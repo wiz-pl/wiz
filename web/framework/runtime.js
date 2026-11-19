@@ -110,17 +110,24 @@ function parseHtml(html) {
 // with `data-wiz-on-EVENT="index"` is found from the target up (one attribute per
 // event, so an element can handle a click and a keydown), and `send(event, index,
 // domEvent)` is called. `send` returns whether the event was handled; when it does,
-// the default action is prevented (a button in a form should not submit).
-export function delegate(root, send, types = ["click", "input", "change", "submit", "keydown", "keyup"]) {
+// the default action is prevented (a button in a form should not submit) — unless the
+// element also carries `data-wiz-prevent-EVENT` (`Loom.onPrevent`), in which case
+// `consume(event, index, domEvent)` decides: a keydown on a textarea must not swallow
+// typing, so the runtime prevents only the keys it consumed.
+export function delegate(root, send, types = ["click", "input", "change", "submit", "keydown", "keyup"], consume = null) {
   for (const type of types) {
     const attr = "data-wiz-on-" + type;
+    const marked = "data-wiz-prevent-" + type;
     root.addEventListener(type, (e) => {
       let t = e.target;
       while (t && t !== root && !(t.getAttribute && t.getAttribute(attr) != null)) t = t.parentNode;
       if (!t || t === root || !t.getAttribute) return;
       const at = t.getAttribute(attr);
       if (at == null) return;
-      if (send(type, Number(at), e)) e.preventDefault();
+      const handled = send(type, Number(at), e);
+      if (!handled) return;
+      const asks = t.getAttribute(marked) != null;
+      if (!asks || typeof consume !== "function" || consume(type, Number(at), e)) e.preventDefault();
     }, false);
   }
 }

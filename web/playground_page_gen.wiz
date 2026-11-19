@@ -1,13 +1,13 @@
 -- A fixture for web/playground_page_test.mjs: the whole playground page
--- (lib/Web/Playground.wiz's Page/pageApp) rendered and stepped, printed as JSON. The
--- Node test parses `initial`, applies `initialToLoaded` with the framework's browser
--- half (web/framework/runtime.js) and requires the result to be `loaded`'s SSR exactly,
--- then checks the examples menu's data against web/playground-presets.js (the oracle
--- until the Wasm test reads the Wiz list). No Wasm, no browser.
+-- (lib/Web/Playground.wiz's Page/pageApp) rendered, stepped and effected, printed as
+-- JSON. The Node test parses `initial`, applies `initialToLoaded` with the framework's
+-- browser half (web/framework/runtime.js) and requires the result to be `loaded`'s SSR
+-- exactly, then checks the effects and the request protocol the page services.
 --
 --   wiz run -I <repo>/lib web/playground_page_gen.wiz
 import IO
 import Json
+import Web.Draft
 import Web.Examples
 import Web.Loom
 import Web.Playground
@@ -24,28 +24,66 @@ def unknown : Page := Loom.LiveApp.step pageApp s0 "change\n0\nnope"
 def staleIndex : Page := Loom.LiveApp.step pageApp s0 "change\n99\nlists"
 def staleEvent : Page := Loom.LiveApp.step pageApp s0 "click\n0"
 
+-- The effects the page sends back (`wiz_loom_effect`).
+def finished : Page := Page.effect s0 "finished" "ok\n3 : Nat" "done in 4 ms"
+def failed : Page := Page.effect s0 "failed" "error: the engine exited" "exit code 3"
+def acked : Page := Page.ack (Page.ack loaded "run") "sync"
+
+-- The initial state's two sources, and the precedence between them.
+def listsState : Draft.State := Draft.State.mk (Examples.codeOf "lists") "lists"
+def custom : String := "def one : Nat := 1\n"
+def fromPreset : Page := Page.effect s0 "load" (Draft.encodeFragment listsState) ""
+def fromDraft : Page :=
+  Page.effect s0 "load" "" (Draft.serializeDraft (Draft.State.mk custom ""))
+def invalid : Page := Page.effect s0 "load" "#nope" ""
+
+-- The toolbar's messages.
+def shared : Page := Page.update PageMsg.share "" s0
+def saved : Page := Page.update PageMsg.save "" s0
+def reset : Page := Page.update PageMsg.reset "" s0
+def cleared : Page := Page.update PageMsg.clear "" finished
+
 def exampleJson (e : Examples.Example) : Json :=
   Json.mkObj [ Json.field "id" (jstr e.id), Json.field "title" (jstr e.title)
              , Json.field "code" (jstr e.code) ]
+
+def pageFields (p : Page) : List (String × Json) :=
+  [ Json.field "html" (jstr (Loom.LiveApp.html pageApp p))
+  , Json.field "text" (jstr p.editor.text)
+  , Json.field "preset" (jstr p.preset)
+  , Json.field "loads" (jnat p.loads)
+  , Json.field "count" (jstr p.output.count)
+  , Json.field "status" (jstr p.output.status)
+  , Json.field "statusKind" (jstr p.output.statusKind)
+  , Json.field "note" (jstr p.note)
+  , Json.field "requests" (jstr (Page.requests p))
+  ]
+
+def nest (p : Page) : Json := Json.mkObj (pageFields p)
 
 def fields : List (String × Json) :=
   [ Json.field "initial" (jstr (Loom.LiveApp.html pageApp s0))
   , Json.field "loaded" (jstr (Loom.LiveApp.html pageApp loaded))
   , Json.field "initialToLoaded" (jstr (Loom.LiveApp.patches pageApp s0 loaded))
-  , Json.field "loadedText" (jstr loaded.editor.text)
-  , Json.field "loadedPreset" (jstr loaded.preset)
-  , Json.field "loadedLoads" (jnat loaded.loads)
-  , Json.field "loadedCount" (jstr loaded.output.count)
-  , Json.field "initialPreset" (jstr s0.preset)
-  , Json.field "initialLoads" (jnat s0.loads)
-  , Json.field "unknownPreset" (jstr unknown.preset)
-  , Json.field "unknownText" (jstr unknown.editor.text)
-  , Json.field "unknownLoads" (jnat unknown.loads)
-  , Json.field "staleIndexText" (jstr staleIndex.editor.text)
-  , Json.field "staleIndexLoads" (jnat staleIndex.loads)
-  , Json.field "staleEventText" (jstr staleEvent.editor.text)
+  , Json.field "initialPage" (nest s0)
+  , Json.field "loadedPage" (nest loaded)
+  , Json.field "unknownPage" (nest unknown)
+  , Json.field "staleIndexPage" (nest staleIndex)
+  , Json.field "staleEventPage" (nest staleEvent)
+  , Json.field "finishedPage" (nest finished)
+  , Json.field "failedPage" (nest failed)
+  , Json.field "ackedPage" (nest acked)
+  , Json.field "fromPresetPage" (nest fromPreset)
+  , Json.field "fromDraftPage" (nest fromDraft)
+  , Json.field "invalidPage" (nest invalid)
+  , Json.field "sharedPage" (nest shared)
+  , Json.field "savedPage" (nest saved)
+  , Json.field "resetPage" (nest reset)
+  , Json.field "clearedPage" (nest cleared)
   , Json.field "defaultExampleId" (jstr Examples.defaultExampleId)
   , Json.field "examples" (Json.mkArr (List.map exampleJson Examples.examples))
+  , Json.field "customDraft" (jstr (Draft.serializeDraft (Draft.State.mk custom "")))
+  , Json.field "listsFragment" (jstr (Draft.encodeFragment listsState))
   ]
 
 def main : IO Unit := do

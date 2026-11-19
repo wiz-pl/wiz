@@ -1701,7 +1701,8 @@ Design, survey and migration analysis: `wiz-notes/react-framework.md`.
 `import Web.Playground` is the playground's output pane: `Line` (the engine's text, the
 `err`/`val` classes, what the line shows and its tooltip), `Model` (the lines, the error
 count, the page's status pair and `#count` text), `Model.ofText`/`Model.ofFailure`, and
-`Model.view` for `#output`. The value grammar (`web/playground-values.js`) lives in it
+`Model.view` for `#output`. The value grammar (`web/framework/values.mjs`, the test
+oracle) lives in it
 too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, and stays
 raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
 with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,

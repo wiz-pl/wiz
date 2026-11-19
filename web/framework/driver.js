@@ -1,12 +1,16 @@
 // The page half for an app built from lib/Web/Loom.wiz, mirroring web/tagged.js's
 // `stepper`: the Wiz module exports
 //
-//   wiz_loom_init  : State
-//   wiz_loom_html  : State -> String          (SSR of the current state)
-//   wiz_loom_step  : State -> String -> State
+//   wiz_loom_init     : State
+//   wiz_loom_html     : State -> String          (SSR of the current state)
+//   wiz_loom_step     : State -> String -> State
+//   wiz_loom_effect   : State -> String -> String -> String -> State
+//   wiz_loom_requests : State -> String          (pending effects, as JSON)
+//   wiz_loom_consume  : State -> String -> Nat   (did a marked event consume its default?)
 //
 // and calls the FFI `js_patch` (web/js.c) with `Loom.patchesJson` on every step; this
-// file applies those patches and turns DOM events into step calls.
+// file applies those patches and turns DOM events into step calls. The last three are
+// optional; a runtime with no effects or no `onPrevent` handler does not export them.
 //
 // **The event string.** A step's argument is
 //
@@ -16,9 +20,10 @@
 // the element's `data-wiz-on-EVENT` attribute (a handler index from `Loom.render`), and
 // `payload` is the rest of the string. The payload is how a pure `step` can see what a
 // control holds: a form control's live `value` for `input`/`change`, the key for
-// `keydown`/`keyup`, and nothing for the other events. It is the *rest* of the string,
-// so a textarea's newlines arrive intact; Wiz parses it with `Loom.splitEvent` and an
-// app that uses it is a `Loom.LiveApp` (`update msg payload state`).
+// `keydown`/`keyup` (with its modifiers after a newline — `Enter\nc` — when there are
+// any), and nothing for the other events. It is the *rest* of the string, so a
+// textarea's newlines arrive intact; Wiz parses it with `Loom.splitEvent` and an app that
+// uses it is a `Loom.LiveApp` (`update msg payload state`).
 //
 // Nothing here reads a control's value except to report it: the patch applier still owns
 // the DOM. A patch that sets a `value` attribute does not rewrite the property when it
@@ -50,6 +55,13 @@ function takeString(wasm, p) {
 // What the step receives after the handler index: a form control's live value, a key,
 // or nothing. (`value` is a string property on input/textarea/select; a test double may
 // only have the attribute.)
+//
+// A keydown/keyup carries its modifiers after a newline — `Enter\nc` for Ctrl+Enter,
+// `s\ncm` for ⌘+S — because the keyboard policy (`Page.consume`) must not run a program
+// on a bare Enter or save on a bare `s`. A key is never a newline, and `Loom.splitEvent`
+// keeps the rest of the string as the payload, so the separator is unambiguous. With no
+// modifier the payload is the key alone, as before.
+const MOD_SEP = "\n";
 export function payloadOf(type, e) {
   const target = e && e.target;
   if (type === "input" || type === "change") {
@@ -58,7 +70,10 @@ export function payloadOf(type, e) {
     return "";
   }
   if (type === "keydown" || type === "keyup") {
-    return e && typeof e.key === "string" ? e.key : "";
+    const key = e && typeof e.key === "string" ? e.key : "";
+    const mods = (e && e.ctrlKey ? "c" : "") + (e && e.metaKey ? "m" : "") +
+      (e && e.shiftKey ? "s" : "") + (e && e.altKey ? "a" : "");
+    return mods ? key + MOD_SEP + mods : key;
   }
   return "";
 }
@@ -77,22 +92,48 @@ export function start(wasm, root, { events, parse, onStep } = {}) {
     }
     return takeString(wasm, wasm._wiz_loom_html(state));
   };
+  // The pending effect requests, as the runtime serialized them (`wiz_loom_requests`,
+  // an optional export: a runtime with no effects does not have it). Read-only, so the
+  // same extra reference as `html`.
+  const requests = () => {
+    if (typeof wasm._wiz_loom_requests !== "function") return "";
+    if (typeof wasm._wiz_retain === "function") {
+      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
+    }
+    return takeString(wasm, wasm._wiz_loom_requests(state));
+  };
   mount(root, html(), parse);
   globalThis.wizPatch = (json) => applyPatches(root, JSON.parse(json), parse);
+  let lastPayload = "";
+  // `Loom.onPrevent`: after a handled event, the runtime's `wiz_loom_consume` says
+  // whether it consumed the default action. A runtime without the export keeps the old
+  // rule (a handler that asked decides: prevent).
+  const consume = (event, index) => {
+    if (typeof wasm._wiz_loom_consume !== "function") return true;
+    if (typeof wasm._wiz_retain === "function") {
+      wasm._wiz_retain(typeof state === "bigint" ? state : big(state));
+    }
+    const p = wasm.stringToNewUTF8(event + "\n" + index + "\n" + lastPayload);
+    const answer = Number(wasm._wiz_loom_consume(state, big(p)));
+    wasm._free(p);
+    return answer !== 0;
+  };
   delegate(root, (event, index, e) => {
     const payload = payloadOf(event, e);
+    lastPayload = payload;
     const p = wasm.stringToNewUTF8(event + "\n" + index + "\n" + payload);
     state = wasm._wiz_loom_step(state, big(p));
     wasm._free(p);
     if (typeof onStep === "function") onStep(state, event, index, payload);
     return true;   // a handled event does not also submit a form or follow a link
-  }, events);
+  }, events, consume);
   return {
     state: () => state,
     // A page that changed the state through an entry point of its own (the playground's
-    // `wiz_loom_show` and friends, which patch the DOM themselves) hands it back here, so
-    // the next DOM event steps from it.
+    // effects, which patch the DOM themselves) hands it back here, so the next DOM event
+    // steps from it.
     setState: (next) => { state = next; },
     html,
+    requests,
   };
 }

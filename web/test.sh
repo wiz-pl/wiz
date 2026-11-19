@@ -3,8 +3,8 @@
 # web/build-playground.sh); the generated benchmark page's fixtures and the site check
 # (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
-# playground's under Node (web/playground_test.mjs); the playground's pure state and
-# URL encoding (web/playground-state_test.mjs) run first; then serve the infoview with
+# playground's under Node (web/playground_test.mjs); the state format's cases are in
+# `lake test -- '=loom'` (the runtime owns them); then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
 # it in headless Chromium (web/chrome_test.mjs, over the DevTools protocol), put the
 # cursor in the page's proof, click a subterm and look for the goals and what the subterm
@@ -18,14 +18,6 @@ PORT=${1:-18765}
 OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
-# (11ab) the playground's pure state and URL encoding need neither the build nor a
-# browser; run it first so a broken share link fails fast.
-node "$ROOT/web/playground-state_test.mjs" > "$OUT/playground-state.txt"
-if grep -qF 'playground state: all checks passed' "$OUT/playground-state.txt"; then
-  echo "ok (playground state, node)"
-else
-  echo "FAIL (playground state, node)"; cat "$OUT/playground-state.txt"; exit 1
-fi
 # (11s) the search box's ranking and rendering (no build or browser needed)
 node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {

@@ -152,9 +152,11 @@ function browserHost(el, env) {
 // Mount `module`'s runtime on `target`. Returns the handle a page needs for its own
 // effects: `call(name, ...args)` invokes an exported entry point with the current state
 // (the module consumes it and returns the next one), and `state`/`html`/`setState` are
-// the driver's.
+// the driver's. `onRequest(kind, payload)` receives the effects the runtime asked for
+// (its `wiz_loom_requests` export, a JSON list); the page does them and acknowledges
+// with `call("wiz_loom_effect", "ack", kind, "")`.
 export async function mount(target, { module, transport, env = globalThis, print, printErr,
-  events, parse, onStep } = {}) {
+  events, parse, onStep, onRequest } = {}) {
   const doc = (target && target.ownerDocument) || env.document;
   const el = resolveTarget(target, doc);
   if (!el) throw new TypeError("mount: no element to mount on");
@@ -164,10 +166,41 @@ export async function mount(target, { module, transport, env = globalThis, print
   // from `wiz_loom_init` must find it there.
   globalThis.wizHost = host;             // the capability boundary (see the header)
   globalThis.wizTransport = transport;   // the runtime's outside world (engine, socket)
-  const app = start(wasm, el, { events, parse, onStep });
 
-  // The runtime's own entry points (`wiz_loom_show`, …): strings are allocated here and
-  // freed after, numbers are wasm64 pointers, and the returned state is the next one.
+  let app = null;
+  let servicing = false;
+  // The runtime's pending effects, in order. A request stays pending until the page
+  // acknowledges it, so an effect that arrives while one is in flight is still seen
+  // after the first; a request is never dropped because a step happened to coalesce it.
+  const service = () => {
+    if (!app || typeof onRequest !== "function" || servicing) return;
+    let list;
+    try { list = JSON.parse(app.requests() || "[]"); } catch { list = []; }
+    if (!Array.isArray(list) || list.length === 0) return;
+    servicing = true;
+    try {
+      for (const r of list) {
+        try {
+          onRequest(r && r.kind, (r && r.payload) || "");
+        } catch (e) {
+          console.error("mount: an effect request failed: " + (e && e.message ? e.message : e));
+        }
+      }
+    } finally {
+      servicing = false;
+    }
+  };
+
+  app = start(wasm, el, {
+    events, parse,
+    onStep: (state, event, index, payload) => {
+      service();
+      if (typeof onStep === "function") onStep(state, event, index, payload);
+    },
+  });
+
+  // The runtime's own entry points (`wiz_loom_effect`, …): strings are allocated here
+  // and freed after, numbers are wasm64 pointers, and the returned state is the next one.
   const call = (name, ...args) => {
     const fn = wasm["_" + name];
     if (typeof fn !== "function") throw new TypeError("mount: the runtime has no " + name);
@@ -185,7 +218,9 @@ export async function mount(target, { module, transport, env = globalThis, print
     } finally {
       for (const p of pointers) wasm._free(p);
     }
+    service();
   };
 
+  service();
   return { ...app, call, host, module: wasm };
 }

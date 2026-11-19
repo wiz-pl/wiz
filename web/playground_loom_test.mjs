@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { applyPatches } from "./framework/runtime.js";
 import { parse, serialize } from "./framework/minidom.mjs";
-import { isValue, renderValue } from "./playground-values.js";
+import { isValue, renderValue } from "./framework/values.mjs";
 
 const fixture = JSON.parse(readFileSync(process.argv[2], "utf-8"));
 let failed = 0;
@@ -54,7 +54,7 @@ ok(!fixture.nasty.includes("<script>"), "output text is escaped", fixture.nasty)
 ok(fixture.empty.includes('id="output"') && fixture.empty.includes('aria-live="polite"'),
   "the pane keeps the page's id and aria-live", fixture.empty);
 
-// The value grammar is the playground's `web/playground-values.js`, ported to Wiz: every
+// The value grammar is the playground's, ported to Wiz: every
 // corpus entry must classify and render exactly as the JavaScript oracle does.
 const oracle = (input) => {
   const err = input.startsWith("error:") || input.startsWith("parse error");
@@ -77,7 +77,7 @@ for (const entry of fixture.values || []) {
     }
   }
 }
-ok(mismatched === 0, "the value corpus agrees with web/playground-values.js");
+ok(mismatched === 0, "the value corpus agrees with the test oracle");
 ok((fixture.values || []).length >= 12, "the corpus covers the value shapes",
   String((fixture.values || []).length));
 const shownOf = (input) => ((fixture.values || []).find((v) => v.input === input) || {}).shown;

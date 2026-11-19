@@ -48,6 +48,13 @@ def failsLoom (input : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
+/-- The state format's little prelude (`Web.Draft`, `Web.Playground`). -/
+def draftPrelude : String :=
+  "import Web.Draft\nimport Web.Editor\nimport Web.Examples\nimport Web.Loom\nimport Web.Playground\n" ++
+  "def custom : Draft.State := Draft.State.mk \"def one : Nat := 1\\n\" \"\"\n" ++
+  "def listsState : Draft.State := Draft.State.mk (Examples.codeOf \"lists\") \"lists\"\n" ++
+  "def ready : Page := Page.effect Page.initial \"enable\" \"1\" \"\"\n"
+
 def loomGroup : Group where
   name := "loom"
   exercise := "lib/Web/Loom.wiz (web UI framework)"
@@ -90,6 +97,12 @@ def loomGroup : Group where
         okLoom ("import Web.Loom\ninductive Msg where\n  | a\n  | b\n" ++
           "#eval Loom.toHtml (Loom.on \"click\" Msg.a (Loom.on \"keydown\" Msg.b (Loom.el \"button\" List.nil [Loom.text \"x\"])) : Loom.VNode Msg)")
           [r#""<button data-wiz-on-click=\"0\" data-wiz-on-keydown=\"1\">x</button>""#] },
+    { name := "events: onPrevent marks the handler and the runtime decides", run := fun _ =>
+        okLoom ("import Web.Loom\ninductive Msg where\n  | a\n  | b\n" ++
+          "#eval Loom.toHtml (Loom.onPrevent \"keydown\" Msg.a (Loom.el \"textarea\" List.nil List.nil) : Loom.VNode Msg)\n" ++
+          "#eval Loom.toHtml (Loom.onPrevent \"keydown\" Msg.b (Loom.on \"input\" Msg.a (Loom.el \"textarea\" List.nil List.nil)) : Loom.VNode Msg)")
+          [r#""<textarea data-wiz-on-keydown=\"0\" data-wiz-prevent-keydown=\"1\"></textarea>""#,
+           r#""<textarea data-wiz-on-keydown=\"0\" data-wiz-prevent-keydown=\"1\" data-wiz-on-input=\"1\"></textarea>""#] },
     { name := "owned state: a quantity-1 cell is updated and ends once", run := fun _ =>
         okLoom ("import Web.Loom\n" ++
           "#eval Loom.Owned.end (Loom.Owned.update (Loom.Owned.new 1) Nat.succ)\n" ++
@@ -120,6 +133,75 @@ def loomGroup : Group where
           "#eval (Loom.App.dispatch app (Model.mk 0) 0).tag\n" ++
           "#eval (Loom.App.dispatch app (Model.mk 0) 1).tag")
           [r#""<button data-wiz-on-click=\"0\">x</button>""#, "1", "0"] },
+    { name := "state: base64url round-trips text, and refuses non-canonical input", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Draft.base64UrlEncode \"hello world\\n\"\n" ++
+          "#eval String.eq (match Draft.base64UrlDecode (Draft.base64UrlEncode \"λ → ∀ 😀\") with | .some s => s | .none => \"\") \"λ → ∀ 😀\"\n" ++
+          "#eval Draft.base64UrlDecode \"ab\"\n" ++
+          "#eval Draft.base64UrlDecode \"a\"\n" ++
+          "#eval Draft.base64UrlDecode \"%\"")
+          [r#""aGVsbG8gd29ybGQK""#, ".true", ".none", ".none", ".none"] },
+    { name := "state: the fragment is a preset id or the base64url code", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Draft.encodeFragment listsState\n" ++
+          "#eval match Draft.decodeFragment \"#preset=lists\" with | .some s => s.preset | .none => \"none\"\n" ++
+          "#eval String.eq (match Draft.decodeFragment (Draft.encodeFragment custom) with | .some s => s.code | .none => \"\" ) custom.code\n" ++
+          "#eval Draft.decodeFragment \"#preset=nope\"\n" ++
+          "#eval Draft.decodeFragment \"#code=ab\"\n" ++
+          "#eval Draft.decodeFragment \"\"")
+          ["\"#preset=lists\"", r#""lists""#, ".true", ".none", ".none", ".none"] },
+    { name := "state: the draft is versioned JSON, and a stale preset is dropped", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval String.eq (match Draft.parseDraft (Draft.serializeDraft custom) with | .some s => s.code | .none => \"\" ) custom.code\n" ++
+          "#eval match Draft.parseDraft \"{\\\"version\\\":1,\\\"code\\\":\\\"custom\\\",\\\"preset\\\":\\\"lists\\\"}\" with | .some s => s.preset | .none => \"none\"\n" ++
+          "#eval Draft.parseDraft \"{\\\"version\\\":2,\\\"code\\\":\\\"x\\\"}\"\n" ++
+          "#eval Draft.parseDraft \"not json\"")
+          [".true", r#""""#, ".none", ".none"] },
+    { name := "state: the embedded Prelude is added only when there is no import", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval String.eq (Draft.withPrelude \"def one : Nat := 1\") \"import Prelude\\n\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"import Prelude\\ndef one : Nat := 1\") \"import Prelude\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"  import Std\\ndef one : Nat := 1\") \"  import Std\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"imported : Nat := 1\") \"import Prelude\\n\\nimported : Nat := 1\"")
+          [".true", ".true", ".true", ".true"] },
+    { name := "page: a step asks for effects and an ack clears them", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Page.requests Page.initial\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.share \"\" Page.initial)) \"\\\"kind\\\":\\\"share\\\"\"\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.share \"\" Page.initial)) \"#preset=basics\"\n" ++
+          "#eval Page.requests (Page.ack (Page.ack (Page.update PageMsg.share \"\" Page.initial) \"share\") \"sync\")\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.save \"\" Page.initial)) \"\\\"kind\\\":\\\"save\\\"\"")
+          [r#""[]""#, ".true", ".true", r#""[]""#, ".true"] },
+    { name := "page: an effect updates the page without a request", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval (Page.effect Page.initial \"finished\" \"ok\\n3 : Nat\" \"done in 4 ms\").output.count\n" ++
+          "#eval (Page.effect Page.initial \"finished\" \"ok\\n3 : Nat\" \"done in 4 ms\").output.statusKind\n" ++
+          "#eval (Page.effect Page.initial \"failed\" \"error: x\" \"exit code 3\").output.count\n" ++
+          "#eval (Page.effect Page.initial \"failed\" \"error: x\" \"exit code 3\").output.statusKind\n" ++
+          "#eval (Page.effect Page.initial \"enable\" \"1\" \"\").editor.disabled\n" ++
+          "#eval Page.requests (Page.effect Page.initial \"finished\" \"ok\" \"done\")\n" ++
+          "#eval (Page.update (PageMsg.editor WebEditor.Msg.input) \"custom\" ready).preset\n" ++
+          "#eval (Page.update (PageMsg.editor WebEditor.Msg.input) (Examples.codeOf \"lists\") ready).preset")
+          [r#""2 lines""#, r#""ready""#, r#""exit code 3""#, r#""error""#, ".false", r#""[]""#,
+           r#""""#, r#""lists""#] },
+    { name := "page: the load precedence is fragment, draft, default", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval (Page.effect Page.initial \"load\" (Draft.encodeFragment listsState) \"\").preset\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" (Draft.encodeFragment listsState) \"\").editor.text (Examples.codeOf \"lists\")\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" \"\" (Draft.serializeDraft custom)).editor.text custom.code\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" \"#nope\" \"\").editor.text (Examples.codeOf Examples.defaultExampleId)\n" ++
+          "#eval (Page.effect Page.initial \"load\" \"#nope\" \"\").note")
+          [r#""lists""#, ".true", ".true", ".true", r#""ignored an invalid playground link""#] },
+    { name := "page: the keyboard policy consumes only its shortcuts", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nEnter\\nc\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nEnter\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\ns\\ncm\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"click\\n5\\n\") ready\n" ++
+          "#eval (Page.update PageMsg.key \"Enter\\nc\" ready).loads\n" ++
+          "#eval (Page.update PageMsg.key \"Enter\" ready).loads\n" ++
+          "#eval (Page.update PageMsg.key \"s\\nm\" ready).save")
+          [".true", ".false", ".true", ".false", "1", "0", "1"] },
     { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
         -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
         -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters

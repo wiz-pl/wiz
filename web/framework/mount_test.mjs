@@ -162,5 +162,50 @@ const app2 = await mount(direct, { module: stubModule(SSR), env, parse });
 eq("an element target is used as it is", SSR, serialize(direct));
 eq("and its own state starts fresh", 7, app2.state());
 
+// ## Effect requests: the runtime's `wiz_loom_requests` JSON reaches `onRequest` in
+// order, and an acknowledged request is not reported again.
+function requestModule(html) {
+  const strings = new Map();
+  let next = 1;
+  const put = (s) => { const p = next++; strings.set(p, s); return p; };
+  const module = {
+    default: async () => ({
+      _wiz_loom_init: () => 1,
+      _wiz_loom_html: () => put(html),
+      _wiz_loom_step: (s) => s,
+      _wiz_loom_requests: () => put(JSON.stringify(module.pending)),
+      _wiz_loom_effect: (_s, kp, ap) => {
+        // The page acknowledges `effect("ack", <request kind>)`: the first string is
+        // "ack", the second is the request kind.
+        if (strings.get(Number(kp)) !== "ack") return 1;
+        const kind = strings.get(Number(ap));
+        module.pending = module.pending.filter((r) => r.kind !== kind);
+        return 1;
+      },
+      stringToNewUTF8: put,
+      UTF8ToString: (p) => strings.get(Number(p)) || "",
+      _free: (p) => { strings.delete(Number(p)); },
+    }),
+    pending: [],
+  };
+  return module;
+}
+const req = requestModule(SSR);
+const requested = [];
+let reqApp = null;
+const reqRoot = parse("");
+reqApp = await mount(reqRoot, {
+  module: req, env: fakeEnv(), parse,
+  onRequest: (kind, payload) => {
+    requested.push(kind + ":" + payload);
+    reqApp.call("wiz_loom_effect", "ack", kind, "");   // the page acks what it serviced
+  },
+});
+ok(requested.length === 0, "no request is reported until there is one");
+req.pending = [{ kind: "run", payload: "" }, { kind: "sync", payload: "{}" }];
+reqRoot.childNodes[0].childNodes[0].dispatchEvent({ type: "click" });
+eq("a step reports both requests, in order", "run:|sync:{}", requested.join("|"));
+eq("the acknowledged requests are gone", 0, JSON.parse(reqApp.requests() || "[]").length);
+
 console.log(failed === 0 ? "mount: all checks passed" : `mount: ${failed} failure(s)`);
 process.exit(failed === 0 ? 0 : 1);

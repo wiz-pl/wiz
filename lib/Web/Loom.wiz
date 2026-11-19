@@ -98,6 +98,7 @@ inductive Loom.VNode (M : Type) where
   | raw (html : String) (next : Loom.VNode M)
   | el (tag : String) (key : String) (attrs : List Loom.Attr) (children : Loom.VNode M) (next : Loom.VNode M)
   | on (event : String) (msg : M) (body : Loom.VNode M) (next : Loom.VNode M)
+  | prevent (event : String) (msg : M) (body : Loom.VNode M) (next : Loom.VNode M)
 
 /-- Put `rest` after the sibling chain `x`. -/
 def Loom.append {M : Type} : Loom.VNode M → Loom.VNode M → Loom.VNode M
@@ -106,6 +107,7 @@ def Loom.append {M : Type} : Loom.VNode M → Loom.VNode M → Loom.VNode M
   | .raw h n, rest => .raw h (Loom.append n rest)
   | .el t k a cs n, rest => .el t k a cs (Loom.append n rest)
   | .on e m b n, rest => .on e m b (Loom.append n rest)
+  | .prevent e m b n, rest => .prevent e m b (Loom.append n rest)
 
 /-- `x` followed by the chain `rest`, merging two adjacent text nodes into one. HTML
 merges adjacent text nodes when it parses a page, so the tree must merge them too: a
@@ -145,6 +147,15 @@ def Loom.keyed {M : Type} (key : String) (node : Loom.VNode M) : Loom.VNode M :=
 last `on` for the same event wins, as in the DOM). -/
 def Loom.on {M : Type} (event : String) (msg : M) (node : Loom.VNode M) : Loom.VNode M :=
   .on event msg node .nil
+
+/-- Like `Loom.on`, but the handler decides whether the event's default action is
+prevented: the element carries `data-wiz-prevent-EVENT`, and the driver asks the
+runtime's `wiz_loom_consume` (an app's `Loom.LiveApp` policy) after the step. Use it for
+a `keydown` on a textarea: a handler that prevents every key swallows typing, so the
+runtime prevents only what it consumed (Ctrl/⌘+Enter, Save, …). A plain `Loom.on` keeps
+the older rule (a handled event is prevented). -/
+def Loom.onPrevent {M : Type} (event : String) (msg : M) (node : Loom.VNode M) : Loom.VNode M :=
+  .prevent event msg node .nil
 /-- A group of siblings, for a children list (do not use a group as one child). -/
 def Loom.seq {M : Type} (kids : List (Loom.VNode M)) : Loom.VNode M := Loom.ofList kids
 
@@ -158,6 +169,7 @@ def Loom.mapMsg {A B : Type} (f : A → B) : Loom.VNode A → Loom.VNode B
   | .raw h n => .raw h (Loom.mapMsg f n)
   | .el t k a cs n => .el t k a (Loom.mapMsg f cs) (Loom.mapMsg f n)
   | .on e m b n => .on e (f m) (Loom.mapMsg f b) (Loom.mapMsg f n)
+  | .prevent e m b n => .prevent e (f m) (Loom.mapMsg f b) (Loom.mapMsg f n)
 
 -- ## Rendering
 
@@ -224,15 +236,30 @@ def Loom.eventAttr (event : String) : String := String.append "data-wiz-on-" eve
 def Loom.eventValue (index : Nat) : String :=
   String.mk (Json.natChars index [])
 
-/-- Attach the handler attribute for `event` (number `index`) to the head of `node`.
-Nested `on`s put more attributes on the same element; a text node is wrapped in a
-`span` so that it has somewhere to carry the attribute. -/
-def Loom.attach {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M
-  | .el t k a cs n => .el t k (List.append a [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))]) cs n
-  | .on e m b n => .on e m (Loom.attach event index b) n
-  | .text s n => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] (.text s .nil) n
-  | .raw h n => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] (.raw h .nil) n
-  | .nil => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] .nil .nil
+/-- The marker attribute of a handler that decides its own default action
+(`Loom.onPrevent`): `data-wiz-prevent-EVENT`. -/
+def Loom.preventAttr (event : String) : String := String.append "data-wiz-prevent-" event
+
+/-- Attach the handler attribute for `event` (number `index`) and `extra` to the head of
+`node`. Nested `on`s put more attributes on the same element; a text node is wrapped in
+a `span` so that it has somewhere to carry the attribute. -/
+def Loom.attachWith {M : Type} (event : String) (index : Nat) (extra : List Loom.Attr) :
+    Loom.VNode M → Loom.VNode M
+  | .el t k a cs n =>
+    .el t k (List.append a (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra)) cs n
+  | .on e m b n => .on e m (Loom.attachWith event index extra b) n
+  | .prevent e m b n => .prevent e m (Loom.attachWith event index extra b) n
+  | .text s n => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) (.text s .nil) n
+  | .raw h n => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) (.raw h .nil) n
+  | .nil => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) .nil .nil
+
+/-- Attach the handler attribute for `event` (number `index`) to the head of `node`. -/
+def Loom.attach {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M :=
+  Loom.attachWith event index List.nil
+
+/-- Attach the handler attribute and the "the runtime decides" marker. -/
+def Loom.attachPrevent {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M :=
+  Loom.attachWith event index [(Loom.attr (Loom.preventAttr event) "1")]
 
 /-- Turn a virtual tree into a rendered tree, numbering handlers in document order
 (pre-order: the node's own handlers, then its children, then its next sibling). -/
@@ -252,6 +279,11 @@ partial def Loom.toR {M : Type} : Loom.VNode M → Loom.Out M → Loom.RNode × 
     let index := o.next;
     let o1 : Loom.Out M := { o with next := index + 1, handlers := .cons (e, m) o.handlers };
     let r := Loom.toR (Loom.append (Loom.attach e index b) n) o1;
+    (r.1, r.2)
+  | .prevent e m b n, o =>
+    let index := o.next;
+    let o1 : Loom.Out M := { o with next := index + 1, handlers := .cons (e, m) o.handlers };
+    let r := Loom.toR (Loom.append (Loom.attachPrevent e index b) n) o1;
     (r.1, r.2)
 
 /-- An attribute's HTML: ` name="value"`, escaped. -/
