@@ -1,0 +1,6 @@
+heavy: template [lake build] -> mem=6G cpus=3 time=14400s
+srun: job 2444 queued and waiting for resources
+srun: job 2444 has been allocated resources
+✔ [28/28] Built Wiz.Compiler.IRRun (689ms)
+Build completed successfully (28 jobs).
+rc=0

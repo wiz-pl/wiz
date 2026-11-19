@@ -1,5 +1,2 @@
 heavy: template [lake build .*wiz.*tests] -> mem=8G cpus=4 time=14400s
-srun: job 2432 queued and waiting for resources
-srun: Job has been cancelled
-srun: error: Unable to allocate resources: Job/step already completing or completed
-rc=1
+srun: job 2452 queued and waiting for resources

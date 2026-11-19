@@ -283,9 +283,9 @@ Adding a test group touches no shared file:
   `Tests/Groups.lean` (an import of every file in `Tests/Groups/`; not committed, see the
   `testGroups` target in `lakefile.lean`) and `Tests/Main.lean` imports it, so the group
   is in the suite as soon as its file exists. Copy a small one (e.g.
-  `Tests/Groups/Struct.lean`) to start. Set `shard := "backends"` in the group to run it
-  in a shard other than the default (`library`), or add a selector to
-  `.github/test-shards.json`.
+  `Tests/Groups/Struct.lean`) to start. Set `shard := "selfhost"` (or another name from
+  `.github/test-shards.json`) in the group to run it in a shard other than the default
+  (`library`), or add a selector to the shard's list.
 * **New cases of an existing group** go in its module: the group `elab: structural
   types` is `structGroup` in `Tests/Groups/Struct.lean` (`grep -l 'name := "…"'
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
@@ -875,9 +875,8 @@ setup action keeps the elan cache for those
   that build. The baseline holds only the split shards' cases, one per line
   (`selfhost`, `library`, `scaling`, `selfhost-libdiff`; the last is split into four cases
   over `lib/` and `scry/` by file index). `scripts/ci.py plan` shows the parts and their
-  estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
-  `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
-  `core`.
+  estimates. The heavy groups have shards of their own (`hdl`, `semantics`), so adding a
+  slow case there does not unbalance `library`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
 * **`"parts"`.** A shard with `"parts": N` splits one case's *work*, not a set of cases:
