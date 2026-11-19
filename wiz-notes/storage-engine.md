@@ -815,14 +815,16 @@ linear fold whose state includes the write-set; the latter is new work.
 
 * Structures at 1 cannot be taken apart (`docs/stages/04-data.md:69–76`); use an
   inductive (`Uniq`, `Result1`). Already supported; no addition.
-* **Recursive consumers that thread the linear handle are rejected today.** A
-  `partial def` that recurses on `c'` reports `c ... used 0`; the equation form
-  reports `next ... used ω`. The workaround is to match the handle once into an
-  ω plan state and recurse on that (`Cursor.fold`/`foldUntil`, §7.2). The
-  smallest addition for user-written streaming loops is a **linear fixpoint
-  rule** (a recursive call may consume a linear argument exactly once), or a
-  built-in `Cursor.fold`/`foldUntil` in the storage library. Slice 1 does not
-  need it; slice 4's engine should ship `fold`/`foldUntil` as the public loop.
+* **Recursive consumers that thread the linear handle are accepted.** A
+  `partial def` that recurses on `c'` consumes it exactly once; the `partial`
+  witness is checked without usages, and the body is checked strictly. A
+  recursive call's **result** may be used at ω (`Nat.succ (loop c')`, `1 + loop
+  c'`, a pair's first component) when the result type contains neither the
+  linear argument nor its type — "consumed but not contained"
+  (`docs/stages/04-data.md`, `fixCallSafe`). A result that contains the cursor
+  (`Cursor a × Nat`, `Option (Cursor a)`) is still rejected. The loops remain
+  the cheaper shape for a query engine, so `fold`/`foldUntil` are still the
+  public loop; user-written streaming recursion is no longer a type error.
 * `Option`/`List` payloads are ω, so a linear element cannot live in them; use
   `Step`/`Control` or `Result1`/`ResultH`. A generic `LinearOption` would be a
   convenience, not a blocker.

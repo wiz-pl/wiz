@@ -266,6 +266,35 @@ def languageGroup : Group where
           "#eval Cursor.every (Cursor.mk (List.cons 1 List.nil)) (fun _ => Bool.true) Bool.true\n" ++
           "#eval Cursor.altA (Cursor.mk (List.cons 1 (List.cons 2 List.nil)))")
           ["3", ".true", "0"] },
+    { name := "... and the result of a recursive call may be used at ω when it carries no linear content (\"consumed but not contained\")", run := fun _ =>
+        okLib (cursorHeader ++
+          -- `Nat.succ` and `+` take their argument at ω: the call is charged once because
+          -- its result (`Nat`) contains neither `c'` nor `Cursor a`
+          "partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n" ++
+          "partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n" ++
+          -- a pair's first component is at ω: the result `(Nat × Nat) × Nat` has no
+          -- `Cursor` in it
+          "partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n" ++
+          -- a `Bool` result and an `Option Nat` scrutinee are ω too
+          "partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
+          "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n" ++
+          "partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
+          "    let r := Cursor.optLen c';\n    match r with\n" ++
+          "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n" ++
+          "#eval Cursor.length (Cursor.mk (List.cons 1 (List.cons 2 List.nil)))\n" ++
+          "#eval Cursor.lengthAdd (Cursor.mk (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))")
+          ["2", "3"] },
+    { name := "... but a result type that contains the linear parameter stays rejected", run := fun _ =>
+        failsLib (cursorHeader ++
+          -- the result is `Cursor a × Nat`, and its first component is checked at ω; the
+          -- call's result contains `Cursor a`, so it cannot be copied
+          "partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)")
+          "quantity 1 but used ω" },
     { name := "... and the four bad recursive consumers are still rejected", run := fun _ => do
         -- drop the continuation
         failsLib (cursorHeader ++
@@ -294,12 +323,6 @@ def languageGroup : Group where
         failsLib (cursorHeader ++
           "partial (default := fun c => Cursor.closeThen c 0) def Cursor.leak {a : Type} (1 c : Cursor a) : Nat := 0")
           "variable c declared with quantity 1 but used 0"
-        -- the ordinary ω rule, not a fixpoint gap: the call's result is consumed by `Nat.succ`
-        failsLib (cursorHeader ++
-          "partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => 0\n" ++
-          "  | .more _ c' => Nat.succ (Cursor.length c')")
-          "variable next declared with quantity 1 but used ω"
         -- the equation form threads the handle on an ω fuel, with the same branch rule
         okLib (cursorHeader ++
           "def Cursor.countFuel {a : Type} : (1 c : Cursor a) → List Unit → Nat → Nat\n" ++

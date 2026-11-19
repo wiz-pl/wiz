@@ -108,13 +108,55 @@ partial def Cursor.count {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=
   | .more _ c' => Cursor.count c' (Nat.succ n)
 ```
 
-The recursive call's **result must not be consumed by an ω position**: `Nat.succ
-(Cursor.count c' n)` (or `1 + Cursor.count c' n`) scales the call's use of `c'` by ω,
-because an ω binder may duplicate its argument (`variable next … used ω`); write the
-counter as an accumulator (above) or a tail call. A `partial` definition's **witness**
-(the term that shows its type is inhabited) is checked without usages, so it may ignore a
-linear parameter — the body that runs is still checked strictly. (`Wiz/Core/Check.lean`,
-`Ctx.witness`; the self-hosted kernel's `TCtx.witness`.)
+A recursive call that consumes a `1`-parameter may have its **result** used in an ω
+position — `Nat.succ (loop c')`, `1 + loop c'`, a pair's first component — when the result
+type contains neither the linear argument nor its type. The rule is **"consumed but not
+contained"**: the call is evaluated once, so the cursor is threaded exactly once, and a
+result with no linear content (a `Nat`, a `Bool`, a pair of ω types, an `Option Nat`) can
+be copied or dropped without copying the resource. The kernel tests the result type for
+a syntactic occurrence of the call's `1`-quantity arguments and their instantiated
+parameter types (`fixCallSafe`); a partially applied call is refused, because its closure
+may capture the linear value. The test never unfolds a definition, so it is a decidable
+approximation: a type alias that hides the linear type, or a function value that captures
+it, is not seen (and should be avoided).
+
+```wiz
+inductive Cursor (a : Type) where
+  | mk (rest : List a)
+inductive Step (a : Type) where
+  | done
+  | more (value : a) (1 next : Cursor a)
+
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=
+  match Cursor.next c with
+  | .done => 0
+  | .more _ c' => Nat.succ (Cursor.length c')   -- accepted: the result is a Nat
+```
+
+A result type that **contains** the linear parameter stays rejected: copying it would
+copy the cursor. `Cursor a × Nat` is such a type, and so is `Option (Cursor a)`:
+
+```wiz no-check
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=
+  match Cursor.next c with
+  | .done => (d, 0)
+  | .more _ c' => (Cursor.keep c' d, 0)
+-- error: variable c' declared with quantity 1 but used ω
+--   (the pair's first component is ω, and the recursive result contains `Cursor a`)
+```
+
+A `partial` definition's **witness** (the term that shows its type is inhabited) is
+checked without usages, so it may ignore a linear parameter — the body that runs is still
+checked strictly. (`Wiz/Core/Check.lean`, `Ctx.witness` and `fixCallSafe`; the
+self-hosted kernel's `TCtx.witness` and `fixCallSafe`.)
 
 | #   | Where              | What                                                       |
 |-----|--------------------|------------------------------------------------------------|
