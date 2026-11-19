@@ -88,7 +88,7 @@ def main : IO Unit := do
         | .false => do
           IO.println (String.append "revision: the store is at generation "
             (String.append (Nat.repr gen) (String.append ", the manifest at "
-              (String.append (Nat.repr manifest.gen) ": run ingest")));
+              (String.append (Nat.repr manifest.gen) ": run ingest"))));
           Process.exit 3
         | .true => match Scry.sameView manifest.view live with
           | .false => do

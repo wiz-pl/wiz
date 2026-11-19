@@ -34,13 +34,18 @@ It checks:
 A non-zero exit means a check failed.
 -/
 
+/-- A value for a branch that `Process.exit` never returns from (the test driver's
+error path). -/
+axiom ScryTest.anyValue {A : Type} : A
+
 def ScryTest.runEIO {A : Type} (x : EIO A) : IO A := do
   r ← x;
   match r with
   | .ok a => IO.pure a
   | .error e => do
     IO.ePrintln (String.append "unexpected EIO error: " e);
-    Process.exit 2
+    Process.exit 2;
+    IO.pure ScryTest.anyValue
 
 def ScryTest.checkOne (fails : Nat) (name : String) (ok : Bool) : IO Nat := do
   IO.println (String.append (match ok with | .true => "PASS " | .false => "FAIL ") name);
@@ -85,7 +90,8 @@ def ScryTest.manifestOf (path : String) : IO Scry.Manifest := do
   | .some m => IO.pure m
   | .none => do
     IO.ePrintln (String.append "no manifest at " path);
-    Process.exit 2
+    Process.exit 2;
+    IO.pure ScryTest.anyValue
 
 def ScryTest.main : IO Unit := do
   tmp ← ScryTest.runEIO FS.createTempDir;
