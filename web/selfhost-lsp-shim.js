@@ -429,7 +429,7 @@ export function wordAt(text, offset) {
 
 // The names whose label starts with `prefix` (case-insensitive), as LSP completion items.
 // An empty prefix keeps the answer order (`newest declaration first`), capped so a large
-// Prelude cannot flood the popup.
+// module cannot flood the popup.
 export function filterCompletions(names, prefix, limit = 200) {
   const want = String(prefix || "").toLowerCase();
   const items = [];

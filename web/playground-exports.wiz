@@ -130,35 +130,32 @@ def pgiGoals : List String → String
   | .nil => ""
   | .cons g rest => match rest with
     | .nil => pgcStr g
-    | .cons _ _ => String.append (pgcStr g) (String.append "," (pgiGoals rest))
+    | .cons _ _ => pgcStr g +++ "," +++ pgiGoals rest
 
-def pgiHead (s e : Nat) : String := String.append "{\"s\":" (String.append (Nat.toString s)
-    (String.append ",\"e\":" (String.append (Nat.toString e) "")))
+def pgiHead (s e : Nat) : String :=
+  "{\"s\":" +++ Nat.toString s +++ ",\"e\":" +++ Nat.toString e
 
 def pgiEntry (i : LspEntry) : String := match i with
-  | .term s e t => String.append (pgiHead s e)
-      (String.append ",\"kind\":\"term\",\"expected\":" (String.append (pgcStr t) "}"))
-  | .goal s e gs => String.append (pgiHead s e)
-      (String.append ",\"kind\":\"goal\",\"goals\":[" (String.append (pgiGoals gs) "]}"))
-  | .decl s e n ty k => String.append (pgiHead s e)
-      (String.append ",\"kind\":\"decl\",\"name\":" (String.append (pgcStr n)
-        (String.append ",\"detail\":" (String.append (pgcStr ty)
-          (String.append ",\"ckind\":" (String.append (Nat.toString k) "}")))))
+  | .term s e t => pgiHead s e +++ ",\"kind\":\"term\",\"expected\":" +++ pgcStr t +++ "}"
+  | .goal s e gs => pgiHead s e +++ ",\"kind\":\"goal\",\"goals\":[" +++ pgiGoals gs +++ "]}"
+  | .decl s e n ty k => pgiHead s e +++ ",\"kind\":\"decl\",\"name\":" +++ pgcStr n
+      +++ ",\"detail\":" +++ pgcStr ty +++ ",\"ckind\":" +++ Nat.toString k +++ "}"
 
 def pgiEntries : List LspEntry → String
   | .nil => ""
   | .cons i rest => match rest with
     | .nil => pgiEntry i
-    | .cons _ _ => String.append (pgiEntry i) (String.append "," (pgiEntries rest))
+    | .cons _ _ => pgiEntry i +++ "," +++ pgiEntries rest
 
 -- the check's text; the export runs it under the boundary. (A named helper keeps the
 -- `match` at command indentation, where the layout parser wants it.)
 def playgroundCheckText (text : String) : String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       (String.codes text) 0 (Globals.watching (Globals.setModule Globals.empty "input")) .nil with
-  | .mk out gs _ _ _ => String.append "{\"v\":1,\"lines\":["
-      (String.append (pgcLines (List.reverseOf out .nil))
-        (String.append "],\"index\":[" (String.append (pgiEntries (Globals.lspEntries gs)) "]}")))
+  | .mk out gs _ _ _ =>
+    let lines := pgcLines (List.reverseOf out .nil);
+    let index := pgiEntries (Globals.lspEntries gs);
+    "{\"v\":1,\"lines\":[" +++ lines +++ "],\"index\":[" +++ index +++ "]}"
 
 def playgroundCheck (text : String) : String :=
   pgStopRun (fun _ => playgroundCheckText text)
