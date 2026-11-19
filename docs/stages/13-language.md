@@ -456,7 +456,10 @@ The parser stays scannerless with one token table (`Wiz/Parser/Token.lean`): the
 a property of the category being parsed (`ParserTables.reservedIn`, read by the `ident`
 case of `runDescr`), so the memo key, which already names the category, is unchanged.
 The design options are in the notes (`scoped-keywords.md`). The self-hosted parser
-interprets the built-in tables, which use no scope, and has no `syntax` command yet.
+interprets the built-in tables, which use no scope; it dispatches `syntax` and
+`declare_syntax_cat` ([21ac](21-bootstrap.md); the `selfhost-macro` group checks them),
+but does not track a category's keyword scope, so a scope is accepted and not enforced
+there.
 Tests: `parser: commands and syntax`, `language`.
 
 ## 13k: list literals
@@ -506,15 +509,17 @@ declares the same `infixr`, so both frontends expand it to `List.cons` and the
 
 ## 13l: `++` for lists and strings
 
-`a ++ b` is `Append.append a b`, a method of the homogeneous class
-`class Append (A : Type) where append : A → A → A`, with instances for `List A`
-(`List.append`) and `String` (`String.append`): the same design as the numeric classes
-(7e, HD9 stage 1). A heterogeneous `HAppend A B C` would need default instances, which
-the numeric classes also left for later. Other types get `++` by an instance.
-(`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local spellings
-of `String.append`; the self-hosted prelude keeps `infixr:67 " ++ " => List.append`, and
-`::` (13k) sits at the same precedence.)
-Tests: group `language`.
+`a ++ b` elaborates to `HAppend.hAppend a b` (`lib/Prelude.wiz`'s
+`infixr:67 " ++ "`), the method of the heterogeneous class `HAppend (A B : Type)
+(C : outParam Type)`. The homogeneous class `Append (A : Type)` with
+`append : A → A → A` has instances for `List A` (`List.append`) and `String`
+(`String.append`), and `instHAppend {A : Type} [Append A] : HAppend A A A` is registered
+as a **default instance**: at a homogeneous type `++` therefore resolves to
+`Append.append`, and a heterogeneous instance (like `HMul Nat V V` in 7f) resolves
+without one. Other types get `++` by an `Append` instance or a heterogeneous `HAppend`
+one. (`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local
+spellings of `String.append`; the self-hosted prelude keeps
+`infixr " ++ " => List.append`.) Tests: group `language` (`++` on lists and strings).
 
 ## 13m: local notation
 
@@ -529,8 +534,13 @@ local macro_rules
 ```
 
 `local` applies to `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`,
-`macro_rules` and `attribute [macro …]`; anything else is an error. In the main file it
-changes nothing. `local` is not a reserved word.
+`macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance`,
+`app_unexpander` and `attribute [app_unexpander …]` (the ten command kinds
+`Wiz/Elab/Command.lean` accepts; any other command is an error there). In the main file
+it changes nothing. `local` is not a reserved word. The `language` group pins
+`local instance` (11w) and the `simp` group pins `local attribute [simp]`; the
+self-hosted frontend unwraps `local` and leaves the notation visible to importers
+([21ac](21-bootstrap.md)).
 
 An `import` elaborates the module's text into the importer's state, so its
 syntax lands in the importer's parser tables. The state records what each `local`
@@ -545,9 +555,11 @@ none of the dropped rules. Definitions written with the notation are unaffected 
 are terms by then). Lean also has `scoped` notation, active where a namespace is open;
 Wiz has no `open`, so the module is the only scope. The design notes are in the notes
 (`notation.md`). `command.local` is built-in grammar (`Wiz/Parser/Builtin.lean`), so the
-self-hosted parser's generated tables have it too; the self-hosted frontend has no
-`syntax` command yet and doesn't elaborate it. Tests: groups `language`,
-`parser: commands and syntax`.
+self-hosted parser's generated tables have it too; the self-hosted frontend also
+dispatches `syntax` and `declare_syntax_cat` ([21ac](21-bootstrap.md)), but it unwraps
+`local` and does not keep the command's rules in the module: a local notation or macro
+rule stays visible to importers there ([21ac](21-bootstrap.md)'s "Not done"). Tests:
+groups `language`, `parser: commands and syntax`.
 
 ## 13n: `rfl` at an equation that has computed
 
