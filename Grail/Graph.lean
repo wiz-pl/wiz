@@ -766,7 +766,10 @@ def jobMain (tc : Toolchain) (arg : String) : IO UInt32 := do
   let r : Runner := { ctx := { dir, std, tc, binId := bin.toNat!.toUInt64,
                                libRoots := roots.toList.filterMap fun x => (atom? x).map System.FilePath.mk },
                       stats := ← IO.mkRef {}, memo := ← IO.mkRef {} }
-  match ← (try r.runJob out job catch e => pure (.error (toString e))) with
+  let res ← try r.runJob out job catch e => pure (.error (toString e))
+  -- (`--region-stats`) this job's counters, after its report; zero when the cache was off
+  printRegionStats tc
+  match res with
   | .ok () => pure 0
   | .error e => IO.eprint e; pure 1
 
