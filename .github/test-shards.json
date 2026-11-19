@@ -128,9 +128,11 @@
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*",
-              "lib/Text.wiz", "lib/Word.wiz", "lib/Functor.wiz", "lib/Deriving.wiz"],
+              "lib/Text.wiz", "lib/Word.wiz", "lib/Functor.wiz", "lib/Deriving.wiz",
+              "scripts/diff-fuzz.py", "Tests/Groups/DiffFuzz.lean"],
    "select": [
     "check",
+    "=diff-fuzz",
     "conv",
     "copatterns",
     "data",

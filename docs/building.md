@@ -249,6 +249,50 @@ Adding a test group touches no shared file:
   (`groups` at their end, concatenated by `Tests/Main.lean`); a new group goes in
   `Tests/Groups/` all the same.
 
+### Differential fuzzing for erasure and optimisation (`=diff-fuzz`)
+
+`scripts/diff-fuzz.py` generates closed Wiz programs from a seed and checks that the
+three pipelines that must agree do: the tree interpreter (`#eval`), the IR interpreter
+(`#run`, which runs `IR.optimizeProgram` and reference counting) and the C backend
+(`wiz run`). It is aimed at the two places where the pipelines differ: **erasure**
+(stage 5) and **constant folding and known constructors** (stage 15c). The grammar is
+`Nat`/`Bool` arithmetic and the operations `foldNat` treats specially (`Nat.div`/`mod`
+by zero, `pow`, `shiftLeft`, the bitwise operations), `if`, `let`, pairs, `Option`,
+structural and tail recursion, arrays with a pure list model (compiled only: the
+interpreters cannot run the natives), regions as erased type indices, and the
+quantity-0 constructs: a `0` argument, `let 0`, a `0` field and a `split` at 0 whose
+value diverges, and a function into `Unit` (`erasedFunTy`) stored in a structure and
+applied. A program whose erasure is wrong therefore hangs or panics instead of printing.
+
+Programs are batched: one file with many `#eval`s, one with many `#run`s and one C
+program printing every result, so 200 programs cost three processes, not 600. A batch
+that crashes or times out is bisected to one program; a disagreement is shrunk by
+delta-debugging its choice sequence and the minimised source is printed. Exit code 1
+means a finding; a missing `wiz`/`python3`/C toolchain is a skip.
+
+```sh
+lake test -- '=diff-fuzz'                    # the fast tier: 200 programs, a fixed seed
+python3 scripts/diff-fuzz.py --fast          # the same, with the printed report
+python3 scripts/diff-fuzz.py --nightly       # today's seed, 2000 programs, shrinking
+python3 scripts/diff-fuzz.py --seed 7 --programs 500
+python3 scripts/diff-fuzz.py --replay 7 3 12,4,0,...   # one case again
+python3 scripts/diff-fuzz.py --self-test     # the detector's panic/timeout paths
+python3 scripts/diff-fuzz.py --nightly --pin .lake/diff-fuzz/pins  # keep a finding
+```
+
+A campaign is processed in files of `--batch-size` programs (default 200), so a long
+run costs three processes per file rather than one enormous C unit; a crash is bisected
+inside its file. A missing C toolchain (`cc`, GMP or the GC) makes the compiled pipeline
+`SKIPPED`, which the group reports as a skipped case, not a pass.
+
+The group forwards the driver's toolchain flags (`--cc`, `--cflags`, …) to every `wiz`
+invocation; a checkout without `grail.local.wiz` therefore needs the toolchain flags on
+the command line, or `wiz` must come from a release bundle. The nightly has no workflow
+of its own yet: run the `--nightly` command above (or from a scheduled job) with the
+checkout's `wiz`. The harness works in a temporary directory under `.lake/diff-fuzz/`
+and gives `wiz` a per-run elaboration cache there (removed at the end; `--cache DIR`
+keeps one for a series of runs), so a campaign does not grow `~/.cache/wiz`.
+
 ### The rejection corpus (`=reject`)
 
 The suite is mostly about programs that must be accepted; `Tests/Groups/Reject.lean` is
