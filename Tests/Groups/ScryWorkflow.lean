@@ -95,8 +95,8 @@ def group : Group where
         "#eval if String.contains plan.inputText plan.marker then 1 else 0\n" ++
         "#eval if String.eq (Scry.wfCalleeOfLine \"  char *cmd = getenv(\\\"SCRY_CMD\\\");\") \"getenv\" then 1 else 0\n" ++
         "#eval if String.eq (Scry.wfChannelOfCallee \"System.Console.ReadLine\") \"stdin\" then 1 else 0\n" ++
-        "def ok := Scry.wfRankInputOf true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" false\n" ++
-        "def dup := Scry.wfRankInputOf true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" true\n" ++
+        "def ok := Scry.wfRankInputOf .true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" .false\n" ++
+        "def dup := Scry.wfRankInputOf .true 0 0 2 \"T1\" \"env\" \"SCRY_CMD\" .true\n" ++
         "#eval (Scry.wfRank ok).1\n" ++
         "#eval if String.eq (Scry.wfVerdict (Scry.wfRank ok).1) \"pursue\" then 1 else 0\n" ++
         "#eval if String.eq (Scry.wfVerdict (Scry.wfRank dup).1) \"reject\" then 1 else 0\n" ++
