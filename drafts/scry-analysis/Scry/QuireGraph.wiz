@@ -174,7 +174,7 @@ def Scry.G.encode (revision : Scry.Revision) (source graphPath : String)
     let edgeLabels := Scry.G.tableOf Scry.G.edgeBase (Scry.G.unique (List.map (fun e => e.label) facts.edges));
     let rels := Scry.G.tableOf Scry.G.relBase (Scry.G.unique (List.map (fun r => r.name) facts.relations));
     let fileNodes := List.filter (fun n => String.startsWith n.kind "file:") facts.nodes;
-    let fileTable := match fileNodes with
+    let fileTable : List (String × Nat) := match fileNodes with
       | [] => Scry.mapIdxFrom 0 (fun i f => (f.path, i)) facts.files
       | List.cons _ _ => List.map (fun n =>
           ((match String.stripPrefix n.kind "file:" with
@@ -189,7 +189,7 @@ def Scry.G.encode (revision : Scry.Revision) (source graphPath : String)
           (Scry.G.lookupId edgeLabels e.label)))
         (U64.ofNat e.src.n) (U32.ofNat e.dst.n))) facts.edges;
     let relRecs := Scry.G.relationRows (Nat.add n (List.length facts.edges)) rels facts.relations;
-    let oldIds := match old with
+    let oldIds : List Nat := match old with
       | .none => []
       | .some m => match Nat.beq m.gen 0 with
         | .true => []
