@@ -1088,7 +1088,7 @@ covers ordinary inductives only), no rewriting in hypotheses, no
 (A12's evaluator). `unfold` replaces syntactic occurrences that are still in the goal
 type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
 whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
-written ones), so the exact `unfold List.filter` steps of `lib/ListLemmas` are not
+written ones), so the exact `unfold List.filter` steps of `lib/Data/ListLemmas` are not
 guaranteed to match the host. The error position is the failed command, as for the rest
 of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
 are not reproduced.
@@ -1231,7 +1231,7 @@ slice/append/eq boundaries, a `char *`/`uint8_t *`/`unsigned char *` buffer argu
 self-hosted one (collector and reference counting); `=ffi` has `#eval`/`#run` of the
 operations in the host interpreters.
 
-**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/WordBytes.wiz`, no `U8` in the Prelude),
+**Not done:** `Bytes.ofU8s`/`toU8s` (`lib/Data/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
 

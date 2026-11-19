@@ -338,13 +338,14 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   -- inside the declaration `T` takes the parameters too: `T : Δ → Ξ → Type l`
   let ctxT := ctxΔ.bind T (eval (← getGlobals) [] (pisTm Δ.toList sig))
   let ctors := (cmd.child "ctors").args
-  let mut names : List Name := []
-  let mut descs : List (Term R) := []
-  let mut ctorInfo : List (Name × List (Name × BinderInfo × Term R × Term R) × List (Term R)) := []
-  let mut ctorLevels : List (List (Option Level × Option Level)) := []
+  let mut names : Array Name := #[]
+  let mut seen : Std.HashSet Name := {}
+  let mut descs : Array (Term R) := #[]
+  let mut ctorInfo : Array (Name × List (Name × BinderInfo × Term R × Term R) × List (Term R)) := #[]
+  let mut ctorLevels : Array (List (Option Level × Option Level)) := #[]
   for c in ctors do
     let cname := ((c.child "name").getId?).getD "_"
-    if names.contains cname then
+    if seen.contains cname then
       throwAt (c.child "name").info s!"the constructor {cname} is declared twice in {T}" ErrorCode.duplicateConstructor
     let (ctxF, fs) ← elabTelescope ctxT ((c.child "binders").args.flatMap binderViews).toList
     let n := fs.size
@@ -370,10 +371,11 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
     let D ← match ctorDesc nΔ (fs'.toList.map fun (x, _, q, A) => (x, q, A)) js .tt l lvs with
       | .ok D => pure D
       | .error e => fail c s!"constructor {cname}: {e}"
-    ctorLevels := ctorLevels ++ [lvs]
-    names := names ++ [cname]
-    descs := descs ++ [D]
-    ctorInfo := ctorInfo ++ [(cname, fs'.toList, js)]
+    ctorLevels := ctorLevels.push lvs
+    seen := seen.insert cname
+    names := names.push cname
+    descs := descs.push D
+    ctorInfo := ctorInfo.push (cname, fs'.toList, js)
   -- phantom parameters: those that neither a constructor nor an index type mentions
   -- (a `sealed inductive`: the seal was declared just before, `command.sealed`)
   let sealAx := if (← getGlobals).contains (sealName T) then some (sealName T) else none
@@ -388,9 +390,9 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   -- (Q4) the tag is in `Type`: lifted when the type is in a bigger universe
   let tagLifted := !(Level.succ l).equiv (Level.ofNat 1)
-  let desc : Term R := .darg w (if tagLifted then .ulift 1 (.succ l) (.enum names) else .enum names)
+  let desc : Term R := .darg w (if tagLifted then .ulift 1 (.succ l) (.enum names.toList) else .enum names.toList)
     (.lam "t" (.ecase "z" ((Term.desc l I).lift 2) (if tagLifted then .down (.var 0) else .var 0)
-      (descs.map (·.lift 1))))
+      (descs.toList.map (·.lift 1))))
   let ΔNames := Δ.toList.map (·.1)
   let ΔBinders := Δ.toList
   let descName := T ++ ".desc"
@@ -409,7 +411,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
   -- constructors
   let implicitΔ := ΔBinders.map fun (x, _, _, A) => (x, BinderInfo.implicit, (.qlit 0 : Term R), A)
   let mut ctorDecls := []
-  for (cname, fs, js) in ctorInfo, tagIx in [0:ctorInfo.length], D in descs do
+  for (cname, fs, js) in ctorInfo, tagIx in [0:ctorInfo.size], D in descs do
     let n := fs.length
     let lifts := descFieldLifts D
     -- occurrences of the local `T` (already applied to the parameters) become the global
@@ -419,7 +421,7 @@ def elabInductive (cmd : Syntax) (levelParams : List Name) : ElabM R (List (Decl
     let some js' := js.mapM (·.strengthen? n)
       | fail cmd s!"constructor {cname}: its indices may not mention {T}"
     let fieldVars := telescopeVars n 0
-    let tag : Term R := if tagLifted then .up (.tag names tagIx) else .tag names tagIx
+    let tag : Term R := if tagLifted then .up (.tag names.toList tagIx) else .tag names.toList tagIx
     let fieldVals := fieldVars.zipIdx.map fun (f, k) => (lifts[k]?.getD .none).wrap f
     let payload := Term.pair tag
       (fieldVals.foldr .pair (.pair (.refl (I.lift n) (tupleWith (tailV.lift n) js')) .tt))

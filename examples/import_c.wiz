@@ -1,3 +1,4 @@
+-- test: run
 import IO
 import_c "string.h"
 import_c "math.h" (pure)

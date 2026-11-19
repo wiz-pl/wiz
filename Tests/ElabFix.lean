@@ -532,6 +532,45 @@ def group : Group where
         okLibs ("import Hdl.Core\nstructure CombT (i o : HwTy) where\n  run : {r : HwTy → Type} → [Hw r] → r i → r o\n" ++
           "def mapIn {ω i' i o : HwTy} (f : CombT i' i) (c : Circuit i o) : Circuit i' o :=\n" ++
           "  Circuit.mk c.st c.init (fun s x => c.step s (f.run x))\n") },
+    { name := "a hole applied to its own context variables is a pattern (`?p A B =?= A → B`)", run := fun _ =>
+        -- the leading `arity` spine entries of a hole are its context (`metaApp`), not
+        -- arguments; the arguments after them are distinct, so this is Miller's pattern
+        -- (`?p := (→)`), not a repeat. Before, `?p` had to be named by hand at every use.
+        okLib ("import Prelude\n" ++
+          "def apply {A B : Type} (f : {p : Type → Type → Type} → p A B → Nat) (x : A → B) : Nat := f x\n") },
+    { name := "… and the optics-shaped `set` needs no `(p := …)` annotation", run := fun _ =>
+        -- the blocker in wiz-notes/reviews/2026-11-18-optics-profunctor.md §2.5:
+        -- `l (fun _ => b) s` against `?p A B =?= ?dom → B` (a Π) solves `p := (→)`
+        okLib ("import Prelude\n" ++
+          "class Profunctor (p : Type → Type → Type) where\n" ++
+          "  dimap : {A B C D : Type} → (A → B) → (C → D) → p B C → p A D\n" ++
+          "class Strong (p : Type → Type → Type) where\n" ++
+          "  first' : {A B C : Type} → p A B → p (A × C) (B × C)\n" ++
+          "def Hom (A B : Type) : Type := A → B\n" ++
+          "instance : Profunctor Hom where\n" ++
+          "  dimap := fun f g h => fun a => g (h (f a))\n" ++
+          "instance : Strong Hom where\n" ++
+          "  first' := fun h ac => (h ac.1, ac.2)\n" ++
+          "def Lens (S T A B : Type) : Type 1 :=\n" ++
+          "  {p : Type → Type → Type} → [j : Profunctor p] → [i : Strong p] → (p A B → p S T)\n" ++
+          "def fstL {A B C : Type} : Lens (A × C) (B × C) A B :=\n" ++
+          "  fun {p : Type → Type → Type} [j : Profunctor p] [i : Strong p] => @Strong.first' p i A B C\n" ++
+          "def set {S T A B : Type} (l : Lens S T A B) (b : B) (s : S) : T := l (fun _ => b) s\n" ++
+          "def setFst : Nat × Nat := set fstL 9 (1, 2)\n#eval setFst") ["(9, 2)"] },
+    { name := "a hole applied to the same variable twice is still not a pattern (`?p a a`)", run := fun _ => do
+        -- the two *arguments* are the same variable: a solution is a guess (which
+        -- occurrence would it mean?), so the error is the one it was before
+        failsLib ("import Prelude\n" ++
+          "def apply {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : A → A) : Nat := f x\n")
+          "a variable escapes the scope of the hole being solved"
+        -- nor is a non-variable argument a pattern
+        failsLib ("import Prelude\n" ++
+          "def nv {A B : Type} (f : {p : Type → Type → Type} → p (List A) B → Nat) (x : List A → B) : Nat := f x\n")
+          "outside the pattern fragment" },
+    { name := "a repeated argument is still pruned when the right side does not use it", run := fun _ =>
+        -- `?p A A =?= Nat`: `A` is left out of the solution, which ignores it
+        okLib ("import Prelude\n" ++
+          "def pruned {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : Nat) : Nat := f x\n") },
     { name := "a variable whose type is the expected definition is not η-expanded through it (hdl-cleanup)", run := fun _ =>
         -- `f : Comb i o` against `Comb ?i ?o` (`def Comb … := {r} → [Hw r] → …`) became
         -- `fun {r} [_] => f`, with an instance hole made while `?r` was unsolved: "could not

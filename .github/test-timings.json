@@ -1238,7 +1238,7 @@
    "nat_ring! rejects an equation that is not an identity": {"seconds": 3.521},
    "native text": {"seconds": 2.316},
    "naturals: semiring laws, the order as a proposition, ≤ notation": {"seconds": 2.471},
-   "order notation: ≤, < and ≈ are classes (lib/Order.wiz)": {"seconds": 1.721},
+   "order notation: ≤, < and ≈ are classes (lib/Data/Order.wiz)": {"seconds": 1.721},
    "rationals: an ordered field up to ≈, and q_ring!": {"seconds": 12.799},
    "ring: a false identity is reported with both sides": {"seconds": 17.166},
    "ring: a goal that is not an equation of a ring": {"seconds": 12.797},

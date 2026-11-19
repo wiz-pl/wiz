@@ -1,3 +1,4 @@
+-- test: skip a benchmark: `wiz build` it and run `./b MODE CYCLES`; a check is not its oracle
 -- A benchmark for the HDL simulations (`wiz build examples/hdl-sim-bench.wiz -o b`,
 -- then `b MODE CYCLES`): a design in the style of the iCEstick OLED demo (a sequencer
 -- whose program is a table, a serialiser, a pixel generator reading a sine and a font

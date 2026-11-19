@@ -39,7 +39,7 @@ open Wiz
 
 namespace Tests.ScryCSharp
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
 def loader : IO (Name → Option String) := do
   let mut m : List (Name × String) := []
   for e in ← System.FilePath.readDir "lib" do

@@ -45,7 +45,7 @@ open Wiz
 
 namespace Tests.ScryTaint
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
 `Scry.X`), by module name. The C-lowering pipeline case serves both roots. -/
 def libLoader : IO (Name → Option String) := do
   let mut m : List (Name × String) := []
