@@ -167,10 +167,13 @@ def termGroup : Group where
         let _ ← checkScaling "numeral conversion" convert 131072 3 100
         -- `wiz check` serialises the literal for its cache with the printer, and the
         -- core `Nat.toString` is quadratic too (one division and one append per digit);
-        -- the same n/2n measurement over `NatString.decimalString`.
+        -- the same n/2n measurement over `NatString.decimalString`. The result must be
+        -- observed: a `let _ := …` is dead code and the compiler removes the whole
+        -- conversion (it measured 0 ms at 262144 digits).
         let print (n : Nat) : IO Unit := do
-          let _ := NatString.decimalString (Nat.pow 10 (n + 1) + 1)
-          pure ()
+          let s := NatString.decimalString (Nat.pow 10 (n + 1) + 1)
+          unless s.length == n + 2 do
+            throw (IO.userError s!"the printer produced {s.length} digits, expected {n + 2}")
         let _ ← checkScaling "numeral printing" print 131072 3 100
         -- The same size against an independently computed value: the token is not
         -- truncated and the limbs combine in the right order.
