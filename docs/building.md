@@ -783,12 +783,16 @@ setup action keeps the elan cache for those
   uploads every case's time as the `test-timings` artifact.
 * **The examples are tests** (the `examples` shard, group `examples`): every
   `examples/*.wiz` is compared with its `.expected` exactly as `grail test` does (the
-  same `runTests` helper the tour group uses), in three cases split by name, so a
-  library change that changes an example's output fails CI instead of only a command a
-  contributor runs by hand. An example with `-- test: skip REASON` (the benchmarks) is
-  reported as skipped, not passed; one with `-- test: run` has `main`'s compiled output
-  as its oracle. The shard runs when `examples/`, `lib/` or `drafts/feral/lib/` changes,
-  and (like every shard) when the Lean sources or the harness change.
+  same `runTests` helper the tour group uses), in a marker-guard case and three cases
+  split by name, so a library change that changes an example's output fails CI instead
+  of only a command a contributor runs by hand. An example with `-- test: skip REASON`
+  (the benchmarks) is reported as skipped, not passed; one with `-- test: run` has
+  `main`'s compiled output as its oracle. The guard fails when an `.expected` is not
+  the shape its marker produces: program output (such as a bare digest) under a check
+  marker, check messages under a run marker, a check-message path that names another
+  file, or a missing `.expected`. The shard runs when `examples/`, `lib/` or
+  `drafts/feral/lib/` changes, and (like every shard) when the Lean sources or the
+  harness change.
 * **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
   absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
   worker roles, U+2705 status checkmarks, and decision/step phrases attributed to
