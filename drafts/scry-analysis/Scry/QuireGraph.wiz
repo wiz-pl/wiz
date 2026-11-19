@@ -243,10 +243,10 @@ def Scry.G.viewOf (s : QSnapshot) (m : Scry.Manifest) : Scry.GraphView :=
   let errorKind := Scry.G.lookupId m.kinds "ERROR";
   let callIds := List.filter (fun id => Nat.lt id m.nodeCount) (Scry.G.idsOfKind s callKind);
   let errIds := List.filter (fun id => Nat.lt id m.nodeCount) (Scry.G.idsOfKind s errorKind);
-  let calls := List.filterMap (fun id => Scry.G.siteOf s m fileRel id) callIds;
-  let errors := List.filterMap (fun id => Scry.G.siteOf s m fileRel id) errIds;
+  let calls := Scry.filterMap (fun id => Scry.G.siteOf s m fileRel id) callIds;
+  let errors := Scry.filterMap (fun id => Scry.G.siteOf s m fileRel id) errIds;
   let rows := Scry.G.idsOfKind s callRel;
-  let heads := List.filterMap (fun r => match Scry.G.nodeOf s r with
+  let heads := Scry.filterMap (fun r => match Scry.G.nodeOf s r with
     | .some n => .some n.count.toNat
     | .none => .none) rows;
   Scry.GraphView.mk calls heads errors m.nodeCount m.edgeRowCount m.relationRowCount
@@ -377,9 +377,13 @@ def Scry.G.currentRevision (m : Scry.Manifest) : EIO Scry.Revision :=
 /-- The writer lock path. This is not the revision manifest. -/
 def Scry.G.writerPath (graph : String) : String := String.append graph ".writer"
 
+/-- The raw IO action behind an `EIO` (so `finallyWriter` can observe an error and still
+release the descriptor; `IO.bind` takes a linear action). -/
+def Scry.G.runRaw {A : Type} (x : EIO A) : IO (Except String A) := x
+
 /-- Release and close on every path. -/
 def Scry.G.finallyWriter {A : Type} (fd : Fd) (body : EIO A) : EIO A :=
-  IO.bind body (fun r =>
+  IO.bind (Scry.G.runRaw body) (fun r =>
     IO.bind (Fd.unlock fd) (fun u =>
       IO.bind (Fd.close fd) (fun c =>
         match u with
