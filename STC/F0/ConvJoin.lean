@@ -341,53 +341,80 @@ theorem redStar_trans {sg : Sig} {Γ : Ctx} {A : Tm} {t u v : Tm}
     · exact Or.inr h1
     · exact Or.inr (Relation.TransGen.trans h1 h2)
 
-/-- The first step of a (possibly empty) reduction chain. -/
-theorem redStar_head_decomp {sg : Sig} {Γ : Ctx} {A : Tm} {t u : Tm}
-    (h : RedStar sg Γ A t u) :
-    t = u ∨ ∃ a, RedStep sg Γ A t a ∧ RedStar sg Γ A a u := by
-  rcases h with hEq | h
-  · exact Or.inl hEq
-  · induction h with
-    | single hstep => exact Or.inr ⟨_, hstep, redStar_refl⟩
-    | tail hprev hstep ih =>
-      rcases ih with hEq | hEx
-      · exact Or.inr ⟨_, hEq.symm ▸ hstep, redStar_refl⟩
-      · obtain ⟨a, hta, hau⟩ := hEx
-        exact Or.inr ⟨a, hta, redStar_tail hau hstep⟩
+/-- Reduction closure as a **head-first inductive**: same relation as `RedStar`
+(`redStar_of_rstar`), but with a structural induction principle and the head
+decomposition built into `step`, which is what the confluence proof needs. -/
+inductive RStar (sg : Sig) (Γ : Ctx) (A : Tm) : Tm → Tm → Prop where
+  | refl (t : Tm) : RStar sg Γ A t t
+  | step {t u v : Tm} : RedStep sg Γ A t u → RStar sg Γ A u v → RStar sg Γ A t v
 
-/-- **Newman's lemma**, strip form: if `t` is strongly normalising, a one-step reduct `u`
-of `t` and any reduct `v` of `t` have a common reduct. The induction is on `Acc`; the tail
-of the chain is joined by applying the induction hypothesis twice at the *one-step*
-reduct `a` (so no transitive closure of the accessibility relation is needed). -/
+theorem rstar_snoc {sg : Sig} {Γ : Ctx} {A : Tm} :
+    ∀ {t u v : Tm}, RStar sg Γ A t u → RedStep sg Γ A u v → RStar sg Γ A t v
+  | _, _, _, .refl _, hs => .step hs .refl
+  | _, _, _, .step h1 h2, hs => .step h1 (rstar_snoc h2 hs)
+
+theorem rstar_trans {sg : Sig} {Γ : Ctx} {A : Tm} :
+    ∀ {t u v : Tm}, RStar sg Γ A t u → RStar sg Γ A u v → RStar sg Γ A t v
+  | _, _, _, .refl _, h2 => h2
+  | _, _, _, .step h1 h2, h2' => .step h1 (rstar_trans h2 h2')
+
+theorem redStar_head {sg : Sig} {Γ : Ctx} {A : Tm} {t u v : Tm}
+    (hs : RedStep sg Γ A t u) (h : RedStar sg Γ A u v) : RedStar sg Γ A t v := by
+  rcases h with hEq | h
+  · rw [← hEq]
+    exact redStar_of_step hs
+  · exact Or.inr (Relation.TransGen.tail (Relation.TransGen.single hs) h)
+
+theorem rstar_of_redStar {sg : Sig} {Γ : Ctx} {A : Tm} {t u : Tm}
+    (h : RedStar sg Γ A t u) : RStar sg Γ A t u := by
+  rcases h with hEq | h
+  · rw [hEq]
+    exact RStar.refl u
+  · induction h with
+    | single hs => exact RStar.step hs (RStar.refl _)
+    | tail _ hs ih => exact rstar_snoc ih hs
+
+theorem redStar_of_rstar {sg : Sig} {Γ : Ctx} {A : Tm} {t u : Tm}
+    (h : RStar sg Γ A t u) : RedStar sg Γ A t u := by
+  induction h with
+  | refl t => exact redStar_refl
+  | step hs _ ih => exact redStar_head hs ih
+
+/-- **Newman's lemma**, strip form, on `RStar`: if `t` is strongly normalising, any two
+reducts of `t` have a common reduct. The induction is on `Acc`; the tail of a chain is
+joined by applying the induction hypothesis twice at the *one-step* head reduct, so no
+transitive closure of the accessibility relation is needed. -/
 theorem confluence_aux {sg : Sig} {Γ : Ctx} {A : Tm} (hLC : LocalConfluence sg) :
     ∀ (t : Tm), Acc (fun u v => RedStep sg Γ A v u) t →
-      ∀ u v, RedStar sg Γ A t u → RedStar sg Γ A t v →
-        ∃ w, RedStar sg Γ A u w ∧ RedStar sg Γ A v w := by
+      ∀ u v, RStar sg Γ A t u → RStar sg Γ A t v →
+        ∃ w, RStar sg Γ A u w ∧ RStar sg Γ A v w := by
   intro t hacc
   induction hacc with
   | intro t hstep ih =>
     intro u v htu htv
-    refine Or.elim htu ?_ ?_
-    · intro hEq
-      exact ⟨v, hEq ▸ htv, redStar_refl⟩
-    · intro htu
-      refine Or.elim htv ?_ ?_
-      · intro hEq
-        exact ⟨u, redStar_refl, Or.inr (hEq ▸ htu)⟩
-      · intro htv
-        obtain ⟨a, hta, hau⟩ := redStar_head_decomp (Or.inr htu)
-        obtain ⟨b, htb, hbv⟩ := redStar_head_decomp (Or.inr htv)
-        obtain ⟨c, hac, hbc⟩ := hLC Γ A t a b hta htb
-        obtain ⟨d, hud, hcd⟩ := ih a hta u hau c hac
-        obtain ⟨e, hve, hce⟩ := ih b htb v hbv c hbc
-        obtain ⟨z, hdz, hez⟩ := ih a hta d (redStar_trans hac hcd) e (redStar_trans hac hce)
-        exact ⟨z, redStar_trans hud hdz, redStar_trans hve hez⟩
+    cases htu with
+    | refl _ => exact ⟨v, htv, RStar.refl v⟩
+    | step hta hau =>
+      cases htv with
+      | refl _ => exact ⟨u, RStar.refl u, RStar.step hta hau⟩
+      | step htb hbv =>
+        obtain ⟨c, hac, hbc⟩ := hLC Γ A t _ _ hta htb
+        have hac' : RStar sg Γ A _ c := rstar_of_redStar hac
+        have hbc' : RStar sg Γ A _ c := rstar_of_redStar hbc
+        obtain ⟨d, hud, hcd⟩ := ih _ hta u hau c hac'
+        obtain ⟨e, hve, hce⟩ := ih _ htb v hbv c hbc'
+        obtain ⟨z, hdz, hez⟩ :=
+          ih _ hta d (rstar_trans hac' hcd) e (rstar_trans hac' hce)
+        exact ⟨z, rstar_trans hud hdz, rstar_trans hve hez⟩
 
 /-- **Local confluence plus strong normalisation gives confluence** (Newman's lemma). -/
 theorem confluent_of_sn_local {sg : Sig} (hSN : SN sg) (hLC : LocalConfluence sg) :
-    Confluence sg :=
-  fun Γ A t u v htu htv =>
-    confluence_aux (Γ := Γ) (A := A) hLC t (hSN Γ A t) u v htu htv
+    Confluence sg := by
+  intro Γ A t u v htu htv
+  obtain ⟨w, h1, h2⟩ :=
+    confluence_aux (Γ := Γ) (A := A) hLC t (hSN Γ A t) u v
+      (rstar_of_redStar htu) (rstar_of_redStar htv)
+  exact ⟨w, redStar_of_rstar h1, redStar_of_rstar h2⟩
 
 /-- **Reduction-generated conversion**: the fragment of `≡` closed under `refl`, `symm`,
 `trans`, `redEq`, `eqConv` and `redConv` — exactly the rules whose content is a reduction
