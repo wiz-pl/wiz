@@ -44,7 +44,7 @@ Along the way the elaborator learned to:
   `0 h`);
 * prove an equation that has already computed with `rfl` (`Nat.succ a = Nat.succ a`
   is a Σ of `True`s and `a = a`), and recompute an equation stuck on a metavariable
-  once it is solved (`congrArg Nat.succ ih` against such a goal). The proof follows the
+  once it is solved (`Eq.congrArg Nat.succ ih` against such a goal). The proof follows the
   elaborator's computed form; where the kernel computes the equation to another shape
   (a numeral on one side, a constructor on the other), the kernel rejects it;
 * erase a `cast` against its source type (the solution rule casts a function, so
@@ -1325,7 +1325,9 @@ the scrolling commands.
 ## Logic, heap predicates and Hoare triples
 
 `lib/Logic.wiz` (`∧`, `∨`, `∃` with binder notation `∃ x : A, P`, `↔`, `¬`, ASCII
-`/\`, `\/`, `exists`, `<->`, equality lemmas, `funext`, `propext`; [13e](stages/13-language.md)),
+`/\`, `\/`, `exists`, `<->`, level-polymorphic equality lemmas (`Eq.symm`, `Eq.trans`,
+`Eq.congrArg`, `Eq.congrArg2`, `Eq.substProp`, `Eq.mp'`/`Eq.mpr'`, `Eq.via`), `funext`,
+`propext`; [13e](stages/13-language.md)),
 `lib/HProp.wiz` (model heaps, `emp`, `↦`, `⋆`, `−∗`, entailment and the separation-logic
 laws), `lib/Hoare.wiz` (`wp`, triples, the frame rule, adequacy for an interpreter),
 `lib/HoareTactics.wiz` (SLF-style automation: `xsimpl`, `xpull`, `xstep`, `xapp`, …) and
@@ -1628,7 +1630,7 @@ and doc comments; std's tests check one example of each.
 | module | contents |
 |--------|----------|
 | `lib/Order.wiz` | the classes `LE`, `LT`, `Equiv`: notation `a ≤ b`, `a < b`, `a ≈ b` (propositions) |
-| `lib/Nat.wiz` | `congrArg`, `congrArg2`, `Eq.mp'`, `Eq.via`; the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
+| `lib/Nat.wiz` | the commutative semiring laws of `Nat`, cancellation, truncated subtraction; `Nat.Le`/`Nat.Lt` (`Nat.le m n = .true`, so many facts are `rfl`) with `≤`/`<` instances; `Ordering`, `Nat.cmp` |
 | `lib/Ring.wiz` | `nat_ring! lhs = rhs`: identities of commutative semirings at `Nat`, by reflection |
 | `lib/IntRing.wiz` | `int_ring! lhs = rhs` at `Int`; the ring laws `Int.add_comm` … `Int.neg_mul`; the pair representation `Int.ofPair a b = a - b` |
 | `lib/IntOrder.wiz` | `Int.Le`/`Int.Lt` (`b - a` not negative) with `≤`/`<`; monotonicity, cancellation, `Int.abs` and the triangle inequality |

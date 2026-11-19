@@ -142,10 +142,10 @@ def QExpr.env_get : (ρ : List Q) → (i : Nat) → Nat.lt i (List.length ρ) = 
   | .nil, i, h => absurd (Bool.trueNeFalse (Eq.trans (Eq.symm h) (Nat.lt_zero i)))
   | .cons p _, .zero, _ => (rfl, rfl)
   | .cons p ρ, .succ i, h =>
-    let e : Nat.succ i + Nat.succ i = Nat.succ (Nat.succ (i + i)) := congrArg Nat.succ (Nat.add_succ i i);
+    let e : Nat.succ i + Nat.succ i = Nat.succ (Nat.succ (i + i)) := Eq.congrArg Nat.succ (Nat.add_succ i i);
     let ih := QExpr.env_get ρ i h;
-    (Eq.trans (congrArg (IntExpr.get (QExpr.env (.cons p ρ))) e) ih.1,
-     Eq.trans (congrArg (fun j => IntExpr.get (QExpr.env (.cons p ρ)) (Nat.succ j)) e) ih.2)
+    (Eq.trans (Eq.congrArg (IntExpr.get (QExpr.env (.cons p ρ))) e) ih.1,
+     Eq.trans (Eq.congrArg (fun j => IntExpr.get (QExpr.env (.cons p ρ)) (Nat.succ j)) e) ih.2)
 
 /-- The numerator and denominator of the value are those of `QExpr.toFrac`. -/
 def QExpr.sound (ρ : List Q) : (e : QExpr) → QExpr.wf (List.length ρ) e = .true →
@@ -156,18 +156,18 @@ def QExpr.sound (ρ : List Q) : (e : QExpr) → QExpr.wf (List.length ρ) e = .t
   | .add a b, hw =>
     let ha := QExpr.sound ρ a (Bool.and_left _ _ hw);
     let hb := QExpr.sound ρ b (Bool.and_right _ _ hw);
-    (congrArg2 (fun x y => x + y) (congrArg2 (fun x y => x * y) ha.1 hb.2) (congrArg2 (fun x y => x * y) hb.1 ha.2),
-     congrArg2 (fun x y => x * y) ha.2 hb.2)
+    (Eq.congrArg2 (fun x y => x + y) (Eq.congrArg2 (fun x y => x * y) ha.1 hb.2) (Eq.congrArg2 (fun x y => x * y) hb.1 ha.2),
+     Eq.congrArg2 (fun x y => x * y) ha.2 hb.2)
   | .mul a b, hw =>
     let ha := QExpr.sound ρ a (Bool.and_left _ _ hw);
     let hb := QExpr.sound ρ b (Bool.and_right _ _ hw);
-    (congrArg2 (fun x y => x * y) ha.1 hb.1, congrArg2 (fun x y => x * y) ha.2 hb.2)
-  | .neg a, hw => let ha := QExpr.sound ρ a hw; (congrArg (fun x => -x) ha.1, ha.2)
+    (Eq.congrArg2 (fun x y => x * y) ha.1 hb.1, Eq.congrArg2 (fun x y => x * y) ha.2 hb.2)
+  | .neg a, hw => let ha := QExpr.sound ρ a hw; (Eq.congrArg (fun x => -x) ha.1, ha.2)
   | .sub a b, hw =>
     let ha := QExpr.sound ρ a (Bool.and_left _ _ hw);
     let hb := QExpr.sound ρ b (Bool.and_right _ _ hw);
-    (congrArg2 (fun x y => x + y) (congrArg2 (fun x y => x * y) ha.1 hb.2) (congrArg2 (fun x y => -x * y) hb.1 ha.2),
-     congrArg2 (fun x y => x * y) ha.2 hb.2)
+    (Eq.congrArg2 (fun x y => x + y) (Eq.congrArg2 (fun x y => x * y) ha.1 hb.2) (Eq.congrArg2 (fun x y => -x * y) hb.1 ha.2),
+     Eq.congrArg2 (fun x y => x * y) ha.2 hb.2)
 
 /-- Two expressions are equal up to `≈` when `num₁ · den₂ = num₂ · den₁` as
 integers, which `IntExpr.prove` decides; `h` checks both the atoms and the normal
@@ -179,9 +179,9 @@ def QExpr.prove (ρ : List Q) (a b : QExpr)
   let hw := Bool.and_left _ _ h;
   let ha := QExpr.sound ρ a (Bool.and_left _ _ hw);
   let hb := QExpr.sound ρ b (Bool.and_right _ _ hw);
-  Eq.trans (congrArg2 (fun x y => x * y) ha.1 hb.2)
+  Eq.trans (Eq.congrArg2 (fun x y => x * y) ha.1 hb.2)
     (Eq.trans (IntExpr.prove (QExpr.env ρ) (.mul (QExpr.toFrac a).1 (QExpr.toFrac b).2) (.mul (QExpr.toFrac b).1 (QExpr.toFrac a).2) (Bool.and_right _ _ h))
-      (Eq.symm (congrArg2 (fun x y => x * y) hb.1 ha.2)))
+      (Eq.symm (Eq.congrArg2 (fun x y => x * y) hb.1 ha.2)))
 
 /-- `x ≈ y`, from expressions that evaluate to `x` and `y`. `q_ring!` expands to
 this. -/
@@ -207,9 +207,9 @@ def Q.trans {ω p q r : Q} (h1 : p ≈ q) (h2 : q ≈ r) : p ≈ r :=
   -- q.den * (p.num * r.den) = q.den * (r.num * p.den)
   Int.eq_of_mul_eq_mul_left q.den (p.num * r.den) (r.num * p.den) q.pos
     (Eq.via (p.num * q.den * r.den) (int_ring! q.den * (p.num * r.den) = p.num * q.den * r.den)
-      (Eq.via (q.num * p.den * r.den) (congrArg (fun z => z * r.den) h1)
+      (Eq.via (q.num * p.den * r.den) (Eq.congrArg (fun z => z * r.den) h1)
         (Eq.via (p.den * (q.num * r.den)) (int_ring! q.num * p.den * r.den = p.den * (q.num * r.den))
-          (Eq.via (p.den * (r.num * q.den)) (congrArg (fun z => p.den * z) h2)
+          (Eq.via (p.den * (r.num * q.den)) (Eq.congrArg (fun z => p.den * z) h2)
             (int_ring! p.den * (r.num * q.den) = q.den * (r.num * p.den))))))
 /-- Equal rationals are equivalent. -/
 def Q.ofEq {ω p q : Q} (e : p = q) : p ≈ q := Eq.mp' (fun (x : Q) => p ≈ x) e (Q.refl p)
@@ -222,19 +222,19 @@ def Q.add_congr {ω p p' q q' : Q} (hp : p ≈ p') (hq : q ≈ q') : p + q ≈ p
     (int_ring! (p.num * q.den + q.num * p.den) * (p'.den * q'.den)
        = p.num * p'.den * (q.den * q'.den) + q.num * q'.den * (p.den * p'.den))
     (Eq.via (p'.num * p.den * (q.den * q'.den) + q'.num * q.den * (p.den * p'.den))
-      (congrArg2 (fun x y => x * (q.den * q'.den) + y * (p.den * p'.den)) hp hq)
+      (Eq.congrArg2 (fun x y => x * (q.den * q'.den) + y * (p.den * p'.den)) hp hq)
       (int_ring! p'.num * p.den * (q.den * q'.den) + q'.num * q.den * (p.den * p'.den)
          = (p'.num * q'.den + q'.num * p'.den) * (p.den * q.den)))
 /-- Negation respects `≈`. -/
 def Q.neg_congr {ω p p' : Q} (hp : p ≈ p') : -p ≈ -p' :=
   Eq.via (-(p.num * p'.den)) (int_ring! -p.num * p'.den = -(p.num * p'.den))
-    (Eq.via (-(p'.num * p.den)) (congrArg (fun x => -x) hp) (int_ring! -(p'.num * p.den) = -p'.num * p.den))
+    (Eq.via (-(p'.num * p.den)) (Eq.congrArg (fun x => -x) hp) (int_ring! -(p'.num * p.den) = -p'.num * p.den))
 /-- Multiplication respects `≈`. -/
 def Q.mul_congr {ω p p' q q' : Q} (hp : p ≈ p') (hq : q ≈ q') : p * q ≈ p' * q' :=
   Eq.via (p.num * p'.den * (q.num * q'.den))
     (int_ring! p.num * q.num * (p'.den * q'.den) = p.num * p'.den * (q.num * q'.den))
     (Eq.via (p'.num * p.den * (q'.num * q.den))
-      (congrArg2 (fun x y => x * y) hp hq)
+      (Eq.congrArg2 (fun x y => x * y) hp hq)
       (int_ring! p'.num * p.den * (q'.num * q.den) = p'.num * q'.num * (p.den * q.den)))
 /-- Subtraction respects `≈`. -/
 def Q.sub_congr {ω p p' q q' : Q} (hp : p ≈ p') (hq : q ≈ q') : p - q ≈ p' - q' :=
@@ -433,7 +433,7 @@ def Q.abs (p : Q) : Q := Q.mk (Int.abs p.num) p.den p.pos
 /-- `Q.abs` respects `≈`. -/
 def Q.abs_congr {ω p q : Q} (e : p ≈ q) : Q.abs p ≈ Q.abs q :=
   Eq.trans (Int.abs_mul_pos p.num q.den q.pos)
-    (Eq.trans (congrArg Int.abs e) (Eq.symm (Int.abs_mul_pos q.num p.den p.pos)))
+    (Eq.trans (Eq.congrArg Int.abs e) (Eq.symm (Int.abs_mul_pos q.num p.den p.pos)))
 /-- `0 ≤ |p|`. -/
 def Q.abs_nonneg (p : Q) : 0 ≤ Q.abs p := @Q.le_of_nonneg (Q.abs p) (Int.abs_nonneg p.num)
 /-- `p ≤ |p|`. -/
@@ -452,9 +452,9 @@ def Q.le_of_abs_le {ω p r : Q} (h : Q.abs p ≤ r) : p ≤ r := Q.le_trans (Q.l
 def Q.neg_le_of_abs_le {ω p r : Q} (h : Q.abs p ≤ r) : -p ≤ r := Q.le_trans (Q.neg_le_abs p) h
 /-- `|p · q| ≈ |p| · |q|`. -/
 def Q.abs_mul (p q : Q) : Q.abs (p * q) ≈ Q.abs p * Q.abs q :=
-  congrArg (fun z => z * (p.den * q.den)) (Int.abs_mul p.num q.num)
+  Eq.congrArg (fun z => z * (p.den * q.den)) (Int.abs_mul p.num q.num)
 /-- `|-p| ≈ |p|`. -/
-def Q.abs_neg (p : Q) : Q.abs (-p) ≈ Q.abs p := congrArg (fun z => z * p.den) (Int.abs_neg p.num)
+def Q.abs_neg (p : Q) : Q.abs (-p) ≈ Q.abs p := Eq.congrArg (fun z => z * p.den) (Int.abs_neg p.num)
 /-- `|p - q| ≈ |q - p|`. -/
 def Q.abs_sub_comm (p q : Q) : Q.abs (p - q) ≈ Q.abs (q - p) :=
   Q.trans (Q.abs_congr (q_ring! p - q ≈ -(q - p))) (Q.abs_neg (q - p))
@@ -467,7 +467,7 @@ def Q.abs_sub_le (p q r : Q) : Q.abs (p - r) ≤ Q.abs (p - q) + Q.abs (q - r) :
   Q.le_congr (Q.abs_congr (q_ring! p - q + (q - r) ≈ p - r)) (Q.refl _) (Q.abs_add (p - q) (q - r))
 /-- `|p| ≈ p` for `0 ≤ p`. -/
 def Q.abs_of_nonneg {ω p : Q} (h : 0 ≤ p) : Q.abs p ≈ p :=
-  congrArg (fun z => z * p.den) (Int.abs_of_nonneg p.num (Q.nonneg_of_le h))
+  Eq.congrArg (fun z => z * p.den) (Int.abs_of_nonneg p.num (Q.nonneg_of_le h))
 /-- `-r ≤ p → p ≤ r → |p| ≤ r`. -/
 def Q.abs_le_of_bounds {ω p r : Q} (h1 : -r ≤ p) (h2 : p ≤ r) : Q.abs p ≤ r :=
   Q.abs_le h2 (Q.le_congr (Q.refl _) (q_ring! -(-r) ≈ r) (Q.neg_le_neg h1))
@@ -516,13 +516,13 @@ def Q.ceil (p : Q) : Nat := Nat.succ (Int.natAbs p.num)
 /-- `Q.ceil p` is `|p.num| + 1`. -/
 def Q.ceil_num (p : Q) : Int.ofNat (Q.ceil p) = Int.abs p.num + 1 :=
   @Eq.trans Int (Int.ofNat (Q.ceil p)) (Int.ofNat (Int.natAbs p.num) + 1) (Int.abs p.num + 1)
-    (Int.ofNat_succ (Int.natAbs p.num)) (congrArg (fun z => z + 1) (Int.ofNat_natAbs p.num))
+    (Int.ofNat_succ (Int.natAbs p.num)) (Eq.congrArg (fun z => z + 1) (Int.ofNat_natAbs p.num))
 /-- The archimedean property: `p < Q.ceil p`. -/
 def Q.lt_ceil (p : Q) : p < Q.ofNat (Q.ceil p) :=
   -- a·1 ≤ |a| ≤ |a|·b < |a|·b + b = (|a| + 1)·b
   Int.Lt.congr (int_ring! p.num = p.num * 1)
     (Eq.trans (int_ring! Int.abs p.num * p.den + p.den = (Int.abs p.num + 1) * p.den)
-      (congrArg (fun z => z * p.den) (Eq.symm (Q.ceil_num p))))
+      (Eq.congrArg (fun z => z * p.den) (Eq.symm (Q.ceil_num p))))
     (Int.lt_of_le_of_lt p.num (Int.abs p.num * p.den) (Int.abs p.num * p.den + p.den)
       (Int.le_trans p.num (Int.abs p.num) (Int.abs p.num * p.den) (Int.le_abs p.num)
         (Int.Le.congr (int_ring! Int.abs p.num * 1 = Int.abs p.num) (refl _)

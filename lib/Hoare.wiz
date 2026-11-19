@@ -226,7 +226,8 @@ def wp.bind_r {V A B : Type} : (c : Prog V A) → (f : A → Prog V B) → (0 Q 
 /-- `wp` preserves `bind`, as an equation of predicate transformers. -/
 def wp.bind {V A B : Type} (c : Prog V A) (f : A → Prog V B) :
     wp (Prog.bind c f) = W.bind (wp c) (fun a => wp (f a)) :=
-  @funext (B → HProp V) (HProp V) (wp (Prog.bind c f)) (W.bind (wp c) (fun a => wp (f a)))
+  funext.{0, 0} (A := B → HProp V) (B := HProp V)
+    (f := wp (Prog.bind c f)) (g := W.bind (wp c) (fun a => wp (f a)))
     (fun Q => Entails.antisym (wp.bind_l c f Q) (wp.bind_r c f Q))
 
 -- ## Triples and their rules
