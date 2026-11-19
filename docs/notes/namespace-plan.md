@@ -10,25 +10,41 @@ plan.** The old plan is archived as
 (`Scry.Tool.*`, `Scry.Examples.*`, `Data.*`, `Proof.*`, `Run.*`, `Hdl.Trace`) is **not**
 a prerequisite for namespaces and is not re-decided here. Its settled decisions of
 2026-11-18 (`lib/Scry` leaves the standard library; a `Data.*` group is wanted) remain in
-force and are recorded in the archive. This plan is about the *language* rule and the
-migration that makes today's tree check under it.
+force and are recorded in the archive.
+
+This revision folds in four decisions:
+
+1. **`open` is block-scoped** (Lean), not file-scoped.
+2. **No leaf aliases.** A direct import brings `M.*` and no short `CstStore.x` spelling.
+3. **Shared families move under their owner.** `List`, `Int`, `Bits`, `Bytes`, `File`
+   (the families the note lists as shared); `List`/`Int` are root-owned exceptions,
+   `Bits`/`Bytes`/`File` move.
+4. **`open import M`** is the shorthand: import M and open it at that point.
+
+And one external constraint, enforced by another change in flight:
+
+* **Imports are a fixed header:** top level, before every other declaration, and not
+  producible by any syntax extension. Consequently `open import M` is header-only and
+  **file-scoped**; block-scoped `open` is for namespace bodies only. The dependency graph
+  is a syntactic fact per file, so the migration graph and the collision checker's
+  `--reachable` can be read without elaborating.
 
 The short version:
 
 1. A module's default namespace is its module path: `scry/src/Scry/CstStore.wiz` is
    `Scry.CstStore`; `f` there is `Scry.CstStore.f`.
 2. `__root__.f` is the only way to declare or name a true global (Lean's `_root_.f`).
-3. `namespace X … end X` and `open X` exist, are relative to the current namespace, and
-   `open X as A` is a qualified alias only.
-4. Today's tree is made safe by a **generated compatibility allowlist**, not by a
-   flag-day rename: every existing declaration keeps its current name until its module is
-   migrated. The allowlist has 8,757 rows over 157 files for the five library/tool
-   trees (11,153 over 169 with `selfhost/`, §3.3).
-5. The five interaction verdicts are in §5: `private` composes (24 declarations),
-   `import` brings the namespace but not an open (502 import edges), instances stay
-   global (191 commands), the trust ledger's `module` column already *is* the namespace
-   (730 rows, 576 to re-key over the whole programme), and the self-hosted frontend's
-   flat table must be re-keyed (2,396 declarations, 12 files).
+3. `namespace X … end X` is relative to the current namespace; shared families live under
+   their owner (`Sys.File`, `IO.Bytes`, `BitBlast.Bits`), with `List`/`Int` root-owned.
+4. `open X` is block-scoped to the enclosing `namespace` body; `open import M` is
+   header-only and file-scoped.
+5. **No leaf aliases.** Outside the module, write `Scry.CstStore.f`, or `open import
+   Scry.CstStore` in the header, or `open Scry.CstStore` in a body.
+6. Today's tree is made safe by a **generated compatibility allowlist**, then migrated in
+   batches: **6,740 declarations rename, 4,413 are name-preserving, 608 of 730 ledger rows
+   re-key**. The bare-name work is **472 declarations (floor), 193 importer-module edges
+   in 120 files, 3,567 use sites**; `open import` would be used by **155 files / 423
+   edges** (any imported name), **120 files / 193 edges** for bare names.
 
 ---
 
@@ -36,22 +52,35 @@ The short version:
 
 ```wiz
 -- scry/src/Scry/CstStore.wiz, module Scry.CstStore
-def lineIndexGo (n : Nat) : Nat := n          -- Scry.CstStore.lineIndexGo
-def __root__.cstVersion : Nat := 1            -- cstVersion (a true global)
+import Prelude                                  -- the fixed header: imports first
+import Nat
 
-namespace Internal                            -- Scry.CstStore.Internal
-def scratch : Nat := 0                        -- Scry.CstStore.Internal.scratch
+def lineIndexGo (n : Nat) : Nat := n            -- Scry.CstStore.lineIndexGo
+def __root__.cstVersion : Nat := 1              -- cstVersion (a true global)
+
+namespace Internal                              -- Scry.CstStore.Internal
+def scratch : Nat := 0                          -- Scry.CstStore.Internal.scratch
 end Internal
+```
 
--- another file, with `import Scry.CstStore`
-def use : Nat := CstStore.lineIndexGo 0       -- the direct import's leaf alias
-def use2 : Nat := Scry.CstStore.lineIndexGo 0 -- the full path always works
-def use3 : Nat := cstVersion                  -- the root name
+```wiz
+-- another file
+import Scry.CstStore
+open import Scry.CstStore                       -- header, file-scoped: import + open
+def use : Nat := lineIndexGo 0                  -- Scry.CstStore.lineIndexGo
+def use2 : Nat := Scry.CstStore.lineIndexGo 0   -- the full path, always
+-- CstStore.lineIndexGo                         -- no leaf alias: this is unknown
+
+namespace Inner
+open Scry.CstStore                              -- body-scoped: ends at `end Inner`
+def use3 : Nat := lineIndexGo 0
+end Inner
+-- def use4 : Nat := lineIndexGo 0              -- after the end: qualify or reopen
 ```
 
 The main structural difference from Lean is the first line: Lean has no implicit
-per-file namespace. The smaller differences (`open` scope, no `section`, `scoped`
-notation, the import leaf alias) are listed in §1.9; everything else is Lean's behaviour.
+per-file namespace. The smaller differences (`open` placement, no `section`, `scoped`
+notation, `open import`) are listed in §1.9.
 
 ---
 
@@ -71,9 +100,8 @@ A module's name is derived from its path under the package root that owns it
 | `lib/Prelude.wiz` | `Prelude` | `Prelude.f` — except that this file is root (§3.4) |
 | `selfhost/Frontend.wiz` | `Frontend` | `Frontend.f` — except that this tree is frozen (§5.5) |
 
-Inside the module, `f` and `CstStore.lineIndexGo` both name the declaration: the resolver
-tries the current namespace first (§1.5). Outside, `Scry.CstStore.f` always works; the
-*leaf* `CstStore.f` works for a direct `import Scry.CstStore` (§1.7).
+Inside the module, `f` names `M.f`; outside, `Scry.CstStore.f` always works. There is no
+leaf alias: `CstStore.f` is unknown unless `CstStore` is itself a namespace (§1.7).
 
 The prefix applies to the **declared name**; constructors, fields, recursors, `T.desc`,
 `T.seal✝`, and generated instance names follow the type, exactly as `Globals.privateName`
@@ -104,12 +132,11 @@ def h : Nat := __root__.f           -- the root f, even if Scry.CstStore.f exist
 * `__root__` is an ordinary identifier lexically (`Wiz/Parser/Token.lean` already accepts
   `_` and `.` in an identifier), so the grammar does not change; the resolver and
   `prefixDeclName` interpret it. It is *reserved in name position* by a check, not by the
-  token table, so `__root__` remains usable as a local variable name (nobody should, but
-  nothing breaks).
+  token table.
 * A true global name is the only place the old flat collision rules still apply: two
   modules that both declare `__root__.x` collide exactly as they do today. A shared
-  namespace (`namespace __root__.List`) is also global, and collisions *inside* it remain;
-  that is the price of an open-world family such as `List` or `Bits` (§3.2).
+  namespace reopened at root (`namespace __root__.Bus`) is also global, and collisions
+  *inside* it remain; that is the price of a family the plan chooses to keep at root.
 
 ### 1.3 `namespace X … end X`
 
@@ -128,42 +155,63 @@ end A
   the same prefix.
 * `end` closes the innermost namespace; `end X` must name its last segment (or its full
   name). A missing `end` is reported at its own `namespace` line; a stray or mismatching
-  `end` at the `end` (`unclosed-namespace`, `stray-end`). This is the 13t behaviour and
-  its tests.
+  `end` at the `end` (`unclosed-namespace`, `stray-end`).
 * `namespace` does **not** fall back to the root: inside module `M`, `namespace List`
-  means `M.List`, never the global `List`. To reopen a global namespace, write
-  `namespace __root__.List` (§1.2). This is the single most important rule for the
-  migration of the extension families (`ListLemmas` extends `List`, `IntRing` extends
-  `Int`, `BitVecAdd`/`BitVecShift`/`BitBlast` extend `Bits`).
+  means `M.List`, never the global `List`.
+* **Shared families live under their owner.** The owner is the module that declares the
+  type/class/axiom/foreign_type `P`, or, for a family with no type (`Bits`), the module
+  that declares most of its members. An extension module reopens the owner's namespace
+  with `namespace __root__.Owner.P`:
+
+  ```wiz
+  -- lib/Handle.wiz, extending Sys.File
+  namespace __root__.Sys.File
+  def withOwned (f : File) : File := f
+  end File
+  ```
+
+  The five named families resolve as follows:
+
+  | family | owner | target | extension declarations |
+  |---|---|---|---:|
+  | `List` | `Prelude` (root) | `List.*` | 85 stay root |
+  | `Int` | `Int` (root-level namespace) | `Int.*` | 104 stay |
+  | `Bits` | `BitBlast` (167 of 208) | `BitBlast.Bits.*` | 41 rename |
+  | `Bytes` | `IO` | `IO.Bytes.*` | 8 rename |
+  | `File` | `Sys` | `Sys.File.*` | 7 rename |
+
+  `List` and `Int` are exceptions because their owners are root (`Prelude`) or the family
+  name itself (`Int`); moving them would make `Prelude.List`/`Int.Int` and break every
+  program. The other shared families (`Bus`, `Circuit`, `Prog`, `Spi`, `Axi4`, …) stay at
+  root by this plan (§3.3), unless their owner asks for the same move later.
 * `namespace M` at the top of module `M` is **not** a no-op: it would open `M.M`. The
-  elaborator reports it as a warning (`namespace-repeats-module`) and ignores it; the
-  module's default already is `M`. Do not write it.
+  elaborator reports it as a warning (`namespace-repeats-module`) and ignores it.
 * A namespace is a prefix, not a privacy boundary: `private` is still per module (§5.1).
 
 ### 1.4 `open X` and `open X as A`
 
-`open X` makes the names under `X` visible unqualified from that line to the end of the
-file:
+`open X` makes the names under `X` visible unqualified in the **enclosing block**:
 
 ```wiz
 namespace A
 def x : Nat := 0
 end A
+namespace B
 open A
 def y : Nat := x       -- A.x
+end B
+-- def z : Nat := x    -- after `end B`: unknown; open A again or qualify
 ```
 
-* **File-scoped from the line on.** `end A` does not undo the `open`, and an `open`
-  inside a module does not reach a file that imports it (`CommandState.endModule` drops
-  it). This is the 13t rule and it is a deliberate divergence from Lean, which scopes an
-  `open` to the enclosing `section`/`namespace`; Wiz has no `section`, and the file is
-  the module. The 13t test "an `open` is file-scoped: it outlives its namespace's `end`"
-  is the contract.
+* **Block-scoped.** `open X` is active from its line to the `end` of the enclosing
+  `namespace` block; at file top it has no enclosing block and reaches EOF. This is Lean's
+  behaviour. The 13t implementation is file-scoped and its test "an `open` is file-scoped:
+  it outlives its namespace's `end`" must be reversed.
 * **`open` resolves like a reference**, not like a declaration prefix: it tries
-  `currentNs ++ "." ++ X`, then the root `X`, then an import alias (§1.7). An unknown
-  name is an error (`unknown-namespace`). Thus `open List` inside `ListLemmas` opens the
-  root `List` if `ListLemmas.List` does not exist — unlike `namespace List`, which would
-  *create* `ListLemmas.List`.
+  `currentNs ++ "." ++ X`, then the root `X`, then an `open … as` alias. An unknown name is
+  an error (`unknown-namespace`). Thus `open List` inside `ListLemmas` opens the root `List`
+  if `ListLemmas.List` does not exist — unlike `namespace List`, which would *create*
+  `ListLemmas.List`.
 * **An unqualified name that two opens provide, or an open and a declaration, is an
   error** naming both candidates (`ambiguous-name`), never a silent last-wins. The same
   declaration found twice (this namespace and an open of it) is one candidate. The
@@ -171,22 +219,25 @@ def y : Nat := x       -- A.x
   distinct full names conflict.
 * **`open X as A` is a prefix alias, not an open.** `A.x` is `X.x`; `x` is not. An alias
   is for a long or clashing prefix. The longest matching alias wins for a qualified name.
+  This is the *only* alias; there is no import leaf alias (§1.7).
 * `open` does not change declaration names: with `open A`, `def y` is still `M.y`, not
   `A.y`.
 * **No `open … in` in v1.** It is a small command wrapper and can be added later without
-  changing the resolution rules; nothing in the tree needs it.
+  changing the resolution rules; nothing in the tree needs it. `open import` is a separate
+  header command, not an `open … in` form (§1.7.1).
 
 ### 1.5 Resolution, precisely
 
 `Ns` is the current namespace: the module path, then each `namespace` on the stack.
-`root` is the empty namespace.
+`root` is the empty namespace. `Opens` is the open set of the current block (the enclosing
+`namespace`, or the file-scope set from `open import` and file-top `open`).
 
 **Unqualified `x`** (in a term, pattern, `#check`, `builtin`, `extern`, …):
 
 1. a local binder (unchanged; locals shadow globals);
 2. `Ns.x`, then the enclosing namespaces outward;
 3. `root.x`;
-4. `N.x` for each `open N` (in source order);
+4. `N.x` for each `open N` in `Opens` (in source order);
 5. `root.x` as a builtin (`Unit`, `True`, …) if nothing was found.
 
 Distinct full names in the candidate set are an ambiguity error. A private declaration
@@ -197,11 +248,11 @@ kernel name, §5.1).
 
 1. `Ns.A.x` (relative), then the enclosing namespaces outward;
 2. `A.x` (root);
-3. an `open … as` alias or an import leaf alias, longest prefix first.
+3. an `open … as` alias, longest prefix first.
 
-Again, distinct full names are an error. There is **no general suffix search**: `CstStore.x`
-works because `import Scry.CstStore` registers the leaf alias, not because the resolver
-scans for a declaration ending in `.CstStore.x`.
+Again, distinct full names are an error. There is **no import leaf alias and no suffix
+search**: `CstStore.x` is unknown; write `Scry.CstStore.x`, or put `open import
+Scry.CstStore` in the header or `open Scry.CstStore` in the enclosing body.
 
 **`__root__.x`:** exactly `root.x`; no relative or alias fallback.
 
@@ -216,7 +267,7 @@ private lookup must be composed: for each candidate full name `c`, also try
 ### 1.6 `private`, `local`, and notation
 
 * **`private` is per module, not per namespace** (§5.1). A private name is invisible
-  through `open` and through an alias; a qualified name still needs the privacy check.
+  through `open` and through an alias; `open import M` does not expose M's private names.
 * **`local` stays module-scoped** (`docs/stages/13-language.md`, 13m): it does not follow
   a namespace or an `open`. `local instance` is module-scoped too (the existing
   `localInsts` mechanism).
@@ -225,37 +276,79 @@ private lookup must be composed: for each candidate full name `c`, also try
   `syntax` command at all. `local` covers the module case, which is the only one the
   library uses today. Adding `scoped` later means teaching the parser tables to
   activate/deactivate rules on `open`/`end` (the `localRules` machinery is the starting
-  point); estimate one to two days plus a self-hosted table change, and nothing in the
-  tree depends on it. Do not couple it to this plan.
+  point); estimate one to two days plus a self-hosted table change. Do not couple it to
+  this plan.
 
-### 1.7 `import`
+### 1.7 `import` is a fixed header, and brings no short name
 
-`import M` brings M's declarations, at their full names, and (for a direct import) one
-**leaf alias**. It does not open anything:
+**Imports are a fixed header:** top level, before every other declaration, and not
+producible by a syntax extension. This is an external constraint, not a Wiz design choice.
+Consequences:
+
+* `Module.importsOf`'s line scan is now **exact**, not a superset; the dependency graph of
+  a file is a syntactic fact. The migration graph and the collision checker's
+  `--reachable` can be computed from headers without elaborating (§7, stage 3).
+* An `import` cannot appear inside a namespace, a body or a macro expansion. `open import`
+  is therefore header-only (§1.7.1); its open is file-scoped.
+
+`import M` brings M's declarations at their full names, and **no short name and no alias**:
 
 | after `import Scry.CstStore` | works? |
 |---|---|
 | `Scry.CstStore.lineIndexGo` | yes |
-| `CstStore.lineIndexGo` | yes, the direct import's leaf alias |
-| `lineIndexGo` | no — write `open Scry.CstStore` or qualify |
-| a name from a module that `Scry.CstStore` imports | yes, at its full name (imports re-export declarations, as today); its leaf alias is **not** registered |
+| `CstStore.lineIndexGo` | **no** — no leaf alias |
+| `lineIndexGo` | no — use `open import Scry.CstStore` in the header, or `open Scry.CstStore` in the body |
+| a name from a module that `Scry.CstStore` imports | yes, at its full name (imports re-export declarations, as today) |
 
-* The alias is registered only if the leaf is unambiguous: not another direct import's
-  leaf, and not already a root namespace or declaration (so `Text.x` keeps meaning the
-  root `Text`; an `import Hdl.Text` uses `Hdl.Text.x`, with a warning at the import).
-  When two direct imports share a leaf (`Main` in `selfhost/Main.wiz` and
-  `tower/Main.wiz`), only the full path is available; a use of `Main.x` is an ambiguity
-  error naming both modules.
-* The alias is a **prefix** alias: `CstStore.Internal.x` is
-  `Scry.CstStore.Internal.x`.
-* The alias is per direct import and per file; it is not re-exported. An `open M` in an
-  imported module does not reach the importer (13t's rule); neither does its leaf alias.
+* The import is transitive in visibility, not in aliases: a module visible only through
+  another import is still usable at its full name; it gets no short spelling.
+* Duplicate leaves (`Main` in `selfhost/Main.wiz` and `tower/Main.wiz`) are now only a
+  module-name issue for the package graph, not an alias ambiguity: there is no alias to be
+  ambiguous. `import` resolves a module by its dotted path.
 * `import` does not change the module's own default namespace: a file that imports
   `Scry.CstStore` and declares `def f` still declares `M.f`.
+* **`open import M`** is the shorthand for `import M` plus a file-scope `open M`; it is the
+  only ergonomic way to get M's names unqualified when you do not want to write the full
+  path. See §1.7.1.
 
-This is the answer to "does `import` bring the prefix?": it brings the module's full
-namespace (the names are `M.*`) and a leaf alias for qualified use; it does not bring an
-implicit open.
+### 1.7.1 `open import M`
+
+```wiz
+import Prelude
+open import Scry.CstStore      -- header: import M, and open M for the whole file
+open import Scry.Rules
+```
+
+* **Syntax.** `command.openImport` := `"open" "import" ident`. `open` is non-reserved;
+  `import` is the import keyword; the rule is a leading parser before `command.open`
+  (the `ident` of `open ident` cannot match the reserved `import`). It is header-only:
+  it must appear among the imports, before every other declaration; an `import` or
+  `open import` after the header is an error (`import-not-in-header`).
+* **Semantics.** `open import M` = `import M` (once, as today; a second occurrence is just
+  the open) + `open M` at that point. Because it is in the header, the open has no
+  enclosing block: it is **file-scoped**. Its names are in the file-scope open set of
+  §1.5, visible to every namespace body in the file. The import part is file-wide, like any
+  import; the module is loaded once.
+* **Can it be combined with `in`?** No. `open import M in <command>` is rejected
+  (`open-import-in`): `import` is a header command and cannot be scoped to a command. If a
+  future `open … in` lands, the form is `import M` in the header plus `open M in <command>`
+  in the body; `open import` never takes `in`. To confine an open to a namespace body, use
+  a plain `open M` there (block-scoped, §1.4).
+* **`private`.** `open import M` does not expose M's private names; the privacy check is
+  unchanged (§5.1).
+* **Ambiguity.** Two `open import`s (or an `open import` and a file-top `open`) that
+  provide the same name are ambiguous at the use (`ambiguous-name`), naming both. The
+  import itself does not report ambiguity; only the use does.
+* **Why it earns its syntax.** With leaf aliases gone, a file has three choices: fully
+  qualify (`Scry.CstStore.x`), `open import M` in the header (short names, file scope), or
+  `open M` in a body (short names, block scope). For a file that uses M's names at all,
+  `open import` is the only header-level way to avoid both full paths and a separate
+  `open` line. **155 files / 423 importer-module edges** use at least one imported name;
+  **120 files / 193 edges** use a *bare* name (the ones that cannot be fully qualified
+  without a rewrite). Those 155 files would want the shorthand; the 120 are the ones for
+  which it is close to mandatory. A conservative token scan (names of four or more
+  characters, common words removed) gives 107 files / 138 edges, so the honest range is
+  **107–155 files**.
 
 ### 1.8 Instances
 
@@ -276,11 +369,12 @@ declaration, in `prefixDeclName` and in the anonymous-instance base name (§5.3)
 | Lean | Wiz | why |
 |---|---|---|
 | no implicit file namespace | module path is the default namespace | the proposal; this is what removes `Msg`/`Settings`/`main` collisions |
-| `_root_` | `__root__` | the spelling requested and used by the plan |
-| `open` scoped to the enclosing section/namespace | file-scoped from the line on | Wiz has no `section`; the file is the module; 13t already ships and tests this |
+| `_root_` | `__root__` | the requested spelling |
+| `open` scoped to the enclosing section/namespace | block-scoped to the enclosing `namespace`; file-scoped at top | Wiz has no `section`; the file is the module. Now matches Lean's block scope. |
 | `section`, `variable` | not proposed | Wiz has no section variables; `namespace` is enough |
 | `scoped` notation | deferred; `local` is module-scoped | parser-table work, not needed by the library |
-| `import` brings names at full names | same, plus a direct import's leaf alias | the `CstStore.lineIndexGo` spelling in the brief; a leaf alias is cheaper and safer than suffix search |
+| `import` brings names at full names | same, with **no** leaf alias | the decided rule; `open import` is the shorthand |
+| `open … in` | not in v1; `open import` is a separate header command | imports are header-only, so an import cannot be command-scoped |
 
 Everything else — relative `namespace`, `__root__`, aliases, ambiguity as an error,
 `private` per module, global instance search — is Lean's behaviour.
@@ -337,27 +431,28 @@ lines of Wiz.
 
 | class of written name | declarations | files | what the default prefix makes it | migration |
 |---|---:|---:|---|---|
-| `bare` (`def f`) | 540 | 70 | `M.f` (68 Prelude names stay root) | rename or `open` |
+| `bare` (`def f`) | 540 | 70 | `M.f` (68 Prelude names stay root) | rename or `open import` |
 | `exact-module` (`def M`) | 16 | 16 | `M.M` | `__root__` the type |
 | `exact-leaf` (`structure Pipe` in `Hdl.Pipe`) | 1 | 1 | `Hdl.Pipe.Pipe` | `__root__` or keep nested |
 | `module-prefixed` (`def M.f`) | 1,026 | 40 | strip `M.` → `M.f` (**same name**) | mechanical, no rename |
 | `first-prefixed` (`def Hdl.f` in `Hdl.Core`) | 2,752 | 62 | `Hdl.Core.f` | rename |
 | `leaf-prefixed` (`def Apb.f` in `Hdl.Apb`) | 801 | 21 | `Hdl.Apb.f` | rename |
-| `other-dotted` (`def Fe.f` in `Feral`) | 3,621 | 74 | `Feral.Fe.f` or a root extension | split (§3.2) |
+| `other-dotted` (`def Fe.f` in `Feral`) | 3,621 | 74 | owner-local or shared family | §3.3 |
 | **total** | **8,757** | **157** | | |
 
 **8,217 of the 8,757 (94 %) are already dotted, in 152 files** — the five trees. The
-self-hosted tree adds 136 dotted declarations (`8,353` in the six trees). That is the
-migration. The other trees: `selfhost/` 2,396 declarations in 12 files; `examples/` 2,482
-in 106; `drafts/` 407 in 56; 67 fixture files under `Tests/`, `editors/` and `examples/`
-that are registry-test evidence and must not be renamed.
+self-hosted tree adds 136 dotted declarations (`8,353` in the six trees). The other trees:
+`selfhost/` 2,396 declarations in 12 files; `examples/` 2,482 in 106; `drafts/` 407 in 56;
+67 fixture files under `Tests/`, `editors/` and `examples/` that are registry-test evidence
+and must not be renamed.
 
 Module graph: 170 distinct module names in 171 files; one duplicate name (`Main` in
 `selfhost/Main.wiz` and `tower/Main.wiz` — different packages, never loaded together); two
 prefix overlaps (`Web` vs `Web.Loom`, `Web` vs `Web.Widget` — a module name and a
 namespace may coexist, so these are legal, but the case-only `Web`/`Web.*` is the same
 latent case-insensitive-filesystem issue the old plan noted); 502 `import` lines to 115
-distinct targets; 56 modules never imported.
+distinct targets; 56 modules never imported. Under the fixed-header constraint the 502
+`import` lines are the complete graph (no macro can add an edge).
 
 ---
 
@@ -371,43 +466,36 @@ Under the rule, a `def Scry.lineIndexGo` in module `Scry.CstStore` is
 *intended* global prefix, not as a nested namespace. (The historical copy was in
 `Scry.CstStore`; today's is in `Scry.TaintCmd`.) The same applies to `Hdl.f` in
 `Hdl.Core`, `Apb.f` in `Hdl.Apb`, `Fe.f` in `Feral`, `Bits.f` in `BitBlast`, and the
-`List`/`Int`/`Bytes` extension families. A mechanical strip is not enough either: a
-declaration whose written prefix is a *different* concept (`Bits` in `BitBlast`) must not
-become `BitBlast.odd` unless the owner means to rename the family.
+shared families. A mechanical strip is not enough either: a declaration whose written
+prefix is a *different* concept (`Bits` in `BitBlast`) must not become `BitBlast.odd`
+unless the owner means to rename the family.
 
 ### 3.2 The three options, and the recommendation
 
 **Option A — one-off rewrite of every dotted declaration.** Strip the module's own path;
-rename the rest into the module namespace or a root family. Touches **8,217 declaration
-lines in 152 files** (five trees), plus every reference and **576 trust-ledger rows** (the
-60 module-prefixed, 68 cross-module-extension, 24 Prelude and 2 principal-type rows are
-name-preserving; see §3.3). It is the clean end state, but as a flag day it is
-unreviewable: one mistake in a family (`Bits`, `Bytes`, `File`) breaks a whole analysis
-or the HDL library, and the ledger diff is 576 rows with one shared reason.
+rename the rest into the module namespace or the owner's family. Touches **8,217
+declaration lines in 152 files** (five trees), plus every reference and **608 trust-ledger
+rows**. It is the clean end state, but as a flag day it is unreviewable: one mistake in a
+family (`Bits`, `Bytes`, `File`) breaks a whole analysis or the HDL library, and the
+ledger diff is 608 rows with one shared reason.
 
-**Option B — a temporary compatibility rule.** The brief's wording is "a name starting
-with the module's own prefix is absolute". A *text* rule of that shape does not work:
-`Scry.lineIndexGo` does not start with the module path `Scry.CstStore`, and `Bits.odd` in
-`BitBlast` does not start with `BitBlast`; making it "starts with the module's first
-segment" would also capture unrelated names in a module such as `Scry.CstStore`, and
-"any dotted name" would capture every new declaration that wants a nested namespace. A
-prefix heuristic is either too narrow or too broad.
-
-The safe form of B is a **generated allowlist**, not a text rule:
+**Option B — a temporary compatibility rule.** A text rule "a name starting with the
+module's own prefix is absolute" does not work: `Scry.lineIndexGo` does not start with the
+module path `Scry.CstStore`, and `Bits.odd` in `BitBlast` does not start with `BitBlast`.
+The safe form is a **generated allowlist**:
 `legacy-names.tsv` with one row per `(module, full name)`, generated from the current
 elaborator before the default prefix flips. A declaration whose written name is in the
 row set for its module is declared at that absolute name and emits a `legacy-name`
 warning; everything else gets the default prefix. A new legacy name is an error; an
-unused row is an error (the batch forgot to delete it); `--strict-names` makes the
-warnings errors. The allowlist is read by the elaborator, so its digest must be mixed
-into the module cache key (`Frontend.isoKey`, `Cache.moduleKeys`) or a stale artifact
-will disagree with a fresh run; alternatively, apply it as a source rewrite in
-`runFrontend.step` before elaboration, and the cache key is just the rewritten text.
+unused row is an error; `--strict-names` makes the warnings errors. The allowlist is read
+by the elaborator, so its digest must be mixed into the module cache key
+(`Frontend.isoKey`, `Cache.moduleKeys`), or apply it as a source rewrite in
+`runFrontend.step` before elaboration.
 
 *Size:* **8,757 rows / 157 files** for the five library/tool trees (11,153 / 169 with
-`selfhost`; every declaration, not only the dotted ones, so bare names are safe too);
-2,482 more for `examples/` if that root is checked under the same rule. **Day-one
-renames: zero. Day-one ledger changes: zero.**
+`selfhost`; every declaration, not only the dotted ones); 2,482 more for `examples/` if
+that root is checked under the same rule. **Day-one renames: zero. Day-one ledger changes:
+zero.**
 
 **Option C — `__root__` every legacy declaration.** Prefix the 8,217 dotted declarations
 with `__root__` (one token each, 152 files). Zero reference and ledger changes, but it
@@ -419,12 +507,9 @@ library.
 **Recommendation: B, then A in batches.** Start with the allowlist (zero behaviour
 change, all gates green), then migrate one module or one family per commit, deleting its
 allowlist rows. The end state is A's clean rule with a reviewable diff per batch. B is
-least surprising because the observable names do not move until a commit says they do;
-A as a flag day is least surprising only *after* the migration, and C never gets there.
-The allowlist is the only compatibility rule; when it is empty it is deleted, and
-`legacy-name` becomes an error.
+least surprising because the observable names do not move until a commit says they do.
 
-### 3.3 The batch rewrite rules and their counts
+### 3.3 The batch rewrite rules and the final counts
 
 Within a module batch, a declaration's written name is rewritten by the first applicable
 rule:
@@ -432,61 +517,113 @@ rule:
 | written name | rewrite | target | name preserved? | declarations | files |
 |---|---|---|---|---:|---:|
 | `M.f` (module path is a prefix) | strip `M.` | `M.f` | **yes** | 1,026 | 40 |
-| extends another module's type/namespace (`File.f` in `Handle`, `List.f` in `ListLemmas`) | `namespace __root__.P` + strip `P.`, **or** follow the owner's move (`namespace Sys.File`) | `P.f` or `Owner.P.f` | yes if root, no if the owner moved | 528 | 41 |
-| own type family (`Fe.f` in `Feral`, `File.f` in `Sys`, `U8Array.f` in `WordArray`) | `namespace P` + strip `P.` | `M.P.f` | no (rename) | 3,093 | 65 |
-| module's first/leaf segment (`Hdl.f` in `Hdl.Core`, `Apb.f` in `Hdl.Apb`, `Scry.f` in `Scry.TaintCmd`) | strip the segment | `M.f` | no (rename) | 3,553 | 83 |
+| owner-local family (`Fe.f` in `Feral`, `U8Array.f` in `WordArray`) | `namespace P` + strip `P.` | `M.P.f` | no | 2,659 | 56 |
+| prelude owner-local (`List.f` in `Prelude`) | `namespace __root__` | root | **yes** | 189 | 1 |
+| five-family extension preserved (`List.f` in `ListLemmas`, `Int.f` in `IntRing`) | `namespace __root__.P` | `P.f` | **yes** | 189 | 9 |
+| five-family extension moved (`Bits.f` in `BitVecAdd`/`BitVecShift`, `Bytes.f` in `Std`/`WordBytes`, `File.f` in `Handle`) | `namespace __root__.Owner.P` + strip | `Owner.P.f` | no | 56 | 5 |
+| other shared family kept root (`Bus.f`, `Circuit.f`, `Prog.f`, `Spi.f`, …) | `namespace __root__.P` | `P.f` | **yes** | 528 | 39 |
+| module's first/leaf segment (`Hdl.f` in `Hdl.Core`, `Apb.f` in `Hdl.Apb`, `Scry.f` in `Scry.TaintCmd`) | strip the segment | `M.f` | no | 3,553 | 83 |
 | principal type (`inductive Int` in `Int`, `structure Pipe` in `Hdl.Pipe`) | `__root__` the type | `Int`, `Pipe` | **yes** | 17 | 17 |
-| bare (`def f`) | none; it becomes `M.f` | `M.f` | no (rename), except Prelude | 472 | 60 |
+| bare (`def f`) | none; it becomes `M.f` | `M.f` | no, except Prelude | 472 | 60 |
 | Prelude (all 260) | `namespace __root__` around the file | root | **yes** | 260 | 1 |
-| selfhost (all 2,396) | `namespace __root__` per file, or a root flag until stage 4 | root | **yes** | 2,396 | 12 |
+| selfhost (all 2,396) | `namespace __root__` per file, or a root flag | root | **yes** | 2,396 | 12 |
 
-The classes overlap in files (a module can have several), so summing files is not
-meaningful. The declaration sums are disjoint except that Prelude's 192 dotted core
-names (`Nat.*`, `List.*`, …) sit in the 528 extension row and its 68 bare names in the
-bare row; count them once, in the Prelude batch. The dotted subset of the five trees is
-**8,217 in 152 files** (1,026 + 528 + 3,553 + 3,093 + 17). Of those, **1,026 + 528 + 17 =
-1,571 are name-preserving** (including Prelude's 192) and **3,553 + 3,093 = 6,646 are
-renames**. The 472 bare names (Prelude's 68 excluded) are renames; the 2,396 selfhost
-declarations stay root.
+The classes overlap in files (a module can have several). The disjoint partition is:
 
-For `def Scry.lineIndexGo` in `Scry/TaintCmd.wiz` the batch is the fourth row: rewrite to
-`def lineIndexGo` (target `Scry.TaintCmd.lineIndexGo`), replace `Scry.lineIndexGo` by
-`lineIndexGo` inside the module and by `TaintCmd.lineIndexGo` outside. That is a rename.
-If the owner wants the old spelling, the explicit alternative is
-`namespace __root__` around the file or `def __root__.Scry.lineIndexGo`; the allowlist
-keeps it until then.
+| class | declarations | files | renames? |
+|---|---:|---:|---|
+| module-prefixed (`M.f`) | 1,026 | 40 | no |
+| principal (`M` / `L`) | 17 | 17 | no |
+| first/leaf (`F.f`, `L.f`) | 3,553 | 83 | **yes** |
+| bare, non-Prelude | 472 | 60 | **yes** |
+| bare, Prelude | 68 | 1 | no |
+| owner-local family (`Fe.f` in `Feral`) | 2,659 | 56 | **yes** |
+| owner-local, Prelude (`List.f` in `Prelude`) | 189 | 1 | no |
+| five-family extension preserved (`List`/`Int`) | 189 | 9 | no |
+| five-family extension moved (`Bits`/`Bytes`/`File`) | 56 | 5 | **yes** |
+| other shared family kept root (`Bus`, `Circuit`, …) | 528 | 39 | no |
+| selfhost (all, frozen) | 2,396 | 12 | no |
+| **six trees** | **11,153** | **169** | **6,740** |
+
+The five-tree total is 8,757 (all except selfhost); the dotted subset of the five trees is
+**8,217 in 152 files** (everything except the 540 bare). Name-preserving dotted:
+1,026 + 17 + 189 + 189 + 528 = **1,949**; renaming dotted: 2,659 + 56 + 3,553 = **6,268**;
+bare: 472 rename + 68 Prelude. Five trees: **6,740 renames**, 2,017 name-preserving; six
+trees: **6,740 / 4,413**. The Prelude row (260) is the 68 bare + 189 owner-local + 3
+core-extension declarations, so count it once in batch 1.
+
+**Final numbers (before → after the four decisions).** The previous draft's 7,118 / 4,035
+double-counted the 245 `List`/`Int`/`Bits`/`Bytes`/`File` extensions as local renames while
+also keeping them at root; the clean owner split is below. The "before" column is that
+clean base, with decision 3 applied in the "after" column.
+
+| metric | before (clean base) | after decisions | delta |
+|---|---:|---:|---:|
+| declaration renames (six trees) | 6,684 | **6,740** | **+56** |
+| name-preserving | 4,469 | **4,413** | −56 |
+| dotted name-preserving | 2,005 | **1,949** | −56 |
+| shared extensions at root | 773 | **717** | −56 |
+| `Bits`/`Bytes`/`File` extensions moved | 0 | **56** | +56 |
+| ledger rows re-keyed | 608 | **608** | 0 |
+| bare declarations needing an open | 472 (floor) | **472 (floor)** | 0 |
+| importer edges needing an open | 502 (all imports) | **423 any-name / 193 bare** | — |
+| importer files needing an open | — | **155 any / 120 bare** | — |
+| `open import` users | — | **155 files / 423 edges** | — |
+
+The five-family move is 56 declarations (Bits 41, Bytes 8, File 7), **0 additional
+ledger rows**: the extension declarations have no trust rows, and the 18 `IO.Bytes` + 20
+`Sys.File` owner rows are already in the 608 (they are owner-local renames). The 32
+`MVar`/`Ref`/`Session`/`Handle`/`IO`/`Std` private/native ledger rows keep their names
+and are not re-keyed by this move.
+
+The old draft's **528 "extensions kept at root"** were the *other* shared families
+(`Bus`, `Circuit`, `Prog`, `Spi`, `Axi4`, …), not the five named families; the five
+families' 245 extensions were in the 3,093 owner-local bucket. Decision 3 moves 56 of
+those 245 (`Bits`/`Bytes`/`File`); the 189 `List`/`Int` extensions stay root, and the 528
+other families stay root. The 528 therefore does **not** become zero; the rename count
+rises by 56 from the five-family bucket.
+
+For `def Scry.lineIndexGo` in `Scry/TaintCmd.wiz` the batch is the first/leaf row: rewrite
+to `def lineIndexGo` (target `Scry.TaintCmd.lineIndexGo`), replace `Scry.lineIndexGo` by
+`lineIndexGo` inside the module and by `Scry.TaintCmd.lineIndexGo` outside (or `open
+import Scry.TaintCmd` in the importer's header). That is a rename. If the owner wants the
+old spelling, the explicit alternative is `namespace __root__` around the file or
+`def __root__.Scry.lineIndexGo`; the allowlist keeps it until then.
 
 ### 3.4 The files that must stay root
 
 * `lib/Prelude.wiz` (260 declarations) declares the language's vocabulary (`Nat`, `Bool`,
   `List`, `Option`, `String`, `Char`, the numeric classes). It is root by definition;
-  wrap it in `namespace __root__`. This is not a compatibility hack: the self-hosted
-  prelude's names are root, and `modCanonical` maps `IO`/`Std`/`Sys` to the embedded
-  prelude by a string match (`selfhost/Frontend.wiz`), so a `Prelude.Nat` would not be
-  the `Nat` every program and every test uses.
+  wrap it in `namespace __root__`. The self-hosted prelude's names are root, and
+  `modCanonical` maps `IO`/`Std`/`Sys` to the embedded prelude by a string match
+  (`selfhost/Frontend.wiz`), so a `Prelude.Nat` would not be the `Nat` every program uses.
 * `selfhost/*.wiz` (12 files, 2,396 declarations) are concatenated into one file with
   their imports dropped (`Wiz/Selfhost.lean`, "their imports dropped: they are
   concatenated"). The same text is elaborated as 12 modules and as one concatenated
   module; a per-module prefix would give the same declaration two names. The tree is
-  frozen (the old plan's hard rule) and stays root. Stage 4 may add
-  `namespace __root__` to each file so the intent is in the source; until the selfhost
-  frontend parses it, a root flag in the driver is the bridge.
+  frozen and stays root; stage 4 may add `namespace __root__` to each file, until then a
+  root flag in the driver is the bridge.
 * `lib/IO.wiz`, `lib/Std.wiz`, `lib/Sys.wiz` do **not** need root: their declarations are
   `IO.*`, `Std.*`, `Sys.*` and a single-segment module's own prefix is exactly the module
-  name, so they are in the name-preserving 1,026. (The self-hosted frontend canonicalises
-  those module names to its embedded prelude, a separate world; see §5.5.)
+  name, so they are in the name-preserving 1,026. The self-hosted frontend canonicalises
+  those module names to its embedded prelude, a separate world (§5.5).
+* `List` and `Int` are the two named families that do **not** move: `List`'s owner is
+  `Prelude` (root), and `Int`'s owner is the module `Int`, whose namespace is the
+  root-level `Int`. Moving them would mean `Prelude.List`/`Int.Int`; that is 189 extra
+  renames and breaks the core. Not adopted.
 * `scry/gen/C/Schema.wiz` (33 declarations) is generated by the `schema` command; change
-  the generator, not the checked-in file. It should emit the module-namespace form or
-  `namespace __root__`; the `schema-check` target is the gate.
+  the generator, not the checked-in file.
 * `web/framework/gen.wiz` and `web/widget/gen.wiz` (79 declarations) are generated by the
-  web build; change the generator and regenerate, or they will drift.
+  web build; change the generator and regenerate.
 
 ---
 
 ## 4. The migration in batches (the plan of record)
 
 Each row is one PR, independently landable and revertable. The allowlist shrinks by the
-batch's rows; a batch that leaves a stale row fails the name check.
+batch's rows; a batch that leaves a stale row fails the name check. **The order changed**
+after decision 3: the owner families (batch 4) must exist before the shared extensions
+that target them (batch 5).
 
 | batch | what | declarations | files | ledger rows re-keyed |
 |---|---|---:|---:|---:|
@@ -494,21 +631,25 @@ batch's rows; a batch that leaves a stale row fails the name check.
 | 1 | `namespace __root__` around `Prelude` and the 12 selfhost files | 2,656 | 13 | 0 |
 | 2 | name-preserving strip: `def M.f` → `def f` | 1,026 | 40 | 0 (60 rows already match) |
 | 3 | principal types: `inductive __root__.Int`, `def add` | 17 | 17 | 2 rows unchanged |
-| 4 | shared extensions: `namespace __root__.P`, strip `P.` | 528 | 41 | 0 (68 rows unchanged) |
-| 5 | own-type families: `namespace P`, strip `P.` | 3,093 | 65 | 493 |
-| 6 | first/leaf prefix renames: `Hdl.f` → `Hdl.Core.f`, `Scry.f` → `Scry.TaintCmd.f` | 3,553 | 83 | 66 |
-| 7 | bare names: qualify; add `open M` to importers | 472 | 60 | 17 |
-| 8 | examples, docs, tests, Lean strings, loaders | 2,482 + 309 refs | 106 + 67 sites | 0 |
-| 9 | delete the empty allowlist and the compatibility code | 0 | 0 | 0 |
+| 4 | **owner-local families**: `namespace P`, strip `P.` | 2,659 | 56 | 525 |
+| 5 | **five-family extensions under owner**: `namespace __root__.Owner.P` | 56 | 5 | 0 |
+| 6 | shared families kept root: `List`/`Int` (189) + other (525; three Prelude rows are in batch 1) | 714 | 46 | 0 (32 private/native rows unchanged) |
+| 7 | first/leaf prefix renames: `Hdl.f` → `Hdl.Core.f`, `Scry.f` → `Scry.TaintCmd.f` | 3,553 | 83 | 66 |
+| 8 | bare names + `open import` in importer headers | 472 | 60 | 17 |
+| 9 | examples, docs, tests, Lean strings, loaders | 2,482 + 309 refs | 106 + 67 sites | 0 |
+| 10 | delete the empty allowlist and the compatibility code | 0 | 0 | 0 |
 
-The programme touches the same 11,153 declarations (six trees) and 730 ledger rows, but
-no single PR is a flag day. The batch rows are a work breakdown, not a partition:
-Prelude's 260 declarations are counted in batch 1 and are also a subset of the class
-table's bare/other-dotted rows, so do not add the rows to a total. Batches 2–7 are
-independent once 1 lands; do 2 and 4 first (they are name-preserving and prove the
-machinery), then 3, then 6, 5, 7, 8. Batch 5's 493 ledger rows are the review bottleneck
-(Sys 108, WordArray 93, Word 78, Feral 70, IO 32, WordMap 25, …; Prelude's 20 are root
-and unchanged); split it by module if review bandwidth is tight.
+Batch 4 creates the owner namespaces (`Feral.Fe`, `WordArray.U8Array`, `IO.Bytes`,
+`Sys.File`, `BitBlast.Bits`); batch 5's extensions target them; batch 6 keeps the other
+shared families at root; batch 7 is the flat `Hdl.*`/`Scry.*` renames; batch 8 uses
+`open import` and full qualification for the bare names. Batches 2, 3, 4, 6 and 7 are
+independent once 1 lands; 5 depends on 4; 8 depends on the parser (stage 1/2) and on the
+owner names from 4/5; 9 is the tree-wide cleanup.
+
+The batch rows partition the 11,153 declarations (Prelude's 260 are in batch 1; the class
+table above also lists them in its Prelude row). Batch 4's 525 rows are the review
+bottleneck (Sys 128, WordArray 93, Word 78, Feral 70, IO 48, Std 34, WordMap 25,
+Intern 16, …); split it by module if review bandwidth is tight.
 
 ---
 
@@ -532,30 +673,40 @@ The resolver must therefore try the private kernel name for each candidate full 
 This matters for every private declaration once modules have a default prefix: today
 there are **24 private lines in 7 files** (`Handle`, `IO`, `MVar`, `Ref`, `Region`,
 `Session`, `Word`, in `lib/` and `scry/src/`) plus the private `mk`/extern forms.
+`open import M` does not expose M's private names; `private` is still module-private.
 Semantics: unchanged; messages may print the full private name (Lean does), so strip the
 current module's prefix for display if the tests are noisy.
 
-### 5.2 `import` — brings the namespace, not an open
+### 5.2 `import` — the header, full names, no alias
 
-Verdict: **`import M` makes `M.x` available (transitively, as today) and registers the
-leaf alias for a direct import; it does not make `x` unqualified.** `open M` is the
-separate, explicit operation. This is Lean's split, with one convenience: the leaf alias.
+Verdict: **`import M` is a header command that makes `M.x` available (transitively, as
+today); it brings no short name and no leaf alias. `open import M` is the header
+shorthand for import + file-scope open; `open M` is the body-scoped form.**
 
 What changes for today's code: a declaration that was bare and used unqualified from
-another module is now `M.name`, so the importer needs `open M` (or a qualification). The
-migration adds `open M` where a file used M's bare names; the upper bound is the number
-of import edges, **502**, and the declaration count is **472 bare names in 60 files**
-(Prelude's 68 excluded). Names that are already dotted at the owner (`M.f`, `Scry.f`,
-`Bits.f`) are not affected by `import` at all; they are the rename batches.
+another module is now `M.name`; the importer either writes `M.name`, adds `open import
+M` to its header, or adds a body `open M`. The counts:
 
-Two edge cases to decide in review:
-
-* **Duplicate leaves.** `Main` is the only one today (2 files). Only the full path is
-  available; a `Main.x` use is an ambiguity error. Do not auto-pick.
-* **Transitive aliases.** A direct import gets the leaf alias; a module visible only
-  through another import does not. If a file needs `CstStore.x` for a module it does not
-  import directly, it adds `import Scry.CstStore` or `open Scry.CstStore as CstStore`.
-  This keeps the alias table small and predictable.
+* **155 files / 423 importer-module edges** use at least one imported name (the set that
+  may want `open import`); **120 files / 193 edges** use a bare name (the set for which a
+  qualification is a rewrite, not just a spelling change).
+* **3,567 bare-name use sites** (1,923 excluding Prelude's root names) are the actual
+  occurrences; a conservative token scan gives 107 files / 138 edges.
+* **No leaf aliases**: the 801 leaf-prefixed declarations (already in the 3,553 rename
+  column) have no alternative short spelling. Every external use is `M.L.f`, an `open
+  import M` in the header, or a body `open M`; they add no declaration renames, but their
+  importers are in the 423-edge / 155-file open set.
+* Block-scoped `open` does **not** multiply the import count: `open import` is header-only
+  and file-scoped, so it covers every namespace body in the file. A body `open X` is a
+  separate namespace-scoped open; it ends at the enclosing `end`, and a sibling body
+  needs its own. The migration's bodies are 56 owner-family files + 5 shared-owner files +
+  13 root files (overlapping), so at most one body `open` per block that opens a namespace;
+  that is independent of the 155 import files.
+* Duplicate leaves (`Main`) are no longer an alias ambiguity; they are a module-name
+  concern for the two packages, which never load together.
+* Transitive imports: a module visible only through another import is usable at its full
+  name; it gets no short spelling unless the file imports it directly and adds `open
+  import`.
 
 ### 5.3 Instances — global, unchanged
 
@@ -564,26 +715,26 @@ Verdict: **instance search is unaffected.** `Wiz/Elab/Class.lean` filters
 looks at the instance's name or a namespace. `local instance` is module-scoped through
 `localInsts`. The model only changes the *name* an instance is declared under: a named
 instance in `M.N` is `M.N.name`; an anonymous one gets `M.N.inst<Class>…`
-(`Elab/Command.lean`, the `base` computation). That removes the last class of instance
-name collisions. Today: **191 `instance` commands, 0 `local instance`**. No breaking
-change to resolution; names change only where a module is migrated.
+(`Elab/Command.lean`, the `base` computation). Today: **191 `instance` commands, 0 `local
+instance`**. No breaking change to resolution; names change only where a module is
+migrated.
 
 ### 5.4 Trust ledger — the `module` column already is the namespace
 
 Verdict: **no schema change; the `module` column is exactly the module path, which is now
-the default namespace.** The `declaration` column should become the fully qualified
-name (`Feral.Fe.appE`, `Scry.TaintCmd.lineIndexGo`), so a row identifies a constant even
-if a later move changes the module. The key remains `(module, declaration, item)`; a
-rename is a re-key and needs `scripts/trust-ledger.sh --update --reason ...`, as the
-ledger rules require ("a rename is a new trust claim").
+the default namespace.** The `declaration` column becomes the fully qualified name
+(`Feral.Fe.appE`, `Scry.TaintCmd.lineIndexGo`), so a row identifies a constant. The key
+remains `(module, declaration, item)`; a rename is a re-key and needs
+`scripts/trust-ledger.sh --update --reason ...` ("a rename is a new trust claim").
 
-Numbers: **730 rows in 41 modules**. 60 rows are module-prefixed (name-preserving), 68
-are cross-module extensions kept at root (name-preserving), 24 are Prelude's (root,
-unchanged) and 2 are principal types kept at root (unchanged); **576 rows are re-keyed
-over the whole programme** (51 first-prefixed, 15 leaf-prefixed, 493 own-family, 17
-bare). Batches 2–4 re-key nothing; batch 5 re-keys 493; batch 6 re-keys 66; batch 7
-re-keys 17. The ledger also drives the `native` test group; the `--update` run belongs in
-the same PR as the batch, with the reason naming the batch.
+Numbers: **730 rows in 41 modules**. **608 rows re-key** (51 first-prefixed, 15
+leaf-prefixed, 525 owner-local, 17 non-Prelude bare); **122 stay**: 60 module-prefixed, 2
+principal, 24 Prelude, 4 root core extensions, 32 private/native rows that keep their
+names. The five-family move adds **0** rows: the 56 extension declarations have no trust
+rows, and the 18 `IO.Bytes` + 20 `Sys.File` owner rows are already in the 525. Batch 4
+re-keys 525; batch 7 re-keys 66; batch 8 re-keys 17; batches 2, 3, 5, 6 re-key nothing
+(batch 3's 2 rows and batch 6's 32 rows are unchanged). The exact set is produced by
+`--update`; the `native` test group is the gate.
 
 ### 5.5 Self-hosted frontend — the flat table must be re-keyed
 
@@ -594,9 +745,9 @@ files stay root.** The table is flat (`Scope.globals : StrMap Nat`, keyed by ker
 * `Globals.declName`/`Globals.add` prefix a non-private declaration with the current
   namespace (`Scope.cur` + any `namespace` prefix); `Globals.ind`/`addInd` do the same for
   types; `Globals.setModule` (`modRunBody`) sets the default prefix.
-* `Scope.lookupExact` tries the prefixed name first, then the root, then opens; `privName`
-  uses the full name (`_private.M._0.M.N.x`) to match the host; `privSplit`/`privBase`
-  must accept a dotted base (the `Kernel.wiz` `show` and the "private to module" message).
+* `Scope.lookupExact` tries the prefixed name first, then the root, then the current
+  block's opens; `privName` uses the full name (`_private.M._0.M.N.x`) to match the host;
+  `privSplit`/`privBase` must accept a dotted base.
 * `Scope.declaredIn` can stay keyed by `(module, source name)`; duplicate detection is
   unchanged.
 * `modCanonical` (IO/Std/Sys → Prelude) and the embedded `preludeText` stay root; the
@@ -606,6 +757,10 @@ files stay root.** The table is flat (`Scope.globals : StrMap Nat`, keyed by ker
   (or keeps the driver's root flag). Applying the default prefix to them blind would give
   the same declaration two names, because `Wiz/Selfhost.lean` concatenates the files with
   their imports dropped.
+* Block-scoped `open` is a `nsStack` change in the selfhost too: an entry saves the open
+  list as well as the prefix, and `end` restores it. `open import` is header-only; the
+  selfhost's `modImportsAt` already scans the header, so it can read the imports (and
+  `open import` is a header entry) without elaboration.
 
 ---
 
@@ -614,61 +769,81 @@ files stay root.** The table is flat (`Scope.globals : StrMap Nat`, keyed by ker
 ### 6.1 Grammar
 
 ```text
-command.namespace := "namespace" ident                      (namespace / open / as are non-reserved)
-command.open      := "open" ident ["as" ident]
-command.end       := "end" [ident]                          (precedence 0, below a mutual body)
+command.import     := "import" ident                              (header only)
+command.openImport := "open" "import" ident                       (header only)
+command.namespace  := "namespace" ident                           (namespace / open / as are non-reserved)
+command.open       := "open" ident ["as" ident]                   (body only)
+command.end        := "end" [ident]                               (precedence 0, below a mutual body)
 ```
 
 `__root__` needs no grammar rule: it is an identifier (`[A-Za-z_][A-Za-z0-9_'.]*`,
 `Wiz/Parser/Token.lean`), and the resolver/`prefixDeclName` interpret a leading segment.
-`namespace` and `open` stay usable as identifiers (13t); `end` was already reserved by
-`mutual`. `end`'s precedence 0 keeps `mutual … end` closing at its own `end` (13t).
+`namespace` and `open` stay usable as identifiers; `end` was already reserved by `mutual`.
+`end`'s precedence 0 keeps `mutual … end` closing at its own `end`.
+
+The header is a grammar phase: zero or more `import`/`open import` commands, then the
+body. A later `import` or `open import` is `import-not-in-header`; a syntax extension
+cannot produce either command (the external constraint).
 
 ### 6.2 Examples
 
 ```wiz
 -- module Scry.CstStore
+import Prelude
+import Nat
 def lineIndexGo (n : Nat) : Nat := n           -- Scry.CstStore.lineIndexGo
 def __root__.version : Nat := 1                -- version
 namespace Internal                             -- Scry.CstStore.Internal
 def scratch : Nat := lineIndexGo 0             -- Scry.CstStore.Internal.scratch
 end Internal
-namespace __root__.List                        -- the shared List family
-def map2 (f : Nat → Nat) (xs : List Nat) : List Nat := xs
-end List
 ```
 
 ```wiz
 -- another file
 import Scry.CstStore
-def use : Nat := CstStore.lineIndexGo 0        -- leaf alias of the direct import
-open CstStore                                  -- lineIndexGo unqualified from here
-def use2 : Nat := lineIndexGo 0
-open __root__.List as L                        -- L.map2, nothing unqualified
+open import Scry.CstStore                      -- header, file-scoped
+def use : Nat := lineIndexGo 0                 -- Scry.CstStore.lineIndexGo
+def use2 : Nat := Scry.CstStore.lineIndexGo 0  -- full path, always
+-- CstStore.lineIndexGo                        -- no leaf alias
+namespace Inner
+open Scry.CstStore                             -- body-scoped: ends at `end Inner`
+def use3 : Nat := lineIndexGo 0
+end Inner
+-- def use4 : Nat := lineIndexGo 0             -- qualify or reopen
+```
+
+```wiz
+-- lib/Handle.wiz, extending Sys.File
+import Sys
+namespace __root__.Sys.File
+def withOwned (f : File) : File := f
+end File
 ```
 
 ### 6.3 Errors
 
 | code | when |
 |---|---|
-| `ambiguous-name` | an unqualified name has two distinct candidates (two opens, or an open and a declaration); an aliased qualified name has two distinct targets |
+| `ambiguous-name` | an unqualified name has two distinct candidates (two opens, an open and a declaration, two `open import`s); an aliased qualified name has two distinct targets |
 | `unclosed-namespace` | a `namespace` with no `end`, reported at the `namespace` |
 | `stray-end` | `end` with no open namespace, or `end X` that does not name the innermost |
-| `unknown-namespace` | `open X` where no `X` exists (new) |
-| `root-name` | `__root__` not as the first segment; a declaration named exactly `__root__` (new) |
-| `namespace-repeats-module` | `namespace M` inside module `M`; a warning, ignored (new) |
-| `legacy-name` | a declaration uses an allowlist row; a warning during migration, an error under `--strict-names` |
+| `unknown-namespace` | `open X` where no `X` exists |
+| `root-name` | `__root__` not as the first segment; a declaration named exactly `__root__` |
+| `namespace-repeats-module` | `namespace M` inside module `M`; a warning, ignored |
+| `import-not-in-header` | an `import` or `open import` after the header (new) |
+| `open-import-in` | `open import M in …` (new; no such form) |
+| `legacy-name` | a declaration uses an allowlist row; a warning, or an error under `--strict-names` |
 
 ---
 
 ## 7. Staged implementation order
 
-The parser → elaborator → import/reference → selfhost → migration order the brief asks
-for. The 13t namespace implementation (not on master) already contains the parser
-commands, `Globals.namespacePrefix`, `resolveName`, `prefixDeclName`, `nsStack`,
-`atModuleStart`, `checkUnclosedNamespaces`, and the host tests; stages 1–2 are mostly a
-delta on it (the initial prefix, `__root__`, relative `namespace`/`open`), not a rewrite.
-If 13t has not merged, stages 1–2 must land it first.
+The parser → elaborator → import/reference → selfhost → migration order. The 13t
+namespace implementation (not on master) already contains the parser commands,
+`Globals.namespacePrefix`, `resolveName`, `prefixDeclName`, `nsStack`, `atModuleStart`,
+`checkUnclosedNamespaces`, and the host tests; stages 1–2 are mostly a delta on it (the
+initial prefix, `__root__`, relative `namespace`/`open`, block scope, no aliases, `open
+import`), not a rewrite. If 13t has not merged, stages 1–2 must land it first.
 
 ### Stage 0 — baseline and allowlist (no behaviour change)
 
@@ -681,54 +856,59 @@ that root is enabled).
 
 ### Stage 1 — parser (`Wiz/Parser/Builtin.lean`, `Wiz/Core/ErrorCode.lean`)
 
-`command.namespace`, `command.open`, `command.end` (precedence 0); `nsStack` in
-`CommandState`; unclosed/stray/mismatch errors; `namespace`/`open`/`as` non-reserved;
-`__root__` accepted by `ident` with no change. **Gate:** `=parser`/`=language`,
-`Tests/Groups/Namespace.lean` (host), `docs/error-codes.md` rows.
+`command.namespace`, `command.open`, `command.end` (precedence 0), `command.openImport`;
+the header phase (`import`/`open import` first; `import-not-in-header`, `open-import-in`);
+`nsStack` in `CommandState`; unclosed/stray/mismatch errors; `namespace`/`open`/`as`
+non-reserved; `__root__` accepted by `ident` with no change. **Gate:** `=parser`,
+`=language`, `Tests/Groups/Namespace.lean` (host), `docs/error-codes.md` rows.
 
 ### Stage 2 — elaborator (`Wiz/Core/Term.lean`, `Wiz/Elab/Command.lean`, `Wiz/Elab/Term.lean`)
 
-Add `Globals.namespacePrefix`, `opens`, `aliases`; `resolveName` with `__root__`,
-relative `namespace`, relative-then-root-then-alias `open`, ambiguity; `prefixDeclName`
-with `__root__` and the `namespace-repeats-module` warning; private kernel names from the
-full name; `mutual`, type self-references, anonymous instance names; route `#check`,
-`#print axioms`, `builtin`, `extern`, `app_unexpander`, `derive` through `resolveName`;
-`endModule` resets user opens and the prefix. Leave the initial prefix `""` in this
-stage, so every existing test still passes. **Gate:** `=namespace`, `=language`,
-`=private`, `=elab`, `=modules`.
+Add `Globals.namespacePrefix`, `opens` (block-scoped, saved/restored in `nsStack`),
+`open import` (header, file-scoped); `resolveName` with `__root__`, relative `namespace`,
+relative-then-root `open`, ambiguity; `prefixDeclName` with `__root__` and the
+`namespace-repeats-module` warning; private kernel names from the full name; `mutual`, type
+self-references, anonymous instance names; route `#check`, `#print axioms`, `builtin`,
+`extern`, `app_unexpander`, `derive` through `resolveName`; `endModule` resets user opens
+and the prefix. Leave the initial prefix `""` in this stage, so every existing test still
+passes. **Gate:** `=namespace`, `=language`, `=private`, `=elab`, `=modules`.
 
 ### Stage 3 — import and reference resolution (`Wiz/Frontend/Frontend.lean`, `Wiz/Module.lean`, `Wiz/Cache.lean`, `Wiz/Query.lean`, `Wiz/LSP.lean`, `Wiz/Format.lean`)
 
-Set `namespacePrefix := m` at module start (`atModuleStart`); register direct-import leaf
-aliases (preserve them across `endModule`; reset user `open`s); root flags for `Prelude`
-and the self-hosted tree; the allowlist lookup; the cache digest; completion/hover show
-full names and offer the leaf alias; `Module.nameOf`/`roots` unchanged. **Gate:**
-`=modules`, `=cache`, the scry groups, `=native` (the ledger), the language server's
-`=lsp`/`=grail` groups.
+Set `namespacePrefix := m` at module start (`atModuleStart`); **no leaf aliases**;
+`open import` headers become the file-scope open set; root flags for `Prelude` and the
+self-hosted tree; the allowlist lookup; the cache digest. **The header rule makes this
+stage cheaper:** `Module.importsOf` is exact, so the import graph, the migration graph and
+`--reachable` in the collision checker are read from headers without elaborating; no
+import-alias state is carried through elaboration. Completion/hover show full names and
+offer `open import`; `Module.nameOf`/`roots` unchanged. **Gate:** `=modules`, `=cache`,
+the scry groups, `=native` (the ledger), `=lsp`/`=grail`.
 
 ### Stage 4 — self-hosted frontend (`selfhost/Frontend.wiz`, `selfhost/Tables.wiz`)
 
 `Scope`/`Globals` prefix, `declName`/`add`/`ind`, `lookupExact`, `privName`/`privSplit`,
-`modRunBody`/`setModule`; `namespace`/`open`/`end` commands and the same resolution
-order; regenerate the tables; the 13t selfhost cases. **Gate:** `=selfhost`,
-`=grail-selfhost`, the bootstrap fixpoint (this is the memory-heavy one; run it through
-the shared queue with its measured peak, not in the foreground).
+`modRunBody`/`setModule`; `namespace`/`open`/`end` commands with block scope, `open
+import` in the header, and the same resolution order; regenerate the tables; the 13t
+selfhost cases. **Gate:** `=selfhost`, `=grail-selfhost`, the bootstrap fixpoint (the
+memory-heavy one; run it through the shared queue with its measured peak).
 
-### Stage 5 — migration (batches 1–9 of §4)
+### Stage 5 — migration (batches 1–10 of §4)
 
 `namespace __root__` around Prelude and the selfhost; the name-preserving strips; the
-principal types; the shared families; the own-family nests; the first/leaf renames; the
-bare names with `open` insertion; examples/docs/tests/Lean strings/loaders; delete the
-allowlist. **Gate per batch:** the groups of the tree it touches, `=selfhost-libdiff`
-(compare the aggregate verdict, `regressed: 0`, not per-file `same`), the trust ledger
-with `--update --reason`, `scripts/check-names.py`, docs-style. Batch 8 also needs the
-docs-example re-elaboration (one cold run) and the `Tests/Groups` string updates.
+principal types; **owner-local families first** (batch 4, which creates `IO.Bytes`,
+`Sys.File`, `BitBlast.Bits`); **then the five-family extensions** (batch 5); the other
+shared families at root (batch 6); the first/leaf renames (batch 7); the bare names with
+`open import` (batch 8); examples/docs/tests (batch 9); delete the allowlist. **Gate per
+batch:** the groups of the tree it touches, `=selfhost-libdiff` (aggregate verdict,
+`regressed: 0`), the trust ledger with `--update --reason`, `scripts/check-names.py`,
+docs-style. Batch 9 also needs the docs-example re-elaboration and the `Tests/Groups`
+string updates.
 
 ### Stage 6 — remove the compatibility code
 
 Delete `legacy-names.tsv`, the allowlist branch in the resolver, and the `legacy-name`
-code; make an unknown name in a namespace position an error; update the stage doc
-(13t or a new 13u "module namespaces") and the old plan's archive note.
+code; make an unknown name in a namespace position an error; update the stage doc (13t or
+a new 13u "module namespaces") and the old plan's archive note.
 
 ---
 
@@ -736,38 +916,35 @@ code; make an unknown name in a namespace position an error; update the stage do
 
 | change | breaking? | affected declarations | files | ledger rows |
 |---|---|---:|---:|---:|
-| default prefix on bare names (cross-module use) | **yes**, unless the importer adds `open` | 472 | 60 | 17 |
+| default prefix on bare names (cross-module use) | **yes**, unless the importer adds `open import`/`open` | 472 | 60 | 17 |
 | first/leaf prefix renames (`Hdl.f` → `Hdl.Core.f`, `Scry.f` → `Scry.TaintCmd.f`) | **yes** | 3,553 | 83 | 66 |
-| own-type families (`Fe.f` → `Feral.Fe.f`) | **yes** | 3,093 | 65 | 493 |
-| principal types (`Int`, `Pipe`) via `__root__` | no (name preserved) | 17 | 17 | 2 unchanged |
-| module-prefixed strip (`M.f` → `def f`) | no (name preserved) | 1,026 | 40 | 0 |
-| cross-module extensions kept at root (`namespace __root__.List`) | no if kept root | 528 | 41 | 0 |
+| owner-local families (`Fe.f` → `Feral.Fe.f`, `Bits.f` in `BitBlast`) | **yes** | 2,659 | 56 | 525 |
+| five-family extensions moved (`Bits.f` → `BitBlast.Bits.f`, `Bytes.f` → `IO.Bytes.f`, `File.f` → `Sys.File.f`) | **yes** | 56 | 5 | 0 |
+| principal types (`Int`, `Pipe`) via `__root__` | no | 17 | 17 | 2 unchanged |
+| module-prefixed strip (`M.f` → `def f`) | no | 1,026 | 40 | 0 |
+| `List`/`Int` extensions kept root | no | 189 | 9 | 0 |
+| other shared families kept root (`Bus`, `Circuit`, `Prog`, …) | no if kept root | 528 | 39 | 0 (32 private/native rows unchanged) |
 | Prelude (root) | no if `namespace __root__` | 260 | 1 | 24 unchanged |
 | selfhost (root/frozen) | no if exempt | 2,396 | 12 | not in the ledger |
-| examples/docs/tests (strings, snippets, loaders) | **yes** (they are gates) | 2,482 + 309 `Scry.` strings | 106 + 67 loader sites | 0 |
+| no leaf aliases: importer headers gain `open import`/qualification | **yes** (source churn) | 155 files / 423 edges | 155 | 0 |
+| block-scoped `open` after an `end` | **yes** (body opens) | 193 edges / 120 files; 3,567 sites | 120 | 0 |
+| examples/docs/tests (strings, snippets, loaders) | **yes** (gates) | 2,482 + 309 `Scry.` strings | 106 + 67 loader sites | 0 |
 | `Main` duplicate (two packages) | potential module-name clash | 2 | 2 | 0 |
 | `C.Schema` generated | **yes** (change the generator) | 33 | 1 | 0 |
 | `web/*/gen.wiz` generated | **yes** (change the generator) | 79 | 2 | 0 |
-| `#check`/`#print` expected strings | **yes** (test output) | 309 `Scry.` mentions in `Tests/Groups` | — | 0 |
 
-**Nothing in the shipped library can adopt the default prefix without a rename** except
-the 1,026 module-prefixed declarations, the 528 extensions left at root, and the 17
-principal types kept root. That is the honest answer: 7,118 declarations (3,553 + 3,093 +
-472) change name somewhere in the programme, 576 ledger rows are re-keyed, and the
-allowlist is what makes the change landable one module at a time. The name-preserving
-part is 1,571 dotted declarations, Prelude's 68 bare names and the 2,396 selfhost
-declarations — 4,035 in all — which can move with no reference edits.
-
-If the scope is cut to **namespaces for new code only** (leave the whole current tree on
-the allowlist forever), the cost is zero renames and zero ledger changes, but the
-`Msg`/`Settings`/`main` class remains for every old module; that is the status quo with
-new syntax, not the fix the brief asks for.
+Final totals: **6,740 declarations rename**, **4,413 are name-preserving**, **608 of 730
+ledger rows re-key**; the five-family move adds 56 renames and 0 ledger rows; `open
+import` is wanted by **155 files / 423 edges** (bare: 120 / 193). If the scope is cut to
+"namespaces for new code only" (the allowlist forever), the cost is zero renames and zero
+ledger changes, but the `Msg`/`Settings`/`main` class remains for every old module; that is
+the status quo with new syntax, not the fix the brief asks for.
 
 ---
 
 ## 9. Method
 
-Counts were produced by scanning the branch point `c2efe881` with a one-pass script:
+Counts were produced by scanning the branch point `c2efe881`:
 
 * a declaration is a line at column 0 whose first keyword is `def`, `inductive`,
   `structure`, `class`, `coinductive`, `axiom`, `extern`, `foreign_type`, `glue`,
@@ -776,13 +953,23 @@ Counts were produced by scanning the branch point `c2efe881` with a one-pass scr
   members are at column 0 and are counted;
 * a module name is the path under its package root with `/` → `.` (`lib/`, `scry/src/`,
   `scry/gen/`, `selfhost/`, `tower/`, `web/`), the same rule as `Module.nameOf`;
-* the class of a name is by its written segments versus the module path: exact module,
-  module-prefixed, first-prefixed, leaf-prefixed, other-dotted, bare;
+* a family `P`'s owner is the module declaring the type/class/axiom/foreign_type `P`, or,
+  for a family with no type (`Bits`), the module declaring most `P.*` members (`BitBlast`,
+  167 of 208);
+* an "extension" is a `P.*` declaration in a module other than the owner; a five-family
+  extension is moved if the owner is not root (`Bits`, `Bytes`, `File`) and kept if the
+  owner is root (`List` in `Prelude`, `Int` in the module `Int`);
+* the import/open counts use the header `import` list and a token scan of the importer:
+  an edge is an `(importer, imported module)` pair with at least one occurrence of a
+  declared name of the module; the bare-name count restricts that to declarations with no
+  dot. The unfiltered counts (423 edges / 155 files; 193 / 120) are the plan's upper
+  bound; a conservative scan (names of four or more characters, common words removed)
+  gives 138 / 107. The 3,567 sites are token occurrences; 1,923 exclude Prelude's root
+  names;
 * the ledger counts are read from `.github/trust-baseline.tsv` (730 rows, 41 modules) and
-  classified by the same rule; a "cross-module extension" is a dotted name whose prefix
-  is a type/class/axiom declared in a different module, or a builtin core name
-  (`Nat`, `List`, `Int`, `Bytes`, `File`, …), and is kept at root when the owner does not
-  move it.
+  classified by declaration-name prefix; private/native kernel names are counted
+  separately (32 rows keep their names). The 608 re-key figure is the pre-`--update`
+  estimate; the exact set is produced by the ledger driver.
 
 The file/line counts include only the eight source trees; `Tests/`, `editors/` and
 `examples/grail-index` fixtures (67 files) are registry-test evidence and are out of
@@ -791,21 +978,26 @@ its target.
 
 ---
 
-## 10. Decisions wanted
+## 10. Decisions taken, and what remains
 
-1. **File-scoped `open`** (13t, shipped) versus Lean's block-scoped `open`. This plan
-   keeps file-scoped; changing it now costs one 13t test and the `nsStack` entry.
-2. **The leaf alias** for a direct import. This plan takes it; the alternative is Lean's
-   "no alias unless `open … as`", which would make `CstStore.lineIndexGo` in the brief
-   invalid.
-3. **The allowlist** as the migration mechanism, versus a flag-day rewrite. This plan
-   takes the allowlist; the cost is a temporary table and a cache-key input.
-4. **The shared families** (`List`, `Int`, `Bits`, `Bytes`, `File`): keep them at root
-   with `namespace __root__.P`, or move the family under its owner (`Sys.File`,
-   `WordArray.U8Array`) and rewrite the extensions. The former is name-preserving; the
-   latter is cleaner but re-keys the extension rows and every cross-module reference.
-   Decide per family, not globally.
-5. **`Scry.Tool.*` / `Data.*` moves** from the old plan: parked. They are compatible with
-   either choice above and are not a namespace prerequisite.
-6. **`scoped` notation**: defer (this plan) or schedule after stage 4. No current notation
-   depends on it.
+Taken 2026-11-19 (this revision):
+
+1. **`open` is block-scoped** to the enclosing `namespace`; at file top it reaches EOF.
+   The 13t "open outlives end" test is reversed.
+2. **No leaf aliases.** `import M` brings `M.*`; `open import M` is the header shorthand.
+3. **Shared families move under their owner.** `Bits` → `BitBlast.Bits`, `Bytes` →
+   `IO.Bytes`, `File` → `Sys.File`; `List`/`Int` stay root because their owners are root.
+4. **`open import M`** = `import M` + file-scope `open M`, header-only; no `in` form.
+5. **Imports are a fixed header**; the dependency graph and `--reachable` are syntactic.
+
+Remaining:
+
+* Whether the other 528 shared-family extensions (`Bus`, `Circuit`, `Prog`, `Spi`,
+  `Axi4`, …) should follow their owners in a later batch. The plan keeps them at root;
+  the move would add their 375 non-root declarations to the rename count and 0 new
+  ledger rows (their extension rows are not trust sources).
+* Whether a future `open … in` command is worth adding for namespace bodies; `open
+  import` never takes `in`.
+* `scoped` notation: defer; nothing in the tree depends on it.
+* `Scry.Tool.*` / `Data.*` moves from the old plan: parked; they are compatible with
+  either choice above.
