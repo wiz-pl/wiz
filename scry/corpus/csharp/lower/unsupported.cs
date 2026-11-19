@@ -33,14 +33,19 @@ public class OutOfScope : IEnumerable
 
 public class Control
 {
+    public static int Apply(Func<int, int> f) => f(1);
+
     public void Flow(object value)
     {
         static int Local(int x) => x + 1;
         Func<int, int> twice = x => x * 2;
+        Func<int, int> unused = x => x + 1;
+
+        value = Local(1) + twice(2) + Apply(x => x * 3);
 
         lock (this)
         {
-            value = Local(1) + twice(2);
+            Console.WriteLine(value);
         }
 
         goto done;

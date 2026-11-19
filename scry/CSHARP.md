@@ -116,7 +116,16 @@ disappears.
 | `null` | `cst nul`; `x?.M()`, `??`: a branch on `x == null` |
 | exceptions | `throw e` goes to the innermost `catch` dispatch block, else returns (`ret none`, an exceptional exit). Inside `try`, every statement boundary may branch (on a havoc'd bit) to the catch dispatch, so a definition made in the `try` reaches the handler; `catch (T e)` binds `e` to a havoc'd reference; `finally` is lowered on the normal and the catch paths (duplicated blocks). `using` is `try { … } finally { x.Dispose() }`. |
 | `if`/`while`/`do`/`for`/`foreach`/`break`/`continue`/`return` | as in C; `foreach (var x in e)` is `e.GetEnumerator()` + a loop on `MoveNext()`/`get_Current()` calls, so taint flows from the collection to `x` |
-| lambdas, delegates | slice 1: an opaque `fnptr "$lambda:<n>"` value + warning; later each lambda body becomes its own `Wil.Func` with captured locals as parameters |
+| `await e` | the value of `e` (the task is not dereferenced and no operand is havoc'd). The result's static type is the awaited `T` from `Task<T>`/`ValueTask<T>`, the C# value table, or a local's `awaitTy`; otherwise `?` (the value still flows). |
+| lambdas, delegates | a lambda assigned to a local or a field of the current class and invoked in the same method is lowered inline at the call site: its parameters are bound to the call's arguments and its result is the body's value (a block body gets an exit block for `return`). A lambda with no known call site is an opaque `fnptr "$lambda:<n>"` + a warning naming the site that would invoke it; a recursive lambda call warns and is havoc. |
+
+External calls that only affect a value are summarised once in `lib/Scry/Models.wiz`
+(`Scry.csExternals`): each entry gives the call's result type, the type `await` yields
+for an async call, and a note saying what the entry claims. The table is also a model
+(`FnModel`) with no effects, so the memory analysis does **not** report
+`unmodelled-external` for a call it has a value summary for; the C# rule pack still owns
+sources, sanitisers and sinks. A name outside the table (a NuGet type, an unknown BCL
+method) keeps an unknown result (`?`) and its `unmodelled-external` warning names it.
 
 ### Nullability (CWE-476 → `NullReferenceException`)
 
@@ -337,6 +346,8 @@ diagnostic.
   `tuple_expression` 30, target-typed `new()` 30, `out`/`ref` 19, property initialiser
   10, deconstruction 8, switch labels/arms 6, `with` 3, throw expression 4,
   `range_expression` 3, `initializer_expression` 3, `lock_statement` 2.
+  These are the pass's *starting* numbers; the value-flow pass's after numbers are in
+  §7.9 (the lambda row is split into named call sites there).
 
 ### 7.5 Fixes in this pass
 
@@ -372,12 +383,28 @@ diagnostic.
 * **Constructor initialisers** (`: base(…)`, `: this(…)`) evaluate their arguments and
   call the target constructor; unsupported members (indexer, operator, destructor,
   event with accessors, `#if`-guarded member) are each named.
+* **`await e`** is lowered to the value of `e` (the old first-child walk could pick the
+  `await` token and havoc it); the awaited type is read from a unit method's raw
+  `Task<T>`/`ValueTask<T>` return, a `Task<T>` local, or the C# value table.
+* **Lambdas assigned to a local or field and invoked in the same method** are lowered
+  inline at the call site (`invokeLambda`): parameters are bound to the arguments, an
+  expression body is the result, a block body gets its own `return` target. A lambda
+  with no known call site still warns, naming the callee it was passed to or the
+  local/field whose call site is unknown; a recursive lambda call warns and is havoc.
+* **C# external calls** with a known value effect are in
+  `lib/Scry/Models.wiz`'s `Scry.csExternals` table: result type, awaited type, and a
+  value-only model (no `unmodelled-external` row). `Process.GetCurrentProcess().StartInfo`
+  keeps its `ProcessStartInfo` type, so `Arguments` reaches the modelled sink; an
+  unknown external still warns with its name.
+* **A bare property reference of the current class** (`Status => IsRefusal ? …`) is a
+  `get_P(this)` call instead of `unknown name` havoc.
 
 ### 7.6 Still out of scope, with the warning each produces
 
 | construct | warning |
 |---|---|
-| lambda body | `lambda body not lowered: an opaque function value` |
+| lambda with an unknown call site | `lambda body not lowered: passed to CALLEE, whose call site is unknown` (a direct argument) or `lambda body not lowered: assigned to local NAME / field C.NAME but never invoked in this method, so its call site is unknown` |
+| recursive lambda call | `lambda NAME calls itself: the call site is the lambda body, which is not modelled: havoc` |
 | local function | `local function NAME not modelled: its body is not lowered and calls to it are unknown` |
 | indexer | `indexer_declaration member not modelled: no code is lowered for it` |
 | operator / conversion operator | `operator_declaration member not modelled: …` |
@@ -406,10 +433,12 @@ and ignored.
 
 ### 7.7 What runs today
 
-There is **no command on this branch that analyses a directory of `.cs` files**. C# is
-not wired into `scry taint`; `scry parse --stats` reads a spill. Two things exist:
+`scry cs PATH` (§8) walks a directory, `.csproj` or `.sln`/`.slnx`, parses every file
+with the native shim, lowers it with `Scry.CsLower`, runs the rule pack over the merged
+program and prints the coverage rows. The measurement harness from the coverage pass is
+still available:
 
-```
+```sh
 # 1. the measurement harness (this section's numbers; needs the native grammar)
 nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp   # once per checkout
 cd scry && wiz build tools/CsCover.wiz -I src -I ../lib -o build/cs-cover
@@ -417,14 +446,12 @@ cd scry && wiz build tools/CsCover.wiz -I src -I ../lib -o build/cs-cover
         #  search path, --cflags/--ldflags as `grail.local.wiz` lists them)
 cd .. && CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh DIR
 
-# 2. the test group (checked-in spills, no native build)
+# 2. the repository driver (coverage rows, findings and exit status)
+scry cs DIR --no-taint
+
+# 3. the test group (checked-in spills, no native build)
 ./.lake/build/bin/tests '=scry-csharp'
 ```
-
-A `scry cs PATH` driver (`scry/src/Scry/CsCmd.wiz`, which walks a directory,
-`.csproj` or `.sln`, prints per-file coverage rows and exits 3 when nothing could be
-analysed) is being added on the sibling branch `agent/cs-driver`; it is not part of
-this branch.
 
 ### 7.8 A known caveat: non-ASCII text
 
@@ -435,6 +462,44 @@ identifier after such a character is read shifted — `outcome` becomes `ome` �
 two files report `unknown name …` warnings for real locals. It is loud, not silent, but
 it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
 it is left as its own change because it is shared with C.
+
+### 7.9 Real-code value flow (2026-11-19)
+
+This pass was measured on the Nexus tree with the compiled `scry cs` — the driver
+itself, not a regex — and the `scry-csharp` group's three new fixtures. `--no-taint`
+stops after lowering, so the three categories below are lowering diagnostics; the
+finding count comes from the tainted `Crux.Api` run.
+
+| measurement | before | after | what remains |
+|---|---:|---:|---|
+| `await not modelled: havoc` (whole tree, `--no-taint`) | 0 | 0 | — |
+| `lambda body not lowered` (whole tree) | 25,124 | 25,118 | the count is nearly flat but no longer one opaque row: 852 method groups and every lambda now name the callee or the local/field whose call site is unknown |
+| `unknown name not modelled: havoc` (whole tree) | 19,189 | 16,229 | method groups, `is`-pattern designations on shapes we do not bind, and the byte/character caveat of §7.8 |
+| `unknown name not modelled: havoc` (`src/Crux.Api`) | 173 | 62 | the same categories, per file |
+| `lambda body not lowered` (`src/Crux.Api`) | 60 | 60 (29 named rows) | lambdas passed to LINQ/ASP.NET higher-order APIs; each row names the callee |
+| `unmodelled-external` (`src/Crux.Api`, taint) | 4,028 | 3,898 | NuGet/unresolved externals whose value effect is not in the table |
+| findings (`src/Crux.Api`, taint) | 0 | 0 | the pack's only rule is CWE-78 and these endpoints do not build a command line; the value-flow evidence is the three fixtures below |
+
+`await` was already lowered on the branch this work started from (the fix came with
+`24e0a3ab`, before the C# driver); the 38,457 figure in the originating report was
+measured with a pre-fix binary. This pass adds the waited-result type (a unit method's
+raw `Task<T>`/`ValueTask<T>`, a `Task<T>` local, or the value table) and keeps the
+fixture that fails if the operand is havoc'd again.
+
+The three corpus cases that would fail on a regression (they are findings, not just
+goldens):
+
+| fixture | construct | finding |
+|---|---|---|
+| `taint/cwe78-await-unsafe.cs` | `await` of an async unit method's result | `ProcessStartInfo.set_Arguments` arg 1 |
+| `taint/cwe78-lambda-unsafe.cs` | a captured `Func<string>` and an `Action<string>` whose body is the sink | `Process.Start` arg 0 |
+| `taint/cwe78-bcl-unsafe.cs` | `Process.GetCurrentProcess().StartInfo` (the BCL value table) | `ProcessStartInfo.set_Arguments` arg 1 |
+
+The whole-tree `--no-taint` run lowered 4,263 of 4,621 files (16 parse failures), the
+same set as the baseline (no throughput claim; the measurement is a correctness pass,
+not a benchmark). The coverage section grows from 348 to 4,061 rows because a warning
+that used to be one opaque construct now names the callee; that is the point of the
+change, not a regression in the count of analysed code.
 
 ## 8. The repository driver: `scry cs`
 
@@ -472,24 +537,25 @@ Measured on a real codebase (Nexus `src/Crux.Api`, 75 kept files):
 
 ```
 walk: 79 .cs file(s) before exclusions; 75 kept, 4 excluded by rule
-files: 75 found, 75 parsed, 57 lowered, 0 failed
-functions: 239 lowered
+files: 75 found, 75 parsed, 58 lowered, 0 failed
+functions: 240 lowered
 rules: scry/corpus/csharp/csharp.scry (4 rule(s))
 findings: 0 (error 0, warning 0, note 0)
-coverage: 25 row(s) — what was skipped or warned about
-  SEVERITY COUNT  CONSTRUCT                                   EXAMPLE
-  warning  2933   unmodelled-external                         Authentication/AuthenticatedPartner.cs:16:12
-  warning  205    await not modelled: havoc                   Dtos/TransactionDtos.cs:87:23
-  warning  168    unknown name not modelled: havoc            Dtos/SchemeIngressDtos.cs:16:31
+coverage: 143 row(s) — what was skipped or warned about
+  SEVERITY COUNT  CONSTRUCT                                            EXAMPLE
+  warning  88     is test not modelled: havoc                          Authentication/PartnerCredentialCache.cs:14:12
+  warning  62     unknown name not modelled: havoc                     Endpoints/CommunicationsWebhookEndpoints.cs:188:75
+  warning  48     field initialiser not modelled (starts as default)   Authentication/AuthenticatedPartner.cs:13:26
+  warning  12     lambda body not lowered: passed to ?.Select, whose call site is unknown Endpoints/AgentEndpoints.cs:97:90
   ...
-  note     4      excluded: obj/                              obj/Debug/net10.0/…AssemblyAttributes.cs
+  note     4      excluded: obj/                                       obj/Debug/net10.0/…AssemblyAttributes.cs
 ```
 
-The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
-in 311.8 s and about 4.1 GiB with `--no-taint`: 4 605 parsed, 4 250 lowered, 16 parse
-failures, 36 319 functions and 46 coverage rows. Taint dominates: Crux.Api took 219.8 s
-with taint and 2.0 s without, so a full tainted sweep of the tree is hours, not minutes,
-and is not attempted by default.
+The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) parsed and lowered
+with `--no-taint`: 4 605 parsed, 4 263 lowered, 16 parse failures, 36 334 functions.
+Taint dominates (the `src/Crux.Api` taint run is minutes; the whole tree is not
+attempted by default), so the default is the coverage-only pass; the `.cs` tree is a
+measurement input, not part of the test suite.
 
 `files found / parsed / lowered / failed` distinguishes native parsing from lowering:
 `failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered

@@ -116,7 +116,9 @@ def fixtures : List (String × String) :=
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
+   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
+   ("taint", "cwe78-await-unsafe"), ("taint", "cwe78-lambda-unsafe"),
+   ("taint", "cwe78-bcl-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -168,6 +170,7 @@ def requiredWarnings : List (String × String) :=
    ("unsupported", "delegate_declaration not modelled"),
    ("unsupported", "local function Local not modelled"),
    ("unsupported", "lambda body not lowered"),
+   ("unsupported", "passed to Demo.Unsupported.Control.Apply"),
    ("unsupported", "lock_statement not modelled"),
    ("unsupported", "goto_statement not modelled"),
    ("unsupported", "labeled_statement not modelled"),
@@ -309,8 +312,7 @@ def repoCoverage : IO Unit := do
   checkEq
     ("error 1 parse failure"
      ++ "|warning 3 unmodelled-external"
-     ++ "|warning 1 lambda body not lowered: an opaque function value"
-     ++ "|warning 1 query_expression not modelled: havoc"
+     ++ "|warning 1 lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
      ++ "|note 1 excluded: bin/"
@@ -414,7 +416,19 @@ def group : Group where
     { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-safe"
-        checkEq ([] : List String) fs }
+        checkEq ([] : List String) fs },
+    { name := "taint: CWE-78 through await (an async method's result reaches ProcessStartInfo.Arguments)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-await-unsafe"
+        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 through an invoked lambda (captured value and a sink in the body)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-lambda-unsafe"
+        checkEq ["command-injection Fixtures.LambdaShell.Run System.Diagnostics.Process.Start arg 0"] fs },
+    { name := "taint: CWE-78 through a modelled BCL call (Process.get_StartInfo -> set_Arguments)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-bcl-unsafe"
+        checkEq ["command-injection Fixtures.BclShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group
