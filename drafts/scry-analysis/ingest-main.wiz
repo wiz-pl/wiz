@@ -1,0 +1,61 @@
+import Sys
+import IO
+import Text
+import Scry.QuireGraph
+/-!
+# `scry-analysis`: the command form of an analysis file's ingestion (Quire)
+
+Build it once from the repository root:
+
+```
+wiz -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
+    build drafts/scry-analysis/ingest-main.wiz -o /tmp/scry-analysis
+/tmp/scry-analysis --file drafts/scry-analysis/analysis.wiz
+/tmp/scry-analysis drafts/scry-analysis/fixtures --graph /tmp/graph.quire
+```
+
+With no arguments it runs the declaration in `drafts/scry-analysis/analysis.wiz`.
+`--git` records a git commit instead of a tree hash. Exit 0 when the run's `ok` is true,
+1 on a failed ingest, 2 on a usage error. The same `Scry.G.ingestTree` is what the LSP
+action's `wiz.scry.ingest` would call; the revision manifest is the artifact the analysis
+checks.
+-/
+
+def ScryAnalysis.report (r : Scry.G.IngestResult) : IO Unit := do
+  IO.println (Scry.G.renderIngest r);
+  match r.ok with
+  | .true => Process.exit 0
+  | .false => Process.exit 1
+
+def ScryAnalysis.usage : IO Unit := do
+  IO.eprintln "usage: scry-analysis DIR --graph FILE [--git] | scry-analysis --file FILE"
+  Process.exit 2
+
+def ScryAnalysis.runFile (file : String) : IO Unit := do
+  r ← Scry.G.ingestSourceFile file;
+  match r with
+  | .ok x => ScryAnalysis.report x
+  | .error e => do
+    IO.eprintln (String.append "scry-analysis: " e);
+    Process.exit 1
+
+def main : IO Unit := do
+  args ← IO.args;
+  match args with
+  | [] => ScryAnalysis.runFile "drafts/scry-analysis/analysis.wiz"
+  | .cons "--file" (.cons file .nil) => ScryAnalysis.runFile file
+  | .cons root (.cons "--graph" (.cons dest .nil)) => do
+    r ← Scry.G.ingestTree root dest (String.append dest ".manifest.json") .false;
+    match r with
+    | .ok x => ScryAnalysis.report x
+    | .error e => do
+      IO.eprintln (String.append "scry-analysis: " e);
+      Process.exit 1
+  | .cons root (.cons "--graph" (.cons dest (.cons "--git" .nil))) => do
+    r ← Scry.G.ingestTree root dest (String.append dest ".manifest.json") .true;
+    match r with
+    | .ok x => ScryAnalysis.report x
+    | .error e => do
+      IO.eprintln (String.append "scry-analysis: " e);
+      Process.exit 1
+  | _ => ScryAnalysis.usage
