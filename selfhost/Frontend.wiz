@@ -6961,7 +6961,12 @@ def command (gs : Globals) (stx : Syntax) (sp0 : Option SpT) : Step :=
       | .false => match kids (kid stx 4) with
         | .cons _ (.cons tyStx _) =>
           let us := univParamsOf stx;
-          match defT gs (ES.withParams ES.empty us) cx0 (kids (kid stx 3)) tyStx (kid stx 6) (spKid sp 6) with
+          -- (the body may call the definition itself: a partial definition is already in
+          -- the globals as an axiom. `TCtx.fix` marks it, so a recursive call that
+          -- consumes a linear argument may have its result used at ω when the result has
+          -- no linear content: the linear fixpoint rule, `fixCallSafe`.)
+          let cxD := Cx.mk (TCtx.withFix empty (Globals.declName gs x)) (Globals.scope gs) .nil;
+          match defT gs (ES.withParams ES.empty us) cxD (kids (kid stx 3)) tyStx (kid stx 6) (spKid sp 6) with
           | .err m => errStep gs m
           | .ok ty0 v0 es0 => match finishElab gs es0 with
           | .err m => errStep gs m
@@ -6974,8 +6979,10 @@ def command (gs : Globals) (stx : Syntax) (sp0 : Option SpT) : Step :=
               match zonk es 0 v0 with
               | .none => errStep gs "could not infer an implicit argument"
               | .some v0z =>
-                -- (P2) with the proof markers the kernel requires, if it asks for them
-                match checkMarkingParams us v0z tyT with
+                -- (P2) with the proof markers the kernel requires, if it asks for them;
+                -- the body may be the linear fixpoint `x` (a recursive call's result may
+                -- be used at ω when it contains no linear content)
+                match checkMarkingParamsFix (Globals.declName gs x) us v0z tyT with
                 | .bad m => errStep gs m
                 | .good v =>
                   let gs1 := Globals.add gsI (.mk x us tyT v (inlineTm gsI v) (paramMask (kids (kid stx 3)))

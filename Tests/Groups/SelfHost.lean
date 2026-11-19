@@ -2714,6 +2714,36 @@ def selfHostGroup : Group where
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
+    { name := "the linear fixpoint: a recursive call's result may be used at ω when it contains no linear content, as in the Lean frontend", run := fun _ =>
+        selfhostAgrees
+          ("inductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
+           "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
+           "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
+           "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n")
+          [
+            -- the call's result is `Nat`: no linear content, so it may be copied
+            ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
+            ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
+            ("partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n", true),
+            ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
+             "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
+            -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
+            ("partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
+             "    let r := Cursor.optLen c';\n    match r with\n" ++
+             "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
+            -- the result contains `Cursor a`: copied at ω it would copy the cursor
+            ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)\n", false),
+            -- two calls on one handle, and a path that never calls it
+            ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
+            ("partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1\n", false)
+          ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
     { name := "`let () := u; b` and split: the Lean and the self-hosted compilers agree (B7)", run := fun _ => do

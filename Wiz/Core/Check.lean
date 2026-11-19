@@ -37,6 +37,11 @@ Two mutually recursive judgments, each also producing a **usage vector**:
     Γ ⊢ f ⇒ (x :q A) → B ⊣ U₁     Γ ⊢ a ⇐ A ⊣ U₂
     ──────────────────────────────── app
     Γ ⊢ f a ⇒ B[a/x] ⊣ U₁ + q·U₂
+    (the second summand is `U₂` instead when `a` is a saturated call of the fixpoint
+    being checked, it consumes a `1`-quantity argument, and its result type `A` contains
+    neither that argument nor its type: the linear fixpoint rule, `fixCallSafe`. The same
+    relaxation applies where a term is scaled by its context — `let`, `pair`, `split`,
+    `scase` — via `scaleUsage`.)
 
     Γ ⊢ T type   Γ ⊢ v ⇐ T ⊣ U₁   Γ, x :q T := v ⊢ b ⇐ A ⊣ (u :: U₂)   le u q
     ──────────────────────────────── let     (and the ⇒ version)
@@ -256,6 +261,12 @@ structure Ctx (R : Type) where
   Nothing runs unchecked: a partial definition's *body* is checked strictly
   (`addPartialImpl`), and it, not the witness, is the compiled code. -/
   witness : Bool := false
+  /-- the partial definition whose body is being checked (`addPartialImpl`): its recursive
+  calls are the **linear fixpoint**. A call that consumes a `1`-quantity parameter may
+  have its result used `ω` times when the result type contains neither that argument nor
+  its type ("consumed but not contained"): the call runs once, and a result with no
+  linear content can be duplicated. See `fixCallSafe`. -/
+  fixpoint : Option Name := none
 
 namespace Ctx
 
@@ -354,6 +365,84 @@ def methodUsage (ctx : Ctx R) (u : Usage R) : TCM (Usage R) :=
     match (u.zip ctx.names).find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
     | some (p, x) => throw (.other s!"a method may run any number of times, so it can't use {x} ({p} times): the rig has no unrestricted quantity")
     | none => pure u
+
+/-- Does the term `t` contain `target` as a syntactic subterm? `target` is a term at the
+top level and `t` is under `depth` binders, so the target is lifted past them. Types are
+erased, so this is a *syntactic* containment test: it never unfolds a definition. -/
+partial def termContains {R : Type} [BEq R] (target : Term R) (depth : Nat) (t : Term R) : Bool :=
+  t == target.lift depth ||
+    (t.forChildren (m := StateM Bool) (fun _ => pure ())
+      (fun k c => modify (fun b => b || termContains target (depth + k) c)) |>.run false).2
+
+/-- The result of peeling a call's arguments off the fixpoint's `Π` type: the arguments
+given to its `1`-quantity parameters, the (instantiated) types of those parameters, and
+the remaining type. -/
+structure FixCall (R : Type) where
+  /-- arguments applied to `1`-quantity parameters -/
+  args : List (Term R)
+  /-- their instantiated parameter types -/
+  tys : List (Term R)
+  /-- the remaining type (the call's result type when the call is saturated) -/
+  rest : Term R
+
+/-- Peel `args` off `ty`, collecting the arguments at `1`-quantity binders. `none` on an
+over-applied or malformed spine. -/
+partial def peelFix {R : Type} [BEq R] [One R] :
+    Term R → List (Term R) → List (Term R) → List (Term R) → Option (FixCall R)
+  | .pi _ _ (.qlit r) dom cod _, a :: rest, args, tys =>
+    if r == (1 : R) then peelFix (cod.instantiateAt 0 a) rest (a :: args) (dom :: tys)
+    else peelFix (cod.instantiateAt 0 a) rest args tys
+  | .pi _ _ _ dom cod _, a :: rest, args, tys =>
+    peelFix (cod.instantiateAt 0 a) rest args tys
+  | ty, [], args, tys => some ⟨args.reverse, tys.reverse, ty⟩
+  | _, _, _, _ => none
+
+/-- If `t` is a call of the fixpoint whose body is being checked (`Ctx.fixpoint`), peel
+its arguments and report the `1`-parameter positions. -/
+def fixCall? (ctx : Ctx R) (t : Term R) : Option (FixCall R) :=
+  match ctx.fixpoint with
+  | none => none
+  | some fn =>
+    let t := match t with | .ann inner _ => inner | t => t
+    let (head, args) := t.spine
+    match head with
+    | .const n us =>
+      if n != fn then none else
+      match ctx.globals.find? n with
+      | none => none
+      | some d => peelFix (d.type.instLevels d.levelParams us) args [] []
+    | _ => none
+
+/-- **The linear fixpoint rule ("consumed but not contained").** A recursive call that
+consumes a linear parameter may have its result used at `ω` when the result type contains
+neither the linear argument's value nor its type: the call runs once (so the linear value
+is consumed exactly once), and a result with no linear content may be copied or dropped.
+A partially applied call is refused (its closure may capture the linear value), and so is
+a result type that mentions the argument or its type. The test is syntactic (it never
+unfolds a definition): a type alias is not seen through, and a type that merely *could*
+hold the linear value through a definition the search does not chase (the body of a
+function type, say) is approximated by the type as written. -/
+def fixCallSafe (ctx : Ctx R) (t : Term R) (ty : VTy R) : Bool :=
+  match fixCall? ctx t with
+  | none => false
+  | some fc =>
+    if fc.args.isEmpty then false else
+    -- a partially applied recursive call returns a function value (a closure), which
+    -- may capture the linear argument: only a saturated call has a result we can copy
+    match whnf ty with
+    | .pi .. => false
+    | _ =>
+      let res := quote ctx.globals ctx.lvl ty
+      let targets := fc.args.map (fun a => quote ctx.globals ctx.lvl (ctx.eval a))
+        ++ fc.tys.map (fun A => quote ctx.globals ctx.lvl (ctx.eval A))
+      !(targets.any fun target => termContains target 0 res)
+
+/-- Scale a checked term's usage by `q`, except that a linear fixpoint call whose result
+type is "consumed but not contained" is charged once when `q` allows more than one use:
+the call is evaluated once even when its result is copied. `q = 0` still scales to 0, so
+a dropped call is rejected as before. -/
+def scaleUsage (ctx : Ctx R) (q : QPoly R) (t : Term R) (ty : VTy R) (u : Usage R) : Usage R :=
+  if QPoly.le (QPoly.const ((1 : R) + (1 : R))) q && fixCallSafe ctx t ty then u else q • u
 
 /-- For error messages only: is this `Σ` (a suffix of) a structure, i.e. does its chain
 of second parts end in a structure's marker tail (`structTailName`)? -/
@@ -625,12 +714,12 @@ partial def checkCore (ctx : Ctx R) (t : Term R) (ty : VTy R) : TCM (Usage R) :=
     let uv ← check (ctx.erasedAt q) val vty
     let ub ← check (ctx.define x q vty (ctx.evalAt val vty)) body ty
     let ub ← ctx.popUsageAt x q vty ub
-    pure (q • uv + ub)
+    pure (scaleUsage ctx q val vty uv + ub)
   | .pair a b, .sigma _ q A B _ => do
     let q ← qtyPoly ctx q
     let ua ← check (ctx.erasedAt q) a A
     let ub ← check ctx b (ctx.instArgAt A B a)
-    pure (q • ua + ub)
+    pure (scaleUsage ctx q a A ua + ub)
   | .tt, .unit _ => pure (Usage.zeros ctx.lvl)
   | .letUnit u b, _ => do
     let uu ← checkUnit ctx u
@@ -783,7 +872,9 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       -- argument with it: the argument is checked as in relevant mode)
       let actx := if ctx.proof && !ctx.isProofTy fty then { ctx with proof := false } else ctx
       let ua ← check (actx.erasedAt q) a dom
-      pure (ctx.instArgAt dom cod a, uf + q • ua)
+      -- (the linear fixpoint rule: a recursive call whose result type contains no linear
+      -- content is charged once even when its result is copied)
+      pure (ctx.instArgAt dom cod a, uf + scaleUsage ctx q a dom ua)
     | _ => throw (.notAFunction (ctx.showTerm f) (ctx.showVal fty))
   | .letE x q tty val body => do
     let q ← checkQty ctx q
@@ -796,12 +887,12 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       let (bty, ub) ← infer (ctx.define x q vty (suspend ctx.globals ctx.env val)) body
       let uv ← check ((if ctx.isProofTy bty then ctx else { ctx with proof := false }).erasedAt q) val vty
       let ub ← ctx.popUsageAt x q vty ub
-      pure (bty, q • uv + ub)
+      pure (bty, scaleUsage ctx q val vty uv + ub)
     else
     let uv ← check (ctx.erasedAt q) val vty
     let (bty, ub) ← infer (ctx.define x q vty (ctx.eval val)) body
     let ub ← ctx.popUsageAt x q vty ub
-    pure (bty, q • uv + ub)
+    pure (bty, scaleUsage ctx q val vty uv + ub)
   | .ann tm tty => do
     let _ ← checkType ctx tty
     let vty := ctx.eval tty
@@ -854,7 +945,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       let ub ← check ctx₂ b (Closure.inst ctx.globals mc (.pair vx vy))
       let ub ← (ctx.bind x (q * p) A).popUsageAt y q (Closure.inst ctx.globals B vx) ub
       let ub ← ctx.popUsageAt x (q * p) A ub
-      pure (Closure.inst ctx.globals mc (ctx.evalAt s sty), q • us + ub)
+      pure (Closure.inst ctx.globals mc (ctx.evalAt s sty), scaleUsage ctx q s sty us + ub)
     | _ => throw (.other s!"not a pair: {ctx.showTerm s}\n  has type: {ctx.showVal sty}")
   | .unit l => pure (.sort l, Usage.zeros ctx.lvl)
   | .empty l => pure (.sort l, Usage.zeros ctx.lvl)
@@ -1059,8 +1150,9 @@ stores data), so its eliminator can only target Prop")
     let vs := ctx.eval s
     let um ← check ctx m (scaseMethodTy ctx.globals l v vI vD vP vs (ctx.eval q))
     let _ ← check ctx i vI
-    let ux ← check (ctx.erasedAt qp) x (.mu l vI vD (ctx.eval i) vs none false)
-    pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + qp • ux)
+    let xt := .mu l vI vD (ctx.eval i) vs none false
+    let ux ← check (ctx.erasedAt qp) x xt
+    pure (vApp ctx.globals (vApp ctx.globals vP (ctx.eval i)) (ctx.eval x), um + scaleUsage ctx qp x xt ux)
   | .cocon _ => throw (.cannotInfer (ctx.showTerm t))
   | .coit l I D S st i s => do
     checkIndexLevel ctx l I
@@ -1677,7 +1769,9 @@ def addPartialImpl (g : Globals R) (name : Name) (impl : Term R) : TCM (Globals 
   let some d := g.find? name | throw (.other s!"unknown declaration '{name}'")
   unless d.witness.isSome && d.value.isNone do
     throw (.other s!"{name} is not a partial definition")
-  let ctx : Ctx R := { globals := g }
+  -- (`fixpoint` turns a recursive call to `name` that consumes a linear parameter into
+  -- the linear fixpoint: its result may be used at ω when it contains no linear content)
+  let ctx : Ctx R := { globals := g, fixpoint := some name }
   let _ ← check ctx impl (ctx.eval d.type)
   pure (g.insert { d with impl := some impl })
 
