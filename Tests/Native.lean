@@ -133,7 +133,13 @@ def trustModuleOf (g : Globals ZeroOneMany) (n : Name) : String :=
 witness), a `partial` definition (its body is compiled, not unfolded), a native
 implementation (`implemented_by`, and a type's `repr:` representation), a `native_refl`
 or `smt` axiom, and one per `builtin` registration. `only` restricts it to a scope (an
-example's own declarations). -/
+example's own declarations).
+
+An `implemented_by` on a **partial** definition is two sources, not one: the `partial`
+row for the declaration and a `native` row for the constant compiled code runs. The
+kernel's `Decl.nativeImpl?` suppresses every partial implementation (usually it is the
+compiled body), so the walk checks `d.impl` itself; otherwise the `partial` row would
+hide a native step that `#print axioms` also does not list. -/
 def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
     (only : Name → Bool := fun _ => true) : List TrustSource := Id.run do
   let mut out : Array TrustSource := #[]
@@ -152,6 +158,17 @@ def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
       out := out.push { module := m, name := n, item := "partial" }
     if let some i := d.nativeImpl? then
       out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+    else if d.witness.isSome then
+      -- An `implemented_by` on a partial definition. `Decl.nativeImpl?` deliberately
+      -- returns none for every partial declaration (normally its implementation is the
+      -- compiled body, not a native), but `setImpl` can replace that body with a
+      -- constant: compiled code then runs it, and the `partial` row alone would hide
+      -- the trust step. A partial body that is itself a bare constant is the same shape
+      -- and is recorded the same way (compiled code runs that constant).
+      match d.impl with
+      | some (.const i _) =>
+        if i != n then out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+      | _ => pure ()
   -- every registration, including `repr:` (a type's native representation) and `seal:`;
   -- `inline` (a compiler hint) and `int` (only how values print) are not trust
   for (k, nm) in g.builtins do
@@ -359,10 +376,11 @@ def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
-  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
-  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
-  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
-  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
+  "# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a\n" ++
+  "# second row next to `partial` when a partial definition's implementation is a native\n" ++
+  "# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`\n" ++
+  "# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,\n" ++
+  "# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
   "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
   "# trust and are not listed.\n" ++
   "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
