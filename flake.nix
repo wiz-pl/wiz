@@ -9,8 +9,8 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
-  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
+  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground` and
+  # `wiz-playground-ui`, the Wasm page modules (`web/build*.sh`) built by a
   # derivation instead of in each CI job. CI pushes them to the Cachix cache
   # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
@@ -264,7 +264,8 @@ EOF
                 # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
-                ./web/infoview.html ./web/infoview.js ./web/tagged.js ./web/scroll.js
+                ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
+                ./web/lsp-client.js ./web/goals.js ./web/tagged.js ./web/scroll.js
                 ./web/scroll-search.js ./web/scroll.css
               ];
             };
@@ -300,9 +301,11 @@ EOF
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
                 ./web/playground.html ./web/playground.js ./web/playground-values.js
+                ./web/playground-presets.js ./web/playground-state.js
                 ./web/playground.css ./web/lsp-client.js ./web/goals.js
                 ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
-                ./web/playground-engine.js
+                ./web/playground-engine.js ./web/editor-model.js
+                ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -324,6 +327,39 @@ EOF
             '';
             meta = {
               description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
+              platforms = systems;
+            };
+          };
+          # The playground page's Loom UI module (`?ui=loom`, stage 11w's page as one Loom
+          # app): small, but built by `web/test.sh` and the web job only through this, so a
+          # `web` job still needs no Emscripten. `lib/` is its `-I` root (the module is
+          # `web/playground-ui.wiz` and imports Web.{Loom,Playground,Editor} and their
+          # dependencies), so any library change rebuilds it — correct, and cheap.
+          wiz-playground-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-playground-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./web/framework/driver.js ./web/framework/runtime.js
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The playground's Loom UI module (wiz-playground-ui.mjs, web/build-playground-ui.sh)";
               platforms = systems;
             };
           };
@@ -543,7 +579,7 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground; default = wiz;
+                   wiz-web wiz-playground wiz-playground-ui; default = wiz;
           wizc = bootstrapChain.wizc;
           wizc-seed = bootstrapChain.seed;
           wizc-release = bootstrapChain.release { };

@@ -10,8 +10,9 @@
 # cursor in the page's proof, click a subterm and look for the goals and what the subterm
 # is in the DOM.
 #   usage: web/test.sh [PORT]       (needs nix for emscripten and chromium)
-#   WIZ_WEB_FROM=DIR and WIZ_PLAYGROUND_FROM=DIR: copy the modules a Nix build made
-#   (`nix build .#wiz-web .#wiz-playground`) instead of building them, as CI does.
+#   WIZ_WEB_FROM=DIR, WIZ_PLAYGROUND_FROM=DIR and WIZ_PLAYGROUND_UI_FROM=DIR: copy the
+#   modules a Nix build made (`nix build .#wiz-web .#wiz-playground .#wiz-playground-ui`)
+#   instead of building them, as CI does.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${1:-18765}

@@ -1336,12 +1336,13 @@ first, so a JSON change that was not regenerated fails the job (and is visible a
 in the checked-in page). Regenerate it with `python3 web/build-bench.py`; the fixture
 tests and the site-check rules for it are in `web/test-bench.sh`.
 
-The playground's Loom page (`?ui=loom`) needs a fourth build,
-`web/build-playground-ui.sh` (the page's UI module, `wiz-playground-ui.mjs`). The `web`
-job builds and tests it; `web/build-site.sh` copies it when the `docs` job built it into
-`web/out`, and the page falls back to its static markup when it is missing. To publish
-the Loom page, add the command to the `docs` job's module step beside `web/build.sh` and
-`web/build-playground.sh`.
+The playground's Loom page (`?ui=loom`) needs another build,
+`web/build-playground-ui.sh` (the page's UI module, `wiz-playground-ui.mjs`). It is the
+`wiz-playground-ui` derivation too; the `web` job copies it from the store
+(`WIZ_PLAYGROUND_UI_FROM`) and tests it. `web/build-site.sh` copies it when the `docs`
+job built it into `web/out`, and the page falls back to its static markup when it is
+missing. To publish the Loom page, add the command to the `docs` job's module step
+beside `web/build.sh` and `web/build-playground.sh`.
 
 | path | what it is |
 |---|---|
@@ -1378,9 +1379,10 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
-With the derivations already in the store (`nix build .#wiz-web .#wiz-playground`), the
-two module steps can copy them instead of running Emscripten: pass `--from DIR` (or
-`WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`) the store path, exactly as CI does.
+With the derivations already in the store (`nix build .#wiz-web .#wiz-playground
+.#wiz-playground-ui`), the module steps can copy them instead of running Emscripten:
+pass `--from DIR` (or `WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`/`WIZ_PLAYGROUND_UI_FROM`)
+the store path, exactly as CI does.
 
 `wiz doc --jobs N` elaborates and renders N modules at once; the default is 1, and
 `--jobs 0` (or `--jobs auto`) takes the CPUs the process may run on, at most 8. The tree
