@@ -18,11 +18,6 @@ def shows : List Nat → String
   | .nil => ""
   | .cons x xs => Hdl.show x <+> " " <+> shows xs
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def flat : List (List Nat) → List Nat
   | .nil => .nil
   | .cons xs xss => List.append xs (flat xss)
@@ -68,10 +63,10 @@ def report (div : Nat) (datas : List Nat) : String :=
   let edges := sampled outs;
   let want := flat (Hdl.map bitsOf datas);
   let got := doneBytes outs;
-  "spi div=" <+> Hdl.show div <+> ": sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  "spi div=" <+> Hdl.show div <+> ": sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", edges " <+> Hdl.show (List.length edges)
-    <+> ", shift " <+> yes (Hdl.natsEq edges want)
-    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", shift " <+> yes (BEq.beq edges want)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (BEq.beq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spi" c))
 
 -- The bits of a `w`-bit word, most significant first.
@@ -102,11 +97,11 @@ def reportW (w cw ncs div : Nat) (datas sels : List Nat) : String :=
   let want := flat (Hdl.map (fun (d : Nat) => bitsOfW w d) datas);
   let got := doneBytes outs;
   "spi w=" <+> Hdl.show w <+> " cw=" <+> Hdl.show cw <+> " ncs=" <+> Hdl.show ncs
-    <+> " div=" <+> Hdl.show div <+> ": sim " <+> yes (leavesEq outs (Circuit.simLeaves .true c ins))
-    <+> " simFast " <+> yes (leavesEq outs (Circuit.simFast c ins))
+    <+> " div=" <+> Hdl.show div <+> ": sim " <+> yes (BEq.beq outs (Circuit.simLeaves .true c ins))
+    <+> " simFast " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", edges " <+> Hdl.show (List.length edges)
-    <+> ", shift " <+> yes (Hdl.natsEq edges want)
-    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (Hdl.natsEq got datas)
+    <+> ", shift " <+> yes (BEq.beq edges want)
+    <+> ", bytes " <+> shows got <+> ", ok " <+> yes (BEq.beq got datas)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiW" c))
 
 -- The generic master at 8 bits, a 16-bit counter and one chip select, on the same
@@ -121,7 +116,7 @@ def reportCompat (div : Nat) (datas : List Nat) : String :=
     (Hdl.map (fun (_ : Nat) => 0) (Hdl.upto cycles 0)) k) (Hdl.upto cycles 0);
   let outs0 := Circuit.runLeaves (Spi.loopC div) ins0;
   let outs1 := Circuit.runLeaves (Spi.loopCW 8 16 1 div) ins1;
-  "spi compat div=" <+> Hdl.show div <+> ": same " <+> yes (leavesEq outs0 outs1)
+  "spi compat div=" <+> Hdl.show div <+> ": same " <+> yes (BEq.beq outs0 outs1)
 
 -- The chip-select values while `busy` (leaf 3 of `Spi.OutW`), and their distinct
 -- consecutive values.
@@ -147,9 +142,9 @@ def reportCS : String :=
   let c := Spi.loopCW 8 16 3 1;
   let outs := Circuit.runLeaves c ins;
   let patterns := uniq (busyCS outs);
-  "spi cs ncs=3: sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  "spi cs ncs=3: sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", patterns " <+> shows patterns
-    <+> ", ok " <+> yes (Hdl.natsEq patterns (.cons 6 (.cons 5 (.cons 3 .nil))))
+    <+> ", ok " <+> yes (BEq.beq patterns (.cons 6 (.cons 5 (.cons 3 .nil))))
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "spiCS" c))
 
 def main : IO Unit := do

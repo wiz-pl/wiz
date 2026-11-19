@@ -65,7 +65,7 @@ def AxiStream.Law.acceptedN {ω dw : Nat}
 /-- The Boolean form of the order law: the accepted payloads are equal. -/
 def AxiStream.Law.acceptedEq {ω dw : Nat}
     (ins outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
-  Hdl.natsEq (AxiStream.Law.accepted outs) (AxiStream.Law.accepted ins)
+  BEq.beq (AxiStream.Law.accepted outs) (AxiStream.Law.accepted ins)
 
 /-- The Boolean form of no lost/duplicated beats: the accepted counts are equal. -/
 def AxiStream.Law.acceptedNOk {ω dw : Nat}

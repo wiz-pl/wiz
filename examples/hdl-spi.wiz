@@ -22,15 +22,10 @@ def allTrue : List Bool → Bool
   | .nil => .true
   | .cons b bs => Bool.and b (allTrue bs)
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
   let ω v := Circuit.runLeaves c ins;
-  Bool.and (leavesEq v (Circuit.simFast c ins))
-    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
 
 ------------------------------------------------------------------------------------
 -- The link trace: start with `sent`, then quiet cycles long enough for `done` (the
@@ -140,7 +135,7 @@ def masterIns (div : Nat) : List (HwTy.El (Spi.InW.code 8 1)) :=
 
 def legacyMaster (div : Nat) : Bool :=
   let ins := masterIns div;
-  Hdl.natsEq
+  BEq.beq
     (Hdl.map (HwTy.pack (Spi.OutW.code 8 1)) (Circuit.run (Spi.masterCW 8 Spi.cntW 1 div) ins))
     (Hdl.map (HwTy.pack (Spi.OutW.code 8 1)) (Circuit.run (Spi.masterModeCW 8 Spi.cntW 1 0 div) ins))
 

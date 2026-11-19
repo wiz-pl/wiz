@@ -59,8 +59,8 @@ def alu : Circuit AluIn.code AluOut.code :=
     (Alu.mk (BitVec.ofNat 8 0) (BitVec.ofNat 70 1180591620717411303423) (BitVec.ofNat 1 0)) aluStep
 
 -- with a synchronous reset and a clock enable
-def aluRE : Circuit (HwTy.prod (HwTy.named "rst" HwTy.bit) (HwTy.prod (HwTy.named "en" HwTy.bit) AluIn.code)) AluOut.code :=
-  Circuit.withReset (Circuit.withEnable alu)
+def aluRE : Circuit.RstEn AluIn.code AluOut.code :=
+  Circuit.withResetEnable alu
 
 -- composition: a delay line after the ALU, a feedback loop around an adder
 def acc8 : Circuit B8 B8 := Circuit.mk B8 (BitVec.ofNat 8 0) (fun s x => Hw.pair (Hw.add s x) s)
@@ -112,11 +112,6 @@ def Rng.trace (m : Nat) : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, s => .cons (Nat.mod (Nat.div s 256) m) (Rng.trace m k (Rng.next s))
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def sumAll : List (List Nat) → Nat → Nat
   | .nil, acc => acc
   | .cons l ls, acc => sumAll ls (Nat.mod (Hdl.sum l + acc * 3) 1000000007)
@@ -130,8 +125,8 @@ def report {ω i o : HwTy} (name : String) (c : Circuit i o) (xs : List Nat) : S
   let ω ins := Hdl.map (HwTy.unpack i) xs;
   let ω v := Circuit.runLeaves c ins;
   let ω f := Circuit.simFast c ins;
-  let ω ok := Bool.and (leavesEq f v) (Bool.and (leavesEq f (Circuit.simLeaves .true c ins))
-    (leavesEq (Netlist.simFast (Circuit.netlistNaive "c" c) (Hdl.map (HwTy.leaves i) ins)) v));
+  let ω ok := Bool.and (BEq.beq f v) (Bool.and (BEq.beq f (Circuit.simLeaves .true c ins))
+    (BEq.beq (Netlist.simFast (Circuit.netlistNaive "c" c) (Hdl.map (HwTy.leaves i) ins)) v));
   name <+> ": " <+> yes ok <+> ", " <+> Hdl.show (List.length f) <+> " cycles, well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "c" c))
     <+> ", checksum " <+> Hdl.show (sumAll f 0)
 
@@ -159,8 +154,8 @@ def main : IO Unit := do
   IO.println (report "alu with reset and enable" aluRE (Rng.trace 4096 3000 2));
   IO.println (report "piped" piped (Rng.trace 1024 3000 3));
   IO.println (report "memories" memC (Rng.trace 4194304 3000 4));
-  IO.println ("memories, raw out-of-range values: simFast = simulate: " <+> yes (leavesEq (Netlist.simFast (Circuit.netlist "m" memC) (rawIns 3000 5))
+  IO.println ("memories, raw out-of-range values: simFast = simulate: " <+> yes (BEq.beq (Netlist.simFast (Circuit.netlist "m" memC) (rawIns 3000 5))
     (Netlist.simulate (Circuit.netlist "m" memC) (rawIns 3000 5))));
   IO.println (report "shifter" shifter (Rng.trace 256 3000 4));
   IO.println ("not well formed: " <+> yes (Bool.not (Netlist.wellFormed badNet)) <+> ", simFast = simulate: "
-    <+> yes (leavesEq (Netlist.simFast badNet badIns) (Netlist.simulate badNet badIns)))
+    <+> yes (BEq.beq (Netlist.simFast badNet badIns) (Netlist.simulate badNet badIns)))

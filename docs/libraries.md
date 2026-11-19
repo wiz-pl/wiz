@@ -673,7 +673,9 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   it, all of which the netlist turns into the register's reset and enable (not
   multiplexers):
   * a whole circuit: `Circuit.withResetEnable c` (= `withReset (withEnable c)`; S1's
-    `withReset`, `withEnable` alone);
+    `withReset`, `withEnable` alone); the inputs' type is `HwTy.rstEn i`
+    (`prod (named "rst" bit) (prod (named "en" bit) i)`) and the circuit's is
+    `Circuit.RstEn i o`;
   * one register: `Circuit.registerR t init`, `registerE`, `registerRE` (a `delay` with
     them; `Circuit.stepEl_registerRE` … say what they do in a cycle);
   * a field of a state, inside a step function: `Hw.regNext rst en init cur next`

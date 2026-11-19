@@ -481,7 +481,7 @@ def Axi4.matchFirst (xs : List Axi4.Burst) (d : Axi4.Burst) : Bool :=
   match xs with
   | .nil => .false
   | .cons x rest =>
-    if Nat.beq x.id d.id then Hdl.natsEq x.addrs d.addrs
+    if Nat.beq x.id d.id then BEq.beq x.addrs d.addrs
     else Axi4.matchFirst rest d
 
 /-- The Boolean check behind `Axi4.orderOf`: every response is the first remaining
