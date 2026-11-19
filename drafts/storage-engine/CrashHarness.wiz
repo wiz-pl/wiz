@@ -1,0 +1,237 @@
+import Sys
+import Word
+import Text
+import MVar
+import Storage
+import Durable
+import Registry
+import Compact
+/-!
+# The crash matrix's two roles
+
+`crash-matrix.sh` builds this once and runs it under `LD_PRELOAD=crash_shim.so`
+for the writer (which is `SIGKILL`ed at a chosen point), then again without the
+shim for the recovery checks.  `QUIRE_ROLE` selects the role:
+
+* `setup-commit`  — a fresh store at generation 2 (seed plus one `+1`);
+* `commit`        — opens it and performs the victim `+1` (would be generation 3);
+* `check-commit`  — opens after the crash, asserts the old state is intact, the
+                    retained roots load, and the next commit succeeds and is
+                    durable; prints one `RESULT role=check-commit …` line;
+* `setup-compact` — a fresh store at generation 8, with waste to reclaim;
+* `compact`       — opens it and runs `prepareCompaction` + `finishCompaction`;
+* `check-compact` — opens after the crash, asserts the same generation and
+                    content, ignores/removes a leftover temp image, and commits.
+
+The assertions are the crash contract, not a comparison with a golden file:
+generation and node-1 count always satisfy `count = gen - 1` (every commit after
+the seed is one `+1`), so a mixed state cannot pass; node 2 must always exist; a
+retained root must load through the durable loader; and the next commit must be
+at the expected generation (the `genFloor` case skips the torn generation).
+
+`QUIRE_EXPECT_OPEN` and `QUIRE_EXPECT_NEXT` come from the matrix row, so the
+check fails if recovery chose the wrong side of the commit point.
+-/
+
+def indices : List IndexDef := [kindIndex, uniqueLabel]
+
+def cat : List String → String
+  | .nil => ""
+  | .cons x xs => String.append x (cat xs)
+
+def line (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def expect (what : String) (b : Bool) : EIO Unit :=
+  match b with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def envOr (k d : String) : IO String := do
+  v ← Env.get k;
+  IO.pure (match v with
+    | .none => d
+    | .some s => s)
+
+def natEnv (k : String) (d : Nat) : IO Nat := do
+  s ← envOr k (Nat.toString d);
+  IO.pure (match String.parseNat s with
+    | .some n => n
+    | .none => d)
+
+def countOf (s : Snapshot) (id : U64) : Nat :=
+  match Snapshot.getNode s id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def hasNode (s : Snapshot) (id : U64) : Bool :=
+  match Snapshot.getNode s id with
+  | .some _ => .true
+  | .none => .false
+
+def recHas (rs : List Rec) (id : Nat) : Bool :=
+  List.any (fun r => UIntN.beq r.id (U64.ofNat id)) rs
+
+/-- Every retained root still loads and still has the seed's node 2. -/
+partial def checkRefs (fd : Fd) (pc : U64) : List RootRef → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons r rest => do
+    recs ← readRef fd r pc;
+    match recs with
+    | .none =>
+      EIO.fail (cat ["a retained root does not load: gen ", Nat.toString r.gen.toNat])
+    | .some rs => do
+      expect (cat ["retained root gen ", Nat.toString r.gen.toNat, " has node 2"])
+        (recHas rs 2);
+      checkRefs fd pc rest
+
+partial def bumpN (h : Handle) : Nat → EIO Unit
+  | .zero => EIO.pure ()
+  | .succ k => do
+    s ← getDb h;
+    o ← putDb h (bumpCount (U64.ofNat 1) s);
+    expect "a bump commits" (succeeded o);
+    bumpN h k
+
+-- ## The commit roles (generation 2 is the baseline; the victim would be 3)
+
+def setupCommit (path : String) : EIO Unit := do
+  h ← openDbWith path indices 2;
+  s0 ← getDb h;
+  o ← putDb h (seedNodes s0);
+  expect "seed commits" (succeeded o);
+  bumpN h 1;
+  s ← getDb h;
+  expect "setup is generation 2" (Nat.beq s.gen.toNat 2);
+  closeDb h;
+  line "SETUP gen=2 count=1"
+
+def commitVictim (path : String) : EIO Unit := do
+  h ← openDbWith path indices 2;
+  s ← getDb h;
+  line (cat ["OPEN gen=", Nat.toString s.gen.toNat,
+             " count=", Nat.toString (countOf s 1)]);
+  o ← putDb h (bumpCount (U64.ofNat 1) s);
+  expect "the victim commit commits" (succeeded o);
+  s' ← getDb h;
+  line (cat ["COMMITTED gen=", Nat.toString s'.gen.toNat,
+             " count=", Nat.toString (countOf s' 1)]);
+  closeDb h
+
+def checkCommit (path : String) : EIO Unit := do
+  wantOpen ← EIO.lift (natEnv "QUIRE_EXPECT_OPEN" 2);
+  wantNext ← EIO.lift (natEnv "QUIRE_EXPECT_NEXT" 3);
+  h ← openDbWith path indices 2;
+  s ← getDb h;
+  let gen := s.gen.toNat;
+  let c := countOf s 1;
+  -- `gen - 1` is the committed value of node 1: seed is 1/0, every later commit one +1.
+  expect "the open generation is the expected one" (Nat.beq gen wantOpen);
+  expect "the baseline commit survived (gen >= 2)" (Nat.le 2 gen);
+  expect "old content is readable (count = gen - 1)" (Nat.beq c (Nat.sub gen 1));
+  expect "node 2 survived" (hasNode s 2);
+  st ← EIO.lift (MVar.read h.state);
+  roots ← retainedRoots h;
+  expect "there is a retained root" (Nat.lt 0 (List.length roots));
+  checkRefs st.fd st.pageCount roots;
+  line (cat ["OPEN gen=", Nat.toString gen, " count=", Nat.toString c,
+             " roots=", Nat.toString (List.length roots)]);
+  o ← putDb h (bumpCount (U64.ofNat 1) s);
+  expect "the next commit succeeds" (succeeded o);
+  s2 ← getDb h;
+  let g2 := s2.gen.toNat;
+  expect "the next commit has the expected generation" (Nat.beq g2 wantNext);
+  expect "the next commit added one" (Nat.beq (countOf s2 1) (Nat.add c 1));
+  closeDb h;
+  h2 ← openDbWith path indices 2;
+  s3 ← getDb h2;
+  expect "the next commit is durable (generation)" (Nat.beq s3.gen.toNat g2);
+  expect "the next commit is durable (count)" (Nat.beq (countOf s3 1) (Nat.add c 1));
+  closeDb h2;
+  line (cat ["RESULT role=check-commit open_gen=", Nat.toString gen,
+             " open_count=", Nat.toString c,
+             " next_gen=", Nat.toString g2,
+             " next_count=", Nat.toString (countOf s2 1),
+             " final_gen=", Nat.toString s3.gen.toNat,
+             " roots=", Nat.toString (List.length roots)])
+
+-- ## The compaction roles (generation 8 is the baseline)
+
+def setupCompact (path : String) : EIO Unit := do
+  h ← openDbWith path indices 2;
+  s0 ← getDb h;
+  o ← putDb h (seedNodes s0);
+  expect "seed commits" (succeeded o);
+  bumpN h 7;
+  s ← getDb h;
+  expect "setup is generation 8" (Nat.beq s.gen.toNat 8);
+  closeDb h;
+  line "SETUP gen=8 count=7"
+
+def compactVictim (path : String) : EIO Unit := do
+  h ← openDbWith path indices 2;
+  s ← getDb h;
+  line (cat ["OPEN gen=", Nat.toString s.gen.toNat,
+             " count=", Nat.toString (countOf s 1)]);
+  p ← prepareCompaction h;
+  line "PREPARED";
+  c ← finishCompaction h p;
+  line (cat ["COMPACTED gen=", Nat.toString c.gen.toNat]);
+  closeDb h
+
+def checkCompact (path : String) : EIO Unit := do
+  wantOpen ← EIO.lift (natEnv "QUIRE_EXPECT_OPEN" 8);
+  wantNext ← EIO.lift (natEnv "QUIRE_EXPECT_NEXT" 9);
+  let temp := String.append path ".compact";
+  tempThere ← EIO.lift (FS.exists temp);
+  h ← openDbWith path indices 2;
+  s ← getDb h;
+  let gen := s.gen.toNat;
+  let c := countOf s 1;
+  expect "compact: the open generation is the expected one" (Nat.beq gen wantOpen);
+  expect "compact: content is readable (count = gen - 1)" (Nat.beq c (Nat.sub gen 1));
+  expect "compact: node 2 survived" (hasNode s 2);
+  st ← EIO.lift (MVar.read h.state);
+  roots ← retainedRoots h;
+  expect "compact: a retained root exists" (Nat.lt 0 (List.length roots));
+  checkRefs st.fd st.pageCount roots;
+  line (cat ["OPEN gen=", Nat.toString gen, " count=", Nat.toString c,
+             " roots=", Nat.toString (List.length roots),
+             " temp=", (match tempThere with | .true => "present" | .false => "absent")]);
+  -- A leftover temp image is not the store: open already ignored it.  Removing
+  -- it is the "removed" half of the contract; a later compaction overwrites it.
+  if tempThere then FS.removeFile temp else EIO.pure ();
+  o ← putDb h (bumpCount (U64.ofNat 1) s);
+  expect "compact: the next commit succeeds" (succeeded o);
+  s2 ← getDb h;
+  let g2 := s2.gen.toNat;
+  expect "compact: the next generation is the expected one" (Nat.beq g2 wantNext);
+  expect "compact: the next commit added one" (Nat.beq (countOf s2 1) (Nat.add c 1));
+  closeDb h;
+  h2 ← openDbWith path indices 2;
+  s3 ← getDb h2;
+  expect "compact: the next commit is durable (generation)" (Nat.beq s3.gen.toNat g2);
+  expect "compact: the next commit is durable (count)" (Nat.beq (countOf s3 1) (Nat.add c 1));
+  closeDb h2;
+  line (cat ["RESULT role=check-compact open_gen=", Nat.toString gen,
+             " open_count=", Nat.toString c,
+             " next_gen=", Nat.toString g2,
+             " next_count=", Nat.toString (countOf s2 1),
+             " final_gen=", Nat.toString s3.gen.toNat,
+             " roots=", Nat.toString (List.length roots),
+             " temp=", (match tempThere with | .true => "present" | .false => "absent")])
+
+def main : IO Unit := EIO.toIO (do
+  role ← EIO.lift (envOr "QUIRE_ROLE" "check-commit");
+  path ← EIO.lift (envOr "QUIRE_DB" "/tmp/quire-crash.db");
+  if String.eq role "setup-commit" then setupCommit path
+  else if String.eq role "commit" then commitVictim path
+  else if String.eq role "check-commit" then checkCommit path
+  else if String.eq role "setup-compact" then setupCompact path
+  else if String.eq role "compact" then compactVictim path
+  else if String.eq role "check-compact" then checkCompact path
+  else EIO.fail (cat ["unknown QUIRE_ROLE: ", role]))
