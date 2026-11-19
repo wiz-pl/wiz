@@ -1,4 +1,5 @@
 import Wiz.Compiler.Inline
+import Wiz.Core.Pretty
 
 /-!
 # Running erased programs
@@ -51,6 +52,9 @@ inductive RVal where
   /-- a byte buffer (the interpreters' model of `Bytes`, stage 21ag): the runtime
   natives are implemented on it here, since the interpreters cannot call C -/
   | bytes (data : ByteArray)
+  /-- an array (the interpreters' model of `Array`, stage 12a): the runtime natives
+  are implemented on it here, since the interpreters cannot call C -/
+  | arr (data : Array RVal)
   /-- a native operation waiting for arguments -/
   | native (op : Name) (args : Array RVal)
   /-- lazy coinductive values -/
@@ -246,11 +250,22 @@ def exportPrefix : String := "export:"
 
 def nativeArity (key : Name) : Nat :=
   match ExternSig.ofKey? key with
+  -- erased parameters (`e`, implicit type arguments) are passed as `◾` and count:
+  -- the erased term keeps the application, and `C.lean`/`Wasm.lean` skip the value
+  -- when they marshal it (`argIndices` below gives the other parameters' positions)
   | some sig => sig.params.length + (if sig.io then 1 else 0)
   | none => match key with
     | "nat.zero" => 0
     | "nat.succ" | "nat.pred" | "nat.log2" => 1
     | _ => 2
+
+/-- The positions of the parameters that carry a run-time value: `e` (an erased type
+argument, passed as `◾`) is skipped. The positions index the call's argument array,
+which has one value per parameter. -/
+def ExternSig.argIndices (sig : ExternSig) : List Nat :=
+  sig.params.zipIdx.filterMap fun (k, i) => match k with
+    | .k 'e' => none
+    | _ => some i
 
 end RVal
 
@@ -327,6 +342,23 @@ def toCString (b : ByteArray) : String :=
 
 end BytesModel
 
+/-! The interpreters' model of `Array` (stage 12a). Compiled code's `Array` is a native
+buffer updated in place when it is unique (`runtime/rt_data.inc`, `wiz_array_*`); here it
+is an immutable Lean array of interpreter values, so `push` and `set` copy. The
+observable semantics is the same — Wiz has no pointer equality and every operation is
+functional — and the `natives` group compares the two. Out-of-range indices behave as
+in the runtime: `getD` gives the default and `set` changes nothing. -/
+namespace ArrayModel
+
+/-- The element at `i`, or `d` when `i` is out of range. -/
+def getD (a : Array RVal) (i : Nat) (d : RVal) : RVal := a[i]?.getD d
+
+/-- `a` with `i` replaced by `x` (unchanged when `i` is out of range). -/
+def set (a : Array RVal) (i : Nat) (x : RVal) : Array RVal :=
+  if i < a.size then a.set! i x else a
+
+end ArrayModel
+
 /-- The characters of a Wiz `String` value (`String.mk (List Char)`, the form
 `wiz_nat_show` builds), for a `Bytes` native that takes text. Defined here rather than
 reused from `RVal.toString?` because the `Bytes` dispatch is above it. -/
@@ -365,6 +397,29 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   | some "wiz_bytes_eq" => (bs 0).map fun b => match bs 1 with
     | some c => .obj (if b == c then 1 else 0) #[]
     | none => .erased
+  | _ => none
+
+/-- The `Array` native operations (stage 12a), by the C name the runtime exports.
+`none` for every other native, and for an operation whose array argument is not what
+the compiler passes. The call's arguments include one `◾` per erased type parameter, so
+the handler indexes them through `ExternSig.argIndices`. -/
+def arrayNative? (op : Name) (args : Array RVal) : Option RVal :=
+  let ix := match RVal.ExternSig.ofKey? op with
+    | some sig => sig.argIndices
+    | none => []
+  let arg (j : Nat) : RVal := match ix[j]? with
+    | some i => (args[i]?).getD .erased
+    | none => .erased
+  let natArg (j : Nat) : Nat := (arg j).toNat?.getD 0
+  let as : Option (Array RVal) := match arg 0 with
+    | .arr a => some a
+    | _ => none
+  match (RVal.ExternSig.ofKey? op).map (·.cname) with
+  | some "wiz_array_empty" => some (.arr #[])
+  | some "wiz_array_push" => as.map fun a => .arr (a.push (arg 1))
+  | some "wiz_array_size" => as.map fun a => .nat a.size
+  | some "wiz_array_get" => as.map fun a => ArrayModel.getD a (natArg 1) (arg 2)
+  | some "wiz_array_set" => as.map fun a => .arr (ArrayModel.set a (natArg 1) (arg 2))
   | _ => none
 
 /-- Erased global definitions, by name. -/
@@ -432,7 +487,9 @@ partial def fireNative (op : Name) (args : Array RVal) : RVal :=
     .obj 0 #[chars]
   | _ => match bytesNative? op args n with
     | some v => v
-    | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
+    | none => match arrayNative? op args with
+      | some v => v
+      | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
 
 partial def applyN (code : Code) (f : RVal) (as : List RVal) : RVal := as.foldl (apply code) f
 
@@ -568,6 +625,16 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
     else readbackData ty v
   | .neutral (.global "Bytes" _) sp, .bytes b =>
     if sp.isEmpty then .const (BytesModel.render b) [] else readbackData ty v
+  | .neutral (.global "Array" _) sp, .arr xs =>
+    let elem : Option (Val R) := match (sp : Array (Elim R))[0]? with
+      | some (.app A) => some A
+      | _ => none
+    let render (x : RVal) : String := match elem with
+      | some A => (readback A x).pretty [] (some g)
+      | none => match x.toNat? with
+        | some n => toString n
+        | none => "_"
+    .const ("[" ++ ", ".intercalate (xs.toList.map render) ++ "]") []
   | .sigma _ _ A B _, v =>
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then

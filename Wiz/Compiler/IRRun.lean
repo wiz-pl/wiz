@@ -25,6 +25,10 @@ inductive IVal where
   | erased
   /-- a byte buffer (`Bytes`, stage 21ag): a scalar, like a number -/
   | bytes (data : ByteArray)
+  /-- an array (`Array`, the interpreters' model of the runtime buffer): a scalar
+  holding interpreter values. `dupV`/`dropV` visit the elements, so the heap's
+  reference counts stay right -/
+  | arr (data : Array IVal)
   | ptr (id : Nat)
   deriving Inhabited, BEq, Repr
 
@@ -61,6 +65,7 @@ partial def toRVal (h : Heap) : IVal → RVal
   | .tag t => .obj t #[]
   | .erased => .erased
   | .bytes b => .bytes b
+  | .arr xs => .arr (xs.map (toRVal h))
   | .ptr id => match h.objs.get? id with
     | some (_, .ctor 1000 _) => .coit .erased .erased .erased .erased
     | some (_, .ctor 1001 _) => .scofix .erased .erased .erased
@@ -78,10 +83,11 @@ def strIVal (s : String) : RunM IVal := do
     l ← alloc (.ctor 1 #[ch, l])
   alloc (.ctor 0 #[l])
 
-def dupV : IVal → RunM Unit
+partial def dupV : IVal → RunM Unit
   | .ptr id => do
     let (rc, o) ← getObj id
     modify fun h => { h with objs := h.objs.insert id (rc + 1, o) }
+  | .arr xs => xs.forM dupV
   | _ => pure ()
 
 partial def dropV : IVal → RunM Unit
@@ -94,6 +100,8 @@ partial def dropV : IVal → RunM Unit
       | .ctor _ fs => fs.forM dropV
       | .clo _ as => as.forM dropV
       | .token _ => pure ()
+  | .arr xs => xs.forM dropV
+  | _ => pure ()
   | _ => pure ()
 
 /-- Field `i` of a number's unary view (`natView`): field 0 is its constructor tag. The
@@ -228,6 +236,44 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
         | "wiz_bytes_append", some b, some c => pure (some (.bytes (BytesModel.append b c)))
         | "wiz_bytes_eq", some b, some c => pure (some (.tag (if b == c then 1 else 0)))
         | _, _, _ => pure none
+      -- `Array` (stage 12a), over the interpreter's `.arr`
+      let r ← match r with
+        | some v => pure (some v)
+        | none =>
+          let ix := match RVal.ExternSig.ofKey? op with
+            | some sig => sig.argIndices
+            | none => []
+          let at (j : Nat) : IVal := match ix[j]? with
+            | some i => (args[i]?).getD .erased
+            | none => .erased
+          let idx (j : Nat) : Nat := match at j with
+            | .num k | .tag k => k
+            | _ => 0
+          let arr : Option (Array IVal) := match at 0 with
+            | .arr a => some a
+            | _ => none
+          match c, arr with
+          | "wiz_array_empty", _ => pure (some (.arr #[]))
+          | "wiz_array_push", some a => do
+            let x := at 1
+            dupV x
+            for v in a do dupV v
+            pure (some (.arr (a.push x)))
+          | "wiz_array_size", some a => pure (some (.num a.size))
+          | "wiz_array_get", some a => do
+            let d := at 2
+            match a[(idx 1)]? with
+            | some x => do dupV x; pure (some x)
+            | none => do dupV d; pure (some d)
+          | "wiz_array_set", some a => do
+            let i := idx 1
+            let x := at 2
+            for v in a do dupV v
+            if i < a.size then do
+              dupV x
+              pure (some (.arr (a.set! i x)))
+            else pure (some (.arr a))
+          | _, _ => pure none
       match r with
       | some v => do args.forM dropV; pure v
       | none => throw s!"{op}: foreign functions only run in compiled code (wiz run)"
@@ -330,6 +376,7 @@ partial def run (prog : Std.HashMap Name Decl) (env : Std.HashMap Var IVal)
         | _ => throw "case on a closure or token"
       | .erased => throw "case on ◾"
       | .bytes _ => throw "case on a byte buffer"
+      | .arr _ => throw "case on an array"
     match alts[t]? with
     | some alt => run prog env joins alt
     | none => throw s!"no branch for tag {t}"
