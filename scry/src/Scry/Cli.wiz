@@ -208,7 +208,7 @@ def Scry.replCmd (args : List String) : EIO Nat := do
   let (file, rest) := match args with
     | .cons a more => match String.startsWith a "--" with
       | .true => ((Option.none : Option String), args)
-      | .false => ((Option.some a : Option String), more)
+      | .false => ((.some a : Option String), more)
     | .nil => ((Option.none : Option String), ([] : List String));
   step ← (match file with
     | .some f => do

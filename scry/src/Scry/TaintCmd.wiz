@@ -250,7 +250,7 @@ def Scry.lineStartsBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
 
 def Scry.lineStartsOf (text : String) : U32Array :=
   let b := Bytes.ofString text;
-  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList [(U32.ofNat 0)])
 
 /-- Binary search for the largest line-start index whose offset is `<= off`. -/
 partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
@@ -471,7 +471,7 @@ def Scry.diffLineText (h : Scry.DiffHit) : String :=
 
 def Scry.diffHeaderLines (dm : Scry.DiffMode) : List String :=
   match dm.all with
-  | .true => List.cons "diff: all findings (--diff all; no filtering)" .nil
+  | .true => ["diff: all findings (--diff all; no filtering)"]
   | .false =>
     let base := "diff: " ++ dm.label ++ "; " ++ Nat.repr dm.selection.hunks
       ++ " hunk(s) in " ++ Nat.repr dm.files ++ " file(s), "
@@ -483,21 +483,21 @@ def Scry.diffHeaderLines (dm : Scry.DiffMode) : List String :=
         | .none => "");
     let notes := List.append
       (match dm.emptyDiff with
-        | .true => List.cons "  note: the diff is empty; the file is unchanged" .nil
+        | .true => ["  note: the diff is empty; the file is unchanged"]
         | .false => match dm.selection.matched with
           | .false => List.cons ("  note: no diff entry matches \"" ++ dm.selection.path
               ++ "\"; treating it as unchanged (check the path spelling)") .nil
           | .true => .nil)
       (List.append
         (match dm.selection.ambiguous with
-          | .true => List.cons "  note: several diff entries match; using their union" .nil
+          | .true => ["  note: several diff entries match; using their union"]
           | .false => .nil)
         (List.append
           (match dm.selection.binary with
-            | .true => List.cons "  note: binary in the diff; no line mapping, findings are shown" .nil
+            | .true => ["  note: binary in the diff; no line mapping, findings are shown"]
             | .false => .nil)
           (match dm.selection.deleted with
-            | .true => List.cons "  note: deleted in the diff; there are no new lines" .nil
+            | .true => ["  note: deleted in the diff; there are no new lines"]
             | .false => .nil)));
     List.cons base notes
 
@@ -525,8 +525,8 @@ def Scry.diffSummaryLines (dm : Scry.DiffMode) (f b mm : Scry.DiffTally) : List 
           | .zero => ""
           | n => ", " ++ Nat.repr n ++ " unlocated (also shown)");
     List.cons fLine (List.append
-      (match String.eq bLine "" with | .true => .nil | .false => List.cons bLine .nil)
-      (match String.eq mLine "" with | .true => .nil | .false => List.cons mLine .nil))
+      (match String.eq bLine "" with | .true => .nil | .false => [bLine])
+      (match String.eq mLine "" with | .true => .nil | .false => [mLine]))
 
 -- ## JSON
 
@@ -765,7 +765,7 @@ def Scry.findingJson (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool
 def Scry.findingJsonHit (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool)
     (hit : Scry.DiffHit) : Json :=
   Json.mkObj (List.append (Scry.findingFields m f checked)
-    (List.cons ("diff", Scry.diffHitJson hit) .nil))
+    [("diff", Scry.diffHitJson hit)])
 
 def Scry.boundaryFields (b : Scry.BoundaryFinding) : List (String × Json) :=
   let loc := match b.origin with
@@ -789,7 +789,7 @@ def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
 /-- A warning's JSON plus its diff verdict (only used in diff mode). -/
 def Scry.boundaryJsonHit (b : Scry.BoundaryFinding) (hit : Scry.DiffHit) : Json :=
   Json.mkObj (List.append (Scry.boundaryFields b)
-    (List.cons ("diff", Scry.diffHitJson hit) .nil))
+    [("diff", Scry.diffHitJson hit)])
 
 def Scry.checkedCount (flags : List Bool) : Nat :=
   List.length (List.filter (fun b => b) flags)
@@ -1215,7 +1215,7 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
           , ("memory", Json.ofNat (List.length memory)) ]) ]
       (match dmOpt with
         | .none => .nil
-        | .some dm => List.cons ("diff", Scry.diffJson dm o.file ft bt mt) .nil)))))
+        | .some dm => [("diff", Scry.diffJson dm o.file ft bt mt)])))))
   | .false => do
     Scry.taintSay ("taint: " ++ o.file ++ " (" ++ Nat.repr (List.length pack.rules) ++ " rules)");
     unit2 ← (match errs with

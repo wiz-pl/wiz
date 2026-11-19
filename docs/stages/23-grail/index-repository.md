@@ -23,8 +23,10 @@ grail-index/
 ```
 
 The snapshot and its signature are **additive**: an index without them is read exactly
-as before, and an older grail ignores them. `grail update` only requires them when asked
-to (`--require-signature`) or when the project's lock already pinned a signature.
+as before, and an older grail ignores them. `grail update` requires them with
+`--require-signature`, or when the project's lock already pinned a signature; CI and the
+install docs pass the flag, and `--allow-unsigned` is the explicit, documented escape for
+a registry that has no signed snapshot.
 
 `grail update` reads only the package files `index/NAME.sexpr` (or `index.sexpr`, or a
 git URL's checkout); `index/snapshot.sexpr` is the signed state, not a package.

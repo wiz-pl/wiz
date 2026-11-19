@@ -70,7 +70,7 @@ def Hdl.rev {A : Type} : List A → List A → List A
   | .nil, acc => acc
   | .cons x xs, acc => Hdl.rev xs (List.cons x acc)
 /-- A list reversed (`Hdl.reverse [1, 2, 3] = [3, 2, 1]`). -/
-def Hdl.reverse {A : Type} (xs : List A) : List A := Hdl.rev xs List.nil
+def Hdl.reverse {A : Type} (xs : List A) : List A := Hdl.rev xs []
 
 /-- `f` applied to every element of a list. -/
 def Hdl.map {A B : Type} (f : A → B) : List A → List B
@@ -131,7 +131,7 @@ def Hdl.digitsAux : Nat → Nat → List Char → List Char
     | .true => List.cons (Char.mk (48 + n)) acc
     | .false => Hdl.digitsAux f (Nat.div n 10) (List.cons (Char.mk (48 + Nat.mod n 10)) acc)
 /-- A number in decimal: `Hdl.show 42 = "42"`. -/
-def Hdl.show (n : Nat) : String := String.mk (Hdl.digitsAux (Nat.succ n) n List.nil)
+def Hdl.show (n : Nat) : String := String.mk (Hdl.digitsAux (Nat.succ n) n [])
 /-- The lower-case hexadecimal digit of a number below 16. -/
 def Hdl.hexDigit (n : Nat) : Char := match Nat.lt n 10 with
   | .true => Char.mk (48 + n)
@@ -146,7 +146,7 @@ def Hdl.binAux : Nat → Nat → List Char → List Char
   | .zero, _, acc => acc
   | .succ d, v, acc => Hdl.binAux d (Nat.div v 2) (List.cons (Char.mk (48 + Nat.mod v 2)) acc)
 /-- `v` as `w` binary digits: `Hdl.bin 4 5 = "0101"` (VCD values are written so). -/
-def Hdl.bin (w v : Nat) : String := String.mk (Hdl.binAux w v List.nil)
+def Hdl.bin (w v : Nat) : String := String.mk (Hdl.binAux w v [])
 /-- String equality. -/
 def Hdl.strEq (a b : String) : Bool := String.beq a b
 /-- A string as a key of an `HTrie` (its character codes). -/
@@ -788,30 +788,30 @@ structure Netlist where
 /-- Hash-consing keys: an operation as a code and its payload. With the width and the
 arguments (`NetNode.key`) it identifies a node. -/
 def NetOp.code : NetOp → List Nat
-  | .input p => List.cons 0 (List.cons p List.nil)
-  | .const v => List.cons 1 (List.cons v List.nil)
-  | .reg r => List.cons 2 (List.cons r List.nil)
-  | .add => List.cons 3 List.nil
-  | .sub => List.cons 4 List.nil
-  | .mul => List.cons 5 List.nil
-  | .and => List.cons 6 List.nil
-  | .or => List.cons 7 List.nil
-  | .xor => List.cons 8 List.nil
-  | .not => List.cons 9 List.nil
-  | .eq => List.cons 10 List.nil
-  | .ult => List.cons 11 List.nil
-  | .mux => List.cons 12 List.nil
-  | .concat => List.cons 13 List.nil
-  | .slice lo => List.cons 14 (List.cons lo List.nil)
-  | .resetTo v => List.cons 15 (List.cons v List.nil)
-  | .hold => List.cons 16 List.nil
-  | .memRead m => List.cons 17 (List.cons m List.nil)
-  | .shl => List.cons 20 List.nil
-  | .lshr => List.cons 21 List.nil
-  | .ashr => List.cons 22 List.nil
-  | .slt => List.cons 23 List.nil
-  | .inst p => List.cons 30 List.nil
-  | .instOut j lo => List.cons 31 (List.cons j (List.cons lo List.nil))
+  | .input p => [0, p]
+  | .const v => [1, v]
+  | .reg r => [2, r]
+  | .add => [3]
+  | .sub => [4]
+  | .mul => [5]
+  | .and => [6]
+  | .or => [7]
+  | .xor => [8]
+  | .not => [9]
+  | .eq => [10]
+  | .ult => [11]
+  | .mux => [12]
+  | .concat => [13]
+  | .slice lo => [14, lo]
+  | .resetTo v => [15, v]
+  | .hold => [16]
+  | .memRead m => [17, m]
+  | .shl => [20]
+  | .lshr => [21]
+  | .ashr => [22]
+  | .slt => [23]
+  | .inst p => [30]
+  | .instOut j lo => [31, j, lo]
   | .clock dom => List.cons 32 (Hdl.strKey dom)
 
 /-- Whether the operation is commutative (its two arguments are sorted for hash-consing,
@@ -828,7 +828,7 @@ def NetOp.commutative : NetOp → Bool
 /-- The arguments in canonical order: a commutative operation's two arguments sorted. -/
 def NetNode.canonArgs (op : NetOp) (args : List Nat) : List Nat := match NetOp.commutative op, args with
   | .true, .cons a (.cons b .nil) => match Nat.lt b a with
-    | .true => List.cons b (List.cons a List.nil)
+    | .true => [b, a]
     | .false => args
   | _, _ => args
 
@@ -872,9 +872,9 @@ def HTrie.find {V : Type} (key : List Nat) (h : Nat) : Nat → HTrie V → Optio
 /-- `HTrie.insert key v h d t`: `t` with `key` (hash `h`) bound to `v` (in front of any
 older binding). -/
 def HTrie.insert {V : Type} (key : List Nat) (v : V) (h : Nat) : Nat → HTrie V → HTrie V
-  | .zero, .tip => .bucket (List.cons (key, v) List.nil)
+  | .zero, .tip => .bucket [(key, v)]
   | .zero, .bucket kvs => .bucket (List.cons (key, v) kvs)
-  | .zero, .node _ _ => .bucket (List.cons (key, v) List.nil)
+  | .zero, .node _ _ => .bucket [(key, v)]
   | .succ d, .tip => match Nat.testBit h d with
     | .true => .node .tip (HTrie.insert key v h d .tip)
     | .false => .node (HTrie.insert key v h d .tip) .tip
@@ -890,9 +890,9 @@ def HTrie.get {V : Type} (key : List Nat) (t : HTrie V) : Option V :=
 def HTrie.put {V : Type} (key : List Nat) (v : V) (t : HTrie V) : HTrie V :=
   HTrie.insert key v (NatList.hash key 7) HTrie.depth t
 /-- `HTrie.get` for a key that is a single number. -/
-def HTrie.getN {V : Type} (k : Nat) (t : HTrie V) : Option V := HTrie.get (List.cons k List.nil) t
+def HTrie.getN {V : Type} (k : Nat) (t : HTrie V) : Option V := HTrie.get [k] t
 /-- `HTrie.put` for a key that is a single number. -/
-def HTrie.putN {V : Type} (k : Nat) (v : V) (t : HTrie V) : HTrie V := HTrie.put (List.cons k List.nil) v t
+def HTrie.putN {V : Type} (k : Nat) (v : V) (t : HTrie V) : HTrie V := HTrie.put [k] v t
 
 /-- The state of the netlist builder: the next node id, the nodes in reverse, the
 hash-consing table, whether to hash-cons at all (off only to measure what it saves),
@@ -909,7 +909,7 @@ structure NetS where
   errs : List String
 
 /-- The empty builder state, hash-consing if `cse`. -/
-def NetS.init (cse : Bool) : NetS := NetS.mk 0 List.nil HTrie.tip cse 0 List.nil List.nil List.nil
+def NetS.init (cse : Bool) : NetS := NetS.mk 0 [] HTrie.tip cse 0 [] [] []
 
 /-- Building netlists: a state monad over `NetS`. -/
 def NetM (A : Type) : Type := NetS → A × NetS
@@ -1013,11 +1013,11 @@ def Wire (t : HwTy) : Type := NetM (HwTy.Ids t)
 def Wire.op2 (op : NetOp) (w : Nat) (a b : NetM Nat) : NetM Nat := do
   x ← a;
   y ← b;
-  NetM.emit op w (List.cons x (List.cons y List.nil))
+  NetM.emit op w [x, y]
 /-- A node with one argument, after building it. -/
 def Wire.op1 (op : NetOp) (w : Nat) (a : NetM Nat) : NetM Nat := do
   x ← a;
-  NetM.emit op w (List.cons x List.nil)
+  NetM.emit op w [x]
 
 -- A choice between two memories: the writes both have made, then the other writes of
 -- each, enabled only on its side (the sides exclude each other, so their order does not
@@ -1055,7 +1055,7 @@ def Wire.memChoice (c : Nat) (a b : Nat × List (Nat × (Nat × Nat))) : NetM (N
 -- per-leaf multiplexers, constants, resets, holds, names
 /-- Per-leaf multiplexers: one `mux` node for each leaf of `t`. -/
 def Wire.muxIds : (ω t : HwTy) → Nat → HwTy.Ids t → HwTy.Ids t → NetM (HwTy.Ids t)
-  | .bits n, c, a, b => NetM.emit NetOp.mux n (List.cons c (List.cons a (List.cons b List.nil)))
+  | .bits n, c, a, b => NetM.emit NetOp.mux n [c, a, b]
   | .prod x y, c, a, b => do
     p ← Wire.muxIds x c a.1 b.1;
     q ← Wire.muxIds y c a.2 b.2;
@@ -1064,7 +1064,7 @@ def Wire.muxIds : (ω t : HwTy) → Nat → HwTy.Ids t → HwTy.Ids t → NetM (
   | .mem _ _, c, a, b => Wire.memChoice c a b
 /-- Per-leaf `hold` nodes (clock-enable candidates). -/
 def Wire.holdIds : (ω t : HwTy) → Nat → HwTy.Ids t → HwTy.Ids t → NetM (HwTy.Ids t)
-  | .bits n, c, a, b => NetM.emit NetOp.hold n (List.cons c (List.cons a (List.cons b List.nil)))
+  | .bits n, c, a, b => NetM.emit NetOp.hold n [c, a, b]
   | .prod x y, c, a, b => do
     p ← Wire.holdIds x c a.1 b.1;
     q ← Wire.holdIds y c a.2 b.2;
@@ -1073,7 +1073,7 @@ def Wire.holdIds : (ω t : HwTy) → Nat → HwTy.Ids t → HwTy.Ids t → NetM 
   | .mem _ _, c, a, b => Wire.memChoice c a b
 /-- A constant of any type: one `const` node per leaf. -/
 def Wire.constIds : (ω t : HwTy) → HwTy.El t → NetM (HwTy.Ids t)
-  | .bits n, v => NetM.emit (NetOp.const (v : BitVec n).toNat) n List.nil
+  | .bits n, v => NetM.emit (NetOp.const (v : BitVec n).toNat) n []
   | .prod x y, v => do
     p ← Wire.constIds x v.1;
     q ← Wire.constIds y v.2;
@@ -1085,7 +1085,7 @@ def Wire.constIds : (ω t : HwTy) → HwTy.El t → NetM (HwTy.Ids t)
     NetM.pure (k, .nil)
 /-- Per-leaf `resetTo` nodes (synchronous-reset candidates). -/
 def Wire.resetIds : (ω t : HwTy) → Nat → HwTy.El t → HwTy.Ids t → NetM (HwTy.Ids t)
-  | .bits n, c, v, a => NetM.emit (NetOp.resetTo (v : BitVec n).toNat) n (List.cons c (List.cons a List.nil))
+  | .bits n, c, v, a => NetM.emit (NetOp.resetTo (v : BitVec n).toNat) n [c, a]
   | .prod x y, c, v, a => do
     p ← Wire.resetIds x c v.1 a.1;
     q ← Wire.resetIds y c v.2 a.2;
@@ -1100,7 +1100,7 @@ def NetM.hints : List Nat → List String → NetM Unit
   | _, _ => NetM.pure ()
 
 /-- `Hw.lit` on wires: a constant node (the value taken modulo 2ⁿ). -/
-def Wire.lit (ω n : Nat) (k : Nat) : Wire (HwTy.bits n) := NetM.emit (NetOp.const (Nat.mod k (Nat.pow 2 n))) n List.nil
+def Wire.lit (ω n : Nat) (k : Nat) : Wire (HwTy.bits n) := NetM.emit (NetOp.const (Nat.mod k (Nat.pow 2 n))) n []
 /-- `Hw.add` on wires. -/
 def Wire.add {ω n : Nat} (a b : Wire (HwTy.bits n)) : Wire (HwTy.bits n) := Wire.op2 NetOp.add n a b
 /-- `Hw.sub` on wires. -/
@@ -1219,18 +1219,18 @@ def Prim.erase {ω i o : HwTy} (p : Prim i o) : NetPrim :=
   NetPrim.mk p.name p.params p.ins p.outs (HwTy.leafKinds i) (HwTy.leafKinds o) (HwTy.leafWidths o)
     (match p.model with
     | .none => Option.none
-    | .some f => Option.some (fun (ls : List Nat) => HwTy.leaves o (f (HwTy.ofLeaves i ls))))
+    | .some f => .some (fun (ls : List Nat) => HwTy.leaves o (f (HwTy.ofLeaves i ls))))
     p.sync p.outDom
 
 -- What is wrong with a declaration: port names that do not match the leaves.
 /-- What is wrong with a primitive declaration: port names that do not match the leaves. -/
 def Prim.problems {ω i o : HwTy} (p : Prim i o) : List String :=
   let ω a : List String := match Nat.beq (List.length p.ins) (List.length (HwTy.leafWidths i)) with
-    | .true => List.nil
+    | .true => []
     | .false => .cons (p.name <+> ": " <+> Hdl.show (List.length p.ins) <+> " input port names for "
         <+> Hdl.show (List.length (HwTy.leafWidths i)) <+> " input leaves") .nil;
   let ω b : List String := match Nat.beq (List.length p.outs) (List.length (HwTy.leafWidths o)) with
-    | .true => List.nil
+    | .true => []
     | .false => .cons (p.name <+> ": " <+> Hdl.show (List.length p.outs) <+> " output port names for "
         <+> Hdl.show (List.length (HwTy.leafWidths o)) <+> " output leaves") .nil;
   List.append a b
@@ -1247,7 +1247,7 @@ def NetM.errors : List String → NetM Unit
   | .cons e es => NetM.bind (NetM.error e) (fun u => NetM.errors es)
 /-- One `instOut` node per output leaf of a primitive instance, from leaf `j` at bit `lo`. -/
 def Wire.primOuts (k : Nat) : Nat → Nat → List Nat → NetM (List Nat)
-  | _, _, .nil => NetM.pure List.nil
+  | _, _, .nil => NetM.pure []
   | j, lo, .cons w ws => NetM.bind (NetM.emit (NetOp.instOut j lo) w (.cons k .nil)) (fun x =>
       NetM.bind (Wire.primOuts k (Nat.succ j) (lo + w) ws) (fun xs => NetM.pure (List.cons x xs)))
 /-- A primitive instance on wires: one `inst` node (never shared), then one `instOut` node
@@ -1255,14 +1255,14 @@ per output leaf; a memory in its ports is an error. -/
 def Wire.prim {ω i o : HwTy} (p : Prim i o) (x : Wire i) : NetM (HwTy.Ids o) := do
   ids ← (x : NetM (HwTy.Ids i));
   NetM.errors (match List.append (HwTy.memShapes i) (HwTy.memShapes o) with
-    | .nil => List.nil
+    | .nil => []
     | _ => .cons (p.name <+> ": a primitive's ports cannot carry a memory") .nil);
   NetM.errors (Prim.problems p);
   k ← NetM.pushRaw (NetOp.inst (Prim.erase p)) 0 (HwTy.idsLeaves i ids);
   outs ← Wire.primOuts k 0 0 (HwTy.leafWidths o);
   NetM.pure (HwTy.idsTake o outs).1
 /-- The clock net of domain `d`, as a wire. -/
-def Wire.clockOf (d : ClockDomain) : NetM Nat := NetM.emit (NetOp.clock d.name) 1 List.nil
+def Wire.clockOf (d : ClockDomain) : NetM Nat := NetM.emit (NetOp.clock d.name) 1 []
 /-- The implicit clock, as a wire. -/
 def Wire.clock : NetM Nat := Wire.clockOf ClockDomain.sys
 
@@ -1320,7 +1320,7 @@ Index 0 is the most recent element. A list of complete trees with their sizes. -
 def Hdl.RList (A : Type) : Type := List (Nat × Hdl.RTree A)
 
 /-- The empty random-access list. -/
-def Hdl.RList.nil {A : Type} : Hdl.RList A := List.nil
+def Hdl.RList.nil {A : Type} : Hdl.RList A := []
 /-- An element in front (index 0), in O(1): two trees of equal size merge under it. -/
 def Hdl.RList.cons {A : Type} (x : A) (ts : Hdl.RList A) : Hdl.RList A := match (ts : List (Nat × Hdl.RTree A)) with
   | .cons p (.cons q rest) => (match Nat.beq p.1 q.1 with
@@ -1513,7 +1513,7 @@ port), the output vectors (one value per output port). O(nodes · log nodes) per
 `Circuit.simLeaves` compares it with the value semantics. -/
 def Netlist.simulate (n : Netlist) (inputs : List (List Nat)) : List (List Nat) :=
   Netlist.simulateGo n (SimNode.ofNodes n.nodes Hdl.Vec.empty) (Hdl.map (fun (r : NetReg) => r.init) n.regs)
-    (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems) inputs List.nil
+    (Hdl.map (fun (m : NetMem) => Hdl.memOf m.init) n.mems) inputs []
 
 /-- The number of nodes whose operation satisfies `p`. -/
 def Netlist.countAux (p : NetOp → Bool) : List NetNode → Nat
@@ -1545,7 +1545,7 @@ def Netlist.count (p : NetOp → Bool) (n : Netlist) : Nat :=
 -- `resetTo`/`hold` nodes that feed them, and nodes nothing reads are dropped.
 
 /-- A dummy node (a default for lookups). -/
-def NetNode.none : NetNode := NetNode.mk (NetOp.const 0) 0 List.nil
+def NetNode.none : NetNode := NetNode.mk (NetOp.const 0) 0 []
 
 /-- A `hold en x cur` in front of the register reading `cur`: an enable `en`, and `x` as the
 next value; otherwise no enable. -/
@@ -1553,7 +1553,7 @@ def Net.peelEn (nodes : Hdl.Vec NetNode) (cur x : Nat) : Option Nat × Nat :=
   let ω n := Hdl.Vec.get NetNode.none nodes x;
   match n.op, n.args with
   | .hold, .cons e (.cons a (.cons b .nil)) => (match Nat.beq b cur with
-    | .true => (Option.some e, a)
+    | .true => (.some e, a)
     | .false => (Option.none, x))
   | _, _ => (Option.none, x)
 /-- A `resetTo rst init x` in front of a register, with the register's initial value: a
@@ -1562,7 +1562,7 @@ def Net.peel (nodes : Hdl.Vec NetNode) (cur init next : Nat) : Option Nat × (Op
   let ω n := Hdl.Vec.get NetNode.none nodes next;
   match n.op, n.args with
   | .resetTo v, .cons c (.cons x .nil) => (match Nat.beq v init with
-    | .true => (Option.some c, Net.peelEn nodes cur x)
+    | .true => (.some c, Net.peelEn nodes cur x)
     | .false => (Option.none, Net.peelEn nodes cur next))
   | _, _ => (Option.none, Net.peelEn nodes cur next)
 
@@ -1674,8 +1674,8 @@ def Net.finish (name : String) (clocks : List ClockDomain) (dom : String) (s : N
   let ω roots := List.append (Hdl.map (fun (p : NetPort) => p.node) ins)
     (List.append regReads (List.append (Hdl.map (fun (p : NetPort) => p.node) outs)
       (List.append (NetReg.readsAll regs) (NetMem.readsAll mems))));
-  let ω live := Net.liveAux s.nodes (s.next - 1) (Hdl.Set.addAll roots HTrie.tip) List.nil;
-  let ω r := Net.renumber (Hdl.reverse s.nodes) live 0 0 HTrie.tip List.nil;
+  let ω live := Net.liveAux s.nodes (s.next - 1) (Hdl.Set.addAll roots HTrie.tip) [];
+  let ω r := Net.renumber (Hdl.reverse s.nodes) live 0 0 HTrie.tip [];
   Netlist.mk name r.1 (Hdl.map (NetReg.remap r.2) regs) (Hdl.map (NetPort.remap r.2) ins)
     (Hdl.map (NetPort.remap r.2) outs) (Net.remapHints (Net.liveSet live 0 HTrie.tip) r.2 (Hdl.reverse s.hints))
     (Hdl.map (fun (m : NetMem) => NetMem.withDom dom (NetMem.remap r.2 m)) mems) clocks (Hdl.reverse s.errs)
@@ -1713,7 +1713,7 @@ def Circuit.runFrom {ω i o : HwTy} (c : Circuit i o) : HwTy.El c.st → List (H
 
 /-- `Circuit.runFrom` with an accumulator (the outputs so far, reversed). -/
 def Circuit.runAcc {ω i o : HwTy} (c : Circuit i o) : HwTy.El c.st → List (HwTy.El i) → List (HwTy.El o) → List (HwTy.El o)
-  | _, .nil, acc => Hdl.rev acc List.nil
+  | _, .nil, acc => Hdl.rev acc []
   | s, .cons x xs, acc =>
     let ω r : HwTy.El c.st × HwTy.El o := Circuit.stepEl c s x;
     Circuit.runAcc c r.1 xs (List.cons r.2 acc)
@@ -1721,7 +1721,7 @@ def Circuit.runAcc {ω i o : HwTy} (c : Circuit i o) : HwTy.El c.st → List (Hw
 /-- Simulate a circuit from its initial state: one output per input.
 `Circuit.run (Circuit.delay t v) [a, b] = [v, a]`. -/
 def Circuit.run {ω i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)) : List (HwTy.El o) :=
-  Circuit.runAcc c c.init xs List.nil
+  Circuit.runAcc c c.init xs []
 
 /-- `Circuit.runAcc` is `Circuit.runFrom` behind the accumulator. -/
 def Circuit.runAcc_eq {i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) → (acc : List (HwTy.El o)) →
@@ -2023,9 +2023,9 @@ def Circuit.run_named {ω i o : HwTy} (name : String) (c : Circuit i o) (xs : Li
 
 /-- One leaf node per width (`mk k` for the `k`-th: inputs or registers); their ids. -/
 def NetM.emitLeaves (mk : Nat → NetOp) : Nat → List Nat → NetM (List Nat)
-  | _, .nil => NetM.pure List.nil
+  | _, .nil => NetM.pure []
   | k, .cons w ws => do
-    x ← NetM.emit (mk k) w List.nil;
+    x ← NetM.emit (mk k) w [];
     rest ← NetM.emitLeaves mk (Nat.succ k) ws;
     NetM.pure (List.cons x rest)
 
@@ -2167,7 +2167,7 @@ def Netlist.withErrors (n : Netlist) (es : List String) : Netlist :=
 -- clock or data is in the wrong domain, and a domain the netlist does not declare.
 
 /-- The empty domain set. -/
-def Net.noDom : List String := List.nil
+def Net.noDom : List String := []
 /-- The union of two domain sets: the first's domains, then the second's that are new (so
 the order is the first argument's and messages are stable). -/
 def Net.domUnion : List String → List String → List String
@@ -2177,7 +2177,7 @@ def Net.domUnion : List String → List String → List String
     | .false => .cons x (Net.domUnion xs b)
 /-- The union of the domains of a node's arguments. -/
 def Net.domArgs (ds : Hdl.Vec (List String)) : List Nat → List String
-  | .nil => List.nil
+  | .nil => []
   | .cons a as => Net.domUnion (Hdl.Vec.get Net.noDom ds a) (Net.domArgs ds as)
 /-- The first domain of node `k`'s domain set (`?` if it has none). -/
 def Net.domHead (ds : Hdl.Vec (List String)) (k : Nat) : String :=
@@ -2265,7 +2265,7 @@ def Net.dataDomAux (ds : Hdl.Vec (List String)) : List PortKind → List Nat →
   | .cons k ks, .cons a as => match k with
     | .clock => Net.dataDomAux ds ks as
     | _ => Net.domUnion (Hdl.Vec.get Net.noDom ds a) (Net.dataDomAux ds ks as)
-  | _, _ => List.nil
+  | _, _ => []
 /-- The domain a synchroniser's data comes from (empty if it has none, or several). -/
 def Net.dataDom (ds : Hdl.Vec (List String)) (p : NetPrim) (args : List Nat) : List String :=
   Net.dataDomAux ds p.inKinds args
@@ -2276,20 +2276,20 @@ clock net and a constant have none, a synchroniser's output is in its clock's do
 and every other node is in the union of its arguments' domains. -/
 def Net.domOfNode (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (nd : NetNode) : List String :=
   match nd.op, nd.args with
-  | .input p, _ => .cons (Net.DomCx.inPort cx p).dom List.nil
-  | .reg r, _ => .cons (Net.DomCx.reg cx r).dom List.nil
-  | .memRead m, _ => .cons (Net.DomCx.mem cx m).dom List.nil
-  | .clock _, _ => List.nil
-  | .const _, _ => List.nil
+  | .input p, _ => .cons (Net.DomCx.inPort cx p).dom []
+  | .reg r, _ => .cons (Net.DomCx.reg cx r).dom []
+  | .memRead m, _ => .cons (Net.DomCx.mem cx m).dom []
+  | .clock _, _ => []
+  | .const _, _ => []
   | .instOut j _, .cons i _ => match Net.DomCx.instAt cx i with
     | .some p => match p.sync with
       | .true => match Net.syncDom cx.nodes p (Net.DomCx.args cx i) with
-        | .some d => .cons d List.nil
-        | .none => List.nil
+        | .some d => [d]
+        | .none => []
       | .false => match Hdl.nthD (Option.none : Option String) p.outDom j with
-        | .some d => .cons d List.nil
+        | .some d => [d]
         | .none => Hdl.Vec.get Net.noDom ds i
-    | .none => List.nil
+    | .none => []
   | _, _ => Net.domArgs ds nd.args
 /-- The domain of every node, in order: the fixpoint of the rules above (a node's
 arguments are earlier nodes, so one pass reaches it). With one clock domain every set is
@@ -2311,7 +2311,7 @@ def Netlist.domNames (n : Netlist) : String :=
 declare. -/
 def Netlist.undeclared (n : Netlist) (what d : String) : List String :=
   match Netlist.hasDom n d with
-  | .true => List.nil
+  | .true => []
   | .false => .cons (what <+> " is on clock domain " <+> d <+> ", which the netlist does not declare ("
       <+> Netlist.domNames n <+> ")") List.nil
 
@@ -2319,24 +2319,24 @@ def Netlist.undeclared (n : Netlist) (what d : String) : List String :=
 node that mixes domains is reported where they meet (or upstream), not again here. -/
 def Net.domSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Nat) (what : String) : List String :=
   match Hdl.Vec.get Net.noDom ds a with
-  | .nil => List.nil
+  | .nil => []
   | .cons x .nil => match Hdl.strEq x d with
-    | .true => List.nil
+    | .true => []
     | .false => .cons ("a " <+> x <+> " signal (" <+> Net.DomCx.describe cx a <+> ") is used by " <+> d
         <+> " logic (" <+> what <+> "): no synchroniser") List.nil
-  | .cons _ (.cons _ _) => List.nil
+  | .cons _ (.cons _ _) => []
 /-- `Net.domSink` for an optional node (a register's reset or enable). -/
 def Net.domOptSink (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (d : String) (a : Option Nat) (what : String) : List String :=
   match a with
-  | .none => List.nil
+  | .none => []
   | .some k => Net.domSink cx ds d k what
 /-- The crossing error where a node's arguments mix two clock domains (the first argument
 in a domain, and a later one in another): the crossing that no synchroniser makes. -/
 def Net.domMix (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : NetNode) : List String :=
   match Net.firstDom ds nd.args with
-  | .none => List.nil
+  | .none => []
   | .some a => match Net.otherDom ds a.2 nd.args with
-    | .none => List.nil
+    | .none => []
     | .some b => .cons ("a " <+> Net.domHead ds b <+> " signal (" <+> Net.DomCx.describe cx b
         <+> ") and a " <+> a.2 <+> " signal (" <+> Net.DomCx.describe cx a.1 <+> ") meet at node "
         <+> Hdl.show k <+> ": no synchroniser") List.nil
@@ -2346,17 +2346,17 @@ in the clock's domain; `Net.domOfNode` puts it there.) -/
 def Net.domSync (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (p : NetPrim) : List String :=
   let ω name := "synchroniser " <+> p.name <+> " (node " <+> Hdl.show k <+> ")";
   match Nat.beq 1 (Net.clockLeaves p.inKinds) with
-  | .false => .cons (name <+> ": a synchroniser needs exactly one clock input") List.nil
+  | .false => [(name <+> ": a synchroniser needs exactly one clock input")]
   | .true => match Net.syncDom cx.nodes p (Net.DomCx.args cx k) with
-    | .none => .cons (name <+> ": no clock net (Hw.clockOf d) at its clock input") List.nil
+    | .none => [(name <+> ": no clock net (Hw.clockOf d) at its clock input")]
     | .some d => match Net.dataDom ds p (Net.DomCx.args cx k) with
-      | .nil => List.nil
+      | .nil => []
       | .cons src rest => match rest with
-        | .cons _ _ => .cons (name <+> ": its data mixes clock domains") List.nil
+        | .cons _ _ => [(name <+> ": its data mixes clock domains")]
         | .nil => match Hdl.strEq src d with
           | .true => .cons (name <+> ": its data is in its clock's own domain " <+> d
               <+> ", not another one") List.nil
-          | .false => List.nil
+          | .false => []
 /-- The crossing errors of one node: a mix of domains in its arguments, or a
 synchroniser's own rules. -/
 def Net.domNode (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : NetNode) : List String :=
@@ -2364,15 +2364,15 @@ def Net.domNode (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (k : Nat) (nd : Ne
   | .inst p => match p.sync with
     | .true => Net.domSync cx ds k p
     | .false => Net.domMix cx ds k nd
-  | .input _ => List.nil
-  | .const _ => List.nil
-  | .reg _ => List.nil
-  | .clock _ => List.nil
-  | .instOut _ _ => List.nil
+  | .input _ => []
+  | .const _ => []
+  | .reg _ => []
+  | .clock _ => []
+  | .instOut _ _ => []
   | _ => Net.domMix cx ds k nd
 /-- The crossing errors of every node, in order. -/
 def Net.domNodes (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : Nat → List NetNode → List String
-  | _, .nil => List.nil
+  | _, .nil => []
   | k, .cons nd nds => List.append (Net.domNode cx ds k nd) (Net.domNodes cx ds (Nat.succ k) nds)
 /-- The crossing errors of one register: what it loads, its reset and its enable must be
 in its own domain. -/
@@ -2382,7 +2382,7 @@ def Net.domReg (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (r : NetReg) : List
       (Net.domOptSink cx ds r.dom r.en ("the enable of register " <+> r.name)))
 /-- The crossing errors of the registers, in order. -/
 def Net.domRegs (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : List NetReg → List String
-  | .nil => List.nil
+  | .nil => []
   | .cons r rs => List.append (Net.domReg cx ds r) (Net.domRegs cx ds rs)
 /-- The crossing errors of one memory write: its enable, address and data must be in the
 memory's domain. -/
@@ -2392,15 +2392,15 @@ def Net.domMemWrite (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (m : NetMem) (
       (Net.domSink cx ds m.dom wd ("the write data of memory " <+> m.name)))
 /-- The crossing errors of a memory's writes, in order. -/
 def Net.domMemWrites (cx : Net.DomCx) (ds : Hdl.Vec (List String)) (m : NetMem) : List (Nat × (Nat × Nat)) → List String
-  | .nil => List.nil
+  | .nil => []
   | .cons w ws => List.append (Net.domMemWrite cx ds m w.1 w.2.1 w.2.2) (Net.domMemWrites cx ds m ws)
 /-- The crossing errors of the memories, in order. -/
 def Net.domMems (cx : Net.DomCx) (ds : Hdl.Vec (List String)) : List NetMem → List String
-  | .nil => List.nil
+  | .nil => []
   | .cons m ms => List.append (Net.domMemWrites cx ds m m.writes) (Net.domMems cx ds ms)
 /-- The undeclared domains of the input ports. -/
 def Net.domPorts (n : Netlist) : List NetPort → List String
-  | .nil => List.nil
+  | .nil => []
   | .cons p ps => List.append (Netlist.undeclared n ("input " <+> p.name) p.dom) (Net.domPorts n ps)
 /-- The undeclared domain of every port, register and memory. -/
 def Net.domDeclared (n : Netlist) : List String :=
@@ -2409,19 +2409,19 @@ def Net.domDeclared (n : Netlist) : List String :=
       (Hdl.concatLists (Hdl.map (fun (m : NetMem) => Netlist.undeclared n ("memory " <+> m.name) m.dom) n.mems)))
 /-- The undeclared domain of every clock net. -/
 def Net.domClockNets (n : Netlist) : Nat → List NetNode → List String
-  | _, .nil => List.nil
+  | _, .nil => []
   | k, .cons nd ns => List.append (match nd.op with
     | .clock d => Netlist.undeclared n ("the clock net at node " <+> Hdl.show k) d
-    | _ => List.nil) (Net.domClockNets n (Nat.succ k) ns)
+    | _ => []) (Net.domClockNets n (Nat.succ k) ns)
 /-- The undeclared domain of every primitive clock output (`Prim.outDom`). -/
 def Net.domPrimOuts (n : Netlist) : Nat → List NetNode → List String
-  | _, .nil => List.nil
+  | _, .nil => []
   | k, .cons nd ns => List.append (match nd.op with
     | .inst p => Hdl.concatLists (Hdl.map (fun (d : Option String) => match d with
-      | .none => List.nil
+      | .none => []
       | .some x => Netlist.undeclared n ("the clock output of " <+> p.name <+> " (node "
           <+> Hdl.show k <+> ")") x) p.outDom)
-    | _ => List.nil) (Net.domPrimOuts n (Nat.succ k) ns)
+    | _ => []) (Net.domPrimOuts n (Nat.succ k) ns)
 
 /-- What is wrong with a netlist's clock domains: data crossing a domain boundary without
 a synchroniser, a synchroniser in the wrong domain, a clock used as data (that one is
@@ -2442,23 +2442,23 @@ def Netlist.domainRefusals (n : Netlist) : List String :=
   match n.clocks with
   | .cons _ (.cons _ _) => .cons (Hdl.show (List.length n.clocks) <+> " clock domains ("
       <+> Netlist.domNames n <+> "): multi-clock simulation needs an event schedule") List.nil
-  | _ => List.nil
+  | _ => []
 
 /-- The clock periods a pin constraint file needs, checked against the board's clock (in
 picoseconds): the first domain's declared period, if any, must be the board's; every
 later domain needs a period to constrain it (`0` means unknown). -/
 def Netlist.clockProblems (n : Netlist) (boardPeriodPs : Nat) : List String :=
   match n.clocks with
-  | .nil => List.nil
+  | .nil => []
   | .cons d ds => List.append (match d.periodPs with
-      | 0 => List.nil
+      | 0 => []
       | ps => match Nat.beq ps boardPeriodPs with
-        | .true => List.nil
+        | .true => []
         | .false => .cons ("clock domain " <+> d.name <+> " is " <+> Hdl.show ps <+> " ps, the board's clock is "
             <+> Hdl.show boardPeriodPs <+> " ps") List.nil)
     (Hdl.concatLists (Hdl.map (fun (e : ClockDomain) => match e.periodPs with
-      | 0 => .cons ("clock domain " <+> e.name <+> " has no period: cannot constrain it") List.nil
-      | _ => List.nil) ds))
+      | 0 => [("clock domain " <+> e.name <+> " has no period: cannot constrain it")]
+      | _ => []) ds))
 /-- The period of the first clock domain, or `0`. -/
 def Netlist.firstPeriod (n : Netlist) : Nat :=
   match n.clocks with
@@ -2611,7 +2611,7 @@ structure MultiS where
   errs : List String
 
 def MultiS.init (clocks : List ClockDomain) : MultiS :=
-  MultiS.mk List.nil 0 List.nil List.nil List.nil List.nil List.nil List.nil List.nil clocks List.nil List.nil List.nil
+  MultiS.mk [] 0 [] [] [] [] [] [] [] clocks [] [] []
 
 /-- Building a `Multi`: a state monad over `MultiS`. -/
 def MultiM (A : Type) : Type := MultiS → A × MultiS
@@ -2637,7 +2637,7 @@ def MultiM.lookupName (k : String) : MultiM (Option Nat) := fun s => (Hdl.lookup
 def MultiM.addInput (name : String) (width : Nat) (dom : String) (kind : PortKind) : MultiM Nat := fun s =>
   let idx := List.length s.inputs;
   let k := s.next;
-  (k, MultiS.mk (List.cons (NetNode.mk (.input idx) width List.nil) s.nodes) (Nat.succ s.next) s.regs s.mems
+  (k, MultiS.mk (List.cons (NetNode.mk (.input idx) width []) s.nodes) (Nat.succ s.next) s.regs s.mems
     (List.append s.inputs (.cons (NetPort.mk name width k dom) .nil)) s.outputs s.hints
     (List.cons (name, k) s.names) s.built s.clocks (List.append s.inKinds (.cons kind .nil)) s.outKinds s.errs)
 /-- Add a top-level output port, once. -/
@@ -2653,7 +2653,7 @@ def MultiM.clockNode (d : String) : MultiM Nat := fun s =>
   | .some k => (k, s)
   | .none =>
     let k := s.next;
-    (k, MultiS.mk (List.cons (NetNode.mk (.clock d) 1 List.nil) s.nodes) (Nat.succ s.next) s.regs s.mems s.inputs
+    (k, MultiS.mk (List.cons (NetNode.mk (.clock d) 1 []) s.nodes) (Nat.succ s.next) s.regs s.mems s.inputs
       s.outputs s.hints (List.cons (d, k) s.names) s.built s.clocks s.inKinds s.outKinds s.errs)
 /-- A node's arguments, renumbered by a part's local → global map. -/
 def Multi.remapArgs (rem : Hdl.Vec Nat) : List Nat → List Nat
@@ -2697,7 +2697,7 @@ def MultiM.resolveName (m : Multi) (name : String) : MultiM Nat := fun s =>
     | .false => (0, MultiM.errorS ("Multi: no source " <+> name <+> " (wires may only read earlier parts or clock domains)") s)
 /-- Resolve a list of names, in order. -/
 def MultiM.resolveNames (m : Multi) : List String → MultiM (List Nat)
-  | .nil => MultiM.pure List.nil
+  | .nil => MultiM.pure []
   | .cons x xs => MultiM.bind (MultiM.resolveName m x) (fun k =>
       MultiM.bind (MultiM.resolveNames m xs) (fun ks => MultiM.pure (List.cons k ks)))
 /-- The output nodes of a primitive instance: leaf `j` at bit `lo`, named `outs[j]`. -/
@@ -2764,7 +2764,7 @@ def MultiM.partNodes (m : Multi) (p : MultiPart) (regBase memBase : Nat) : List 
   | .cons n ns, rem => MultiM.bind (match n.op with
       | .input j => MultiM.partInput m p j
       | .clock d => MultiM.clockNode d
-      | .reg r => MultiM.push (.reg (regBase + r)) n.width List.nil
+      | .reg r => MultiM.push (.reg (regBase + r)) n.width []
       | .memRead mm => MultiM.push (.memRead (memBase + mm)) n.width (Multi.remapArgs rem n.args)
       | _ => MultiM.push n.op n.width (Multi.remapArgs rem n.args)) (fun k =>
         MultiM.partNodes m p regBase memBase ns (Hdl.Vec.push rem k))
@@ -3781,7 +3781,7 @@ def deriveBitPack : Deriver := fun n => do
     | .true => do
       code ← MacroM.getType (String.append n ".code");
       pre ← (match code with
-        | .some _ => MacroM.pure List.nil
+        | .some _ => MacroM.pure []
         | .none => deriveBundle n);
       HdlDerive.bundlePack v n pre
     | .false => MacroM.throw (String.append "BitPack: not an enumeration or a bundle: " n))
@@ -3884,7 +3884,7 @@ hexadecimal. -/
 def Testbench.line (n : Netlist) (ins outs : List Nat) : String :=
   let ω w := Hdl.sum (Hdl.map (fun (p : NetPort) => p.width) n.inputs) + Hdl.sum (Hdl.map (fun (p : NetPort) => p.width) n.outputs);
   let ω v := Testbench.packPorts n.outputs outs (Testbench.packPorts n.inputs ins 0);
-  String.mk (Hdl.hexAux (Nat.max 1 (Nat.div (w + 3) 4)) v (List.cons (Char.mk 10) List.nil))
+  String.mk (Hdl.hexAux (Nat.max 1 (Nat.div (w + 3) 4)) v [(Char.mk 10)])
 /-- The vector lines of a trace of inputs and outputs. -/
 def Testbench.lines (n : Netlist) : List (List Nat) → List (List Nat) → List String
   | .cons i is, .cons o os => .cons (Testbench.line n i o) (Testbench.lines n is os)
@@ -3905,7 +3905,7 @@ def Vcd.idAux : Nat → Nat → List Char → List Char
     | .true => List.cons (Char.mk (33 + k)) acc
     | .false => Vcd.idAux f (Nat.div k 94 - 1) (List.cons (Char.mk (33 + Nat.mod k 94)) acc)
 /-- The VCD identifier of signal `k`: `!`, `"`, … -/
-def Vcd.id (k : Nat) : String := String.mk (Vcd.idAux 8 k List.nil)
+def Vcd.id (k : Nat) : String := String.mk (Vcd.idAux 8 k [])
 /-- A value change line: `1!` for one bit, `b0101 "` for a vector. -/
 def Vcd.value (w v : Nat) (id : String) : String := match w with
   | .succ .zero => Hdl.show v <+> id <+> "\n"
@@ -3946,7 +3946,7 @@ def Vcd.ofRun {ω i o : HwTy} (name : String) (c : Circuit i o) (xs : List (HwTy
   let ω names := List.cons "clk" (List.append (HwTy.portNames "x" i) (List.append (HwTy.portNames "y" o) (HwTy.portNames "r" c.st)));
   let ω ws := List.cons 1 (List.append (HwTy.leafWidths i) (List.append (HwTy.leafWidths o) (HwTy.leafWidths c.st)));
   "$timescale 1ns $end\n$scope module " <+> Verilog.ident name <+> " $end\n" <+> Vcd.vars 0 names ws
-  <+> "$upscope $end\n$enddefinitions $end\n" <+> Hdl.concat (Vcd.cycles c ws 0 c.init xs List.nil List.nil)
+  <+> "$upscope $end\n$enddefinitions $end\n" <+> Hdl.concat (Vcd.cycles c ws 0 c.init xs [] [])
 
 ------------------------------------------------------------------------------------
 -- Pin constraints (the PCF of nextpnr-ice40 and arachne): a pin for every port, by the
@@ -4073,7 +4073,7 @@ def Design.runGo (d : Design) : HwTy.El d.st → List (HwTy.El d.i) → List (Hw
     let ω r : HwTy.El d.st × HwTy.El d.o := d.step s x;
     Design.runGo d r.1 xs (List.cons r.2 acc)
 /-- Simulate a design by values from its initial state. -/
-def Design.run (d : Design) (xs : List (HwTy.El d.i)) : List (HwTy.El d.o) := Design.runGo d d.init xs List.nil
+def Design.run (d : Design) (xs : List (HwTy.El d.i)) : List (HwTy.El d.o) := Design.runGo d d.init xs []
 /-- `Design.run` on bus encodings (one number per cycle). -/
 def Design.runPacked (d : Design) (xs : List Nat) : List Nat :=
   Hdl.map (HwTy.pack d.o) (Design.run d (Hdl.map (HwTy.unpack d.i) xs))

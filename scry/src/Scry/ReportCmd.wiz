@@ -250,7 +250,7 @@ def Scry.reportFilesOf (path : String) : EIO (List String) := do
   | .true => do
     isDir ← EIO.lift (FS.isDir path);
     match isDir with
-    | .false => EIO.pure (List.cons path .nil)
+    | .false => EIO.pure [path]
     | .true => do
       found ← Scry.ProjectIO.walkGo path;
       EIO.pure (Scry.sortStrings found)

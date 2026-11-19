@@ -14,7 +14,7 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell nixpkgs#emscripten -c "$0" "$@"; fi
+if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
 case "${2:-}" in --gmp-src) GMPSRC=$(cd "$(dirname "$3")" && pwd)/$(basename "$3") ;; esac
 OUT=$(mkdir -p "${1:-$ROOT/web/out}" && cd "${1:-$ROOT/web/out}" && pwd)
@@ -23,7 +23,7 @@ WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # 1. mini-gmp from GMP's source tarball, behind a <gmp.h>
 if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
   mkdir -p "$OUT/gmp"
-  SRC=${GMPSRC:-$(nix build --no-link --print-out-paths nixpkgs#gmp.src)}
+  SRC=${GMPSRC:-$(nix build --inputs-from "$ROOT" --no-link --print-out-paths nixpkgs#gmp.src)}
   tar -C "$OUT/gmp" --strip-components=2 -xf "$SRC" --wildcards '*/mini-gmp/mini-gmp.[ch]'
   printf '#include "mini-gmp.h"\n' > "$OUT/gmp/gmp.h"
 fi

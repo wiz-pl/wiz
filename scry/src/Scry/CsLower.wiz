@@ -397,13 +397,13 @@ partial def Scry.Cs.lowerArgs (c : Scry.Cst) : List Nat → Scry.Cs.M (List Wil.
       | .some d => do
         v ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
         Scry.Cs.emit c d (Wil.cst v .nul);
-        Scry.Cs.pure (v, List.cons d .nil)
+        Scry.Cs.pure (v, [d])
       | .none => match Scry.childF c a "expression" with
         | .some e => do
           x ← Scry.Cs.lowerExpr c e;
           outs ← (match Scry.childK c a "modifier" with
             | .some m => match Bool.or (String.eq (c.textOf m) "out") (String.eq (c.textOf m) "ref") with
-              | .true => Scry.Cs.pure (List.cons e .nil)
+              | .true => Scry.Cs.pure [e]
               | .false => Scry.Cs.pure (.nil : List Nat)
             | .none => Scry.Cs.pure (.nil : List Nat));
           Scry.Cs.pure (x.v, outs)
@@ -452,7 +452,7 @@ partial def Scry.Cs.instanceCall (c : Scry.Cst) (n : Nat) (recv : Scry.Cs.EV) (m
       | .some om => om.2.ret
       | .none => "?"
     | .none => Scry.Cs.knownRet (recv.ty ++ "." ++ m);
-  Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) (List.cons recv.v .nil) ret
+  Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) [recv.v] ret
 
 /-- `f(args)`, `x.M(args)`, `T.M(args)`, `this.M(args)`. -/
 partial def Scry.Cs.lowerCall (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV := do
@@ -555,13 +555,13 @@ partial def Scry.Cs.lowerMember (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV 
       recv ← Scry.Cs.lowerExpr c e;
       match Scry.Cs.findCls s.unit recv.ty with
       | .some k => match String.elem m k.props with
-        | .true => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) (List.cons recv.v .nil) "?"
+        | .true => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) [recv.v] "?"
         | .false => do
           r ← Scry.Cs.readField c n recv.v k m;
           match r with
           | .some x => Scry.Cs.pure x
-          | .none => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) (List.cons recv.v .nil) "?"
-      | .none => Scry.Cs.call c n (recv.ty ++ ".get_" ++ m) (List.cons recv.v .nil)
+          | .none => Scry.Cs.call c n (k.qname ++ ".get_" ++ m) [recv.v] "?"
+      | .none => Scry.Cs.call c n (recv.ty ++ ".get_" ++ m) [recv.v]
           (Scry.Cs.knownRet (recv.ty ++ ".get_" ++ m))
   | _, _ => Scry.Cs.havoc c n (Wil.Ty.ptr Wil.Ty.dyn) "member access"
 
@@ -590,8 +590,8 @@ partial def Scry.Cs.assignTo (c : Scry.Cst) (n : Nat) (lhs : Nat) (v : Scry.Cs.E
           a ← Scry.Cs.fieldAddr c n .none kc m;
           match a with
           | .some p => Scry.Cs.emit c n (Wil.store p v.v)
-          | .none => Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (t ++ ".set_" ++ m)) (List.cons v.v .nil) Wil.noSpan)
-        | .none => Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (t ++ ".set_" ++ m)) (List.cons v.v .nil) Wil.noSpan)
+          | .none => Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (t ++ ".set_" ++ m)) [v.v] Wil.noSpan)
+        | .none => Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (t ++ ".set_" ++ m)) [v.v] Wil.noSpan)
       | .none => do
         recv ← Scry.Cs.lowerExpr c e;
         match Scry.Cs.findCls s.unit recv.ty with
@@ -608,7 +608,7 @@ partial def Scry.Cs.assignTo (c : Scry.Cst) (n : Nat) (lhs : Nat) (v : Scry.Cs.E
       recv ← Scry.Cs.lowerExpr c e;
       r ← Scry.Cs.lowerArgs c (Scry.kids c sub);
       Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (recv.ty ++ ".set_Item"))
-        (List.append (List.cons recv.v r.1) (List.cons v.v .nil)) Wil.noSpan)
+        (List.append (List.cons recv.v r.1) [v.v]) Wil.noSpan)
     | _, _ => Scry.Cs.warn c lhs "assignment target not modelled"
   else if String.eq k "parenthesized_expression" then match Scry.kids c lhs with
     | .cons i _ => Scry.Cs.assignTo c n i v
@@ -1188,7 +1188,7 @@ partial def Scry.Cs.lowerInit (c : Scry.Cst) (obj : Scry.Cs.EV) : List Nat → S
           | .none => Scry.Cs.emit c e (Wil.Stmt.call .none (.direct (obj.ty ++ ".set_" ++ m)) [obj.v, v.v] Wil.noSpan)
         | _, _ => Scry.Cs.pure ()
       | .false => do
-        xs ← Scry.Cs.lowerExprs c (List.cons e .nil);
+        xs ← Scry.Cs.lowerExprs c [e];
         Scry.Cs.emit c e (Wil.Stmt.call .none (.direct (obj.ty ++ ".Add")) (List.cons obj.v xs) Wil.noSpan));
     Scry.Cs.lowerInit c obj rest
 
@@ -1461,13 +1461,13 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
     match Scry.childF c n "type", Scry.childF c n "left", Scry.childF c n "right", Scry.childF c n "body" with
     | .some ty, .some nm, .some coll, .some body => Scry.Cs.scoped (do
       xs ← Scry.Cs.lowerExpr c coll;
-      en ← Scry.Cs.call c n (xs.ty ++ ".GetEnumerator") (List.cons xs.v .nil) "?";
+      en ← Scry.Cs.call c n (xs.ty ++ ".GetEnumerator") [xs.v] "?";
       hb ← Scry.Cs.newBlock;
       bb ← Scry.Cs.newBlock;
       xb ← Scry.Cs.newBlock;
       Scry.Cs.goto c n hb;
       Scry.Cs.startBlock hb;
-      more ← Scry.Cs.call c n (xs.ty ++ ".Enumerator.MoveNext") (List.cons en.v .nil) "System.Boolean";
+      more ← Scry.Cs.call c n (xs.ty ++ ".Enumerator.MoveNext") [en.v] "System.Boolean";
       z ← Scry.Cs.fresh more.v.ty;
       Scry.Cs.emit c n (Wil.cst z (Wil.Val.default more.v.ty));
       Scry.Cs.seal c n (.br (Wil.Cond.cmp .ne more.v z) (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
@@ -1478,7 +1478,7 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
         | .true, .some e => e
         | .true, .none => "?"
         | .false, _ => t0;
-      cur ← Scry.Cs.call c n (xs.ty ++ ".Enumerator.get_Current") (List.cons en.v .nil) elemTy;
+      cur ← Scry.Cs.call c n (xs.ty ++ ".Enumerator.get_Current") [en.v] elemTy;
       ign ← Scry.Cs.declare c nm (c.textOf nm) elemTy (.some cur);
       Scry.Cs.loopBody c body xb hb;
       Scry.Cs.goto c n hb;
@@ -1510,7 +1510,7 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
           Scry.Cs.pure (List.map (fun l => Scry.Cs.ev l.var l.ty) ls)
         | .false => do
           x ← Scry.Cs.lowerExpr c r;
-          Scry.Cs.pure (List.cons x .nil)
+          Scry.Cs.pure [x]
       | .nil => Scry.Cs.pure (.nil : List Scry.Cs.EV));
     (match Scry.childF c n "body" with
       | .some b => Scry.Cs.lowerStmt c b
@@ -1528,7 +1528,7 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
 partial def Scry.Cs.dispose (c : Scry.Cst) (n : Nat) : List Scry.Cs.EV → Scry.Cs.M Unit
   | .nil => Scry.Cs.pure ()
   | .cons r rest => do
-    Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (r.ty ++ ".Dispose")) (List.cons r.v .nil) Wil.noSpan);
+    Scry.Cs.emit c n (Wil.Stmt.call .none (.direct (r.ty ++ ".Dispose")) [r.v] Wil.noSpan);
     Scry.Cs.dispose c n rest
 
 partial def Scry.Cs.sectionBlocks : Nat → Scry.Cs.M (List Nat)

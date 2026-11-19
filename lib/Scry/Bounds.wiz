@@ -72,8 +72,8 @@ def Scry.boundsSizesOfFunc (fn : Wil.Func) : List ((String × Nat) × Nat) :=
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
-      | .assign _ (.alloc cells) _ => List.cons ((fn.name, n), cells) .nil
-      | .assign _ (.slot cells) _ => List.cons ((fn.name, n), cells) .nil
+      | .assign _ (.alloc cells) _ => [((fn.name, n), cells)]
+      | .assign _ (.slot cells) _ => [((fn.name, n), cells)]
       | _ => .nil) (Scry.range g.count)
 
 def Scry.boundsSizes (p : Wil.Program) : List ((String × Nat) × Nat) :=
@@ -225,7 +225,7 @@ def Scry.boundsFinding (rule : Scry.MemoryRule) (fn : Wil.Func) (point var : Nat
   let a := Scry.boundsAllocNode alloc fn.name point;
   let s := Scry.PathNode.mk fn.name point var Scry.PathKind.sink;
   Scry.RuleFinding.mk rule.id rule.severity rule.message Scry.FindingKind.memory
-    fn.name point what var (List.cons a (List.cons s .nil))
+    fn.name point what var [a, s]
 
 def Scry.boundsWarning (func : String) (point : Nat) (what : String) : Scry.MemWarning :=
   Scry.MemWarning.mk Scry.MemWarnKind.unknownMemory func point
@@ -284,13 +284,13 @@ def Scry.boundsCapCheck (rule : Option Scry.MemoryRule) (fn : Wil.Func) (g : Scr
     Scry.BoundsResult :=
   match Nat.beq size 0 with
   | .true => Scry.BoundsResult.mk .nil
-      (List.cons (Scry.boundsWarning fn.name access what) .nil)
+      [(Scry.boundsWarning fn.name access what)]
   | .false => match Scry.boundsGuarded info g access idx bound with
     | .true => Scry.boundsEmpty
     | .false => match rule with
       | .none => Scry.boundsEmpty
       | .some r => Scry.BoundsResult.mk
-          (List.cons (Scry.boundsFinding r fn access idx what alloc) .nil) .nil
+          [(Scry.boundsFinding r fn access idx what alloc)] .nil
 
 /-- Check one reached `gepVar` definition at an access. -/
 def Scry.boundsIndexSite (writeRule readRule : Option Scry.MemoryRule)

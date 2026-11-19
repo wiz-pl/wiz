@@ -164,7 +164,7 @@ class TraverseMut (S : Type) (A : outParam Type) where
 
 /-- `iter_mut` over a list (`TraverseMut`'s instance for `List`). -/
 def List.traverseM {A σ : Type} (f : A → σ → Result (A × σ)) : List A → σ → Result (List A × σ)
-  | .nil, st => .ok ((List.nil : List A), st)
+  | .nil, st => .ok (([] : List A), st)
   | .cons x xs, st => match f x st with
     | .ok r => (match List.traverseM f xs r.2 with
       | .ok r' => .ok (List.cons r.1 r'.1, r'.2)

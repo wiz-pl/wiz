@@ -423,13 +423,13 @@ def Option.unless_when {A : Type} : (b : Bool) → (w : A) → (o : Option A) �
   | .false, w, o, d => rfl
 /-- The cell `l` of `single l v ⊎ h₂` holds `v`. -/
 def Heap.union_single_at {V : Type} (h h₁ h₂ : Heap V) (l : Nat) (v : V)
-    (e : h = Heap.union h₁ h₂) (e₁ : h₁ = Heap.single l v) : h l = Option.some v :=
+    (e : h = Heap.union h₁ h₂) (e₁ : h₁ = Heap.single l v) : h l = .some v :=
   Eq.trans (e l) (@Eq.congrArg (Option V) (Option V) (fun (o : Option V) => Option.orElse o (h₂ l))
-    (h₁ l) (Option.some v) (Eq.trans (e₁ l) (Heap.single_at l v)))
+    (h₁ l) (.some v) (Eq.trans (e₁ l) (Heap.single_at l v)))
 /-- An allocated cell is below the bound. -/
-def Heap.bounded_ne {V : Type} (h : Heap V) (n l : Nat) (v : V) (b : Heap.Bounded h n) (hl : h l = Option.some v)
+def Heap.bounded_ne {V : Type} (h : Heap V) (n l : Nat) (v : V) (b : Heap.Bounded h n) (hl : h l = .some v)
     (k : Nat) : Not (Nat.beq l (k + n) = .true) := fun eb =>
-  absurd (@Option.substP V (@Option.Free V) (h l) (Option.some v) hl
+  absurd (@Option.substP V (@Option.Free V) (h l) (.some v) hl
     (@Nat.substP (Heap.FreeAt h) (k + n) l (Eq.symm (Nat.beq_eq l (k + n) eb)) (b k))).1
 
 -- ### The cases
@@ -485,11 +485,11 @@ def adequacy.alloc {V A : Type} (v : V) (k : Nat → Prog V A) (0 Q : A → HPro
     Prog.Post Q (Prog.run (Prog.alloc v k) h n) :=
   let d : Heap.Disj h (Heap.single n v) := fun l' => Or.elim (Bool.cases (Nat.beq n l'))
     (fun eb => Or.inl (@Nat.substP (Heap.FreeAt h) n l' (Nat.beq_eq n l' eb) (b 0)))
-    (fun eb => Or.inr (@Bool.substP (Option.FreeWhen v) Bool.false (Nat.beq n l') (Eq.symm eb) rfl));
+    (fun eb => Or.inr (@Bool.substP (Option.FreeWhen v) .false (Nat.beq n l') (Eq.symm eb) rfl));
   let bu : Heap.Bounded (Heap.union h (Heap.single n v)) (Nat.succ n) := fun j =>
     (Option.free_orElse (h (j + Nat.succ n)) (Heap.single n v (j + Nat.succ n))).2
       (@Nat.substP (Heap.FreeAt h) (Nat.succ (j + n)) (j + Nat.succ n) (Eq.symm (Nat.add_succ_r j n)) (b (Nat.succ j)),
-       @Bool.substP (Option.FreeWhen v) Bool.false (Nat.beq n (j + Nat.succ n))
+       @Bool.substP (Option.FreeWhen v) .false (Nat.beq n (j + Nat.succ n))
          (Eq.symm (@Nat.substP (Nat.BeqFalse n) (Nat.succ (j + n)) (j + Nat.succ n) (Eq.symm (Nat.add_succ_r j n)) (Nat.beq_succ_add n j)))
          rfl);
   ih bu (w n (Heap.single n v) d rfl)

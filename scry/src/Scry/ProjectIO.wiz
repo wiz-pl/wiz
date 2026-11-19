@@ -143,7 +143,7 @@ def Scry.ProjectIO.stripSystem (pre : Scry.Preprocessed) : Scry.Preprocessed :=
 `cwd` (the compile command's directory, when it has one). -/
 def Scry.ProjectIO.preprocess (cc : String) (cwd : Option String) (flags : List String)
     (file : String) : EIO String := do
-  let args := List.append ["-E", "-ffreestanding"] (List.append flags (List.cons file .nil));
+  let args := List.append ["-E", "-ffreestanding"] (List.append flags [file]);
   let opts : SpawnOptions := match cwd with
     | .some d => SpawnOptions.inDir d SpawnOptions.piped
     | .none => SpawnOptions.piped;
@@ -264,7 +264,7 @@ partial def Scry.ProjectIO.walkNames (dir : String) : List String → EIO (List 
         | .true => EIO.pure (.nil : List String)
         | .false => Scry.ProjectIO.walkGo full
       | .file => match String.endsWith name ".c" with
-        | .true => EIO.pure (List.cons full .nil)
+        | .true => EIO.pure [full]
         | .false => EIO.pure (.nil : List String)
       | _ => EIO.pure (.nil : List String);
     tail ← Scry.ProjectIO.walkNames dir rest;
@@ -277,7 +277,7 @@ end
 
 /-- Sort strings (insertion sort; a project's source list is small). -/
 def Scry.insertString (x : String) : List String → List String
-  | .nil => List.cons x .nil
+  | .nil => [x]
   | .cons y rest => match String.lt x y with
     | .true => List.cons x (List.cons y rest)
     | .false => List.cons y (Scry.insertString x rest)

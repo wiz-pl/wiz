@@ -241,7 +241,7 @@ def downExpected (n : Nat) : List (Nat × Nat) :=
     (txPayload 8 lo 1 0 1 0, txPayload 8 hi 1 last 1 0)) (units n)
 
 def downExpectedFlat (n : Nat) : List Nat :=
-  Hdl.concatLists (Hdl.map (fun (p : Nat × Nat) => List.cons p.1 (List.cons p.2 List.nil))
+  Hdl.concatLists (Hdl.map (fun (p : Nat × Nat) => [p.1, p.2])
     (downExpected n))
 
 def downLawOk (n period fuel : Nat) : Bool :=

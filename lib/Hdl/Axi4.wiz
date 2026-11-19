@@ -461,12 +461,12 @@ structure Axi4.Burst where
 remainder. Recursion is on `fuel` (call it with `List.length xs`), because the remainder
 is rebuilt. -/
 def Axi4.removeId : (fuel : Nat) → List Axi4.Burst → Nat → (Bool × List Axi4.Burst)
-  | .zero, xs, _ => (Bool.false, xs)
+  | .zero, xs, _ => (.false, xs)
   | .succ f, xs, id =>
     match xs with
-    | .nil => (Bool.false, List.nil)
+    | .nil => (.false, [])
     | .cons x rest =>
-      if Nat.beq x.id id then (Bool.true, rest)
+      if Nat.beq x.id id then (.true, rest)
       else
         let r := Axi4.removeId f rest id;
         (r.1, List.cons x r.2)

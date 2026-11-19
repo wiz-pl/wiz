@@ -171,7 +171,7 @@ def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := 
         IO.pure (.some (Scry.Repl.Unit.mk path p))
 
 partial def Scry.Repl.sortGo (x : String) : List String → List String
-  | .nil => List.cons x .nil
+  | .nil => [x]
   | .cons y rest => match String.lt x y with
     | .true => List.cons x (List.cons y rest)
     | .false => List.cons y (Scry.Repl.sortGo x rest)
@@ -237,7 +237,7 @@ def Scry.Repl.load (path : String) : IO Unit := do
       match u with
       | .none => IO.println ("load: could not load " ++ path)
       | .some u => do
-        Scry.Repl.saveUnits (List.cons u .nil);
+        Scry.Repl.saveUnits [u];
         IO.println ("loaded " ++ path ++ " (1 unit; use facts/query/functions)")
 
 
@@ -912,7 +912,7 @@ partial def Scry.Repl.uniqCallers (acc : List String) : List Scry.Repl.CallSite 
   | .nil => acc
   | .cons c rest => match List.any (fun x => String.eq x c.function) acc with
     | .true => Scry.Repl.uniqCallers acc rest
-    | .false => Scry.Repl.uniqCallers (List.append acc (List.cons c.function .nil)) rest
+    | .false => Scry.Repl.uniqCallers (List.append acc [c.function]) rest
 
 /-- Functions that call `callee` (deduplicated). -/
 def Scry.Repl.callers (callee : String) : IO (List String) := do

@@ -145,7 +145,7 @@ def badNet : Netlist :=
     (.cons (NetPort.mk "y" 4 1 "clk") (.cons (NetPort.mk "z" 4 7 "clk") .nil))
     .nil .nil (.cons ClockDomain.sys .nil) .nil
 
-def badIns : List (List Nat) := Hdl.map (fun (k : Nat) => List.cons k List.nil) (Rng.trace 16 20 9)
+def badIns : List (List Nat) := Hdl.map (fun (k : Nat) => [k]) (Rng.trace 16 20 9)
 
 -- the RAM's netlist on raw port values beyond the ports' widths (addresses past the
 -- memory: `Netlist.simulate` keeps any address; so must `simFast`)

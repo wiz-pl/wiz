@@ -605,7 +605,9 @@ The snapshot is additive: an index without one is read exactly as before.
   download size cap, and no build sandbox — `grail build` runs the package author's
   Wiz/C code. Expiry and sequence are checked at `update`/`index verify`, not on every
   build. A first use needs an external `--allowed-signers` policy; an index without a
-  snapshot is accepted unless `--require-signature` or a lock pinned one.
+  snapshot is accepted unless `--require-signature` or a lock pinned one. CI and the
+  install docs pass `--require-signature`; `--allow-unsigned` is the explicit escape for
+  a registry without a signed snapshot.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the

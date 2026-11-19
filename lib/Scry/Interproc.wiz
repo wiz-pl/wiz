@@ -80,7 +80,7 @@ def Scry.sitesOfFunc (fn : Wil.Func) (pt : Scry.PtResult) : List Scry.CallSite :
     | .none => .nil
     | .some s => match s with
       | .call r callee args _ => match callee with
-        | .direct name => List.cons (Scry.siteOfCall fn pt n r args name) .nil
+        | .direct name => [(Scry.siteOfCall fn pt n r args name)]
         | .indirect _ =>
           List.map (fun name => Scry.siteOfCall fn pt n r args name)
             (Scry.indirectAt pt fn.name n).names
@@ -92,7 +92,7 @@ def Scry.indirectOfFunc (fn : Wil.Func) : List (String × Nat) :=
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
-      | .call _ (.indirect _) _ _ => List.cons (fn.name, n) .nil
+      | .call _ (.indirect _) _ _ => [(fn.name, n)]
       | _ => .nil) (Scry.range g.count)
 
 /-- The direct-call graph of a program plus every resolved indirect target; the unresolved
@@ -118,7 +118,7 @@ Such a function is used from inside the unit as a callback, so its parameters ar
 external entry merely because no direct call resolves to it. -/
 def Scry.fnptrNamesOfStmt (s : Wil.Stmt) : List String :=
   match s with
-  | .assign _ (.fnptr name) _ => List.cons name .nil
+  | .assign _ (.fnptr name) _ => [name]
   | _ => .nil
 
 def Scry.fnptrNamesOfFunc (fn : Wil.Func) : List String :=
@@ -203,7 +203,7 @@ def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncRe
     Scry.concatLists (fun site =>
       if Bool.and (String.eq site.caller r.fn.name) (String.eq site.callee callee) then
         Scry.concatLists (fun p =>
-          if Scry.argTainted r site.node p.2 then List.cons p.1 .nil else .nil)
+          if Scry.argTainted r site.node p.2 then [p.1] else .nil)
           (Scry.indexedNats 0 site.args)
       else .nil) graph.sites) results
 
@@ -264,7 +264,7 @@ def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
     if Bool.and (String.eq site.caller caller)
         (Scry.summaryOf sums site.callee).retTainted then
       match site.result with
-      | .some r => List.cons (site.node, r) .nil
+      | .some r => [(site.node, r)]
       | .none => .nil
     else .nil) graph.sites
 
@@ -520,7 +520,7 @@ def Scry.returnChain (r : Scry.FuncResult) : List Scry.PathNode :=
     | .none => .nil
     | .some d =>
       List.append (Scry.chainToDef r.fn.name r.plan.seeds st d p.2)
-        (List.cons (Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue) .nil)
+        [(Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue)]
 
 /-- A caller path to the argument at `pos` of a call site, if one is tainted. -/
 def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
@@ -536,7 +536,7 @@ def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
       | .none => .none
       | .some d =>
         .some (List.append (Scry.chainToDef r.fn.name r.plan.seeds st d v)
-          (List.cons (Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call) .nil))
+          [(Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call)])
     else .none
 
 /-- Find a caller that passes taint into parameter `pos` of `callee`. -/
@@ -633,7 +633,7 @@ def Scry.findingKeyLess (a b : Scry.RuleFinding) : Bool :=
 
 def Scry.insertRuleFinding (f : Scry.RuleFinding) (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
   match fs with
-  | .nil => List.cons f .nil
+  | .nil => [f]
   | .cons x xs => match Scry.findingKeyLess f x with
     | .true => List.cons f fs
     | .false => List.cons x (Scry.insertRuleFinding f xs)

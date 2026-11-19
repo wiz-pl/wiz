@@ -312,14 +312,14 @@ def Bool.or_assoc : (a b c : Bool) → Bool.or (Bool.or a b) c = Bool.or a (Bool
 the `&&` macro's stuck form is the one a goal written `b && true` contains. A rule stated
 `Bool.and b .true = b` would *not* fire on it (`Bool.and` matches on both arguments), so
 the three notation identities are stated here with the notation. -/
-def Bool.and_true : (a : Bool) → (a && Bool.true) = a
+def Bool.and_true : (a : Bool) → (a && .true) = a
   | .true => rfl
   | .false => rfl
 /-- `.true` is a left identity of `Bool.and`. -/
 def Bool.true_and (a : Bool) : Bool.and .true a = a := rfl
 /-- `.false` is absorbing on the right for `Bool.and` (`b && false = false`), on the
 notation for the reason above. -/
-def Bool.and_false : (a : Bool) → (a && Bool.false) = Bool.false
+def Bool.and_false : (a : Bool) → (a && .false) = .false
   | .true => rfl
   | .false => rfl
 /-- `.false` is absorbing on the left for `Bool.and`. -/

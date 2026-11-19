@@ -160,10 +160,10 @@ def Scry.Program.isLat {L : Type} (p : Scry.Program L) (r : Nat) : Bool :=
 every lattice head variable by a body lattice atom, and every atom has its declared
 arity. -/
 def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :=
-  let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) List.nil r.body;
+  let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) [] r.body;
   let latBound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => match a.latVal with
     | .none => acc
-    | .some v => List.cons v acc) List.nil r.body;
+    | .some v => List.cons v acc) [] r.body;
   let headVars : List Nat := match r.head with
     | .tuple _ args => Scry.termsVars args
     | .lat _ key _ => Scry.termsVars key;
@@ -171,13 +171,13 @@ def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :
     | .tuple _ _ => .nil
     | .lat _ _ val => val.vars;
   let negOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
-    if Scry.natSubset a.negVars bound then acc else Bool.false) Bool.true r.body;
+    if Scry.natSubset a.negVars bound then acc else .false) .true r.body;
   let arityOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
     if Scry.Atom.relOk p a then
       if Scry.Atom.kindOk p a then
-        if Scry.Atom.arityOk p a then acc else Bool.false
-      else Bool.false
-    else Bool.false) Bool.true r.body;
+        if Scry.Atom.arityOk p a then acc else .false
+      else .false
+    else .false) .true r.body;
   let headKindOk := match r.head with
     | .tuple rel _ => if Scry.natMem rel p.latRels then Bool.false else Bool.true
     | .lat rel _ _ => Scry.natMem rel p.latRels;
@@ -220,8 +220,8 @@ def Scry.Program.stratPass {L : Type} (p : Scry.Program L) (strata : List Nat) :
   List.foldr (fun (r : Scry.Rule L) (acc : List Nat × Bool) =>
     let need := Scry.Rule.stratumReq acc.1 r;
     let hs := List.getD acc.1 r.head.rel 0;
-    if Nat.lt hs need then (List.setAt acc.1 r.head.rel need, Bool.true) else acc)
-    (strata, Bool.false) p.rules
+    if Nat.lt hs need then (List.setAt acc.1 r.head.rel need, .true) else acc)
+    (strata, .false) p.rules
 
 def Scry.Program.stratPasses {L : Type} (p : Scry.Program L) :
     Nat → List Nat → List Nat × Bool
