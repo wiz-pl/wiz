@@ -302,9 +302,11 @@ EOF
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
                 ./web/playground.html ./web/playground.js ./web/playground-values.js
+                ./web/playground-presets.js ./web/playground-state.js
                 ./web/playground.css ./web/lsp-client.js ./web/goals.js
                 ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
-                ./web/playground-engine.js
+                ./web/playground-engine.js ./web/editor-model.js
+                ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
