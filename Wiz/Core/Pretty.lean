@@ -1,4 +1,5 @@
 import Wiz.Core.Term
+import Wiz.Core.NatString
 import Wiz.Core.StructLayout
 import Wiz.Rig
 
@@ -521,7 +522,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
     app (← if s matches .szInf then pure (txt "ν") else pure (cat [txt "ν^", ← sub 1024 s])) [D, i]
   | .out x => app (txt "out") [x]
   | .coit _ _ _ S st i s => app (txt "coit") [S, st, i, s]
-  | .natLit n => pure (txt (toString n))
+  | .natLit n => pure (txt (NatString.decimalString n))
   -- Q4: the elaborator lifts small fields; `up`/`down` are invisible
   | .ulift _ _ A => app (txt "ULift") [A]
   | .up a | .down a => printNode env names tys prec a noUnexp
@@ -553,7 +554,7 @@ partial def delab (g : Globals R) (names : List Name) (tys : List (Option (Term 
   match u with
   | .up a | .down a => delab g names tys a
   | .var ix => ref (identStx (names[ix]?.getD s!"#{ix}"))
-  | .natLit n => ref (.node {} "term.num" #[.node {} "num" #[.atom {} (toString n)]])
+  | .natLit n => ref (.node {} "term.num" #[.node {} "num" #[.atom {} (NatString.decimalString n)]])
   | .lam x b =>
     let x' := freshenName names (if x == "_" && b.hasVar 0 then "x" else x)
     let body ← delab g (x' :: names) (none :: tys) b
@@ -577,7 +578,7 @@ partial def unexpand (g : Globals R) (names : List Name) (tys : List (Option (Te
   -- prints as the numeral `n` (its type and instance are implicit; H14 S2)
   if c == "OfNat.ofNat" && args.size == 3 then
     if let .natLit n := args[1]! then
-      return some (.node {} "term.num" #[.node {} "num" #[.atom {} (toString n)]])
+      return some (.node {} "term.num" #[.node {} "num" #[.atom {} (NatString.decimalString n)]])
   let some entries := g.pp.unexpanders[c]? | return none
   if entries.isEmpty then return none
   let argStx ← (explicitArgs g c args).mapM (delab g names tys)
