@@ -166,9 +166,10 @@ def compactTest (dir : String) (r0 : Nat) : EIO Nat := do
   r9 ← expect r8 "the switch keeps every node and version" (sameContent after before ids);
   r10 ← expect r9 "the switch keeps the values" (Nat.beq (countIn after.root 1) 20);
   r11 ← expect r10 "the compacted image wastes nothing" (Nat.beq st1.wastedPages 0);
-  r12 ← expect r11 "the compacted image is live plus the two meta pages"
-    (Nat.beq st1.totalPages (Nat.add st1.livePages 2));
-  r13 ← expect r12 "compaction lowered the total" (Nat.lt st1.totalPages st0.totalPages);
+  r12 ← expect r11 "the compacted image is live plus the two meta pages and its registry"
+    (Nat.beq st1.totalPages (Nat.add (Nat.add st1.livePages 2) st1.registryPages));
+  r12b ← expect r12 "the compacted image has a registry page" (Nat.lt 0 st1.registryPages);
+  r13 ← expect r12b "compaction lowered the total" (Nat.lt st1.totalPages st0.totalPages);
   r14 ← expect r13 "the reclaimed bytes are the old waste"
     (Nat.beq (Nat.sub st0.totalPages st1.totalPages) st0.wastedPages);
   -- The plan's own accounting agrees with the store's read-back.
@@ -319,8 +320,11 @@ def tailTest (dir : String) (r0 : Nat) : EIO Nat := do
   he ← openDbWith epath indices 2;
   c ← compactStore he;
   se ← getDb he;
-  r6 ← expect r5 "empty: compaction is meta only" (Nat.beq c.after.totalPages 2);
-  r7 ← expect r6 "empty: and the generation is 0" (Nat.beq se.gen.toNat 0);
+  r6 ← expect r5 "empty: compaction is the two meta pages and one registry page"
+    (Nat.beq c.after.totalPages 3);
+  r6b ← expect r6 "empty: the registry page is counted"
+    (Nat.beq c.after.registryPages 1);
+  r7 ← expect r6b "empty: and the generation is 0" (Nat.beq se.gen.toNat 0);
   oE ← putDb he (seedNodes se);
   r8 ← expect r7 "empty: a commit after compaction works" (succeeded oE);
   closeDb he;

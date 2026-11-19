@@ -32,7 +32,7 @@ skipped on the hot path.
   are always checksummed (two 64-byte reads per open), so a torn meta write is never
   read.
 
-## The format this decoder assumes (version 1)
+## The format this decoder assumes (version 2)
 
 `wiz-notes/storage-engine.md` fixes the shape but not every byte value. This decoder was
 written before `store-durable` published its writer; the constants below were then pinned
@@ -66,9 +66,8 @@ halves read and write one format:
   1 and §2.3 puts two 64-byte slots on page 0; the valid slot with the larger `txid`
   wins;
 * magic: the note gives no value, so a nonzero magic plus a valid checksum and
-  `format = 1` identifies a slot (`Store.metaMagic` is what our fixture writes,
-  `WIZSTOR1`). Pin this to an equality once slice 2 fixes the constant;
-* `format = 1`; checksums are FNV-1a-64 over the page (or meta record) with the
+  `format = 2` identifies a slot (`Store.metaMagic` is what the writer uses);
+* `format = 2`; checksums are FNV-1a-64 over the page (or meta record) with the
   checksum field zeroed, offset basis `0xcbf29ce484222325`, prime `0x100000001b3`;
 * never-reuse pages: roots and snapshots are valid forever; compaction renames a new
   file (a mapped snapshot keeps the old inode).
@@ -96,7 +95,7 @@ extern "wiz_store_get_u64" Map.getU64 : Map → Nat → U64
 /-- `mmap` a descriptor, failing with the C library's message (`Sys.check`). -/
 def Store.mapFile (fd : Fd) (length : Nat) : EIO Map := Sys.check "mmap" (Map.ofFd fd length)
 
--- ## The format, version 1
+-- ## The format, version 2
 
 /-- `4096`: the unit of COW, checksum and mapping. -/
 def Store.pageSize : Nat := 4096
@@ -108,17 +107,17 @@ def Store.recordSize : Nat := 32
 def Store.indexRecordSize : Nat := 16
 /-- An internal page record's size (`key`, `child`, `pad`). -/
 def Store.internalRecordSize : Nat := 16
-/-- The assumed on-disk format version (`meta.format`). -/
-def Store.formatVersion : Nat := 1
-/-- The on-disk magic (`store-durable`'s `metaMagic`; the reader accepts any nonzero value
-with a valid checksum, so an older fixture still reads). -/
+/-- The on-disk format version (`meta.format`). Version 2 adds the registry root at meta
+offset 40; the read path ignores it, so the fields it uses are unchanged. -/
+def Store.formatVersion : Nat := 2
+/-- The on-disk magic (`store-durable`'s `metaMagic`). -/
 def Store.metaMagic : U64 := U64.ofNat 0x57495a53544f5245
 /-- The offsets a meta slot may start at (page 0, its second 64-byte slot, page 1). -/
 def Store.metaOffsets : List Nat := [0, 64, 4096]
 /-- The deepest tree walk accepted before the file is called cyclic/corrupt. -/
 def Store.maxDepth : Nat := 64
 
-/-- The page kinds of version 1. -/
+/-- The page kinds of version 2. -/
 inductive PageKind where
   | leaf
   | internal
@@ -176,7 +175,7 @@ def StoreError.message : StoreError → String
     String.append "page " (String.append (Nat.toString (UIntN.toNat page))
       (String.append " has kind " (Nat.toString kind)))
   | .badMeta => "no valid meta slot"
-  | .badFormat f => String.append "format " (String.append (Nat.toString f) ", expected 1")
+  | .badFormat f => String.append "format " (String.append (Nat.toString f) ", expected 2")
   | .tooDeep page =>
     String.append "walk too deep at page " (Nat.toString (UIntN.toNat page))
 

@@ -124,9 +124,18 @@ def tornTest (dir : String) : EIO Unit := do
   expect "torn store count is 2" (Nat.beq (snapCount s3 1) 2);
   closeDb h;
 
-  -- The by-hand truncation: drop the final 4 KiB page from a copy.
+  -- The by-hand truncation: cut a copy at the previous commit's page count, so the
+  -- last commit's data page(s) *and* its registry page are gone (the registry is part
+  -- of the commit, not an extra page after the root).
   bytes ← FS.readBytes path;
-  let cut := Nat.sub (Bytes.size bytes) pageSize;
+  oldFd ← Fd.open path .read OpenFlags.none;
+  raw ← readAt oldFd (slotOffset (U64.ofNat 2)) metaSize;
+  Fd.close oldFd;
+  let cut := match raw with
+    | .none => Nat.sub (Bytes.size bytes) pageSize
+    | .some b => match Meta.decode b with
+      | .none => Nat.sub (Bytes.size bytes) pageSize
+      | .some m => Nat.mul m.pageCount.toNat pageSize;
   let truncated := Bytes.slice bytes 0 cut;
   let tpath := Path.join dir "torn-cut.db";
   FS.writeBytes tpath truncated;

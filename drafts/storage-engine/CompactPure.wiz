@@ -43,14 +43,14 @@ def okb (b : Bool) : Nat := match b with
 
 /-- Five live pages, seven wasted, before the rewrite. -/
 #eval List.length pK2.live                                   -- 5
-#eval (Plan.stats pK2).wastedPages                           -- 5 (12 - 5 - 2)
-#eval (Plan.stats pK2).wastedBytes                           -- 20480
+#eval (Plan.stats pK2 0).wastedPages                           -- 5 (12 - 5 - 2)
+#eval (Plan.stats pK2 0).wastedBytes                           -- 20480
 /-- After the rewrite the two chains are the whole file: nothing wasted. -/
-#eval (Plan.after pK2).totalPages                            -- 7
-#eval (Plan.after pK2).wastedPages                           -- 0
+#eval (Plan.after pK2 0).totalPages                            -- 7
+#eval (Plan.after pK2 0).wastedPages                           -- 0
 /-- The newest K alone: three live pages. -/
 #eval List.length pK1.live                                   -- 3
-#eval (Plan.stats pK1).wastedPages                           -- 7
+#eval (Plan.stats pK1 0).wastedPages                           -- 7
 /-- A lease keeps the old root live under K = 1. -/
 #eval List.length pPinned.live                               -- 5
 /-- Overlapping chains are marked once. -/
@@ -77,5 +77,5 @@ def regLeased := Registry.release (Registry.lease regK1 (U64.ofNat 1)) (U64.ofNa
   | .none => 0
   | .some r => r.gen.toNat                                 -- 1
 /-- Stats move from wasted to reclaimed. -/
-#eval (Plan.stats pK2).totalPages                            -- 12
-#eval (Plan.after pK2).totalPages                            -- 7
+#eval (Plan.stats pK2 0).totalPages                            -- 12
+#eval (Plan.after pK2 0).totalPages                            -- 7
