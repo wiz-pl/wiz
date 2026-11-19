@@ -1,0 +1,14 @@
+[
+  {
+    "method": "event",
+    "widget_id": "inc",
+    "event": "click",
+    "value": "count 1"
+  },
+  {
+    "method": "event",
+    "widget_id": "level",
+    "event": "input",
+    "value": "3"
+  }
+]

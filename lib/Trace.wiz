@@ -4,7 +4,7 @@ import Logic
 
 Traces and Mealy machines (`import Trace`): the common semantics of the HDL's circuits
 (lib/Hdl/Core.wiz, `Circuit.trace`), the temporal logic over them, and anything else
-that runs step by step. Design: /workspace/wiz-notes/cohesion-hardware.md, 2.1.
+that runs step by step. Design: wiz-notes/cohesion-hardware.md, 2.1.
 
 * A trace is a function `Nat → A`, not a ν-stream: equality at ν is stuck, while
   equality of functions is pointwise and computes (funext is a definition).
@@ -118,3 +118,109 @@ def Mealy.simulatesOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T
   Eq.trans
     (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).2) (Mealy.simulates impl spec embS embI embO h s0 xs t))
     (Eq.congrArg (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)))
+
+------------------------------------------------------------------------------------
+-- Finite case analysis (H14 T2): numbers below a bound, and Booleans by evaluation
+
+def Nat.lt_zero_absurd : (k : Nat) → Nat.lt k 0 = .true → False
+  | .zero, h => absurd h.1
+  | .succ k, h => absurd h.1
+def Bool.and_true_left : (a b : Bool) → Bool.and a b = .true → a = .true
+  | .true, b, h => rfl
+  | .false, b, h => absurd h.1
+def Bool.and_true_right : (a b : Bool) → Bool.and a b = .true → b = .true
+  | .true, b, h => h
+  | .false, b, h => absurd h.1
+def Nat.lt_self_succ : (n : Nat) → Nat.lt n (Nat.succ n) = .true
+  | .zero => rfl
+  | .succ n => Nat.lt_self_succ n
+
+def Bool.indP (0 P : Bool → Prop) (ht : P .true) (hf : P .false) : (b : Bool) → P b
+  | .true => ht
+  | .false => hf
+
+-- Enumeration of the numbers below `n`: `Nat.All P n` is `P 0 ∧ … ∧ P (n-1)`, a
+-- proposition the kernel unfolds, so a proof is a tuple of the cases.
+def Nat.All (P : Nat → Prop) : Nat → Prop
+  | .zero => True
+  | .succ n => Nat.All P n ∧ P n
+def Nat.lt_succ_split : (k m : Nat) → Nat.lt k (Nat.succ m) = .true → Nat.lt k m = .true ∨ k = m
+  | .zero, .zero, h => Or.inr rfl
+  | .zero, .succ m, h => Or.inl rfl
+  | .succ k, .zero, h => absurd (Nat.lt_zero_absurd k h)
+  | .succ k, .succ m, h => Or.imp (fun (e : Nat.lt k m = .true) => e) (fun (e : k = m) => Eq.congrArg Nat.succ e)
+      (Nat.lt_succ_split k m h)
+def Nat.lt_to_succ : (k m : Nat) → Nat.lt k m = .true → Nat.lt k (Nat.succ m) = .true
+  | .zero, m, h => rfl
+  | .succ k, .zero, h => absurd (Nat.lt_zero_absurd (Nat.succ k) h)
+  | .succ k, .succ m, h => Nat.lt_to_succ k m h
+def Nat.all_spec (0 P : Nat → Prop) : (n : Nat) → Nat.All P n → (k : Nat) → Nat.lt k n = .true → P k
+  | .zero, h, k, hk => absurd (Nat.lt_zero_absurd k hk)
+  | .succ n, h, k, hk => Or.elim (Nat.lt_succ_split k n hk)
+      (fun (e : Nat.lt k n = .true) => Nat.all_spec P n h.1 k e)
+      (fun (e : k = n) => Eq.substProp P (Eq.symm e) h.2)
+
+-- Enumeration of Booleans by evaluation: a Boolean check of all 2^9 inputs, `.true` by
+-- `refl`, gives the check at every input.
+def Bool.all (f : Bool → Bool) : Bool := Bool.and (f .true) (f .false)
+def Bool.all_spec (f : Bool → Bool) (h : Bool.all f = .true) : (b : Bool) → f b = .true
+  | .true => Bool.and_true_left (f .true) (f .false) h
+  | .false => Bool.and_true_right (f .true) (f .false) h
+def Bool.all9 (q : Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool) : Bool :=
+  Bool.all (fun a => Bool.all (fun b => Bool.all (fun c => Bool.all (fun d => Bool.all (fun e =>
+    Bool.all (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => q a b c d e f g i j)))))))))
+def Bool.forall9 (q : Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool → Bool) (h : Bool.all9 q = .true)
+    (a b c d e f g i j : Bool) : q a b c d e f g i j = .true :=
+  Bool.all_spec (q a b c d e f g i) (Bool.all_spec (fun j => Bool.all (q a b c d e f g j)) (Bool.all_spec (fun i => Bool.all (fun j => Bool.all (q a b c d e f i j))) (Bool.all_spec (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q a b c d e g i j)))) (Bool.all_spec (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q a b c d f g i j))))) (Bool.all_spec (fun e => Bool.all (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q a b c e f g i j)))))) (Bool.all_spec (fun d => Bool.all (fun e => Bool.all (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q a b d e f g i j))))))) (Bool.all_spec (fun c => Bool.all (fun d => Bool.all (fun e => Bool.all (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q a c d e f g i j)))))))) (Bool.all_spec (fun b => Bool.all (fun c => Bool.all (fun d => Bool.all (fun e => Bool.all (fun f => Bool.all (fun g => Bool.all (fun i => Bool.all (fun j => Bool.all (q b c d e f g i j))))))))) h a) b) c) d) e) f) g) i) j
+
+def Nat.eq_of_beq : (a b : Nat) → Nat.beq a b = .true → a = b
+  | .zero, .zero, e => rfl
+  | .zero, .succ b, e => absurd e.1
+  | .succ a, .zero, e => absurd e.1
+  | .succ a, .succ b, e => Nat.eq_of_beq a b e
+-- Refinement under an invariant of the specification: `Mealy.simulates` for the
+-- reachable states only (the premise is one step from a state satisfying `inv`).
+def Mealy.simulatesInv {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
+    (embS : T → S) (embI : J → I) (embO : P → O) (inv : T → Prop)
+    (pres : (s : T) → (x : J) → inv s → inv (spec s x).1)
+    (h : (s : T) → (x : J) → inv s → impl (embS s) (embI x) = (embS (spec s x).1, embO (spec s x).2))
+    (s0 : T) (h0 : inv s0) (xs : Trace J) :
+    (t : Nat) → Mealy.stateAt impl (embS s0) (Trace.map embI xs) t = embS (Mealy.stateAt spec s0 xs t)
+  | .zero => rfl
+  | .succ t => Eq.trans
+      (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).1) (Mealy.simulatesInv impl spec embS embI embO inv pres h s0 h0 xs t))
+      (Eq.congrArg (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)
+        (Mealy.invariant spec s0 xs (fun (x : J) => True) inv h0 (fun (s : T) (x : J) (u : True) (i : inv s) => pres s x i) (fun (t : Nat) => True.intro) t)))
+def Mealy.simulatesInvOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
+    (embS : T → S) (embI : J → I) (embO : P → O) (inv : T → Prop)
+    (pres : (s : T) → (x : J) → inv s → inv (spec s x).1)
+    (h : (s : T) → (x : J) → inv s → impl (embS s) (embI x) = (embS (spec s x).1, embO (spec s x).2))
+    (s0 : T) (h0 : inv s0) (xs : Trace J) (t : Nat) :
+    Mealy.outAt impl (embS s0) (Trace.map embI xs) t = embO (Mealy.outAt spec s0 xs t) :=
+  Eq.trans
+    (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).2) (Mealy.simulatesInv impl spec embS embI embO inv pres h s0 h0 xs t))
+    (Eq.congrArg (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)
+      (Mealy.invariant spec s0 xs (fun (x : J) => True) inv h0 (fun (s : T) (x : J) (u : True) (i : inv s) => pres s x i) (fun (t : Nat) => True.intro) t)))
+
+-- A run that follows a known path: from `F 0` at cycle `t`, if every step `k < K` of
+-- the path is taken on the inputs that come (`step`), the run is at `F k` at `k + t`.
+def Mealy.follows {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (F : Nat → S) (t K : Nat)
+    (h0 : Mealy.stateAt m s0 xs t = F 0)
+    (step : (k : Nat) → Nat.lt k K = .true → (m (F k) (xs (Nat.add k t))).1 = F (Nat.succ k)) :
+    (k : Nat) → Nat.lt k (Nat.succ K) = .true → Mealy.stateAt m s0 xs (Nat.add k t) = F k
+  | .zero, hk => h0
+  | .succ k, hk => Eq.trans
+      (Eq.congrArg (fun (s : S) => (m s (xs (Nat.add k t))).1) (Mealy.follows m s0 xs F t K h0 step k (Nat.lt_to_succ k K hk)))
+      (step k hk)
+
+-- Two machines in sequence (`Circuit.seq`), and their run: the second runs on the
+-- first's outputs.
+def Mealy.seq {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) : Mealy (S1 × S2) I O :=
+  fun (s : S1 × S2) (x : I) => (((m1 s.1 x).1, (m2 s.2 (m1 s.1 x).2).1), (m2 s.2 (m1 s.1 x).2).2)
+def Mealy.seq_stateAt {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) (a : S1) (b : S2) (xs : Trace I) :
+    (t : Nat) → Mealy.stateAt (Mealy.seq m1 m2) (a, b) xs t = (Mealy.stateAt m1 a xs t, Mealy.stateAt m2 b (Mealy.outAt m1 a xs) t)
+  | .zero => refl (a, b)
+  | .succ t => Eq.congrArg (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).1) (Mealy.seq_stateAt m1 m2 a b xs t)
+def Mealy.seq_outAt {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) (a : S1) (b : S2) (xs : Trace I) (t : Nat) :
+    Mealy.outAt (Mealy.seq m1 m2) (a, b) xs t = Mealy.outAt m2 b (Mealy.outAt m1 a xs) t :=
+  Eq.congrArg (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).2) (Mealy.seq_stateAt m1 m2 a b xs t)

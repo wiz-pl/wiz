@@ -407,7 +407,25 @@ def group : Group where
         -- generated source that does not check is reported at the node, with the text
         let bad := src.replace "def one : Nat := 1" "def one : Nat := zzz"
         let b ← frontend bad
-        check ((errorsOf b bad).any (fun e => e.startsWith "6:8: " && has e "the generated source was rejected")) (toString (errorsOf b bad)) }
+        check ((errorsOf b bad).any (fun e => e.startsWith "6:8: " && has e "the generated source was rejected")) (toString (errorsOf b bad)) },
+    { name := "Text's helpers: Fe.split and handle-pack words, byte for byte, and linear on long input", run := fun _ => do
+        -- (the prefixes are accumulated reversed and reversed once; the output is what the
+        -- former quadratic `List.append acc (.cons c .nil)` loops gave)
+        let src := pre ++
+          "#eval Fe.split \"x.f.g\"\n#eval Fe.split \"\"\n#eval Fe.split \".f\"\n" ++
+          "#eval Fe.wordsOf .nil (String.chars \"  (x,y) ,  (a, (b, c)) \")\n" ++
+          "def rep (n : Nat) (c : Char) (acc : List Char) : List Char := match n with\n" ++
+          "  | .zero => acc\n  | .succ m => rep m c (.cons c acc)\n" ++
+          "def longName : String := String.ofChars (List.append (rep 20000 (Char.mk 97) .nil) (String.chars \".tail\"))\n" ++
+          "def longSplit : String × String := Fe.split longName\n" ++
+          "def longPack : List Char := List.append (String.chars \"(a,\") (List.append (rep 20000 (Char.mk 98) .nil) (String.chars \",c\"))\n" ++
+          "def longWords : List String := Fe.wordsOf .nil longPack\n" ++
+          "#eval String.length longSplit.1\n#eval longSplit.2\n" ++
+          "#eval List.length longWords\n#eval String.length (String.intercalate \"\" longWords)\n"
+        let s ← frontend src
+        checkEq "[]" (toString (errorsOf s src))
+        checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), .cons \"x\" (.cons \"y\" (.cons \"a\" (.cons \"b\" (.cons \"c\" .nil)))), 20000, \"tail\", 3, 20002]"
+          (toString (infosOf s)) }
   ]
 
 def groups : List Group :=

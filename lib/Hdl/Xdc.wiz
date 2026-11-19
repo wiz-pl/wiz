@@ -65,11 +65,39 @@ def Xdc.ports (b : XBoard) : List String → List NetPort → String
   | _, _ => ""
 
 -- The constraints of a netlist on a board: the clock (pin and period), then the ports
--- (with the identifiers `Verilog.emit` uses).
+-- (with the identifiers `Verilog.emit` uses). Each clock domain's net gets a
+-- `create_clock`; a second clock also gets its package pin when the board's table has
+-- one (a generated clock has none). A domain's period is its `periodPs` (`0`: unknown;
+-- the first domain falls back to the board's period).
+def Xdc.clockLine (name : String) (ps : Nat) : String :=
+  "create_clock -period " <+> Xdc.ns ps <+> " [get_ports {" <+> name <+> "}]\n"
+def Xdc.clockLinesTail : List ClockDomain → String
+  | .nil => ""
+  | .cons d ds => (match d.periodPs with
+    | 0 => ""
+    | ps => Xdc.clockLine d.name ps) <+> Xdc.clockLinesTail ds
+def Xdc.clockLines (n : Netlist) (b : XBoard) : String :=
+  match n.clocks with
+  | .nil => ""
+  | .cons d ds => Xdc.clockLine d.name (match d.periodPs with
+      | 0 => b.periodPs
+      | ps => ps) <+> Xdc.clockLinesTail ds
+def Xdc.clockPin (b : XBoard) (d : ClockDomain) : String := match XPin.find d.name b.pins with
+  | .none => ""
+  | .some (.one _ pin) => Xdc.line b.iostd pin d.name
+  | .some (.bus _ ps) => Xdc.busLines b.iostd d.name 0 ps
+def Xdc.clockPinsTail (b : XBoard) : List ClockDomain → String
+  | .nil => ""
+  | .cons d ds => Xdc.clockPin b d <+> Xdc.clockPinsTail b ds
+def Xdc.clockPins (n : Netlist) (b : XBoard) : String :=
+  match n.clocks with
+  | .nil => ""
+  | .cons _ ds => Xdc.clockPinsTail b ds
 def Xdc.emit (n : Netlist) (b : XBoard) : String :=
   let ω vn := Verilog.portIdents n;
   Xdc.line b.iostd b.clk "clk"
-  <+> "create_clock -period " <+> Xdc.ns b.periodPs <+> " [get_ports {clk}]\n"
+  <+> Xdc.clockLines n b
+  <+> Xdc.clockPins n b
   <+> Xdc.ports b vn.ins n.inputs <+> Xdc.ports b vn.outs n.outputs
 
 -- What does not fit: ports without a resource, ports whose width is not the resource's.
@@ -85,7 +113,7 @@ def Xdc.portProblems (pins : List XPin) : List NetPort → List String
   | .nil => .nil
   | .cons p ps => List.append (Xdc.portProblem pins p) (Xdc.portProblems pins ps)
 def Xdc.check (n : Netlist) (b : XBoard) : List String :=
-  Xdc.portProblems b.pins (List.append n.inputs n.outputs)
+  List.append (Xdc.portProblems b.pins (List.append n.inputs n.outputs)) (Netlist.clockProblems n b.periodPs)
 
 -- Resources under other names, or part of a bus: `XPin.rename "leds" p`, and
 -- `XPin.take k p` for its first `k` bits (a one-bit result is a `one`).

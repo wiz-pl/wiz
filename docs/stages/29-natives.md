@@ -1,9 +1,9 @@
 # Stage 29: native data structures
 
 Three structures that Wiz programs need once they handle a lot of data: unboxed arrays
-of machine words, maps from 64-bit words, and interned strings. Stage S0 of the code
-analysis design (`wiz-notes/code-analysis-design.md`, §3 and §6) asked for them, and
-they also help compilers and checkers written in Wiz. Each one follows the 22b/22d
+of machine words, maps from 64-bit words, and interned strings. The design of the `scry`
+code analyser asked for them first (its stage S0), to hold large program graphs
+compactly, and they also help compilers and checkers written in Wiz. Each one follows the 22b/22d
 pattern:
 
 * a **model** in plain Wiz data. A `sealed inductive` (22k) with a private constructor

@@ -1,0 +1,515 @@
+{
+  "format": "scry-bench-corpus",
+  "version": 1,
+  "description": "S0/S2 taint corpus: checked-in hand-authored C fixtures with safe/unsafe pairs per CWE. External suites (S1/S3/S4) are optional and are added with --extra.",
+  "cases": [
+    {
+      "id": "s0/taint-unsafe",
+      "suite": "S0",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "the existing scry taint fixture, kept as the S0 golden"
+    },
+    {
+      "id": "s0/taint-safe",
+      "suite": "S0",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-safe.c",
+      "expect": "safe",
+      "note": "the existing result-sanitiser fixture"
+    },
+    {
+      "id": "s0/taint-chain",
+      "suite": "S0",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-chain.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "run", "callee": "system", "argument": 0, "sinkLine": 6, "sourceLine": 11}
+      ],
+      "note": "the existing interprocedural fixture"
+    },
+    {
+      "id": "s0/taint-clean",
+      "suite": "S0",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-clean.c",
+      "expect": "safe",
+      "note": "no source and no sink"
+    },
+    {
+      "id": "s0/taint-boundary",
+      "suite": "S0",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-boundary.c",
+      "expect": "unknown",
+      "reason": "struct fields are a lowering boundary at this commit"
+    },
+
+    {
+      "id": "s2/cwe78/direct-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/direct-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ]
+    },
+    {
+      "id": "s2/cwe78/direct-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/direct-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe78/sanitised-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/sanitised-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe78/sanitised-arg-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/sanitised-arg-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 9, "sourceLine": 7}
+      ]
+    },
+    {
+      "id": "s2/cwe78/branch-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/branch-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 12, "sourceLine": 8}
+      ],
+      "note": "the else branch is a lowering boundary; the finding is still a TP"
+    },
+    {
+      "id": "s2/cwe78/branch-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/branch-safe.c",
+      "expect": "unknown",
+      "reason": "the else branch is a lowering boundary, so a safe verdict is not verifiable"
+    },
+    {
+      "id": "s2/cwe78/loop-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/loop-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 12, "sourceLine": 9}
+      ]
+    },
+    {
+      "id": "s2/cwe78/loop-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/loop-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe78/chain-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/chain-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "run", "callee": "system", "argument": 0, "sinkLine": 6, "sourceLine": 11}
+      ]
+    },
+    {
+      "id": "s2/cwe78/chain-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/chain-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe78/chain-sanitised-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/chain-sanitised-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe78/popen-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/popen-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "popen", "argument": 0, "sinkLine": 8, "sourceLine": 7}
+      ]
+    },
+    {
+      "id": "s2/cwe78/recv-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/recv-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ]
+    },
+    {
+      "id": "s2/cwe78/two-sinks-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/two-sinks-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 8, "sourceLine": 6}
+      ],
+      "note": "two sinks on the same value exercise multi-finding matching"
+    },
+    {
+      "id": "s2/cwe78/infeasible-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/infeasible-safe.c",
+      "expect": "safe",
+      "note": "mutually exclusive conditions: a path-insensitive may analysis flags this (known FP)"
+    },
+    {
+      "id": "s2/cwe78/read-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/read-unknown.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 9, "sourceLine": 8}
+      ],
+      "note": "known gap: read writes through an array; memory is not modelled at this commit, so this is an FN"
+    },
+    {
+      "id": "s2/cwe78/alias-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "cwe78/alias-unknown.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 9}
+      ],
+      "note": "known gap: store/load through a pointer is not modelled at this commit, so this is an FN"
+    },
+
+    {
+      "id": "s2/cwe134/printf-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "cwe134/printf-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "format-string", "function": "main", "callee": "printf", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ]
+    },
+    {
+      "id": "s2/cwe134/printf-safe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "cwe134/printf-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe134/fprintf-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "cwe134/fprintf-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "format-string", "function": "main", "callee": "fprintf", "argument": 1, "sinkLine": 9, "sourceLine": 7}
+      ]
+    },
+    {
+      "id": "s2/cwe134/fprintf-safe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "cwe134/fprintf-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe134/chain-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "cwe134/chain-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "format-string", "function": "logmsg", "callee": "printf", "argument": 0, "sinkLine": 6, "sourceLine": 11}
+      ]
+    },
+
+    {
+      "id": "s2/cwe242/gets-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-242",
+      "file": "cwe242/gets-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "gets-overflow", "function": "main", "callee": "gets", "argument": 0, "sinkLine": 6}
+      ]
+    },
+    {
+      "id": "s2/cwe242/fgets-safe",
+      "suite": "S2",
+      "cwe": "CWE-242",
+      "file": "cwe242/fgets-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe242/gets-array-unknown",
+      "suite": "S2",
+      "cwe": "CWE-242",
+      "file": "cwe242/gets-array-unknown.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "gets-overflow", "function": "main", "callee": "gets", "argument": 0, "sinkLine": 7}
+      ],
+      "note": "detected, but the array argument is a lowering boundary"
+    },
+
+    {
+      "id": "s2/cwe120/strcpy-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "cwe120/strcpy-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 7}
+      ]
+    },
+    {
+      "id": "s2/cwe120/strncpy-safe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "cwe120/strncpy-safe.c",
+      "expect": "safe"
+    },
+    {
+      "id": "s2/cwe120/strcat-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "cwe120/strcat-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcat", "argument": 0, "sinkLine": 7}
+      ]
+    },
+
+    {
+      "id": "s2/cwe121/strcpy-array-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-121",
+      "file": "cwe121/strcpy-array-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 8}
+      ],
+      "note": "detected, but the destination array is a lowering boundary"
+    },
+    {
+      "id": "s2/cwe78/exec-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-exec.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "execl", "argument": 3, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "the exec* model checks the variadic argv, not only the path at argument 0"
+    },
+    {
+      "id": "s2/cwe78/exec-model-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-exec-safe.c",
+      "expect": "safe",
+      "note": "a constant exec has no tainted argv"
+    },
+    {
+      "id": "s2/cwe134/sprintf-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-134",
+      "file": "../../tests/fixtures/model-sprintf-format.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "format-string", "function": "main", "callee": "sprintf", "argument": 1, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "the sprintf model's format argument"
+    },
+    {
+      "id": "s2/cwe78/sprintf-copy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-sprintf-copy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the sprintf copyArgs model taints the destination from a variadic argument"
+    },
+    {
+      "id": "s2/cwe120/strcpy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "../../tests/fixtures/model-strcpy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 9},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the copy model carries the taint through the destination and the forbidden rule still fires"
+    },
+    {
+      "id": "s2/cwe120/strncpy-model-safe",
+      "suite": "S2",
+      "cwe": "CWE-120",
+      "file": "../../tests/fixtures/model-strncpy-safe.c",
+      "expect": "safe",
+      "note": "a bounded copy with a constant source"
+    },
+    {
+      "id": "s2/cwe78/read-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-read.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "read's buffer argument is a model source (argument 1), independent of arrays"
+    },
+    {
+      "id": "s2/cwe78/recv-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-recv.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 7, "sourceLine": 6}
+      ],
+      "note": "recv's buffer argument is the source, not its result"
+    },
+    {
+      "id": "s2/cwe78/realloc-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-realloc.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 11},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 12, "sourceLine": 11}
+      ],
+      "note": "malloc and realloc are allocation effects; the copy and sink stay precise"
+    },
+    {
+      "id": "s2/cwe78/model-sanitised-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-sanitise.c",
+      "expect": "safe",
+      "note": "a policy sanitiser's result is clean"
+    },
+    {
+      "id": "s2/cwe78/model-unknown-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-unknown.c",
+      "expect": "safe",
+      "note": "an unmodelled external with a pointer argument gets an unmodelled-external warning, not a finding"
+    },
+    {
+      "id": "s2/cwe78/snprintf-copy-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-snprintf-copy.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 8}
+      ],
+      "note": "the snprintf copyArgs model taints the destination; the explicit bound is clean"
+    },
+    {
+      "id": "s2/cwe787/snprintf-length-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-787",
+      "file": "../../tests/fixtures/model-snprintf-length.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "buffer-overflow", "function": "main", "callee": "snprintf", "argument": 1, "sinkLine": 8, "sourceLine": 7}
+      ],
+      "note": "snprintf's size argument is a length sink"
+    },
+    {
+      "id": "s2/cwe78/calloc-model-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/model-calloc.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "strcpy-overflow", "function": "main", "callee": "strcpy", "argument": 0, "sinkLine": 9},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 10, "sourceLine": 9}
+      ],
+      "note": "calloc is an allocation effect; the copy and sink stay precise"
+    },
+    {
+      "id": "s2/cwe78/exec-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "main", "callee": "execl", "argument": 3, "sinkLine": 18, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execlp", "argument": 3, "sinkLine": 19, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execv", "argument": 0, "sinkLine": 20, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execvp", "argument": 0, "sinkLine": 21, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "execve", "argument": 0, "sinkLine": 22, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawn", "argument": 1, "sinkLine": 23, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "posix_spawnp", "argument": 1, "sinkLine": 24, "sourceLine": 17},
+        {"rule": "command-injection", "function": "main", "callee": "system", "argument": 0, "sinkLine": 25, "sourceLine": 17}
+      ],
+      "note": "the exec family, including the variadic execl argument selector and posix_spawn's path"
+    },
+    {
+      "id": "s2/cwe78/exec-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-exec-safe.c",
+      "expect": "safe",
+      "note": "the same exec-family calls with a constant command"
+    },
+    {
+      "id": "s2/cwe78/entry-unsafe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-unsafe.c",
+      "expect": "unsafe",
+      "findings": [
+        {"rule": "command-injection", "function": "iv_spawn", "callee": "execl", "argument": 3, "sinkLine": 6, "sourceLine": 6}
+      ],
+      "note": "an exported C-ABI entry with no caller: its parameter is a source"
+    },
+    {
+      "id": "s2/cwe78/entry-safe",
+      "suite": "S2",
+      "cwe": "CWE-78",
+      "file": "../../tests/fixtures/taint-entry-safe.c",
+      "expect": "safe",
+      "note": "an internally called function and a static function are not exported entries"
+    }
+
+  ]
+}

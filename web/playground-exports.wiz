@@ -1,0 +1,116 @@
+-- (11ab) The playground's entry point. `web/build-playground.sh` concatenates the
+-- self-hosted frontend (`selfhost/Lex.wiz`, `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`)
+-- with the parser tables (`web/selfhost-tables.wiz`) and this file, then
+-- `wiz build --no-main` turns it into the WebAssembly module `web/out/wiz-playground.mjs`.
+--
+-- `checkFile` is the self-hosted frontend's one-file entry (the embedded Prelude plus
+-- the text): it returns one output line per command, so a definition gives its
+-- signature, `#check` a type, `#eval`/`#reduce` the kernel's normal form, and errors
+-- start with `error:` or `parse error`. The page only moves text in and lines out.
+
+def pgJoin : List String → String
+  | .nil => ""
+  | .cons s ss => String.append s (String.append "\n" (pgJoin ss))
+
+def playgroundEval (text : String) : String := pgJoin (checkFile cats tokens text)
+
+export "wiz_playground_eval" playgroundEval
+
+-- (playground LSP, stage 1) `wiz_playground_check : String → String`: the same check as
+-- `wiz_playground_eval`, as JSON, with the offset of the command each line belongs to.
+-- `checkFile` strips the `@OFFSET` tag `stepCommand` puts on every line (`atLine`); this
+-- keeps it. The answer is
+--
+--   {"v":1,"lines":[{"off":N,"sev":S,"text":"…"}, …]}
+--
+-- `off` is the command's start as a code-point offset into the checked text (`null` for
+-- a line without a tag), `sev` is 1 for `error:`/`parse error`, 2 for `warning:`, else 3,
+-- and `text` is the line as `wiz_playground_eval` prints it (it may contain newlines: a
+-- tactic error lists the goals left). The page's in-page server
+-- (web/selfhost-lsp-shim.js) turns this into LSP diagnostics; the document state stays
+-- in JavaScript and this export is pure (text in, JSON out). A later stage adds an
+-- `index` field (positions → expected types and goal states) beside `lines`.
+
+-- one hexadecimal digit, for `\u00XX`
+def pgcHex (n : Nat) : Char := match Nat.lt n 10 with
+  | .true => Char.mk (Nat.add 48 n)
+  | .false => Char.mk (Nat.add 87 n)
+
+-- a character inside a JSON string: `"`, `\`, newline, tab and the other control
+-- characters escaped
+def pgcEscC (c : Char) : List Char :=
+  let n := Char.code c;
+  match Nat.beq n 34 with
+  | .true => .cons (Char.mk 92) (.cons c .nil)
+  | .false => match Nat.beq n 92 with
+    | .true => .cons (Char.mk 92) (.cons c .nil)
+    | .false => match Nat.beq n 10 with
+      | .true => .cons (Char.mk 92) (.cons (Char.mk 110) .nil)
+      | .false => match Nat.beq n 9 with
+        | .true => .cons (Char.mk 92) (.cons (Char.mk 116) .nil)
+        | .false => match Nat.lt n 32 with
+          | .true => .cons (Char.mk 92) (.cons (Char.mk 117) (.cons (Char.mk 48) (.cons (Char.mk 48)
+              (.cons (pgcHex (Nat.div n 16)) (.cons (pgcHex (Nat.mod n 16)) .nil)))))
+          | .false => .cons c .nil
+
+def pgcEsc : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => List.append (pgcEscC c) (pgcEsc cs)
+
+-- a JSON string literal
+def pgcStr (s : String) : String := match s with
+  | .mk cs => String.mk (.cons (Char.mk 34) (List.append (pgcEsc cs) (.cons (Char.mk 34) .nil)))
+
+-- the digits after `@`, then the space: the offset and the rest of the line
+inductive PgcTag where
+  | mk (off : Option Nat) (rest : List Char)
+
+def pgcDigits : Nat → List Char → PgcTag
+  | n, .nil => .mk (.some n) .nil
+  | n, .cons c cs => match isDigitC (Char.code c) with
+    | .true => pgcDigits (Nat.add (Nat.mul n 10) (Nat.sub (Char.code c) 48)) cs
+    | .false => match Nat.beq (Char.code c) 32 with
+      | .true => .mk (.some n) cs
+      | .false => .mk (.some n) (.cons c cs)
+
+def pgcTag (cs : List Char) : PgcTag := match cs with
+  | .cons c rest => match Nat.beq (Char.code c) 64 with
+    | .true => match rest with
+      | .cons d _ => match isDigitC (Char.code d) with
+        | .true => pgcDigits 0 rest
+        | .false => .mk .none cs
+      | .nil => .mk .none cs
+    | .false => .mk .none cs
+  | .nil => .mk .none cs
+
+def pgcSev (s : String) : String := match strPrefix "error:" s with
+  | .true => "1"
+  | .false => match strPrefix "parse error" s with
+    | .true => "1"
+    | .false => match strPrefix "warning:" s with
+      | .true => "2"
+      | .false => "3"
+
+def pgcLine (l : String) : String := match l with
+  | .mk cs => match pgcTag cs with
+    | .mk off rest =>
+      let text := String.mk rest;
+      let offJ := match off with
+        | .some n => Nat.toString n
+        | .none => "null";
+      String.append "{\"off\":" (String.append offJ (String.append ",\"sev\":"
+        (String.append (pgcSev text) (String.append ",\"text\":" (String.append (pgcStr text) "}")))))
+
+def pgcLines : List String → String
+  | .nil => ""
+  | .cons l rest => match rest with
+    | .nil => pgcLine l
+    | .cons _ _ => String.append (pgcLine l) (String.append "," (pgcLines rest))
+
+def playgroundCheck (text : String) : String :=
+  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+  | .mk out _ _ _ _ => String.append "{\"v\":1,\"lines\":["
+      (String.append (pgcLines (List.reverseOf out .nil)) "]}")
+
+export "wiz_playground_check" playgroundCheck

@@ -1,0 +1,602 @@
+import Text
+/-!
+# Scry.Report: the human HTML page
+
+SARIF and JSON are for machines; a corpus review needs a page. This module renders one
+self-contained HTML document from the evidence `scry taint` already produces. It adds no
+analysis and no claim:
+
+* the page is a **rendering of the evidence**, not a proof. It says so in the header and
+  the footer, and it never turns "not reported" into "absent";
+* it has **no JavaScript and no external resource** (inline CSS, no CDN, no fonts). The
+  source is escaped as text, so `<script>` in a C string is shown, not executed;
+* output is deterministic: no timestamp, no machine name, no elapsed time. Findings are
+  sorted and their anchors are the semantic `f_<16 hex>` workflow ids, never line
+  numbers, so two runs produce the same bytes and a line move does not break a link.
+
+The IO half (`scry/src/Scry/ReportCmd.wiz`) runs the pipeline and fills the structures
+below; this half is pure, so escaping, anchors, sorting and the page shape are testable
+without C or a compiler.
+-/
+
+-- ## Page data
+
+/-- One source step of a finding's path. `line`/`column` are 1-based; `line = 0` means
+the path node had no recorded origin (shown as a step, not as a source mark). -/
+structure Scry.ReportStep where
+  kind : String
+  func : String
+  line : Nat
+  column : Nat
+
+/-- One finding on the page. `anchor` is page-unique (the semantic id, with a `-N`
+suffix only on a genuine collision); `id` is always the semantic id. -/
+structure Scry.ReportFinding where
+  anchor : String
+  id : String
+  file : String
+  rule : String
+  severity : String
+  cwe : String
+  tier : String
+  message : String
+  func : String
+  callee : String
+  arg : Nat
+  sinkLine : Nat
+  sinkColumn : Nat
+  checked : Bool
+  steps : List Scry.ReportStep
+  shown : Bool
+  diffMatchedBy : String
+  diffLine : Nat
+
+/-- A non-finding diagnostic (lowering boundary or points-to memory warning). It is
+listed separately and is not evidence that the program is safe. -/
+structure Scry.ReportWarning where
+  rule : String
+  message : String
+  func : String
+  line : Nat
+  column : Nat
+  shown : Bool
+
+/-- One analysed file. `diffHeader`/`diffSummary` are the CLI's diff lines for this
+file (empty outside diff mode); they are escaped and printed verbatim so the page and
+`scry taint` cannot disagree about the suppressed counts. -/
+structure Scry.ReportFile where
+  path : String
+  anchor : String
+  source : String
+  findings : List Scry.ReportFinding
+  boundary : List Scry.ReportWarning
+  memory : List Scry.ReportWarning
+  diffHeader : List String
+  diffSummary : List String
+
+/-- Page-wide text. There is deliberately no field for a date, host or elapsed time. -/
+structure Scry.ReportMeta where
+  toolVersion : String
+  /-- Extra note, e.g. that a directory contained no C files. -/
+  note : String
+
+-- ## Small helpers
+
+def Scry.reportMax (a b : Nat) : Nat := match Nat.le a b with
+  | .true => b
+  | .false => a
+
+/-- `nthD` for the page: the `i`-th line, or `""`. Defined here so the renderer does
+not depend on the analysis module just for one lookup. -/
+def Scry.reportNthD (d : String) : List String → Nat → String
+  | .nil, _ => d
+  | .cons x xs, n => match Nat.beq n 0 with
+    | .true => x
+    | .false => Scry.reportNthD d xs (Nat.sub n 1)
+
+/-- The lines of `s`, without the empty element a final newline produces. -/
+def Scry.reportLines (s : String) : List String :=
+  let rev : List String := List.reverse (String.splitOn s "\n");
+  match rev with
+  | .cons "" rest => List.reverse rest
+  | _ => List.reverse rev
+
+/-- Insert a `Nat`, dropping a duplicate. -/
+def Scry.reportInsertNat (n : Nat) : List Nat → List Nat
+  | .nil => List.cons n .nil
+  | .cons m rest => match Nat.beq n m with
+    | .true => List.cons m rest
+    | .false => match Nat.lt n m with
+      | .true => List.cons n (List.cons m rest)
+      | .false => List.cons m (Scry.reportInsertNat n rest)
+
+def Scry.reportSortNats (ns : List Nat) : List Nat :=
+  List.foldl (fun acc n => Scry.reportInsertNat n acc) .nil ns
+
+-- ## Escaping
+
+/-- The replacement characters for one character. Every character that can change the
+HTML structure (`& < > " '`) is replaced; everything else is copied. -/
+def Scry.htmlReplacement (c : Char) : List Char :=
+  match Char.eq c (Char.mk 38) with
+  | .true => String.chars "&amp;"
+  | .false => match Char.eq c (Char.mk 60) with
+    | .true => String.chars "&lt;"
+    | .false => match Char.eq c (Char.mk 62) with
+      | .true => String.chars "&gt;"
+      | .false => match Char.eq c (Char.mk 34) with
+        | .true => String.chars "&quot;"
+        | .false => match Char.eq c (Char.mk 39) with
+          | .true => String.chars "&#39;"
+          | .false => List.cons c .nil
+
+partial def Scry.htmlEscapeGo (acc : List Char) : List Char → List Char
+  | .nil => List.reverse acc
+  | .cons c cs =>
+    -- `repl` is at most six characters; reverse it once so the accumulator stays a
+    -- cheap cons list and the whole escape is linear in the source size.
+    Scry.htmlEscapeGo (List.append (List.reverse (Scry.htmlReplacement c)) acc) cs
+
+/-- Escape text for an HTML text node or a quoted attribute. This is the only path by
+which untrusted C source reaches the page. -/
+def Scry.htmlEscape (s : String) : String :=
+  String.ofChars (Scry.htmlEscapeGo .nil (String.chars s))
+
+-- ## Rule metadata
+
+/-- The CWE a rule id names. The rule pack has no CWE field on this base (see
+`Scry.wfCweTier`), so this is a conservative table; an unknown rule shows
+"not declared" rather than a guessed CWE. -/
+def Scry.reportCwe (rule : String) : String :=
+  match rule with
+  | "command-injection" => "CWE-78"
+  | "format-string" => "CWE-134"
+  | "gets-overflow" => "CWE-242"
+  | "strcpy-overflow" => "CWE-120"
+  | "use-after-free" => "CWE-416"
+  | "scry/memory/use-after-free" => "CWE-416"
+  | _ => ""
+
+/-- `CWE-78 (T1)` when both are known, `CWE-78` or `T1` otherwise. The values come
+from the caller (the IO half uses the workflow's conservative tier table), so the pure
+renderer stays independent of the analysis modules. -/
+def Scry.reportCweTierText (cwe tier : String) : String :=
+  match cwe, tier with
+  | "", "unknown" => "not declared"
+  | "", t => t
+  | c, "unknown" => c
+  | c, t => c ++ " (" ++ t ++ ")"
+
+/-- The evidence ladder for a static finding. A checked derivation is L2; the static
+finding itself is a reproducible experiment (L1); an unchecked finding has no checked
+certificate and is L0 for the certificate item. -/
+def Scry.reportEvidence (checked : Bool) : String :=
+  match checked with
+  | .true => "static (L1); certificate (L2, checked)"
+  | .false => "static (L1); certificate (L0, unchecked)"
+
+/-- The coarse path, e.g. `source → flow → sink` or `alloc → free → sink`. Escaped
+because it is rendered into HTML, even though the kinds are from our own enum. -/
+def Scry.reportChain (steps : List Scry.ReportStep) : String :=
+  match steps with
+  | .nil => "no path recorded"
+  | _ => String.intercalate " &rarr; "
+    (List.map (fun s => Scry.htmlEscape s.kind) steps)
+
+-- ## Sorting, anchors and ids
+
+/-- `0` (unlocated) sorts last: a located sink is more useful at the top of a page. -/
+def Scry.reportLineKey (n : Nat) : Nat :=
+  match Nat.beq n 0 with
+  | .true => 1000000000
+  | .false => n
+
+/-- True when `a` should be listed before `b`: sink line, rule, semantic id. The final
+tiebreak is the original order (the insert below is stable for equal keys), so two
+identical sinks keep the analysis order. -/
+def Scry.reportBefore (a b : Scry.ReportFinding) : Bool :=
+  let la := Scry.reportLineKey a.sinkLine;
+  let lb := Scry.reportLineKey b.sinkLine;
+  match Nat.lt la lb with
+  | .true => .true
+  | .false => match Nat.lt lb la with
+    | .true => .false
+    | .false => match String.lt a.rule b.rule with
+      | .true => .true
+      | .false => match String.lt b.rule a.rule with
+        | .true => .false
+        | .false => String.lt a.id b.id
+
+/-- Stable insertion sort by `reportBefore` (equal keys keep their input order). -/
+def Scry.reportInsertFinding (f : Scry.ReportFinding) :
+    List Scry.ReportFinding → List Scry.ReportFinding
+  | .nil => List.cons f .nil
+  | .cons g rest => match Scry.reportBefore f g with
+    | .true => List.cons f (List.cons g rest)
+    | .false => List.cons g (Scry.reportInsertFinding f rest)
+
+def Scry.reportSortFindings (fs : List Scry.ReportFinding) : List Scry.ReportFinding :=
+  List.foldl (fun acc f => Scry.reportInsertFinding f acc) .nil fs
+
+partial def Scry.reportUniqueAnchorGo (base : String) (n : Nat) (used : List String) :
+    String × List String :=
+  let candidate := match Nat.beq n 1 with
+    | .true => base
+    | .false => base ++ "-" ++ Nat.repr n;
+  match List.any (fun u => String.eq u candidate) used with
+  | .false => (candidate, List.cons candidate used)
+  | .true => Scry.reportUniqueAnchorGo base (Nat.succ n) used
+
+/-- Give each finding a page-unique anchor. A semantic-id collision (two identical
+sinks with the same path shape) gets `-2`, `-3`, … in sorted order; the displayed id
+stays the semantic id, so the suffix is visibly an anchor disambiguator. -/
+def Scry.reportAssignAnchor (used : List String) (f : Scry.ReportFinding) :
+    Scry.ReportFinding × List String :=
+  match Scry.reportUniqueAnchorGo f.id 1 used with
+  | (anchor, used') => ({ f with anchor := anchor }, used')
+
+partial def Scry.reportAssignAnchorsInFile (used : List String) (fs : List Scry.ReportFinding) :
+    List Scry.ReportFinding × List String :=
+  match fs with
+  | .nil => (.nil, used)
+  | .cons f rest =>
+    match Scry.reportAssignAnchor used f with
+    | (f', used') =>
+      match Scry.reportAssignAnchorsInFile used' rest with
+      | (rs, used'') => (List.cons f' rs, used'')
+
+/-- Assign anchors across the whole page, in file order, so the suffixes never depend
+on a single file's internal order alone. -/
+partial def Scry.reportAssignAnchorsGo (used : List String) (files : List Scry.ReportFile) :
+    List Scry.ReportFile × List String :=
+  match files with
+  | .nil => (.nil, used)
+  | .cons f rest =>
+    match Scry.reportAssignAnchorsInFile used (Scry.reportSortFindings f.findings) with
+    | (fs', used') =>
+      match Scry.reportAssignAnchorsGo used' rest with
+      | (rs, used'') => (List.cons ({ f with findings := fs' }) rs, used'')
+
+def Scry.reportAssignAnchors (files : List Scry.ReportFile) :
+    List Scry.ReportFile × List String :=
+  Scry.reportAssignAnchorsGo .nil files
+
+-- ## Source windows and marks
+
+structure Scry.LineWindow where
+  first : Nat
+  last : Nat
+
+/-- Merge overlapping or adjacent windows (the input is already sorted by `first`). -/
+partial def Scry.reportMergeWindows : List Scry.LineWindow → List Scry.LineWindow
+  | .nil => .nil
+  | .cons w .nil => List.cons w .nil
+  | .cons w (.cons v rest) =>
+    match Nat.le (Nat.succ v.first) w.last with
+    | .true => Scry.reportMergeWindows (List.cons (Scry.LineWindow.mk w.first
+        (Scry.reportMax w.last v.last)) rest)
+    | .false => List.cons w (Scry.reportMergeWindows (List.cons v rest))
+
+def Scry.reportWindowsOfNats (ctx : Nat) (ns : List Nat) : List Scry.LineWindow :=
+  let sorted := Scry.reportSortNats ns;
+  let expand := List.map (fun n => Scry.LineWindow.mk
+    (Scry.reportMax 1 (Nat.sub n ctx)) (Nat.add n ctx)) sorted;
+  Scry.reportMergeWindows expand
+
+/-- The interesting line numbers of a finding: its sink and every path step with an
+origin. -/
+def Scry.reportInterestingLines (f : Scry.ReportFinding) : List Nat :=
+  let sink := match Nat.beq f.sinkLine 0 with
+    | .true => .nil
+    | .false => List.cons f.sinkLine .nil;
+  List.foldl (fun acc s => match Nat.beq s.line 0 with
+    | .true => acc
+    | .false => List.cons s.line acc) sink f.steps
+
+/-- The marks on one line: `1 source`, `2 flow`, … (indexed from 1, escaped). -/
+partial def Scry.reportMarksGo (steps : List Scry.ReportStep) (i line : Nat) :
+    List String :=
+  match steps with
+  | .nil => .nil
+  | .cons s rest =>
+    let here := match Nat.beq s.line line with
+      | .true => List.cons ("<span class=\"step-tag\">" ++ Nat.repr i ++ " "
+          ++ Scry.htmlEscape s.kind ++ "</span>") .nil
+      | .false => (.nil : List String);
+    List.append here (Scry.reportMarksGo rest (Nat.succ i) line)
+
+def Scry.reportMarks (steps : List Scry.ReportStep) (line : Nat) : String :=
+  String.intercalate "" (Scry.reportMarksGo steps 1 line)
+
+def Scry.reportLineHasStep (steps : List Scry.ReportStep) (line : Nat) : Bool :=
+  List.any (fun s => Nat.beq s.line line) steps
+
+def Scry.reportLineClass (f : Scry.ReportFinding) (line : Nat) : String :=
+  match Nat.beq f.sinkLine line with
+  | .true => "sink"
+  | .false => match Scry.reportLineHasStep f.steps line with
+    | .true => "path"
+    | .false => ""
+
+/-- One source row. The sink gets a `sink` class (and tag), a path step gets a `path`
+class and its numbered tag; the code cell is escaped exactly once. -/
+def Scry.reportSourceRow (lines : List String) (f : Scry.ReportFinding) (line : Nat) : String :=
+  let text := Scry.reportNthD "" lines (Nat.sub line 1);
+  let cls := Scry.reportLineClass f line;
+  let sinkTag := match Nat.beq f.sinkLine line with
+    | .true => "<span class=\"sink-tag\">sink</span>"
+    | .false => "";
+  "<tr class=\"" ++ cls ++ "\"><td class=\"ln\">" ++ Nat.repr line
+    ++ "</td><td class=\"mark\">" ++ sinkTag
+    ++ Scry.reportMarks f.steps line
+    ++ "</td><td class=\"code\">" ++ Scry.htmlEscape text ++ "</td></tr>"
+
+partial def Scry.reportWindowRows (lines : List String) (f : Scry.ReportFinding)
+    (first last : Nat) : List String :=
+  match Nat.le first last with
+  | .false => .nil
+  | .true => List.cons (Scry.reportSourceRow lines f first)
+      (Scry.reportWindowRows lines f (Nat.succ first) last)
+
+def Scry.reportRowsOfWindows (lines : List String) (f : Scry.ReportFinding) :
+    List Scry.LineWindow → List String
+  | .nil => .nil
+  | .cons w rest =>
+    List.append (Scry.reportWindowRows lines f w.first w.last)
+      (match rest with
+        | .nil => .nil
+        | _ => List.cons "<tr class=\"gap\"><td class=\"ln\">…</td><td></td><td class=\"code\">…</td></tr>"
+            (Scry.reportRowsOfWindows lines f rest))
+
+/-- The per-finding source view: an excerpt covering the sink and every path step,
+with two lines of context. A file with no origin at all says so rather than showing the
+top of the file and pretending it is the site. -/
+def Scry.reportSource (f : Scry.ReportFinding) (source : String) : String :=
+  let interesting := Scry.reportInterestingLines f;
+  match interesting with
+  | .nil => "<p class=\"muted\">No source line was recorded for this finding (unlocated).</p>"
+  | _ =>
+    let lines := Scry.reportLines source;
+    let windows := Scry.reportWindowsOfNats 2 interesting;
+    "<table class=\"source\"><tbody>"
+      ++ String.intercalate "" (Scry.reportRowsOfWindows lines f windows)
+      ++ "</tbody></table>"
+
+-- ## Rendering the pieces
+
+def Scry.reportCountShown (fs : List Scry.ReportFinding) : Nat :=
+  List.length (List.filter (fun f => f.shown) fs)
+
+def Scry.reportCountSuppressed (fs : List Scry.ReportFinding) : Nat :=
+  List.length (List.filter (fun f => Bool.not f.shown) fs)
+
+def Scry.reportCountChecks (fs : List Scry.ReportFinding) (want : Bool) : Nat :=
+  List.length (List.filter (fun f => match want with
+    | .true => f.checked
+    | .false => Bool.not f.checked) fs)
+
+def Scry.reportDiffText (lines : List String) : String :=
+  match lines with
+  | .nil => ""
+  | _ => "<pre class=\"diff\">" ++ Scry.htmlEscape (String.intercalate "\n" lines) ++ "</pre>"
+
+def Scry.reportDiffNote (f : Scry.ReportFinding) : String :=
+  match f.diffMatchedBy with
+  | "" => ""
+  | "sink" => "<span class=\"diff-hit\">diff: sink line " ++ Nat.repr f.diffLine ++ "</span>"
+  | "path" => "<span class=\"diff-hit\">diff: path step on line " ++ Nat.repr f.diffLine ++ "</span>"
+  | "unlocated" => "<span class=\"diff-hit\">diff: no source line (shown; unchanged cannot be proved)</span>"
+  | other => "<span class=\"diff-hit\">diff: " ++ Scry.htmlEscape other ++ "</span>"
+
+/-- One full finding article. The anchor is finding-id based, not line-based. -/
+def Scry.reportFindingArticle (f : Scry.ReportFinding) (source : String) : String :=
+  let severity := Scry.htmlEscape f.severity;
+  let status := match f.checked with
+    | .true => "checked"
+    | .false => "unchecked";
+  "<article class=\"finding\" id=\"" ++ Scry.htmlEscape f.anchor ++ "\">"
+    ++ "<h3><span class=\"rule\">" ++ Scry.htmlEscape f.rule ++ "</span>"
+    ++ " <span class=\"sev sev-" ++ severity ++ "\">" ++ severity ++ "</span>"
+    ++ " <span class=\"finding-id\">" ++ Scry.htmlEscape f.id ++ "</span></h3>"
+    ++ "<p class=\"message\">" ++ Scry.htmlEscape f.message ++ "</p>"
+    ++ "<dl class=\"meta\">"
+    ++ "<dt>location</dt><dd>" ++ Scry.htmlEscape f.file ++ ":"
+      ++ Nat.repr f.sinkLine ++ ":" ++ Nat.repr f.sinkColumn
+      ++ " in <code>" ++ Scry.htmlEscape f.func ++ "</code></dd>"
+    ++ "<dt>sink</dt><dd><code>" ++ Scry.htmlEscape f.callee ++ "</code> argument "
+      ++ Nat.repr f.arg ++ "</dd>"
+    ++ "<dt>CWE</dt><dd>" ++ Scry.htmlEscape (Scry.reportCweTierText f.cwe f.tier) ++ "</dd>"
+    ++ "<dt>derivation</dt><dd>" ++ status ++ "</dd>"
+    ++ "<dt>evidence</dt><dd>" ++ Scry.htmlEscape (Scry.reportEvidence f.checked) ++ "</dd>"
+    ++ "<dt>chain</dt><dd><code>" ++ Scry.reportChain f.steps ++ "</code></dd>"
+    ++ "</dl>"
+    ++ Scry.reportDiffNote f
+    ++ Scry.reportSource f source
+    ++ "</article>"
+
+def Scry.reportWarningRow (w : Scry.ReportWarning) : String :=
+  let loc := match Nat.beq w.line 0 with
+    | .true => Scry.htmlEscape w.func
+    | .false => Scry.htmlEscape w.func ++ ":" ++ Nat.repr w.line ++ ":" ++ Nat.repr w.column;
+  "<li><span class=\"rule\">" ++ Scry.htmlEscape w.rule ++ "</span> "
+    ++ Scry.htmlEscape w.message ++ " <span class=\"muted\">[" ++ loc ++ "]</span></li>"
+
+def Scry.reportWarnList (title : String) (ws : List Scry.ReportWarning) : String :=
+  match ws with
+  | .nil => ""
+  | _ => "<h3>" ++ Scry.htmlEscape title ++ "</h3><ul class=\"warnings\">"
+      ++ String.intercalate "" (List.map Scry.reportWarningRow ws) ++ "</ul>"
+
+/-- The visible warnings plus a `<details>` block for the diff-suppressed ones. The
+suppressed warnings are still on the page (a filter is not a deletion). -/
+def Scry.reportWarnBlock (title : String) (ws : List Scry.ReportWarning) : String :=
+  let shown := List.filter (fun w => w.shown) ws;
+  let hidden := List.filter (fun w => Bool.not w.shown) ws;
+  Scry.reportWarnList title shown
+    ++ (match hidden with
+      | .nil => ""
+      | _ => "<details class=\"suppressed\"><summary>Suppressed " ++ Scry.htmlEscape title
+          ++ " (" ++ Nat.repr (List.length hidden) ++ ")</summary><ul class=\"warnings\">"
+          ++ String.intercalate "" (List.map Scry.reportWarningRow hidden)
+          ++ "</ul></details>")
+
+def Scry.reportFindingRow (f : Scry.ReportFinding) : String :=
+  let cls := match f.shown with
+    | .true => "finding-row"
+    | .false => "finding-row suppressed-row";
+  "<tr class=\"" ++ cls ++ "\"><td><a href=\"#" ++ Scry.htmlEscape f.anchor ++ "\">"
+    ++ Scry.htmlEscape f.id ++ "</a></td>"
+    ++ "<td>" ++ Scry.htmlEscape f.file ++ ":" ++ Nat.repr f.sinkLine ++ "</td>"
+    ++ "<td>" ++ Scry.htmlEscape f.rule ++ "</td>"
+    ++ "<td>" ++ Scry.htmlEscape f.severity ++ "</td>"
+    ++ "<td>" ++ Scry.htmlEscape (Scry.reportCweTierText f.cwe f.tier) ++ "</td>"
+    ++ "<td>" ++ (match f.checked with | .true => "checked" | .false => "unchecked") ++ "</td>"
+    ++ "<td><code>" ++ Scry.reportChain f.steps ++ "</code></td></tr>"
+
+def Scry.reportFileRow (f : Scry.ReportFile) : String :=
+  let fs := f.findings;
+  let shown := Scry.reportCountShown fs;
+  let suppressed := Scry.reportCountSuppressed fs;
+  let diff := match Bool.or (Nat.lt 0 suppressed) (List.isEmpty f.diffSummary) with
+    | .true => Nat.repr shown ++ " / " ++ Nat.repr suppressed
+    | .false => Nat.repr shown;
+  "<tr><td><a href=\"#" ++ Scry.htmlEscape f.anchor ++ "\">"
+    ++ Scry.htmlEscape f.path ++ "</a></td>"
+    ++ "<td>" ++ Nat.repr (List.length fs) ++ "</td>"
+    ++ "<td>" ++ Nat.repr (Scry.reportCountChecks fs .true) ++ "</td>"
+    ++ "<td>" ++ Nat.repr (Scry.reportCountChecks fs .false) ++ "</td>"
+    ++ "<td>" ++ Nat.repr (List.length f.boundary) ++ "</td>"
+    ++ "<td>" ++ Nat.repr (List.length f.memory) ++ "</td>"
+    ++ "<td>" ++ diff ++ "</td></tr>"
+
+def Scry.reportFileSection (f : Scry.ReportFile) : String :=
+  let shown := List.filter (fun x => x.shown) f.findings;
+  let hidden := List.filter (fun x => Bool.not x.shown) f.findings;
+  "<section class=\"file\" id=\"" ++ Scry.htmlEscape f.anchor ++ "\">"
+    ++ "<h2>" ++ Scry.htmlEscape f.path ++ "</h2>"
+    ++ Scry.reportDiffText f.diffHeader
+    ++ Scry.reportDiffText f.diffSummary
+    ++ (match shown with
+      | .nil => match f.findings with
+        | .nil => "<p class=\"muted\">No findings in this file. A clean analysis is not a"
+            ++ " proof of safety; see the note at the top and the limits in the footer.</p>"
+        | _ => "<p class=\"muted\">All findings in this file are suppressed by the diff"
+            ++ " filter; the count and the rows are below.</p>"
+      | _ => String.intercalate "" (List.map (fun x => Scry.reportFindingArticle x f.source) shown))
+    ++ (match hidden with
+      | .nil => ""
+      | _ => "<details class=\"suppressed\"><summary>Suppressed findings ("
+          ++ Nat.repr (List.length hidden) ++ ")</summary>"
+          ++ "<ul class=\"suppressed-list\">"
+          ++ String.intercalate "" (List.map (fun x =>
+            "<li id=\"" ++ Scry.htmlEscape x.anchor ++ "\"><a href=\"#"
+              ++ Scry.htmlEscape x.anchor ++ "\">" ++ Scry.htmlEscape x.id ++ "</a> "
+              ++ Scry.htmlEscape x.rule ++ " at " ++ Scry.htmlEscape x.file ++ ":"
+              ++ Nat.repr x.sinkLine ++ " <span class=\"muted\">("
+              ++ Scry.htmlEscape x.diffMatchedBy ++ ")</span></li>") hidden)
+          ++ "</ul></details>")
+    ++ Scry.reportWarnBlock "Boundary warnings" f.boundary
+    ++ Scry.reportWarnBlock "Memory warnings" f.memory
+    ++ "</section>"
+
+-- ## The page
+
+def Scry.reportStyle : String :=
+  "body{font:15px/1.5 system-ui,sans-serif;margin:0;color:#1b1f23;background:#fff}"
+  ++ "main{max-width:1100px;margin:0 auto;padding:1.5rem}"
+  ++ "h1{font-size:1.6rem;margin:0 0 .3rem}h2{font-size:1.25rem;margin:2rem 0 .5rem}"
+  ++ "h3{font-size:1rem;margin:1.5rem 0 .3rem}"
+  ++ ".lede{color:#444;margin:.2rem 0 1rem}.muted{color:#666}"
+  ++ "table{border-collapse:collapse;width:100%;margin:.6rem 0 1rem}"
+  ++ "th,td{border:1px solid #d0d7de;padding:.25rem .45rem;text-align:left;vertical-align:top}"
+  ++ "th{background:#f6f8fa}code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.9em}"
+  ++ ".summary td:not(:first-child){text-align:right}"
+  ++ ".files{columns:2;margin:.4rem 0 1rem}"
+  ++ ".finding{border:1px solid #d0d7de;border-radius:6px;padding:.7rem 1rem;margin:1rem 0}"
+  ++ ".rule{font-family:ui-monospace,SFMono-Regular,monospace}"
+  ++ ".finding-id{color:#666;font-weight:400;font-size:.85em}"
+  ++ ".sev{font-size:.75rem;text-transform:uppercase;border-radius:4px;padding:0 .35rem}"
+  ++ ".sev-error{background:#ffebe9;color:#a4000f}.sev-warning{background:#fff8c5;color:#7a5d00}"
+  ++ ".sev-note{background:#ddf4ff;color:#0550ae}"
+  ++ "dl.meta{display:grid;grid-template-columns:8rem 1fr;gap:.1rem .8rem;margin:.5rem 0}"
+  ++ "dt{color:#57606a}dd{margin:0}"
+  ++ "table.source{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.85rem;table-layout:fixed}"
+  ++ "table.source td{padding:.05rem .4rem;border:0;white-space:pre-wrap;word-break:break-word}"
+  ++ "table.source td.ln{width:3.5rem;text-align:right;color:#8c959f;user-select:none}"
+  ++ "table.source td.mark{width:9rem}"
+  ++ "tr.sink td{background:#ffebe9}tr.sink td.mark{box-shadow:inset 3px 0 0 #cf222e}"
+  ++ "tr.path td{background:#fff8c5}tr.gap td{color:#8c959f;background:#f6f8fa}"
+  ++ ".sink-tag{background:#cf222e;color:#fff;border-radius:3px;padding:0 .25rem;margin-right:.3rem;font-size:.75rem}"
+  ++ ".step-tag{background:#eaeef2;border:1px solid #d0d7de;border-radius:3px;padding:0 .25rem;margin-right:.2rem;font-size:.75rem}"
+  ++ ".diff{background:#f6f8fa;border:1px solid #d0d7de;padding:.4rem .6rem;white-space:pre-wrap;font-size:.8rem}"
+  ++ ".diff-hit{display:inline-block;background:#ddf4ff;border-radius:3px;padding:0 .3rem;font-size:.8rem}"
+  ++ ".suppressed{margin:.6rem 0}.suppressed summary{cursor:pointer;color:#57606a}"
+  ++ ".suppressed-row{color:#8c959f}.warnings{margin:.3rem 0 1rem;padding-left:1.2rem}"
+  ++ "footer{margin-top:2.5rem;border-top:1px solid #d0d7de;padding-top:.8rem;color:#57606a;font-size:.9rem}"
+  ++ "@media print{main{max-width:none}.finding{break-inside:avoid}}"
+
+/-- The whole self-contained page. No `<script>`, no external URL, no timestamp. -/
+def Scry.renderReport (meta : Scry.ReportMeta) (files : List Scry.ReportFile) : String :=
+  let assigned := Scry.reportAssignAnchors files;
+  let fs := assigned.1;
+  let allFindings := List.foldl (fun acc f => List.append acc f.findings)
+    (.nil : List Scry.ReportFinding) fs;
+  let allBoundary := List.foldl (fun acc f => List.append acc f.boundary)
+    (.nil : List Scry.ReportWarning) fs;
+  let allMemory := List.foldl (fun acc f => List.append acc f.memory)
+    (.nil : List Scry.ReportWarning) fs;
+  let shown := Scry.reportCountShown allFindings;
+  let suppressed := Scry.reportCountSuppressed allFindings;
+  let checked := Scry.reportCountChecks allFindings .true;
+  let unchecked := Scry.reportCountChecks allFindings .false;
+  let diffUsed := List.any (fun f => Bool.not (List.isEmpty f.diffSummary)) fs;
+  "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+    ++ "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    ++ "<title>Scry report</title><style>" ++ Scry.reportStyle ++ "</style></head><body><main>"
+    ++ "<h1>Scry report</h1>"
+    ++ "<p class=\"lede\">A human rendering of <code>scry taint</code> evidence. "
+    ++ "It is not a proof: it reports what this run derived, not that a path is impossible "
+    ++ "or that a program is safe.</p>"
+    ++ "<p class=\"muted\">Tool: <code>" ++ Scry.htmlEscape meta.toolVersion ++ "</code>. "
+    ++ "No timestamp, machine name or elapsed time is recorded, so two runs over the same "
+    ++ "input produce the same page.</p>"
+    ++ (match meta.note with | "" => "" | n => "<p class=\"note\">" ++ Scry.htmlEscape n ++ "</p>")
+    ++ "<h2>Summary</h2>"
+    ++ "<table class=\"summary\"><thead><tr><th>scope</th><th>findings</th><th>checked</th>"
+    ++ "<th>unchecked</th><th>boundary</th><th>memory</th><th>shown / suppressed</th></tr></thead><tbody>"
+    ++ "<tr><td><strong>all files</strong></td><td>" ++ Nat.repr (List.length allFindings)
+    ++ "</td><td>" ++ Nat.repr checked ++ "</td><td>" ++ Nat.repr unchecked
+    ++ "</td><td>" ++ Nat.repr (List.length allBoundary) ++ "</td><td>"
+    ++ Nat.repr (List.length allMemory) ++ "</td><td>" ++ Nat.repr shown ++ " / "
+    ++ Nat.repr suppressed ++ "</td></tr>"
+    ++ String.intercalate "" (List.map Scry.reportFileRow fs)
+    ++ "</tbody></table>"
+    ++ (match diffUsed with
+      | .true => "<p class=\"note\">A diff filter was used: the counts above are "
+          ++ "post-filter. Suppressed findings stay in a details block in their file "
+          ++ "section; nothing is silently deleted.</p>"
+      | .false => "")
+    ++ "<h2>Files</h2><ul class=\"files\">"
+    ++ String.intercalate "" (List.map (fun f =>
+      "<li><a href=\"#" ++ Scry.htmlEscape f.anchor ++ "\">" ++ Scry.htmlEscape f.path
+        ++ "</a> <span class=\"muted\">(" ++ Nat.repr (List.length f.findings)
+        ++ " finding(s))</span></li>") fs)
+    ++ "</ul>"
+    ++ "<h2>Findings</h2>"
+    ++ (match allFindings with
+      | .nil => "<p class=\"muted\">No findings. This is not a proof of absence: the rule "
+          ++ "pack, the C subset and the analysis budget are all incomplete by design.</p>"
+      | _ => "<table class=\"findings\"><thead><tr><th>id</th><th>file:line</th><th>rule</th>"
+          ++ "<th>severity</th><th>CWE</th><th>derivation</th><th>chain</th></tr></thead><tbody>"
+          ++ String.intercalate "" (List.map Scry.reportFindingRow allFindings)
+          ++ "</tbody></table>")
+    ++ String.intercalate "" (List.map Scry.reportFileSection fs)
+    ++ "<footer><p><strong>What this page does not claim.</strong> It is a rendering of "
+    ++ "one analysis run's evidence, not a proof. A finding is a derivation over the "
+    ++ "supported C subset; a missing finding is not absence. Boundary warnings mark "
+    ++ "constructs the lowering could not model and are gaps, not passes. Memory warnings "
+    ++ "are points-to diagnostics. Dynamic evidence, SMT models and concolic witnesses are "
+    ++ "not read by this page: they live in a separate workflow bundle and are not merged "
+    ++ "into this static rendering. The page needs no JavaScript and loads no remote "
+    ++ "resource.</p></footer>"
+    ++ "</main></body></html>\n"

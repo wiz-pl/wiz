@@ -183,6 +183,24 @@ def group : Group where
           "def t3 (x : Nat) (xs ys : List Nat) (h : xs = ys) : List.cons x xs = List.cons x ys :=\n" ++
           "  Eq.congrArg (List.cons x) h\n" ++
           "def t4 (a b : Nat) (h : a = b) : Nat.succ a = Nat.succ b := Eq.congrArg Nat.succ h") },
+    -- (#257) the expected equation is stuck on the third argument of `Eq.trans`
+    -- (`L = ?c`), and the given equation's type has already computed to a Σ of field
+    -- equations: the unifier reads the original sides off the Σ (`eqDataSides?`, #256)
+    -- and solves `?c`, instead of a rigid mismatch between the equation and the Σ.
+    { name := "#257: Eq.trans takes an equation whose type has computed (sides on the Σ)", run := fun _ => do
+        let pre := "import Logic\n" ++
+          "def L : List Nat := .cons 1 (.cons 2 .nil)\n" ++
+          "def L2 : List Nat := .cons 1 (.cons 2 .nil)\n" ++
+          "def e1 : L = L2 := refl L\n"
+        okLib (pre ++
+          "def t (y : List Nat) (h : y = L) : y = L2 := Eq.trans h e1\n" ++
+          "def t2 (y : List Nat) (h : y = L) : y = L2 := Eq.trans h (refl L)")
+        -- the issue's own reproducer: a lemma's equation (data `Int`) computed first
+        okLibs ("import Int\nimport Logic\n" ++
+          "def c2 (a : Nat) : Int.ofNat a + 0 = Int.ofNat a := Eq.trans (Int.add_zero (Int.ofNat a)) rfl")
+        -- only the sides that unify are accepted
+        failsLibW (pre ++ "def L3 : List Nat := .cons 1 (.cons 3 .nil)\n" ++
+          "def bad (y : List Nat) (h : y = L) : y = L3 := Eq.trans h e1") "type mismatch" },
     -- agent/elab-stretch
     { name := "numerals and notation in class field types (numerals-in-class-decls)", run := fun _ =>
         okLib ("import Prelude\ninductive HwTy where\n  | bits (n : Nat)\nclass Hw (r : HwTy → Type) where\n" ++
@@ -326,15 +344,20 @@ def group : Group where
         -- control: a term with a hole of the goal's type (what `apply` does)
         okLib ("import Prelude\n" ++ tac "Expr.app (.const \"Nat.succ\") e" ++ "def three : Nat := by\n  viaHole\n  exact 2\n#eval three") ["3"]
         okLib ("import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n  intro A; intro B; intro f; intro a\n  apply f\n  assumption") },
-    { name := "OPEN (13b): a first-order unification solution forges a value of a private type", run := fun _ => do
-        -- not wanted: this records that the path is open. `?F ?p =?= G x` is solved by
-        -- `?F := G`, `?p := x`; nobody type-checks the solutions, and the kernel takes
-        -- `Look Nat` for `Pos Nat` by shape. When this test fails, the path was closed:
-        -- turn it into a `failsPriv` and update docs/stages/13-language.md, 13b.
-        okPriv privMod ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+    { name := "(13b): a first-order unification solution cannot forge a value of a private type", run := fun _ => do
+        -- `?F ?p =?= G x` is solved by `?F := G`, `?p := x`; the solutions are picked by
+        -- shape, so `G` is checked against `?F`'s type where it is guessed, where opaque
+        -- types have no definition (`Look Nat → Type` is not `Pos Nat → Type` there).
+        failsPriv privMod ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
           "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
           "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
-          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n#eval (forge (Look.mk 11)).val") ["11"] },
+          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)")
+          "hidden outside its module"
+        -- and the same solution where no opaque type is involved stays accepted
+        okPriv "" ("import Prelude\nstructure Look (A : Type) where\n  val : A\n" ++
+          "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+          "def sel {F : Look Nat → Type} (p : Look Nat) (w : F p) : Look Nat := p\n" ++
+          "def forge (x : Look Nat) : Look Nat := sel _ (G.mk x)\n#eval (forge (Look.mk 11)).val") ["11"] },
     { name := "rfl is checked by the elaborator, not left to the kernel (wishful: elab-rfl-unchecked)", run := fun _ => do
         failsLib "import Prelude\ndef w (r a : Nat) : r = Nat.succ a := rfl" "rfl: the two sides are not definitionally equal"
         failsLib "import Prelude\ndef z (a : Nat) : a = a + 0 := rfl" "rfl: the two sides are not definitionally equal"
@@ -390,12 +413,13 @@ def group : Group where
           "rfl: the two sides are not definitionally equal"
         failsLib "import Prelude\ndef bad {A B : Type} (p q : A × B) : (p.1, q.2) = p := rfl"
           "rfl: the two sides are not definitionally equal"
-        -- a field equation written by hand with a cast at a type variable is not proved by
-        -- `rfl` (no axiom is added silently: write `castRefl`)
-        failsLib "import Prelude\ndef h {A B : Type} (s : A × B) : (0 e : s.1 = s.1) × ((cast (refl B) s.2 : B) = s.2) := rfl"
-          "rfl: the two sides are not definitionally equal"
-        failsLib "import Prelude\ndef h2 {B : Type} (b : B) : (cast (refl B) b : B) = b := rfl"
-          "rfl: the two sides are not definitionally equal" },
+        -- (PF-C) an equation is a proposition, so while the checker compares its two sides
+        -- Cast-Refl applies at every type: a hand-written cast at a type variable is its
+        -- argument. This is the breadth the D1 trade-off takes (wiz-notes/conv-proof-field.md
+        -- §8, the "scope probe"); the reference checker (Tests/Meta.lean, T0/T1) keeps the
+        -- inert-only rule, and no axiom is added.
+        okLib "import Prelude\ndef h {A B : Type} (s : A × B) : (0 e : s.1 = s.1) × ((cast (refl B) s.2 : B) = s.2) := rfl"
+        okLib "import Prelude\ndef h2 {B : Type} (b : B) : (cast (refl B) b : B) = b := rfl" },
     { name := "private constructors, observations and fields: the public API (13b)", run := fun _ => do
         okPriv privMod2 ("import Priv\n#eval Tok.value (Tok.num 3)\n#eval Tok.value (Tok.hide 4)\n#eval Tok.value (.num 5)\n" ++
           "#eval Sig.sample (Sig.next (Sig.const 3))\n#eval (Sig.const 2).name\n" ++

@@ -1,0 +1,124 @@
+-- test: run
+import IO
+import Sys
+import Scry.CstStore
+import Scry.Native
+import Scry.Preproc
+import Scry.Lower
+import Scry.Wil
+-- S2 end to end: the real preprocessor (`cc -E`), the vendored tree-sitter shim, the
+-- line map in Scry.Preproc, the C-to-Wil lowering, and `Wil.runFunction`.
+--
+-- The Lean group (Tests/Groups/ScryC2Wil.lean) pins the same fixture through a
+-- checked-in `main.i` and spill, so it runs without tree-sitter; this test runs the
+-- toolchain's own `cc -E`, which covers its marker format and the unreadable
+-- pseudo-file path (`<built-in>`, `<command-line>`).
+--
+-- `corpus/c2wil/preproc/main.c` includes `inc.h` (a macro and a `static` function),
+-- defines a function-like macro, and has an `#if`/`#else`. The lines below are the
+-- counts and the *original* source lines the origins point at; the C result is 12
+-- (`6 + 5`, then `bump`).
+
+def fail (m : String) : IO Unit := IO.bind (IO.println m) (fun _ => Process.exit 1)
+
+def checkEq (label : String) (got want : Nat) : IO Unit :=
+  match Nat.beq got want with
+  | .true => IO.println (label ++ ": " ++ Nat.repr got)
+  | .false => fail (label ++ ": got " ++ Nat.repr got ++ ", want " ++ Nat.repr want)
+
+/-- The original texts named by `paths` (`""` for a pseudo path or an unreadable file). -/
+def loadTexts : List String → EIO (List (String × String))
+  | .nil => EIO.pure .nil
+  | .cons p rest => do
+    rest' ← loadTexts rest;
+    match String.startsWith p "<" with
+    | .true => EIO.pure (.cons (p, "") rest')
+    | .false => do
+      there ← EIO.lift (FS.exists p);
+      match there with
+      | .false => EIO.pure (.cons (p, "") rest')
+      | .true => do
+        t ← FS.readFile p;
+        EIO.pure (.cons (p, t) rest')
+
+def fnNamed (t : Scry.TU) (name : String) : Option Wil.Func :=
+  List.find (fun f => String.eq f.name name) t.funcs
+
+/-- Every statement and terminator origin of `f`, in block order. -/
+def spansOf (f : Wil.Func) : List Wil.Span :=
+  List.concat (List.map (fun b => List.append (List.map Wil.stmtOrigin b.stmts)
+    (.cons (Wil.termOrigin b.term) .nil)) f.blocks)
+
+/-- The first span of `f` whose original text is `text`. -/
+def spanWith (t : Scry.TU) (f : Wil.Func) (text : String) : Option Wil.Span :=
+  List.find (fun sp => String.eq (Scry.spanText t.files sp) text) (spansOf f)
+
+def main : IO Unit := EIO.toIO (do
+  let path := "corpus/c2wil/preproc/main.c";
+  out ← Process.output "cc" ["-E", "-ffreestanding", "-DWITH_OFFSET=1", path] "";
+  match out.status with
+  | .exited 0 => do
+    let paths := Scry.markerPaths path out.stdout;
+    texts ← loadTexts paths;
+    let pre := Scry.preprocess path out.stdout texts;
+    st ← Scry.Native.parseCheckedText path pre.text;
+    store ← EIO.lift (Scry.Native.toCstStore path st);
+    let cst := Scry.Cst.ofPreprocessed pre store;
+    let tu := Scry.lowerTU path cst;
+    let real := List.length (List.filter (fun p => Bool.not (String.startsWith p "<")) pre.paths);
+    EIO.lift (checkEq "warnings" (List.length tu.warnings) 0);
+    EIO.lift (match Nat.lt 0 pre.markers with
+      | .true => IO.println "markers present: 1"
+      | .false => fail "markers present: none");
+    EIO.lift (match Nat.beq pre.systemMarkers 0 with
+      | .true => IO.println "system markers: 0"
+      | .false => fail ("system markers: " ++ Nat.repr pre.systemMarkers));
+    EIO.lift (match Nat.beq real 2 with
+      | .true => IO.println ("original files: " ++ Nat.repr real)
+      | .false => fail ("original files: " ++ Nat.repr real ++ ", want 2"));
+    EIO.lift (match List.find (fun p => String.endsWith p "preproc/main.c") pre.paths with
+      | .some _ => IO.println "main.c path: 1"
+      | .none => fail "main.c path: not in the file table");
+    EIO.lift (match List.find (fun p => String.endsWith p "preproc/inc.h") pre.paths with
+      | .some _ => IO.println "inc.h path: 1"
+      | .none => fail "inc.h path: not in the file table");
+    EIO.lift (match fnNamed tu "main" with
+      | .some f => match spanWith tu f "int a = TWICE(3);" with
+        | .some sp => IO.println ("macro origin: " ++ Scry.spanText tu.files sp
+            ++ " (line " ++ Nat.repr sp.line ++ ")")
+        | .none => fail "macro origin: not found"
+      | .none => fail "macro origin: main not found");
+    EIO.lift (match fnNamed tu "main" with
+      | .some f => match spanWith tu f "int b = a + OFFSET;" with
+        | .some sp => IO.println ("conditional origin: " ++ Scry.spanText tu.files sp
+            ++ " (line " ++ Nat.repr sp.line ++ ")")
+        | .none => fail "conditional origin: not found"
+      | .none => fail "conditional origin: main not found");
+    EIO.lift (match fnNamed tu "main" with
+      | .some f => match spanWith tu f "return bump(b);" with
+        | .some sp => IO.println ("return origin: " ++ Scry.spanText tu.files sp
+            ++ " (line " ++ Nat.repr sp.line ++ ")")
+        | .none => fail "return origin: not found"
+      | .none => fail "return origin: main not found");
+    EIO.lift (match fnNamed tu "main" with
+      | .some f =>
+        let p := List.getD tu.paths f.origin.file "";
+        match String.endsWith p "preproc/main.c" with
+        | .true => IO.println ("main origin path: " ++ p)
+        | .false => fail ("main origin path: " ++ p)
+      | .none => fail "main origin path: main not found");
+    EIO.lift (match fnNamed tu "static:bump" with
+      | .some f =>
+        let p := List.getD tu.paths f.origin.file "";
+        match Bool.and (String.endsWith p "preproc/inc.h")
+            (String.startsWith (Scry.spanText tu.files f.origin) "static int bump(int x) {") with
+        | .true => IO.println ("header origin: inc.h (line " ++ Nat.repr f.origin.line ++ ")")
+        | .false => fail ("header origin: " ++ p ++ " line " ++ Nat.repr f.origin.line)
+      | .none => fail "header origin: static:bump not found"
+      | .none => fail "header origin: static:bump not found");
+    EIO.lift (IO.println ("main result: " ++ (match
+      Wil.runFunction (Wil.program tu.funcs) 10000 "main" [] with
+      | .ok v => Nat.repr (Wil.Val.bitsAt 32 v)
+      | .fault m => String.append "fault " m
+      | .outOfFuel => "out of fuel")))
+  | _ => EIO.fail ("cc -E failed: " ++ out.stderr))

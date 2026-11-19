@@ -27,7 +27,10 @@
 #                            there is a lean) and scripts/release-licenses/*-LICENSE
 #   share/wiz/TOOLCHAIN      a marker: editors find the toolchain a library file belongs to
 #
-# OUT.tar.gz.sha256 is written next to it.
+# The archive is reproducible: members are sorted, owned by 0:0, all dated
+# SOURCE_DATE_EPOCH (default 0) and given the same modes, and gzip is told not to
+# record a name or time. The same tree then gives the same bytes, wherever it was
+# built. OUT.tar.gz.sha256 is written next to it.
 set -eu
 out=$1
 bindir=${2:-.lake/build/bin}
@@ -66,7 +69,8 @@ if [ -n "$webdir" ]; then
   # (11s) tagged.js is shared by the infoview and the documentation's pages (`wiz doc`,
   # which also copies scroll.*); a web dir from before 11s has none of them
   for f in infoview.html infoview.js wiz-infoview.mjs wiz-infoview.wasm; do cp "$webdir/$f" "$top/share/wiz/web/$f"; done
-  for f in tagged.js scroll.js scroll-search.js scroll.css; do
+  for f in tagged.js scroll.js scroll-search.js scroll.css \
+           lsp-client.js goals.js doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
 fi
@@ -83,6 +87,8 @@ exec "$d/share/wiz/.lake/build/bin/grail" "$@"
 EOF
 chmod 755 "$top/bin/wiz" "$top/bin/grail"
 case $out in /*) ;; *) out=$(pwd)/$out ;; esac
-tar -czf "$out" -C "$work" "$name"
+epoch=${SOURCE_DATE_EPOCH:-0}
+tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+    --mode='u+rwX,go+rX,go-w' -cf - -C "$work" "$name" | gzip -n > "$out"
 (cd "$(dirname "$out")" && sha256sum "$(basename "$out")") > "$out.sha256"
 echo "$out"

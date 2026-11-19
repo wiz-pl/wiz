@@ -257,9 +257,12 @@ and `q₁ + p₂` have the same normal form as `NatExpr`s. -/
 def IntExpr.provePairs (ρ : List Int) (a b : IntExpr)
     (h : NatPoly.beq (NatExpr.norm (.add (IntExpr.toPair a).1 (IntExpr.toPair b).2)) (NatExpr.norm (.add (IntExpr.toPair b).1 (IntExpr.toPair a).2)) = .true) :
     IntExpr.eval ρ a = IntExpr.eval ρ b :=
-  Eq.trans (IntExpr.sound ρ a)
-    (Eq.trans (Int.ofPair_eq _ _ _ _ (NatExpr.prove (IntExpr.env ρ) (.add (IntExpr.toPair a).1 (IntExpr.toPair b).2) (.add (IntExpr.toPair b).1 (IntExpr.toPair a).2) h))
-      (Eq.symm (IntExpr.sound ρ b)))
+  calc IntExpr.eval ρ a
+      = Int.ofPair (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair a).1) (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair a).2) :=
+        IntExpr.sound ρ a
+       _ = Int.ofPair (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair b).1) (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair b).2) :=
+        Int.ofPair_eq _ _ _ _ (NatExpr.prove (IntExpr.env ρ) (.add (IntExpr.toPair a).1 (IntExpr.toPair b).2) (.add (IntExpr.toPair b).1 (IntExpr.toPair a).2) h)
+       _ = IntExpr.eval ρ b := Eq.symm (IntExpr.sound ρ b)
 
 /-- `x = y` by the bootstrap procedure, as `NatExpr.proveAt`. `int_pair_ring!`
 expands to this. It is slower than `int_ring!`; it proves the lemmas `int_ring!`
@@ -267,7 +270,9 @@ needs. -/
 def IntExpr.provePairsAt (x y : Int) (ρ : List Int) (a b : IntExpr) (hx : IntExpr.eval ρ a = x) (hy : IntExpr.eval ρ b = y)
     (h : NatPoly.beq (NatExpr.norm (.add (IntExpr.toPair a).1 (IntExpr.toPair b).2)) (NatExpr.norm (.add (IntExpr.toPair b).1 (IntExpr.toPair a).2)) = .true) :
     x = y :=
-  Eq.trans (Eq.symm hx) (Eq.trans (IntExpr.provePairs ρ a b h) hy)
+  calc x = IntExpr.eval ρ a := Eq.symm hx
+       _ = IntExpr.eval ρ b := IntExpr.provePairs ρ a b h
+       _ = y := hy
 /-- The macro behind `int_pair_ring!`. -/
 def IntPairRing.expand : Macro := fun stx => Ring.Reify.expandWith "IntExpr" "provePairsAt" stx
 syntax:lead (name := intPairRing) "int_pair_ring!" term : term
@@ -356,9 +361,13 @@ def IntPoly.keyProd_merge (ρ : List Int) : (xs ys : List Nat) →
     IntPoly.keyProd ρ (Ring.Key.merge xs ys) = IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys
   | .nil, ys => int_pair_ring! IntPoly.keyProd ρ ys = 1 * IntPoly.keyProd ρ ys
   | .cons x xs, ys =>
-    Eq.trans (IntPoly.keyProd_insert ρ x (Ring.Key.merge xs ys))
-      (Eq.trans (congrArg (fun z => IntExpr.get ρ x * z) (IntPoly.keyProd_merge ρ xs ys))
-        (int_pair_ring! IntExpr.get ρ x * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys) = IntExpr.get ρ x * IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys))
+    calc IntPoly.keyProd ρ (Ring.Key.merge (.cons x xs) ys)
+        = IntExpr.get ρ x * IntPoly.keyProd ρ (Ring.Key.merge xs ys) :=
+          IntPoly.keyProd_insert ρ x (Ring.Key.merge xs ys)
+         _ = IntExpr.get ρ x * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys) :=
+          congrArg (fun z => IntExpr.get ρ x * z) (IntPoly.keyProd_merge ρ xs ys)
+         _ = IntExpr.get ρ x * IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys :=
+          int_pair_ring! IntExpr.get ρ x * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys) = IntExpr.get ρ x * IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys
 
 /-- Soundness of `IntPoly.addEq`. -/
 def IntPoly.eval_addEq (ρ : List Int) (s : Int) (xs : List Nat) (p : IntPoly) :
@@ -375,9 +384,13 @@ def IntPoly.eval_addMonoO (ρ : List Int) (c : Int) (xs : List Nat) (d : Int) (y
   | .lt, _ => rfl
   | .eq, h =>
     let e := Ring.Key.cmp_eq xs ys h;
-    Eq.trans (IntPoly.eval_addEq ρ (c + d) xs p (Int.beq (c + d) 0) rfl)
-      (Eq.trans (int_pair_ring! (c + d) * IntPoly.keyProd ρ xs + IntPoly.eval ρ p = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p))
-        (congrArg (fun (zs : List Nat) => c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ zs + IntPoly.eval ρ p)) e))
+    calc IntPoly.eval ρ (IntPoly.addMonoO .eq c xs d ys p rec)
+        = (c + d) * IntPoly.keyProd ρ xs + IntPoly.eval ρ p :=
+          IntPoly.eval_addEq ρ (c + d) xs p (Int.beq (c + d) 0) rfl
+         _ = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) :=
+          int_pair_ring! (c + d) * IntPoly.keyProd ρ xs + IntPoly.eval ρ p = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p)
+         _ = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ ys + IntPoly.eval ρ p) :=
+          congrArg (fun (zs : List Nat) => c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ zs + IntPoly.eval ρ p)) e
   | .gt, _ =>
     Eq.trans (congrArg (fun z => d * IntPoly.keyProd ρ ys + z) ih)
       (int_pair_ring! d * IntPoly.keyProd ρ ys + (c * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ ys + IntPoly.eval ρ p))
@@ -391,27 +404,38 @@ def IntPoly.eval_addMono (ρ : List Int) (c : Int) (xs : List Nat) : (p : IntPol
 def IntPoly.eval_add (ρ : List Int) : (p q : IntPoly) → IntPoly.eval ρ (IntPoly.add p q) = IntPoly.eval ρ p + IntPoly.eval ρ q
   | .nil, q => int_pair_ring! IntPoly.eval ρ q = 0 + IntPoly.eval ρ q
   | .cons m p, q =>
-    Eq.trans (IntPoly.eval_addMono ρ m.1 m.2 (IntPoly.add p q))
-      (Eq.trans (congrArg (fun z => m.1 * IntPoly.keyProd ρ m.2 + z) (IntPoly.eval_add ρ p q))
-        (int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 + (IntPoly.eval ρ p + IntPoly.eval ρ q) = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p + IntPoly.eval ρ q))
+    calc IntPoly.eval ρ (IntPoly.add (.cons m p) q)
+        = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ (IntPoly.add p q) :=
+          IntPoly.eval_addMono ρ m.1 m.2 (IntPoly.add p q)
+         _ = m.1 * IntPoly.keyProd ρ m.2 + (IntPoly.eval ρ p + IntPoly.eval ρ q) :=
+          congrArg (fun z => m.1 * IntPoly.keyProd ρ m.2 + z) (IntPoly.eval_add ρ p q)
+         _ = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p + IntPoly.eval ρ q :=
+          int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 + (IntPoly.eval ρ p + IntPoly.eval ρ q) = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p + IntPoly.eval ρ q
 /-- Multiplying by a monomial multiplies by its value. -/
 def IntPoly.eval_mulMono (ρ : List Int) (c : Int) (xs : List Nat) : (q : IntPoly) →
     IntPoly.eval ρ (IntPoly.mulMono c xs q) = c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q
   | .nil => Eq.symm (int_pair_ring! c * IntPoly.keyProd ρ xs * 0 = 0)
   | .cons m q =>
-    Eq.trans (IntPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (IntPoly.mulMono c xs q))
-      (Eq.trans
-        (congrArg2 (fun y z => c * m.1 * y + z) (IntPoly.keyProd_merge ρ xs m.2) (IntPoly.eval_mulMono ρ c xs q))
-        (int_pair_ring! c * m.1 * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ m.2) + c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q
-           = c * IntPoly.keyProd ρ xs * (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ q)))
+    calc IntPoly.eval ρ (IntPoly.mulMono c xs (.cons m q))
+        = c * m.1 * IntPoly.keyProd ρ (Ring.Key.merge xs m.2) + IntPoly.eval ρ (IntPoly.mulMono c xs q) :=
+          IntPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (IntPoly.mulMono c xs q)
+         _ = c * m.1 * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ m.2) + c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q :=
+          congrArg2 (fun y z => c * m.1 * y + z) (IntPoly.keyProd_merge ρ xs m.2) (IntPoly.eval_mulMono ρ c xs q)
+         _ = c * IntPoly.keyProd ρ xs * (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ q) :=
+          int_pair_ring! c * m.1 * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ m.2) + c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q
+             = c * IntPoly.keyProd ρ xs * (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ q)
 /-- `IntPoly.mul` is multiplication. -/
 def IntPoly.eval_mul (ρ : List Int) : (p q : IntPoly) → IntPoly.eval ρ (IntPoly.mul p q) = IntPoly.eval ρ p * IntPoly.eval ρ q
   | .nil, q => Eq.symm (int_pair_ring! 0 * IntPoly.eval ρ q = 0)
   | .cons m p, q =>
-    Eq.trans (IntPoly.eval_add ρ (IntPoly.mulMono m.1 m.2 q) (IntPoly.mul p q))
-      (Eq.trans (congrArg2 (fun y z => y + z) (IntPoly.eval_mulMono ρ m.1 m.2 q) (IntPoly.eval_mul ρ p q))
-        (int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 * IntPoly.eval ρ q + IntPoly.eval ρ p * IntPoly.eval ρ q
-           = (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p) * IntPoly.eval ρ q))
+    calc IntPoly.eval ρ (IntPoly.mul (.cons m p) q)
+        = IntPoly.eval ρ (IntPoly.mulMono m.1 m.2 q) + IntPoly.eval ρ (IntPoly.mul p q) :=
+          IntPoly.eval_add ρ (IntPoly.mulMono m.1 m.2 q) (IntPoly.mul p q)
+         _ = m.1 * IntPoly.keyProd ρ m.2 * IntPoly.eval ρ q + IntPoly.eval ρ p * IntPoly.eval ρ q :=
+          congrArg2 (fun y z => y + z) (IntPoly.eval_mulMono ρ m.1 m.2 q) (IntPoly.eval_mul ρ p q)
+         _ = (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p) * IntPoly.eval ρ q :=
+          int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 * IntPoly.eval ρ q + IntPoly.eval ρ p * IntPoly.eval ρ q
+             = (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p) * IntPoly.eval ρ q
 /-- A constant polynomial evaluates to its constant. -/
 def IntPoly.eval_const (ρ : List Int) : (n : Nat) → IntPoly.eval ρ (IntPoly.const n) = Int.ofNat n
   | .zero => rfl
@@ -450,7 +474,10 @@ def IntPoly.beq_eval (ρ : List Int) : (p q : IntPoly) → IntPoly.beq p q = .tr
 
 /-- Expressions with the same normal form have the same value. -/
 def IntExpr.prove (ρ : List Int) (a b : IntExpr) (h : IntPoly.beq (IntExpr.norm a) (IntExpr.norm b) = .true) : IntExpr.eval ρ a = IntExpr.eval ρ b :=
-  Eq.trans (Eq.symm (IntExpr.eval_norm ρ a)) (Eq.trans (IntPoly.beq_eval ρ (IntExpr.norm a) (IntExpr.norm b) h) (IntExpr.eval_norm ρ b))
+  calc IntExpr.eval ρ a
+      = IntPoly.eval ρ (IntExpr.norm a) := Eq.symm (IntExpr.eval_norm ρ a)
+       _ = IntPoly.eval ρ (IntExpr.norm b) := IntPoly.beq_eval ρ (IntExpr.norm a) (IntExpr.norm b) h
+       _ = IntExpr.eval ρ b := IntExpr.eval_norm ρ b
 
 /-- `x = y`, from expressions that evaluate to `x` and `y` and have the same
 normal form. `int_ring!` expands to this. -/
@@ -477,8 +504,6 @@ def Int.add_neg (a : Int) : a + -a = 0 := int_ring! a + -a = 0
 def Int.neg_add (a : Int) : -a + a = 0 := int_ring! -a + a = 0
 /-- `a - a = 0`. -/
 def Int.sub_self (a : Int) : a - a = 0 := int_ring! a - a = 0
-/-- `a - 0 = a`. -/
-def Int.sub_zero (a : Int) : a - 0 = a := int_ring! a - 0 = a
 /-- `0 - a = -a`. -/
 def Int.zero_sub (a : Int) : 0 - a = -a := int_ring! 0 - a = -a
 /-- Subtraction is adding the negation. -/
@@ -497,14 +522,6 @@ def Int.mul_comm (a b : Int) : a * b = b * a := int_ring! a * b = b * a
 def Int.mul_assoc (a b c : Int) : a * b * c = a * (b * c) := int_ring! a * b * c = a * (b * c)
 /-- `a * (b * c) = b * (a * c)`. -/
 def Int.mul_left_comm (a b c : Int) : a * (b * c) = b * (a * c) := int_ring! a * (b * c) = b * (a * c)
-/-- `a * 1 = a`. -/
-def Int.mul_one (a : Int) : a * 1 = a := int_ring! a * 1 = a
-/-- `1 * a = a`. -/
-def Int.one_mul (a : Int) : 1 * a = a := int_ring! 1 * a = a
-/-- `a * 0 = 0`. -/
-def Int.mul_zero (a : Int) : a * 0 = 0 := int_ring! a * 0 = 0
-/-- `0 * a = 0`. -/
-def Int.zero_mul (a : Int) : 0 * a = 0 := int_ring! 0 * a = 0
 /-- Multiplication distributes over addition on the left. -/
 def Int.mul_add (a b c : Int) : a * (b + c) = a * b + a * c := int_ring! a * (b + c) = a * b + a * c
 /-- Multiplication distributes over addition on the right. -/

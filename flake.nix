@@ -8,8 +8,9 @@
   # The packages: `wiz` (the default; it has `grail` too), built with Lake and the Lean
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
-  # and wiz (`nix run .#nvim-wiz`). CI pushes them to the Cachix cache `badlydrawnwizards`; see
-  # docs/building.md for `nix run`.
+  # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
+  # manual, generated with that wiz (never committed). CI pushes them to the Cachix
+  # cache `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -48,7 +49,8 @@
                 root = ./.;
                 fileset = fs.unions [
                   ./lakefile.lean ./lake-manifest.json ./lean-toolchain
-                  ./Main.lean ./Wiz.lean ./Wiz ./Grail.lean ./Grail
+                  ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+                  ./Tests # the test driver (`packages.tests`)
                   ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
                   ./c # linked into the executables (moreLinkObjs)
                 ];
@@ -57,14 +59,15 @@
               buildPhase = ''
                 runHook preBuild
                 # no dependencies to fetch (lake-manifest.json); Lake's artifact cache in the sandbox
+                # (`tests` is the test driver: `packages.tests` installs it from here)
                 export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
-                lake build wiz grail
+                lake build wiz grail tests
                 runHook postBuild
               '';
               installPhase = ''
                 runHook preInstall
                 mkdir -p $out/bin
-                install -m755 .lake/build/bin/wiz .lake/build/bin/grail $out/bin/
+                install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
                 runHook postInstall
               '';
             };
@@ -92,18 +95,109 @@
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
+              # The packaged read-only elaboration cache: elaborate every module of the
+              # standard library once, with the binary the wrapper runs (the same bytes,
+              # and the same toolchain-library layout, so the keys match a user's run).
+              # Check a one-line `import M` rather than M's file: checking the file
+              # elaborates it as the main file, whose commands are keyed by the main
+              # text and never hit by an importer. `import M` stores M's effect under
+              # M's module key and writes its seen marker, which is what a user hits.
+              # Each check reads what earlier ones wrote, so this is one pass over lib/.
+              # A lib module that does not check is a real failure: stop at the first.
+              export HOME=$TMPDIR
+              cd $share
+              cache=$share/cache
+              mkdir -p "$cache"
+              while IFS= read -r f; do
+                m=''${f#lib/}; m=''${m%.wiz}; m=''${m//\//.}
+                printf 'import %s\n' "$m" > "$TMPDIR/lib-import.wiz"
+                .lake/build/bin/wiz --cache "$cache" -I "$share/lib" check "$TMPDIR/lib-import.wiz"
+              done < <(find lib -name '*.wiz' | LC_ALL=C sort)
+              # grail elaborates in-process under its *own* binary hash (the build file,
+              # Grail and Prelude, before every command, and each `check` job), so it
+              # hits none of the entries above: the two namespaces are disjoint by
+              # design (Cache.binaryId). Warm grail's too, with a minimal package: its
+              # `grail.wiz` elaborates Grail and Prelude, and the check target elaborates
+              # Std's closure, which is the fixed cost of a first `grail build` (measured:
+              # 437 entries, 3.3 MB, ~3 s here, against ~0 store hits without it). A
+              # module outside Std's closure is elaborated once into the user's cache.
+              # `grail build` reads the build file and runs the check job in one go; the
+              # binary needs no toolchain flags for either (lib/ imports no C headers).
+              warm=$TMPDIR/warm-pkg
+              mkdir -p "$warm"
+              printf '%s\n' 'import Grail' \
+                'def package : Package := Package.new "warm"' \
+                '  |> Package.check "std" "main.wiz"' > "$warm/grail.wiz"
+              printf 'import Std\n' > "$warm/main.wiz"
+              .lake/build/bin/grail -C "$warm" --cache "$cache" build
+              # The binary's memo names the build-time executable path in its stamp; it
+              # is for the write cache, so the store ships none.
+              rm -rf "$cache/bin"
+              chmod -R a-w "$cache"
               # wiz's module roots: ./lib (a checkout's), then the packaged standard library
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils ]} \
-                --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib" ])}
+                --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib"
+                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
               # grail: git fetches dependencies (stage 23h)
               makeWrapper $share/.lake/build/bin/grail $out/bin/grail \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git ]} \
-                --add-flags ${addFlags tcFlags}
+                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
             '';
             meta = {
               description = "Wiz, a didactic dependently typed language, and grail, its build tool";
               mainProgram = "wiz";
+              platforms = systems;
+            };
+          };
+          # The test driver (`tests --list`, `tests --run GROUP INDEX`), from the same
+          # build as wiz and grail (so `nix build .#wiz` builds it too). The driver looks
+          # for `wiz`/`grail` beside itself (`IO.appPath.parent` in Tests/Grail.lean), so
+          # the wrapped binaries are installed here too: their flags carry the packaged
+          # library, cache and C toolchain, exactly what a `.lake/build/bin/wiz` in a
+          # checkout has.
+          tests = pkgs.stdenv.mkDerivation {
+            pname = "wiz-tests";
+            inherit (unwrapped) version;
+            dontUnpack = true;
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              install -m755 ${unwrapped}/bin/tests $out/bin/tests
+              install -m755 ${wiz}/bin/wiz $out/bin/wiz
+              install -m755 ${wiz}/bin/grail $out/bin/grail
+              runHook postInstall
+            '';
+            meta = {
+              description = "The Wiz test driver";
+              mainProgram = "tests";
+              platforms = systems;
+            };
+          };
+          # The standard library's reference manual (stage 11s; `wiz doc --lib --reference`):
+          # built, not committed. It reads only the packaged wiz (its lib/ and its
+          # read-only elaboration cache), so while the compiler and lib/ are unchanged a
+          # rebuild is a Cachix hit. $out/index.md is the Markdown manual; $out/site is the
+          # plain-HTML site it came with (reference.html among its pages).
+          reference = pkgs.stdenv.mkDerivation {
+            pname = "wiz-reference";
+            inherit (unwrapped) version;
+            dontUnpack = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              ${wiz}/bin/wiz doc --lib -o site --reference manual
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp manual/index.md $out/index.md
+              cp -r site $out/site
+              runHook postInstall
+            '';
+            meta = {
+              description = "The Wiz standard library reference manual (generated)";
               platforms = systems;
             };
           };
@@ -204,7 +298,83 @@
                 platforms = systems;
               };
             };
-        in { inherit wiz unwrapped tower wiz-nvim nvim-wiz; default = wiz; };
+
+          # scry's C# grammar (scry/CSHARP.md, scry/native/README.md): tree-sitter-c-sharp
+          # v0.23.5, fetched rather than vendored, because its src/parser.c (29.7 MB) is
+          # generated by tree-sitter. scry's `link_c` lines compile it from
+          # scry/native/tree-sitter-c-sharp, an uncommitted out-link to this path:
+          #   nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
+          tree-sitter-c-sharp = pkgs.fetchFromGitHub {
+            owner = "tree-sitter";
+            repo = "tree-sitter-c-sharp";
+            rev = "cac6d5fb595f5811a076336682d5d595ac1c9e85"; # tag v0.23.5
+            hash = "sha256-N5AAlwQFGGi47cj0m7Te08bA486gwY6NBOx4Qcy4lpo=";
+          };
+
+          # scry's native parse library, built once here and substituted from Cachix: the
+          # tree-sitter runtime, the C grammar (both vendored under scry/native), the C#
+          # grammar above, and ts_shim.c, as lib/libscry-ts.a. The check parses one C and
+          # one C# file through `scry_parse`, so a grammar the shim can't load fails here.
+          scry-native = pkgs.stdenv.mkDerivation {
+            pname = "scry-native";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./scry/native;
+              fileset = fs.unions [ ./scry/native/ts_shim.c ./scry/native/tree-sitter ./scry/native/tree-sitter-c ];
+            };
+            buildPhase = ''
+              runHook preBuild
+              ln -s ${tree-sitter-c-sharp} tree-sitter-c-sharp
+              cc=''${CC:-cc}
+              $cc -O2 -c -I tree-sitter/lib/include -I tree-sitter/lib/src tree-sitter/lib/src/lib.c -o ts-lib.o
+              $cc -O2 -c -I tree-sitter-c/src tree-sitter-c/src/parser.c -o ts-c.o
+              $cc -O2 -c -I tree-sitter-c-sharp/src tree-sitter-c-sharp/src/parser.c -o ts-cs-parser.o
+              $cc -O2 -c -I tree-sitter-c-sharp/src tree-sitter-c-sharp/src/scanner.c -o ts-cs-scanner.o
+              $cc -O2 -c -I . ts_shim.c -o ts-shim.o
+              ar rcs libscry-ts.a ts-lib.o ts-c.o ts-cs-parser.o ts-cs-scanner.o ts-shim.o
+              runHook postBuild
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              cat > smoke.c <<'C'
+              #include <stdint.h>
+              #include <stdio.h>
+              #include <string.h>
+              typedef struct ScryStore ScryStore;
+              ScryStore *scry_parse(const char *lang, const char *src, uint64_t len);
+              uint64_t scry_store_ok(ScryStore *s);
+              const char *scry_store_error(ScryStore *s);
+              uint64_t scry_node_count(ScryStore *s);
+              uintptr_t wiz_warray_of_c(uint32_t width, const void *p, size_t n) { return 0; }
+              static int check(const char *lang, const char *src) {
+                ScryStore *s = scry_parse(lang, src, strlen(src));
+                if (!s || !scry_store_ok(s) || scry_node_count(s) < 3) {
+                  fprintf(stderr, "scry_parse %s: %s\n", lang, s ? scry_store_error(s) : "null");
+                  return 1;
+                }
+                return 0;
+              }
+              int main(void) {
+                return check("c", "int main(void) { return 0; }")
+                     | check("c_sharp", "class A { static void Main() { var x = $\"{1}\"; } }");
+              }
+              C
+              ''${CC:-cc} smoke.c libscry-ts.a -o smoke
+              ./smoke
+              runHook postCheck
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm644 libscry-ts.a $out/lib/libscry-ts.a
+              runHook postInstall
+            '';
+            meta = {
+              description = "scry's tree-sitter parse library: the runtime, the C and C# grammars, and the shim";
+              platforms = systems;
+            };
+          };
+        in { inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native; default = wiz; };
     in {
       packages = forAll packagesFor;
 
@@ -222,9 +392,12 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat` groups
-          # (stage 28b: `sat_decide` finds it on PATH)
-          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical ];
+          # neovim: the `nvim` test group (editors/nvim); z3 and cadical: the `smt` and `sat`
+          # groups (stage 28b: `sat_decide` finds it on PATH); yosys: the synthesis cases
+          # (the `hdl` group and the HDL protocol hooks), so CI runs them instead of
+          # skipping; nodejs: the WebAssembly backend's modules run under Node with
+          # web/wasm-host.mjs (stage 8f) and skip without it
+          packages = [ pkgs.elan pkgs.gmp pkgs.boehmgc pkgs.llvm pkgs.python3 pkgs.git pkgs.neovim pkgs.z3 pkgs.cadical pkgs.yosys pkgs.nodejs ];
           # `wiz` and `grail` take the toolchain as flags (stage 23a); grail and the test
           # driver read this machine's paths from the uncommitted grail.local.wiz written
           # here (when run from the repository root). Nothing reads the environment.

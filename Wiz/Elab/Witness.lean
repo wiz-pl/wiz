@@ -50,8 +50,8 @@ its shape (an inductive type's name, or an axiom). -/
 private partial def headNames (v : Val R) (acc : List Name := []) : ElabM R (List Name) := do
   match ← forceMeta v with
   | .unfold n _ _ v => headNames v.get (acc ++ [n])
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => headNames v.get acc
-  | .mu _ _ _ _ _ (some (T, _, _)) | .nu _ _ _ _ _ (some (T, _, _)) => pure (acc ++ [T])
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => headNames v.get acc
+  | .mu _ _ _ _ _ (some (T, _, _)) _ | .nu _ _ _ _ _ (some (T, _, _)) => pure (acc ++ [T])
   | .neutral (.global T _) _ => pure (acc ++ [T])
   | _ => pure acc
 
@@ -127,7 +127,7 @@ partial def applyConst (ix : HeadIndex) (ctx : LocalCtx R) (ty : VTy R) (c : Nam
   for _ in [0:numPis d.type] do
     match ← forceMeta cty with
     | .pi x bi _ dom cod _ =>
-      let m ← freshMeta ctx s!"argument {x}"
+      let m ← freshMeta ctx s!"argument {x}" dom
       holes := holes.push (m, dom, bi)
       t := .app t m
       cty := Closure.inst g cod (← evalIn ctx m)

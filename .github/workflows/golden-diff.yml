@@ -1,0 +1,194 @@
+# The golden diff bot: when CI fails, show the reviewer what `grail test --update` would
+# have written for the failing golden cases. See "Golden diffs" in docs/building.md.
+#
+# Triggered by a failed CI run. The `diff` job checks out the failing commit and runs
+# scripts/golden-diff.py on the run's test logs; it re-runs only the failing cases with
+# `grail test --update` in a temporary copy and uploads the resulting Markdown (a
+# one-line-per-case summary plus a unified diff of every changed `.expected` file). The
+# `comment` job posts that report on the pull request.
+#
+# The split is deliberate: `diff` runs the pull request's code (and its flake), so it has
+# a read-only token; `comment` has `pull-requests: write` but runs no pull request code.
+# The diff job never commits and never pushes; its only writes are to the runner.
+name: golden diff
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  # One report per failed run (its id in the group): a re-run of the *same* run would
+  # only replace its own comment, so cancelling it is safe. Two different runs never
+  # share a group and never cancel each other.
+  group: golden-diff-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+env:
+  # The public binary cache. No auth token here: this workflow runs pull request code,
+  # so it keeps the anonymous (pull-only) cache even for a same-repository PR.
+  CACHIX_NAME: badlydrawnwizards
+
+defaults:
+  run:
+    shell: nix develop --command bash -eo pipefail {0}
+
+jobs:
+  preflight:
+    name: did a test shard fail?
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    # 5 min: one API call
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      tests-failed: ${{ steps.jobs.outputs.failed }}
+    steps:
+      - name: Look at the failed run's jobs
+        id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # A golden test only fails in a shard job (`test (NAME)`). A failure in, say,
+          # docs style has no test logs and nothing to diff: do not add a comment to it.
+          n=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+               --jq '[.jobs[] | select(.conclusion == "failure" and (.name | startswith("test (")))] | length' \
+               | awk '{n += $1} END {print n + 0}')
+          echo "failed=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  diff:
+    name: golden diff
+    needs: preflight
+    if: needs.preflight.outputs.tests-failed == 'true'
+    runs-on: ubuntu-latest
+    # 75 min: build grail, then up to 12 failing cases at the 300 s cap each (60 min) plus
+    # the diff engine's own work
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The failing commit, not the default branch: this is the tree whose output the
+          # diff must reproduce. `persist-credentials: false`: the read-only token is not
+          # left in the checkout.
+          repository: ${{ github.event.workflow_run.head_repository.full_name || github.repository }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: The failing run's test logs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: test-log-*
+          path: logs
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # empty: the public cache is read anonymously, and no secret enters a job that
+          # runs pull request code
+          cachix-token: ""
+          lean: false
+      - name: Self-test the diff engine
+        run: python3 scripts/golden-diff.py --self-test
+      - name: Build grail (from Cachix)
+        id: nix
+        # A run can fail before it has a usable build (the `build` job itself failed).
+        # Then there is no output to diff; the summary says so instead of failing again.
+        continue-on-error: true
+        run: |
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "grail=$wiz/bin/grail" >> "$GITHUB_OUTPUT"
+      - name: Golden diff
+        env:
+          GRAIL: ${{ steps.nix.outputs.grail }}
+        run: |
+          shopt -s nullglob
+          logs=(logs/*.log logs/*.jsonl)
+          if [ -z "$GRAIL" ]; then
+            {
+              echo '<!-- wiz-golden-diff -->'
+              echo
+              echo '### Golden diff'
+              echo
+              echo 'The failing run did not produce a grail binary (its build failed), so'
+              echo 'there is no output to diff.'
+            } > golden-diff.md
+            cp golden-diff.md golden-diff-comment.md
+          else
+            python3 scripts/golden-diff.py --grail "$GRAIL" --timeout 300 --max-cases 12 \
+              --out golden-diff.md --comment-out golden-diff-comment.md "${logs[@]}"
+          fi
+          cat golden-diff.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && hashFiles('golden-diff.md') != ''
+        with:
+          name: golden-diff
+          path: |
+            golden-diff.md
+            golden-diff-comment.md
+          if-no-files-found: ignore
+          retention-days: 3
+
+  comment:
+    name: post the golden diff
+    needs: diff
+    # Only a pull request gets a comment; a failed push to master only updates the job
+    # summary (the diff job did that).
+    if: needs.diff.result == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    # 5 min: one or two API calls
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: golden-diff
+          path: report
+      - name: Post or update one comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || '' }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr="$PR_NUMBER"
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            # workflow_run does not always carry the pull_requests list (and a fork PR may
+            # not be in it): ask which PR has this head.
+            pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')
+          fi
+          if [ -z "$pr" ]; then
+            echo "no pull request for $HEAD_SHA: nothing to comment on"
+            exit 0
+          fi
+          body=report/golden-diff-comment.md
+          marker='<!-- wiz-golden-diff -->'
+          if ! grep -qF "$marker" "$body"; then
+            { echo "$marker"; echo; cat "$body"; } > body.md
+            body=body.md
+          fi
+          jq -n --rawfile body "$body" '{body: $body}' > comment.json
+          # One comment per pull request: a rerun updates the previous report instead of
+          # adding another.
+          id=$(gh api "repos/$REPO/issues/$pr/comments" --paginate \
+               --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$id" --input comment.json
+          else
+            gh api --method POST "repos/$REPO/issues/$pr/comments" --input comment.json
+          fi

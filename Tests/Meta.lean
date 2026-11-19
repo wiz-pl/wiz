@@ -44,6 +44,10 @@ inductive Outcome where
   /-- the kernel rejects for a usage (quantity) reason, which the reference checker does
   not look at, and the reference checker accepts -/
   | usage
+  /-- the kernel rejects an unguarded `μ` description (`descGuarded`, TT-06: a recursive
+  field with no `arg` field before it, `μ X. X`), a size side condition the reference
+  checker does not implement (it has no sizes), and the reference checker accepts -/
+  | guard
   | fuel
   | disagree (what : String)
   deriving Repr, BEq
@@ -61,6 +65,21 @@ def kernelInfer (g : Globals ZeroOneMany) (t0 : Term ZeroOneMany) : TCM (VTy Zer
   | .ok _ =>
     let t := (Mark.infer (R := ZeroOneMany) { globals := g, sortsOnly := true } t0).1
     infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } t).1
+
+/-- The verdict when at least one side rejects (`none`: that side accepts). Only the kernel
+rejecting what the reference checker accepts can be excused, and only for a rule the
+reference checker does not implement (usage; the `μ` guard). The kernel accepting what
+the reference checker rejects is always a disagreement. `none, none` is not decided here
+(the types are compared). -/
+def rejectionVerdict : Option String → Option String → Option Outcome
+  | none, none => none
+  | none, some m => some (.disagree s!"the kernel accepts, the reference checker rejects: {m}")
+  | some _, some _ => some .reject
+  | some m, none =>
+    if has m "declared with quantity" || has m "cannot project the field" || has m "cannot discard" ||
+        has m "a projection needs an unrestricted pair" then some .usage
+    else if has m unguardedDescription then some .guard
+    else some (.disagree s!"the reference checker accepts, the kernel rejects: {m}")
 
 /-- One term: the Lean kernel's verdict against the reference checker's. -/
 def vote (g : Globals ZeroOneMany) (sg : Sig) (t : MTm) (opts : Opts := kernelOpts) : Outcome :=
@@ -80,13 +99,9 @@ def vote (g : Globals ZeroOneMany) (sg : Sig) (t : MTm) (opts : Opts := kernelOp
         | .ok false => .disagree "both accept, with types that are not convertible"
         | .error .fuel => .fuel
         | .error (.fail m) => .disagree s!"both accept; comparing the types failed: {m}"
-    | .ok _, .error (.fail m) => .disagree s!"the kernel accepts, the reference checker rejects: {m}"
-    | .error e, .ok _ =>
-      let m := toString e
-      if has m "declared with quantity" || has m "cannot project the field" || has m "cannot discard" ||
-          has m "a projection needs an unrestricted pair" then .usage
-      else .disagree s!"the reference checker accepts, the kernel rejects: {m}"
-    | .error _, .error (.fail _) => .reject
+    | .ok _, .error (.fail m) => (rejectionVerdict none (some m)).getD (.disagree m)
+    | .error e, .ok _ => (rejectionVerdict (some (toString e)) none).getD (.disagree (toString e))
+    | .error e, .error (.fail m) => (rejectionVerdict (some (toString e)) (some m)).getD .reject
 
 /-- The terms of the differential test (`Tests/Elab.lean`): the samples, then 400
 generated ones. Keep in step with that case. -/
@@ -105,12 +120,13 @@ structure Tally where
   acceptUncompared : Nat := 0
   reject : Nat := 0
   usage : Nat := 0
+  guard : Nat := 0
   fuel : Nat := 0
   disagree : List (Nat × String × String) := []
 
 def Tally.summary (t : Tally) : String :=
   s!"accept {t.accept} (+{t.acceptUncompared} with the type not compared), reject {t.reject}, " ++
-  s!"usage-only {t.usage}, out of fuel {t.fuel}, outside the fragment {t.outside}, disagree {t.disagree.length}"
+  s!"usage-only {t.usage}, guard-only {t.guard}, out of fuel {t.fuel}, outside the fragment {t.outside}, disagree {t.disagree.length}"
 
 def tally (terms : Array MTm) (opts : Opts := kernelOpts) : Except String Tally := do
   let sg ← refSig opts
@@ -124,6 +140,7 @@ def tally (terms : Array MTm) (opts : Opts := kernelOpts) : Except String Tally 
     | .acceptUncompared => t := { t with acceptUncompared := t.acceptUncompared + 1 }
     | .reject => t := { t with reject := t.reject + 1 }
     | .usage => t := { t with usage := t.usage + 1 }
+    | .guard => t := { t with guard := t.guard + 1 }
     | .fuel => t := { t with fuel := t.fuel + 1 }
     | .disagree w => t := { t with disagree := t.disagree ++ [(i, w, tm.pretty 0)] }
     i := i + 1
@@ -362,6 +379,34 @@ def group : Group where
           check (t.accept ≥ 200) s!"too few accepted terms: {t.accept}"
           check (t.reject ≥ 100) s!"too few rejected terms: {t.reject}"
           check (t.acceptUncompared ≤ 10) s!"too many types not compared: {t.acceptUncompared}" },
+    { name := "the μ guard is excused only where the kernel rejects and the reference checker accepts", run := fun _ => do
+        let isGuard (o : Option Outcome) : Bool := o == some .guard
+        let isDisagree (o : Option Outcome) : Bool := match o with
+          | some (.disagree _) => true
+          | _ => false
+        -- the one excused direction
+        check (isGuard (rejectionVerdict (some s!"error: {unguardedDescription}") none)) "kernel-only guard rejection is not `guard`"
+        -- the kernel accepting what the reference checker rejects is always a disagreement,
+        -- whatever the reference checker's message says
+        check (isDisagree (rejectionVerdict none (some unguardedDescription))) "a reference-only rejection was excused"
+        check (isDisagree (rejectionVerdict none (some "type mismatch"))) "a reference-only rejection was excused"
+        -- any other kernel-only rejection is a disagreement
+        check (isDisagree (rejectionVerdict (some "type mismatch") none)) "an unrelated kernel-only rejection was excused"
+        check (rejectionVerdict (some unguardedDescription) (some "x") == some .reject) "both reject is not `reject`"
+        check (rejectionVerdict none none == none) "both accept was decided without comparing types"
+        -- end to end on the samples: μ X. X is the guard outcome, the guarded μ types are not
+        let sg ← match refSig with | .ok sg => pure sg | .error e => throw (IO.userError e)
+        let g := leanGlobals ()
+        let unguarded := MTm.mus 0 (MTm.unit 0) (MTm.drec MTm.star (MTm.dret MTm.star)) MTm.star MTm.szInf
+        match vote g sg unguarded with
+        | .guard => pure ()
+        | o => throw (IO.userError s!"μ X. X: expected `guard`, got {repr o}")
+        for (t, ok) in MTm.muSize do
+          if ok then
+            match vote g sg t with
+            | .guard => throw (IO.userError s!"an accepted μ/ν sample counted as `guard`: {t.pretty 0}")
+            | .disagree w => throw (IO.userError s!"{w}: {t.pretty 0}")
+            | _ => pure () },
     { name := "the same with the levelled rule for Π ≡ Π (the corpus does not tell the variants apart)", run := fun _ => do
         match tally (diffTerms 400) { kernelOpts with eqTyLevelled := true } with
         | .error e => throw (IO.userError e)
@@ -468,7 +513,7 @@ def group : Group where
         -- between a proposition and a type that is not one: formed in the spec, and False
         rejects (eqTy ptrue (enum 2))
         accepts (ann (lam (var 0)) (sorted 0 0 (pi (eqTy ptrue (enum 2)) pfalse))) spec (some []) },
-    { name := "T0 against T1: a cast between convertible inert types is its argument only with InReg", run := fun _ => do
+    { name := "T0 against T1: InReg decides an inert cast in the spec; PF-C also lets the kernel use a cast at a type variable under a proposition", run := fun _ => do
         let nat := const "Nat"
         let t := ann (lam (lam (refl nat (var 0)))) (pi (eqTy nat nat) (pi nat (eq nat (cast nat nat (var 1) (var 0)) (var 0))))
         accepts t
@@ -477,7 +522,11 @@ def group : Group where
         -- a cast at a neutral type with its argument
         let v := ann (lam (lam (lam (refl (var 2) (var 0))))) (pi (univ 0) (pi (eqTy (var 0) (var 0)) (pi (var 1) (eq (var 2) (cast (var 2) (var 2) (var 1) (var 0)) (var 0)))))
         rejects v
-        check (!kernelAccepts v) "the kernel has regularity at a type variable" },
+        -- (PF-C) `cast A A e t = t` is an equation, hence a proposition: the kernel compares
+        -- its sides with Cast-Refl at every type and accepts this probe (t5 in Tests/Elab.lean).
+        -- The reference checker above keeps the inert-only rule. This is the D1 breadth
+        -- recorded in wiz-notes/conv-proof-field.md §8, not a bug.
+        check (kernelAccepts v) "the kernel rejects Cast-Refl at a type variable (PF-C expects it to accept)" },
     { name := "the level premise of ind (audit F3): the index type is in Sort (l+1)", run := fun _ => do
         -- `ind.{1}` at an index type in `Sort 1`; `D` and the scrutinee are checked against values
         -- the rule builds, so no former sees the level (the Lean kernel at a143052 accepts this)

@@ -17,7 +17,7 @@ conventions a new one follows. Details are in the stage sections cited.
 | separation logic | `HProp`, `Hoare` | import | `⊢ ↦ ⋆ −∗`, `⌜P⌝`, `∃ʰ x, H`, `⦃P⦄ c ⦃r, Q⦄` | 24b–c, 24e |
 | x-tactics | `HoareTactics` | `by` | `xsimpl xpull xwp xstep xval xseq xapp xchange xunfold xgo` | 24d |
 | Feral (Rust-like) | `Feral` | `feral … end`, `#lower feral … end`, `#unchecked feral … end` | its own grammar (keyword scope `feral_kw`) | 22j |
-| HDL | `Hdl.Core` | import | none: combinators `Hw.add`, `Hw.mux`, `Circuit.mk` … | libraries.md, H14 |
+| HDL | `Hdl.Core` | import | `Hdl.Core`: none (combinators `Hw.add`, `Hw.mux`, `Circuit.mk` …); `Hdl.Pipe`: `\|>>` `***` `&>` | libraries.md, H14 |
 | optics | `Optic` | import | none (the target of Feral's lowering) | libraries.md |
 
 **Entering a DSL.** There is no `open`: a library's notation is on from its `import` to
@@ -35,6 +35,8 @@ One meaning per symbol across the libraries. The levels (higher binds tighter):
 | 10 | `\|>` | Prelude |
 | 15 | `⊢` (entailment of heap predicates) | HProp |
 | 20 | `↔` `<->` | Logic |
+| 20 | `\|>>` | Hdl.Pipe |
+| 30 | `***` `&>` | Hdl.Pipe |
 | 30 | `∨` `\/` `\|\|` | Logic, Prelude |
 | 35 | `∧` `/\` `&&` | Logic, Prelude |
 | 52 | `−∗` | HProp |
@@ -105,4 +107,4 @@ mismatch: expected Bool, found U64`, E0499 …); an x-tactic's failure starts wi
 
 There is no `dsl` declaration command: each part above is already one command, and the
 grammar tools (go to definition, hovers, the printer) read those commands directly.
-The audit behind these rules: `wiz-notes/dsl-conventions.md`.
+The rules came from an audit of the DSLs in `lib/` in November 2026.

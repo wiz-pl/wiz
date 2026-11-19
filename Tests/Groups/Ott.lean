@@ -48,16 +48,19 @@ def checkTerminates (input mode : String) (secs : Nat := 20) : IO Unit := do
   unless out.exitCode == 0 do
     throw (IO.userError s!"expected success, got exit code {out.exitCode}: {out.stderr.take 1000}")
 
-/-- (P1) The probe of `wiz-notes/inert-regularity-probe.wiz`: an inert indexed family
-whose index can hide a proof (`f p`), and statements that need InReg (regularity at inert
-types). Each declaration is checked on its own. -/
+/-- (P1) The inert-regularity probe: an inert indexed family whose index can hide a proof
+(`f p`), and statements that need InReg (regularity at inert types). `h2`, the instance
+`r := p` of `h`, was rejected while `h` and its application `h3` were accepted: typing was
+not stable under substitution. Each declaration is checked on its own; the cases "P1: …"
+of this group pin the verdicts. -/
 def p1Prelude : String :=
   "inductive N where\n  | z\n  | s (n : N)\n" ++
   "inductive Fin2 : N → Type where\n  | fz {0 n : N} : Fin2 (.s n)\n  | fs {0 n : N} (k : Fin2 n) : Fin2 (.s n)\n" ++
   "def two : N := .s (.s .z)\n"
 
 def p1Decls : List (String × String) := [
-  -- control: no regularity at a type variable
+  -- PF-C (D1 trade-off): inside the equation's type, Cast-Refl applies at every type,
+  -- so the cast at the type variable is stripped (it used to be the control)
   ("t5", "def t5 (A : Type) (k : A) (e : A = A) : (cast e k : A) = k := rfl"),
   -- InReg at an open index (`f p`)
   ("t1", "def t1 (P : Prop) (f : (0 _ : P) → N) (p : P) (k : Fin2 (f p)) (e : Fin2 (f p) = Fin2 (f p)) : (cast e k : Fin2 (f p)) = k := rfl"),
@@ -141,22 +144,25 @@ def ottGroup : Group where
         ok "def peq {A B : Type} (p : A × B) : p = (p.1, p.2) := refl p" },
     { name := "different type formers are unequal", run := fun _ =>
         ok "def noconf (e : Unit = Empty) : False := e" },
-    -- F2 (`wiz-notes/soundness-audit.md`): `vAbsurd` had no case for a glued value, so
-    -- `absurd (lem h)` panicked and evaluated to `Sort 0`: `g h` was `Prop`
+    -- F2 (found by a soundness audit of the Lean kernel): `vAbsurd` had no case for a
+    -- glued value, so `absurd (lem h)` panicked and evaluated to `Sort 0`: `g h` was `Prop`
     { name := "F2: absurd on a lemma's result is stuck, not Prop", run := fun _ => do
         let p := "def lem (h : False) : False := h\ndef g (h : False) : Type := absurd (lem h)\n"
         ok (p ++ "def r (h : False) (x : g h) : g h := x\n#reduce fun (h : False) => g h") ["fun h => absurd h"]
         fails (p ++ "def u (h : False) : g h := True\n") "mismatch" },
-    -- D1: no regularity by default: a cast at a variable type stays a cast
-    { name := "cast along a variable `A = A` is not the identity (no regularity; it is with --regularity full)", run := fun _ => do
+    -- PF-C (D1 trade-off, adopted): inside a proposition Cast-Refl applies at every type,
+    -- so `cast e a = a` checks at a type variable; a cast at a variable type compared as a
+    -- *type* still does not reduce (the inert-only rule, `A` is not inert)
+    { name := "Cast-Refl inside an equation at a variable type checks (PF-C); a cast at a variable type in a type position does not", run := fun _ => do
         let reg := "def reg (A : Type) (e : A = A) (a : A) : cast e a = a := rfl"
-        fails reg "rfl: the two sides are not definitionally equal"
-        okWith .full reg },
+        ok reg
+        okWith .full reg
+        fails "def regTy (A : Type) (e : A = A) (a : A) (F : A → Type) (x : F (cast e a)) : F a := x" "type mismatch" },
     { name := "J from transp and cast", run := fun _ =>
         ok substDef },
-    { name := "J computes on refl at a data type, not at a variable family (no regularity)", run := fun _ => do
+    { name := "J computes on refl at a data type; the equation at a variable family checks by PF-C", run := fun _ => do
         let substRefl := substDef ++ "def substRefl {A : Type} (P : A → Type) (a : A) (pa : P a) : subst P (refl a) pa = pa := rfl"
-        fails substRefl "rfl: the two sides are not definitionally equal"
+        ok substRefl
         okWith .full substRefl
         ok (substDef ++ "inductive N where\n  | z\n  | s (n : N)\n" ++
           "def substN {A : Type} (a : A) : subst (fun _ => N) (refl a) (N.s N.z) = N.s N.z := rfl") },
@@ -238,20 +244,30 @@ def ottGroup : Group where
           "def len {A : Type} {0 n : N} : V A n → N\n  | .nil => .z\n  | .cons _ xs => .s (len xs)\n" ++
           "def lenCons {A : Type} {0 n : N} (x : A) (xs : V A n) : len (V.cons x xs) = N.s (len xs) := rfl\n" ++
           "def castN (e : N = N) (n : N) : (cast e n : N) = n := rfl\n") },
-    { name := "no regularity at a type with a variable parameter", run := fun _ =>
-        fails ("inductive L (A : Type) where\n  | nil\n  | cons (x : A) (xs : L A)\n" ++
-          "def castL (A : Type) (e : L A = L A) (l : L A) : (cast e l : L A) = l := rfl\n") "rfl: the two sides are not definitionally equal" },
+    -- PF-C (D1 trade-off, adopted): `castL`'s equation is a proposition, so the checker
+    -- compares its sides with Cast-Refl at every type and the cast is stripped at `L A`;
+    -- the *type-level* comparison is still only the inert-only rule (`L A` is not inert)
+    { name := "a cast at a data type with a variable parameter: the value equation checks (PF-C); a cast in a type position does not", run := fun _ => do
+        let pre := "inductive L (A : Type) where\n  | nil\n  | cons (x : A) (xs : L A)\n"
+        ok (pre ++ "def castL (A : Type) (e : L A = L A) (l : L A) : (cast e l : L A) = l := rfl\n")
+        fails (pre ++ "def castLTy (A : Type) (e : L A = L A) (l : L A) (F : L A → Type) (x : F (cast e l)) : F l := x\n") "type mismatch" },
     -- P1: regularity at inert types is decided by conversion (InReg_conv, the default): all
-    -- eight probes check, and the control at a type variable does not
-    { name := "P1: InReg decided by conversion accepts the eight probes, open indices too (the default)", run := fun _ => do
-        checkEq (repr ["t1", "t2", "h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr (p1Accepted .conv)).pretty
+    -- nine probes check (t5 by PF-C), and the control in a type position does not
+    { name := "P1: InReg decided by conversion accepts the nine probes, open indices too (the default)", run := fun _ => do
+        checkEq (repr ["t5", "t1", "t2", "h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr (p1Accepted .conv)).pretty
         let dflt := p1Decls.filterMap fun (n, d) =>
           if (runFrontend (R := ZeroOneMany) (p1Prelude ++ d ++ "\n")).messages.any (·.severity == .error) then none else some n
-        checkEq (repr ["t1", "t2", "h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr dflt).pretty },
-    -- the evaluator's fast path alone (`--inert ground`) is stable under substitution (h3
-    -- checks, and so does its reduct h2) but gives up a neutral value at an open index
-    { name := "P1: the fast path alone (ground) is stable, and rejects t1 and t2", run := fun _ =>
-        checkEq (repr ["h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr (p1Accepted .ground)).pretty },
+        checkEq (repr ["t5", "t1", "t2", "h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr dflt).pretty
+        fails "def t5Ty (A : Type) (k : A) (e : A = A) (F : A → Type) (x : F (cast e k)) : F k := x" "type mismatch" },
+    -- the evaluator's fast path alone (`--inert ground`): the value comparisons inside
+    -- equations are still accepted (PF-C's prop gate does not consult `inertReg`); the
+    -- type-position control is what still needs the inert-only conversion rule
+    { name := "P1: the fast path alone (ground) accepts the value probes (PF-C) and rejects the type-position control", run := fun _ => do
+        checkEq (repr ["t5", "t1", "t2", "h", "h2", "h3", "g1", "g2", "g3"]).pretty (repr (p1Accepted .ground)).pretty
+        let s := runFrontend (R := ZeroOneMany)
+          "def t5Ty (A : Type) (k : A) (e : A = A) (F : A → Type) (x : F (cast e k)) : F k := x"
+          { globals := { inertReg := .ground } }
+        unless s.messages.any (·.severity == .error) do throw (IO.userError "the type-position control was accepted with the fast path alone") },
     { name := "D1: with eager proofs, a cast between propositions applies the equivalence, not regularity", run := fun _ => do
         let s := runFrontend (R := ZeroOneMany) abelCoquandLiteral { globals := { lazyProofs := false } }
         checkEq (repr ["fun x => x"]).pretty (repr (s.messages.toList.map (·.text))).pretty },

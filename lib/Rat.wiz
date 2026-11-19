@@ -345,6 +345,38 @@ def Q.lt_of_le_of_lt {ω p q r : Q} (h1 : p ≤ q) (h2 : q < r) : p < r :=
 def Q.le_of_lt {ω p q : Q} (h : p < q) : p ≤ q := Q.le_iff_mpr (Q.nonneg_of_pos _ (Q.lt_iff_mp h))
 /-- `<` is transitive. -/
 def Q.lt_trans {ω p q r : Q} (h1 : p < q) (h2 : q < r) : p < r := Q.lt_of_lt_of_le h1 (Q.le_of_lt h2)
+
+-- ## `calc`: composing `≈`, `≤` and `<`
+--
+-- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). `≈` is the rationals'
+-- equality (`Q.Eq`), so the `≈` instances transport `≤` and `<` along it.
+/-- `p ≈ q → q ≤ r → p ≤ r`. -/
+instance {p q r : Q} : Trans (p ≈ q) (q ≤ r) (p ≤ r) :=
+  Trans.mk (fun h h' => Q.le_congr (Q.symm h) (Q.refl r) h')
+/-- `p ≤ q → q ≈ r → p ≤ r`. -/
+instance {p q r : Q} : Trans (p ≤ q) (q ≈ r) (p ≤ r) :=
+  Trans.mk (fun h h' => Q.le_congr (Q.refl p) h' h)
+/-- `p ≈ q → q < r → p < r`. -/
+instance {p q r : Q} : Trans (p ≈ q) (q < r) (p < r) :=
+  Trans.mk (fun h h' => Q.lt_congr (Q.symm h) (Q.refl r) h')
+/-- `p < q → q ≈ r → p < r`. -/
+instance {p q r : Q} : Trans (p < q) (q ≈ r) (p < r) :=
+  Trans.mk (fun h h' => Q.lt_congr (Q.refl p) h' h)
+/-- `p ≈ q → q ≈ r → p ≈ r`. -/
+instance {p q r : Q} : Trans (p ≈ q) (q ≈ r) (p ≈ r) :=
+  Trans.mk (fun h h' => Q.trans h h')
+/-- `p ≤ q → q ≤ r → p ≤ r`. -/
+instance {p q r : Q} : Trans (p ≤ q) (q ≤ r) (p ≤ r) :=
+  Trans.mk (fun h h' => Q.le_trans h h')
+/-- `p ≤ q → q < r → p < r`. -/
+instance {p q r : Q} : Trans (p ≤ q) (q < r) (p < r) :=
+  Trans.mk (fun h h' => Q.lt_of_le_of_lt h h')
+/-- `p < q → q ≤ r → p < r`. -/
+instance {p q r : Q} : Trans (p < q) (q ≤ r) (p < r) :=
+  Trans.mk (fun h h' => Q.lt_of_lt_of_le h h')
+/-- `p < q → q < r → p < r`. -/
+instance {p q r : Q} : Trans (p < q) (q < r) (p < r) :=
+  Trans.mk (fun h h' => Q.lt_trans h h')
 /-- `≤` is antisymmetric, up to `≈`. -/
 def Q.le_antisymm {ω p q : Q} (h1 : p ≤ q) (h2 : q ≤ p) : p ≈ q :=
   Int.le_antisymm _ _ h1 h2

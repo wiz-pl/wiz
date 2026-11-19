@@ -1,0 +1,136 @@
+import Sys
+import Json
+import Scry.Dynamic
+import Scry.TaintCmd
+import Scry.Rules
+import Scry.Sarif
+/-!
+# Scry.DynamicCmd: `scry dynamic FILE.c`
+
+```
+scry dynamic FILE.c [--cc PATH] [--json] [--sarif OUT] [--timeout SECS]
+                    [--no-coverage] [--witness FILE] [--keep] [--work-dir DIR]
+                    [--no-static]
+```
+
+The command compiles the file with AddressSanitizer/UndefinedBehaviorSanitizer, runs it,
+collects crash/UB/leak events and (when LLVM tools exist) line coverage, maps the events
+to `Scry.Origin` spans, and links each event to a static finding by source line (or
+function). It prints the dynamic evidence *next to* the static findings; it never edits
+them. A clean run is reported as `no event on this input`, never as "safe".
+-/
+
+structure Scry.DynCliOpts where
+  dyn : Scry.DynOpts
+  json : Bool
+  sarif : Option String
+  noStatic : Bool
+
+def Scry.dynUsage : String :=
+  "usage: scry dynamic FILE.c [--cc PATH] [--json] [--sarif OUT] [--timeout SECS]\n"
+  ++ "                     [--no-coverage] [--witness FILE] [--keep] [--work-dir DIR]\n"
+  ++ "                     [--no-static]\n"
+
+def Scry.dynEmptyCli (file : String) : Scry.DynCliOpts :=
+  Scry.DynCliOpts.mk (Scry.dynDefaultOpts file) .false .none .false
+
+partial def Scry.dynArgsGo (file : Option String) (o : Scry.DynCliOpts) :
+    List String → Except String Scry.DynCliOpts
+  | .nil => match file with
+    | .some f => .ok { o with dyn := { o.dyn with file := f } }
+    | .none => .error Scry.dynUsage
+  | .cons a rest => match a with
+    | "--cc" => match rest with
+      | .cons p more => Scry.dynArgsGo file { o with dyn := { o.dyn with cc := .some p } } more
+      | .nil => .error "--cc needs a path"
+    | "--timeout" => match rest with
+      | .cons p more => match String.parseNat p with
+        | .some n => Scry.dynArgsGo file { o with dyn := { o.dyn with timeoutSecs := n } } more
+        | .none => .error "--timeout needs a number of seconds"
+      | .nil => .error "--timeout needs a number of seconds"
+    | "--json" => Scry.dynArgsGo file { o with json := .true } rest
+    | "--sarif" => match rest with
+      | .cons p more => Scry.dynArgsGo file { o with sarif := .some p } more
+      | .nil => .error "--sarif needs an output file"
+    | "--no-coverage" => Scry.dynArgsGo file { o with dyn := { o.dyn with coverage := .false } } rest
+    | "--witness" => match rest with
+      | .cons p more => Scry.dynArgsGo file { o with dyn := { o.dyn with witnessFile := .some p } } more
+      | .nil => .error "--witness needs a JSON file"
+    | "--keep" => Scry.dynArgsGo file { o with dyn := { o.dyn with keep := .true } } rest
+    | "--work-dir" => match rest with
+      | .cons p more => Scry.dynArgsGo file { o with dyn := { o.dyn with workDir := .some p } } more
+      | .nil => .error "--work-dir needs a directory"
+    | "--no-static" => Scry.dynArgsGo file { o with noStatic := .true } rest
+    | "--help" => .error Scry.dynUsage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.dynUsage)
+      | .false => match file with
+        | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.dynUsage)
+        | .none => Scry.dynArgsGo (.some a) o rest
+
+def Scry.dynArgs (args : List String) : Except String Scry.DynCliOpts :=
+  Scry.dynArgsGo .none (Scry.dynEmptyCli "") args
+
+-- ## Static sites and correlation
+
+def Scry.dynSitesOf (rep : Scry.TaintReport) : List Scry.DynSite :=
+  let findings := Scry.dynFilterMap (fun f => match Scry.originAt rep.origins f.func f.sink with
+    | .some o => .some (Scry.DynSite.mk f.rule f.func (Scry.FindingKind.show f.kind)
+        o.line o.column)
+    | .none => .none) rep.findings;
+  let memory := Scry.dynFilterMap (fun b => match b.origin with
+    | .some o => .some (Scry.DynSite.mk b.rule b.func "memory" o.line o.column)
+    | .none => .none) rep.memory;
+  let boundary := Scry.dynFilterMap (fun b => match b.origin with
+    | .some o => .some (Scry.DynSite.mk b.rule b.func "boundary" o.line o.column)
+    | .none => .none) rep.boundaries;
+  List.append findings (List.append memory boundary)
+
+/-- The full pipeline: probe, compile/run, parse, then static analysis and correlation.
+Static analysis is done with `--allow-errors` because the dynamic run is useful even
+when the frontend recovers from a macro/syntax error. -/
+def Scry.dynAnalyze (o : Scry.DynCliOpts) : EIO (Scry.DynReport × Option Scry.TaintReport) := do
+  tmp ← FS.createTempDir;
+  chain ← Scry.dynResolve o.dyn.cc tmp;
+  FS.removeAll tmp;
+  rep ← Scry.dynExecute chain o.dyn;
+  match o.noStatic with
+  | .true => EIO.pure (Scry.dynAttachStatic .nil "skipped" "--no-static" rep, .none)
+  | .false => do
+    srep ← Scry.analyzeFile { Scry.emptyTaintOpts o.dyn.file with allowErrors := .true };
+    let sites := Scry.dynSitesOf srep;
+    EIO.pure (Scry.dynAttachStatic sites "ok" "" rep, .some srep)
+
+-- ## Rendering
+
+def Scry.dynSarifText (rep : Scry.DynReport) (srep : Option Scry.TaintReport) : String :=
+  match srep with
+  | .none => Json.render (Scry.sarifWith "scry" .nil (Scry.RulePack.mk .nil) .nil
+      (Scry.dynSarifResults rep))
+  | .some r =>
+    let extra := List.append
+      (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
+        (List.append r.boundaries r.memory))
+      (Scry.dynSarifResults rep);
+    Json.render (Scry.sarifWith "scry" r.origins r.pack
+      (Scry.zipFindings r.findings r.checks) extra)
+
+def Scry.dynCmd (args : List String) : EIO Nat :=
+  match Scry.dynArgs args with
+  | .error e => EIO.fail e
+  | .ok o => do
+    rep ← Scry.dynAnalyze o;
+    let report := rep.1;
+    let srep := rep.2;
+    match o.json with
+    | .true => EIO.lift (IO.println (Json.render (Scry.dynReportJson report)))
+    | .false => EIO.lift (IO.println (Scry.dynRender report));
+    match o.sarif with
+    | .some out => do
+      FS.writeFile out (Scry.dynSarifText report srep);
+      EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out
+        ++ " (dynamic evidence, claim none)"))
+    | .none => EIO.pure ();
+    match report.status with
+    | "error" => EIO.pure 1
+    | _ => EIO.pure 0

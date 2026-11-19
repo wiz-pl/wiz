@@ -77,6 +77,11 @@ def eqView := 34
 def smt := 35
 def define := 36
 def assignLate := 37
+def nativeDecide := 38
+-- (stage 6h) match a lemma's `∀` telescope, rewrite an occurrence, one request
+def rewriteAt := 39
+-- (stage 6h S2) the registered `[simp]` lemmas, for the default set
+def getSimpLemmas := 40
 end TacTag
 
 structure Goal (R : Type) where
@@ -143,7 +148,7 @@ partial def reflect (t : Term R) (depth : Nat) : StateM (Array (Term R × Nat)) 
   | .lam x b => pure (mkCon 4 [encodeString x, ← reflect b (depth + 1)])
   | .app f a => pure (mkCon 5 [← reflect f depth, ← reflect a depth])
   | .natLit n => pure (mkCon 6 [.nat n])
-  | .mu _ _ _ _ .szInf (some (T, _, args)) | .nu _ _ _ _ .szInf (some (T, _, args)) =>
+  | .mu _ _ _ _ .szInf (some (T, _, args)) _ | .nu _ _ _ _ .szInf (some (T, _, args)) =>
     args.foldlM (fun acc a => do pure (mkCon 5 [acc, ← reflect a depth])) (mkCon 1 [encodeString T])
   | _ => mkOpaque
 where
@@ -387,7 +392,7 @@ partial def reflectT (rc : RCtx R) (t : Term R) (ty? : Option (VTy R)) : ReflM R
       | .app .. => mkOpq  -- (not reached: `spine` strips every application)
       | h => reflectT rc h none
     reflectArgs rc rh (rc.headType? g h) args
-  | .mu _ _ _ _ .szInf (some (T, us, args)) | .nu _ _ _ _ .szInf (some (T, us, args)) =>
+  | .mu _ _ _ _ .szInf (some (T, us, args)) _ | .nu _ _ _ _ .szInf (some (T, us, args)) =>
     reflectArgs rc (mkCon 1 [encodeString T]) (rc.headType? (← globalsR) (.const T us)) args
   | .natOp op args =>
     let g ← globalsR
@@ -418,7 +423,7 @@ partial def reflectCtor (rc : RCtx R) (tag rest : Term R) (ty? : Option (VTy R))
   let some ty := ty? | return none
   let some (ls, i) := payloadTag? tag | return none
   let (T, us, targs) ← match ← forceR ty with
-    | .mu _ _ _ _ _ (some h) => pure h
+    | .mu _ _ _ _ _ (some h) _ => pure h
     | _ => return none
   let some c := ls[i]? | return none
   let g ← globalsR
@@ -586,7 +591,7 @@ the raw `ind … L n` of a definition by cases applied to a numeral. -/
 partial def forceRecursors (v : Val R) : ElabM R (Val R) := do
   match ← forceMeta v with
   | .unfold n us sp w => if isRecursor (← getGlobals) n then forceRecursors w.get else pure (.unfold n us sp w)
-  | .lazyInd _ _ _ _ _ _ _ _ _ w => forceRecursors w.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ w => forceRecursors w.get
   | v => pure v
 
 /-- Unfold the head of a value until it is not a definition; also the definitions
@@ -595,7 +600,7 @@ partial def forceNames (v : Val R) (names : List Name := []) : ElabM R (Val R ×
   match ← forceMeta v with
   | .unfold n _ _ v =>
     forceNames v.get (if names.contains n || isRecursor (← getGlobals) n then names else names ++ [n])
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => forceNames v.get names
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => forceNames v.get names
   | v => pure (v, names)
 
 /-- The weak head normal form of `t`, with recursive calls folded back. -/
@@ -638,5 +643,189 @@ partial def abstractOcc (a : Term R) (t : Term R) (depth : Nat := 0) : StateM Bo
   match t with
   | .var i => pure (.var (if i ≥ depth then i + 1 else i))
   | t => t.mapChildrenM pure fun k c => abstractOcc a c (depth + k)
+
+/-! ## Matching a rule, at a chosen occurrence (stage 6h)
+
+`rewrite` takes a *complete* equation: `rw (h x)`. A simplifier rule is a telescope
+`∀ x₁ … xₙ, lhs = rhs`, and its variables are found by **matching** `lhs` against a
+subterm of the goal; a rule with a premise (`… → lhs = rhs`) is conditional. The Wiz
+side (`lib/Prelude.wiz`) owns rule order, the traversal policy, the fuel and the
+messages; the host owns only what needs `Term` and the unifier:
+
+* `stripRule`: strip the `∀` binders, making a fresh metavariable for each;
+* `matchRule`: unify the rule's left side with each subterm of the goal (pre-order),
+  and require the instantiation to determine every metavariable;
+* `abstractOccAt`: the occurrence selection for the transport (all, or the `n`th).
+
+The step is the same `transp`/`cast` transport as `rewrite`, so the kernel checks it.
+No metavariable is ever handed to Wiz: it sees a `RewriteResult` (no match, a new goal
+and its reflected type, or a malformed rule). -/
+
+mutual
+
+/-- `t` with the selected occurrences of `a` abstracted as the variable `depth` (the
+other variables make room for it): every occurrence when `occ` is `none`, the `n`th in
+pre-order when `occ = some n`. The state is (was one replaced, occurrences so far). -/
+partial def abstractOccAt (a : Term R) (t : Term R) (occ : Option Nat) (depth : Nat := 0) :
+    StateM (Bool × Nat) (Term R) := do
+  let (found, i) ← get
+  if t == a.lift depth then
+    match occ with
+    | none => set (true, i + 1); return .var depth
+    | some n =>
+      if i == n then
+        set (true, i + 1); return .var depth
+      else do
+        set (found, i + 1)
+        abstractOccChildren a t occ depth
+  else abstractOccChildren a t occ depth
+
+/-- The children of `t`, with the occurrence search continued in each (for a term that
+is not the selected occurrence). -/
+partial def abstractOccChildren (a : Term R) (t : Term R) (occ : Option Nat) (depth : Nat) :
+    StateM (Bool × Nat) (Term R) :=
+  match t with
+  | .var j => pure (.var (if j ≥ depth then j + 1 else j))
+  | t => t.mapChildrenM pure fun k c => abstractOccAt a c occ (depth + k)
+
+end
+
+/-- The subterms of `t` in pre-order (the whole term first): the positions a rule's
+left side is matched against. -/
+partial def subtermsPre (t : Term R) : List (Term R) :=
+  let cs : List (Term R) :=
+    ((t.forChildren (m := StateM (List (Term R))) (fun _ => pure ())
+      (fun _ c => modify fun xs => xs ++ [c])) []).2
+  t :: cs.flatMap subtermsPre
+
+/-- Strip the leading `∀` binders of a rule's type, making a fresh metavariable for
+each: the body (the equation) and the metavariables, outermost first. `fuel` bounds
+the number of binders (a telescope is finite). The body is kept **syntactically** when
+it is an equation: an equation at a data type computes when it is evaluated (`b ^ 0` is
+`1`, so `b ^ 0 = 1` computes to `True`), and such a rule (`Nat.pow_zero`,
+`List.map_cons`, …) must still be readable as `lhs = rhs` for matching. -/
+partial def stripRule (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) :
+    ElabM R (Term R × List (Term R)) := do
+  if fuel == 0 then return (ty, [])
+  let ty' ← whnfTerm ctx ty
+  match ty' with
+  | .pi _ _ _ _ body _ => do
+    let m ← freshMeta ctx "simp"
+    let (b, ms) ← stripRule ctx (fuel - 1) (body.instantiateAt 0 m)
+    pure (b, m :: ms)
+  | .eq .. => pure (ty', [])
+  | _ =>
+    -- (a definition that unfolds to an equation: `ty'`; else the equation as written)
+    match ty with
+    | .eq .. => pure (ty, [])
+    | _ => pure (ty', [])
+
+/-- Strip a telescope's binders, taking arguments from `args` where the term is already
+applied and making a fresh metavariable otherwise. Returns the body (the equation), the
+fresh metavariables, and each binder's `(domain, argument)` pair, for solving implicit
+parameters from the arguments' types. The body is kept syntactically when it is an
+equation (an equation that computes still reads as `lhs = rhs`). -/
+partial def stripArgs (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) (args : List (Term R)) :
+    ElabM R (Term R × List (Term R) × List (Term R × Term R)) := do
+  if fuel == 0 then return (ty, [], [])
+  match ty with
+  | .pi _ _ _ dom body _ =>
+    match args with
+    | a :: rest => do
+      let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 a) rest
+      pure (b, ms, (dom, a) :: ps)
+    | [] => do
+      let m ← freshMeta ctx "simp"
+      let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 m) []
+      pure (b, m :: ms, (dom, m) :: ps)
+  | .eq .. => pure (ty, [], [])
+  | _ => do
+    let ty' ← whnfTerm ctx ty
+    match ty' with
+    | .pi .. => stripArgs ctx (fuel - 1) ty' args
+    | .eq .. => pure (ty', [], [])
+    | _ =>
+      match ty with
+      | .eq .. => pure (ty, [], [])
+      | _ => pure (ty', [], [])
+
+/-- The type of a rule term **as written**, at the goal's level: for a constant, its
+declaration's type with its levels and already-applied arguments substituted and a
+fresh metavariable for each remaining `∀` binder. `none` when the head is not a
+constant (a local hypothesis: the kernel's evaluated type is used then). This is what
+keeps rules like `Nat.pow_zero` (`b ^ 0 = 1`, whose *evaluated* type is `1 = 1`) and
+`List.map_cons` usable: the equation is read before computation erases its sides. The
+`(domain, argument)` pairs let the match solve implicit parameters (`{A : Type}`) from
+the types of the arguments it determined. -/
+def ruleType? (ctx : LocalCtx R) (g : Globals R) (t : Term R) :
+    ElabM R (Option (Term R × Term R × List (Term R × Term R))) := do
+  let (head, args) := Term.spine t
+  match head with
+  | .const n us =>
+    let some d := g.find? n | return none
+    let (body, ms, ps) ← stripArgs ctx 64 (d.type.instLevels d.levelParams us) args
+    pure (some (body, ms.foldl (fun f m => .app f m) t, ps))
+  | _ => return none
+
+/-- Is this value a constructor payload (a data value)? -/
+def isConVal : Val R → Bool
+  | .con _ => true
+  | _ => false
+
+/-- Match the rule's pattern side `pat` (one side of the equation `lhs = rhs`, with the
+telescope metavariables of `happ`) against each subterm of the goal type, in pre-order.
+The first subterm whose unification determines every metavariable wins: the result is
+the equation's type, its two sides, the instantiated lemma, and the matched subterm
+(which is what the transport abstracts: it is the term the goal actually contains, and
+the rule's side may differ from it only up to conversion). `pairs` are the rule's
+binder domains with their arguments: the arguments' types solve the implicit
+parameters that matching a value does not reach. `none` is no match. -/
+partial def matchRule (gl : Goal R) (g : Globals R) (A pat lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+  let lvl := gl.ctx.lvl
+  let goalT ← zonk lvl (quote g lvl gl.ty)
+  let rc := RCtx.ofLocal gl.ctx
+  let pvRaw ← evalIn gl.ctx pat
+  let pvF ← force pvRaw
+  -- (a pattern that computes to a data value: only a *closed* one is matched, by plain
+  -- structural unification. A data value with rule variables (`List.map f (x :: xs)`)
+  -- has already computed in the goal too, and asking the unifier about it against the
+  -- goal's values can force an ill-typed `vApp`; such rules are refused. A pattern that
+  -- does not compute to a data value is unified as evaluated; forcing it would unfold
+  -- `Nat.add ?n 0` into a stuck form that no longer matches the goal's.)
+  if isConVal pvF && !pat.mvars.isEmpty then return none
+  let pv := if isConVal pvF then pvF else pvRaw
+  let rec go : List (Term R) → ElabM R (Option (Term R × Term R × Term R × Term R × Term R))
+    | [] => pure none
+    | cand :: rest => do
+      let cv ← evalIn gl.ctx cand
+      if isConVal pv && !isConVal cv then go rest
+      else do
+        let s ← get
+        let r ← try
+          unify lvl pv cv
+          -- the arguments' types solve the implicit parameters (the match works on values)
+          for (dom, arg) in pairs do
+            let arg' ← zonk lvl arg
+            if arg'.mvars.isEmpty then
+              match ← rc.typeOf? arg' with
+              | some ty => unify lvl (← evalIn gl.ctx dom) ty
+              | none => pure ()
+          let app ← zonk lvl happ
+          if !app.mvars.isEmpty then pure none
+          else do
+            let A' ← zonk lvl A
+            let a' ← zonk lvl lhs
+            let b' ← zonk lvl rhs
+            if !A'.mvars.isEmpty || !a'.mvars.isEmpty || !b'.mvars.isEmpty then pure none
+            -- (a rule that rewrites a term to itself is not a step)
+            else if a' == b' then pure none
+            else pure (some (A', a', b', app, cand))
+        catch _ => pure none
+        match r with
+        | some p => pure (some p)
+        | none => do set s; go rest
+  go (subtermsPre goalT)
 
 end Wiz.Elab

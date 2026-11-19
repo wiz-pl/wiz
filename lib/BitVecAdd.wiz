@@ -1,0 +1,368 @@
+import BitVec
+import BitVecShift
+/-!
+# BitVecAdd
+
+The 34-bit carry/borrow adder in word form (`import BitVecAdd`).
+
+`Rv.Core`'s ALU has one 34-bit addition for `add`, `sub`, the comparisons and address
+computation: the carry in is a low bit, the operands are `{a, 1}` and `{b', sub}`
+(`b' = b`, or `~b` when subtracting), and the result is bits 1 … 32 of the sum
+(`slice 1 32`). At values this is not `BitVec.add`/`BitVec.sub` for symbolic `a b`: the
+kernel sees a `concat`/`slice` over a 34-bit `UIntN` and two `Bits.low`s. The bridge
+here is the *same* normal form as `lib/BitVecShift.wiz`: everything is a `Bits.low` of a
+`Nat` expression, and the two steps that matter are
+
+* the `low` of each `concat` operand is the operand's value (`Bits.low_of_lt` under the
+  bound `a * 2 + 1 < 2^33` that a 32-bit word gives), and
+* dividing the low `w+1` bits by 2 is dividing and taking the low `w` bits
+  (`Bits.div_low_succ`), so the top (carry) bit falls off and the rest is
+  `(2 q + 1) / 2 = q` (`Bits.div_two_add`) or `(2 q) / 2 = q` (`Bits.div_two`).
+
+The result: `BitVec.adc s a b` (the core's expression, with `s` the carry-in bit, which
+is the instruction's `sub` control signal) is `BitVec.sub a b` when `s` is 1 and
+`BitVec.add a b` when it is 0 (`BitVec.adc_eq`), so an ADD/ADDI/SUB proof is one
+`Eq.congrArg` on the register value.
+
+Nothing here uses the native-refl escape hatch: every lemma is kernel-checked, and the
+`Nat` steps are explicit `Eq.trans` chains (a `Nat` identity that the kernel's normalizer
+closes would be `True`, and cannot be a rewrite step).
+-/
+
+-- ## The circuit's expression
+
+/-- The multiplexer on a one-bit control: `x` when the bit is 1, else `y`. The same term
+as `HwTy.El.mux` (`Bool.not (Nat.beq c.toNat 0)`), so the core's `Hw.mux` reduces to it. -/
+def BitVec.muxBit {0 n : Nat} (c : BitVec 1) (x y : BitVec n) : BitVec n :=
+  match Bool.not (Nat.beq c.toNat 0) with
+  | .true => x
+  | .false => y
+
+/-- Zero-extend a word by one bit on top (`Hw.cat (Hw.lit 1 0) x`). -/
+def BitVec.zext1 {ω n : Nat} (x : BitVec n) : BitVec (Nat.add 1 n) :=
+  BitVec.concat (BitVec.ofNat 1 0) x
+
+/-- The adder's second operand: `b`, or `~b` when the carry-in is 1 (subtraction). -/
+def BitVec.adcB (s : BitVec 1) (b : BitVec 32) : BitVec 32 :=
+  BitVec.muxBit s (BitVec.not b) b
+
+/-- The core's 34-bit addition: `zext1 {a, 1} + zext1 {b', sub}`. -/
+def BitVec.adcForm (s : BitVec 1) (a b : BitVec 32) : BitVec 34 :=
+  BitVec.add (BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1)))
+    (BitVec.zext1 (BitVec.concat (BitVec.adcB s b) s))
+
+/-- `slice 1 32` of it: the word the ALU uses. -/
+def BitVec.adc (s : BitVec 1) (a b : BitVec 32) : BitVec 32 :=
+  BitVec.ofNat 32 (Nat.shiftRight (BitVec.adcForm s a b).toNat 1)
+
+-- ## `toNat` of the pieces
+
+/-- The value of a concatenation: the low bits of `hi · 2^n + lo`. -/
+def BitVec.catToNat {ω m n : Nat} (hi : BitVec m) (lo : BitVec n) :
+    (BitVec.concat hi lo).toNat
+      = Bits.low (Nat.add m n) (Nat.add (Nat.mul hi.toNat (Nat.pow 2 n)) lo.toNat) :=
+  Bits.wofNat_val (Nat.add m n) (Nat.add (Nat.mul hi.toNat (Nat.pow 2 n)) lo.toNat)
+
+/-- The value of a one-bit zero extension. -/
+def BitVec.zext1ToNat {ω n : Nat} (x : BitVec n) :
+    (BitVec.zext1 x).toNat = Bits.low (Nat.add 1 n) x.toNat :=
+  BitVec.catToNat (BitVec.ofNat 1 0) x
+
+-- ## Bounds: a `cat`ed 32-bit word fits in 33 bits
+
+/-- `2 · (2^32 - 1) + 1 < 2^33` (closed numerals). -/
+def Bits.dec32_lt :
+    Nat.Lt (Nat.add (Nat.mul (Bits.dec (Nat.pow 2 32)) 2) 1) (Nat.pow 2 33) := rfl
+
+/-- `A · 2 + 1 < 2^33` for a 32-bit `A` (the bits of `{A, 1}` fit a 33-bit word). -/
+def Bits.cat_lt (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) :
+    Nat.Lt (Nat.add (Nat.mul A 2) 1) (Nat.pow 2 33) :=
+  let P := Nat.pow 2 32;
+  Nat.lt_of_le_of_lt (Nat.add (Nat.mul A 2) 1)
+    (Nat.add (Nat.mul (Bits.dec P) 2) 1) (Nat.pow 2 33)
+    (Nat.add_le_add (Nat.mul A 2) (Nat.mul (Bits.dec P) 2) 1 1
+      (Nat.mul_le_mul_right 2 A (Bits.dec P) (Bits.lt_le_pred A P h))
+      (Nat.le_refl 1))
+    Bits.dec32_lt
+
+/-- The low 33 bits of `A · 2 + 1` are `A · 2 + 1` for a 32-bit `A`. -/
+def Bits.low33_cat (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) :
+    Bits.low 33 (Nat.add (Nat.mul A 2) 1) = Nat.add (Nat.mul A 2) 1 :=
+  Bits.low_of_lt 33 (Nat.add (Nat.mul A 2) 1) (Bits.cat_lt A h)
+
+/-- The low 33 bits of `A · 2 + 0` are `A · 2` for a 32-bit `A`. (The `+ 0` is kept: an
+equation between a stuck application and `x + 0` does not convert quickly, so the step
+that removes it is explicit.) -/
+def Bits.low33_cat0 (A : Nat) (h : Nat.Lt A (Nat.pow 2 32)) :
+    Bits.low 33 (Nat.add (Nat.mul A 2) 0) = Nat.mul A 2 :=
+  Eq.trans
+    (Bits.congr (fun t => Bits.low 33 t) (Nat.add_zero (Nat.mul A 2)))
+    (Bits.low_of_lt 33 (Nat.mul A 2)
+      (Nat.lt_of_le_of_lt (Nat.mul A 2) (Nat.add (Nat.mul A 2) 1) (Nat.pow 2 33)
+        (Nat.le_add_right (Nat.mul A 2) 1) (Bits.cat_lt A h)))
+
+-- ## Dividing the 34-bit sum: the carry bit falls off
+
+/-- `low (w+1) n / 2 = low w (n / 2)`. -/
+def Bits.div_low_succ (w n : Nat) :
+    Nat.div (Bits.low (Nat.succ w) n) 2 = Bits.low w (Nat.div n 2) :=
+  Bits.div_cons (Nat.isOdd n) (Bits.low w (Nat.div n 2))
+
+/-- `(2 q + 1) / 2 = q`: an odd sum. -/
+def Bits.div_two_add (q : Nat) :
+    Nat.div (Nat.add (Nat.mul 2 q) 1) 2 = q :=
+  Bits.div_mq 1 q 1 rfl
+
+/-- `(2 q) / 2 = q`: an even sum. (The `+ 0` of `Bits.div_mq` is removed explicitly: a
+stuck `q + 0` and `q` are not convertible.) -/
+def Bits.div_two (q : Nat) : Nat.div (Nat.mul 2 q) 2 = q :=
+  Eq.trans
+    (Bits.congr (fun t => Nat.div t 2) (Eq.symm (Nat.add_zero (Nat.mul 2 q))))
+    (Bits.div_mq 1 q 0 rfl)
+
+-- ## The carry-out bit (for the comparisons)
+
+/-- Dividing twice is dividing by the product: `(n / 2^k) / 2^j = n / 2^(k+j)`
+(`Bits.div_pow` and `Bits.high_high`). -/
+def Bits.div_div (k j n : Nat) :
+    Nat.div (Nat.div n (Nat.pow 2 k)) (Nat.pow 2 j) = Nat.div n (Nat.pow 2 (Nat.add k j)) :=
+  Eq.trans
+    (Bits.congr (fun t => Nat.div t (Nat.pow 2 j)) (Bits.div_pow k n))
+    (Eq.trans
+      (Bits.div_pow j (Bits.high k n))
+      (Eq.trans
+        (Bits.high_high j k n)
+        (Eq.symm (Bits.div_pow (Nat.add k j) n))))
+
+/-- The carry-out bit of a `low (w+1)` word: dividing it by `2^w` is its bit `w`, i.e.
+`low 1 (n / 2^w)`. The `2^w` analogue of `Bits.div_low_succ` (induction on `w`, with
+`Bits.div_div` for the composition). -/
+def Bits.div_low_pow : (w n : Nat) →
+    Nat.div (Bits.low (Nat.succ w) n) (Nat.pow 2 w) = Bits.low 1 (Nat.div n (Nat.pow 2 w))
+  | .zero, n =>
+    Eq.trans (Bits.div_one (Bits.low 1 n))
+      (Eq.symm (Bits.congr (fun t => Bits.low 1 t) (Bits.div_one n)))
+  | .succ w, n =>
+    Eq.trans
+      (Eq.symm (Bits.div_div 1 w
+        (Bits.cons (Nat.isOdd n) (Bits.low (Nat.succ w) (Nat.div n 2)))))
+      (Eq.trans
+        (Bits.congr (fun t => Nat.div t (Nat.pow 2 w))
+          (Bits.div_cons (Nat.isOdd n) (Bits.low (Nat.succ w) (Nat.div n 2))))
+        (Eq.trans
+          (Bits.div_low_pow w (Nat.div n 2))
+          (Bits.congr (fun t => Bits.low 1 t) (Bits.div_div 1 w n))))
+
+-- ## The borrow-out of `a + (2^32 - b)` (the comparison instructions)
+
+/-- `2 · P = P + P`. -/
+def Bits.mul2_add (P : Nat) : Nat.mul 2 P = Nat.add P P :=
+  Eq.trans (Nat.mul_comm 2 P)
+    (Eq.trans (Nat.mul_succ P 1) (Bits.congr (fun t => Nat.add P t) (Nat.mul_one P)))
+
+/-- `P ≤ Z < 2P` gives `Z / P = 1` (`Bits.div_mq` at `m = P`, with `Z - P < P`). -/
+def Bits.div_one_of (P Z : Nat) (hP : Nat.Lt 0 P) (h1 : Nat.Le P Z)
+    (h2 : Nat.Lt Z (Nat.mul 2 P)) : Nat.div Z P = 1 :=
+  let r := Nat.sub Z P;
+  let eZ : Nat.add P r = Z := Nat.add_sub_of_le P Z h1;
+  let h2' : Nat.Le (Nat.succ Z) (Nat.add P P) :=
+    transp (fun t _ => Nat.le (Nat.succ Z) t = .true) h2 (Bits.mul2_add P);
+  let h2r : Nat.Le (Nat.add P (Nat.succ r)) (Nat.add P P) :=
+    transp (fun t _ => Nat.le t (Nat.add P P) = .true) h2'
+      (Eq.symm (Eq.trans (Nat.add_succ P r) (Bits.congr Nat.succ eZ)));
+  let hsr : Nat.Lt r P := Nat.le_of_add_le_add_left P (Nat.succ r) P h2r;
+  let hsr2 : Nat.lt r (Nat.succ (Bits.dec P)) = .true :=
+    transp (fun t _ => Nat.lt r t = .true) hsr (Bits.pos_succ P hP);
+  let eq1 : Nat.add (Nat.mul (Nat.succ (Bits.dec P)) 1) r = Z :=
+    Eq.trans
+      (Bits.congr (fun t => Nat.add (Nat.mul t 1) r) (Eq.symm (Bits.pos_succ P hP)))
+      (Eq.trans (Bits.congr (fun t => Nat.add t r) (Nat.mul_one P)) eZ);
+  transp (fun t _ => Nat.div Z t = 1)
+    (Eq.trans
+      (Eq.symm (Bits.congr (fun t => Nat.div t (Nat.succ (Bits.dec P))) eq1))
+      (Bits.div_mq (Bits.dec P) 1 r hsr2))
+    (Eq.symm (Bits.pos_succ P hP))
+
+/-- `(2^32 - 1) + 2^32 < 2^33` (closed numerals). -/
+def Bits.dec32_add_lt :
+    Nat.Lt (Nat.add (Bits.dec (Nat.pow 2 32)) (Nat.pow 2 32)) (Nat.mul 2 (Nat.pow 2 32)) := rfl
+
+/-- `b ≤ a` gives `(a + (2^32 - b)) / 2^32 = 1`: the sum is `2^32 + (a - b)`. -/
+def Bits.borrow_le (a b : Nat) (ha : Nat.Lt a (Nat.pow 2 32)) (hb : Nat.Lt b (Nat.pow 2 32))
+    (h : Nat.le b a = .true) :
+    Nat.div (Nat.add a (Nat.sub (Nat.pow 2 32) b)) (Nat.pow 2 32) = 1 :=
+  let P := Nat.pow 2 32;
+  let Z := Nat.add a (Nat.sub P b);
+  let hbP : Nat.Le b P := Word.lt_succ b P hb;
+  let h1 : Nat.Le P Z :=
+    transp (fun t _ => Nat.le t Z = .true)
+      (Nat.add_le_add b a (Nat.sub P b) (Nat.sub P b) h (Nat.le_refl (Nat.sub P b)))
+      (Nat.add_sub_of_le b P hbP);
+  let h2 : Nat.Lt Z (Nat.mul 2 P) :=
+    Nat.lt_of_le_of_lt Z (Nat.add (Bits.dec P) P) (Nat.mul 2 P)
+      (Nat.add_le_add a (Bits.dec P) (Nat.sub P b) P
+        (Bits.lt_le_pred a P ha) (Bits.sub_le_self P b))
+      Bits.dec32_add_lt;
+  Bits.div_one_of P Z (Word.pow_pos 32) h1 h2
+
+/-- `a < b` gives `(a + (2^32 - b)) / 2^32 = 0`: the sum is below `2^32`. -/
+def Bits.borrow_gt (a b : Nat) (ha : Nat.Lt a (Nat.pow 2 32)) (hb : Nat.Lt b (Nat.pow 2 32))
+    (h : Nat.le b a = .false) :
+    Nat.div (Nat.add a (Nat.sub (Nat.pow 2 32) b)) (Nat.pow 2 32) = 0 :=
+  let P := Nat.pow 2 32;
+  let Z := Nat.add a (Nat.sub P b);
+  let hbP : Nat.Le b P := Word.lt_succ b P hb;
+  let hZ : Nat.Lt Z P :=
+    transp (fun t _ => Nat.le (Nat.succ Z) t = .true)
+      (Nat.add_le_add (Nat.succ a) b (Nat.sub P b) (Nat.sub P b)
+        (Nat.not_le b a h) (Nat.le_refl (Nat.sub P b)))
+      (Nat.add_sub_of_le b P hbP);
+  Bits.div_small Z P hZ
+
+-- ## The operands' values
+
+/-- The `{a, 1}` operand's value: `2 a + 1`. -/
+def BitVec.adcW1 (a : BitVec 32) :
+    (BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1))).toNat
+      = Nat.add (Nat.mul a.toNat 2) 1 :=
+  Eq.trans (BitVec.zext1ToNat (BitVec.concat a (BitVec.ofNat 1 1)))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 34 t) (BitVec.catToNat a (BitVec.ofNat 1 1)))
+      (Eq.trans
+        (Bits.low_low_rev 33 34 (Nat.add (Nat.mul a.toNat 2) 1) rfl)
+        (Bits.low33_cat a.toNat (UIntN.toNat_lt a))))
+
+/-- The adding operand's value: `2 b` (`{b, 0}`). -/
+def BitVec.adcW2_zero (b : BitVec 32) :
+    (BitVec.zext1 (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 0) b) (BitVec.ofNat 1 0))).toNat
+      = Nat.mul b.toNat 2 :=
+  Eq.trans
+    (BitVec.zext1ToNat (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 0) b) (BitVec.ofNat 1 0)))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 34 t)
+        (BitVec.catToNat (BitVec.adcB (BitVec.ofNat 1 0) b) (BitVec.ofNat 1 0)))
+      (Eq.trans
+        (Bits.low_low_rev 33 34 (Nat.add (Nat.mul (BitVec.adcB (BitVec.ofNat 1 0) b).toNat 2) 0) rfl)
+        (Bits.low33_cat0 b.toNat (UIntN.toNat_lt b))))
+
+/-- The subtracting operand's value: `2 ~b` (`{~b, 1}`). -/
+def BitVec.adcW2_one (b : BitVec 32) :
+    (BitVec.zext1 (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 1) b) (BitVec.ofNat 1 1))).toNat
+      = Nat.add (Nat.mul (BitVec.not b).toNat 2) 1 :=
+  Eq.trans
+    (BitVec.zext1ToNat (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 1) b) (BitVec.ofNat 1 1)))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 34 t)
+        (BitVec.catToNat (BitVec.adcB (BitVec.ofNat 1 1) b) (BitVec.ofNat 1 1)))
+      (Eq.trans
+        (Bits.low_low_rev 33 34 (Nat.add (Nat.mul (BitVec.adcB (BitVec.ofNat 1 1) b).toNat 2) 1) rfl)
+        (Bits.low33_cat (BitVec.not b).toNat (UIntN.toNat_lt (BitVec.not b)))))
+
+-- ## The 34-bit sum's value
+
+/-- The 34-bit sum is the low 34 bits of the two operands' sum (a `BitVec.add` at 34
+bits is `Bits.low 34`). -/
+def BitVec.adcFormToNat (s : BitVec 1) (a b : BitVec 32) :
+    (BitVec.adcForm s a b).toNat
+      = Bits.low 34 (Nat.add
+          (BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1))).toNat
+          (BitVec.zext1 (BitVec.concat (BitVec.adcB s b) s)).toNat) :=
+  Bits.wofNat_val 34 (Nat.add
+    (BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1))).toNat
+    (BitVec.zext1 (BitVec.concat (BitVec.adcB s b) s)).toNat)
+
+-- ## Carry-in 0: the sum's high bits are `a + b`
+
+/-- `(adc 0 a b).toNat = low 32 (a + b)`: `(2 a + 1 + 2 b) / 2 = a + b`, and the slice's
+`low 32` stays. -/
+def BitVec.adc_zero_toNat (a b : BitVec 32) :
+    (BitVec.adc (BitVec.ofNat 1 0) a b).toNat = Bits.low 32 (Nat.add a.toNat b.toNat) :=
+  let A := a.toNat;
+  let B := b.toNat;
+  let W1 := BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1));
+  let W2 := BitVec.zext1 (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 0) b) (BitVec.ofNat 1 0));
+  let X := Nat.add (Nat.mul 2 (Nat.add A B)) 1;
+  let e12 : Nat.add W1.toNat W2.toNat = X :=
+    Eq.trans
+      (Bits.congr2 (fun (x y : Nat) => Nat.add x y) (BitVec.adcW1 a) (BitVec.adcW2_zero b))
+      (nat_ring! A * 2 + 1 + B * 2 = 2 * (A + B) + 1);
+  Eq.trans
+    (Bits.wofNat_val 32 (Nat.div (BitVec.adcForm (BitVec.ofNat 1 0) a b).toNat 2))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 32 (Nat.div t 2))
+        (BitVec.adcFormToNat (BitVec.ofNat 1 0) a b))
+      (Eq.trans
+        (Bits.congr (fun t => Bits.low 32 (Nat.div (Bits.low 34 t) 2)) e12)
+        (Eq.trans
+          (Bits.congr (fun t => Bits.low 32 t) (Bits.div_low_succ 33 X))
+          (Eq.trans
+            (Bits.congr (fun t => Bits.low 32 (Bits.low 33 t))
+              (Bits.div_two_add (Nat.add A B)))
+            (Bits.low_low 32 33 (Nat.add A B) rfl)))))
+
+-- ## Carry-in 1: the sum's high bits are `a - b`
+
+/-- `(adc 1 a b).toNat = low 32 (a + (2^32 - b))`: `(2 a + 1 + 2 ~b + 1) / 2 = a + ~b + 1`,
+and `~b + 1 = 2^32 - b`. -/
+def BitVec.adc_one_toNat (a b : BitVec 32) :
+    (BitVec.adc (BitVec.ofNat 1 1) a b).toNat
+      = Bits.low 32 (Nat.add a.toNat (Nat.sub (Nat.pow 2 32) b.toNat)) :=
+  let A := a.toNat;
+  let B := b.toNat;
+  let NB := (BitVec.not b).toNat;
+  let W1 := BitVec.zext1 (BitVec.concat a (BitVec.ofNat 1 1));
+  let W2 := BitVec.zext1 (BitVec.concat (BitVec.adcB (BitVec.ofNat 1 1) b) (BitVec.ofNat 1 1));
+  let X := Nat.mul 2 (Nat.add (Nat.add A NB) 1);
+  let e12 : Nat.add W1.toNat W2.toNat = X :=
+    Eq.trans
+      (Bits.congr2 (fun (x y : Nat) => Nat.add x y) (BitVec.adcW1 a) (BitVec.adcW2_one b))
+      (nat_ring! A * 2 + 1 + (NB * 2 + 1) = 2 * (A + NB + 1));
+  -- `~b = 2^32 - 1 - b`, `~b + 1 = 2^32 - b`
+  let eWnot : NB = Bits.ncompl 32 B := Bits.wnot_val b;
+  let eNB : Nat.add NB 1 = Nat.sub (Nat.pow 2 32) B :=
+    Eq.trans (Nat.add_one NB)
+      (Eq.trans (Bits.congr Nat.succ eWnot) (Eq.symm (Bits.sub_pow 32 B (UIntN.toNat_lt b))));
+  Eq.trans
+    (Bits.wofNat_val 32 (Nat.div (BitVec.adcForm (BitVec.ofNat 1 1) a b).toNat 2))
+    (Eq.trans
+      (Bits.congr (fun t => Bits.low 32 (Nat.div t 2))
+        (BitVec.adcFormToNat (BitVec.ofNat 1 1) a b))
+      (Eq.trans
+        (Bits.congr (fun t => Bits.low 32 (Nat.div (Bits.low 34 t) 2)) e12)
+        (Eq.trans
+          (Bits.congr (fun t => Bits.low 32 t) (Bits.div_low_succ 33 X))
+          (Eq.trans
+            (Bits.congr (fun t => Bits.low 32 (Bits.low 33 t))
+              (Bits.div_two (Nat.add (Nat.add A NB) 1)))
+            (Eq.trans
+              (Bits.low_low 32 33 (Nat.add (Nat.add A NB) 1) rfl)
+              (Eq.trans
+                (Bits.congr (fun t => Bits.low 32 t) (Nat.add_assoc A NB 1))
+                (Bits.congr (fun t => Bits.low 32 (Nat.add A t)) eNB)))))))
+
+-- ## The two words
+
+/-- The 34-bit adder with carry-in 0 is `BitVec.add`. -/
+def BitVec.adc_zero (a b : BitVec 32) :
+    BitVec.adc (BitVec.ofNat 1 0) a b = BitVec.add a b :=
+  UIntN.ext (BitVec.adc (BitVec.ofNat 1 0) a b) (BitVec.add a b)
+    (Eq.trans (BitVec.adc_zero_toNat a b)
+      (Eq.symm (Bits.wofNat_val 32 (Nat.add a.toNat b.toNat))))
+
+/-- The 34-bit adder with carry-in 1 is `BitVec.sub`. -/
+def BitVec.adc_one (a b : BitVec 32) :
+    BitVec.adc (BitVec.ofNat 1 1) a b = BitVec.sub a b :=
+  UIntN.ext (BitVec.adc (BitVec.ofNat 1 1) a b) (BitVec.sub a b)
+    (Eq.trans (BitVec.adc_one_toNat a b)
+      (Eq.symm (Bits.wofNat_val 32 (Nat.add a.toNat (Nat.sub (Nat.pow 2 32) b.toNat)))))
+
+/-- **The bridge**: the core's 34-bit add/sub is `add` (`s = 0`) or `sub` (`s = 1`). -/
+def BitVec.adc_eq (s : BitVec 1) (a b : BitVec 32) :
+    BitVec.adc s a b = BitVec.muxBit s (BitVec.sub a b) (BitVec.add a b) :=
+  Or.elim (UIntN.cases1 s)
+    (fun e => transp
+      (fun t _ => BitVec.adc t a b = BitVec.muxBit t (BitVec.sub a b) (BitVec.add a b))
+      (BitVec.adc_zero a b) (Eq.symm e))
+    (fun e => transp
+      (fun t _ => BitVec.adc t a b = BitVec.muxBit t (BitVec.sub a b) (BitVec.add a b))
+      (BitVec.adc_one a b) (Eq.symm e))

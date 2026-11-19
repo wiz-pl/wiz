@@ -1,0 +1,26 @@
+import Prelude
+
+-- The fixed workload `scripts/wasm-peak.mjs` measures: `spin` builds a perfect binary
+-- tree and then consumes it, `iterations` times. A tree of depth `d` has 2^(d+1)-1 nodes,
+-- so the *stack* depth is only `d` while the allocation per iteration is exponential in
+-- it. Under a bump allocator the peak is every node ever allocated; with reference
+-- counting it is one tree.
+inductive Tree where
+  | leaf
+  | node (l : Tree) (r : Tree)
+
+def full : Nat → Tree
+  | .zero => Tree.leaf
+  | .succ k => Tree.node (full k) (full k)
+
+def size : Tree → Nat
+  | .leaf => 1
+  | .node l r => size l + size r
+
+partial def spin (i : Nat) (d : Nat) (acc : Nat) : Nat :=
+  match i with
+  | .zero => acc
+  | .succ j => spin j d (acc + size (full d))
+
+-- 20 iterations of a 2^19-node tree: 20 * 524287 nodes, 40 bytes each ≈ 420 MiB bump.
+def main : Nat := spin 20 18 0

@@ -1,0 +1,141 @@
+-- test: run
+import Sys
+import Json
+import Text
+import Scry.Dynamic
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def target : String := "/tmp/scry-dynamic/target.c"
+
+def asanText : String :=
+  "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+  ++ "WRITE of size 1 at 0x1 thread T0\n"
+  ++ "    #0 0x111 in bad /tmp/scry-dynamic/target.c:4:3\n"
+  ++ "    #1 0x222 in main /tmp/scry-dynamic/target.c:9:1\n"
+  ++ "SUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/scry-dynamic/target.c:4:3 in bad\n"
+
+def ubText : String :=
+  "/tmp/scry-dynamic/target.c:5:9: runtime error: signed integer overflow: 2147483647 + 1\n"
+  ++ "    #0 0x333 in main /tmp/scry-dynamic/target.c:5:9\n"
+  ++ "SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /tmp/scry-dynamic/target.c:5:9\n"
+
+def leakText : String :=
+  "==2==ERROR: LeakSanitizer: detected memory leaks\n"
+  ++ "Direct leak of 16 byte(s) in 1 object(s) allocated from:\n"
+  ++ "    #0 0x444 in malloc\n"
+  ++ "    #1 0x555 in main /tmp/scry-dynamic/target.c:3:13\n"
+  ++ "SUMMARY: AddressSanitizer: 16 byte(s) leaked in 1 allocation(s).\n"
+
+def covText : String :=
+  "    1|       |#include <stdlib.h>\n"
+  ++ "    2|      1|int main(void) {\n"
+  ++ "    3|      1|  return 0;\n"
+  ++ "    4|       |}\n"
+
+def firstEventOk (evs : List Scry.DynEvent) (kind san : String) (line : Nat) : Bool :=
+  match evs with
+  | .cons e _ => Bool.and (Bool.and (String.eq e.kind kind) (String.eq e.sanitizer san))
+      (Bool.and e.validated (match e.site with
+        | .some o => Nat.beq o.line line
+        | .none => .false))
+  | .nil => .false
+
+def firstLinkSameLine (ls : List Scry.DynLink) : Bool :=
+  match ls with
+  | .cons l _ => Bool.and (String.eq l.relation "same-line") (String.eq l.rule "rule-a")
+  | .nil => .false
+
+def anyExerciseCovered (xs : List Scry.DynExercise) : Bool :=
+  List.any (fun x => x.covered) xs
+
+def witnessValidation (w : Option Scry.DynWitness) : String :=
+  match w with
+  | .some x => x.validation
+  | .none => "none"
+
+def witnessClaim (w : Option Scry.DynWitness) : String :=
+  match w with
+  | .some x => (match Json.get (Scry.dynWitnessJson x) "claim" with
+      | .some v => (match Json.asString v with
+        | .some s => s
+        | .none => "")
+      | .none => "")
+  | .none => ""
+
+def jsonStr (j : Json) (k : String) : String :=
+  match Json.get j k with
+  | .some v => (match Json.asString v with
+    | .some s => s
+    | .none => "")
+  | .none => ""
+
+def jsonFalse (j : Json) (k : String) : Bool :=
+  match Json.get j k with
+  | .some v => (match Json.asBool v with
+    | .some b => Bool.not b
+    | .none => .false)
+  | .none => .false
+
+def e2eOk (r : Scry.DynReport) : Bool :=
+  match r.status with
+  | "ok" => Bool.and (Nat.lt 0 (List.length r.events))
+      (List.any (fun x => x.validated) r.events)
+  | "skipped" => .true
+  | _ => .false
+
+def parseChecks : EIO Unit := do
+  check "asan: one validated crash" (firstEventOk (Scry.dynEventsOfText target asanText)
+    "crash" "address" 4);
+  check "ubsan: one validated ub" (firstEventOk (Scry.dynEventsOfText target ubText)
+    "ub" "undefined" 5);
+  check "leak: validated" (firstEventOk (Scry.dynEventsOfText target leakText)
+    "leak" "leak" 3)
+
+def coverageChecks : EIO Unit := do
+  let cov := Scry.dynCoverageOf covText "" .true;
+  check "coverage: 2/2 lines" (Bool.and (Nat.beq cov.executable 2) (Nat.beq cov.covered 2));
+  check "coverage: line 3 hits" (Nat.beq (Scry.dynHitAt cov 3) 1);
+  let sites := [Scry.DynSite.mk "rule-a" "bad" "taint" 4 3,
+    Scry.DynSite.mk "rule-b" "main" "taint" 3 3];
+  let evs := Scry.dynEventsOfText target asanText;
+  let linked := Scry.dynAttachStatic sites "ok" "" (Scry.DynReport.mk target "ok" ""
+    "" "" .nil "" evs cov .nil .nil .none "" "" "" .nil "skipped" "");
+  check "correlation: same line" (firstLinkSameLine linked.links);
+  check "correlation: line executed" (anyExerciseCovered linked.exercises)
+
+def witnessChecks : EIO Unit := do
+  w0 ← Scry.dynLoadWitness "tests/fixtures/dyn-witness.json";
+  check "witness: pcChecked" (String.eq (witnessValidation w0) "pcChecked");
+  check "witness: claim none" (String.eq (witnessClaim w0) "none")
+
+def skipCheck : EIO Unit := do
+  skipped ← Scry.dynExecute (Scry.DynToolchain.mk .none .nil) (Scry.dynDefaultOpts "bench/dynamic/clean.c");
+  check "skip: no compiler is clean" (String.eq skipped.status "skipped");
+  chain ← Scry.dynResolve (.some "/nonexistent/scry-cc") ".";
+  check "toolchain: requested compiler missing" (match chain.tool with
+    | .none => .true
+    | .some _ => .false)
+
+def e2eCheck : EIO Unit := do
+  dir ← FS.createTempDir;
+  chain ← Scry.dynResolve .none dir;
+  FS.removeAll dir;
+  rep ← Scry.dynExecute chain (Scry.dynDefaultOpts "bench/dynamic/stack-oob.c");
+  check "e2e: crash or clean skip" (e2eOk rep);
+  check "e2e: evidence kind dynamic"
+    (String.eq (jsonStr (Scry.dynReportJson rep) "evidenceKind") "dynamic");
+  check "e2e: no absence claim" (jsonFalse (Scry.dynReportJson rep) "absence")
+
+def run : EIO Unit := do
+  parseChecks;
+  coverageChecks;
+  witnessChecks;
+  skipCheck;
+  e2eCheck
+
+def main : IO Unit := EIO.toIO run

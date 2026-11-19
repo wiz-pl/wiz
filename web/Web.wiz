@@ -16,6 +16,9 @@ link_c "js.c"
 extern "js_send" Js.send : String → IO Unit
 extern "js_set_html" Js.setHtml : String → String → IO Unit
 extern "js_go" Js.go : String → IO Unit
+-- (loom) DOM patches from lib/Web/Loom.wiz (`Loom.patchesJson`); the page applies
+-- them with web/framework/runtime.js. (No live page uses this yet.)
+extern "js_patch" Js.patch : String → IO Unit
 
 structure WSt where
   buf : List Char

@@ -85,19 +85,20 @@ def delimMethodTys (g : Globals R) (l v : Level) (I P : Val R) (w : R) : VTy R �
   (eval g env mret.1, eval g env marg.1, eval g env mrec.1, eval g env mhrec.1)
 
 /-- `P : (i : I) → μ D i → Sort v` -/
-def indMotiveTy (g : Globals R) (l v : Level) (I D : Val R) (w : R) : VTy R :=
+def indMotiveTy (g : Globals R) (l v : Level) (I D : Val R) (w : R) (prop : Bool := false) : VTy R :=
   let l1 : Level := .succ l
-  eval g [D, I] (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none, l1) (.sort v, .succ v))).1
+  let lμ : Level := if prop then .zero else l1
+  eval g [D, I] (spi w "i" (tv 1, l1) (spi w "_" (.mu l (tv 2) (tv 1) (tv 0) .szInf none prop, lμ) (.sort v, .succ v))).1
 
 /-- `m : (0 i : I) → (xs : ⟦D⟧ (μ D) i) → (ih : All D (μ D) P i xs) → P i (con xs)` -/
-def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) : VTy R :=
+def indMethodTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) (prop : Bool := false) : VTy R :=
   let l1 : Level := .succ l
   -- i0 P1 D2 I3 ; xs0 i1 P2 D3 I4 ; ih0 xs1 i2 P3 D4 I5
-  let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none)
-  let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none)
+  let X₁ : Term R := .lam "j" (.mu l (tv 4) (tv 3) (tv 0) .szInf none prop)
+  let X₂ : Term R := .lam "j" (.mu l (tv 5) (tv 4) (tv 0) .szInf none prop)
   eval g [P, D, I] (spi 0 "i" (tv 2, l1)
-    (spi w "xs" (tapps (Templates.interpTm l) [tv 3, tv 2, X₁, tv 0], l1)
-      (spi w "ih" (tapps (Templates.allTm l v) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
+    (spi w "xs" (Templates.interpApp l prop (tv 3) (tv 2) X₁ (tv 0), l1)
+      (spi w "ih" (tapps (Templates.allTm l v prop) [tv 4, tv 3, X₂, tv 2, tv 1, tv 0], .max l1 v)
         (tapps (tv 3) [tv 2, .con (tv 1)], v)))).1
 
 /-- `S : I → Type l` -/
@@ -109,7 +110,7 @@ def coitStepTy (g : Globals R) (l : Level) (I D S : Val R) (w : R) : VTy R :=
   let l1 : Level := .succ l
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
   eval g [S, D, I] (spi w "i" (tv 2, l1)
-    (spi w "s" (.app (tv 1) (tv 0), l1) (tapps (Templates.interpTm l) [tv 4, tv 3, tv 2, tv 1], l1))).1
+    (spi w "s" (.app (tv 1) (tv 0), l1) (Templates.interpApp l false (tv 4) (tv 3) (tv 2) (tv 1), l1))).1
 
 /-! ### Sizes
 
@@ -118,7 +119,7 @@ A size is `∞`, or a size variable (any neutral) plus a number of `↑`s. -/
 /-- `(base, k)` for `↑ᵏ base`; `none` as the base means `∞`. -/
 partial def sizeView : Val R → Option (Val R) × Nat
   | .unfold _ _ _ v => sizeView v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => sizeView v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => sizeView v.get
   | .szInf => (none, 0)
   | .szSuc s => let (b, k) := sizeView s; (b, k + 1)
   | v => (some v, 0)
@@ -171,8 +172,8 @@ def sfixFunTy (g : Globals R) (l v : Level) (I D P : Val R) (w : R) : VTy R :=
   -- rec0 s1 P2 D3 I4 ; i0 rec1 s2 P3 D4 I5 ; x0 i1 rec2 s3 P4
   eval g [P, D, I] (spi 0 "s" (.size, 1)
     (pi "rec" (spi 0 "j" (.sizeLt (tv 0), 1)
-        (pi "i" (tv 4, l1) (pi "y" (.mu l (tv 5) (tv 4) (tv 0) (tv 1) none, l1) (tapps (tv 4) [tv 1, tv 0], v))))
-      (pi "i" (tv 4, l1) (pi "x" (.mu l (tv 5) (tv 4) (tv 0) (tv 2) none, l1) (tapps (tv 4) [tv 1, tv 0], v))))).1
+        (pi "i" (tv 4, l1) (pi "y" (.mu l (tv 5) (tv 4) (tv 0) (tv 1) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))
+      (pi "i" (tv 4, l1) (pi "x" (.mu l (tv 5) (tv 4) (tv 0) (tv 2) none false, l1) (tapps (tv 4) [tv 1, tv 0], v))))).1
 
 /-- `m : (0 j : Size< s) → (0 i : I) → (q xs : ⟦D⟧ (μ^j D) i) → P i (con xs)`: the method
 of `scase` at quantity `q` (K1) receives the payload at `q`. -/
@@ -181,7 +182,7 @@ def scaseMethodTy (g : Globals R) (l v : Level) (I D P s q : Val R) : VTy R :=
   -- j0 s1 P2 D3 I4 q5 ; i0 j1 s2 P3 D4 I5 q6 ; xs0 i1 j2 s3 P4 D5 I6
   eval g [s, P, D, I, q] (spi 0 "j" (.sizeLt (tv 0), 1) (spi 0 "i" (tv 4, l1)
     ((.pi "xs" .default (tv 6)
-      (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none), tv 0])
+      (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none false), tv 0])
       (tapps (tv 4) [tv 1, .con (tv 0)]) ⟨l1, v⟩), .imax l1 v))).1
 
 /-- `f : (s : Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i` -/
@@ -204,7 +205,7 @@ def sameSorts (σ σ' : BinderSorts) : Bool := sameSort σ.dom σ'.dom && sameSo
 /-- The type of a neutral, computed by walking its spine from the head's type. -/
 partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VTy R)
   | .unfold n us sp _ => inferNe g tys (.neutral (.global n us) sp)
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => inferNe g tys v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => inferNe g tys v.get
   | .neutral h sp => do
     -- (P2) a suspended proof has no type of its own; what follows its last `absurd` is
     -- typed by the motive (a neutral that is a *type* and starts at a proof has one)
@@ -226,7 +227,7 @@ partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VT
       | .absurd m, _ => ty := m; acc := vAbsurd m acc
       | .ecase z m env bs, _ => ty := Closure.inst g m acc; acc := vEcase g z m acc env bs
       | .delim v P a b c h, _ => ty := vApp g P acc; acc := vDelim g v P a b c h acc
-      | .ind l I D v P m i, _ => ty := vApp g (vApp g P i) acc; acc := vInd g l I D v P m i acc
+      | .ind l I D v P m i pr, _ => ty := vApp g (vApp g P i) acc; acc := vInd g l I D v P m i acc pr
       | .out, .nu l I D i s _ =>
         ty := vInterp g l I D (nuFamilyAt l I D ((sizePred? s).getD .szInf)) i; acc := vOut g acc
       | .sfix l I D v P f s i, _ => ty := vApp g (vApp g P i) acc; acc := vSfix g l I D v P f s i acc
@@ -239,7 +240,7 @@ partial def inferNe (g : Globals R) (tys : Array (VTy R)) : Val R → Option (VT
 /-- The universe level of a type, if it can be computed. -/
 partial def typeSort? (g : Globals R) (tys : Array (VTy R)) : VTy R → Option Level
   | .unfold _ _ _ v => typeSort? g tys v.get
-  | .lazyInd _ _ _ _ _ _ _ _ _ v => typeSort? g tys v.get
+  | .lazyInd _ _ _ _ _ _ _ _ _ _ v => typeSort? g tys v.get
   | .sort l => some (.succ l)
   -- (mandatory sorts: read off the annotation; only the elaborator, before its sorts pass,
   -- has holes, which are computed from the components)
@@ -252,6 +253,7 @@ partial def typeSort? (g : Globals R) (tys : Array (VTy R)) : VTy R → Option L
   | .unit l | .empty l | .ulift _ l _ => some l
   | .qty | .enum _ | .size | .sizeLt _ => some 1
   | .desc l _ => some (.succ (.succ l))
+  | .mu _ _ _ _ _ _ true => some .zero
   | .mu l .. | .nu l .. => some (.succ l)
   | v@(.neutral ..) => do
     match whnf (← inferNe g tys v) with
@@ -356,8 +358,8 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
       conv g tys .qty q q' && convTy g tys H H' &&
         conv g tys (.pi "h" .default (.qlit 1) H (.mk [I] (.var 1)) ⟨.succ l, .succ l⟩) j j' && conv g tys (.desc l I) E E'
     | _, _ => (convNe g tys a b).isSome
-  | .mu l I D i _ _ => match a, b with
-    | .con x, .con y => conv g tys (vInterp g l I D (muFamily l I D) i) x y
+  | .mu l I D i _ _ pr => match a, b with
+    | .con x, .con y => conv g tys (vInterp g l I D (muFamily l I D pr) i pr) x y
     | _, _ => (convNe g tys a b).isSome
   | .nu l I D i _ _ => match a, b with
     | .cocon x, .cocon y => conv g tys (vInterp g l I D (nuFamily l I D) i) x y
@@ -406,6 +408,17 @@ partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
   -- (given) Q4
   if let (.ulift k l A, .ulift k' l' A') := (a, b) then l.equiv l' && sameSort k k' && convTy g tys A A' else
   --<sol
+  -- **Cast-Refl at every type, while deciding equality of two propositions.**
+  -- The two sides are propositions (truth values in the model): their truth values
+  -- are what matters, and the model validates `cast`-regularity at every type. Use the
+  -- evaluator's proposition test (`propSort?`), not `isProp`/`typeSort?`: the latter
+  -- recomputes a Π/Σ sort from its parts and misses an annotated proposition whose tail
+  -- is a Π over a data domain (`vEq`'s equation at a product is exactly that).
+  -- This is what lets two proofs whose propositional types differ only in a `cast`
+  -- (outside vs inside a projection, a `transp` motive) compare. An equation between two
+  -- data *types* still uses the inert-only rule; the flag does reach the equation's two
+  -- *sides*, i.e. Cast-Refl for equation proofs (wiz-notes/conv-proof-field.md §8).
+  let g := if propSort? a == some true && propSort? b == some true then { g with regularity := .full } else g
   let v := Val.var tys.size
   match a, b with
   | .sort u, .sort u' => u.equiv u'
@@ -423,7 +436,9 @@ partial def convTy (g : Globals R) (tys : Array (VTy R)) (a b : VTy R) : Bool :=
   | .sizeLt s, .sizeLt t => sizeEq s t
   | .enum ls, .enum ls' => ls.length == ls'.length
   | .desc l I, .desc l' I' => l.equiv l' && convTy g tys I I'
-  | .mu l I D i s _, .mu l' I' D' i' s' _ | .nu l I D i s _, .nu l' I' D' i' s' _ =>
+  | .mu l I D i s _ pr, .mu l' I' D' i' s' _ pr' =>
+    pr == pr' && l.equiv l' && sizeEq s s' && convTy g tys I I' && conv g tys (.desc l I) D D' && conv g tys I i i'
+  | .nu l I D i s _, .nu l' I' D' i' s' _ =>
     l.equiv l' && sizeEq s s' && convTy g tys I I' && conv g tys (.desc l I) D D' && conv g tys I i i'
   | .unit u, .unit u' => u.equiv u'
   | .empty u, .empty u' => u.equiv u'
@@ -472,7 +487,7 @@ partial def convGlued (g : Globals R) (tys : Array (VTy R)) (a b : Val R) : Opti
       some (convNe g tys (.neutral (.global n us) sp) (.neutral (.global n' us') sp')).isSome
     else none
   -- the same induction on a numeral: compare the folded forms
-  | a@(.lazyInd _ _ _ _ _ _ _ x _ _), b@(.lazyInd _ _ _ _ _ _ _ y _ _) =>
+  | a@(.lazyInd _ _ _ _ _ _ _ x _ _ _), b@(.lazyInd _ _ _ _ _ _ _ y _ _ _) =>
     -- (on a constructor, `ind` is lazy for speed alone: compared by what it computes)
     if (whnf x matches .con _) || (whnf y matches .con _) then none else
     -- (P2: the kernel's comparisons don't evaluate proofs)
@@ -582,9 +597,9 @@ partial def convNe (g : Globals R) (tys : Array (VTy R)) (a b : Val R) : Option 
       unless conv g tys ta a a' && conv g tys tb b b' && conv g tys tc c c' && conv g tys th h h' do none
       ty := vApp g P acc
       acc := vDelim g v P a b c h acc
-    | .ind l I D v P m i, .ind _ _ _ v' P' m' i', _ =>
-      unless v.equiv v' && conv g tys (indMotiveTy g l v I D 1) P P' do none
-      unless conv g tys (indMethodTy g l v I D P 1) m m' && conv g tys I i i' do none
+    | .ind l I D v P m i pr, .ind _ _ _ v' P' m' i' pr', _ =>
+      unless pr == pr' && v.equiv v' && conv g tys (indMotiveTy g l v I D 1 pr) P P' do none
+      unless conv g tys (indMethodTy g l v I D P 1 pr) m m' && conv g tys I i i' do none
       ty := vApp g (vApp g P i) acc
       acc := vInd g l I D v P m i acc
     | .scase l q I D v P m s i, .scase _ q' _ _ v' P' m' s' i', _ =>
@@ -618,8 +633,8 @@ the domain, and everything else is conversion. -/
 partial def subTy (g : Globals R) (tys : Array (VTy R)) (A B : VTy R) : Bool :=
   let v := Val.var tys.size
   match whnf A, whnf B with
-  | .mu l I D i s _, .mu l' I' D' i' s' _ =>
-    l.equiv l' && sizeLe tys s s' && convTy g tys I I' && conv g tys (.desc l I) D D' && conv g tys I i i'
+  | .mu l I D i s _ pr, .mu l' I' D' i' s' _ pr' =>
+    pr == pr' && l.equiv l' && sizeLe tys s s' && convTy g tys I I' && conv g tys (.desc l I) D D' && conv g tys I i i'
   | .nu l I D i s _, .nu l' I' D' i' s' _ =>
     l.equiv l' && sizeLe tys s' s && convTy g tys I I' && conv g tys (.desc l I) D D' && conv g tys I i i'
   -- (the sorts as in `convTy`: `μ^s` and `μ^t` are in one sort)

@@ -1,7 +1,7 @@
 # A self-hosted CI runner
 
 CI runs on GitHub's `ubuntu-latest` runners. The heavy test shards (those with
-`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-4` and
+`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-6` and
 `grail-selfhost`) can run on a machine of our own instead. Nothing changes until the
 repository variable `WIZ_RUNNER_HEAVY` is set; unsetting it switches back.
 
@@ -30,7 +30,17 @@ self-hosted runner executes that pull request's code on the machine. So:
 
 * Linux, x86_64 or aarch64 (see "aarch64" below). 4 or more cores, 16 GB of memory
   (the selfhost shards peak at about 4.5 GB per job; one job runs at a time per runner),
-  60 GB of disk (the Nix store, `.lake` at about 3 GB, the Wiz caches).
+  60 GB of disk (the Nix store: `wiz` is ~1.8 GB with its closure; the test driver's
+  output is ~165 MB but its closure includes `wiz`, so ~2.0 GB; plus cache.nixos.org's
+  dev shell, the Wiz caches under `~/.cache/wiz`, `.grail` and `/tmp/wiz-selfhost-*`).
+  There is no `.lake` build any more. The opt-in nightly fixpoint
+  (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the fixpoint's declaration);
+  it checks `MemAvailable` before the run and fails clearly on a smaller
+  runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
+  and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
+  to all but two CPUs). The nightly compiler reproducibility check
+  (`.github/workflows/repro.yml`, two `lake build wiz grail` runs under two absolute
+  roots) needs **5 GiB free** and checks `MemAvailable` the same way.
 * **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means
@@ -168,22 +178,25 @@ big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 
 ## Caches
 
-Each job starts with an empty container: Lake's build (`.lake`, from the build job, by the
-actions cache) and the Wiz build caches (`~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*`)
-come from the GitHub Actions cache, as on GitHub's runners, and the Nix store from the image
-and Cachix. Pushing to Cachix needs the `CACHIX_AUTH_TOKEN` secret, which the job gets
-(only for this repository's code, never for forks).
+Each job starts with an empty container. The Nix store comes from the image and from
+Cachix: the `build` job's `nix build .#wiz .#tests` store paths are published with an
+explicit `nix shell nixpkgs#cachix -c cachix push badlydrawnwizards …` (the
+`CACHIX_AUTH_TOKEN` secret is in that step's environment only; a fork's job never gets
+it), and the shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
+`/tmp/wiz-selfhost-*`) still come from the GitHub Actions cache, as on GitHub's runners.
+There is no `.lake` build or `.lake` cache to restore.
 
 ## aarch64
 
-* The cache keys carry the architecture when it isn't x86_64 (`lake-Linux-ARM64-…`,
-  `wiz-Linux-ARM64-…`, `elan-Linux-ARM64-…`), so an ARM job never restores x86_64
-  binaries. The build job runs on GitHub's x86_64 runner, so an ARM test job builds the
-  tree itself the first time (`lake test` builds what it needs; tens of minutes) and saves
-  that build for the next ARM run of the same sources ("Save the Lake build (ARM64)").
-* Cachix holds x86_64 builds only (the `nix package` job runs on x86_64): on aarch64 the
-  dev shell's packages come from cache.nixos.org (nixpkgs builds aarch64-linux), and the
-  image's pre-fetch step matters more.
+* Cachix holds x86_64 builds only (the `build` job runs on GitHub's x86_64 runner). A
+  heavy shard on an aarch64 runner has a different store path for the same sources, so
+  `nix build .#wiz .#tests` builds it there the first time and nothing publishes it:
+  aarch64 jobs are slower until the cache holds an aarch64 build (publishing one needs a
+  build job on that architecture, or a manual `cachix push` from an aarch64 machine).
+  The dev shell's packages still come from cache.nixos.org, which builds aarch64-linux,
+  and the image's pre-fetch step matters more.
+* The Wiz build-cache key carries the architecture through its compiler hash and
+  `wiz-Linux-ARM64-…` name, so an ARM job never restores x86_64 programs.
 * The release tarball (`release.yml`, `wiz-x86_64-linux.tar.gz`) and its bundled C
   toolchain are x86_64 only, and `tower`'s release source picks the tarball by `uname -m`:
   the release workflow stays on GitHub's runner, and tests that install a real release

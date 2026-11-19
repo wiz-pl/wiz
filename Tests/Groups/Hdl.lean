@@ -156,9 +156,29 @@ def hdlPrimTools : IO Unit := do
         unless (st.splitOn cell).length > 1 do throw (IO.userError s!"no {cell} in serial:\n{st}")
       if (o.stderr.splitOn "has no driver").length > 1 then throw (IO.userError s!"undriven wire:\n{o.stderr}")
 
+/-- H14 S5: yosys `check -assert` on the data-path and flow pipelines of
+examples/hdl-pipe.wiz (when yosys is on PATH). -/
+def hdlPipeTools : IO Unit := do
+    let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
+    unless ys do skip "no yosys"; return
+    let src ← IO.FS.readFile "examples/hdl-pipe.wiz"
+    let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval aluVerilog\n#eval flowVerilog\n")
+      { trustedModule := Tests.libModule, loader := ← libLoader }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+    let all := s.messages.toList.map (·.text)
+    let texts := all.drop (all.length - 2)
+    let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
+    IO.FS.withTempDir fun dir => do
+      for (t, top) in texts.zip ["alu3", "flow3"] do
+        IO.FS.writeFile (dir / s!"{top}.v") (unq t)
+        let o ← IO.Process.output { cmd := "yosys", args := #["-q", "-p", s!"read_verilog {top}.v; hierarchy -top {top}; check -assert"], cwd := dir }
+        unless o.exitCode == 0 do throw (IO.userError s!"yosys check fails on {top}.v:\n{o.stderr}")
+
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
+  parallel := true
   cases := [
     { name := "S2: operators on signals: same Verilog as the Hw operations, numerals at the width, if as a mux, printed back", run := fun _ => do
         -- the three designs agree with their Hw-operation twins (Verilog text); the counter
@@ -197,6 +217,21 @@ def hdlGroup : Group where
            "((.true, .cons 4 (.cons 42 (.cons 42 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 87 (.cons 87 (.cons 87 (.cons 87 (.cons 42 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 58 (.cons 58 (.cons 58 .nil))))))))))))))))))))))))))))))))))))))))), (.true, .cons 5 (.cons 0 (.cons 0 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 121 (.cons 121 (.cons 121 (.cons 121 (.cons 0 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 5 (.cons 5 (.cons 63 .nil))))))))))))))))))))))))))))))))))))))))), .true, .true)",
            ".true",
            "\"module reg_(input clk, input [0:0] rst, input [0:0] en, input [7:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd42;\\n  always @(posedge clk) if (rst) r <= 8'd42; else if (en) r <= x;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "S4: match on a signal: an enumeration case tree equals the if chain (same netlist), Bool, nested, non-exhaustive rejected", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-match.wiz")
+          [".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           ".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           "(15, 15)",
+           ".true",
+           ".cons 7 (.cons 9 .nil)",
+           ".cons 7 (.cons 9 .nil)",
+           ".cons 10 (.cons 20 .nil)",
+           ".cons 1 (.cons 2 .nil)",
+           ".cons 5 (.cons 6 (.cons 1 (.cons 2 (.cons 3 .nil))))",
+           ".cons 4 (.cons 5 (.cons 6 (.cons 7 .nil)))"]
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ninductive P where | a | b | c\n  deriving BitPack\ndef f {r : HwTy → Type} [Hw r] (p : r P.code) : r B8 := match p with | .a => 0 | .b => 1" "not exhaustive"
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ndef f {r : HwTy → Type} [Hw r] (b : r HwTy.bit) : r B8 := match b with | .true => 1" "not exhaustive"
+        failsLibs "import Hdl.Core\ndef B8 : HwTy := HwTy.bits 8\ndef f {r : HwTy → Type} [Hw r] (x : r B8) : r B8 := match x with | 0 => 1 | _ => 0" "literal patterns" },
     { name := "S2: if on a condition that is no signal takes the ordinary path (its messages)", run := fun _ => do
         failsLibs "import Prelude\ndef f (n : Nat) : Nat := if n then 1 else 2" "constructor"
         failsLibs "import Prelude\ndef f (A : Type) (a : A) : Nat := if a then 1 else 2" "cannot match on a value of type A"
@@ -247,11 +282,65 @@ def hdlGroup : Group where
            ".cons \"a choice between two different memories (a memory can only be written, not chosen)\" .nil",
            "\"module ram(input clk, input [0:0] we, input [3:0] waddr, input [7:0] wdata, input [3:0] raddr, output [7:0] y);\\n  reg [7:0] q; initial q = 8'd0;\\n  reg [7:0] cells [0:15];\\n  initial begin\\n    cells[0] = 8'd0;\\n    cells[1] = 8'd0;\\n    cells[2] = 8'd0;\\n    cells[3] = 8'd0;\\n    cells[4] = 8'd0;\\n    cells[5] = 8'd0;\\n    cells[6] = 8'd0;\\n    cells[7] = 8'd0;\\n    cells[8] = 8'd0;\\n    cells[9] = 8'd0;\\n    cells[10] = 8'd0;\\n    cells[11] = 8'd0;\\n    cells[12] = 8'd0;\\n    cells[13] = 8'd0;\\n    cells[14] = 8'd0;\\n    cells[15] = 8'd0;\\n  end\\n  wire [7:0] n5 = cells[raddr];\\n  always @(posedge clk) q <= n5;\\n  always @(posedge clk) begin\\n    if (we) cells[waddr] <= wdata;\\n  end\\n  assign y = q;\\nendmodule\\n\""] },
     { name := "memories in Verilog: Icarus replays the RAM's test bench; yosys maps RAM and a 256-word ROM to SB_RAM40_4K (skipped without the tools)", run := fun _ => hdlMemTools },
+    { name := "Hdl.Mem: word/byte read-after-write and no-alias laws, every byte-strobe mask, one- and two-cycle RAMs, values = netlist", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
+          [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-bits.wiz") ["1"] },
     { name := "Verilog: declarations before use (regs, wires, then the updates), sized initial values", run := fun _ =>
         okLibs (hdlVerilogSrc ++ "#eval v1\n")
           ["\"module counter(input clk, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "C1: clock domains: a clk2 circuit emits input clk2 and posedge clk2; Hw.clockOf drives a primitive", run := fun _ => do
+        -- `n2.clocks` is the named domain; its Verilog names the port and the always block
+        -- after it; an ODDR clocked by `Hw.clockOf d2` connects `.C(clk2)`.
+        okLibs ("import Hdl.Core\nimport Hdl.Prim\n" ++
+          "def u8 : HwTy := HwTy.bits 8\n" ++
+          "def c1 : Circuit (HwTy.bits 1) u8 := Circuit.mk u8 (BitVec.ofNat 8 250) (fun s u => Hw.pair (Hw.add s (Hw.lit 8 1)) s)\n" ++
+          "def d2 : ClockDomain := ClockDomain.named \"clk2\"\n" ++
+          "def n2 : Netlist := Circuit.netlistIn d2 \"dom2\" c1\n" ++
+          "#eval Hdl.map (fun (d : ClockDomain) => (d.name, d.periodPs)) n2.clocks\n" ++
+          "#eval Verilog.emit n2\n" ++
+          "def oddrP : Prim (HwTy.prod HwTy.clock (HwTy.prod HwTy.bit HwTy.bit)) HwTy.bit :=\n" ++
+          "  Prim.decl \"ODDR\" .nil (.cons \"C\" (.cons \"D1\" (.cons \"D2\" .nil))) (.cons \"Q\" .nil) .none\n" ++
+          "def primC : Circuit (HwTy.bits 8) HwTy.bit :=\n" ++
+          "  Circuit.mk (HwTy.bits 8) (BitVec.ofNat 8 0)\n" ++
+          "    (fun s x => Hw.pair s (Hw.prim oddrP (Hw.pair (Hw.clockOf d2) (Hw.pair (Hw.lit 1 0) (Hw.lit 1 1)))))\n" ++
+          "#eval Verilog.emit (Circuit.netlistIn d2 \"dom3\" primC)\n")
+          [".cons (\"clk2\", 0) .nil",
+           "\"module dom2(input clk2, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk2) r <= n3;\\n  assign y = r;\\nendmodule\\n\"",
+           "\"module dom3(input clk2, input [7:0] x, output [0:0] y);\\n  reg [7:0] r; initial r = 8'd0;\\n  wire [0:0] n6;\\n  ODDR u5 (.C(clk2), .D1(1'd0), .D2(1'd1), .Q(n6));\\n  always @(posedge clk2) r <= r;\\n  assign y = n6;\\nendmodule\\n\""] },
+    { name := "C2/C3: clock domains: a synchronised crossing accepted, an unsynchronised one rejected; Multi parts and wires; Clocking.domains; XDC/PCF periods; BUFG output domain; runners refuse two clocks", run := fun _ => do
+        -- examples/hdl-cdc.wiz: the C2 raw-netlist checks (a two-domain top with and without
+        -- Cdc.sync2, the sync clocked by its own source domain, a clock input used as data,
+        -- a one-domain circuit, a circuit that tries to smuggle a second domain in), then
+        -- C3: the same design as two Multi parts with a link (rejected) and Cdc.wire
+        -- (accepted), its core and PLL-wrapper Verilog, a pin-sourced second clock, XDC and
+        -- PCF constraints from ClockDomain.periodPs, a BUFG output as a synchroniser's
+        -- clock (Prim.withOutDom), and the multi-clock simulation refusal
+        okLibs (← IO.FS.readFile "examples/hdl-cdc.wiz")
+          [".nil",
+           "\"module cross(input clk, input clk2, output [0:0] y);\\n  reg [0:0] r; initial r = 1'd0;\\n  reg [0:0] s; initial s = 1'd0;\\n  wire [0:0] n3;\\n  wiz_sync2 u2 (.clk(clk2), .d(r), .q(n3));\\n  always @(posedge clk) r <= r;\\n  always @(posedge clk2) s <= n3;\\n  assign y = s;\\nendmodule\\n\"",
+           ".cons \"a clk signal (register r) is used by clk2 logic (register s): no synchroniser\" .nil",
+           ".cons \"a clk signal (register r) is used by clk2 logic (register s): no synchroniser\" .nil",
+           ".cons \"synchroniser wiz_sync2 (node 2): its data is in its clock's own domain clk, not another one\" (.cons \"a clk signal (wiz_sync2.q) is used by clk2 logic (register s): no synchroniser\" .nil)",
+           ".cons \"a clock (input ck) is used as data by register r\" .nil",
+           ".nil",
+           ".nil",
+           "\"module counter(input clk, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd0;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\"",
+           ".cons \"a clk2 signal (wiz_sync2.q) is used by clk logic (register r): no synchroniser\" (.cons \"the clock net at node 2 is on clock domain clk2, which the netlist does not declare (clk)\" .nil)",
+           ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 2) has no behavioural model\"",
+           ".cons \"a clk signal (register tx_r) is used by clk2 logic (register rx_r): no synchroniser\" .nil",
+           ".nil",
+           "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\n\"",
+           "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  wire ck_CLKOUT1;\\n  PLLE2_BASE #(.CLKIN1_PERIOD(10.0), .CLKFBOUT_MULT(8), .DIVCLK_DIVIDE(1), .CLKOUT0_DIVIDE(8), .CLKOUT0_PHASE(0.0), .CLKOUT1_DIVIDE(2), .CLKOUT1_PHASE(0.0)) clocking (.CLKIN1(clk), .RST(1'b0), .PWRDWN(1'b0), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0), .CLKOUT1(ck_CLKOUT1));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  wire ck_CLKOUT1_g;\\n  BUFG bufg_CLKOUT1 (.I(ck_CLKOUT1), .O(ck_CLKOUT1_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(ck_CLKOUT1_g), .go(go), .q(q));\\nendmodule\\n\"",
+           "\"module cross_core(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wiz_sync2 u3 (.clk(clk2), .d(tx_r), .q(n4));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n4;\\n  assign q = rx_r;\\nendmodule\\nmodule cross(input clk, input [0:0] go, input clk2, output [0:0] q);\\n  wire ck_CLKFBOUT;\\n  wire ck_CLKOUT0;\\n  PLLE2_BASE clocking (.CLKIN1(clk), .CLKFBOUT(ck_CLKFBOUT), .CLKFBIN(ck_CLKFBOUT), .CLKOUT0(ck_CLKOUT0));\\n  wire ck_CLKOUT0_g;\\n  BUFG bufg_CLKOUT0 (.I(ck_CLKOUT0), .O(ck_CLKOUT0_g));\\n  cross_core core (.clk(ck_CLKOUT0_g), .clk2(clk2), .go(go), .q(q));\\nendmodule\\n\"",
+           "\"set_property -dict { PACKAGE_PIN E3 IOSTANDARD LVCMOS33 } [get_ports {clk}]\\ncreate_clock -period 10.000 [get_ports {clk}]\\ncreate_clock -period 2.500 [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN F3 IOSTANDARD LVCMOS33 } [get_ports {clk2}]\\nset_property -dict { PACKAGE_PIN D9 IOSTANDARD LVCMOS33 } [get_ports {go}]\\nset_property -dict { PACKAGE_PIN D10 IOSTANDARD LVCMOS33 } [get_ports {q}]\\n\"",
+           ".nil",
+           "\"set_io clk 21\\nset_io go 1\\nset_io q 2\\nset_frequency clk 100\\nset_frequency clk2 400\\n\"",
+           ".cons \"synchroniser wiz_sync2 (node 5): its data is in its clock's own domain clk2, not another one\" .nil",
+           ".nil",
+           "\"module cross(input clk, input clk2, input [0:0] go, output [0:0] q);\\n  reg [0:0] tx_r; initial tx_r = 1'd0;\\n  reg [0:0] rx_r; initial rx_r = 1'd0;\\n  wire [0:0] n4;\\n  wire [0:0] n6;\\n  BUFG u3 (.I(clk2), .O(n4));\\n  wiz_sync2 u5 (.clk(n4), .d(tx_r), .q(n6));\\n  always @(posedge clk) tx_r <= go;\\n  always @(posedge clk2) rx_r <= n6;\\n  assign q = rx_r;\\nendmodule\\n\"",
+           ".error \"simulation refused: 2 clock domains (clk, clk2): multi-clock simulation needs an event schedule; wiz_sync2 (node 3) has no behavioural model\""] },
     { name := "S1: bundles, composition, reset and enable at random cycles; netlist simulation = values; names, test bench, PCF, VCD", run := fun _ => do
         -- t1–t6: (agreement of the netlist simulations with `Circuit.run`, the netlist size
         -- and the outputs) for the bundled counter, a delay chain, `par`, a feedback loop,
@@ -266,10 +355,28 @@ def hdlGroup : Group where
            "(.true, .cons 29 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 .nil)))))))))))))))))))))))))))))))))))))))))",
            "(.true, .cons 19 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 0 (.cons 0 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 2 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
            "\"module counter(input clk, input [0:0] rst, input [0:0] en, input [0:0] go, output [3:0] leds, output [0:0] top);\\n  reg [3:0] count; initial count = 4'd0;\\n  reg [0:0] up; initial up = 1'd1;\\n  wire [3:0] n6 = count + 4'd1;\\n  wire [3:0] n7 = count - 4'd1;\\n  wire [3:0] n8 = up ? n6 : n7;\\n  wire [3:0] next = go ? n8 : count;\\n  wire [0:0] n11 = next == 4'd9;\\n  wire [0:0] n13 = next == 4'd0;\\n  wire [0:0] n16 = n13 ? 1'd1 : up;\\n  wire [0:0] n17 = n11 ? 1'd0 : n16;\\n  wire [0:0] n18 = count == 4'd9;\\n  always @(posedge clk) if (rst) count <= 4'd0; else if (en) count <= next;\\n  always @(posedge clk) if (rst) up <= 1'd1; else if (en) up <= n17;\\n  assign leds = count;\\n  assign top = n18;\\nendmodule\\n\"",
-           "\"set_io clk 21\\nset_io rst 1\\nset_io en 2\\nset_io go 3\\nset_io leds[0] 99\\nset_io leds[1] 98\\nset_io leds[2] 97\\nset_io leds[3] 96\\nset_io top 95\\n\"",
+           "\"set_io clk 21\\nset_io rst 1\\nset_io en 2\\nset_io go 3\\nset_io leds[0] 99\\nset_io leds[1] 98\\nset_io leds[2] 97\\nset_io leds[3] 96\\nset_io top 95\\nset_frequency clk 100\\n\"",
            ".cons \"no pin for port rst\" (.cons \"no pin for port en\" (.cons \"port leds has 4 bits, one pin given\" (.cons \"no pin for port top\" (.cons \"pin for no port: led\" .nil))))",
            "\"$timescale 1ns $end\\n$scope module counter $end\\n$var wire 1 ! clk $end\\n$var wire 1 \\\" go $end\\n$var wire 4 # leds $end\\n$var wire 1 $ top $end\\n$var wire 4 % count $end\\n$var wire 1 & up $end\\n$upscope $end\\n$enddefinitions $end\\n#0\\n0!\\n0\\\"\\nb0000 #\\n0$\\nb0000 %\\n1&\\n#1\\n1!\\n#2\\n0!\\n#3\\n1!\\n#4\\n0!\\n#5\\n1!\\n#6\\n0!\\n1\\\"\\n#7\\n1!\\n#8\\n\"",
            ".cons 17 (.cons 5 (.cons 4 .nil))"] },
+    { name := "traces: refinement and case-analysis tools (Mealy.follows, Mealy.seq, Nat.All, Bool.forall9, simulatesInv)", run := fun _ =>
+        okLibs ("import Trace\n" ++
+          "def cnt : Mealy Nat Bool Nat := fun (s : Nat) (b : Bool) => (match b with | .true => Nat.succ s | .false => s, s)\n" ++
+          "def up : Trace Bool := Trace.const .true\n" ++
+          "def steps : Nat.All (fun (k : Nat) => (cnt k .true).1 = Nat.succ k) 3 := And.intro (And.intro (And.intro True.intro rfl) rfl) rfl\n" ++
+          "def run3 (t : Nat) (h0 : Mealy.stateAt cnt 0 up t = 0) : Mealy.stateAt cnt 0 up (Nat.add 3 t) = 3 :=\n" ++
+          "  Mealy.follows cnt 0 up (fun (k : Nat) => k) t 3 h0 (fun (k : Nat) (hk : Nat.lt k 3 = .true) => Nat.all_spec (fun (j : Nat) => (cnt j .true).1 = Nat.succ j) 3 steps k hk) 3 rfl\n" ++
+          "def lem (a b c d e f g i j : Bool) : Bool.or a (Bool.not a) = .true :=\n" ++
+          "  Bool.forall9 (fun (a b c d e f g i j : Bool) => Bool.or a (Bool.not a)) (refl Bool.true) a b c d e f g i j\n" ++
+          "def acc : Mealy Nat Nat Nat := fun (s x : Nat) => (Nat.add s x, s)\n" ++
+          "def two (t : Nat) : Mealy.outAt (Mealy.seq cnt acc) (0, 0) up t = Mealy.outAt acc 0 (Mealy.outAt cnt 0 up) t :=\n" ++
+          "  Mealy.seq_outAt cnt acc 0 0 up t\n" ++
+          "def evenInv (s : Nat) : Prop := True\n" ++
+          "def same (t : Nat) : Mealy.stateAt cnt 0 (Trace.map (fun (b : Bool) => b) up) t = Mealy.stateAt cnt 0 up t :=\n" ++
+          "  Mealy.simulatesInv cnt cnt (fun (s : Nat) => s) (fun (b : Bool) => b) (fun (o : Nat) => o) evenInv\n" ++
+          "    (fun (s : Nat) (b : Bool) (h : evenInv s) => True.intro) (fun (s : Nat) (b : Bool) (h : evenInv s) => refl (cnt s b)) 0 True.intro up t\n" ++
+          "#eval Mealy.stateAt (Mealy.seq cnt acc) (0, 0) up 4\n")
+          ["(4, 6)"] },
     { name := "H14 T: temporal properties (UART idle-high and delivery for ever, valid/ready refinement, stability, liveness)", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-temporal.wiz") },
     { name := "H14 T: temporal notation □ ◇ ○ ~> |-> |=>, printed back; `|=>` leaves `fun`/`match` alone (13o)", run := fun _ => do
@@ -332,6 +439,14 @@ def hdlGroup : Group where
             let r ← IO.Process.output { cmd := "vvp", args := #["-n", (dir / "t.vvp").toString], cwd := dir }
             unless (r.stdout.splitOn pass).length > 1 do
               throw (IO.userError s!"test bench {m}: {r.stdout}{r.stderr}") },
+    { name := "Netlist simulation theorem (Hdl.Netlist): a synthesised one-bit delay satisfies Circuit.Simulates by rfl; Netlist.simulate = Circuit.run", run := fun _ => do
+        -- examples/hdl-sim-theorem.wiz: a one-bit delay built with Circuit.netlist; the
+        -- relation's oneClock/memFree/initOk/stepOk are discharged by kernel evaluation,
+        -- the theorem is applied to a four-cycle trace, and both simulations agree
+        okLibs (← IO.FS.readFile "examples/hdl-sim-theorem.wiz")
+          [".cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))",
+           ".cons (.cons 0 .nil) (.cons (.cons 1 .nil) (.cons (.cons 0 .nil) (.cons (.cons 1 .nil) .nil)))",
+           ".true"] },
     { name := "fast netlist simulation (Hdl.Sim, compiled): = Netlist.simulate = Circuit.run, cycle for cycle; not well formed falls back", run := fun _ => do
         -- examples/hdl-sim.wiz: every netlist operation (shifts by a signal too), 70-bit widths, reset and enable, a
         -- table tree, composition, memories (two write ports, read-during-write, a ROM,
@@ -343,7 +458,28 @@ def hdlGroup : Group where
            "memories: yes, 3000 cycles, well formed yes, checksum 380888474\n" ++
            "memories, raw out-of-range values: simFast = simulate: yes\n" ++
            "shifter: yes, 3000 cycles, well formed yes, checksum 331396695\n" ++
-           "not well formed: yes, simFast = simulate: yes\n") }
+           "not well formed: yes, simFast = simulate: yes\n") },
+    { name := "H14 S5: pipeline arrows (Pipe/Flow): latency, identity/associativity laws, throughput, stalls, reset; values = netlist; notation round-trip", run := fun _ => do
+        okLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
+          ["(1, 2, 3)",
+           ".cons 0 (.cons 254 (.cons 254 (.cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 .nil))))))))",
+           ".true",
+           "fun p q => p |>> q : Pipe B8 B8 → Pipe B8 B8 → Pipe B8 B8",
+           "fun p q => p *** q : Pipe B8 B8 → Pipe B8 B8 → Pipe (.prod B8 B8) (.prod B8 B8)",
+           "fun p q => p &> q : Pipe B8 B8 → Pipe B8 B8 → Pipe B8 (.prod B8 B8)",
+           "fun p i => Pipe.loop B8 B8 B8 p i : Pipe (.prod B8 B8) (.prod B8 B8) → HwTy.El B8 → Pipe B8 B8",
+           "(.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil)))))))), .cons 0 (.cons 254 (.cons 254 (.cons 63 (.cons 68 (.cons 73 (.cons 78 (.cons 83 (.cons 88 .nil)))))))))",
+           "(.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil))))))))))), .cons 0 (.cons 254 (.cons 254 (.cons 13 (.cons 13 (.cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 (.cons 43 .nil))))))))))))",
+           ".cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 (.cons 38 (.cons 43 .nil))))))",
+           ".true",
+           ".cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 (.cons 1 .nil)))))))))))",
+           ".cons (0, 0, 1) (.cons (0, 0, 1) (.cons (0, 0, 1) (.cons (254, 0, 1) (.cons (254, 0, 1) (.cons (163, 1, 1) .nil)))))"] },
+    { name := "H14 S5: yosys check -assert on the data-path and flow pipeline Verilog (skipped without yosys)", run := fun _ => hdlPipeTools },
+    { name := "H14 S5: simFast = Circuit.run = netlist for the pipelines (compiled; skipped without a C toolchain)", run := fun _ => do
+        let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["--version"] }; pure (o.exitCode == 0)) <|> pure false
+        unless (← has "cc") do skip "no cc"; return
+        cRunLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
+          "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" }
   ]
 
 builtin_initialize registerGroup hdlGroup
