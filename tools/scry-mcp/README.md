@@ -1,7 +1,9 @@
-# scry-mcp: Scry for MCP clients, read-only
+# scry-mcp: Scry for MCP clients
 
 A stdio MCP server for [Scry](../../scry/README.md): it does taint analysis of C files and
-projects, queries fact stores and reads the findings database. It is separate from
+projects, queries fact stores and reads the findings database. By default it is
+read-only. Dynamic analysis, repro/verify and triage exist only behind flags
+(see [Runners](#runners-opt-in)). It is separate from
 `tools/wiz-mcp` (its own process and its own `.mcp.json` entry, `scry`). It reuses
 that bridge's transport, its path confinement and its environment filter, so
 `tools/wiz-mcp/wiz_mcp.py` must sit beside it, as it does in a checkout.
@@ -50,15 +52,52 @@ Results:
 * `scry_findings` reads `scry-workflow/findings.json` unless `db` names another
   file. A missing database lists as empty.
 
+## Runners (opt-in)
+
+| tool | flag | runs |
+| --- | --- | --- |
+| `scry_dynamic` | `--allow-scry-dynamic` | `scry dynamic FILE.c --json --sarif TMP --work-dir TMP --timeout N [--no-coverage]` under `heavy` |
+| `scry_repro` | `--allow-scry-dynamic` | `scry findings repro ID --db DB --sanitize S --timeout N --json [--input F] [--witness F]` under `heavy` |
+| `scry_verify` | `--allow-scry-dynamic` | `scry findings verify ID --db DB --json` under `heavy` |
+| `scry_triage` | `--allow-scry-triage` | `scry findings triage ID --state S --reason R --by scry-mcp --db DB` under `light` |
+| `job_status`, `job_cancel` | `--allow-scry-dynamic` | follow or stop a job |
+
+They share wiz-mcp's runner machinery (`tools/wiz-mcp/wiz_runners.py`; see
+its README, "Runners"):
+
+* **Scheduling.** `heavy --mem MEM timeout -k 30 T` runs the job, with a
+  declared `mem` (default 4G, at most `--max-mem`) and `timeout` (default 600
+  s). Heavy's status is read first: a busy heavy is `heavy_busy` unless
+  `queue: true`, and a measurement window is `measurement_window`. Calls return
+  a job after `wait` seconds, and there is one job at a time.
+* **The sandbox.** `bwrap` gives the job no network, a read-only root and
+  workspace, a private `/tmp`, and a hidden home directory. Only the run's own
+  temporary directory is writable, plus the findings database's directory for
+  repro, verify and triage. `run_timeout` (default 10 s, at most 120) is the
+  analysed program's own limit inside Scry.
+* **No caller-chosen commands.** `--cc`, `--harness` and `--env` are never
+  passed, and those arguments are refused as unknown. `input` and `witness`
+  must be files in the readable roots.
+* **The findings database must be a real file in the workspace.** It may not
+  be in the toolchain, an `--allow-root` directory or behind a symlink. A
+  missing database is `not_found`; `scry findings scan` is still not offered.
+* **Outputs are confined.** `scry_dynamic` reports go through the same
+  confinement as `scry_taint`, and the SARIF is kept as a run resource.
+  A repro or verify record whose `source` is outside the roots is withheld.
+
+A stored repro may name a harness that someone recorded earlier with the CLI.
+`verify` replays it inside the same sandbox; the server never accepts one.
+
 ## Safety
 
-Every tool is annotated `readOnlyHint: true`, `destructiveHint: false` and
-`openWorldHint: false`.
+Every tool except the runners is annotated `readOnlyHint: true`,
+`destructiveHint: false` and `openWorldHint: false`. The runners are
+`readOnlyHint: false`.
 
-* **Not offered.** These commands are not offered, because they run code or
-  write files: `scry dynamic` and `findings repro` (both compile and run
-  code), `findings scan`, `triage` and `verify` (all three write the database),
-  `bench`, `repl`, `project --facts`/`--cache`/`--cc`, and `cst`.
+* **Not offered.** These commands are not offered, because they write files
+  or run code outside the runners' sandbox: `findings scan`, `bench`, `repl`,
+  `project --facts`/`--cache`/`--cc`, and `cst`. `scry dynamic`,
+  `findings repro`, `verify` and `triage` exist only as the runners above.
 * **Temporary-directory output only.** Each run gets a fresh directory inside
   the server's private (0700) temporary directory. That directory is the
   child's working directory, `HOME`, `XDG_CACHE_HOME` and `TMPDIR`, so anything
@@ -107,6 +146,9 @@ Error kinds:
 * `timeout` (the process group is killed)
 * `io_error`
 * `internal`
+* runners only: `not_enabled`, `heavy_busy`, `measurement_window`, `busy` (a
+  job is already running), `scheduler_not_found`, `scheduler_error` and
+  `sandbox_unavailable`
 
 ## Options
 
@@ -117,6 +159,10 @@ Error kinds:
 --timeout SECS    per-call deadline, also the cap on Scry's own --timeout (default: 300)
 --allow-root DIR  another directory tools may read (repeatable; never written)
 --pass-env NAME   pass another environment variable (credential-like names are still dropped)
+--allow-scry-dynamic  list and allow scry_dynamic, scry_repro, scry_verify (heavy, sandboxed)
+--allow-scry-triage   list and allow scry_triage (writes the findings database; light, sandboxed)
+--heavy PATH, --light PATH, --bwrap PATH, --max-mem SIZE, --max-runtime SECS
+                  as in wiz-mcp
 ```
 
 ## Tests
@@ -135,6 +181,10 @@ environment. They check:
 * that secrets are filtered;
 * `diff` validation, and that `git diff` runs in the workspace;
 * the limits, and the retention of runs;
-* that the findings database is never written.
+* that the findings database is never written by the read-only tools;
+* the runners, with stand-in `heavy`/`light`/`bwrap` scripts: the gating, the
+  argument vectors (no `--cc`/`--harness`/`--env`), the sandbox's writable
+  directories, the database checks, confinement of dynamic reports, and
+  refusal when heavy is busy.
 
 The `tools` workflow runs them on every change under `tools/`.

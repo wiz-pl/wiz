@@ -16,8 +16,10 @@
 // No endpoint (no `--lsp`, or `?lsp=off`): this module does nothing at all — no socket,
 // no fetch, no panel. The page is then the static documentation, readable without JS.
 // `?lsp=PORT` (or a `ws://` URL) overrides the endpoint the page was made with.
+// `?token=T` is the language server's token (#430: `wiz lsp --ws` prints it, and refuses
+// a connection without it); the page never carries it itself.
 "use strict";
-import { LspClient, endpointFromSearch, parseEndpoint } from "./lsp-client.js";
+import { LspClient, endpointFromSearch } from "./lsp-client.js";
 import { escapeHtml, readGoalState, renderDiagnostics, renderGoalResult, renderTermResult } from "./goals.js";
 
 // The page's serve data, or null (a page made without --serve carries no such script).
@@ -28,11 +30,10 @@ function serveData() {
 }
 
 // `?lsp=` wins when present (`?lsp=off` disables); otherwise the page's `--lsp` port.
+// `?token=` goes into the socket's URL either way.
 function endpointOf(data) {
-  if (typeof location !== "undefined" && new URLSearchParams(location.search).has("lsp")) {
-    return endpointFromSearch(location.search);
-  }
-  return parseEndpoint(data && data.lsp);
+  const search = typeof location !== "undefined" ? location.search : "";
+  return endpointFromSearch(search, "lsp", data && data.lsp);
 }
 
 // ## Hover contents (Markdown, as `textDocument/hover` returns it)
@@ -125,7 +126,8 @@ function render(panel, view) {
     const why = view.message ? `<p class="reason">${escapeHtml(view.message)}</p>` : "";
     body = `${why}<p class="hint">Start a language server with ` +
       `<code>wiz lsp --ws PORT --no-stdio</code>, from the module root (so its imports ` +
-      `resolve), and make the pages with <code>--lsp PORT</code>.</p>` +
+      `resolve), make the pages with <code>--lsp PORT</code>, and open them with ` +
+      `<code>?token=T</code>, where T is the token the server prints.</p>` +
       `<p><button type="button" data-live-reconnect>reconnect</button></p>`;
   } else {
     const why = view.message ? `<p class="reason">${escapeHtml(view.message)}</p>` : "";
@@ -165,7 +167,7 @@ function start() {
 
   const panel = createPanel();
   const view = {
-    state: "connecting", endpoint: endpoint.url, serverInfo: null,
+    state: "connecting", endpoint: endpoint.label || endpoint.url, serverInfo: null,
     hover: null, goals: null, diagnostics: [], message: null,
     pinned: false, position: null,
   };

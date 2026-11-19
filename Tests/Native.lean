@@ -218,20 +218,30 @@ their own declarations must add no trust. `examples/hdl-verified.wiz` is checked
 `hdl-verified` group too; `-native`/`-full` are deliberately trusted and are not here. -/
 def trustLedgerExamples : List String := ["examples/hdl-verified.wiz"]
 
-/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
-library trusted). Both trust extensions are on so that a use is *recorded* by the
-ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
-and `lib/ never uses native_refl` still fail on a use). -/
-def libTrustState : IO (CommandState ZeroOneMany) := do
-  let files ← wizFiles "lib"
-  let mods := files.filterMap fun f => do
-    let cs := (f.toString.toList.drop 4)
-    pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
-  let mods := mods.toArray.qsort (· ≤ ·) |>.toList
-  let input := String.join (mods.map (s!"import {·}\n"))
-  pure (runFrontend (R := ZeroOneMany) input
-    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
-      trustNative := true, smt := { trust := true } })
+/-- The states of importing `lib/`, as `wiz check` does (the toolchain's library
+trusted). Both trust extensions are on so that a use is *recorded* by the ledger rather
+than merely an error; `lib/` is not allowed to use either (the cases below and `lib/
+never uses native_refl` still fail on a use).
+
+`Scry.EgraphNative` and `Scry.EqPlan` are alternative backends that cannot be imported
+into one program with `Scry.Egraph` and its clients, so there is no single whole-library
+import: the reference family is loaded with everything else, then each distinct
+exclusion set among the apart modules (with those modules) is loaded with everything
+else. The ledger is the union of the states' sources, and every module is still checked
+against every module it can share a program with. -/
+def libTrustStates : IO (List (String × CommandState ZeroOneMany)) := do
+  let loader ← Elab.libLoader
+  let one (what input : String) : IO (String × CommandState ZeroOneMany) := do
+    pure (what, runFrontend (R := ZeroOneMany) input
+      { loader, trustedModule := Tests.libModule
+        trustNative := true, smt := { trust := true } })
+  let mut out := [← one "the library" (← Elab.allLibSource)]
+  let mut seen : List (List String) := []
+  for (m, skip) in Elab.libApart do
+    unless seen.contains skip do
+      seen := skip :: seen
+      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]
+  pure out
 
 /-- The state of elaborating `path` (an example) with every library module importable. -/
 def exampleTrustState (path : String) : IO (CommandState ZeroOneMany) := do
@@ -282,13 +292,18 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
   | none =>
     let libFiles ← wizFiles "lib"
     rejectSorry libFiles
-    let s ← libTrustState
-    noTrustErrors "the library" s
-    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-    let libLabel (n : Name) : String := trustModuleOf s.globals n
-    let libSources := trustSources s.globals libLabel
-    checkCovered s.globals libSources
-    let mut sources := libSources
+    let states ← libTrustStates
+    let mut libSources : List TrustSource := []
+    let mut decls := 0
+    for (what, s) in states do
+      noTrustErrors what s
+      decls := decls + s.globals.order.size
+      let libLabel (n : Name) : String := trustModuleOf s.globals n
+      let sources := trustSources s.globals libLabel
+      checkCovered s.globals sources
+      libSources := libSources ++ sources
+    check (decls > 1000) s!"only {decls} library declarations in all loads"
+    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
@@ -299,7 +314,7 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
         let ownSources := (trustSources es.globals labelOf own)
         -- an example's declarations may depend on the library's trusted base, so the
         -- walk checks against both; its own sources are what the baseline would gain
-        checkCovered es.globals (libSources ++ ownSources) own
+        checkCovered es.globals (sources ++ ownSources) own
         sources := sources ++ ownSources
     pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
 
