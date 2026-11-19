@@ -1154,3 +1154,148 @@ staged plan says where the tests and the natives go.
 7. **Cursor recursion.** The current checker rejects recursive consumers of a
    linear handle. Ship `Cursor.fold`/`foldUntil` as the public loop; a linear
    fixpoint rule is a language addition, not a storage-engine requirement.
+
+---
+
+## 14. Slice 2 implemented: the durable single-file store
+
+Status: branch `store-durable` off `integration/train6` (`66398557`), no PR. The
+prototype above is unchanged; the slice-2 files are additions in
+`drafts/storage-engine/`:
+
+* `Durable.wiz` — the file format, recovery, commit protocol, and the public
+  `Handle`/`getDb`/`putDb`/`closeDb`;
+* `DurableTest.wiz` — a compiled program that runs the §12 scenarios against a real
+  file, plus the crash-ish cases;
+* `test-durable.sh` — the three `wiz check`s and the `wiz run`.
+
+The native is in the ordinary `Sys`/`Fd` family, not a storage-specific one:
+
+* `runtime/rt_sys.inc`: `wiz_sys_fd_fsync` (`fsync(2)`) and
+  `wiz_sys_fd_fdatasync` (`fdatasync(2)`, `fsync` under Emscripten), each returning
+  `0` or `errno`; `runtime/wiz_rt.h` has the prototypes;
+* `lib/Sys.wiz`: `Fd.syncRaw`/`Fd.dataSyncRaw` and `Fd.sync`/`Fd.dataSync` (EIO);
+* `.github/trust-baseline.tsv`: the four rows (axiom + `builtin extern:`) for the
+  two externs.
+
+### 14.1 The format actually implemented
+
+One file, little-endian, 4 KiB pages. Page 0 holds meta slot A and page 1 meta slot
+B (the §2.2 diagram, not both slots in page 0 as §2.3 says): the slots are then in
+different pages, so a torn write to one cannot take the other with it. Data pages
+start at page 2.
+
+* **Meta slot, 96 B** (the §2.3 field list is 96 B, not 64 B):
+  `magic u64 | format u32 | flags u32 | txid u64 | root u64 | index_root u64 |
+  freelist_root u64 | log_end u64 | del_epoch u64 | min_gen u64 | schema_gen u64 |
+  page_count u64 | checksum u64`. Only `txid`, `root`, `del_epoch` and `page_count`
+  are used in this slice; the rest are zero.
+* **Data page:** a 32 B header (`kind u16 | n u16 | free u16 | flags u16 | txid u64 |
+  checksum u64 | right u32 | reserved u32`) and 127 fixed 32 B records. The records
+  are `key u64 | kind u32 | label u32 | count u64 | version u64`, exactly §2.2.
+  `right` chains the leaves; `root` is the first page (0 for an empty map).
+* **Checksums:** FNV-1a-64 over the page (or slot) with the checksum field zeroed.
+  The Wiz checksum folds the page in 512-byte blocks: one 4096-deep recursion
+  overflows the compiled program's stack, while the blocked fold gives the same
+  hash.
+* **This slice's tree** is one leaf chain, not a B+tree with internal pages. The
+  page/record format and the COW discipline are the ones an internal level will
+  use; a commit rewrites the whole map into fresh pages. That is enough for the
+  API and the crash cases, and it keeps `mmap` (slice 3) a read-path change only.
+
+### 14.2 Commit protocol as implemented
+
+`putDb` takes the handle's `MVar` (the single-writer critical section), runs the
+pure `Db.commit`, and only then touches the file:
+
+```
+1. pure Db.commit: validate (delete epoch, per-key first-committer-wins, unique
+   index) and materialise the new map             -> rejected, or a plan
+2. append fresh pages at page_count                (pwrite through Fd.seek/Fd.write)
+3. fdatasync(fd)                                   pages durable
+4. write the inactive meta slot (txid mod 2)
+5. fsync(fd)                                       the commit point is durable
+6. publish the new Db in the MVar
+```
+
+A rejection writes nothing. An I/O error leaves the old `Db` published, abandons
+the pages it wrote, and moves a **generation floor** past the attempt; the next
+commit uses `max(db.gen, genFloor) + 1`. That is what keeps a fallback safe: after
+a torn last commit the chosen state is older than the torn slot's `txid`, and a
+retry must not reuse that `txid` (a stale slot could otherwise point at pages the
+retry overwrites).
+
+`genFloor` and `page_count` are kept out of the pure `Db`: `Db.gen` is the honest
+generation a snapshot reports, `genFloor` only bounds the next commit.
+
+### 14.3 Recovery on open
+
+`openDb` reads both 96 B slots. A slot is valid iff magic, format and checksum
+pass. The valid slots are tried newest `txid` first; a slot is *chosen* only when
+its whole page chain verifies:
+
+* every page is 4 KiB, kind 1, `n ≤ 127`, its header `txid` equals the slot's
+  `txid`, and its checksum matches;
+* every page number is below the slot's `page_count`; `right` chains to 0; the
+  walk is fuelled by `page_count`, so a cycle is corrupt, not a loop.
+
+If the newest slot's chain fails (the last commit's pages were truncated or torn),
+the next slot is tried. The chosen state gets `db.gen = chosen.txid` and a
+`genFloor` equal to the greatest `txid` among *all checksum-valid* slots, so the
+next commit is above the torn one. `page_count` starts after every page any valid
+slot names, so recovery never overwrites a page a stale slot might still reach.
+A file with no valid slot opens as an empty store; its bytes are unreachable pages
+from a crash before the first commit.
+
+The index roots are not stored: the index is derived state, so `dbOf` rebuilds it
+from the primary records with `Root.rebuildIndex` (the same recompute path §6.3
+keeps for repair). Deleted keys keep no tombstone on disk; the global delete epoch
+is enough to reject a transaction that began before a delete. Per-key tombstones
+arrive with the per-key refinement (§3.2, §13.4).
+
+### 14.4 What ran
+
+All through `light` with the worktree's `wiz` (built by one `heavy lake build wiz
+tests`, 555 jobs, rc=0), except the build itself.
+
+```text
+wiz check -I drafts/storage-engine drafts/storage-engine/Durable.wiz      rc=0
+wiz check -I drafts/storage-engine drafts/storage-engine/DurableTest.wiz  rc=0
+wiz check lib/Sys.wiz                                                      rc=0
+
+wiz check -I drafts/storage-engine drafts/storage-engine/Storage.wiz      rc=0
+  (the same 13 #eval lines as §12)
+wiz check -I drafts/storage-engine drafts/storage-engine/Cursor.wiz       rc=0
+wiz check -I drafts/storage-engine drafts/storage-engine/StorageCursor.wiz rc=0
+  (the same 5 lines as §12)
+wiz check -I drafts/storage-engine drafts/storage-engine/CursorReject.wiz rc=1
+  (the same 4 expected errors as §7.3)
+```
+
+The compiled test (a C build with the gmp flags from `grail.local.wiz`) prints:
+
+```text
+durable: in /tmp/wiz-…
+durable: clean reopen ok
+durable: truncated tail ignored
+durable: all checks passed
+```
+
+It covers, against a real file: seed; two `+1`s from one base both commit and sum
+(count 2, generation 3); a stale `set` is rejected; a unique-index duplicate is
+rejected; a delete commits (generation 4) and a transaction begun before it is
+rejected by the epoch; close and reopen sees generation 4, count 2, node 2 gone;
+a commit after the reopen is generation 5 and survives another reopen. The torn
+case writes three commits, copies the file with the last 4 KiB removed
+(`Bytes.slice` is the by-hand truncation), opens the copy at generation 2 / count
+1, commits again at generation 4, and reopens it at generation 4 / count 2.
+
+`strace -e fsync,fdatasync` on the final binary shows **9 commits, 9
+`fdatasync(3)` and 9 `fsync(3)`**: the native really reaches the kernel, and the
+two phases are distinct.
+
+Not run: the trust-ledger gate. `scripts/trust-ledger.sh --lib-only` on this
+train6 checkout stops before the ledger on pre-existing errors in `lib/Scope.wiz`
+(quantity 0 used ω) and `lib/Scry/EgraphExtract.wiz` (unknown identifiers), which
+are unrelated to `lib/Sys.wiz`; `scripts/trust-ffi-audit.sh Sys` does show both new
+externs as `reviewed` with the expected `Fd → Nat` signature. No PR and no CI.
