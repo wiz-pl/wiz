@@ -610,17 +610,16 @@ lowering warnings, taint on; the driver's `scry cs` reaches the same lowering):
 | | before | after |
 |---|---:|---:|
 | functions | 240 | 240 |
-| warnings (excluding the 17 `no functions lowered` rows) | 409 | 407 |
+| warnings | 409 | 403 |
 | `switch labels are not compared` | 3 | 0 |
 | `switch expression arms are not compared` | 3 | 0 |
 | `switch label (…) is not compared` | 0 | 0 |
-| warnings, total | 409 | 403 |
 | findings (rule pack, taint on) | 0 | 0 |
 
 No warning is added: the `when` guards' calls are modelled calls, not warnings (the
 driver's `unmodelled-external` coverage row gains the two calls, which used to vanish
-with the guard). The two labels the lowering cannot compare in this corpus are external
-constants compared symbolically, not unknown tests, so that row stays 0.
+with the guard). No label in this corpus is an unknown test — the external constants
+are compared symbolically — so the `switch label (…)` row stays 0.
 
 Fixtures: `lower/switch` (int, string and in-unit enum labels, stacked labels, a typed
 `case string text:` used by a call, a guard that uses the binding, and two switch
