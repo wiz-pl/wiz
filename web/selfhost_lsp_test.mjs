@@ -16,7 +16,7 @@ import {
   isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
   parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
   SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
-  completionPrefix, parseNames, filterCompletions, splitGoals,
+  completionPrefix, filterCompletions, splitGoals, wordAt,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
@@ -212,6 +212,7 @@ let notOpen = null;
 try { await client.plainGoal("file:///other.wiz", { line: 0, character: 0 }); } catch (e) { notOpen = e; }
 check("plainGoal: an unopened document", notOpen instanceof LspError ? notOpen.code : String(notOpen), -32602);
 check("hover: null", await client.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 0 } }), null);
+check("definition: null", await client.request("textDocument/definition", { textDocument: { uri }, position: { line: 0, character: 0 } }), null);
 let unknown = null;
 try { await client.request("wiz/frobnicate", {}); } catch (e) { unknown = e; }
 check("an unknown request: MethodNotFound", unknown && unknown.code, -32601);
@@ -431,95 +432,147 @@ check("check: no lines", parseCheck('{"v":1}'), null);
   c2.close();
 }
 
-// ## 9. Completions (`wiz_playground_names` + `textDocument/completion`)
+// ## 9. Completion, hover and definition (`textDocument/*` from the declaration index)
 
-// The stub of the export: four names, the shape `{"v":1,"names":[{label,kind,detail?}]}`.
-const NAMES = JSON.stringify({ v: 1, names: [
-  { label: "twice", kind: 3, detail: "(x0 : Nat) → Nat" },
-  { label: "Nat.add", kind: 3 },
-  { label: "natPred", kind: 6 },
-  { label: "n", kind: 6 },
-] });
-const stubNames = () => NAMES;
+// The index of a module's declarations: `{s,e,kind:"decl",name,detail,ckind}` in the
+// checked source (the Prelude line included), as `wiz_playground_check` emits them.
+function declCheck(source, decls, extra = {}) {
+  // the client passes the checked source, so the added Prelude is already in it
+  const p = source.startsWith("import Prelude\n\n") ? "import Prelude\n\n".length : 0;
+  const index = decls.map((d) => ({
+    s: p + d.s, e: p + d.e, kind: "decl", name: d.name, detail: d.detail, ckind: d.kind,
+  }));
+  return stubCheck(source, Object.assign({ index }, extra));
+}
+
+const DECLS = [
+  { name: "twice", detail: "(n : Nat) → Nat", kind: 3, s: 4, e: 9 },
+  { name: "pred", detail: "Nat → Nat", kind: 3, s: 39, e: 43 },
+  { name: "MyType", detail: "Type", kind: 7, s: 75, e: 81 },
+];
+const DECL_TEXT = "def twice (n : Nat) : Nat := n + n\n" +
+  "def pred (n : Nat) : Nat := n\n" +
+  "inductive MyType where\n" +
+  "  | mk\n" +
+  "#eval twice";
+
+const declarations = [
+  { label: "twice", kind: 3, detail: "(n : Nat) → Nat", range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } } },
+  { label: "pred", kind: 3, detail: "Nat → Nat", range: { start: { line: 0, character: 39 }, end: { line: 0, character: 43 } } },
+  { label: "MyType", kind: 7, detail: "Type", range: { start: { line: 0, character: 75 }, end: { line: 0, character: 81 } } },
+];
 
 check("prefix: after an identifier", completionPrefix("x := tw", 7), { start: 5, prefix: "tw" });
 check("prefix: a dotted name", completionPrefix("Nat.ad", 6).prefix, "Nat.ad");
 check("prefix: after a space", completionPrefix("= ", 2), { start: 2, prefix: "" });
 check("prefix: at the start", completionPrefix("twice", 0).prefix, "");
-check("names: JSON", parseNames(NAMES).map((n) => n.label), ["twice", "Nat.add", "natPred", "n"]);
-check("names: a bare array", parseNames('[{"label":"a"}]'), [{ label: "a", kind: 6 }]);
-check("names: garbage", parseNames("{"), []);
-check("names: an old module's null", parseNames(null), []);
-check("filter: the prefix", filterCompletions(parseNames(NAMES), "tw").map((n) => n.label), ["twice"]);
-check("filter: case-insensitive", filterCompletions(parseNames(NAMES), "NAT").map((n) => n.label), ["Nat.add", "natPred"]);
-check("filter: dotted", filterCompletions(parseNames(NAMES), "Nat.").map((n) => n.label), ["Nat.add"]);
-check("filter: no match", filterCompletions(parseNames(NAMES), "zz"), []);
-check("filter: an empty prefix keeps the order", filterCompletions(parseNames(NAMES), "").map((n) => n.label),
-  ["twice", "Nat.add", "natPred", "n"]);
-check("filter: the detail survives", filterCompletions(parseNames(NAMES), "tw")[0].detail, "(x0 : Nat) → Nat");
-check("filter: a cap", filterCompletions(parseNames(NAMES), "", 2).length, 2);
+check("word: at a name", wordAt("def twice (n : Nat)", 6), { start: 4, end: 9, word: "twice" });
+check("word: just after it", wordAt("def twice (n : Nat)", 9).word, "twice");
+check("word: a dotted name", wordAt("Nat.add", 4).word, "Nat.add");
+check("word: on a space", wordAt("   ", 1).word, "");
+check("filter: the prefix", filterCompletions(declarations, "tw").map((n) => n.label), ["twice"]);
+check("filter: case-insensitive", filterCompletions(declarations, "MY").map((n) => n.label), ["MyType"]);
+check("filter: dotted", filterCompletions(declarations, "Nat.").map((n) => n.label), []);
+check("filter: no match", filterCompletions(declarations, "zz"), []);
+check("filter: an empty prefix keeps the order", filterCompletions(declarations, "").map((n) => n.label),
+  ["twice", "pred", "MyType"]);
+check("filter: the detail survives", filterCompletions(declarations, "tw")[0].detail, "(n : Nat) → Nat");
+check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
 {
-  // the handshake advertises completions, and the answer is filtered by the caret's prefix
+  // the handshake advertises all three, and the answers come from the index
   const c3 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (s) => stubCheck(s), names: stubNames,
+    evaluate: stubEval, check: (s) => declCheck(s, DECLS), names: () => { throw new Error("no names export"); },
   }) });
   await c3.connect();
-  checkThat("completion: advertised", (c3.capabilities.completionProvider || {}).triggerCharacters !== undefined,
-    JSON.stringify(c3.capabilities));
-  const doc = "def twice (n : Nat) : Nat := n + n\n#eval tw";
+  const caps = c3.capabilities || {};
+  checkThat("completion: advertised", (caps.completionProvider || {}).triggerCharacters !== undefined,
+    JSON.stringify(caps));
+  check("hover: advertised", caps.hoverProvider, true);
+  check("definition: advertised", caps.definitionProvider, true);
   const got = waitFor(c3, "diagnostics");
-  c3.openDocument(uri, doc);
+  c3.openDocument(uri, DECL_TEXT);
   await got;
-  const answer = await c3.completion(uri, { line: 1, character: 8 });
+
+  const answer = await c3.completion(uri, { line: 4, character: 8 });
   check("completion: isIncomplete", answer.isIncomplete, false);
   check("completion: the prefix", answer.items.map((i) => i.label), ["twice"]);
-  check("completion: the kind and detail", [answer.items[0].kind, answer.items[0].detail], [3, "(x0 : Nat) → Nat"]);
-  const empty = await c3.completion(uri, { line: 1, character: 6 });
+  check("completion: the kind and detail", [answer.items[0].kind, answer.items[0].detail], [3, "(n : Nat) → Nat"]);
+  check("completion: a textEdit over the prefix", answer.items[0].textEdit,
+    { range: { start: { line: 4, character: 6 }, end: { line: 4, character: 8 } }, newText: "twice" });
+  const empty = await c3.completion(uri, { line: 4, character: 6 });
   check("completion: an empty prefix lists them all", empty.items.map((i) => i.label),
-    ["twice", "Nat.add", "natPred", "n"]);
-  check("completion: none for an unknown prefix", (await c3.completion(uri, { line: 1, character: 8 })), answer);
-  // the names are asked once per document text, not once per request
-  let asked = 0;
-  const c4 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (s) => stubCheck(s), names: (s) => { asked++; return stubNames(s); },
-  }) });
-  await c4.connect();
-  const got4 = waitFor(c4, "diagnostics");
-  c4.openDocument(uri, doc);
-  await got4;
-  await c4.completion(uri, { line: 1, character: 7 });
-  await c4.completion(uri, { line: 1, character: 8 });
-  check("completion: names cached per text", asked, 1);
-  c4.close();
+    ["twice", "pred", "MyType"]);
+  check("completion: none for an unknown prefix", (await c3.completion(uri, { line: 4, character: 3 })).items, []);
+
+  check("hover: a declaration's signature", await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 10 } }), {
+    contents: { kind: "markdown", value: "```wiz\ntwice : (n : Nat) → Nat\n```" },
+    range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } },
+  });
+  check("hover: on the declaration itself", (await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 6 } })).contents.value,
+    "```wiz\ntwice : (n : Nat) → Nat\n```");
+  check("hover: an unknown name is null", await c3.request("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 4 } }), null);
+  check("definition: the declaration's Location", await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 4, character: 10 } }), {
+    uri, range: { start: { line: 0, character: 4 }, end: { line: 0, character: 9 } },
+  });
+  check("definition: another declaration's Location", (await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 1, character: 6 } })).range,
+    { start: { line: 1, character: 4 }, end: { line: 1, character: 8 } });
+  check("definition: an unknown name is null", await c3.request("textDocument/definition", { textDocument: { uri }, position: { line: 4, character: 4 } }), null);
   c3.close();
 }
 {
-  // a module without the export: an empty list, never an error
-  const server = new SelfhostServer({ evaluate: stubEval, names: undefined });
-  check("completion: no names export is an empty list",
+  // a constructor is used after a dot; the index has its full name
+  const text = "inductive Box where\n  | mk\ndef b : Box := Box.mk\n";
+  const decls = [
+    { name: "Box", detail: "Type", kind: 7, s: 10, e: 13 },
+    { name: "Box.mk", detail: "Box", kind: 3, s: 24, e: 26 },
+  ];
+  const c4 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
+    evaluate: stubEval, check: (s) => declCheck(s, decls),
+  }) });
+  await c4.connect();
+  const got4 = waitFor(c4, "diagnostics");
+  c4.openDocument(uri, text);
+  await got4;
+  check("definition: a constructor's suffix", (await c4.request("textDocument/definition", { textDocument: { uri }, position: { line: 2, character: 20 } })).range,
+    { start: { line: 1, character: 4 }, end: { line: 1, character: 6 } });
+  check("completion: a constructor's full name", (await c4.completion(uri, { line: 2, character: 21 })).items.map((i) => i.label),
+    ["Box.mk"]);
+  c4.close();
+}
+{
+  // a module without the export: empty lists and nulls, never an error
+  const server = new SelfhostServer({ evaluate: stubEval });
+  check("completion: no check is an empty list",
     (await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'))[0].result
       .capabilities.completionProvider !== undefined, true);
   await server.handle(JSON.stringify({ jsonrpc: "2.0", method: "textDocument/didOpen",
     params: { textDocument: { uri: "u", version: 1, text: "def a : Nat := 1\n" } } }));
   const out = await server.handle('{"jsonrpc":"2.0","id":2,"method":"textDocument/completion",' +
     '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
-  check("completion: no export, no items", [out[0].result.isIncomplete, out[0].result.items], [false, []]);
+  check("completion: no index, no items", [out[0].result.isIncomplete, out[0].result.items], [false, []]);
+  const hov = await server.handle('{"jsonrpc":"2.0","id":3,"method":"textDocument/hover",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("hover: no index is null", hov[0].result, null);
+  const def = await server.handle('{"jsonrpc":"2.0","id":4,"method":"textDocument/definition",' +
+    '"params":{"textDocument":{"uri":"u"},"position":{"line":0,"character":4}}}');
+  check("definition: no index is null", def[0].result, null);
   // before the handshake an unknown method is still refused, and an unopened document is
   // an invalid parameter (not a crash)
   const fresh = new SelfhostServer({ evaluate: stubEval });
-  const unknown = await fresh.handle('{"jsonrpc":"2.0","id":3,"method":"wiz/frobnicate","params":{}}');
+  const unknown = await fresh.handle('{"jsonrpc":"2.0","id":5,"method":"wiz/frobnicate","params":{}}');
   check("before initialize: an unknown method", unknown[0].error.code, -32601);
-  const closed = await fresh.handle('{"jsonrpc":"2.0","id":4,"method":"textDocument/completion",' +
+  const closed = await fresh.handle('{"jsonrpc":"2.0","id":6,"method":"textDocument/completion",' +
     '"params":{"textDocument":{"uri":"nope"},"position":{"line":0,"character":0}}}');
   check("before initialize: an unopened document", closed[0].error.code, -32602);
 }
 {
   // the page: Ctrl-Space opens the list in the panel, Tab inserts over the prefix
-  const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval tw");
+  const editor = fakeEditor(DECL_TEXT);
   editor.selectionStart = editor.selectionEnd = editor.value.length;
   const wire = fakePanel();
-  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval, names: stubNames }),
-    uri: "file:///complete.wiz" });
+  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({
+    evaluate: stubEval, check: (s) => declCheck(s, DECLS),
+  }), uri: "file:///complete.wiz" });
   checkThat("completion: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
   let prevented = 0;
   for (const fn of editor.listeners.keydown || []) fn({ key: " ", ctrlKey: true, preventDefault: () => prevented++ });

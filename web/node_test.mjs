@@ -1,6 +1,8 @@
-// The web infoview's Wasm module under Node, with a language server as a child process
-// in place of the WebSocket: web/infoview.js's three hooks, nothing else. Prints the
-// HTML Wiz sets, after opening a document, moving the cursor and clicking subterm 3.
+// The web module's Wiz half under Node, with a language server as a child process in
+// place of the WebSocket: web/Web.wiz's `wiz_web_*` hooks, nothing else (the browser
+// page itself is JavaScript now: web/infoview.js on top of web/playground-lsp.js, and
+// web/chrome_test.mjs drives it). Prints the HTML Wiz sets, after opening a document,
+// moving the cursor and clicking subterm 3.
 //   usage: node web/node_test.mjs OUT_DIR SERVER_CMD...
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";

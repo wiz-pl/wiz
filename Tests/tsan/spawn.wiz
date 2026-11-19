@@ -1,0 +1,31 @@
+import IO
+import Sys
+import Session
+
+-- Four threads spawn processes at the same time: the runtime's one-shot
+-- `signal(SIGPIPE, SIG_IGN)` (wiz_sys_spawn_in) must be done once, not raced on, which
+-- is what ThreadSanitizer checks in tests/tsan-conc.sh (docs/stages/25-concurrency.md,
+-- 25a).
+def spawnOne : EIO Unit := do
+  st ← Process.run "true" .nil;
+  EIO.pure ()
+
+def worker (done : MVar Nat) : Nat → IO Unit
+  | .zero => MVar.put done 1
+  | .succ n => IO.bind (EIO.toIO spawnOne) (fun _ => worker done n)
+
+def spawnN (done : MVar Nat) : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ k => Chan.fork Proto.done
+      (fun c => Chan.close c (worker done 5))
+      (fun c => Chan.close c (spawnN done k))
+
+def waitN (done : MVar Nat) : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ k => IO.bind (MVar.take done) (fun _ => waitN done k)
+
+def main : IO Unit := do1
+  done ← MVar.new (A := Nat);
+  spawnN done 4;
+  waitN done 4;
+  IO.println "spawned 20"

@@ -146,9 +146,9 @@ def runLeanC (program : String) : IO Got := do
   match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 180) with
   | .ok out => pure (.ok (digitRuns out))
   | .error e =>
-    match noC e with
-    | some why => pure (.skipped why)
-    | none => pure (.failed ("lean-c: " ++ e))
+    -- a missing compiler/GMP is a skip; a program that ran and failed is a failed cell
+    if e.isToolchain then pure (.skipped "no C toolchain")
+    else pure (.failed ("lean-c: " ++ e.message))
 
 /-- Wiz frontend (`selfhost/`) → C, compiled with the self-hosted runtime. -/
 def runWizC (program : String) : IO Got := do
@@ -216,6 +216,9 @@ def compare (pipeline : String) (cells : Array SCell) (got : Got) : IO (Except S
 
 /-- Run one pipeline over its cells, compare, and print the coverage note. -/
 def case (name pipeline : String) (cells : Array SCell) (run : Array SCell → IO Got) : IO Unit := do
+  -- (an empty selection compares 0 values with 0 cells and always passes: a pipeline
+  -- must compare at least one cell, as the Wiz→C case already requires)
+  check (!cells.isEmpty) s!"{pipeline}: no cells selected"
   let got ← run cells
   match ← compare pipeline cells got with
   | .ok _ => pure ()
@@ -297,6 +300,7 @@ def semanticsGroup : Group where
     { name := "Float64 values (Lean → C)", run := fun _ => do
         let cells ← readCells
         let cs := floatCells cells
+        check (!cs.isEmpty) "Float64: no cells selected"
         let program := floatProgram cs
         let errs ← frontendErrors program
         unless errs.isEmpty do throw (IO.userError s!"rejected:\n{"\n".intercalate errs}")
@@ -304,9 +308,8 @@ def semanticsGroup : Group where
         let dir ← IO.FS.createTempDir
         match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 180) with
         | .error e =>
-          match noC e with
-          | some why => skip why
-          | none => throw (IO.userError e)
+          if e.isToolchain then skip "no toolchain"
+          else throw (IO.userError e.message)
         | .ok out =>
           let vals := (out.splitOn "\n").filter (fun l => !l.trimAscii.isEmpty)
           if vals.length != cs.size then
@@ -324,6 +327,7 @@ def semanticsGroup : Group where
     { name := "the kernel computes the width-8 words, Nat and Int", run := fun _ => do
         let cells ← readCells
         let cs := kernelCells cells
+        check (!cs.isEmpty) "kernel: no cells selected"
         let src := kernelSource cs ++ "def t : main = expected := refl main\n"
         let errs ← frontendErrors src
         unless errs.isEmpty do throw (IO.userError s!"rejected:\n{"\n".intercalate errs}")

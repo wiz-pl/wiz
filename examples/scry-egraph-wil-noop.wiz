@@ -1,0 +1,24 @@
+import Scry.EgraphWil
+-- The no-op case (`scry-egraph-wil-noop`): a function with only a copy has no constant
+-- fold and no identity rewrite. The first round changes nothing, so the loop reports a
+-- fixpoint after one round. `main` is the digest.
+
+def x : Wil.Var := Wil.var 0 Wil.i32
+def y : Wil.Var := Wil.var 1 Wil.i32
+
+def fn : Wil.Func :=
+  Wil.func "copy" [] [x, y]
+    [Wil.block [Wil.copy x y] (Wil.ret (.some x))]
+
+def b : Scry.WgBuild := Scry.wgBuildProgram (Wil.program [fn])
+def s : Scry.WgStats := Scry.wgSaturate 8 b.g []
+
+def bit (x : Bool) : Nat := if x then 1 else 0
+
+def main : Nat :=
+  Scry.EGraph.numClasses s.g * 10000
+  + Scry.EGraph.numNodes s.g * 100
+  + s.folds * 10
+  + s.rewrites
+  + bit (String.eq s.stop "fixpoint") * 100000
+  + bit (Nat.beq s.rounds 1) * 1000000

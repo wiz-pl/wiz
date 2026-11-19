@@ -18,6 +18,7 @@ def tickSrc (release : Bool) : String :=
 def callbacksGroup : Group where
   name := "callbacks"
   exercise := "Stage 9g"
+  parallel := true
   cases := [
     { name := "qsort with a Wiz comparator (a closure, borrowed for the call)", run := fun _ =>
         ioRunC ("import IO\nextern \"sort_some\" sortSome : (Nat → Nat → Bool) → String\n" ++

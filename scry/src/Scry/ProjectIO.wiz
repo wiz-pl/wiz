@@ -58,8 +58,9 @@ def Scry.ProjectIO.parentDir (p : String) : String :=
 
 
 /-- Values of the include-directory flags in front of a compile command, resolved
-relative to its working directory. `-I dir`/`-Idir`, `-isystem`, `-iquote`,
-`-idirafter`, `-isysroot` and `--sysroot` are recognised. -/
+relative to its working directory. `-I dir`/`-Idir`, `-isystem`, `-iquote` and
+`-idirafter` are recognised (the only path flags the compile-database allowlist lets
+through). -/
 partial def Scry.ProjectIO.includeDirsGo (base : String) : List String → List String
   | .nil => .nil
   | .cons a rest =>
@@ -72,8 +73,6 @@ partial def Scry.ProjectIO.includeDirsGo (base : String) : List String → List 
     | "-isystem" => takeNext
     | "-iquote" => takeNext
     | "-idirafter" => takeNext
-    | "-isysroot" => takeNext
-    | "--sysroot" => takeNext
     | _ => match Bool.and (String.startsWith a "-I") (Nat.lt 2 (String.length a)) with
       | .true => List.cons (Scry.ProjectIO.resolvePath base (String.drop 2 a))
           (Scry.ProjectIO.includeDirsGo base rest)
@@ -298,27 +297,35 @@ def Scry.ProjectIO.normaliseCmd (compdbDir : String) (c : Scry.CompileCommand) :
   Scry.CompileCommand.mk dir c.file c.flags
 
 /-- The compile commands of a project: a compile database, or every `*.c` under `dir`
-with the command-line flags. -/
+with the command-line flags. The command-line flags are checked with the same allowlist as
+a database entry (the CLI only accepts `-I`/`-D`/`-U`/`-include`, so this is a guard for
+callers of the library). -/
 partial def Scry.ProjectIO.discover (dir : String) (compdb : Option String)
     (flags : List String) : EIO (List Scry.CompileCommand) :=
   match compdb with
   | .some f => do
     text ← FS.readFile f;
+    extra ← match Scry.parseCompdbFlags "" flags with
+      | .error e => EIO.fail e
+      | .ok ok => EIO.pure ok;
     match Scry.parseCompdb text with
     | .error e => EIO.fail e
     | .ok cmds => EIO.pure (List.map (fun c =>
         let c2 := Scry.ProjectIO.normaliseCmd (Scry.ProjectIO.parentDir f) c;
-        Scry.CompileCommand.mk c2.directory c2.file (List.append c2.flags flags)) cmds)
+        Scry.CompileCommand.mk c2.directory c2.file (List.append c2.flags extra)) cmds)
   | .none => do
     let p := Path.join dir "compile_commands.json";
     there ← EIO.lift (FS.exists p);
     match there with
     | .true => Scry.ProjectIO.discover dir (.some p) flags
     | .false => do
+      extra ← match Scry.parseCompdbFlags "" flags with
+        | .error e => EIO.fail e
+        | .ok ok => EIO.pure ok;
       files ← Scry.ProjectIO.walkGo dir;
       let files := Scry.sortStrings files;
       EIO.pure (List.map (fun file =>
-        Scry.CompileCommand.mk "" file flags) files)
+        Scry.CompileCommand.mk "" file extra) files)
 
 /-- Drop a trailing slash from a project root (SARIF URI bases are concatenated). -/
 def Scry.ProjectIO.trimRoot (p : String) : String :=

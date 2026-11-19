@@ -551,58 +551,108 @@ def builtinDerivers : StrMap (Option String) :=
     (Str.ofString "Repr") (.some "deriveRepr"))
     (Str.ofString "DecidableEq") (.some "deriveDecidableEq"))
     (Str.ofString "Compare") (.some "deriveCompare")
--- (playground LSP, stage 2) one entry of the check's position index: a syntax node's span
--- (code-point offsets into the checked text), what kind of answer it is (`term` = the
--- expected type, `goal` = the tactic state before a step), and the printed answer
-inductive Info where
-  | mk (start stop : Nat) (kind : String) (text : String)
+-- (D8 goals) what the language server keeps from a check: a body's expected type (a
+-- `term`), or the goals after a tactic (a `goal`). Both are character offsets into the
+-- document's text; the driver (`selfhost/Cli.wiz`) answers the infoview's plain queries
+-- from them. An entry is recorded only while `LspCtx.on`, so `check` does not build it.
+-- (playground LSP, stage 2) The in-page server also reads them: `watch` records a
+-- checked node's expected type (`term`), the state before a tactic (`goal`), and each
+-- declaration (`decl`, with its name, printed type and source span), for the page's
+-- completion, hover and definition.
+inductive LspEntry where
+  | term (start stop : Nat) (goal : String)
+  | goal (start stop : Nat) (goals : List String)
+  | decl (start stop : Nat) (name ty : String) (kind : Nat)
+
+structure LspSpan where
+  start : Nat
+  stop : Nat
+
+inductive LspCtx where
+  | mk (on : Bool) (watch : Bool) (src : Array Nat) (cmdStart : Nat) (cmdStop : Nat) (entries : List LspEntry)
+def LspCtx.on : LspCtx → Bool
+  | .mk o _ _ _ _ _ => o
+def LspCtx.watch : LspCtx → Bool
+  | .mk _ w _ _ _ _ => w
+def LspCtx.src : LspCtx → Array Nat
+  | .mk _ _ s _ _ _ => s
+def LspCtx.cmdStart : LspCtx → Nat
+  | .mk _ _ _ c _ _ => c
+def LspCtx.cmdStop : LspCtx → Nat
+  | .mk _ _ _ _ c _ => c
+def LspCtx.entries : LspCtx → List LspEntry
+  | .mk _ _ _ _ _ e => e
+
+def LspCtx.empty : LspCtx := .mk .false .false Array.empty 0 0 .nil
 
 -- the globals so far: by position (the first is `0`), their names in scope, the
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
--- reads them, since the frontend is pure), the derivers by class, and (playground LSP,
--- stage 2) the position index entries so far, with `watch` on only while the playground
--- asks for them (so the compiler path pays a Bool check, not a span walk per command)
+-- reads them, since the frontend is pure), the derivers by class, (C15) whether
+-- `--trust-smt` was given (it selects the `smt` refusal), and (D8 goals) the language
+-- server's collection state
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String)) (infos : List Info) (watch : Bool)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .nil .false
+       (priv : Bool) (ders : StrMap (Option String)) (smtTrust : Bool) (lsp : LspCtx)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .false LspCtx.empty
 def Globals.scope : Globals → Scope
   | .mk _ sc _ _ _ _ _ _ _ _ _ => sc
--- (playground LSP, stage 2) whether to record spans and expected types at all
-def Globals.watch : Globals → Bool
-  | .mk _ _ _ _ _ _ _ _ _ _ w => w
-def Globals.watching (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf _ => .mk all sc inds ffi cls ins hs p d inf .true
-def Globals.setWatch (gs : Globals) (w : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf _ => .mk all sc inds ffi cls ins hs p d inf w
-def Globals.infos : Globals → List Info
-  | .mk _ _ _ _ _ _ _ _ _ inf _ => inf
-def Globals.addInfos (gs : Globals) (is : List Info) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds ffi cls ins hs p d (List.append is inf) w
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d t l
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d inf w => .mk all sc inds ffi cls ins hs p d inf w
+  | .mk all sc inds ffi cls ins hs _ d t l => .mk all sc inds ffi cls ins hs p d t l
+-- (playground LSP, stage 2) whether to record spans and expected types at all: the
+-- page's check turns it on, the compiler and the external server leave it off
+def Globals.watch (gs : Globals) : Bool := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.watch l
+def Globals.watching (gs : Globals) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l =>
+    .mk all sc inds ffi cls ins hs p d t (.mk (LspCtx.on l) .true (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+def Globals.setWatch (gs : Globals) (w : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l =>
+    .mk all sc inds ffi cls ins hs p d t (.mk (LspCtx.on l) w (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+-- (D8 goals) what the collection sees: the command's source range, and the entries so far
+def Globals.lspOn (gs : Globals) : Bool := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.on l
+def Globals.lspSrc (gs : Globals) : Array Nat := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.src l
+def Globals.lspStart (gs : Globals) : Nat := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStart l
+def Globals.lspStop (gs : Globals) : Nat := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStop l
+def Globals.lspEntries : Globals → List LspEntry
+  | .mk _ _ _ _ _ _ _ _ _ _ l => LspCtx.entries l
+def Globals.setCmd (gs : Globals) (src : Array Nat) (start stop : Nat) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l =>
+    .mk all sc inds ffi cls ins hs p d t (.mk (LspCtx.on l) (LspCtx.watch l) src start stop (LspCtx.entries l))
+def Globals.addLsp (gs : Globals) (e : LspEntry) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l => match Bool.or (LspCtx.on l) (LspCtx.watch l) with
+    | .true => .mk all sc inds ffi cls ins hs p d t (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (.cons e (LspCtx.entries l)))
+    | .false => gs
+def Globals.withLsp (gs : Globals) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi cls ins hs p d t (.mk .true (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+-- (a module's commands start a new document's entries; `modRunBody` resets it per module)
+def Globals.lspReset (gs : Globals) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi cls ins hs p d t (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) 0 0 .nil)
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
   | .mk _ sc _ _ _ _ _ p _ _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => match g with
+  | .mk all sc inds ffi cls ins hs p d t l => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d inf w
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d t l
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w =>
+  | .mk all sc inds ffi cls ins hs p d t l =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d inf w
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d t l
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
   | .mk _ sc inds _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
@@ -611,11 +661,11 @@ def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
 def Globals.ffi : Globals → List Foreign
   | .mk _ _ _ ffi _ _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds (.cons f ffi) cls ins hs p d inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds (.cons f ffi) cls ins hs p d t l
 def Globals.headers : Globals → List Header
   | .mk _ _ _ _ _ _ hs _ _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d t l
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -624,33 +674,39 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d inf w => .mk all sc inds ffi cls ins hs p d inf w
+  | .mk all sc inds ffi cls ins _ p d t l => .mk all sc inds ffi cls ins hs p d t l
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
   | .mk _ _ _ _ cls _ _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d t l
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
   | .mk _ _ _ _ _ _ _ _ ders _ _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) t l
+-- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
+-- frontend can parse and refuse but not run; the flag says which refusal to give
+def Globals.smtTrust : Globals → Bool
+  | .mk _ _ _ _ _ _ _ _ _ t _ => t
+def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d _ l => .mk all sc inds ffi cls ins hs p d t l
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
   | .mk _ _ _ _ _ ins _ _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => .mk all sc inds ffi cls (.cons i ins) hs p d inf w
+  | .mk all sc inds ffi cls ins hs p d t l => .mk all sc inds ffi cls (.cons i ins) hs p d t l
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d inf w => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d t l => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d inf w
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d t l
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -1402,7 +1458,8 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
-          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c)))) .nil)) (i + 1) cs with
+          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c))))
+          (List.append ps (fieldNames (ctorFields c))))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with
@@ -1697,48 +1754,48 @@ inductive PInst where
 -- the elaborator's state: the term metavariables, the postponed arguments, the level
 -- metavariables (U1: their solution, `none` while unsolved), the current
 -- declaration's universe parameters (`._ {u}` on it), (A10) the class problems, and
--- (playground LSP, stage 2) the position index entries collected while elaborating
--- (`Info`; see `recordTerm` below)
+-- (D8 goals) the tactic snapshots collected while a `by` block runs
 inductive ES where
-  | mk (metas : Array MetaInfo) (pending : List Pend) (lmetas : Array (Option Lvl)) (lparams : List String) (insts : List PInst) (infos : List Info)
+  | mk (metas : Array MetaInfo) (pending : List Pend) (lmetas : Array (Option Lvl)) (lparams : List String) (insts : List PInst) (snaps : List LspEntry)
 def ES.empty : ES := .mk Array.empty .nil Array.empty .nil .nil .nil
 def ES.get (es : ES) (i : Nat) : MetaInfo := match es with
   | .mk ms _ _ _ _ _ => Array.getD ms i (.mk 0 .none .none)
-def ES.infos : ES → List Info
-  | .mk _ _ _ _ _ inf => inf
-def ES.addInfo (es : ES) (i : Info) : ES := match es with
-  | .mk ms ps ls lps ins inf => .mk ms ps ls lps ins (.cons i inf)
 -- an implicit type argument's sort constraint (see `MetaInfo`)
 def metaSconstr (es : ES) (i : Nat) : Option Lvl := match ES.get es i with
   | .mk _ _ sc => sc
 def ES.pend (es : ES) (p : Pend) : ES := match es with
-  | .mk ms ps ls lps ins inf => .mk ms (.cons p ps) ls lps ins inf
+  | .mk ms ps ls lps ins sn => .mk ms (.cons p ps) ls lps ins sn
 -- (A10) a new class problem
 def ES.pinst (es : ES) (p : PInst) : ES := match es with
-  | .mk ms ps ls lps ins inf => .mk ms ps ls lps (.cons p ins) inf
+  | .mk ms ps ls lps ins sn => .mk ms ps ls lps (.cons p ins) sn
 def ES.insts : ES → List PInst
   | .mk _ _ _ _ ins _ => ins
 def ES.noInst : ES → ES
-  | .mk ms ps ls lps _ inf => .mk ms ps ls lps .nil inf
+  | .mk ms ps ls lps _ sn => .mk ms ps ls lps .nil sn
+-- (D8 goals) the tactic snapshots a `by` block recorded
+def ES.snaps : ES → List LspEntry
+  | .mk _ _ _ _ _ sn => sn
+def ES.addSnap (es : ES) (e : LspEntry) : ES := match es with
+  | .mk ms ps ls lps ins sn => .mk ms ps ls lps ins (.cons e sn)
 -- a level metavariable's solution (`none` while unsolved)
 def ES.getLvl (es : ES) (i : Nat) : Option Lvl := match es with
   | .mk _ _ ls _ _ _ => Array.getD ls i .none
 def ES.setLvl (es : ES) (i : Nat) (l : Lvl) : ES := match es with
-  | .mk ms ps ls lps ins inf => .mk ms ps (Array.set ls i (.some l)) lps ins inf
+  | .mk ms ps ls lps ins sn => .mk ms ps (Array.set ls i (.some l)) lps ins sn
 -- solving a level metavariable (a later `zonk` puts its solution in)
 def ES.solveLvl (es : ES) (i : Nat) (l : Lvl) : ES := ES.setLvl es i l
 -- the universe parameters of the declaration being elaborated (`.{u, v}`)
 def ES.params (es : ES) : List String := match es with
   | .mk _ _ _ lps _ _ => lps
 def ES.withParams (es : ES) (ps : List String) : ES := match es with
-  | .mk ms pend ls _ ins inf => .mk ms pend ls ps ins inf
+  | .mk ms pend ls _ ins sn => .mk ms pend ls ps ins sn
 -- a fresh level metavariable
 inductive LvlR where
   | mk (l : Lvl) (es : ES)
 def newLvl (es : ES) : LvlR := match es with
-  | .mk ms ps ls lps ins inf =>
+  | .mk ms ps ls lps ins sn =>
     let id := Array.size ls;
-    .mk (.lmvar id) (.mk ms ps (Array.push ls .none) lps ins inf)
+    .mk (.lmvar id) (.mk ms ps (Array.push ls .none) lps ins sn)
 -- `n` fresh level metavariables
 inductive LvlsR where
   | mk (ls : List Lvl) (es : ES)
@@ -1831,11 +1888,11 @@ def teleOf : List (Unit → Tm) → Tms → Tms
 inductive MetaR where
   | mk (t : Tm) (es : ES)
 def newMetaS (es : ES) (cx : Cx) (A : Val) (sc : Option Lvl) : MetaR := match es with
-  | .mk ms ps ls lps ins inf =>
+  | .mk ms ps ls lps ins sn =>
     let d := Cx.lvl cx;
     let id := Array.size ms;
     let ty := piTele (teleOf (Cx.tele cx) .tnil) (quote d A);
-    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none sc)) ps ls lps ins inf)
+    .mk (tApps (.axiomC (metaName id) ty) (pvars d d)) (.mk (Array.push ms (.mk d .none sc)) ps ls lps ins sn)
 def newMeta (es : ES) (cx : Cx) (A : Val) : MetaR := newMetaS es cx A .none
 
 -- a spine's arguments, first first (`none` if it isn't only applications)
@@ -1983,11 +2040,11 @@ partial def pruneTm (k d : Nat) (es : ES) (t : Tm) : Pruned := match spineHead t
           | .some A => match lowerTm (kj - k) 0 A with
             | .some Ak => match piPrefix k ty Ak with
               | .some nty => match es with
-                | .mk ms ps ls lps ins inf =>
+                | .mk ms ps ls lps ins sn =>
                   let id := Array.size ms;
                   let fresh : Tm := .axiomC (metaName id) nty;
                   let ms1 := Array.push ms (.mk k .none .none);
-                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))) sc)) ps ls lps ins inf)
+                  .mk (.mk (Array.set ms1 j (.mk kj (.some (tApps fresh (pvars k kj))) sc)) ps ls lps ins sn)
                     (appsL fresh (takeL k (spineArgsTm t .nil)))
               | .none => .mk es t
             | .none => .mk es t
@@ -2025,9 +2082,9 @@ def solveTm (es0 : ES) (cx : Cx) (i k : Nat) (tm0 : Tm) (tv : Unit → Val) : Op
       | .true => Option.some tm
       | .false => lowerTm (d - k) 0 tm) with
     | .some sol => match es with
-      | .mk ms ps ls lps ins inf =>
+      | .mk ms ps ls lps ins sn =>
         let sc := metaSconstr es i;
-        let es1 : ES := .mk (Array.set ms i (.mk k (.some sol) sc)) ps ls lps ins inf;
+        let es1 : ES := .mk (Array.set ms i (.mk k (.some sol) sc)) ps ls lps ins sn;
         -- (an implicit type argument's sort: the solution must be in it, which solves
         -- the universe level it mentions)
         match sc with
@@ -2317,6 +2374,9 @@ inductive STacOp where
 inductive STac where
   | done
   | fail (msg : String)
+  -- (C15) a refusal that is not about the goal state: the host's `smt` error is an
+  -- elaboration error, not a tactic failure, so no goals are listed after it
+  | abort (msg : String)
   | op (o : STacOp)
   | eval (stx : Syntax)
   | seq (a b : STac)
@@ -2450,6 +2510,18 @@ def tacGoalsShow (es : ES) (st : STacState) : String :=
 def unsolvedGoals (es : ES) (st : STacState) : String :=
   String.append "unsolved goals:\n" (tacGoalsShow es st)
 
+-- (D8 goals) the open goals as the infoview's `goals` array (the strings `unsolved
+-- goals` prints, in order: one per open goal)
+def tacGoalsListGo (es : ES) (st : STacState) : List Nat → List String
+  | .nil => .nil
+  | .cons g rest => match nthGoal (STacState.goals st) g with
+    | .none => tacGoalsListGo es st rest
+    | .some gl => match goalIsOpen es gl with
+      | .false => tacGoalsListGo es st rest
+      | .true => .cons (tacGoalShow es gl) (tacGoalsListGo es st rest)
+def tacGoalsList (es : ES) (st : STacState) : List String :=
+  tacGoalsListGo es st (STacState.open st)
+
 -- the monad is the command tree (`Unit`-valued: a tactic script is a sequence of
 -- requests). `seq` is `bind`, `fail` is `STac.fail`, and `try`/`first` are the
 -- backtracking constructors (their failed branch's state changes are dropped).
@@ -2532,10 +2604,25 @@ def optionalTerm (s : Syntax) : Option Syntax := match strEq (kindOf s) "null" w
     | .cons t _ => .some t
   | .false => .some s
 
+-- (C15) `smt` (stage 28a) is a library tactic: `lib/Prelude.wiz` declares the syntax and
+-- `Tactic.smt` sends the request `Tac.smt`. This frontend has no SMT translation, solver
+-- or answer cache, so it refuses. Without `--trust-smt` the host refuses at the same
+-- point with this message; with the flag it would ask the solver and add an axiom (out
+-- of reach here, so the message says what is missing). `sat_decide` (28b) is not even
+-- syntax here: it comes from `lib/SatTactic.wiz` and needs `Tac.satSolve`.
+def smtRefusal : String := "SMT solving is not enabled: `smt` closes a goal on an SMT solver's word, which the kernel does not check; run with --trust-smt to allow it"
+def smtUnsupported : String := "smt: the self-hosted toolchain has no SMT translation or solver (C15); --trust-smt cannot close a goal here"
+def smtRefusalFor (gs : Globals) : String := match Globals.smtTrust gs with
+  | .true => smtUnsupported
+  | .false => smtRefusal
 -- one tactic of a script, as a request
 mutual
-def tacOfStx (stx : Syntax) : STac :=
+def tacOfStx (gs : Globals) (stx : Syntax) : STac :=
   let k := kindOf stx;
+  match strEq k "tactic.smt" with
+  | .true => STac.abort (smtRefusalFor gs)
+  | .false => tacOfStxCore k stx
+def tacOfStxCore (k : String) (stx : Syntax) : STac :=
   match strEq k "tactic.intro" with
   | .true => match identNameOf (kid stx 1) with
     | .some x => STacticM.op (STacOp.intro x)
@@ -2594,9 +2681,12 @@ def tacticSeq (xs : List Syntax) : STac := match xs with
 end
 
 -- what an interpreter step answered: the state and the elaborator state, or a failure
+-- (`err`: a tactic failure, which lists the remaining goals; `abort`: a refusal that is
+-- the host's elaboration error, printed alone)
 inductive STacR where
   | ok (st : STacState) (es : ES)
   | err (msg : String)
+  | abort (msg : String)
 -- the endpoints of a `calc` step's equation
 inductive CalcEnd where
   | mk (A a b : Tm)
@@ -2690,6 +2780,8 @@ partial def goalIntros (es : ES) (st : STacState) (g : Nat) (fuel : Nat) : STacR
       | .vpi _ _ _ _ _ _ => match goalIntroFresh es st g with
         | .ok st' es' => goalIntros es' st' g k
         | .err m => .err m
+        -- (`goalIntroFresh` never aborts; the case is here because `STacR` is total)
+        | .abort m => .abort m
       | _ => .ok st es
 partial def goalApply (es : ES) (st : STacState) (g : Nat) (f : Tm) (ty : Val) (fuel : Nat)
     (acc : List Nat) : STacR :=
@@ -2712,6 +2804,7 @@ partial def goalApply (es : ES) (st : STacState) (g : Nat) (f : Tm) (ty : Val) (
         | .some es' => match assignInto es' st g f with
           | .ok st' es'' => .ok (STacState.mk (STacState.goals st') (openReplace g acc (STacState.open st)) (STacState.unchecked st')) es''
           | .err m => .err m
+          | .abort m => .abort m
 def checkUncheckedGo : List SUnchecked → ES → Option String
   | .nil, _ => .none
   | .cons (.mk gl t) rest, es =>
@@ -3002,10 +3095,11 @@ def scopeNames : Scope → List String
 -- `sp` is the node's span from the parser's side table; `none` (spans off, or a node the
 -- parser did not build — a macro expansion, a rewrite) records nothing. The text is the
 -- type as the kernel prints it in the node's own context, which is what `plainTermGoal`
--- shows; entries are kept in `ES` and end up in `Globals.infos` when the command succeeds.
+-- shows; entries are kept in `ES` and end up in the language server's entries when the
+-- command succeeds.
 def recordTerm (es : ES) (sp : Option SpT) (cx : Cx) (ty : Val) : ES := match sp with
   | .none => es
-  | .some t => ES.addInfo es (.mk (SpT.start t) (SpT.stop t) "term"
+  | .some t => ES.addSnap es (.term (SpT.start t) (SpT.stop t)
       (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) ty)))
 -- the spans of the arguments of a node's `i`th child (the `null` of an application, say),
 -- one per argument; empty when the node has no span
@@ -3923,9 +4017,9 @@ def resolveOne (gs : Globals) (es : ES) (p : PInst) : InstRes := match p with
             | .no => .err (missingMsg p)
 -- all the problems, each after the ones it creates (the step budget catches cycles)
 partial def resolveAll (gs : Globals) (es : ES) (fuel : Nat) : InstRes := match es with
-  | .mk ms ps ls lps (.cons p rest) inf => match fuel with
+  | .mk ms ps ls lps (.cons p rest) sn => match fuel with
     | .zero => .err (String.append "instance search did not finish in 100 steps (a cyclic instance?): " (goalShow p))
-    | .succ f => match resolveOne gs (.mk ms ps ls lps rest inf) p with
+    | .succ f => match resolveOne gs (.mk ms ps ls lps rest sn) p with
       | .err m => .err m
       | .ok es' => resolveAll gs es' f
   | _ => .ok es
@@ -4310,6 +4404,7 @@ def tryCtors (gs : Globals) (es : ES) (st : STacState) (g : Nat) (cx : Cx) : Lis
     | .ok f ty es1 => match goalApply es1 st g f ty 64 .nil with
       | .ok st' es' => .ok st' es'
       | .err _ => tryCtors gs es st g cx rest
+      | .abort m => .abort m
 def runOpConstructor (gs : Globals) (es : ES) (st : STacState) (g : Nat) : STacR :=
   match STacState.getGoal st g with
   | .none => tacGoalError
@@ -4355,43 +4450,155 @@ def runRepeat (gs : Globals) (es : ES) (st : STacState) (body : STac) : Nat → 
   | .zero => .ok st es
   | .succ k => match runTac gs es st body with
     | .ok st' es' => runRepeat gs es' st' body k
+    -- (the host's `repeat` is `TacticM.tryCatch`, and `Tac.catch` catches any error,
+    -- the `smt` refusal included)
     | .err _ => .ok st es
+    | .abort _ => .ok st es
 def runTac (gs : Globals) (es : ES) (st : STacState) (t : STac) : STacR := match t with
   | .done => .ok st es
   | .fail m => .err m
+  | .abort m => .abort m
   | .op o => runOp gs es st o
   | .eval stx => evalTacticStx gs es st stx
   | .seq a b => match runTac gs es st a with
     | .ok st' es' => runTac gs es' st' b
     | .err m => .err m
+    | .abort m => .abort m
   | .tryTac body => match runTac gs es st body with
     | .ok st' es' => .ok st' es'
     | .err _ => .ok st es
+    | .abort _ => .ok st es
   | .firstTac a b => match runTac gs es st a with
     | .ok st' es' => .ok st' es'
     | .err _ => runTac gs es st b
+    | .abort _ => runTac gs es st b
   | .repeatTac body => runRepeat gs es st body 64
 
 def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) : STacR :=
   match stx with
   | .atom _ => .ok st es
-  | _ => runTac gs es st (tacOfStx stx)
+  | _ => runTac gs es st (tacOfStx gs stx)
 
--- (playground LSP, stage 3) the tactic state before a step, keyed by the step's span: the
--- answer `wiz/plainGoal` gives while the caret is in that step. `sp` is `.none` everywhere
--- except the playground's check, so the recorder costs a match.
+-- (D8 goals) the first token a tactic step is written with, for finding its offset in
+-- the command's source text (the parser keeps no positions in `Syntax`)
+def tacticHead (stx : Syntax) : Option String :=
+  let k := kindOf stx;
+  match strEq k "tactic.intro" with
+  | .true => .some "intro"
+  | .false => match strEq k "tactic.intros" with
+    | .true => .some "intros"
+    | .false => match strEq k "tactic.exact" with
+      | .true => .some "exact"
+      | .false => match strEq k "tactic.apply" with
+        | .true => .some "apply"
+        | .false => match strEq k "tactic.assumption" with
+          | .true => .some "assumption"
+          | .false => match strEq k "tactic.rfl" with
+            | .true => .some "rfl"
+            | .false => match strEq k "tactic.change" with
+              | .true => .some "change"
+              | .false => match strEq k "tactic.unfold" with
+                | .true => .some "unfold"
+                | .false => match strEq k "tactic.constructor" with
+                  | .true => .some "constructor"
+                  | .false => match Bool.or (strEq k "tactic.rw") (strEq k "tactic.rwBack") with
+                    | .true => .some "rw"
+                    | .false => match strEq k "tactic.calc" with
+                      | .true => .some "calc"
+                      | .false => match strEq k "tactic.have" with
+                        | .true => .some "have"
+                        | .false => match strEq k "tactic.suffices" with
+                          | .true => .some "suffices"
+                          | .false => match strEq k "tactic.obtain" with
+                            | .true => .some "obtain"
+                            | .false => match strEq k "tactic.try" with
+                              | .true => .some "try"
+                              | .false => match strEq k "tactic.first" with
+                                | .true => .some "first"
+                                | .false => match strEq k "tactic.repeat" with
+                                  | .true => .some "repeat"
+                                  | .false => match strEq k "tactic.paren" with
+                                    | .true => .some "("
+                                    | .false => .none
+
+-- the end of a string literal whose opening quote is at `i`
+partial def lspStrEnd (input : Array Nat) (i : Nat) : Nat :=
+  let c := at input (i + 1);
+  match Nat.beq c 0 with
+  | .true => i + 1
+  | .false => match Nat.beq c 34 with
+    | .true => i + 2
+    | .false => match Nat.beq c 92 with
+      | .true => lspStrEnd input (i + 3)
+      | .false => lspStrEnd input (i + 2)
+
+def lspCodes : List Char → List Nat
+  | .nil => .nil
+  | .cons c cs => .cons (Char.code c) (lspCodes cs)
+
+def lspMatchWord (input : Array Nat) (word : List Nat) (i : Nat) : Bool := match word with
+  | .nil => .true
+  | .cons c rest => match Nat.beq (at input i) c with
+    | .true => lspMatchWord input rest (i + 1)
+    | .false => .false
+
+-- `word` at `i`, ending at a token boundary (`exact` is not matched inside `exactly`)
+def lspWordAt (input : Array Nat) (word : List Char) (i : Nat) (len : Nat) : Bool :=
+  match lspMatchWord input (lspCodes word) i with
+  | .false => .false
+  | .true => match isIdRest (at input (i + len)) with
+    | .true => match isIdRest (at input i) with
+      | .true => .false
+      | .false => .true
+    | .false => .true
+
+-- the offset of `word` in `[i, stop)`, skipping comments (through `skipWs`) and strings
+partial def lspFindWordGo (input : Array Nat) (word : List Char) (len : Nat) (i stop : Nat) : Option Nat :=
+  let i := skipWs input i;
+  match Nat.lt i stop with
+  | .false => .none
+  | .true => match Nat.beq (at input i) 34 with
+    | .true => lspFindWordGo input word len (lspStrEnd input i) stop
+    | .false => match lspWordAt input word i len with
+      | .true => .some i
+      | .false => lspFindWordGo input word len (i + 1) stop
+def lspFindWord (input : Array Nat) (word : String) (i stop : Nat) : Option Nat :=
+  match word with
+  | .mk cs => lspFindWordGo input cs (List.length cs) i stop
+
+-- (playground LSP, stage 3) the tactic state before a step, keyed by the step's span:
+-- the answer `wiz/plainGoal` gives while the caret is in that step. `sp` is `.none`
+-- everywhere except the playground's check, so the recorder costs a match.
 def recordGoal (es : ES) (sp : Option SpT) (st : STacState) : ES := match sp with
   | .none => es
-  | .some t => ES.addInfo es (.mk (SpT.start t) (SpT.stop t) "goal" (tacGoalsShow es st))
+  | .some t => ES.addSnap es (.goal (SpT.start t) (SpT.stop t) (tacGoalsList es st))
 
-def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT)
+-- (D8 goals) at each top-level tactic boundary, record the state after the tactic,
+-- keyed by the tactic's first token. `last` is where the previous snapshot's search
+-- stopped; `check` never reaches these (the `lspOn` branch is false there). When the
+-- playground is watching, the state *before* the step is recorded too, keyed by the
+-- parser's span for the step (Lean's `plainGoal` semantics).
+def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT) (last : Nat)
     (steps : List Syntax) (sps : List (Option SpT)) : STacR := match steps with
   | .nil => .ok st (recordGoal es endSp st)
   | .cons t rest =>
+    let found : Option Nat := match Globals.lspOn gs with
+      | .false => .none
+      | .true => match tacticHead t with
+        | .some h => lspFindWord (Globals.lspSrc gs) h last (Globals.lspStop gs)
+        | .none => .none;
+    let at := match found with
+      | .some n => n
+      | .none => last;
     let esB := recordGoal es (spHead sps) st;
     match evalTacticStx gs esB st t with
-    | .ok st' es' => runTacticSteps gs es' st' endSp rest (spTail sps)
+    | .ok st' es' =>
+      let es'' := match Globals.lspOn gs with
+        | .true => ES.addSnap es' (.goal at (Globals.lspStop gs) (tacGoalsList es' st'))
+        | .false => es';
+      runTacticSteps gs es'' st' endSp (at + 1) rest (spTail sps)
     | .err m => .err (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st)))
+    | .abort m => .abort m
 
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by the tactic script, and
 checked by the kernel as an ordinary term. -/
@@ -4406,8 +4613,9 @@ def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) (s
     let endSp : Option SpT := match sp with
       | .some t => .some (.leaf (SpT.stop t) (SpT.stop t))
       | .none => .none;
-    match runTacticSteps gs es1 st0 endSp (tacticSteps stx) (tacticStepsSp sp stx) with
+    match runTacticSteps gs es1 st0 endSp (Globals.lspStart gs) (tacticSteps stx) (tacticStepsSp sp stx) with
     | .err msg => .err msg
+    | .abort msg => .err msg
     | .ok st es' => match goalListOpen es' st (STacState.open st) with
       | .cons _ _ => .err (unsolvedGoals es' st)
       | .nil => match checkUnchecked es' st with
@@ -4981,9 +5189,9 @@ def drainList (gs : Globals) : ES → Bool → List Pend → DR
         | .none => .err
       | .err _ => .err
 def drain (gs : Globals) (es : ES) : Option ES := match es with
-  | .mk ms ps ls lps ins inf => match ps with
+  | .mk ms ps ls lps ins sn => match ps with
     | .nil => .some es
-    | .cons _ _ => match drainList gs (.mk ms .nil ls lps ins inf) .false ps with
+    | .cons _ _ => match drainList gs (.mk ms .nil ls lps ins sn) .false ps with
       | .ok es' pr => match pr with
         | .true => drain gs es'
         | .false => .none
@@ -5604,6 +5812,150 @@ def peelCtx : Nat → TCtx → Val → Peeled
   | .succ k, c, v => match whnf v with
     | .vpi _ _ _ dom env cod => peelCtx k (TCtx.bind c dom) (eval (.cons (fresh (TCtx.lvl c)) env) cod)
     | v' => .mk c v'
+
+-- (D8 goals) a goal as `GoalView.show` prints it (`x : T` per hypothesis, then `⊢ T`),
+-- from a declaration's type peeled at its body: the diagnostics path already computes
+-- the type for a definition's line, and this is its body's expected-type view
+partial def goalShowHyps (names : List String) (types : List Val) (d : Nat) : Nat → Bool → String → String
+  | i, first, acc => match Nat.lt i d with
+    | .false => acc
+    | .true =>
+      let line := String.append (String.append (nthStr names i) " : ")
+        (show names d (match nthVal types (d - 1 - i) with
+          | .some v => quote d v
+          | .none => .star));
+      let acc' := match first with
+        | .true => line
+        | .false => String.append (String.append acc "\n") line;
+      goalShowHyps names types d (i + 1) .false acc'
+def goalShowCtx (names : List String) (c : TCtx) (target : Val) : String :=
+  let d := TCtx.lvl c;
+  let ctx := goalShowHyps names (envToList (TCtx.types c)) d 0 .true "";
+  let body := String.append "⊢ " (show names d (quote d target));
+  match strEq ctx "" with
+  | .true => body
+  | .false => String.append (String.append ctx "\n") body
+
+-- (D8 goals) the body's span: after the command's top-level `:=`, to the command's end
+partial def lspBodyStartGo (input : Array Nat) (i stop depth : Nat) : Option Nat :=
+  match Nat.lt i stop with
+  | .false => .none
+  | .true => match Nat.beq (at input i) 34 with
+    | .true => lspBodyStartGo input (lspStrEnd input i) stop depth
+    | .false => match Bool.and (Nat.beq (at input i) 45) (Nat.beq (at input (i + 1)) 45) with
+      | .true => lspBodyStartGo input (lineEnd input (i + 2)) stop depth
+      | .false => match Bool.and (Nat.beq (at input i) 47) (Nat.beq (at input (i + 1)) 45) with
+        | .true => lspBodyStartGo input (blockEnd input (i + 2) 1) stop depth
+        | .false => match Bool.and (Nat.beq depth 0) (Bool.and (Nat.beq (at input i) 58) (Nat.beq (at input (i + 1)) 61)) with
+          | .true => .some (skipWs input (i + 2))
+          | .false =>
+            let c := at input i;
+            let d' := match Bool.or (Nat.beq c 40) (Bool.or (Nat.beq c 91) (Nat.beq c 123)) with
+              | .true => depth + 1
+              | .false => match Bool.or (Nat.beq c 41) (Bool.or (Nat.beq c 93) (Nat.beq c 125)) with
+                | .true => match Nat.lt 0 depth with
+                  | .true => depth - 1
+                  | .false => 0
+                | .false => depth;
+            lspBodyStartGo input (i + 1) stop d'
+partial def lspTrimEnd (input : Array Nat) (start stop : Nat) : Nat :=
+  match Nat.lt start stop with
+  | .false => stop
+  | .true => match isSpace (at input (stop - 1)) with
+    | .true => lspTrimEnd input start (stop - 1)
+    | .false => stop
+def lspBodyRange (input : Array Nat) (cmdStart cmdStop : Nat) : Option LspSpan :=
+  match lspBodyStartGo input cmdStart cmdStop 0 with
+  | .some start => .some (LspSpan.mk start (lspTrimEnd input start cmdStop))
+  | .none => .none
+def lspAddSnaps : List LspEntry → Globals → Globals
+  | .nil, gs => gs
+  | .cons e rest, gs => lspAddSnaps rest (Globals.addLsp gs e)
+-- (D8 goals) what one checked `def` adds: the body's expected type, then the tactic
+-- snapshots its `by` block recorded (none for a term body)
+def lspAddCommand (gs : Globals) (stx : Syntax) (tyT : Tm) (es : ES) : Globals :=
+  match Globals.lspOn gs with
+  | .false => gs
+  | .true =>
+    let gs1 := match lspBodyRange (Globals.lspSrc gs) (Globals.lspStart gs) (Globals.lspStop gs) with
+      | .none => gs
+      | .some r =>
+        let names := fieldNames (fieldsOf (kids (kid stx 3)));
+        match peelCtx (List.length names) empty (eval .nil tyT) with
+        | .mk c rest => Globals.addLsp gs (.term r.start r.stop (goalShowCtx names c rest));
+    lspAddSnaps (ES.snaps es) gs1
+
+-- (playground LSP, completion/hover/definition) a new declaration's entry: its source
+-- name, the type as the kernel prints it, and its source span. `gs` is the state after
+-- the command, so `Globals.ind`/`Globals.class` classify a type (CompletionItemKind 7)
+-- before the type's shape classifies a function (3) or a plain value (6).
+def Global.name : Global → String
+  | .mk n _ _ _ _ _ _ => n
+def Global.ty : Global → Tm
+  | .mk _ _ ty _ _ _ _ => ty
+def declKind (gs : Globals) (n : String) (ty : Tm) : Nat :=
+  match Globals.ind gs n with
+  | .some _ => 7
+  | .none => match Globals.class gs n with
+    | .some _ => 7
+    | .none => match ty with
+      | .pi _ _ _ _ _ => 3
+      | _ => 6
+
+-- the last `.`-separated segment of a name (`T.mk` → `mk`): a constructor's source
+-- token is the segment, not the kernel name
+def baseNameGo : List Char → List Char → List Char
+  | .nil, acc => acc
+  | .cons c cs, acc => match Nat.beq (Char.code c) 46 with
+    | .true => baseNameGo cs .nil
+    | .false => baseNameGo cs (.cons c acc)
+def baseName (n : String) : String := match n with
+  | .mk cs => String.mk (List.reverseOf (baseNameGo cs .nil) .nil)
+
+-- the first leaf of the command's span tree whose source text is `name`
+mutual
+partial def spFindName (input : Array Nat) (name : String) : SpT → Option SpT
+  | .leaf s e => match strEq (String.mk (slice s input e)) name with
+    | .true => .some (.leaf s e)
+    | .false => .none
+  | .node _ _ _ ks => spFindList input name (spList ks)
+  | .missing => .none
+partial def spFindList (input : Array Nat) (name : String) : List SpT → Option SpT
+  | .nil => .none
+  | .cons t rest => match spFindName input name t with
+    | .some x => .some x
+    | .none => spFindList input name rest
+end
+
+-- a declaration's span: its name's token when the parser kept one, else the whole
+-- command (a generated helper, an anonymous instance)
+def declSpanFor (input : Array Nat) (sp : Option SpT) (name : String) : Option SpT := match sp with
+  | .none => .none
+  | .some t => match spFindName input name t with
+    | .some x => .some x
+    | .none => match spFindName input (baseName name) t with
+      | .some x => .some x
+      | .none => .some t
+
+-- the entries for the globals a command added, oldest first
+partial def recordDeclsGo (gs : Globals) (input : Array Nat) (sp : Option SpT)
+    (all : Array Global) (i : Nat) : Globals :=
+  match Nat.lt i (Array.size all) with
+  | .false => gs
+  | .true => match Array.getD all i (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ ty _ _ _ _ =>
+      let n := privBase n;
+      match declSpanFor input sp n with
+        | .none => recordDeclsGo gs input sp all (i + 1)
+        | .some t =>
+          let gs1 := Globals.addLsp gs (.decl (SpT.start t) (SpT.stop t) n
+            (show .nil 0 ty) (declKind gs n ty));
+          recordDeclsGo gs1 input sp all (i + 1)
+
+-- what a command added between `old` and `new`, for the check's index (nothing unless
+-- the playground turned `watch` on, since `Globals.addLsp` is gated by it)
+def recordDecls (old new : Globals) (input : Array Nat) (sp : Option SpT) : Globals :=
+  recordDeclsGo new input sp (Globals.all new) (Array.size (Globals.all old))
 def indexIn : List String → String → Nat → Option Nat
   | .nil, _, _ => .none
   | .cons y ys, x, i => match strEq x y with
@@ -5738,15 +6090,24 @@ def command (gs : Globals) (stx : Syntax) (sp0 : Option SpT) : Step :=
         | .err m => errStep gs m
         | .ok es => match zonk es 0 ty0 with
           | .none => errStep gs "could not infer an implicit argument"
-          | .some tyZ => let tyT := sortTy tyZ; let gsI := Globals.addInfos gs (ES.infos es); match zonk es 0 v0 with
+          | .some tyZ => let tyT := sortTy tyZ;
+            let gsI := match Globals.watch gs with
+              | .true => lspAddSnaps (ES.snaps es) gs
+              | .false => gs;
+            match zonk es 0 v0 with
             | .none => errStep gs "could not infer an implicit argument"
             | .some v0z =>
               -- (P2) with the proof markers the kernel requires, if it asks for them
               match checkMarkingParams us v0z tyT with
               | .bad m => errStep gs m
-              | .good v => .mk (String.append x (String.append " : " (show .nil 0 tyT)))
-                  (Globals.add gsI (.mk x us tyT v (inlineTm gsI v) (paramMask (kids (kid stx 3)))
-                    (declParamNames stx)))
+              | .good v =>
+                let gs1 := Globals.add gsI (.mk x us tyT v (inlineTm gsI v) (paramMask (kids (kid stx 3)))
+                  (declParamNames stx));
+                let gs2 := match Globals.watch gs with
+                  | .true => lspAddSnaps (ES.snaps es) gs1
+                  | .false => gs1;
+                .mk (String.append x (String.append " : " (show .nil 0 tyT)))
+                  (lspAddCommand gs2 stx tyT es)
       | _ => errStep gs "a definition needs a type"
     | _ => errStep gs "a definition needs a name"
   | .false =>
@@ -5762,7 +6123,10 @@ def command (gs : Globals) (stx : Syntax) (sp0 : Option SpT) : Step :=
     | .err m => errStep gs m
     | .ok es => match zonk es 0 t0 with
       | .none => errStep gs "could not infer an implicit argument"
-      | .some t0z => let gsI := Globals.addInfos gs (ES.infos es); let t := MR.tm (markInfer empty t0z); match infer empty t with
+      | .some t0z => let gsI := match Globals.watch gs with
+          | .true => lspAddSnaps (ES.snaps es) gs
+          | .false => gs;
+        let t := MR.tm (markInfer empty t0z); match infer empty t with
         | .err m => errStep gs m
         | .ok ty _ => match strEq (kindOf stx) "command.check" with
           | .true => .mk (show .nil 0 (quote 0 ty)) gsI
@@ -8824,6 +9188,8 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
   | .true => match parseCommandAt cats tokens input pos with
     | .err m => .next (atLine start (.some (String.append "parse " m))) (Array.size input) gs cats tokens notes
     | .ok stx0 stop =>
+      -- (D8 goals) the command's source range, for the language server's entries
+      let gs := Globals.setCmd gs input start stop;
       -- (playground LSP, stage 2) the parser's span side table for this command; `none`
       -- unless the playground asked for the position index (the compiler path stays free)
       let sp0 : Option SpT := match Globals.watch gs with
@@ -8906,7 +9272,7 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
         -- (A11) `deriving instance` prints no line, as in the Lean toolchain
         | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
             | .true => .none
-            | .false => .some line)) stop (Globals.setPrivate gs' .false) cats tokens notes
+            | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports cats tokens notes input pos gs with
@@ -8980,10 +9346,12 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- driver and `checkFile` keep this path; the module loader is `moduleCheck` below).
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
-def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+def checkFileWith (smtTrust : Bool) (cats : List Cat) (tokens : List String) (text : String) : List String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
+      (String.codes text) 0 (Globals.setModule (Globals.withSmtTrust Globals.empty smtTrust) "input") .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
+def checkFile (cats : List Cat) (tokens : List String) (text : String) : List String :=
+  checkFileWith .false cats tokens text
 
 -- (A14) Modules. `import M` loads the module `M`: the file `M.wiz` under the first `-I`
 -- root that has it, else in the working directory (`A.B` is `A/B.wiz`). Each module is
@@ -9167,8 +9535,10 @@ inductive ModLoad where
 -- file it came from; `stripAt` removes the tag for the checker's own output.
 def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- (21n) the module's commands run with `name` as the current module: its `private`
-  -- declarations are private to it, and every name it declares is marked in its name
-  let gs0 := Globals.setModule (Run.gs r) name;
+  -- declarations are private to it, and every name it declares is marked in its name.
+  -- (D8 goals) each module's entries start empty; the root (`Main`) is loaded last, so
+  -- the graph's globals end with the document's own entries.
+  let gs0 := Globals.lspReset (Globals.setModule (Run.gs r) name);
   let r' := match strEq name "Prelude" with
     | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
         (Run.notesOf r) (String.codes text) 0 gs0 .nil with
@@ -9207,9 +9577,19 @@ end
 
 -- the whole graph from `roots`, in order: dependencies first, each module once; its
 -- output lines, globals and tables (the load order is in `order`)
+def modCheckRunT (smtTrust : Bool) (cats : List Cat) (tokens : List String) (headers : List Header)
+    (tab : List ModSrc) (roots : List String) : ModLoad :=
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withSmtTrust (Globals.withHeaders Globals.empty headers) smtTrust)
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
+  modCheckRunT .false cats tokens headers tab roots
+-- (D8 goals) the language server's check: the same graph, with the infoview's entries
+-- collected. Only this path pays for them; `check` uses `modCheckRunH` and skips every
+-- goal rendering and entry (`Globals.lspOn` is false there).
+def modCheckRunHLsp (cats : List Cat) (tokens : List String) (headers : List Header)
+    (tab : List ModSrc) (roots : List String) : ModLoad :=
+  modLoadAll tab (.mk (Run.mk .nil (Globals.withLsp (Globals.withHeaders Globals.empty headers))
     (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
@@ -9331,11 +9711,14 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
+  -- (C15) `--trust-smt` changes the `smt` refusal (the host accepts the flag; this
+  -- frontend has no solver, so the flag selects the message)
+  let trustSmt := modHasFlag args "--trust-smt";
   match modHasFlag args "--oneshot" with
   -- (21n) the one-shot path (`checkFile`: the embedded Prelude inline, one module
   -- `input`), kept reachable for the checker's own tests; the loader is the default
-  | .true => modPrint (checkFile cats tokens text)
-  | .false => match modCheckRunH cats tokens hs tab (.cons "Main" .nil) with
+  | .true => modPrint (checkFileWith trustSmt cats tokens text)
+  | .false => match modCheckRunT trustSmt cats tokens hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)

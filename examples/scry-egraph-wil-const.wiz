@@ -1,0 +1,57 @@
+import Scry.EgraphWil
+-- The Wil layer of the e-graph (`scry-egraph-wil-const`): the straight-line function
+-- used by the C fixture. `2 + 3` folds to 5, `a * 1` and `a + 0` become `a`, and then
+-- `b + c` folds to 10. `main` is a digest of the graph and the rewrite counts.
+
+def v0 : Wil.Var := Wil.var 0 Wil.i32
+def v1 : Wil.Var := Wil.var 1 Wil.i32
+def v2 : Wil.Var := Wil.var 2 Wil.i32
+def v3 : Wil.Var := Wil.var 3 Wil.i32
+def v4 : Wil.Var := Wil.var 4 Wil.i32
+def v5 : Wil.Var := Wil.var 5 Wil.i32
+def v6 : Wil.Var := Wil.var 6 Wil.i32
+def v7 : Wil.Var := Wil.var 7 Wil.i32
+
+def fn : Wil.Func :=
+  Wil.func "constants" [] [v0, v1, v2, v3, v4, v5, v6, v7]
+    [ Wil.block
+        [ Wil.num v0 2
+        , Wil.num v1 3
+        , Wil.binop v2 .add v0 v1
+        , Wil.num v3 1
+        , Wil.binop v4 .mul v2 v3
+        , Wil.num v5 0
+        , Wil.binop v6 .add v2 v5
+        , Wil.binop v7 .add v4 v6 ]
+        (Wil.ret (.some v7)) ]
+
+def b : Scry.WgBuild := Scry.wgBuildProgram (Wil.program [fn])
+def s : Scry.WgStats := Scry.wgSaturate 8 b.g []
+
+def classOfVar (g : Scry.EGraph) (i : Nat) : Nat :=
+  match Scry.EGraph.classOf g (Scry.ENode.leaf (Scry.wgVarOp i)) with
+  | .some c => c
+  | .none => 999
+
+def classOfConst (g : Scry.EGraph) (v : Wil.Val) : Nat :=
+  let a := Scry.wgAddConst g v;
+  a.2
+
+def bit (x : Bool) : Nat := if x then 1 else 0
+
+def main : Nat :=
+  let c5 := classOfConst s.g (.int 32 .true 5);
+  let c10 := classOfConst s.g (.int 32 .true 10);
+  let a := classOfVar s.g 2;
+  let b := classOfVar s.g 4;
+  let c := classOfVar s.g 6;
+  let d := classOfVar s.g 7;
+  Scry.EGraph.numClasses s.g * 1000000
+  + Scry.EGraph.numNodes s.g * 10000
+  + s.folds * 1000
+  + s.rewrites * 10
+  + bit (Scry.EGraph.sameClass s.g a c5)
+  + bit (Scry.EGraph.sameClass s.g b c5)
+  + bit (Scry.EGraph.sameClass s.g c c5)
+  + bit (Scry.EGraph.sameClass s.g d c10)
+  + bit (Scry.EGraph.canonical s.g)

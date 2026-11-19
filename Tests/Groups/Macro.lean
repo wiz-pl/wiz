@@ -13,6 +13,7 @@ def macroPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\
 def macroGroup : Group where
   name := "macros"
   exercise := "Exercise 6.1"
+  parallel := true
   cases := [
     { name := "infixl with precedence", run := fun _ =>
         ok (macroPrelude ++ "#eval two + two * two")

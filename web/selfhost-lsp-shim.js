@@ -12,7 +12,8 @@
 //   * `wiz/plainGoal`/`wiz/plainTermGoal` answered from the check's position index (the
 //     expected type and, before a tactic step, the goal state at the caret), and the
 //     interactive methods with `MethodNotFound`, so the panel takes its plain path;
-//   * `textDocument/completion` from `wiz_playground_names` (below).
+//   * `textDocument/completion`, `textDocument/hover` and `textDocument/definition`
+//     answered from the check's declaration index (below).
 //
 // The diagnostics come from `wiz_playground_eval`'s text: one line per command (an
 // `import` or a grammar command prints none), errors start with `error:` or
@@ -28,11 +29,14 @@
 // `index` (positions → expected types and goal states, a later stage); `PositionIndex`
 // answers `wiz/plainTermGoal`/`wiz/plainGoal` from it with no further Wasm call.
 //
-// Completions: `initialize` advertises `completionProvider`, and `textDocument/completion`
-// asks the module's `wiz_playground_names` (web/playground-exports.wiz) for the names in
-// scope, once per document text (the answer is cached on the document), then filters by
-// the identifier prefix before the caret. Without the export the answer is an empty list,
-// never an error.
+// Completions, hover and definition: the check's `index` carries one `decl` entry per
+// declaration the module added (`{"s","e","name","detail","ckind"}`: the source name, its
+// printed type, and an LSP CompletionItemKind). `initialize` advertises the three
+// providers; `textDocument/completion` filters the declarations by the identifier before
+// the caret and gives each item a `textEdit` over that prefix; `textDocument/hover`
+// answers Markdown with the declaration's signature; `textDocument/definition` answers a
+// `Location` in this document. A caret on a name without a declaration (a Prelude global,
+// a local binder) is `null`, never an error, since the index covers this module only.
 //
 // `SelfhostServer.handle(text) → [message]` has the shape of the planned wasm export
 // `wiz_lsp_handle : String → String` (one JSON-RPC message in, a JSON array out), so a
@@ -346,6 +350,31 @@ export class PositionIndex {
     return x && typeof x.expected === "string" ? { goal: x.expected, range: this.rangeOf(x) } : null;
   }
 
+  // The declarations the checked module added, in source order: `{label, kind, detail,
+  // range}` (kind is an LSP `CompletionItemKind`).
+  declarations() {
+    return this.entries
+      .filter((x) => x.kind === "decl" && typeof x.name === "string" && x.name !== "")
+      .map((x) => ({
+        label: x.name,
+        kind: typeof x.ckind === "number" ? x.ckind : 6,
+        detail: typeof x.detail === "string" ? x.detail : "",
+        range: this.rangeOf(x),
+      }));
+  }
+
+  // The declaration a source name denotes: an exact label, else a unique suffix match
+  // (`mk` for `T.mk`, as a constructor is used after a dot).
+  declarationNamed(name) {
+    const n = String(name === undefined || name === null ? "" : name);
+    if (n === "") return null;
+    const all = this.declarations();
+    const exact = all.find((d) => d.label === n);
+    if (exact) return exact;
+    const suffix = all.filter((d) => d.label.endsWith("." + n));
+    return suffix.length === 1 ? suffix[0] : null;
+  }
+
   // `wiz/plainGoal`: `{goals, rendered}` or null (`goals: []` is a finished proof)
   goal(offset) {
     const x = this.lookup(offset, "goal");
@@ -385,21 +414,17 @@ export function completionPrefix(text, offset) {
   return { start, prefix: text.slice(start, at) };
 }
 
-// `wiz_playground_names`'s JSON (or an already-parsed answer) as a list of
-// `{label, kind, detail}`; anything malformed is dropped.
-export function parseNames(json) {
-  if (json === null || json === undefined) return [];
-  let answer;
-  try { answer = typeof json === "string" ? JSON.parse(json) : json; } catch (_) { return []; }
-  const list = Array.isArray(answer) ? answer : (answer && Array.isArray(answer.names) ? answer.names : []);
-  const names = [];
-  for (const item of list) {
-    if (!item || typeof item.label !== "string" || item.label === "") continue;
-    const name = { label: item.label, kind: typeof item.kind === "number" ? item.kind : 6 };
-    if (typeof item.detail === "string" && item.detail !== "") name.detail = item.detail;
-    names.push(name);
-  }
-  return names;
+// The identifier under (or just before) the caret, for hover and definition: the same
+// characters as `completionPrefix`, scanned both ways so a caret inside or after a name
+// finds it. `{start, end, word}` in UTF-16 offsets.
+export function wordAt(text, offset) {
+  const s = String(text === undefined || text === null ? "" : text);
+  const at = Math.max(0, Math.min(offset, s.length));
+  let start = at;
+  let end = at;
+  while (start > 0 && /[A-Za-z0-9_'.]/.test(s[start - 1])) start--;
+  while (end < s.length && /[A-Za-z0-9_'.]/.test(s[end])) end++;
+  return { start, end, word: s.slice(start, end) };
 }
 
 // The names whose label starts with `prefix` (case-insensitive), as LSP completion items.
@@ -422,16 +447,13 @@ export function filterCompletions(names, prefix, limit = 200) {
 
 // `evaluate(source) → string | Promise<string>` is `wiz_playground_eval` (the page waits
 // for its engine inside it); `check(source) → string | null | Promise<…>` is
-// `wiz_playground_check`, or null when the module has none (then `evaluate` is used);
-// `names(source) → string | null | Promise<…>` is `wiz_playground_names`, or null when
-// the module has none (then completions are an empty list).
+// `wiz_playground_check`, or null when the module has none (then `evaluate` is used).
 export class SelfhostServer {
-  constructor({ evaluate, check = null, names = null, serverInfo = SERVER_INFO } = {}) {
+  constructor({ evaluate, check = null, serverInfo = SERVER_INFO } = {}) {
     this.evaluate = evaluate;
     this.check = check;
-    this.names = names;
     this.serverInfo = serverInfo;
-    this.docs = new Map();     // uri → {text, version, index?, names?}
+    this.docs = new Map();     // uri → {text, version, index?}
     this.session = 0;
     this.wantsElaborated = false;
     this.shutdown = false;
@@ -481,7 +503,8 @@ export class SelfhostServer {
           capabilities: {
             positionEncoding: "utf-16",
             textDocumentSync: 1,
-            hoverProvider: false,
+            hoverProvider: true,
+            definitionProvider: true,
             completionProvider: { triggerCharacters: ["."], resolveProvider: false },
             experimental: { wizInfoview: { version: 1, methods: SELFHOST_METHODS.slice() } },
           },
@@ -508,11 +531,33 @@ export class SelfhostServer {
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         if (!params.position) return ok({ isIncomplete: false, items: [] });
         const offset = offsetOf(doc.text, params.position);
-        const { prefix } = completionPrefix(doc.text, offset);
-        return ok({ isIncomplete: false, items: filterCompletions(await this.namesOf(doc), prefix) });
+        const { start, prefix } = completionPrefix(doc.text, offset);
+        const declarations = doc.index ? doc.index.declarations() : [];
+        const edit = { range: { start: positionOf(doc.text, start), end: positionOf(doc.text, offset) } };
+        const items = filterCompletions(declarations, prefix).map((item) =>
+          Object.assign({}, item, { textEdit: { range: edit.range, newText: item.label } }));
+        return ok({ isIncomplete: false, items });
       }
-      case "textDocument/hover":
-        return ok(null);
+      case "textDocument/hover": {
+        const uri = params.textDocument && params.textDocument.uri;
+        const doc = this.docs.get(uri);
+        if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
+        if (!doc.index || !doc.index.size || !params.position) return ok(null);
+        const found = wordAt(doc.text, offsetOf(doc.text, params.position));
+        const decl = found.word === "" ? null : doc.index.declarationNamed(found.word);
+        if (!decl) return ok(null);
+        const signature = decl.detail === "" ? decl.label : decl.label + " : " + decl.detail;
+        return ok({ contents: { kind: "markdown", value: "```wiz\n" + signature + "\n```" }, range: decl.range });
+      }
+      case "textDocument/definition": {
+        const uri = params.textDocument && params.textDocument.uri;
+        const doc = this.docs.get(uri);
+        if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
+        if (!doc.index || !doc.index.size || !params.position) return ok(null);
+        const found = wordAt(doc.text, offsetOf(doc.text, params.position));
+        const decl = found.word === "" ? null : doc.index.declarationNamed(found.word);
+        return ok(decl ? { uri, range: decl.range } : null);
+      }
       default:
         return fail(ERR.methodNotFound, "the self-hosted playground server has no " + method);
     }
@@ -542,20 +587,6 @@ export class SelfhostServer {
       default:
         return [];   // initialized, exit, $/… : nothing to say
     }
-  }
-
-  // The names in scope for `doc`, once per document text: the module's
-  // `wiz_playground_names` (a whole check, so it is only asked for when the popup opens),
-  // or `[]` when the module has no export or the call failed.
-  async namesOf(doc) {
-    if (Array.isArray(doc.names)) return doc.names;
-    if (typeof this.names !== "function") { doc.names = []; return doc.names; }
-    try {
-      doc.names = parseNames(await this.names(withPrelude(doc.text).source));
-    } catch (_) {
-      doc.names = [];
-    }
-    return doc.names;
   }
 
   async publish(uri) {

@@ -8,11 +8,22 @@
 -- signature, `#check` a type, `#eval`/`#reduce` the kernel's normal form, and errors
 -- start with `error:` or `parse error`. The page only moves text in and lines out.
 
+-- (engine-trampoline) A clean stop is how a program finishes, not a fault. The runtime's
+-- `wiz_stop_run` arms a `setjmp` and applies the closure; `Process.exit`, the
+-- one-threaded build's refusal to fork or block, and a failed `IO.writeFile` longjmp
+-- back to it instead of calling `exit`, so the module stays alive and the page keeps its
+-- state. `wiz_playground_exit` then holds the code + 1 (0: the call ran to the end).
+-- `wiz_panic` (out of memory) and a Wasm trap are not caught: those still cost the
+-- instance, which is the only reliable reset.
+extern "wiz_stop_run" pgStopRun : (String → String) → String
+extern "wiz_stop_code_value" pgStopCode : Nat → Nat
+
 def pgJoin : List String → String
   | .nil => ""
   | .cons s ss => String.append s (String.append "\n" (pgJoin ss))
 
-def playgroundEval (text : String) : String := pgJoin (checkFile cats tokens text)
+def playgroundEval (text : String) : String :=
+  pgStopRun (fun _ => pgJoin (checkFile cats tokens text))
 
 export "wiz_playground_eval" playgroundEval
 
@@ -109,88 +120,54 @@ def pgcLines : List String → String
     | .nil => pgcLine l
     | .cons _ _ => String.append (pgcLine l) (String.append "," (pgcLines rest))
 
--- (stage 2) the position index beside the lines: each `Info` the frontend recorded while
--- elaborating (a checked node's expected type, later a tactic state before a step) as
--- `{"s","e","kind","expected"|"goals"}`; `s`/`e` are code-point offsets into the checked
--- text, end-exclusive. The page's server turns them into UTF-16 ranges.
-def pgiBody (k t : String) : String := match strEq k "goal" with
-  | .true => String.append ",\"goals\":[" (String.append (pgcStr t) "]")
-  | .false => String.append ",\"expected\":" (pgcStr t)
+-- (stage 2) the position index beside the lines: each `LspEntry` the frontend recorded
+-- while elaborating, as `{"s","e","kind",…}`. `term` has the checked node's expected
+-- type (`expected`), `goal` the tactic state before a step (`goals`), and `decl` a
+-- declaration of the module being checked (`name`, `detail` its printed type, `ckind`
+-- an LSP CompletionItemKind). `s`/`e` are code-point offsets into the checked text,
+-- end-exclusive; the page's server turns them into UTF-16.
+def pgiGoals : List String → String
+  | .nil => ""
+  | .cons g rest => match rest with
+    | .nil => pgcStr g
+    | .cons _ _ => String.append (pgcStr g) (String.append "," (pgiGoals rest))
 
-def pgiEntry (i : Info) : String := match i with
-  | .mk s e k t => String.append "{\"s\":" (String.append (Nat.toString s)
-      (String.append ",\"e\":" (String.append (Nat.toString e)
-        (String.append ",\"kind\":" (String.append (pgcStr k)
-          (String.append (pgiBody k t) "}"))))))
+def pgiHead (s e : Nat) : String := String.append "{\"s\":" (String.append (Nat.toString s)
+    (String.append ",\"e\":" (String.append (Nat.toString e) "")))
 
-def pgiEntries : List Info → String
+def pgiEntry (i : LspEntry) : String := match i with
+  | .term s e t => String.append (pgiHead s e)
+      (String.append ",\"kind\":\"term\",\"expected\":" (String.append (pgcStr t) "}"))
+  | .goal s e gs => String.append (pgiHead s e)
+      (String.append ",\"kind\":\"goal\",\"goals\":[" (String.append (pgiGoals gs) "]}"))
+  | .decl s e n ty k => String.append (pgiHead s e)
+      (String.append ",\"kind\":\"decl\",\"name\":" (String.append (pgcStr n)
+        (String.append ",\"detail\":" (String.append (pgcStr ty)
+          (String.append ",\"ckind\":" (String.append (Nat.toString k) "}")))))
+
+def pgiEntries : List LspEntry → String
   | .nil => ""
   | .cons i rest => match rest with
     | .nil => pgiEntry i
     | .cons _ _ => String.append (pgiEntry i) (String.append "," (pgiEntries rest))
 
--- the check, with the position index: watching on records the spans and expected types
--- (the compiler path leaves it off, so it pays one Bool check per command)
-def playgroundCheck (text : String) : String :=
+-- the check's text; the export runs it under the boundary. (A named helper keeps the
+-- `match` at command indentation, where the layout parser wants it.)
+def playgroundCheckText (text : String) : String :=
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       (String.codes text) 0 (Globals.watching (Globals.setModule Globals.empty "input")) .nil with
   | .mk out gs _ _ _ => String.append "{\"v\":1,\"lines\":["
       (String.append (pgcLines (List.reverseOf out .nil))
-        (String.append "],\"index\":[" (String.append (pgiEntries (Globals.infos gs)) "]}")))
+        (String.append "],\"index\":[" (String.append (pgiEntries (Globals.lspEntries gs)) "]}")))
+
+def playgroundCheck (text : String) : String :=
+  pgStopRun (fun _ => playgroundCheckText text)
 
 export "wiz_playground_check" playgroundCheck
 
--- (playground LSP, completions) `wiz_playground_names : String → String`: the names in
--- scope after checking `text`, as JSON:
---
---   {"v":1,"names":[{"label":"…","kind":N,"detail":"…"}, …]}
---
--- `kind` is an LSP `CompletionItemKind` (7 a type, 3 a function, 6 anything else) and
--- `detail` the declaration's type as the kernel prints it. The answer is the frontend's
--- global environment (`Globals.all`, newest declaration first, each source name once), so
--- the page filters it by the identifier prefix before the caret; the wasm side never sees
--- the caret. Local binders are **not** listed: the frontend exposes the scope only while
--- it elaborates a command (there is no info tree), so a definition's parameters are not
--- in the answer. The names are read from the same `runCommands` as
--- `wiz_playground_check`, so a name the check accepted is one this list has.
+-- The code of the last eval/check's clean stop, as `code + 1` (0: it ran to the end), so
+-- the page can tell `exit 0` from no stop. The argument is unused: a C export needs a
+-- parameter, and the page passes 0.
+def playgroundExit (n : Nat) : Nat := pgStopCode n
 
-def pgnKind (gs : Globals) (n : String) (ty : Tm) : Nat := match Globals.ind gs n with
-  | .some _ => 7
-  | .none => match ty with
-    | .pi _ _ _ _ _ => 3
-    | _ => 6
-
-def pgnEntry (gs : Globals) (n : String) (ty : Tm) : String :=
-  String.append "{\"label\":" (String.append (pgcStr n) (String.append ",\"kind\":"
-    (String.append (Nat.toString (pgnKind gs n ty)) "}")))
-
--- The globals in declaration order (oldest to newest, the order `Globals.add` pushes),
--- each entry **prepended** to the answer: the final string is newest first, and every
--- `String.append` copies one entry, never the growing answer (copying the whole answer
--- once per entry would recurse once per character of it and overflow the wasm stack).
--- `k` is a loop counter, so this is one tail-recursive loop, not a recursion over the list.
-partial def pgnGo (gs : Globals) (all : Array Global) (k : Nat) (acc : String) : String :=
-  match Nat.lt k (Array.size all) with
-  | .false => acc
-  | .true => match Array.getD all k (.mk "" .nil .star .star .star .nil .nil) with
-    | .mk n _ ty _ _ _ _ =>
-      let entry := pgnEntry gs (privBase n) ty;
-      let acc' := match strEq acc "" with
-        | .true => entry
-        | .false => String.append entry (String.append "," acc);
-      pgnGo gs all (Nat.add k 1) acc'
-
-def playgroundNames (text : String) : String :=
-  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0 (Globals.setModule Globals.empty "input") .nil with
-  | .mk _ gs _ _ _ => String.append "{\"v\":1,\"names\":["
-      (String.append (pgnGo gs (Globals.all gs) 0 "") "]}")
-
--- NOTE: not exported yet. `wiz_playground_names` enumerates the frontend's environment, and
--- the first wasm build of it overflowed the module's stack while printing a global (the
--- crash is in the C runtime's list handling, not in this function's control flow). The
--- page's server treats a missing export as "no completions" (an empty list), so the page
--- is safe with this line absent; re-enable it with
--- `export "wiz_playground_names" playgroundNames` once the wasm path is fixed.
-
-
+export "wiz_playground_exit" playgroundExit

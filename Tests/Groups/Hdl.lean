@@ -178,6 +178,7 @@ def hdlPipeTools : IO Unit := do
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
+  parallel := true
   cases := [
     { name := "S2: operators on signals: same Verilog as the Hw operations, numerals at the width, if as a mux, printed back", run := fun _ => do
         -- the three designs agree with their Hw-operation twins (Verilog text); the counter
@@ -266,11 +267,23 @@ def hdlGroup : Group where
           ["(.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))))))))), .true)"]
         okLibs ("import OpticDerive\nstructure P where\n  x : Nat\n  y : Bool\n  z : Nat\n  deriving Lens\n" ++
           "structure Q (A : Type) (n : Nat) where\n  a : A\n  b : List A\n  deriving Lens\n" ++
-          "def t1 : Lens.get P.yL (P.mk 1 .true 3) = .true := rfl\n" ++
+          -- (t1 is general: the closed `Lens.get … = .true` reduces to `True`, so it
+          -- cannot be told from `True.intro`; a variable's projection does not reduce)
+          "def t1 (p : P) : Lens.get P.yL p = p.y := rfl\n" ++
           "def t2 : Lens.set P.zL (P.mk 1 .true 3) 7 = P.mk 1 .true 7 := rfl\n" ++
           "def t3 : Lens.Indep P.xL P.zL := P.x_z_indep\n" ++
           "def t4 : Lens.set (@Q.bL Nat 3) (Q.mk 1 .nil) (.cons 2 .nil) = Q.mk 1 (.cons 2 .nil) := rfl\n" ++
-          "def t5 {A : Type} {n : Nat} : Lens.Lawful (@Q.aL A n) := Q.aL_lawful\n#eval Lens.get P.zL (Lens.set P.xL (P.mk 1 .true 3) 9)\n") ["3"] },
+          "def t5 {A : Type} {n : Nat} : Lens.Lawful (@Q.aL A n) := Q.aL_lawful\n" ++
+          "#eval Lens.get P.zL (Lens.set P.xL (P.mk 1 .true 3) 9)\n" ++
+          -- (the `#check`s pin the statements: deleting or weakening a theorem changes
+          -- this list, so the final `#eval` alone cannot keep the case green)
+          "#check t1\n#check t2\n#check t3\n#check t4\n#check t5\n")
+          ["3",
+           "t1 : (p : P) → Lens.get P Bool P.yL p = p.2.1",
+           "t2 : (1, .true, 7, fun fields✝ => ()) = (1, .true, 7, fun fields✝ => ())",
+           "t3 : Lens.Indep P Nat Nat P.xL P.zL",
+           "t4 : (1, .cons 2 .nil, fun phantom✝ fields✝ => ()) = (1, .cons 2 .nil, fun phantom✝ fields✝ => ())",
+           "t5 : {A : Type} → {n : Nat} → Lens.Lawful (Q A n) A (Q.aL A n)"] },
     { name := "docs/hardware.md's example: a circuit refines a specification; a temporal property of every run; simulation agrees", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hardware-tour.wiz") ["(.cons 2 (.cons 0 (.cons 0 (.cons 1 (.cons 2 (.cons 0 .nil))))), .true)"] },
     { name := "memories: RAM with a registered read, ROM, enable and reset; values = netlist; read/write lemmas; misuse reported; Verilog arrays", run := fun _ => do
@@ -285,7 +298,14 @@ def hdlGroup : Group where
         okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
           [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
-        okLibs (← IO.FS.readFile "examples/hdl-bits.wiz") ["1"] },
+        -- (the `#check`s name the proofs the case is about: deleting or weakening one
+        -- changes this message list, so the final `#eval` alone cannot keep it green)
+        okLibs ((← IO.FS.readFile "examples/hdl-bits.wiz") ++
+          "\n#check stall_out\n#check stall_halt\n#check stall_is_mux\n")
+          ["1",
+           "stall_out : (tx : BitVec 1) → (rx : BitVec 1) → stall HwTy.El instHwHwTyEl Bit.one tx Bit.zero rx Bit.zero = ~~~tx",
+           "stall_halt : (o : BitVec 1) → (t : BitVec 1) → (i : BitVec 1) → (f : BitVec 1) → stall HwTy.El instHwHwTyEl o t i f Bit.one = Bit.one",
+           "stall_is_mux : (o : BitVec 1) → (t : BitVec 1) → (i : BitVec 1) → (f : BitVec 1) → (h : BitVec 1) → stall HwTy.El instHwHwTyEl o t i f h = stallMux o t i f h"] },
     { name := "Verilog: declarations before use (regs, wires, then the updates), sized initial values", run := fun _ =>
         okLibs (hdlVerilogSrc ++ "#eval v1\n")
           ["\"module counter(input clk, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\""] },

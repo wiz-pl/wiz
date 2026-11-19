@@ -505,9 +505,14 @@ def addLeadingTo (cat : String) (l : Leading) : List Cat → List Cat
 
 -- The surface forms the self-hosted frontend adds to the tables it is given: `if`, `!`,
 -- `&&` and `||` (the host gets them from `lib/Prelude.wiz`'s `syntax`/`notation`, which
--- this frontend does not process). The kinds and shapes are the host's, so the parser
--- differential compares the trees directly.
+-- this frontend does not process), and (C15) the `smt` tactic. The kinds and shapes are
+-- the host's, so the parser differential compares the trees directly.
 def surfaceCats (cats : List Cat) : List Cat :=
+  -- (C15) `smt` is a `tactic` in lib/Prelude.wiz (`syntax (name := smt) "smt" : tactic`);
+  -- this frontend gets the host's kind and shape, so `by smt` parses as the host parses
+  -- it and the frontend refuses it at elaboration (Frontend.wiz, `tacOfStx`). `smt` is
+  -- an identifier here (the tables do not reserve it, as `if`/`then`/`else` are not)
+  let cats := addLeadingTo "tactic" (.mk "tactic.smt" 1024 0 (.nonReserved "smt")) cats;
   let cats := addLeadingTo "term" (.mk "term.!" 1024 0
     (.seq (.atom "!") (.cat "term" 1024))) cats;
   let cats := addTrailingTo "term" (.mk "term.boolAnd" 35 36 0

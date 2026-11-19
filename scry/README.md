@@ -23,7 +23,9 @@ tree-sitter-c-sharp (fetched by Nix; `native/README.md`) through the same shim (
 `src/Scry/CsCst.wiz` views the store as a `Scry.Cst` and `src/Scry/CsLower.wiz` lowers
 methods to Wil (receiver as argument 0, `using`-resolved BCL names). Its fixtures, their
 spills and the rule pack are in `corpus/csharp/`; the tests are the `scry-csharp` group
-(`tests =scry-csharp`).
+(`tests =scry-csharp`). `scry cs PATH` is the repository driver over a directory,
+`.csproj` or `.sln`/`.slnx`: one summary with a coverage section that names every file or
+construct that was skipped (design: `CSHARP.md` §7).
 
 ```sh
 cd scry
@@ -39,6 +41,8 @@ grail run scry -- facts fixtures/demo.facts.json
 grail run scry -- query fixtures/demo.facts.json --kind call_expression
 grail run scry -- explain fixtures/demo.facts.json 4
 grail run scry -- fuzz-span fixtures/broken.c --json
+grail run scry -- egraph fixtures/egraph-const.c
+grail run scry -- egraph fixtures/egraph-const.c --rewrite
 ```
 
 Commands: `facts`, `query --kind|--edge|--edge-src|--rel`, `explain`, `parse --stats` (a C source,
@@ -46,10 +50,20 @@ a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C �
 Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
 correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), `project` (a `compile_commands.json` multi-file C project:
-cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `report`
+cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `cs` (a
+directory, `.csproj` or `.sln`/`.slnx` of C#: one summary with a coverage section),
+`report`
 (one self-contained HTML page of the taint evidence), `fuzz-span` (map a fuzz artifact
-to CST spans for the dynamic-evidence report) and `repl` (the Wiz REPL with `Scry.Repl`
-preloaded). `parse --stats` prints counts only; the perf agent owns throughput numbers.
+to CST spans for the dynamic-evidence report), `repl` (the Wiz REPL with `Scry.Repl`
+preloaded) and `egraph FILE.c [--fuel N] [--rewrite]` (C -> Wil ->
+e-classes, then a deterministic fold/identity saturation report). The `egraph` report is
+read-only: it does not change the CST, the Wil program or any Datalog fact. `--rewrite`
+additionally runs `lib/Scry/EgraphExtract.wiz`, which extracts the saturated classes back
+into a **checked** `Wil.Program` (straight-line functions, single-definition registers, no
+registers outside the original right-hand side, strictly cheaper terms) and prints the
+transformation report. That program is an optional input to a later analysis;
+`lib/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
+authoritative. `parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 ## Optics and accessors
 
@@ -333,6 +347,15 @@ lowered; the units are then merged:
   definition is reported in `duplicates`, not silently merged, and is not analysed;
 * a call with no definition anywhere is `unresolved` and its callee is `0` in the EDB.
 
+A database is repository-supplied, so its flags are filtered by an explicit allowlist
+before `cc -E` sees them: `-I`, `-isystem`, `-iquote`, `-idirafter`, `-include` (their
+paths are confined by the MCP), `-D`, `-U` and `-std=`/`--std=` are kept, the compile
+driver's `-c`/`-o`/`-M…` structure is dropped, and **any other word is refused** with a
+diagnostic naming it. In particular `-B<dir>` (which would make `cc` run a committed
+`cc1`), `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang` and `-cc1` cannot reach the
+preprocessor. `-include` still reads a header named by the database, which is code
+influence (a macro or an inline body) but not a choice of program.
+
 ```sh
 grail run scry -- project corpus/project
 grail run scry -- project corpus/project --facts -          # project EDB
@@ -390,7 +413,16 @@ grail run scry -- bench --no-timing --json -    # deterministic report on stdout
 grail run scry -- bench --extra /path/to/subset # an external manifest
 grail run scry -- bench --fail-on-regression    # exit 1 if the baseline changed
 grail run scry -- bench --update-baseline bench/baseline.json
+grail run scry -- bench --fail-on-regression --baseline-bootstrap  # first run only
 ```
+
+`--fail-on-regression` fails closed: a **missing** baseline, an **invalid** one, a run whose
+status is not `ok` (for example a missing corpus), and a case that appears or disappears
+between the baseline and the run all exit 1 with the reason. Presence is compared in both
+directions (`present→absent` and `absent→present`) and is reported in the JSON and the
+Markdown summary. `--baseline-bootstrap` is the explicit first-run escape: it allows an
+absent baseline and nothing else. Without the flag, every one of those shapes still exits 0,
+so the gate is a mode of the benchmark, not a different command.
 
 Reported per CWE and overall: TP/FN/TN/FP case counts, TPR, FPR, Youden's J, precision,
 F1, macro averages, path validity (the path ends at the reported sink; a taint path also

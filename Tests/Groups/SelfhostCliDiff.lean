@@ -273,6 +273,9 @@ def cliDiffGroup : Group where
                                     args := #["check", "good.wiz"] }
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
+        -- (both tools must exit 0 on a good file: equal non-zero codes are not a pass)
+        checkEq 0 h.code
+        checkEq 0 s.code
         checkEq "" s.out
         checkEq "" s.err },
     { name := "check: `#check` prints an info line without --types in both", run := fun _ => withSelfhostCli fun exe => do
@@ -324,6 +327,21 @@ def cliDiffGroup : Group where
         checkEq 1 s3.code
         cliCheck s3.err "tm.wiz:2:1: error: type mismatch" "type mismatch"
         skip "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+    { name := "smt: without --trust-smt the refusal is the host's, at the command's start (C15)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        -- `smt` (stage 28a) is a library tactic: the host parses it, elaborates it, and
+        -- refuses it unless `--trust-smt`; the self-hosted frontend parses the same tree
+        -- (Parse.wiz `surfaceCats`) and refuses it with the same message and exit code
+        let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
+        let spec : CliDiffSpec := { files := #[("f.wiz", src)], args := #["check", "f.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq ("f.wiz:2:1: error: SMT solving is not enabled: `smt` closes a goal on an " ++
+          "SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n") s.err
+        skip "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6); the message and the exit code are the same" },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,
@@ -578,7 +596,7 @@ def cliDiffGroup : Group where
         else do
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
-          skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
+          skip "artifact: --lib's object/header match; --no-main writes an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -594,7 +612,7 @@ def cliDiffGroup : Group where
           skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
         else do
           let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
-          skip s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
+          skip s!"backend: the host builds through textual LLVM IR; --llvm here selects the host's LLVM path (exit {h.code}: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
