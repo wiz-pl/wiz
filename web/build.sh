@@ -9,8 +9,13 @@
 # `wiz_web_step` on every event, so nothing waits inside Wasm (no Asyncify).
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell nixpkgs#emscripten -c "$0" "$@"; fi
+# without emcc on the PATH, run again with this flake's Emscripten: `nix build
+# .#emscripten` pins the version (nixpkgs' 6.0.9) and names the store path, where
+# `nix shell nixpkgs#emscripten` would use whatever the registry's nixpkgs has.
+if ! command -v emcc >/dev/null; then
+  emcc=$(nix build "$ROOT#emscripten" --no-link --print-out-paths) || exit 1
+  exec env PATH="$emcc/bin:$PATH" "$0" "$@"
+fi
 GMPSRC=
 case "${2:-}" in --gmp-src) GMPSRC=$(cd "$(dirname "$3")" && pwd)/$(basename "$3") ;; esac
 OUT=$(mkdir -p "${1:-$ROOT/web/out}" && cd "${1:-$ROOT/web/out}" && pwd)

@@ -1149,7 +1149,8 @@ TLS or authentication. Live search results and code actions are not part of it â
 need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
-slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Without
+slow part; without `emcc` on `PATH` the script runs itself again with the flake's
+Emscripten (`nix build .#emscripten`; `nix develop .#web -c â€¦` has `emcc` ready). Without
 `--source-url`, the local documentation's source links are plain paths. `docs` and
 `deploy-docs` run only on `push` (`workflow_dispatch` runs do not publish). The artifact
 stays for 3 days for debugging; the site keeps the newest deployed tree until the next
