@@ -281,8 +281,8 @@ def scanLength (1 c : Cursor Node) : Nat := Cursor.length c
     | _ => Control.stop (acc + 1)) 0           -- 2 (stopped after two of three)
 #eval Cursor.foldUntil (Snapshot.indexNodes kindIndex (u64 1) s0)
   (fun (acc : Nat) _ => match acc with
-    | .zero => Control.go (acc + 1)
-    | _ => Control.stop (acc + 1)) 0           -- 1 (stopped after one of two)
+    | .zero => Control.stop (acc + 1)
+    | _ => Control.go (acc + 1)) 0             -- 1 (stopped after one of two)
 
 #eval match Cursor.first (Snapshot.tableCursor s0) with
   | .some n => n.kind.toNat
