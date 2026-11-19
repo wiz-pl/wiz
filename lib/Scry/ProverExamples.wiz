@@ -1,5 +1,6 @@
 import Scry.Prover
 import Scry.RuleTaint
+import Scry.Bounds
 /-!
 # Tiny prover examples
 
@@ -168,3 +169,109 @@ def Scry.proverConstantOrBoundUnsafeVerdict : Scry.Verdict :=
 /-- A script with an out-of-range rule index: a tagged script failure, not "none". -/
 def Scry.proverScriptFailVerdict : Scry.Verdict :=
   Scry.proveWith Scry.ruleTaintProgram Scry.proverSafe [Scry.Tactic.apply 99]
+
+-- ## The cut (guards/bounds)
+
+/-- A tiny checked copy:
+```
+point 0: if (n > 32) return      guard(0, 3, 32, 1)   -- on the edge to 1, n <= 32
+point 1: memcpy(dst, src, n)     use(1, 3, 7, 32, 2, 0) -- copy-write into loc 7 (32 cells)
+                                 before(0, 1), before(1, 1)
+```
+`Scry.proverCutSafe` proves the cut over `{0}`; the twins below remove the dominance, weaken
+the bound, or make the length a constant. -/
+def Scry.proverCutSafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 1, U64.ofNat 1]
+
+/-- The same guard and use, but the check does not dominate the copy (it is after it). -/
+def Scry.proverCutUnordered : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0]
+
+/-- The guard is before the copy but its bound (64) exceeds the buffer (32 cells). -/
+def Scry.proverCutWeak : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 64, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1]
+
+/-- A constant length 32 into a 32-cell buffer: in range without a guard. -/
+def Scry.proverCutConstOk : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 33]
+
+/-- A constant length 64 into a 32-cell buffer. -/
+def Scry.proverCutConstBad : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 65]
+
+/-- A write with no statically known capacity. -/
+def Scry.proverCutUnknownCap : Scry.State Nat :=
+  let st := Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 0, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1]
+
+def Scry.proverCutSafeVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutSafe (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutUnorderedVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutUnordered (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutWeakVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutWeak (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutConstOkVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutConstOk (Scry.Claim.cut "cut" [])
+
+def Scry.proverCutConstBadVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutConstBad (Scry.Claim.cut "cut" [])
+
+def Scry.proverCutUnknownCapVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutUnknownCap (Scry.Claim.cut "cut" [0])
+
+/-- The cut names a point with no guard row. -/
+def Scry.proverCutPhantomVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutSafe (Scry.Claim.cut "cut" [9])
+
+/-- No use at all: a cut claim about a program with no writes is vacuous. -/
+def Scry.proverCutVacuousVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.cut "cut" [])
+
+-- ## Guard extraction
+
+/-- A hand-built function for the guard-extraction unit test:
+
+```
+if (n > 16) return;      -- the false edge establishes n <= 16
+return;
+```
+No memory is involved; this isolates `Scry.boundsCondBounds`/`boundsGuardRows` from the
+C frontend (the corpus covers the frontend path). -/
+def Scry.guardFn : Wil.Func :=
+  let n := Wil.var 0 Wil.u64;
+  let cap := Wil.var 1 Wil.u64;
+  Wil.func "guard" [] []
+    [ Wil.block
+        [ Wil.assign cap (.cst (Wil.Val.ofNat 64 false 16))
+        , Wil.assign n (.havoc Wil.u64) ]
+        (Wil.branch (Wil.Cond.cmp .gt n cap) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block [] (Wil.ret (Option.none : Option Wil.Var))
+    , Wil.block [] (Wil.ret (Option.none : Option Wil.Var)) ]
+
+def Scry.guardFnInfo : Scry.FnInfo := Scry.fnInfo Scry.guardFn
+
+def Scry.guardFnRows : List (List Nat) :=
+  Scry.boundsGuardRows Scry.guardFnInfo Scry.guardFnInfo.g
