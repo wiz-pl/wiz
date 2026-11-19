@@ -432,7 +432,7 @@ inductive Wish where
   | idle
   | want (w : String) (n : Nat)
 inductive CG where
-  | mk (fns : List Doc) (n : Nat) (ar : StrMap Nat) (pend : Wish) (pe : PE)
+  | mk (fns : List Doc) (n : Nat) (ar : SMap Nat) (pend : Wish) (pe : PE)
 inductive CR where
   | mk (code : Doc) (st : CG)
 inductive FR where
@@ -442,7 +442,7 @@ def CG.fresh (st : CG) (base : String) : FR := match st with
 def CG.emit (st : CG) (f : Doc) : CG := match st with
   | .mk fns n ar p pe => .mk (.cons f fns) n ar p pe
 def CG.arity (st : CG) (g : String) : Nat := match st with
-  | .mk _ _ ar _ _ => StrMap.findD ar (Str.ofString g) 0
+  | .mk _ _ ar _ _ => SMap.findD ar g 0
 def CG.pend (st : CG) : Wish := match st with
   | .mk _ _ _ p _ => p
 def CG.setPend (st : CG) (p : Wish) : CG := match st with
@@ -1356,13 +1356,13 @@ def entryDrops (names : List String) (d : Nat) (live : List Nat) : List Nat → 
 -- parameters (`true`: borrowed, first parameter first); and the variables whose cells
 -- may be reused here (the owned variables matched on by the enclosing `case`s)
 inductive RE where
-  | mk (bor : List Nat) (sigs : StrMap (List Bool)) (cands : List Nat)
+  | mk (bor : List Nat) (sigs : SMap (List Bool)) (cands : List Nat)
 def RE.bor : RE → List Nat
   | .mk b _ _ => b
 def RE.inner : RE → RE
   | .mk _ s _ => .mk .nil s .nil
 def RE.sig (re : RE) (g : String) : List Bool := match re with
-  | .mk _ s _ => StrMap.findD s (Str.ofString g) .nil
+  | .mk _ s _ => SMap.findD s g .nil
 def RE.cands : RE → List Nat
   | .mk _ _ c => c
 def RE.withCand (re : RE) (x : Nat) : RE := match re with
@@ -1834,9 +1834,9 @@ partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (
               | .true => markLets e
               | .false => lazyLets .false e;
             eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n e') acc) k
-def arities : StrMap Nat → List Erased → StrMap Nat
+def arities : SMap Nat → List Erased → SMap Nat
   | ar, .nil => ar
-  | ar, .cons (.mk n e) rest => arities (StrMap.insert ar (Str.ofString n) (lamsOf e)) rest
+  | ar, .cons (.mk n e) rest => arities (SMap.insert ar n (lamsOf e)) rest
 def paramNames (k : Nat) : Nat → List String
   | .zero => .nil
   | .succ i => .cons ("p" +++ Nat.toString i) (paramNames k i)
@@ -1886,10 +1886,10 @@ def genCode : CG → List Doc → List Doc → List Erased → Code
 def ffiArity (ps : List String) (io : Bool) : Nat := lenL ps + (match io with
   | .true => 1
   | .false => 0)
-def ffiArities : StrMap Nat → List Foreign → StrMap Nat
+def ffiArities : SMap Nat → List Foreign → SMap Nat
   | ar, .nil => ar
   | ar, .cons f rest => match f with
-    | .fn n _ _ ps _ io _ => ffiArities (StrMap.insert ar (Str.ofString n) (ffiArity ps io)) rest
+    | .fn n _ _ ps _ io _ => ffiArities (SMap.insert ar n (ffiArity ps io)) rest
     | _ => ffiArities ar rest
 def ffiCType (k : String) : String := match strEq k "f" with
   | .true => "double"
@@ -2351,7 +2351,7 @@ def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
       -- (applications pushed into `case`s, as under reference counting: a match is then
       -- no closure, and its recursive calls are in tail position)
       let es := pushGlobals es0;
-      match genCode (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
+      match genCode (.mk .nil 0 (arities (ffiArities SMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
           List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false ffi) (List.append protos
@@ -2381,15 +2381,15 @@ def isNulE : ETm → Bool
     | .some _ => .true
     | .none => .false
   | _ => .false
-def consMap : StrMap ETm → List Erased → StrMap ETm
+def consMap : SMap ETm → List Erased → SMap ETm
   | m, .nil => m
   | m, .cons (.mk n e) rest => match lamsOf e with
     -- (a constant constructor: when it is a static object)
     | .zero => match isNulE e with
-      | .true => consMap (StrMap.insert m (Str.ofString n) e) rest
+      | .true => consMap (SMap.insert m n e) rest
       | .false => consMap m rest
     | .succ _ => match leafE (underLams (lamsOf e) e) with
-      | .true => consMap (StrMap.insert m (Str.ofString n) e) rest
+      | .true => consMap (SMap.insert m n e) rest
       | .false => consMap m rest
 -- **Small branching functions inlined, their arguments suspended** (reference counting
 -- mode): a global whose body, under its `λ`s, is a `case` on (a field of) a parameter
@@ -2420,12 +2420,12 @@ def caseShaped (k : Nat) (b : ETm) : Bool := match b with
     | .var i => Bool.and (Nat.lt i k) (smallBranches bs)
     | _ => .false
   | _ => .false
-def caseMap : StrMap ETm → List Erased → StrMap ETm
+def caseMap : SMap ETm → List Erased → SMap ETm
   | m, .nil => m
   | m, .cons (.mk n e) rest => match lamsOf e with
     | .zero => caseMap m rest
     | .succ _ => match caseShaped (lamsOf e) (underLams (lamsOf e) e) with
-      | .true => caseMap (StrMap.insert m (Str.ofString n) (.prim "lazyInl" (etms1 e))) rest
+      | .true => caseMap (SMap.insert m n (.prim "lazyInl" (etms1 e))) rest
       | .false => caseMap m rest
 -- `f a` with `f` a lambda: `a` put in place when cheap, else bound by a marked `let`
 def betaLz : ETm → ETm → ETm
@@ -2462,7 +2462,7 @@ def inlApp (h : ETm) (args : List ETm) (body0 : ETm) : ETm :=
     | .false => eappsL h args
   | .false => eappsL h args
 mutual
-def inlE (m : StrMap ETm) (t : ETm) : ETm := match t with
+def inlE (m : SMap ETm) (t : ETm) : ETm := match t with
   -- (a string literal stays one, for `rcE`)
   | .app f a => match stringConst t with
     | .some _ => t
@@ -2470,7 +2470,7 @@ def inlE (m : StrMap ETm) (t : ETm) : ETm := match t with
       | .mk h args =>
         let args2 := inlL m args;
         match h with
-        | .glob g => inlApp h args2 (StrMap.findD m (Str.ofString g) .erased)
+        | .glob g => inlApp h args2 (SMap.findD m g .erased)
         | _ => eappsL (inlE m h) args2
   | .lam b => .lam (inlE m b)
   | .letE v b => .letE (inlE m v) (inlE m b)
@@ -2478,16 +2478,16 @@ def inlE (m : StrMap ETm) (t : ETm) : ETm := match t with
   | .proj i x => .proj i (inlE m x)
   | .case s bs => .case (inlE m s) (inlEs m bs)
   | .prim op as => .prim op (inlEs m as)
-  | .glob g => inlConst t (StrMap.findD m (Str.ofString g) .erased)
+  | .glob g => inlConst t (SMap.findD m g .erased)
   | _ => t
-def inlEs (m : StrMap ETm) (ts : ETms) : ETms := match ts with
+def inlEs (m : SMap ETm) (ts : ETms) : ETms := match ts with
   | .nil => .nil
   | .cons t rest => .cons (inlE m t) (inlEs m rest)
-def inlL (m : StrMap ETm) (ts : List ETm) : List ETm := match ts with
+def inlL (m : SMap ETm) (ts : List ETm) : List ETm := match ts with
   | .nil => .nil
   | .cons t rest => .cons (inlE m t) (inlL m rest)
 end
-def inlGlobals (m : StrMap ETm) : List Erased → List Erased
+def inlGlobals (m : SMap ETm) : List Erased → List Erased
   | .nil => .nil
   | .cons (.mk n e) rest => .cons (.mk n (inlE m e)) (inlGlobals m rest)
 
@@ -2523,14 +2523,14 @@ def buildsEs : ETms → Bool
 end
 mutual
 -- the variables (levels) `t` consumes, added to `acc`
-def consumed (sigs : StrMap (List Bool)) (d : Nat) (t : ETm) (acc : List Nat) : List Nat := match t with
+def consumed (sigs : SMap (List Bool)) (d : Nat) (t : ETm) (acc : List Nat) : List Nat := match t with
   | .var i => match Nat.lt i d with
     | .true => lvIns (d - 1 - i) acc
     | .false => acc
   | .app f a => match spineE f (.cons a .nil) with
     | .mk h args => match h with
       | .glob g =>
-        let sig := StrMap.findD sigs (Str.ofString g) .nil;
+        let sig := SMap.findD sigs g .nil;
         match Nat.le (lenL sig) (lenL args) with
         | .true => consumedArgs sigs d sig args acc
         | .false => consumedArgs sigs d .nil args acc
@@ -2550,14 +2550,14 @@ def consumed (sigs : StrMap (List Bool)) (d : Nat) (t : ETm) (acc : List Nat) : 
   | .obj _ fs => consumedEs sigs d fs acc
   | .prim _ as => consumedEs sigs d as acc
   | _ => acc
-def consumedArgs (sigs : StrMap (List Bool)) (d : Nat) (sig : List Bool) (ts : List ETm) (acc : List Nat) : List Nat := match ts with
+def consumedArgs (sigs : SMap (List Bool)) (d : Nat) (sig : List Bool) (ts : List ETm) (acc : List Nat) : List Nat := match ts with
   | .nil => acc
   | .cons t rest => match headB sig with
     | .true => match t with
       | .var _ => consumedArgs sigs d (tailB sig) rest acc
       | _ => consumedArgs sigs d (tailB sig) rest (consumed sigs d t acc)
     | .false => consumedArgs sigs d (tailB sig) rest (consumed sigs d t acc)
-def consumedEs (sigs : StrMap (List Bool)) (d : Nat) (ts : ETms) (acc : List Nat) : List Nat := match ts with
+def consumedEs (sigs : SMap (List Bool)) (d : Nat) (ts : ETms) (acc : List Nat) : List Nat := match ts with
   | .nil => acc
   | .cons t rest => consumedEs sigs d rest (consumed sigs d t acc)
 def capLevels (d : Nat) (cs : List Nat) (acc : List Nat) : List Nat := match cs with
@@ -2582,10 +2582,10 @@ def countTrue : List Bool → Nat
     | .true => countTrue rest + 1
     | .false => countTrue rest
 inductive SigR where
-  | mk (sigs : StrMap (List Bool)) (borrowed : Nat)
-def sigsInit : StrMap (List Bool) → List Erased → StrMap (List Bool)
+  | mk (sigs : SMap (List Bool)) (borrowed : Nat)
+def sigsInit : SMap (List Bool) → List Erased → SMap (List Bool)
   | m, .nil => m
-  | m, .cons (.mk n e) rest => sigsInit (StrMap.insert m (Str.ofString n) (allTrue (lamsOf e))) rest
+  | m, .cons (.mk n e) rest => sigsInit (SMap.insert m n (allTrue (lamsOf e))) rest
 -- **Tail calls kept** (as Lean's `preserveTailCall`): a function calling itself in tail
 -- position with a borrowed parameter given something it would release after the call
 -- (a variable it owns, or a temporary) makes that parameter owned, so that nothing
@@ -2631,14 +2631,14 @@ def ownAt : List Bool → Nat → List Nat → List Bool
       | .true => .false
       | .false => b) (ownAt rest (i + 1) ps)
 -- one round: every function's parameters, from the current signatures
-def sigsRound (old : StrMap (List Bool)) : StrMap (List Bool) → Nat → List Erased → SigR
+def sigsRound (old : SMap (List Bool)) : SMap (List Bool) → Nat → List Erased → SigR
   | m, c, .nil => .mk m c
   | m, c, .cons (.mk n e) rest =>
     let k := lamsOf e;
     let sig0 := borSig (consumed old k (underLams k e) .nil) 0 k;
     let sig := ownAt sig0 0 (tailOwned sig0 n k k (underLams k e) .nil);
-    sigsRound old (StrMap.insert m (Str.ofString n) sig) (c + countTrue sig) rest
-partial def sigsFix (sigs : StrMap (List Bool)) (count : Nat) (es : List Erased) : StrMap (List Bool) :=
+    sigsRound old (SMap.insert m n sig) (c + countTrue sig) rest
+partial def sigsFix (sigs : SMap (List Bool)) (count : Nat) (es : List Erased) : SMap (List Bool) :=
   match sigsRound sigs sigs 0 es with
   | .mk s2 c2 => match Nat.beq c2 count with
     | .true => s2
@@ -2836,7 +2836,7 @@ def indvGlobals : List Erased → List Erased
 
 -- the same under reference counting: a constant global is built by `init_g` and kept
 -- (a root, released at exit); `get_g()` returns a new reference
-def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → List Erased → Code
+def genCodeRC (sigs : SMap (List Bool)) : CG → List Doc → List Doc → List Erased → Code
   | st, protos, defs, .nil => .mk protos defs st
   | st, protos, defs, .cons (.mk n e) rest =>
     let g := mangle n;
@@ -2851,7 +2851,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
     | .succ _ =>
       let names := paramNames k k;
       -- (no signature: every parameter owned)
-      let sig := match StrMap.findD sigs (Str.ofString n) .nil with
+      let sig := match SMap.findD sigs n .nil with
         | .nil => allFalse k
         | sg => sg;
       match rcHead (.mk (borLevels 0 sig) sigs .nil) st names k .nil .nil (markSelf n k sig (borLevels 0 sig) k (underLams k e)) with
@@ -2867,11 +2867,11 @@ def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;
-      let es := indvGlobals (decideGlobals (inlGlobals (caseMap (consMap StrMap.empty es1) es1) es1));
-      let sigs : StrMap (List Bool) := match borrow with
-        | .true => sigsFix (sigsInit StrMap.empty es) 0 es
-        | .false => StrMap.empty;
-      match genCodeRC sigs (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
+      let es := indvGlobals (decideGlobals (inlGlobals (caseMap (consMap SMap.empty es1) es1) es1));
+      let sigs : SMap (List Bool) := match borrow with
+        | .true => sigsFix (sigsInit SMap.empty es) 0 es
+        | .false => SMap.empty;
+      match genCodeRC sigs (.mk .nil 0 (arities (ffiArities SMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
           List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true ffi) (List.append protos

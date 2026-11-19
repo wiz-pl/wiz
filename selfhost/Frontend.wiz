@@ -89,15 +89,85 @@ inductive Lookup where
   | ok (i : Nat)
   | missing
   | privTo (mod : String)
+-- ## `SMap`: a map from `String` to values, hashing the key's characters
+--
+-- The compiler's scope, its table of inductive types/classes/derivers, the backend's
+-- arity table and its constructor/inlining maps are keyed by `String` and looked up once
+-- per identifier or codegen application. `StrMap` (lib/Std.wiz) takes a `Str` key, and
+-- `Str.ofString` **copies** the string: it walks the key's character list, builds a UTF-8
+-- buffer, allocates a `Str` and copies the text into it (see `Str_46_ofString` in
+-- `selfhost/rt.c` and `wiz_str_of_cstr` in the runtime), and the copy is hashed and
+-- compared and then thrown away.
+--
+-- `SMap` keys on the `String` itself. A bucket holds `(key, value)` pairs, chosen by a
+-- rolling hash of the key's code points (no conversion and no allocation), and the pairs
+-- are compared with `strEq`. The buckets are an `Array`, doubled when the map is half
+-- full; the public operations mirror `StrMap`'s (`empty`, `insert`, `findD`, `size`).
+-- `StrMap` stays for `Parse.wiz`'s packrat memo, whose key is a freshly built `Str`.
+inductive SMap (V : Type) where
+  | mk (bs : Array (List (String × V))) (n : Nat)
+
+def SMap.hashChars : List Char → Nat → Nat
+  | .nil, h => h
+  | .cons c cs, h => SMap.hashChars cs (Nat.land (Nat.add (Nat.mul h 33) (Char.code c)) 1073741823)
+def SMap.hash (s : String) : Nat := match s with
+  | .mk cs => SMap.hashChars cs 5381
+-- `k` empty buckets
+def SMap.buckets {V : Type} : Nat → Array (List (String × V))
+  | .zero => Array.empty
+  | .succ k => Array.push (SMap.buckets k) .nil
+def SMap.empty {V : Type} : SMap V := .mk (SMap.buckets 16) 0
+def SMap.size {V : Type} (m : SMap V) : Nat := match m with
+  | .mk _ n => n
+def SMap.slot {V : Type} (bs : Array (List (String × V))) (h : Nat) : Nat :=
+  Nat.mod h (Array.size bs)
+def SMap.findL {V : Type} (s : String) (d : V) : List (String × V) → V
+  | .nil => d
+  | .cons e rest => match strEq s e.1 with
+    | .true => e.2
+    | .false => SMap.findL s d rest
+def SMap.findD {V : Type} (m : SMap V) (s : String) (d : V) : V := match m with
+  | .mk bs _ => SMap.findL s d (Array.getD bs (SMap.slot bs (SMap.hash s)) .nil)
+-- the bucket with `s` set to `v`, and whether `s` was new
+def SMap.putL {V : Type} (s : String) (v : V) : List (String × V) → List (String × V) × Bool
+  | .nil => (.cons (s, v) .nil, .true)
+  | .cons e rest => match strEq s e.1 with
+    | .true => (.cons (e.1, v) rest, .false)
+    | .false => match SMap.putL s v rest with
+      | p => (.cons e p.1, p.2)
+-- insert every pair of `l` into `m` (the buckets are already large enough)
+partial def SMap.addL {V : Type} (m : SMap V) : List (String × V) → SMap V
+  | .nil => m
+  | .cons e rest => match m with
+    | .mk bs n =>
+      let i := SMap.slot bs (SMap.hash e.1);
+      SMap.addL (.mk (Array.set bs i (.cons e (Array.getD bs i .nil))) (n + 1)) rest
+partial def SMap.rehash {V : Type} (m : SMap V) (old : Array (List (String × V))) (i : Nat) : SMap V :=
+  match Nat.lt i (Array.size old) with
+  | .true => SMap.rehash (SMap.addL m (Array.getD old i .nil)) old (i + 1)
+  | .false => m
+def SMap.insert {V : Type} (m : SMap V) (s : String) (v : V) : SMap V := match m with
+  | .mk bs n =>
+    let i := SMap.slot bs (SMap.hash s);
+    match SMap.putL s v (Array.getD bs i .nil) with
+    | p =>
+      let n1 := match p.2 with
+        | .true => n + 1
+        | .false => n;
+      let bs1 := Array.set bs i p.1;
+      match Nat.lt (Array.size bs1) (Nat.mul 2 n1) with
+      | .true => SMap.rehash (.mk (SMap.buckets (Nat.mul 2 (Array.size bs1))) 0) bs1 0
+      | .false => .mk bs1 n1
+
 -- the names in scope: the local binders (innermost first, with their number), the
 -- globals by kernel name (each with its position plus one; there are `count`), a marker
 -- for every source name declared in each module (a source name is declared at most once
 -- per module, private or not: `Scope.declaredIn`), the private declarations (for the
 -- diagnostic), and the module being checked (`Scope.cur`)
 inductive Scope where
-  | mk (locals : List String) (depth : Nat) (globals : StrMap Nat) (names : StrMap Nat)
+  | mk (locals : List String) (depth : Nat) (globals : SMap Nat) (names : SMap Nat)
       (privs : List PrivName) (cur : String) (count : Nat)
-def Scope.empty : Scope := .mk .nil 0 StrMap.empty StrMap.empty .nil "" 0
+def Scope.empty : Scope := .mk .nil 0 SMap.empty SMap.empty .nil "" 0
 def Scope.bind (sc : Scope) (x : String) : Scope := match sc with
   | .mk ls d gs nms pvs cur n => .mk (.cons x ls) (d + 1) gs nms pvs cur n
 -- the module being checked (`private` is module-scoped)
@@ -111,7 +181,7 @@ def Scope.localNames : Scope → List String
 def nameKey (m x : String) : String := "module:" +++ m +++ ":" +++ x
 -- whether the source name `x` was declared in the module `m`
 def Scope.declaredIn (sc : Scope) (m x : String) : Bool := match sc with
-  | .mk _ _ _ nms _ _ _ => match StrMap.findD nms (Str.ofString (nameKey m x)) 0 with
+  | .mk _ _ _ nms _ _ _ => match SMap.findD nms (nameKey m x) 0 with
     | .zero => .false
     | _ => .true
 -- `key` is the kernel name (mangled when private), `x` the source name
@@ -120,12 +190,12 @@ def Scope.addGlobal (sc : Scope) (key x : String) (m : String) (priv : Bool) : S
     let pvs' := match priv with
       | .true => .cons (.mk x m) pvs
       | .false => pvs;
-    .mk ls d (StrMap.insert gs (Str.ofString key) (n + 1))
-      (StrMap.insert nms (Str.ofString (nameKey m x)) 1) pvs' cur (n + 1)
+    .mk ls d (SMap.insert gs key (n + 1))
+      (SMap.insert nms (nameKey m x) 1) pvs' cur (n + 1)
 -- the global with the kernel name `key` (a closed scope, like `Globals.scope`), by its
 -- position from the latest: for the internals that read a term's constant name
 def Scope.find (sc : Scope) (key : String) : Option Nat := match sc with
-  | .mk _ _ gs _ _ _ n => match StrMap.findD gs (Str.ofString key) 0 with
+  | .mk _ _ gs _ _ _ n => match SMap.findD gs key 0 with
     | .zero => .none
     | .succ p => .some (n - 1 - p)
 -- a private declaration of `x` in a module other than `cur`
@@ -151,9 +221,9 @@ def stripScope (n : String) : String := match n with
 def lookupExact (sc : Scope) (x : String) : Lookup := match sc with
   | .mk ls d gs _ pvs cur n => match indexOf ls x 0 with
     | .some i => .ok i
-    | .none => match StrMap.findD gs (Str.ofString (privName cur x)) 0 with
+    | .none => match SMap.findD gs (privName cur x) 0 with
       | .succ p => .ok (d + (n - 1 - p))
-      | .zero => match StrMap.findD gs (Str.ofString x) 0 with
+      | .zero => match SMap.findD gs x 0 with
         | .succ p => match privMod x with
           | .some m => match strEq m cur with
             | .true => .ok (d + (n - 1 - p))
@@ -544,21 +614,21 @@ inductive Foreign where
 -- pre-registered here. The value is the deriver's name (`deriveBEq`, …), as
 -- `attribute [deriver C] f` records it: dispatch is by **name**, like the host's table
 -- (`CommandState.derivers`), not by the class's method shape.
-def builtinDerivers : StrMap (Option String) :=
-  StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert (StrMap.insert StrMap.empty
-    (Str.ofString "Inhabited") (.some "deriveInhabited"))
-    (Str.ofString "BEq") (.some "deriveBEq"))
-    (Str.ofString "Repr") (.some "deriveRepr"))
-    (Str.ofString "DecidableEq") (.some "deriveDecidableEq"))
-    (Str.ofString "Compare") (.some "deriveCompare")
+def builtinDerivers : SMap (Option String) :=
+  SMap.insert (SMap.insert (SMap.insert (SMap.insert (SMap.insert SMap.empty
+    "Inhabited" (.some "deriveInhabited"))
+    "BEq" (.some "deriveBEq"))
+    "Repr" (.some "deriveRepr"))
+    "DecidableEq" (.some "deriveDecidableEq"))
+    "Compare" (.some "deriveCompare")
 -- the globals so far: by position (the first is `0`), their names in scope, the
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
 -- reads them, since the frontend is pure), and the derivers by class
 inductive Globals where
-  | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
-       (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String))
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+  | mk (all : Array Global) (scope : Scope) (inds : SMap (Option IndInfo)) (ffi : List Foreign)
+       (classes : SMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
+       (priv : Bool) (ders : SMap (Option String))
+def Globals.empty : Globals := .mk Array.empty Scope.empty SMap.empty .nil SMap.empty .nil .nil .false builtinDerivers
 def Globals.scope : Globals → Scope
   | .mk _ sc _ _ _ _ _ _ _ => sc
 -- the module whose commands are being elaborated (`private` is module-scoped)
@@ -583,12 +653,12 @@ def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := mat
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d
+    .mk all sc (SMap.insert inds k (.some info)) ffi cls ins hs p d
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ => match SMap.findD inds (privName (Scope.cur sc) T) .none with
     | .some info => .some info
-    | .none => StrMap.findD inds (Str.ofString T) .none
+    | .none => SMap.findD inds T .none
 def Globals.ffi : Globals → List Foreign
   | .mk _ _ _ ffi _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
@@ -608,18 +678,18 @@ def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs 
   | .mk all sc inds ffi cls ins _ p d => .mk all sc inds ffi cls ins hs p d
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ => match SMap.findD cls T .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi (SMap.insert cls T (.some info)) ins hs p d
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders => match SMap.findD ders C .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f))
+  | .mk all sc inds ffi cls ins hs p d => .mk all sc inds ffi cls ins hs p (SMap.insert d C (.some f))
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
   | .mk _ _ _ _ _ ins _ _ _ => ins
@@ -3596,7 +3666,7 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
     | .mk _ _ inds _ _ _ _ _ _ =>
-      match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
+      match SMap.findD inds (privName m ("structure " +++ base)) .none with
       | .some info => structFieldsOf info
       | .none => .none
   | .none => match Globals.ind gs (String.append "structure " T) with
@@ -6151,7 +6221,7 @@ inductive AxR where
 -- definition `f : T` only with a term of `T` it checks (`checkPartial`), found here by a
 -- search over the shape of `T`: a variable of the type's `Π`s, `fun x => w`, a pair,
 -- `tt`, a tag, `∞`, `Unit` for a sort, or a global whose type ends in `T`'s head (a
--- constructor, `StrMap.empty`), with the arguments its conclusion fixes taken from `T`
+-- constructor, `SMap.empty`), with the arguments its conclusion fixes taken from `T`
 -- and the others found again, to a bounded depth. Each candidate is checked: so `T.mk :
 -- T .t` is no witness of `T .f`.
 inductive WPeel where
@@ -6229,23 +6299,23 @@ def sortWit (l : Lvl) : Option Tm := match l with
 -- conclusion (built once per partial definition, so the search doesn't scan every
 -- global for every type it looks for)
 inductive WEnv where
-  | mk (all : Array Global) (ix : StrMap (List Nat))
+  | mk (all : Array Global) (ix : SMap (List Nat))
 def globalHead (g : Global) : Option String := match g with
   | .mk _ _ gty _ _ _ _ => match tmConcl gty 0 with
     | .mk concl _ => tmHeadName concl
 -- (from the latest global down, so each list is in declaration order)
-partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : StrMap (List Nat) := match i with
+partial def headIndex (all : Array Global) (i : Nat) (m : SMap (List Nat)) : SMap (List Nat) := match i with
   | .zero => m
   | .succ j => headIndex all j (match globalHead (Array.getD all j (.mk "?" .nil .star .star .star .nil .nil)) with
     | .none => m
-    | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
+    | .some h => SMap.insert m h (.cons j (SMap.findD m h .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) SMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
   | .mk _ ix => match h with
-    | .mk n _ => StrMap.findD ix (Str.ofString n) .nil
+    | .mk n _ => SMap.findD ix n .nil
 mutual
 def wit (we : WEnv) (c : TCtx) (ty : Val) (fuel : Nat) : Option Tm := match fuel with
   | .zero => .none
@@ -9027,14 +9097,14 @@ inductive ModState where
   | unseen
   | loading
   | loaded
-def modStateOf (vis : StrMap Nat) (name : String) : ModState :=
-  match StrMap.findD vis (Str.ofString name) 0 with
+def modStateOf (vis : SMap Nat) (name : String) : ModState :=
+  match SMap.findD vis name 0 with
   | .zero => .unseen
   | .succ k => match k with
     | .zero => .loading
     | _ => .loaded
-def modMark (vis : StrMap Nat) (name : String) (v : Nat) : StrMap Nat :=
-  StrMap.insert vis (Str.ofString name) v
+def modMark (vis : SMap Nat) (name : String) (v : Nat) : SMap Nat :=
+  SMap.insert vis name v
 
 def modJoinArrows : List String → String
   | .nil => ""
@@ -9055,7 +9125,7 @@ def modCycleMsg (stack : List String) (name : String) : String :=
 -- the loader's state: the output, globals and tables (`Run`), each module's state, the
 -- current import path, and the modules loaded so far (in load order)
 inductive ModLoad where
-  | mk (run : Run) (vis : StrMap Nat) (stack : List String) (order : List String)
+  | mk (run : Run) (vis : SMap Nat) (stack : List String) (order : List String)
 
 -- one module's commands, its imports already loaded (skipped); the Prelude needs the `do`
 -- grammar and the `←` token, as the inline import did, and its output is silent (it
@@ -9107,9 +9177,9 @@ end
 def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil (Globals.withHeaders Globals.empty headers)
-    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) SMap.empty .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
+  modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) SMap.empty .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)
 partial def modHeaderNamesAt : List Char → List String
   | .nil => .nil
