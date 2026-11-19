@@ -3,7 +3,7 @@
 
 The runtime embedded in the compiler (`Wiz.C.program` pastes it at the top of every C
 program). It is split into the ABI header `runtime/wiz_rt.h` (value representation, tags,
-object layouts, and — below a marker — prototypes for embedders) and six area files,
+object layouts, and — below a marker — prototypes for embedders) and seven area files,
 in the order of the old `runtime/wiz.c`:
 
 * `rt_core.inc` — leaks, allocation, reference counting, immortality, CAFs;
@@ -13,6 +13,9 @@ in the order of the old `runtime/wiz.c`:
 * `rt_data.inc` — constructors, `String`, the C ABI, `Bytes`/`Array`/`Str`/maps/`Intern`,
   the library helpers and the proof budget;
 * `rt_sys.inc` — POSIX: environment, files, processes, descriptors, output;
+* `rt_storage.inc` — the storage engine's read path: a read-only `mmap`, `munmap`, the
+  mapped length and the unaligned little-endian `u64` load (with its bounds-checked
+  form);
 * `rt_con.inc` — threads, channels, `MVar`s, locks, and the entry points.
 
 `runtime` is the header's representation part followed by the parts, in that order —
@@ -41,7 +44,7 @@ def inlineHeader : String :=
   | _ => panic! "runtime/wiz_rt.h: the 'declarations for embedders' marker is missing"
 
 /-- The runtime, as it is pasted at the top of every generated C program: the header's
-representation part, then the six area files in the old order. (Each `include_str` is
+representation part, then the seven area files in the old order. (Each `include_str` is
 parenthesized: unparenthesized, its argument runs to the end of the expression.) -/
 def runtime : String :=
   inlineHeader ++
@@ -50,6 +53,7 @@ def runtime : String :=
     (include_str "rt_words.inc") ++
     (include_str "rt_data.inc") ++
     (include_str "rt_sys.inc") ++
+    (include_str "rt_storage.inc") ++
     (include_str "rt_con.inc")
 
 end Wiz.C

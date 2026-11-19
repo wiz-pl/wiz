@@ -1,0 +1,2 @@
+def f (i : Nat) (a : Array U32) : U32 :=
+  Array.getD a (Nat.add i (Nat.succ i)) (U32.ofNat 0)

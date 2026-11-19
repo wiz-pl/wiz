@@ -1,0 +1,109 @@
+-- Clash-style signals (lib/Hdl/Signal.wiz, stage 34a): counters as Mealy machines,
+-- registers, combinational `Hw` code and bundles on signals, a temporal property, and
+-- wiz-rv's baud generator driven as a signal through `Signal.ofCircuit`. Checked by the
+-- `hdl-signal` test group, which also checks that a size-keeping register, a
+-- size-preserving `map` (until sized `scofix`, lane L2) and a domain mismatch are
+-- rejected. Doc: docs/stages/34-hdl-signals.md.
+import Hdl.Core
+import Hdl.Uart
+import Hdl.Signal
+import Nat
+
+def Sys : ClockDomain := ClockDomain.sys
+
+------------------------------------------------------------------------------------
+-- Counters
+
+-- an unbounded counter, as a Mealy machine with no input
+def natCounter {d : ClockDomain} : Signal d Nat :=
+  Signal.mealy (fun (s : Nat) (u : Unit) => (Nat.succ s, s)) Nat.zero (Signal.pure ())
+
+-- an 8-bit counter that wraps
+def counter8 {d : ClockDomain} : Signal d (BitVec 8) :=
+  Signal.mealy (fun (s : BitVec 8) (u : Unit) => (BitVec.add s (BitVec.ofNat 8 1), s)) (BitVec.ofNat 8 0) (Signal.pure ())
+
+def natCounter_from {d : ClockDomain} : (t : Nat) → (s : Nat) →
+    Signal.at (Signal.mealy (fun (s : Nat) (u : Unit) => (Nat.succ s, s)) s (Signal.pure () : Signal d Unit)) t = Nat.add t s
+  | .zero, s => rfl
+  | .succ t, s => Eq.trans (natCounter_from t (Nat.succ s)) (Nat.add_succ t s)
+
+-- the counter is `t` at every cycle `t`
+def natCounter_at {d : ClockDomain} (t : Nat) : Signal.at (natCounter : Signal d Nat) t = Nat.add t Nat.zero :=
+  natCounter_from t Nat.zero
+
+-- the same as a temporal property (lib/Hdl/Temporal.wiz): always, the next value is one more
+def natCounter_steps {d : ClockDomain} :
+    Signal.sat (natCounter : Signal d Nat) (TL.always (TL.act (fun (a b : Nat) => b = Nat.succ a))) :=
+  fun (k : Nat) =>
+    Eq.trans (natCounter_at (Nat.succ (Nat.add k 0))) (Eq.congrArg Nat.succ (Eq.symm (natCounter_at (Nat.add k 0))))
+
+-- every observation is defined
+def sample_counter8 : List.length (Signal.sample 12 (counter8 : Signal Sys (BitVec 8))) = 12 :=
+  Signal.sample_length 12 (counter8 : Signal Sys (BitVec 8))
+
+#eval Signal.sample 10 (natCounter : Signal Sys Nat)
+#eval Signal.sample 10 (Signal.map BitVec.toNat (counter8 : Signal Sys (BitVec 8)))
+
+------------------------------------------------------------------------------------
+-- Registers
+
+def nat7 : Nat := Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ .zero))))))
+def b1 (n : Nat) : BitVec 1 := BitVec.ofNat 1 n
+
+-- 7, then the counter one cycle late
+#eval Signal.sample 6 (Signal.register nat7 (natCounter : Signal Sys Nat))
+-- reset high in cycles 1 and 3: the output is 0 one cycle later
+#eval Signal.sample 6 (Signal.registerR 0 (Signal.fromList (b1 0) (List.cons (b1 0) (List.cons (b1 1) (List.cons (b1 0) (List.cons (b1 1) List.nil))))) (natCounter : Signal Sys Nat))
+-- enable low in cycles 0 and 1: the output stays 7 through cycle 2, then follows one cycle late
+#eval Signal.sample 6 (Signal.registerEn nat7 (Signal.fromList (b1 1) (List.cons (b1 0) (List.cons (b1 0) List.nil))) (natCounter : Signal Sys Nat))
+
+-- `register` is `Circuit.delay`, for every input
+def delay8 (xs : Signal Sys (BitVec 8)) :
+    Signal.Eqv (Signal.ofCircuit (Circuit.delay (HwTy.bits 8) (BitVec.ofNat 8 5)) xs) (Signal.register (BitVec.ofNat 8 5) xs) :=
+  Signal.ofCircuit_delay (HwTy.bits 8) (BitVec.ofNat 8 5) xs
+
+------------------------------------------------------------------------------------
+-- Combinational `Hw` code on signals, and bundles
+
+def B8 : HwTy := HwTy.bits 8
+def Bit : HwTy := HwTy.bits 1
+
+-- ordinary tagless hardware code: one more, and whether it is 3
+def incr {r : HwTy → Type} [Hw r] (x : r B8) : r B8 := Hw.add x (Hw.lit 8 1)
+def isThree {r : HwTy → Type} [Hw r] (x : r B8) : r Bit := Hw.eq x (Hw.lit 8 3)
+
+#eval Signal.sample 5 (Signal.map BitVec.toNat (incr (r := Signal.Sig Sys) counter8))
+#eval Signal.sample 5 (Signal.map BitVec.toNat (isThree (r := Signal.Sig Sys) counter8))
+
+-- a structure of signals (Clash's unbundled record) and its bundle
+structure Pair8 (r : HwTy → Type) where
+  val : r B8
+  hit : r Bit
+  deriving Bundle
+
+def pairs : Pair8 (Signal.Sig Sys) := Pair8.mk (incr (r := Signal.Sig Sys) counter8) (isThree (r := Signal.Sig Sys) counter8)
+-- bundled into one signal of the structure's code, and back
+def packed : Signal Sys (HwTy.El Pair8.code) := Signal.bundle Pair8.bundle pairs
+#eval Signal.sample 5 (Signal.map BitVec.toNat (Signal.unbundle Pair8.bundle packed).hit)
+#eval Signal.sample 3 (Signal.map BitVec.toNat (Signal.unbundle2 (Signal.map (fun (n : BitVec 8) => (n, BitVec.add n n)) (counter8 : Signal Sys (BitVec 8)))).2)
+
+------------------------------------------------------------------------------------
+-- The bridge: wiz-rv's baud generator (Rv.Uart.baudStep = Uart.baudStep Uart.cntW10)
+-- driven as a signal: a 10-bit counter, period 4, clock enable high.
+
+def ones {d : ClockDomain} : Signal d (BitVec 1) := Signal.pure (BitVec.ofNat 1 1)
+def baud4 {d : ClockDomain} (ce : Signal d (BitVec 1)) : Signal d (BitVec 1) :=
+  Signal.ofCircuit (Uart.baudCw 10 4) ce
+
+-- the signal is the circuit's trace at every cycle, for every input
+def baud4_trace {d : ClockDomain} (ce : Signal d (BitVec 1)) (t : Nat) :
+    Signal.at (baud4 ce) t = Circuit.trace (Uart.baudCw 10 4) (Signal.toTrace ce) t :=
+  Signal.ofCircuit_at (Uart.baudCw 10 4) ce t
+
+-- and agrees with the list simulation on the first ten cycles (kernel-checked)
+def baud4_run :
+    Signal.sample 10 (baud4 (ones : Signal Sys (BitVec 1))) = Circuit.run (Uart.baudCw 10 4) (Signal.sample 10 (ones : Signal Sys (BitVec 1))) :=
+  rfl
+
+#eval Signal.sample 10 (Signal.map BitVec.toNat (baud4 (ones : Signal Sys (BitVec 1))))
+#eval List.length (Circuit.netlist "baud" (Uart.baudCw 10 4)).nodes

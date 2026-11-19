@@ -168,10 +168,11 @@ release` they come from the release tarballs and never from Nix). The package ad
 tar and curl to tower's `PATH`; `nix` and `lake` are yours. `tower self shims` is still
 there for shims in `~/.tower/bin` (they then call the tower given with `--self`).
 
-**With the install script** (no Nix):
-`curl -sSfL https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh | sh`
-(or `| sh -s -- v0.2.0` for a tag). It downloads the tarball, runs `tower self install`
-and then `tower default nightly`.
+**With the install script** (no Nix; see docs/install.md for the hash that pins it):
+`curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/wiz-pl/wiz/master/scripts/tower-init.sh`,
+`sha256sum -c` against that hash, then `sh tower-init.sh` (or
+`sh tower-init.sh v0.2.0` for a tag). It downloads the tarball (refusing a missing or
+mismatched `.sha256`), runs `tower self install` and then `tower default nightly`.
 
 **From a release tarball**: unpack `wiz-x86_64-linux.tar.gz`. Its `bin/` already works
 on its own (`bin/wiz`, `bin/grail` and `bin/tower`). Then run

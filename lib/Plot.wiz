@@ -850,7 +850,7 @@ def Plot.axesSvg (c : Plot.Chart) (r : Plot.Rect) (xb yb : Plot.Bounds) : List S
             (String.append (Plot.attr "font-size" "10")
               (String.append (Plot.attr "fill" "#333")
                 (String.append ">" (String.append (Plot.esc (Plot.showDec t.mant t.exp)) "</text>"))))))));
-    List.cons tick (List.cons label (List.nil : List String))) (Plot.xTicks c);
+    List.cons tick (List.cons label ([] : List String))) (Plot.xTicks c);
   let yticks := List.map (fun t =>
     let y := Plot.yAt c yb t.value;
     let tick := String.append "<line" (String.append (Plot.attr "x1" (Nat.repr (Nat.sub left 4)))
@@ -865,7 +865,7 @@ def Plot.axesSvg (c : Plot.Chart) (r : Plot.Rect) (xb yb : Plot.Bounds) : List S
             (String.append (Plot.attr "font-size" "10")
               (String.append (Plot.attr "fill" "#333")
                 (String.append ">" (String.append (Plot.esc (Plot.showDec t.mant t.exp)) "</text>"))))))));
-    List.cons tick (List.cons label (List.nil : List String))) (Plot.yTicks c);
+    List.cons tick (List.cons label ([] : List String))) (Plot.yTicks c);
   List.append xgrid (List.append ygrid
     (List.append border (List.append (List.concat xticks) (List.concat yticks))))
 

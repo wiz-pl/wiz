@@ -16,13 +16,22 @@ namespace Tests.Elab
 toolchains over the same input tree in a fresh directory and compares what a user sees:
 the exit code, standard output, standard error, the cache entries and the artifacts.
 The cases are picked by what a user hits first — `check` on a bad file, `build` on a good
-one, the cache flags — and by the driver items of the self-hosting parity audit, whose
-labels the cases cite: D2 subcommands, D3 flags, D4 build artifacts, D5 the elaboration
-cache, D6 diagnostics, D7 exit codes (and, for the skips, A14 modules, C5 the LLVM/IR
-backends, C9 `--lib`/`--no-main`, C12 the native operations, D8 LSP/doc). The host's newer
-flags are covered too: `--target c` works in both, `--target llvm|wasm` and
-`--cache-verify strict` are the host's backend/manifest features the self-hosted
-toolchain has not got (C5, D5), and each is an asserted skip rather than a silent pass.
+one, the cache flags, the flags the docs promise — and by the driver items of the
+self-hosting parity audit, whose labels the cases cite: D2 subcommands, D3 flags, D4
+build artifacts, D5 the elaboration cache, D6 diagnostics, D7 exit codes (and A14
+modules, C5 the LLVM/IR backends, C9 `--lib`/`--no-main`, C12 the native operations, D8
+LSP/doc).
+
+## A difference is asserted, not skipped
+
+A skip is for a case that could not run (no C compiler, no collector) and for nothing
+else: it is not a pass, and an allow-list entry that excuses 14 of 30 cases hides the
+group. A known parity difference is therefore an **expected difference**: the case
+checks the exact symptom (the exit code, the message, the artifact) and records
+`expected-difference: …` with `Tests.note`, then passes. If the driver catches up the
+assertion stops holding and the case fails — the prompt to promote it — whereas a skip
+would stay silent. This group has no `.github/skip-allowlist.json` entry; the two `run`
+cases still skip on a host without the collector, as they must.
 
 ## What "normalised" means here
 
@@ -32,24 +41,27 @@ stable `[code]` the Lean-hosted CLI does not print (`Msg.render`). A diagnostic 
 
     file:line:col: severity: message [code]
 
-is therefore compared as `file:line:col: severity: kind`, where `kind` is the code (or,
-for the host, the same `ErrorCode` derived from its wording). Driver lines that are not
-diagnostics (`unknown flag: …`, the version line) are compared verbatim, with
-`wiz-selfhost` read as `wiz`. Two blocks are not compared:
+is compared as `file:line:col: severity: kind`, where `kind` is the code (or, for the
+host, the same `ErrorCode` derived from its wording). `messages := true` also compares
+the message text (the driver's `[code]` dropped, the tool name unified) for the cases
+where both sides word it identically; the cases whose wording differs leave it off.
+Driver lines that are not diagnostics (`unknown flag: …`, the version line) are compared
+verbatim, with `wiz-selfhost` read as `wiz`. Two blocks are not compared by default:
 
 * **the usage text** after a usage error (everything from the line that starts `usage`):
-  the driver documents the subset it has (no `parse`/`doc`/`fmt`/`lsp`, no `--llvm`);
-  the cases check the message line and the exit code, and the help case says so;
+  the driver documents the subset it has (no `parse`/`doc`/`fmt`/`lsp`, no `--llvm`).
+  The help case pins the driver's whole usage text and says which host commands it
+  lacks, so this is a checked difference, not an unchecked block;
 * **indented continuation lines** of a message (`type mismatch`'s `expected:` /
   `inferred:` lines), since the host's elaborator and the self-hosted one split a
-  message differently.
+  message differently. `continuations := true` compares them for a case where they
+  match.
 
 `columns := false` compares `file:line` only: the self-hosted frontend reports what
 failed at the start of its **command** (D6), the host at the failing term. Such a case
-asserts the code, streams, line, severity and kind, then records a `skip` with the
-reason — a difference that is known is never silent. A case whose artifact legitimately
-differs (D4: `build` writes C, not an executable) asserts what it can and skips the same
-way.
+asserts the code, streams, line, severity and kind, then records the expected
+difference. A case whose artifact legitimately differs (D4: `build` writes C, not an
+executable) asserts what it can and records it the same way.
 
 Every case gives both tools a private `HOME` (the default cache is `~/.cache/wiz` for
 both), so the host's shared cache is never touched.
@@ -71,6 +83,11 @@ structure CliDiffSpec where
   shArgs : Array String := #[]
   /-- Compare the diagnostic's column too (false: the self-hosted frontend's granularity) -/
   columns : Bool := true
+  /-- Compare the message text too (the driver's `[code]` dropped, the tool name unified):
+  only for the cases whose wording both frontends already share -/
+  messages : Bool := false
+  /-- Compare a message's indented continuation lines (`expected:` / `inferred:`) too -/
+  continuations : Bool := false
 
 /-- The Lean-hosted `wiz`, beside the test driver. -/
 def cliDiffHost : IO System.FilePath := do
@@ -167,31 +184,46 @@ def cliDiffKind (msg : String) : String :=
     else cliDiffKindText msg
   | [] => cliDiffKindText msg
 
-/-- One line, normalised: a diagnostic to `file:level: severity: kind` (or
-`file:line:col: severity: kind`), anything else verbatim with the tool name unified. -/
-def cliDiffLine (columns : Bool) (l : String) : String :=
+/-- A diagnostic's message without the driver's trailing ` [code]` (the host prints no
+code), so that a case can compare the wording both sides share. -/
+def cliDiffText (msg : String) : String :=
+  let parts := msg.splitOn " ["
+  match parts.reverse with
+  | last :: _ =>
+    if parts.length > 1 && last.endsWith "]" then " [".intercalate parts.dropLast
+    else msg
+  | [] => msg
+
+/-- One line, normalised: a diagnostic to `file:line: severity: kind` (or
+`file:line:col: severity: kind`), plus its message text when `messages` is set; anything
+else verbatim with the tool name unified. -/
+def cliDiffLine (columns messages : Bool) (l : String) : String :=
   match l.splitOn ": " with
   | loc :: sev :: rest =>
     if rest.isEmpty || !(["error", "warning", "info"].contains sev) then cliDiffTool l
     else
       let msg := ": ".intercalate rest
+      let what := if messages then s!"{cliDiffKind msg}: {cliDiffTool (cliDiffText msg)}"
+        else cliDiffKind msg
       match loc.splitOn ":" with
       | [f, ln, col] =>
-        if columns then s!"{f}:{ln}:{col}: {sev}: {cliDiffKind msg}"
-        else s!"{f}:{ln}: {sev}: {cliDiffKind msg}"
+        if columns then s!"{f}:{ln}:{col}: {sev}: {what}"
+        else s!"{f}:{ln}: {sev}: {what}"
       | _ => cliDiffTool l
   | _ => cliDiffTool l
 
-/-- A stream, normalised (see the module docs). -/
-def cliDiffNormal (columns : Bool) (s : String) : String :=
+/-- A stream, normalised (see the module docs). Indented continuation lines are dropped
+unless `continuations` is set (the two elaborators split a message differently). -/
+def cliDiffNormal (columns messages continuations : Bool) (s : String) : String :=
   let ls := cliDiffBeforeUsage (s.splitOn "\n")
   let ls := ls.filterMap fun l =>
-    if l.isEmpty || l.startsWith "  " then none else some (cliDiffLine columns l)
+    if l.isEmpty || (!continuations && l.startsWith "  ") then none
+    else some (cliDiffLine columns messages l)
   "\n".intercalate ls
 
 def cliDiffOneStream (spec : CliDiffSpec) (name ho so : String) : IO Unit := do
-  let hn := cliDiffNormal spec.columns ho
-  let sn := cliDiffNormal spec.columns so
+  let hn := cliDiffNormal spec.columns spec.messages spec.continuations ho
+  let sn := cliDiffNormal spec.columns spec.messages spec.continuations so
   unless hn == sn do
     throw (IO.userError s!"{name} differs (args {" ".intercalate spec.args.toList}):\n-- wiz\n{hn}\n-- wiz-selfhost\n{sn}\n-- raw wiz\n{ho}\n-- raw wiz-selfhost\n{so}")
 
@@ -201,6 +233,13 @@ def cliDiffSame (spec : CliDiffSpec) (h s : CliDiffRun) : IO Unit := do
     throw (IO.userError s!"exit code differs (args {" ".intercalate spec.args.toList}): wiz {h.code}, wiz-selfhost {s.code}\n-- wiz stdout\n{h.out}\n-- wiz stderr\n{h.err}\n-- wiz-selfhost stdout\n{s.out}\n-- wiz-selfhost stderr\n{s.err}")
   cliDiffOneStream spec "stdout" h.out s.out
   cliDiffOneStream spec "stderr" h.err s.err
+
+/-- A known parity difference, asserted rather than skipped: the case checked the exact
+symptom (exit code, message, artifact) above and now records it. If the driver catches
+up, one of those assertions fails first — that is the prompt to promote the case — where
+a skip would stay silent. The case name is the `--timings` record's `case`. -/
+def cliDiffKnown (symptom : String) : IO Unit :=
+  Tests.note s!"expected-difference: {symptom}"
 
 /-- A file of a run, if it was produced. -/
 def cliDiffRead (r : CliDiffRun) (name : String) : IO (Option String) := do
@@ -262,6 +301,41 @@ def square (n : Nat) : Nat := Nat.mul n n
 export \"wiz_square\" square : Nat → Nat
 "
 
+/-- The driver's usage text, verbatim (`selfhost/Cli.wiz` `usageText`): the help case
+pins it, so an unintended wording change is a test failure and the expected
+subcommand surface is checked line by line. -/
+def cliDiffDriverHelp : String :=
+  "usage: wiz-selfhost COMMAND FILE [OPTIONS]\n" ++
+  "\n" ++
+  "  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on\n" ++
+  "                                  standard error; exit 1 if it has errors)\n" ++
+  "  wiz-selfhost build FILE -o OUT  write the generated C to OUT\n" ++
+  "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)\n" ++
+  "  wiz-selfhost version            print the version (also --version)\n" ++
+  "  wiz-selfhost help               this text (also -h, --help)\n" ++
+  "  wiz-selfhost lsp                a language server on stdin/stdout: initialize,\n" ++
+  "                                  full-text didOpen/didChange/didClose,\n" ++
+  "                                  publishDiagnostics, plainGoal/plainTermGoal (D8)\n" ++
+  "\n" ++
+  "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" ++
+  "  in the working directory),\n" ++
+  "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" ++
+  "  the Lean-hosted `wiz`'s), --cache-ro DIR (a read-only layer, repeatable:\n" ++
+  "  searched after --cache in order, never written), --no-cache (both lists),\n" ++
+  "  --cache-prune DAYS (remove the write cache's keyed entries older than DAYS\n" ++
+  "  days before the command; a layer is never pruned),\n" ++
+  "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" ++
+  "  strict: only manifested entries), --target c (the only backend;\n" ++
+  "  --llvm/--wasm/--split are the host's and are refused, C5),\n" ++
+  "  -v (cache hits and misses), --types (each declaration's type),\n" ++
+  "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" ++
+  "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" ++
+  "  --native-fuel: the self-hosted evaluator has no step counter),\n" ++
+  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" ++
+  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" ++
+  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" ++
+  "\n" ++
+  "without a command: input.wiz in the working directory to standard output\n\n"
 def cliDiffGroup : Group where
   name := "selfhost-cli-diff"
   exercise := "stage 21 (D2-D7): the self-hosted driver against the Lean-hosted wiz"
@@ -273,6 +347,9 @@ def cliDiffGroup : Group where
                                     args := #["check", "good.wiz"] }
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
+        -- (both tools must exit 0 on a good file: equal non-zero codes are not a pass)
+        checkEq 0 h.code
+        checkEq 0 s.code
         checkEq "" s.out
         checkEq "" s.err },
     { name := "check: `#check` prints an info line without --types in both", run := fun _ => withSelfhostCli fun exe => do
@@ -323,7 +400,18 @@ def cliDiffGroup : Group where
         cliDiffSame spec3 h3 s3
         checkEq 1 s3.code
         cliCheck s3.err "tm.wiz:2:1: error: type mismatch" "type mismatch"
-        skip "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+        cliDiffKnown "column: the host reports the failing term and the declared name; the self-hosted frontend reports the command's start (D6)" },
+    { name := "messages: a duplicate declaration is word-for-word the same on both sides", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let dup := "import Prelude\ndef one : Nat := 1\ndef one : Nat := 2\n"
+        -- `messages := true`: the whole message after the kind, not just the `[code]`
+        let spec : CliDiffSpec := { files := #[("dup.wiz", dup)], args := #["check", "dup.wiz"]
+                                    columns := false, messages := true }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 s.code
+        -- (the driver's raw line: the self-hosted frontend's own position and its `[code]`)
+        checkEq "dup.wiz:3:1: error: 'one' has already been declared [duplicate-declaration]\n" s.err },
     { name := "smt: without --trust-smt the refusal is the host's, at the command's start (C15)", run := fun _ =>
         withSelfhostCli fun exe => do
         let host ← cliDiffHost
@@ -338,7 +426,7 @@ def cliDiffGroup : Group where
         checkEq "" s.out
         checkEq ("f.wiz:2:1: error: SMT solving is not enabled: `smt` closes a goal on an " ++
           "SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n") s.err
-        skip "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6); the message and the exit code are the same" },
+        cliDiffKnown "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6); the message and the exit code are the same" },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         -- (the selfhost loader canonicalises `IO`/`Std`/`Sys` to its one embedded prelude,
@@ -350,7 +438,7 @@ def cliDiffGroup : Group where
         cliCheck h.err "unknown identifier 'IO'" "the host's Prelude"
         checkEq 0 s.code
         checkEq "" s.err
-        skip "prelude: the self-hosted Prelude is one embedded module that includes the IO natives, and `import IO` is canonicalised to it; the host's `lib/Prelude.wiz` has no `IO`, so a file that omits `import IO` compiles only there (A14/C12)" },
+        cliDiffKnown "prelude: the self-hosted Prelude is one embedded module that includes the IO natives, and `import IO` is canonicalised to it; the host's `lib/Prelude.wiz` has no `IO`, so a file that omits `import IO` compiles only there (A14/C12)" },
     { name := "usage: a missing FILE, extra arguments and an unknown command agree (exit 2)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         for args in [#["check"], #["nonsense"], #["check", "--bogus", "x.wiz"],
@@ -395,6 +483,36 @@ def cliDiffGroup : Group where
           cliDiffSame spec h s
           checkEq 1 s.code
           checkEq 1 h.code },
+    { name := "--llvm / --wasm: the host's aliases, refused as targets by the driver (C5)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("good.wiz", cliGood)]
+        for args in [#["check", "good.wiz", "--llvm"], #["--wasm", "check", "good.wiz"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 1 s.code
+          checkEq "" s.out
+          let target := if args.contains "--llvm" then "llvm" else "wasm"
+          cliCheck s.err s!"unsupported target {target}: the self-hosted backend emits C only (C5)" "the driver's rejection"
+        cliDiffKnown "flags: `--llvm`/`--wasm` are target aliases in the host; the driver recognises them and refuses the target (exit 1), as `--target llvm|wasm` (C5)" },
+    { name := "build --split N: the host splits the C into N units, the driver refuses it (C5)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let tc ← cliDiffHostToolchain
+        let spec : CliDiffSpec := { files := #[("good.wiz", cliDiffHello)]
+                                    args := #["build", "good.wiz", "-o", "out", "--split", "2"]
+                                    hostArgs := tc }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 0 h.code
+        check (← cliDiffExists h "out") "the host's split build wrote no artifact"
+        checkEq 1 s.code
+        cliCheck s.err "unsupported --split 2: the self-hosted backend emits one C unit (C5)" "the driver's rejection"
+        -- (the leading form too: a value is a value, not a command)
+        let spec2 : CliDiffSpec := { files := #[("good.wiz", cliGood)]
+                                     args := #["--split", "2", "check", "good.wiz"] }
+        let (h2, s2) ← cliDiffBoth host exe spec2
+        checkEq 0 h2.code
+        checkEq 1 s2.code
+        cliDiffKnown "flags: `--split N` compiles N C units in parallel in the host; the self-hosted backend has one C unit, so the driver refuses the flag (exit 1) (C5)" },
     { name := "--target llvm|wasm: the host selects the backend, the self-hosted one emits C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
@@ -406,8 +524,8 @@ def cliDiffGroup : Group where
           checkEq 1 s.code
           checkEq "" s.out
           cliCheck s.err s!"unsupported target {target}" "the driver's rejection"
-        skip "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5); the self-hosted backend emits C, so the driver refuses the name (exit 1) instead of silently building C" },
-    { name := "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)", run := fun _ => withSelfhostCli fun exe => do
+        cliDiffKnown "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5); the self-hosted backend emits C, so the driver refuses the name (exit 1) instead of silently building C" },
+    { name := "--cache-verify: the modes are accepted, and strict is warm in both", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("cv.wiz", cliGood)]
         -- (off and warn: both read the entry; the output is the same warm or cold)
@@ -420,6 +538,18 @@ def cliDiffGroup : Group where
           let (h, s) ← cliDiffBoth host exe spec
           cliDiffSame spec h s
           checkEq 0 s.code
+        -- (the driver's own manifest makes a second strict run warm; `-v` shows it in
+        -- `=selfhost-cli`, since the host has no verbose cache line)
+        let spec : CliDiffSpec := { files := files
+                                    args := #["--cache-verify=strict", "check", "cv.wiz", "--cache", "c"] }
+        let h1 ← cliDiffInit spec.files
+        let s1 ← cliDiffInit spec.files
+        let _ ← cliDiffExec host h1 #[] spec.args
+        let _ ← cliDiffExec exe s1 #[] spec.args
+        let h2 ← cliDiffExec host h1 #[] spec.args
+        let s2 ← cliDiffExec exe s1 #[] spec.args
+        cliDiffSame spec h2 s2
+        checkEq 0 s2.code
         -- (an unknown mode: the message and exit 2 agree; the host prints no usage, and
         -- the driver's is not compared. Also with no command: the host validates the
         -- mode before its usage, and a flag's word is its value, not a command.)
@@ -431,7 +561,7 @@ def cliDiffGroup : Group where
           checkEq 2 s.code
           checkEq 2 h.code
           cliCheck s.err "--cache-verify: unknown mode bogus (off, warn, strict)" "the mode's error"
-        skip "cache verification: the host writes output manifests, so a second `--cache-verify strict` run is a hit there; the self-hosted cache has none, so strict never trusts an entry (a miss, same output, no saved work) (D5)" },
+        cliDiffKnown "cache verification: both modes behave alike; the manifests' layouts differ (the host's per-module SHA-256/Merkle `.wizmf` under `manifest.d/`, the driver's per-entry digest sidecar) (D5)" },
     { name := "flags: a backend flag is not a `check` option in either (exit 2)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         for args in [#["check", "--lib", "x.wiz"], #["check", "x.wiz", "-o", "out.c"],
@@ -486,7 +616,7 @@ def cliDiffGroup : Group where
         -- message, the self-hosted loader at the module's own file and line
         cliCheck h.err "module M has errors" "host nesting"
         cliCheck s.err "lib/M.wiz:3:1: error: unknown identifier nope" "module's own position"
-        skip "structure: the host nests a module's errors under its import (`module M has errors:`); the self-hosted loader reports each at its own module and position (D6/A14)" },
+        cliDiffKnown "structure: the host nests a module's errors under its import (`module M has errors:`); the self-hosted loader reports each at its own module and position (D6/A14)" },
     { name := "cache: --cache DIR is written by both, and a warm run agrees", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { files := #[("c.wiz", cliGood)]
@@ -522,15 +652,49 @@ def cliDiffGroup : Group where
         check ((← cliDiffCacheEntries s "home/.cache/wiz") == 0) "the driver wrote a cache entry"
         unless !(← cliDiffExists s ".wiz-cache") do
           throw (IO.userError "the driver wrote `.wiz-cache` with --no-cache") },
-    { name := "cache: --cache-ro is a host layer the driver has not got (a named difference)", run := fun _ => withSelfhostCli fun exe => do
+    { name := "cache: --cache-ro DIR adds a read-only layer in both, and neither writes it", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("ro/.keep", ""), ("r.wiz", cliGood)]
-        let spec : CliDiffSpec := { files := files, args := #["check", "r.wiz", "--cache-ro", "ro"] }
+        let spec : CliDiffSpec := { files := files
+                                    args := #["check", "r.wiz", "--cache", "c", "--cache-ro", "ro"] }
         let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 s.code
         checkEq 0 h.code
-        checkEq 2 s.code
-        cliCheck s.err "unknown flag: --cache-ro" "the driver's rejection"
-        skip "cache: `--cache-ro DIR` adds a read-only layer (a Nix package's share/wiz/cache) in the host; the driver's one-file cache has no layers, so it rejects the flag (D5)" },
+        -- (an empty layer is not a cache source; the write cache gets the entry, and the
+        -- read-only layer keeps only its own `.keep`)
+        check ((← cliDiffEntries (h.dir / "ro")) == 1) "the host wrote its read-only layer"
+        check ((← cliDiffEntries (s.dir / "ro")) == 1) "the driver wrote its read-only layer"
+        -- `--no-cache` clears the write cache, and a later `--cache-ro` adds the layer back
+        let spec2 : CliDiffSpec := { files := files
+                                     args := #["check", "r.wiz", "--no-cache", "--cache-ro", "ro"] }
+        let (h2, s2) ← cliDiffBoth host exe spec2
+        cliDiffSame spec2 h2 s2
+        checkEq 0 s2.code
+        check ((← cliDiffEntries (h2.dir / "ro")) == 1) "the host wrote a layer under --no-cache"
+        check ((← cliDiffEntries (s2.dir / "ro")) == 1) "the driver wrote a layer under --no-cache" },
+    { name := "cache: --cache-prune DAYS checks its argument in both, and prunes before the run", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("p.wiz", cliGood)]
+        -- (the host's `takeCachePrune` errors: the message alone, exit 1, in both)
+        for days in ["0", "x"] do
+          let spec : CliDiffSpec := { files := files, args := #["check", "p.wiz", "--cache-prune", days] }
+          let (h, s) ← cliDiffBoth host exe spec
+          cliDiffSame spec h s
+          checkEq 1 s.code
+          checkEq 1 h.code
+        -- a prune before a run: both exit 0 and print a summary (the entry sets differ:
+        -- `.wizc/.wizm/.wizr/.wizs` against the driver's `.check/.c`, so the line does;
+        -- `c/.keep` makes the write cache exist, as a warm run would)
+        let spec2 : CliDiffSpec :=
+          { files := files.push ("c/.keep", "")
+            args := #["check", "p.wiz", "--cache", "c", "--cache-prune", "7"] }
+        let (h2, s2) ← cliDiffBoth host exe spec2
+        checkEq 0 h2.code
+        checkEq 0 s2.code
+        cliCheck h2.err "cache prune: removed " "the host's summary"
+        cliCheck s2.err "cache prune: removed " "the driver's summary"
+        cliDiffKnown "cache prune: both prune only the write cache by age, but the summary names each tool's own keyed files (the host's .wizc/.wizm/.wizr/.wizs, the driver's .check/.c) (D5)" },
     { name := "cache: an edit is a miss in both (an error becomes clean)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { files := #[("m.wiz", cliMissingModule)]
@@ -569,7 +733,7 @@ def cliDiffGroup : Group where
         -- (an ELF (`\x7fELF`) or a Mach-O; the driver's artifact is C)
         check ((hc.map cliDiffIsExe).getD false) "the host's artifact is not executable"
         check (cliHas (sc.getD "") "int main(") "the driver's artifact is not C"
-        skip "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C (D4)" },
+        cliDiffKnown "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C (D4)" },
     { name := "build --lib: both accept it and are silent (an object file, or the C)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -589,11 +753,11 @@ def cliDiffGroup : Group where
                                      hostArgs := tc }
         let (h2, s2) ← cliDiffBoth host exe spec2
         if h2.code != 0 then
-          skip "artifact: --lib's object/header match; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C (D4/C9)"
+          cliDiffKnown "artifact: --lib's object/header match; --no-main does not link without a `main` on this platform (the host's Wasm path), the driver writes the C (D4/C9)"
         else do
           cliDiffSame spec2 h2 s2
           checkEq 0 s2.code
-          skip "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
+          cliDiffKnown "artifact: --lib/--no-main write an object (and a .h), or an executable, in the host; the C here (D4/C9)" },
     { name := "build --llvm: the host has it, the self-hosted backend is C only (C5)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let tc ← cliDiffHostToolchain
@@ -601,15 +765,16 @@ def cliDiffGroup : Group where
                                     args := #["build", "good.wiz", "-o", "out", "--llvm"]
                                     hostArgs := tc }
         let (h, s) ← cliDiffBoth host exe spec
-        -- (the driver has no LLVM path at all: it always refuses the flag, C5)
-        checkEq 2 s.code
-        cliCheck s.err "unknown flag: --llvm" "the driver's rejection"
+        -- (the driver has no LLVM path at all: it recognises the flag and refuses the
+        -- target, C5, rather than calling it an unknown flag)
+        checkEq 1 s.code
+        cliCheck s.err "unsupported target llvm: the self-hosted backend emits C only (C5)" "the driver's rejection"
         if h.code == 0 then do
           check (← cliDiffExists h "out") "the host's LLVM build wrote no artifact"
-          skip "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
+          cliDiffKnown "backend: the host builds through textual LLVM IR (`--llvm`); the self-hosted backend is C only (C5)"
         else do
-          let why := " ".intercalate ((cliDiffNormal false h.err).splitOn "\n")
-          skip s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
+          let why := " ".intercalate ((cliDiffNormal spec.columns spec.messages spec.continuations h.err).splitOn "\n")
+          cliDiffKnown s!"backend: --llvm selects the host's LLVM path (exit {h.code} here: {why}); the self-hosted backend is C only (C5)" },
     { name := "extensions: --include, --types and -v are the driver's own (the host rejects them)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("good.wiz", cliGood)]
@@ -619,7 +784,18 @@ def cliDiffGroup : Group where
           let (h, s) ← cliDiffBoth host exe spec
           checkEq 2 h.code
           checkEq 0 s.code
-        skip "flags: the driver also has `--include` (an -I alias), `--types` and `-v`; the host has -I only and no verbose/type switch (its `wiz check` prints info already)" },
+        cliDiffKnown "flags: the driver also has `--include` (an -I alias), `--types` and `-v`; the host has -I only and no verbose/type switch (its `wiz check` prints info already)" },
+    { name := "subcommands: parse and fmt are the host's (the driver has no such command)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("f.wiz", cliGood)]
+        for args in [#["parse", "f.wiz"], #["fmt", "f.wiz"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 2 s.code
+          checkEq "" s.out
+          cliCheck s.err s!"unknown command: {" ".intercalate args.toList}" "the driver's rejection"
+        cliDiffKnown "subcommands: parse, doc, fmt, repl, test-driver, cache prune|verify|manifest and lsp are the host's; the driver has check/build/run/version/help (D2/D8)" },
     { name := "run: an IO program prints the same output and exits 0", run := fun _ => do
         match ← cliRunOptions with
         | none => skip "no garbage collector, --gc-cflags"
@@ -647,22 +823,37 @@ def cliDiffGroup : Group where
           cliCheck h.err "unknown command: run prog.wiz one two" "the host's rejection"
           checkEq 0 s.code
           checkEq "hello from the selfhost driver\n42\n" s.out
-          skip "`run`: the driver passes the words after FILE to the program (`run FILE ARG…`); the host's `run` has no program arguments and rejects them (exit 2)" },
-    { name := "help and version: exit 0, one version line (the usage documents the subset)", run := fun _ => withSelfhostCli fun exe => do
+          cliDiffKnown "`run`: the driver passes the words after FILE to the program (`run FILE ARG…`); the host's `run` has no program arguments and rejects them (exit 2)" },
+    { name := "help and version: the version line is exact and both usage texts are pinned", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { args := #["--version"] }
         let (h, s) ← cliDiffBoth host exe spec
         cliDiffSame spec h s
         checkEq 0 s.code
+        -- (the whole line, not just a prefix: `wiz VERSION` from one source)
         checkEq (h.out.replace "wiz-selfhost" "wiz") (s.out.replace "wiz-selfhost" "wiz")
+        checkEq s!"wiz {Wiz.version}\n" (s.out.replace "wiz-selfhost" "wiz")
         let spec2 : CliDiffSpec := { args := #["--help"] }
         let (h2, s2) ← cliDiffBoth host exe spec2
         checkEq 0 h2.code
         checkEq 0 s2.code
-        for word in ["check", "build", "run"] do
-          cliCheck h2.out word "host help"
-          cliCheck s2.out word "driver help"
-        skip "usage text: the driver documents the subset it has (no parse/doc/fmt/lsp, no --llvm; D2/D8)" },
+        -- the driver's usage text verbatim, so a wording change is a test failure
+        checkEq cliDiffDriverHelp s2.out
+        -- and the exact command list it documents (D2): one line per subcommand
+        let cmds := (s2.out.splitOn "\n").filter (fun l => l.startsWith "  wiz-selfhost ")
+        checkEq ["  wiz-selfhost check FILE         elaborate and type check FILE (diagnostics on",
+                 "  wiz-selfhost build FILE -o OUT  write the generated C to OUT",
+                 "  wiz-selfhost run FILE [ARG]...  compile `main` and run it (also `eval`)",
+                 "  wiz-selfhost version            print the version (also --version)",
+                 "  wiz-selfhost help               this text (also -h, --help)",
+                 "  wiz-selfhost lsp                a language server on stdin/stdout: initialize,"] cmds
+        -- (the host's own list is the difference: these are the lines it has and the
+        -- driver does not; each is asserted so implementing one fails the case)
+        for word in ["parse", "repl", "test-driver", "doc", "fmt", "cache prune"] do
+          cliCheck h2.out (s!"  wiz {word}") "host help"
+          unless !((s2.out.splitOn (s!"  wiz-selfhost {word}")).length > 1) do
+            throw (IO.userError s!"the driver now documents `{word}`: promote this case")
+        cliDiffKnown "usage text: the driver lists check/build/run/version/help/lsp; the host lists those and parse, repl, test-driver, doc, fmt, cache prune/verify/manifest (D2/D8)" },
     { name := "warnings: the host warns about a shadowed Prelude (the driver has none yet)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("Prelude.wiz", "import Prelude\ndef shadow : Nat := 0\n"),
@@ -673,7 +864,69 @@ def cliDiffGroup : Group where
         checkEq 0 s.code
         cliCheck h.out "is ignored: module Prelude" "host warning"
         checkEq "" s.out
-        skip "warnings: the host warns (on stdout) about a module root shadowing its own lib; the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet (A14/D6)" },
+        cliDiffKnown "warnings: the host warns (on stdout) about a module root shadowing its own lib; the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet (A14/D6)" },
+    { name := "(C14) check --trust-native: native_refl is accepted in both, before or after the command", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("native.wiz", cliNativeRefl)]
+        for args in [#["check", "native.wiz", "--trust-native"],
+                     #["--trust-native", "check", "native.wiz"]] do
+          let spec : CliDiffSpec := { files := files, args := args }
+          let (h, s) ← cliDiffBoth host exe spec
+          checkEq 0 h.code
+          checkEq 0 s.code
+          checkEq "" s.out
+          checkEq "" s.err
+          checkEq "" h.err
+          cliCheck h.out "is accepted on the strength of native evaluation" "the host's warning"
+        cliDiffKnown "warning: the host reports the acceptance as a warning naming the steps; the self-hosted frontend has no warning channel, and the `X.native✝` axiom is visible through `#print axioms` instead (D6/C14)" },
+    { name := "(C14) check without --trust-native: native_refl is refused with the host's message in both", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("native.wiz", cliNativeRefl)]
+                                    args := #["check", "native.wiz"], columns := false }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 1 h.code
+        checkEq 1 s.code
+        checkEq "" s.out
+        checkEq "native.wiz:2:1: error: native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it\n" s.err },
+    { name := "(C14) build --trust-native: both accept the flag and write an artifact (an executable there, the C here)", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let tc ← cliDiffHostToolchain
+        -- (the host's `build` needs a `main`; the driver writes the C without one)
+        let spec : CliDiffSpec := { files := #[("nmain.wiz", cliNativeReflMain)]
+                                    args := #["build", "nmain.wiz", "-o", "out", "--trust-native"]
+                                    hostArgs := tc }
+        let (h, s) ← cliDiffBoth host exe spec
+        cliDiffSame spec h s
+        checkEq 0 h.code
+        checkEq 0 s.code
+        check (← cliDiffExists h "out") "the host wrote no artifact"
+        check (← cliDiffExists s "out") "the driver wrote no C"
+        let sc ← cliDiffRead s "out"
+        check (cliHas (sc.getD "") "/* x : ") "the driver's artifact is not the C for `x`"
+        cliDiffKnown "artifact: `build` writes an executable (via C) in the host and the generated C here (D4)" },
+    { name := "(C14) an unknown trust flag is the same usage error, before or after the command", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- (the host's `--trust-native` is a switch: its value form is left over as an
+        -- unknown flag; a misspelling is one in both)
+        for bad in ["--trust-native=1", "--trust-nativ"] do
+          for args in [#["check", "native.wiz", bad], #[bad, "check", "native.wiz"]] do
+            let spec : CliDiffSpec := { files := files, args := args }
+            let (h, s) ← cliDiffBoth host exe spec
+            cliDiffSame spec h s
+            checkEq 2 h.code
+            checkEq 2 s.code
+            cliCheck s.err s!"unknown flag: {bad}" "the unknown flag's text" },
+    { name := "(C14) --native-fuel: the host takes a step limit, the driver's evaluator has no counter", run := fun _ => withSelfhostCli fun exe => do
+        let host ← cliDiffHost
+        let spec : CliDiffSpec := { files := #[("native.wiz", cliNativeRefl)]
+                                    args := #["check", "native.wiz", "--trust-native", "--native-fuel", "100"] }
+        let (h, s) ← cliDiffBoth host exe spec
+        checkEq 0 h.code
+        checkEq 2 s.code
+        cliCheck s.err "unknown flag: --native-fuel" "the driver's rejection"
+        cliDiffKnown "native fuel: the self-hosted evaluator has no step counter, so `--native-fuel N` is refused as an unknown flag rather than accepted and ignored (C14)" },
     { name := "a missing file: both exit 1 (the host's message is an uncaught read)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let spec : CliDiffSpec := { args := #["check", "no.wiz"] }
@@ -682,7 +935,7 @@ def cliDiffGroup : Group where
         checkEq 1 h.code
         checkEq "" s.out
         checkEq "no.wiz:1:1: error: no such file\n" s.err
-        skip "message: the host lets IO.readFile throw (an uncaught exception on stderr); the driver checks access first and prints one positioned diagnostic (D6/D7)" }
+        cliDiffKnown "message: the host lets IO.readFile throw (an uncaught exception on stderr); the driver checks access first and prints one positioned diagnostic (D6/D7)" }
   ]
 
 builtin_initialize registerGroup cliDiffGroup

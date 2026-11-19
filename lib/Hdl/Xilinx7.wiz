@@ -37,25 +37,25 @@ def X7.names (pre : String) : Nat → Nat → List String
 -- Buffers and clock buffers
 
 def X7.obufP : Prim X7.B1 (HwTy.pad 1) :=
-  Prim.decl "OBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El X7.B1) => x))
+  Prim.decl "OBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (.some (fun (x : HwTy.El X7.B1) => x))
 def X7.ibufP : Prim (HwTy.pad 1) X7.B1 :=
-  Prim.decl "IBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El (HwTy.pad 1)) => x))
+  Prim.decl "IBUF" .nil (.cons "I" .nil) (.cons "O" .nil) (.some (fun (x : HwTy.El (HwTy.pad 1)) => x))
 -- IOBUF: (I, T) ↦ (O, IO); T high is tristate
 def X7.iobufModel (x : HwTy.El (HwTy.prod X7.B1 X7.B1)) : HwTy.El (HwTy.prod X7.B1 (HwTy.inout 1)) :=
   (@HwTy.El.mux X7.B1 x.2 (BitVec.ofNat 1 0) x.1, x.1)
 def X7.iobufP : Prim (HwTy.prod X7.B1 X7.B1) (HwTy.prod X7.B1 (HwTy.inout 1)) :=
-  Prim.decl "IOBUF" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" .nil)) (Option.some X7.iobufModel)
+  Prim.decl "IOBUF" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" .nil)) (.some X7.iobufModel)
 -- OBUFDS: I ↦ (O, OB)
 def X7.obufdsModel (x : HwTy.El X7.B1) : HwTy.El (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) := (x, BitVec.not x)
 def X7.obufdsP : Prim X7.B1 (HwTy.prod (HwTy.pad 1) (HwTy.pad 1)) :=
-  Prim.decl "OBUFDS" .nil (.cons "I" .nil) (.cons "O" (.cons "OB" .nil)) (Option.some X7.obufdsModel)
+  Prim.decl "OBUFDS" .nil (.cons "I" .nil) (.cons "O" (.cons "OB" .nil)) (.some X7.obufdsModel)
 -- IOBUFDS: (I, T) ↦ (O, IO, IOB)
 def X7.iobufdsModel (x : HwTy.El (HwTy.prod X7.B1 X7.B1)) : HwTy.El (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
   (@HwTy.El.mux X7.B1 x.2 (BitVec.ofNat 1 0) x.1, (x.1, BitVec.not x.1))
 def X7.iobufdsP : Prim (HwTy.prod X7.B1 X7.B1) (HwTy.prod X7.B1 (HwTy.prod (HwTy.inout 1) (HwTy.inout 1))) :=
-  Prim.decl "IOBUFDS" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" (.cons "IOB" .nil))) (Option.some X7.iobufdsModel)
+  Prim.decl "IOBUFDS" .nil (.cons "I" (.cons "T" .nil)) (.cons "O" (.cons "IO" (.cons "IOB" .nil))) (.some X7.iobufdsModel)
 def X7.bufgP : Prim HwTy.clock HwTy.clock :=
-  Prim.decl "BUFG" .nil (.cons "I" .nil) (.cons "O" .nil) (Option.some (fun (x : HwTy.El HwTy.clock) => x))
+  Prim.decl "BUFG" .nil (.cons "I" .nil) (.cons "O" .nil) (.some (fun (x : HwTy.El HwTy.clock) => x))
 
 def X7.obuf {r : HwTy → Type} [Hw r] (x : r X7.B1) : r (HwTy.pad 1) := Hw.prim X7.obufP x
 def X7.ibuf {r : HwTy → Type} [Hw r] (x : r (HwTy.pad 1)) : r X7.B1 := Hw.prim X7.ibufP x
@@ -154,7 +154,7 @@ def X7.idelay {r : HwTy → Type} [Hw r] (ce inc ld : r X7.B1) (value : r (HwTy.
 -- it has. nextpnr places one copy per clock region of IDELAYE2s.
 def X7.idelayctrlP : Prim (HwTy.prod HwTy.clock X7.B1) X7.B1 :=
   Prim.decl "IDELAYCTRL" .nil (.cons "REFCLK" (.cons "RST" .nil)) (.cons "RDY" .nil)
-    (Option.some (fun (x : HwTy.El (HwTy.prod HwTy.clock X7.B1)) => BitVec.ofNat 1 1))
+    (.some (fun (x : HwTy.El (HwTy.prod HwTy.clock X7.B1)) => BitVec.ofNat 1 1))
 def X7.idelayctrl {r : HwTy → Type} [Hw r] (refclk : r HwTy.clock) (rst : r X7.B1) : r X7.B1 :=
   Hw.prim X7.idelayctrlP (Hw.pair refclk rst)
 

@@ -7,12 +7,12 @@ import FeralCore
 -- lens laws and its spec.
 
 -- fn get_mut {'a} (v : &'a mut Vec U64) (i : USize) : &'a mut U64 := &mut v[i]
-def get_mut {ρ : Region} (1 v : Uniq ρ (Vec U64)) (i : U64) : Borrowed (Mut ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
+def get_mut {0 ρ : Region} (1 v : Uniq ρ (Vec U64)) (i : U64) : Borrowed (Mut ρ U64 (Vec U64)) (Uniq ρ (Vec U64)) :=
   Mut.ofPLens v (Vec.indexMut i)
 
 -- generated: `get_mut` borrows through a place (L10), a lawful partial lens, at quantity 0
 def get_mut.place (i : U64) : PLens (Vec U64) U64 := Vec.indexMut i
-def get_mut.is_place {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) :
+def get_mut.is_place {0 ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) :
     get_mut v i = Mut.ofPLens v (get_mut.place i) := refl (get_mut v i)
 def get_mut.lawful (i : U64) : PLens.Lawful (get_mut.place i) :=
   Vec.indexMut_lawful i
@@ -27,7 +27,7 @@ def List.set {A : Type} : Nat → List A → A → List A
   | .succ i, .cons x xs, y => .cons x (List.set i xs y)
 -- (stated on the place's store: `get_mut v i` is `Mut.ofPLens v (get_mut.place i)`, whose
 -- borrow is that store, `Mut.ofR`, so `*result` is `st.1` and `final(v)` is `st.2 fin`)
-def get_mut.spec {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Prop :=
+def get_mut.spec {0 ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Prop :=
   Result.All (fun (st : Store U64 (Vec U64)) =>
     (Vec.index (Uniq.get v) i = .ok st.1) × ((fin : U64) → (st.2 fin).items = List.set i.val (Uniq.get v).items fin))
     (get_mut.place i (Uniq.get v))
@@ -38,7 +38,7 @@ def get_mut.spec {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : Prop :=
 -- drafts/feral/rejected/E0502_use_while_mut.wiz), and `m`'s last use gives the lender back.
 -- Every error exit hands the reborrow's handle back: an overflow while `m` lives first
 -- releases `m` (D8: the error alternative is built from what is live there).
-def bump {ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
+def bump {0 ρ : Region} (1 v : Uniq ρ (Vec U64)) : Result1 Unit (Uniq ρ (Vec U64)) :=
   Uniq.reborrow v (fun ρ' h v r =>                  -- &mut *v, at ρ' (ρ : ρ')
     match get_mut r (U64.lit 1) with                -- the borrow `m` of *r
     | .ok m =>
@@ -94,6 +94,6 @@ def get_mut.spec_place (s : Vec U64) (i : U64) : (r : Result (Store U64 (List U6
        (Option.some st.1) (List.getOpt i.val s.items) (Eq.symm hg) (refl (Result.ok st.1)),
      hs)
   | .err e, hg, hs => ()
-def get_mut.spec_holds {ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : get_mut.spec v i :=
+def get_mut.spec_holds {0 ρ : Region} (v : Uniq ρ (Vec U64)) (i : U64) : get_mut.spec v i :=
   get_mut.spec_place (Uniq.get v) i (@List.atL U64 i.val (Uniq.get v).items)
     (@List.atL_get U64 i.val (Uniq.get v).items) (@List.atL_set U64 i.val (Uniq.get v).items)

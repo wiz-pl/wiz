@@ -1,0 +1,126 @@
+import Sys
+import Text
+import Scry.Wil
+import Scry.CsCmd
+import Scry.Interproc
+/-!
+# cs-externals: the `unmodelled-external` frequency table for a C# tree
+
+A measurement tool, not a driver. `scry cs PATH` reports unmodelled externals as one
+aggregated coverage row, which is what a first run needs; this tool keeps the names, so
+the next model can be chosen from data instead of from guesswork:
+
+    cs-externals PATH [PACK.scry]
+
+`PATH` is anything `scry cs` accepts (a directory, a `.csproj`, a `.sln`/`.slnx`, one
+`.cs`), and the file set is exactly `Scry.CsCmd`'s walk (same exclusions). With no pack
+argument it reads the frontend's default pack (`scry/corpus/csharp/csharp.scry`, then
+`lib/Scry/rules/csharp.scry`), so the findings are comparable with `scry cs`'s.
+
+The program is **merged across files**, as `scry cs` does, so a call to a method the tree
+defines is not external. Output is tab-separated for `sort`/`awk`:
+
+    target    <path>
+    files     <found> <lowered> <functions>
+    findings  <total>
+    finding   <rule> <severity> <func> <point> <callee>
+    unmodelled <calls> <distinct>
+    count     <n> <callee>
+    unmodelled-before <calls> <distinct>
+    count-before <n> <callee>
+
+`count` is the frequency table the model work is ranked on. A modelled call disappears
+from it; the model table (`Scry.Models`) is keyed by the exact callee spelling the C#
+lowerer emits (`Namespace.Type.Method`, `T[].get_Item`, `Type..ctor`). `count-before` is
+the same selection against `Scry.Models.coreModels` (the libc/policy/pure table, without
+the CLR layer), so one run gives both sides of a model change: the difference is exactly
+the calls the CLR models cover.
+-/
+
+/-- Bump `name`'s count in an association list (kept in first-seen order; the printer
+sorts, so only the counts matter). -/
+def Scry.externBump (name : String) : List (String × Nat) → List (String × Nat)
+  | .nil => .cons (name, 1) .nil
+  | .cons (n, k) rest => match String.eq n name with
+    | .true => .cons (n, Nat.succ k) rest
+    | .false => .cons (n, k) (Scry.externBump name rest)
+
+def Scry.externCount (names : List String) : List (String × Nat) :=
+  List.foldl (fun acc n => Scry.externBump n acc) (.nil : List (String × Nat)) names
+
+/-- Descending by count, then ascending by name, so equal counts are stable between runs. -/
+def Scry.externBefore (a b : String × Nat) : Bool :=
+  match Nat.lt b.2 a.2 with
+  | .true => .true
+  | .false => match Nat.lt a.2 b.2 with
+    | .true => .false
+    | .false => String.lt a.1 b.1
+
+def Scry.externInsert (r : String × Nat) : List (String × Nat) → List (String × Nat)
+  | .nil => List.cons r .nil
+  | .cons x rest => match Scry.externBefore r x with
+    | .true => List.cons r (List.cons x rest)
+    | .false => List.cons x (Scry.externInsert r rest)
+
+def Scry.externSort (rows : List (String × Nat)) : List (String × Nat) :=
+  List.foldl (fun acc r => Scry.externInsert r acc) .nil rows
+
+def Scry.externTotal (rows : List (String × Nat)) : Nat :=
+  List.foldl (fun n r => Nat.add n r.2) 0 rows
+
+def Scry.externSay (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def Scry.externUsage : EIO Unit :=
+  EIO.lift (IO.ePrintln
+    "usage: cs-externals PATH [PACK.scry]   (PATH as for `scry cs`; TSV table on stdout)")
+
+/-- The analysis and the report: walk, lower every file, merge the program (as `scry cs`
+does), and count the unmodelled callees. -/
+def Scry.externRun (args : List String) : EIO Unit :=
+  match args with
+  | .cons path rest => do
+    target ← Scry.Cs.discover path;
+    results ← Scry.Cs.analyseAll target.walk.files;
+    let funcs := List.concat (List.map (fun r => r.funcs) results);
+    let packArg : Option String := match rest with
+      | .cons p _ => .some p
+      | .nil => .none;
+    found ← Scry.Cs.loadPack packArg;
+    match found with
+    | .none => Scry.externSay "error\tno rule pack found; pass PACK.scry"
+    | .some (packPath, pack) => do
+      let prog := Scry.Cs.resolveCalls (Wil.program funcs);
+      let pr := Scry.analyze prog pack;
+      let names := List.concat (List.map (fun r =>
+        List.map (fun nc => nc.1) (Scry.unmodelledCallsOf prog r)) pr.results);
+      let rows := Scry.externSort (Scry.externCount names);
+      let findings := Scry.programFindings pr;
+      let lowered := Scry.Cs.countIf (fun r => Bool.and r.parseOk (match r.funcs with
+        | .nil => .false
+        | _ => .true)) results;
+      Scry.externSay ("target\t" ++ path);
+      Scry.externSay ("rules\t" ++ packPath ++ "\t" ++ Nat.repr (List.length pack.rules));
+      Scry.externSay ("files\t" ++ Nat.repr (List.length results) ++ "\t"
+        ++ Nat.repr lowered ++ "\t" ++ Nat.repr (List.length funcs));
+      Scry.externSay ("findings\t" ++ Nat.repr (List.length findings));
+      Scry.externSay (String.intercalate "" (List.map (fun f =>
+        "finding\t" ++ f.rule ++ "\t" ++ Scry.Severity.show f.severity ++ "\t" ++ f.func
+          ++ "\t" ++ Nat.repr f.sink ++ "\t" ++ f.name ++ "\n") findings));
+      Scry.externSay ("unmodelled\t" ++ Nat.repr (Scry.externTotal rows) ++ "\t"
+        ++ Nat.repr (List.length rows));
+      Scry.externSay (String.intercalate "" (List.map (fun r =>
+        "count\t" ++ Nat.repr r.2 ++ "\t" ++ r.1 ++ "\n") rows));
+      -- The same selection against the pre-CLR table (`Scry.Models.coreModels`): the
+      -- `before` column, from the same walk, lowering and analysis. `count-before` rows
+      -- are emitted only for names the CLR models cover, so the two tables line up.
+      let beforeNames := List.concat (List.map (fun r =>
+        List.map (fun nc => nc.1)
+          (Scry.unmodelledCallsWith Scry.isModelledCore prog r)) pr.results);
+      let beforeRows := Scry.externSort (Scry.externCount beforeNames);
+      Scry.externSay ("unmodelled-before\t" ++ Nat.repr (Scry.externTotal beforeRows) ++ "\t"
+        ++ Nat.repr (List.length beforeRows));
+      Scry.externSay (String.intercalate "" (List.map (fun r =>
+        "count-before\t" ++ Nat.repr r.2 ++ "\t" ++ r.1 ++ "\n") beforeRows))
+  | .nil => Scry.externUsage
+
+def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.externRun)

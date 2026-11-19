@@ -17,7 +17,7 @@ inductive Tree where
 -- (so Perceus reuses the cell).
 -- `partial`: the recursive call is on the handle of a field, made inside a scope's
 -- lambda, which structural recursion doesn't see through (wishful: reborrow-recursion).
-partial def insert {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
+partial def insert {0 ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
   Uniq.reborrow t (fun ρ' h t r =>
     let 1 (v, r) := Uniq.peek r;
     match v with
@@ -45,7 +45,7 @@ partial def insert {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (
 -- once per step and handed back by the loop (`Result1`, with a `Flow` for the `return`); each
 -- step composes it with a borrow of a child, whose backward function rebuilds the node.
 -- The region stays `ρ`: `t` is moved into the cursor, and the cursor's release gives it back.
-partial def insert_loop.loop0 {ρ : Region} (k : U64) (1 cur : Mut ρ Tree Tree) :
+partial def insert_loop.loop0 {0 ρ : Region} (k : U64) (1 cur : Mut ρ Tree Tree) :
     Result1 (Flow Unit Unit) (Mut ρ Tree Tree) :=
   let 1 (v, cur) := Mut.peek cur;
   match v with
@@ -60,7 +60,7 @@ partial def insert_loop.loop0 {ρ : Region} (k : U64) (1 cur : Mut ρ Tree Tree)
       | .false => .ok (.ret ()) cur)        -- return (): the cursor goes back, unchanged
   | .leaf => .ok (.brk ()) cur
 
-def insert_loop {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
+def insert_loop {0 ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
   let 1 cur := Mut.whole t;
   match insert_loop.loop0 k cur with
   | .ok fl cur => (match fl with
@@ -92,7 +92,7 @@ partial def insert_zip.loop0 (k : U64) (cur : Tree) (path : Path) : Result (Flow
       | .false => .ok (.ret ((), Path.plug path (Tree.node key left right))))
   | .leaf => .ok (.brk (cur, path))
 
-def insert_zip {ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
+def insert_zip {0 ρ : Region} (1 t : Uniq ρ Tree) (k : U64) : Result1 Unit (Uniq ρ Tree) :=
   let 1 (v, t) := Uniq.peek t;
   match insert_zip.loop0 k v Path.top with
   | .ok fl => (match fl with

@@ -1,14 +1,24 @@
+-- test: run
 import IO
+import Sys
 foreign_type FILE (finalizer := "fclose")
 extern "fopen" (header := "stdio.h") fopen : String → String → IO FILE
 extern "fputs" (header := "stdio.h") fputs : String → FILE → IO Nat
+extern "fflush" (header := "stdio.h") fflush : FILE → IO Nat
 def fill : Nat → Bytes → Bytes
   | .zero, b => b
   | .succ n, b => Bytes.push (fill n b) (65 + n)
 def main : IO Unit := do
-  f ← fopen "/tmp/claude-1000/wiz_ffi_test.txt" "w";
+  -- the temporary directory, so the program runs on any machine (and in CI)
+  root ← FS.tempRoot;
+  let path := Path.join root "wiz-ffi-example.txt";
+  f ← fopen path "w";
   n ← fputs "written by wiz, closed by a finalizer\n" f;
-  s ← IO.readFile "/tmp/claude-1000/wiz_ffi_test.txt";
+  -- the finalizer closes the handle; flush so the read below sees the text
+  m ← fflush f;
+  s ← IO.readFile path;
   IO.print s;
   IO.println (Bytes.toString (fill 5 Bytes.empty));
-  IO.println (Nat.toString (Bytes.size (Bytes.ofString "λx")))
+  IO.println (Nat.toString (Bytes.size (Bytes.ofString "λx")));
+  r ← FS.removeFile path;
+  IO.pure ()

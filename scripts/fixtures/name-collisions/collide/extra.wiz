@@ -1,0 +1,2 @@
+/-- Fixture: a module in the scan that does not declare `shared`. -/
+def extra : Nat := 0

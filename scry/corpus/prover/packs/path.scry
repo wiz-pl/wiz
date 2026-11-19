@@ -1,0 +1,17 @@
+# Prover pack: a request-supplied name must not reach a filesystem handle.
+#
+# The synthetic helper validates and normalises a name but returns a string; it does
+# not construct a FileInfo or FileStream. `Path.GetFullPath` is declared a sanitiser
+# because the helper's real guard is `IsSegment` plus the prefix check — the EDB has no
+# guard facts, so the pack states the effect the guard has as an assumption.
+rule file-path
+  kind taint
+  severity error
+  message A request-supplied name reaches a filesystem handle
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  sanitise System.IO.Path.GetFullPath result
+  sanitise System.IO.Path.GetFileName result
+  sink System.IO.FileInfo..ctor arg 0
+  sink System.IO.FileStream..ctor arg 0
+end

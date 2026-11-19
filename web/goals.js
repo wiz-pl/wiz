@@ -39,7 +39,11 @@ export function offsetAt(text, position) {
     if (newline < 0) return text.length;
     offset = newline + 1;
   }
-  return Math.min(text.length, offset + character);
+  // `character` counts within its line: a past-the-end character stops at the line
+  // break, not at the same column of the next line.
+  const newline = text.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? text.length : newline;
+  return Math.min(lineEnd, offset + character);
 }
 
 // The inverse: an LSP position for a JavaScript string index.
@@ -216,6 +220,22 @@ export function plainGoals(result) {
   return text.split(/\n\s*\n/).map((g) => g.trim()).filter((g) => g !== "");
 }
 
+// A plain result has its required field (`goals` of strings, or `rendered`) or it is
+// malformed. `null` is the protocol's "nothing at the cursor" and is handled before this.
+function isPlainGoalsResult(result) {
+  if (!result || typeof result !== "object") return false;
+  if (typeof result.rendered === "string") return true;
+  return Array.isArray(result.goals) && result.goals.every((g) => typeof g === "string");
+}
+
+// A bare interactive goal (accepted instead of `{goal}`) carries at least one of the
+// goal's own fields; `{range: …}` alone does not, so it is a malformed result.
+function looksLikeGoal(value) {
+  return !!value && typeof value === "object" &&
+    (value.type !== undefined || Array.isArray(value.hyps) ||
+      value.goalPrefix !== undefined || value.userName !== undefined);
+}
+
 function messagesHtml(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
   return `<div class="messages"><h4>messages</h4>${messages.map((m) =>
@@ -223,19 +243,25 @@ function messagesHtml(messages) {
 }
 
 // Render a goals result: `"interactive"` (`{goals: [InteractiveGoal], range, …}`) or
-// `"plain"` (`{goals: [string], rendered, …}`). `null` is "nothing at the cursor".
+// `"plain"` (`{goals: [string], rendered, …}`). `null` is "nothing at the cursor", and so
+// is a result without the shape's required field: an empty array is the protocol's
+// positive "no goals", but a missing `goals` array is not.
 export function renderGoalResult(result, kind) {
+  const nothing = `<div class="nothing">nothing at the cursor</div>`;
   if (kind === "plain") {
+    if (!isPlainGoalsResult(result)) return nothing;
     const goals = plainGoals(result);
     if (!goals.length) {
-      return result ? `<div class="no-goals">no goals</div>` : `<div class="nothing">nothing at the cursor</div>`;
+      return `<div class="no-goals">no goals</div>`;
     }
     const block = goals.map((g) =>
       `<div class="goal plain"${spanAttr(result && result.range)}><pre>${escapeHtml(g)}</pre></div>`).join("");
     return block + messagesHtml(result && result.messages);
   }
-  if (!result) return `<div class="nothing">nothing at the cursor</div>`;
-  const goals = Array.isArray(result.goals) ? result.goals : [];
+  if (!result || typeof result !== "object" || !Array.isArray(result.goals)) {
+    return nothing;
+  }
+  const goals = result.goals;
   const html = goals.length === 0
     ? `<div class="no-goals">no goals</div>`
     : goals.map((g) => interactiveGoalHtml(g, result.range)).join("");
@@ -253,17 +279,22 @@ function treeSection(tree) {
 }
 
 // The expected type: `wiz/interactiveTermGoal` (`{goal, range}`), `plainTermGoal`
-// (`{goal: string, range}`), or a bare interactive goal. A tagged expected type also
-// gives the term tree (inside a `<details>`); plain text has none.
+// (`{goal: string, range}`), or a bare interactive goal. A result without `goal` (and
+// not itself a bare goal) is malformed: it is "nothing at the cursor", not an empty
+// expected type. A tagged expected type also gives the term tree (inside a `<details>`);
+// plain text has none.
 export function renderTermResult(result, kind) {
-  if (!result) return `<div class="nothing">nothing at the cursor</div>`;
+  const nothing = `<div class="nothing">nothing at the cursor</div>`;
+  if (!result || typeof result !== "object") return nothing;
   if (kind === "plain" || typeof result.goal === "string") {
-    const text = typeof result.goal === "string" ? result.goal : plainText(result.goal);
-    return `<div class="goal plain"${spanAttr(result.range)}><pre>${escapeHtml(text)}</pre></div>`;
+    if (typeof result.goal !== "string") return nothing;
+    return `<div class="goal plain"${spanAttr(result.range)}><pre>${escapeHtml(result.goal)}</pre></div>`;
   }
-  const goal = result.goal || result;
+  const goal = result.goal && typeof result.goal === "object" ? result.goal
+    : (looksLikeGoal(result) ? result : null);
+  if (!goal) return nothing;
   const html = interactiveGoalHtml(goal, result.range);
-  const tree = result.tree || (goal && goal.type && typeof goal.type === "object" ? goal.type : null);
+  const tree = result.tree || (goal.type && typeof goal.type === "object" ? goal.type : null);
   return html + (tree ? treeSection(tree) : "");
 }
 
@@ -280,6 +311,20 @@ export function renderDiagnostics(diagnostics) {
     return `<div class="diag sev-${sev}"${spanAttr(d.range)}${title}><span class="sev">${sev}</span>` +
       `<span class="msg">${escapeHtml(text)}</span><span class="where">${where}</span></div>`;
   }).join("")}</div>`;
+}
+
+// The completion popup: `{open, items, index, prefix}` from web/playground-lsp.js. It is a
+// list in the panel (a textarea has no menus); `data-completion` carries the item's index.
+export function renderCompletions(state) {
+  if (!state || !state.open) return "";
+  const items = Array.isArray(state.items) ? state.items : [];
+  const head = `<h4>completions${state.prefix ? " for <code>" + escapeHtml(state.prefix) + "</code>" : ""}` +
+    ` <span class="hint">Tab inserts, Esc closes</span></h4>`;
+  if (items.length === 0) return `<div class="completions">${head}<div class="nothing">no completions</div></div>`;
+  return `<div class="completions">${head}${items.map((item, i) =>
+    `<div class="completion${i === state.index ? " sel" : ""}" data-completion="${i}">` +
+    `<span class="label">${escapeHtml(item.label)}</span>` +
+    (item.detail ? `<span class="detail">${escapeHtml(item.detail)}</span>` : "") + `</div>`).join("")}</div>`;
 }
 
 // What the cursor selects (an optional `wiz/subtermInfo` answer).
@@ -329,7 +374,7 @@ function hintHtml(view) {
 
 // Render the whole panel. `view` is the page's model:
 //   {state, endpoint, serverInfo, infoview, message, diagnostics, goals, goalsKind,
-//    term, termKind, info, position}
+//    term, termKind, info, position, completions}
 // A stub `{innerHTML}` is enough (the Node test uses one).
 export function renderPanel(element, view) {
   if (!element) return;
@@ -337,6 +382,7 @@ export function renderPanel(element, view) {
   const open = state === "open";
   const parts = [`<div class="lsp-view" data-state="${escapeHtml(state)}">`, statusHtml(view), hintHtml(view)];
   if (open) {
+    if (view.completions) parts.push(renderCompletions(view.completions));
     parts.push(`<h3>Goals</h3>`);
     parts.push(view.goalsKind
       ? renderGoalResult(view.goals, view.goalsKind)
