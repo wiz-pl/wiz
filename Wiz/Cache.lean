@@ -83,7 +83,7 @@ where
       if w.isEmpty then none else return (.a (String.ofList w), cs.drop w.length)
 
 def node (tag : String) (xs : List Sx) : Sx := .l (#[.a tag] ++ xs.toArray)
-def nat (n : Nat) : Sx := .a (toString n)
+def nat (n : Nat) : Sx := .a (NatString.decimalString n)
 def str (s : String) : Sx := .a s
 def list (xs : List Sx) : Sx := .l xs.toArray
 
@@ -193,7 +193,7 @@ partial def dterm : Sx → Option (Term R)
     let x (i : Nat) : Sx := xs[i]?.getD (.a "")
     let t (i : Nat) : Option (Term R) := dterm (x i)
     let s (i : Nat) : Option String := atom? (x i)
-    let n (i : Nat) : Option Nat := (s i).bind String.toNat?
+    let n (i : Nat) : Option Nat := (s i).bind NatString.ofDecimalDigits?
     let lv (i : Nat) : Option Level := dlevel (x i)
     let ts (i : Nat) : Option (List (Term R)) := do (← items? (x i)).toList.mapM dterm
     let ss (i : Nat) : Option (List String) := do (← items? (x i)).toList.mapM atom?
