@@ -1,0 +1,26 @@
+import Std
+-- Functional arrays (lib/Std.wiz): random updates, the same under the interpreter (the
+-- model: the interpreter's immutable array) and compiled (the natives: C arrays updated
+-- in place when unique). Group `natives`.
+
+-- a pseudo-random sequence
+def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
+
+-- `n` random operations on an `Array Nat`: set, push, or reading an element
+def steps : Nat → Nat → Array Nat → Nat → Array Nat × Nat
+  | .zero, _, a, acc => (a, acc)
+  | .succ n, x, a, acc =>
+    let y := next x;
+    let i := Nat.mod (Nat.div y 16) (Array.size a + 3);
+    let op := Nat.mod y 7;
+    if Nat.beq op 0 then steps n y a (Nat.mod (acc * 7 + Array.getD a i 5) 1000000007)
+    else if Nat.beq op 1 then steps n y (Array.set a i y) acc
+    else if Nat.beq op 2 then steps n y (Array.push a y) acc
+    else if Nat.beq op 3 then steps n y a (Nat.mod (acc * 7 + Array.size a) 1000000007)
+    else steps n y (Array.push (Array.set a i (Nat.mod y 256)) (Nat.mod (y + 1) 1000)) acc
+
+def main : Nat :=
+  let r := steps 500 7 Array.empty 0;
+  -- persistence: `b` is the changed copy, `r.1` still has its old element at 0
+  let b := Array.set r.1 0 12345;
+  Array.getD r.1 3 0 + Array.getD b 0 0 + Array.size r.1 + r.2

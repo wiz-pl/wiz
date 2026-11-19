@@ -1,3 +1,4 @@
+-- test: skip its SVG is compared byte for byte with docs/assets/plot-example.svg by group plot
 import IO
 import Plot
 

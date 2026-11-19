@@ -402,7 +402,7 @@ def Sat.BForm.beq : Sat.BForm → Sat.BForm → Bool
   | _, _ => .false
 
 /-- Congruence for a two-argument operation. -/
-def Sat.congr2 (f : Bool → Bool → Bool) {a b c d : Bool} (e₁ : a = c) (e₂ : b = d) : f a b = f c d :=
+def Sat.congr2 (f : Bool → Bool → Bool) {0 a b c d : Bool} (e₁ : a = c) (e₂ : b = d) : f a b = f c d :=
   Eq.trans (Eq.congrArg (fun x => f x b) e₁) (Eq.congrArg (f c) e₂)
 /-- Equal formulas have the same value. -/
 def Sat.BForm.beq_eval (σ : Nat → Bool) : (f g : Sat.BForm) → Sat.BForm.beq f g = .true → Sat.BForm.eval σ f = Sat.BForm.eval σ g

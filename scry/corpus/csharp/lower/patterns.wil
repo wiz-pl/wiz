@@ -1,0 +1,71 @@
+func Demo.Match.Length(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br ne %2, %3 ? b1 : b2
+  b1:
+    %1 = %0
+    %4 = call System.String.get_Length(%1)
+    ret %4
+  b2:
+    goto b3
+  b3:
+    %5 = 1
+    %6 = neg %5
+    ret %6
+func Demo.Match.IsNull(%0)
+  b0:
+    %1 = null
+    %2 = eq %0, %1
+    ret %2
+func Demo.Match.NotNull(%0)
+  b0:
+    %1 = null
+    %2 = ne %0, %1
+    ret %2
+func Demo.Match.TypeTest(%0)
+  b0:
+    %1 = havoc u1
+    ret %1
+func Demo.Match.Guarded(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br ne %2, %3 ? b1 : b2
+  b1:
+    %1 = %0
+    %4 = %1
+    goto b3
+  b2:
+    %5 = 0
+    %4 = %5
+    goto b3
+  b3:
+    %6 = %4
+    ret %6
+func Demo.Match.OrNone(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br ne %2, %3 ? b1 : b2
+  b1:
+    %4 = global $str:"none"
+    ret %4
+  b2:
+    %1 = %0
+    goto b3
+  b3:
+    ret %1
+func Demo.Match.NotEither(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br not (ne %2, %3) ? b1 : b2
+  b1:
+    %4 = global $str:"none"
+    ret %4
+  b2:
+    %1 = %0
+    goto b3
+  b3:
+    ret %1

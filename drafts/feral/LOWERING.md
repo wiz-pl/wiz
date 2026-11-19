@@ -14,7 +14,7 @@ Files:
 
 | path | what | checks? |
 |---|---|---|
-| `lib/Result.wiz`, `lib/Optic.wiz` | `Result`/`Error` (RD7, lib/Result.wiz), `Store`, `Lens`, `PLens`, `Affine`, `zoom`, `TraverseMut`, laws, proofs | yes, tested (`lake test -- optic`) |
+| `lib/Data/Result.wiz`, `lib/Optic.wiz` | `Result`/`Error` (RD7, lib/Data/Result.wiz), `Store`, `Lens`, `PLens`, `Affine`, `zoom`, `TraverseMut`, laws, proofs | yes, tested (`lake test -- optic`) |
 | `lib/Region.wiz` | regions, `Outlives`, the handles `Shr`/`Uniq`/`Mut`/`MutOpt`/`Lent` (structures: the region is part of the type) and the borrow scopes | yes, tested (`lake test -- regions`) |
 | `drafts/feral/lib/FeralCore.wiz` | `Flow`, Nat-backed `U64` and List-backed `Vec` stand-ins | yes (stand-ins for agent/natives-ints and agent/vec-lib) |
 | `lib/Feral.wiz` | the front end: grammar, a checker whose types carry regions, the lowering | yes, tested (`lake test -- '=feral'`) |
@@ -105,10 +105,10 @@ end
 
 ## 2. Lowering rules
 
-Notation: `⟦e⟧` the lowering; `R A` is `Result A` (lib/Result.wiz).
+Notation: `⟦e⟧` the lowering; `R A` is `Result A` (lib/Data/Result.wiz).
 
 **L1. Items and generics.** `fn f {'a} {T : Type} [C T] (xs…) : Ret` ↦
-`def f {ρ : Region} {T : Type} [C T] (xs…) : R (…)`: region parameters first (implicit,
+`def f {0 ρ : Region} {T : Type} [C T] (xs…) : R (…)`: region parameters first (implicit,
 so quantity 0, RD12), then outlives bounds `'a : 'b` as erased proof arguments
 `(0 h : Outlives ρa ρb)` (L22), then type parameters, then instance arguments, then values.
 `struct S where f : T` ↦ `structure S where f : ⟦T⟧` (fields at ω, RD2).

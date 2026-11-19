@@ -12,7 +12,7 @@ def idf.Spec (a : U64) : Prop :=
 --   requires (Nat.lt x.val 100 = .true)
 --   ensures (final x.val = Nat.add old x.val step.val) ensures (result = final x)
 --   : U64 := { *x := *x + step; *x }
-def bump {ρ : Region} (1 x : Uniq ρ U64) (step : U64) : Result1 U64 (Uniq ρ U64) :=
+def bump {0 ρ : Region} (1 x : Uniq ρ U64) (step : U64) : Result1 U64 (Uniq ρ U64) :=
   let 1 (d, x) := Uniq.peek x;
   (match U64.add d step with
   | .ok s => let 1 x := Uniq.write x s; Result1.ok s x

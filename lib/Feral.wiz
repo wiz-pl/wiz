@@ -372,7 +372,7 @@ def Fe.render (sb : Fe.Subst) : Fe.Out → Nat → List Char → List Char
   | .rgs ts ex, _, acc =>
     (match List.filter (fun (r : String) => Bool.not (String.elem r ex)) (List.revApp (Fe.rgsAll sb ts .nil) .nil) with
     | .nil => acc
-    | .cons r rs => List.append (String.chars ("{" +++ Fe.words (.cons r rs) +++ ": Region} ")) acc)
+    | .cons r rs => List.append (String.chars ("{0 " +++ Fe.words (.cons r rs) +++ ": Region} ")) acc)
 /-- The text of a plain piece of generated code (a variable's name, say), if it is one. -/
 def Fe.outName : Fe.Out → Option String
   | .s x => .some x
@@ -523,16 +523,16 @@ def Fe.unify (a b : Fe.Ty) : Fe.M Bool := do
 def Fe.unifyZ (a b : Fe.Ty) : Fe.M Bool :=
   match a, b with
   | .var n, .var m => (match Nat.beq n m with
-    | .true => Fe.M.pure Bool.true
-    | .false => do Fe.bindVar n (.var m); Fe.M.pure Bool.true)
-  | .var n, t => do Fe.bindVar n t; Fe.M.pure Bool.true
-  | t, .var n => do Fe.bindVar n t; Fe.M.pure Bool.true
+    | .true => Fe.M.pure .true
+    | .false => do Fe.bindVar n (.var m); Fe.M.pure .true)
+  | .var n, t => do Fe.bindVar n t; Fe.M.pure .true
+  | t, .var n => do Fe.bindVar n t; Fe.M.pure .true
   | .con x, .con y => Fe.M.pure (String.eq x y)
   | .rg x, .rg y => Fe.M.pure (String.eq x y)
   | .app f x, .app g y => Fe.unify2 f g x y
   | .prod f x, .prod g y => Fe.unify2 f g x y
   | .ref m r t, .ref n q u => (match Bool.xor m n with
-    | .true => Fe.M.pure Bool.false
+    | .true => Fe.M.pure .false
     | .false => Fe.unify2 r q t u)
   | .mutb r x l, .mutb q y k => Fe.unify3 r q x y l k
   | .mopt r x l, .mopt q y k => Fe.unify3 r q x y l k
@@ -540,19 +540,19 @@ def Fe.unifyZ (a b : Fe.Ty) : Fe.M Bool :=
   -- a `Lent` token flows on only after a borrow error was recorded: let the lowering go on
   | .lent r l, t => Fe.unify l t
   | t, .lent r l => Fe.unify t l
-  | _, _ => Fe.M.pure Bool.false
+  | _, _ => Fe.M.pure .false
 /-- Unifies two pairs of types, `a` with `b` and then `c` with `d`. -/
 def Fe.unify2 (a b c d : Fe.Ty) : Fe.M Bool := do
   r ← Fe.unify a b;
   match r with
   | .true => Fe.unify c d
-  | .false => Fe.M.pure Bool.false
+  | .false => Fe.M.pure .false
 /-- Unifies three pairs of types. -/
 def Fe.unify3 (a b c d e f : Fe.Ty) : Fe.M Bool := do
   r ← Fe.unify2 a b c d;
   match r with
   | .true => Fe.unify e f
-  | .false => Fe.M.pure Bool.false
+  | .false => Fe.M.pure .false
 end
 
 -- ## Signatures, data declarations, the context
@@ -746,7 +746,7 @@ def Fe.tyOf (p : List Nat) (s : Syntax) : Fe.M Fe.Ty :=
     (fun _ => Fe.fail p "not a type of the supported fragment")
 /-- Several Feral types, from syntax. -/
 def Fe.tysOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List Fe.Ty)
-  | .nil => Fe.M.pure List.nil
+  | .nil => Fe.M.pure []
   | .cons a as => do
     t ← Fe.tyOf (Fe.sub p a.1) a.2;
     ts ← Fe.tysOf p as;
@@ -1127,11 +1127,11 @@ def Fe.sigFor (cx : Fe.Cx) (env : Fe.Env) (f : String) : Option (Fe.Sig × Bool)
   match Bool.and (Fe.has sp.1 env) (Fe.hasDot f) with
   | .true => (match String.lookup sp.2 Fe.methods with
     | .some m => (match Fe.findSig m cx.g.sigs with
-      | .some s => .some (s, Bool.true)
+      | .some s => .some (s, .true)
       | .none => .none)
     | .none => .none)
   | .false => (match Fe.findSig f cx.g.sigs with
-    | .some s => .some (s, Bool.false)
+    | .some s => .some (s, .false)
     | .none => .none)
 /-- a variable that has no open borrow yet -/
 def Fe.findFree (opened : List String) (x : String) (env : Fe.Env) : Option Fe.Var := match Fe.handleOf x env with
@@ -1265,8 +1265,8 @@ def Fe.stmtReqs (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) : Fe.M 
     let fb := Fe.fieldBorrow init;
     (match Fe.find fb.1 env, String.eq fb.2 "" with
     | .some v, .false => (match Fe.zonk s v.ty with
-      | .ref .true _ _ => Fe.pure (List.cons (Fe.Req.mk 4 fb.1 "" .nil) List.nil)
-      | _ => Fe.pure List.nil)
+      | .ref .true _ _ => Fe.pure [(Fe.Req.mk 4 fb.1 "" .nil)]
+      | _ => Fe.pure [])
     | _, _ => (match Fe.is "feral_expr.borrow" init, String.eq (Fe.plainVar (Fe.arg init 2)) "" with
       | .true, .false => Fe.pure (Fe.nameReq (Fe.id (Fe.arg st 2)) (Fe.sub p 2) (Fe.rq cx s env init .nil))
       | _, _ => Fe.pure (Fe.rq cx s env init .nil)))
@@ -1282,7 +1282,7 @@ with the pattern's variables, whether it is in tail position, and the continuati
 def Fe.Arm : Type := Syntax × (Fe.Cx → Fe.Env → Bool → Fe.K → Fe.M Fe.Out)
 /-- A fresh inference variable for each of these names. -/
 def Fe.instMapGo : List String → Fe.M (List (String × Fe.Ty))
-  | .nil => Fe.pure List.nil
+  | .nil => Fe.pure []
   | .cons x xs => do
     v ← Fe.freshVar;
     rest ← Fe.instMapGo xs;
@@ -1441,7 +1441,7 @@ def Fe.exprK (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
           (fun vs e => k (Fe.Out.s "(" ⊕ Fe.tupleO vs ⊕ Fe.Out.s ")") (Fe.Ty.prod ta tb) e)
       | _ => Fe.fail p "tuples of more than two components are not supported yet")) ▸
     ("feral_expr.block", fun _ => Fe.seqU cx env (Fe.sub p 1) (Fe.kids (Fe.arg s 1)) exp tail .false
-      (fun _ _ => Fe.pure Bool.false) (fun _ v t e => k v t e)) ▸
+      (fun _ _ => Fe.pure .false) (fun _ v t e => k v t e)) ▸
     ("feral_expr.dotCtor", fun _ => Fe.ctorApp cx env p (Fe.id (Fe.arg s 1)) "" .nil exp k) ▸
     ("feral_expr.app", fun _ => Fe.appE cx env p s exp k) ▸
     ("feral_expr.dot", fun _ => (match String.lookup (Fe.id (Fe.arg s 2)) Fe.methods with
@@ -1553,7 +1553,7 @@ def Fe.body (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.T
   sb ← Fe.getSubst;
   match Fe.tailReqs cx .true (Fe.rq cx sb env s .nil) with
   | .nil => Fe.expr cx env p s exp tail k
-  | reqs => Fe.scoped cx env p reqs (fun _ x => Fe.ment x s) (fun _ _ => Bool.false) (Fe.early s)
+  | reqs => Fe.scoped cx env p reqs (fun _ x => Fe.ment x s) (fun _ _ => .false) (Fe.early s)
     (fun cx2 e2 fin => Fe.expr cx2 e2 p s exp .false (fun v t e3 => fin 0 v t e3))
     (fun _ v t e => k v t e)
 
@@ -1893,7 +1893,7 @@ def Fe.evalS (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (exp : Fe.
   sb ← Fe.getSubst;
   match Fe.rq cx sb env s .nil with
   | .nil => Fe.expr (Fe.Cx.setTail cx .false) env p s exp .false k
-  | reqs => Fe.scoped (Fe.Cx.setTail cx .false) env p reqs (fun _ x => Fe.ment x s) (fun _ _ => Bool.false) (Fe.early s)
+  | reqs => Fe.scoped (Fe.Cx.setTail cx .false) env p reqs (fun _ x => Fe.ment x s) (fun _ _ => .false) (Fe.early s)
     (fun cx2 e2 fin => Fe.expr cx2 e2 p s exp .false (fun v t e3 => fin 0 v t e3))
     (fun _ v t e => k v t e)
 
@@ -1962,7 +1962,7 @@ def Fe.matchG (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (sp : Lis
     t ← Fe.zonkM v.ty;
     (match (t : Fe.Ty), v.gone with
     | _, .true => Fe.fail sp ("error[E0505]: `" +++ x +++ "` was moved into a borrow that is still in use")
-    | .ref .true r l, _ => Fe.scope1 cx env p (Fe.Req.mk 2 x "" .nil) (fun _ y => Fe.ment y s) (fun _ _ => Bool.false) (Fe.early s)
+    | .ref .true r l, _ => Fe.scope1 cx env p (Fe.Req.mk 2 x "" .nil) (fun _ y => Fe.ment y s) (fun _ _ => .false) (Fe.early s)
       (fun cx2 e2 fin => (match Fe.handleOf x e2 with
         | .none => Fe.fail p "internal: no handle for the scrutinee"
         | .some h => do
@@ -1987,7 +1987,7 @@ def Fe.matchG (cx0 : Fe.Cx) (env : Fe.Env) (p : List Nat) (s : Syntax) (sp : Lis
     | .nil => Fe.expr (Fe.Cx.setTail cx .false) env sp scrut tv .false (fun v t e => do
       t ← Fe.zonkM t;
       Fe.branch cx e p s tail (fun cx2 tl kk => Fe.armsBy cx2 e p v t arms tl kk) k)
-    | reqs => Fe.scoped cx env p reqs (fun _ y => Fe.ment y s) (fun _ _ => Bool.false) (Fe.early s)
+    | reqs => Fe.scoped cx env p reqs (fun _ y => Fe.ment y s) (fun _ _ => .false) (Fe.early s)
       (fun cx2 e2 fin => Fe.expr (Fe.Cx.setTail cx2 .false) e2 sp scrut tv .false (fun v t e3 => do
         t ← Fe.zonkM t;
         Fe.armsBy cx2 e3 p v t arms .true (fun v2 t2 e4 => fin 0 v2 t2 e4)))
@@ -2068,7 +2068,7 @@ def Fe.ctorFields (cx : Fe.Cx) (p : List Nat) (sty : Fe.Ty) (c : String) : Fe.M 
 /-- `_` fields get names when the constructor has to be rebuilt -/
 def Fe.fieldNames (keepWild : Bool) (ns : List String) : Fe.M (List String) :=
   match ns with
-  | .nil => Fe.pure List.nil
+  | .nil => Fe.pure []
   | .cons n rest => do
     n2 ← Fe.asStr (match Bool.and (Fe.isWild n) (Bool.not keepWild) with
       | .true => Fe.freshName "f"
@@ -2312,10 +2312,10 @@ def Fe.seqU (cx : Fe.Cx) (env : Fe.Env) (bp : List Nat) (stmts : Fe.Stmts) (exp 
   | .nil => k 0 (Fe.o "()") Fe.tUnit env
   | .cons st rest => do
     halt ← Fe.asBool (match opened with
-      | .true => Fe.pure Bool.false
+      | .true => Fe.pure .false
       | .false => stop env stmts);
     reqs ← Fe.asReqs (match opened with
-      | .true => Fe.pure List.nil
+      | .true => Fe.pure []
       | .false => Fe.M.bind (Fe.stmtReqs (Fe.Cx.fresh cx) env (Fe.sub bp st.1) st.2) (fun rs => Fe.pure (Fe.tailReqs cx (List.isEmpty rest) rs)));
     (match (halt : Bool), (reqs : List Fe.Req) with
     | .true, _ => k (Fe.len stmts) (Fe.o "()") Fe.tUnit env
@@ -2364,7 +2364,7 @@ def Fe.letS (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (st : Syntax) (k : Fe.K) 
     | .false => "");
   let named := Fe.the Bool (match Fe.handleOf bx env with
     | .some h => Bool.and (Bool.not (String.eq bx "")) (String.eq h.name x)
-    | .none => Bool.false);
+    | .none => .false);
   let lender := Fe.find fb.1 env;
   let moved := Fe.find (Fe.plainVar init) env;
   match named, lender, moved with
@@ -2402,7 +2402,7 @@ def Fe.letG (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (x : String) (mt : Bool) 
       | .none => Option.none);
     let rel := Fe.the (List String) (match tmp with
       | .some w => w.rel
-      | .none => List.nil);
+      | .none => []);
     let e1 := Fe.the Fe.Env (match tmp, List.isEmpty rel with
       | .some w, .false => Fe.update (fun (u : Fe.Var) => Fe.Var.setGone (Fe.Var.setRel u .nil) .true) w.name e
       | _, _ => e);
@@ -2476,7 +2476,7 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
     -- L11: with the fields out, each is a local until the scope's end rebuilds the struct
     let fields := Fe.the (List (String × Fe.Ty)) (match Nat.beq rq.kind 4, Fe.structOf cx sty with
       | .true, .some sd => sd.fields
-      | _, _ => List.nil);
+      | _, _ => []);
     let unp := List.map (fun (f : String × Fe.Ty) => (f.1, rq.lender +++ "_" +++ f.1)) fields;
     let e0 := Fe.the Fe.Env (match shared with
       | .true => hvar ▸ env
@@ -2516,7 +2516,7 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
       outs ← Fe.exportsBut rq.lender (ment rem) env;
       tz ← Fe.zonkM t;
       let newv := Fe.the (List Fe.Var) (match rem with
-        | .zero => List.nil
+        | .zero => []
         | _ => List.filter (fun (w : Fe.Var) => Bool.and (Bool.and (Bool.not (Fe.has w.name env)) (String.eq w.src ""))
             (Bool.and (Bool.not (Bool.or w.gone (Fe.isLent w.ty))) (after rem w.name))) ez);
       let cur := List.filter (fun (w : Fe.Var) => String.elem w.name (Fe.names outs)) ez;
@@ -2666,7 +2666,7 @@ def Fe.tyVars : Fe.Ty → List Nat → List Nat
     | .false => .cons n acc)
 /-- Names the elided regions of a signature `ρe0`, `ρe1`, … (solving their variables). -/
 def Fe.nameElided : List Nat → Fe.M (List String)
-  | .nil => Fe.pure List.nil
+  | .nil => Fe.pure []
   | .cons n ns => do
     Fe.bindVar n (Fe.Ty.rg ("ρe" +++ Syntax.decimal n));
     rest ← Fe.nameElided ns;
@@ -2713,8 +2713,8 @@ def Fe.prodAll : List (Nat × Fe.Ty) → Fe.Ty
   | .cons a as => Fe.Ty.app (Fe.Ty.app (Fe.Ty.con "Σ1") a.2) (Fe.prodAll as)
 /-- the returned borrow, if the result type is one: (optional?, region, pointee) -/
 def Fe.retBorrow : Fe.Ty → Option (Bool × (Fe.Ty × Fe.Ty))
-  | .ref .true r a => .some (Bool.false, (r, a))
-  | .app (.con o) (.ref .true r a) => .some (Bool.true, (r, a))
+  | .ref .true r a => .some (.false, (r, a))
+  | .app (.con o) (.ref .true r a) => .some (.true, (r, a))
   | _ => .none
 /-- A function's signature, from its syntax: its binders, elided regions named,
 the result's elided regions taken from the first reference parameter (else E0106), and
@@ -2866,7 +2866,7 @@ def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M S
   let head := Fe.Out.s kw ⊕ Fe.Out.at (Fe.sub p 1) (Fe.Out.s sig.name) ⊕ Fe.Out.s (" "
       +++ (match sig.rgs with
         | .nil => ""
-        | rs => "{" +++ Fe.words rs +++ ": Region} ")
+        | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
       +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
       +++ (match sig.tys with
         | .nil => ""
@@ -2889,14 +2889,14 @@ def Fe.fnText (g : Fe.Glob) (p : List Nat) (it : Syntax) (sig : Fe.Sig) : Fe.M S
 /-- `struct S where f : T` ↦ `structure S`, with a lens per field, its laws, and the
 independence of distinct fields (L10); `enum` ↦ `inductive` -/
 def Fe.fieldsOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List (String × Fe.Ty))
-  | .nil => Fe.pure List.nil
+  | .nil => Fe.pure []
   | .cons f fs => do
     t ← Fe.tyOf (Fe.sub (Fe.sub p f.1) 2) (Fe.arg f.2 2);
     rest ← Fe.fieldsOf p fs;
     Fe.pure (List.cons (Fe.id (Fe.arg f.2 0), t) rest)
 /-- An enum's constructors and their fields, from syntax. -/
 def Fe.ctorsOf (p : List Nat) : List (Nat × Syntax) → Fe.M (List (String × List (String × Fe.Ty)))
-  | .nil => Fe.pure List.nil
+  | .nil => Fe.pure []
   | .cons c cs => do
     b ← Fe.binders (Fe.sub (Fe.sub p c.1) 2) (Fe.kids (Fe.arg c.2 2)) (Fe.B.mk .nil .nil .nil .nil);
     rest ← Fe.ctorsOf p cs;
@@ -3096,7 +3096,7 @@ def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
       .ok ("def " +++ sig.name +++ ".Spec "
         +++ (match rgs with
           | .nil => ""
-          | rs => "{" +++ Fe.words rs +++ ": Region} ")
+          | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
         +++ (match sig.tys with
           | .nil => ""
           | ts => "{" +++ Fe.words ts +++ ": Type} ")
@@ -3129,7 +3129,7 @@ def Fe.specOf (sig : Fe.Sig) (cls : List (Nat × Syntax)) : Except String String
       .ok ("def " +++ sig.name +++ ".Spec "
         +++ (match sig.rgs with
           | .nil => ""
-          | rs => "{" +++ Fe.words rs +++ ": Region} ")
+          | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
         +++ Fe.words (List.map (fun (e : String × (String × String)) => "(0 " +++ e.1 +++ " : Outlives " +++ e.2.1 +++ " " +++ e.2.2 +++ ")") ev)
         +++ (match sig.tys with
           | .nil => ""

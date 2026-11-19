@@ -2,14 +2,12 @@
 /* ---- flat objects: tags and fields by runtime values (`pack`, `unpack`) ---- */
 
 WIZ_API wiz_val wiz_tag_of(wiz_val v) {
-  uint32_t t = wiz_tag(v);
-  wiz_dec(v);
-  return WIZ_BOX(t);
+  /* borrowed (stage 8e): the caller keeps its reference */
+  return WIZ_BOX(wiz_tag(v));
 }
 WIZ_API wiz_val wiz_nat_tag(wiz_val v) {
-  int zero = WIZ_IS_SCALAR(v) && WIZ_UNBOX(v) == 0;
-  wiz_dec(v);
-  return WIZ_BOX(zero ? 0 : 1);
+  /* borrowed (stage 8e): the caller keeps its reference */
+  return WIZ_BOX(WIZ_IS_SCALAR(v) && WIZ_UNBOX(v) == 0 ? 0 : 1);
 }
 WIZ_API wiz_val wiz_field_at(wiz_val v, wiz_val n) {
   wiz_val f = ((wiz_ctor *)v)->fields[WIZ_UNBOX(n)];

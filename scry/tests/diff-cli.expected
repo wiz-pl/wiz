@@ -61,6 +61,14 @@ diff all: exit 1: ok
 flags: --diff and --changed-lines conflict: ok
 flags: --diff-context needs a diff: ok
 flags: --diff all has no context: ok
+diff base: --output=FILE refused: ok
+diff base: --ext-diff refused: ok
+diff base: a revision range refused: ok
+diff base: HEAD~1 accepted: ok
+diff base: origin/master accepted: ok
+diff base: parse refuses an option: ok
+diff base: the run refuses it: ok
+diff base: git never wrote a file: ok
 taint: tests/fixtures/taint-unsafe.c (6 rules)
 parse: ok
 diff: --changed-lines tests/fixtures/diff/unsafe-moved.patch; 0 hunk(s) in 1 file(s), 0 added line(s), 0 line(s) in scope, context 0

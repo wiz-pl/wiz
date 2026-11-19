@@ -160,10 +160,10 @@ def Scry.Program.isLat {L : Type} (p : Scry.Program L) (r : Nat) : Bool :=
 every lattice head variable by a body lattice atom, and every atom has its declared
 arity. -/
 def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :=
-  let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) List.nil r.body;
+  let bound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => List.append a.posVars acc) [] r.body;
   let latBound : List Nat := List.foldr (fun (a : Scry.Atom) (acc : List Nat) => match a.latVal with
     | .none => acc
-    | .some v => List.cons v acc) List.nil r.body;
+    | .some v => List.cons v acc) [] r.body;
   let headVars : List Nat := match r.head with
     | .tuple _ args => Scry.termsVars args
     | .lat _ key _ => Scry.termsVars key;
@@ -171,13 +171,13 @@ def Scry.Rule.rangeOk {L : Type} (p : Scry.Program L) (r : Scry.Rule L) : Bool :
     | .tuple _ _ => .nil
     | .lat _ _ val => val.vars;
   let negOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
-    if Scry.natSubset a.negVars bound then acc else Bool.false) Bool.true r.body;
+    if Scry.natSubset a.negVars bound then acc else .false) .true r.body;
   let arityOk : Bool := List.foldr (fun (a : Scry.Atom) (acc : Bool) =>
     if Scry.Atom.relOk p a then
       if Scry.Atom.kindOk p a then
-        if Scry.Atom.arityOk p a then acc else Bool.false
-      else Bool.false
-    else Bool.false) Bool.true r.body;
+        if Scry.Atom.arityOk p a then acc else .false
+      else .false
+    else .false) .true r.body;
   let headKindOk := match r.head with
     | .tuple rel _ => if Scry.natMem rel p.latRels then Bool.false else Bool.true
     | .lat rel _ _ => Scry.natMem rel p.latRels;
@@ -220,8 +220,8 @@ def Scry.Program.stratPass {L : Type} (p : Scry.Program L) (strata : List Nat) :
   List.foldr (fun (r : Scry.Rule L) (acc : List Nat × Bool) =>
     let need := Scry.Rule.stratumReq acc.1 r;
     let hs := List.getD acc.1 r.head.rel 0;
-    if Nat.lt hs need then (List.setAt acc.1 r.head.rel need, Bool.true) else acc)
-    (strata, Bool.false) p.rules
+    if Nat.lt hs need then (List.setAt acc.1 r.head.rel need, .true) else acc)
+    (strata, .false) p.rules
 
 def Scry.Program.stratPasses {L : Type} (p : Scry.Program L) :
     Nat → List Nat → List Nat × Bool
@@ -241,3 +241,65 @@ def Scry.Program.stratify {L : Type} (p : Scry.Program L) : Option (List Nat) :=
 /-- Range restriction and stratification, the checks the surface macro will perform. -/
 def Scry.Program.check {L : Type} (p : Scry.Program L) : Option (List Nat) :=
   if Scry.Program.wellFormed p then Scry.Program.stratify p else .none
+
+-- ## Equality-sorted columns (S12 seam)
+
+/-- The kind of a relation column. `u64` is an ordinary 64-bit word; `eqsort s` is a
+column whose values are e-class ids of equality sort `s`. The canonicalisation step of
+`Scry.EqPlan` rewrites an `eqsort` column to its class representative, and an equality
+assertion merges the two classes a row names. The kind is declared in an `EqCol` schema
+next to the program, so existing `Program`s are unchanged (`Scry.Datalog`'s typed-column
+work owns the column types themselves). -/
+inductive Scry.ColKind where
+  | u64
+  | eqsort (sort : Nat)
+
+/-- One equality-sorted column: relation `rel`, column index `col`, equality sort
+`sort`. A relation with two `eqsort` columns of the same sort can be the target of an
+equality assertion (`Head.eqAssert`). -/
+structure Scry.EqCol where
+  rel : Nat
+  col : Nat
+  sort : Nat
+
+def Scry.EqCols.forRel (cols : List Scry.EqCol) (rel : Nat) : List Scry.EqCol :=
+  List.filter (fun c => Nat.beq c.rel rel) cols
+
+/-- The declared kind of one column (`u64` when nothing is declared). -/
+def Scry.EqCols.kindAt (cols : List Scry.EqCol) (rel col : Nat) : Scry.ColKind :=
+  match List.filter (fun c => Bool.and (Nat.beq c.rel rel) (Nat.beq c.col col)) cols with
+  | .nil => .u64
+  | .cons c _ => .eqsort c.sort
+
+/-- The equality sort of a column, if it is one. -/
+def Scry.EqCols.sortAt (cols : List Scry.EqCol) (rel col : Nat) : Option Nat :=
+  match Scry.EqCols.kindAt cols rel col with
+  | .u64 => .none
+  | .eqsort s => .some s
+
+/-- Whether a relation has at least one equality-sorted column. -/
+def Scry.EqCols.hasEq (cols : List Scry.EqCol) (rel : Nat) : Bool :=
+  match Scry.EqCols.forRel cols rel with
+  | .nil => .false
+  | .cons _ _ => .true
+
+/-- The sorts named by a schema. -/
+def Scry.EqCols.sorts (cols : List Scry.EqCol) : List Nat :=
+  List.foldr (fun c acc => if Scry.natMem c.sort acc then acc else .cons c.sort acc) .nil cols
+
+/-- A schema is well formed when every declared column exists in its relation. An
+`eqsort` column of a **lattice** relation is its key, which is exactly how an e-class
+analysis is written down (`itv : EClass → Interval`); a lattice relation has no value
+column, so every `eqsort` column on one is a key. -/
+def Scry.EqCols.ok {L : Type} (p : Scry.Program L) (cols : List Scry.EqCol) : Bool :=
+  List.foldr (fun c acc =>
+    if Nat.lt c.rel (List.length p.arities) then
+      if Nat.lt c.col (p.arity c.rel) then acc else .false
+    else .false) .true cols
+
+/-- A rule head that **asserts an equality**: a tuple head in `rel` (an equality
+relation, whose two first columns are `eqsort` of one sort) with the two terms to be
+merged. `Scry.EqPlan` calls `EGraph.mergeFacts` on those rows after a round and then
+canonicalises the database. -/
+def Scry.Head.eqAssert {L : Type} (rel : Nat) (a b : Scry.Term) : Scry.Head L :=
+  .tuple rel (.cons a (.cons b .nil))

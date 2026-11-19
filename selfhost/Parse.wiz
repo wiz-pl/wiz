@@ -505,15 +505,25 @@ def addLeadingTo (cat : String) (l : Leading) : List Cat → List Cat
 
 -- The surface forms the self-hosted frontend adds to the tables it is given: `if`, `!`,
 -- `&&` and `||` (the host gets them from `lib/Prelude.wiz`'s `syntax`/`notation`, which
--- this frontend does not process). The kinds and shapes are the host's, so the parser
--- differential compares the trees directly.
+-- this frontend does not process), and (C15) the `smt` tactic. The kinds and shapes are
+-- the host's, so the parser differential compares the trees directly.
 def surfaceCats (cats : List Cat) : List Cat :=
+  -- (C15) `smt` is a `tactic` in lib/Prelude.wiz (`syntax (name := smt) "smt" : tactic`);
+  -- this frontend gets the host's kind and shape, so `by smt` parses as the host parses
+  -- it and the frontend refuses it at elaboration (Frontend.wiz, `tacOfStx`). `smt` is
+  -- an identifier here (the tables do not reserve it, as `if`/`then`/`else` are not)
+  let cats := addLeadingTo "tactic" (.mk "tactic.smt" 1024 0 (.nonReserved "smt")) cats;
   let cats := addLeadingTo "term" (.mk "term.!" 1024 0
     (.seq (.atom "!") (.cat "term" 1024))) cats;
   let cats := addTrailingTo "term" (.mk "term.boolAnd" 35 36 0
     (.seq (.atom "&&") (.cat "term" 35))) cats;
   let cats := addTrailingTo "term" (.mk "term.boolOr" 30 31 0
     (.seq (.atom "||") (.cat "term" 30))) cats;
+  -- (A17) `[a, b]`: the host gets this from lib/Prelude.wiz's
+  -- `syntax (name := listLit) "[" sepBy(term, ",") "]"`, which this frontend does not
+  -- process; the shape is the one that rule generates
+  let cats := addLeadingTo "term" (.mk "term.listLit" 1024 0
+    (.seq (.atom "[") (.seq (.sepBy (.cat "term" 0) "," .false) (.atom "]")))) cats;
   -- `if c then a else b`: the branches are `term`s, not application arguments, so a
   -- branch may start on the next line at the `if`'s column (Lean's syntax rule has the
   -- same shape; as an application it was only accepted when indented further)
@@ -524,3 +534,131 @@ def surfaceCats (cats : List Cat) : List Cat :=
 -- would swallow `then` (the host's `syntax` reserves them the same way)
 def surfaceTokens : List String :=
   .cons "if" (.cons "then" (.cons "else" (.cons "!" (.cons "&&" (.cons "||" .nil)))))
+
+-- ## Spans (playground LSP, stage 2)
+
+-- The source span of every syntax node, as a **side table beside the tree**: `Syntax`
+-- stays `missing | atom | ident | node kind args`, so no match on it changes and no node
+-- grows a field. The tree of spans is deep-coded (`SpF`, like `SyntaxF`): a node's
+-- children are a `SpF .false` list aligned one-for-one with the syntax node's arguments
+-- (an atom/ident argument is a `leaf`; a list is one child whose own children are its
+-- elements). A node the parser did not build (a macro expansion, a `.missing`, a rewrite)
+-- has no span, and `spCheck` refuses a pairing whose kinds disagree, so a wrong span is
+-- dropped rather than guessed.
+inductive SpF : Bool → Type where
+  | missing : SpF .true
+  | leaf (start stop : Nat) : SpF .true
+  | node (kind : String) (start stop : Nat) (kids : SpF .false) : SpF .true
+  | nil : SpF .false
+  | cons (head : SpF .true) (tail : SpF .false) : SpF .false
+def SpT : Type := SpF .true
+def SpL : Type := SpF .false
+
+def SpT.start : SpT → Nat
+  | .missing => 0
+  | .leaf s _ => s
+  | .node _ s _ _ => s
+def SpT.stop : SpT → Nat
+  | .missing => 0
+  | .leaf _ e => e
+  | .node _ _ e _ => e
+-- the spans of a node's children, as a list
+def spList : SpL → List SpT
+  | .nil => .nil
+  | .cons x rest => .cons x (spList rest)
+def spKids : SpT → List SpT
+  | .node _ _ _ ks => spList ks
+  | _ => .nil
+def spNth : List SpT → Nat → SpT
+  | .nil, _ => .missing
+  | .cons x rest, .zero => x
+  | .cons _ rest, .succ k => spNth rest k
+-- the `i`th argument's span
+def spKid (sp : Option SpT) (i : Nat) : Option SpT := match sp with
+  | .none => .none
+  | .some t => match spNth (spKids t) i with
+    | .missing => .none
+    | k => .some k
+def spSome : List SpT → List (Option SpT)
+  | .nil => .nil
+  | .cons x rest => .cons (.some x) (spSome rest)
+-- the spans of a node's arguments, one per argument
+def spKidsOpt (sp : Option SpT) : List (Option SpT) := match sp with
+  | .none => .nil
+  | .some t => spSome (spKids t)
+-- a list of argument spans: the first, and the rest (an empty list is `none`/empty, so an
+-- argument list with no spans at all stays aligned in length)
+def spHead : List (Option SpT) → Option SpT
+  | .nil => .none
+  | .cons x _ => x
+def spTail : List (Option SpT) → List (Option SpT)
+  | .nil => .nil
+  | .cons _ xs => xs
+-- `sp` only if it describes `s` (the same kind, or a leaf for a token). A node the
+-- frontend rewrote before elaborating it (a macro expansion: an infix operator, `&&`,
+-- `do`, `if`) no longer has the parser's children, so it keeps the parsed node's range
+-- (the same source text) but loses its children: the node's own expected type is still
+-- exact, a nested one under the rewrite is not guessed.
+def spCheck (sp : Option SpT) (s : Syntax) : Option SpT := match sp with
+  | .none => .none
+  | .some t => match s with
+    | .node k _ => match t with
+      | .node k2 st en ks => match strEq k k2 with
+        | .true => .some t
+        | .false => .some (.node k st en .nil)
+      | _ => .none
+    | .atom _ => match t with
+      | .leaf _ _ => .some t
+      | _ => .none
+    | .ident _ => match t with
+      | .leaf _ _ => .some t
+      | _ => .none
+    | .missing => .none
+
+-- The walk: one left-to-right pass over the tree and the lexer's tokens. Every token the
+-- parser consumed is exactly one leaf of the tree in source order (`runDescr`: `.atom`
+-- emits an `.atom`, `.ident` an `.ident`, `.node`/`.many`/`.optional` keep or wrap their
+-- children, `.withPosition`/`colGt`/`noWs`/`empty` emit nothing), so one leaf consumes one
+-- token. A leaf with no token left, or a bad token, ends the walk: `bad`.
+inductive Ann where
+  | ok (sp : SpT) (pos : Nat)
+  | bad
+inductive AnnL where
+  | ok (kids : SpL) (pos : Nat)
+  | bad
+def annotLeaf (c : Ctx) (pos : Nat) : Ann :=
+  let i := skipWs (Ctx.input c) pos;
+  match peek c i with
+  | .tok _ start stop => .ok (.leaf start stop) stop
+  | _ => .bad
+def annotStart (pos : Nat) : SpL → Nat
+  | .nil => pos
+  | .cons k _ => SpT.start k
+partial def annotStop : SpL → Nat → Nat
+  | .nil, pos => pos
+  | .cons k rest, _ => annotStop rest (SpT.stop k)
+mutual
+partial def annot (c : Ctx) (pos : Nat) (s : Syntax) : Ann := match s with
+  | .missing => .bad
+  | .atom _ => annotLeaf c pos
+  | .ident _ => annotLeaf c pos
+  | .node k args => match annotArgs c pos args with
+    | .bad => .bad
+    | .ok kids stop => .ok (.node k (annotStart pos kids) (annotStop kids pos) kids) stop
+partial def annotArgs (c : Ctx) (pos : Nat) : SyntaxF .false → AnnL
+  | .nil => .ok .nil pos
+  | .cons x rest => match annot c pos x with
+    | .bad => .bad
+    | .ok k p1 => match annotArgs c p1 rest with
+      | .bad => .bad
+      | .ok ks p2 => .ok (.cons k ks) p2
+end
+
+-- the span tree of `s`, parsed at `pos` of `input` against `tokens` (the grammar the
+-- command was parsed with — commands may change it, so this can't be replayed later);
+-- `none` when the tree does not line up with the input
+def spansAt (input : Array Nat) (tokens : List String) (pos : Nat) (s : Syntax) : Option SpT :=
+  match annot (Ctx.mk input (tokenBuckets tokens) .nil .none 0) pos s with
+  | .ok sp _ => .some sp
+  | .bad => .none
+

@@ -25,7 +25,14 @@ M.defaults = {
     inlay_hints = false,
     -- Neovim's own completion from the server (0.11+, `vim.lsp.completion`), popping up
     -- as you type: true, false, or 'auto' (on unless nvim-cmp or blink.cmp is loaded).
+    -- On 0.10 this instead sets 'omnifunc' to the client's completion (`<C-x><C-o>`).
     completion = 'auto',
+    -- Buffer-local LSP keymaps: K hover, gd/gD, grn rename, grr references, gra code
+    -- action, gO outline, ]d/[d diagnostics, <C-s> signature help (see the README).
+    --   'auto'  only where Neovim installs none itself, i.e. 0.10 (0.11+ has defaults)
+    --   true    also on 0.11+, for keys the user has not mapped
+    --   false   never (use your own mappings)
+    keymaps = 'auto',
     -- Fold with the server's folding ranges (commands, `by` blocks, comments) in the
     -- windows showing a Wiz buffer (0.11+, `vim.lsp.foldexpr`; all folds start open).
     folding = false,

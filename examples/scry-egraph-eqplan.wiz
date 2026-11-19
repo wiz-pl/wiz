@@ -1,0 +1,66 @@
+import Scry.EqPlan
+-- Equality sorts in the Datalog surface (`scry-egraph-eqplan`): `eq` is an equality
+-- relation (`eqsort` columns of sort 0), its rule head is an equality assertion
+-- (`Head.eqAssert`), and the plan interpreter merges derived rows with one `mergeFacts`
+-- and canonicalises the database between rounds. Once `1` and `2` are the same class,
+-- `q(2)` is stored as `q(1)` and the rules `p(y) :- q(x), eq(x, y)` and
+-- `r(x) :- q(x)` derive canonical rows. `main` is the digest.
+
+-- relations: 0 = edge, 1 = eq (eqsort 0, eqsort 0), 2 = q, 3 = p, 4 = r;
+-- every e-class column of q/p/r is also an eqsort column, as in a real IR schema
+def u (n : Nat) : U64 := U64.ofNat n
+
+def ops : Scry.LatOps Nat :=
+  Scry.LatOps.mk 0 (fun a b => if Nat.lt a b then b else a) Nat.beq
+
+-- eq(x, y) :- edge(x, y), with an equality-assertion head
+def rEq : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.eqAssert 1 (Scry.Term.var 0) (Scry.Term.var 1))
+    [Scry.Atom.pos 0 [Scry.Term.var 0, Scry.Term.var 1]]
+
+-- p(y) :- q(x), eq(x, y)
+def rP : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 3 [Scry.Term.var 1])
+    [Scry.Atom.pos 2 [Scry.Term.var 0], Scry.Atom.pos 1 [Scry.Term.var 0, Scry.Term.var 1]]
+
+-- r(x) :- q(x)
+def rR : Scry.Rule Nat :=
+  Scry.Rule.mk (Scry.Head.tuple 4 [Scry.Term.var 0])
+    [Scry.Atom.pos 2 [Scry.Term.var 0]]
+
+def prog : Scry.Program Nat :=
+  Scry.Program.mk ops [2, 2, 1, 1, 1] [] [] [rEq, rP, rR]
+
+def plan : Scry.Plan Nat :=
+  -- eq's two columns and q's value column are e-class ids of sort 0
+  Scry.Plan.mk prog
+    [Scry.EqCol.mk 1 0 0, Scry.EqCol.mk 1 1 0, Scry.EqCol.mk 2 0 0,
+     Scry.EqCol.mk 3 0 0, Scry.EqCol.mk 4 0 0]
+    [1]
+
+def db : Scry.State Nat :=
+  Scry.State.addTuple (Scry.State.addTuple Scry.State.empty 0 [u 1, u 2]) 2 [u 2]
+
+def headNat : List U64 → Nat
+  | .nil => 99
+  | .cons x _ => UIntN.toNat x
+
+def firstRow (db : Scry.Db Nat) (rel : Nat) : Nat :=
+  match (Scry.Db.tupleAt db rel).toList with
+  | .nil => 99
+  | .cons row _ => headNat row
+
+def main : Nat :=
+  match Scry.Plan.eval plan db 20 with
+  | .none => 900
+  | .some r =>
+    let st := r.1;
+    let g := Scry.EqSorts.graph r.2 0;
+    Scry.Db.relSize st.db 1 * 100000 +
+    Scry.Db.relSize st.db 2 * 10000 +
+    Scry.Db.relSize st.db 3 * 1000 +
+    Scry.Db.relSize st.db 4 * 100 +
+    Scry.EGraph.numClasses g * 10 +
+    (if Scry.EGraph.sameClass g 1 2 then 1 else 0) +
+    (if Nat.beq (firstRow st.db 3) 1 then 1000000 else 0) +
+    (if Scry.EGraph.canonical g then 10000000 else 0)

@@ -1,6 +1,7 @@
 import Text
 import Functor
 import WordArray
+import IO
 import Scry.Wil
 import Scry.CstStore
 import Scry.Models
@@ -64,8 +65,9 @@ structure Scry.Cst where
   parentOf : Nat → Option Nat
   /-- Node `i`'s children, in tree order. -/
   childrenOf : Nat → List Nat
-  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
-  for `Scry.spanText` and the lowering tests. -/
+  /-- The source text of file `i`. `Wil.Span` offsets index it as **bytes**, while a
+  `String` is character-indexed: `Scry.spanText` converts through `Scry.ByteMap`.
+  Retained for `Scry.spanText` and the lowering tests. -/
   fileText : Nat → String
   /-- The path of file `i` (as the preprocessor or the caller named it). -/
   filePath : Nat → String
@@ -92,13 +94,15 @@ the `cc -E` line markers to the original file, byte range, line and column, and
 `fileText` serves the original texts. This is what `Scry.lowerTU` lowers, so the
 lowering never sees a preprocessed offset. -/
 def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry.Cst :=
-  let nodeBytes := List.foldl (fun a c => U32Array.push a (U32.ofNat (Char.code c)))
-    U32Array.empty (String.chars pre.text);
+  -- the span tables are built once: `Scry.mapSpan` is O(file) per span (it walks the
+  -- line lists and drops from the start of the text), `Scry.mapSpanAt` is not.
+  let ix := Scry.spanIndexOf pre;
+  let nodeBytes := ix.preWords;
   Scry.Cst.mk (Scry.CstStore.nodeCount s)
     (fun i => Scry.CstStore.kindName s i)
     (fun i => Scry.CstStore.fieldName s i)
     (fun i => let sp := Scry.CstStore.spanOf s i;
-      Scry.mapSpan pre i sp.start sp.stop)
+      Scry.mapSpanAt ix i sp.start sp.stop)
     (fun i => match Scry.CstStore.parentOf s i with
       | .none => .none
       | .some x => .some x.n)
@@ -107,7 +111,9 @@ def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry
     (fun f => List.getD pre.paths f "")
     (List.length pre.paths)
     (fun i => let sp := Scry.CstStore.spanOf s i;
-      Scry.Cst.wordsText nodeBytes sp.start (Nat.sub sp.stop sp.start))
+      let a := Scry.ByteMap.charOfByte pre.textMap sp.start;
+      let b := Scry.ByteMap.charOfByte pre.textMap sp.stop;
+      Scry.Cst.wordsText nodeBytes a (Nat.sub b a))
 
 /-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
 store has one file per parse, so `text` is file 0. Line and column of every node's
@@ -115,15 +121,105 @@ origin are derived from the text (a direct parse, not preprocessed). -/
 def Scry.Cst.ofStore (text : String) (s : Scry.CstStore) : Scry.Cst :=
   Scry.Cst.ofPreprocessed (Scry.Preprocessed.plain (Scry.CstStore.pathName s 0) text) s
 
-/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). Byte
-offsets are used as character indices: the fixtures are ASCII (the shim's offsets are
-bytes; a UTF-8 identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
+-- ## A bytes-backed view (no whole-file `String`)
+
+/-- Is the byte an ASCII decimal digit? -/
+def Scry.isDigitByte (x : Nat) : Bool := Bool.and (Nat.le 48 x) (Nat.le x 57)
+
+/-- Does the line starting at `i` start with a preprocessor line marker (`# 12 "a.c"`,
+`#line 12`)? This is `Scry.markerOf` on bytes, without building the line's text. -/
+def Scry.markerAtBytes (b : Bytes) (i n : Nat) : Bool :=
+  let j := Scry.skipSpaceLine b i n;
+  match Nat.lt j n with
+  | .false => .false
+  | .true => match Nat.beq (Bytes.get b j) 35 with
+    | .false => .false
+    | .true =>
+      let k := Scry.skipSpaceLine b (Nat.succ j) n;
+      match Nat.lt k n with
+      | .false => .false
+      | .true =>
+        (if Scry.isDigitByte (Bytes.get b k) then .true
+         else if Bytes.matchesAt b k "line" then
+           (let l := Scry.skipSpaceLine b (Nat.add k 4) n;
+            match Nat.lt l n with
+            | .true => Scry.isDigitByte (Bytes.get b l)
+            | .false => .false)
+         else .false)
+
+/-- Does any line of the buffer start with a preprocessor marker? Walking line starts (not
+every byte) keeps a mid-line `#` from counting. -/
+partial def Scry.markerLinesFrom (b : Bytes) (i n : Nat) (atStart : Bool) : Bool :=
+  if Nat.lt i n then
+    (if Bool.and atStart (Scry.markerAtBytes b i n) then .true
+     else Scry.markerLinesFrom b (Nat.succ i) n (Nat.beq (Bytes.get b i) 10))
+  else .false
+
+/-- The longest node text the lowering materialises as a `String`. A C token longer than
+this (a megabyte-scale identifier or integer literal) cannot name a modelled binding or
+fit a machine integer; it is lowered as unmodelled (havoc plus a boundary warning)
+instead of allocating two cons cells per character. The limit is far above any
+identifier, keyword or type name in real code. -/
+def Scry.nodeTextLimit : Nat := 65536
+
+/-- `Scry.Cst.ofStoreBytesAt`'s `nodeText`: the token's bytes as text, or a short marker
+for a token past `Scry.nodeTextLimit` (see that definition). -/
+def Scry.nodeTextBytes (b : Bytes) (s : Scry.CstStore) (i : Nat) : String :=
+  let sp := Scry.CstStore.spanOf s i;
+  let n := Nat.sub sp.stop sp.start;
+  match Nat.le n Scry.nodeTextLimit with
+  | .true => Bytes.toLatin1 (Bytes.slice b sp.start n)
+  | .false => "<node text longer than " ++ Nat.repr Scry.nodeTextLimit ++ " bytes>"
+
+/-- The `Scry.Cst` view of a **direct** parse whose source is held as `Bytes`, with the
+line table already built (the caller uses it for origins too, so the file is scanned
+once). The common case (no preprocessor line markers) is built without a `String` of
+the file: origins are line/column from the byte table (`Scry.lineColFrom`) and a node's
+text is a `Bytes` slice. A file with markers falls back to `Scry.Cst.ofStore`, which
+needs the text to honour them.
+
+`fileText` is empty here: `Scry.lowerTU` keeps the file table for project-level origin
+rendering, which the single-file `scry taint` path does not use. A caller that needs
+the original texts reads them with `FS.readFile` and uses `Scry.Cst.ofStore`, which
+pays for them. -/
+def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
+    (s : Scry.CstStore) : Scry.Cst :=
+  match Scry.markerLinesFrom b 0 (Bytes.size b) .true with
+  | .true => Scry.Cst.ofStore (Scry.bytesText b) s
+  | .false =>
+    Scry.Cst.mk (Scry.CstStore.nodeCount s)
+      (fun i => Scry.CstStore.kindName s i)
+      (fun i => Scry.CstStore.fieldName s i)
+      (fun i => let sp := Scry.CstStore.spanOf s i;
+        let lc := Scry.lineColFromBytes starts sp.start;
+        Wil.Span.mk 0 sp.start sp.stop i lc.1 lc.2)
+      (fun i => match Scry.CstStore.parentOf s i with
+        | .none => .none
+        | .some x => .some x.n)
+      (fun i => List.map (fun x => x.n) (Scry.CstStore.childrenOf s i))
+      (fun _ => "")
+      (fun f => match Nat.beq f 0 with
+        | .true => path
+        | .false => "")
+      1
+      (fun i => Scry.nodeTextBytes b s i)
+
+/-- `Scry.Cst.ofStoreBytesAt` with the line table built here. -/
+def Scry.Cst.ofStoreBytes (path : String) (b : Bytes) (s : Scry.CstStore) : Scry.Cst :=
+  Scry.Cst.ofStoreBytesAt path b (Scry.lineStartsOfBytes b) s
+
+/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). In the
+text-backed views the span's byte offsets were converted through `Scry.ByteMap` when
+`nodeText` was built; in the bytes-backed view (`Scry.Cst.ofStoreBytes`) the slice is on
+bytes. A multibyte character before the token therefore does not shift it. -/
 def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String := c.nodeText i
 
-/-- The text of an origin. -/
+/-- The text of an origin. `sp.start`/`sp.stop` are byte offsets; the text is sliced by
+character index, so the file's byte map is built here (O(file) per call: this is for
+tests and the REPL, not the lowering's per-token path). -/
 def Scry.spanText (files : List String) (sp : Wil.Span) : String :=
   match List.getD files sp.file "" with
-  | text => String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+  | text => Scry.ByteMap.slice (Scry.ByteMap.ofString text) sp.start sp.stop
 
 -- ## Reading the tree
 
@@ -257,6 +353,8 @@ structure Scry.LState where
   contTo : Option Nat
   /-- Diagnostics, newest first, each with the statement that caused it. -/
   warnings : List Scry.Warning
+  /-- The model pack the lowering consults for allocation/free calls. -/
+  models : Scry.ModelPack
 
 /-- The lowering monad: state in, state and result out. -/
 def Scry.LM (A : Type) : Type := Scry.LState → (Scry.LState × A)
@@ -610,14 +708,38 @@ def Scry.digitVal (ch : Char) : Nat :=
           | .false => 99
         | .false => 99
 
-/-- Parse digits in `base` into `acc`. -/
-partial def Scry.parseDigits (base : Nat) : Nat → List Char → Option Nat
-  | acc, .nil => .some acc
-  | acc, .cons ch rest =>
+/-- Split a list after `n` elements. -/
+def Scry.splitChars : Nat → List Char → List Char × List Char
+  | .zero, cs => (.nil, cs)
+  | _, .nil => (.nil, .nil)
+  | .succ k, .cons c cs =>
+    match Scry.splitChars k cs with
+    | (lo, hi) => (.cons c lo, hi)
+
+/-- Parse a digit list in `base` by halving it: the value is
+`a * base ^ length(hi) + b`. This is the same value as the old digit-by-digit fold, but
+the big multiplications are between big numbers (`Nat.mul`, GMP) instead of one
+small-number multiply per digit over a growing accumulator, which was quadratic in the
+literal's length. A non-digit is still `none`. -/
+partial def Scry.parseDigitsAt (base : Nat) : List Char → Option Nat
+  | .nil => .some 0
+  | .cons ch .nil =>
     let d := Scry.digitVal ch;
     match Nat.lt d base with
     | .false => .none
-    | .true => Scry.parseDigits base (Nat.add (Nat.mul acc base) d) rest
+    | .true => .some d
+  | cs =>
+    match Scry.splitChars (Nat.div (List.length cs) 2) cs with
+    | (lo, hi) =>
+      match Scry.parseDigitsAt base lo, Scry.parseDigitsAt base hi with
+      | .some a, .some b => .some (Nat.add (Nat.mul a (Nat.pow base (List.length hi))) b)
+      | _, _ => .none
+
+/-- Parse digits in `base` into `acc`. -/
+def Scry.parseDigits (base : Nat) (acc : Nat) (cs : List Char) : Option Nat :=
+  match Scry.parseDigitsAt base cs with
+  | .some v => .some (Nat.add (Nat.mul acc (Nat.pow base (List.length cs))) v)
+  | .none => .none
 
 /-- Whether `ch` is `u` or `U` (a literal suffix). -/
 def Scry.isU (ch : Char) : Bool :=
@@ -1667,9 +1789,12 @@ def Scry.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var :=
   match Scry.ekindOf (c.kindOf n) with
   | .identifier => do
     s ← Scry.get;
-    match Scry.lookupBind s (c.textOf n) with
+    -- Materialise the name once: a pathological identifier used in several lookups
+    -- used to slice its text for every one of them.
+    let name := c.textOf n;
+    match Scry.lookupBind s name with
     | .some b => Scry.readBind c n b
-    | .none => match List.find (fun y => String.eq y.name (c.textOf n)) s.syms with
+    | .none => match List.find (fun y => String.eq y.name name) s.syms with
       | .some sym => do
         let qname := match sym.isStatic with
           | .true => "static:" ++ sym.name
@@ -1681,7 +1806,7 @@ def Scry.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Var :=
         g ← Scry.bindGlobal c n;
         match g with
         | .some b => Scry.readBind c n b
-        | .none => Scry.havocAt c n Wil.i32 ("identifier " ++ c.textOf n)
+        | .none => Scry.havocAt c n Wil.i32 ("identifier " ++ name)
   | .number => do
     let txt := c.textOf n;
     let neg := String.startsWith txt "-";
@@ -2115,14 +2240,17 @@ def Scry.allocCallByShape (c : Scry.Cst) (n : Nat) (name : String) (argNodes : L
       Scry.allocCall c n name sz count
 
 /-- The name-based part of `Scry.lowerCall` (also the path for an external function).
-Allocation and `free` are read from `Scry.Models`, so the lowering and the taint model
-agree on which names allocate and which free; every other call keeps its ordinary
-`Wil.call` and its result is the declared type (or `i32` when undeclared). -/
+Allocation and `free` are read from the lowering state's `Scry.ModelPack` (by name and
+arity), so the lowering and the taint model agree on which names allocate and which
+free; every other call keeps its ordinary `Wil.call` and its result is the declared type
+(or `i32` when undeclared). -/
 def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat) :
-    Scry.LM Wil.Var :=
-  match Scry.Models.allocOf name with
+    Scry.LM Wil.Var := do
+  s0 ← Scry.get;
+  let arity := List.length argNodes;
+  match Scry.ModelPack.allocOfAt s0.models name arity with
   | .some shape => Scry.allocCallByShape c n name argNodes shape
-  | .none => match Scry.Models.freeArgOf name with
+  | .none => match Scry.ModelPack.freeArgOfAt s0.models name arity with
     | .some ai => do
       v ← Scry.zeroAt c n Wil.i32;
       match Wil.listNth argNodes ai with
@@ -2222,7 +2350,7 @@ end
 /-- The state a translation unit's lowering starts from. -/
 def Scry.emptyState : Scry.LState :=
   Scry.LState.mk 0 0 0 .nil .true .nil .nil .nil .nil .nil .nil .nil .nil .nil
-    "" Wil.i32 Wil.noSpan .none .none .nil
+    "" Wil.i32 Wil.noSpan .none .none .nil Scry.defaultModels
 
 /-- Give each parameter a register and bind its name (an unnamed parameter still gets a
 register, so the arity matches). -/
@@ -2378,14 +2506,19 @@ partial def Scry.recoverTop (c : Scry.Cst) : List Nat → List Nat
 first, so a call sees a definition that appears later in the file (C's rule). Parsing is
 recoverable: the passes and the function walk use `Scry.recoverTop`, so functions inside
 tree-sitter's `ERROR` nodes keep their partial AST and facts. -/
-def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
+def Scry.lowerTUWithModels (path : String) (models : Scry.ModelPack) (c : Scry.Cst) :
+    Scry.TU :=
   let top := Scry.recoverTop c (c.childrenOf 0);
-  let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
+  let init := { Scry.emptyState with models := models };
+  let s1 := (Scry.runLM (Scry.scanTypes c top) init).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;
   let files := List.map (fun i => c.fileText i) (Scry.schemaRange c.fileCount);
   let paths := List.map (fun i => c.filePath i) (Scry.schemaRange c.fileCount);
   Scry.TU.mk path files paths r.2 r.1.warnings (Scry.externalOf r.2)
+
+def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
+  Scry.lowerTUWithModels path Scry.defaultModels c
 
 -- ## The CFG
 

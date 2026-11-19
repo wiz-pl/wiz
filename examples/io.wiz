@@ -1,3 +1,4 @@
+-- test: run
 import IO
 def loop : Nat → IO Unit
   | .zero => IO.pure ()

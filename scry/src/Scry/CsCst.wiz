@@ -25,7 +25,7 @@ without a field, so the lowering reads one vocabulary (design `CSHARP.md` §6):
 | `as_expression` | `left:`/`right:` | `expression:`/`type:` |
 | `conditional_access_expression` | `condition:` + `member_binding_expression` | `expression:` + the binding's `name:` |
 | `(implicit_)array_creation_expression` | the initialiser has no field | `initializer:` |
-| `switch_section` | `case`/`default` are bare tokens before the patterns | patterns are `case_switch_label`, `default` is `default_switch_label` |
+| `switch_section` | `case`/`default` are bare tokens before the patterns | a label keeps its pattern kind (`constant_pattern`, `declaration_pattern`, …); `default` is `default_switch_label` |
 | `this`/`base` | anonymous tokens | `this_expression`/`base_expression` |
 
 A file whose tree has an `ERROR` or `MISSING` node is refused before it gets here:
@@ -61,14 +61,14 @@ def Scry.Cs.keeps (s : Scry.CstStore) (pk : String) (j : Nat) : Bool :=
     else if Bool.and (String.eq pk "switch_section") (String.eq k "default") then .true
     else Bool.or (String.eq k "this") (String.eq k "base")
 
-/-- Node `j`'s kind in the view. -/
+/-- Node `j`'s kind in the view. A `switch_section`'s label keeps its grammar kind
+(`constant_pattern`, `declaration_pattern`, `type_pattern`, …): the lowering has to
+tell a constant the sections compare from a type test it cannot decide. A label is a
+*position* (a non-statement child of a section), not a kind. -/
 def Scry.Cs.viewKind (s : Scry.CstStore) (j : Nat) : String :=
   let k := Scry.CstStore.kindName s j;
   let pk := Scry.Cs.parentKind s j;
-  if Scry.CstStore.namedOf s j then
-    if Bool.and (String.eq pk "switch_section")
-        (Bool.and (Bool.not (Scry.Cs.isStmtKind k)) (Bool.not (String.eq k "comment")))
-    then "case_switch_label" else k
+  if Scry.CstStore.namedOf s j then k
   else if String.eq k "this" then "this_expression"
   else if String.eq k "base" then "base_expression"
   else if Bool.and (String.eq pk "argument") (Scry.Cs.isPassMode k) then "modifier"

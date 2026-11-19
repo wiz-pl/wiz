@@ -7,6 +7,7 @@ import Scry.Budget
 import Scry.Native
 import Scry.CstStore
 import Scry.Lower
+import Scry.CsLower
 import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
@@ -45,7 +46,8 @@ fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnost
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
   `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
-  `Scry.RuleTaint`, and direct-call summaries stitch the paths.
+  `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
+  S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
   function's EDB. A finding is `checked` when its certificate verifies and `unchecked`
   otherwise (e.g. no provenance), and the status is printed and put in SARIF.
@@ -84,6 +86,9 @@ structure Scry.TaintOpts where
   failOnFinding : Bool
   /-- `--origin-map`: print the point -> span table. -/
   showOriginMap : Bool
+  /-- `--null-deref`: run the S5 nullness pass and add
+  `scry/memory/null-dereference` diagnostics. Off by default. -/
+  nullDeref : Bool
   /-- `--diff BASE`: filter to the changed lines of `git diff -U0 BASE`, or `all`. -/
   diff : Option String
   /-- `--changed-lines FILE`: filter to the changed lines of a saved unified diff. -/
@@ -98,14 +103,17 @@ structure Scry.TaintOpts where
   maxRounds : Option Nat
   /-- `--progress`: print one stage line per phase on stderr. -/
   progress : Bool
+  /-- The external-function model pack. The default is `Scry.defaultModels`; a caller
+  (a test or a future `--models` flag) can pass another pack without changing the CLI. -/
+  models : Scry.ModelPack
 
 /-- The defaults are a **contract**, not an accident: a single file is analysed under a
 300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
 clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` disable
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
-  Scry.TaintOpts.mk file .none .none .false .false .false .false .none .none .none
-    (.some 300) (.some 2000000) .none .false
+  Scry.TaintOpts.mk file .none .none .false .false .false .false .false .none .none .none
+    (.some 300) (.some 2000000) .none .false Scry.defaultModels
 
 /-- The budget view of the options (`--progress` is included there too). -/
 def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
@@ -115,9 +123,52 @@ def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
 imports this module, so it cannot be used here). -/
 def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 
+/-- Whether one character of a `--diff` base is allowed, given whether it is the first.
+The first must be alphanumeric or `_`; later ones may also be `.`, `/`, `@`, `^`, `~`,
+`{`, `}` or `-` (revisions such as `origin/master`, `HEAD~1`, `{HEAD}`). -/
+def Scry.validDiffBaseChar (first : Bool) (c : Char) : Bool :=
+  let n := Char.code c;
+  let alnum := Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57))
+    (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 90)) (Bool.and (Nat.le 97 n) (Nat.le n 122)));
+  let okFirst := Bool.or alnum (Nat.beq n 95);
+  let okRest := Bool.or okFirst (Bool.or (Nat.beq n 46) (Bool.or (Nat.beq n 47)
+    (Bool.or (Nat.beq n 64) (Bool.or (Nat.beq n 94) (Bool.or (Nat.beq n 126)
+      (Bool.or (Nat.beq n 123) (Bool.or (Nat.beq n 125) (Nat.beq n 45))))))));
+  match first with
+  | .true => okFirst
+  | .false => okRest
+
+/-- Every character after the first is an allowed non-first character. -/
+def Scry.validDiffBaseRest : List Char → Bool
+  | .nil => .true
+  | .cons c cs => Bool.and (Scry.validDiffBaseChar .false c) (Scry.validDiffBaseRest cs)
+
+/-- Whether `base` is a plausible git revision (see `Scry.validDiffBaseChar`): a
+non-empty revision with no `..`, whose first character is alphanumeric or `_`. -/
+def Scry.validDiffBase (base : String) : Bool :=
+  Bool.and (Bool.not (String.contains base ".."))
+    (match String.chars base with
+      | .nil => .false
+      | .cons c cs => Bool.and (Scry.validDiffBaseChar .true c)
+          (Scry.validDiffBaseRest cs))
+
+/-- The refusal for a bad `--diff` base. -/
+def Scry.diffBaseError (base : String) : String :=
+  "invalid --diff base \"" ++ base ++ "\": expected a git revision (e.g. HEAD~1, "
+    ++ "origin/master); an option such as --output=FILE or a revision range is refused"
+
+/-- Validate `--diff` when the options are parsed, before any file is analysed. -/
+def Scry.checkDiffBase (o : Scry.TaintOpts) : Except String Scry.TaintOpts :=
+  match o.diff with
+  | .none => .ok o
+  | .some b => match Bool.or (String.eq b "all") (Scry.validDiffBase b) with
+    | .true => .ok o
+    | .false => .error (Scry.diffBaseError b)
+
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
+  ++ "                      [--null-deref]\n"
   ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "                      [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                      [--progress]\n"
@@ -157,6 +208,7 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
     | "--allow-errors" => Scry.taintArgsGo file { o with allowErrors := .true } rest
     | "--fail-on-finding" => Scry.taintArgsGo file { o with failOnFinding := .true } rest
     | "--origin-map" => Scry.taintArgsGo file { o with showOriginMap := .true } rest
+    | "--null-deref" => Scry.taintArgsGo file { o with nullDeref := .true } rest
     | "--diff" => match rest with
       | .cons p more => Scry.taintArgsGo file { o with diff := .some p } more
       | .nil => .error "--diff needs a base revision or 'all'"
@@ -187,7 +239,7 @@ def Scry.taintArgs (args : List String) : Except String Scry.TaintOpts :=
     | .none, .none => match o.diffContext with
       | .some _ => .error "--diff-context needs --diff or --changed-lines"
       | .none => .ok o
-    | _, _ => .ok o
+    | _, _ => Scry.checkDiffBase o
 
 -- ## The rule pack
 
@@ -250,37 +302,43 @@ def Scry.lineStartsBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
 
 def Scry.lineStartsOf (text : String) : U32Array :=
   let b := Bytes.ofString text;
-  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+  Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList [(U32.ofNat 0)])
 
-/-- Binary search for the largest line-start index whose offset is `<= off`. -/
-partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
-  match Nat.lt lo hi with
-  | .false => lo
-  | .true =>
-    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
-    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
-    | .true => Scry.lineIndexGo starts off mid hi
-    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
+/-- A text with the two indexes a span→location conversion needs: the byte→character
+map (columns are characters, spans are bytes) and the byte offset of each line start.
+Built once per file; a `Wil.Span` is a byte range, and every column this module emits
+(SARIF and the human report) is a 1-based character column. -/
+structure Scry.TextIndex where
+  map : Scry.ByteMap
+  lineStarts : U32Array
 
-/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
-def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+/-- The indexes of `text`, built in one pass over it. -/
+def Scry.TextIndex.ofString (text : String) : Scry.TextIndex :=
+  Scry.TextIndex.mk (Scry.ByteMap.ofString text) (Scry.lineStartsOf text)
+
+/-- A 1-based line and **character** column for a byte offset. The line table holds byte
+offsets; the column goes through the text's byte map, so a multibyte character before
+the span does not inflate it. -/
+def Scry.lineColFrom (idx : Scry.TextIndex) (off : Nat) : Nat × Nat :=
+  let starts := idx.lineStarts;
   let n := U32Array.size starts;
   match Nat.beq n 0 with
-  | .true => (1, Nat.succ off)
+  | .true => (1, Nat.succ (Scry.ByteMap.charOfByte idx.map off))
   | .false =>
     let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
-    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+    let lo := UIntN.toNat (U32Array.get starts i);
+    (Nat.succ i, Scry.ByteMap.colOf idx.map off lo)
 
-/-- The old signature, kept for callers that only have the text (it builds the line
-table first, so prefer `originOfSpanAt` when several spans are located). -/
+/-- The old signature, kept for callers that only have the text (it builds the byte map
+and line table first, so prefer `originOfSpanAt` when several spans are located). -/
 def Scry.lineColAt (text : String) (off : Nat) : Nat × Nat :=
-  Scry.lineColFrom (Scry.lineStartsOf text) off
+  Scry.lineColFrom (Scry.TextIndex.ofString text) off
 
 /-- The SARIF origin of a `Wil.Span`. `endColumn` is exclusive; an empty span still gets
 a one-character region so a result has a visible place. -/
-def Scry.originOfSpanAt (uri : String) (starts : U32Array) (sp : Wil.Span) : Scry.Origin :=
-  let start := Scry.lineColFrom starts sp.start;
-  let stop := Scry.lineColFrom starts sp.stop;
+def Scry.originOfSpanAt (uri : String) (idx : Scry.TextIndex) (sp : Wil.Span) : Scry.Origin :=
+  let start := Scry.lineColFrom idx sp.start;
+  let stop := Scry.lineColFrom idx sp.stop;
   let endCol := match Nat.beq sp.stop sp.start with
     | .true => Nat.succ start.2
     | .false => stop.2;
@@ -293,25 +351,25 @@ def Scry.spanAtPoint (g : Scry.Fn) (n : Nat) : Option Wil.Span :=
     | .some t => .some (Wil.termOrigin t)
     | .none => .none
 
-/-- The old `text`-only origin lookup: builds the line table and locates one span. -/
+/-- The old `text`-only origin lookup: builds the indexes and locates one span. -/
 def Scry.originOfSpan (uri text : String) (sp : Wil.Span) : Scry.Origin :=
-  Scry.originOfSpanAt uri (Scry.lineStartsOf text) sp
+  Scry.originOfSpanAt uri (Scry.TextIndex.ofString text) sp
 
-def Scry.originEntryAt (uri : String) (starts : U32Array) (fn : Wil.Func) (g : Scry.Fn)
+def Scry.originEntryAt (uri : String) (idx : Scry.TextIndex) (fn : Wil.Func) (g : Scry.Fn)
     (n : Nat) : Option Scry.OriginEntry :=
   match Scry.spanAtPoint g n with
   | .none => .none
-  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpanAt uri starts sp))
+  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpanAt uri idx sp))
 
-def Scry.originEntriesOfFunc (uri : String) (starts : U32Array) (fn : Wil.Func) :
+def Scry.originEntriesOfFunc (uri : String) (idx : Scry.TextIndex) (fn : Wil.Func) :
     List Scry.OriginEntry :=
   let g := Scry.flatten fn;
-  Scry.filterMapOpt (fun n => Scry.originEntryAt uri starts fn g n) (Scry.range g.count)
+  Scry.filterMapOpt (fun n => Scry.originEntryAt uri idx fn g n) (Scry.range g.count)
 
 /-- Every `(function, program point) -> span` entry of the lowered unit. -/
-def Scry.originEntries (uri : String) (starts : U32Array) (funcs : List Wil.Func) :
+def Scry.originEntries (uri : String) (idx : Scry.TextIndex) (funcs : List Wil.Func) :
     Scry.OriginMap :=
-  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri starts fn) funcs
+  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri idx fn) funcs
 
 def Scry.locationText (m : Scry.OriginMap) (func : String) (point : Nat) : String :=
   match Scry.originAt m func point with
@@ -381,18 +439,21 @@ def Scry.loadDiffMode (o : Scry.TaintOpts) : EIO (Option Scry.DiffMode) :=
   | .none, .none => EIO.pure .none
   | .some "all", .none => EIO.pure (.some (Scry.DiffMode.mk "--diff all" context
       .true Scry.emptyDiffSelection .false 0))
-  | .some base, .none => do
-    out ← Process.output "git"
-      ["diff", "-U0", "--no-color", "-M", base, "--", o.file] "";
-    match out.status.success with
-    | .true =>
-      let fs := Scry.parseDiff out.stdout;
-      EIO.pure (.some (Scry.DiffMode.mk ("--diff " ++ base) context .false
-        (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
-    | .false => EIO.fail ("git diff " ++ base ++ " failed ("
-        ++ out.status.toString ++ ")" ++ match String.trim out.stderr with
-          | "" => ""
-          | e => ": " ++ e)
+  | .some base, .none => match Scry.validDiffBase base with
+    | .false => EIO.fail (Scry.diffBaseError base)
+    | .true => do
+      out ← Process.output "git"
+        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "-M",
+          "--end-of-options", base, "--", o.file] "";
+      match out.status.success with
+      | .true =>
+        let fs := Scry.parseDiff out.stdout;
+        EIO.pure (.some (Scry.DiffMode.mk ("--diff " ++ base) context .false
+          (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
+      | .false => EIO.fail ("git diff " ++ base ++ " failed ("
+          ++ out.status.toString ++ ")" ++ match String.trim out.stderr with
+            | "" => ""
+            | e => ": " ++ e)
   | .none, .some p => do
     text ← FS.readFile p;
     let fs := Scry.parseDiff text;
@@ -471,7 +532,7 @@ def Scry.diffLineText (h : Scry.DiffHit) : String :=
 
 def Scry.diffHeaderLines (dm : Scry.DiffMode) : List String :=
   match dm.all with
-  | .true => List.cons "diff: all findings (--diff all; no filtering)" .nil
+  | .true => ["diff: all findings (--diff all; no filtering)"]
   | .false =>
     let base := "diff: " ++ dm.label ++ "; " ++ Nat.repr dm.selection.hunks
       ++ " hunk(s) in " ++ Nat.repr dm.files ++ " file(s), "
@@ -483,21 +544,21 @@ def Scry.diffHeaderLines (dm : Scry.DiffMode) : List String :=
         | .none => "");
     let notes := List.append
       (match dm.emptyDiff with
-        | .true => List.cons "  note: the diff is empty; the file is unchanged" .nil
+        | .true => ["  note: the diff is empty; the file is unchanged"]
         | .false => match dm.selection.matched with
           | .false => List.cons ("  note: no diff entry matches \"" ++ dm.selection.path
               ++ "\"; treating it as unchanged (check the path spelling)") .nil
           | .true => .nil)
       (List.append
         (match dm.selection.ambiguous with
-          | .true => List.cons "  note: several diff entries match; using their union" .nil
+          | .true => ["  note: several diff entries match; using their union"]
           | .false => .nil)
         (List.append
           (match dm.selection.binary with
-            | .true => List.cons "  note: binary in the diff; no line mapping, findings are shown" .nil
+            | .true => ["  note: binary in the diff; no line mapping, findings are shown"]
             | .false => .nil)
           (match dm.selection.deleted with
-            | .true => List.cons "  note: deleted in the diff; there are no new lines" .nil
+            | .true => ["  note: deleted in the diff; there are no new lines"]
             | .false => .nil)));
     List.cons base notes
 
@@ -525,8 +586,8 @@ def Scry.diffSummaryLines (dm : Scry.DiffMode) (f b mm : Scry.DiffTally) : List 
           | .zero => ""
           | n => ", " ++ Nat.repr n ++ " unlocated (also shown)");
     List.cons fLine (List.append
-      (match String.eq bLine "" with | .true => .nil | .false => List.cons bLine .nil)
-      (match String.eq mLine "" with | .true => .nil | .false => List.cons mLine .nil))
+      (match String.eq bLine "" with | .true => .nil | .false => [bLine])
+      (match String.eq mLine "" with | .true => .nil | .false => [mLine]))
 
 -- ## JSON
 
@@ -597,14 +658,14 @@ def Scry.baselineState (dm : Option Scry.DiffMode) (h : Scry.DiffHit) : Option S
 
 -- ## Lowering-boundary warnings
 
-def Scry.boundaryOfWarning (uri : String) (starts : U32Array) (w : Scry.Warning) :
+def Scry.boundaryOfWarning (uri : String) (idx : Scry.TextIndex) (w : Scry.Warning) :
     Scry.BoundaryFinding :=
   Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
-    (.some (Scry.originOfSpanAt uri starts w.span))
+    (.some (Scry.originOfSpanAt uri idx w.span))
 
-def Scry.boundaryFindings (uri : String) (starts : U32Array) (tu : Scry.TU) :
+def Scry.boundaryFindings (uri : String) (idx : Scry.TextIndex) (tu : Scry.TU) :
     List Scry.BoundaryFinding :=
-  List.map (Scry.boundaryOfWarning uri starts) tu.warnings
+  List.map (Scry.boundaryOfWarning uri idx) tu.warnings
 
 /-- The points-to diagnostics as warning findings, located with the same origin map the
 findings use. -/
@@ -765,7 +826,7 @@ def Scry.findingJson (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool
 def Scry.findingJsonHit (m : Scry.OriginMap) (f : Scry.RuleFinding) (checked : Bool)
     (hit : Scry.DiffHit) : Json :=
   Json.mkObj (List.append (Scry.findingFields m f checked)
-    (List.cons ("diff", Scry.diffHitJson hit) .nil))
+    [("diff", Scry.diffHitJson hit)])
 
 def Scry.boundaryFields (b : Scry.BoundaryFinding) : List (String × Json) :=
   let loc := match b.origin with
@@ -789,7 +850,7 @@ def Scry.boundaryJson (b : Scry.BoundaryFinding) : Json :=
 /-- A warning's JSON plus its diff verdict (only used in diff mode). -/
 def Scry.boundaryJsonHit (b : Scry.BoundaryFinding) (hit : Scry.DiffHit) : Json :=
   Json.mkObj (List.append (Scry.boundaryFields b)
-    (List.cons ("diff", Scry.diffHitJson hit) .nil))
+    [("diff", Scry.diffHitJson hit)])
 
 def Scry.checkedCount (flags : List Bool) : Nat :=
   List.length (List.filter (fun b => b) flags)
@@ -887,7 +948,8 @@ function-heavy file (e.g. tree-sitter's `query.c`) show where it is instead of r
 silently for a minute. -/
 partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : String)
     (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (sums : List Scry.Summary) (funcs : List Wil.Func)
+    (entries : List (String × Nat)) (plans : List Scry.FuncPlan)
+    (allMems : List Scry.MemSeed) (sums : List Scry.Summary) (funcs : List Wil.Func)
     (i total : Nat) : EIO (List Scry.FuncResult) :=
   match funcs with
   | .nil => EIO.pure .nil
@@ -902,29 +964,49 @@ partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : Strin
           ++ " elapsed=" ++ Nat.repr (Nat.sub now startMs) ++ "ms"))
       | .false => EIO.pure ()
     | .false => EIO.pure ();
-    let r := Scry.evalWithEntries graph pack pt entries sums fn;
-    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries sums rest (Nat.succ i) total;
+    let r := match plans with
+      | .cons plan _ => Scry.evalWithPreparedM graph pt plan sums allMems fn
+      | .nil => Scry.evalWithEntriesModels o.models graph pack pt entries sums fn;
+    let plans' := match plans with
+      | .cons _ prest => prest
+      | .nil => (List.nil : List Scry.FuncPlan);
+    rs ← Scry.evalAllStaged o startMs tag graph pack pt entries plans' allMems sums rest
+      (Nat.succ i) total;
     EIO.pure (List.cons r rs)
 
+/-- The result of the summary fixpoint: the stable summaries plus the evaluations made
+under them (reusable as the final results, so convergence does not pay a second pass). -/
+structure Scry.SummaryRun where
+  summaries : List Scry.Summary
+  rounds : Nat
+  complete : Bool
+  /-- The per-function results of the **last** round. They are the final results when
+  `complete` (the summaries did not move); otherwise the caller re-evaluates. -/
+  results : List Scry.FuncResult
+
 /-- The summary fixpoint, one round at a time (so `--timeout` and progress can act
-between rounds). Returns the summaries, the rounds run, and whether it converged. -/
+between rounds). Returns the summaries, the rounds run, whether it converged, and the
+last round's results. -/
 partial def Scry.summaryRounds (o : Scry.TaintOpts) (startMs : Nat)
     (p : Wil.Program) (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
-    (entries : List (String × Nat)) (fuel rounds : Nat) (sums : List Scry.Summary) :
-    EIO (List Scry.Summary × Nat × Bool) :=
+    (entries : List (String × Nat)) (plans : List Scry.FuncPlan)
+    (fuel rounds : Nat) (sums : List Scry.Summary) :
+    EIO Scry.SummaryRun :=
   match fuel with
-  | .zero => EIO.pure (sums, rounds, .false)
+  | .zero => EIO.pure (Scry.SummaryRun.mk sums rounds .false .nil)
   | .succ k => do
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries sums p.funcs 0
-      (List.length p.funcs);
-    let next := Scry.growSummaries p graph sums results;
+    let allMems := Scry.allMemSeeds sums;
+    results ← Scry.evalAllStaged o startMs "summaries" graph pack pt entries plans allMems
+      sums p.funcs 0 (List.length p.funcs);
+    let next := Scry.growSummaries p pack graph sums results;
     match Scry.summariesEq next sums with
     | .true => do
       Scry.reportStage o startMs "summaries" (Nat.repr (Nat.succ rounds)
         ++ " round(s), converged");
-      EIO.pure (next, Nat.succ rounds, .true)
-    | .false => Scry.summaryRounds o startMs p graph pack pt entries k (Nat.succ rounds) next
+      EIO.pure (Scry.SummaryRun.mk next (Nat.succ rounds) .true results)
+    | .false => Scry.summaryRounds o startMs p graph pack pt entries plans k (Nat.succ rounds)
+        next
 
 /-- The summary fixpoint's fuel: its historical bound, or `--max-rounds` when given. -/
 def Scry.summaryFuel (o : Scry.TaintOpts) (p : Wil.Program) (pt : Scry.PtResult) : Nat :=
@@ -966,7 +1048,7 @@ def Scry.certVerified : Option Scry.Certificate → Bool
 /-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
 locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
 so a session does not parse the C again. -/
-def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx : Scry.TextIndex)
     (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
   let errs := Scry.CstStore.errorCount cst;
   match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
@@ -976,7 +1058,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     Scry.checkDeadline o startMs "parse";
     pack ← Scry.loadTaintPack o.rules;
     let c := Scry.Cst.ofStore text cst;
-    let tu := Scry.lowerTU o.file c;
+    let tu := Scry.lowerTUWithModels o.file o.models c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
@@ -995,64 +1077,123 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
     let entries := Scry.entrySources prog graph;
     let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
     let summaryFuel := Scry.summaryFuel o prog pt;
-    sums ← Scry.summaryRounds o startMs prog graph pack pt entries summaryFuel 0 sums0;
+    -- Plans depend on the function, the rule pack, points-to and the entry policy only,
+    -- so they are built once; the summary fixpoint and the final pass reuse them.
+    let plans := Scry.prepareAllWithEntriesModels o.models prog pack pt entries;
+    Scry.reportStage o startMs "plans" (Nat.repr (List.length plans) ++ " plan(s)");
+    Scry.checkDeadline o startMs "plans";
+    run ← Scry.summaryRounds o startMs prog graph pack pt entries plans summaryFuel 0 sums0;
     Scry.checkDeadline o startMs "summaries";
-    results ← Scry.evalAllStaged o startMs "results" graph pack pt entries sums.1
-      prog.funcs 0 (List.length prog.funcs);
+    -- A converged round evaluated every function under summaries equal to the final
+    -- ones, so its results are the final results.
+    results ← match run.complete with
+      | .true => EIO.pure run.results
+      | .false => Scry.evalAllStaged o startMs "results" graph pack pt entries plans
+          (Scry.allMemSeeds run.summaries) run.summaries prog.funcs 0
+          (List.length prog.funcs);
     Scry.checkDeadline o startMs "results";
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    let bounds := Scry.boundsCheck prog pt pack results;
+    let bounds := Scry.boundsCheckModels o.models prog pt pack results;
+    let nulls : List Scry.MemWarning := match o.nullDeref with
+      | .true => Scry.nullDerefWarnings prog
+      | .false => .nil;
     let warnings := Scry.dedupWarnings (List.append
       (List.filter (Scry.keepMemWarning hasLifetime)
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
-          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
-      bounds.warnings);
-    let memoryFindings := List.append (Scry.lifetimeFindings prog pt pack) bounds.findings;
-    let pr := Scry.ProgramResult.mk results sums.1 graph pt warnings memoryFindings;
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels o.models prog r) results)))
+      (List.append bounds.warnings nulls));
+    let memoryFindings := List.append
+      (Scry.lifetimeFindingsWithModels o.models prog pt pack) bounds.findings;
+    let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
     Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
-      ++ " function(s), " ++ Nat.repr sums.2.1 ++ " summary round(s)"
-      ++ (match sums.2.2 with
+      ++ " function(s), " ++ Nat.repr run.rounds ++ " summary round(s)"
+      ++ (match run.complete with
         | .true => ""
         | .false => " (incomplete)"));
     let findings := Scry.programFindings pr;
-    let origins := Scry.originEntries o.file starts tu.funcs;
+    let origins := Scry.originEntries o.file idx tu.funcs;
     Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
     Scry.checkDeadline o startMs "origins";
     let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
-      (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
+      (List.length tu.funcs)) (Scry.boundaryFindings o.file idx tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
     let checks := List.map Scry.certVerified certificates;
     let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
-      (Scry.summariesBudgetNotes o.maxRounds sums.2.1 sums.2.2);
-    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not sums.2.2);
+      (Scry.summariesBudgetNotes o.maxRounds run.rounds run.complete);
+    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not run.complete);
     endMs ← EIO.lift Scry.nowMs;
     EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated sums.2.1
-      sums.2.2 notes)
+      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds
+      run.complete notes)
+
+/-- The C# pipeline: parse with tree-sitter-c-sharp, lower with `Scry.CsLower`, then run
+the same points-to/summary/rule engine as C. The spill is the boundary `Scry.Cs.frontend`
+already reads (the tests use checked-in spills for exactly this reason). Origins work
+because `Scry.CsLower` gives every statement a `Wil.Span` into the `.cs` text. -/
+def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)
+    (idx : Scry.TextIndex) : EIO Scry.TaintReport := do
+  st ← Scry.Native.parse "c_sharp" text;
+  nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
+  Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes (c_sharp)");
+  match Scry.Budget.tooManyNodes (Scry.TaintOpts.toBudget o) o.file nodes with
+  | .some msg => EIO.fail msg
+  | .none => do
+    cst ← EIO.lift (Scry.Native.toCstStore o.file st);
+    let errs := Scry.CstStore.errorCount cst;
+    match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
+    | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
+        ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
+    | .false => do
+      Scry.checkDeadline o startMs "parse";
+      pack ← Scry.loadTaintPack o.rules;
+      let spill := Scry.CstStore.render cst;
+      match Scry.Cs.frontendWithModels Scry.csModels o.file text spill with
+      | .err e => EIO.fail e
+      | .ok l => do
+        let tu := Scry.TU.mk o.file [text] [o.file] l.funcs l.warnings .nil;
+        Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs)
+          ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
+        let prog := Wil.program tu.funcs;
+        let pr := Scry.analyzeModels Scry.csModels prog pack;
+        let findings := Scry.programFindings pr;
+        let checks := List.map (fun f => Scry.findingChecked pr f) findings;
+        let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
+        let origins := Scry.originEntries o.file idx tu.funcs;
+        let boundaries := List.append
+          (Scry.parseRecoveryFindings o.file text cst errs (List.length tu.funcs))
+          (Scry.boundaryFindings o.file idx tu);
+        let memory := Scry.memoryFindings origins pr.warnings;
+        endMs ← EIO.lift Scry.nowMs;
+        EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates
+          origins boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs)
+          .false 1 .true .nil)
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   startMs ← EIO.lift Scry.nowMs;
   text ← FS.readFile o.file;
-  starts ← EIO.lift (IO.pure (Scry.lineStartsOf text));
-  Scry.reportStage o startMs "read" (Nat.repr (String.length text) ++ " bytes, "
-    ++ Nat.repr (U32Array.size starts) ++ " lines");
-  st ← Scry.Native.parse "c" text;
-  nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
-  Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
-  -- The node cap is checked **before** the column copy: refusing a giant file should
-  -- not pay for shrinking it into Wiz arrays first.
-  match Scry.Budget.tooManyNodes (Scry.TaintOpts.toBudget o) o.file nodes with
-  | .some msg => EIO.fail msg
-  | .none => do
-    cst ← EIO.lift (Scry.Native.toCstStore o.file st);
-    Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
-      ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
-    Scry.analyzeStore o startMs text starts cst nodes
+  let idx := Scry.TextIndex.ofString text;
+  Scry.reportStage o startMs "read" (Nat.repr (Scry.textByteLength text) ++ " bytes, "
+    ++ Nat.repr (U32Array.size idx.lineStarts) ++ " lines");
+  match String.endsWith o.file ".cs" with
+  | .true => Scry.analyzeCsFile o startMs text idx
+  | .false => do
+    st ← Scry.Native.parse "c" text;
+    nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
+    Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
+    -- The node cap is checked **before** the column copy: refusing a giant file should
+    -- not pay for shrinking it into Wiz arrays first.
+    match Scry.Budget.tooManyNodes (Scry.TaintOpts.toBudget o) o.file nodes with
+    | .some msg => EIO.fail msg
+    | .none => do
+      cst ← EIO.lift (Scry.Native.toCstStore o.file st);
+      Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
+        ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
+      Scry.analyzeStore o startMs text idx cst nodes
 
 
 /-- `(finding, checked)` pairs in the findings' order. -/
@@ -1184,7 +1325,7 @@ def Scry.runTaint (o : Scry.TaintOpts) : EIO Nat := do
           , ("memory", Json.ofNat (List.length memory)) ]) ]
       (match dmOpt with
         | .none => .nil
-        | .some dm => List.cons ("diff", Scry.diffJson dm o.file ft bt mt) .nil)))))
+        | .some dm => [("diff", Scry.diffJson dm o.file ft bt mt)])))))
   | .false => do
     Scry.taintSay ("taint: " ++ o.file ++ " (" ++ Nat.repr (List.length pack.rules) ++ " rules)");
     unit2 ← (match errs with

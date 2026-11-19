@@ -126,8 +126,12 @@ def declIs (n x : Name) : Bool := n == x || n.endsWith ("._0." ++ x)
 
 /-- What a command's declarations are, and their doc comments (`docCommentBefore`, at
 the command, a constructor, a field). `added`: the names the command declared, in order.
-A `mutual` block's commands each have their own; `private`, `partial`, `sealed` and
-`local` keep the comment before them. -/
+Every command that declares a name gets an entry — `def` (with equations), `partial def`,
+`axiom`, `extern`, `foreign_type`, `glue`, `c_struct`, `structure`, `class`, `inductive`,
+`coinductive`, `instance` and a user's own `syntax … : command` — with the command as its
+kind (`defEqns` is `def`, `foreignType` is `foreign type`, `cStruct` is `c struct`, a
+`lemma` is shown as `theorem`). A `mutual` block's commands each have their own;
+`private`, `partial`, `sealed` and `local` keep the comment before them. -/
 partial def declDocsOf (chars : Array Char) (cmd : Syntax) (added : Array Name)
     (m : Std.HashMap Name DeclDoc) : Std.HashMap Name DeclDoc :=
   let m := (go cmd (docCommentBefore chars cmd.info.start) "" m)
@@ -143,9 +147,14 @@ where
       let word := if k == "command.local" then "" else (k.drop 8).toString ++ " "
       go inner doc (pre ++ word) m
     else
-      let kind := match (k.drop 8).toString with
+      -- (11s) the kind shown for any command that declares a name, built in and user
+      -- written (`syntax … : command` gives a `command.<name>` node) alike
+      let word := if k.startsWith "command." then (k.drop 8).toString else s!"{k}"
+      let kind := match word with
         | "defEqns" => "def"
         | "foreignType" => "foreign type"
+        | "cStruct" => "c struct"
+        | "lemma" => "theorem"
         | w => w
       let primary : Option Name := match c.firstIdent? with
         | some x => added.find? (declIs · x)
@@ -173,8 +182,9 @@ where
             | some n => m.insert n { kind := "field", parent := some p, doc := docAt f, start := f.info.start }
             | none => m
           | none => m) m
-        -- a structure's constructor, by default `mk`
-        if (k == "command.structure" || k == "command.class" || k == "command.coinductive") then
+        -- a structure's constructor, by default `mk` (`c_struct` makes one too)
+        if (k == "command.structure" || k == "command.class" || k == "command.coinductive" ||
+            k == "command.cStruct") then
           match added.find? (· == p ++ ".mk") with
           | some n => if m.contains n then m else m.insert n { kind := "constructor", parent := some p }
           | none => m
@@ -305,6 +315,11 @@ where
     let before := s.globals.order.size
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
+    -- Macro scopes must depend on the command, not on which earlier commands were cache
+    -- hits: a hit applies an effect without expanding the macros it recorded, so a running
+    -- counter would make a command's names depend on the schedule. Start each command's
+    -- scopes at its source position instead (the position is part of what the key hashes).
+    let s := { s with nextScope := 1000000 + cmd.info.start }
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)

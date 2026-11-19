@@ -160,6 +160,6 @@ def sensors (car tick : Nat) : HwTy.El Sensors.code := embI (Nat.beq car 1, Nat.
 def demo : List (HwTy.El Sensors.code) :=
   .cons (sensors 0 1) (.cons (sensors 1 0) (.cons (sensors 0 1) (.cons (sensors 0 1) (.cons (sensors 0 1) (.cons (sensors 0 1) .nil)))))
 def shown : List Nat := Hdl.map (HwTy.pack B2) (Circuit.run lightC demo)
-def agree : Bool := Hdl.natsEq shown (Circuit.simNet .true lightC (Hdl.map (HwTy.pack Sensors.code) demo))
+def agree : Bool := BEq.beq shown (Circuit.simNet .true lightC (Hdl.map (HwTy.pack Sensors.code) demo))
 def tour : List Nat × Bool := (shown, agree)
 #eval tour

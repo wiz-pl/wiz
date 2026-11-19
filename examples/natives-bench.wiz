@@ -1,3 +1,4 @@
+-- test: skip a benchmark: `wiz build` it and run `./nb MODE N`; a check is not its oracle
 import IO
 import Std
 import Text

@@ -546,7 +546,20 @@ def foldAs? (ctx : LocalCtx R) (n : Name) (t : Term R) : ElabM R (Option (Term R
   try
     let us ← d.levelParams.mapM fun _ => freshLevelMeta
     let mut cand : Term R := .const n us
-    for _ in [0:arity] do cand := .app cand (← freshMeta ctx "fold")
+    -- (13b) each hole typed by the definition's parameter (`MetaEntry.type?`)
+    let g ← getGlobals
+    let mut ty? : Option (VTy R) := some (eval g [] (d.type.instLevels d.levelParams us))
+    for _ in [0:arity] do
+      let dom? ← match ty? with
+        | some ty => do match ← force ty with
+          | .pi _ _ _ dom cod _ => pure (some (dom, cod))
+          | _ => pure none
+        | none => pure none
+      let m ← freshMeta ctx "fold" (dom?.map (·.1))
+      ty? ← match dom? with
+        | some (_, cod) => pure (some (← instM cod (← evalIn ctx m)))
+        | none => pure none
+      cand := .app cand m
     let cv ← evalIn ctx cand
     let tv ← force (← evalIn ctx t)
     -- `n ?a₁ … ?aₖ` is itself stuck, on the hole it recurses on: `?aᵢ` followed by the
@@ -709,8 +722,8 @@ partial def stripRule (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) :
   if fuel == 0 then return (ty, [])
   let ty' ← whnfTerm ctx ty
   match ty' with
-  | .pi _ _ _ _ body _ => do
-    let m ← freshMeta ctx "simp"
+  | .pi _ _ _ dom body _ => do
+    let m ← freshMeta ctx "simp" (some (← evalIn ctx dom))
     let (b, ms) ← stripRule ctx (fuel - 1) (body.instantiateAt 0 m)
     pure (b, m :: ms)
   | .eq .. => pure (ty', [])
@@ -735,7 +748,7 @@ partial def stripArgs (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) (args : List
       let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 a) rest
       pure (b, ms, (dom, a) :: ps)
     | [] => do
-      let m ← freshMeta ctx "simp"
+      let m ← freshMeta ctx "simp" (some (← evalIn ctx dom))
       let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 m) []
       pure (b, m :: ms, (dom, m) :: ps)
   | .eq .. => pure (ty, [], [])

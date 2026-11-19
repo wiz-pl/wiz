@@ -103,7 +103,7 @@ def Scry.reportLines (s : String) : List String :=
 
 /-- Insert a `Nat`, dropping a duplicate. -/
 def Scry.reportInsertNat (n : Nat) : List Nat → List Nat
-  | .nil => List.cons n .nil
+  | .nil => [n]
   | .cons m rest => match Nat.beq n m with
     | .true => List.cons m rest
     | .false => match Nat.lt n m with
@@ -128,7 +128,7 @@ def Scry.htmlReplacement (c : Char) : List Char :=
         | .true => String.chars "&quot;"
         | .false => match Char.eq c (Char.mk 39) with
           | .true => String.chars "&#39;"
-          | .false => List.cons c .nil
+          | .false => [c]
 
 partial def Scry.htmlEscapeGo (acc : List Char) : List Char → List Char
   | .nil => List.reverse acc
@@ -210,7 +210,7 @@ def Scry.reportBefore (a b : Scry.ReportFinding) : Bool :=
 /-- Stable insertion sort by `reportBefore` (equal keys keep their input order). -/
 def Scry.reportInsertFinding (f : Scry.ReportFinding) :
     List Scry.ReportFinding → List Scry.ReportFinding
-  | .nil => List.cons f .nil
+  | .nil => [f]
   | .cons g rest => match Scry.reportBefore f g with
     | .true => List.cons f (List.cons g rest)
     | .false => List.cons g (Scry.reportInsertFinding f rest)
@@ -270,7 +270,7 @@ structure Scry.LineWindow where
 /-- Merge overlapping or adjacent windows (the input is already sorted by `first`). -/
 partial def Scry.reportMergeWindows : List Scry.LineWindow → List Scry.LineWindow
   | .nil => .nil
-  | .cons w .nil => List.cons w .nil
+  | .cons w .nil => [w]
   | .cons w (.cons v rest) =>
     match Nat.le (Nat.succ v.first) w.last with
     | .true => Scry.reportMergeWindows (List.cons (Scry.LineWindow.mk w.first
@@ -288,7 +288,7 @@ origin. -/
 def Scry.reportInterestingLines (f : Scry.ReportFinding) : List Nat :=
   let sink := match Nat.beq f.sinkLine 0 with
     | .true => .nil
-    | .false => List.cons f.sinkLine .nil;
+    | .false => [f.sinkLine];
   List.foldl (fun acc s => match Nat.beq s.line 0 with
     | .true => acc
     | .false => List.cons s.line acc) sink f.steps

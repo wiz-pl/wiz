@@ -12,7 +12,7 @@
 # script never silently replaces someone's hook. `core.hooksPath` is respected (the
 # hook goes where git will look for it). Exit status: 0 installed/kept, 1 refused,
 # 2 usage error, 3 not a git checkout.
-set -u
+set -eu
 
 force=0
 while [ $# -gt 0 ]; do

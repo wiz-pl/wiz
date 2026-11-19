@@ -113,6 +113,147 @@ def refPkgFiles : List (String × String) :=
   [("grail.wiz", "import Grail\ndef package : Package := Package.new \"ref\" |> Package.lib \"ref\" \"src\"\n"),
    ("src/Ref/A.wiz", refSrc), ("src/Ref/Empty.wiz", refEmpty)]
 
+/-- A module with one declaration of every command kind that declares a name: a `def`
+(plain and by equations), a `partial def`, an `axiom`, an `extern`, a `foreign_type`, a
+`glue`, a `c_struct`, a `structure` (with a field and a dotted method), a `class` and its
+instance, an `inductive`, a `coinductive` and a `sealed inductive`, plus a `theorem`,
+`lemma` and `abbrev` written as *user* commands (`syntax … : command`, the language's
+extension point). It also has a private definition and commands that declare nothing
+(`#check`, `attribute`, `notation`, `syntax`, `export`), which must make no entry. -/
+def kindsSrc : String := "/-! # Kinds
+
+One declaration of each command kind, for the `doc` tests. -/
+import Prelude
+
+/-- A user command: `theorem n : T := e` is `def n : T := e`. -/
+syntax (name := theorem) \"theorem\" ident \":\" term \":=\" term : command
+
+def theoremMacro : CommandMacro := fun stx =>
+  let n := Syntax.getArg stx 1;
+  let t := Syntax.getArg stx 3;
+  let e := Syntax.getArg stx 5;
+  MacroM.pure (.cons `(command| def $n : $t := $e) .nil)
+
+attribute [macro command.theorem] theoremMacro
+
+/-- A user command: a `lemma` is a theorem. -/
+syntax (name := lemma) \"lemma\" ident \":\" term \":=\" term : command
+
+def lemmaMacro : CommandMacro := fun stx =>
+  let n := Syntax.getArg stx 1;
+  let t := Syntax.getArg stx 3;
+  let e := Syntax.getArg stx 5;
+  MacroM.pure (.cons `(command| def $n : $t := $e) .nil)
+
+attribute [macro command.lemma] lemmaMacro
+
+/-- A user command: an `abbrev` is a definition too (Wiz has no reducibility hints). -/
+syntax (name := abbrev) \"abbrev\" ident \":\" term \":=\" term : command
+
+def abbrevMacro : CommandMacro := fun stx =>
+  let n := Syntax.getArg stx 1;
+  let t := Syntax.getArg stx 3;
+  let e := Syntax.getArg stx 5;
+  MacroM.pure (.cons `(command| def $n : $t := $e) .nil)
+
+attribute [macro command.abbrev] abbrevMacro
+
+/-- a definition -/
+def aDef (n : Nat) : Nat := n
+
+/-- a definition by equations -/
+def aEqns : Nat → Nat
+  | .zero => 0
+  | .succ n => n
+
+/-- the body of this one must not appear in its signature -/
+def withBody (n : Nat) : Nat := Nat.succ (Nat.succ n)
+
+/-- a partial definition -/
+partial def aPartial (n : Nat) : Nat := aPartial n
+
+/-- an axiom -/
+axiom anAxiom : Nat
+
+/-- an external constant -/
+extern \"kinds_extern\" anExtern : Nat
+
+/-- a foreign type -/
+foreign_type aHandle
+
+/-- a glued function -/
+glue aGlue (n : Nat) : Nat := \"return n + 1;\"
+
+/-- a C struct -/
+c_struct \"struct kinds_pair\" AKindsPair where
+  /-- the first -/
+  a : Nat
+  /-- the second -/
+  b : Nat
+
+/-- a structure -/
+structure AStructure where
+  /-- the x -/
+  x : Nat
+  /-- the y -/
+  y : Nat
+
+/-- a method of the structure: its name is fully qualified -/
+def AStructure.area : AStructure → Nat
+  | .mk _ _ => 0
+
+/-- a class -/
+class AClass (A : Type) where
+  /-- how big -/
+  size : A → Nat
+
+/-- a named instance -/
+instance anInstance : AClass Nat := AClass.mk (fun n => n)
+
+/-- an inductive type -/
+inductive AnInductive where
+  /-- a constructor -/
+  | aCtor
+  /-- another -/
+  | bCtor (n : Nat)
+
+/-- a coinductive type -/
+coinductive ACoinductive where
+  /-- the observation -/
+  head : Nat
+
+/-- a sealed inductive -/
+sealed inductive ASealed where
+  /-- the only constructor -/
+  | seal
+
+/-- a theorem (a user command): its statement is its type -/
+theorem aTheorem : Nat → Nat := fun n => Nat.succ n
+
+/-- a lemma (a user command: shown as `theorem`) -/
+lemma aLemma : Nat := 1
+
+/-- an abbreviation (a user command) -/
+abbrev anAbbrev : Nat := 2
+
+-- not a doc comment
+def undocumentedKind : Nat := 0
+
+/-- private: not documented -/
+private def aSecret : Nat := 0
+
+-- (commands that declare nothing: no entry)
+#check aDef
+attribute [inline] withBody
+notation:max \"kindsBang\" n => aDef n
+syntax (name := kindsSyntax) \"kinds_syntax\" : command
+export \"kinds_export\" withBody
+"
+
+def kindsPkgFiles : List (String × String) :=
+  [("grail.wiz", "import Grail\ndef package : Package := Package.new \"kinds\" |> Package.lib \"kinds\" \"src\"\n"),
+   ("src/Kinds/All.wiz", kindsSrc)]
+
 def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOneMany) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let loader : Name → Option String := fun m => if m == "Prelude" then some prelude else none
@@ -120,6 +261,11 @@ def elabBasic (cache : Option System.FilePath := none) : IO (CommandState ZeroOn
   match cache with
   | none => pure (runFrontend basicSrc init)
   | some dir => pure (← Cache.elaborateCached (some dir) [] basicSrc init 0).1
+
+def elabKinds : IO (CommandState ZeroOneMany) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let loader : Name → Option String := fun m => if m == "Prelude" then some prelude else none
+  pure (runFrontend kindsSrc { loader, trustedModule := Tests.libModule })
 
 def docOf (s : CommandState ZeroOneMany) (n : Name) : String :=
   match s.declDocs.get? n with
@@ -212,6 +358,29 @@ def makeSite (dir : System.FilePath) : IO System.FilePath := do
 def has (text frag : String) : Bool := (text.splitOn frag).length > 1
 def checkHas (text frag : String) : IO Unit := check (has text frag) s!"missing {frag}"
 
+/-- The `data-kind` of the declaration `id` on a module page (`""` if it has no entry). -/
+def kindOn (html id : String) : String :=
+  match (html.splitOn s!"<div class=\"decl\" id=\"{id}\" data-kind=\"")[1]? with
+  | some rest => (rest.splitOn "\"").headD ""
+  | none => ""
+
+/-- A declaration's heading and signature on a module page (up to the end of its
+signature block): the part that must not show its body. -/
+def declHead (html id : String) : String :=
+  match (html.splitOn s!"<div class=\"decl\" id=\"{id}\" data-kind=\"")[1]? with
+  | some rest => (rest.splitOn "</code></pre>").headD ""
+  | none => ""
+
+/-- The kind (the `class` attribute) of the child entry `id` (a constructor or field) on a
+module page: `field`, `constructor`, … (`""` if there is no such child). -/
+def childKindOn (html id : String) : String := Id.run do
+  let mut out := ""
+  for part in (html.splitOn "<li class=\"").drop 1 do
+    match part.splitOn "\"" with
+    | cls :: _ :: i :: _ => if i == id && out.isEmpty then out := cls
+    | _ => pure ()
+  return out
+
 /-- The core library modules whose every public declaration must have a doc comment. -/
 def coreModules : List String := ["Prelude", "Std", "Vec", "Word"]
 
@@ -274,6 +443,86 @@ def docGroup : Group where
         for n in ["Point", "Point.x", "Shape.box", "Area", "isOdd", "Shape.area"] do
           checkEq (docOf a n) (docOf b n)
         checkEq "constructor|a box from one corner to the other|Shape" (docOf b "Shape.box") },
+    { name := "doc comments are stored for every command kind that declares a name", run := fun _ => do
+        let s ← elabKinds
+        let errs := s.messages.filter (·.severity == .error)
+        check errs.isEmpty s!"{errs.toList.map (·.text)}"
+        for p in [("aDef", "def"), ("aEqns", "def"), ("withBody", "def"),
+            ("aPartial", "partial def"), ("anAxiom", "axiom"), ("anExtern", "extern"),
+            ("aHandle", "foreign type"), ("aGlue", "glue"), ("AKindsPair", "c struct"),
+            ("AStructure", "structure"), ("AStructure.area", "def"), ("AClass", "class"),
+            ("anInstance", "instance"), ("AnInductive", "inductive"),
+            ("ACoinductive", "coinductive"), ("ASealed", "sealed inductive"),
+            ("aTheorem", "theorem"), ("aLemma", "theorem"), ("anAbbrev", "abbrev"),
+            ("undocumentedKind", "def")] do
+          checkEq p.2 ((docOf s p.1).splitOn "|" |>.headD "")
+        -- (constructors and fields: their kind and parent)
+        checkEq "field|the x|AStructure" (docOf s "AStructure.x")
+        checkEq "field|the first|AKindsPair" (docOf s "AKindsPair.a")
+        checkEq "constructor|-|AStructure" (docOf s "AStructure.mk")
+        checkEq "constructor|a constructor|AnInductive" (docOf s "AnInductive.aCtor")
+        checkEq "field|the observation|ACoinductive" (docOf s "ACoinductive.head")
+        checkEq "constructor|the only constructor|ASealed" (docOf s "ASealed.seal")
+        checkEq "field|how big|AClass" (docOf s "AClass.size") },
+    { name := "wiz doc: every command kind that declares a name is an entry with its kind and signature", run := fun _ => do
+        let dir ← mkTree kindsPkgFiles
+        let out ← makeSite dir
+        let html ← IO.FS.readFile (out / "Kinds.All.html")
+        for p in [("aDef", "def"), ("aEqns", "def"), ("withBody", "def"),
+            ("aPartial", "partial def"), ("anAxiom", "axiom"), ("anExtern", "extern"),
+            ("aHandle", "foreign type"), ("aGlue", "glue"), ("AKindsPair", "c struct"),
+            ("AStructure", "structure"), ("AStructure.area", "def"), ("AClass", "class"),
+            ("anInstance", "instance"), ("AnInductive", "inductive"),
+            ("ACoinductive", "coinductive"), ("ASealed", "sealed inductive"),
+            ("aTheorem", "theorem"), ("aLemma", "theorem"), ("anAbbrev", "abbrev"),
+            ("undocumentedKind", "def")] do
+          checkEq p.2 (kindOn html p.1)
+        for p in [("AStructure.x", "field"), ("AStructure.mk", "constructor"),
+            ("AKindsPair.a", "field"), ("AKindsPair.mk", "constructor"),
+            ("AClass.size", "field"), ("AnInductive.aCtor", "constructor"),
+            ("ACoinductive.head", "field"), ("ASealed.seal", "constructor")] do
+          checkEq p.2 (childKindOn html p.1)
+        -- the signature is the type or the statement, not the body
+        check (has (declHead html "withBody") "Nat") (declHead html "withBody")
+        check (!has (declHead html "withBody") "succ") "withBody's body is in its signature"
+        check (!has (declHead html "aTheorem") "succ") "aTheorem's proof is in its signature"
+        check (has (declHead html "anInstance") "AClass") (declHead html "anInstance")
+        check (has (declHead html "anAxiom") "Nat") (declHead html "anAxiom")
+        check (has (declHead html "aPartial") "Nat → Nat") (declHead html "aPartial")
+        -- a dotted name keeps its fully qualified anchor
+        checkHas html "id=\"AStructure.area\""
+        -- private, auxiliary and non-declaring commands make no entry
+        check (!has html "aSecret") "a private declaration is documented"
+        check (!has html "AnInductive.rec") "an auxiliary declaration is documented"
+        for k in ["auxiliary", "check", "eval", "syntax", "notation", "attribute", "export",
+            "deriving"] do
+          check (!has html s!"data-kind=\"{k}\"") s!"a {k} command has an entry"
+        -- the API index, api.json and the search index carry the same kinds
+        let api ← IO.FS.readFile (out / "api.html")
+        for k in ["theorem", "c struct", "partial def", "foreign type", "sealed inductive"] do
+          checkHas api s!"class=\"kind\">{k}</td>"
+        checkHas api "href=\"Kinds.All.html#aTheorem\""
+        let text ← IO.FS.readFile (out / "api.json")
+        let .ok j := Lean.Json.parse text | throw (IO.userError "api.json is not JSON")
+        let some (.arr decls) := (j.getObjVal? "decls").toOption
+          | throw (IO.userError "api.json has no decls")
+        for p in [("aTheorem", "theorem"), ("aPartial", "partial def"),
+            ("AKindsPair", "c struct"), ("anExtern", "extern"), ("aHandle", "foreign type")] do
+          let some d := decls.find? (fun d => field d "name" == p.1)
+            | throw (IO.userError s!"{p.1} is not in api.json")
+          checkEq p.2 (field d "kind")
+        let idx ← IO.FS.readFile (out / "search.js")
+        let some rows := searchRows? idx | throw (IO.userError "search.js is not the index")
+        for p in [("aTheorem", "theorem"), ("aGlue", "glue"), ("anInstance", "instance")] do
+          let some r := rows.find? (fun r => field r "n" == p.1)
+            | throw (IO.userError s!"{p.1} is not in the search index")
+          checkEq p.2 (field r "k")
+        -- the same input makes the same page and index (deterministic order and anchors)
+        let out2 := dir / "site2"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out2.toString,
+          "--source-url", "https://example.org/blob/abc/src/", "--web", (dir / "no-web").toString]
+        checkEq (← IO.FS.readFile (out / "Kinds.All.html")) (← IO.FS.readFile (out2 / "Kinds.All.html"))
+        checkEq (← IO.FS.readFile (out / "api.json")) (← IO.FS.readFile (out2 / "api.json")) },
     { name := "Markdown: paragraphs, emphasis, code, lists, fences, links; HTML escaped", run := fun _ => do
         let r := Doc.render (fun c => if c == "f" then some "M.html#f" else none)
         checkEq "<p>a <em>b</em> <strong>c</strong> <a href=\"M.html#f\"><code>f</code></a> <code>g</code></p>\n" (r "a *b* **c** `f` `g`")
@@ -513,6 +762,25 @@ def docGroup : Group where
           "--reference", ref.toString, "--check"] }
         check (p.exitCode == 1) s!"--check exit {p.exitCode}: {p.stdout}{p.stderr}"
         check (has p.stderr "is out of date") p.stderr },
+    { name := "wiz doc --reference: every command kind is a section with its kind and signature", run := fun _ => do
+        let dir ← mkTree kindsPkgFiles
+        let out := dir / "site"
+        let ref := dir / "reference"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out.toString,
+          "--web", (dir / "no-web").toString, "--reference", ref.toString]
+        let md ← IO.FS.readFile (ref / "index.md")
+        -- (one subsection per declaration, with the kind and the source)
+        for k in ["def", "partial def", "axiom", "extern", "foreign type", "glue", "c struct",
+            "structure", "class", "inductive", "coinductive", "sealed inductive", "instance",
+            "theorem", "abbrev"] do
+          checkHas md s!"{k} · `Kinds/All.wiz:"
+        -- (the anchors are the fully qualified names, and the signature is the type)
+        for n in ["aDef", "aEqns", "aPartial", "anAxiom", "anExtern", "aHandle", "aGlue",
+            "AKindsPair", "AStructure", "AStructure.area", "AClass", "anInstance",
+            "AnInductive", "ACoinductive", "ASealed", "aTheorem", "aLemma", "anAbbrev"] do
+          checkHas md s!"<a id=\"{n}\"></a>"
+        checkHas md "```text\nNat → Nat\n```"
+        check (!has md "Nat.succ") "a declaration's body is in the manual" },
     libDocCase
   ]
 

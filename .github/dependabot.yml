@@ -1,0 +1,8 @@
+# Actions are pinned to commit SHAs (a tag is mutable); dependabot moves the SHA and
+# the trailing `# vX.Y.Z` comment together, one pull request a week.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

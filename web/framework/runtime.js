@@ -24,6 +24,15 @@ export function applyPatches(root, patches, parse = parseHtml) {
       case "text": {
         const n = nodeAt(root, p.path);
         n.textContent = p.text;
+        // A textarea's text child is its *default* value: once the user has edited the
+        // control (the HTML "dirty value flag"), replacing the child does not change the
+        // live value. A page that sets a textarea's text means the value too. Only
+        // assign when it differs, so a re-render during typing cannot move the caret.
+        const parent = n.parentNode;
+        if (parent && String(parent.tagName || "").toLowerCase() === "textarea" &&
+            parent.value !== p.text) {
+          try { parent.value = p.text; } catch { /* a test double without a value */ }
+        }
         break;
       }
       case "setAttr": {

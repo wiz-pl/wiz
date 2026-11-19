@@ -1,3 +1,4 @@
+-- test: run
 -- The AXI4-Stream subset (`import Hdl.AxiStream`, `Hdl.AxiStreamLaw`): source/sink,
 -- one-beat register slice, up/down width conversion, a stalling sink, and the
 -- backpressure law (no beat lost, no beat duplicated, order preserved). Run by the
@@ -22,15 +23,10 @@ def allTrue : List Bool → Bool
   | .nil => .true
   | .cons b bs => Bool.and b (allTrue bs)
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
   let ω v := Circuit.runLeaves c ins;
-  Bool.and (leavesEq v (Circuit.simFast c ins))
-    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
 
 def beatE (dw : Nat) (data valid last keep user ready : Nat) : HwTy.El (AxiStream.Beat.code dw) :=
   Bundle.toEl (AxiStream.Beat.bundle dw)
@@ -46,8 +42,6 @@ def txPayload (dw data valid last keep user : Nat) : Nat :=
 -- The stalling sink's ready: one cycle in `period` (period = 1 is always ready).
 def stallReady (period k : Nat) : Nat :=
   if Nat.beq period 1 then 1 else n01 (Nat.beq (Nat.mod k period) (Nat.sub period 1))
-
-def natsEq (xs ys : List Nat) : Bool := Hdl.natsEq xs ys
 
 ------------------------------------------------------------------------------------
 -- 1. Source and stalling sink: the sink must count exactly `n` beats and see `tlast`
@@ -135,9 +129,9 @@ def sliceExpected (n : Nat) : List Nat :=
 def sliceLawOk (n period fuel : Nat) : Bool :=
   let ins := sliceIns n period fuel;
   let outs := Circuit.run (AxiStream.sliceC 8) ins;
-  Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
+  Bool.and (BEq.beq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) (sliceRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (sliceExpected n))
+    (Bool.and (BEq.beq (AxiStream.Law.accepted outs) (sliceExpected n))
       (Bool.and (Nat.beq (List.length (AxiStream.Law.accepted outs)) n)
         (Nat.beq (List.length (AxiStream.Law.accepted outs))
           (List.length (sliceExpected n)))))
@@ -187,9 +181,9 @@ def upExpected (n : Nat) : List Nat :=
 def upLawOk (n period fuel : Nat) : Bool :=
   let ins := upIns n period fuel;
   let outs := Circuit.run (AxiStream.upC 8 2) ins;
-  Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 16)) outs)
+  Bool.and (BEq.beq (Hdl.map (HwTy.pack (AxiStream.Beat.code 16)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 16)) (upRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (upExpected n))
+    (Bool.and (BEq.beq (AxiStream.Law.accepted outs) (upExpected n))
       (Nat.beq (List.length (AxiStream.Law.accepted outs)) (Nat.div n 2)))
 
 def upAgree (n period fuel : Nat) : Bool :=
@@ -240,15 +234,15 @@ def downExpected (n : Nat) : List (Nat × Nat) :=
     (txPayload 8 lo 1 0 1 0, txPayload 8 hi 1 last 1 0)) (units n)
 
 def downExpectedFlat (n : Nat) : List Nat :=
-  Hdl.concatLists (Hdl.map (fun (p : Nat × Nat) => List.cons p.1 (List.cons p.2 List.nil))
+  Hdl.concatLists (Hdl.map (fun (p : Nat × Nat) => [p.1, p.2])
     (downExpected n))
 
 def downLawOk (n period fuel : Nat) : Bool :=
   let ins := downIns n period fuel;
   let outs := Circuit.run (AxiStream.downC 8 2) ins;
-  Bool.and (natsEq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
+  Bool.and (BEq.beq (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) outs)
       (Hdl.map (HwTy.pack (AxiStream.Beat.code 8)) (downRef n period fuel)))
-    (Bool.and (natsEq (AxiStream.Law.accepted outs) (downExpectedFlat n))
+    (Bool.and (BEq.beq (AxiStream.Law.accepted outs) (downExpectedFlat n))
       (Nat.beq (List.length (AxiStream.Law.accepted outs)) (Nat.mul 2 n)))
 
 def downAgree (n period fuel : Nat) : Bool :=

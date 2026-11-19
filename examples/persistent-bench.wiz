@@ -1,9 +1,9 @@
 import IO
-import PMap
+import Data.PMap
 import WordMap
 import Text
 
--- A benchmark of the persistent map (lib/PMap.wiz) against the U64Map's model and its
+-- A benchmark of the persistent map (lib/Data/PMap.wiz) against the U64Map's model and its
 -- native backend (lib/WordMap.wiz). Each mode does the same operations with the same
 -- keys and values and prints the same checksum:
 --

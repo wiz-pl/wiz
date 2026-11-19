@@ -4,7 +4,9 @@ Real threads in compiled code, and two peer APIs on top of them (decision CS1):
 session-typed linear channels (`lib/Session.wiz`), deadlock-free by construction, and
 MVars and locks (`lib/MVar.wiz`), which are more flexible and give weaker guarantees.
 Plan and survey: `concurrency-seplogic-plan.md` (stages C0, C2–C3, C8 there); runtime
-design: `concurrency.md`. Tests: group `conc`.
+design: `concurrency.md`. Tests: group `conc`; a test program that fails at run time is a
+failed case, with its exit code and standard error (a program's own "No such file" is never
+read as a missing toolchain; docs/building.md, "Building and testing").
 
 ## 25a: a thread-safe runtime
 
@@ -40,11 +42,56 @@ test per `inc`/`dec`. The rest follows from that invariant:
   per thread.
 
 A spawned thread has a 256 MB stack (`WIZ_THREAD_STACK_MB`). The interpreters (`#eval`,
-`#run`) don't run threads. Checked with ThreadSanitizer (`--cflags -fsanitize=thread`) on
-the `conc` programs; the cost for single-threaded programs is queued for measurement
-(`perf-queue.md`). Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
-Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to a
-blackhole), and `rc == -1` counting as unique.
+`#run`) don't run threads. The sanitiser evidence is `scripts/tsan-conc.sh`: it builds the
+programs in `Tests/tsan/` (eight threads under a lock around a plain, non-atomic C
+counter; the contended ordering case; four threads spawning children) with
+`--cflags "-O1 -g -fsanitize=thread"`, runs them, and fails on a ThreadSanitizer report or
+a wrong total. The `conc` group runs the same sources in the ordinary suite (so the lock's
+mutual exclusion is tested without a sanitiser too) and once more under ThreadSanitizer, so
+the claim is a test rather than a one-off run. `wiz_sys_spawn_in` re-asserts
+`signal(SIGPIPE, SIG_IGN)` on every spawn (a failed `exec` restores the program's
+disposition, and another thread may have spawned since), so concurrent spawns from
+several threads share no flag and are not a data race. The sanitiser's cost for
+single-threaded programs is queued for measurement (`perf-queue.md`).
+
+Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
+Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to ablackhole), and `rc == -1` counting as unique.
+
+The self-hosted runtime (`selfhost/rt.c`) has the same natives on its values: channels,
+MVars, locks and refs, a new thread for `Chan.fork`, `rt_mark_mt`'s transfer rule,
+shared thunks under one recursive lock, constants published once (`rt_caf`, made
+immortal as `wiz_immortal` does), and per-thread allocation (the size-class free lists
+and the recycling stack are `__thread`, so two threads never write one list). Under the
+collector each thread is created with `GC_pthread_create` (`GC_THREADS`) and the live
+count is per thread in both modes, summed at exit after the program waits for every
+thread. The `=selfhost` group's differential case runs one program — fork, send,
+MVar put/take, lock and join — in both runtimes and in both memory modes. Its library
+layer is the next step: the self-hosted frontend cannot yet express the phantom indices
+(`MVar.Hole m`, `Lock.Guard l`, `Chan p`), and it does not solve a metavariable applied
+to the local context, so a `do` bind whose value is a pair (`Chan.recv`'s `A × Chan`)
+cannot be checked; that program declares the natives directly, passes the type arguments
+by name, and sends on the channel without receiving. The `WIZ_NO_THREADS` one-thread
+build (the Wasm page) has the same natives without locks.
+
+**Handles.** A `File` or `Child` (lib/Sys.wiz) is an ordinary ω value, so the types do
+not stop a program from capturing one in a `Chan.fork` child while the parent keeps it:
+quantity 1 makes the *endpoint* of a channel linear, and a closure that captures an ω
+handle is still a linear function. Rather than trust a convention, the runtime
+serialises the operations on one handle (`runtime/rt_sys.inc`): a `File` holds a mutex
+across each read, write and close, so `File.close` cannot free a `FILE *` under a
+`getline` (the use-after-free otherwise allowed) and a second close is `EBADF`; a
+`Child` has a mutex per pipe plus one for the wait status and one for the blocking
+`waitpid`, so two `wait`s return the same status, a second `closeStdin` is `EBADF`
+(never a second `close(2)` of a descriptor another thread has reused), and `kill` and
+the other pipes stay usable while one pipe or a `wait` blocks. Operations on one handle
+are **serialised, not parallel**: a close waits for a read already in progress, and a
+read of one pipe waits for `Child.communicate` on the same child. The `conc` cases
+"handles (conc-02)" pin both halves. The deterministic one is `Child`: two threads wait
+on one child; before the lock both `waitpid`s raced, one reaped and the other never got
+a status (the case timed out), while now the second waiter returns the status the first
+recorded. The `File` case is a stress case — a reader loops over a file while the other
+thread closes it — because the use-after-free does not fault on every schedule; with
+the lock the in-flight read finishes and the next one is `EBADF`.
 
 An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and returns any
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
@@ -126,8 +173,12 @@ channel, `link` is the claim as a total program.
 **Pure model vs threads.** `Proc.run p proc c` runs a pure process over a real endpoint,
 and `Proc.runLinked p a b : IO (A × B)` is `IO.pure (link p a b)` for the kernel, `#eval`
 and `#run`, but `implemented_by` threads in compiled code (the peer in a new thread, its
-result back through an MVar). A compiled program printing it is a differential test of the
-natives against the pure semantics (`conc` group). A model of the whole `Chan` API (a
+result back through an MVar). The model starts no thread and the native `wiz_chan_forks`
+counts the threads `Chan.fork` started, exposed as `Chan.forks : IO Nat`; a compiled
+program that prints the result *and* the fork count is a differential test of the natives
+against the pure semantics: it must print the same value with `1` fork, and dropping the
+`implemented_by` attribute prints it with `0` and fails the `conc` case. (A result alone
+would not: both sides evaluate the same pure `link`.) A model of the whole `Chan` API (a
 deterministic scheduler) needs one-shot linear continuations (plan C5, `LEff`).
 
 **Sequencing and current workarounds.** Linear steps sequence with `do1` or `IO.bind`
@@ -167,10 +218,56 @@ output. MVars and locks are ordinary (ω) values, shared freely.
 other borrowers. Deadlock-free locks (lock levels, or Jacobs & Balzer's POPL 2023 linear
 locks) are future work (plan C8).
 
+The linear discipline is not mutual exclusion, so the `conc` group tests the runtime's part
+too: eight threads bump a plain, non-atomic C counter a thousand times each under
+`Lock.with` and the case asserts the exact total (`8000`) and an overlap detector that must
+stay `0`; the critical section yields to the scheduler (`sched_yield`), so a lock that does
+not exclude shows up even in a one-CPU job. A second case holds the lock, waits for
+another thread to announce that it is acquiring, and pins the order in which the threads
+print (the waiter's first line comes after the holder released). `scripts/tsan-conc.sh`
+and one `conc` case run the same programs under ThreadSanitizer (25a).
+
 ## 25e: what's next
 
 Pure parallelism (`Task.spawn`, plan C1) on the same runtime, with a `-j1` vs `-jN`
 differential test; structured scopes (C4); a concurrency effect with a pure scheduler
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
-proof (C7); `selfhost/rt.c` threads.
+proof (C7); `selfhost/rt.c` threads, and the self-hosted frontend's library layer for
+`Chan`/`MVar`/`Lock` (the phantom indices and linear holes; the natives themselves are in
+`selfhost/rt.c`).
+
+## 25k: the one-thread build (`WIZ_NO_THREADS`)
+
+The WebAssembly pages (the playground and the self-hosted frontend's build) have no
+`-pthread`, so they compile the runtime with `WIZ_NO_THREADS` (`web/build.sh`,
+`web/build-playground.sh`; `runtime/wiz_rt.h` also turns it on by itself for Emscripten
+without `__EMSCRIPTEN_PTHREADS__`). It is a build with **one thread because the first
+thing that needs a second thread stops**, not a scheduler:
+
+* `wiz_mark_mt` does nothing, so nothing ever becomes shared: counts stay positive and
+  every count operation is plain arithmetic (`WIZ_RC` is a read).
+* `wiz_run_main` runs `main` on the calling thread, and `wiz_thunk_lock`/`wiz_caf_init`
+  have no lock and no atomics (nothing can race).
+* `Chan.fork` and every wait only another thread could end — taking from an empty MVar,
+  reading one, putting into a full one, acquiring a held `Lock`, receiving on an empty
+  channel — prints `wiz: <what>: threads are not available in this build
+  (WIZ_NO_THREADS)` and exits 3 instead of hanging. Sending never blocks, so a message
+  queued before its receive goes through on one thread.
+
+The `conc` group runs the compiled cases with `-DWIZ_NO_THREADS` as well: an MVar/lock
+program that never waits prints its result, and `Chan.fork`, taking from an empty MVar,
+putting into a full one and re-acquiring a held lock each stop with their message.
+`scripts/test-runtime.sh` links the one-thread runtime **with stub pthreads** (every
+pthread entry point the runtime names is redirected with `-Wl,--wrap=` to a no-op, and
+`pthread_create` exits 99 if it is ever reached), checks that the binary has no pthread
+symbols, and runs a channel program that sends before receiving, plus the abort paths
+above. `scripts/test-runtime.sh` also compiles the header's `__EMSCRIPTEN__`
+auto-enable's translation unit with `-D__EMSCRIPTEN__` (the macro must be on, and off
+with `__EMSCRIPTEN_PTHREADS__`), but there is no `emcc` or Emscripten sysroot here, so
+no real Emscripten build is checked.
+
+Not covered: the one-thread build is not a concurrency model. `Chan.fork` stops there,
+so no Wiz-level program can create a channel or a second thread; the channel program in
+`scripts/test-runtime.sh` makes one with both ends in the same thread, through the
+native API. Neither the script nor the `conc` group runs a WebAssembly build.
