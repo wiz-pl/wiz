@@ -974,6 +974,19 @@ def baseline_self_test() -> list[str]:
         if not stale:
             failures.append("a baseline entry naming a missing module was not stale")
 
+        # A group whose module set changes: the old entry is stale and the new group
+        # is unbaselined (the caller fails it), rather than silently excusing it.
+        write_baseline(
+            path,
+            [dict(valid, modules=["a.wiz", "b.wiz", "extra.wiz"])],
+        )
+        entries = load_baseline(path, today=dt.date(2026, 1, 1))
+        matched, stale = apply_baseline(collisions, scan, entries, case)
+        if matched or not stale:
+            failures.append(
+                "a baseline entry with a changed module set was not stale"
+            )
+
         write_baseline(path, [dict(valid, expires="2020-01-01")])
         try:
             load_baseline(path, today=dt.date(2026, 1, 1))
