@@ -10,13 +10,13 @@ Two layers in one module.
 **Profunctor optics (the default).** The representation programming should reach for.
 An optic is a transformer of profunctors `P : Type → Type → Type`, polymorphic in `P`:
 
-    Iso       S T A B := {P} → [Profunctor P]                → P A B → P S T
+    IsoP      S T A B := {P} → [Profunctor P]                → P A B → P S T
     LensP     S T A B := {P} → [Profunctor P] → [Strong P]    → P A B → P S T
     PrismP    S T A B := {P} → [Profunctor P] → [Choice P]    → P A B → P S T
     TraversalP S T A B := {P} → [Profunctor P] → [Wandering P] → P A B → P S T
 
-One optic, many interpretations: `over` is `Hom`, `view` is `Forget`, `toListOf` is
-`ForgetList`, `preview` is `ForgetOpt`, and `overWrite` is `Writer Δ` (update and
+One optic, many interpretations: `overL` is `Hom`, `viewP` is `Forget`, `toListOfT` is
+`ForgetList`, `previewP` is `ForgetOpt`, and `overWriteT` is `Writer Δ` (update and
 write-set in one pass). `LensP.ofLens` lifts the store `Lens` below, so derived field
 lenses are usable with this layer at no loss.
 
@@ -41,8 +41,8 @@ predicates are in lib/Data/Result.wiz.
 import Optic
 
 def p : Pair2 Nat Nat := Pair2.mk 1 2
-#eval view fstL ((1, Bool.true) : Nat × Bool)           -- 1
-#eval over fstL Nat.succ ((1, Bool.true) : Nat × Bool)  -- (2, .true)
+#eval viewP fstLP ((1, Bool.true) : Nat × Bool)           -- 1
+#eval overL fstLP Nat.succ ((1, Bool.true) : Nat × Bool)  -- (2, .true)
 #eval Lens.get Pair2.fstL p                             -- 1
 #eval Result.map Store.pos (List.atL 1 (List.cons 7 (List.cons 8 List.nil)))   -- .ok 8
 ```
@@ -513,7 +513,7 @@ def Choice.right' {P : Type → Type → Type} [d : Profunctor P] [c : Choice P]
 -- ## The optics
 
 /-- An iso: a profunctor transformer for any `Profunctor`. -/
-def Iso (S T A B : Type) : Type 1 :=
+def IsoP (S T A B : Type) : Type 1 :=
   {P : Type → Type → Type} → [pf : Profunctor P] → (P A B → P S T)
 /-- A lens: `Strong` (a focus in a product context). -/
 def LensP (S T A B : Type) : Type 1 :=
@@ -527,7 +527,7 @@ def TraversalP (S T A B : Type) : Type 1 :=
     (P A B → P S T)
 
 /-- An iso from `to : S → A` and `from : B → T`. -/
-def iso {S T A B : Type} (to : S → A) (from : B → T) : Iso S T A B :=
+def iso {S T A B : Type} (to : S → A) (from : B → T) : IsoP S T A B :=
   fun {P : Type → Type → Type} [d : Profunctor P] =>
     @Profunctor.dimap P d S A B T to from
 
@@ -646,46 +646,46 @@ instance {ω M : Type} [m : Delta M] : Wandering (Writer M) where
 
 -- ## Reading and writing
 
-/-- `view`: run a lens at `Forget`. -/
-def view {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) : A :=
+/-- `viewP`: run a lens at `Forget`. -/
+def viewP {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) : A :=
   l (P := Forget A) (fun a => a) s
-/-- `over`: run a lens at `Hom`. -/
-def over {S T A B : Type} (l : LensP S T A B) (f : A → B) (s : S) : T :=
+/-- `overL`: run a lens at `Hom`. -/
+def overL {S T A B : Type} (l : LensP S T A B) (f : A → B) (s : S) : T :=
   l (P := Hom) f s
-/-- `set`: `over` with a constant. -/
-def set {S T A B : Type} (l : LensP S T A B) (b : B) (s : S) : T :=
-  over l (fun a => b) s
-/-- `toListOf` for a traversal: run it at `ForgetList`. -/
-def toListOf {S T B : Type} {ω A : Type} (tr : TraversalP S T A B) (s : S) : List A :=
+/-- `setL`: `overL` with a constant. -/
+def setL {S T A B : Type} (l : LensP S T A B) (b : B) (s : S) : T :=
+  overL l (fun a => b) s
+/-- `toListOfT` for a traversal: run it at `ForgetList`. -/
+def toListOfT {S T B : Type} {ω A : Type} (tr : TraversalP S T A B) (s : S) : List A :=
   tr (P := ForgetList A) (fun a => List.cons a List.nil) s
-/-- `toListOf` for a prism: the same `ForgetList` interpretation, typed at `PrismP`. -/
+/-- `toListOfP` for a prism: the same `ForgetList` interpretation, typed at `PrismP`. -/
 def toListOfP {S T B : Type} {ω A : Type} (pr : PrismP S T A B) (s : S) : List A :=
   pr (P := ForgetList A) (fun a => List.cons a List.nil) s
-/-- `preview`: run a prism at `ForgetOpt`. -/
-def preview {S : Type} {ω A : Type} (pr : PrismP S S A A) (s : S) : Option A :=
+/-- `previewP`: run a prism at `ForgetOpt`. -/
+def previewP {S : Type} {ω A : Type} (pr : PrismP S S A A) (s : S) : Option A :=
   pr (P := ForgetOpt A) (fun a => Option.some a) s
-/-- `over` for a traversal. -/
+/-- `overT`: run a traversal at `Hom`. -/
 def overT {S T A B : Type} (tr : TraversalP S T A B) (f : A → B) (s : S) : T :=
   tr (P := Hom) f s
-/-- `over` for a prism. -/
+/-- `overP`: run a prism at `Hom`. -/
 def overP {S T A B : Type} (pr : PrismP S T A B) (f : A → B) (s : S) : T :=
   pr (P := Hom) f s
-/-- `over` for an iso. -/
-def overI {S T A B : Type} (i : Iso S T A B) (f : A → B) (s : S) : T :=
+/-- `overL` for an iso. -/
+def overI {S T A B : Type} (i : IsoP S T A B) (f : A → B) (s : S) : T :=
   i (P := Hom) f s
-/-- `view` for an iso (the `Forget` interpretation is a profunctor). -/
-def viewI {S : Type} {ω A : Type} (i : Iso S S A A) (s : S) : A :=
+/-- `viewP` for an iso (the `Forget` interpretation is a profunctor). -/
+def viewI {S : Type} {ω A : Type} (i : IsoP S S A A) (s : S) : A :=
   i (P := Forget A) (fun a => a) s
-/-- `over` that records a delta: the write-set interpretation. `f` returns the new focus
+/-- `overWriteT` records a delta through a traversal: the write-set interpretation. `f` returns the new focus
 and the delta for it; the optic composes the deltas with `Delta.append`. -/
-def overWrite {S T A B : Type} {ω M : Type} [m : Delta M] (tr : TraversalP S T A B)
+def overWriteT {S T A B : Type} {ω M : Type} [m : Delta M] (tr : TraversalP S T A B)
     (f : A → B × M) (s : S) : T × M :=
   tr (P := Writer M) f s
-/-- The lens version of `overWrite`. -/
+/-- The lens version of `overWriteT`. -/
 def overWriteL {S T A B : Type} {ω M : Type} [m : Delta M] (l : LensP S T A B)
     (f : A → B × M) (s : S) : T × M :=
   l (P := Writer M) f s
-/-- The prism version of `overWrite`. -/
+/-- The prism version of `overWriteT`. -/
 def overWriteP {S T A B : Type} {ω M : Type} [m : Delta M] (pr : PrismP S T A B)
     (f : A → B × M) (s : S) : T × M :=
   pr (P := Writer M) f s
@@ -708,19 +708,19 @@ def PrismP.comp {S T A B C D : Type} (l : PrismP S T A B) (m : PrismP A B C D) :
   fun {P : Type → Type → Type} [pf : Profunctor P] [ch : Choice P] (x : P C D) =>
     l (P := P) (m (P := P) x)
 /-- Compose two isos. -/
-def IsoP.comp {S T A B C D : Type} (l : Iso S T A B) (m : Iso A B C D) :
-    Iso S T C D :=
+def IsoP.comp {S T A B C D : Type} (l : IsoP S T A B) (m : IsoP A B C D) :
+    IsoP S T C D :=
   fun {P : Type → Type → Type} [pf : Profunctor P] (x : P C D) =>
     l (P := P) (m (P := P) x)
 
 -- ## Common optics
 
 /-- The first component of a pair, as a profunctor lens. -/
-def fstL {A C : Type} : LensP (A × C) (A × C) A A :=
+def fstLP {A C : Type} : LensP (A × C) (A × C) A A :=
   fun {P : Type → Type → Type} [d : Profunctor P] [i : Strong P] =>
     @Strong.first' P d i A A C
 /-- The second component of a pair. -/
-def sndL {A C : Type} : LensP (C × A) (C × A) A A :=
+def sndLP {A C : Type} : LensP (C × A) (C × A) A A :=
   fun {P : Type → Type → Type} [d : Profunctor P] [i : Strong P] =>
     @Strong.second' P d i A A C
 
@@ -739,7 +739,7 @@ def listTrav {A : Type} : {F : Type → Type} → [i : Applicative F] →
     (A → F A) → List A → F (List A) :=
   fun {F : Type → Type} [i : Applicative F] f xs => listWander (A := A) (B := A) f xs
 /-- The list traversal. -/
-def listT {A : Type} : TraversalP (List A) (List A) A A := traversalOf listTrav
+def listTP {A : Type} : TraversalP (List A) (List A) A A := traversalOf listTrav
 /-- The head of a list, as a prism (0 or 1 focus). -/
 def headP {A : Type} : PrismP (List A) (List A) A A :=
   prism
@@ -772,7 +772,7 @@ def listWhereTrav {A : Type} (keep : A → Bool) : {F : Type → Type} → [i : 
     (A → F A) → List A → F (List A) :=
   fun {F : Type → Type} [i : Applicative F] f xs => listWanderWhere keep f xs
 /-- Every element of a list that satisfies `keep`. -/
-def listWhereT {A : Type} (keep : A → Bool) : TraversalP (List A) (List A) A A :=
+def listWhereTP {A : Type} (keep : A → Bool) : TraversalP (List A) (List A) A A :=
   fun {P : Type → Type → Type} [pf : Profunctor P] [wd : Wandering P] (x : P A A) =>
     @Wandering.wander P pf wd A A (List A) (List A) (listWhereTrav keep) x
 
@@ -846,14 +846,14 @@ def ForgetList.wanderingLawful {ω R : Type} : Wandering.Lawful (ForgetList R) :
 
 /-- GetPut: reading and writing back the same value is the identity. -/
 def LensP.GetPut {S A : Type} (l : LensP S S A A) : Prop :=
-  (s : S) → over l (fun a => a) s = s
+  (s : S) → overL l (fun a => a) s = s
 /-- PutGet: a write is what a subsequent read sees. -/
 def LensP.PutGet {S A : Type} (l : LensP S S A A) : Prop :=
-  (s : S) → (a : A) → view l (over l (fun b => a) s) = a
+  (s : S) → (a : A) → viewP l (overL l (fun b => a) s) = a
 /-- PutPut: the last write wins. -/
 def LensP.PutPut {S A : Type} (l : LensP S S A A) : Prop :=
-  (s : S) → (a b : A) → over l (fun c => b) (over l (fun c => a) s) =
-    over l (fun c => b) s
+  (s : S) → (a b : A) → overL l (fun c => b) (overL l (fun c => a) s) =
+    overL l (fun c => b) s
 /-- A lawful profunctor lens: GetPut, PutGet and PutPut. -/
 def LensP.Lawful {S A : Type} (l : LensP S S A A) : Prop :=
   LensP.GetPut l × LensP.PutGet l × LensP.PutPut l
@@ -866,7 +866,7 @@ def LensP.Lawful {S A : Type} (l : LensP S S A A) : Prop :=
 -- and the put-back) that a returned borrow (`Mut` in lib/Region.wiz) carries.
 
 /-- A store lens, as a profunctor lens, at a chosen `P` (fully applied, so it can be
-used where a profunctor optic is being built rather than passed). `view`/`over` agree
+used where a profunctor optic is being built rather than passed). `viewP`/`overL` agree
 definitionally with `Lens.get`/`Lens.over`. -/
 def LensP.ofLensAt {S A : Type} (l : Lens S A) {P : Type → Type → Type}
     [pf : Profunctor P] [st : Strong P] (x : P A A) : P S S :=
@@ -875,10 +875,10 @@ def LensP.ofLensAt {S A : Type} (l : Lens S A) {P : Type → Type → Type}
     (fun bs => Lens.set l bs.2 bs.1)
     (@Strong.first' P pf st A A S x)
 
-/-- A store lens, as a profunctor lens. `view`/`over` agree definitionally with
+/-- A store lens, as a profunctor lens. `viewP`/`overL` agree definitionally with
 `Lens.get`/`Lens.over` (`LensP.ofLens_view`, `LensP.ofLens_over`), so derived field
 lenses (`deriving Lens`) work with this layer. Bind it to a name before passing it to
-`view`/`over`: a partially applied definition whose result is an optic cannot be an
+`viewP`/`overL`: a partially applied definition whose result is an optic cannot be an
 argument (`LensP.ofLens l` is fine in a `def` body, not in an argument position). -/
 def LensP.ofLens {S A : Type} (l : Lens S A) : LensP S S A A :=
   fun {P : Type → Type → Type} [pf : Profunctor P] [st : Strong P] (x : P A A) =>
@@ -905,15 +905,15 @@ def LensP.ofLens_putPut {S A : Type} (l : Lens S A) (h : Lens.Lawful l) (s : S) 
 
 -- ## The pair lens, proved lawful
 
-/-- `fstL` obeys GetPut (the componentwise pair equation; pair eta is not definitional). -/
-def fstL_getPut {A C : Type} : LensP.GetPut (S := A × C) (A := A) fstL :=
+/-- `fstLP` obeys GetPut (the componentwise pair equation; pair eta is not definitional). -/
+def fstLP_getPut {A C : Type} : LensP.GetPut (S := A × C) (A := A) fstLP :=
   fun s => Optic.pairEq s.1 s.2 s rfl rfl
-/-- `fstL` obeys PutGet. -/
-def fstL_putGet {A C : Type} : LensP.PutGet (S := A × C) (A := A) fstL :=
+/-- `fstLP` obeys PutGet. -/
+def fstLP_putGet {A C : Type} : LensP.PutGet (S := A × C) (A := A) fstLP :=
   fun s a => rfl
-/-- `fstL` obeys PutPut. -/
-def fstL_putPut {A C : Type} : LensP.PutPut (S := A × C) (A := A) fstL :=
+/-- `fstLP` obeys PutPut. -/
+def fstLP_putPut {A C : Type} : LensP.PutPut (S := A × C) (A := A) fstLP :=
   fun s a b => rfl
-/-- `fstL` is a lawful profunctor lens. -/
-def fstL_lawful {A C : Type} : LensP.Lawful (S := A × C) (A := A) fstL :=
-  (fstL_getPut, fstL_putGet, fstL_putPut)
+/-- `fstLP` is a lawful profunctor lens. -/
+def fstLP_lawful {A C : Type} : LensP.Lawful (S := A × C) (A := A) fstLP :=
+  (fstLP_getPut, fstLP_putGet, fstLP_putPut)

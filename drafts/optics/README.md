@@ -7,10 +7,10 @@ file (`Tests.wiz`) and a compiled smoke test (`Smoke.wiz`); the store `Traversal
 used to be here is `lib/Optic.wiz`'s (next to `PLens.over`).
 
 `lib/Optic.wiz` defines `Profunctor`, `Strong`, `Choice`, `Wandering`, the four optic
-types (`Iso`/`LensP`/`PrismP`/`TraversalP`), the `Hom`/`Forget`/`ForgetList`/
-`ForgetOpt`/`Writer Δ` interpretations, `over`/`view`/`set`/`toListOf`/`preview`/
-`overWrite`, composition, `LensP.ofLens` (store lens → profunctor lens), the class laws
-with proofs for `Hom` and `ForgetList R`, and `fstL`'s lens laws. `wiz check` accepts
+types (`IsoP`/`LensP`/`PrismP`/`TraversalP`), the `Hom`/`Forget`/`ForgetList`/
+`ForgetOpt`/`Writer Δ` interpretations, `overL`/`viewP`/`setL`/`toListOfT`/`previewP`/
+`overWriteT`, composition, `LensP.ofLens` (store lens → profunctor lens), the class laws
+with proofs for `Hom` and `ForgetList R`, and `fstLP`'s lens laws. `wiz check` accepts
 it, and `wiz run` compiles and executes a program that uses it (`Smoke.wiz`).
 
 **Every command here needs a rebuilt toolchain** (`heavy lake build`, or the branch's
@@ -46,14 +46,14 @@ wiz run   -I drafts/optics drafts/optics/Smoke.wiz
   The caller picks `P`; the instance problem is solved at a concrete `P` (`Hom`,
   `Forget A`, …). The nested `{F : Type → Type}` in `Wandering.wander` is a `Π` in an
   argument type and works.
-* **The interpretations coexist** — the same `listT`/`fstL` is run at `Hom` (update),
+* **The interpretations coexist** — the same `listTP`/`fstLP` is run at `Hom` (update),
   `Forget` (read one), `ForgetList` (read all), `ForgetOpt` (preview) and `Writer Δ`
   (update + delta).
 * **Laws** — `Profunctor.Lawful`, `Strong.Lawful`, `Choice.Lawful`,
   `Wandering.Lawful` are stated as `Prop`s and proved for `Hom` (all four) and
   `ForgetList R` (all four). `Choice` needs `funext` + cases on `Coprod`; the others are
-  `rfl`. The lens laws `LensP.GetPut`/`PutGet`/`PutPut` are stated, checked on `fstL`
-  values and proved for `fstL` in `lib/Optic.wiz` (GetPut with `Optic.pairEq`, since
+  `rfl`. The lens laws `LensP.GetPut`/`PutGet`/`PutPut` are stated, checked on `fstLP`
+  values and proved for `fstLP` in `lib/Optic.wiz` (GetPut with `Optic.pairEq`, since
   pair eta is not definitional).
 * **Store lenses lift** — `LensP.ofLens` turns a store `Lens` into a `LensP`, and
   `LensP.ofLens_view`/`_over` prove the two readings agree by `rfl`, so derived field
@@ -80,7 +80,7 @@ annotated away in `lib/Optic.wiz`.
    ```
 
    is fixed by `instance {ω R : Type}`. We annotated `ω` on `R`/`M`/`A` where the
-   parameter types a returned runtime value (`view`, `toListOf`, `preview`,
+   parameter types a returned runtime value (`viewP`, `toListOfT`, `previewP`,
    `overWrite*`, the two `Wandering` instances). A required annotation, not a missing
    feature.
 
@@ -99,7 +99,7 @@ annotated away in `lib/Optic.wiz`.
    *applied* named definition whose result is a Π with implicit binders is still
    normalised first and cannot be an argument either, so `traversalOf (listWhereTrav
    keep)` fails while `@Wandering.wander … (listWhereTrav keep) x` works (we build
-   `listWhereT` that way), and `view (LensP.ofLens l)` fails while binding
+   `listWhereTP` that way), and `viewP (LensP.ofLens l)` fails while binding
    `def p := LensP.ofLens l` first works (we state the lift's laws on the fully applied
    `LensP.ofLensAt`). Smallest language change: when checking a lambda or an
    application against a `Π` with implicit/instance binders, bind them the same way a

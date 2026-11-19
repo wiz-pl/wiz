@@ -13,9 +13,9 @@ Expected output: `3`, `2`, `1`.
 -/
 
 def main : IO Unit := do
-  let x := view fstL ((3 : Nat), Bool.true);
-  let l := toListOf (listT (A := Nat)) (List.cons 1 (List.cons 2 List.nil));
-  let w := overWriteL fstL (fun n => (n + 1, List.cons n List.nil)) ((1 : Nat), Bool.true);
+  let x := viewP fstLP ((3 : Nat), Bool.true);
+  let l := toListOfT (listTP (A := Nat)) (List.cons 1 (List.cons 2 List.nil));
+  let w := overWriteL fstLP (fun n => (n + 1, List.cons n List.nil)) ((1 : Nat), Bool.true);
   IO.println (Nat.repr x);
   IO.println (Nat.repr (List.length l));
   IO.println (Nat.repr (List.length w.2))

@@ -61,7 +61,7 @@ def indexTraversalP (d : IndexDef) (v : U64) :
 
 /-- The read interpretation: the bucket's `(key, node)` entries. -/
 def indexViewP (d : IndexDef) (v : U64) (s : Snapshot) : List (U64 × Node) :=
-  toListOf (indexTraversalP d v) s
+  toListOfT (indexTraversalP d v) s
 
 /-- The store encoding's read, for comparison. -/
 def indexViewStore (d : IndexDef) (v : U64) (s : Snapshot) : List Node :=
@@ -74,7 +74,7 @@ def writeSetOf (d : List (U64 × Patch)) : WriteSet :=
 /-- Bump every node in the bucket with the profunctor traversal, recording the write-set
 in the same pass. -/
 def bumpKindP (v : U64) (s : Snapshot) : Snapshot × WriteSet :=
-  let r := overWrite (indexTraversalP kindIndex v)
+  let r := overWriteT (indexTraversalP kindIndex v)
     (fun p => let n := p.2;
       let n' := { n with count := n.count + 1 };
       match Patch.ofChange n n' with

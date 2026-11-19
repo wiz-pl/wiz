@@ -554,11 +554,12 @@ universe change.
 ### Profunctor optics (default) and the store encoding
 
 `lib/Optic.wiz` also carries the profunctor layer, which is the default representation
-for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `Iso`, `LensP`,
+for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `IsoP`, `LensP`,
 `PrismP`, `TraversalP`, and the `Hom`/`Forget`/`ForgetList`/`ForgetOpt`/`Writer Δ`
-interpretations. One optic runs at every interpretation: `over` (update), `view` (read
-one), `toListOf` (read all), `preview` (read at most one), `overWrite` (update and
-write-set in one pass). `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
+interpretations. One optic runs at every interpretation: `overL` (update), `viewP` (read
+one), `toListOfT` (read all), `previewP` (read at most one), `overWriteT` (update and
+write-set in one pass). The generic helpers carry a suffix (`overL`/`overT`/`overP`/
+`overI`, `viewP`/`viewI`) so they do not capture a user's own `view`/`over`. `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
 `LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it. A
 `Type 0` store of optics is still impossible here (the profunctor types are `Type 1`), and
 a profunctor optic cannot hand back the `Store A S` that a returned borrow (`Mut` in
