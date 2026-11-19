@@ -265,7 +265,7 @@ def Scry.guardFn : Wil.Func :=
   let cap := Wil.var 1 Wil.u64;
   Wil.func "guard" [] []
     [ Wil.block
-        [ Wil.assign cap (.cst (Wil.Val.ofNat 64 false 16))
+        [ Wil.assign cap (.cst (Wil.Val.ofNat 64 .false 16))
         , Wil.assign n (.havoc Wil.u64) ]
         (Wil.branch (Wil.Cond.cmp .gt n cap) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
     , Wil.block [] (Wil.ret (Option.none : Option Wil.Var))

@@ -529,7 +529,7 @@ def Scry.boundsCondBounds (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat)
   | .cmp op a b =>
     match Scry.boundsConstAt info g at b.index 8 with
     | .some k =>
-      let hi := match op, isTrue with
+      let hi : Option Nat := match op, isTrue with
         -- a < K, a >= K false: a <= K-1
         | .lt, .true => .some (Nat.sub k 1)
         | .ge, .false => .some (Nat.sub k 1)
@@ -542,7 +542,7 @@ def Scry.boundsCondBounds (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat)
       | .none => .nil
     | .none => match Scry.boundsConstAt info g at a.index 8 with
       | .some k =>
-        let hi := match op, isTrue with
+        let hi : Option Nat := match op, isTrue with
           -- K > b, K <= b false: b <= K-1
           | .gt, .true => .some (Nat.sub k 1)
           | .le, .false => .some (Nat.sub k 1)
@@ -626,13 +626,13 @@ def Scry.boundsCopyUsesAtWith (models : Scry.ModelPack) (pt : Scry.PtResult)
     | .none => .nil
     | .some countVar =>
       let konst := Scry.boundsConstCode r.plan.info g point countVar;
-      let dstUses := match Scry.boundsArgAt args shape.dst with
+      let dstUses : List (List Nat) := match Scry.boundsArgAt args shape.dst with
         | .none => .nil
         | .some dstVar => List.map (fun cap =>
             [point, countVar, Scry.boundsLocIdOf pt cap.1, cap.2,
              Scry.useCopyWrite, konst])
             (Scry.boundsPtrCaps pt sizes r.fn.name dstVar);
-      let srcUses := match shape.src with
+      let srcUses : List (List Nat) := match shape.src with
         | .none => .nil
         | .some srcPos => match Scry.boundsArgAt args srcPos with
           | .none => .nil
@@ -704,8 +704,9 @@ def Scry.boundsFactsOfFunc (pt : Scry.PtResult) (r : Scry.FuncResult) :
 
 /-- Add the guard/use/before rows to a function's EDB. -/
 def Scry.addBoundsFacts (st : Scry.State Nat) (f : Scry.BoundsFacts) : Scry.State Nat :=
-  let st := List.foldr (fun row acc => Scry.State.addTuple acc Scry.rtGuard row)
-    st f.guards;
-  let st := List.foldr (fun row acc => Scry.State.addTuple acc Scry.rtUse row)
-    st f.uses;
-  List.foldr (fun row acc => Scry.State.addTuple acc Scry.rtBefore row) st f.before
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtGuard (List.map U64.ofNat row)) st f.guards;
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtUse (List.map U64.ofNat row)) st f.uses;
+  List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtBefore (List.map U64.ofNat row)) st f.before

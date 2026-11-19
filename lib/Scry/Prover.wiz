@@ -672,11 +672,6 @@ def Scry.checkCut (st : Scry.State Nat) (c : Scry.Claim) : Scry.Verdict :=
       | .some w => .refuted w
       | .none => .proved c
 
-/-- Prove the cut over every guard point in the EDB (the default certificate). -/
-def Scry.proveCut (p : Scry.Program Nat) (st : Scry.State Nat) (func : String) :
-    Scry.Verdict :=
-  Scry.check p st (Scry.Claim.cut func (Scry.guardPoints st))
-
 /-- A claim is vacuous when the function has no sink, or (for a `noFlow` claim) when the
 selected source relations are empty. A `constantOrBound` claim with sinks is not vacuous
 when the untrusted source set is empty: then every argument is a constant, which is one
@@ -724,6 +719,11 @@ def Scry.check (p : Scry.Program Nat) (st : Scry.State Nat) (c : Scry.Claim) :
         | .none => match Scry.checkAlertRules p stI p.rules with
           | .some w => .refuted w
           | .none => .proved c
+
+/-- Prove the cut over every guard point in the EDB (the default certificate). -/
+def Scry.proveCut (p : Scry.Program Nat) (st : Scry.State Nat) (func : String) :
+    Scry.Verdict :=
+  Scry.check p st (Scry.Claim.cut func (Scry.guardPoints st))
 
 -- ## The tactic script (the search)
 
