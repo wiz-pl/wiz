@@ -241,15 +241,16 @@ EOF
               platforms = systems;
             };
           };
-          # The two Wiz→wasm page modules (stages 11n/11ab) as derivations, so that Cachix
-          # serves them: CI's `web` job used to run both Emscripten builds inside its
+          # The Wiz→wasm page modules (stages 11n/11ab/11w) as derivations, so that Cachix
+          # serves them: CI's `web` job used to run every Emscripten build inside its
           # single test step (95 % of it, ~10 min and an 8–10 GiB `wasm-opt -O2` tail),
-          # and the `docs` job ran them again on every push. Each derivation runs the same
-          # script a developer runs, with the packaged wiz, `emcc` on PATH (so the script
-          # does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
+          # and the `docs` job ran two of them again on every push. Each derivation runs the
+          # same script a developer runs, with the packaged wiz, `emcc` on PATH (so the
+          # script does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
           # `nix build`): no network at build time. `$out` is the script's OUT directory
           # — the module pair plus the page files it copies beside them — and the scripts
-          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`).
+          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
+          # `WIZ_PLAYGROUND_UI_FROM`).
           #
           # The `src` filesets list exactly what each script reads: a change to a test or
           # a page it does not touch leaves the module in the cache. A script that starts

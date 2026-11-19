@@ -839,13 +839,16 @@ setup action keeps the elan cache for those
   Pages outage does not fail the suite. See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
   changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. The
-  two Wasm modules are not built here: the `web_modules` job builds them once as the
-  Nix derivations `packages.wiz-web` and `packages.wiz-playground` (flake.nix) and
-  publishes them to Cachix, and `web/test.sh` copies those directories
-  (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`; `web/modules-from-store.sh` fails the job on
-  a miss instead of rebuilding). The browser-free half then runs:
-  `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
-  and the site check's rules for it); `web/playground_lsp_test.mjs` and
+  three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the playground's Loom
+  UI, `web/build-playground-ui.sh`) are not built here: the `web_modules` job builds them
+  once as the Nix derivations `packages.wiz-web`, `packages.wiz-playground` and
+  `packages.wiz-playground-ui` (flake.nix) and publishes them to Cachix, and `web/test.sh`
+  copies those directories (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
+  `WIZ_PLAYGROUND_UI_FROM`; `web/modules-from-store.sh` fails the job on a miss instead
+  of rebuilding) and then runs its browser-free half: `web/scroll-search_test.mjs`;
+  `web/test-bench.sh` (the
+  benchmark page's fixtures and the site check's rules for it);
+  `web/playground_lsp_test.mjs` and
   `web/infoview_page_test.mjs` (the language client and goals pane shared by the
   playground and the infoview page, and the page's URL rule); `web/selfhost_lsp_test.mjs`
   (the in-page server shim, against stubs); `web/node_test.mjs` and
@@ -1384,9 +1387,9 @@ python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
 With the derivations already in the store (`nix build .#wiz-web .#wiz-playground
-.#wiz-playground-ui`), the module steps can copy them instead of running Emscripten:
-pass `--from DIR` (or `WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`/`WIZ_PLAYGROUND_UI_FROM`)
-the store path, exactly as CI does.
+.#wiz-playground-ui`), the three module steps can copy them instead of running Emscripten:
+pass `--from DIR` (or `WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`/`WIZ_PLAYGROUND_UI_FROM`) the
+store path, exactly as CI does.
 
 `wiz doc --jobs N` elaborates and renders N modules at once; the default is 1, and
 `--jobs 0` (or `--jobs auto`) takes the CPUs the process may run on, at most 8. The tree
