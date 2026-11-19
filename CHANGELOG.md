@@ -186,6 +186,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `namespace` command: `theorem`, `lemma` and `abbrev` written as command macros are
   shown with those kinds (a `lemma` as `theorem`), and dotted names (`T.f`) stay fully
   qualified since there is no namespace syntax.
+* examples are a gate (23f): group `examples` runs the root package's
+  `examples/*.expected` through the same `runTests` the tour uses, in three cases split
+  by name, in a new `examples` shard (`"split": 3`, inputs `examples/`, `lib/` and
+  `drafts/feral/lib/`) that `CI result` requires. A library change that shifts an
+  example's printed value now fails the suite instead of only a command a person runs.
+  The four benchmarks (`closed-table-bench`, `hdl-sim-bench`, `natives-bench`,
+  `scry-datalog-bench`) declare `-- test: skip` with a reason; the executable examples
+  (`io`, `std`, `effects`, `foreign`, `glue`, `import_c`, and `hdl-spi`/`hdl-stream`,
+  whose goldens were program output but were read as `check`s) declare `-- test: run`,
+  so their goldens are program output rather than a silent `check`; `plot.wiz`'s SVG is
+  compared byte for byte with `docs/assets/plot-example.svg` by group `plot`; and
+  `std.wiz`/`foreign.wiz` write to `FS.tempRoot` instead of a hard-coded scratch path,
+  so they run on any machine.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
@@ -287,7 +300,22 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   cold elaboration of the graph (the frontend's globals are not serialized). Entries
   carry their payload's digest, so a truncated or edited entry is a miss, never a wrong
   verdict. Before, one graph-wide key mixed the modules' paths and the root's headers,
-  so a dependency's `import_c` header and every `include_str` file were outside it.* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  so a dependency's `import_c` header and every `include_str` file were outside it.
+* scry: `scry taint` and `scry parse --stats` read C source as `Bytes` and parse it in
+  place (`FS.readBytes`, `Scry.Native.parseBytes`, `Scry.Cst.ofStoreBytes`), and
+  `parseBlock` sniffs the store format on bytes instead of `String.trim`-ing the whole
+  file. A 4 MiB source no longer becomes a `String` (`List Char`, two cons cells per
+  character): the memory ratio drops from ~287× to ~8× (a 3 MiB string literal peaks at 23.8 MiB). The summary fixpoint reuses the
+  converged round's `FuncResult`s for the results stage (it evaluated every function a
+  second time), prepares each function's plan once instead of per round, and indexes a
+  point's CFG predecessors (`Scry.Fn.pointPreds`) instead of rebuilding them by scanning
+  every point: the 525-byte 128-statement case drops from 12.85 s to 0.32 s (256 statements 2.2 s). Long
+  integer literals are parsed by halving the digit list (`Scry.parseDigitsAt`) instead
+  of one quadratic-size multiply per digit. New `scry/scripts/dos-check.py` (grail target
+  `dos-check`, run by the nightly bench workflow) pins RSS < 20× input and statement
+  counts 16/64/128/256 to small time budgets (S1 findings `scrydos-01/02/03`).
+
+* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
   shared clause body, and a postponed argument (read back as its normal form, which also

@@ -148,6 +148,23 @@ groups that did not opt in, for auditing one group's isolation — not for CI. O
 runner `--jobs 4` is the useful setting; more jobs only add memory pressure (a case that
 compiles C can peak at a few hundred MB).
 
+### Splitting one case into parts (`--part`)
+
+`--part i/n` (1-based) runs only the files whose index `k` in the case's sorted file list
+satisfies `k % n = i - 1`. It is for a case that is too long for the shard's limit but
+whose per-file work must not change: the parts are a partition of the same list, so
+their union is the case and each file still goes through both compilers with the same
+bounds. `=selfhost-libdiff` is the one that uses it; `.github/test-shards.json` says
+`"parts": 6` and CI gives each of the six jobs `--part i/6` (the flag is not `--shard`,
+which is the `--timings` label). The driver validates it (`1 ≤ i ≤ n`, `n ≥ 1`) and
+passes it to the case's process; `tests --libdiff --part 2/6` runs one part locally, and
+the case's property test checks the partition for `n = 1…8` without a toolchain.
+
+A part writes `.lake/libdiff/records.jsonl` as each record arrives, so a part killed by
+the job timeout still leaves what it finished (a missing file is then named by the union
+check, rather than shrinking the green total). The check, `scripts/ci.py libdiff-union`,
+lives in `CI result` and reads the parts' uploaded `part.txt` and `records.jsonl`.
+
 ### Flaky tests and the quarantine
 
 A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`
@@ -695,13 +712,22 @@ setup action keeps the elan cache for those
   no shard's selectors pick runs in
   the shard its `Group.shard` names, else in the shard marked `"default": true`
   (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting, and
-  again end to end on the matrix the jobs are started from; `check-shards --self-test`
+  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting; a
+  `"parts"` shard's jobs count as the one shard they split, and the check runs again
+  end to end on the matrix the jobs are started from; `check-shards --self-test`
   checks the check on a stand-in driver). See
   "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
+* **The examples are tests** (the `examples` shard, group `examples`): every
+  `examples/*.wiz` is compared with its `.expected` exactly as `grail test` does (the
+  same `runTests` helper the tour group uses), in three cases split by name, so a
+  library change that changes an example's output fails CI instead of only a command a
+  contributor runs by hand. An example with `-- test: skip REASON` (the benchmarks) is
+  reported as skipped, not passed; one with `-- test: run` has `main`'s compiled output
+  as its oracle. The shard runs when `examples/`, `lib/` or `drafts/feral/lib/` changes,
+  and (like every shard) when the Lean sources or the harness change.
 * **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
   absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
   worker roles, U+2705 status checkmarks, and decision/step phrases attributed to
@@ -779,15 +805,31 @@ setup action keeps the elan cache for those
   self-hosted checker or compiler, which the first case that needs it builds) stay in
   one part, so each program is built once, and the other cases fill the parts up. A new
   case counts as its group's median, with the programs most of its group uses. The
-  baseline holds only the split shards' cases, one per line (`selfhost`, `library` and
-  `scaling`; the last is a sweep over `lib/` and `examples/`, split into cases for `lib/`,
-  `libApart` and six chunks of `examples/`, so its parts can run in different shards).
+  baseline holds only the split shards' cases, one per line (`selfhost`, `library`,
+  `scaling` and `examples`; `scaling` is a sweep over `lib/` and `examples/`, split into
+  cases for `lib/`, `libApart` and six chunks of `examples/`, so its parts can run in
+  different shards, and `examples` has the three name ranges of the root examples).
   `scripts/ci.py plan` shows the parts and their
   estimates. The heavy groups have dedicated shards of their own (`hdl-verified`,
   `hdl-uart-temporal`, `prop`, `audit`), so adding a slow case there does not unbalance
   `core`.
   To refresh the baseline from a CI run:
   `gh run download RUN -n test-timings && scripts/ci.py baseline timings.jsonl > .github/test-timings.json`.
+* **`"parts"`.** A shard with `"parts": N` splits one case's *work*, not a set of cases:
+  it runs as N jobs `NAME-1` … `NAME-N` with the same selectors, each carrying
+  `"part": "i/N"`, which the workflow passes as the driver's `--part i/N`. The case
+  partitions its own file list by index (`libDiffPart`: the file at index `k` of the
+  sorted list is in part `k % N + 1`), so the parts are deterministic, disjoint and
+  their union is the case, unchanged in what each file is compared against.
+  `selfhost-libdiff` is the one: 181 files through both compilers in 3664 s (180 tracked
+  at this commit) is one case against the 1110 s shard limit, so six parts of ~611 s
+  each fit. `scripts/ci.py
+  libdiff-union` (in `CI result`) proves the union from the parts' `part.txt` and
+  `records.jsonl`: the parts are `1..N`, every part names the same `total`, every file
+  in `.github/libdiff-corpus.txt` is checked exactly once, the verdicts sum to the
+  whole-run summary, and no record is `bounded`. A parts shard is not a `split` shard:
+  it has no `.github/test-timings.json` entry, since the case (not the job set) is what
+  the baseline measures, so `make_baseline` skips it deliberately.
 * **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
   (after a perf fix, or when a group grows), fetch the last runs and rebalance:
 
@@ -813,10 +855,11 @@ setup action keeps the elan cache for those
   opted-in groups run N cases at a time, and a lone case may use N workers itself.
   Only set it on a shard whose groups were verified (and opted in) to be safe in
   parallel; `core`, `library` and `backends` use 4 on the 4-core hosted runner.
-  `selfhost-libdiff` needs no `"jobs"`: its one case picks auto (the CPUs minus one,
-  capped by the free memory), so a 4 vCPU / 16 GB runner runs 3 files at `--mem`
-  (4096 MB) and a 20 GB one could run more; a matrix of six heavy shards on 16 GB
-  runners cannot OOM it. A shard of one long case
+  `selfhost-libdiff` says `"jobs": 3` deliberately: six parts landing on one 24-core
+  heavy runner would otherwise each pick `nproc - 1` workers, and an oversubscribed
+  part turns slow files into `bounded` records, which the union check rejects. Three
+  keeps six parts to at most 18 worker processes, and `--mem` (4096 MB) still caps each
+  by the free memory. A shard of one long case
   (`grail-selfhost`, `hdl-verified`) and the shards that build a shared program
   (`selfhost`) keep 1. A case's `seconds` stays its own process's time, so shard
   balance is unaffected.
@@ -1113,7 +1156,9 @@ Markdown.
 
 **What it will not do.** The script never modifies the checkout, commits, or pushes;
 the workflow has no write permission outside the comment job. It re-runs only cases
-whose name (or failure output) is a `.wiz` under a `Package.tests` root, at most 12
+whose name (or failure output) is a `.wiz` under a `Package.tests` root (a group
+`examples` case names a name range, but its failure output names the example that
+failed), at most 12
 files with a 300 s limit each, and it reports a case that fails for another reason
 (a build error, a timeout, a missing toolchain) as "not diffed" instead of writing a
 `.expected` file: `grail test --update` never records a failure either. The diff is

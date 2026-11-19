@@ -1,6 +1,6 @@
 import Eff
 import Text
-import ListLemmas
+import Data.ListLemmas
 
 /-!
 # Conc

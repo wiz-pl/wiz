@@ -1,7 +1,7 @@
-import PMap
+import Data.PMap
 import WordMap
 
--- Persistent maps and sets (lib/PMap.wiz): persistence, the BST invariant, sorted
+-- Persistent maps and sets (lib/Data/PMap.wiz): persistence, the BST invariant, sorted
 -- `toList`, `fromList`/`toList` round trips, a differential test against `U64Map`, the
 -- expected laws, structural sharing, sets, and a generic key type. `main` returns 0 when
 -- every check holds, otherwise the first failing check's code. Run it under `#eval`,

@@ -27,7 +27,7 @@ open Wiz
 
 namespace Tests.ScryC2Wil
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
 by module name. The lowering lives in the scry package, so the test loader serves both
 roots. -/
 def loader : IO (Name → Option String) := do

@@ -1,3 +1,4 @@
+-- test: skip a benchmark: `wiz build` it and run `./bench chain N`; a check is not its oracle
 import Prelude
 import IO
 import Sys

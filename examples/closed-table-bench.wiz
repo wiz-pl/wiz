@@ -1,3 +1,4 @@
+-- test: skip a benchmark: `wiz build` it and run `./bench N`; a check is not its oracle
 -- A benchmark for closed top-level definitions in compiled code (CAFs, stage 15i): a
 -- lookup table (a list of 256 entries) and a ROM tree built from it, both closed
 -- definitions, read in a loop. Compiled code computes each once, on its first use; before

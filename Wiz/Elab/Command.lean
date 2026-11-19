@@ -282,6 +282,13 @@ def addDeclSorted (g : Globals R) (d : Decl R) : TCM (Globals R) := do
   -- whose `hidden` definitions (13b) `conv` would consult
   unless g.hidden.isEmpty do throw (.other s!"internal error: {d.name} checked against the elaborator's view")
   let d := d.withSorts g
+  -- (the sorts pass is untrusted and it is total — but it can be incomplete, and the hole
+  -- it left is a bug in this elaborator, not in the declaration. Report it here, where the
+  -- pass is, as an ordinary error: the kernel's message for the same hole says "internal
+  -- error", which is not a user-facing message. The kernel keeps its check: it is the
+  -- invariant's last line of defence, for declarations built by hand or by a tactic.)
+  if d.type.hasHole || d.value.any (·.hasHole) || d.impl.any (·.hasHole) || d.witness.any (·.hasHole) then
+    throw (.other "a Π/Σ/ULift sort could not be inferred: the sorts pass left it a hole (add a type annotation to the term that contains it)")
   let kind := fun (g' : Globals R) (d' : Decl R) => withMarksOnDemand g' d' (addDecl g')
   let g' ← kind g d
   privacyCheck g d kind
@@ -1122,6 +1129,26 @@ def mkMetaCode (g : Globals R) (builtins procMacros tactics : List (Name × Name
     let roots := "TacticM.run" :: "Macro.run" :: (procMacros ++ tactics).map (·.2) ++ more
     (compileReachable g builtins roots (externImpls := false)).mapError (s!"cannot compile the macros and tactics: {·}")
 
+/-- The projection `t.2…2.1` of a right-nested Σ, with `i` projections: field `i` of a
+value of a structure whose value is `x₀, (x₁, …)`. -/
+def projField (i : Nat) (t : Term R) : Term R :=
+  let rec snds : Nat → Term R → Term R
+    | 0, t => t
+    | n + 1, t => snds n (.snd t)
+  .fst (snds i t)
+
+/-- The type `A` of field `k` lives in `[f_{k-1} … f_0, Δ]`; in a method's context
+`[self, Δ]` field `f_i` is `projField i self`. Substituting them one at a time rebuilds
+`A` once per field, and copies each earlier projection into it (`k` rebuilds of a term
+that grows to `k²`); here they are replaced in one pass, each by a term of its own size. -/
+partial def substProjFields (k : Nat) (t : Term R) (d : Nat := 0) : Term R :=
+  match t with
+  | .var i =>
+    if i < d then t
+    else if i - d < k then projField (k - 1 - (i - d)) (.var d)
+    else .var (i + 1 - k)
+  | t => Id.run <| t.mapChildrenM pure fun dd c => pure (substProjFields k c (d + dd))
+
 /-- The method functions of a class `C` (from its structure declaration):
 `C.f : {Δ} → [self : C Δ] → F`, the field `f` of `self`, where earlier fields in `F`
 become projections of `self`. With `selfBi := .default`, the projection functions of a
@@ -1141,22 +1168,20 @@ def classMethods (sDecl : Decl R) (levelParams : List Name)
     | .sigma x q A rest _ => (x, q, A) :: fieldsOf rest
     | _ => []
   let fields := fieldsOf (stripLams nΔ (sDecl.value.getD .tt))
-  let proj (i : Nat) (t : Term R) : Term R := .fst ((List.range i).foldl (fun t _ => .snd t) t)
+  -- `t.2…2.1`: the `i`-th field of a right-nested Σ (`projField 0` is `.1`)
+  let proj := projField (R := R)
   let implicitΔ := Δ.map fun (x, _, _, A) => (x, BinderInfo.implicit, (.qlit 0 : Term R), A)
   let Capp : Term R := ((List.range nΔ).map fun j => Term.var (nΔ - 1 - j)).foldl .app (.const C us)
   let w : Term R := .qlit QuantitySyntax.explicitDefault
-  let mut out := []
+  let mut out : Array (Decl R) := #[]
   for (x, q, A) in fields, k in [0:fields.length] do
     if q == .qlit 0 then continue
-    -- `A` lives under the earlier fields: insert `self` below them, then replace them
-    let mut A' := A.lift 1 k
-    for i in (List.range k).reverse do
-      A' := A'.instantiateAt 0 (proj i (.var i))
+    let A' := substProjFields (R := R) k A
     let type := implicitΔ.foldr (fun (y, bi, q, B) acc => .pi y bi q B acc .hole) (.pi "self" selfBi w Capp A' .hole)
     let value := Δ.foldr (fun (y, _, _, _) acc => .lam y acc) (.lam "self" (proj k (.var 0)))
     let d : Decl R := { name := C ++ "." ++ x, levelParams, type, value := some value }
-    out := out ++ [d]
-  pure out
+    out := out.push d
+  pure out.toList
 
 /-- `notation` and `infixl`/`infixr`/`infix`: register a syntax rule and a macro rule.
 Returns the new tables and the macro rule. -/

@@ -280,6 +280,22 @@ def Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b)
 def Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n
 /-- All but the first `n` bytes. -/
 def Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)
+/-- `Bytes.matchChars b i cs`: whether the bytes at `i` are the UTF-8 bytes of `cs`
+(a helper of `Bytes.startsWith`). -/
+def Bytes.matchChars (b : Bytes) : Nat → List Char → Bool
+  | _, .nil => .true
+  | i, .cons c cs =>
+    if Nat.lt i (Bytes.size b) then
+      (if Nat.beq (Bytes.get b i) (Char.code c) then Bytes.matchChars b (Nat.succ i) cs
+       else .false)
+    else .false
+/-- Whether the buffer starts with the bytes of `s`: `Bytes.startsWith (Bytes.ofUtf8 "scry-cst x") "scry-cst "`.
+A byte comparison, so it does not build a `List Char` for `s` on the way. -/
+def Bytes.startsWith (b : Bytes) (s : String) : Bool := match s with
+  | .mk cs => Bytes.matchChars b 0 cs
+/-- Whether the bytes at offset `i` are the UTF-8 bytes of `s`. -/
+def Bytes.matchesAt (b : Bytes) (i : Nat) (s : String) : Bool := match s with
+  | .mk cs => Bytes.matchChars b i cs
 /-- `Bytes.ofListAux l acc`: `acc` with the numbers of `l` pushed (a helper of `Bytes.ofList`). -/
 def Bytes.ofListAux : List Nat → Bytes → Bytes
   | .nil, acc => acc

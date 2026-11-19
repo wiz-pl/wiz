@@ -148,6 +148,9 @@ def Scry.Repl.saveUnits (us : List Scry.Repl.Unit) : IO Unit := do
 
 /-- Parse one C file and cache its CST columns. -/
 def Scry.Repl.loadOne (i : Nat) (path : String) : IO (Option Scry.Repl.Unit) := do
+  -- The cache directory must exist before the first `write`: `saveUnits` creates it
+  -- afterwards, which used to lose the cst of the first `load` in a fresh checkout.
+  Scry.Repl.ensureDir Scry.Repl.dir;
   text ← Scry.Repl.ioOr path "" (FS.readFile path);
   match String.isEmpty text with
   | .true => IO.pure .none

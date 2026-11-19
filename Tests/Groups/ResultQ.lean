@@ -10,13 +10,13 @@ namespace Tests.Elab
 
 /-! ## Quantity-polymorphic results (`ResultQ`, `ResultH`)
 
-`ResultQ q A` (lib/Result.wiz) is `Result` with the success value at `%q`: `q = ω` is
+`ResultQ q A` (lib/Data/Result.wiz) is `Result` with the success value at `%q`: `q = ω` is
 `Result` definitionally, `q = 1` has a linear success value, `q = 0` an erased one.
 `ResultH q B H` (lib/Region.wiz) is `Result1` with the handle on both branches at `%q`;
 `q = 1` is `Result1` definitionally. They are library API added next to `Result` and
 `Result1`, which are kept unchanged (no constructor or pattern changes). -/
 
-def rqPrelude : String := "import Result\nimport Region\n"
+def rqPrelude : String := "import Data.Result\nimport Region\n"
 
 /-- The aliases: `ResultQ ω`/`Result` and `ResultH 1`/`Result1` are convertible both
 ways (`refl`), and the conversion functions round-trip and compute. -/
@@ -78,7 +78,7 @@ def rqRun : String := rqPrelude ++ "import IO\n" ++
 
 def rqGroup : Group where
   name := "result-q"
-  exercise := "lib/Result.wiz, lib/Region.wiz (quantity-polymorphic results)"
+  exercise := "lib/Data/Result.wiz, lib/Region.wiz (quantity-polymorphic results)"
   parallel := true
   cases := [
     { name := "ResultQ ω is Result and ResultH 1 is Result1, definitionally both ways", run := fun _ =>

@@ -1,3 +1,4 @@
+-- test: run
 -- The AXI4-Stream subset (`import Hdl.AxiStream`, `Hdl.AxiStreamLaw`): source/sink,
 -- one-beat register slice, up/down width conversion, a stalling sink, and the
 -- backpressure law (no beat lost, no beat duplicated, order preserved). Run by the

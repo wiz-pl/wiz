@@ -1,5 +1,5 @@
 import Logic
-import Order
+import Data.Order
 /-!
 # Nat
 
@@ -9,7 +9,7 @@ order, proved by hand from `0` and `succ`.
 The order is the Prelude's Boolean `Nat.le`, made a proposition by `= .true`
 (`Nat.Le m n := Nat.le m n = .true`). An equation of Booleans computes, so
 `Nat.Le (succ m) (succ n)` *is* `Nat.Le m n` and `Nat.Le 0 n` is `True`: many order
-facts hold by `rfl`, and case splits use `Bool.cases`. `m ≤ n` and `m < n` (lib/Order.wiz)
+facts hold by `rfl`, and case splits use `Bool.cases`. `m ≤ n` and `m < n` (lib/Data/Order.wiz)
 are `Nat.Le` and `Nat.Lt`.
 
 Main definitions: `congrArg`, `congrArg2`; the laws `Nat.add_comm`, `Nat.add_assoc`,

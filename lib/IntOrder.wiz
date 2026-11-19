@@ -5,7 +5,7 @@ import IntRing
 The order of the integers (`import IntOrder`): `a ≤ b` when `b - a` is not negative,
 `a < b` when `a + 1 ≤ b`; the absolute value and the triangle inequality.
 
-`a ≤ b` and `a < b` (lib/Order.wiz) are `Int.Le a b` and `Int.Lt a b`. Most facts are
+`a ≤ b` and `a < b` (lib/Data/Order.wiz) are `Int.Le a b` and `Int.Lt a b`. Most facts are
 proved by moving to `Int.NonNeg` of a difference and rewriting the difference with
 `int_ring!` (`Int.NonNeg.congr`), so new ones are easy to add in the same way.
 

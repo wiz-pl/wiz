@@ -656,8 +656,9 @@ def package : Package := Package.new "hello"
 `grail run app` builds and runs a program, and `grail test` runs the tests: a test is a
 `.wiz` file whose messages (or, with `-- test: run` on its first line, whose output) must
 match the `.expected` file beside it. `grail test --update` writes the `.expected` files.
-The tour's own examples are tests of exactly this kind. A `wiz-toolchain` file next to
-`grail.wiz` pins the toolchain, and `Package.dep` adds a package from a git repository.
+The tour's own examples are tests of exactly this kind (group `tour`). A `wiz-toolchain`
+file next to `grail.wiz` pins the toolchain, and `Package.dep` adds a package from a git
+repository.
 [install.md](install.md#a-first-project-with-grail) walks through a first package;
 [stages/23-grail.md](stages/23-grail.md) has the rest.
 
@@ -705,7 +706,8 @@ which kills the flow. A finding also carries its source → sink path (`Scry.fin
 ## Where next
 
 * The **examples**: [`examples/`](../examples/) has one file per feature, each checked
-  by the test suite (`grail test` in the repository).
+  against its `.expected` by the test suite: `grail test` in the repository, and the
+  `examples` group in CI.
 * The **libraries**: `lib/`, described in [libraries.md](libraries.md): text, JSON,
   arrays, processes and files (`Sys`), effects (`Eff`), concurrency (`MVar`,
   `Session`), separation logic (`HProp`, `Hoare`), the HDL.

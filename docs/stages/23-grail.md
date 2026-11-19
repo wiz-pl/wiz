@@ -128,8 +128,11 @@ nothing; `grail test FILTER` runs the tests whose path contains it, and
 even when a pass is recorded (a flaky test, a program that reads something outside its
 key): the old record is dropped, a pass is recorded again and a failure leaves none, so the
 next plain `grail test` reports what this run saw. Only the tests' own jobs run again;
-their programs' checks, objects and links are reused when up to date. Every example is a test
-(`examples/*.expected`). The Lean tests stay in `lake test`.
+their programs' checks, objects and links are reused when up to date. Every example is a
+test (`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
+them in CI, in three cases over name ranges, so a change to a library that changes what
+an example prints fails the suite rather than only a command a person runs. The Lean
+tests stay in `lake test`.
 
 ## 23g: parallel jobs
 
