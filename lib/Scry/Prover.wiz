@@ -194,7 +194,7 @@ relation is the seed locations plus the invariant's derived locations. `evalAtom
 then enumerates exactly the rule instances whose tainted/mtainted premises are in the
 certificate. -/
 def Scry.invState (st : Scry.State Nat) (inv : Scry.Inv) : Scry.State Nat :=
-  Scry.State.mk (Scry.invDb st.db inv) st.nodes st.next st.stepIdx
+  Scry.State.mk (Scry.invDb st.db inv) st.steps st.next st.stepIdx
 
 /-- Drop the seed relations the claim did not select, so the closure and the alert check
 only see the sources the claim is about. Memory seeds are kept: their provenance is
@@ -496,7 +496,7 @@ def Scry.check (p : Scry.Program Nat) (st : Scry.State Nat) (c : Scry.Claim) :
   | .some r => .vacuous r
   | .none =>
     let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources c))
-      st.nodes st.next st.stepIdx;
+      st.steps st.next st.stepIdx;
     let inv := Scry.invOfClaim c;
     let stI := Scry.invState stSel inv;
     match Scry.checkRulesClosed p stI inv p.rules 0 with
@@ -610,7 +610,7 @@ the invariant it built (for reports and for checking by hand). -/
 def Scry.searchWithSpec (p : Scry.Program Nat) (st : Scry.State Nat) (spec : Scry.Claim)
     (script : List Scry.Tactic) : Option Scry.Inv :=
   let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources spec))
-    st.nodes st.next st.stepIdx;
+    st.steps st.next st.stepIdx;
   match Scry.runTactic p stSel spec script Scry.Inv.empty with
   | .stop _ => .none
   | .found inv => .some inv
@@ -620,7 +620,7 @@ the result with the claim's property/sources. -/
 def Scry.proveWithSpec (p : Scry.Program Nat) (st : Scry.State Nat) (spec : Scry.Claim)
     (script : List Scry.Tactic) : Scry.Verdict :=
   let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources spec))
-    st.nodes st.next st.stepIdx;
+    st.steps st.next st.stepIdx;
   match Scry.runTactic p stSel spec script Scry.Inv.empty with
   | .stop v => v
   | .found inv => Scry.check p st (Scry.claimOfInv spec inv)

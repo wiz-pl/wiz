@@ -1,6 +1,7 @@
 import Prelude
 import Word
 import Text
+import Std
 import WordMap
 import Scry.Store
 import Scry.Datalog
@@ -51,18 +52,25 @@ structure Scry.Witness (L : Type) where
   root : Scry.ProofStep L
   steps : List (Scry.ProofStep L)
 
-/-- The engine's state: the database, the provenance heap (newest first), the next step
-id, and an index from a fact's hash to `(fact, step id)` buckets. The heap is still the
-authoritative provenance; the index only makes the per-premise lookup a hash probe
-instead of a scan of every step ever derived. -/
+/-- The step used when an id is out of range. No lookup returns it: the range is
+checked first (the checker rejects an out-of-range premise before it matters). -/
+def Scry.emptyStep {L : Type} : Scry.ProofStep L :=
+  Scry.ProofStep.mk 0 (Scry.PFact.mk 0 [] .none) .none []
+
+/-- The engine's state: the database, the provenance heap (by id: step `i` is the `i`th
+step added), the next step id, and an index from a fact's hash to `(fact, step id)`
+buckets. The heap is still the authoritative provenance; the index makes the
+per-premise fact lookup a hash probe instead of a scan of every step ever derived, and
+the heap is an `Array` so a lookup by id is constant time (it was a scan of the heap,
+which made explaining a large derivation quadratic). -/
 structure Scry.State (L : Type) where
   db : Scry.Db L
-  nodes : List (Scry.ProofStep L)
+  steps : Array (Scry.ProofStep L)
   next : Nat
   stepIdx : U64Map (List (Scry.PFact L × Nat))
 
 def Scry.State.empty {L : Type} : Scry.State L :=
-  Scry.State.mk (Scry.Db.empty) [] 0 U64Map.empty
+  Scry.State.mk (Scry.Db.empty) (Array.empty : Array (Scry.ProofStep L)) 0 U64Map.empty
 
 def Scry.optEq {L : Type} (eqL : L → L → Bool) : Option L → Option L → Bool
   | .none, .none => .true
@@ -107,20 +115,41 @@ def Scry.findStepL {L : Type} (eqL : L → L → Bool) (fact : Scry.PFact L) :
   | .nil => .none
   | .cons s rest => if Scry.pfactEq eqL fact s.fact then .some s else Scry.findStepL eqL fact rest
 
-/-- A step by id. -/
+/-- A step by id in a newest-first list (kept for callers that hold the heap as a list). -/
 def Scry.stepByIdL {L : Type} (nodes : List (Scry.ProofStep L)) (id : Nat) :
     Option (Scry.ProofStep L) :=
   match nodes with
   | .nil => .none
   | .cons s rest => if Nat.beq s.id id then .some s else Scry.stepByIdL rest id
 
+/-- A step by id in the heap: ids are dense and equal to the position, so this is a
+constant-time index (`none` past the end). -/
+def Scry.stepByIdA {L : Type} (steps : Array (Scry.ProofStep L)) (id : Nat) :
+    Option (Scry.ProofStep L) :=
+  match Nat.lt id (Array.size steps) with
+  | .true => .some (Array.getD steps id Scry.emptyStep)
+  | .false => .none
+
+/-- Scan the heap newest first, by position (the fallback for a state built outside the
+add functions). `i` is the number of positions still to visit. -/
+def Scry.findStepA {L : Type} (eqL : L → L → Bool) (fact : Scry.PFact L) :
+    Array (Scry.ProofStep L) → Nat → Option (Scry.ProofStep L)
+  | steps, .zero => .none
+  | steps, .succ k =>
+    match Nat.lt k (Array.size steps) with
+    | .true =>
+      let s := Array.getD steps k Scry.emptyStep;
+      if Scry.pfactEq eqL fact s.fact then .some s
+      else Scry.findStepA eqL fact steps k
+    | .false => Scry.findStepA eqL fact steps k
+
 def Scry.State.findStep {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
     (fact : Scry.PFact L) : Option (Scry.ProofStep L) :=
   match st.stepIdOf ops fact with
-  | .some id => Scry.stepByIdL st.nodes id
+  | .some id => Scry.stepByIdA st.steps id
   -- A state built outside the add functions has no index; the heap remains the source
-  -- of truth, so fall back to the old scan rather than report the fact absent.
-  | .none => Scry.findStepL ops.eq fact st.nodes
+  -- of truth, so fall back to the scan rather than report the fact absent.
+  | .none => Scry.findStepA ops.eq fact st.steps (Array.size st.steps)
 
 /-- The projection of a step's fact. -/
 def Scry.ProofStep.rel {L : Type} (s : Scry.ProofStep L) : Nat := s.fact.rel
@@ -146,61 +175,61 @@ def Scry.State.premiseLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
 /-- Add an EDB tuple (no rule), recording its provenance step. -/
 def Scry.State.addTuple {L : Type} (st : Scry.State L) (rel : Nat) (row : List U64) : Scry.State L :=
   match st with
-  | .mk db nodes next idx =>
+  | .mk db steps next idx =>
     match Scry.Db.insertTuple db rel row with
     | (db', .true) =>
       let fact := Scry.PFact.mk rel row .none;
       Scry.State.mk db'
-        (.cons (Scry.ProofStep.mk next fact .none .nil) nodes)
+        (Array.push steps (Scry.ProofStep.mk next fact .none .nil))
         (Nat.succ next) (Scry.stepIndexAdd idx fact next)
-    | (db', .false) => Scry.State.mk db' nodes next idx
+    | (db', .false) => Scry.State.mk db' steps next idx
 
 /-- Add an EDB lattice fact (no rule): join its value in and record a step when the value
 moves. -/
 def Scry.State.addLatFact {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
     (rel : Nat) (key : List U64) (v : L) : Scry.State L :=
   match st with
-  | .mk db nodes next idx =>
+  | .mk db steps next idx =>
     let old := match Scry.Db.findLat db rel key with
       | .none => ops.bot
       | .some x => x;
     let nv := ops.join old v;
-    if ops.eq nv old then Scry.State.mk db nodes next idx
+    if ops.eq nv old then Scry.State.mk db steps next idx
     else
       let db' := Scry.Db.setLat db rel key nv;
       let fact := Scry.PFact.mk rel key (.some nv);
       Scry.State.mk db'
-        (.cons (Scry.ProofStep.mk next fact .none .nil) nodes)
+        (Array.push steps (Scry.ProofStep.mk next fact .none .nil))
         (Nat.succ next) (Scry.stepIndexAdd idx fact next)
 
 /-- A derived tuple. The flag says whether it was new. -/
 def Scry.State.addDerivedTuple {L : Type} (st : Scry.State L) (rule : Nat) (premises : List Nat)
     (rel : Nat) (row : List U64) : Scry.State L × Bool :=
   match st with
-  | .mk db nodes next idx =>
+  | .mk db steps next idx =>
     match Scry.Db.insertTuple db rel row with
     | (db', .true) =>
       let fact := Scry.PFact.mk rel row .none;
       (Scry.State.mk db'
-        (.cons (Scry.ProofStep.mk next fact (.some rule) premises) nodes)
+        (Array.push steps (Scry.ProofStep.mk next fact (.some rule) premises))
         (Nat.succ next) (Scry.stepIndexAdd idx fact next), .true)
-    | (db', .false) => (Scry.State.mk db' nodes next idx, .false)
+    | (db', .false) => (Scry.State.mk db' steps next idx, .false)
 
 /-- A derived lattice value: join it in and record a step if the value moved. -/
 def Scry.State.addDerivedLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
     (rule : Nat) (premises : List Nat) (rel : Nat) (key : List U64) (v : L) : Scry.State L × Bool :=
   match st with
-  | .mk db nodes next idx =>
+  | .mk db steps next idx =>
     let old := match Scry.Db.findLat db rel key with
       | .none => ops.bot
       | .some x => x;
     let nv := ops.join old v;
-    if ops.eq nv old then (Scry.State.mk db nodes next idx, .false)
+    if ops.eq nv old then (Scry.State.mk db steps next idx, .false)
     else
       let db' := Scry.Db.setLat db rel key nv;
       let fact := Scry.PFact.mk rel key (.some nv);
       (Scry.State.mk db'
-        (.cons (Scry.ProofStep.mk next fact (.some rule) premises) nodes)
+        (Array.push steps (Scry.ProofStep.mk next fact (.some rule) premises))
         (Nat.succ next) (Scry.stepIndexAdd idx fact next), .true)
 
 -- ## Environments
@@ -580,18 +609,18 @@ def Scry.State.whyLat {L : Type} (st : Scry.State L) (ops : Scry.LatOps L)
   | .some v => st.findStep ops (Scry.PFact.mk rel key (.some v))
 
 /-- The steps reachable from these premise ids. -/
-partial def Scry.reachSteps {L : Type} (nodes : List (Scry.ProofStep L)) (ids : List Nat) :
+partial def Scry.reachSteps {L : Type} (steps : Array (Scry.ProofStep L)) (ids : List Nat) :
     List (Scry.ProofStep L) :=
   match ids with
   | .nil => .nil
   | .cons id rest =>
-    match Scry.stepByIdL nodes id with
-    | .none => Scry.reachSteps nodes rest
-    | .some s => .cons s (Scry.reachSteps nodes (List.append s.premises rest))
+    match Scry.stepByIdA steps id with
+    | .none => Scry.reachSteps steps rest
+    | .some s => .cons s (Scry.reachSteps steps (List.append s.premises rest))
 
 def Scry.State.expandWitness {L : Type} (st : Scry.State L) (root : Scry.ProofStep L) :
     Scry.Witness L :=
-  Scry.Witness.mk root (Scry.reachSteps st.nodes root.premises)
+  Scry.Witness.mk root (Scry.reachSteps st.steps root.premises)
 
 def Scry.Witness.size {L : Type} (w : Scry.Witness L) : Nat := Nat.succ (List.length w.steps)
 
