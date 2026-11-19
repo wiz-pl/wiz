@@ -24,3 +24,7 @@ if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
 # The driver's ABI (event strings, payloads, onStep, js_patch): Node only, no wiz.
 node "$ROOT/web/framework/driver_test.mjs"
+# The mount contract (one export; element, module, events, host capabilities): Node only.
+node "$ROOT/web/framework/mount_test.mjs"
+# The page is the mount contract (no ABI calls of its own): source-level, Node only.
+node "$ROOT/web/playground_entry_test.mjs"

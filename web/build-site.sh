@@ -39,12 +39,18 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 # The playground page is index.html, so /playground/ is a directory index; its own
 # links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
-for f in playground.js playground.css playground-values.js \
+for f in playground.js playground-static.js playground.css playground-values.js \
          playground-presets.js playground-state.js \
          lsp-client.js goals.js playground-lsp.js hover.js tagged.js selfhost-lsp-shim.js \
          playground-engine.js editor-model.js squiggles.js completions.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
+# The runtime's mount contract (web/framework/mount.js) is a static import of the
+# playground's entry point, so the framework's browser half is always published, with or
+# without the Loom module: mount.js imports driver.js, which imports runtime.js.
+mkdir -p "$SITE/playground/framework"
+cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
+  "$ROOT/web/framework/runtime.js" "$SITE/playground/framework/"
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
 for f in wiz-playground.mjs wiz-playground.wasm; do

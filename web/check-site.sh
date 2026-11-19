@@ -29,6 +29,10 @@ need docs/search.js
 need docs/scroll.css
 need playground/index.html
 need playground/playground.js
+need playground/playground-static.js
+need playground/framework/mount.js
+need playground/framework/driver.js
+need playground/framework/runtime.js
 need playground/playground.css
 need playground/playground-values.js
 need playground/playground-presets.js

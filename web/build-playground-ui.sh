@@ -40,5 +40,6 @@ fi
 # The page loads the module and the driver at runtime (`?ui=loom`); both live beside
 # playground.js, also under a framework/ subdirectory for the framework's modules.
 mkdir -p "$OUT/framework"
-cp "$ROOT/web/framework/driver.js" "$ROOT/web/framework/runtime.js" "$OUT/framework/"
+cp "$ROOT/web/framework/driver.js" "$ROOT/web/framework/runtime.js" \
+  "$ROOT/web/framework/mount.js" "$OUT/framework/"
 echo "built $OUT/wiz-playground-ui.mjs"

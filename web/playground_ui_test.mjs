@@ -10,6 +10,7 @@
 import { pathToFileURL } from "node:url";
 import { start } from "./framework/driver.js";
 import { parse, serialize } from "./framework/minidom.mjs";
+import { findPreset } from "./playground-presets.js";
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground-ui.mjs").href)).default;
@@ -64,6 +65,10 @@ ok(byId(root, "goals").getAttribute("aria-live") === "polite" &&
 ok(html.includes('class="goals"') && html.includes('class="output"'),
   "the panes keep their classes (web/playground.css)");
 ok(html.includes("Ctrl/⌘+Enter runs"), "the editor's hint text is unchanged");
+ok(byId(root, "preset") && byId(root, "preset").getAttribute("data-wiz-on-change") === "0",
+  "the examples menu is in the page and is handler 0", html.slice(0, 300));
+ok(walk(byId(root, "preset"), (n) => n.tagName === "option").length === 7,
+  "the examples menu has every example");
 ok(html.includes("from <code>?lsp=ws://host:port</code>"),
   "the goals pane's hint text is unchanged", html);
 ok(byId(root, "status").textContent === "loading the engine…", "the first paint's status");
@@ -102,6 +107,15 @@ call("wiz_loom_fail", "error: the engine exited with code 3", "exit code 3");
 check("failure: count", "exit code 3", byId(root, "count").textContent);
 ok(walk(byId(root, "output"), (n) => n.getAttribute &&
   (n.getAttribute("class") || "") === "line err").length === 1, "the failure line is `err`");
+
+// ## The examples menu: a `change` step loads the runtime's example
+const select = byId(root, "preset");
+select.value = "lists";
+select.dispatchEvent({ type: "change" });
+check("the menu loads an example", findPreset("lists").code, byId(root, "editor").value);
+check("the menu's selection moved", "lists",
+  walk(select, (n) => n.getAttribute && n.getAttribute("selected") != null)
+    .map((n) => n.getAttribute("value")).join(","));
 
 // ## The status pair, Run's state, the footer, the text
 call("wiz_loom_status", "done in 4 ms", "ready");
