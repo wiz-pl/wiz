@@ -1,10 +1,11 @@
 # The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).
 # One row per source of trust, tab-separated:
 #   module, declaration, item, reason, owner, review
-# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for
-# implemented_by, `native T := mk/get` for a repr registration, `native_refl
-# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt
-# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
+# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a
+# second row next to `partial` when a partial definition's implementation is a native
+# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`
+# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,
+# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
 # `builtin inline` (a compiler hint) and `builtin int` (how values print) are not
 # trust and are not listed.
 # Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row

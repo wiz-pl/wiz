@@ -1,0 +1,7 @@
+import Prelude
+
+-- An `implemented_by` on a partial definition replaces the compiled body with `pOther`.
+-- The `partial` row alone would hide that step; the ledger must report the native too.
+partial def pBase (n : Nat) : Nat := pBase n
+def pOther (n : Nat) : Nat := Nat.add n 2
+attribute [implemented_by pOther] pBase
