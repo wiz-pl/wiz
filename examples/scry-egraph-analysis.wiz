@@ -1,0 +1,66 @@
+import Scry.EgraphNative
+-- E-class analyses and guarded rewrites (`scry-egraph-analysis`): the interval lattice
+-- is joined per e-class after each rebuild. The rewrite `f x -> g x` fires only when
+-- the analysis says `x` is in `[0, 5]`, so it merges `f 3` with `g 3` but leaves `f 9`
+-- alone. The merged class joins `[3, 3]` (from `f 3`) with `[13, 13]` (from `g 3`).
+-- `main` is the digest.
+
+-- ops: 0..9 are constant leaves (the op number is the value); 10 = f, 11 = g (+10)
+def spec : Scry.AnSpec :=
+  Scry.AnSpec.mk (fun op args =>
+    if Nat.lt op 10 then Interval.range op op
+    else match args with
+      | .cons a .nil =>
+        match Interval.loOpt a with
+        | .some lo =>
+          match Interval.hiOpt a with
+          | .some hi => if Nat.beq op 10 then Interval.range lo hi
+            else Interval.range (Nat.add lo 10) (Nat.add hi 10)
+          | .none => Interval.etop
+        | .none => Interval.etop
+      | _ => Interval.etop)
+
+def pFx : Scry.Pat := .pnode 10 (.pcons (.var 0) .pnil)
+def pGx : Scry.Pat := .pnode 11 (.pcons (.var 0) .pnil)
+def rFg : Scry.Rewrite := Scry.Rewrite.mk pFx pGx
+
+/-- The rule fires only when the bound class lies in `[0, 5]`. -/
+def small : Scry.Bindings → Scry.EClassAn → Bool :=
+  fun b an => Interval.le (an.get (Scry.EGraph.classOfVar b 0)) (Interval.range 0 5)
+
+def gr : Scry.GuardedRewrite := Scry.GuardedRewrite.mk rFg small
+
+def ga : Scry.EGraph :=
+  let e := Scry.EGraph.empty;
+  let c3 := Scry.EGraph.add e (Scry.ENode.leaf 3);
+  let f3 := Scry.EGraph.add c3.1 (Scry.ENode.mk 10 [c3.2]);
+  let c9 := Scry.EGraph.add f3.1 (Scry.ENode.leaf 9);
+  let f9 := Scry.EGraph.add c9.1 (Scry.ENode.mk 10 [c9.2]);
+  f9.1
+
+def classOfD (g : Scry.EGraph) (n : Scry.ENode) (d : Nat) : Nat :=
+  match Scry.EGraph.classOf g n with
+  | .none => 999
+  | .some c => c
+
+def intervalNat (i : Interval) : Nat :=
+  match Interval.loOpt i with
+  | .none => 900
+  | .some lo =>
+    match Interval.hiOpt i with
+    | .none => 901
+    | .some hi => Nat.add (Nat.mul lo 100) hi
+
+def main : Nat :=
+  let s := Scry.EGraph.saturateAn 5 ga [gr] spec;
+  let an := Scry.EGraph.analyse s spec;
+  let f3 := classOfD s (Scry.ENode.mk 10 [0]) 900;
+  let g3 := classOfD s (Scry.ENode.mk 11 [0]) 901;
+  let f9 := classOfD s (Scry.ENode.mk 10 [2]) 902;
+  let g9 := classOfD s (Scry.ENode.mk 11 [2]) 903;
+  (if Scry.EGraph.sameClass s f3 g3 then 1000000 else 0) +
+  (if Nat.beq g9 999 then 100000 else 0) +
+  (if Scry.EGraph.sameClass s f9 g9 then 10000 else 0) +
+  intervalNat (an.get f3) * 100 +
+  Scry.EGraph.numClasses s * 10 +
+  (if Scry.EGraph.canonical s then 1 else 0)

@@ -11,6 +11,7 @@
 import { isValue, renderValue } from "./playground-values.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
+import { createEngine, failureLines } from "./playground-engine.js";
 import { createPageUi } from "./playground-react.js";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
@@ -31,9 +32,8 @@ const goalsPanel = reactMode ? document.createElement("div") : document.getEleme
 let pageUi = null;        // the React pane's handle, once its module has loaded
 let lastOutput = null;    // the last `show` text, re-applied when the React pane appears
 
-let wasm = null;
+let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
 let busy = false;
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
 function setStatus(text, kind) {
   status.textContent = text;
@@ -48,27 +48,12 @@ function withPrelude(text) {
 }
 
 // `wiz_playground_eval` on a source: the module's one call, shared by Run and the
-// in-page language server.
-function evalSource(src) {
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_eval(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : "";
-  if (r) wasm._free(r);
-  return text;
-}
-
-// (stage 1) `wiz_playground_check`: the same check as JSON with each line's offset, for
-// the in-page language server; null with a module built before it existed.
-function checkSource(src) {
-  if (typeof wasm._wiz_playground_check !== "function") return null;
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_check(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : null;
-  if (r) wasm._free(r);
-  return text;
-}
+// in-page language server. (stage 1) `wiz_playground_check`: the same check as JSON with
+// each line's offset, for the in-page language server; null with a module built before
+// it existed. Both reject with an `EngineFailure` when the program exits (the module is
+// kept), aborts or traps (the module is replaced).
+const evalSource = (src) => wasm.evaluate(src);
+const checkSource = (src) => wasm.check(src);
 
 // An output line's class and the text to show. A value the page can render (a Nat, a
 // Bool, a list) shows its rendered form; the raw text is in the DOM path's title.
@@ -121,15 +106,20 @@ function run() {
   runButton.disabled = true;
   setStatus("running…", "running");
   // let the status paint before the (synchronous) Wasm call
-  setTimeout(() => {
+  setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = evalSource(withPrelude(editor.value));
+      const text = await evalSource(withPrelude(editor.value));
       const ms = Math.max(0, performance.now() - started);
       const bad = show(text);
       setStatus(`done in ${ms < 10 ? "<10" : Math.round(ms)} ms`, bad ? "error" : "ready");
     } catch (e) {
-      show("error: " + (e && e.message ? e.message : String(e)));
+      if (e && e.name === "EngineFailure") {
+        // The failure's stderr lines are normal `error:` lines; `show` also keeps the
+        // `?ui=react` pane in step with them.
+        show(failureLines(e).join("\n"));
+        if (!pageUi) count.textContent = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
+      } else show("error: " + (e && e.message ? e.message : String(e)));
       setStatus("failed", "error");
     } finally {
       busy = false;
@@ -210,10 +200,13 @@ async function start() {
   startReactPane();
   try {
     const createModule = (await import("./wiz-playground.mjs")).default;
-    wasm = await createModule({
+    const engine = createEngine(createModule, {
       print: (s) => console.log(s),
       printErr: (s) => console.warn(s),
+      onRestart: (f) => console.warn("wiz playground: restarting the engine: " + f.message),
     });
+    await engine.ready;
+    wasm = engine;
     engine.textContent = "engine: ready";
     engineReady.resolve();
     runButton.disabled = false;

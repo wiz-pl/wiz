@@ -1,5 +1,0 @@
-import Prelude
-
--- A tiny prelude for the `wiz repl --prelude` smoke test: it must be importable as an
--- ordinary module and its definitions must be in scope from the first prompt.
-def replPreludeAnswer : Nat := 42
