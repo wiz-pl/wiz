@@ -1303,16 +1303,183 @@ externs as `reviewed` with the expected `Fd → Nat` signature. No PR and no CI.
 
 ---
 
-## 15. Slice 3b implemented: one writer, many readers
+## 15. Slice 3 implemented: retention, compaction, space accounting
+
+Status: branch `store-compact` off `integration/train6`, merging `store-durable` and
+`store-mmap` (both off `66398557`). No PR. The slice-2 format and commit protocol are
+unchanged; this slice adds the registry, the live-page walk, the two-file compaction, and
+`stats`, plus one native (`ftruncate`).
+
+### 15.1 What the format already gave, and what it did not
+
+`store-durable` writes one append-only chain: a commit appends the whole node map as 32 B
+records in kind-1 pages linked by `right`, then switches a 96-byte meta slot. Two slots
+hold the current and the previous root. Nothing is ever reused, so every generation's
+pages stay on disk until something removes them.
+
+* **Retained.** `min_gen` (present in the meta since slice 2, always 0) is now the oldest
+  live generation. `page_count` keeps its meaning (first free page = file length in
+  pages). The two-slot alternation, the 32 B header/record, FNV-1a-64 and the
+  `pages → fdatasync → meta → fsync` commit order are untouched.
+* **Assumed, not changed.** The format names exactly **two** roots, one per meta slot.
+  Therefore retention across a restart is at most two roots: `openDb` verifies both
+  slots' chains and registers both. A larger K is in-process history (each commit adds a
+  `RootRef` in the handle); the format does not name those roots, so after a restart they
+  are gone. Persisting K > 2 across restarts would need a registry page (a kind-2 chain
+  named by a meta field) — that is a format extension, not what this slice does.
+* **Added native.** `Fd.truncate` (`wiz_sys_fd_ftruncate`, 0/errno, `EINVAL` above
+  `INT64_MAX`), two trust-baseline rows. It is used twice, both on the tail: on open, a
+  commit that appended pages and crashed before the meta switch leaves a tail no valid
+  slot names, and `openDb` truncates to `max(page_count over valid slots)`; when building
+  the compacted image, `ftruncate` sets its exact length (`2 + live` pages), which is a
+  no-op on the `pwrite` path but is the invariant an empty store (meta only) and a future
+  preallocating writer rely on.
+
+### 15.2 Retention (`drafts/storage-engine/Registry.wiz`)
+
+A `RootRef` is `gen | root | pages | del_epoch | pins`; a `Registry` is
+`refs (newest first) | keep (K)`.
+
+* **Policy.** `Registry.live` = the newest K roots **union** every root with `pins > 0`.
+  `lease`/`release` move the pin counter; a pinned root outlives the count policy. (The
+  design's end state attaches this counter to a `Snapshot` finaliser; the counter is the
+  bookkeeping, and the pure `Snapshot` value stays pure.)
+* **Exact admission, not a floor.** `Registry.retained (gen)` is membership in the live
+  set. Count-based retention can drop generation 5 while 4 is pinned, so a floor alone
+  would admit a snapshot whose pages are gone. `Registry.min_gen` is still written to the
+  meta as the horizon; `putDb` uses `retained` and returns `CommitError.expired`
+  (`base`, `floor`). Reads through an evicted snapshot value are outside the contract,
+  as §2.5 says.
+* **Trimming.** Every commit re-applies the policy to the handle's history, so the
+  registry is bounded by K + pins.
+
+### 15.3 The live set and the plan (`Compact.wiz`)
+
+`StoreView` is `page_count` plus each data page's `right` link, read from the file's
+headers. `compact : StoreView → List RootRef → Plan` is pure:
+
+1. walk every retained root's chain with a visited set shared across roots and a fuel
+   bound of that root's `pages` (a corrupt cycle stops at the bound);
+2. sort the union ascending and number it densely from page 2 (`newOf`);
+3. map each root to its new first page, and report `totalPages` (the file before).
+
+`Plan.stats` = `livePages`, `totalPages`, `metaPages = 2`,
+`wastedPages = total − live − 2`, `wastedBytes = 4096 × wasted`; `Plan.after` is the same
+accounting for the rewritten file (`total = live + 2`, waste 0). `statsOf` runs the same
+walk against the live file, so the policy can decide *when* to compact from
+`wastedPages`.
+
+### 15.4 The compaction protocol, and why it is a second file
+
+The format is append-only. A "fresh region of the same file" can only be at the end, so
+an in-place compaction makes the file **larger**; to reclaim, the image must be moved
+down over the old pages, and that cannot be crash-safe: a crash between the move and the
+second meta switch leaves both slots naming overwritten pages, and a live read-only
+mapping of the old inode `SIGBUS`es once the file is truncated below its pages. Neither
+has a fallback. So the switch is the design's §2.5 swap:
+
+```
+1. read the view (every data page's right link) and the registry
+2. plan := compact view (Registry.roots registry)          -- pure
+3. create <path>.compact, write the live pages densely from page 2,
+   relinking `right` and recomputing each page checksum
+4. write the newest root's meta into its parity slot, and the newest
+   retained root of the opposite parity into the other slot; min_gen
+5. fsync(<path>.compact)                                    -- the image is complete
+6. rename(<path>.compact, <path>)                           -- the single switch
+7. fsync(parent(<path>))                                    -- the switch is durable
+8. publish: the handle writes to the new descriptor, the registry is
+   remapped, page_count := 2 + live
+```
+
+`rename` is the single atomic operation (the analogue of the meta write); the new file's
+meta slots and pages are already durable, so there is no state where the name and the
+contents disagree. A reader that mapped the old file keeps the old inode (POSIX), so a
+`MappedSnapshot` taken before compaction still reads; new `getDb`s read the new file.
+
+**Crash states.** (1) crash while writing the image: the store is untouched; the temp is
+overwritten next time. (2) crash before the temp `fsync`: the store is untouched; a torn
+temp is never a valid store. (3) after the temp `fsync`, before `rename`: the store is
+untouched; the temp is a leaked inode. (4) during `rename`: old or new name, both complete
+images (the pair is atomic). (5) after `rename`, before the directory `fsync`: either name
+after power loss, both complete. (6) after the directory `fsync`: the new file. The old
+root is valid in 1–3 (and in 4–5 if the old name survives), which is the case the brief
+asks to test.
+
+### 15.5 Integration of `store-mmap` (the merged read path)
+
+`store-mmap` was written before the writer existed and assumed a B+tree. The writer's
+actual page is a chained kind-1 leaf, so the merge makes three changes to `Mmap.wiz`,
+without changing the format:
+
+* `Store.metaMagic` is `store-durable`'s `0x57495a53544f5245` (the decoder still accepts
+  any nonzero magic with a valid checksum);
+* a leaf lookup that misses follows `right` (`Store.findInChain`), so the decoder reads
+  the writer's chained records;
+* the mapped snapshot types are renamed `MapRoot`/`MappedSnapshot` so a test can import
+  both halves (Wiz has no namespaces); `Snapshot.open` also treats `root = 0` as the
+  empty store rather than checksumming the meta page.
+
+`CompactTest`'s last check maps the compacted file and reads every node through the
+decoder, which is the "compaction preserves reads" check with the real read path.
+
+### 15.6 Tests
+
+`CompactPure.wiz` (`wiz check` + `#eval`) — a hand-built view with two chains (2→3→4,
+5→6) and 12 pages: the union counts each page once (including a shared suffix); K = 1
+keeps 3 pages, K = 2 keeps 5, a lease on the old root under K = 1 keeps 5;
+`wastedPages` 7/5 before and 0 after; the mapping is dense from page 2; `retained` is
+false for an evicted generation and true for a pinned one; lease/release move the
+counter; `otherRoot` picks the opposite-parity slot.
+
+`CompactTest.wiz` (`wiz run`) — seed plus 20 commits (never-reuse: one page each),
+`stats` shows waste, then `prepareCompaction`: the old file still opens with the same
+generation and content, and the prepared image is a complete store with the same
+generation and content. `finishCompaction`: same generation, same nodes and versions,
+`wastedPages = 0`, `total = live + 2`, the total fell by exactly the old waste, the
+plan's after-stats equal the measured ones, the **mmap decoder** reads the compacted
+file, a reopen reads it, both meta slots name roots, and a commit past it is durable.
+`retentionTest`: K = 1, lease generation 1, six commits, compact — the leased chain is
+still live (2 pages) and its records still load; release, compact — 1 page and a smaller
+file; a commit from the evicted base is `expired`, from the current base it commits.
+`crashTest`: prepare and abandon (complete image, then a garbage temp) leaves the path's
+store exactly as it was. `tailTest`: two garbage pages appended with no meta naming them
+(the crash-before-switch case) are truncated away on open, `stats` shows no waste, and the
+generation is unchanged; an empty store compacts to its two meta pages (the
+`ftruncate`-grows case) and still commits.
+
+Results with the worktree's `wiz` (`heavy lake build wiz tests`, rc=0; checks and runs via
+`light`):
+
+* `CompactPure.wiz`: rc=0, 24 `#eval` lines, all matching the comments (live 5/3/5/3 for
+  K=2/K=1/pinned/shared, waste 5 and 7, after 7 pages, 0 waste, dense mapping, retention
+  predicates, remap 2/1, other slot 1, total 12 → 7).
+* `CompactTest.wiz`: `compact: all checks passed (70)` — compaction 40, retention 16 more,
+  crash 6 more, tail/empty 8 more (cumulative count).
+* `DurableTest.wiz` and `MmapTest.wiz` still pass unchanged after the merge (the latter's
+  group `storage-mmap` expected output is unchanged).
+* `strace -f -e ftruncate,rename` on the run shows `ftruncate(3, 12288)` for the tail trim,
+  `ftruncate(4, 16384)` for the image length, and
+  `rename("…/compact.db.compact", "…/compact.db")` for each switch.
+* `scripts/trust-ffi-audit.sh --check Sys` (under `heavy`): 69 externs, 0 legacy,
+  signatures match, `Fd.truncateRaw wiz_sys_fd_ftruncate` reviewed.
+
+Not run: the trust-ledger gate (same pre-existing `lib/Scope.wiz` /
+`lib/Scry/EgraphExtract.wiz` errors as §14). No PR and no CI.
+
+
+---
+
+## 16. Slice 3b implemented: one writer, many readers
 
 Status: branch `store-multiproc` off `integration/train6` (`7138f924`), with
 `store-durable` (`244caf7a`) and `store-mmap` (`79fb531b`) merged; train6 is
 untouched and there is no PR. Neither format branch's writer or decoder is
 changed: this slice adds `flock` to the ordinary `Sys`/`Fd` family, a
 `Multiproc.wiz` layer over `Durable.wiz`, and its tests. The `mmap` read path is
-merged unchanged, and §15.6 checks its assumptions against the shipped writer.
+merged unchanged, and §16.6 checks its assumptions against the shipped writer.
 
-### 15.1 The lock native
+### 16.1 The lock native
 
 `runtime/rt_sys.inc` adds `wiz_sys_fd_flock(p, mode, nonblock)`:
 
@@ -1333,7 +1500,7 @@ checks the signature against the C prototype).
 process. That is what lets the test exercise the contract with two handles in one
 process, and it is why the writer handle keeps its `MVar` (below).
 
-### 15.2 The concurrency contract
+### 16.2 The concurrency contract
 
 ```
 writer:   getDb ──(pure transaction, no lock)── putDb
@@ -1375,7 +1542,7 @@ reader:   open ── LOCK_SH ─ read two meta slots ── LOCK_UN ── (sna
   user code, so there is no cycle. Two `Handle`s in one process are ordinary
   competing writers; the test uses exactly that.
 
-### 15.3 Validation inside the exclusive section
+### 16.3 Validation inside the exclusive section
 
 `Handle.putDb` runs, under `LOCK_EX`:
 
@@ -1394,7 +1561,7 @@ global epoch. Two-handle test, exact outcomes: `+1` commits, `+1` commits
 (count 2), `set` rejected `conflict`, `+1` commits (count 3), `delete` commits,
 the next transaction from the old base rejected `stale`.
 
-### 15.4 Crash and abandonment
+### 16.4 Crash and abandonment
 
 * **The lock dies with the process.** `flock` is held on the open file
   description and dropped by the kernel on exit (including `SIGKILL`) and when
@@ -1411,9 +1578,10 @@ the next transaction from the old base rejected `stale`.
 
 Tested: the truncated-tail substitute (drop the last 4 KiB page of a
 three-commit file, reopen: generation 2 / count 1, no lock held, next commit
-generation 4 / count 2) and, opt-in, a real killed process (§15.5).
+generation 4 / count 2) and, opt-in, a real killed process (§16.5).
 Not tested: a torn slot in the *middle* of the 96 bytes (covered by the checksum
 by construction, but not exercised by a test), and power loss between the two
 syncs (the protocol's ordering argument covers it; no fault injector here).
 
-### 15.5 What ran
+### 16.5 What ran
+

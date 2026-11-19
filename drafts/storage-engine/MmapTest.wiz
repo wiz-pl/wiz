@@ -183,26 +183,26 @@ def main : IO Unit := EIO.toIO (do
   m ← Sys.check "mmap" (Map.ofFd fd st.size);
   Fd.close fd;
   EIO.lift (report "maplen" (showNat (Map.len m)));
-  match Snapshot.open m with
+  match MappedSnapshot.open m with
   | .error e => EIO.lift (report "open" (StoreError.message e))
   | .ok s => do
     EIO.lift (report "gen" (showNat s.gen.toNat));
     EIO.lift (report "root" (String.append (showNat s.root.page.toNat)
       (String.append " index " (showNat s.indexRoot.toNat))));
-    EIO.lift (report "n10" (showNode (Snapshot.getNode s (U64.ofNat 10))));
-    EIO.lift (report "n20" (showNode (Snapshot.getNode s (U64.ofNat 20))));
-    EIO.lift (report "n30" (showNode (Snapshot.getNode s (U64.ofNat 30))));
-    EIO.lift (report "absent" (showNode (Snapshot.getNode s (U64.ofNat 99))));
-    EIO.lift (report "bucket1" (showBucket (match Snapshot.indexBucket s (U64.ofNat 1) with
+    EIO.lift (report "n10" (showNode (MappedSnapshot.getNode s (U64.ofNat 10))));
+    EIO.lift (report "n20" (showNode (MappedSnapshot.getNode s (U64.ofNat 20))));
+    EIO.lift (report "n30" (showNode (MappedSnapshot.getNode s (U64.ofNat 30))));
+    EIO.lift (report "absent" (showNode (MappedSnapshot.getNode s (U64.ofNat 99))));
+    EIO.lift (report "bucket1" (showBucket (match MappedSnapshot.indexBucket s (U64.ofNat 1) with
       | .error _ => [] | .ok ids => ids)));
-    EIO.lift (report "bucket2" (showBucket (match Snapshot.indexBucket s (U64.ofNat 2) with
+    EIO.lift (report "bucket2" (showBucket (match MappedSnapshot.indexBucket s (U64.ofNat 2) with
       | .error _ => [] | .ok ids => ids)));
-    EIO.lift (report "bucket3" (showBucket (match Snapshot.indexBucket s (U64.ofNat 3) with
+    EIO.lift (report "bucket3" (showBucket (match MappedSnapshot.indexBucket s (U64.ofNat 3) with
       | .error _ => [] | .ok ids => ids)));
     EIO.lift (report "oob" (showOpt (Map.getU64At m (Nat.sub st.size 4))));
     let unaligned := match Map.getU64At m 3 with
       | .none => "out"
-      | .some v => match UIntN.beq v (U64.ofNat 0x00000131524F5453) with
+      | .some v => match UIntN.beq v (U64.ofNat 0x00000157495a5354) with
         | .true => "ok"
         | .false => "wrong";
     EIO.lift (report "unaligned" unaligned);
@@ -215,14 +215,14 @@ def main : IO Unit := EIO.toIO (do
   fd2 ← Fd.open pathTorn .read OpenFlags.none;
   m2 ← Sys.check "mmap" (Map.ofFd fd2 st2.size);
   Fd.close fd2;
-  match Snapshot.open m2 with
+  match MappedSnapshot.open m2 with
   | .error e => EIO.lift (report "torn open" (StoreError.message e))
   | .ok s => do
-    let checked := match Snapshot.getNode s (U64.ofNat 10) with
+    let checked := match MappedSnapshot.getNode s (U64.ofNat 10) with
       | .error (.corrupt _ _ _) => "corrupt"
       | .error e => StoreError.message e
       | .ok _ => "ok";
     EIO.lift (report "verify" checked);
-    EIO.lift (report "skip" (showNode (Snapshot.getNodeWith s (U64.ofNat 10) .false)));
-    EIO.lift (report "clean" (showNode (Snapshot.getNodeWith s (U64.ofNat 20) .false)));
+    EIO.lift (report "skip" (showNode (MappedSnapshot.getNodeWith s (U64.ofNat 10) .false)));
+    EIO.lift (report "clean" (showNode (MappedSnapshot.getNodeWith s (U64.ofNat 20) .false)));
   FS.removeAll dir)

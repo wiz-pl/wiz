@@ -506,8 +506,12 @@ Sys	Fd.adopt	axiom Fd.adopt	runtime/rt_sys.inc wiz_sys_fd_adopt: wraps a descrip
 Sys	Fd.adopt	builtin extern:wiz_sys_fd_adopt:n:p:io::wiz_sys_fd_free := Fd.adopt	runtime/rt_sys.inc wiz_sys_fd_adopt: wraps a descriptor number as an owned handle; a number above INT_MAX is EINVAL and an already-closed handle (no narrowing)	Reuben Steenekamp	2027-05-01
 Sys	Fd.closeRaw	axiom Fd.closeRaw	runtime/rt_sys.inc wiz_sys_fd_close: atomic exchange to -1 so one close(2) when owned; 0 or errno, EBADF on a second close	Reuben Steenekamp	2027-05-01
 Sys	Fd.closeRaw	builtin extern:wiz_sys_fd_close:p:n:io:: := Fd.closeRaw	runtime/rt_sys.inc wiz_sys_fd_close: atomic exchange to -1 so one close(2) when owned; 0 or errno, EBADF on a second close	Reuben Steenekamp	2027-05-01
+Sys	Fd.dataSyncRaw	axiom Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.dataSyncRaw	builtin extern:wiz_sys_fd_fdatasync:p:n:io:: := Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
 Sys	Fd.keep	axiom Fd.keep	runtime/rt_sys.inc wiz_sys_fd_keep: a no-op use of the handle, keeping it live to this point	Reuben Steenekamp	2027-05-01
 Sys	Fd.keep	builtin extern:wiz_sys_fd_keep:p:v:io:: := Fd.keep	runtime/rt_sys.inc wiz_sys_fd_keep: a no-op use of the handle, keeping it live to this point	Reuben Steenekamp	2027-05-01
+Sys	Fd.lockRaw	axiom Fd.lockRaw	runtime/rt_sys.inc wiz_sys_fd_flock: flock(2) with mode 0 shared / 1 exclusive / 2 unlock; 0 or errno, WIZ_SYS_BUSY (100002) for a held non-blocking lock, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.lockRaw	builtin extern:wiz_sys_fd_flock:pnb:n:io:: := Fd.lockRaw	runtime/rt_sys.inc wiz_sys_fd_flock: flock(2) with mode 0 shared / 1 exclusive / 2 unlock; 0 or errno, WIZ_SYS_BUSY (100002) for a held non-blocking lock, EBADF when closed	Reuben Steenekamp	2027-05-01
 Sys	Fd.markPtyController	axiom Fd.markPtyController	runtime/rt_sys.inc wiz_sys_fd_set_pty: sets only the eio_eof flag on the handle; no I/O	Reuben Steenekamp	2027-05-01
 Sys	Fd.markPtyController	builtin extern:wiz_sys_fd_set_pty:p:v:io:: := Fd.markPtyController	runtime/rt_sys.inc wiz_sys_fd_set_pty: sets only the eio_eof flag on the handle; no I/O	Reuben Steenekamp	2027-05-01
 Sys	Fd.openRaw	axiom Fd.openRaw	runtime/rt_sys.inc wiz_sys_fd_open: open(2) with access/flags/mode, O_CLOEXEC and optional nonblocking cleared; owned Fd or NULL with errno	Reuben Steenekamp	2027-05-01
@@ -524,14 +528,12 @@ Sys	Fd.readRaw	axiom Fd.readRaw	runtime/rt_sys.inc wiz_sys_fd_read: one read aft
 Sys	Fd.readRaw	builtin extern:wiz_sys_fd_read:pnbn:w:io:: := Fd.readRaw	runtime/rt_sys.inc wiz_sys_fd_read: one read after an optional poll; fresh Bytes; WIZ_SYS_EOF/WIZ_SYS_TIMEOUT/errno on the short cases	Reuben Steenekamp	2027-05-01
 Sys	Fd.seekRaw	axiom Fd.seekRaw	runtime/rt_sys.inc wiz_sys_fd_seek: lseek with whence 0/1/2 and back negating off; returns the new offset, errno on failure	Reuben Steenekamp	2027-05-01
 Sys	Fd.seekRaw	builtin extern:wiz_sys_fd_seek:pnnb:n:io:: := Fd.seekRaw	runtime/rt_sys.inc wiz_sys_fd_seek: lseek with whence 0/1/2 and back negating off; returns the new offset, errno on failure	Reuben Steenekamp	2027-05-01
-Sys	Fd.syncRaw	axiom Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
-Sys	Fd.syncRaw	builtin extern:wiz_sys_fd_fsync:p:n:io:: := Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
-Sys	Fd.dataSyncRaw	axiom Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
-Sys	Fd.dataSyncRaw	builtin extern:wiz_sys_fd_fdatasync:p:n:io:: := Fd.dataSyncRaw	runtime/rt_sys.inc wiz_sys_fd_fdatasync: fdatasync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
-Sys	Fd.lockRaw	axiom Fd.lockRaw	runtime/rt_sys.inc wiz_sys_fd_flock: flock(2) with mode 0 shared / 1 exclusive / 2 unlock; 0 or errno, WIZ_SYS_BUSY (100002) for a held non-blocking lock, EBADF when closed	Reuben Steenekamp	2027-05-01
-Sys	Fd.lockRaw	builtin extern:wiz_sys_fd_flock:pnb:n:io:: := Fd.lockRaw	runtime/rt_sys.inc wiz_sys_fd_flock: flock(2) with mode 0 shared / 1 exclusive / 2 unlock; 0 or errno, WIZ_SYS_BUSY (100002) for a held non-blocking lock, EBADF when closed	Reuben Steenekamp	2027-05-01
 Sys	Fd.std	axiom Fd.std	runtime/rt_sys.inc wiz_sys_fd_std: wraps descriptors 0/1/2 as unowned handles; other indices map to 2	Reuben Steenekamp	2027-05-01
 Sys	Fd.std	builtin extern:wiz_sys_fd_std:n:p:io::wiz_sys_fd_free := Fd.std	runtime/rt_sys.inc wiz_sys_fd_std: wraps descriptors 0/1/2 as unowned handles; other indices map to 2	Reuben Steenekamp	2027-05-01
+Sys	Fd.syncRaw	axiom Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.syncRaw	builtin extern:wiz_sys_fd_fsync:p:n:io:: := Fd.syncRaw	runtime/rt_sys.inc wiz_sys_fd_fsync: fsync(2) on the descriptor; 0 or errno, EBADF when closed	Reuben Steenekamp	2027-05-01
+Sys	Fd.truncateRaw	axiom Fd.truncateRaw	runtime/rt_sys.inc wiz_sys_fd_ftruncate: ftruncate(2) on the descriptor; 0 or errno, EBADF when closed, EINVAL above INT64_MAX	Reuben Steenekamp	2027-05-01
+Sys	Fd.truncateRaw	builtin extern:wiz_sys_fd_ftruncate:pn:n:io:: := Fd.truncateRaw	runtime/rt_sys.inc wiz_sys_fd_ftruncate: ftruncate(2) on the descriptor; 0 or errno, EBADF when closed, EINVAL above INT64_MAX	Reuben Steenekamp	2027-05-01
 Sys	Fd.waitRaw	axiom Fd.waitRaw	runtime/rt_sys.inc wiz_sys_fd_wait: poll for POLLIN (events 1) or POLLOUT (events 2) with a deadline; 1 ready, 0 timeout, errno	Reuben Steenekamp	2027-05-01
 Sys	Fd.waitRaw	builtin extern:wiz_sys_fd_wait:pnbn:n:io:: := Fd.waitRaw	runtime/rt_sys.inc wiz_sys_fd_wait: poll for POLLIN (events 1) or POLLOUT (events 2) with a deadline; 1 ready, 0 timeout, errno	Reuben Steenekamp	2027-05-01
 Sys	Fd.writeRaw	axiom Fd.writeRaw	runtime/rt_sys.inc wiz_sys_fd_write: write loop, waiting on EAGAIN; consumes the Bytes; 0 or errno	Reuben Steenekamp	2027-05-01
