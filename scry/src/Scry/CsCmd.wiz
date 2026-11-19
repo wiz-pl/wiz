@@ -954,7 +954,7 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
         | .nil => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil (.some path) 0
             [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""])
         | _ => do
-          let pr := Scry.analyze (Wil.program funcs) p;
+          let pr := Scry.analyzeC (Scry.Cs.resolveCalls (Wil.program funcs)) p;
           let m := Scry.Cs.originMapOf results;
           Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk
             (Scry.Cs.findingRows m (Scry.programFindings pr))

@@ -21,6 +21,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `src/Crux.Api`, lowering warnings drop 513 → 420 (`unknown name` 173 → 80, every one
   of the 93 removed a unit method) while the new `cwe78-macro-unsafe` fixture gains the
   finding the havoc used to hide.
+* scry C#: **the first finding on real code** (`src/Crux.Api`, same 75 files, 240
+  functions: 0 → 7). The frontend, the rule pack and the call graph disagreed on names:
+  a file that relies on ASP.NET's implicit usings lowers `HttpRequest.get_ContentType`
+  (the pack named `Microsoft.AspNetCore.Http.HttpRequest.get_ContentType`), each file's
+  lowering keeps `Class.Method` for a class in another file (the merged program has
+  `Ns.Class.Method`), and a method group's `$method:` prefix defeated the C-ABI
+  "address taken ⇒ callback" test. `Scry.Cs.resolveCalls` reconciles the merged
+  program's direct callees (unique suffix only), the `$method:` prefix is stripped for
+  the entry test, and `Scry.Models` names the HTTP request sources under all three
+  spellings. `ILogger.Log*` is a `log` sink class (CWE-117) on its pointer-like
+  arguments, and `scry cs` uses the entry policy (`Scry.analyzeC`) so route parameters
+  are sources. `unmodelled-external` falls 917 → 845, `unknown-memory` 59 → 36, and the
+  findings are the route-value log lines in `SchemeInboundReceiver` and
+  `SchemeOperatorAdmission`; `taint/cwe117-log-unsafe`/`-safe` pin the model.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,

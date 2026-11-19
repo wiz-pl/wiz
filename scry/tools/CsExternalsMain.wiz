@@ -89,7 +89,7 @@ def Scry.externRun (args : List String) : EIO Unit :=
     match found with
     | .none => Scry.externSay "error\tno rule pack found; pass PACK.scry"
     | .some (packPath, pack) => do
-      let prog := Wil.program funcs;
+      let prog := Scry.Cs.resolveCalls (Wil.program funcs);
       let pr := Scry.analyze prog pack;
       let names := List.concat (List.map (fun r =>
         List.map (fun nc => nc.1) (Scry.unmodelledCallsOf prog r)) pr.results);

@@ -474,14 +474,20 @@ def Scry.modelSinkFactsAt (n : Nat) (name : String) (args : List Wil.Var)
     match Wil.listNth args arg with
     | .none => .nil
     | .some v =>
-      let id := Scry.SinkClass.ruleId cls;
-      let sev := match pack.taintRuleById id with
-        | .some r => r.severity
-        | .none => Scry.SinkClass.severity cls;
-      let msg := match pack.taintRuleById id with
-        | .some r => r.message
-        | .none => Scry.SinkClass.message cls;
-      List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg) .nil)
+      -- A log line is forged by a **string** argument; an integer (a length, a count)
+      -- cannot carry a newline and is not a CWE-117 sink. The other model classes are
+      -- argument-position sinks regardless of the value's type.
+      match Bool.and (Scry.SinkClass.isLog cls) (Bool.not (Scry.ptrLike v.ty)) with
+      | .true => .nil
+      | .false =>
+        let id := Scry.SinkClass.ruleId cls;
+        let sev := match pack.taintRuleById id with
+          | .some r => r.severity
+          | .none => Scry.SinkClass.severity cls;
+        let msg := match pack.taintRuleById id with
+          | .some r => r.message
+          | .none => Scry.SinkClass.message cls;
+        List.cons (Scry.RuleSinkFact.mk n arg v.index name id sev msg) .nil)
     (Scry.Models.sinksOf name)
 
 /-- One access's freed-location diagnostic: a free that reaches the access and may free

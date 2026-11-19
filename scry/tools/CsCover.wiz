@@ -74,7 +74,7 @@ def Scry.coverFile (pack : Scry.RulePack) (p : String) : EIO Unit := do
     store ← EIO.lift (Scry.Native.toCstStore p st);
     let cst := Scry.Cs.ofStore text store;
     let l := Scry.Cs.lowerCst p text cst;
-    let fs := Scry.programFindings (Scry.analyze (Wil.program l.funcs) pack);
+    let fs := Scry.programFindings (Scry.analyze (Scry.Cs.resolveCalls (Wil.program l.funcs)) pack);
     EIO.lift (IO.println ("FILE\t" ++ p ++ "\t" ++ Nat.repr (List.length l.funcs) ++ "\t"
       ++ Nat.repr (List.length l.warnings) ++ "\t" ++ Nat.repr (List.length fs)));
     EIO.lift (IO.print (String.intercalate ""

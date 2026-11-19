@@ -804,3 +804,135 @@ Method groups in the table are recognised by the unit's method table, so the gua
 structural: remove a method and the name falls back to the warning; there is no
 permissive suffix rule.
 
+
+## 11. The first finding on real code (2026-11-19)
+
+§10 measured a tree with **0 findings** — the lowering and the external-read models were
+right, but no finding could exist. This section traces one true positive in `src/Crux.Api`
+and fixes the two model-side causes; the trace tool is `scry/tools/CsTraceMain.wiz`
+(`grail build cs-trace`, or `wiz build tools/CsTraceMain.wiz -I src -I ../lib`).
+
+### 11.1 The shape
+
+`src/Crux.Api/Schemes/SchemeInboundReceiver.cs:35`:
+
+```csharp
+logger.LogWarning(
+    "Scheme {SchemeKey} did not recognise a {MessageName} message ({ContentType}, {Length} characters).",
+    schemeKey, messageName ?? "inbound", httpRequest.ContentType ?? "no content type", body.Length);
+```
+
+`schemeKey` and `messageName` are route values (attacker-controlled, URL-decoded) and
+`httpRequest.ContentType` is a request header. The rendered line is written by Serilog to
+`Logs/Api/api-.log` (`Program.cs:36-41`). A route value with a newline forges a log record:
+CWE-117. `SchemeOperatorAdmission.cs:28` logs `schemeKey` the same way.
+
+### 11.2 The trace, before
+
+`cs-trace src/Crux.Api SchemeInboundReceiver.ReceiveAsync` printed:
+
+```
+%21 = call HttpRequest.get_ContentType(%4)
+...
+%37 = call ILogger.LogWarning(%27, %28, %1, %30, %34, %36)
+sources 0
+sinks   0
+tainted 0
+findings 0
+```
+
+Three name-resolution gaps and one missing model explain it; the first is the largest.
+
+1. **The source name is bare.** `SchemeInboundReceiver.cs` has no
+   `using Microsoft.AspNetCore.Http;` (the project's implicit global usings supply it), so
+   `canon` leaves the parameter type as `HttpRequest` and the lowering emits
+   `HttpRequest.get_ContentType`, not `Microsoft.AspNetCore.Http.HttpRequest.get_ContentType`.
+   The pack's sources are fully qualified, so no `src` fact is added. The same happens
+   for `HttpContext.Request.Headers` (`?.get_Headers`), `HttpRequest.get_Body`, and every
+   other implicit-using type. The externals work (§9) modelled the **reads** by shape
+   (`get_P`, `T[].get_Item`); it did not add the request accessors as **sources**, and
+   the fully qualified source list was dead on real code.
+2. **Cross-file calls keep short names.** `Scry.CsCmd` lowers each file with its own
+   class table, so `BootstrapPartnerCredentialSeeder.RunAsync` from `Program.cs` is
+   emitted as `BootstrapPartnerCredentialSeeder.RunAsync`, while the merged program's
+   function is `Crux.Api.Hosting.BootstrapPartnerCredentialSeeder.RunAsync`. The call
+   graph sees no edge: summaries do not connect across files, the callee looks
+   external (inflating `unmodelled-external`), and under the entry policy it looks like
+   an entry (so its parameters become sources). `BoundaryRejectionRecorder.RecordAsync`
+   alone had 34 such call sites.
+3. **A method-group value is not a callback according to the entry test.** `CsLower`
+   emits `fnptr "$method:Ns.Class.Method"`; `Scry.fnptrNamesOfStmt` returned the whole
+   spelling and `isExportedEntry` compared it with `fn.name`, so the "address taken ⇒
+   callback" guard never matched for C#.
+4. **There is no sink.** `ILogger.LogWarning` was one of the 917 `unmodelled-external`
+   rows: the C# pack's only sinks are `Process.Start`/`ProcessStartInfo`, and §9
+   deliberately left writes out of the read table. A tainted argument to a log call is a
+   log-line write, so it is a sink (CWE-117).
+
+Classification: **name resolution** (items 1–3, the largest cause) and **missing sink**
+(item 4). There is no havoc or points-to loss in this flow: the `??` copies and the call
+arguments are ordinary uses.
+
+### 11.3 The fix
+
+* `Scry.Cs.resolveCalls` reconciles a **merged** program's direct callees with its
+  function names: a short `Class.Method` becomes the unique `Ns.Class.Method` whose
+  qualified name ends with it (an ambiguous name is left alone; an external name matches
+  none). It also resolves the name inside `$method:` function values. `scry cs` applies
+  it after lowering every file. This is what makes the cross-file call graph, the
+  per-parameter summaries and the entry policy agree.
+* `Scry.fnptrNamesOfStmt` strips `$method:` before the entry test, so a handler passed
+  to `MapPost` or a LINQ selector is a callback, not an exported entry.
+* `Scry.Models` carries the **HTTP request sources** under the three spellings the
+  frontend emits: fully qualified (`Microsoft.AspNetCore.Http.HttpRequest.get_Body`),
+  bare when the file relies on implicit usings (`HttpRequest.get_Body`), and `?.get_P`
+  when the receiver type is unknown. It covers `Body`, `ContentType`, `Query`, `Form`,
+  `Headers`, `Cookies`, `RouteValues`, `Path`, `QueryString`, `ReadFormAsync`,
+  `ReadFromJsonAsync` and `ReadFromJson`.
+* `Scry.Models` has a `log` sink class; `ILogger.Log*`, `?.Log*` and
+  `LoggerExtensions.Log*` are modelled with pointer-like arguments 1–8 as sinks. The
+  receiver (argument 0) is not a sink, and an integer (a length) is not one either, so a
+  tainted logger object or a `Length` cannot fire. The rule id is `log-injection`
+  (CWE-117); `scry/corpus/csharp/csharp.scry` declares it.
+* `scry cs` uses `Scry.analyzeC`: on a partial tree, a public method with no caller in
+  the analysed files is reachable from outside, so its parameters are source seeds (the
+  C-ABI policy `scry taint` already uses). With `resolveCalls` in place this seeds the
+  genuinely external methods, not every cross-file callee.
+* A static method's bare identifier reads a static field (including `const`) through
+  `globalRef`, not field 0 of parameter 0. Before, `SecretVariable`/`CliFlag` read
+  `gep %0,1` and were tainted by the first parameter, which produced six false
+  `log-injection` findings in `BootstrapPartnerCredentialSeeder`.
+
+The corpus pair `taint/cwe117-log-unsafe.cs` / `cwe117-log-safe.cs` pins the model: an
+entry parameter reaches `ILogger.LogWarning` (one finding, `arg 2`), and a constant log
+line with the same parameter has none. Both run under `Scry.analyzeC`, the driver's
+analysis.
+
+### 11.4 After
+
+`scry cs src/Crux.Api` (same 75 files, 240 functions):
+
+| measure | before | after |
+|---|---|---|
+| findings | 0 | **7** (`log-injection`) |
+| `unmodelled-external` call sites | 917 (485 distinct) | **845** |
+| `unknown-memory` | 59 | **36** |
+| lowering warnings (all rows except the taint warnings, `no functions lowered` excluded) | 420 | **420** |
+| `await not modelled` havocs | 0 | **0** |
+
+The 7 findings are 4 in `SchemeInboundReceiver.ReceiveAsync` (line 35 `arg 2` route
+`schemeKey`, `arg 3` `messageName`, `arg 4` `ContentType`; line 50 `arg 2` `schemeKey`)
+and 3 in `SchemeOperatorAdmission.AdmitAsync` (line 28 `arg 2` `schemeKey`, `arg 3` the
+caller certificate thumbprint, `arg 4` `verdict.Reason`). The route arguments are the
+true positives: `%0A` in a path segment is URL-decoded before it reaches the log line.
+The thumbprint and content-type arguments are may-findings of the model (the whole
+`HttpContext` is an entry value); the trace names every step, so a reviewer can see
+which argument they came from. The trace for the receiver is 12 `src` facts (six entry
+parameters and six request accessors), 6 sinks, and 4 alerts; before the fix it was
+0 / 0 / 0.
+
+The remaining `unmodelled-external` 845 are another Nexus project's methods (the
+majority), extension methods called through `HttpContext`/`this` (the 63
+`HttpContext.RequireAuthenticatedPartner` sites), unknown-receiver user extensions,
+constructors and setters — the classes §9 left out. They are coverage rows, not taint
+facts.

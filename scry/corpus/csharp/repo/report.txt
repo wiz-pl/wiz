@@ -3,7 +3,7 @@ target: scry/corpus/csharp/repo (directory)
 walk: 9 .cs file(s) before exclusions; 4 kept, 5 excluded by rule
 files: 4 found, 3 parsed, 3 lowered, 1 failed
 functions: 4 lowered
-rules: scry/corpus/csharp/csharp.scry (4 rule(s))
+rules: scry/corpus/csharp/csharp.scry (5 rule(s))
 findings: 1 (error 1, warning 0, note 0)
   SEVERITY COUNT  RULE  EXAMPLE
   error    1      command-injection  src/Helper.cs:11:13

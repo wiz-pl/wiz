@@ -607,8 +607,8 @@ partial def Scry.Cs.callRetRaw (c : Scry.Cst) (n : Nat) : Scry.Cs.M (Option Stri
           match Scry.Cs.methodOwner s.unit s.cls m with
           | .some om => Scry.Cs.pure (.some om.2.retRaw)
           | .none => Scry.Cs.pure (.none : Option String)
-        else
-          let ty0 ← (match Scry.Cs.lookupLocal s (c.textOf e) with
+        else do
+          ty0 ← (match Scry.Cs.lookupLocal s (c.textOf e) with
             | .some l => Scry.Cs.pure (.some l.ty)
             | .none => Scry.Cs.typePath c e);
           match ty0 with
@@ -635,8 +635,9 @@ partial def Scry.Cs.awaitedType (c : Scry.Cst) (e : Nat) (fallback : String) : S
       | .true => fallback
       | .false => l.awaitTy)
     | .none => Scry.Cs.pure fallback
-  else if String.eq k "invocation_expression" then
-    match Scry.Cs.callRetRaw c e with
+  else if String.eq k "invocation_expression" then do
+    rawOpt ← Scry.Cs.callRetRaw c e;
+    match rawOpt with
     | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
       | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
       | .true => Scry.Cs.pure (match Scry.Cs.asyncResult (Scry.Cs.calleeSimple c e) with
@@ -834,6 +835,21 @@ partial def Scry.Cs.readField (c : Scry.Cst) (n : Nat) (obj : Wil.Var) (k : Scry
       Scry.Cs.emit c n (Wil.load v p);
       Scry.Cs.pure (.some (Scry.Cs.ev v fi.2))
     | .none => Scry.Cs.pure (.none : Option Scry.Cs.EV)
+
+/-- Read a **static** field of a class of the unit (including a `const`): no receiver, so
+an instance field is not in scope. A static method's bare identifier must not read field
+0 of parameter 0. -/
+partial def Scry.Cs.readStaticField (c : Scry.Cst) (n : Nat) (k : Scry.Cs.Cls) (name : String) :
+    Scry.Cs.M (Option Scry.Cs.EV) :=
+  match Scry.Cs.fieldIndex 0 name k.statics with
+  | .some fi => do
+    p ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
+    Scry.Cs.emit c n (Wil.globalRef p (k.qname ++ "." ++ name));
+    wt ← Scry.Cs.wilOf fi.2;
+    v ← Scry.Cs.fresh wt;
+    Scry.Cs.emit c n (Wil.load v p);
+    Scry.Cs.pure (.some (Scry.Cs.ev v fi.2))
+  | .none => Scry.Cs.pure (.none : Option Scry.Cs.EV)
 
 /-- The address of field `name` (instance or static) of class `k`. -/
 partial def Scry.Cs.fieldAddr (c : Scry.Cst) (n : Nat) (obj : Option Wil.Var) (k : Scry.Cs.Cls) (name : String) :
@@ -1046,9 +1062,9 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
     match Scry.Cs.lookupLocal s nm with
     | .some l => Scry.Cs.pure (Scry.Cs.evFn l.var l.ty l.fn)
     | .none => do
-      r ← Scry.Cs.readField c n (match s.this with
-        | .some th => th
-        | .none => Wil.var 0 Wil.Ty.dyn) s.cls nm;
+      r ← (match s.this with
+        | .some th => Scry.Cs.readField c n th s.cls nm
+        | .none => Scry.Cs.readStaticField c n s.cls nm);
       match r with
       | .some x => Scry.Cs.pure x
       | .none => match Scry.Cs.methodOwner s.unit s.cls nm with
@@ -1664,7 +1680,9 @@ partial def Scry.Cs.declGo (c : Scry.Cst) (declTy declTyRaw : String) : List Nat
       -- takes it from the callee's raw return type
       aw ← (match String.eq declTyRaw "var" with
         | .true => match Scry.childF c v "value" with
-          | .some x => match Scry.Cs.callRetRaw c x with
+          | .some x => do
+            rawOpt ← Scry.Cs.callRetRaw c x;
+            match rawOpt with
             | .some raw => match String.eq (Scry.Cs.taskResultRaw raw) "" with
               | .true => Scry.Cs.pure ""
               | .false => Scry.Cs.canonM (Scry.Cs.taskResultRaw raw)
@@ -1988,7 +2006,9 @@ end
 def Scry.Cs.modsOf (c : Scry.Cst) (n : Nat) : List String :=
   List.map (fun m => c.textOf m) (Scry.childrenK c n "modifier")
 
-def Scry.Cs.isStaticMember (c : Scry.Cst) (n : Nat) : Bool := String.elem "static" (Scry.Cs.modsOf c n)
+def Scry.Cs.isStaticMember (c : Scry.Cst) (n : Nat) : Bool :=
+  -- a `const` is a static field; it has no receiver
+  Bool.or (String.elem "static" (Scry.Cs.modsOf c n)) (String.elem "const" (Scry.Cs.modsOf c n))
 
 def Scry.Cs.isTypeDecl (k : String) : Bool :=
   String.elem k ["class_declaration", "struct_declaration", "interface_declaration", "record_declaration"]
@@ -2447,6 +2467,44 @@ def Scry.Cs.frontend (path : String) (text : String) (spill : String) : Scry.Cs.
   match Scry.CstStore.ofText spill with
   | .error e => .err (path ++ ": error: bad spill: " ++ e)
   | .ok s => .ok (Scry.Cs.lowerCst path text (Scry.Cs.ofStore text s))
+
+/-- The unique function whose qualified name ends with `"." ++ name`, or `name` itself.
+Each file is lowered with its own class table, so a call to a class declared in another
+file (`Class.Method`) keeps the short spelling; the merged program knows the qualified
+name. A short name that matches two functions is left alone (ambiguous is not resolved by
+guessing), and a name that matches none is external. -/
+def Scry.Cs.resolveCallName (names : List String) (name : String) : String :=
+  match List.filter (fun n => String.endsWith n ("." ++ name)) names with
+  | .cons one .nil => one
+  | _ => name
+
+/-- A method-group value carries the `$method:` prefix; resolve the name inside it. -/
+def Scry.Cs.resolveFnptr (names : List String) (name : String) : String :=
+  match String.stripPrefix name "$method:" with
+  | .some n => String.append "$method:" (Scry.Cs.resolveCallName names n)
+  | .none => name
+
+def Scry.Cs.resolveStmt (names : List String) : Wil.Stmt → Wil.Stmt
+  | .call r (.direct name) args sp =>
+    .call r (.direct (Scry.Cs.resolveCallName names name)) args sp
+  | .assign x (.fnptr name) sp => .assign x (.fnptr (Scry.Cs.resolveFnptr names name)) sp
+  | s => s
+
+def Scry.Cs.resolveBlock (names : List String) (b : Wil.Block) : Wil.Block :=
+  { b with stmts := List.map (Scry.Cs.resolveStmt names) b.stmts }
+
+def Scry.Cs.resolveFunc (names : List String) (f : Wil.Func) : Wil.Func :=
+  { f with blocks := List.map (Scry.Cs.resolveBlock names) f.blocks }
+
+/-- Reconcile the direct callees of a **merged** program with its function names. The
+per-file lowering gives `Class.Method` for a call to a class in another file because that
+file's unit does not contain the class; the merged program does. Without this pass the
+call graph sees no edge, every callee looks external (and, under the entry policy, every
+callee parameter becomes a source), and the `unmodelled-external` count includes calls
+the unit defines. Unique suffix matches only; ambiguous names stay as they are. -/
+def Scry.Cs.resolveCalls (p : Wil.Program) : Wil.Program :=
+  let names := List.map (fun f => f.name) p.funcs;
+  { p with funcs := List.map (Scry.Cs.resolveFunc names) p.funcs }
 
 /-- The functions of a spill, empty when it cannot be read (for tests). -/
 def Scry.Cs.programOf (path : String) (text : String) (spill : String) : Wil.Program :=
