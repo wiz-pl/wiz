@@ -9,8 +9,8 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
-  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
+  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground` and
+  # `wiz-playground-ui`, the Wasm page modules (`web/build*.sh`) built by a
   # derivation instead of in each CI job. CI pushes them to the Cachix cache
   # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";

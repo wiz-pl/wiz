@@ -1,5 +1,5 @@
 #!/bin/sh
-# The two page-module derivations for this checkout, for the `web` and `docs` jobs.
+# The three page-module derivations for this checkout, for the `web` and `docs` jobs.
 #
 # `web_modules` builds `.#wiz-web`, `.#wiz-playground` and `.#wiz-playground-ui` once per
 # run and publishes them to Cachix; this step realises the same paths from there, so
