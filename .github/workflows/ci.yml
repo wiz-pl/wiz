@@ -110,7 +110,7 @@ jobs:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: two Python checks on the checkout; no build
+    # 5 min: three Python checks on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -121,6 +121,27 @@ jobs:
           python3 scripts/check-docs-style.py
           python3 scripts/check-doc-links.py --self-test
           python3 scripts/check-doc-links.py --quiet
+          python3 scripts/check-name-collisions.py --self-test
+          python3 scripts/check-name-collisions.py --quiet
+
+  # (seconds, no build) The strict half of the name-collision check: a global group is
+  # reported only when two of its declarations can share a transitive importer, i.e.
+  # can be loaded in one program. The broad project-wide run lives in docs_style; its
+  # baseline records the groups that are independent programs today
+  # (scripts/check-name-collisions.py, .github/name-collisions-baseline.json).
+  # One extra first-wave job: the check is <1 s, so it holds a concurrency slot for
+  # roughly a checkout's minute and delays a queued job by that, not by a shard's build.
+  name_collisions_reachable:
+    name: name collisions (reachable)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # 5 min: one Python check on the checkout; no build (the check takes <1 s)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Reachable global name collisions
+        shell: bash
+        run: python3 scripts/check-name-collisions.py --reachable --quiet
 
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
@@ -589,7 +610,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, docs_examples, build, test, web, docs]
+    needs: [changes, docs_style, name_collisions_reachable, docs_examples, build, test, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -694,6 +715,7 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
+          check "name collisions (reachable)" "${{ needs.name_collisions_reachable.result }}" true
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
           check build "${{ needs.build.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
