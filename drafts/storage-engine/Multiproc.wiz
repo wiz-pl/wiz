@@ -1,0 +1,279 @@
+import Sys
+import Word
+import Text
+import WordMap
+import Functor
+import MVar
+import Storage
+import Durable
+/-!
+# Slice 3b: one writer, many readers, across processes
+
+`Durable.wiz` makes a single process's commits durable. This module adds the
+multi-process contract on top of the *same* file format; it does not change a byte of
+it:
+
+* a **writer** takes `flock(LOCK_EX)` for the commit section only (`Handle.putDb`), not
+  for the transaction. Between `getDb` and `putDb` the transaction is pure and holds no
+  lock at all; another process may commit, and the validation at `putDb` decides whether
+  this transaction still applies.
+* a **reader** takes `flock(LOCK_SH)` for the *handshake* — the two meta slots, a few
+  hundred bytes — and then holds a **snapshot lease** (generation, root page, and a
+  read-only descriptor) for the life of its cursor. The lease, not a held lock, is what
+  makes the cursor stable: pages reachable from a root are never overwritten. A commit
+  writes fresh pages and only then publishes a root that names them
+  (`Durable.commit`), so the old chain is still there and still verifies under its old
+  `txid` while the writer appends and switches slots. This choice is forced by the
+  design's "readers never block the writer" (§2.1): a share held for the whole cursor
+  would make the writer's exclusive section wait, and the mid-scan-commit test below
+  impossible. When a later slice reuses pages (§2.5 policy 2/3), the lease becomes a
+  held share or a counted lease, and a commit then waits for old readers.
+* **validation is inside the exclusive section.** `Handle.putDb` re-reads the meta after
+  taking the lock and runs the pure `Db.commit` on that fresh state. The delete-epoch and
+  per-key version tests therefore cannot race a commit between the test and the slot
+  switch. A transaction that loses the race comes back `rejected`; nothing retries it
+  behind the caller's back.
+* **abandonment.** A writer that dies mid-commit leaves no lock: `flock` belongs to the
+  open file description and the kernel drops it when the process dies. It cannot leave a
+  half-switched slot either: the meta slot is written once, at the end, and recovery
+  takes the valid slot with the larger `txid` (a torn slot fails its checksum; a valid
+  slot whose pages are short fails the chain check and the previous slot is used). The
+  pages it had written are simply unreachable and are never reused (`Durable`'s
+  never-reuse policy), and the generation floor moves past the abandoned attempt.
+
+Two limits, stated rather than hidden:
+
+* `flock` is advisory. A process that writes the file without taking the lock is outside
+  the contract, exactly as the design note says (§4.2, case 12).
+* the writer handle's `MVar` is still the *in-process* single-writer cell. `flock` locks
+  an open file description, and two threads sharing one `Handle` share its descriptor,
+  so `flock` alone would not separate them; the `MVar` does. Two handles in one process
+  (two `Fd.open`s) have two descriptions, so `flock` does separate them, which is what
+  the two-handle test exercises.
+-/
+
+-- ## The lock boundary
+
+/-- Run `body` holding `fd`'s `mode` lock, releasing it on every path: success,
+rejection, and an I/O error. A process that dies inside the section leaves the release to
+the kernel. -/
+def EIO.withLock {A : Type} (fd : Fd) (mode : LockMode) (body : EIO A) : EIO A := do
+  l ← Fd.lock fd mode;
+  match l with
+  | .error e => EIO.fail e
+  | .ok _ => do
+    r ← body;
+    u ← Fd.unlock fd;
+    match u with
+    | .error e => EIO.fail e
+    | .ok _ => match r with
+      | .ok a => EIO.pure a
+      | .error e => EIO.fail e
+
+-- ## Reading the meta
+
+/-- The on-disk meta slots that pass magic/format/checksum, newest first. -/
+def readSlots (fd : Fd) : EIO (List Meta) := do
+  a ← readAt fd 0 metaSize;
+  b ← readAt fd pageSize metaSize;
+  let ma : Option Meta := match a with
+    | .none => .none
+    | .some x => Meta.decode x;
+  let mb : Option Meta := match b with
+    | .none => .none
+    | .some x => Meta.decode x;
+  EIO.pure (validMetas ma mb)
+
+/-- The snapshot handshake: both meta slots under the shared lock, so a commit's slot
+switch is either entirely before or entirely after the read. Only the two 96-byte slots
+are covered; the page chain is immutable and is read after the lock is dropped, which is
+why a commit does not wait for a scan. -/
+def readSlotsLocked (fd : Fd) : EIO (List Meta) :=
+  EIO.withLock fd .shared (readSlots fd)
+
+/-- The meta slot a fresh reader takes as its snapshot, with the state it names. The first
+slot (newest `txid` first) whose whole page chain verifies wins, exactly as `recover`
+chooses. -/
+def chooseMetaState (fd : Fd) (indices : List IndexDef) (floor pages : U64) :
+    List Meta → EIO (Option (Meta × StoreState))
+  | .nil => EIO.pure .none
+  | .cons m rest => do
+    r ← loadChain fd m;
+    match r with
+    | .some recs => EIO.pure (.some (m, StoreState.mk (dbOf m recs indices) pages floor))
+    | .none => chooseMetaState fd indices floor pages rest
+
+/-- The meta of an empty (never committed) store, so a reader can still be a lease. -/
+def zeroMeta (pages : U64) : Meta :=
+  Meta.mk (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0)
+    (U64.ofNat 0) (U64.ofNat 0) (U64.ofNat 0) pages
+
+-- ## Readers: a snapshot lease for the life of the cursor
+
+/-- A read-only handle holding a snapshot lease. `db` is the materialised snapshot the
+process reads values from; `meta` is the same snapshot's root and generation, which
+`scan` follows page by page on disk. The lease is the frozen root plus the never-reuse
+rule, not a held lock (see the module comment); `open` takes the share only for the meta
+handshake. Closing the reader closes its descriptor. -/
+structure Reader where
+  fd : Fd
+  meta : Meta
+  db : Db
+
+/-- A page-at-a-time scan of the snapshot's leaf chain. The page numbers and the `txid`
+are frozen when the scan starts; a page that does not carry that `txid` is an error, not
+a torn read. -/
+structure Scan where
+  fd : Fd
+  txid : U64
+  pages : U64
+  page : U64
+
+/-- Open a snapshot: a read-only descriptor, the meta handshake under the shared lock,
+then the newest chain that verifies (read without the lock: those pages cannot change).
+The lease lasts until `Reader.close`. -/
+def Reader.open (path : String) (indices : List IndexDef) : EIO Reader := do
+  fd ← Fd.open path .read OpenFlags.none;
+  ms ← readSlotsLocked fd;
+  let floor := maxTxid ms;
+  let pages := maxPages ms;
+  r ← chooseMetaState fd indices floor pages ms;
+  match r with
+  | .some e => EIO.pure (Reader.mk fd e.1 e.2.db)
+  | .none => EIO.pure (Reader.mk fd (zeroMeta pages) (emptyDb indices))
+
+/-- The snapshot's value view (the same immutable `Snapshot` the note's `getDb` returns). -/
+def Reader.snapshot (r : Reader) : Snapshot := Db.snapshot r.db
+
+/-- Start a scan of the snapshot's leaf chain. -/
+def Reader.scan (r : Reader) : Scan :=
+  Scan.mk r.fd r.meta.txid r.meta.pageCount r.meta.root
+
+/-- The next leaf page of the scan, and the scan positioned after it. `none` at the end.
+The page is read through the snapshot's mapping of the chain: it must still carry the
+snapshot's `txid` and checksum, which is what "reachable pages are never overwritten"
+buys. -/
+def Scan.step (s : Scan) : EIO (Option (List Rec × Scan)) :=
+  match Nat.beq s.page.toNat 0 with
+  | .true => EIO.pure .none
+  | .false =>
+    match UIntN.lt s.page s.pages with
+    | .false => EIO.fail "scan: page outside the snapshot"
+    | .true => do
+      r ← readPage s.fd s.txid s.page;
+      match r with
+      | .none => EIO.fail "scan: a page of the snapshot was overwritten or truncated"
+      | .some p => EIO.pure (.some (p.recs, Scan.mk s.fd s.txid s.pages p.right))
+
+/-- Close the reader's descriptor (releasing anything it still holds, though the share is
+only taken for the handshake). -/
+def Reader.close (r : Reader) : EIO Unit := do
+  u ← Fd.unlock r.fd;
+  match u with
+  | .error e => EIO.fail e
+  | .ok _ => Fd.close r.fd
+
+-- ## The public engine: the same API, now safe across processes
+
+/-- The state behind the meta slots `ms`. If their `txid` is the one this handle already
+holds, the in-memory state is returned; otherwise the page chain is read (another process
+committed). The chain read is outside the lock: a valid slot only names pages that were
+durable before it was published, and no later commit writes them. -/
+def stateOfSlots (h : Handle) (st : StoreState) (ms : List Meta) : EIO StoreState :=
+  match ms with
+  -- No checksum-valid slot: the disk is the truth and it holds no commit (an empty
+  -- file, or one whose header was destroyed). `recover` on open says the same.
+  | .nil => EIO.pure (StoreState.mk (emptyDb h.indices) (U64.ofNat 2) (U64.ofNat 0))
+  | .cons _ _ =>
+    match UIntN.beq (maxTxid ms) st.db.gen with
+    | .true => EIO.pure st
+    | .false => do
+      r ← chooseState h.fd h.indices (maxTxid ms) (maxPages ms) ms;
+      match r with
+      | .some st' => EIO.pure st'
+      | .none =>
+        EIO.pure (StoreState.mk (emptyDb h.indices) (maxPages ms) (maxTxid ms))
+
+/-- The latest snapshot, as the note's `getDb`: the meta slots are read under the shared
+lock, so a commit in another process is seen whole or not at all (its slot switch is one
+96-byte write, and either the old or the new slot wins the `txid` pick).
+
+The handle's cell is taken for the read as well as for the commit. That is not only for
+the in-memory state: `flock` belongs to the *open file description*, and two threads that
+share one `Handle` share its descriptor. A `LOCK_SH` taken on a descriptor that already
+holds `LOCK_EX` converts the lock rather than waiting, which would drop the writer's
+exclusion mid-commit. Serialising every use of the handle on its cell keeps one lock
+acquisition in flight per descriptor. Concurrent readers in one process should use
+`Reader` (a descriptor and a share of their own), which is the same object readers in
+other processes use. -/
+/-- Bring the state up to date from `ms` and take its snapshot, keeping the state to
+publish even on failure. -/
+def refreshAndRead (h : Handle) (st : StoreState) (ms : List Meta) :
+    IO (StoreState × Except String Snapshot) :=
+  IO.bind (stateOfSlots h st ms) (fun r =>
+    match r with
+    | .error e => IO.pure (st, .error e)
+    | .ok st' => IO.pure (st', .ok (Db.snapshot st'.db)))
+
+def Handle.getDb (h : Handle) : EIO Snapshot :=
+  EIO.lift (MVar.borrow h.state (fun st hole =>
+    IO.bind (readSlotsLocked h.fd) (fun r =>
+      match r with
+      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
+      | .ok ms =>
+        IO.bind (refreshAndRead h st ms) (fun r2 =>
+          MVar.fill h.state hole r2.1 (IO.pure r2.2)))))
+
+/-- Re-read the meta *inside* the exclusive lock and commit against it. This is the
+whole point of the slice: the state the version/epoch check sees cannot change before the
+slot switch, because no other cooperating writer can be in the section. -/
+def commitSection (h : Handle) (tx : Snapshot) :
+    EIO (StoreState × Except String Outcome) := do
+  fresh ← recover h.fd h.indices;
+  EIO.lift (commit h.fd fresh tx)
+
+/-- The section without the locking, for callers that already hold the exclusive lock. -/
+def commitUnlocked (h : Handle) (st : StoreState) (tx : Snapshot) :
+    IO (StoreState × Except String Outcome) := do
+  r ← commitSection h tx;
+  match r with
+  | .error e => IO.pure (st, .error e)
+  | .ok (st', out) => IO.pure (st', out)
+
+/-- Commit with the lock already held, then unlock; the result carries the state to
+publish whether the commit committed, rejected, or failed. -/
+def commitAndUnlock (h : Handle) (st : StoreState) (tx : Snapshot) :
+    IO (StoreState × Except String Outcome) :=
+  IO.bind (commitUnlocked h st tx) (fun r =>
+    IO.bind (Fd.unlock h.fd) (fun u =>
+      match u with
+      | .error e => IO.pure (r.1, .error e)
+      | .ok _ => IO.pure r))
+
+/-- Commit a transaction, waiting for the writer lock. The transaction's pure part is
+already done; the exclusive section is validation plus the page/fsync/meta/fsync
+sequence. A transaction that lost a race is `Outcome.rejected` — it is not retried. -/
+def Handle.putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
+  EIO.lift (MVar.borrow h.state (fun st hole =>
+    IO.bind (Fd.lock h.fd .exclusive) (fun l =>
+      match l with
+      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
+      | .ok _ =>
+        IO.bind (commitAndUnlock h st tx) (fun r =>
+          MVar.fill h.state hole r.1 (IO.pure (.ok r.2))))))
+
+/-- A non-blocking commit: `none` when another open file description holds the exclusive
+lock (the caller decides whether to wait or to report `busy`), `some out` when the
+section ran. The typed `busy` of `Fd.tryLock` is surfaced here as `none`. -/
+def Handle.tryPutDb (h : Handle) (tx : Snapshot) : EIO (Option Outcome) :=
+  EIO.lift (MVar.borrow h.state (fun st hole =>
+    IO.bind (Fd.tryLock h.fd .exclusive) (fun l =>
+      match l with
+      | .error e => MVar.fill h.state hole st (IO.pure (.error e))
+      | .ok .busy => MVar.fill h.state hole st (IO.pure (.ok .none))
+      | .ok .acquired =>
+        IO.bind (commitAndUnlock h st tx) (fun r =>
+          MVar.fill h.state hole r.1 (IO.pure (.ok (.some r.2)))))))
+
+/-- Close the writer's descriptor (which also drops any lock it held). -/
+def Handle.closeDb (h : Handle) : EIO Unit := Fd.close h.fd

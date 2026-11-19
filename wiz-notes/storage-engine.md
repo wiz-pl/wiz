@@ -1300,3 +1300,120 @@ train6 checkout stops before the ledger on pre-existing errors in `lib/Scope.wiz
 are unrelated to `lib/Sys.wiz`; `scripts/trust-ffi-audit.sh Sys` does show both new
 externs as `reviewed` with the expected `Fd → Nat` signature. No PR and no CI.
 
+
+---
+
+## 15. Slice 3b implemented: one writer, many readers
+
+Status: branch `store-multiproc` off `integration/train6` (`7138f924`), with
+`store-durable` (`244caf7a`) and `store-mmap` (`79fb531b`) merged; train6 is
+untouched and there is no PR. Neither format branch's writer or decoder is
+changed: this slice adds `flock` to the ordinary `Sys`/`Fd` family, a
+`Multiproc.wiz` layer over `Durable.wiz`, and its tests. The `mmap` read path is
+merged unchanged, and §15.6 checks its assumptions against the shipped writer.
+
+### 15.1 The lock native
+
+`runtime/rt_sys.inc` adds `wiz_sys_fd_flock(p, mode, nonblock)`:
+
+* `mode` 0 is `LOCK_SH` (shared), 1 is `LOCK_EX` (exclusive), 2 is `LOCK_UN`;
+* blocking unless `nonblock`, in which case a held lock returns `WIZ_SYS_BUSY`
+  (100002) with `wiz_sys_err = 0` — an answer, not an error — and any other
+  failure returns `errno` (also left in `wiz_sys_err`);
+* a closed descriptor is `EBADF`.
+
+`lib/Sys.wiz` adds the Wiz surface in the same style as `fsync`/`fdatasync`:
+`Fd.lockRaw`, `LockMode` (`shared`/`exclusive`), `Locked` (`acquired`/`busy`),
+`Fd.lock` (wait), `Fd.tryLock` (the typed `busy`) and `Fd.unlock`. Two rows in
+`.github/trust-baseline.tsv` cover the extern (`scripts/trust-ffi-audit.sh`
+checks the signature against the C prototype).
+
+`flock` belongs to the **open file description**, not the process. Copies of one
+`Fd` share the lock; two `Fd.open`s of the same file contend, even inside one
+process. That is what lets the test exercise the contract with two handles in one
+process, and it is why the writer handle keeps its `MVar` (below).
+
+### 15.2 The concurrency contract
+
+```
+writer:   getDb ──(pure transaction, no lock)── putDb
+                                                    └─ LOCK_EX ─ validate ─ pages ─ fdatasync ─ meta ─ fsync ─ LOCK_UN
+reader:   open ── LOCK_SH ─ read two meta slots ── LOCK_UN ── (snapshot lease: root + pages) ── scan ── close
+```
+
+* **The writer takes the exclusive lock for the commit section only.** `getDb`,
+  the pure `over`/`Lens` work, and the caller's decision are outside it. The
+  section is: re-read the meta, run `Db.commit`'s validation on that fresh state,
+  write pages, `fdatasync`, write the inactive slot, `fsync`, release. The lock
+  is released on every path (success, rejection, I/O error).
+* **The reader takes the shared lock for the handshake, and a snapshot lease for
+  the cursor.** The handshake is the two 96-byte meta slots, read under `LOCK_SH`
+  so the writer's slot switch is entirely before or entirely after; the chain is
+  read after the lock is dropped, because a checksum-valid slot only names pages
+  that were durable before it was published. The cursor's stability is the
+  **lease** (§2.5): a frozen `(generation, root)` and the never-reuse rule. This
+  is the design's own alternative ("a shared lock *or* a snapshot lease") and it
+  is forced by §2.1's "readers never block the writer": a share held for the
+  whole cursor would make every commit wait for every open scan, and the
+  mid-scan-commit test impossible. When a later policy reuses pages (§2.5
+  policies 2/3), the lease becomes a held share or a counted lease and a commit
+  then waits for old readers.
+* **What a reader sees when a commit lands mid-scan.** Its root was frozen at
+  `Reader.open`; the commit appends fresh pages at the old `page_count` and
+  switches the inactive meta slot. Pages reachable from the old root are never
+  written, so the rest of the scan reads exactly the old records, and each page
+  still carries the old `txid` (the decoder checks it) and checksum. The test
+  proves this with a two-leaf chain: page 1 read, commit, page 2 read, both still
+  at count 0, while a new reader sees count 1.
+* **One writer per process, not just per store.** The handle's `MVar` is taken
+  around both `getDb` and `putDb`, for two reasons: it is the in-process
+  single-writer cell when two threads share one handle (their descriptor is one
+  open file description, and `flock` on it would convert rather than contend),
+  and it keeps every lock acquisition on a descriptor in one place. `flock` then
+  serialises *handles* (in one process or many). Lock order is always
+  `MVar` → `flock`, never the reverse, and the flock is never held while calling
+  user code, so there is no cycle. Two `Handle`s in one process are ordinary
+  competing writers; the test uses exactly that.
+
+### 15.3 Validation inside the exclusive section
+
+`Handle.putDb` runs, under `LOCK_EX`:
+
+1. `recover`: read both slots, pick the max checksum-valid `txid`, load its chain;
+2. `Db.commit` on that state: the delete-epoch test and every per-key version test
+   see a state that no cooperating writer can change before the slot switch;
+3. only on a commit: the page writes, the two syncs, the slot switch.
+
+A transaction that loses the race is returned as `Outcome.rejected`
+(`stale`/`conflict`/...) with the fresh state published to the handle, so a
+caller can re-read with `getDb` and re-run its pure function if it wants to. The
+engine never retries. A pure delta (`addCount`) still merges: two `+1`s from one
+base both commit and sum, while a `set`/`del` computed from that base is a
+conflict, and any transaction that began before a delete is `stale` through the
+global epoch. Two-handle test, exact outcomes: `+1` commits, `+1` commits
+(count 2), `set` rejected `conflict`, `+1` commits (count 3), `delete` commits,
+the next transaction from the old base rejected `stale`.
+
+### 15.4 Crash and abandonment
+
+* **The lock dies with the process.** `flock` is held on the open file
+  description and dropped by the kernel on exit (including `SIGKILL`) and when
+  the last descriptor closes, so an abandoned writer cannot leave the store
+  locked. There is no lock file and no lease record on disk to go stale.
+* **No half-switched slot.** The writer writes the slot once, after the pages are
+  durable. A torn slot fails its checksum and is skipped; a valid slot whose root
+  chain is short (the crash-substitute) fails the chain check and recovery falls
+  back to the previous slot. The generation floor is above every checksum-valid
+  slot seen, so the next commit cannot reuse the abandoned attempt's generation,
+  and `page_count` starts after every page a valid slot names, so it cannot
+  overwrite a page a stale slot still reaches. Pages of the abandoned attempt
+  are unreachable and leaked, as §2.5's never-reuse policy accepts.
+
+Tested: the truncated-tail substitute (drop the last 4 KiB page of a
+three-commit file, reopen: generation 2 / count 1, no lock held, next commit
+generation 4 / count 2) and, opt-in, a real killed process (§15.5).
+Not tested: a torn slot in the *middle* of the 96 bytes (covered by the checksum
+by construction, but not exercised by a test), and power loss between the two
+syncs (the protocol's ordering argument covers it; no fault injector here).
+
+### 15.5 What ran

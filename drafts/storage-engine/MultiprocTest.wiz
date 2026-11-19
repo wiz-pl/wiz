@@ -1,0 +1,376 @@
+import Sys
+import Word
+import Text
+import Storage
+import Durable
+import Multiproc
+/-!
+# The multi-process contract, exercised end to end
+
+`wiz run drafts/storage-engine/MultiprocTest.wiz` (compiled: the file and lock natives do
+not run under `#eval`). Everything is one process with **two open file descriptions**
+(two `Fd.open` calls), which is the case `flock` distinguishes: the kernel treats each
+description as an independent locker, so a shared reader really does block an exclusive
+writer here, exactly as it would between two processes.
+
+What it checks:
+
+* shared locks coexist, an exclusive lock is `busy` while a share is held, a share is
+  `busy` while the exclusive lock is held, and unlocking lets the other side in;
+* the commit section takes the exclusive lock: while another description holds it,
+  `tryPutDb` answers `none` (typed busy, not a silent retry); when it is free the same
+  transaction commits, and the handle's ordinary `getDb`/`putDb` hold no lock between
+  the calls;
+* a scan started from a snapshot's root finishes after a commit lands in the middle, sees
+  the old values, and every old page still verifies under its old `txid` (so no page
+  reachable from the root was overwritten); a reader opened afterwards sees the new value;
+* two writers read the same base: both `+1`s commit and sum, a `set` from the same base is
+  rejected as a conflict, a pure `add` still merges, and a transaction that began before a
+  delete is rejected as stale;
+* a file truncated by one page (the stand-in for a writer that died between its page
+  writes and its slot switch) reopens at the previous generation, is not left locked, and
+  commits again above the torn generation.
+
+Set `WIZ_MULTIPROC_KILL=1` to also run the kill case: a child process takes the exclusive
+lock with `flock(1)`, is `SIGKILL`ed, and the lock is gone. It needs the `flock` utility,
+so it is opt-in; the test group's fixed output is the skipping line.
+-/
+
+def expect (what : String) (b : Bool) : EIO Unit :=
+  match b with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def rejected (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .false
+  | .rejected _ => .true
+
+def isStale (o : Outcome) : Bool :=
+  match o with
+  | .rejected e => match e with
+    | .stale _ _ => .true
+    | _ => .false
+  | .committed _ => .false
+
+def isConflict (o : Outcome) : Bool :=
+  match o with
+  | .rejected e => match e with
+    | .conflict _ _ _ => .true
+    | _ => .false
+  | .committed _ => .false
+
+def gotLock : Locked → Bool
+  | .acquired => .true
+  | .busy => .false
+
+def snapCount (s : Snapshot) (id : U64) : Nat :=
+  match Snapshot.getNode s id with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def snapHas (s : Snapshot) (id : U64) : Bool :=
+  match Snapshot.getNode s id with
+  | .some _ => .true
+  | .none => .false
+
+def indices : List IndexDef := [kindIndex, uniqueLabel]
+
+def seedNodes (s : Snapshot) : Snapshot :=
+  Snapshot.record
+    (Snapshot.record s (U64.ofNat 1)
+      (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)))))
+    (U64.ofNat 2)
+    (.some (.set (Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8))))
+
+/-- `n` nodes with ids and labels `i, i+1, …`, all of kind 1, count 0. Two leaves: 127
+records and the rest. -/
+def seedMany (s : Snapshot) : Nat → Nat → Snapshot
+  | .zero, _ => s
+  | .succ k, i =>
+    seedMany
+      (Snapshot.record s (U64.ofNat i)
+        (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat i)))))
+      k (Nat.succ i)
+
+/-- The record for `id` in a page's record list. -/
+def recFind : List Rec → U64 → Option Rec
+  | .nil, _ => .none
+  | .cons r rs, id => match UIntN.beq r.id id with
+    | .true => .some r
+    | .false => recFind rs id
+
+def recCount (recs : List Rec) (id : U64) : Nat :=
+  match recFind recs id with
+  | .none => 999999
+  | .some r => r.node.count.toNat
+
+/-- The count of `id` in whichever of the scan's two leaves holds it. -/
+def countIn (a b : List Rec) (id : U64) : Nat :=
+  match recFind a id with
+  | .some r => r.node.count.toNat
+  | .none => recCount b id
+
+-- ## 1. Shared vs exclusive, and the commit section's boundary
+
+def lockTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "lock.db";
+  h ← openDb path indices;
+  s0 ← Handle.getDb h;
+  o ← Handle.putDb h (seedNodes s0);
+  expect "lock test: the seed commits" (succeeded o);
+  -- Three open file descriptions in the same process: flock treats each as an
+  -- independent locker, exactly as it would another process.
+  p1 ← Fd.open path .readWrite OpenFlags.none;
+  p2 ← Fd.open path .readWrite OpenFlags.none;
+  p3 ← Fd.open path .readWrite OpenFlags.none;
+  a ← Fd.tryLock p1 .shared;
+  expect "lock test: a free file takes a shared lock" (gotLock a);
+  b ← Fd.tryLock p2 .shared;
+  expect "lock test: shared locks do not exclude each other" (gotLock b);
+  c ← Fd.tryLock p3 .exclusive;
+  expect "lock test: the exclusive lock is busy while a share is held"
+    (Bool.not (gotLock c));
+  Fd.unlock p1;
+  Fd.unlock p2;
+  d ← Fd.tryLock p1 .exclusive;
+  expect "lock test: the exclusive lock is free after the shares are released" (gotLock d);
+  e ← Fd.tryLock p2 .shared;
+  expect "lock test: a share is busy while the exclusive lock is held"
+    (Bool.not (gotLock e));
+  Fd.unlock p1;
+  f ← Fd.tryLock p2 .shared;
+  expect "lock test: a share gets in when the exclusive lock is released" (gotLock f);
+  Fd.unlock p2;
+  Fd.close p1;
+  Fd.close p2;
+  Fd.close p3;
+  -- The commit section, and only the section, takes the exclusive lock.
+  s1 ← Handle.getDb h;
+  p ← Fd.open path .readWrite OpenFlags.none;
+  g ← Fd.tryLock p .exclusive;
+  expect "lock test: another description can hold the file" (gotLock g);
+  tb ← Handle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
+  expect "lock test: the commit section is deferred while it is held"
+    (match tb with
+      | .none => .true
+      | .some _ => .false);
+  -- A read waits for the exclusive holder (its handshake takes the share), so read after
+  -- releasing: the transaction was not applied, and it was not retried.
+  Fd.unlock p;
+  sStill ← Handle.getDb h;
+  expect "lock test: the busy attempt changed nothing" (Nat.beq (snapCount sStill 1) 0);
+  tc ← Handle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
+  expect "lock test: the same transaction commits once the lock is free"
+    (match tc with
+      | .some out => succeeded out
+      | .none => .false);
+  s2 ← Handle.getDb h;
+  expect "lock test: and the count is 1" (Nat.beq (snapCount s2 1) 1);
+  Fd.close p;
+  Handle.closeDb h;
+  EIO.lift (IO.println
+    "lock: shares coexist, exclusive excludes both ways, commit section waits for the lock")
+
+-- ## 2. The reader sees the old snapshot across a commit
+
+def snapshotTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "scan.db";
+  h ← openDb path indices;
+  s0 ← Handle.getDb h;
+  o ← Handle.putDb h (seedMany s0 130 1);
+  expect "scan test: the 130-node seed commits" (succeeded o);
+  r ← Reader.open path indices;
+  p1 ← Scan.step (Reader.scan r);
+  match p1 with
+  | .none => EIO.fail "scan test: the scan ended before its first page"
+  | .some (recs1, scan1) =>
+    expect "scan test: the first leaf holds 127 records" (Nat.beq (List.length recs1) 127);
+    -- The commit lands in the middle of the scan.
+    sNow ← Handle.getDb h;
+    o1 ← Handle.putDb h (bumpCount (U64.ofNat 1) sNow);
+    expect "scan test: the mid-scan commit commits" (succeeded o1);
+    -- Finish the scan from the root frozen at `Reader.open`.
+    p2 ← Scan.step scan1;
+    match p2 with
+    | .none => EIO.fail "scan test: the scan lost its second page"
+    | .some (recs2, scan2) =>
+      expect "scan test: the second leaf holds the remaining 3 records"
+        (Nat.beq (List.length recs2) 3);
+      expect "scan test: node 1 is still 0 in the old chain"
+        (Nat.beq (countIn recs1 recs2 (U64.ofNat 1)) 0);
+      expect "scan test: node 130 is still 0 in the old chain"
+        (Nat.beq (countIn recs1 recs2 (U64.ofNat 130)) 0);
+      p3 ← Scan.step scan2;
+      match p3 with
+      | .some _ => EIO.fail "scan test: the scan has a page too many"
+      | .none =>
+        expect "scan test: the old snapshot still says 0"
+          (Nat.beq (snapCount (Reader.snapshot r) 1) 0);
+        sAfter ← Handle.getDb h;
+        expect "scan test: the writer's latest says 1" (Nat.beq (snapCount sAfter 1) 1);
+        expect "scan test: the commit moved the generation" (Nat.beq sAfter.gen.toNat 2);
+        Reader.close r;
+        r2 ← Reader.open path indices;
+        expect "scan test: a new reader sees 1"
+          (Nat.beq (snapCount (Reader.snapshot r2) 1) 1);
+        Reader.close r2;
+        Handle.closeDb h;
+        EIO.lift (IO.println
+          "scan: pages 127 3, old values 0 0, new value 1, generation 1 -> 2")
+
+-- ## 3. Two writers from the same base
+
+def writersTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "writers.db";
+  w1 ← openDb path indices;
+  w2 ← openDb path indices;
+  s0 ← Handle.getDb w1;
+  oSeed ← Handle.putDb w1 (seedNodes s0);
+  expect "writers test: the seed commits" (succeeded oSeed);
+  -- Both read the same generation.
+  a ← Handle.getDb w1;
+  b ← Handle.getDb w2;
+  o1 ← Handle.putDb w1 (bumpCount (U64.ofNat 1) a);
+  expect "writers test: the first +1 commits" (succeeded o1);
+  -- The second transaction was computed from the same base; a pure delta rebases.
+  o2 ← Handle.putDb w2 (bumpCount (U64.ofNat 1) b);
+  expect "writers test: the second +1 from the same base commits" (succeeded o2);
+  s2 ← Handle.getDb w1;
+  expect "writers test: the +1s summed to 2" (Nat.beq (snapCount s2 1) 2);
+  -- A `set` computed from the stale base is not a delta: rejected, never retried.
+  o3 ← Handle.putDb w2 (setLabel (U64.ofNat 1) (U32.ofNat 99) b);
+  expect "writers test: the stale set is rejected" (rejected o3);
+  expect "writers test: and it is a conflict" (isConflict o3);
+  -- A transaction of pure deltas still merges over the committed writes.
+  o4 ← Handle.putDb w1 (bumpCount (U64.ofNat 1) b);
+  expect "writers test: a stale pure add still commits" (succeeded o4);
+  s4 ← Handle.getDb w1;
+  expect "writers test: the counter is 3" (Nat.beq (snapCount s4 1) 3);
+  -- A delete moves the epoch; a transaction begun before it is stale.
+  oDel ← Handle.putDb w2 (delNode (U64.ofNat 2) b);
+  expect "writers test: the delete commits" (succeeded oDel);
+  o5 ← Handle.putDb w2 (bumpCount (U64.ofNat 1) b);
+  expect "writers test: a transaction begun before the delete is rejected" (rejected o5);
+  expect "writers test: and it is stale" (isStale o5);
+  s5 ← Handle.getDb w2;
+  expect "writers test: the delete is visible" (Bool.not (snapHas s5 2));
+  expect "writers test: the counter survives" (Nat.beq (snapCount s5 1) 3);
+  Handle.closeDb w1;
+  Handle.closeDb w2;
+  EIO.lift (IO.println
+    "writers: two +1s committed and summed to 3, stale set conflict, stale add merged, post-delete tx stale")
+
+-- ## 4. A torn last commit, and no lock left behind
+
+def reopenTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "reopen.db";
+  h ← openDb path indices;
+  s0 ← Handle.getDb h;
+  oA ← Handle.putDb h (seedNodes s0);
+  s1 ← Handle.getDb h;
+  oB ← Handle.putDb h (bumpCount (U64.ofNat 1) s1);
+  s2 ← Handle.getDb h;
+  oC ← Handle.putDb h (bumpCount (U64.ofNat 1) s2);
+  s3 ← Handle.getDb h;
+  expect "reopen test: three commits"
+    (Bool.and (succeeded oA) (Bool.and (succeeded oB) (succeeded oC)));
+  expect "reopen test: at generation 3" (Nat.beq s3.gen.toNat 3);
+  Handle.closeDb h;
+  -- The crash substitute: drop the file's last page, so the newest slot's root is short
+  -- while the slot still checksums. This is what a writer killed between the page writes
+  -- and the slot switch leaves behind (the pages of the slot are not reachable).
+  bytes ← FS.readBytes path;
+  let cut := Nat.sub (Bytes.size bytes) pageSize;
+  let tpath := Path.join dir "reopen-cut.db";
+  FS.writeBytes tpath (Bytes.slice bytes 0 cut);
+  ht ← openDb tpath indices;
+  st ← Handle.getDb ht;
+  expect "reopen test: the torn commit is ignored (generation 2)"
+    (Nat.beq st.gen.toNat 2);
+  expect "reopen test: the last good count is 1" (Nat.beq (snapCount st 1) 1);
+  -- A closed handle left no lock: a fresh description takes it at once.
+  p ← Fd.open tpath .readWrite OpenFlags.none;
+  l ← Fd.tryLock p .exclusive;
+  expect "reopen test: the reopened store is not left locked" (gotLock l);
+  Fd.unlock p;
+  Fd.close p;
+  oD ← Handle.putDb ht (bumpCount (U64.ofNat 1) st);
+  expect "reopen test: a commit after torn recovery commits" (succeeded oD);
+  s4 ← Handle.getDb ht;
+  expect "reopen test: the recovery commit is generation 4"
+    (Nat.beq s4.gen.toNat 4);
+  expect "reopen test: and the count is 2" (Nat.beq (snapCount s4 1) 2);
+  Handle.closeDb ht;
+  EIO.lift (IO.println
+    "reopen: torn last commit ignored at generation 2, no lock held, next commit is 4")
+
+-- ## 5. An abandoned writer (opt-in: needs the `flock` utility)
+
+def waitForFile (path : String) : Nat → EIO Bool
+  | .zero => EIO.pure .false
+  | .succ k => do
+    r ← FS.readFile path;
+    match r with
+    | .ok _ => EIO.pure .true
+    | .error _ => do
+      EIO.lift (Clock.sleep (Duration.millis 25));
+      waitForFile path k
+
+def shQuote (s : String) : String := String.append "'" (String.append s "'")
+
+def killTest (dir : String) : EIO Unit := do
+  let path := Path.join dir "kill.db";
+  h ← openDb path indices;
+  s0 ← Handle.getDb h;
+  o ← Handle.putDb h (seedNodes s0);
+  expect "kill test: the seed commits" (succeeded o);
+  let marker := Path.join dir "kill.marker";
+  -- A separate process takes the exclusive lock the same way the writer would, then
+  -- sleeps; `9>>` must not truncate the store.
+  let script :=
+    String.append "exec 9>>" (String.append (shQuote path)
+      (String.append "; flock -x 9; echo locked > "
+        (String.append (shQuote marker) "; sleep 30")));
+  c ← Process.spawn "sh" (List.cons "-c" (List.cons script List.nil))
+    .inherit .inherit .inherit;
+  ok ← waitForFile marker 400;
+  expect "kill test: the child took the lock" ok;
+  p ← Fd.open path .readWrite OpenFlags.none;
+  l1 ← Fd.tryLock p .exclusive;
+  expect "kill test: the live child's lock is seen" (Bool.not (gotLock l1));
+  Child.kill c 9;
+  st ← Child.wait c;
+  l2 ← Fd.tryLock p .exclusive;
+  expect "kill test: the killed child's lock is released" (gotLock l2);
+  Fd.unlock p;
+  Fd.close p;
+  Handle.closeDb h;
+  EIO.lift (IO.println
+    (String.append "kill: released after SIGKILL ("
+      (String.append (ExitStatus.toString st) ")")))
+
+def envFlag (k : String) : IO Bool := do
+  v ← Env.get k;
+  IO.pure (match v with
+    | .some _ => .true
+    | .none => .false)
+
+def main : IO Unit := EIO.toIO (do
+  killOn ← EIO.lift (envFlag "WIZ_MULTIPROC_KILL");
+  dir ← FS.createTempDir;
+  lockTest dir;
+  snapshotTest dir;
+  writersTest dir;
+  reopenTest dir;
+  match killOn with
+  | .true => killTest dir
+  | .false =>
+    EIO.lift (IO.println "kill: skipped (WIZ_MULTIPROC_KILL is not set)")
+  FS.removeAll dir;
+  EIO.lift (IO.println "multiproc: all checks passed"))

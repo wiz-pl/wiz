@@ -1,0 +1,39 @@
+import Sys
+import Word
+import Text
+import Mmap
+/-!
+# Read a durable-written store through the `mmap` path (the format-merge check)
+
+`WIZ_COMPAT_STORE=/path wiz run drafts/storage-engine/CompatRead.wiz` maps the file
+`CompatSeed.wiz` wrote with `Durable.wiz`, opens its snapshot with `Mmap.wiz`'s
+decoder (meta slot pick, checksum, record layout) and prints the two nodes. This is
+the check that the two merged branches really share one on-disk format: the decoder
+was written before the writer, from the note, and this is the first time it reads
+the writer's bytes.
+-/
+
+def word (w : U64) : String := Nat.toString (UIntN.toNat w)
+
+def showNode (s : Snapshot) (id : U64) : String :=
+  match Snapshot.getNode s id with
+  | .none => String.append "node " (String.append (word id) " absent")
+  | .some n =>
+    String.append (word n.id) (String.append " kind " (String.append (word n.kind)
+      (String.append " label " (String.append (word n.label)
+        (String.append " count " (word n.count))))))
+
+def main : IO Unit := EIO.toIO (do
+  p ← EIO.lift (Env.get "WIZ_COMPAT_STORE");
+  match p with
+  | .none => EIO.fail "WIZ_COMPAT_STORE is not set"
+  | .some path => do
+    fd ← Fd.open path .read OpenFlags.none;
+    m ← Store.mapFile fd 1048576;
+    s ← match Snapshot.open m with
+      | .ok s => EIO.pure s
+      | .error e => EIO.fail (StoreError.message e)
+    EIO.lift (IO.println (String.append "gen " (word s.gen)));
+    EIO.lift (IO.println (String.append "n1 " (showNode s (U64.ofNat 1))));
+    EIO.lift (IO.println (String.append "n2 " (showNode s (U64.ofNat 2))));
+    Fd.close fd)
