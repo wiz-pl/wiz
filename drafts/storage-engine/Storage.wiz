@@ -425,6 +425,22 @@ def indexTraversal (d : IndexDef) (v : U64) : Traversal Snapshot Node :=
         | .some n => Snapshot.record s id (Patch.ofChange n (f n)))
       s (Root.lookupIndex s.root (IndexDef.uid d) v))
 
+/-- The demo indices the tests build a store with: kind (field 0) and a unique label. -/
+def kindIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def uniqueLabel : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .true
+
+/-- Bump every node whose indexed field is `v`. -/
+def bumpOfKind (v : U64) (s : Snapshot) : Snapshot :=
+  Traversal.overAll (indexTraversal kindIndex v) (fun n => { n with count := n.count + 1 }) s
+
+/-- Delete a node (a tombstone in the write-set; the commit bumps the delete epoch). -/
+def delNode (id : U64) (s : Snapshot) : Snapshot :=
+  { s with ws := WriteSet.combine s.ws id .del }
+
+/-- Set a node's label through the lens (the update records a `set` patch). -/
+def setLabel (id : U64) (v : U32) (s : Snapshot) : Snapshot :=
+  Lens.over (Lens.comp (nodeOr id (Node.mk 0 0 0)) Node.labelL) (fun _ => v) s
+
 -- ## Commit and validation
 
 /-- Why a commit was rejected. -/
