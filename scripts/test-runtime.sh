@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The C runtime compiles on its own: `runtime/wiz_rt.h` (value representation, tags,
-# object layouts, prototypes) plus the six area files (`runtime/rt_*.inc`), as a
+# object layouts, prototypes) plus the seven area files (`runtime/rt_*.inc`), as a
 # translation unit that is not generated code.
 #
 # `cc -fsyntax-only -Wall -Wextra`, in both ABI settings:
@@ -44,6 +44,7 @@ cat > "$tmp/runtime.c" <<'EOF'
 #include "rt_words.inc"
 #include "rt_data.inc"
 #include "rt_sys.inc"
+#include "rt_storage.inc"
 #include "rt_con.inc"
 /* the header's Emscripten auto-enable must have taken effect (see the check below) */
 #ifdef WIZ_EXPECT_NO_THREADS
