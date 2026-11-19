@@ -1,4 +1,5 @@
 -- test: run
+import WordMap
 import Sys
 import Text
 import Scry.Registry
@@ -52,7 +53,8 @@ def demoPack : Scry.RulePack := pack
 
 def demoRun : Scry.AnalysisOutput :=
   Scry.runAnalyses (Scry.AnalysisTable.append Scry.analyses (one demoAnalysis)) demoPack
-    (Wil.Program.mk .nil) (Scry.PtResult.mk Scry.ptEmpty .nil .nil 0 .true) .nil
+    (Wil.Program.mk .nil)
+    (Scry.PtResult.mk Scry.ptEmpty .nil U64Map.empty U64Map.empty .nil 0 .true) .nil
 
 def opts (args : List String) : EIO Scry.TaintOpts :=
   match Scry.taintArgs args with
