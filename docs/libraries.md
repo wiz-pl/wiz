@@ -1892,6 +1892,20 @@ Scry.WilExamples` is the hand-built golden corpus (`Scry.arith`, `Scry.sumTo`,
 in this stage; `wiz-notes/scry-wil.md` has the grammar, the rules, the corpus and what
 S2 still needs.
 
+`Wil.cstep`, `Wil.CStep` and `Wil.crun` add a **concurrent machine** over the same
+sequential step: a thread is its own call stack, `Wil.CConfig.mem` is one shared store
+(sequentially consistent), and the synchronisation primitives are reserved callee names
+(`lock`, `unlock`, `spawn:<f>`, `join`, `atomic_add`, `fence` — the table `Wil.syncOf`)
+rather than new `Stmt` constructors, so the lowering and every existing analysis are
+unchanged. Blocks the root allocates are `shared`; a spawned thread's are `local` to it,
+and a cross-thread access faults in the step relation. `Wil.crun` is a fuel-bounded
+*interleaving* under a scheduler (`Wil.schedFirst`, `Wil.schedRoundRobin`,
+`Wil.schedScript`): one run is one interleaving, not all of them. `import
+Scry.ConcurrencyExamples` is the racing / locked / atomic corpus, and `import Scry.Race`
+is the lockset data-race check that consumes it (`Scry.raceFindings`). The model, its
+memory model, and what is proved vs tested are in `wiz-notes/scry-wil-concurrency.md`.
+
+
 ## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
 
 `import Scry.Analysis` numbers a Wil function's statements and terminators as program
