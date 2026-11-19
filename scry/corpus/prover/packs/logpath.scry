@@ -1,0 +1,19 @@
+# Dogfood pack: a request-supplied name must not reach a filesystem handle.
+#
+# `LogFileReader.Resolve(service, file)` normalises the name and then prefixes it with
+# the log root before constructing a `FileInfo`. `Path.GetFullPath` is declared a
+# sanitiser here because the code's real guard is the pair `IsSegment(file)` and the
+# `PathEquals(GetDirectoryName(full), dir)` prefix check — the EDB has no guard facts,
+# so the pack states the effect the guard has as a sanitiser assumption. The proof is
+# only as strong as that assumption; see the note's friction list.
+rule log-path
+  kind taint
+  severity error
+  message A request-supplied name reaches a filesystem handle
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  sanitise System.IO.Path.GetFullPath result
+  sanitise System.IO.Path.GetFileName result
+  sink System.IO.FileInfo..ctor arg 0
+  sink System.IO.FileStream..ctor arg 0
+end

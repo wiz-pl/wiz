@@ -1,0 +1,23 @@
+# Dogfood pack: the SQL-injection sinks of the real ReportService provider.
+#
+# The claim proved over `ReportService.Provider.SqlReportProvider.FetchRrnsAsync` is
+# "no caller-supplied or ambient value reaches a SqlCommand's text". The safety
+# consequence of "every SqlCommand argument is a constant or a parameter bind" is the
+# same no-flow claim; the positive "is a constant or a bind" predicate is not in the
+# proposition language (see wiz-notes/scry-prover-dogfood.md).
+rule sql-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a SQL command text
+  source System.Console.ReadLine result
+  source System.Environment.GetEnvironmentVariable result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  sink Microsoft.Data.SqlClient.SqlCommand..ctor arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.set_CommandText arg 1
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteReader arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteNonQuery arg 0
+  sink Microsoft.Data.SqlClient.SqlCommand.ExecuteScalar arg 0
+  sink System.Data.SqlClient.SqlCommand..ctor arg 0
+  sink System.Data.SqlClient.SqlCommand.set_CommandText arg 1
+end

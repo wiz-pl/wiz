@@ -104,6 +104,7 @@ def group : Group where
         ("#eval String.eq (Scry.Verdict.show Scry.proverSafeVerdict) \"ok\"\n" ++
          "#eval String.eq Scry.proverSafeInvariant \"{(0,0)}\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"alert rule fires at sink 2 argument 0\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"path tainted(1,1) -> flow(1,2,1) -> sink(2,0,1)\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"rule 0 derives tainted (0,0)\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverCrossVerdict) \"alert rule fires\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverSafeVerdict\n" ++
@@ -113,7 +114,7 @@ def group : Group where
          "#eval match Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe with\n" ++
          "  | .some _ => .true\n" ++
          "  | .none => .false\n")
-        [".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".false", ".false"] },
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".false", ".false"] },
     { name := "the script proves the safe twin; the unsafe twin is refuted at the alert obligation",
       run := fun _ => do
         let pack ← packText

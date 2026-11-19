@@ -157,14 +157,41 @@ def Scry.checkRulesClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
     | .some e => .some e
     | .none => Scry.checkRulesClosed p stI I rest (Nat.succ ri)
 
-/-- The first alert instance in a match list, as a counterexample message. -/
-def Scry.alertInstanceOf (args : List Scry.Term) :
+/-- A row's columns, rendered. An alert's path is a sequence of rows, so the whole row
+matters, not only the sink and its argument. -/
+def Scry.renderRow (row : List U64) : String :=
+  "(" ++ String.intercalate ","
+    (List.map (fun i => Nat.repr (Scry.rowNat row i)) (Scry.range (List.length row))) ++ ")"
+
+/-- The name of a taint relation, for a counterexample's path. -/
+def Scry.relName (rel : Nat) : String :=
+  if Nat.beq rel Scry.rtFlow then "flow"
+  else if Nat.beq rel Scry.rtSrc then "src"
+  else if Nat.beq rel Scry.rtSink then "sink"
+  else if Nat.beq rel Scry.rtTainted then "tainted"
+  else if Nat.beq rel Scry.rtSan then "san"
+  else if Nat.beq rel Scry.rtGen then "gen"
+  else "rel " ++ Nat.repr rel
+
+/-- The positive body atoms of a matching instance, as `relation(row)` strings. -/
+def Scry.renderAtoms (m : Scry.Env Nat × List Nat) : List Scry.Atom → List String
+  | .nil => .nil
+  | .cons a rest => match a with
+    | .pos rel args => List.cons (Scry.relName rel ++
+        Scry.renderRow (List.map (Scry.Term.eval m.1.vals) args)) (Scry.renderAtoms m rest)
+    | _ => Scry.renderAtoms m rest
+
+/-- The first alert instance in a match list, as a counterexample message. The message
+names the whole path — the tainted fact, the flow edge and the sink — because "the alert
+rule fires at sink N" alone does not tell a reader which definition reached it. -/
+def Scry.alertInstanceOf (args : List Scry.Term) (body : List Scry.Atom) :
     List (Scry.Env Nat × List Nat) → Option String
   | .nil => .none
   | .cons m _ =>
     let row := List.map (Scry.Term.eval m.1.vals) args;
+    let path := String.intercalate " -> " (Scry.renderAtoms m body);
     .some ("the alert rule fires at sink " ++ Nat.repr (Scry.rowNat row 0) ++
-      " argument " ++ Nat.repr (Scry.rowNat row 1))
+      " argument " ++ Nat.repr (Scry.rowNat row 1) ++ "; path " ++ path)
 
 /-- The alert rule's instances under `I`: any one is a counterexample to the claim. -/
 def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
@@ -174,7 +201,7 @@ def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
     match r.head with
     | .tuple rel args =>
       if Nat.beq rel Scry.rtAlert then
-        Scry.alertInstanceOf args (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
+        Scry.alertInstanceOf args r.body (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
       else Scry.checkAlertRules p stI rest
     | .lat _ _ _ => Scry.checkAlertRules p stI rest
 
