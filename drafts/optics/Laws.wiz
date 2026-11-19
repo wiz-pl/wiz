@@ -1,0 +1,21 @@
+import Profunctor
+import Optic
+import Logic
+/-!
+# `fstL`'s lens laws, proved
+
+`LensP.GetPut`/`PutGet`/`PutPut` are stated in `Profunctor.wiz` and checked on values in
+`Tests.wiz`. Here they are proved for `fstL`. GetPut needs the componentwise pair
+equation from `lib/Optic.wiz` (`Optic.pairEq`), because pair eta is not definitional in
+Wiz.
+-/
+
+/-- `fstL` obeys GetPut. -/
+def fstL_getPut {A C : Type} : LensP.GetPut (S := A × C) (A := A) fstL :=
+  fun s => Optic.pairEq s.1 s.2 s rfl rfl
+/-- `fstL` obeys PutGet. -/
+def fstL_putGet {A C : Type} : LensP.PutGet (S := A × C) (A := A) fstL :=
+  fun s a => rfl
+/-- `fstL` obeys PutPut. -/
+def fstL_putPut {A C : Type} : LensP.PutPut (S := A × C) (A := A) fstL :=
+  fun s a b => rfl
