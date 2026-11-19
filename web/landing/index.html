@@ -16,7 +16,8 @@
   <a class="brand" href="./" aria-label="Wiz home"><span class="brand-mark" aria-hidden="true">λ</span> Wiz</a>
   <nav class="site-nav" aria-label="Main">
     <ul>
-      <li><a href="docs/">Docs</a></li>
+      <li><a href="docs/">API</a></li>
+      <li><a href="guide/docs/index.html">Guide</a></li>
       <li><a href="bench/">Benchmarks</a></li>
       <li><a href="playground/">Playground</a></li>
       <li><a href="#install">Install</a></li>
@@ -36,7 +37,7 @@
       code through C and LLVM.
     </p>
     <p class="hero-actions">
-      <a class="button primary" href="docs/">Read the docs</a>
+      <a class="button primary" href="guide/docs/index.html">Read the docs</a>
       <a class="button" href="playground/">Try the playground</a>
     </p>
     <pre class="hero-code" tabindex="0" aria-label="Example: the identity function"><code><span class="tok-keyword">def</span> id {<span class="tok-number">0</span> A : Type} (<span class="tok-number">1</span> x : A) : A := x</code></pre>
@@ -86,7 +87,7 @@
         <h3>Tools that know the language</h3>
         <p>A language server with an infoview (terminal and browser clients), a
           content-addressed elaboration cache, and
-          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/23-grail.md">grail</a>,
+          <a href="guide/docs/stages/23-grail.html">grail</a>,
           a build tool and test runner configured in Wiz.</p>
       </li>
     </ul>
@@ -96,7 +97,7 @@
     <h2 id="install-title">Get started</h2>
     <p class="section-lede">
       Wiz runs on x86_64 Linux (glibc 2.27 or later). Pick one of these, or read the
-      full <a href="https://github.com/wiz-pl/wiz/blob/master/docs/install.md">installation
+      full <a href="guide/docs/install.html">installation
       guide</a> for editors and a first project.
     </p>
     <ol class="steps">
@@ -113,7 +114,7 @@ tower default nightly</code></pre>
         <p class="small">Or with Nix:
           <code>nix profile install github:wiz-pl/wiz#tower</code>.
           More in the
-          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/26-tower.md">tower
+          <a href="guide/docs/stages/26-tower.html">tower
           guide</a>.</p>
       </li>
       <li>
@@ -131,7 +132,7 @@ nix run github:wiz-pl/wiz#wiz -- check hello.wiz   # `#grail` for grail</code></
 lake build          # the library and the `wiz` executable
 lake test           # the test suite (`lake test -- --list` for the groups)</code></pre>
         <p class="small">See
-          <a href="https://github.com/wiz-pl/wiz/blob/master/docs/building.md">building.md</a>
+          <a href="guide/docs/building.html">building.md</a>
           for CI, caches and the rest.</p>
       </li>
     </ol>
@@ -141,8 +142,16 @@ lake test           # the test suite (`lake test -- --list` for the groups)</cod
     <h2 id="explore-title">Explore</h2>
     <ul class="links">
       <li>
+        <a href="guide/docs/index.html">
+          <span class="link-title">The guide</span>
+          <span class="link-desc">The repository's documentation as pages: installing,
+            the language tour, the stages, packages, the self-hosted compiler, the
+            semantics matrix, and the paths to go deeper.</span>
+        </a>
+      </li>
+      <li>
         <a href="docs/">
-          <span class="link-title">Documentation</span>
+          <span class="link-title">API reference</span>
           <span class="link-desc">The standard library, one page per module, with
             searchable declarations and interactive signatures.</span>
         </a>
@@ -163,7 +172,7 @@ lake test           # the test suite (`lake test -- --list` for the groups)</cod
         </a>
       </li>
       <li>
-        <a href="https://github.com/wiz-pl/wiz/blob/master/docs/tour.md">
+        <a href="guide/docs/tour.html">
           <span class="link-title">Language tour</span>
           <span class="link-desc">A tour for people who know a little functional
             programming, with checked examples.</span>
@@ -195,12 +204,13 @@ lake test           # the test suite (`lake test -- --list` for the groups)</cod
   </p>
   <nav aria-label="Footer">
     <ul>
-      <li><a href="docs/">Docs</a></li>
+      <li><a href="docs/">API</a></li>
+      <li><a href="guide/docs/index.html">Guide</a></li>
       <li><a href="bench/">Benchmarks</a></li>
       <li><a href="playground/">Playground</a></li>
       <li><a href="https://github.com/wiz-pl/wiz">GitHub</a></li>
       <li><a href="https://github.com/wiz-pl/wiz/issues">Issues</a></li>
-      <li><a href="https://github.com/wiz-pl/wiz/blob/master/docs/stages/26-tower.md">Toolchain</a></li>
+      <li><a href="guide/docs/stages/26-tower.html">Toolchain</a></li>
       <li><a href="licenses/">Licences</a></li>
     </ul>
   </nav>

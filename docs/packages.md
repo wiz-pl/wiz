@@ -196,4 +196,4 @@ vendored archive is an `--offline` error.
 
 The test needs no network. Its one write outside the scenario's directory is the system
 temporary directory: `grail publish` unpacks the archive there to compute its tree hash
-(`unpackTreeHash`), as do the test helpers that build the tarball.
+(`unpackTreeHash`), as do the test helpers that build the tarball.>>>>>>> agent/site-docs
