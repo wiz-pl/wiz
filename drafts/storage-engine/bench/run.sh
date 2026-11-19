@@ -22,16 +22,16 @@ CF="${WIZ_CFLAGS:-} -Idrafts/storage-engine"
 LF=${WIZ_LDFLAGS:-}
 cd "$root"
 
-bin=${BENCH_BIN_DIR:-$out}
+bidir=${BENCH_BIN_DIR:-$out}
 if [ -z "${BENCH_SKIP_BUILD:-}" ]; then
-  bin=$out
+  bidir=$out
   echo "bench: building the three programs" >&2
   "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
-    drafts/storage-engine/bench/QuireBench.wiz -o "$bin/quire-bench"
+    drafts/storage-engine/bench/QuireBench.wiz -o "$bidir/quire-bench"
   "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
-    drafts/storage-engine/bench/JsonBench.wiz -o "$bin/json-bench"
+    drafts/storage-engine/bench/JsonBench.wiz -o "$bidir/json-bench"
   "$wiz" build -I drafts/storage-engine --cflags "$CF" --ldflags "$LF" \
-    drafts/storage-engine/bench/BeforeBench.wiz -o "$bin/before-bench"
+    drafts/storage-engine/bench/BeforeBench.wiz -o "$bidir/before-bench"
 fi
 
 tsv="$out/results.tsv"
@@ -39,7 +39,7 @@ tsv="$out/results.tsv"
 
 # run_one IMPL OP N BIN PATH [COPY]
 run_one() {
-  impl=$1; op=$2; n=$3; bin=$4; path=$5; copy=${6:-}
+  impl=$1; op=$2; n=$3; prog=$4; path=$5; copy=${6:-}
   if [ "$copy" = "keep" ]; then
     :
   elif [ -n "$copy" ]; then
@@ -48,7 +48,7 @@ run_one() {
     rm -f "$path"
   fi
   t0=$(date +%s%N)
-  if ! "$bin" "$op" "$n" "$path" > "$out/out.txt" 2> "$out/err.txt"; then
+  if ! "$prog" "$op" "$n" "$path" > "$out/out.txt" 2> "$out/err.txt"; then
     echo "bench: $impl $op $n failed:" >&2
     cat "$out/err.txt" >&2
     exit 1
@@ -72,25 +72,25 @@ for n in $ns; do
   QU="$out/quire-$n-update.db"
 
   # build / append
-  run_one json  build  "$n" "$bin/json-bench"  "$J"
-  run_one quire batch  "$n" "$bin/quire-bench" "$QB"
-  run_one quire append "$n" "$bin/quire-bench" "$QA"
+  run_one json  build  "$n" "$bidir/json-bench"  "$J"
+  run_one quire batch  "$n" "$bidir/quire-bench" "$QB"
+  run_one quire append "$n" "$bidir/quire-bench" "$QA"
 
   # reopen (parse the whole file vs open the snapshot)
-  run_one json  reopen "$n" "$bin/json-bench"  "$J"
-  run_one quire reopen "$n" "$bin/quire-bench" "$QB"
-  run_one quire reopen-fast "$n" "$bin/quire-bench" "$QB"
+  run_one json  reopen "$n" "$bidir/json-bench"  "$J" keep
+  run_one quire reopen "$n" "$bidir/quire-bench" "$QB" keep
+  run_one quire reopen-fast "$n" "$bidir/quire-bench" "$QB" keep
 
   # query by state (parse+filter vs indexCursor + filterKey)
-  run_one json  query  "$n" "$bin/json-bench"  "$J"
-  run_one quire query  "$n" "$bin/quire-bench" "$QB"
+  run_one json  query  "$n" "$bidir/json-bench"  "$J" keep
+  run_one quire query  "$n" "$bidir/quire-bench" "$QB" keep
 
   # update one record's state (parse/mutate/rewrite vs lens over + commit)
-  run_one json  update "$n" "$bin/json-bench"  "$JU" "$J"
-  run_one quire update "$n" "$bin/quire-bench" "$QU" "$QB"
+  run_one json  update "$n" "$bidir/json-bench"  "$JU" "$J"
+  run_one quire update "$n" "$bidir/quire-bench" "$QU" "$QB"
 
   # compact the never-reuse append file: the reclamation the design note promises
-  run_one quire compact "$n" "$bin/quire-bench" "$QA" keep
+  run_one quire compact "$n" "$bidir/quire-bench" "$QA" keep
   rm -f "$QA"
 done
 
@@ -99,11 +99,11 @@ done
 for n in ${BENCH_BEFORE_NS:-"1000 10000"}; do
   B="$out/before-$n.db"
   BU="$out/before-$n-update.db"
-  run_one before append "$n" "$bin/before-bench" "$B"
-  run_one before reopen "$n" "$bin/before-bench" "$B" keep
-  run_one before query  "$n" "$bin/before-bench" "$B" keep
+  run_one before append "$n" "$bidir/before-bench" "$B"
+  run_one before reopen "$n" "$bidir/before-bench" "$B" keep
+  run_one before query  "$n" "$bidir/before-bench" "$B" keep
   if [ "$n" = "1000" ]; then
-    run_one before update "$n" "$bin/before-bench" "$BU" "$B"
+    run_one before update "$n" "$bidir/before-bench" "$BU" "$B"
     rm -f "$BU"
   fi
   rm -f "$B"
