@@ -1,0 +1,20 @@
+import Prelude
+/-!
+# Prototype: large elimination of a non-singleton inductive proposition is rejected
+
+Expected **failure**, kept to pin the rule. Run:
+
+    .lake/build/bin/wiz check --no-cache --cache-verify off STC/Prototype/IndPropReject.wiz
+
+Observed: `error: large elimination from the inductive proposition Le: …`, with the
+motive `fun _ _ _ => Nat` (a `Type`, not a `Prop`). The same test is in
+`Tests/Check.lean` ("large elimination of a non-singleton inductive proposition is
+rejected") and `Tests/Groups/Inductive.lean`.
+-/
+
+inductive Le : Nat → Nat → Prop where
+  | refl (n : Nat) : Le n n
+  | step {n m : Nat} (h : Le n m) : Le n (Nat.succ m)
+
+def bad (h : Le .zero .zero) : Nat :=
+  Le.rec (fun _ _ _ => Nat) (fun _ => .zero) (fun _ _ => .zero) h
