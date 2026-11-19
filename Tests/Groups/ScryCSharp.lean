@@ -26,6 +26,13 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
 A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
 text over the expected file **and still fails the case**, so a regenerated golden is
 always reviewed in the diff and never passes silently.
+
+`lower/toplevel.cs` and `lower/lambda.cs` are ports of Joern's `csharpsrc2cpg`
+`TopLevelStatementTests` and `LambdaTests` fixtures. They are **characterization cases
+for known gaps**, not claims of support: the golden records what scry does today, and
+the case is then reported as skipped with the gap as its reason. When the gap is fixed
+the golden changes, the case fails, and both the golden and the skip must be updated
+(see `.github/skip-allowlist.json`).
 -/
 
 open Wiz
@@ -102,7 +109,8 @@ def fixtureDefs (src spill : String) : String :=
 /-- Every fixture, as `(dir, name)`. -/
 def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
-   ("lower", "basic"), ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
+   ("lower", "basic"), ("lower", "toplevel"), ("lower", "lambda"),
+   ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
@@ -200,6 +208,14 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
+    { name := "known gap: top-level statements are invisible (Joern's `<Main>$`)",
+      run := fun _ => do
+        lowerGolden "toplevel"
+        skip "known gap: top-level statements are not lowered (0 functions, 0 warnings); Joern's TopLevelStatementTests gives them a synthetic `<Main>$`" },
+    { name := "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+      run := fun _ => do
+        lowerGolden "lambda"
+        skip "known gap: lambda bodies are an opaque fnptr and its body is not in the program; Joern's LambdaTests lowers each lambda as a method" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"
