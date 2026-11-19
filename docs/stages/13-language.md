@@ -473,9 +473,10 @@ def len : List Nat → Nat
 ```
 
 It is a Prelude `syntax` with a procedural macro (`ListLit.expand`), not built-in
-grammar, so the self-hosted toolchain's generated parser tables are unchanged (its own
-prelude, `preludeText` in `selfhost/Frontend.wiz`, has no list literals, and its sources
-don't use them). `[` already starts an instance binder in a dependent arrow
+grammar. The self-hosted toolchain cannot run a macro at elaboration time, so it adds
+the same surface rule itself (`term.listLit` in `selfhost/Parse.wiz`, precedence 1024)
+and rewrites the node to `List.cons`/`List.nil` in `selfhost/Frontend.wiz`; its embedded
+prelude (`preludeText`) declares nothing for it. `[` already starts an instance binder in a dependent arrow
 (`[Monad m] → m A`, `[inst : C A] → B`): that is one leading parser that also consumes
 the arrow, so it is longer than a list literal and wins (longest match, `Wiz/Parser/Interp.lean`);
 `Enum [a, b]`, `ecase t [..]` and `attribute [..]` are leading parsers that consume their

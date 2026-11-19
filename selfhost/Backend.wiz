@@ -133,6 +133,7 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
   | .letE A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
   | .letq _ A v b => quickType (TCtx.define c (eval (TCtx.env c) v) (eval (TCtx.env c) A)) b
   | .letUnit _ b => quickType c b
+  | .split _ s m _ => .some (eval (.cons (eval (TCtx.env c) s) (TCtx.env c)) m)
   | .down x => match quickType c x with
     | .some xty => match whnf xty with
       | .vulift _ _ A => .some A
@@ -140,10 +141,79 @@ partial def quickType (c : TCtx) (t : Tm) : Option Val := match t with
     | .none => .none
   | _ => inferTy c t
 
--- the payload of a value of `ty` for a match: unpacked from a number
-def payloadOf (ty : Val) (x : ETm) : ETm := match isNatTy ty with
-  | .true => .prim "natUnpack" (etms1 x)
-  | .false => x
+-- (B12) a native representation (`attribute [implemented_by mk get] T.mk`): compiled
+-- code builds a value of `T` with `mk` (which has the constructor's type) and reads its
+-- one runtime field with `get`, as the host's `ReprInfo` (`Wiz/Compiler/Erase.lean`).
+-- `mkImpl` and `getImpl` are kernel names; `tag`, `nfields` and `r` describe the model's
+-- constructor (the field chain a match walks), `mkArity`/`p` place the runtime field
+-- among `mk`'s arguments, and `getArity` is `get`'s telescope length.
+inductive ReprInfo where
+  | mk (mkImpl getImpl : String) (tag nfields r mkArity p getArity : Nat)
+-- the representation of the type named `T`, if one is registered
+def reprOf (T : String) : List Foreign → Option ReprInfo
+  | .nil => (.none : Option ReprInfo)
+  | .cons f rest => match f with
+    | .repr T' _ m g tag nf r ma p ga => match strEq T T' with
+      | .true => .some (.mk m g tag nf r ma p ga)
+      | .false => reprOf T rest
+    | _ => reprOf T rest
+-- `mk ◾ … f … ◾`: `mk` at the constructor's arity, the runtime field at position `p`
+def reprMkArgs : Nat → Nat → Nat → ETm → ETms
+  | _, .zero, _, _ => .nil
+  | i, .succ k, p, f => .cons (match Nat.beq i p with
+    | .true => f
+    | .false => .erased) (reprMkArgs (i + 1) k p f)
+def reprMkApp (ri : ReprInfo) (f : ETm) : ETm := match ri with
+  | .mk m _ _ _ _ ma p _ => eapps (.glob m) (reprMkArgs 0 ma p f)
+-- `get ◾ … x`
+def reprGetArgs : Nat → ETm → ETms
+  | .zero, x => .cons x .nil
+  | .succ k, x => .cons .erased (reprGetArgs k x)
+def reprGetApp (ri : ReprInfo) (x : ETm) : ETm := match ri with
+  | .mk _ g _ _ _ _ _ ga => eapps (.glob g) (reprGetArgs (ga - 1) x)
+-- the model's payload of a native value: the constructor's tag and field chain, with the
+-- one runtime field read back by `get` and the fields erasure dropped as `◾` (this
+-- backend's payloads put the tag first, see `natOf` and the runtime's `hyps`)
+def reprModelFrom (ri : ReprInfo) (x : ETm) : Nat → Nat → ETm
+  | .zero, _ => .erased
+  | .succ k, i => match ri with
+    | .mk _ _ _ _ r _ _ _ => match Nat.beq i r with
+      | .true => epair (reprGetApp ri x) (reprModelFrom ri x k (i + 1))
+      | .false => epair .erased (reprModelFrom ri x k (i + 1))
+def reprModel (ri : ReprInfo) (x : ETm) : ETm := match ri with
+  | .mk _ _ tag nf _ _ _ _ => epair (.obj tag .nil) (reprModelFrom ri x nf 0)
+-- field `i` of an erased payload literal: a nested pair chain `⟨0 f₀ ⟨0 f₁ …⟩⟩`
+def payloadFieldE : Nat → ETm → Option ETm
+  | .zero, .obj 0 (.cons f _) => .some f
+  | .succ k, .obj 0 (.cons _ (.cons rest _)) => payloadFieldE k rest
+  | _, _ => .none
+-- field `r` of the erased constructor payload by projection (its fields follow the
+-- payload's tag, as in `natOf`)
+def payloadField : Nat → ETm → ETm
+  | .zero, x => .proj 0 x
+  | .succ k, x => payloadField k (.proj 1 x)
+-- field `r` of the erased constructor payload, read off the literal when it is one (a
+-- constructor's body builds a pair chain, and the other fields are erased anyway)
+def reprFieldOf (ri : ReprInfo) (x : ETm) : ETm := match ri with
+  | .mk _ _ _ _ r _ _ _ => match x with
+    | .obj 0 (.cons _ (.cons rest _)) => match payloadFieldE r rest with
+      | .some f => f
+      | .none => payloadField r (.proj 1 x)
+    | _ => payloadField r (.proj 1 x)
+-- the native representation of a type, if it has one (its sealed type, by the seal)
+def reprOfTy (ffi : List Foreign) (ty : Val) : Option ReprInfo := match whnf ty with
+  | .vmu _ I _ _ _ => match sealName 1000 I with
+    | .some T => reprOf T ffi
+    | .none => (.none : Option ReprInfo)
+  | _ => (.none : Option ReprInfo)
+
+-- the payload of a value of `ty` for a match: the model's field chain for a native value
+-- (its runtime field read with `get`), else unpacked from a number
+def payloadOf (ffi : List Foreign) (ty : Val) (x : ETm) : ETm := match reprOfTy ffi ty with
+  | .some ri => reprModel ri x
+  | .none => match isNatTy ty with
+    | .true => .prim "natUnpack" (etms1 x)
+    | .false => x
 
 -- the result of erasing: the term, or why it failed
 inductive ER where
@@ -171,6 +241,31 @@ def natOf (x : Tm) (x' : ETm) : ETm := match x' with
     | .nil => .prim "natPack" (etms1 x')
   | _ => .prim "natPack" (etms1 x')
 
+
+
+-- **Lazy `let`s.** The match compiler binds with `let`s things only some branches use:
+-- a shared catch-all (`dflt✝`), the hypotheses of `ind` (each the result of a recursive
+-- call). Evaluated eagerly they cost every call a full walk of its argument, or worse.
+-- A cheap value (a variable, a global, projections of a variable) is substituted at its
+-- uses; any other is suspended (`memo`) and forced where it is used.
+mutual
+def liftE (k c : Nat) : ETm → ETm
+  | .var i => match Nat.lt i c with
+    | .true => .var i
+    | .false => .var (i + k)
+  | .lam b => .lam (liftE k (c + 1) b)
+  | .app f a => .app (liftE k c f) (liftE k c a)
+  | .letE v b => .letE (liftE k c v) (liftE k (c + 1) b)
+  | .obj t fs => .obj t (liftEs k c fs)
+  | .proj i t => .proj i (liftE k c t)
+  | .case s bs => .case (liftE k c s) (liftEs k c bs)
+  | .prim op as => .prim op (liftEs k c as)
+  | t => t
+def liftEs (k c : Nat) : ETms → ETms
+  | .nil => .nil
+  | .cons t rest => .cons (liftE k c t) (liftEs k c rest)
+end
+
 mutual
 -- **Exercise 21.1.** Erase `t`, checking it against `ty` (`eraseCheck` in `Erase.lean`):
 -- an erasable type gives `◾`; `fun` against a Π erases the body under the binder; a
@@ -178,71 +273,74 @@ mutual
 -- is the erased payload (a number for a type shaped like the naturals: `natOf`); the
 -- descriptions are objects (see above); `tt` is `◾`; a `let` keeps its binder;
 -- anything else is inferred (`eraseInfer`).
-def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
+def eraseCheck (ffi : List Foreign) (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
   | .true => .ok .erased
   | .false =>
   --<sol
   match t with
   | .lam b => match whnf ty with
-    | .vpi _ _ _ dom env cod => match eraseCheck (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
+    | .vpi _ _ _ dom env cod => match eraseCheck ffi (TCtx.bind c dom) b (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
       | .ok b' => .ok (.lam b')
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .pair a b => match whnf ty with
     | .vsigma q _ _ A env B =>
       let ar : ER := match q with
         | .qz => .ok .erased
-        | _ => eraseCheck c a A;
+        | _ => eraseCheck ffi c a A;
       match ar with
-      | .ok a' => match eraseCheck c b (eval (.cons (eval (TCtx.env c) a) env) B) with
+      | .ok a' => match eraseCheck ffi c b (eval (.cons (eval (TCtx.env c) a) env) B) with
         | .ok b' => .ok (epair a' b')
         | e => e
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .con x => match whnf ty with
-    | .vmu l I D i sz => match eraseCheck c x (vInterp l I D (muFamilyAt l I D (sizePredOrInf sz)) i) with
-      | .ok x' => match isNatTy ty with
-        | .true => .ok (natOf x x')
-        | .false => .ok x'
+    | .vmu l I D i sz => match eraseCheck ffi c x (vInterp l I D (muFamilyAt l I D (sizePredOrInf sz)) i) with
+      | .ok x' => match reprOfTy ffi ty with
+        -- (B12) a native value: `mk` applied to the constructor's runtime field
+        | .some ri => .ok (reprMkApp ri (reprFieldOf ri x'))
+        | .none => match isNatTy ty with
+          | .true => .ok (natOf x x')
+          | .false => .ok x'
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .dret i => match whnf ty with
-    | .vdesc _ I => match eraseCheck c i I with
+    | .vdesc _ I => match eraseCheck ffi c i I with
       | .ok i' => .ok (.obj 0 (etms1 i'))
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .darg _ S D => match whnf ty with
-    | .vdesc l I => match eraseCheck c D (.vpi .qw (lsucc l) (lsucc (lsucc l)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
+    | .vdesc l I => match eraseCheck ffi c D (.vpi .qw (lsucc l) (lsucc (lsucc l)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
       | .ok D' => .ok (.obj 1 (etms2 .erased D'))
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .drec _ j D => match whnf ty with
-    | .vdesc _ I => match eraseCheck c j I with
-      | .ok j' => match eraseCheck c D ty with
+    | .vdesc _ I => match eraseCheck ffi c j I with
+      | .ok j' => match eraseCheck ffi c D ty with
         | .ok D' => .ok (.obj 2 (etms2 j' D'))
         | e => e
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .dhrec _ H j D => match whnf ty with
-    | .vdesc l I => match eraseCheck c j (.vpi .qw (lsucc l) (lsucc l) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
-      | .ok j' => match eraseCheck c D ty with
+    | .vdesc l I => match eraseCheck ffi c j (.vpi .qw (lsucc l) (lsucc l) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
+      | .ok j' => match eraseCheck ffi c D ty with
         | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
         | e => e
       | e => e
-    | _ => eraseInfer c t
+    | _ => eraseInfer ffi c t
   | .star => .ok .erased
   -- (P2) a marked proof is erased; a marker at another level is transparent
   | .prf l x => match lvlIsZero l with
     | .true => .ok .erased
-    | .false => eraseCheck c x ty
+    | .false => eraseCheck ffi c x ty
   -- (Q4) `ULift` has no runtime content
   | .up a => match whnf ty with
-    | .vulift _ _ A => eraseCheck c a A
-    | _ => eraseInfer c t
+    | .vulift _ _ A => eraseCheck ffi c a A
+    | _ => eraseInfer ffi c t
   | .letE A v b =>
     let vA := eval (TCtx.env c) A;
-    match eraseCheck c v vA with
-    | .ok v' => match eraseCheck (TCtx.define c (eval (TCtx.env c) v) vA) b ty with
+    match eraseCheck ffi c v vA with
+    | .ok v' => match eraseCheck ffi (TCtx.define c (eval (TCtx.env c) v) vA) b ty with
       | .ok b' => .ok (.letE v' b')
       | e => e
     | e => e
@@ -253,62 +351,108 @@ def eraseCheck (c : TCtx) (t : Tm) (ty : Val) : ER := match erasable c ty with
     let vA := eval (TCtx.env c) A;
     let vr : ER := match q with
       | .qz => .ok .erased
-      | _ => eraseCheck c v vA;
+      | _ => eraseCheck ffi c v vA;
     match vr with
-    | .ok v' => match eraseCheck (TCtx.define c (eval (TCtx.env c) v) vA) b ty with
+    | .ok v' => match eraseCheck ffi (TCtx.define c (eval (TCtx.env c) v) vA) b ty with
       | .ok b' => .ok (.letE v' b')
       | e => e
     | e => e
-  -- (linear-case stage 2) `let () := u; b` must evaluate `u` before `b`, and this
-  -- backend's `let`s are lazy (a `let` whose variable is unused is dropped): refuse it
-  -- rather than skip `u`. The self-hosted frontend never produces it.
-  | .letUnit _ _ => .err "erasure: `let () := u` (the unit eliminator) is not supported by the self-hosted backend"
-  | _ => eraseInfer c t
+  -- (linear-case stage 2) `let () := u; b`: `u` is evaluated, then `b` (a `let` whose
+  -- variable `b` doesn't use; it is a strict let in the generated C: `u` is a call, not a
+  -- pure value, unless it is `()` itself)
+  | .letUnit u b =>
+    let ur : ER := match u with
+      | .star => .ok .erased
+      | _ => eraseInfer ffi c u;
+    match ur with
+    | .ok u' => match eraseCheck ffi c b ty with
+      | .ok b' => .ok (.letE u' (liftE 1 0 b'))
+      | e => e
+    | e => e
+  -- `let q (x, y) := s; b`: `let s := s'; let x := s.0; let y := s.1; b` (at 0, all
+  -- three values are erased: the kernel checks the scrutinee and the body as erased).
+  | .split q s m b =>
+    let sty : Val := match quickType c s with
+      | .some v => v
+      | .none => match inferTy c s with
+        | .some v => v
+        | .none => .vunit (ln 1);
+    match whnf sty with
+    | .vsigma _ _ _ A env B =>
+      let zero := qEq q .qz;
+      let sr : ER := match zero with
+        | .true => .ok .erased
+        | .false => eraseCheck ffi c s sty;
+      match sr with
+      | .ok s' =>
+        let l := TCtx.lvl c;
+        let vx := fresh l;
+        let vy := fresh (l + 1);
+        let byTy := eval (.cons vx env) B;
+        let bty := eval (.cons (.vpair vx vy) (TCtx.env c)) m;
+        match eraseCheck ffi (TCtx.bind (TCtx.bind c A) byTy) b bty with
+        | .ok b' =>
+          let bx := liftE 1 2 b';
+          match zero with
+          | .true => .ok (.letE .erased (.letE .erased (.letE .erased bx)))
+          | .false => .ok (.letE s' (.letE (.proj 0 (.var 0)) (.letE (.proj 1 (.var 1)) bx)))
+        | e => e
+      | e => e
+    | _ => .err "erasure: split of a non-pair"
+  | _ => eraseInfer ffi c t
   --|ex
   --| .err "not implemented"
   --sol>
 -- erase `t`, computing its type
-def eraseInfer (c : TCtx) (t : Tm) : ER := match quickType c t with
+def eraseInfer (ffi : List Foreign) (c : TCtx) (t : Tm) : ER := match quickType c t with
   | .none => .err "erasure: an ill-typed term"
   | .some ty => match erasable c ty with
     | .true => .ok .erased
     | .false => match t with
       | .var i => .ok (.var i)
       | .const n _ _ _ _ => .ok (.glob n)
-      | .app _ _ => eraseApp c t
-      | .ann x A => eraseCheck c x (eval (TCtx.env c) A)
-      | .letE _ _ _ => eraseCheck c t ty
-      | .letq _ _ _ _ => eraseCheck c t ty
-      | .letUnit _ _ => eraseCheck c t ty
-      | .fst p => match eraseInfer c p with
+      | .app _ _ => eraseApp ffi c t
+      | .ann x A => eraseCheck ffi c x (eval (TCtx.env c) A)
+      | .letE _ _ _ => eraseCheck ffi c t ty
+      | .letq _ _ _ _ => eraseCheck ffi c t ty
+      | .letUnit _ _ => eraseCheck ffi c t ty
+      | .split _ _ _ _ => eraseCheck ffi c t ty
+      | .fst p => match eraseInfer ffi c p with
         | .ok p' => .ok (.proj 0 p')
         | e => e
-      | .snd p => match eraseInfer c p with
+      | .snd p => match eraseInfer ffi c p with
         | .ok p' => .ok (.proj 1 p')
         | e => e
       | .tag _ i => .ok (.obj i .nil)
-      | .ecase m s bs => match eraseInfer c s with
-        | .ok s' => match eraseBranches c m 0 bs with
+      | .ecase m s bs => match eraseInfer ffi c s with
+        | .ok s' => match eraseBranches ffi c m 0 bs with
           | .ok bs' => .ok (.case s' bs')
           | .err msg => .err msg
         | e => e
-      | .coe A _ _ x => eraseCheck c x (eval (TCtx.env c) A)   -- (a function under a cast is checked)
+      | .coe A _ _ x => eraseCheck ffi c x (eval (TCtx.env c) A)   -- (a function under a cast is checked)
       | .exfalso _ _ => .ok (.prim "unreachable" .nil)
-      | .down x => eraseInfer c x
-      | .prf _ x => eraseInfer c x
+      | .down x => eraseInfer ffi c x
+      | .prf _ x => eraseInfer ffi c x
       | .ind l I D v P m i x =>
         let vI := eval (TCtx.env c) I;
         let vD := eval (TCtx.env c) D;
         let vP := eval (TCtx.env c) P;
-        match eraseCheck c m (indMethodTy l v vI vD vP) with
-        | .ok m' => match eraseCheck c D (.vdesc l vI) with
-          | .ok D' => match eraseCheck c i vI with
-            | .ok i' => match eraseInfer c x with
+        let nty : Val := .vmu l vI vD (eval (TCtx.env c) i) .vszInf;
+        match eraseCheck ffi c m (indMethodTy l v vI vD vP) with
+        | .ok m' => match eraseCheck ffi c D (.vdesc l vI) with
+          | .ok D' => match eraseCheck ffi c i vI with
+            | .ok i' => match eraseInfer ffi c x with
               | .ok x' =>
-                let nat := match isNatTy (.vmu l vI vD (eval (TCtx.env c) i) .vszInf) with
-                  | .true => 1
-                  | .false => 0;
-                .ok (.prim "ind" (.cons (.nat nat) (etms4 D' m' i' x')))
+                -- (B12) a native value: the generic eliminator walks the model's chain
+                let x'' := match reprOfTy ffi nty with
+                  | .some ri => reprModel ri x'
+                  | .none => x';
+                let nat := match reprOfTy ffi nty with
+                  | .some _ => 0
+                  | .none => match isNatTy nty with
+                    | .true => 1
+                    | .false => 0;
+                .ok (.prim "ind" (.cons (.nat nat) (etms4 D' m' i' x'')))
               | e => e
             | e => e
           | e => e
@@ -317,40 +461,40 @@ def eraseInfer (c : TCtx) (t : Tm) : ER := match quickType c t with
         -- `m ◾ i payload` (K1: a case at 0 has an erased scrutinee, whose payload is ◾)
         let vI := eval (TCtx.env c) I;
         let vD := eval (TCtx.env c) D;
-        match eraseCheck c m (scaseMethodTy l v q vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
-        | .ok m' => match eraseCheck c i vI with
+        match eraseCheck ffi c m (scaseMethodTy l v q vI vD (eval (TCtx.env c) P) (eval (TCtx.env c) sz)) with
+        | .ok m' => match eraseCheck ffi c i vI with
           | .ok i' => match q with
             | .qz => .ok (eapps m' (.cons .erased (etms2 i' .erased)))
-            | _ => match eraseInfer c x with
-              | .ok x' => .ok (eapps m' (.cons .erased (etms2 i' (payloadOf (.vmu l vI vD (eval (TCtx.env c) i) .vszInf) x'))))
+            | _ => match eraseInfer ffi c x with
+              | .ok x' => .ok (eapps m' (.cons .erased (etms2 i' (payloadOf ffi (.vmu l vI vD (eval (TCtx.env c) i) .vszInf) x'))))
               | e => e
           | e => e
         | e => e
       | _ => .err "erasure: unsupported term"
 -- the branches of an `ecase` with motive `m` (under the tag's binder), from tag `k`
-def eraseBranches (c : TCtx) (m : Tm) (k : Nat) : Tms → ERs
+def eraseBranches (ffi : List Foreign) (c : TCtx) (m : Tm) (k : Nat) : Tms → ERs
   | .tnil => .ok .nil
-  | .tcons b rest => match eraseCheck c b (eval (.cons (.vtag (k + 1 + tmsLen rest) k) (TCtx.env c)) m) with
-    | .ok b' => match eraseBranches c m (k + 1) rest with
+  | .tcons b rest => match eraseCheck ffi c b (eval (.cons (.vtag (k + 1 + tmsLen rest) k) (TCtx.env c)) m) with
+    | .ok b' => match eraseBranches ffi c m (k + 1) rest with
       | .ok bs => .ok (.cons b' bs)
       | e => e
     | .err msg => .err msg
 -- an application: the head and the arguments, each erased against the head's type (an
 -- argument of quantity `0`, or of an erasable type, is `◾`)
-def eraseApp (c : TCtx) (t : Tm) : ER := match quickType c (spineHead t) with
+def eraseApp (ffi : List Foreign) (c : TCtx) (t : Tm) : ER := match quickType c (spineHead t) with
   | .none => .err "erasure: an ill-typed head"
-  | .some hty => match eraseInfer c (spineHead t) with
-    | .ok h' => eraseArgs c h' hty (spineArgsTm t .nil)
+  | .some hty => match eraseInfer ffi c (spineHead t) with
+    | .ok h' => eraseArgs ffi c h' hty (spineArgsTm t .nil)
     | e => e
-def eraseArgs (c : TCtx) (f : ETm) (fty : Val) : List Tm → ER
+def eraseArgs (ffi : List Foreign) (c : TCtx) (f : ETm) (fty : Val) : List Tm → ER
   | .nil => .ok f
   | .cons a rest => match whnf fty with
     | .vpi q _ _ dom env cod =>
       let ar : ER := match q with
         | .qz => .ok .erased
-        | _ => eraseCheck c a dom;
+        | _ => eraseCheck ffi c a dom;
       match ar with
-      | .ok a' => eraseArgs c (.app f a') (eval (.cons (match usesVar 0 cod with
+      | .ok a' => eraseArgs ffi c (.app f a') (eval (.cons (match usesVar 0 cod with
           | .true => eval (TCtx.env c) a
           | .false => .vtt) env) cod) rest
       | e => e
@@ -900,29 +1044,6 @@ def cgHead (st : CG) (names : List String) (pe0 : PE) (t : ETm) : CR := match cs
         | .cons _ _ _ _ => .t "({ " ⧺ emDeclsG names (lenL names) em ⧺ c ⧺ .t "; })") (CG.setPe st1 (CG.pe st))
 end
 
-
--- **Lazy `let`s.** The match compiler binds with `let`s things only some branches use:
--- a shared catch-all (`dflt✝`), the hypotheses of `ind` (each the result of a recursive
--- call). Evaluated eagerly they cost every call a full walk of its argument, or worse.
--- A cheap value (a variable, a global, projections of a variable) is substituted at its
--- uses; any other is suspended (`memo`) and forced where it is used.
-mutual
-def liftE (k c : Nat) : ETm → ETm
-  | .var i => match Nat.lt i c with
-    | .true => .var i
-    | .false => .var (i + k)
-  | .lam b => .lam (liftE k (c + 1) b)
-  | .app f a => .app (liftE k c f) (liftE k c a)
-  | .letE v b => .letE (liftE k c v) (liftE k (c + 1) b)
-  | .obj t fs => .obj t (liftEs k c fs)
-  | .proj i t => .proj i (liftE k c t)
-  | .case s bs => .case (liftE k c s) (liftEs k c bs)
-  | .prim op as => .prim op (liftEs k c as)
-  | t => t
-def liftEs (k c : Nat) : ETms → ETms
-  | .nil => .nil
-  | .cons t rest => .cons (liftE k c t) (liftEs k c rest)
-end
 mutual
 -- the body of `let` with variable `c` (at this depth) replaced by `v` (a term at the
 -- `let`'s depth), and the variables above it moved down
@@ -1549,12 +1670,12 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
       | .false => .mk (.t "") (.t nm) (lvIns (d - 1 - i) live) st
   | .glob n => bindTo st (.t "") (.t ("get_" +++ mangle n +++ "()")) live
   | .app f a => match stringConst t with
-    -- a string literal, built once (a constant: released at exit)
+    -- a string literal, built once (a constant: immortal, never freed)
     | .some cs => match CG.fresh st "str" with
-      | .mk x st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { " +++ x +++ " = wcodes((uint32_t[]){") ⧺ codesC cs ⧺
+      | .mk x st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = wcodes((uint32_t[]){") ⧺ codesC cs ⧺
           .t ((match cs with
             | .nil => "0"
-            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) live st1
+            | .cons _ _ => "") +++ "}, " +++ Nat.toString (lenL cs) +++ "); rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
     | .none => match natConst t with
       | .some n => .mk (.t "") (.t "BOX(" ⧺ Doc.nat n ⧺ .t "UL)") live st
       | .none => match spineE f (.cons a .nil) with
@@ -1610,8 +1731,8 @@ def rcE (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) (t
         -- (built only from constants: built once, a constant)
         | .true => match CG.fresh st "cst" with
           | .mk x st0 => match rcEs (RE.inner re) st0 .nil 0 .nil items with
-            | .mk fc atoms _ st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { ") ⧺ fc ⧺ .t (x +++ " = ") ⧺ objC "" tag n atoms ⧺
-                .t ("; rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) live st1
+            | .mk fc atoms _ st1 => .mk (.t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { ") ⧺ fc ⧺ .t (x +++ " = ") ⧺ objC "" tag n atoms ⧺
+                .t ("; rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) live st1
         | .false => match wish with
           | .mk w st0 => match rcEs re st0 names d live items with
             | .mk fc atoms fl st1 => bindTo st1 fc (objC w tag n atoms) fl
@@ -1719,8 +1840,8 @@ def rcLam (re : RE) (st : CG) (names : List String) (d : Nat) (live : List Nat) 
           | .false => match caps with
             -- (capturing nothing: one closure, built once, a constant)
             | .nil => match CG.fresh st3 "clo" with
-              | .mk x st4 => .mk (cc ⧺ .t ("static V " +++ x +++ " = 0; if (!" +++ x +++ ") { " +++ x +++ " = mkfun(" +++ fname +++ ", " +++
-                  Nat.toString k +++ ", 0, NULL); rt_root(&" +++ x +++ "); } inc(" +++ x +++ "); ")) (.t x) cl st4
+              | .mk x st4 => .mk (cc ⧺ .t ("static V " +++ x +++ " = 0; if (!rt_peek(&" +++ x +++ ")) { rt_caf_lock(); if (!rt_peek(&" +++ x +++ ")) { " +++ x +++ " = mkfun(" +++ fname +++ ", " +++
+                  Nat.toString k +++ ", 0, NULL); rt_mark_mt(" +++ x +++ "); rt_root(&" +++ x +++ "); } rt_caf_unlock(); } inc(rt_peek(&" +++ x +++ ")); ")) (.t x) cl st4
             | .cons _ _ => bindTo st3 cc (.t ("mkfun(" +++ fname +++ ", " +++ Nat.toString (nc + k) +++ ", " +++ Nat.toString nc +++
                 ", (V[]){" +++ joinC (capsCode names caps) +++ "})")) cl
 -- a saturated call of `d_g`, then the rest applied: a variable in a borrowed position
@@ -1827,7 +1948,7 @@ partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (
       | .some g => eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
       | .none => match v with
         | .axiomC _ _ => eraseGlobals sl ffi all (.cons n seen) acc k
-        | _ => match eraseCheck empty v (eval .nil ty) with
+        | _ => match eraseCheck ffi empty v (eval .nil ty) with
           | .err m => .err (n +++ ": " +++ m)
           | .ok e =>
             let e' := match sl with
@@ -2234,9 +2355,6 @@ def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
     | .fn n cname _ ps r io fin =>
       let g := mangle n;
       let k := ffiArity ps io;
-      let keep := match rc with
-        | .true => "rt_root(&c); } inc(c); "
-        | .false => "} ";
       match ffiIn ffi 0 ps with
       | .mk pre cargs post =>
         let body := pre +++ ffiOut ffi r fin (cname +++ "(" +++ commaSep cargs +++ ")") +++ post;
@@ -2244,11 +2362,19 @@ def ffiWrappers (ffi : List Foreign) (rc : Bool) : List Foreign → List Doc
           | .true => "return prodv(r, p" +++ Nat.toString (k - 1) +++ "); "
           | .false => "return r; ";
         match k with
-        | .zero => .cons (.t ("V get_" +++ g +++ "(void) { static V c = 0; static int i = 0; if (!i) { i = 1; c = ({ " +++ body +++ "r; }); " +++
-            keep +++ "return c; }")) (ffiWrappers ffi rc rest)
+        | .zero => .cons (.t ((match rc with
+            -- (25a) a shared constant: the first thread to use it publishes it, a loser
+            -- releases its copy (`rt_caf`)
+            | .true => "static V mk_" +++ g +++ "(void) { " +++ body +++ "return r; } V get_" +++ g +++
+              "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }"
+            | .false => "V get_" +++ g +++ "(void) { static V c = 0; if (!c) c = ({ " +++ body +++ "r; }); return c; }")))
+          (ffiWrappers ffi rc rest)
         | .succ _ => .cons (.t ("V d_" +++ g +++ "(" +++ paramDecls 0 k +++ ") { " +++ body +++ ret +++ "} " +++
             "static V w_" +++ g +++ "(V *a) { return d_" +++ g +++ "(" +++ argList 0 k +++ "); } " +++
-            "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); " +++ keep +++ "return c; }"))
+            (match rc with
+            | .true => "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
+              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }"
+            | .false => "V get_" +++ g +++ "(void) { static V c = 0; if (!c) c = native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); return c; }")))
           (ffiWrappers ffi rc rest)
     | _ => ffiWrappers ffi rc rest
 -- (stage 21o) The C files and libraries of `link_c`/`link_lib`, as lines at the top of the
@@ -2345,7 +2471,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2845,9 +2971,8 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
     | .zero => match rcHead (.mk .nil sigs .nil) st .nil 0 .nil .nil e with
       | .mk code atom _ st1 =>
         genCodeRC sigs st1 (.cons (.t ("V get_" +++ g +++ "(void);")) protos)
-          (.cons (.t ("static V g_" +++ g +++ "; static int i_" +++ g +++ "; static V init_" +++ g +++ "(void) { ") ⧺ code ⧺
-            .t "return " ⧺ atom ⧺ .t ("; } V get_" +++ g +++ "(void) { if (!i_" +++ g +++ ") { g_" +++ g +++ " = init_" +++ g +++
-            "(); i_" +++ g +++ " = 1; rt_root(&g_" +++ g +++ "); } inc(g_" +++ g +++ "); return g_" +++ g +++ "; }")) defs) rest
+          (.cons (.t ("static V g_" +++ g +++ "; static V init_" +++ g +++ "(void) { ") ⧺ code ⧺
+            .t "return " ⧺ atom ⧺ .t ("; } V get_" +++ g +++ "(void) { return rt_caf(&g_" +++ g +++ ", init_" +++ g +++ "); }")) defs) rest
     | .succ _ =>
       let names := paramNames k k;
       -- (no signature: every parameter owned)
@@ -2860,10 +2985,10 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
         genCodeRC sigs st1 (.cons (.t ("V d_" +++ g +++ "(" +++ ps +++ "); V get_" +++ g +++ "(void);")) protos)
           (.cons (.t ("V d_" +++ g +++ "(" +++ ps +++ ") { top_: ; ") ⧺ entryDrops names k live (ownedIdx k 0 sig) ⧺ code ⧺ .t "return " ⧺ atom ⧺ .t "; }") (.cons
             (.t ("static V w_" +++ g +++ "(V *a) { V r = d_" +++ g +++ "(" +++ argList 0 k +++ "); " +++ wrapDecs 0 sig +++ "return r; } " +++
-             "V get_" +++ g +++ "(void) { static V c = 0; if (!c) { c = native(w_" +++ g +++ ", " +++ Nat.toString k +++
-             "); rt_root(&c); } inc(c); return c; }")) defs)) rest
+             "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
+             "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;

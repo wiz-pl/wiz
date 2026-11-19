@@ -5,9 +5,10 @@ import IO
 -- analysis (stage 14f), `Prop` with proof irrelevance (stage 14g), observational
 -- equality (stage 14h), descriptions and data (stage 14i), induction (stage 14j),
 -- global constants (stage 14k) and universe-polymorphic ones (stage 14l), quantities
--- (stage 14m), sizes and subtyping (stage 14n), sized recursion (stage 14o), `let`, and
--- type ascriptions. Normalisation by evaluation, as in `Eval.lean`: terms evaluate to values
--- with closures (an environment and a body), values quote back to normal forms, and
+-- (stage 14m), sizes and subtyping (stage 14n), sized recursion (stage 14o), `let`,
+-- type ascriptions, and number literals (lane E-K). Normalisation by evaluation, as in
+-- `Eval.lean`: terms evaluate to values with closures (an environment and a body),
+-- values quote back to normal forms, and
 -- conversion compares values at their types (with η, and all proofs of a proposition
 -- equal). Values carry `Sort` levels: `Prop` is `Sort 0`, and `U n` is `Sort (n + 1)`.
 --
@@ -43,6 +44,214 @@ inductive Lvl where
   -- term metavariable, an unsolved one is an error)
   | lmvar (id : Nat)
 
+-- **Number literals** (lane E-K; `Term.natLit` in the Lean kernel). A literal is a number
+-- of the type registered as `builtin nat`: it means `succ (… (succ zero))`, and it unfolds
+-- one step at a time when something looks inside it (`natView`). The registered
+-- operations (`builtin nat.add := Nat.add`, …) compute on literals natively (`vNatOp`),
+-- as the Lean kernel's `natNative?` does.
+--
+-- The numbers are **exact**, as the Lean kernel's are. They are not `Nat`: in the
+-- self-hosted compiler's runtime (`selfhost/rt.c`) a `Nat` is a 63-bit word that wraps
+-- (C13). So the kernel has its own bignum, `KNat`: little-endian limbs of 24 bits each, held
+-- in `Nat`s. Every intermediate value (a limb product plus a carry) stays below `2^49`,
+-- so the limb arithmetic is exact under either runtime, and nothing here depends on
+-- `rt.c` or GMP. A `KNat` is normalised: no zero limb at the top, and `0` is no limbs.
+inductive KNat where
+  | mk (limbs : List Nat)
+-- the limb base, `2^24` (written as a product: a big literal in the selfhost sources is
+-- built by halving, `wiz-language-pitfalls`)
+def knBase : Nat := Nat.mul 4096 4096
+-- drop zero limbs at the top
+def knTrim : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => match knTrim xs with
+    | .nil => match Nat.beq x 0 with
+      | .true => .nil
+      | .false => .cons x .nil
+    | r => .cons x r
+def knLimbs : KNat → List Nat
+  | .mk ls => ls
+def knZero : KNat := .mk .nil
+def knIsZero : KNat → Bool
+  | .mk .nil => .true
+  | _ => .false
+-- a machine number as a `KNat` (exact for any `Nat` the runtime holds)
+partial def knLimbsOf (n : Nat) : List Nat := match Nat.beq n 0 with
+  | .true => .nil
+  | .false => .cons (Nat.mod n knBase) (knLimbsOf (Nat.div n knBase))
+def knOfNat (n : Nat) : KNat := .mk (knLimbsOf n)
+-- a's limbs plus b's, plus a carry
+partial def knAddL (a b : List Nat) (carry : Nat) : List Nat := match a with
+  | .nil => match b with
+    | .nil => match Nat.beq carry 0 with
+      | .true => .nil
+      | .false => .cons carry .nil
+    | .cons y ys =>
+      let s := y + carry;
+      .cons (Nat.mod s knBase) (knAddL .nil ys (Nat.div s knBase))
+  | .cons x xs => match b with
+    | .nil =>
+      let s := x + carry;
+      .cons (Nat.mod s knBase) (knAddL xs .nil (Nat.div s knBase))
+    | .cons y ys =>
+      let s := x + y + carry;
+      .cons (Nat.mod s knBase) (knAddL xs ys (Nat.div s knBase))
+def knAdd (a b : KNat) : KNat := .mk (knAddL (knLimbs a) (knLimbs b) 0)
+-- `a - b` for `a ≥ b`, with a borrow (the result may have zero limbs at the top)
+def knTail : List Nat → List Nat
+  | .nil => .nil
+  | .cons _ xs => xs
+partial def knSubL (a b : List Nat) (borrow : Nat) : List Nat := match a with
+  | .nil => .nil
+  | .cons x xs =>
+    let y := (match b with
+      | .nil => 0
+      | .cons y _ => y) + borrow;
+    let rest := knTail b;
+    match Nat.lt x y with
+    | .true => .cons (x + knBase - y) (knSubL xs rest 1)
+    | .false => .cons (x - y) (knSubL xs rest 0)
+def knLen : List Nat → Nat
+  | .nil => 0
+  | .cons _ xs => knLen xs + 1
+def knRev : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => knRev xs (.cons x acc)
+-- most significant limb first, the same length: 0 less, 1 equal, 2 greater
+def knCmpRev : List Nat → List Nat → Nat
+  | .nil, _ => 1
+  | .cons x xs, ys => match ys with
+    | .nil => 1
+    | .cons y ys' => match Nat.lt x y with
+      | .true => 0
+      | .false => match Nat.lt y x with
+        | .true => 2
+        | .false => knCmpRev xs ys'
+-- compare: 0 less, 1 equal, 2 greater (normalised limbs: the longer one is greater)
+def knCmp (a b : KNat) : Nat :=
+  let la := knLen (knLimbs a);
+  let lb := knLen (knLimbs b);
+  match Nat.lt la lb with
+  | .true => 0
+  | .false => match Nat.lt lb la with
+    | .true => 2
+    | .false => knCmpRev (knRev (knLimbs a) .nil) (knRev (knLimbs b) .nil)
+def knEq (a b : KNat) : Bool := Nat.beq (knCmp a b) 1
+def knLt (a b : KNat) : Bool := Nat.beq (knCmp a b) 0
+-- truncated subtraction, as `Nat.sub`: `a - b = 0` when `a ≤ b`
+def knSub (a b : KNat) : KNat := match Nat.beq (knCmp a b) 2 with
+  | .true => .mk (knTrim (knSubL (knLimbs a) (knLimbs b) 0))
+  | .false => knZero
+def knOne : KNat := .mk (.cons 1 .nil)
+def knSucc (a : KNat) : KNat := knAdd a knOne
+def knPred (a : KNat) : KNat := knSub a knOne
+-- the limbs times a small number `m < 2^24`, plus a carry
+partial def knMulSmallL (a : List Nat) (m carry : Nat) : List Nat := match a with
+  | .nil => match Nat.beq carry 0 with
+    | .true => .nil
+    | .false => .cons (Nat.mod carry knBase) (knMulSmallL .nil m (Nat.div carry knBase))
+  | .cons x xs =>
+    let p := Nat.mul x m + carry;
+    .cons (Nat.mod p knBase) (knMulSmallL xs m (Nat.div p knBase))
+-- schoolbook multiplication, one limb of `a` at a time
+def knMulL : List Nat → List Nat → List Nat
+  | .nil, _ => .nil
+  | .cons x xs, b => knAddL (knMulSmallL b x 0) (.cons 0 (knMulL xs b)) 0
+def knMul (a b : KNat) : KNat := .mk (knTrim (knMulL (knLimbs a) (knLimbs b)))
+-- the quotient's limbs (least significant first) and the remainder of the limbs (most
+-- significant first) by a small divisor `0 < d < 2^24`
+inductive KNatQ where
+  | mk (q : List Nat) (r : Nat)
+def knDivSmallRev : List Nat → Nat → Nat → List Nat → KNatQ
+  | .nil, _, r, acc => .mk acc r
+  | .cons x xs, d, r, acc =>
+    let cur := Nat.mul r knBase + x;
+    knDivSmallRev xs d (Nat.mod cur d) (.cons (Nat.div cur d) acc)
+-- the bits of the limbs, most significant first: `k` bits of `x` from bit `k - 1` down
+def knBitsOf : Nat → Nat → List Nat → List Nat
+  | _, .zero, acc => acc
+  | x, .succ k, acc => knBitsOf (Nat.div x 2) k (.cons (Nat.mod x 2) acc)
+def knBitsRev : List Nat → List Nat
+  | .nil => .nil
+  | .cons x xs => List.append (knBitsOf x 24 .nil) (knBitsRev xs)
+inductive KNatD where
+  | mk (q r : KNat)
+-- binary long division, one bit at a time (the remainder stays below the divisor)
+def knDivBits : List Nat → KNat → KNat → KNat → KNatD
+  | .nil, _, q, r => .mk q r
+  | .cons bit bits, d, q, r =>
+    let r2 := KNat.mk (knTrim (knAddL (knAddL (knLimbs r) (knLimbs r) 0) (knLimbsOf bit) 0));
+    let q2 := knAdd q q;
+    match knLt r2 d with
+    | .true => knDivBits bits d q2 r2
+    | .false => knDivBits bits d (knSucc q2) (knSub r2 d)
+-- `a / b` and `a % b`, as `Nat.div`/`Nat.mod`: `a / 0 = 0`, `a % 0 = a`
+def knDivMod (a b : KNat) : KNatD := match knLimbs b with
+  | .nil => .mk knZero a
+  | .cons d .nil => match knDivSmallRev (knRev (knLimbs a) .nil) d 0 .nil with
+    | .mk q r => .mk (.mk (knTrim q)) (knOfNat r)
+  | _ => knDivBits (knBitsRev (knRev (knLimbs a) .nil)) b knZero knZero
+def knDiv (a b : KNat) : KNat := match knDivMod a b with
+  | .mk q _ => q
+def knMod (a b : KNat) : KNat := match knDivMod a b with
+  | .mk _ r => r
+-- a small `KNat` as a machine number (the caller knows it is small)
+def knToNatL : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x + Nat.mul knBase (knToNatL xs)
+-- in decimal, one digit at a time
+partial def knDigits (a : List Nat) (acc : List Char) : List Char := match knTrim a with
+  | .nil => acc
+  | ls => match knDivSmallRev (knRev ls .nil) 10 0 .nil with
+    | .mk q r => knDigits q (.cons (Char.mk (r + 48)) acc)
+def knShow (a : KNat) : String := match knLimbs a with
+  | .nil => "0"
+  | ls => String.mk (knDigits ls .nil)
+-- (the frontend's hook) a numeral's digits, exactly: a numeral in the source may be past
+-- the runtime's 63 bits
+def knOfDigitsL : List Char → KNat → KNat
+  | .nil, acc => acc
+  | .cons c cs, acc => knOfDigitsL cs (.mk (knAddL (knMulSmallL (knLimbs acc) 10 0) (knLimbsOf (Char.code c - 48)) 0))
+def knOfDigits (s : String) : KNat := match s with
+  | .mk cs => knOfDigitsL cs knZero
+-- the registered operations on numbers that the kernel computes natively (the Lean
+-- kernel's `natNative?` for these keys, and its comparisons `nat.beq`/`nat.blt`)
+inductive NatOp where
+  | nsucc
+  | npred
+  | nadd
+  | nsub
+  | nmul
+  | ndiv
+  | nmod
+  | nbeq
+  | nblt
+def natOpCode : NatOp → Nat
+  | .nsucc => 0
+  | .npred => 1
+  | .nadd => 2
+  | .nsub => 3
+  | .nmul => 4
+  | .ndiv => 5
+  | .nmod => 6
+  | .nbeq => 7
+  | .nblt => 8
+def natOpEq (a b : NatOp) : Bool := Nat.beq (natOpCode a) (natOpCode b)
+def natOpArity : NatOp → Nat
+  | .nsucc => 1
+  | .npred => 1
+  | _ => 2
+def natOpKey : NatOp → String
+  | .nsucc => "nat.succ"
+  | .npred => "nat.pred"
+  | .nadd => "nat.add"
+  | .nsub => "nat.sub"
+  | .nmul => "nat.mul"
+  | .ndiv => "nat.div"
+  | .nmod => "nat.mod"
+  | .nbeq => "nat.beq"
+  | .nblt => "nat.blt"
+
 mutual
 inductive Tm where
   | var (i : Nat)
@@ -77,6 +286,11 @@ inductive Tm where
   -- (linear-case stage 2) `let () := u; b`, the unit eliminator: consumes `u : Unit n`
   -- (its usage counts), computes to `b` by η
   | letUnit (u b : Tm)
+  -- `let q (x, y) := s; b` (Σ elimination; `split` in the Lean kernel). `motive` is
+  -- under one binder (`z`), `body` under two (`x`, then `y`); `s`'s components are bound
+  -- at `q·p` and `q` for a Σ at `p`. A pair at 1 can only be consumed this way: `fst`
+  -- and `snd` need an unrestricted pair.
+  | split (q : Q) (scrut motive body : Tm)
   -- an enumeration of `k` tags, its `i`-th tag, and case analysis (the motive is
   -- under one binder, the scrutinee)
   | enum (k : Nat)
@@ -147,9 +361,24 @@ inductive Tm where
   -- suspends it and never looks at it. Outside a proof, `infer` and `check` require every
   -- term whose sort may be `0` to be marked or neutral-shaped ("the proof marker", below).
   | prf (l : Lvl) (t : Tm)
+  -- (E-K) a number literal of the registered `nat` type (`Term.natLit`): it means
+  -- `succ (… (succ zero))` with `n` `succ`s. It carries the registration it needs (this
+  -- kernel has no table of globals): the type and its two constructors, as constants
+  | nlit (n : KNat) (nb : NatB)
+  -- (E-K) a registered operation on numbers (`builtin nat.add := Nat.add`; the value the
+  -- Lean kernel's `vBuiltin?` gives such a constant): the constant `d` (its definition),
+  -- which computes natively once its arguments are literals (`vNatOp`)
+  | natFn (op : NatOp) (nb : NatB) (d : Tm)
 inductive Tms where
   | tnil
   | tcons (t : Tm) (rest : Tms)
+-- (E-K) the registration of numbers: the constants `nat`, `nat.zero` and `nat.succ`
+-- (`builtin nat := Nat`, …). The checker checks it wherever a literal or an operation is
+-- used (`natBOk`), so a literal is always a well-typed `succ (… zero)`; what is trusted
+-- is only that each registered operation agrees with its definition (the trust ledger's
+-- `builtin` rows, as for the Lean kernel)
+inductive NatB where
+  | mk (nat zero succ : Tm)
 end
 
 mutual
@@ -196,6 +425,17 @@ inductive Val where
   | vup (a : Val)
   -- a stuck head and the eliminations applied to it
   | vne (head : Head) (spine : Spine)
+  -- (E-K) a number literal (`Val.natLit`): `whnf` leaves it as it is, and `natView`
+  -- shows it as a constructor, one step deep
+  | vnat (n : KNat) (nb : NatB)
+  -- (E-K) a registered operation applied to fewer arguments than it takes (a partial
+  -- application); `vapp` collects them
+  | vnatfn (op : NatOp) (nb : NatB) (d : Tm) (args : Env)
+  -- (E-K) a registered operation with all its arguments, kept glued while an argument is
+  -- a definition's glued value (or the result is expansive): `whnf` runs its `unfold`
+  -- thunk (`memo`, so once), `whnfNumeral` leaves an expansive one glued. Recognisable as
+  -- an operation, which is what lets an outer operation compute an inner one first.
+  | vnatglue (op : NatOp) (nb : NatB) (d : Tm) (args : Env) (unfold : Unit → Val)
 inductive Env where
   | nil
   | cons (v : Val) (rest : Env)
@@ -207,6 +447,8 @@ inductive Spine where
   | ssnd (sp : Spine)
   -- a stuck case: its motive and branches, closed over `env`
   | secase (sp : Spine) (env : Env) (motive : Tm) (branches : Tms)
+  -- a stuck `split`: its motive and body, closed over `env`
+  | ssplit (sp : Spine) (env : Env) (q : Q) (motive body : Tm)
   | sabsurd (sp : Spine) (motive : Val)
   | sdelim (sp : Spine) (v : Lvl) (P mret marg mrec mhrec : Val)
   | sind (sp : Spine) (l : Lvl) (I D : Val) (v : Lvl) (P m i : Val)
@@ -527,6 +769,7 @@ def tmSubst (ps : List String) (ls : List Lvl) : Tm → Tm
   | .snd p => .snd (tmSubst ps ls p)
   | .exfalso m t => .exfalso (tmSubst ps ls m) (tmSubst ps ls t)
   | .letUnit u b => .letUnit (tmSubst ps ls u) (tmSubst ps ls b)
+  | .split q s m b => .split q (tmSubst ps ls s) (tmSubst ps ls m) (tmSubst ps ls b)
   | .ecase m sc bs => .ecase (tmSubst ps ls m) (tmSubst ps ls sc) (tmsSubst ps ls bs)
   | .eq A a b => .eq (tmSubst ps ls A) (tmSubst ps ls a) (tmSubst ps ls b)
   | .eqTy A B => .eqTy (tmSubst ps ls A) (tmSubst ps ls B)
@@ -566,6 +809,8 @@ def tmSubst (ps : List String) (ls : List Lvl) : Tm → Tm
   | .down t => .down (tmSubst ps ls t)
   -- (the marker's level is substituted: `prf u t` is a suspended proof at `u := 0`)
   | .prf l t => .prf (substLvl ps ls l) (tmSubst ps ls t)
+  -- (E-K) the operation's constant is closed, with no level parameters
+  | .natFn op nb d => .natFn op nb d
   | t => t
 def tmsSubst (ps : List String) (ls : List Lvl) : Tms → Tms
   | .tnil => .tnil
@@ -592,6 +837,8 @@ def lsucc (l : Lvl) : Lvl := .lsucc l
 -- would be rebuilt from its fields, an allocation for every call)
 partial def whnf (v : Val) : Val := match v with
   | .vglued _ _ g => whnf (g ())
+  -- (E-K) a glued operation computes (a partial one is a function value as it is)
+  | .vnatglue _ _ _ _ g => whnf (g ())
   | _ => v
 
 
@@ -742,6 +989,7 @@ def tmEq : Tm → Tm → Bool
   | .pfalse, .pfalse => .true
   | .exfalso a b, .exfalso c d => Bool.and (tmEq a c) (tmEq b d)
   | .letUnit a b, .letUnit c d => Bool.and (tmEq a c) (tmEq b d)
+  | .split q a m b, .split q' a' m' b' => Bool.and (qEq q q') (Bool.and (tmEq a a') (Bool.and (tmEq m m') (tmEq b b')))
   | .enum k, .enum k' => Nat.beq k k'
   -- (the enumeration's size too: `valSame` compares it, and "the same term" must not
   -- depend on both sides having one type)
@@ -790,11 +1038,17 @@ def tmEq : Tm → Tm → Bool
   | .prf l a, .prf l' b => Bool.and (lvlEquiv l l') (tmEq a b)
   | .ind l a b v c d e f, .ind l' a' b' v' c' d' e' f' => Bool.and (lvlEquiv l l') (Bool.and (lvlEquiv v v')
       (Bool.and (tmEq a a') (Bool.and (tmEq b b') (Bool.and (tmEq c c') (Bool.and (tmEq d d') (Bool.and (tmEq e e') (tmEq f f')))))))
+  -- (E-K) literals by their number and registration, operations by their key and constant
+  | .nlit n nb, .nlit n' nb' => Bool.and (knEq n n') (natBEq nb nb')
+  | .natFn o nb d, .natFn o' nb' d' => Bool.and (natOpEq o o') (Bool.and (natBEq nb nb') (tmEq d d'))
   | _, _ => .false
 def tmsEq : Tms → Tms → Bool
   | .tnil, .tnil => .true
   | .tcons a r, .tcons b r' => Bool.and (tmEq a b) (tmsEq r r')
   | _, _ => .false
+-- (E-K) the same registration of numbers (constants: by name)
+def natBEq : NatB → NatB → Bool
+  | .mk n z s, .mk n' z' s' => Bool.and (tmEq n n') (Bool.and (tmEq z z') (tmEq s s'))
 end
 
 -- The templates of `Templates.lean`, as terms (the same de Bruijn layout; quantity
@@ -941,7 +1195,7 @@ def kernelInertConv : Bool := .true
 def kernelLazyProofs : Bool := .true
 
 -- (P2) **The step budget of a proof's read-back** (`Budget` in `Wiz/Core/Term.lean`, review
--- F7). Reading a value back (`quoteM .true`: the elaborator's solutions, `#reduce`, its
+-- F7). Reading a value back (`quoteM .false .true`: the elaborator's solutions, its
 -- messages) evaluates a suspended proof, and a proof need not have a normal form. So that
 -- evaluation runs within a budget of steps, counted, not timed: a step is one
 -- instantiation of a closure (`instC`: a β-step, or going under a binder to read it
@@ -980,6 +1234,7 @@ def toAbsurd : Spine → Spine
   | .sfst sp => toAbsurd sp
   | .ssnd sp => toAbsurd sp
   | .secase sp _ _ _ => toAbsurd sp
+  | .ssplit sp _ _ _ _ => toAbsurd sp
   | .sdelim sp _ _ _ _ _ _ => toAbsurd sp
   | .sind sp _ _ _ _ _ _ _ => toAbsurd sp
   | .ssfix sp _ _ _ _ _ _ _ _ => toAbsurd sp
@@ -1019,6 +1274,7 @@ def usesVar : Nat → Tm → Bool
   | i, .fst p => usesVar i p
   | i, .snd p => usesVar i p
   | i, .pair a b => Bool.or (usesVar i a) (usesVar i b)
+  | i, .split _ s m b => Bool.or (usesVar i s) (Bool.or (usesVar (i + 1) m) (usesVar (i + 2) b))
   | i, .con x => usesVar i x
   | i, .ulift _ _ A => usesVar i A
   | i, .up a => usesVar i a
@@ -1042,6 +1298,8 @@ def usesVar : Nat → Tm → Bool
   | i, .qty => .false
   | i, .qlit _ => .false
   | i, .prf _ t => usesVar i t
+  | i, .nlit _ _ => .false
+  | i, .natFn _ _ d => usesVar i d
   | _, _ => .true
 
 mutual
@@ -1122,6 +1380,9 @@ def eval : Env → Tm → Val
   | _, .sortL l => .vsort l
   | _, .const n ps ls v ty => .vglued (.hconst n ps ls v ty) .snil (memo (fun _ => eval .nil (substIfAny ps ls v)))
   | _, .axiomC n ty => .vne (.haxiom n ty) .snil
+  -- (E-K) a literal is a value; an operation collects its arguments (`vapp`)
+  | _, .nlit n nb => .vnat n nb
+  | _, .natFn op nb d => .vnatfn op nb d .nil
   | env, .ulift k l A => .vulift k l (eval env A)
   | env, .up a => .vup (eval env a)
   | env, .down t => vdown (eval env t)
@@ -1130,6 +1391,7 @@ def eval : Env → Tm → Val
   | env, .prf l t => match lvlIsZero l with
     | .true => suspend env t
     | .false => eval env t
+  | env, .split q s m b => vSplit q (eval env s) env m b
   --|ex
   --| | _, _ => .vsort (.lnum 0)
   --sol>
@@ -1140,6 +1402,14 @@ def suspend (env : Env) (t : Tm) : Val := match kernelLazyProofs with
     | .prf _ t' => suspend env t'
     | _ => .vne (.hprf env t) .snil
   | .false => eval env t
+-- `let q (x, y) := s; b`: β-reduces on a pair, is stuck on a neutral; a proof is split
+-- by η (`Σ` has η, and a proof is never evaluated to a pair).
+def vSplit (q : Q) (s : Val) (env : Env) (motive body : Tm) : Val := match whnf s with
+  | .vpair a b => eval (.cons b (.cons a env)) body
+  | .vne h sp => match Bool.and kernelLazyProofs (proofHead h) with
+    | .true => eval (.cons (vsnd s) (.cons (vfst s) env)) body
+    | .false => .vne h (.ssplit sp env q motive body)
+  | v => v
 -- the eliminations of a spine, applied to a value (for reading a proof back, and for
 -- the argument of a cast that regularity removes: `stripCast`)
 def forceSp : Val → Spine → Val
@@ -1159,6 +1429,7 @@ def forceSp : Val → Spine → Val
     | .vtag _ i => eval env (tmsNth bs i)
     | .vne h sp' => .vne h (.secase sp' env m bs)
     | w => w
+  | v, .ssplit sp env q m b => vSplit q (forceSp v sp) env m b
   | v, .sdelim sp k P a b c d => vDelim k P a b c d (forceSp v sp)
   | v, .sind sp l I D k P m i => vInd l I D k P m i (forceSp v sp)
   | v, .ssfix sp l I D k P f sz i => vSfix l I D k P f sz i (forceSp v sp)
@@ -1190,6 +1461,9 @@ def fromAbsurd : Spine → Option Spine
   | .secase sp env m bs => match fromAbsurd sp with
     | .some r => .some (.secase r env m bs)
     | .none => .none
+  | .ssplit sp env q m b => match fromAbsurd sp with
+    | .some r => .some (.ssplit r env q m b)
+    | .none => .none
   | .sdelim sp v P a b c d => match fromAbsurd sp with
     | .some r => .some (.sdelim r v P a b c d)
     | .none => .none
@@ -1216,6 +1490,7 @@ def vapp : Val → Val → Val
   --<sol
   | .vlam env b, a => instC env a b
   | .vne h sp, a => .vne h (.sapp sp a)
+  | .vnatfn op nb d args, a => vNatFnApp op nb d (.cons a args)
   | v, _ => v
   --|ex
   --| | v, _ => v
@@ -1244,6 +1519,195 @@ def vdown : Val → Val
   | .vup a => a
   | .vne h sp => .vne h (.sdown sp)
   | v => v
+-- **(E-K) Registered operations on numbers** (`vNatOp` in `Eval.lean`). An operation
+-- applied to all its arguments computes natively when they are literals (of its own
+-- registration). Otherwise it stays glued as `.vnatglue` (recognisable as an operation, so an
+-- outer operation can compute an inner one first) and computes when `whnf` looks at it.
+-- The rules are the Lean kernel's (`kernel-lazy-let.md` §8.1, §8.4, §9.3):
+-- * `natFast`: `Nat.mul 0 x ↦ 0`, `Nat.add 0 x ↦ x`, `Nat.sub x 0 ↦ x`, without forcing `x`
+--   (the zero is looked for among literals only);
+-- * on literals: `succ`, `pred`, `add`, `sub` (truncated), `mul`, `div` (`n / 0 = 0`),
+--   `mod` (`n % 0 = n`) natively; `beq a b` and `blt a b` are the definition's own result
+--   at small literals: `d 0 (if a = b then 0 else 1)`, `d 0 (if a < b then 1 else 0)`;
+-- * an operation whose argument is a definition's glued value (`.vglued`) stays glued:
+--   asking whether it is a numeral would run the definition (wiz-rv FINDINGS L8). An
+--   argument that is itself an operation is computed first, and replaced by its value when
+--   that is a numeral, so a chain of suspended operations never grows past one link;
+-- * otherwise the definition: `succ` applied (a constructor, not glued), `x - n` with `x`
+--   stuck and `n ≥ 1` a literal stays a stuck application (`Nat.subFrom` would build `n`
+--   `pred`s), and anything else computes the definition when `whnf` asks.
+def natTyOf (nb : NatB) : Val := match nb with
+  | .mk n _ _ => eval .nil n
+-- the number of the argument if it is a literal of this registration, without looking
+-- through a glue (a definition's value is not forced)
+def natLitNoForce (nb : NatB) (v : Val) : Option KNat := match v with
+  | .vnat n nb' => match natBEq nb nb' with
+    | .true => .some n
+    | .false => .none
+  | _ => .none
+def natZeroNoForce (nb : NatB) (v : Val) : Bool := match natLitNoForce nb v with
+  | .some n => knIsZero n
+  | .none => .false
+-- the same, through `whnfNumeral` (a non-expansive glue is computed; an expansive one is
+-- not: the caller only asks for the zero rule, which cannot need it)
+def natLitStrong (nb : NatB) (v : Val) : Option KNat := match whnfNumeral v with
+  | .vnat n nb' => match natBEq nb nb' with
+    | .true => .some n
+    | .false => .none
+  | _ => .none
+def natZeroStrong (nb : NatB) (v : Val) : Bool := match natLitStrong nb v with
+  | .some n => knIsZero n
+  | .none => .false
+-- an argument's numeral: a literal, or the value of an operation (which the caller may
+-- compute: it is not a definition's glue, so this is the `vNatOpNow` step of §8.1)
+def natLitOp (nb : NatB) (v : Val) : Option KNat := match natLitNoForce nb v with
+  | .some n => .some n
+  | .none => match v with
+    | .vnatfn _ _ _ _ => match natLitStrong nb v with
+      | .some n => .some n
+      | .none => .none
+    | .vnatglue _ _ _ _ _ => match natLitStrong nb v with
+      | .some n => .some n
+      | .none => .none
+    | _ => .none
+-- the argument as it is stored in a glued operation: its numeral when it is one, else as
+-- it was (a definition's glued value is never forced)
+def natResolve (nb : NatB) (v : Val) : Val := match natLitOp nb v with
+  | .some n => .vnat n nb
+  | .none => v
+-- `Nat.mul 0 x ↦ 0`, `Nat.add 0 x ↦ x`, `Nat.sub x 0 ↦ x` (`natFast?`)
+def natFast (force : Bool) (op : NatOp) (nb : NatB) (a b : Val) : Option Val := match op with
+  | .nmul => match (match force with | .true => natZeroStrong nb a | .false => natZeroNoForce nb a) with
+    | .true => .some (.vnat knZero nb)
+    | .false => .none
+  | .nadd => match (match force with | .true => natZeroStrong nb a | .false => natZeroNoForce nb a) with
+    | .true => .some b
+    | .false => .none
+  | .nsub => match (match force with | .true => natZeroStrong nb b | .false => natZeroNoForce nb b) with
+    | .true => .some a
+    | .false => .none
+  | _ => .none
+-- the definition applied (glued under the constant's name)
+def natDefApp (d : Tm) (a : Val) : Val := vapp (eval .nil d) a
+-- one argument (arity 1). `force` is `whnf`'s view: a definition's value is computed, and
+-- the result is now a constructor or the definition's unfolding, never a glued operation.
+def vNatOp1 (force : Bool) (op : NatOp) (nb : NatB) (d : Tm) (a : Val) : Val :=
+  match (match force with | .true => natLitStrong nb a | .false => natLitNoForce nb a) with
+  | .some n => match op with
+    | .nsucc => .vnat (knSucc n) nb
+    | .npred => .vnat (knPred n) nb
+    | _ => natDefApp d a
+  | .none => match op with
+    -- (`succ` is a constructor: its definition applied, not glued)
+    | .nsucc => vapp (whnf (eval .nil d)) a
+    | _ => match force with
+      | .true => natDefApp d a
+      | .false => .vnatglue op nb d (.cons a .nil) (memo (fun _ => vNatOp1 .true op nb d a))
+-- two arguments (arity 2), not forced: literals compute; an operation argument is
+-- computed and kept as its numeral when it has one; a definition's glue stays glued
+def vNatOp2 (op : NatOp) (nb : NatB) (d : Tm) (a b : Val) : Val := match natFast .false op nb a b with
+  | .some v => v
+  | .none =>
+    let a' := natResolve nb a;
+    let b' := natResolve nb b;
+    match natLitNoForce nb a' with
+    | .some x => match natLitNoForce nb b' with
+      | .some y => natNative op nb d x y
+      | .none => .vnatglue op nb d (.cons b' (.cons a' .nil)) (memo (fun _ => vNatOp2Now op nb d a' b'))
+    | .none => .vnatglue op nb d (.cons b' (.cons a' .nil)) (memo (fun _ => vNatOp2Now op nb d a' b'))
+-- the same forced (`whnf`): both arguments are computed, and the result is native or the
+-- definition's unfolding
+def vNatOp2Now (op : NatOp) (nb : NatB) (d : Tm) (a b : Val) : Val := match natFast .true op nb a b with
+  | .some v => v
+  | .none => match natLitStrong nb a with
+    | .some x => match natLitStrong nb b with
+      | .some y => natNative op nb d x y
+      | .none => natUnfold op nb d a b
+    | .none => natUnfold op nb d a b
+-- the operation once it has its arguments (the arguments in `args`, the last first);
+-- literals compute, anything else is glued with its `whnf` thunk
+def vNatFnApp (op : NatOp) (nb : NatB) (d : Tm) (args : Env) : Val := match args with
+  | .cons b rest => match Nat.beq (natOpArity op) 1 with
+    | .true => match rest with
+      | .nil => vNatOp1 .false op nb d b
+      | _ => .vnatfn op nb d args
+    | .false => match rest with
+      | .cons a .nil => vNatOp2 op nb d a b
+      | _ => .vnatfn op nb d args
+  | .nil => .vnatfn op nb d args
+-- would forcing this value need the value of an operation whose result can be far larger
+-- than its arguments (`Nat.pow`, `Nat.shiftLeft`)? `Nat.pow 2 (Nat.pow 2 28)` is the
+-- probe: a comparison that only asks whether it is the same application must not
+-- materialise it. A glue around one (`Nat.sub h (Nat.pow …)`) is as expensive.
+def expansiveName (n : String) : Bool :=
+  Bool.or (kStrEq n "Nat.pow") (Bool.or (kStrEq n "N.pow")
+    (Bool.or (kStrEq n "Nat.shiftLeft") (kStrEq n "N.shiftLeft")))
+def valExpensive (v : Val) : Bool := match v with
+  | .vglued (.hconst n _ _ _ _) sp _ => Bool.or (expansiveName n) (spineExpensive sp)
+  | .vnatglue _ _ _ args _ => envExpensive args
+  | _ => .false
+def spineExpensive (sp : Spine) : Bool := match sp with
+  | .sapp sp' a => Bool.or (spineExpensive sp') (valExpensive a)
+  | _ => .false
+def envExpensive (e : Env) : Bool := match e with
+  | .nil => .false
+  | .cons v rest => Bool.or (valExpensive v) (envExpensive rest)
+-- `whnf`, but a glued value that would need an expansive operation's value is not forced:
+-- its result may need as much memory as the value, and not forcing it is always sound (it
+-- is computed if something really asks for it). (`whnfNumeral` in `Eval.lean`.)
+def whnfNumeral (v : Val) : Val := match v with
+  | .vglued _ _ _ => match valExpensive v with
+    | .true => v
+    | .false => whnf v
+  | .vnatglue _ _ _ _ _ => match valExpensive v with
+    | .true => v
+    | .false => whnf v
+  | _ => whnf v
+def natNative (op : NatOp) (nb : NatB) (d : Tm) (x y : KNat) : Val := match op with
+  | .nadd => .vnat (knAdd x y) nb
+  | .nsub => .vnat (knSub x y) nb
+  | .nmul => .vnat (knMul x y) nb
+  | .ndiv => .vnat (knDiv x y) nb
+  | .nmod => .vnat (knMod x y) nb
+  | .nbeq => whnf (vapp (natDefApp d (.vnat knZero nb)) (.vnat (match knEq x y with
+      | .true => knZero
+      | .false => knOne) nb))
+  | .nblt => whnf (vapp (natDefApp d (.vnat knZero nb)) (.vnat (match knLt x y with
+      | .true => knOne
+      | .false => knZero) nb))
+  | _ => vapp (natDefApp d (.vnat x nb)) (.vnat y nb)
+def natUnfold (op : NatOp) (nb : NatB) (d : Tm) (a b : Val) : Val := match natStuckSub op nb a b with
+  | .true => (match d with
+    | .const n ps ls v ty => .vne (.hconst n ps ls v ty) (.sapp (.sapp .snil a) b)
+    | _ => vapp (natDefApp d a) b)
+  | .false => vapp (natDefApp d a) b
+-- `x - n`, `x` stuck and `n ≥ 1` a literal
+def natStuckSub (op : NatOp) (nb : NatB) (a b : Val) : Bool := match op with
+  | .nsub => match whnfNumeral a with
+    | .vne _ _ => match natLitStrong nb b with
+      | .some n => Bool.not (knIsZero n)
+      | .none => .false
+    | _ => .false
+  | _ => .false
+-- **(E-K) A literal as a constructor**, one step deep (`vNatView`): `0 ↦ zero`,
+-- `n + 1 ↦ succ n`, by the constructors' definitions (not their registered values). Other
+-- values are as they are. The argument is in weak head normal form, and so is the result.
+def natView (v : Val) : Val := match v with
+  | .vnat n nb => match nb with
+    | .mk _ z sc => match knIsZero n with
+      | .true => whnf (eval .nil z)
+      | .false => whnf (vapp (eval .nil sc) (.vnat (knPred n) nb))
+  | _ => v
+-- `whnf`, a literal shown as a constructor
+def whnfView (v : Val) : Val := natView (whnf v)
+-- two literals of one registration: equal when their numbers are (`.none`: not two such)
+def natLitsEq (a b : Val) : Option Bool := match a with
+  | .vnat n nb => match b with
+    | .vnat m nb' => match natBEq nb nb' with
+      | .true => .some (knEq n m)
+      | .false => .none
+    | _ => .none
+  | _ => .none
 -- `up` when `lifted` (a lifted tag, Q4)
 def upIf (lifted : Bool) (v : Val) : Val := match lifted with
   | .true => .vup v
@@ -1270,7 +1734,7 @@ def vDelimW : Lvl → Val → Val → Val → Val → Val → Val → Val
   | _, _, _, _, _, _, d => d
 -- induction (`vInd` in `Eval.lean`): on a constructor, the method applied to the payload
 -- and its hypotheses (`ind` at each recursive field)
-def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnf x)
+def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnfView x)
 def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vcon xs =>
     -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
@@ -1281,7 +1745,7 @@ def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vne h sp => .vne h (.sind sp l I D v P m i)
   | _, _, _, _, _, _, _, x => x
 -- sized recursion (`vSfix`): on a constructor, `f ∞ rec i x`, where `rec j i y` recurses
-def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnf x with
+def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnfView x with
   | .vcon xs =>
     -- inside: y0 i1 j2 f3 P4 D5 I6
     let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
@@ -1290,7 +1754,7 @@ def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnf
   | .vne h sp => .vne h (.ssfix sp l I D v P f sz i)
   | x' => x'
 -- sized case analysis (`vScase`): `m ∞ i xs` (the quantity plays no part)
-def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnf x with
+def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnfView x with
   | .vcon xs => vapp (vapp (vapp m .vszInf) i) xs
   | .vne h sp => .vne h (.sscase sp l q I D v P m sz i)
   | x' => x'
@@ -1326,13 +1790,29 @@ def nuFamilyAt (l : Lvl) (I D sz : Val) : Val :=
 -- `a = b` at `A`, by `A` (`vEq` in `Eval.lean`; the closures are the same templates)
 -- at a proposition, `True` (proof irrelevance: the equation would be ill typed, and two
 -- proofs are always convertible); otherwise by `A`
-def vEq (A a b : Val) : Val :=
-  let A' := whnf A;
-  match propSort A' with
-  | .some p => match p with
+def vEq (A a b : Val) : Val := vEqLit A (whnfNumeral a) (whnfNumeral b)
+-- (E-K) two literals: decided by their numbers (`True` or `False`), as in the Lean kernel.
+-- The sides are already `whnfNumeral`'d, so an expansive operation (`Nat.pow 2
+-- (Nat.pow 2 28)`) is still glued here and the equation stays stuck instead of building
+-- the value.
+def vEqLit (A a b : Val) : Val := match natLitsEq a b with
+  | .some r => match r with
     | .true => .vunit (ln 0)
-    | .false => vEqW A' (whnf a) (whnf b)
-  | .none => vEqW A' (whnf a) (whnf b)
+    | .false => .vempty (ln 0)
+  | .none =>
+    let A' := whnf A;
+    match propSort A' with
+    | .some p => match p with
+      | .true => .vunit (ln 0)
+      | .false => vEqNat A' a b
+    | .none => vEqNat A' a b
+-- (E-K) a literal side one step inside (`vNatView`) when both sides are then constructors;
+-- a stuck equation keeps its sides as they were
+def vEqNat (A a b : Val) : Val := match natView a with
+  | .vcon x => match natView b with
+    | .vcon y => vEqW A (.vcon x) (.vcon y)
+    | _ => vEqW A a b
+  | _ => vEqW A a b
 def vEqW : Val → Val → Val → Val
   | .vpi _ i _ a1 env b1, a, b => .vpi .qz i (ln 0) a1 (.cons b (.cons a (.cons (.vlam env b1) .nil)))
       (.eq (.app (.var 3) (.var 0)) (.app (.var 2) (.var 0)) (.app (.var 1) (.var 0)))
@@ -1628,7 +2108,11 @@ def groundTags (d : Nat) (I E E' : Val) (lifted : Bool) (k i : Nat) : Bool := ma
   | .true => match groundEqDesc (Nat.succ d) I (vapp E (upIf lifted (.vtag k i))) (vapp E' (upIf lifted (.vtag k i))) with
     | .true => groundTags d I E E' lifted k (Nat.succ i)
     | .false => .false
-def groundEqVal (T a b : Val) : Bool := groundValP (whnf T) (whnf a) (whnf b)
+def groundEqVal (T a b : Val) : Bool := groundValN (whnf T) (whnf a) (whnf b)
+-- (E-K) two literals by their numbers, else one step inside (`vNatView`)
+def groundValN (T a b : Val) : Bool := match natLitsEq a b with
+  | .some r => r
+  | .none => groundValP T (natView a) (natView b)
 def groundValP (T a b : Val) : Bool := match propSort T with
   | .some p => match p with
     | .true => .true
@@ -1769,7 +2253,7 @@ def famPayloadW (nu : Bool) (l : Lvl) (I D i s : Val) (l' : Lvl) (I' D' i' s' e 
         (.lam (.eqTy (.var 2) (interpApp l (.fst (.var 1)) (.fst (.snd (.var 1)))
           (.lam (famTm nu l (.fst (.var 2)) (.fst (.snd (.var 2))) (.var 0) (.var 4))) (.snd (.snd (.var 1))))));
       .some (.mk Xi Xi' (.vne (.htransp (famCodeTy l) (.vpair I (.vpair D i)) P (.vne (.hreflTy Xi) .snil) (.vpair I' (.vpair D' i')) e) .snil))
-def castMu (A B e t : Val) : Val := match whnf t with
+def castMu (A B e t : Val) : Val := match whnfView t with
   | .vcon x => match famPayload A B e with
     | .some p => match p with
       | .mk Xi Xi' e' => .vcon (vCast Xi Xi' e' x)
@@ -1795,17 +2279,17 @@ def outCast (A B e t : Val) : Val := match A with
   | _ => .vne (.hcast A B e t) (.sout .snil)
 
 -- **Exercise 14.2.** Quotation (`quote` in `Eval.lean`): back to a term at depth `l`.
-def quoteM (qm : Bool) : Nat → Val → Tm
+def quoteM (nf qm : Bool) : Nat → Val → Tm
   --<sol
   | _, .vsort l => match lvlClosed l with
     | .some n => match n with
       | .zero => .prop
       | .succ m => .univ m
     | .none => .sortL l
-  | l, .vpi q i j a env b => .pi q i j (quoteM qm l a) (quoteM qm (l + 1) (instC env (fresh l) b))
-  | l, .vlam env b => .lam (quoteM qm (l + 1) (instC env (fresh l) b))
-  | l, .vsigma q i j a env b => .sigma q i j (quoteM qm l a) (quoteM qm (l + 1) (instC env (fresh l) b))
-  | l, .vpair a b => .pair (quoteM qm l a) (quoteM qm l b)
+  | l, .vpi q i j a env b => .pi q i j (quoteM nf qm l a) (quoteM nf qm (l + 1) (instC env (fresh l) b))
+  | l, .vlam env b => .lam (quoteM nf qm (l + 1) (instC env (fresh l) b))
+  | l, .vsigma q i j a env b => .sigma q i j (quoteM nf qm l a) (quoteM nf qm (l + 1) (instC env (fresh l) b))
+  | l, .vpair a b => .pair (quoteM nf qm l a) (quoteM nf qm l b)
   | _, .vunit l => match lvlClosed l with
     | .some n => (match n with
       | .zero => .ptrue
@@ -1819,26 +2303,26 @@ def quoteM (qm : Bool) : Nat → Val → Tm
     | .none => .empty l
   | _, .venum k => .enum k
   | _, .vtag k i => .tag k i
-  | l, .vdesc k I => .descr k (quoteM qm l I)
-  | l, .vdret i => .dret (quoteM qm l i)
-  | l, .vdarg q S E => .darg (quoteM qm l q) (quoteM qm l S) (quoteM qm l E)
-  | l, .vdrec q j E => .drec (quoteM qm l q) (quoteM qm l j) (quoteM qm l E)
-  | l, .vdhrec q H j E => .dhrec (quoteM qm l q) (quoteM qm l H) (quoteM qm l j) (quoteM qm l E)
+  | l, .vdesc k I => .descr k (quoteM nf qm l I)
+  | l, .vdret i => .dret (quoteM nf qm l i)
+  | l, .vdarg q S E => .darg (quoteM nf qm l q) (quoteM nf qm l S) (quoteM nf qm l E)
+  | l, .vdrec q j E => .drec (quoteM nf qm l q) (quoteM nf qm l j) (quoteM nf qm l E)
+  | l, .vdhrec q H j E => .dhrec (quoteM nf qm l q) (quoteM nf qm l H) (quoteM nf qm l j) (quoteM nf qm l E)
   | _, .vqty => .qty
   | _, .vqlit q => .qlit q
   | l, .vmu k I D i sz => match sz with
-    | .vszInf => .mu k (quoteM qm l I) (quoteM qm l D) (quoteM qm l i)
-    | _ => .mus k (quoteM qm l I) (quoteM qm l D) (quoteM qm l i) (quoteM qm l sz)
+    | .vszInf => .mu k (quoteM nf qm l I) (quoteM nf qm l D) (quoteM nf qm l i)
+    | _ => .mus k (quoteM nf qm l I) (quoteM nf qm l D) (quoteM nf qm l i) (quoteM nf qm l sz)
   | _, .vsize => .size
   | _, .vszInf => .szInf
-  | l, .vszSuc sz => .szSuc (quoteM qm l sz)
-  | l, .vsizeLt sz => .sizeLt (quoteM qm l sz)
-  | l, .vcon x => .con (quoteM qm l x)
-  | l, .vnu k I D i sz => .nu k (quoteM qm l I) (quoteM qm l D) (quoteM qm l i) (quoteM qm l sz)
-  | l, .vcocon x => .cocon (quoteM qm l x)
+  | l, .vszSuc sz => .szSuc (quoteM nf qm l sz)
+  | l, .vsizeLt sz => .sizeLt (quoteM nf qm l sz)
+  | l, .vcon x => .con (quoteM nf qm l x)
+  | l, .vnu k I D i sz => .nu k (quoteM nf qm l I) (quoteM nf qm l D) (quoteM nf qm l i) (quoteM nf qm l sz)
+  | l, .vcocon x => .cocon (quoteM nf qm l x)
   | l, .vscofix k I D A f sz i a =>
-    .scofix k (quoteM qm l I) (quoteM qm l D) (quoteM qm l A) (quoteM qm l f) (quoteM qm l sz) (quoteM qm l i) (quoteM qm l a)
-  | l, .vcoit k I D S st i s => .coit k (quoteM qm l I) (quoteM qm l D) (quoteM qm l S) (quoteM qm l st) (quoteM qm l i) (quoteM qm l s)
+    .scofix k (quoteM nf qm l I) (quoteM nf qm l D) (quoteM nf qm l A) (quoteM nf qm l f) (quoteM nf qm l sz) (quoteM nf qm l i) (quoteM nf qm l a)
+  | l, .vcoit k I D S st i s => .coit k (quoteM nf qm l I) (quoteM nf qm l D) (quoteM nf qm l S) (quoteM nf qm l st) (quoteM nf qm l i) (quoteM nf qm l s)
   -- (P2) a suspended proof, with its eliminations: evaluated (`.true`), or `()`. Erased,
   -- the eliminations from the last `absurd` on are kept, on `()`: past an `absurd` the
   -- value need not be a proof, and two different values must not read back alike
@@ -1846,79 +2330,99 @@ def quoteM (qm : Bool) : Nat → Val → Tm
     -- (read back marked: in a relevant position `infer` requires the marker)
     | .true => match fromAbsurd sp with
       | .none => forceProof l env t sp
-      | .some r => quoteSpine qm l (forceProof l env t (toAbsurd sp)) r
+      | .some r => quoteSpine nf qm l (forceProof l env t (toAbsurd sp)) r
     | .false => match fromAbsurd sp with
       | .none => .star
-      | .some r => quoteSpine qm l .star r
+      | .some r => quoteSpine nf qm l .star r
   | l, .vne h sp => match Bool.and qm (Bool.and kernelLazyProofs (proofHead h)) with
     -- (P2) the other proof heads (`refl`, `transp`, a stuck cast between propositions)
     -- read back marked too, up to their last `absurd`
     | .true => match fromAbsurd sp with
-      | .none => markTm (quoteSpine qm l (quoteHead qm l h) sp)
-      | .some r => quoteSpine qm l (markTm (quoteSpine qm l (quoteHead qm l h) (toAbsurd sp))) r
+      | .none => markTm (quoteSpine nf qm l (quoteHead nf qm l h) sp)
+      | .some r => quoteSpine nf qm l (markTm (quoteSpine nf qm l (quoteHead nf qm l h) (toAbsurd sp))) r
     -- (erased, every proof head reads back as `()`, like a suspended proof: the same proof
     -- can be a `refl` head in one value and a suspension in another, and two types that
     -- differ only so must not compare as different)
     | .false => match Bool.and (Bool.not qm) (Bool.and kernelLazyProofs (proofHead h)) with
       | .true => (match fromAbsurd sp with
         | .none => .star
-        | .some r => quoteSpine qm l .star r)
-      | .false => quoteSpine qm l (quoteHead qm l h) sp
-  | l, .vglued h sp _ => quoteSpine qm l (quoteHead qm l h) sp
-  | l, .vulift k u A => .ulift k u (quoteM qm l A)
-  | l, .vup a => .up (quoteM qm l a)
+        | .some r => quoteSpine nf qm l .star r)
+      | .false => quoteSpine nf qm l (quoteHead nf qm l h) sp
+  -- (a normal form, `nf`: unfold the glue; read-back keeps the application)
+  | l, .vglued h sp v => match nf with
+    | .true => quoteM nf qm l (whnf (.vglued h sp v))
+    | .false => quoteSpine nf qm l (quoteHead nf qm l h) sp
+  | l, .vulift k u A => .ulift k u (quoteM nf qm l A)
+  | l, .vup a => .up (quoteM nf qm l a)
+  -- (E-K) a literal reads back as itself; an operation short of arguments as the
+  -- operation applied to them (a normal form computes a full one first)
+  | _, .vnat n nb => .nlit n nb
+  | l, .vnatfn op nb d args => quoteNatArgs nf qm l (.natFn op nb d) args
+  | l, .vnatglue op nb d args g => match nf with
+    | .true => quoteM nf qm l (whnf (g ()))
+    | .false => quoteNatArgs nf qm l (.natFn op nb d) args
   --|ex
   --| | _, _ => .univ 0
   --sol>
-def quoteSpine (qm : Bool) : Nat → Tm → Spine → Tm
+-- (E-K) `h` applied to the arguments (the last one first)
+def quoteNatArgs (nf qm : Bool) (l : Nat) (h : Tm) : Env → Tm
+  | .nil => h
+  | .cons a rest => .app (quoteNatArgs nf qm l h rest) (quoteM nf qm l a)
+def quoteSpine (nf qm : Bool) : Nat → Tm → Spine → Tm
   | _, h, .snil => h
-  | l, h, .sapp sp a => .app (quoteSpine qm l h sp) (quoteM qm l a)
-  | l, h, .sfst sp => .fst (quoteSpine qm l h sp)
-  | l, h, .ssnd sp => .snd (quoteSpine qm l h sp)
+  | l, h, .sapp sp a => .app (quoteSpine nf qm l h sp) (quoteM nf qm l a)
+  | l, h, .sfst sp => .fst (quoteSpine nf qm l h sp)
+  | l, h, .ssnd sp => .snd (quoteSpine nf qm l h sp)
   | l, h, .secase sp env m bs =>
-    .ecase (quoteM qm (l + 1) (instC env (fresh l) m)) (quoteSpine qm l h sp) (quoteBranches qm l env bs)
-  | l, h, .sabsurd sp m => .exfalso (quoteM qm l m) (quoteSpine qm l h sp)
+    .ecase (quoteM nf qm (l + 1) (instC env (fresh l) m)) (quoteSpine nf qm l h sp) (quoteBranches nf qm l env bs)
+  | l, h, .ssplit sp env q m b =>
+    .split q (quoteSpine nf qm l h sp) (quoteM nf qm (l + 1) (instC env (fresh l) m))
+      (quoteM nf qm (l + 2) (eval (.cons (fresh (l + 1)) (.cons (fresh l) env)) b))
+  | l, h, .sabsurd sp m => .exfalso (quoteM nf qm l m) (quoteSpine nf qm l h sp)
   | l, h, .sdelim sp v P a b c d =>
-    .delim v (quoteM qm l P) (quoteM qm l a) (quoteM qm l b) (quoteM qm l c) (quoteM qm l d) (quoteSpine qm l h sp)
+    .delim v (quoteM nf qm l P) (quoteM nf qm l a) (quoteM nf qm l b) (quoteM nf qm l c) (quoteM nf qm l d) (quoteSpine nf qm l h sp)
   | l, h, .sind sp k I D v P m i =>
-    .ind k (quoteM qm l I) (quoteM qm l D) v (quoteM qm l P) (quoteM qm l m) (quoteM qm l i) (quoteSpine qm l h sp)
+    .ind k (quoteM nf qm l I) (quoteM nf qm l D) v (quoteM nf qm l P) (quoteM nf qm l m) (quoteM nf qm l i) (quoteSpine nf qm l h sp)
   | l, h, .ssfix sp k I D v P f sz i =>
-    .sfix k (quoteM qm l I) (quoteM qm l D) v (quoteM qm l P) (quoteM qm l f) (quoteM qm l sz) (quoteM qm l i) (quoteSpine qm l h sp)
+    .sfix k (quoteM nf qm l I) (quoteM nf qm l D) v (quoteM nf qm l P) (quoteM nf qm l f) (quoteM nf qm l sz) (quoteM nf qm l i) (quoteSpine nf qm l h sp)
   | l, h, .sscase sp k q I D v P m sz i =>
-    .scase k q (quoteM qm l I) (quoteM qm l D) v (quoteM qm l P) (quoteM qm l m) (quoteM qm l sz) (quoteM qm l i) (quoteSpine qm l h sp)
-  | l, h, .sout sp => .out (quoteSpine qm l h sp)
-  | l, h, .sdown sp => .down (quoteSpine qm l h sp)
-  | l, h, .ssigq sp i j A env B => .sigmaQ (quoteSpine qm l h sp) i j (quoteM qm l A) (quoteM qm (l + 1) (eval (.cons (fresh l) env) B))
-def quoteHead (qm : Bool) : Nat → Head → Tm
+    .scase k q (quoteM nf qm l I) (quoteM nf qm l D) v (quoteM nf qm l P) (quoteM nf qm l m) (quoteM nf qm l sz) (quoteM nf qm l i) (quoteSpine nf qm l h sp)
+  | l, h, .sout sp => .out (quoteSpine nf qm l h sp)
+  | l, h, .sdown sp => .down (quoteSpine nf qm l h sp)
+  | l, h, .ssigq sp i j A env B => .sigmaQ (quoteSpine nf qm l h sp) i j (quoteM nf qm l A) (quoteM nf qm (l + 1) (eval (.cons (fresh l) env) B))
+def quoteHead (nf qm : Bool) : Nat → Head → Tm
   | l, .hvar x => .var (l - x - 1)
-  | l, .heq A a b => .eq (quoteM qm l A) (quoteM qm l a) (quoteM qm l b)
-  | l, .heqTy A B => .eqTy (quoteM qm l A) (quoteM qm l B)
-  | l, .hcast A B e t => .coe (quoteM qm l A) (quoteM qm l B) (quoteM qm l e) (quoteM qm l t)
-  | l, .hrefl A a => .eqRefl (quoteM qm l A) (quoteM qm l a)
-  | l, .hreflTy X => .tyRefl (quoteM qm l X)
-  | l, .htransp A a P p b e => .subst (quoteM qm l A) (quoteM qm l a) (quoteM qm l P) (quoteM qm l p) (quoteM qm l b) (quoteM qm l e)
+  | l, .heq A a b => .eq (quoteM nf qm l A) (quoteM nf qm l a) (quoteM nf qm l b)
+  | l, .heqTy A B => .eqTy (quoteM nf qm l A) (quoteM nf qm l B)
+  | l, .hcast A B e t => .coe (quoteM nf qm l A) (quoteM nf qm l B) (quoteM nf qm l e) (quoteM nf qm l t)
+  | l, .hrefl A a => .eqRefl (quoteM nf qm l A) (quoteM nf qm l a)
+  | l, .hreflTy X => .tyRefl (quoteM nf qm l X)
+  | l, .htransp A a P p b e => .subst (quoteM nf qm l A) (quoteM nf qm l a) (quoteM nf qm l P) (quoteM nf qm l p) (quoteM nf qm l b) (quoteM nf qm l e)
   | _, .hconst n ps ls v ty => .const n ps ls v ty
   | _, .haxiom n ty => .axiomC n ty
-  | l, .hprf env t => quoteM qm l (eval env t)  -- (not reached: `quoteM`'s case)
-def quoteBranches (qm : Bool) : Nat → Env → Tms → Tms
+  | l, .hprf env t => quoteM nf qm l (eval env t)  -- (not reached: `quoteM`'s case)
+def quoteBranches (nf qm : Bool) : Nat → Env → Tms → Tms
   | _, _, .tnil => .tnil
-  | l, env, .tcons b rest => .tcons (quoteM qm l (eval env b)) (quoteBranches qm l env rest)
+  | l, env, .tcons b rest => .tcons (quoteM nf qm l (eval env b)) (quoteBranches nf qm l env rest)
 -- (P2) a suspended proof `t` in `env`, with the eliminations `sp`, read back (`quoteM
 -- .true`): evaluated and read back marked, within the step budget (Lean's `quote` on a
 -- `.prf` head). A read-back inside another one counts on its budget; if the budget runs
 -- out, the proof reads back as the constant `proofStub`.
 def forceProof (l : Nat) (env : Env) (t : Tm) (sp : Spine) : Tm := match proofStart proofSteps with
-  | .false => markTm (quoteM .true l (forceSp (eval env t) sp))
+  | .false => markTm (quoteM .false .true l (forceSp (eval env t) sp))
   | .true =>
-    let tm := markTm (quoteM .true l (forceSp (eval env t) sp));
+    let tm := markTm (quoteM .false .true l (forceSp (eval env t) sp));
     match proofEnd (tmSeq tm) with
     | .true => tm
     | .false => markTm (.axiomC proofStub .star)
 end
 -- **Reading back** a value: suspended proofs are evaluated, so that the term is a normal
 -- form (which `infer` can check again). The kernel's own comparison of types (`sameVal`)
--- uses `quoteM .false`, which never evaluates a proof.
-def quote (l : Nat) (v : Val) : Tm := quoteM .true l v
+-- uses `quoteM .false .false`, which never evaluates a proof.
+def quote (l : Nat) (v : Val) : Tm := quoteM .false .true l v
+-- a normal form: every glued definition and full operation is computed first (`nf` in
+-- `Eval.lean` sets `Globals.eager`)
+def quoteNF (l : Nat) (v : Val) : Tm := quoteM .true .true l v
 
 -- a quantity literal
 def qLit : Q → String
@@ -1988,6 +2492,12 @@ def show (names : List String) : Nat → Tm → String
   | l, .letE t v b => String.append (String.append "let " (nameAt names l))
       (String.append (String.append " := " (show names l v)) (String.append "; " (show names (l + 1) b)))
   | l, .letUnit u b => String.append (String.append "let () := " (show names l u)) (String.append "; " (show names l b))
+  | l, .split q s m b =>
+    let qp := match q with
+      | .qw => ""
+      | q' => String.append (qLit q') " ";
+    String.append (String.append (String.append "let " qp) (String.append "(x, y) := " (show names l s)))
+      (String.append "; " (show names (l + 2) b))
   | l, .ann t ty => String.append (String.append "(" (show names l t)) (String.append " : " (String.append (show names l ty) ")"))
   | l, .letq _ t v b => show names l (.letE t v b)
   | l, .sigma q _ _ a b => String.append (String.append (String.append "(" (nameAt names l))
@@ -2063,6 +2573,9 @@ def show (names : List String) : Nat → Tm → String
       (String.append ", " (show names l s))) (String.append (showBranches names l bs) ")")
   | _, .qty => "Qty"
   | _, .qlit q => qLit q
+  -- (E-K) a literal in decimal; an operation by its constant
+  | _, .nlit n _ => knShow n
+  | l, .natFn _ _ d => show names l d
   | l, .sigmaQ q _ _ a b => String.append (String.append (String.append "(%" (show names l q))
       (String.append (String.append " " (nameAt names l)) (String.append " : " (show names l a)))) (String.append ") × " (show names (l + 1) b))
 
@@ -2240,6 +2753,7 @@ def typeOfNe : TCtx → Head → Spine → Val
     | .vne _ (.ssigq _ _ _ _ env b) => eval (.cons (vfst (.vne x sp)) env) b
     | ty => ty
   | _, x, .secase sp env m _ => eval (.cons (.vne x sp) env) m
+  | _, x, .ssplit sp env _ m _ => eval (.cons (.vne x sp) env) m
   | _, _, .sabsurd _ m => m
   | _, h, .sdelim sp _ P _ _ _ _ => vapp P (.vne h sp)
   | _, h, .sind sp _ _ _ _ P _ i => vapp (vapp P i) (.vne h sp)
@@ -2323,6 +2837,7 @@ def proofSpine : Spine → Bool
   | .ssnd sp => proofSpine sp
   | .sdown sp => proofSpine sp
   | .secase _ _ _ _ => .false
+  | .ssplit _ _ _ _ _ => .false
   | .sabsurd _ _ => .false
   | .sdelim _ _ _ _ _ _ _ => .false
   | .sind _ _ _ _ _ _ _ _ => .false
@@ -2539,6 +3054,26 @@ def valSame : Nat → Val → Val → Option Nat
     | .vszInf => match b with
       | .vszInf => .some n
       | _ => .none
+    -- (E-K) two literals of one registration
+    | .vnat k nb => match b with
+      | .vnat k' nb' => match Bool.and (knEq k k') (natBEq nb nb') with
+        | .true => .some n
+        | .false => .none
+      | _ => .none
+    -- (E-K) two applications of one operation (a partial one; a glued one is still an
+    -- application of its constant)
+    | .vnatfn op nb d args => match b with
+      | .vnatfn op' nb' d' args' =>
+        andSame (match Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d')) with
+          | .true => .some n
+          | .false => .none) (fun k => envSame k args args')
+      | _ => .none
+    | .vnatglue op nb d args _ => match b with
+      | .vnatglue op' nb' d' args' _ =>
+        andSame (match Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d')) with
+          | .true => .some n
+          | .false => .none) (fun k => envSame k args args')
+      | _ => .none
     | _ => .none
 def envSame : Nat → Env → Env → Option Nat
   | .zero, _, _ => .none
@@ -2584,6 +3119,14 @@ def conv : TCtx → Val → Val → Val → Bool
   -- (proof irrelevance is checked at the other types only: at a Π type the comparison
   -- of the bodies, at a Σ type of the components, checks it again, and asking at every
   -- level made long Π types quadratic)
+  | c, ty, a, b => match lazyDelta c a b with
+    -- two glued values with the same head: compare the arguments, and do not force them
+    -- (`Nat.add big 5 ≡ Nat.add big 5`; `Nat.pow 2 (Nat.pow 2 28)` is
+    -- `wiz-notes/kernel-lazy-let.md` §8.2)
+    | .true => .true
+    | .false => convW c ty a b
+-- (the comparison proper, after the same-head shortcut)
+def convW : TCtx → Val → Val → Val → Bool
   | c, ty, a, b => match (match whnf ty with
       | .vpi _ _ _ _ _ _ => Bool.false
       | .vsigma _ _ _ _ _ _ => Bool.false
@@ -2631,11 +3174,7 @@ def conv : TCtx → Val → Val → Val → Bool
       | .vqty => match qtySame a b with
         | .some r => r
         | .none => convNe c a b
-      | .vmu l I D i _ => match whnf a with
-        | .vcon x => match whnf b with
-          | .vcon y => conv c (vInterp l I D (muFamily l I D) i) x y
-          | _ => convNe c a b
-        | _ => convNe c a b
+      | .vmu l I D i _ => convMu c l I D i (whnf a) (whnf b)
       | .vnu l I D i _ => match whnf a with
         | .vcocon x => match whnf b with
           | .vcocon y => conv c (vInterp l I D (nuFamily l I D) i) x y
@@ -2653,13 +3192,33 @@ def conv : TCtx → Val → Val → Val → Bool
   --|ex
   --| | _, _, _, _ => .false
   --sol>
+-- at a data type: two literals by their numbers, else (E-K: a literal one step inside,
+-- `vNatView`) two constructors by their payloads
+def convMu (c : TCtx) (l : Lvl) (I D i a b : Val) : Bool := match natLitsEq a b with
+  | .some r => r
+  | .none => match natView a with
+    | .vcon x => match natView b with
+      | .vcon y => conv c (vInterp l I D (muFamily l I D) i) x y
+      | _ => convNe c a b
+    | _ => convNe c a b
 def convTy (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .true => .true
   | .false => let a := whnf a; let b := whnf b; convTyW (TCtx.propGate c a b) a b
 -- two glued values with the same head: compare the spines (else they get unfolded)
 def lazyDelta : TCtx → Val → Val → Bool
   | c, .vglued h sp _, .vglued h' sp' _ => convSpine c h h' sp sp'
+  -- (E-K) two glued operations of one registration: the same operation on convertible
+  -- arguments, without computing either (a definition's glued argument is not forced)
+  | c, .vnatglue op nb d args _, .vnatglue op' nb' d' args' _ =>
+    Bool.and (Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d'))) (convNatArgs c nb args args')
+  | c, .vnatfn op nb d args, .vnatfn op' nb' d' args' =>
+    Bool.and (Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d'))) (convNatArgs c nb args args')
   | _, _, _ => .false
+-- an operation's arguments (last first), at the registered `Nat` type
+def convNatArgs (c : TCtx) (nb : NatB) : Env → Env → Bool
+  | .nil, .nil => .true
+  | .cons a r, .cons b r' => Bool.and (conv c (natTyOf nb) a b) (convNatArgs c nb r r')
+  | _, _ => .false
 def convTyW : TCtx → Val → Val → Bool
   --<sol
   -- (mandatory sorts: the components' sorts are compared too, as in `Conv.lean`)
@@ -2695,6 +3254,14 @@ def convNe (c : TCtx) (a b : Val) : Bool := match lazyDelta c a b with
   | .false => convNeW c (whnf a) (whnf b)
 def convNeW : TCtx → Val → Val → Bool
   | _, .vtag _ i, .vtag _ j => Nat.beq i j
+  -- (E-K) two literals of one registration
+  | _, .vnat n nb, .vnat m nb' => Bool.and (knEq n m) (natBEq nb nb')
+  -- (E-K) two applications of one operation (a partial one, or a glued one that reached
+  -- this point: its arguments did not decide it and it is not computed here)
+  | c, .vnatfn op nb d args, .vnatfn op' nb' d' args' =>
+    Bool.and (Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d'))) (convNatArgs c nb args args')
+  | c, .vnatglue op nb d args _, .vnatglue op' nb' d' args' _ =>
+    Bool.and (Bool.and (natOpEq op op') (Bool.and (natBEq nb nb') (tmEq d d'))) (convNatArgs c nb args args')
   | _, .vtt, .vtt => .true
   -- **Regularity, decided by conversion** (InReg_conv; `unCast` in `Conv.lean`): a stuck
   -- cast between convertible types (inert ones) is its argument, on either side, with the
@@ -2789,6 +3356,18 @@ def convSpineW : TCtx → Head → Head → Spine → Spine → Bool
            (convTy (TCtx.bind c (.venum k)) (eval (.cons (fresh (TCtx.lvl c)) e) m) (eval (.cons (fresh (TCtx.lvl c)) e') m'))
            (convBranches c k e m e' bs bs' 0)
        | _ => .false)
+  | c, x, y, .ssplit r e q m b, .ssplit r' e' q' m' b' =>
+      let sty := whnf (typeOfNe c x r);
+      Bool.and (convSpine c x y r r') (match sty with
+        | .vsigma p i j A env B =>
+          let vx := fresh (TCtx.lvl c)
+          let vy := fresh (TCtx.lvl c + 1)
+          let ctx₂ := TCtx.bind (TCtx.bind c A) (eval (.cons vx env) B)
+          Bool.and (qEq q q') (Bool.and
+            (convTy (TCtx.bind c sty) (eval (.cons (fresh (TCtx.lvl c)) e) m) (eval (.cons (fresh (TCtx.lvl c)) e') m'))
+            (conv ctx₂ (eval (.cons (.vpair vx vy) e) m)
+              (eval (.cons vy (.cons vx e)) b) (eval (.cons vy (.cons vx e')) b')))
+        | _ => .false)
   | c, x, y, .sabsurd r m, .sabsurd r' m' => match Bool.and (falseNe c x r) (falseNe c y r') with
     | .true => convTy c m m'
     | .false => Bool.and (convSpine c x y r r') (convTy c m m')
@@ -2853,7 +3432,7 @@ def subTy (c : TCtx) (A B : Val) : Bool := match whnf A with
 end
 
 -- (P2: an error message does not evaluate a suspended proof either; it reads back as `()`)
-def showVal (c : TCtx) (v : Val) : String := show .nil (TCtx.lvl c) (quoteM .false (TCtx.lvl c) v)
+def showVal (c : TCtx) (v : Val) : String := show .nil (TCtx.lvl c) (quoteM .false .false (TCtx.lvl c) v)
 
 -- **Exercise 14.3.** Bidirectional type checking with usage (`infer` and `check` in
 -- `Check.lean`): each answer comes with the usage of the variables (types and proofs
@@ -2882,6 +3461,8 @@ def neutralShaped : Tm → Bool
   | .eqRefl _ _ => .true
   | .tyRefl _ => .true
   | .subst _ _ _ _ _ _ => .true
+  -- (E-K) an operation is a constant
+  | .natFn _ _ _ => .true
   | _ => .false
 -- the requirement on `t`, found at the type `ty`: `.none`, or the error
 def requireMarker (c : TCtx) (t : Tm) (ty : Val) : Option String := match TCtx.pm c with
@@ -2941,6 +3522,62 @@ def evalAt (c : TCtx) (t : Tm) (ty : Val) : Val := match Bool.and (inProofMode c
   | .true => suspend (TCtx.env c) t
   | .false => eval (TCtx.env c) t
 
+-- **(E-K) Typing literals and operations.** A literal `n` is of the registered type `nat`
+-- (`Term.natLit` in `Check.lean`). Its registration is checked where it is used: `nat`,
+-- `nat.zero` and `nat.succ` are constants, `zero : nat` and `succ : nat → nat`. So a
+-- literal is always the well-typed `succ (… zero)` it means, and conversion and the
+-- eliminators can look inside it (`natView`). (The Lean kernel looks the registration up
+-- in its table and requires both constructors to be defined; this kernel has no table.)
+def natArrowTm (n : Tm) : Nat → Tm
+  | .zero => n
+  | .succ k => .pi .qw .lhole .lhole n (natArrowTm n k)
+-- `nat → nat` and `nat → nat → nat`
+def natArrow (nb : NatB) (k : Nat) : Val := match nb with
+  | .mk n _ _ => match k with
+    | .zero => eval .nil n
+    | .succ k' => .vpi .qw .lhole .lhole (eval .nil n) .nil (natArrowTm n k')
+-- a constant's type (`.none`: not a constant). (An operation may be an axiom: computed
+-- natively on literals, stuck otherwise.)
+def natFnTyOf (d : Tm) : Option Val := match d with
+  | .const _ ps ls _ ty => .some (eval .nil (substIfAny ps ls ty))
+  | .axiomC _ ty => .some (eval .nil ty)
+  | _ => .none
+def isConstTm (t : Tm) : Bool := match t with
+  | .const _ _ _ _ _ => .true
+  | _ => .false
+def natBOk (c : TCtx) (nb : NatB) : Option String := match nb with
+  | .mk n z sc => match Bool.and (isConstTm n) (Bool.and (isConstTm z) (isConstTm sc)) with
+    | .false => .some "numerals need `builtin nat`, `builtin nat.zero` and `builtin nat.succ` registered as definitions"
+    | .true => match natFnTyOf z with
+      | .none => .some "numerals need `builtin nat.zero := …`"
+      | .some zty => match convTy c zty (natTyOf nb) with
+        | .false => .some (String.append "the registered nat.zero is not a " (show .nil 0 n))
+        | .true => match natFnTyOf sc with
+          | .none => .some "numerals need `builtin nat.succ := …`"
+          | .some sty => match convTy c sty (natArrow nb 1) with
+            | .true => .none
+            | .false => .some (String.append "the registered nat.succ is not a function from and to " (show .nil 0 n))
+def natCmpTyOk (c : TCtx) (nb : NatB) (ty : Val) : Bool := match whnf ty with
+  | .vpi _ _ _ dom env cod => match convTy c dom (natTyOf nb) with
+    | .true => match whnf (eval (.cons (fresh (TCtx.lvl c)) env) cod) with
+      | .vpi _ _ _ dom2 _ _ => convTy (TCtx.bind c dom) dom2 (natTyOf nb)
+      | _ => .false
+    | .false => .false
+  | _ => .false
+def natFnTyOk (c : TCtx) (op : NatOp) (nb : NatB) (ty : Val) : Bool := match op with
+  | .nbeq => natCmpTyOk c nb ty
+  | .nblt => natCmpTyOk c nb ty
+  | _ => convTy c ty (natArrow nb (natOpArity op))
+
+-- an operation's constant has the type its key says: `nat → nat` (`succ`, `pred`),
+-- `nat → nat → nat` (arithmetic), `nat → nat → B` for some `B` (`beq`, `blt`: the result
+-- is the definition's own, at two small literals)
+def natFnOk (c : TCtx) (op : NatOp) (nb : NatB) (d : Tm) : Option String := match natFnTyOf d with
+  | .none => .some (String.append (natOpKey op) " is registered with a term that is not a constant")
+  | .some ty => match natFnTyOk c op nb ty with
+    | .true => .none
+    | .false => .some (String.append (String.append (natOpKey op) " is registered with a constant of the wrong type: ") (show .nil 0 d))
+
 mutual
 -- the guarded inductive description (`μ`, `descGuarded` in Check.lean): every
 -- `drec`/`dhrec` must occur under a non-recursive `darg` field, so a recursive position
@@ -2958,6 +3595,7 @@ def descGuarded (depth : Nat) (guarded : Bool) : Tm → Bool
   | .ecase _ _ bs => tmsGuarded depth guarded bs
   | .letE _ _ b => descGuarded depth guarded b
   | .letq _ _ _ b => descGuarded depth guarded b
+  | .split _ s m b => Bool.and (descGuarded depth guarded s) (Bool.and (descGuarded depth guarded m) (descGuarded depth guarded b))
   | .const _ _ _ v _ => match depth with
     | .zero => .true
     | .succ k => descGuarded k guarded v
@@ -3068,6 +3706,28 @@ def inferW : TCtx → Tm → TyRes
     | .ok _ uu => match infer c b with
       | .ok bty ub => .ok bty (uAdd uu ub)
       | r => r
+    | r => r
+  -- Σ elimination: the scrutinee first (at `q`; an erased position at 0), the motive is
+  -- a type under the pair, and the body is checked at it. The components are bound at
+  -- `q·p` and `q` and their usages checked against those quantities.
+  | c, .split q s m b => match infer (erasedIf q c) s with
+    | .ok sty us => match whnf sty with
+      | .vsigma p _ _ A env B =>
+        match inferUniv (TCtx.bind c sty) m with
+        | .ok _ _ =>
+          let l := TCtx.lvl c;
+          let vx := fresh l;
+          let vy := fresh (l + 1);
+          let byTy := eval (.cons vx env) B;
+          match check (TCtx.bind (TCtx.bind c A) byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m) with
+          | .ok _ ub => match popUsageAt (TCtx.bind c A) q byTy ub with
+            | .some ub' => match popUsageAt c (qmul q p) A ub' with
+              | .some ub'' => .ok (eval (.cons (evalAt c s sty) (TCtx.env c)) m) (uAdd (uScale q us) ub'')
+              | .none => .err "the split's first component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+            | .none => .err "the split's second component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+          | r => r
+        | r => r
+      | sty => .err (String.append "not a pair: its type is " (showVal c sty))
     | r => r
   | c, .exfalso m t => match inferUniv c m with
     -- (inside a proof: if the motive is not a proposition the `absurd` is a relevant term,
@@ -3366,6 +4026,16 @@ def inferW : TCtx → Tm → TyRes
   | c, .axiomC n ty => match kStrEq n proofStub with
     | .true => .err proofStub
     | .false => .ok (eval .nil ty) (uZeros (TCtx.lvl c))
+  -- (E-K) a literal, at the registered type; a registered operation, at its constant's
+  -- type (both with their registration checked)
+  | c, .nlit _ nb => match natBOk c nb with
+    | .some m => .err m
+    | .none => .ok (natTyOf nb) (uZeros (TCtx.lvl c))
+  | c, .natFn op nb d => match natBOk c nb with
+    | .some m => .err m
+    | .none => match natFnOk c op nb d with
+      | .some m => .err m
+      | .none => infer c d
   | c, .ulift k0 l A => match inferUniv c A with
     | .ok (.vsort k) _ => match componentSort "lifted type (ULift)" k0 k with
       | .some m => .err m
@@ -3663,6 +4333,7 @@ def tmHasLvlWith (p : Lvl → Bool) : Tm → Bool
   | .letE t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
   | .letq _ t v b => Bool.or (tmHasLvlWith p t) (Bool.or (tmHasLvlWith p v) (tmHasLvlWith p b))
   | .letUnit u b => Bool.or (tmHasLvlWith p u) (tmHasLvlWith p b)
+  | .split _ s m b => Bool.or (tmHasLvlWith p s) (Bool.or (tmHasLvlWith p m) (tmHasLvlWith p b))
   | .ann t ty => Bool.or (tmHasLvlWith p t) (tmHasLvlWith p ty)
   | .pair a b => Bool.or (tmHasLvlWith p a) (tmHasLvlWith p b)
   | .fst x => tmHasLvlWith p x
@@ -3725,6 +4396,9 @@ def tmHasLvlWith (p : Lvl → Bool) : Tm → Bool
   | .qty => .false
   | .qlit _ => .false
   | .axiomC _ _ => .false
+  -- (E-K) closed constants, without level parameters
+  | .nlit _ _ => .false
+  | .natFn _ _ d => tmHasLvlWith p d
 def tmsHasLvlWith (p : Lvl → Bool) : Tms → Bool
   | .tnil => .false
   | .tcons t rest => Bool.or (tmHasLvlWith p t) (tmsHasLvlWith p rest)
@@ -3800,6 +4474,7 @@ def tmHasHole : Tm → Bool
   | .letE t v b => Bool.or (tmHasHole t) (Bool.or (tmHasHole v) (tmHasHole b))
   | .letq _ t v b => Bool.or (tmHasHole t) (Bool.or (tmHasHole v) (tmHasHole b))
   | .letUnit u b => Bool.or (tmHasHole u) (tmHasHole b)
+  | .split _ s m b => Bool.or (tmHasHole s) (Bool.or (tmHasHole m) (tmHasHole b))
   | .ann t ty => Bool.or (tmHasHole t) (tmHasHole ty)
   | .pair a b => Bool.or (tmHasHole a) (tmHasHole b)
   | .fst p => tmHasHole p
@@ -3860,6 +4535,8 @@ def tmHasHole : Tm → Bool
   | .qlit _ => .false
   | .const _ _ _ _ _ => .false
   | .axiomC _ _ => .false
+  | .nlit _ _ => .false
+  | .natFn _ _ d => tmHasHole d
 def tmsHasHole : Tms → Bool
   | .tnil => .false
   | .tcons t rest => Bool.or (tmHasHole t) (tmsHasHole rest)
@@ -4036,6 +4713,21 @@ def markInferW : TCtx → Tm → MR
   | c, .letUnit u b => match markInfer c u with
     | .mk u' _ => match markInfer c b with
       | .mk b' tb => .mk (.letUnit u' b') tb
+  -- `split`: the scrutinee, the motive (a type under the pair) and the body at it
+  | c, .split q s m b => match markInfer c s with
+    | .mk s' ts => match knownW ts with
+      | .vsigma p _ _ A env B =>
+        let l := TCtx.lvl c;
+        let vx := fresh l;
+        let vy := fresh (l + 1);
+        let vsty : Val := match ts with
+          | .some v => v
+          | .none => .vunit (ln 1);
+        let m' := markTy (TCtx.bind c vsty) m;
+        let byTy := eval (.cons vx env) B;
+        let b' := markCheck (TCtx.bind (TCtx.bind c A) byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m');
+        .mk (.split q s' m' b') (.some (eval (.cons (evalAt c s' vsty) (TCtx.env c)) m'))
+      | _ => .mk (.split q s' m b) .none
   | c, .ann t ty =>
     let ty' := markTy c ty;
     let tyv := eval (TCtx.env c) ty';
@@ -4198,6 +4890,9 @@ def markInferW : TCtx → Tm → MR
     .mk (.coit l I' D' S' st' i' x') (.some (.vnu l vI vD vi .vszInf))
   | _, .const n ps ls v ty => .mk (.const n ps ls v ty) (.some (eval .nil (substIfAny ps ls ty)))
   | _, .axiomC n ty => .mk (.axiomC n ty) (.some (eval .nil ty))
+  -- (E-K) a literal is of the registered type; an operation of its constant's type
+  | _, .nlit n nb => .mk (.nlit n nb) (.some (natTyOf nb))
+  | _, .natFn op nb d => .mk (.natFn op nb d) (natFnTyOf d)
   | c, .ulift k l A => .mk (.ulift k l (markTy c A)) (.some (.vsort l))
   | c, .down t => match markInfer c t with
     | .mk t' tt => .mk (.down t') (match knownW tt with
@@ -4236,7 +4931,7 @@ def typeOf (t : Tm) : String := match infer empty (sortsInfer t) with
   | .ok ty _ => show .nil 0 (quote 0 ty)
   | .err m => String.append "error: " m
 -- the normal form of a closed term (after the sorts pass)
-def normalize (t : Tm) : String := show .nil 0 (quote 0 (eval .nil (sortsInfer t)))
+def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer t)))
 -- (a type in the context `c`)
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
@@ -4294,3 +4989,39 @@ def checkMarkingParams (ps : List String) (v0 ty : Tm) : Checked :=
   | .false => match checkDeclParams ps ty .none with
     | .err m => .bad m
     | .ok _ _ => checkMarking v0 ty
+
+-- **(E-K) The frontend's hook for numbers.** The frontend makes literals only once the
+-- Prelude's `builtin` registrations reach it (lane P0-RPREL); until then nothing below is
+-- called, and numerals stay `binNat` terms. The wiring (a follow-up in the Frontend, not
+-- here): from the registrations `builtin nat`, `nat.zero`, `nat.succ` build one `NatB` of
+-- the three constants (as `identHead` makes them); a numeral is `natLitDigits nb digits`
+-- (exact, from the token's text), a character code `natLitTm nb code`; and a use of a
+-- registered constant `c` under the key `k` is `natRegistered nb k c` (the operation, the
+-- literal `0` for `nat.zero`, else `c` itself). The registration's own constants (inside
+-- `nb`) stay plain constants: `natView` unfolds a literal by their definitions.
+def natOpOfKey (k : String) : Option NatOp := match kStrEq k "nat.succ" with
+  | .true => .some .nsucc
+  | .false => match kStrEq k "nat.pred" with
+    | .true => .some .npred
+    | .false => match kStrEq k "nat.add" with
+      | .true => .some .nadd
+      | .false => match kStrEq k "nat.sub" with
+        | .true => .some .nsub
+        | .false => match kStrEq k "nat.mul" with
+          | .true => .some .nmul
+          | .false => match kStrEq k "nat.div" with
+            | .true => .some .ndiv
+            | .false => match kStrEq k "nat.mod" with
+              | .true => .some .nmod
+              | .false => match kStrEq k "nat.beq" with
+                | .true => .some .nbeq
+                | .false => match kStrEq k "nat.blt" with
+                  | .true => .some .nblt
+                  | .false => .none
+def natLitTm (nb : NatB) (n : Nat) : Tm := .nlit (knOfNat n) nb
+def natLitDigits (nb : NatB) (digits : String) : Tm := .nlit (knOfDigits digits) nb
+def natRegistered (nb : NatB) (key : String) (c : Tm) : Tm := match natOpOfKey key with
+  | .some op => .natFn op nb c
+  | .none => match kStrEq key "nat.zero" with
+    | .true => .nlit knZero nb
+    | .false => c

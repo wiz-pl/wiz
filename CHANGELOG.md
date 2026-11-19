@@ -200,6 +200,52 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   are split eight ways by the measured times. A case of a group that does not opt in
   to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
   workers.
+* selfhost: the frontend now handles the rest of A18 and A17's list literals and boolean
+  operators — as-patterns (`x@y@p`, in equations, `match`, literal and tuple rows), tuple
+  patterns (pair splitting without the kernel's `split`), `let (x, y)`/`let (x, y, z)`
+  (elaborated as a `match`, so `Kernel.wiz` needs no `split`) and `let () := u; b` (the
+  unit eliminator, also erased by the backend) — and list literals in terms and patterns
+  (`Parse.wiz` adds the host's `term.listLit` rule at precedence 1024; the frontend
+  rewrites the node to `List.cons`/`List.nil`, as the host's `ListLit.expand` does).
+  `&&`/`||`/`!` short-circuit and bind as on the host. Six `selfhost` cases compile one
+  program with the Lean host and with the self-hosted compiler and compare their outputs
+  rather than a literal (149–154). Still missing: `∃`/`¬` and `⟨…⟩`; a written quantity
+  other than ω on `let (x, y)` is refused.
+
+* selfhost: `Kernel.wiz` has the host's number literals and registered `Nat` operations
+  (lane E-K, B13): `Tm.nlit`/`Tm.natFn`, `Val.vnat`/`Val.vnatfn`, exact `KNat` numbers
+  (24-bit limbs; not `rt.c`'s 63-bit words), the native rules for `succ`, `pred`, `add`,
+  `sub`, `mul`, `div`, `mod`, `beq` and `blt`, and literal decisions in `vEq`, conversion
+  and `ind`. As in the host after `kernel-vnatop-lazy`, an operation on a definition's
+  glued value stays glued (`whnf` computes it; `nf` still does), an inner operation is
+  computed and kept as its numeral, and `vEq` does not force an expansive
+  `Nat.pow 2 (Nat.pow 2 28)`. The frontend does not emit literals yet (its hook is
+  `natLitDigits`/`natRegistered`).
+* selfhost: a `×` type in an inductive or structure field (`| mk (p : Nat × Bool)`)
+  no longer fails with `internal error: a variable out of scope`. The self-hosted
+  frontend's scope checker names a global by its index and `closeG` closes those indices
+  over the globals; it did not visit a `sigma`, so a syntactic pair in a field type kept
+  both components as scope indices (a pair written through a definition was fine). This
+  was the first error on `lib/Web/React.wiz` (21an).
+* selfhost: `attribute [implemented_by mk get] T.mk` now works end to end. The frontend
+  records the native representation (the constructor's tag, its one runtime field and the
+  two conversions' arities, the host's `ReprInfo`) and reports the host's diagnostics for
+  an unknown name, a constructor with more than one runtime field, or a `get` that does
+  not end in the type; the backend erases a value of `T` as `mk` applied to the
+  constructor's runtime field and feeds a match the model's field chain read with `get`,
+  so a `UIntN`-like type compiles to the same values and runtime layout as the Lean
+  toolchain. A differential case compiles and runs a sealed word type with extern
+  `mk`/`get` in both toolchains (GC and RC), and a verdict case pins the registrations
+  (21aa).
+* selfhost: `selfhost/Cli.wiz` now passes `--trust-native` (27a) to the frontend's
+  `Globals.trustNative`, so `wiz-selfhost check`, `build`, `run`/`eval` and the one-shot
+  mode accept `def X : a = b := native_refl` (C14). The flag is a switch before or after
+  the command, as in the host's `parseFlags`, is part of the driver's cache key (an
+  acceptance is never replayed without it), and `--trust-native=1` (the value form) is
+  the host's `unknown flag: …` with exit 2. `--trust-smt` (C15) is accepted too and only
+  selects the `smt` refusal. `--native-fuel N` is not accepted: the self-hosted evaluator
+  has no step counter, so the driver refuses it as an unknown flag rather than take a
+  flag with nothing to limit. Cases: *selfhost-cli* and *selfhost-cli-diff*.
 * concurrency (25a, 25d): `Lock` is now tested for mutual exclusion, not just for its
   linear `Guard`. The `conc` group's new cases run eight threads that bump a plain,
   non-atomic C counter a thousand times each under `Lock.with` and assert the exact total
@@ -241,14 +287,22 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   cold elaboration of the graph (the frontend's globals are not serialized). Entries
   carry their payload's digest, so a truncated or edited entry is a miss, never a wrong
   verdict. Before, one graph-wide key mixed the modules' paths and the root's headers,
-  so a dependency's `import_c` header and every `include_str` file were outside it.
-* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
+  so a dependency's `import_c` header and every `include_str` file were outside it.* selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
   shared clause body, and a postponed argument (read back as its normal form, which also
   put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
   as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
   (`fib 40`) at 120 s in `check` and in the one-shot compile.
+* selfhost: the unit eliminator `let () := u; b` and `split` (`let q (x, y) := s; b`,
+  with a tuple `let (x, y, z)` as nested pairs) are in the self-hosted toolchain (21ah).
+  `Kernel.wiz` gained `split` (the stuck `ssplit` spine, `vSplit`, conversion, the
+  `q·p`/`q` usage), the frontend elaborates both forms, and the backend erases them (it
+  used to refuse `letUnit`), so a pair held at quantity 1 is consumed by
+  `let 1 (x, y) := p` and a linear `Unit` by `let () := u`, as in the Lean toolchain.
+  The `selfhost` group pins the verdicts against the Lean frontend and runs a program in
+  both compilers; its module-private case also checks the Lean frontend's message text
+  and the self-hosted compiler's rejection (21n).
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one
@@ -382,6 +436,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   compiler's entry point is `selfhost/Main.wiz` (the checker's is
   `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
   text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
+* selfhost (D5): the driver's cache is layered like the host's. `--cache-ro DIR`
+  (repeatable) adds read-only layers, searched after `--cache` in the order given and
+  never written or copied back; `--no-cache` clears both lists, so
+  `--no-cache --cache-ro DIR` replays a shipped cache and writes nothing.
+  `--cache-prune DAYS` removes the write cache's keyed `.check`/`.c` entries older than
+  DAYS days before the command (a layer is never pruned, and a pruned entry is a miss).
+  `--cache-verify off|warn|strict` now has per-entry digest manifests (`<entry>.mf`):
+  `warn` verifies one when it exists, `strict` uses only manifested entries, and a cold
+  strict run writes them, so the next run is a hit. The selfhost runtime gained the
+  host's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns` leaves in
+  its own representation, so a driver built by either toolchain prunes (21al).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
