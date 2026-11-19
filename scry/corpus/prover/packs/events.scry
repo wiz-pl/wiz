@@ -1,0 +1,12 @@
+# Prover pack: an unvalidated request value must not reach the event processor.
+#
+# The handler reads a header (a source) and passes the parsed body to the processor;
+# the proof must show the header does not flow to the processor argument.
+rule event-input
+  kind taint
+  severity error
+  message An unvalidated request value reaches the event processor
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Query result
+  sink Fixtures.Requests.IEventProcessor.ProcessAsync arg 0
+end

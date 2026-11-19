@@ -1,0 +1,6 @@
+/-- Fixture: a private declaration is already module-scoped.
+
+The doc comment mentions `def ghost` and must not be scanned as code. -/
+private def hidden : Nat := 1
+
+def visible : Nat := 2

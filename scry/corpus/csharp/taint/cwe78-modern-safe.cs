@@ -2,7 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 
-namespace Crux.Api.Endpoints;
+namespace Fixtures.Modern;
 
 #nullable enable
 
@@ -11,7 +11,7 @@ public record CommandRequest(string Command, int Retries = 0);
 
 // The sanitised twin: the console input is parsed as a port number before it reaches the
 // command line, so the same record/switch/LINQ/`with` path carries no taint.
-public sealed class ReportEndpoints
+public sealed class CommandEndpoints
 {
     public void Run(string mode)
     {

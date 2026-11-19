@@ -12,11 +12,19 @@ honest slice of "prove, don't just report":
   `(point, register)` facts; `Scry.check` verifies it from the EDB without running the
   analysis and without calling `Scry.prove`.
 * **the same claim refuted on the unsafe twin.** The prover's closure reaches the sink,
-  and the checker's alert obligation rejects it. The tool does not rubber-stamp.
-* **wrong proofs rejected.** An invariant that omits the seed is rejected by the
-  closure obligation; the unsafe program's invariant checked against the safe program is
-  rejected; a function with a store is refused (the memory rules are outside the
-  fragment) rather than accepted unsoundly.
+  and the checker's alert obligation refutes it with a provenance path.
+* **memory is covered.** A store/load pair is proved when the load is sanitised and
+  refuted (with `store`/`load` in the witness) when it is not. The closure obligation
+  is checked for both `tainted` rows and `mtainted` locations.
+* **vacuity fails loudly.** A claim about a function with no selected source or no sink
+  gets `vacuous`, not `proved`.
+* **the verdict is tagged.** `proved`, `refuted`, `refused`, `script-failed`, `vacuous`
+  are distinct; the script's `none` is not the only failure signal.
+* **a claim selects its sources.** A parameter flow does not make a claim about `src`
+  fail; the same claim over every source is refuted.
+* **wrong proofs rejected.** An invariant that omits the seed is refused by the closure
+  obligation; the unsafe program's invariant checked against the safe program is not
+  accepted.
 
 The group reads the checked-in C# spills, so it needs no tree-sitter and no .NET, like
 `scry-csharp`.
@@ -96,24 +104,25 @@ def bothFixtures (pack sSrc sSpill uSrc uSpill : String) : String :=
 
 def group : Group where
   name := "scry-prover"
-  exercise := "Scry prover mode: invariants, a checker, and a tactic script"
+  exercise := "Scry prover mode: invariants, memory, vacuity and a tactic script"
   parallel := true
   cases := [
-    { name := "the tiny examples: safe proves, unsafe is refuted, empty and cross invariants are rejected",
+    { name := "the tiny examples: safe proves, unsafe is refuted with a path, wrong invariants are refused",
       run := fun _ => evalTexts
-        ("#eval String.eq (Scry.Verdict.show Scry.proverSafeVerdict) \"ok\"\n" ++
+        ("#eval String.eq (Scry.Verdict.show Scry.proverSafeVerdict) \"proved\"\n" ++
          "#eval String.eq Scry.proverSafeInvariant \"{(0,0)}\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"alert rule fires at sink 2 argument 0\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeVerdict) \"path src(0,0) -> flow(0,1,0) -> flow(1,2,1) -> sink(2,0,1)\"\n" ++
          "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"rule 0 derives tainted (0,0)\"\n" ++
-         "#eval String.contains (Scry.Verdict.show Scry.proverCrossVerdict) \"alert rule fires\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverEmptyVerdict) \"refused\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverSafeVerdict\n" ++
          "#eval Scry.Verdict.isOk Scry.proverUnsafeVerdict\n" ++
-         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand\" [(0,0)]))\n" ++
-         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand-wrong\" [(1,1)]))\n" ++
-         "#eval match Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe with\n" ++
-         "  | .some _ => .true\n" ++
-         "  | .none => .false\n")
-        [".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".false", ".false"] },
+         "#eval Scry.Verdict.isOk Scry.proverEmptyVerdict\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverCrossVerdict\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand\" [(0,0)] []))\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow \"hand-wrong\" [(1,1)] []))\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverUnsafeCoverVerdict) \"refuted\"\n")
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".false", ".false", ".true", ".false", ".true"] },
     { name := "the script proves the safe twin; the unsafe twin is refuted at the alert obligation",
       run := fun _ => do
         let pack ← packText
@@ -121,45 +130,35 @@ def group : Group where
         let (uSrc, uSpill) ← fixture "cwe78-process-unsafe"
         evalTexts
           (bothFixtures pack sSrc sSpill uSrc uSpill ++
-           "def safeClaim : Option Scry.Claim := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
+           "def safeClaim : Scry.Verdict := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
+           "#eval Scry.Verdict.isOk safeClaim\n" ++
            "#eval match safeClaim with\n" ++
-           "  | .some c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb c)\n" ++
-           "  | .none => .false\n" ++
-           "#eval match safeClaim with\n" ++
-           "  | .some c => List.length c.invariant\n" ++
-           "  | .none => 999\n" ++
-           "def unsafeCover : Option Scry.Claim := Scry.proveWith Scry.ruleTaintProgram unsafeEdb\n" ++
-           "  ([Scry.Tactic.intro Scry.rtSrc, Scry.Tactic.intro Scry.rtParam,\n" ++
-           "    Scry.Tactic.intro Scry.rtRetSrc, Scry.Tactic.close] : List Scry.Tactic)\n" ++
-           "#eval match unsafeCover with\n" ++
-           "  | .some c => (match Scry.check Scry.ruleTaintProgram unsafeEdb c with\n" ++
-           "    | .rejected r => String.contains r \"alert rule fires at sink\"\n" ++
-           "    | .ok => .false)\n" ++
-           "  | .none => .false\n" ++
-           "#eval match Scry.prove Scry.ruleTaintProgram unsafeEdb with\n" ++
-           "  | .some _ => .true\n" ++
-           "  | .none => .false\n" ++
+           "  | .proved c => List.length c.invariant\n" ++
+           "  | _ => 999\n" ++
+           "def unsafeClaim : Scry.Verdict := Scry.prove Scry.ruleTaintProgram unsafeEdb\n" ++
+           "#eval Scry.Verdict.isOk unsafeClaim\n" ++
+           "#eval String.contains (Scry.Verdict.show unsafeClaim) \"alert rule fires at sink\"\n" ++
            "#eval String.eq Scry.defaultScript \"intro 1;intro 6;intro 7;close;split;\"\n")
-          [".true", "1", ".true", ".false", ".true"] },
-    { name := "wrong proof 1: an invariant that omits the seed is rejected",
+          [".true", "1", ".false", ".true", ".true"] },
+    { name := "wrong proof 1: an invariant that omits the seed is refused",
       run := fun _ => do
         let pack ← packText
         let (src, spill) ← fixture "cwe78-process-safe"
         evalTexts
           (s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
            fixtureBody "safe" "cwe78-process-safe" src spill ++
-           "def full : Option Scry.Claim := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
+           "def full : Scry.Verdict := Scry.prove Scry.ruleTaintProgram safeEdb\n" ++
            "def noSeeds (c : Scry.Claim) : Scry.Claim :=\n" ++
            "  { c with invariant := List.filter (fun p => Bool.not (List.any (fun r => Scry.pairEq p (Scry.rowPair r))\n" ++
            "      (Scry.rtRows safeEdb Scry.rtSrc))) c.invariant }\n" ++
            "#eval match full with\n" ++
-           "  | .some c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c))\n" ++
-           "  | .none => .true\n" ++
+           "  | .proved c => Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c))\n" ++
+           "  | _ => .true\n" ++
            "#eval match full with\n" ++
-           "  | .some c => (match Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c) with\n" ++
-           "    | .rejected r => String.contains r \"rule 0 derives tainted\"\n" ++
-           "    | .ok => .false)\n" ++
-           "  | .none => .false\n")
+           "  | .proved c => (match Scry.check Scry.ruleTaintProgram safeEdb (noSeeds c) with\n" ++
+           "    | .refused r => String.contains r \"rule 0 derives tainted\"\n" ++
+           "    | _ => .false)\n" ++
+           "  | _ => .false\n")
           [".false", ".true"] },
     { name := "wrong proof 2: the unsafe program's invariant is rejected on the safe program",
       run := fun _ => do
@@ -168,28 +167,58 @@ def group : Group where
         let (uSrc, uSpill) ← fixture "cwe78-process-unsafe"
         evalTexts
           (bothFixtures pack sSrc sSpill uSrc uSpill ++
-           "def uInv : List (Nat × Nat) :=\n" ++
-           "  match Scry.proveWith Scry.ruleTaintProgram unsafeEdb\n" ++
+           "def uInv : Scry.Inv :=\n" ++
+           "  match Scry.searchWith Scry.ruleTaintProgram unsafeEdb\n" ++
            "    ([Scry.Tactic.intro Scry.rtSrc, Scry.Tactic.close] : List Scry.Tactic) with\n" ++
-           "  | .some c => c.invariant\n" ++
-           "  | .none => []\n" ++
-           "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb (Scry.Claim.mk \"wrong\" uInv))\n" ++
-           "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram unsafeEdb (Scry.Claim.mk \"wrong\" uInv))\n")
+           "  | .some inv => inv\n" ++
+           "  | .none => Scry.Inv.empty\n" ++
+           "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram safeEdb\n" ++
+           "  (Scry.Claim.noFlow \"wrong\" uInv.tainted uInv.locations))\n" ++
+           "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram unsafeEdb\n" ++
+           "  (Scry.Claim.noFlow \"wrong\" uInv.tainted uInv.locations))\n")
           [".false", ".false"] },
-    { name := "the fragment boundary: a function with a store is refused, not accepted",
-      run := fun _ => do
-        let pack ← packText
-        let (src, spill) ← fixture "cwe78-process-safe"
-        evalTexts
-          (s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
-           fixtureBody "safe" "cwe78-process-safe" src spill ++
-           "def stored : Scry.State Nat := Scry.State.addTuple safeEdb Scry.rtMStore\n" ++
-           "  [U64.ofNat 0, U64.ofNat 1, U64.ofNat 2]\n" ++
-           "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram stored (Scry.Claim.mk \"stored\" []))\n" ++
-           "#eval match Scry.check Scry.ruleTaintProgram stored (Scry.Claim.mk \"stored\" []) with\n" ++
-           "  | .rejected r => String.contains r \"memory rules are not covered\"\n" ++
-           "  | .ok => .false\n")
-          [".false", ".true"] }
+    { name := "memory is covered: the store/load witness names both edges; the safe load proves",
+      run := fun _ => evalTexts
+        ("#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"refuted\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"store(7,1,0)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"load(7,2,0)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverMemoryUnsafeVerdict) \"sink(4,0,0)\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverMemorySafeVerdict\n" ++
+         "#eval String.eq Scry.proverMemorySafeInvariant \"{(0,0)}\"\n" ++
+         "#eval String.eq Scry.proverMemorySafeLocations \"{7}\"\n" ++
+         "def noM : Scry.Verdict := Scry.check Scry.ruleTaintProgram Scry.proverMemorySafe\n" ++
+         "  (Scry.Claim.noFlow \"no-m\" [(0,0)] [])\n" ++
+         "#eval String.contains (Scry.Verdict.show noM) \"mtainted 7\"\n" ++
+         "def noLoad : Scry.Verdict := Scry.check Scry.ruleTaintProgram Scry.proverMemoryUnsafe\n" ++
+         "  (Scry.Claim.noFlow \"no-load\" [(0,0)] [7])\n" ++
+         "#eval String.contains (Scry.Verdict.show noLoad) \"tainted (2,0)\"\n" ++
+         "#eval Scry.Verdict.isOk noLoad\n")
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false"] },
+    { name := "vacuity: a claim with no source or no sink is vacuous, not proved",
+      run := fun _ => evalTexts
+        ("#eval String.contains (Scry.Verdict.show Scry.proverVacuousVerdict) \"vacuous\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverVacuousVerdict) \"source set is empty\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverVacuousVerdict\n" ++
+         "def srcOnly : Scry.State Nat :=\n" ++
+         "  Scry.State.addTuple Scry.State.empty Scry.rtSrc [U64.ofNat 0, U64.ofNat 0]\n" ++
+         "def noSink : Scry.Verdict := Scry.prove Scry.ruleTaintProgram srcOnly\n" ++
+         "#eval String.contains (Scry.Verdict.show noSink) \"sink set is empty\"\n" ++
+         "#eval Scry.Verdict.isOk noSink\n")
+        [".true", ".true", ".false", ".true", ".false"] },
+    { name := "a claim selects its sources; constantOrBound allows parameter flows",
+      run := fun _ => evalTexts
+        ("#eval String.contains (Scry.Verdict.show Scry.proverSelectAllVerdict) \"refuted\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverSelectSrcVerdict\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverConstantOrBoundVerdict\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundVerdict) \"constant or parameter-bound\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundUnsafeVerdict) \"refuted\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverConstantOrBoundUnsafeVerdict) \"src(0,0)\"\n")
+        [".true", ".true", ".true", ".true", ".true", ".true"] },
+    { name := "the verdict is tagged: a bad script is script-failed, not none",
+      run := fun _ => evalTexts
+        ("#eval String.contains (Scry.Verdict.show Scry.proverScriptFailVerdict) \"script-failed\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverScriptFailVerdict\n")
+        [".true", ".false"] }
   ]
 
 builtin_initialize registerGroup group

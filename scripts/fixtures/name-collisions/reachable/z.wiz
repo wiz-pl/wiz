@@ -1,0 +1,2 @@
+/-- Fixture: nothing imports z with x or y, so this one is project-wide only. -/
+def shared : Nat := 3
