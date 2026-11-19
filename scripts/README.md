@@ -20,6 +20,7 @@ so in its header and skips cleanly when the build is absent.
 | `test-embed.sh` | checks that Lake re-embeds `runtime/rt_*.inc` after an edit (a temporary copy of the checkout) | local dev shell only (`docs/building.md`); needs an incremental Lake build, so CI does not run it |
 | `check-docs-style.py` | fails on authoring artefacts in user-facing docs: `/workspace` paths, agent roles, status checkmarks, "the user's decision" | `ci.yml` (`docs_style`), `pre-commit.sh --fast` |
 | `check-docs-examples.py` | runs every fenced `wiz` block through `wiz check`/`wiz run`, compares expected output, and resolves relative doc links | `ci.yml` (`docs_examples`), `--self-test` |
+| `check-names.py` | checks every declaration's current name against `legacy-names.tsv`: normal reports, `--quiet` is the CI gate, `--strict-names` fails on every name outside its module prefix; a stale row is an error, a malformed row exit 2 | `ci.yml` (`docs_style`, added by the namespace train) |
 | `check-repro.sh` | builds `Tests/ReproPaths` under two absolute paths with different environment and byte-compares the artifacts; `--compiler` also builds the compiler twice | `ci.yml`, `pre-commit.sh --full` |
 | `ci.py` | helpers for `ci.yml`: `matrix`, `plan`, `changes`, `check-shards`, `balance`, `summary`, `baseline`, `check-skips` | `.github/workflows/ci.yml`, `pre-commit.sh --fast` (skip lint) |
 | `host-unsafe-ledger.py` | checks `.github/host-unsafe.tsv` against the `unsafe`/`extern`/`implemented_by` uses in host Lean; `--print` writes rows | `ci.yml`, `pre-commit.sh --fast`, `Tests/host-unsafe-ledger/run.sh` |
@@ -73,6 +74,7 @@ so in its header and skips cleanly when the build is absent.
 | `GenSelfhost.lean` | writes the fixpoint inputs (`compiler.wiz`, `self.wiz`) into `$OUT` | `fixpoint.sh`, `bench/selfhost-build.sh` |
 | `GenSelfhostTables.lean` | the `genSelfhostTables` Lake target: regenerates `selfhost/Tables.wiz` from the grammar | `lakefile.lean` |
 | `gen-semantics-matrix.py` | regenerates `docs/semantics-matrix.md` and `Tests/Semantics/cells.tsv` from the stage rules | by hand (`docs/semantics-matrix.md`) |
+| `gen-legacy-names.py` | regenerates `legacy-names.tsv` (module, name, reason class, file, line) from the six library/tool roots; `--check`, `--print-digest`, `--update-digest` | by hand (namespace compatibility baseline) |
 | `gen-uart-temporal.py` | regenerates the marked case analyses inside `examples/hdl-uart-temporal.wiz` | by hand (`docs/libraries.md`) |
 
 ## Wasm experiments
