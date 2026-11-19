@@ -42,11 +42,11 @@ infixl:60 " <*> " => Applicative.seq
 
 -- The generic instances (`@`: a method at a variable monad needs its instance spelled out).
 /-- Every monad is an applicative functor: `mf <*> ma` runs `mf`, then `ma`, and applies. -/
-instance {m : Type → Type} [i : Monad m] : Applicative m :=
+instance {0 m : Type → Type} [i : Monad m] : Applicative m :=
   Applicative.mk (fun a => @Monad.pure m i _ a)
     (fun mf ma => @Monad.bind m i _ _ mf (fun g => @Monad.bind m i _ _ ma (fun a => @Monad.pure m i _ (g a))))
 /-- Every applicative functor is a functor: `map g x = pure g <*> x`. -/
-instance {f : Type → Type} [i : Applicative f] : Functor f :=
+instance {0 f : Type → Type} [i : Applicative f] : Functor f :=
   Functor.mk (fun g x => @Applicative.seq f i _ _ (@Applicative.pure f i _ g) x)
 
 -- ## Option

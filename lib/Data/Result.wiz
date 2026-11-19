@@ -74,18 +74,18 @@ def ResultQ.toResult {A : Type} (x : ResultQ ω A) : Result A := x
 the input's quantity `q`, and the result is at `p`. The scrutinee is consumed once, so a
 linear success value cannot be duplicated; `f` itself is unrestricted because the `err`
 branch drops it. -/
-def ResultQ.bind {q p : Qty} {A B : Type} (1 x : ResultQ q A)
+def ResultQ.bind {0 q p : Qty} {A B : Type} (1 x : ResultQ q A)
     (f : (%q a : A) → ResultQ p B) : ResultQ p B := match x with
   | .ok a => f a
   | .err e => .err e
 /-- Apply `f` to the success value, at the input's quantity `q`. -/
-def ResultQ.map {q : Qty} {A B : Type} (f : (%q a : A) → B) (x : ResultQ q A) : ResultQ q B :=
+def ResultQ.map {0 q : Qty} {A B : Type} (f : (%q a : A) → B) (x : ResultQ q A) : ResultQ q B :=
   match x with
   | .ok a => .ok (f a)
   | .err e => .err e
 /-- Case analysis: the success branch takes the value at `%q`, the error branch takes the
 `Error`. Both branches are unrestricted (each is dropped on the other path). -/
-def ResultQ.elim {q : Qty} {A B : Type} (onOk : (%q a : A) → B) (onErr : (e : Error) → B)
+def ResultQ.elim {0 q : Qty} {A B : Type} (onOk : (%q a : A) → B) (onErr : (e : Error) → B)
     (1 x : ResultQ q A) : B := match x with
   | .ok a => onOk a
   | .err e => onErr e

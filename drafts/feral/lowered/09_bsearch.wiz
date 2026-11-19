@@ -6,7 +6,7 @@ import FeralCore
 
 -- the loop `while lo < hi invariant … decreases hi - lo do { … }`
 -- live variables in and out: lo, hi; `return` inside: Flow.ret
-partial def bsearch.loop0 {ρ : Region} (v : Shr ρ (Vec U64)) (x : U64) (lo : U64) (hi : U64) :
+partial def bsearch.loop0 {0 ρ : Region} (v : Shr ρ (Vec U64)) (x : U64) (lo : U64) (hi : U64) :
     Result (Flow (U64 × U64) (Option U64)) :=
   match U64.lt lo hi with
   | .true =>
@@ -25,7 +25,7 @@ partial def bsearch.loop0 {ρ : Region} (v : Shr ρ (Vec U64)) (x : U64) (lo : U
 -- fn bsearch {'a} (v : &'a Vec U64) (x : U64) : Option USize
 --   requires sorted v
 --   ensures match result with | .some i => v[i] = x | .none => ¬ x ∈ v
-def bsearch {ρ : Region} (v : Shr ρ (Vec U64)) (x : U64) : Result (Option U64) :=
+def bsearch {0 ρ : Region} (v : Shr ρ (Vec U64)) (x : U64) : Result (Option U64) :=
   let lo := U64.lit 0;
   let hi := Vec.len v;
   match bsearch.loop0 v x lo hi with

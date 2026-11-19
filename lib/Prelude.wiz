@@ -915,7 +915,7 @@ macro_rules
   | `(term| do1 let ($x, $y) := $e; $rest) => `(term| let ($x, $y) := $e; do1 $rest)
 
 /-- The `n`th tree of a list (from 0), or `missing`. (Taking syntax apart.) -/
-def SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax
+def SyntaxF.nth {0 b : Bool} : SyntaxF b → Nat → Syntax
   | .cons x t, n => match n with
     | .zero => x
     | .succ m => SyntaxF.nth t m
@@ -1041,7 +1041,7 @@ def Tactic.first : Tactic := fun stx =>
 attribute [tactic tactic.first] Tactic.first
 
 /-- Run each tactic of a list in turn: `(tac₁; tac₂; …)`. -/
-def TacticM.evalSeq {b : Bool} : SyntaxF b → TacticM Unit
+def TacticM.evalSeq {0 b : Bool} : SyntaxF b → TacticM Unit
   | .cons t ts => do TacticM.evalTactic t; TacticM.evalSeq ts
   | _ => TacticM.pure ()
 syntax (name := paren) "(" sepBy(tactic, ";") ")" : tactic
@@ -1155,7 +1155,7 @@ def TacticM.renameAll : Nat → List Nat → List String → TacticM Nat
     TacticM.renameAll g' ixs xs
 /-- The names of the identifiers in a list of trees (other trees, such as separators,
 skipped). -/
-def Syntax.identNames {b : Bool} : SyntaxF b → List String
+def Syntax.identNames {0 b : Bool} : SyntaxF b → List String
   | .cons (.ident x) rest => .cons x (Syntax.identNames rest)
   | .cons _ rest => Syntax.identNames rest
   | _ => .nil
@@ -1488,7 +1488,7 @@ infixr:67 " ++ " => HAppend.hAppend
 syntax (name := listLit) "[" sepBy(term, ",") "]" : term
 /-- The term a list literal stands for: the nested `List.cons` of the literal's elements
 (skipping the `,` atoms), ending in `List.nil`. -/
-def ListLit.build {b : Bool} : SyntaxF b → Syntax
+def ListLit.build {0 b : Bool} : SyntaxF b → Syntax
   | .cons (.atom _) ts => ListLit.build ts
   | .cons t ts => Syntax.mkApp (Syntax.mkVar "List.cons") (.cons t (.cons (ListLit.build ts) .nil))
   | _ => Syntax.mkVar "List.nil"

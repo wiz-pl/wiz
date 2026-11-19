@@ -234,8 +234,9 @@ def binderType (b : Syntax) : Option Syntax := match isInstB b with
     | _ => .none
 
 -- Quantities (stage 21m), as `elabQuantity` in the Lean elaborator: a binder's written
--- quantity (`(1 x : A)`, `{0 A : Type}`, `(ω f : …)`), or its default: ω on an explicit
--- binder, 0 on an implicit one. A written quantity is the optional `quantity` node
+-- quantity (`(1 x : A)`, `{0 n : Nat}`, `(ω f : …)`), or its default: ω on an explicit
+-- binder; on an implicit one rule (b), 0 for a sort or a proposition and ω for data
+-- (`binderQ`, `typeQ`). A written quantity is the optional `quantity` node
 -- (`num`, `ω`, or `%t`); `bad` for one this frontend can't read (`%t`, a numeral other
 -- than 0 or 1), which is an error (`qtyErr`) wherever it is written.
 inductive QW where
@@ -266,11 +267,20 @@ def binderW (b : Syntax) : QW := match b with
   | _ => match Bool.or (strEq (kindOf b) "binder.explicit") (isImplicitB b) with
     | .true => writtenQ (kid b 1)
     | .false => .dflt
--- a binder's quantity, the default filled in
+-- is this written type a sort (`Type`, `Type u`, `Sort u`, `Prop`)?
+def sortStx (t : Syntax) : Bool := Bool.or (strEq (kindOf t) "term.type")
+  (Bool.or (strEq (kindOf t) "term.sort") (strEq (kindOf t) "term.prop"))
+-- a binder's quantity, the default filled in: ω for an explicit binder; for an implicit
+-- one rule (b) (`binderDflt` below), here from the syntax alone: 0 when its written type
+-- is a sort, else ω. Where the binder's type is elaborated, `typeQ` decides instead.
 def binderQ (b : Syntax) : Option Q := match binderW b with
   | .is q => .some q
   | .dflt => .some (match isImplicitB b with
-    | .true => .qz
+    | .true => (match binderType b with
+      | .some t => (match sortStx t with
+        | .true => .qz
+        | .false => .qw)
+      | .none => .qw)
     | .false => .qw)
   | .bad => .none
 def qsFor (q : Q) : List String → List Q
@@ -301,6 +311,52 @@ def headQ : List Q → Q
 def tailQ : List Q → List Q
   | .nil => .nil
   | .cons _ qs => qs
+-- Rule (b), the language decision of 2026-11-16 (`binderDefaultQty` in
+-- `Elab/Term.lean`): an implicit binder with no quantity written is at 0 when its type is
+-- a sort or a proposition (erased anyway) and at ω otherwise (data). `binderQ` decides
+-- from the syntax alone (a written `Type`, `Sort u` or `Prop` is a sort); where the type
+-- has been elaborated, `typeQ` decides from it, as the Lean elaborator does.
+def binderDflt (b : Syntax) : Bool := match isImplicitB b with
+  | .true => (match binderW b with
+    | .dflt => .true
+    | _ => .false)
+  | .false => .false
+def bsFor (d : Bool) : List String → List Bool
+  | .nil => .nil
+  | .cons _ xs => .cons d (bsFor d xs)
+-- one per name, as `binderQs`
+def binderDflts : List Syntax → List Bool
+  | .nil => .nil
+  | .cons b bs => List.append (bsFor (binderDflt b) (binderNames b)) (binderDflts bs)
+def headB : List Bool → Bool
+  | .nil => .false
+  | .cons d _ => d
+def tailB : List Bool → List Bool
+  | .nil => .nil
+  | .cons _ ds => ds
+-- the quantity rule (b) gives an implicit of type `A` (a value, its metavariables
+-- forced), in the sort `l` (if known): 0 when `A` is a sort or `l` is `Prop`, else ω
+def typeQ (A : Val) (l : Option Lvl) : Q := match whnf A with
+  | .vsort _ => .qz
+  | _ => match l with
+    | .some l' => match lvlIsZero l' with
+      | .true => .qz
+      | .false => .qw
+    | .none => .qw
+-- the same with the sort computed in the context `c`
+def typeQC (c : TCtx) (A : Val) : Q := typeQ A (sortOf c A)
+-- `q`, or for an implicit with none written (`d`) the quantity its type gives
+def pickQC (d : Bool) (q : Q) (c : TCtx) (A : Val) : Q := match d with
+  | .true => typeQC c A
+  | .false => q
+-- the quantities of a telescope of binders (`binderQs`, `binderDflts`) whose types `pts`
+-- are elaborated, each over the ones before, in the context `c` (all arguments are
+-- matched columns: the recursion decreases on `rest` and `c` changes with it)
+def resolveQs : TCtx → List Bool → List Q → Tms → List Q
+  | c, .cons d ds, .cons q qs, .tcons A rest =>
+    let Av := eval (TCtx.env c) A;
+    .cons (pickQC d q c Av) (resolveQs (TCtx.bind c Av) ds qs rest)
+  | _, _, qs, _ => qs
 
 -- all the names of a `fun`'s binders
 def binders : List Syntax → List String
@@ -1196,15 +1252,54 @@ def ctorRes (nidx : Nat) (c : Syntax) : Option Syntax := match nidx with
     | .cons _ (.cons ty _) => .some (lastS (kids (kid ty 1)))
     | _ => .none
 
+-- the context of the parameters (their types, each over the ones before)
+def paramCtx : TCtx → Tms → TCtx
+  | c, .tnil => c
+  | c, .tcons A rest => paramCtx (TCtx.bind c (eval (TCtx.env c) A)) rest
+-- (rule b) one flag per field (as `fieldsOf`): an implicit field with no quantity written
+def fieldDflts : List Syntax → List Bool
+  | .nil => .nil
+  | .cons b bs => match binderType b with
+    | .none => fieldDflts bs
+    | .some _ => List.append (bsFor (binderDflt b) (binderNames b)) (fieldDflts bs)
+-- (rule b) a constructor's fields, an implicit field with no quantity written at the
+-- quantity its type gives (`typeQC`), as the Lean elaborator's `elabTelescope`: each
+-- type scope-checked as `ctorFieldTys` does (`sc` the globals, the parameters and the
+-- fields before, `d` their number) and evaluated in `c` (the parameters' context, then
+-- the fields before). A recursive field (`isRec`) has the type being defined: data (ω).
+def resolveFields (gs : Globals) (isRec : Syntax → Bool) : TCtx → Scope → Nat → List Bool → List Field → List Field
+  | _, _, _, _, .nil => .nil
+  | c, sc, d, ds, .cons (.mk x q impl ty) rest =>
+    let Ao : Option Tm := match isRec ty with
+      | .true => .none
+      | .false => match elab sc ty with
+        | .ok A => .some (closeG .false gs d A)
+        | .err _ => .none;
+    let Av : Val := match Ao with
+      | .some A => eval (TCtx.env c) A
+      | .none => .vunit (ln 0);
+    let q' := match headB ds with
+      | .true => (match Ao with
+        | .some _ => typeQC c Av
+        | .none => .qw)
+      | .false => q;
+    .cons (.mk x q' impl ty) (resolveFields gs isRec (TCtx.bind c Av) (Scope.bind sc x) (d + 1) (tailB ds) rest)
+def isYesRF : RecF → Bool
+  | .yes _ => .true
+  | .no => .false
+-- a constructor's fields, their quantities by rule (b) (`pts` the parameters' types)
+def ctorFieldsQ (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (pts : Tms) (c : Syntax) : List Field :=
+  resolveFields gs (fun (ty : Syntax) => isYesRF (recField T ps nidx ty)) (paramCtx empty pts)
+    (bindAll (Globals.scope gs) ps) (List.length ps) (fieldDflts (kids (kid c 3))) (ctorFields c)
 -- the constructors' descriptions, under the binder `t✝` of the tag
 inductive Descs where
   | ok (ds : Tms)
   | err (msg : String)
-def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (nidx : Nat) (lv : Lvl) (cx : TCtx) : List Syntax → Descs
+def ctorDescs (inline : Bool) (gs : Globals) (T : String) (ps : List String) (pts : Tms) (nidx : Nat) (lv : Lvl) (cx : TCtx) : List Syntax → Descs
   | .nil => .ok .tnil
-  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) lv cx (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons c cs => match ctorDesc inline gs T ps nidx (ctorRes nidx c) lv cx (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFieldsQ gs T ps nidx pts c) with
     | .err m => .err m
-    | .ok D => match ctorDescs inline gs T ps nidx lv cx cs with
+    | .ok D => match ctorDescs inline gs T ps pts nidx lv cx cs with
       | .ok ds => .ok (.tcons D ds)
       | e => e
 -- a constructor's fields with their types, every field bound in the later ones
@@ -1270,12 +1365,7 @@ def liftHead : List (List Bool) → List Bool
 def liftTail : List (List Bool) → List (List Bool)
   | .nil => .nil
   | .cons _ r => r
-def headB : List Bool → Bool
-  | .nil => .false
-  | .cons b _ => b
-def tailB : List Bool → List Bool
-  | .nil => .nil
-  | .cons _ r => r
+-- (`headB`/`tailB` are defined above with rule (b)'s binder flags; the same `List Bool`)
 -- A type with the sorts of the `Π`/`Σ` in its spine filled in where they are known
 -- (`Sorts.type` in the Lean elaborator), and its sort: the types of declarations are
 -- built without them (telescopes, constructor types), and type equality waits on a
@@ -1375,10 +1465,6 @@ def occursTms : Nat → Tms → Bool
   | _, .tnil => .false
   | i, .tcons t rest => Bool.or (occurs i t) (occursTms i rest)
 end
--- the context of the parameters (their types, each over the ones before)
-def paramCtx : TCtx → Tms → TCtx
-  | c, .tnil => c
-  | c, .tcons A rest => paramCtx (TCtx.bind c (eval (TCtx.env c) A)) rest
 -- the phantom domain `D` of the parameter `k` of `np` (its type `A` over the ones
 -- before), at depth `np` in the parameters' context `c`; `none` if it gets none
 def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
@@ -1466,15 +1552,16 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
   | _, gs, _, .nil => .ok gs .nil
   | lifts, gs, i, .cons c cs =>
     let ls := liftHead lifts;
-    let n := List.length (ctorFields c);
+    let cfs := ctorFieldsQ gs T ps nidx pts c;
+    let n := List.length cfs;
     let np := List.length ps;
-    let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames (ctorFields c));
-    match ctorFieldTys gs T ps nidx Tc TcI (bindAll (Globals.scope gs) ps) np (ctorFields c) with
+    let scF := bindAll (bindAll (Globals.scope gs) ps) (fieldNames cfs);
+    match ctorFieldTys gs T ps nidx Tc TcI (bindAll (Globals.scope gs) ps) np cfs with
     | .err _ => .err
     | .ok fs => match idxArgs gs scF (np + n) (ctorRes nidx c) with
       | .err _ => .err
       | .ok ics =>
-        let qs := fieldQs (ctorFields c);
+        let qs := fieldQs cfs;
         let ty := sortTy (piTeleZ pts (ctorType (tApps Tc (tmsAppend (pvars np (np + n)) ics)) qs fs));
         -- (without an index: `tt`, or `refl` at a phantom tail)
         let proof : Tm := match ics with
@@ -1487,13 +1574,13 @@ def addCtors (T : String) (us : List String) (lv : Lvl) (ps : List String) (pts 
         match check empty v (eval .nil ty) with
         | .err _ => .err
         | .ok _ _ => match addCtors T us lv ps pts nidx I Tc TcI k strct (liftTail lifts) (Globals.add gs (.mk (String.append (String.append T ".") (ctorName c)) us ty v v
-          (List.append (impls np) (fieldKinds (fieldImpl (ctorFields c))))
-          (List.append ps (fieldNames (ctorFields c))))) (i + 1) cs with
+          (List.append (impls np) (fieldKinds (fieldImpl cfs)))
+          (List.append ps (fieldNames cfs)))) (i + 1) cs with
         | .ok gs' rest => .ok gs' (.cons (.mk (ctorName c) fs (match ics with
           | .tcons ic _ => ic
           | .tnil => .star) (match strct with
             | .true => structBindQs qs
-            | .false => qs) (fieldImpl (ctorFields c)) ls) rest)
+            | .false => qs) (fieldImpl cfs) ls) rest)
         | .err => .err
 -- the types of a telescope, each over the ones before
 def elabTele (gs : Globals) : Scope → Nat → List Field → TmsR
@@ -1564,7 +1651,8 @@ def lastIdx : List Syntax → Nat → Nat
     | .cons _ _ => lastIdx rest (i + 1)
 -- (stage 21m, 21x) A constructor field's quantity is its description's (`darg q S D`,
 -- `Desc.arg q S D` in the Lean kernel): written, or by default ω for an explicit field
--- and 0 for an implicit one (`{n : Nat}`), as `elabQuantity` gives it. A bad quantity
+-- and rule (b) for an implicit one (`ctorFieldsQ`: ω for data such as `{n : Nat}`, 0 for a
+-- sort or a proposition; `{0 n : Nat}` erases it), as `elabTelescope` gives it. A bad quantity
 -- (`2`, `%t`) on a field or a parameter is an error.
 def fieldQtyErr : List Syntax → Option String
   | .nil => .none
@@ -1641,9 +1729,9 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
         -- (U2b) the context of the parameters and the tag binder `t✝` (which `ctorDesc`
         -- is under: its var 0), for reading a field's sort
         let cxP := TCtx.bind (paramCtx empty pts) (.vunit (ln 1));
-        match ctorDescs .false gs T ps nidx lv cxP ctors with
+        match ctorDescs .false gs T ps pts nidx lv cxP ctors with
         | .err m => errStep gs m
-        | .ok ds0 => match ctorDescs .true gs T ps nidx lv cxP ctors with
+        | .ok ds0 => match ctorDescs .true gs T ps pts nidx lv cxP ctors with
           | .err m => errStep gs m
           | .ok dsI0 =>
             -- phantom parameters: those that neither a constructor nor the index type
@@ -1674,9 +1762,9 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
               let body := fun (D : Tm) => (match sig with
                 | .indexed _ => .lam (.mu lv (shiftTm 1 0 I) (nfAt (np + 1) (tApps (tLams np D) (pvars np (np + 1)))) (.var 0))
                 | _ => .mu lv I D tl : Tm);
-              let ty := sortTy (piTeleQ (match binderQs (kids (kid stx 3)) with
+              let ty := sortTy (piTeleQ (resolveQs (paramCtx empty pts) (binderDflts (kids (kid stx 3))) (match binderQs (kids (kid stx 3)) with
                 | .some qs => qs
-                | .none => .nil) pts (match sig with
+                | .none => .nil) pts) pts (match sig with
                 | .indexed _ => piH I (.sortL (lsucc lv))
                 | _ => .sortL (lsucc lv)));
               let val := markClosed (tLams np (body (mkD ds))) ty;
@@ -3027,6 +3115,14 @@ def dotCtor (gs : Globals) (es : ES) (ty : Val) (s : Syntax) : Option Syntax :=
 def sortLvl (es : ES) (ty : Val) : Lvl := match whnf (force es ty) with
   | .vsort l => l
   | _ => .lnum 0
+-- (rule b) the quantity of a binder elaborated at type `A` in the sort `la` (as
+-- `inferType` gives them): `q`, or for an implicit with none written (`d`) the
+-- quantity its type gives (`typeQ`)
+def implicitQ (d : Bool) (q : Q) (es : ES) (A la : Val) : Q := match d with
+  | .true => typeQ (force es A) (match whnf (force es la) with
+    | .vsort l => .some l
+    | _ => .none)
+  | .false => q
 -- an implicit argument's metavariable; when its type is a sort (`{A : Type u}`), the
 -- solution's own sort is recorded, which solves the level (`id 5` has `?u = 0`)
 def newImplicit (es : ES) (cx : Cx) (dom : Val) : MetaR := match whnf (force es dom) with
@@ -4916,7 +5012,7 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
         | .false => match strEq k "term.depArrow" with
           | .true => match binderType (kid s 0) with
             | .some aStx => match binderQ (kid s 0) with
-              | .some q => depPis gs es cx q (binderNames (kid s 0)) aStx (kid s 2)
+              | .some q => depPis gs es cx (binderDflt (kid s 0)) q (binderNames (kid s 0)) aStx (kid s 2)
               | .none => .err qtyErr
             | .none => .err "a Π needs a binder type"
           | .false => match strEq k "term.ascription" with
@@ -4948,7 +5044,7 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
               | .false => match strEq k "term.fun" with
                 | .true => match Nat.beq (lenL (binders (kids (kid s 1)))) (lenL (fieldsOf (kids (kid s 1)))) with
                   | .true => match binderQs (kids (kid s 1)) with
-                    | .some qs => inferLams gs es cx qs (fieldsOf (kids (kid s 1))) (kid s 3)
+                    | .some qs => inferLams gs es cx (binderDflts (kids (kid s 1))) qs (fieldsOf (kids (kid s 1))) (kid s 3)
                     | .none => .err qtyErr
                   | .false => .err "cannot infer the type of a λ; add a type ascription"
                 | .false => match strEq k "term.structUpdate" with
@@ -5035,14 +5131,14 @@ def forallPis (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (body : Synt
   | .nil => inferType gs es cx body
   | .cons b rest => match binderQ b with
     | .none => .err qtyErr
-    | .some q => forallNames gs es cx q (binderNames b) (match binderType b with
+    | .some q => forallNames gs es cx (binderDflt b) q (binderNames b) (match binderType b with
         | .some t => t
         | .none => holeStx) rest body
-def forallNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx : Syntax) (bs : List Syntax) (body : Syntax) : TE := match xs with
+def forallNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aStx : Syntax) (bs : List Syntax) (body : Syntax) : TE := match xs with
   | .nil => forallPis gs es cx bs body
   | .cons x xs' => match inferType gs es cx aStx with
-    | .ok a la es1 => match forallNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) q xs' aStx bs body with
-      | .ok b lb es2 => .ok (piSortedQ q es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
+    | .ok a la es1 => match forallNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) d q xs' aStx bs body with
+      | .ok b lb es2 => .ok (piSortedQ (implicitQ d q es1 (eval (TCtx.env (Cx.c cx)) a) la) es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
       | e => e
     | e => e
 -- `(a, b, c)` without an expected type: `A × (B × C)`
@@ -5070,15 +5166,16 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
       | e => e
     | _ => .err (String.append "a tuple against a type that isn't a Σ type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es ty))))
 -- `fun (x : A) … => b` with every binder typed: `(x : A) → B` (stage 20a)
-def inferLams (gs : Globals) (es : ES) (cx : Cx) (qs : List Q) : List Field → Syntax → TE
+def inferLams (gs : Globals) (es : ES) (cx : Cx) (ds : List Bool) (qs : List Q) : List Field → Syntax → TE
   | .nil, body => inferT gs es cx body
   | .cons (.mk x _ _ aS) rest, body => match strEq (kindOf aS) "" with
     | .true => .err "cannot infer the type of a λ; add a type ascription"
     | .false => match inferType gs es cx aS with
-      | .ok A _ es1 =>
-        let cx' := Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A);
-        match inferLams gs es1 cx' (tailQ qs) rest body with
-        | .ok b bty es2 => .ok (.lam b) (eval (TCtx.env (Cx.c cx)) (piTm (headQ qs) A (quote (Cx.lvl cx') (force es2 bty)))) es2
+      | .ok A la es1 =>
+        let Av := eval (TCtx.env (Cx.c cx)) A;
+        let cx' := Cx.bind cx x Av;
+        match inferLams gs es1 cx' (tailB ds) (tailQ qs) rest body with
+        | .ok b bty es2 => .ok (.lam b) (eval (TCtx.env (Cx.c cx)) (piTm (implicitQ (headB ds) (headQ qs) es1 Av la) A (quote (Cx.lvl cx') (force es2 bty)))) es2
         | e => e
       | e => e
 -- a type: its sort is computed again by the kernel later, so any sort is fine here
@@ -5088,11 +5185,11 @@ def inferType (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE := match infe
     | _ => .err (String.append "not a type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) t))
   | e => e
 -- `(x y : A) → B`
-def depPis (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
+def depPis (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aStx body : Syntax) : TE := match xs with
   | .nil => inferType gs es cx body
   | .cons x rest => match inferType gs es cx aStx with
-    | .ok a la es1 => match depPis gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) q rest aStx body with
-      | .ok b lb es2 => .ok (piSortedQ q es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
+    | .ok a la es1 => match depPis gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) a)) d q rest aStx body with
+      | .ok b lb es2 => .ok (piSortedQ (implicitQ d q es1 (eval (TCtx.env (Cx.c cx)) a) la) es2 a b la lb) (.vsort (.limax (sortLvl es2 la) (sortLvl es2 lb))) es2
       | e => e
     | e => e
 -- the arguments of an application, inserting implicit ones by the mask. A `.c`
@@ -5903,14 +6000,16 @@ def defT (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (tyS vS : Syntax)
   | .cons b rest => match binderType b with
     | .none => .err "the binders of a definition need types"
     | .some aS => match binderQ b with
-      | .some q => defNames gs es cx q (binderNames b) aS rest tyS vS
+      | .some q => defNames gs es cx (binderDflt b) q (binderNames b) aS rest tyS vS
       | .none => .err qtyErr
-def defNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS vS : Syntax) : DefR :=
+def defNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS vS : Syntax) : DefR :=
   match xs with
   | .nil => defT gs es cx rest tyS vS
   | .cons x xs' => match inferType gs es cx aS with
-    | .ok A _ es1 => match defNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) q xs' aS rest tyS vS with
-      | .ok ty v es2 => .ok (piTm q A ty) (.lam v) es2
+    | .ok A la es1 =>
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match defNames gs es1 (Cx.bind cx x Av) d q xs' aS rest tyS vS with
+      | .ok ty v es2 => .ok (piTm (implicitQ d q es1 Av la) A ty) (.lam v) es2
       | e => e
     | .err m => .err m
 end
@@ -6108,9 +6207,9 @@ def matchDefCmd (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
           | .ok RE0 _ esR => match zonk esR n RE0 with
           | .none => errStep gs "could not infer an implicit argument"
           | .some RE =>
-            let tyT := sortTy (piTeleQ (match binderQs (kids (kid stx 3)) with
+            let tyT := sortTy (piTeleQ (resolveQs (paramCtx empty pts) (binderDflts (kids (kid stx 3))) (match binderQs (kids (kid stx 3)) with
               | .some qs => qs
-              | .none => .nil) pts RE);
+              | .none => .nil) pts) pts RE);
             let sc := bindAll (Globals.scope gs) params;
             match peelCtx n empty (eval .nil tyT) with
               | .mk c Rv => match sortOf c Rv with
@@ -6690,11 +6789,21 @@ def mctorsOf (j : Nat) : List Syntax → List MCtor
 def memberCtors : List Syntax → Nat → List MCtor
   | .nil, _ => .nil
   | .cons d rest, j => List.append (mctorsOf j (kids (kid d 6))) (memberCtors rest (j + 1))
-def mdescs (inline : Bool) (gs : Globals) (members ps : List String) (m : Nat) : List MCtor → Descs
+-- (rule b) a member constructor's fields, their quantities by rule (b) (`ctorFieldsQ`;
+-- a field typed by a member, or a function into one, is recursive)
+def isMemberField (members ps : List String) (ty : Syntax) : Bool := match memberOf members ps ty with
+  | .some _ => .true
+  | .none => match hrecMember members ps ty with
+    | .yes _ _ => .true
+    | .no => .false
+def mctorFieldsQ (gs : Globals) (members ps : List String) (pts : Tms) (c : Syntax) : List Field :=
+  resolveFields gs (fun (ty : Syntax) => isMemberField members ps ty) (paramCtx empty pts)
+    (bindAll (Globals.scope gs) ps) (List.length ps) (fieldDflts (kids (kid c 3))) (ctorFields c)
+def mdescs (inline : Bool) (gs : Globals) (members ps : List String) (pts : Tms) (m : Nat) : List MCtor → Descs
   | .nil => .ok .tnil
-  | .cons (.mk j c) rest => match mctorDesc inline gs members ps m j (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (ctorFields c) with
+  | .cons (.mk j c) rest => match mctorDesc inline gs members ps m j (Scope.bind (bindAll (Globals.scope gs) ps) "t✝") (List.length ps + 1) (mctorFieldsQ gs members ps pts c) with
     | .err e => .err e
-    | .ok D => match mdescs inline gs members ps m rest with
+    | .ok D => match mdescs inline gs members ps pts m rest with
       | .ok ds => .ok (.tcons D ds)
       | e => e
 def identOf' (s : Syntax) : String := match s with
@@ -6728,7 +6837,7 @@ def markRec (members ps : List String) : List Field → List CField → List CFi
 def addMCtors (members ps : List String) (pts : Tms) (m k : Nat) : Globals → Nat → List MCtor → MAdded
   | gs, _, .nil => .ok gs .nil
   | gs, ci, .cons (.mk j c) rest =>
-    let fs0 := ctorFields c;
+    let fs0 := mctorFieldsQ gs members ps pts c;
     let n := List.length fs0;
     let np := List.length ps;
     let T := nthName members j;
@@ -6777,9 +6886,9 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
   let mkD := fun (ds : Tms) => (.darg (.qlit .qw) (.enum k) (.lam (.ecase (.descr (.lnum 0) I) (.var 0) ds)) : Tm);
   match elabTele gs (Globals.scope gs) 0 params with
   | .err e => errStep gs e
-  | .ok pts => match mdescs .false gs members ps m mcs with
+  | .ok pts => match mdescs .false gs members ps pts m mcs with
     | .err e => errStep gs e
-    | .ok ds => match mdescs .true gs members ps m mcs with
+    | .ok ds => match mdescs .true gs members ps pts m mcs with
       | .err e => errStep gs e
       | .ok dsI =>
         -- `fun ps i => μ D i` (the description moved under `i`)
@@ -6889,14 +6998,36 @@ def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
     | .zero => .cons v rest
     | .succ j => .cons s (setNthSyn v rest j)
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
--- (an implicit binder keeps its quantity: its default 0 is written out, stage 21m)
+-- a generated parameter binder is implicit at quantity 0 (as the Lean elaborator's
+-- `implicitΔ`), whatever its type
 def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
-def explicitBinders : List Syntax → List Syntax
-  | .nil => .nil
-  | .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (match Bool.and (isImplicitB b) (isNilS (kids (kid b 1))) with
-      | .true => zeroQtyStx
+-- a quantity as binder syntax (ω is a bare binder)
+def qtyStxOf (q : Q) : Syntax := match q with
+  | .qz => zeroQtyStx
+  | .qo => mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "1"))))))
+  | .qw => mkNull .nil
+def dropQ : Nat → List Q → List Q
+  | .zero, qs => qs
+  | .succ k, qs => dropQ k (tailQ qs)
+-- the binders made explicit, each keeping its quantity: a written one, or for an implicit
+-- with none written the one rule (b) gave it (`qs`, one per name: a bare explicit binder
+-- would be ω)
+def explicitBinders : List Q → List Syntax → List Syntax
+  | _, .nil => .nil
+  | qs, .cons b rest => .cons (mkNode "binder.explicit" (.cons (.atom "(") (.cons (match binderDflt b with
+      | .true => qtyStxOf (headQ qs)
       | .false => kid b 1) (.cons (kid b 2)
-      (.cons (kid b 3) (one (.atom ")"))))))) (explicitBinders rest)
+      (.cons (kid b 3) (one (.atom ")"))))))) (explicitBinders (dropQ (lenL (binderNames b)) qs) rest)
+-- the quantities of a definition's binders, one per name, rule (b) applied to their
+-- elaborated types (as `defT`)
+def defParamQs (gs : Globals) (stx : Syntax) : List Q :=
+  let bs := kids (kid stx 3);
+  let qs : List Q := match binderQs bs with
+    | .some qs => qs
+    | .none => .nil;
+  match elabParams gs (univParamsOf stx) (Cx.mk empty (Globals.scope gs) .nil) (fieldsOf bs) with
+  | .ok pts _ => resolveQs (paramCtx empty pts) (binderDflts bs) qs pts
+  | .err _ => qs
 -- `let x := scrutinee; …` for the clause's variables
 def letsFor (body : Syntax) : List Syntax → List Syntax → Syntax
   | .cons p ps, .cons sc scs => match strEq (identOf p) "_" with
@@ -6924,7 +7055,7 @@ def withDefault' (gs : Globals) (stx : Syntax) : Step := match kid stx 1 with
       | .true =>
         let g := String.append f "✝d";
         let dstx := mkNode "command.def" (.cons (.atom "def") (.cons (.ident g) (.cons (kid stx 2)
-          (.cons (mkNull (explicitBinders (kids (kid stx 3)))) (.cons (kid stx 4) (.cons (.atom ":=")
+          (.cons (mkNull (explicitBinders (defParamQs gs stx) (kids (kid stx 3)))) (.cons (kid stx 4) (.cons (.atom ":=")
             (one (letsFor (kid a 3) pats scruts))))))));
         match command gs dstx with
         | .mk line gs1 => match strEq (String.mk (takeL 6 (match line with
@@ -7078,14 +7209,16 @@ def teleT (gs : Globals) (es : ES) (cx : Cx) (bs : List Syntax) (tyS : Syntax) :
   | .cons b rest => match binderType b with
     | .none => .err "the binders of a definition need types"
     | .some aS => match binderQ b with
-      | .some q => teleNames gs es cx q (binderNames b) aS rest tyS
+      | .some q => teleNames gs es cx (binderDflt b) q (binderNames b) aS rest tyS
       | .none => .err qtyErr
-def teleNames (gs : Globals) (es : ES) (cx : Cx) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS : Syntax) : TE :=
+def teleNames (gs : Globals) (es : ES) (cx : Cx) (d : Bool) (q : Q) (xs : List String) (aS : Syntax) (rest : List Syntax) (tyS : Syntax) : TE :=
   match xs with
   | .nil => teleT gs es cx rest tyS
   | .cons x xs' => match inferType gs es cx aS with
-    | .ok A _ es1 => match teleNames gs es1 (Cx.bind cx x (eval (TCtx.env (Cx.c cx)) A)) q xs' aS rest tyS with
-      | .ok B _ es2 => .ok (piTm q A B) (.vsort (.lnum 0)) es2
+    | .ok A la es1 =>
+      let Av := eval (TCtx.env (Cx.c cx)) A;
+      match teleNames gs es1 (Cx.bind cx x Av) d q xs' aS rest tyS with
+      | .ok B _ es2 => .ok (piTm (implicitQ d q es1 Av la) A B) (.vsort (.lnum 0)) es2
       | e => e
     | e => e
 end
@@ -7833,10 +7966,11 @@ def binderStx (ob cb x : String) (A : Syntax) : Syntax := match strEq ob "[" wit
     | .true => "binder.implicit"
     | .false => "binder.explicit") (.cons (.atom ob) (.cons (mkNull .nil)
     (.cons (mkNull (one (.ident x))) (.cons (mkNull (.cons (.atom ":") (one A))) (one (.atom cb))))))
--- the parameter binders, made implicit
+-- the parameter binders, made implicit at 0 (generated declarations keep the erased
+-- parameter, as the Lean elaborator's `implicitΔ`, whatever rule (b) would give it)
 def implicitBinders : List Syntax → List Syntax
   | .nil => .nil
-  | .cons b rest => .cons (mkNode "binder.implicit" (.cons (.atom "{") (.cons (kid b 1) (.cons (kid b 2)
+  | .cons b rest => .cons (mkNode "binder.implicit" (.cons (.atom "{") (.cons zeroQtyStx (.cons (kid b 2)
       (.cons (kid b 3) (one (.atom "}"))))))) (implicitBinders rest)
 -- (a field is ["private"] [quantity] ident ":" T)
 def fieldName (f : Syntax) : String := identOf' (kid f 2)

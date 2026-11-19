@@ -94,7 +94,7 @@ def Bus.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
 /-- Forget the byte enables: the word-level request. -/
-def Bus.ReqW.toReq {r : HwTy → Type} {aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
+def Bus.ReqW.toReq {r : HwTy → Type} {0 aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
   Bus.Req.mk q.valid q.we q.addr q.wdata
 
 /-- The word-level request with every byte enabled (the `Bus.Req` API in `Bus.ReqW`). -/

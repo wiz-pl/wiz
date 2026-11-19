@@ -105,17 +105,17 @@ def Heap.Disj {V : Type} (h₁ h₂ : Heap V) : Prop :=
 
 /-- Heap extensionality: an equation of heaps is pointwise. It needs no axiom, since the
 equation *computes* to `(0 l : Nat) → h₁ l = h₂ l`; this lemma takes the unerased form. -/
-def Heap.ext {V : Type} {h₁ h₂ : Heap V} (p : (l : Nat) → h₁ l = h₂ l) : h₁ = h₂ := p
+def Heap.ext {V : Type} {0 h₁ h₂ : Heap V} (p : (l : Nat) → h₁ l = h₂ l) : h₁ = h₂ := p
 /-- `Eq.symm` at the type of heaps. -/
-def Heap.symm {V : Type} {h₁ h₂ : Heap V} (e : h₁ = h₂) : h₂ = h₁ := @Eq.symm (Heap V) h₁ h₂ e
+def Heap.symm {V : Type} {0 h₁ h₂ : Heap V} (e : h₁ = h₂) : h₂ = h₁ := @Eq.symm (Heap V) h₁ h₂ e
 /-- `Eq.trans` at the type of heaps. -/
-def Heap.trans {V : Type} {h₁ h₂ h₃ : Heap V} (e₁ : h₁ = h₂) (e₂ : h₂ = h₃) : h₁ = h₃ :=
+def Heap.trans {V : Type} {0 h₁ h₂ h₃ : Heap V} (e₁ : h₁ = h₂) (e₂ : h₂ = h₃) : h₁ = h₃ :=
   @Eq.trans (Heap V) h₁ h₂ h₃ e₁ e₂
 /-- Transport a property of heaps along an equation of heaps. -/
-def Heap.subst {V : Type} (0 P : Heap V → Prop) {h₁ h₂ : Heap V} (e : h₁ = h₂) (p : P h₁) : P h₂ :=
+def Heap.subst {V : Type} (0 P : Heap V → Prop) {0 h₁ h₂ : Heap V} (e : h₁ = h₂) (p : P h₁) : P h₂ :=
   @Eq.substProp (Heap V) P h₁ h₂ e p
 /-- Rewrite the left operand of a `Heap.union`. -/
-def Heap.congrUnionL {V : Type} {h₁ h₁' : Heap V} (h₂ : Heap V) (e : h₁ = h₁') :
+def Heap.congrUnionL {V : Type} {0 h₁ h₁' : Heap V} (h₂ : Heap V) (e : h₁ = h₁') :
     Heap.union h₁ h₂ = Heap.union h₁' h₂ :=
   @Eq.congrArg (Heap V) (Heap V) (fun (x : Heap V) => Heap.union x h₂) h₁ h₁' e
 
@@ -138,19 +138,19 @@ def Heap.union_comm {V : Type} (h₁ h₂ : Heap V) (d : Heap.Disj h₁ h₂) :
   Heap.ext (fun l => Option.orElse_comm (h₁ l) (h₂ l) (d l))
 
 /-- The disjointness laws: `Heap.Disj` is symmetric. -/
-def Heap.disj_symm {V : Type} {h₁ h₂ : Heap V} (d : Heap.Disj h₁ h₂) : Heap.Disj h₂ h₁ :=
+def Heap.disj_symm {V : Type} {0 h₁ h₂ : Heap V} (d : Heap.Disj h₁ h₂) : Heap.Disj h₂ h₁ :=
   fun l => Or.symm (d l)
 /-- The empty heap is disjoint from every heap (on the left). -/
 def Heap.disj_empty_l {V : Type} (h : Heap V) : Heap.Disj Heap.empty h := fun l => Or.inl rfl
 /-- Every heap is disjoint from the empty heap (on the right). -/
 def Heap.disj_empty_r {V : Type} (h : Heap V) : Heap.Disj h Heap.empty := fun l => Or.inr rfl
 /-- `h₁ ⊎ h₂` is disjoint from `h₃` only if both parts are. -/
-def Heap.disj_union_l {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d : Heap.Disj (Heap.union h₁ h₂) h₃) :
+def Heap.disj_union_l {V : Type} (h₁ h₂ : Heap V) {0 h₃ : Heap V} (d : Heap.Disj (Heap.union h₁ h₂) h₃) :
     Heap.Disj h₁ h₃ ∧ Heap.Disj h₂ h₃ :=
   (fun l => Or.imp (fun f => ((Option.free_orElse (h₁ l) (h₂ l)).1 f).1) (fun f => f) (d l),
    fun l => Or.imp (fun f => ((Option.free_orElse (h₁ l) (h₂ l)).1 f).2) (fun f => f) (d l))
 /-- `h₁ ⊎ h₂` is disjoint from `h₃` if both parts are. -/
-def Heap.disj_union_l_intro {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d₁ : Heap.Disj h₁ h₃) (d₂ : Heap.Disj h₂ h₃) :
+def Heap.disj_union_l_intro {V : Type} (h₁ h₂ : Heap V) {0 h₃ : Heap V} (d₁ : Heap.Disj h₁ h₃) (d₂ : Heap.Disj h₂ h₃) :
     Heap.Disj (Heap.union h₁ h₂) h₃ := fun l =>
   Or.elim (d₁ l)
     (fun f₁ => Or.elim (d₂ l)
@@ -158,19 +158,19 @@ def Heap.disj_union_l_intro {V : Type} (h₁ h₂ : Heap V) {h₃ : Heap V} (d�
       (fun f₃ => Or.inr f₃))
     (fun f₃ => Or.inr f₃)
 /-- `h₁` is disjoint from `h₂ ⊎ h₃` only if it is disjoint from both. -/
-def Heap.disj_union_r {V : Type} {h₁ : Heap V} (h₂ h₃ : Heap V) (d : Heap.Disj h₁ (Heap.union h₂ h₃)) :
+def Heap.disj_union_r {V : Type} {0 h₁ : Heap V} (h₂ h₃ : Heap V) (d : Heap.Disj h₁ (Heap.union h₂ h₃)) :
     Heap.Disj h₁ h₂ ∧ Heap.Disj h₁ h₃ :=
   And.imp (fun d' => Heap.disj_symm d') (fun d' => Heap.disj_symm d')
     (Heap.disj_union_l h₂ h₃ (Heap.disj_symm d))
 /-- `h₁` is disjoint from `h₂ ⊎ h₃` if it is disjoint from both. -/
-def Heap.disj_union_r_intro {V : Type} {h₁ : Heap V} (h₂ h₃ : Heap V) (d₁ : Heap.Disj h₁ h₂) (d₂ : Heap.Disj h₁ h₃) :
+def Heap.disj_union_r_intro {V : Type} {0 h₁ : Heap V} (h₂ h₃ : Heap V) (d₁ : Heap.Disj h₁ h₂) (d₂ : Heap.Disj h₁ h₃) :
     Heap.Disj h₁ (Heap.union h₂ h₃) :=
   Heap.disj_symm (Heap.disj_union_l_intro h₂ h₃ (Heap.disj_symm d₁) (Heap.disj_symm d₂))
 /-- Rewrite the left heap of a disjointness along an equation of heaps. -/
-def Heap.disj_eq_l {V : Type} {h h' : Heap V} (h₂ : Heap V) (e : h = h') (d : Heap.Disj h h₂) : Heap.Disj h' h₂ :=
+def Heap.disj_eq_l {V : Type} {0 h h' : Heap V} (h₂ : Heap V) (e : h = h') (d : Heap.Disj h h₂) : Heap.Disj h' h₂ :=
   @Heap.subst V (fun (x : Heap V) => Heap.Disj x h₂) h h' e d
 /-- Rewrite the right heap of a disjointness along an equation of heaps. -/
-def Heap.disj_eq_r {V : Type} (h₁ : Heap V) {h h' : Heap V} (e : h = h') (d : Heap.Disj h₁ h) : Heap.Disj h₁ h' :=
+def Heap.disj_eq_r {V : Type} (h₁ : Heap V) {0 h h' : Heap V} (e : h = h') (d : Heap.Disj h₁ h) : Heap.Disj h₁ h' :=
   @Heap.subst V (fun (x : Heap V) => Heap.Disj h₁ x) h h' e d
 /-- Two singletons at one location overlap: they are never disjoint. -/
 def Heap.disj_single {V : Type} (l : Nat) (v w : V) : ¬ Heap.Disj (Heap.single l v) (Heap.single l w) :=
@@ -234,7 +234,7 @@ def star.intro {V : Type} (0 H₁ H₂ : HProp V) (h h₁ h₂ : Heap V) (s : St
   Ex.intro (fun (a : Heap V) => ∃ b : Heap V, StarAt H₁ H₂ h a b) h₁
     (Ex.intro (fun (b : Heap V) => StarAt H₁ H₂ h h₁ b) h₂ s)
 /-- Eliminate `⋆`: to prove `R` from `(H₁ ⋆ H₂) h`, prove it for every split of `h`. -/
-def star.elim {V : Type} {0 H₁ H₂ : HProp V} {h : Heap V} (s : star H₁ H₂ h) (0 R : Prop)
+def star.elim {V : Type} {0 H₁ H₂ : HProp V} {0 h : Heap V} (s : star H₁ H₂ h) (0 R : Prop)
     (k : (h₁ h₂ : Heap V) → StarAt H₁ H₂ h h₁ h₂ → R) : R :=
   s R (fun h₁ s₁ => s₁ R (fun h₂ s₂ => k h₁ h₂ s₂))
 

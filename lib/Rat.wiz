@@ -351,31 +351,31 @@ def Q.lt_trans {ω p q r : Q} (h1 : p < q) (h2 : q < r) : p < r := Q.lt_of_lt_of
 -- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). `≈` is the rationals'
 -- equality (`Q.Eq`), so the `≈` instances transport `≤` and `<` along it.
 /-- `p ≈ q → q ≤ r → p ≤ r`. -/
-instance {p q r : Q} : Trans (p ≈ q) (q ≤ r) (p ≤ r) :=
+instance {0 p q r : Q} : Trans (p ≈ q) (q ≤ r) (p ≤ r) :=
   Trans.mk (fun h h' => Q.le_congr (Q.symm h) (Q.refl r) h')
 /-- `p ≤ q → q ≈ r → p ≤ r`. -/
-instance {p q r : Q} : Trans (p ≤ q) (q ≈ r) (p ≤ r) :=
+instance {0 p q r : Q} : Trans (p ≤ q) (q ≈ r) (p ≤ r) :=
   Trans.mk (fun h h' => Q.le_congr (Q.refl p) h' h)
 /-- `p ≈ q → q < r → p < r`. -/
-instance {p q r : Q} : Trans (p ≈ q) (q < r) (p < r) :=
+instance {0 p q r : Q} : Trans (p ≈ q) (q < r) (p < r) :=
   Trans.mk (fun h h' => Q.lt_congr (Q.symm h) (Q.refl r) h')
 /-- `p < q → q ≈ r → p < r`. -/
-instance {p q r : Q} : Trans (p < q) (q ≈ r) (p < r) :=
+instance {0 p q r : Q} : Trans (p < q) (q ≈ r) (p < r) :=
   Trans.mk (fun h h' => Q.lt_congr (Q.refl p) h' h)
 /-- `p ≈ q → q ≈ r → p ≈ r`. -/
-instance {p q r : Q} : Trans (p ≈ q) (q ≈ r) (p ≈ r) :=
+instance {0 p q r : Q} : Trans (p ≈ q) (q ≈ r) (p ≈ r) :=
   Trans.mk (fun h h' => Q.trans h h')
 /-- `p ≤ q → q ≤ r → p ≤ r`. -/
-instance {p q r : Q} : Trans (p ≤ q) (q ≤ r) (p ≤ r) :=
+instance {0 p q r : Q} : Trans (p ≤ q) (q ≤ r) (p ≤ r) :=
   Trans.mk (fun h h' => Q.le_trans h h')
 /-- `p ≤ q → q < r → p < r`. -/
-instance {p q r : Q} : Trans (p ≤ q) (q < r) (p < r) :=
+instance {0 p q r : Q} : Trans (p ≤ q) (q < r) (p < r) :=
   Trans.mk (fun h h' => Q.lt_of_le_of_lt h h')
 /-- `p < q → q ≤ r → p < r`. -/
-instance {p q r : Q} : Trans (p < q) (q ≤ r) (p < r) :=
+instance {0 p q r : Q} : Trans (p < q) (q ≤ r) (p < r) :=
   Trans.mk (fun h h' => Q.lt_of_lt_of_le h h')
 /-- `p < q → q < r → p < r`. -/
-instance {p q r : Q} : Trans (p < q) (q < r) (p < r) :=
+instance {0 p q r : Q} : Trans (p < q) (q < r) (p < r) :=
   Trans.mk (fun h h' => Q.lt_trans h h')
 /-- `≤` is antisymmetric, up to `≈`. -/
 def Q.le_antisymm {ω p q : Q} (h1 : p ≤ q) (h2 : q ≤ p) : p ≈ q :=

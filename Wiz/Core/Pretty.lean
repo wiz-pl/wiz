@@ -105,6 +105,16 @@ def txt (s : String) : TT := .text s
 def cat (xs : List TT) : TT := .append xs.toArray
 def paren (b : Bool) (t : TT) : TT := if b then cat [txt "(", t, txt ")"] else t
 
+/-- A binder's default quantity as the printer sees it (rule (b), `Elab.binderDefaultQty`):
+an implicit binder whose domain is a sort, or whose domain's sort is `Prop`, defaults to
+`implicitDefault` (0), any other implicit to `implicitDataDefault` (ω). The printer does
+not unfold definitions, so `{0 A : Ty}` with `def Ty := Type` keeps its `0`, which reads
+back the same. -/
+def binderDefault (bi : BinderInfo) (dom : Term R) (σ : BinderSorts) : R :=
+  if bi != .implicit then QuantitySyntax.explicitDefault
+  else if (dom matches .sort _) || (!σ.dom.hasHole && σ.dom.equiv 0) then QuantitySyntax.implicitDefault
+  else QuantitySyntax.implicitDataDefault
+
 def isDefaultQ (bi : BinderInfo) : Term R → Bool
   | .qlit r => r == if bi == .implicit then QuantitySyntax.implicitDefault else QuantitySyntax.explicitDefault
   | _ => false
@@ -402,6 +412,9 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   let app (f : TT) (args : List (Term R)) : M R TT := do
     let as ← args.mapM (sub 1023)
     pure (paren (prec > 1022) (cat (f :: as.flatMap fun a => [txt " ", a])))
+  let qtyPrefixD (dflt : R) (q : Term R) : M R TT := match q with
+    | .qlit r => pure (txt (if r == dflt then "" else QuantitySyntax.display r ++ " "))
+    | q => do pure (cat [txt "%", ← sub 1024 q, txt " "])
   let qtyPrefix (bi : BinderInfo) (q : Term R) : M R TT := match q with
     | .qlit r =>
       let dflt := if bi == .implicit then QuantitySyntax.implicitDefault else QuantitySyntax.explicitDefault
@@ -437,7 +450,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .scofix _ _ _ A f s i a => app (txt "scofix") [A, f, s, i, a]
   | .qlit r => pure (txt (QuantitySyntax.display r))
   | .sort l => pure (paren (prec > 1022 && !atomicSort l) (txt (showSort l)))
-  | .pi x bi q dom cod _ =>
+  | .pi x bi q dom cod σ =>
     if bi == .default && isDefaultQ .default q && !cod.hasVar 0 then
       pure (paren (prec > 25) (cat [← sub 26 dom, txt " → ", ← go env ("_" :: names) (some dom :: tys) 25 cod]))
     else
@@ -446,7 +459,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
         | .implicit => ("{", "}")
         | .instImplicit => ("[", "]")
         | .default => ("(", ")")
-      pure (paren (prec > 25) (cat [txt o, ← qtyPrefix bi q, txt s!"{x'} : ", ← sub 0 dom, txt s!"{c} → ",
+      pure (paren (prec > 25) (cat [txt o, ← qtyPrefixD (binderDefault bi dom σ) q, txt s!"{x'} : ", ← sub 0 dom, txt s!"{c} → ",
         ← go env (x' :: names) (some dom :: tys) 25 cod]))
   | .lam .. =>
     let (xs, names', tys', body) := lams names tys t #[]

@@ -735,11 +735,11 @@ inductive Timed (A : Type) where
 /-- What a read of an exact number of bytes got: all of them, or what came before the end
 of the file or (only when `timed`) before the time ran out. -/
 inductive Got : Bool → Type where
-  | all {timed : Bool} (b : Bytes) : Got timed
-  | eof {timed : Bool} (b : Bytes) : Got timed
+  | all {0 timed : Bool} (b : Bytes) : Got timed
+  | eof {0 timed : Bool} (b : Bytes) : Got timed
   | timeout (b : Bytes) : Got .true
 /-- The bytes, however the read ended. -/
-def Got.bytes {timed : Bool} (g : Got timed) : Bytes := match g with
+def Got.bytes {0 timed : Bool} (g : Got timed) : Bytes := match g with
   | .all b => b
   | .eof b => b
   | .timeout b => b

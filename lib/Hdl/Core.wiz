@@ -480,7 +480,7 @@ class ShareLet (A B : Type) where
   share : A → (A → B) → B
 
 /-- Auto-share for hardware code: a `let` of a signal is `Hw.share`. -/
-instance {r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
+instance {0 r : HwTy → Type} [Hw r] {ω a b : HwTy} : ShareLet (r a) (r b) where
   share := fun x f => Hw.share x f
 
 /-- A boolean as one bit: `.true` is 1, `.false` is 0. -/
@@ -569,7 +569,7 @@ def Hdl.memPick {A : Type} : Bool → A → A → A
 /-- A write: a disabled one is the memory itself, so that a simulation does not wrap the
 memory in one more function per cycle (a read would cost the number of cycles so far,
 not the number of writes). -/
-def Hdl.memWr {aw dw : Nat} : Bool → (BitVec aw → BitVec dw) → BitVec aw → BitVec dw → (BitVec aw → BitVec dw)
+def Hdl.memWr {0 aw dw : Nat} : Bool → (BitVec aw → BitVec dw) → BitVec aw → BitVec dw → (BitVec aw → BitVec dw)
   | .false, m, a, d => m
   | .true, m, a, d => fun (b : BitVec aw) => Hdl.memPick (BitVec.beq a b) d (m b)
 /-- Read a memory at an address (combinational). -/
@@ -1700,9 +1700,9 @@ structure Circuit (i o : HwTy) where
   step : {r : HwTy → Type} → [Hw r] → r st → r i → r (HwTy.prod st o)
 
 /-- The step on values (the representation is found from the result type). -/
-def Circuit.stepEl {i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (x : HwTy.El i) : HwTy.El (HwTy.prod c.st o) := c.step s x
+def Circuit.stepEl {0 i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (x : HwTy.El i) : HwTy.El (HwTy.prod c.st o) := c.step s x
 /-- The step on wires. -/
-def Circuit.stepWire {i o : HwTy} (c : Circuit i o) (s : Wire c.st) (x : Wire i) : Wire (HwTy.prod c.st o) := c.step s x
+def Circuit.stepWire {0 i o : HwTy} (c : Circuit i o) (s : Wire c.st) (x : Wire i) : Wire (HwTy.prod c.st o) := c.step s x
 
 /-- The semantics: simulation by values over a finite input trace, from state `s`.
 `runFrom` is the specification (structural, for proofs); `Circuit.run` is the same with
@@ -1724,20 +1724,20 @@ def Circuit.run {ω i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)) : List
   Circuit.runAcc c c.init xs []
 
 /-- `Circuit.runAcc` is `Circuit.runFrom` behind the accumulator. -/
-def Circuit.runAcc_eq {i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) → (acc : List (HwTy.El o)) →
+def Circuit.runAcc_eq {0 i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) → (acc : List (HwTy.El o)) →
     Circuit.runAcc c s xs acc = Hdl.rev acc (Circuit.runFrom c s xs)
   | s, .nil, acc => refl (Hdl.rev acc (@List.nil (HwTy.El o)))
   | s, .cons x xs, acc => Circuit.runAcc_eq c (Circuit.stepEl c s x).1 xs (List.cons (Circuit.stepEl c s x).2 acc)
 
 /-- `Circuit.run` agrees with the specification `Circuit.runFrom`. -/
-def Circuit.run_eq {i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)) : Circuit.run c xs = Circuit.runFrom c c.init xs :=
+def Circuit.run_eq {0 i o : HwTy} (c : Circuit i o) (xs : List (HwTy.El i)) : Circuit.run c xs = Circuit.runFrom c c.init xs :=
   Circuit.runAcc_eq c c.init xs List.nil
 
 /-- The infinite semantics (lib/Trace.wiz): a circuit is a Mealy machine, and its run along
 an input trace is a trace. `run` and `runFrom` are its finite prefixes
 (`Mealy.runFrom_take`, `Circuit.run_take`); temporal properties are stated over `Circuit.trace` and
 `Circuit.obs`. -/
-def Circuit.mealy {i o : HwTy} (c : Circuit i o) : Mealy (HwTy.El c.st) (HwTy.El i) (HwTy.El o) := Circuit.stepEl c
+def Circuit.mealy {0 i o : HwTy} (c : Circuit i o) : Mealy (HwTy.El c.st) (HwTy.El i) (HwTy.El o) := Circuit.stepEl c
 /-- The state at each cycle, along an input trace. -/
 def Circuit.stateAt {ω i o : HwTy} (c : Circuit i o) (xs : Trace (HwTy.El i)) : Trace (HwTy.El c.st) :=
   Mealy.stateAt (Circuit.mealy c) c.init xs
@@ -1750,16 +1750,16 @@ def Circuit.obs {ω i o : HwTy} (c : Circuit i o) (xs : Trace (HwTy.El i)) : Tra
 
 /-- `runFrom` is `Mealy.runFrom` of the step, so simulating `n` cycles gives the first `n`
 elements of the trace. -/
-def Circuit.runFrom_mealy {i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
+def Circuit.runFrom_mealy {0 i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
     Circuit.runFrom c s xs = Mealy.run (Circuit.mealy c) s xs
   | s, .nil => rfl
   | s, .cons x xs => Eq.congrArg (List.cons (Circuit.stepEl c s x).2) (Circuit.runFrom_mealy c (Circuit.stepEl c s x).1 xs)
 /-- (the statement lib/Hdl/Temporal.wiz uses) -/
-def Mealy.runFrom_take {i o : HwTy} (c : Circuit i o) (n : Nat) (s : HwTy.El c.st) (xs : Trace (HwTy.El i)) :
+def Mealy.runFrom_take {0 i o : HwTy} (c : Circuit i o) (n : Nat) (s : HwTy.El c.st) (xs : Trace (HwTy.El i)) :
     Circuit.runFrom c s (Trace.take n xs) = Trace.take n (Mealy.outAt (Circuit.stepEl c) s xs) :=
   Eq.trans (Circuit.runFrom_mealy c s (Trace.take n xs)) (Mealy.run_take (Circuit.mealy c) n s xs)
 /-- `Circuit.run` of `n` cycles is the first `n` elements of `Circuit.trace`. -/
-def Circuit.run_take {i o : HwTy} (c : Circuit i o) (n : Nat) (xs : Trace (HwTy.El i)) :
+def Circuit.run_take {0 i o : HwTy} (c : Circuit i o) (n : Nat) (xs : Trace (HwTy.El i)) :
     Circuit.run c (Trace.take n xs) = Trace.take n (Circuit.trace c xs) :=
   Eq.trans (Circuit.run_eq c (Trace.take n xs)) (Mealy.runFrom_take c n c.init xs)
 
@@ -1827,7 +1827,7 @@ def Circuit.outputName {ω i o : HwTy} (name : String) (c : Circuit i o) : Circu
 
 /-- An instance of `c` inside another step: `s` is its state (a part of the caller's state,
 starting at `c.init`), the result its next state and its output. -/
-def Circuit.inst {r : HwTy → Type} [Hw r] {i o : HwTy} (c : Circuit i o) (s : r c.st) (x : r i) : r (HwTy.prod c.st o) :=
+def Circuit.inst {r : HwTy → Type} [Hw r] {0 i o : HwTy} (c : Circuit i o) (s : r c.st) (x : r i) : r (HwTy.prod c.st o) :=
   c.step s x
 
 /-- A synchronous reset: while `rst` (a new first input) is high the next state is `c.init`
@@ -1895,26 +1895,26 @@ def Hdl.snds {A B : Type} : List (A × B) → List B
   | .cons p ps => .cons p.2 (Hdl.snds ps)
 
 /-- Equal lists stay equal with the same head. -/
-def Hdl.consEq {A : Type} (x : A) {xs ys : List A} (e : xs = ys) : List.cons x xs = List.cons x ys :=
+def Hdl.consEq {A : Type} (x : A) {0 xs ys : List A} (e : xs = ys) : List.cons x xs = List.cons x ys :=
   Eq.congrArg (List.cons x) e
 
 /-- Combinational code at values. -/
-def Comb.el {i o : HwTy} (f : Comb i o) (x : HwTy.El i) : HwTy.El o := f x
+def Comb.el {0 i o : HwTy} (f : Comb i o) (x : HwTy.El i) : HwTy.El o := f x
 /-- A combinational circuit maps its code over the trace. -/
-def Circuit.runFrom_comb {i o : HwTy} (f : Comb i o) :
+def Circuit.runFrom_comb {0 i o : HwTy} (f : Comb i o) :
     (s : HwTy.El (HwTy.bits 0)) → (xs : List (HwTy.El i)) →
     Circuit.runFrom (Circuit.comb f) s xs = Hdl.map (Comb.el f) xs
   | s, .nil => refl (@List.nil (HwTy.El o))
   | s, .cons x xs => Hdl.consEq (Comb.el f x) (Circuit.runFrom_comb f s xs)
 
 /-- A delay shifts the trace by one, starting with its state. -/
-def Circuit.runFrom_delay {t : HwTy} (v : HwTy.El t) : (s : HwTy.El t) → (xs : List (HwTy.El t)) →
+def Circuit.runFrom_delay {0 t : HwTy} (v : HwTy.El t) : (s : HwTy.El t) → (xs : List (HwTy.El t)) →
     Circuit.runFrom (Circuit.delay t v) s xs = Hdl.shift s xs
   | s, .nil => refl (@List.nil (HwTy.El t))
   | s, .cons x xs => Hdl.consEq s (Circuit.runFrom_delay v x xs)
 
 /-- A sequence runs the second circuit on the first one's outputs. -/
-def Circuit.runFrom_seq {i m o : HwTy} (a : Circuit i m) (b : Circuit m o) :
+def Circuit.runFrom_seq {0 i m o : HwTy} (a : Circuit i m) (b : Circuit m o) :
     (sa : HwTy.El a.st) → (sb : HwTy.El b.st) → (xs : List (HwTy.El i)) →
     Circuit.runFrom (Circuit.seq a b) (sa, sb) xs = Circuit.runFrom b sb (Circuit.runFrom a sa xs)
   | sa, sb, .nil => refl (@List.nil (HwTy.El o))
@@ -1923,7 +1923,7 @@ def Circuit.runFrom_seq {i m o : HwTy} (a : Circuit i m) (b : Circuit m o) :
       (Circuit.runFrom_seq a b (Circuit.stepEl a sa x).1 (Circuit.stepEl b sb (Circuit.stepEl a sa x).2).1 xs)
 
 /-- Side by side: each circuit on its half of the inputs, the outputs zipped. -/
-def Circuit.runFrom_par {i1 o1 i2 o2 : HwTy} (a : Circuit i1 o1) (b : Circuit i2 o2) :
+def Circuit.runFrom_par {0 i1 o1 i2 o2 : HwTy} (a : Circuit i1 o1) (b : Circuit i2 o2) :
     (sa : HwTy.El a.st) → (sb : HwTy.El b.st) → (xs : List (HwTy.El i1 × HwTy.El i2)) →
     Circuit.runFrom (Circuit.par a b) (sa, sb) xs =
       Hdl.zip (Circuit.runFrom a sa (Hdl.fsts xs)) (Circuit.runFrom b sb (Hdl.snds xs))
@@ -1933,7 +1933,7 @@ def Circuit.runFrom_par {i1 o1 i2 o2 : HwTy} (a : Circuit i1 o1) (b : Circuit i2
       (Circuit.runFrom_par a b (Circuit.stepEl a sa x.1).1 (Circuit.stepEl b sb x.2).1 xs)
 
 /-- Feedback, one cycle (the definition, as an equation to rewrite with). -/
-def Circuit.runFrom_loop {i o f : HwTy} (v : HwTy.El f) (c : Circuit (HwTy.prod i f) (HwTy.prod o f))
+def Circuit.runFrom_loop {0 i o f : HwTy} (v : HwTy.El f) (c : Circuit (HwTy.prod i f) (HwTy.prod o f))
     (s : HwTy.El c.st) (fb : HwTy.El f) (x : HwTy.El i) (xs : List (HwTy.El i)) :
     Circuit.runFrom (Circuit.loop c v) (s, fb) (List.cons x xs) =
       List.cons (Circuit.stepEl c s (x, fb)).2.1
@@ -1941,22 +1941,22 @@ def Circuit.runFrom_loop {i o f : HwTy} (v : HwTy.El f) (c : Circuit (HwTy.prod 
   refl (Circuit.runFrom (Circuit.loop c v) (s, fb) (List.cons x xs))
 
 /-- Naming the state changes nothing. -/
-def Circuit.runFrom_named {i o : HwTy} (name : String) (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
+def Circuit.runFrom_named {0 i o : HwTy} (name : String) (c : Circuit i o) : (s : HwTy.El c.st) → (xs : List (HwTy.El i)) →
     Circuit.runFrom (Circuit.named name c) s xs = Circuit.runFrom c s xs
   | s, .nil => refl (@List.nil (HwTy.El o))
   | s, .cons x xs => Hdl.consEq (Circuit.stepEl c s x).2 (Circuit.runFrom_named name c (Circuit.stepEl c s x).1 xs)
 
 /-- An instance, at values, is the sub-circuit's step. -/
-def Circuit.inst_el {i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (x : HwTy.El i) :
+def Circuit.inst_el {0 i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (x : HwTy.El i) :
     @Circuit.inst HwTy.El _ i o c s x = Circuit.stepEl c s x := refl (Circuit.stepEl c s x)
 
 /-- Reset, one cycle: the next state is `c.init` when `rst` is 1. -/
-def Circuit.stepEl_withReset {i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (rst : HwTy.El HwTy.bit) (x : HwTy.El i) :
+def Circuit.stepEl_withReset {0 i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (rst : HwTy.El HwTy.bit) (x : HwTy.El i) :
     Circuit.stepEl (Circuit.withReset c) s (rst, x) =
       (HwTy.El.resetToAt c.st rst c.init (Circuit.stepEl c s x).1, (Circuit.stepEl c s x).2) :=
   refl (Circuit.stepEl (Circuit.withReset c) s (rst, x))
 /-- Enable, one cycle: the state holds when `en` is 0. -/
-def Circuit.stepEl_withEnable {i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (en : HwTy.El HwTy.bit) (x : HwTy.El i) :
+def Circuit.stepEl_withEnable {0 i o : HwTy} (c : Circuit i o) (s : HwTy.El c.st) (en : HwTy.El HwTy.bit) (x : HwTy.El i) :
     Circuit.stepEl (Circuit.withEnable c) s (en, x) =
       (@HwTy.El.mux c.st en (Circuit.stepEl c s x).1 s, (Circuit.stepEl c s x).2) :=
   refl (Circuit.stepEl (Circuit.withEnable c) s (en, x))
@@ -1976,22 +1976,22 @@ def Circuit.stepEl_registerE {ω t : HwTy} (v : HwTy.El t) (s : HwTy.El t) (en :
   rfl
 
 /-- memories at values: a read sees an enabled write to its address, and nothing else -/
-def Hdl.memWr_miss {aw dw : Nat} (m : BitVec aw → BitVec dw) (a : BitVec aw) (d : BitVec dw) (b : BitVec aw)
+def Hdl.memWr_miss {0 aw dw : Nat} (m : BitVec aw → BitVec dw) (a : BitVec aw) (d : BitVec dw) (b : BitVec aw)
     (h : BitVec.beq a b = .false) : (we : Bool) → Hdl.memWr we m a d b = m b
   | .false => rfl
   | .true => Eq.substProp (fun (hit : Bool) => Hdl.memPick hit d (m b) = m b) (Eq.symm h) rfl
 /-- A read after a write to another address is the read before it. -/
-def HwTy.El.memRead_write_miss {aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (we : HwTy.El HwTy.bit) (a : HwTy.El (HwTy.bits aw))
+def HwTy.El.memRead_write_miss {0 aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (we : HwTy.El HwTy.bit) (a : HwTy.El (HwTy.bits aw))
     (d : HwTy.El (HwTy.bits dw)) (b : HwTy.El (HwTy.bits aw)) (h : BitVec.beq (a : BitVec aw) b = .false) :
     HwTy.El.memRead (HwTy.El.memWrite m we a d) b = HwTy.El.memRead m b :=
   Hdl.memWr_miss (m : BitVec aw → BitVec dw) (a : BitVec aw) (d : BitVec dw) b h (BitVec.isTrue (we : BitVec 1))
 /-- A read after an enabled write to its address is the word written. -/
-def HwTy.El.memRead_write_hit {aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (a : HwTy.El (HwTy.bits aw))
+def HwTy.El.memRead_write_hit {0 aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (a : HwTy.El (HwTy.bits aw))
     (d : HwTy.El (HwTy.bits dw)) (b : HwTy.El (HwTy.bits aw)) (h : BitVec.beq (a : BitVec aw) b = .true) :
     HwTy.El.memRead (HwTy.El.memWrite m (BitVec.ofNat 1 1) a d) b = d :=
   Eq.substProp (fun (hit : Bool) => Hdl.memPick hit (d : BitVec dw) ((m : BitVec aw → BitVec dw) b) = d) (Eq.symm h) rfl
 /-- A disabled write leaves every read unchanged. -/
-def HwTy.El.memRead_write_off {aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (a : HwTy.El (HwTy.bits aw))
+def HwTy.El.memRead_write_off {0 aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw)) (a : HwTy.El (HwTy.bits aw))
     (d : HwTy.El (HwTy.bits dw)) (b : HwTy.El (HwTy.bits aw)) :
     HwTy.El.memRead (HwTy.El.memWrite m (BitVec.ofNat 1 0) a d) b = HwTy.El.memRead m b := rfl
 

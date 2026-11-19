@@ -121,7 +121,7 @@ def List.lenAcc_succ {A : Type} : (L : List A) → (acc : Nat) → List.lenAcc L
   | .nil, acc => rfl
   | .cons _ xs, acc => List.lenAcc_succ xs (Nat.succ acc)
 /-- Chain `a = succ b` and `b = c` (`succ b = succ c` computes to `b = c`). -/
-def Nat.succ_eq_of {a b c : Nat} (e₁ : a = Nat.succ b) (e₂ : b = c) : a = Nat.succ c :=
+def Nat.succ_eq_of {0 a b c : Nat} (e₁ : a = Nat.succ b) (e₂ : b = c) : a = Nat.succ c :=
   @Eq.trans Nat a (Nat.succ b) (Nat.succ c) e₁ e₂
 /-- Counting from 0 is `List.length`. -/
 def List.lenAcc_zero {A : Type} : (L : List A) → List.lenAcc L 0 = List.length L

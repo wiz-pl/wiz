@@ -274,6 +274,22 @@ def privacyCheck (g : Globals R) (d : Decl R) (kind : Globals R → Decl R → T
     throw (.other (s!"{shown} depends on the definition of {", ".intercalate (used.map show1)}, which is hidden outside " ++
       s!"its module (it has private parts): with the definition hidden, {e}"))
 
+/-- The implicit binders written in `stx` (a command), wherever they are. -/
+partial def implicitBinderViews (stx : Syntax) : Array Elab.BinderView :=
+  if stx.isOfKind "binder.implicit" then Elab.binderViews stx else stx.args.flatMap implicitBinderViews
+
+/-- The implicit binders of a declaration's type `ty` (its leading `Π`s) at the quantity
+rule (b) gives a data implicit, when that differs from the one for a type (ω, not 0). -/
+def dataImplicits (ty : Term R) : List Name :=
+  match ty with
+  | .pi x bi q _ B _ =>
+    let here : Bool := match q with
+      | .qlit r => bi == .implicit && r == QuantitySyntax.implicitDataDefault &&
+          r != QuantitySyntax.implicitDefault (R := R)
+      | _ => false
+    (if here then [x] else []) ++ dataImplicits B
+  | _ => []
+
 /-- `addDecl` with the sorts of the elaborator's `Π`/`Σ` filled in first (`Sorts`), the
 proof markers the kernel requires (`withMarksOnDemand`), and then the privacy check (with
 the markers too: an unmarked proof is not a privacy failure). -/
@@ -1667,8 +1683,27 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       -- `elabDefEqns`) is the elaborator's own: if only it fails, the bug is ours
       let ours := impl.isSome &&
         (addDeclSorted s.globals { name, levelParams, type := ty, value := val }) matches .ok _
-      reportKernel cmd.info name e (if ours then
-        "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
+      -- ...except a quantity error. The definition is checked through the eliminator, whose
+      -- recursive results need none of the arguments, while the implementation calls
+      -- itself, passing them: a parameter at ω (a data implicit's default, rule (b)) given a
+      -- variable the match binds at 0 (an erased constructor field) is the user's error,
+      -- reported at that parameter's binder.
+      let qtyErr := kernelRejectedCode e == ErrorCode.quantity
+      if ours && qtyErr then
+        let cands := dataImplicits ty
+        let bv? := (implicitBinderViews cmd).find? fun b => b.qty.isNone && cands.contains b.name
+        let hint := match bv? with
+          | some b =>
+            s!"\n  in a recursive call of {name}: its implicit parameter {b.name} has the default quantity ω " ++
+            s!"of a data implicit, but the call passes it a value the match binds at quantity 0 (an erased " ++
+            s!"constructor field such as `\{0 n : Nat}`); write `\{0 {b.name} : …}` if {b.name} is only needed in types"
+          | none =>
+            s!"\n  in a recursive call of {name}: an argument is passed at a higher quantity than the match binds " ++
+            "it at (an erased constructor field is bound at quantity 0)"
+        reportC ((bv?.map (·.info)).getD cmd.info) (kernelRejected name e ++ hint) (kernelRejectedCode e)
+      else
+        reportKernel cmd.info name e (if ours then
+          "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
   match cmd.kind with
   | "command.private" =>
     -- (13b) every name the command declares is private to this module

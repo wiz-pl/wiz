@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
+  binder with no written quantity is `0` only when its type is a sort or a proposition
+  (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index
+  `{n : Nat}` — is `ω`. A written `{0}` (or `(0 x : A)`), `{1}` or `{ω}` is authoritative.
+  The decision is made at the binder from the type known there: `{A}` and `{A : _}` are
+  data (ω) even if a later use solves the metavariable to `Type`; write the type or the
+  quantity to erase it. `lib/` now writes `{0 …}` on the data implicits it used to leave
+  bare, so its erasure is unchanged, but **user code is not migrated**: an existing
+  `{n : Nat}` index is now passed and computed at run time (an unused one is not free:
+  `onlyType ((Nat.add k 5))`, where it used to be `onlyType ◾`), and a recursive
+  definition that passes a `{0 n}` constructor field to such an index must write
+  `{0 n : Nat}` — the bare form is rejected with a quantity error at the binder, not
+  silently erased. The Lean and self-hosted frontends decide identically (`=elab`,
+  `=selfhost`).
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,

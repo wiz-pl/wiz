@@ -17,7 +17,9 @@ binder.implicit   := "{" [quantity] [names+] [":" type] "}"
 ```
 
 Quantities follow Idris 2: `(1 x : A)`, `{0 A : Type}`. An omitted quantity means ω
-on explicit binders and 0 on implicit ones.
+on explicit binders. On an implicit binder it is 0 when the binder's type is a sort or a
+proposition (`{A : Type}`) and ω otherwise (`{n : Nat}`; write `{0 n : Nat}` to erase it):
+rule (b), `Elab.binderDefaultQty`.
 -/
 
 namespace Wiz.Builtin

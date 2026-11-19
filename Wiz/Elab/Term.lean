@@ -1088,6 +1088,36 @@ def calcEndpoints? (t : Term R) : Option (Term R × Term R) :=
     | b :: a :: _ => some (a, b)
     | _ => none
 
+/-- **Rule (b)** (the language decision of 2026-11-16): the default quantity of a binder
+with none written, once its type is elaborated. `tyl` is the binder's elaborated type and
+its sort level (`checkType`), or `none` when no type was written.
+
+* An explicit or instance binder: `explicitDefault` (ω).
+* An implicit binder: `implicitDefault` (0) when its type is a **sort** or a
+  **proposition**, `implicitDataDefault` (ω) otherwise. "A sort": the type, with solved
+  metavariables and definitions unfolded at its head (`force`), is `Sort u` (`Prop`,
+  `Type`, `Type u`, `Sort u`). "A proposition": the type's own sort, with solved level
+  metavariables replaced, is equivalent to level 0 (`Prop`).
+
+The type is the one known **when the binder is elaborated**, before anything after it:
+an implicit with no written type (`{A}`), or one whose type is still an unsolved
+metavariable (`{A : _}`), counts as data and defaults to ω, even when later uses solve it
+to `Type`; write the type (`{A : Type}`) or the quantity (`{0 A}`) to erase it. A type
+family (`{F : Type → Type}`) is not a sort: it is data (ω), as erasure has it (a function
+into a sort has run-time content, `Erase.erasable`). The self-hosted frontend decides
+the same way (`implicitQ` in `selfhost/Frontend.wiz`). -/
+def binderDefaultQty (ctx : LocalCtx R) (bi : BinderInfo) (tyl : Option (Term R × Level)) :
+    ElabM R (Term R) := do
+  unless bi == .implicit do return defaultQty bi
+  let dflt := QuantitySyntax.implicitDefault (R := R)
+  let data := QuantitySyntax.implicitDataDefault (R := R)
+  if dflt == data then return .qlit dflt
+  let some (ty, l) := tyl | return .qlit data
+  let erased ← match ← force (← evalIn ctx ty) with
+    | .sort _ => pure true
+    | _ => pure ((← instLevel l).equiv 0)
+  return .qlit (if erased then dflt else data)
+
 /-- One branch of a `match` on a signal, as `matchMux?` reads it: the constructor tag of
 the pattern (`none` for the default `_`), the type the pattern named (`Phase.idle` names
 `Phase`; a bare `.idle` names none), the branch body, and the pattern's position. -/
@@ -1134,6 +1164,14 @@ def hdlEnumCandidates (g : Globals R) (c : Name) : List Name := Id.run do
   return out
 
 mutual
+
+/-- A binder's quantity once its type is elaborated: the written one (`elabQuantity`), or
+the default by rule (b) (`binderDefaultQty`). -/
+partial def elabBinderQty (ctx : LocalCtx R) (bi : BinderInfo) (qty : Option Syntax)
+    (tyl : Option (Term R × Level)) : ElabM R (Term R) :=
+  match qty with
+  | none => binderDefaultQty ctx bi tyl
+  | some _ => elabQuantity ctx bi qty
 
 /-- A binder's quantity: the default, a literal (`0`, `1`, `ω`), or (stage 4d)
 `%t` for a term `t : Qty`, such as a quantity variable. -/
@@ -1999,10 +2037,10 @@ partial def inferFun (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
   match bs with
   | [] => infer ctx body
   | b :: rest =>
-    let ty ← match b.type with
-      | some s => pure (← checkType ctx s).1
-      | none => freshTypeMeta ctx s!"the type of {b.name}"
-    let q ← elabQuantity ctx b.bi b.qty
+    let (ty, tyl) ← match b.type with
+      | some s => do let (ty, l) ← checkType ctx s; pure (ty, some (ty, l))
+      | none => pure (← freshTypeMeta ctx s!"the type of {b.name}", none)
+    let q ← elabBinderQty ctx b.bi b.qty tyl
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let ctx' := ctx.bind b.name vty
@@ -2071,7 +2109,7 @@ partial def elabPis (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax) :
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
       | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
-    let q ← elabQuantity ctx b.bi b.qty
+    let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let (cod, l₂) ← elabPis (ctx.bind b.name vty) rest body
@@ -2088,7 +2126,7 @@ partial def elabSigmas (ctx : LocalCtx R) (bs : List BinderView) (body : Syntax)
     let (ty, l₁) ← match b.type with
       | some s => checkType ctx s
       | none => do let u ← freshLevelMeta; pure (← freshMeta ctx s!"the type of {b.name}" (some (.sort u)), u)
-    let q ← elabQuantity ctx b.bi b.qty
+    let q ← elabBinderQty ctx b.bi b.qty (if b.type.isSome then some (ty, l₁) else none)
     let vty ← evalIn ctx ty
     recordBinder ctx b.info b.name vty
     let (cod, s) ← elabSigmas (ctx.bind b.name vty) rest body
