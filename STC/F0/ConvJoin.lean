@@ -58,9 +58,11 @@ but the **sort-endpoint** statement
 refuted stub implies it, and `convInjSort_of_convHead` shows that it closes
 `ConvInjSort` (no reduction starts at a sort, `redStar_of_sort`). It is *not* refuted by
 §1, because `irrel`/`η` have no sort endpoint. In the intended model it is proved by the
-algorithmic checker's canonical-head analysis (`DecConv`, M1): `convHead_of_canonConv` is
-that composition once the algorithm is available, and `ConvInjSort`/`SortUniqueAt`/
-`WhRed.empty_at_prop` follow from it by the reductions at the end of this file.
+algorithmic checker's canonical-head analysis (`DecConv`, M1): the sort branch of the
+algorithm relates `t` to `Sort u` only by returning `u = u`, and completeness of the
+algorithm turns that into `RedStar t (Sort u)`. `ConvInjSort`/`SortUniqueAt`/
+`WhRed.empty_at_prop` then follow from `ConvHead` by the reductions at the end of this
+file; `ConvHead` is recorded here as the obligation M1 discharges.
 
 `ConvJoinSort` (the sort/sort instance of the stub) is also recorded: it is **equivalent**
 to `ConvInjSort` (`convJoinSort_iff_convInjSort`), which is why a common-reduct theorem
