@@ -208,13 +208,15 @@ def Scry.selectSources (db : Scry.Db Nat) (selected : List Nat) : Scry.Db Nat :=
     else Scry.Db.setTupleAt db Scry.rtRetSrc Scry.TupleRel.empty;
   db
 
-/-- A row's column as a `Nat` (absent columns read as 0). -/
-def Scry.rowNat (row : List U64) (i : Nat) : Nat :=
+/-- A claim row's column as a `Nat` (absent columns read as 0). `Scry.Taint` also
+declares a `rowNat`, and the trust ledger imports the whole library at once, where a name
+two modules declare is an error; this copy is named for the claim. -/
+def Scry.claimRowNat (row : List U64) (i : Nat) : Nat :=
   UIntN.toNat (List.getD row i (U64.ofNat 0))
 
 /-- The first two columns of a row. -/
 def Scry.rowPair (row : List U64) : Nat × Nat :=
-  (Scry.rowNat row 0, Scry.rowNat row 1)
+  (Scry.claimRowNat row 0, Scry.claimRowNat row 1)
 
 def Scry.showPair (p : Nat × Nat) : String :=
   "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2 ++ ")"
@@ -248,7 +250,7 @@ def Scry.firstBadLocInstance (args : List Scry.Term) (M : List Nat) (ri : Nat) :
   | .nil => .none
   | .cons m rest =>
     let row := List.map (Scry.Term.eval m.1.vals) args;
-    let l := Scry.rowNat row 0;
+    let l := Scry.claimRowNat row 0;
     if Scry.invLocMem l M then Scry.firstBadLocInstance args M ri rest
     else .some ("rule " ++ Nat.repr ri ++ " derives mtainted " ++ Nat.repr l ++
       ", which is not in the invariant's locations")
@@ -293,7 +295,7 @@ def Scry.checkLocationsClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
 matters, not only the sink and its argument. -/
 def Scry.renderClaimRow (row : List U64) : String :=
   "(" ++ String.intercalate ","
-    (List.map (fun i => Nat.repr (Scry.rowNat row i)) (Scry.range (List.length row))) ++ ")"
+    (List.map (fun i => Nat.repr (Scry.claimRowNat row i)) (Scry.range (List.length row))) ++ ")"
 
 /-- The name of a taint relation, for a counterexample's path. -/
 def Scry.relName (rel : Nat) : String :=
@@ -427,12 +429,12 @@ def Scry.alertWitness (p : Scry.Program Nat) (st : Scry.State Nat)
   let v := match t with | .some q => q.2 | .none => 0;
   let pre := Scry.explainTaint p st 64 .nil 0 d v;
   let path := List.append pre
-    [ "flow(" ++ Nat.repr d ++ "," ++ Nat.repr (Scry.rowNat row 0) ++ "," ++
+    [ "flow(" ++ Nat.repr d ++ "," ++ Nat.repr (Scry.claimRowNat row 0) ++ "," ++
        Nat.repr v ++ ")",
-      "sink(" ++ Nat.repr (Scry.rowNat row 0) ++ "," ++ Nat.repr (Scry.rowNat row 1) ++
+      "sink(" ++ Nat.repr (Scry.claimRowNat row 0) ++ "," ++ Nat.repr (Scry.claimRowNat row 1) ++
        "," ++ Nat.repr v ++ ")" ];
-  "the alert rule fires at sink " ++ Nat.repr (Scry.rowNat row 0) ++
-    " argument " ++ Nat.repr (Scry.rowNat row 1) ++ "; path " ++
+  "the alert rule fires at sink " ++ Nat.repr (Scry.claimRowNat row 0) ++
+    " argument " ++ Nat.repr (Scry.claimRowNat row 1) ++ "; path " ++
     String.intercalate " -> " path
 
 /-- The alert rule's instances under `I`: any one is a counterexample to the claim. -/
@@ -547,7 +549,7 @@ def Scry.closeOne (p : Scry.Program Nat) (st : Scry.State Nat)
       Scry.Inv.mk t inv.locations
     else if Nat.beq rel Scry.rtMTainted then
       let m := List.foldl (fun (acc : List Nat) (m : Scry.Env Nat × List Nat) =>
-        Scry.invLocAdd (Scry.rowNat (List.map (Scry.Term.eval m.1.vals) args) 0) acc)
+        Scry.invLocAdd (Scry.claimRowNat (List.map (Scry.Term.eval m.1.vals) args) 0) acc)
         inv.locations (Scry.evalAtoms p.ops stI r.body Scry.Env.empty);
       Scry.Inv.mk inv.tainted m
     else inv

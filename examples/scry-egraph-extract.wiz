@@ -2,7 +2,8 @@ import Scry.Egraph
 -- Extraction (`scry-egraph-extract`): a cheapest term per e-class. The first class has
 -- `x`, `x + 0` and `(x + 0) * 1`; unit cost extracts `x`. The second has a leaf `k` and
 -- `0 + 1`; with a heavy weight on `k`, extraction picks the smaller `0 + 1` instead.
--- `main` is the digest.
+-- The same source runs against `Scry.EgraphNative`, so it reads the extracted terms and
+-- not a `cost`, whose type differs between the backends. `main` is the digest.
 
 -- ops: 0 = x, 1 = add, 2 = zero, 3 = mul, 4 = one, 5 = k
 def ga : Scry.EGraph :=
@@ -34,18 +35,18 @@ def main : Nat :=
   let w := fun op => if Nat.beq op 5 then 100 else 0;
   let unit := Scry.EGraph.extract ga xcls;
   let weighted := Scry.EGraph.extractWith ga w kcls;
-  let unitCost := match Scry.EGraph.cost ga (fun _ => 0) xcls with
-    | .none => 1000000
-    | .some c => c;
-  let weightedCost := match Scry.EGraph.cost ga w kcls with
-    | .none => 1000000
-    | .some c => c;
+  -- The cost tables are backend-specific (`Scry.Egraph`'s `Scry.EGraph.cost` is a
+  -- `Nat` with `Scry.EGraph.inf`, the native tables' is `Option Nat`), so this example,
+  -- which also runs against `Scry.EgraphNative`, reads the extracted terms instead:
+  -- `x` is one node and `0 + 1` is three under the heavy weight on `k`.
   match unit with
   | .none => 902
   | .some t1 =>
     match weighted with
     | .none => 903
     | .some t2 =>
-      unitCost * 10000 + Scry.ETerm.size t1 * 1000 + weightedCost * 100 +
+      let unitSize := Scry.ETerm.size t1;
+      let weightedSize := Scry.ETerm.size t2;
+      unitSize * 10000 + unitSize * 1000 + weightedSize * 100 +
       List.length (Scry.ETerm.toList t2) * 10 + headD (Scry.ETerm.toList t2) +
       (if Scry.EGraph.canonical ga then 1 else 0)
