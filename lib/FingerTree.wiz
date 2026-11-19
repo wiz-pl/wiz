@@ -1,4 +1,4 @@
-import ListLemmas
+import Data.ListLemmas
 
 /-!
 # Finger trees

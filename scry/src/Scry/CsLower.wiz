@@ -180,9 +180,6 @@ structure Scry.Cs.Local where
   awaitTy : String
   /-- The known delegate target of a local (a method-group value), if any. -/
   fn : Option String
-  /-- The type `await` yields when the declared type is a `Task<T>`/`ValueTask<T>`
-  (`""` when it is not an async wrapper). -/
-  awaitTy : String
 
 /-- The lowering state: the C lowering's block builder plus C#'s scope. -/
 structure Scry.Cs.LS where
