@@ -1,14 +1,13 @@
 # scry C# frontend
 
 Status: **design + first slice, parsing on tree-sitter-c-sharp** (2026-11-16;
-the working copy of this note is `wiz-notes/scry-csharp.md`). The user chose option B
-of §1 on 2026-11-16: the hand-written parser of the first draft is gone, and
+the working copy of this note is `wiz-notes/scry-csharp.md`). Option B of §1 was chosen
+on 2026-11-16: the hand-written parser of the first draft is gone, and
 tree-sitter-c-sharp v0.23.5 (fetched by Nix, `.#tree-sitter-c-sharp`) parses C# through
-the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
-the pieces the frontend plugs into exist only there: `Scry.Cst` (the read-only CST view
-the C lowering walks), `Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every
-statement, and the rule-pack taint engine (`Scry.RuleTaint`, `Scry.Interproc`,
-`Scry.analyze`). The PR declares `Depends-on: #376`.
+the same shim as C. The analysis stack the frontend plugs into is on master (PR #376,
+merged 2026-11-16): `Scry.Cst` (the read-only CST view the C lowering walks),
+`Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every statement, and the rule-pack taint
+engine (`Scry.RuleTaint`, `Scry.Interproc`, `Scry.analyze`).
 
 Design context: `code-analysis-design.md` §4.8 (C# second, decided 2026-11-12, 3–4 wk),
 §4.3 (Wil), `scry-c2wil.md` (the C lowering this mirrors), `scry-taint.md` (the engine).
@@ -203,11 +202,13 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
 | `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 4 lowering goldens + execution, 6 taint cases, and the "silent skip" case (§2) |
 
-A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
+A spill is regenerated with `scry-cst FILE.cs > FILE.cst`. Build the tool with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
-toolchain's `--cflags`/`--ldflags`; this host's `grail` link of executables fails on a
-pre-existing `__isoc23_strtol` glibc/gmp mismatch). The freshness case fails when a
-spill's root does not span its `.cs` text. Goldens are regenerated with
+toolchain's `--cflags`/`--ldflags`. The C# grammar is the uncommitted out-link
+`scry/native/tree-sitter-c-sharp`, created with
+`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp` (what
+`.github/workflows/scry.yml` does before `grail build scry`). The freshness case fails
+when a spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
