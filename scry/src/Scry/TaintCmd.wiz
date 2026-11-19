@@ -252,6 +252,25 @@ def Scry.lineStartsOf (text : String) : U32Array :=
   let b := Bytes.ofString text;
   Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
 
+/-- Binary search for the largest line-start index whose offset is `<= off`. -/
+partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
+    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
+    | .true => Scry.lineIndexGo starts off mid hi
+    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
+
+/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
+def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+
 /-- The old signature, kept for callers that only have the text (it builds the line
 table first, so prefer `originOfSpanAt` when several spans are located). -/
 def Scry.lineColAt (text : String) (off : Nat) : Nat × Nat :=
