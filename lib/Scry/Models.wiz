@@ -558,6 +558,251 @@ def Scry.pureModels : List Scry.FnModel :=
     , "isdigit", "isspace", "isalpha", "toupper", "tolower", "puts", "fputs"
     , "fwrite", "fflush", "close", "perror" ]
 
+/-- A C#/CLR external call whose **value** is known: `result` is the call's result type
+(`?` when unknown), `awaited` is what `await` yields for an async call (`""` when the
+call is not async), and `note` states what the entry claims. This is a *type* table for
+the lowering: it says nothing about memory effects, which stay in `clrModels` above (a
+write or a sink that table leaves out keeps its `unmodelled-external` warning). A name
+not in the table has result type `?`. -/
+structure Scry.CsExternal where
+  name : String
+  result : String
+  awaited : String
+  note : String
+
+/-- The C# value summary. These are the calls the lowerer emits for CLR/BCL code and
+whose result type (or awaited type) it can name; the table is deliberately small and
+every entry says what it claims. `""` in `awaited` means "not an async call"; `?` as a
+result means "the value flows, its static type is not known". -/
+def Scry.csExternals : List Scry.CsExternal :=
+  [ Scry.CsExternal.mk "System.String.Concat" "System.String" ""
+      "concatenates its arguments: taint flows to the result"
+  , Scry.CsExternal.mk "System.String.Format" "System.String" ""
+      "formats its arguments into the result"
+  , Scry.CsExternal.mk "System.String.Join" "System.String" ""
+      "joins its arguments into the result"
+  , Scry.CsExternal.mk "System.String.Replace" "System.String" ""
+      "replaces text; taint flows from the receiver and the arguments"
+  , Scry.CsExternal.mk "System.String.Substring" "System.String" ""
+      "a substring carries the receiver's taint"
+  , Scry.CsExternal.mk "System.String.Trim" "System.String" ""
+      "trims the receiver; taint flows"
+  , Scry.CsExternal.mk "System.String.TrimStart" "System.String" ""
+      "trims the receiver; taint flows"
+  , Scry.CsExternal.mk "System.String.TrimEnd" "System.String" ""
+      "trims the receiver; taint flows"
+  , Scry.CsExternal.mk "System.String.ToUpper" "System.String" ""
+      "changes case; taint flows"
+  , Scry.CsExternal.mk "System.String.ToLower" "System.String" ""
+      "changes case; taint flows"
+  , Scry.CsExternal.mk "System.String.ToUpperInvariant" "System.String" ""
+      "changes case; taint flows"
+  , Scry.CsExternal.mk "System.String.ToLowerInvariant" "System.String" ""
+      "changes case; taint flows"
+  , Scry.CsExternal.mk "System.String.PadLeft" "System.String" ""
+      "pads the receiver; taint flows"
+  , Scry.CsExternal.mk "System.String.PadRight" "System.String" ""
+      "pads the receiver; taint flows"
+  , Scry.CsExternal.mk "System.String.Insert" "System.String" ""
+      "inserts text; taint flows"
+  , Scry.CsExternal.mk "System.String.Remove" "System.String" ""
+      "removes text; taint flows"
+  , Scry.CsExternal.mk "System.String.Split" "System.String[]" ""
+      "splits the receiver; each part carries its taint"
+  , Scry.CsExternal.mk "System.String.get_Length" "System.Int32" ""
+      "a length is not tainted by the text's contents"
+  , Scry.CsExternal.mk "System.String.StartsWith" "System.Boolean" ""
+      "a predicate over the receiver"
+  , Scry.CsExternal.mk "System.String.EndsWith" "System.Boolean" ""
+      "a predicate over the receiver"
+  , Scry.CsExternal.mk "System.String.Contains" "System.Boolean" ""
+      "a predicate over the receiver"
+  , Scry.CsExternal.mk "System.String.IndexOf" "System.Int32" ""
+      "an index into the receiver"
+  , Scry.CsExternal.mk "System.String.IsNullOrEmpty" "System.Boolean" ""
+      "a predicate"
+  , Scry.CsExternal.mk "System.String.IsNullOrWhiteSpace" "System.Boolean" ""
+      "a predicate"
+  , Scry.CsExternal.mk "System.Object.ToString" "System.String" ""
+      "the receiver's text; taint flows from the receiver"
+  , Scry.CsExternal.mk "System.Convert.ToString" "System.String" ""
+      "converts its argument to text; taint flows"
+  , Scry.CsExternal.mk "System.Int32.Parse" "System.Int32" ""
+      "the rule pack owns the sanitiser; the result type is a number"
+  , Scry.CsExternal.mk "System.Int64.Parse" "System.Int64" ""
+      "the rule pack owns the sanitiser; the result type is a number"
+  , Scry.CsExternal.mk "System.Guid.Parse" "System.Guid" ""
+      "parses a GUID; the rule pack owns the sanitiser"
+  , Scry.CsExternal.mk "System.IO.Path.Combine" "System.String" ""
+      "joins path parts; taint flows to the result"
+  , Scry.CsExternal.mk "System.IO.Path.GetFileName" "System.String" ""
+      "selects a path component; taint flows"
+  , Scry.CsExternal.mk "System.IO.Path.GetFileNameWithoutExtension" "System.String" ""
+      "selects a path component; taint flows"
+  , Scry.CsExternal.mk "System.IO.Path.GetExtension" "System.String" ""
+      "selects a path component; taint flows"
+  , Scry.CsExternal.mk "System.IO.Path.GetDirectoryName" "System.String" ""
+      "selects a path component; taint flows"
+  , Scry.CsExternal.mk "System.IO.Path.GetFullPath" "System.String" ""
+      "resolves a path; taint flows"
+  , Scry.CsExternal.mk "System.IO.File.ReadAllText" "System.String" ""
+      "reads a file; taint flows to the result"
+  , Scry.CsExternal.mk "System.IO.File.ReadAllLines" "System.String[]" ""
+      "reads a file; taint flows to the lines"
+  , Scry.CsExternal.mk "System.IO.File.ReadAllBytes" "System.Byte[]" ""
+      "reads a file; taint flows to the bytes"
+  , Scry.CsExternal.mk "System.IO.File.Exists" "System.Boolean" ""
+      "a predicate over the path"
+  , Scry.CsExternal.mk "System.IO.File.WriteAllText" "System.Void" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.WriteAllLines" "System.Void" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.WriteAllBytes" "System.Void" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.Delete" "System.Void" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.Open" "System.IO.FileStream" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.OpenRead" "System.IO.FileStream" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.File.OpenWrite" "System.IO.FileStream" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.Directory.Exists" "System.Boolean" ""
+      "a predicate over the path"
+  , Scry.CsExternal.mk "System.IO.Directory.CreateDirectory" "System.IO.DirectoryInfo" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.Directory.Delete" "System.Void" ""
+      "the rule pack owns the path sink"
+  , Scry.CsExternal.mk "System.IO.StreamReader.ReadLine" "System.String" ""
+      "reads a line; taint flows to the result"
+  , Scry.CsExternal.mk "System.IO.StreamReader.ReadToEnd" "System.String" ""
+      "reads text; taint flows to the result"
+  , Scry.CsExternal.mk "System.IO.StreamReader.ReadLineAsync" "System.Threading.Tasks.Task" "System.String"
+      "reads a line asynchronously; the awaited value is a string"
+  , Scry.CsExternal.mk "System.IO.StreamReader.ReadToEndAsync" "System.Threading.Tasks.Task" "System.String"
+      "reads text asynchronously; the awaited value is a string"
+  , Scry.CsExternal.mk "System.IO.StreamWriter.WriteLine" "System.Void" ""
+      "writes a line"
+  , Scry.CsExternal.mk "System.IO.StreamWriter.Write" "System.Void" ""
+      "writes text"
+  , Scry.CsExternal.mk "System.IO.StreamWriter.Flush" "System.Void" ""
+      "flushes the writer"
+  , Scry.CsExternal.mk "System.Console.ReadLine" "System.String" ""
+      "the rule pack owns this source"
+  , Scry.CsExternal.mk "System.Console.WriteLine" "System.Void" ""
+      "writes a line"
+  , Scry.CsExternal.mk "System.Console.Write" "System.Void" ""
+      "writes text"
+  , Scry.CsExternal.mk "System.Environment.GetEnvironmentVariable" "System.String" ""
+      "the rule pack owns this source"
+  , Scry.CsExternal.mk "System.Environment.GetCommandLineArgs" "System.String[]" ""
+      "the process arguments"
+  , Scry.CsExternal.mk "System.Environment.get_NewLine" "System.String" ""
+      "the platform newline"
+  , Scry.CsExternal.mk "System.Environment.Exit" "System.Void" ""
+      "ends the process"
+  , Scry.CsExternal.mk "System.Diagnostics.Process.Start" "System.Diagnostics.Process" ""
+      "starts a process; the rule pack owns the sink"
+  , Scry.CsExternal.mk "System.Diagnostics.Process.GetCurrentProcess" "System.Diagnostics.Process" ""
+      "returns the current process object"
+  , Scry.CsExternal.mk "System.Diagnostics.Process.get_StartInfo" "System.Diagnostics.ProcessStartInfo" ""
+      "the process's start information"
+  , Scry.CsExternal.mk "System.Diagnostics.Process.Kill" "System.Void" ""
+      "ends the process"
+  , Scry.CsExternal.mk "System.Diagnostics.ProcessStartInfo..ctor" "System.Diagnostics.ProcessStartInfo" ""
+      "the rule pack owns the constructor's arguments"
+  , Scry.CsExternal.mk "System.Diagnostics.ProcessStartInfo.get_Arguments" "System.String" ""
+      "the command line"
+  , Scry.CsExternal.mk "System.Diagnostics.ProcessStartInfo.set_Arguments" "System.Void" ""
+      "the rule pack owns this sink (argument 1)"
+  , Scry.CsExternal.mk "System.Diagnostics.ProcessStartInfo.get_FileName" "System.String" ""
+      "the executable name"
+  , Scry.CsExternal.mk "System.Diagnostics.ProcessStartInfo.set_FileName" "System.Void" ""
+      "the rule pack owns this sink (argument 1)"
+  , Scry.CsExternal.mk "System.Text.StringBuilder..ctor" "System.Text.StringBuilder" ""
+      "allocates a builder"
+  , Scry.CsExternal.mk "System.Text.StringBuilder.ToString" "System.String" ""
+      "the builder's text; taint flows from the receiver"
+  , Scry.CsExternal.mk "System.Text.Encoding.GetString" "System.String" ""
+      "decodes bytes; taint flows"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.FromResult" "System.Threading.Tasks.Task" ""
+      "wraps the argument; await yields its value"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.Delay" "System.Threading.Tasks.Task" "System.Void"
+      "waits; await yields nothing"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.Yield" "System.Threading.Tasks.Task" "System.Void"
+      "yields; await yields nothing"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.Run" "System.Threading.Tasks.Task" ""
+      "runs a delegate asynchronously"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.WhenAll" "System.Threading.Tasks.Task" ""
+      "waits for several tasks"
+  , Scry.CsExternal.mk "System.Threading.Tasks.Task.WhenAny" "System.Threading.Tasks.Task" ""
+      "waits for one of several tasks"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient..ctor" "System.Net.Http.HttpClient" ""
+      "allocates a client"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.GetAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "GET; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.PostAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "POST; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.PutAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "PUT; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.PatchAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "PATCH; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.DeleteAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "DELETE; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.SendAsync" "System.Threading.Tasks.Task" "System.Net.Http.HttpResponseMessage"
+      "sends a request; await yields the response"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.GetStringAsync" "System.Threading.Tasks.Task" "System.String"
+      "gets a body as text; await yields a string"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.GetByteArrayAsync" "System.Threading.Tasks.Task" "System.Byte[]"
+      "gets a body as bytes; await yields byte[]"
+  , Scry.CsExternal.mk "System.Net.Http.HttpClient.GetStreamAsync" "System.Threading.Tasks.Task" "System.IO.Stream"
+      "gets a body as a stream; await yields a stream"
+  , Scry.CsExternal.mk "System.Net.Http.HttpResponseMessage.get_Content" "System.Net.Http.HttpContent" ""
+      "the response body object"
+  , Scry.CsExternal.mk "System.Net.Http.HttpContent.ReadAsStringAsync" "System.Threading.Tasks.Task" "System.String"
+      "reads the body as text; await yields a string"
+  , Scry.CsExternal.mk "System.Net.Http.HttpContent.ReadAsByteArrayAsync" "System.Threading.Tasks.Task" "System.Byte[]"
+      "reads the body as bytes; await yields byte[]"
+  , Scry.CsExternal.mk "System.Net.Http.HttpContent.ReadAsStreamAsync" "System.Threading.Tasks.Task" "System.IO.Stream"
+      "reads the body as a stream; await yields a stream"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand..ctor" "System.Data.SqlClient.SqlCommand" ""
+      "allocates a command; the rule pack owns the query sink"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand.set_CommandText" "System.Void" ""
+      "the rule pack owns this sink (argument 1)"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand.ExecuteReader" "System.Data.Common.DbDataReader" ""
+      "executes the command; the rule pack owns the receiver sink"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand.ExecuteNonQuery" "System.Int32" ""
+      "executes the command"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand.ExecuteScalar" "System.Object" ""
+      "executes the command"
+  , Scry.CsExternal.mk "System.Data.SqlClient.SqlCommand.ExecuteReaderAsync" "System.Threading.Tasks.Task" "System.Data.Common.DbDataReader"
+      "executes the command asynchronously; await yields a reader"
+  , Scry.CsExternal.mk "System.Data.Common.DbDataReader.Read" "System.Boolean" ""
+      "advances the reader"
+  , Scry.CsExternal.mk "System.Data.Common.DbDataReader.GetString" "System.String" ""
+      "reads a column as text; taint flows"
+  , Scry.CsExternal.mk "System.Data.Common.DbDataReader.get_Item" "System.Object" ""
+      "reads a column; taint flows"
+  , Scry.CsExternal.mk "System.Array.$new" "System.Array" ""
+      "the lowerer's array allocation; its elements are the arguments"
+  ]
+
+def Scry.csExternalOf (name : String) : Option Scry.CsExternal :=
+  List.find (fun e => String.eq e.name name) Scry.csExternals
+
+/-- The call's result type from the C# value table, when the table knows it. -/
+def Scry.csResultType (name : String) : Option String :=
+  match Scry.csExternalOf name with
+  | .some e => if String.eq e.result "?" then .none else .some e.result
+  | .none => .none
+
+/-- What `await` yields for a C# call, when the table knows it (`none` for a
+non-async call or an async call whose result type is unknown). -/
+def Scry.csAwaitedType (name : String) : Option String :=
+  match Scry.csExternalOf name with
+  | .some e => if String.eq e.awaited "" then .none else .some e.awaited
+  | .none => .none
+
 def Scry.libcModels : List Scry.FnModel :=
   [ Scry.sourceGetenv
   , Scry.sourceRead
@@ -1104,6 +1349,10 @@ def Scry.Models.modelFor (name : String) : Scry.FnModel := Scry.modelFor name
 def Scry.Models.isModelled (name : String) : Bool := Scry.isModelled name
 
 def Scry.Models.isUnknownModel (m : Scry.FnModel) : Bool := Scry.isUnknownModel m
+
+def Scry.Models.csResultType (name : String) : Option String := Scry.csResultType name
+
+def Scry.Models.csAwaitedType (name : String) : Option String := Scry.csAwaitedType name
 
 def Scry.Models.sourcesOf (name : String) : List Scry.ArgRef := Scry.sourcesOf name
 
