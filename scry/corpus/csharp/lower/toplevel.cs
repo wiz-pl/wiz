@@ -1,23 +1,36 @@
 // A minimal-API Program.cs: top-level statements (C# 9), which are `Program.<Main>$`
-// in the language and `Program.Main` here, plus the types the file declares.
+// in the language and `toplevel_Program.<Main>$` here, plus the types the file declares.
 using System;
 using System.Diagnostics;
 
 var prefix = Environment.GetEnvironmentVariable("REPORT_PREFIX") ?? "daily";
-var args = Console.ReadLine();
+var input = Console.ReadLine();
 
-var command = prefix + " " + args;
+var command = prefix + " " + input;
 Process.Start("/bin/sh", command);
 
 using var scope = new ReportScope(command);
 scope.Mark("started");
 
-if (args is null)
+if (input is null)
 {
     return;
 }
 
-Console.WriteLine($"ran {command}");
+Usage();
+Emit(command);
+
+// A top-level local function is a nested method of the synthetic `<Main>$`; it may be
+// called before its declaration, and the class below keeps its own scope.
+static void Usage()
+{
+    Console.WriteLine("usage: report [prefix]");
+}
+
+void Emit(string text)
+{
+    Console.WriteLine(text);
+}
 
 public sealed class ReportScope : IDisposable
 {

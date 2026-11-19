@@ -15,41 +15,50 @@ func ReportScope.Dispose(%0)
     %1 = global $str:"done"
     %2 = call System.Console.WriteLine(%1)
     ret
-func toplevel.Main()
+func toplevel_Program.<Main>$(%0)
   b0:
-    %0 = global $str:"REPORT_PREFIX"
-    %1 = call System.Environment.GetEnvironmentVariable(%0)
-    %2 = global $str:"daily"
-    %3 = %1
-    %4 = null
-    br eq %1, %4 ? b1 : b2
+    %1 = global $str:"REPORT_PREFIX"
+    %2 = call System.Environment.GetEnvironmentVariable(%1)
+    %3 = global $str:"daily"
+    %4 = %2
+    %5 = null
+    br eq %2, %5 ? b1 : b2
   b1:
-    %3 = %2
+    %4 = %3
     goto b2
   b2:
-    %5 = %3
-    %6 = call System.Console.ReadLine()
-    %7 = %6
-    %8 = global $str:" "
-    %9 = call System.String.Concat(%5, %8)
-    %10 = call System.String.Concat(%9, %7)
-    %11 = %10
-    %12 = global $str:"/bin/sh"
-    %13 = call System.Diagnostics.Process.Start(%12, %11)
-    %14 = alloc 2
-    %15 = call ReportScope..ctor(%14, %11)
-    %16 = %14
-    %17 = global $str:"started"
-    %18 = call ReportScope.Mark(%16, %17)
-    %19 = null
-    %20 = eq %7, %19
-    %21 = 0
-    br ne %20, %21 ? b3 : b4
+    %6 = %4
+    %7 = call System.Console.ReadLine()
+    %8 = %7
+    %9 = global $str:" "
+    %10 = call System.String.Concat(%6, %9)
+    %11 = call System.String.Concat(%10, %8)
+    %12 = %11
+    %13 = global $str:"/bin/sh"
+    %14 = call System.Diagnostics.Process.Start(%13, %12)
+    %15 = alloc 2
+    %16 = call ReportScope..ctor(%15, %12)
+    %17 = %15
+    %18 = global $str:"started"
+    %19 = call ReportScope.Mark(%17, %18)
+    %20 = null
+    %21 = eq %8, %20
+    %22 = 0
+    br ne %21, %22 ? b3 : b4
   b3:
     ret
   b4:
     goto b5
   b5:
-    %22 = call System.String.Concat(%11)
-    %23 = call System.Console.WriteLine(%22)
+    %23 = call toplevel_Program.<Main>$.Usage()
+    %24 = call toplevel_Program.<Main>$.Emit(%12)
+    ret
+func toplevel_Program.<Main>$.Usage()
+  b0:
+    %0 = global $str:"usage: report [prefix]"
+    %1 = call System.Console.WriteLine(%0)
+    ret
+func toplevel_Program.<Main>$.Emit(%0)
+  b0:
+    %1 = call System.Console.WriteLine(%0)
     ret

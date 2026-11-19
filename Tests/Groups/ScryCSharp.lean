@@ -18,7 +18,9 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
   and returns the value C# would. `lower/modern` covers records, partial parts, switch
   expressions, LINQ, `with`, collection expressions and a constructor initialiser;
-  `lower/toplevel` covers top-level statements (lowered as `<stem>.Main`);
+  `lower/toplevel` covers top-level statements (a synthetic `<file>_Program.<Main>$`
+  with `string[] args`, its top-level local functions nested under it, and the file's
+  classes);
   `lower/unsupported` is the warning golden for everything out of scope.
 * **Silent skip**: `lower/{modern,toplevel,unsupported}` must each keep the warning that
   names every out-of-scope construct they contain. The case fails when one of them
@@ -33,6 +35,15 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
 A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
 text over the expected file **and still fails the case**, so a regenerated golden is
 always reviewed in the diff and never passes silently.
+
+`lower/toplevel.cs` is close to Joern's `csharpsrc2cpg` `TopLevelStatementTests`
+fixture: top-level statements become a synthetic `<file>_Program.<Main>$` method with a
+`string[] args` parameter (Joern's naming), and a top-level local function becomes a
+nested static method under it. `lower/lambda.cs` is a **characterization case for a
+known gap**: the golden records what scry does today, and the case is then reported as
+skipped with the gap as its reason. When the gap is fixed the golden changes, the case
+fails, and both the golden and the skip must be updated (see
+`.github/skip-allowlist.json`).
 -/
 
 open Wiz
@@ -114,7 +125,8 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
-   ("lower", "patterns"),
+   ("lower", "patterns"), ("lower", "lambda"),
+   ("lower", "toplevel-async"), ("lower", "toplevel-class"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
@@ -198,8 +210,8 @@ def spillCheck (dir name : String) : IO String := do
     pure s!"{dir}/{name}: stale (language {lang}, bytes {bytes} of {src.utf8ByteSize}, root {start}..{stop})"
 
 /-- The findings of the C# rule pack on a taint fixture, one `rule func arg` line each. -/
-def taintFindings (name : String) : IO (List String) := do
-  let (src, spill) ← fixture "taint" name
+def taintFindingsAt (dir name : String) : IO (List String) := do
+  let (src, spill) ← fixture dir name
   let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
   let body :=
     fixtureDefs src spill ++
@@ -214,6 +226,8 @@ def taintFindings (name : String) : IO (List String) := do
     let fs := unquote fs
     pure (if fs.isEmpty then [] else fs.splitOn "|")
   | ms => throw (IO.userError s!"expected two #eval messages, got {ms}")
+
+def taintFindings (name : String) : IO (List String) := taintFindingsAt "taint" name
 
 /-! ## The `scry cs` fixture tree
 
@@ -356,7 +370,7 @@ def group : Group where
       run := fun _ => lowerGolden "basic" },
     { name := "lower: record and record struct, partial parts, switch expression, LINQ, with, collection, ctor init, async",
       run := fun _ => lowerGolden "modern" },
-    { name := "lower: top-level statements become <stem>.Main (with the file's classes)",
+    { name := "lower: top-level statements become <file>_Program.<Main>$ (with the file's classes)",
       run := fun _ => lowerGolden "toplevel" },
     { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
       run := fun _ => lowerGolden "unsupported" },
@@ -381,6 +395,33 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
+    { name := "lower: top-level statements and their local functions become <file>_Program.<Main>$ with args",
+      run := fun _ => do
+        lowerGolden "toplevel"
+        let (src, spill) ← fixture "lower" "toplevel"
+        let body :=
+          fixtureDefs src spill ++
+          "def prog : Wil.Program := Scry.Cs.programOf \"toplevel.cs\" src spill\n" ++
+          "#eval String.intercalate \"|\" (List.map (fun f => f.name ++ \"/\" ++ Nat.repr (List.length f.params)) prog.funcs)\n"
+        match ← runProbe lowerImports body with
+        | [m] => do
+          let got := (unquote m).splitOn "|"
+          checkEq ["ReportScope..ctor/2", "ReportScope.Mark/2", "ReportScope.Dispose/1",
+            "toplevel_Program.<Main>$/1", "toplevel_Program.<Main>$.Usage/0",
+            "toplevel_Program.<Main>$.Emit/1"] got
+        | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}") },
+    { name := "taint: CWE-78 from Console.ReadLine inside a top-level statement reaches Process.Start",
+      run := fun _ => do
+        let fs ← taintFindingsAt "lower" "toplevel"
+        checkEq ["command-injection toplevel_Program.<Main>$ System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "lower: top-level statements with await, return and Environment.Exit",
+      run := fun _ => lowerGolden "toplevel-async" },
+    { name := "lower: top-level statements followed by a class stay in their own scopes",
+      run := fun _ => lowerGolden "toplevel-class" },
+    { name := "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+      run := fun _ => do
+        lowerGolden "lambda"
+        skip "known gap: lambda bodies are an opaque fnptr and its body is not in the program; Joern's LambdaTests lowers each lambda as a method" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"

@@ -1664,8 +1664,8 @@ partial def Scry.Cs.lowerStmtGo (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   if String.eq k "block" then Scry.Cs.scoped (Scry.Cs.lowerStmts c (Scry.kids c n))
   else if String.eq k "empty_statement" then Scry.Cs.pure ()
   -- a top-level statement is a wrapper around one statement (`global_statement`), which
-  -- is what `<stem>.Main` receives; unwrap it or every top-level statement would be a
-  -- warning and no code at all
+  -- is what the synthetic `<Main>$` receives; unwrap it or every top-level statement
+  -- would be a warning and no code at all
   else if String.eq k "global_statement" then match Scry.kids c n with
     | .cons x _ => Scry.Cs.lowerStmt c x
     | .nil => Scry.Cs.pure ()
@@ -2375,6 +2375,20 @@ partial def Scry.Cs.mergeOne (acc : List Scry.Cs.Cls) (k : Scry.Cs.Cls) (first :
         base := (if String.isEmpty x.base then k.base else x.base) } rest
     | .false => .cons x (Scry.Cs.mergeOne rest k .false)
 
+/-- The `local_function_statement` of a top-level item, if it is one. tree-sitter puts a
+top-level `void Run() {}` directly under the `compilation_unit` in the checked-in spills;
+it also accepts a `global_statement` wrapper (a local function is a statement), so both
+shapes are read here. -/
+def Scry.Cs.topLocalFunc (c : Scry.Cst) (g : Nat) : Option Nat :=
+  let k := c.kindOf g;
+  if String.eq k "local_function_statement" then .some g
+  else if String.eq k "global_statement" then match Scry.kids c g with
+    | .cons x _ => match String.eq (c.kindOf x) "local_function_statement" with
+      | .true => .some x
+      | .false => .none
+    | .nil => .none
+  else .none
+
 /-- The file name without its directory or extension (`src/Program.cs` is `Program`). -/
 def Scry.Cs.stemOf (path : String) : String :=
   let base := match List.reverse (String.splitOn path "/") with
@@ -2401,15 +2415,50 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
       | .none => .nil;
     let r1 := Scry.Cs.lowerMembers c u k acc.1 ms;
     (r1.1, List.append acc.2 r1.2)) (Scry.emptyState, (.nil : List Wil.Func)) decls;
-  -- top-level statements are `Program.<Main>$` in C#: lower them as `<stem>.Main`.
+  -- Top-level statements are the body of a fictitious `Program.<Main>$` in C#. Joern
+  -- names it `<file>_Program.<Main>$`; the file's own declarations stay in their own
+  -- scope. A top-level local function becomes a nested static function of that method
+  -- (`<Main>$.Run`), and is collected before any body is lowered, so a call may precede
+  -- its declaration.
+  let topItems := Scry.kids c 0;
   let globals := Scry.childrenK c 0 "global_statement";
+  let localFuncs := Scry.filterMapOpt (fun g => Scry.Cs.topLocalFunc c g) topItems;
+  let stmts := List.filter (fun g =>
+    match Scry.Cs.topLocalFunc c g with
+    | .some _ => .false
+    | .none => .true) globals;
   let stem := Scry.Cs.stemOf path;
-  let r2 : Scry.LState × List Wil.Func := match globals with
-    | .nil => r
-    | .cons g0 _ =>
-      let k : Scry.Cs.Cls := { Scry.Cs.Cls.empty with qname := stem, simple := stem };
-      let gr := Scry.Cs.lowerFuncOf c u k r.1 g0 (stem ++ ".Main") .true .nil .true .false .none globals;
-      (gr.1, List.append r.2 (List.cons gr.2 .nil));
+  let synCls := stem ++ "_Program";
+  let mainName := synCls ++ ".<Main>$";
+  let localMeths := List.map (fun lf =>
+    Scry.Cs.Meth.mk (Scry.Cs.memberName c lf) .true
+      (Scry.Cs.canon u Scry.Cs.Cls.empty (Scry.Cs.memberType c lf))
+      (Scry.Cs.arityOf c lf)) localFuncs;
+  -- The synthetic class's qname is the method's full name: a call resolved through
+  -- `methodOwner` is emitted as `k.qname ++ "." ++ m`, so a top-level local function
+  -- is called as `<Main>$.Run` (the name it is lowered under), not `<file>_Program.Run`.
+  let k : Scry.Cs.Cls := { Scry.Cs.Cls.empty with qname := mainName, simple := synCls,
+    methods := localMeths };
+  -- Synthesise `<Main>$` at `g0`'s origin. Split off as a `let` so the caller can be a
+  -- single-scrutinee match (a two-scrutinee match's type universe does not elaborate).
+  let synth : Nat → Scry.LState × List Wil.Func := fun g0 =>
+    -- the fictitious method's parameter: `string[] args` (Joern's signature)
+    let gr := Scry.Cs.lowerFuncOf c u k r.1 g0 mainName .true
+      (List.cons ("args", "System.String[]") .nil) .true .false .none stmts;
+    let lr := List.foldl (fun (acc : Scry.LState × List Wil.Func) lf =>
+      let nm := Scry.Cs.memberName c lf;
+      let rr := Scry.Cs.lowerFunc c u k acc.1 lf (mainName ++ "." ++ nm) .true
+        (Scry.Cs.paramsOf c u k lf)
+        (String.eq (Scry.Cs.memberType c lf) "void") .false
+        (Scry.childF c lf "body");
+      (rr.1, List.append acc.2 (List.cons rr.2 .nil)))
+      (gr.1, (.nil : List Wil.Func)) localFuncs;
+    (lr.1, List.append r.2 (List.append (List.cons gr.2 .nil) lr.2));
+  let r2 : Scry.LState × List Wil.Func := match stmts with
+    | .cons s0 _ => synth s0
+    | .nil => match localFuncs with
+      | .cons lf0 _ => synth lf0
+      | .nil => r;
   Scry.Cs.Lowered.mk path text r2.2
     (List.append (Scry.Cs.initWarnings c u decls)
       (List.append (Scry.Cs.memberWarnings c decls)

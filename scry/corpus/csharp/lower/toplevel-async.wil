@@ -1,0 +1,27 @@
+func toplevel-async_Program.<Main>$(%0)
+  b0:
+    %1 = call System.Console.In.ReadLineAsync()
+    %2 = %1
+    %3 = null
+    %4 = eq %2, %3
+    %5 = 0
+    br ne %4, %5 ? b1 : b2
+  b1:
+    %6 = 2
+    %7 = call System.Environment.Exit(%6)
+    goto b3
+  b2:
+    goto b3
+  b3:
+    %8 = call System.Console.WriteLine(%2)
+    ret
+func toplevel-async_Program.<Main>$.Fail()
+  b0:
+    %0 = 1
+    %1 = call System.Environment.Exit(%0)
+    ret
+func toplevel-async_Program.<Main>$.Double(%0)
+  b0:
+    %1 = 2
+    %2 = mul %0, %1
+    ret %2

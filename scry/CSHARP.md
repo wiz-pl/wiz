@@ -241,7 +241,7 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
 | `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
 | `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions`, `modern` (`.cs` + `.cst` spill + `.sexp` view golden) |
-| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `unsupported` (the warnings for everything out of scope) |
+| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become a synthetic `<file>_Program.<Main>$` with `string[] args`, e.g. `toplevel_Program.<Main>$`, and top-level local functions nest under it), `toplevel-async` (top-level `await`/`return`/`Environment.Exit`), `toplevel-class` (statements followed by a namespaced class), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `unsupported` (the warnings for everything out of scope) |
 | `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), and the `pattern` pair (a pattern binding carries the sink on the test's true edge) |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
 | `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 5 lowering goldens + execution, 7 taint cases, and the "silent skip" case (§2) |
@@ -346,7 +346,7 @@ diagnostic.
 | `record` / `record struct` | yes | positional parameters become leading fields; `new R(a, b)` stores the arguments | flows (`cwe78-modern`) | **yes: parameters and arguments dropped** → fixed |
 | primary-constructor class | yes | positional parameters become fields (as a record) | flows | **yes** → fixed |
 | `partial` parts in one file | yes | parts merged by qualified name | flows | **yes: the second part was shadowed** → fixed |
-| top-level statements | yes | `<stem>.Main` (`Program.Main` for `Program.cs`) | flows | **yes: not a type, so ignored; a minimal API `Program.cs` produced no functions** → fixed |
+| top-level statements | yes | `<file>_Program.<Main>$` (`string[] args`; top-level local functions are nested static methods) | flows | **yes: not a type, so ignored; a minimal API `Program.cs` produced no functions** → fixed |
 | `async` method | yes | body lowered synchronously | flows | no (by design) |
 | `await e` | yes | the value of `e` | flows | no (by design) |
 | nullable `T?` | yes | erased to `T` | n/a | no (no nullness domain yet, documented) |
@@ -385,7 +385,11 @@ diagnostic.
 
 * **File-scoped namespaces** (§7.1) — the whole file was dropped silently.
 * **Top-level statements** are unwrapped from `global_statement` (they were a
-  `global_statement not modelled` warning with no code) and lowered as `<stem>.Main`.
+  `global_statement not modelled` warning with no code) and lowered as a synthetic
+  `<file>_Program.<Main>$` method with a `string[] args` parameter; top-level local
+  functions become nested static methods under it (`<Main>$.Run`), collected before the
+  body so a call may precede the declaration, and declarations after the statements keep
+  their own scope.
 * **Records and primary constructors**: the parameter list becomes the leading fields;
   `new R(a, b)` allocates, stores each argument into its field, then calls a declared
   constructor if there is one.
