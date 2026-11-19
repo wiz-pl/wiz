@@ -15,5 +15,10 @@ if [ -z "$CC" ]; then
 fi
 mkdir -p "$ROOT/scry/build"
 cd "$ROOT/scry"
+if [ "${WIZ_BUNDLED:-0}" = 1 ]; then
+  # A packaged wiz wrapper already supplies its own --cc/--cflags/--ldflags and a
+  # read-only cache; passing grail.local.wiz's paths would override them.
+  exec "$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover
+fi
 exec "$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover \
   ${CC:+--cc "$CC"} --cflags "$CFLAGS" --ldflags "$LDFLAGS"

@@ -83,9 +83,16 @@ def Scry.parseRows (s : String) : List (Nat × Nat) :=
 def Scry.coverScript : List Scry.Tactic :=
   [ .intro Scry.rtSrc, .intro Scry.rtParam, .intro Scry.rtRetSrc, .close ]
 
-/-- The proof for one function. `entryMode` selects the C-ABI parameter policy. -/
+/-- The claim specification for this run: the default no-flow claim over every source, or
+the "constant or parameter bind" property over the untrusted sources. -/
+def Scry.specOf (fn : String) (classify : Bool) : Scry.Claim :=
+  if classify then Scry.Claim.constantOrBound fn [] []
+  else Scry.Claim.noFlow fn [] []
+
+/-- The proof for one function. `entryMode` selects the C-ABI parameter policy;
+`classify` selects the "constant or parameter bind" property. -/
 def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
-    (rows : List (Nat × Nat)) (entryMode : Bool) : EIO Unit := do
+    (rows : List (Nat × Nat)) (entryMode classify : Bool) : EIO Unit := do
   t0 ← EIO.lift Scry.nowMs;
   text ← FS.readFile path;
   spill ← FS.readFile (Scry.spillOf path);
@@ -104,47 +111,55 @@ def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
     | .none => EIO.lift (IO.println "NOFUNC\t")
     | .some r => do
       let st0 := r.edb;
+      let spec := Scry.specOf fn classify;
       EIO.lift (IO.println ("ANALYZE_MS\t" ++ Nat.repr (Nat.sub t1 t0)));
+      EIO.lift (IO.println ("PROPERTY\t" ++ Scry.Property.show spec.property));
       EIO.lift (IO.println ("SRC\t" ++ Nat.repr (Scry.relN st0 Scry.rtSrc)));
       EIO.lift (IO.println ("SINK\t" ++ Nat.repr (Scry.relN st0 Scry.rtSink)));
       EIO.lift (IO.println ("FLOW\t" ++ Nat.repr (Scry.relN st0 Scry.rtFlow)));
       EIO.lift (IO.println ("GEN\t" ++ Nat.repr (Scry.relN st0 Scry.rtGen)));
       EIO.lift (IO.println ("SAN\t" ++ Nat.repr (Scry.relN st0 Scry.rtSan)));
+      EIO.lift (IO.println ("MSTORE\t" ++ Nat.repr (Scry.relN st0 Scry.rtMStore)));
+      EIO.lift (IO.println ("MLOAD\t" ++ Nat.repr (Scry.relN st0 Scry.rtMLoad)));
+      EIO.lift (IO.println ("MTAINTED\t" ++ Nat.repr (Scry.relN st0 Scry.rtMTainted)));
       match mode with
       | "--dump" => Scry.proDump st0
       | "--cover" => do
-        match Scry.proveWith Scry.ruleTaintProgram st0 Scry.coverScript with
-        | .none => EIO.lift (IO.println "COVER\tno invariant")
-        | .some c => do
+        let v := Scry.proveWithSpec Scry.ruleTaintProgram st0 spec Scry.coverScript;
+        EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
+        match v with
+        | .proved c => do
           EIO.lift (IO.println ("COVER_ROWS\t" ++ Nat.repr (List.length (Scry.claimRows c))));
           EIO.lift (IO.println ("COVER_INV\t" ++ Scry.showInv (Scry.claimRows c)));
-          EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show
-            (Scry.check Scry.ruleTaintProgram st0 c)))
+          EIO.lift (IO.println ("COVER_LOCS\t" ++ Scry.showLocs c.locations))
+        | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
+        | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
+        | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+        | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
       | "--rows" => do
-        let c := Scry.Claim.mk "hand" rows;
+        let c := { spec with invariant := rows };
         EIO.lift (IO.println ("HAND_ROWS\t" ++ Nat.repr (List.length rows)));
         EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show
           (Scry.check Scry.ruleTaintProgram st0 c)))
       | _ => do
         t2 ← EIO.lift Scry.nowMs;
-        match Scry.prove Scry.ruleTaintProgram st0 with
-        | .none => do
-          EIO.lift (IO.println "PROVE\tnone (the script found no sink-free invariant)");
-          match Scry.proveWith Scry.ruleTaintProgram st0 Scry.coverScript with
-          | .none => EIO.lift (IO.println "REASON\tno cover invariant")
-          | .some c => EIO.lift (IO.println ("REASON\t" ++ Scry.Verdict.show
-              (Scry.check Scry.ruleTaintProgram st0 c)))
-        | .some c => do
-          t3 ← EIO.lift Scry.nowMs;
-          EIO.lift (IO.println ("PROVE_MS\t" ++ Nat.repr (Nat.sub t3 t2)));
+        let v := Scry.proveFor Scry.ruleTaintProgram st0 spec;
+        t3 ← EIO.lift Scry.nowMs;
+        EIO.lift (IO.println ("PROVE_MS\t" ++ Nat.repr (Nat.sub t3 t2)));
+        EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
+        match v with
+        | .proved c => do
           EIO.lift (IO.println ("ROWS\t" ++ Nat.repr (List.length (Scry.claimRows c))));
           EIO.lift (IO.println ("INV\t" ++ Scry.showInv (Scry.claimRows c)));
-          EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show
-            (Scry.check Scry.ruleTaintProgram st0 c)))
+          EIO.lift (IO.println ("LOCS\t" ++ Scry.showLocs c.locations))
+        | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
+        | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
+        | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+        | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
 
 def Scry.proUsage : EIO Unit :=
   EIO.lift (IO.ePrintln
-    "usage: prover FILE.cs FUNCTION [--cover|--dump|--rows p:v,...] [--entry] [--pack FILE]")
+    "usage: prover FILE.cs FUNCTION [--cover|--dump|--rows p:v,...] [--entry] [--classify] [--pack FILE]")
 
 def Scry.packPathOf : List String → String
   | .cons "--pack" (.cons p _) => p
@@ -156,20 +171,25 @@ def Scry.stripPack : List String → List String
   | .cons "--pack" _ => .nil
   | other => other
 
-/-- `prover FILE FN [MODE [ROWS]]`, with `--entry` and `--pack FILE`. -/
+/-- `prover FILE FN [MODE [ROWS]]`, with `--entry`, `--classify` and `--pack FILE`. -/
 def Scry.proMain (args : List String) : EIO Unit :=
   match args with
   | .cons path (.cons fn rest0) => do
     let entryMode := List.any (String.eq "--entry") rest0;
+    let classify := List.any (String.eq "--classify") rest0;
     let rest := List.filter (fun a => Bool.not (String.eq a "--entry")) rest0;
+    let rest := List.filter (fun a => Bool.not (String.eq a "--classify")) rest;
     let packPath := Scry.packPathOf rest;
     packText ← FS.readFile packPath;
     let pack := Scry.parseRulePack packText;
     let rest := Scry.stripPack rest;
     match rest with
-    | .cons mode (.cons rows _) => Scry.proofOf pack path fn mode (Scry.parseRows rows) entryMode
-    | .cons mode _ => Scry.proofOf pack path fn mode (List.nil : List (Nat × Nat)) entryMode
-    | .nil => Scry.proofOf pack path fn "" (List.nil : List (Nat × Nat)) entryMode
+    | .cons mode (.cons rows _) =>
+      Scry.proofOf pack path fn mode (Scry.parseRows rows) entryMode classify
+    | .cons mode _ =>
+      Scry.proofOf pack path fn mode (List.nil : List (Nat × Nat)) entryMode classify
+    | .nil =>
+      Scry.proofOf pack path fn "" (List.nil : List (Nat × Nat)) entryMode classify
   | _ => Scry.proUsage
 
 def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.proMain)

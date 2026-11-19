@@ -3,7 +3,7 @@ import Scry.RuleTaint
 /-!
 # Tiny prover examples
 
-Two EDBs for the taint rules, small enough to read. They isolate the prover from the
+Small EDBs for the taint rules, small enough to read. They isolate the prover from the
 C# frontend, so the `scry-prover` tests can check the proof objects with exact rows:
 
 ```
@@ -17,7 +17,21 @@ not. The safe claim's invariant is `{(0,0)}`: the only seed, and the transfer ru
 blocked at point 1. The unsafe closure adds `{(1,1)}` and the alert obligation fires at
 `sink 2 argument 0`.
 
-The relation numbers are `Scry.rtFlow`/`rtSrc`/`rtSink`/`rtSan`/`rtGen`.
+The memory pair shows the same shape through a store/load:
+
+```
+point 0: v0 = source()
+point 1: store loc 7 <- v0       flow(0,1,0), mstore(7,1,0)
+point 2: v0 = load loc 7         mload(7,2,0), [san(2,0)]
+point 3: v0 = f(v0)              flow(2,3,0), gen(3,0)
+point 4: sink(v0)                flow(3,4,0), sink(4,0,0)
+```
+
+The unsafe twin is refuted with a path that names the store and the load; the safe twin
+adds `san(2,0)` and proves with `I = {(0,0)}`, `M = {7}`.
+
+The relation numbers are `Scry.rtFlow`/`rtSrc`/`rtSink`/`rtSan`/`rtGen`/`rtMStore`/
+`rtMLoad`.
 -/
 
 def Scry.proverSafe : Scry.State Nat :=
@@ -39,49 +53,118 @@ def Scry.proverUnsafe : Scry.State Nat :=
   let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 2, U64.ofNat 0, U64.ofNat 1];
   st
 
-/-- The safe claim, proved by the default script. -/
-def Scry.proverSafeClaim : Option Scry.Claim :=
+/-- A source that is stored into a location and loaded at a later point. -/
+def Scry.proverMemoryUnsafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtMStore [U64.ofNat 7, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtMLoad [U64.ofNat 7, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 2, U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 3, U64.ofNat 4, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 4, U64.ofNat 0, U64.ofNat 0];
+  st
+
+/-- The same program with the load result sanitised: the store still taints location 7,
+but the load cannot carry it to the sink. -/
+def Scry.proverMemorySafe : Scry.State Nat :=
+  Scry.State.addTuple Scry.proverMemoryUnsafe Scry.rtSan [U64.ofNat 2, U64.ofNat 0]
+
+/-- A sink with no source at all: sound but vacuous. -/
+def Scry.proverVacuous : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtSink [U64.ofNat 4, U64.ofNat 0, U64.ofNat 0]
+
+/-- A parameter flow reaches the sink; the `src` in the same EDB does not. -/
+def Scry.proverSelect : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtParam [U64.ofNat 0, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 2, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 2, U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 3, U64.ofNat 0, U64.ofNat 0];
+  st
+
+/-- The `src` also reaches the same sink argument: `constantOrBound` must refute. -/
+def Scry.proverSelectUnsafe : Scry.State Nat :=
+  Scry.State.addTuple Scry.proverSelect Scry.rtFlow [U64.ofNat 0, U64.ofNat 2, U64.ofNat 0]
+
+/-- The cover script: seed the sources and take the closure, without the final check.
+It is used to read the invariant a refutation would have produced. -/
+def Scry.coverScript : List Scry.Tactic :=
+  [ Scry.Tactic.intro Scry.rtSrc
+  , Scry.Tactic.intro Scry.rtParam
+  , Scry.Tactic.intro Scry.rtRetSrc
+  , Scry.Tactic.close ]
+
+def Scry.proverSafeVerdict : Scry.Verdict :=
   Scry.prove Scry.ruleTaintProgram Scry.proverSafe
 
-/-- The safe claim's verdict (should be `ok`). -/
-def Scry.proverSafeVerdict : Scry.Verdict :=
-  match Scry.proverSafeClaim with
-  | .some c => Scry.check Scry.ruleTaintProgram Scry.proverSafe c
-  | .none => .rejected "the default script found no invariant"
-
-/-- The unsafe closure: seeds and one closure round, no final check (the point is to
-show the checker refusing it). -/
-def Scry.proverUnsafeCover : Option Scry.Claim :=
-  Scry.proveWith Scry.ruleTaintProgram Scry.proverUnsafe
-    [ Scry.Tactic.intro Scry.rtSrc
-    , Scry.Tactic.intro Scry.rtParam
-    , Scry.Tactic.intro Scry.rtRetSrc
-    , Scry.Tactic.close ]
-
-/-- The unsafe claim's verdict (should be rejected at the alert obligation). -/
-def Scry.proverUnsafeVerdict : Scry.Verdict :=
-  match Scry.proverUnsafeCover with
-  | .some c => Scry.check Scry.ruleTaintProgram Scry.proverUnsafe c
-  | .none => .rejected "no invariant"
-
-/-- An empty invariant: the seed rule must catch it. -/
-def Scry.proverEmptyVerdict : Scry.Verdict :=
-  Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk "empty" [])
-
-/-- The unsafe program's invariant checked against the safe program. -/
-def Scry.proverCrossVerdict : Scry.Verdict :=
-  match Scry.proverUnsafeCover with
-  | .some c => Scry.check Scry.ruleTaintProgram Scry.proverSafe c
-  | .none => .rejected "no invariant"
-
-/-- The invariant after the safe script, rendered. -/
 def Scry.proverSafeInvariant : String :=
-  match Scry.proverSafeClaim with
-  | .some c => Scry.showInv c.invariant
+  match Scry.proverSafeVerdict with
+  | .proved c => Scry.showInv c.invariant
+  | _ => "?"
+
+def Scry.proverUnsafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe
+
+def Scry.proverUnsafeCoverVerdict : Scry.Verdict :=
+  Scry.proveWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript
+
+def Scry.proverUnsafeInvariant : String :=
+  match Scry.searchWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript with
+  | .some inv => Scry.showInv inv.tainted
   | .none => "?"
 
-/-- The unsafe invariant after the cover script, rendered. -/
-def Scry.proverUnsafeInvariant : String :=
-  match Scry.proverUnsafeCover with
-  | .some c => Scry.showInv c.invariant
-  | .none => "?"
+def Scry.proverEmptyVerdict : Scry.Verdict :=
+  Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow "empty" [] [])
+
+def Scry.proverCrossVerdict : Scry.Verdict :=
+  match Scry.searchWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript with
+  | .some inv => Scry.check Scry.ruleTaintProgram Scry.proverSafe
+      (Scry.Claim.noFlow "cross" inv.tainted inv.locations)
+  | .none => Scry.Verdict.refused "no invariant"
+
+def Scry.proverMemoryUnsafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverMemoryUnsafe
+
+def Scry.proverMemorySafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverMemorySafe
+
+def Scry.proverMemorySafeInvariant : String :=
+  match Scry.proverMemorySafeVerdict with
+  | .proved c => Scry.showInv c.invariant
+  | _ => "?"
+
+def Scry.proverMemorySafeLocations : String :=
+  match Scry.proverMemorySafeVerdict with
+  | .proved c => Scry.showLocs c.locations
+  | _ => "?"
+
+def Scry.proverVacuousVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverVacuous
+
+/-- All sources: the parameter flow is part of the claim, so it is refuted. -/
+def Scry.proverSelectAllVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverSelect
+
+/-- Only `src`: the parameter flow is not part of the claim, so it is proved. -/
+def Scry.proverSelectSrcVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelect
+    (Scry.Claim.withSources (Scry.Claim.noFlow "src-only" [] []) [Scry.rtSrc])
+
+/-- "Every sink argument is a constant or a parameter bind": the untrusted source does
+not reach the sink, so the claim is proved. -/
+def Scry.proverConstantOrBoundVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelect
+    (Scry.Claim.constantOrBound "sql" [] [])
+
+/-- The same claim when the untrusted source does reach the sink: refuted. -/
+def Scry.proverConstantOrBoundUnsafeVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelectUnsafe
+    (Scry.Claim.constantOrBound "sql" [] [])
+
+/-- A script with an out-of-range rule index: a tagged script failure, not "none". -/
+def Scry.proverScriptFailVerdict : Scry.Verdict :=
+  Scry.proveWith Scry.ruleTaintProgram Scry.proverSafe [Scry.Tactic.apply 99]

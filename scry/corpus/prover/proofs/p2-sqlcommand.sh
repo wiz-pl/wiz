@@ -5,4 +5,4 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../../.." && pwd)
 PROVER=${PROVER:-$ROOT/scry/build/prover}
 exec "$PROVER" "$ROOT/scry/corpus/prover/real/SqlReportProvider.cs" \
   ReportService.Provider.SqlReportProvider.FetchRrnsAsync \
-  --pack "$ROOT/scry/corpus/prover/packs/sql.scry" --entry
+  --pack "$ROOT/scry/corpus/prover/packs/sql.scry" --entry --classify

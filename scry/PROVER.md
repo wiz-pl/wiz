@@ -29,29 +29,42 @@ property over `(point, register)` nodes:
 ```
 atomic     R(t₁, …, tₙ)        R an EDB relation, tᵢ a logical variable or a U64
 formula    φ ::= R(t⃗) | ¬R(t⃗) | φ ∧ φ | ∀x⃗. φ
-claim      noFlow f I          I : set of (point, register) pairs
+claim      noFlow f I M S      I : tainted (point, register) rows
+                               M : derived tainted locations
+                               S : the source relations the claim quantifies over
 ```
 
-`noFlow f I` means:
+`noFlow f I M S` means:
 
-1. **closure** — for every instance of every rule whose head is `tainted`, if the
-   instance's `tainted` premises are in `I` and its other premises hold in the EDB
-   (including the negated `san` premises), then its head is in `I`;
-2. **no alert** — the `alert` rule has no instance with its `tainted` premise in `I`.
+1. **closure of taint** — for every instance of every rule whose head is `tainted`
+   (including the load rule), if the instance's `tainted`/`mtainted` premises are in
+   `I`/`M` (or are EDB location seeds) and its other premises hold in the EDB (including
+   the negated `san` premises), then its head is in `I`;
+2. **closure of locations** — for every instance of the store rule, if its `tainted`
+   premise is in `I` and its `flow`/`mstore` premises hold, then its location is in `M`;
+3. **no alert** — the `alert` rule has no instance with its `tainted` premise in `I`.
 
-The pair `(f, I)` is the whole proposition. `I` is an *over-approximation of the
-reachable taint*, not the fixpoint: any superset that is still sink-free works, and for
-the safe C# twin a one-row `I` suffices.
+The certificate `(f, I, M, S)` is the whole proposition. `I` and `M` are
+*over-approximations of the reachable taint and tainted locations*, not the fixpoint: any
+superset that is still sink-free works, and for the safe C# twin a one-row `I` suffices.
+`S` selects the seeds: `{src}` is "no `Console.ReadLine` value reaches…", while
+`{src, retsrc}` is the SQL property "every sink argument is a constant or a parameter
+bind" (`param` flows are allowed by leaving `param` out).
 
 ### Why this fragment, and what it deliberately excludes
 
 * It is the **tuple** fragment of the engine's taint rules. `evalAtoms` on the EDB with
   relation 4 replaced by `I` enumerates exactly the rule instances the closure obligation
   talks about, using the same matcher the engine uses. No new semantics is invented.
-* **Memory is excluded.** `mstore`/`mload`/`mtainted` are a second mutual recursion; an
-  invariant over `tainted` alone does not cover it. The checker *refuses* a function
-  whose EDB contains a store or a load (`Scry.checkMemory`), with a reason. Refusing is
-  the honest behaviour; silently ignoring the rules would be unsound.
+* **Memory is covered.** `mstore`/`mload`/`mtainted` form a second mutual recursion, so
+  the invariant is a pair of sets: `I` over `(point, register)` and `M` over locations.
+  The checker discharges the store and load rules as separate closure obligations. The
+  EDB's `mtainted` rows are location seeds imported from other functions; they are part
+  of the base, not of `M`.
+* **A counterexample is a provenance path.** The alert obligation finds the first alert
+  instance and walks the taint back to a seed through the same rule instances, rendering
+  `src -> store -> load -> flow -> sink`. That walk is explanation, not proof; the
+  checker's answer is still just the invariant's acceptance or the alert instance.
 * **`param`/`retsrc` are assumptions.** They are seeds that `Scry.Interproc` derives
   from callers/callees. The certificate is intraprocedural; the note says so, and
   `Scry.check` does not claim the seeds themselves. This is the same assumption
@@ -69,12 +82,16 @@ the safe C# twin a one-row `I` suffices.
 ```wiz
 structure Scry.Claim where
   func : String              -- a label; the EDB identifies the function
-  invariant : List (Nat × Nat)
+  invariant : List (Nat × Nat)   -- tainted rows
+  locations : List Nat           -- derived tainted locations
+  sources : List Nat             -- source relations quantified (`[]` = all)
+  property : Scry.Property       -- noFlow | constantOrBound
 ```
 
-That is the certificate: **a finite set of `(point, register)` rows**. It is tiny
-compared with the analysis trace (one row for the worked example), human-checkable by
-reading the script, and it is not a re-encoding of the evaluator's provenance.
+That is the certificate: **a finite set of `(point, register)` rows and a finite set of
+locations**. It is tiny compared with the analysis trace (one row for the worked
+example), human-checkable by reading the script, and it is not a re-encoding of the
+evaluator's provenance.
 
 A proof of a finding stays a `Scry.Derivation` (`Scry.Cert`); the two certificate kinds
 are duals:
@@ -102,8 +119,10 @@ The default script is
 intro 1; intro 6; intro 7; close; split
 ```
 
-(`src`, `param`, `retsrc`; closure; check). `Scry.prove` runs it and returns the
-resulting `Claim`; `Scry.proveWith` runs any script.
+(`src`, `param`, `retsrc`; closure; check). `Scry.prove` runs it and returns a tagged
+`Scry.Verdict` carrying the `Claim`; `Scry.proveWith` runs any script. A claim's
+`sources` field selects the `intro` rows (and the checker drops the other seed
+relations), so a claim about one property does not quantify over every seed.
 
 The script is **search**: it is recorded for reports, not replayed by the checker. A
 user can skip it entirely and hand-write `I`; `Scry.check` accepts or rejects that. This
@@ -113,28 +132,36 @@ claim)`.
 
 ## 4. The checker, and why it is independent
 
-`Scry.check p edb claim` has three obligations, in order:
+`Scry.check p edb claim` has four obligations, in order:
 
-1. **fragment** — refuse if the EDB has `mstore`/`mload` rows.
-2. **closure** — for every rule with a `tainted` head (indices 0, 1, 2, 3, 7 of
+1. **vacuity** — the selected source relations must have at least one row, and the
+   function must have at least one sink. Otherwise the verdict is `vacuous` with the
+   reason ("the claim's source set is empty" / "the claim's sink set is empty"), never
+   `proved`.
+2. **taint closure** — for every rule with a `tainted` head (indices 0, 1, 2, 3, 7 of
    `ruleTaintProgram`), enumerate `Scry.evalAtoms` over the EDB with relation 4 replaced
-   by `I`; every match's head `(point, register)` must be in `I`. The first miss is
-   reported with the rule number and the fact.
-3. **no alert** — enumerate the `alert` rule's body the same way; any match is a
-   counterexample and is reported with the sink and argument.
+   by `I` and relation 13 by the EDB seeds plus `M`; every match's head
+   `(point, register)` must be in `I`. The first miss is `refused` with the rule number
+   and the fact.
+3. **location closure** — for the store rule (head `mtainted`), every instance whose
+   `tainted` premise is in `I` must have its location in `M`.
+4. **no alert** — enumerate the `alert` rule's body the same way; any match is a
+   `refuted` claim with the provenance path and the sink/argument.
 
 It calls neither `Scry.analyze`/`Scry.eval` (the fixpoint) nor `Scry.prove` (the
 search). The only shared component is the datalog *matcher* (`evalAtoms`), which is
 part of the trusted semantics, not the search: it says which rule instances exist for a
 given database, not which facts the analysis derived.
 
-**Soundness argument (stated, not mechanised).** Let `T` be the least `tainted`
-fixpoint. By induction on the height of a derivation: every `t ∈ T` is in `I` — the
-base case is a rule whose `tainted` premises are empty, whose instance closure covers;
-the step case applies closure to the instance built from the (smaller) premises, which
-are in `I` by induction. Then the alert rule has no instance with premises in `T`,
-because closure puts `T ⊆ I` and the no-alert obligation has no instance under `I`.
-Therefore `alert` is empty: no path from a seed to a sink.
+**Soundness argument (stated, not mechanised).** Let `T` and `L` be the least `tainted`
+and `mtainted` fixpoints. The two closure obligations are checked together by induction
+on the height of a derivation: a seed is in `I` (checked by the seed-head rules), a
+store step's location is in `M` because its tainted premise is in `I` (location
+closure), and a load step's result is in `I` because its location is in `M` (taint
+closure). Hence `T ⊆ I` and every *derived* location is in `M`; location seeds are
+already in the EDB. Then the alert rule has no instance with premises in `T`, because
+closure puts `T ⊆ I` and the no-alert obligation has no instance under `I`. Therefore
+`alert` is empty: no path from a seed to a sink.
 
 Two honest caveats:
 
@@ -185,11 +212,11 @@ the analysis already asserts is decoration, not verification.
    argument is the summary walk's, as in `Scry.Certify`.
 4. **Not the analysis's own soundness.** The parser, lowering, points-to, models and
    rule pack are trusted inputs. A wrong model makes a "proof" about the wrong program.
-5. **The search is not verified, and `prove` returning `none` is not a proof.**
-   `none` means "this script did not find a sink-free invariant", not "the property is
-   false". Only `Scry.check`'s `ok` is an acceptance. (For the unsafe twin the checker
-   *does* produce a counterexample — the alert obligation — which is a refutation of the
-   claim, not a proof that every possible invariant fails.)
+5. **The search is not verified.** `Scry.prove` returns a tagged verdict:
+   `proved` (with the claim), `refuted` (with a witness), `refused` (the certificate is
+   not closed), `script-failed` (an ill-formed script), or `vacuous`. Only `proved` is an
+   acceptance. A refutation is an alert instance, not a proof that every possible
+   invariant fails.
 6. **No mechanised soundness.** See §4.
 
 What makes the prototype more than decoration, concretely:
@@ -207,7 +234,8 @@ What makes the prototype more than decoration, concretely:
 | file | contents |
 |---|---|
 | `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the tactic datatype and `prove`/`proveWith` |
-| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, wrong proofs rejected, memory refused |
+| `lib/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection and `constantOrBound` |
+| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection |
 | `scry/PROVER.md` | this note |
 
 Test cases (all in the interpreter, reading the checked-in spills, so no tree-sitter and
@@ -242,13 +270,12 @@ property needs, is the natural second user of the same checker shape.
 
 1. Mechanise the soundness theorem for `check` (derivation-height induction, reusing
    `Scry.Cert`'s flat-tree machinery).
-2. Memory: extend `I` to `mtainted` (the invariant becomes a pair of sets) and check the
-   two memory rules; then remove the refusal.
-3. Interprocedural: make the `param`/`retsrc` seeds *subgoals* (a summary certificate per
+2. Interprocedural: make the `param`/`retsrc` seeds *subgoals* (a summary certificate per
    caller), so a corpus-wide claim is a tree of per-function invariants.
-4. Guards/bounds: add `guard`/`use` EDB rows from `Scry.Bounds`, define the cut claim for
+3. Guards/bounds: add `guard`/`use` EDB rows from `Scry.Bounds`, define the cut claim for
    "every write preceded by a check", and prove the `memcpy` length property on a C
    fixture.
-5. A `scry prove FILE --claim …` driver: parse a small script, run it, print the
+4. A `scry prove FILE --claim …` command: parse a small script, run it, print the
    invariant and the verdict, and exit non-zero on a rejected claim (with the offending
-   fact).
+   fact). The dogfood driver `scry/tools/ProverMain.wiz` is the prototype.
+5. Mechanise the memory closure induction alongside the taint one.
