@@ -509,7 +509,7 @@ documents; its `col` is a 1-based **character** column. The SARIF report goes th
 columns too. The C frontend shares `Scry.Cst.ofPreprocessed` and `Scry.mapSpan`, so it
 gets the same fix.
 
-Two of the 75 files of `src/Crux.Api` contain an em dash or a `§`; before this change
+Two of the 75 files of the solution's `src/` contain an em dash or a `§`; before this change
 every identifier after such a character was read shifted (`outcome` became `ome`) and
 those files reported `unknown name …` warnings for real locals. The corpus case
 `lower/unicode` keeps a local declared before the em dash and used after it; its
@@ -520,7 +520,7 @@ column.
 ### 7.9 `is` tests and pattern bindings (2026-11-19)
 
 The 88 `is test not modelled` warnings of §7.4 were not, as assumed, mostly `is T x`
-declaration patterns: `src/Crux.Api` contains **none of those**. Attributing every
+declaration patterns: the solution's `src/` contains **none of those**. Attributing every
 lowered `is_pattern_expression` by the shape tree-sitter-c-sharp gives it (the CST holds
 108; 88 reach the lowering, and 20 sit in lambdas, field initialisers, swallowed tails
 or the 17 files with no function, so the driver never warns for them):
@@ -558,7 +558,7 @@ The binding lowering, and what it fixed:
   pattern) is recovered: the left spine is the test, the tail is lowered as code.
 * A `catch … when (F(ex) is { } s)` filter installs `s` at the start of the handler.
 
-Measured on `src/Crux.Api` with the same walk (`scry cs`, `--no-taint` unless stated):
+Measured on the solution's `src/` with the same walk (`scry cs`, `--no-taint` unless stated):
 
 | | before | after |
 |---|---:|---:|
@@ -571,7 +571,7 @@ Measured on `src/Crux.Api` with the same walk (`scry cs`, `--no-taint` unless st
 
 The 18 `unknown name` warnings that went are property-pattern bindings that used to be
 unknown at every later use. The one new warning is
-`Middleware/PartnerBasicAuthMiddleware.cs`'s `… is not { } endpoint || endpoint.…`: the
+`Middleware/CallerAuthMiddleware.cs`'s `… is not { } endpoint || endpoint.…`: the
 binding is used in the right operand of `||`, and conditions are lowered without
 short-circuit blocks, so the copy sits on the branch edge rather than before the operand.
 The `lambda body` row goes 60 → 61 because the recovered tail of
@@ -694,7 +694,7 @@ itself; files discovered inside it are.
 
 ### What the summary says
 
-Measured on a real codebase (Nexus `src/Crux.Api`, 75 kept files):
+Measured on a real codebase (a real solution's `src/`, 75 kept files):
 
 ```
 walk: 79 .cs file(s) before exclusions; 75 kept, 4 excluded by rule
@@ -704,20 +704,20 @@ rules: scry/corpus/csharp/csharp.scry (4 rule(s))
 findings: 0 (error 0, warning 0, note 0)
 coverage: 25 row(s) — what was skipped or warned about
   SEVERITY COUNT  CONSTRUCT                                   EXAMPLE
-  warning  2933   unmodelled-external                         Authentication/AuthenticatedPartner.cs:16:12
+  warning  2933   unmodelled-external                         Authentication/AuthenticatedCaller.cs:16:12
   warning  205    await not modelled: havoc                   Dtos/TransactionDtos.cs:87:23
   warning  168    unknown name not modelled: havoc            Dtos/SchemeIngressDtos.cs:16:31
   ...
   note     4      excluded: obj/                              obj/Debug/net10.0/…AssemblyAttributes.cs
 ```
 
-The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
+The whole the solution tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
 in 311.8 s and about 4.1 GiB with `--no-taint` on the build that first ran the sweep:
 4 605 parsed, 4 250 lowered, 16 parse failures, 36 319 functions and 46 coverage rows.
 The 2026-11-18 re-run that named all 16 failures (commit `e3f27195`, before merging
 master) reports the same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage
 rows: the lowering now names more constructs, and each failed file is its own row. Taint
-dominates: Crux.Api took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
+dominates: the solution took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
 the tree is hours, not minutes, and is not attempted by default. All 16 failures were two
 grammar gaps, not malformed files and not our walker; both are fixed by scry's grammar
 patch, and the patched build parses the whole tree: §8.2.
@@ -774,12 +774,12 @@ renderings and all four exit statuses. The Lean interpreter cannot call the nati
 so the spills are checked in exactly as for the other C# fixtures; `Broken.cs` is the only
 file without a spill, and its `.err` result is built directly.
 
-### 8.2 The 16 Nexus parse failures: two grammar gaps, now fixed (2026-11-18)
+### 8.2 The 16 the solution parse failures: two grammar gaps, now fixed (2026-11-18)
 
 The first whole-tree run reported `4 621 kept, 4 605 parsed, 4 250 lowered, 16 failed`.
 All sixteen were **valid C# that tree-sitter-c-sharp v0.23.5 refused**; none was a
 truncated write, an encoding problem (all 4 621 decode as UTF-8, and the grammar's
-`extras` accept a BOM), a preprocessor form (Nexus has no `#if`/`#region`), or a walker
+`extras` accept a BOM), a preprocessor form (the solution has no `#if`/`#region`), or a walker
 bug. They fell into exactly two grammar gaps, and scry's grammar patch fixes both
 (`native/README.md`; `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports the
 two upstream-master rules and the Nix derivation regenerates `src/parser.c`):
@@ -793,28 +793,16 @@ Each failure is still one row per file, with the first failing node's position a
 so a sweep names every failed file instead of summing them into one row with one example.
 The 16, as the old grammar reported them (all `ERROR`):
 
-| file (below `/workspace/Nexus/`) | first node | rejected construct |
+| file | first node | rejected construct |
 |---|---|---|
-| `src/Crux.Demo.Api/Execution/RealServerActionExecutor.cs:865:82` | `ERROR` | `.. var selector` in a list pattern (gap B) |
-| `tests/Crux.Api.Tests/AgentCashEndpointsTests.cs:473:17` | `ERROR` | `required` as a local (gap A) |
-| `tests/Crux.Api.Tests/CardChargebackTests.cs:227:9` | `ERROR` | `partial` as a local (gap A) |
-| `tests/Crux.Application.Tests/Compliance/ApplicationRegistersTests.cs:84:9` | `ERROR` | `var with` (gap A; also `partial`) |
-| `tests/Crux.Application.Tests/Compliance/OwnershipRegisterTests.cs:280:9` | `ERROR` | `var with` (gap A) |
-| `tests/Crux.Application.Tests/Compliance/ReserveBankDirectionsTests.cs:99:17` | `ERROR` | `required` as a local (gap A) |
-| `tests/Crux.Application.Tests/Compliance/StructureRegistersTests.cs:179:9` | `ERROR` | `partial` as a local (gap A; also `var with`) |
-| `tests/Crux.Application.Tests/Identity/AppKeyAttestationsTests.cs:165:15` | `ERROR` | `required` as a local (gap A) |
-| `tests/Crux.Application.Tests/Treasury/PartyCalendarsTests.cs:47:17` | `ERROR` | `required` as a local (gap A) |
-| `tests/Crux.Architecture.Tests/ContainerDirectoryTests.cs:1:1` | `ERROR` | `required` as a local (gap A); recovery's node spans the unit |
-| `tests/Crux.Communications.Tests/SegmentEvaluatorTests.cs:174:9` | `ERROR` | `var with` (gap A) |
-| `tests/Crux.Dashboard.Api.Tests/CertificationContentTests.cs:241:16` | `ERROR` | `partial` as a local (gap A) |
-| `tests/Crux.Demo.Api.Tests/CardMachineValueTourTests.cs:45:17` | `ERROR` | `partial` as a local (gap A) |
-| `tests/Crux.Domain.Tests/Compliance/InternalAuditRecordTests.cs:80:9` | `ERROR` | `required` as a local (gap A) |
-| `tests/Crux.Tenant.Api.Tests/AgentTests.cs:415:15` | `ERROR` | `partial` as a local (gap A) |
-| `tests/Crux.Worker.Tests/NextDaySegregationTests.cs:186:15` | `ERROR` | `partial` as a local (gap A) |
+| a demo project's executor, line 865 | `ERROR` | `.. var selector` in a list pattern (gap B) |
+| the API tests, 3 files | `ERROR` | `required` as a local (gap A) |
+| the application tests, 5 files | `ERROR` | `var with` / `partial` / `required` as locals (gap A) |
+| the remaining test projects, 7 files | `ERROR` | `partial` or `required` as a local (gap A) |
 
 **Gap A (15 files): `with`, `partial` and `required` are not reserved identifiers.**
 C# makes these *contextual* keywords: outside a `with` expression, a `partial` modifier or
-a `required` member modifier, each is an ordinary identifier, and Nexus uses them as local
+a `required` member modifier, each is an ordinary identifier, and the solution uses them as local
 names (`var with = await …;`, then `partial.Detail.Should()`, `required.Should()`). The
 grammar's `_reserved_identifier` rule lists the contextual keywords it accepts as names
 (`alias`, `ascending`, … `yield`) but omits these three in v0.23.5 — and upstream
@@ -837,7 +825,7 @@ public static int Count(int[] items)
 backports verbatim; the smallest reproduction is `corpus/csharp/repo/src/SlicePattern.cs`.
 
 **Before and after, whole tree.** A differential parse of all 5 560 `.cs` files under
-`/workspace/Nexus` with the old and patched grammars: 16 files had `ERROR`/`MISSING`
+`/workspace/the solution` with the old and patched grammars: 16 files had `ERROR`/`MISSING`
 nodes before, **0 after**; no file that parsed gained an error. 43 further files keep
 their error-free status but change node shape: 34 gain the keyword's explicit token node
 (`new(required: true)` now names the argument `required`) and 9 gain a `slice_pattern`
@@ -847,7 +835,7 @@ from a wrong `invocation_expression` around `Find(key) is not var (a, b)` to the
 pin the target shape: `parse/contextual.{cs,cst,sexp}` covers both gaps and both keyword
 positions, and the two repo fixtures now have spills.
 
-The driver's own report on the patched build (`scry cs /workspace/Nexus --no-taint
+The driver's own report on the patched build (`scry cs /workspace/the solution --no-taint
 --json`) is **4 621 kept, 4 621 parsed, 4 279 lowered, 0 failed**, 36 667 functions and
 367 coverage rows, exit 0. The same tree on the pre-patch build reports 4 605 parsed,
 4 263 lowered, 16 failed, 36 334 functions and 363 rows. The parse-failure list is empty
@@ -861,7 +849,7 @@ lower). Those are not parse failures and are not conflated with them: each is ei
 declaration-only file or carries a lowering warning that `scry cs`'s coverage rows name,
 and §7.6 lists the out-of-scope constructs behind them.
 
-## 9. The parsed-but-not-lowered files (Nexus, 2026-11-18)
+## 9. The parsed-but-not-lowered files (the solution, 2026-11-18)
 
 `files: … parsed, … lowered` counts a file as **lowered only when it produced a
 function**, so the difference is files that parse and lower to nothing. §8 recorded
@@ -869,7 +857,7 @@ function**, so the difference is files that parse and lower to nothing. §8 reco
 it is now
 
 ```
-scry cs /workspace/Nexus --json --no-taint
+scry cs /workspace/the solution --json --no-taint
 ```
 
 gives `walk: 5 560 before exclusions; 4 621 kept`, `files: 4 621 found, 4 605 parsed,
@@ -943,7 +931,7 @@ frontend emits CLR spellings (`Namespace.Type.Method`, `T[].get_Item`), so on re
 *none* of the BCL reads it lowers to matched an entry. Every one became an
 `unmodelled-external` warning — the coverage marker `Scry.Interproc.unmodelledWarningsOf`
 prints for a call with a pointer result or argument and no model. That was 4,028 call
-sites over 75 `Crux.Api` files: noise on the coverage report, not a taint fact (an
+sites over 75 `the solution` files: noise on the coverage report, not a taint fact (an
 unmodelled call has no source fact either; only its result's points-to location is
 `unknown`, which is what every external call's result is anyway).
 
@@ -954,7 +942,7 @@ lowering and merged-program analysis `scry cs` uses, so the numbers are comparab
 
 ```
 cd scry && grail build cs-externals
-.grail/bin/cs-externals /workspace/Nexus/src/Crux.Api corpus/csharp/csharp.scry
+.grail/bin/cs-externals /workspace/the solution/src/the solution corpus/csharp/csharp.scry
 ```
 
 `count-before` is the same selection against `Scry.Models.coreModels` (libc/policy/pure,
@@ -962,7 +950,7 @@ without the CLR layer), so one run gives both sides of a model change. The model
 by the exact callee spelling (or by the shape rules in §10.2), so a call disappears from
 `count` exactly when a model covers it.
 
-Top of `src/Crux.Api` (75 files, 240 functions, merged program), before → after:
+Top of the solution's `src/` (75 files, 240 functions, merged program), before → after:
 
 | # | callee | before | after | model |
 |---|---|---|---|---|
@@ -976,24 +964,24 @@ Top of `src/Crux.Api` (75 files, 240 functions, merged program), before → afte
 | 8 | `?.WithSummary` | 90 | — | ASP.NET fluent |
 | 9 | `System.String.Concat` | 75 | — | exact |
 | 10 | `TypedResults.Ok` | 71 | — | `Results` factory |
-| 11 | `HttpContext.RequireAuthenticatedPartner` | 63 | 63 | not modelled: another Nexus project's method |
+| 11 | `HttpContext.RequireAuthenticatedCaller` | 63 | 63 | not modelled: another project's method |
 | 12 | `?.MapPost` | 59 | — | ASP.NET fluent |
-| 13 | `?.get_TenantId` | 49 | — | getter |
-| 14 | `?.Refuses` | 46 | 46 | not modelled: another Nexus project's method |
-| 15 | `?.get_PartyId` | 44 | — | getter |
-| 16 | `CruxValidationException.get_Message` | 42 | — | getter |
+| 13 | `?.get_AccountId` | 49 | — | getter |
+| 14 | `?.Refuses` | 46 | 46 | not modelled: another project's method |
+| 15 | `?.get_OwnerId` | 44 | — | getter |
+| 16 | `DomainValidationException.get_Message` | 42 | — | getter |
 | 17 | `?.get_Status` | 42 | — | getter |
-| 18 | `HttpContext.PartnerTenantId` | 41 | 41 | not modelled: another Nexus project's method |
-| 19 | `?.get_IsReplay` | 35 | — | getter |
-| 20 | `?.get_TransactionId` | 35 | — | getter |
-| 21 | `BoundaryRejectionRecorder.RecordAsync` | 34 | 34 | not modelled: another Nexus project's method |
+| 18 | `HttpContext.CallerAccountId` | 41 | 41 | not modelled: another project's method |
+| 19 | `?.get_IsRepeat` | 35 | — | getter |
+| 20 | `?.get_TxnId` | 35 | — | getter |
+| 21 | `RejectionRecorder.RecordAsync` | 34 | 34 | not modelled: another project's method |
 | 22 | `StatusCodes.get_Status201Created` | 31 | — | getter |
 | 23 | `System.Array.$new` | 30 | — | collection-expression allocation |
 | 24 | `?.WithTags` | 29 | — | ASP.NET fluent |
-| 25 | `BoundaryRejectionRecorder..ctor` | 28 | 28 | not modelled: a constructor writes its object |
-| 26 | `CruxNotFoundException.get_Message` | 28 | — | getter |
+| 25 | `RejectionRecorder..ctor` | 28 | 28 | not modelled: a constructor writes its object |
+| 26 | `DomainNotFoundException.get_Message` | 28 | — | getter |
 | 27 | `System.String.get_Empty` | 26 | — | getter |
-| 28 | `AuthorizeRefusals.get_PartyClosed` | 24 | — | getter |
+| 28 | `AuthorizeRefusals.get_OwnerClosed` | 24 | — | getter |
 | 29 | `?.get_Services` | 22 | — | getter |
 | 30 | `IEndpointRouteBuilder.MapGroup` | 22 | — | ASP.NET fluent |
 
@@ -1002,7 +990,7 @@ callees, on the same input and the same rule pack. The remaining 917, by shape:
 
 | shape | calls | why it stays |
 |---|---|---|
-| named type, other method | 487 | almost all another `Nexus` project's code (`HttpContext.RequireAuthenticatedPartner`, `BoundaryRejectionRecorder.RecordAsync`, `IOrchestrator.ExecuteAsync`), which the model table has no honest entry for |
+| named type, other method | 487 | almost all another `the solution` project's code (`HttpContext.RequireAuthenticatedCaller`, `RejectionRecorder.RecordAsync`, `IOrchestrator.ExecuteAsync`), which the model table has no honest entry for |
 | `?.method` (unknown receiver) | 215 | user mapping/DI/logging extensions (`?.ToWire`, `?.GetRequiredService`, `?.LogError`); a name alone does not say what they do |
 | `T..ctor` | 170 | a constructor writes the object it returns; modelling it `copy` would taint `Loc.unknown` |
 | `T.set_*` / `set_Item` | 39 | a setter writes through its receiver |
@@ -1068,7 +1056,7 @@ pack has to trust them.
 
 ### 10.4 Findings
 
-`src/Crux.Api` has **0 findings before and after** (the pack's only rule is CWE-78 and
+the solution's `src/` has **0 findings before and after** (the pack's only rule is CWE-78 and
 these endpoints do not build a command line from a request value). This is the expected
 direction: a read model adds no sanitiser and no filter, and the one source model
 (`Console.ReadLine`) duplicates a pack source, so the finding set can only stay or grow.
@@ -1089,9 +1077,9 @@ analysis's `unmodelled-external` warning. The one shape rule is a method group, 
 name is looked up in the unit's own method table (the `methodOwner` used by every call);
 an unknown name is still a havoc with a warning, never a silent value.
 
-### 11.1 Where the warnings are (`src/Crux.Api`, 75 files, 240 functions)
+### 11.1 Where the warnings are (the solution's `src/`, 75 files, 240 functions)
 
-Measured with `scry cs src/Crux.Api --no-taint --json` (lowering warnings) and
+Measured with `scry cs src/the solution --no-taint --json` (lowering warnings) and
 `scry-externals` (the merged program's unmodelled callees), at the head of this branch
 (which includes §9's models). The brief's guess — that macro-shaped constructs are a
 large warning source — is mostly wrong. The lowering warnings are dominated by semantic
@@ -1116,7 +1104,7 @@ The macro-shaped family itself:
 | property-like accessor (`x.P`, `x[i]`, `get_*`) | 1,943 lowered call sites | 1,943 `unmodelled-external` | 0 by §9's read model — **not** by an expansion: the lowering already emitted `get_P` |
 | method group (`Foo.Sink` in delegate position) | 93 | 1 `unknown name … havoc` each | 0 (this section) |
 | `nameof(x)` | 76 | 0, but every site was one shared `$str:nameof` constant | 0, now one constant per name |
-| `string.Format` | 0 in `Crux.Api` | — | — |
+| `string.Format` | 0 in `the solution` | — | — |
 | exception message formatting | 6 `new …Exception(…)`, none interpolated | an unmodelled constructor, deliberately (§9.3) | refused |
 | `ArgumentNullException.ThrowIfNull(x)` | 6 | `unmodelled-external` | 0 (a guard) |
 | `ConfigureAwait` / `Task.FromResult` | 5 / 2 | `unmodelled-external` | 0 (pass-through) |
@@ -1186,13 +1174,13 @@ permissive suffix rule.
 ## 11. The first finding on real code (2026-11-19)
 
 §10 measured a tree with **0 findings** — the lowering and the external-read models were
-right, but no finding could exist. This section traces one true positive in `src/Crux.Api`
+right, but no finding could exist. This section traces one true positive in the solution's `src/`
 and fixes the two model-side causes; the trace tool is `scry/tools/CsTraceMain.wiz`
 (`grail build cs-trace`, or `wiz build tools/CsTraceMain.wiz -I src -I ../lib`).
 
 ### 11.1 The shape
 
-`src/Crux.Api/Schemes/SchemeInboundReceiver.cs:35`:
+`src/the solution/Schemes/SchemeInboundReceiver.cs:35`:
 
 ```csharp
 logger.LogWarning(
@@ -1207,7 +1195,7 @@ CWE-117. `SchemeOperatorAdmission.cs:28` logs `schemeKey` the same way.
 
 ### 11.2 The trace, before
 
-`cs-trace src/Crux.Api SchemeInboundReceiver.ReceiveAsync` printed:
+`cs-trace src/the solution SchemeInboundReceiver.ReceiveAsync` printed:
 
 ```
 %21 = call HttpRequest.get_ContentType(%4)
@@ -1231,12 +1219,12 @@ Three name-resolution gaps and one missing model explain it; the first is the la
    (`get_P`, `T[].get_Item`); it did not add the request accessors as **sources**, and
    the fully qualified source list was dead on real code.
 2. **Cross-file calls keep short names.** `Scry.CsCmd` lowers each file with its own
-   class table, so `BootstrapPartnerCredentialSeeder.RunAsync` from `Program.cs` is
-   emitted as `BootstrapPartnerCredentialSeeder.RunAsync`, while the merged program's
-   function is `Crux.Api.Hosting.BootstrapPartnerCredentialSeeder.RunAsync`. The call
+   class table, so `BootstrapCredentialSeeder.RunAsync` from `Program.cs` is
+   emitted as `BootstrapCredentialSeeder.RunAsync`, while the merged program's
+   function is `the solution's Hosting.BootstrapCredentialSeeder.RunAsync`. The call
    graph sees no edge: summaries do not connect across files, the callee looks
    external (inflating `unmodelled-external`), and under the entry policy it looks like
-   an entry (so its parameters become sources). `BoundaryRejectionRecorder.RecordAsync`
+   an entry (so its parameters become sources). `RejectionRecorder.RecordAsync`
    alone had 34 such call sites.
 3. **A method-group value is not a callback according to the entry test.** `CsLower`
    emits `fnptr "$method:Ns.Class.Method"`; `Scry.fnptrNamesOfStmt` returned the whole
@@ -1279,7 +1267,7 @@ arguments are ordinary uses.
 * A static method's bare identifier reads a static field (including `const`) through
   `globalRef`, not field 0 of parameter 0. Before, `SecretVariable`/`CliFlag` read
   `gep %0,1` and were tainted by the first parameter, which produced six false
-  `log-injection` findings in `BootstrapPartnerCredentialSeeder`.
+  `log-injection` findings in `BootstrapCredentialSeeder`.
 
 The corpus pair `taint/cwe117-log-unsafe.cs` / `cwe117-log-safe.cs` pins the model: an
 entry parameter reaches `ILogger.LogWarning` (one finding, `arg 2`), and a constant log
@@ -1288,7 +1276,7 @@ analysis.
 
 ### 11.4 After
 
-`scry cs src/Crux.Api` (same 75 files, 240 functions):
+`scry cs src/the solution` (same 75 files, 240 functions):
 
 | measure | before | after |
 |---|---|---|
@@ -1309,8 +1297,8 @@ which argument they came from. The trace for the receiver is 12 `src` facts (six
 parameters and six request accessors), 6 sinks, and 4 alerts; before the fix it was
 0 / 0 / 0.
 
-The remaining `unmodelled-external` 845 are another Nexus project's methods (the
+The remaining `unmodelled-external` 845 are another project's methods (the
 majority), extension methods called through `HttpContext`/`this` (the 63
-`HttpContext.RequireAuthenticatedPartner` sites), unknown-receiver user extensions,
+`HttpContext.RequireAuthenticatedCaller` sites), unknown-receiver user extensions,
 constructors and setters — the classes §9 left out. They are coverage rows, not taint
 facts.

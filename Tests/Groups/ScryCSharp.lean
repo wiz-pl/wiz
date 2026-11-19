@@ -387,7 +387,7 @@ def repoCoverage : IO Unit := do
      ++ "|note 1 excluded: obj/") m
 
 /-- Every failed file is named: error rows are not summed into one "parse failure 3" row
-with a single example (the sweep's 16 Nexus failures used to hide fifteen file names; the
+with a single example (the sweep's 16 failures used to hide fifteen file names; the
 two grammar-gap reproducers now parse, so only the deliberately invalid file is left). -/
 def repoFailureRows : IO Unit := do
   let files ← repoFiles

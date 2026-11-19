@@ -1,5 +1,5 @@
 Two grammar fixes for valid C# that tree-sitter-c-sharp v0.23.5 refuses, both
-backported from upstream master (0.24.0). scry/CSHARP.md §8.2 lists the 16 real Nexus
+backported from upstream master (0.24.0). scry/CSHARP.md §8.2 lists the 16 real
 files that failed on them; after this patch the whole tree parses.
 
 1. `_reserved_identifier` omits `with`, `partial` and `required`. They are contextual
