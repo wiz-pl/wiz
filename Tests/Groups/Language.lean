@@ -479,6 +479,17 @@ def languageGroup : Group where
         failsLib ("import Prelude\naxiom Tok : Type\naxiom Tok.close : (1 t : Tok) → Unit\n" ++
           "def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=\n  let 1 (n, s, t) := p;\n  (Tok.close s, Tok.close s)\n")
           "quantity 1 but used" },
+    -- the `let` pattern is the general pattern form: its components may be patterns (a
+    -- three-name tuple was an elaborator special case; `tuplePat` is a tuple pattern)
+    { name := "13f: a `let` tuple pattern takes patterns, not only names (nested tuple, `_`)", run := fun _ => do
+        okLib ("import Prelude\ndef f (p : (Nat × Nat) × Nat × Nat) : Nat := let ((a, b), c, d) := p; a + b + c + d\n" ++
+          "#eval f ((1, 2), 3, 4)\n" ++
+          "def g (p : Nat × Nat × Nat) : Nat := let (a, _, c) := p; a + c\n" ++
+          "#eval g (4, 9, 5)")
+          ["10", "9"]
+        -- with a quantity the components are still names: one split each
+        failsLib ("import Prelude\ndef f (1 p : (Nat × Nat) × Nat × Nat) : Nat :=\n  let 1 ((a, b), c, d) := p;\n  a")
+          "its components are names or `_`" },
     -- (13k) list literals: a Prelude macro
     { name := "list literals: [a, b, c], [], nested, multi-line, with ++", run := fun _ =>
         okLib ("import Prelude\ndef xs : List Nat := [1, 2, 3]\ndef ys : List String := []\n" ++

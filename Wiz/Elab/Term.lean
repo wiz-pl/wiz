@@ -633,6 +633,12 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     if x.isOfKind "term.ident" then pure (.as ((x.getArg 0).getId?.getD "_") (stx.getArg 2))
     else .error "an as-pattern is `x@p` with a variable `x`"
   | "term.anon" => pure (.anon ((stx.getArg 1).args.filter (!· matches .atom ..)).toList)
+  | "term.tuplePat" =>
+    -- (13f) a tuple pattern of three or more in a `let`: the same view as `(a, (b, c))`
+    let inner := (stx.getArg 5).args
+    let rest := .node stx.info "null" (#[stx.getArg 3, .atom stx.info ","] ++ inner)
+    patView g (.node stx.info "term.tuple" #[.atom stx.info "(", stx.getArg 1, .atom stx.info ",", rest,
+      .atom stx.info ")"])
   | "term.num" | "term.str" => pure (.lit stx)
   | "term.dotIdent" => pure (.ctor none ((stx.getArg 1).getId?.getD "_") [])
   | "term.ident" =>
@@ -672,6 +678,13 @@ def patIsCtor (g : Globals R) (stx : Syntax) : Bool :=
   match patViewAs g stx with
   | .ok (_, .ctor ..) | .ok (_, .lit _) | .ok (_, .plusK ..) => true
   | _ => false
+
+/-- (13f) The components of a tuple pattern of three or more, `(p₁, …, pₙ)` as the
+right-nested `(p₁, (… pₙ))`: `[p₁, …, pₙ]`, from the `PatView.tuple` chain. -/
+partial def tuplePatComponents (g : Globals R) (a b : Syntax) : List Syntax :=
+  match patView g b with
+  | .ok (.tuple b1 b2) => a :: tuplePatComponents g b1 b2
+  | _ => [a, b]
 
 /-- The pattern `x₁@…@xₙ@p`. -/
 def asPatStx (ns : List Name) (p : Syntax) : Syntax :=
@@ -1314,7 +1327,6 @@ where
         | none => do let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
       | _ => do let (t, ty) ← infer ctx stx; unifyAt ctx stx expected ty; pure t
     | "term.letPair" => elabLetPair ctx stx expected
-    | "term.letTuple" => elabLetPair ctx (letTupleToPairs stx) expected
     -- (linear-case stage 2) `let () := u; b`: consumes `u : Unit`
     | "term.letUnit" => do
       let u ← check ctx (stx.getArg 4) (.unit (.succ .zero))
@@ -1714,24 +1726,6 @@ partial def inferTuple (ctx : LocalCtx R) (items : List Syntax) : ElabM R (Term 
     let bTerm := quote g (ctx.lvl + 1) bty
     return (.pair a b, ctx.sortVal g (.sigma "_" (.qlit QuantitySyntax.explicitDefault) aty (.mk ctx.env bTerm) .hole))
 
-/-- `let q (x₁, x₂, …, xₙ) := e; body` (n ≥ 3) as right-nested pairs:
-`let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …; let q (xₙ₋₁, xₙ) := rₙ₋₂; body`, with
-names `rᵢ` that no user name can capture. -/
-partial def letTupleToPairs (stx : Syntax) : Syntax :=
-  let i := stx.info
-  let names : List Syntax := [stx.getArg 3, stx.getArg 5] ++
-    ((stx.getArg 7).args.toList.filter (· matches .ident ..))
-  let pair (x y e body : Syntax) : Syntax :=
-    .node i "term.letPair" #[stx.getArg 0, stx.getArg 1, .atom i "(", x, .atom i ",", y, .atom i ")",
-      .atom i ":=", e, .node i Syntax.nullKind #[], body]
-  let rec go : Nat → List Syntax → Syntax → Syntax
-    | _, [x, y], e => pair x y e (stx.getArg 12)
-    | k, x :: rest, e =>
-      let r : Name := s!"tuple✝{k}"
-      pair x (.ident i r) e (go (k + 1) rest (.node i "term.ident" #[.ident i r]))
-    | _, _, e => e
-  go 0 names (stx.getArg 10)
-
 /-- (linear-case stage 2) The literal quantities a `split` at `q` binds its components
 at, `q·p` and `q`, for a Σ whose first component is at `p` (when both are literals): a
 component taken at 1 is linear (`LocalCtx.bindQ`), so a `match` on it is `casesOn1`. -/
@@ -1855,6 +1849,10 @@ partial def elabLetPat (ctx : LocalCtx R) (stx : Syntax) (expected : Option (VTy
         unless ps.length ≥ 2 do
           throwAt pat.info "an anonymous constructor pattern on a pair has at least two components"
         ps.mapM nameOf
+      -- (13f) `let q (p₁, …, pₙ) := e` with n ≥ 3: the components of the right-nested
+      -- pair, each a name (as for `⟨…⟩`)
+      | .tuple a b, .sigma .. =>
+        (tuplePatComponents g a b).mapM nameOf
       | _, sty => throwAt (ctx.withInfo (stx.getArg 4)).info s!"`let` with a quantity and a pattern expects a structure or a tuple, got {← showVal ctx sty}"
   pure (← splitChain ctx q s sty names body expected, expected)
 
@@ -3697,7 +3695,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let ty ← evalIn ctx (← freshTypeMeta ctx' "the type of this match")
     return (← check ctx stx ty, ty)
   | "term.calc" => elabCalc ctx stx
-  | "term.letPair" | "term.letTuple" | "term.absurd" | "term.rfl" =>
+  | "term.letPair" | "term.absurd" | "term.rfl" =>
     throwAt ctx.info "cannot infer the type of this expression; add a type ascription" ErrorCode.cannotInfer
   | "term.letUnit" => do
     let u ← check ctx (stx.getArg 4) (.unit (.succ .zero))

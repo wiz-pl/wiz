@@ -295,7 +295,7 @@ def layoutAfter (kind : Name) (tok : String) : List Chunk :=
   -- a `let` starts a line: the parser remembers its column (`withPosition`) for the
   -- terms after it, so a `let` in the middle of a line would forbid the continuation
   -- lines (of the `let`'s own body) to its left
-  | "term.let", ";" | "term.letPair", ";" | "term.letTuple", ";" | "term.letUnit", ";"
+  | "term.let", ";" | "term.letPair", ";" | "term.letUnit", ";"
   | "term.letPat", ";" => [.brk true]
   | _, _ => []
 

@@ -281,12 +281,15 @@ def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
   (Tok.close s, Tok.close t)
 ```
 
-`let q (x₁, …, xₙ) := e; body` with three or more names (`term.letTuple`) is right-nested
-pairs, as tuple types and tuple patterns are: `let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …`,
-with intermediate names (`tuple✝k`) that no program can mention (`letTupleToPairs`,
-`Elab/Term.lean`). Each step is a `let (x, y)` split at quantity `q`, so with `let 1` every
-component of a linear tuple is bound once, which is how a tuple holding resources is taken
-apart now that linear pairs aren't projected. Tests: group `language`.
+`let q (p₁, …, pₙ) := e; body` with three or more components is the general `let` with a
+pattern of 13h: `(p₁, …, pₙ)` is the tuple pattern `(p₁, (p₂, …))` (`term.tuplePat`), so
+the components may be any patterns (a nested tuple, `_`, or a constructor — the `let` is
+then a `match`, so the constructors must be covered), and without a quantity the `let` is
+the `match` on the tuple that 13h describes. With a quantity `q` the components must be
+names: each step is a `let (x, y)` split at quantity `q` (right-nested, as tuple types
+are), so with `let 1` every component of a linear tuple is bound once, which is how a
+tuple holding resources is taken apart now that linear pairs aren't projected. (Two
+components are `term.letPair`, the same split.) Tests: group `language`.
 
 ## 13g: as-patterns `x@p`
 
