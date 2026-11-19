@@ -69,7 +69,8 @@ produces the `unknown-memory` boundary, never a finding.
 `0` is the lowering's "size not statically known" marker. This is the event-sourced form
 of `boundsSizesOfFunc`: it reads the semantics' projection (`Sem.events`) rather than
 Wil's statement constructors. -/
-def Scry.boundsSizesOfEvents (es : List Scry.ObservedEvent) : List ((String × Nat) × Nat) :=
+def Scry.boundsSizesOfEvents (es : List (Scry.ObservedEvent Scry.Event)) :
+    List ((String × Nat) × Nat) :=
   Scry.concatLists (fun e =>
     match e.event with
     | .alloc _ cells => List.cons ((e.func, e.point), cells) .nil
@@ -420,7 +421,8 @@ def Scry.boundsOfUnit (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.P
 /-- The units of a run: one per function result, in result order (which is the program's
 function order, `Scry.evalAllStaged`). Each unit's events are the semantics' events for
 that function, in the order the semantics emitted them. -/
-def Scry.boundsUnits (es : List Scry.ObservedEvent) (rs : List Scry.FuncResult) :
+def Scry.boundsUnits (es : List (Scry.ObservedEvent Scry.Event))
+    (rs : List Scry.FuncResult) :
     List Scry.BoundsUnit :=
   Scry.concatLists (fun r =>
     List.cons (Scry.BoundsUnit.mk r.fn.name
@@ -433,7 +435,7 @@ def Scry.boundsJoin (rs : List Scry.BoundsResult) : Scry.BoundsResult :=
 
 /-- Run the two out-of-bounds rules of `pack` over a semantics' events. `s` supplies the
 event projection (`s.events p`); the default is `Scry.Wil.concrete`. -/
-def Scry.boundsCheckWith (s : Scry.Sem) (p : s.Ir) (pt : Scry.PtResult)
+def Scry.boundsCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir) (pt : Scry.PtResult)
     (pack : Scry.RulePack) (rs : List Scry.FuncResult) : Scry.BoundsResult :=
   let wr := pack.memoryRuleFor "out-of-bounds-write";
   let rr := pack.memoryRuleFor "out-of-bounds-read";
