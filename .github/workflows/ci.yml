@@ -581,11 +581,12 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
-  # (11s) The two Wiz→wasm page modules as Nix derivations (`packages.wiz-web` and
-  # `packages.wiz-playground`; flake.nix), built once here and published to Cachix. They
-  # used to be built inside `web`'s test step (95 % of its 608 s, with `wasm-opt -O2`'s
-  # 8–10 GiB peak as the tail that once reached 55 min) and again in every `docs` job on
-  # a push; both jobs now substitute these paths (`web/modules-from-store.sh`).
+  # (11s) The Wiz→wasm page modules as Nix derivations (`packages.wiz-web`,
+  # `packages.wiz-playground` and `packages.wiz-playground-ui`; flake.nix), built once
+  # here and published to Cachix. They used to be built inside `web`'s test step (95 % of
+  # its 608 s, with `wasm-opt -O2`'s 8–10 GiB peak as the tail that once reached 55 min)
+  # and again in every `docs` job on a push; both jobs now substitute these paths
+  # (`web/modules-from-store.sh`).
   #
   # It is not in `build`: a 10-minute wasm build there would sit on the shards' critical
   # path. Here it runs beside the shards. It waits for `build` when that runs, so its
@@ -607,19 +608,22 @@ jobs:
           cachix-name: ${{ env.CACHIX_NAME }}
           cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           lean: false
-      - name: nix build (wiz-web, wiz-playground)
+      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
         id: nix
         run: |
-          # Both at once they share `wiz`, the emscripten closure and mini-gmp, but the
-          # playground's `wasm-opt` is the memory peak: one derivation at a time keeps the
-          # runner (16 GB) clear of it. `wiz` and emscripten are substitutes.
-          nix build .#wiz-web .#wiz-playground --no-link -L --max-jobs 1
+          # They share `wiz`, the emscripten closure and mini-gmp; the playground engine is
+          # the expensive one (`--opt 1` in flake.nix, because `wasm-opt`'s -O2 peak does
+          # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
+          # `wiz` and emscripten are substitutes.
+          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
           web=$(nix path-info .#wiz-web)
           playground=$(nix path-info .#wiz-playground)
+          ui=$(nix path-info .#wiz-playground-ui)
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "playground=$playground" >> "$GITHUB_OUTPUT"
-          echo "wiz-web: $web"; echo "wiz-playground: $playground"
-          du -sh "$web" "$playground"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          echo "wiz-web: $web"; echo "wiz-playground: $playground"; echo "wiz-playground-ui: $ui"
+          du -sh "$web" "$playground" "$ui"
       - name: Publish the store paths to Cachix
         # `web` and `docs` substitute these; the same token rule as the compiler's push.
         # A fork pull request has no secret: its jobs build the modules themselves.
@@ -636,7 +640,7 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz-web .#wiz-playground)
+            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui)
 
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
   # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
@@ -693,6 +697,7 @@ jobs:
           # the module directories, copied into web/test.sh's OUT (no build)
           WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
           WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
+          WIZ_PLAYGROUND_UI_FROM: ${{ steps.modules.outputs.ui }}
         run: sh web/test.sh
       - name: The React framework's browser half (a Node DOM double)
         env:

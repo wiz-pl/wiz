@@ -5,18 +5,40 @@
 # separate module (web/build-playground.sh), so a user program's trap cannot lose the UI
 # state, and no user code ever runs in this one.
 #
-#   usage: web/build-playground-ui.sh [OUT] [--gmp-src GMP.tar.xz]
-#   (OUT default web/out; needs .lake/build/bin/wiz and the library in lib/)
+#   usage: web/build-playground-ui.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR]
+#   (OUT default web/out; needs .lake/build/bin/wiz and the library in lib/.
+#   --from DIR, or WIZ_PLAYGROUND_UI_FROM=DIR: copy the module a Nix build made instead
+#   (`nix build .#wiz-playground-ui`); local use is unchanged.)
 #
 # It is a second output beside web/build-playground.sh's wiz-playground.mjs; the page
 # loads it only for `?ui=loom` and falls back to its static markup when it is absent.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-# without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
-case "${2:-}" in --gmp-src) GMPSRC=$(cd "$(dirname "$3")" && pwd)/$(basename "$3") ;; esac
-OUT=$(mkdir -p "${1:-$ROOT/web/out}" && cd "${1:-$ROOT/web/out}" && pwd)
+FROM=${WIZ_PLAYGROUND_UI_FROM:-}
+OUT_DIR=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gmp-src) GMPSRC=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --from) FROM=$2; shift 2 ;;
+    *) OUT_DIR=$1; shift ;;
+  esac
+done
+OUT=$(mkdir -p "${OUT_DIR:-$ROOT/web/out}" && cd "${OUT_DIR:-$ROOT/web/out}" && pwd)
+# A module built elsewhere (packages.wiz-playground-ui): same files, no Emscripten, no nix.
+if [ -n "$FROM" ]; then
+  [ -f "$FROM/wiz-playground-ui.mjs" ] || {
+    echo "build-playground-ui: $FROM/wiz-playground-ui.mjs is missing (--from $FROM)" >&2; exit 1; }
+  cp -R --no-preserve=mode "$FROM"/. "$OUT"/
+  echo "copied $OUT/wiz-playground-ui.mjs from $FROM"
+  exit 0
+fi
+# without emcc on the PATH, run again with Emscripten from nixpkgs
+if ! command -v emcc >/dev/null; then
+  set --; [ -z "$OUT_DIR" ] || set -- "$OUT_DIR"
+  [ -z "$GMPSRC" ] || set -- "$@" --gmp-src "$GMPSRC"
+  exec nix shell nixpkgs#emscripten -c "$0" "$@"
+fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 
 # mini-gmp, as web/build-playground.sh does (share OUT/gmp when both are built)
