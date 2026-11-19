@@ -102,7 +102,6 @@ partial def dropV : IVal → RunM Unit
       | .token _ => pure ()
   | .arr xs => xs.forM dropV
   | _ => pure ()
-  | _ => pure ()
 
 /-- Field `i` of a number's unary view (`natView`): field 0 is its constructor tag. The
 other fields would be fresh objects, which a borrowed `proj` (stage 8e) never frees: the
@@ -244,31 +243,31 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
           let ix := match RVal.ExternSig.ofKey? op with
             | some sig => sig.argIndices
             | none => []
-          let at (j : Nat) : IVal := match ix[j]? with
+          let argAt (j : Nat) : IVal := match ix[j]? with
             | some i => (args[i]?).getD .erased
             | none => .erased
-          let idx (j : Nat) : Nat := match at j with
+          let idx (j : Nat) : Nat := match argAt j with
             | .num k | .tag k => k
             | _ => 0
-          let arr : Option (Array IVal) := match at 0 with
+          let arr : Option (Array IVal) := match argAt 0 with
             | .arr a => some a
             | _ => none
           match c, arr with
           | "wiz_array_empty", _ => pure (some (.arr #[]))
           | "wiz_array_push", some a => do
-            let x := at 1
+            let x := argAt 1
             dupV x
             for v in a do dupV v
             pure (some (.arr (a.push x)))
           | "wiz_array_size", some a => pure (some (.num a.size))
           | "wiz_array_get", some a => do
-            let d := at 2
+            let d := argAt 2
             match a[(idx 1)]? with
             | some x => do dupV x; pure (some x)
             | none => do dupV d; pure (some d)
           | "wiz_array_set", some a => do
             let i := idx 1
-            let x := at 2
+            let x := argAt 2
             for v in a do dupV v
             if i < a.size then do
               dupV x
