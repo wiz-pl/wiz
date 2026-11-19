@@ -35,12 +35,17 @@ The conventions that rules depend on:
 Control flow: `if`/`while`/`do`/`for`/`foreach`/`switch`/`break`/`continue`/`return`;
 `try`/`catch`/`finally` with a possible throw after every statement of a `try` body
 (a havoc'd branch to the catch dispatch, which picks a clause or propagates), `throw` to
-the innermost dispatch or out of the function; `using` calls `Dispose`. `switch` picks a
-section nondeterministically (sound for taint; constants are not compared yet).
+the innermost dispatch or out of the function; `using` calls `Dispose`. A `switch`
+statement and a `switch` expression test their labels in source order (values for a
+constant label, a runtime type test otherwise), and a label's pattern binding is copied
+at the start of its section/arm — the block the label's true edge enters — before its
+`when` guard, which is the section's own condition. Stacked labels (`case 1: case 2:`)
+are one section. A property, relational or list label, and an external constant whose
+value an integer scrutinee would need, are unknown tests and reported by name.
 
 An `is` test is a runtime test the lowering does not decide: its value is a
-nondeterministic bit, the same abstraction a `switch` section gets. A pattern that
-binds a name (`is T x`, `is { … } x`, `is var x`) declares a local of the pattern's
+nondeterministic bit, the same abstraction a switch label's type test gets. A pattern
+that binds a name (`is T x`, `is { … } x`, `is var x`) declares a local of the pattern's
 type (the operand's when the pattern has none) and assigns it the operand **on the
 test's true edge only**, so a use of the name carries the operand's taint exactly where
 the test held. `is null` / `is not null` and integer constants are exact comparisons.
@@ -161,6 +166,12 @@ def Scry.Cs.Cls.empty : Scry.Cs.Cls := Scry.Cs.Cls.mk "" "" .nil .nil .nil .nil 
 structure Scry.Cs.Unit where
   classes : List Scry.Cs.Cls
   enums : List String
+  /-- Every member of every enum the unit declares, with its value, keyed by both the
+  simple and the qualified enum name (`("Mode", "Idle", 0)` and `("Ns.Mode", "Idle",
+  0)`). A member whose value the lowering cannot read (an explicit value that is not a
+  plain decimal literal, or one after it) is absent: a label naming it is reported, not
+  guessed. -/
+  enumVals : List (String × String × Nat)
   usings : List String
 
 /-- A local variable: its register and canonical C# type. -/
@@ -191,6 +202,9 @@ structure Scry.Cs.LS where
   /-- Pattern bindings declared by the condition being lowered, installed on the edge
   where they hold (see `condPending`). -/
   pending : List Scry.Cs.PatBind
+  /-- The locals each switch section's/arm's label binds, keyed by the body block: the
+  body must see its own section's names, not a later label's same-named binding. -/
+  labelEnv : List (Nat × List Scry.Cs.Local)
 
 def Scry.Cs.M (A : Type) : Type := Scry.Cs.LS → (Scry.Cs.LS × A)
 
@@ -1194,18 +1208,72 @@ def Scry.Cs.armValue (c : Scry.Cst) (a : Nat) : Option Nat :=
         (Bool.or (String.eq k "discard") (String.eq k "parenthesized_variable_designation")))))
     (List.reverse (Scry.kids c a))
 
-/-- `x switch { … }`: a nondeterministic choice among the arms (labels and guards are
-not compared, so every arm is reachable — sound for taint), each arm's value copied into
-one result register, so taint in any arm reaches the result. -/
+/-- The pattern of a `switch_expression_arm`: its first child that is neither the value
+expression nor a `when_clause`. -/
+def Scry.Cs.armPattern (c : Scry.Cst) (a : Nat) : Option Nat :=
+  match Scry.Cs.armValue c a with
+  | .some v => List.find (fun j => Bool.and (Bool.not (Nat.beq j v))
+      (Bool.not (String.eq (c.kindOf j) "when_clause"))) (Scry.kids c a)
+  | .none => .none
+
+def Scry.Cs.armWhen (c : Scry.Cst) (a : Nat) : Option Nat := Scry.childK c a "when_clause"
+
+/-- The arm that takes every value (`_ =>`, no guard): the chain's fallback. -/
+def Scry.Cs.armIsFallback (c : Scry.Cst) (a : Nat) : Bool :=
+  match Scry.Cs.armPattern c a with
+  | .some p => Bool.and (String.eq (c.kindOf p) "discard")
+      (match Scry.Cs.armWhen c a with | .none => .true | .some _ => .false)
+  | .none => .false
+
+/-- The chain of a switch expression: the same label tests as a `switch` statement, each
+guard checked with the arm's binding installed; the arm body then copies its value into
+`r`. `fb` is the fallback arm's block (or the join). -/
+partial def Scry.Cs.emitArmTests (c : Scry.Cst) (x : Scry.Cs.EV) (at : Nat) :
+    List (Nat × Nat) → Nat → Scry.Cs.M Unit
+  | .nil, fb => Scry.Cs.goto c at fb
+  | .cons (a, body) rest, fb => do
+    s ← Scry.Cs.st;
+    match Scry.Cs.armPattern c a with
+    | .none => Scry.Cs.emitArmTests c x at rest fb
+    | .some p => do
+      mark ← Scry.Cs.markPending;
+      emark ← Scry.Cs.envMark;
+      test ← Scry.Cs.labelTest c a x p .false;
+      binds ← Scry.Cs.cutPending mark;
+      (match Scry.Cs.labelUncompared c s.unit x p with
+        | .some what => Scry.Cs.warn c p ("switch arm (" ++ what
+          ++ ") is not compared: the arm is reached by an unknown test")
+        | .none => Scry.Cs.pure ());
+      tc ← Scry.Cs.bitCond c a test;
+      match rest with
+      | .nil => do
+        edge ← Scry.Cs.newBlock;
+        Scry.Cs.seal c a (.br tc (Wil.mkBlockId edge) (Wil.mkBlockId fb) Wil.noSpan);
+        Scry.Cs.startBlock edge;
+        Scry.Cs.installPending c a .true binds;
+        Scry.Cs.emitGuard c a (Scry.Cs.armWhen c a) body fb;
+        Scry.Cs.recordLabel body emark
+      | .cons _ _ => do
+        next ← Scry.Cs.newBlock;
+        edge ← Scry.Cs.newBlock;
+        Scry.Cs.seal c a (.br tc (Wil.mkBlockId edge) (Wil.mkBlockId next) Wil.noSpan);
+        Scry.Cs.startBlock edge;
+        Scry.Cs.installPending c a .true binds;
+        Scry.Cs.emitGuard c a (Scry.Cs.armWhen c a) body next;
+        Scry.Cs.recordLabel body emark;
+        Scry.Cs.startBlock next;
+        Scry.Cs.emitArmTests c x at rest fb
+
+/-- `x switch { … }`: one comparison (or unknown test) per arm, in source order, and the
+arm's value copied into one result register, so taint in any arm reaches the result.
+A `_` arm without a guard is the fallback; a guard is evaluated after the arm's binding
+is installed, and only its true edge reaches the arm's value. -/
 partial def Scry.Cs.lowerSwitch (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV := do
   let kids := Scry.kids c n;
   let arms := List.filter (fun j => String.eq (c.kindOf j) "switch_expression_arm") kids;
-  (match kids with
-    | .cons scrut _ => do
-      ign ← Scry.Cs.lowerExpr c scrut;
-      Scry.Cs.pure ()
-    | .nil => Scry.Cs.pure ());
-  Scry.Cs.warn c n "switch expression arms are not compared: every arm is reachable";
+  x ← (match kids with
+    | .cons scrut _ => Scry.Cs.lowerExpr c scrut
+    | .nil => Scry.Cs.havoc c n Wil.Ty.unknown "switch expression without a value");
   match arms with
   | .nil => Scry.Cs.havoc c n Wil.Ty.unknown "switch expression without arms"
   | .cons a0 _ => do
@@ -1213,32 +1281,41 @@ partial def Scry.Cs.lowerSwitch (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV 
       | .some e => Scry.Cs.typeHint c e
       | .none => "?";
     wt ← Scry.Cs.wilOf ty;
+    s0 ← Scry.Cs.st;
     r ← Scry.Cs.fresh wt;
     jb ← Scry.Cs.newBlock;
     bs ← Scry.Cs.sectionBlocks (List.length arms);
-    Scry.Cs.dispatch c n bs (.some jb);
-    Scry.Cs.lowerArms c arms bs r jb;
+    let zips := Scry.Cs.zipArms c arms bs;
+    let pairs := List.filter (fun p => Bool.not (Scry.Cs.armIsFallback c p.1)) zips;
+    let fb : Nat := match List.find (fun p => Scry.Cs.armIsFallback c p.1) zips with
+      | .some p => p.2
+      | .none => jb;
+    Scry.Cs.emitArmTests c x n pairs fb;
+    Scry.Cs.lowerArms c arms bs r jb s0.env;
     Scry.Cs.startBlock jb;
     Scry.Cs.pure (Scry.Cs.ev r ty)
 
-/-- The arms of a `switch` expression: one block per arm, its value copied to `r`. -/
+/-- Pair each arm with its block, in order. -/
+partial def Scry.Cs.zipArms (c : Scry.Cst) : List Nat → List Nat → List (Nat × Nat)
+  | .cons a arest, .cons b brest => .cons (a, b) (Scry.Cs.zipArms c arest brest)
+  | _, _ => .nil
+
+/-- The arms of a `switch` expression: one block per arm, its value copied to `r`. The
+pattern's binding and the `when` guard were emitted on the arm's edge (see
+`emitArmTests`), so the block is entered only where they held. -/
 partial def Scry.Cs.lowerArms (c : Scry.Cst) (arms : List Nat) (bs : List Nat) (r : Wil.Var)
-    (jb : Nat) : Scry.Cs.M Unit :=
+    (jb : Nat) (base : List Scry.Cs.Local) : Scry.Cs.M Unit :=
   match arms, bs with
   | .cons a arest, .cons b brest => do
     Scry.Cs.startBlock b;
-    (match Scry.childK c a "when_clause" with
-      | .some w => do
-        ign ← Scry.Cs.lowerExprs c (Scry.kids c w);
-        Scry.Cs.pure ()
-      | .none => Scry.Cs.pure ());
+    Scry.Cs.envFor b base;
     (match Scry.Cs.armValue c a with
       | .some e => do
         x ← Scry.Cs.lowerExpr c e;
         Scry.Cs.emit c a (Wil.copy r x.v)
       | .none => Scry.Cs.pure ());
     Scry.Cs.goto c a jb;
-    Scry.Cs.lowerArms c arest brest r jb
+    Scry.Cs.lowerArms c arest brest r jb base
   | _, _ => Scry.Cs.pure ()
 
 /-- `x with { P = e }`: the declaration's initialiser values are evaluated (a sink
@@ -1475,6 +1552,31 @@ partial def Scry.Cs.valueCond (c : Scry.Cst) (n : Nat) : Scry.Cs.M Wil.Cond := d
   Scry.Cs.emit c n (Wil.cst z (Wil.Val.default x.v.ty));
   Scry.Cs.pure (Wil.Cond.cmp .ne x.v z)
 
+/-- The scope as a mark: the locals a label declares are those added since it. -/
+def Scry.Cs.envMark : Scry.Cs.M (List Scry.Cs.Local) := do
+  s ← Scry.Cs.st;
+  Scry.Cs.pure s.env
+
+/-- The locals declared since `mark` (the env's new prefix). -/
+def Scry.Cs.envSince (mark : List Scry.Cs.Local) : Scry.Cs.M (List Scry.Cs.Local) := do
+  s ← Scry.Cs.st;
+  Scry.Cs.pure (List.take (Nat.sub (List.length s.env) (List.length mark)) s.env)
+
+/-- Record the locals a switch label declares, so the section's body sees exactly them. -/
+def Scry.Cs.recordLabel (block : Nat) (mark : List Scry.Cs.Local) : Scry.Cs.M Unit := do
+  own ← Scry.Cs.envSince mark;
+  Scry.Cs.modify (fun s => { s with labelEnv := .cons (block, own) s.labelEnv })
+
+/-- Restrict the scope to `base` plus the locals the label of `block` declares: a switch
+section's body must not resolve a name bound by a later section's label. -/
+def Scry.Cs.envFor (block : Nat) (base : List Scry.Cs.Local) : Scry.Cs.M Unit := do
+  s ← Scry.Cs.st;
+  let own : List Scry.Cs.Local := List.concat (List.map (fun p =>
+    match Nat.beq p.1 block with
+    | .true => p.2
+    | .false => .nil) s.labelEnv);
+  Scry.Cs.modify (fun s2 => { s2 with env := List.append own base })
+
 /-- The pending bindings, as a mark for `cutPending`. -/
 def Scry.Cs.markPending : Scry.Cs.M (List Scry.Cs.PatBind) := do
   s ← Scry.Cs.st;
@@ -1551,6 +1653,182 @@ partial def Scry.Cs.throwHere (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   | .some b => Scry.Cs.goto c n b
   | .none => Scry.Cs.seal c n (.ret .none Wil.noSpan)
 
+/-- The value of member `m` of the enum named `q` (its simple or qualified name), when the
+unit declares it with a known value. -/
+def Scry.Cs.enumValue (u : Scry.Cs.Unit) (q m : String) : Option Nat :=
+  match List.find (fun r => Bool.and (String.eq r.2.1 m)
+      (Bool.or (String.eq r.1 q) (String.endsWith r.1 ("." ++ q)))) u.enumVals with
+  | .some r => .some r.2.2
+  | .none => .none
+
+-- ## Switch labels
+
+/-- Is `k` a literal whose lowered value is a constant (`Scry.Cs.lowerExpr` emits a
+`cst`/`num`/`globalRef` for it)? -/
+def Scry.Cs.isConstLit (k : String) : Bool :=
+  String.elem k ["null_literal", "integer_literal", "boolean_literal", "character_literal",
+    "string_literal", "verbatim_string_literal", "raw_string_literal"]
+
+/-- Is the Wil type a reference, as far as the C# lowering knows? A named constant of
+unknown value is compared symbolically only against a reference: its pointer identity
+is a distinct value per label. -/
+def Scry.Cs.isRefTy (t : Wil.Ty) : Bool := match t with
+  | .ptr _ => .true
+  | .dyn => .true
+  | .unknown => .true
+  | _ => .false
+
+/-- A boolean value as a branch condition (`bit != 0`). -/
+def Scry.Cs.bitCond (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) : Scry.Cs.M Wil.Cond := do
+  z ← Scry.Cs.fresh x.v.ty;
+  Scry.Cs.emit c n (Wil.cst z (Wil.Val.default x.v.ty));
+  Scry.Cs.pure (Wil.Cond.cmp .ne x.v z)
+
+/-- `x == v` (or `!=` when `neg`): the value comparison a constant switch label makes. -/
+def Scry.Cs.cmpLabel (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (v : Wil.Var) (neg : Bool) :
+    Scry.Cs.M Scry.Cs.EV := do
+  b ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+  Scry.Cs.emit c n (Wil.binop b (match neg with | .true => .ne | .false => .eq) x.v v);
+  Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
+/-- A `case A.B:` / `E.A =>` label naming a constant of a type the unit does not declare.
+The value is not in the tree: the label is compared against a **distinct symbolic
+value** (`globalRef "$const:A.B"`), so two labels never alias. A reference scrutinee can
+be compared to it; an integer one cannot (there is no integer to invent), so that label
+is an unknown test and the caller reports it. -/
+partial def Scry.Cs.labelNamed (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (v : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV := do
+  s ← Scry.Cs.st;
+  match Scry.childF c v "expression", Scry.childF c v "name" with
+  | .some qn, .some mn => do
+    let q := Scry.Cs.nameText c qn;
+    let m := Scry.Cs.nameText c mn;
+    match Scry.Cs.enumValue s.unit q m with
+    | .some k => do
+      -- an enum the unit declares: its ordinal is the value, in the scrutinee's type
+      r ← Scry.Cs.fresh x.v.ty;
+      Scry.Cs.emit c v (Wil.num r k);
+      Scry.Cs.cmpLabel c n x r neg
+    | .none => match Scry.Cs.isRefTy x.v.ty with
+      | .true => do
+        r ← Scry.Cs.fresh (Wil.Ty.ptr Wil.Ty.dyn);
+        Scry.Cs.emit c v (Wil.globalRef r ("$const:" ++ c.textOf v));
+        Scry.Cs.cmpLabel c n x r neg
+      | .false => do
+        b ← Scry.Cs.freshBit c n;
+        Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  | _, _ => do
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
+/-- A switch label's test against the scrutinee `x`. A literal is compared by value; an
+enum member the unit declares by its ordinal; an external enum member or `const` by a
+distinct symbolic value; a bare name is a **type test** (tree-sitter parses `case T:` /
+`T =>` as a `constant_pattern` around an identifier, and C# means the type). Anything
+else — and an external constant against an integer scrutinee — is an unknown test, which
+`Scry.Cs.labelUncompared` reports. -/
+partial def Scry.Cs.labelConstTest (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (v : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV := do
+  let vk := c.kindOf v;
+  if Scry.Cs.isConstLit vk then do
+    lit ← Scry.Cs.lowerExpr c v;
+    Scry.Cs.cmpLabel c n x lit.v neg
+  else if String.eq vk "prefix_unary_expression" then do
+    lit ← Scry.Cs.lowerExpr c v;
+    Scry.Cs.cmpLabel c n x lit.v neg
+  else if String.eq vk "member_access_expression" then Scry.Cs.labelNamed c n x v neg
+  else do
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
+/-- A switch label's test: a `constant_pattern` is decided by `labelConstTest`; a
+`discard` label (`case _:` / `_ =>`) is unconditional; every other pattern (a type
+test, `var`, or/and, and the unknown kinds) goes through `lowerPattern`, which also
+schedules the bindings `installPending` puts on the true edge. -/
+partial def Scry.Cs.labelTest (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (p : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV := do
+  let k := c.kindOf p;
+  if String.eq k "constant_pattern" then
+    match c.childrenOf p with
+    | .cons v _ => Scry.Cs.labelConstTest c n x v neg
+    | .nil => do
+      b ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if String.eq k "discard" then do
+    one ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+    Scry.Cs.emit c p (Wil.num one 1);
+    Scry.Cs.pure (Scry.Cs.ev one "System.Boolean")
+  else Scry.Cs.lowerPattern c n x p neg
+
+/-- The reason a label's test is **not compared**, when it is one the lowering cannot
+decide, or `none` for a compared label and for a type test (a runtime fact, like `is T`,
+which is not a warning). -/
+def Scry.Cs.labelUncompared (c : Scry.Cst) (u : Scry.Cs.Unit) (x : Scry.Cs.EV) (p : Nat) :
+    Option String :=
+  let k := c.kindOf p;
+  if String.eq k "constant_pattern" then
+    match c.childrenOf p with
+    | .cons v _ =>
+      let vk := c.kindOf v;
+      if Bool.or (Scry.Cs.isConstLit vk) (String.eq vk "identifier") then .none
+      else if String.eq vk "prefix_unary_expression" then .none
+      else if String.eq vk "member_access_expression" then
+        (match Scry.childF c v "expression", Scry.childF c v "name" with
+          | .some qn, .some mn =>
+            match Scry.Cs.enumValue u (Scry.Cs.nameText c qn) (Scry.Cs.nameText c mn) with
+            | .some _ => .none
+            | .none => match Scry.Cs.isRefTy x.v.ty with
+              | .true => .none
+              | .false => .some ("the constant " ++ c.textOf v ++ " has no known value")
+          | _, _ => .some "a member access")
+      else .some ("a " ++ vk)
+    | .nil => .some "an empty constant pattern"
+  else if String.eq k "recursive_pattern" then .some "a property pattern"
+  else if String.eq k "relational_pattern" then .some "a relational pattern"
+  else if String.eq k "list_pattern" then .some "a list pattern"
+  else if Bool.or (Bool.or (String.eq k "declaration_pattern") (String.eq k "type_pattern"))
+      (Bool.or (Bool.or (String.eq k "var_pattern") (String.eq k "discard"))
+        (Bool.or (String.eq k "parenthesized_pattern") (String.eq k "negated_pattern"))) then .none
+  else if Bool.or (String.eq k "or_pattern") (String.eq k "and_pattern") then .none
+  else .some ("a " ++ k)
+
+/-- A section's label pattern (`none` for `default`), its `when` guard, and its
+statements. -/
+def Scry.Cs.sectionPattern (c : Scry.Cst) (sec : Nat) : Option Nat :=
+  List.find (fun j =>
+    let k := c.kindOf j;
+    Bool.and (Bool.not (Scry.Cs.isStmtKind k))
+      (Bool.and (Bool.not (String.eq k "when_clause"))
+        (Bool.and (Bool.not (String.eq k "comment"))
+          (Bool.not (String.eq k "default_switch_label"))))) (Scry.kids c sec)
+
+def Scry.Cs.sectionWhen (c : Scry.Cst) (sec : Nat) : Option Nat := Scry.childK c sec "when_clause"
+
+def Scry.Cs.sectionStmts (c : Scry.Cst) (sec : Nat) : List Nat :=
+  List.filter (fun j => Scry.Cs.isStmtKind (c.kindOf j)) (Scry.kids c sec)
+
+/-- Branch to `body` when the guard holds and to `fb` when it fails. The pattern's
+bindings are already installed; a guard that declares its own (`when o is T x`) installs
+them on its true edge too. -/
+def Scry.Cs.emitGuard (c : Scry.Cst) (at : Nat) (w : Option Nat) (body fb : Nat) :
+    Scry.Cs.M Unit :=
+  match w with
+  | .none => Scry.Cs.goto c at body
+  | .some wn => do
+    s ← Scry.Cs.st;
+    let expr : Nat := match Scry.kids c wn with
+      | .cons e _ => e
+      | .nil => wn;
+    mark ← Scry.Cs.markPending;
+    gc ← Scry.Cs.lowerCond c expr;
+    gb ← Scry.Cs.cutPending mark;
+    Scry.Cs.installPending c expr .true gb;
+    Scry.Cs.seal c wn (.br gc (Wil.mkBlockId body) (Wil.mkBlockId fb) Wil.noSpan)
+
+
+/-- The `||` / `&&` tail tree-sitter-c-sharp swallows into a constant pattern
+(`x is null || rest`): the left spine is the constant compared with `x`, the tail is
+ordinary code, lowered here so nothing is skipped. -/
 -- ## Statements
 
 /-- After a statement inside `try`: it may have thrown. -/
@@ -1817,18 +2095,17 @@ partial def Scry.Cs.lowerStmtGo (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   else if String.eq k "switch_statement" then
     match Scry.childF c n "value", Scry.childF c n "body" with
     | .some v, .some body => do
-      ign ← Scry.Cs.lowerExpr c v;
+      x ← Scry.Cs.lowerExpr c v;
+      s0 ← Scry.Cs.st;
       xb ← Scry.Cs.newBlock;
       let secs := Scry.childrenK c body "switch_section";
-      let hasDefault := List.any (fun sec => match Scry.childK c sec "default_switch_label" with
-        | .some _ => .true
-        | .none => .false) secs;
-      Scry.Cs.warn c n "switch labels are not compared: every section is reachable";
-      bs ← Scry.Cs.sectionBlocks (List.length secs);
-      Scry.Cs.dispatch c n bs (match hasDefault with
-        | .true => .none
-        | .false => .some xb);
-      Scry.Cs.lowerSections c secs bs xb;
+      let groups := Scry.Cs.switchGroups c .nil secs;
+      bs ← Scry.Cs.sectionBlocks (List.length groups);
+      let (pairs, defB) := Scry.Cs.labelPairs c groups bs;
+      Scry.Cs.emitLabels c x n pairs (match defB with
+        | .some b => b
+        | .none => xb);
+      Scry.Cs.lowerGroups c groups bs xb s0.env;
       Scry.Cs.startBlock xb
     | _, _ => Scry.Cs.warn c n "malformed switch"
   else if String.eq k "try_statement" then Scry.Cs.lowerTry c n
@@ -1881,18 +2158,101 @@ partial def Scry.Cs.dispatch (c : Scry.Cst) (n : Nat) (targets : List Nat) (last
     Scry.Cs.startBlock nb;
     Scry.Cs.dispatch c n rest last
 
-partial def Scry.Cs.lowerSections (c : Scry.Cst) (secs : List Nat) (bs : List Nat) (xb : Nat) : Scry.Cs.M Unit :=
-  match secs, bs with
-  | .cons sec srest, .cons b brest => do
+/-- Group a switch's sections: consecutive sections with no statements are alternative
+labels of the next section with statements (`case 1: case 2: …`); a trailing group with
+no statements is a label that falls out of the switch. -/
+partial def Scry.Cs.switchGroups (c : Scry.Cst) (acc : List Nat) : List Nat → List (List Nat)
+  | .nil => match acc with
+    | .nil => .nil
+    | _ => .cons acc .nil
+  | .cons sec rest =>
+    match Scry.Cs.sectionStmts c sec with
+    | .nil => Scry.Cs.switchGroups c (List.append acc (.cons sec .nil)) rest
+    | _ => .cons (List.append acc (.cons sec .nil)) (Scry.Cs.switchGroups c .nil rest)
+
+/-- Every label of a group and the block its section's statements start in, plus the
+`default` group's block (the chain's fallback). A label is a section with a pattern;
+`default` has none. -/
+partial def Scry.Cs.labelPairs (c : Scry.Cst) (groups : List (List Nat)) (bs : List Nat) :
+    List (Nat × Nat) × Option Nat :=
+  match groups, bs with
+  | .nil, _ => (.nil, .none)
+  | _, .nil => (.nil, .none)
+  | .cons g grest, .cons b brest =>
+    let here := List.map (fun s => (s, b))
+      (List.filter (fun s => match Scry.Cs.sectionPattern c s with
+        | .some _ => .true
+        | .none => .false) g);
+    let hereDef := List.any (fun s => match Scry.Cs.sectionPattern c s with
+      | .some _ => .false
+      | .none => .true) g;
+    let rest := Scry.Cs.labelPairs c grest brest;
+    let d : Option Nat := match rest.2 with
+      | .some x => .some x
+      | .none => match hereDef with
+        | .true => .some b
+        | .false => .none;
+    (List.append here rest.1, d)
+
+/-- The chain of a switch statement: for each label, its test and a branch to the label's
+edge block, which installs the section's binding and checks its `when` guard before the
+statements. `fb` is the `default` section's block (or the exit). -/
+partial def Scry.Cs.emitLabels (c : Scry.Cst) (x : Scry.Cs.EV) (at : Nat) :
+    List (Nat × Nat) → Nat → Scry.Cs.M Unit
+  | .nil, fb => Scry.Cs.goto c at fb
+  | .cons (sec, body) rest, fb => do
+    match Scry.Cs.sectionPattern c sec with
+    | .none => Scry.Cs.emitLabels c x at rest fb
+    | .some p => do
+      s ← Scry.Cs.st;
+      mark ← Scry.Cs.markPending;
+      emark ← Scry.Cs.envMark;
+      test ← Scry.Cs.labelTest c sec x p .false;
+      binds ← Scry.Cs.cutPending mark;
+      (match Scry.Cs.labelUncompared c s.unit x p with
+        | .some what => Scry.Cs.warn c p ("switch label (" ++ what
+          ++ ") is not compared: the section is reached by an unknown test")
+        | .none => Scry.Cs.pure ());
+      tc ← Scry.Cs.bitCond c sec test;
+      match rest with
+      | .nil => do
+        edge ← Scry.Cs.newBlock;
+        Scry.Cs.seal c sec (.br tc (Wil.mkBlockId edge) (Wil.mkBlockId fb) Wil.noSpan);
+        Scry.Cs.startBlock edge;
+        Scry.Cs.installPending c sec .true binds;
+        Scry.Cs.emitGuard c sec (Scry.Cs.sectionWhen c sec) body fb;
+        Scry.Cs.recordLabel body emark
+      | .cons _ _ => do
+        next ← Scry.Cs.newBlock;
+        edge ← Scry.Cs.newBlock;
+        Scry.Cs.seal c sec (.br tc (Wil.mkBlockId edge) (Wil.mkBlockId next) Wil.noSpan);
+        Scry.Cs.startBlock edge;
+        Scry.Cs.installPending c sec .true binds;
+        Scry.Cs.emitGuard c sec (Scry.Cs.sectionWhen c sec) body next;
+        Scry.Cs.recordLabel body emark;
+        Scry.Cs.startBlock next;
+        Scry.Cs.emitLabels c x at rest fb
+
+/-- The bodies of a switch's label groups: each is a block, the sections' statements
+lowered with `break` targeting the exit. -/
+partial def Scry.Cs.lowerGroups (c : Scry.Cst) (groups : List (List Nat)) (bs : List Nat)
+    (xb : Nat) (base : List Scry.Cs.Local) : Scry.Cs.M Unit :=
+  match groups, bs with
+  | .cons g grest, .cons b brest => do
     s ← Scry.Cs.st;
+    let at : Nat := match List.reverse g with
+      | .cons last _ => last
+      | .nil => 0;
+    let stmts : List Nat := match List.reverse g with
+      | .cons last _ => Scry.Cs.sectionStmts c last
+      | .nil => .nil;
     Scry.Cs.startBlock b;
+    Scry.Cs.envFor b base;
     Scry.Cs.modify (fun s2 => { s2 with ls := { s2.ls with breakTo := .some xb } });
-    let body := List.filter (fun j => Bool.not (Bool.or (String.eq (c.kindOf j) "case_switch_label")
-      (String.eq (c.kindOf j) "default_switch_label"))) (Scry.kids c sec);
-    Scry.Cs.scoped (Scry.Cs.lowerStmts c body);
-    Scry.Cs.goto c sec xb;
+    Scry.Cs.scoped (Scry.Cs.lowerStmts c stmts);
+    Scry.Cs.goto c at xb;
     Scry.Cs.modify (fun s2 => { s2 with ls := { s2.ls with breakTo := s.ls.breakTo } });
-    Scry.Cs.lowerSections c srest brest xb
+    Scry.Cs.lowerGroups c grest brest xb base
   | _, _ => Scry.Cs.pure ()
 
 /-- `try { … } catch (T e) { … } finally { … }` (see the module doc). -/
@@ -2123,6 +2483,53 @@ partial def Scry.Cs.enumsOf (c : Scry.Cst) (ns : String) (n : Nat) : List String
       | .none => .nil
     else .nil) (Scry.kids c n))
 
+/-- The rows of an enum's members, with their values: an explicit value is read when it
+is a plain decimal literal, otherwise the sequence continues from the previous member.
+A member whose explicit value is not a decimal literal (and every member after it) is
+omitted: its value is unknown. -/
+partial def Scry.Cs.enumMemberRows (c : Scry.Cst) (prev : Nat) : List Nat → List (String × Nat)
+  | .nil => .nil
+  | .cons m rest =>
+    let nm : String := match Scry.childF c m "name" with
+      | .some x => c.textOf x
+      | .none => "";
+    match Scry.childF c m "value" with
+    | .some vn => match String.parseNat (String.trim (c.textOf vn)) with
+      | .some v => .cons (nm, v) (Scry.Cs.enumMemberRows c (Nat.succ v) rest)
+      | .none => .nil
+    | .none => .cons (nm, prev) (Scry.Cs.enumMemberRows c (Nat.succ prev) rest)
+
+/-- Every enum member the unit declares with its value, keyed by both the simple and the
+qualified enum name (like `enumsOf`). A label compares an enum member only when it is in
+this table (`Scry.Cs.enumValue`). -/
+partial def Scry.Cs.enumValuesOf (c : Scry.Cst) (ns : String) (n : Nat) :
+    List (String × String × Nat) :=
+  List.concat (List.map (fun i =>
+    let k := c.kindOf i;
+    if String.eq k "enum_declaration" then
+      let nm := Scry.Cs.memberName c i;
+      let q := match String.isEmpty ns with
+        | .true => nm
+        | .false => ns ++ "." ++ nm;
+      match Scry.childF c i "body" with
+      | .some b =>
+        let rows := Scry.Cs.enumMemberRows c 0 (Scry.childrenK c b "enum_member_declaration");
+        List.concat (List.map (fun r =>
+          .cons (nm, r.1, r.2) (.cons (q, r.1, r.2) .nil)) rows)
+      | .none => .nil
+    else if Bool.or (String.eq k "namespace_declaration")
+        (String.eq k "file_scoped_namespace_declaration") then
+      let nm : String := match Scry.childF c i "name" with
+        | .some x => c.textOf x
+        | .none => "";
+      match Scry.childF c i "body" with
+      | .some b => Scry.Cs.enumValuesOf c nm b
+      | .none => Scry.Cs.enumValuesOf c nm i
+    else if Scry.Cs.isTypeDecl k then match Scry.childF c i "body" with
+      | .some b => Scry.Cs.enumValuesOf c ns b
+      | .none => .nil
+    else .nil) (Scry.kids c n))
+
 /-- Canonicalise the member type spellings of a class once the unit is known. -/
 def Scry.Cs.canonCls (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) : Scry.Cs.Cls :=
   { k with fields := List.map (fun f => (f.1, Scry.Cs.canon u k f.2)) k.fields,
@@ -2204,7 +2611,7 @@ def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0
     , live := .true, done := .nil, locals := .nil, params := .nil, env := .nil
     , fname := qname, retTy := Wil.Ty.ptr Wil.Ty.dyn, funcOrigin := Scry.originOf c n
     , breakTo := .none, contTo := .none };
-  let s0 := Scry.Cs.LS.mk ls1 .nil k u .none .none .nil;
+  let s0 := Scry.Cs.LS.mk ls1 .nil k u .none .none .nil .nil;
   let prog : Scry.Cs.M Unit := (do
     (match isStatic with
       | .true => Scry.Cs.pure ()
@@ -2390,7 +2797,8 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
   let raw0 := List.map (fun d => Scry.Cs.scanClass c d.1 d.2) decls;
   let raw := List.foldl (fun acc k => Scry.Cs.mergeOne acc k .true)
     (.nil : List Scry.Cs.Cls) raw0;
-  let u0 := Scry.Cs.Unit.mk raw (Scry.Cs.enumsOf c "" 0) (List.append ["System"] (Scry.Cs.usingsOf c 0));
+  let u0 := Scry.Cs.Unit.mk raw (Scry.Cs.enumsOf c "" 0) (Scry.Cs.enumValuesOf c "" 0)
+    (List.append ["System"] (Scry.Cs.usingsOf c 0));
   let u := { u0 with classes := List.map (Scry.Cs.canonCls u0) raw };
   let r := List.foldl (fun (acc : Scry.LState × List Wil.Func) d =>
     let k : Scry.Cs.Cls := match Scry.Cs.findCls u (Scry.Cs.scanClass c d.1 d.2).qname with

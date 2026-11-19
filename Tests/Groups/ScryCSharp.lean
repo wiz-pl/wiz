@@ -18,6 +18,8 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   warnings), plus an execution check: a lowered C# method runs under `Wil.runFunction`
   and returns the value C# would. `lower/modern` covers records, partial parts, switch
   expressions, LINQ, `with`, collection expressions and a constructor initialiser;
+  `lower/switch` covers compared int/string/enum labels, stacked labels, a typed
+  `case T x` binding, `when` guards and switch-expression arms;
   `lower/toplevel` covers top-level statements (lowered as `<stem>.Main`);
   `lower/unsupported` is the warning golden for everything out of scope.
 * **Silent skip**: `lower/{modern,toplevel,unsupported}` must each keep the warning that
@@ -28,7 +30,9 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   `Process.Start` through string concatenation) fires the `command-injection` rule of
   `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
   more unsafe fixtures cover interpolation plus a `ProcessStartInfo` object, and an
-  instance helper method (interprocedural parameter/return flow).
+  instance helper method (interprocedural parameter/return flow), and
+  `taint/cwe78-switch-unsafe` shows a `case string command:` binding (and a
+  `string command =>` arm binding) carrying the sink on the label's true edge.
 
 A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
 text over the expected file **and still fails the case**, so a regenerated golden is
@@ -114,11 +118,11 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
-   ("lower", "patterns"),
+   ("lower", "patterns"), ("lower", "switch"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
-   ("taint", "cwe78-pattern-unsafe")]
+   ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -160,7 +164,6 @@ looked at), which is the failure mode this table exists to prevent. -/
 def requiredWarnings : List (String × String) :=
   [("modern", "target-typed new() without a declared type"),
    ("modern", "local function Label not modelled"),
-   ("modern", "switch expression arms are not compared"),
    ("modern", "with expression: the copy's members are not updated"),
    ("unsupported", "indexer_declaration member not modelled"),
    ("unsupported", "operator_declaration member not modelled"),
@@ -362,6 +365,8 @@ def group : Group where
       run := fun _ => lowerGolden "unsupported" },
     { name := "lower: is-test bindings, is null / is not null and a conditional binding",
       run := fun _ => lowerGolden "patterns" },
+    { name := "lower: switch labels compared (int, string, enum), typed binding, when guard, arms",
+      run := fun _ => lowerGolden "switch" },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []
@@ -419,7 +424,12 @@ def group : Group where
     { name := "taint: CWE-78 through a pattern binding (the sink is on the test's true edge)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-pattern-unsafe"
-        checkEq ["command-injection Fixtures.PatternGate.Run System.Diagnostics.Process.Start arg 1"] fs }
+        checkEq ["command-injection Fixtures.PatternGate.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 through a switch label's typed binding, statement and arm",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-switch-unsafe"
+        checkEq ["command-injection Fixtures.SwitchGate.Run System.Diagnostics.Process.Start arg 1",
+          "command-injection Fixtures.SwitchGate.RunExpression System.Diagnostics.Process.Start arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group

@@ -241,10 +241,10 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
 | `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
 | `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions`, `modern` (`.cs` + `.cst` spill + `.sexp` view golden) |
-| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `unsupported` (the warnings for everything out of scope) |
-| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), and the `pattern` pair (a pattern binding carries the sink on the test's true edge) |
+| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `switch` (constant int/string/enum labels compared, typed labels, `when` guards, stacked labels, arms), `unsupported` (the warnings for everything out of scope) |
+| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), the `pattern` pair (a pattern binding carries the sink on the test's true edge), and the `switch` case (a `case T x` binding and an arm binding reach the sink) |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
-| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 5 lowering goldens + execution, 7 taint cases, and the "silent skip" case (§2) |
+| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 6 lowering goldens + execution, 8 taint cases, and the "silent skip" case (§2) |
 
 A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
@@ -431,11 +431,11 @@ diagnostic.
 | `lock`, `goto`, a label | `lock_statement not modelled`, `goto_statement not modelled`, `labeled_statement not modelled` |
 | `yield return` | `yield_statement not modelled` |
 | `unsafe`, `fixed`, `checked` | `unsafe_statement not modelled`, … |
-| `is` test's *conditions* | none: a type test, a property/positional/relational/list pattern's conditions and an unknown constant are nondeterministic bits (like a `switch` section), so both edges stay reachable; `is null` / `is not null` and integer constants are exact |
-| a pattern binding no condition site installs | `a pattern binding outside a condition is not installed` (a `switch` label, a `when` clause, a bare expression, or a binding used in the right operand of `&&`/`||`) |
+| `is` test's *conditions* | none: a type test, a property/positional/relational/list pattern's conditions and an unknown constant are nondeterministic bits (like a switch label's type test), so both edges stay reachable; `is null` / `is not null` and integer constants are exact |
+| a pattern binding no condition site installs | `a pattern binding outside a condition is not installed` (a bare expression, or a binding used in the right operand of `&&`/`||`) |
 | a name declared inside a subpattern | `nested pattern binding NAME not modelled` |
 | a declaration inside an `or`/`and` pattern | `a binding in an or_pattern (NAME) is not installed` (invalid C#; reported rather than dropped) |
-| `switch` statement labels / expression arms | `switch labels are not compared: every section is reachable`, `switch expression arms are not compared: every arm is reachable` |
+| a switch label the lowering cannot compare (a property, relational or list pattern; a constant of unknown value against an integer scrutinee) | `switch label (…) is not compared: the section is reached by an unknown test` (`arm` for an expression), §7.10 |
 | target-typed `new()` in an expression | `target-typed new() without a declared type not modelled: havoc` |
 | `join`/`group`/`orderby` in a query | `… in a query is not modelled: its value is havoc` |
 | field/property initialiser | `field initialiser of X not modelled: the field starts as its default` |
@@ -506,7 +506,7 @@ or the 17 files with no function, so the driver never warns for them):
 | **total** | **88** | |
 
 Not among the 88: `is T x` **0**, a bare `is T` 0, `as T` 2 (already typed; unchanged),
-`switch` with patterns 8 switches / 35 pattern nodes (out of scope, §7.6).
+`switch` with patterns 8 switches / 35 pattern nodes (§7.10).
 
 The binding lowering, and what it fixed:
 
@@ -549,6 +549,84 @@ Fixtures: `lower/patterns` (a true-edge binding used by a call, `is not` and `!`
 `input is string command` on the true branch, while its safe method shows the binding
 does not leak out of the branch). `lower/unsupported` keeps a named warning for a nested
 binding.
+
+### 7.10 `switch` labels and arms (2026-11-19)
+
+§7.9 left `switch` out: every section was a nondeterministic choice
+(`switch labels are not compared: every section is reachable`), and a `switch`
+statement's `when` clause was not reached at all — the CST view renamed every named
+child of a `switch_section` that is not a statement to `case_switch_label`, so the guard
+looked like a second label and was filtered out with the pattern. Both are fixed.
+
+The §7.4 corpus has **3 `switch` statements / 10 sections** (9 `case` + 1 `default`)
+and **5 `switch` expressions / 24 arms**. Three of the five expressions reach the
+lowering: one sits in a lambda body (an opaque function value, §7.6) and one in a
+target-typed `new(…)` whose arguments are havoc'd, so their arms were never lowered
+either.
+
+| | sections/arms | constant label (compared) | type test | binding | `when` |
+|---|---:|---:|---:|---:|---:|
+| `switch` statements | 10 | 9 (6 enum, 3 string) | 0 | 0 | 2 |
+| `switch` expressions | 24 | 17 (8 enum, 2 int, 7 external string `const`) | 2 (1 bare type name, 1 `or` of two) | 1 | 0 |
+| **lowered** (3 statements + 3 expressions) | 27 | 20 (10 enum, 3 string, 7 external `const`) | 2 | 1 | 2 |
+
+The one binding declares an exception-typed value that is only a call receiver (a
+property read and `ToString()`), not a sink argument, so **0 of the labels' bindings
+reach a sink** in this corpus; the taint fixture below is what pins that flow.
+
+The lowering:
+
+* A constant label is a **value comparison**: the scrutinee is evaluated once and each
+  label compares against it (`eq`, or `ne` for a negated one). A literal (int, string,
+  char, bool, `null`) uses its lowered value; an enum member of an enum the analysed
+  tree declares uses its ordinal (explicit decimal values honoured, implicit ones
+  counted, a non-decimal initialiser makes that member and the rest unknown); an enum
+  member of an enum it does not declare, or a `const` of unknown value, is compared
+  against a **distinct symbolic value** (`globalRef "$const:<name>"`), so two labels
+  never alias but the value stays unknown (the analysis does not evaluate either).
+  This is what a string-literal label, an in-tree enum member label and an external
+  string-`const` label get.
+* A **typed** label (`case string s:`, `case T:`, `=> T s`) keeps a nondeterministic
+  runtime type test (the lowering cannot know an object's runtime type) and declares
+  `s` as a local of the pattern's type; the copy from the scrutinee is emitted in the
+  label's **edge block**, the only way into the section/arm.
+* A label's `when` guard is lowered **after** that copy, in the same edge block, and
+  branches to the section on hold and to the next label's test on failure. A guard that
+  declares its own bindings (`when o is T x`) installs them on its true edge.
+* Stacked labels (`case 1: case 2:`) are consecutive sections, the first with no
+  statements; they are grouped so both labels enter the one body (before this pass the
+  empty section was a reachable block that fell out of the switch).
+* A section sees only its own label's names: two sections may both declare `text`, and
+  the body must not resolve the other section's binding.
+* A property, relational or list label is an unknown test, reported by name
+  (`switch label (a property pattern) is not compared: …`), with its binding installed;
+  an external constant that an integer scrutinee would need is reported the same way.
+  A bare type name in a label is the C# type-pattern shorthand (tree-sitter parses it as
+  a `constant_pattern` around an identifier), so it is a type test, not a warning.
+
+Measured on the §7.4 corpus with its probe (`scry/scripts/cs-coverage.sh`, per-file
+lowering warnings, taint on; the driver's `scry cs` reaches the same lowering):
+
+| | before | after |
+|---|---:|---:|
+| functions | 240 | 240 |
+| warnings (excluding the 17 `no functions lowered` rows) | 409 | 407 |
+| `switch labels are not compared` | 3 | 0 |
+| `switch expression arms are not compared` | 3 | 0 |
+| `switch label (…) is not compared` | 0 | 0 |
+| warnings, total | 409 | 403 |
+| findings (rule pack, taint on) | 0 | 0 |
+
+No warning is added: the `when` guards' calls are modelled calls, not warnings (the
+driver's `unmodelled-external` coverage row gains the two calls, which used to vanish
+with the guard). The two labels the lowering cannot compare in this corpus are external
+constants compared symbolically, not unknown tests, so that row stays 0.
+
+Fixtures: `lower/switch` (int, string and in-unit enum labels, stacked labels, a typed
+`case string text:` used by a call, a guard that uses the binding, and two switch
+expressions — one with `1 or 2` and `_`, one with a guarded binding) and
+`taint/cwe78-switch-unsafe` (the console line reaches `Process.Start` through
+`case string command` and through a `string command =>` arm).
 
 ## 8. The repository driver: `scry cs`
 

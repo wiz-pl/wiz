@@ -67,9 +67,10 @@ func Crux.Api.Endpoints.PayoutService.SubmitAsync(%0, %1)
     %19 = %18
     %20 = gep %1, 1
     %21 = load %20
-    %23 = havoc u1
-    %24 = 0
-    br ne %23, %24 ? b2 : b5
+    %23 = 0
+    %24 = eq %21, %23
+    %25 = 0
+    br ne %24, %25 ? b6 : b5
   b1:
     %38 = %22
     %39 = %1
@@ -100,14 +101,10 @@ func Crux.Api.Endpoints.PayoutService.SubmitAsync(%0, %1)
     store %62, %38
     ret %60
   b2:
-    %29 = global $str:"zero"
-    %22 = %29
+    %33 = global $str:"zero"
+    %22 = %33
     goto b1
   b3:
-    %30 = gep %1, 2
-    %31 = load %30
-    %32 = null
-    %33 = ne %31, %32
     %34 = gep %1, 2
     %35 = load %34
     %36 = call System.String.Concat(%35)
@@ -118,15 +115,18 @@ func Crux.Api.Endpoints.PayoutService.SubmitAsync(%0, %1)
     %22 = %37
     goto b1
   b5:
-    %25 = havoc u1
-    %26 = 0
-    br ne %25, %26 ? b3 : b6
+    %26 = 1
+    %27 = 0
+    br ne %26, %27 ? b7 : b4
   b6:
-    %27 = havoc u1
-    %28 = 0
-    br ne %27, %28 ? b4 : b7
+    goto b2
   b7:
-    goto b1
+    %28 = gep %1, 2
+    %29 = load %28
+    %30 = null
+    %31 = ne %29, %30
+    %32 = 0
+    br ne %31, %32 ? b3 : b4
 func Crux.Api.Endpoints.PayoutService.ToString(%0)
   b0:
     %1 = gep %0, 1
@@ -141,7 +141,6 @@ func Crux.Api.Endpoints.PayoutService.Submit(%0, %1)
     ret %4
 warning: Crux.Api.Endpoints.PaymentBase.Reject:35: target-typed new() without a declared type not modelled: havoc
 warning: Crux.Api.Endpoints.PayoutService.SubmitAsync:64: call to Abs: not a method of Crux.Api.Endpoints.PayoutService (delegate or unknown)
-warning: Crux.Api.Endpoints.PayoutService.SubmitAsync:70: switch expression arms are not compared: every arm is reachable
 warning: Crux.Api.Endpoints.PayoutService.SubmitAsync:77: with expression: the copy's members are not updated (it keeps the original's values)
 warning: Crux.Api.Endpoints.PayoutService.ToString:86: local function Label not modelled: its body is not lowered and calls to it are unknown
 warning: Crux.Api.Endpoints.PayoutService.ToString:87: call to Label: not a method of Crux.Api.Endpoints.PayoutService (delegate or unknown)

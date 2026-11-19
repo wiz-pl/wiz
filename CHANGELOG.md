@@ -600,6 +600,21 @@ that pin each one):
   warn by name. On `src/Crux.Api` this removes the `is test not modelled` row (88
   warnings); fixtures `lower/patterns` and `taint/cwe78-pattern-unsafe` pin the binding
   and the true-branch flow.
+* scry C#: `switch` statement sections and `switch` expression arms are compared and
+  their bindings installed. A constant label (`case 0:`, `case "a":`, `case Mode.Idle:`)
+  is a value comparison against the scrutinee, materialised once; an enum member the
+  analysed tree declares uses its ordinal, and one from outside it (or a `const` of
+  unknown value) is compared against a distinct symbolic value, so two labels never
+  alias. A typed label (`case string s:`) keeps the nondeterministic runtime type test
+  and copies the scrutinee into `s` in the section's edge block; `when` guards are
+  lowered **after** that copy, as the section's own condition, and a failing guard tests
+  the next label. Stacked labels (`case 1: case 2:`) are one section. Property,
+  relational and list labels (and an external constant against an integer scrutinee)
+  are unknown tests, reported by name rather than guessed. On the §7.4 real-code
+  corpus the 6 `switch … not compared` warnings go to 0 (warnings 409 → 403; no
+  warning is added — the two `when` guards are now lowered, so their calls appear in
+  the driver's coverage rows instead); fixtures `lower/switch` and
+  `taint/cwe78-switch-unsafe`.
 
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so
