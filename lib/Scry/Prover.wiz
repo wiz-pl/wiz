@@ -122,6 +122,8 @@ def Scry.checkMemory (st : Scry.State Nat) : Option String :=
     .some "the function stores (mstore); the memory rules are not covered by this checker"
   else if Nat.lt 0 (Scry.Db.relSize st.db Scry.rtMLoad) then
     .some "the function loads (mload); the memory rules are not covered by this checker"
+  else if Nat.lt 0 (Scry.Db.relSize st.db Scry.rtMTainted) then
+    .some "a tainted location seed (mtainted) is present; the memory rules are not covered by this checker"
   else .none
 
 /-- One taint-head rule's closure: every instance whose tainted premises are `I` has its

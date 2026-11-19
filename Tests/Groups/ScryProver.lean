@@ -108,10 +108,12 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverCrossVerdict) \"alert rule fires\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverSafeVerdict\n" ++
          "#eval Scry.Verdict.isOk Scry.proverUnsafeVerdict\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand\" [(0,0)]))\n" ++
+         "#eval Scry.Verdict.isOk (Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.mk \"hand-wrong\" [(1,1)]))\n" ++
          "#eval match Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe with\n" ++
          "  | .some _ => .true\n" ++
          "  | .none => .false\n")
-        [".true", ".true", ".true", ".true", ".true", ".true", ".false", ".false"] },
+        [".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".false", ".false"] },
     { name := "the script proves the safe twin; the unsafe twin is refuted at the alert obligation",
       run := fun _ => do
         let pack ← packText
@@ -190,6 +192,6 @@ def group : Group where
           [".false", ".true"] }
   ]
 
-builtin_initialize registerGroup scryProverGroup
+builtin_initialize registerGroup group
 
 end Tests.ScryProver

@@ -56,6 +56,10 @@ the safe C# twin a one-row `I` suffices.
   from callers/callees. The certificate is intraprocedural; the note says so, and
   `Scry.check` does not claim the seeds themselves. This is the same assumption
   `Scry.Certify` reports for findings.
+* **Forbidden calls are a different property.** `badalert` (`gets`, `strcpy`, …) is not
+  a flow property; a `noFlow` claim says nothing about it, and a program can have a
+  proof and a forbidden-call finding at the same time. That is correct, not a gap in the
+  proof, but a report must not read "checked" as "finding-free".
 * **No arithmetic, no bounds, no guards-as-facts.** The engine has no EDB relation for
   "here a length was checked", so a `memcpy` length property is outside the current
   fact language (see §6).
@@ -225,6 +229,14 @@ no .NET):
 * **Full temporal logic (LTL/CTL) over the CFG.** The right long-term language for
   "preceded by"; overkill for the first slice, and it needs guard facts before it can say
   anything the current EDB does not.
+
+The shape is the one `code-analysis-design.md` §5.3 already prescribes for absence
+certificates ("an invariant map `inv : Point → L` … a checker `Cert.check f inv` … a
+post-fixpoint check, linear in the function's size"), specialised to the taint lattice
+`L = 2^{point × var}` and with a tactic script on top. What §5.3 does not have, and this
+note adds, is the *language* of claims and the separation of the script (search) from
+the certificate (checking). The interval-domain instance, which is what a length/bounds
+property needs, is the natural second user of the same checker shape.
 
 ## 9. Next slices
 
