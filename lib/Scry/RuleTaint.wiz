@@ -149,6 +149,9 @@ inductive Scry.MemWarnKind where
   /-- A load or store through a pointer that may be null on some path (S5's nullness
   alarm, wired through `Scry.Nullness`). -/
   | nullDereference
+  /-- The rule pack or the analysis registry asks for something this build cannot run
+  (an unknown `check`, or a registered analysis no check can select). -/
+  | registry
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
@@ -156,6 +159,7 @@ def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
   | .nullDereference => "null-dereference"
+  | .registry => "registry"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/
