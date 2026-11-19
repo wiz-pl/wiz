@@ -182,6 +182,18 @@ needs the text to honour them.
 rendering, which the single-file `scry taint` path does not use. A caller that needs
 the original texts reads them with `FS.readFile` and uses `Scry.Cst.ofStore`, which
 pays for them. -/
+/-- Line and byte column from a line-start table. The bytes-backed store has no
+`ByteMap` (it deliberately avoids building a `String`), so its columns are byte columns;
+the text-backed `Scry.TextIndex` path uses character columns. -/
+def Scry.lineColFromStarts (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    let lo := UIntN.toNat (U32Array.get starts i);
+    (Nat.succ i, Nat.succ (Nat.sub off lo))
+
 def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
     (s : Scry.CstStore) : Scry.Cst :=
   match Scry.markerLinesFrom b 0 (Bytes.size b) .true with
@@ -191,7 +203,7 @@ def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
       (fun i => Scry.CstStore.kindName s i)
       (fun i => Scry.CstStore.fieldName s i)
       (fun i => let sp := Scry.CstStore.spanOf s i;
-        let lc := Scry.lineColFrom starts sp.start;
+        let lc := Scry.lineColFromStarts starts sp.start;
         Wil.Span.mk 0 sp.start sp.stop i lc.1 lc.2)
       (fun i => match Scry.CstStore.parentOf s i with
         | .none => .none

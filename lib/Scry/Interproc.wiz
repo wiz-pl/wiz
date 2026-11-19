@@ -514,12 +514,6 @@ def Scry.keepMemWarning (hasLifetime : Bool) (w : Scry.MemWarning) : Bool :=
   | .useAfterFree => Bool.not hasLifetime
   | _ => .true
 
-/-- Analyse a program: points-to first (the memory model every later stage uses), then the
-summary fixpoint, then one final evaluation per function. The pack gains the missing
-model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound) has a
-rule id even when the textual pack does not repeat it. `entryMode` enables the C-ABI
-policy that seeds the parameters of exported entries; the library/old API passes
-`false` through `Scry.analyze`. `maxRounds` bounds the points-to fixpoint (a partial
 /-- Analyse a program with an explicit model pack: points-to first, then the summary
 fixpoint, then one final evaluation per function. `withNull` appends the S5 nullness
 pass's diagnostics (opt-in through `Scry.analyzeWithNull`). -/
