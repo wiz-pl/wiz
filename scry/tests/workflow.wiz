@@ -58,7 +58,7 @@ def main : IO Unit := EIO.toIO (do
   check "triage: new -> confirmed -> fixed"
     (match Scry.wfTriage
       (Scry.WfRecord.mk "f_x" "k" "h" .new .nil "src/a.c" .none .false Json.mkNull
-        "art" .none .none .none 1 1)
+        "art" .none .none .none .none .none 1 1)
       .confirmed "tester" "seen" 2 with
       | .ok r => match Scry.wfTriage r .fixed "tester" "patched" 3 with
         | .ok r2 => Bool.and (String.eq (Scry.WfState.show r2.state) "fixed")
@@ -70,7 +70,7 @@ def main : IO Unit := EIO.toIO (do
   let r := Scry.WfRecord.mk "f_x" "k" "h" .confirmed
     [Scry.WfHistory.mk .new 1 "scry" "seen", Scry.WfHistory.mk .confirmed 2 "tester" "ok"]
     "src/a.c" .none .false (Json.mkObj [("rule", Json.mkStr "gets-overflow")])
-    "art" (.some "static.json") .none .none 1 2;
+    "art" (.some "static.json") .none .none .none .none 1 2;
   let st := Scry.wfUpsert Scry.wfEmptyStore r;
   match Scry.wfStoreOfText (Scry.wfStoreText st) with
   | .error e => EIO.fail e
@@ -117,7 +117,8 @@ def main : IO Unit := EIO.toIO (do
     "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fake-cc 1; exit 0; fi\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf '#!/bin/sh\\ncat >/dev/null\\nexit 0\\n' > \"$out\"\nchmod +x \"$out\"\nexit 0\n";
   step4 ← FS.setMode fake 493;
   let out := Path.join dir "repro";
-  let cfg := Scry.ReproConfig.mk fake "none" .none .none "" 5 .nil .none "absent" "L0";
+  let cfg := Scry.ReproConfig.mk fake "none" .none .none "" 5 .nil .none "absent" "L0"
+    .none "template" "";
   res ← Scry.reproRun cfg "tests/fixtures/workflow-gets.c" out "test";
   check "repro: the fake compiler builds and the harness runs" res.ran;
   check "repro: no sanitizer is reported" (Bool.not res.sanitizerHit);

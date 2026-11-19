@@ -133,7 +133,13 @@ def trustModuleOf (g : Globals ZeroOneMany) (n : Name) : String :=
 witness), a `partial` definition (its body is compiled, not unfolded), a native
 implementation (`implemented_by`, and a type's `repr:` representation), a `native_refl`
 or `smt` axiom, and one per `builtin` registration. `only` restricts it to a scope (an
-example's own declarations). -/
+example's own declarations).
+
+An `implemented_by` on a **partial** definition is two sources, not one: the `partial`
+row for the declaration and a `native` row for the constant compiled code runs. The
+kernel's `Decl.nativeImpl?` suppresses every partial implementation (usually it is the
+compiled body), so the walk checks `d.impl` itself; otherwise the `partial` row would
+hide a native step that `#print axioms` also does not list. -/
 def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
     (only : Name → Bool := fun _ => true) : List TrustSource := Id.run do
   let mut out : Array TrustSource := #[]
@@ -152,6 +158,17 @@ def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
       out := out.push { module := m, name := n, item := "partial" }
     if let some i := d.nativeImpl? then
       out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+    else if d.witness.isSome then
+      -- An `implemented_by` on a partial definition. `Decl.nativeImpl?` deliberately
+      -- returns none for every partial declaration (normally its implementation is the
+      -- compiled body, not a native), but `setImpl` can replace that body with a
+      -- constant: compiled code then runs it, and the `partial` row alone would hide
+      -- the trust step. A partial body that is itself a bare constant is the same shape
+      -- and is recorded the same way (compiled code runs that constant).
+      match d.impl with
+      | some (.const i _) =>
+        if i != n then out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+      | _ => pure ()
   -- every registration, including `repr:` (a type's native representation) and `seal:`;
   -- `inline` (a compiler hint) and `int` (only how values print) are not trust
   for (k, nm) in g.builtins do
@@ -228,33 +245,45 @@ structure TrustCache where
 
 def TrustCache.isEmpty (c : TrustCache) : Bool := c.write.isNone && c.reads.isEmpty
 
-/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
-library trusted). Both trust extensions are on so that a use is *recorded* by the
-ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
-and `lib/ never uses native_refl` still fail on a use).
+/-- The states of importing `lib/`, as `wiz check` does (the toolchain's library
+trusted). Both trust extensions are on so that a use is *recorded* by the ledger rather
+than merely an error; `lib/` is not allowed to use either (the cases below and `lib/
+never uses native_refl` still fail on a use).
 
-With a cache the state comes through `Cache.elaborateCached`, in the same namespaces
+`Scry.EgraphNative` and `Scry.EqPlan` are alternative backends that cannot be imported
+into one program with `Scry.Egraph` and its clients, so there is no single whole-library
+import: the reference family is loaded with everything else, then each distinct
+exclusion set among the apart modules (with those modules) is loaded with everything
+else. The ledger is the union of the states' sources, and every module is still checked
+against every module it can share a program with.
+
+With a cache each state comes through `Cache.elaborateCached`, in the same namespaces
 `wiz check` uses: a module is elaborated once and its effect replayed, so the walk sees
 the same declarations, builtins and `#print axioms` as the cold elaboration (the cache is
 keyed by each module's exact text, its imports, the binary and the trust options, so a
 changed source is never served an old effect). Returns how many commands the cache
 served. -/
-def libTrustState (cache : TrustCache := {}) : IO (CommandState ZeroOneMany × Nat) := do
-  let files ← wizFiles "lib"
-  let mods := files.filterMap fun f => do
-    let cs := (f.toString.toList.drop 4)
-    pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
-  let mods := mods.toArray.qsort (· ≤ ·) |>.toList
-  let input := String.join (mods.map (s!"import {·}\n"))
-  let init : CommandState ZeroOneMany :=
-    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
-      trustNative := true, smt := { trust := true } }
-  if cache.isEmpty then
-    pure (runFrontend (R := ZeroOneMany) input init, 0)
-  else
-    let tc : Toolchain := { cacheDir := cache.write, readCaches := cache.reads }
-    Cache.elaborateCached tc.cacheDir tc.readCaches input init 0
-      (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+def libTrustStates (cache : TrustCache := {}) :
+    IO (List (String × CommandState ZeroOneMany × Nat)) := do
+  let loader ← Elab.libLoader
+  let one (what input : String) : IO (String × CommandState ZeroOneMany × Nat) := do
+    let init : CommandState ZeroOneMany :=
+      { loader, trustedModule := Tests.libModule
+        trustNative := true, smt := { trust := true } }
+    if cache.isEmpty then
+      pure (what, runFrontend (R := ZeroOneMany) input init, 0)
+    else
+      let tc : Toolchain := { cacheDir := cache.write, readCaches := cache.reads }
+      let (s, hits) ← Cache.elaborateCached tc.cacheDir tc.readCaches input init 0
+        (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+      pure (what, s, hits)
+  let mut out := [← one "the library" (← Elab.allLibSource)]
+  let mut seen : List (List String) := []
+  for (m, skip) in Elab.libApart do
+    unless seen.contains skip do
+      seen := skip :: seen
+      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]   -- complexity: ok (libApart is a handful of module groups; test-only)
+  pure out
 
 /-- The state of elaborating `path` (an example) with every library module importable. -/
 def exampleTrustState (path : String) : IO (CommandState ZeroOneMany) := do
@@ -308,13 +337,20 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none)
   | none =>
     let libFiles ← wizFiles "lib"
     rejectSorry libFiles
-    let (s, hits) ← libTrustState cache
-    noTrustErrors "the library" s
-    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-    let libLabel (n : Name) : String := trustModuleOf s.globals n
-    let libSources := trustSources s.globals libLabel
-    checkCovered s.globals libSources
-    let mut sources := libSources
+    let states ← libTrustStates cache
+    let mut libSources : List TrustSource := []
+    let mut decls := 0
+    let mut hits := 0
+    for (what, s, h) in states do
+      noTrustErrors what s
+      decls := decls + s.globals.order.size
+      hits := hits + h
+      let libLabel (n : Name) : String := trustModuleOf s.globals n
+      let sources := trustSources s.globals libLabel
+      checkCovered s.globals sources
+      libSources := libSources ++ sources
+    check (decls > 1000) s!"only {decls} library declarations in all loads"
+    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList   -- complexity: ok (test-only: one dedup of the whole ledger, after the loop)
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
@@ -325,7 +361,7 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none)
         let ownSources := (trustSources es.globals labelOf own)
         -- an example's declarations may depend on the library's trusted base, so the
         -- walk checks against both; its own sources are what the baseline would gain
-        checkCovered es.globals (libSources ++ ownSources) own
+        checkCovered es.globals (sources ++ ownSources) own
         sources := sources ++ ownSources
     pure ((sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList, hits))
 
@@ -340,10 +376,11 @@ def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
-  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
-  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
-  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
-  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
+  "# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a\n" ++
+  "# second row next to `partial` when a partial definition's implementation is a native\n" ++
+  "# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`\n" ++
+  "# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,\n" ++
+  "# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
   "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
   "# trust and are not listed.\n" ++
   "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
@@ -826,11 +863,21 @@ def group : Group where
           let src ← IO.FS.readFile f
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
-    { name := "no library declaration depends on a native axiom", run := fun _ => do
+    { name := "every library source of trust is a reviewed ledger row", run := fun _ => do
         -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
-        -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new
+        -- each source listed must be a row in .github/trust-baseline.tsv, and a new
         -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
         -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
+        --
+        -- This case was `no library declaration depends on a native axiom`: that was a
+        -- goal from Stage 27a, when it checked only the `native✝` axioms `native_refl`
+        -- adds. It is not an invariant of lib/: InternTable, UIntN, IntN and Proc have
+        -- depended on reviewed `extern`/`implemented_by` natives (`wiz_itab_*`,
+        -- `wiz_*` builtins) since before the ledger, as `Task.*` and `Scope.spawn`
+        -- (`wiz_task_*`, `wiz_scope_*`) do now. What the gate guarantees is that such
+        -- a dependency is reviewed, dated and listed; a `native_refl` axiom is still
+        -- never allowed in lib/ (the `lib/ never uses native_refl` case, and no
+        -- `native_refl` row exists).
         let _ ← checkTrustLedger (includeExamples := false)
         pure () },
     { name := "the trust gate: fixture trees, exit codes and messages (Tests/trust-ledger/)", run := fun _ => do
@@ -840,7 +887,23 @@ def group : Group where
         -- cases above do that).
         let out ← IO.Process.output { cmd := "sh", args := #["Tests/trust-ledger/run.sh"] }
         unless out.exitCode == 0 do
-          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
+          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") },
+    { name := "the FFI audit: every extern's signature matches its C prototype (scripts/trust-ffi-audit.sh --check)", run := fun _ => do
+        -- (docs/trust-ledger.md, "The numeric/container FFI audit"; stage 22b/9.) The
+        -- ledger's `builtin extern:SYM:kinds:result` rows are only prose until this
+        -- script compiles a function pointer of the marshalled C signature against the
+        -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
+        -- this case nothing ran it — no test group and no CI job named it — so a
+        -- marshalling width that drifted from its C definition would have been silent.
+        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
+        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
+        -- not evidence (a pass here must have compiled the signatures).
+        let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
+        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
+          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        unless out.exitCode == 0 do
+          throw (IO.userError
+            s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat

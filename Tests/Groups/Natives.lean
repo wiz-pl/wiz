@@ -69,6 +69,8 @@ def nativesGroup : Group where
   cases := [
     { name := "word arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
         nativesSame "wordarray" "24057236113" },
+    { name := "arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
+        nativesSame "array" "1039243342" },
     { name := "word maps: the model and the natives agree (growing, erasing, keys above 2^63)", run := fun _ =>
         nativesSame "wordmap" "6735556925" },
     { name := "intern tables: the model and the natives agree", run := fun _ =>

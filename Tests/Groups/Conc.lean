@@ -171,6 +171,136 @@ def main : IO Unit := do1
   IO.println (Nat.toString n)
 "
 
+/-- (conc-02) One `Child` waited on by two threads at once. Both `waitpid`s block until
+the child exits; without a lock one reaps it and the other never gets a status (it
+blocked for ever and the case timed out), so a well-typed program hangs or reports a
+spurious failure. With the handle's `waitmu` the second waiter sees the status the
+first recorded, and the program prints `2`. -/
+def concWaitTwice : String := "import Sys
+import Session
+import MVar
+def verdict (r : Except String ExitStatus) : Nat :=
+  match r with
+  | .ok st => match st with
+    | .exited 0 => 1
+    | _ => 0
+  | .error _ => 0
+def both (c : Child) (m : MVar Nat) : IO Unit :=
+  Chan.fork Proto.done
+    (fun ch => Chan.close ch (IO.bind (Child.wait c) (fun r => MVar.put m (verdict r))))
+    (fun ch => Chan.close ch (IO.bind (Child.wait c) (fun r => MVar.put m (verdict r))))
+def main : IO Unit := do
+  c ← Process.spawnRaw \"sleep\" (.cons \"0.3\" .nil) 0 1 1;
+  m ← MVar.new (A := Nat);
+  both c m;
+  a ← MVar.take m;
+  b ← MVar.take m;
+  IO.println (Nat.toString (a + b))
+"
+
+/-- (conc-02) The File half of the race, as a stress case: the child reads a file to the
+end again and again while the parent closes the same handle 10 ms later. Without the
+lock this is a `FILE *` use-after-free (a reader can load `h->f` just before `fclose`
+frees it); whether that faults depends on the compiler and the interleaving, so the
+deterministic repro of conc-02 is the `Child.wait` case above. With the lock the
+in-flight read finishes and the next one is `EBADF`, so the child prints `closed`. -/
+def concFileRace : String := "import Sys
+import Session
+import MVar
+def line : String := \"0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\\n\"
+def fill : Nat → String → String
+  | .zero, acc => acc
+  | .succ k, acc => fill k (String.append acc line)
+def spin (f : File) : Nat → IO Nat
+  | .zero => IO.pure 0
+  | .succ k => IO.bind (File.readAll f) (fun r =>
+      match r with
+      | .ok _ => IO.bind (File.seek f (.start 0)) (fun s =>
+          match s with
+          | .ok _ => spin f k
+          | .error _ => IO.pure 1)
+      | .error _ => IO.pure 1)
+def main : IO Unit := EIO.toIO (do
+  d ← FS.createTempDir;
+  let p := Path.join d \"race.txt\";
+  FS.writeFile p (fill 400 \"\");
+  f ← File.open p \"r\";
+  m ← EIO.lift (MVar.new (A := Nat));
+  n ← EIO.lift (Chan.fork Proto.done
+    (fun ch => Chan.close ch (IO.bind (spin f 100000) (fun x => MVar.put m x)))
+    (fun ch => Chan.close ch (IO.bind (Clock.sleep (Duration.millis 10)) (fun _ =>
+      IO.bind (File.close f) (fun _ => MVar.take m)))));
+  FS.removeAll d;
+  EIO.lift (IO.println (match Nat.beq n 1 with | .true => \"closed\" | .false => \"finished\")))
+"
+
+/-- (conc-02) Using a handle in a fork after it was closed, twice, and waited on twice:
+the deterministic primitive checks. A second `File.close` and `Child.closeStdin` are
+`EBADF` (no second `fclose`/`close(2)`), a read after close is `EBADF` (never a
+`FILE *` use after free), and a second `Child.wait` gives the same status. -/
+def concHandlePrims : String := "import Sys
+def errTag (e : Nat) : String :=
+  match Nat.beq e 0 with
+  | .true => \"ok\"
+  | .false => \"err\"
+def waitTag (n e : Nat) : String :=
+  match Nat.beq e 0 with
+  | .true => ExitStatus.toString (ExitStatus.ofNat n)
+  | .false => \"err\"
+def main : IO Unit := EIO.toIO (do
+  d ← FS.createTempDir;
+  let p := Path.join d \"x.txt\";
+  FS.writeFile p \"one\\ntwo\\n\";
+  f ← File.open p \"r\";
+  EIO.lift (File.readLineRaw f);
+  e0 ← EIO.lift Sys.errno;
+  e1 ← EIO.lift (File.closeRaw f);
+  e2 ← EIO.lift (File.closeRaw f);
+  EIO.lift (File.readLineRaw f);
+  e3 ← EIO.lift Sys.errno;
+  EIO.lift (IO.println (String.append (errTag e0) (String.append \" \" (String.append (errTag e1) (String.append \" \" (String.append (errTag e2) (String.append \" \" (errTag e3))))))));
+  c ← Process.spawn \"cat\" .nil .piped .piped .inherit;
+  w1 ← EIO.lift (Child.closeStdinRaw c);
+  w2 ← EIO.lift (Child.closeStdinRaw c);
+  s1 ← EIO.lift (Child.waitRaw c);
+  se1 ← EIO.lift Sys.errno;
+  s2 ← EIO.lift (Child.waitRaw c);
+  se2 ← EIO.lift Sys.errno;
+  FS.removeAll d;
+  EIO.lift (IO.println (String.append (errTag w1) (String.append \" \" (String.append (errTag w2) (String.append \" \" (String.append (waitTag s1 se1) (String.append \" \" (waitTag s2 se2)))))))))
+"
+
+/-- (conc-02) The safe capture: a handle opened in the child and used only there still
+works (an endpoint's `1` closure moves into the fork; a `File` can be moved the same
+way, it is just not checked). -/
+def concHandleMoved : String := "import Sys
+import Session
+import MVar
+def show (r : Except String (Option String)) : String :=
+  match r with
+  | .ok opt => match opt with
+    | .some s => s
+    | .none => \"eof\"
+  | .error _ => \"read failed\"
+def reader (p : String) (m : MVar String) : IO Unit :=
+  IO.bind (File.open p \"r\") (fun r =>
+    match r with
+    | .ok f =>
+        IO.bind (File.readLine f) (fun l =>
+          IO.bind (File.close f) (fun _ =>
+            MVar.put m (show l)))
+    | .error _ => MVar.put m \"open failed\")
+def main : IO Unit := EIO.toIO (do
+  d ← FS.createTempDir;
+  let p := Path.join d \"moved.txt\";
+  FS.writeFile p \"moved\\n\";
+  m ← EIO.lift (MVar.new (A := String));
+  EIO.lift (Chan.fork Proto.done
+    (fun ch => Chan.close ch (reader p m))
+    (fun ch => Chan.close ch (IO.bind (MVar.take m) (fun s =>
+      IO.bind (FS.removeAll d) (fun _ => IO.println s))))))
+"
+
 /-- The lock tests of `Tests/tsan/` (the programs `scripts/tsan-conc.sh` also runs under
 ThreadSanitizer, 25a): a plain, non-atomic C counter that only the lock protects.
 `link_c "lock.c"` resolves relative to `main.wiz`, so both go in the temporary tree. -/
@@ -268,6 +398,19 @@ def concGroup : Group where
         okLibs "import IO\naxiom Tok : Type\naxiom Tok.new : IO1 Tok\naxiom Tok.use : (1 t : Tok) → (n : Nat) → IO1 ((r : Nat) × Tok)\naxiom Tok.close : (1 t : Tok) → IO Unit\ndef prog : IO Nat := do1\n  t ⇐ Tok.new;\n  (r, t) ⇐ Tok.use t 3;\n  Tok.close t;\n  IO.pure r"
         failsLibs "import IO\naxiom Tok : Type\naxiom Tok.new : IO1 Tok\naxiom Tok.close : (1 t : Tok) → IO Unit\n-- the token is dropped\ndef leak : IO Nat := do1\n  t ⇐ Tok.new;\n  IO.pure 3" "quantity 1"
         failsLibs "import Handle\n-- the token is not given back to a release (a leak)\ndef leak (p : String) : EIO Unit :=\n  File.withOwned p \"w\" (fun f o => do1\n    (r1, o) ⇐ File.writeOwned f o \"one\\n\";\n    IO.pure r1)" "quantity 1" },
+    { name := "handles (conc-02): one Child waited on by two threads: both get the status", run := fun _ =>
+        cRunLibs concWaitTwice "2\n" },
+    { name := "handles (conc-02): a File read while another thread closes it ends in EBADF (stress)", run := fun _ =>
+        cRunLibs concFileRace "closed\n" },
+    { name := "handles (conc-02): close twice, read after close, wait twice: errors, not a second close", run := fun _ =>
+        cRunLibs concHandlePrims "ok ok err err\nok err exit code 0 exit code 0\n" },
+    { name := "handles (conc-02): a handle opened and used only in the forked child still works", run := fun _ =>
+        cRunLibs concHandleMoved "moved\n" },
+    { name := "handles (conc-02): the ω capture the types allow compiles (the runtime serialises it)", run := fun _ =>
+        okLibs ("import Sys\nimport Session\n" ++
+          "def shared (f : File) : IO Unit := Chan.fork Proto.done\n" ++
+          "  (fun c => Chan.close c (IO.bind (File.readLine f) (fun _ => IO.pure ())))\n" ++
+          "  (fun c => Chan.close c (IO.bind (File.close f) (fun _ => IO.pure ())))") },
     { name := "Ref: cells owned by linear points-to tokens; a function's type is its triple", run := fun _ => do
         cRunLibs ("import Ref\n" ++
           "-- swap through two tokens: the type is the triple {p ↦ a ⋆ q ↦ b} swap {p ↦ b ⋆ q ↦ a}\n" ++
@@ -373,6 +516,15 @@ def concGroup : Group where
                 pure true
               catch _ => pure false
             check (!skipped) "cRunLibs recorded a run-time failure as a skip" },
+    -- (engine-trampoline) Native builds arm no boundary: `Process.exit` still ends the
+    -- process with its own code (the Wasm playground is the one place `wiz_stop_run`
+    -- catches it, runtime/rt_con.inc).
+    { name := "a program's own exit is still the process's exit status", run := fun _ => do
+        match ← cRunLibsOut "import IO\nimport Sys\ndef main : IO Unit := Process.exit 3\n" with
+        | .ok v => throw (IO.userError s!"the program ran to the end: {v}")
+        | .error e =>
+          if e.isToolchain then skip "no toolchain"
+          else check ((e.message.splitOn "the program failed (3)").length > 1) e.message },
     { name := "a program that writes 'No such file' on stderr and exits 0 still passes", run := fun _ =>
         cRunLibs ("import IO\nimport Sys\n" ++
           "def main : IO Unit := IO.bind (IO.ePrintln \"open log.txt: No such file or directory\") (fun _ => IO.println \"ok\")\n") "ok\n" },

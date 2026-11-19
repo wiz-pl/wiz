@@ -3,41 +3,79 @@
 // `wiz_playground_eval : String → String`, and show the lines it returns. There is no
 // server and nothing to install: the module is the checker.
 //
-// `?ui=react` renders the right-hand pane with the repo's React-style framework
-// (web/playground-react.js + web/framework/driver.js) instead of building its DOM nodes
-// here. The textarea, its squiggles/completions, the header, the Run button and the
-// footer stay imperative on both paths; without the flag nothing changes.
+// `?ui=loom` mounts the page itself from a second Wasm module
+// (`web/build-playground-ui.wiz` → `wiz-playground-ui.mjs`): the whole page is one Loom
+// app (`web/playground-ui.wiz`), and this file only loads the engine and turns its
+// results into the app's states. The default is the static markup the page carries; the
+// Loom path falls back to it when the module is not built, and it is the only path that
+// can move the page's text into a Loom component.
 "use strict";
 import { isValue, renderValue } from "./playground-values.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
-import { createPageUi } from "./playground-react.js";
+import { createEngine, failureLines } from "./playground-engine.js";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
-const reactMode = params.get("ui") === "react";
+const useLoom = params.get("ui") === "loom";
 
-const editor = document.getElementById("editor");
-const runButton = document.getElementById("run");
-const output = document.getElementById("output");
-const status = document.getElementById("status");
-const count = document.getElementById("count");
-const engine = document.getElementById("engine");
-const sideUi = document.getElementById("side-ui");
-const sideDom = document.getElementById("side-dom");
+// The page's elements: the static markup's at load, or the Loom app's after it mounts.
+let editor = null;
+let runButton = null;
+let output = null;
+let status = null;
+let count = null;
+let engineEl = null;
 
-// The Goals pane's element: the page's own div, or under `?ui=react` a detached one whose
-// HTML the React model carries into the tree (the pane keeps web/goals.js's rendering).
-const goalsPanel = reactMode ? document.createElement("div") : document.getElementById("goals");
-let pageUi = null;        // the React pane's handle, once its module has loaded
-let lastOutput = null;    // the last `show` text, re-applied when the React pane appears
+// The Loom UI instance (`?ui=loom`), driver's handle and its state marshalling.
+let ui = null;
+let app = null;
 
-let wasm = null;
+let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
 let busy = false;
+
 const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
 
+// Call one of the UI module's `wiz_loom_*` entry points: the state first, then strings
+// (allocated here and freed after) and numbers. The app patches the page itself
+// (`js_patch`), so the page only keeps the returned state.
+function uiCall(name, ...args) {
+  if (!ui || !app) return null;
+  const pointers = [];
+  const rest = args.map((a) => {
+    if (typeof a === "string") {
+      const p = ui.stringToNewUTF8(a);
+      pointers.push(p);
+      return big(p);
+    }
+    return typeof a === "number" ? big(a) : a;
+  });
+  try {
+    const next = ui["_" + name](app.state(), ...rest);
+    app.setState(next);
+    return next;
+  } finally {
+    for (const p of pointers) ui._free(p);
+  }
+}
+
+// The UI's getters are not exported: an exported call consumes the state it is given
+// (driver.js's ownership note), so the page computes what it needs from the text it
+// already has (the error count for the status kind) and keeps the app's state.
+
 function setStatus(text, kind) {
+  if (ui) { uiCall("wiz_loom_status", text, kind || ""); return; }
   status.textContent = text;
   status.className = "status " + (kind || "");
+}
+
+function setEnabled(on) {
+  if (ui) { uiCall("wiz_loom_enable", on ? 1 : 0); return; }
+  runButton.disabled = !on;
+}
+
+function setEngine(text) {
+  if (ui) { uiCall("wiz_loom_engine", text); return; }
+  engineEl.textContent = text;
 }
 
 // The engine has the self-hosted frontend's embedded Prelude; a source without an
@@ -48,179 +86,166 @@ function withPrelude(text) {
 }
 
 // `wiz_playground_eval` on a source: the module's one call, shared by Run and the
-// in-page language server.
-function evalSource(src) {
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_eval(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : "";
-  if (r) wasm._free(r);
-  return text;
-}
+// in-page language server. (stage 1) `wiz_playground_check`: the same check as JSON with
+// each line's offset, for the in-page language server; null with a module built before
+// it existed. Both reject with an `EngineFailure` when the program exits (the module is
+// kept), aborts or traps (the module is replaced).
+const evalSource = (src) => wasm.evaluate(src);
+const checkSource = (src) => wasm.check(src);
 
-// (stage 1) `wiz_playground_check`: the same check as JSON with each line's offset, for
-// the in-page language server; null with a module built before it existed.
-function checkSource(src) {
-  if (typeof wasm._wiz_playground_check !== "function") return null;
-  const p = wasm.stringToNewUTF8(src);
-  const r = wasm._wiz_playground_check(big(p));
-  wasm._free(big(p));
-  const text = r ? wasm.UTF8ToString(Number(r)) : null;
-  if (r) wasm._free(r);
-  return text;
-}
-
-// An output line's class and the text to show. A value the page can render (a Nat, a
-// Bool, a list) shows its rendered form; the raw text is in the DOM path's title.
-function lineSpec(text) {
-  if (text.startsWith("error:") || text.startsWith("parse error")) return { kind: "err", text };
-  if (isValue(text)) {
-    const shown = renderValue(text);
-    return shown === null ? { kind: "raw", text } : { kind: "val", text: shown };
-  }
-  return { kind: "", text };
-}
+// ## The static page's output pane (the Loom app renders its own)
 
 function line(text) {
   const el = document.createElement("div");
   el.className = "line";
   el.textContent = text;
-  const spec = lineSpec(text);
-  if (spec.kind === "err") el.classList.add("err");
-  else if (spec.kind === "val" || spec.kind === "raw") {
+  if (text.startsWith("error:") || text.startsWith("parse error")) {
+    el.classList.add("err");
+  } else if (isValue(text)) {
     el.classList.add("val");
     el.title = text;
-    if (spec.kind === "val") el.textContent = spec.text;
+    const shown = renderValue(text);
+    if (shown !== null) el.textContent = shown;
     else el.classList.add("raw");
   }
   return el;
 }
 
+// Show a run's output. Returns how many lines are errors (the status kind; the app owns
+// the `#count` text and the classes).
 function show(text) {
-  lastOutput = text;
-  const lines = text.split("\n").filter((l) => l !== "");
-  const bad = lines.filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
-  const label = lines.length + (lines.length === 1 ? " line" : " lines") +
-    (bad ? ` · ${bad} error${bad === 1 ? "" : "s"}` : "");
-  // Under `?ui=react` the count is part of the React pane (its Output head) rather than
-  // the line under the editor, so it is not drawn twice.
-  if (!pageUi) count.textContent = label;
-  if (pageUi) {
-    // The React pane owns the output's nodes; the Wiz view escapes every line's text.
-    pageUi.update({ count: label, lines: lines.map(lineSpec) });
-    return bad;
+  if (ui) {
+    uiCall("wiz_loom_show", text);
+  } else {
+    output.replaceChildren();
+    const lines = text.split("\n").filter((l) => l !== "");
+    for (const t of lines) output.appendChild(line(t));
+    const bad = lines.filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
+    count.textContent = lines.length + (lines.length === 1 ? " line" : " lines") +
+      (bad ? ` · ${bad} error${bad === 1 ? "" : "s"}` : "");
   }
-  output.replaceChildren();
-  for (const t of lines) output.appendChild(line(t));
-  return bad;
+  return text.split("\n").filter((l) => l !== "")
+    .filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
+}
+
+// An engine exit, abort or trap: the lines it printed, then what happened.
+function showFailure(e) {
+  const lines = failureLines(e);
+  const countText = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
+  if (ui) { uiCall("wiz_loom_fail", lines.join("\n"), countText); return; }
+  output.replaceChildren(...lines.map(line));
+  count.textContent = countText;
 }
 
 function run() {
   if (!wasm || busy) return;
   busy = true;
-  runButton.disabled = true;
+  setEnabled(false);
   setStatus("running…", "running");
   // let the status paint before the (synchronous) Wasm call
-  setTimeout(() => {
+  setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = evalSource(withPrelude(editor.value));
+      const text = await evalSource(withPrelude(editor.value));
       const ms = Math.max(0, performance.now() - started);
       const bad = show(text);
       setStatus(`done in ${ms < 10 ? "<10" : Math.round(ms)} ms`, bad ? "error" : "ready");
     } catch (e) {
-      show("error: " + (e && e.message ? e.message : String(e)));
+      if (e && e.name === "EngineFailure") showFailure(e);
+      else show("error: " + (e && e.message ? e.message : String(e)));
       setStatus("failed", "error");
     } finally {
       busy = false;
-      runButton.disabled = false;
+      setEnabled(true);
     }
   }, 0);
 }
 
-runButton.addEventListener("click", run);
-editor.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
-    run();
-  }
-});
+// ## The goals pane (independent of the Wasm engine)
 
-// The goals pane is independent of the Wasm engine. By default it is the in-page server
-// (web/selfhost-lsp-shim.js): the same Wasm engine answers the pane, so there is nothing
-// to start, and it waits for the engine to load. `?lsp=ws://host:port` switches it to the
-// external language client (web/playground-lsp.js), and `?lsp=off` (or none/0/false)
-// leaves the pane with no server; a failed connection is the same as no server.
+// By default it is the in-page server (web/selfhost-lsp-shim.js): the same Wasm engine
+// answers the pane, so there is nothing to start, and it waits for the engine to load.
+// `?lsp=ws://host:port` switches it to the external language client
+// (web/playground-lsp.js), and `?lsp=off` (or none/0/false) leaves the pane with no
+// server; a failed connection is the same as no server.
 let engineReady;
 const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
 engineLoaded.catch(() => { /* reported by start(); the shim reports it again */ });
-
-// Under `?ui=react` the pane's HTML is mirrored into the React model after every render.
-function syncGoals() {
-  if (pageUi) pageUi.update({ goals: goalsPanel.innerHTML });
-}
-
 const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
   ? selfhostEndpoint({
     evaluate: (src) => engineLoaded.then(() => evalSource(src)),
     check: (src) => engineLoaded.then(() => checkSource(src)),
   })
   : undefined;
-startInfoview({
-  editor,
-  panel: goalsPanel,
-  config: selfhost,
-  onRender: syncGoals,
-  // Under `?ui=react` the panel's markup lives in the live tree (#side-ui), so its
-  // clicks and arrow keys are delegated to the pane, not to the detached panel. That
-  // also keeps the DOM path working if the React module fails to load: #side-dom is
-  // still inside `.side`.
-  eventsFrom: reactMode ? document.querySelector(".side") : undefined,
-});
 
-// `?ui=react`: load the small UI module (web/playground-ui.wiz → wiz-playground-ui.mjs)
-// and hand the pane to the React driver. A missing or broken module is not fatal: the
-// page falls back to the DOM pane it always had.
-async function startReactPane() {
-  if (!reactMode || !sideUi || !sideDom) return;
+function wireGoals() {
+  startInfoview({ editor, panel: document.getElementById("goals"), config: selfhost });
+}
+
+// ## Mounting the page
+
+// Mount the Loom app on `body` and return true, or leave the static markup in place and
+// return false (the module is not built, or its ABI is not what the driver expects).
+async function mountLoom() {
   try {
-    const createUi = (await import("./wiz-playground-ui.mjs")).default;
-    const uiWasm = await createUi({ printErr: (s) => console.warn(s) });
-    const page = createPageUi({
-      wasm: uiWasm,
-      root: sideUi,
-      model: { count: "", lines: [], goals: goalsPanel.innerHTML },
-    });
-    if (!page) throw new Error("the UI module has no wiz_ui_html export");
-    pageUi = page;
-    // One pane at a time: removing the DOM copy also keeps the ids unique.
-    if (sideDom.parentNode) sideDom.parentNode.removeChild(sideDom);
-    sideUi.hidden = false;
-    show(lastOutput === null ? "" : lastOutput);
-    syncGoals();
+    const createModule = (await import("./wiz-playground-ui.mjs")).default;
+    ui = await createModule({ print: (s) => console.log(s), printErr: (s) => console.warn(s) });
+    // A cheap ABI probe before anything is removed from the page: the SSR has to come
+    // back as a string, or the static page stays.
+    const probe = ui._wiz_loom_init();
+    ui._free(ui._wiz_loom_html(probe));
+    const { start: startLoom } = await import("./framework/driver.js");
+    app = startLoom(ui, document.body, { events: ["click", "input"] });
+    return true;
   } catch (e) {
-    pageUi = null;
-    if (sideUi.parentNode) sideUi.parentNode.removeChild(sideUi);
-    console.warn("?ui=react unavailable, using the DOM pane: " + (e && e.message ? e.message : String(e)));
+    console.warn("wiz playground: using the static page: " +
+      (e && e.message ? e.message : String(e)));
+    ui = null;
+    app = null;
+    return false;
   }
 }
 
+function wireEditor() {
+  editor = document.getElementById("editor");
+  runButton = document.getElementById("run");
+  status = document.getElementById("status");
+  output = document.getElementById("output");
+  count = document.getElementById("count");
+  engineEl = document.getElementById("engine");
+
+  runButton.addEventListener("click", run);
+  editor.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      run();
+    }
+  });
+}
+
 async function start() {
+  // `?ui=loom`: the page is the Loom app; otherwise the static markup stays.
+  if (useLoom) await mountLoom();
+  wireEditor();
+  wireGoals();
+
   setStatus("loading the engine…", "running");
-  startReactPane();
   try {
     const createModule = (await import("./wiz-playground.mjs")).default;
-    wasm = await createModule({
+    const engine = createEngine(createModule, {
       print: (s) => console.log(s),
       printErr: (s) => console.warn(s),
+      onRestart: (f) => console.warn("wiz playground: restarting the engine: " + f.message),
     });
-    engine.textContent = "engine: ready";
+    await engine.ready;
+    wasm = engine;
+    setEngine("engine: ready");
     engineReady.resolve();
-    runButton.disabled = false;
+    setEnabled(true);
     if (!output.childElementCount) run();
     else setStatus("ready", "ready");
   } catch (e) {
-    engine.textContent = "engine: failed";
+    setEngine("engine: failed");
     engineReady.reject(e);
     setStatus("the engine did not load: " + (e && e.message ? e.message : String(e)), "error");
     show("error: " + (e && e.message ? e.message : String(e)));

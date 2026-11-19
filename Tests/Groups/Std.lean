@@ -31,8 +31,8 @@ def stdGroup : Group where
           "def f (xs : List U8) : List U8 := List.cons 1 xs\n#eval (a 255).toNat\n#eval (b 1).toNat\n#eval c 5\n#eval (d 7).toNat\n#eval (e 1).toNat\n" ++
           "def g (x : I16) := 2 * x - 1\n#eval (g 3).toNat")
           ["0", "2", "-9", "8", "10", "5"] },
-    { name := "order notation: ≤, < and ≈ are classes (lib/Order.wiz)", run := fun _ =>
-        okLibs ("import Order\ndef Bool.Le (a b : Bool) : Prop := Bool.or (Bool.not a) b = .true\n" ++
+    { name := "order notation: ≤, < and ≈ are classes (lib/Data/Order.wiz)", run := fun _ =>
+        okLibs ("import Data.Order\ndef Bool.Le (a b : Bool) : Prop := Bool.or (Bool.not a) b = .true\n" ++
           "instance : LE Bool := LE.mk Bool.Le\ninstance : Equiv Bool := Equiv.mk (fun a b => a = b)\n" ++
           "def t : Bool.false ≤ Bool.true := rfl\ndef u : Bool.true ≈ Bool.true := rfl\n#check Bool.false ≤ Bool.true")
           ["Bool.false ≤ Bool.true : Prop"] },
@@ -40,9 +40,10 @@ def stdGroup : Group where
     { name := "naturals: semiring laws, the order as a proposition, ≤ notation", run := fun _ =>
         okLibs ("import Nat\n#check Nat.mul_add\n#check Nat.le_trans\n" ++
           "def a (n : Nat) : n ≤ n + 1 := Nat.le_add_right n 1\ndef b : Nat.Le 2 5 := rfl\ndef c : (3 : Nat) < 4 := rfl\n" ++
-          "def d (m n : Nat) (h : m ≤ n) (h' : n ≤ m) : m = n := Nat.le_antisymm m n h h'\n#print axioms Nat.mul_assoc")
+          "def d (m n : Nat) (h : m ≤ n) (h' : n ≤ m) : m = n := Nat.le_antisymm m n h h'\n#check Nat.mul_assoc\n#print axioms Nat.mul_assoc")
           ["Nat.mul_add : (a : Nat) → (b : Nat) → (c : Nat) → a * (b + c) = a * b + a * c",
            "Nat.le_trans : (a : Nat) → (b : Nat) → (c : Nat) → Nat.Le a b → Nat.Le b c → Nat.Le a c",
+           "Nat.mul_assoc : (a : Nat) → (b : Nat) → (c : Nat) → a * b * c = a * (b * c)",
            "'Nat.mul_assoc' does not depend on any axioms"] },
     { name := "simp lemmas: normal forms and explicit rw chains (lib/SimpLemmas.wiz)", run := fun _ =>
         okLibs ("import SimpLemmas\n" ++
@@ -88,9 +89,10 @@ def stdGroup : Group where
     { name := "int_ring! and the ring laws of Int", run := fun _ =>
         okLibs ("import IntRing\ndef t (a b : Int) : (a - b) * (a + b) = a * a - b * b := int_ring! (a - b) * (a + b) = a * a - b * b\n" ++
           "def u (a b c : Int) : -(a - b) * c + a * c = b * c := int_ring! -(a - b) * c + a * c = b * c\n" ++
-          "#check Int.mul_comm\n#check Int.neg_mul\n#print axioms Int.mul_add")
+          "#check Int.mul_comm\n#check Int.neg_mul\n#check Int.mul_add\n#print axioms Int.mul_add")
           ["Int.mul_comm : (a : Int) → (b : Int) → a * b = b * a",
            "Int.neg_mul : (a : Int) → (b : Int) → -a * b = - (a * b)",
+           "Int.mul_add : (a : Int) → (b : Int) → (c : Int) → a * (b + c) = a * b + a * c",
            "'Int.mul_add' does not depend on any axioms"] },
     { name := "int_ring! rejects an equation that is not an identity", run := fun _ =>
         failsLibs "import IntRing\ndef bad (a b : Int) : a - b = b - a := int_ring! a - b = b - a" "not definitionally equal" },
@@ -104,9 +106,10 @@ def stdGroup : Group where
         okLibs ("import Rat\ndef half : Q := Q.mk 1 2 rfl\ndef a : half + half ≈ 1 := rfl\ndef b : half < 1 := rfl\n" ++
           "def c (p q : Q) : (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q := q_ring! (p + q) * (p + q) ≈ p * p + 2 * p * q + q * q\n" ++
           "def d (p q r : Q) (h : p ≤ q) (h' : q < r) : p < r := Q.lt_of_le_of_lt h h'\n" ++
-          "#eval (Q.div 1 half).num\n#check Q.mul_inv\n#check Q.abs_sub_le\n#print axioms Q.lt_ceil")
+          "#eval (Q.div 1 half).num\n#check Q.mul_inv\n#check Q.abs_sub_le\n#check Q.lt_ceil\n#print axioms Q.lt_ceil")
           ["2", "Q.mul_inv : (p : Q) → ¬p.1 = 0 → p * Q.inv p ≈ 1",
            "Q.abs_sub_le : (p : Q) → (q : Q) → (r : Q) → Q.abs (p - r) ≤ Q.abs (p - q) + Q.abs (q - r)",
+           "Q.lt_ceil : (p : Q) → p < Q.ofNat (Q.ceil p)",
            "'Q.lt_ceil' does not depend on any axioms"] },
     { name := "ring: the tactic reads the goal (Nat, Int, ≈ at Q; binders introduced)", run := fun _ =>
         okLibs ("import RingTactic\ndef a (x y : Int) : (x - y) * (x + y) = x * x - y * y := by ring\n" ++

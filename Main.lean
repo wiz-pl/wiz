@@ -43,9 +43,10 @@ def usage : String := "usage:
                                    also the reference manual (full signatures, doc comments,
                                    class instances, notation table) into DIR/index.md;
                                    --check: change nothing, exit 1 when DIR/index.md differs
-  wiz fmt [FILE|-] [--check] [--width N] [--explain]
+  wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
                                    reprint a file from its syntax tree (stdin/stdout;
-                                   --check: change nothing, exit 1 when it differs)
+                                   --check: change nothing, exit 1 when it differs;
+                                   --self-test: run the built-in fixtures)
   wiz cache prune [--days N] [--dry-run]
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
@@ -57,7 +58,12 @@ def usage : String := "usage:
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
-                                   both flags may be given; --no-stdio: no editor on stdin)
+                                   both flags may be given; --no-stdio: no editor on stdin);
+                                   clients present a token (`/?token=T` or `Authorization:
+                                   Bearer T`): a fresh one per launch, printed on stderr
+  wiz lsp … --token-file FILE      the token in FILE (created with mode 0600 and a fresh
+                                   token when FILE does not exist)
+  wiz lsp … --ws-insecure          no token: any local process may connect (loopback only)
   wiz lsp … --web DIR              the web infoview's files, served on the WebSocket's port
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
@@ -86,6 +92,8 @@ unboxed; not stable under substitution, so off by default)
 --strict-privacy (13b, an experiment; turns the cache off): check each declaration again with
   the definitions of other modules' types with private parts hidden
 --pp-all (11r; turns the cache off): print terms without notation (as `set_option pp.all true`)
+--trace-guess-fallback (13b, a diagnostic; turns the cache off): print (stderr) each declaration
+  whose guessed hole solutions reach the whole-declaration recheck, and why
 toolchain: --cc X (default: a release's own share/wiz/cc, else cc), --cflags \"…\" --ldflags \"…\" (where GMP lives),
   --libs \"…\" (say -lm), --gmp \"…\" (default -lgmp), --llc X (default llc)"
 
@@ -120,22 +128,38 @@ def loadLibraryPaths (tc : Toolchain) : IO (Std.HashMap String (String × String
     m := m.insert n ((← IO.FS.realPath p).toString, src)
   pure m
 
-/-- `wiz lsp`'s options: `--infoview SOCK`, `--ws [ADDR:]PORT`, `--no-stdio`. -/
-def lspOptions : List String → Option (LSP.Listen × Bool)
-  | [] => some ({}, true)
-  | "--infoview" :: sock :: rest => do let (l, io) ← lspOptions rest; pure ({ l with infoview := some sock }, io)
+/-- `wiz lsp`'s options: `--infoview SOCK`, `--ws [ADDR:]PORT`, `--no-stdio`, `--web DIR`,
+and (#430) `--token-file FILE` (returned apart: it is read later) and `--ws-insecure`. -/
+def lspOptions : List String → Option (LSP.Listen × Bool × Option String)
+  | [] => some ({}, true, none)
+  | "--infoview" :: sock :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with infoview := some sock }, io, t)
   | "--ws" :: spec :: rest => do
-    let (l, io) ← lspOptions rest
+    let (l, io, t) ← lspOptions rest
     let (addr, port) ← match spec.splitOn ":" with
       | [p] => pure (Socket.loopback, p)
       | [a, p] => do pure (← Socket.parseIPv4 a, p)
       | _ => none
     let port ← port.toNat?
     if port ≥ 65536 then none
-    pure ({ l with ws := some (addr, port.toUInt16) }, io)
-  | "--no-stdio" :: rest => do let (l, _) ← lspOptions rest; pure (l, false)
-  | "--web" :: dir :: rest => do let (l, io) ← lspOptions rest; pure ({ l with web := some dir }, io)
+    pure ({ l with ws := some (addr, port.toUInt16) }, io, t)
+  | "--no-stdio" :: rest => do let (l, _, t) ← lspOptions rest; pure (l, false, t)
+  | "--web" :: dir :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with web := some dir }, io, t)
+  | "--token-file" :: f :: rest => do let (l, io, _) ← lspOptions rest; pure (l, io, some f)
+  | "--ws-insecure" :: rest => do let (l, io, t) ← lspOptions rest; pure ({ l with insecure := true }, io, t)
   | _ => none
+
+/-- (#430) The token in `file` (its first line, trimmed); a file that does not exist is
+created with mode 0600 (before anything is written to it) and gets a fresh token. -/
+def lspTokenFromFile (file : System.FilePath) : IO String := do
+  if ← file.pathExists then
+    let t := ((← IO.FS.readFile file).splitOn "\n").headD "" |>.trimAscii.toString
+    if t.isEmpty then throw (IO.userError s!"{file}: empty token file")
+    return t
+  let t ← WebSocket.freshToken
+  IO.FS.withFile file .writeNew fun h => do
+    IO.setAccessRights file { user := { read := true, write := true } }
+    h.putStrLn t
+  pure t
 
 /-- (11w) The web infoview's files (`web/build.sh`'s output) beside the toolchain's
 library: `share/wiz/web` in a release, `web/out` in a checkout. -/
@@ -304,7 +328,8 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) :
   let unboxStructs ← unboxOpt.get
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
-      proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get)
+      proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get) &&
+      !(← traceGuessesRef.get)
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
@@ -488,7 +513,7 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     return 1
   IO.println s!"wiz doc: serving http://127.0.0.1:{p}/ (Ctrl-C to stop)"
   match a.lsp with
-  | some lp => IO.println s!"wiz doc: the live panel asks wiz lsp --ws {lp}; start it with `wiz lsp --ws {lp} --no-stdio`"
+  | some lp => IO.println s!"wiz doc: the live panel asks wiz lsp --ws {lp}; start it with `wiz lsp --ws {lp} --no-stdio` and open the pages with ?token=T (the token it prints)"
   | none => IO.println "wiz doc: static pages; --lsp PORT shows live types and docs from `wiz lsp --ws PORT`"
   Doc.Serve.acceptLoop fd site
   pure 0
@@ -499,11 +524,13 @@ structure FmtArgs where
   check : Bool := false
   width : Nat := 100
   explain : Bool := false
+  selfTest : Bool := false
 
 def fmtArgs (a : FmtArgs) : List String → Except String FmtArgs
   | [] => pure a
   | "--check" :: rest => fmtArgs { a with check := true } rest
   | "--explain" :: rest => fmtArgs { a with explain := true } rest
+  | "--self-test" :: rest => fmtArgs { a with selfTest := true } rest
   | "--width" :: n :: rest => do
     let some w := n.toNat? | throw s!"wiz fmt: --width needs a number, not {n}"
     fmtArgs { a with width := w } rest
@@ -518,23 +545,31 @@ def fmtCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let a ← match fmtArgs {} args with
     | .ok a => pure a
     | .error e => do IO.eprintln e; return 2
-  let path := a.input.getD "-"
-  let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
-  let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
-  let r := Fmt.run init input { width := a.width, explain := a.explain }
-  unless r.errors.isEmpty do
-    for e in r.errors do IO.eprintln s!"{path}:{e}"
-    IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
-    return 2
-  for m in r.refused do IO.eprintln s!"{path}:{m}"
-  if a.check then
-    if r.text == input then pure 0
-    else
-      IO.eprintln s!"wiz fmt: {path}: not formatted"
-      pure 1
+  if a.selfTest then
+    let bad := Fmt.selfTest
+    for b in bad do IO.eprintln s!"wiz fmt --self-test: {b}"
+    if bad.isEmpty then
+      IO.println s!"wiz fmt --self-test: {Fmt.selfTestFixtures.size} fixtures ok"
+      pure 0
+    else pure 1
   else
-    IO.print r.text
-    pure (if r.refused.isEmpty then 0 else 1)
+    let path := a.input.getD "-"
+    let input ← if path == "-" then (← IO.getStdin).readToEnd else IO.FS.readFile path
+    let (init, _) ← initState tc (if path == "-" then "<stdin>" else path) input
+    let r := Fmt.run init input { width := a.width, explain := a.explain }
+    unless r.errors.isEmpty do
+      for e in r.errors do IO.eprintln s!"{path}:{e}"
+      IO.eprintln s!"wiz fmt: {path}: not formatted (the file did not parse)"
+      return 2
+    for m in r.refused do IO.eprintln s!"{path}:{m}"
+    if a.check then
+      if r.text == input then pure 0
+      else
+        IO.eprintln s!"wiz fmt: {path}: not formatted"
+        pure 1
+    else
+      IO.print r.text
+      pure (if r.refused.isEmpty then 0 else 1)
 /-- `wiz cache prune [--days N] [--dry-run]`: remove keyed files older than N days (default
 30) from the write cache. Only the write cache: read-only layers are never touched. -/
 def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
@@ -933,9 +968,13 @@ def main (args : List String) : IO UInt32 := do
   let args := args.filter (· != "--strict-privacy")
   if args.contains "--pp-all" then ppAllOpt.set true
   let args := args.filter (· != "--pp-all")
+  if args.contains "--trace-guess-fallback" then traceGuessesRef.set true
+  let args := args.filter (· != "--trace-guess-fallback")
   if args.contains "--unbox-structs" then unboxOpt.set true
   let args := args.filter (· != "--unbox-structs")
-  regionStatsOpt.set (args.contains "--region-stats")
+  -- (`--region-stats` is a toolchain flag, so `parseFlags` above has consumed it; a
+  -- grail job gets it from `Toolchain.toFlags`)
+  regionStatsOpt.set tc.regionStats
   let args := args.filter (· != "--region-stats")
   verifyStatsOpt.set (args.contains "--cache-verify-stats")
   let args := args.filter (· != "--cache-verify-stats")
@@ -1007,8 +1046,23 @@ def main (args : List String) : IO UInt32 := do
   | "lsp" :: opts => do
     match lspOptions opts with
     | none => IO.println usage; pure 2
-    | some (listen, stdio) =>
+    | some (listen, stdio, tokenFile) =>
       let listen ← if listen.web.isSome then pure listen else do pure { listen with web := ← webDir }
+      -- (#430) no token is only for the loopback address, and not with a token file
+      if listen.insecure then
+        if tokenFile.isSome then
+          IO.eprintln "wiz lsp: --ws-insecure and --token-file contradict each other"
+          return 2
+        if let some (addr, _) := listen.ws then
+          unless addr == Socket.loopback do
+            IO.eprintln "wiz lsp: --ws-insecure is only for the loopback address (127.0.0.1)"
+            return 2
+      let mut listen := listen
+      if let some f := tokenFile then
+        try listen := { listen with token := some (← lspTokenFromFile f) }
+        catch e =>
+          IO.eprintln s!"wiz lsp: --token-file: {e}"
+          return 2
       LSP.serve (← loadLibraryPaths tc) listen stdio (← libTrusted tc) (nativeOpts tc) (← tc.smt.resolve)
       -- (an infoview's reader thread may still be blocked: don't wait for it)
       IO.Process.exit 0

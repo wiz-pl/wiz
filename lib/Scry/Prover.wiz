@@ -1,0 +1,305 @@
+import Prelude
+import Word
+import Text
+import Scry.Store
+import Scry.Datalog
+import Scry.Eval
+import Scry.RuleTaint
+/-!
+# Scry.Prover
+
+**Prover mode** (`import Scry.Prover`): prove properties of an analysed function,
+rather than report the findings a fixpoint happened to produce.
+
+The design is `wiz-notes/scry-prover.md`. This module is the smallest honest slice:
+
+* the **proposition** is a *no-flow claim* about one function's fact graph: no `sink`
+  use is reachable from the taint seeds, given an **invariant** `I` over
+  `(point, register)` pairs;
+* the **proof object** is the invariant (`Scry.Claim`);
+* `Scry.check` validates the claim against the function's EDB **without running the
+  analysis and without calling the prover**; it rejects a claim that omits a seed,
+  that is not closed under a taint rule, or that admits an alert;
+* `Scry.prove` is the *search*: a small tactic script (`intro`, `apply`, `close`,
+  `split`) that builds an invariant. Its result is only accepted if `Scry.check`
+  accepts it.
+
+## Why an invariant and not a derivation
+
+A finding is existential ("this path exists") and is certified by a derivation
+(`Scry.Cert`). A *no-flow* property is universal ("no path exists"), and no finite
+derivation can prove it. Because the EDB is finite and the taint rules are monotone,
+a set `I` that
+
+1. contains every fact the rules can derive from the seeds (closure), and
+2. contains no alert instance,
+
+is a genuine proof: by induction on the height of a derivation, every `tainted` fact is
+in `I`; hence the alert rule has no instance with premises in `I`. The checker verifies
+(1) and (2) by enumerating rule instances against the EDB. It never computes the
+fixpoint, and it does not trust `Scry.prove`.
+
+## The fragment (and what is refused)
+
+The checker covers the **tuple** fragment of `Scry.RuleTaint.ruleTaintProgram`:
+`src`, `param`, `retsrc`, the transfer rule and the alert rule. The memory rules
+(`mstore`/`mload`/`mtainted`) are **not** covered; a function whose EDB has a store or a
+load is refused with a reason rather than accepted unsoundly. `param`/`retsrc` rows are
+*assumptions about callers and callees*: the claim is intraprocedural.
+-/
+
+/-- A no-flow claim for one function: the invariant `I`, as `(point, register)` rows.
+`func` is a label only; the EDB identifies the function. -/
+structure Scry.Claim where
+  func : String
+  invariant : List (Nat × Nat)
+
+/-- The checker's answer. A rejection carries the offending fact and the rule. -/
+inductive Scry.Verdict where
+  | ok
+  | rejected (reason : String)
+
+def Scry.Verdict.isOk : Scry.Verdict → Bool
+  | .ok => .true
+  | .rejected _ => .false
+
+def Scry.Verdict.show : Scry.Verdict → String
+  | .ok => "ok"
+  | .rejected r => String.append "rejected: " r
+
+-- ## Invariants
+
+def Scry.pairEq (a b : Nat × Nat) : Bool :=
+  if Nat.beq a.1 b.1 then Nat.beq a.2 b.2 else .false
+
+/-- Is `p` one of `I`'s rows? -/
+def Scry.invMem (p : Nat × Nat) (I : List (Nat × Nat)) : Bool :=
+  List.any (fun q => Scry.pairEq p q) I
+
+/-- Add a row to an invariant unless it is already there. -/
+def Scry.invAdd (p : Nat × Nat) (I : List (Nat × Nat)) : List (Nat × Nat) :=
+  if Scry.invMem p I then I else List.cons p I
+
+/-- Insert a row, keeping the relation (the flag is not needed here). -/
+def Scry.tupleInsert (t : Scry.TupleRel) (row : List U64) : Scry.TupleRel :=
+  match Scry.TupleRel.insert t row with
+  | (t', _) => t'
+
+/-- The invariant as a `tainted` relation: the EDB with relation 4 replaced by `I`. -/
+def Scry.invDb (db : Scry.Db Nat) (I : List (Nat × Nat)) : Scry.Db Nat :=
+  let rows := List.foldr (fun (p : Nat × Nat) (acc : Scry.TupleRel) =>
+      Scry.tupleInsert acc [U64.ofNat p.1, U64.ofNat p.2])
+    Scry.TupleRel.empty I;
+  Scry.Db.setTupleAt db Scry.rtTainted rows
+
+/-- An EDB state whose `tainted` relation is the invariant. `evalAtoms` then enumerates
+exactly the rule instances whose tainted premises are `I`'s rows. -/
+def Scry.invState (st : Scry.State Nat) (I : List (Nat × Nat)) : Scry.State Nat :=
+  Scry.State.mk (Scry.invDb st.db I) st.nodes st.next st.stepIdx
+
+/-- A row's column as a `Nat` (absent columns read as 0). -/
+def Scry.rowNat (row : List U64) (i : Nat) : Nat :=
+  UIntN.toNat (List.getD row i (U64.ofNat 0))
+
+/-- The first two columns of a row. -/
+def Scry.rowPair (row : List U64) : Nat × Nat :=
+  (Scry.rowNat row 0, Scry.rowNat row 1)
+
+def Scry.showPair (p : Nat × Nat) : String :=
+  "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2 ++ ")"
+
+def Scry.showInv (I : List (Nat × Nat)) : String :=
+  String.append "{" (String.append
+    (String.intercalate " " (List.map Scry.showPair I)) "}")
+
+-- ## Checking
+
+/-- The memory rules are outside the fragment: a store or a load row means the invariant
+would have to cover `mtainted`, which this checker does not do. Refuse instead of
+accepting an unsound claim. -/
+def Scry.checkMemory (st : Scry.State Nat) : Option String :=
+  if Nat.lt 0 (Scry.Db.relSize st.db Scry.rtMStore) then
+    .some "the function stores (mstore); the memory rules are not covered by this checker"
+  else if Nat.lt 0 (Scry.Db.relSize st.db Scry.rtMLoad) then
+    .some "the function loads (mload); the memory rules are not covered by this checker"
+  else if Nat.lt 0 (Scry.Db.relSize st.db Scry.rtMTainted) then
+    .some "a tainted location seed (mtainted) is present; the memory rules are not covered by this checker"
+  else .none
+
+/-- One taint-head rule's closure: every instance whose tainted premises are `I` has its
+head in `I`. Returns the first offending instance. -/
+def Scry.firstBadInstance (args : List Scry.Term) (I : List (Nat × Nat)) (ri : Nat) :
+    List (Scry.Env Nat × List Nat) → Option String
+  | .nil => .none
+  | .cons m rest =>
+    let row := List.map (Scry.Term.eval m.1.vals) args;
+    let p := Scry.rowPair row;
+    if Scry.invMem p I then Scry.firstBadInstance args I ri rest
+    else .some ("rule " ++ Nat.repr ri ++ " derives tainted " ++ Scry.showPair p ++
+      ", which is not in the invariant")
+
+/-- Check one rule: a `tainted` head must stay in `I`; any other head is not this
+obligation's business. -/
+def Scry.checkRuleClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
+    (I : List (Nat × Nat)) (ri : Nat) (r : Scry.Rule Nat) : Option String :=
+  match r.head with
+  | .tuple rel args =>
+    if Nat.beq rel Scry.rtTainted then
+      Scry.firstBadInstance args I ri (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
+    else .none
+  | .lat _ _ _ => .none
+
+def Scry.checkRulesClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
+    (I : List (Nat × Nat)) : List (Scry.Rule Nat) → Nat → Option String
+  | .nil, _ => .none
+  | .cons r rest, ri =>
+    match Scry.checkRuleClosed p stI I ri r with
+    | .some e => .some e
+    | .none => Scry.checkRulesClosed p stI I rest (Nat.succ ri)
+
+/-- The first alert instance in a match list, as a counterexample message. -/
+def Scry.alertInstanceOf (args : List Scry.Term) :
+    List (Scry.Env Nat × List Nat) → Option String
+  | .nil => .none
+  | .cons m _ =>
+    let row := List.map (Scry.Term.eval m.1.vals) args;
+    .some ("the alert rule fires at sink " ++ Nat.repr (Scry.rowNat row 0) ++
+      " argument " ++ Nat.repr (Scry.rowNat row 1))
+
+/-- The alert rule's instances under `I`: any one is a counterexample to the claim. -/
+def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
+    List (Scry.Rule Nat) → Option String
+  | .nil => .none
+  | .cons r rest =>
+    match r.head with
+    | .tuple rel args =>
+      if Nat.beq rel Scry.rtAlert then
+        Scry.alertInstanceOf args (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
+      else Scry.checkAlertRules p stI rest
+    | .lat _ _ _ => Scry.checkAlertRules p stI rest
+
+/-- **The checker.** Validate `c` against the function's EDB. It is a pure function of
+the EDB, the rules and the claim; it does not run `Scry.prove`.
+
+Obligations, in order: the fragment covers the EDB; `I` is closed under every
+tainted-head rule; the alert rule has no instance under `I`. -/
+def Scry.check (p : Scry.Program Nat) (st : Scry.State Nat) (c : Scry.Claim) : Scry.Verdict :=
+  match Scry.checkMemory st with
+  | .some e => .rejected e
+  | .none =>
+    let stI := Scry.invState st c.invariant;
+    match Scry.checkRulesClosed p stI c.invariant p.rules 0 with
+    | .some e => .rejected e
+    | .none => match Scry.checkAlertRules p stI p.rules with
+      | .some e => .rejected e
+      | .none => .ok
+
+-- ## The tactic script (the search)
+
+/-- A tactic transforms the proof state. The scripts below are *search*; only the
+`Scry.Claim` they produce is checked. -/
+inductive Scry.Tactic where
+  /-- Finite `∀`-introduction: add every row of an EDB relation to `I` (a seed). -/
+  | intro (rel : Nat)
+  /-- Apply one rule's tainted-head instances, adding their heads to `I`. -/
+  | apply (ri : Nat)
+  /-- One closure round over every tainted-head rule (a derived `apply`/`repeat`). -/
+  | close
+  /-- Run `close` up to `n` times (the fixpoint is reached when nothing is added). -/
+  | closeN (n : Nat)
+  /-- Split the no-flow goal into its two obligations and check them. -/
+  | split
+
+/-- Rows of an EDB relation as invariant rows. -/
+def Scry.rowsOf (st : Scry.State Nat) (rel : Nat) : List (Nat × Nat) :=
+  List.map Scry.rowPair (Scry.rtRows st rel)
+
+/-- Add every `tainted` head derivable in one round whose tainted premises are in `I`. -/
+def Scry.closeOne (p : Scry.Program Nat) (stI : Scry.State Nat)
+    (I : List (Nat × Nat)) (r : Scry.Rule Nat) : List (Nat × Nat) :=
+  match r.head with
+  | .tuple rel args =>
+    if Nat.beq rel Scry.rtTainted then
+      List.foldl (fun (acc : List (Nat × Nat)) (m : Scry.Env Nat × List Nat) =>
+        Scry.invAdd (Scry.rowPair (List.map (Scry.Term.eval m.1.vals) args)) acc)
+        I (Scry.evalAtoms p.ops stI r.body Scry.Env.empty)
+    else I
+  | .lat _ _ _ => I
+
+/-- One closure round over every rule. -/
+def Scry.closeRound (p : Scry.Program Nat) (stI : Scry.State Nat)
+    (rules : List (Scry.Rule Nat)) (I : List (Nat × Nat)) : List (Nat × Nat) :=
+  List.foldl (fun acc r => Scry.closeOne p stI acc r) I rules
+
+/-- One closure round: re-derive `tainted` heads from `I` until the round adds nothing.
+The recursion is bounded by the number of rows in the EDB (each round that changes `I`
+adds at least one row), so the prover is total without a fixpoint proof. -/
+def Scry.closeFix (p : Scry.Program Nat) (st : Scry.State Nat) :
+    Nat → List (Nat × Nat) → List (Nat × Nat)
+  | .zero, I => I
+  | .succ k, I =>
+    let I' := Scry.closeRound p (Scry.invState st I) p.rules I;
+    if Nat.beq (List.length I') (List.length I) then I
+    else Scry.closeFix p st k I'
+
+/-- The number of closure rounds a script may take: at most one row per EDB fact. -/
+def Scry.roundBudget (st : Scry.State Nat) : Nat :=
+  Nat.succ (Nat.add (Scry.Db.relSize st.db Scry.rtFlow)
+    (Nat.add (Scry.Db.relSize st.db Scry.rtGen) (Scry.Db.relSize st.db Scry.rtSrc)))
+
+/-- The rule at index `ri`, or an inert rule (no head relation) when out of range. -/
+def Scry.ruleAt (p : Scry.Program Nat) (ri : Nat) : Scry.Rule Nat :=
+  match Scry.listGetOpt p.rules ri with
+  | .some r => r
+  | .none => Scry.Rule.mk (Scry.Head.tuple 0 (List.nil : List Scry.Term))
+      (List.nil : List Scry.Atom)
+
+def Scry.runTactic (p : Scry.Program Nat) (st : Scry.State Nat) :
+    List Scry.Tactic → List (Nat × Nat) → Option (List (Nat × Nat))
+  | .nil, I => .some I
+  | .cons t rest, I =>
+    match t with
+    | .intro rel => Scry.runTactic p st rest (List.foldr (fun r acc => Scry.invAdd r acc) I (Scry.rowsOf st rel))
+    | .apply ri =>
+      let r := Scry.ruleAt p ri;
+      let I' := Scry.closeRound p (Scry.invState st I) (List.cons r .nil) I;
+      Scry.runTactic p st rest I'
+    | .close => Scry.runTactic p st rest (Scry.closeFix p st (Scry.roundBudget st) I)
+    | .closeN n => Scry.runTactic p st rest (Scry.closeFix p st n I)
+    | .split =>
+      match Scry.check p st (.mk "proved" I) with
+      | .ok => Scry.runTactic p st rest I
+      | .rejected _ => .none
+
+/-- Run a script from the empty invariant. -/
+def Scry.proveWith (p : Scry.Program Nat) (st : Scry.State Nat)
+    (script : List Scry.Tactic) : Option Scry.Claim :=
+  match Scry.runTactic p st script .nil with
+  | .none => .none
+  | .some I => .some (.mk "proved" I)
+
+/-- The default script: seed the three taint relations, take the closure, check.
+This is the search; a different invariant (found by hand) can be checked directly. -/
+def Scry.defaultTactics : List Scry.Tactic :=
+  [ .intro Scry.rtSrc
+  , .intro Scry.rtParam
+  , .intro Scry.rtRetSrc
+  , .close
+  , .split ]
+
+def Scry.prove (p : Scry.Program Nat) (st : Scry.State Nat) : Option Scry.Claim :=
+  Scry.proveWith p st Scry.defaultTactics
+
+/-- A script's text, for reports and tests. -/
+def Scry.renderScript : List Scry.Tactic → String
+  | .nil => ""
+  | .cons t rest =>
+    String.append (match t with
+      | .intro rel => String.append "intro " (Nat.repr rel)
+      | .apply ri => String.append "apply " (Nat.repr ri)
+      | .close => "close"
+      | .closeN n => String.append "closeN " (Nat.repr n)
+      | .split => "split") (String.append ";" (Scry.renderScript rest))
+
+/-- The default script as text. -/
+def Scry.defaultScript : String := Scry.renderScript Scry.defaultTactics

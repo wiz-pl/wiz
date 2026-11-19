@@ -183,7 +183,7 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
   * `Compare`: lexicographic on the fields of the same constructor, `.lt`/`.gt` by the
     constructors' **declaration order** (the first is least), recursive fields through
     the helper. There is no Lean-host deriver for `Compare` (the class is
-    `lib/PMap.wiz`'s, whose `Ordering` comes from `lib/Nat.wiz`, and its instances are
+    `lib/Data/PMap.wiz`'s, whose `Ordering` comes from `lib/Nat.wiz`, and its instances are
     written by hand), so this one has no differential case; it is tested in the
     self-hosted toolchain only, whose prelude has no `Ordering` (the case declares one),
     and the deriver names its result type `Ordering` as the other derivers name `Bool`
@@ -315,3 +315,50 @@ unwrapped in `absurdBranch`; mutual inductives still reject universe parameters
 (`mutualInductiveCmd`); and the result universe of a data type whose field is itself
 `Type u` is not inferred. A generic instance's level is printed unnormalised
 (`Repr.{max(0, 0)} (List x0)`): the printer does not simplify it.
+
+## 30f: superclasses are instance-implicit parameters
+
+A class takes its superclass as an ordinary **instance-implicit parameter**, the same
+shape as 30a's `Commute`:
+
+```
+class Profunctor (p : Type → Type → Type) where …
+class Strong (p : Type → Type → Type) [super : Profunctor p] where …
+```
+
+There is no `extends` in the language. Neither frontend's grammar accepts it, so
+`class Strong (p) extends Profunctor p` is a parse error; both frontends implement the
+parameter form above.
+
+* **The type former.** `Strong : (p : Type → Type → Type) → [super : Profunctor p] →
+  Type 1`: `#check Strong` prints the extra binder. `Strong.mk` takes it as a parameter
+  (`{super : Profunctor p}`), and each method carries the class's binders before
+  `[self : Strong p super]`, so `Strong.first'` re-inserts the `Profunctor p` problem
+  wherever it is used with a variable `p`.
+* **The instance.** `instance : Strong Hom where …` needs `Profunctor Hom` in scope when
+  its type is formed; the dictionary is not stored in the instance, and no
+  `instCToD`-style global is declared. Nothing chains from `Strong p` to
+  `Profunctor p`: resolution finds a superclass only where the class type is formed.
+* **The cost at a use site.** Every signature that mentions `C a` must also carry
+  `[D a]` in front of it, because forming `C a` synthesizes `D a`. A context holding
+  only `[i : C a]` fails at that binder (`lean` 4.35.0: `failed to synthesize instance
+  of type class D a`), which is why the accepted spelling is
+  `def f {a} [d : D a] [i : C a] …`. This is the measured price of the form, and it is
+  accepted.
+* **Why `extends` is not the rule.** The optics work wanted `Strong p` usable in a
+  `{p} → [Strong p] → …` lens without threading `[Profunctor p]`. An `extends`
+  experiment existed on an integration branch only: a superclass was a stored leading
+  dictionary field (`toProfunctor`) plus a generated `instCToD` instance, so that
+  ordinary synthesis chained `Strong p → Profunctor p`. It was dropped before reaching
+  `master` in favour of the parameter form, which needs no new grammar, no stored
+  dictionary, no second instance per class and no coherence rule, and which both
+  frontends already have. The threading cost above is the reason the feature was
+  dropped, not a defect of this rule.
+
+Tests (`=classes`): `#check Strong` showing the extra parameter and `Strong.mk` taking
+it; a `Type 1` lens that supplies both `[d : Profunctor p]` and `[i : Strong p]` and
+runs through `Hom`; and the missing-`Profunctor` error. `=selfhost` checks the same
+declaration's frontend output and compiles and runs the same program with the
+self-hosted toolchain; its method calls spell the class's parameters (`@Loud.loud A d i
+x`) because a problem whose arguments are still metavariables is `stuck` there (30a),
+and a postponed argument does not fix them in time.

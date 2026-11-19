@@ -15,15 +15,10 @@ def yes (b : Bool) : String := match b with
   | .true => "yes"
   | .false => "NO"
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
   let ω v := Circuit.runLeaves c ins;
-  Bool.and (leavesEq v (Circuit.simFast c ins))
-    (Bool.and (leavesEq v (Circuit.simLeaves .true c ins)) (leavesEq v (Circuit.simLeaves .false c ins)))
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
 
 ------------------------------------------------------------------------------------
 -- The hardware step at values against the specification on numbers.

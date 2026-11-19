@@ -11,6 +11,9 @@
 //   * `parseEndpoint` accepts the `?lsp=` value (a `ws://` URL, or a bare port for
 //     `ws://127.0.0.1:PORT`), and `LspClient` takes `{url, ...}`; nothing else in the
 //     page knows the difference between a Wiz server and a future self-hosted one.
+//   * (#430) `wiz lsp --ws` refuses a connection without its token: the page's
+//     `?token=` (or a `token=` already in the `?lsp=` URL) goes into the socket's URL
+//     (`withToken`); `label` is the URL without it, for the panel to show.
 //
 // Positions are UCS-2/UTF-16 code units, which is what LSP's default
 // `positionEncoding` says and what a JavaScript string index counts. The `initialize`
@@ -50,10 +53,34 @@ export function parseEndpoint(value) {
   return { url: "ws://" + raw };
 }
 
-// The endpoint from a location's query string (`location.search`, or any `?…` text).
-export function endpointFromSearch(search, name = "lsp") {
+// (#430) `url` with `?token=` (or `&token=`) added, unless it has one already.
+export function withToken(url, token) {
+  if (!token) return url;
+  let u;
+  try { u = new URL(url); } catch (_) { return url; }
+  if (!u.searchParams.has("token")) u.searchParams.set("token", token);
+  return u.toString();
+}
+
+// (#430) A URL without its token, to show (the token is a secret).
+export function withoutToken(url) {
+  let u;
+  try { u = new URL(url); } catch (_) { return url; }
+  if (!u.searchParams.has("token")) return url;
+  u.searchParams.delete("token");
+  return u.toString();
+}
+
+// The endpoint from a location's query string (`location.search`, or any `?…` text);
+// its `token` parameter is the server's token. `fallback` is the endpoint when `name`
+// is absent (a page's own `--lsp`); `?token=` applies to it too.
+export function endpointFromSearch(search, name = "lsp", fallback = null) {
   try {
-    return parseEndpoint(new URLSearchParams(search || "").get(name));
+    const params = new URLSearchParams(search || "");
+    const endpoint = params.has(name) ? parseEndpoint(params.get(name)) : parseEndpoint(fallback);
+    if (!endpoint) return null;
+    const url = withToken(endpoint.url, params.get("token"));
+    return { url, label: withoutToken(url) };
   } catch (_) {
     return null;
   }
@@ -419,6 +446,12 @@ export class LspClient {
   positionParams(uri, position) {
     return { textDocument: { uri }, position: { line: position.line, character: position.character } };
   }
+
+  // The editor's requests: the type at the caret and where the identifier is declared
+  // (both already advertised in `initializeParams`'s capabilities). A server without
+  // them answers `MethodNotFound`; `web/hover.js` treats that as "nothing to show".
+  hover(uri, position) { return this.request("textDocument/hover", this.positionParams(uri, position)); }
+  definition(uri, position) { return this.request("textDocument/definition", this.positionParams(uri, position)); }
 
   plainGoal(uri, position) { return this.request("wiz/plainGoal", this.positionParams(uri, position)); }
   plainTermGoal(uri, position) { return this.request("wiz/plainTermGoal", this.positionParams(uri, position)); }

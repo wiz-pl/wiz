@@ -53,15 +53,17 @@ region is a miss, and the next run rewrites it. The command loop (keys, imports,
 still parses every command and only takes the effects from the region, so the result is
 the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
 the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
-`pp.run` and the `Budget` stay live. `--region-stats` (a `wiz` flag) prints what came from
-a region.
+`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region: in
+`wiz` once at the end, in `grail` as one line per job.
 
-`grail` takes the same flag, as `--region-cache` or as the `region-cache` setting of
-`grail.wiz`/`grail.local.wiz` (`Toolchain.regionCache`). It is part of the toolchain record,
-so `grail config` shows it and `Toolchain.toFlags` passes it to every job: a job's
+`grail` takes the same flags, as `--region-cache`/`--region-stats` or as the
+`region-cache`/`region-stats` settings of `grail.wiz`/`grail.local.wiz`
+(`Toolchain.regionCache`, `Toolchain.regionStats`). They are part of the toolchain record,
+so `grail config` shows them and `Toolchain.toFlags` passes them to every job: a job's
 in-process elaboration reads and writes regions in the same layers as its `.wizc` entries,
 and a warm `grail build --region-cache` takes the package modules' effects from `.wizr`
-instead of decoding the text.
+instead of decoding the text. A job with `--region-stats` prints its own counters (zero
+when `--region-cache` is off, or when the job does not elaborate).
 
 **Regions and layers together.** Regions live in the same directory layers as the text
 entries: a lookup tries the write cache first, then the read-only caches in order (so a
@@ -310,6 +312,24 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
 
+**The token (#430).** The `Origin` check stops other web sites, but a local program
+simply sends no `Origin`, and a WebSocket client may open documents and have them
+elaborated (imports, `import_c` headers, an SMT solver) with the user's privileges. So
+the upgrade must also present the server's token, as `?token=T` in the request target
+(all a browser can add) or as `Authorization: Bearer T`; anything else gets `401` before
+any `101`, and the comparison takes the same time wherever the first difference is
+(`WebSocket.constantTimeEq`). The token is 128 random bits, fresh for every launch and
+printed on stderr with the web infoview's URL; `--token-file FILE` reads it from FILE
+(creating FILE, mode 0600, with a fresh one when it does not exist), and `--ws-insecure`
+turns the check off, for the loopback address only and with a warning.
+`wiz/browserInfoview` returns the token and puts it in the page's URL; the pages
+(`web/infoview.js`, the playground and `wiz doc --serve`'s panel through
+`web/lsp-client.js`) pass their own `?token=` on to the socket and never display it. The
+infoview's files are served without a token (they are the toolchain's own). Tests: the
+`lsp-server` group (no token, a wrong, empty or longer token, a wrong bearer: `401`; the
+query and the bearer: `101`; a token in an asset's URL changes nothing), the `nvim` group
+(the browser infoview's URL and handshake), and `web/playground_lsp_test.mjs`.
+
 ## 11p: a Neovim plugin
 
 `editors/nvim/` is **wiz.nvim**, a Lua plugin for Neovim ≥ 0.10 modelled on lean.nvim
@@ -414,6 +434,22 @@ def four : Nat := twice two
   sections under the goals, and `gd` on an item jumps to it. `#check`, `#eval`,
   `#reduce`, `#run`, `inductive` and `structure` now keep their info trees, so hovers
   work inside them too.
+* **One-shot requests** (#435), for clients without an interactive table (no session, no
+  ref): `wiz/typeAt {textDocument, position}` answers the innermost elaborated term there
+  (an application, a `match`, a literal, a hole, or an identifier) as `{term, type,
+  range, kind, name?}`: the source text, the type it was checked against (an
+  identifier's own type), the range, and `const`/`local`/`term`/`hole`; it is the place
+  `wiz/plainTermGoal` picks, without the hypotheses. The info tree records no core term
+  per range, so `term` is what the source says there. `wiz/coreTerm {textDocument, name}`
+  (or `position`: the global under the cursor, else the declaration of the command
+  there) answers `{name, type, value, kind, levelParams, location, native?, axioms,
+  raw?}`: the declaration as the kernel has it, printed as core terms (macros and
+  notation expanded; `notation: true` prints with notation, as hovers do), `kind`
+  `definition`, `opaque` (no value to unfold: an axiom, a constructor, an `extern`; the
+  value is `null` rather than unfolded) or `partial`, the native implementation if
+  there is one, `#print axioms`'s list (`axioms: false` skips it), and with `raw: true`
+  the core syntax trees. Both are in `infoviewMethods`, so infoviews on the Unix socket
+  may ask them. Tests: `lsp-server`, "#435: wiz/typeAt and wiz/coreTerm".
 
 Not covered: hovers inside tactic arguments (a tactic gets its syntax without ranges),
 a procedural macro's output (it has no ranges of the user's), the arguments of
@@ -422,8 +458,11 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 
 ## 11r: printing notation (unexpanders)
 
-Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
-messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
+`#check`, messages (`type mismatch`, kernel errors), hovers and the infoview's goals
+print terms as the notation they were written with. Data values from `#eval`/`#reduce`
+are constructor payloads, not applications, so they print as before (below;
+`Wiz/Core/Pretty.lean` prints `.con` without consulting an unexpander, and the `tour`
+case `01-basics` pins the list output).
 
 ```wiz
 import Logic
@@ -490,7 +529,7 @@ Like Lean's doc-gen4: a static site from a set of modules. Design notes:
 `wiz-notes/scroll.md`.
 
     wiz doc [MODULE|FILE|DIR …] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
-            [--reference DIR [--check]]
+            [--serve [--port N] [--lsp PORT]] [--reference DIR [--check]] [--jobs N] [-v] [-q]
     grail doc [TARGET…] [-o OUT] [--source-url URL] [--title T]
 
 `--lib` documents the toolchain's library; a directory, every module under it (it is a
@@ -613,20 +652,23 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
-* **Cost: one elaboration per module, and `--jobs`.** The site needs each module's
-  declarations as that module's own file sees them, so `run` elaborates `import M` once
-  per module (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from
-  `~/.cache/wiz` (median closure: 8 modules), so the work is one elaboration per module,
-  not one for the library; the pages, the API index and the reference then pretty-print
-  every declaration and run `Wiz.infer` on every subterm of every signature
-  (`LSP.subtermType:532`, `Site.lean:130`), once per declaration. `--jobs N` elaborates
-  and renders N modules at once (`0`: auto, the CPUs available, at most 8); the output is
-  assembled in the modules' own order, so `OUT` is byte-for-byte the same as `--jobs 1`
-  (only the `-v` log follows completion order, and every line names its module). `-v`
-  writes a progress log to stderr — per module its elaboration and rendering time and
-  cache hits, every 25th declaration, the phase boundaries, and a summary with the wall
-  time and peak RSS; `-vv` lists every declaration, `-q` is the quiet default. Stdout and
-  the pages are unchanged in every mode.
+* **Cost, `--jobs` and the progress log.** The site needs each module's declarations as
+  that module's own file sees them, so `run` elaborates `import M` once per module
+  (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from `~/.cache/wiz`
+  (median closure: 8 modules), so the work is one elaboration per module, not one for the
+  library; the pages, the API index and the reference then pretty-print every declaration
+  and run `Wiz.infer` on every subterm of every signature (`LSP.subtermType:532`,
+  `Site.lean:130`), once per declaration. `--jobs N` elaborates and renders N modules at
+  once; the default is 1, and `--jobs 0` (or `--jobs auto`) takes the CPUs this process
+  may run on (`Cpus_allowed_list`, so a cgroup or `taskset` is respected), capped at 8
+  because each job holds a whole elaboration state. The pages, `api.html`, `api.json` and
+  `search.js` are assembled in the modules' order, whichever job finishes first, so `OUT`
+  is byte-for-byte the same at every N; only the log's line order follows completion.
+  `-v` writes that log to stderr: the discovery pass (a line per module, then a phase
+  total), each module's elaboration and rendering time and its cache hits, every 25th
+  declaration, the phase boundaries, and a summary with the wall time and peak RSS. `-vv`
+  lists every declaration; `-q` is the quiet default. Stdout and the pages are unchanged
+  in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
   links, instances, the index); a fixture with one declaration of every command kind
@@ -784,10 +826,23 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+* **From a declaration's own name** (#434). The name in a `def`, `inductive`,
+  `structure` or `class` header, a constructor (`| red`) and a structure field (`px :
+  Nat`) are not identifiers of the info tree, so the cursor there used to find nothing.
+  Now `targetAt` falls back to the command's syntax (parsed again, `declIdents`): the
+  first identifier of each declaring node is the name it declares, and the cursor on it
+  is the same target as a use, so references, highlights and rename give the same answer
+  from either place. The declaration site in the results is that identifier (before, the
+  name's first occurrence in the command's text, which missed constructors and fields).
+  A constructor or field is written by its last component (`red` for `Col.red`): rename
+  edits it there with the new name's last component when the new name keeps the prefix
+  (`Col.crimson`), and leaves it when it doesn't (the declaration can't say `Other.x`).
+  Tests: `lsp-server`, "#434: references, highlights and rename from a declaration's own
+  name".
 
 ## 11aa: `wiz fmt`, a formatter
 
-    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+    wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
 
 Reprints a file from its syntax tree: each command is parsed with the tables that are in
 effect at it (imported `syntax` and `notation` included), printed from the tree with the
@@ -796,7 +851,9 @@ spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-pr
 document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
 to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
 file differs, `--width` is the column budget (default 100), `--explain` prints what a
-refused command would have become.
+refused command would have become, and `--self-test` runs eight built-in fixtures
+(`let` without `;`, `calc`, a tactic with `[simp]`, attributes, patterns, structures and
+implicit binders, a string with comment markers, comments in odd places).
 
 * **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
   the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
@@ -818,7 +875,9 @@ refused command would have become.
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
-  on one line.
+  on one line. A `calc`'s steps line up under its first relation (`Doc.atCol`), and a
+  trailing comment on a token stays on that token's line while the break it ends takes
+  the indentation of the construct that follows (no blank line is left).
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
   check is what makes a prototype safe: across the library files tested (Prelude, Logic,
@@ -826,7 +885,10 @@ refused command would have become.
   Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
   accepts, is idempotent on every file (formatting twice gives the same text), and
   refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+  see `wiz-notes/wiz-fmt.md`). The `format` group has the layout and comment cases
+  (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
+  fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
+  idempotent reprint with no refused command. Both groups are in CI's `core` shard.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not

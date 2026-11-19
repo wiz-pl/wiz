@@ -22,6 +22,7 @@
 #endif
 #include <alloca.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -412,6 +413,12 @@ WIZ_API void wiz_ref_free(wiz_val mv, wiz_val tok);
 WIZ_API wiz_val wiz_lock_new(void);
 WIZ_API wiz_val wiz_lock_acquire(wiz_val lv);
 WIZ_API void wiz_lock_release(wiz_val lv, wiz_val g);
+WIZ_API wiz_val wiz_task_spawn(wiz_val fn);
+WIZ_API wiz_val wiz_task_get(wiz_val tv);
+WIZ_API wiz_val wiz_task_both(wiz_val f, wiz_val g);
+WIZ_API wiz_val wiz_task_race(wiz_val f, wiz_val g);
 WIZ_API int wiz_finish_io(wiz_val main);
 WIZ_API int wiz_finish(wiz_val r);
 WIZ_API int wiz_run_main(wiz_val(*entry)(void), int io);
+WIZ_API char *wiz_stop_run(wiz_val f);
+WIZ_API uint64_t wiz_stop_code_value(uint64_t unused);

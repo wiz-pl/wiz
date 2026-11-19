@@ -8,7 +8,7 @@ import FeralCore
 -- (drafts/feral/rejected/lifetime_bound_missing_mut.wiz).
 
 -- fn pick {'a 'b} {'a : 'b} (c : Bool) (x : &'a mut U64) (y : &'b mut U64) : &'b mut U64
-def pick {ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
+def pick {0 ρa ρb : Region} (0 h : Outlives ρa ρb) (c : Bool) (1 x : Uniq ρa U64) (1 y : Uniq ρb U64) :
     Borrowed (Mut ρb U64 ((1 _ : Uniq ρa U64) × Uniq ρb U64)) ((1 _ : Uniq ρa U64) × Uniq ρb U64) :=
   match c with
   | .true => .ok (Mut.alongside (Mut.weaken h (Mut.ofUniq x)) y (fun (x : Uniq ρa U64) (y : Uniq ρb U64) => (x, y)))

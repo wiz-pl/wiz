@@ -62,10 +62,14 @@ inductive ACond where
   | notNull (x : Nat)
   deriving BEq, Repr
 
-/-- A statement. -/
+/-- A statement. `store` is the write half of a memory access; it has no result, so its
+transfer leaves the environment unchanged. It exists so the S5 alarms can see a store
+through a possibly-null or possibly-out-of-bounds pointer (a `load` alone would miss
+`*p = x`). -/
 inductive AStmt where
   | assign (x : Nat) (e : AExpr)
   | assume (c : ACond)
+  | store (arr : Nat) (idx : AExpr) (len : Nat)
   | skip
   deriving BEq, Repr
 
@@ -210,6 +214,7 @@ def ACond.refine (m : AiMach) (env : AiEnv) : ACond → AiEnv
 def AStmt.transfer (m : AiMach) (env : AiEnv) : AStmt → AiEnv
   | .assign x e => AiEnv.set x (AExpr.eval m env e) env
   | .assume c => ACond.refine m env c
+  | .store _ _ _ => env
   | .skip => env
 
 /-- One CFG edge. A guard is the condition under which control takes the edge; `none`

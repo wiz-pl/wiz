@@ -1,0 +1,2 @@
+def f (i : Nat) (a : Array U32) : U32 :=
+  (fun y => y) (Array.getD a i (U32.ofNat 0))

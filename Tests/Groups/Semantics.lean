@@ -68,7 +68,7 @@ def semHelpers : String :=
   "def double : Nat → Float64 → Float64\n  | .zero, x => x\n  | .succ k, x => double k (Float64.add x x)\n"
 
 def imports : String :=
-  "import Word\nimport Int\nimport Text\nimport IO\nimport WordBytes\n"
+  "import Word\nimport Int\nimport Text\nimport IO\nimport Data.WordBytes\n"
 
 /-- `main : List Nat`, the channel the interpreters and C read back. -/
 def natProgram (cells : Array SCell) : String :=
@@ -216,6 +216,9 @@ def compare (pipeline : String) (cells : Array SCell) (got : Got) : IO (Except S
 
 /-- Run one pipeline over its cells, compare, and print the coverage note. -/
 def case (name pipeline : String) (cells : Array SCell) (run : Array SCell → IO Got) : IO Unit := do
+  -- (an empty selection compares 0 values with 0 cells and always passes: a pipeline
+  -- must compare at least one cell, as the Wiz→C case already requires)
+  check (!cells.isEmpty) s!"{pipeline}: no cells selected"
   let got ← run cells
   match ← compare pipeline cells got with
   | .ok _ => pure ()
@@ -297,6 +300,7 @@ def semanticsGroup : Group where
     { name := "Float64 values (Lean → C)", run := fun _ => do
         let cells ← readCells
         let cs := floatCells cells
+        check (!cs.isEmpty) "Float64: no cells selected"
         let program := floatProgram cs
         let errs ← frontendErrors program
         unless errs.isEmpty do throw (IO.userError s!"rejected:\n{"\n".intercalate errs}")
@@ -323,6 +327,7 @@ def semanticsGroup : Group where
     { name := "the kernel computes the width-8 words, Nat and Int", run := fun _ => do
         let cells ← readCells
         let cs := kernelCells cells
+        check (!cs.isEmpty) "kernel: no cells selected"
         let src := kernelSource cs ++ "def t : main = expected := refl main\n"
         let errs ← frontendErrors src
         unless errs.isEmpty do throw (IO.userError s!"rejected:\n{"\n".intercalate errs}")

@@ -355,7 +355,7 @@ function hintHtml(view) {
   const start = state === "closed" ? "Start it again" : "Start it";
   return `${reason}<p class="lsp-hint">The playground evaluates locally; goals need a language server. ` +
     `${start} with <code>wiz lsp --ws 8765 --no-stdio</code> and open this page with ` +
-    `<code>?lsp=ws://127.0.0.1:8765</code>.</p>${retry}`;
+    `<code>?lsp=ws://127.0.0.1:8765&amp;token=T</code>, where T is the token it prints.</p>${retry}`;
 }
 
 // Render the whole panel. `view` is the page's model:

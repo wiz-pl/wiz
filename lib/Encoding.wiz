@@ -1,6 +1,6 @@
 import Word
 import Text
-import WordBytes
+import Data.WordBytes
 /-!
 # Encoding
 
@@ -21,7 +21,7 @@ bytes or the reason the text is not valid.
   input is an `error`, never a silently shortened result. The unused low bits of the last
   character are ignored, as RFC 4648 permits a decoder to do.
 * `Encoding.base64EncodeBytes`, `Encoding.base64DecodeBytes`, `Encoding.hexEncodeBytes`,
-  `Encoding.hexDecodeBytes`: the same over `Bytes` (lib/WordBytes.wiz).
+  `Encoding.hexDecodeBytes`: the same over `Bytes` (lib/Data/WordBytes.wiz).
 
 ```
 import Encoding

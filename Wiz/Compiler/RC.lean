@@ -25,8 +25,9 @@ borrowed variable is simply one that is not owned: it is `dup`ed when it is cons
 never dropped. At a call, an argument in a borrowed position is lent (not consumed); a
 variable lent to a call and also passed to an owned position of the same call is
 `dup`ed for the owned one (the callee might free it while the borrow is still used).
-Join points have borrowed parameters too. The comparisons `nat.beq` and `nat.blt` borrow
-their arguments the same way (`Expr.primBorrows`).
+Join points have borrowed parameters too. The comparisons `nat.beq` and `nat.blt`, and
+the tag inspections `tag` and `natTag`, borrow their arguments the same way
+(`Expr.primBorrows`).
 
 Join point bodies only use their parameters (see `Lower.lean`), so they start from
 their own parameters.

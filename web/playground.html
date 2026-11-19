@@ -7,6 +7,9 @@
 <link rel="stylesheet" href="playground.css">
 </head>
 <body>
+<!-- The static markup is the page's default and the fallback: with ?ui=loom,
+     web/playground.js mounts the whole body from wiz-playground-ui.mjs instead
+     (web/playground-ui.wiz, one Loom app). -->
 <header>
   <a class="home" href="../">&larr; Wiz</a>
   <strong>Playground</strong>
@@ -34,18 +37,16 @@ def twice (n : Nat) : Nat := n + n
     </div>
   </section>
   <section class="pane side">
-    <div id="side-ui" class="side-ui" hidden></div>
-    <div id="side-dom" class="side-dom">
-      <div class="pane-head"><span>Goals</span><span class="hint">from <code>?lsp=ws://host:port</code></span></div>
-      <div id="goals" class="goals" tabindex="0" aria-live="polite"></div>
-      <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
-      <div id="output" class="output" aria-live="polite"></div>
-    </div>
+    <div class="pane-head"><span>Goals</span><span class="hint">from <code>?lsp=ws://host:port</code></span></div>
+    <div id="goals" class="goals" tabindex="0" aria-live="polite"></div>
+    <div class="pane-head"><span>Output</span><span class="hint">one line per command; <code>#eval</code> is the kernel's normal form</span></div>
+    <div id="output" class="output" aria-live="polite"></div>
   </section>
 </main>
 <footer>
   <span id="engine" class="dim">engine: loading</span>
   <span class="dim">A definition prints its signature, <code>#check</code> a type, <code>#eval</code> a value (shown raw if it is not a Nat, Bool or list).</span>
+  <span class="dim">The engine includes mini-gmp from GMP 6.3.0 (LGPL v3+ / GPL v2+): <a href="../licenses/">licences and source</a>.</span>
 </footer>
 <script type="module" src="playground.js"></script>
 </body>
