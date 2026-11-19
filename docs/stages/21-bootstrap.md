@@ -1149,12 +1149,13 @@ they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel i
 A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
 pipeline measurement. The group is now split by what a case runs:
 
-* `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
+* `=selfhost` (**207 cases** at `integration/train7` `7365f7d1`; 208 with this branch's
+  A19 pin; 172 when this section was written) is the pipeline group. Every case runs the self-hosted
   compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
   (`selfhostChecker`/`selfhostCheckFile`/`selfhostOutput`) and compares what it says —
   against a hand-written expectation, or against the Lean frontend/kernel for the
   differential cases. This is the number to quote for parity.
-* `=selfhost-host` (**14 cases**) runs the Lean host only: the static `Tables.wiz`
+* `=selfhost-host` (**16 cases** at train7; 14 when written) runs the Lean host only: the static `Tables.wiz`
   regeneration check, the additive match (the self-hosted frontend has no additive
   eliminator, A21), in-process probes of the Lean kernel/`MTm` (their Wiz counterpart is
   the "and both kernels agree below" pipeline case), and the anti-vacuity case below.
@@ -1163,13 +1164,15 @@ The anti-vacuity case builds a stub that writes `input.wiz` to standard output a
 the compiler and the checker, runs every `=selfhost` case in a child process with
 `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
 passes. That is the audit's measurement turned into a test, so the pipeline group cannot
-regress into cases that do not reach the pipeline. Twenty-two cases that used to
+regress into cases that do not reach the pipeline. (At `integration/train7` the guard is
+**red**: one of 208 `=selfhost` cases, "Kernel.wiz quantity terms ...", passes with the
+stub, so that case does not reach the pipeline.) Twenty-two cases that used to
 compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
 type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.wiz`'s
 erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
 the cases that cannot — they call the Lean kernel API in process, need the additive
 eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
-`selfhost` shard split 6) selects both groups.
+`selfhost` shard split 3) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 
