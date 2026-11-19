@@ -43,7 +43,7 @@ for f in playground.js playground.css playground-values.js \
          playground-react.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
-# The React driver (?ui=react): web/framework/runtime.js applies the patches, driver.js
+# The Loom driver (?ui=react): web/framework/runtime.js applies the patches, driver.js
 # calls into the UI module.
 mkdir -p "$SITE/playground/framework"
 cp "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/driver.js" "$SITE/playground/framework/"
