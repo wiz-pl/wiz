@@ -38,14 +38,13 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 # links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css playground-values.js \
-         lsp-client.js goals.js playground-lsp.js tagged.js selfhost-lsp-shim.js \
-         playground-engine.js; do
+         lsp-client.js goals.js playground-lsp.js hover.js tagged.js selfhost-lsp-shim.js \
+         playground-engine.js editor-model.js squiggles.js completions.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
-
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
-for f in wiz-playground.mjs wiz-playground.wasm; do
+for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs wiz-playground-ui.wasm; do
   if [ ! -f "$WEB/$f" ]; then
     echo "build-site: $WEB/$f is missing: run web/build-playground.sh $WEB first" >&2
     exit 1

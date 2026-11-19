@@ -21,6 +21,7 @@ import {
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./goals.js";
 import { startInfoview } from "./playground-lsp.js";
+import { document as minidoc } from "./framework/minidom.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -294,6 +295,17 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
+// The DOM the squiggle overlay needs (minidom's elements plus a body).
+function fakeDocument() {
+  const base = minidoc();
+  return {
+    body: base.createElement("body"),
+    createElement: base.createElement,
+    createTextNode: base.createTextNode,
+    createRange: base.createRange,
+    defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
+  };
+}
 async function waitUntil(predicate, ms = 3000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -305,13 +317,19 @@ async function waitUntil(predicate, ms = 3000) {
 {
   const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval twice 21\n");
   const wire = fakePanel();
-  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz" });
+  const app = startInfoview({
+    editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    document: fakeDocument(),
+  });
   checkThat("wiring: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
   checkThat("wiring: the #eval result", await waitUntil(() => wire.innerHTML.includes("42")));
   editor.value = "def twice (n : Nat) : Nat := BAD\n";
   for (const fn of editor.listeners.input || []) fn();
   checkThat("wiring: an edit's error", await waitUntil(() => wire.innerHTML.includes("unknown identifier")), wire.innerHTML.slice(0, 600));
   checkThat("wiring: on line 1", wire.innerHTML.includes('data-span="0:0-0:'));
+  // The in-page server's diagnostics reach the editor's squiggle layer too.
+  checkThat("wiring: the error is underlined", !!app.squiggles() && app.squiggles().segments().length === 1,
+    JSON.stringify(app.squiggles() && app.squiggles().segments()));
   app.stop();
 }
 
@@ -565,29 +583,6 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
     '"params":{"textDocument":{"uri":"nope"},"position":{"line":0,"character":0}}}');
   check("before initialize: an unopened document", closed[0].error.code, -32602);
 }
-{
-  // the page: Ctrl-Space opens the list in the panel, Tab inserts over the prefix
-  const editor = fakeEditor(DECL_TEXT);
-  editor.selectionStart = editor.selectionEnd = editor.value.length;
-  const wire = fakePanel();
-  const app = startInfoview({ editor, panel: wire, config: selfhostEndpoint({
-    evaluate: stubEval, check: (s) => declCheck(s, DECLS),
-  }), uri: "file:///complete.wiz" });
-  checkThat("completion: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));
-  let prevented = 0;
-  for (const fn of editor.listeners.keydown || []) fn({ key: " ", ctrlKey: true, preventDefault: () => prevented++ });
-  checkThat("completion: Ctrl-Space opens the list", await waitUntil(() => wire.innerHTML.includes('class="completion')),
-    wire.innerHTML.slice(0, 600));
-  check("completion: the popup is filtered", (app.completions().items || []).map((i) => i.label), ["twice"]);
-  check("completion: Ctrl-Space was consumed", prevented, 1);
-  checkThat("completion: the popup says what it is", wire.innerHTML.includes("Tab inserts"),
-    wire.innerHTML.slice(0, 300));
-  for (const fn of editor.listeners.keydown || []) fn({ key: "Tab", preventDefault() {} });
-  check("completion: Tab inserted the label", editor.value.endsWith("#eval twice"), true);
-  check("completion: the list is closed", app.completions().open, false);
-  app.stop();
-}
-
 // ## 10. Stage 3: tactic states in the index (`wiz/plainGoal`)
 
 check("goals: two blocks", splitGoals("a : Nat\n⊢ Nat\n\nb : Bool\n⊢ Bool"),

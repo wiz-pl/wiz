@@ -111,7 +111,7 @@ export class LspClient {
     this.capabilities = null;
     this.capabilitiesRaw = null;
     this.serverInfo = null;
-    this.diagnostics = new Map(); // uri → the last published array
+    this.diagnostics = new Map(); // uri → {version, diagnostics} (the last publish)
     this.handlers = Object.create(null);
     this.pending = new Map();     // id → {resolve, reject, timer, method}
     this.docs = new Map();        // uri → {uri, text, version, languageId}
@@ -240,7 +240,17 @@ export class LspClient {
           synchronization: { dynamicRegistration: false, willSave: false, didSave: false },
           publishDiagnostics: { relatedInformation: false, versionSupport: true },
           hover: { contentFormat: ["markdown", "plaintext"] },
-          completion: { completionItem: { snippetSupport: false, documentationFormat: ["markdown", "plaintext"] } },
+          // Snippets are not expanded by the playground's popup, so say so; a server may
+          // still send them and acceptCompletion strips the placeholders.
+          completion: {
+            dynamicRegistration: false,
+            contextSupport: true,
+            completionItem: {
+              snippetSupport: false,
+              documentationFormat: ["plaintext", "markdown"],
+              insertReplaceSupport: false,
+            },
+          },
         },
         // Ask for `wiz/elaborated` (the server only sends it to clients that do).
         experimental: { wizElaborated: true, wizInfoview: true },
@@ -344,7 +354,19 @@ export class LspClient {
   dispatchNotification(method, params) {
     if (method === "textDocument/publishDiagnostics" && params && params.uri) {
       const diagnostics = Array.isArray(params.diagnostics) ? params.diagnostics : [];
-      this.diagnostics.set(params.uri, diagnostics);
+      // The client advertises `versionSupport`: a publish for an older document version
+      // than the one already stored is dropped (a second connection, or a server that
+      // fans work out, can deliver them out of order). A server that sends no version
+      // keeps last-arrival, and the last version seen is remembered across such
+      // publishes so a later numbered one is still ordered.
+      const version = typeof params.version === "number" && isFinite(params.version)
+        ? params.version : null;
+      const previous = this.diagnostics.get(params.uri);
+      if (version !== null && previous && typeof previous.version === "number" && version < previous.version) {
+        return;
+      }
+      const kept = version !== null ? version : (previous ? previous.version : null);
+      this.diagnostics.set(params.uri, { version: kept, diagnostics });
       this.emit("diagnostics", { uri: params.uri, diagnostics, version: params.version });
     }
     this.emit("notification", { method, params });
@@ -387,6 +409,9 @@ export class LspClient {
       languageId: options.languageId || this.languageId,
     };
     this.docs.set(uri, doc);
+    // `didOpen` starts a new document lifecycle: a publish from the previous one must
+    // not make the new lifecycle's (lower) versions look stale.
+    this.diagnostics.delete(uri);
     if (this.state === "open") this.sendDidOpen(doc);
     return doc;
   }
@@ -407,6 +432,7 @@ export class LspClient {
 
   closeDocument(uri) {
     if (!this.docs.delete(uri)) return;
+    this.diagnostics.delete(uri);
     if (this.state === "open") this.notify("textDocument/didClose", { textDocument: { uri } });
   }
 
@@ -421,15 +447,33 @@ export class LspClient {
     return { textDocument: { uri }, position: { line: position.line, character: position.character } };
   }
 
+  // The editor's requests: the type at the caret and where the identifier is declared
+  // (both already advertised in `initializeParams`'s capabilities). A server without
+  // them answers `MethodNotFound`; `web/hover.js` treats that as "nothing to show".
+  hover(uri, position) { return this.request("textDocument/hover", this.positionParams(uri, position)); }
+  definition(uri, position) { return this.request("textDocument/definition", this.positionParams(uri, position)); }
+
   plainGoal(uri, position) { return this.request("wiz/plainGoal", this.positionParams(uri, position)); }
   plainTermGoal(uri, position) { return this.request("wiz/plainTermGoal", this.positionParams(uri, position)); }
-  completion(uri, position) { return this.request("textDocument/completion", this.positionParams(uri, position)); }
   interactiveGoals(uri, position) { return this.request("wiz/interactiveGoals", this.positionParams(uri, position)); }
   interactiveTermGoal(uri, position) { return this.request("wiz/interactiveTermGoal", this.positionParams(uri, position)); }
   subtermInfo(uri, session, ref) {
     return this.request("wiz/subtermInfo", { textDocument: { uri }, session, ref });
   }
   interactiveInfo(uri, position) { return this.request("wiz/interactiveInfo", this.positionParams(uri, position)); }
+
+  // `textDocument/completion` at the caret. `context` is LSP's
+  // `{triggerKind, triggerCharacter}`: 1 = invoked (Ctrl-Space), 2 = a character typed.
+  // The result is an array or a `CompletionList`; the popup accepts either (and a
+  // `MethodNotFound` simply closes it).
+  completion(uri, position, context) {
+    const params = {
+      textDocument: { uri },
+      position: { line: position.line, character: position.character },
+    };
+    if (context) params.context = context;
+    return this.request("textDocument/completion", params);
+  }
 
   // The server's advertised infoview tag, if it has one.
   get infoview() { return infoviewTag(this.capabilities); }
