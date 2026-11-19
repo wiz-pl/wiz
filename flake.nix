@@ -45,6 +45,9 @@
             pkgs.stdenv.mkDerivation {
               pname = "wiz-unwrapped";
               version = "0.1.0";
+              # (measurement only, not for the PR) keep the Lean build within the Nix
+              # daemon's 6 GiB cap on this 20-CPU machine.
+              LEAN_NUM_THREADS = "4";
               src = fs.toSource {
                 root = ./.;
                 fileset = fs.unions [
