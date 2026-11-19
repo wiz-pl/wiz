@@ -7,89 +7,89 @@ using System.Linq;
 using System.Threading.Tasks;
 using static System.Math;
 
-namespace Crux.Api.Endpoints;
+namespace Fixtures.Modern;
 
 #nullable enable
 
-/// <summary>What a payout request carries.</summary>
+/// <summary>What a work request carries.</summary>
 [Serializable]
-public record PayoutRequest(string Account, long AmountMinorUnits, string? Reference = null);
+public record WorkRequest(string Name, long Count, string? Label = null);
 
-public readonly record struct PayoutResult(int Status, string Detail)
+public readonly record struct WorkResult(int Status, string Detail)
 {
     public bool Accepted => Status is 202 or 200;
 }
 
-public interface IPayments
+public interface IWorkService
 {
-    Task<PayoutResult> SubmitAsync(PayoutRequest request);
+    Task<WorkResult> SubmitAsync(WorkRequest request);
 
     // A default interface method (C# 8).
-    string Describe(PayoutRequest request) => $"payout {request.Account}";
+    string Describe(WorkRequest request) => $"work {request.Name}";
 }
 
-public abstract class PaymentBase
+public abstract class ServiceBase
 {
     protected abstract string Route { get; }
 
-    public virtual PayoutResult Reject(string detail) => new(422, detail);
+    public virtual WorkResult Reject(string detail) => new(422, detail);
 }
 
-public sealed partial class PayoutService : PaymentBase, IPayments
+public sealed partial class WorkService : ServiceBase, IWorkService
 {
     private readonly List<string> _trace = new();
-    private static readonly string[] Refusals = ["ValidationFailed", "InsufficientFunds"];
+    private static readonly string[] Limits = ["Invalid", "OverLimit"];
 
-    public string Account { get; }
+    public string Name { get; }
     public int Retries { get; init; }
     public string? LastError { get; private set; }
 
     // Expression-bodied members.
     public int Count => _trace.Count;
-    protected override string Route => "payouts";
+    protected override string Route => "work";
 
-    public PayoutService(string account) : base()
+    public WorkService(string name) : base()
     {
-        Account = account;
+        Name = name;
     }
 
     public static T? Find<T>(IEnumerable<T> items) where T : class, new()
         => items.FirstOrDefault() ?? new T();
 
-    public async Task<PayoutResult> SubmitAsync(PayoutRequest request)
+    public async Task<WorkResult> SubmitAsync(WorkRequest request)
     {
         await Task.Yield();
 
-        var words = request.Account.Split('-');
-        var magnitude = Abs(request.AmountMinorUnits);
+        var words = request.Name.Split('-');
+        var magnitude = Abs(request.Count);
         var parts =
             from w in words
             where w.Length > 1
             select w.ToUpperInvariant();
 
-        var route = request.AmountMinorUnits switch
+        var route = request.Count switch
         {
             0 => "zero",
-            _ when request.Reference is not null => $"by-ref {request.Reference}",
-            _ => "by-account",
+            _ when request.Label is not null => $"by-label {request.Label}",
+            _ => "by-name",
         };
 
-        var copy = request with { Reference = route };
-        var refusals = [.. Refusals, "KycNotVerified"];
-        _trace.Add(route + string.Join('/', parts) + copy.Reference + refusals.Length
+        var copy = request with { Label = route };
+        var extras = [.. Limits, "NotReady"];
+        _trace.Add(route + string.Join('/', parts) + copy.Label + extras.Length
             + magnitude.ToString());
-        return new PayoutResult(202, route);
+        return new WorkResult(202, route);
     }
 
     public override string ToString()
     {
         static string Label(string s) => $"[{s}]";
-        return Label(Account);
+        return Label(Name);
     }
 }
 
-public sealed partial class PayoutService
+public sealed partial class WorkService
 {
     [Obsolete("use SubmitAsync")]
-    public PayoutResult Submit(PayoutRequest request) => Reject(request.Account);
+    public WorkResult Submit(WorkRequest request) => Reject(request.Name);
 }

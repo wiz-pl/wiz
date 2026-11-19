@@ -273,16 +273,15 @@ skips `finally`; `using var` does not call `Dispose`; `switch` labels are not co
 anyway); field initialisers are not run by constructors (each one gets a warning);
 lambdas are opaque.
 
-## 7. Real-code coverage (`Crux.Api`, 2026-11-18)
+## 7. Real-code coverage (a private C# solution, 2026-11-18)
 
-The slice was checked against a real solution, not a language tour: `Nexus`
-(`Crux.slnx`, 2,483 `.cs` files under `src/`) and, as the starting project,
-`src/Crux.Api` (75 files; `node_modules/`, `bin/` and `obj/` excluded). The numbers
-below are reproduced by
+The slice was checked against a real solution, not a language tour: a private
+solution (2,483 `.cs` files) and, as the starting project, its 75-file API project
+(`node_modules/`, `bin/` and `obj/` excluded). The numbers below are reproduced by
 
 ```
-scry/scripts/cs-coverage.sh /workspace/Nexus/src/Crux.Api
-scry/scripts/cs-coverage.sh /workspace/Nexus/src
+scry/scripts/cs-coverage.sh PATH-TO-API-PROJECT
+scry/scripts/cs-coverage.sh PATH-TO-SOLUTION
 ```
 
 which prints the per-construct regular expressions (and, given `CS_COVER`, runs the
@@ -293,7 +292,7 @@ semantic precision.
 
 ### 7.1 The failure this pass exists to prevent
 
-The first honest run over `Crux.Api` produced **no functions and no warnings** — a
+The first honest run over the API project produced **no functions and no warnings** — a
 clean-looking result over code that was never analysed. The cause: every one of the 75
 files uses a file-scoped namespace (`namespace X;`), and `typeDecls` treated
 `file_scoped_namespace_declaration` as a container and recursed into its children.
@@ -311,7 +310,7 @@ over unanalysed code is the failure mode, not the goal.
 
 ### 7.2 Frequencies (regex, occurrences / files)
 
-| construct | `src/Crux.Api` | `src/` |
+| construct | the API project | the whole solution |
 |---|---|---|
 | nullable annotation (`string?`, `T?`) | 339 / 44 | 13,358 / 1,328 |
 | `is` pattern | 165 / 39 | 12,032 / 1,405 |
@@ -359,7 +358,7 @@ diagnostic.
 | `switch` expression | yes | nondeterministic choice among the arms, each value copied to one register + warning | flows (`cwe78-modern`) | no (warning) |
 | `with { P = e }` | yes | `e` evaluated; the result is a copy of the source + warning (members not updated) | flows (same object) | no (warning) |
 | collection expression `[a, ..b]` | yes | `System.Array.$new(a, b)` | flows | was havoc per element with a warning → fixed |
-| LINQ query syntax | yes (none in `Crux.Api`) | source, range variable, `where`/`let`/`select`; `join`/`group`/`orderby` warn | flows (`cwe78-modern`) | no (warning) |
+| LINQ query syntax | yes (none in the API project) | source, range variable, `where`/`let`/`select`; `join`/`group`/`orderby` warn | flows (`cwe78-modern`) | no (warning) |
 | string interpolation | yes | `System.String.Concat(holes…)` | flows | no |
 | attributes | yes | parsed and ignored (no rule depends on one) | n/a | no (documented) |
 | `using static` | yes | directive ignored; a bare imported call is named in a "not a method" warning | n/a | warning |
@@ -368,7 +367,7 @@ diagnostic.
 
 ### 7.4 The 75-file run, in numbers
 
-`CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh /workspace/Nexus/src/Crux.Api`:
+`CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh PATH-TO-API-PROJECT`:
 
 * 75/75 files parse (no `ERROR`/`MISSING` node) and 75/75 lower;
 * 240 functions, 513 warnings, 0 findings (the pack's only rule is CWE-78; these
