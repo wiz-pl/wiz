@@ -252,6 +252,18 @@ def Scry.lineStartsOf (text : String) : U32Array :=
   let b := Bytes.ofString text;
   Scry.lineStartsBytesGo b (Bytes.size b) (Bytes.size b) (U32Array.ofList [(U32.ofNat 0)])
 
+/-- A text with the two indexes a span→location conversion needs: the byte→character
+map (columns are characters, spans are bytes) and the byte offset of each line start.
+Built once per file; a `Wil.Span` is a byte range, and every column this module emits
+(SARIF and the human report) is a 1-based character column. -/
+structure Scry.TextIndex where
+  map : Scry.ByteMap
+  lineStarts : U32Array
+
+/-- The indexes of `text`, built in one pass over it. -/
+def Scry.TextIndex.ofString (text : String) : Scry.TextIndex :=
+  Scry.TextIndex.mk (Scry.ByteMap.ofString text) (Scry.lineStartsOf text)
+
 /-- Binary search for the largest line-start index whose offset is `<= off`. -/
 partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
   match Nat.lt lo hi with
@@ -262,25 +274,29 @@ partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat
     | .true => Scry.lineIndexGo starts off mid hi
     | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
 
-/-- A 1-based line and column for a byte offset, from the precomputed line starts. -/
-def Scry.lineColFrom (starts : U32Array) (off : Nat) : Nat × Nat :=
+/-- A 1-based line and **character** column for a byte offset. The line table holds byte
+offsets; the column goes through the text's byte map, so a multibyte character before
+the span does not inflate it. -/
+def Scry.lineColFrom (idx : Scry.TextIndex) (off : Nat) : Nat × Nat :=
+  let starts := idx.lineStarts;
   let n := U32Array.size starts;
   match Nat.beq n 0 with
-  | .true => (1, Nat.succ off)
+  | .true => (1, Nat.succ (Scry.ByteMap.charOfByte idx.map off))
   | .false =>
     let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
-    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+    let lo := UIntN.toNat (U32Array.get starts i);
+    (Nat.succ i, Scry.ByteMap.colOf idx.map off lo)
 
-/-- The old signature, kept for callers that only have the text (it builds the line
-table first, so prefer `originOfSpanAt` when several spans are located). -/
+/-- The old signature, kept for callers that only have the text (it builds the byte map
+and line table first, so prefer `originOfSpanAt` when several spans are located). -/
 def Scry.lineColAt (text : String) (off : Nat) : Nat × Nat :=
-  Scry.lineColFrom (Scry.lineStartsOf text) off
+  Scry.lineColFrom (Scry.TextIndex.ofString text) off
 
 /-- The SARIF origin of a `Wil.Span`. `endColumn` is exclusive; an empty span still gets
 a one-character region so a result has a visible place. -/
-def Scry.originOfSpanAt (uri : String) (starts : U32Array) (sp : Wil.Span) : Scry.Origin :=
-  let start := Scry.lineColFrom starts sp.start;
-  let stop := Scry.lineColFrom starts sp.stop;
+def Scry.originOfSpanAt (uri : String) (idx : Scry.TextIndex) (sp : Wil.Span) : Scry.Origin :=
+  let start := Scry.lineColFrom idx sp.start;
+  let stop := Scry.lineColFrom idx sp.stop;
   let endCol := match Nat.beq sp.stop sp.start with
     | .true => Nat.succ start.2
     | .false => stop.2;
@@ -293,25 +309,25 @@ def Scry.spanAtPoint (g : Scry.Fn) (n : Nat) : Option Wil.Span :=
     | .some t => .some (Wil.termOrigin t)
     | .none => .none
 
-/-- The old `text`-only origin lookup: builds the line table and locates one span. -/
+/-- The old `text`-only origin lookup: builds the indexes and locates one span. -/
 def Scry.originOfSpan (uri text : String) (sp : Wil.Span) : Scry.Origin :=
-  Scry.originOfSpanAt uri (Scry.lineStartsOf text) sp
+  Scry.originOfSpanAt uri (Scry.TextIndex.ofString text) sp
 
-def Scry.originEntryAt (uri : String) (starts : U32Array) (fn : Wil.Func) (g : Scry.Fn)
+def Scry.originEntryAt (uri : String) (idx : Scry.TextIndex) (fn : Wil.Func) (g : Scry.Fn)
     (n : Nat) : Option Scry.OriginEntry :=
   match Scry.spanAtPoint g n with
   | .none => .none
-  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpanAt uri starts sp))
+  | .some sp => .some (Scry.OriginEntry.mk fn.name n (Scry.originOfSpanAt uri idx sp))
 
-def Scry.originEntriesOfFunc (uri : String) (starts : U32Array) (fn : Wil.Func) :
+def Scry.originEntriesOfFunc (uri : String) (idx : Scry.TextIndex) (fn : Wil.Func) :
     List Scry.OriginEntry :=
   let g := Scry.flatten fn;
-  Scry.filterMapOpt (fun n => Scry.originEntryAt uri starts fn g n) (Scry.range g.count)
+  Scry.filterMapOpt (fun n => Scry.originEntryAt uri idx fn g n) (Scry.range g.count)
 
 /-- Every `(function, program point) -> span` entry of the lowered unit. -/
-def Scry.originEntries (uri : String) (starts : U32Array) (funcs : List Wil.Func) :
+def Scry.originEntries (uri : String) (idx : Scry.TextIndex) (funcs : List Wil.Func) :
     Scry.OriginMap :=
-  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri starts fn) funcs
+  Scry.concatLists (fun fn => Scry.originEntriesOfFunc uri idx fn) funcs
 
 def Scry.locationText (m : Scry.OriginMap) (func : String) (point : Nat) : String :=
   match Scry.originAt m func point with
@@ -597,14 +613,14 @@ def Scry.baselineState (dm : Option Scry.DiffMode) (h : Scry.DiffHit) : Option S
 
 -- ## Lowering-boundary warnings
 
-def Scry.boundaryOfWarning (uri : String) (starts : U32Array) (w : Scry.Warning) :
+def Scry.boundaryOfWarning (uri : String) (idx : Scry.TextIndex) (w : Scry.Warning) :
     Scry.BoundaryFinding :=
   Scry.BoundaryFinding.mk "scry/lowering/boundary" w.message w.func 0
-    (.some (Scry.originOfSpanAt uri starts w.span))
+    (.some (Scry.originOfSpanAt uri idx w.span))
 
-def Scry.boundaryFindings (uri : String) (starts : U32Array) (tu : Scry.TU) :
+def Scry.boundaryFindings (uri : String) (idx : Scry.TextIndex) (tu : Scry.TU) :
     List Scry.BoundaryFinding :=
-  List.map (Scry.boundaryOfWarning uri starts) tu.warnings
+  List.map (Scry.boundaryOfWarning uri idx) tu.warnings
 
 /-- The points-to diagnostics as warning findings, located with the same origin map the
 findings use. -/
@@ -987,7 +1003,7 @@ def Scry.certVerified : Option Scry.Certificate → Bool
 /-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
 locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
 so a session does not parse the C again. -/
-def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (starts : U32Array)
+def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx : Scry.TextIndex)
     (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
   let errs := Scry.CstStore.errorCount cst;
   match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
@@ -1049,11 +1065,11 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
         | .true => ""
         | .false => " (incomplete)"));
     let findings := Scry.programFindings pr;
-    let origins := Scry.originEntries o.file starts tu.funcs;
+    let origins := Scry.originEntries o.file idx tu.funcs;
     Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
     Scry.checkDeadline o startMs "origins";
     let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
-      (List.length tu.funcs)) (Scry.boundaryFindings o.file starts tu);
+      (List.length tu.funcs)) (Scry.boundaryFindings o.file idx tu);
     let memory := Scry.memoryFindings origins pr.warnings;
     let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
     let checks := List.map Scry.certVerified certificates;
@@ -1069,9 +1085,9 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (star
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
   startMs ← EIO.lift Scry.nowMs;
   text ← FS.readFile o.file;
-  starts ← EIO.lift (IO.pure (Scry.lineStartsOf text));
-  Scry.reportStage o startMs "read" (Nat.repr (String.length text) ++ " bytes, "
-    ++ Nat.repr (U32Array.size starts) ++ " lines");
+  let idx := Scry.TextIndex.ofString text;
+  Scry.reportStage o startMs "read" (Nat.repr (Scry.textByteLength text) ++ " bytes, "
+    ++ Nat.repr (U32Array.size idx.lineStarts) ++ " lines");
   st ← Scry.Native.parse "c" text;
   nodes ← EIO.lift (IO.pure (Scry.Native.nodeCount st));
   Scry.reportStage o startMs "parse" (Nat.repr nodes ++ " nodes");
@@ -1083,7 +1099,7 @@ def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
     cst ← EIO.lift (Scry.Native.toCstStore o.file st);
     Scry.reportStage o startMs "store" (Nat.repr (Scry.CstStore.nodeCount cst) ++ " nodes, "
       ++ Nat.repr (Scry.CstStore.edgeCount cst) ++ " edges");
-    Scry.analyzeStore o startMs text starts cst nodes
+    Scry.analyzeStore o startMs text idx cst nodes
 
 
 /-- `(finding, checked)` pairs in the findings' order. -/

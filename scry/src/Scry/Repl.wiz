@@ -477,8 +477,8 @@ def Scry.Repl.analyzeUnit (rules : Option String) (u : Scry.Repl.Unit) :
         let o := Scry.TaintOpts.mk u.source rules .none .false .false .false .false .none .none
           .none (.some 300) (.some 2000000) .none .false;
         startMs ← Scry.nowMs;
-        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source (Scry.lineStartsOf source)
-          cst (Scry.CstStore.nodeCount cst))
+        Scry.Repl.optEIO "taint" (Scry.analyzeStore o startMs source
+          (Scry.TextIndex.ofString source) cst (Scry.CstStore.nodeCount cst))
 
 def Scry.Repl.taintJson (ru : Scry.Repl.ReportUnit) : Json :=
   let rep := ru.report;
@@ -803,8 +803,10 @@ def Scry.Repl.callSiteJson (c : Scry.Repl.CallSite) : Json := Json.mkObj
    ("source", Json.mkStr c.source), ("line", Json.ofNat c.line),
    ("column", Json.ofNat c.column)]
 
+/-- The source text of a span. `sp` is a byte range; `text` is character-indexed, so go
+through its byte map. -/
 partial def Scry.Repl.sourceAt (text : String) (sp : Scry.Span) : String :=
-  String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+  Scry.ByteMap.slice (Scry.ByteMap.ofString text) sp.start sp.stop
 
 partial def Scry.Repl.childWithField (f : Scry.Facts) (id : Nat) (field : String) :
     Option Scry.NodeId :=

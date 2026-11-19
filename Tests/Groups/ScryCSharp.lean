@@ -114,6 +114,7 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
+   ("lower", "unicode"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
@@ -140,6 +141,14 @@ def lowerGolden (name : String) : IO Unit := do
   match ← runProbe lowerImports (fixtureDefs src spill ++
       s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.wil" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The warnings of a fixture with their `line:col`, as a golden: the location golden. -/
+def lowerLocGolden (name : String) : IO Unit := do
+  let (src, spill) ← fixture "lower" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerLocations {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => golden s!"scry/corpus/csharp/lower/{name}.loc" (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
 /-- The rendering of a lowered fixture (functions and warnings), read from the lowering
@@ -360,6 +369,8 @@ def group : Group where
       run := fun _ => lowerGolden "toplevel" },
     { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
       run := fun _ => lowerGolden "unsupported" },
+    { name := "lower: a multibyte character before a token keeps its name and character column",
+      run := fun _ => lowerLocGolden "unicode" },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []

@@ -41,8 +41,11 @@ structure Scry.Origin where
   uri : String
   /-- 1-based. -/
   line : Nat
+  /-- 1-based **character** column (a multibyte character counts once, even though a
+  `Wil.Span` range is a byte range; the conversion happens before the origin is built). -/
   column : Nat
   endLine : Nat
+  /-- 1-based character column, exclusive. -/
   endColumn : Nat
 
 structure Scry.OriginEntry where

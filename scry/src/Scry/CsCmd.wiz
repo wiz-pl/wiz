@@ -650,7 +650,7 @@ def Scry.Cs.findingRows (m : Scry.OriginMap) (fs : List Scry.RuleFinding) :
 /-- The origin map of every lowered function, for finding locations. -/
 def Scry.Cs.originMapOf (results : List Scry.Cs.FileResult) : Scry.OriginMap :=
   List.concat (List.map (fun r =>
-    Scry.originEntries r.path (Scry.lineStartsOf r.text) r.funcs) results)
+    Scry.originEntries r.path (Scry.TextIndex.ofString r.text) r.funcs) results)
 
 /-- The report. `found` is the number of `.cs` files analysed; `before` is
 `found + walk.excludedCount`. -/

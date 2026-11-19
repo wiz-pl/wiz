@@ -767,3 +767,25 @@ that pin each one):
   parameter can be named. An inductive type's own parameters, a dot-constructor and a
   local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
   and rejected constructor forms against the Lean frontend (21ab, 13a).
+* scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
+  reports a summary with a coverage section: `.cs` files before and after exclusions
+  (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
+  symbolic links), found/parsed/lowered/failed, findings by rule and severity, and every
+  construct or file that was skipped or warned about with a count and one example
+  location. `--json` is the same report, `--fail-on error|warning|note` gates findings
+  and coverage rows, and the exit status separates `0` clean, `1` gated, `2` usage/IO
+  from `3` nothing analysed (no `.cs`, or every file failed). Lowering warnings are
+  normalised to constructs, so a first run answers "what didn't you look at?" in one
+  screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
+  counts, coverage rows, JSON and every exit status.
+* scry C#: the frontend survives real code. Re-checked against a real solution's
+  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  files under `src/`), the lowering no longer drops constructs silently. The headline
+  find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
+  function and no warning** — `typeDecls` recursed into the namespace node, but
+  tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type
+  in the project was dropped. Fixed, and `lower/{modern,unsupported}` pin it. Top-level
+  statements (the whole of a minimal-API `Program.cs`) become `<stem>.Main`
+  (`Program.Main` for `Program.cs`); a record's or primary constructor's positional
+  parameters become fields and `new R(a)` lowers and stores its arguments instead of
+  discarding them; `partial` parts in one file are merged; `: base(…)` / `: this(…)`
