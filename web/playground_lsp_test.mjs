@@ -15,7 +15,7 @@ import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
 import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
 import {
-  renderPanel, renderGoalResult, renderTermResult, readGoalState, offsetAt, positionAt, rangeOffsets,
+  renderPanel, renderGoalResult, renderTermResult, renderInfoItems, readGoalState, offsetAt, positionAt, rangeOffsets,
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
 } from "./goals.js";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
@@ -673,6 +673,29 @@ checkThat("token: the page's ?token= gets in",
 checkThat("token: the panel does not show it", !tokenPanel.innerHTML.includes("s3cr3t"));
 tokenApp.stop();
 await tokenMock.close();
+
+// ## 10f. Widget items (`#plot`): the self-contained SVG is inserted, a script is not
+
+const plotBundle = JSON.stringify({
+  schema: "wiz.widget/1", kind: "plot", mimeType: "image/svg+xml",
+  title: "Sales", summary: "plot: Sales (1 series, 320×240)",
+  svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>',
+  html: '<figure class="wiz-plot"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg><figcaption>Sales</figcaption></figure>',
+});
+const widgetItem = { kind: "widget", title: "plot", text: "WIZ_WIDGET:" + plotBundle };
+checkThat("widget: the HTML (an inline SVG) is rendered",
+  renderInfoItems([widgetItem]).includes('<figure class="wiz-plot">') &&
+  renderInfoItems([widgetItem]).includes("<svg"));
+checkThat("widget: the title is carried for the caption",
+  renderInfoItems([widgetItem]).includes('data-widget-title="Sales"'));
+checkThat("widget: an item of another kind is not drawn",
+  renderInfoItems([{ kind: "message", title: "info", text: "hello" }]) === "");
+checkThat("widget: a payload with a script is refused",
+  !renderInfoItems([{ kind: "widget", title: "x",
+    text: 'WIZ_WIDGET:{"html":"<figure><script>alert(1)</script></figure>"}' }]).includes("<script"));
+checkThat("widget: a payload with an external reference is refused",
+  !renderInfoItems([{ kind: "widget", title: "x",
+    text: 'WIZ_WIDGET:{"html":"<figure><img src=\\"https://example.invalid/x.png\\"></figure>"}' }]).includes("example.invalid"));
 
 // ## 11. Nothing escaped
 

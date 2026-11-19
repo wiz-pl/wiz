@@ -278,6 +278,41 @@ function treeSection(tree) {
   return `<details class="tree-wrap"><summary>term tree</summary>${drawn.html}</details>`;
 }
 
+// ## Items from `wiz/interactiveInfo`
+
+// A widget item's `text` is `WIZ_WIDGET:` plus a Loom widget bundle (`lib/Plot.wiz`
+// `Plot.widget`): `html`/`svg` is a self-contained drawing. The pane inserts it as HTML,
+// but only when it contains no script and no external reference — the plot library
+// emits neither, and a hostile server still cannot run code in the page.
+function widgetBody(item) {
+  const text = typeof item.text === "string" ? item.text : "";
+  const json = text.startsWith("WIZ_WIDGET:") ? text.slice("WIZ_WIDGET:".length) : text;
+  let bundle = null;
+  try { bundle = JSON.parse(json); } catch (_) { bundle = null; }
+  const body = bundle && typeof bundle.html === "string" && bundle.html
+    ? bundle.html
+    : (bundle && typeof bundle.svg === "string" ? bundle.svg : "");
+  if (!body) return null;
+  if (/<\s*script\b/i.test(body) || /\bon[a-z]+\s*=/i.test(body)) return null;
+  if (/\b(?:href|src)\s*=/i.test(body)) return null;
+  return {
+    body,
+    title: (bundle && typeof bundle.title === "string" && bundle.title) || item.title || "plot",
+  };
+}
+
+// The widget items of a `wiz/interactiveInfo` answer (`#plot`), as HTML. Nothing else
+// from that answer is drawn: the goals panel is about the term at the cursor.
+export function renderInfoItems(items) {
+  const list = Array.isArray(items) ? items.filter((i) => i && i.kind === "widget") : [];
+  if (list.length === 0) return "";
+  return `<div class="widgets">${list.map((item) => {
+    const drawn = widgetBody(item);
+    if (!drawn) return `<div class="widget blocked">${escapeHtml(item.title || "widget")}</div>`;
+    return `<figure class="wiz-widget" data-widget-title="${escapeHtml(drawn.title)}">${drawn.body}</figure>`;
+  }).join("")}</div>`;
+}
+
 // The expected type: `wiz/interactiveTermGoal` (`{goal, range}`), `plainTermGoal`
 // (`{goal: string, range}`), or a bare interactive goal. A result without `goal` (and
 // not itself a bare goal) is malformed: it is "nothing at the cursor", not an empty
@@ -392,6 +427,8 @@ export function renderPanel(element, view) {
       ? renderTermResult(view.term, view.termKind)
       : `<div class="nothing">asking the server…</div>`);
     if (view.info) parts.push(`<h3>Selected subterm</h3>`, renderSelection(view.info));
+    const widgets = renderInfoItems(view.items);
+    if (widgets) parts.push(`<h3>Widgets</h3>`, widgets);
     parts.push(`<h3>Diagnostics</h3>`, renderDiagnostics(view.diagnostics));
   }
   parts.push("</div>");

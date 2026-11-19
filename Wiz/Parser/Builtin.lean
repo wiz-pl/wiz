@@ -331,6 +331,8 @@ def commandLeading : List LeadingParser := [
   { kind := "command.printAxioms", prec := maxPrec, p := seqs ["#print", nonReserved "axioms", ident] },
   { kind := "command.reduce", prec := maxPrec, p := seqs ["#reduce", term] },
   { kind := "command.eval", prec := maxPrec, p := seqs ["#eval", term] },
+  -- `#plot expr`: evaluate a `Plot.Chart` and emit its infoview widget (lib/Plot.wiz)
+  { kind := "command.plot", prec := maxPrec, p := seqs ["#plot", term] },
   { kind := "command.erase", prec := maxPrec, p := seqs ["#erase", ident] },
   { kind := "command.import", prec := maxPrec, p := seqs ["import", ident] },
   -- stage 8: run through the backend pipeline (IR, reference counting), print the IR

@@ -122,7 +122,23 @@ def loomGroup : Group where
           "#eval List.length (Widget.widgetsOf (Widget.display ws))\n" ++
           "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"patches\"\n" ++
           "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"\\\"op\\\"\"")
-          [".true", ".true", ".true", "2", ".true", ".true"] }
+          [".true", ".true", ".true", "2", ".true", ".true"] },
+    { name := "Widget: a Plot.Chart becomes a display-only widget whose fragment is the SVG", run := fun _ =>
+        -- `Widget.plotOf` is the `lib/Plot.wiz` adapter: the SVG replaces the plot
+        -- placeholder, so the notebook needs no front-end renderer for it.
+        okLoom ("import Plot\nimport Web.Widget\n" ++
+          "def chart : Plot.Chart :=\n" ++
+          "  Plot.labels \"x\" \"y\" (Plot.chart \"W\" (Plot.frame [\n" ++
+          "    Plot.line \"a\" [Plot.ptNat 0 1, Plot.ptNat 1 3, Plot.ptNat 2 2]]))\n" ++
+          "def w : Widget.Widget := Widget.plotOf \"sales\" chart\n" ++
+          "def ws : List Widget.Widget := List.cons w List.nil\n" ++
+          "#eval String.eq w.kind \"plot\"\n" ++
+          "#eval String.isEmpty w.callback\n" ++
+          "#eval String.contains (Widget.html ws) \"<svg\"\n" ++
+          "#eval String.contains (Widget.html ws) \"wiz-plot\"\n" ++
+          "#eval Bool.not (String.contains (Widget.html ws) \"wiz-plot-canvas\")\n" ++
+          "#eval String.startsWith (Widget.display ws) Widget.prefix")
+          [".true", ".true", ".true", ".true", ".true", ".true"] }
   ]
 
 builtin_initialize registerGroup loomGroup

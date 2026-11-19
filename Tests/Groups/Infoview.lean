@@ -103,6 +103,14 @@ def infoviewGroup : Group where
            r#".cons "Tactic state" (.cons "No goals" (.cons "" (.cons "Messages" (.cons "info" (.cons "  3" .nil)))))"#,
            r#""<h3>Declarations</h3><div class=\"item\"><span class=\"names\">x&lt;y</span> : <span class=\"tt k-const\" data-ref=\"1\" data-idx=\"0\" title=\"Nat\">Nat</span></div>""#,
            "1"] },
+    { name := "widget items: a #plot payload has a Widgets section and a title, not a text dump", run := fun _ =>
+        okInfoview (goalPrelude ++ r#"def wi : List InfoItem := .cons (.mk "widget" "plot: Sales" "WIZ_WIDGET:{\"schema\":\"wiz.widget/1\"}" .none) .nil
+#eval Infoview.plainLines (View.lines (View.ofInfo 60 .none .none wi))
+#eval Infoview.htmlInfo 0 .none .none wi
+#eval InfoItem.section (.mk "widget" "plot: Sales" "WIZ_WIDGET:" .none)"#)
+          [r#".cons "Widgets" (.cons "plot: Sales" (.cons "  (widget: open the browser infoview to draw it)" .nil))"#,
+           r#""<h3>Widgets</h3><div class=\"widget\"><span class=\"names\">plot: Sales</span></div>""#,
+           r#""Widgets""#] },
     { name := "terminal lines: SGR colours by kind, the selection in reverse video", run := fun _ =>
         okInfoview (goalPrelude ++ "#eval Infoview.ansiLines 3 (View.lines (View.ofState 80 (.some .nil) (.some (.mk \"h\" .nil (arrow 1 (nat 2) (nat 3))))))")
           [r#".cons "\x1b[0;1;4mTactic state\x1b[0m" (.cons "\x1b[0;1;32mNo goals\x1b[0m" (.cons "\x1b[0m" (.cons "\x1b[0;1;4mExpected type\x1b[0m" (.cons "\x1b[0;1;4mcase h\x1b[0m" (.cons "\x1b[0;1;35m⊢\x1b[0m \x1b[0;34mNat\x1b[0m \x1b[0m→\x1b[0m \x1b[0;34;7mNat\x1b[0m" .nil)))))"#] },

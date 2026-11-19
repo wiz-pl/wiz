@@ -232,8 +232,10 @@ regenerates the fixture from `widget_gen.wiz` (needs a `wiz` binary; the test do
 not). `web/widget/test.sh` is the Wiz-side golden (each widget kind, the display
 bundle, keyed diff and removal) with no browser at all.
 
-**Limits.** `plot` carries opaque JSON in `data-wiz-widget-data` and the front end
-draws a placeholder until a `Plot` module exists. `runtime.js` mirrors a `value` patch
+**Limits.** A plain `Widget.plot` carries opaque JSON in `data-wiz-widget-data` and the
+front end draws a placeholder. `Widget.plotOf` is the `lib/Plot.wiz` adapter: it puts
+the chart's self-contained SVG in the fragment (raw HTML, no front-end renderer), so the
+notebook shows the plot without a comm or a callback. `runtime.js` mirrors a `value` patch
 into the DOM property (so a live range/text control follows it), but `checked` is still
 attribute-only. There is no `display_data` stream and no debugger.
 
