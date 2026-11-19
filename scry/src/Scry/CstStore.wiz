@@ -113,6 +113,18 @@ partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat
     | .true => Scry.lineIndexGo starts off mid hi
     | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
 
+/-- A 1-based line and **byte-as-character** column for a byte offset, from a line-start
+table. This is the bytes-backed path's lookup (`Scry.Cst.ofStoreBytes`): it has no byte
+map, and its fixtures are ASCII (the shim's offsets are bytes; a UTF-8 identifier would
+need a byte slice). The text-backed paths use `Scry.TextIndex` and `Scry.lineColFrom`. -/
+def Scry.lineColFromBytes (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+
 /-- The bytes as text: UTF-8 when they are valid, otherwise Latin-1 (one character per
 byte, which is the lowering's byte-as-character convention for a non-ASCII file). -/
 def Scry.bytesText (b : Bytes) : String := match Bytes.toUtf8 b with
