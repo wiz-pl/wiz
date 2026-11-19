@@ -310,8 +310,8 @@ def quireStale (path : String) : EIO StaleResult := do
   h2 ← openDb path Findings.indices;
   s2 ← getDb h2;
   let del := match Snapshot.getNode s2 id1 with
-    | .some _ => .false
-    | .none => .true;
+    | .some _ => (.false : Bool)
+    | .none => (.true : Bool);
   let st0 := match Snapshot.getNode s2 id0 with
     | .some n => n.label
     | .none => U32.ofNat 99;
