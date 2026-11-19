@@ -1,6 +1,6 @@
--- Regression fixture for #256: a ledger state machine (definitions unchanged, imports
--- inlined), run behind one definition.
--- Before the fix, the last equation did not check in two minutes and exceeded 5 GB.
+-- Regression fixture for #256: a synthetic capacity scheduler, invented for this test,
+-- run behind one definition. Before the fix, the last equation did not check in two
+-- minutes and exceeded 5 GB.
 import Prelude
 import Int
 import Text
@@ -18,17 +18,17 @@ def Int.pos : Int → Int
   | .ofNat n => .ofNat n
   | .negSucc _ => 0
 
-inductive Status where
-  | created
-  | authorizing
-  | authorized
-  | issuing
-  | completed
-  | settled
-  | failed
-  | reversing
-  | reversed
-  | expired
+inductive Stage where
+  | idle
+  | queued
+  | admitted
+  | running
+  | finished
+  | archived
+  | rejected
+  | reverting
+  | reverted
+  | dropped
 
 def sumBy {A : Type} (p : A → Bool) (f : A → Int) : List A → Int
   | .nil => 0
@@ -44,221 +44,216 @@ def uniq : List Nat → List Nat
   | .nil => .nil
   | .cons x xs => uniqStep (memB x (uniq xs)) x (uniq xs)
 
-structure Movement where
-  tx : Nat
-  account : Nat
+structure Delta where
+  ticket : Nat
+  pool : Nat
   unit : Nat
   amount : Int
 
-def Movement.mirror (m : Movement) : Movement := Movement.mk m.tx m.account m.unit (-(m.amount))
-def mirror (l : List Movement) : List Movement := List.map Movement.mirror l
-def forTx (l : List Movement) (t : Nat) : List Movement := List.filter (fun m => Nat.beq m.tx t) l
+def Delta.mirror (d : Delta) : Delta := Delta.mk d.ticket d.pool d.unit (-(d.amount))
+def mirror (l : List Delta) : List Delta := List.map Delta.mirror l
+def forTicket (l : List Delta) (t : Nat) : List Delta := List.filter (fun d => Nat.beq d.ticket t) l
 
--- The ledger kernel as a state machine, cut down to what the account-balance floor is
--- about: each `Op` is one save, and `apply` returns `.none` when the save is refused.
--- Kept: the chart (Held or Mirrored accounts), movements, draw holds, transactions with a
--- status and a movement set, and the operations create, the two status-only begins,
--- authorize (with the funds gate), complete (with the re-check and the per-unit balance
--- check), settle, fail, expire and reverse (with its availability check). Left out of
--- this slice: received and incoming holds, refunds, capture for less, account opening and
--- closing, pricing, the other gates, the outbox.
+-- A ticket moves through a small stage lattice; a pool's headroom is its realised load
+-- less the loads leased by tickets that are still in flight. Each `Action` is one save,
+-- and `apply` returns `.none` when the save is refused. Kept: the pool map (managed or
+-- passthrough pools), load deltas, open leases, tickets with a stage and a plan, the
+-- operations submit, the two stage-only begins, admit (with the capacity gate), finish
+-- (with the re-check and the per-unit consistency check), archive, fail, expire and
+-- rollback (with its headroom check). Left out of this slice: incoming leases, partial
+-- releases, opening and closing pools, pricing, and the other gates.
 
--- ## The chart of accounts
+inductive Mode where
+  | managed
+  | passthrough
 
-inductive Backing where
-  | held
-  | mirrored
+def Mode.isManaged : Mode → Bool
+  | .managed => .true
+  | .passthrough => .false
 
-def Backing.isHeld : Backing → Bool
-  | .held => .true
-  | .mirrored => .false
-
-structure AccountInfo where
+structure PoolInfo where
   unit : Nat
-  backing : Backing
+  mode : Mode
 
--- fixed in this slice: opening and closing an account are not modelled
-def Chart : Type := Nat → AccountInfo
+-- the pool map: a pool number to its unit and mode
+def Pools : Type := Nat → PoolInfo
 
-def isHeld (c : Chart) (a : Nat) : Bool := Backing.isHeld (AccountInfo.backing (c a))
+def isManaged (c : Pools) (a : Nat) : Bool := Mode.isManaged (PoolInfo.mode (c a))
 
--- ## Movement sets, holds, transactions
+-- ## Plans, leases, tickets
 
--- one line of the movement set a transaction will post (the resolver's output)
-structure Posting where
-  account : Nat
+-- one line of the load a ticket will apply
+structure Entry where
+  pool : Nat
   amount : Int
 
-inductive HoldStatus where
-  | active
-  | captured
-  | released
+inductive LeaseState where
+  | open
+  | used
+  | dropped
 
-def HoldStatus.isActive : HoldStatus → Bool
-  | .active => .true
-  | .captured => .false
-  | .released => .false
+def LeaseState.isOpen : LeaseState → Bool
+  | .open => .true
+  | .used => .false
+  | .dropped => .false
 
--- the hold model, draw holds only
-structure Hold where
-  tx : Nat
-  account : Nat
+structure Lease where
+  ticket : Nat
+  pool : Nat
   amount : Int
-  status : HoldStatus
+  state : LeaseState
 
-structure Tx where
-  status : Status
-  plan : List Posting
+structure Ticket where
+  stage : Stage
+  plan : List Entry
 
--- a movement is (tx, account, unit, amount)
-structure State where
-  txs : Nat → Option Tx
+-- a realised load: ticket, pool, unit, signed amount
+structure Cluster where
+  tickets : Nat → Option Ticket
   next : Nat
-  ledger : List Movement
-  holds : List Hold
+  history : List Delta
+  leases : List Lease
 
-def State.init : State := State.mk (fun _ => .none) 0 .nil .nil
+def Cluster.empty : Cluster := Cluster.mk (fun _ => .none) 0 .nil .nil
 
--- ## Balances
+-- ## Headroom
 
--- posted value of an account: the sum of its movements
-def posted (s : State) (a : Nat) : Int :=
-  sumBy (fun m => Nat.beq (Movement.account m) a) Movement.amount (State.ledger s)
+-- realised load on a pool: the sum of its deltas
+def loadOf (s : Cluster) (a : Nat) : Int :=
+  sumBy (fun d => Nat.beq (Delta.pool d) a) Delta.amount (Cluster.history s)
 
--- a hold that reserves value on `a`
-def holdCounts (a : Nat) (h : Hold) : Bool :=
-  Bool.and (HoldStatus.isActive (Hold.status h)) (Nat.beq (Hold.account h) a)
-def heldOn (s : State) (a : Nat) : Int := sumBy (holdCounts a) Hold.amount (State.holds s)
+-- an open lease that holds load on `a`
+def leaseCounts (a : Nat) (l : Lease) : Bool :=
+  Bool.and (LeaseState.isOpen (Lease.state l)) (Nat.beq (Lease.pool l) a)
+def leasedOn (s : Cluster) (a : Nat) : Int := sumBy (leaseCounts a) Lease.amount (Cluster.leases s)
 
--- the available balance is "posted less held"
-def available (s : State) (a : Nat) : Int := posted s a - heldOn s a
+-- a pool's headroom is "realised less leased"
+def headroom (s : Cluster) (a : Nat) : Int := loadOf s a - leasedOn s a
 
--- the active hold transaction `t` has on account `a`
-def ownCounts (t a : Nat) (h : Hold) : Bool := Bool.and (Nat.beq (Hold.tx h) t) (holdCounts a h)
-def ownHold (s : State) (t a : Nat) : Int := sumBy (ownCounts t a) Hold.amount (State.holds s)
+-- the open lease ticket `t` has on pool `a`
+def ownCounts (t a : Nat) (l : Lease) : Bool := Bool.and (Nat.beq (Lease.ticket l) t) (leaseCounts a l)
+def ownLease (s : Cluster) (t a : Nat) : Int := sumBy (ownCounts t a) Lease.amount (Cluster.leases s)
 
--- what transaction `t`'s committed movements moved on account `a`
-def txNet (s : State) (t a : Nat) : Int :=
-  sumBy (fun m => Bool.and (Nat.beq (Movement.tx m) t) (Nat.beq (Movement.account m) a)) Movement.amount (State.ledger s)
+-- what ticket `t`'s realised deltas moved on pool `a`
+def ticketNet (s : Cluster) (t a : Nat) : Int :=
+  sumBy (fun d => Bool.and (Nat.beq (Delta.ticket d) t) (Nat.beq (Delta.pool d) a)) Delta.amount (Cluster.history s)
 
--- ## Movement sets
+-- ## Plans
 
-def net (plan : List Posting) (a : Nat) : Int :=
-  sumBy (fun p => Nat.beq (Posting.account p) a) Posting.amount plan
+def entryNet (plan : List Entry) (a : Nat) : Int :=
+  sumBy (fun e => Nat.beq (Entry.pool e) a) Entry.amount plan
 
--- the net draw of a movement set on one account, `max 0 (-net)` (the hold rule)
-def draw (plan : List Posting) (a : Nat) : Int := Int.pos (-(net plan a))
+-- the net pull of a plan on one pool, `max 0 (-net)`
+def pull (plan : List Entry) (a : Nat) : Int := Int.pos (-(entryNet plan a))
 
-def accounts (plan : List Posting) : List Nat := uniq (List.map Posting.account plan)
+def poolsOf (plan : List Entry) : List Nat := uniq (List.map Entry.pool plan)
 
-def unitOf (c : Chart) (p : Posting) : Nat := AccountInfo.unit (c (Posting.account p))
-def planUnitSum (c : Chart) (plan : List Posting) (u : Nat) : Int :=
-  sumBy (fun p => Nat.beq (unitOf c p) u) Posting.amount plan
+def unitOf (c : Pools) (e : Entry) : Nat := PoolInfo.unit (c (Entry.pool e))
+def planUnitSum (c : Pools) (plan : List Entry) (u : Nat) : Int :=
+  sumBy (fun e => Nat.beq (unitOf c e) u) Entry.amount plan
 
--- every unit the set moves sums to zero (the check the double-entry rule makes)
-def balancedB (c : Chart) (plan : List Posting) : Bool :=
+-- every unit the plan moves sums to zero
+def consistentB (c : Pools) (plan : List Entry) : Bool :=
   List.all (fun u => Int.beq (planUnitSum c plan u) 0) (List.map (unitOf c) plan)
 
--- the movements a movement set posts for transaction `t`
-def post (c : Chart) (plan : List Posting) (t : Nat) : List Movement :=
-  List.map (fun p => Movement.mk t (Posting.account p) (unitOf c p) (Posting.amount p)) plan
+-- the deltas a plan realises for ticket `t`
+def deltasOf (c : Pools) (plan : List Entry) (t : Nat) : List Delta :=
+  List.map (fun e => Delta.mk t (Entry.pool e) (unitOf c e) (Entry.amount e)) plan
 
--- one draw hold per Held account the set draws from
-def drawsOn (c : Chart) (plan : List Posting) (a : Nat) : Bool := Bool.and (isHeld c a) (Int.posB (draw plan a))
-def drawHolds (c : Chart) (plan : List Posting) (t : Nat) : List Hold :=
-  List.map (fun a => Hold.mk t a (draw plan a) .active) (List.filter (drawsOn c plan) (accounts plan))
+-- one open lease per managed pool the plan pulls from
+def pullsOn (c : Pools) (plan : List Entry) (a : Nat) : Bool := Bool.and (isManaged c a) (Int.posB (pull plan a))
+def leasesFor (c : Pools) (plan : List Entry) (t : Nat) : List Lease :=
+  List.map (fun a => Lease.mk t a (pull plan a) .open) (List.filter (pullsOn c plan) (poolsOf plan))
 
--- closing transaction `t`'s active holds: capture (complete) or release (fail, expire)
-def statusAfter (c : Bool) (st st0 : HoldStatus) : HoldStatus := match c with
+-- closing ticket `t`'s open leases: use (finish) or drop (fail, expire)
+def stateAfter (b : Bool) (st st0 : LeaseState) : LeaseState := match b with
   | .true => st
   | .false => st0
-def closeHold (t : Nat) (st : HoldStatus) (h : Hold) : Hold :=
-  Hold.mk (Hold.tx h) (Hold.account h) (Hold.amount h)
-    (statusAfter (Bool.and (Nat.beq (Hold.tx h) t) (HoldStatus.isActive (Hold.status h))) st (Hold.status h))
-def closeHolds (t : Nat) (st : HoldStatus) (hs : List Hold) : List Hold := List.map (closeHold t st) hs
+def closeLease (t : Nat) (st : LeaseState) (l : Lease) : Lease :=
+  Lease.mk (Lease.ticket l) (Lease.pool l) (Lease.amount l)
+    (stateAfter (Bool.and (Nat.beq (Lease.ticket l) t) (LeaseState.isOpen (Lease.state l))) st (Lease.state l))
+def closeLeases (t : Nat) (st : LeaseState) (ls : List Lease) : List Lease := List.map (closeLease t st) ls
 
--- ## Guards
+-- ## Gates
 
--- the funds gate at authorize: on every Held account the set touches,
--- `draw ≤ available`
-def fundsOk (c : Chart) (s : State) (plan : List Posting) : Bool :=
-  List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a - draw plan a))) (accounts plan)
+-- the capacity gate at admit: on every managed pool the plan touches,
+-- `pull ≤ headroom`
+def capacityOk (c : Pools) (s : Cluster) (plan : List Entry) : Bool :=
+  List.all (fun a => Bool.or (Bool.not (isManaged c a)) (Int.nonnegB (headroom s a - pull plan a))) (poolsOf plan)
 
--- the debit/credit rule: "Complete checks a debit again … with the transaction's own
--- draw hold added back"
-def recheckOk (c : Chart) (s : State) (t : Nat) (plan : List Posting) : Bool :=
-  List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a + ownHold s t a - draw plan a)))
-    (accounts plan)
+-- finish checks a pull again, with the ticket's own lease added back
+def recheckOk (c : Pools) (s : Cluster) (t : Nat) (plan : List Entry) : Bool :=
+  List.all (fun a => Bool.or (Bool.not (isManaged c a)) (Int.nonnegB (headroom s a + ownLease s t a - pull plan a)))
+    (poolsOf plan)
 
--- the hold rule: "A reversal takes back only value the account still has available"
-def reverseOk (c : Chart) (s : State) (t : Nat) : Bool :=
-  List.all (fun a => Bool.or (Bool.not (isHeld c a)) (Int.nonnegB (available s a - txNet s t a)))
-    (uniq (List.map Movement.account (forTx (State.ledger s) t)))
+-- a rollback takes back only load the pool still has headroom for
+def rollbackOk (c : Pools) (s : Cluster) (t : Nat) : Bool :=
+  List.all (fun a => Bool.or (Bool.not (isManaged c a)) (Int.nonnegB (headroom s a - ticketNet s t a)))
+    (uniq (List.map Delta.pool (forTicket (Cluster.history s) t)))
 
 -- ## Operations
 
-inductive Op where
-  | create (plan : List Posting)
-  | beginAuthorize (t : Nat)
-  | authorize (t : Nat)
-  | beginIssuing (t : Nat)
-  -- `resolved`: what the movement resolver returns at completion; `.none` is the set it
-  -- returned at authorize
-  | complete (t : Nat) (resolved : Option (List Posting))
-  | settle (t : Nat)
+inductive Action where
+  | submit (plan : List Entry)
+  | beginReview (t : Nat)
+  | admit (t : Nat)
+  | beginRun (t : Nat)
+  -- `resolved`: what the planner returns at finish; `.none` is the plan admitted
+  | finish (t : Nat) (resolved : Option (List Entry))
+  | archive (t : Nat)
   | fail (t : Nat)
   | expire (t : Nat)
-  | reverse (t : Nat)
+  | rollback (t : Nat)
 
-def Status.code : Status → Nat
-  | .created => 0
-  | .authorizing => 1
-  | .authorized => 2
-  | .issuing => 3
-  | .completed => 4
-  | .settled => 5
-  | .failed => 6
-  | .reversing => 7
-  | .reversed => 8
-  | .expired => 9
-def Status.is (s t : Status) : Bool := Nat.beq (Status.code s) (Status.code t)
+def Stage.code : Stage → Nat
+  | .idle => 0
+  | .queued => 1
+  | .admitted => 2
+  | .running => 3
+  | .finished => 4
+  | .archived => 5
+  | .rejected => 6
+  | .reverting => 7
+  | .reverted => 8
+  | .dropped => 9
+def Stage.is (s t : Stage) : Bool := Nat.beq (Stage.code s) (Stage.code t)
 
-def Status.canFail : Status → Bool
-  | .created => .true
-  | .authorizing => .true
-  | .authorized => .true
-  | .issuing => .true
-  | .completed => .false
-  | .settled => .false
-  | .failed => .false
-  | .reversing => .false
-  | .reversed => .false
-  | .expired => .false
-def Status.canExpire : Status → Bool
-  | .created => .true
-  | .authorized => .true
-  | .authorizing => .false
-  | .issuing => .false
-  | .completed => .false
-  | .settled => .false
-  | .failed => .false
-  | .reversing => .false
-  | .reversed => .false
-  | .expired => .false
+def Stage.canFail : Stage → Bool
+  | .idle => .true
+  | .queued => .true
+  | .admitted => .true
+  | .running => .true
+  | .finished => .false
+  | .archived => .false
+  | .rejected => .false
+  | .reverting => .false
+  | .reverted => .false
+  | .dropped => .false
+def Stage.canExpire : Stage → Bool
+  | .idle => .true
+  | .admitted => .true
+  | .queued => .false
+  | .running => .false
+  | .finished => .false
+  | .archived => .false
+  | .rejected => .false
+  | .reverting => .false
+  | .reverted => .false
+  | .dropped => .false
 
-def Status.canReverse : Status → Bool
-  | .completed => .true
-  | .settled => .true
-  | .created => .false
-  | .authorizing => .false
-  | .authorized => .false
-  | .issuing => .false
-  | .failed => .false
-  | .reversing => .false
-  | .reversed => .false
-  | .expired => .false
+def Stage.canRollback : Stage → Bool
+  | .finished => .true
+  | .archived => .true
+  | .idle => .false
+  | .queued => .false
+  | .admitted => .false
+  | .running => .false
+  | .rejected => .false
+  | .reverting => .false
+  | .reverted => .false
+  | .dropped => .false
 
-def upd (f : Nat → Option Tx) (t : Nat) (v : Tx) : Nat → Option Tx :=
+def upd (f : Nat → Option Ticket) (t : Nat) (v : Ticket) : Nat → Option Ticket :=
   fun t' => match Nat.beq t' t with
     | .true => .some v
     | .false => f t'
@@ -268,64 +263,63 @@ def Option.getD {A : Type} (d : A) : Option A → A
   | .none => d
 
 -- the save, if the guard passed
-def guard (b : Bool) (v : State) : Option State := match b with
+def guard (b : Bool) (v : Cluster) : Option Cluster := match b with
   | .true => .some v
   | .false => .none
 
--- `s` with transaction `t` (now `tx`) at status `st`, ledger and holds as given
-def State.save (s : State) (t : Nat) (tx : Tx) (st : Status) (l : List Movement) (hs : List Hold) : State :=
-  State.mk (upd (State.txs s) t (Tx.mk st (Tx.plan tx))) (State.next s) l hs
+-- `s` with ticket `t` (now `tk`) at stage `st`, history and leases as given
+def Cluster.save (s : Cluster) (t : Nat) (tk : Ticket) (st : Stage) (h : List Delta) (ls : List Lease) : Cluster :=
+  Cluster.mk (upd (Cluster.tickets s) t (Ticket.mk st (Ticket.plan tk))) (Cluster.next s) h ls
 
-def moveTo (s : State) (t : Nat) (tx : Tx) (from to : Status) : Option State :=
-  guard (Status.is (Tx.status tx) from) (State.save s t tx to (State.ledger s) (State.holds s))
+def moveTo (s : Cluster) (t : Nat) (tk : Ticket) (from to : Stage) : Option Cluster :=
+  guard (Stage.is (Ticket.stage tk) from) (Cluster.save s t tk to (Cluster.history s) (Cluster.leases s))
 
-def authorizeTx (c : Chart) (s : State) (t : Nat) (tx : Tx) : Option State :=
-  guard (Bool.and (Status.is (Tx.status tx) .authorizing) (fundsOk c s (Tx.plan tx)))
-    (State.save s t tx .authorized (State.ledger s) (List.append (State.holds s) (drawHolds c (Tx.plan tx) t)))
+def admitTicket (c : Pools) (s : Cluster) (t : Nat) (tk : Ticket) : Option Cluster :=
+  guard (Bool.and (Stage.is (Ticket.stage tk) .queued) (capacityOk c s (Ticket.plan tk)))
+    (Cluster.save s t tk .admitted (Cluster.history s) (List.append (Cluster.leases s) (leasesFor c (Ticket.plan tk) t)))
 
-def completeTx (c : Chart) (s : State) (t : Nat) (tx : Tx) (plan : List Posting) : Option State :=
-  guard (Bool.and (Status.is (Tx.status tx) .issuing) (Bool.and (balancedB c plan) (recheckOk c s t plan)))
-    (State.save s t tx .completed (List.append (State.ledger s) (post c plan t)) (closeHolds t .captured (State.holds s)))
+def finishTicket (c : Pools) (s : Cluster) (t : Nat) (tk : Ticket) (plan : List Entry) : Option Cluster :=
+  guard (Bool.and (Stage.is (Ticket.stage tk) .running) (Bool.and (consistentB c plan) (recheckOk c s t plan)))
+    (Cluster.save s t tk .finished (List.append (Cluster.history s) (deltasOf c plan t)) (closeLeases t .used (Cluster.leases s)))
 
-def closeTx (s : State) (t : Nat) (tx : Tx) (ok : Bool) (to : Status) : Option State :=
-  guard ok (State.save s t tx to (State.ledger s) (closeHolds t .released (State.holds s)))
+def closeTicket (s : Cluster) (t : Nat) (tk : Ticket) (ok : Bool) (to : Stage) : Option Cluster :=
+  guard ok (Cluster.save s t tk to (Cluster.history s) (closeLeases t .dropped (Cluster.leases s)))
 
--- the mirror of the transaction's movements (the refund/reversal rule)
-def reverseTx (c : Chart) (s : State) (t : Nat) (tx : Tx) : Option State :=
-  guard (Bool.and (Status.canReverse (Tx.status tx)) (reverseOk c s t))
-    (State.save s t tx .reversed (List.append (State.ledger s) (mirror (forTx (State.ledger s) t))) (State.holds s))
+-- the mirror of the ticket's deltas
+def rollbackTicket (c : Pools) (s : Cluster) (t : Nat) (tk : Ticket) : Option Cluster :=
+  guard (Bool.and (Stage.canRollback (Ticket.stage tk)) (rollbackOk c s t))
+    (Cluster.save s t tk .reverted (List.append (Cluster.history s) (mirror (forTicket (Cluster.history s) t))) (Cluster.leases s))
 
-def apply (c : Chart) (s : State) : Op → Option State
-  | .create plan =>
-    .some (State.mk (upd (State.txs s) (State.next s) (Tx.mk .created plan)) (Nat.succ (State.next s))
-      (State.ledger s) (State.holds s))
-  | .beginAuthorize t => Option.bind (State.txs s t) (fun tx => moveTo s t tx .created .authorizing)
-  | .authorize t => Option.bind (State.txs s t) (fun tx => authorizeTx c s t tx)
-  | .beginIssuing t => Option.bind (State.txs s t) (fun tx => moveTo s t tx .authorized .issuing)
-  | .complete t resolved =>
-    Option.bind (State.txs s t) (fun tx => completeTx c s t tx (Option.getD (Tx.plan tx) resolved))
-  | .settle t => Option.bind (State.txs s t) (fun tx => moveTo s t tx .completed .settled)
-  | .fail t => Option.bind (State.txs s t) (fun tx => closeTx s t tx (Status.canFail (Tx.status tx)) .failed)
-  | .expire t => Option.bind (State.txs s t) (fun tx => closeTx s t tx (Status.canExpire (Tx.status tx)) .expired)
-  | .reverse t => Option.bind (State.txs s t) (fun tx => reverseTx c s t tx)
+def apply (c : Pools) (s : Cluster) : Action → Option Cluster
+  | .submit plan =>
+    .some (Cluster.mk (upd (Cluster.tickets s) (Cluster.next s) (Ticket.mk .idle plan)) (Nat.succ (Cluster.next s))
+      (Cluster.history s) (Cluster.leases s))
+  | .beginReview t => Option.bind (Cluster.tickets s t) (fun tk => moveTo s t tk .idle .queued)
+  | .admit t => Option.bind (Cluster.tickets s t) (fun tk => admitTicket c s t tk)
+  | .beginRun t => Option.bind (Cluster.tickets s t) (fun tk => moveTo s t tk .admitted .running)
+  | .finish t resolved =>
+    Option.bind (Cluster.tickets s t) (fun tk => finishTicket c s t tk (Option.getD (Ticket.plan tk) resolved))
+  | .archive t => Option.bind (Cluster.tickets s t) (fun tk => moveTo s t tk .finished .archived)
+  | .fail t => Option.bind (Cluster.tickets s t) (fun tk => closeTicket s t tk (Stage.canFail (Ticket.stage tk)) .rejected)
+  | .expire t => Option.bind (Cluster.tickets s t) (fun tk => closeTicket s t tk (Stage.canExpire (Ticket.stage tk)) .dropped)
+  | .rollback t => Option.bind (Cluster.tickets s t) (fun tk => rollbackTicket c s t tk)
 
--- The states reachable from the empty estate, by any interleaving of saves. (A relation
--- in `Type`: FINDINGS G2.)
-inductive Reachable (c : Chart) : State → Type where
-  | init : Reachable c State.init
-  | step (s s' : State) (op : Op) (r : Reachable c s) (h : apply c s op = .some s') : Reachable c s'
+-- The clusters reachable from the empty cluster, by any interleaving of saves.
+inductive Reachable (c : Pools) : Cluster → Type where
+  | empty : Reachable c Cluster.empty
+  | step (s s' : Cluster) (op : Action) (r : Reachable c s) (h : apply c s op = .some s') : Reachable c s'
 
-def chart2 : Chart := fun a => match Nat.beq a 1 with
-  | .true => AccountInfo.mk 710 .held
-  | .false => AccountInfo.mk 710 .mirrored
+def cluster2 : Pools := fun a => match Nat.beq a 1 with
+  | .true => PoolInfo.mk 710 .managed
+  | .false => PoolInfo.mk 710 .passthrough
 
-def run2 : State → List Op → Option State
+def run2 : Cluster → List Action → Option Cluster
   | s, .nil => .some s
-  | s, .cons op ops => Option.bind (apply chart2 s op) (fun s' => run2 s' ops)
+  | s, .cons op ops => Option.bind (apply cluster2 s op) (fun s' => run2 s' ops)
 
-def fund2 : List Posting := .cons (Posting.mk 2 (-500)) (.cons (Posting.mk 1 500) .nil)
-def life2 (t : Nat) : List Op := .cons (.create fund2) (.cons (.beginAuthorize t)
-  (.cons (.authorize t) (.cons (.beginIssuing t) (.cons (.complete t .none) .nil))))
-def ops3 : List Op := List.append (life2 0) (List.append (life2 1) (life2 2))
-def avail2 (ops : List Op) : Option Int := Option.map (fun s => available s 1) (run2 State.init ops)
-def eqm : avail2 ops3 = .some 1500 := rfl
+def load2 : List Entry := .cons (Entry.mk 2 (-500)) (.cons (Entry.mk 1 500) .nil)
+def cycle2 (t : Nat) : List Action := .cons (.submit load2) (.cons (.beginReview t)
+  (.cons (.admit t) (.cons (.beginRun t) (.cons (.finish t .none) .nil))))
+def plan3 : List Action := List.append (cycle2 0) (List.append (cycle2 1) (cycle2 2))
+def headroom2 (ops : List Action) : Option Int := Option.map (fun s => headroom s 1) (run2 Cluster.empty ops)
+def eqm : headroom2 plan3 = .some 1500 := rfl
