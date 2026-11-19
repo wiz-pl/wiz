@@ -114,9 +114,11 @@ def fixtures : List (String × String) :=
   [("parse", "hello"), ("parse", "members"), ("parse", "statements"), ("parse", "expressions"),
    ("parse", "modern"),
    ("lower", "basic"), ("lower", "modern"), ("lower", "toplevel"), ("lower", "unsupported"),
+   ("lower", "patterns"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe")]
+   ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
+   ("taint", "cwe78-pattern-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -158,10 +160,8 @@ looked at), which is the failure mode this table exists to prevent. -/
 def requiredWarnings : List (String × String) :=
   [("modern", "target-typed new() without a declared type"),
    ("modern", "local function Label not modelled"),
-   ("modern", "is test not modelled"),
    ("modern", "switch expression arms are not compared"),
    ("modern", "with expression: the copy's members are not updated"),
-   ("toplevel", "is test not modelled"),
    ("unsupported", "indexer_declaration member not modelled"),
    ("unsupported", "operator_declaration member not modelled"),
    ("unsupported", "destructor_declaration member not modelled"),
@@ -173,7 +173,7 @@ def requiredWarnings : List (String × String) :=
    ("unsupported", "labeled_statement not modelled"),
    ("unsupported", "yield_statement not modelled"),
    ("unsupported", "preproc_if not modelled"),
-   ("unsupported", "is test not modelled")]
+   ("unsupported", "nested pattern binding inner")]
 
 /-- A spill's freshness, read from its text (no Wiz evaluation): the `language` is
 `c_sharp`, the `bytes` row is the `.cs` file's UTF-8 size, and the root's span starts at
@@ -360,6 +360,8 @@ def group : Group where
       run := fun _ => lowerGolden "toplevel" },
     { name := "lower: out-of-scope constructs are reported by name, never skipped silently",
       run := fun _ => lowerGolden "unsupported" },
+    { name := "lower: is-test bindings, is null / is not null and a conditional binding",
+      run := fun _ => lowerGolden "patterns" },
     { name := "silent skip: every out-of-scope construct keeps the warning that names it",
       run := fun _ => do
         let mut missing : List String := []
@@ -413,7 +415,11 @@ def group : Group where
     { name := "taint: CWE-78 sanitised twin (int.Parse) over the same constructs has no finding",
       run := fun _ => do
         let fs ← taintFindings "cwe78-modern-safe"
-        checkEq ([] : List String) fs }
+        checkEq ([] : List String) fs },
+    { name := "taint: CWE-78 through a pattern binding (the sink is on the test's true edge)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-pattern-unsafe"
+        checkEq ["command-injection Fixtures.PatternGate.Run System.Diagnostics.Process.Start arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group

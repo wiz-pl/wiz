@@ -88,16 +88,59 @@ Parser (one node per construct, tree-sitter-c-sharp names):
   `lambda_expression` (parsed, lowered as an opaque value in slice 1).
 
 Out of the first subset, each either lowered since or reported by name (§7): LINQ query
-syntax, `switch` expressions and patterns beyond `is T x`, `async`/`await` (parsed as a
-prefix), iterators (`yield`), local functions, tuples and deconstruction, `ref`/`out`
-arguments (parsed, lowered as havoc of the target), `unsafe`/pointers, events and
-delegates, operator overloading, attributes' semantics.
+syntax, `switch` expressions, pattern shapes other than a single type test (`{ … }`
+property, positional, relational, list, and `is not T y`, which binds on the false
+edge), `async`/`await` (parsed as a prefix), iterators (`yield`), local functions, tuples
+and deconstruction, `ref`/`out` arguments (parsed, lowered as havoc of the target),
+`unsafe`/pointers, events and delegates, operator overloading, attributes' semantics.
 
 The rule for everything outside the subset: **a warning that names the construct**, never
 a silent skip. A construct that lowers to nothing without a diagnostic is worse than a
 parse error, because the analysis then reports "no findings" about code it never read.
 `tests =scry-csharp` has a case ("silent skip") that fails when one of the warnings in §7
 disappears.
+
+### `is` tests and pattern bindings
+
+`o is T x` is two things, and the lowering models both:
+
+* the **test**: a fresh nondeterministic bit. The lowering does not know an object's
+  runtime type, so both outcomes are possible — the honest abstraction for taint, and
+  the same one `switch` sections get. No warning: nothing is skipped.
+* the **binding**: `x` is a local of the canonical pattern type `T` (so a later call
+  `x.M()` names `T.M(x)` and a rule for `T.M` matches), and it is assigned `o` **on the
+  test's true edge only** — the `copy` is emitted into the true block, not before the
+  branch. A use of `x` therefore carries `o`'s taint exactly on the paths where the
+  test held. The false branch keeps `x` in scope (as C# does) with no definition, so a
+  use there has no taint flow.
+
+The same lowering covers `is T` (the test with no binding), `is var x` (always true, `x`
+is `o`), `is null` / `is not null` (an exact `==`/`!=` comparison against the default
+value), integer constant patterns (an `==`), and `or`/`and` patterns (a disjunction /
+conjunction of their alternatives' bits).
+
+Two more shapes need a word, because they are where the grammar and the language
+disagree:
+
+* **A property or positional pattern** (`o is { Count: > 0 } x`) is a test whose
+  conditions are *not compared*: it is a nondeterministic bit, like a `switch` label's,
+  and its own name `x` is installed on the true edge exactly as `is T x`'s. The
+  subpattern expressions (a relational pattern's operand) are lowered for their effects,
+  and a name declared *inside* a subpattern (`{ P: var y }`) is reported: the lowering
+  would have to install it on a path it does not build.
+* **The grammar swallows the rest of a condition into a constant pattern**:
+  `x is null || rest` parses as `constant_pattern(binary_expression(null || rest))`, and
+  `x is not null && rest` as a negated one. The lowering recovers the shape — the left
+  spine is the constant compared with `x`, the `||`/`&&` tail is ordinary code — and
+  lowers the tail, so a sink or an `is` inside it is not skipped.
+
+A pattern in a `switch` label or a `when` clause is not one of these condition sites, so
+its binding is not installed there (reported). A binding on a *false* edge (`is not T y`,
+or an `is` under `!`) is installed on the branch's false edge, so
+`if (x is not { } y) return; use y;` flows. A name declared *inside* a subpattern
+(`{ P: var y }`) is reported: its path is not built. A binding is **not** available in
+the right operand of a `&&`/`||` that contains its test, because conditions are lowered
+without short-circuit blocks; the copy sits on the branch edge instead.
 
 ## 3. C# semantics on Wil
 
@@ -198,10 +241,10 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
 | `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
 | `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions`, `modern` (`.cs` + `.cst` spill + `.sexp` view golden) |
-| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `unsupported` (the warnings for everything out of scope) |
-| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, and the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy) |
+| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `unsupported` (the warnings for everything out of scope) |
+| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), and the `pattern` pair (a pattern binding carries the sink on the test's true edge) |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
-| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 4 lowering goldens + execution, 6 taint cases, and the "silent skip" case (§2) |
+| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 5 lowering goldens + execution, 7 taint cases, and the "silent skip" case (§2) |
 
 A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
@@ -388,7 +431,10 @@ diagnostic.
 | `lock`, `goto`, a label | `lock_statement not modelled`, `goto_statement not modelled`, `labeled_statement not modelled` |
 | `yield return` | `yield_statement not modelled` |
 | `unsafe`, `fixed`, `checked` | `unsafe_statement not modelled`, … |
-| `is` test | `is test not modelled: havoc` (both branches stay reachable) |
+| `is` test's *conditions* | none: a type test, a property/positional/relational/list pattern's conditions and an unknown constant are nondeterministic bits (like a `switch` section), so both edges stay reachable; `is null` / `is not null` and integer constants are exact |
+| a pattern binding no condition site installs | `a pattern binding outside a condition is not installed` (a `switch` label, a `when` clause, a bare expression, or a binding used in the right operand of `&&`/`||`) |
+| a name declared inside a subpattern | `nested pattern binding NAME not modelled` |
+| a declaration inside an `or`/`and` pattern | `a binding in an or_pattern (NAME) is not installed` (invalid C#; reported rather than dropped) |
 | `switch` statement labels / expression arms | `switch labels are not compared: every section is reachable`, `switch expression arms are not compared: every arm is reachable` |
 | target-typed `new()` in an expression | `target-typed new() without a declared type not modelled: havoc` |
 | `join`/`group`/`orderby` in a query | `… in a query is not modelled: its value is havoc` |
@@ -435,6 +481,74 @@ identifier after such a character is read shifted — `outcome` becomes `ome` �
 two files report `unknown name …` warnings for real locals. It is loud, not silent, but
 it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
 it is left as its own change because it is shared with C.
+
+### 7.9 `is` tests and pattern bindings (2026-11-19)
+
+The 88 `is test not modelled` warnings of §7.4 were not, as assumed, mostly `is T x`
+declaration patterns: `src/Crux.Api` contains **none of those**. Attributing every
+lowered `is_pattern_expression` by the shape tree-sitter-c-sharp gives it (the CST holds
+108; 88 reach the lowering, and 20 sit in lambdas, field initialisers, swallowed tails
+or the 17 files with no function, so the driver never warns for them):
+
+| shape | the 88 | lowered as |
+|---|---:|---|
+| `x is null` | 26 | `x == default` |
+| `x is A or B` (type tests) | 20 | nondeterministic test (bits disjoined) |
+| `x is { … } y` (property pattern + binding) | 20 | nondeterministic test, `y` on the true edge |
+| `x is not null` | 7 | `x != default` |
+| `x is null \|\| rest` (the grammar swallowed the tail) | 6 | `==`, and the tail lowered |
+| `x is not { … } y` | 3 | nondeterministic test, `y` on the false edge |
+| `x is not null && rest` | 2 | `!=`, and the tail lowered |
+| `x is { … }` (property pattern, no name) | 1 | nondeterministic test |
+| `x is > 0 and <= 30` | 1 | nondeterministic test |
+| `x is null or { … }` | 1 | `==` or nondeterministic |
+| `x is SomeConstant` | 1 | nondeterministic test |
+| **total** | **88** | |
+
+Not among the 88: `is T x` **0**, a bare `is T` 0, `as T` 2 (already typed; unchanged),
+`switch` with patterns 8 switches / 35 pattern nodes (out of scope, §7.6).
+
+The binding lowering, and what it fixed:
+
+* `x` is a local of the pattern's type (the operand's when the pattern has none), and its
+  copy is emitted into the **edge where the binding holds**: the true block of an `if`,
+  `while`, `for` or `?:`, the false block for `is not T x` and for an `is` under `!`. A
+  use of `x` therefore carries the operand's taint exactly where the test held, and a
+  call `x.M()` names `T.M`, which is what a rule for `T.M` matches.
+* The test itself is a fresh nondeterministic bit: the lowering cannot know a runtime
+  type or a property pattern's conditions. That is the `switch` section's abstraction and
+  needs no warning.
+* `is null`, `is not null` and integer constants are exact comparisons.
+* The grammar's `x is null || rest` parse (the `||`/`&&` tail is inside the constant
+  pattern) is recovered: the left spine is the test, the tail is lowered as code.
+* A `catch … when (F(ex) is { } s)` filter installs `s` at the start of the handler.
+
+Measured on `src/Crux.Api` with the same walk (`scry cs`, `--no-taint` unless stated):
+
+| | before | after |
+|---|---:|---:|
+| functions | 240 | 240 |
+| warnings (excluding the 17 `no functions lowered` rows) | 513 | 409 |
+| `is test not modelled` | 88 | 0 |
+| `unknown name` | 173 | 155 |
+| `a pattern binding outside a condition is not installed` | 0 | 1 |
+| findings (rule pack, taint on) | 0 | 0 |
+
+The 18 `unknown name` warnings that went are property-pattern bindings that used to be
+unknown at every later use. The one new warning is
+`Middleware/PartnerBasicAuthMiddleware.cs`'s `… is not { } endpoint || endpoint.…`: the
+binding is used in the right operand of `||`, and conditions are lowered without
+short-circuit blocks, so the copy sits on the branch edge rather than before the operand.
+The `lambda body` row goes 60 → 61 because the recovered tail of
+`payments is null || payments.Any(p => …)` now reaches a lambda the old lowering never
+visited: newly reached code, reported.
+
+Fixtures: `lower/patterns` (a true-edge binding used by a call, `is not` and `!` bindings,
+`is null` / `is not null`, a conditional-expression binding) and
+`taint/cwe78-pattern-unsafe` (the console line reaches `Process.Start` through
+`input is string command` on the true branch, while its safe method shows the binding
+does not leak out of the branch). `lower/unsupported` keeps a named warning for a nested
+binding.
 
 ## 8. The repository driver: `scry cs`
 

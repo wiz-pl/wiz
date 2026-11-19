@@ -589,6 +589,17 @@ that pin each one):
   `silent skip` case fails when any of the out-of-scope warnings disappears
   (`scry/CSHARP.md` §7). `scry/scripts/cs-coverage.sh` reproduces the coverage table
   (frequencies, and per-file parse/lower/taint given a native build).
+* scry C#: `is` tests and pattern bindings are modelled instead of havoc'd as a whole.
+  `o is T x` is a nondeterministic type test (the lowering cannot know an object's
+  runtime type, so both edges are explored) **and** a local `x` of the pattern type `T`,
+  assigned `o` on the test's true edge only — the copy is emitted into the true block, so
+  a use of `x` carries `o`'s taint exactly where the test held, and a call `x.M()` names
+  `T.M` as the rule pack expects. `is null` / `is not null`, integer constant patterns,
+  `is T`, `is var x` and `or`/`and` patterns are tests too. Property, positional,
+  relational and list patterns, and `is not T y` (which binds on the false edge), still
+  warn by name. On `src/Crux.Api` this removes the `is test not modelled` row (88
+  warnings); fixtures `lower/patterns` and `taint/cwe78-pattern-unsafe` pin the binding
+  and the true-branch flow.
 
 * selfhost: a constructor's parameters and fields are named arguments too (A9). The
   self-hosted frontend kept no binder names for a constructor's `Global`, so

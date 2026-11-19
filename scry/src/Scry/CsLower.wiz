@@ -38,9 +38,18 @@ Control flow: `if`/`while`/`do`/`for`/`foreach`/`switch`/`break`/`continue`/`ret
 the innermost dispatch or out of the function; `using` calls `Dispose`. `switch` picks a
 section nondeterministically (sound for taint; constants are not compared yet).
 
+An `is` test is a runtime test the lowering does not decide: its value is a
+nondeterministic bit, the same abstraction a `switch` section gets. A pattern that
+binds a name (`is T x`, `is { … } x`, `is var x`) declares a local of the pattern's
+type (the operand's when the pattern has none) and assigns it the operand **on the
+test's true edge only**, so a use of the name carries the operand's taint exactly where
+the test held. `is null` / `is not null` and integer constants are exact comparisons.
+
 What is not modelled is **havoc plus a warning** (`Scry.Warning`, with the node's
-origin): lambdas, `out`/`ref` targets (havoc'd after the call), `is` tests (a havoc'd
-bit), floating point arithmetic, field initialisers, and calls through delegates.
+origin): lambdas, `out`/`ref` targets (havoc'd after the call), floating point
+arithmetic, field initialisers, calls through delegates, and a name a pattern declares
+*inside* a subpattern (`{ P: var x }`), which would need a path the lowering does not
+build.
 -/
 
 -- ## Types
@@ -160,6 +169,16 @@ structure Scry.Cs.Local where
   var : Wil.Var
   ty : String
 
+/-- A pattern binding waiting for the edge where it holds: `is T x`'s `x` is the operand
+where the test held, `is not T x`'s where it failed. -/
+structure Scry.Cs.PatBind where
+  /-- `.true` when the binding holds where the condition held, `.false` where it failed. -/
+  positive : Bool
+  /-- The local that receives the value. -/
+  var : Wil.Var
+  /-- The operand it receives. -/
+  src : Wil.Var
+
 /-- The lowering state: the C lowering's block builder plus C#'s scope. -/
 structure Scry.Cs.LS where
   ls : Scry.LState
@@ -169,6 +188,9 @@ structure Scry.Cs.LS where
   this : Option Wil.Var
   /-- The innermost `try`'s catch dispatch block. -/
   catchTo : Option Nat
+  /-- Pattern bindings declared by the condition being lowered, installed on the edge
+  where they hold (see `condPending`). -/
+  pending : List Scry.Cs.PatBind
 
 def Scry.Cs.M (A : Type) : Type := Scry.Cs.LS → (Scry.Cs.LS × A)
 
@@ -284,6 +306,25 @@ def Scry.Cs.coin (c : Scry.Cst) (n : Nat) : Scry.Cs.M Wil.Cond := do
   Scry.Cs.emit c n (Wil.cst z (Wil.Val.zero 1 .false));
   Scry.Cs.pure (Wil.Cond.cmp .ne h z)
 
+/-- A fresh nondeterministic bit as a value: a runtime test the lowering does not decide
+(a type test, a property pattern's conditions). Both outcomes are possible, which is the
+honest abstraction for taint; it is not a warning, because nothing is skipped. -/
+def Scry.Cs.freshBit (c : Scry.Cst) (n : Nat) : Scry.Cs.M Wil.Var := do
+  b ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+  Scry.Cs.emit c n (Wil.havoc b);
+  Scry.Cs.pure b
+
+/-- `x == null` (`isNull := .true`) or `x != null` (`isNull := .false`) as a
+`System.Boolean` bit: the default value of `x`'s type is the null of a pointer and the
+zero of an integer, so one comparison covers both. -/
+def Scry.Cs.nullTest (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (isNull : Bool) :
+    Scry.Cs.M Scry.Cs.EV := do
+  z ← Scry.Cs.fresh x.v.ty;
+  Scry.Cs.emit c n (Wil.cst z (Wil.Val.default x.v.ty));
+  b ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+  Scry.Cs.emit c n (Wil.binop b (match isNull with | .true => .eq | .false => .ne) x.v z);
+  Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
 /-- The known result types of a few external calls (for `var` and receivers). -/
 def Scry.Cs.knownRet (name : String) : String :=
   if String.elem name ["System.Console.ReadLine", "System.String.Concat", "System.String.Format",
@@ -319,6 +360,17 @@ def Scry.Cs.declare (c : Scry.Cst) (n : Nat) (name : String) (ty : String) (e : 
     | .none => Scry.Cs.emit c n (Wil.cst v (Wil.Val.default wt)));
   Scry.Cs.bindLocal name v ty;
   Scry.Cs.pure v
+
+/-- Declare a pattern's local and schedule its assignment on the edge where the binding
+holds: the operand is copied into the local only there, so before that the local has no
+value (and no taint flow). -/
+def Scry.Cs.patternBinding (c : Scry.Cst) (p : Nat) (positive : Bool) (name : String)
+    (ty : String) (src : Wil.Var) : Scry.Cs.M Unit := do
+  wt ← Scry.Cs.wilOf ty;
+  v ← Scry.Cs.fresh wt;
+  Scry.Cs.bindLocal name v ty;
+  Scry.Cs.modify (fun s =>
+    { s with pending := .cons (Scry.Cs.PatBind.mk positive v src) s.pending })
 
 /-- The method `m` of the current class, if any. -/
 def Scry.Cs.ownMethod (s : Scry.Cs.LS) (m : String) : Option Scry.Cs.Meth :=
@@ -676,6 +728,193 @@ def Scry.Cs.isDigit (c : Nat) : Bool := Bool.and (Bool.not (Nat.lt c 48)) (Nat.l
 partial def Scry.Cs.intValue (text : String) : Option Nat :=
   String.parseNat (String.ofChars (List.filter (fun ch => Scry.Cs.isDigit (Char.code ch)) (String.chars text)))
 
+/-- The name a pattern declares (`is T x`, `is { … } x`, `is var x`), if any. -/
+def Scry.Cs.patternName (c : Scry.Cst) (p : Nat) : Option String :=
+  match Scry.childF c p "name" with
+  | .some nm => .some (c.textOf nm)
+  | .none => .none
+
+/-- A name declared *inside* a pattern (`is T { P: var x }`): the lowering would have to
+install it on a path it does not build, so it is reported instead of silently dropped. -/
+partial def Scry.Cs.nestedBinding (c : Scry.Cst) (p : Nat) : Option String :=
+  Scry.Cs.nestedBindingIn c (Scry.kids c p)
+
+partial def Scry.Cs.nestedBindingIn (c : Scry.Cst) : List Nat → Option String
+  | .nil => .none
+  | .cons j rest =>
+    let k := c.kindOf j;
+    if Bool.or (String.eq k "declaration_pattern") (String.eq k "var_pattern") then
+      match Scry.Cs.patternName c j with
+      | .some nm => .some nm
+      | .none => Scry.Cs.nestedBindingIn c rest
+    else match Scry.Cs.nestedBinding c j with
+      | .some nm => .some nm
+      | .none => Scry.Cs.nestedBindingIn c rest
+
+/-- The test `x is <operand>` for a constant operand node: `null` and integer literals
+are compared exactly; anything else (a type name, an enum member, a string) is a
+nondeterministic bit, because the lowering cannot tell a constant from a type here. -/
+partial def Scry.Cs.constantTest (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (v : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV := do
+  let vk := c.kindOf v;
+  if String.eq vk "null_literal" then Scry.Cs.nullTest c n x (Bool.not neg)
+  else if String.eq vk "integer_literal" then do
+    lit ← Scry.Cs.lowerExpr c v;
+    b ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+    Scry.Cs.emit c v (Wil.binop b (match neg with | .true => .ne | .false => .eq) x.v lit.v);
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else do
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
+/-- The `||` / `&&` tail tree-sitter-c-sharp swallows into a constant pattern
+(`x is null || rest`): the left spine is the constant compared with `x`, the tail is
+ordinary code, lowered here so nothing is skipped. -/
+partial def Scry.Cs.constantTail (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (b : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV :=
+  match Scry.childF c b "left", Scry.childF c b "right" with
+  | .some l, .some r => do
+    let op := Scry.tokenF c b "operator";
+    a ← (match String.eq (c.kindOf l) "binary_expression" with
+      | .true => Scry.Cs.constantTail c n x l neg
+      | .false => Scry.Cs.constantTest c n x l neg);
+    y ← Scry.Cs.lowerExpr c r;
+    z ← Scry.Cs.fresh y.v.ty;
+    Scry.Cs.emit c b (Wil.cst z (Wil.Val.default y.v.ty));
+    yb ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+    Scry.Cs.emit c b (Wil.binop yb .ne y.v z);
+    if Bool.or (String.eq op "||") (String.eq op "&&") then do
+      res ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+      Scry.Cs.emit c b (Wil.binop res (match String.eq op "&&" with
+        | .true => Wil.Op.and
+        | .false => Wil.Op.or) a.v yb);
+      Scry.Cs.pure (Scry.Cs.ev res "System.Boolean")
+    else do
+      -- the tail was lowered for its effects; the test itself stays unknown
+      u ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev u "System.Boolean")
+  | _, _ => do
+    u ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev u "System.Boolean")
+
+/-- Lower the expressions of a pattern's subpatterns (`{ Count: > 0 }`, a relational
+pattern's operand) for their effects, so a call inside one is analysed even though the
+comparison is not evaluated. -/
+partial def Scry.Cs.lowerSubpatterns (c : Scry.Cst) : List Nat → Scry.Cs.M Unit
+  | .nil => Scry.Cs.pure ()
+  | .cons j rest => do
+    (match String.eq (c.kindOf j) "relational_pattern", Scry.childF c j "expression" with
+      | .true, .some e => do
+        ign ← Scry.Cs.lowerExpr c e;
+        Scry.Cs.pure ()
+      | _, _ => Scry.Cs.pure ());
+    Scry.Cs.lowerSubpatterns c (Scry.kids c j);
+    Scry.Cs.lowerSubpatterns c rest
+
+/-- The value of `x is <pattern>`, and the bindings `p` declares on the test's true edge
+(`condPending` installs them there). `neg` inverts a *constant* test (`is not null`); it
+never applies to a condition the grammar swallowed into the pattern. -/
+partial def Scry.Cs.lowerPattern (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) (p : Nat)
+    (neg : Bool) : Scry.Cs.M Scry.Cs.EV := do
+  let k := c.kindOf p;
+  if String.eq k "constant_pattern" then
+    match Scry.kids c p with
+    | .cons v _ =>
+      (match String.eq (c.kindOf v) "binary_expression" with
+        | .true => Scry.Cs.constantTail c n x v neg
+        | .false => Scry.Cs.constantTest c n x v neg)
+    | .nil => do
+      b ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if String.eq k "declaration_pattern" then do
+    (match Scry.childF c p "name", Scry.childF c p "type" with
+      | .some nm, .some ty => do
+        t0 ← Scry.Cs.canonM (Scry.Cs.typeText c ty);
+        Scry.Cs.patternBinding c p (Bool.not neg) (c.textOf nm) t0 x.v
+      | _, _ => Scry.Cs.pure ());
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if String.eq k "type_pattern" then do
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if String.eq k "var_pattern" then do
+    (match Scry.Cs.patternName c p with
+      | .some nm => do
+        ign ← Scry.Cs.declare c p nm x.ty (.some x);
+        Scry.Cs.pure ()
+      | .none => Scry.Cs.pure ());
+    one ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+    Scry.Cs.emit c p (Wil.num one 1);
+    Scry.Cs.pure (Scry.Cs.ev one "System.Boolean")
+  else if String.eq k "recursive_pattern" then do
+    -- `is { … } x` binds `x` to the operand where the (unknown) property test held; the
+    -- property / positional conditions are not compared, like a `switch` label
+    (match Scry.Cs.patternName c p with
+      | .some nm => do
+        t0 ← (match Scry.childF c p "type" with
+          | .some t => Scry.Cs.canonM (Scry.Cs.typeText c t)
+          | .none => Scry.Cs.pure x.ty);
+        Scry.Cs.patternBinding c p (Bool.not neg) nm t0 x.v
+      | .none => Scry.Cs.pure ());
+    (match Scry.Cs.nestedBinding c p with
+      | .some nm => Scry.Cs.warn c p ("nested pattern binding " ++ nm ++ " not modelled")
+      | .none => Scry.Cs.pure ());
+    Scry.Cs.lowerSubpatterns c (Scry.kids c p);
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if Bool.or (String.eq k "relational_pattern") (String.eq k "list_pattern") then do
+    Scry.Cs.lowerSubpatterns c (Scry.kids c p);
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if String.eq k "parenthesized_pattern" then
+    match Scry.kids c p with
+    | .cons inner _ => Scry.Cs.lowerPattern c n x inner neg
+    | .nil => do
+      b ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else if Bool.or (String.eq k "or_pattern") (String.eq k "and_pattern") then do
+    let alts := List.filter (fun j =>
+      Bool.not (String.eq (c.kindOf j) (match String.eq k "and_pattern" with
+        | .true => "and"
+        | .false => "or"))) (Scry.kids c p);
+    -- C# forbids a declaration in a disjunctive/conjunctive pattern; if one appears, say
+    -- so: its copy would be installed on an edge its alternative does not imply
+    (match alts with
+      | .cons a _ => match Scry.Cs.patternName c a, Scry.Cs.nestedBinding c a with
+        | .some nm, _ => Scry.Cs.warn c a ("a binding in an " ++ k ++ " (" ++ nm ++ ") is not installed")
+        | .none, .some nm => Scry.Cs.warn c a ("a binding in an " ++ k ++ " (" ++ nm ++ ") is not installed")
+        | _, _ => Scry.Cs.pure ()
+      | .nil => Scry.Cs.pure ());
+    Scry.Cs.combinePatterns c n x alts (String.eq k "and_pattern")
+  else if String.eq k "negated_pattern" then
+    match Scry.kids c p with
+    | .cons inner _ => Scry.Cs.lowerPattern c n x inner (Bool.not neg)
+    | .nil => do
+      b ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  else do
+    Scry.Cs.warn c p ("is " ++ k ++ " not modelled: unknown test");
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+
+/-- `or` / `and` patterns: the disjunction (conjunction) of their alternatives' bits. -/
+partial def Scry.Cs.combinePatterns (c : Scry.Cst) (n : Nat) (x : Scry.Cs.EV) :
+    List Nat → Bool → Scry.Cs.M Scry.Cs.EV
+  | .nil, _ => do
+    b ← Scry.Cs.freshBit c n;
+    Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+  | .cons p rest, isAnd => do
+    a ← Scry.Cs.lowerPattern c n x p .false;
+    match rest with
+    | .nil => Scry.Cs.pure a
+    | .cons _ _ => do
+      b ← Scry.Cs.combinePatterns c n x rest isAnd;
+      r ← Scry.Cs.fresh (Wil.Ty.int 1 .false);
+      Scry.Cs.emit c n (Wil.binop r (match isAnd with
+        | .true => Wil.Op.and
+        | .false => Wil.Op.or) a.v b.v);
+      Scry.Cs.pure (Scry.Cs.ev r "System.Boolean")
+
 /-- Lower an expression to a value. -/
 partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV := do
   s ← Scry.Cs.st;
@@ -803,17 +1042,19 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
   else if String.eq k "conditional_expression" then
     match Scry.childF c n "condition", Scry.childF c n "consequence", Scry.childF c n "alternative" with
     | .some cn, .some a, .some b => do
-      cond ← Scry.Cs.lowerCond c cn;
+      cb ← Scry.Cs.condPending c cn;
       tb ← Scry.Cs.newBlock;
       fb ← Scry.Cs.newBlock;
       jb ← Scry.Cs.newBlock;
-      Scry.Cs.seal c n (.br cond (Wil.mkBlockId tb) (Wil.mkBlockId fb) Wil.noSpan);
+      Scry.Cs.seal c n (.br cb.1 (Wil.mkBlockId tb) (Wil.mkBlockId fb) Wil.noSpan);
       Scry.Cs.startBlock tb;
+      Scry.Cs.installPending c cn .true cb.2;
       x ← Scry.Cs.lowerExpr c a;
       r ← Scry.Cs.fresh x.v.ty;
       Scry.Cs.emit c n (Wil.copy r x.v);
       Scry.Cs.goto c n jb;
       Scry.Cs.startBlock fb;
+      Scry.Cs.installPending c cn .false cb.2;
       y ← Scry.Cs.lowerExpr c b;
       Scry.Cs.emit c n (Wil.copy r y.v);
       Scry.Cs.goto c n jb;
@@ -843,17 +1084,16 @@ partial def Scry.Cs.lowerExpr (c : Scry.Cst) (n : Nat) : Scry.Cs.M Scry.Cs.EV :=
     match Scry.childF c n "expression", Scry.childF c n "pattern" with
     | .some e, .some p => do
       x ← Scry.Cs.lowerExpr c e;
-      -- `x is T y` binds `y` to `x`
-      (match String.eq (c.kindOf p) "declaration_pattern" with
-        | .true => match Scry.childF c p "name", Scry.childF c p "type" with
-          | .some nm, .some ty => do
-            t0 ← Scry.Cs.canonM (Scry.Cs.typeText c ty);
-            ign ← Scry.Cs.declare c p (c.textOf nm) t0 (.some x);
-            Scry.Cs.pure ()
-          | _, _ => Scry.Cs.pure ()
-        | .false => Scry.Cs.pure ());
-      Scry.Cs.havoc c n (Wil.Ty.int 1 .false) "is test"
+      Scry.Cs.lowerPattern c n x p .false
     | _, _ => Scry.Cs.havoc c n (Wil.Ty.int 1 .false) "is test"
+  else if String.eq k "is_expression" then
+    -- the pre-pattern `o is T`: a runtime type test, no binding
+    match Scry.childF c n "left" with
+    | .some e => do
+      x ← Scry.Cs.lowerExpr c e;
+      b ← Scry.Cs.freshBit c n;
+      Scry.Cs.pure (Scry.Cs.ev b "System.Boolean")
+    | .none => Scry.Cs.havoc c n (Wil.Ty.int 1 .false) "is expression"
   else if String.eq k "object_creation_expression" then Scry.Cs.lowerNew c n
   else if Bool.or (String.eq k "array_creation_expression") (String.eq k "implicit_array_creation_expression") then do
     -- elements flow into the array object (sizes are arguments)
@@ -1202,7 +1442,10 @@ partial def Scry.Cs.lowerCond (c : Scry.Cst) (n : Nat) : Scry.Cs.M Wil.Cond := d
   else if Bool.and (String.eq k "prefix_unary_expression") (String.eq (Scry.Cs.opOf c n) "!") then
     match Scry.childF c n "operand" with
     | .some o => do
+      mark ← Scry.Cs.markPending;
       x ← Scry.Cs.lowerCond c o;
+      -- `!p` holds exactly where `p` failed, so the operand's bindings swap edges
+      Scry.Cs.flipPending mark;
       Scry.Cs.pure (Wil.Cond.not x)
     | .none => Scry.Cs.pure (Wil.Cond.const .true)
   else if String.eq k "binary_expression" then
@@ -1231,6 +1474,75 @@ partial def Scry.Cs.valueCond (c : Scry.Cst) (n : Nat) : Scry.Cs.M Wil.Cond := d
   z ← Scry.Cs.fresh x.v.ty;
   Scry.Cs.emit c n (Wil.cst z (Wil.Val.default x.v.ty));
   Scry.Cs.pure (Wil.Cond.cmp .ne x.v z)
+
+/-- The pending bindings, as a mark for `cutPending`. -/
+def Scry.Cs.markPending : Scry.Cs.M (List Scry.Cs.PatBind) := do
+  s ← Scry.Cs.st;
+  Scry.Cs.pure s.pending
+
+/-- Take the bindings recorded since `mark` and restore the state to `mark`: the caller
+installs them on the edge where the construct holds, not where it was evaluated. -/
+def Scry.Cs.cutPending (mark : List Scry.Cs.PatBind) :
+    Scry.Cs.M (List Scry.Cs.PatBind) := do
+  s ← Scry.Cs.st;
+  let added := Nat.sub (List.length s.pending) (List.length mark);
+  let new := List.take added s.pending;
+  Scry.Cs.modify (fun s2 => { s2 with pending := mark });
+  Scry.Cs.pure new
+
+/-- Invert the polarity of the bindings recorded since `mark` (the operand of `!`): a
+binding that held where the operand held now holds where the `!` fails, and vice versa. -/
+def Scry.Cs.flipPending (mark : List Scry.Cs.PatBind) : Scry.Cs.M Unit := do
+  s ← Scry.Cs.st;
+  let added := Nat.sub (List.length s.pending) (List.length mark);
+  let new := List.map (fun b => { b with positive := Bool.not b.positive })
+    (List.take added s.pending);
+  Scry.Cs.modify (fun s2 => { s2 with pending := List.append new mark })
+
+/-- Lower a condition and take the pattern bindings it declared. -/
+def Scry.Cs.condPending (c : Scry.Cst) (n : Nat) :
+    Scry.Cs.M (Wil.Cond × List Scry.Cs.PatBind) := do
+  mark ← Scry.Cs.markPending;
+  cond ← Scry.Cs.lowerCond c n;
+  binds ← Scry.Cs.cutPending mark;
+  Scry.Cs.pure (cond, binds)
+
+/-- Assign the bindings that hold on the edge `positive` selects (the condition's true or
+false block): that is what makes the binding guarded by the condition. -/
+partial def Scry.Cs.installPending (c : Scry.Cst) (n : Nat) (positive : Bool) :
+    List Scry.Cs.PatBind → Scry.Cs.M Unit
+  | .nil => Scry.Cs.pure ()
+  | .cons b rest => do
+    (match b.positive, positive with
+      | .true, .true => Scry.Cs.emit c n (Wil.copy b.var b.src)
+      | .false, .false => Scry.Cs.emit c n (Wil.copy b.var b.src)
+      | _, _ => Scry.Cs.pure ());
+    Scry.Cs.installPending c n positive rest
+
+/-- The bindings that hold where the construct failed (see `droppedPending`). -/
+partial def Scry.Cs.negatives : List Scry.Cs.PatBind → List Scry.Cs.PatBind
+  | .nil => .nil
+  | .cons b rest => match b.positive with
+    | .true => Scry.Cs.negatives rest
+    | .false => .cons b (Scry.Cs.negatives rest)
+
+/-- A pattern binding that no condition site installed: report it rather than let it
+silently vanish (an `is` outside a condition, or in a `switch`/`when` clause). -/
+def Scry.Cs.dropPending (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
+  s ← Scry.Cs.st;
+  match s.pending with
+  | .nil => Scry.Cs.pure ()
+  | .cons _ _ => do
+    Scry.Cs.warn c n "a pattern binding outside a condition is not installed";
+    Scry.Cs.modify (fun s2 => { s2 with pending := .nil })
+
+/-- Report bindings a condition site cannot install (a `do`-`while` condition's edges,
+or a loop condition's false edge): the names stay in scope without a value, which must
+be said rather than assumed. -/
+partial def Scry.Cs.droppedPending (c : Scry.Cst) (n : Nat) :
+    List Scry.Cs.PatBind → String → Scry.Cs.M Unit
+  | .nil, _ => Scry.Cs.pure ()
+  | .cons _ _, what => Scry.Cs.warn c n (what ++ " is not installed")
 
 /-- Leave towards the innermost catch dispatch, or out of the function. -/
 partial def Scry.Cs.throwHere (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
@@ -1340,7 +1652,13 @@ partial def Scry.Cs.loopBody (c : Scry.Cst) (body : Nat) (brk cont : Nat) : Scry
   Scry.Cs.scoped (Scry.Cs.lowerStmt c body);
   Scry.Cs.modify (fun s2 => { s2 with ls := { s2.ls with breakTo := s.ls.breakTo, contTo := s.ls.contTo } })
 
+/-- A statement: lower it, then report any pattern binding it left un-installed (an `is`
+outside a condition, or one in a `switch`/`when` clause the lowering does not reach). -/
 partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
+  Scry.Cs.lowerStmtGo c n;
+  Scry.Cs.dropPending c n
+
+partial def Scry.Cs.lowerStmtGo (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   s ← Scry.Cs.st;
   let k := c.kindOf n;
   if String.eq k "block" then Scry.Cs.scoped (Scry.Cs.lowerStmts c (Scry.kids c n))
@@ -1382,15 +1700,17 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   else if String.eq k "if_statement" then
     match Scry.childF c n "condition", Scry.childF c n "consequence" with
     | .some cn, .some a => do
-      cond ← Scry.Cs.lowerCond c cn;
+      cb ← Scry.Cs.condPending c cn;
       tb ← Scry.Cs.newBlock;
       fb ← Scry.Cs.newBlock;
       jb ← Scry.Cs.newBlock;
-      Scry.Cs.seal c n (.br cond (Wil.mkBlockId tb) (Wil.mkBlockId fb) Wil.noSpan);
+      Scry.Cs.seal c n (.br cb.1 (Wil.mkBlockId tb) (Wil.mkBlockId fb) Wil.noSpan);
       Scry.Cs.startBlock tb;
+      Scry.Cs.installPending c cn .true cb.2;
       Scry.Cs.scoped (Scry.Cs.lowerStmt c a);
       Scry.Cs.goto c n jb;
       Scry.Cs.startBlock fb;
+      Scry.Cs.installPending c cn .false cb.2;
       (match Scry.childF c n "alternative" with
         | .some b => Scry.Cs.scoped (Scry.Cs.lowerStmt c b)
         | .none => Scry.Cs.pure ());
@@ -1405,9 +1725,12 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
       xb ← Scry.Cs.newBlock;
       Scry.Cs.goto c n hb;
       Scry.Cs.startBlock hb;
-      cond ← Scry.Cs.lowerCond c cn;
-      Scry.Cs.seal c n (.br cond (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
+      cb ← Scry.Cs.condPending c cn;
+      Scry.Cs.seal c n (.br cb.1 (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
       Scry.Cs.startBlock bb;
+      Scry.Cs.installPending c cn .true cb.2;
+      Scry.Cs.droppedPending c cn (Scry.Cs.negatives cb.2)
+        "a pattern binding on a loop condition's false edge";
       Scry.Cs.loopBody c body xb hb;
       Scry.Cs.goto c n hb;
       Scry.Cs.startBlock xb
@@ -1423,8 +1746,9 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
       Scry.Cs.loopBody c body xb cb;
       Scry.Cs.goto c n cb;
       Scry.Cs.startBlock cb;
-      cond ← Scry.Cs.lowerCond c cn;
-      Scry.Cs.seal c n (.br cond (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
+      cb2 ← Scry.Cs.condPending c cn;
+      Scry.Cs.droppedPending c cn cb2.2 "a pattern binding in a do-while condition";
+      Scry.Cs.seal c n (.br cb2.1 (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
       Scry.Cs.startBlock xb
     | _, _ => Scry.Cs.warn c n "malformed do"
   else if String.eq k "for_statement" then Scry.Cs.scoped (do
@@ -1443,12 +1767,18 @@ partial def Scry.Cs.lowerStmt (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
     xb ← Scry.Cs.newBlock;
     Scry.Cs.goto c n hb;
     Scry.Cs.startBlock hb;
-    (match Scry.childF c n "condition" with
+    cbs ← (match Scry.childF c n "condition" with
       | .some cn => do
-        cond ← Scry.Cs.lowerCond c cn;
-        Scry.Cs.seal c n (.br cond (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan)
-      | .none => Scry.Cs.goto c n bb);
+        cb ← Scry.Cs.condPending c cn;
+        Scry.Cs.seal c n (.br cb.1 (Wil.mkBlockId bb) (Wil.mkBlockId xb) Wil.noSpan);
+        Scry.Cs.pure cb.2
+      | .none => do
+        Scry.Cs.goto c n bb;
+        Scry.Cs.pure (.nil : List Scry.Cs.PatBind));
     Scry.Cs.startBlock bb;
+    Scry.Cs.installPending c n .true cbs;
+    Scry.Cs.droppedPending c n (Scry.Cs.negatives cbs)
+      "a pattern binding on a loop condition's false edge";
     (match Scry.childF c n "body" with
       | .some body => Scry.Cs.loopBody c body xb ub
       | .none => Scry.Cs.pure ());
@@ -1614,13 +1944,19 @@ partial def Scry.Cs.lowerCatches (c : Scry.Cst) (clauses : List Nat) (bs : List 
             Scry.Cs.bindLocal (c.textOf nm) v t0
           | _, _ => Scry.Cs.pure ()
         | .none => Scry.Cs.pure ());
-      (match Scry.childK c cl "catch_filter_clause" with
+      fbinds ← (match Scry.childK c cl "catch_filter_clause" with
         | .some flt => do
           -- the filter is not compared (the handler stays reachable), but its
-          -- expressions are evaluated so a sink inside one is analysed
+          -- expressions are evaluated so a sink inside one is analysed, and a pattern
+          -- binding it declares is assigned where the handler is entered
+          mark ← Scry.Cs.markPending;
           ign ← Scry.Cs.lowerExprs c (Scry.kids c flt);
-          Scry.Cs.pure ()
-        | .none => Scry.Cs.pure ());
+          bs ← Scry.Cs.cutPending mark;
+          Scry.Cs.pure bs
+        | .none => Scry.Cs.pure (.nil : List Scry.Cs.PatBind));
+      Scry.Cs.installPending c cl .true fbinds;
+      Scry.Cs.droppedPending c cl (Scry.Cs.negatives fbinds)
+        "a pattern binding in a catch filter's false branch";
       (match Scry.childF c cl "body" with
         | .some body => Scry.Cs.lowerStmt c body
         | .none => Scry.Cs.pure ()));
@@ -1868,7 +2204,7 @@ def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0
     , live := .true, done := .nil, locals := .nil, params := .nil, env := .nil
     , fname := qname, retTy := Wil.Ty.ptr Wil.Ty.dyn, funcOrigin := Scry.originOf c n
     , breakTo := .none, contTo := .none };
-  let s0 := Scry.Cs.LS.mk ls1 .nil k u .none .none;
+  let s0 := Scry.Cs.LS.mk ls1 .nil k u .none .none .nil;
   let prog : Scry.Cs.M Unit := (do
     (match isStatic with
       | .true => Scry.Cs.pure ()
@@ -1895,6 +2231,7 @@ def Scry.Cs.lowerFuncOf (c : Scry.Cst) (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (ls0
             | .nil => Scry.Cs.pure ()
           | .false => Scry.Cs.lowerStmt c b
         | .none => Scry.Cs.pure ()));
+    Scry.Cs.dropPending c n;
     s ← Scry.Cs.st;
     match s.ls.live with
     | .false => Scry.Cs.pure ()
