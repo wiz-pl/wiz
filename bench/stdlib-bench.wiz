@@ -3,7 +3,6 @@ import Std
 import Text
 import Word
 import WordMap
-import Std
 import Scry.Egraph
 import Hdl.Core
 
@@ -42,7 +41,7 @@ import Hdl.Core
 --   list-index    (4000)    10 passes of N reads of a `List Nat` by index (the pattern
 --                           `array-index` replaces; its cost grows with the index)
 --   egraph        (3000)    build N e-nodes, union N pairs, then 10N `find`s (the
---                           union-find parent/rank tables are `Array Nat`)
+--                           union-find parent/rank/cost tables are `U64Array`s)
 --
 -- (The harness passes a mode and size; with no arguments the program runs every mode at
 -- its default size and prints one checksum per line.)

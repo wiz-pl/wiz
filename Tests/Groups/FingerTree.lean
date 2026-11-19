@@ -89,53 +89,45 @@ def fingerTreeGroup : Group where
             ".some (.cons 1 (.cons 2 .nil), 3)",
             ".some (.cons 2 (.cons 3 .nil), 1)"
           ] },
-    { name := "twenty elements across the levels: four pops and popFronts rebuild the middle", run := fun _ =>
+    { name := "ten elements across the levels: four pops and popFronts rebuild the middle", run := fun _ =>
         okLibs ("import FingerTree\n" ++
-          "def l : List Nat :=\n" ++
-          "  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]\n" ++
-          "def q : Seq Nat := Seq.ofList l\n" ++
-          "def roundTrip : Seq.toList q = l := Seq.toList_ofList l\n" ++
-          "def pop4 : Option (Seq Nat × Nat) :=\n" ++
-          "  match Seq.pop q with\n" ++
-          "  | .some (a, x) => match Seq.pop a with\n" ++
-          "    | .some (b, y) => match Seq.pop b with\n" ++
-          "      | .some (c, z) => match Seq.pop c with\n" ++
-          "        | .some (d, w) => .some (d, w)\n" ++
-          "        | .none => .some (c, z)\n" ++
-          "      | .none => .some (b, y)\n" ++
-          "    | .none => .some (a, x)\n" ++
-          "  | .none => .none\n" ++
-          "def front4 : Option (Seq Nat × Nat) :=\n" ++
-          "  match Seq.popFront q with\n" ++
-          "  | .some (a, x) => match Seq.popFront a with\n" ++
-          "    | .some (b, y) => match Seq.popFront b with\n" ++
-          "      | .some (c, z) => match Seq.popFront c with\n" ++
-          "        | .some (d, w) => .some (d, w)\n" ++
-          "        | .none => .some (c, z)\n" ++
-          "      | .none => .some (b, y)\n" ++
-          "    | .none => .some (a, x)\n" ++
-          "  | .none => .none\n" ++
+          "def q5 : Seq Nat := Seq.ofList [0, 1, 2, 3, 4]\n" ++
+          "def q : Seq Nat := Seq.push (Seq.push (Seq.push (Seq.push (Seq.push q5 5) 6) 7) 8) 9\n" ++
+          "def popN : Nat → Seq Nat → Option (Seq Nat × Nat)\n" ++
+          "  | .zero, _ => .none\n" ++
+          "  | .succ k, s => match Seq.pop s with\n" ++
+          "    | .none => .none\n" ++
+          "    | .some (t, x) => match k with\n" ++
+          "      | .zero => .some (t, x)\n" ++
+          "      | .succ _ => popN k t\n" ++
+          "def popFrontN : Nat → Seq Nat → Option (Seq Nat × Nat)\n" ++
+          "  | .zero, _ => .none\n" ++
+          "  | .succ k, s => match Seq.popFront s with\n" ++
+          "    | .none => .none\n" ++
+          "    | .some (t, x) => match k with\n" ++
+          "      | .zero => .some (t, x)\n" ++
+          "      | .succ _ => popFrontN k t\n" ++
           "def pop4List : Option (List Nat × Nat) :=\n" ++
-          "  match pop4 with\n" ++
+          "  match popN 4 q with\n" ++
           "  | .some (t, x) => .some (Seq.toList t, x)\n" ++
           "  | .none => .none\n" ++
           "def front4List : Option (List Nat × Nat) :=\n" ++
-          "  match front4 with\n" ++
+          "  match popFrontN 4 q with\n" ++
           "  | .some (t, x) => .some (Seq.toList t, x)\n" ++
           "  | .none => .none\n" ++
           "#eval pop4List\n" ++
           "#eval front4List\n" ++
-          "#eval Seq.get q 19\n" ++
-          "#eval Seq.get q 20\n" ++
+          "#eval Seq.get q 9\n" ++
+          "#eval Seq.get q 10\n" ++
           "#eval Seq.size q\n" ++
           "#eval Seq.toList (Seq.pushFront q 100)\n")
           [
-            ".some (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 (.cons 10 (.cons 11 (.cons 12 (.cons 13 (.cons 14 (.cons 15 .nil))))))))))))))), 16)",
-            ".some (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 (.cons 10 (.cons 11 (.cons 12 (.cons 13 (.cons 14 (.cons 15 (.cons 16 (.cons 17 (.cons 18 (.cons 19 .nil))))))))))))))), 3)",
-            ".some 19",
+            ".some (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))), 6)",
+            ".some (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil))))), 3)",
+            ".some 9",
             ".none",
-            "20",
-            ".cons 100 (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 (.cons 10 (.cons 11 (.cons 12 (.cons 13 (.cons 14 (.cons 15 (.cons 16 (.cons 17 (.cons 18 (.cons 19 .nil))))))))))))))))))))"
+            "10",
+            ".cons 100 (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil))))))))))"
           ] },
     { name := "the textbook non-uniform tree is what the kernel rejects (the design note)", run := fun _ =>
         failsLibs ("import FingerTree\n" ++

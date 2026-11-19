@@ -4,9 +4,13 @@ import ListLemmas
 # Finger trees
 
 A finger tree (`import FingerTree`) is a sequence with amortised `O(1)` push and pop at
-both ends, `O(log n)` indexing, and a monoidal **measure** (a `Monoid` fold over the
-elements in order). `Seq A` is the sequence; the finger tree is `FT A l` at level `0`,
-where `l` counts the nesting of nodes.
+both ends, indexing by descending through recomputed subtree sizes, and a monoidal
+**measure** (a `Monoid` fold over the elements in order). `Seq A` is the sequence; the
+finger tree is `FT A l` at level `0`, where `l` counts the nesting of nodes.
+
+The measure is not cached in the nodes (that would need a node carrying its value and
+its equation), so `size`, `measure` and `get` are `O(n)`: `get` recomputes the middle's
+size at each level. The deque ends are the amortised-constant part.
 
 Why the level index. The textbook tree is non-uniform:
 

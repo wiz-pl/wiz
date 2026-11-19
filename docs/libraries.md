@@ -135,8 +135,10 @@ laws only where a node combines its parts, not a reassociation at every step.
 Not here: for the same kernel restriction, `Seq.append` rebuilds from the two readings
 (O(n)) instead of the textbook O(log n) catenation, which needs one function to match
 two trees at the same level. The measure is recomputed by a fold — a node does not cache
-it — so `size`/`measure` are O(n); a cached measure would be a node carrying its value
-and its equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`).
+it — so `size`/`measure` are O(n), and `get` (which descends by recomputed subtree
+sizes) is O(n) as well; a cached measure would be a node carrying its value and its
+equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The deque ends
+(push, pop, pushFront, popFront) are the amortised-constant operations.
 
 ## H14 S0: hardware as tagless-final code, with sharing
 
