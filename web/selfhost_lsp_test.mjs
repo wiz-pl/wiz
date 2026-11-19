@@ -8,9 +8,10 @@
 // commands, the engine's lines as diagnostics (one per command, a parse error at its
 // offset in UTF-16, the added Prelude line, output that does not line up), the
 // handshake through `LspClient`, didOpen/didChange → publishDiagnostics (and
-// `wiz/elaborated`), the plain fallback answering "nothing at the cursor", an engine
-// that loads late or fails, the page's wiring (`startInfoview` with a stub textarea), and
-// no unhandled rejection anywhere.
+// `wiz/elaborated`), the plain fallback answering "nothing at the cursor", completion,
+// hover and definition from the check's declaration index (with their `textEdit`, Markdown
+// and `Location` shapes), an engine that loads late or fails, the page's wiring
+// (`startInfoview` with a stub textarea), and no unhandled rejection anywhere.
 "use strict";
 import {
   isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
@@ -499,7 +500,7 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
 {
   // the handshake advertises all three, and the answers come from the index
   const c3 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (s) => declCheck(s, DECLS), names: () => { throw new Error("no names export"); },
+    evaluate: stubEval, check: (s) => declCheck(s, DECLS)
   }) });
   await c3.connect();
   const caps = c3.capabilities || {};

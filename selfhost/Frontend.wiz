@@ -5944,12 +5944,12 @@ partial def recordDeclsGo (gs : Globals) (input : Array Nat) (sp : Option SpT)
   | .false => gs
   | .true => match Array.getD all i (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty _ _ _ _ =>
-      let n := privBase n;
-      match declSpanFor input sp n with
+      let base := privBase n;
+      match declSpanFor input sp base with
         | .none => recordDeclsGo gs input sp all (i + 1)
         | .some t =>
-          let gs1 := Globals.addLsp gs (.decl (SpT.start t) (SpT.stop t) n
-            (show .nil 0 ty) (declKind gs n ty));
+          let gs1 := Globals.addLsp gs (.decl (SpT.start t) (SpT.stop t) base
+            (show .nil 0 ty) (declKind gs base ty));
           recordDeclsGo gs1 input sp all (i + 1)
 
 -- what a command added between `old` and `new`, for the check's index (nothing unless

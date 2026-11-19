@@ -7,14 +7,15 @@ engine), so the published page has a pane with no server to start; with an endpo
 the page's URL it can also be a **language client** of an external server, showing that
 server's tactic state, expected type and diagnostics. With an external server that
 implements the interactive methods, clicking a hypothesis or a tagged subterm selects its
-source span in the editor; the in-page server answers only the plain goal methods, so
-only the goal's span is clickable.
+source span in the editor; the in-page server answers the plain goal methods and the
+editor's completion, hover and definition from its own check index (the interactive
+tagged methods remain an external server's, so a tagged tree is only clickable there).
 
 The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
 rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
 insertion), `web/squiggles.js` and `web/completions.js` draw them, and
 `web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
-the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=react`
+the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=loom`
 (§ The Loom UI); the default page builds its DOM directly.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
@@ -71,8 +72,8 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to start one), and the playground keeps working as a local checker. Nothing is logged
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
-  `?completions=off` the completion popup (§ The editor). `?ui=react` renders the pane
-  with the repo's Loom framework instead of the DOM path (§ The Loom UI).
+  `?completions=off` the completion popup (§ The editor). `?ui=loom` mounts the whole
+  page as the repo's Loom app instead of the static markup (§ The Loom UI).
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -198,37 +199,26 @@ The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
 asking.
 
-## The Loom UI (`?ui=react`)
+## The Loom UI (`?ui=loom`)
 
-The right-hand pane (Goals over Output) can be rendered by the repo's Loom framework
-instead of by `document.createElement` in `web/playground.js`:
+The whole page can be mounted as one Loom app instead of the static markup: with
+`?ui=loom`, `web/playground.js` loads `wiz-playground-ui.mjs` (built by
+`web/build-playground-ui.sh` from `web/playground-ui.wiz`) and `web/framework/driver.js`
+mounts it on `body`.
 
 ```sh
-web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playground-ui.mjs
-# open http://127.0.0.1:8000/playground.html?ui=react
+web/build-playground.sh web/out         # the engine (wiz-playground.mjs)
+web/build-playground-ui.sh web/out      # the Loom page (wiz-playground-ui.mjs)
+# open http://127.0.0.1:8000/playground.html?ui=loom
 ```
 
-* `web/playground-react.js` keeps the page's model — `{count, lines, goals}` — and
-  serialises it as JSON on every change; `web/framework/driver.js`'s `startModel` calls
-  the UI module's `wiz_ui_html(model)` for the first paint and `wiz_ui_patch(old, new)`
-  for each update, then applies the patches with `web/framework/runtime.js`. The goals
-  pane's HTML (`web/goals.js`) travels in the model and enters the tree as raw HTML, so
-  its spans, ranges and clicks are unchanged.
-* The UI app is `web/playground-ui.wiz`: a pure `model → tree` function, which is why a
-  page with arbitrary text can use the framework even though its typed dispatch carries
-  only `(event, handler index)`. It is built as its own small Wasm module so a failure to
-  build or load it cannot affect the checker; `web/ui-framework.wiz` is the **only** file
-  naming the framework module (`Web.Loom`), so a further rename touches that file alone.
-* Still imperative (the same on both paths): the textarea and its squiggle overlay, the
-  completion popup, the header's status line, the Run button and the footer's engine
-  line. The line count moves from under the editor into the pane's Output head under the
-  flag (so it is not drawn twice). The pane's own DOM path is untouched: without the
-  flag, and whenever the UI module is missing, `#side-dom` renders as before and the
-  Loom container stays hidden.
-* `web/test-playground-ui.sh` checks the Wiz half under Node: it runs the fixture
-  (`web/playground-ui-fixture.wiz`) with `wiz run`, applies the patch list to the SSR HTML
-  in `web/framework/minidom.mjs`, and requires the result to equal the next model's HTML
-  exactly; `web/playground_ui_test.mjs` also drives `startModel` with a fake Wasm module.
+The UI is its own Wasm instance, so a trap or restart in the engine does not touch it.
+The page keeps the effects (the engine, the goals client, the editor overlays) and
+reports their results through the module's `wiz_loom_*` entry points; the static markup
+is the default and the fallback when the module is missing or its ABI is not what the
+driver expects. `web/playground_ui_test.mjs` mounts the real module under Node with the
+driver and the DOM double and checks the panes, the status pair, the count, the value
+classes and the entry points.
 
 ## Documents
 
@@ -269,11 +259,13 @@ textarea an editor:
 Both requests use `TextDocumentPositionParams` and the same UTF-16 positions as the rest
 of the client. A server that answers `null` (nothing at that character) or
 `MethodNotFound` is silent: the page keeps working as before. The in-page server
-(`web/selfhost-lsp-shim.js`) currently answers `hover` with `null` and has no
-`definition`, because the self-hosted frontend keeps no position index yet; with
-`?lsp=ws://…` both come from the Lean server, which implements them. `web/hover.js` is
-the page half (the content rules and the card), and `web/hover_test.mjs` tests it without
-a browser.
+(`web/selfhost-lsp-shim.js`) answers both from the check's declaration index (see
+§ Completions): a declaration of the module being checked gives its signature as
+Markdown and its own span as the `Location`; a Prelude global or a local binder is
+`null`, because the index covers this module only. With `?lsp=ws://…` both come from the
+Lean server, which also knows the library and local scopes. `web/hover.js` is the page
+half (the content rules and the card), and `web/hover_test.mjs` tests it without a
+browser.
 
 ## Requests
 
@@ -353,41 +345,35 @@ to jump).
 
 ## Completions
 
-The editor is a plain `<textarea>`, so completions are asked for explicitly: **Ctrl-Space**
-(also Cmd-Space) requests them at the caret, and the panel shows the answer as a list above
-Goals. ArrowUp/ArrowDown choose, **Tab** or **Enter** inserts the chosen label over the
-identifier before the caret, **Escape** closes the list, and typing closes it (the list
-would be stale). Clicking an entry inserts it too. There is no automatic popup: a textarea
-has no menu, and a popup anchored at the caret would need a hidden mirror element for the
-geometry, which this pane does not carry.
+The editor is a plain `<textarea>`, so the popup is an overlay (`web/completions.js`):
+**Ctrl-Space** asks at the caret, and typing an identifier character asks after a short
+debounce. ArrowUp/ArrowDown/PageUp/PageDown move, **Enter** or **Tab** accepts, **Escape**
+closes, and a non-identifier key or a blur closes it. The item's `textEdit` is applied
+when its range ends at the caret; a stale answer is re-anchored on the identifier prefix
+at the caret instead (so typing more while an answer is in flight cannot duplicate the
+suffix). `insertText`/`label` and snippet placeholders are the fallbacks. The accepted
+item goes through the normal `input` event, so the document is re-sent by the existing
+`didChange` path. `?completions=off` disables the popup.
 
-The request is `textDocument/completion` with `TextDocumentPositionParams`; the result is
-an LSP `CompletionList`, `{"isIncomplete": false, "items": [{"label", "kind"?, "detail"?}]}`.
-The client uses `label`, `kind` (an LSP `CompletionItemKind` number) and `detail`; other
-fields are ignored. A server may return an empty list for "nothing here"; the panel shows
-"no completions".
+The request is `textDocument/completion` with `TextDocumentPositionParams` and an optional
+`context: {triggerKind, triggerCharacter?}`; the result is an LSP `CompletionList`,
+`{"isIncomplete": false, "items": [{"label", "kind"?, "detail"?, "textEdit"?}]}`, or a bare
+array. The client uses `label`, `kind`, `detail`, `sortText`/`filterText` and the edit.
 
-The in-page server would answer from the module's `wiz_playground_names : String → String`
-export (`web/playground-exports.wiz`): it runs the same check as the diagnostics
-(`runCommands`) and would return `{"v":1,"names":[{"label","kind"}, …]}` — the frontend's
-**global environment**, newest declaration first, each name once, with `kind` an LSP
-`CompletionItemKind` (7 a type, 3 a function, 6 otherwise). The shim caches the answer per
-document text and filters by the identifier prefix before the caret (letters, digits, `_`,
-`'` and `.`; case-insensitive), capped at 200 items.
+The in-page server answers from the check answer's `index`: the module's declarations are
+recorded there as `{"s", "e", "kind": "decl", "name", "detail", "ckind"}` — the source
+name, the type as the kernel prints it, an LSP `CompletionItemKind` (7 a type, 3 a
+function, 6 otherwise), and the declaration's code-point span. The shim filters the
+declarations by the identifier before the caret (letters, digits, `_`, `'` and `.`;
+case-insensitive, capped at 200), and gives each item a `textEdit` over that prefix. It is
+the **same check** that produces the diagnostics, cached on the document, so a name the
+check accepted is one the list has, and there is no second Wasm call.
 
-**In this build the export is not wired** (there is no `export` line and the function is not
-in `web/build-playground.sh`'s exported list): the first wasm build of it overflowed the
-module's stack while listing the environment (a recursion in the C runtime's list handling
-that the function's own control flow does not explain), so it is left out and the shim's
-safe fallback answers an **empty list** ("no completions"). The protocol, the shim, the
-client and the Ctrl-Space popup are complete and tested against a stub engine; re-enable
-the export once the wasm path is fixed. An external server (`?lsp=ws://…`) answers
-completions normally, so the popup is useful there today.
-
-Two honest limits even with the export: **local binders are not listed** (a definition's
-parameters, a `fun`'s variables, a tactic's hypotheses — the self-hosted frontend exposes
-the scope only while it elaborates a command and keeps no info tree), and a module whose
-export fails answers an empty list rather than an error.
+The index covers **the module being checked**, not the embedded Prelude: a Prelude global
+is in scope but not listed, and a local binder (a definition's parameter, a `fun`'s
+variable, a tactic's hypothesis) is not listed either — the frontend exposes the scope
+only while it elaborates a command and keeps no info tree. An external server
+(`?lsp=ws://…`) answers those too.
 
 ## Expected types (`wiz/plainTermGoal`)
 
@@ -396,7 +382,8 @@ the check answer: `wiz_playground_check` returns
 
 ```json
 {"v":1,"lines":[…],
- "index":[{"s":16,"e":44,"kind":"term","expected":"Nat"}, …]}
+ "index":[{"s":16,"e":44,"kind":"term","expected":"Nat"},
+          {"s":16,"e":21,"kind":"decl","name":"twice","detail":"(n : Nat) → Nat","ckind":3}, …]}
 ```
 
 where `s`/`e` are **code-point** offsets into the checked text (end-exclusive; the shim
@@ -419,17 +406,18 @@ How the index is made, and what it really is:
   `spCheck` checks a span against the syntax node's kind at every step, so a stale pairing
   is dropped, never guessed.
 * **The recorder is in the elaborator.** `checkT` (the "check this against a type" entry)
-  records `(span, "term", expected)` when it is entered with a span; `ES` carries the
-  entries (a new `infos` field) and `command` moves them into `Globals.infos` when the
-  command succeeds. `stepCommand` turns the side table on only when the playground asks
-  (`Globals.watching`), so the compiler and `wiz check` pay one `Bool` check per command
-  and no span walk.
+  records `(span, "term", expected)` when it is entered with a span; the entries go into
+  the same `ES.snaps`/`LspEntry` list the external `wiz lsp` uses, and `command` moves
+  them into the document's entries when the command succeeds. `stepCommand` turns the
+  side table on only when the playground asks (`Globals.watching`), so the compiler and
+  `wiz check` pay one `Bool` check per command and no span walk.
 * **Where it threads** (for the parity work on `Frontend.wiz`/`Parse.wiz`): the `SpT`
   threading is a last parameter on `checkT`, `inferT`, `inferT1`, `inferT2`, `inferHead`,
   `checkLams`, `checkTuple`, `letT`, `inferLams`, `defT`, `defNames`, `command` and
   `defStep`, and a `List (Option SpT)` on `appArgsT`/`appArgsNamed`/`appExpected` (one span
-  per argument). Everything else passes `.none`. `ES` grew one field, `Globals` two
-  (`infos`, `watch`) — a constructor arity change, as `selfhost` changes are announced.
+  per argument). Everything else passes `.none`. `LspEntry` grew a `decl` constructor and
+  `LspCtx` a `watch` flag; `Globals`/`ES` keep their existing shapes — a constructor
+  arity change, as `selfhost` changes are announced.
 
 **What is not recorded.** A command whose syntax tree the frontend rewrites before
 elaborating has no spans there: `def` with pattern-matching defaults or derived equations
@@ -443,8 +431,8 @@ other caller) it is dead weight of one `none`.
 ## Tactic states (`wiz/plainGoal`)
 
 The same index carries `kind: "goal"` entries: `{"s","e","kind":"goal","goals":[…]}`,
-where `goals` holds the state `tacGoalsShow` prints, one goal per blank-line-separated
-block (`"no goals"` for a finished proof). `wiz/plainGoal` at the caret answers the
+where `goals` holds the state's goals as `tacGoalsList` prints them (`[]` for a finished
+proof). `wiz/plainGoal` at the caret answers the
 **innermost `goal` entry containing it** as `{goals, rendered, range}`; `rendered` is a
 ` ```wiz ` fence around the goals, as the Lean server sends, and `null` means the caret
 is outside any recorded state.

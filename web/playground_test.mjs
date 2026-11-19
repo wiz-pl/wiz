@@ -54,7 +54,7 @@ check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
 check("a normal run leaves no clean-stop code", Number(wasm._wiz_playground_exit(0n)), 0);
 
-// (stage 2/3) the check's position index and the names export. The page adds the Prelude
+// (stage 2/3) the check's position and declaration index. The page adds the Prelude
 // line itself (`withPrelude`), so the checked text is that source.
 function call(name, source) {
   const p = wasm.stringToNewUTF8(source);
@@ -111,9 +111,20 @@ function checkThat(name, condition, detail) {
   checkThat("by: the end of the block has a state", index.goal(end) !== null, JSON.stringify(goal));
 }
 {
-  // the names export is not wired into the build yet (it enumerated the environment and
-  // overflowed the wasm stack); the page's server treats that as an empty completion list
-  check("names: the export is not wired yet", typeof wasm._wiz_playground_names, "undefined");
+  // the declarations of the module being checked: name, printed type and source span,
+  // for completion, hover and definition (the page's server answers from these)
+  const body = "def twice (n : Nat) : Nat := n + n\ndef pred (n : Nat) : Nat := n\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + body));
+  const index = new PositionIndex(body, answer.index);
+  const decls = index.declarations();
+  checkThat("decls: twice and pred", decls.map((d) => d.label).sort().join(",") === "pred,twice",
+    JSON.stringify(decls));
+  const twice = index.declarationNamed("twice");
+  checkThat("decls: twice's type", twice !== null && twice.detail.includes("Nat"), twice && twice.detail);
+  check("decls: twice's span", twice && JSON.stringify(twice.range),
+    JSON.stringify({ start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }));
+  check("decls: an unknown name", index.declarationNamed("nope"), null);
+  check("decls: the export is gone", typeof wasm._wiz_playground_names, "undefined");
 }
 
 if (failed) process.exit(1);
