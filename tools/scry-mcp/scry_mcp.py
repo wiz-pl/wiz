@@ -77,12 +77,17 @@ from wiz_mcp import (  # noqa: E402
     reply,
     reply_error,
     resolve_path,
+    run_truncated,
     write_message,
 )
 
 SERVER_NAME = "scry"
 SERVER_VERSION = "1.0.0"
 DEFAULT_TIMEOUT = 300.0
+#: One text field (stdout/stderr) is clipped to this many characters (the shared
+#: reader's display bound), and the reader kills the child past `MAX_OUTPUT`.
+MAX_TEXT = base.MAX_TEXT
+MAX_OUTPUT = base.MAX_OUTPUT
 #: Reports kept as resources (the oldest go first).
 MAX_RUNS = 20
 #: A compile database larger than this is refused before it is parsed (the read
@@ -468,6 +473,36 @@ def _include_paths(args: list[str]) -> list[str]:
     return out
 
 
+#: Compile-database flags that never reach a preprocessor here: they choose the
+#: compiler/driver (`-B`), rewrite its specs (`-specs`, `-wrapper`), load a plugin
+#: (`-fplugin`) or splice words past the driver (`-Xclang`, `-Xpreprocessor`, `-Wp,`);
+#: `@file` is a response file that can carry any of them. `scry` itself refuses these
+#: too; refusing here keeps the read-only server from even spawning the tool. This is the
+#: branch's explicit deny list, checked before the allowlist so a refusal names the
+#: execution vector even if the allowlist grows.
+FORBIDDEN_COMPDB_FLAGS = ("-B", "-specs", "-wrapper", "-fplugin", "-Xclang", "-Xpreprocessor", "-Xlinker", "-Wp,")
+
+
+def forbid_compdb_flag(arg: str) -> None:
+    """Refuse a compile-database argument that can execute code (naming it)."""
+    if arg.startswith("@"):
+        raise ToolError("invalid_args", f"compile database: refusing response file `{arg}` (flags must be written out)")
+    if arg.startswith("-fplugin-arg-"):
+        raise ToolError(
+            "invalid_args",
+            f"compile database: refusing flag `{arg}` (it configures a compiler plugin)",
+        )
+    for flag in FORBIDDEN_COMPDB_FLAGS:
+        if arg == flag or (flag.endswith(",") and arg.startswith(flag)) or (
+                flag != "-B" and arg.startswith(flag) and len(arg) > len(flag) and arg[len(flag)] in "=,") or (
+                flag == "-B" and arg.startswith("-B") and len(arg) > 2):
+            raise ToolError(
+                "invalid_args",
+                f"compile database: refusing flag `{arg}` (it can execute code or choose a compiler driver; "
+                "only preprocessing flags are allowed)",
+            )
+
+
 def _has_control(value: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
@@ -537,13 +572,13 @@ def _check_flags(file: str, args: list[str]) -> None:
     driver's `-c`/`-o`/`-M…` structure and the source argument are dropped; every other
     word — `-B`, `-fplugin`, `-specs`, `-wrapper`, `@file`, `-Xclang`, `-cc1`,
     `-Xlinker`, `-imacros`, `--sysroot`, any other `-f…`/`-m…` — is refused by name.
+    The explicit deny list (`forbid_compdb_flag`) runs first, then the allowlist.
     This mirrors `Scry.parseCompdbFlags` in `scry/src/Scry/Project.wiz`.
     """
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg.startswith("@"):
-            raise ToolError("invalid_args", _refused(file, arg))
+        forbid_compdb_flag(arg)
         if arg in DROPPED_FLAGS:
             i += 1
             continue
@@ -921,16 +956,24 @@ class Server:
         except OSError as exc:
             raise ToolError("io_error", f"cannot run scry: {exc}") from exc
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            base._kill_process_group(proc)
-            proc.communicate()
-            raise ToolError("timeout", f"scry did not finish within {timeout:.0f}s (the process group was killed)") from exc
+            (stdout, out_total), (stderr, err_total), timed_out = base._communicate_bounded(
+                proc, timeout, keep=MAX_TEXT, hard=MAX_OUTPUT)
         except BaseException:
             base._kill_process_group(proc)
             proc.wait()
             raise
-        return {"exit": proc.returncode, "stdout": stdout or "", "stderr": stderr or ""}
+        stdout_text, out_trunc = base._fit_text(stdout, out_total, limit=MAX_TEXT)
+        stderr_text, err_trunc = base._fit_text(stderr, err_total, limit=MAX_TEXT)
+        if timed_out:
+            raise ToolError("timeout", f"scry did not finish within {timeout:.0f}s (the process group was killed)",
+                            stdout=stdout_text, stderr=stderr_text)
+        return {
+            "exit": proc.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_truncated": out_trunc,
+            "stderr_truncated": err_trunc,
+        }
 
     def _git_diff(self, base_ref: str, file: str, out: str) -> None:
         if not DIFF_BASE.match(base_ref) or ".." in base_ref:
@@ -1028,7 +1071,8 @@ class Server:
             finally:
                 shutil.rmtree(run_dir, ignore_errors=True)
             return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"],
-                                 stdout=run["stdout"], stderr=run["stderr"], result={"scry": self._scry()})
+                                 stdout=run["stdout"], stderr=run["stderr"], result={"scry": self._scry()},
+                                 truncated=run_truncated(run))
         if name == "scry_taint":
             return self._taint(args)
         if name == "scry_project":
@@ -1231,13 +1275,15 @@ class Server:
         if run["exit"] != 0 and not run["stdout"].lstrip().startswith("{"):
             shutil.rmtree(run_dir, ignore_errors=True)
             return make_envelope("scry_taint", ok=False, path=path, exit_code=run["exit"], stdout=run["stdout"],
-                                 stderr=run["stderr"], error={"kind": "scry_error", "message": _first_line(run["stderr"])})
+                                 stderr=run["stderr"], error={"kind": "scry_error", "message": _first_line(run["stderr"])},
+                                 truncated=run_truncated(run))
         report = self._json_report(run, "scry taint")
         if isinstance(report, dict) and isinstance(report.get("diff"), dict) and diff is not None:
             report["diff"]["argument"] = f"--diff {diff}"  # not the private temp file
         kept = self._keep(run_id, run_dir, "taint", path, report, sarif)
         return make_envelope("scry_taint", ok=run["exit"] == 0, path=path, exit_code=run["exit"],
-                             stderr=_quiet(run["stderr"]), result=dict(report, **{"_run": kept}))
+                             stderr=_quiet(run["stderr"]), result=dict(report, **{"_run": kept}),
+                             truncated=run_truncated(run))
 
     def _project(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._path(args, what="project directory")
@@ -1267,12 +1313,14 @@ class Server:
         if not run["stdout"].lstrip().startswith("{"):
             shutil.rmtree(run_dir, ignore_errors=True)
             return make_envelope("scry_project", ok=False, path=path, exit_code=run["exit"], stdout=run["stdout"],
-                                 stderr=run["stderr"], error={"kind": "scry_error", "message": _first_line(run["stderr"])})
+                                 stderr=run["stderr"], error={"kind": "scry_error", "message": _first_line(run["stderr"])},
+                                 truncated=run_truncated(run))
         report = self._json_report(run, "scry project")
         kept = self._keep(run_id, run_dir, "project", path, report, sarif)
         kept["units"] = len(entries)
         return make_envelope("scry_project", ok=run["exit"] == 0, path=path, exit_code=run["exit"],
-                             stderr=_quiet(run["stderr"]), result=dict(report, **{"_run": kept}))
+                             stderr=_quiet(run["stderr"]), result=dict(report, **{"_run": kept}),
+                             truncated=run_truncated(run))
 
     def _store(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         path = self._path(args)
@@ -1301,7 +1349,8 @@ class Server:
             shutil.rmtree(run_dir, ignore_errors=True)
         ok = run["exit"] == 0
         return make_envelope(name, ok=ok, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"],
-                             error=None if ok else {"kind": "scry_error", "message": _first_line(run["stderr"])})
+                             error=None if ok else {"kind": "scry_error", "message": _first_line(run["stderr"])},
+                             truncated=run_truncated(run))
 
     def _findings(self, args: dict[str, Any]) -> dict[str, Any]:
         action = args.get("action")

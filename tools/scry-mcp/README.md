@@ -214,10 +214,16 @@ Every tool except the runners is annotated `readOnlyHint: true`,
   refused by name**, not stripped: `-B<dir>` (with a committed `cc1`),
   `-fplugin=`, `-specs=`, `-wrapper`, `@file`, `-Xclang`, `-cc1`, `-Xlinker`,
   `-imacros`, `--sysroot` and any other `-f…`/`-m…` option could change which
-  program runs or what it reads. The refusal is `invalid_args` and names the
-  flag; Scry's own parser enforces the same list
-  (`scry/src/Scry/Project.wiz`). `cc -E -ffreestanding` is the one host program
-  the server can start besides `scry` and `git diff`.
+  program runs or what it reads. The branch's explicit deny list of execution
+  vectors runs before the allowlist, so a refusal names the vector even if the
+  allowlist grows. The refusal is `invalid_args` and names the flag; Scry's own
+  parser enforces the same list (`scry/src/Scry/Project.wiz`). `cc -E
+  -ffreestanding` is the one host program the server can start besides `scry`
+  and `git diff`.
+* **Child output is bounded.** `stdout`/`stderr` are drained in chunks and only
+  the first 64 KiB of each is kept; past 8 MiB on either stream the child's
+  process group is killed, so a repository-chosen output size cannot OOM the
+  server.
 * **Outputs are confined.** Findings, SARIF results and findings-database
   records whose file is outside the roots are withheld: counted, never named.
   `show` of such a finding is `path_denied`. Within a report, `skipped[].file`

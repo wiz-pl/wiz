@@ -115,6 +115,48 @@ def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
 imports this module, so it cannot be used here). -/
 def Scry.taintSay (s : String) : EIO Unit := EIO.lift (IO.println s)
 
+/-- Whether one character of a `--diff` base is allowed, given whether it is the first.
+The first must be alphanumeric or `_`; later ones may also be `.`, `/`, `@`, `^`, `~`,
+`{`, `}` or `-` (revisions such as `origin/master`, `HEAD~1`, `{HEAD}`). -/
+def Scry.validDiffBaseChar (first : Bool) (c : Char) : Bool :=
+  let n := Char.code c;
+  let alnum := Bool.or (Bool.and (Nat.le 48 n) (Nat.le n 57))
+    (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 90)) (Bool.and (Nat.le 97 n) (Nat.le n 122)));
+  let okFirst := Bool.or alnum (Nat.beq n 95);
+  let okRest := Bool.or okFirst (Bool.or (Nat.beq n 46) (Bool.or (Nat.beq n 47)
+    (Bool.or (Nat.beq n 64) (Bool.or (Nat.beq n 94) (Bool.or (Nat.beq n 126)
+      (Bool.or (Nat.beq n 123) (Bool.or (Nat.beq n 125) (Nat.beq n 45))))))));
+  match first with
+  | .true => okFirst
+  | .false => okRest
+
+/-- Every character after the first is an allowed non-first character. -/
+def Scry.validDiffBaseRest : List Char → Bool
+  | .nil => .true
+  | .cons c cs => Bool.and (Scry.validDiffBaseChar .false c) (Scry.validDiffBaseRest cs)
+
+/-- Whether `base` is a plausible git revision (see `Scry.validDiffBaseChar`): a
+non-empty revision with no `..`, whose first character is alphanumeric or `_`. -/
+def Scry.validDiffBase (base : String) : Bool :=
+  Bool.and (Bool.not (String.contains base ".."))
+    (match String.chars base with
+      | .nil => .false
+      | .cons c cs => Bool.and (Scry.validDiffBaseChar .true c)
+          (Scry.validDiffBaseRest cs))
+
+/-- The refusal for a bad `--diff` base. -/
+def Scry.diffBaseError (base : String) : String :=
+  "invalid --diff base \"" ++ base ++ "\": expected a git revision (e.g. HEAD~1, "
+    ++ "origin/master); an option such as --output=FILE or a revision range is refused"
+
+/-- Validate `--diff` when the options are parsed, before any file is analysed. -/
+def Scry.checkDiffBase (o : Scry.TaintOpts) : Except String Scry.TaintOpts :=
+  match o.diff with
+  | .none => .ok o
+  | .some b => match Bool.or (String.eq b "all") (Scry.validDiffBase b) with
+    | .true => .ok o
+    | .false => .error (Scry.diffBaseError b)
+
 def Scry.taintUsage : String :=
   "usage: scry taint FILE.c [--rules FILE] [--sarif OUT] [--json]\n"
   ++ "                      [--allow-errors] [--fail-on-finding] [--origin-map]\n"
@@ -187,7 +229,7 @@ def Scry.taintArgs (args : List String) : Except String Scry.TaintOpts :=
     | .none, .none => match o.diffContext with
       | .some _ => .error "--diff-context needs --diff or --changed-lines"
       | .none => .ok o
-    | _, _ => .ok o
+    | _, _ => Scry.checkDiffBase o
 
 -- ## The rule pack
 
@@ -397,18 +439,21 @@ def Scry.loadDiffMode (o : Scry.TaintOpts) : EIO (Option Scry.DiffMode) :=
   | .none, .none => EIO.pure .none
   | .some "all", .none => EIO.pure (.some (Scry.DiffMode.mk "--diff all" context
       .true Scry.emptyDiffSelection .false 0))
-  | .some base, .none => do
-    out ← Process.output "git"
-      ["diff", "-U0", "--no-color", "-M", base, "--", o.file] "";
-    match out.status.success with
-    | .true =>
-      let fs := Scry.parseDiff out.stdout;
-      EIO.pure (.some (Scry.DiffMode.mk ("--diff " ++ base) context .false
-        (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
-    | .false => EIO.fail ("git diff " ++ base ++ " failed ("
-        ++ out.status.toString ++ ")" ++ match String.trim out.stderr with
-          | "" => ""
-          | e => ": " ++ e)
+  | .some base, .none => match Scry.validDiffBase base with
+    | .false => EIO.fail (Scry.diffBaseError base)
+    | .true => do
+      out ← Process.output "git"
+        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "-M",
+          "--end-of-options", base, "--", o.file] "";
+      match out.status.success with
+      | .true =>
+        let fs := Scry.parseDiff out.stdout;
+        EIO.pure (.some (Scry.DiffMode.mk ("--diff " ++ base) context .false
+          (Scry.diffSelect o.file context fs) (List.isEmpty fs) (List.length fs)))
+      | .false => EIO.fail ("git diff " ++ base ++ " failed ("
+          ++ out.status.toString ++ ")" ++ match String.trim out.stderr with
+            | "" => ""
+            | e => ": " ++ e)
   | .none, .some p => do
     text ← FS.readFile p;
     let fs := Scry.parseDiff text;

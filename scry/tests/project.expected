@@ -4,6 +4,14 @@ uri: a space is percent-encoded: ok
 compdb: two entries: ok
 compdb: -I and -D kept, -c/-o/-MMD dropped: ok
 compdb: command form keeps -Iinc2 and -DBAR=2: ok
+compdb: -Bbin is refused (names the flag): ok
+compdb: @file is refused (names the file): ok
+compdb: non-allowlisted flags are refused (-O2 named): ok
+compdb: preprocessing flags kept, driver flags dropped: ok
+flags-b: compile database refused (-Bbin named): ok
+flags-b: the committed cc1 never ran: ok
+flags-rsp: response file refused (@args.rsp named): ok
+flags-normal: still analysed (one unit): ok
 compdb: -Bbin is refused by name: ok
 compdb: -fplugin is refused by name: ok
 compdb: @file is refused: ok
@@ -38,4 +46,6 @@ cache: cold miss for every TU: ok
 cache: warm hit for every TU: ok
 cache: corrupt entries are recomputed: ok
 cache: warm again after corruption: ok
+cache: symlink tmp refused: ok
+cache: symlink target unchanged: ok
 cache: cleanup: ok
