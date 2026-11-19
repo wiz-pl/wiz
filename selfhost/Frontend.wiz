@@ -10646,8 +10646,6 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
                       | .false => match strEq (kindOf stx) "command.import" with
                         | .true => errStep gs0 "`import` is not allowed inside a command: imports go at the top level of a file, before every other command"
                         | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
-                      -- an error naming it, never ignored)
-                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
       -- (13t) the namespace commands change the state (and validate it), not the globals
       let step := match nsCommand gs0 stx start with
         | .some s => s
