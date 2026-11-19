@@ -10,9 +10,11 @@ set_option compiler.extract_closed false
 `drafts/storage-engine/Quire.wiz` is the constant-page commit/open engine (a two-level
 directory, index fact chains, format 2); `QuireCursor.wiz` is the page cursor
 (`indexCursor`/`filterKey`, `Cost.pages`); `QuireTest.wiz` exercises both: a batched seed,
-an update through the lens, a delete, stale/unique rejection, reopen, and the page counts
+an update through the lens, a delete, stale/unique rejection, reopen, the page counts
 (equality reads one slot's pages, a full scan reads every slot's, a range reads its
-values' slots, and an index-only scan reads no primary page).
+values' slots, and an index-only scan reads no primary page), and group commit (`putMany`:
+one generation for a batch, the crash between its pages and its commit record, a stale
+entry rejected on its own, and unique collisions against the base and inside the batch).
 
 The case concatenates the modules (the suite's loader only serves `lib/` modules), as the
 `storage-mmap` and `storage-multiproc` cases do.
@@ -46,7 +48,7 @@ def storageQuireBody : IO String := do
   pure (body.replace "link_c \"quire_seal.c\"" "link_c \"drafts/storage-engine/quire_seal.c\"")
 
 def storageQuireExpected : String :=
-  "quire: all checks passed: 29\n"
+  "quire: all checks passed: 60\n"
 
 def storageQuire : IO Unit := do
   -- the C companion's header (`quire_seal.h`) is on the draft include path

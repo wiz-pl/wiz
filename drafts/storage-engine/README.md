@@ -139,11 +139,16 @@ file says what a linear-fixpoint rule would need to allow.
 two-level radix directory over 32-byte records, index-fact chains, a 96-byte meta slot).
 A commit copies the touched leaf, the two directory pages, the index root and prepends
 one fact page per touched `(index, value)`; an open is a `stat` + `mmap` + meta pick
-(no map materialisation, no index rebuild). `QuireCursor.wiz` is the page-backed query
-plan: `indexOnlyRange`/`indexCursorRange`/`indexNodesRange`, `filterKey`/`filterOnNode`
-pushdown, `fold`/`foldUntil`, and `Cost.pages` (the mapped pages touched).
-`QuireTest.wiz` covers a batched seed, an update through the lens, a delete, stale and
-unique rejection, reopen, and the page-read counts. `test-quire.sh` checks and runs it;
-`bench/` is the findings-store benchmark against `lib/Json` (see `bench/README.md`).
-`Quire.wiz` also has `compactQ`: the live records and recomputed indices are written to
-a fresh image and renamed over the path, which is what reclaims a never-reuse file.
+(no map materialisation, no index rebuild). `putMany` is the group commit: a list of
+independent transactions validated in order, written as one page run, and published by
+one meta switch (one `fdatasync`, one `fsync`), so a one-record-at-a-time writer amortises
+the durability point without changing the snapshot contract. `QuireCursor.wiz` is the
+page-backed query plan: `indexOnlyRange`/`indexCursorRange`/`indexNodesRange`,
+`filterKey`/`filterOnNode` pushdown, `fold`/`foldUntil`, and `Cost.pages` (the mapped
+pages touched). `QuireTest.wiz` covers a batched seed, an update through the lens, a
+delete, stale and unique rejection, reopen, the page-read counts, and the group commit
+(one generation, the crash between pages and commit record, per-record rejection).
+`test-quire.sh` checks and runs it; `bench/` is the findings-store benchmark against
+`lib/Json` (see `bench/README.md`). `Quire.wiz` also has `compactQ`: the live records and
+recomputed indices are written to a fresh image and renamed over the path, which is what
+reclaims a never-reuse file.
