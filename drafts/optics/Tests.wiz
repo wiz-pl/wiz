@@ -1,0 +1,67 @@
+import Profunctor
+import Logic
+
+/-!
+# Tests for the profunctor optics
+
+Every line is an interpretation of the same optic at a different `P`: `view` at
+`Forget`, `over` at `Hom`, `toListOf` at `ForgetList`, and `overWrite` at `Writer Δ`.
+-/
+
+-- ## Iso
+
+def swapI {A B : Type} : Iso (A × B) (B × A) (B × A) (A × B) :=
+  iso (fun p => (p.2, p.1)) (fun p => (p.2, p.1))
+def idI {A : Type} : Iso A A A A := iso (fun a => a) (fun a => a)
+
+#eval viewI (idI (A := Nat)) 7                          -- 7
+#eval overI swapI (fun p => (p.2, p.1)) ((1 : Nat), Bool.true) -- (Bool.true, 1)
+
+-- ## Lens: the pair's first component
+
+#eval view fstL ((7 : Nat), Bool.true)                   -- 7
+#eval over fstL (fun n => n + 1) ((1 : Nat), Bool.true)  -- (2, Bool.true)
+#eval set fstL 9 ((1 : Nat), Bool.true)                  -- (9, Bool.true)
+
+-- Lens laws on values (`fstL`'s GetPut/PutGet/PutPut).
+#eval Nat.beq (view fstL (over fstL (fun a => a) ((3 : Nat), Bool.true))) 3 -- Bool.true
+#eval Nat.beq (view fstL (over fstL (fun _ => 5) ((3 : Nat), Bool.true))) 5  -- Bool.true
+#eval view fstL (over fstL (fun _ => 6) (over fstL (fun _ => 5) ((3 : Nat), Bool.true)))
+
+-- ## Composition (`LensP.comp`)
+
+def fstFst : LensP ((Nat × Nat) × Bool) ((Nat × Nat) × Bool) Nat Nat :=
+  LensP.comp fstL fstL
+
+#eval view fstFst (((1, 2), Bool.true))               -- 1
+#eval over fstFst (fun n => n + 10) (((1, 2), Bool.true)) -- ((11, 2), Bool.true)
+
+-- ## Traversal: every list element
+
+#eval toListOf (listT (A := Nat)) (List.cons 1 (List.cons 2 (List.cons 3 List.nil)))
+-- .cons 1 (.cons 2 (.cons 3 .nil))
+#eval overT (listT (A := Nat)) (fun n => n + 10) (List.cons 1 (List.cons 2 List.nil))
+-- .cons 11 (.cons 12 .nil)
+
+-- ## Prism: the list's head
+
+#eval preview headP (List.cons 5 (List.cons 6 List.nil)) -- .some 5
+#eval preview headP (List.nil : List Nat)                -- .none
+#eval toListOfP headP (List.cons 5 (List.cons 6 List.nil)) -- .cons 5 .nil
+#eval overP headP (fun n => n + 1) (List.cons 5 (List.cons 6 List.nil))
+-- .cons 6 (.cons 6 .nil)
+
+-- ## Recording an update: the write-set interpretation (Writer)
+
+-- A delta of `(key, new value)` pairs; here the key is the focus itself and the value
+-- is the old value, so a caller can rebuild a write-set without a second pass.
+#eval overWrite (listT (A := Nat))
+  (fun n => (n + 1, List.cons (n, n) List.nil))
+  (List.cons 1 (List.cons 2 List.nil))
+-- (.cons 2 (.cons 3 .nil), .cons (1, 1) (.cons (2, 2) .nil))
+
+-- The same for a lens: one delta, no second traversal.
+#eval overWriteL fstL
+  (fun n => (n + 1, List.cons n List.nil))
+  ((1 : Nat), Bool.true)
+-- ((2, Bool.true), .cons 1 .nil)

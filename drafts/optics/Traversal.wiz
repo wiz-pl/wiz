@@ -1,0 +1,37 @@
+import Optic
+/-!
+# Traversal and `PLens.over` (store encoding) — the engine-facing piece
+
+The pure, store-encoding traversal the storage engine needs, kept in one place so that
+`drafts/storage-engine/Storage.wiz` does not carry its own copy:
+
+* `PLens.over`: the partial-lens counterpart of `Lens.over` (its natural home is
+  `lib/Optic.wiz` next to `Lens.over`; this module is the staging point).
+* `Traversal S A`: a pure read-and-update over every focus (`view`, `overAll`). It is
+  the store encoding, not profunctor optics: `overAll` runs a plain `A → A` through the
+  places and the lens's backward function records any writes. The profunctor version
+  (`drafts/optics/Profunctor.wiz`, `TraversalP`) is the general form; this one is what
+  the engine can use with the shipped toolchain today.
+
+The lens/traversal laws live in `lib/Optic.wiz` (`Lens.Lawful`, `PLens.Lawful`); a
+traversal built from a lawful lens inherits them, since `view` and `overAll` are just
+that lens's get and put.
+-/
+
+/-- `PLens.over`: the partial-lens counterpart of `Lens.over`. -/
+def PLens.over {S A : Type} (l : PLens S A) (f : A → A) (s : S) : Result S :=
+  match l s with
+  | .ok st => .ok (st.2 (f st.1))
+  | .err e => .err e
+
+/-- A read-and-update traversal: every focus matching a predicate. `view` reads the
+foci; `overAll` applies `f` to each and records the writes through the places' backward
+functions (the engine's write-set). -/
+structure Traversal (S A : Type) where
+  view : S → List A
+  overAll : (A → A) → S → S
+
+/-- The one-focus traversal induced by a lens. -/
+def Traversal.ofLens {S A : Type} (l : Lens S A) : Traversal S A :=
+  Traversal.mk (fun s => List.cons (Lens.get l s) List.nil)
+    (fun f s => Lens.over l f s)

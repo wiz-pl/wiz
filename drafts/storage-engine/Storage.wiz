@@ -1,4 +1,5 @@
 import Optic
+import Traversal
 import OpticDerive
 import Word
 import Text
@@ -32,12 +33,10 @@ the write-set it carries.
   delete epoch, per-key first-committer-wins for `set`/`del`, no version check for
   `addCount`, and unique-index rejection.
 
-`Traversal` and `PLens.over` are **additions for this engine**, not claims about
-`lib/Optic.wiz` (which has `TraverseMut` — an effectful `iter_mut` — but no pure
-`Traversal`, and has `Lens.over` but not `PLens.over`). `PLens.over` belongs in
-`lib/Optic.wiz` next to `Lens.over`; it is kept here because a shipped toolchain's
-library shadows a worktree `lib/`, so the pure half can be checked with `wiz check`
-alone (see the note, §5.2 and §12).
+`Traversal` and `PLens.over` come from `drafts/optics/Traversal.wiz` (checked with
+`-I drafts/optics`): the shipped toolchain's library shadows a worktree `lib/`, so the
+shared piece lives in `drafts/` until it can move into `lib/Optic.wiz`. See the note,
+§5.2 and §12.
 -/
 
 -- ## Records
@@ -209,13 +208,6 @@ def nodeOr (id : U64) (d : Node) : Lens Snapshot Node := fun s =>
     | .none => match Node.beq d n' with
       | .true => s
       | .false => Snapshot.record s id (.some (.set n')))
-
-/-- `PLens.over`: the partial-lens counterpart of `Lens.over` (an addition for this
-engine; its natural home is `lib/Optic.wiz`, next to `Lens.over`). -/
-def PLens.over {S A : Type} (l : PLens S A) (f : A → A) (s : S) : Result S :=
-  match l s with
-  | .ok st => .ok (st.2 (f st.1))
-  | .err e => .err e
 
 /-- The owner's shape, pure and total: `over (nodeOr id d ∘ Node.countL) (+1) db`. The
 composite's backward function runs inside the outer store, so the write-set gets one
@@ -403,15 +395,11 @@ def Root.applyDelta (r : Root) (d : IndexDelta) : Root :=
 def Root.applyDeltas (r : Root) (ds : List IndexDelta) : Root :=
   List.foldl (fun r d => Root.applyDelta r d) r ds
 
--- ## A traversal over an index bucket (an addition for this engine)
-
-/-- A read-and-update traversal: every focus matching a predicate. `lib/Optic.wiz` has
-`TraverseMut` (an effectful `iter_mut`) but no pure `Traversal`; this is the small piece
-the index update path needs. `overAll` is the ω update path and records one patch per
-matched node; the streaming query path is the linear `Cursor` (`Snapshot.indexNodes`). -/
-structure Traversal (S A : Type) where
-  view : S → List A
-  overAll : (A → A) → S → S
+-- ## A traversal over an index bucket
+--
+-- `Traversal` and `PLens.over` are shared with `drafts/optics/Traversal.wiz`; `overAll`
+-- is the ω update path and records one patch per matched node, while the streaming query
+-- path is the linear `Cursor` (`Snapshot.indexNodes`).
 
 /-- The nodes in `d`'s bucket for `v`, as a traversal. Membership is read from the base
 index; a node changed earlier in the transaction is still read through the write-set. -/

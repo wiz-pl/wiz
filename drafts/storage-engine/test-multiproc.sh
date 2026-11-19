@@ -18,16 +18,16 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/wiz-multiproc.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cd "$root"
 for f in Storage Registry Durable Multiproc MultiprocTest CompatSeed CompatRead; do
-  "$wiz" check -I drafts/storage-engine "drafts/storage-engine/$f.wiz"
+  "$wiz" check -I drafts/storage-engine -I drafts/optics "drafts/storage-engine/$f.wiz"
 done
 if [ -n "${WIZ_CFLAGS:-}" ]; then
   set -- --cflags "$WIZ_CFLAGS" --ldflags "${WIZ_LDFLAGS:-}"
 else
   set --
 fi
-WIZ_MULTIPROC_KILL=1 "$wiz" run -I drafts/storage-engine "$@" \
+WIZ_MULTIPROC_KILL=1 "$wiz" run -I drafts/storage-engine -I drafts/optics "$@" \
   drafts/storage-engine/MultiprocTest.wiz
-WIZ_COMPAT_STORE="$tmp/compat.db" "$wiz" run -I drafts/storage-engine "$@" \
+WIZ_COMPAT_STORE="$tmp/compat.db" "$wiz" run -I drafts/storage-engine -I drafts/optics "$@" \
   drafts/storage-engine/CompatSeed.wiz
-WIZ_COMPAT_STORE="$tmp/compat.db" "$wiz" run -I drafts/storage-engine "$@" \
+WIZ_COMPAT_STORE="$tmp/compat.db" "$wiz" run -I drafts/storage-engine -I drafts/optics "$@" \
   drafts/storage-engine/CompatRead.wiz
