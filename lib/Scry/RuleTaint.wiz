@@ -827,7 +827,7 @@ def Scry.taintAtUse (info : Scry.FnInfo) (rows : List (Nat × Nat)) (u v : Nat) 
 
 def Scry.rtPremiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
     (rel : Nat) : Option Nat :=
-  List.find (fun id => match Scry.stepByIdL st.nodes id with
+  List.find (fun id => match Scry.stepByIdA st.steps id with
     | .none => .false
     | .some s => Nat.beq s.fact.rel rel) step.premises
 
@@ -856,7 +856,7 @@ function's summary: the path names that function's store and
 `Scry.Interproc.extendPath` expands it. -/
 partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.MemSeed)
     (id : Nat) : List Scry.ChainNode :=
-  match Scry.stepByIdL st.nodes id with
+  match Scry.stepByIdA st.steps id with
   | .none => .nil
   | .some step =>
     match Nat.beq step.fact.rel Scry.rtMTainted with
@@ -871,7 +871,7 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
         let fromTaint := Scry.rtChainKinds st seeds pid;
         let storeNode : Option (Nat × Nat) :=
           match Scry.rtPremiseOfRel st step Scry.rtFlow with
-          | .some fid => match Scry.stepByIdL st.nodes fid with
+          | .some fid => match Scry.stepByIdA st.steps fid with
             | .some fs => .some (Scry.rtRowNat fs.fact.args 1, Scry.rtRowNat fs.fact.args 2)
             | .none => .none
           | .none => .none;
@@ -929,7 +929,7 @@ def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :
   | .some step =>
     match Scry.rtPremiseOfRel st step Scry.rtTainted with
     | .none => .none
-    | .some pid => match Scry.stepByIdL st.nodes pid with
+    | .some pid => match Scry.stepByIdA st.steps pid with
       | .none => .none
       | .some s => .some (Scry.rtRowNat s.fact.args 0, Scry.rtRowNat s.fact.args 1)
 
