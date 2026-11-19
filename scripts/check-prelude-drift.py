@@ -120,6 +120,18 @@ EMBEDDED_ONLY: dict[str, str] = {
     "Nat.blt": "lib/Prelude.wiz:174 registers it as `builtin nat.blt := Nat.lt`, "
                "but the host has no identifier `Nat.blt` (verified: `#check` rejects "
                "it), so the page offers a name the host does not",
+    "Bytes.width": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
+    "Bytes.minWidth": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
+    "Bytes.isScalar": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
+    "Bytes.leadVal": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
+    "Bytes.contOk": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
+    "Bytes.contVal": "a helper of the embedded prelude's UTF-8 decoder (`bytesText`); the "
+                "library's `Bytes` is a native `axiom` with `extern` operations",
     "Bytes.getAux": "a helper of the embedded prelude's Wiz model of `Bytes`; the "
                     "library's `Bytes` is a native `axiom` with `extern` operations",
     "Bytes.dropN": "as `Bytes.getAux`",
