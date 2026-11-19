@@ -1,0 +1,40 @@
+func xtures;
+.ney(l..ctor(%0, %1, %2)
+  b0:
+    %3 = gep %0, 0
+    store %3, %1
+    %4 = gep %0, 1
+    store %4, %2
+    ret %0
+func xtures;
+.yment(l..ctor(%0, %1, %2)
+  b0:
+    %3 = havoc dyn*
+    call ney(A..ctor(%0, %1, %3)
+    %4 = gep %0, 0
+    store %4, %1
+    %5 = gep %0, 1
+    store %5, %2
+    ret %0
+func xtures;
+.se(s..ctor(%0, %1)
+  b0:
+    %2 = gep %0, 0
+    store %2, %1
+    ret %0
+func xtures;
+.gged(s..ctor(%0, %1)
+  b0:
+    %2 = havoc dyn*
+    call se(t..ctor(%0, %2)
+    %3 = gep %0, 0
+    store %3, %1
+    ret %0
+func xtures;
+.it(s..ctor(%0, %1)
+  b0:
+    %2 = gep %0, 0
+    store %2, %1
+    ret %0
+warning: xtures;
+.se(s:13: property initialiser of g { not modelled: the property starts as its default
