@@ -8,6 +8,30 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- (21ag) The messages of a program that imports headers, preprocessed as `ioRun`
+does; `#check`'s info is in the list, so an imported signature can be pinned. -/
+def importCMsgs (src : String) : IO (List String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  let loader : Name → Option String := fun m =>
+    if m == "Prelude" then some prelude else if m == "IO" then some ioLib else none
+  let headers ← Build.preprocessHeaders (← toolchain) src
+  let s := runFrontend (R := ZeroOneMany) src { loader, cHeaders := (headers[·]?) }
+  pure (s.messages.filter (·.severity == .info) |>.toList.map (·.text))
+
+/-- (21ag) The header of the `import_c` signature pins: every spelling of a buffer
+pointer with a length, one without, and an integer that is not a length. -/
+def sigHeader : String :=
+  "#ifndef WIZ_SIG_H\n#define WIZ_SIG_H\n" ++
+  "typedef unsigned char uint8_t;\n" ++
+  "static inline unsigned long sig_const(const char *buf, unsigned long n) { return n + buf[0]; }\n" ++
+  "static inline unsigned long sig_mut(char *buf, unsigned long n) { return n + buf[0]; }\n" ++
+  "static inline unsigned long sig_alone(char *buf) { return (unsigned long)buf[0]; }\n" ++
+  "static inline unsigned long sig_k(char *buf, int k) { return (unsigned long)k + (unsigned long)buf[0]; }\n" ++
+  "static inline unsigned long sig_len(char *buf, int n) { return (unsigned long)n + (unsigned long)buf[0]; }\n" ++
+  "static inline unsigned long sig_signed(signed char *buf, unsigned long n) { return n + (unsigned long)buf[0]; }\n" ++
+  "#endif\n"
+
 def ffiGroup : Group where
   name := "ffi"
   exercise := "Stage 9a"
@@ -92,6 +116,27 @@ def ffiGroup : Group where
           "  IO.println (Nat.toString (C.strlen (C.strchr \"abc\" 98)))"
         ioRun src "\n0\n2\n"
         ioRun src "\n0\n2\n" (llvm := true) },
+    -- (21ag) `isBuf` folds a buffer pointer and its length into one `Bytes` parameter.
+    -- This pins which prototypes that changes: a `const char*` + length and a writable
+    -- `char*` + length (or `signed char*`) are one `Bytes`; a `char*` alone stays
+    -- `String`; a `char*, int` whose second name is not a length stays `String → Nat`;
+    -- and `char*, int n` changes arity from two to one.
+    { name := "import_c: a buffer pointer and its length fold into one Bytes (21ag)", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let h := dir / "wiz_sig.h"
+        IO.FS.writeFile h sigHeader
+        let src := s!"import IO\nimport_c \"{h}\" (pure)\n" ++
+          "#check C.sig_const\n#check C.sig_mut\n#check C.sig_alone\n" ++
+          "#check C.sig_k\n#check C.sig_len\n#check C.sig_signed\n" ++
+          "def good : Nat := C.sig_mut (Bytes.ofString \"A\")\n"
+        checkEq (repr [
+          "C.sig_const : Bytes → Nat",
+          "C.sig_mut : Bytes → Nat",
+          "C.sig_alone : String → Nat",
+          "C.sig_k : String → Nat → Nat",
+          "C.sig_len : Bytes → Nat",
+          "C.sig_signed : Bytes → Nat"]).pretty
+          (repr (← importCMsgs src)).pretty },
     { name := "the C subset parser (Exercise 9.1)", run := fun _ => do
         let fs := FFI.parseHeader "typedef unsigned long size_t;\nextern size_t strlen (const char *__s) __attribute__ ((__pure__));\nstruct S { int x; };\ntypedef int (*cmp_t)(const void *, const void *);\nvoid qsort(void *b, size_t n, size_t s, cmp_t c);\nstatic inline int twice(int x) { return 2 * x; }\nint printf(const char *f, ...);"
         checkEq "[strlen, qsort, twice, printf]" (toString (fs.toList.map (·.name)))
@@ -152,11 +197,21 @@ def ffiGroup : Group where
           "#run Bytes.show (Bytes.ofList (List.cons 1 (List.cons 2 (List.cons 300 .nil))))\n" ++
           "#run Bytes.eq (Bytes.ofString \"ab\") (Bytes.ofString \"ab\")\n" ++
           "#run Bytes.toString (Bytes.ofUtf8 \"é\")\n" ++
-          "#run Bytes.size (Bytes.ofUtf8 \"𝄞\")\n")
+          "#run Bytes.size (Bytes.ofUtf8 \"𝄞\")\n" ++
+          -- (21ag) the one UTF-8 rule in the interpreters' model: a lone continuation
+          -- byte, an overlong form, a surrogate half, and a non-scalar encoder input
+          "#eval Bytes.show (Bytes.ofUtf8 (Bytes.toString (Bytes.ofList (List.cons 136 (List.cons 65 .nil)))))\n" ++
+          "#eval Bytes.show (Bytes.ofUtf8 (Bytes.toString (Bytes.ofList (List.cons 192 (List.cons 128 .nil)))))\n" ++
+          "#eval Bytes.show (Bytes.ofUtf8 (Bytes.toString (Bytes.ofList (List.cons 237 (List.cons 160 (List.cons 128 .nil))))))\n" ++
+          "#eval Bytes.show (Bytes.ofUtf8 (String.mk (List.cons (Char.mk 55296) .nil)))\n" ++
+          "#eval Bytes.show (Bytes.ofString (String.mk (List.cons (Char.mk 55296) .nil)))\n" ++
+          "#eval Bytes.show (Bytes.pushUtf8 Bytes.empty 1114112)\n")
           -- (`Bytes.show` is a `String`, so `#eval`/`#run` print it quoted, as they print
           -- `Bytes.toString`'s; a `Bytes` value itself prints as `[1, 255]`, unquoted)
           ["\"[1, 2, 44]\"", "1", "0", ".true", ".false", "\"A\"", "1", "[1, 255]", "\"[2, 3]\"",
-           "\"[1, 2, 44]\"", ".true", "\"é\"", "4"] },
+           "\"[1, 2, 44]\"", ".true", "\"é\"", "4",
+           "\"[239, 191, 189, 65]\"", "\"[239, 191, 189]\"", "\"[239, 191, 189]\"",
+           "\"[239, 191, 189]\"", "\"[239, 191, 189]\"", "\"[239, 191, 189]\""] },
     { name := "foreign types are checked", run := fun _ =>
         ioFails "import IO\nextern \"f\" f : ((Nat → Nat) → Nat) → Nat" "foreign function" },
     { name := "link_c: a C file and a library linked with the program (C backend)", run := fun _ =>

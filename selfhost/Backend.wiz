@@ -2106,7 +2106,9 @@ def ffiProtoParams (ffi : List Foreign) : List String → List String
       -- (stage 30) a byte buffer is passed as a pointer and a length
       | .none => match strEq k "y" with
         | .true => .cons "const void *" (.cons "size_t" (ffiProtoParams ffi rest))
-        | .false => .cons (extCType ffi k) (ffiProtoParams ffi rest)
+        | .false => match strEq k "Y" with
+          | .true => .cons "void *" (.cons "size_t" (ffiProtoParams ffi rest))
+          | .false => .cons (extCType ffi k) (ffiProtoParams ffi rest)
 inductive FfiIn where
   | mk (pre : String) (cargs : List String) (post : String)
 -- (stage 21q) a callback: its trampoline and the closure as the context; a borrowed one
@@ -2117,10 +2119,19 @@ def ffiInMore (ffi : List Foreign) (k a c pre : String) (cargs : List String) (p
     | .mk owned _ _ _ => match owned with
       | .true => post
       | .false => "rt_drop(" +++ a +++ "); " +++ post)
-  | .none => match strEq k "y" with
+  | .none => match Bool.or (strEq k "y") (strEq k "Y") with
     -- (stage 30) a byte buffer: its data and length, borrowed for the call
-    | .true => .mk pre (.cons ("(const void *)((wiz_bytes *)" +++ a +++ ")->data")
-        (.cons ("(size_t)((wiz_bytes *)" +++ a +++ ")->len") cargs)) ("rt_drop(" +++ a +++ "); " +++ post)
+    | .true => match strEq k "Y" with
+      | .true =>
+        -- (21ag) a writable buffer: a copy for the call, so C's writes cannot change
+        -- the Wiz value (`Bytes` is functional; the same copy is in `Compiler/C.lean`)
+        .mk (pre +++ "wiz_bytes *b" +++ c +++ " = (wiz_bytes *)" +++ a +++ "; size_t n" +++ c +++
+          " = b" +++ c +++ "->len; unsigned char *p" +++ c +++ " = (unsigned char *)malloc(n" +++ c +++
+          " ? n" +++ c +++ " : 1); if (n" +++ c +++ ") memcpy(p" +++ c +++ ", b" +++ c +++ "->data, n" +++ c +++ "); ")
+          (.cons ("(void *)p" +++ c) (.cons ("(size_t)n" +++ c) cargs))
+          ("free(p" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)
+      | .false => .mk pre (.cons ("(const void *)((wiz_bytes *)" +++ a +++ ")->data")
+          (.cons ("(size_t)((wiz_bytes *)" +++ a +++ ")->len") cargs)) ("rt_drop(" +++ a +++ "); " +++ post)
     | .false => match kindStruct ffi k with
       | .some f => .mk (structCType f +++ " " +++ c +++ "; wiz_sin_" +++ structMangled f +++ "(&" +++ c +++ ", " +++ a +++ "); " +++ pre) (.cons c cargs)
           ("wiz_sfree_" +++ structMangled f +++ "(&" +++ c +++ "); rt_drop(" +++ a +++ "); " +++ post)

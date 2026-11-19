@@ -15,6 +15,41 @@ static wiz_val wiz_field_ref(wiz_val v, uint32_t i) { /* borrowed */
 WIZ_API int wiz_in_bool(wiz_val v) { int b = (int)wiz_tag(v); wiz_dec(v); return b; }
 WIZ_API wiz_val wiz_out_bool(int b) { return wiz_con(b ? 1 : 0, 0, NULL); }
 
+/* ---- UTF-8 (one rule: `Bytes`, `String` at the C boundary, the interpreters and the
+   self-hosted runtime; docs/libraries.md, "Byte buffers") ----
+
+   The length of a sequence is the lead byte's top bits: 0xxxxxxx 1, 110xxxxx 2,
+   1110xxxx 3, 11110xxx 4; a byte that is none of those (10xxxxxx, 11111xxx) is not a
+   lead. A sequence is *valid* when its continuation bytes (10xxxxxx) are all there and
+   the scalar is not overlong (below 80, 800, 10000 for 2, 3, 4 bytes), not a surrogate
+   (D800 … DFFF) and at most 10FFFF. `Bytes.toUtf8` reports the offset of the lead byte
+   of the first invalid sequence; the C-string decoders cannot fail, so they write
+   U+FFFD for it and resume after the bytes the lead claimed (one for a non-lead). A
+   non-scalar code point is encoded as U+FFFD too, by every encoder. */
+
+/* the length a lead byte claims, and its low bits */
+static int wiz_utf8_span(unsigned char c, uint32_t *cp) {
+  if (c < 0x80) { *cp = c; return 1; }
+  if ((c >> 5) == 6) { *cp = c & 0x1F; return 2; }
+  if ((c >> 4) == 14) { *cp = c & 0x0F; return 3; }
+  if ((c >> 3) == 30) { *cp = c & 0x07; return 4; }
+  *cp = 0xFFFD; return 1; /* not a lead: 10xxxxxx, 11111xxx */
+}
+/* the scalar of `len` bytes at `p`, or U+FFFD if the sequence is not valid */
+static uint32_t wiz_utf8_scalar(int len, uint32_t cp, const unsigned char *p) {
+  for (int j = 1; j < len; j++) {
+    if ((p[j] & 0xC0) != 0x80) return 0xFFFD;
+    cp = (cp << 6) | (p[j] & 0x3F);
+  }
+  if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)) return 0xFFFD;
+  if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) return 0xFFFD;
+  return cp;
+}
+/* a code point as the encoders write it: a non-scalar value is U+FFFD */
+static uint32_t wiz_utf8_code(uint64_t c) {
+  return (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) ? 0xFFFD : (uint32_t)c;
+}
+
 /* String := String.mk (List Char), Char := Char.mk Nat; C strings are UTF-8 */
 WIZ_API char *wiz_in_string(wiz_val s) {
   size_t cap = 16, len = 0;
@@ -23,7 +58,7 @@ WIZ_API char *wiz_in_string(wiz_val s) {
   while (wiz_tag(l) == 1) {
     wiz_val ch = wiz_field_ref(l, 0);
     wiz_val cp = wiz_field_ref(ch, 0);
-    uint32_t c = WIZ_IS_SCALAR(cp) ? (uint32_t)WIZ_UNBOX(cp) : 0xFFFD;
+    uint32_t c = wiz_utf8_code(WIZ_IS_SCALAR(cp) ? (uint64_t)WIZ_UNBOX(cp) : 0xFFFD);
     if (len + 5 > cap) { cap *= 2; buf = (char *)realloc(buf, cap); }
     if (c < 0x80) buf[len++] = (char)c;
     else if (c < 0x800) { buf[len++] = 0xC0 | (c >> 6); buf[len++] = 0x80 | (c & 0x3F); }
@@ -46,14 +81,10 @@ WIZ_API wiz_val wiz_out_string(const char *s) {
   size_t n = strlen(s), k = 0;
   uint32_t *cps = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
   for (size_t i = 0; i < n;) {
-    unsigned char c = (unsigned char)s[i];
-    uint32_t cp; int len;
-    if (c < 0x80) { cp = c; len = 1; }
-    else if ((c >> 5) == 6) { cp = c & 0x1F; len = 2; }
-    else if ((c >> 4) == 14) { cp = c & 0x0F; len = 3; }
-    else { cp = c & 0x07; len = 4; }
-    for (int j = 1; j < len && i + j < n; j++) cp = (cp << 6) | ((unsigned char)s[i + j] & 0x3F);
-    cps[k++] = cp;
+    uint32_t cp;
+    int len = wiz_utf8_span((unsigned char)s[i], &cp);
+    cps[k++] = i + (size_t)len > n ? 0xFFFD
+             : wiz_utf8_scalar(len, cp, (const unsigned char *)s + i);
     i += len;
   }
   wiz_val list = wiz_con(0, 0, NULL);

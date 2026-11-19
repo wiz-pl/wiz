@@ -430,6 +430,33 @@ static V consv(V h, V t) { return flat4(BOX(1), h, t, BOX(0)); }
 static V charv(uint32_t c) { return flat3(BOX(0), BOX(c), BOX(0)); }
 static V stringv(V list) { return flat3(BOX(0), list, BOX(0)); }
 
+/* ---- UTF-8: the same rule as `runtime/rt_data.inc` and `Bytes.toUtf8`
+   (docs/libraries.md, "Byte buffers"). The lead byte's top bits give the length
+   (0xxxxxxx 1, 110xxxxx 2, 1110xxxx 3, 11110xxx 4; 10xxxxxx and 11111xxx are not
+   leads); a sequence is valid when its continuations are there and its scalar is not
+   overlong, not a surrogate and at most 10FFFF. Here an invalid sequence is U+FFFD
+   and the scan resumes after the bytes the lead claimed. */
+static int rt_utf8_span(unsigned char b, uint32_t *c) {
+  if (b < 0x80) { *c = b; return 1; }
+  if ((b >> 5) == 6) { *c = b & 0x1F; return 2; }
+  if ((b >> 4) == 14) { *c = b & 0x0F; return 3; }
+  if ((b >> 3) == 30) { *c = b & 0x07; return 4; }
+  *c = 0xFFFD; return 1;
+}
+static uint32_t rt_utf8_scalar(int len, uint32_t c, const unsigned char *p) {
+  for (int j = 1; j < len; j++) {
+    if ((p[j] & 0xC0) != 0x80) return 0xFFFD;
+    c = (c << 6) | (p[j] & 0x3F);
+  }
+  if ((len == 2 && c < 0x80) || (len == 3 && c < 0x800) || (len == 4 && c < 0x10000)) return 0xFFFD;
+  if ((c >= 0xD800 && c <= 0xDFFF) || c > 0x10FFFF) return 0xFFFD;
+  return c;
+}
+/* a code point as the encoders write it: a non-scalar value is U+FFFD */
+static uint32_t rt_utf8_code(uint64_t c) {
+  return (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) ? 0xFFFD : (uint32_t)c;
+}
+
 /* a Wiz string as UTF-8 (a new buffer; the string is only read) */
 static char *cstr(V s) {
   size_t cap = 64, len = 0;
@@ -437,7 +464,7 @@ static char *cstr(V s) {
   V l = fld(fld(s, 1), 0);
   while (tagof(fld(l, 0)) == 1) {
     V rest = fld(l, 1);
-    uint32_t c = (uint32_t)UNBOX(fld(fld(fld(rest, 0), 1), 0));
+    uint32_t c = rt_utf8_code(UNBOX(fld(fld(fld(rest, 0), 1), 0)));
 #ifndef WIZ_RC
     if (len + 5 > cap) { char *nb = (char *)GC_MALLOC_ATOMIC(cap * 2); memcpy(nb, buf, len); buf = nb; cap *= 2; }
 #else
@@ -458,13 +485,10 @@ static V wstr(const char *s, size_t n) {
   uint32_t *cps = (uint32_t *)MALLOC_BUF((n + 1) * sizeof(uint32_t));
   size_t k = 0;
   for (size_t i = 0; i < n;) {
-    unsigned char b = (unsigned char)s[i];
-    uint32_t c; int extra;
-    if (b < 0x80) { c = b; extra = 0; } else if (b < 0xE0) { c = b & 0x1F; extra = 1; }
-    else if (b < 0xF0) { c = b & 0x0F; extra = 2; } else { c = b & 0x07; extra = 3; }
-    i++;
-    for (int e = 0; e < extra && i < n; e++, i++) c = (c << 6) | ((unsigned char)s[i] & 0x3F);
-    cps[k++] = c;
+    uint32_t c;
+    int len = rt_utf8_span((unsigned char)s[i], &c);
+    cps[k++] = i + (size_t)len > n ? 0xFFFD : rt_utf8_scalar(len, c, (const unsigned char *)s + i);
+    i += len;
   }
   V l = nilv();
   while (k > 0) l = consv(charv(cps[--k]), l);

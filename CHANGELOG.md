@@ -339,6 +339,37 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `dos-check`, run by the nightly bench workflow) pins RSS < 20× input and statement
   counts 16/64/128/256 to small time budgets (S1 findings `scrydos-01/02/03`).
 
+* `Bytes` (stage 21ag, over 9i): a functional buffer of bytes, in the C11 runtime
+  (`runtime/rt_data.inc`), the self-hosted one (`selfhost/rt.c`) and the interpreters
+  (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`). `empty`, `push` (the number's
+  low eight bits; in place when the buffer is unique), `size`, `get` (`0` past the end;
+  `at` is the total `Option`), `slice`/`take`/`drop` (both bounds clamp), `append`,
+  `eq`, `isEmpty`, `ofList`/`toList` (each number mod 256), `singleton`, `range n`
+  (`0 … n-1`) and `show`; `ofArray`/`toArray` are in `Std`, and `import WordBytes` adds
+  `ofU8s`/`toU8s` (`U8.ofNat` wraps mod 256, `UIntN.toNat` is the value). A `Bytes`
+  prints as `[1, 2, 255]` in `#eval`/`#run`; equality is `Bytes.eq`. Text and bytes meet
+  only through a named encoding, and **one UTF-8 rule** now governs all three codecs
+  (`lib/IO.wiz`, the host runtime and `selfhost/rt.c`; the interpreters mirror it): the
+  lead byte's top bits give the length (`0xxxxxxx` 1, `110xxxxx` 2, `1110xxxx` 3,
+  `11110xxx` 4; `10xxxxxx` and `11111xxx` are not leads), and a sequence is valid when
+  its continuation bytes are all there and the scalar is not overlong, not a surrogate
+  (`D800` … `DFFF`) and at most `10FFFF`. `Bytes.ofUtf8`/`toUtf8` encode and decode every
+  character, NULs included, and the checked decoder reports the first invalid sequence as
+  `"invalid UTF-8 at byte k"`; `ofString`/`toString` stay the NUL-terminated C-string
+  pair, whose decoder writes U+FFFD for an invalid sequence and resumes after the bytes
+  its lead claimed. They no longer disagree: `toString (ofList [0x88, 0x41])` is U+FFFD
+  followed by `A` in both toolchains, where the host used to give U+0001 and the
+  self-hosted U+0201. Every encoder (`Bytes.pushUtf8`, `ofUtf8`, and a `String` crossing
+  the FFI) writes U+FFFD for a code point that is not a scalar value, so `ofUtf8` and
+  `ofString` agree. `ofLatin1`/`toLatin1` are one byte per character. In the FFI (9l), a
+  `const void *`/`char *` buffer and its length are one borrowed `Bytes` parameter; a
+  **writable** `char *` with a length is one `Bytes` parameter too, but given a *copy*
+  for the call (kind `Y`), so a C write is discarded and never changes a Wiz value
+  (ownership is not shared). Tests: the `selfhost` group's table-driven UTF-8
+  differential (ASCII, 2/3/4-byte sequences, truncation, an overlong `C0 80`, a lone
+  continuation byte, a surrogate half, above U+10FFFF and an embedded NUL, through both
+  toolchains, collector and reference counting), the `ffi` `#eval`/`#run` cases, and
+  `#check` pins of the folded `import_c` signatures.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
