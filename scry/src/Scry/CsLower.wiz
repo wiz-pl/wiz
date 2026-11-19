@@ -3247,8 +3247,10 @@ def Scry.Cs.stemOf (path : String) : String :=
   | .some s => s
   | .none => base
 
-/-- Lower a parsed C# file (`c` is its `Scry.Cs.ofStore` view). -/
-def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lowered :=
+/-- Lower a parsed C# file (`c` is its `Scry.Cs.ofStore` view) with an explicit model
+pack; the default wrapper is `Scry.Cs.lowerCst`. -/
+def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text : String)
+    (c : Scry.Cst) : Scry.Cs.Lowered :=
   let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
   let raw0 := List.map (fun d => Scry.Cs.scanClass c d.1 d.2) decls;
   let raw := List.foldl (fun acc k => Scry.Cs.mergeOne acc k .true)
@@ -3268,7 +3270,7 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
       | .true => .cons (Scry.Cs.lowerPrimaryCtor c u k acc.1 d.2 (Scry.Cs.baseArgsOf c d.2)).2 .nil
       | .false => .nil;
     (r1.1, List.append acc.2 (List.append synth r1.2)))
-    (Scry.emptyState, (.nil : List Wil.Func)) decls;
+    ({ Scry.emptyState with models := models }, (.nil : List Wil.Func)) decls;
   -- top-level statements are `Program.<Main>$` in C#: lower them as `<stem>.Main`.
   let globals := Scry.childrenK c 0 "global_statement";
   let stem := Scry.Cs.stemOf path;
@@ -3284,16 +3286,25 @@ def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lo
       (List.append (Scry.Cs.memberWarnings c decls)
         (List.append (Scry.Cs.itemWarnings c) r2.1.warnings)))
 
+/-- Lower a parsed C# file with the default model pack. -/
+def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lowered :=
+  Scry.Cs.lowerCstWithModels Scry.defaultModels path text c
+
 /-- The result of the frontend on a spill: lowered, or an unreadable spill. -/
 inductive Scry.Cs.FrontResult where
   | ok (l : Scry.Cs.Lowered)
   | err (msg : String)
 
-/-- Lower the `scry-cst` spill `spill` of the C# file `path`, whose text is `text`. -/
-def Scry.Cs.frontend (path : String) (text : String) (spill : String) : Scry.Cs.FrontResult :=
+/-- Lower the `scry-cst` spill `spill` of the C# file `path`, whose text is `text`, with
+an explicit model pack. -/
+def Scry.Cs.frontendWithModels (models : Scry.ModelPack) (path : String) (text : String)
+    (spill : String) : Scry.Cs.FrontResult :=
   match Scry.CstStore.ofText spill with
   | .error e => .err (path ++ ": error: bad spill: " ++ e)
-  | .ok s => .ok (Scry.Cs.lowerCst path text (Scry.Cs.ofStore text s))
+  | .ok s => .ok (Scry.Cs.lowerCstWithModels models path text (Scry.Cs.ofStore text s))
+
+def Scry.Cs.frontend (path : String) (text : String) (spill : String) : Scry.Cs.FrontResult :=
+  Scry.Cs.frontendWithModels Scry.csModels path text spill
 
 /-- The unique function whose qualified name ends with `"." ++ name`, or `name` itself.
 Each file is lowered with its own class table, so a call to a class declared in another
@@ -3334,10 +3345,14 @@ def Scry.Cs.resolveCalls (p : Wil.Program) : Wil.Program :=
   { p with funcs := List.map (Scry.Cs.resolveFunc names) p.funcs }
 
 /-- The functions of a spill, empty when it cannot be read (for tests). -/
-def Scry.Cs.programOf (path : String) (text : String) (spill : String) : Wil.Program :=
-  match Scry.Cs.frontend path text spill with
+def Scry.Cs.programOfWithModels (models : Scry.ModelPack) (path : String) (text : String)
+    (spill : String) : Wil.Program :=
+  match Scry.Cs.frontendWithModels models path text spill with
   | .ok l => Wil.program l.funcs
   | .err _ => Wil.program .nil
+
+def Scry.Cs.programOf (path : String) (text : String) (spill : String) : Wil.Program :=
+  Scry.Cs.programOfWithModels Scry.csModels path text spill
 
 -- ## A textual view of the lowered functions (the lowering golden format)
 
