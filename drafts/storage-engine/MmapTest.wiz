@@ -1,0 +1,228 @@
+import Mmap
+import Word
+import IO
+import Sys
+import WordArray
+
+/-!
+# The slice-3 read-path test
+
+Builds a store file in the version-1 format (`Mmap.wiz`'s documented assumptions), maps
+it read-only and reads it through the decoder: the meta-slot pick (a torn, newer slot is
+ignored), the page checksums, a B+tree walk to three nodes, an index bucket, an
+unaligned wide load, and an out-of-range read that is an error rather than a fault. A
+second file has a corrupted leaf: the verified read says `corrupt`, the unverified one
+returns the (wrong) record, which is what the `verify` option is for.
+
+Run it with the built `wiz`: `wiz run -I drafts/storage-engine drafts/storage-engine/MmapTest.wiz`
+(the test group `storage-mmap` concatenates it onto `Mmap.wiz` instead).
+-/
+
+-- ## Building pages (the fixture writer: `U8Array` and the reference checksum)
+
+def blankPage : U8Array := U8Array.replicate Store.pageSize (U8.ofNat 0)
+
+def putU8 (a : U8Array) (off : Nat) (v : Nat) : U8Array :=
+  U8Array.set a off (U8.ofNat (Nat.land v 255))
+
+def putU16 (a : U8Array) (off : Nat) (v : Nat) : U8Array :=
+  let a := putU8 a off v;
+  putU8 a (Nat.add off 1) (Nat.shiftRight v 8)
+
+def putU32 (a : U8Array) (off : Nat) (v : Nat) : U8Array :=
+  let a := putU16 a off v;
+  putU16 a (Nat.add off 2) (Nat.shiftRight v 16)
+
+def putU64 (a : U8Array) (off : Nat) (v : U64) : U8Array :=
+  let a := putU8 a off (Store.wordByte v 0);
+  let a := putU8 a (Nat.add off 1) (Store.wordByte v 1);
+  let a := putU8 a (Nat.add off 2) (Store.wordByte v 2);
+  let a := putU8 a (Nat.add off 3) (Store.wordByte v 3);
+  let a := putU8 a (Nat.add off 4) (Store.wordByte v 4);
+  let a := putU8 a (Nat.add off 5) (Store.wordByte v 5);
+  let a := putU8 a (Nat.add off 6) (Store.wordByte v 6);
+  putU8 a (Nat.add off 7) (Store.wordByte v 7)
+
+def pageNats (a : U8Array) : List Nat := List.map (fun x => x.toNat) a.toList
+
+def pageBytes (a : U8Array) : Bytes :=
+  U8Array.foldl (fun b x => Bytes.push b x.toNat) Bytes.empty a
+
+def setPageChecksum (a : U8Array) : U8Array :=
+  putU64 a 16 (Store.pageChecksum (pageNats a))
+
+def nodeRecord (a : U8Array) (i : Nat) (id : U64) (kind : Nat) (label : Nat)
+    (count : U64) (version : U64) : U8Array :=
+  let off := Nat.add Store.headerSize (Nat.mul i Store.recordSize);
+  let a := putU64 a off id;
+  let a := putU32 a (Nat.add off 8) kind;
+  let a := putU32 a (Nat.add off 12) label;
+  let a := putU64 a (Nat.add off 16) count;
+  putU64 a (Nat.add off 24) version
+
+def pageHeader (a : U8Array) (kind : Nat) (n : Nat) (txid : U64) (right : Nat) : U8Array :=
+  let a := putU16 a 0 kind;
+  let a := putU16 a 2 n;
+  let a := putU16 a 4 0;
+  let a := putU16 a 6 0;
+  let a := putU64 a 8 txid;
+  putU64 a 24 (U64.ofNat right)
+
+/-- The primary leaf: nodes 10, 20, 30. -/
+def leafPage : U8Array :=
+  let a := blankPage;
+  let a := pageHeader a 1 3 (U64.ofNat 5) 0;
+  let a := nodeRecord a 0 (U64.ofNat 10) 1 100 (U64.ofNat 7) (U64.ofNat 5);
+  let a := nodeRecord a 1 (U64.ofNat 20) 2 200 (U64.ofNat 8) (U64.ofNat 5);
+  let a := nodeRecord a 2 (U64.ofNat 30) 1 300 (U64.ofNat 9) (U64.ofNat 5);
+  setPageChecksum a
+
+/-- The same leaf with node 10's count byte torn (`7` becomes `99`) after its checksum
+was written. -/
+def leafPageTorn : U8Array :=
+  let a := leafPage;
+  putU8 a (Nat.add Store.headerSize 16) 99
+
+/-- The index leaf for `kind`: (1, 10), (1, 30), (2, 20). -/
+def indexLeafPage : U8Array :=
+  let a := blankPage;
+  let a := pageHeader a 3 3 (U64.ofNat 5) 0;
+  let a := putU64 a 32 (U64.ofNat 1);
+  let a := putU64 a 40 (U64.ofNat 10);
+  let a := putU64 a 48 (U64.ofNat 1);
+  let a := putU64 a 56 (U64.ofNat 30);
+  let a := putU64 a 64 (U64.ofNat 2);
+  let a := putU64 a 72 (U64.ofNat 20);
+  setPageChecksum a
+
+/-- An internal page with one (key, child) entry (`kind` 2 primary, 4 index). -/
+def internalPage (kind : Nat) (key : U64) (child : Nat) : U8Array :=
+  let a := blankPage;
+  let a := pageHeader a kind 1 (U64.ofNat 5) 0;
+  let a := putU64 a 32 key;
+  let a := putU32 a 40 child;
+  setPageChecksum a
+
+/-- A 96-byte meta slot (`txid`, `root`, `index_root`, `page_count`); `torn` flips a
+byte in `page_count` after the checksum, so the slot must be ignored. -/
+def metaPage (txid : U64) (root : U64) (indexRoot : U64) (pageCount : U64)
+    (torn : Bool) : U8Array :=
+  let a := blankPage;
+  let a := putU64 a 0 Store.metaMagic;
+  let a := putU32 a 8 Store.formatVersion;
+  let a := putU32 a 12 0;
+  let a := putU64 a 16 txid;
+  let a := putU64 a 24 root;
+  let a := putU64 a 32 indexRoot;
+  let a := putU64 a 40 (U64.ofNat 0);
+  let a := putU64 a 48 (U64.ofNat 0);
+  let a := putU64 a 56 (U64.ofNat 0);
+  let a := putU64 a 64 (U64.ofNat 0);
+  let a := putU64 a 72 (U64.ofNat 0);
+  let a := putU64 a 80 pageCount;
+  let a := putU64 a 88 (Store.metaChecksumBytes (pageNats a) 96);
+  match torn with
+  | .true => putU8 a 82 170
+  | .false => a
+
+/-- offset 0: meta A (valid, txid 5); 1: meta B (torn, txid 6);
+2: primary leaf; 3: index leaf; 4: primary root; 5: index root. -/
+def storeImage (leaf : U8Array) : Bytes :=
+  let pages := [
+    metaPage (U64.ofNat 5) (U64.ofNat 4) (U64.ofNat 5) (U64.ofNat 6) .false,
+    metaPage (U64.ofNat 6) (U64.ofNat 2) (U64.ofNat 3) (U64.ofNat 6) .true,
+    leaf,
+    indexLeafPage,
+    internalPage 2 (U64.ofNat 10) 2,
+    internalPage 4 (U64.ofNat 1) 3];
+  List.foldl (fun b a => Bytes.append b (pageBytes a)) Bytes.empty pages
+
+-- ## Showing results
+
+def showNat : Nat → String := Nat.toString
+
+def joinSpaces : List String → String
+  | .nil => ""
+  | .cons x xs => match xs with
+    | .nil => x
+    | .cons _ _ => String.append x (String.append " " (joinSpaces xs))
+
+def showOpt (o : Option U64) : String :=
+  match o with
+  | .none => "none"
+  | .some v => showNat v.toNat
+
+def showNode (r : Except StoreError (Option NodeRecord)) : String :=
+  match r with
+  | .error e => String.append "error " (StoreError.message e)
+  | .ok .none => "none"
+  | .ok (.some n) =>
+    joinSpaces [showNat n.id.toNat, showNat n.kind.toNat, showNat n.label.toNat,
+      showNat n.count.toNat, showNat n.version.toNat]
+
+def showIds (ids : List U64) : String :=
+  List.foldl (fun s x => String.append s (String.append " " (showNat x.toNat))) "" ids
+
+def showBucket (ids : List U64) : String :=
+  String.append (showNat (List.length ids)) (showIds ids)
+
+def report (label : String) (value : String) : IO Unit :=
+  IO.println (String.append (String.append label " ") value)
+
+-- ## The test
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  let path := Path.join dir "store.wizdb";
+  let pathTorn := Path.join dir "store-torn.wizdb";
+  FS.writeBytes path (storeImage leafPage);
+  FS.writeBytes pathTorn (storeImage leafPageTorn);
+  st ← FS.stat path;
+  EIO.lift (report "len" (showNat st.size));
+  fd ← Fd.open path .read OpenFlags.none;
+  m ← Sys.check "mmap" (Map.ofFd fd st.size);
+  Fd.close fd;
+  EIO.lift (report "maplen" (showNat (Map.len m)));
+  match Snapshot.open m with
+  | .error e => EIO.lift (report "open" (StoreError.message e))
+  | .ok s => do
+    EIO.lift (report "gen" (showNat s.gen.toNat));
+    EIO.lift (report "root" (String.append (showNat s.root.page.toNat)
+      (String.append " index " (showNat s.indexRoot.toNat))));
+    EIO.lift (report "n10" (showNode (Snapshot.getNode s (U64.ofNat 10))));
+    EIO.lift (report "n20" (showNode (Snapshot.getNode s (U64.ofNat 20))));
+    EIO.lift (report "n30" (showNode (Snapshot.getNode s (U64.ofNat 30))));
+    EIO.lift (report "absent" (showNode (Snapshot.getNode s (U64.ofNat 99))));
+    EIO.lift (report "bucket1" (showBucket (match Snapshot.indexBucket s (U64.ofNat 1) with
+      | .error _ => [] | .ok ids => ids)));
+    EIO.lift (report "bucket2" (showBucket (match Snapshot.indexBucket s (U64.ofNat 2) with
+      | .error _ => [] | .ok ids => ids)));
+    EIO.lift (report "bucket3" (showBucket (match Snapshot.indexBucket s (U64.ofNat 3) with
+      | .error _ => [] | .ok ids => ids)));
+    EIO.lift (report "oob" (showOpt (Map.getU64At m (Nat.sub st.size 4))));
+    let unaligned := match Map.getU64At m 3 with
+      | .none => "out"
+      | .some v => match UIntN.beq v (U64.ofNat 0x00000131524F5453) with
+        | .true => "ok"
+        | .false => "wrong";
+    EIO.lift (report "unaligned" unaligned);
+    let bad := match Store.nodeInLeaf m (U64.ofNat 999) 0 with
+      | .error (.outOfRange _ _ _) => "outOfRange"
+      | .error _ => "other"
+      | .ok _ => "ok";
+    EIO.lift (report "badpage" bad);
+  st2 ← FS.stat pathTorn;
+  fd2 ← Fd.open pathTorn .read OpenFlags.none;
+  m2 ← Sys.check "mmap" (Map.ofFd fd2 st2.size);
+  Fd.close fd2;
+  match Snapshot.open m2 with
+  | .error e => EIO.lift (report "torn open" (StoreError.message e))
+  | .ok s => do
+    let checked := match Snapshot.getNode s (U64.ofNat 10) with
+      | .error (.corrupt _ _ _) => "corrupt"
+      | .error e => StoreError.message e
+      | .ok _ => "ok";
+    EIO.lift (report "verify" checked);
+    EIO.lift (report "skip" (showNode (Snapshot.getNodeWith s (U64.ofNat 10) .false)));
+    EIO.lift (report "clean" (showNode (Snapshot.getNodeWith s (U64.ofNat 20) .false)));
+  FS.removeAll dir)
