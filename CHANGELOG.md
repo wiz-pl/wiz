@@ -68,11 +68,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   sharing one `$str:nameof` constant, and `String.Format`, `ConfigureAwait`,
   `Task.FromResult`, `ThrowIfNull`/`ThrowIfNullOrEmpty` are emitted as templates over
   their arguments (`CSHARP.md` §11). The table is exact-name only, the method-group
-  lookup is the unit's own method table, and an unknown name still warns — measured on
-  `src/Crux.Api`, lowering warnings drop 513 → 420 (`unknown name` 173 → 80, every one
+  lookup is the unit's own method table, and an unknown name still warns — measured on a
+  real solution's `src/`, lowering warnings drop 513 → 420 (`unknown name` 173 → 80, every one
   of the 93 removed a unit method) while the new `cwe78-macro-unsafe` fixture gains the
   finding the havoc used to hide.
-* scry C#: **the first finding on real code** (`src/Crux.Api`, same 75 files, 240
+* scry C#: **the first finding on real code** (a real 75-file solution, 240
   functions: 0 → 7). The frontend, the rule pack and the call graph disagreed on names:
   a file that relies on ASP.NET's implicit usings lowers `HttpRequest.get_ContentType`
   (the pack named `Microsoft.AspNetCore.Http.HttpRequest.get_ContentType`), each file's
@@ -173,7 +173,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   instance, because the engine's is deliberately dropped and re-instantiated after a
   user `exit` (see `wiz-notes/playground-loom-plan.md`).
 * scry C#: the frontend survives real code. Re-checked against a real solution's
-  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  `src/` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
   files under `src/`), the lowering no longer drops constructs silently. The headline
   find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
   function and no warning** — `typeDecls` recursed into the namespace node, but
@@ -204,7 +204,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `ProcessStartInfo`, so `psi.Arguments = command` is the `set_Arguments` sink; with the
   value typed as `Task` no sink matches. The havoc itself (every await used to be havoc
   because its operand was read through a field name the grammar does not give it) is
-  fixed in the same feature: on `src/Crux.Api` the `await not modelled: havoc` class is
+  fixed in the same feature: on that solution the `await not modelled: havoc` class is
   0, against 205 warnings on `origin/master`, with no other warning class changed and no
   finding lost. An await of an unknown external stays one `unmodelled-external` warning
   at its call site, not a havoc of the whole state (`scry/CSHARP.md` §7.4).
@@ -225,7 +225,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   C#) and a list-pattern slice with a designation (`['[', .. var x, ']']`, 1 file).
   `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports both rules from
   upstream master and the Nix derivation regenerates `src/parser.c`; a differential
-  parse of all 5 560 Nexus `.cs` files takes the error count from 16 to 0 with no file
+  parse of all 5 560 `.cs` files of a real solution takes the error count from 16 to 0 with no file
   gaining an error. The two reproducers now have spills, `parse/contextual` pins the
   tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
@@ -901,7 +901,7 @@ that pin each one):
   screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
   counts, coverage rows, JSON and every exit status.
 * scry C#: the frontend survives real code. Re-checked against a real solution's
-  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  `src/` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
   files under `src/`), the lowering no longer drops constructs silently. The headline
   find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
   function and no warning** — `typeDecls` recursed into the namespace node, but
@@ -931,7 +931,7 @@ that pin each one):
   `T.M` as the rule pack expects. `is null` / `is not null`, integer constant patterns,
   `is T`, `is var x` and `or`/`and` patterns are tests too. Property, positional,
   relational and list patterns, and `is not T y` (which binds on the false edge), still
-  warn by name. On `src/Crux.Api` this removes the `is test not modelled` row (88
+  warn by name. On that solution this removes the `is test not modelled` row (88
   warnings); fixtures `lower/patterns` and `taint/cwe78-pattern-unsafe` pin the binding
   and the true-branch flow.
 * scry C#: `switch` statement sections and `switch` expression arms are compared and
@@ -970,7 +970,7 @@ that pin each one):
   screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
   counts, coverage rows, JSON and every exit status.
 * scry C#: the frontend survives real code. Re-checked against a real solution's
-  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  `src/` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
   files under `src/`), the lowering no longer drops constructs silently. The headline
   find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
   function and no warning** — `typeDecls` recursed into the namespace node, but
