@@ -70,7 +70,21 @@ type). The flag and the solver settings are in the cache keys (commands, modules
 jobs), so an acceptance is never replayed without the flag. `lib/` never uses `smt`
 (group *smt* greps it).
 
-**The self-hosted toolchain** has no `smt`: the request is the Lean host's.
+**The self-hosted toolchain** parses `smt` and refuses it, like the host does without
+`--trust-smt`. `selfhost/Parse.wiz` `surfaceCats` adds the host's `tactic.smt` shape, and
+`selfhost/Frontend.wiz` `tacOfStx` refuses the tactic at elaboration: without the flag
+with this section's message (`smtRefusal`, exit 1, no goals listed — the host's error is
+an elaboration error, not a tactic failure), and with the flag (accepted by the driver,
+`selfhost/Cli.wiz` `Opts.smtTrust`, and mixed into the cache key) with
+`smtUnsupported`, "no SMT translation or solver (C15)". The case
+"smt: without --trust-smt the refusal is the host's, at the command's start (C15)"
+(`Tests/Groups/SelfhostCliDiff.lean`) runs both toolchains and compares the message and
+exit code; the position is the command's start, not the `smt` token (the self-hosted
+frontend has no per-token positions, D6). Only the refusal is implemented: the
+translation (`Wiz/Smt/Translate.lean`), the solver process and the `X.smt✝…` axiom are
+not. `sat_decide` (28b) is further out: its syntax and tactic are `lib/SatTactic.wiz`,
+and it needs the requests `satSolve`, `eqView`, `define` and `assignLate`, which the
+self-hosted tactic engine has not got (`STacOp`, `selfhost/Frontend.wiz`).
 
 ## 28b: `sat_decide`: certified, with LRAT
 

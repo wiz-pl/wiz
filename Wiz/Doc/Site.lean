@@ -56,6 +56,10 @@ structure Options where
   check : Bool := false
   /-- the manual's own title (`--title`, else "Wiz standard library reference") -/
   referenceTitle : String := "Wiz standard library reference"
+  /-- `-v` (1) and `-vv` (2): the progress log on stderr (`0`: quiet, the default) -/
+  verbose : Nat := 0
+  /-- modules elaborated and rendered at once (`--jobs`; `1`: one at a time) -/
+  jobs : Nat := 1
 
 /-- What `run` made: the site's pages, the reference files that are not up to date (with
 `--check`), and the reference files it wrote. -/
@@ -221,7 +225,10 @@ def entries (c : Ctx) (src : String) : Array Entry := Id.run do
     k := k + 1
     let mut kids : Array Entry := #[]
     for m in mine do
-      if (st.declDocs.get? m).bind (·.parent) == some n then
+      let md := st.declDocs.get? m
+      -- (a private constructor or field is not documented either)
+      if (md.bind (·.parent)) == some n && !hidden m md &&
+          !st.globals.privates.contains m then
         if let some ke := entry c src m k then
           kids := kids.push ke
           k := k + 1
