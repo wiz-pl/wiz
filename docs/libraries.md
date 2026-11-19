@@ -2210,3 +2210,63 @@ no other kernel path consumes it.
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout
 policy), and text metrics (labels use fixed offsets, not measured widths).
+
+## Command-line parsing (`lib/Args.wiz`)
+
+**Provisional.** `lib/Args.wiz` is new, so the API and these rules may change; the `args`
+test group pins the behaviour described here.
+
+| module | contents | test group |
+|--------|----------|------------|
+| `lib/Args.wiz` (`import Args`) | a pure parser for a tool's command line: `Args.parse : Args.Spec → List String → Except Args.Usage Args.Parsed`, with long and short flags (`--mem 6G`, `--mem=6G`, `-m 6G`, `-m6G`, clusters), `--`, positionals and subcommands; `Args.Usage.message` is the text for the user | `=args` |
+
+`import Args` (over `Text`) has no `IO`, no environment and no process state, so a command
+line is testable with `#eval`. A specification is one `Args.Spec`: its flags and its
+subcommands. `Args.Flag.on long short` is a switch, `Args.Flag.arg long short` takes a
+value, and a flag's `name` is the key in the result, so `--mem` and `-m` share one value.
+
+```wiz
+import Args
+
+def spec : Args.Spec :=
+  Args.Spec.mk
+    [ Args.Flag.arg "mem" "m"        -- --mem 6G, --mem=6G, -m 6G, -m6G
+    , Args.Flag.on "verbose" "v" ]   -- --verbose, -v
+    ["build", "check", "run"]
+
+def memOf (args : List String) : String :=
+  match Args.parse spec args with
+  | .ok p => match Args.Parsed.value p "mem" with
+    | .some v => v
+    | .none => "(no --mem)"
+  | .error u => Args.Usage.message u
+
+#eval memOf ["-vm6G", "build", "one"]       -- "6G"
+#eval memOf ["--mem=6G"]                    -- "6G"
+#eval memOf ["build"]                       -- "(no --mem)"
+#eval memOf ["--bogus"]                     -- "unknown flag: --bogus"
+```
+
+A result gives `p.command` (`Option String`, the first positional when the spec names
+subcommands), `p.positionals`, and `Args.Parsed.value p name` / `Args.Parsed.has p name`
+for what was given. A failure is an `Args.Usage` and `Args.Usage.message` is the text for
+the user (`unknown flag: --bogus`, `flag needs a value: --mem`, `flag takes no value:
+--all`, `unknown command: frobnicate`), without a program-name prefix.
+
+**Rules.** A long flag takes `--mem 6G` or `--mem=6G` (everything after the first `=`,
+including further `=`, is the value), and a value flag takes the next argument even when
+it starts with `-` (`--mem --fast`), as Lean Grail does. A short flag takes `-m 6G` or
+`-m6G`; a cluster is read left to right, so switches accumulate and the first value flag
+takes the rest of the token (`-vm6G` is `-v` and `-m` with `6G`), or the next argument
+when nothing is left. There is no `=` stripping for short flags (`-m=6G` is `"=6G"`).
+`--` ends flag parsing unless a value flag is waiting for it, and a lone `-` is
+positional. Positionals keep their command-line order wherever the flags were, an
+unknown flag is an error rather than a positional, and the first positional is the
+subcommand when the spec names any (a first positional that is not one is
+`unknownCommand`). Repeated flags are explicit: the last value wins and is stored once,
+and a switch's repetition changes nothing.
+
+The scan is Grail's (`Grail/Cli.lean`: flags before and after positionals, the last value
+winning, a value flag consuming the next argument), plus what `grailOpts` lacks: `--`,
+short-flag clustering, `--flag=value`, and subcommands. An unknown flag, which Grail
+leaves for a later stage, is an error here.
