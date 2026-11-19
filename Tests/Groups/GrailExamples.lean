@@ -92,11 +92,11 @@ def markerFailures : IO (List String) := do
   let mut bad := []
   for f in files do
     match Grail.TestKind.ofSource (← IO.FS.readFile f) with
-    | .error e => bad := bad.push s!"{f}: {e}"
+    | .error e => bad := bad ++ [s!"{f}: {e}"]
     | .ok kind =>
       let expFile := (System.FilePath.mk f).withExtension "expected"
       let expected ← if ← expFile.pathExists then some <$> IO.FS.readFile expFile else pure none
-      if let some m := expectedMismatch f kind expected then bad := bad.push m
+      if let some m := expectedMismatch f kind expected then bad := bad ++ [m]
   pure bad
 
 /-- The guard that every `.expected` is the shape its marker produces. It runs before the
@@ -118,8 +118,8 @@ def markerCase : Case :=
         "the guard rejects a real check output"
       let bad ← markerFailures
       unless bad.isEmpty do
-        throw (IO.userError s!"{bad.length} example marker(s) disagree with their .expected:\n  "
-          ++ "\n  ".intercalate bad) }
+        throw (IO.userError (s!"{bad.length} example marker(s) disagree with their .expected:\n  "
+          ++ "\n  ".intercalate bad)) }
 
 /-- The root examples (`examples/*.wiz`, not `examples/tour/`) and, for each, the
 `grail test` result, compared against its `.expected`; `keep` picks one case's range and
