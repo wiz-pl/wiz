@@ -59,7 +59,7 @@ def checkRevision : IO Bool := do
   r ← Scry.G.currentRevision manifest;
   match r with
   | .error e => do
-    IO.eprintln (String.append "revision: cannot read the source: " e);
+    IO.ePrintln (String.append "revision: cannot read the source: " e);
     IO.pure .false
   | .ok current =>
     match Scry.revisionVerdict manifest current with
@@ -71,7 +71,7 @@ def checkRevision : IO Bool := do
 def main : IO Unit := do
   match String.eq manifest.revision.kind "unset" with
   | .true => do
-    IO.eprintln "no graph manifest: run the ingest command first"
+    IO.ePrintln "no graph manifest: run the ingest command first"
     Process.exit 2
   | .false => do
     fresh ← checkRevision;
@@ -81,7 +81,7 @@ def main : IO Unit := do
       r ← Scry.G.readGraph manifest.graph manifest;
       match r with
       | .error e => do
-        IO.eprintln (String.append "graph: " e);
+        IO.ePrintln (String.append "graph: " e);
         Process.exit 2
       | .ok (live, gen) =>
         match Nat.beq gen manifest.gen with
