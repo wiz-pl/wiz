@@ -891,6 +891,9 @@ end Foo
 * **Errors.** A namespace with no `end` is reported at the `namespace` line
   (`namespace Foo is not closed: add end (or end Foo)`); `end` with no open namespace,
   and `end Bar` that does not name the innermost namespace, are errors at the `end`.
+  `open Foo` when nothing is declared as `Foo.…` is an error at the `open`
+  (``unknown namespace 'Foo': there is no declaration `Foo.…` ``), because elaboration
+  is single-pass: the namespace must already have a declaration when the `open` is read.
 * **Self-hosting.** The syntax is in the Lean frontend only, like the rest of stage 13:
   the self-hosted frontend needs the two parser rules (`namespace`, `open`/`end` in its
   table) and an `elabCommand` walk that keeps the prefix and open lists and applies the
