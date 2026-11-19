@@ -87,7 +87,7 @@ axiom dfRg : Type
 axiom dfRgStatic : dfRg
 structure dfSh (r : dfRg) (A : Type) where
   val : A
-def dfShMk {r : dfRg} {A : Type} (a : A) : dfSh r A := dfSh.mk a
+def dfShMk {0 r : dfRg} {A : Type} (a : A) : dfSh r A := dfSh.mk a
 def dfRscope {B : Type} (0 r : dfRg) (body : (0 r' : dfRg) \u2192 dfSh r' Nat \u2192 B) : B := body r (dfShMk 7)
 """
 
@@ -803,9 +803,11 @@ def self_test(ctx: Ctx) -> int:
     report("an agreeing program", "agreement" if res is None else res[0], "agreement")
 
     # A native in a 0 position: correct erasure drops it, a bug runs it and panics.
-    # Here it is *not* in a 0 position, which is the known-bad shape.
-    panic = Case(1, "bad-native", [], ["def p1_out : Nat := Array.size (Array.push Array.empty 7)"],
-                 "p1_out", ["def p1_out : Nat := Array.size (Array.push Array.empty 7)"],
+    # Here it is *not* in a 0 position, which is the known-bad shape.  (Array has an
+    # interpreter model now; UInt64 is still a compiled-only extern.)
+    bad = "UInt64.toNat (UInt64.add (UInt64.ofNat 1) (UInt64.ofNat 2))"
+    panic = Case(1, "bad-native", [], [f"def p1_out : Nat := {bad}"],
+                 "p1_out", [f"def p1_out : Nat := {bad}"],
                  ["p1_out"], 1)
     res = classify(single_outcomes(panic, ctx, ("eval",)), panic)
     report("a native the interpreter must not run", res, "eval-panic")
@@ -909,10 +911,18 @@ def main(argv: list[str]) -> int:
     else:
         # A per-run cache by default: a persistent one grows with every campaign and
         # a large `~/.cache/wiz` makes each `wiz` startup slow.  `--cache DIR` keeps
-        # one for a series of runs.
-        cache = Path(args.cache) if args.cache else (work / "cache")
-        cache.mkdir(parents=True, exist_ok=True)
-        wiz_args += ["--cache", str(cache)]
+        # one for a series of runs.  A cache the caller already named (the test driver
+        # passes the suite's warm `--cache ~/.cache/wiz` through `--wiz-arg`) wins:
+        # replacing it with a cold per-run cache made the 200-program batch time out.
+        if args.cache:
+            cache = Path(args.cache)
+        elif any(a == "--cache" for a in wiz_args):
+            cache = None
+        else:
+            cache = work / "cache"
+        if cache is not None:
+            cache.mkdir(parents=True, exist_ok=True)
+            wiz_args += ["--cache", str(cache)]
     ctx = Ctx(wiz, wiz_args, ROOT, work, args.timeout, args.verbose)
     try:
         if args.self_test:
