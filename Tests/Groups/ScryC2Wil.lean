@@ -27,7 +27,7 @@ open Wiz
 
 namespace Tests.ScryC2Wil
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
 by module name. The lowering lives in the scry package, so the test loader serves both
 roots. -/
 def loader : IO (Name → Option String) := do
@@ -169,6 +169,7 @@ def differential (name : String) : IO Unit := do
 def group : Group where
   name := "scry-c2wil"
   exercise := "Scry S2 (C to Wil, origins, CFG, facts)"
+  parallel := true
   cases := [
     { name := "differential: straight-line C (2 + 3 * 4) lowers and runs as compiled",
       run := fun _ => differential "straight" },

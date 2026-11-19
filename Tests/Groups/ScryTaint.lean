@@ -32,17 +32,20 @@ The cases cover:
 * certificates: a finding's derivation checks, reports its axioms and assumptions, and a
   tampered derivation is rejected;
 * SARIF 2.1.0 shape, locations from an origin map, related locations, and the JSON
-  round-trip through `Json.parse`.
+  round-trip through `Json.parse`;
+* the checked e-graph extraction (`Scry.EgraphExtract`): an identity keeps a finding, a
+  mask removes exactly one false positive and adds none, a multi-block function and a
+  two-definition register are refused, and no corpus program gains an alert.
 
 The prototype cases import only the old modules (so they stay cheap); the rule-pack
-cases import the whole taint stack.
+cases import the whole taint stack, and the e-graph cases add the e-graph modules.
 -/
 
 open Wiz
 
 namespace Tests.ScryTaint
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
 `Scry.X`), by module name. The C-lowering pipeline case serves both roots. -/
 def libLoader : IO (Name → Option String) := do
   let mut m : List (Name × String) := []
@@ -78,6 +81,8 @@ def ruleImports : String :=
   "import Scry.Models\n" ++
   "import Scry.RuleTaint\n" ++
   "import Scry.Interproc\n" ++
+  "import Scry.Nullness\n" ++
+  "import Scry.NullExamples\n" ++
   "import Scry.Sarif\n" ++
   "import Scry.Certify\n" ++
   "import Scry.RuleExamples\n" ++
@@ -91,6 +96,10 @@ def pipelineImports : String :=
   "import Scry.Lower\n" ++
   "import Scry.CstStore\n"
 
+/-- The prototype modules plus the e-graph layer (`Scry.EgraphWil`/`Extract`/`Taint`). -/
+def egraphImports : String :=
+  "import Scry.Analysis\nimport Scry.Taint\nimport Scry.TaintExamples\n" ++
+  "import Scry.EgraphWil\nimport Scry.EgraphExtract\nimport Scry.EgraphTaint\nimport Text\n"
 
 /-- Run `body` with `imports` prepended and return the `#eval` message texts. -/
 def runProbe (imports body : String) : IO (List String) := do
@@ -110,6 +119,10 @@ def evalNats (body : String) (expected : List Nat) : IO Unit := do
 def evalRuleNats (body : String) (expected : List Nat) : IO Unit := do
   checkEq (expected.map toString) (← runProbe ruleImports body)
 
+/-- The same with the e-graph layer importable. -/
+def evalEgraphNats (body : String) (expected : List Nat) : IO Unit := do
+  checkEq (expected.map toString) (← runProbe egraphImports body)
+
 /-- `body`'s `#eval` messages are exactly `expected` (e.g. quoted strings). -/
 def evalRuleTexts (body : String) (expected : List String) : IO Unit := do
   checkEq expected (← runProbe ruleImports body)
@@ -127,6 +140,17 @@ def prelude : String :=
   "def pathCode (p : List Nat) : Nat :=\n" ++
   "  Nat.add (Nat.mul (List.length p) 1000000)\n" ++
   "    (Nat.add (Nat.mul (headNat p) 1000) (lastNat p))\n"
+
+/-- The e-graph prelude: `diffCode` encodes a `Scry.WgeDiff` (before/after alert counts,
+added, removed, rewritten statements); `diffSoundCode` adds 1 when no alert was added. -/
+def egraphPrelude : String := prelude ++
+  "def diffCode (d : Scry.WgeDiff) : Nat :=\n" ++
+  "  Nat.add (Nat.mul (List.length d.before) 100000)\n" ++
+  "    (Nat.add (Nat.mul (List.length d.after) 10000)\n" ++
+  "      (Nat.add (Nat.mul d.added 1000)\n" ++
+  "        (Nat.add (Nat.mul d.removed 100) (Nat.mul d.rewritten 10))))\n" ++
+  "def diffSoundCode (d : Scry.WgeDiff) : Nat :=\n" ++
+  "  Nat.add (diffCode d) (if Scry.wgeTaintSound d then 1 else 0)\n"
 
 /-- The rule-pack prelude: `pathCode3`/`kindsCode` encode a `PathNode` path, and the
 helpers read group-ranked rules and JSON objects. -/
@@ -190,6 +214,7 @@ def rulePrelude : String := prelude ++
 def group : Group where
   name := "scry-taint"
   exercise := "Scry S4 (intraprocedural dataflow, rule pack, interprocedural taint, SARIF, certificates)"
+  parallel := true
   cases := [
     { name := "real flow: getenv -> copy -> add -> system, with its path",
       run := fun _ => evalNats (prelude ++
@@ -428,7 +453,7 @@ def group : Group where
       run := fun _ => evalRuleNats
         ("#eval List.length (Scry.RulePack.withModels Scry.demoRules).rules\n" ++
          "#eval List.length (Scry.RulePack.withModels (Scry.RulePack.withModels Scry.demoRules)).rules\n" ++
-         "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [6, 6, 4] },
+         "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [7, 7, 5] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",
       run := fun _ => do
         evalRuleNats (rulePrelude ++
@@ -465,6 +490,38 @@ def group : Group where
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "nullness: allocation, call and literal sources; the guard kills the null",
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.nullDerefWarnings Scry.nullAlloc)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullChecked)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullCall)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullParam)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullLiteral)\n" ++
+         "#eval if String.eq (Scry.MemWarnKind.show Scry.MemWarnKind.nullDereference) \"null-dereference\" then 1 else 0\n") [1, 0, 1, 0, 1, 1] },
+    { name := "nullness: a constant-false status guard makes the dereference unreachable",
+      run := fun _ => evalRuleNats
+        ("#eval List.length (Scry.nullDerefWarnings Scry.nullStatus)\n" ++
+         "#eval List.length (Scry.nullDerefWarnings Scry.nullStatusChecked)\n") [1, 0] },
+    { name := "nullness: opt-in via Scry.analyzeWithNull and reported as a memory diagnostic",
+      run := fun _ => do
+        evalRuleNats (rulePrelude ++
+          "def prN : Scry.ProgramResult := Scry.analyzeWithNull Scry.nullAlloc Scry.demoRules\n" ++
+          "#eval List.length (Scry.programFindings prN)\n" ++
+          "#eval List.length (List.filter (fun w => String.eq (Scry.MemWarnKind.show w.kind) \"null-dereference\") prN.warnings)\n") [0, 1] },
+    { name := "path rule: opt-in pack, path sinks, the argv directive and the realpath sanitiser",
+      run := fun _ => do
+        let text ← IO.FS.readFile "lib/Scry/rules/path-traversal.scry"
+        let body :=
+          s!"def pathPackText : String := {wizStr text}\n" ++
+          "def pathPack : Scry.RulePack := Scry.parseRulePack pathPackText\n" ++
+          "#eval List.length pathPack.rules\n" ++
+          "#eval if Scry.RulePack.sourcesArgv pathPack then 1 else 0\n" ++
+          "#eval if Scry.RulePack.sourcesArgv Scry.demoRules then 1 else 0\n" ++
+          "#eval match Scry.RulePack.taintRuleById pathPack \"path-traversal\" with\n" ++
+          "  | .some r => List.length r.sinks\n" ++
+          "  | .none => 999\n" ++
+          "#eval List.length (Scry.Models.sansOf \"realpath\")\n"
+        checkEq ["5", "1", "0", "16", "2"] (← runProbe ruleImports body) },
     { name := "pipeline: C to Wil to rule pack, the CLI's path on a checked-in CST",
       run := fun _ => do
         let csrc ← IO.FS.readFile "scry/tests/fixtures/taint-unsafe.c"
@@ -485,7 +542,41 @@ def group : Group where
           "  | .some t => match Scry.programFindings (Scry.analyze (Wil.program t.funcs) Scry.demoRules) with\n" ++
           "    | .cons f _ => if String.eq f.rule \"command-injection\" then 1 else 0\n" ++
           "    | .nil => 0\n"
-        checkEq ["0", "1", "1"] (← runProbe pipelineImports body) }
+        checkEq ["0", "1", "1"] (← runProbe pipelineImports body) },
+    { name := "e-graph report pass is read-only: the rewritable program is flagged, the clean one is neither rewritten nor flagged",
+      run := fun _ => evalEgraphNats
+        ("#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintRewrite).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintRewrite Scry.demoSpec)\n" ++
+         "#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintClean).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintClean Scry.demoSpec)\n" ++
+         "#eval (Scry.wgSaturate 4 (Scry.wgBuildProgram Scry.taintDirect).g []).rewrites\n" ++
+         "#eval List.length (Scry.findings Scry.taintDirect Scry.demoSpec)") [1, 1, 0, 0, 0, 1] },
+    { name := "e-graph extract: x + 0 -> x rewrites one statement and keeps the finding",
+      run := fun _ => evalEgraphNats (egraphPrelude ++
+        "#eval diffSoundCode (Scry.wgeTaintDiff Scry.taintRewrite Scry.demoSpec 4)") [110011] },
+    { name := "e-graph extract: x & 0 -> 0 drops the masked false positive, adds none",
+      run := fun _ => evalEgraphNats (egraphPrelude ++
+        "#eval diffSoundCode (Scry.wgeTaintDiff Scry.taintMasked Scry.demoSpec 4)") [100111] },
+    { name := "e-graph extract: a multi-block function is left alone, taint unchanged",
+      run := fun _ => evalEgraphNats (egraphPrelude ++
+        "#eval diffSoundCode (Scry.wgeTaintDiff Scry.taintBranch Scry.demoSpec 4)") [110001] },
+    { name := "e-graph extract: two definitions of x block the candidate, taint unchanged",
+      run := fun _ => evalEgraphNats (egraphPrelude ++
+        "#eval diffSoundCode (Scry.wgeTaintDiff Scry.taintReassign Scry.demoSpec 4)") [110001] },
+    { name := "e-graph extract: no corpus program gains a taint alert",
+      run := fun _ => evalEgraphNats
+        ("#eval List.length (List.filter (fun d => Bool.not (Scry.wgeTaintSound d))\n" ++
+         "  [ Scry.wgeTaintDiff Scry.taintDirect Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintRewrite Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintSanitised Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintClean Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintBranch Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintLoop Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintFp Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintFn Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintMasked Scry.demoSpec 4\n" ++
+         "  , Scry.wgeTaintDiff Scry.taintReassign Scry.demoSpec 4\n" ++
+         "  ])") [0] }
   ]
 
 builtin_initialize registerGroup group

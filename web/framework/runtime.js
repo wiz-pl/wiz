@@ -1,4 +1,4 @@
-// The browser half of lib/Web/React.wiz: apply the patch list `React.patchesJson`
+// The browser half of lib/Web/Loom.wiz: apply the patch list `Loom.patchesJson`
 // produces, and turn DOM events into (event, handler-index) calls back into Wiz.
 //
 // The paths are child indices from the container: "" is the container, "0" its first
@@ -10,7 +10,7 @@
 // No framework, no build step: an ES module, like tagged.js.
 "use strict";
 
-// Apply `patches` (the parsed JSON of React.patchesJson) to `root`. `parse(html)`
+// Apply `patches` (the parsed JSON of Loom.patchesJson) to `root`. `parse(html)`
 // returns a DocumentFragment (in a browser, `parseHtml` below). Each operation expects
 // the DOM state left by the previous ones (the diff emits them in order).
 export function applyPatches(root, patches, parse = parseHtml) {
@@ -24,6 +24,15 @@ export function applyPatches(root, patches, parse = parseHtml) {
       case "text": {
         const n = nodeAt(root, p.path);
         n.textContent = p.text;
+        // A textarea's text child is its *default* value: once the user has edited the
+        // control (the HTML "dirty value flag"), replacing the child does not change the
+        // live value. A page that sets a textarea's text means the value too. Only
+        // assign when it differs, so a re-render during typing cannot move the caret.
+        const parent = n.parentNode;
+        if (parent && String(parent.tagName || "").toLowerCase() === "textarea" &&
+            parent.value !== p.text) {
+          try { parent.value = p.text; } catch { /* a test double without a value */ }
+        }
         break;
       }
       case "setAttr": {
@@ -116,7 +125,7 @@ export function delegate(root, send, types = ["click", "input", "change", "submi
   }
 }
 
-// Mount a server-rendered tree: `html` is React.toHtml's output for the initial state.
+// Mount a server-rendered tree: `html` is Loom.toHtml's output for the initial state.
 export function mount(root, html, parse = parseHtml) {
   const frag = parse(html);
   for (const c of Array.from(root.childNodes)) root.removeChild(c);

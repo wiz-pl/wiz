@@ -1,5 +1,5 @@
--- Regression fixture for #256: the ledger state machine from the crux-spec project's
--- `Crux.Machine` (definitions unchanged, imports inlined), run behind one definition.
+-- Regression fixture for #256: a private state machine's definitions (imports inlined),
+-- run behind one definition.
 -- Before the fix, the last equation did not check in two minutes and exceeded 5 GB.
 import Prelude
 import Int
@@ -54,7 +54,7 @@ def Movement.mirror (m : Movement) : Movement := Movement.mk m.tx m.account m.un
 def mirror (l : List Movement) : List Movement := List.map Movement.mirror l
 def forTx (l : List Movement) (t : Nat) : List Movement := List.filter (fun m => Nat.beq m.tx t) l
 
--- The ledger kernel as a state machine, cut down from CruxSpec/Machine.lean to what
+-- The kernel as a state machine, cut down from a private model to what
 -- ACCOUNT-001's floor is about: each `Op` is one save, and `apply` returns `.none` when
 -- the save is refused. Kept: the chart (Held or Mirrored accounts), movements, draw holds,
 -- transactions with a status and a movement set, and the operations create, the two
@@ -110,7 +110,7 @@ structure Tx where
   status : Status
   plan : List Posting
 
--- `Movement` is Crux.Ledger's (tx, account, unit, amount)
+-- `Movement` is the model's (tx, account, unit, amount)
 structure State where
   txs : Nat → Option Tx
   next : Nat

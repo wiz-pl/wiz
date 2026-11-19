@@ -6,14 +6,15 @@ it, and the `trust-ledger` CI job plus the `native` test group compare it with t
 
 ## What is a source of trust
 
-The ledger is produced by elaborating every module and running `#print axioms`, so it
-records sources rather than dependency edges. One row per:
+The ledger is produced by elaborating every module and walking its declarations (with
+`#print axioms` as the dependency check), so it records sources rather than dependency
+edges. One row per:
 
 | Wiz | ledger `item` | what it trusts |
 | --- | --- | --- |
 | `axiom` | `axiom X` | the proposition `X` |
 | `extern "f" X …` (FFI) | `axiom X` and `builtin extern:… := X` | the C function, and how it is marshalled |
-| `partial def` | `partial` | the compiled body (its witness is kernel-checked) |
+| `partial def` | `partial` | the compiled body (its witness is kernel-checked); with an `implemented_by`, also `native f := g` |
 | `attribute [implemented_by g] f` | `native f := g` | compiled code runs `g` for `f` |
 | a type's `repr:` | `native T := mk/get` | the native representation |
 | `native_refl` | `native_refl X.native✝` | compiled evaluation, the analogue of Lean's `native_decide`/`ofReduceBool` |
@@ -23,6 +24,44 @@ records sources rather than dependency edges. One row per:
 `builtin inline` (a compiler hint) and `builtin int` (only how values print) are not
 trust and are not listed. Wiz has no `unsafe` keyword: an `unsafe` declaration is a parse
 error, and `sorry` is rejected by the ledger walker before it elaborates.
+
+Two constructs are easy to mistake for sources, and a fixture pins each:
+
+* **An inductive proposition** (`inductive … : Prop`, the `μ … (prop : true)` term of
+  issue #252) is **not** a source. Formation, the guardedness check and the generated
+  recursor are all kernel-checked; the `prop` flag puts the fixed point in `Prop`
+  (proof-irrelevant) and restricts large elimination (a non-singleton proposition may
+  eliminate only into `Prop`; the singleton rule is checked). The `ind-prop` fixture has
+  such a type and is clean with an empty ledger; a
+  future change that turned one into an axiom or a `partial` would add a visible source.
+* **A `partial` definition with an `implemented_by`** is **two** sources: `partial` for
+  the declaration (its witness is checked, its body is compiled) and `native f := g` for
+  the constant compiled code runs. `Decl.nativeImpl?` suppresses every partial
+  implementation because it is normally the compiled body, so `#print axioms` does not
+  list the native step; the ledger walk therefore checks `d.impl` itself. The
+  `impl-partial` fixture fails when its ledger has only the `partial` row.
+
+The `partial` rows (and the `native` row that an `implemented_by` on a partial adds) come
+from that declaration walk, not from `#print axioms`: a partial definition's
+implementation is not unfolded there. `checkCovered` still requires every entry
+`#print axioms` does list to have a source.
+
+## Scope
+
+The gate walks `lib/` and the axiom-free examples. `selfhost/*.wiz`, the Wiz source of the
+self-hosted toolchain, is **outside** it. At the last reviewed base (`c2efe881`) that tree
+has 9 `extern` declarations (18 rows: an `axiom` and a `builtin extern:` for each), 172
+`partial def` declarations, and 79 definition `mutual` blocks with 388 more `def` members
+(560 `partial` rows together; the 4 mutual blocks of *inductive* definitions add no
+trust), so widening the walk to `selfhost/` would add **578 rows** (560 `partial`, 18
+FFI). The newest of those externs are the proof-read-back budget in
+`selfhost/Kernel.wiz:955-957` (`wiz_proof_start`/`tick`/`end`): exactly the kind of
+unchecked step the ledger exists to list. Widening also needs a multi-root walk in
+`Tests/Native.lean` (`--tree` is for fixtures, not a second root), a reviewed reason per
+row, and the `--check` job would elaborate 13 more modules. A prototype of the widened
+walk measured **~9m30s cold** (against ~7m26s for `lib/` alone) and the same +578 delta
+(730 → 1308 rows). That is a scope decision, not a mechanical update, and it is
+deliberately not made here.
 
 ## Format
 
@@ -151,7 +190,7 @@ The reviewed base falls into these groups:
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
 * **Mutual recursion and `partial`, 182 rows.** The rows come from `Feral` (70: 67
-  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.React` (14), the `Scry` modules
+  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.Loom` (14), the `Scry` modules
   (49), `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`), `SatTactic` (7),
   `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3), `Prelude` (3),
   `Ring` (2) and `IO` (1). Wiz's kernel treats a `partial`

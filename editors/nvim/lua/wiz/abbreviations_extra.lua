@@ -17,6 +17,7 @@ return {
   ['++'] = '⧺', -- selfhost/Backend.wiz: Doc concatenation
   done = '✅', -- the docs' "done" mark
   cross = '✗', -- grail's failure mark
+  cmd = '⌘', -- lib/Web/Editor.wiz: the editor hint's Command key (Ctrl/⌘+Enter runs)
   hat = '\u{0302}', -- combining circumflex: x\hat → x̂ (docs/CoreSpec.md)
   vec = '\u{20D7}', -- combining arrow above: v\vec → v⃗
 }

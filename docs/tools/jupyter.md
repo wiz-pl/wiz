@@ -26,7 +26,7 @@ The kernel needs Python ≥ 3.10 and `pyzmq`; Jupyter itself is only needed to
 installed: the kernel lives in this checkout.
 
 ```sh
-python3 -m pip install pyzmq                 # or: nix shell nixpkgs#python3Packages.pyzmq
+python3 -m pip install pyzmq                 # or: nix shell --inputs-from . nixpkgs#python3Packages.pyzmq
 python3 -m wiz_kernel install --user         # from tools/jupyter, or with PYTHONPATH:
                                              # PYTHONPATH=tools/jupyter python3 -m wiz_kernel install --user
 jupyter console --kernel wiz-kernel          # or a notebook: Kernel → Wiz
@@ -162,9 +162,9 @@ The protocol, all of it on the shell/iopub sockets:
   up in `comm_id -> widget id -> callback expression`, evaluates
   `#eval Widget.handle (<callback>) "<previous bundle>" "<id>" "<event>" "<value>"` in
   the notebook session, and publishes a `comm_msg` with
-  `{method: "update", bundle, patches}`. `patches` is `React.patchesJson
-  (React.Rendered.diff old new)`, so the browser applies it with the same patch applier
-  as the React framework. A failed callback is `{method: "error", error}`.
+  `{method: "update", bundle, patches}`. `patches` is `Loom.patchesJson
+  (Loom.Rendered.diff old new)`, so the browser applies it with the same patch applier
+  as the Loom framework. A failed callback is `{method: "error", error}`.
 * **close / info** — `comm_close` drops the registry entry (and is echoed on iopub);
   `comm_info_request` lists the open widget comms. Shutdown sends `comm_close` for
   each.
@@ -201,22 +201,22 @@ JupyterLab needs a mime-renderer extension for `application/vnd.wiz.widget+json`
 calls `renderMime`; the extension is **not** included, so JupyterLab shows the SSR
 HTML without events.
 
-**What survives the split.** The keyed diff is computed in Wiz (`React.Rendered.diff`,
-`React.patchesJson`) and applied in JS (`move`/`insert`/`remove`/`text`/…), so keyed
-lists keep their identity and minimal moves. Lens state (`React.useState`/`setState`)
+**What survives the split.** The keyed diff is computed in Wiz (`Loom.Rendered.diff`,
+`Loom.patchesJson`) and applied in JS (`move`/`insert`/`remove`/`text`/…), so keyed
+lists keep their identity and minimal moves. Lens state (`Loom.useState`/`setState`)
 is Wiz-side: the callback recomputes the new widget list from the previous one on every
-event. `React.Owned` is a Wiz typing property inside one evaluation; a linear token
+event. `Loom.Owned` is a Wiz typing property inside one evaluation; a linear token
 cannot be held across two `#eval`s or cross the comm, so it does not model a
 browser-held resource. The browser has **no local state and no hooks**: every event is
 a kernel round trip (with the batch driver, a `wiz check` of the whole notebook), and
 the front end adopts server-rendered DOM rather than hydrating state.
 
-**Events carry the value.** The raw React path (`React.on` → `delegate` →
-`React.App.event`) passes only `(event, handler index)`, so a slider's value is lost
+**Events carry the value.** The raw Loom path (`Loom.on` → `delegate` →
+`Loom.App.event`) passes only `(event, handler index)`, so a slider's value is lost
 there. Widgets deliberately do not use that path: the front end sends `value`
 explicitly and `Widget.Callback` receives it in `Widget.Event`, so
 `Widget.setValue w e.value` sees the number (the protocol test pins this). The
-index-only gap remains for hand-written `React.on` handlers in `Web.React` apps; a
+index-only gap remains for hand-written `Loom.on` handlers in `Web.Loom` apps; a
 widget uses the descriptor/comm path instead.
 
 **Front-end test.** `tools/jupyter/static/widget_test.mjs` runs the same scenario

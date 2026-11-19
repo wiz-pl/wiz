@@ -34,11 +34,14 @@ self-hosted runner executes that pull request's code on the machine. So:
   output is ~165 MB but its closure includes `wiz`, so ~2.0 GB; plus cache.nixos.org's
   dev shell, the Wiz caches under `~/.cache/wiz`, `.grail` and `/tmp/wiz-selfhost-*`).
   There is no `.lake` build any more. The opt-in nightly fixpoint
-  (`.github/workflows/fixpoint.yml`) needs **6 GiB free** (the fixpoint's declaration);
-  it checks `MemAvailable` before the run and fails clearly on a smaller
+  (`.github/workflows/fixpoint.yml`) needs **7 GiB free** (the fixpoint's declaration:
+  stage 2's self-compile has peaked at 6.3 GiB); it checks `MemAvailable` before the run
+  and fails clearly on a smaller
   runner. The nightly benchmarks (`.github/workflows/bench.yml`) need **6 GiB free**,
   and pin the measurement to `WIZ_BENCH_CPUSET` when that variable is set (otherwise
-  to all but two CPUs).
+  to all but two CPUs). The nightly compiler reproducibility check
+  (`.github/workflows/repro.yml`, two `lake build wiz grail` runs under two absolute
+  roots) needs **5 GiB free** and checks `MemAvailable` the same way.
 * **Nix** (multi-user), with flakes, and the Cachix cache as a substituter. The workflow
   does not install Nix on a self-hosted runner (`.github/actions/setup`: only on GitHub's
   runners); `cachix-action` adds the cache per job, but configuring it system-wide means
@@ -64,20 +67,25 @@ sudo apt-get install -y podman
 
 ### 2. The image
 
-`Containerfile` (pick the runner's architecture: `x64` or `arm64`; the version is the
-latest from https://github.com/actions/runner/releases):
+`Containerfile` (pick the runner's architecture: `x64` or `arm64`). The base image digest,
+the Nix version and the runner version are pinned; take the digests and checksums from
+the image and release pages and update them together:
 
 ```dockerfile
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
 ARG RUNNER_VERSION=2.321.0
 ARG RUNNER_ARCH=x64
 RUN apt-get update && apt-get install -y curl git xz-utils ca-certificates python3 sudo \
     libicu74 && rm -rf /var/lib/apt/lists/*
 RUN useradd -m runner && echo 'runner ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/runner
-# Nix, single-user inside the container (the container is the isolation boundary)
+# Nix, single-user inside the container (the container is the isolation boundary).
+# The versioned installer is the one nixos.org/nix/install serves for 2.35.6; its
+# sha256 pins the script (it verifies the Nix tarball it downloads).
 RUN mkdir -m 0755 /nix && chown runner /nix
 USER runner
-RUN curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
+RUN curl -sSfL -o /tmp/nix-install.sh https://releases.nixos.org/nix/nix-2.35.6/install \
+    && echo '6f7bf206efb54cd4941fb274930dbc74fdfc16fcb06757ef261c8d7d69cfd60e  /tmp/nix-install.sh' | sha256sum -c - \
+    && sh /tmp/nix-install.sh --no-daemon
 RUN mkdir -p ~/.config/nix && printf '%s\n' \
     'experimental-features = nix-command flakes' \
     'substituters = https://cache.nixos.org https://badlydrawnwizards.cachix.org' \
@@ -85,7 +93,13 @@ RUN mkdir -p ~/.config/nix && printf '%s\n' \
     > ~/.config/nix/nix.conf
 ENV PATH=/home/runner/.nix-profile/bin:$PATH
 WORKDIR /home/runner/actions-runner
-RUN curl -L -o r.tgz https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz \
+RUN case "$RUNNER_ARCH" in \
+      x64) sum=ba46ba7ce3a4d7236b16fbe44419fb453bc08f866b24f04d549ec89f1722a29e ;; \
+      arm64) sum=62cc5735d63057d8d07441507c3d6974e90c1854bdb33e9c8b26c0da086336e1 ;; \
+      *) echo "RUNNER_ARCH must be x64 or arm64"; exit 1 ;; \
+    esac \
+    && curl -sSfL -o r.tgz https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz \
+    && echo "$sum  r.tgz" | sha256sum -c - \
     && tar xzf r.tgz && rm r.tgz
 # pre-fetch the dev shell's packages so each job starts warm (optional; re-run to refresh)
 RUN nix develop github:wiz-pl/wiz --command true || true
@@ -177,12 +191,46 @@ big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 ## Caches
 
 Each job starts with an empty container. The Nix store comes from the image and from
-Cachix: the `build` job's `nix build .#wiz .#tests` store paths are published with an
-explicit `nix shell nixpkgs#cachix -c cachix push badlydrawnwizards …` (the
-`CACHIX_AUTH_TOKEN` secret is in that step's environment only; a fork's job never gets
-it), and the shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
+Cachix: the `build` job's `nix build .#wiz .#tests` store paths are published and the
+shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
 `/tmp/wiz-selfhost-*`) still come from the GitHub Actions cache, as on GitHub's runners.
 There is no `.lake` build or `.lake` cache to restore.
+
+### Which cache is trusted
+
+The invariant: **only master publishes trusted paths; PR caches are per-run and
+untrusted.**
+
+* A push to `master` publishes the `build` job's store paths to `CACHIX_NAME`
+  (`badlydrawnwizards`) with the `CACHIX_AUTH_TOKEN` secret. The tag/release path only
+  reads that cache (it has no Cachix push). That cache's key is the only Cachix key in
+  the image's `nix.conf` and in the docs/tower instructions
+  (`cachix use badlydrawnwizards`).
+* A pull request publishes only to the PR cache `wiz-pl` (repository variable
+  `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
+  shards, trust-ledger and web jobs add that cache as an extra substituter for that job
+  only, so its key is trusted in that job and nowhere else; master, the docs job and
+  tower never add it as a substituter.
+* If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
+  the step prints "the store paths are not published" and continues, and the shards
+  build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.
+* A merge-queue run is neither master nor a pull request: it gets no trusted token,
+  publishes nothing, and its shards build.
+* The PR cache's entries are content-addressed and its signatures are not trusted by
+  anything but that run. A compromised PR can fill a cache its own runs read; it cannot
+  change what master, the docs deploy or tower substitute.
+
+`wiz-pl` must **not** be added to `trusted-public-keys` anywhere: no `nix.conf`, no
+image, no docs/tower instruction. The shards' `cachix-action` adds its key per job, and
+that is the only place it belongs. Two independent properties keep a PR away from the
+trusted cache: a PR's push steps get no `CACHIX_AUTH_TOKEN` (the setup action's
+`cachix-token` is for substitution only, `skipPush: true`, and never writes), and
+`CACHIX_PR_AUTH_TOKEN` has **Read** (not Write) on `badlydrawnwizards`, so even a
+mistake in the workflow cannot push to the trusted cache with it.
+
+The settings are: repository variable `CACHIX_PR_NAME` = `wiz-pl` (the separate Cachix
+cache, which the token has Write on), and repository secret `CACHIX_PR_AUTH_TOKEN` = a
+Cachix token with Write on `wiz-pl` and Read on `badlydrawnwizards`.
 
 ## aarch64
 

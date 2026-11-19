@@ -40,6 +40,16 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 (Lean would abstract it). Unknown and repeated names are errors (`inferAppNamed`,
 `Elab/Term.lean`; test group `elabfix`).
 
+A constructor's parameters and fields have names as well: with
+`inductive P where | mk (x : Nat) (y : Nat)`, `P.mk (y := 2) (x := 1)` fills `x` with 1
+and `y` with 2 — the telescope is walked in its own order, so a later field's type may
+mention an earlier named one — and an implicit field or a parameter can be named too.
+A missing field leaves a partial application (`P.mk (x := 1)` is a type mismatch at
+`P`), an unknown field is `no parameter named 'z'`, and a repeated one is an error
+(test groups `language`, `selfhost`). A dot-constructor (`.mk (x := 1)`, whose head needs
+the expected type) and an inductive type's own parameters (`L (A := Nat)`) keep no names
+yet.
+
 ## 13b: private declarations and private constructors
 
 ```wiz no-check
@@ -100,8 +110,8 @@ would still be accepted:
 | `refl X`, `cast e x`, `transp`, a tuple or look-alike against the type, `p.1` | closed (their types are unified in the elaborator's view) |
 | `exact`, `rfl` and other tactics that elaborate syntax; macros (they produce syntax) | closed (they go through the same rules) |
 | the tactic request `assign` with a term that still has holes | closed: such a term is kept in the tactic state and its type is inferred and compared with its goal at the end of the `by` block (it was a real bypass: `K x ?n : Look Nat` for a goal `Pos Nat`) |
-| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. A hole records its type when its maker knows it (`MetaEntry.type?`: implicit and instance arguments, `_` against an expected type, goals), and the guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a hole with no recorded type, a comparison that meets an unsolved hole) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`) |
-| the self-hosted frontend (`selfhost/Frontend.wiz`) | open, tracked as a parity item: it parses `private` and ignores it |
+| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. Every hole records its type (`MetaEntry.type?`): the parameter's type for an implicit, instance or placeholder argument, the expected type for `_` and goals, `Sort ?u` for a hole that stands for a type, and the declared telescope for an output parameter, a simp or fold argument and a calc relation. The guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations. The error leads with the reason and names the hole by what it was made for ("the implicit argument F can't be G: the two types agree only through the definition of Pos (module Priv), hidden outside its module"), then shows the hole, its expected type, the guess and the guess's type, with the free variables by name; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a pruned hole whose own Π lost a binder, a type that mentions a variable the hole is not applied to, a head whose type can't be read off, a comparison that still meets an unsolved hole at the end of the declaration) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`). A comparison that meets a hole where the guess is made is kept and made again at the end of the declaration, with its holes solved (`recheckDeferredGuesses`); a forgery found then is reported as on the spot (`reject`, "a guess compared at the end of the declaration cannot forge either") |
+| the self-hosted frontend (`selfhost/Frontend.wiz`) | partly closed (stage 21n): private names are module-scoped there; the type-level rules above (a type with private parts is opaque) are not implemented |
 | `T.desc` of an inductive or coinductive type with private parts: `μ T.desc i` written out is the type with nothing hidden, and a raw `con` builds a value of it | closed: `T.desc` is private with the constructors and recursors (a structure has no description). Generic code over `Desc` in another module can't be pointed at such a type; it could not be applied to its values before either, since the type is opaque there. `deriving` reads the kernel's declarations, not the name, and is unaffected (a derived instance that matches on the type is refused as before) |
 | inside the declaring module | by design: there the look-alike is the same type |
 
@@ -120,6 +130,20 @@ elaborator quotes evaluated values into terms, and a raw pair or projection at a
 without a definition does not type-check (`drafts/rust/lowered/03_get_mut.wiz`,
 `get_mut.is_place` and `get_mut.spec_under`). With the flag a type with private parts is
 abstract for proofs as well.
+
+**`wiz --trace-guess-fallback`** (a diagnostic, off by default). Every hole a guess can
+meet records its type, apart from a pruned hole whose own function type lost a binder
+and a constant whose declared type is not a function there. Even so, a guess can still
+reach the whole-declaration recheck: its type can mention a variable the hole is not
+applied to, the guessed head's type can't be read off, or the comparison can still meet
+a hole at the end of the declaration (a comparison that meets one where the guess is made
+is made again there, once the holes are solved). The flag prints one line per declaration that reaches the recheck, with the
+reasons: `guess-fallback: <module> <declaration> recheck=ran|skipped reasons=…`
+(`skipped`: no other module's private type is in view, so the recheck has nothing to
+hide). `scripts/guess-fallback-stats.sh` counts them over `lib/`, `examples/` and `tests/`
+(`WIZ`), and over the programs inline in the test groups (`--tests TESTS`: the tests binary
+takes the same flag, and its cases' lines name their file `GROUP#INDEX`).
+The goal is zero, so the recheck can go.
 
 The motivating use is `lib/Region.wiz` ([22g](22-numbers.md)): the constructors of the borrow handles
 `Shr`, `Uniq`, `Mut` and `Lent` are private, so a handle at a region comes only from a
@@ -257,12 +281,15 @@ def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
   (Tok.close s, Tok.close t)
 ```
 
-`let q (x₁, …, xₙ) := e; body` with three or more names (`term.letTuple`) is right-nested
-pairs, as tuple types and tuple patterns are: `let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …`,
-with intermediate names (`tuple✝k`) that no program can mention (`letTupleToPairs`,
-`Elab/Term.lean`). Each step is a `let (x, y)` split at quantity `q`, so with `let 1` every
-component of a linear tuple is bound once, which is how a tuple holding resources is taken
-apart now that linear pairs aren't projected. Tests: group `language`.
+`let q (p₁, …, pₙ) := e; body` with three or more components is the general `let` with a
+pattern of 13h: `(p₁, …, pₙ)` is the tuple pattern `(p₁, (p₂, …))` (`term.tuplePat`), so
+the components may be any patterns (a nested tuple, `_`, or a constructor — the `let` is
+then a `match`, so the constructors must be covered), and without a quantity the `let` is
+the `match` on the tuple that 13h describes. With a quantity `q` the components must be
+names: each step is a `let (x, y)` split at quantity `q` (right-nested, as tuple types
+are), so with `let 1` every component of a linear tuple is bound once, which is how a
+tuple holding resources is taken apart now that linear pairs aren't projected. (Two
+components are `term.letPair`, the same split.) Tests: group `language`.
 
 ## 13g: as-patterns `x@p`
 
@@ -432,7 +459,10 @@ The parser stays scannerless with one token table (`Wiz/Parser/Token.lean`): the
 a property of the category being parsed (`ParserTables.reservedIn`, read by the `ident`
 case of `runDescr`), so the memo key, which already names the category, is unchanged.
 The design options are in the notes (`scoped-keywords.md`). The self-hosted parser
-interprets the built-in tables, which use no scope, and has no `syntax` command yet.
+interprets the built-in tables, which use no scope; it dispatches `syntax` and
+`declare_syntax_cat` ([21ac](21-bootstrap.md); the `selfhost-macro` group checks them),
+but does not track a category's keyword scope, so a scope is accepted and not enforced
+there.
 Tests: `parser: commands and syntax`, `language`.
 
 ## 13k: list literals
@@ -449,9 +479,10 @@ def len : List Nat → Nat
 ```
 
 It is a Prelude `syntax` with a procedural macro (`ListLit.expand`), not built-in
-grammar, so the self-hosted toolchain's generated parser tables are unchanged (its own
-prelude, `preludeText` in `selfhost/Frontend.wiz`, has no list literals, and its sources
-don't use them). `[` already starts an instance binder in a dependent arrow
+grammar. The self-hosted toolchain cannot run a macro at elaboration time, so it adds
+the same surface rule itself (`term.listLit` in `selfhost/Parse.wiz`, precedence 1024)
+and rewrites the node to `List.cons`/`List.nil` in `selfhost/Frontend.wiz`; its embedded
+prelude (`preludeText`) declares nothing for it. `[` already starts an instance binder in a dependent arrow
 (`[Monad m] → m A`, `[inst : C A] → B`): that is one leading parser that also consumes
 the arrow, so it is longer than a list literal and wins (longest match, `Wiz/Parser/Interp.lean`);
 `Enum [a, b]`, `ecase t [..]` and `attribute [..]` are leading parsers that consume their
@@ -466,16 +497,32 @@ expanded if a macro applies, so `[x, y]` becomes `List.cons x (List.cons y List.
 and a user notation whose expansion is a constructor application works in patterns too.
 Tests: group `language`.
 
+**`x :: xs`.** The Prelude declares `infixr:67 " :: " => List.cons`, so a cons cell can
+be written `x :: xs` in terms and in patterns. It is right-associative at 67, the
+precedence of `++` (13l), and tighter than the arrows (25): `1 :: 2 :: xs` is
+`1 :: (2 :: xs)`, `x :: xs ++ ys` is `x :: (xs ++ ys)` (`++` is right-associative at
+67 too, so it sits in the `::` tail), and `x :: xs → P` is `(x :: xs) → P`. A list
+literal tail keeps the literal spelling: `1 :: [2]` prints as `[1, 2]`; a cons with a
+variable tail prints as `x :: xs` (the inverse of the notation
+rule that 11r installs for every `infix`; `set_option pp.notation false` prints
+`List.cons Nat x xs`). The self-hosted prelude, `preludeText` in `selfhost/Frontend.wiz`,
+declares the same `infixr`, so both frontends expand it to `List.cons` and the
+`selfhost` differential case computes with it. Tests: group `language`, `reject`
+(`1 :: 2`), and `selfhost`.
+
 ## 13l: `++` for lists and strings
 
-`a ++ b` is `Append.append a b`, a method of the homogeneous class
-`class Append (A : Type) where append : A → A → A`, with instances for `List A`
-(`List.append`) and `String` (`String.append`): the same design as the numeric classes
-(7e, HD9 stage 1). A heterogeneous `HAppend A B C` would need default instances, which
-the numeric classes also left for later. Other types get `++` by an instance.
-(`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local spellings
-of `String.append`; the self-hosted prelude keeps `infixr " ++ " => List.append`.)
-Tests: group `language`.
+`a ++ b` elaborates to `HAppend.hAppend a b` (`lib/Prelude.wiz`'s
+`infixr:67 " ++ "`), the method of the heterogeneous class `HAppend (A B : Type)
+(C : outParam Type)`. The homogeneous class `Append (A : Type)` with
+`append : A → A → A` has instances for `List A` (`List.append`) and `String`
+(`String.append`), and `instHAppend {A : Type} [Append A] : HAppend A A A` is registered
+as a **default instance**: at a homogeneous type `++` therefore resolves to
+`Append.append`, and a heterogeneous instance (like `HMul Nat V V` in 7f) resolves
+without one. Other types get `++` by an `Append` instance or a heterogeneous `HAppend`
+one. (`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local
+spellings of `String.append`; the self-hosted prelude keeps
+`infixr " ++ " => List.append`.) Tests: group `language` (`++` on lists and strings).
 
 ## 13m: local notation
 
@@ -490,8 +537,13 @@ local macro_rules
 ```
 
 `local` applies to `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`,
-`macro_rules` and `attribute [macro …]`; anything else is an error. In the main file it
-changes nothing. `local` is not a reserved word.
+`macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance`,
+`app_unexpander` and `attribute [app_unexpander …]` (the ten command kinds
+`Wiz/Elab/Command.lean` accepts; any other command is an error there). In the main file
+it changes nothing. `local` is not a reserved word. The `language` group pins
+`local instance` (11w) and the `simp` group pins `local attribute [simp]`; the
+self-hosted frontend unwraps `local` and leaves the notation visible to importers
+([21ac](21-bootstrap.md)).
 
 An `import` elaborates the module's text into the importer's state, so its
 syntax lands in the importer's parser tables. The state records what each `local`
@@ -506,9 +558,11 @@ none of the dropped rules. Definitions written with the notation are unaffected 
 are terms by then). Lean also has `scoped` notation, active where a namespace is open;
 Wiz has no `open`, so the module is the only scope. The design notes are in the notes
 (`notation.md`). `command.local` is built-in grammar (`Wiz/Parser/Builtin.lean`), so the
-self-hosted parser's generated tables have it too; the self-hosted frontend has no
-`syntax` command yet and doesn't elaborate it. Tests: groups `language`,
-`parser: commands and syntax`.
+self-hosted parser's generated tables have it too; the self-hosted frontend also
+dispatches `syntax` and `declare_syntax_cat` ([21ac](21-bootstrap.md)), but it unwraps
+`local` and does not keep the command's rules in the module: a local notation or macro
+rule stays visible to importers there ([21ac](21-bootstrap.md)'s "Not done"). Tests:
+groups `language`, `parser: commands and syntax`.
 
 ## 13n: `rfl` at an equation that has computed
 

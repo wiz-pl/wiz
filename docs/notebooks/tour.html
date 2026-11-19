@@ -156,7 +156,7 @@ compose : {A : Type} → {B : Type} → {C : Type} → (B → C) → (A → B) �
 </div>
 </section>
 <section class="cell cell-markdown" id="cell-14">
-<p>Values are printed as terms: a list is its constructors. Comparisons on <code>Nat</code> are functions that return a <code>Bool</code> (<code>Nat.lt</code>, <code>Nat.le</code>, <code>Nat.beq</code>); there are no <code>&lt;</code> or <code>==</code> operators yet. (<code>examples/tour/01-basics.wiz</code>.)</p>
+<p>Values are printed as terms: a list is its constructors. Comparisons on <code>Nat</code> are functions that return a <code>Bool</code> (<code>Nat.lt</code>, <code>Nat.le</code>, <code>Nat.beq</code>); <code>&lt;</code> and <code>≤</code> are notation on the order classes (<code>import Order</code>, through <code>import Nat</code>), <code>≈</code> is notation on <code>Equiv</code>, and <code>==</code> is still <code>BEq.beq</code>. (<code>examples/tour/01-basics.wiz</code>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-15">
 <h2>2: inductive types and pattern matching</h2>
@@ -213,7 +213,7 @@ def t : Tree Nat := .node (.node .leaf 1 .leaf) 2 (.node .leaf 3 .leaf)
   | _, _ =&gt; .nil</code></pre></div>
 </section>
 <section class="cell cell-markdown" id="cell-24">
-<p>A match must cover every case: leave one out and <code>wiz check</code> says which (&quot;missing case for constructor …&quot;). Under the hood an inductive type is a <em>description</em>, a value that says what its constructors look like, and its least fixed point. That is how the kernel can stay small; <a href="stages/04-data.md">stages/04-data.md</a> tells the story. (<code>examples/tour/02-data.wiz</code>.)</p>
+<p>A match must cover every case: leave one out and <code>wiz check</code> says which (&quot;missing case for constructor …&quot;). Under the hood an inductive type is a <em>description</em>, a value that says what its constructors look like, and its least fixed point. That is how the kernel can stay small; <a href="../stages/04-data.md">stages/04-data.md</a> tells the story. (<code>examples/tour/02-data.wiz</code>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-25">
 <h2>3: structures</h2>
@@ -262,7 +262,7 @@ def manhattan (q : Point) : Nat :=
 def five : Positive := ⟨5, rfl⟩</code></pre></div>
 </section>
 <section class="cell cell-markdown" id="cell-31">
-<p>In the kernel a structure is a Σ type, a dependent pair, so <code>⟨5, rfl⟩</code> is a pair whose second component&#x27;s type depends on the first. (<code>examples/tour/03-structures.wiz</code>; <a href="stages/13-language.md">stages/13-language.md</a>, 13a, 13h, 13i.)</p>
+<p>In the kernel a structure is a Σ type, a dependent pair, so <code>⟨5, rfl⟩</code> is a pair whose second component&#x27;s type depends on the first. (<code>examples/tour/03-structures.wiz</code>; <a href="../stages/13-language.md">stages/13-language.md</a>, 13a, 13h, 13i.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-32">
 <h2>4: type classes and numerals</h2>
@@ -323,7 +323,7 @@ def sum {A : Type} [Add A] [OfNat A 0] : List A → A
 </div>
 </section>
 <section class="cell cell-markdown" id="cell-38">
-<p><code>Nat</code> subtraction stops at zero (<code>2 - 3 = 0</code>); <code>Int</code>, the machine words <code>U8</code> … <code>U64</code> and <code>I8</code> … <code>I64</code> (<code>lib/Word.wiz</code>) and bit vectors (<code>lib/BitVec.wiz</code>) are in the library. At <code>Nat</code> a numeral is a native number and <code>+</code> runs as native arithmetic, both in the checker and in compiled code. (<code>examples/tour/04-classes.wiz</code>; <a href="stages/07-type-classes.md">stages/07-type-classes.md</a>; the table of numeric types in <a href="libraries.md">libraries.md</a>.)</p>
+<p><code>Nat</code> subtraction stops at zero (<code>2 - 3 = 0</code>); <code>Int</code>, the machine words <code>U8</code> … <code>U64</code> and <code>I8</code> … <code>I64</code> (<code>lib/Word.wiz</code>) and bit vectors (<code>lib/BitVec.wiz</code>) are in the library. At <code>Nat</code> a numeral is a native number and <code>+</code> runs as native arithmetic, both in the checker and in compiled code. (<code>examples/tour/04-classes.wiz</code>; <a href="../stages/07-type-classes.md">stages/07-type-classes.md</a>; the table of numeric types in <a href="../libraries.md">libraries.md</a>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-39">
 <h2>5: dependent types</h2>
@@ -440,7 +440,7 @@ def zero_add : (n : Nat) → 0 + n = n
 </div>
 </section>
 <section class="cell cell-markdown" id="cell-57">
-<p><code>_</code> is the previous step&#x27;s right endpoint (an explicit middle term must be the same). <code>Trans</code> instances for <code>=</code> and <code>↔</code> are in <code>lib/Logic.wiz</code>; <code>Nat</code>, <code>Int</code> and <code>Q</code> register <code>=</code>, <code>≤</code> and <code>&lt;</code> (and <code>≈</code> at <code>Q</code>) in <code>lib/Nat.wiz</code>, <code>lib/IntOrder.wiz</code> and <code>lib/Rat.wiz</code>, and a program adds its own relation by declaring a <code>Trans</code> instance for it. A chain elaborates to nested <code>Trans.trans</code> applications, so it is checked like any other proof and names no axioms; a step whose proof has the wrong relation, or a pair of relations that no instance composes, is reported at that step. (<code>examples/tour/06b-calc.wiz</code>; <a href="stages/13-language.md">stages/13-language.md</a>, 13s.)</p>
+<p><code>_</code> is the previous step&#x27;s right endpoint (an explicit middle term must be the same). <code>Trans</code> instances for <code>=</code> and <code>↔</code> are in <code>lib/Logic.wiz</code>; <code>Nat</code>, <code>Int</code> and <code>Q</code> register <code>=</code>, <code>≤</code> and <code>&lt;</code> (and <code>≈</code> at <code>Q</code>) in <code>lib/Nat.wiz</code>, <code>lib/IntOrder.wiz</code> and <code>lib/Rat.wiz</code>, and a program adds its own relation by declaring a <code>Trans</code> instance for it. A chain elaborates to nested <code>Trans.trans</code> applications, so it is checked like any other proof and names no axioms; a step whose proof has the wrong relation, or a pair of relations that no instance composes, is reported at that step. (<code>examples/tour/06b-calc.wiz</code>; <a href="../stages/13-language.md">stages/13-language.md</a>, 13s.)</p>
 <p>Proofs can also be written with <strong>tactics</strong>, after <code>by</code>. <code>intro</code>, <code>exact</code>, <code>apply</code>, <code>assumption</code>, <code>rfl</code>, <code>rw</code> and <code>unfold</code> are in the Prelude, and since a tactic is a Wiz function, you can write your own (<code>examples/tactics.wiz</code>):</p>
 </section>
 <section class="cell cell-markdown" id="cell-58">
@@ -452,7 +452,7 @@ def zero_add : (n : Nat) → 0 + n = n
   rfl</code></pre></div>
 </section>
 <section class="cell cell-markdown" id="cell-60">
-<p><code>rw h</code> rewrites <code>m</code> to <code>n</code> in the goal, which leaves <code>double n = double n</code>, and <code>rfl</code> closes it. In an editor with the infoview (see <a href="install.md#editors">install.md</a>), the cursor on the <code>rfl</code> line shows the goal at that point:</p>
+<p><code>rw h</code> rewrites <code>m</code> to <code>n</code> in the goal, which leaves <code>double n = double n</code>, and <code>rfl</code> closes it. In an editor with the infoview (see <a href="../install.md#editors">install.md</a>), the cursor on the <code>rfl</code> line shows the goal at that point:</p>
 </section>
 <section class="cell cell-markdown" id="cell-61">
 <p>Not a cell: this is the infoview&#x27;s goal at the <code>rfl</code> line.</p>
@@ -482,12 +482,12 @@ def exists_double : ∃ n, double n = 8 := Ex.intro (fun n =&gt; double n = 8) 4
 <div class="cell-input"><span class="prompt in-prompt">In&nbsp;[18]:</span><pre class="code"><code class="language-wiz">def funext' {A B : Type} (f g : A → B) (h : (x : A) → f x = g x) : f = g := h</code></pre></div>
 </section>
 <section class="cell cell-markdown" id="cell-68">
-<p><code>Prop</code> is impredicative and proof-irrelevant: any two proofs of a proposition are equal, and proofs (like everything at quantity 0) are erased from compiled code. (<code>examples/tour/06-proofs.wiz</code>; <a href="stages/04-data.md">stages/04-data.md</a>, 4c; <a href="stages/24-separation-logic.md">stages/24-separation-logic.md</a> for the logic library and program verification with Hoare triples; <a href="Status.md">Status.md</a> for what is known about soundness, and what isn&#x27;t.)</p>
+<p><code>Prop</code> is impredicative and proof-irrelevant: any two proofs of a proposition are equal, and proofs (like everything at quantity 0) are erased from compiled code. (<code>examples/tour/06-proofs.wiz</code>; <a href="../stages/04-data.md">stages/04-data.md</a>, 4c; <a href="../stages/24-separation-logic.md">stages/24-separation-logic.md</a> for the logic library and program verification with Hoare triples; <a href="../Status.md">Status.md</a> for what is known about soundness, and what isn&#x27;t.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-69">
 <h2>7: quantities and linear resources</h2>
 <p>Every binder in Wiz carries a <strong>quantity</strong>, which says how often the body may use the variable at run time:</p>
-<p>| quantity | means | for | |---|---|---| | <code>0</code> | never: erased | types, proofs, indices like <code>Vec</code>&#x27;s length | | <code>1</code> | exactly once: linear | resources: a file handle, a channel end, the world | | <code>ω</code> | any number of times | everything else; the default |</p>
+<p>| quantity | means | for | |---|---|---| | <code>0</code> | never: erased | types, proofs, indices like <code>Vec</code>&#x27;s length | | <code>1</code> | exactly once: linear | resources: a file handle, a channel end, the world | | <code>ω</code> | any number of times | explicit binders: the default; an implicit binder defaults to <code>0</code> (erased) |</p>
 </section>
 <section class="cell cell-markdown" id="cell-70">
 <p>Quantities <code>0</code> and <code>1</code> on binders.</p>
@@ -547,7 +547,7 @@ def lose (1 t : Ticket) : IO Unit := IO.pure ()
 <pre class="markdown-code"><code class="language-text">IO.bind : {A : Type} → {B : Type} → (1 x : IO A) → (1 f : A → IO B) → IO B</code></pre>
 </section>
 <section class="cell cell-markdown" id="cell-82">
-<p>Linear matching on your own data types is not there yet (a <code>match</code> uses its scrutinee at <code>ω</code>), so linear data is written with pairs, as above, for now. (<code>examples/tour/07-quantities.wiz</code>; <a href="stages/09-ffi.md">stages/09-ffi.md</a>, 9a and 9e; <a href="stages/25-concurrency.md">stages/25-concurrency.md</a> for linear channels and session types.)</p>
+<p>Linear matching on your own data types is not there yet (a <code>match</code> uses its scrutinee at <code>ω</code>), so linear data is written with pairs, as above, for now. (<code>examples/tour/07-quantities.wiz</code>; <a href="../stages/09-ffi.md">stages/09-ffi.md</a>, 9a and 9e; <a href="../stages/25-concurrency.md">stages/25-concurrency.md</a> for linear channels and session types.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-83">
 <h2>8: codata</h2>
@@ -593,7 +593,7 @@ def squares : Stream Nat := Stream.map (fun n =&gt; n * n) (Stream.from 0)
 -- error: the observation .tail must be a corecursive call of stuck (guardedness)</code></pre>
 </section>
 <section class="cell cell-markdown" id="cell-88">
-<p>(<code>examples/tour/08-codata.wiz</code>; <code>examples/streams.wiz</code>, <code>examples/sized.wiz</code> for sized types, <a href="stages/04-data.md">stages/04-data.md</a>.)</p>
+<p>(<code>examples/tour/08-codata.wiz</code>; <code>examples/streams.wiz</code>, <code>examples/sized.wiz</code> for sized types, <a href="../stages/04-data.md">stages/04-data.md</a>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-89">
 <h2>9: the C FFI</h2>
@@ -621,7 +621,7 @@ def main : IO Unit := do
 45</code></pre>
 </section>
 <section class="cell cell-markdown" id="cell-92">
-<p><code>extern &quot;cname&quot; name : T</code> declares a function implemented in C; the arguments are converted by their Wiz types. A foreign function that has effects should return <code>IO</code>. <code>glue</code> writes the C body inline, in a subset that the compiler checks. <code>import_c &quot;h&quot;</code> binds every function of a C header at once (<code>C.strlen</code>, …), <code>link_c &quot;file.c&quot;</code> and <code>link_lib &quot;m&quot;</code> link your own C, and <code>foreign_type</code> wraps a C pointer with a finalizer. Foreign functions run only in compiled code: <code>#eval</code> can&#x27;t call them, so this example is a program, and its test (the first line, <code>-- test: run</code>) runs it. (<code>examples/tour/09-ffi.wiz</code>; <code>examples/foreign.wiz</code>, <code>examples/import_c.wiz</code>, <code>examples/glue.wiz</code>; <a href="stages/09-ffi.md">stages/09-ffi.md</a>.)</p>
+<p><code>extern &quot;cname&quot; name : T</code> declares a function implemented in C; the arguments are converted by their Wiz types. A foreign function that has effects should return <code>IO</code>. <code>glue</code> writes the C body inline, in a subset that the compiler checks. <code>import_c &quot;h&quot;</code> binds every function of a C header at once (<code>C.strlen</code>, …), <code>link_c &quot;file.c&quot;</code> and <code>link_lib &quot;m&quot;</code> link your own C, and <code>foreign_type</code> wraps a C pointer with a finalizer. Foreign functions run only in compiled code: <code>#eval</code> can&#x27;t call them, so this example is a program, and its test (the first line, <code>-- test: run</code>) runs it. (<code>examples/tour/09-ffi.wiz</code>; <code>examples/foreign.wiz</code>, <code>examples/import_c.wiz</code>, <code>examples/glue.wiz</code>; <a href="../stages/09-ffi.md">stages/09-ffi.md</a>.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-93">
 <h2>10: hardware</h2>
@@ -670,7 +670,7 @@ def verilog : String := Verilog.emit (Circuit.netlist "pipeline" pipeline)</code
 endmodule</code></pre>
 </section>
 <section class="cell cell-markdown" id="cell-98">
-<p>The library also has bundles of named signals (<code>deriving Bundle</code>), reset and enable, test benches, waveforms (VCD) and pin constraints, and the combinators come with lemmas (<code>Circuit.run_seq</code>: running <code>seq a b</code> is running <code>b</code> on the outputs of <code>a</code>). A UART for a Lattice iCEstick FPGA board is written in it. (<code>examples/tour/10-hdl.wiz</code>; <code>examples/hdl.wiz</code>, <code>examples/hdl-compose.wiz</code>; <a href="libraries.md">libraries.md</a>, H14.)</p>
+<p>The library also has bundles of named signals (<code>deriving Bundle</code>), reset and enable, test benches, waveforms (VCD) and pin constraints, and the combinators come with lemmas (<code>Circuit.run_seq</code>: running <code>seq a b</code> is running <code>b</code> on the outputs of <code>a</code>). A UART for a Lattice iCEstick FPGA board is written in it. (<code>examples/tour/10-hdl.wiz</code>; <code>examples/hdl.wiz</code>, <code>examples/hdl-compose.wiz</code>; <a href="../libraries.md">libraries.md</a>, H14.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-99">
 <h2>11: packages</h2>
@@ -687,7 +687,7 @@ def package : Package := Package.new "hello"
   |&gt; Package.tests "tests" "tests"       -- each tests/*.wiz against its .expected</code></pre></div>
 </section>
 <section class="cell cell-markdown" id="cell-102">
-<p><code>grail build</code> builds everything (in parallel, and only what changed since last time), <code>grail run app</code> builds and runs a program, and <code>grail test</code> runs the tests: a test is a <code>.wiz</code> file whose messages (or, with <code>-- test: run</code> on its first line, whose output) must match the <code>.expected</code> file beside it. <code>grail test --update</code> writes the <code>.expected</code> files. The tour&#x27;s own examples are tests of exactly this kind. A <code>wiz-toolchain</code> file next to <code>grail.wiz</code> pins the toolchain, and <code>Package.dep</code> adds a package from a git repository. <a href="install.md#a-first-project-with-grail">install.md</a> walks through a first package; <a href="stages/23-grail.md">stages/23-grail.md</a> has the rest.</p>
+<p><code>grail build</code> builds everything (in parallel, and only what changed since last time), <code>grail run app</code> builds and runs a program, and <code>grail test</code> runs the tests: a test is a <code>.wiz</code> file whose messages (or, with <code>-- test: run</code> on its first line, whose output) must match the <code>.expected</code> file beside it. <code>grail test --update</code> writes the <code>.expected</code> files. The tour&#x27;s own examples are tests of exactly this kind. A <code>wiz-toolchain</code> file next to <code>grail.wiz</code> pins the toolchain, and <code>Package.dep</code> adds a package from a git repository. <a href="../install.md#a-first-project-with-grail">install.md</a> walks through a first package; <a href="../stages/23-grail.md">stages/23-grail.md</a> has the rest.</p>
 <p>A new package starts with <code>grail new</code>:</p>
 </section>
 <section class="cell cell-markdown" id="cell-103">
@@ -697,7 +697,7 @@ grail new: wrote hello (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gi
   cd hello &amp;&amp; grail build &amp;&amp; grail run hello</code></pre>
 </section>
 <section class="cell cell-markdown" id="cell-104">
-<p>It writes a library, an executable and a golden test; <code>grail run hello</code> prints <code>hello from hello</code>, and the test checks the same line. An existing non-empty directory is refused, so <code>new</code> never overwrites work, and the name must start with a letter. (<a href="stages/23-grail.md">stages/23-grail.md</a>, 23o.)</p>
+<p>It writes a library, an executable and a golden test; <code>grail run hello</code> prints <code>hello from hello</code>, and the test checks the same line. An existing non-empty directory is refused, so <code>new</code> never overwrites work, and the name must start with a letter. (<a href="../stages/23-grail.md">stages/23-grail.md</a>, 23o.)</p>
 <p>Modules are files: <code>import A.B</code> reads <code>A/B.wiz</code> from a module root (the standard library <code>lib/</code>, a package&#x27;s <code>lib</code> directories, <code>-I DIR</code>). Wiz has no namespaces yet, so one name can be declared only once among everything a file imports. Mark helpers <code>private</code> to keep them out of other modules.</p>
 </section>
 <section class="cell cell-markdown" id="cell-105">
@@ -723,11 +723,11 @@ def spec : Scry.TaintSpec :=
 </div>
 </section>
 <section class="cell cell-markdown" id="cell-108">
-<p>The first function copies and adds <code>getenv</code>&#x27;s result before passing it to <code>system</code>, so the analysis reports the sink and the argument; the second passes it through <code>sanitize</code>, which kills the flow. A finding also carries its source → sink path (<code>Scry.findings</code>). (<code>examples/tour/12-scry.wiz</code>; <a href="libraries.md">libraries.md</a>, &quot;Scry&quot;.)</p>
+<p>The first function copies and adds <code>getenv</code>&#x27;s result before passing it to <code>system</code>, so the analysis reports the sink and the argument; the second passes it through <code>sanitize</code>, which kills the flow. A finding also carries its source → sink path (<code>Scry.findings</code>). (<code>examples/tour/12-scry.wiz</code>; <a href="../libraries.md">libraries.md</a>, &quot;Scry&quot;.)</p>
 </section>
 <section class="cell cell-markdown" id="cell-109">
 <h2>Where next</h2>
-<ul><li>The <strong>examples</strong>: <a href="../examples/"><code>examples/</code></a> has one file per feature, each checked by the test suite (<code>grail test</code> in the repository).</li><li>The <strong>libraries</strong>: <code>lib/</code>, described in <a href="libraries.md">libraries.md</a>: text, JSON, arrays, processes and files (<code>Sys</code>), effects (<code>Eff</code>), concurrency (<code>MVar</code>, <code>Session</code>), separation logic (<code>HProp</code>, <code>Hoare</code>), the HDL.</li><li><strong>How it works</strong>: the stage docs (<a href="index.md">index.md</a>) build the language up from the kernel, a stage at a time, with exercises. Stage 1 is the core calculus, stages 3–7 the elaborator, data, erasure, macros and classes, stage 8 the compiler, stages 12–21 the self-hosted toolchain. <a href="CoreSpec.md">CoreSpec.md</a> has the rules.</li><li><strong>What is proved, and what isn&#x27;t</strong>: <a href="Status.md">Status.md</a>.</li></ul>
+<ul><li>The <strong>examples</strong>: <a href="../../examples/"><code>examples/</code></a> has one file per feature, each checked by the test suite (<code>grail test</code> in the repository).</li><li>The <strong>libraries</strong>: <code>lib/</code>, described in <a href="../libraries.md">libraries.md</a>: text, JSON, arrays, processes and files (<code>Sys</code>), effects (<code>Eff</code>), concurrency (<code>MVar</code>, <code>Session</code>), separation logic (<code>HProp</code>, <code>Hoare</code>), the HDL.</li><li><strong>How it works</strong>: the stage docs (<a href="../index.md">index.md</a>) build the language up from the kernel, a stage at a time, with exercises. Stage 1 is the core calculus, stages 3–7 the elaborator, data, erasure, macros and classes, stage 8 the compiler, stages 12–21 the self-hosted toolchain. <a href="../CoreSpec.md">CoreSpec.md</a> has the rules.</li><li><strong>What is proved, and what isn&#x27;t</strong>: <a href="../Status.md">Status.md</a>.</li></ul>
 </section>
 </main>
 </body>

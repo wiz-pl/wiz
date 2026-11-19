@@ -9,6 +9,10 @@
    shared or immortal objects; in-place updates need rc == 1, which a shared object
    never has, and a shared thunk is forced under a lock and its value marked shared. */
 
+#ifdef WIZ_NO_THREADS
+/* one thread: nothing crosses to another, so nothing becomes shared */
+static void wiz_mark_mt(wiz_val v) { (void)v; }
+#else
 static void wiz_mark_mt(wiz_val v) {
   size_t cap = 64, n = 0;
   wiz_val *st = (wiz_val *)malloc(cap * sizeof(wiz_val));
@@ -40,6 +44,15 @@ static void wiz_mark_mt(wiz_val v) {
 #undef WIZ_PUSH
   free(st);
 }
+#endif
+
+/* Wait while `c` holds, on `cv` under `mu`. With WIZ_NO_THREADS no other thread can
+   make `c` false, so waiting would never end: stop with `what` instead. */
+#ifdef WIZ_NO_THREADS
+#define WIZ_WAIT_WHILE(c, cv, mu, what) do { if (c) wiz_no_threads(what); } while (0)
+#else
+#define WIZ_WAIT_WHILE(c, cv, mu, what) while (c) pthread_cond_wait(cv, mu)
+#endif
 
 /* every thread but main is counted, so the program can wait for them before it checks
    for leaks; a finished thread adds its allocation balance to wiz_live_exited */
@@ -47,6 +60,9 @@ static pthread_mutex_t wiz_threads_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wiz_threads_cv = PTHREAD_COND_INITIALIZER;
 static int64_t wiz_threads_running = 0;
 static int64_t wiz_live_exited = 0;
+/* how many threads `Chan.fork` has started (monotone; `Chan.forks` reads it): an
+   observable the pure model does not have, so the `Proc.runLinked` case is differential */
+static int64_t wiz_threads_started = 0;
 
 typedef struct { wiz_val fn; wiz_val arg; } wiz_spawn_args;
 
@@ -67,6 +83,10 @@ static void *wiz_thread_main(void *p) {
 
 /* run `fn arg world` on a new thread; `fn` must be shared already, `arg` is moved */
 static void wiz_spawn(wiz_val fn, wiz_val arg) {
+#ifdef WIZ_NO_THREADS
+  (void)fn; (void)arg;
+  wiz_no_threads("starting a thread");
+#endif
   wiz_spawn_args *a = (wiz_spawn_args *)malloc(sizeof *a);
   a->fn = fn; a->arg = arg;
   const char *mb = getenv("WIZ_THREAD_STACK_MB");
@@ -77,10 +97,20 @@ static void wiz_spawn(wiz_val fn, wiz_val arg) {
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
   pthread_mutex_lock(&wiz_threads_mu);
   wiz_threads_running++;
+  wiz_threads_started++;
   pthread_mutex_unlock(&wiz_threads_mu);
   pthread_t t;
   if (pthread_create(&t, &attr, wiz_thread_main, a) != 0) wiz_panic("can't start a thread");
   pthread_attr_destroy(&attr);
+}
+
+/* `Chan.forks`: how many threads `Chan.fork` has started in this program. The pure model
+   (`link`) starts none, so a compiled program can check that the native channel path ran. */
+WIZ_API uint64_t wiz_chan_forks(void) {
+  pthread_mutex_lock(&wiz_threads_mu);
+  uint64_t n = (uint64_t)wiz_threads_started;
+  pthread_mutex_unlock(&wiz_threads_mu);
+  return n;
 }
 
 static void wiz_wait_threads(void) {
@@ -134,6 +164,9 @@ static wiz_chan *wiz_chan_of(wiz_val c, int *side) {
 /* `Chan.forkRaw child`: a new channel; `child` runs on end 1 in a new thread, the
    caller gets end 0 */
 WIZ_API wiz_val wiz_chan_fork(wiz_val child) {
+#ifdef WIZ_NO_THREADS
+  wiz_no_threads("Chan.fork");
+#endif
   wiz_chan *ch = (wiz_chan *)calloc(1, sizeof(wiz_chan));
   pthread_mutex_init(&ch->mu, NULL);
   pthread_cond_init(&ch->cv, NULL);
@@ -167,7 +200,7 @@ WIZ_API wiz_val wiz_chan_recv(wiz_val c) {
   int side;
   wiz_chan *ch = wiz_chan_of(c, &side);
   pthread_mutex_lock(&ch->mu);
-  while (!ch->head[side]) pthread_cond_wait(&ch->cv, &ch->mu);
+  WIZ_WAIT_WHILE(!ch->head[side], &ch->cv, &ch->mu, "Chan.recv on an empty channel would wait forever");
   wiz_msg *m = ch->head[side];
   ch->head[side] = m->next;
   if (!m->next) ch->tail[side] = NULL;
@@ -207,7 +240,8 @@ WIZ_API wiz_val wiz_mvar_new(void) {
 static wiz_val wiz_mvar_take_(wiz_val mv, int keep) {
   wiz_mvar *m = (wiz_mvar *)((wiz_ext *)mv)->ptr;
   pthread_mutex_lock(&m->mu);
-  while (!m->full) pthread_cond_wait(&m->cv, &m->mu);
+  WIZ_WAIT_WHILE(!m->full, &m->cv, &m->mu, keep ? "MVar.read of an empty MVar would wait forever"
+                                                : "MVar.take of an empty MVar would wait forever");
   wiz_val v = m->v;
   if (keep) wiz_inc(v);
   else { m->full = 0; m->v = WIZ_BOX(0); pthread_cond_broadcast(&m->cv); }
@@ -220,7 +254,7 @@ WIZ_API void wiz_mvar_put(wiz_val mv, wiz_val a) {
   wiz_mvar *m = (wiz_mvar *)((wiz_ext *)mv)->ptr;
   wiz_mark_mt(a);
   pthread_mutex_lock(&m->mu);
-  while (m->full) pthread_cond_wait(&m->cv, &m->mu);
+  WIZ_WAIT_WHILE(m->full, &m->cv, &m->mu, "MVar.put into a full MVar would wait forever");
   m->v = a; m->full = 1;
   pthread_cond_broadcast(&m->cv);
   pthread_mutex_unlock(&m->mu);
@@ -279,7 +313,7 @@ WIZ_API wiz_val wiz_lock_new(void) {
 WIZ_API wiz_val wiz_lock_acquire(wiz_val lv) {
   wiz_lock *l = (wiz_lock *)((wiz_ext *)lv)->ptr;
   pthread_mutex_lock(&l->mu);
-  while (l->held) pthread_cond_wait(&l->cv, &l->mu);
+  WIZ_WAIT_WHILE(l->held, &l->cv, &l->mu, "Lock.acquire of a held lock would wait forever");
   l->held = 1;
   pthread_mutex_unlock(&l->mu);
   wiz_dec(lv);
@@ -295,9 +329,236 @@ WIZ_API void wiz_lock_release(wiz_val lv, wiz_val g) {
   wiz_dec(lv);
 }
 
+/* ---- pure tasks (lib/Task.wiz, stage 31): `Task.spawn f` may compute `f ()` on another
+   thread, `Task.get` waits for it ----
+
+   A task is waiting to start (0), running (1) or done (2), under one mutex for all tasks
+   (a task is coarse work; the lock is held only to change a state). Whoever moves a task
+   from 0 to 1 runs it: its own thread, or the first `get` that needs it before any thread
+   has started it (work-first), so `get` never waits for work nobody is doing and nested
+   tasks can't deadlock. At most one task thread per online CPU runs at a time; a task
+   spawned beyond that has no thread and runs at the `get` that needs it. A task's value
+   is marked shared before it is published (another thread may `get` it). The task
+   object (a foreign object) and its thread each hold a reference to the record. A task
+   object that became immortal (a closed definition, `def t : Task A := …`) is never
+   finalised, so at the end the program drops what its record still holds before the
+   leak check (`wiz_task_exit`). With WIZ_NO_THREADS, spawning stops with
+   `wiz_no_threads` like `Chan.fork`. */
+
+typedef struct wiz_task {
+  int state;    /* 0 waiting to start, 1 running, 2 done */
+  int refs;     /* the Wiz object, and the thread if one was started */
+  int held;     /* the Wiz object still refers to this record */
+  wiz_val obj;  /* that object (not a reference: valid while `held`) */
+  wiz_val fn;   /* `Unit → A`, shared; taken by whoever runs it */
+  wiz_val val;  /* the value, shared, once done */
+  struct wiz_task *prev, *next; /* every record alive (for wiz_task_exit) */
+} wiz_task;
+
+/* all under wiz_task_mu: states, counts, the list */
+static pthread_mutex_t wiz_task_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wiz_task_cv = PTHREAD_COND_INITIALIZER;
+static wiz_task *wiz_tasks = NULL;
+static int64_t wiz_task_threads = 0; /* task threads running now */
+static int64_t wiz_task_max = 0;     /* their limit: the online CPUs (0: not read yet) */
+
+/* drop one reference (the object's, if `obj`); the last one frees the record */
+static void wiz_task_drop(wiz_task *t, int obj) {
+  pthread_mutex_lock(&wiz_task_mu);
+  if (obj) t->held = 0;
+  int last = --t->refs == 0;
+  if (last) {
+    if (t->prev) t->prev->next = t->next; else wiz_tasks = t->next;
+    if (t->next) t->next->prev = t->prev;
+  }
+  pthread_mutex_unlock(&wiz_task_mu);
+  if (!last) return;
+  /* (outside the lock: dropping a value may finalise other tasks) */
+  if (t->fn) wiz_dec(t->fn);
+  if (t->state == 2) wiz_dec(t->val);
+  free(t);
+}
+static void wiz_task_unref(wiz_task *t) { wiz_task_drop(t, 0); }
+static void wiz_task_fin(void *p) { wiz_task_drop((wiz_task *)p, 1); }
+
+/* at the end, once every thread has finished: an immortal task object keeps its record
+   for ever, so drop the function or value the record holds (they are not immortal: they
+   were shared when the task was made or ran), one record at a time, outside the lock */
+static void wiz_task_exit(void) {
+  for (;;) {
+    wiz_val drop = 0;
+    pthread_mutex_lock(&wiz_task_mu);
+    for (wiz_task *t = wiz_tasks; t && !drop; t = t->next) {
+      if (!t->held || ((wiz_hdr *)t->obj)->rc != 0) continue;
+      if (t->fn) { drop = t->fn; t->fn = 0; }
+      else if (t->state == 2 && t->val != WIZ_BOX(0)) { drop = t->val; t->val = WIZ_BOX(0); }
+    }
+    pthread_mutex_unlock(&wiz_task_mu);
+    if (!drop) return;
+    wiz_dec(drop);
+  }
+}
+
+/* run a task this thread moved to state 1, and publish its value */
+static void wiz_task_run(wiz_task *t) {
+  wiz_val fn = t->fn;
+  t->fn = 0;
+  wiz_val u = WIZ_BOX(0);
+  wiz_val v = wiz_apply(fn, 1, &u);
+  wiz_mark_mt(v);
+  pthread_mutex_lock(&wiz_task_mu);
+  t->val = v;
+  t->state = 2;
+  pthread_cond_broadcast(&wiz_task_cv);
+  pthread_mutex_unlock(&wiz_task_mu);
+}
+
+static void *wiz_task_thread(void *p) {
+  wiz_task *t = (wiz_task *)p;
+  pthread_mutex_lock(&wiz_task_mu);
+  int mine = t->state == 0;
+  if (mine) t->state = 1;
+  pthread_mutex_unlock(&wiz_task_mu);
+  if (mine) wiz_task_run(t);
+  wiz_task_unref(t);
+  pthread_mutex_lock(&wiz_task_mu);
+  wiz_task_threads--;
+  pthread_mutex_unlock(&wiz_task_mu);
+  /* as wiz_thread_main: this thread's allocation balance, and one thread fewer */
+  pthread_mutex_lock(&wiz_threads_mu);
+  wiz_live_exited += wiz_live;
+  wiz_threads_running--;
+  pthread_cond_broadcast(&wiz_threads_cv);
+  pthread_mutex_unlock(&wiz_threads_mu);
+  return NULL;
+}
+
+/* give `t` a thread of its own if fewer than wiz_task_max are running; otherwise (or if
+   the system has no thread to give) it waits for the `get` that needs it */
+static void wiz_task_start(wiz_task *t) {
+  pthread_mutex_lock(&wiz_task_mu);
+  if (wiz_task_max == 0) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    wiz_task_max = n > 0 ? n : 1;
+  }
+  int go = wiz_task_threads < wiz_task_max;
+  if (go) { wiz_task_threads++; t->refs++; }
+  pthread_mutex_unlock(&wiz_task_mu);
+  if (!go) return;
+  pthread_mutex_lock(&wiz_threads_mu);
+  wiz_threads_running++;
+  pthread_mutex_unlock(&wiz_threads_mu);
+  const char *mb = getenv("WIZ_THREAD_STACK_MB");
+  size_t size = (size_t)(mb ? atol(mb) : 256) << 20;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, size);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_t th;
+  int err = pthread_create(&th, &attr, wiz_task_thread, t);
+  pthread_attr_destroy(&attr);
+  if (err == 0) return;
+  pthread_mutex_lock(&wiz_threads_mu);
+  wiz_threads_running--;
+  pthread_cond_broadcast(&wiz_threads_cv);
+  pthread_mutex_unlock(&wiz_threads_mu);
+  pthread_mutex_lock(&wiz_task_mu);
+  wiz_task_threads--;
+  t->refs--; /* the object's reference remains */
+  pthread_mutex_unlock(&wiz_task_mu);
+}
+
+static wiz_task *wiz_task_of(wiz_val tv) { return (wiz_task *)((wiz_ext *)tv)->ptr; }
+
+/* `Task.spawn f` */
+WIZ_API wiz_val wiz_task_spawn(wiz_val fn) {
+#ifdef WIZ_NO_THREADS
+  (void)fn;
+  wiz_no_threads("Task.spawn");
+#endif
+  wiz_task *t = (wiz_task *)calloc(1, sizeof(wiz_task));
+  t->refs = 1;
+  t->held = 1;
+  t->val = WIZ_BOX(0);
+  wiz_mark_mt(fn);
+  t->fn = fn;
+  wiz_val tv = wiz_out_ptr(t, wiz_task_fin);
+  t->obj = tv;
+  pthread_mutex_lock(&wiz_task_mu);
+  t->next = wiz_tasks;
+  if (wiz_tasks) wiz_tasks->prev = t;
+  wiz_tasks = t;
+  pthread_mutex_unlock(&wiz_task_mu);
+  wiz_task_start(t);
+  return tv;
+}
+
+/* `Task.get t`: its value; runs it here if it hasn't started */
+WIZ_API wiz_val wiz_task_get(wiz_val tv) {
+  wiz_task *t = wiz_task_of(tv);
+  pthread_mutex_lock(&wiz_task_mu);
+  if (t->state == 0) {
+    t->state = 1;
+    pthread_mutex_unlock(&wiz_task_mu);
+    wiz_task_run(t);
+    pthread_mutex_lock(&wiz_task_mu);
+  }
+  WIZ_WAIT_WHILE(t->state != 2, &wiz_task_cv, &wiz_task_mu, "Task.get of a running task would wait forever");
+  wiz_val v = t->val;
+  wiz_inc(v);
+  pthread_mutex_unlock(&wiz_task_mu);
+  wiz_dec(tv);
+  return v;
+}
+
+/* `Task.both f g`: `g ()` as a task while this thread runs `f ()`; the pair */
+WIZ_API wiz_val wiz_task_both(wiz_val f, wiz_val g) {
+#ifdef WIZ_NO_THREADS
+  (void)f; (void)g;
+  wiz_no_threads("Task.both");
+#endif
+  wiz_val tg = wiz_task_spawn(g);
+  wiz_val u = WIZ_BOX(0);
+  wiz_val a = wiz_apply(f, 1, &u);
+  wiz_val b = wiz_task_get(tg);
+  return wiz_pair(a, b);
+}
+
+/* `Task.race f g h`: the value of whichever finishes first (they are equal, `h`). If
+   neither has a thread, `f ()` runs here. The other one runs on to its end. */
+WIZ_API wiz_val wiz_task_race(wiz_val f, wiz_val g) {
+#ifdef WIZ_NO_THREADS
+  (void)f; (void)g;
+  wiz_no_threads("Task.race");
+#endif
+  wiz_val tf = wiz_task_spawn(f), tg = wiz_task_spawn(g);
+  wiz_task *a = wiz_task_of(tf), *b = wiz_task_of(tg);
+  pthread_mutex_lock(&wiz_task_mu);
+  wiz_val v;
+  for (;;) {
+    if (a->state == 2) { v = a->val; break; }
+    if (b->state == 2) { v = b->val; break; }
+    if (a->state == 0 && b->state == 0) {
+      a->state = 1;
+      pthread_mutex_unlock(&wiz_task_mu);
+      wiz_task_run(a);
+      pthread_mutex_lock(&wiz_task_mu);
+      continue;
+    }
+    /* one of them is running (on its thread, or at another `get`): wait for a change */
+    pthread_cond_wait(&wiz_task_cv, &wiz_task_mu);
+  }
+  wiz_inc(v);
+  pthread_mutex_unlock(&wiz_task_mu);
+  wiz_dec(tf);
+  wiz_dec(tg);
+  return v;
+}
+
 /* the objects still alive, once every thread has finished */
 static int64_t wiz_live_total(void) {
   wiz_wait_threads();
+  wiz_task_exit();
   return wiz_live + wiz_live_exited;
 }
 
@@ -335,6 +596,10 @@ static void *wiz_main_thread(void *p) {
 WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
   wiz_main_args args = {entry, io, 0};
   wiz_track_init();
+#ifdef WIZ_NO_THREADS
+  /* one thread: run on this one, with the stack it has */
+  return wiz_main_thread(&args), args.rc;
+#endif
   const char *mb = getenv("WIZ_STACK_MB");
   size_t size = (size_t)(mb ? atol(mb) : 1024) << 20;
   pthread_attr_t attr;
@@ -344,4 +609,50 @@ WIZ_API int wiz_run_main(wiz_val (*entry)(void), int io) {
   if (pthread_create(&t, &attr, wiz_main_thread, &args) != 0) return wiz_main_thread(&args), args.rc;
   pthread_join(t, NULL);
   return args.rc;
+}
+
+/* ---- the recovery boundary (rt_core.inc) that an embedding host arms ----
+
+   `wiz_stop_run(f)` applies the Wiz closure `f : String → String` (the export wraps its
+   body in `fun _ => …`) with a `setjmp` armed, so a clean stop inside it (`wiz_no_threads`,
+   `Process.exit`, a failed write) longjmps back here instead of ending the module. It
+   returns the closure's text, or "" if it stopped; `wiz_stop_code_value` then has the
+   code (0 = none, otherwise code + 1, which keeps 0 as "ran to the end"). The strings
+   are copied: the export wrapper converts the result immediately. */
+
+static __thread char *wiz_stop_text = NULL;   /* the last call's text, for the wrapper */
+static __thread size_t wiz_stop_text_cap = 0;
+
+WIZ_API char *wiz_stop_run(wiz_val f) {
+  jmp_buf jb;
+  jmp_buf *volatile prev = wiz_stop_jmp;
+  wiz_stop_code = -1;
+  if (setjmp(jb) != 0) {
+    /* a clean stop: everything the call allocated is abandoned with it */
+    wiz_stop_jmp = prev;
+    return (char *)"";
+  }
+  wiz_stop_jmp = &jb;
+  wiz_val arg = wiz_out_string("");   /* the dummy the closure ignores: a Wiz function
+                                         type always has a parameter */
+  wiz_val r = wiz_apply(f, 1, &arg);
+  wiz_stop_jmp = prev;
+  char *s = wiz_in_string(r);          /* takes the String */
+  size_t n = strlen(s) + 1;
+  if (n > wiz_stop_text_cap) {
+    free(wiz_stop_text);
+    wiz_stop_text = (char *)wiz_xmalloc(n);
+    wiz_stop_text_cap = n;
+  }
+  memcpy(wiz_stop_text, s, n);
+  free(s);
+  wiz_stop_code = -1;
+  return wiz_stop_text;
+}
+
+/* The last `wiz_stop_run`'s clean-stop code: 0 for none, otherwise code + 1. The
+   argument is unused (a Wiz export cannot take no arguments; the page passes 0). */
+WIZ_API uint64_t wiz_stop_code_value(uint64_t unused) {
+  (void)unused;
+  return wiz_stop_code < 0 ? 0 : (uint64_t)wiz_stop_code + 1;
 }

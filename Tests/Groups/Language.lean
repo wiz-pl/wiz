@@ -70,6 +70,7 @@ def r1Header : String := "import Prelude\naxiom Tok : Type\n"
 def languageGroup : Group where
   name := "language"
   exercise := "Stage 13"
+  parallel := true
   cases := [
     { name := "string escapes: \\r, \\t, \\0, \\\\, \\\", \\', \\xHH, \\u{H}; a bad one is reported where it is", run := fun _ => do
         okLib "import Prelude\n#eval \"a\\rb\\t\\0\\'\\x41\\u{3bb}\\\\\\\"\"" ["\"a\\x0db\\t\\x00'Aλ\\\\\\\"\""]
@@ -79,6 +80,12 @@ def languageGroup : Group where
         failsLib "import Prelude\ndef s : String := \"\\u{}\"" "2:20: error: the escape \\u is written \\u{H}"
         failsLib "import Prelude\ndef s : String := \"\\u{1234567}\"" "2:20: error: the escape \\u is written \\u{H}"
         failsLib "import Prelude\ndef s : String := \"abc" "2:19: error: unterminated string literal" },
+    { name := "named arguments: a constructor's parameters and fields (13a)", run := fun _ => do
+        let p := "import Prelude\ninductive P where\n  | mk (x : Nat) (y : Nat)\n"
+        okLib (p ++ "def a : P := P.mk (y := 2) (x := 1)\ndef getX : P → Nat\n  | .mk x _ => x\n#eval getX a") ["1"]
+        failsLib (p ++ "def b : P := P.mk (x := 1)") "type mismatch"
+        failsLib (p ++ "def c : P := P.mk (z := 1)") "no parameter named 'z'"
+        failsLib (p ++ "def d : P := P.mk (x := 1) (x := 2)") "already given" },
     -- (CoreSpec §6: proofs use nothing) a term at a proposition is checked erased, so a
     -- variable at 0 may appear in a proof (wiz-cats G2/B2, wiz-reals B2)
     { name := "a proof uses nothing: a 0-variable may appear in a proof, a linear one still must be used (both kernels)", run := fun _ => do
@@ -472,6 +479,17 @@ def languageGroup : Group where
         failsLib ("import Prelude\naxiom Tok : Type\naxiom Tok.close : (1 t : Tok) → Unit\n" ++
           "def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=\n  let 1 (n, s, t) := p;\n  (Tok.close s, Tok.close s)\n")
           "quantity 1 but used" },
+    -- the `let` pattern is the general pattern form: its components may be patterns (a
+    -- three-name tuple was an elaborator special case; `tuplePat` is a tuple pattern)
+    { name := "13f: a `let` tuple pattern takes patterns, not only names (nested tuple, `_`)", run := fun _ => do
+        okLib ("import Prelude\ndef f (p : (Nat × Nat) × Nat × Nat) : Nat := let ((a, b), c, d) := p; a + b + c + d\n" ++
+          "#eval f ((1, 2), 3, 4)\n" ++
+          "def g (p : Nat × Nat × Nat) : Nat := let (a, _, c) := p; a + c\n" ++
+          "#eval g (4, 9, 5)")
+          ["10", "9"]
+        -- with a quantity the components are still names: one split each
+        failsLib ("import Prelude\ndef f (1 p : (Nat × Nat) × Nat × Nat) : Nat :=\n  let 1 ((a, b), c, d) := p;\n  a")
+          "its components are names or `_`" },
     -- (13k) list literals: a Prelude macro
     { name := "list literals: [a, b, c], [], nested, multi-line, with ++", run := fun _ =>
         okLib ("import Prelude\ndef xs : List Nat := [1, 2, 3]\ndef ys : List String := []\n" ++
@@ -510,6 +528,18 @@ def languageGroup : Group where
           "def b {A : Type} (xs : List A) : List A := xs ++ xs\ndef c (s : String) : String := \"<\" ++ s ++ \">\"\n" ++
           "#eval a [2]\n#eval b [1]\n#eval c \"x\"")
           [".cons 1 (.cons 2 .nil)", ".cons 1 (.cons 1 .nil)", "\"<x>\""] },
+    -- (13k) `x :: xs` is `List.cons x xs`
+    { name := "13k: x :: xs is List.cons: right-associative, in patterns, printed back", run := fun _ =>
+        okLib ("import Prelude\n#eval 1 :: [2]\ndef ys : List Nat := 1 :: 2 :: [3]\n#eval ys\n" ++
+          "def len : List Nat → Nat\n  | [] => 0\n  | x :: xs => Nat.succ (len xs)\n#eval len ys\n" ++
+          "def prepend (x : Nat) (xs ys : List Nat) : List Nat := x :: xs ++ ys\n" ++
+          "#eval prepend 0 [1] [2, 3]\n" ++
+          "#check fun (x : Nat) (xs ys : List Nat) => x :: xs ++ ys\n" ++
+          "#check fun (x : Nat) (xs : List Nat) => List.cons x xs")
+          [".cons 1 (.cons 2 .nil)", ".cons 1 (.cons 2 (.cons 3 .nil))", "3",
+           ".cons 0 (.cons 1 (.cons 2 (.cons 3 .nil)))",
+           "fun x xs ys => x :: xs ++ ys : Nat → List Nat → List Nat → List Nat",
+           "fun x xs => x :: xs : Nat → List Nat → List Nat"] },
     -- (13m) `local` notation
     { name := "local notation is used in its module and not seen by importers", run := fun _ => do
         okLoc locMod "import Loc\n#eval greet \"a\" &&& \"b\"\n#eval three" ["\"hi a!b\"", ".cons 1 (.cons 2 (.cons 3 .nil))"]
@@ -556,7 +586,7 @@ def languageGroup : Group where
           "#check fun (P Q : Prop) => P ∧ Q → Q ∨ ¬ P\n#check ∃ (n : Nat), n = n\n#check fun (f : Nat → Nat) => (fun x => x) (f 1) + 2")
           ["fun n => n + 1 : Nat → Nat", "fun a b => a * (b + 1) - a : Nat → Nat → Nat",
            "fun xs ys => xs ++ ys : List Nat → List Nat → List Nat", "[1, 2, 3] : List Nat", "[] : List Nat",
-           "fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat",
+           "fun x xs => x :: xs : Nat → List Nat → List Nat",
            "fun b c => if b then c else !c : Bool → Bool → Bool", "fun b c => b && c || !b : Bool → Bool → Bool",
            "fun P Q => P ∧ Q → Q ∨ ¬P : Prop → Prop → Prop", "∃ n, n = n : Prop",
            "fun f => (fun x => x : Nat → Nat) (f 1) + 2 : (Nat → Nat) → Nat"] },
@@ -576,7 +606,7 @@ def languageGroup : Group where
            "fun n => dbl (dbl n) : Nat → Nat"] },
     { name := "... local notation's unexpanders end with the module", run := fun _ =>
         okLoc locMod "import Loc\n#check fun (x : Nat) (xs : List Nat) => List.cons x xs\n#check fun (a b : String) => a &&& b"
-          ["fun x xs => List.cons Nat x xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
+          ["fun x xs => x :: xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
         failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" }
   ]

@@ -31,9 +31,9 @@ def d2 : ClockDomain := ClockDomain.mk "clk2" 2500
 /-- The implicit clock domain. -/
 def clk : ClockDomain := ClockDomain.sys
 /-- A register node (register `r`). -/
-def regN (r : Nat) : NetNode := NetNode.mk (NetOp.reg r) 1 List.nil
+def regN (r : Nat) : NetNode := NetNode.mk (NetOp.reg r) 1 []
 /-- A clock-net node of domain `d`. -/
-def clockN (d : ClockDomain) : NetNode := NetNode.mk (NetOp.clock d.name) 1 List.nil
+def clockN (d : ClockDomain) : NetNode := NetNode.mk (NetOp.clock d.name) 1 []
 /-- A `wiz_sync2` instance node on nodes `c` (its clock) and `a` (its data). -/
 def syncN (c a : Nat) : NetNode := NetNode.mk (NetOp.inst (Prim.erase Cdc.sync2P)) 0 (.cons c (.cons a .nil))
 /-- Output leaf 0 of the instance at node `k`. -/
@@ -49,14 +49,14 @@ def accepted : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (clockN d2) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
-    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    [] (.cons (outY 4) .nil) [] [] (.cons clk (.cons d2 .nil)) []
 
 /-- The same top without the synchroniser: `s` (clk2) samples `r` (clk) directly. -/
 def rejected : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (regN 1) .nil))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 0 "clk2") .nil))
-    List.nil (.cons (outY 1) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    [] (.cons (outY 1) .nil) [] [] (.cons clk (.cons d2 .nil)) []
 
 /-- A synchroniser clocked by the domain its data is already in: the cell crosses
 nothing, and `s` then samples its (clk) output from clk2. -/
@@ -64,15 +64,15 @@ def sameDomain : Netlist :=
   Netlist.mk "cross"
     (.cons (regN 0) (.cons (clockN clk) (.cons (syncN 1 0) (.cons (outN 2) (.cons (regN 1) .nil)))))
     (.cons (reg "r" 0 "clk") (.cons (reg "s" 3 "clk2") .nil))
-    List.nil (.cons (outY 4) .nil) List.nil List.nil (.cons clk (.cons d2 .nil)) List.nil
+    [] (.cons (outY 4) .nil) [] [] (.cons clk (.cons d2 .nil)) []
 
 /-- An input port of kind clock (the second clock of a design) used as data. -/
 def clockData : Netlist :=
   Netlist.mk "clockData"
-    (.cons (NetNode.mk (NetOp.input 0) 1 List.nil) (.cons (regN 0) .nil))
+    [(NetNode.mk (NetOp.input 0) 1 List.nil), (regN 0)]
     (.cons (reg "r" 0 "clk") .nil)
     (.cons (NetPort.mk "ck" 1 0 "clk") .nil) (.cons (NetPort.mk "y" 1 1 "clk") .nil)
-    List.nil List.nil (.cons clk .nil) List.nil
+    [] [] (.cons clk .nil) []
 
 /-- A one-domain circuit: its netlist has no domain errors and its Verilog is unchanged. -/
 def counter : Circuit (HwTy.bits 0) (HwTy.bits 8) :=
@@ -101,7 +101,7 @@ def smuggled : Circuit (HwTy.bits 0) HwTy.bit :=
 -- a circuit cannot smuggle a second register domain in
 #eval (Circuit.netlist "smuggle" smuggled).errors
 -- the checked runners refuse a multi-domain netlist (and an unmodelled cell)
-#eval Netlist.simulateModelled accepted List.nil
+#eval Netlist.simulateModelled accepted []
 
 --------------------------------------------------------------------------------
 -- (C3) The same design written as a `Multi`: two single-clock circuits (parts), a
@@ -161,4 +161,4 @@ def designBufg : Multi :=
 #eval (Multi.netlist designBufg).errors
 #eval Multi.verilog designBufg
 -- simulation of the multi-clock design is refused (an event schedule is not implemented)
-#eval Netlist.simulateModelled (Multi.netlist design) List.nil
+#eval Netlist.simulateModelled (Multi.netlist design) []

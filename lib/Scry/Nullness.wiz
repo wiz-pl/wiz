@@ -1,0 +1,530 @@
+import Prelude
+import Text
+import Scry.Wil
+import Scry.Analysis
+import Scry.AiCfg
+import Scry.AiDomain
+import Scry.AiFixpoint
+import Scry.RuleTaint
+/-!
+# Scry.Nullness: the S5 null-dereference check, wired to Wil
+
+`Scry.AiFixpoint` has the nullness alarm (`Alarm.nullDeref`) but no Wil frontend, so the
+`scry taint` pipeline never ran it. This module is the missing translation: it builds the
+`ACfg` of a Wil function, runs the same worklist/fixpoint engine, and turns the alarm into
+the `scry/memory/null-dereference` diagnostic the CVE corpus expects.
+
+## The translation
+
+Wil program points become CFG blocks. A statement point whose lowering needs more than one
+abstract statement (a `load` result, a `store`, a call result) gets a short chain of
+blocks; the terminator point gets a `skip` block carrying its guards. The abstract
+variables are the Wil registers, so `AState` is a per-point register environment.
+
+The nullness projections are:
+
+| Wil | abstract |
+|---|---|
+| `cst .nul` | `.null` — definitely null |
+| `cst` integer / `bin` / `un` | a non-null value |
+| `slot`, `gep` of a non-null base | non-null pointer |
+| `alloc` (`malloc`/`calloc`/`realloc`) | **maybe null**: the allocation can fail |
+| `load` | its **base** is checked; the loaded pointer is assumed non-null (no memory nullness) |
+| `call` result | **maybe null** unless a constant-return summary proves otherwise |
+| `store` | a dereference of the base: alarms when the base may be null |
+| `free` | no dereference (`free(NULL)` is defined) |
+
+A memory access through a pointer parameter is *not* reported by default: a function
+parameter is given a non-null entry value, so the pass does not flag every
+`f(p) { p->x }`. That is a deliberate assumption ("callers pass valid objects"), stated
+here rather than hidden. It means a null that arrives through a parameter and is only
+discovered in the callee (CVE-2020-1971, CVE-2021-3449) is a documented false negative;
+the local pattern (a pointer set to null by an allocation, a failed call or a literal,
+then dereferenced without a guard) is what this pass reports.
+
+## The guard kill
+
+A two-way branch refines nullness on both edges: `if (p)` / `if (p != NULL)` gives
+`p ≠ null` on the true edge, `if (!p)` / `if (p == NULL)` gives `p = null`; an early
+`return` after the check therefore removes the null value from the path that reaches the
+dereference. In addition, `condKnown` evaluates a branch when its operands are constant in
+the post-fixpoint state, and unreachable targets are pruned before the alarms are read.
+That is what makes `if (status == APR_SUCCESS) { req->method }` silent when the callee
+always returns `APR_ENOMEM`: the guard is constant-false, the guarded block is unreachable,
+and the definitely-null `req` is only dereferenced on the unreachable path.
+
+## Limits
+
+* No memory nullness: a field store (`s.p = NULL`) is not tracked. A pointer read from
+  memory is therefore treated as non-null for the *next* access (its own access is still
+  checked); a NULL in a field is a documented false negative, not a source of chained
+  warnings.
+* A parameter is non-null at entry (above), so nullness does not flow into a callee.
+* Function points are capped at `maxNullPoints`; a larger function is skipped, because the
+  list-based worklist is a prototype and the pass must not turn a one-minute CVE analysis
+  into a ten-minute one.
+* Branch conditions with `&&`/`||` refine only their first nullness test.
+-/
+
+/-- The largest function the nullness pass runs on. Larger functions are skipped (the
+worklist is list-based; see the module note). -/
+def Scry.maxNullPoints : Nat := 300
+
+/-- One block of the translated CFG: the Wil point it belongs to and the abstract
+statement. -/
+structure Scry.NBlock where
+  point : Nat
+  stmt : AStmt
+
+/-- A translated function: the CFG, the block -> point map, and the point -> first/last
+block bases. -/
+structure Scry.NCfg where
+  cfg : ACfg
+  blocks : List (Nat × Scry.NBlock)
+  bases : List (Nat × Nat × Nat)
+
+def Scry.nIsPtr (t : Wil.Ty) : Bool :=
+  match t with
+  | .ptr _ => .true
+  | _ => .false
+
+/-- The variable index reserved for an unknown value (`top`, hence maybe-null). It is one
+past every register the function mentions. -/
+def Scry.nMaxVar (fn : Wil.Func) : Nat :=
+  let g := Scry.flatten fn;
+  let fromStmts := List.foldl (fun acc p =>
+    match Scry.nodeStmt g p with
+    | .none => match Scry.nodeTerm g p with
+      | .some t => List.foldl (fun a v => Nat.max a (Nat.succ v)) acc (Scry.termUses t)
+      | .none => acc
+    | .some s =>
+      let uses := Scry.stmtUses s;
+      let defs := Scry.stmtDefs s;
+      List.foldl (fun a v => Nat.max a (Nat.succ v)) acc (List.append uses defs))
+    (List.foldl (fun a v => Nat.max a (Nat.succ v.index)) 0
+      (List.append fn.params fn.locals)) (Scry.range g.count);
+  fromStmts
+
+def Scry.nVars (fn : Wil.Func) : List Nat :=
+  Scry.range (Nat.succ (Scry.nMaxVar fn))
+
+def Scry.nHavoc (fn : Wil.Func) : Nat := Scry.nMaxVar fn
+
+/-- The entry environment: parameters are valid objects (non-null); everything else is
+unknown. -/
+def Scry.nEntryEnv (fn : Wil.Func) : AiEnv :=
+  List.foldl (fun env v => AiEnv.set v.index Value.intTop env)
+    (AiEnv.topOf (Scry.nVars fn)) fn.params
+
+-- ## Constant-return summaries
+
+/-- A register's only definition is a constant, so it is that constant everywhere. Only
+unambiguous definitions are recorded (`none` marks a conflict); this is enough for a
+status code returned from a failed helper. -/
+def Scry.constVars (g : Scry.Fn) : List (Nat × Option Nat) :=
+  List.foldl (fun acc d =>
+    match Scry.nodeStmt g d.1 with
+    | .some (.assign x (.cst (.int _ _ n)) _) =>
+      if Nat.beq x.index d.2 then
+        match List.find (fun p => Nat.beq p.1 d.2) acc with
+        | .none => List.cons (d.2, .some n) acc
+        | .some p => match p.2 with
+          | .none => acc
+          | .some m =>
+            if Nat.beq m n then acc
+            else List.cons (d.2, (.none : Option Nat))
+              (List.filter (fun q => Bool.not (Nat.beq q.1 d.2)) acc)
+      else acc
+    | _ => acc) .nil (Scry.defsOf g)
+
+/-- The unambiguous constant of a register, if it has one. -/
+def Scry.constOfVar (cs : List (Nat × Option Nat)) (v : Nat) : Option Nat :=
+  match List.find (fun p => Nat.beq p.1 v) cs with
+  | .none => .none
+  | .some p => p.2
+
+/-- A function whose every `ret` is the same integer literal. Used to resolve a status
+code at a call site (`if (status == SUCCESS)`), which is how the fixed CVE-2017-7659
+control kills the null dereference. -/
+def Scry.retConstOf (fn : Wil.Func) : Option Nat :=
+  let g := Scry.flatten fn;
+  match Nat.le g.count Scry.maxNullPoints with
+  | .false => .none
+  | .true =>
+    let defs := Scry.defsOf g;
+    let rd := Scry.rdIn g defs;
+    let consts := Scry.constVars g;
+    let result := List.foldl (fun acc p =>
+      match Scry.nodeTerm g p with
+      | .none => acc
+      | .some (.ret (.some v) _) =>
+        let ds := Scry.rdForVar defs rd p v.index;
+        match ds with
+        | .nil => .none
+        | .cons d _ =>
+          let first : Option Nat := match Scry.nodeStmt g d with
+            | .some (.assign x (.cst (.int _ _ n)) _) =>
+              if Nat.beq x.index v.index then .some n else .none
+            | .some (.assign x (.use y) _) =>
+              if Nat.beq x.index v.index then Scry.constOfVar consts y.index else .none
+            | _ => .none;
+          match first with
+          | .none => .none
+          | .some n =>
+            let same := List.all (fun d2 =>
+              match Scry.nodeStmt g d2 with
+              | .some (.assign x (.cst (.int _ _ n2)) _) =>
+                Bool.and (Nat.beq x.index v.index) (Nat.beq n n2)
+              | .some (.assign x (.use y) _) =>
+                Bool.and (Nat.beq x.index v.index)
+                  (match Scry.constOfVar consts y.index with
+                   | .some m => Nat.beq n m
+                   | .none => .false)
+              | _ => .false) ds;
+            match same with
+            | .true => match acc with
+              | .none => .some n
+              | .some m => if Nat.beq n m then .some n else .none
+            | .false => .none
+      | .some (.ret .none _) => .none
+      | _ => acc) (.none : Option Nat) (Scry.range g.count);
+    result
+
+def Scry.retConstTable (p : Wil.Program) : List (String × Nat) :=
+  List.foldl (fun acc fn =>
+    match Scry.retConstOf fn with
+    | .some n => List.cons (fn.name, n) acc
+    | .none => acc) .nil p.funcs
+
+def Scry.retConstOfName (tab : List (String × Nat)) (name : String) : Option Nat :=
+  match List.find (fun p => String.eq p.1 name) tab with
+  | .none => .none
+  | .some p => .some p.2
+
+-- ## Conditions
+
+/-- The nullness-relevant half of a mapped condition. -/
+def Scry.pickNull (a b : Option ACond) : Option ACond :=
+  match a with
+  | .some (.isNull _) => a
+  | .some (.notNull _) => a
+  | _ => b
+
+def Scry.negCond : ACond → ACond
+  | .lt x e => .ge x e
+  | .le x e => .gt x e
+  | .gt x e => .le x e
+  | .ge x e => .lt x e
+  | .eq x e => .ne x e
+  | .ne x e => .eq x e
+  | .isNull x => .notNull x
+  | .notNull x => .isNull x
+
+/-- Map a Wil condition to an abstract guard. `zero` registers make `p == 0` an
+`isNull`/`notNull` test, which is what the guard kill uses. -/
+def Scry.nCond (consts : List (Nat × Option Nat)) (c : Wil.Cond) : Option ACond :=
+  match c with
+  | .const _ => .none
+  | .not c1 => match Scry.nCond consts c1 with
+    | .none => .none
+    | .some a => .some (Scry.negCond a)
+  | .and a b => Scry.pickNull (Scry.nCond consts a) (Scry.nCond consts b)
+  | .or _ _ => .none
+  | .cmp op a b =>
+    let za := Scry.constOfVar consts a.index;
+    let zb := Scry.constOfVar consts b.index;
+    match op with
+    | .eq => match zb with
+      | .some 0 => .some (.isNull a.index)
+      | _ => match za with
+        | .some 0 => .some (.isNull b.index)
+        | _ => .some (.eq a.index (AExpr.var b.index))
+    | .ne => match zb with
+      | .some 0 => .some (.notNull a.index)
+      | _ => match za with
+        | .some 0 => .some (.notNull b.index)
+        | _ => .some (.ne a.index (AExpr.var b.index))
+    | .lt => .some (.lt a.index (AExpr.var b.index))
+    | .le => .some (.le a.index (AExpr.var b.index))
+    | .gt => .some (.gt a.index (AExpr.var b.index))
+    | .ge => .some (.ge a.index (AExpr.var b.index))
+    | _ => .none
+
+/-- Evaluate a condition whose operands are known in the post-fixpoint state. -/
+def Scry.cmpKnown (op : Wil.Op) (a b : Nat) : Option Bool :=
+  match op with
+  | .eq => .some (Nat.beq a b)
+  | .ne => .some (Bool.not (Nat.beq a b))
+  | .lt => .some (Nat.lt a b)
+  | .le => .some (Nat.le a b)
+  | .gt => .some (Nat.lt b a)
+  | .ge => .some (Nat.le b a)
+  | _ => .none
+
+def Scry.condKnown (env : AiEnv) (c : Wil.Cond) : Option Bool :=
+  match c with
+  | .const b => .some b
+  | .not c1 => match Scry.condKnown env c1 with
+    | .some b => .some (Bool.not b)
+    | .none => .none
+  | .and a b => match Scry.condKnown env a, Scry.condKnown env b with
+    | .some .false, _ => .some .false
+    | _, .some .false => .some .false
+    | .some .true, .some .true => .some .true
+    | _, _ => .none
+  | .or a b => match Scry.condKnown env a, Scry.condKnown env b with
+    | .some .true, _ => .some .true
+    | _, .some .true => .some .true
+    | .some .false, .some .false => .some .false
+    | _, _ => .none
+  | .cmp op a b =>
+    let va := AiEnv.getD env a.index Value.top;
+    let vb := AiEnv.getD env b.index Value.top;
+    match va.cst, vb.cst with
+    | .known x, .known y => Scry.cmpKnown op x y
+    | .known 0, _ =>
+      match op with
+      | .eq => match vb.nul with
+        | .nul => .some .true
+        | .nonNull => .some .false
+        | _ => .none
+      | .ne => match vb.nul with
+        | .nul => .some .false
+        | .nonNull => .some .true
+        | _ => .none
+      | _ => .none
+    | _, .known 0 =>
+      match op with
+      | .eq => match va.nul with
+        | .nul => .some .true
+        | .nonNull => .some .false
+        | _ => .none
+      | .ne => match va.nul with
+        | .nul => .some .false
+        | .nonNull => .some .true
+        | _ => .none
+      | _ => .none
+    | _, _ => match op with
+      | .eq => match va.nul, vb.nul with
+        | .nul, .nul => .some .true
+        | .nul, .nonNull => .some .false
+        | .nonNull, .nul => .some .false
+        | _, _ => .none
+      | .ne => match va.nul, vb.nul with
+        | .nul, .nul => .some .false
+        | .nul, .nonNull => .some .true
+        | .nonNull, .nul => .some .true
+        | _, _ => .none
+      | _ => .none
+
+-- ## Statements
+
+/-- The abstract value of a Wil right-hand side. A loaded pointer and a call result are
+unknown; allocations are **maybe null** (they can fail); a stack slot is a fresh non-null
+object. -/
+def Scry.nRhs (fn : Wil.Func) (tab : List (String × Nat)) (e : Wil.Rhs) : AExpr :=
+  match e with
+  | .use v => AExpr.var v.index
+  | .cst .nul => AExpr.null
+  | .cst (.int _ _ n) => AExpr.lit n
+  | .cst (.ptr _ _) => AExpr.alloc (AExpr.lit 1)
+  | .cst .undef => AExpr.var (Scry.nHavoc fn)
+  | .bin op a b => match op with
+    | .add => AExpr.add (AExpr.var a.index) (AExpr.var b.index)
+    | .sub => AExpr.sub (AExpr.var a.index) (AExpr.var b.index)
+    | .mul => AExpr.mul (AExpr.var a.index) (AExpr.var b.index)
+    | _ => AExpr.var (Scry.nHavoc fn)
+  | .un _ _ => AExpr.var (Scry.nHavoc fn)
+  | .load p => AExpr.load p.index (AExpr.lit 0) 1
+  | .gep p _ => AExpr.var p.index
+  | .gepVar p _ _ => AExpr.var p.index
+  | .alloc _ => AExpr.var (Scry.nHavoc fn)
+  | .slot _ => AExpr.alloc (AExpr.lit 1)
+  | .globalRef _ => AExpr.alloc (AExpr.lit 1)
+  | .fnptr _ => AExpr.alloc (AExpr.lit 1)
+  | .havoc _ => AExpr.var (Scry.nHavoc fn)
+
+/-- The abstract statements of one Wil statement. A call contributes its result (a
+constant when the callee's return summary proves one, otherwise an unknown). -/
+def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
+    (consts : List (Nat × Option Nat)) (s : Wil.Stmt) : List AStmt :=
+  match s with
+  | .assign x (.load p) _ =>
+    -- Two statements: one checks the base (the alarm), the other gives the loaded
+    -- value a **non-null** abstract value. A pointer read out of memory is not tracked
+    -- as a null field (no memory nullness); treating it as maybe-null would warn on
+    -- every `p = s->field; p->x` chain. The access through the base is still checked.
+    List.cons (AStmt.assign (Scry.nHavoc fn) (AExpr.load p.index (AExpr.lit 0) 1))
+      (List.cons (AStmt.assign x.index (AExpr.alloc (AExpr.lit 1))) .nil)
+  | .assign x e _ =>
+    let rhs : AExpr := match e, x.ty with
+      | .cst (.int _ _ 0), .ptr _ => AExpr.null
+      | _, _ => Scry.nRhs fn tab e;
+    List.cons (AStmt.assign x.index rhs) .nil
+  | .assume c _ => match Scry.nCond consts c with
+    | .some a => List.cons (AStmt.assume a) .nil
+    | .none => .nil
+  | .store p _ _ => List.cons (AStmt.store p.index (AExpr.lit 0) 1) .nil
+  | .free _ _ => .nil
+  | .call r callee _args _ =>
+    match r with
+    | .some v =>
+      let e := match callee with
+        | .direct name => match Scry.retConstOfName tab name with
+          | .some 0 => match v.ty with
+            | .ptr _ => AExpr.null
+            | _ => AExpr.lit 0
+          | .some n => AExpr.lit n
+          | .none => AExpr.var (Scry.nHavoc fn)
+        | .indirect _ => AExpr.var (Scry.nHavoc fn);
+      List.cons (AStmt.assign v.index e) .nil
+    | .none => .nil
+  | .nop _ => .nil
+
+/-- The number of CFG blocks a point needs (at least one, so a terminator has a block to
+carry its guards). -/
+def Scry.nSize (fn : Wil.Func) (tab : List (String × Nat))
+    (consts : List (Nat × Option Nat)) (g : Scry.Fn) (p : Nat) : Nat :=
+  match Scry.nodeStmt g p with
+  | .none => 1
+  | .some s => Nat.max 1 (List.length (Scry.nStmts fn tab consts s))
+
+def Scry.nStmtAt (fn : Wil.Func) (tab : List (String × Nat))
+    (consts : List (Nat × Option Nat)) (g : Scry.Fn) (p : Nat) (j : Nat) : AStmt :=
+  match Scry.nodeStmt g p with
+  | .none => AStmt.skip
+  | .some s => match Wil.listNth (Scry.nStmts fn tab consts s) j with
+    | .some a => a
+    | .none => AStmt.skip
+
+/-- Allocate block bases: point `p` owns `[base, base + size)`. -/
+def Scry.nBases (fn : Wil.Func) (tab : List (String × Nat))
+    (consts : List (Nat × Option Nat)) (g : Scry.Fn) :
+    List (Nat × Nat × Nat) × Nat :=
+  List.foldl (fun acc p =>
+    let size := Scry.nSize fn tab consts g p;
+    (List.append acc.1 (List.cons (p, acc.2, size) .nil), Nat.add acc.2 size))
+    (.nil, 0) (Scry.range g.count)
+
+def Scry.nBaseOf (bases : List (Nat × Nat × Nat)) (p : Nat) : Nat :=
+  match List.find (fun t => Nat.beq t.1 p) bases with
+  | .some t => t.2.1
+  | .none => 0
+
+def Scry.nSizeOf (bases : List (Nat × Nat × Nat)) (p : Nat) : Nat :=
+  match List.find (fun t => Nat.beq t.1 p) bases with
+  | .some t => t.2.2
+  | .none => 1
+
+def Scry.nLastOf (bases : List (Nat × Nat × Nat)) (p : Nat) : Nat :=
+  Nat.sub (Nat.add (Scry.nBaseOf bases p) (Scry.nSizeOf bases p)) 1
+
+/-- Translate one function to an `ACfg`. -/
+def Scry.translate (fn : Wil.Func) (tab : List (String × Nat)) : Scry.NCfg :=
+  let g := Scry.flatten fn;
+  let consts := Scry.constVars g;
+  let bases := (Scry.nBases fn tab consts g).1;
+  let blocks := Scry.concatLists (fun p =>
+    let base := Scry.nBaseOf bases p;
+    let size := Scry.nSizeOf bases p;
+    List.map (fun j => (Nat.add base j, Scry.NBlock.mk p (Scry.nStmtAt fn tab consts g p j)))
+      (Scry.range size)) (Scry.range g.count);
+  let stmts := List.map (fun b => (b.1, b.2.stmt)) blocks;
+  let intra := Scry.concatLists (fun p =>
+    let base := Scry.nBaseOf bases p;
+    let size := Scry.nSizeOf bases p;
+    List.map (fun j => AEdge.mk (Nat.add base j) (Nat.add base (Nat.succ j)) .none)
+      (Scry.range (Nat.sub size 1))) (Scry.range g.count);
+  let inter := Scry.concatLists (fun p =>
+    let from := Scry.nLastOf bases p;
+    match Scry.nodeTerm g p with
+    | .some (.br c t f _) =>
+      let ca := Scry.nCond consts c;
+      let cf : Option ACond := match ca with
+        | .none => .none
+        | .some a => .some (Scry.negCond a);
+      List.cons (AEdge.mk from (Scry.nBaseOf bases (Scry.nodeOf g t 0)) ca)
+        (List.cons (AEdge.mk from (Scry.nBaseOf bases (Scry.nodeOf g f 0)) cf) .nil)
+    | _ =>
+      List.map (fun q => AEdge.mk from (Scry.nBaseOf bases q) .none) (Scry.succs g p))
+    (Scry.range g.count);
+  Scry.NCfg.mk
+    (ACfg.mk (Scry.nBaseOf bases (Scry.entryNode g)) (Scry.nVars fn) stmts
+      (List.append intra inter))
+    blocks bases
+
+-- ## Reachability and alarms
+
+/-- The reachable Wil points under the post-fixpoint state. A branch whose condition is
+constant-false only keeps the other target, so a guarded block is not alarmed. -/
+partial def Scry.nReachGo (g : Scry.Fn) (ncfg : Scry.NCfg) (st : AState)
+    (work : List Nat) (seen : List Nat) : List Nat :=
+  match work with
+  | .nil => seen
+  | .cons p rest =>
+    match Scry.memNat p seen with
+    | .true => Scry.nReachGo g ncfg st rest seen
+    | .false =>
+      let seen' := List.cons p seen;
+      let succs := Scry.succs g p;
+      let next := match Scry.nodeTerm g p with
+        | .some (.br c t f _) =>
+          let env := AState.at ncfg.cfg st (Scry.nLastOf ncfg.bases p);
+          match Scry.condKnown env c with
+          | .some .true => List.cons (Scry.nodeOf g t 0) .nil
+          | .some .false => List.cons (Scry.nodeOf g f 0) .nil
+          | .none => succs
+        | _ => succs;
+      Scry.nReachGo g ncfg st (List.append rest next) seen'
+
+/-- The warning detail for a block: a load or a store through a possibly-null register. -/
+def Scry.nullDetail (b : Scry.NBlock) : String :=
+  match b.stmt with
+  | .assign _ (.load arr _ _) =>
+    "load through pointer register " ++ Nat.repr arr ++ ", which may be null"
+  | .store arr _ _ =>
+    "store through pointer register " ++ Nat.repr arr ++ ", which may be null"
+  | _ => "memory access through a pointer that may be null"
+
+/-- The null-dereference warnings of one translated function. -/
+def Scry.nullWarningsOfCfg (fnName : String) (ncfg : Scry.NCfg) (st : AState)
+    (reach : List Nat) : List Scry.MemWarning :=
+  Scry.concatLists (fun b =>
+    let point := b.2.point;
+    match Scry.memNat point reach with
+    | .false => .nil
+    | .true =>
+      let alarms := AStmt.alarms (AiMach.mk 64) b.1
+        (AState.at ncfg.cfg st b.1) b.2.stmt;
+      let nulls := List.filter (fun a => match a with
+        | .nullDeref _ => .true
+        | _ => .false) alarms;
+      List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point
+        (Scry.nullDetail b.2)) nulls) ncfg.blocks
+
+/-- The null-dereference warnings of one function. -/
+def Scry.nullWarningsOfFunc (fn : Wil.Func) (tab : List (String × Nat)) : List Scry.MemWarning :=
+  let g := Scry.flatten fn;
+  match Nat.le g.count Scry.maxNullPoints with
+  | .false => .nil
+  | .true =>
+    let ncfg := Scry.translate fn tab;
+    let st := fixpointFrom (AiMach.mk 64) ncfg.cfg (Scry.nEntryEnv fn);
+    let reach := Scry.nReachGo g ncfg st
+      (List.cons (Scry.entryNode g) .nil) .nil;
+    Scry.nullWarningsOfCfg fn.name ncfg st reach
+
+/-- Deduplicate null warnings by function and point (one per memory access). -/
+def Scry.dedupNullWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
+  List.foldl (fun acc w =>
+    let key := w.func ++ "|" ++ Nat.repr w.point;
+    match List.any (fun x => String.eq (x.func ++ "|" ++ Nat.repr x.point) key) acc with
+    | .true => acc
+    | .false => List.append acc (List.cons w .nil)) .nil ws
+
+/-- Every null-dereference warning of a program. `Scry.analyzeWithNull` runs it; the
+default `Scry.analyze` does not (the CLI flag is `--null-deref`). -/
+def Scry.nullDerefWarnings (p : Wil.Program) : List Scry.MemWarning :=
+  let tab := Scry.retConstTable p;
+  Scry.dedupNullWarnings
+    (Scry.concatLists (fun fn => Scry.nullWarningsOfFunc fn tab) p.funcs)

@@ -1,0 +1,648 @@
+import Word
+import IO
+import Functor
+import Sys
+import Text
+import WordArray
+
+/-!
+# Slice 3: the read-only `mmap` page decoder
+
+The read path of the storage engine (`wiz-notes/storage-engine.md`, slice 3): a
+read-only mapping of the store's file, the 32-byte page header, the 32-byte primary node
+records, the B+tree walk, the two meta slots, and a per-page checksum that can be
+skipped on the hot path.
+
+* `Map` is a `foreign_type` in the `lib/Sys.wiz` style: `Map.ofFd` is `mmap` (read-only,
+  `PROT_READ | MAP_SHARED`), the finalizer is `munmap`, `Map.len` is the mapped length,
+  and `Map.getU64At` is the bounds-checked unaligned wide load (`none` outside the
+  mapping) — a bad page number or offset is an error, never a `SIGSEGV`. `Map.getU64`
+  is the same load without the check, for offsets a caller has already checked (the
+  decoder only uses it after `Store.pageBase` or a meta-slot bound).
+* Pages are read in place: a `MappedSnapshot` holds the `Map` handle and a root page number,
+  and a lookup copies one 32-byte record, never a page. The mapping is reference
+  counted like every other `foreign_type`, so a snapshot kept across a commit keeps its
+  mapping alive.
+* Writes do not go through the map. The commit path is `pwrite` + `fsync` (slice 2), so
+  the mapping is read-only and no `msync` is needed.
+* `Store.checkPage`/`MappedSnapshot.getNodeWith`/`MappedSnapshot.indexBucketWith` take a
+  `verify : Bool`: `.true` recomputes the page's FNV-1a-64 checksum, `.false` only
+  bounds-checks the page. The wrappers `MappedSnapshot.open`, `MappedSnapshot.getNode` and
+  `MappedSnapshot.indexBucket` verify by default (the first slice's choice). The meta slots
+  are always checksummed (two 64-byte reads per open), so a torn meta write is never
+  read.
+
+## The format this decoder assumes (version 2)
+
+`wiz-notes/storage-engine.md` fixes the shape but not every byte value. This decoder was
+written before `store-durable` published its writer; the constants below were then pinned
+to that writer (the magic, the chained kind-1 leaf, the 96-byte meta record), so the two
+halves read and write one format:
+
+* page size 4096 B; page `p` is at `p * 4096`; the file is little-endian;
+* page header 32 B: `u16 kind` (0), `u16 n` (2), `u16 free` (4), `u16 flags` (6),
+  `u64 txid` (8), `u64 checksum` (16), `u32 right` (24), `u32 reserved` (28);
+* page kinds: 1 leaf, 2 internal, 3 index-leaf, 4 index-internal, 5 free, 6 log,
+  7 meta (the note lists the kinds but not their numbers). The writer uses kind 1 only:
+  the primary records are one chained run of leaves, followed through `right`;
+* primary leaf record 32 B: `u64 node id` (0), `u32 kind` (8), `u32 label` (12),
+  `u64 count` (16), `u64 version` (24), slots at `32 + i*32` (the note's "the node id
+  is the key, so it is not repeated" contradicts its own arithmetic — 32 B a record,
+  127 a leaf, the slot at `32 + i*32` — so the explicit field list, which includes the
+  key, is the one implemented; a B+tree leaf needs the key to answer a range scan);
+* primary internal record 16 B: `u64 key` (0), `u32 child` (8), `u32 pad` (12), slots
+  at `32 + i*16`; the child is the last entry whose key is `<=` the target, or the
+  first entry when the target is below all of them;
+* index leaf record 16 B: `u64 value` (0), `u64 node` (8). The note's "8 B with the
+  node id in the value slot" for a unique index has no decodable reading (a lookup by
+  value needs the value in the entry), so both kinds use the 16 B record and
+  uniqueness stays a constraint, not a layout;
+* meta record: the note's field list is 96 B (magic, format, flags, txid, root,
+  index_root, freelist_root, log_end, del_epoch, min_gen, schema_gen, page_count,
+  checksum) but its text says "two 64-byte slots". The decoder tries 96 B (checksum
+  at 88) and then 64 B (checksum at 56), so either choice reads. Fields before
+  `index_root` — all the read path needs — are at the same offsets in both;
+* meta slots are searched at offsets 0, 64 and 4096, because §2.2 puts slot B on page
+  1 and §2.3 puts two 64-byte slots on page 0; the valid slot with the larger `txid`
+  wins;
+* magic: the note gives no value, so a nonzero magic plus a valid checksum and
+  `format = 2` identifies a slot (`Store.metaMagic` is what the writer uses);
+* `format = 2`; checksums are FNV-1a-64 over the page (or meta record) with the
+  checksum field zeroed, offset basis `0xcbf29ce484222325`, prime `0x100000001b3`;
+* never-reuse pages: roots and snapshots are valid forever; compaction renames a new
+  file (a mapped snapshot keeps the old inode).
+-/
+
+-- ## The mapping: `mmap`/`munmap` and the wide load
+
+/-- A read-only mapping of a store file. Like `Fd`, an ordinary reference-counted
+`foreign_type`: copies share the mapping and it is unmapped when the last one goes. -/
+foreign_type Map (finalizer := "wiz_store_map_free")
+/-- `mmap` the descriptor read-only. `len` is clamped to the file's size (mapping past
+the end of a file would `SIGBUS` on the first read there), and 0 is `EINVAL`; an error
+is `NULL` and `Sys.errno`. The descriptor may be closed once the map exists. -/
+extern "wiz_store_mmap_ro" Map.ofFd : Fd → Nat → IO Map
+/-- The mapped length in bytes. -/
+extern "wiz_store_map_len" Map.len : Map → Nat
+/-- The little-endian `u64` at byte offset `off`, or `none` when the eight bytes are not
+all inside the mapping. This is the safe load: an out-of-range offset is a value, not a
+fault. Unaligned offsets are fine (`memcpy` in C). -/
+extern "wiz_store_get_u64_at" Map.getU64At : Map → Nat → Option U64
+/-- The same load without the bounds check. Only for offsets the caller has checked
+against `Map.len` (the decoder checks the page once, then reads the page's fields). -/
+extern "wiz_store_get_u64" Map.getU64 : Map → Nat → U64
+
+/-- `mmap` a descriptor, failing with the C library's message (`Sys.check`). -/
+def Store.mapFile (fd : Fd) (length : Nat) : EIO Map := Sys.check "mmap" (Map.ofFd fd length)
+
+-- ## The format, version 2
+
+/-- `4096`: the unit of COW, checksum and mapping. -/
+def Store.pageSize : Nat := 4096
+/-- The page header's size in bytes. -/
+def Store.headerSize : Nat := 32
+/-- A primary node record's size in bytes. -/
+def Store.recordSize : Nat := 32
+/-- An index leaf record's size in bytes (`value`, `node`). -/
+def Store.indexRecordSize : Nat := 16
+/-- An internal page record's size (`key`, `child`, `pad`). -/
+def Store.internalRecordSize : Nat := 16
+/-- The on-disk format version (`meta.format`). Version 2 adds the registry root at meta
+offset 40; the read path ignores it, so the fields it uses are unchanged. -/
+def Store.formatVersion : Nat := 2
+/-- The on-disk magic (`store-durable`'s `metaMagic`). -/
+def Store.metaMagic : U64 := U64.ofNat 0x57495a53544f5245
+/-- The offsets a meta slot may start at (page 0, its second 64-byte slot, page 1). -/
+def Store.metaOffsets : List Nat := [0, 64, 4096]
+/-- The deepest tree walk accepted before the file is called cyclic/corrupt. -/
+def Store.maxDepth : Nat := 64
+
+/-- The page kinds of version 2. -/
+inductive PageKind where
+  | leaf
+  | internal
+  | indexLeaf
+  | indexInternal
+  | free
+  | log
+  | meta
+  | other (code : Nat)
+
+/-- The kind for a header's `u16`. -/
+def PageKind.ofNat (n : Nat) : PageKind :=
+  match n with
+  | 1 => .leaf
+  | 2 => .internal
+  | 3 => .indexLeaf
+  | 4 => .indexInternal
+  | 5 => .free
+  | 6 => .log
+  | 7 => .meta
+  | k => .other k
+
+/-- The number on disk for a kind (`other k` is `k`). -/
+def PageKind.code : PageKind → Nat
+  | .leaf => 1
+  | .internal => 2
+  | .indexLeaf => 3
+  | .indexInternal => 4
+  | .free => 5
+  | .log => 6
+  | .meta => 7
+  | .other k => k
+
+/-- What the decoder refuses. `outOfRange` is a read outside the mapping or a page — the
+safe path instead of a fault; `corrupt` is a checksum mismatch. -/
+inductive StoreError where
+  | outOfRange (what : String) (offset : Nat) (length : Nat)
+  | corrupt (page : U64) (expected : U64) (found : U64)
+  | badKind (page : U64) (kind : Nat)
+  | badMeta
+  | badFormat (format : Nat)
+  | tooDeep (page : U64)
+
+/-- A readable message (the test prints it; a real caller matches instead). -/
+def StoreError.message : StoreError → String
+  | .outOfRange what off len =>
+    String.append "out of range: " (String.append what
+      (String.append " at " (String.append (Nat.toString off)
+        (String.append " + " (Nat.toString len)))))
+  | .corrupt page expected found =>
+    String.append "corrupt page " (String.append (Nat.toString (UIntN.toNat page))
+      (String.append ": checksum " (String.append (Nat.toString (UIntN.toNat expected))
+        (String.append " != " (Nat.toString (UIntN.toNat found))))))
+  | .badKind page kind =>
+    String.append "page " (String.append (Nat.toString (UIntN.toNat page))
+      (String.append " has kind " (Nat.toString kind)))
+  | .badMeta => "no valid meta slot"
+  | .badFormat f => String.append "format " (String.append (Nat.toString f) ", expected 2")
+  | .tooDeep page =>
+    String.append "walk too deep at page " (Nat.toString (UIntN.toNat page))
+
+-- ## The page header
+
+/-- The decoded 32-byte page header. `kindCode` is the `u16` as stored. -/
+structure PageHeader where
+  kind : PageKind
+  kindCode : Nat
+  n : Nat
+  free : Nat
+  flags : Nat
+  txid : U64
+  checksum : U64
+  right : U64
+
+/-- The header at an already-bounds-checked page base. -/
+def Store.headerAt (m : Map) (base : Nat) : PageHeader :=
+  let w0 := UIntN.toNat (Map.getU64 m base);
+  let kind := Nat.land w0 0xffff;
+  let right := Nat.land (UIntN.toNat (Map.getU64 m (Nat.add base 24))) 0xffffffff;
+  PageHeader.mk (PageKind.ofNat kind) kind
+    (Nat.land (Nat.shiftRight w0 16) 0xffff)
+    (Nat.land (UIntN.toNat (Map.getU64 m (Nat.add base 4))) 0xffff)
+    (Nat.land (Nat.shiftRight (UIntN.toNat (Map.getU64 m (Nat.add base 4))) 16) 0xffff)
+    (Map.getU64 m (Nat.add base 8))
+    (Map.getU64 m (Nat.add base 16))
+    (U64.ofNat right)
+
+/-- The byte offset of page `page`, or `outOfRange` when the whole page is not inside
+the mapping. Every tree read starts here; the unchecked `Map.getU64` calls after it are
+inside the page. -/
+def Store.pageBase (m : Map) (page : U64) : Except StoreError Nat :=
+  let off := Nat.mul (UIntN.toNat page) Store.pageSize;
+  match Nat.le (Nat.add off Store.pageSize) (Map.len m) with
+  | .true => .ok off
+  | .false => .error (.outOfRange "page" off Store.pageSize)
+
+/-- The header of a page, bounds-checked. -/
+def Store.header (m : Map) (page : U64) : Except StoreError PageHeader :=
+  match Store.pageBase m page with
+  | .error e => .error e
+  | .ok base => .ok (Store.headerAt m base)
+
+-- ## Checksums: FNV-1a-64, over the page with the checksum field zeroed
+
+/-- FNV-1a-64's offset basis. -/
+def Store.fnvOffset : U64 := U64.ofNat 0xcbf29ce484222325
+/-- FNV-1a-64's prime. -/
+def Store.fnvPrime : U64 := U64.ofNat 0x100000001b3
+/-- One FNV-1a-64 byte (the number's low eight bits). -/
+def Store.fnvByte (h : U64) (b : Nat) : U64 :=
+  UIntN.mul (UIntN.xor h (U64.ofNat (Nat.mod b 256))) Store.fnvPrime
+
+/-- FNV-1a-64 over a byte list (the reference definition; the test builds its fixture
+with this one). -/
+def Store.fnvBytesFrom : U64 → List Nat → U64
+  | h, .nil => h
+  | h, .cons b bs => Store.fnvBytesFrom (Store.fnvByte h b) bs
+
+/-- FNV-1a-64 over a byte list. -/
+def Store.fnvBytes (bs : List Nat) : U64 := Store.fnvBytesFrom Store.fnvOffset bs
+
+/-- FNV-1a-64 over `bs` with the `skipLen` bytes at `skip` read as zero (the checksum
+field): the writer's definition. -/
+def Store.fnvExceptFrom : U64 → Nat → Nat → Nat → List Nat → U64
+  | h, i, skip, skipLen, .nil => h
+  | h, i, skip, skipLen, .cons b bs =>
+    let inSkip := if Nat.le skip i then Nat.lt i (Nat.add skip skipLen) else Bool.false;
+    Store.fnvExceptFrom (Store.fnvByte h (if inSkip then 0 else b))
+      (Nat.succ i) skip skipLen bs
+
+/-- FNV-1a-64 over `bs`, with the checksum field at `skip` zeroed. -/
+def Store.fnvExcept (bs : List Nat) (skip : Nat) (skipLen : Nat) : U64 :=
+  Store.fnvExceptFrom Store.fnvOffset 0 skip skipLen bs
+
+/-- The checksum of a page image (the field at byte 16 is zeroed). -/
+def Store.pageChecksum (bytes : List Nat) : U64 := Store.fnvExcept bytes 16 8
+
+/-- The checksum of a meta record of `width` bytes (the field in its last eight bytes
+is zeroed). Only the record's `width` bytes are folded: the rest of the page is not
+part of it. -/
+def Store.metaChecksumBytes (bytes : List Nat) (width : Nat) : U64 :=
+  Store.fnvExcept (List.take width bytes) (Nat.sub width 8) 8
+
+/-- Byte `k` of a little-endian word. -/
+def Store.wordByte (w : U64) (k : Nat) : Nat :=
+  UIntN.toNat (UIntN.land (UIntN.shiftRight w (Nat.mul 8 k)) (U64.ofNat 255))
+
+/-- One FNV-1a-64 word: its eight little-endian bytes, in order. -/
+def Store.fnvWord (h0 : U64) (w : U64) : U64 :=
+  let h1 := Store.fnvByte h0 (Store.wordByte w 0);
+  let h2 := Store.fnvByte h1 (Store.wordByte w 1);
+  let h3 := Store.fnvByte h2 (Store.wordByte w 2);
+  let h4 := Store.fnvByte h3 (Store.wordByte w 3);
+  let h5 := Store.fnvByte h4 (Store.wordByte w 4);
+  let h6 := Store.fnvByte h5 (Store.wordByte w 5);
+  let h7 := Store.fnvByte h6 (Store.wordByte w 6);
+  Store.fnvByte h7 (Store.wordByte w 7)
+
+/-- The page's checksum, folded eight bytes at a time. `i` is the word index, `fuel` the
+words left; word 2 (byte 16, the checksum field) reads as zero. -/
+def Store.pageChecksumFrom : Map → Nat → Nat → Nat → U64 → U64
+  | m, base, i, .zero, h => h
+  | m, base, i, .succ f, h =>
+    let w := match Nat.beq i 2 with
+      | .true => U64.ofNat 0
+      | .false => Map.getU64 m (Nat.add base (Nat.mul i 8));
+    Store.pageChecksumFrom m base (Nat.succ i) f (Store.fnvWord h w)
+
+/-- The checksum stored in the header of a page (bounds-checked). -/
+def Store.pageChecksumAt (m : Map) (page : U64) : Except StoreError U64 :=
+  match Store.pageBase m page with
+  | .error e => .error e
+  | .ok base => .ok (Store.pageChecksumFrom m base 0 (Nat.div Store.pageSize 8) Store.fnvOffset)
+
+/-- Verify a page's checksum. -/
+def Store.verifyPage (m : Map) (page : U64) : Except StoreError Unit :=
+  match Store.pageBase m page with
+  | .error e => .error e
+  | .ok base =>
+    let hdr := Store.headerAt m base;
+    let found := Store.pageChecksumFrom m base 0 (Nat.div Store.pageSize 8) Store.fnvOffset;
+    match UIntN.beq hdr.checksum found with
+    | .true => .ok ()
+    | .false => .error (.corrupt page hdr.checksum found)
+
+/-- Bounds-check a page, and verify its checksum when `verify` (the option the hot path
+turns off; the callers below default it on). -/
+def Store.checkPage (m : Map) (page : U64) (verify : Bool) : Except StoreError Unit :=
+  match verify with
+  | .true => Store.verifyPage m page
+  | .false => match Store.pageBase m page with
+    | .error e => .error e
+    | .ok _ => .ok ()
+
+-- ## Primary node records
+
+/-- The 32-byte record: the key (the node id) is stored first, then the fields. -/
+structure NodeRecord where
+  id : U64
+  kind : U64
+  label : U64
+  count : U64
+  version : U64
+
+/-- The record at slot `i` of an already-checked leaf page. -/
+def Store.recordAt (m : Map) (base : Nat) (i : Nat) : NodeRecord :=
+  let off := Nat.add base (Nat.add Store.headerSize (Nat.mul i Store.recordSize));
+  let kindLabel := Map.getU64 m (Nat.add off 8);
+  NodeRecord.mk (Map.getU64 m off)
+    (UIntN.resize 64 (UIntN.land kindLabel (U64.ofNat 0xffffffff)))
+    (UIntN.resize 64 (UIntN.shiftRight kindLabel 32))
+    (Map.getU64 m (Nat.add off 16))
+    (Map.getU64 m (Nat.add off 24))
+
+/-- Record `i` of a leaf page, checking the kind and the slot. -/
+def Store.nodeInLeaf (m : Map) (page : U64) (i : Nat) : Except StoreError NodeRecord :=
+  match Store.header m page with
+  | .error e => .error e
+  | .ok hdr =>
+    match hdr.kind with
+    | .leaf =>
+      match Nat.lt i hdr.n with
+      | .true => match Store.pageBase m page with
+        | .error e => .error e
+        | .ok base => .ok (Store.recordAt m base i)
+      | .false => .error (.outOfRange "leaf entry" i hdr.n)
+    | _ => .error (.badKind page hdr.kindCode)
+
+/-- Scan a leaf from slot `i`, `fuel` slots left, for `key`. -/
+def Store.findInLeafFrom : Map → Nat → Nat → Nat → U64 → Option NodeRecord
+  | m, base, i, .zero, key => .none
+  | m, base, i, .succ f, key =>
+    let rec := Store.recordAt m base i;
+    match UIntN.beq rec.id key with
+    | .true => .some rec
+    | .false => Store.findInLeafFrom m base (Nat.succ i) f key
+
+/-- The node with `key` in a leaf page (linear in `n`, at most 127 slots). -/
+def Store.findInLeaf (m : Map) (page : U64) (key : U64) : Except StoreError (Option NodeRecord) :=
+  match Store.header m page with
+  | .error e => .error e
+  | .ok hdr =>
+    match hdr.kind with
+    | .leaf => match Store.pageBase m page with
+      | .error e => .error e
+      | .ok base => .ok (Store.findInLeafFrom m base 0 hdr.n key)
+    | _ => .error (.badKind page hdr.kindCode)
+
+/-- Scan a leaf, then its `right` siblings: `store-durable` writes the primary records as
+one chained run of leaf pages (no internal pages yet), so a lookup that is not in the
+first page follows the chain. `fuel` bounds a corrupt cycle. -/
+def Store.findInChain : Map → U64 → U64 → Bool → Nat → Except StoreError (Option NodeRecord)
+  | _, _, _, _, .zero => .error (.tooDeep 0)
+  | m, page, key, verify, .succ f => match Store.checkPage m page verify with
+    | .error e => .error e
+    | .ok _ => match Store.header m page with
+      | .error e => .error e
+      | .ok hdr => match hdr.kind with
+        | .leaf => match Store.findInLeaf m page key with
+          | .error e => .error e
+          | .ok (.some r) => .ok (.some r)
+          | .ok .none => match UIntN.beq hdr.right (U64.ofNat 0) with
+            | .true => .ok .none
+            | .false => Store.findInChain m hdr.right key verify f
+        | _ => .error (.badKind page hdr.kindCode)
+
+-- ## The B+tree walk
+
+/-- The child for `key`: the last internal entry whose key is `<= key`, or the first
+entry when every key is greater (which the leaf search then answers with `none`). -/
+def Store.childFrom : Map → Nat → Nat → Nat → U64 → Option U64 → Option U64
+  | m, base, i, .zero, key, best => best
+  | m, base, i, .succ f, key, best =>
+    let ekey := Map.getU64 m (Nat.add base (Nat.add Store.headerSize (Nat.mul i Store.internalRecordSize)));
+    let echild := UIntN.resize 64 (UIntN.land
+      (Map.getU64 m (Nat.add base (Nat.add 40 (Nat.mul i Store.internalRecordSize))))
+      (U64.ofNat 0xffffffff));
+    let best' := match UIntN.le ekey key with
+      | .true => .some echild
+      | .false => best;
+    Store.childFrom m base (Nat.succ i) f key best'
+
+/-- The child of an internal page with `n` entries (primary or index: same shape). -/
+def Store.findChildOf (m : Map) (page : U64) (n : Nat) (key : U64) : Except StoreError U64 :=
+  match n with
+  | 0 => .error (.outOfRange "internal entry" 0 0)
+  | _ => match Store.pageBase m page with
+    | .error e => .error e
+    | .ok base =>
+      let first := UIntN.resize 64 (UIntN.land
+        (Map.getU64 m (Nat.add base 40)) (U64.ofNat 0xffffffff));
+      .ok (match Store.childFrom m base 0 n key .none with
+        | .some c => c
+        | .none => first)
+
+/-- The child page of an internal page for `key`. -/
+def Store.findChild (m : Map) (page : U64) (key : U64) : Except StoreError U64 :=
+  match Store.header m page with
+  | .error e => .error e
+  | .ok hdr =>
+    match hdr.kind with
+    | .internal => Store.findChildOf m page hdr.n key
+    | .indexInternal => Store.findChildOf m page hdr.n key
+    | _ => .error (.badKind page hdr.kindCode)
+
+/-- Walk from `page` to the node with `key`, `fuel` pages deep. Every page is checked
+(and, with `verify`, checksummed) on the way down. -/
+def Store.walkFrom : Map → U64 → U64 → Bool → Nat → Except StoreError (Option NodeRecord)
+  | m, page, key, verify, .zero => .error (.tooDeep page)
+  | m, page, key, verify, .succ f => match Store.checkPage m page verify with
+    | .error e => .error e
+    | .ok _ => match Store.header m page with
+      | .error e => .error e
+      | .ok hdr => match hdr.kind with
+        | .leaf => Store.findInChain m page key verify f
+        | .internal => match Store.findChild m page key with
+          | .error e => .error e
+          | .ok child => Store.walkFrom m child key verify f
+        | _ => .error (.badKind page hdr.kindCode)
+
+/-- The node with `key` under `root`: the snapshot root → pages path, verifying every
+page (the option is `walkFrom`'s). -/
+def Store.getNode (m : Map) (root : U64) (key : U64) (verify : Bool) :
+    Except StoreError (Option NodeRecord) :=
+  Store.walkFrom m root key verify Store.maxDepth
+
+-- ## Index leaves
+
+/-- The `value` of index slot `i` of an already-checked leaf. -/
+def Store.indexValueAt (m : Map) (base : Nat) (i : Nat) : U64 :=
+  Map.getU64 m (Nat.add base (Nat.add Store.headerSize (Nat.mul i Store.indexRecordSize)))
+
+/-- The `node` of index slot `i` of an already-checked leaf. -/
+def Store.indexNodeAt (m : Map) (base : Nat) (i : Nat) : U64 :=
+  Map.getU64 m (Nat.add base (Nat.add 40 (Nat.mul i Store.indexRecordSize)))
+
+/-- Collect the nodes whose value is `target` from slot `i`, `fuel` slots left, into
+`acc` (reversed). -/
+def Store.collectBucketFrom : Map → Nat → Nat → Nat → U64 → List U64 → List U64
+  | m, base, i, .zero, target, acc => acc
+  | m, base, i, .succ f, target, acc =>
+    let v := Store.indexValueAt m base i;
+    let acc' := match UIntN.beq v target with
+      | .true => List.cons (Store.indexNodeAt m base i) acc
+      | .false => acc;
+    Store.collectBucketFrom m base (Nat.succ i) f target acc'
+
+/-- An index leaf's bucket, following the `right` sibling links while they last. -/
+def Store.collectLeafChain : Map → U64 → U64 → Bool → Nat → Except StoreError (List U64)
+  | m, page, target, verify, .zero => .error (.tooDeep page)
+  | m, page, target, verify, .succ f => match Store.checkPage m page verify with
+    | .error e => .error e
+    | .ok _ => match Store.header m page with
+      | .error e => .error e
+      | .ok hdr => match hdr.kind with
+        | .indexLeaf => match Store.pageBase m page with
+          | .error e => .error e
+          | .ok base =>
+            let here := List.reverse (Store.collectBucketFrom m base 0 hdr.n target []);
+            match UIntN.beq hdr.right (U64.ofNat 0) with
+            | .true => .ok here
+            | .false => match Store.collectLeafChain m hdr.right target verify f with
+              | .error e => .error e
+              | .ok rest => .ok (List.append here rest)
+        | _ => .error (.badKind page hdr.kindCode)
+
+/-- The nodes in the index bucket for `value`, from an index root. Index internal pages
+have the primary internal shape. -/
+def Store.indexWalk : Map → U64 → U64 → Bool → Nat → Except StoreError (List U64)
+  | m, page, target, verify, .zero => .error (.tooDeep page)
+  | m, page, target, verify, .succ f => match Store.checkPage m page verify with
+    | .error e => .error e
+    | .ok _ => match Store.header m page with
+      | .error e => .error e
+      | .ok hdr => match hdr.kind with
+        | .indexLeaf => Store.collectLeafChain m page target verify f
+        | .indexInternal => match Store.findChild m page target with
+          | .error e => .error e
+          | .ok child => Store.indexWalk m child target verify f
+        | _ => .error (.badKind page hdr.kindCode)
+
+-- ## The meta slots
+
+/-- The fields of one meta slot that the read path uses; `width` is the record size the
+checksum matched (64 or 96). -/
+structure MetaSlot where
+  offset : Nat
+  width : Nat
+  format : Nat
+  txid : U64
+  root : U64
+  indexRoot : U64
+  pageCount : U64
+  delEpoch : U64
+
+/-- FNV-1a-64 over a meta record (`width` bytes), the last word zeroed. -/
+def Store.metaChecksumFrom : Map → Nat → Nat → Nat → Nat → U64 → U64
+  | m, off, i, .zero, last, h => h
+  | m, off, i, .succ f, last, h =>
+    let w := match Nat.beq i last with
+      | .true => U64.ofNat 0
+      | .false => Map.getU64 m (Nat.add off (Nat.mul i 8));
+    Store.metaChecksumFrom m off (Nat.succ i) f last (Store.fnvWord h w)
+
+/-- The checksum a `width`-byte meta record should have. -/
+def Store.metaChecksum (m : Map) (off : Nat) (width : Nat) : U64 :=
+  let words := Nat.div width 8;
+  Store.metaChecksumFrom m off 0 words (Nat.sub words 1) Store.fnvOffset
+
+/-- The record's checksum field. -/
+def Store.metaStoredChecksum (m : Map) (off : Nat) (width : Nat) : U64 :=
+  Map.getU64 m (Nat.add off (Nat.sub width 8))
+
+/-- The record's fields (the caller has bounds-checked `width` bytes). -/
+def Store.metaRecord (m : Map) (off : Nat) (width : Nat) : MetaSlot :=
+  let w1 := UIntN.toNat (Map.getU64 m (Nat.add off 8));
+  MetaSlot.mk off width (Nat.land w1 0xffffffff)
+    (Map.getU64 m (Nat.add off 16))
+    (Map.getU64 m (Nat.add off 24))
+    (Map.getU64 m (Nat.add off 32))
+    (match Nat.beq width 64 with
+      | .true => U64.ofNat 0
+      | .false => Map.getU64 m (Nat.add off 80))
+    (match Nat.beq width 64 with
+      | .true => U64.ofNat 0
+      | .false => Map.getU64 m (Nat.add off 56))
+
+/-- The slot at `off`: a nonzero magic and a checksum that matches 96 bytes (the full
+field list) or 64 (the short layout). -/
+def Store.metaSlotAt (m : Map) (off : Nat) : Except StoreError MetaSlot :=
+  match Nat.le (Nat.add off 64) (Map.len m) with
+  | .false => .error (.outOfRange "meta slot" off 64)
+  | .true =>
+    match UIntN.beq (Map.getU64 m off) (U64.ofNat 0) with
+    | .true => .error .badMeta
+    | .false =>
+      let ok96 := match Nat.le (Nat.add off 96) (Map.len m) with
+        | .true => UIntN.beq (Store.metaStoredChecksum m off 96)
+            (Store.metaChecksum m off 96)
+        | .false => Bool.false;
+      match ok96 with
+      | .true => .ok (Store.metaRecord m off 96)
+      | .false =>
+        let ok64 := UIntN.beq (Store.metaStoredChecksum m off 64)
+          (Store.metaChecksum m off 64);
+        match ok64 with
+        | .true => .ok (Store.metaRecord m off 64)
+        | .false => .error .badMeta
+
+/-- The valid slot with the larger `txid` among `offsets`, or `none`. -/
+def Store.pickMetaFrom : Map → Option MetaSlot → List Nat → Option MetaSlot
+  | m, best, .nil => best
+  | m, best, .cons off offs =>
+    let best' := match Store.metaSlotAt m off with
+      | .error _ => best
+      | .ok s => match best with
+        | .none => .some s
+        | .some b => match UIntN.lt b.txid s.txid with
+          | .true => .some s
+          | .false => best;
+    Store.pickMetaFrom m best' offs
+
+/-- The meta slot the read path uses: the valid slot with the larger `txid`. Both slots
+are always checksummed (two small reads), so a torn write is never read. -/
+def Store.pickMeta (m : Map) : Except StoreError MetaSlot :=
+  match Store.pickMetaFrom m .none Store.metaOffsets with
+  | .some s => .ok s
+  | .none => .error .badMeta
+
+-- ## A snapshot is a root pointer
+
+/-- A mapping and a root page: the mapped root (the prototype's is a `U64Map`).
+The map is a reference-counted handle; copying the root does not copy a page. -/
+structure MapRoot where
+  map : Map
+  page : U64
+
+/-- An immutable snapshot: a generation and a root page into the mapping. `getDb`
+returns one; reads go through `MappedSnapshot.getNode`/`MappedSnapshot.indexBucket`. -/
+structure MappedSnapshot where
+  gen : U64
+  root : MapRoot
+  indexRoot : U64
+
+/-- Open a snapshot: pick the valid meta slot, require format 1, and (with `verify`)
+checksum the root page. The meta checksums are always checked. -/
+def MappedSnapshot.openWith (m : Map) (verify : Bool) : Except StoreError MappedSnapshot :=
+  match Store.pickMeta m with
+  | .error e => .error e
+  | .ok meta => match Nat.beq meta.format Store.formatVersion with
+    | .false => .error (.badFormat meta.format)
+    | .true => match verify with
+      | .false => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
+      | .true => match Nat.beq meta.root.toNat 0 with
+        | .true => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
+        | .false => match Store.verifyPage m meta.root with
+          | .error e => .error e
+          | .ok _ => .ok (MappedSnapshot.mk meta.txid (MapRoot.mk m meta.root) meta.indexRoot)
+
+/-- Open a snapshot, verifying the root page's checksum (the default). -/
+def MappedSnapshot.open (m : Map) : Except StoreError MappedSnapshot := MappedSnapshot.openWith m .true
+
+/-- The node with `id` in the snapshot, verifying every page on the way (the first
+slice's default). -/
+def MappedSnapshot.getNode (s : MappedSnapshot) (id : U64) : Except StoreError (Option NodeRecord) :=
+  Store.getNode s.root.map s.root.page id .true
+
+/-- The node with `id`, skipping page checksums on the hot path (`verify := false` only
+for pages the caller trusts). -/
+def MappedSnapshot.getNodeWith (s : MappedSnapshot) (id : U64) (verify : Bool) :
+    Except StoreError (Option NodeRecord) :=
+  Store.getNode s.root.map s.root.page id verify
+
+/-- The nodes in the index bucket for `value`, verifying every page (the default). -/
+def MappedSnapshot.indexBucket (s : MappedSnapshot) (value : U64) : Except StoreError (List U64) :=
+  Store.indexWalk s.root.map s.indexRoot value .true Store.maxDepth
+
+/-- The index bucket, skipping page checksums on the hot path. -/
+def MappedSnapshot.indexBucketWith (s : MappedSnapshot) (value : U64) (verify : Bool) :
+    Except StoreError (List U64) :=
+  Store.indexWalk s.root.map s.indexRoot value verify Store.maxDepth
+
+/-- Map a file and open a snapshot from it: the IO shell the engine's `getDb` uses
+(`mapFile` then `MappedSnapshot.openWith`). -/
+def Store.openSnapshot (fd : Fd) (length : Nat) (verify : Bool) :
+    EIO (Except StoreError MappedSnapshot) := do
+  m ← Store.mapFile fd length;
+  EIO.pure (MappedSnapshot.openWith m verify)

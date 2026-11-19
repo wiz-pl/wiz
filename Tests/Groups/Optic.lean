@@ -19,11 +19,14 @@ def failsOptic (input : String) (fragment : String) : IO Unit := do
 def opticGroup : Group where
   name := "optic"
   exercise := "lib/Optic.wiz (Feral, RD11)"
+  parallel := true
   cases := [
     { name := "the optics library checks, with its lens laws", run := fun _ =>
-        okOptic "import Optic\n#check List.atL_lawful\n#check Lens.comp_lawful"
+        okOptic "import Optic\n#check List.atL_lawful\n#check Lens.comp_lawful\n#check Lens"
           ["List.atL_lawful : {A : Type} → (i : Nat) → PLens.Lawful (List A) A (List.atL A i)",
-           "Lens.comp_lawful : {S : Type} → {A : Type} → {B : Type} → (l : Lens S A) → (m : Lens A B) → Lens.Lawful S A l → Lens.Lawful A B m → Lens.Lawful S B (Lens.comp S A B l m)"] },
+           "Lens.comp_lawful : {S : Type} → {A : Type} → {B : Type} → (l : Lens S A) → (m : Lens A B) → Lens.Lawful S A l → Lens.Lawful A B m → Lens.Lawful S B (Lens.comp S A B l m)",
+           -- the store lens is small: the borrow lowering stores and returns it
+           "Lens : Type → Type → Type"] },
     { name := "lenses get, put and compose", run := fun _ =>
         okOptic ("import Optic\n#eval Lens.set Pair2.fstL (Pair2.mk 1 2) 5\n" ++
           "#eval Lens.over (Lens.comp Pair2.sndL Pair2.fstL) Nat.succ (Pair2.mk 1 (Pair2.mk 10 20))\n" ++
@@ -39,6 +42,12 @@ def opticGroup : Group where
         failsOptic ("import Optic\ndef bad : Lens (List Nat) Nat := fun s => match s with\n" ++
           "  | .nil => (0, fun a => List.cons a List.nil)\n  | .cons x xs => (x, fun a => List.cons a (List.cons a xs))\n" ++
           "def badGP : Lens.GetPut bad := fun s => refl s") "type mismatch" },
+    { name := "an optic that quantifies over a type constructor is Type 1 (predicative Pi rule)", run := fun _ =>
+        -- The minimal profunctor shape: no classes, just the `p : Type → Type → Type` binder.
+        -- This must fail by the Pi sort rule, not by non-cumulativity, so it stays a
+        -- `Type : Type` tripwire: cumulativity would only raise universes, never lower this.
+        failsOptic ("import Prelude\ndef Lens (S T A B : Type) : Type :=\n" ++
+          "  {p : Type → Type → Type} → (p A B → p S T)") "inferred: Type 1" },
     { name := "the frame rule for values: a zoom keeps every independent place", run := fun _ => do
         okOptic ("import Optic\n" ++
           "def t (m : Nat → Result (Unit × Nat)) (s : Pair2 Nat Nat) :\n" ++

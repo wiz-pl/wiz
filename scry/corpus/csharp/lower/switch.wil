@@ -1,0 +1,194 @@
+func Demo.Router.IntLabel(%0)
+  b0:
+    %1 = 0
+    %2 = eq %0, %1
+    %3 = 0
+    br ne %2, %3 ? b6 : b5
+  b1:
+    ret
+  b2:
+    %10 = global $str:"zero"
+    ret %10
+  b3:
+    %11 = global $str:"small"
+    ret %11
+  b4:
+    %12 = global $str:"many"
+    ret %12
+  b5:
+    %4 = 1
+    %5 = eq %0, %4
+    %6 = 0
+    br ne %5, %6 ? b8 : b7
+  b6:
+    goto b2
+  b7:
+    %7 = 2
+    %8 = eq %0, %7
+    %9 = 0
+    br ne %8, %9 ? b9 : b4
+  b8:
+    goto b3
+  b9:
+    goto b3
+func Demo.Router.StringLabel(%0)
+  b0:
+    %1 = global $str:"a"
+    %2 = eq %0, %1
+    %3 = 0
+    br ne %2, %3 ? b6 : b5
+  b1:
+    ret
+  b2:
+    %7 = global $str:"first"
+    ret %7
+  b3:
+    %8 = global $str:"second"
+    ret %8
+  b4:
+    %9 = global $str:"other"
+    ret %9
+  b5:
+    %4 = global $str:"b"
+    %5 = eq %0, %4
+    %6 = 0
+    br ne %5, %6 ? b7 : b4
+  b6:
+    goto b2
+  b7:
+    goto b3
+func Demo.Router.EnumLabel(%0)
+  b0:
+    %1 = 0
+    %2 = eq %0, %1
+    %3 = 0
+    br ne %2, %3 ? b6 : b5
+  b1:
+    ret
+  b2:
+    %7 = global $str:"idle"
+    ret %7
+  b3:
+    %8 = global $str:"busy"
+    ret %8
+  b4:
+    %9 = global $str:"down"
+    ret %9
+  b5:
+    %4 = 1
+    %5 = eq %0, %4
+    %6 = 0
+    br ne %5, %6 ? b7 : b4
+  b6:
+    goto b2
+  b7:
+    goto b3
+func Demo.Router.Typed(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br ne %2, %3 ? b4 : b3
+  b1:
+    ret
+  b2:
+    %4 = call System.String.get_Length(%1)
+    ret %4
+  b3:
+    %5 = 0
+    ret %5
+  b4:
+    %1 = %0
+    goto b2
+func Demo.Router.Guarded(%0)
+  b0:
+    %2 = havoc u1
+    %3 = 0
+    br ne %2, %3 ? b6 : b5
+  b1:
+    ret
+  b2:
+    %9 = global $str:"long"
+    ret %9
+  b3:
+    %10 = global $str:"short"
+    ret %10
+  b4:
+    %11 = global $str:"other"
+    ret %11
+  b5:
+    %7 = havoc u1
+    %8 = 0
+    br ne %7, %8 ? b7 : b4
+  b6:
+    %1 = %0
+    %4 = call System.String.get_Length(%1)
+    %5 = 3
+    br gt %4, %5 ? b2 : b5
+  b7:
+    %6 = %0
+    goto b3
+func Demo.Router.Arms(%0)
+  b0:
+    %2 = 0
+    %3 = eq %0, %2
+    %4 = 0
+    br ne %3, %4 ? b6 : b5
+  b1:
+    ret %1
+  b2:
+    %11 = global $str:"zero"
+    %1 = %11
+    goto b1
+  b3:
+    %12 = global $str:"small"
+    %1 = %12
+    goto b1
+  b4:
+    %13 = global $str:"many"
+    %1 = %13
+    goto b1
+  b5:
+    %5 = 1
+    %6 = eq %0, %5
+    %7 = 2
+    %8 = eq %0, %7
+    %9 = or %6, %8
+    %10 = 0
+    br ne %9, %10 ? b7 : b4
+  b6:
+    goto b2
+  b7:
+    goto b3
+func Demo.Router.ArmBinding(%0)
+  b0:
+    %3 = havoc u1
+    %4 = 0
+    br ne %3, %4 ? b6 : b5
+  b1:
+    ret %1
+  b2:
+    %10 = global $str:"long "
+    %11 = call System.String.Concat(%10, %2)
+    %1 = %11
+    goto b1
+  b3:
+    %12 = global $str:"short "
+    %13 = call System.String.Concat(%12, %7)
+    %1 = %13
+    goto b1
+  b4:
+    %14 = global $str:"other"
+    %1 = %14
+    goto b1
+  b5:
+    %8 = havoc u1
+    %9 = 0
+    br ne %8, %9 ? b7 : b4
+  b6:
+    %2 = %0
+    %5 = call System.String.get_Length(%2)
+    %6 = 3
+    br gt %5, %6 ? b2 : b5
+  b7:
+    %7 = %0
+    goto b3

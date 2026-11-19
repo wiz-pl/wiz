@@ -11,6 +11,7 @@ namespace Tests.Elab
 def backendGroup : Group where
   name := "backend"
   exercise := "Exercise 8.1"
+  parallel := true
   cases := [
     { name := "numbers through the IR", run := fun _ =>
         okLib "import Prelude\n#run 100 * 100 + 1" ["10001"] },
@@ -39,6 +40,18 @@ def backendGroup : Group where
     { name := "the IR, with reference counting (Exercise 8.1)", run := fun _ =>
         okLib "import Prelude\ndef twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)\n#ir twice"
           ["def twice x0 x1 :=\n  dup x0\n  let x2 := ap x0 x1\n  let x3 := ap x0 x2\n  ret x3"] },
+    { name := "a tag inspection borrows its scrutinee (8e)", run := fun _ => do
+        let src := "import Prelude\ndef count : Nat → Nat\n  | .zero => 0\n" ++
+          "  | .succ n => count n + 1\n#ir count\n#run count 1000\n"
+        let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
+        match (s.messages.toList.filter (·.severity == .info)).map (·.text) with
+        | [ir, run] =>
+          -- `dup x` before `natTag x` would count a scrutinee that the inspection
+          -- only reads (the branch's `nat.pred` consumes it, the other drops it)
+          check ((ir.splitOn "dup").length == 1) s!"the tag inspection duplicated its scrutinee:\n{ir}"
+          check ((ir.splitOn "natTag").length > 1) s!"no natTag in:\n{ir}"
+          checkEq "1000" run
+        | ms => throw (IO.userError s!"unexpected messages {ms}") },
     { name := "reuse: a dead cell is reused for a new one (Exercise 8.3)", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let src := "import Prelude\ndef inc : List Nat → List Nat\n  | .nil => .nil\n  | .cons x xs => .cons (x + 1) (inc xs)\n#ir inc\n#run inc (.cons 1 (.cons 2 .nil))"

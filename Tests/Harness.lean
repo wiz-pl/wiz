@@ -14,6 +14,27 @@ namespace Tests
 initialize toolchainRef : IO.Ref Wiz.Toolchain ← IO.mkRef {}
 /-- The toolchain flags, given again to each case's process. -/
 initialize flagsRef : IO.Ref (List String) ← IO.mkRef []
+/-- The driver's `--jobs N`, for a case that runs alone (a group that did not opt in to
+`Group.parallel`): such a case may use up to N workers of its own (`=selfhost-libdiff`
+checks its files N at a time). `Group.run` passes it to each case's process; the cases
+of a parallel group (`Group.runJobs`) get 1, since N of them already run at once. -/
+initialize caseJobsRef : IO.Ref Nat ← IO.mkRef 1
+/-- Whether the driver was given `--jobs` (so a case can tell an explicit `--jobs 1`
+from the default, which means "choose for yourself"). -/
+initialize caseJobsSetRef : IO.Ref Bool ← IO.mkRef false
+/-- The driver's `--part i/n`, for a case that is one part of a split sweep
+(`=selfhost-libdiff`): `Group.run` passes it to each case's process. Empty when it was
+not given, which is the whole sweep (`1/1`). -/
+initialize casePartRef : IO.Ref String ← IO.mkRef ""
+
+/-- How many workers a case may use (`caseJobsRef`); at least 1. -/
+def caseJobs : IO Nat := do pure (max 1 (← caseJobsRef.get))
+
+/-- Whether `--jobs` was given on the command line. -/
+def caseJobsGiven : IO Bool := caseJobsSetRef.get
+
+/-- The driver's `--part i/n` as it was given, or `""`. -/
+def casePart : IO String := casePartRef.get
 
 def toolchain : IO Wiz.Toolchain := toolchainRef.get
 
@@ -60,6 +81,41 @@ def checkEq {α : Type} [BEq α] [ToString α] (expected actual : α) : IO Unit 
   unless expected == actual do
     throw (IO.userError s!"expected {expected}\n      got {actual}")
 
+/-- The wall time of `f k` in milliseconds, best of `runs` (a shared machine stalls one
+run, not all of them). -/
+def bestMs (f : Nat → IO Unit) (k : Nat) (runs : Nat := 3) : IO Nat := do
+  let mut best := 1_000_000_000
+  for _ in [0:runs] do
+    let t0 ← IO.monoMsNow
+    f k
+    best := min best ((← IO.monoMsNow) - t0)
+  pure best
+
+/-- `checkScaling name f n bound`: a claim of "linear" measured at `n` and `2n`, not an
+absolute millisecond bound.
+
+Runs `f 0` once to measure the fixed floor (process start-up and the like; `f 0` must
+be a valid, minimal input), then `f n` and `f (2 * n)` best of three each, subtracts the
+floor, and requires `t(2n) ≤ bound * t(n) + slackMs`.  `bound` 3 is a claim of linear,
+6 of `n log n`, 10 of quadratic.  The measured pair is printed on success and repeated
+in the failure, so a failure can be diagnosed without re-running (and no timing claim
+depends on one machine's absolute numbers).
+
+The floor matters: a ~1 s start-up otherwise hides a 2× ratio at small `n`.  The
+`slackMs` allowance (default 250 ms) absorbs scheduler noise in the net times; it is
+not a subsidy for a real superlinear shape, which doubles with `n`. -/
+def checkScaling (name : String) (f : Nat → IO Unit) (n bound : Nat)
+    (slackMs : Nat := 250) : IO (Nat × Nat) := do
+  let floor ← bestMs f 0 1
+  let a ← bestMs f n
+  let b ← bestMs f (2 * n)
+  let na := max 1 (a - floor)
+  let nb := max 1 (b - floor)
+  IO.println s!"  {name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms, best of 3, bound {bound}×)"
+  unless nb ≤ bound * na + slackMs do
+    throw (IO.userError s!"{name}: {n} → {2 * n} took {na} → {nb} ms net (raw {a} → {b} ms, floor {floor} ms): more than {bound}× plus {slackMs} ms")
+  pure (a, b)
+
 /-- Run one case in-process; used by the child process. -/
 def Case.runHere (c : Case) : IO UInt32 := do
   try
@@ -79,6 +135,35 @@ def noteMarker : String := "@@wiz-test-note "
 def note (line : String) : IO Unit := do
   IO.println (noteMarker ++ line)
   (← IO.getStdout).flush
+
+/-- What a case's process prints on its standard error, before a line, to have the driver
+pass that line on at once (`progress`). -/
+def progressMarker : String := "@@wiz-test-progress "
+
+/-- A progress line from a long case (`=selfhost-libdiff`): the driver prints it on its
+own standard error while the case is still running, indented and without the marker, so
+a CI log shows the case moving. It is not part of the case's result: not a note, not its
+output, and it cannot change whether the case passes. -/
+def progress (line : String) : IO Unit := do
+  let err ← IO.getStderr
+  err.putStrLn (progressMarker ++ line)
+  err.flush
+
+/-- Read a case's standard error to its end: pass its `progress` lines on to the driver's
+standard error as they come (indented by four spaces, which no line of the suite's
+summary format starts with), and give back the rest. -/
+partial def readCaseStderr (h : IO.FS.Handle) : IO String := do
+  let out ← IO.getStderr
+  let rec go (acc : String) : IO String := do
+    let l ← h.getLine
+    if l.isEmpty then return acc
+    if l.startsWith progressMarker then
+      let text := (l.drop progressMarker.length).toString
+      out.putStr ("    " ++ (if text.endsWith "\n" then text else text ++ "\n"))
+      out.flush
+      go acc
+    else go (acc ++ l)
+  go ""
 
 /-- Mark the running case as skipped (it could not run here, e.g. without a C toolchain),
 with the reason; the case then returns normally. The driver shows it as skipped, not
@@ -139,6 +224,17 @@ def caseResult (c : Case) (index : Nat) (exitCode : UInt32) (stdout stderr : Str
     else (stderr ++ stdoutText).trimAscii.toString.replace "\n" "\n      "
   { index, name := c.name, ok := exitCode == 0, ms, notes, skipped, output }
 
+/-- (13b) The `--trace-guess-fallback` lines of a case's process (its stderr), on the
+driver's stderr, with the case's own file (module `_`) named `GROUP#INDEX`:
+`scripts/guess-fallback-stats.sh --tests` counts them. Only a traced run has such lines. -/
+def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := do
+  let tag := "guess-fallback: "
+  for l in stderr.splitOn "\n" do
+    if l.startsWith tag then
+      let rest := (l.drop tag.length).toString
+      let rest := if rest.startsWith "_ " then s!"{g.name}#{index} " ++ (rest.drop 2).toString else rest
+      IO.eprintln (tag ++ rest)
+
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
 these indices. Prints each case with its wall time (`✓` passed, `✗` failed, with its
@@ -150,15 +246,32 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let stdout ← IO.getStdout
   stdout.flush
   let self ← IO.appPath
+  -- a case of a group that runs its cases one at a time may use the driver's `--jobs`;
+  -- `runJobs` does not pass it, so N cases at once do not each start N workers
+  let given ← caseJobsGiven
+  let jobs ← caseJobs
+  let jobArgs := if given then #["--jobs", toString jobs] else #[]
+  -- `--part i/n` is the split sweep's part (a case of a non-parallel group that opted
+  -- into it); the other cases ignore it
+  let part ← casePart
+  let partArgs := if part.isEmpty then #[] else #["--part", part]
   let mut results := #[]
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
     let start ← IO.monoMsNow
-    let out ← IO.Process.output
-      { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ (← flagsRef.get).toArray }
+    let child ← IO.Process.spawn
+      { cmd := self.toString,
+        args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
+        stdin := .null, stdout := .piped, stderr := .piped }
+    let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
+    let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
+    let code ← child.wait
     let ms := (← IO.monoMsNow) - start
-    let r := caseResult c i out.exitCode out.stdout out.stderr ms
+    let out ← IO.ofExcept outT.get
+    let err ← IO.ofExcept errT.get
+    forwardGuessLines g i err
+    let r := caseResult c i code out err ms
     IO.println (renderResult r)
     stdout.flush
     onResult r
@@ -192,7 +305,7 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
     { cmd := self.toString, args := #["--run-case", g.name, toString i] ++ flags
       stdin := .null, stdout := .piped, stderr := .piped }
   let out ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
-  let err ← IO.asTask child.stderr.readToEnd Task.Priority.dedicated
+  let err ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
   let code ← IO.asTask (do pure (← child.wait, (← IO.monoMsNow) - start)) Task.Priority.dedicated
   pure { index := i, kill := child.kill, code, out, err }
 
@@ -209,7 +322,8 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
   IO.println s!"── {g.name} ({g.exercise})"
   (← IO.getStdout).flush
   let self ← IO.appPath
-  let flags := (← flagsRef.get).toArray
+  let part ← casePart
+  let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
@@ -238,6 +352,7 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
         live.set rest
         let some c := g.cases[l.index]?
           | throw (IO.userError s!"no case {l.index} in {g.name}")
+        forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
         IO.println (renderResult r)
         (← IO.getStdout).flush

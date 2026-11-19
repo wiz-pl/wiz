@@ -55,6 +55,7 @@ partial def wrapCalls (f : Name) (wrap : Term ZeroOneMany → Term ZeroOneMany) 
 def trustGroup : Group where
   name := "trust"
   exercise := "—"
+  parallel := true
   cases := [
     { name := "O2: a partial definition at an empty index is rejected", run := fun _ =>
         failsWith (familyTF ++ "partial def bad : T .f := bad\ndef boom : False := match bad with\n  | .mk => absurd ()\n")
@@ -132,6 +133,19 @@ def trustGroup : Group where
           | .error e => throw (IO.userError s!"setup rejected: {e}")
         check ((setImpl g "f" (.const "g" [])) matches .ok _) "a native implementation of the same type was rejected"
         check ((setImpl g "f" (.const "h" [])) matches .error _) "a native implementation of another type was accepted" },
+    { name := "the sorts pass's own failures are ordinary errors, not the kernel's internal one", run := fun _ => do
+        -- A `Π` whose domain cannot be given a sort (an unbound variable: the pass cannot
+        -- infer its level) keeps its hole through `Decl.withSorts`. The kernel's message for
+        -- that state is "internal error: … (the sorts pass did not fill it)"; the elaborator
+        -- reports it at the pass, as an ordinary error (`addDeclSorted`).
+        let d : Decl ZeroOneMany :=
+          { name := "f", type := .pi "x" .default (.qlit .many) (.var 0) (.unit 1) .hole, value := none }
+        match addDeclSorted (R := ZeroOneMany) {} d with
+        | .ok _ => throw (IO.userError "a declaration whose Π has no sorts was accepted")
+        | .error (.other m) =>
+          check ((m.splitOn "internal error").length == 1) s!"the pass's failure is still an internal error: {m}"
+          check ((m.splitOn "could not be inferred").length > 1) s!"unexpected message: {m}"
+        | .error e => throw (IO.userError s!"unexpected error: {e}") },
     { name := "recursive definitions: the compiled equations are kernel-checked terms", run := fun _ => do
         let src := "inductive N where\n  | z\n  | s (n : N)\n" ++
           "def add : N → N → N\n  | .z, m => m\n  | .s n, m => .s (add n m)\n" ++

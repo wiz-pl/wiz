@@ -1,0 +1,24 @@
+scan: both files analysed: ok
+scan: C candidate recorded: ok
+scan: C# candidate recorded (frontend reached through the CLI): ok
+refine: exit 0: ok
+refine: C candidate is triaged with a derived env plan: ok
+refine: C# candidate's plan is stdin (Console.ReadLine): ok
+refine: candidate.json is written: ok
+f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
+  marker: observed
+repro: exit 0: ok
+repro: derived from the candidate, not a template: ok
+repro: harness is the plan's (env) harness: ok
+repro: the plan's marker was observed at the sink: ok
+repro: candidate.stage is poc: ok
+f_edbaeb86bcfed108: finding-present-poc-observed
+  static: still reported
+  repro: ran
+  poc marker: observed
+verify: exit 0 (PoC observed): ok
+verify: verdict names the observed PoC: ok
+verify: poc.markerObserved is true: ok
+verify: candidate.stage is verified: ok
+bundle: candidate.stage is verified: ok
+bundle: evidence has a poc item with the marker observed: ok

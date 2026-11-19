@@ -4,4 +4,4 @@ import FeralCore
 -- so `&'a U64` for an arbitrary `'a` (here one that outlives everything the caller has)
 -- can't be made from a value. Elsewhere `Shr ρ A` is opaque, so a tuple or a look-alike
 -- structure doesn't convert to it either.
-def forge {ρ : Region} (x : U64) : Shr ρ U64 := Shr.mk x
+def forge {0 ρ : Region} (x : U64) : Shr ρ U64 := Shr.mk x

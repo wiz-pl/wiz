@@ -17,8 +17,11 @@ bound. A Datalog relation of equalities can feed it with `mergeFacts`/`mergeRows
 * **E-node.** `ENode` is an operator (`op : Nat`) and the e-class ids of its children
   (`args : List Nat`). Leaves are nodes with no arguments. The op is an uninterpreted
   symbol number; scry's IR assigns the numbers.
-* **E-class.** A union-find over dense ids `0 … next - 1`. `parent` and `rank` are lists
-  indexed by id (union by rank; `find` follows parent pointers). `nodes` is the flat
+* **E-class.** A union-find over dense ids `0 … next - 1`. `parent` and `rank` are
+  `U64Array`s indexed by id (union by rank; `find` follows parent pointers), so a
+  compiled `find` step and a `union` write are O(1) rather than a list scan; the model
+  (`#eval`) is still the list, so the engine stays ordinary Wiz under the interpreter.
+  `nodes` is the flat
   e-node table: `(class id, node)`, most recently added first. `etable` is the hash
   cons: canonical e-node → class id. Both lists are association lists; the interface is
   the same one a native table (`U64Array`/`U64Map`) would implement.
@@ -64,6 +67,11 @@ def Scry.egConcatMap {A B : Type} (f : A → List B) : List A → List B
 def Scry.egRep : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, v => .cons v (Scry.egRep k v)
+
+/-- `n` copies of `v` as a `U64Array` (the dense union-find / cost tables). -/
+def Scry.egU64Rep : Nat → Nat → U64Array
+  | .zero, _ => U64Array.empty
+  | .succ k, v => U64Array.push (Scry.egU64Rep k v) (U64.ofNat v)
 
 def Scry.egCountUp : Nat → Nat → List Nat
   | .zero, _ => .nil
@@ -162,24 +170,24 @@ end
 every id is dense, stored class ids and stored node arguments are roots, and `etable`
 maps each distinct canonical e-node to its class. -/
 structure Scry.EGraph where
-  parent : List Nat
-  rank : List Nat
+  parent : U64Array
+  rank : U64Array
   nodes : List (Nat × Scry.ENode)
   etable : List (Scry.ENode × Nat)
   next : Nat
 
-def Scry.EGraph.empty : Scry.EGraph := Scry.EGraph.mk .nil .nil .nil .nil 0
+def Scry.EGraph.empty : Scry.EGraph := Scry.EGraph.mk U64Array.empty U64Array.empty .nil .nil 0
 
 /-- Path-following `find`, with a fuel bound (`next + 1`) so a corrupted parent cycle
 cannot loop forever. -/
 def Scry.EGraph.findGo (g : Scry.EGraph) : Nat → Nat → Nat
   | .zero, x => x
   | .succ k, x =>
-    let p := List.getD g.parent x x;
+    let p := UIntN.toNat (U64Array.getD g.parent x (U64.ofNat x));
     if Nat.beq p x then x else Scry.EGraph.findGo g k p
 
 def Scry.EGraph.find (g : Scry.EGraph) (x : Nat) : Nat :=
-  Scry.EGraph.findGo g (Nat.succ (List.length g.parent)) x
+  Scry.EGraph.findGo g (Nat.succ (U64Array.size g.parent)) x
 
 /-- Canonicalise the children of a node. -/
 def Scry.ENode.canon (g : Scry.EGraph) (n : Scry.ENode) : Scry.ENode :=
@@ -211,8 +219,8 @@ def Scry.EGraph.add (g : Scry.EGraph) (n : Scry.ENode) : Scry.EGraph × Nat :=
   | .none =>
     let id := g.next;
     (Scry.EGraph.mk
-      (List.append g.parent (.cons id .nil))
-      (List.append g.rank (.cons 0 .nil))
+      (U64Array.push g.parent (U64.ofNat id))
+      (U64Array.push g.rank (U64.ofNat 0))
       (.cons (id, c) g.nodes)
       (.cons (c, id) g.etable)
       (Nat.succ id), id)
@@ -226,26 +234,26 @@ def Scry.EGraph.union (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
   let rb := Scry.EGraph.find g b;
   if Nat.beq ra rb then (g, .false)
   else
-    let rka := List.getD g.rank ra 0;
-    let rkb := List.getD g.rank rb 0;
+    let rka := UIntN.toNat (U64Array.getD g.rank ra (U64.ofNat 0));
+    let rkb := UIntN.toNat (U64Array.getD g.rank rb (U64.ofNat 0));
     if Nat.lt rka rkb then
-      (Scry.EGraph.mk (List.setAt g.parent ra rb) g.rank g.nodes g.etable g.next, .true)
+      (Scry.EGraph.mk (U64Array.set g.parent ra (U64.ofNat rb)) g.rank g.nodes g.etable g.next, .true)
     else if Nat.lt rkb rka then
-      (Scry.EGraph.mk (List.setAt g.parent rb ra) g.rank g.nodes g.etable g.next, .true)
+      (Scry.EGraph.mk (U64Array.set g.parent rb (U64.ofNat ra)) g.rank g.nodes g.etable g.next, .true)
     else
-      (Scry.EGraph.mk (List.setAt g.parent rb ra)
-        (List.setAt g.rank ra (Nat.succ rka)) g.nodes g.etable g.next, .true)
+      (Scry.EGraph.mk (U64Array.set g.parent rb (U64.ofNat ra))
+        (U64Array.set g.rank ra (U64.ofNat (Nat.succ rka))) g.nodes g.etable g.next, .true)
 
 def Scry.EGraph.compressFrom : Nat → Nat → Scry.EGraph → Scry.EGraph
   | .zero, _, g => g
   | .succ k, i, g =>
     let r := Scry.EGraph.find g i;
-    let g' := Scry.EGraph.mk (List.setAt g.parent i r) g.rank g.nodes g.etable g.next;
+    let g' := Scry.EGraph.mk (U64Array.set g.parent i (U64.ofNat r)) g.rank g.nodes g.etable g.next;
     Scry.EGraph.compressFrom k (Nat.succ i) g'
 
 /-- Point every id at its root (path compression, done once per rebuild pass). -/
 def Scry.EGraph.compress (g : Scry.EGraph) : Scry.EGraph :=
-  Scry.EGraph.compressFrom (List.length g.parent) 0 g
+  Scry.EGraph.compressFrom (U64Array.size g.parent) 0 g
 
 /-- One rebuild pass: canonicalise and hash-cons each node into a fresh table, unioning
 classes whose canonical nodes coincide. `changed` says whether a union happened, so
@@ -281,7 +289,7 @@ def Scry.EGraph.rebuildLoop : Nat → Scry.EGraph → Scry.EGraph
 /-- Congruence closure and canonicalisation. At most `next + 1` passes: a changed pass
 performs at least one union, and there are only `next - 1` unions. -/
 def Scry.EGraph.rebuild (g : Scry.EGraph) : Scry.EGraph :=
-  Scry.EGraph.rebuildLoop (Nat.succ (List.length g.parent)) g
+  Scry.EGraph.rebuildLoop (Nat.succ (U64Array.size g.parent)) g
 
 /-- The class representatives (`find i = i`). -/
 def Scry.EGraph.roots (g : Scry.EGraph) : List Nat :=
@@ -327,6 +335,25 @@ def Scry.EGraph.merge (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
                            (List.length (Scry.EGraph.roots g1)));
   (g1, ch)
 
+/-- Add classes until `id` exists (`ensure` is what a Datalog equality row uses: a fact
+may name a class the e-graph has not interned yet). -/
+partial def Scry.EGraph.ensureFrom (g : Scry.EGraph) (fuel : Nat) (target : Nat) :
+    Scry.EGraph :=
+  match fuel with
+  | .zero => g
+  | .succ k =>
+    if Nat.le (Nat.succ target) (U64Array.size g.parent) then g
+    else
+      let i := U64Array.size g.parent;
+      let g' := Scry.EGraph.mk
+        (U64Array.push g.parent (U64.ofNat i))
+        (U64Array.push g.rank (U64.ofNat 0))
+        g.nodes g.etable (Nat.max g.next (Nat.succ i));
+      Scry.EGraph.ensureFrom g' k target
+
+def Scry.EGraph.ensure (g : Scry.EGraph) (id : Nat) : Scry.EGraph :=
+  Scry.EGraph.ensureFrom g (Nat.succ id) id
+
 -- ## A merge usable from Datalog / lattice relations
 
 /-- Union the first two columns of every row (rows with fewer than two columns are
@@ -361,21 +388,22 @@ def Scry.EGraph.inf : Nat := 1000000
 
 /-- `1 + weight op + the children's costs`; the `1` makes every node cost at least the
 sum of its children plus one, which bounds extraction depth by the cost. -/
-def Scry.ENode.cost (w : Nat → Nat) (costs : List Nat) (n : Scry.ENode) : Nat :=
-  List.foldr (fun a acc => Nat.add (List.getD costs a Scry.EGraph.inf) acc)
+def Scry.ENode.cost (w : Nat → Nat) (costs : U64Array) (n : Scry.ENode) : Nat :=
+  List.foldr (fun a acc => Nat.add
+    (UIntN.toNat (U64Array.getD costs a (U64.ofNat Scry.EGraph.inf))) acc)
     (Nat.succ (w n.op)) n.args
 
 def Scry.EGraph.costPass (g : Scry.EGraph) (w : Nat → Nat) :
-    List (Nat × Scry.ENode) → List Nat → List Nat
+    List (Nat × Scry.ENode) → U64Array → U64Array
   | .nil, costs => costs
   | .cons p rest, costs =>
     let cls := Scry.EGraph.find g p.1;
     let c := Scry.ENode.cost w costs p.2;
-    let old := List.getD costs cls Scry.EGraph.inf;
-    let costs' := if Nat.lt c old then List.setAt costs cls c else costs;
+    let old := UIntN.toNat (U64Array.getD costs cls (U64.ofNat Scry.EGraph.inf));
+    let costs' := if Nat.lt c old then U64Array.set costs cls (U64.ofNat c) else costs;
     Scry.EGraph.costPass g w rest costs'
 
-def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → List Nat → List Nat
+def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → U64Array → U64Array
   | .zero, costs => costs
   | .succ k, costs =>
     Scry.EGraph.costIter g w k (Scry.EGraph.costPass g w g.nodes costs)
@@ -383,16 +411,17 @@ def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → List Nat 
 /-- A cost per class id (`inf` when nothing finite reaches it). One pass is a full
 relaxation; `next + 1` passes suffice for a shortest derivation tree (a shortest tree
 repeats no class on a root-to-leaf path when every node costs at least one). -/
-def Scry.EGraph.costs (g : Scry.EGraph) (w : Nat → Nat) : List Nat :=
+def Scry.EGraph.costs (g : Scry.EGraph) (w : Nat → Nat) : U64Array :=
   Scry.EGraph.costIter g w (Nat.succ g.next)
-    (Scry.egRep g.next Scry.EGraph.inf)
+    (Scry.egU64Rep g.next Scry.EGraph.inf)
 
 def Scry.EGraph.cost (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) : Nat :=
-  List.getD (Scry.EGraph.costs g w) (Scry.EGraph.find g cls) Scry.EGraph.inf
+  UIntN.toNat (U64Array.getD (Scry.EGraph.costs g w) (Scry.EGraph.find g cls)
+    (U64.ofNat Scry.EGraph.inf))
 
 /-- The cheapest node of a list under fixed costs (the first one on a tie; `nodes` is
 most-recent-first, so later-added nodes win ties). -/
-def Scry.EGraph.bestIn (w : Nat → Nat) (costs : List Nat) :
+def Scry.EGraph.bestIn (w : Nat → Nat) (costs : U64Array) :
     List Scry.ENode → Option (Scry.ENode × Nat) → Option (Scry.ENode × Nat)
   | .nil, best => best
   | .cons n ns, best =>
@@ -406,7 +435,7 @@ mutual
 /-- Build a cheapest term of a class with `fuel` depth left. The class cost bounds the
 fuel, and a cheapest node's children all cost strictly less, so the recursion is
 bounded even when the e-class contains a cycle. -/
-partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : List Nat) :
+partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : U64Array) :
     Nat → Nat → Option Scry.ETerm
   | .zero, _ => .none
   | .succ k, cls =>
@@ -416,7 +445,7 @@ partial def Scry.EGraph.buildTerm (g : Scry.EGraph) (w : Nat → Nat) (costs : L
       match Scry.EGraph.buildArgs g w costs k p.1.args with
       | .none => .none
       | .some ts => .some (.tnode p.1.op ts)
-partial def Scry.EGraph.buildArgs (g : Scry.EGraph) (w : Nat → Nat) (costs : List Nat) :
+partial def Scry.EGraph.buildArgs (g : Scry.EGraph) (w : Nat → Nat) (costs : U64Array) :
     Nat → List Nat → Option Scry.ETerms
   | _, .nil => .some .tnil
   | k, .cons a as =>

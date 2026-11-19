@@ -1,0 +1,125 @@
+import Word
+import Storage
+/-!
+# Snapshot retention: the registry and its policy
+
+A `RootRef` names one committed root: the generation a snapshot was taken at, the first
+page of its chain, the chain's length, the delete epoch it carried, and the number of
+*leases* (live readers) pinning it. A `Registry` is the list of roots this process still
+promises to serve, newest generation first, plus the retention count `K`.
+
+The policy (`Registry.live`) is the design note's second step, made explicit:
+
+> keep the newest `K` roots, plus every root a reader has leased.
+
+A lease is bookkeeping here: `lease`/`release` increment and decrement `pins`, and a
+pinned root survives the count policy until the last reader releases it. (The design's
+end state attaches the lease to the `Snapshot` as an ω `foreign_type` finaliser; this
+module supplies the counter that finaliser would drive. Nothing in the on-disk format
+depends on it.)
+
+`Registry.retained` is the exact test a commit uses: a snapshot may commit iff its
+generation is *live*, not merely at or above the oldest live generation — count-based
+retention can drop generation 5 while generation 4 is pinned, so a floor alone would
+admit a root whose pages are gone. `Registry.minGen` is still recorded in the meta as
+the horizon for recovery and diagnostics.
+
+This module is pure; `Compact.wiz` is the page walk and the two-file rewrite that use it.
+-/
+
+/-- One retained root and the readers pinning it. `root = 0` is the empty store. -/
+structure RootRef where
+  gen : U64
+  root : U64
+  /-- The chain's length in pages (the walk's bound). -/
+  pages : Nat
+  /-- The delete epoch this root carried (the meta slot needs it). -/
+  delEpoch : U64
+  /-- Live leases. A root with `pins > 0` is never dropped by the count policy. -/
+  pins : Nat
+
+/-- A registry: retained roots newest first, and the retention count. -/
+structure Registry where
+  refs : List RootRef
+  keep : Nat
+
+/-- An empty registry. -/
+def Registry.empty (keep : Nat) : Registry := Registry.mk [] keep
+
+/-- The entry for `gen`, if it is registered. -/
+def Registry.find (r : Registry) (gen : U64) : Option RootRef :=
+  List.find (fun e => UIntN.beq e.gen gen) r.refs
+
+/-- Insert a root so the list stays newest generation first. -/
+def Registry.insertRef (e : RootRef) : List RootRef → List RootRef
+  | .nil => List.cons e []
+  | .cons x xs =>
+    match UIntN.lt e.gen x.gen with
+    | .true => List.cons x (Registry.insertRef e xs)
+    | .false => List.cons e (List.cons x xs)
+
+/-- Record a root (newest first); a repeated generation replaces the old entry but keeps
+its lease count. -/
+def Registry.add (r : Registry) (e : RootRef) : Registry :=
+  let old := match Registry.find r e.gen with
+    | .none => e
+    | .some o => { e with pins := o.pins };
+  Registry.mk
+    (Registry.insertRef old (List.filter (fun x => Bool.not (UIntN.beq x.gen e.gen)) r.refs))
+    r.keep
+
+/-- Take a lease on `gen`: it stays live however many newer roots commit. -/
+def Registry.lease (r : Registry) (gen : U64) : Registry :=
+  Registry.mk (List.map (fun e => match UIntN.beq e.gen gen with
+      | .true => { e with pins := Nat.succ e.pins }
+      | .false => e) r.refs) r.keep
+
+/-- Release a lease on `gen` (a no-op at zero: a double release cannot underflow). -/
+def Registry.release (r : Registry) (gen : U64) : Registry :=
+  Registry.mk (List.map (fun e => match UIntN.beq e.gen gen with
+      | .true => match e.pins with
+        | .zero => e
+        | .succ k => { e with pins := k }
+      | .false => e) r.refs) r.keep
+
+/-- The retention walk: keep a root when it is among the newest `K`, or pinned. -/
+def Registry.liveGo (keep : Nat) : Nat → List RootRef → List RootRef
+  | _, .nil => []
+  | i, .cons e es =>
+    let rest := Registry.liveGo keep (Nat.succ i) es;
+    match Bool.or (Nat.lt i keep) (Nat.lt 0 e.pins) with
+    | .true => List.cons e rest
+    | .false => rest
+
+/-- The live set of the policy: newest `K` union pinned. -/
+def Registry.live (r : Registry) : List RootRef := Registry.liveGo r.keep 0 r.refs
+
+/-- Exactly what a commit is allowed to build on: `gen` is live. -/
+def Registry.retained (r : Registry) (gen : U64) : Bool :=
+  List.any (fun e => UIntN.beq e.gen gen) (Registry.live r)
+
+/-- The oldest live generation (0 when nothing is registered), the meta's `min_gen`. -/
+def Registry.minGen (r : Registry) : U64 :=
+  List.foldl (fun a e => match UIntN.lt e.gen a with
+    | .true => e.gen
+    | .false => a) (U64.ofNat 0) (Registry.live r)
+
+/-- Forget every root the policy no longer keeps. -/
+def Registry.trim (r : Registry) : Registry := Registry.mk (Registry.live r) r.keep
+
+/-- Point the registry at a compacted image: keep only the roots the plan copied, with
+their new first pages (a `(gen, newRoot)` list). -/
+def Registry.remapFrom (roots : List (U64 × U64)) : List RootRef → List RootRef
+  | .nil => []
+  | .cons e es =>
+    let rest := Registry.remapFrom roots es;
+    match List.find (fun p => UIntN.beq p.1 e.gen) roots with
+    | .none => rest
+    | .some p => List.cons { e with root := p.2 } rest
+
+/-- `Registry.remap r roots`: the registry after compaction moved every live root. -/
+def Registry.remap (r : Registry) (roots : List (U64 × U64)) : Registry :=
+  Registry.mk (Registry.remapFrom roots (Registry.live r)) r.keep
+
+/-- The live roots as `(gen, root, pages)`; the compactor's input. -/
+def Registry.roots (r : Registry) : List RootRef := Registry.live r

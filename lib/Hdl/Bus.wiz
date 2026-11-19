@@ -94,7 +94,7 @@ def Bus.noReqW {r : HwTy → Type} [Hw r] {ω aw dw : Nat} : Bus.ReqW aw dw r :=
   Bus.ReqW.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit aw 0) (Hw.lit dw 0) (Hw.lit (Nat.div dw 8) 0)
 
 /-- Forget the byte enables: the word-level request. -/
-def Bus.ReqW.toReq {r : HwTy → Type} {aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
+def Bus.ReqW.toReq {r : HwTy → Type} {0 aw dw : Nat} (q : Bus.ReqW aw dw r) : Bus.Req aw dw r :=
   Bus.Req.mk q.valid q.we q.addr q.wdata
 
 /-- The word-level request with every byte enabled (the `Bus.Req` API in `Bus.ReqW`). -/
@@ -235,7 +235,7 @@ structure Bus.ArbN where
   last : Nat
 
 /-- The N-master arbiter at rest: no owner, master 0 was granted last. -/
-def Bus.arbNInit : Bus.ArbN := Bus.ArbN.mk Bool.false 0 0
+def Bus.arbNInit : Bus.ArbN := Bus.ArbN.mk .false 0 0
 
 /-- `valid` of a request, as a Boolean. -/
 def Bus.reqValid {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) : Bool :=
@@ -287,7 +287,7 @@ def Bus.arbNStep (n aw dw : Nat) (s : Bus.ArbN)
   let ack := Bool.or (BitVec.isTrue resp.ready) (BitVec.isTrue resp.rvalid);
   let done := Bool.or ack (Bool.and s.busy (Bool.not selV));
   let s' := Bus.ArbN.mk
-    (if done then Bool.false else if s.busy then Bool.true else selV)
+    (if done then .false else if s.busy then .true else selV)
     (if s.busy then s.owner else g)
     (if s.busy then s.last else if selV then g else s.last);
   (s', Bus.respN n g resp)

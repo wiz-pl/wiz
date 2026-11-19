@@ -4,24 +4,60 @@
 # compiled to C by `wiz` and then to WebAssembly by Emscripten. The page (web/playground.html) calls its exported
 # `wiz_playground_eval : String → String`, so there is no server and no main loop.
 #
-#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz]
-#   (OUT default web/out; needs .lake/build/bin/wiz, i.e. `lake build wiz` first)
+#   usage: web/build-playground.sh [OUT] [--gmp-src GMP.tar.xz] [--from DIR] [--opt LEVEL]
+#   (OUT default web/out; needs .lake/build/bin/wiz, i.e. `lake build wiz` first.
+#   --from DIR, or WIZ_PLAYGROUND_FROM=DIR: copy the engine a Nix build made instead
+#   (`nix build .#wiz-playground`); local use is unchanged. --opt LEVEL: the C
+#   optimisation level (1, 2, 3); the default is the compiler's -O2. emcc runs
+#   binaryen's `wasm-opt` at -O2 and up, which needs ~17 GiB on this module; -O1 skips
+#   it (2.3 GiB) for a module ~47 % larger. packages.wiz-playground builds at -O1 because
+#   a 16 GB CI runner cannot hold the -O2 peak.)
 #
 # This is web/build.sh's pipeline with a different source and export; the infoview's
 # module (wiz-infoview.mjs) is unchanged and can live in the same OUT directory.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # without emcc on the PATH, run again with Emscripten from nixpkgs
-if ! command -v emcc >/dev/null; then exec nix shell nixpkgs#emscripten -c "$0" "$@"; fi
+if ! command -v emcc >/dev/null; then exec nix shell --inputs-from "$ROOT" nixpkgs#emscripten -c "$0" "$@"; fi
 GMPSRC=
-case "${2:-}" in --gmp-src) GMPSRC=$(cd "$(dirname "$3")" && pwd)/$(basename "$3") ;; esac
-OUT=$(mkdir -p "${1:-$ROOT/web/out}" && cd "${1:-$ROOT/web/out}" && pwd)
+FROM=${WIZ_PLAYGROUND_FROM:-}
+OPT=
+OUT_DIR=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gmp-src) GMPSRC=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
+    --from) FROM=$2; shift 2 ;;
+    --opt) OPT=$2; shift 2 ;;
+    *) OUT_DIR=$1; shift ;;
+  esac
+done
+OUT=$(mkdir -p "${OUT_DIR:-$ROOT/web/out}" && cd "${OUT_DIR:-$ROOT/web/out}" && pwd)
+# An engine built elsewhere (packages.wiz-playground): same files, no Emscripten, no nix.
+if [ -n "$FROM" ]; then
+  [ -f "$FROM/wiz-playground.mjs" ] || {
+    echo "build-playground: $FROM/wiz-playground.mjs is missing (--from $FROM)" >&2; exit 1; }
+  # the store's files are read-only and its `gmp/` is a 0555 directory: `--no-preserve=mode`
+  # (GNU cp) copies them writable, so this OUT can be built into later
+  cp -R --no-preserve=mode "$FROM"/. "$OUT"/
+  echo "copied $OUT/wiz-playground.mjs from $FROM"
+  exit 0
+fi
+# without emcc on the PATH, run again with Emscripten from nixpkgs
+if ! command -v emcc >/dev/null; then
+  set --; [ -z "$OUT_DIR" ] || set -- "$OUT_DIR"
+  [ -z "$GMPSRC" ] || set -- "$@" --gmp-src "$GMPSRC"
+  [ -z "$OPT" ] || set -- "$@" --opt "$OPT"
+  exec nix shell nixpkgs#emscripten -c "$0" "$@"
+fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
+# (after the compiler's own -O2, so emcc's last -O wins)
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+[ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)
 if [ ! -f "$OUT/gmp/mini-gmp.c" ]; then
   mkdir -p "$OUT/gmp"
-  SRC=${GMPSRC:-$(nix build --no-link --print-out-paths nixpkgs#gmp.src)}
+  SRC=${GMPSRC:-$(nix build --inputs-from "$ROOT" --no-link --print-out-paths nixpkgs#gmp.src)}
   tar -C "$OUT/gmp" --strip-components=2 -xf "$SRC" --wildcards '*/mini-gmp/mini-gmp.[ch]'
   printf '#include "mini-gmp.h"\n' > "$OUT/gmp/gmp.h"
 fi
@@ -44,14 +80,24 @@ ENGINE="$OUT/playground.wiz"
 
 # 3. Wiz → C → wasm. wasm64 as in web/build.sh; the export is called from
 # web/playground.js, and returns a malloc'ed UTF-8 string the page frees.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+#
+# The runtime's clean stops use setjmp/longjmp (runtime/rt_core.inc, runtime/rt_con.inc:
+# `wiz_stop_run`), so a program that ends on purpose leaves the module alive.
+# Emscripten's default SUPPORT_LONGJMP=emscripten implements that in wasm64; it needs no
+# flag (and SUPPORT_LONGJMP=wasm works too, but is not required). The module exports
+# `wiz_playground_exit` beside the two calls: the code of the last clean stop, read by
+# web/playground-engine.js after each call.
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "$CFLAGS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_playground_eval,_free \
+-sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_wiz_playground_exit,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
+  "$ROOT/web/playground-presets.js" "$ROOT/web/playground-state.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$OUT/"
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
+  "$ROOT/web/playground-engine.js" "$ROOT/web/editor-model.js" \
+  "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$ROOT/web/hover.js" "$OUT/"
 echo "built $OUT/wiz-playground.mjs"

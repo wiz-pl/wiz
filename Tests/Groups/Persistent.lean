@@ -8,7 +8,7 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
-/-- Persistent maps and sets (`lib/PMap.wiz`): `examples/persistent.wiz` checks
+/-- Persistent maps and sets (`lib/Data/PMap.wiz`): `examples/persistent.wiz` checks
 persistence, the BST invariant, sorted `toList`, round trips, a differential test against
 `U64Map`, the expected laws, structural sharing, sets and a generic key type, returning 0
 when all hold. `examples/persistent-bench.wiz` with no arguments prints the checksums of
@@ -16,7 +16,8 @@ its three modes (the persistent tree, `U64Map`'s list model and the native `U64M
 which must agree. -/
 def persistentGroup : Group where
   name := "persistent"
-  exercise := "persistent data structures: lib/PMap.wiz (PMap, PSet), examples/persistent.wiz"
+  exercise := "persistent data structures: lib/Data/PMap.wiz (PMap, PSet), examples/persistent.wiz"
+  parallel := true
   cases := [
     { name := "the model (#eval) passes every check", run := fun _ => do
         let src ← IO.FS.readFile "examples/persistent.wiz"

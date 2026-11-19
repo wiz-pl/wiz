@@ -244,8 +244,9 @@ def FS.tempRoot : IO String := do
     | .some d => d
     | .none => "/tmp")
 /-- A new, empty directory under `FS.tempRoot`, named `wiz-…`; remove it with `FS.removeAll`. -/
-def FS.createTempDir : EIO String :=
-  IO.bind FS.tempRoot (fun root => Sys.check root (FS.mkdtempRaw (Path.join root "wiz-")))
+def FS.createTempDir : EIO String := do
+  root ← EIO.lift FS.tempRoot;
+  Sys.check root (FS.mkdtempRaw (Path.join root "wiz-"))
 
 -- Whole files. (Text stops at a NUL byte: use `Bytes` for binary data.)
 /-- The contents of a file, as text (it stops at a NUL byte: use `FS.readBytes` for binary data). -/
@@ -259,7 +260,11 @@ def FS.readBytes (p : String) : EIO Bytes := Sys.check p (FS.readBytesRaw p)
 /-- Replace the file's contents with the bytes (creating it). -/
 def FS.writeBytes (p : String) (b : Bytes) : EIO Unit := Sys.lift p (FS.writeBytesRaw p b .false)
 
-/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`). -/
+/-- A buffered file handle (C's `FILE *`), closed when the last reference goes (or by `File.close`).
+
+Like every foreign handle it is an ordinary (ω) value, so a `Chan.fork` child may
+capture it; the runtime serialises the operations on one handle (25a), so a close
+waits for a read already in progress and later operations are errors. -/
 foreign_type File (finalizer := "wiz_sys_file_free")
 /-- Raw `fopen`; use `File.open`. -/
 extern "wiz_sys_file_open" File.openRaw : String → String → IO File
@@ -276,7 +281,9 @@ extern "wiz_sys_file_flush" File.flushRaw : File → IO Nat
 /-- Raw `fclose`; use `File.close`. -/
 extern "wiz_sys_file_close" File.closeRaw : File → IO Nat
 
-/-- Open a file; `mode` as for `fopen`: "r", "w", "a", "r+", … -/
+/-- Open a file; `mode` as for `fopen`: "r", "w", "a", "r+", … The handle is close-on-exec:
+a child this program starts does not inherit it (only the std streams are inherited, for
+streams a child is given). -/
 def File.open (p mode : String) : EIO File := Sys.check p (File.openRaw p mode)
 /-- Standard input. -/
 def File.stdin : IO File := File.std 0
@@ -291,19 +298,21 @@ loop f = do
   l ← File.readLine f;
   match l with | .some s => … | .none => …
 ``` -/
-def File.readLine (f : File) : EIO (Option String) :=
-  IO.bind (File.readLineRaw f) (fun l => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def File.readLine (f : File) : EIO (Option String) := do
+  l ← EIO.lift (File.readLineRaw f);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some l)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message "readLine" e))))
+      | .false => .error (Sys.message "readLine" e))
 /-- The rest of the file, as text. -/
 def File.readAll (f : File) : EIO String := Sys.check "read" (File.readAllRaw f)
 /-- Write text (UTF-8, up to the first NUL). -/
 def File.write (f : File) (s : String) : EIO Unit := Sys.lift "write" (File.writeRaw f s)
 /-- Write out what is buffered. -/
 def File.flush (f : File) : EIO Unit := Sys.lift "flush" (File.flushRaw f)
-/-- Close the handle now; later operations on it are errors. -/
+/-- Close the handle now; later operations on it are errors (a second close too). -/
 def File.close (f : File) : EIO Unit := Sys.lift "close" (File.closeRaw f)
 /-- Print a line on standard error. -/
 def IO.ePrintln (s : String) : IO Unit := do
@@ -354,7 +363,11 @@ def ExitStatus.toString : ExitStatus → String
   | .exited c => String.append "exit code " (Nat.toString c)
   | .signaled s => String.append "signal " (Nat.toString s)
 
-/-- A running (or finished) child process. Its pipes close when the last reference goes. -/
+/-- A running (or finished) child process. Its pipes close when the last reference goes.
+
+Like `File` it is an ω value and may be used from two threads: the runtime locks each
+pipe and the wait status (25a), so a second `closeStdin` is an error, two `wait`s
+agree, and `kill` works while another thread waits. -/
 foreign_type Child (finalizer := "wiz_sys_child_free")
 /-- Raw spawn; use `Process.spawn`. -/
 extern "wiz_sys_spawn" Process.spawnRaw : String → List String → Nat → Nat → Nat → IO Child
@@ -384,7 +397,7 @@ def Process.spawn (cmd : String) (args : List String) (stdin stdout stderr : Std
   Sys.check cmd (Process.spawnRaw cmd args (Stdio.toNat stdin) (Stdio.toNat stdout) (Stdio.toNat stderr))
 /-- Write to the child's stdin (which must be `.piped`). -/
 def Child.write (c : Child) (s : String) : EIO Unit := Sys.lift "write to child" (Child.writeRaw c s)
-/-- Close the child's stdin, so it sees the end of its input. -/
+/-- Close the child's stdin, so it sees the end of its input (the second close is an error). -/
 def Child.closeStdin (c : Child) : EIO Unit := Sys.lift "close child stdin" (Child.closeStdinRaw c)
 /-- The rest of the child's stdout (a pipe), to the end. -/
 def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (Child.readRaw c 1)
@@ -392,7 +405,9 @@ def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (
 def Child.readStderr (c : Child) : EIO String := Sys.check "read child stderr" (Child.readRaw c 2)
 /-- Give the child `input` on stdin while collecting its stdout and stderr
 (`Child.readStdout` and `Child.readStderr` then return them): no deadlock when the
-pipes fill up. -/
+pipes fill up. The stdin must still be a pipe (`Process.spawn` with `.piped`, not
+taken or closed): `input` that has nowhere to go is an error ("communicate: Bad file
+descriptor"), not dropped. -/
 def Child.communicate (c : Child) (input : String) : EIO Unit := Sys.lift "communicate" (Child.communicateRaw c input)
 /-- Wait for the child to end. -/
 def Child.wait (c : Child) : EIO ExitStatus := do
@@ -577,12 +592,14 @@ extern "wiz_sys_file_write_bytes" File.writeBytesRaw : File → Bytes → IO Nat
 /-- Raw `fseek`; use `File.seek`. -/
 extern "wiz_sys_file_seek" File.seekRaw : File → Nat → Nat → Bool → IO Nat
 /-- `Sys.check`, with the end of the file (errno 100000) as `none`. -/
-def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) :=
-  IO.bind x (fun a => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0 with
+def Sys.checkEof {A : Type} (what : String) (x : IO A) : EIO (Option A) := do
+  a ← EIO.lift x;
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0 with
     | .true => .ok (.some a)
     | .false => match Nat.beq e 100000 with
       | .true => .ok .none
-      | .false => .error (Sys.message what e))))
+      | .false => .error (Sys.message what e))
 /-- Up to `n` bytes (fewer only at the end of the file); `none` at the end. -/
 def File.readBytes (f : File) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (File.readBytesRaw f n)
 /-- Write the bytes. -/
@@ -626,7 +643,12 @@ foreign_type Fd (finalizer := "wiz_sys_fd_free")
 extern "wiz_sys_fd_open" Fd.openRaw : String → Nat → Nat → Nat → IO Fd
 /-- The descriptor 0, 1 or 2; use `Fd.stdin`, `Fd.stdout`, `Fd.stderr`. -/
 extern "wiz_sys_fd_std" Fd.std : Nat → IO Fd
-/-- Take ownership of a descriptor number (it is closed with the handle). -/
+/-- Take ownership of a descriptor number (it is closed with the handle). A number above
+`INT_MAX` is not a descriptor (the runtime would narrow `4294967297` to 1, stdout): it is
+rejected with `EINVAL` (see `Sys.errno`) and the handle is already closed, so every
+operation on it is "Bad file descriptor". Adopting 0, 1 or 2 takes over a standard
+stream, so the handle's close closes it; adopting one number twice gives two owners that
+both close it (close each handle once). -/
 extern "wiz_sys_fd_adopt" Fd.adopt : Nat → IO Fd
 /-- The descriptor's number; see `Fd.withRaw` to keep it valid while it is used. -/
 extern "wiz_sys_fd_raw" Fd.raw : Fd → IO Nat
@@ -648,6 +670,14 @@ extern "wiz_sys_fd_write" Fd.writeRaw : Fd → Bytes → IO Nat
 extern "wiz_sys_fd_wait" Fd.waitRaw : Fd → Nat → Bool → Nat → IO Nat
 /-- Raw `lseek`; use `Fd.seek`. -/
 extern "wiz_sys_fd_seek" Fd.seekRaw : Fd → Nat → Nat → Bool → IO Nat
+/-- Raw `fsync`; use `Fd.sync`. -/
+extern "wiz_sys_fd_fsync" Fd.syncRaw : Fd → IO Nat
+/-- Raw `fdatasync`; use `Fd.dataSync`. -/
+extern "wiz_sys_fd_fdatasync" Fd.dataSyncRaw : Fd → IO Nat
+/-- Raw `flock(2)`; use `Fd.lock`/`Fd.tryLock`/`Fd.unlock`. -/
+extern "wiz_sys_fd_flock" Fd.lockRaw : Fd → Nat → Bool → IO Nat
+/-- Raw `ftruncate`; use `Fd.truncate`. -/
+extern "wiz_sys_fd_ftruncate" Fd.truncateRaw : Fd → Nat → IO Nat
 /-- Raw `poll`; use `Fd.poll`. -/
 extern "wiz_sys_fd_poll" Fd.pollRaw : List Fd → List Nat → Bool → Nat → IO (List Nat)
 /-- Raw pipe hand-over; use `Child.takePipe`. -/
@@ -726,11 +756,11 @@ inductive Timed (A : Type) where
 /-- What a read of an exact number of bytes got: all of them, or what came before the end
 of the file or (only when `timed`) before the time ran out. -/
 inductive Got : Bool → Type where
-  | all {timed : Bool} (b : Bytes) : Got timed
-  | eof {timed : Bool} (b : Bytes) : Got timed
+  | all {0 timed : Bool} (b : Bytes) : Got timed
+  | eof {0 timed : Bool} (b : Bytes) : Got timed
   | timeout (b : Bytes) : Got .true
 /-- The bytes, however the read ended. -/
-def Got.bytes {timed : Bool} (g : Got timed) : Bytes := match g with
+def Got.bytes {0 timed : Bool} (g : Got timed) : Bytes := match g with
   | .all b => b
   | .eof b => b
   | .timeout b => b
@@ -746,21 +776,27 @@ def Sys.readResult (what : String) (e : Nat) (b : Bytes) : Except String (Timed 
 /-- One read: up to `n` bytes, as many as are there (at least one, waiting for it); `none` at the end of the file. -/
 def Fd.read (f : Fd) (n : Nat) : EIO (Option Bytes) := Sys.checkEof "read" (Fd.readRaw f n .false 0)
 /-- One read like `Fd.read`, giving up when nothing has come within `d`. -/
-def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) :=
-  IO.bind (Fd.readRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (Sys.readResult "read" e b)))
+def Fd.readWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Timed (Option Bytes)) := do
+  b ← EIO.lift (Fd.readRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (Sys.readResult "read" e b)
 /-- Exactly `n` bytes, unless the end of the file comes first. -/
-def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) :=
-  IO.bind (Fd.readExactRaw f n .false 0) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
+def Fd.readExactly (f : Fd) (n : Nat) : EIO (Got .false) := do
+  b ← EIO.lift (Fd.readExactRaw f n .false 0);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000 with
     | .true, _ => .ok (.all b)
     | _, .true => .ok (.eof b)
-    | _, _ => .error (Sys.message "read" e))))
+    | _, _ => .error (Sys.message "read" e))
 /-- Exactly `n` bytes within `d` in all (or what came: `.eof`, `.timeout`). -/
-def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) :=
-  IO.bind (Fd.readExactRaw f n .true d.ns) (fun b => IO.bind Sys.errno (fun e => IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
+def Fd.readExactlyWithin (f : Fd) (n : Nat) (d : Duration) : EIO (Got .true) := do
+  b ← EIO.lift (Fd.readExactRaw f n .true d.ns);
+  e ← EIO.lift Sys.errno;
+  IO.pure (match Nat.beq e 0, Nat.beq e 100000, Nat.beq e 100001 with
     | .true, _, _ => .ok (.all b)
     | _, .true, _ => .ok (.eof b)
     | _, _, .true => .ok (.timeout b)
-    | _, _, _ => .error (Sys.message "read" e))))
+    | _, _, _ => .error (Sys.message "read" e))
 /-- Write all of the bytes. -/
 def Fd.write (f : Fd) (b : Bytes) : EIO Unit := Sys.lift "write" (Fd.writeRaw f b)
 /-- Write text, as UTF-8. -/
@@ -776,6 +812,49 @@ def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool := do
 /-- Move, and say where that is (from the start), as `File.seek`. -/
 def Fd.seek (f : Fd) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (Fd.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
+/-- Flush this descriptor's data and metadata to stable storage (`fsync`). A commit that
+must survive a crash calls this before publishing the pointer to its pages. -/
+def Fd.sync (f : Fd) : EIO Unit := Sys.lift "fsync" (Fd.syncRaw f)
+/-- Flush this descriptor's data to stable storage (`fdatasync`), leaving metadata that is
+not needed to read the data back to the filesystem. -/
+def Fd.dataSync (f : Fd) : EIO Unit := Sys.lift "fdatasync" (Fd.dataSyncRaw f)
+/-- Set the file's length in bytes: growing zero-fills, shrinking discards the tail. Only
+for a descriptor whose pages nothing holds mapped past the new end. -/
+def Fd.truncate (f : Fd) (n : Nat) : EIO Unit := Sys.lift "ftruncate" (Fd.truncateRaw f n)
+
+-- File locks (flock): one writer, many readers, across processes.
+
+/-- The scope of a file lock: any number of shared readers, or one exclusive writer. -/
+inductive LockMode where
+  | shared
+  | exclusive
+/-- The runtime's code for a `LockMode` (0 shared, 1 exclusive). -/
+def LockMode.toNat : LockMode → Nat
+  | .shared => 0
+  | .exclusive => 1
+/-- A non-blocking lock's answer: someone else holds it, or it is ours. -/
+inductive Locked where
+  | acquired
+  | busy
+
+/-- Take a lock and wait for it: `LOCK_SH` for a reader, `LOCK_EX` for a writer. The lock
+belongs to this open file description, so two descriptors from two `Fd.open` calls
+contend even inside one process, while copies of one handle share it. It is released by
+`Fd.unlock`, by `Fd.close`, and by the kernel when the process exits (so a writer that
+dies cannot leave the file locked for ever). Advisory: a process that does not lock is
+outside the contract. -/
+def Fd.lock (f : Fd) (m : LockMode) : EIO Unit :=
+  Sys.lift "flock" (Fd.lockRaw f (LockMode.toNat m) .false)
+/-- Take a lock, or answer `busy` without waiting: the non-blocking `flock`. -/
+def Fd.tryLock (f : Fd) (m : LockMode) : EIO Locked := do
+  n ← EIO.lift (Fd.lockRaw f (LockMode.toNat m) .true);
+  match Nat.beq n 100002 with
+  | .true => EIO.pure .busy
+  | .false => match Nat.beq n 0 with
+    | .true => EIO.pure .acquired
+    | .false => EIO.fail (Sys.message "flock" n)
+/-- Release whatever lock this open file description holds (`LOCK_UN`). -/
+def Fd.unlock (f : Fd) : EIO Unit := Sys.lift "flock" (Fd.lockRaw f 2 .false)
 
 -- Waiting on several descriptors.
 /-- What `Fd.poll` waits for on a descriptor. -/

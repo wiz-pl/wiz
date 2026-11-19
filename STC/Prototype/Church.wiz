@@ -1,0 +1,43 @@
+import Prelude
+import Logic
+/-!
+# Prototype: impredicative (Church) encodings over `Prop`, and their cost
+
+`lib/Logic.wiz` already uses this route: `∨` and `∃` are Church encodings because a `Σ`
+of a `Type` and a proposition lands in `Type`, and (before #252) there were no inductive
+propositions. The encoding is:
+
+    Ex P  := (0 R : Prop) → ((a : A) → P a → R) → R
+    Or P Q := (0 R : Prop) → (P → R) → (Q → R) → R
+
+The eliminators go into a *constant* `Prop` `R`. That is enough for propositional logic
+and for the non-dependent uses in the STC proof port, but **not** for a motive that
+depends on the proof: `ChurchDep.wiz` is the failing dependent version, and the error is
+the cost. There is no induction principle for a Church-encoded *recursive* proposition
+either (`Derivable`, `LR`): the encoding gives iteration into a constant proposition, not
+induction on a derivation.
+
+The alternative — native `μ` at `Sort 0` — is `IndProp.wiz`; it is what #252 added to the
+Lean kernel. This file typechecks; see the note at the top of `ChurchDep.wiz` for the
+negative result.
+-/
+
+-- Non-dependent elimination into a constant proposition (the library's `Ex.elim` shape).
+def exElim {A : Type} {P : A → Prop} (h : Ex P) (R : Prop) (k : (a : A) → P a → R) : R :=
+  Ex.elim h k
+
+-- The same for `∨`.
+def orElim {P Q : Prop} (h : P ∨ Q) (R : Prop) (l : P → R) (r : Q → R) : R :=
+  Or.elim h l r
+
+-- A witness and its proof package up: `∃ n, n = 0`.
+def exZero : ∃ n : Nat, n = .zero := Ex.intro (fun n => n = .zero) .zero rfl
+
+-- Use it at a constant proposition. Note `R := Nat` would be rejected: the encoding only
+-- eliminates into `Prop`, so it cannot extract the witness as data (that is the `Σ`/native
+-- `μ` job; `Ex` is for propositions).
+def exZeroElim (h : ∃ n : Nat, n = .zero) : ∃ n : Nat, n = .zero :=
+  exElim h (∃ n : Nat, n = .zero) (fun n p => Ex.intro (fun n => n = .zero) n p)
+
+-- `∨` into a constant proposition.
+def orSwap {P Q : Prop} (h : P ∨ Q) : Q ∨ P := orElim h (Q ∨ P) Or.inr Or.inl

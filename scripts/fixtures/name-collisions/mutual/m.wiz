@@ -1,0 +1,12 @@
+/-- Fixture: a member of a `mutual` block is a declaration, and `end` closes only the
+`mutual` block, not the surrounding namespace. -/
+namespace Mut
+
+mutual
+def loop (n : Nat) : Nat := loop n
+end
+
+/-- Still inside namespace Mut; collides with the `mutual` member above. -/
+def loop : Nat := 0
+
+end Mut
