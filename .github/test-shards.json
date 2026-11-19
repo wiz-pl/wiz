@@ -90,6 +90,7 @@
     "=scry-wil",
     "=scry-c2wil",
     "=scry-csharp",
+    "=scry-prover",
     "=scry-ai",
     "=scry-taint",
     "=scry-uaf",
