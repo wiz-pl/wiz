@@ -453,7 +453,7 @@ def group : Group where
       run := fun _ => evalRuleNats
         ("#eval List.length (Scry.RulePack.withModels Scry.demoRules).rules\n" ++
          "#eval List.length (Scry.RulePack.withModels (Scry.RulePack.withModels Scry.demoRules)).rules\n" ++
-         "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [6, 6, 4] },
+         "#eval List.length (Scry.RulePack.withModels (Scry.parseRulePack \"\")).rules") [7, 7, 5] },
     { name := "certificates: the derivation checks, reports axioms, and a tampered one is rejected",
       run := fun _ => do
         evalRuleNats (rulePrelude ++

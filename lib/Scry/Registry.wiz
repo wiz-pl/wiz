@@ -63,11 +63,14 @@ A silent skip is the failure mode this table has to rule out:
 -- ## What an analysis consumes and produces
 
 /-- The Wil evidence every analysis of this slice consumes (the fact-bundle
-parameterisation is P3): the program, its points-to solution, the per-function taint
-results, and the pack that selected the analysis. This record is also the seam for P4's
-model pack: adding `models : Scry.ModelPack` here and reading it in the two shipped rows
-is enough, because both pipelines only build the input and call `runAnalyses`. -/
+parameterisation is P3): the model pack, the program, its points-to solution, the
+per-function taint results, and the pack that selected the analysis. P4's model pack is a
+field here, not a pipeline argument to each analysis: both pipelines build this record and
+call `runAnalyses`, so a row reads `i.models` and no pipeline changes when an analysis
+gains a model dependency. -/
 structure Scry.AnalysisInput where
+  /-- The external-function model pack the pack's rules were resolved with (P4). -/
+  models : Scry.ModelPack
   prog : Wil.Program
   pt : Scry.PtResult
   results : List Scry.FuncResult
@@ -109,20 +112,21 @@ def Scry.boundsAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) 
     s
     lift
     (fun i ir =>
-      let r := Scry.boundsCheckWith s ir i.pt i.pack i.results;
+      let r := Scry.boundsCheckWithModels i.models s ir i.pt i.pack i.results;
       Scry.AnalysisOutput.mk r.findings r.warnings)
 
-/-- The use-after-free rule. `Scry.lifetimeFindings` still reads the Wil fact bundle
-directly (its event parameterisation is P1), so its row names the default semantics; the
-row shape is the same as bounds', so extending it later is an edit to this constructor,
-not to either pipeline. -/
+/-- The use-after-free rule. `Scry.lifetimeFindingsWithModels` still reads the Wil fact
+bundle directly (its event parameterisation is P1), so its row names the default semantics
+and uses the Wil-shaped entry; the row shape is the same as bounds', so extending it later
+is an edit to this constructor, not to either pipeline. -/
 def Scry.lifetimeAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
   Scry.AnalysisSpec.mk
     ["use-after-free"]
     "lifetime"
     s
     lift
-    (fun i _ => Scry.AnalysisOutput.mk (Scry.lifetimeFindings i.prog i.pt i.pack) .nil)
+    (fun i _ => Scry.AnalysisOutput.mk
+      (Scry.lifetimeFindingsWithModels i.models i.prog i.pt i.pack) .nil)
 
 /-- The default registry, in pipeline order. Lifetime findings have always preceded
 bounds findings (`memoryFindings := lifetime ++ bounds`), and lifetime contributes no
@@ -206,10 +210,10 @@ def Scry.runEnabled (reg : Scry.AnalysisTable) (i : Scry.AnalysisInput) :
 /-- **The whole pipeline hook**: every enabled row, run in registry order. Both
 `Scry.analyzeStore` and `Scry.analyzeEntriesBound` call this and nothing else from the
 analysis set. -/
-def Scry.runAnalyses (reg : Scry.AnalysisTable) (pack : Scry.RulePack)
-    (prog : Wil.Program) (pt : Scry.PtResult) (results : List Scry.FuncResult) :
-    Scry.AnalysisOutput :=
-  let i := Scry.AnalysisInput.mk prog pt results pack;
+def Scry.runAnalyses (reg : Scry.AnalysisTable) (models : Scry.ModelPack)
+    (pack : Scry.RulePack) (prog : Wil.Program) (pt : Scry.PtResult)
+    (results : List Scry.FuncResult) : Scry.AnalysisOutput :=
+  let i := Scry.AnalysisInput.mk models prog pt results pack;
   Scry.joinAnalysisOutputs (Scry.runEnabled reg i)
 
 -- ## Exhaustiveness checks

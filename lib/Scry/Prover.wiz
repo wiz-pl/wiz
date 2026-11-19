@@ -291,7 +291,7 @@ def Scry.checkLocationsClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
 
 /-- A row's columns, rendered. An alert's path is a sequence of rows, so the whole row
 matters, not only the sink and its argument. -/
-def Scry.renderRow (row : List U64) : String :=
+def Scry.renderClaimRow (row : List U64) : String :=
   "(" ++ String.intercalate ","
     (List.map (fun i => Nat.repr (Scry.rowNat row i)) (Scry.range (List.length row))) ++ ")"
 
@@ -315,7 +315,7 @@ def Scry.renderAtoms (m : Scry.Env Nat × List Nat) : List Scry.Atom → List St
   | .nil => .nil
   | .cons a rest => match a with
     | .pos rel args => List.cons (Scry.relName rel ++
-        Scry.renderRow (List.map (Scry.Term.eval m.1.vals) args)) (Scry.renderAtoms m rest)
+        Scry.renderClaimRow (List.map (Scry.Term.eval m.1.vals) args)) (Scry.renderAtoms m rest)
     | _ => Scry.renderAtoms m rest
 
 -- ## Provenance witnesses through memory
@@ -453,14 +453,14 @@ def Scry.checkAlertRules (p : Scry.Program Nat) (stI : Scry.State Nat) :
 def Scry.sourceRows (st : Scry.State Nat) (rels : List Nat) : Nat :=
   List.foldl (fun acc r => Nat.add acc (Scry.Db.relSize st.db r)) 0 rels
 
-def Scry.sourceName (r : Nat) : String :=
+def Scry.claimSource (r : Nat) : String :=
   if Nat.beq r Scry.rtSrc then "src"
   else if Nat.beq r Scry.rtParam then "param"
   else if Nat.beq r Scry.rtRetSrc then "retsrc"
   else "rel " ++ Nat.repr r
 
 def Scry.showSources (rels : List Nat) : String :=
-  String.intercalate "," (List.map Scry.sourceName rels)
+  String.intercalate "," (List.map Scry.claimSource rels)
 
 /-- A claim is vacuous when the function has no sink, or (for a `noFlow` claim) when the
 selected source relations are empty. A `constantOrBound` claim with sinks is not vacuous

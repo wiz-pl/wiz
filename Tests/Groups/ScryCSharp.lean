@@ -377,7 +377,7 @@ def repoCoverage : IO Unit := do
   checkEq
     ("error 1 parse failure"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
-     ++ "|warning 1 is test not modelled: havoc"
+     
      ++ "|warning 1 unmodelled-external"
      ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|note 1 excluded: *.Designer.cs"
@@ -387,7 +387,7 @@ def repoCoverage : IO Unit := do
      ++ "|note 1 excluded: obj/") m
 
 /-- Every failed file is named: error rows are not summed into one "parse failure 3" row
-with a single example (the sweep's 16 Nexus failures used to hide fifteen file names; the
+with a single example (the sweep's 16 failures used to hide fifteen file names; the
 two grammar-gap reproducers now parse, so only the deliberately invalid file is left). -/
 def repoFailureRows : IO Unit := do
   let files ← repoFiles

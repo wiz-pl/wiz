@@ -1,5 +1,6 @@
 import Scry.PointsTo
 import Scry.Rules
+import Scry.Models
 import Scry.RuleTaint
 import Scry.Engine
 import Text
@@ -340,18 +341,18 @@ structure Scry.BoundsCopy where
   src : Option Nat
   count : Nat
 
-/-- The `(destination, source, count)` positions of a modelled copy/read call. -/
+/-- The `(destination, source, count)` positions of a modelled copy/read call. This is a
+view of the pack's `copyBounds` effects, not a second table: the C family names and their
+argument positions live only in `Scry.Models` now. -/
+def Scry.boundsCopyShapeWith (models : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.BoundsCopy :=
+  match Scry.ModelPack.copyShapeOf models name arity with
+  | .none => .none
+  | .some s => .some (Scry.BoundsCopy.mk s.dst s.src s.count)
+
+/-- The default pack's copy shape (the compatibility spelling). -/
 def Scry.boundsCopyShape (name : String) (arity : Nat) : Option Scry.BoundsCopy :=
-  if Bool.and (String.eq name "read") (Nat.le 3 arity) then
-    .some (Scry.BoundsCopy.mk 1 .none 2)
-  else if Bool.and (String.eq name "recv") (Nat.le 3 arity) then
-    .some (Scry.BoundsCopy.mk 1 .none 2)
-  else if Bool.and (Bool.or (String.eq name "memcpy") (String.eq name "memmove"))
-      (Nat.le 3 arity) then
-    .some (Scry.BoundsCopy.mk 0 (.some 1) 2)
-  else if Bool.and (String.eq name "strncpy") (Nat.le 3 arity) then
-    .some (Scry.BoundsCopy.mk 0 (.some 1) 2)
-  else .none
+  Scry.boundsCopyShapeWith Scry.defaultModels name arity
 
 def Scry.boundsArgAt (args : List Nat) (i : Nat) : Option Nat := Wil.listNth args i
 
@@ -368,10 +369,11 @@ def Scry.boundsCopyCaps (rule : Option Scry.MemoryRule) (fn : Wil.Func) (g : Scr
 
 /-- Check a copy/read call. `read`/`recv` are the write side (the buffer they fill);
 `memcpy` and friends are the read side (the source they read). -/
-def Scry.boundsCopyAt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+def Scry.boundsCopyAtWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
     (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func) (g : Scry.Fn)
     (point : Nat) (name : String) (args : List Nat) : Scry.BoundsResult :=
-  match Scry.boundsCopyShape name (List.length args) with
+  match Scry.boundsCopyShapeWith models name (List.length args) with
   | .none => Scry.boundsEmpty
   | .some shape => match Scry.boundsArgAt args shape.count with
     | .none => Scry.boundsEmpty
@@ -388,6 +390,11 @@ def Scry.boundsCopyAt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.P
           | .some srcVar => Scry.boundsCopyCaps readRule fn g r.plan.info point countVar name
               (Scry.boundsPtrCaps pt sizes fn.name srcVar)
 
+def Scry.boundsCopyAt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : Scry.BoundsResult :=
+  Scry.boundsCopyAtWith Scry.defaultModels writeRule readRule pt sizes r fn g point name args
+
 -- ## One function, over the semantics' events
 
 /-- Everything `Bounds` needs from one analysed unit: the semantics' events (in the
@@ -403,21 +410,30 @@ structure Scry.BoundsUnit where
 /-- Dispatch one event. This replaces the Wil-constructor match: a `store`, a `load` and
 a direct `call` are the only events with a bounds obligation; everything else is
 `boundsEmpty`. -/
-def Scry.boundsEventStmt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+def Scry.boundsEventStmtWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
     (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func)
     (g : Scry.Fn) (n : Nat) (e : Scry.Event) : Scry.BoundsResult :=
   match e with
   | .store p _ => Scry.boundsIndexAt writeRule readRule pt sizes r fn g n p .true
   | .load _ p => Scry.boundsIndexAt writeRule readRule pt sizes r fn g n p .false
-  | .call _ name args => Scry.boundsCopyAt writeRule readRule pt sizes r fn g n name args
+  | .call _ name args =>
+    Scry.boundsCopyAtWith models writeRule readRule pt sizes r fn g n name args
   | _ => Scry.boundsEmpty
 
-def Scry.boundsOfUnit (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+def Scry.boundsEventStmt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func)
+    (g : Scry.Fn) (n : Nat) (e : Scry.Event) : Scry.BoundsResult :=
+  Scry.boundsEventStmtWith Scry.defaultModels writeRule readRule pt sizes r fn g n e
+
+def Scry.boundsOfUnitWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
     (sizes : List ((String × Nat) × Nat)) (u : Scry.BoundsUnit) : Scry.BoundsResult :=
   let r0 := u.result;
   let g := r0.plan.info.g;
   let run := fun (r : Scry.FuncResult) => List.foldr (fun (pe : Nat × Scry.Event) acc =>
-    Scry.boundsAppend acc (Scry.boundsEventStmt writeRule readRule pt sizes r r.fn g pe.1 pe.2))
+    Scry.boundsAppend acc
+      (Scry.boundsEventStmtWith models writeRule readRule pt sizes r r.fn g pe.1 pe.2))
     Scry.boundsEmpty u.events;
   let first := run r0;
   -- A flow-only plan has no dominator sets, so no guard can be proved in `first`.
@@ -429,6 +445,10 @@ def Scry.boundsOfUnit (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.P
   | _, .nil =>
     let info := { r0.plan.info with dom := Scry.dominators g };
     run { r0 with plan := { r0.plan with info := info } }
+
+def Scry.boundsOfUnit (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (u : Scry.BoundsUnit) : Scry.BoundsResult :=
+  Scry.boundsOfUnitWith Scry.defaultModels writeRule readRule pt sizes u
 
 /-- The units of a run: one per function result, in result order (which is the program's
 function order, `Scry.evalAllStaged`). Each unit's events are the semantics' events for
@@ -445,10 +465,12 @@ def Scry.boundsUnits (es : List (Scry.ObservedEvent Scry.Event))
 def Scry.boundsJoin (rs : List Scry.BoundsResult) : Scry.BoundsResult :=
   List.foldr (fun r acc => Scry.boundsAppend r acc) Scry.boundsEmpty rs
 
-/-- Run the two out-of-bounds rules of `pack` over a semantics' events. `s` supplies the
-event projection (`s.events p`); the default is `Scry.Wil.concrete`. -/
-def Scry.boundsCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir) (pt : Scry.PtResult)
-    (pack : Scry.RulePack) (rs : List Scry.FuncResult) : Scry.BoundsResult :=
+/-- Run the two out-of-bounds rules of `pack` over a semantics' events, reading copy
+shapes from `models`. `s` supplies the event projection (`s.events p`); the default is
+`Scry.Wil.concrete` and `Scry.defaultModels`. -/
+def Scry.boundsCheckWithModels (models : Scry.ModelPack) (s : Scry.Sem Scry.Event)
+    (p : s.Ir) (pt : Scry.PtResult) (pack : Scry.RulePack)
+    (rs : List Scry.FuncResult) : Scry.BoundsResult :=
   let wr := pack.memoryRuleFor "out-of-bounds-write";
   let rr := pack.memoryRuleFor "out-of-bounds-read";
   match wr, rr with
@@ -456,16 +478,32 @@ def Scry.boundsCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir) (pt : Scry.PtResul
   | _, _ =>
     let es := s.events p;
     let sizes := Scry.boundsSizesOfEvents es;
-    Scry.boundsJoin (List.map (fun u => Scry.boundsOfUnit wr rr pt sizes u)
+    Scry.boundsJoin (List.map (fun u => Scry.boundsOfUnitWith models wr rr pt sizes u)
       (Scry.boundsUnits es rs))
+
+def Scry.boundsCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir) (pt : Scry.PtResult)
+    (pack : Scry.RulePack) (rs : List Scry.FuncResult) : Scry.BoundsResult :=
+  Scry.boundsCheckWithModels Scry.defaultModels s p pt pack rs
 
 /-- Run the two out-of-bounds rules of `pack`. Neither rule in the pack means no
 findings and no diagnostics; the pack is still the only way to enable the family.
-This is the **default instantiation**: Wil's concrete semantics, byte-for-byte the
-analysis that ran before the `Sem` parameter existed. -/
+This is the **default instantiation**: Wil's concrete semantics and the default model
+pack, byte-for-byte the analysis that ran before the `Sem` parameter existed. -/
+def Scry.boundsCheckModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (pack : Scry.RulePack) (rs : List Scry.FuncResult) :
+    Scry.BoundsResult :=
+  Scry.boundsCheckWithModels models Scry.Wil.concrete (Scry.WilTarget.mk p "" .nil)
+    pt pack rs
+
 def Scry.boundsCheck (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack)
     (rs : List Scry.FuncResult) : Scry.BoundsResult :=
-  Scry.boundsCheckWith Scry.Wil.concrete (Scry.WilTarget.mk p "" .nil) pt pack rs
+  Scry.boundsCheckModels Scry.defaultModels p pt pack rs
+
+/-- `boundsCheckModels`' findings. -/
+def Scry.boundsFindingsWithModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (pack : Scry.RulePack) (rs : List Scry.FuncResult) :
+    List Scry.RuleFinding :=
+  (Scry.boundsCheckModels models p pt pack rs).findings
 
 /-- Flatten the one-element list `boundsCheck` builds (kept explicit so the order is the
 function order and each function's point order). -/

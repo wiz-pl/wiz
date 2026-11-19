@@ -52,7 +52,8 @@ def demoPack : Scry.RulePack := pack
   "rule demo\n  kind memory\n  check demo-function-count\nend\n"
 
 def demoRun : Scry.AnalysisOutput :=
-  Scry.runAnalyses (Scry.AnalysisTable.append Scry.analyses (one demoAnalysis)) demoPack
+  Scry.runAnalyses (Scry.AnalysisTable.append Scry.analyses (one demoAnalysis))
+    Scry.defaultModels demoPack
     (Wil.Program.mk .nil)
     (Scry.PtResult.mk Scry.ptEmpty .nil U64Map.empty U64Map.empty .nil 0 .true) .nil
 

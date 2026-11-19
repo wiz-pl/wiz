@@ -104,6 +104,9 @@ structure Scry.TaintOpts where
   maxRounds : Option Nat
   /-- `--progress`: print one stage line per phase on stderr. -/
   progress : Bool
+  /-- The external-function model pack. The default is `Scry.defaultModels`; a caller
+  (a test or a future `--models` flag) can pass another pack without changing the CLI. -/
+  models : Scry.ModelPack
 
 /-- The defaults are a **contract**, not an accident: a single file is analysed under a
 300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
@@ -111,7 +114,7 @@ clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` dis
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
   Scry.TaintOpts.mk file .none .none .false .false .false .false .false .none .none .none
-    (.some 300) (.some 2000000) .none .false
+    (.some 300) (.some 2000000) .none .false Scry.defaultModels
 
 /-- The budget view of the options (`--progress` is included there too). -/
 def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
@@ -964,7 +967,7 @@ partial def Scry.evalAllStaged (o : Scry.TaintOpts) (startMs : Nat) (tag : Strin
     | .false => EIO.pure ();
     let r := match plans with
       | .cons plan _ => Scry.evalWithPreparedM graph pt plan sums allMems fn
-      | .nil => Scry.evalWithEntries graph pack pt entries sums fn;
+      | .nil => Scry.evalWithEntriesModels o.models graph pack pt entries sums fn;
     let plans' := match plans with
       | .cons _ prest => prest
       | .nil => (List.nil : List Scry.FuncPlan);
@@ -1070,7 +1073,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
     pack ← Scry.loadTaintPack o.rules;
     Scry.refuseRegistryProblems o pack;
     let c := Scry.Cst.ofStore text cst;
-    let tu := Scry.lowerTU o.file c;
+    let tu := Scry.lowerTUWithModels o.file o.models c;
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
@@ -1091,7 +1094,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
     let summaryFuel := Scry.summaryFuel o prog pt;
     -- Plans depend on the function, the rule pack, points-to and the entry policy only,
     -- so they are built once; the summary fixpoint and the final pass reuse them.
-    let plans := Scry.prepareAllWithEntries prog pack pt entries;
+    let plans := Scry.prepareAllWithEntriesModels o.models prog pack pt entries;
     Scry.reportStage o startMs "plans" (Nat.repr (List.length plans) ++ " plan(s)");
     Scry.checkDeadline o startMs "plans";
     run ← Scry.summaryRounds o startMs prog graph pack pt entries plans summaryFuel 0 sums0;
@@ -1107,9 +1110,9 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
     let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
       | .some _ => .true
       | .none => .false;
-    -- The memory analyses are the registry's rows: every row the pack enables runs, in
-    -- registry order (lifetime before bounds, as the old fixed sequence did).
-    let analyses := Scry.runAnalyses Scry.analyses pack prog pt results;
+    -- The memory analyses are the registry's rows: the model pack is in the input
+    -- record, and this call is the only pipeline hook.
+    let analyses := Scry.runAnalyses Scry.analyses o.models pack prog pt results;
     let nulls : List Scry.MemWarning := match o.nullDeref with
       | .true => Scry.nullDerefWarnings prog
       | .false => .nil;
@@ -1117,7 +1120,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
       (List.filter (Scry.keepMemWarning hasLifetime)
         (List.append
           (Scry.concatLists (fun r => r.plan.memWarnings) results)
-          (Scry.concatLists (fun r => Scry.unmodelledWarningsOf prog r) results)))
+          (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels o.models prog r) results)))
       (List.append analyses.warnings nulls));
     let memoryFindings := analyses.findings;
     let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
@@ -1163,15 +1166,16 @@ def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)
     | .false => do
       Scry.checkDeadline o startMs "parse";
       pack ← Scry.loadTaintPack o.rules;
+      Scry.refuseRegistryProblems o pack;
       let spill := Scry.CstStore.render cst;
-      match Scry.Cs.frontend o.file text spill with
+      match Scry.Cs.frontendWithModels Scry.csModels o.file text spill with
       | .err e => EIO.fail e
       | .ok l => do
         let tu := Scry.TU.mk o.file [text] [o.file] l.funcs l.warnings .nil;
         Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs)
           ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
         let prog := Wil.program tu.funcs;
-        let pr := Scry.analyze prog pack;
+        let pr := Scry.analyzeModels Scry.csModels prog pack;
         let findings := Scry.programFindings pr;
         let checks := List.map (fun f => Scry.findingChecked pr f) findings;
         let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
