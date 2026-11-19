@@ -1,0 +1,123 @@
+import Logic
+import Text
+/-!
+# Task
+
+Pure parallelism: `import Task` (stage 31, docs/stages/31-tasks.md; plan stage T1 in
+wiz-notes/concurrency-plan-2026-11-17.md).
+
+A `Task A` is a value of type `A` that may be computed on another thread. The model, which
+the kernel, every proof and the interpreters (`#eval`, `#run`) use, is sequential:
+`Task.spawn f` is `f ()` in a box and `Task.get` takes it out, so a program that uses
+tasks means exactly what it means without them (decision CP6). Compiled code (`runtime/`,
+`wiz_task_*`) runs the same functions in parallel, by `implemented_by`; that is a trusted
+claim, which `#print axioms` lists, and a compiled program that prints a task's result is
+a differential test of the threads against the model.
+
+* `Task.spawn f` starts `f ()`; `Task.get t` waits for it. A task that no thread has
+  started yet when it is needed runs where it is needed (work-first), so `get` never
+  waits for work nobody is doing, and nested tasks can't deadlock.
+* At most one task thread per online CPU runs at a time; a task spawned beyond that waits
+  for the `get` that needs it, and runs there.
+* `Task.both f g` is `(f (), g ())`, with `g` on another thread while this one runs `f`.
+* `Task.par fs` runs a list of functions, `Task.parMap f xs` maps in parallel.
+* `Task.race f g h` returns whichever of `f ()` and `g ()` finishes first. Both have the
+  same value (`h : f () = g ()`, an erased proof), so the result is deterministic: two
+  algorithms for one function, the faster one wins. The loser runs to its end in the
+  background (a pure computation can't be cancelled).
+
+Tasks are pure: no `IO`, no effect, no linearity. For `IO` actions with a guaranteed join,
+see `lib/Scope.wiz`. A build without threads (`WIZ_NO_THREADS`, the Wasm pages) stops at
+the first `Task.spawn`, `Task.both` or `Task.race` with a clear message (exit 3).
+
+```
+import Task
+
+def sumTo : Nat → Nat
+  | .zero => 0
+  | .succ n => .succ n + sumTo n
+
+def two : Nat × Nat := Task.both (fun _ => sumTo 100) (fun _ => sumTo 200)   -- (5050, 20100)
+def sums : List Nat := Task.parMap sumTo [10, 20, 30]                       -- [55, 210, 465]
+```
+-/
+
+-- ## The model
+
+/-- A value of type `A` that may be computed on another thread. Opaque outside this
+module (a private constructor and field): a task is made by `Task.spawn` and read by
+`Task.get`, which is what compiled code replaces. -/
+structure Task (A : Type) where
+  private mk ::
+  private value : A
+
+/-- Start computing `f ()`. The model: the value, at once. -/
+def Task.spawn {0 A : Type} (f : Unit → A) : Task A := Task.mk (f ())
+
+/-- The task's value; compiled code waits for it (or computes it here, if no thread has
+started it yet). -/
+def Task.get {0 A : Type} (t : Task A) : A := t.value
+
+/-- `(f (), g ())`: compiled code runs `g ()` as a task while this thread runs `f ()`. -/
+def Task.both {0 A B : Type} (f : Unit → A) (g : Unit → B) : A × B := (f (), g ())
+
+/-- Whichever of `f ()` and `g ()` finishes first; `h` says they are the same value, so
+the model is `f ()`. -/
+def Task.race {0 A : Type} (f g : Unit → A) (0 h : f () = g ()) : A := f ()
+
+-- (start every task, then wait for each: `getAll` needs the whole list `spawnAll` built,
+-- so compiled code starts all of them before it waits for the first)
+private def Task.spawnAll {0 A : Type} : List (Unit → A) → List (Task A)
+  | .nil => .nil
+  | .cons f fs => .cons (Task.spawn f) (Task.spawnAll fs)
+private def Task.getAll {0 A : Type} : List (Task A) → List A
+  | .nil => .nil
+  | .cons t ts => .cons (Task.get t) (Task.getAll ts)
+
+/-- The values of every function in `fs`, computed in parallel, in order. -/
+def Task.par {0 A : Type} (fs : List (Unit → A)) : List A := Task.getAll (Task.spawnAll fs)
+
+-- (one function per element, closing over it)
+private def Task.thunks {0 A B : Type} (f : A → B) : List A → List (Unit → B)
+  | .nil => .nil
+  | .cons x xs => .cons (fun _ => f x) (Task.thunks f xs)
+
+/-- `List.map f xs`, one task per element. -/
+def Task.parMap {0 A B : Type} (f : A → B) (xs : List A) : List B := Task.par (Task.thunks f xs)
+
+-- ## The model's laws (proofs: the kernel computes with the model)
+
+/-- A spawned task's value is the function's. -/
+def Task.get_spawn {0 A : Type} (f : Unit → A) : Task.get (Task.spawn f) = f () := rfl
+
+/-- `both` is the pair of the two values. -/
+def Task.both_eq {0 A B : Type} (f : Unit → A) (g : Unit → B) : Task.both f g = (f (), g ()) := rfl
+
+/-- `race` is either value. -/
+def Task.race_eq_left {0 A : Type} (f g : Unit → A) (0 h : f () = g ()) : Task.race f g h = f () := rfl
+/-- … and so the other one too. -/
+def Task.race_eq_right {0 A : Type} (f g : Unit → A) (h : f () = g ()) : Task.race f g h = g () := h
+
+/-- `par` is every function applied to `()`. -/
+def Task.par_eq {0 A : Type} : (fs : List (Unit → A)) → Task.par fs = List.map (fun f => f ()) fs
+  | .nil => rfl
+  | .cons f fs => Eq.congrArg (List.cons (f ())) (Task.par_eq fs)
+
+/-- `parMap` is `List.map`. -/
+def Task.parMap_eq {0 A B : Type} (f : A → B) : (xs : List A) → Task.parMap f xs = List.map f xs
+  | .nil => rfl
+  | .cons x xs => Eq.congrArg (List.cons (f x)) (Task.parMap_eq f xs)
+
+-- ## Compiled code: runtime/rt_con.inc (`wiz_task_*`)
+--
+-- The natives behind the four definitions above (public only because `implemented_by`
+-- names them; call `Task.spawn` and friends, which the interpreters can run too).
+
+extern "wiz_task_spawn" Task.spawnNative : {0 A : Type} → (f : Unit → A) → Task A
+extern "wiz_task_get" Task.getNative : {0 A : Type} → (t : Task A) → A
+extern "wiz_task_both" Task.bothNative : {0 A B : Type} → (f : Unit → A) → (g : Unit → B) → A × B
+extern "wiz_task_race" Task.raceNative : {0 A : Type} → (f g : Unit → A) → (0 h : f () = g ()) → A
+attribute [implemented_by Task.spawnNative] Task.spawn
+attribute [implemented_by Task.getNative] Task.get
+attribute [implemented_by Task.bothNative] Task.both
+attribute [implemented_by Task.raceNative] Task.race

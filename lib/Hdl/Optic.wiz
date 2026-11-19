@@ -60,15 +60,15 @@ def Bundle.lens_lawful {F : (HwTy → Type) → Type} (b : Bundle F) (h : Bundle
 -- Product codes
 
 /-- The first component of a product code, at values. -/
-def HwTy.fstL {a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El a) :=
+def HwTy.fstL {0 a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El a) :=
   fun (p : HwTy.El (HwTy.prod a b)) => (p.1, fun (x : HwTy.El a) => (x, p.2))
 /-- The second component of a product code, at values. -/
-def HwTy.sndL {a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El b) :=
+def HwTy.sndL {0 a b : HwTy} : Lens (HwTy.El (HwTy.prod a b)) (HwTy.El b) :=
   fun (p : HwTy.El (HwTy.prod a b)) => (p.2, fun (y : HwTy.El b) => (p.1, y))
 /-- `HwTy.fstL` is lawful (every law by `rfl`). -/
-def HwTy.fstL_lawful {a b : HwTy} : Lens.Lawful (@HwTy.fstL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
+def HwTy.fstL_lawful {0 a b : HwTy} : Lens.Lawful (@HwTy.fstL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
 /-- `HwTy.sndL` is lawful (every law by `rfl`). -/
-def HwTy.sndL_lawful {a b : HwTy} : Lens.Lawful (@HwTy.sndL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
+def HwTy.sndL_lawful {0 a b : HwTy} : Lens.Lawful (@HwTy.sndL a b) := (fun s => rfl, fun s x => rfl, fun s x y => rfl)
 /-- The two components of a product code are independent. -/
-def HwTy.fst_snd_indep {a b : HwTy} : Lens.Indep (@HwTy.fstL a b) (@HwTy.sndL a b) :=
+def HwTy.fst_snd_indep {0 a b : HwTy} : Lens.Indep (@HwTy.fstL a b) (@HwTy.sndL a b) :=
   (fun s x => rfl, fun s y => rfl, fun s x y => rfl)

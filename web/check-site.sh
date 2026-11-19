@@ -1,11 +1,13 @@
 #!/bin/sh
-# Check an assembled site without a server: the four entry points exist, the landing
-# page's and the benchmark page's local links resolve, and the playground's page and
-# assets are all there. External links (http, https, mailto, data) are not fetched.
-# Run by CI after web/build-site.sh, and usable locally on a `doc-site` tree.
+# Check an assembled site without a server: the five entry points exist, every internal
+# link of every page resolves, no page links to a repository Markdown file, every
+# rendered page carries its source link, and the playground's module graph is complete.
+# External links (http, https, mailto, data) are not fetched. Run by CI after
+# web/build-site.sh, and usable locally on a `doc-site` tree.
 #
 #   usage: web/check-site.sh [SITE]                (default: doc-site)
 set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SITE=${1:-doc-site}
 fail=0
 
@@ -46,6 +48,8 @@ need notebooks/index.html
 need licenses/index.html
 need licenses/LGPL-3.0.txt
 need licenses/GPL-3.0.txt
+need guide/docs/index.html
+need guide/guide.css
 
 # Every local ES import of the playground's scripts resolves: a page whose module graph
 # is broken would load and then do nothing, which an HTTP check would not see.
@@ -125,8 +129,13 @@ if [ -f "$SITE/notebooks/index.html" ]; then
   check_links "$SITE/notebooks/index.html" "$SITE/notebooks"
 fi
 
+# The whole tree: every page's internal links resolve (fragments too), no page links to
+# a repository Markdown file, and every module, guide and notebook page has its source
+# link.
+python3 "$ROOT/web/check-links.py" "$SITE" || fail=1
+
 if [ "$fail" -eq 0 ]; then
-  echo "check-site: ok ($SITE: landing, docs, benchmarks, playground, notebooks, licenses)"
+  echo "check-site: ok ($SITE: landing, docs, guide, benchmarks, playground, notebooks, licenses)"
 else
   echo "check-site: FAILED" >&2
 fi

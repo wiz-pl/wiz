@@ -5,6 +5,8 @@
 #   /landing.css
 #   /bench/                benchmarks, generated from the checked-in JSON
 #                          (web/build-bench.py → web/bench/index.html)
+#   /guide/                the repository's prose documentation, rendered from
+#                          Markdown by web/build-docs.py
 #   /playground/           the static playground: web/playground.html and its scripts,
 #                          plus web/build-playground.sh's wiz-playground.mjs/.wasm
 #   /licenses/             the Wasm modules' notice (mini-gmp) and licence texts
@@ -77,4 +79,12 @@ if [ -d "$ROOT/docs/notebooks" ]; then
   done
 fi
 
-echo "site: landing at $SITE/index.html, docs at $SITE/docs, benchmarks at $SITE/bench/index.html, playground at $SITE/playground/index.html, notebooks at $SITE/notebooks/index.html"
+# The prose documentation: the repository's Markdown (`docs/`, the README, and what
+# they link to) rendered under /guide/, with each page's links rewritten to the
+# rendered pages. A page on the site never sends the reader to a repository `.md`: the
+# notebook pages' links are rewritten here too, so /notebooks/tour.html points at
+# /guide/docs/… . Each page's "source" link names this commit (or `WIZ_SOURCE_URL`).
+SOURCE_URL=${WIZ_SOURCE_URL:-https://github.com/wiz-pl/wiz/blob/$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo master)}
+python3 "$ROOT/web/build-docs.py" --site "$SITE" --source-url "$SOURCE_URL"
+
+echo "site: landing at $SITE/index.html, docs at $SITE/docs, guide at $SITE/guide/docs/index.html, benchmarks at $SITE/bench/index.html, playground at $SITE/playground/index.html, notebooks at $SITE/notebooks/index.html"

@@ -9,6 +9,8 @@
 # cursor in the page's proof, click a subterm and look for the goals and what the subterm
 # is in the DOM.
 #   usage: web/test.sh [PORT]       (needs nix for emscripten and chromium)
+#   WIZ_WEB_FROM=DIR and WIZ_PLAYGROUND_FROM=DIR: copy the modules a Nix build made
+#   (`nix build .#wiz-web .#wiz-playground`) instead of building them, as CI does.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${1:-18765}
@@ -79,7 +81,7 @@ for want in 'class="tt k-const" data-ref=' 'info: <span class="kind">const</span
   if grep -qF "$want" "$OUT/doc.txt"; then echo "ok (doc, node): $want"; else echo "FAIL (doc, node): missing $want"; cat "$OUT/doc.txt"; exit 1; fi
 done
 [ -n "$WIZ_WEB_NO_BROWSER" ] && exit 0
-if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell nixpkgs#chromium -c sh -c 'command -v chromium'); fi
+if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell --inputs-from "$ROOT" nixpkgs#chromium -c sh -c 'command -v chromium'); fi
 # (11s) the documentation page in Chromium: signatures rendered by the Wasm module
 (cd "$OUT/doc/site" && exec python3 -m http.server $((PORT + 2)) --bind 127.0.0.1) > "$OUT/http.log" 2>&1 &
 HTTP=$!

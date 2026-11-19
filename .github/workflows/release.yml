@@ -176,7 +176,7 @@ jobs:
           if grep -q -- --gmp-src web/build.sh 2>/dev/null; then echo "web=yes" >> "$GITHUB_OUTPUT"; else echo "web=no" >> "$GITHUB_OUTPUT"; fi
       - name: Emscripten
         if: steps.web.outputs.web == 'yes'
-        uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        uses: emscripten-core/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
         with:
           version: 6.0.9
           actions-cache-folder: emsdk-cache
@@ -374,8 +374,10 @@ jobs:
           notes=$RUNNER_TEMP/notes.md
           awk -v h="## [$v]" 'index($0, h) == 1 { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md > "$notes"
           if ! grep -q '[^[:space:]]' "$notes"; then echo "CHANGELOG.md has no section [$v]"; exit 1; fi
-          printf '\nInstall: `curl -sSfL https://raw.githubusercontent.com/%s/%s/scripts/tower-init.sh | sh -s -- %s` (docs/install.md).\n' \
-            "${{ github.repository }}" "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" >> "$notes"
+          # the installer is at this tag; its sha256 pins the tag's content in the notes
+          sum=$(sha256sum scripts/tower-init.sh | cut -d' ' -f1)
+          printf '\nInstall:\n\n```sh\ncurl -sSfL -o tower-init.sh https://raw.githubusercontent.com/%s/%s/scripts/tower-init.sh\necho "%s  tower-init.sh" | sha256sum -c -\nsh tower-init.sh %s\n```\n\n(docs/install.md).\n' \
+            "${{ github.repository }}" "$GITHUB_REF_NAME" "$sum" "$GITHUB_REF_NAME" >> "$notes"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo "release ${GITHUB_REF_NAME} exists already: its assets are not replaced"; exit 1
           fi

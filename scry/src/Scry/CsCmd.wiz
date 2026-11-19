@@ -48,7 +48,10 @@ walked. `<Compile Remove=` and `EnableDefaultCompileItems` are not interpreted.
 Nothing is dropped silently. A row is one of:
 
 * `parse failure` (error): the native grammar reported `ERROR`/`MISSING` nodes, so the
-  file's tree is recovery output and the file was **not** lowered;
+  file's tree is recovery output and the file was **not** lowered. The row's location is
+  the first failing node's position and kind (`path:line:col (MISSING identifier)`), and
+  there is one row per file: an error is never summed into a single "16 parse failure"
+  row, because the operator then knows one file's name and not the other fifteen;
 * `unreadable file` (error): an IO error while reading a discovered file;
 * a lowering warning (warning): every message `Scry.CsLower` emits is normalised to a
   construct and counted (`lambda body not lowered`, `out/ref argument …`, an unsupported
@@ -525,8 +528,17 @@ def Scry.Cs.resultOfFront (path : String) (r : Scry.Cs.FrontResult) : Scry.Cs.Fi
   | .err m => Scry.Cs.FileResult.mk path .false 1 .nil ""
       [Scry.Cs.Diag.mk .error "parse failure" path m]
 
+/-- The kind of a store's first failing node: `ERROR`, or `MISSING <token>` (the token
+the grammar expected). Naming the node is what lets a failing file be diagnosed without a
+second tool: the sweep row says which node is absent, not just that the file failed. -/
+def Scry.Cs.errorKind (s : Scry.CstStore) (i : Nat) : String :=
+  match Scry.CstStore.missingOf s i with
+  | .true => "MISSING " ++ Scry.CstStore.kindName s i
+  | .false => "ERROR"
+
 /-- Parse and lower one file. `rel` is the path the report uses; `full` is read.
-A tree with `ERROR`/`MISSING` nodes is a failure (never lowered as if recovered). -/
+A tree with `ERROR`/`MISSING` nodes is a failure (never lowered as if recovered); the
+row's location names the first failing node's position and kind. -/
 def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
   text ← FS.readFile full;
   st ← Scry.Native.parse "c_sharp" text;
@@ -542,6 +554,7 @@ def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
       | .some i => let sp := Scry.CstStore.spanOf store i;
         let pos := Scry.posOf pre sp.start;
         rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
+          ++ " (" ++ Scry.Cs.errorKind store i ++ ")"
       | .none => rel;
     EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
       [Scry.Cs.Diag.mk .error "parse failure" loc
@@ -566,12 +579,16 @@ def Scry.Cs.findCover (c : String) : List Scry.Cs.CoverRow → Option Nat
     | .true => .some r.count
     | .false => Scry.Cs.findCover c rest
 
-/-- Add a diagnostic to the coverage rows (same construct: count + 1). -/
+/-- Add a diagnostic to the coverage rows (same construct: count + 1). An `error` row is
+never merged: a count of "16 parse failure" with one example hides fifteen files, and the
+point of the coverage section is to name every file that was not analysed. Warnings still
+aggregate, because one construct repeated in a file is one construct. -/
 def Scry.Cs.addDiag (d : Scry.Cs.Diag) : List Scry.Cs.CoverRow → List Scry.Cs.CoverRow
   | .nil => [Scry.Cs.CoverRow.mk d.level d.construct 1 d.location]
-  | .cons r rest => match String.eq r.construct d.construct with
-    | .true => List.cons { r with count := Nat.succ r.count } rest
-    | .false => List.cons r (Scry.Cs.addDiag d rest)
+  | .cons r rest => match d.level, String.eq r.construct d.construct with
+    | .error, _ => List.cons r (Scry.Cs.addDiag d rest)
+    | _, .true => List.cons { r with count := Nat.succ r.count } rest
+    | _, .false => List.cons r (Scry.Cs.addDiag d rest)
 
 def Scry.Cs.coverageOf (results : List Scry.Cs.FileResult) : List Scry.Cs.CoverRow :=
   List.foldl (fun rows r => List.foldl (fun rs d => Scry.Cs.addDiag d rs) rows r.diags)
@@ -650,7 +667,7 @@ def Scry.Cs.findingRows (m : Scry.OriginMap) (fs : List Scry.RuleFinding) :
 /-- The origin map of every lowered function, for finding locations. -/
 def Scry.Cs.originMapOf (results : List Scry.Cs.FileResult) : Scry.OriginMap :=
   List.concat (List.map (fun r =>
-    Scry.originEntries r.path (Scry.lineStartsOf r.text) r.funcs) results)
+    Scry.originEntries r.path (Scry.TextIndex.ofString r.text) r.funcs) results)
 
 /-- The report. `found` is the number of `.cs` files analysed; `before` is
 `found + walk.excludedCount`. -/
@@ -954,7 +971,7 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
         | .nil => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil (.some path) 0
             [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""])
         | _ => do
-          let pr := Scry.analyze (Wil.program funcs) p;
+          let pr := Scry.analyzeC (Scry.Cs.resolveCalls (Wil.program funcs)) p;
           let m := Scry.Cs.originMapOf results;
           Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk
             (Scry.Cs.findingRows m (Scry.programFindings pr))

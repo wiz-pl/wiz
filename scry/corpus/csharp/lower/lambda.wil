@@ -1,0 +1,19 @@
+func Program.Main()
+  b0:
+    %0 = havoc unknown
+    %1 = %0
+    %2 = fnptr $lambda:79
+    %3 = call System.Int32[].Select(%1, %2)
+    %4 = %3
+    ret
+func Program.Run()
+  b0:
+    %0 = fnptr $lambda:112
+    %1 = %0
+    %2 = call System.Console.ReadLine()
+    %3 = call run(%2)
+    ret
+warning: Program.Main:12: initializer_expression not modelled: havoc
+warning: Program.Main:13: lambda body not lowered: an opaque function value
+warning: Program.Run:18: lambda body not lowered: an opaque function value
+warning: Program.Run:19: call to run: not a method of Program (delegate or unknown)

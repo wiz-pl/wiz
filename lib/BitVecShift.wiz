@@ -206,7 +206,7 @@ def Bits.zero_mul_add (Y X : Nat) : Nat.add (Nat.mul 0 Y) X = X := rfl
 
 -- `Hw.and 0 b = 0` at any width: SRLI's barrel fill (`Hw.and d.alt (bit 31 a)`, with
 -- `d.alt = 0`) is the zero word.
-def BitVec.and_zero_left {n : Nat} (b : BitVec n) :
+def BitVec.and_zero_left {0 n : Nat} (b : BitVec n) :
     BitVec.and (BitVec.ofNat n 0) b = BitVec.ofNat n 0 :=
   UIntN.ext (BitVec.and (BitVec.ofNat n 0) b) (BitVec.ofNat n 0)
     (Eq.trans

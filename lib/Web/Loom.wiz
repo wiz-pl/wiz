@@ -211,17 +211,17 @@ def Loom.eventAttr (event : String) : String := String.append "data-wiz-on-" eve
 
 /-- The `data-wiz-on-EVENT` value of a handler: its index in the rendered handler table. -/
 def Loom.eventValue (index : Nat) : String :=
-  String.mk (Json.natChars index List.nil)
+  String.mk (Json.natChars index [])
 
 /-- Attach the handler attribute for `event` (number `index`) to the head of `node`.
 Nested `on`s put more attributes on the same element; a text node is wrapped in a
 `span` so that it has somewhere to carry the attribute. -/
 def Loom.attach {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M
-  | .el t k a cs n => .el t k (List.append a (.cons (Loom.attr (Loom.eventAttr event) (Loom.eventValue index)) List.nil)) cs n
+  | .el t k a cs n => .el t k (List.append a [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))]) cs n
   | .on e m b n => .on e m (Loom.attach event index b) n
-  | .text s n => .el "span" "" (.cons (Loom.attr (Loom.eventAttr event) (Loom.eventValue index)) List.nil) (.text s .nil) n
-  | .raw h n => .el "span" "" (.cons (Loom.attr (Loom.eventAttr event) (Loom.eventValue index)) List.nil) (.raw h .nil) n
-  | .nil => .el "span" "" (.cons (Loom.attr (Loom.eventAttr event) (Loom.eventValue index)) List.nil) .nil .nil
+  | .text s n => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] (.text s .nil) n
+  | .raw h n => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] (.raw h .nil) n
+  | .nil => .el "span" "" [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] .nil .nil
 
 /-- Turn a virtual tree into a rendered tree, numbering handlers in document order
 (pre-order: the node's own handlers, then its children, then its next sibling). -/
@@ -272,8 +272,8 @@ def Loom.renderRNode : Loom.RNode → Html → Html
     | .false => Loom.renderRNode n (Loom.closeTag t (Loom.renderRNode cs opened))
 
 /-- A rendered tree as an HTML string. -/
-def Loom.htmlOf (n : Loom.RNode) : String := match Loom.renderRNode n (Html.mk List.nil 0) with
-  | .mk acc _ => String.mk (List.revOnto acc List.nil)
+def Loom.htmlOf (n : Loom.RNode) : String := match Loom.renderRNode n (Html.mk [] 0) with
+  | .mk acc _ => String.mk (List.revOnto acc [])
 
 /-- A rendered view: its tree (for diffing), its HTML, and its handler table
 (`event, message`, in document order). -/
@@ -285,9 +285,9 @@ structure Loom.Rendered (M : Type) where
 /-- Render a virtual tree: HTML for SSR, handlers for dispatch, and the tree for a
 later `Loom.Rendered.diff`. Deterministic: no clock, no hashing, no allocation order. -/
 def Loom.render {M : Type} (v : Loom.VNode M) : Loom.Rendered M :=
-  let o : Loom.Out M := Loom.Out.mk List.nil 0 List.nil;
+  let o : Loom.Out M := Loom.Out.mk [] 0 [];
   let r := Loom.toR v o;
-  Loom.Rendered.mk r.1 (Loom.htmlOf r.1) (List.revOnto r.2.handlers List.nil)
+  Loom.Rendered.mk r.1 (Loom.htmlOf r.1) (List.revOnto r.2.handlers [])
 
 /-- A virtual tree as an HTML string (SSR). -/
 def Loom.toHtml {M : Type} (v : Loom.VNode M) : String := (Loom.render v).html
@@ -374,9 +374,9 @@ def Loom.allKeyed : List Loom.RNode → Bool
 /-- Whether the parent is the root (whose child paths have no leading dot). -/
 def Loom.childPath (parent : String) (i : Nat) : String :=
   match String.eq parent "" with
-  | .true => String.mk (Json.natChars i List.nil)
+  | .true => String.mk (Json.natChars i [])
   | .false => String.mk (List.append (String.chars parent)
-      (List.append (String.chars ".") (Json.natChars i List.nil)))
+      (List.append (String.chars ".") (Json.natChars i [])))
 
 /-- An attribute's value by name. -/
 def Loom.attrValue (name : String) : List Loom.Attr → Option String
@@ -387,14 +387,14 @@ def Loom.attrValue (name : String) : List Loom.Attr → Option String
 
 /-- Remove the attributes of `old` that `new` does not have. -/
 def Loom.removedAttrs (path : String) : List Loom.Attr → List Loom.Attr → List Loom.Patch
-  | .nil, _ => List.nil
+  | .nil, _ => []
   | .cons a rest, new => match Loom.attrValue a.1 new with
     | .some _ => Loom.removedAttrs path rest new
     | .none => .cons (.removeAttr path a.1) (Loom.removedAttrs path rest new)
 
 /-- Set the attributes of `new` that are absent from `old` or have another value. -/
 def Loom.setAttrs (path : String) (old : List Loom.Attr) : List Loom.Attr → List Loom.Patch
-  | .nil => List.nil
+  | .nil => []
   | .cons a rest => match Loom.attrValue a.1 old with
     | .some v => match String.eq v a.2 with
       | .true => Loom.setAttrs path old rest
@@ -413,21 +413,21 @@ mutual
 /-- Patches turning the node `old` into `new` at `path` (both are single nodes). -/
 partial def Loom.diffNode (path : String) (old : Loom.RNode) (new : Loom.RNode) : List Loom.Patch :=
   match old, new with
-  | .nil, .nil => List.nil
+  | .nil, .nil => []
   | .text s _, .text s' _ => match String.eq s s' with
-    | .true => List.nil
-    | .false => .cons (.text path s') List.nil
+    | .true => []
+    | .false => [(.text path s')]
   | .raw h _, .raw h' _ => match String.eq h h' with
-    | .true => List.nil
-    | .false => .cons (.replace path h') List.nil
+    | .true => []
+    | .false => [(.replace path h')]
   | .el t k a cs _, .el t' k' a' cs' _ =>
     match String.eq t t' with
-    | .false => .cons (.replace path (Loom.htmlOf new)) List.nil
+    | .false => [(.replace path (Loom.htmlOf new))]
     | .true => match String.eq k k' with
-      | .false => .cons (.replace path (Loom.htmlOf new)) List.nil
+      | .false => [(.replace path (Loom.htmlOf new))]
       | .true => List.append (Loom.diffAttrs path a a')
           (Loom.diffChildren path (Loom.RNode.siblings cs) (Loom.RNode.siblings cs'))
-  | _, _ => .cons (.replace path (Loom.htmlOf new)) List.nil
+  | _, _ => [(.replace path (Loom.htmlOf new))]
 
 /-- Patches for a children list at `base` (which ends with `.`, or is empty at the
 root): keyed when both lists are fully keyed, positional otherwise. -/
@@ -440,11 +440,11 @@ partial def Loom.diffChildren (base : String) (old new : List Loom.RNode) : List
 
 /-- Positional diff: pair by index, then insert or remove at the tail. -/
 partial def Loom.diffPositional (base : String) (i : Nat) : List Loom.RNode → List Loom.RNode → List Loom.Patch
-  | .nil, .nil => List.nil
+  | .nil, .nil => []
   | .nil, .cons n ns =>
-    .cons (.insert base i (Loom.htmlOf n)) (Loom.diffPositional base (i + 1) List.nil ns)
+    .cons (.insert base i (Loom.htmlOf n)) (Loom.diffPositional base (i + 1) [] ns)
   | .cons o os, .nil =>
-    .cons (.remove base i) (Loom.diffPositional base i os List.nil)
+    .cons (.remove base i) (Loom.diffPositional base i os [])
   | .cons o os, .cons n ns =>
     List.append (Loom.diffNode (Loom.childPath base i) o n)
       (Loom.diffPositional base (i + 1) os ns)
@@ -453,14 +453,14 @@ partial def Loom.diffPositional (base : String) (i : Nat) : List Loom.RNode → 
 matching child into place (or inserting it), and finally remove the leftovers. -/
 partial def Loom.diffKeyed (base : String) (old new : List Loom.RNode) : List Loom.Patch :=
   let kept := Loom.dropMissing base new 0 old;
-  let walked := Loom.keyedLoop base 0 kept.1 new List.nil;
+  let walked := Loom.keyedLoop base 0 kept.1 new [];
   List.append kept.2 walked.2
 
 /-- The old children still present in `new`, with `remove` patches for the others.
 `j` is the child's current index (the number kept so far). -/
 def Loom.dropMissing (base : String) (new : List Loom.RNode) (j : Nat) :
     List Loom.RNode → List Loom.RNode × List Loom.Patch
-  | .nil => (List.nil, List.nil)
+  | .nil => ([], [])
   | .cons o os =>
     match Loom.hasKey (Loom.keyOf o) new with
     | .true => let rest := Loom.dropMissing base new (j + 1) os; (.cons o rest.1, rest.2)
@@ -481,13 +481,13 @@ partial def Loom.keyedLoop (base : String) (i : Nat) (cur : List Loom.RNode) :
             (List.append acc (.cons (.move base j i)
               (Loom.diffNode (Loom.childPath base i) (Loom.atD n j cur) n)))
         | .none => Loom.keyedLoop base (i + 1) (Loom.insertAt i n cur) ns
-            (List.append acc (.cons (.insert base i (Loom.htmlOf n)) List.nil))
+            (List.append acc [(.insert base i (Loom.htmlOf n))])
     | .none => Loom.keyedLoop base (i + 1) (Loom.insertAt i n cur) ns
-        (List.append acc (.cons (.insert base i (Loom.htmlOf n)) List.nil))
+        (List.append acc [(.insert base i (Loom.htmlOf n))])
 
 /-- Remove `k` children at index `i` (each removal shifts the next into place). -/
 def Loom.removeTail (base : String) (i : Nat) : Nat → List Loom.Patch
-  | .zero => List.nil
+  | .zero => []
   | .succ k => .cons (.remove base i) (Loom.removeTail base i k)
 end
 

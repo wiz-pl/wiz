@@ -8,15 +8,20 @@
 --   wiz-selfhost lsp                   a language server on stdin/stdout (D8: the
 --                                      protocol subset `web/selfhost-lsp-shim.js` answers)
 --   wiz-selfhost version | help
---   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --no-cache,
+--   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --cache-ro DIR
+--            (a read-only cache layer, repeatable), --no-cache, --cache-prune DAYS,
 --            --cache-verify off|warn|strict, --target c (the backend the host names;
 --            llvm/wasm are C5), -v (cache hits/misses), --types (each declaration's type),
---            --cc, --rt, --cflags, --ldflags (the C toolchain for `run`),
---            --trust-smt (C15: the `smt` tactic is refused; there is no solver here),
+--            --trust-native (27a: `def X : a = b := native_refl` is decided by running
+--            a and b; the frontend's `Globals.trustNative`), --trust-smt (C15: the `smt`
+--            tactic is refused; there is no solver here), --cc, --rt, --cflags,
+--            --ldflags (the C toolchain for `run`),
 --            --rc | --rc-owned | --gc | --lib | --no-main | --header (the backend),
---            --version, -h | --help
+--            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
+--            recognised and refused with the reason (C5/D5), not as unknown flags.
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
---               a bad `--target`), 2 usage (unknown command or option, missing argument)
+--               a bad/unsupported `--target`, a refused `--split`/`--cache-ro`),
+--               2 usage (unknown command or option, missing argument)
 --
 -- Without a subcommand it is the tool it was: `input.wiz` in the working directory to
 -- standard output (the fixpoint and the selfhost tests use that), and the first argument
@@ -43,16 +48,40 @@
 -- `import_c` header texts and the modules' paths. A `.check` entry is the
 -- tagged lines and the exit status; a `.c` entry is the C `build` writes (and `run`
 -- prints), so a warm build or run skips elaboration and code generation.
+--
+-- The cache is layered, as the Lean-hosted `wiz`'s is (`Wiz/Cache.lean`, D5):
+-- `--cache-ro DIR` (repeatable) adds read-only layers, searched in the order given
+-- *after* the writable `--cache`; only `put` and a miss write, so a layer hit is served
+-- as it is and never copied back. `--no-cache` clears both lists (a later `--cache` or
+-- `--cache-ro` adds one again), so `--no-cache --cache-ro DIR` reads a shared layer and
+-- writes nothing. A layer is never created or modified:
+-- `--cache-prune DAYS` walks only the write cache and removes the driver's keyed
+-- entries (`.check`, `.c`) whose modification time is older than DAYS days; a pruned
+-- entry is an ordinary miss, and a layer is never pruned.
+--
+-- `--cache-verify off|warn|strict` (the host's flag; `require` is `strict`) checks an
+-- entry's bytes against an output manifest, `<entry>.mf`: one line, `m<digest>`, the
+-- driver's `hashStep` digest (FNV-1a-shaped, modulo 4294967291) of the whole
+-- `s<status>\n<payload>` text. The host's
+-- manifest is per module (`manifest.d/*.wizmf`, SHA-256 and a Merkle root); the
+-- driver's one-file-per-graph cache needs only a digest per entry, and the file names
+-- already carry the key. `off` neither reads nor writes manifests, `warn` (the default)
+-- verifies one when it exists and otherwise keeps the old unverified lookup, and
+-- `strict` uses only manifested entries (a cold strict run writes the manifests, so the
+-- next one is warm). Manifests are written to the write cache only, never to a layer.
 
 -- ------------------------------------------------------------------------------------
 -- Options
 
--- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5); the
--- driver's cache has no manifests, so `strict` never trusts an entry (see `cacheRead`).
+-- `verify` is `--cache-verify off|warn|strict`, the Lean-hosted `wiz`'s flag (D5);
+-- `cacheRo` are the read-only layers, in the order given (`--cache-ro`), and `prune` is
+-- `--cache-prune DAYS` (run before the command, never on a layer).
 -- `target` is `--target c`, the only backend the self-hosted code generator has (C5).
 structure Opts where
   roots : List String
   cache : Option String
+  cacheRo : List String
+  prune : Option Nat
   out : Option String
   verbose : Bool
   types : Bool
@@ -63,16 +92,17 @@ structure Opts where
   backend : List String
   verify : String
   target : Option String
+  -- (27a) `--trust-native`: `native_refl` may decide an equation by running it; the
+  -- frontend's `Globals.trustNative` (the host's `Toolchain.trustNative`)
+  trustNative : Bool
   -- (C15) the host's `--trust-smt`: accepted, and it selects the `smt` refusal (the
   -- frontend has no solver; see `smtUnsupported`); it is in the cache key when set
   trustSmt : Bool
-
 -- (the cache directory is `$HOME/.cache/wiz` unless `--cache` says otherwise; the
 -- `.cache/wiz` here is the fallback for a process without `HOME`, as the host's is)
 def optsDefault : Opts :=
-  Opts.mk .nil (.some ".cache/wiz") .none .false .false "cc" "selfhost" .nil .nil .nil
-    "warn" .none .false
-
+  Opts.mk .nil (.some ".cache/wiz") .nil .none .none .false .false "cc" "selfhost" .nil
+    .nil .nil "warn" .none .false .false
 -- ------------------------------------------------------------------------------------
 -- The file system (whole-file read and write, directories; `access` is `Backend.wiz`'s
 -- `cAccessFails`)
@@ -85,6 +115,13 @@ extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
 extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+-- `--cache-prune` (D5): the host runtime's interfaces (`lib/Sys.wiz`, `Wiz/Cache.lean`);
+-- the selfhost runtime has the same three leaves (a list of `kind, size, mtime, ns,
+-- mode`; the directory's names; the wall clock).
+extern "wiz_sys_list_dir" cListDir : String → IO (List String)
+extern "wiz_sys_stat" cStat : String → Bool → IO (List Nat)
+extern "wiz_sys_unlink" cUnlink : String → IO Nat
+extern "wiz_sys_clock_ns" cClockNs : Nat → IO Nat
 
 -- the default cache directory: `$HOME/.cache/wiz` (the Lean-hosted toolchain's), or
 -- `./.cache/wiz` in the working directory when there is no `HOME` (the host reads
@@ -245,16 +282,18 @@ def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
         IO.bind (moduleRootSourcesAs cats tokens roots "Main" file text) (fun tab =>
           someGraph (Graph.mk tab hs))))
 
-def runGraph (smtTrust : Bool) (g : Graph) : Prepared := match g with
-  | .mk tab hs => match modCheckRunT smtTrust cats tokens hs tab (.cons "Main" .nil) with
+-- (27a) `trust` is the run's `--trust-native`: it is handed to the frontend's
+-- `Globals.trustNative` (never a property of the source); (C15) `smtTrust` is
+-- `--trust-smt`, which selects the `smt` refusal
+def runGraph (trust smtTrust : Bool) (g : Graph) : Prepared := match g with
+  | .mk tab hs => match modCheckRunHT cats tokens trust smtTrust hs tab (.cons "Main" .nil) with
     | .mk run _ _ order => Prepared.mk tab run order
 
 -- the whole program: the loader, every module checked, and the run it produced
-def prepare (roots : List String) (file : String) : IO (Option Prepared) :=
+def prepare (trust smtTrust : Bool) (roots : List String) (file : String) : IO (Option Prepared) :=
   IO.bind (loadGraph roots file) (fun g => match g with
     | .none => nonePrepared
-    | .some g => somePrepared (runGraph .false g))
-
+    | .some g => somePrepared (runGraph trust smtTrust g))
 -- the module `name`'s path (for a diagnostic; the name itself when there is no entry)
 def modFile (tab : List ModSrc) (name : String) : String := match modFind tab name with
   | .some (.mk _ p _ _) => match strEq p "" with
@@ -639,9 +678,14 @@ def headerHash : List Header → Nat → Nat
 -- (the cache key) the graph alone: every module's name and text, the paths they were
 -- found at, the root's header texts, and the backend flags. This is the same before and
 -- after elaboration, so a warm `check`/`run` can answer it without running a command.
+-- (27a) `--trust-native` is part of the key, as it is of the host's: a `native_refl`
+-- accepted with it is never replayed without it, nor the refusal with it.
 def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
   | .mk tab hs =>
     let names := tabNames tab;
+    let trustPart := match o.trustNative with
+      | .true => .cons "--trust-native" .nil
+      | .false => (.nil : List String);
     -- (C15) the flag is part of the key when set, as the host's `smtKey` mixes in a
     -- non-default `Smt.Config` (a refusal message is cached with the run that wrote it)
     let smtFlag : List String := match o.trustSmt with
@@ -650,8 +694,7 @@ def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append o.backend (List.append smtFlag (modPathsOf tab names))))))) 2166136261)
-
+          (List.append trustPart (List.append o.backend (List.append smtFlag (modPathsOf tab names)))))))) 2166136261)
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
 
@@ -667,50 +710,127 @@ def splitFirstLineGo : List Char → List Char → FirstLine
 def splitFirstLine (s : String) : FirstLine := match s with
   | .mk cs => splitFirstLineGo cs .nil
 
+-- a cache entry: `s<status>` on the first line, then the payload. `dir` and `ro` are
+-- where the hit came from (a layer hit is never copied into the write cache).
 inductive Cached where
-  | mk (status : Nat) (payload : String)
+  | mk (status : Nat) (payload : String) (dir : String) (ro : Bool)
 
 -- `s12 payload` → the status and the payload
-def entryOf (text : String) : Option Cached := match splitFirstLine text with
+def entryOf (text : String) : Option (Nat × String) := match splitFirstLine text with
   | .mk line payload => match stripPrefix "s" (String.mk line) with
     | .none => .none
     | .some num => match num with
       | .mk ns => match readNat ns 0 with
-        | .mk st _ => .some (Cached.mk st payload)
+        | .mk st _ => .some (st, payload)
+
+def entryText (status : Nat) (payload : String) : String :=
+  String.append "s" (String.append (Nat.toString status) (String.append "\n" payload))
+
+-- the output manifest: one line, `m<digest>`, over the entry's whole `s<status>` text
+-- (`hashStep`, the driver's FNV-1a-shaped rolling hash). The host's manifests are per
+-- module and SHA-256 (`Wiz/Cache.lean`); a graph-keyed one-file cache only needs a
+-- digest of the bytes it serves (an integrity check, not a signature: the file name
+-- already carries the input key).
+def entryHash (text : String) : Nat := hashStep (charsOf text) 2166136261
+
+def manifestPath (dir key ext : String) : String :=
+  String.append (cachePath dir key ext) ".mf"
+
+def manifestText (text : String) : String :=
+  String.append "m" (String.append (Nat.toString (entryHash text)) "\n")
+
+def manifestValue (text : String) : Option Nat := match stripPrefix "m" text with
+  | .none => .none
+  | .some rest => match readNat (charsOf rest) 0 with
+    | .mk n after => match after with
+      | .nil => .some n
+      | .cons c cs => match strEqC c 10 with
+        | .true => match cs with
+          | .nil => .some n
+          | .cons _ _ => .none
+        | .false => .none
 
 -- a cache entry: `s<status>` on the first line, then the payload
 def someCached (c : Cached) : IO (Option Cached) := IO.pure (.some c)
 def noneCached : IO (Option Cached) := IO.pure (.none : Option Cached)
 
--- `--cache-verify strict` (`require` is the host's synonym): only an entry listed in an
--- output manifest is used. The driver's cache has no manifests (D5), so strict is always
--- a miss; the host, which writes manifests, has a warm hit. The output is the same either
--- way; only the work is not saved here. `off` and `warn` (the default) read the entry.
+-- `--cache-verify off|warn|strict` (`require` is the host's synonym for `strict`)
 def strictVerify (o : Opts) : Bool :=
   Bool.or (strEq o.verify "strict") (strEq o.verify "require")
+def offVerify (o : Opts) : Bool := strEq o.verify "off"
 
-def cacheRead (o : Opts) (key ext : String) : IO (Option Cached) := match o.cache with
-  | .none => noneCached
-  | .some dir => match strictVerify o with
-    | .true => noneCached
-    | .false => IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
+-- one layer: read the entry, then check its manifest when the mode asks for one
+def cacheReadAt (o : Opts) (dir key ext : String) (ro : Bool) : IO (Option Cached) :=
+  IO.bind (readIf (cachePath dir key ext)) (fun t => match t with
+    | .none => noneCached
+    | .some text => match entryOf text with
       | .none => noneCached
-      | .some text => match entryOf text with
-        | .none => noneCached
-        | .some c => someCached c)
+      | .some (st, payload) => match offVerify o with
+        | .true => someCached (Cached.mk st payload dir ro)
+        | .false => IO.bind (readIf (manifestPath dir key ext)) (fun m => match m with
+          -- (no manifest: `warn` keeps the old lookup, `strict` does not use it)
+          | .none => match strictVerify o with
+            | .true => noneCached
+            | .false => someCached (Cached.mk st payload dir ro)
+          | .some mt => match manifestValue mt with
+            | .some h => match Nat.beq h (entryHash text) with
+              | .true => someCached (Cached.mk st payload dir ro)
+              | .false => noneCached
+            | .none => match strictVerify o with
+              | .true => noneCached
+              | .false => someCached (Cached.mk st payload dir ro)))
 
-def cacheWriteDo (dir key ext : String) (status : Nat) (payload : String) : IO Bool := do
+def cacheReadLayers (o : Opts) (key ext : String) : List String → IO (Option Cached)
+  | .nil => noneCached
+  | .cons d ds => IO.bind (cacheReadAt o d key ext .true) (fun hit => match hit with
+    | .some c => someCached c
+    | .none => cacheReadLayers o key ext ds)
+
+-- (the host's order: the write cache first, then the read-only layers in the order given)
+def cacheRead (o : Opts) (key ext : String) : IO (Option Cached) := match o.cache with
+  | .none => cacheReadLayers o key ext o.cacheRo
+  | .some dir => IO.bind (cacheReadAt o dir key ext .false) (fun hit => match hit with
+    | .some c => someCached c
+    | .none => cacheReadLayers o key ext o.cacheRo)
+
+-- whether there is any cache at all: a write cache or a read-only layer. A read-only-only
+-- run still builds the key and reads the layers, and its writes are no-ops.
+def cacheOn (o : Opts) : Bool := match o.cache with
+  | .some _ => .true
+  | .none => match o.cacheRo with
+    | .nil => .false
+    | .cons _ _ => .true
+
+def cacheWriteDo (o : Opts) (dir key ext : String) (status : Nat) (payload : String) : IO Bool := do
   ensureDir dir;
   let p := cachePath dir key ext;
   let tmp := String.append p ".tmp";
-  ok ← writeFile tmp (String.append "s" (String.append (Nat.toString status) (String.append "\n" payload)));
+  let text := entryText status payload;
+  ok ← writeFile tmp text;
   match ok with
   | .false => IO.pure (Bool.false)
-  | .true => IO.bind (cRename tmp p) (fun st => IO.pure (Nat.beq st 0))
+  | .true => do
+    st ← cRename tmp p;
+    match Nat.beq st 0 with
+    | .false => IO.pure (Bool.false)
+    | .true => match offVerify o with
+      -- (`--cache-verify off`: no manifests are written or read)
+      | .true => IO.pure (Bool.true)
+      -- (the manifest follows the entry; a failure to write it only loses a strict hit)
+      | .false => do
+        let mp := manifestPath dir key ext;
+        let mtmp := String.append mp ".tmp";
+        mok ← writeFile mtmp (manifestText text);
+        match mok with
+        | .false => IO.pure (Bool.true)
+        | .true => do
+          st2 ← cRename mtmp mp;
+          IO.pure (Bool.true)
 
+-- only the write cache is written: a hit in a layer is returned as it is, never copied
 def cacheWrite (o : Opts) (key ext : String) (status : Nat) (payload : String) : IO Bool := match o.cache with
   | .none => IO.pure (Bool.false)
-  | .some dir => cacheWriteDo dir key ext status payload
+  | .some dir => cacheWriteDo o dir key ext status payload
 
 -- `--no-cache` paths: no key, no read, no write (the caller decides once whether the run
 -- is cached, and these keep the cache out of the warm/cold split)
@@ -724,10 +844,149 @@ def cacheWriteIf (o : Opts) (use : Bool) (key ext : String) (status : Nat) (payl
   | .false => IO.pure (Bool.false)
 
 -- `-v` still says a run was not served from the cache; without a cache there is no key,
--- so the line names the reason instead
+-- so the line names the reason instead. A hit names the layer it came from, so a
+-- read-only hit is visible (`cache hit: KEY (read-only DIR)`).
+def cacheHitMsg (o : Opts) (key : String) (dir : String) (ro : Bool) : IO Unit :=
+  if o.verbose then
+    match ro with
+    | .true => IO.ePrintln (String.append "cache hit: " (String.append key
+        (String.append " (read-only " (String.append dir ")"))))
+    | .false => IO.ePrintln (String.append "cache hit: " key)
+  else IO.pure ()
+
 def cacheMissMsg (o : Opts) (use : Bool) (key : String) : IO Unit := match use with
   | .true => if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ()
   | .false => if o.verbose then IO.ePrintln "cache miss: no-cache" else IO.pure ()
+
+-- ------------------------------------------------------------------------------------
+-- Pruning (`--cache-prune DAYS`)
+
+-- `s` ends with `suf`
+def strSuffix (s suf : String) : Bool := match s with
+  | .mk ss => match suf with
+    | .mk ps => charsPrefix (List.reverseOf ps .nil) (List.reverseOf ss .nil)
+
+-- the whole of `s` is a number (no sign, no trailing characters)
+def readNatFull (s : String) : Option Nat := match s with
+  | .mk cs => match cs with
+    | .nil => .none
+    | .cons c _ => match isDigitC (Char.code c) with
+      | .false => .none
+      | .true => match readNat cs 0 with
+        | .mk n rest => match rest with
+          | .nil => .some n
+          | .cons _ _ => .none
+
+-- the `i`th number (0 when the list is too short)
+def pruneNatAt : List Nat → Nat → Nat
+  | .nil, _ => 0
+  | .cons x xs, .zero => x
+  | .cons _ xs, .succ k => pruneNatAt xs k
+
+-- what a prune removed: the driver's two keyed extensions, and their bytes
+structure PruneCounts where
+  checks : Nat
+  programs : Nat
+  bytes : Nat
+
+def PruneCounts.total (c : PruneCounts) : Nat := Nat.add c.checks c.programs
+
+def PruneCounts.plus (a b : PruneCounts) : PruneCounts :=
+  PruneCounts.mk (Nat.add a.checks b.checks) (Nat.add a.programs b.programs)
+    (Nat.add a.bytes b.bytes)
+
+def sizeText (n : Nat) : String := match Nat.lt n 1024 with
+  | .true => String.append (Nat.toString n) " B"
+  | .false => match Nat.lt n (Nat.mul 1024 1024) with
+    | .true => String.append (Nat.toString (Nat.div n 1024)) " KiB"
+    | .false => match Nat.lt n (Nat.mul (Nat.mul 1024 1024) 1024) with
+      | .true => String.append (Nat.toString (Nat.div n (Nat.mul 1024 1024))) " MiB"
+      | .false => String.append (Nat.toString (Nat.div n (Nat.mul (Nat.mul 1024 1024) 1024))) " GiB"
+
+-- the host's `PruneCounts.render`, with the driver's extensions
+def pruneRender (c : PruneCounts) (days : Nat) (dir : String) : String :=
+  "cache prune: removed " +++ Nat.toString (PruneCounts.total c) +++ " files (" +++
+    Nat.toString c.checks +++ " .check, " +++ Nat.toString c.programs +++ " .c), " +++
+    sizeText c.bytes +++ " older than " +++ Nat.toString days +++ " days in " +++ dir
+
+inductive Keyed where
+  | check
+  | program
+
+-- only the driver's keyed entries: a `.mf` manifest, a subdirectory or anything else in
+-- the write cache is left alone (the host leaves its manifests too)
+def keyedOf (name : String) : Option Keyed := match strSuffix name ".check" with
+  | .true => .some Keyed.check
+  | .false => match strSuffix name ".c" with
+    | .true => .some Keyed.program
+    | .false => .none
+
+def addKeyed (k : Keyed) (size : Nat) (c : PruneCounts) : PruneCounts := match k with
+  | .check => PruneCounts.mk (Nat.succ c.checks) c.programs (Nat.add c.bytes size)
+  | .program => PruneCounts.mk c.checks (Nat.succ c.programs) (Nat.add c.bytes size)
+
+-- one directory's entries: the old keyed files are removed (or counted), and the
+-- subdirectories are returned for the walk (links are not followed, as in the host)
+inductive PruneStep where
+  | mk (counts : PruneCounts) (subdirs : List String)
+
+def pruneNames (dir : String) (cutoff : Nat) : List String → IO PruneStep
+  | .nil => IO.pure (PruneStep.mk (PruneCounts.mk 0 0 0) .nil)
+  | .cons n rest => do
+    tail ← pruneNames dir cutoff rest;
+    match tail with
+    | .mk c subs => match strEq n "" with
+      | .true => IO.pure (PruneStep.mk c subs)
+      | .false => do
+        let p := String.append dir (String.append "/" n);
+        -- (lstat: links are not followed, as the host's pruner does)
+        st ← cStat p .false;
+        match st with
+        | .nil => IO.pure (PruneStep.mk c subs)
+        | .cons _ _ => match Nat.beq (pruneNatAt st 0) 1 with
+          | .true => IO.pure (PruneStep.mk c (.cons p subs))
+          | .false => match Nat.beq (pruneNatAt st 0) 0 with
+            | .false => IO.pure (PruneStep.mk c subs)
+            | .true => match Nat.lt (pruneNatAt st 2) cutoff with
+              | .false => IO.pure (PruneStep.mk c subs)
+              | .true => match keyedOf n with
+                | .none => IO.pure (PruneStep.mk c subs)
+                | .some k => do
+                  u ← cUnlink p;
+                  IO.pure (PruneStep.mk (addKeyed k (pruneNatAt st 1) c) subs)
+
+-- walk the write cache with a work list; the fuel bounds a pathological tree of
+-- directories (a keyed cache is flat, so it is only a safety net)
+def pruneWalk (fuel : Nat) (dirs : List String) (cutoff : Nat) : IO PruneCounts :=
+  match fuel with
+  | .zero => IO.pure (PruneCounts.mk 0 0 0)
+  | .succ k => match dirs with
+    | .nil => IO.pure (PruneCounts.mk 0 0 0)
+    | .cons d rest => do
+      names ← cListDir d;
+      step ← pruneNames d cutoff names;
+      match step with
+      | .mk c subs => do
+        more ← pruneWalk k (List.append rest subs) cutoff;
+        IO.pure (PruneCounts.plus c more)
+
+-- the wall clock as seconds (the host's `Std.Time.Timestamp.now`)
+def nowSeconds : IO Nat := IO.bind (cClockNs 1) (fun ns =>
+  IO.pure (Nat.div (Nat.div ns 1000000) 1000))
+
+def pruneCache (dir : String) (days : Nat) : IO PruneCounts := do
+  now ← nowSeconds;
+  let cutoff := Nat.sub now (Nat.mul days 86400);
+  pruneWalk 1000000 (.cons dir .nil) cutoff
+
+-- `--cache-prune DAYS`: only the write cache, before the command; with no write cache
+-- (or with `--cache-ro` alone) nothing is pruned and nothing is printed
+def pruneMaybe (o : Opts) : IO Unit := match o.prune with
+  | .none => IO.pure ()
+  | .some days => match o.cache with
+    | .none => IO.pure ()
+    | .some dir => IO.bind (pruneCache dir days) (fun c =>
+        IO.ePrintln (pruneRender c days dir))
 
 -- ------------------------------------------------------------------------------------
 -- The command line
@@ -804,63 +1063,91 @@ partial def parseOptsGo : List String → Opts → Option String → List String
             | .true => match rest with
               | .nil => .err "unknown flag: --cache"
               | .cons d r2 => parseOptsGo r2 { o with cache := .some d } file extra
-            | .false => match strEq a "--no-cache" with
-              | .true => parseOptsGo rest { o with cache := .none } file extra
-              | .false => match strEq a "-v" with
-                | .true => parseOptsGo rest { o with verbose := .true } file extra
-                | .false => match strEq a "--verbose" with
-                  | .true => parseOptsGo rest { o with verbose := .true } file extra
-                  | .false => match strEq a "--types" with
-                    | .true => parseOptsGo rest { o with types := .true } file extra
-                    | .false => match strEq a "--cc" with
-                      | .true => match rest with
-                        | .nil => .err "unknown flag: --cc"
-                        | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
-                      | .false => match strEq a "--rt" with
-                        | .true => match rest with
-                          | .nil => .err "unknown flag: --rt"
-                          | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
-                        | .false => match strEq a "--cflags" with
+            | .false => match strEq a "--cache-ro" with
+              | .true => match rest with
+                | .nil => .err "unknown flag: --cache-ro"
+                | .cons d r2 => parseOptsGo r2 { o with cacheRo := List.append o.cacheRo (singleton d) } file extra
+              | .false => match strEq a "--cache-prune" with
+                | .true => match rest with
+                  | .nil => .err "unknown flag: --cache-prune"
+                  | .cons n r2 => match readNatFull n with
+                    | .none => .fail (String.append "--cache-prune needs a number of days, not " n)
+                    | .some k => match Nat.beq k 0 with
+                      | .true => .fail "--cache-prune needs at least one day"
+                      | .false => parseOptsGo r2 { o with prune := .some k } file extra
+                | .false => match strEq a "--no-cache" with
+                  -- (`--no-cache` clears both lists, as the host's does: a later `--cache` or
+                  -- `--cache-ro` adds one again)
+                  | .true => parseOptsGo rest { o with cache := .none, cacheRo := .nil } file extra
+                  | .false => match strEq a "-v" with
+                    | .true => parseOptsGo rest { o with verbose := .true } file extra
+                    | .false => match strEq a "--verbose" with
+                      | .true => parseOptsGo rest { o with verbose := .true } file extra
+                      | .false => match strEq a "--types" with
+                        | .true => parseOptsGo rest { o with types := .true } file extra
+                        | .false => match strEq a "--cc" with
                           | .true => match rest with
-                            | .nil => .err "unknown flag: --cflags"
-                            | .cons f r2 => parseOptsGo r2 { o with cflags := List.append o.cflags (singleton f) } file extra
-                          | .false => match strEq a "--ldflags" with
+                            | .nil => .err "unknown flag: --cc"
+                            | .cons c r2 => parseOptsGo r2 { o with cc := c } file extra
+                          | .false => match strEq a "--rt" with
                             | .true => match rest with
-                              | .nil => .err "unknown flag: --ldflags"
-                              | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
-                            -- (the host's `takeTarget` messages and exit 1)
-                            | .false => match strEq a "--target" with
+                              | .nil => .err "unknown flag: --rt"
+                              | .cons d r2 => parseOptsGo r2 { o with rt := d } file extra
+                            | .false => match strEq a "--cflags" with
                               | .true => match rest with
-                                | .nil => .fail "--target needs c, llvm or wasm"
-                                | .cons t r2 => match targetOk t with
-                                  | .true => parseOptsGo r2 { o with target := .some t } file extra
-                                  | .false => match targetKnown t with
-                                    | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C only (C5)"))
-                                    | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
-                              | .false => match strEq a "--cache-verify" with
+                                | .nil => .err "unknown flag: --cflags"
+                                | .cons f r2 => parseOptsGo r2 { o with cflags := List.append o.cflags (singleton f) } file extra
+                              | .false => match strEq a "--ldflags" with
                                 | .true => match rest with
-                                  | .nil => .err "unknown flag: --cache-verify"
-                                  | .cons m r2 => match verifyOk m with
-                                    | .true => parseOptsGo r2 { o with verify := m } file extra
-                                    | .false => .err (verifyErr m)
-                                | .false => match stripPrefix "--cache-verify=" a with
-                                  | .some m => match verifyOk m with
-                                    | .true => parseOptsGo rest { o with verify := m } file extra
-                                    | .false => .err (verifyErr m)
-                                  | .none => match strEq a "--trust-smt" with
-                                    | .true => parseOptsGo rest { o with trustSmt := .true } file extra
-                                    | .false => match isBackendFlag a with
-                                      | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
-                                      | .false => match strStarts "-" a with
-                                        -- (A14) a root with its directory attached: `-IDIR`,
-                                        -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
-                                        | .true => match modAttachedRoot a with
-                                          | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
-                                          | .none => .err (String.append "unknown flag: " a)
-                                        | .false => match file with
-                                          | .none => parseOptsGo rest o (.some a) extra
-                                          | .some _ => parseOptsGo rest o file (.cons a extra)
-
+                                  | .nil => .err "unknown flag: --ldflags"
+                                  | .cons f r2 => parseOptsGo r2 { o with ldflags := List.append o.ldflags (singleton f) } file extra
+                                -- (the host's `takeTarget` messages and exit 1)
+                                | .false => match strEq a "--target" with
+                                  | .true => match rest with
+                                    | .nil => .fail "--target needs c, llvm or wasm"
+                                    | .cons t r2 => match targetOk t with
+                                      | .true => parseOptsGo r2 { o with target := .some t } file extra
+                                      | .false => match targetKnown t with
+                                        | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C only (C5)"))
+                                        | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                                  | .false => match strEq a "--cache-verify" with
+                                    | .true => match rest with
+                                      | .nil => .err "unknown flag: --cache-verify"
+                                      | .cons m r2 => match verifyOk m with
+                                        | .true => parseOptsGo r2 { o with verify := m } file extra
+                                        | .false => .err (verifyErr m)
+                                    | .false => match stripPrefix "--cache-verify=" a with
+                                      | .some m => match verifyOk m with
+                                        | .true => parseOptsGo rest { o with verify := m } file extra
+                                        | .false => .err (verifyErr m)
+                                      | .none => match strEq a "--llvm" with
+                                        | .true => .fail "unsupported target llvm: the self-hosted backend emits C only (C5)"
+                                        | .false => match strEq a "--wasm" with
+                                          | .true => .fail "unsupported target wasm: the self-hosted backend emits C only (C5)"
+                                          | .false => match strEq a "--split" with
+                                            | .true => match rest with
+                                              | .nil => .err "unknown flag: --split"
+                                              | .cons n r2 => .fail (String.append "unsupported --split " (String.append n ": the self-hosted backend emits one C unit (C5)"))
+                                            | .false => match strEq a "--trust-smt" with
+                                              | .true => parseOptsGo rest { o with trustSmt := .true } file extra
+                                              | .false => match isBackendFlag a with
+                                                | .true => parseOptsGo rest { o with backend := List.append o.backend (singleton a) } file extra
+                                                | .false => match strStarts "-" a with
+                                                  -- (A14) a root with its directory attached: `-IDIR`,
+                                                  -- `-I=DIR`, `--include=DIR` (the loader's `modRoots`)
+                                                  | .true => match modAttachedRoot a with
+                                                    | .some d => parseOptsGo rest { o with roots := List.append o.roots (singleton d) } file extra
+                                                    -- (27a) the host's `--trust-native`: a switch,
+                                                    -- before or after the command, as in its
+                                                    -- `parseFlags` (the value form is not one: the
+                                                    -- host leaves `--trust-native=…` over as an
+                                                    -- unknown flag, and so does this)
+                                                    | .none => match strEq a "--trust-native" with
+                                                      | .true => parseOptsGo rest { o with trustNative := .true } file extra
+                                                      | .false => .err (String.append "unknown flag: " a)
+                                                  | .false => match file with
+                                                    | .none => parseOptsGo rest o (.some a) extra
+                                                    | .some _ => parseOptsGo rest o file (.cons a extra)
 def parseOpts (args : List String) (o : Opts) : Arg := parseOptsGo args o .none .nil
 
 def usageText : String :=
@@ -879,10 +1166,17 @@ def usageText : String :=
   "options: -I DIR (a module root, repeatable; an `import M` is M.wiz there, then\n" +++
   "  in the working directory),\n" +++
   "  -o OUT (the C `run` compiles, kept), --cache DIR (default ~/.cache/wiz, as\n" +++
-  "  the Lean-hosted `wiz`'s),\n" +++
-  "  --no-cache, --cache-verify off|warn|strict (the driver's cache has no output\n" +++
-  "  manifests yet, so strict never trusts an entry), --target c (the only backend),\n" +++
+  "  the Lean-hosted `wiz`'s), --cache-ro DIR (a read-only layer, repeatable:\n" +++
+  "  searched after --cache in order, never written), --no-cache (both lists),\n" +++
+  "  --cache-prune DAYS (remove the write cache's keyed entries older than DAYS\n" +++
+  "  days before the command; a layer is never pruned),\n" +++
+  "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" +++
+  "  strict: only manifested entries), --target c (the only backend;\n" +++
+  "  --llvm/--wasm/--split are the host's and are refused, C5),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
+  "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" +++
+  "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" +++
+  "  --native-fuel: the self-hosted evaluator has no step counter),\n" +++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
   "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
   "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
@@ -907,23 +1201,23 @@ def statusOf (ds : List Diag) : Nat := match hasError ds with
 def linesOf (r : Run) : List String := List.reverseOf (Run.out r) .nil
 
 def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
-  | .mk tab _ => match o.cache with
+  | .mk tab _ => match cacheOn o with
     -- no cache: do not even build the key (it hashes every module's text)
-    | .none => do
+    | .false => do
       cacheMissMsg o .false "";
-      let p := runGraph o.trustSmt g;
+      let p := runGraph o.trustNative o.trustSmt g;
       let ds := diagsOf p.tab (linesOf p.run);
       let st := statusOf ds;
       emitDiags o ds;
       match Nat.beq st 0 with
       | .true => IO.pure ()
       | .false => Process.exit 1
-    | .some _ => do
+    | .true => do
       let key := keyOfGraph o "check" g;
       cached ← cacheRead o key ".check";
       match cached with
-      | .some (.mk st payload) => do
-        if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+      | .some (.mk st payload from ro) => do
+        cacheHitMsg o key from ro;
         let ds := diagsOf tab (mapChars (fun cs => String.mk cs) (splitLines payload));
         emitDiags o ds;
         match Nat.beq st 0 with
@@ -931,7 +1225,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         | .false => Process.exit 1
       | .none => do
         if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-        let p := runGraph o.trustSmt g;
+        let p := runGraph o.trustNative o.trustSmt g;
         let lines := linesOf p.run;
         let ds := diagsOf p.tab lines;
         let st := statusOf ds;
@@ -983,20 +1277,20 @@ def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : Strin
     cacheWriteIf o useCache cKey ".c" 0 ctext;
     writeOut out ctext
 
-def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match o.cache with
-  | .none => do
+def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheOn o with
+  | .false => do
     cacheMissMsg o .false "";
-    buildMiss o .false "" "" out (runGraph o.trustSmt g)
-  | .some _ => do
+    buildMiss o .false "" "" out (runGraph o.trustNative o.trustSmt g)
+  | .true => do
     let key := keyOfGraph o "c" g;
     cached ← cacheRead o key ".c";
     match cached with
-    | .some (.mk st ctext) => do
-      if o.verbose then IO.ePrintln (String.append "cache hit: " key) else IO.pure ();
+    | .some (.mk st ctext from ro) => do
+      cacheHitMsg o key from ro;
       writeOut out ctext
     | .none => do
       cacheMissMsg o .true key;
-      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustSmt g)
+      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustNative o.trustSmt g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -1047,8 +1341,8 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
     (extra : List String) : IO Unit := do
   cached ← cacheReadIf o useCache cKey ".c";
   match cached with
-  | .some (.mk st ctext) => do
-    if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+  | .some (.mk st ctext from ro) => do
+    cacheHitMsg o cKey from ro;
     compileAndRun o cKey ctext extra
   | .none => do
     cacheMissMsg o useCache cKey;
@@ -1072,16 +1366,16 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   gopt ← loadGraph o.roots file;
   match gopt with
   | .none => missingFile file
-  | .some g => match o.cache with
-    | .none => runPrepared o .false "nocache" "" (runGraph o.trustSmt g) extra
-    | .some _ => do
+  | .some g => match cacheOn o with
+    | .false => runPrepared o .false "nocache" "" (runGraph o.trustNative o.trustSmt g) extra
+    | .true => do
       let cKey := keyOfGraph o "c" g;
       cached ← cacheRead o cKey ".c";
       match cached with
-      | .some (.mk st ctext) => do
-        if o.verbose then IO.ePrintln (String.append "cache hit: " cKey) else IO.pure ();
+      | .some (.mk st ctext from ro) => do
+        cacheHitMsg o cKey from ro;
         compileAndRun o cKey ctext extra
-      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustSmt g) extra
+      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustNative o.trustSmt g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -1111,7 +1405,10 @@ def legacyCmd (args : List String) : IO Unit := do
   text ← IO.readFile "input.wiz";
   hs ← moduleHeaderTexts text;
   tab ← moduleRootSources cats tokens (modRoots args) text;
-  match modCheckRunT (modHasFlag args "--trust-smt") cats tokens hs tab (.cons "Main" .nil) with
+  -- (27a) the one-shot mode reads `--trust-native` too (the frontend's
+  -- `Globals.trustNative`; `genProgramArgs` ignores the flag itself); (C15) it reads
+  -- `--trust-smt` as well (the `smt` refusal)
+  match modCheckRunHT cats tokens (listHas "--trust-native" args) (modHasFlag args "--trust-smt") hs tab (.cons "Main" .nil) with
   | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
@@ -1974,7 +2271,10 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
   | .err msg => match strEq msg "no FILE" with
     | .true => usageError (String.append "unknown command: " (kindName k))
     | .false => usageError msg
-  | .ok o file extra => match k with
+  | .ok o file extra => do
+    -- (`--cache-prune`: before the command, so this process has not read what it deletes)
+    pruneMaybe o;
+    match k with
     | .check => match o.out with
       -- (the host finds the first flag-looking argument; `-o` is not a `check` option)
       | .some _ => usageError "unknown flag: -o"
@@ -1996,16 +2296,18 @@ def parseThen (k : Kind) (args : List String) : IO Unit := do
 -- take a value, the rest do not)
 def takesValueFlag (a : String) : Bool :=
   Bool.or (strEq a "-I") (Bool.or (strEq a "--include") (Bool.or (strEq a "-o")
-    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
-      (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
-        (Bool.or (strEq a "--cflags") (strEq a "--ldflags")))))))))
+    (Bool.or (strEq a "--cache") (Bool.or (strEq a "--cache-ro") (Bool.or (strEq a "--cache-prune")
+      (Bool.or (strEq a "--cache-verify") (Bool.or (strEq a "--target")
+        (Bool.or (strEq a "--split") (Bool.or (strEq a "--cc") (Bool.or (strEq a "--rt")
+          (Bool.or (strEq a "--cflags") (strEq a "--ldflags"))))))))))))
 
 def knownTopFlag (a : String) : Bool :=
   match stripPrefix "--cache-verify=" a with
   | .some _ => .true
   | .none => Bool.or (takesValueFlag a) (Bool.or (strEq a "--no-cache") (Bool.or (strEq a "-v")
-    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types") (strEq a "--trust-smt")))))
-
+    (Bool.or (strEq a "--verbose") (Bool.or (strEq a "--types")
+      (Bool.or (strEq a "--llvm") (Bool.or (strEq a "--wasm")
+        (Bool.or (strEq a "--trust-native") (strEq a "--trust-smt"))))))))
 inductive LeadSplit where
   | mk (lead : List String) (rest : List String)
 

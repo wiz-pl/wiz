@@ -57,14 +57,14 @@ def Int.negPart : Int → Nat
 
 /-- Adding the same number to both components keeps the difference. -/
 def Int.ofPair_add_right (a b k : Nat) : Int.ofPair (a + k) (b + k) = Int.ofPair a b :=
-  congrArg2 Int.pairSel (Nat.add_sub_add_right b a k) (Nat.add_sub_add_right a b k)
+  Eq.congrArg2 Int.pairSel (Nat.add_sub_add_right b a k) (Nat.add_sub_add_right a b k)
 /-- `(b + x) - b = x`. -/
 def Int.ofPair_nat (b x : Nat) : Int.ofPair (b + x) b = Int.ofNat x :=
-  congrArg2 Int.pairSel (Nat.sub_self_add b x) (Nat.add_sub_cancel_left b x)
+  Eq.congrArg2 Int.pairSel (Nat.sub_self_add b x) (Nat.add_sub_cancel_left b x)
 /-- `a - (a + x + 1) = -(x + 1)`. -/
 def Int.ofPair_neg (a x : Nat) : Int.ofPair a (a + Nat.succ x) = Int.negSucc x :=
   @Eq.trans Int (Int.ofPair a (a + Nat.succ x)) (Int.pairSel (Nat.succ x) 0) (Int.negSucc x)
-    (congrArg2 Int.pairSel (Nat.add_sub_cancel_left a (Nat.succ x)) (Nat.sub_self_add a (Nat.succ x))) rfl
+    (Eq.congrArg2 Int.pairSel (Nat.add_sub_cancel_left a (Nat.succ x)) (Nat.sub_self_add a (Nat.succ x))) rfl
 /-- `x = x - 0`. -/
 def Int.ofNat_pair (x : Nat) : Int.ofNat x = Int.ofPair x 0 :=
   Eq.symm (Int.ofPair_nat 0 x)
@@ -83,12 +83,12 @@ def Int.ofPair_cases (a b : Nat) (0 P : Int → Prop)
   Or.elim (Bool.cases (Nat.le b a))
     (fun (h : Nat.le b a = .true) =>
       let e : b + (a - b) = a := Nat.add_sub_of_le b a h;
-      Eq.mpr' P (Eq.trans (congrArg (fun y => Int.ofPair y b) (Eq.symm e)) (Int.ofPair_nat b (a - b)))
+      Eq.mpr' P (Eq.trans (Eq.congrArg (fun y => Int.ofPair y b) (Eq.symm e)) (Int.ofPair_nat b (a - b)))
         (h1 (a - b) (Eq.symm e)))
     (fun (h : Nat.le b a = .false) =>
       let e : Nat.succ a + (b - Nat.succ a) = b := Nat.add_sub_of_le (Nat.succ a) b (Nat.not_le b a h);
       let e' : b = a + Nat.succ (b - Nat.succ a) := Eq.trans (Eq.symm e) (Eq.symm (Nat.add_succ a (b - Nat.succ a)));
-      Eq.mpr' P (Eq.trans (congrArg (fun y => Int.ofPair a y) e') (Int.ofPair_neg a (b - Nat.succ a)))
+      Eq.mpr' P (Eq.trans (Eq.congrArg (fun y => Int.ofPair a y) e') (Int.ofPair_neg a (b - Nat.succ a)))
         (h2 (b - Nat.succ a) e'))
 
 /-- Equal differences give equal integers: `a + d = c + b → a - b = c - d`. -/
@@ -97,13 +97,13 @@ def Int.ofPair_eq (a b c d : Nat) (h : a + d = c + b) : Int.ofPair a b = Int.ofP
     (fun x ea =>
       -- c + b = b + x + d, so c = d + x
       let ec : c = d + x := Nat.add_right_cancel (Eq.trans (Eq.symm h)
-        (Eq.trans (congrArg (fun y => y + d) ea) (nat_ring! b + x + d = d + x + b)));
-      Eq.symm (Eq.trans (congrArg (fun y => Int.ofPair y d) ec) (Int.ofPair_nat d x)))
+        (Eq.trans (Eq.congrArg (fun y => y + d) ea) (nat_ring! b + x + d = d + x + b)));
+      Eq.symm (Eq.trans (Eq.congrArg (fun y => Int.ofPair y d) ec) (Int.ofPair_nat d x)))
     (fun x eb =>
       -- a + d = c + a + succ x, so d = c + succ x
       let ed : d = c + Nat.succ x := Nat.add_left_cancel a (Eq.trans h
-        (Eq.trans (congrArg (fun y => c + y) eb) (nat_ring! c + (a + Nat.succ x) = a + (c + Nat.succ x))));
-      Eq.symm (Eq.trans (congrArg (fun y => Int.ofPair c y) ed) (Int.ofPair_neg c x)))
+        (Eq.trans (Eq.congrArg (fun y => c + y) eb) (nat_ring! c + (a + Nat.succ x) = a + (c + Nat.succ x))));
+      Eq.symm (Eq.trans (Eq.congrArg (fun y => Int.ofPair c y) ed) (Int.ofPair_neg c x)))
 
 -- ## Operations on pairs
 
@@ -120,7 +120,7 @@ def Int.ofPair_negate (a b : Nat) : -(Int.ofPair a b) = Int.ofPair b a :=
     (fun (x : Nat) (eb : b = a + Nat.succ x) =>
       Eq.trans (Int.ofNat_pair (Nat.succ x))
         (Int.ofPair_eq (Nat.succ x) 0 b a
-          (Eq.trans (nat_ring! Nat.succ x + a = a + Nat.succ x + 0) (congrArg (fun y => y + 0) (Eq.symm eb)))))
+          (Eq.trans (nat_ring! Nat.succ x + a = a + Nat.succ x + 0) (Eq.congrArg (fun y => y + 0) (Eq.symm eb)))))
 
 /-- `(a - b) + (c - d) = (a + c) - (b + d)`. -/
 def Int.ofPair_add (a b c d : Nat) : Int.ofPair a b + Int.ofPair c d = Int.ofPair (a + c) (b + d) :=
@@ -130,22 +130,22 @@ def Int.ofPair_add (a b c d : Nat) : Int.ofPair a b + Int.ofPair c d = Int.ofPai
         (fun (y : Nat) (ec : c = d + y) =>
           Eq.trans (Int.ofNat_pair (x + y)) (Int.ofPair_eq (x + y) 0 (a + c) (b + d)
             (Eq.trans (nat_ring! x + y + (b + d) = b + x + (d + y) + 0)
-              (congrArg2 (fun p q => p + q + 0) (Eq.symm ea) (Eq.symm ec)))))
+              (Eq.congrArg2 (fun p q => p + q + 0) (Eq.symm ea) (Eq.symm ec)))))
         (fun (y : Nat) (ed : d = c + Nat.succ y) =>
           Int.ofPair_eq x (Nat.succ y) (a + c) (b + d)
-            (Eq.trans (congrArg (fun q => x + (b + q)) ed)
+            (Eq.trans (Eq.congrArg (fun q => x + (b + q)) ed)
               (Eq.trans (nat_ring! x + (b + (c + Nat.succ y)) = b + x + c + Nat.succ y)
-                (congrArg (fun p => p + c + Nat.succ y) (Eq.symm ea))))))
+                (Eq.congrArg (fun p => p + c + Nat.succ y) (Eq.symm ea))))))
     (fun (x : Nat) (eb : b = a + Nat.succ x) =>
       Int.ofPair_cases c d (fun j => Int.negSucc x + j = Int.ofPair (a + c) (b + d))
         (fun (y : Nat) (ec : c = d + y) =>
           Int.ofPair_eq y (Nat.succ x) (a + c) (b + d)
-            (Eq.trans (congrArg (fun p => y + (p + d)) eb)
+            (Eq.trans (Eq.congrArg (fun p => y + (p + d)) eb)
               (Eq.trans (nat_ring! y + (a + Nat.succ x + d) = a + (d + y) + Nat.succ x)
-                (congrArg (fun q => a + q + Nat.succ x) (Eq.symm ec)))))
+                (Eq.congrArg (fun q => a + q + Nat.succ x) (Eq.symm ec)))))
         (fun (y : Nat) (ed : d = c + Nat.succ y) =>
           Int.ofPair_eq 0 (Nat.succ (Nat.succ (x + y))) (a + c) (b + d)
-            (Eq.trans (congrArg2 (fun p q => 0 + (p + q)) eb ed)
+            (Eq.trans (Eq.congrArg2 (fun p q => 0 + (p + q)) eb ed)
               (nat_ring! 0 + (a + Nat.succ x + (c + Nat.succ y)) = a + c + Nat.succ (Nat.succ (x + y))))))
 
 /-- `(a - b) · (c - d) = (a·c + b·d) - (a·d + b·c)`. -/
@@ -156,30 +156,30 @@ def Int.ofPair_mul (a b c d : Nat) :
       Int.ofPair_cases c d (fun j => Int.ofNat x * j = Int.ofPair (a * c + b * d) (a * d + b * c))
         (fun (y : Nat) (ec : c = d + y) =>
           Eq.trans (Int.ofNat_pair (x * y)) (Int.ofPair_eq (x * y) 0 (a * c + b * d) (a * d + b * c)
-            (Eq.trans (congrArg2 (fun p q => x * y + (p * d + b * q)) ea ec)
+            (Eq.trans (Eq.congrArg2 (fun p q => x * y + (p * d + b * q)) ea ec)
               (Eq.trans (nat_ring! x * y + ((b + x) * d + b * (d + y)) = (b + x) * (d + y) + b * d + 0)
-                (congrArg2 (fun p q => p * q + b * d + 0) (Eq.symm ea) (Eq.symm ec))))))
+                (Eq.congrArg2 (fun p q => p * q + b * d + 0) (Eq.symm ea) (Eq.symm ec))))))
         (fun (y : Nat) (ed : d = c + Nat.succ y) =>
           Eq.trans (Int.negOfNat_pair (x * Nat.succ y)) (Int.ofPair_eq 0 (x * Nat.succ y) (a * c + b * d) (a * d + b * c)
-            (Eq.trans (congrArg2 (fun p q => 0 + (p * q + b * c)) ea ed)
+            (Eq.trans (Eq.congrArg2 (fun p q => 0 + (p * q + b * c)) ea ed)
               (Eq.trans (nat_ring! 0 + ((b + x) * (c + Nat.succ y) + b * c) = (b + x) * c + b * (c + Nat.succ y) + x * Nat.succ y)
-                (congrArg2 (fun p q => p * c + b * q + x * Nat.succ y) (Eq.symm ea) (Eq.symm ed)))))))
+                (Eq.congrArg2 (fun p q => p * c + b * q + x * Nat.succ y) (Eq.symm ea) (Eq.symm ed)))))))
     (fun (x : Nat) (eb : b = a + Nat.succ x) =>
       Int.ofPair_cases c d (fun j => Int.negSucc x * j = Int.ofPair (a * c + b * d) (a * d + b * c))
         (fun (y : Nat) (ec : c = d + y) =>
           Eq.trans (Int.negOfNat_pair (Nat.succ x * y)) (Int.ofPair_eq 0 (Nat.succ x * y) (a * c + b * d) (a * d + b * c)
-            (Eq.trans (congrArg2 (fun p q => 0 + (a * d + p * q)) eb ec)
+            (Eq.trans (Eq.congrArg2 (fun p q => 0 + (a * d + p * q)) eb ec)
               (Eq.trans (nat_ring! 0 + (a * d + (a + Nat.succ x) * (d + y)) = a * (d + y) + (a + Nat.succ x) * d + Nat.succ x * y)
-                (congrArg2 (fun p q => a * q + p * d + Nat.succ x * y) (Eq.symm eb) (Eq.symm ec))))))
+                (Eq.congrArg2 (fun p q => a * q + p * d + Nat.succ x * y) (Eq.symm eb) (Eq.symm ec))))))
         (fun (y : Nat) (ed : d = c + Nat.succ y) =>
           Eq.trans (Int.ofNat_pair (Nat.succ x * Nat.succ y)) (Int.ofPair_eq (Nat.succ x * Nat.succ y) 0 (a * c + b * d) (a * d + b * c)
-            (Eq.trans (congrArg2 (fun p q => Nat.succ x * Nat.succ y + (a * q + p * c)) eb ed)
+            (Eq.trans (Eq.congrArg2 (fun p q => Nat.succ x * Nat.succ y + (a * q + p * c)) eb ed)
               (Eq.trans (nat_ring! Nat.succ x * Nat.succ y + (a * (c + Nat.succ y) + (a + Nat.succ x) * c) = a * c + (a + Nat.succ x) * (c + Nat.succ y) + 0)
-                (congrArg2 (fun p q => a * c + p * q + 0) (Eq.symm eb) (Eq.symm ed)))))))
+                (Eq.congrArg2 (fun p q => a * c + p * q + 0) (Eq.symm eb) (Eq.symm ed)))))))
 
 /-- `(a - b) - (c - d) = (a + d) - (b + c)`. -/
 def Int.ofPair_sub (a b c d : Nat) : Int.ofPair a b - Int.ofPair c d = Int.ofPair (a + d) (b + c) :=
-  Eq.trans (congrArg (fun y => Int.ofPair a b + y) (Int.ofPair_negate c d)) (Int.ofPair_add a b d c)
+  Eq.trans (Eq.congrArg (fun y => Int.ofPair a b + y) (Int.ofPair_negate c d)) (Int.ofPair_add a b d c)
 
 -- ## The bootstrap normaliser, through pairs of naturals
 
@@ -232,25 +232,25 @@ def IntExpr.env_get : (ρ : List Int) → (i : Nat) →
   | .cons _ _, .zero => (rfl, rfl)
   | .cons a ρ, .succ i =>
     -- succ i + succ i = succ (succ (i + i))
-    let e : Nat.succ i + Nat.succ i = Nat.succ (Nat.succ (i + i)) := congrArg Nat.succ (Nat.add_succ i i);
+    let e : Nat.succ i + Nat.succ i = Nat.succ (Nat.succ (i + i)) := Eq.congrArg Nat.succ (Nat.add_succ i i);
     let ih := IntExpr.env_get ρ i;
-    (Eq.trans (congrArg (NatExpr.get (IntExpr.env (.cons a ρ))) e) ih.1,
-     Eq.trans (congrArg (fun j => NatExpr.get (IntExpr.env (.cons a ρ)) (Nat.succ j)) e) ih.2)
+    (Eq.trans (Eq.congrArg (NatExpr.get (IntExpr.env (.cons a ρ))) e) ih.1,
+     Eq.trans (Eq.congrArg (fun j => NatExpr.get (IntExpr.env (.cons a ρ)) (Nat.succ j)) e) ih.2)
 
 /-- An expression is the difference of the values of its pair. -/
 def IntExpr.sound (ρ : List Int) : (e : IntExpr) →
     IntExpr.eval ρ e = Int.ofPair (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair e).1) (NatExpr.eval (IntExpr.env ρ) (IntExpr.toPair e).2)
   | .atom i =>
     let h := IntExpr.env_get ρ i;
-    Eq.trans (Int.pair (IntExpr.get ρ i)) (congrArg2 Int.ofPair (Eq.symm h.1) (Eq.symm h.2))
+    Eq.trans (Int.pair (IntExpr.get ρ i)) (Eq.congrArg2 Int.ofPair (Eq.symm h.1) (Eq.symm h.2))
   | .lit n => Int.ofNat_pair n
   | .add a b =>
-    Eq.trans (congrArg2 (fun x y => x + y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_add _ _ _ _)
+    Eq.trans (Eq.congrArg2 (fun x y => x + y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_add _ _ _ _)
   | .mul a b =>
-    Eq.trans (congrArg2 (fun x y => x * y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_mul _ _ _ _)
-  | .neg a => Eq.trans (congrArg (fun x => -x) (IntExpr.sound ρ a)) (Int.ofPair_negate _ _)
+    Eq.trans (Eq.congrArg2 (fun x y => x * y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_mul _ _ _ _)
+  | .neg a => Eq.trans (Eq.congrArg (fun x => -x) (IntExpr.sound ρ a)) (Int.ofPair_negate _ _)
   | .sub a b =>
-    Eq.trans (congrArg2 (fun x y => x - y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_sub _ _ _ _)
+    Eq.trans (Eq.congrArg2 (fun x y => x - y) (IntExpr.sound ρ a) (IntExpr.sound ρ b)) (Int.ofPair_sub _ _ _ _)
 
 /-- The bootstrap decision procedure: two expressions are equal when `p₁ + q₂`
 and `q₁ + p₂` have the same normal form as `NatExpr`s. -/
@@ -282,8 +282,8 @@ attribute [macro term.intPairRing] IntPairRing.expand
 
 /-- `Int.beq` decides equality. -/
 def Int.beq_eq : (a b : Int) → Int.beq a b = .true → a = b
-  | .ofNat m, .ofNat n, h => congrArg Int.ofNat (Nat.beq_eq m n h)
-  | .negSucc m, .negSucc n, h => congrArg Int.negSucc (Nat.beq_eq m n h)
+  | .ofNat m, .ofNat n, h => Eq.congrArg Int.ofNat (Nat.beq_eq m n h)
+  | .negSucc m, .negSucc n, h => Eq.congrArg Int.negSucc (Nat.beq_eq m n h)
   | .ofNat _, .negSucc _, h => absurd h.1
   | .negSucc _, .ofNat _, h => absurd h.1
 
@@ -349,7 +349,7 @@ def IntPoly.keyProd_insertB (ρ : List Int) (x y : Nat) (ys rec : List Nat)
     (ih : IntPoly.keyProd ρ rec = IntExpr.get ρ x * IntPoly.keyProd ρ ys) :
     (b : Bool) → IntPoly.keyProd ρ (Ring.Key.insertB b x y ys rec) = IntExpr.get ρ x * (IntExpr.get ρ y * IntPoly.keyProd ρ ys)
   | .true => rfl
-  | .false => Eq.trans (congrArg (fun z => IntExpr.get ρ y * z) ih)
+  | .false => Eq.trans (Eq.congrArg (fun z => IntExpr.get ρ y * z) ih)
                 (int_pair_ring! IntExpr.get ρ y * (IntExpr.get ρ x * IntPoly.keyProd ρ ys) = IntExpr.get ρ x * (IntExpr.get ρ y * IntPoly.keyProd ρ ys))
 /-- Inserting an atom multiplies the product by it. -/
 def IntPoly.keyProd_insert (ρ : List Int) (x : Nat) : (ys : List Nat) →
@@ -365,7 +365,7 @@ def IntPoly.keyProd_merge (ρ : List Int) : (xs ys : List Nat) →
         = IntExpr.get ρ x * IntPoly.keyProd ρ (Ring.Key.merge xs ys) :=
           IntPoly.keyProd_insert ρ x (Ring.Key.merge xs ys)
          _ = IntExpr.get ρ x * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys) :=
-          congrArg (fun z => IntExpr.get ρ x * z) (IntPoly.keyProd_merge ρ xs ys)
+          Eq.congrArg (fun z => IntExpr.get ρ x * z) (IntPoly.keyProd_merge ρ xs ys)
          _ = IntExpr.get ρ x * IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys :=
           int_pair_ring! IntExpr.get ρ x * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys) = IntExpr.get ρ x * IntPoly.keyProd ρ xs * IntPoly.keyProd ρ ys
 
@@ -374,7 +374,7 @@ def IntPoly.eval_addEq (ρ : List Int) (s : Int) (xs : List Nat) (p : IntPoly) :
     (b : Bool) → Int.beq s 0 = b → IntPoly.eval ρ (IntPoly.addEq b s xs p) = s * IntPoly.keyProd ρ xs + IntPoly.eval ρ p
   | .true, h =>
     Eq.trans (int_pair_ring! IntPoly.eval ρ p = 0 * IntPoly.keyProd ρ xs + IntPoly.eval ρ p)
-      (congrArg (fun z => z * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) (Eq.symm (Int.beq_eq s 0 h)))
+      (Eq.congrArg (fun z => z * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) (Eq.symm (Int.beq_eq s 0 h)))
   | .false, _ => rfl
 /-- Soundness of `IntPoly.addMonoO`. -/
 def IntPoly.eval_addMonoO (ρ : List Int) (c : Int) (xs : List Nat) (d : Int) (ys : List Nat) (p rec : IntPoly)
@@ -390,9 +390,9 @@ def IntPoly.eval_addMonoO (ρ : List Int) (c : Int) (xs : List Nat) (d : Int) (y
          _ = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) :=
           int_pair_ring! (c + d) * IntPoly.keyProd ρ xs + IntPoly.eval ρ p = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ xs + IntPoly.eval ρ p)
          _ = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ ys + IntPoly.eval ρ p) :=
-          congrArg (fun (zs : List Nat) => c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ zs + IntPoly.eval ρ p)) e
+          Eq.congrArg (fun (zs : List Nat) => c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ zs + IntPoly.eval ρ p)) e
   | .gt, _ =>
-    Eq.trans (congrArg (fun z => d * IntPoly.keyProd ρ ys + z) ih)
+    Eq.trans (Eq.congrArg (fun z => d * IntPoly.keyProd ρ ys + z) ih)
       (int_pair_ring! d * IntPoly.keyProd ρ ys + (c * IntPoly.keyProd ρ xs + IntPoly.eval ρ p) = c * IntPoly.keyProd ρ xs + (d * IntPoly.keyProd ρ ys + IntPoly.eval ρ p))
 /-- Adding a monomial adds its value. -/
 def IntPoly.eval_addMono (ρ : List Int) (c : Int) (xs : List Nat) : (p : IntPoly) →
@@ -408,7 +408,7 @@ def IntPoly.eval_add (ρ : List Int) : (p q : IntPoly) → IntPoly.eval ρ (IntP
         = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ (IntPoly.add p q) :=
           IntPoly.eval_addMono ρ m.1 m.2 (IntPoly.add p q)
          _ = m.1 * IntPoly.keyProd ρ m.2 + (IntPoly.eval ρ p + IntPoly.eval ρ q) :=
-          congrArg (fun z => m.1 * IntPoly.keyProd ρ m.2 + z) (IntPoly.eval_add ρ p q)
+          Eq.congrArg (fun z => m.1 * IntPoly.keyProd ρ m.2 + z) (IntPoly.eval_add ρ p q)
          _ = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p + IntPoly.eval ρ q :=
           int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 + (IntPoly.eval ρ p + IntPoly.eval ρ q) = m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p + IntPoly.eval ρ q
 /-- Multiplying by a monomial multiplies by its value. -/
@@ -420,7 +420,7 @@ def IntPoly.eval_mulMono (ρ : List Int) (c : Int) (xs : List Nat) : (q : IntPol
         = c * m.1 * IntPoly.keyProd ρ (Ring.Key.merge xs m.2) + IntPoly.eval ρ (IntPoly.mulMono c xs q) :=
           IntPoly.eval_addMono ρ (c * m.1) (Ring.Key.merge xs m.2) (IntPoly.mulMono c xs q)
          _ = c * m.1 * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ m.2) + c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q :=
-          congrArg2 (fun y z => c * m.1 * y + z) (IntPoly.keyProd_merge ρ xs m.2) (IntPoly.eval_mulMono ρ c xs q)
+          Eq.congrArg2 (fun y z => c * m.1 * y + z) (IntPoly.keyProd_merge ρ xs m.2) (IntPoly.eval_mulMono ρ c xs q)
          _ = c * IntPoly.keyProd ρ xs * (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ q) :=
           int_pair_ring! c * m.1 * (IntPoly.keyProd ρ xs * IntPoly.keyProd ρ m.2) + c * IntPoly.keyProd ρ xs * IntPoly.eval ρ q
              = c * IntPoly.keyProd ρ xs * (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ q)
@@ -432,7 +432,7 @@ def IntPoly.eval_mul (ρ : List Int) : (p q : IntPoly) → IntPoly.eval ρ (IntP
         = IntPoly.eval ρ (IntPoly.mulMono m.1 m.2 q) + IntPoly.eval ρ (IntPoly.mul p q) :=
           IntPoly.eval_add ρ (IntPoly.mulMono m.1 m.2 q) (IntPoly.mul p q)
          _ = m.1 * IntPoly.keyProd ρ m.2 * IntPoly.eval ρ q + IntPoly.eval ρ p * IntPoly.eval ρ q :=
-          congrArg2 (fun y z => y + z) (IntPoly.eval_mulMono ρ m.1 m.2 q) (IntPoly.eval_mul ρ p q)
+          Eq.congrArg2 (fun y z => y + z) (IntPoly.eval_mulMono ρ m.1 m.2 q) (IntPoly.eval_mul ρ p q)
          _ = (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p) * IntPoly.eval ρ q :=
           int_pair_ring! m.1 * IntPoly.keyProd ρ m.2 * IntPoly.eval ρ q + IntPoly.eval ρ p * IntPoly.eval ρ q
              = (m.1 * IntPoly.keyProd ρ m.2 + IntPoly.eval ρ p) * IntPoly.eval ρ q
@@ -448,12 +448,12 @@ def IntPoly.eval_neg (ρ : List Int) (p : IntPoly) : IntPoly.eval ρ (IntPoly.mu
 def IntExpr.eval_norm (ρ : List Int) : (e : IntExpr) → IntPoly.eval ρ (IntExpr.norm e) = IntExpr.eval ρ e
   | .atom i => int_pair_ring! 1 * (IntExpr.get ρ i * 1) + 0 = IntExpr.get ρ i
   | .lit n => IntPoly.eval_const ρ n
-  | .add a b => Eq.trans (IntPoly.eval_add ρ (IntExpr.norm a) (IntExpr.norm b)) (congrArg2 (fun y z => y + z) (IntExpr.eval_norm ρ a) (IntExpr.eval_norm ρ b))
-  | .mul a b => Eq.trans (IntPoly.eval_mul ρ (IntExpr.norm a) (IntExpr.norm b)) (congrArg2 (fun y z => y * z) (IntExpr.eval_norm ρ a) (IntExpr.eval_norm ρ b))
-  | .neg a => Eq.trans (IntPoly.eval_neg ρ (IntExpr.norm a)) (congrArg (fun y => -y) (IntExpr.eval_norm ρ a))
+  | .add a b => Eq.trans (IntPoly.eval_add ρ (IntExpr.norm a) (IntExpr.norm b)) (Eq.congrArg2 (fun y z => y + z) (IntExpr.eval_norm ρ a) (IntExpr.eval_norm ρ b))
+  | .mul a b => Eq.trans (IntPoly.eval_mul ρ (IntExpr.norm a) (IntExpr.norm b)) (Eq.congrArg2 (fun y z => y * z) (IntExpr.eval_norm ρ a) (IntExpr.eval_norm ρ b))
+  | .neg a => Eq.trans (IntPoly.eval_neg ρ (IntExpr.norm a)) (Eq.congrArg (fun y => -y) (IntExpr.eval_norm ρ a))
   | .sub a b =>
     Eq.trans (IntPoly.eval_add ρ (IntExpr.norm a) (IntPoly.mulMono (-1) .nil (IntExpr.norm b)))
-      (Eq.trans (congrArg2 (fun y z => y + z) (IntExpr.eval_norm ρ a) (Eq.trans (IntPoly.eval_neg ρ (IntExpr.norm b)) (congrArg (fun y => -y) (IntExpr.eval_norm ρ b))))
+      (Eq.trans (Eq.congrArg2 (fun y z => y + z) (IntExpr.eval_norm ρ a) (Eq.trans (IntPoly.eval_neg ρ (IntExpr.norm b)) (Eq.congrArg (fun y => -y) (IntExpr.eval_norm ρ b))))
         (int_pair_ring! IntExpr.eval ρ a + -(IntExpr.eval ρ b) = IntExpr.eval ρ a - IntExpr.eval ρ b))
 
 /-- Boolean equality of polynomials (see `NatPoly.beq`). -/
@@ -468,8 +468,8 @@ def IntPoly.beq_eval (ρ : List Int) : (p q : IntPoly) → IntPoly.beq p q = .tr
   | .cons _ _, .nil, h => absurd h.1
   | .cons m p, .cons n q, h =>
     let h1 := Bool.and_left _ _ h;
-    congrArg2 (fun x y => x + y)
-      (congrArg2 (fun c xs => c * IntPoly.keyProd ρ xs) (Int.beq_eq m.1 n.1 (Bool.and_left _ _ h1)) (Ring.Key.beq_eq m.2 n.2 (Bool.and_right _ _ h1)))
+    Eq.congrArg2 (fun x y => x + y)
+      (Eq.congrArg2 (fun c xs => c * IntPoly.keyProd ρ xs) (Int.beq_eq m.1 n.1 (Bool.and_left _ _ h1)) (Ring.Key.beq_eq m.2 n.2 (Bool.and_right _ _ h1)))
       (IntPoly.beq_eval ρ p q (Bool.and_right _ _ h))
 
 /-- Expressions with the same normal form have the same value. -/
@@ -544,4 +544,4 @@ def Int.ofNat_add (m n : Nat) : Int.ofNat (m + n) = Int.ofNat m + Int.ofNat n :=
 def Int.ofNat_mul (m n : Nat) : Int.ofNat (m * n) = Int.ofNat m * Int.ofNat n := rfl
 /-- `Int.ofNat (n + 1) = Int.ofNat n + 1`. -/
 def Int.ofNat_succ (n : Nat) : Int.ofNat (Nat.succ n) = Int.ofNat n + 1 :=
-  congrArg Int.ofNat (Eq.symm (Nat.add_one n))
+  Eq.congrArg Int.ofNat (Eq.symm (Nat.add_one n))

@@ -1,0 +1,710 @@
+import Data.ListLemmas
+
+/-!
+# Finger trees
+
+A finger tree (`import FingerTree`) is a sequence with amortised `O(1)` push and pop at
+both ends, indexing by descending through recomputed subtree sizes, and a monoidal
+**measure** (a `Monoid` fold over the elements in order). `Seq A` is the sequence; the
+finger tree is `FT A l` at level `0`, where `l` counts the nesting of nodes.
+
+The measure is not cached in the nodes (that would need a node carrying its value and
+its equation), so `size`, `measure` and `get` are `O(n)`: `get` recomputes the middle's
+size at each level. The deque ends are the amortised-constant part.
+
+Why the level index. The textbook tree is non-uniform:
+
+```wiz no-check
+inductive FT (A : Type) where
+  | deep (prefix : Digit A) (middle : FT (Node A)) (suffix : Digit A)
+```
+
+Wiz's termination checker rejects it ("constructor deep: the recursive field middle must
+use the same parameters"): the recursive field may change the *indices* of the type but
+not its *parameters*, so `FT A` cannot contain an `FT (Node A)`. This module keeps the
+same data by making the level an index and the element type a function of the level:
+`Elem A 0 = A` at the leaves and `Elem A (n+1) = Node (Elem A n)` one node up, so a
+`deep` at level `l` holds a middle at level `l+1`, whose elements are exactly the nodes
+of its own digits. Every definition below is total and structural on its first
+argument, so the trust ledger gains no row.
+
+The measure is a `Monoid`: `Measure A M` gives each element a value in `M`, and
+`FT.measure` combines the digits and the middle. `measure_eq` proves the measure is the
+fold of the elements in order (`FT.listMeasure (FT.toList t)`), and `size_eq` proves
+the same for `FT.size`, the `Nat` count of leaves. `Seq` wraps level `0`.
+
+```
+import FingerTree
+
+def q : Seq Nat := Seq.push (Seq.push (Seq.push Seq.empty 1) 2) 3
+#eval Seq.toList q               -- [1, 2, 3]
+#eval Seq.size q                 -- 3
+#eval Seq.get q 1                -- some 2
+```
+
+The laws are in the second half of the file (search for `## Laws`).
+-/
+
+/-- A monoid: a unit `one` and an associative operation `mul`. The laws are not fields
+(instances stay simple); state them with `Monoid.Lawful` where a proof needs them. -/
+class Monoid (M : Type) where
+  /-- The unit. -/
+  one : M
+  /-- The operation. -/
+  mul : M → M → M
+
+/-- The monoid laws: associativity and both unit laws. -/
+def Monoid.Lawful {M : Type} (m : Monoid M) : Prop :=
+  ((a b c : M) → m.mul (m.mul a b) c = m.mul a (m.mul b c)) ×
+  ((a : M) → m.mul m.one a = a) ×
+  ((a : M) → m.mul a m.one = a)
+
+/-- A measurement of `A` in the monoid `M`: each element's contribution to the
+aggregate. -/
+class Measure (A M : Type) where
+  /-- The contribution of one element. -/
+  measure : A → M
+
+/-- `Nat` is a monoid under `0` and `+`. -/
+instance : Monoid Nat := Monoid.mk 0 Nat.add
+/-- `Unit` is the trivial monoid (a measure that only needs to exist). -/
+instance : Monoid Unit := Monoid.mk () (fun _ _ => ())
+
+/-- The elements of a finger tree, one level at a time: leaves at level `0`, and a node
+of 2 or 3 elements of level `n` at level `n+1`. This is the type-level counterpart of
+the textbook `Node`: it lets a single index (`l`) record the nesting depth, which Wiz's
+termination checker requires in place of the textbook `FT (Node A)`. -/
+inductive Elem (A : Type) : Nat → Type where
+  | base (a : A) : Elem A 0
+  | node2 {n : Nat} (a b : Elem A n) : Elem A (Nat.succ n)
+  | node3 {n : Nat} (a b c : Elem A n) : Elem A (Nat.succ n)
+
+/-- A digit: 1 to 4 elements. Keeping the digits non-empty in the type removes the
+impossible `deep` with an empty prefix or suffix. -/
+inductive Digit (A : Type) where
+  | one (a : A)
+  | two (a b : A)
+  | three (a b c : A)
+  | four (a b c d : A)
+
+/-- The elements of a digit, in order. -/
+def Digit.toList {A : Type} : Digit A → List A
+  | .one a => .cons a .nil
+  | .two a b => .cons a (.cons b .nil)
+  | .three a b c => .cons a (.cons b (.cons c .nil))
+  | .four a b c d => .cons a (.cons b (.cons c (.cons d .nil)))
+
+/-- The number of elements in a digit. -/
+def Digit.length {A : Type} (d : Digit A) : Nat := List.length (Digit.toList d)
+
+/-- A finger tree over the level-`l` elements `Elem A l`: `empty`, a single element, or
+a `deep` node with a prefix digit, a middle tree one level up (whose elements are the
+nodes) and a suffix digit. -/
+inductive FT (A : Type) : Nat → Type where
+  | empty {l : Nat} : FT A l
+  | single {l : Nat} (e : Elem A l) : FT A l
+  | deep {l : Nat} (prefix : Digit (Elem A l)) (middle : FT A (Nat.succ l))
+      (suffix : Digit (Elem A l)) : FT A l
+
+-- ## Flattening, size and measure
+
+/-- `f` applied to every element of a list and concatenated:
+`List.concatMap f [a, b] = f a ++ f b`. -/
+def List.concatMap {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (List.concatMap f xs)
+
+/-- The leaves of one element, in order. -/
+def elemToList {A : Type} {l : Nat} : Elem A l → List A
+  | .base a => .cons a .nil
+  | .node2 a b => List.append (elemToList a) (elemToList b)
+  | .node3 a b c => List.append (elemToList a) (List.append (elemToList b) (elemToList c))
+
+/-- All the leaves of a tree, in order. -/
+def FT.toList {A : Type} {l : Nat} : FT A l → List A
+  | .empty => .nil
+  | .single e => elemToList e
+  | .deep p m s =>
+    List.append (List.concatMap elemToList (Digit.toList p))
+      (List.append (FT.toList m) (List.concatMap elemToList (Digit.toList s)))
+
+/-- The elements of a list of elements, concatenated onto `acc` (the accumulator shape
+of `FT.toList`). -/
+def FT.listToListGo {A : Type} {l : Nat} : List (Elem A l) → List A → List A
+  | .nil, acc => acc
+  | .cons x xs, acc => List.append (elemToList x) (FT.listToListGo xs acc)
+
+/-- `FT.toList` with an accumulator: `toListGo t acc = toList t ++ acc`. The accumulator
+shape makes the deque laws about `push`/`pushFront` structural. -/
+def FT.toListGo {A : Type} {l : Nat} : FT A l → List A → List A
+  | .empty, acc => acc
+  | .single e, acc => List.append (elemToList e) acc
+  | .deep p m s, acc =>
+    FT.listToListGo (Digit.toList p) (FT.toListGo m (FT.listToListGo (Digit.toList s) acc))
+
+/-- The number of leaves of one element (a node counts all its leaves). -/
+def elemSize {A : Type} {l : Nat} : Elem A l → Nat
+  | .base _ => 1
+  | .node2 a b => Nat.add (elemSize a) (elemSize b)
+  | .node3 a b c => Nat.add (elemSize a) (Nat.add (elemSize b) (elemSize c))
+
+/-- `List.length` with an accumulator: `lengthGo l acc = length l + acc`, in the shape
+the size law compares with. -/
+def listLengthGo {A : Type} : List A → Nat → Nat
+  | .nil, acc => acc
+  | .cons _ xs, acc => Nat.succ (listLengthGo xs acc)
+
+/-- The sum of `elemSize` over a list. -/
+def listElemSize {A : Type} {l : Nat} : List (Elem A l) → Nat
+  | .nil => 0
+  | .cons x xs => Nat.add (elemSize x) (listElemSize xs)
+
+/-- The sum of `elemSize` over a list, with an accumulator (the shape the size law
+compares with). -/
+def listElemSizeGo {A : Type} {l : Nat} : List (Elem A l) → Nat → Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => Nat.add (elemSize x) (listElemSizeGo xs acc)
+
+/-- The number of leaves in a tree, with an accumulator. -/
+def FT.sizeGo {A : Type} {l : Nat} : FT A l → Nat → Nat
+  | .empty, acc => acc
+  | .single e, acc => Nat.add (elemSize e) acc
+  | .deep p m s, acc =>
+    listElemSizeGo (Digit.toList p) (FT.sizeGo m (listElemSizeGo (Digit.toList s) acc))
+
+/-- The number of leaves in a tree. -/
+def FT.size {A : Type} {l : Nat} (t : FT A l) : Nat := FT.sizeGo t 0
+
+/-- The measure of one element: its `Measure` at a leaf, the `mul` of its parts at a
+node. -/
+def elemMeasure {A M : Type} [Monoid M] [Measure A M] {l : Nat} : Elem A l → M
+  | .base a => Measure.measure a
+  | .node2 a b => Monoid.mul (elemMeasure a) (elemMeasure b)
+  | .node3 a b c => Monoid.mul (elemMeasure a) (Monoid.mul (elemMeasure b) (elemMeasure c))
+
+/-- The measure of a list of elements, with an accumulator. -/
+def listElemMeasureGo {A M : Type} [Monoid M] [Measure A M] {l : Nat} :
+    List (Elem A l) → M → M
+  | .nil, acc => acc
+  | .cons x xs, acc => Monoid.mul (elemMeasure x) (listElemMeasureGo xs acc)
+
+/-- The measure of a list of values, with an accumulator (the normal form the measure
+law compares with). -/
+def listMeasureGo {A M : Type} [Monoid M] [Measure A M] : List A → M → M
+  | .nil, acc => acc
+  | .cons x xs, acc => Monoid.mul (Measure.measure x) (listMeasureGo xs acc)
+
+/-- The measure of a list of values. -/
+def listMeasure {A M : Type} [Monoid M] [Measure A M] (l : List A) : M :=
+  listMeasureGo l Monoid.one
+
+/-- The measure of a tree, with an accumulator. -/
+def FT.measureGo {A M : Type} [Monoid M] [Measure A M] {l : Nat} : FT A l → M → M
+  | .empty, acc => acc
+  | .single e, acc => Monoid.mul (elemMeasure e) acc
+  | .deep p m s, acc =>
+    listElemMeasureGo (Digit.toList p) (FT.measureGo m (listElemMeasureGo (Digit.toList s) acc))
+
+/-- The measure of a tree. -/
+def FT.measure {A M : Type} [Monoid M] [Measure A M] {l : Nat} (t : FT A l) : M :=
+  FT.measureGo t Monoid.one
+
+-- ## The sequence and its deque operations
+
+/-- A finger tree at level `0` is a sequence of `A`. -/
+def Seq (A : Type) : Type := FT A 0
+
+/-- A deque (a sequence used from both ends) is a sequence. -/
+def Deque (A : Type) : Type := Seq A
+
+/-- The empty sequence. -/
+def Seq.empty {A : Type} : Seq A := FT.empty
+/-- A one-element sequence. -/
+def Seq.single {A : Type} (a : A) : Seq A := FT.single (.base a)
+/-- The elements, in order. -/
+def Seq.toList {A : Type} (s : Seq A) : List A := FT.toList s
+/-- The number of elements. -/
+def Seq.size {A : Type} (s : Seq A) : Nat := FT.size s
+/-- The measure of the sequence. -/
+def Seq.measure {A M : Type} [Monoid M] [Measure A M] (s : Seq A) : M := FT.measure s
+
+/-- Push an element on the back. -/
+def FT.push {A : Type} {l : Nat} : FT A l → Elem A l → FT A l
+  | .empty, e => .single e
+  | .single a, e => .deep (.one a) .empty (.one e)
+  | .deep p m (.one a), e => .deep p m (.two a e)
+  | .deep p m (.two a b), e => .deep p m (.three a b e)
+  | .deep p m (.three a b c), e => .deep p m (.four a b c e)
+  | .deep p m (.four a b c d), e => .deep p (FT.push m (.node3 a b c)) (.two d e)
+
+/-- Push an element on the front. -/
+def FT.pushFront {A : Type} {l : Nat} : FT A l → Elem A l → FT A l
+  | .empty, e => .single e
+  | .single a, e => .deep (.one e) .empty (.one a)
+  | .deep (.one a) m s, e => .deep (.two e a) m s
+  | .deep (.two a b) m s, e => .deep (.three e a b) m s
+  | .deep (.three a b c) m s, e => .deep (.four e a b c) m s
+  | .deep (.four a b c d) m s, e => .deep (.two e a) (FT.pushFront m (.node3 b c d)) s
+
+/-- The children of a node as a digit of the level below. -/
+def nodeDigit {A : Type} {l : Nat} : Elem A (Nat.succ l) → Digit (Elem A l)
+  | .node2 a b => .two a b
+  | .node3 a b c => .three a b c
+
+/-- A list of elements as a tree, in order (by pushing at the front; used to rebuild a
+tree from a remaining digit). -/
+def FT.ofList {A : Type} {l : Nat} : List (Elem A l) → FT A l
+  | .nil => .empty
+  | .cons x xs => FT.pushFront (FT.ofList xs) x
+
+/-- A digit as a tree. -/
+def FT.ofDigit {A : Type} {l : Nat} (d : Digit (Elem A l)) : FT A l :=
+  FT.ofList (Digit.toList d)
+
+/-- Pop the last element, if any. -/
+def FT.pop {A : Type} {l : Nat} : FT A l → Option (FT A l × Elem A l)
+  | .empty => .none
+  | .single e => .some (.empty, e)
+  | .deep p m s => match s with
+    | .one x =>
+      match m with
+      | .empty => .some (FT.ofDigit p, x)
+      | _ => match FT.pop m with
+        | .none => .none
+        | .some (m', node) => .some (.deep p m' (nodeDigit node), x)
+    | .two a b => .some (.deep p m (.one a), b)
+    | .three a b c => .some (.deep p m (.two a b), c)
+    | .four a b c d => .some (.deep p m (.three a b c), d)
+
+/-- Pop the first element, if any. -/
+def FT.popFront {A : Type} {l : Nat} : FT A l → Option (FT A l × Elem A l)
+  | .empty => .none
+  | .single e => .some (.empty, e)
+  | .deep p m s => match p with
+    | .one x =>
+      match m with
+      | .empty => .some (FT.ofDigit s, x)
+      | _ => match FT.popFront m with
+        | .none => .none
+        | .some (m', node) => .some (.deep (nodeDigit node) m' s, x)
+    | .two a b => .some (.deep (.one b) m s, a)
+    | .three a b c => .some (.deep (.two b c) m s, a)
+    | .four a b c d => .some (.deep (.three b c d) m s, a)
+
+/-- The element of one level-`l` node containing the leaf at index `i`. -/
+def elemGet {A : Type} {l : Nat} : Elem A l → Nat → Option A
+  | .base a, i => match i with
+    | .zero => .some a
+    | .succ _ => .none
+  | .node2 a b, i => match Nat.lt i (elemSize a) with
+    | .true => elemGet a i
+    | .false => elemGet b (Nat.sub i (elemSize a))
+  | .node3 a b c, i => match Nat.lt i (elemSize a) with
+    | .true => elemGet a i
+    | .false => match Nat.lt (Nat.sub i (elemSize a)) (elemSize b) with
+      | .true => elemGet b (Nat.sub i (elemSize a))
+      | .false => elemGet c (Nat.sub (Nat.sub i (elemSize a)) (elemSize b))
+
+/-- The leaf at index `i` of a list of elements (skipping whole elements). -/
+def listElemGet {A : Type} {l : Nat} : List (Elem A l) → Nat → Option A
+  | .nil, _ => .none
+  | .cons x xs, i => match Nat.lt i (elemSize x) with
+    | .true => elemGet x i
+    | .false => listElemGet xs (Nat.sub i (elemSize x))
+
+/-- The leaf at index `i` of a tree. -/
+def FT.get {A : Type} {l : Nat} : FT A l → Nat → Option A
+  | .empty, _ => .none
+  | .single e, i => elemGet e i
+  | .deep p m s, i =>
+    let np := listElemSize (Digit.toList p);
+    match Nat.lt i np with
+    | .true => listElemGet (Digit.toList p) i
+    | .false => match Nat.lt (Nat.sub i np) (FT.size m) with
+      | .true => FT.get m (Nat.sub i np)
+      | .false => listElemGet (Digit.toList s) (Nat.sub (Nat.sub i np) (FT.size m))
+
+/-- Push an element on the back of a sequence. -/
+def Seq.push {A : Type} (s : Seq A) (a : A) : Seq A := FT.push s (.base a)
+/-- Push an element on the front of a sequence. -/
+def Seq.pushFront {A : Type} (s : Seq A) (a : A) : Seq A := FT.pushFront s (.base a)
+/-- Pop the last element of a sequence. -/
+def Seq.pop {A : Type} (s : Seq A) : Option (Seq A × A) :=
+  match FT.pop s with
+  | .none => .none
+  | .some (t, e) => match e with
+    | .base a => .some (t, a)
+    | .node2 _ _ => .none
+    | .node3 _ _ _ => .none
+/-- Pop the first element of a sequence. -/
+def Seq.popFront {A : Type} (s : Seq A) : Option (Seq A × A) :=
+  match FT.popFront s with
+  | .none => .none
+  | .some (t, e) => match e with
+    | .base a => .some (t, a)
+    | .node2 _ _ => .none
+    | .node3 _ _ _ => .none
+/-- The sequence of a list. -/
+def Seq.ofList {A : Type} (l : List A) : Seq A := FT.ofList (List.map (fun a => Elem.base a) l)
+
+/-- Concatenate two sequences. This rebuilds the result from the two readings (O(n));
+the textbook finger-tree catenation is O(log n) but matches two trees at the same
+level, which Wiz's "the recursive field must use the same parameters" rule (see the
+module note) leaves no way to write. The law `Seq.toList_append` still holds. -/
+def Seq.append {A : Type} (s t : Seq A) : Seq A :=
+  Seq.ofList (List.append (Seq.toList s) (Seq.toList t))
+/-- The leaf at index `i`. -/
+def Seq.get {A : Type} (s : Seq A) (i : Nat) : Option A := FT.get s i
+
+-- ## Laws
+
+/-! ### List helpers
+
+The accumulator formulations need only `List.append_assoc` (and `Nat.add_assoc` for the
+size), plus one regrouping lemma for the four-element digit that overflows. -/
+
+/-- `(a ++ (b ++ c)) ++ d = a ++ (b ++ (c ++ d))`: the regrouping an overflowing digit
+needs when a node moves into the middle. -/
+def List.append_four {A : Type} (a b c d : List A) :
+    List.append (List.append a (List.append b c)) d =
+      List.append a (List.append b (List.append c d)) :=
+  Eq.trans
+    (List.append_assoc a (List.append b c) d)
+    (Eq.congrArg (fun z => List.append a z) (List.append_assoc b c d))
+
+/-- `lengthGo` is the length plus the accumulator. -/
+def listLengthGo_add {A : Type} : (l : List A) → (acc : Nat) →
+    listLengthGo l acc = Nat.add (List.length l) acc
+  | .nil, acc => rfl
+  | .cons _ xs, acc => Eq.congrArg Nat.succ (listLengthGo_add xs acc)
+
+/-- `lengthGo` at zero is `List.length`. -/
+def listLengthGo_length {A : Type} (l : List A) :
+    listLengthGo l 0 = List.length l :=
+  Eq.trans (listLengthGo_add l 0) (Nat.add_zero (List.length l))
+
+/-- The accumulator splits at `++`. -/
+def listLengthGo_append {A : Type} : (l m : List A) → (acc : Nat) →
+    listLengthGo (List.append l m) acc = listLengthGo l (listLengthGo m acc)
+  | .nil, m, acc => rfl
+  | .cons _ xs, m, acc => Eq.congrArg Nat.succ (listLengthGo_append xs m acc)
+
+/-- The monoid accumulator splits at `++`. -/
+def listMeasureGo_append {A M : Type} [mo : Monoid M] [Measure A M] :
+    (l m : List A) → (acc : M) →
+      listMeasureGo (List.append l m) acc = listMeasureGo l (listMeasureGo m acc)
+  | .nil, m, acc => rfl
+  | .cons x xs, m, acc =>
+    Eq.congrArg (fun z => Monoid.mul (Measure.measure x) z) (listMeasureGo_append xs m acc)
+
+/-- Each element's measure equals the measure of its leaves, with an accumulator. -/
+def elemMeasureGo {A M : Type} [mo : Monoid M] [Measure A M] (law : Monoid.Lawful mo)
+    {l : Nat} : (e : Elem A l) → (acc : M) →
+      Monoid.mul (elemMeasure e) acc = listMeasureGo (elemToList e) acc
+  | .base a, acc => rfl
+  | .node2 a b, acc =>
+    Eq.trans
+      (law.1 (elemMeasure a) (elemMeasure b) acc)
+      (Eq.trans
+        (Eq.congrArg (fun z => Monoid.mul (elemMeasure a) z) (elemMeasureGo law b acc))
+        (Eq.trans
+          (elemMeasureGo law a (listMeasureGo (elemToList b) acc))
+          (Eq.symm (listMeasureGo_append (elemToList a) (elemToList b) acc))))
+  | .node3 a b c, acc =>
+    Eq.trans
+      (law.1 (elemMeasure a) (Monoid.mul (elemMeasure b) (elemMeasure c)) acc)
+      (Eq.trans
+        (Eq.congrArg (fun z => Monoid.mul (elemMeasure a) z)
+          (law.1 (elemMeasure b) (elemMeasure c) acc))
+        (Eq.trans
+          (Eq.congrArg (fun z => Monoid.mul (elemMeasure a) (Monoid.mul (elemMeasure b) z))
+            (elemMeasureGo law c acc))
+          (Eq.trans
+            (Eq.congrArg (fun z => Monoid.mul (elemMeasure a) z)
+              (elemMeasureGo law b (listMeasureGo (elemToList c) acc)))
+            (Eq.trans
+              (elemMeasureGo law a
+                (listMeasureGo (elemToList b) (listMeasureGo (elemToList c) acc)))
+              (Eq.trans
+                (Eq.congrArg (fun z => listMeasureGo (elemToList a) z)
+                  (Eq.symm (listMeasureGo_append (elemToList b) (elemToList c) acc)))
+                (Eq.symm (listMeasureGo_append (elemToList a)
+                  (List.append (elemToList b) (elemToList c)) acc)))))))
+
+/-- A list of elements measures the concatenation of their leaves. -/
+def listElemMeasureGo_concat {A M : Type} [mo : Monoid M] [Measure A M]
+    (law : Monoid.Lawful mo) {l : Nat} : (xs : List (Elem A l)) → (acc : M) →
+      listElemMeasureGo xs acc = listMeasureGo (List.concatMap elemToList xs) acc
+  | .nil, acc => rfl
+  | .cons x xs, acc =>
+    Eq.trans
+      (Eq.congrArg (fun z => Monoid.mul (elemMeasure x) z)
+        (listElemMeasureGo_concat law xs acc))
+      (Eq.trans
+        (elemMeasureGo law x (listMeasureGo (List.concatMap elemToList xs) acc))
+        (Eq.symm (listMeasureGo_append (elemToList x)
+          (List.concatMap elemToList xs) acc)))
+
+/-- Each element's size equals the length of its leaves, with an accumulator. -/
+def elemSizeGo {A : Type} {l : Nat} : (e : Elem A l) → (acc : Nat) →
+    Nat.add (elemSize e) acc = listLengthGo (elemToList e) acc
+  | .base _, acc => rfl
+  | .node2 a b, acc =>
+    Eq.trans
+      (Nat.add_assoc (elemSize a) (elemSize b) acc)
+      (Eq.trans
+        (Eq.congrArg (fun z => Nat.add (elemSize a) z) (elemSizeGo b acc))
+        (Eq.trans
+          (elemSizeGo a (listLengthGo (elemToList b) acc))
+          (Eq.symm (listLengthGo_append (elemToList a) (elemToList b) acc))))
+  | .node3 a b c, acc =>
+    Eq.trans
+      (Nat.add_assoc (elemSize a) (Nat.add (elemSize b) (elemSize c)) acc)
+      (Eq.trans
+        (Eq.congrArg (fun z => Nat.add (elemSize a) z)
+          (Nat.add_assoc (elemSize b) (elemSize c) acc))
+        (Eq.trans
+          (Eq.congrArg (fun z => Nat.add (elemSize a) (Nat.add (elemSize b) z))
+            (elemSizeGo c acc))
+          (Eq.trans
+            (Eq.congrArg (fun z => Nat.add (elemSize a) z)
+              (elemSizeGo b (listLengthGo (elemToList c) acc)))
+            (Eq.trans
+              (elemSizeGo a
+                (listLengthGo (elemToList b) (listLengthGo (elemToList c) acc)))
+              (Eq.trans
+                (Eq.congrArg (fun z => listLengthGo (elemToList a) z)
+                  (Eq.symm (listLengthGo_append (elemToList b) (elemToList c) acc)))
+                (Eq.symm (listLengthGo_append (elemToList a)
+                  (List.append (elemToList b) (elemToList c)) acc)))))))
+
+/-- A list of elements has the length of the concatenation of their leaves. -/
+def listElemSizeGo_concat {A : Type} {l : Nat} : (xs : List (Elem A l)) → (acc : Nat) →
+    listElemSizeGo xs acc = listLengthGo (List.concatMap elemToList xs) acc
+  | .nil, acc => rfl
+  | .cons x xs, acc =>
+    Eq.trans
+      (Eq.congrArg (fun z => Nat.add (elemSize x) z) (listElemSizeGo_concat xs acc))
+      (Eq.trans
+        (elemSizeGo x (listLengthGo (List.concatMap elemToList xs) acc))
+        (Eq.symm (listLengthGo_append (elemToList x)
+          (List.concatMap elemToList xs) acc)))
+
+/-- **The measure law.** A tree's measure is the monoid fold of its leaves in order, for
+a lawful monoid. -/
+def FT.measureGo_toList {A M : Type} [mo : Monoid M] [Measure A M]
+    (law : Monoid.Lawful mo) {l : Nat} : (t : FT A l) → (acc : M) →
+      FT.measureGo t acc = listMeasureGo (FT.toList t) acc
+  | .empty, acc => rfl
+  | .single e, acc => elemMeasureGo law e acc
+  | .deep p m s, acc =>
+    Eq.trans
+      (listElemMeasureGo_concat law (Digit.toList p)
+        (FT.measureGo m (listElemMeasureGo (Digit.toList s) acc)))
+      (Eq.trans
+        (Eq.congrArg
+          (fun z => listMeasureGo (List.concatMap elemToList (Digit.toList p)) z)
+          (FT.measureGo_toList law m (listElemMeasureGo (Digit.toList s) acc)))
+        (Eq.trans
+          (Eq.congrArg
+            (fun z => listMeasureGo (List.concatMap elemToList (Digit.toList p))
+              (listMeasureGo (FT.toList m) z))
+            (listElemMeasureGo_concat law (Digit.toList s) acc))
+          (Eq.symm (Eq.trans
+            (listMeasureGo_append
+              (List.concatMap elemToList (Digit.toList p))
+              (List.append (FT.toList m) (List.concatMap elemToList (Digit.toList s))) acc)
+            (Eq.congrArg
+              (fun z => listMeasureGo (List.concatMap elemToList (Digit.toList p)) z)
+              (listMeasureGo_append (FT.toList m)
+                (List.concatMap elemToList (Digit.toList s)) acc))))))
+
+/-- **The size law.** A tree's size is the length of its leaves. -/
+def FT.sizeGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : Nat) →
+    FT.sizeGo t acc = listLengthGo (FT.toList t) acc
+  | .empty, acc => rfl
+  | .single e, acc => elemSizeGo e acc
+  | .deep p m s, acc =>
+    Eq.trans
+      (listElemSizeGo_concat (Digit.toList p)
+        (FT.sizeGo m (listElemSizeGo (Digit.toList s) acc)))
+      (Eq.trans
+        (Eq.congrArg
+          (fun z => listLengthGo (List.concatMap elemToList (Digit.toList p)) z)
+          (FT.sizeGo_toList m (listElemSizeGo (Digit.toList s) acc)))
+        (Eq.trans
+          (Eq.congrArg
+            (fun z => listLengthGo (List.concatMap elemToList (Digit.toList p))
+              (listLengthGo (FT.toList m) z))
+            (listElemSizeGo_concat (Digit.toList s) acc))
+          (Eq.symm (Eq.trans
+            (listLengthGo_append
+              (List.concatMap elemToList (Digit.toList p))
+              (List.append (FT.toList m) (List.concatMap elemToList (Digit.toList s))) acc)
+            (Eq.congrArg
+              (fun z => listLengthGo (List.concatMap elemToList (Digit.toList p)) z)
+              (listLengthGo_append (FT.toList m)
+                (List.concatMap elemToList (Digit.toList s)) acc))))))
+
+/-- The size law, in the user-facing form. -/
+def FT.size_eq {A : Type} {l : Nat} (t : FT A l) :
+    FT.size t = List.length (FT.toList t) :=
+  Eq.trans (FT.sizeGo_toList t 0) (listLengthGo_length (FT.toList t))
+
+/-- The measure law, in the user-facing form. -/
+def FT.measure_eq {A M : Type} [mo : Monoid M] [Measure A M] (law : Monoid.Lawful mo)
+    {l : Nat} (t : FT A l) : FT.measure t = listMeasure (FT.toList t) :=
+  FT.measureGo_toList law t Monoid.one
+
+-- ### The deque laws
+
+/-- `listToListGo` is `concatMap` then the accumulator. -/
+def FT.listToListGo_toList {A : Type} {l : Nat} : (xs : List (Elem A l)) → (acc : List A) →
+    FT.listToListGo xs acc = List.append (List.concatMap elemToList xs) acc
+  | .nil, acc => rfl
+  | .cons x xs, acc =>
+    Eq.trans
+      (Eq.congrArg (fun z => List.append (elemToList x) z)
+        (FT.listToListGo_toList xs acc))
+      (Eq.symm (List.append_assoc (elemToList x) (List.concatMap elemToList xs) acc))
+
+/-- `toListGo` is `toList` then the accumulator. -/
+def FT.toListGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : List A) →
+    FT.toListGo t acc = List.append (FT.toList t) acc
+  | .empty, acc => rfl
+  | .single e, acc => rfl
+  | .deep p m s, acc =>
+    Eq.trans
+      (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) z)
+        (FT.toListGo_toList m (FT.listToListGo (Digit.toList s) acc)))
+      (Eq.trans
+        (FT.listToListGo_toList (Digit.toList p)
+          (List.append (FT.toList m) (FT.listToListGo (Digit.toList s) acc)))
+        (Eq.trans
+          (Eq.congrArg (fun z => List.append
+              (List.concatMap elemToList (Digit.toList p))
+              (List.append (FT.toList m) z))
+            (FT.listToListGo_toList (Digit.toList s) acc))
+          (Eq.symm (Eq.trans
+            (List.append_assoc
+              (List.concatMap elemToList (Digit.toList p))
+              (List.append (FT.toList m) (List.concatMap elemToList (Digit.toList s)))
+              acc)
+            (Eq.congrArg (fun z => List.append
+                (List.concatMap elemToList (Digit.toList p)) z)
+              (List.append_assoc (FT.toList m)
+                (List.concatMap elemToList (Digit.toList s)) acc))))))
+
+/-- **Push on the back.** `push` appends one element, with an accumulator. -/
+def FT.toListGo_push {A : Type} {l : Nat} :
+    (t : FT A l) → (e : Elem A l) → (acc : List A) →
+      FT.toListGo (FT.push t e) acc =
+        FT.toListGo t (List.append (elemToList e) acc)
+  | .empty, e, acc => rfl
+  | .single a, e, acc => rfl
+  | .deep p m (.one a), e, acc => rfl
+  | .deep p m (.two a b), e, acc => rfl
+  | .deep p m (.three a b c), e, acc => rfl
+  | .deep p m (.four a b c d), e, acc =>
+      Eq.trans
+        (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) z)
+          (FT.toListGo_push m (.node3 a b c)
+            (List.append (elemToList d) (List.append (elemToList e) acc))))
+        (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) (FT.toListGo m z))
+          (List.append_four (elemToList a) (elemToList b) (elemToList c)
+            (List.append (elemToList d) (List.append (elemToList e) acc))))
+
+/-- **Push on the back**, in the user-facing form:
+`toList (push t e) = toList t ++ elemToList e`. -/
+def FT.toList_push {A : Type} {l : Nat} (t : FT A l) (e : Elem A l) :
+    FT.toList (FT.push t e) = List.append (FT.toList t) (elemToList e) :=
+  Eq.trans (Eq.symm (List.append_nil (FT.toList (FT.push t e))))
+    (Eq.trans (Eq.symm (FT.toListGo_toList (FT.push t e) .nil))
+      (Eq.trans (FT.toListGo_push t e .nil)
+        (Eq.trans (FT.toListGo_toList t (List.append (elemToList e) .nil))
+          (Eq.congrArg (fun z => List.append (FT.toList t) z)
+            (List.append_nil (elemToList e))))))
+
+/-- **Push on the front.** `pushFront` prepends one element, with an accumulator. -/
+def FT.toListGo_pushFront {A : Type} {l : Nat} :
+    (t : FT A l) → (e : Elem A l) → (acc : List A) →
+      FT.toListGo (FT.pushFront t e) acc =
+        List.append (elemToList e) (FT.toListGo t acc)
+  | .empty, e, acc => rfl
+  | .single a, e, acc => rfl
+  | .deep (.one a) m s, e, acc => rfl
+  | .deep (.two a b) m s, e, acc => rfl
+  | .deep (.three a b c) m s, e, acc => rfl
+  | .deep (.four a b c d) m s, e, acc =>
+      Eq.trans
+        (Eq.congrArg (fun z => List.append (elemToList e)
+            (List.append (elemToList a) z))
+          (FT.toListGo_pushFront m (.node3 b c d)
+            (FT.listToListGo (Digit.toList s) acc)))
+        (Eq.congrArg (fun z => List.append (elemToList e)
+            (List.append (elemToList a) z))
+          (List.append_four (elemToList b) (elemToList c) (elemToList d)
+            (FT.toListGo m (FT.listToListGo (Digit.toList s) acc))))
+
+/-- **Push on the front**, in the user-facing form:
+`toList (pushFront t e) = elemToList e ++ toList t`. -/
+def FT.toList_pushFront {A : Type} {l : Nat} (t : FT A l) (e : Elem A l) :
+    FT.toList (FT.pushFront t e) = List.append (elemToList e) (FT.toList t) :=
+  Eq.trans (Eq.symm (List.append_nil (FT.toList (FT.pushFront t e))))
+    (Eq.trans (Eq.symm (FT.toListGo_toList (FT.pushFront t e) .nil))
+      (Eq.trans (FT.toListGo_pushFront t e .nil)
+        (Eq.congrArg (fun z => List.append (elemToList e) z)
+          (Eq.trans (FT.toListGo_toList t .nil) (List.append_nil (FT.toList t))))))
+
+/-- `Seq.ofList` reads back as the list. -/
+def Seq.toList_ofList {A : Type} : (l : List A) → Seq.toList (Seq.ofList l) = l
+  | .nil => rfl
+  | .cons x xs =>
+    Eq.trans
+      (FT.toList_pushFront (FT.ofList (List.map (fun a => Elem.base a) xs)) (.base x))
+      (Eq.congrArg (fun z => List.append (elemToList (.base x)) z) (Seq.toList_ofList xs))
+
+/-- **The catenation law.** `Seq.append` reads as the two readings concatenated. -/
+def Seq.toList_append {A : Type} (s t : Seq A) :
+    Seq.toList (Seq.append s t) = List.append (Seq.toList s) (Seq.toList t) :=
+  Seq.toList_ofList (List.append (Seq.toList s) (Seq.toList t))
+
+/-- **The catenation size law.** `Seq.size` adds up over `Seq.append`. -/
+def Seq.size_append {A : Type} (s t : Seq A) :
+    Seq.size (Seq.append s t) = Nat.add (Seq.size s) (Seq.size t) :=
+  Eq.trans (FT.size_eq (Seq.append s t))
+    (Eq.trans (Eq.congrArg List.length (Seq.toList_append s t))
+      (Eq.trans (List.length_append_eq (Seq.toList s) (Seq.toList t))
+        (Eq.trans
+          (Eq.congrArg (fun z => Nat.add z (List.length (Seq.toList t)))
+            (Eq.symm (FT.size_eq s)))
+          (Eq.congrArg (Nat.add (Seq.size s)) (Eq.symm (FT.size_eq t))))))
+
+-- ## Examples
+
+def ftExample : Seq Nat := Seq.push (Seq.push (Seq.push Seq.empty 1) 2) 3
+
+def ftExampleToList : Seq.toList ftExample = List.cons 1 (List.cons 2 (List.cons 3 .nil)) := rfl
+def ftExampleSize : Seq.size ftExample = 3 := rfl
+def ftExampleGet : Seq.get ftExample 2 = .some 3 := rfl
+def ftExampleGetOut : Seq.get ftExample 3 = .none := rfl
+
+def ftExamplePop : Option (List Nat × Nat) :=
+  match Seq.pop ftExample with
+  | .some (t, x) => .some (Seq.toList t, x)
+  | .none => .none
+
+def ftExamplePopFront : Option (List Nat × Nat) :=
+  match Seq.popFront ftExample with
+  | .some (t, x) => .some (Seq.toList t, x)
+  | .none => .none
+
+#eval Seq.toList ftExample
+#eval Seq.size ftExample
+#eval Seq.get ftExample 1
+#eval Seq.toList (Seq.pushFront ftExample 0)
+#eval Seq.toList (Seq.ofList [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+#eval Seq.size (Seq.ofList [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+#eval ftExamplePop
+#eval ftExamplePopFront
+#eval Seq.toList (Seq.append ftExample (Seq.ofList [4, 5]))

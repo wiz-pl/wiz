@@ -1,0 +1,31 @@
+import Logic
+/-!
+# Order
+
+Notation for orders and equivalences (`import Data.Order`): `a ≤ b`, `a < b` and `a ≈ b`,
+each a class with one instance per type. The relations are propositions.
+
+Instances: `Nat` (lib/Nat.wiz), `Int` (lib/IntOrder.wiz), and the rationals `Q`
+(lib/Rat.wiz, where `≈` is the equality of fractions).
+
+```
+import Nat
+
+def ex (n : Nat) : n ≤ n + 1 := Nat.le_add_right n 1
+```
+-/
+
+/-- `a ≤ b`: a (non-strict) order on `A`. -/
+class LE (A : Type) where
+  le : A → A → Prop
+/-- `a < b`: a strict order on `A`. -/
+class LT (A : Type) where
+  lt : A → A → Prop
+/-- `a ≈ b`: an equivalence on `A` that stands in for equality (a setoid), for types
+whose equality is coarser than `=`, such as unreduced fractions. -/
+class Equiv (A : Type) where
+  equiv : A → A → Prop
+
+infix:50 " ≤ " => LE.le
+infix:50 " < " => LT.lt
+infix:50 " ≈ " => Equiv.equiv
