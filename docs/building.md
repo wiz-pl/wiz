@@ -810,15 +810,19 @@ setup action keeps the elan cache for those
   an allow-list entry needs a real reason and an expiry date, and the entry names the one
   case it excuses: prefer putting the tool in the dev shell.
 * **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
-  test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
-  `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
+  test` over the 26 `scry/tests/*.expected` files, on master pushes that change
+  `scry/**`, `lib/Scry/**`, `Wiz/**` or `selfhost/**`, on a weekly schedule (Monday) and
+  on `workflow_dispatch` — not on pull requests. The Lean-side `=scry-*` groups test the
   library through the host; this is the package's own suite, and no other job ran it
   (`golden-diff.yml` only *shows* what `--update` would write, after a shard failed for
   another reason). The workflow never passes `--update`: a non-zero `grail test` fails,
   and a later step fails if anything rewrote `scry/tests`. Measured on a loaded 32-core
   box: 11.5 min for `grail build scry` and 14 min for the 26 tests, peak ~220 MiB, so it
   runs on `ubuntu-latest` with a 60-minute job timeout and needs no memory reservation.
-  It is not part of `CI result` yet: it is its own required-check candidate.
+  It is not part of `CI result` and branch protection requires only `CI result`, so it
+  is advisory; the push-only trigger keeps a ~27-minute slot (median, up to 60) out of
+  the 20-job cap while PRs are waiting, and a golden regression merged from a PR is
+  caught on the master push that follows.
 * **The exercise tree** is checked only for a release tag: the `exercise tree` job of
   `release.yml` generates it with `scripts/mkexercises.py` into a temporary directory
   and builds it (`lake build wiz grail tests`), and the tarball job (which publishes)

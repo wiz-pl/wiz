@@ -6,6 +6,21 @@
 # `--update` would write, and only after a `test (...)` shard failed for another reason;
 # it never gates. This workflow does: no `--update`, and a non-zero `grail test` fails.
 #
+# Trigger: master pushes (the same path filter as before), a weekly schedule, and
+# `workflow_dispatch`. It is deliberately **not** a pull_request workflow. The plan's
+# 20 concurrent jobs are shared by every workflow in the org, and one run here holds a
+# slot for the length of `grail build` + `grail test`: median 26.5 min over the last 12
+# completed runs, up to the 60-minute job timeout (22 of the last 100 workflow runs were
+# this workflow, almost all of them on pull requests). Dropping the per-PR run keeps the
+# same coverage per merged tree — the master push tests what the PR merged — and gives
+# the slot back during the window that decides merge latency.
+#
+# What is lost: a PR author no longer sees golden drift before merge. A regression is
+# caught by the master push run (the same goldens, on the merged commit), and the weekly
+# schedule catches drift that no push touched (a changed dev shell or toolchain input).
+# No check depends on this workflow: `CI`'s `CI result` job does not `needs:` it, and
+# branch protection requires only `CI result`, so it was already advisory.
+#
 # Cost and memory (measured on a loaded 32-core Linux box): `grail build scry` 11.5 min,
 # `grail test` 14 min for the 26 goldens; the whole run peaked at ~220 MiB of resident
 # memory (the dev shell's `cc` included). No Lean/Lake build: `grail` and the
@@ -21,14 +36,6 @@
 name: scry goldens
 
 on:
-  pull_request:
-    branches: [master]
-    paths:
-      - "scry/**"
-      - "lib/Scry/**"
-      - "Wiz/**"
-      - "selfhost/**"
-      - ".github/workflows/scry.yml"
   push:
     branches: [master]
     paths:
@@ -37,14 +44,20 @@ on:
       - "Wiz/**"
       - "selfhost/**"
       - ".github/workflows/scry.yml"
+  schedule:
+    # Monday 04:17 UTC: catch drift that no push touched (a dev-shell or toolchain
+    # input that moved). `paths` does not apply to a scheduled run.
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
+  # A newer master push (or dispatch) supersedes an older one: the newer tree contains
+  # the older commit, so cancelling in progress is safe and frees the slot immediately.
   group: scry-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   # public binary cache, substituted anonymously (this workflow pushes nothing)
