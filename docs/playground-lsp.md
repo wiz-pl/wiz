@@ -14,8 +14,8 @@ The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has
 rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
 insertion), `web/squiggles.js` and `web/completions.js` draw them, and
 `web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
-the repo's own React-style framework (`lib/Web/React.wiz`) with `?ui=react`
-(§ The React UI); the default page builds its DOM directly.
+the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=react`
+(§ The Loom UI); the default page builds its DOM directly.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
 is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
@@ -60,7 +60,7 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
   `?completions=off` the completion popup (§ The editor). `?ui=react` renders the pane
-  with the repo's React-style framework instead of the DOM path (§ The React UI).
+  with the repo's Loom framework instead of the DOM path (§ The Loom UI).
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -184,10 +184,10 @@ The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
 asking.
 
-## The React UI (`?ui=react`)
+## The Loom UI (`?ui=react`)
 
-The right-hand pane (Goals over Output) can be rendered by the repo's React-style
-framework instead of by `document.createElement` in `web/playground.js`:
+The right-hand pane (Goals over Output) can be rendered by the repo's Loom framework
+instead of by `document.createElement` in `web/playground.js`:
 
 ```sh
 web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playground-ui.mjs
@@ -204,14 +204,13 @@ web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playgroun
   page with arbitrary text can use the framework even though its typed dispatch carries
   only `(event, handler index)`. It is built as its own small Wasm module so a failure to
   build or load it cannot affect the checker; `web/ui-framework.wiz` is the **only** file
-  naming the framework module (`Web.React` today; the module is being renamed to
-  `Web.Loom`, with namespace and Wasm exports, so only that file changes).
+  naming the framework module (`Web.Loom`), so a further rename touches that file alone.
 * Still imperative (the same on both paths): the textarea and its squiggle overlay, the
   completion popup, the header's status line, the Run button and the footer's engine
   line. The line count moves from under the editor into the pane's Output head under the
   flag (so it is not drawn twice). The pane's own DOM path is untouched: without the
   flag, and whenever the UI module is missing, `#side-dom` renders as before and the
-  React container stays hidden.
+  Loom container stays hidden.
 * `web/test-playground-ui.sh` checks the Wiz half under Node: it runs the fixture
   (`web/playground-ui-fixture.wiz`) with `wiz run`, applies the patch list to the SSR HTML
   in `web/framework/minidom.mjs`, and requires the result to equal the next model's HTML
@@ -234,6 +233,33 @@ web/build-playground.sh web/out    # builds wiz-playground.mjs and wiz-playgroun
   treats the notification as "the document is elaborated now" and re-asks for goals.
 * Optionally, if the client asked for it, `wiz/elaborated`
   `{"uri", "version", "session"}` after the diagnostics; the panel also re-asks on it.
+
+## The editor: hover and go-to-definition
+
+The pane is not the only server feature the page shows. Two standard requests make the
+textarea an editor:
+
+* **Hover.** When the caret rests after a mouse click or selection, or after an
+  arrow/Home/End/Page key, the page sends `textDocument/hover` at that position and
+  draws the answer in a small card under the caret. The server's Markdown is rendered as
+  text lines (a fenced block stays code, `---` is a rule) and never as HTML, so a server
+  cannot inject markup. The card is not shown while typing; keyboard navigation shows it
+  again when the caret stops. `?hover=off` (also `0`, `none`, `false`) turns the feature
+  off, and the `startInfoview({..., hover: false})` option does the same in JavaScript.
+* **Go to definition.** F12 or Ctrl/⌘-click sends `textDocument/definition` at the
+  caret. A location in the document the page has open (`file:///playground-….wiz`)
+  moves the caret and selects the name; a definition in a library file has no page here,
+  so the card shows `Prelude.wiz:7:1` and the editor is left alone. Escape, typing,
+  scrolling or leaving the field close the card.
+
+Both requests use `TextDocumentPositionParams` and the same UTF-16 positions as the rest
+of the client. A server that answers `null` (nothing at that character) or
+`MethodNotFound` is silent: the page keeps working as before. The in-page server
+(`web/selfhost-lsp-shim.js`) currently answers `hover` with `null` and has no
+`definition`, because the self-hosted frontend keeps no position index yet; with
+`?lsp=ws://…` both come from the Lean server, which implements them. `web/hover.js` is
+the page half (the content rules and the card), and `web/hover_test.mjs` tests it without
+a browser.
 
 ## Requests
 
@@ -374,7 +400,8 @@ polish. Nothing in the playground is specific to the Lean server beyond this lis
    text, the state's range) and `wiz/interactiveTermGoal` (the expected type), plus the
    `wiz/plainGoal`/`wiz/plainTermGoal` fallbacks so degraded servers still work.
 7. **Optional.** `wiz/subtermInfo`, `wiz/elaborated`, `Hyp.range`, `SubtermTag.range`,
-   `InteractiveGoal.range`, `tree`.
+   `InteractiveGoal.range`, `tree`, and the editor's `textDocument/hover` /
+   `textDocument/definition` (without them the card stays closed and F12 does nothing).
 8. **Optional, for the editor.** `textDocument/completion` (an array or a
    `CompletionList`; `textEdit`/`insertText`/`filterText`/`sortText` honoured), so
    Ctrl-Space and typing have something to show. Without it the popup stays closed.
@@ -407,6 +434,10 @@ server does.
   needs no Wiz build.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
+* `node web/hover_test.mjs` — the hover card and go-to-definition: the three LSP content
+  shapes and the line rules (fences, a rule, the length limit), `Location` / `LocationLink`
+  / array definitions, and the widget's keys (Escape, F12, Ctrl-click, typing) against
+  `web/framework/minidom.mjs`. No browser, no server, no Wiz build.
 * `web/test.sh` runs the tests beside the other web tests; `web/build-site.sh` and
   `web/check-site.sh` ship the new modules (and `framework/`) and fail if an import does
   not resolve.

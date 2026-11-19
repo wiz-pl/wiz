@@ -21,6 +21,7 @@ import { readGoalState, renderPanel, positionAt, parseSpan, rangeOffsets } from 
 import { delegate } from "./tagged.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
+import { mountHover, wantsHover } from "./hover.js";
 import { caretOffset } from "./editor-model.js";
 
 // A document URI of our own: the server shares documents between every page, so two
@@ -34,14 +35,16 @@ function scratchUri() {
 // from `parseEndpoint`; `search` defaults to the page's query string.
 //
 // Options: `squiggles`/`completions` (false disables the overlay; they are on by
-// default), `onRender(view)` (called after every panel render: the React page uses it to
+// default), `hover: false` (or `?hover=off`) turns the hover card and go-to-definition
+// off, `onRender(view)` (called after every panel render: the Loom page uses it to
 // mirror the panel HTML into its model), `eventsFrom` (the element the panel's clicks and
-// keys arrive on; `panel` itself by default, and the live React container when the panel
-// is rendered into a model), and `positionDebounce` (ms, 120 by default).
+// keys arrive on; `panel` itself by default, and the live Loom container when the panel
+// is rendered into a model), `document` (the page's document; the Node tests pass a
+// double), and `positionDebounce` (ms, 120 by default).
 export function startInfoview({
   editor, panel, config, search, uri, onRender, eventsFrom, document: pageDocument,
   squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  positionDebounce = 120,
+  hover: wantHover, positionDebounce = 120,
 } = {}) {
   if (!editor || !panel) return null;
   // The panel's markup may be produced here and rendered elsewhere (the `?ui=react`
@@ -76,6 +79,24 @@ export function startInfoview({
     position: null,
     canReconnect: false,
   };
+
+  // ## Hover and go-to-definition
+
+  // The card shows the server's `textDocument/hover` at the caret and jumps to a
+  // definition (`textDocument/definition`). A definition in the editor's own document
+  // moves the caret and selects the name; one in a library has no page here, so the card
+  // says `Prelude.wiz:7:1` and the editor stays where it was.
+  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+    editor,
+    document: pageDocument,
+    onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
+    onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
+    onJump: (target) => {
+      if (!target || target.uri !== documentUri) return false;
+      highlight(target.range);
+      return true;
+    },
+  });
 
   // Keep the panel's scroll position across re-renders (a click re-renders the panel).
   function render() {
@@ -215,7 +236,7 @@ export function startInfoview({
     const span = spanOf(tag);
     if (span) highlight(span);
     // Keep the keys on the panel: `highlight` focused the editor to show the selection,
-    // and a second arrow must walk the tags again rather than the caret. In the React
+    // and a second arrow must walk the tags again rather than the caret. In the Loom
     // page the panel is a detached model, and the focusable element is `#goals` inside
     // the live container.
     const focusTarget = panel === eventRoot ? panel
@@ -279,6 +300,7 @@ export function startInfoview({
     client.openDocument(documentUri, editor.value);
     client.on("close", (info) => {
       if (info && info.intentional) return;
+      if (hover) hover.close();
       view.state = "closed";
       view.info = null;
       view.diagnostics = [];
@@ -350,6 +372,7 @@ export function startInfoview({
     uri: documentUri,
     view,
     client: () => client,
+    hover: () => hover,
     refresh,
     reconnect,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
@@ -357,6 +380,7 @@ export function startInfoview({
     squiggles: () => squiggles,
     completions: () => completions,
     stop() {
+      if (hover) hover.close();
       if (completions) completions.destroy();
       if (squiggles) squiggles.destroy();
       if (!client) return;

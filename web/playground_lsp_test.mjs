@@ -19,8 +19,8 @@ import {
   parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
 } from "./goals.js";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
+import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
-import { document as minidoc, Element } from "./framework/minidom.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -349,7 +349,9 @@ function fakePanel() {
     querySelectorAll() { return []; },
   };
 }
-// The DOM the overlays need: minidom's elements plus the bits the page provides.
+// The DOM the overlays need: minidom's elements plus the bits the page provides
+// (`web/hover.js` appends its card to the body, the completion overlay dispatches an
+// `Event`, and the squiggle layer parses through `createRange`).
 function fakeDocument() {
   const base = minidoc();
   return {
@@ -372,9 +374,10 @@ async function waitUntil(predicate, ms = 3000) {
 const wireMock = await startMockServer();
 const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
+const pageDocument = fakeDocument();
 const app = startInfoview({
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
-  document: fakeDocument(),
+  document: pageDocument,
 });
 checkThat("wiring: the pane says it is connecting", wirePanel.innerHTML.includes("connecting"));
 checkThat("wiring: goals arrive", await waitUntil(() => wirePanel.innerHTML.includes('class="names"')));
@@ -401,7 +404,44 @@ wirePanel.listeners.click[0]({ target: clickTarget, preventDefault() {} });
 check("wiring: a click selects the span", editor.selectionStart, line2 + 8);
 check("wiring: the selection ends there", editor.selectionEnd, line2 + 9);
 
+// Hover at the caret (`textDocument/hover`) and F12 / Ctrl-click go to definition
+// (`textDocument/definition`): the card is the page's, the answers are the mock's.
+editor.selectionStart = editor.selectionEnd = 0;
+const hovered = await app.hover().inquire();
+check("wiring: textDocument/hover was asked", wireMock.stats.hover, 1);
+checkThat("wiring: the hover card is up", hovered !== null && app.hover().isOpen());
+checkThat("wiring: the hover card shows the signature",
+  app.hover().content().includes("Nat.add : Nat → Nat → Nat"), app.hover().content());
+checkThat("wiring: the hover card shows the doc comment",
+  app.hover().content().includes("Adds two Nats."));
+
+// A definition in this document moves the caret and selects the name. The mock answers
+// in this file for a caret on the fixture's last line.
+const fixtureLastLine = offsetAt(FIXTURE_TEXT, { line: 4, character: 2 });
+editor.selectionStart = editor.selectionEnd = fixtureLastLine;
+for (const fn of editor.listeners.click || []) fn({ ctrlKey: true, metaKey: false, preventDefault() {} });
+checkThat("wiring: Ctrl-click asked for the definition",
+  await waitUntil(() => wireMock.stats.definition === 1), `requests = ${wireMock.stats.definition}`);
+checkThat("wiring: the definition moves the caret",
+  await waitUntil(() => editor.selectionStart === offsetAt(FIXTURE_TEXT, { line: 1, character: 4 })),
+  `caret = ${editor.selectionStart}`);
+checkThat("wiring: the card closes after a jump", !app.hover().isOpen());
+
+// A definition in a library has no page here: the card names the place instead.
+app.hover().close();
+editor.selectionStart = editor.selectionEnd = 0;
+for (const fn of editor.listeners.keydown || []) fn({ key: "F12", preventDefault() {} });
+checkThat("wiring: F12 asked for the definition",
+  await waitUntil(() => wireMock.stats.definition === 2), `requests = ${wireMock.stats.definition}`);
+checkThat("wiring: a library definition is named",
+  await waitUntil(() => app.hover().content().includes("Prelude.wiz:7:1")), app.hover().content());
+
+// `?hover=off` (or `hover: false`) mounts nothing.
+const noHover = startInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
+check("wiring: hover: false turns it off", noHover.hover(), null);
+
 // Diagnostics → squiggles: the overlay underlines the same range the panel lists.
+// An edit sends didChange and the goals are asked again.
 editor.value = "nope import Prelude\n";
 editor.selectionStart = 0;
 for (const fn of editor.listeners.input || []) fn();
@@ -447,6 +487,7 @@ popup.handleKey({ key: "Enter", preventDefault() {}, stopPropagation() {} });
 check("wiring: the accepted item replaced the prefix", editor.value, "Nat.sub");
 check("wiring: the caret after accepting", editor.selectionStart, 7);
 app.stop();
+checkThat("wiring: stop closes the hover card", !app.hover().isOpen());
 await wireMock.close();
 
 const idlePanel = fakePanel();

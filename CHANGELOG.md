@@ -17,10 +17,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   changes (120 ms debounce); and `textDocument/completion` gets a keyboard-navigable popup
   (`web/completions.js`) on Ctrl-Space or while typing, inserting a `textEdit`/`insertText`
   through the normal `input` path. `?squiggles=off` and `?completions=off` disable them.
-  The Goals/Output pane can also be rendered by `lib/Web/React.wiz` behind `?ui=react`
+  The Goals/Output pane can also be rendered by `lib/Web/Loom.wiz` behind `?ui=react`
   (`web/playground-react.js`, `web/playground-ui.wiz`, a second small Wasm module); the
   textarea, header, Run button, footer and the two overlays stay imperative, and the
   default DOM path is unchanged. `docs/playground-lsp.md` documents both.
+* editor: the playground's textarea has hover and go-to-definition. When the caret rests
+  after a click, a selection or an arrow/Home/End/Page key, the page sends
+  `textDocument/hover` and draws the answer (the identifier's type and, for a global, its
+  doc comment) in a card under the caret; F12 and Ctrl/⌘-click send
+  `textDocument/definition`, moving the caret to a location in the page's own document
+  and naming a library location (`Prelude.wiz:7:1`) that it cannot open. The card renders
+  the server's Markdown as text, never as HTML; `?hover=off` turns it off. The server
+  already implemented both requests (`Wiz/LSP.lean`); `web/hover.js` is the page half and
+  `web/hover_test.mjs` tests it without a browser or a Wiz build.
+* nvim: on Neovim 0.10, where Neovim installs no LSP keymaps and has no
+  `vim.lsp.completion`, the plugin now fills both gaps: `lsp.keymaps` (`'auto'`, `true`,
+  `false`; a key the user mapped is never replaced) installs `K`, `gd`, `gD`, `grn`,
+  `grr`, `gra`, `gO`, `]d`, `[d` and `<C-s>`, and `lsp.completion` sets `omnifunc` to the
+  client's completion (so `<C-x><C-o>` — and `<C-Space>`, which types it — work). On
+  0.11+ the plugin leaves Neovim's own mappings and completion alone.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,

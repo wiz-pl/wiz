@@ -3,7 +3,7 @@
 // `wiz_playground_eval : String → String`, and show the lines it returns. There is no
 // server and nothing to install: the module is the checker.
 //
-// `?ui=react` renders the right-hand pane with the repo's React-style framework
+// `?ui=react` renders the right-hand pane with the repo's Loom framework
 // (web/playground-react.js + web/framework/driver.js) instead of building its DOM nodes
 // here. The textarea, its squiggles/completions, the header, the Run button and the
 // footer stay imperative on both paths; without the flag nothing changes.
@@ -27,10 +27,10 @@ const sideUi = document.getElementById("side-ui");
 const sideDom = document.getElementById("side-dom");
 
 // The Goals pane's element: the page's own div, or under `?ui=react` a detached one whose
-// HTML the React model carries into the tree (the pane keeps web/goals.js's rendering).
+// HTML the Loom model carries into the tree (the pane keeps web/goals.js's rendering).
 const goalsPanel = reactMode ? document.createElement("div") : document.getElementById("goals");
-let pageUi = null;        // the React pane's handle, once its module has loaded
-let lastOutput = null;    // the last `show` text, re-applied when the React pane appears
+let pageUi = null;        // the Loom pane's handle, once its module has loaded
+let lastOutput = null;    // the last `show` text, re-applied when the Loom pane appears
 
 let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
 let busy = false;
@@ -87,11 +87,11 @@ function show(text) {
   const bad = lines.filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
   const label = lines.length + (lines.length === 1 ? " line" : " lines") +
     (bad ? ` · ${bad} error${bad === 1 ? "" : "s"}` : "");
-  // Under `?ui=react` the count is part of the React pane (its Output head) rather than
+  // Under `?ui=react` the count is part of the Loom pane (its Output head) rather than
   // the line under the editor, so it is not drawn twice.
   if (!pageUi) count.textContent = label;
   if (pageUi) {
-    // The React pane owns the output's nodes; the Wiz view escapes every line's text.
+    // The Loom pane owns the output's nodes; the Wiz view escapes every line's text.
     pageUi.update({ count: label, lines: lines.map(lineSpec) });
     return bad;
   }
@@ -145,7 +145,7 @@ let engineReady;
 const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
 engineLoaded.catch(() => { /* reported by start(); the shim reports it again */ });
 
-// Under `?ui=react` the pane's HTML is mirrored into the React model after every render.
+// Under `?ui=react` the pane's HTML is mirrored into the Loom model after every render.
 function syncGoals() {
   if (pageUi) pageUi.update({ goals: goalsPanel.innerHTML });
 }
@@ -163,13 +163,13 @@ startInfoview({
   onRender: syncGoals,
   // Under `?ui=react` the panel's markup lives in the live tree (#side-ui), so its
   // clicks and arrow keys are delegated to the pane, not to the detached panel. That
-  // also keeps the DOM path working if the React module fails to load: #side-dom is
+  // also keeps the DOM path working if the Loom module fails to load: #side-dom is
   // still inside `.side`.
   eventsFrom: reactMode ? document.querySelector(".side") : undefined,
 });
 
 // `?ui=react`: load the small UI module (web/playground-ui.wiz → wiz-playground-ui.mjs)
-// and hand the pane to the React driver. A missing or broken module is not fatal: the
+// and hand the pane to the Loom driver. A missing or broken module is not fatal: the
 // page falls back to the DOM pane it always had.
 async function startReactPane() {
   if (!reactMode || !sideUi || !sideDom) return;
