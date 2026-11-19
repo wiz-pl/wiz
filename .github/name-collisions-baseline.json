@@ -974,18 +974,6 @@
       "expires": "2027-05-01"
     },
     {
-      "module": "lib/Scry/PointsTo.wiz",
-      "name": "Scry.directTargets",
-      "modules": [
-        "lib/Scry/PointsTo.wiz",
-        "lib/Scry/Race.wiz"
-      ],
-      "scope": "",
-      "reason": "project-wide only: lib/Scry/PointsTo.wiz and lib/Scry/Race.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
-      "owner": "the two modules lib/Scry/PointsTo.wiz and lib/Scry/Race.wiz",
-      "expires": "2027-05-01"
-    },
-    {
       "module": "lib/Scry/Egraph.wiz",
       "name": "Scry.egArgsBeq",
       "modules": [
@@ -1031,18 +1019,6 @@
       "scope": "",
       "reason": "project-wide only: two e-graph frontends. lib/Scry/Egraph.wiz is imported by EgraphWil/EgraphExtract, lib/Scry/EgraphNative.wiz by EqPlan; no module imports both, so the duplicated Scry.EGraph API cannot be loaded twice in one run.",
       "owner": "Scry e-graph (lib/Scry/Egraph.wiz) and its native twin (lib/Scry/EgraphNative.wiz)",
-      "expires": "2027-05-01"
-    },
-    {
-      "module": "lib/Scry/Prover.wiz",
-      "name": "Scry.rowNat",
-      "modules": [
-        "lib/Scry/Prover.wiz",
-        "lib/Scry/Taint.wiz"
-      ],
-      "scope": "",
-      "reason": "project-wide only: lib/Scry/Prover.wiz and lib/Scry/Taint.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
-      "owner": "the two modules lib/Scry/Prover.wiz and lib/Scry/Taint.wiz",
       "expires": "2027-05-01"
     },
     {
