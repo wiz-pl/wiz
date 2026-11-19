@@ -139,6 +139,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   normalised to constructs, so a first run answers "what didn't you look at?" in one
   screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
   counts, coverage rows, JSON and every exit status.
+* scry C#: the 16 real files `scry cs` could not parse now parse. Both gaps were in
+  tree-sitter-c-sharp v0.23.5: `with`, `partial` and `required` used as identifiers (15
+  files; they are contextual keywords, so `var with = …` and `partial.Member` are valid
+  C#) and a list-pattern slice with a designation (`['[', .. var x, ']']`, 1 file).
+  `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports both rules from
+  upstream master and the Nix derivation regenerates `src/parser.c`; a differential
+  parse of all 5 560 Nexus `.cs` files takes the error count from 16 to 0 with no file
+  gaining an error. The two reproducers now have spills, `parse/contextual` pins the
+  tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known

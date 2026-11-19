@@ -30,9 +30,11 @@ recursive-descent parser in Wiz whose rows used tree-sitter-c-sharp's vocabulary
 `Scry.Cst`); it was replaced by B in the same PR:
 
 * tree-sitter-c-sharp is the upstream generated `parser.c` + `scanner.c` of tag v0.23.5
-  (`native/README.md`: licence, commit, hash). Generated code is not committed, so
-  `flake.nix` fetches it (`fetchFromGitHub`, pinned commit and hash) and builds it with
-  the shim and the vendored runtime as `.#scry-native` (pushed to Cachix). A native scry
+  (`native/README.md`: licence, commit, hash), with two grammar backports (the
+  contextual-keyword identifiers and the list-pattern slice; §8.2). Generated code is
+  not committed, so `flake.nix` fetches it (`fetchFromGitHub`, pinned commit and hash),
+  applies the patch, regenerates the parser and builds it with the shim and the vendored
+  runtime as `.#scry-native` (pushed to Cachix). A native scry
   build compiles it through the uncommitted out-link `native/tree-sitter-c-sharp`
   (`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`). `parser.c` is
   29.7 MB and compiles at `-O2` in about 1.5 s; it is not regenerated.
@@ -191,7 +193,7 @@ Total ≈ 4 weeks, in line with §4.8.
 
 | file | contents |
 |---|---|
-| `flake.nix` (`tree-sitter-c-sharp`, `scry-native`) | the fetched grammar (v0.23.5, MIT) and the Nix build of the native parse library; `scry/native/tree-sitter-c-sharp` is its uncommitted out-link |
+| `flake.nix` (`tree-sitter-c-sharp`, `scry-native`) | the fetched grammar (v0.23.5, MIT) plus `tree-sitter-c-sharp-v0.23.5-fixes.patch` (both §8.2 gaps), regenerated at build time, and the Nix build of the native parse library; `scry/native/tree-sitter-c-sharp` is its uncommitted out-link |
 | `scry/native/ts_shim.c`, `scry/src/Scry/Native.wiz` | `scry_parse "c_sharp"`; `languageOf` picks C# for `*.cs`; `toCstStoreIn` records the spill's language |
 | `scry/tools/CstMain.wiz` | `scry-cst FILE.cs` spills a C# store (refuses a tree with `ERROR`/`MISSING` nodes, as for C) |
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
@@ -499,16 +501,23 @@ coverage: 25 row(s) — what was skipped or warned about
 ```
 
 The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
-in 311.8 s and about 4.1 GiB with `--no-taint`: 4 605 parsed, 4 250 lowered, 16 parse
-failures, 36 319 functions and 46 coverage rows. Taint dominates: Crux.Api took 219.8 s
-with taint and 2.0 s without, so a full tainted sweep of the tree is hours, not minutes,
-and is not attempted by default.
+in 311.8 s and about 4.1 GiB with `--no-taint` on the build that first ran the sweep:
+4 605 parsed, 4 250 lowered, 16 parse failures, 36 319 functions and 46 coverage rows.
+The 2026-11-18 re-run that named all 16 failures (commit `e3f27195`, before merging
+master) reports the same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage
+rows: the lowering now names more constructs, and each failed file is its own row. Taint
+dominates: Crux.Api took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
+the tree is hours, not minutes, and is not attempted by default. All 16 failures were two
+grammar gaps, not malformed files and not our walker; both are fixed by scry's grammar
+patch, and the patched build parses the whole tree: §8.2.
 
 `files found / parsed / lowered / failed` distinguishes native parsing from lowering:
 `failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered
-at all. A file that parses but produces no method is a `no functions lowered` warning, not
-a zero. An unreadable file or a directory that cannot be listed is a row, never an
-omission.
+at all. A failed file gets **its own** `parse failure` row (errors are never summed), and
+the row's location is the first failing node's position and kind — `path:line:col
+(MISSING identifier)` or `(ERROR)`. A file that parses but produces no method is a `no
+functions lowered` warning, not a zero. An unreadable file or a directory that cannot be
+listed is a row, never an omission.
 
 Lowering messages interpolate identifiers and types; the coverage row normalises them to
 the construct (`lambda body not lowered: an opaque function value`, `out/ref argument not
@@ -538,16 +547,105 @@ row says so). `--rules FILE` selects a pack; otherwise the walk tries
 ### Fixture and tests
 
 `scry/corpus/csharp/repo/` is a small tree: three analysable files (one with a real
-finding), one deliberately invalid file, and five excluded paths (`bin/`, `obj/`,
-`node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda and a
-`from … where … select` query: the lambda is still an opaque `fnptr` (its own warning),
-while the query lowers to `System.Int32[].get_Item` and
+finding), one file that does not parse (`Broken.cs` is deliberately invalid C#; the two
+grammar-gap reproducers `KeywordIdentifier.cs` and `SlicePattern.cs` now parse — §8.2),
+and five excluded paths (`bin/`, `obj/`, `node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda
+and a `from … where … select` query: the lambda is still an opaque `fnptr` (its own
+warning), while the query lowers to `System.Int32[].get_Item` and
 `System.Linq.Enumerable.Select` calls, so those two calls are part of the five
 `unmodelled-external` rows (with `Console.ReadLine`, `Process.Start` and
 `System.Int32[].get_Length`) instead of a `query_expression not modelled` row: a query
 the lowering handles is analysed, not skipped. The `scry-csharp` group enumerates it,
 applies `Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the
 driver's aggregation) to checked-in spills, and asserts the before/after counts, the
-coverage rows, both report renderings and all four exit statuses. The Lean interpreter
-cannot call the native shim, so the spills are checked in exactly as for the other C#
-fixtures; the invalid file has no spill and its `.err` result is built directly.
+coverage rows (one `parse failure` row per failed file, each named), both report
+renderings and all four exit statuses. The Lean interpreter cannot call the native shim,
+so the spills are checked in exactly as for the other C# fixtures; `Broken.cs` is the only
+file without a spill, and its `.err` result is built directly.
+
+### 8.2 The 16 Nexus parse failures: two grammar gaps, now fixed (2026-11-18)
+
+The first whole-tree run reported `4 621 kept, 4 605 parsed, 4 250 lowered, 16 failed`.
+All sixteen were **valid C# that tree-sitter-c-sharp v0.23.5 refused**; none was a
+truncated write, an encoding problem (all 4 621 decode as UTF-8, and the grammar's
+`extras` accept a BOM), a preprocessor form (Nexus has no `#if`/`#region`), or a walker
+bug. They fell into exactly two grammar gaps, and scry's grammar patch fixes both
+(`native/README.md`; `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports the
+two upstream-master rules and the Nix derivation regenerates `src/parser.c`):
+
+| gap | construct | files | fix |
+|---|---|---|---|
+| A | `with`, `partial`, `required` used as identifiers | 15 | add the three to `_reserved_identifier` |
+| B | a list-pattern slice with a designation (`['[', .. var selector, ']']`) | 1 | master's `slice_pattern` rule |
+
+Each failure is still one row per file, with the first failing node's position and kind,
+so a sweep names every failed file instead of summing them into one row with one example.
+The 16, as the old grammar reported them (all `ERROR`):
+
+| file (below `/workspace/Nexus/`) | first node | rejected construct |
+|---|---|---|
+| `src/Crux.Demo.Api/Execution/RealServerActionExecutor.cs:865:82` | `ERROR` | `.. var selector` in a list pattern (gap B) |
+| `tests/Crux.Api.Tests/AgentCashEndpointsTests.cs:473:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Api.Tests/CardChargebackTests.cs:227:9` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ApplicationRegistersTests.cs:84:9` | `ERROR` | `var with` (gap A; also `partial`) |
+| `tests/Crux.Application.Tests/Compliance/OwnershipRegisterTests.cs:280:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ReserveBankDirectionsTests.cs:99:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/StructureRegistersTests.cs:179:9` | `ERROR` | `partial` as a local (gap A; also `var with`) |
+| `tests/Crux.Application.Tests/Identity/AppKeyAttestationsTests.cs:165:15` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Treasury/PartyCalendarsTests.cs:47:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Architecture.Tests/ContainerDirectoryTests.cs:1:1` | `ERROR` | `required` as a local (gap A); recovery's node spans the unit |
+| `tests/Crux.Communications.Tests/SegmentEvaluatorTests.cs:174:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Dashboard.Api.Tests/CertificationContentTests.cs:241:16` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Demo.Api.Tests/CardMachineValueTourTests.cs:45:17` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Domain.Tests/Compliance/InternalAuditRecordTests.cs:80:9` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Tenant.Api.Tests/AgentTests.cs:415:15` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Worker.Tests/NextDaySegregationTests.cs:186:15` | `ERROR` | `partial` as a local (gap A) |
+
+**Gap A (15 files): `with`, `partial` and `required` are not reserved identifiers.**
+C# makes these *contextual* keywords: outside a `with` expression, a `partial` modifier or
+a `required` member modifier, each is an ordinary identifier, and Nexus uses them as local
+names (`var with = await …;`, then `partial.Detail.Should()`, `required.Should()`). The
+grammar's `_reserved_identifier` rule lists the contextual keywords it accepts as names
+(`alias`, `ascending`, … `yield`) but omits these three in v0.23.5 — and upstream
+0.24.0/master still does, so a plain grammar bump would not clear the fifteen. The patch
+adds them; the smallest reproduction is `corpus/csharp/repo/src/KeywordIdentifier.cs`:
+
+```csharp
+public static int Count(int[] items)
+{
+    var with = items.Length;
+    var partial = with;
+    var required = partial;
+    return required;
+}
+```
+
+**Gap B (1 file): a list-pattern slice with a designation.** C# 11 allows
+`['[', .. var selector, ']']`; v0.23.5's `list_pattern` accepts a bare `..` only, so the
+`ERROR` starts at the `var`. Master (0.24.0) has a `slice_pattern` rule, which the patch
+backports verbatim; the smallest reproduction is `corpus/csharp/repo/src/SlicePattern.cs`.
+
+**Before and after, whole tree.** A differential parse of all 5 560 `.cs` files under
+`/workspace/Nexus` with the old and patched grammars: 16 files had `ERROR`/`MISSING`
+nodes before, **0 after**; no file that parsed gained an error. 43 further files keep
+their error-free status but change node shape: 34 gain the keyword's explicit token node
+(`new(required: true)` now names the argument `required`) and 9 gain a `slice_pattern`
+node. The new trees are the better ones where they differ: `ContractSamples.cs` goes
+from a wrong `invocation_expression` around `Find(key) is not var (a, b)` to the correct
+`declaration_pattern`. The corpus goldens
+pin the target shape: `parse/contextual.{cs,cst,sexp}` covers both gaps and both keyword
+positions, and the two repo fixtures now have spills.
+
+The driver's own report on the patched build (`scry cs /workspace/Nexus --no-taint
+--json`) is **4 621 kept, 4 621 parsed, 4 279 lowered, 0 failed**, 36 667 functions and
+367 coverage rows, exit 0. The same tree on the pre-patch build reports 4 605 parsed,
+4 263 lowered, 16 failed, 36 334 functions and 363 rows. The parse-failure list is empty
+for the whole tree; `Broken.cs` in the repo fixture is the only remaining deliberate
+parse failure, and it is invalid C#, not a grammar gap. Nothing on this list is left as
+"out of scope".
+
+The second list the sweep separates is **lowering**: 342 of the 4 621 parsed files produce
+no function (`4 621 - 4 279`), the same 342 as before the fix (the 16 now parse *and*
+lower). Those are not parse failures and are not conflated with them: each is either a
+declaration-only file or carries a lowering warning that `scry cs`'s coverage rows name,
+and §7.6 lists the out-of-scope constructs behind them.
