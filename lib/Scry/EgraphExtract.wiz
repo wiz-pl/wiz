@@ -2,7 +2,6 @@ import Prelude
 import Scry.Egraph
 import Scry.Wil
 import Scry.EgraphWil
-import Scry.EgraphNative
 /-!
 # Scry.EgraphExtract: e-graph rewrites back into Wil, checked
 
@@ -274,15 +273,12 @@ def Scry.wgeExtract (g : Scry.EGraph) (allowed : List Nat) (e : Wil.Rhs) :
   | .some cls =>
     let costs := Scry.EGraph.costs g w;
     let root := Scry.EGraph.find g cls;
-    -- `Scry.egCostAt` lives in `Scry.EgraphNative`, whose `egRep` collides with
-    -- `Scry.Egraph.egRep`; this is the same `List.getD` lookup without that import.
-    match List.getD costs root .none with
-    | .none => .none
-    | .some c => if Nat.lt c Scry.wgeForbidden then
-        match Scry.EGraph.buildTerm g w costs (Nat.succ c) root with
-        | .none => .none
-        | .some t => Scry.wgeOfETerm t
-      else .none
+    let c := UIntN.toNat (U64Array.getD costs root (U64.ofNat Scry.EGraph.inf));
+    if Nat.lt c Scry.wgeForbidden then
+      match Scry.EGraph.buildTerm g w costs (Nat.succ c) root with
+      | .none => .none
+      | .some t => Scry.wgeOfETerm t
+    else .none
 
 structure Scry.WgeStep where
   stmt : Wil.Stmt
