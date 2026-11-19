@@ -754,7 +754,7 @@ def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
   | .mk all sc inds ffi cls ins hs _ d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ _ _ _ _ _ _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ _ _ _ _ _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
