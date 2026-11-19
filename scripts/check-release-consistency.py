@@ -17,7 +17,11 @@ Checks
               "merge of #N", its committer date (and the manifest's
               `sourceDateEpoch`) is the claimed date, and the first commit the
               notes name is the root.  `--for-tag` additionally requires it to
-              be HEAD, which is the tagging pull request's invariant.
+              be HEAD, which is the tagging pull request's invariant.  The
+              candidate must stay in one of the machine-readable forms
+              ("Candidate commit: `<sha>`", "prepared ... at commit `<sha>`",
+              "current candidate is `<sha>`", or a sentence-initial
+              "At `<sha>`"); a file with no candidate mention fails.
   counts      Commit counts are `git rev-list --count`; pull-request counts are
               `gh pr list --state merged` filtered by merge-commit ancestry,
               so they do not depend on the clock.  A file may instead carry
@@ -83,15 +87,14 @@ from pathlib import Path
 RELEASE_DIR = Path("docs/release")
 MANIFEST_REL = RELEASE_DIR / "release-manifest.json"
 CHECKLIST_REL = RELEASE_DIR / "v0.1-checklist.md"
-NOTES_REL = RELEASE_DIR / "v0.1.md"
 PRS_REL = RELEASE_DIR / "v0.1-prs.md"
 
 SHA = r"[0-9a-f]{7,40}"
 DATE = r"\d{4}-\d{2}-\d{2}"
 
-# Candidate mentions.  "at"/"through"/"before" catch the prose references
-# ("At `672d3bfb` it still says ...") as well as the formal lines; every one
-# must name the same commit, or an edit updated only some of them.
+# Candidate mentions.  The sentence-initial "At `672d3bfb`", "on master at"
+# and "through" forms catch the prose references as well as the formal lines;
+# every one must name the same commit, or an edit updated only some of them.
 CANDIDATE_PATTERNS = (
     re.compile(rf"Candidate commit:\s*`(?P<sha>{SHA})`"),
     re.compile(
@@ -157,7 +160,9 @@ COUNT_PATTERNS = (
     ),
     (
         "range",
-        re.compile(r"(?:The\s+)?(?P<prs>[\d,]+)\s+pull requests\s+merged (?:after|into)"),
+        re.compile(
+            r"(?:The\s+)?(?P<prs>[\d,]+)\s+pull requests\s+merged (?:after|into)"
+        ),
     ),
     ("range", re.compile(r"lists those\s+(?P<prs>[\d,]+)\s+pull requests")),
 )
@@ -320,7 +325,8 @@ def commit_field(root: Path, sha: str, fmt: str) -> str:
 
 
 def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
-    return git(root, "merge-base", "--is-ancestor", ancestor, descendant).returncode == 0
+    result = git(root, "merge-base", "--is-ancestor", ancestor, descendant)
+    return result.returncode == 0
 
 
 def rev_count(root: Path, spec: str) -> int:
@@ -336,7 +342,9 @@ def github_repo(root: Path) -> str | None:
     return match.group("repo") if match else None
 
 
-def gh_merged_prs(root: Path, repo: str, limit: int = 1000) -> tuple[list[dict] | None, str]:
+def gh_merged_prs(
+    root: Path, repo: str, limit: int = 1000
+) -> tuple[list[dict] | None, str]:
     """Merged PRs, or (None, reason) when the answer cannot be verified."""
     exe = shutil.which("gh")
     if exe is None:
@@ -487,12 +495,15 @@ def pr_table(root: Path) -> tuple[list[tuple[int, int, str]], list[int]]:
 # --- the checks -------------------------------------------------------------------
 
 
-def check_candidate(root: Path, manifest: dict, report: Report, for_tag: bool) -> str | None:
+def check_candidate(
+    root: Path, manifest: dict, report: Report, for_tag: bool
+) -> str | None:
     """Check the candidate mentions; return the full candidate SHA when known."""
     found, unreadable = mentions(root)
     if unreadable:
         report.cannot(
-            "docs/release has a file that is not readable UTF-8; cannot check the candidate"
+            "docs/release has a file that is not readable UTF-8; cannot check "
+            "the candidate"
         )
         return None
 
@@ -590,13 +601,13 @@ def check_candidate(root: Path, manifest: dict, report: Report, for_tag: bool) -
                 )
 
     # The date and the merge number in the parenthetical "(DATE, the merge of #N)".
+    expected_date = commit_field(root, candidate, "%cs")
     for path in release_docs(root):
         text = read_text(root, path)
         if text is None:
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             for match in CANDIDATE_DATE_RE.finditer(line):
-                expected_date = commit_field(root, candidate, "%cs")
                 if match.group("date") != expected_date:
                     report.wrong(
                         f"{rel(root, path)}:{lineno}: candidate date "
@@ -651,7 +662,6 @@ def check_candidate(root: Path, manifest: dict, report: Report, for_tag: bool) -
 
 def check_counts(
     root: Path,
-    manifest: dict,
     report: Report,
     candidate: str,
     offline: bool,
@@ -708,7 +718,11 @@ def check_counts(
             return
 
     total_commits = rev_count(root, candidate)
-    range_commits = rev_count(root, f"{previous}..{candidate}") if previous else total_commits
+    range_commits = (
+        rev_count(root, f"{previous}..{candidate}")
+        if previous
+        else total_commits
+    )
 
     prs = None
     total_prs = None
@@ -768,7 +782,11 @@ def check_counts(
         if claim.commits is not None:
             expected = total_commits if claim.kind == "total" else range_commits
             if claim.commits != expected:
-                where = "all history" if claim.kind == "total" else "the candidate range"
+                where = (
+                    "all history"
+                    if claim.kind == "total"
+                    else "the candidate range"
+                )
                 report.wrong(
                     f"{claim.path}:{claim.line}: claims {claim.commits} commits "
                     f"for {where}, but git rev-list says {expected}"
@@ -776,7 +794,11 @@ def check_counts(
         if claim.prs is not None and prs is not None:
             expected = total_prs if claim.kind == "total" else range_prs
             if expected is not None and claim.prs != expected:
-                where = "all history" if claim.kind == "total" else "the candidate range"
+                where = (
+                    "all history"
+                    if claim.kind == "total"
+                    else "the candidate range"
+                )
                 report.wrong(
                     f"{claim.path}:{claim.line}: claims {claim.prs} merged pull "
                     f"requests for {where}, but gh says {expected}"
@@ -792,7 +814,9 @@ def check_counts(
     rows, unreadable = pr_table(root)
     if unreadable:
         report.wrong(f"{PRS_REL}: cannot read the PR table")
-    elif rows:
+    elif not rows:
+        report.wrong(f"{PRS_REL}: has no PR rows")
+    else:
         numbers = [pr for _, pr, _ in rows]
         if len(set(numbers)) != len(numbers):
             duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
@@ -846,6 +870,8 @@ def artifact_verdict(root: Path, name: object, entry: object) -> tuple[str, str]
     """
     if not isinstance(name, str) or not name:
         return "missing", "the manifest entry has no name"
+    if Path(name).is_absolute() or ".." in Path(name).parts:
+        return "missing", f"{name!r}: the artifact name must be a path inside the tree"
     if not isinstance(entry, dict):
         return "missing", f"{name}: the manifest entry is not an object"
     for relative in (name, f"dist/{name}"):
@@ -855,10 +881,14 @@ def artifact_verdict(root: Path, name: object, entry: object) -> tuple[str, str]
     status = entry.get("status")
     note = entry.get("note") or entry.get("reason")
     if status is not None and status != "outstanding":
-        return "missing", f"{name}: unknown status {status!r} (only 'outstanding' is allowed)"
+        return "missing", (
+            f"{name}: unknown status {status!r} (only 'outstanding' is allowed)"
+        )
     if status == "outstanding":
         if not isinstance(note, str) or not note.strip():
-            return "missing", f"{name}: status is outstanding but there is no note saying why"
+            return "missing", (
+                f"{name}: status is outstanding but there is no note saying why"
+            )
         return "outstanding", note.strip()
     producer = entry.get("producer")
     if producer is None:
@@ -869,7 +899,9 @@ def artifact_verdict(root: Path, name: object, entry: object) -> tuple[str, str]
     if not isinstance(producer, str) or not producer.strip():
         return "missing", f"{name}: producer is not a path"
     if Path(producer).is_absolute() or ".." in Path(producer).parts:
-        return "missing", f"{name}: producer {producer!r} must be a path inside the tree"
+        return "missing", (
+            f"{name}: producer {producer!r} must be a path inside the tree"
+        )
     if not (root / producer).is_file():
         return "missing", f"{name}: producer {producer} does not exist"
     return "producer", producer
@@ -879,16 +911,16 @@ def check_artifacts(root: Path, manifest: dict, report: Report) -> None:
     tag = manifest.get("tag")
     tagged = tag is not None
 
-    entries: list[tuple[str, object, object, str]] = []
+    entries: list[tuple[str, object, object]] = []
     source = manifest.get("source")
     if isinstance(source, dict) and isinstance(source.get("tarball"), dict):
         tarball = source["tarball"]
-        entries.append(("source.tarball", tarball.get("name"), tarball, "source.tarball"))
+        entries.append(("source.tarball", tarball.get("name"), tarball))
     artifacts = manifest.get("artifacts")
     if isinstance(artifacts, list):
         for index, entry in enumerate(artifacts):
             name = entry.get("name") if isinstance(entry, dict) else None
-            entries.append((f"artifacts[{index}]", name, entry, str(name)))
+            entries.append((f"artifacts[{index}]", name, entry))
     elif artifacts is not None:
         report.wrong(f"{MANIFEST_REL}: artifacts must be an array")
 
@@ -896,8 +928,8 @@ def check_artifacts(root: Path, manifest: dict, report: Report) -> None:
         report.wrong(f"{MANIFEST_REL}: no artifacts are advertised")
         return
 
-    by_name: dict[str, list[tuple[str, dict]]] = {}
-    for where, name, entry, label in entries:
+    by_name: dict[str, list[tuple[str, object]]] = {}
+    for where, name, entry in entries:
         verdict, detail = artifact_verdict(root, name, entry)
         if verdict == "missing":
             report.wrong(f"{MANIFEST_REL} {where}: {detail}")
@@ -977,7 +1009,7 @@ def path_token(token: str, top: set[str]) -> str | None:
     return token
 
 
-def checklist_items(text: str, top: set[str]) -> list[tuple[int, bool, str, str]]:
+def checklist_items(text: str) -> list[tuple[int, bool, str, str]]:
     """Items as (line, ticked, item text, section preamble)."""
     lines = text.splitlines()
     starts = [index for index, line in enumerate(lines) if SECTION_RE.match(line)]
@@ -1040,7 +1072,7 @@ def check_checklist(root: Path, report: Report) -> None:
 
     top = top_directories(root)
     used_allow: set[int] = set()
-    items = checklist_items(text, top)
+    items = checklist_items(text)
     referenced = 0
     for line, ticked, body, preamble in items:
         for token in dict.fromkeys(refs_in(body, top)):
@@ -1131,7 +1163,7 @@ def check(root: Path, for_tag: bool, offline: bool, report: Report,
 
     candidate = check_candidate(root, manifest, report, for_tag)
     if candidate is not None:
-        check_counts(root, manifest, report, candidate, offline, repo)
+        check_counts(root, report, candidate, offline, repo)
     check_artifacts(root, manifest, report)
 
     tag = manifest.get("tag")
@@ -1251,14 +1283,20 @@ def self_test() -> int:
         check_equal("artifact outstanding needs a note",
                     artifact_verdict(root, "x.tar.gz", {"status": "outstanding"})[0],
                     "missing")
-        check_equal("artifact producer",
-                    artifact_verdict(root, "x.tar.gz", {"producer": "scripts/build.sh"}),
-                    ("producer", "scripts/build.sh"))
-        check_equal("artifact producer must exist",
-                    artifact_verdict(root, "x.tar.gz", {"producer": "scripts/nope.sh"})[0],
-                    "missing")
+        check_equal(
+            "artifact producer",
+            artifact_verdict(root, "x.tar.gz", {"producer": "scripts/build.sh"}),
+            ("producer", "scripts/build.sh"),
+        )
+        check_equal(
+            "artifact producer must exist",
+            artifact_verdict(root, "x.tar.gz", {"producer": "scripts/nope.sh"})[0],
+            "missing",
+        )
         check_equal("artifact with nothing",
                     artifact_verdict(root, "x.tar.gz", {})[0], "missing")
+        check_equal("artifact name may not leave the tree",
+                    artifact_verdict(root, "../x.tar.gz", {})[0], "missing")
 
         # Checklist: a missing path is a problem unless the unticked item says
         # the work is outstanding; a ticked item is always a problem.
@@ -1271,7 +1309,7 @@ def self_test() -> int:
         ), True)
         check_equal("ticked is not excused",
                     checklist_items(
-                        "## Fixture\n\n- [x] `scripts/nope.py`\n", top
+                        "## Fixture\n\n- [x] `scripts/nope.py`\n"
                     )[0][1], True)
 
         # Git: a candidate two commits back, and counts.
