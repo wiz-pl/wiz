@@ -10,6 +10,8 @@ table lists exactly those. Messages not listed here have no code yet.
 | code | the error | example | quick fixes |
 |---|---|---|---|
 | `unknown-identifier` | a name that is neither a local nor a global in scope | `doubel 2` | did you mean (locals and globals, edit distance ≤ 2); add the missing `import` of a module of the package or the library that declares it |
+| `ambiguous-name` | an unqualified name that two `open`s, or an `open` and a declaration, both provide | `open A` and `open B` with `A.x` and `B.x`, then `x` | qualify it with a namespace |
+| `unclosed-namespace` | a `namespace` with no `end` (the error is at the `namespace`) | `namespace A` … end of file | add `end` |
 | `no-such-field` | the type has no field (or name in its namespace) of that name | `p.cuont`, `{ p with cuont := 1 }` | did you mean (a structure's fields; for a data type `T`, the names `T.f` that `t.f` can mean) |
 | `unknown-constructor` | the type has no constructor of that name | `(.gren : Color)`, `\| .gren => …` | did you mean (the type's constructors) |
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |

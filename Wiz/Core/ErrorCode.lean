@@ -12,6 +12,10 @@ namespace Wiz.ErrorCode
 
 /-- a name that is neither a local nor a global in scope -/
 def unknownIdentifier := "unknown-identifier"
+/-- (13t) a name that two `open`s (or an `open` and a declaration) both provide -/
+def ambiguousName := "ambiguous-name"
+/-- (13t) a `namespace` with no `end` (reported at the `namespace`) -/
+def unclosedNamespace := "unclosed-namespace"
 /-- `t.f` where the type of `t` has no field (or namespace member) `f` -/
 def noSuchField := "no-such-field"
 /-- `.c` or a pattern `.c …` where the type has no constructor `c` -/
@@ -89,7 +93,7 @@ def nonPattern := "non-pattern"
 
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
-  [unknownIdentifier, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
+  [unknownIdentifier, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
    importOrder,
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
