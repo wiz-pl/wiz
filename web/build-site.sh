@@ -46,7 +46,7 @@ for f in playground.js playground.css playground-values.js \
 done
 # The module and its side-car wasm; a missing one would publish a playground that
 # cannot load, so stop here instead.
-for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs wiz-playground-ui.wasm; do
+for f in wiz-playground.mjs wiz-playground.wasm; do
   if [ ! -f "$WEB/$f" ]; then
     echo "build-site: $WEB/$f is missing: run web/build-playground.sh $WEB first" >&2
     exit 1
