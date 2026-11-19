@@ -179,7 +179,7 @@ def Hv.ltSucc : (k n : Nat) → Nat.lt k (Nat.succ n) = .true → (Nat.lt k n = 
   | .zero, .zero, _ => Or.inr rfl
   | .zero, .succ _, _ => Or.inl rfl
   | .succ k, .zero, h => absurd (Hv.notLt0 k h)
-  | .succ k, .succ n, h => Or.imp (fun x => x) (fun e => congrArg Nat.succ e) (Hv.ltSucc k n h)
+  | .succ k, .succ n, h => Or.imp (fun x => x) (fun e => Eq.congrArg Nat.succ e) (Hv.ltSucc k n h)
 def allBelow_sound (p : Nat → Bool) : (n k : Nat) → allBelow p n = .true → Nat.lt k n = .true → p k = .true
   | .zero, .zero, _, hk => absurd hk.1
   | .zero, .succ _, _, hk => absurd hk.1

@@ -60,10 +60,10 @@ def Eff.toProg {V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {A : Type} (c :
 def Prog.bind_assoc {V A B C : Type} : (c : Prog V A) → (f : A → Prog V B) → (g : B → Prog V C) →
     Prog.bind (Prog.bind c f) g = Prog.bind c (fun a => Prog.bind (f a) g)
   | .ret a, f, g => refl (Prog.bind (f a) g)
-  | .get l k, f, g => Eq.congrArg (Prog.get l) (funext (fun v => Prog.bind_assoc (k v) f g))
-  | .set l v k, f, g => Eq.congrArg (Prog.set l v) (Prog.bind_assoc k f g)
-  | .alloc v k, f, g => Eq.congrArg (Prog.alloc v) (funext (fun l => Prog.bind_assoc (k l) f g))
-  | .free l k, f, g => Eq.congrArg (Prog.free l) (Prog.bind_assoc k f g)
+  | .get l k, f, g => Eq.congrArg.{0, 0} (Prog.get l) (funext (fun v => Prog.bind_assoc (k v) f g))
+  | .set l v k, f, g => Eq.congrArg.{0, 0} (Prog.set l v) (Prog.bind_assoc k f g)
+  | .alloc v k, f, g => Eq.congrArg.{0, 0} (Prog.alloc v) (funext (fun l => Prog.bind_assoc (k l) f g))
+  | .free l k, f, g => Eq.congrArg.{0, 0} (Prog.free l) (Prog.bind_assoc k f g)
   | .fail, f, g => refl (@Prog.fail V C)
 
 /-- running `c >>= f` on the heap is running `c`, then `f` of its answer (DM4All's
@@ -72,10 +72,10 @@ def Eff.toProg_bind {V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {A B : Typ
     (c : Eff r A) → (f : A → Eff r B) →
     @Eff.toProg V r hs B (Eff.bind c f) = Prog.bind (@Eff.toProg V r hs A c) (fun a => @Eff.toProg V r hs B (f a))
   | .pure a, f => refl (@Eff.toProg V r hs B (f a))
-  | .op o k, f => Eq.trans
-      (Eq.congrArg (Prog.bind (@Handlers.handleU r (Prog V) hs o))
+  | .op o k, f => Eq.trans.{0} (A := Prog V B)
+      (Eq.congrArg.{0, 0} (Prog.bind (@Handlers.handleU r (Prog V) hs o))
         (funext (fun x => @Eff.toProg_bind V r hs A B (k x) f)))
-      (Eq.symm (Prog.bind_assoc (@Handlers.handleU r (Prog V) hs o)
+      (Eq.symm.{0} (Prog.bind_assoc (@Handlers.handleU r (Prog V) hs o)
         (fun x => @Eff.toProg V r hs A (k x)) (fun a => @Eff.toProg V r hs B (f a))))
 /-- `Eff.pure` is `Prog.ret`: the interpretation takes a pure value to a pure program. -/
 def Eff.toProg_pure {V : Type} {0 r : Row} [hs : Handlers r (Prog V)] {A : Type} (a : A) :

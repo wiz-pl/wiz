@@ -154,7 +154,7 @@ def Prog.lenLoop.spec : (L : List Nat) → (f : Nat) → Nat.lt (List.length L) 
 def Prog.length_spec (L : List Nat) (fuel p : Nat) (h : Nat.lt (List.length L) fuel = .true) :
     Triple (MList L p) (Prog.length fuel p) (fun r => hpure (r = List.length L) ⋆ MList L p) := by
   xapp (Prog.lenLoop.spec L fuel h p 0)
-  exact Eq.trans hp (List.lenAcc_zero L)
+  exact Eq.trans.{0} hp (List.lenAcc_zero L)
 
 -- ## Adding one to every element in place
 

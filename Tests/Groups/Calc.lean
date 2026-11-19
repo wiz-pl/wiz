@@ -91,6 +91,50 @@ def t3 {A : Type} (a b c d : A) (h1 : a = b) (h2 : b = c) (h3 : c = d) : a = d :
 #print axioms t
 "
 
+/-- The equality lemmas at two universes: each is used at `Type` and at `Type 1` (with
+the carrier a variable, so the equations stay neutral and are not computed away). The
+`Type`-only versions cannot check the second use. `calc` stays at `Type`: its `Trans`
+instance must be monomorphic or level inference fails (see `lib/Logic.wiz`). -/
+def levelEquality : String := "import Logic
+-- Eq.symm at Type 0 and Type 1
+def symm0 {A : Type} {a b : A} (e : a = b) : b = a := Eq.symm e
+def symm1 {A : Type 1} {a b : A} (e : a = b) : b = a := Eq.symm e
+-- Eq.trans at each
+def trans0 {A : Type} {a b c : A} (e1 : a = b) (e2 : b = c) : a = c := Eq.trans e1 e2
+def trans1 {A : Type 1} {a b c : A} (e1 : a = b) (e2 : b = c) : a = c := Eq.trans e1 e2
+-- Eq.congrArg at each
+def congr0 {A B : Type} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
+def congr1 {A B : Type 1} (f : A → B) {a b : A} (e : a = b) : f a = f b := Eq.congrArg f e
+-- Eq.congrArg2 at each
+def congr2a {A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
+    f a b = f a' b' := Eq.congrArg2 f e e'
+def congr2b {A B C : Type 1} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
+    f a b = f a' b' := Eq.congrArg2 f e e'
+-- Eq.substProp at each
+def subst0 {A : Type} {a b : A} (P : A → Prop) (e : a = b) (h : P a) : P b :=
+  Eq.substProp P e h
+def subst1 {A : Type 1} {a b : A} (P : A → Prop) (e : a = b) (h : P a) : P b :=
+  Eq.substProp P e h
+-- Eq.mp'/Eq.mpr' at each
+def mp0 {A : Type} {a b : A} (P : A → Prop) (e : a = b) (h : P a) : P b := Eq.mp' P e h
+def mp1 {A : Type 1} {a b : A} (P : A → Prop) (e : a = b) (h : P a) : P b := Eq.mp' P e h
+def mpr0 {A : Type} {a b : A} (P : A → Prop) (e : a = b) (h : P b) : P a := Eq.mpr' P e h
+def mpr1 {A : Type 1} {a b : A} (P : A → Prop) (e : a = b) (h : P b) : P a := Eq.mpr' P e h
+-- Eq.via at each
+def via0 {A : Type} {a b c : A} (h1 : a = b) (h2 : b = c) : a = c := Eq.via b h1 h2
+def via1 {A : Type 1} {a b c : A} (h1 : a = b) (h2 : b = c) : a = c := Eq.via b h1 h2
+-- funext and congrFun at each
+def fun0 {A B : Type} (f g : A → B) (h : (x : A) → f x = g x) : f = g := funext h
+def fun1 {A B : Type 1} (f g : A → B) (h : (x : A) → f x = g x) : f = g := funext h
+def cf0 {A B : Type} (f g : A → B) (e : f = g) (x : A) : f x = g x := congrFun e x
+def cf1 {A B : Type 1} (f g : A → B) (e : f = g) (x : A) : f x = g x := congrFun e x
+-- calc over = at Type 0 (unchanged: the Trans instance stays monomorphic)
+def chain {A : Type} {a b c : A} (e1 : a = b) (e2 : b = c) : a = c :=
+  calc a = b := e1
+       _ = c := e2
+#print axioms chain
+"
+
 def placeholders : String := "import Nat
 def t (a b c d : Nat) (h1 : a ≤ b) (h2 : b < c) (h3 : c < d) : a < d :=
   calc a ≤ b := h1
@@ -157,6 +201,8 @@ def calcGroup : Group where
         okLibs ratCalc ["'t' does not depend on any axioms"] },
     { name := "↔ chains, = between propositions, and = at a type variable", run := fun _ =>
         okLibs propCalc ["'t' does not depend on any axioms"] },
+    { name := "equality lemmas and `calc` at `Type` and `Type 1`", run := fun _ =>
+        okLib levelEquality ["'chain' does not depend on any axioms"] },
     { name := "`_` placeholders and an explicit intermediate term", run := fun _ =>
         okLibs placeholders },
     { name := "a relation registered by the program (`Same`, with its own `Trans` instance)", run := fun _ =>

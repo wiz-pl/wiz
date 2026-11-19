@@ -24,7 +24,8 @@ The names are Lean's, so that the library can switch to native inductive proposi
 later (plan D4) without renaming.
 
 What is here: `Not` (`¬`), `And` (`∧`), `Or` (`∨`), `Iff` (`↔`), `Ex` (`∃`, with binder
-notation), the equality lemmas `Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substProp`,
+notation), the equality lemmas `Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.congrArg2`,
+`Eq.substProp`,
 the definitional `propext` and `funext`, and the Boolean algebra (`Bool.and_comm`,
 `Bool.or_assoc`, `Bool.and_absorb`, the De Morgan laws, …) with its bridges from
 `b = true` to `∧`, `∨` and `¬` (`Bool.and_eq_true`, `Bool.or_eq_true`, `Bool.not_eq_true`).
@@ -198,25 +199,42 @@ def Forall.notEx {A : Type} {P : A → Prop} (n : ¬ ∃ a, P a) (a : A) : ¬ P 
 
 -- ## Equality
 --
--- `transp` is the eliminator; these are J in its usual shapes. (lib/Optic.wiz has the
--- same lemmas under `Optic.*`.)
-/-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`). -/
-def Eq.symm {A : Type} {0 a b : A} (e : a = b) : b = a :=
+-- `transp` is the eliminator; these are J in its usual shapes. The lemmas are at any
+-- universe (`Type u`).
+/-- Equality is symmetric (`transp` with the motive `fun b _ => b = a`), at any universe. -/
+def Eq.symm.{u} {A : Type u} {0 a b : A} (e : a = b) : b = a :=
   transp (fun b _ => b = a) (refl a) e
-/-- Equality is transitive. -/
-def Eq.trans {A : Type} {0 a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
+/-- Equality is transitive, at any universe. -/
+def Eq.trans.{u} {A : Type u} {0 a b c : A} (e₁ : a = b) (e₂ : b = c) : a = c :=
   transp (fun c _ => a = c) e₁ e₂
-/-- Equal arguments give equal results: from `a = b`, `f a = f b`. -/
-def Eq.congrArg {A B : Type} (0 f : A → B) {0 a b : A} (e : a = b) : f a = f b :=
+/-- Equal arguments give equal results: from `a = b`, `f a = f b`; the two types may be
+at different universes. -/
+def Eq.congrArg.{u, v} {A : Type u} {B : Type v} (0 f : A → B) {0 a b : A} (e : a = b) :
+    f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
+/-- `Eq.congrArg` for a function of two arguments. -/
+def Eq.congrArg2.{u, v, w} {A : Type u} {B : Type v} {C : Type w} (0 f : A → B → C)
+    {a a' : A} {b b' : B} (e : a = a') (e' : b = b') : f a b = f a' b' :=
+  Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 /-- Transport a proof of `P a` along `a = b` to a proof of `P b`, for a family of
 propositions `P`.
 
-(It goes through `congrArg`: a motive `fun b _ => P b` would use `b`, which `transp`
+(It goes through `Eq.congrArg`: a motive `fun b _ => P b` would use `b`, which `transp`
 binds at 0; an equation of propositions computes to the pair of implications, whose
 second field is the direction we want.) -/
-def Eq.substProp {A : Type} (0 P : A → Prop) {0 a b : A} (e : a = b) (pa : P a) : P b :=
+def Eq.substProp.{u} {A : Type u} (0 P : A → Prop) {0 a b : A} (e : a = b) (pa : P a) :
+    P b :=
   (@Eq.congrArg A Prop P b a (@Eq.symm A a b e)).2 pa
+/-- Transport a proposition backwards along an equation: from `P b` and `a = b`, `P a`. -/
+def Eq.mpr'.{u} {A : Type u} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
+  Eq.substProp P (Eq.symm e) h
+/-- Transport a proposition along an equation: from `P a` and `a = b`, `P b`. -/
+def Eq.mp'.{u} {A : Type u} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
+  Eq.substProp P e h
+/-- `Eq.trans` with the middle term written out, for chains whose steps need their
+equation as the expected type (`nat_ring!`, `int_ring!`). -/
+def Eq.via.{u} {A : Type u} {0 a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c :=
+  Eq.trans h1 h2
 /-- Equivalent propositions are equal: propositional extensionality is definitional
 (`P = Q` computes to a pair of implications). -/
 def Iff.toEq {P Q : Prop} (h : P ↔ Q) : P = Q := (h.1, h.2)
@@ -229,10 +247,11 @@ def propext {P Q : Prop} (h : P ↔ Q) : P = Q := Iff.toEq h
 lemma that matches on it) can't be written against it directly; `funext` takes the
 unerased form and lets subtyping (quantities don't matter in a Π that is a
 proposition, CoreSpec §11.5) do the rest. -/
-def funext {A B : Type} {0 f g : A → B} (h : (x : A) → f x = g x) : f = g := h
+def funext.{u, v} {A : Type u} {B : Type v} {0 f g : A → B} (h : (x : A) → f x = g x) :
+    f = g := h
 /-- Equal functions agree at every argument: from `f = g`, `f x = g x`. -/
-def congrFun {A B : Type} {0 f g : A → B} (e : f = g) (x : A) : f x = g x := e x
-
+def congrFun.{u, v} {A : Type u} {B : Type v} {0 f g : A → B} (e : f = g) (x : A) :
+    f x = g x := e x
 -- ## Composing relations: `Trans` and `calc`
 
 /-- `Trans p q r`: a proof of `p` and one of `q` give one of `r`. `calc` (stage 13s)
@@ -252,15 +271,20 @@ class Trans (p q : Prop) (r : outParam Prop) where
   /-- Compose a proof of `p` and one of `q` into a proof of `r`. -/
   trans : p → q → r
 
-/-- `=` composes with itself. -/
+/-- `=` composes with itself at `Type`. (A level-polymorphic instance — `{A : Type u}` or
+`{A : Type (u+1)}` — makes every `calc` fail with "could not infer a universe level":
+instance search does not solve a level that occurs only in an implicit argument's type.
+`Eq.trans` itself is level-polymorphic; at `Type u`, write it directly.) -/
 instance {A : Type} {0 a b c : A} : Trans (a = b) (b = c) (a = c) :=
   Trans.mk (fun e₁ e₂ => Eq.trans e₁ e₂)
-/-- `=` between propositions is transitive. (The generic `Eq.trans` is at a `Type`, and
-`Prop` is a `Sort`, not a `Type`.) -/
+/-- `=` between propositions is transitive. (An equation of propositions computes to a
+pair of implications, so `Eq.trans`, which needs a syntactic equation, cannot take one;
+this goes through `Iff`.) -/
 def Eq.transProp {P Q R : Prop} (e₁ : P = Q) (e₂ : Q = R) : P = R :=
   Iff.toEq (Iff.trans (Iff.ofEq e₁) (Iff.ofEq e₂))
-/-- `=` between propositions composes with itself. (The generic instance does not apply:
-equations of propositions live at `Prop`, not at a `Type`.) -/
+/-- `=` between propositions composes with itself. (The generic instance does not apply
+here: an equation of propositions computes to a Σ, not an equation the elaborator can
+see through.) -/
 instance {P Q R : Prop} : Trans (P = Q) (Q = R) (P = R) :=
   Trans.mk (fun e₁ e₂ => Eq.transProp e₁ e₂)
 /-- `↔` composes with itself. -/
@@ -474,9 +498,10 @@ def Bool.eq_false_iff : (b : Bool) → ((b = .false) ↔ ¬ (b = .true))
 -- * `Bool.cases`, `Bool.trueNeFalse`, `Bool.and_left`, `Bool.and_right`: a disjunction, a
 --   negation, and two lemmas with a premise before the equation (a rule with a premise
 --   needs a discharger, S3).
--- * The equality section (`Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.substProp`,
---   `Iff.toEq`, `Iff.ofEq`, `propext`, `funext`, `congrFun`, `Eq.transProp`): every one
---   has a premise before the equation, so `attribute [simp]` rejects it until S3.
+-- * The equality section (`Eq.symm`, `Eq.trans`, `Eq.congrArg`, `Eq.congrArg2`,
+--   `Eq.substProp`, `Eq.transProp`, `Iff.toEq`, `Iff.ofEq`, `propext`, `funext`,
+--   `congrFun`): every one has a premise before the equation, so `attribute [simp]`
+--   rejects it until S3.
 
 attribute [simp] Bool.not_not
 attribute [simp] Bool.not_and
