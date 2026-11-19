@@ -391,6 +391,17 @@ def labelInRange (n : Node) : Bool :=
   (Cursor.toList (Cursor.filter labelInRange
     (Snapshot.indexNodesAll uniqueLabel s0))))                 -- 1
 
+-- Pushed equality against the same-key index bucket, and `follow` on the key
+-- projection (it follows the entry's primary id, not the projected value).
+#eval boolToNat (sameNodes
+  (Cursor.toList (Snapshot.indexNodesWhere kindIndex (KeyPred.eq (u64 1)) s0))
+  (Cursor.toList (Snapshot.indexNodes kindIndex (u64 1) s0)))  -- 1
+#eval boolToNat (sameNodes
+  (Cursor.toList (Cursor.follow s0
+    (Cursor.filterKey (KeyPred.eq (u64 1))
+      (Snapshot.indexOnlyRange kindIndex KeyRange.all s0))))
+  (Cursor.toList (Snapshot.indexNodes kindIndex (u64 1) s0)))  -- 1
+
 -- A predicate on a *non-indexed* field is not pushed: the range stays `all` and the
 -- predicate is a post-filter (the results are still right).
 #eval (Cursor.info (Cursor.filterOnNode countIndex (KeyPred.eq (u64 0))
