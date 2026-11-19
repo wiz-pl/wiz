@@ -75,6 +75,7 @@ There are two kinds of dependency, and they stay separate on purpose:
   the index resolves (23m).
 
 ```wiz
+import Grail
 def package : Package := Package.new "greet"
   |> Package.version "1.2.0"                 -- this release's version
   |> Package.toolchain ">=0.1 <0.3"          -- the Wiz it was tested with
