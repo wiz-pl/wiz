@@ -102,7 +102,7 @@ def wordGroup : Group where
         -- the interpreters refuse the foreign call ("foreign functions only run in
         -- compiled code"). The `#eval` half cannot exist, not even in CI.
         unless ← hasCC do skip "no C toolchain (cc)"; return
-        cRunLibs ("import Prelude\nimport Text\nimport WordBytes\n" ++
+        cRunLibs ("import Prelude\nimport Text\nimport Word\nimport Data.WordBytes\n" ++
           "def b1 := Bytes.ofU8s (.cons (U8.ofNat 0) (.cons (U8.ofNat 255) .nil))\n" ++
           "def b2 := Bytes.ofU8s (.cons (U8.ofNat 1) (.cons (U8.ofNat 2) (.cons (U8.ofNat 3) (.cons (U8.ofNat 4) (.cons (U8.ofNat 5) .nil)))))\n" ++
           "def main : List Nat :=\n" ++
