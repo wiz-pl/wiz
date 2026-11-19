@@ -185,12 +185,12 @@ the web infoview), a plain `GET` of one of `webAssets` (`/infoview.html?…`) ge
 and `false`, with or without a token (the files are the toolchain's own, the same for
 everyone); any other path gets `404`. -/
 def accept (r w : IO.FS.Stream) (token : Option String) (web : Option String := none) : IO Bool := do
-  let some (line, headers) ← readHead r | return false
-  let get (k : String) := (headers.lookup k).getD ""
   let refuse (status : String) : IO Bool := do
     w.putStr s!"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     w.flush
     pure false
+  let some (line, headers) ← readHead r | return ← refuse "400 Bad Request"
+  let get (k : String) := (headers.lookup k).getD ""
   unless line.startsWith "GET " do return ← refuse "405 Method Not Allowed"
   if let some o := headers.lookup "origin" then
     unless localOrigin o do return ← refuse "403 Forbidden"
