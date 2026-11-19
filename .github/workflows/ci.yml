@@ -560,29 +560,87 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
+  # (11s) The two Wiz→wasm page modules as Nix derivations (`packages.wiz-web` and
+  # `packages.wiz-playground`; flake.nix), built once here and published to Cachix. They
+  # used to be built inside `web`'s test step (95 % of its 608 s, with `wasm-opt -O2`'s
+  # 8–10 GiB peak as the tail that once reached 55 min) and again in every `docs` job on
+  # a push; both jobs now substitute these paths (`web/modules-from-store.sh`).
+  #
+  # It is not in `build`: a 10-minute wasm build there would sit on the shards' critical
+  # path. Here it runs beside the shards. It waits for `build` when that runs, so its
+  # `wiz` is a substitute (a web-only change skips `build` and leaves `wiz` unchanged, so
+  # that substitutes from Cachix too).
+  web_modules:
+    name: wasm modules
+    needs: [changes, build]
+    if: >-
+      !cancelled() && needs.changes.outputs.web == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          lean: false
+      - name: nix build (wiz-web, wiz-playground)
+        id: nix
+        run: |
+          # Both at once they share `wiz`, the emscripten closure and mini-gmp, but the
+          # playground's `wasm-opt` is the memory peak: one derivation at a time keeps the
+          # runner (16 GB) clear of it. `wiz` and emscripten are substitutes.
+          nix build .#wiz-web .#wiz-playground --no-link -L --max-jobs 1
+          web=$(nix path-info .#wiz-web)
+          playground=$(nix path-info .#wiz-playground)
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "playground=$playground" >> "$GITHUB_OUTPUT"
+          echo "wiz-web: $web"; echo "wiz-playground: $playground"
+          du -sh "$web" "$playground"
+      - name: Publish the store paths to Cachix
+        # `web` and `docs` substitute these; the same token rule as the compiler's push.
+        # A fork pull request has no secret: its jobs build the modules themselves.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            if [ "${{ github.event_name }}" = pull_request ]; then
+              echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN (a pull request): the modules are not published"
+              exit 0
+            fi
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
+            $(nix path-info .#wiz-web .#wiz-playground)
+
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
   # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
-  # builds both Wasm modules with the same scripts the `docs` job uses and runs its
-  # browser-free half: the search box, the benchmark page and site check, the
-  # playground's language client and self-hosted server shim (against stubs), the
-  # infoview's and playground's modules under Node, and a `wiz doc` page's module.
-  # `WIZ_WEB_NO_BROWSER` stops it before the Chromium half (`web/chrome_test.mjs` and
-  # `web/doc_chrome_test.mjs`: a served page over the DevTools protocol), which still
-  # needs a browser and stays local. The framework's browser half is a Node DOM double
-  # (`web/framework/test.sh`), so it runs here too. This job is in `result`: a
-  # playground that does not build or a failing web test fails `CI result`.
+  # runs its browser-free half on the two modules `web_modules` built: the search box,
+  # the benchmark page and site check, the playground's language client and self-hosted
+  # server shim (against stubs), the infoview's and playground's modules under Node, and a
+  # `wiz doc` page's module. `WIZ_WEB_NO_BROWSER` stops it before the Chromium half
+  # (`web/chrome_test.mjs` and `web/doc_chrome_test.mjs`: a served page over the DevTools
+  # protocol), which still needs a browser and stays local. The framework's browser half
+  # is a Node DOM double (`web/framework/test.sh`), so it runs here too. This job is in
+  # `result`: a missing module or a failing web test fails `CI result`.
   web:
     name: web
     # Ordered behind `build` when it runs, so `nix build .#wiz` substitutes this commit's
     # store path from Cachix instead of rebuilding it here (and instead of competing with
     # the build for the runner). A web-only change skips `build` (`code` is false), which
     # must not skip this job — hence the explicit result check rather than a bare `needs`.
-    needs: [changes, build]
+    needs: [changes, build, web_modules]
     if: >-
       !cancelled() && needs.changes.outputs.web == 'true' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      needs.web_modules.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 20 min: the Node tests (~1 min) and slack; the Wasm builds are `web_modules`' job
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -601,10 +659,19 @@ jobs:
           wiz=$(nix build .#wiz --no-link --print-out-paths)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
+      - name: The Wasm modules (from Cachix; web_modules built them)
+        id: modules
+        env:
+          # only the fork-pull-request fallback in the script reads it
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: sh web/modules-from-store.sh
       - name: The browser-free half of web/test.sh
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           WIZ_WEB_NO_BROWSER: "1"
+          # the module directories, copied into web/test.sh's OUT (no build)
+          WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
+          WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
         run: sh web/test.sh
       - name: The React framework's browser half (a Node DOM double)
         env:
@@ -626,12 +693,13 @@ jobs:
   # (docs/building.md, "Documentation site").
   docs:
     name: docs (wiz doc --lib + site)
-    needs: build
+    needs: [build, web_modules]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # 45 min: both Wasm builds, `wiz doc --lib` and the site, with wiz substituted.
-    # Without an elaboration cache for this binary `wiz doc --lib` is the bulk of the
-    # job (10-19 min in recent runs); the restored cache below replays it in ~2-4 min.
+    # 45 min: `wiz doc --lib` and the site, with wiz and both Wasm modules substituted
+    # (`web_modules`). Without an elaboration cache for this binary `wiz doc --lib` is
+    # the bulk of the job (10-19 min in recent runs); the restored cache below replays it
+    # in ~2-4 min.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -673,9 +741,17 @@ jobs:
           path: .wiz-doc-cache/ro
           key: ${{ steps.key.outputs.cache }}
           restore-keys: wiz-doc-v1-${{ runner.os }}-${{ steps.key.outputs.compiler }}-
-      - name: The Wasm modules (web/build.sh, web/build-playground.sh)
+      - name: The Wasm modules (copied from the derivations)
+        id: modules
         env:
-          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          # only the fork-pull-request fallback in the script reads it (this job is a push)
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: sh web/modules-from-store.sh
+      - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
+        env:
+          # the scripts copy what `web_modules` built instead of running Emscripten
+          WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
+          WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
         run: |
           sh web/build.sh web/out
           sh web/build-playground.sh web/out
@@ -793,7 +869,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, prelude_drift, docs_examples, build, trust_ledger, test, web, docs]
+    needs: [changes, docs_style, prelude_drift, docs_examples, build, trust_ledger, test, web_modules, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -879,7 +955,7 @@ jobs:
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
-          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
+          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, wasm modules: ${{ needs.web_modules.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
@@ -904,6 +980,9 @@ jobs:
           check build "${{ needs.build.result }}" "$code"
           check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
+          # the two page modules are a prerequisite of `web` (and of `docs` on a push):
+          # a failure here is red even though `web` then skips
+          check "wasm modules" "${{ needs.web_modules.result }}" "$web"
           # a change to web/** must build the playground and pass its Node tests; the
           # job is skipped (and that is fine) only when the filter does not want it
           check web "${{ needs.web.result }}" "$web"

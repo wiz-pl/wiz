@@ -779,8 +779,9 @@ setup action keeps the elan cache for those
   Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
   docs-only run is seconds and a toolchain change invalidates it.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
-  only (not a pull request, the weekly run or a manual run), `docs` builds the two Wasm
-  modules (the infoview's and the playground's), the standard library's pages with
+  only (not a pull request, the weekly run or a manual run), `docs` copies the two Wasm
+  modules that `web_modules` built (`wiz-web`, `wiz-playground`), the standard library's
+  pages with
   `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
   a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
@@ -789,12 +790,14 @@ setup action keeps the elan cache for those
   and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
   Pages outage does not fail the suite. See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
-  changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. It
-  builds the three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the
-  playground's Loom UI, `web/build-playground-ui.sh`) with the same scripts as `docs`,
-  then runs its browser-free half: `web/scroll-search_test.mjs`; `web/test-bench.sh` (the
-  benchmark page's fixtures and the site check's rules for it);
-  `web/playground_lsp_test.mjs` and
+  changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. The
+  two Wasm modules are not built here: the `web_modules` job builds them once as the
+  Nix derivations `packages.wiz-web` and `packages.wiz-playground` (flake.nix) and
+  publishes them to Cachix, and `web/test.sh` copies those directories
+  (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`; `web/modules-from-store.sh` fails the job on
+  a miss instead of rebuilding). The browser-free half then runs:
+  `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
+  and the site check's rules for it); `web/playground_lsp_test.mjs` and
   `web/infoview_page_test.mjs` (the language client and goals pane shared by the
   playground and the infoview page, and the page's URL rule); `web/selfhost_lsp_test.mjs`
   (the in-page server shim, against stubs); `web/node_test.mjs` and
@@ -1220,8 +1223,10 @@ relative, so the project-site prefix (or a custom domain root) works either way:
 | `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
-The `docs` job builds the two Wasm modules (`web/build.sh` for the documentation's
-interactive signatures, `web/build-playground.sh` for the playground), runs `wiz doc
+The `docs` job copies the two Wasm modules that `web_modules` built from Cachix
+(`web/build.sh` for the documentation's interactive signatures,
+`web/build-playground.sh` for the playground; the scripts only copy in that mode),
+runs `wiz doc
 --lib -o doc-site/docs --web web/out` (source links to the commit), copies the
 reference manual's Markdown from the flake's `reference` package (`nix build
 .#reference`, a Cachix hit when the build job already built it) to
@@ -1299,6 +1304,10 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
+With the derivations already in the store (`nix build .#wiz-web .#wiz-playground`), the
+two module steps can copy them instead of running Emscripten: pass `--from DIR` (or
+`WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`) the store path, exactly as CI does.
+
 `wiz doc --jobs N` elaborates and renders N modules at once; the default is 1, and
 `--jobs 0` (or `--jobs auto`) takes the CPUs the process may run on, at most 8. The tree
 is byte-for-byte the same for every N (the modules' outputs are assembled in the order
@@ -1341,7 +1350,15 @@ TLS or authentication. Live search results and code actions are not part of it â
 need an editor's document and its cursor.
 
 `web/build-playground.sh` compiles the self-hosted frontend to WebAssembly, so it is the
-slow part; without `emcc` on `PATH` the script runs Emscripten from nixpkgs. Both web
+slow part (~10 minutes, with Emscripten's `wasm-opt -O2` as the memory tail); without
+`emcc` on `PATH` the script runs Emscripten from nixpkgs. CI does not run it: the
+`wiz-playground` derivation in flake.nix does, once, and Cachix serves the result
+(`web/build-playground.sh --from "$(nix build .#wiz-playground --no-link
+--print-out-paths)"` copies it). That derivation builds at `--opt 1`: at `-O2`
+`wasm-opt` peaks at 16.9 GiB on the 7.7 MB module (measured 2026-11-18) and is killed on
+a 16 GB CI runner, while `-O1` skips binaryen and peaks at 2.3 GiB, for a module 47 %
+larger (11.4 MB). The script's default is still the compiler's `-O2`, so a local build
+is unchanged; pass `--opt 1` to it to reproduce what the derivation publishes. Both web
 builds (`web/build.sh`, `web/build-playground.sh`) pass `-DWIZ_NO_THREADS`, since they
 are compiled without `-pthread` (the header also turns it on by itself for Emscripten
 without `-pthread`): the runtime then has one thread, nothing is ever
