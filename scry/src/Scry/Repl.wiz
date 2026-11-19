@@ -436,7 +436,7 @@ def Scry.Repl.findingRecordJson (rep : Scry.TaintReport) (st : Scry.WfStore)
   let state := match old with | .some r => r.state | .none => (.new : Scry.WfState);
   let artifacts := Scry.Repl.pjoin (Scry.Repl.pjoin Scry.Repl.dir "artifacts") id;
   (finding, Scry.WfRecord.mk id key lineHash state history rep.file .none .false finding
-    artifacts .none .none .none firstSeen now)
+    artifacts .none .none .none .none .none firstSeen now)
 
 def Scry.Repl.recordOfPair (rep : Scry.TaintReport) (st : Scry.WfStore) (now : Nat)
     (pair : Scry.RuleFinding × Option Scry.Certificate) : Scry.WfRecord :=
@@ -700,9 +700,10 @@ def Scry.Repl.repro (id : String) : IO Nat := do
     | .false => do IO.println ("repro: source not found: " ++ r.source); IO.pure 1
     | .true => do
       Scry.Repl.ensureDir r.artifacts;
-      let cfg := Scry.ReproConfig.mk "cc" "none" .none .none "" 5 .nil .none "absent" "L0";
+      let cfg := Scry.ReproConfig.mk "cc" "none" .none .none "" 5 .nil .none "absent" "L0"
+        .none "template" "";
       res ← Scry.Repl.ioOr "repro" (Scry.ReproResult.mk "compile-failed" "none" .false
-          .false .false .false "exited" 127 0 Json.mkNull "" .nil)
+          .false .false .false "exited" 127 0 .false Json.mkNull "" .nil)
           (Scry.reproRun cfg r.source r.artifacts "repro");
       now ← IO.bind Clock.wall (fun d => IO.pure d.ns);
       Scry.Repl.saveStore (Scry.wfUpsert st (Scry.Repl.withDynamic now r));
