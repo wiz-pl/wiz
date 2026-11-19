@@ -555,21 +555,26 @@ scry cs /workspace/Nexus --json --no-taint
 gives `walk: 5 560 before exclusions; 4 621 kept`, `files: 4 621 found, 4 605 parsed,
 4 263 lowered, 16 failed` (342 parsed-but-not-lowered files) and 36 334 functions — 13
 more files lower than in the recorded run, from changes that landed after it. The set is
-not one bug, and most of it is not a bug at all:
+not one bug, and most of it is not a bug at all. The classes are exclusive: the 17 files
+that have both a primary constructor and an initialiser are counted as primary
+constructors here (they are §9.1's), although the classifier that produced the raw
+counts tested initialisers first and reported them in the initialiser row:
 
 | class | files | what the file contains | status |
 |---|---|---|---|
 | declaration-only | 161 | no member with a body, no initialiser, no primary constructor: 130 `interface` / `const`-only `static class` / attribute-class files, 31 `enum` files | out of scope **by design**: there is no executable member to lower |
-| primary constructor | 132 | a `record` / `record struct` / `class` / `struct` with a parameter list (`record R(int X, …)`, `class C(T t)`) | **fixed**, §9.1 |
-| initialisers only | 48 | the only executable code is a field or property initialiser (`T x = e;`, `T P { get; } = e;`) | out of scope for this slice, named by its warning |
+| primary constructor | 149 | a `record` / `record struct` / `class` / `struct` with a parameter list (`record R(int X, …)`, `class C(T t)`); 17 of them also have an initialiser | **fixed**, §9.1 |
+| initialisers only | 31 | the only executable code is a field or property initialiser (`T x = e;`, `T P { get; } = e;`) | out of scope for this slice, named by its warning |
 | empty | 1 | one `[assembly: …]` attribute and no declaration | nothing to lower |
 
 The 161 declaration-only files have no statement or expression to lower, so
 `no functions lowered` is the correct row (an `enum` is additionally named by
-`enum_declaration not modelled: no code is lowered for it`). The 48 initialiser-only
+`enum_declaration not modelled: no code is lowered for it`). The 31 initialiser-only
 files keep the warning `field initialiser of X not modelled: the field starts as its
 default` (or the property form); running field/property initialisers from a constructor
-is its own change, and such a file would still have no *function* until that is done.
+is its own change, and such a file would still have no *function* until that is done. The
+17 initialiser-plus-primary-constructor files are the exception: §9.1 gives them a
+`..ctor`, so they are lowered, but their initialiser is still warned and not run.
 
 **No file in the set has a method, constructor or accessor body and no function.** The
 dangerous class — executable members that lowered to nothing without a diagnostic, the
@@ -599,11 +604,13 @@ Before/after on the same walk:
 
 | | before | after |
 |---|---|---|
-| files lowered | 4 263 | 4 395 |
-| parsed but not lowered | 342 | 210 |
+| files lowered | 4 263 | 4 412 |
+| parsed but not lowered | 342 | 193 |
 
-The 210 that remain are exactly the 161 declaration-only + 48 initialiser-only + 1 empty
-files above. The fixture `scry/corpus/csharp/lower/primary-ctor.{cs,cst,wil}` is the
+The 193 that remain are exactly the 161 declaration-only + 31 initialiser-only + 1 empty
+files above (`4 605 − 4 412 = 193`); the change lowers the 149 primary-constructor files
+(the 132 the classifier reported plus the 17 it put in the initialiser row). The fixture
+`scry/corpus/csharp/lower/primary-ctor.{cs,cst,wil}` is the
 regression test: it has `record`, `record struct`, a record with a base call, and a class
 primary constructor with a base call. Before this change it lowered to zero functions;
 `lower/*.wil` now pins the five `..ctor` functions, their field stores, and the two base
