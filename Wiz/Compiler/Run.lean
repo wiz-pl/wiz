@@ -250,13 +250,22 @@ def exportPrefix : String := "export:"
 
 def nativeArity (key : Name) : Nat :=
   match ExternSig.ofKey? key with
-  -- erased parameters (`e`: implicit type arguments) are not passed at run time
-  | some sig => (sig.params.filter fun k => match k with | .k 'e' => false | _ => true).length +
-      (if sig.io then 1 else 0)
+  -- erased parameters (`e`, implicit type arguments) are passed as `◾` and count:
+  -- the erased term keeps the application, and `C.lean`/`Wasm.lean` skip the value
+  -- when they marshal it (`argIndices` below gives the other parameters' positions)
+  | some sig => sig.params.length + (if sig.io then 1 else 0)
   | none => match key with
     | "nat.zero" => 0
     | "nat.succ" | "nat.pred" | "nat.log2" => 1
     | _ => 2
+
+/-- The positions of the parameters that carry a run-time value: `e` (an erased type
+argument, passed as `◾`) is skipped. The positions index the call's argument array,
+which has one value per parameter. -/
+def ExternSig.argIndices (sig : ExternSig) : List Nat :=
+  sig.params.zipIdx.filterMap fun (k, i) => match k with
+    | .k 'e' => none
+    | _ => some i
 
 end RVal
 
@@ -391,19 +400,26 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   | _ => none
 
 /-- The `Array` native operations (stage 12a), by the C name the runtime exports.
-`none` for every other native, and for an operation whose first argument is not an
-array. -/
-def arrayNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RVal :=
-  let as (i : Nat) : Option (Array RVal) := match args[i]? with
-    | some (.arr a) => some a
+`none` for every other native, and for an operation whose array argument is not what
+the compiler passes. The call's arguments include one `◾` per erased type parameter, so
+the handler indexes them through `ExternSig.argIndices`. -/
+def arrayNative? (op : Name) (args : Array RVal) : Option RVal :=
+  let ix := match RVal.ExternSig.ofKey? op with
+    | some sig => sig.argIndices
+    | none => []
+  let arg (j : Nat) : RVal := match ix[j]? with
+    | some i => (args[i]?).getD .erased
+    | none => .erased
+  let natArg (j : Nat) : Nat := (arg j).toNat?.getD 0
+  let as : Option (Array RVal) := match arg 0 with
+    | .arr a => some a
     | _ => none
-  let at (i : Nat) : RVal := (args[i]?).getD .erased
   match (RVal.ExternSig.ofKey? op).map (·.cname) with
   | some "wiz_array_empty" => some (.arr #[])
-  | some "wiz_array_push" => (as 0).map fun a => .arr (a.push (at 1))
-  | some "wiz_array_size" => (as 0).map fun a => .nat a.size
-  | some "wiz_array_get" => (as 0).map fun a => ArrayModel.getD a (num 1) (at 2)
-  | some "wiz_array_set" => (as 0).map fun a => .arr (ArrayModel.set a (num 1) (at 2))
+  | some "wiz_array_push" => as.map fun a => .arr (a.push (arg 1))
+  | some "wiz_array_size" => as.map fun a => .nat a.size
+  | some "wiz_array_get" => as.map fun a => ArrayModel.getD a (natArg 1) (arg 2)
+  | some "wiz_array_set" => as.map fun a => .arr (ArrayModel.set a (natArg 1) (arg 2))
   | _ => none
 
 /-- Erased global definitions, by name. -/
@@ -423,9 +439,7 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
       -- a definition registered as a native operation (`builtin`)
       match bytesNative? op #[] (fun _ => 0) with
       | some v => v
-      | none => match arrayNative? op #[] (fun _ => 0) with
-        | some v => v
-        | none => if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
+      | none => if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
     | some t => run code [] t
     | none => panic! s!"no code for {n}"
   | .lam _ b => .clo env b
@@ -473,7 +487,7 @@ partial def fireNative (op : Name) (args : Array RVal) : RVal :=
     .obj 0 #[chars]
   | _ => match bytesNative? op args n with
     | some v => v
-    | none => match arrayNative? op args n with
+    | none => match arrayNative? op args with
       | some v => v
       | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
 
@@ -615,12 +629,12 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
     let elem : Option (Val R) := match sp[0]? with
       | some (.app A) => some A
       | _ => none
-    let show (x : RVal) : String := match elem with
+    let render (x : RVal) : String := match elem with
       | some A => (readback g builtins A x).pretty [] (some g)
       | none => match x.toNat? with
         | some n => toString n
         | none => "_"
-    .const ("[" ++ ", ".intercalate (xs.toList.map show) ++ "]") []
+    .const ("[" ++ ", ".intercalate (xs.toList.map render) ++ "]") []
   | .sigma _ _ A B _, v =>
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then

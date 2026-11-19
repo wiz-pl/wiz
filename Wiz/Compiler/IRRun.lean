@@ -240,25 +240,34 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
       let r ← match r with
         | some v => pure (some v)
         | none =>
-          let arr (i : Nat) : Option (Array IVal) := match args[i]? with
-            | some (.arr a) => some a
+          let ix := match RVal.ExternSig.ofKey? op with
+            | some sig => sig.argIndices
+            | none => []
+          let at (j : Nat) : IVal := match ix[j]? with
+            | some i => (args[i]?).getD .erased
+            | none => .erased
+          let idx (j : Nat) : Nat := match at j with
+            | .num k | .tag k => k
+            | _ => 0
+          let arr : Option (Array IVal) := match at 0 with
+            | .arr a => some a
             | _ => none
-          match c, arr 0 with
+          match c, arr with
           | "wiz_array_empty", _ => pure (some (.arr #[]))
           | "wiz_array_push", some a => do
-            let x := (args[1]?).getD .erased
+            let x := at 1
             dupV x
             for v in a do dupV v
             pure (some (.arr (a.push x)))
           | "wiz_array_size", some a => pure (some (.num a.size))
           | "wiz_array_get", some a => do
-            let d := (args[2]?).getD .erased
-            match a[(n 1)]? with
+            let d := at 2
+            match a[(idx 1)]? with
             | some x => do dupV x; pure (some x)
             | none => do dupV d; pure (some d)
           | "wiz_array_set", some a => do
-            let i := n 1
-            let x := (args[2]?).getD .erased
+            let i := idx 1
+            let x := at 2
             for v in a do dupV v
             if i < a.size then do
               dupV x
