@@ -1226,9 +1226,10 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
-With the derivations already in the store (`nix build .#wiz-web .#wiz-playground`), the
-two module steps can copy them instead of running Emscripten: pass `--from DIR` (or
-`WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`) the store path, exactly as CI does.
+With the derivations already in the store (`nix build .#wiz-web .#wiz-playground
+.#wiz-playground-ui`), the three module steps can copy them instead of running Emscripten:
+pass `--from DIR` (or `WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`/`WIZ_PLAYGROUND_UI_FROM`) the
+store path, exactly as CI does.
 
 `wiz doc --jobs N` elaborates and renders N modules at once (`0`: auto); the tree is the
 same as with `--jobs 1`. `-v` (`-vv`, `-q`) turns on the progress log on stderr, which
