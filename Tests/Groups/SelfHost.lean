@@ -2041,6 +2041,31 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
         throw (IO.userError s!"{label}: the compiler printed no C:\n{out.stdout.take 500}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+/-- The host frontend elaborates the two programs the cases below compile. A break in
+`selfhost/*.wiz` used to surface only when a case built one (a merge left a `)` out of
+`knownTopFlag`'s `Bool.or` chain; `classCmd` had a `match` arm whose type the host would
+not infer), minutes into an already heavy shard. This case reads the same files and calls
+the same `checkerSource`/`compilerSource` the builders do, but stops at the host frontend:
+no kernel evaluation, no C toolchain, and the first errors print with their positions.
+The compiler's buffer comes first and a failure there short-circuits: it holds every
+shared file (the frontend and the tables) and the driver, so both incidents surface in
+its half of the ~50 s, not after the checker's. -/
+def selfhostHostGuard : IO Unit := do
+  let loader ← selfhostLoader
+  let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    let prog := source srcs
+    let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
+    if errs.isEmpty then pure [] else
+      pure (s!"the host frontend rejects the self-hosted {what} ({errs.size} error(s)):"
+        :: errs.toList.take 5)
+  let bad ← check "compiler" Selfhost.compilerFiles Selfhost.compilerSource
+  -- (`Check.wiz` is the only file of the checker's buffer the compiler's does not have)
+  let bad ← if bad.isEmpty then check "checker" Selfhost.checkerFiles Selfhost.checkerSource
+    else pure bad
+  unless bad.isEmpty do throw (IO.userError ("\n".intercalate bad))
+
 /-- (A23) `#print axioms` on the forms the host distinguishes: a definition with no
 axioms, a chain to an axiom, an axiom, an inductive type and its constructor, an
 `implemented_by` target (walked as code and marked `native`), a `sealed` type's native
@@ -4146,6 +4171,8 @@ def selfHostHostGroup : Group where
   name := "selfhost-host"
   exercise := "Stages 12b–14q (Lean host only)"
   cases := [
+    { name := "the host frontend elaborates the self-hosted checker and compiler (a fast guard)", run := fun _ =>
+        selfhostHostGuard },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do

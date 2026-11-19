@@ -12,7 +12,9 @@
       "lib/Text.wiz",
       "lib/Deriving.wiz",
       "Wiz/Parser/*",
-      "scripts/GenSelfhostTables.lean"
+      "scripts/GenSelfhostTables.lean",
+      "Tests/Groups/SelfHost.lean",
+      "Tests/Elab.lean"
     ],
     "select": [
       "=prop-kernels",
