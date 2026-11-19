@@ -5915,7 +5915,7 @@ def baseName (n : String) : String := match n with
 -- the first leaf of the command's span tree whose source text is `name`
 mutual
 partial def spFindName (input : Array Nat) (name : String) : SpT → Option SpT
-  | .leaf s e => match strEq (String.mk (slice s input e)) name with
+  | .leaf s e => match strEq (String.mk (slice (Nat.sub e s) input s)) name with
     | .true => .some (.leaf s e)
     | .false => .none
   | .node _ _ _ ks => spFindList input name (spList ks)

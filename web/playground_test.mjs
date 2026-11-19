@@ -99,7 +99,7 @@ function checkThat(name, condition, detail) {
   const src = "import Prelude\n\ndef idA (A : Type) (a : A) : A := by\n  exact a\n";
   const answer = JSON.parse(call("_wiz_playground_check", src));
   const errors = answer.lines.filter((l) => l.sev === 1 || l.sev === 2);
-  check("by: the block checks", errors.map((l) => l.text), []);
+  check("by: the block checks", errors.length, 0);
   const doc = "def idA (A : Type) (a : A) : A := by\n  exact a\n";
   const index = new PositionIndex(doc, answer.index);
   const step = doc.indexOf("exact");
