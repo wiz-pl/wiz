@@ -975,6 +975,14 @@ setup action keeps the elan cache for those
   over the examples, and one that checks that the six cover every example once), measured
   on CI in `.github/test-timings.json` (1330 s in total, the longest 229 s), so the
   shard's parts can each hold one.
+* **Shard packing (2026-11-19).** The 20-concurrent-job cap leaves a 32-job matrix with a
+  second wave, so it is natural to ask whether packing the cases into at most 20 jobs is
+  shorter. It is not, by enough: the current expansion's longest job is 28.6 min of test
+  time, a packing that keeps the large shards' path filters and runner classes is 28.1
+  min, and even merging shards across filters reaches 25.3 min — under the 5-minute bar,
+  and the remaining queueing is other workflows sharing the cap, not this matrix. See
+  [ci-shard-packing.md](ci-shard-packing.md) for the numbers, the packing tables and
+  what a later attempt would have to change.
 * **Skips.** A green run must have run its cases: a skipped case is not a pass, and a
   group that skipped wholesale means CI tested nothing there. The `CI result` job runs
   `scripts/ci.py check-skips` on the shard logs and `--timings` files, and fails when
