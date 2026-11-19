@@ -34,7 +34,7 @@ from `Scry.nowMs`; they are informational, not perf-run measurements.
 -/
 
 def Scry.prow (row : List U64) (k : Nat) : String :=
-  Nat.repr (Scry.rowNat row k)
+  Nat.repr (Scry.claimRowNat row k)
 
 /-- One relation's rows, rendered with the row's own width. -/
 def Scry.proRel (st : Scry.State Nat) (name : String) (rel : Nat) : String :=
