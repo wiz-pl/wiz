@@ -1,5 +1,5 @@
 # The Scry tool's own golden suite: `cd scry && grail test`, which runs the
-# `scry/tests/*.expected` goldens (26 today). The Lean-side groups (`=scry-taint`,
+# `scry/tests/*.expected` goldens (28 today). The Lean-side groups (`=scry-taint`,
 # `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
 # the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
 # `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what
@@ -7,7 +7,7 @@
 # it never gates. This workflow does: no `--update`, and a non-zero `grail test` fails.
 #
 # Cost and memory (measured on a loaded 32-core Linux box): `grail build scry` 11.5 min,
-# `grail test` 14 min for the 26 goldens; the whole run peaked at ~220 MiB of resident
+# `grail test` 14 min for the 28 goldens; the whole run peaked at ~220 MiB of resident
 # memory (the dev shell's `cc` included). No Lean/Lake build: `grail` and the
 # tree-sitter-c-sharp grammar are substituted from Cachix, so this needs no heavy runner
 # and no 7 GiB reservation; the job timeout is 60 min (about twice the measured cost,

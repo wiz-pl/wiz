@@ -443,6 +443,13 @@ def Scry.ProjectOpts.default (target : String) : Scry.ProjectOpts :=
 def Scry.ProjectIO.addFlag (opts : Scry.ProjectOpts) (flag value : String) : Scry.ProjectOpts :=
   { opts with flags := List.append opts.flags [flag, value] }
 
+/-- `scry project`'s usage line (or `project query`'s). -/
+def Scry.ProjectIO.usage (query : Bool) : String :=
+  match query with
+  | .true => "usage: scry project query DIR --rel NAME | --func NAME"
+  | .false =>
+    "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
+
 /-- Parse the arguments after `project` (or `project query`): one positional directory
 and the flags above. `-I dir`, `-Idir`, `-D X=1`, `-DX=1` are all accepted and kept for
 `cc -E`. -/
@@ -450,7 +457,7 @@ partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectO
     List String → Except String (String × Scry.ProjectOpts)
   | .nil => match target with
     | .some t => .ok (t, opts)
-    | .none => .error "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
+    | .none => .error (Scry.ProjectIO.usage .false)
   | .cons a rest => match a with
     | "--compdb" => match rest with
       | .cons v r => Scry.parseProjectArgs target { opts with compdb := .some v } r
@@ -560,10 +567,9 @@ def Scry.ProjectIO.report (opts : Scry.ProjectOpts) (r : Scry.ProjectReport) : E
   | .true => EIO.pure 1
   | .false => EIO.pure 0
 
-/-- Run `scry project` (or `query` when `query` is true): parse the options, build the
-project, print the summary, the requested relation or the whole-project taint report, and
-write `--facts`/`--sarif`. -/
-def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
+/-- The command proper: parse the options, build the project, print the summary, the
+requested relation or the whole-project taint report, and write `--facts`/`--sarif`. -/
+def Scry.ProjectIO.runArgs (query : Bool) (args : List String) : EIO Nat := do
   match Scry.parseProjectArgs .none (Scry.ProjectOpts.default "") args with
   | .error e => EIO.fail e
   | .ok pair => do
@@ -594,4 +600,13 @@ def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat := do
           | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
       | .none => match opts.func with
         | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
-        | .none => EIO.fail "usage: scry project query DIR --rel NAME | --func NAME"
+        | .none => EIO.fail (Scry.ProjectIO.usage .true)
+
+/-- Run `scry project` (or `query` when `query` is true). `--help` prints that command's
+usage and exits 0, before the positional directory is parsed. -/
+def Scry.ProjectIO.run (query : Bool) (args : List String) : EIO Nat :=
+  match List.any (fun a => String.eq a "--help") args with
+  | .true => do
+    Scry.ProjectIO.say (Scry.ProjectIO.usage query);
+    EIO.pure 0
+  | .false => Scry.ProjectIO.runArgs query args
