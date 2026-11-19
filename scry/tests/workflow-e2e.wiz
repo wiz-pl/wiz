@@ -44,7 +44,7 @@ def jsonAt (j : Option Json) (path : List String) : Json :=
   | .none => Json.mkNull
 
 def flag (j : Option Json) (path : List String) : Bool :=
-  match Json.asBool (jsonAt j path) with | .some b => b | .none => .false
+  match Json.asBool (jsonAt j path) with | .some b => b | .none => (.false : Bool)
 
 def strAt (j : Option Json) (path : List String) : String :=
   match jsonAt j path with
@@ -66,11 +66,11 @@ def main : IO Unit := EIO.toIO (do
   check "scan: C candidate recorded" (match findIn st1 "cwe78-getenv.c" with
     | .some r => Bool.and (String.eq (Scry.WfState.show r.state) "new")
         (String.eq (candOf r).stage "scan")
-    | .none => .false);
+    | .none => (.false : Bool));
   check "scan: C# candidate recorded (frontend reached through the CLI)"
     (match findIn st1 "cwe78-process-unsafe.cs" with
       | .some r => String.eq (Json.getStr r.finding "rule") "command-injection"
-      | .none => .false);
+      | .none => (.false : Bool));
 
   -- 2. refine
   n3 ← Scry.findingsCmd ["refine", "--db", db, "--quiet"];
@@ -83,18 +83,18 @@ def main : IO Unit := EIO.toIO (do
             (Bool.and (Nat.le 60 (candOf r).rank)
               (Bool.and (String.eq (candOf r).plan.channel "env")
                 (String.eq (candOf r).plan.envName "SCRY_CMD"))))
-      | .none => .false);
+      | .none => (.false : Bool));
   check "refine: C# candidate's plan is stdin (Console.ReadLine)"
     (match findIn st2 "cwe78-process-unsafe.cs" with
       | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
           (String.eq (candOf r).verdict "pursue")
-      | .none => .false);
+      | .none => (.false : Bool));
   check "refine: candidate.json is written"
     (match findIn st2 "cwe78-getenv.c" with
       | .some r => match Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json") with
         | .some j => String.eq (Json.getStr j "stage") "refined"
-        | .none => .false
-      | .none => .false);
+        | .none => (.false : Bool)
+      | .none => (.false : Bool));
 
   -- 3. repro with the plan-derived harness and input
   let cRec := match findIn st2 "cwe78-getenv.c" with
@@ -117,7 +117,7 @@ def main : IO Unit := EIO.toIO (do
   check "repro: candidate.stage is poc"
     (match findIn st3 "cwe78-getenv.c" with
       | .some r => String.eq (candOf r).stage "poc"
-      | .none => .false);
+      | .none => (.false : Bool));
 
   -- 4. verify: static plus the stored PoC, side by side
   n5 ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
@@ -130,7 +130,7 @@ def main : IO Unit := EIO.toIO (do
   check "verify: candidate.stage is verified"
     (match findIn st4 "cwe78-getenv.c" with
       | .some r => String.eq (candOf r).stage "verified"
-      | .none => .false);
+      | .none => (.false : Bool));
 
   -- 5. the root bundle carries the same candidate value
   bundle ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "finding.json");
