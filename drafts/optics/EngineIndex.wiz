@@ -1,5 +1,5 @@
 import Storage
-import Profunctor
+import Optic
 /-!
 # The index bucket as a profunctor traversal
 

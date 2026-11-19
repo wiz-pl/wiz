@@ -551,6 +551,20 @@ If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
 (`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
 universe change.
 
+### Profunctor optics (default) and the store encoding
+
+`lib/Optic.wiz` also carries the profunctor layer, which is the default representation
+for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `Iso`, `LensP`,
+`PrismP`, `TraversalP`, and the `Hom`/`Forget`/`ForgetList`/`ForgetOpt`/`Writer Δ`
+interpretations. One optic runs at every interpretation: `over` (update), `view` (read
+one), `toListOf` (read all), `preview` (read at most one), `overWrite` (update and
+write-set in one pass). `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
+`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it. A
+`Type 0` store of optics is still impossible here (the profunctor types are `Type 1`), and
+a profunctor optic cannot hand back the `Store A S` that a returned borrow (`Mut` in
+`lib/Region.wiz`) carries; that is why `Lens`/`PLens`/`Store`/`zoom`/`Affine` stay. New
+code that only reads and updates a value should use the `…P` forms.
+
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
 Compiled, the value simulation (`Circuit.run`, `Design.runLeaves`) runs the step function

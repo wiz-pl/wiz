@@ -1,5 +1,4 @@
 import Optic
-import Traversal
 import OpticDerive
 import Word
 import Text
@@ -33,10 +32,9 @@ the write-set it carries.
   delete epoch, per-key first-committer-wins for `set`/`del`, no version check for
   `addCount`, and unique-index rejection.
 
-`Traversal` and `PLens.over` come from `drafts/optics/Traversal.wiz` (checked with
-`-I drafts/optics`): the shipped toolchain's library shadows a worktree `lib/`, so the
-shared piece lives in `drafts/` until it can move into `lib/Optic.wiz`. See the note,
-§5.2 and §12.
+`Traversal` and `PLens.over` are in `lib/Optic.wiz` (the store-encoding pair, not the
+profunctor `TraversalP`), so this module needs a rebuilt toolchain (a `lib/` edit is
+shadowed by the installed library). See the note, §5.2 and §12.
 -/
 
 -- ## Records
@@ -397,7 +395,7 @@ def Root.applyDeltas (r : Root) (ds : List IndexDelta) : Root :=
 
 -- ## A traversal over an index bucket
 --
--- `Traversal` and `PLens.over` are shared with `drafts/optics/Traversal.wiz`; `overAll`
+-- `Traversal` is lib/Optic.wiz's store-encoding pair; `overAll`
 -- is the ω update path and records one patch per matched node, while the streaming query
 -- path is the linear `Cursor` (`Snapshot.indexNodes`).
 

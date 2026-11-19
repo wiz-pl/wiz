@@ -1,5 +1,5 @@
 import IO
-import Profunctor
+import Optic
 import Logic
 
 /-!
