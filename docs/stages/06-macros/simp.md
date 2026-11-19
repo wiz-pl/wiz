@@ -81,7 +81,7 @@ importing it is enough: `lib/Nat.wiz` (`Nat.add_zero`, `Nat.mul_one`/`one_mul`/
 Boolean algebra: `Bool.not_not`, the `&&`/`||` identities `Bool.and_true`/`and_false`/
 `or_false` stated on the notation, `Bool.and_self`/`and_absorb`/`and_not_self`,
 `Bool.or_true_right`/`or_self`/`or_absorb`/`or_not_self`, `Bool.not_and`/`not_or`) and
-`lib/ListLemmas.wiz` (`List.append_nil`, `List.map_id`, `List.map_map`,
+`lib/Data/ListLemmas.wiz` (`List.append_nil`, `List.map_id`, `List.map_map`,
 `List.map_append`, and the `length`/`reverse`/`filter`/`any`/`all` normal forms).
 `lib/SimpLemmas.wiz` is the umbrella:
 `import SimpLemmas` brings all of them, and it also keeps the lemmas that are
@@ -193,7 +193,7 @@ not; the default order is priority first then oldest registration (`getSimpLemma
 a duplicate registration and a possibly looping orientation; and a two-module fixture
 that checks `local attribute [simp]` works in its module and is gone in the importer,
 through both the frontend and the command cache. The library-set case uses the
-annotations of `lib/ListLemmas.wiz`, `lib/Logic.wiz` and `lib/SimpLemmas.wiz` on real
+annotations of `lib/Data/ListLemmas.wiz`, `lib/Logic.wiz` and `lib/SimpLemmas.wiz` on real
 goals: a list goal that needs `List.append_nil`, `List.length_append_eq` and
 `List.reverse_reverse`, `Bool.and`/`!` goals against the Logic rules, the `&&`/`||`
 notation against the SimpLemmas rules, and `simp only [List.append_nil]` rewriting both

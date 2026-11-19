@@ -819,6 +819,7 @@ def dropQSrc : String :=
   "  | .pfalse => .pfalse\n" ++
   "  | .exfalso m t => .exfalso (dropQTm m) (dropQTm t)\n" ++
   "  | .letUnit u b => .letUnit (dropQTm u) (dropQTm b)\n" ++
+  "  | .split q s m b => .split q (dropQTm s) (dropQTm m) (dropQTm b)\n" ++
   "  | .enum k => .enum k\n" ++
   "  | .tag k i => .tag k i\n" ++
   "  | .ecase m s bs => .ecase (dropQTm m) (dropQTm s) (dropQTms bs)\n" ++
@@ -857,6 +858,8 @@ def dropQSrc : String :=
   "  | .up a => .up (dropQTm a)\n" ++
   "  | .down t => .down (dropQTm t)\n" ++
   "  | .prf l t => .prf l (dropQTm t)\n" ++
+  "  | .nlit n nb => .nlit n nb\n" ++
+  "  | .natFn op nb d => .natFn op nb d\n" ++
   "partial def dropQTms : Tms → Tms\n" ++
   "  | .tnil => .tnil\n" ++
   "  | .tcons t r => .tcons (dropQTm t) (dropQTms r)\n" ++

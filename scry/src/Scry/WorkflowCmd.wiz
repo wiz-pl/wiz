@@ -382,7 +382,7 @@ partial def Scry.scanArgsGo (o : Scry.ScanOpts) : List String → Except String 
     | "--help" => .error Scry.scanUsage
     | _ => match String.startsWith a "--" with
       | .true => .error (String.append "unknown flag " (String.append a "\n" ++ Scry.scanUsage))
-      | .false => Scry.scanArgsGo { o with files := List.append o.files (List.cons a .nil) } rest
+      | .false => Scry.scanArgsGo { o with files := List.append o.files [a] } rest
 
 partial def Scry.wfPackTextGo : List String → EIO (String × String)
   | .nil => EIO.pure ("lib/Scry/rules/default.scry", "")
@@ -975,7 +975,7 @@ partial def Scry.reproArgsGo (o : Scry.ReproCmdOpts) : List String → Except St
       | .nil => .error "--harness needs a shell script"
     | "--env" => match rest with
       | .cons p more => match Scry.parseEnvPair p with
-        | .some kv => Scry.reproArgsGo { o with env := List.append o.env (List.cons kv .nil) } more
+        | .some kv => Scry.reproArgsGo { o with env := List.append o.env [kv] } more
         | .none => .error "--env needs NAME=VALUE"
       | .nil => .error "--env needs NAME=VALUE"
     | "--witness" => match rest with

@@ -16,11 +16,6 @@ def yes (b : Bool) : String := match b with
   | .true => "yes"
   | .false => "no"
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .nil, .nil => .true
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | _, _ => .false
-
 def shows : List Nat → String
   | .nil => ""
   | .cons x xs => Hdl.show x <+> " " <+> shows xs
@@ -94,9 +89,9 @@ def main : IO Unit := do
   let c := Ddr.modelC;
   let outs := Circuit.runLeaves c ins;
   let got := responses outs;
-  IO.println ("ddr: sim " <+> yes (leavesEq outs (Circuit.simFast c ins))
+  IO.println ("ddr: sim " <+> yes (BEq.beq outs (Circuit.simFast c ins))
     <+> ", accepted " <+> Hdl.show (accepted ins outs)
     <+> ", ready-low " <+> Hdl.show (countReadyLow outs)
     <+> ", rvalid " <+> Hdl.show (countRvalid outs)
-    <+> ", values " <+> yes (Hdl.natsEq got expect)
+    <+> ", values " <+> yes (BEq.beq got expect)
     <+> ", well formed " <+> yes (Netlist.wellFormed (Circuit.netlist "ddr" c)))

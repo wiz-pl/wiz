@@ -105,7 +105,54 @@ def main : IO Unit := EIO.toIO (do
   check "diff all: header" (String.contains pa "diff: all findings");
   check "diff all: no suppressed block" (Bool.not (String.contains pa "Suppressed findings"));
 
-  -- 7. Flag validation.
+  -- 7. security-02/03/04: --out cannot write through a symlink or over an input, and
+  -- the walk does not follow directory symlinks.
+  tmp ← FS.createTempDir;
+  FS.writeFile (tmp ++ "/src.c") "int main(void) { return 0; }\n";
+  FS.writeFile (tmp ++ "/victim.txt") "keep me\n";
+  FS.symlink (tmp ++ "/victim.txt") (tmp ++ "/page.html");
+  badLink ← EIO.lift (run [tmp ++ "/src.c", "--out", tmp ++ "/page.html"]);
+  let linkRefused :=
+    match badLink with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out symlink: refused" linkRefused;
+  victim ← read (tmp ++ "/victim.txt");
+  check "out symlink: the target is unchanged" (String.eq victim "keep me\n");
+
+  sourceBefore ← read (tmp ++ "/src.c");
+  badInput ← EIO.lift (run [tmp ++ "/src.c", "--out", tmp ++ "/src.c"]);
+  let inputRefused :=
+    match badInput with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out input: refused" inputRefused;
+  sourceAfter ← read (tmp ++ "/src.c");
+  check "out input: the source is unchanged" (String.eq sourceBefore sourceAfter);
+
+  FS.createDir "build/walk-corpus";
+  FS.createDir "build/walk-outside";
+  FS.writeFile "build/walk-corpus/a.c" "int main(void) { return 0; }\n";
+  FS.writeFile "build/walk-outside/secret.c" "int secret(void) { return 1; }\n";
+  FS.symlink "../walk-outside" "build/walk-corpus/up";
+  FS.symlink ".." "build/walk-corpus/self";
+  n7 ← run ["build/walk-corpus", "--out", "build/walk.html"];
+  check "walk: exit 0" (Nat.beq n7 0);
+  walked ← read "build/walk.html";
+  check "walk: an outside tree behind a symlink stays out"
+    (Bool.not (String.contains walked "secret.c"));
+  check "walk: the skipped link is reported" (String.contains walked "symbolic link");
+  badCorpus ← EIO.lift (run ["build/walk-corpus", "--out", "build/walk-corpus/page.c"]);
+  let corpusRefused :=
+    match badCorpus with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "out corpus .c: refused" corpusRefused;
+  FS.removeAll "build/walk-corpus";
+  FS.removeAll "build/walk-outside";
+  FS.removeAll tmp;
+
+  -- 8. Flag validation.
   match Scry.reportArgs ["tests/fixtures/report/taint.c", "--diff", "HEAD",
       "--changed-lines", "tests/fixtures/diff/unsafe-other.patch"] with
   | .error _ => check "flags: --diff and --changed-lines conflict" .true

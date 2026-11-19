@@ -152,11 +152,19 @@ def Scry.cacheLoad (dir key pre : String) : EIO (Except String (Scry.CstStore ×
     text ← FS.readFile p;
     EIO.pure (Scry.cacheEntryOf key pre text)
 
-/-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). -/
+/-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). A
+`.tmp` that is a symbolic link is refused: `FS.writeFile` opens with `O_TRUNC`, so a
+committed `<entry>.tmp -> ~/.bashrc` would otherwise truncate the target. -/
 def Scry.cacheSave (dir key pre errors cst : String) : EIO Unit := do
   Scry.mkdirp dir;
   let p := Scry.cachePath dir key;
   let tmp := String.append p ".tmp";
+  st ← EIO.lift (FS.linkStat tmp);
+  match st with
+  | .ok s => match s.kind with
+    | .symlink => EIO.fail ("cache: " ++ tmp ++ " is a symbolic link; refusing to write through it")
+    | _ => EIO.pure ()
+  | .error _ => EIO.pure ();
   FS.writeFile tmp (Scry.cacheEntryText key pre errors cst);
   FS.rename tmp p
 

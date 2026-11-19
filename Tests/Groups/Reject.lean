@@ -175,6 +175,14 @@ def group : Group where
       ("import Prelude\nmutual\ndef f : Nat → Nat\n  | n => g n\n" ++
        "def g : Nat → Nat\n  | n => f n\nend\n#check f\n"),
 
+    -- the cons notation: `::` is `List.cons`, whose tail must be a list
+    rejected "cons: the tail of `1 :: 2` is not a list"
+      (prelude ++ "def bad : List Nat := 1 :: 2\n")
+      none "2" "failed to synthesize an instance of OfNat (List Nat) 2",
+    rejected "cons: `1 :: (2 : Nat)` has a Nat tail"
+      (prelude ++ "def bad : List Nat := 1 :: (2 : Nat)\n")
+      (some "type-mismatch") "(2 : Nat)" "type mismatch",
+
     -- missing coverage
     rejected "coverage: match misses a constructor"
       "import Prelude\ndef f (b : Bool) : Nat := match b with\n  | .true => 1\n"

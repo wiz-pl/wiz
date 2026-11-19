@@ -1,0 +1,3 @@
+# fixture ledger (Tests/trust-ledger/impl-partial): both sources reviewed
+A	pBase	native pBase := pOther	fixture: the native step a partial implementation hides	gate-fixture	2027-06-30
+A	pBase	partial	fixture: an implemented_by on a partial	gate-fixture	2027-06-30

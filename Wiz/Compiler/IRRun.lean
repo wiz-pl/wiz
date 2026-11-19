@@ -134,7 +134,6 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
       | some (.tag t) => pure t
       | some (.num k) => pure (if k == 0 then 0 else 1)
       | _ => pure 0
-    args.forM dropV
     pure (.tag t)
   | "fieldAt" =>
     match (args[0]? : Option IVal), (args[1]? : Option IVal) with
@@ -228,8 +227,10 @@ def nativeOp (op : Name) (args : Array IVal) : RunM IVal := do
         | "wiz_bytes_size", some b, _ => pure (some (.num b.size))
         | "wiz_bytes_get", some b, _ => pure (some (.num (BytesModel.get b (n 1))))
         | "wiz_bytes_of_string", _, _ => do
-          let s := (toRVal (← get) (args[0]?.getD .erased)).toString?
-          pure (s.map fun s => .bytes (BytesModel.ofCString s))
+          -- (the Wiz `String` value's own characters: a non-scalar code point is
+          -- U+FFFD, which a Lean `String` could not carry)
+          let rv := toRVal (← get) (args[0]?.getD .erased)
+          pure ((BytesModel.ofCString rv).map fun b => .bytes b)
         | "wiz_bytes_to_string", some b, _ => do
           pure (some (← strIVal (BytesModel.toCString b)))
         | "wiz_bytes_slice", some b, _ => pure (some (.bytes (BytesModel.slice b (n 1) (n 2))))

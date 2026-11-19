@@ -46,6 +46,7 @@ MODES = [
     "bytes-append", "bytes-slice", "bytes-compare",
     "text-split", "text-replace", "text-trim", "text-eq", "text-suffix",
     "sort", "hash",
+    "list-index", "egraph",
 ]
 
 
@@ -283,6 +284,7 @@ DEFAULT_SIZES = {
     "text-split": 40000, "text-replace": 40000, "text-trim": 40000, "text-eq": 40000,
     "text-suffix": 40000,
     "sort": 100000, "hash": 300000,
+    "list-index": 4000, "egraph": 3000,
 }
 
 if __name__ == "__main__":

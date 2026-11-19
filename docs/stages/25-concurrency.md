@@ -55,8 +55,43 @@ several threads share no flag and are not a data race. The sanitiser's cost for
 single-threaded programs is queued for measurement (`perf-queue.md`).
 
 Not yet: `selfhost/rt.c` (the self-hosted backend's runtime, under
-Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to a
-blackhole), and `rc == -1` counting as unique.
+Boehm it needs `GC_THREADS`), shared lazy cells that keep their payload (a CAS to ablackhole), and `rc == -1` counting as unique.
+
+The self-hosted runtime (`selfhost/rt.c`) has the same natives on its values: channels,
+MVars, locks and refs, a new thread for `Chan.fork`, `rt_mark_mt`'s transfer rule,
+shared thunks under one recursive lock, constants published once (`rt_caf`, made
+immortal as `wiz_immortal` does), and per-thread allocation (the size-class free lists
+and the recycling stack are `__thread`, so two threads never write one list). Under the
+collector each thread is created with `GC_pthread_create` (`GC_THREADS`) and the live
+count is per thread in both modes, summed at exit after the program waits for every
+thread. The `=selfhost` group's differential case runs one program — fork, send,
+MVar put/take, lock and join — in both runtimes and in both memory modes. Its library
+layer is the next step: the self-hosted frontend cannot yet express the phantom indices
+(`MVar.Hole m`, `Lock.Guard l`, `Chan p`), and it does not solve a metavariable applied
+to the local context, so a `do` bind whose value is a pair (`Chan.recv`'s `A × Chan`)
+cannot be checked; that program declares the natives directly, passes the type arguments
+by name, and sends on the channel without receiving. The `WIZ_NO_THREADS` one-thread
+build (the Wasm page) has the same natives without locks.
+
+**Handles.** A `File` or `Child` (lib/Sys.wiz) is an ordinary ω value, so the types do
+not stop a program from capturing one in a `Chan.fork` child while the parent keeps it:
+quantity 1 makes the *endpoint* of a channel linear, and a closure that captures an ω
+handle is still a linear function. Rather than trust a convention, the runtime
+serialises the operations on one handle (`runtime/rt_sys.inc`): a `File` holds a mutex
+across each read, write and close, so `File.close` cannot free a `FILE *` under a
+`getline` (the use-after-free otherwise allowed) and a second close is `EBADF`; a
+`Child` has a mutex per pipe plus one for the wait status and one for the blocking
+`waitpid`, so two `wait`s return the same status, a second `closeStdin` is `EBADF`
+(never a second `close(2)` of a descriptor another thread has reused), and `kill` and
+the other pipes stay usable while one pipe or a `wait` blocks. Operations on one handle
+are **serialised, not parallel**: a close waits for a read already in progress, and a
+read of one pipe waits for `Child.communicate` on the same child. The `conc` cases
+"handles (conc-02)" pin both halves. The deterministic one is `Child`: two threads wait
+on one child; before the lock both `waitpid`s raced, one reaped and the other never got
+a status (the case timed out), while now the second waiter returns the status the first
+recorded. The `File` case is a stress case — a reader loops over a file while the other
+thread closes it — because the use-after-free does not fault on every schedule; with
+the lock the in-flight read finishes and the next one is `EBADF`.
 
 An `extern` bound to a runtime native (a C name starting `wiz_`) now takes and returns any
 Wiz value as it is (an opaque type's, a closure, a Σ pair), so the natives below are
@@ -198,7 +233,9 @@ Pure parallelism (`Task.spawn`, plan C1) on the same runtime, with a `-j1` vs `-
 differential test; structured scopes (C4); a concurrency effect with a pure scheduler
 (C5, needs one-shot continuations); recursive protocols over ν with sizes; delegation
 (sending endpoints) with protocol-level linear payloads; a mechanised deadlock-freedom
-proof (C7); `selfhost/rt.c` threads.
+proof (C7); `selfhost/rt.c` threads, and the self-hosted frontend's library layer for
+`Chan`/`MVar`/`Lock` (the phantom indices and linear holes; the natives themselves are in
+`selfhost/rt.c`).
 
 ## 25k: the one-thread build (`WIZ_NO_THREADS`)
 

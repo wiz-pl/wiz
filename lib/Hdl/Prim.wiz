@@ -78,12 +78,12 @@ def Prim.declSync {ω i o : HwTy} (name : String) (ps : List (String × PrimPara
 def Prim.withParams {ω i o : HwTy} (p : Prim i o) (ps : List (String × PrimParam)) : Prim i o :=
   Prim.mk p.name (PrimParam.pairs ps) p.ins p.outs p.model p.sync p.outDom
 def Prim.withModel {ω i o : HwTy} (p : Prim i o) (f : HwTy.El i → HwTy.El o) : Prim i o :=
-  Prim.mk p.name p.params p.ins p.outs (Option.some f) p.sync p.outDom
+  Prim.mk p.name p.params p.ins p.outs (.some f) p.sync p.outDom
 /-- Give output leaf `j` the clock domain `d` (`outDom`): a BUFG or PLL output that clocks
 a domain. A primitive's other output leaves are in the domain their inputs are in. -/
 def Prim.withOutDomAt {ω i o : HwTy} (p : Prim i o) (j : Nat) (d : String) : Prim i o :=
   Prim.mk p.name p.params p.ins p.outs p.model p.sync
-    (Hdl.setNthPad (Option.none : Option String) (Option.some d) p.outDom j)
+    (Hdl.setNthPad (Option.none : Option String) (.some d) p.outDom j)
 /-- The clock domain of a primitive's first output leaf (`Prim.withOutDomAt` at 0). -/
 def Prim.withOutDom {ω i o : HwTy} (p : Prim i o) (d : String) : Prim i o :=
   Prim.withOutDomAt p 0 d
@@ -239,12 +239,12 @@ def Clocking.problems (n : Netlist) (ck : Clocking) : List String :=
   let ω keys := Hdl.map (fun (q : String × ClockSource) => q.1) ck.domains;
   let ω sigs := Hdl.map (fun (q : String × String) => q.1) ck.signals;
   let ω rest := match n.clocks with
-    | .nil => List.nil
+    | .nil => []
     | .cons _ ds => ds;
   List.append (Clocking.missing ports (List.append keys sigs))
     (Hdl.concatLists (Hdl.map (fun (d : ClockDomain) => match Clocking.source ck d.name with
-      | .some _ => List.nil
-      | .none => .cons ("Clocking: no source for clock domain " <+> d.name) List.nil) rest))
+      | .some _ => []
+      | .none => [("Clocking: no source for clock domain " <+> d.name)]) rest))
 
 /-- The connection of each of the netlist's clock ports: the first through `sys`'s BUFG,
 each other through its domain's source (a PLL output's BUFG or an input pin). -/

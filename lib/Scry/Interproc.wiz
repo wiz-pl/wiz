@@ -5,6 +5,7 @@ import Scry.Rules
 import Scry.Models
 import Scry.Lifetime
 import Scry.Bounds
+import Scry.Nullness
 import Text
 import WordMap
 /-!
@@ -80,7 +81,7 @@ def Scry.sitesOfFunc (fn : Wil.Func) (pt : Scry.PtResult) : List Scry.CallSite :
     | .none => .nil
     | .some s => match s with
       | .call r callee args _ => match callee with
-        | .direct name => List.cons (Scry.siteOfCall fn pt n r args name) .nil
+        | .direct name => [(Scry.siteOfCall fn pt n r args name)]
         | .indirect _ =>
           List.map (fun name => Scry.siteOfCall fn pt n r args name)
             (Scry.indirectAt pt fn.name n).names
@@ -92,7 +93,7 @@ def Scry.indirectOfFunc (fn : Wil.Func) : List (String × Nat) :=
     match Scry.nodeStmt g n with
     | .none => .nil
     | .some s => match s with
-      | .call _ (.indirect _) _ _ => List.cons (fn.name, n) .nil
+      | .call _ (.indirect _) _ _ => [(fn.name, n)]
       | _ => .nil) (Scry.range g.count)
 
 /-- The direct-call graph of a program plus every resolved indirect target; the unresolved
@@ -118,7 +119,11 @@ Such a function is used from inside the unit as a callback, so its parameters ar
 external entry merely because no direct call resolves to it. -/
 def Scry.fnptrNamesOfStmt (s : Wil.Stmt) : List String :=
   match s with
-  | .assign _ (.fnptr name) _ => List.cons name .nil
+  | .assign _ (.fnptr name) _ =>
+    let n := match String.stripPrefix name "$method:" with
+      | .some x => x
+      | .none => name;
+    List.cons n .nil
   | _ => .nil
 
 def Scry.fnptrNamesOfFunc (fn : Wil.Func) : List String :=
@@ -203,7 +208,7 @@ def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncRe
     Scry.concatLists (fun site =>
       if Bool.and (String.eq site.caller r.fn.name) (String.eq site.callee callee) then
         Scry.concatLists (fun p =>
-          if Scry.argTainted r site.node p.2 then List.cons p.1 .nil else .nil)
+          if Scry.argTainted r site.node p.2 then [p.1] else .nil)
           (Scry.indexedNats 0 site.args)
       else .nil) graph.sites) results
 
@@ -264,7 +269,7 @@ def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
     if Bool.and (String.eq site.caller caller)
         (Scry.summaryOf sums site.callee).retTainted then
       match site.result with
-      | .some r => List.cons (site.node, r) .nil
+      | .some r => [(site.node, r)]
       | .none => .nil
     else .nil) graph.sites
 
@@ -282,6 +287,18 @@ def Scry.seedsFor (sums : List Scry.Summary) (func : String) : List Scry.MemSeed
 def Scry.seedsForAll (all : List Scry.MemSeed) (func : String) : List Scry.MemSeed :=
   List.filter (fun m => Bool.not (String.eq m.func func)) all
 
+/-- The parameter positions a rule pack declares as sources regardless of the caller.
+Today one such policy exists: `source argv result` asks for `main`'s second parameter
+(the C `argv` array). The default pack does not declare it, so argv taint is opt-in.
+(`Scry.prepareFuncWith` seeds the same entry definition; the position here also marks
+the parameter as tainted for the summaries.) -/
+def Scry.argvParamsOf (pack : Scry.RulePack) (fn : Wil.Func) : List Nat :=
+  match Scry.RulePack.sourcesArgv pack, String.eq fn.name "main" with
+  | .true, .true => match Wil.listNth fn.params 1 with
+    | .some _ => List.cons 1 .nil
+    | .none => .nil
+  | _, _ => .nil
+
 /-- Evaluate one function under the current summaries (the unit of the summary
 fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. The
 entry sources are the C-ABI policy's parameter seeds for exported entries. -/
@@ -289,7 +306,7 @@ def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
     (pt : Scry.PtResult) (entries : List (String × Nat)) (sums : List Scry.Summary)
     (fn : Wil.Func) : Scry.FuncResult :=
   Scry.evaluateFuncWith fn pack pt (Scry.seedsFor sums fn.name)
-    (Scry.summaryOf sums fn.name).params
+    (Scry.unionNat (Scry.summaryOf sums fn.name).params (Scry.argvParamsOf pack fn))
     (Scry.retSeedsOf graph sums fn.name)
     (Scry.entrySourcesFor entries fn.name)
 
@@ -337,14 +354,15 @@ def Scry.prepareAll (p : Wil.Program) (pack : Scry.RulePack) (pt : Scry.PtResult
 
 /-- Grow every summary from one round's results: the argument-taint contributions the
 results expose and the return flags, plus the tainted memory locations. -/
-def Scry.growSummaries (p : Wil.Program) (graph : Scry.CallGraph)
+def Scry.growSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   let entries := Scry.taintEntries results;
   let contribs := Scry.paramContribFrom graph entries;
   List.map (fun fn =>
     let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.contribOf contribs fn.name;
+    let contrib := Scry.unionNat (Scry.contribOf contribs fn.name)
+      (Scry.argvParamsOf pack fn);
     let ret := match List.find (fun e => String.eq e.name fn.name) entries with
       | .some e => e.retTainted
       | .none => (.false : Bool);
@@ -356,7 +374,8 @@ with the argument-taint contributions the results expose and the return flags. -
 def Scry.stepSummariesWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (graph : Scry.CallGraph) (pt : Scry.PtResult) (prev : List Scry.Summary)
     (entries : List (String × Nat)) : List Scry.Summary :=
-  Scry.growSummaries p graph prev (Scry.resultsWithEntries p pack graph pt prev entries)
+  Scry.growSummaries p pack graph prev
+    (Scry.resultsWithEntries p pack graph pt prev entries)
 
 def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
@@ -404,12 +423,19 @@ def Scry.dedupWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
     | .true => acc
     | .false => List.append acc (.cons w .nil)) .nil ws
 
-/-- One unmodelled-external diagnostic for a call: an external the unit does not define,
-with no model entry, and with a pointer result or argument, so its memory effect is
-genuinely unknown. The warning is attached to the call point. A call to a function the
-unit defines is not external (`Wil.findFunc` is the discriminator), and a modelled call
-has a known effect, so neither warns here. -/
-def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+/-- The `(callee name, call point)` pairs of the unmodelled external calls in a function:
+an external the unit does not define, with no model entry, and with a pointer result or
+argument, so its memory effect is genuinely unknown. A call to a function the unit
+defines is not external (`Wil.findFunc` is the discriminator), and a modelled call has a
+known effect, so neither is listed here. The callee name is kept apart from the
+diagnostic text so a coverage report can group by external (the `scry cs` external
+frequency table).
+
+`isModelled` is a parameter so a measurement can ask the same question of an older
+table (`Scry.Models.isModelledCore`): the `before` column of an external-coverage run is
+this function with the table the change added entries to. -/
+def Scry.unmodelledCallsWith (isModelled : String → Bool) (p : Wil.Program)
+    (r : Scry.FuncResult) : List (String × Nat) :=
   let g := r.plan.info.g;
   Scry.rulePackConcat (fun n =>
     match Scry.nodeStmt g n with
@@ -417,7 +443,7 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
       match Wil.findFunc p name with
       | .some _ => .nil
       | .none =>
-        if Scry.Models.isModelled name then .nil
+        if isModelled name then .nil
         else
           let pointerArg := List.any (fun v => Scry.ptrLike v.ty) args;
           let pointerRet := match res with
@@ -425,10 +451,19 @@ def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scr
             | .none => (.false : Bool);
           match Bool.or pointerArg pointerRet with
           | .false => .nil
-          | .true => List.cons (Scry.memWarning Scry.MemWarnKind.unmodelledExternal
-              r.fn.name n ("call to unmodelled external " ++ name
-                ++ ": result and memory effects are unknown")) .nil
+          | .true => List.cons (name, n) .nil
     | _ => .nil) (Scry.range g.count)
+
+/-- `unmodelledCallsWith` for the analysis's own table (`Scry.Models.isModelled`). -/
+def Scry.unmodelledCallsOf (p : Wil.Program) (r : Scry.FuncResult) : List (String × Nat) :=
+  Scry.unmodelledCallsWith Scry.Models.isModelled p r
+
+/-- One unmodelled-external diagnostic for a call: the call point carries the callee and
+why the call is not modelled. See `Scry.unmodelledCallsOf` for the selection. -/
+def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) : List Scry.MemWarning :=
+  List.map (fun nc => Scry.memWarning Scry.MemWarnKind.unmodelledExternal
+    r.fn.name nc.2 ("call to unmodelled external " ++ nc.1
+      ++ ": result and memory effects are unknown")) (Scry.unmodelledCallsOf p r)
 
 /-- The lifetime rule supersedes the old points-to `use-after-free` warning: once a
 `kind memory` rule is enabled its finding is the diagnostic, so do not print both. -/
@@ -443,9 +478,10 @@ model rule descriptors, so a model-only sink (`execl`, `sprintf`, `read`'s bound
 rule id even when the textual pack does not repeat it. `entryMode` enables the C-ABI
 policy that seeds the parameters of exported entries; the library/old API passes
 `false` through `Scry.analyze`. `maxRounds` bounds the points-to fixpoint (a partial
-result when it is hit). -/
-def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
-    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+result when it is hit). `withNull` appends the S5 nullness pass's diagnostics, which
+are opt-in (`Scry.analyzeWithNull`, `scry taint --null-deref`). -/
+def Scry.analyzeCoreBounded (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (maxRounds : Option Nat) (withNull : Bool) : Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsToBounded p maxRounds;
   let graph := Scry.callGraph p pt;
@@ -461,34 +497,57 @@ def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
     | .some _ => .true
     | .none => .false;
   let bounds := Scry.boundsCheck p pt pack results;
+  let nulls : List Scry.MemWarning := match withNull with
+    | .true => Scry.nullDerefWarnings p
+    | .false => .nil;
   let warnings := Scry.dedupWarnings (List.append
     (List.filter (Scry.keepMemWarning hasLifetime)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOf p r) results)))
-    bounds.warnings);
-  let memoryFindings := List.append (Scry.useAfterFreeCheck p pt pack) bounds.findings;
+    (List.append bounds.warnings nulls));
+  let memoryFindings := List.append (Scry.lifetimeFindings p pt pack) bounds.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
+
+/-- The bounded analysis, entry policy and nullness off (the historical signature). -/
+def Scry.analyzeEntriesBounded (p : Wil.Program) (pack0 : Scry.RulePack)
+    (entryMode : Bool) (maxRounds : Option Nat) : Scry.ProgramResult :=
+  Scry.analyzeCoreBounded p pack0 entryMode maxRounds .false
 
 /-- The library analysis: no exported-entry policy, the historical round bound. -/
 def Scry.analyze (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  Scry.analyzeEntriesBounded p pack .false .none
+  Scry.analyzeCoreBounded p pack .false .none .false
 
 /-- The C-ABI analysis: parameters of exported entry functions are sources. -/
 def Scry.analyzeC (p : Wil.Program) (pack : Scry.RulePack) : Scry.ProgramResult :=
-  Scry.analyzeEntriesBounded p pack .true .none
+  Scry.analyzeCoreBounded p pack .true .none .false
 
 /-- The bounded analysis with the C-ABI entry policy (the `scry taint` driver uses the
 staged loop in `Scry.TaintCmd`; this is the library-level equivalent). -/
 def Scry.analyzeEntries (p : Wil.Program) (pack : Scry.RulePack)
     (entryMode : Bool) : Scry.ProgramResult :=
-  Scry.analyzeEntriesBounded p pack entryMode .none
+  Scry.analyzeCoreBounded p pack entryMode .none .false
 
 /-- The default analysis with an explicit points-to round bound. -/
 def Scry.analyzeBounded (p : Wil.Program) (pack : Scry.RulePack)
     (maxRounds : Option Nat) : Scry.ProgramResult :=
-  Scry.analyzeEntriesBounded p pack .false maxRounds
+  Scry.analyzeCoreBounded p pack .false maxRounds .false
 
+/-- Analyse a program with the default pack and the points-to/taint stages only. The S5
+null-dereference pass is **opt-in** (`Scry.analyzeWithNull`, or `scry taint
+--null-deref`): it is a memory diagnostic with a different precision trade-off from the
+taint rules, and the default pack's results stay pinned. -/
+def Scry.analyzeCore (p : Wil.Program) (pack0 : Scry.RulePack) (withNull : Bool) :
+    Scry.ProgramResult :=
+  Scry.analyzeCoreBounded p pack0 .false .none withNull
+
+/-- The same analysis with the S5 nullness pass appended to the memory diagnostics. -/
+def Scry.analyzeWithNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .true
+
+/-- The default analysis; kept as the historical name. -/
+def Scry.analyzeWithoutNull (p : Wil.Program) (pack0 : Scry.RulePack) : Scry.ProgramResult :=
+  Scry.analyzeCore p pack0 .false
 -- ## Stitching paths across calls
 
 /-- The parameter position of a register in a plan. -/
@@ -520,7 +579,7 @@ def Scry.returnChain (r : Scry.FuncResult) : List Scry.PathNode :=
     | .none => .nil
     | .some d =>
       List.append (Scry.chainToDef r.fn.name r.plan.seeds st d p.2)
-        (List.cons (Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue) .nil)
+        [(Scry.PathNode.mk r.fn.name p.1 p.2 Scry.PathKind.returnValue)]
 
 /-- A caller path to the argument at `pos` of a call site, if one is tainted. -/
 def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
@@ -536,7 +595,7 @@ def Scry.argPath (r : Scry.FuncResult) (site : Scry.CallSite) (pos : Nat) :
       | .none => .none
       | .some d =>
         .some (List.append (Scry.chainToDef r.fn.name r.plan.seeds st d v)
-          (List.cons (Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call) .nil))
+          [(Scry.PathNode.mk r.fn.name site.node v Scry.PathKind.call)])
     else .none
 
 /-- Find a caller that passes taint into parameter `pos` of `callee`. -/
@@ -633,7 +692,7 @@ def Scry.findingKeyLess (a b : Scry.RuleFinding) : Bool :=
 
 def Scry.insertRuleFinding (f : Scry.RuleFinding) (fs : List Scry.RuleFinding) : List Scry.RuleFinding :=
   match fs with
-  | .nil => List.cons f .nil
+  | .nil => [f]
   | .cons x xs => match Scry.findingKeyLess f x with
     | .true => List.cons f fs
     | .false => List.cons x (Scry.insertRuleFinding f xs)

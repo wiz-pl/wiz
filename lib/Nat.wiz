@@ -1,5 +1,5 @@
 import Logic
-import Order
+import Data.Order
 /-!
 # Nat
 
@@ -9,10 +9,10 @@ order, proved by hand from `0` and `succ`.
 The order is the Prelude's Boolean `Nat.le`, made a proposition by `= .true`
 (`Nat.Le m n := Nat.le m n = .true`). An equation of Booleans computes, so
 `Nat.Le (succ m) (succ n)` *is* `Nat.Le m n` and `Nat.Le 0 n` is `True`: many order
-facts hold by `rfl`, and case splits use `Bool.cases`. `m ≤ n` and `m < n` (lib/Order.wiz)
+facts hold by `rfl`, and case splits use `Bool.cases`. `m ≤ n` and `m < n` (lib/Data/Order.wiz)
 are `Nat.Le` and `Nat.Lt`.
 
-Main definitions: `congrArg`, `congrArg2`; the laws `Nat.add_comm`, `Nat.add_assoc`,
+Main definitions: the laws `Nat.add_comm`, `Nat.add_assoc`,
 `Nat.mul_comm`, `Nat.mul_assoc`, `Nat.mul_add`, `Nat.add_mul`, …; cancellation
 (`Nat.add_left_cancel`); `Nat.Le`, `Nat.Lt` with reflexivity, transitivity,
 antisymmetry, totality (`Nat.le_cases`) and monotonicity of `+` and `*`; `Nat.cmp`, a
@@ -40,57 +40,57 @@ instance : LT Nat := LT.mk Nat.Lt
 -- ## Equality helpers
 
 /-- Applying `f` to equal arguments gives equal results. -/
-def congrArg.{u, v} {A : Type u} {B : Type v} (f : A → B) {a b : A} (e : a = b) : f a = f b :=
+def congrArg.{u, v} {A : Type u} {B : Type v} (f : A → B) {0 a b : A} (e : a = b) : f a = f b :=
   transp (fun b _ => f a = f b) (refl (f a)) e
 /-- `congrArg` for a function of two arguments. -/
-def congrArg2 {A B C : Type} (f : A → B → C) {a a' : A} {b b' : B} (e : a = a') (e' : b = b') :
+def congrArg2 {A B C : Type} (f : A → B → C) {0 a a' : A} {0 b b' : B} (e : a = a') (e' : b = b') :
     f a b = f a' b' :=
   Eq.trans (Eq.congrArg (fun x => f x b) e) (Eq.congrArg (f a') e')
 /-- Transport a proposition backwards along an equation: from `P b` and `a = b`, `P a`. -/
-def Eq.mpr' {A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
+def Eq.mpr' {A : Type} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P b) : P a :=
   Eq.substProp P (Eq.symm e) h
 /-- Transport a proposition along an equation: from `P a` and `a = b`, `P b`. -/
-def Eq.mp' {A : Type} {a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
+def Eq.mp' {A : Type} {0 a b : A} (0 P : A → Prop) (e : a = b) (h : P a) : P b :=
   Eq.substProp P e h
 /-- `Eq.trans` with the middle term written out, for chains whose steps need their
 equation as the expected type (`nat_ring!`, `int_ring!`). -/
-def Eq.via {A : Type} {a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
+def Eq.via {A : Type} {0 a c : A} (b : A) (h1 : a = b) (h2 : b = c) : a = c := Eq.trans h1 h2
 
 -- ## Addition
 
 /-- `n + 0 = n` (`+` recurses on its first argument, so this needs induction). -/
 def Nat.add_zero : (n : Nat) → n + 0 = n
   | .zero => rfl
-  | .succ n => congrArg Nat.succ (Nat.add_zero n)
+  | .succ n => Eq.congrArg Nat.succ (Nat.add_zero n)
 /-- `0 + n = n`, by computation. -/
 def Nat.zero_add (n : Nat) : 0 + n = n := rfl
 /-- `m + (n + 1) = (m + n) + 1`. -/
 def Nat.add_succ : (m n : Nat) → m + Nat.succ n = Nat.succ (m + n)
   | .zero, _ => rfl
-  | .succ m, n => congrArg Nat.succ (Nat.add_succ m n)
+  | .succ m, n => Eq.congrArg Nat.succ (Nat.add_succ m n)
 /-- `(m + 1) + n = (m + n) + 1`, by computation. -/
 def Nat.succ_add (m n : Nat) : Nat.succ m + n = Nat.succ (m + n) := rfl
 /-- Addition is commutative. -/
 def Nat.add_comm : (m n : Nat) → m + n = n + m
   | .zero, n => Eq.symm (Nat.add_zero n)
-  | .succ m, n => Eq.trans (congrArg Nat.succ (Nat.add_comm m n)) (Eq.symm (Nat.add_succ n m))
+  | .succ m, n => Eq.trans (Eq.congrArg Nat.succ (Nat.add_comm m n)) (Eq.symm (Nat.add_succ n m))
 /-- Addition is associative. -/
 def Nat.add_assoc : (a b c : Nat) → a + b + c = a + (b + c)
   | .zero, _, _ => rfl
-  | .succ a, b, c => congrArg Nat.succ (Nat.add_assoc a b c)
+  | .succ a, b, c => Eq.congrArg Nat.succ (Nat.add_assoc a b c)
 /-- `a + (b + c) = b + (a + c)`. -/
 def Nat.add_left_comm (a b c : Nat) : a + (b + c) = b + (a + c) :=
   calc a + (b + c)
       = a + b + c := Eq.symm (Nat.add_assoc a b c)
-       _ = b + a + c := congrArg (fun x => x + c) (Nat.add_comm a b)
+       _ = b + a + c := Eq.congrArg (fun x => x + c) (Nat.add_comm a b)
        _ = b + (a + c) := Nat.add_assoc b a c
 /-- `n + 1 = succ n`. -/
 def Nat.add_one (n : Nat) : n + 1 = Nat.succ n :=
-  Eq.trans (Nat.add_succ n 0) (congrArg Nat.succ (Nat.add_zero n))
+  Eq.trans (Nat.add_succ n 0) (Eq.congrArg Nat.succ (Nat.add_zero n))
 /-- `succ` is injective (an equation of constructors computes to one of their fields). -/
-def Nat.succ_inj {m n : Nat} (e : Nat.succ m = Nat.succ n) : m = n := e
+def Nat.succ_inj {0 m n : Nat} (e : Nat.succ m = Nat.succ n) : m = n := e
 /-- Cancel a summand on the left: `k + m = k + n → m = n`. -/
-def Nat.add_left_cancel : (k : Nat) → {m n : Nat} → k + m = k + n → m = n
+def Nat.add_left_cancel : (k : Nat) → {0 m n : Nat} → k + m = k + n → m = n
   | .zero, _, _, e => e
   | .succ k, _, _, e => @Nat.add_left_cancel k _ _ e
 /-- Cancel a summand on the right: `m + k = n + k → m = n`. -/
@@ -115,12 +115,12 @@ def Nat.mul_succ : (m n : Nat) → m * Nat.succ n = m + m * n
   | .zero, _ => rfl
   | .succ m, n =>
     -- succ n + m * succ n = succ m + (n + m * n)
-    congrArg Nat.succ
-      (Eq.trans (congrArg (fun x => n + x) (Nat.mul_succ m n)) (Nat.add_left_comm n m (m * n)))
+    Eq.congrArg Nat.succ
+      (Eq.trans (Eq.congrArg (fun x => n + x) (Nat.mul_succ m n)) (Nat.add_left_comm n m (m * n)))
 /-- Multiplication is commutative. -/
 def Nat.mul_comm : (m n : Nat) → m * n = n * m
   | .zero, n => Eq.symm (Nat.mul_zero n)
-  | .succ m, n => Eq.trans (congrArg (fun x => n + x) (Nat.mul_comm m n)) (Eq.symm (Nat.mul_succ n m))
+  | .succ m, n => Eq.trans (Eq.congrArg (fun x => n + x) (Nat.mul_comm m n)) (Eq.symm (Nat.mul_succ n m))
 /-- `1 * n = n`. -/
 def Nat.one_mul (n : Nat) : 1 * n = n := Nat.add_zero n
 /-- `n * 1 = n`. -/
@@ -128,22 +128,22 @@ def Nat.mul_one (n : Nat) : n * 1 = n := Eq.trans (Nat.mul_comm n 1) (Nat.one_mu
 /-- Multiplication distributes over addition on the right. -/
 def Nat.add_mul : (a b c : Nat) → (a + b) * c = a * c + b * c
   | .zero, _, _ => rfl
-  | .succ a, b, c => Eq.trans (congrArg (fun x => c + x) (Nat.add_mul a b c)) (Eq.symm (Nat.add_assoc c (a * c) (b * c)))
+  | .succ a, b, c => Eq.trans (Eq.congrArg (fun x => c + x) (Nat.add_mul a b c)) (Eq.symm (Nat.add_assoc c (a * c) (b * c)))
 /-- Multiplication distributes over addition on the left. -/
 def Nat.mul_add (a b c : Nat) : a * (b + c) = a * b + a * c :=
   calc a * (b + c)
       = (b + c) * a := Nat.mul_comm a (b + c)
        _ = b * a + c * a := Nat.add_mul b c a
-       _ = a * b + a * c := congrArg2 (fun x y => x + y) (Nat.mul_comm b a) (Nat.mul_comm c a)
+       _ = a * b + a * c := Eq.congrArg2 (fun x y => x + y) (Nat.mul_comm b a) (Nat.mul_comm c a)
 /-- Multiplication is associative. -/
 def Nat.mul_assoc : (a b c : Nat) → a * b * c = a * (b * c)
   | .zero, _, _ => rfl
-  | .succ a, b, c => Eq.trans (Nat.add_mul b (a * b) c) (congrArg (fun x => b * c + x) (Nat.mul_assoc a b c))
+  | .succ a, b, c => Eq.trans (Nat.add_mul b (a * b) c) (Eq.congrArg (fun x => b * c + x) (Nat.mul_assoc a b c))
 /-- `a * (b * c) = b * (a * c)`. -/
 def Nat.mul_left_comm (a b c : Nat) : a * (b * c) = b * (a * c) :=
   calc a * (b * c)
       = a * b * c := Eq.symm (Nat.mul_assoc a b c)
-       _ = b * a * c := congrArg (fun x => x * c) (Nat.mul_comm a b)
+       _ = b * a * c := Eq.congrArg (fun x => x * c) (Nat.mul_comm a b)
        _ = b * (a * c) := Nat.mul_assoc b a c
 
 -- ## Comparisons as data
@@ -153,7 +153,7 @@ def Nat.beq_eq : (m n : Nat) → Nat.beq m n = .true → m = n
   | .zero, .zero, _ => rfl
   | .zero, .succ _, h => absurd h.1
   | .succ _, .zero, h => absurd h.1
-  | .succ m, .succ n, h => congrArg Nat.succ (Nat.beq_eq m n h)
+  | .succ m, .succ n, h => Eq.congrArg Nat.succ (Nat.beq_eq m n h)
 
 /-- The result of a three-way comparison. -/
 inductive Ordering where
@@ -183,7 +183,7 @@ def Nat.cmp_eq : (m n : Nat) → Nat.cmp m n = .eq → m = n
   | .zero, .zero, _ => rfl
   | .zero, .succ _, h => absurd h.1
   | .succ _, .zero, h => absurd h.1
-  | .succ m, .succ n, h => congrArg Nat.succ (Nat.cmp_eq m n h)
+  | .succ m, .succ n, h => Eq.congrArg Nat.succ (Nat.cmp_eq m n h)
 
 -- ## Order
 
@@ -216,7 +216,7 @@ def Nat.le_antisymm : (a b : Nat) → Nat.Le a b → Nat.Le b a → a = b
   | .zero, .zero, _, _ => rfl
   | .zero, .succ b, _, h => absurd (Nat.not_succ_le_zero b h)
   | .succ a, .zero, h, _ => absurd (Nat.not_succ_le_zero a h)
-  | .succ a, .succ b, h, h' => congrArg Nat.succ (Nat.le_antisymm a b h h')
+  | .succ a, .succ b, h, h' => Eq.congrArg Nat.succ (Nat.le_antisymm a b h h')
 /-- `≤` is total. -/
 def Nat.le_cases : (a b : Nat) → Nat.Le a b ∨ Nat.Le b a
   | .zero, _ => Or.inl rfl
@@ -253,28 +253,28 @@ def Nat.lt_trans (a b c : Nat) (h : Nat.Lt a b) (h' : Nat.Lt b c) : Nat.Lt a c :
 -- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz). The equation instances
 -- transport a proof along `=`, so `a = b ≤ c` and `a ≤ b = c` both give `a ≤ c`.
 /-- `a = b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a = b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Le x c) (Eq.symm e) h)
 /-- `a ≤ b → b = c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b = c) (a ≤ c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Le a x) e h)
 /-- `a = b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a = b) (b < c) (a < c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Nat) => Nat.Lt x c) (Eq.symm e) h)
 /-- `a < b → b = c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a < b) (b = c) (a < c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Nat) => Nat.Lt a x) e h)
 /-- `a ≤ b → b ≤ c → a ≤ c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun h h' => Nat.le_trans a b c h h')
 /-- `a ≤ b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a ≤ b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_of_le_of_lt a b c h h')
 /-- `a < b → b ≤ c → a < c`. -/
-instance (priority := 1001) {a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
+instance (priority := 1001) {0 a b c : Nat} : Trans (a < b) (b ≤ c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_of_lt_of_le a b c h h')
 /-- `a < b → b < c → a < c`. -/
-instance {a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
+instance {0 a b c : Nat} : Trans (a < b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Nat.lt_trans a b c h h')
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Nat.not_lt_of_le (a b : Nat) (h : Nat.Le a b) (h' : Nat.Lt b a) : False :=
@@ -333,7 +333,7 @@ def Nat.mul_pos (a b : Nat) (ha : Nat.Lt 0 a) (hb : Nat.Lt 0 b) : Nat.Lt 0 (a * 
 /-- `pred (subFrom a (b + 1)) = subFrom a b`, the step behind `Nat.succ_sub_succ`. -/
 def Nat.pred_subFrom_succ : (a b : Nat) → Nat.pred (Nat.subFrom a (Nat.succ b)) = Nat.subFrom a b
   | .zero, _ => rfl
-  | .succ a, b => congrArg Nat.pred (Nat.pred_subFrom_succ a b)
+  | .succ a, b => Eq.congrArg Nat.pred (Nat.pred_subFrom_succ a b)
 /-- `(b + 1) - (a + 1) = b - a`. -/
 def Nat.succ_sub_succ (b a : Nat) : Nat.succ b - Nat.succ a = b - a := Nat.pred_subFrom_succ a b
 /-- `n - 0 = n`, by computation. -/
@@ -341,7 +341,7 @@ def Nat.sub_zero (n : Nat) : n - 0 = n := rfl
 /-- `0 - n = 0`. -/
 def Nat.zero_sub : (n : Nat) → 0 - n = 0
   | .zero => rfl
-  | .succ n => congrArg Nat.pred (Nat.zero_sub n)
+  | .succ n => Eq.congrArg Nat.pred (Nat.zero_sub n)
 /-- `(a + k) - a = k`. -/
 def Nat.add_sub_cancel_left : (a k : Nat) → a + k - a = k
   | .zero, _ => rfl
@@ -353,18 +353,18 @@ def Nat.sub_self_add : (n k : Nat) → n - (n + k) = 0
 /-- `(a + k) - (b + k) = a - b`. -/
 def Nat.add_sub_add_right : (a b k : Nat) → (a + k) - (b + k) = a - b
   | a, b, .zero =>
-    congrArg2 (fun x y => x - y) (Nat.add_zero a) (Nat.add_zero b)
+    Eq.congrArg2 (fun x y => x - y) (Nat.add_zero a) (Nat.add_zero b)
   | a, b, .succ k =>
     calc a + Nat.succ k - (b + Nat.succ k)
         = Nat.succ (a + k) - Nat.succ (b + k) :=
-          congrArg2 (fun x y => x - y) (Nat.add_succ a k) (Nat.add_succ b k)
+          Eq.congrArg2 (fun x y => x - y) (Nat.add_succ a k) (Nat.add_succ b k)
          _ = a + k - (b + k) := Nat.succ_sub_succ (a + k) (b + k)
          _ = a - b := Nat.add_sub_add_right a b k
 /-- `a ≤ b → a + (b - a) = b`: the difference. -/
 def Nat.add_sub_of_le : (a b : Nat) → Nat.Le a b → a + (b - a) = b
   | .zero, _, _ => rfl
   | .succ a, .zero, h => absurd (Nat.not_succ_le_zero a h)
-  | .succ a, .succ b, h => congrArg Nat.succ (Eq.trans (congrArg (fun x => a + x) (Nat.succ_sub_succ b a)) (Nat.add_sub_of_le a b h))
+  | .succ a, .succ b, h => Eq.congrArg Nat.succ (Eq.trans (Eq.congrArg (fun x => a + x) (Nat.succ_sub_succ b a)) (Nat.add_sub_of_le a b h))
 
 -- ## The default `simp` set
 --

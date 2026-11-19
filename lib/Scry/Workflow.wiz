@@ -637,7 +637,7 @@ def Scry.wfFind (st : Scry.WfStore) (id : String) : Option Scry.WfRecord :=
 /-- Replace the record with the same id, or append it. -/
 def Scry.wfUpsert (st : Scry.WfStore) (r : Scry.WfRecord) : Scry.WfStore :=
   match Scry.wfFind st r.id with
-  | .none => Scry.WfStore.mk (List.append st.findings (List.cons r .nil))
+  | .none => Scry.WfStore.mk (List.append st.findings [r])
   | .some _ =>
     Scry.WfStore.mk (List.map (fun x => match String.eq x.id r.id with
       | .true => r
@@ -745,7 +745,7 @@ def Scry.wfTriage (r : Scry.WfRecord) (to : Scry.WfState) (actor : String) (reas
   | .error e => .error e
   | .ok state =>
     let h := Scry.WfHistory.mk state at actor reason;
-    .ok { r with state := state, history := List.append r.history (List.cons h .nil) }
+    .ok { r with state := state, history := List.append r.history [h] }
 
 -- ## Small helpers used by the command and its tests
 

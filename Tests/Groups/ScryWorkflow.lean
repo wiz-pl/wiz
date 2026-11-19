@@ -13,7 +13,7 @@ open Wiz
 
 namespace Tests.ScryWorkflow
 
-/-- Every `lib/*.wiz` and `lib/D/*.wiz` (as `D.X`), by module name. -/
+/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name. -/
 def libLoader : IO (Name → Option String) := do
   let mut m : List (Name × String) := []
   for e in ← System.FilePath.readDir "lib" do

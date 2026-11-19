@@ -301,6 +301,105 @@ def clip_text(text: str, limit: int = MAX_TEXT) -> tuple[str, bool]:
     return text[:limit] + TRUNCATION_MARK.format(n=len(text) - limit), True
 
 
+#: A child's pipes are drained in chunks; at most MAX_TEXT characters per stream are
+#: kept, and past this many characters the child's process group is killed. Without
+#: that hard cap a repository file that makes `wiz`/`scry` print hundreds of megabytes
+#: would be buffered whole by `communicate()` and OOM the server (security-07).
+MAX_OUTPUT = 8 * 1024 * 1024
+
+
+def _read_capped(stream: Any, keep: int, hard: int, kill: Any) -> tuple[str, int]:
+    """Drain `stream`, returning at most `keep` characters and the true length.
+
+    Counting continues after the keep limit (nothing more is stored), so the truncation
+    marker can name the real number omitted. `kill()` is called once when either stream
+    exceeds `hard`.
+    """
+    chunks: list[str] = []
+    kept = 0
+    total = 0
+    killed = False
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            if kept < keep:
+                take = min(keep - kept, len(chunk))
+                chunks.append(chunk[:take])
+                kept += take
+            if total > hard and not killed:
+                killed = True
+                kill()
+    except (OSError, ValueError):
+        pass
+    return "".join(chunks), total
+
+
+def _fit_text(kept: str, total: int, limit: int = MAX_TEXT) -> tuple[str, bool]:
+    """`kept` plus a marker that names the omitted characters, within `limit`."""
+    if total <= len(kept):
+        return kept, False
+    marker = TRUNCATION_MARK.format(n=total - limit)
+    keep_len = max(0, limit - len(marker))
+    marker = TRUNCATION_MARK.format(n=max(0, total - keep_len))
+    keep_len = max(0, limit - len(marker))
+    return kept[:keep_len] + marker, True
+
+
+def _communicate_bounded(
+    proc: "subprocess.Popen[Any]",
+    timeout: Optional[float],
+    *,
+    keep: int = MAX_TEXT,
+    hard: int = MAX_OUTPUT,
+) -> tuple[tuple[str, int], tuple[str, int], bool]:
+    """`communicate()` with a bounded buffer.
+
+    Returns `(stdout, stderr)` as `(kept, true_length)` and whether the timeout fired.
+    Both pipes are read concurrently in daemon threads, so a child cannot block on a
+    full pipe; when either stream passes `hard`, the whole process group is killed.
+    """
+    results: dict[str, tuple[str, int]] = {}
+
+    def reader(key: str, stream: Any) -> None:
+        results[key] = _read_capped(stream, keep, hard, lambda: _kill_process_group(proc))
+
+    threads = [
+        threading.Thread(target=reader, args=("stdout", proc.stdout), daemon=True),
+        threading.Thread(target=reader, args=("stderr", proc.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_process_group(proc)
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    except BaseException:
+        _kill_process_group(proc)
+        raise
+    for thread in threads:
+        thread.join(timeout=5)
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    return results.get("stdout", ("", 0)), results.get("stderr", ("", 0)), timed_out
+
+
+def run_truncated(run: dict[str, Any]) -> bool:
+    """Whether `_run` clipped either stream while reading it."""
+    return bool(run.get("stdout_truncated") or run.get("stderr_truncated"))
+
+
 def clip_result(result: Any) -> tuple[Any, bool]:
     """Serialize a JSON result; if it is too big, return an explicit preview object."""
     raw = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
@@ -341,6 +440,7 @@ def make_envelope(
     stderr: str = "",
     result: Any = None,
     error: Optional[dict[str, str]] = None,
+    truncated: bool = False,
 ) -> dict[str, Any]:
     """The shape every tool returns, success or failure.
 
@@ -348,11 +448,12 @@ def make_envelope(
     `exit` carries the command's status; a `check` with type errors is
     `ok: false, exit: 1, error: null` with the messages in stderr. `error` is
     non-null only for a bridge-level failure (missing toolchain, timeout, bad
-    arguments, daemon failure).
+    arguments, daemon failure). `truncated` says the reader already dropped part of
+    the child's output while draining it (see `_communicate_bounded`).
     """
     stdout, trunc_out = clip_text(stdout)
     stderr, trunc_err = clip_text(stderr)
-    truncated = trunc_out or trunc_err
+    truncated = truncated or trunc_out or trunc_err
     if result is not None:
         result, trunc_result = clip_result(result)
         truncated = truncated or trunc_result
@@ -1901,24 +2002,28 @@ class Server:
         except OSError as exc:
             raise ToolError("io_error", f"cannot run wiz: {exc}", stderr=str(exc)) from exc
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            _kill_process_group(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
-            raise ToolError(
-                "timeout",
-                f"`wiz {' '.join(args)}` did not finish within {timeout:.0f}s (the process group was killed)",
-                stdout=_as_text(stdout) or _as_text(exc.stdout),
-                stderr=_as_text(stderr) or _as_text(exc.stderr),
-            ) from exc
+            (stdout, out_total), (stderr, err_total), timed_out = _communicate_bounded(
+                proc, timeout, keep=MAX_TEXT, hard=MAX_OUTPUT)
         except BaseException:
             _kill_process_group(proc)
             proc.wait()
             raise
-        return {"exit": proc.returncode, "stdout": stdout or "", "stderr": stderr or ""}
+        stdout_text, out_trunc = _fit_text(stdout, out_total)
+        stderr_text, err_trunc = _fit_text(stderr, err_total)
+        if timed_out:
+            raise ToolError(
+                "timeout",
+                f"`wiz {' '.join(args)}` did not finish within {timeout:.0f}s (the process group was killed)",
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
+        return {
+            "exit": proc.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_truncated": out_trunc,
+            "stderr_truncated": err_trunc,
+        }
 
     def _text_of(self, args: dict[str, Any], path: str) -> str:
         text = args.get("text")
@@ -1936,7 +2041,8 @@ class Server:
         timeout = self.config.timeout
         if name == "version":
             run = self._run(["--version"], timeout, use_cache=False)
-            return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+            return make_envelope(name, ok=run["exit"] == 0, exit_code=run["exit"], stdout=run["stdout"],
+                                 stderr=run["stderr"], truncated=run_truncated(run))
         if name in ("search", "doc"):
             return self._library_tool(name, args)
 
@@ -1967,10 +2073,12 @@ class Server:
             return make_envelope(
                 name, ok=run["exit"] == 0, path=path, exit_code=run["exit"],
                 stdout=run["stdout"], stderr=run["stderr"], result=result,
+                truncated=run_truncated(run),
             )
         if name == "parse":
             run = self._run(["parse", path], timeout)
-            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"],
+                                 stdout=run["stdout"], stderr=run["stderr"], truncated=run_truncated(run))
         if name == "fmt":
             extra = ["fmt", path]
             if _optional_bool(args, "check"):
@@ -1981,7 +2089,8 @@ class Server:
                     raise ToolError("invalid_args", "`width` must be an integer between 1 and 10000")
                 extra += ["--width", str(width)]
             run = self._run(extra, timeout)
-            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"],
+                                 stdout=run["stdout"], stderr=run["stderr"], truncated=run_truncated(run))
         if name == "build":
             out = _require_str(args, "out")
             out = confine(resolve_path(self.config.workspace, out), self.write_roots(), what="output")
@@ -1991,7 +2100,8 @@ class Server:
             if _optional_bool(args, "lib"):
                 extra.append("--lib")
             run = self._run(extra, timeout)
-            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"], stdout=run["stdout"], stderr=run["stderr"])
+            return make_envelope(name, ok=run["exit"] == 0, path=path, exit_code=run["exit"],
+                                 stdout=run["stdout"], stderr=run["stderr"], truncated=run_truncated(run))
 
         # LSP-backed tools: one daemon, one call at a time, one deadline.
         deadline = time.monotonic() + timeout
@@ -2396,14 +2506,6 @@ class Resources:
                 raise ToolError("invalid_args", f"bad stage name {name!r}")
             return text(self._text(f"docs/stages/{name}.md"), "text/markdown")
         raise ToolError("not_found", f"unknown resource {uri}")
-
-
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
 
 
 def _kill_process_group(proc: subprocess.Popen[Any]) -> None:

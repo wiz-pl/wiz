@@ -10,7 +10,7 @@ generated `parser.c` (29.7 MB) is not committed.
 |---|---|---|---|
 | [tree-sitter](https://github.com/tree-sitter/tree-sitter) | v0.27.2 | `3fb7be49145acfb07e33b61ed5689e2b6771b2e9` | vendored, `tree-sitter/` |
 | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | v0.24.2 | `b780e47fc780ddc8da13afa35a3f4ed5c157823d` | vendored, `tree-sitter-c/` |
-| [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | v0.23.5 | `cac6d5fb595f5811a076336682d5d595ac1c9e85` | Nix, `.#tree-sitter-c-sharp` |
+| [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | v0.23.5 + scry's patch | `cac6d5fb595f5811a076336682d5d595ac1c9e85` | Nix, `.#tree-sitter-c-sharp` |
 
 All three are MIT licensed. The vendored licence texts are `tree-sitter/LICENSE` and
 `tree-sitter-c/LICENSE`; tree-sitter-c-sharp's is in the fetched tree and copied below.
@@ -19,13 +19,29 @@ Each grammar's `src/parser.c` is the upstream generated file, not regenerated he
 
 ### tree-sitter-c-sharp
 
-`flake.nix` pins it as `fetchFromGitHub` of commit `cac6d5fb…` (tag `v0.23.5`, annotated
-tag object `173c15453b733ccde654032fec7103705b5ad04f`) with hash
-`sha256-N5AAlwQFGGi47cj0m7Te08bA486gwY6NBOx4Qcy4lpo=`. The build reads
-`src/parser.c`, `src/scanner.c` (the external scanner: interpolated and raw strings,
-preprocessor lines) and `src/tree_sitter/*.h`; `src/node-types.json` describes the node
-kinds that `src/Scry/CsCst.wiz` reads. `parser.c` is 29 664 333 bytes and compiles at
-`-O2` in about 1.5 s.
+`flake.nix` pins the upstream tree as `fetchFromGitHub` of commit `cac6d5fb…` (tag
+`v0.23.5`, annotated tag object `173c15453b733ccde654032fec7103705b5ad04f`) with hash
+`sha256-N5AAlwQFGGi47cj0m7Te08bA486gwY6NBOx4Qcy4lpo=`, then applies
+`tree-sitter-c-sharp-v0.23.5-fixes.patch` and regenerates the parser with
+`tree-sitter generate --js-runtime native --abi 15` (the tree-sitter in nixpkgs). The
+build reads `src/parser.c`, `src/scanner.c` (the external scanner: interpolated and raw
+strings, preprocessor lines) and `src/tree_sitter/*.h`; `src/node-types.json` describes
+the node kinds that `src/Scry/CsCst.wiz` reads. `parser.c` is 29 664 333 bytes and
+compiles at `-O2` in about 1.5 s.
+
+The patch carries two grammar fixes that were still upstream in 0.23.5 and are in
+tree-sitter-c-sharp master (0.24.0), each with a minimal reproducer under
+`scry/corpus/csharp/` and the real files listed in `CSHARP.md` §8.2:
+
+* `_reserved_identifier` gains `with`, `partial` and `required`. They are *contextual*
+  keywords, so `var with = …`, `partial.Member` and `required.Member` are valid C#
+  identifiers outside their keyword position.
+* `list_pattern` gains master's `slice_pattern` rule, so a C# 11 slice with a
+  designation (`['[', .. var middle, ']']`) parses.
+
+The patch touches `grammar.js` only; `parser.c` is generated, not hand-edited, and the
+generated tree stays ABI 15. `scry/CSHARP.md` §8.2 records the whole-tree before/after:
+16 files refused → 0.
 
 To compile scry's native code (`grail build`, `wiz build tools/CstMain.wiz`, …), make
 the out-link from the repository root first:

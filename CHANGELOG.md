@@ -10,6 +10,70 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
+  binder with no written quantity is `0` only when its type is a sort or a proposition
+  (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index
+  `{n : Nat}` — is `ω`. A written `{0}` (or `(0 x : A)`), `{1}` or `{ω}` is authoritative.
+  The decision is made at the binder from the type known there: `{A}` and `{A : _}` are
+  data (ω) even if a later use solves the metavariable to `Type`; write the type or the
+  quantity to erase it. `lib/` now writes `{0 …}` on the data implicits it used to leave
+  bare, so its erasure is unchanged, but **user code is not migrated**: an existing
+  `{n : Nat}` index is now passed and computed at run time (an unused one is not free:
+  `onlyType ((Nat.add k 5))`, where it used to be `onlyType ◾`), and a recursive
+  definition that passes a `{0 n}` constructor field to such an index must write
+  `{0 n : Nat}` — the bare form is rejected with a quantity error at the binder, not
+  silently erased. The Lean and self-hosted frontends decide identically (`=elab`,
+  `=selfhost`).
+* CI: the test matrix is listed longest first, and `selfhost-libdiff` is four jobs. The
+  sweep over `lib/` and `scry/` was one 45-minute case and the run's critical path (run
+  44333554608: 2679 s, of which 423 s built the self-hosted compiler, with 3 files at a
+  time); it is now four cases, each a contiguous file range by index (every file is still
+  checked exactly once in both compilers), each about 16 minutes in its own job. A new
+  `"split-cases": true` shard field lets the splitter spread cases that share a program
+  over the jobs and charges each part the build it pays, and `scripts/ci.py matrix` sorts
+  the shards by the same estimated cost: GitHub's 20-job cap made the late matrix entries
+  wait (`test (prop)` started 16 minutes after the wave), so the expensive work now
+  starts first.
+* scry C#: known expansions for method groups, `nameof` and a few CLR helpers. A C#
+  method group is now a function value (`fnptr "$method:Ns.Class.Method"`) rather than an
+  `unknown name … havoc`, and a local initialised from a static method group calls that
+  method (an assignment updates or clears the target). `nameof(x)` names `x` instead of
+  sharing one `$str:nameof` constant, and `String.Format`, `ConfigureAwait`,
+  `Task.FromResult`, `ThrowIfNull`/`ThrowIfNullOrEmpty` are emitted as templates over
+  their arguments (`CSHARP.md` §11). The table is exact-name only, the method-group
+  lookup is the unit's own method table, and an unknown name still warns — measured on
+  `src/Crux.Api`, lowering warnings drop 513 → 420 (`unknown name` 173 → 80, every one
+  of the 93 removed a unit method) while the new `cwe78-macro-unsafe` fixture gains the
+  finding the havoc used to hide.
+* scry C#: **the first finding on real code** (`src/Crux.Api`, same 75 files, 240
+  functions: 0 → 7). The frontend, the rule pack and the call graph disagreed on names:
+  a file that relies on ASP.NET's implicit usings lowers `HttpRequest.get_ContentType`
+  (the pack named `Microsoft.AspNetCore.Http.HttpRequest.get_ContentType`), each file's
+  lowering keeps `Class.Method` for a class in another file (the merged program has
+  `Ns.Class.Method`), and a method group's `$method:` prefix defeated the C-ABI
+  "address taken ⇒ callback" test. `Scry.Cs.resolveCalls` reconciles the merged
+  program's direct callees (unique suffix only), the `$method:` prefix is stripped for
+  the entry test, and `Scry.Models` names the HTTP request sources under all three
+  spellings. `ILogger.Log*` is a `log` sink class (CWE-117) on its pointer-like
+  arguments, and `scry cs` uses the entry policy (`Scry.analyzeC`) so route parameters
+  are sources. `unmodelled-external` falls 917 → 845, `unknown-memory` 59 → 36, and the
+  findings are the route-value log lines in `SchemeInboundReceiver` and
+  `SchemeOperatorAdmission`; `taint/cwe117-log-unsafe`/`-safe` pin the model.
+* editor: the playground's textarea has hover and go-to-definition. When the caret rests
+  after a click, a selection or an arrow/Home/End/Page key, the page sends
+  `textDocument/hover` and draws the answer (the identifier's type and, for a global, its
+  doc comment) in a card under the caret; F12 and Ctrl/⌘-click send
+  `textDocument/definition`, moving the caret to a location in the page's own document
+  and naming a library location (`Prelude.wiz:7:1`) that it cannot open. The card renders
+  the server's Markdown as text, never as HTML; `?hover=off` turns it off. The server
+  already implemented both requests (`Wiz/LSP.lean`); `web/hover.js` is the page half and
+  `web/hover_test.mjs` tests it without a browser or a Wiz build.
+* nvim: on Neovim 0.10, where Neovim installs no LSP keymaps and has no
+  `vim.lsp.completion`, the plugin now fills both gaps: `lsp.keymaps` (`'auto'`, `true`,
+  `false`; a key the user mapped is never replaced) installs `K`, `gd`, `gD`, `grn`,
+  `grr`, `gra`, `gO`, `]d`, `[d` and `<C-s>`, and `lsp.completion` sets `omnifunc` to the
+  client's completion (so `<C-x><C-o>` — and `<C-Space>`, which types it — work). On
+  0.11+ the plugin leaves Neovim's own mappings and completion alone.
 * playground: an exit no longer costs a Wasm instance. A clean stop — `Process.exit`,
   the one-threaded build's refusal to fork or block, a failed `IO.writeFile` — now
   `longjmp`s back to a boundary armed around each exported call (`wiz_stop_run`,
@@ -128,6 +192,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   normalised to constructs, so a first run answers "what didn't you look at?" in one
   screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
   counts, coverage rows, JSON and every exit status.
+* scry C#: the 16 real files `scry cs` could not parse now parse. Both gaps were in
+  tree-sitter-c-sharp v0.23.5: `with`, `partial` and `required` used as identifiers (15
+  files; they are contextual keywords, so `var with = …` and `partial.Member` are valid
+  C#) and a list-pattern slice with a designation (`['[', .. var x, ']']`, 1 file).
+  `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports both rules from
+  upstream master and the Nix derivation regenerates `src/parser.c`; a differential
+  parse of all 5 560 Nexus `.cs` files takes the error count from 16 to 0 with no file
+  gaining an error. The two reproducers now have spills, `parse/contextual` pins the
+  tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known
@@ -199,6 +272,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `namespace` command: `theorem`, `lemma` and `abbrev` written as command macros are
   shown with those kinds (a `lemma` as `theorem`), and dotted names (`T.f`) stay fully
   qualified since there is no namespace syntax.
+* examples are a gate (23f): group `examples` runs the root package's
+  `examples/*.expected` through the same `runTests` the tour uses, in three cases split
+  by name, in a new `examples` shard (`"split": 3`, inputs `examples/`, `lib/` and
+  `drafts/feral/lib/`) that `CI result` requires. A library change that shifts an
+  example's printed value now fails the suite instead of only a command a person runs.
+  The four benchmarks (`closed-table-bench`, `hdl-sim-bench`, `natives-bench`,
+  `scry-datalog-bench`) declare `-- test: skip` with a reason; the executable examples
+  (`io`, `std`, `effects`, `foreign`, `glue`, `import_c`, and `hdl-spi`/`hdl-stream`,
+  whose goldens were program output but were read as `check`s) declare `-- test: run`,
+  so their goldens are program output rather than a silent `check`; `plot.wiz`'s SVG is
+  compared byte for byte with `docs/assets/plot-example.svg` by group `plot`; and
+  `std.wiz`/`foreign.wiz` write to `FS.tempRoot` instead of a hard-coded scratch path,
+  so they run on any machine.
 * web: the playground's Goals pane is served **in the page by default**
   (`web/selfhost-lsp-shim.js`): the same Wasm engine answers the language-server protocol,
   so diagnostics and `#check`/`#eval` results appear with no server to start. Plain goal
@@ -213,6 +299,52 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   are split eight ways by the measured times. A case of a group that does not opt in
   to `Group.parallel` is told the driver's `--jobs`, for a sweep that runs its own
   workers.
+* selfhost: the frontend now handles the rest of A18 and A17's list literals and boolean
+  operators — as-patterns (`x@y@p`, in equations, `match`, literal and tuple rows), tuple
+  patterns (pair splitting without the kernel's `split`), `let (x, y)`/`let (x, y, z)`
+  (elaborated as a `match`, so `Kernel.wiz` needs no `split`) and `let () := u; b` (the
+  unit eliminator, also erased by the backend) — and list literals in terms and patterns
+  (`Parse.wiz` adds the host's `term.listLit` rule at precedence 1024; the frontend
+  rewrites the node to `List.cons`/`List.nil`, as the host's `ListLit.expand` does).
+  `&&`/`||`/`!` short-circuit and bind as on the host. Six `selfhost` cases compile one
+  program with the Lean host and with the self-hosted compiler and compare their outputs
+  rather than a literal (149–154). Still missing: `∃`/`¬` and `⟨…⟩`; a written quantity
+  other than ω on `let (x, y)` is refused.
+
+* selfhost: `Kernel.wiz` has the host's number literals and registered `Nat` operations
+  (lane E-K, B13): `Tm.nlit`/`Tm.natFn`, `Val.vnat`/`Val.vnatfn`, exact `KNat` numbers
+  (24-bit limbs; not `rt.c`'s 63-bit words), the native rules for `succ`, `pred`, `add`,
+  `sub`, `mul`, `div`, `mod`, `beq` and `blt`, and literal decisions in `vEq`, conversion
+  and `ind`. As in the host after `kernel-vnatop-lazy`, an operation on a definition's
+  glued value stays glued (`whnf` computes it; `nf` still does), an inner operation is
+  computed and kept as its numeral, and `vEq` does not force an expansive
+  `Nat.pow 2 (Nat.pow 2 28)`. The frontend does not emit literals yet (its hook is
+  `natLitDigits`/`natRegistered`).
+* selfhost: a `×` type in an inductive or structure field (`| mk (p : Nat × Bool)`)
+  no longer fails with `internal error: a variable out of scope`. The self-hosted
+  frontend's scope checker names a global by its index and `closeG` closes those indices
+  over the globals; it did not visit a `sigma`, so a syntactic pair in a field type kept
+  both components as scope indices (a pair written through a definition was fine). This
+  was the first error on `lib/Web/React.wiz` (21an).
+* selfhost: `attribute [implemented_by mk get] T.mk` now works end to end. The frontend
+  records the native representation (the constructor's tag, its one runtime field and the
+  two conversions' arities, the host's `ReprInfo`) and reports the host's diagnostics for
+  an unknown name, a constructor with more than one runtime field, or a `get` that does
+  not end in the type; the backend erases a value of `T` as `mk` applied to the
+  constructor's runtime field and feeds a match the model's field chain read with `get`,
+  so a `UIntN`-like type compiles to the same values and runtime layout as the Lean
+  toolchain. A differential case compiles and runs a sealed word type with extern
+  `mk`/`get` in both toolchains (GC and RC), and a verdict case pins the registrations
+  (21aa).
+* selfhost: `selfhost/Cli.wiz` now passes `--trust-native` (27a) to the frontend's
+  `Globals.trustNative`, so `wiz-selfhost check`, `build`, `run`/`eval` and the one-shot
+  mode accept `def X : a = b := native_refl` (C14). The flag is a switch before or after
+  the command, as in the host's `parseFlags`, is part of the driver's cache key (an
+  acceptance is never replayed without it), and `--trust-native=1` (the value form) is
+  the host's `unknown flag: …` with exit 2. `--trust-smt` (C15) is accepted too and only
+  selects the `smt` refusal. `--native-fuel N` is not accepted: the self-hosted evaluator
+  has no step counter, so the driver refuses it as an unknown flag rather than take a
+  flag with nothing to limit. Cases: *selfhost-cli* and *selfhost-cli-diff*.
 * concurrency (25a, 25d): `Lock` is now tested for mutual exclusion, not just for its
   linear `Guard`. The `conc` group's new cases run eight threads that bump a plain,
   non-atomic C counter a thousand times each under `Lock.with` and assert the exact total
@@ -255,6 +387,51 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   carry their payload's digest, so a truncated or edited entry is a miss, never a wrong
   verdict. Before, one graph-wide key mixed the modules' paths and the root's headers,
   so a dependency's `import_c` header and every `include_str` file were outside it.
+* scry: `scry taint` and `scry parse --stats` read C source as `Bytes` and parse it in
+  place (`FS.readBytes`, `Scry.Native.parseBytes`, `Scry.Cst.ofStoreBytes`), and
+  `parseBlock` sniffs the store format on bytes instead of `String.trim`-ing the whole
+  file. A 4 MiB source no longer becomes a `String` (`List Char`, two cons cells per
+  character): the memory ratio drops from ~287× to ~8× (a 3 MiB string literal peaks at 23.8 MiB). The summary fixpoint reuses the
+  converged round's `FuncResult`s for the results stage (it evaluated every function a
+  second time), prepares each function's plan once instead of per round, and indexes a
+  point's CFG predecessors (`Scry.Fn.pointPreds`) instead of rebuilding them by scanning
+  every point: the 525-byte 128-statement case drops from 12.85 s to 0.32 s (256 statements 2.2 s). Long
+  integer literals are parsed by halving the digit list (`Scry.parseDigitsAt`) instead
+  of one quadratic-size multiply per digit. New `scry/scripts/dos-check.py` (grail target
+  `dos-check`, run by the nightly bench workflow) pins RSS < 20× input and statement
+  counts 16/64/128/256 to small time budgets (S1 findings `scrydos-01/02/03`).
+
+* `Bytes` (stage 21ag, over 9i): a functional buffer of bytes, in the C11 runtime
+  (`runtime/rt_data.inc`), the self-hosted one (`selfhost/rt.c`) and the interpreters
+  (`Wiz/Compiler/Run.lean`, `Wiz/Compiler/IRRun.lean`). `empty`, `push` (the number's
+  low eight bits; in place when the buffer is unique), `size`, `get` (`0` past the end;
+  `at` is the total `Option`), `slice`/`take`/`drop` (both bounds clamp), `append`,
+  `eq`, `isEmpty`, `ofList`/`toList` (each number mod 256), `singleton`, `range n`
+  (`0 … n-1`) and `show`; `ofArray`/`toArray` are in `Std`, and `import WordBytes` adds
+  `ofU8s`/`toU8s` (`U8.ofNat` wraps mod 256, `UIntN.toNat` is the value). A `Bytes`
+  prints as `[1, 2, 255]` in `#eval`/`#run`; equality is `Bytes.eq`. Text and bytes meet
+  only through a named encoding, and **one UTF-8 rule** now governs all three codecs
+  (`lib/IO.wiz`, the host runtime and `selfhost/rt.c`; the interpreters mirror it): the
+  lead byte's top bits give the length (`0xxxxxxx` 1, `110xxxxx` 2, `1110xxxx` 3,
+  `11110xxx` 4; `10xxxxxx` and `11111xxx` are not leads), and a sequence is valid when
+  its continuation bytes are all there and the scalar is not overlong, not a surrogate
+  (`D800` … `DFFF`) and at most `10FFFF`. `Bytes.ofUtf8`/`toUtf8` encode and decode every
+  character, NULs included, and the checked decoder reports the first invalid sequence as
+  `"invalid UTF-8 at byte k"`; `ofString`/`toString` stay the NUL-terminated C-string
+  pair, whose decoder writes U+FFFD for an invalid sequence and resumes after the bytes
+  its lead claimed. They no longer disagree: `toString (ofList [0x88, 0x41])` is U+FFFD
+  followed by `A` in both toolchains, where the host used to give U+0001 and the
+  self-hosted U+0201. Every encoder (`Bytes.pushUtf8`, `ofUtf8`, and a `String` crossing
+  the FFI) writes U+FFFD for a code point that is not a scalar value, so `ofUtf8` and
+  `ofString` agree. `ofLatin1`/`toLatin1` are one byte per character. In the FFI (9l), a
+  `const void *`/`char *` buffer and its length are one borrowed `Bytes` parameter; a
+  **writable** `char *` with a length is one `Bytes` parameter too, but given a *copy*
+  for the call (kind `Y`), so a C write is discarded and never changes a Wiz value
+  (ownership is not shared). Tests: the `selfhost` group's table-driven UTF-8
+  differential (ASCII, 2/3/4-byte sequences, truncation, an overlong `C0 80`, a lone
+  continuation byte, a surrogate half, above U+10FFFF and an embedded NUL, through both
+  toolchains, collector and reference counting), the `ffi` `#eval`/`#run` cases, and
+  `#check` pins of the folded `import_c` signatures.
 * selfhost: a `match` (or `if`) on a closed scrutinee is no longer evaluated while the
   self-hosted frontend compiles (#422). The frontend evaluated elaborated terms it did not
   need: the argument for a non-dependent codomain, every `let` value, `match` scrutinee and
@@ -262,6 +439,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   put the match's result in the program). `match Bytes.toUtf8 (Bytes.ofUtf8 "𝄞") with …`
   as an argument took over 200 s and 3.4 GB. The `selfhost` group bounds such a program
   (`fib 40`) at 120 s in `check` and in the one-shot compile.
+* selfhost: the unit eliminator `let () := u; b` and `split` (`let q (x, y) := s; b`,
+  with a tuple `let (x, y, z)` as nested pairs) are in the self-hosted toolchain (21ah).
+  `Kernel.wiz` gained `split` (the stuck `ssplit` spine, `vSplit`, conversion, the
+  `q·p`/`q` usage), the frontend elaborates both forms, and the backend erases them (it
+  used to refuse `letUnit`), so a pair held at quantity 1 is consumed by
+  `let 1 (x, y) := p` and a linear `Unit` by `let () := u`, as in the Lean toolchain.
+  The `selfhost` group pins the verdicts against the Lean frontend and runs a program in
+  both compilers; its module-private case also checks the Lean frontend's message text
+  and the self-hosted compiler's rejection (21n).
 * The trust ledger's merge driver (`scripts/trust-ledger-merge.sh`) merges three-way
   by key: a row one side deleted and the other left unchanged is deleted (a union kept
   it, so a branch merging master resurrected rows master had removed), and a row one
@@ -296,6 +482,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   stays `bounded`). A case of a group that runs its cases one at a time now receives
   `--jobs` (`Tests.caseJobs`). The records carry each side's `ms`, the summary the
   slowest runs (21ae).
+* `lib/Hdl/Signal.wiz` (`import Hdl.Signal`): Clash-style signals as ν-streams with a
+  phantom `ClockDomain`, `register`/`registerR`/`registerEn`, `mealy`/`moore`, a pointwise
+  `Hw` instance so tagless hardware code and derived bundles run on signals, `Signal.Eqv`
+  and `Signal.sat` over `TL`, and `Signal.ofCircuit` with its proof that the signal is
+  `Circuit.trace` at every cycle. No `Signal.fix` yet: it needs sized `scofix` (34a).
 * `UInt64.ofNat` is total: it reduces the `Nat` modulo 2⁶⁴ in Wiz before the C call
   (`wiz_u64_id` takes a `uint64_t`, and the marshalling panicked above 2⁶⁴); the `ffi`
   group pins 2⁶⁴−1, 2⁶⁴ and 2⁶⁴+1 in C and LLVM. The trust ledger's numeric/container
@@ -395,6 +586,17 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   compiler's entry point is `selfhost/Main.wiz` (the checker's is
   `selfhost/Check.wiz`). The fixpoint's input is `selfhost/*.wiz` with no generated Wiz
   text in it: only the build identity (`wizVersion`, `toolchainId`) is passed in (23e).
+* selfhost (D5): the driver's cache is layered like the host's. `--cache-ro DIR`
+  (repeatable) adds read-only layers, searched after `--cache` in the order given and
+  never written or copied back; `--no-cache` clears both lists, so
+  `--no-cache --cache-ro DIR` replays a shipped cache and writes nothing.
+  `--cache-prune DAYS` removes the write cache's keyed `.check`/`.c` entries older than
+  DAYS days before the command (a layer is never pruned, and a pruned entry is a miss).
+  `--cache-verify off|warn|strict` now has per-entry digest manifests (`<entry>.mf`):
+  `warn` verifies one when it exists, `strict` uses only manifested entries, and a cold
+  strict run writes them, so the next run is a hit. The selfhost runtime gained the
+  host's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns` leaves in
+  its own representation, so a driver built by either toolchain prunes (21al).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
@@ -729,3 +931,25 @@ that pin each one):
   parameter can be named. An inductive type's own parameters, a dot-constructor and a
   local Π type still keep no names; the `selfhost` and `language` groups pin the accepted
   and rejected constructor forms against the Lean frontend (21ab, 13a).
+* scry: **`scry cs PATH`** analyses a directory, `.csproj` or `.sln`/`.slnx` of C# and
+  reports a summary with a coverage section: `.cs` files before and after exclusions
+  (`bin/`, `obj/`, `node_modules/`, hidden directories, `*.g.cs`, `*.Designer.cs`,
+  symbolic links), found/parsed/lowered/failed, findings by rule and severity, and every
+  construct or file that was skipped or warned about with a count and one example
+  location. `--json` is the same report, `--fail-on error|warning|note` gates findings
+  and coverage rows, and the exit status separates `0` clean, `1` gated, `2` usage/IO
+  from `3` nothing analysed (no `.cs`, or every file failed). Lowering warnings are
+  normalised to constructs, so a first run answers "what didn't you look at?" in one
+  screen. The fixture tree `scry/corpus/csharp/repo/` and the `scry-csharp` group pin the
+  counts, coverage rows, JSON and every exit status.
+* scry C#: the frontend survives real code. Re-checked against a real solution's
+  `src/Crux.Api` (75 files, every one parses without an `ERROR` or `MISSING` node; 2,483
+  files under `src/`), the lowering no longer drops constructs silently. The headline
+  find: **all 74 files with a file-scoped namespace (`namespace X;`) lowered to no
+  function and no warning** — `typeDecls` recursed into the namespace node, but
+  tree-sitter-c-sharp puts the following declarations as its *siblings*, so every type
+  in the project was dropped. Fixed, and `lower/{modern,unsupported}` pin it. Top-level
+  statements (the whole of a minimal-API `Program.cs`) become `<stem>.Main`
+  (`Program.Main` for `Program.cs`); a record's or primary constructor's positional
+  parameters become fields and `new R(a)` lowers and stores its arguments instead of
+  discarding them; `partial` parts in one file are merged; `: base(…)` / `: this(…)`

@@ -1,14 +1,13 @@
 # scry C# frontend
 
 Status: **design + first slice, parsing on tree-sitter-c-sharp** (2026-11-16;
-the working copy of this note is `wiz-notes/scry-csharp.md`). The user chose option B
-of §1 on 2026-11-16: the hand-written parser of the first draft is gone, and
+the working copy of this note is `wiz-notes/scry-csharp.md`). Option B of §1 was chosen
+on 2026-11-16: the hand-written parser of the first draft is gone, and
 tree-sitter-c-sharp v0.23.5 (fetched by Nix, `.#tree-sitter-c-sharp`) parses C# through
-the same shim as C. The branch is based on `agent/scry-integrate` (PR #376), because
-the pieces the frontend plugs into exist only there: `Scry.Cst` (the read-only CST view
-the C lowering walks), `Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every
-statement, and the rule-pack taint engine (`Scry.RuleTaint`, `Scry.Interproc`,
-`Scry.analyze`). The PR declares `Depends-on: #376`.
+the same shim as C. The analysis stack the frontend plugs into is on master (PR #376,
+merged 2026-11-16): `Scry.Cst` (the read-only CST view the C lowering walks),
+`Scry.Warning`/`Scry.TU`, `Wil.Span` origins on every statement, and the rule-pack taint
+engine (`Scry.RuleTaint`, `Scry.Interproc`, `Scry.analyze`).
 
 Design context: `code-analysis-design.md` §4.8 (C# second, decided 2026-11-12, 3–4 wk),
 §4.3 (Wil), `scry-c2wil.md` (the C lowering this mirrors), `scry-taint.md` (the engine).
@@ -31,9 +30,11 @@ recursive-descent parser in Wiz whose rows used tree-sitter-c-sharp's vocabulary
 `Scry.Cst`); it was replaced by B in the same PR:
 
 * tree-sitter-c-sharp is the upstream generated `parser.c` + `scanner.c` of tag v0.23.5
-  (`native/README.md`: licence, commit, hash). Generated code is not committed, so
-  `flake.nix` fetches it (`fetchFromGitHub`, pinned commit and hash) and builds it with
-  the shim and the vendored runtime as `.#scry-native` (pushed to Cachix). A native scry
+  (`native/README.md`: licence, commit, hash), with two grammar backports (the
+  contextual-keyword identifiers and the list-pattern slice; §8.2). Generated code is
+  not committed, so `flake.nix` fetches it (`fetchFromGitHub`, pinned commit and hash),
+  applies the patch, regenerates the parser and builds it with the shim and the vendored
+  runtime as `.#scry-native` (pushed to Cachix). A native scry
   build compiles it through the uncommitted out-link `native/tree-sitter-c-sharp`
   (`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp`). `parser.c` is
   29.7 MB and compiles at `-O2` in about 1.5 s; it is not regenerated.
@@ -236,7 +237,7 @@ Total ≈ 4 weeks, in line with §4.8.
 
 | file | contents |
 |---|---|
-| `flake.nix` (`tree-sitter-c-sharp`, `scry-native`) | the fetched grammar (v0.23.5, MIT) and the Nix build of the native parse library; `scry/native/tree-sitter-c-sharp` is its uncommitted out-link |
+| `flake.nix` (`tree-sitter-c-sharp`, `scry-native`) | the fetched grammar (v0.23.5, MIT) plus `tree-sitter-c-sharp-v0.23.5-fixes.patch` (both §8.2 gaps), regenerated at build time, and the Nix build of the native parse library; `scry/native/tree-sitter-c-sharp` is its uncommitted out-link |
 | `scry/native/ts_shim.c`, `scry/src/Scry/Native.wiz` | `scry_parse "c_sharp"`; `languageOf` picks C# for `*.cs`; `toCstStoreIn` records the spill's language |
 | `scry/tools/CstMain.wiz` | `scry-cst FILE.cs` spills a C# store (refuses a tree with `ERROR`/`MISSING` nodes, as for C) |
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
@@ -247,11 +248,13 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
 | `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 6 lowering goldens + execution, 8 taint cases, and the "silent skip" case (§2) |
 
-A spill is regenerated with `scry-cst FILE.cs > FILE.cst` (build it with
+A spill is regenerated with `scry-cst FILE.cs > FILE.cst`. Build the tool with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
-toolchain's `--cflags`/`--ldflags`; this host's `grail` link of executables fails on a
-pre-existing `__isoc23_strtol` glibc/gmp mismatch). The freshness case fails when a
-spill's root does not span its `.cs` text. Goldens are regenerated with
+toolchain's `--cflags`/`--ldflags`. The C# grammar is the uncommitted out-link
+`scry/native/tree-sitter-c-sharp`, created with
+`nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp` (what
+`.github/workflows/scry.yml` does before `grail build scry`). The freshness case fails
+when a spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
@@ -474,8 +477,8 @@ and ignored.
 
 ### 7.7 What runs today
 
-There is **no command on this branch that analyses a directory of `.cs` files**. C# is
-not wired into `scry taint`; `scry parse --stats` reads a spill. Two things exist:
+Two commands exist for a tree of C# (the driver landed in §8; this section's numbers were
+taken with the first):
 
 ```
 # 1. the measurement harness (this section's numbers; needs the native grammar)
@@ -489,20 +492,31 @@ cd .. && CS_COVER=$PWD/scry/build/cs-cover scry/scripts/cs-coverage.sh DIR
 ./.lake/build/bin/tests '=scry-csharp'
 ```
 
-A `scry cs PATH` driver (`scry/src/Scry/CsCmd.wiz`, which walks a directory,
-`.csproj` or `.sln`, prints per-file coverage rows and exits 3 when nothing could be
-analysed) is being added on the sibling branch `agent/cs-driver`; it is not part of
-this branch.
+`scry cs PATH` (§8) is the directory/project/solution driver: it walks the tree, prints
+per-file coverage rows and exits 3 when nothing could be analysed. `cs-externals`
+(§9.1) is the measurement tool for the `unmodelled-external` frequency table.
 
-### 7.8 A known caveat: non-ASCII text
+### 7.8 Non-ASCII text: byte spans, character columns
 
-Two of the 75 files contain non-ASCII text (an em dash in a comment, a `§`). `Scry.Cst`
-slices a node's text by **character** index while tree-sitter's spans are **byte**
-offsets (`Scry.Cst.textOf`'s doc says so; the C frontend has the same limitation). Every
-identifier after such a character is read shifted — `outcome` becomes `ome` — so those
-two files report `unknown name …` warnings for real locals. It is loud, not silent, but
-it loses precision. The fix is a byte→character index map in `Scry.Cst.ofPreprocessed`;
-it is left as its own change because it is shared with C.
+A Wiz `String` is a list of characters, while tree-sitter's spans are UTF-8 **byte**
+offsets. `Scry.ByteMap` (`Scry.Preproc`) is the single conversion between the two: it is
+built once per text (`Scry.Preprocessed.textMap` for the preprocessed text and
+`fileMaps` for the originals) and every call site that slices a `String` or emits a
+column goes through it. `Scry.Cst.nodeText` maps the span's byte ends to character
+indices and slices the code-point array; `Scry.mapSpan` and `Scry.lineOrigin` slice and
+convert through the map. A `Wil.Span` range stays a **byte** offset, as `Scry.Schema`
+documents; its `col` is a 1-based **character** column. The SARIF report goes through
+`Scry.TextIndex`, which carries the same map, so `startColumn`/`endColumn` are character
+columns too. The C frontend shares `Scry.Cst.ofPreprocessed` and `Scry.mapSpan`, so it
+gets the same fix.
+
+Two of the 75 files of `src/Crux.Api` contain an em dash or a `§`; before this change
+every identifier after such a character was read shifted (`outcome` became `ome`) and
+those files reported `unknown name …` warnings for real locals. The corpus case
+`lower/unicode` keeps a local declared before the em dash and used after it; its
+`lower/unicode.loc` golden pins that the use still resolves and that the one genuine
+`unknown name Missing` warning is at the `M` (line 12, column 26), not at a byte
+column.
 
 ### 7.9 `is` tests and pattern bindings (2026-11-19)
 
@@ -699,16 +713,23 @@ coverage: 25 row(s) — what was skipped or warned about
 ```
 
 The whole Nexus tree (5 560 `.cs` before exclusions, 4 621 kept) walked, parsed and lowered
-in 311.8 s and about 4.1 GiB with `--no-taint`: 4 605 parsed, 4 250 lowered, 16 parse
-failures, 36 319 functions and 46 coverage rows. Taint dominates: Crux.Api took 219.8 s
-with taint and 2.0 s without, so a full tainted sweep of the tree is hours, not minutes,
-and is not attempted by default.
+in 311.8 s and about 4.1 GiB with `--no-taint` on the build that first ran the sweep:
+4 605 parsed, 4 250 lowered, 16 parse failures, 36 319 functions and 46 coverage rows.
+The 2026-11-18 re-run that named all 16 failures (commit `e3f27195`, before merging
+master) reports the same 4 621/4 605/16, 4 263 lowered, 36 334 functions and 363 coverage
+rows: the lowering now names more constructs, and each failed file is its own row. Taint
+dominates: Crux.Api took 219.8 s with taint and 2.0 s without, so a full tainted sweep of
+the tree is hours, not minutes, and is not attempted by default. All 16 failures were two
+grammar gaps, not malformed files and not our walker; both are fixed by scry's grammar
+patch, and the patched build parses the whole tree: §8.2.
 
 `files found / parsed / lowered / failed` distinguishes native parsing from lowering:
 `failed` means the grammar returned `ERROR`/`MISSING` nodes, so the file was not lowered
-at all. A file that parses but produces no method is a `no functions lowered` warning, not
-a zero. An unreadable file or a directory that cannot be listed is a row, never an
-omission.
+at all. A failed file gets **its own** `parse failure` row (errors are never summed), and
+the row's location is the first failing node's position and kind — `path:line:col
+(MISSING identifier)` or `(ERROR)`. A file that parses but produces no method is a `no
+functions lowered` warning, not a zero. An unreadable file or a directory that cannot be
+listed is a row, never an omission.
 
 Lowering messages interpolate identifiers and types; the coverage row normalises them to
 the construct (`lambda body not lowered: an opaque function value`, `out/ref argument not
@@ -738,19 +759,108 @@ row says so). `--rules FILE` selects a pack; otherwise the walk tries
 ### Fixture and tests
 
 `scry/corpus/csharp/repo/` is a small tree: three analysable files (one with a real
-finding), one deliberately invalid file, and five excluded paths (`bin/`, `obj/`,
-`node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda and a
-`from … where … select` query: the lambda is still an opaque `fnptr` (its own warning),
-while the query lowers to `System.Int32[].get_Item` and
-`System.Linq.Enumerable.Select` calls, so those two calls are part of the five
-`unmodelled-external` rows (with `Console.ReadLine`, `Process.Start` and
-`System.Int32[].get_Length`) instead of a `query_expression not modelled` row: a query
-the lowering handles is analysed, not skipped. The `scry-csharp` group enumerates it,
+finding), one file that does not parse (`Broken.cs` is deliberately invalid C#; the two
+grammar-gap reproducers `KeywordIdentifier.cs` and `SlicePattern.cs` now parse — §8.2),
+and five excluded paths (`bin/`, `obj/`, `node_modules/`, `.g.cs`, `.Designer.cs`). `src/Unsupported.cs` carries a lambda
+and a `from … where … select` query: the lambda is still an opaque `fnptr` (its own
+warning), while the query lowers to `System.Int32[].get_Item` and
+`System.Linq.Enumerable.Select` calls, which the CLR model table (§10) covers, so the
+tree's remaining `unmodelled-external` rows are the calls the model does not know
+(`Console.ReadLine`, `Process.Start`; §10.3), and the query is analysed rather than
+skipped as a `query_expression not modelled` row. The `scry-csharp` group enumerates it,
 applies `Scry.Cs.walkOfPaths` (the driver's exclusion rule) and `Scry.Cs.reportOf` (the
 driver's aggregation) to checked-in spills, and asserts the before/after counts, the
-coverage rows, both report renderings and all four exit statuses. The Lean interpreter
-cannot call the native shim, so the spills are checked in exactly as for the other C#
-fixtures; the invalid file has no spill and its `.err` result is built directly.
+coverage rows (one `parse failure` row per failed file, each named), both report
+renderings and all four exit statuses. The Lean interpreter cannot call the native shim,
+so the spills are checked in exactly as for the other C# fixtures; `Broken.cs` is the only
+file without a spill, and its `.err` result is built directly.
+
+### 8.2 The 16 Nexus parse failures: two grammar gaps, now fixed (2026-11-18)
+
+The first whole-tree run reported `4 621 kept, 4 605 parsed, 4 250 lowered, 16 failed`.
+All sixteen were **valid C# that tree-sitter-c-sharp v0.23.5 refused**; none was a
+truncated write, an encoding problem (all 4 621 decode as UTF-8, and the grammar's
+`extras` accept a BOM), a preprocessor form (Nexus has no `#if`/`#region`), or a walker
+bug. They fell into exactly two grammar gaps, and scry's grammar patch fixes both
+(`native/README.md`; `scry/native/tree-sitter-c-sharp-v0.23.5-fixes.patch` backports the
+two upstream-master rules and the Nix derivation regenerates `src/parser.c`):
+
+| gap | construct | files | fix |
+|---|---|---|---|
+| A | `with`, `partial`, `required` used as identifiers | 15 | add the three to `_reserved_identifier` |
+| B | a list-pattern slice with a designation (`['[', .. var selector, ']']`) | 1 | master's `slice_pattern` rule |
+
+Each failure is still one row per file, with the first failing node's position and kind,
+so a sweep names every failed file instead of summing them into one row with one example.
+The 16, as the old grammar reported them (all `ERROR`):
+
+| file (below `/workspace/Nexus/`) | first node | rejected construct |
+|---|---|---|
+| `src/Crux.Demo.Api/Execution/RealServerActionExecutor.cs:865:82` | `ERROR` | `.. var selector` in a list pattern (gap B) |
+| `tests/Crux.Api.Tests/AgentCashEndpointsTests.cs:473:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Api.Tests/CardChargebackTests.cs:227:9` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ApplicationRegistersTests.cs:84:9` | `ERROR` | `var with` (gap A; also `partial`) |
+| `tests/Crux.Application.Tests/Compliance/OwnershipRegisterTests.cs:280:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Application.Tests/Compliance/ReserveBankDirectionsTests.cs:99:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Compliance/StructureRegistersTests.cs:179:9` | `ERROR` | `partial` as a local (gap A; also `var with`) |
+| `tests/Crux.Application.Tests/Identity/AppKeyAttestationsTests.cs:165:15` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Application.Tests/Treasury/PartyCalendarsTests.cs:47:17` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Architecture.Tests/ContainerDirectoryTests.cs:1:1` | `ERROR` | `required` as a local (gap A); recovery's node spans the unit |
+| `tests/Crux.Communications.Tests/SegmentEvaluatorTests.cs:174:9` | `ERROR` | `var with` (gap A) |
+| `tests/Crux.Dashboard.Api.Tests/CertificationContentTests.cs:241:16` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Demo.Api.Tests/CardMachineValueTourTests.cs:45:17` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Domain.Tests/Compliance/InternalAuditRecordTests.cs:80:9` | `ERROR` | `required` as a local (gap A) |
+| `tests/Crux.Tenant.Api.Tests/AgentTests.cs:415:15` | `ERROR` | `partial` as a local (gap A) |
+| `tests/Crux.Worker.Tests/NextDaySegregationTests.cs:186:15` | `ERROR` | `partial` as a local (gap A) |
+
+**Gap A (15 files): `with`, `partial` and `required` are not reserved identifiers.**
+C# makes these *contextual* keywords: outside a `with` expression, a `partial` modifier or
+a `required` member modifier, each is an ordinary identifier, and Nexus uses them as local
+names (`var with = await …;`, then `partial.Detail.Should()`, `required.Should()`). The
+grammar's `_reserved_identifier` rule lists the contextual keywords it accepts as names
+(`alias`, `ascending`, … `yield`) but omits these three in v0.23.5 — and upstream
+0.24.0/master still does, so a plain grammar bump would not clear the fifteen. The patch
+adds them; the smallest reproduction is `corpus/csharp/repo/src/KeywordIdentifier.cs`:
+
+```csharp
+public static int Count(int[] items)
+{
+    var with = items.Length;
+    var partial = with;
+    var required = partial;
+    return required;
+}
+```
+
+**Gap B (1 file): a list-pattern slice with a designation.** C# 11 allows
+`['[', .. var selector, ']']`; v0.23.5's `list_pattern` accepts a bare `..` only, so the
+`ERROR` starts at the `var`. Master (0.24.0) has a `slice_pattern` rule, which the patch
+backports verbatim; the smallest reproduction is `corpus/csharp/repo/src/SlicePattern.cs`.
+
+**Before and after, whole tree.** A differential parse of all 5 560 `.cs` files under
+`/workspace/Nexus` with the old and patched grammars: 16 files had `ERROR`/`MISSING`
+nodes before, **0 after**; no file that parsed gained an error. 43 further files keep
+their error-free status but change node shape: 34 gain the keyword's explicit token node
+(`new(required: true)` now names the argument `required`) and 9 gain a `slice_pattern`
+node. The new trees are the better ones where they differ: `ContractSamples.cs` goes
+from a wrong `invocation_expression` around `Find(key) is not var (a, b)` to the correct
+`declaration_pattern`. The corpus goldens
+pin the target shape: `parse/contextual.{cs,cst,sexp}` covers both gaps and both keyword
+positions, and the two repo fixtures now have spills.
+
+The driver's own report on the patched build (`scry cs /workspace/Nexus --no-taint
+--json`) is **4 621 kept, 4 621 parsed, 4 279 lowered, 0 failed**, 36 667 functions and
+367 coverage rows, exit 0. The same tree on the pre-patch build reports 4 605 parsed,
+4 263 lowered, 16 failed, 36 334 functions and 363 rows. The parse-failure list is empty
+for the whole tree; `Broken.cs` in the repo fixture is the only remaining deliberate
+parse failure, and it is invalid C#, not a grammar gap. Nothing on this list is left as
+"out of scope".
+
+The second list the sweep separates is **lowering**: 342 of the 4 621 parsed files produce
+no function (`4 621 - 4 279`), the same 342 as before the fix (the 16 now parse *and*
+lower). Those are not parse failures and are not conflated with them: each is either a
+declaration-only file or carries a lowering warning that `scry cs`'s coverage rows name,
+and §7.6 lists the out-of-scope constructs behind them.
 
 ## 9. The parsed-but-not-lowered files (Nexus, 2026-11-18)
 
@@ -827,3 +937,381 @@ primary constructor with a base call. Before this change it lowered to zero func
 `lower/*.wil` now pins the five `..ctor` functions, their field stores, and the two base
 calls.
 
+## 10. External models (`Scry.Models` §CLR)
+
+`Scry.Models` was a C table: libc names, policy sanitisers and the C pure calls. The C#
+frontend emits CLR spellings (`Namespace.Type.Method`, `T[].get_Item`), so on real code
+*none* of the BCL reads it lowers to matched an entry. Every one became an
+`unmodelled-external` warning — the coverage marker `Scry.Interproc.unmodelledWarningsOf`
+prints for a call with a pointer result or argument and no model. That was 4,028 call
+sites over 75 `Crux.Api` files: noise on the coverage report, not a taint fact (an
+unmodelled call has no source fact either; only its result's points-to location is
+`unknown`, which is what every external call's result is anyway).
+
+### 10.1 The frequency table
+
+`scry/tools/CsExternalsMain.wiz` (`grail build cs-externals`) prints it from the same walk,
+lowering and merged-program analysis `scry cs` uses, so the numbers are comparable:
+
+```
+cd scry && grail build cs-externals
+.grail/bin/cs-externals /workspace/Nexus/src/Crux.Api corpus/csharp/csharp.scry
+```
+
+`count-before` is the same selection against `Scry.Models.coreModels` (libc/policy/pure,
+without the CLR layer), so one run gives both sides of a model change. The model is keyed
+by the exact callee spelling (or by the shape rules in §10.2), so a call disappears from
+`count` exactly when a model covers it.
+
+Top of `src/Crux.Api` (75 files, 240 functions, merged program), before → after:
+
+| # | callee | before | after | model |
+|---|---|---|---|---|
+| 1 | `StatusCodes.get_Status422UnprocessableEntity` | 180 | — | getter |
+| 2 | `TypedResults.Problem` | 160 | — | `Results` factory |
+| 3 | `?.Produces` | 155 | — | ASP.NET fluent |
+| 4 | `?.ProducesProblem` | 126 | — | ASP.NET fluent |
+| 5 | `StatusCodes.get_Status404NotFound` | 99 | — | getter |
+| 6 | `?.WithName` | 96 | — | ASP.NET fluent |
+| 7 | `StatusCodes.get_Status200OK` | 92 | — | getter |
+| 8 | `?.WithSummary` | 90 | — | ASP.NET fluent |
+| 9 | `System.String.Concat` | 75 | — | exact |
+| 10 | `TypedResults.Ok` | 71 | — | `Results` factory |
+| 11 | `HttpContext.RequireAuthenticatedPartner` | 63 | 63 | not modelled: another Nexus project's method |
+| 12 | `?.MapPost` | 59 | — | ASP.NET fluent |
+| 13 | `?.get_TenantId` | 49 | — | getter |
+| 14 | `?.Refuses` | 46 | 46 | not modelled: another Nexus project's method |
+| 15 | `?.get_PartyId` | 44 | — | getter |
+| 16 | `CruxValidationException.get_Message` | 42 | — | getter |
+| 17 | `?.get_Status` | 42 | — | getter |
+| 18 | `HttpContext.PartnerTenantId` | 41 | 41 | not modelled: another Nexus project's method |
+| 19 | `?.get_IsReplay` | 35 | — | getter |
+| 20 | `?.get_TransactionId` | 35 | — | getter |
+| 21 | `BoundaryRejectionRecorder.RecordAsync` | 34 | 34 | not modelled: another Nexus project's method |
+| 22 | `StatusCodes.get_Status201Created` | 31 | — | getter |
+| 23 | `System.Array.$new` | 30 | — | collection-expression allocation |
+| 24 | `?.WithTags` | 29 | — | ASP.NET fluent |
+| 25 | `BoundaryRejectionRecorder..ctor` | 28 | 28 | not modelled: a constructor writes its object |
+| 26 | `CruxNotFoundException.get_Message` | 28 | — | getter |
+| 27 | `System.String.get_Empty` | 26 | — | getter |
+| 28 | `AuthorizeRefusals.get_PartyClosed` | 24 | — | getter |
+| 29 | `?.get_Services` | 22 | — | getter |
+| 30 | `IEndpointRouteBuilder.MapGroup` | 22 | — | ASP.NET fluent |
+
+Totals: **4,028 → 917** call sites (`unmodelled-external`), 1,179 → 485 distinct
+callees, on the same input and the same rule pack. The remaining 917, by shape:
+
+| shape | calls | why it stays |
+|---|---|---|
+| named type, other method | 487 | almost all another `Nexus` project's code (`HttpContext.RequireAuthenticatedPartner`, `BoundaryRejectionRecorder.RecordAsync`, `IOrchestrator.ExecuteAsync`), which the model table has no honest entry for |
+| `?.method` (unknown receiver) | 215 | user mapping/DI/logging extensions (`?.ToWire`, `?.GetRequiredService`, `?.LogError`); a name alone does not say what they do |
+| `T..ctor` | 170 | a constructor writes the object it returns; modelling it `copy` would taint `Loc.unknown` |
+| `T.set_*` / `set_Item` | 39 | a setter writes through its receiver |
+| `System.*` | 5 | `Encoding.UTF8.GetBytes` (has a write-into-buffer overload), `String.Any`/`String[].Any` (a lowering approximation, not `Enumerable.Any`) |
+
+### 10.2 What is modelled, and why each is conservative
+
+The table gains `System.Console.ReadLine` (a source: stdin text is attacker-controlled;
+the rule pack already names it, and pack and model sources are deduplicated) and the
+rest as **reads**. A read model is an empty effect list under the new family `clr-read`
+(`clr-fluent` for the ASP.NET registration calls, `clr-alloc` for `System.Array.$new`):
+
+* **any property getter** (`T.get_P`): the member segment starts with `get_`, and the
+  name contains a `.` — every CLR member name does, and no C identifier can, so the shape
+  rule cannot capture a C function called `get_Foo`. This is the single biggest class
+  (1,943 call sites). A getter's only input is the receiver, so its result derives from it
+  and `gen` carries the receiver's taint to the result. It has no data argument to write
+  through, and it does not free. `set_*` is deliberately not matched.
+* **array/string/collection element and length reads** are getters under that rule
+  (`System.Int32[].get_Item`, `?.get_Length`, `System.String.get_Empty`).
+* **`String` operations** (`Concat`, `Format`, `Join`, `Substring`, `Split`, `Replace`,
+  `Trim*`, `ToLower`/`ToUpper`, `Contains`/`StartsWith`/`EndsWith`, `IndexOf`, `Pad*`,
+  `IsNullOrEmpty`, …) and the `?`-receiver spellings of the same: a string operation
+  returns a value derived from its parts, and `Concat`/`Format` are what the lowering
+  emits for `+`, interpolation and `String.Format`.
+* **LINQ operators** (`System.Linq.Enumerable.*` and the `?`-receiver spellings):
+  projections/aggregations over their source; `gen` carries the source's taint to the
+  result.
+* **ASP.NET Core minimal-API registration/fluent calls** (`?.Produces`, `?.WithName`,
+  `?.MapPost`, `?.RequireAuthorization`, …): the result derives from the receiver and the
+  builder's internal registration state is outside the points-to model either way.
+* **`TypedResults.*` / `Results.*` factories**: they return an `IResult` carrying the
+  argument values; `gen` taints the result when an argument is tainted.
+* **`System.Array.$new`**: the collection-expression array — a fresh object whose
+  elements are its arguments (`alloc`, nothing else).
+* **`System.Convert.FromBase64String`/`ToBase64String`**: conversions of their input.
+
+A model never launders and never narrows taint: the taint layer's ordinary `gen` rule
+still carries taint from the receiver and every argument to the result, so
+`s.Substring(1)` of a tainted `s` is tainted and `xs.Select(f)` of a tainted `xs` is
+tainted. It also does not *widen* it: an unmodelled call has no source fact either, so
+the two differ in the warning and in the effects a model names, not in the flow. No model
+is a sanitiser; the policy sanitisers are still the only names that clean a value, and a
+pack has to trust them.
+
+### 10.3 What is deliberately not modelled
+
+* **Writes through the receiver or an argument**: `set_*`, `set_Item`, `Add`, `Append`,
+  `Insert`, `Remove`, `Clear`, `CopyTo`, `Array.Copy`, `Read`/`ReadOnlySpan` fills,
+  `Encoding.GetBytes(dest, …)`. Modelling a store into an unknown `Loc` would taint every
+  later load through an unknown pointer: more false positives, not more soundness.
+* **Constructors** (`T..ctor`): they write the object they return; the result is tainted
+  by the arguments through `gen` already, and a `copy` effect would land in
+  `Loc.unknown`.
+* **`Dispose`**: `free` would claim the managed object dies; a `using` block's `Dispose`
+  does not, and the lifetime rule would report a false use-after-free.
+* **The rule pack's sinks** (`Process.Start`, `ProcessStartInfo.set_Arguments`, …): a
+  sink needs a rule class and the pack owns those; duplicating them in the table would
+  add nothing (the facts would be deduplicated).
+* **Cross-project code**: a call into another assembly's own methods is not a BCL call,
+  and the name alone (especially on an unknown `?.` receiver) does not say whether it
+  writes or allocates. It keeps its explicit warning.
+
+### 10.4 Findings
+
+`src/Crux.Api` has **0 findings before and after** (the pack's only rule is CWE-78 and
+these endpoints do not build a command line from a request value). This is the expected
+direction: a read model adds no sanitiser and no filter, and the one source model
+(`Console.ReadLine`) duplicates a pack source, so the finding set can only stay or grow.
+The repo fixture's finding (`src/Helper.cs`, `Console.ReadLine` → `Process.Start`) still
+fires, and its `unmodelled-external` row drops from 5 to 1 (only `Process.Start` is
+left). The `taint/cwe78-stringop-unsafe` case pins the pair: `Substring` between the
+source and the sink is no longer a warning, and the finding still fires.
+
+## 11. Known expansions (2026-11-19)
+
+C# has no preprocessor macros, so "macro expansion" here is the narrower thing the
+frontend can do honestly: a **table of known expansions** (`Scry.Cs.expansions`) mapping
+a callee spelling to a *term template over the call's already-lowered arguments*
+(receiver first, the convention everywhere else in this frontend). It is not a C#
+preprocessor. It cannot invent resolution: an entry is used only for an exact spelling,
+and a name with no entry keeps its ordinary call — and, when nothing models it, the
+analysis's `unmodelled-external` warning. The one shape rule is a method group, whose
+name is looked up in the unit's own method table (the `methodOwner` used by every call);
+an unknown name is still a havoc with a warning, never a silent value.
+
+### 11.1 Where the warnings are (`src/Crux.Api`, 75 files, 240 functions)
+
+Measured with `scry cs src/Crux.Api --no-taint --json` (lowering warnings) and
+`scry-externals` (the merged program's unmodelled callees), at the head of this branch
+(which includes §9's models). The brief's guess — that macro-shaped constructs are a
+large warning source — is mostly wrong. The lowering warnings are dominated by semantic
+gaps, not by macros:
+
+| class | count | macro? |
+|---|---|---|
+| `unknown name … havoc` | 173 | mixed: 93 are method groups (this section); the rest are unbound `is { } x` designations, `out var` targets and §7.8's byte→char shift (36 in one non-ASCII file) |
+| `is` test | 88 | no (pattern matching) |
+| lambda body | 60 | no (a function body, not a name→template) |
+| field initialiser | 48 | no (constructor semantics) |
+| target-typed `new()` | 30 | no |
+| tuple expression | 30 | no |
+| `out`/`ref` | 20 | no (needs an address) |
+| property initialiser | 10 | no |
+| everything else | 54 | — |
+
+The macro-shaped family itself:
+
+| construct | sites | warnings before | after |
+|---|---|---|---|
+| property-like accessor (`x.P`, `x[i]`, `get_*`) | 1,943 lowered call sites | 1,943 `unmodelled-external` | 0 by §9's read model — **not** by an expansion: the lowering already emitted `get_P` |
+| method group (`Foo.Sink` in delegate position) | 93 | 1 `unknown name … havoc` each | 0 (this section) |
+| `nameof(x)` | 76 | 0, but every site was one shared `$str:nameof` constant | 0, now one constant per name |
+| `string.Format` | 0 in `Crux.Api` | — | — |
+| exception message formatting | 6 `new …Exception(…)`, none interpolated | an unmodelled constructor, deliberately (§9.3) | refused |
+| `ArgumentNullException.ThrowIfNull(x)` | 6 | `unmodelled-external` | 0 (a guard) |
+| `ConfigureAwait` / `Task.FromResult` | 5 / 2 | `unmodelled-external` | 0 (pass-through) |
+
+So the largest class (property-like accessors) needed a *model*, not an expansion, and
+the expansion for it already existed. The largest class that was **lowered to a havoc**
+is the method group: 93 of the 173 `unknown name` warnings are `unknown name <a unit
+method>` (31 of them are `.MapGet("/", Handler)` / `.MapPost(…, Handler)` route-handler
+arguments; the rest are `.Select(ResponseOf)`, `var h = Method` and other delegate
+positions), and the expansion is a function value, not a call.
+
+Numbers to reproduce (the same lowering-only probe built twice, `-I src` and with the
+previous `CsLower`): lowering warnings 513 → 420 and `unknown name` 173 → 80 on the 75
+files; every one of the 93 that disappears is `unknown name <a unit method>`, and no
+other warning class changes. The unmodelled-external table falls 917 → 906: the method
+groups were not external calls (a `get_Handler` read was modelled), so only the 6
+`ThrowIfNull` and 5 `ConfigureAwait` call sites leave it. The taint fixture
+`cwe78-macro-unsafe` goes from 0 to 1 finding: before, `handler(input)` called a local
+the analysis could not resolve and the sink inside `Sink` was unreachable; after, the
+call reaches `Dispatcher.Sink`.
+
+### 11.2 What is expanded
+
+* **Method group → function value.** A bare identifier or `Type.M` that names a method
+  of a unit class is `fnptr "$method:<Ns.Class.Method>"` (`Scry.Cs.methodGroup`). The
+  unit's `methodOwner` (which walks `base_list`) is the only lookup, so no new symbol
+  resolution is introduced. A local initialised from a **static** method group remembers
+  the target; a later `handler(x)` is the direct call `Ns.Class.M(x)`, and an assignment
+  to the local updates or clears the target (a re-assigned delegate must not keep
+  calling the old method — `cwe78-macro-unsafe` pins this). An instance method group
+  still gets its function value, but not the target: the receiver would have to be
+  captured, and the value alone does not say how.
+* **`nameof(x)`** → `$str:<name>` (the argument's spelling after the last `.`), instead
+  of the one shared `$str:nameof`. A complex or generic argument is approximated by its
+  spelling; no symbol is resolved.
+* **A small call table** (`Scry.Cs.expansions`), each entry a template over the
+  lowered arguments:
+  `String.Format(fmt, …)` → `System.String.Concat(fmt, …)` (the shape §3 already
+  promised); `ConfigureAwait` and `Task.FromResult` → argument 0; and
+  `ArgumentNullException.ThrowIfNull(x)` / `ArgumentException.ThrowIfNullOrEmpty(x)` →
+  `assume x != null` (the call either returns with a non-null argument or throws).
+
+### 11.3 What is refused
+
+* **Property-like accessors.** The lowering already expands `x.P` to `get_P(x)`; the
+  missing piece was the *model* (§9), not a term template. An external object's fields
+  are not in the points-to model, so "expand `get_P` to a field load" would invent a
+  layout.
+* **Exception message formatting.** `new XException($"…")` is a constructor call; §9.3
+  refuses to model constructors because they write the object they return. The message
+  value does not become a sink-visible flow by calling it a macro.
+* **Lambdas and local functions.** Their bodies are functions, not name→template
+  expansions; lowering them is M5's work (captures, parameters, a new `Wil.Func`).
+* **`is { } x`, tuples, deconstruction, `out`/`ref`, target-typed `new()`.** These are
+  binding or address problems. A template cannot bind a name, and `out` needs a location
+  the lowering does not have.
+* **Unknown names.** A bare name that is not a local, a field or a unit method — an
+  external method group, a `using static` import, a missing local-function body — stays
+  a havoc with `unknown name … not modelled` (`lower/expansions`'s `Mystery`). The table
+  never turns an unknown into a value.
+
+Method groups in the table are recognised by the unit's method table, so the guard is
+structural: remove a method and the name falls back to the warning; there is no
+permissive suffix rule.
+
+
+## 11. The first finding on real code (2026-11-19)
+
+§10 measured a tree with **0 findings** — the lowering and the external-read models were
+right, but no finding could exist. This section traces one true positive in `src/Crux.Api`
+and fixes the two model-side causes; the trace tool is `scry/tools/CsTraceMain.wiz`
+(`grail build cs-trace`, or `wiz build tools/CsTraceMain.wiz -I src -I ../lib`).
+
+### 11.1 The shape
+
+`src/Crux.Api/Schemes/SchemeInboundReceiver.cs:35`:
+
+```csharp
+logger.LogWarning(
+    "Scheme {SchemeKey} did not recognise a {MessageName} message ({ContentType}, {Length} characters).",
+    schemeKey, messageName ?? "inbound", httpRequest.ContentType ?? "no content type", body.Length);
+```
+
+`schemeKey` and `messageName` are route values (attacker-controlled, URL-decoded) and
+`httpRequest.ContentType` is a request header. The rendered line is written by Serilog to
+`Logs/Api/api-.log` (`Program.cs:36-41`). A route value with a newline forges a log record:
+CWE-117. `SchemeOperatorAdmission.cs:28` logs `schemeKey` the same way.
+
+### 11.2 The trace, before
+
+`cs-trace src/Crux.Api SchemeInboundReceiver.ReceiveAsync` printed:
+
+```
+%21 = call HttpRequest.get_ContentType(%4)
+...
+%37 = call ILogger.LogWarning(%27, %28, %1, %30, %34, %36)
+sources 0
+sinks   0
+tainted 0
+findings 0
+```
+
+Three name-resolution gaps and one missing model explain it; the first is the largest.
+
+1. **The source name is bare.** `SchemeInboundReceiver.cs` has no
+   `using Microsoft.AspNetCore.Http;` (the project's implicit global usings supply it), so
+   `canon` leaves the parameter type as `HttpRequest` and the lowering emits
+   `HttpRequest.get_ContentType`, not `Microsoft.AspNetCore.Http.HttpRequest.get_ContentType`.
+   The pack's sources are fully qualified, so no `src` fact is added. The same happens
+   for `HttpContext.Request.Headers` (`?.get_Headers`), `HttpRequest.get_Body`, and every
+   other implicit-using type. The externals work (§9) modelled the **reads** by shape
+   (`get_P`, `T[].get_Item`); it did not add the request accessors as **sources**, and
+   the fully qualified source list was dead on real code.
+2. **Cross-file calls keep short names.** `Scry.CsCmd` lowers each file with its own
+   class table, so `BootstrapPartnerCredentialSeeder.RunAsync` from `Program.cs` is
+   emitted as `BootstrapPartnerCredentialSeeder.RunAsync`, while the merged program's
+   function is `Crux.Api.Hosting.BootstrapPartnerCredentialSeeder.RunAsync`. The call
+   graph sees no edge: summaries do not connect across files, the callee looks
+   external (inflating `unmodelled-external`), and under the entry policy it looks like
+   an entry (so its parameters become sources). `BoundaryRejectionRecorder.RecordAsync`
+   alone had 34 such call sites.
+3. **A method-group value is not a callback according to the entry test.** `CsLower`
+   emits `fnptr "$method:Ns.Class.Method"`; `Scry.fnptrNamesOfStmt` returned the whole
+   spelling and `isExportedEntry` compared it with `fn.name`, so the "address taken ⇒
+   callback" guard never matched for C#.
+4. **There is no sink.** `ILogger.LogWarning` was one of the 917 `unmodelled-external`
+   rows: the C# pack's only sinks are `Process.Start`/`ProcessStartInfo`, and §9
+   deliberately left writes out of the read table. A tainted argument to a log call is a
+   log-line write, so it is a sink (CWE-117).
+
+Classification: **name resolution** (items 1–3, the largest cause) and **missing sink**
+(item 4). There is no havoc or points-to loss in this flow: the `??` copies and the call
+arguments are ordinary uses.
+
+### 11.3 The fix
+
+* `Scry.Cs.resolveCalls` reconciles a **merged** program's direct callees with its
+  function names: a short `Class.Method` becomes the unique `Ns.Class.Method` whose
+  qualified name ends with it (an ambiguous name is left alone; an external name matches
+  none). It also resolves the name inside `$method:` function values. `scry cs` applies
+  it after lowering every file. This is what makes the cross-file call graph, the
+  per-parameter summaries and the entry policy agree.
+* `Scry.fnptrNamesOfStmt` strips `$method:` before the entry test, so a handler passed
+  to `MapPost` or a LINQ selector is a callback, not an exported entry.
+* `Scry.Models` carries the **HTTP request sources** under the three spellings the
+  frontend emits: fully qualified (`Microsoft.AspNetCore.Http.HttpRequest.get_Body`),
+  bare when the file relies on implicit usings (`HttpRequest.get_Body`), and `?.get_P`
+  when the receiver type is unknown. It covers `Body`, `ContentType`, `Query`, `Form`,
+  `Headers`, `Cookies`, `RouteValues`, `Path`, `QueryString`, `ReadFormAsync`,
+  `ReadFromJsonAsync` and `ReadFromJson`.
+* `Scry.Models` has a `log` sink class; `ILogger.Log*`, `?.Log*` and
+  `LoggerExtensions.Log*` are modelled with pointer-like arguments 1–8 as sinks. The
+  receiver (argument 0) is not a sink, and an integer (a length) is not one either, so a
+  tainted logger object or a `Length` cannot fire. The rule id is `log-injection`
+  (CWE-117); `scry/corpus/csharp/csharp.scry` declares it.
+* `scry cs` uses `Scry.analyzeC`: on a partial tree, a public method with no caller in
+  the analysed files is reachable from outside, so its parameters are source seeds (the
+  C-ABI policy `scry taint` already uses). With `resolveCalls` in place this seeds the
+  genuinely external methods, not every cross-file callee.
+* A static method's bare identifier reads a static field (including `const`) through
+  `globalRef`, not field 0 of parameter 0. Before, `SecretVariable`/`CliFlag` read
+  `gep %0,1` and were tainted by the first parameter, which produced six false
+  `log-injection` findings in `BootstrapPartnerCredentialSeeder`.
+
+The corpus pair `taint/cwe117-log-unsafe.cs` / `cwe117-log-safe.cs` pins the model: an
+entry parameter reaches `ILogger.LogWarning` (one finding, `arg 2`), and a constant log
+line with the same parameter has none. Both run under `Scry.analyzeC`, the driver's
+analysis.
+
+### 11.4 After
+
+`scry cs src/Crux.Api` (same 75 files, 240 functions):
+
+| measure | before | after |
+|---|---|---|
+| findings | 0 | **7** (`log-injection`) |
+| `unmodelled-external` call sites | 917 (485 distinct) | **845** |
+| `unknown-memory` | 59 | **36** |
+| lowering warnings (all rows except the taint warnings, `no functions lowered` excluded) | 420 | **420** |
+| `await not modelled` havocs | 0 | **0** |
+
+The 7 findings are 4 in `SchemeInboundReceiver.ReceiveAsync` (line 35 `arg 2` route
+`schemeKey`, `arg 3` `messageName`, `arg 4` `ContentType`; line 50 `arg 2` `schemeKey`)
+and 3 in `SchemeOperatorAdmission.AdmitAsync` (line 28 `arg 2` `schemeKey`, `arg 3` the
+caller certificate thumbprint, `arg 4` `verdict.Reason`). The route arguments are the
+true positives: `%0A` in a path segment is URL-decoded before it reaches the log line.
+The thumbprint and content-type arguments are may-findings of the model (the whole
+`HttpContext` is an entry value); the trace names every step, so a reviewer can see
+which argument they came from. The trace for the receiver is 12 `src` facts (six entry
+parameters and six request accessors), 6 sinks, and 4 alerts; before the fix it was
+0 / 0 / 0.
+
+The remaining `unmodelled-external` 845 are another Nexus project's methods (the
+majority), extension methods called through `HttpContext`/`this` (the 63
+`HttpContext.RequireAuthenticatedPartner` sites), unknown-receiver user extensions,
+constructors and setters — the classes §9 left out. They are coverage rows, not taint
+facts.

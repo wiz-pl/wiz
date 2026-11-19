@@ -62,7 +62,7 @@ structure Scry.State (L : Type) where
   stepIdx : U64Map (List (Scry.PFact L × Nat))
 
 def Scry.State.empty {L : Type} : Scry.State L :=
-  Scry.State.mk (Scry.Db.empty) List.nil 0 U64Map.empty
+  Scry.State.mk (Scry.Db.empty) [] 0 U64Map.empty
 
 def Scry.optEq {L : Type} (eqL : L → L → Bool) : Option L → Option L → Bool
   | .none, .none => .true
@@ -270,7 +270,7 @@ def Scry.boundArgs (vals : List (Nat × U64)) (args : List Scry.Term) : List (Na
     | .var n => match Scry.envGet n vals with
       | .some v => (Nat.succ acc.1, .cons (acc.1, v) acc.2)
       | .none => (Nat.succ acc.1, acc.2))
-    (0, List.nil) args).2
+    (0, []) args).2
 
 /-- The rows to try for a positive atom: the shortest column-index bucket over the bound
 columns, or the whole relation when no bound column is indexed. Candidate order inside a
@@ -384,8 +384,8 @@ def Scry.dedupLatKeys (ks : List (Nat × List U64)) : List (Nat × List U64) :=
     let bucket := U64Map.findD acc.1 h .nil;
     if Scry.latKeyMem e bucket then acc
     else (U64Map.insert acc.1 h (.cons e bucket), .cons e acc.2))
-    (U64Map.empty, List.nil) ks).2;
-  List.revOnto rev List.nil
+    (U64Map.empty, []) ks).2;
+  List.revOnto rev []
 
 def Scry.deltaRows {L : Type} (d : Scry.Delta L) (rel : Nat) : List (List U64) :=
   List.foldr (fun f acc => if Nat.beq f.rel rel then .cons f.args acc else acc) .nil d.tuples

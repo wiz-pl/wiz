@@ -7,6 +7,7 @@
     "=prop-kernels",
     "=false-fuzz",
     "=selfhost",
+    "=selfhost-host",
     "=audit-kernels",
     "=selfhost-macro"
   ]},
@@ -27,7 +28,7 @@
    "select": [
     "=grail-selfhost"
   ]},
-  {"name": "selfhost-libdiff", "heavy": true,
+  {"name": "selfhost-libdiff", "split": 4, "split-cases": true, "heavy": true,
    "inputs": ["lib/*", "scry/*", "selfhost/*", "Tests/Groups/SelfhostLibDiff.lean",
               "Tests/Main.lean", "Tests/Harness.lean"],
    "select": [
@@ -39,6 +40,7 @@
     "=c",
     "callbacks",
     "conc",
+    "=task",
     "effects",
     "ffi",
     "llvm",
@@ -58,14 +60,17 @@
     "=display",
     "=doc",
     "=feral",
+    "=finger-tree",
     "=grail",
     "=grail-commands",
     "=grail-deps",
+    "=grail-e2e",
     "=grail-hygiene",
     "=grail-index",
     "=grail-jobs",
     "=grail-vendor",
     "=hdl",
+    "=hdl-signal",
     "infoview",
     "=json",
     "language",
@@ -85,6 +90,7 @@
     "=scry-wil",
     "=scry-c2wil",
     "=scry-csharp",
+    "=scry-prover",
     "=scry-ai",
     "=scry-taint",
     "=scry-uaf",
@@ -114,6 +120,11 @@
   {"name": "scaling", "split": 3, "select": [
     "=scaling"
   ]},
+  {"name": "examples", "split": 3,
+   "inputs": ["examples/*", "lib/*", "drafts/feral/lib/*"],
+   "select": [
+    "=examples"
+  ]},
   {"name": "prop", "select": [
     "=prop"
   ]},
@@ -128,9 +139,11 @@
   {"name": "core", "jobs": 4,
    "inputs": ["selfhost/Kernel.wiz", "examples/*", "lib/Prelude.wiz", "lib/IO.wiz", "lib/Std.wiz",
               "lib/Eff.wiz", "lib/BitVec.wiz", "lib/Logic.wiz", "lib/Hdl/*",
-              "lib/Text.wiz", "lib/Word.wiz", "lib/Functor.wiz", "lib/Deriving.wiz"],
+              "lib/Text.wiz", "lib/Word.wiz", "lib/Functor.wiz", "lib/Deriving.wiz",
+              "scripts/diff-fuzz.py", "Tests/Groups/DiffFuzz.lean"],
    "select": [
     "check",
+    "=diff-fuzz",
     "conv",
     "copatterns",
     "data",
@@ -138,6 +151,7 @@
     "elab",
     "eval",
     "format",
+    "=fmt",
     "inductive",
     "lexer",
     "lift",

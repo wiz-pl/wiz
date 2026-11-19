@@ -1,0 +1,158 @@
+import Scry.Wil
+import Scry.WilExamples
+/-!
+# A concurrent Wil corpus
+
+The programs here are the golden corpus of the *concurrent* machine
+(`Wil.cstep`/`Wil.crun`, design `wiz-notes/scry-wil-concurrency.md`). They are built with
+the same builder as `Scry.WilExamples`, so a lowering bug cannot masquerade as a
+semantics bug, and they are used by the `scry-wil` group.
+
+* `Scry.incUnsafe` — `*p = *p + 1`, three micro-steps, so two threads can interleave
+  between the load and the store and lose an update;
+* `Scry.incLocked` — the same under `lock(m)` / `unlock(m)`;
+* `Scry.incAtomic` — the same as one `atomic_add(p, 1)` micro-step;
+* `Scry.raceMain w` — a root that allocates the shared counter and the mutex, spawns `w`
+  twice, joins both, and returns the counter; `Scry.raceUnsafe`/`Scry.raceSafe`/
+  `Scry.raceAtomic` instantiate it, so the only difference is the worker;
+* `Scry.leakWorker` / `Scry.useWorker` / `Scry.localEscape` — one thread allocates a block
+  and publishes the pointer, a sibling dereferences it: a *thread-local* block, so the
+  sibling's access faults in the step relation.
+
+The values are pinned in `Tests/Groups/ScryWil.lean`: the unsafe counter is 1 under
+round-robin (a lost update) and 2 under the first-runnable scheduler, while the locked and
+atomic twins are 2 under both.
+-/
+
+-- ## The workers
+
+-- *p = *p + 1 (the mutex parameter is unused: this is the unsafe worker)
+def Scry.incUnsafe : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let m := Wil.var 1 (.ptr Wil.i32);
+  let t := Wil.var 2 Wil.i32;
+  let one := Wil.var 3 Wil.i32;
+  Wil.func "inc" [p, m] [t, one]
+    [ Wil.block
+        [ Wil.load t p
+        , Wil.num one 1
+        , Wil.binop t .add t one
+        , Wil.store p t ]
+        (Wil.ret .none) ]
+
+-- lock(m); *p = *p + 1; unlock(m)
+def Scry.incLocked : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let m := Wil.var 1 (.ptr Wil.i32);
+  let t := Wil.var 2 Wil.i32;
+  let one := Wil.var 3 Wil.i32;
+  Wil.func "incLocked" [p, m] [t, one]
+    [ Wil.block
+        [ Wil.call .none "lock" [m]
+        , Wil.load t p
+        , Wil.num one 1
+        , Wil.binop t .add t one
+        , Wil.store p t
+        , Wil.call .none "unlock" [m] ]
+        (Wil.ret .none) ]
+
+-- old = atomic_add(p, 1)   (one micro-step: no interleaving inside it)
+def Scry.incAtomic : Wil.Func :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let m := Wil.var 1 (.ptr Wil.i32);
+  let one := Wil.var 2 Wil.i32;
+  let old := Wil.var 3 Wil.i32;
+  Wil.func "incAtomic" [p, m] [one, old]
+    [ Wil.block
+        [ Wil.num one 1
+        , Wil.call (.some old) "atomic_add" [p, one] ]
+        (Wil.ret .none) ]
+
+-- ## The root
+
+-- p = alloc 1; m = slot 1; *p = 0; spawn w(p, m) twice; join both; return *p
+def Scry.raceMain (worker : Wil.Func) : Wil.Program :=
+  let p := Wil.var 0 (.ptr Wil.i32);
+  let m := Wil.var 1 (.ptr Wil.i32);
+  let v := Wil.var 2 Wil.i32;
+  let h1 := Wil.var 3 Wil.i32;
+  let h2 := Wil.var 4 Wil.i32;
+  let spawnName := String.append "spawn:" worker.name;
+  Wil.program
+    [ worker
+    , Wil.func "main" [] [p, m, v, h1, h2]
+        [ Wil.block
+            [ Wil.alloc p 1
+            , Wil.slot m 1
+            , Wil.num v 0
+            , Wil.store p v
+            , Wil.call (.some h1) spawnName [p, m]
+            , Wil.call (.some h2) spawnName [p, m]
+            , Wil.call .none "join" [h1]
+            , Wil.call .none "join" [h2]
+            , Wil.load v p ]
+            (Wil.retV v) ] ]
+
+def Scry.raceUnsafe : Wil.Program := Scry.raceMain Scry.incUnsafe
+def Scry.raceSafe : Wil.Program := Scry.raceMain Scry.incLocked
+def Scry.raceAtomic : Wil.Program := Scry.raceMain Scry.incAtomic
+
+-- ## Thread-local blocks
+
+-- p = alloc 1; *s = p   (p is local to this thread; s is the root's shared cell)
+def Scry.leakWorker : Wil.Func :=
+  let s := Wil.var 0 (.ptr (.ptr Wil.i32));
+  let p := Wil.var 1 (.ptr Wil.i32);
+  Wil.func "leak" [s] [p]
+    [ Wil.block [Wil.alloc p 1, Wil.store s p] (Wil.ret .none) ]
+
+-- p = *s; x = *p   (p belongs to another thread: the load faults)
+def Scry.useWorker : Wil.Func :=
+  let s := Wil.var 0 (.ptr (.ptr Wil.i32));
+  let p := Wil.var 1 (.ptr Wil.i32);
+  let x := Wil.var 2 Wil.i32;
+  Wil.func "use" [s] [p, x]
+    [ Wil.block [Wil.load p s, Wil.load x p] (Wil.ret .none) ]
+
+def Scry.localEscape : Wil.Program :=
+  let s := Wil.var 0 (.ptr (.ptr Wil.i32));
+  let h1 := Wil.var 1 Wil.i32;
+  let h2 := Wil.var 2 Wil.i32;
+  let z := Wil.var 3 Wil.i32;
+  Wil.program
+    [ Scry.leakWorker
+    , Scry.useWorker
+    , Wil.func "main" [] [s, h1, h2, z]
+        [ Wil.block
+            [ Wil.alloc s 1
+            , Wil.call (.some h1) "spawn:leak" [s]
+            , Wil.call (.some h2) "spawn:use" [s]
+            , Wil.call .none "join" [h1]
+            , Wil.call .none "join" [h2]
+            , Wil.num z 0 ]
+            (Wil.retV z) ] ]
+
+-- ## A kernel-checked claim about the sequential fragment
+--
+-- The first concurrent step of a sequential program is its sequential step: the
+-- concurrent layer adds no effect of its own. `Scry.storeLoad` starts with `p = alloc 4`,
+-- and after one concurrent micro-step thread 0's register 0 holds `&(0, 0)` — the value
+-- `Wil.step` computes for the same statement. Proved by `rfl`, so the kernel evaluates
+-- both machines on the same configuration (no arithmetic that would be too slow to
+-- normalise: allocation only counts blocks).
+
+def Scry.storeLoadCfg : Wil.CConfig :=
+  match Wil.centry Scry.storeLoad "main" [] with
+  | .ok c => c
+  | .error _ => Wil.CConfig.mk Scry.storeLoad .nil .nil .nil .nil 1
+
+def Scry.cstepStoreLoadFirst :
+    ((match Wil.cstep Scry.storeLoadCfg 0 with
+      | .next c => match c.threads with
+        | .cons t _ => match t.frames with
+          | .cons fr _ => match Wil.lookupReg 0 fr.regs with
+            | .some v => Wil.Val.beq v (.ptr 0 0)
+            | .none => .false
+          | .nil => .false
+        | .nil => .false
+      | .fault _ => .false) : Bool) = .true := rfl

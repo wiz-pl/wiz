@@ -1,4 +1,5 @@
 import Wiz.Core.Level
+import Wiz.Core.NatString
 
 /-!
 # Syntax trees
@@ -81,9 +82,13 @@ def getId? : Syntax → Option Name
 
 def isNone (s : Syntax) : Bool := s.isOfKind nullKind && s.args.isEmpty
 
-/-- The value of a `num` node. -/
+/-- The value of a `num` node.
+
+`String.toNat?` is quadratic in the digit count (it copies the bignum per digit), so
+1 MiB of digits took minutes; `NatString.ofDecimalDigits?` combines base-10^9 limbs as
+a product tree instead. -/
 def getNat? : Syntax → Option Nat
-  | node _ "num" #[atom _ v] => v.toNat?
+  | node _ "num" #[atom _ v] => NatString.ofDecimalDigits? v
   | _ => none
 
 /-- The value of a `str` node. -/

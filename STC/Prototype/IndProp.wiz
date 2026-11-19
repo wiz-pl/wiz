@@ -1,0 +1,50 @@
+import Prelude
+/-!
+# Prototype: native inductive propositions in Wiz (issue #252)
+
+The plan's §0.3 ("Wiz `μ` always lives in `Sort (succ l)`; there are no inductive
+propositions") is **stale at master**. Since #252 the Lean kernel, the elaborator and the
+surface language have a `prop` flag on `μ`: the fixed point lives in `Sort 0`, proofs are
+irrelevant, and the eliminator may target `Type` only for a *singleton* description
+(Lean's singleton elimination). See `Wiz/Core/Term.lean:161-165`,
+`Wiz/Core/Check.lean:441` and `:987-996`, and `Wiz/Elab/Recursor.lean:145`.
+
+Checked with:
+
+    .lake/build/bin/wiz check --no-cache --cache-verify off STC/Prototype/IndProp.wiz
+
+No output: every declaration typechecks. `IndPropReject.wiz` is the expected failure.
+-/
+
+-- An indexed relation in `Prop`, with a real recursor.
+inductive Le : Nat → Nat → Prop where
+  | refl (n : Nat) : Le n n
+  | step {n m : Nat} (h : Le n m) : Le n (Nat.succ m)
+
+def leSucc (n : Nat) : Le n (Nat.succ n) := .step (.refl n)
+
+-- Induction on the derivation, with a `Prop` motive (the kernel's supported case).
+def leWiden {a b : Nat} (h : Le a b) : Le a (Nat.succ b) :=
+  Le.rec (fun x y _ => Le x (Nat.succ y)) (fun n => .step (.refl n)) (fun _ ih => .step ih) h
+
+-- A non-indexed proposition with two proof fields; its eliminator only targets `Prop`.
+inductive AndP (A B : Prop) : Prop where
+  | intro (a : A) (b : B)
+
+def andPComm {A B : Prop} (h : AndP A B) : AndP B A :=
+  AndP.rec (fun _ => AndP B A) (fun a b => .intro b a) h
+
+-- A *singleton* proposition may eliminate into `Type` (`EqP.rec` computes `Nat.succ 0`).
+inductive EqP {A : Type} (a : A) : A → Prop where
+  | refl : EqP a a
+
+def eqPTest : Nat :=
+  EqP.rec (fun (b : Nat) (_ : EqP Nat.zero b) => Nat) (Nat.succ Nat.zero) (EqP.refl)
+
+-- Mutual inductive propositions are one propositional family (#252).
+mutual
+inductive A : Prop where
+  | mk
+inductive B : Prop where
+  | mkB (a : A)
+end

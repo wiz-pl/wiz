@@ -104,12 +104,12 @@ def U64Map.beq_self (k : U64) : UIntN.beq k k = .true := U64Map.natBeqSelf k.toN
 def U64Map.findL_cons_self {V : Type} (k : U64) (v : V) (rest : List (U64 × V)) :
     U64Map.findL k (.cons (k, v) rest) = .some v :=
   transp (fun b _ => (match b with
-    | .true => Option.some v
-    | .false => U64Map.findL k rest) = Option.some v) rfl (Eq.symm (U64Map.beq_self k))
+    | .true => .some v
+    | .false => U64Map.findL k rest) = .some v) rfl (Eq.symm (U64Map.beq_self k))
 def U64Map.findL_skip {V : Type} (k : U64) (e : U64 × V) (rest : List (U64 × V)) (h : UIntN.beq k e.1 = .false) :
     U64Map.findL k (.cons e rest) = U64Map.findL k rest :=
   transp (fun b _ => (match b with
-    | .true => Option.some e.2
+    | .true => .some e.2
     | .false => U64Map.findL k rest) = U64Map.findL k rest) rfl (Eq.symm h)
 def U64Map.findL_insertL {V : Type} (k : U64) (v : V) : (l : List (U64 × V)) →
     U64Map.findL k (U64Map.insertL k v l) = .some v
@@ -119,27 +119,27 @@ def U64Map.findL_insertL {V : Type} (k : U64) (v : V) : (l : List (U64 × V)) �
         | .true => List.cons (k, v) (List.cons e rest)
         | .false => match UIntN.beq k e.1 with
           | .true => List.cons (k, v) rest
-          | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+          | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
       (U64Map.findL_cons_self k v (.cons e rest)) (Eq.symm hl))
     (fun hl => Or.elim (Bool.cases (UIntN.beq k e.1))
       (fun hb => transp (fun b _ => U64Map.findL k (match b with
           | .true => List.cons (k, v) (List.cons e rest)
           | .false => match UIntN.beq k e.1 with
             | .true => List.cons (k, v) rest
-            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+            | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
         (transp (fun c _ => U64Map.findL k (match c with
             | .true => List.cons (k, v) rest
-            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+            | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
           (U64Map.findL_cons_self k v rest) (Eq.symm hb))
         (Eq.symm hl))
       (fun hb => transp (fun b _ => U64Map.findL k (match b with
           | .true => List.cons (k, v) (List.cons e rest)
           | .false => match UIntN.beq k e.1 with
             | .true => List.cons (k, v) rest
-            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+            | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
         (transp (fun c _ => U64Map.findL k (match c with
             | .true => List.cons (k, v) rest
-            | .false => List.cons e (U64Map.insertL k v rest)) = Option.some v)
+            | .false => List.cons e (U64Map.insertL k v rest)) = .some v)
           (Eq.trans (U64Map.findL_skip k e (U64Map.insertL k v rest) hb) (U64Map.findL_insertL k v rest)) (Eq.symm hb))
         (Eq.symm hl)))
 def U64Map.find_insert {V : Type} (m : U64Map V) (k : U64) (v : V) : U64Map.find (U64Map.insert m k v) k = .some v :=

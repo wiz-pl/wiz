@@ -1,0 +1,254 @@
+import Text
+/-!
+# Args
+
+A small, pure parser for a tool's command line: a `List String` in, an
+`Except Args.Usage Args.Parsed` out. It has no `IO`, no environment and no process state,
+so a tool author can test a command line with `#eval`.
+
+A specification is one `Args.Spec` value:
+
+```
+def spec : Args.Spec :=
+  Args.Spec.mk
+    [ Args.Flag.arg "mem" "m"        -- --mem 6G, --mem=6G, -m 6G, -m6G
+    , Args.Flag.on "verbose" "v" ]   -- --verbose, -v
+    ["build", "check", "run"]
+```
+
+`Args.parse spec args` then gives either `.ok p` or `.error u`; `Args.Usage.message u`
+is the text for the user, and `p.command`, `p.positionals`, `Args.Parsed.value` and
+`Args.Parsed.has` are what a tool reads. A flag's `name` is the key in the result, so
+`--mem` and `-m` share one value.
+
+## Rules
+
+* Long flags: `--mem 6G` and `--mem=6G` (everything after the first `=` is the value,
+  including further `=`). A value flag takes the next argument even when it starts with
+  `-`: `--mem --fast` is the value `"--fast"`, as in Lean Grail (`grailOpts`).
+* Short flags: `-m 6G` and `-m6G`. A clustered token is read left to right: switches
+  accumulate, and the first value flag takes the rest of the token (`-vm6G` is `-v` and
+  `-m` with `6G`), or the next argument when the rest is empty (`-vm 6G`). There is no
+  `=` stripping for short flags: `-m=6G` is the value `"=6G"`.
+* `--` ends flag parsing: every later argument, including one starting with `-`, is
+  positional. It is only a terminator when no value flag is waiting for its argument:
+  in `--mem -- x`, `--` is the value of `--mem` and `x` is positional.
+* A lone `-` is positional (the usual stdin convention).
+* Positionals are collected in command-line order, wherever the flags were.
+* The first positional is the subcommand when `spec.commands` is not empty; it is
+  removed from `positionals` and reported as `p.command`. A first positional that is
+  not in `spec.commands` is `unknownCommand`. With no positional, `p.command` is
+  `none` (whether that is an error is the tool's decision).
+* An unknown flag is an error, not a positional. After `--`, the same text is
+  positional.
+* **Repeated flags: the last occurrence wins.** For a value flag, the parsed list keeps
+  one entry per name (the newest value); for a switch, repetition is idempotent. Lean
+  Grail's `grailOpts` also lets the last assignment win, which is why this parser does;
+  the difference is that this one makes the duplicate explicit instead of leaving it in
+  the caller's record.
+
+## What is copied from `Grail/Cli.lean` and what is not
+
+Copied: the left-to-right scan, flags allowed before and after positionals, the last
+value winning, a value flag consuming the next argument unconditionally, and the
+`-j4`-style attached short value (`grailOpts` has a special case for it).
+
+Deliberately not copied: `grailOpts` leaves an unrecognised flag in the remaining
+arguments for a later stage (here it is `unknownFlag`); it has no `--` terminator, no
+short-flag clustering, no `--flag=value` form, and no subcommand concept (Grail
+pattern-matches the remaining list itself). Grail also treats `-C` and `--dir` as
+different fields rather than aliases; here `long` and `short` are two spellings of one
+`name`.
+-/
+
+/-- One flag of a specification. `name` is the key reported in the result (so aliases
+share it), `long` and `short` are the spellings without their dashes (`""` for none),
+and `takesArg` says whether an argument follows. -/
+structure Args.Flag where
+  name : String
+  long : String
+  short : String
+  takesArg : Bool
+
+/-- A switch `--long` (and `-short`, when `short` is not empty). Its name is `long`, or
+`short` when there is no long spelling. -/
+def Args.Flag.on (long short : String) : Args.Flag :=
+  Args.Flag.mk (if String.isEmpty long then short else long) long short .false
+
+/-- A flag with an argument: `--long V`, `--long=V`, `-short V` or `-shortV`. Its name
+is `long`, or `short` when there is no long spelling. -/
+def Args.Flag.arg (long short : String) : Args.Flag :=
+  Args.Flag.mk (if String.isEmpty long then short else long) long short .true
+
+/-- What a command line may contain: its flags and its subcommands. `commands` being
+empty means there is no subcommand and every positional is data. -/
+structure Args.Spec where
+  flags : List Args.Flag
+  commands : List String
+
+/-- Why a command line could not be parsed. `Args.Usage.message` is the user-facing
+text; the constructors keep the offending token matchable. -/
+inductive Args.Usage where
+  | unknownFlag (flag : String)
+  | missingValue (flag : String)
+  | unexpectedValue (flag : String)
+  | unknownCommand (command : String)
+
+/-- The text of a usage error, without a program-name prefix:
+`unknown flag: --bogus`, `flag needs a value: --mem`, `flag takes no value: --all`,
+`unknown command: frobnicate`. -/
+def Args.Usage.message : Args.Usage → String
+  | .unknownFlag f => "unknown flag: " ++ f
+  | .missingValue f => "flag needs a value: " ++ f
+  | .unexpectedValue f => "flag takes no value: " ++ f
+  | .unknownCommand c => "unknown command: " ++ c
+
+/-- The parsed command line. `values` holds one entry per value flag that was given
+(most recently given first, so the last occurrence wins); `switches` holds each switch
+at most once. Both use the flag's `name`. -/
+structure Args.Parsed where
+  command : Option String
+  positionals : List String
+  values : List (String × String)
+  switches : List String
+
+/-- The value of the value flag `name`, if it was given. -/
+def Args.Parsed.value (p : Args.Parsed) (name : String) : Option String :=
+  String.lookup name p.values
+
+/-- Whether the switch `name` was given (repetition is idempotent). -/
+def Args.Parsed.has (p : Args.Parsed) (name : String) : Bool := String.elem name p.switches
+
+/-- The first flag with the long spelling `name`. -/
+def Args.findLong (flags : List Args.Flag) (name : String) : Option Args.Flag :=
+  List.find (fun f => String.eq f.long name) flags
+
+/-- The first flag with the short spelling `letter` (one character, without `-`). -/
+def Args.findShort (flags : List Args.Flag) (letter : String) : Option Args.Flag :=
+  List.find (fun f => String.eq f.short letter) flags
+
+/-- Record a value flag: replace an earlier value of the same name, so the last
+occurrence is the one `Args.Parsed.value` finds. -/
+def Args.setValue (p : Args.Parsed) (name : String) (v : String) : Args.Parsed :=
+  {p with values := .cons (name, v) (List.filter (fun kv =>
+    Bool.not (String.eq kv.1 name)) p.values)}
+
+/-- Record a switch (a second occurrence changes nothing). -/
+def Args.setSwitch (p : Args.Parsed) (name : String) : Args.Parsed :=
+  match Args.Parsed.has p name with
+  | .true => p
+  | .false => {p with switches := .cons name p.switches}
+
+/-- What a short cluster says before the parser knows the next argument: the switches
+it contains, an attached value (`-m6G`), or a value flag that needs the next argument
+(`-m`). The spelling is kept for the error message. -/
+structure Args.ShortResult where
+  switches : List String
+  value : Option (String × String)
+  pending : Option (String × String)
+
+/-- The letters of a short token, left to right: switches accumulate; the first value
+flag takes the rest of the token, or asks for the next argument when nothing is left. -/
+def Args.parseShortChars (spec : Args.Spec) : List Char → Except Args.Usage Args.ShortResult
+  | .nil => .ok (Args.ShortResult.mk .nil .none .none)
+  | .cons c cs =>
+    let s := String.singleton c match Args.findShort spec.flags s with
+      | .none => .error (.unknownFlag ("-" ++ s))
+      | .some f => match f.takesArg with
+        | .false => match Args.parseShortChars spec cs with
+          | .ok r => .ok (Args.ShortResult.mk (.cons f.name r.switches) r.value r.pending)
+          | .error e => .error e
+        | .true => match String.isEmpty (String.ofChars cs) with
+          | .false => .ok (Args.ShortResult.mk .nil (.some (f.name, String.ofChars cs)) .none)
+          | .true => .ok (Args.ShortResult.mk .nil .none (.some (f.name, "-" ++ s)))
+
+/-- The state of the left-to-right scan. `pending` is a value flag (name and spelling)
+whose argument is the next token; `error` makes the rest of the scan a no-op. -/
+structure Args.State where
+  parsed : Args.Parsed
+  pending : Option (String × String)
+  terminated : Bool
+  error : Option Args.Usage
+
+/-- The empty state. -/
+def Args.State.initial : Args.State :=
+  Args.State.mk (Args.Parsed.mk .none .nil .nil .nil) .none .false .none
+
+/-- One argument as a positional (they are collected reversed and reversed at the end). -/
+def Args.addPositional (p : Args.Parsed) (a : String) : Args.Parsed :=
+  {p with positionals := .cons a p.positionals}
+
+/-- One long flag: a switch, an attached value (`--mem=6G`), or a value flag asking for
+the next argument (`--mem`). The value after `=` may contain further `=`; an empty
+value (`--mem=`) is a value. -/
+def Args.longStep (spec : Args.Spec) (st : Args.State) (a : String) : Args.State :=
+  let body := match String.stripPrefix a "--" with
+    | .some b => b
+    | .none => a match String.splitOn body "=" with
+      | .nil => {st with error := .some (.unknownFlag a)}
+      | .cons name .nil => match String.isEmpty name with
+        | .true => {st with error := .some (.unknownFlag a)}
+        | .false => match Args.findLong spec.flags name with
+          | .none => {st with error := .some (.unknownFlag ("--" ++ name))}
+          | .some f => match f.takesArg with
+            | .false => {st with parsed := Args.setSwitch st.parsed f.name}
+            | .true => {st with pending := .some (f.name, "--" ++ name)}
+      | .cons name (.cons v more) => match String.isEmpty name with
+        | .true => {st with error := .some (.unknownFlag a)}
+        | .false => match Args.findLong spec.flags name with
+          | .none => {st with error := .some (.unknownFlag ("--" ++ name))}
+          | .some f => match f.takesArg with
+            | .false => {st with error := .some (.unexpectedValue ("--" ++ name))}
+            | .true =>
+              {st with parsed := Args.setValue st.parsed f.name (String.intercalate "=" (.cons v more))}
+
+/-- One short token (`-abc`, `-m6G`, `-m`): apply its switches and attached value, or
+leave a value flag pending for the next argument. -/
+def Args.shortStep (spec : Args.Spec) (st : Args.State) (a : String) : Args.State :=
+  match Args.parseShortChars spec (String.chars (String.drop 1 a)) with
+  | .error e => {st with error := .some e}
+  | .ok r =>
+    let p := List.foldl (fun (q : Args.Parsed) (name : String) =>
+      Args.setSwitch q name) st.parsed r.switches match r.value with
+        | .some (name, v) => {st with parsed := Args.setValue p name v}
+        | .none => match r.pending with
+          | .some (name, spelling) => {st with parsed := p, pending := .some (name, spelling)}
+          | .none => {st with parsed := p}
+
+/-- One argument, in the state of the scan. A pending value flag takes any token,
+including one that starts with `-` (or is `--`), as in Lean Grail. -/
+def Args.step (spec : Args.Spec) (st : Args.State) (a : String) : Args.State := match st.error with
+  | .some _ => st
+  | .none => match st.pending with
+    | .some (name, _) => {st with parsed := Args.setValue st.parsed name a, pending := .none}
+    | .none => match st.terminated with
+      | .true => {st with parsed := Args.addPositional st.parsed a}
+      | .false => match String.eq a "--" with
+        | .true => {st with terminated := .true}
+        | .false => match String.startsWith a "--" with
+          | .true => Args.longStep spec st a
+          | .false => match Bool.and (String.startsWith a "-") (Bool.not (String.eq a "-")) with
+            | .true => Args.shortStep spec st a
+            | .false => {st with parsed := Args.addPositional st.parsed a}
+
+/-- All arguments are in: report an error or a value flag with no argument, reverse the
+collected positionals, then take the first one as the subcommand when the spec has
+commands. -/
+def Args.finish (spec : Args.Spec) (st : Args.State) : Except Args.Usage Args.Parsed :=
+  match st.error with
+  | .some e => .error e
+  | .none =>
+    match st.pending with
+    | .some (_, spelling) => .error (.missingValue spelling)
+    | .none =>
+      let p := {st.parsed with positionals := List.reverse st.parsed.positionals} match spec.commands with
+        | .nil => .ok p
+        | .cons _ _ => match p.positionals with
+          | .nil => .ok p
+          | .cons first rest => match String.elem first spec.commands with
+            | .true => .ok {p with command := .some first, positionals := rest}
+            | .false => .error (.unknownCommand first)
+
+/-- Parse `args` against `spec`. Pure: the same arguments always give the same result. -/
+def Args.parse (spec : Args.Spec) (args : List String) : Except Args.Usage Args.Parsed :=
+  Args.finish spec (List.foldl (Args.step spec) Args.State.initial args)
