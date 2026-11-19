@@ -64,7 +64,9 @@ A silent skip is the failure mode this table has to rule out:
 
 /-- The Wil evidence every analysis of this slice consumes (the fact-bundle
 parameterisation is P3): the program, its points-to solution, the per-function taint
-results, and the pack that selected the analysis. -/
+results, and the pack that selected the analysis. This record is also the seam for P4's
+model pack: adding `models : Scry.ModelPack` here and reading it in the two shipped rows
+is enough, because both pipelines only build the input and call `runAnalyses`. -/
 structure Scry.AnalysisInput where
   prog : Wil.Program
   pt : Scry.PtResult
