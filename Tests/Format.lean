@@ -79,6 +79,9 @@ def group : Group where
         let expected := "def bind (x : Nat) (g : Nat → Nat) : Nat :=\n  fun s =>\n    let r := x\n    g r\n"
         formats input expected
         idempotent input },
+    { name := "let: a parenthesised match as the value is idempotent",
+      run := fun _ => idempotent
+        "inductive T where\n  | a\n  | b\n\ndef f (t : T) : Nat :=\n  match t with\n  | .a => 0\n  | .b =>\n    let x := (match t with\n      | .a => 1\n      | .b => 2);\n    x\n" },
     { name := "comments: a trailing comment does not leave a blank line",
       run := fun _ => formats
         "def f (x : Nat) : Nat :=\n  -- before let\n  let y := x -- after value\n  -- before body\n  y -- after body\n"

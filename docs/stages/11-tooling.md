@@ -768,7 +768,8 @@ implicit binders, a string with comment markers, comments in odd places).
 * **Layout and the parser's columns.** `colGt`/`colGe` compare against a remembered
   position (`withPosition`), so the layout has to respect it: a `match`'s alternatives
   and a `by`'s tactics align with their construct's line (at 2 when it is inline, at the
-  line's indent when it starts one, deeper for nested matches), and a `let` always starts
+  line's indent when it starts one, deeper for nested matches), and a `let` in a body
+  position always starts
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
@@ -777,15 +778,17 @@ implicit binders, a string with comment markers, comments in odd places).
   the indentation of the construct that follows (no blank line is left).
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
-  check is what makes a prototype safe: across the library files tested (Prelude, Logic,
-  BitBlast, Deriving, Eff, Vec, EffHeap, Word, Grail, Feral, HeapBorrow, OpticDerive,
-  Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
-  accepts, is idempotent on every file (formatting twice gives the same text), and
-  refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). The `format` group has the layout and comment cases
-  (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
-  fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
-  idempotent reprint with no refused command. Both groups are in CI's `core` shard.
+  check is what makes a prototype safe: a sweep of every `*.wiz` under `lib/`,
+  `examples/`, `selfhost/` and `scry/` (298 files, with each file's own module roots) finds
+  no idempotence failure: 284 files format to a fixed point, 14 are outside the Lean
+  frontend's parser (the self-hosted subset and two vendored `text` packages use
+  operators it does not accept, so `wiz fmt` reports "not formatted"), and one command is
+  refused (`Scry.unmodelledWarningsOf` in `lib/Scry/Interproc.wiz`: a `let` in an `else`
+  branch, whose reprint misplaces a continuation line; the command is kept verbatim).
+  The `format` group has the layout and comment cases (26 cases); `wiz fmt --self-test`
+  runs the fixtures, and the `fmt` gate group formats a fixed six-file corpus twice
+  (`lake test -- '=fmt'`, about 12 s) and requires an idempotent reprint with no refused
+  command. Both groups are in CI's `core` shard.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not
