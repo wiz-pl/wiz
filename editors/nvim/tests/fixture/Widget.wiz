@@ -1,0 +1,5 @@
+import Plot
+
+def chart : Plot.Chart := Plot.chart "Sales" (Plot.frame [Plot.line "2025" [Plot.ptNat 0 14, Plot.ptNat 1 22, Plot.ptNat 2 19]])
+
+#plot chart
