@@ -172,6 +172,8 @@ def webAssets : List (String × String) :=
    -- (11s) the parts infoview.js shares with the playground and the documentation's pages
    ("playground-lsp.js", "text/javascript; charset=utf-8"),
    ("lsp-client.js", "text/javascript; charset=utf-8"),
+   ("widgets.js", "text/javascript; charset=utf-8"),
+   ("widgets.css", "text/css; charset=utf-8"),
    -- the editor's overlays (squiggles, completions, hover), their layout, and the
    -- text-input helper the completion widget imports
    ("squiggles.js", "text/javascript; charset=utf-8"),

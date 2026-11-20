@@ -46,32 +46,11 @@ open Wiz
 namespace Tests.ScryTaint
 
 /-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as
-`Scry.X`), by module name. The C-lowering pipeline case serves both roots. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
+`Scry.X`), by module name: one loader for the suite (`Tests.scryLoader`). -/
+def libLoader : IO (Name → Option String) := Tests.scryLoader
 
 def prototypeImports : String :=
   "import Scry.Analysis\nimport Scry.Taint\nimport Scry.TaintExamples\nimport Text\n"
-
-/-- A Wiz string literal for `s` (the escapes the Wiz lexer reads). -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
 
 def ruleImports : String :=
   "import Scry.Analysis\n" ++

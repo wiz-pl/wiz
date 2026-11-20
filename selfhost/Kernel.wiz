@@ -3705,7 +3705,7 @@ partial def liftTm (k cut : Nat) : Tm → Tm
   -- (a global's value and type are closed; so are literals and their registrations)
   | .const n ps ls v ty => .const n ps ls v ty
   | .axiomC n ty => .axiomC n ty
-  | .ulift kU l A => .ulift kU l (liftTm k cut A)
+  | .ulift lv lw A => .ulift lv lw (liftTm k cut A)
   | .up a => .up (liftTm k cut a)
   | .down t => .down (liftTm k cut t)
   | .prf l t => .prf l (liftTm k cut t)
@@ -4135,7 +4135,7 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ um => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                let xt := Val.vmu l vI vD vi vs;
+                let xt : Val := .vmu l vI vD vi vs;
                 match check (erasedIf q c) x xt with
                 | .ok _ ux => .ok (vapp (vapp vP vi) (eval (TCtx.env c) x)) (uAdd um (scaleUsage c q x xt ux))
                 | r => r
@@ -5215,7 +5215,7 @@ def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ r w fx => markTy (.mk e ts l x 4 r w fx) t
+    | .mk e ts l x _ r w f => markTy (.mk e ts l x 4 r w f) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v

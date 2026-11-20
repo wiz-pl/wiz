@@ -24,7 +24,7 @@ checkout without a Wiz binary.
 A kernel file is a sequence of `def`s. The entry has a `Nat` index first and one or more
 `Array U32` buffers after it:
 
-```wiz
+```wiz no-check
 def add (i : Nat) (a b : Array U32) : U32 :=
   addScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
 ```

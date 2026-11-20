@@ -1,5 +1,6 @@
 import Scry.Wil
 import Scry.Analysis
+import Scry.Identity
 import Text
 import Word
 import WordMap
@@ -180,12 +181,8 @@ def Scry.locInsert (l : Scry.Loc) (ls : List Scry.Loc) : List Scry.Loc :=
 
 -- ## The abstract state
 
-/-- FNV-1a over a string's characters, the key hash the maps below use. The model is a
-`List Char`, so this is O(length of the name), once per lookup. -/
-def Scry.fnvStr (s : String) : U64 :=
-  List.foldl (fun h c =>
-    UIntN.mul (UIntN.xor h (U64.ofNat (Char.code c))) (U64.ofNat 1099511628211))
-    (U64.ofNat 14695981039346656037) (String.chars s)
+-- `Scry.fnvStr` (the key hash the maps below use) is `Scry.Identity`'s: the one
+-- 64-bit hash, over a string's code points, in `Word`. O(length of the name) per lookup.
 
 /-- Mix two words into one (a 64-bit odd multiplier and add). -/
 def Scry.mix64 (h x : U64) : U64 :=

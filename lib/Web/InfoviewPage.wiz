@@ -58,12 +58,19 @@ def InfoviewPage.view (s : InfoviewPage) : Loom.VNode InfoviewPage.Msg :=
   let side := Loom.el "section" [Loom.id "side"]
     [ Goals.panel InfoviewPage.Msg.tag InfoviewPage.Msg.span InfoviewPage.Msg.reconnect
         InfoviewPage.Msg.key s.panel ];
+  -- The widget host's pane (`web/widgets.js`, mounted by `web/infoview.js`). It is a
+  -- grid child beside the editor and the goals, so a wide plot scrolls in its own
+  -- column; the goals panel never renders a payload's markup.
+  let widgets := Loom.el "aside" [Loom.id "widgets", Loom.class "widget-pane",
+      Loom.attr "aria-label" "Widgets"]
+    [ Loom.el "h3" [] [Loom.text "Widgets"]
+    , Loom.el "div" [Loom.id "widget-list", Loom.class "widget-list"] [] ];
   let main := match s.follow with
-    | .true => Loom.el "main" [Loom.class "follow"] [side]
+    | .true => Loom.el "main" [Loom.class "follow"] [side, widgets]
     | .false => Loom.el "main" []
         [ Loom.on "input" InfoviewPage.Msg.input
             (Loom.el "textarea" [Loom.id "editor", Loom.attr "spellcheck" "false"] [Loom.text s.text])
-        , side ];
+        , side, widgets ];
   Loom.seq [header, main]
 
 /-- The page's effects (`wiz_loom_effect`): `init` (the text and follow flag), `panel`

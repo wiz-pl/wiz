@@ -175,6 +175,63 @@ def hdlPipeTools : IO Unit := do
         let o ← IO.Process.output { cmd := "yosys", args := #["-q", "-p", s!"read_verilog {top}.v; hierarchy -top {top}; check -assert"], cwd := dir }
         unless o.exitCode == 0 do throw (IO.userError s!"yosys check fails on {top}.v:\n{o.stderr}")
 
+/-- examples/hdl-formal.wiz's emitted texts: the correct, `prove` and wrong harnesses,
+then their `.sby` files (`qv`, `pv`, `bv`, `qsby`, `psby`, `bsby`). -/
+def hdlFormalTexts : IO (List String) := do
+    let src ← IO.FS.readFile "examples/hdl-formal.wiz"
+    let s := runFrontend (R := ZeroOneMany)
+      (src ++ "\n#eval qv\n#eval pv\n#eval bv\n#eval qsby\n#eval psby\n#eval bsby\n")
+      { trustedModule := Tests.libModule, loader := ← libLoader }
+    let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+    unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
+    unless s.messages.size == 6 do
+      throw (IO.userError s!"expected 6 texts, got {s.messages.size}: {s.messages.toList.map (·.text)}")
+    pure (s.messages.toList.map (·.text))
+
+/-- Hdl.Formal end to end: yosys reads the emitted module in formal mode and
+`yosys-smtbmc` proves the correct harness (BMC depth 8 and, for the k-inductive
+`ready` monitor, induction depth 4) and finds a counterexample for the wrong RTL. The
+generated `.sby` files are the same checks for a SymbiYosys install. Skipped only when
+yosys, yosys-smtbmc or z3 is missing. -/
+def hdlFormalTools : IO Unit := do
+    let has (cmd : String) (args : Array String) : IO Bool :=
+      (do let o ← IO.Process.output { cmd := cmd, args := args }; pure (o.exitCode == 0)) <|> pure false
+    let ys ← has "yosys" #["-V"]
+    let smt ← has "yosys-smtbmc" #["--help"]
+    let z3 ← has "z3" #["--version"]
+    unless ys && smt && z3 do
+      skip s!"no formal toolchain (yosys {ys}, yosys-smtbmc {smt}, z3 {z3})"; return
+    let texts ← hdlFormalTexts
+    let unq (t : String) : String := ((t.drop 1).dropRight 1).replace "\\n" "\n" |>.replace "\\\"" "\""
+    IO.FS.withTempDir fun dir => do
+      let names := ["queue.v", "queue_prove.v", "queue_bug.v", "queue.sby", "queue_prove.sby", "queue_bug.sby"]
+      for t in texts, nm in names do IO.FS.writeFile (dir / nm) (unq t)
+      let prep (file top : String) : IO Unit := do
+        let o ← IO.Process.output { cmd := "yosys", args := #["-q", "-p",
+          s!"read_verilog -formal {file}; prep -top {top}; clk2fflogic; write_smt2 -wires {top}.smt2"], cwd := dir }
+        unless o.exitCode == 0 do throw (IO.userError s!"yosys rejects {file}:\n{o.stderr}")
+      let check (top : String) (steps : Nat) (induction : Bool) : IO String := do
+        let args := if induction then #["-s", "z3", "-i", "-t", toString steps, s!"{top}.smt2"]
+          else #["-s", "z3", "-t", toString steps, s!"{top}.smt2"]
+        let o ← IO.Process.output { cmd := "yosys-smtbmc", args, cwd := dir }
+        pure (o.stdout ++ o.stderr)
+      -- the correct RTL: all monitors pass in BMC, and the combinational law by induction
+      prep "queue.v" "queue"
+      let bmcQ ← check "queue" 8 false
+      unless (bmcQ.splitOn "Status: PASSED").length > 1 do
+        throw (IO.userError s!"queue.v: BMC did not pass:\n{bmcQ}")
+      prep "queue_prove.v" "queue_prove"
+      let indQ ← check "queue_prove" 4 true
+      unless (indQ.splitOn "Status: PASSED").length > 1 do
+        throw (IO.userError s!"queue_prove.v: induction did not pass:\n{indQ}")
+      -- the wrong RTL: stability must fail, with a counterexample
+      prep "queue_bug.v" "queue_bug"
+      let bmcB ← check "queue_bug" 8 false
+      unless (bmcB.splitOn "Status: FAILED").length > 1 do
+        throw (IO.userError s!"queue_bug.v: BMC did not find the stability bug:\n{bmcB}")
+      unless (bmcB.splitOn "Assert failed").length > 1 do
+        throw (IO.userError s!"queue_bug.v: no failed assertion in the trace:\n{bmcB}")
+
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
@@ -297,6 +354,22 @@ def hdlGroup : Group where
     { name := "Hdl.Mem: word/byte read-after-write and no-alias laws, every byte-strobe mask, one- and two-cycle RAMs, values = netlist", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
           [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
+    { name := "Hdl.Bus.ramWC: wait timeline, read-after-write for every 8/16/32-bit strobe, no alias, no bypass, byte addressing; values = netlist", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-ramwc.wiz")
+          ("wait timeline 0 0 1 1 2 0 0\n" ++
+           "masked read-after-write 8/16/32: yes yes yes\n" ++
+           "no alias 8/16/32: yes yes yes\n" ++
+           "write answer rvalid 0, data 0 (no bypass; the write is visible to the next read)\n" ++
+           "byte addressing shift=2 yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
+    { name := "Hdl.Crc.protoC: line-framed CRC service (one outstanding line), host model, ready/drop laws, values = netlist", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-crc-link.wiz")
+          ("replies 70 52 10 52 53 10, host model yes, lines 2\n" ++
+           "early newline dropped yes, lines 2\n" ++
+           "ready = not valid yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
         -- (the `#check`s name the proofs the case is about: deleting or weakening one
         -- changes this message list, so the final `#eval` alone cannot keep it green)
@@ -405,6 +478,47 @@ def hdlGroup : Group where
           "def q (n : Nat) : Nat := match n with\n  |.zero=>1\n  | .succ k => k\ndef r : Nat → Nat := fun x=>x\n#eval q 0")
           ["p : TL Nat → TL Nat → TL Nat", "fun a b => □ (a ~> ◇ b) : TL Nat → TL Nat → TL Nat",
            "fun a b => a |-> ○ b : TL Nat → TL Nat → TL Nat", "fun a b => a |=> b |-> a : TL Nat → TL Nat → TL Nat", "1"] },
+    { name := "Hdl.Formal: the ifdef FORMAL harness (monitors, $past/$stable/anyconst, reset assumption, .sby) is emitted verbatim", run := fun _ => do
+        let texts ← hdlFormalTexts
+        -- the harness is inside the ifdef and the non-formal module is Verilog.emit's:
+        -- check the structure, the monitor names and the generated job files
+        let q := hdlUnq texts[0]!
+        let p := hdlUnq texts[1]!
+        let b := hdlUnq texts[2]!
+        -- the golden: the module plus the whole harness, byte for byte
+        checkEq
+          "module queue(input clk, input [0:0] rst, input [0:0] in_valid, input [7:0] in_data, input [0:0] out_ready, output [0:0] out_valid, output [7:0] out_data, output [0:0] in_ready);\n  reg [0:0] full; initial full = 1'd0;\n  reg [7:0] data; initial data = 8'd0;\n  wire [0:0] n6 = ~full;\n  wire [0:0] n7 = out_ready | n6;\n  wire [0:0] n8 = in_valid & n7;\n  wire [0:0] n9 = ~out_ready;\n  wire [0:0] n10 = full & n9;\n  wire [0:0] n11 = n8 | n10;\n  wire [7:0] n12 = n8 ? in_data : data;\n  always @(posedge clk) if (rst) full <= 1'd0; else full <= n11;\n  always @(posedge clk) if (rst) data <= 8'd0; else data <= n12;\n  assign out_valid = full;\n  assign out_data = data;\n  assign in_ready = n7;\n\n`ifdef FORMAL\n  // Hdl.Formal harness: 5 monitor(s) on posedge clk, history depth 2.\n  reg [1:0] f_cycle = 2'd0;\n  always @(posedge clk) if (f_cycle != 2'd2) f_cycle <= f_cycle + 2'd1;\n  (* anyconst *) reg [7:0] f_k;\n  // reset is asserted in the first cycle and not again: the environment the\n  // properties are stated for (a design that needs a longer reset says so).\n  initial assume (rst);\n  always @(posedge clk) if (f_cycle >= 1'd1) assume (~rst);\n  // [ready] always\n  always @(posedge clk) if (f_cycle >= 1'd1) assert (((~(out_valid) | (in_ready == out_ready))));\n  // [stability] impliesNext\n  always @(posedge clk) if (f_cycle >= 2'd2) assert (!$past((out_valid & ~(out_ready))) || ($stable(out_data)));\n  // [accepted] impliesNext\n  always @(posedge clk) if (f_cycle >= 2'd2) assert (!$past((in_valid & in_ready)) || ((out_valid & (out_data == $past(in_data, 1)))));\n  // [anyconst] impliesNext\n  always @(posedge clk) if (f_cycle >= 2'd2) assert (!$past(((in_valid & in_ready) & (in_data == f_k))) || ((out_data == f_k)));\n  // [transfer] cover\n  always @(posedge clk) if (f_cycle >= 1'd1) cover (((in_valid & in_ready)));\n`endif\nendmodule\n"
+          q
+        for (what, v) in [("queue", q), ("queue_prove", p), ("queue_bug", b)] do
+          unless (v.splitOn "`ifdef FORMAL").length > 1 do
+            throw (IO.userError s!"{what}.v has no ifdef FORMAL harness:\n{v}")
+          unless (v.splitOn "`endif").length > 1 do
+            throw (IO.userError s!"{what}.v does not close the ifdef:\n{v}")
+        for frag in ["// Hdl.Formal harness: 5 monitor(s) on posedge clk, history depth 2.",
+            "(* anyconst *) reg [7:0] f_k;", "initial assume (rst);",
+            "always @(posedge clk) if (f_cycle >= 1'd1) assume (~rst);",
+            "// [stability] impliesNext",
+            "assert (!$past((out_valid & ~(out_ready))) || ($stable(out_data)));",
+            "// [anyconst] impliesNext",
+            "$past(((in_valid & in_ready) & (in_data == f_k)))",
+            "// [transfer] cover", "cover (((in_valid & in_ready)));"] do
+          unless (q.splitOn frag).length > 1 do
+            throw (IO.userError s!"missing from queue.v: {frag}\n{q}")
+        unless (p.splitOn "// Hdl.Formal harness: 1 monitor(s) on posedge clk, history depth 1.").length > 1 do
+          throw (IO.userError s!"queue_prove.v has the wrong harness:\n{p}")
+        unless (p.splitOn "// [stability]").length == 1 do
+          throw (IO.userError s!"queue_prove.v should only have the ready monitor:\n{p}")
+        checkEq
+          "[options]\nmode bmc\ndepth 8\n\n[engines]\nsmtbmc\n\n[script]\nread -formal queue.v\nprep -top queue\n\n[files]\nqueue.v\n"
+          (hdlUnq texts[3]!)
+        checkEq
+          "[options]\nmode prove\ndepth 4\n\n[engines]\nsmtbmc\n\n[script]\nread -formal queue_prove.v\nprep -top queue_prove\n\n[files]\nqueue_prove.v\n"
+          (hdlUnq texts[4]!)
+        -- the unsuffixed text is exactly Verilog.emit's: remove everything from the ifdef on
+        let before := (q.splitOn "`ifdef FORMAL")[0]!
+        unless (before.splitOn "module queue(").length > 1 && (before.splitOn "endmodule").length == 1 do
+          throw (IO.userError s!"the non-formal prefix of queue.v is not Verilog.emit's:\n{before}") },
+    { name := "Hdl.Formal: yosys-smtbmc proves the correct harness and finds the wrong RTL (skipped without yosys, yosys-smtbmc or z3)", run := fun _ => hdlFormalTools },
     { name := "Verilog: Icarus Verilog accepts the emitted modules (skipped without iverilog on PATH)", run := fun _ => do
         let found ← (do let o ← IO.Process.output { cmd := "iverilog", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
         unless found do skip "no iverilog"; return

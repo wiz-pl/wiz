@@ -55,7 +55,7 @@ fi
   --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_loom_init,_wiz_loom_html,_wiz_loom_step,_wiz_loom_effect,_wiz_loom_requests,_wiz_loom_consume,_wiz_loom_editor_segments,_wiz_loom_editor_items,_wiz_loom_editor_popup,_wiz_loom_editor_move,_wiz_loom_editor_accept,_wiz_loom_editor_trigger,_wiz_loom_editor_position,_wiz_loom_editor_offset,_wiz_loom_editor_indent,_wiz_retain,_wiz_release,_free \
+-sEXPORTED_FUNCTIONS=_wiz_loom_init,_wiz_loom_html,_wiz_loom_step,_wiz_loom_effect,_wiz_loom_requests,_wiz_loom_consume,_wiz_loom_editor_index,_wiz_loom_editor_segments,_wiz_loom_editor_segments_index,_wiz_loom_editor_items,_wiz_loom_editor_popup,_wiz_loom_editor_move,_wiz_loom_editor_accept,_wiz_loom_editor_trigger,_wiz_loom_editor_position,_wiz_loom_editor_position_index,_wiz_loom_editor_offset,_wiz_loom_editor_offset_index,_wiz_loom_editor_utf16,_wiz_loom_editor_editor_offset,_wiz_loom_editor_line_end,_wiz_loom_editor_line_end_index,_wiz_loom_editor_indent,_wiz_loom_index_build,_wiz_loom_index_size,_wiz_loom_index_term,_wiz_loom_index_goal,_wiz_loom_index_declarations,_wiz_loom_index_declaration,_wiz_retain,_wiz_release,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/playground-ui.wiz -o "$OUT/wiz-playground-ui.mjs" --no-main)

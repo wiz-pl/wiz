@@ -229,18 +229,19 @@ def Bus.Law.RouteCorrect {ω aw dw : Nat} (base size : Nat) (x : HwTy.El (Bus.Ro
     Bus.Law.bit y.resp.rvalid = Bool.and (Bus.Law.bit i.req.valid) (Bool.not (Bus.Law.bit i.req.we)) ∧
     y.resp.rdata = BitVec.ofNat dw 0)
 
-/-- The RAM: when a write is answered (`go`), every byte is enabled and the write stored
-`wdata`, then a read of the same address reads `wdata` back. This is the part of the
-byte-enabled RAM's contract the HDL model can state directly; the per-byte merge is
-checked exhaustively in the example ("tested, not proved" there). -/
-def Bus.Law.ReadAfterWrite {ω ab dw : Nat} (shift : Nat) (s : HwTy.El (Bus.Ram.code ab dw))
-    (q : HwTy.El (Bus.ReqW.code 8 dw)) : Prop :=
+/-- The RAM: when a write is answered (`go`), the step stores the masked word, and a
+read of the same address afterwards is `Bus.ramWMerged` (the enabled bytes from
+`wdata`, the others from the old word). This is read-after-write at the transaction
+boundary: the write is visible to the *next* request, not to the read that shares the
+answering cycle (there is no bypass). -/
+def Bus.Law.ReadAfterWrite {ω aw ab dw : Nat} (shift : Nat) (s : HwTy.El (Bus.Ram.code ab dw))
+    (q : HwTy.El (Bus.ReqW.code aw dw)) : Prop :=
   let i := Bus.Law.reqW q;
-  let go := Bool.and (Bus.Law.bit i.valid) (Bus.Law.bit (Bus.isK (Bus.Law.ram s).wait 2));
+  let sr := Bus.Law.ram s;
+  let go := Bool.and (Bus.Law.bit i.valid) (Bus.Law.bit (Bus.isK sr.wait 2));
   go = .true → Bus.Law.bit i.we = .true →
-    i.wstrb = Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1) →
-    Hw.memRead (Bus.Law.ram (Hw.fst (Bus.ramWStep shift ab dw (Bus.Law.ram s) i))).cells
-      (Hw.slice shift ab i.addr) = i.wdata
+    Hw.memRead (Bus.ramWNext shift sr i).cells (Bus.ramWIndex shift ab i)
+      = Bus.ramWMerged shift sr i
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas
@@ -277,6 +278,183 @@ def Bus.Law.memWrite_read_miss {ω aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw))
 API is unchanged by the byte-enabled variant. -/
 def Bus.Law.ofReq_toReq {ω aw dw : Nat} (q : Bus.Req aw dw HwTy.El) :
     Bus.ReqW.toReq (Bus.ReqW.ofReq q) = q := rfl
+
+------------------------------------------------------------------------------------
+-- The byte-enabled RAM, proved. `Bus.ramWStep` is written through `Bus.ramWNext`/
+-- `Bus.ramWOut` and the `Hdl.Mem` mask/merge, so the cell update, the no-bypass answer
+-- and the wait counter are definitional; the read-after-write/no-alias laws are the
+-- memory lemmas applied to that write.
+
+/-- The next state's cells are the masked write, enabled by `go && we` (definitional). -/
+def Bus.Law.ramWNext_cells {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) :
+    (Bus.ramWNext shift s q).cells =
+      Hw.memWrite s.cells (Hw.and (Bus.ramWGo s q) q.we)
+        (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q) := rfl
+
+/-- The next state's wait counter is `Bus.ramWWait` (definitional). -/
+def Bus.Law.ramWNext_wait {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) :
+    (Bus.ramWNext shift s q).wait = Bus.ramWWait s q := rfl
+
+/-- The answer's `ready` is the take signal (definitional). -/
+def Bus.Law.ramWOut_ready {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) :
+    (Bus.ramWOut shift s q).ready = Bus.ramWGo s q := rfl
+
+/-- The answer's `rvalid` is a taken read (definitional). -/
+def Bus.Law.ramWOut_rvalid {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) :
+    (Bus.ramWOut shift s q).rvalid = Hw.and (Bus.ramWGo s q) (Hw.not q.we) := rfl
+
+/-- **No read-during-write bypass.** The data of the answering cycle is the word read
+from the cells before the store, whatever the write does in that cycle. A write is
+therefore visible to the next transaction only (the ordering the RAM documents). -/
+def Bus.Law.ramWOut_noBypass {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) :
+    (Bus.ramWOut shift s q).rdata = Hw.memRead s.cells (Bus.ramWIndex shift ab q) := rfl
+
+/-- A disabled write leaves the cells alone (definitional). -/
+def Bus.Law.memWrite_zero {ω aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw))
+    (a : HwTy.El (HwTy.bits aw)) (d : HwTy.El (HwTy.bits dw)) :
+    Hw.memWrite m (Bit.zero : HwTy.El HwTy.bit) a d = m := rfl
+
+/-- The taken write's enable is 1 (the `go` and `we` bits are both 1). -/
+def Bus.Law.ramWEnable {ω aw ab dw : Nat} (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) (hgo : Bus.ramWGo s q = Bit.one) (hwe : q.we = Bit.one) :
+    Hw.and (Bus.ramWGo s q) q.we = Bit.one :=
+  Eq.trans
+    (Eq.congrArg (fun (w : BitVec 1) => Hw.and (Bus.ramWGo s q) w) hwe)
+    (Eq.trans (Bit.and_one_r (Bus.ramWGo s q)) hgo)
+
+/-- **RAM write (pointwise).** With the request taken (`go = 1`) and `we = 1`, the next
+state's cells at every word are the enabled masked write of `ramWMerged`. (Pointwise
+rather than an equality of the two memory *functions*: a memory is a function, and the
+value-level `Eq.congrArg` over a function-valued result is needlessly awkward.) -/
+def Bus.Law.ramWStep_write {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) (hgo : Bus.ramWGo s q = Bit.one) (hwe : q.we = Bit.one)
+    (x : BitVec ab) :
+    (Bus.ramWNext shift s q).cells x =
+      Hw.memWrite s.cells Bit.one (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q) x :=
+  Eq.trans
+    (Eq.congrArg (fun (m : HwTy.El (HwTy.mem ab dw)) => m x)
+      (Bus.Law.ramWNext_cells shift s q))
+    (Eq.congrArg (fun (en : BitVec 1) =>
+        Hw.memWrite s.cells en (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q) x)
+      (Bus.Law.ramWEnable s q hgo hwe))
+
+/-- **Read-after-write (the RAM law).** After a taken write, a read of the same word is
+the merged word: the enabled bytes are `wdata` and the disabled bytes keep the old
+word. This is the general-strobe form of `ReadAfterWrite`. -/
+def Bus.Law.ramWStep_read_same {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) (hgo : Bus.ramWGo s q = Bit.one) (hwe : q.we = Bit.one) :
+    Hw.memRead (Bus.ramWNext shift s q).cells (Bus.ramWIndex shift ab q)
+      = Bus.ramWMerged shift s q :=
+  Eq.trans
+    (Eq.congrArg (fun (m : HwTy.El (HwTy.mem ab dw)) =>
+        Hw.memRead m (Bus.ramWIndex shift ab q)) (Bus.Law.ramWNext_cells shift s q))
+    (Eq.trans
+      (Eq.congrArg (fun (en : BitVec 1) =>
+          Hw.memRead (Hw.memWrite s.cells en (Bus.ramWIndex shift ab q)
+            (Bus.ramWMerged shift s q)) (Bus.ramWIndex shift ab q))
+        (Bus.Law.ramWEnable s q hgo hwe))
+      (HwTy.El.memRead_write_hit s.cells (Bus.ramWIndex shift ab q)
+        (Bus.ramWMerged shift s q) (Bus.ramWIndex shift ab q)
+        (Bus.Law.beqSelf (Bus.ramWIndex shift ab q))))
+
+/-- **No alias.** A write to the request's word does not change a read of another word,
+whether or not it is taken. -/
+def Bus.Law.ramWStep_read_other {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) (ix : HwTy.El (HwTy.bits ab))
+    (h : BitVec.beq (Bus.ramWIndex shift ab q) ix = .false) :
+    Hw.memRead (Bus.ramWNext shift s q).cells ix = Hw.memRead s.cells ix :=
+  Eq.trans
+    (Eq.congrArg (fun (m : HwTy.El (HwTy.mem ab dw)) => Hw.memRead m ix)
+      (Bus.Law.ramWNext_cells shift s q))
+    (HwTy.El.memRead_write_miss s.cells (Hw.and (Bus.ramWGo s q) q.we)
+      (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q) ix h)
+
+/-- A request that is not taken writes nothing: the cells are unchanged (pointwise). -/
+def Bus.Law.ramWStep_no_write {ω aw ab dw : Nat} (shift : Nat) (s : Bus.Ram ab dw HwTy.El)
+    (q : Bus.ReqW aw dw HwTy.El) (h : Hw.and (Bus.ramWGo s q) q.we = Bit.zero)
+    (x : BitVec ab) :
+    (Bus.ramWNext shift s q).cells x = s.cells x :=
+  Eq.trans
+    (Eq.congrArg (fun (m : HwTy.El (HwTy.mem ab dw)) => m x)
+      (Bus.Law.ramWNext_cells shift s q))
+    (Eq.trans
+      (Eq.congrArg (fun (en : BitVec 1) =>
+          Hw.memWrite s.cells en (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q) x) h)
+      (Eq.congrArg (fun (m : HwTy.El (HwTy.mem ab dw)) => m x)
+        (Bus.Law.memWrite_zero s.cells (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q))))
+
+------------------------------------------------------------------------------------
+-- The wait counter, on closed values. A request offered at wait 0 is answered in the
+-- third cycle (two cycles of delay); while `wait < 2` the step does not take a second
+-- request, and a source that drops `valid` withdraws it (the counter resets, so nothing
+-- is left in flight). Together these are the one-outstanding-request contract.
+
+/-- A byte-enabled request with `valid` and `we` high (all-strobes is not needed). -/
+def Bus.Law.reqW1 {ω aw dw : Nat} : Bus.ReqW aw dw HwTy.El :=
+  Bus.ReqW.mk Bit.one Bit.one (BitVec.ofNat aw 0) (BitVec.ofNat dw 0)
+    (BitVec.ofNat (Nat.div dw 8) 1)
+
+/-- A RAM state at wait 0 (any cells). -/
+def Bus.Law.ramW0 (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
+  Bus.Ram.mk (Bus.ramInit ab dw).cells (BitVec.ofNat 2 0)
+/-- A RAM state at wait 1 (any cells). -/
+def Bus.Law.ramW1 (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
+  Bus.Ram.mk (Bus.ramInit ab dw).cells (BitVec.ofNat 2 1)
+/-- A RAM state at wait 2 (any cells). -/
+def Bus.Law.ramW2 (ab dw : Nat) : Bus.Ram ab dw HwTy.El :=
+  Bus.Ram.mk (Bus.ramInit ab dw).cells (BitVec.ofNat 2 2)
+
+/-- At wait 0 a request is not taken. -/
+def Bus.Law.ramW_go_first {ω aw ab dw : Nat} (shift : Nat) :
+    Bus.ramWGo (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw)) = Bit.zero := rfl
+
+/-- At wait 1 a request is still not taken. -/
+def Bus.Law.ramW_go_second {ω aw ab dw : Nat} (shift : Nat) :
+    Bus.ramWGo (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+      (Bus.Law.reqW1 (aw := aw) (dw := dw)) = Bit.zero := rfl
+
+/-- At wait 2 a held request is taken (two cycles after it was offered). -/
+def Bus.Law.ramW_go_third {ω aw ab dw : Nat} (shift : Nat) :
+    Bus.ramWGo
+      (Bus.ramWNext shift
+        (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+        (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+      (Bus.Law.reqW1 (aw := aw) (dw := dw)) = Bit.one := rfl
+
+/-- The counter after the first cycle of a held request: 1. -/
+def Bus.Law.ramW_wait_first {ω aw ab dw : Nat} (shift : Nat) :
+    (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw))).wait
+      = BitVec.ofNat 2 1 := rfl
+
+/-- The counter after the second cycle: 2. -/
+def Bus.Law.ramW_wait_second {ω aw ab dw : Nat} (shift : Nat) :
+    (Bus.ramWNext shift
+      (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+      (Bus.Law.reqW1 (aw := aw) (dw := dw))).wait = BitVec.ofNat 2 2 := rfl
+
+/-- The counter after the answering cycle: 0 (the next request starts again at 0). -/
+def Bus.Law.ramW_wait_third {ω aw ab dw : Nat} (shift : Nat) :
+    (Bus.ramWNext shift
+      (Bus.ramWNext shift
+        (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+        (Bus.Law.reqW1 (aw := aw) (dw := dw)))
+      (Bus.Law.reqW1 (aw := aw) (dw := dw))).wait = BitVec.ofNat 2 0 := rfl
+
+/-- `valid` low withdraws a request at wait 0: the counter stays 0, so nothing is in
+flight and a later request does not see a stale delay. -/
+def Bus.Law.ramW_wait_withdraw0 {ω aw ab dw : Nat} (shift : Nat) :
+    (Bus.ramWNext shift (Bus.Law.ramW0 ab dw) (Bus.noReqW (aw := aw) (dw := dw))).wait
+      = BitVec.ofNat 2 0 := rfl
+
+/-- `valid` low withdraws a request at wait 1 as well. -/
+def Bus.Law.ramW_wait_withdraw1 {ω aw ab dw : Nat} (shift : Nat) :
+    (Bus.ramWNext shift (Bus.Law.ramW1 ab dw) (Bus.noReqW (aw := aw) (dw := dw))).wait
+      = BitVec.ofNat 2 0 := rfl
 
 ------------------------------------------------------------------------------------
 -- The arbiter, proved. `Bus.arbStepAtBits` has the grant as an argument, so one

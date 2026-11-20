@@ -8,6 +8,7 @@
 // (`web/completions.js`). The page's `update(kind, a, b)` is its runtime effect.
 "use strict";
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
+import { mountWidgets } from "./widgets.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
 import { mountHover, wantsHover } from "./hover.js";
@@ -18,6 +19,55 @@ import { caretOffset } from "./framework/editor-text.js";
 function scratchUri() {
   const random = Math.random().toString(36).slice(2, 10);
   return `file:///playground-${random}.wiz`;
+}
+
+// The runtime's position index (`lib/Web/EditorModel.wiz`), read through `mount.ask`.
+// `ask(name, ...strings) -> string` invokes a `wiz_loom_*` export; `versionOf()` (when
+// given) is the document version the cache is keyed by. The line table is built once per
+// (version, text) and reused by every query: the previous keyup path rebuilt the whole
+// UTF-16 expansion on each call, and the selfhost index repeated it per caret.
+export function createIndexer(ask, versionOf = null) {
+  let cache = { text: null, version: undefined, index: "" };
+  const indexOf = (text) => {
+    const version = versionOf ? versionOf() : undefined;
+    if (cache.text === text && cache.version === version) return cache.index;
+    const index = ask("wiz_loom_editor_index", "0", text);
+    cache = { text, version, index };
+    return index;
+  };
+  return {
+    index: indexOf,
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(offset | 0))),
+    offset: (text, position) => {
+      const line = position && Number.isFinite(position.line) ? Math.trunc(position.line) : 0;
+      const character = position && Number.isFinite(position.character) ? Math.trunc(position.character) : 0;
+      return Number(ask("wiz_loom_editor_offset_index", indexOf(text),
+        String(line), String(character)));
+    },
+    lineEnd: (text, offset) =>
+      Number(ask("wiz_loom_editor_line_end_index", indexOf(text), String(offset | 0))),
+    range: (text, from, to) => ({
+      start: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(from | 0))),
+      end: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(to | 0))),
+    }),
+    utf16: (text, codePoints) => Number(ask("wiz_loom_editor_utf16", text, String(codePoints | 0))),
+    editorOffset: (text, prefix, codePoints) =>
+      Number(ask("wiz_loom_editor_editor_offset", text, prefix, String(codePoints | 0))),
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments_index", indexOf(text), text,
+        JSON.stringify(diagnostics || []), "0")),
+    build: (text, entries, prefix) =>
+      ask("wiz_loom_index_build", text, prefix || "", JSON.stringify(entries || [])),
+    size: (index) => Number(ask("wiz_loom_index_size", index)),
+    term: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_term", text, index, String(offset | 0))),
+    goal: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_goal", text, index, String(offset | 0))),
+    declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
+    declarationNamed: (text, index, name) =>
+      JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+  };
 }
 
 // An LSP position for a JavaScript string index (UTF-16 code units).
@@ -50,11 +100,13 @@ function offsetAt(text, line, character) {
 // `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
 // `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
 // a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
-// `render` callback (the Node tests) gets the same events there.
+// `render` callback (the Node tests) gets the same events there. `widgetPane` is an
+// element for the widget host: the cards are mounted there by `mountWidgets`, never
+// rendered into the goals panel.
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120, onRender, rules,
+  hover: wantHover, positionDebounce = 120, onRender, rules, widgetPane,
 } = {}) {
   if (!editor && !follow) return null;
   const send = typeof update === "function" ? update
@@ -90,8 +142,24 @@ export function startInfoview({
     follow,
   };
 
+  // The widget pane is rebuilt only when the payload changed: `mountWidgets` clears the
+  // container and sanitises every card, and `publish` runs on every answer, diagnostics
+  // notification and cursor move (a plot's SVG is up to 2 MB). The key is the serialized
+  // payload, so identical items keep the mounted DOM (and its `<details open>`, scroll
+  // and focus) across publishes.
+  let lastWidgets = null;
+  const widgetKey = (items) => {
+    try { return JSON.stringify(items || []); } catch { return ""; }
+  };
   const publish = () => {
     send("view", JSON.stringify(view), "");
+    if (widgetPane) {
+      const key = widgetKey(view.items);
+      if (key !== lastWidgets) {
+        mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+        lastWidgets = key;
+      }
+    }
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
     }
@@ -276,6 +344,7 @@ export function startInfoview({
       if (hover) hover.close();
       view.state = "closed";
       view.info = null;
+      view.items = [];
       view.diagnostics = [];
       if (squiggles) squiggles.update([]);
       publish();
@@ -322,6 +391,7 @@ export function startInfoview({
     view.goalsKind = null;
     view.term = null;
     view.termKind = null;
+    view.items = [];
     publish();
     try {
       await client.reconnect();

@@ -2,6 +2,7 @@ import Json
 import Text
 import Web.Widget
 import Scry.Facts
+import Scry.Identity
 /-!
 # Scry.AnalysisFile: an analysis run as an ordinary Wiz file
 
@@ -155,25 +156,14 @@ def Scry.boolEq (a b : Bool) : Bool :=
   | .false, .false => .true
   | _, _ => .false
 
-/-- FNV-1a-64 over a string's code points, modulo 2^64. Not cryptographic; a revision
-records the algorithm so nothing claims otherwise. -/
-def Scry.revFnvStep (h : Nat) (c : Char) : Nat :=
-  Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) (Nat.pow 2 64)
+-- `Scry.revFnv`/`Scry.revHex` are aliases of the one hash (`Scry.Identity`); the
+-- revision records still name the algorithm (`fnv1a64`) next to the value.
 
-/-- The FNV-1a-64 value of a string. -/
-def Scry.revFnv (s : String) : Nat :=
-  List.foldl Scry.revFnvStep 14695981039346656037 (String.chars s)
+/-- The 64-bit hash of a string (alias of `Scry.fnv`). -/
+def Scry.revFnv (s : String) : Nat := Scry.fnv s
 
-/-- 16 lower-case hex digits. -/
-partial def Scry.revHexGo (n : Nat) (fuel : Nat) : List Char :=
-  match fuel with
-  | .zero => .nil
-  | .succ k =>
-    List.cons (Json.hexDigit (Nat.mod n 16)) (Scry.revHexGo (Nat.div n 16) k)
-
-/-- A 64-bit FNV value as 16 hex digits. -/
-def Scry.revHex (n : Nat) : String :=
-  String.ofChars (List.reverse (Scry.revHexGo n 16))
+/-- A 64-bit hash value as 16 hex digits (alias of `Scry.hex16`). -/
+def Scry.revHex (n : Nat) : String := Scry.hex16 n
 
 /-- A call site (or error site) as the claim sees it: a graph node, the file it is in,
 and its span. -/
@@ -587,12 +577,23 @@ def Scry.analysisExt (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
     ("findings", Json.mkArr (List.map Scry.afFindingJson r.findings)),
     ("graph", Scry.graphJson v) ]
 
-/-- The bundle: `Widget.bundle`'s `wiz.widget/1` object with one extra key, `scry`. -/
+/-- The card's title: the claim and its verdict. -/
+def Scry.analysisTitle (r : Scry.ClaimResult) : String :=
+  String.append (String.append "claim " r.name) (String.append ": " r.status)
+
+/-- The bundle: `Widget.bundle`'s `wiz.widget/1` object with the card's `kind`,
+`mimeType`, `title` and `summary`, plus the `scry.analysis/1` extension. A widget host
+draws the extension itself (the claim, findings and graph counts); the `widgets` list
+and `html` stay for clients that only understand the Loom bundle. -/
 def Scry.analysisBundle (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
   let ws := Scry.analysisWidgets r v;
   let ext := Scry.analysisExt r v;
   match Widget.bundle ws with
-  | .obj fs => Json.obj (JFields.fcons "scry" ext fs)
+  | .obj fs => Json.obj (JFields.fcons "kind" (Json.mkStr "scry.analysis")
+      (JFields.fcons "mimeType" (Json.mkStr "text/html")
+        (JFields.fcons "title" (Json.mkStr (Scry.analysisTitle r))
+          (JFields.fcons "summary" (Json.mkStr r.summary)
+            (JFields.fcons "scry" ext fs)))))
   | other => other
 
 /-- The display string: `WIZ_WIDGET:` plus the bundle. -/

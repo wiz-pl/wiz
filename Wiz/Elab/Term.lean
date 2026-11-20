@@ -1309,6 +1309,64 @@ partial def sameDefinition? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R)
       pure (some t))
     (fun _ => pure none)
 
+/-- Every identifier written in a term (uses and binder names alike). A section's
+parameter is named so that it is not one of these, so it can neither capture a use nor
+be captured by a binder in the body. -/
+partial def sectionNamesIn : Syntax → List Name
+  | .ident _ n => [n]
+  | .node _ _ args => args.toList.flatMap sectionNamesIn
+  | _ => []
+
+/-- A section parameter's name: `x`, then `x1`, `x2`, … — the first one not in `used`. -/
+partial def freshSectionName (used : List Name) (i : Nat) : Name :=
+  let n : Name := if i == 0 then "x" else s!"x{i}"
+  if used.contains n then freshSectionName used (i + 1) else n
+
+/-- Whether a term has a `·` outside a nested parenthesised term (that one is the
+inner term's section). -/
+partial def hasSectionHole : Syntax → Bool
+  | .node _ "term.sectionHole" _ => true
+  | .node _ "term.paren" _ => false
+  | .node _ _ args => args.any hasSectionHole
+  | _ => false
+
+/-- Replace each `·` in a term by a variable, returning the rewritten term, the names
+in order, and the `used` list with them. A `·` inside a nested `( … )` belongs to that
+parenthesised term's section, so it is left for the inner elaboration. -/
+partial def abstractSections (stx : Syntax) (used : List Name) :
+    Syntax × List Name × List Name :=
+  match stx with
+  | .node _ "term.sectionHole" _ =>
+    let n := freshSectionName used 0
+    (.node stx.info "term.ident" #[.ident stx.info n], [n], n :: used)
+  | .node _ "term.paren" _ => (stx, [], used)
+  | .node info k args =>
+    let (args, names, used) := args.foldl (init := (#[], [], used)) fun (acc, ns, us) a =>
+      let (a', ns', us') := abstractSections a us
+      (acc.push a', ns ++ ns', us')
+    (.node info k args, names, used)
+  | s => (s, [], used)
+
+/-- A `·` section `(· + 1)`, `(1 + ·)`, `(· * ·)`: a lambda whose parameters are the
+holes, checked against the expected function type. This is what makes
+`List.map (· + 1) xs` work: the argument's expected type `A → B` gives the hole its
+type. `expected` is forced one Π at a time; implicit Πs were already consumed by
+`check`, so the parameters are explicit. -/
+partial def elabSection (ctx : LocalCtx R) (body : Syntax) (expected : VTy R) : ElabM R (Term R) := do
+  let (body', names, _) := abstractSections body (sectionNamesIn body)
+  let rec go (ctx : LocalCtx R) (names : List Name) (e : VTy R) : ElabM R (Term R) := do
+    match names with
+    | [] => check ctx body' e
+    | n :: ns =>
+      match ← force e with
+      | .pi _ _ q dom cod _ =>
+        let t ← go (ctx.bindQ n dom ((Val.toPoly? q).bind (·.isConst?))) ns (← instM cod (Val.var ctx.lvl))
+        return .lam n t
+      | .neutral (.mvar _) _ =>
+        throwAt body.info "a `·` section is a lambda, so it needs a function type from the context; use it where one is expected (as in `List.map (· + 1) xs`), or write the `fun` out"
+      | e => throwAt body.info s!"a `·` section is a lambda, but the expected type has too few function arguments: {← showVal ctx e}"
+  go ctx names expected
+
 /-- **Exercise 3.8.** Elaborate `stx` against `expected`. Force `expected` first.
 
 1. If `expected` is an implicit Π and `stx` is not an implicit `fun`
@@ -1500,7 +1558,11 @@ where
     -- (13h) `⟨a, b⟩` and `let ⟨a, b⟩ := s; body`
     | "term.anon" => elabAnon ctx stx expected
     | "term.letPat" => return (← elabLetPat ctx stx (some expected)).1
-    | "term.paren" => check ctx (stx.getArg 1) expected
+    | "term.paren" =>
+      if hasSectionHole (stx.getArg 1) then elabSection ctx (stx.getArg 1) expected
+      else check ctx (stx.getArg 1) expected
+    | "term.sectionHole" =>
+      throwAt ctx.info "a `·` is a section placeholder: write it inside parentheses, as in `(· + 1)`, where a function type is expected"
     | "term.app" =>
       if (stx.getArg 0).isOfKind "term.explicit" || (← builtinApp? ctx stx).isSome ||
           !((stx.getArg 1).args.any needsExpected || (← ctorWithParams ctx (stx.getArg 0)) ||
@@ -3424,32 +3486,69 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
-  let scruts := (stx.getArg 1).args.filter (!· matches .atom ..)
+  let scrutNodes := (stx.getArg 1).args.filter (!· matches .atom ..)
+  -- `match h : e, … with`: each scrutinee may name the branch's equation `h : e = p`
+  let scrutName (s : Syntax) : Option (Name × SourceInfo) :=
+    if s.isOfKind "match.scrut" then
+      let n := (s.getArg 0).getId?.getD "_"
+      if n == "_" then none else some (n, (s.getArg 0).info)
+    else none
+  let named : Array (Option (Name × SourceInfo)) := scrutNodes.map scrutName
+  let mut seen : List Name := []
+  for nm in named do
+    if let some (n, i) := nm then
+      if seen.contains n then
+        throwAt i s!"the equation hypothesis '{n}' is named twice in one match" ErrorCode.duplicateHypothesis
+      seen := n :: seen
+  let scruts := scrutNodes.map fun s => if s.isOfKind "match.scrut" then s.getArg 2 else s
   let alts := (stx.getArg 3).args
-  let clauses : List (MClause R) ← alts.toList.mapM fun a => do
+  -- `| h : p => …`: the equation's name goes before the scrutinee, not in a pattern
+  for a in alts do
+    if a.isOfKind "match.altEq" then
+      throwAt (a.getArg 1).info ("a pattern is expected here; name the equation before the scrutinee, " ++
+        "`match h : e with | p => …`")
+  let clauses0 : List (MClause R) ← alts.toList.mapM fun a => do
     pure { pats := ← ((a.getArg 1).args.filter (!· matches .atom ..)).toList.mapM expandPattern, rhs := a.getArg 3 }
+  -- the equations are extra columns after the scrutinees (so `compileMatch` reverts
+  -- them into the motive, and each branch gets the refined type `e = p`)
+  let eqCount := (named.filterMap id).size
+  let clauses := if eqCount == 0 then clauses0 else
+    clauses0.map fun c => { c with pats := c.pats ++ List.replicate eqCount holeStx }
   -- bind every scrutinee to a fresh variable, generalising it in the goal
   let mut ctx' := ctx
   let mut ts : Array (Term R) := #[]
+  let mut origTys : Array (Term R) := #[]
   -- zonk: solved metas in the expected type would otherwise hide its universe
   let mut goalTm ← zonk ctx.lvl (quote g ctx.lvl expected)
   let mut binders : Array (Name × Term R) := #[]
   -- (linear-case stage 2) a scrutinee that uses a linear local is bound at 1 and taken
   -- apart by `T.casesOn1`
   let mut linearScruts : Array Bool := #[]
+  -- an indexed type: a constructor split refines its index, so the branch's `e = p`
+  -- would be ill-typed (the scrutinee term keeps its outer index)
+  let mut indexed : Array Bool := #[]
   for s in scruts do
     let (t, ty) ← infer ctx s
     ts := ts.push t
-    -- (H14 S2) a signal as the condition of `if`: a multiplexer
-    if scruts.size == 1 then
+    origTys := origTys.push (quote g ctx.lvl ty)
+    -- (H14 S2) a signal as the condition of `if`: a multiplexer (not for a named
+    -- scrutinee: `ifMux?` would drop the equation)
+    if scruts.size == 1 && eqCount == 0 then
       if let some m ← ifMux? ctx alts t ty expected then return m
       -- (H14 S4) `match` on a signal: a case tree over `Hw.eq` and `Hw.mux`
       if let some m ← matchMux? ctx stx alts s ty expected then return m
     -- (only a data type with `T.casesOn1`, at size ∞: anything else would bind the
     -- scrutinee at 1 and then take it apart at ω)
-    let hasCases1 := match ← force ty with
+    let fty ← force ty
+    let hasCases1 := match fty with
       | .mu _ _ _ _ .szInf (some (T, _, _)) _ => (g.find? (T ++ ".casesOn1")).isSome
       | _ => false
+    indexed := indexed.push (match fty with
+      | .mu _ _ _ _ _ (some (T, _, args)) _ =>
+        match g.find? (T ++ ".desc") with
+        | some descD => (piInfos descD.type).length < args.length
+        | none => false
+      | _ => false)
     linearScruts := linearScruts.push (hasCases1 && ctx.linearLvls.any fun l => t.hasVar (ctx.lvl - l - 1))
     -- an inaccessible name, so the user's own `x` isn't shadowed
     binders := binders.push ("x✝", quote g ctx.lvl ty)
@@ -3469,17 +3568,64 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     absBinders := absBinders.push (n, A)
     lvls := lvls ++ [ctx'.lvl]
     ctx' := ctx'.bindQ n vTy (if linearScruts[i]! then some 1 else none)
-  binders := absBinders
-  goalTm := absGoal
+  -- `h : e = x` for each named scrutinee. The equation is a reverted variable: the
+  -- motive is `fun x => (h : e = x) → …`, and the match is applied to `rfl : e = e`,
+  -- so branch `p` has `h : e = p` (the dependent-motive handling: the hypothesis is in
+  -- the context before the motive is fixed)
+  let nScruts := ts.size
+  -- does any clause split column `j` with a constructor? (then its value is refined)
+  let splitCol (j : Nat) : Bool :=
+    clauses0.any fun c => match c.pats[j]? with
+      | some p => patIsCtor g p
+      | none => false
+  let mut eqBinders : Array (Name × Term R) := #[]
+  -- how many equations are already in the context (they are innermost, so every
+  -- index below is shifted by this many)
+  let mut eqSeen := 0
+  for nm in named, i in [0:named.size] do
+    if let some (h, info) := nm then
+      -- an indexed type's split refines the index: `e` keeps its outer index, so
+      -- `e = p` is not typable (the same for a type that mentions an earlier
+      -- scrutinee this match splits)
+      if indexed[i]! && splitCol i then
+        throwAt info (s!"the equation for '{h}' is not supported: matching on an indexed type refines " ++
+          "the index, so the branch's `e = p` is not well typed; state the goal in terms of the pattern " ++
+          "instead (or use a helper that takes the value and its equation)")
+      if i > 0 && (List.range i).any splitCol && absBinders[i]!.2 != (origTys[i]!).lift i then
+        throwAt info (s!"the equation for '{h}' is not supported: its type mentions an earlier scrutinee " ++
+          "that this match splits; use a helper that takes both values and their equations")
+      -- `e` (and its type) with the earlier scrutinees abstracted, then lifted over
+      -- the remaining scrutinee binders (this one is not bound yet) and the earlier
+      -- equations
+      let mut eTm := ts[i]!
+      for t in ts.extract 0 i, k in [0:i] do eTm := eTm.abstract (t.lift k)
+      -- the lift into the context that has all scrutinees and the earlier equations
+      let liftBy := nScruts - i + eqSeen
+      let eqTy : Term R := .eq ((absBinders[i]!.2).lift liftBy) (eTm.lift liftBy)
+        (.var (eqSeen + nScruts - 1 - i))
+      let vTy ← evalIn ctx' eqTy
+      eqBinders := eqBinders.push (h, eqTy)
+      lvls := lvls ++ [ctx'.lvl] -- complexity: ok (bounded by the match's scrutinees)
+      ctx' := ctx'.bind h vTy
+      eqSeen := eqSeen + 1
+  binders := absBinders ++ eqBinders
+  -- the equations are the innermost binders: the goal, abstracted over the scrutinees,
+  -- is lifted over them
+  goalTm := if eqCount == 0 then absGoal else absGoal.lift eqCount
+  let allLinear := linearScruts ++ (List.replicate eqCount false).toArray
   let goal ← evalIn ctx' goalTm
-  if let some x := lvls.head? then recordMatch stx.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
+  if let some x := lvls.head? then recordMatch stx.info alts clauses0 ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   let body ← compileMatch ctx' lvls clauses goal none true
   let lam := (binders.toList.map (·.1)).foldr .lam body
   -- (the `i`-th scrutinee's type is under the `i` binders before it)
-  let piTy := (binders.toList.zip linearScruts.toList).foldr (fun ((n, A), lin) acc =>
+  let piTy := (binders.toList.zip allLinear.toList).foldr (fun ((n, A), lin) acc =>
     Term.pi n .default (.qlit (if lin then 1 else QuantitySyntax.explicitDefault)) A acc .hole) goalTm
   let piTy := ctx.sortType g piTy
-  pure (ts.foldl .app (.ann lam piTy))
+  let mut t := ts.foldl .app (.ann lam piTy)
+  -- the equations: `rfl : e = e` at each named scrutinee
+  for nm in named, i in [0:named.size] do
+    if nm.isSome then t := .app t (.refl origTys[i]! ts[i]!)
+  pure t
 
 /-- **Exercise 6.2.** Elaborate the body of a quotation to a term that builds it as a
 Wiz `Syntax` value: `SyntaxF.missing`, `SyntaxF.atom "v"`, `SyntaxF.node "k" args` with
@@ -3628,7 +3774,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let l := if stx.isOfKind "term.type" then .succ l else l
     return (.sort l, .sort (.succ l))
   | "term.prop" => return (.sort .zero, .sort (.succ .zero))
-  | "term.paren" => infer ctx (stx.getArg 1)
+  | "term.paren" =>
+    if hasSectionHole (stx.getArg 1) then
+      throwAt ctx.info "a `·` section is a lambda (its parameters are the holes), so it needs a function type from the context; use it where one is expected (as in `List.map (· + 1) xs`), or write the `fun` out"
+    else infer ctx (stx.getArg 1)
+  | "term.sectionHole" =>
+    throwAt ctx.info "a `·` is a section placeholder: write it inside parentheses, as in `(· + 1)`, where a function type is expected"
   | "term.namedArg" => throwAt ctx.info "a named argument `(x := e)` is only allowed as an argument of an application"
   | "term.ascription" =>
     let from_ := (← get).nextInst
@@ -3750,6 +3901,7 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     -- (not depending on the scrutinised variables: the motive abstracts them, which
     -- would leave the metavariable outside the pattern fragment)
     let scrut := (stx.getArg 1).args.toList.filterMap fun a =>
+      let a := if a.isOfKind "match.scrut" then a.getArg 2 else a
       if a.isOfKind "term.ident" then (a.getArg 0).getId? else none
     let firstIx (n : Name) : Option Nat := ctx.names.findIdx? (· == n)
     let hidden := scrut.filterMap firstIx

@@ -74,7 +74,8 @@ if [ -n "$webdir" ]; then
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
   for f in scroll.js scroll-search.js scroll.css lsp-client.js playground-lsp.js \
-           hover.js squiggles.js completions.js overlays.css doc-live.js doc-live.css; do
+           widgets.js widgets.css hover.js squiggles.js completions.js overlays.css \
+           doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
   mkdir -p "$top/share/wiz/web/framework"

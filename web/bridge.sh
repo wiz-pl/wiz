@@ -16,6 +16,7 @@ OUT=${WIZ_WEB_OUT:-$HERE/out}
 # The infoview page is JavaScript now (web/playground-lsp.js and the modules under it);
 # copy them beside the page so an older OUT still works.
 cp "$HERE/infoview.html" "$HERE/infoview.js" "$HERE/playground-lsp.js" "$HERE/lsp-client.js" \
+   "$HERE/widgets.js" "$HERE/widgets.css" \
    "$HERE/squiggles.js" "$HERE/completions.js" "$HERE/hover.js" "$HERE/overlays.css" "$OUT/"
 mkdir -p "$OUT/framework"
 cp "$HERE/framework/mount.js" "$HERE/framework/driver.js" "$HERE/framework/runtime.js" \

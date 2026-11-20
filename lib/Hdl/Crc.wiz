@@ -21,6 +21,16 @@ The known-answer test is in the module (`Crc.checkDigits`, `Crc.checkValue`,
 every `(crc, byte)` pair (65536 inputs), checks `Crc.hexDigit` against `Crc.hex` on all
 16 nibbles, and runs `Crc.crcC` through the value simulation, `Netlist.simulate` and
 `Circuit.simFast`.
+
+`Crc.protoC` is the line-framed CRC service of the iCEstick's `proto` design with the
+UART removed, so it sits behind any byte transport: input `valid`/`data`/`txIdle`,
+output `ready`/`valid`/`data`/`lines`. A line is bytes other than 10 and then the
+newline 10; the service answers the line's CRC as two upper-case hex digits and a
+newline, one byte per `txIdle` cycle. The contract is one outstanding line: `ready` is
+low from the accepted newline until the reply ends, and bytes offered while it is low
+are dropped, not queued. The host half is `Crc.reply`/`Crc.replies`; `Crc.reply_check`
+is the kernel-checked on-the-wire known answer. The example `examples/hdl-crc-link.wiz`
+(test groups `hdl` and `bus-crc`) checks the two sides against each other.
 -/
 
 /-- One bit. -/
@@ -81,10 +91,16 @@ def Crc.hex (n : Nat) : Nat := match Nat.lt n 10 with
   | .true => 48 + n
   | .false => 55 + n
 
-/-- The iCEstick's answer to a line: two hex digits and a newline. -/
+/-- The device's answer to a line: two hex digits of its CRC and a newline. -/
 def Crc.reply (line : List Nat) : List Nat :=
   let c := Crc.ofList 0 line;
   .cons (Crc.hex (Nat.div c 16)) (.cons (Crc.hex (Nat.mod c 16)) (.cons 10 .nil))
+
+/-- The host's answers to a list of lines, in order: the CRC protocol's expected reply
+stream (the host-side half of `Crc.protoC`). -/
+def Crc.replies : List (List Nat) → List Nat
+  | .nil => .nil
+  | .cons l ls => List.append (Crc.reply l) (Crc.replies ls)
 
 ------------------------------------------------------------------------------------
 -- The streaming circuit: a CRC register and an input/output handshake.
@@ -118,6 +134,76 @@ def Crc.crcC : Circuit Crc.In.code Crc.Out.code :=
     (fun s x => Crc.streamStep s x)
 
 ------------------------------------------------------------------------------------
+-- The line protocol: a transport-independent CRC service. It is the `proto` design of
+-- the iCEstick project (`Icestick.Designs`) with the UART removed from the cell, and
+-- the host's half is `Crc.reply`/`Crc.replies`.
+--
+-- The contract is request/response and AXI4-Lite-shaped: one line outstanding, no
+-- bursts. A line is data bytes (any byte but 10) followed by a newline (10). When the
+-- newline is accepted the service answers with the line's CRC as two upper-case hex
+-- digits and a newline, one byte per cycle while `txIdle` is high. `ready` is low from
+-- the accepted newline until the reply's newline has been sent; while it is low the
+-- input byte is ignored (a host that starts another line early loses it, it is not
+-- queued), so a second line cannot be accepted before the first is answered.
+
+/-- The service's state: the running CRC, the CRC being reported, the reply phase
+(0: accepting a line; 1, 2: the hex digits; 3: the reply's newline) and the number of
+lines answered. -/
+structure Crc.Proto (r : HwTy → Type) where
+  crc : r Crc.B8
+  hold : r Crc.B8
+  phase : r (HwTy.bits 2)
+  lines : r (HwTy.bits 4)
+  deriving Bundle
+
+/-- The service's input: a received byte (`valid`/`data`) and whether the transmitter is
+idle (`txIdle`); a reply byte is offered only in an idle cycle. -/
+structure Crc.ProtoIn (r : HwTy → Type) where
+  valid : r Crc.Bit
+  data : r Crc.B8
+  txIdle : r Crc.Bit
+  deriving Bundle
+
+/-- The service's output: `ready` (no reply in flight: a new line may start), `valid`
+with `data` (a reply byte to send) and the line counter. -/
+structure Crc.ProtoOut (r : HwTy → Type) where
+  ready : r Crc.Bit
+  valid : r Crc.Bit
+  data : r Crc.B8
+  lines : r (HwTy.bits 4)
+  deriving Bundle
+
+/-- One cycle of the CRC service. `accept` is `ready && valid`: while a reply is in
+flight the input is ignored. A data byte advances the CRC; an accepted newline starts
+the reply (phase 1) and keeps the CRC to report. A reply byte is sent when the phase is
+non-zero and `txIdle` is high; phase 3 sends the newline and wraps to 0. -/
+def Crc.protoStep {r : HwTy → Type} [Hw r] (s : Crc.Proto r) (x : Crc.ProtoIn r) :
+    r (HwTy.prod Crc.Proto.code Crc.ProtoOut.code) :=
+  let free := s.phase === 0;
+  let accept := free &&& x.valid;
+  let newline := x.data === 10;
+  let endLine := accept &&& newline;
+  let dataByte := accept &&& ~~~newline;
+  let send := (s.phase =/= 0) &&& x.txIdle;
+  let nib := if s.phase === 1 then Hw.slice 4 4 s.hold else Hw.slice 0 4 s.hold;
+  let ch := if s.phase === 3 then 10 else Crc.hexDigit nib;
+  Hw.pair
+    (Crc.Proto.pack (Crc.Proto.mk
+      (if endLine then 0 else if dataByte then Crc.hwStep s.crc x.data else s.crc)
+      (if endLine then s.crc else s.hold)
+      (if endLine then 1 else if send then s.phase + 1 else s.phase)
+      (if endLine then s.lines + 1 else s.lines)))
+    (Crc.ProtoOut.pack (Crc.ProtoOut.mk free send ch s.lines))
+
+/-- The CRC service as a circuit: a byte stream in, a byte stream out, one line
+outstanding. -/
+def Crc.protoC : Circuit Crc.ProtoIn.code Crc.ProtoOut.code :=
+  Circuit.bundled Crc.Proto.bundle Crc.ProtoIn.bundle Crc.ProtoOut.bundle
+    (Crc.Proto.mk (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 2 0)
+      (BitVec.ofNat 4 0))
+    (fun s x => Crc.protoStep s x)
+
+------------------------------------------------------------------------------------
 -- Known-answer test (CRC-8/SMBUS of the ASCII "123456789" is 0xF4 = 244).
 
 /-- The ASCII bytes of `"123456789"`. -/
@@ -129,3 +215,8 @@ def Crc.checkValue : Nat := 244
 
 /-- The specification meets the check value (kernel-checked). -/
 def Crc.check_ok : Crc.ofList 0 Crc.checkDigits = Crc.checkValue := rfl
+
+/-- The known answer on the wire: `"123456789"` is answered `"F4\n"` (the host side of
+the protocol, kernel-checked). -/
+def Crc.reply_check :
+    Crc.reply Crc.checkDigits = .cons 70 (.cons 52 (.cons 10 .nil)) := rfl

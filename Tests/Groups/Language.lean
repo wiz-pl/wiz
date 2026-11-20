@@ -338,6 +338,35 @@ def languageGroup : Group where
     { name := "match without an expected type", run := fun _ =>
         okLib ("import Prelude\ndef f (b : Bool) (n : Nat) : Nat :=\n  let k := match b with\n    | .true => n\n" ++
           "    | .false => 0;\n  Nat.add k 1\n#eval f .true 4") ["5"] },
+    -- `match h : e with`: the branch's equation is `h : e = p`, usable in a proof and
+    -- after an unnamed column; a plain match has no hypothesis, and an indexed value
+    -- (whose split refines the index) is rejected rather than ill typed.
+    { name := "a named match binds its equation `h : e = p` in each branch (#254)", run := fun _ => do
+        okLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def g (n : Nat) : Bool := isZero n\n" ++
+          "def gEq (n : Nat) : g n = isZero n :=\n" ++
+          "  match h : isZero n with\n" ++
+          "  | .true => by unfold g; rw h; rfl\n" ++
+          "  | .false => by unfold g; rw h; rfl\n" ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Nat := match b with\n" ++
+          "  | .true => 1\n  | .false => 0\n" ++
+          -- a named scrutinee after an unnamed one: the equation's indices are shifted
+          "def mixed (n : Nat) (b : Bool) : Nat :=\n" ++
+          "  match b, h : isZero n with\n" ++
+          "  | .true, .true => useEq n .true h\n" ++
+          "  | .true, .false => useEq n .false h\n" ++
+          "  | .false, .true => useEq n .true h\n" ++
+          "  | .false, .false => useEq n .false h\n" ++
+          "#eval mixed 0 .true\n#eval mixed 1 .true") ["1", "0"]
+        failsLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def noEq (n : Nat) : Bool := match isZero n with\n  | .true => h\n  | .false => .false")
+          "unknown identifier 'h'"
+        failsLib ("import Prelude\n" ++
+          "inductive V (A : Type) : Nat → Type where\n  | nil : V A 0\n" ++
+          "  | cons {0 n : Nat} (x : A) (xs : V A n) : V A (Nat.succ n)\n" ++
+          "def headEq (v : V Nat 1) : Nat :=\n  match h : v with\n  | .cons x _ => x") "indexed type" },
     { name := "tuple patterns", run := fun _ =>
         okLib ("import Prelude\ndef sum3 : Nat × Nat × Nat → Nat\n  | (a, b, c) => Nat.add a (Nat.add b c)\n" ++
           "def firstZero : Nat × Nat → Bool\n  | (.zero, _) => .true\n  | p => .false\n" ++
@@ -706,7 +735,40 @@ def languageGroup : Group where
         okLoc locMod "import Loc\n#check fun (x : Nat) (xs : List Nat) => List.cons x xs\n#check fun (a b : String) => a &&& b"
           ["fun x xs => x :: xs : Nat → List Nat → List Nat", "fun a b => a &&& b : String → String → String"] },
     { name := "... an unexpander that is not an Unexpander is rejected", run := fun _ =>
-        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" }
+        failsLib "import Prelude\ndef notOne : Nat := 1\nattribute [app_unexpander List.nil] notOne" "is not an unexpander" },
+    -- 13t: `<|`, `|>.` and `·` sections
+    { name := "13t: `f <| x` is `f x` (right associative), `x |> f` is `f x` (left associative)", run := fun _ => do
+        okLib ("import Prelude\n#eval Nat.succ <| 4\n#eval Nat.succ <| Nat.succ <| 5\n" ++
+          "def sq (n : Nat) : Nat := n * n\n#eval sq <| 1 + 2\n" ++
+          "#eval (fun (f : Nat → Nat) => f 1) <| Nat.succ\n" ++
+          "#check fun (x : Nat) => x |> Nat.succ |> Nat.succ\n" ++
+          "#check fun (x : Nat) => Nat.succ <| Nat.succ <| x")
+          ["5", "7", "9", "2", "fun x => x |> Nat.succ |> Nat.succ : Nat → Nat",
+           "fun x => Nat.succ <| Nat.succ <| x : Nat → Nat"] },
+    { name := "13t: `x |>.f` is the same projection as `x.f` (nested paths too)", run := fun _ => do
+        let decls := "import Prelude\nstructure In where\n  x : Nat\n  y : Nat\n" ++
+          "structure Out where\n  i : In\n  n : Nat\n" ++
+          "def o : Out := Out.mk (In.mk 1 2) 3\n" ++
+          "def mk (n : Nat) : Out := Out.mk (In.mk n 0) n\n"
+        okLib (decls ++ "#eval o |>.n\n#eval o |>.i.x\n#eval o |>.i.y\n#eval (mk 7) |>.n\n" ++
+          "#check o.n\n#check o |>.n\n#check o.i.y\n#check o |>.i.y\n" ++
+          "#check fun (p : Out) => p |>.i.y")
+          ["3", "1", "2", "7", "o.2.1 : Nat", "o.2.1 : Nat", "o.1.2.1 : Nat", "o.1.2.1 : Nat",
+           "fun p => p.1.2.1 : Out → Nat"]
+        failsLib (decls ++ "#eval o |>.z") "has no field 'z'"
+        -- `|>.` needs the dot: `|>` is still the operator
+        failsLib "import Prelude\n#eval 1 |>.x" "no field 'x'" },
+    { name := "13t: `(· + 1)` is a lambda whose parameters come from the expected type", run := fun _ => do
+        okLib ("import Prelude\nimport Text\n#eval List.length (List.map (· + 1) [1, 2, 3])\n" ++
+          "def inc : Nat → Nat := (1 + ·)\n#eval inc 4\ndef mul : Nat → Nat → Nat := (· * ·)\n#eval mul 3 4\n" ++
+          "def twice : Nat → Nat := (· * 2)\n#eval twice 5\ndef addN : Nat → Nat → Nat := (· + ·)\n#eval addN 3 4\n" ++
+          "#check ((· + 1) : Nat → Nat)")
+          ["3", "5", "12", "10", "7", "fun x => x + 1 : Nat → Nat"]
+        failsLib "import Prelude\n#check (· + 1)" "needs a function type"
+        failsLib "import Prelude\ndef x := (· + 1)" "needs a function type"
+        -- the hole is never a term on its own, and a nested paren is its own section
+        failsLib "import Prelude\n#eval · + 1" "write it inside parentheses"
+        failsLib "import Prelude\n#eval (· + 1) + 1" "a `·` section is a lambda" }
   ]
 
 builtin_initialize registerGroup languageGroup

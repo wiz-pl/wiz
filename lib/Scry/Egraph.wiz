@@ -2,15 +2,26 @@ import Prelude
 import Word
 import Text
 import WordArray
+import WordMap
 import Scry.Store
+import Scry.AiDomain
 /-!
 # Scry.Egraph
 
-A native e-graph engine for scry (`import Scry.Egraph`), with no egglog and no foreign
-dependency. It is the S12 slice of `wiz-notes/code-analysis-design.md` §10: an
+The one native e-graph engine for scry (`import Scry.Egraph`), with no egglog and no
+foreign dependency. It is the S12 slice of `wiz-notes/code-analysis-design.md` §10: an
 equality-saturated term store with a union-find, congruence closure by rebuilding, a
-hash-consed e-node table, extraction, and a small pattern/rewrite loop with a fuel
-bound. A Datalog relation of equalities can feed it with `mergeFacts`/`mergeRows`.
+hash-consed e-node table, extraction, and a small pattern/rewrite loop with a fuel bound.
+A Datalog relation of equalities can feed it with `mergeFacts`/`mergeRows`.
+
+This module is the collapse of the two engines that used to live here, `Scry.Egraph`
+(the reference list model) and `Scry.EgraphNative` (the native tables). The *surface* is
+the reference one: `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm`, `Scry.Pat`,
+`Scry.Rewrite`, `costs : U64Array` with `Scry.EGraph.inf`, and
+`applyAt`/`applyMatches` without a rule index. The *representation* is the native one
+for the part that was superlinear: `etable` is a `U64Map` from an e-node hash to a bucket
+of `(e-node, class)`, so `add` and `rebuild` no longer scan a flat association list.
+`Scry.EgraphNative` is now a compatibility module that imports this one; see its docs.
 
 ## Representation
 
@@ -21,20 +32,22 @@ bound. A Datalog relation of equalities can feed it with `mergeFacts`/`mergeRows
   `U64Array`s indexed by id (union by rank; `find` follows parent pointers), so a
   compiled `find` step and a `union` write are O(1) rather than a list scan; the model
   (`#eval`) is still the list, so the engine stays ordinary Wiz under the interpreter.
-  `nodes` is the flat
-  e-node table: `(class id, node)`, most recently added first. `etable` is the hash
-  cons: canonical e-node → class id. Both lists are association lists; the interface is
-  the same one a native table (`U64Array`/`U64Map`) would implement.
+* **E-node table.** `nodes` is the flat e-node table, `(class id, node)`, most recently
+  added first. `etable` is the hash cons: a `U64Map` from `ENode.hash` to a bucket of
+  `(canonical e-node, class id)` pairs. The bucket resolves hash collisions with
+  `ENode.beq`, so the table is a real hash cons, not a hash-only map. `add` does one
+  bucket lookup and one cons; `rebuild` builds a fresh table with one lookup and insert
+  per node. Neither walks the whole table.
 * **Canonical form.** After `rebuild`, every stored class id is a root and every child id
   in a stored node is a root. `canonical` checks that invariant.
 * **Merge.** `union` links two roots (by rank). `merge` unions and rebuilds, so the
   result is closed under congruence. `mergeFacts` does a batch of unions and one
   rebuild, which is the operation a Datalog stratum calls after deriving equality
-  facts.
+  facts. `mergeRows` grows the union-find for ids a fact names before interning them.
 * **Rebuild.** Congruence closure: repeatedly canonicalise every node, hash-cons it into
   a fresh table, and union the classes of two nodes that became identical. Each pass
   removes at least one class when it changes anything, so `next + 1` passes suffice.
-  The final pass writes a canonical, duplicate-free node table.
+  The final pass writes a canonical, duplicate-free node table, newest first.
 
 ## Saturation, extraction
 
@@ -48,14 +61,29 @@ non-terminating system (e.g. `f x → f (f x)`) usable. A rewrite adds no new eq
 when the right-hand side already lives in the left-hand side's class, so a saturated
 graph stops early rather than burning the whole budget.
 
-Extraction is bottom-up dynamic programming: `costs` relaxes a cost per class for
+Extraction is bottom-up dynamic programming: the cost passes relax a cost per class for
 `next + 1` rounds (each node costs `1 + weight op + the children's costs`), then
 `buildTerm` picks a cheapest node per class, with the class cost as a depth bound so a
 cyclic e-class cannot loop. `extract` is unit cost; `extractWith` takes a weight table.
+The canonical costs are `Nat`s with `inf` for "no finite term". The `Option Nat` view
+used by the old native backend is still available as `costsOpt`/`costOpt` (there is no
+`inf` sentinel to collide with a real cost); both views share one relaxation.
 
-The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
-compiled (C and LLVM). It is untrusted, like the rest of the fast engine: nothing here
-is proved about terms or rewrites.
+## E-class analyses, explanations, limits
+
+* **Analyses.** `analyse` joins an analysis lattice (`Interval` from `Scry.AiDomain`)
+  per e-class after a rebuild; `saturateAn` recomputes it every round and
+  `GuardedRewrite` lets a rule require an analysis fact before it fires.
+* **Explanations.** Every union records a `UnionStep` (the two roots and why: an
+  explicit `merge`, a `congruence` found by rebuild, or a `rewrite` with its rule
+  index). `explain` returns a chain of steps from one class to another. The rewrite
+  form is `applyAtN`/`applyMatchesN` (the rule index is the first argument);
+  `applyAt`/`applyMatches` are the reference forms and record rule `0`.
+* **Limits.** `saturateLimited` stops on a fixpoint, a round (fuel) cap, a node cap or a
+  caller-supplied clock, and reports the `StopReason`.
+
+The engine is untrusted and ordinary Wiz: the same code runs in the interpreter and
+compiled (C, LLVM). Nothing here is proved.
 -/
 
 -- ## Small list helpers
@@ -63,10 +91,6 @@ is proved about terms or rewrites.
 def Scry.egConcatMap {A B : Type} (f : A → List B) : List A → List B
   | .nil => .nil
   | .cons x xs => List.append (f x) (Scry.egConcatMap f xs)
-
-def Scry.egRep : Nat → Nat → List Nat
-  | .zero, _ => .nil
-  | .succ k, v => .cons v (Scry.egRep k v)
 
 /-- `n` copies of `v` as a `U64Array` (the dense union-find / cost tables). -/
 def Scry.egU64Rep : Nat → Nat → U64Array
@@ -77,15 +101,13 @@ def Scry.egCountUp : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, i => .cons i (Scry.egCountUp k (Nat.succ i))
 
-def Scry.egNatBeq (a b : Nat) : Bool := Nat.beq a b
-
 def Scry.egArgsBeq : List Nat → List Nat → Bool
   | .nil, .nil => .true
   | .nil, .cons _ _ => .false
   | .cons _ _, .nil => .false
   | .cons a as, .cons b bs => if Nat.beq a b then Scry.egArgsBeq as bs else .false
 
--- ## E-nodes
+-- ## E-nodes and hashing
 
 /-- An e-node: an operator applied to the e-class ids of its children. -/
 structure Scry.ENode where
@@ -96,6 +118,17 @@ def Scry.ENode.beq (a b : Scry.ENode) : Bool :=
   if Nat.beq a.op b.op then Scry.egArgsBeq a.args b.args else .false
 
 def Scry.ENode.leaf (op : Nat) : Scry.ENode := Scry.ENode.mk op .nil
+
+/-- Mix one word into a hash, bounded by a prime below `2^31` so the accumulators stay
+small Nats (the value only has to be a hash, not collision-free). -/
+def Scry.egMix (h x : Nat) : Nat :=
+  Nat.mod (Nat.add (Nat.mul h 1000003) (Nat.add x 1)) 2147483647
+
+/-- A hash of an e-node: the operator, then a tag and each child. Buckets in `etable`
+resolve collisions. -/
+def Scry.ENode.hash (n : Scry.ENode) : Nat :=
+  List.foldr (fun a h => Scry.egMix h (Nat.add a 1))
+    (Scry.egMix n.op (List.length n.args)) n.args
 
 -- ## Terms and patterns
 
@@ -164,22 +197,52 @@ partial def Scry.ETerms.size : Scry.ETerms → Nat
   | .tcons t ts => Nat.add (Scry.ETerm.size t) (Scry.ETerms.size ts)
 end
 
+-- ## Explanations
+
+/-- Why two classes were united. A `rewrite` carries the rule's index in the list the
+caller passed to `saturate`/`applyRules`; `merge` covers an explicit `union`/`merge`,
+and `congruence` a union discovered by `rebuild`. -/
+inductive Scry.UnionReason where
+  | merge
+  | congruence
+  | rewrite (rule : Nat)
+
+/-- One recorded union: the two class ids (roots at the time) and why. -/
+structure Scry.UnionStep where
+  a : Nat
+  b : Nat
+  reason : Scry.UnionReason
+
+def Scry.UnionReason.ruleId : Scry.UnionReason → Option Nat
+  | .rewrite i => .some i
+  | _ => .none
+
+def Scry.UnionReason.isCongruence : Scry.UnionReason → Bool
+  | .congruence => .true
+  | _ => .false
+
 -- ## The graph and its union-find
 
 /-- An e-graph. The invariants after `rebuild`: `parent` and `rank` have `next` entries,
 every id is dense, stored class ids and stored node arguments are roots, and `etable`
-maps each distinct canonical e-node to its class. -/
+maps each distinct canonical e-node to its class. `nodes` is newest first (extraction
+ties and matcher order depend on it); `log` is newest first. -/
 structure Scry.EGraph where
   parent : U64Array
   rank : U64Array
+  /-- the e-node table, `(class id, canonical node)`, newest first -/
   nodes : List (Nat × Scry.ENode)
-  etable : List (Scry.ENode × Nat)
+  /-- e-node hash → bucket of (canonical e-node, class id) -/
+  etable : U64Map (List (Scry.ENode × Nat))
   next : Nat
+  /-- every union, newest first -/
+  log : List Scry.UnionStep
 
-def Scry.EGraph.empty : Scry.EGraph := Scry.EGraph.mk U64Array.empty U64Array.empty .nil .nil 0
+def Scry.EGraph.empty : Scry.EGraph :=
+  Scry.EGraph.mk U64Array.empty U64Array.empty .nil U64Map.empty 0 .nil
 
-/-- Path-following `find`, with a fuel bound (`next + 1`) so a corrupted parent cycle
-cannot loop forever. -/
+/-- Path-following `find` with a `size + 1` fuel bound (a corrupted cycle ends at the
+bound rather than looping). -/
 def Scry.EGraph.findGo (g : Scry.EGraph) : Nat → Nat → Nat
   | .zero, x => x
   | .succ k, x =>
@@ -197,94 +260,127 @@ def Scry.etableFindL (n : Scry.ENode) : List (Scry.ENode × Nat) → Option Nat
   | .nil => .none
   | .cons p rest => if Scry.ENode.beq n p.1 then .some p.2 else Scry.etableFindL n rest
 
-/-- The e-nodes of a class (looked up by any id of the class). -/
-def Scry.EGraph.nodesOfGo (g : Scry.EGraph) (cls : Nat) :
-    List (Nat × Scry.ENode) → List Scry.ENode
-  | .nil => .nil
-  | .cons p rest =>
-    let rest' := Scry.EGraph.nodesOfGo g cls rest;
-    if Nat.beq (Scry.EGraph.find g p.1) cls then .cons p.2 rest' else rest'
+/-- The hash-cons lookup: find the canonical e-node in its bucket. -/
+def Scry.EGraph.etableFind (g : Scry.EGraph) (n : Scry.ENode) : Option Nat :=
+  match U64Map.find g.etable (U64.ofNat (Scry.ENode.hash n)) with
+  | .none => .none
+  | .some bucket => Scry.etableFindL n bucket
 
+/-- The e-nodes of a class (looked up by any id of the class), newest first. -/
 def Scry.EGraph.nodesOf (g : Scry.EGraph) (cls : Nat) : List Scry.ENode :=
-  Scry.EGraph.nodesOfGo g (Scry.EGraph.find g cls) g.nodes
+  let c := Scry.EGraph.find g cls;
+  List.foldr (fun p acc =>
+    if Nat.beq (Scry.EGraph.find g p.1) c then .cons p.2 acc else acc)
+    .nil g.nodes
 
 -- ## Adding e-nodes (hash consing)
 
-/-- Intern `n` and return its class id. A canonical e-node that is already present is
-reused; otherwise a fresh class is allocated. -/
+/-- Intern `n` and return its class id. A canonical e-node already present is reused;
+otherwise a fresh class is allocated. One bucket lookup, one cons.
+
+The record is destructured and rebuilt with `mk` (`not` `{ g with … }`) so the old
+record is consumed: `U64Array.push` and `U64Map.insert` then update in place. A record
+update leaves the old value live, the array/map is shared, and every push/insert copies
+the whole table — that is the O(n²) this module used to have. -/
 def Scry.EGraph.add (g : Scry.EGraph) (n : Scry.ENode) : Scry.EGraph × Nat :=
   let c := Scry.ENode.canon g n;
-  match Scry.etableFindL c g.etable with
+  match Scry.EGraph.etableFind g c with
   | .some id => (g, Scry.EGraph.find g id)
   | .none =>
-    let id := g.next;
-    (Scry.EGraph.mk
-      (U64Array.push g.parent (U64.ofNat id))
-      (U64Array.push g.rank (U64.ofNat 0))
-      (.cons (id, c) g.nodes)
-      (.cons (c, id) g.etable)
-      (Nat.succ id), id)
+    match g with
+    | .mk parent rank nodes etable next log =>
+      let id := next;
+      let h := Scry.ENode.hash c;
+      let bucket := U64Map.findD etable (U64.ofNat h) .nil;
+      let etable' := U64Map.insert etable (U64.ofNat h) (.cons (c, id) bucket);
+      (Scry.EGraph.mk
+        (U64Array.push parent (U64.ofNat id))
+        (U64Array.push rank (U64.ofNat 0))
+        (.cons (id, c) nodes) etable' (Nat.succ id) log, id)
 
 -- ## Union, rebuild, congruence closure
 
-/-- Link two roots by rank. Does not rebuild: the result may have non-canonical nodes
-until `rebuild` (or `merge`) runs. -/
-def Scry.EGraph.union (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
+/-- Link two roots by rank, recording `why`. Does not rebuild: the result may have
+non-canonical nodes until `rebuild` (or `merge`) runs. -/
+def Scry.EGraph.unionWhy (g : Scry.EGraph) (a b : Nat) (why : Scry.UnionReason) :
+    Scry.EGraph × Bool :=
   let ra := Scry.EGraph.find g a;
   let rb := Scry.EGraph.find g b;
   if Nat.beq ra rb then (g, .false)
   else
-    let rka := UIntN.toNat (U64Array.getD g.rank ra (U64.ofNat 0));
-    let rkb := UIntN.toNat (U64Array.getD g.rank rb (U64.ofNat 0));
-    if Nat.lt rka rkb then
-      (Scry.EGraph.mk (U64Array.set g.parent ra (U64.ofNat rb)) g.rank g.nodes g.etable g.next, .true)
-    else if Nat.lt rkb rka then
-      (Scry.EGraph.mk (U64Array.set g.parent rb (U64.ofNat ra)) g.rank g.nodes g.etable g.next, .true)
-    else
-      (Scry.EGraph.mk (U64Array.set g.parent rb (U64.ofNat ra))
-        (U64Array.set g.rank ra (U64.ofNat (Nat.succ rka))) g.nodes g.etable g.next, .true)
+    match g with
+    | .mk parent rank nodes etable next log =>
+      let rka := UIntN.toNat (U64Array.getD rank ra (U64.ofNat 0));
+      let rkb := UIntN.toNat (U64Array.getD rank rb (U64.ofNat 0));
+      let log' := List.cons (Scry.UnionStep.mk ra rb why) log;
+      if Nat.lt rka rkb then
+        (Scry.EGraph.mk (U64Array.set parent ra (U64.ofNat rb)) rank nodes etable
+          next log', .true)
+      else if Nat.lt rkb rka then
+        (Scry.EGraph.mk (U64Array.set parent rb (U64.ofNat ra)) rank nodes etable
+          next log', .true)
+      else
+        (Scry.EGraph.mk (U64Array.set parent rb (U64.ofNat ra))
+          (U64Array.set rank ra (U64.ofNat (Nat.succ rka))) nodes etable next log', .true)
+
+/-- `union`: link two roots by rank, recording an explicit merge. -/
+def Scry.EGraph.union (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
+  Scry.EGraph.unionWhy g a b .merge
 
 def Scry.EGraph.compressFrom : Nat → Nat → Scry.EGraph → Scry.EGraph
   | .zero, _, g => g
   | .succ k, i, g =>
     let r := Scry.EGraph.find g i;
-    let g' := Scry.EGraph.mk (U64Array.set g.parent i (U64.ofNat r)) g.rank g.nodes g.etable g.next;
-    Scry.EGraph.compressFrom k (Nat.succ i) g'
+    match g with
+    | .mk parent rank nodes etable next log =>
+      Scry.EGraph.compressFrom k (Nat.succ i)
+        (Scry.EGraph.mk (U64Array.set parent i (U64.ofNat r)) rank nodes etable next log)
 
 /-- Point every id at its root (path compression, done once per rebuild pass). -/
 def Scry.EGraph.compress (g : Scry.EGraph) : Scry.EGraph :=
   Scry.EGraph.compressFrom (U64Array.size g.parent) 0 g
 
 /-- One rebuild pass: canonicalise and hash-cons each node into a fresh table, unioning
-classes whose canonical nodes coincide. `changed` says whether a union happened, so
-another pass is needed. -/
+classes whose canonical nodes coincide. Nodes are consed onto a fresh list (never
+appended one at a time); the input is newest first, so reversing the accumulator
+restores the same order. `changed` says whether a union happened, so another pass is
+needed. -/
 def Scry.EGraph.rebuildNodes :
-    List (Nat × Scry.ENode) → Scry.EGraph → Bool → Scry.EGraph × Bool
-  | .nil, acc, changed => (acc, changed)
-  | .cons p rest, acc, changed =>
+    List (Nat × Scry.ENode) → List (Nat × Scry.ENode) → Scry.EGraph → Bool →
+      Scry.EGraph × Bool
+  | .nil, accNodes, acc, changed =>
+    ({ acc with nodes := List.revOnto accNodes .nil }, changed)
+  | .cons p rest, accNodes, acc, changed =>
     let cls := Scry.EGraph.find acc p.1;
     let key := Scry.ENode.canon acc p.2;
-    match Scry.etableFindL key acc.etable with
+    match Scry.EGraph.etableFind acc key with
     | .none =>
-      let acc' := Scry.EGraph.mk acc.parent acc.rank
-        (List.append acc.nodes (.cons (cls, key) .nil))
-        (List.append acc.etable (.cons (key, cls) .nil))
-        acc.next;
-      Scry.EGraph.rebuildNodes rest acc' changed
+      match acc with
+      | .mk parent rank nodes etable next log =>
+        let h := Scry.ENode.hash key;
+        let bucket := U64Map.findD etable (U64.ofNat h) .nil;
+        let acc' := Scry.EGraph.mk parent rank nodes
+          (U64Map.insert etable (U64.ofNat h) (.cons (key, cls) bucket)) next log;
+        Scry.EGraph.rebuildNodes rest (.cons (cls, key) accNodes) acc' changed
     | .some other =>
       let other' := Scry.EGraph.find acc other;
-      if Nat.beq other' cls then Scry.EGraph.rebuildNodes rest acc changed
+      if Nat.beq other' cls then
+        Scry.EGraph.rebuildNodes rest accNodes acc changed
       else
-        let u := Scry.EGraph.union acc cls other';
-        Scry.EGraph.rebuildNodes rest u.1 .true
+        let u := Scry.EGraph.unionWhy acc cls other' .congruence;
+        Scry.EGraph.rebuildNodes rest accNodes u.1 .true
 
 def Scry.EGraph.rebuildLoop : Nat → Scry.EGraph → Scry.EGraph
   | .zero, g => g
   | .succ k, g =>
     let g1 := Scry.EGraph.compress g;
-    let start := Scry.EGraph.mk g1.parent g1.rank .nil .nil g1.next;
-    let r := Scry.EGraph.rebuildNodes g1.nodes start .false;
-    if r.2 then Scry.EGraph.rebuildLoop k r.1 else r.1
+    -- Consume `g1` before the pass: if its parent/rank arrays stayed live (shared with
+    -- the record) every congruence union would copy the whole array.
+    match g1 with
+    | .mk parent rank nodes _ next log =>
+      let start := Scry.EGraph.mk parent rank .nil U64Map.empty next log;
+      let r := Scry.EGraph.rebuildNodes nodes .nil start .false;
+      if r.2 then Scry.EGraph.rebuildLoop k r.1 else r.1
 
 /-- Congruence closure and canonicalisation. At most `next + 1` passes: a changed pass
 performs at least one union, and there are only `next - 1` unions. -/
@@ -304,7 +400,7 @@ def Scry.EGraph.sameClass (g : Scry.EGraph) (a b : Nat) : Bool :=
 
 /-- The class of a canonical e-node, if it is interned. -/
 def Scry.EGraph.classOf (g : Scry.EGraph) (n : Scry.ENode) : Option Nat :=
-  match Scry.etableFindL (Scry.ENode.canon g n) g.etable with
+  match Scry.EGraph.etableFind g (Scry.ENode.canon g n) with
   | .none => .none
   | .some c => .some (Scry.EGraph.find g c)
 
@@ -314,12 +410,12 @@ def Scry.ENode.canonical (g : Scry.EGraph) (n : Scry.ENode) : Bool :=
     if Nat.beq (Scry.EGraph.find g a) a then acc else .false) .true n.args
 
 /-- The graph's canonical-form invariant: stored classes are roots, stored node children
-are roots, and the hash-cons table finds every stored node in its own class. -/
+are roots, and the hash cons finds every stored node in its own class. -/
 def Scry.EGraph.canonical (g : Scry.EGraph) : Bool :=
   List.foldr (fun p acc =>
     if Nat.beq (Scry.EGraph.find g p.1) p.1 then
       if Scry.ENode.canonical g p.2 then
-        match Scry.etableFindL p.2 g.etable with
+        match Scry.EGraph.etableFind g p.2 with
         | .none => .false
         | .some c => if Nat.beq (Scry.EGraph.find g c) (Scry.EGraph.find g p.1) then acc else .false
       else .false
@@ -335,6 +431,8 @@ def Scry.EGraph.merge (g : Scry.EGraph) (a b : Nat) : Scry.EGraph × Bool :=
                            (List.length (Scry.EGraph.roots g1)));
   (g1, ch)
 
+-- ## Growing the union-find for facts about ids it has not seen
+
 /-- Add classes until `id` exists (`ensure` is what a Datalog equality row uses: a fact
 may name a class the e-graph has not interned yet). -/
 partial def Scry.EGraph.ensureFrom (g : Scry.EGraph) (fuel : Nat) (target : Nat) :
@@ -344,12 +442,13 @@ partial def Scry.EGraph.ensureFrom (g : Scry.EGraph) (fuel : Nat) (target : Nat)
   | .succ k =>
     if Nat.le (Nat.succ target) (U64Array.size g.parent) then g
     else
-      let i := U64Array.size g.parent;
-      let g' := Scry.EGraph.mk
-        (U64Array.push g.parent (U64.ofNat i))
-        (U64Array.push g.rank (U64.ofNat 0))
-        g.nodes g.etable (Nat.max g.next (Nat.succ i));
-      Scry.EGraph.ensureFrom g' k target
+      match g with
+      | .mk parent rank nodes etable next log =>
+        let i := U64Array.size parent;
+        Scry.EGraph.ensureFrom
+          (Scry.EGraph.mk (U64Array.push parent (U64.ofNat i))
+            (U64Array.push rank (U64.ofNat 0)) nodes etable
+            (Nat.max next (Nat.succ i)) log) k target
 
 def Scry.EGraph.ensure (g : Scry.EGraph) (id : Nat) : Scry.EGraph :=
   Scry.EGraph.ensureFrom g (Nat.succ id) id
@@ -357,16 +456,25 @@ def Scry.EGraph.ensure (g : Scry.EGraph) (id : Nat) : Scry.EGraph :=
 -- ## A merge usable from Datalog / lattice relations
 
 /-- Union the first two columns of every row (rows with fewer than two columns are
-ignored). Datalog equality facts are `List U64` rows of e-class ids. -/
-def Scry.EGraph.mergeRows : List (List U64) → Scry.EGraph → Scry.EGraph × Bool
-  | .nil, g => (g, .false)
-  | .cons row rows, g =>
+ignored). Datalog equality facts are `List U64` rows of e-class ids; an id the graph has
+not interned yet is grown first. The loop is tail-recursive in the graph and the flag:
+a non-tail `(rest.1, …)` keeps every intermediate graph alive in the caller's frame, so
+the next union's `U64Array.set` sees a shared parent array and copies it (O(n²)). -/
+def Scry.EGraph.mergeRowsGo : List (List U64) → Scry.EGraph → Bool → Scry.EGraph × Bool
+  | .nil, g, ch => (g, ch)
+  | .cons row rows, g, ch =>
     match row with
     | .cons a (.cons b _) =>
-      let u := Scry.EGraph.union g (UIntN.toNat a) (UIntN.toNat b);
-      let rest := Scry.EGraph.mergeRows rows u.1;
-      (rest.1, if u.2 then .true else rest.2)
-    | _ => Scry.EGraph.mergeRows rows g
+      let ai := UIntN.toNat a;
+      let bi := UIntN.toNat b;
+      let g1 := Scry.EGraph.ensure (Scry.EGraph.ensure g ai) bi;
+      let u := Scry.EGraph.union g1 ai bi;
+      Scry.EGraph.mergeRowsGo rows u.1 (if u.2 then .true else ch)
+    | _ => Scry.EGraph.mergeRowsGo rows g ch
+
+def Scry.EGraph.mergeRows (rows : List (List U64)) (g : Scry.EGraph) :
+    Scry.EGraph × Bool :=
+  Scry.EGraph.mergeRowsGo rows g .false
 
 /-- A batch of equality facts: all unions, then one rebuild. This is what a Datalog
 stratum calls after it has derived equality tuples (or a lattice relation after its
@@ -386,21 +494,50 @@ def Scry.EGraph.mergeFacts (g : Scry.EGraph) (rows : List (List U64)) :
 enough to be above any test-sized term. -/
 def Scry.EGraph.inf : Nat := 1000000
 
-/-- `1 + weight op + the children's costs`; the `1` makes every node cost at least the
-sum of its children plus one, which bounds extraction depth by the cost. -/
-def Scry.ENode.cost (w : Nat → Nat) (costs : U64Array) (n : Scry.ENode) : Nat :=
-  List.foldr (fun a acc => Nat.add
-    (UIntN.toNat (U64Array.getD costs a (U64.ofNat Scry.EGraph.inf))) acc)
-    (Nat.succ (w n.op)) n.args
+/-- Add two optional costs (`none` is "no finite term"). -/
+def Scry.egAddOpt : Option Nat → Option Nat → Option Nat
+  | .some a, .some b => .some (Nat.add a b)
+  | _, _ => .none
+
+/-- Encode an optional cost for the dense cost array: `none` is `0`, `some n` is `n + 1`.
+`egCodeLt` is the order on codes, with `0` as infinity. -/
+def Scry.egOptCode : Option Nat → Nat
+  | .none => 0
+  | .some n => Nat.succ n
+
+def Scry.egCodeOpt : Nat → Option Nat
+  | .zero => .none
+  | .succ n => .some n
+
+/-- `a < b` on encoded costs (`0` is "no finite term", the largest). -/
+def Scry.egCodeLt (a b : Nat) : Bool :=
+  if Nat.beq a 0 then .false
+  else if Nat.beq b 0 then .true
+  else Nat.lt a b
+
+/-- The encoded cost at class `i` (an absent class has no finite term). -/
+def Scry.egCodeAt (costs : U64Array) (i : Nat) : Option Nat :=
+  Scry.egCodeOpt (UIntN.toNat (U64Array.getD costs i (U64.ofNat 0)))
+
+/-- The sum of the children's costs, if all are finite. -/
+def Scry.ENode.argsCost (costs : U64Array) : List Nat → Option Nat
+  | .nil => .some 0
+  | .cons a as => Scry.egAddOpt (Scry.egCodeAt costs a) (Scry.ENode.argsCost costs as)
+
+/-- `1 + weight op + the children's costs`; `none` if a child has no finite term. The
+leading `1` bounds a cheapest derivation tree's height by its cost. -/
+def Scry.ENode.costOpt (w : Nat → Nat) (costs : U64Array) (n : Scry.ENode) : Option Nat :=
+  Scry.egAddOpt (.some (Nat.succ (w n.op))) (Scry.ENode.argsCost costs n.args)
 
 def Scry.EGraph.costPass (g : Scry.EGraph) (w : Nat → Nat) :
     List (Nat × Scry.ENode) → U64Array → U64Array
   | .nil, costs => costs
   | .cons p rest, costs =>
     let cls := Scry.EGraph.find g p.1;
-    let c := Scry.ENode.cost w costs p.2;
-    let old := UIntN.toNat (U64Array.getD costs cls (U64.ofNat Scry.EGraph.inf));
-    let costs' := if Nat.lt c old then U64Array.set costs cls (U64.ofNat c) else costs;
+    let old := UIntN.toNat (U64Array.getD costs cls (U64.ofNat 0));
+    let code := Scry.egOptCode (Scry.ENode.costOpt w costs p.2);
+    let costs' := if Scry.egCodeLt code old then
+      U64Array.set costs cls (U64.ofNat code) else costs;
     Scry.EGraph.costPass g w rest costs'
 
 def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → U64Array → U64Array
@@ -408,16 +545,49 @@ def Scry.EGraph.costIter (g : Scry.EGraph) (w : Nat → Nat) : Nat → U64Array 
   | .succ k, costs =>
     Scry.EGraph.costIter g w k (Scry.EGraph.costPass g w g.nodes costs)
 
-/-- A cost per class id (`inf` when nothing finite reaches it). One pass is a full
-relaxation; `next + 1` passes suffice for a shortest derivation tree (a shortest tree
-repeats no class on a root-to-leaf path when every node costs at least one). -/
+/-- The encoded (option) costs: `next + 1` relaxation passes suffice for a shortest
+derivation tree (a shortest tree repeats no class on a root-to-leaf path when every node
+costs at least one). -/
+def Scry.EGraph.costCodes (g : Scry.EGraph) (w : Nat → Nat) : U64Array :=
+  Scry.EGraph.costIter g w (Nat.succ g.next) (Scry.egU64Rep g.next 0)
+
+/-- A cost per class id as `Option Nat` (`none` when nothing finite reaches it). -/
+def Scry.EGraph.costsOpt (g : Scry.EGraph) (w : Nat → Nat) : List (Option Nat) :=
+  let codes := Scry.EGraph.costCodes g w;
+  List.map (fun i => Scry.egCodeAt codes i) (Scry.egCountUp g.next 0)
+
+/-- The cheapest extraction cost of `cls` in the `Option` view, if it has a finite
+term. Unlike the `Nat` view there is no `inf` sentinel, so a weight at or above `inf`
+is an ordinary cost. -/
+def Scry.EGraph.costOpt (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) : Option Nat :=
+  Scry.egCodeAt (Scry.EGraph.costCodes g w) (Scry.EGraph.find g cls)
+
+/-- Convert optional costs to the dense `Nat` cost array, mapping "no finite term" and
+every cost at or above `inf` to `inf`. This is the reference cost table. -/
+def Scry.egCostsArray : List (Option Nat) → U64Array → U64Array
+  | .nil, acc => acc
+  | .cons o os, acc =>
+    let c := match o with
+      | .none => Scry.EGraph.inf
+      | .some n => if Nat.lt n Scry.EGraph.inf then n else Scry.EGraph.inf;
+    Scry.egCostsArray os (U64Array.push acc (U64.ofNat c))
+
+/-- A cost per class id (`inf` when nothing finite reaches it, and for a cost at or
+above `inf`). -/
 def Scry.EGraph.costs (g : Scry.EGraph) (w : Nat → Nat) : U64Array :=
-  Scry.EGraph.costIter g w (Nat.succ g.next)
-    (Scry.egU64Rep g.next Scry.EGraph.inf)
+  Scry.egCostsArray (Scry.EGraph.costsOpt g w) U64Array.empty
 
 def Scry.EGraph.cost (g : Scry.EGraph) (w : Nat → Nat) (cls : Nat) : Nat :=
-  UIntN.toNat (U64Array.getD (Scry.EGraph.costs g w) (Scry.EGraph.find g cls)
-    (U64.ofNat Scry.EGraph.inf))
+  match Scry.EGraph.costOpt g w cls with
+  | .none => Scry.EGraph.inf
+  | .some c => if Nat.lt c Scry.EGraph.inf then c else Scry.EGraph.inf
+
+/-- `1 + weight op + the children's costs`, with `inf` for a child with no finite cost.
+This is the reference cost of a node (the `Option` form is `ENode.costOpt`). -/
+def Scry.ENode.cost (w : Nat → Nat) (costs : U64Array) (n : Scry.ENode) : Nat :=
+  List.foldr (fun a acc => Nat.add
+    (UIntN.toNat (U64Array.getD costs a (U64.ofNat Scry.EGraph.inf))) acc)
+    (Nat.succ (w n.op)) n.args
 
 /-- The cheapest node of a list under fixed costs (the first one on a tie; `nodes` is
 most-recent-first, so later-added nodes win ties). -/
@@ -553,12 +723,84 @@ def Scry.EGraph.matches (g : Scry.EGraph) (p : Scry.Pat) : List (Nat × Scry.Bin
     List.map (fun b => (cls, b)) (Scry.EGraph.matchPat g p cls))
     (Scry.EGraph.roots g)
 
+-- ## E-class analyses
+
+/-- An analysis state: one lattice value per e-class (absent = `bot`). -/
+structure Scry.EClassAn where
+  vals : U64Map Interval
+
+def Scry.EClassAn.empty : Scry.EClassAn :=
+  Scry.EClassAn.mk U64Map.empty
+
+def Scry.EClassAn.get (an : Scry.EClassAn) (cls : Nat) : Interval :=
+  U64Map.findD an.vals (U64.ofNat cls) Interval.ebot
+
+/-- How a node's analysis value is computed from its operator and its children's
+values. Leaves are just nodes with no arguments. -/
+structure Scry.AnSpec where
+  node : Nat → List Interval → Interval
+
+/-- The children's values, in order, or `none` when a child has no value yet (the node
+waits for the next pass, so a value propagates from the leaves up instead of a
+not-yet-analysed child being read as `top`). -/
+def Scry.AnSpec.childValsOpt (an : Scry.EClassAn) : List Nat → Option (List Interval)
+  | .nil => .some .nil
+  | .cons a as =>
+    match U64Map.find an.vals (U64.ofNat a) with
+    | .none => .none
+    | .some v =>
+      match Scry.AnSpec.childValsOpt an as with
+      | .none => .none
+      | .some vs => .some (.cons v vs)
+
+/-- The join of one class's value into the analysis map (a helper so the result type of
+the `if` is known). -/
+def Scry.egAnStep (same : Bool) (vals : U64Map Interval) (changed : Bool) (cls : Nat)
+    (nv : Interval) : U64Map Interval × Bool :=
+  if same then (vals, changed) else (U64Map.insert vals (U64.ofNat cls) nv, .true)
+
+/-- One join pass over every node: raise each class's value to the join with each of its
+nodes' values. -/
+def Scry.EGraph.anPass (g : Scry.EGraph) (spec : Scry.AnSpec) :
+    List (Nat × Scry.ENode) → U64Map Interval → Bool → U64Map Interval × Bool
+  | .nil, vals, changed => (vals, changed)
+  | .cons p rest, vals, changed =>
+    let cls := Scry.EGraph.find g p.1;
+    match Scry.AnSpec.childValsOpt (Scry.EClassAn.mk vals) p.2.args with
+    | .none => Scry.EGraph.anPass g spec rest vals changed
+    | .some cvals =>
+      let v := spec.node p.2.op cvals;
+      let old := U64Map.findD vals (U64.ofNat cls) Interval.ebot;
+      let nv := Interval.join old v;
+      let same := Bool.and (Interval.le nv old) (Interval.le old nv);
+      let r := Scry.egAnStep same vals changed cls nv;
+      Scry.EGraph.anPass g spec rest r.1 r.2
+
+def Scry.EGraph.anPassGo (g : Scry.EGraph) (spec : Scry.AnSpec) : Nat → U64Map Interval →
+    U64Map Interval
+  | .zero, vals => vals
+  | .succ k, vals =>
+    let r := Scry.EGraph.anPass g spec g.nodes vals .false;
+    if r.2 then Scry.EGraph.anPassGo g spec k r.1 else r.1
+
+/-- Join the analysis after a rebuild: start every class at `bot` and relax `next + 1`
+passes. The bound is the node count, as for extraction; an analysis whose lattice has
+infinite ascending chains (such as intervals on a growing term) may need a widening,
+which is future work. -/
+def Scry.EGraph.analyse (g : Scry.EGraph) (spec : Scry.AnSpec) : Scry.EClassAn :=
+  Scry.EClassAn.mk (Scry.EGraph.anPassGo g spec (Nat.succ g.next) U64Map.empty)
+
 -- ## Rewriting and saturation
 
 /-- A rewrite: match `lhs`, then union its class with an instance of `rhs`. -/
 structure Scry.Rewrite where
   lhs : Scry.Pat
   rhs : Scry.Pat
+
+/-- A rewrite guarded by an analysis fact (e.g. "this variable is a known point"). -/
+structure Scry.GuardedRewrite where
+  rule : Scry.Rewrite
+  guard : Scry.Bindings → Scry.EClassAn → Bool
 
 def Scry.EGraph.classOfVar (b : Scry.Bindings) (n : Nat) : Nat :=
   match Scry.bindLookup n b with
@@ -582,31 +824,63 @@ partial def Scry.EGraph.instList (g : Scry.EGraph) (b : Scry.Bindings) :
     (r2.1, .cons r.2 r2.2)
 end
 
-/-- Apply one match: union the matched class with the instantiated right-hand side.
-The flag reports a union or a new e-node. -/
-def Scry.EGraph.applyAt (g : Scry.EGraph) (r : Scry.Rewrite) (cls : Nat)
+/-- Apply one match, recording the rule index: union the matched class with the
+instantiated right-hand side. The rule-index form is the one explanations need; the
+reference form is `applyAt`. The flag reports a union or a new e-node. -/
+def Scry.EGraph.applyAtN (g : Scry.EGraph) (rule : Nat) (r : Scry.Rewrite) (cls : Nat)
     (b : Scry.Bindings) : Scry.EGraph × Bool :=
   let i := Scry.EGraph.instantiate g b r.rhs;
-  let u := Scry.EGraph.union i.1 cls i.2;
+  let u := Scry.EGraph.unionWhy i.1 cls i.2 (.rewrite rule);
   (u.1, if u.2 then .true else Nat.lt g.next i.1.next)
 
-def Scry.EGraph.applyMatches (r : Scry.Rewrite) :
+/-- Apply one match under the reference form (rule `0` in the union log). -/
+def Scry.EGraph.applyAt (g : Scry.EGraph) (r : Scry.Rewrite) (cls : Nat)
+    (b : Scry.Bindings) : Scry.EGraph × Bool :=
+  Scry.EGraph.applyAtN g 0 r cls b
+
+def Scry.EGraph.applyMatchesN (rule : Nat) (r : Scry.Rewrite) :
     List (Nat × Scry.Bindings) → Scry.EGraph → Bool → Scry.EGraph × Bool
   | .nil, g, ch => (g, ch)
   | .cons m ms, g, ch =>
-    let r' := Scry.EGraph.applyAt g r m.1 m.2;
-    Scry.EGraph.applyMatches r ms r'.1 (if r'.2 then .true else ch)
+    let r' := Scry.EGraph.applyAtN g rule r m.1 m.2;
+    Scry.EGraph.applyMatchesN rule r ms r'.1 (if r'.2 then .true else ch)
 
-def Scry.EGraph.applyRule (g : Scry.EGraph) (r : Scry.Rewrite) :
-    Scry.EGraph × Bool :=
-  Scry.EGraph.applyMatches r (Scry.EGraph.matches g r.lhs) g .false
+/-- Apply every match, recording rule `0`. -/
+def Scry.EGraph.applyMatches (r : Scry.Rewrite) :
+    List (Nat × Scry.Bindings) → Scry.EGraph → Bool → Scry.EGraph × Bool :=
+  Scry.EGraph.applyMatchesN 0 r
 
-def Scry.EGraph.applyRules :
-    List Scry.Rewrite → Scry.EGraph → Bool → Scry.EGraph × Bool
+/-- `applyMatchesN`, filtered by a guard on the binding and the current e-class
+analysis. A match the guard rejects is skipped. -/
+def Scry.EGraph.applyMatchesGuarded (rule : Nat) (r : Scry.Rewrite)
+    (guard : Scry.Bindings → Scry.EClassAn → Bool) (an : Scry.EClassAn) :
+    List (Nat × Scry.Bindings) → Scry.EGraph → Bool → Scry.EGraph × Bool
   | .nil, g, ch => (g, ch)
-  | .cons r rest, g, ch =>
-    let a := Scry.EGraph.applyRule g r;
-    Scry.EGraph.applyRules rest a.1 (if a.2 then .true else ch)
+  | .cons m ms, g, ch =>
+    if guard m.2 an then
+      let r' := Scry.EGraph.applyAtN g rule r m.1 m.2;
+      Scry.EGraph.applyMatchesGuarded rule r guard an ms r'.1 (if r'.2 then .true else ch)
+    else Scry.EGraph.applyMatchesGuarded rule r guard an ms g ch
+
+def Scry.EGraph.applyRuleN (g : Scry.EGraph) (rule : Nat) (r : Scry.Rewrite) :
+    Scry.EGraph × Bool :=
+  Scry.EGraph.applyMatchesN rule r (Scry.EGraph.matches g r.lhs) g .false
+
+def Scry.EGraph.applyRule (g : Scry.EGraph) (r : Scry.Rewrite) : Scry.EGraph × Bool :=
+  Scry.EGraph.applyRuleN g 0 r
+
+def Scry.EGraph.applyRulesFrom :
+    Nat → List Scry.Rewrite → Scry.EGraph → Bool → Scry.EGraph × Bool
+  | _, .nil, g, ch => (g, ch)
+  | i, .cons r rest, g, ch =>
+    let a := Scry.EGraph.applyRuleN g i r;
+    Scry.EGraph.applyRulesFrom (Nat.succ i) rest a.1 (if a.2 then .true else ch)
+
+/-- Apply every rule to every match; rule `i` is recorded as `.rewrite i` in the union
+log. -/
+def Scry.EGraph.applyRules (rules : List Scry.Rewrite) (g : Scry.EGraph) (ch : Bool) :
+    Scry.EGraph × Bool :=
+  Scry.EGraph.applyRulesFrom 0 rules g ch
 
 /-- Equality saturation with a fuel bound: apply every rule to every match, rebuild
 (congruence closure), and stop when a round changed nothing or the fuel runs out. The
@@ -620,3 +894,174 @@ def Scry.EGraph.saturate :
     let rebuilt := Bool.not (Nat.beq (Scry.EGraph.numClasses a.1)
                                        (Scry.EGraph.numClasses g1));
     if Bool.or a.2 rebuilt then Scry.EGraph.saturate k g1 rules else g1
+
+def Scry.EGraph.applyGuardedFrom (an : Scry.EClassAn) :
+    Nat → List Scry.GuardedRewrite → Scry.EGraph → Bool → Scry.EGraph × Bool
+  | _, .nil, g, ch => (g, ch)
+  | i, .cons gr rest, g, ch =>
+    let m := Scry.EGraph.matches g gr.rule.lhs;
+    let a := Scry.EGraph.applyMatchesGuarded i gr.rule gr.guard an m g .false;
+    Scry.EGraph.applyGuardedFrom an (Nat.succ i) rest a.1 (if a.2 then .true else ch)
+
+/-- Saturation with guarded rewrites: each round applies the currently enabled rules,
+rebuilds, then recomputes the e-class analysis (`analyse`) for the next round. -/
+def Scry.EGraph.saturateAn :
+    Nat → Scry.EGraph → List Scry.GuardedRewrite → Scry.AnSpec → Scry.EGraph
+  | .zero, g, _, _ => g
+  | .succ k, g, rules, spec =>
+    let an := Scry.EGraph.analyse g spec;
+    let a := Scry.EGraph.applyGuardedFrom an 0 rules g .false;
+    let g1 := Scry.EGraph.rebuild a.1;
+    let rebuilt := Bool.not (Nat.beq (Scry.EGraph.numClasses a.1)
+                                       (Scry.EGraph.numClasses g1));
+    if Bool.or a.2 rebuilt then Scry.EGraph.saturateAn k g1 rules spec else g1
+
+-- ## Explanations
+
+/-- The unions adjacent to `node` in the log, as `(other end, step)`. Class ids are the
+roots recorded at union time, so this walks the historical union graph, not only the
+current quotient. -/
+def Scry.EGraph.stepNeighbours (g : Scry.EGraph) (node : Nat) :
+    List (Nat × Scry.UnionStep) :=
+  List.foldr (fun s acc =>
+    if Nat.beq s.a node then .cons (s.b, s) acc
+    else if Nat.beq s.b node then .cons (s.a, s) acc
+    else acc) .nil g.log
+
+/-- Extend a path with one step's other end. -/
+def Scry.egStepPair (path : List Scry.UnionStep) (p : Nat × Scry.UnionStep) :
+    Nat × List Scry.UnionStep :=
+  (p.1, List.cons p.2 path)
+
+/-- Breadth-first search over the union log; each queue item carries the path taken. -/
+partial def Scry.EGraph.explainFrom (g : Scry.EGraph) (target : Nat) (visited : List Nat)
+    (queue : List (Nat × List Scry.UnionStep)) : Option (List Scry.UnionStep) :=
+  match queue with
+  | .nil => .none
+  | .cons item rest =>
+    if Nat.beq item.1 target then .some (List.revOnto item.2 .nil)
+    else if List.any (fun v => Nat.beq v item.1) visited then
+      Scry.EGraph.explainFrom g target visited rest
+    else
+      let next := List.map (Scry.egStepPair item.2)
+        (Scry.EGraph.stepNeighbours g item.1);
+      Scry.EGraph.explainFrom g target (.cons item.1 visited)
+        (List.append rest next)
+
+/-- A chain of recorded unions from `a` to `b`, or `none` when the log does not connect
+them. An empty chain means `a = b` was already true when the query ran (or they are the
+same id). Unconditional rewrites only: guarded rules record `.rewrite i` too, but the
+guard itself is not part of the chain. -/
+def Scry.EGraph.explain (g : Scry.EGraph) (a b : Nat) : Option (List Scry.UnionStep) :=
+  if Nat.beq a b then .some .nil
+  else Scry.EGraph.explainFrom g b .nil (.cons (a, .nil) .nil)
+
+/-- `explain` under its scry name: the rewrite chain between two classes. -/
+def Scry.EGraph.rewriteChain (g : Scry.EGraph) (a b : Nat) :
+    Option (List Scry.UnionStep) :=
+  Scry.EGraph.explain g a b
+
+/-- The rule indices on a chain, in order. -/
+def Scry.chainRules (chain : List Scry.UnionStep) : List Nat :=
+  List.foldr (fun s acc => match s.reason with
+    | .rewrite i => .cons i acc
+    | _ => acc) .nil chain
+
+def Scry.chainHasCongruence (chain : List Scry.UnionStep) : Bool :=
+  List.any (fun s => Scry.UnionReason.isCongruence s.reason) chain
+
+-- ## Limits and stop reasons
+
+/-- Why saturation stopped. -/
+inductive Scry.StopReason where
+  | fixpoint
+  | fuel
+  | nodeCap
+  | timeCap
+
+/-- Caps for `saturateLimited`. `maxRounds` is the fuel of `saturate`; `maxNodes` bounds
+the e-node table; `maxMillis`, when given, is checked against the caller's monotonic
+clock (`now`) once per round. -/
+structure Scry.Limits where
+  maxRounds : Nat
+  maxNodes : Nat
+  maxMillis : Option Nat
+
+/-- The outcome of a limited saturation. -/
+structure Scry.SaturateResult where
+  g : Scry.EGraph
+  rounds : Nat
+  reason : Scry.StopReason
+
+/-- Saturation with caps, reporting why it stopped. The clock is a parameter
+(`now : Nat → Nat`, milliseconds by round), so the loop stays pure and testable: a test
+passes a scripted clock, and an IO driver samples `Clock.monotonic` between rounds. A
+cap is checked *before* a round, except the fixpoint test, which is checked after one. -/
+mutual
+def Scry.EGraph.saturateLoop (now : Nat → Nat) (lim : Scry.Limits) (t0 : Nat)
+    (rounds : Nat) (g : Scry.EGraph) (rules : List Scry.Rewrite) : Scry.SaturateResult :=
+  if Nat.le lim.maxRounds rounds then
+    Scry.SaturateResult.mk g rounds .fuel
+  else match lim.maxMillis with
+    | .some ms =>
+      if Nat.le ms (Nat.sub (now (Nat.succ rounds)) t0) then
+        Scry.SaturateResult.mk g rounds .timeCap
+      else Scry.EGraph.saturateStep now lim t0 rounds g rules
+    | .none => Scry.EGraph.saturateStep now lim t0 rounds g rules
+
+def Scry.EGraph.saturateStep (now : Nat → Nat) (lim : Scry.Limits) (t0 : Nat)
+    (rounds : Nat) (g : Scry.EGraph) (rules : List Scry.Rewrite) : Scry.SaturateResult :=
+  if Nat.le lim.maxNodes (Scry.EGraph.numNodes g) then
+    Scry.SaturateResult.mk g rounds .nodeCap
+  else
+    let a := Scry.EGraph.applyRules rules g .false;
+    let g1 := Scry.EGraph.rebuild a.1;
+    let rebuilt := Bool.not (Nat.beq (Scry.EGraph.numClasses a.1)
+                                       (Scry.EGraph.numClasses g1));
+    if Bool.or a.2 rebuilt then
+      Scry.EGraph.saturateLoop now lim t0 (Nat.succ rounds) g1 rules
+    else Scry.SaturateResult.mk g1 rounds .fixpoint
+end
+
+def Scry.EGraph.saturateLimited (now : Nat → Nat) (lim : Scry.Limits)
+    (g : Scry.EGraph) (rules : List Scry.Rewrite) : Scry.SaturateResult :=
+  Scry.EGraph.saturateLoop now lim (now 0) 0 g rules
+
+-- ## Saturating with an analysis, limits and explanations together
+
+/-- A convenience for callers that want the stop reason *and* the analysis: saturate
+with guarded rules under the same caps as `saturateLimited`. The analysis is recomputed
+after every rebuild, as in `saturateAn`. -/
+mutual
+def Scry.EGraph.saturateAnLoop (now : Nat → Nat) (lim : Scry.Limits) (t0 : Nat)
+    (rounds : Nat) (g : Scry.EGraph) (rules : List Scry.GuardedRewrite)
+    (spec : Scry.AnSpec) : Scry.SaturateResult :=
+  if Nat.le lim.maxRounds rounds then
+    Scry.SaturateResult.mk g rounds .fuel
+  else match lim.maxMillis with
+    | .some ms =>
+      if Nat.le ms (Nat.sub (now (Nat.succ rounds)) t0) then
+        Scry.SaturateResult.mk g rounds .timeCap
+      else Scry.EGraph.saturateAnStep now lim t0 rounds g rules spec
+    | .none => Scry.EGraph.saturateAnStep now lim t0 rounds g rules spec
+
+def Scry.EGraph.saturateAnStep (now : Nat → Nat) (lim : Scry.Limits) (t0 : Nat)
+    (rounds : Nat) (g : Scry.EGraph) (rules : List Scry.GuardedRewrite)
+    (spec : Scry.AnSpec) : Scry.SaturateResult :=
+  if Nat.le lim.maxNodes (Scry.EGraph.numNodes g) then
+    Scry.SaturateResult.mk g rounds .nodeCap
+  else
+    let an := Scry.EGraph.analyse g spec;
+    let a := Scry.EGraph.applyGuardedFrom an 0 rules g .false;
+    let g1 := Scry.EGraph.rebuild a.1;
+    let rebuilt := Bool.not (Nat.beq (Scry.EGraph.numClasses a.1)
+                                       (Scry.EGraph.numClasses g1));
+    if Bool.or a.2 rebuilt then
+      Scry.EGraph.saturateAnLoop now lim t0 (Nat.succ rounds) g1 rules spec
+    else Scry.SaturateResult.mk g1 rounds .fixpoint
+end
+
+def Scry.EGraph.saturateAnLimited (now : Nat → Nat) (lim : Scry.Limits)
+    (g : Scry.EGraph) (rules : List Scry.GuardedRewrite) (spec : Scry.AnSpec) :
+    Scry.SaturateResult :=
+  Scry.EGraph.saturateAnLoop now lim (now 0) 0 g rules spec

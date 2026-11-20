@@ -444,6 +444,55 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
+## H14 T3: formal harness emission (`lib/Hdl/Formal.wiz`)
+
+`Verilog.emitFormal` emits the same module as `Verilog.emit` plus an
+`` `ifdef FORMAL `` harness: the properties declared with the monitor language become
+immediate `assert`/`assume`/`cover` statements clocked by the design's clock, with
+`$past`, `$stable`, `$rose`, `$fell` and `(* anyconst *)` declarations. Outside the
+`ifdef` the text is byte-identical to `Verilog.emit`; synthesis and simulation are
+unaffected. `Formal.sby` writes a SymbiYosys job (`mode bmc` or `prove`, `depth`,
+`smtbmc`); the harness also runs directly under `yosys -formal` +
+`yosys-smtbmc`.
+
+```wiz no-check
+def props : List FProp := [
+  FProp.impliesNext "stability"
+    (FTerm.and (FTerm.outp "out_valid") (FTerm.not (FTerm.inp "out_ready")))
+    (FTerm.stable 1 (FTerm.outp "out_data")),
+  FProp.cover "transfer" (FTerm.and (FTerm.inp "in_valid") (FTerm.outp "in_ready")) ]
+
+IO.writeFile "queue.v" (Verilog.emitFormal "queue" queueR props)
+IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
+```
+
+* **Signals** are input/output ports by their `HwTy.portNames` name (`in_valid`,
+  `out_data`); a name that is not a port renders as `?` (yosys then rejects the
+  harness). Terms are `FTerm`: references, sized literals, `FTerm.const name width`
+  (an `anyconst`), bitwise/logical operators, `eq`/`ne`/`ult`/`slt`, arithmetic,
+  `cat`/`mux`/`slice`, and the temporal forms `past n`, `stable n` (`$stable` for one
+  cycle), `rose` and `fell`.
+* **Monitors** are named `FProp`s: `always`, `implies` (`|->`), `impliesNext` (`|=>`),
+  `nexts n`, `cover`, and the environment assumptions `assumeAlways`,
+  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is the corresponding
+  `TL` formula from H14 T on the observation trace; the module docs give the table.
+* **History** is handled by a saturating cycle counter: a check that reads `n` cycles of
+  history is gated until the counter reaches `n`, so the unconstrained value of a
+  `$past` before cycle 0 is never mistaken for a failure. A circuit built with
+  `Circuit.withReset` (`rst` in the input type) also gets `initial assume (rst);`.
+* **End to end** (`examples/hdl-formal.wiz`, group `hdl`): a one-entry valid/ready
+  buffer and a deliberately wrong variant share five monitors. `yosys-smtbmc` passes the
+  correct RTL and finds a two-or-three-cycle counterexample for the variant (the
+  stability monitor fails; the other four still pass). The test group runs the same
+  proof with `yosys -formal`, `prep`, `clk2fflogic`, `write_smt2` and `yosys-smtbmc -s
+  z3`; `sby` consumes the generated `.sby` unchanged.
+
+Not emitted yet: SVA sequences (`##[m:n]`, repetition, `throughout`), `until`,
+unbounded liveness (`◇`, leads-to, fairness — safety solvers do not prove it), and
+multi-clock properties. The monitor language is intentionally untyped over the circuit's
+`HwTy`; a typed term layer over `HwTy.leaves` would turn a mistyped reference into a Wiz
+type error instead of a `?` in the emitted text.
+
 ## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 
 One semantics for everything that runs step by step (design:
@@ -510,10 +559,12 @@ a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.mem
   byte written) and `byteDisabled` (enable low: the byte is unchanged).
 * **Byte enables in a word.** `Mem.byteMask dw nb strb` is the `dw`-bit mask of `nb`
   strobe bits (byte `k` is `0xff` when bit `k` is set), `Mem.merge old new mask` is the
-  read-modify-write value, and `Mem.writeBytes` is the masked write. The two closed
-  32-bit cases (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the
-  symbolic mask is checked for every strobe pattern and every byte lane of 8-, 16- and
-  32-bit words in the example (a checked law is *tested*, not proved).
+  read-modify-write value, and `Mem.writeBytes` is the masked write. `Bus.byteMask` is
+  `Mem.byteMask`, and `Bus.ramWC` is written with `Mem.merge`, so a bus, a RAM model and
+  a memory proof share one definition of a strobe. The two closed 32-bit cases
+  (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the symbolic mask is
+  checked for every strobe pattern and every byte lane of 8-, 16- and 32-bit words in
+  the example (a checked law is *tested*, not proved).
 * **One-cycle and two-cycle RAMs.** `Mem.Req`/`Mem.ReqW`/`Mem.Resp` are the bundles and
   `Mem.Ram` the state (`cells` plus a two-bit wait counter). `Mem.ramC1` answers in the
   request cycle (a write lands at the clock edge, so a read sees the old word);
@@ -1006,7 +1057,15 @@ parameters and no memory map:
   two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
   index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
   `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
-  of the enabled bytes.
+  of the enabled bytes (`Mem.byteMask`/`Mem.merge` from `Hdl.Mem`, so the bus and a
+  memory proof use one definition of a strobe). Its step is written through
+  `Bus.ramWGo`/`ramWIndex`/`ramWMask`/`ramWMerged`/`ramWWait`/`ramWNext`/`ramWOut`.
+  The contract is one outstanding request: `go` is high only when `valid` is and the
+  two-bit wait counter has reached 2, so a request offered at wait 0 is answered in the
+  third cycle and no second request is taken while `wait < 2`; the counter returns to 0
+  at the answer, and a source that drops `valid` withdraws the request (nothing stays in
+  flight). A read in the answering cycle returns the word read before the store: there
+  is no read-during-write bypass, so a write is visible to the next transaction only.
 
 `lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
@@ -1024,6 +1083,14 @@ to the value model's response vector: every non-granted master is quiet and an
 acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
 value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
 `memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
+The byte-enabled RAM is proved too: `ramWStep_write` (a taken write is the masked
+store), `ramWStep_read_same` (a read of that word afterwards is `Bus.ramWMerged`: the
+enabled bytes from `wdata`, the rest from the old word), `ramWStep_read_other` (no
+alias), `ramWStep_no_write` (an untaken request writes nothing),
+`ramWOut_noBypass` (the answering cycle returns the pre-store word) and the closed
+wait-timeline lemmas `ramW_go_first`/`_second`/`_third` and
+`ramW_wait_first`/`_second`/`_third`/`_withdraw0`/`_withdraw1` (one outstanding
+request, two cycles of delay, reset on withdrawal).
 The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
 checks over exhaustively generated or long pseudo-random traces, compared against
 `Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
@@ -1031,7 +1098,10 @@ checks over exhaustively generated or long pseudo-random traces, compared agains
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
 misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
-cycle for cycle. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
+cycle for cycle. `examples/hdl-ramwc.wiz` (test groups `hdl` and `bus-law`) checks the
+wait timeline of `Bus.ramWC`, read-after-write against an independent byte model for
+every 8-, 16- and 32-bit strobe pattern, no alias, the write-answer no-bypass case and
+byte addressing with `shift = 2`. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
 (4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
 sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
 the three simulations. It also exhausts the N-master selector for n = 1..4 (all valid
@@ -1199,10 +1269,24 @@ streaming circuit: input `valid`/`data`, output `valid`/`crc`, one byte per cycl
 `Crc.check_ok` is the kernel-checked known answer (CRC-8/SMBUS of `"123456789"` is
 `0xF4` = 244).
 
+`Crc.protoC` is the line-framed CRC service extracted from the iCEstick's `proto`
+design, with the UART removed so it sits behind any byte transport: input
+`valid`/`data`/`txIdle`, output `ready`/`valid`/`data`/`lines`. A line is bytes other
+than 10 followed by the newline 10; when the newline is accepted the service answers
+the line's CRC as two upper-case hex digits and a newline, one byte per `txIdle`
+cycle. `ready` is low from the accepted newline until the reply ends, and bytes offered
+while it is low are dropped rather than queued: the contract is request/response,
+single outstanding line, no bursts. The host half is `Crc.reply`/`Crc.replies`, and
+`Crc.reply_check` is the kernel-checked on-the-wire known answer (`"F4\n"`).
+
 `examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
 specification on all 65536 `(crc, byte)` pairs, `hexDigit` on all 16 nibbles, the known
 answer, and the streaming circuit through the value simulation, `Netlist.simulate` and
-`Circuit.simFast`.
+`Circuit.simFast`. `examples/hdl-crc-link.wiz` (test groups `hdl` and `bus-crc`) drives
+the service with two lines, checks the reply stream against `Crc.replies`, drops a
+newline offered during a reply, checks that `ready` is low exactly in the reply cycles,
+counts the accepted lines, and compares the value simulation with `Netlist.simulate`
+and `Circuit.simFast`.
 
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
@@ -1532,6 +1616,13 @@ is an `Applicative` and every `Applicative` a `Functor`; `Monad`/`Functor` insta
 `Option`, `Except E` and `List`, and `Option.map`/`bind`, `Except.map`/`bind`,
 `List.flatMap` (`List.map` is `lib/Text.wiz`'s, which Functor imports). See [13d](stages/13-language.md). The Prelude itself has `if … then …
 else`, short-circuiting `&&` and `||`, and `!` ([13c](stages/13-language.md)).
+
+`lib/Compose.wiz` (`import Compose`): `class Compose (α β γ : Type) where compose :
+(β → γ) → (α → β) → (α → γ)`, the operator `g ∘ f` (`infixr:90`), the function
+instance `compose g f x = g (f x)`, `id`, and the laws `Compose.assoc`,
+`Compose.id_left`, `Compose.id_right` (definitional; `#print axioms` lists none). A
+type with its own composition declares an instance, and a later instance wins (7b).
+See [13w](stages/13-language.md).
 
 ## 9j: text and lists (`lib/Text.wiz`)
 
@@ -1944,9 +2035,14 @@ instead of one `rw` per step.
 
 ## Native structures: word arrays, word maps, interned strings
 
-`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
-and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
-in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`): list models with laws, run
+natively in compiled code, updated in place when unique. `lib/WordMap.wiz`
+(`U64Map V`) and `lib/Intern.wiz` (`InternTable`, ids as `U32`) use the persistent map
+as the model (`PMap U64 V` and `PMap String U32`) and a native hash table in compiled
+code, so `insert`, `find` and `erase` (and `intern`) are O(log n) in the kernel,
+`#eval` and `#run`, and the natives `empty`/`insert`/`erase`/`find`/`size`/`ofList`/
+`toList` (and `intern`/`lookup`/`find` for a table) are the compiled representation.
+See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets
 
@@ -1960,20 +2056,22 @@ the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotati
 increasing key order, and `fromList` accepts entries in any order (a later duplicate
 wins).
 
-Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
-for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
-define one instance to use any other key type. `PSet` and the map
-algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), declared in
+`lib/Compare.wiz` with instances for `Nat` (through the native `Nat.lt`/`Nat.beq`),
+`U64` (`U64.cmp`, unsigned) and `String` (`String.compare`, lexicographic); define one
+instance to use any other key type. `PSet` and the map
+algorithms are key-generic, and so is `U64Map` now (its model is `PMap U64 V`). `size`
+and the balance checks are O(1) (the
 subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
 O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
 O(n log n) for a list in arbitrary order.
 
 Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
 `find_erase` and `size_insert` (and the sortedness and balance invariants across
-rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+rotations) are checked by the tests rather than proved — for `PMap`, `PSet` and
+`U64Map` (which is `PMap U64 V`). Examples: `examples/persistent.wiz`
 (the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
-complexity, persistence guarantees, benchmark plan and the migration path for replacing
-`U64Map` with a pure model plus a native backend are in
+complexity, persistence guarantees and the benchmark plan are in
 `wiz-notes/persistent-data.md`.
 
 ## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
@@ -2104,28 +2202,26 @@ format and the gaps.
 
 ## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
 
-`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
-congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
-extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
-native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
-same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
-and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
-`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
-`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
-record, reads a field, or calls those functions compiles against one import only. It
-adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
-rewrites), union explanations (a flat proof forest), node/round/clock limits with a
-reported stop reason, and `Option Nat` extraction costs. Only six of the eighteen
-`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
-`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
-compares; the analysis, explanation, limit and `EqPlan` surface has no reference
-counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
-byte-identical (matching, instantiation and extraction), so the digests show that the
-two *tables* agree, not that the shared code is independently right. They cannot be
-imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
-operations, so a whole-library import that names both is an error. Every whole-library
-loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
-with everything except the reference family. `import Scry.EqPlan`
+`import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
+rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
+with a fuel bound. The **surface** is the reference one (`Scry.EGraph`, `Scry.ENode`,
+`Scry.ETerm`, `Scry.Pat`, `Scry.Rewrite`, `costs : U64Array` with `Scry.EGraph.inf`, and
+`applyAt`/`applyMatches` without a rule index); the **representation** of the hash cons
+is the native one, a `U64Map` from an e-node hash to a bucket of `(e-node, class)`, so
+`add` and `rebuild` do one bucket lookup and one cons per node instead of scanning a flat
+association list. The record has six fields (`parent`, `rank`, `nodes`, `etable`, `next`,
+`log`); `nodes` is a list, newest first. The module also carries the pieces the old
+native backend added: per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`,
+with guarded rewrites), union explanations (a flat proof forest, `explain`), node/round/
+clock limits with a reported stop reason (`saturateLimited`), and the `Option Nat` cost
+view (`costsOpt`/`costOpt`). `explain` needs the rule index, so the rule-index forms are
+`applyAtN`/`applyMatchesN`; the reference names record rule `0`. `import Scry.EgraphNative`
+is now a **compatibility import** — it just imports `Scry.Egraph` — kept because
+`Scry.EqPlan` and four examples named it; there is no second implementation and no
+import split (the whole of `lib/` loads at once, `Tests.Elab.libApart` is empty). All
+eighteen `examples/scry-egraph-*.wiz` produce their previous digests, including the six
+(`congruence`, `rebuild`, `extract`, `saturate`, `fuel`, `datalog`) that the
+`scry-egraph` group also runs through the compatibility name. `import Scry.EqPlan`
 is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
 relations (a column is not an assertion: a term table `un(term, op, child)` has two
 `eqsort` columns and unions nothing), rules whose head is an equality assertion

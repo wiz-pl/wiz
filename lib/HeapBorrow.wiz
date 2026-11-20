@@ -1,5 +1,4 @@
 import HoareTactics
-import Optic
 /-!
 # HeapBorrow
 

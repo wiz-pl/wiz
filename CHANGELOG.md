@@ -10,6 +10,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the infoview has a **widget host** (`web/widgets.js`). It parses the Loom
+  `wiz.widget/1` payload (`WIZ_WIDGET:`), draws the `#plot` producer's inline
+  `image/svg+xml`/`text/html` figure and the scry analysis's claim/findings card, and
+  shows each card's title, kind and summary. Payload markup is parsed into a checked tree
+  and rebuilt with DOM nodes, never `innerHTML`: scripts, styles, event handlers,
+  `href`/`src`/`style`, `url(...)` and all elements/attributes outside a small allowlist
+  are refused, and a refused or unknown kind falls back to a card naming it. The
+  standalone page's widget pane is a grid child beside the editor and the goals, and
+  the playground keeps the same grid under `Widgets` in the goals panel; both layouts
+  keep a wide plot scrolling in its own column. `Scry.analysisDisplay` now carries
+  `kind`, `mimeType`, `title` and `summary` beside its `scry.analysis/1` extension.
+  Tests: `web/widgets_test.mjs` (fixtures, safety, fallback, DOM mount),
+  `web/playground_lsp_test.mjs` (the payloads through the stubbed LSP transport), and
+  the `=scry-analysis` fields.
+* hdl: **formal harness emission** (`lib/Hdl/Formal.wiz`). `Verilog.emitFormal` appends
+  an `` `ifdef FORMAL `` harness to `Verilog.emit`'s module: named monitors become
+  immediate `assert`/`assume`/`cover` statements clocked by the design, with `$past`,
+  `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
+  assumption. The non-formal text is byte-identical to `Verilog.emit`, and
+  `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
+  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
+  finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
   lines) now only points at the body and calls `web/framework/mount.js`'s one export,
   which loads the Loom page's module (`web/playground-ui.wiz`), mounts its SSR, delegates
@@ -80,6 +103,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   contract), against the stage-4 target 3,733; the remainder is the mirror, the popup
   and the measured style copy, not rules. After the merge with stages 5–6 it is 3,906.
 
+* **Application operators, pipe projections, sections, and `#eval` through `Repr`
+  (13w).** `f <| x` (`apply`, `infixr:10`) joins `x |> f` (`pipe`, `infixl:10`);
+  `x |>.f` is the same projection as `x.f`, nested paths included; `(· + 1)`,
+  `(1 + ·)` and `(· * ·)` are lambdas whose parameters come from the expected type
+  (`List.map (· + 1) xs`). `#eval` now runs `Repr.repr` when the value's type has a
+  `Repr` instance, so `[1, 2, 3]` prints as a list literal instead of `List.cons …`;
+  types without an instance keep the term readback, `Bool` keeps `.true`/`.false`
+  (structurally equal enums share `Repr` instances, so its readback is the stable
+  spelling), and `#check`/`#print` are unchanged. `Repr String` escapes as the lexer
+  reads, and `Repr (List A)` is hand-written (it is no longer derived).
+  `lib/Compose.wiz` adds `class Compose`
+  with `g ∘ f` (`infixr:90`), a function instance, and the definitional laws
+  `Compose.assoc`, `Compose.id_left`, `Compose.id_right`.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
@@ -297,6 +333,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   parse of all 5 560 `.cs` files of a real solution takes the error count from 16 to 0 with no file
   gaining an error. The two reproducers now have spills, `parse/contextual` pins the
   tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
+* scry: **one e-graph engine**. `Scry.Egraph` and `Scry.EgraphNative` were two
+  implementations that shared 74 of the reference module's 80 declarations and could not
+  be imported into one program. `Scry.Egraph` is now the single engine: the reference
+  surface (`Scry.EGraph`, `costs : U64Array` with `EGraph.inf`, `applyAt`/`applyMatches`
+  without a rule index) on the native hash cons (`etable` is a `U64Map` from an e-node
+  hash to a bucket), plus the analyses, explanations, limits and `Option` cost view
+  (`costsOpt`/`costOpt`) that used to live only in the native module. `Scry.EgraphNative`
+  is a compatibility import of `Scry.Egraph`; `Scry.EqPlan` and the examples that named
+  it are unchanged, and every `examples/scry-egraph-*.wiz` digest is identical. `add` and
+  `rebuild` no longer scan a flat association list or append one node at a time (adding
+  1 600 nodes: 18 ms in the audit's reference measurement, 0 ms here; at 12 800 nodes
+  the old module took 501 ms to add and 4.5 s to rebuild, the unified one 3 ms and 3 ms;
+  at 25 600 nodes, 2.0 s/18.7 s against 8 ms/7 ms).
+  The difference was not only the hash cons: a record update (`{ g with … }`) leaves the
+  old record live, so `U64Array.push`/`U64Map.insert` copied the whole table; the hot
+  paths destructure and rebuild with `mk`. The trust ledger and the name-collision
+  baseline drop the duplicate rows, and the whole of `lib/` now loads at once
+  (`Tests.Elab.libApart` is empty).
+
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known
@@ -708,6 +763,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
   group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
   `docs/libraries.md:1979` has the API.
+* `match h : e with | p => …` names the branch's equation `h : e = p`, so a split on a
+  computed value (`match h : p n with`) can use what the split learnt; each scrutinee may
+  be named (`match h : e, k : f with`, including after an unnamed one) and the equation
+  works in a non-dependent match too. A named match on an indexed value is reported
+  rather than ill typed (4e, #254).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

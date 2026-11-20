@@ -163,9 +163,12 @@ passes it to the case's process; `tests --libdiff --part 2/6` runs one part loca
 the case's property test checks the partition for `n = 1…8` without a toolchain.
 
 A part writes `.lake/libdiff/records.jsonl` as each record arrives, so a part killed by
-the job timeout still leaves what it finished (a missing file is then named by the union
-check, rather than shrinking the green total). The check, `scripts/ci.py libdiff-union`,
-lives in `CI result` and reads the parts' uploaded `part.txt` and `records.jsonl`.
+the job timeout still leaves what it finished (a missing file is then named by the
+union check, rather than shrinking the green total). That check is the corpus:
+`.github/libdiff-corpus.txt` is the manifest of every `*.wiz` under `lib/` and `scry/`,
+in `LC_ALL=C` order, with no exclusions, and `scripts/check-libdiff-corpus.sh` (with
+`--self-test`, in the static gate) fails when a listed file is absent, a file under the
+two trees is unlisted, or an entry is duplicated or out of order. It needs no build.
 
 ### Flaky tests and the quarantine
 
@@ -283,9 +286,11 @@ Adding a test group touches no shared file:
   `Tests/Groups.lean` (an import of every file in `Tests/Groups/`; not committed, see the
   `testGroups` target in `lakefile.lean`) and `Tests/Main.lean` imports it, so the group
   is in the suite as soon as its file exists. Copy a small one (e.g.
-  `Tests/Groups/Struct.lean`) to start. Set `shard := "selfhost"` (or another name from
-  `.github/test-shards.json`) in the group to run it in a shard other than the default
-  (`library`), or add a selector to the shard's list.
+  `Tests/Groups/Struct.lean`) to start. Add a selector `=GROUP` to a shard's `select`
+  list in `.github/test-shards.json` (or an entry in
+  `.github/test-shard-exclusions.json` with the reason it runs in no CI shard);
+  `scripts/check-shards.py` fails if the group is in neither. `Group.shard` is only a
+  hint shown in the error message now; it does not move a group by itself.
 * **New cases of an existing group** go in its module: the group `elab: structural
   types` is `structGroup` in `Tests/Groups/Struct.lean` (`grep -l 'name := "…"'
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
@@ -769,15 +774,19 @@ setup action keeps the elan cache for those
 
 * **The test suite** runs in parallel shards, one job per entry of
   `.github/test-shards.json` (each entry is a list of test-driver selectors, the same
-  ones `lake test --` takes; the shards run the Nix-built `tests` binary). A group that
-  no shard's selectors pick runs in
-  the shard its `Group.shard` names, else in the shard marked `"default": true`
-  (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting; a
-  `"parts"` shard's jobs count as the one shard they split, and the check runs again
-  end to end on the matrix the jobs are started from; `check-shards --self-test`
-  checks the check on a stand-in driver). See
-  "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
+  ones `lake test --` takes; the shards run the Nix-built `tests` binary). The plan is
+  **total**: every group `tests --list` reports is selected by a shard's selectors, or
+  named in `.github/test-shard-exclusions.json` with the reason it runs in no CI shard
+  and an owner. A group with neither is an error naming it (and its `Group.shard` hint,
+  if any), so a new group cannot silently join another shard's queue; there is no
+  default-shard fallback. The build job runs `scripts/ci.py check-shards` (the same
+  check as `scripts/check-shards.py`), which also fails on an exclusion whose group does
+  not exist or which a shard selects after all, and on a `.github/skip-allowlist.json`
+  entry whose group or case no case matches; `check-shards --self-test` checks each of
+  those failures on stand-in drivers (`scripts/check-shards.py --groups FILE` runs the
+  group-totality half against a captured `lake test -- --list`). The check also runs
+  end to end on the matrix the jobs are started from. See "Test layout" below for where
+  a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
@@ -892,15 +901,13 @@ setup action keeps the elan cache for those
   partitions its own file list by index (`libDiffPart`: the file at index `k` of the
   sorted list is in part `k % N + 1`), so the parts are deterministic, disjoint and
   their union is the case, unchanged in what each file is compared against.
-  `selfhost-libdiff` is the one: 181 files through both compilers in 3664 s (180 tracked
-  at this commit) is one case against the 1110 s shard limit, so six parts of ~611 s
-  each fit. `scripts/ci.py
-  libdiff-union` (in `CI result`) proves the union from the parts' `part.txt` and
-  `records.jsonl`: the parts are `1..N`, every part names the same `total`, every file
-  in `.github/libdiff-corpus.txt` is checked exactly once, the verdicts sum to the
-  whole-run summary, and no record is `bounded`. A parts shard is not a `split` shard:
-  it has no `.github/test-timings.json` entry, since the case (not the job set) is what
-  the baseline measures, so `make_baseline` skips it deliberately.
+  `.github/libdiff-corpus.txt` is the manifest of the files one whole sweep compares:
+  every `*.wiz` under `lib/` and `scry/` in `LC_ALL=C` order, with no exclusions, and
+  `scripts/check-libdiff-corpus.sh` (in the static gate, with `--self-test`) fails when
+  the manifest and the tree disagree, so no file can silently drop out of the sweep.
+  `selfhost-libdiff` here is a `split` shard (`"split": 2, "split-cases": true`) of four
+  contiguous file-range cases, so it keeps a `.github/test-timings.json` entry per case,
+  unlike a `"parts"` shard.
 * **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
   (after a perf fix, or when a group grows), fetch the last runs and rebalance:
 

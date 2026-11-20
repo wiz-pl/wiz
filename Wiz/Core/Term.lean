@@ -387,10 +387,14 @@ partial def stripMarks : Term R → Term R
   | .prf l t => if l.isZero then .prf l t else stripMarks t
   | t => Id.run <| t.mapChildrenM pure (fun _ c => pure (stripMarks c))
 
-/-- The head and arguments of an application spine. -/
+/-- The head and arguments of an application spine. The arguments are accumulated by
+consing and reversed once, so the cost is linear in the spine's length. -/
 def spine : Term R → Term R × List (Term R)
-  | .app f a => let (h, as) := spine f; (h, as ++ [a])
-  | t => (t, [])
+  | t =>
+    let rec go : Term R → List (Term R) → Term R × List (Term R)
+      | .app f a, acc => go f (a :: acc)
+      | h, acc => (h, acc)
+    go t []
 
 /-- Instantiate universe level parameters `ps` with `us`. -/
 partial def instLevels (ps : List Name) (us : List Level) (t : Term R) : Term R :=

@@ -295,8 +295,11 @@ The panel asks for the goals and the expected type at the caret. `wiz/interactiv
 and `wiz/interactiveTermGoal` are preferred because they carry tagged text; the plain
 methods are the fallback (§ Fallback). `wiz/subtermInfo` is optional: it fills the
 "Selected subterm" box when a tagged subterm is clicked, and a `MethodNotFound` answer
-is silently ignored. `wiz/interactiveInfo` exists in the protocol but the panel does not
-use it yet.
+is silently ignored. `wiz/interactiveInfo` is asked at the same position for its
+`widget` items (`WIZ_WIDGET:` payloads): `web/widgets.js` draws the `wiz.widget/1`
+bundle in a widget pane on both pages (the playground's `#widget-list`, the standalone
+page's `#widget-list` aside). The goals panel never renders a payload's markup. Other
+item kinds are not drawn.
 
 ### Shapes
 

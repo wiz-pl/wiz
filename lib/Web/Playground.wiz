@@ -658,6 +658,14 @@ def Page.goalsHead : Loom.VNode PageMsg :=
     , Loom.el "span" [Loom.class "hint"]
         [Loom.text "from ", Loom.el "code" List.nil [Loom.text "?lsp=ws://host:port"]] ]
 
+/-- The widget pane's heading. The cards are the host's (`web/widgets.js`, mounted by
+`web/playground.js`): the panel never inserts a payload's markup. -/
+def Page.widgetHead : Loom.VNode PageMsg :=
+  Loom.el "div" [Loom.class "pane-head"]
+    [ Loom.el "span" List.nil [Loom.text "Widgets"]
+    , Loom.el "span" [Loom.class "hint"]
+        [Loom.text "from ", Loom.el "code" List.nil [Loom.text "#plot"]] ]
+
 def Page.outputHead : Loom.VNode PageMsg :=
   Loom.el "div" [Loom.class "pane-head"]
     [ Loom.el "span" List.nil [Loom.text "Output"]
@@ -672,6 +680,9 @@ def Page.main (s : Page) : Loom.VNode PageMsg :=
       , Loom.el "section" [Loom.class "pane side"]
           [ Page.goalsHead
           , Goals.panel PageMsg.tag PageMsg.span PageMsg.reconnect PageMsg.goalsKey s.panel
+          , Page.widgetHead
+          , Loom.el "div" [Loom.id "widget-list", Loom.class "widget-list",
+              Loom.attr "aria-label" "Widgets"] []
           , Page.outputHead
           , Model.view s.output
           ]

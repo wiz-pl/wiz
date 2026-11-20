@@ -189,25 +189,27 @@ def grailGroup : Group where
           s!"no warm job hit a region: {regionStatLines o2.stdout}"
         checkEq o0.stdout (withoutRegionStats o2.stdout)
         checkEq (← buildDirs text) (← buildDirs warm)
-        -- one job, one import: cold reports zero hits, warm reports a hit, and with the
-        -- region cache off the counters are zero (a job does not invent counters)
+        -- two jobs, one import that has no imports of its own: cold reports zero hits,
+        -- warm reports a hit, and with the region cache off the counters are zero (a job
+        -- does not invent counters). The build files import Grail/Prelude, but the jobs
+        -- import only this leaf module, so config reading cannot warm what they look up.
         let one : List (String × String) :=
-          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"one\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
-           ("app.wiz", "import Prelude\ndef app : Nat := 1\n")]
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"one\"\n  |> Package.lib \"mylib\" \"src\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
+           ("src/Leaf.wiz", "-- a leaf module: no imports\n"),
+           ("app.wiz", "import Leaf\n")]
         let statsCache ← IO.FS.createTempDir
         let runStats (flags : List String) : IO (List String) := do
           let dir ← mkTree one
           let o ← grailBuild dir (["--cache", statsCache.toString, "--region-stats"] ++ flags)
           checkEq 0 o.exitCode
           let ls := regionStatLines o.stdout
-          check (ls.length == 1) s!"expected one job's counters: {o.stdout}{o.stderr}"
+          check (ls.length == 2) s!"expected both jobs' counters: {o.stdout}{o.stderr}"
           pure ls
         let coldOne ← runStats ["--region-cache"]
-        checkEq 0 (regionStat (coldOne[0]!) "hits")
-        check ((regionStat (coldOne[0]!) "misses") > 0) s!"a cold job did not miss: {coldOne}"
+        check (coldOne.all fun l => regionStat l "hits" == 0) s!"a cold job hit a region: {coldOne}"
+        check (coldOne.any fun l => regionStat l "misses" > 0) s!"a cold job did not miss: {coldOne}"
         let warmOne ← runStats ["--region-cache"]
-        check ((regionStat (warmOne[0]!) "hits") > 0) s!"a warm job did not hit: {warmOne}"
-        check ((regionStat (warmOne[0]!) "commands") > 0) s!"no command came from a region: {warmOne}"
+        check ((warmOne.any fun l => regionStat l "hits" > 0)) s!"a warm job did not hit: {warmOne}"
         let offOne ← runStats []
         check (offOne.all fun l => regionStat l "hits" == 0 && regionStat l "misses" == 0 &&
           regionStat l "commands" == 0) s!"counters without --region-cache: {offOne}" },

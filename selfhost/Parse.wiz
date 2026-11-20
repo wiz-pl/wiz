@@ -107,24 +107,41 @@ def bucketTokens : List String → Array (List String) → Array (List String)
   | .cons t ts, b => bucketTokens ts (addToken b t)
 def tokenBuckets (ts : List String) : Array (List String) := bucketTokens ts (emptyBuckets 129 Array.empty)
 
+-- the column of every offset (0-based, counted from the last newline): built in one
+-- pass over the input, so a column check is one array read instead of a walk back to the
+-- start of the line (finding 1). `columns input` has a value for the offset at the end
+-- of the input too.
+def columnsGo (input : Array Nat) : Nat → Nat → Nat → Array Nat → Array Nat
+  | .zero, _, _, acc => acc
+  | .succ fuel, i, col, acc =>
+    let acc := Array.push acc col;
+    let col := match Nat.beq (at input i) 10 with
+      | .true => 0
+      | .false => col + 1;
+    columnsGo input fuel (i + 1) col acc
+def columns (input : Array Nat) : Array Nat :=
+  columnsGo input (Array.size input + 1) 0 0 Array.empty
+
 -- the context: input, token table (by first character), categories, the position for
--- `colGt`, the precedence
+-- `colGt`, the precedence, and the column table of the input (`columns`)
 inductive Ctx where
-  | mk (input : Array Nat) (tokens : Array (List String)) (cats : List Cat) (saved : Option Nat) (prec : Nat)
+  | mk (input : Array Nat) (tokens : Array (List String)) (cats : List Cat) (saved : Option Nat) (prec : Nat) (cols : Array Nat)
 def Ctx.input : Ctx → Array Nat
-  | .mk i _ _ _ _ => i
+  | .mk i _ _ _ _ _ => i
 def Ctx.tokens : Ctx → Array (List String)
-  | .mk _ t _ _ _ => t
+  | .mk _ t _ _ _ _ => t
 def Ctx.cats : Ctx → List Cat
-  | .mk _ _ c _ _ => c
+  | .mk _ _ c _ _ _ => c
 def Ctx.saved : Ctx → Option Nat
-  | .mk _ _ _ s _ => s
+  | .mk _ _ _ s _ _ => s
 def Ctx.prec : Ctx → Nat
-  | .mk _ _ _ _ p => p
+  | .mk _ _ _ _ p _ => p
+def Ctx.cols : Ctx → Array Nat
+  | .mk _ _ _ _ _ l => l
 def Ctx.withSaved (c : Ctx) (s : Option Nat) : Ctx := match c with
-  | .mk i t cs _ p => .mk i t cs s p
+  | .mk i t cs _ p l => .mk i t cs s p l
 def Ctx.withPrec (c : Ctx) (p : Nat) : Ctx := match c with
-  | .mk i t cs s _ => .mk i t cs s p
+  | .mk i t cs s _ l => .mk i t cs s p l
 
 inductive Res where
   | ok (items : List Syntax) (s : St)
@@ -163,13 +180,8 @@ def tokSyntax : Tok → Syntax
   | .str v => mkNode "str" (one (.atom v))
   | .error m => .atom m
 
--- the column of an offset
-def colOf : Nat → Array Nat → Nat → Nat
-  | .zero, _, col => col
-  | .succ j', input, col => match Nat.beq (at input j') 10 with
-    | .true => col
-    | .false => colOf j' input (col + 1)
-def column (c : Ctx) (i : Nat) : Nat := colOf i (Ctx.input c) 0
+-- the column of an offset, from the table built once per source (`Ctx.cols`)
+def column (c : Ctx) (i : Nat) : Nat := Array.getD (Ctx.cols c) i 0
 
 def quoted (t : String) : String := "'" +++ t +++ "'"
 
@@ -466,7 +478,8 @@ def showRes : Res → String
 
 -- parse a whole input as category `cat`: the tree, or `error <offset>: expected …`
 def parse (cats : List Cat) (tokens : List String) (cat : String) (text : String) : String :=
-  let c := Ctx.mk (String.codes text) (tokenBuckets tokens) cats .none 0;
+  let input := String.codes text;
+  let c := Ctx.mk input (tokenBuckets tokens) cats .none 0 (columns input);
   showRes (atEnd c (categoryParser c cat 0 (St.mk 0 0 .nil StrMap.empty)))
 
 -- the syntax tree of a whole input, for later stages
@@ -474,7 +487,8 @@ inductive Parsed where
   | ok (stx : Syntax)
   | err (msg : String)
 def parseSyntax (cats : List Cat) (tokens : List String) (cat : String) (text : String) : Parsed :=
-  let c := Ctx.mk (String.codes text) (tokenBuckets tokens) cats .none 0;
+  let input := String.codes text;
+  let c := Ctx.mk input (tokenBuckets tokens) cats .none 0 (columns input);
   match atEnd c (categoryParser c cat 0 (St.mk 0 0 .nil StrMap.empty)) with
   | .ok items _ => .ok (firstItem items)
   | .err s => match s with
@@ -484,12 +498,14 @@ def parseSyntax (cats : List Cat) (tokens : List String) (cat : String) (text : 
 inductive PCmd where
   | ok (stx : Syntax) (stop : Nat)
   | err (msg : String)
-def parseCommandAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat) : PCmd :=
-  let c := Ctx.mk input (tokenBuckets tokens) cats .none 0;
+def parseCommandAtLines (cats : List Cat) (tokens : List String) (input : Array Nat) (cols : Array Nat) (pos : Nat) : PCmd :=
+  let c := Ctx.mk input (tokenBuckets tokens) cats .none 0 cols;
   match runDescr (.withPosition (.cat "command" 0)) c (St.mk pos 0 .nil StrMap.empty) with
   | .ok items s => .ok (firstItem items) (St.pos s)
   | .err s => match s with
     | .mk _ e x _ => .err ("error " +++ Nat.toString e +++ ": expected " +++ showExpected x)
+def parseCommandAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat) : PCmd :=
+  parseCommandAtLines cats tokens input (columns input) pos
 
 -- Add a trailing or leading parser to a category.
 def addTrailingTo (cat : String) (t : Trailing) : List Cat → List Cat
@@ -658,7 +674,7 @@ end
 -- command was parsed with — commands may change it, so this can't be replayed later);
 -- `none` when the tree does not line up with the input
 def spansAt (input : Array Nat) (tokens : List String) (pos : Nat) (s : Syntax) : Option SpT :=
-  match annot (Ctx.mk input (tokenBuckets tokens) .nil .none 0) pos s with
+  match annot (Ctx.mk input (tokenBuckets tokens) .nil .none 0 (columns input)) pos s with
   | .ok sp _ => .some sp
   | .bad => .none
 

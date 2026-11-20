@@ -110,6 +110,10 @@ function diagnosticsFor(text) {
 
 export async function startMockServer(options = {}) {
   const mode = options.mode || "full";
+  // A test can put widget items in `wiz/interactiveInfo` (a function gets the client,
+  // for a payload that changes between requests; an array is returned as is).
+  const infoItems = typeof options.infoItems === "function"
+    ? options.infoItems : () => (options.infoItems || []);
   const stats = {
     connections: 0, initialize: 0, initialized: 0,
     didOpen: 0, didChange: 0, didClose: 0, requests: 0, diagnostics: 0,
@@ -264,7 +268,7 @@ export async function startMockServer(options = {}) {
         });
       case "wiz/interactiveInfo":
         if (mode === "plain") return replyError(client, id, -32601, "MethodNotFound");
-        return reply(client, id, { items: [], session: client.session });
+        return reply(client, id, { items: infoItems(client), session: client.session });
       case "shutdown":
         return reply(client, id, null);
       case "exit":
