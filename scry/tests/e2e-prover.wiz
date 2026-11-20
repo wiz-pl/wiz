@@ -164,9 +164,10 @@ def main : IO Unit := EIO.toIO (do
           (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
         check "sarif-unsafe: one result"
           (Nat.beq (List.length (jList run0 ["results"])) 1);
-        check "sarif-unsafe: the result is an error with the no-flow rule"
-          (Bool.and (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["level"]) "error")
-            (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["ruleId"])
-              "scry/prover/no-flow")));
+        let isNoFlowError := Bool.and
+          (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["level"]) "error")
+          (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["ruleId"])
+            "scry/prover/no-flow");
+        check "sarif-unsafe: the result is an error with the no-flow rule" isNoFlowError);
 
     FS.removeAll dir)

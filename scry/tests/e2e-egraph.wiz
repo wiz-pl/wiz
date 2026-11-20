@@ -150,9 +150,9 @@ def main : IO Unit := EIO.toIO (do
           (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
         check "sarif: one note per log entry"
           (Nat.beq (List.length (jList run0 ["results"])) 4);
-        check "sarif: every result is a rewrite note"
-          (List.all (fun r => Bool.and
-            (String.eq (jStr r ["ruleId"]) "scry/egraph/rewrite")
-            (String.eq (jStr r ["level"]) "note")) (jList run0 ["results"])));
+        let allNotes := List.all (fun r => Bool.and
+          (String.eq (jStr r ["ruleId"]) "scry/egraph/rewrite")
+          (String.eq (jStr r ["level"]) "note")) (jList run0 ["results"]);
+        check "sarif: every result is a rewrite note" allNotes);
 
     FS.removeAll dir)

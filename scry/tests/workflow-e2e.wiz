@@ -89,12 +89,14 @@ def main : IO Unit := EIO.toIO (do
       | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
           (String.eq (candOf r).verdict "pursue")
       | .none => (.false : Bool));
-  check "refine: candidate.json is written"
-    (match findIn st2 "cwe78-getenv.c" with
-      | .some r => match Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json") with
-        | .some j => String.eq (Json.getStr j "stage") "refined"
-        | .none => (.false : Bool)
-      | .none => (.false : Bool));
+  candOk ← match findIn st2 "cwe78-getenv.c" with
+    | .some r => do
+      cj ← Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json");
+      match cj with
+      | .some j => EIO.pure (String.eq (Json.getStr j "stage") "refined")
+      | .none => EIO.pure (.false : Bool)
+    | .none => EIO.pure (.false : Bool);
+  check "refine: candidate.json is written" candOk;
 
   -- 3. verify before any repro: the static-only representation. A still-reported
   -- finding with no stored repro is `still-reported` / `not-run`, never a PoC verdict.

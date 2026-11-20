@@ -124,6 +124,15 @@ partial def staleRows (rows : List (String × String)) : EIO (List String) :=
       | 0 => EIO.pure (List.cons (r.1 ++ " (now parses)") more)
       | _ => EIO.pure more
 
+/-- Check every exemption still names a file with at least one ERROR/MISSING node. -/
+partial def checkExpected : List (String × String) → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons row rest => do
+    text ← FS.readFile row.1;
+    n ← parseCount row.1 text;
+    check ("expected failure: " ++ row.1) (Nat.lt 0 n);
+    checkExpected rest
+
 def main : IO Unit := EIO.toIO (do
   all ← walkDir "corpus";
   let sources := sortPaths (List.filter isSource all);
@@ -139,11 +148,12 @@ def main : IO Unit := EIO.toIO (do
     (Nat.beq (List.length acc.unexpected) 0);
   check ("exemptions: " ++ Nat.repr (List.length rows) ++ " row(s), 0 stale")
     (Nat.beq (List.length stale) 0);
-  for p in List.reverse acc.unexpected do
-    check ("unexpected parse errors: " ++ p) .false;
-  for p in List.reverse stale do
-    check ("stale exemption: " ++ p) .false;
-  for row in rows do
-    text ← FS.readFile row.1;
-    n ← parseCount row.1 text;
-    check ("expected failure: " ++ row.1) (Nat.lt 0 n))
+  match acc.unexpected with
+  | .nil => EIO.pure ()
+  | _ => check ("unexpected parse errors: " ++ String.intercalate " | "
+      (List.reverse acc.unexpected)) .false;
+  match stale with
+  | .nil => EIO.pure ()
+  | _ => check ("stale exemptions: " ++ String.intercalate " | "
+      (List.reverse stale)) .false;
+  checkExpected rows)
