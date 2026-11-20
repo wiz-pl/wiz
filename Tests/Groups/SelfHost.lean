@@ -3253,12 +3253,53 @@ def selfHostGroup : Group where
         unless bad.isEmpty do
           throw (IO.userError s!"the self-hosted frontend rejects:\n{"\n".intercalate bad}\n{out}")
         checkChecked surfaceNotExProgram out },
-    -- (A19) the coinductive surface is the one frontend feature with no case at all:
-    -- pin the missing half rather than assuming parity (`command.coinductive` is in
-    -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
-    { name := "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it", run := fun _ =>
-        selfhostVerdicts "" [
-          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n", true, false)] },
+    -- **A19/B4**: `coinductive` and copatterns, compared host (the Lean frontend) and
+    -- self-hosted (the kernel's `coit`/`cocon`). A copattern definition whose state (the
+    -- explicit binders) *includes a value of the coinductive type itself* is not covered
+    -- yet: `i.head` in the step's context (a copattern definition …) leaves the
+    -- projection's implicit type parameter unsolved.
+    { name := "A19: coinductive types and copatterns agree with the host (the self-hosted frontend)", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def zeros : Stream Nat\n  | .head => 0\n  | .tail => zeros\n" ++
+           "def register {A : Type} (init : A) (s : Stream A) : Stream A\n  | .head => init\n  | .tail => s\n")
+          [("(nats 0).tail.tail.head", 2),
+           ("(zeros.tail.tail.tail.head)", 0),
+           ("(register 9 (nats 0)).tail.head", 0),
+           ("(Stream.mk 7 (nats 8)).tail.head", 8)] },
+    { name := "A19: the coinduction primitives ν and out agree with the host", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def typed : ν (Stream.desc Nat) () := nats 3\n" ++
+           "def raw : ν (Stream.desc Nat) () := cocon (4, cocon (5, nats 6, (), ()), (), ())\n")
+          [("(out typed).1", 3),
+           ("(out raw).1", 4),
+           ("(out ((out raw).2.1)).1", 5)] },
+    { name := "A19: the coinduction primitives cocon and coit agree with the host", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def c5 : Stream Nat := cocon (5, nats 6, (), ())\n" ++
+           "def z : Stream Nat := coit (fun (_ : Unit) => Nat) (fun (i : Unit) (s : Nat) => (s, s + 1, (), ())) 0\n")
+          [("(out c5).1", 5),
+           ("(out z).1", 0),
+           ("z.tail.head", 1),
+           ("z.tail.tail.head", 2)] },
+    { name := "A19: copattern errors (missing observation, guardedness, cocon's type) agree with the host", run := fun _ =>
+        selfhostAgrees
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n")
+          [("def ones : Stream Nat\n  | .head => 1\n", false),
+           ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
+           ("def bad : Nat := cocon (0, ())\n", false),
+           ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
+    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) agree with the host", run := fun _ =>
+        selfhostAgrees ""
+          [("def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
+            "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
+            "inductive N2 where\n  | z\ncoinductive S2 where\n  h : N2\n" ++
+            "def nSized : Type := N2^∞\ndef sSized : Type := S2^∞\n", true)] },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
