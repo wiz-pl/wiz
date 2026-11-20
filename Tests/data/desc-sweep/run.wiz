@@ -1,0 +1,3 @@
+-- test: run
+import IO
+def main : IO Unit := IO.println "fixture: run"
