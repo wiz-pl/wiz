@@ -320,6 +320,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   parse of all 5 560 `.cs` files of a real solution takes the error count from 16 to 0 with no file
   gaining an error. The two reproducers now have spills, `parse/contextual` pins the
   tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
+* scry: **one e-graph engine**. `Scry.Egraph` and `Scry.EgraphNative` were two
+  implementations that shared 74 of the reference module's 80 declarations and could not
+  be imported into one program. `Scry.Egraph` is now the single engine: the reference
+  surface (`Scry.EGraph`, `costs : U64Array` with `EGraph.inf`, `applyAt`/`applyMatches`
+  without a rule index) on the native hash cons (`etable` is a `U64Map` from an e-node
+  hash to a bucket), plus the analyses, explanations, limits and `Option` cost view
+  (`costsOpt`/`costOpt`) that used to live only in the native module. `Scry.EgraphNative`
+  is a compatibility import of `Scry.Egraph`; `Scry.EqPlan` and the examples that named
+  it are unchanged, and every `examples/scry-egraph-*.wiz` digest is identical. `add` and
+  `rebuild` no longer scan a flat association list or append one node at a time (adding
+  1 600 nodes: 18 ms in the audit's reference measurement, 0 ms here; at 12 800 nodes
+  the old module took 501 ms to add and 4.5 s to rebuild, the unified one 3 ms and 3 ms;
+  at 25 600 nodes, 2.0 s/18.7 s against 8 ms/7 ms).
+  The difference was not only the hash cons: a record update (`{ g with … }`) leaves the
+  old record live, so `U64Array.push`/`U64Map.insert` copied the whole table; the hot
+  paths destructure and rebuild with `mk`. The trust ledger and the name-collision
+  baseline drop the duplicate rows, and the whole of `lib/` now loads at once
+  (`Tests.Elab.libApart` is empty).
+
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known
