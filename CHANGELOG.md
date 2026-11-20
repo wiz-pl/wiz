@@ -24,6 +24,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   Tests: `web/widgets_test.mjs` (fixtures, safety, fallback, DOM mount),
   `web/playground_lsp_test.mjs` (the payloads through the stubbed LSP transport), and
   the `=scry-analysis` fields.
+* hdl: **formal harness emission** (`lib/Hdl/Formal.wiz`). `Verilog.emitFormal` appends
+  an `` `ifdef FORMAL `` harness to `Verilog.emit`'s module: named monitors become
+  immediate `assert`/`assume`/`cover` statements clocked by the design, with `$past`,
+  `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
+  assumption. The non-formal text is byte-identical to `Verilog.emit`, and
+  `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
+  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
+  finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
   lines) now only points at the body and calls `web/framework/mount.js`'s one export,
   which loads the Loom page's module (`web/playground-ui.wiz`), mounts its SSR, delegates

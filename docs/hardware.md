@@ -13,6 +13,7 @@ controller. The libraries are described in [libraries.md](libraries.md) (section
 | memories | `lib/Hdl/Core.wiz` | `HwTy.mem aw dw`, `Hw.memRead`/`memWrite`; block RAM on iCE40 |
 | traces | `lib/Trace.wiz` | `Trace A := Nat → A`, `Mealy`, invariants, refinement |
 | temporal logic | `lib/Hdl/Temporal.wiz` (PR #146) | `□`, `◇`, `○`, SVA-style implications, fairness, over traces |
+| formal harness | `lib/Hdl/Formal.wiz` | `` `ifdef FORMAL `` `assert`/`assume`/`cover` monitors with `$past`/`$stable`/`anyconst`, plus a generated `.sby` |
 | bit reasoning | `lib/Hdl/Bits.wiz` (PR, needs 22l) | laws of one-bit logic by case split; the bridge to `sat_decide` |
 | solvers | `sat_decide` (stage 28b), `native_refl` (stage 27a) | certified SAT for Boolean goals; compiled evaluation for long closed runs |
 
