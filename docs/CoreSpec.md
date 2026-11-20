@@ -2041,7 +2041,12 @@ proved**, and the D1 experiment shows checking can loop (Status.md).
   instantiations (`Lvl.Good us`: every parameter is instantiated by a level that is never
   zero). The kernels avoid the issue by forming `a =_A b` only at a sort that is never
   `Prop` (§8.1: `isNeverZero`), which *is* preserved; the restriction is on the
-  declarative spec's `¬ IsZero`, not a kernel rule.
+  declarative spec's `¬ IsZero`, not a kernel rule. **As written this hypothesis is
+  uninhabited** for a finite `us` (the entry past the end is `0`, and `Lvl.not_good`
+  proves it), so the level-instantiation theorems are vacuous and O6 remains open; the
+  substitution lemmas (`Tprog_subst`, `DescEq_subst`) are not affected. A usable
+  statement bounds the parameters the judgment actually mentions instead of quantifying
+  over every index (`WizMeta/Spec/LevelSubstitution.lean`, module note).
 * **No recursion in the kernel:** a declaration is checked against the environment
   *without* itself, so a value cannot mention its own name.
 * **Axioms** (`value = none`) are accepted with any well-formed type, including `False`.

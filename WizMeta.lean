@@ -24,9 +24,11 @@ constructor payloads (`Spec/PayloadKernel`, `PayloadStuck`, `PayloadUniform`).
 * `Syntax`, `Level`: the spec's own terms and levels.
 * `Spec/`: the rules, one file per former; `Spec/Fragments.lean`: T0, T1, Tprog.
 * `Spec/{Weakening,Substitution,SubstitutionProg,LevelSubstitution}.lean`: the first
-  metatheory lemmas — renaming, substitution and level instantiation for T0, T1 and Tprog,
-  and `DescEq_subst` (plan O4–O7). `Spec/DescCommute.lean` is the bookkeeping that lets the
-  description formers be renamed/substituted/instantiated.
+  metatheory lemmas — renaming and substitution for T0, T1 and Tprog, and `DescEq_subst`
+  (plan O4, O5, O7). `Spec/DescCommute.lean` is the bookkeeping that lets the description
+  formers be renamed/substituted/instantiated. The level-instantiation induction (O6) is
+  there too, but its `Lvl.Good` hypothesis is uninhabited for finite lists, so its three
+  corollaries are vacuous as stated; see the module note in `LevelSubstitution.lean`.
 * `Reducts`, `Templates`: the terms the rules build, shared by rules and checker.
 * `Checker`: the reference checker. Total; unverified.
 * `Translate`: from `Wiz.Term`; fails outside the fragment.
