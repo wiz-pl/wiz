@@ -342,9 +342,10 @@ def cliGroup : Group where
         checkEq 0 c
         cliCheck err "cache miss: " "the dependency's edit"
         let names2 := (← cliFilesEnding (cacheDir / "c") ".wizc").map (·.fileName.getD "")
-        checkEq 4 names2.length
-        let shared := names1.filter (fun n => names2.contains n)
-        checkEq 1 shared.length
+        -- (the old entries stay: a content-addressed cache never deletes; the new A, B
+        -- and Main keys are new names, the unchanged Prelude entry is the same one)
+        let fresh := names2.filter (fun n => !names1.contains n)
+        checkEq 3 fresh.size
         -- and the edited graph is warm: every entry is read, no command runs
         let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
         checkEq 0 c
