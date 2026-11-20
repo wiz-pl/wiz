@@ -31,7 +31,7 @@ def map {A B : Type} (f : A → B) {0 n : Nat} : Vec A n → Vec B n
 def tail {A : Type} {n : Nat} : Vec A (.succ n) → Vec A n
   | .cons _ xs => xs
 
-def zip {A B : Type} {n : Nat} : Vec A n → Vec B n → Vec (A × B) n
+def zip {A B : Type} {0 n : Nat} : Vec A n → Vec B n → Vec (A × B) n
   | .nil, .nil => .nil
   | .cons a as, .cons b bs => .cons (a, b) (zip as bs)
 #reduce zip (Vec.cons Nat.zero Vec.nil) (Vec.cons (Nat.succ Nat.zero) Vec.nil)
