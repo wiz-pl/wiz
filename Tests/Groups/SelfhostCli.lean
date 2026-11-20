@@ -352,6 +352,20 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe files2 #["check", "main.wiz", "--cache", cache, "-v"]
         checkEq 0 c
         cliCheck err "cache hit: " "all modules warm" },
+    { name := "the cache: a warm check replays a module's info lines once (--types)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let d ← IO.FS.createTempDir
+        let cache := (d / "c").toString
+        let files := #[("M.wiz", "import Prelude\ndef one : Nat := 1\n"),
+                       ("main.wiz", "import Prelude\nimport M\ndef two : Nat := one\n")]
+        let args := #["check", "-I", ".", "main.wiz", "--cache", cache, "--types"]
+        let (c, cold, _) ← cliRun exe files args
+        checkEq 0 c
+        cliCheck cold "./M.wiz:2:1: info: one : Nat" "the module's cold info"
+        let (c, warm, err) ← cliRun exe files (args.push "-v")
+        checkEq 0 c
+        cliCheck err "cache hit: " "the warm cache"
+        checkEq cold warm },
     { name := "the cache: --cache-ro layers are read in order and never written", run := fun _ =>
         withSelfhostCli fun exe => do
         let d ← IO.FS.createTempDir

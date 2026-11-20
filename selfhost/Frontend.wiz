@@ -11479,6 +11479,16 @@ def ownErrs (mName text : String) : List String → List String
         | .mk ln col => .cons (mName +++ ":" +++ Nat.toString ln +++ ":" +++ Nat.toString col +++ ": " +++ msg)
             (ownErrs mName text rest)
 
+-- the lines among `ls` tagged to module `m` (the loader errors of its own imports; a
+-- dependency's kept info line is already in `flat` through the dependency)
+def onlyMod (m : String) : List String → List String
+  | .nil => .nil
+  | .cons l rest => match tlOf l with
+    | .some (.mk n _ _) => match strEq n m with
+      | .true => .cons l (onlyMod m rest)
+      | .false => onlyMod m rest
+    | .none => onlyMod m rest
+
 -- the loader's state: the output, globals and tables (`Run`), each module's state, the
 -- current import path, the modules loaded so far (in load order), each module's error
 -- block (D6), and every module's lines before nesting (`flat`, the per-module cache's
@@ -11553,9 +11563,11 @@ def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
             let body := modRunBody run2b name t;
             let loaderN := Nat.sub (List.length (Run.out run2)) entryLen;
             let bodyN := Nat.sub (List.length (Run.out body)) (List.length (Run.out run2b));
-            let loaderRaw := listTake loaderN (Run.out run2);
+            let loaderAll := listTake loaderN (Run.out run2);
+            let loaderRaw := onlyMod name loaderAll;
             let bodyRaw := listTake bodyN (Run.out body);
-            -- (D5) the module's own lines in source order, before nesting
+            -- (D5) the module's own lines in source order, before nesting (a dependency's
+            -- kept info line is already in `flat2`, not a line of this module)
             let flat3 := List.append flat2 (List.append (List.reverseOf loaderRaw .nil) (List.reverseOf bodyRaw .nil));
             -- a module that fails to load one of its imports reports that at the import
             -- too; it is the module's own error, not a nesting line
