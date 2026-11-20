@@ -71,7 +71,7 @@ def checkRevision : IO Bool := do
 def main : IO Unit := do
   match String.eq manifest.revision.kind "unset" with
   | .true => do
-    IO.ePrintln "no graph manifest: run the ingest command first"
+    IO.ePrintln "no graph manifest: run the ingest command first";
     Process.exit 2
   | .false => do
     fresh ← checkRevision;
@@ -92,10 +92,10 @@ def main : IO Unit := do
           Process.exit 3
         | .true => match Scry.sameView manifest.view live with
           | .false => do
-            IO.println "revision: the manifest's view differs from the store's live view"
+            IO.println "revision: the manifest's view differs from the store's live view";
             Process.exit 3
           | .true => do
             IO.println (Scry.renderClaim claim);
             IO.println (String.append "call_expression nodes: "
-              (Nat.repr (List.length view.calls)))
+              (Nat.repr (List.length view.calls)));
             IO.println (String.append "widget: " display)
