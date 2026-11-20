@@ -1242,7 +1242,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   for ((x, _, qq, _), _) in explicit do
     match whnf sty with
     | .sigma _ _ Aty B _ =>
-      cctx := cctx.bindQ x Aty ((Val.toPoly? (cctx.eval qq)).bind (·.isConst?))
+      cctx := cctx.bindQ x Aty ((Val.toPoly? (← evalIn cctx qq)).bind (·.isConst?))
       sty := Closure.inst g B (Val.var (cctx.lvl - 1))
     | _ => throwAt info "internal error: state tuple"
   -- the explicit binders that are the same coinductive type as the result: their
