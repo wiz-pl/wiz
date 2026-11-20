@@ -933,13 +933,7 @@ of every definition of each `lib/` module, and of the self-hosted checker and co
 def probeReuse : IO UInt32 := do
   let loader ← Tests.Elab.libLoader
   let mut failures := 0
-  let mut mods : Array String := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then mods := mods.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then mods := mods.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  for m in mods.qsort (· < ·) do
+  for m in ← Tests.Elab.libModuleNames do
     let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
     let mine := st.globals.order.toList.filter fun n =>
       st.globals.declModule[n]? == some m && ((st.globals.find? n).bind (·.value)).isSome

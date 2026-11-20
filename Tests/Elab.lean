@@ -2127,28 +2127,13 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  pure fun n => m.lookup n
+/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name (see
+`Tests.loadedModules`, which caches the load for the process). -/
+def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/
 def libModuleNames : IO (List String) := do
-  let mut ms : Array String := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  pure ((ms.qsort (· < ·)).toList)
+  pure ((← Tests.loadedModules "lib").map (·.1))
 
 /-- Modules of `lib/` that are alternative implementations and cannot be imported into
 one program, paired with the modules each must leave out. `Scry.EgraphNative` declares

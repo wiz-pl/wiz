@@ -13,17 +13,9 @@ open Wiz
 
 namespace Tests.ScryWorkflow
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  pure fun n => m.lookup n
+/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name: one loader for the
+suite (`Tests.libLoader`, which caches the load for the process). -/
+def libLoader : IO (Name → Option String) := Tests.libLoader
 
 def imports : String :=
   "import Scry.Workflow\nimport Json\nimport Text\n"

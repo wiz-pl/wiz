@@ -1,4 +1,5 @@
 import Wiz.Toolchain
+import Tests.Loader
 
 /-!
 # A tiny test harness
