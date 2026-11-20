@@ -92,6 +92,8 @@ const blocked = (name, body, forbidden) => {
   const violates = forbidden instanceof RegExp ? forbidden.test(html) : html.includes(forbidden);
   checkThat(name, html.includes("wiz-widget-blocked") && !violates, html);
   checkThat(name + " (kind named)", html.includes(">plot<"));
+  checkThat(name + " (named fallback card)", html.includes("data-widget-rendered=\"false\"") &&
+    html.includes("cannot render"), html);
 };
 blocked("safety: a script is refused", "<figure><script>alert(1)</script></figure>", /<script/i);
 blocked("safety: an event handler is refused", '<svg onload="alert(1)"></svg>', /onload\s*=/i);
@@ -101,6 +103,17 @@ blocked("safety: a style attribute is refused", '<div style="background:url(http
 blocked("safety: a script URL is refused", '<div class="javascript:alert(1)">x</div>', /javascript:/i);
 blocked("safety: a data URL is refused", '<svg><rect width="1" height="1" fill="data:image/png,x"/></svg>', /data:/i);
 blocked("safety: a non-SVG foreignObject is refused", "<svg><foreignObject><div>x</div></foreignObject></svg>", /<foreignObject/i);
+
+// The cases this boundary exists for: each is a named fallback card, never markup.
+blocked("safety: an svg event handler is refused", "<svg onload='alert(1)'></svg>", /onload\s*=/i);
+blocked("safety: an iframe with a case-variant src is refused",
+  "<iframe SRC='https://example.invalid/'></iframe>", /example\.invalid/i);
+blocked("safety: a mixed-case foreignObject is refused",
+  "<svg><foreignObject><div>x</div></foreignObject></svg>", /<foreignObject/i);
+blocked("safety: a javascript: URL is refused",
+  "<a HREF='javascript:alert(1)'>x</a>", /javascript:/i);
+blocked("safety: a non-SVG xmlns is refused",
+  "<svg xmlns='http://example.invalid/'></svg>", /example\.invalid/i);
 
 // The sanitizer itself: a benign fragment round-trips with entities intact.
 const safe = sanitizeWidgetMarkup('<figure class="wiz-plot"><figcaption>A &amp; B</figcaption></figure>');
@@ -129,6 +142,7 @@ checkThat("scry: no script", !/<script/i.test(scryHtml));
 const unknown = renderWidgets([widget(WIDGET_PREFIX + JSON.stringify({ schema: WIDGET_SCHEMA, kind: "slider" }), "slider")]);
 checkThat("fallback: the kind is named", unknown.includes("cannot render") && unknown.includes("slider"));
 checkThat("fallback: the card is marked blocked", unknown.includes("wiz-widget-blocked"));
+checkThat("fallback: the card says it was not rendered", unknown.includes("data-widget-rendered=\"false\""));
 checkThat("fallback: no body is invented", !unknown.includes("<svg"));
 
 // Two widgets are side by side in one grid (the CSS makes the columns).

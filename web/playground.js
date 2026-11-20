@@ -198,10 +198,14 @@ let goals = null;
 
 // The rules behind both overlays are the runtime's (`editorRules`); the pane is the
 // runtime's too (`lib/Web/Goals.wiz`), so its answers go through the page's effect and a
-// click's `reveal`/`subterm` request comes back through onRequest.
+// click's `reveal`/`subterm` request comes back through onRequest. Widget cards are not
+// the pane's: `web/widgets.js` mounts them into the page's `#widget-list` and the pane
+// never inserts a payload's markup.
 function wireGoals(editor, rules) {
+  const widgetPane = typeof document !== "undefined" ? document.getElementById("widget-list") : null;
   goals = startInfoview({
     editor,
+    widgetPane,
     config: selfhost,
     rules,
     update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),

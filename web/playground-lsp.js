@@ -52,8 +52,8 @@ function offsetAt(text, line, character) {
 // `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
 // a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
 // `render` callback (the Node tests) gets the same events there. `widgetPane` is an
-// element for the widget host: when given, the cards are mounted there and the pane's
-// `widgetsInPane` tells the runtime to leave its own `Widgets` section out.
+// element for the widget host: the cards are mounted there by `mountWidgets`, never
+// rendered into the goals panel.
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
@@ -90,9 +90,6 @@ export function startInfoview({
     items: [],
     position: null,
     canReconnect: false,
-    // The standalone page's widget pane is a grid child of its own: the panel then
-    // leaves the widget cards out, so there is one host, not two.
-    widgetsInPane: !!widgetPane,
     follow,
   };
 

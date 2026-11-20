@@ -55,6 +55,28 @@ def draftPrelude : String :=
   "def listsState : Draft.State := Draft.State.mk (Examples.codeOf \"lists\") \"lists\"\n" ++
   "def ready : Page := Page.effect Page.initial \"enable\" \"1\" \"\"\n"
 
+/-- A goals pane with one widget item, for the host/runtime boundary case. -/
+def goalsPrelude : String :=
+  "import Json\nimport Web.Goals\nimport Web.Loom\n" ++
+  "inductive M where\n  | tag (n : Nat)\n  | span (s : String)\n  | key\n  | reconnect\n" ++
+  "def item (body : String) : Json :=\n" ++
+  "  let bundle := Json.mkObj\n" ++
+  "    [Json.field \"schema\" (Json.mkStr \"wiz.widget/1\"),\n" ++
+  "     Json.field \"kind\" (Json.mkStr \"plot\"),\n" ++
+  "     Json.field \"html\" (Json.mkStr body)];\n" ++
+  "  Json.mkObj [Json.field \"kind\" (Json.mkStr \"widget\"),\n" ++
+  "    Json.field \"title\" (Json.mkStr \"p\"),\n" ++
+  "    Json.field \"text\" (Json.mkStr (String.append \"WIZ_WIDGET:\" (Json.render bundle)))]\n" ++
+  "def paneView (body : String) : String :=\n" ++
+  "  Json.render (Json.mkObj\n" ++
+  "    [Json.field \"state\" (Json.mkStr \"open\"),\n" ++
+  "     Json.field \"goalsKind\" (Json.mkStr \"interactive\"),\n" ++
+  "     Json.field \"termKind\" (Json.mkStr \"interactive\"),\n" ++
+  "     Json.field \"items\" (Json.mkArr [item body])])\n" ++
+  "def paneHtml (body : String) : String :=\n" ++
+  "  Loom.toHtml (Goals.panel M.tag M.span M.reconnect M.key\n" ++
+  "    (Goals.effect Goals.initial \"view\" (paneView body) \"\"))\n"
+
 def loomGroup : Group where
   name := "loom"
   exercise := "lib/Web/Loom.wiz (web UI framework)"
@@ -93,6 +115,14 @@ def loomGroup : Group where
           [r#""&lt;b&gt; &amp; &#39;x&#39;""#,
            r#""<b>ok</b>""#,
            r#""<p title=\"a&quot;b\">x</p>""#] },
+    { name := "Goals: widget payloads are the host's, never raw markup", run := fun _ =>
+        okLoom (goalsPrelude ++
+          "#eval String.contains (paneHtml \"<svg onload='alert(1)'></svg>\") \"onload\"\n" ++
+          "#eval String.contains (paneHtml \"<iframe SRC='https://evil.invalid/'></iframe>\") \"iframe\"\n" ++
+          "#eval String.contains (paneHtml \"<svg><foreignObject><div>x</div></foreignObject></svg>\") \"foreignObject\"\n" ++
+          "#eval String.contains (paneHtml \"<a HREF='javascript:alert(1)'>x</a>\") \"javascript:\"\n" ++
+          "#eval String.contains (paneHtml \"<svg xmlns='http://example.invalid/'></svg>\") \"example.invalid\"")
+          [".false", ".false", ".false", ".false", ".false"] },
     { name := "events: two events on one element are two attributes", run := fun _ =>
         okLoom ("import Web.Loom\ninductive Msg where\n  | a\n  | b\n" ++
           "#eval Loom.toHtml (Loom.on \"click\" Msg.a (Loom.on \"keydown\" Msg.b (Loom.el \"button\" List.nil [Loom.text \"x\"])) : Loom.VNode Msg)")
