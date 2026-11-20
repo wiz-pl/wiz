@@ -95,9 +95,13 @@ function start() {
     const position = positionOf(el);
     const token = ++generation;
     pinned = pin || pinned;
-    effect("pinned", pinned ? "1" : "0");
-    effect("position", `line ${position.line + 1}, col ${position.character + 1}`);
     mark(el);
+    // One hover is seven fields of one state: send them as one `batch`, so the runtime
+    // renders the panel once instead of once per field (and patches the DOM once).
+    const pending = [
+      { kind: "pinned", a: pinned ? "1" : "0", b: "" },
+      { kind: "position", a: `line ${position.line + 1}, col ${position.character + 1}`, b: "" },
+    ];
     const status = [];
     let hover = null;
     try {
@@ -108,12 +112,14 @@ function start() {
     const goals = await answer(client, uri, position, "interactiveGoals", "plainGoal");
     const term = await answer(client, uri, position, "interactiveTermGoal", "plainTermGoal");
     if (token !== generation) return;
-    effect("hover", hover ? JSON.stringify(hover) : "");
-    effect("goals", goals ? JSON.stringify(goals.value) : "", goals ? goals.kind : "");
-    effect("term", term ? JSON.stringify(term.value) : "", term ? term.kind : "");
+    pending.push({ kind: "hover", a: hover ? JSON.stringify(hover) : "", b: "" });
+    pending.push({ kind: "goals", a: goals ? JSON.stringify(goals.value) : "", b: goals ? goals.kind : "" });
+    pending.push({ kind: "term", a: term ? JSON.stringify(term.value) : "", b: term ? term.kind : "" });
     const stored = client.diagnostics && client.diagnostics.get(uri);
-    effect("diagnostics", JSON.stringify((stored && stored.diagnostics) || []));
-    effect("message", status.concat(goals ? goals.errors : [], term ? term.errors : []).join("; "));
+    pending.push({ kind: "diagnostics", a: JSON.stringify((stored && stored.diagnostics) || []), b: "" });
+    pending.push({ kind: "message",
+      a: status.concat(goals ? goals.errors : [], term ? term.errors : []).join("; "), b: "" });
+    effect("batch", JSON.stringify(pending));
   }
 
   function watched(node) {
