@@ -1555,27 +1555,66 @@ where
         (.node info k args', msgs)
       | stx => (stx, msgs)
 
+/-- (13t/13v) `__root__` (Lean's `_root_`): the leading segment that resets the
+namespace prefix to the empty one. `__root__` on its own is the root namespace
+(`namespace __root__`); `__root__.Shared` is the root-level namespace `Shared`. -/
+def rootEscape : Name := "__root__"
+
+/-- (13v) Where a written namespace name opens, relative to `p`: `__root__` and
+`__root__.X` are absolute, anything else is `p`-relative. -/
+def namespaceTarget (p : Name) (n : Name) : Name :=
+  if n == rootEscape then ""
+  else if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString
+  else if p.isEmpty then n else p ++ "." ++ n
+
+/-- (13v) A declaration name written with the `__root__.` escape: the true-global
+name it declares (`__root__.f` is `f`). Other names are unchanged. -/
+def stripRootEscape (n : Name) : Name :=
+  if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString else n
+
+/-- (13v) The declaration name a command writes in its name position (the first one for
+`mutual`, whose members are checked when each is elaborated). -/
+partial def cmdDeclName? (cmd : Syntax) : Option Name :=
+  match cmd.kind with
+  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
+  | "command.foreignType" | "command.inductive" | "command.structure"
+  | "command.class" | "command.coinductive" => (cmd.getArg 1).getId?
+  | "command.extern" | "command.cStruct" => (cmd.getArg 3).getId?
+  | "command.instance" =>
+    let stx := cmd.getArg 2
+    match stx.getId? with
+    | some n => some n
+    | none => (stx.args[0]?).bind fun x => x.getId?
+  | "command.private" | "command.sealed" | "command.local" => cmdDeclName? (cmd.getArg 1)
+  | "command.partial" => cmdDeclName? (cmd.getArg 2)
+  | _ => none
+
 /-- (13t) Prefix the name a declaration command declares with the current namespace, so
 that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
 rewritten once, where the command is elaborated (`Frontend.step`, `elabExpansion`); the
 recursive `elabCommand` calls of `private`, `partial`, `mutual`, … then see the full name,
 and references to `bar` in the body resolve through `Globals.namespacePrefix`
-(`Globals.resolveName`). Commands that declare no name (`open`, `end`, `#check`, …) are
-unchanged; a command that declares several names has one in the position handled here
-(`mutual` recurses into its members). -/
+(`Globals.resolveName`). A written `__root__.` escape resets the prefix (13v). Commands
+that declare no name (`open`, `end`, `#check`, …) are unchanged; a command that declares
+several names has one in the position handled here (`mutual` recurses into its members). -/
 partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
-  if p.isEmpty then cmd else
+  let prefixed (n : Name) : Name :=
+    if n == rootEscape then n
+    else if n.startsWith (rootEscape ++ ".") then
+      (n.drop (rootEscape.length + 1)).toString
+    else if (n.splitOn rootEscape).length > 1 then n
+    else if p.isEmpty then n else p ++ "." ++ n
   let namedAt (i : Nat) : Syntax :=
     match (cmd.getArg i).getId? with
-    | some n => Syntax.ident (cmd.getArg i).info (p ++ "." ++ n)
+    | some n => Syntax.ident (cmd.getArg i).info (prefixed n)
     | none => cmd.getArg i
   -- an optional name: the `null` node `optional ident` makes, bare ident, or nothing
   let optIdent (stx : Syntax) : Syntax :=
     match stx.getId? with
-    | some n => Syntax.ident stx.info (p ++ "." ++ n)
+    | some n => Syntax.ident stx.info (prefixed n)
     | none => match stx.args[0]? with
       | some x => match x.getId? with
-        | some n => stx.setArg 0 (Syntax.ident x.info (p ++ "." ++ n))
+        | some n => stx.setArg 0 (Syntax.ident x.info (prefixed n))
         | none => stx
       | none => stx
   match cmd.kind with
@@ -1584,12 +1623,12 @@ partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
   | "command.inductive" | "command.structure" | "command.class" | "command.coinductive" =>
     -- the type's own name, written unqualified in its fields (`| mk : T → T`), is the
     -- prefixed one: the elaborator binds `N.T`, not `T`, while checking them
-    let short? := (cmd.getArg 1).getId?
+    let short? := (cmd.getArg 1).getId? |>.map stripRootEscape
     let cmd := cmd.setArg 1 (namedAt 1)
     match short? with
     | some sh => cmd.renameIdents fun n =>
-        if n == sh then some (p ++ "." ++ sh)
-        else if n.startsWith (sh ++ ".") then some (p ++ "." ++ n)
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
         else none
     | none => cmd
   | "command.extern" | "command.cStruct" => cmd.setArg 3 (namedAt 3)
@@ -1605,11 +1644,11 @@ partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
     let typeShorts := body.args.filterMap fun d =>
       let d := if d.isOfKind "command.private" then d.getArg 1 else d
       if ["command.inductive", "command.structure", "command.class", "command.coinductive"].contains d.kind then
-        (d.getArg 1).getId? else none
+        (d.getArg 1).getId?.map stripRootEscape else none
     let rewrite (c : Syntax) : Syntax := c.renameIdents fun n =>
       typeShorts.findSome? fun sh =>
-        if n == sh then some (p ++ "." ++ sh)
-        else if n.startsWith (sh ++ ".") then some (p ++ "." ++ n)
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
         else none
     cmd.setArg 1 (.node body.info body.kind (members.map rewrite))
   | _ => cmd
@@ -1625,11 +1664,20 @@ line of its `namespace` (the error belongs there, not at the end of the file). -
 def CommandState.checkUnclosedNamespaces (s : CommandState R) : CommandState R :=
   if s.nsStack.isEmpty then s else
   { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info) =>
+      let shown := if n.isEmpty then rootEscape else n
+      let short := if n.isEmpty then rootEscape else (n.splitOn ".").getLast!
       { info, severity := .error, code := ErrorCode.unclosedNamespace
-        text := s!"namespace {n} is not closed: add `end` (or `end {(n.splitOn ".").getLast!}`)" } }
+        text := s!"namespace {shown} is not closed: add `end` (or `end {short}`)" } }
 
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
+  -- (13v) `__root__` is a leading segment only: a declaration named exactly `__root__`,
+  -- or one with `__root__` anywhere else in the name, is an error
+  if let some n := cmdDeclName? cmd then
+    if n == rootEscape || ((n.splitOn ".").drop 1).contains rootEscape then
+      let text := s!"`__root__` is only meaningful as the first segment of a name ('{n}')"
+      modify fun s => { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.rootName, text } }
+      return
   -- (13b) privacy is per module: the globals know which one is being elaborated
   modify fun s => if s.globals.module == s.module then s else { s with globals := { s.globals with module := s.module } }
   let s ← get
@@ -1817,9 +1865,11 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.namespace" =>
     -- (13t) `namespace Foo`: declarations from here to the matching `end` are `Foo.x`
     -- (nested: `A.B.x`). A namespace is only a prefix, not a privacy boundary.
+    -- (13v) `namespace __root__` opens the root (an empty prefix) and
+    -- `namespace __root__.X` opens the root-level `X`, for a file that must stay global.
     let n := ((cmd.getArg 1).getId?).getD "_"
     let p := s.globals.namespacePrefix
-    let full := if p.isEmpty then n else p ++ "." ++ n
+    let full := namespaceTarget p n
     modify fun s => { s with nsStack := (full, cmd.info) :: s.nsStack,
                              globals := { s.globals with namespacePrefix := full } }
   | "command.end" =>
@@ -1829,9 +1879,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     match s.nsStack with
     | [] => reportC cmd.info "`end` without an open `namespace`" ""
     | (full, _) :: rest =>
-      let short := (full.splitOn ".").getLast!
+      let short := if full.isEmpty then rootEscape else (full.splitOn ".").getLast!
+      let closes (g : Name) : Bool := g == short || g == full || (full.isEmpty && g == rootEscape)
       if let some g := given? then
-        unless g == short || g == full do
+        unless closes g do
           report .error cmd.info s!"`end {g}` does not close the namespace `{full}` (write `end` or `end {short}`)"
       let outerNs := match rest with
         | (p, _) :: _ => p
@@ -1841,7 +1892,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.open" =>
     -- (13t) `open M`: M's names are visible unqualified from here on (file-scoped).
     -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
-    let n := ((cmd.getArg 1).getId?).getD "_"
+    let n0 := ((cmd.getArg 1).getId?).getD "_"
+    -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op (the
+    -- root's names are always candidates)
+    let n := stripRootEscape n0
     let asAlias? := (cmd.getArg 2).args.filterMap Syntax.getId? |>.toList.head?
     -- (13t) the namespace must have a declaration visible here: a public one (named
     -- `N.x`), or this module's own private one (`_private.m._0.N.x`, which only this
@@ -1849,7 +1903,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let privPrefix := if s.module.isEmpty then "" else "_private." ++ s.module ++ "._0."
     let declares := s.globals.order.any fun d =>
       d.startsWith (n ++ ".") || (privPrefix != "" && d.startsWith (privPrefix ++ n ++ "."))
-    if !declares then
+    if n.isEmpty then pure ()
+    else if !declares then
       report .error (cmd.getArg 1).info s!"unknown namespace '{n}': there is no declaration `{n}.…`"
     else match asAlias? with
     | some a =>

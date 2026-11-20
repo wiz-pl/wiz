@@ -104,6 +104,29 @@ def strayEnd : String := "def x : Unit := ()\nend\n"
 
 def wrongEnd : String := "namespace A\ndef x : Unit := ()\nend B\n"
 
+/-- (13v) `namespace __root__` opens the root for a block: the declarations in it keep
+their written (global) names, and `end __root__` closes it. -/
+def rootBlock : String :=
+  "namespace __root__\ndef r : Unit := ()\ndef A.x : Unit := ()\nend __root__\n" ++
+  "#check r\n#check A.x\n"
+
+/-- (13v) `namespace __root__.P` opens the root-level `P`, and a nested namespace inside a
+root block is root-level too. -/
+def rootDotted : String :=
+  "namespace __root__.Shared\ndef g : Unit := ()\nend Shared\n" ++
+  "open __root__.Shared\ndef use : Unit := g\n" ++
+  "namespace __root__\nnamespace Inner\ndef h : Unit := ()\nend Inner\nend\n" ++
+  "#check Shared.g\n#check Inner.h\n#check use\n"
+
+/-- (13v) `def __root__.x` declares the true global `x`, and `__root__.x` names it. -/
+def rootDecl : String :=
+  "namespace N\ndef __root__.x : Unit := ()\nend N\n#check x\n#check __root__.x\n"
+
+/-- (13v) `__root__` is a leading segment only. -/
+def rootMisplaced : String := "namespace N\ndef A.__root__.x : Unit := ()\nend N\n"
+
+def rootBare : String := "def __root__ : Unit := ()\n"
+
 def mutualNs : String :=
   "namespace N\nmutual\ninductive A where\n  | mk (b : B)\ninductive B where\n  | mk (a : A)\nend\n" ++
   "def a (b : B) : A := A.mk b\nend N\n#check N.A\n#check N.B\n"
@@ -200,7 +223,17 @@ def namespaceGroup : Group where
     { name := "`end B` that does not close `A` is an error", run := fun _ =>
         nsFails [] wrongEnd "`end B` does not close the namespace `A`" },
     { name := "mutual inductive types under a namespace", run := fun _ =>
-        nsOk [] mutualNs ["N.A : Type", "N.B : Type"] }
+        nsOk [] mutualNs ["N.A : Type", "N.B : Type"] },
+    { name := "(13v) `namespace __root__` keeps the block's declarations global; `end __root__` closes it", run := fun _ =>
+        nsOk [] rootBlock ["r : Unit", "A.x : Unit"] },
+    { name := "(13v) `namespace __root__.P` is the root-level P; a namespace nested in a root block is root-level", run := fun _ =>
+        nsOk [] rootDotted ["Shared.g : Unit", "Inner.h : Unit", "use : Unit"] },
+    { name := "(13v) `def __root__.x` declares the true global x, reachable as x and as __root__.x", run := fun _ =>
+        nsOk [] rootDecl ["x : Unit", "x : Unit"] },
+    { name := "(13v) `__root__` not as the first segment of a name is an error", run := fun _ =>
+        nsFailsCode [] rootMisplaced "root-name" "only meaningful as the first segment" },
+    { name := "(13v) a declaration named exactly `__root__` is an error", run := fun _ =>
+        nsFailsCode [] rootBare "root-name" "only meaningful as the first segment" }
   ]
 
 builtin_initialize registerGroup namespaceGroup

@@ -9,6 +9,7 @@ table lists exactly those. Messages not listed here have no code yet.
 
 | code | the error | example | quick fixes |
 |---|---|---|---|
+| `root-name` | `__root__` not as the first segment of a name, or a declaration named exactly `__root__` (it is the root escape) | `def A.__root__.x`, `def __root__` | write `__root__.x` for a global, or drop the segment |
 | `unknown-identifier` | a name that is neither a local nor a global in scope | `doubel 2` | did you mean (locals and globals, edit distance ≤ 2); add the missing `import` of a module of the package or the library that declares it |
 | `ambiguous-name` | an unqualified name that two `open`s, or an `open` and a declaration, both provide | `open A` and `open B` with `A.x` and `B.x`, then `x` | qualify it with a namespace |
 | `unclosed-namespace` | a `namespace` with no `end` (the error is at the `namespace`) | `namespace A` … end of file | add `end` |

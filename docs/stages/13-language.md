@@ -994,6 +994,36 @@ end Foo
   ambiguity error. The parser table was regenerated with the grammar; the self-hosted
   frontend compiles the namespace cases in the `selfhost` group.
 
+### 13t.1 `__root__`: the escape to the global scope
+
+`__root__` is Lean's `_root_`: a **leading name segment**, not a variable and not a
+namespace you can declare. It resets the prefix to the empty one, so a file that must keep
+global names (the Prelude, the self-hosted tree) needs one line at the top and one `end`
+at the bottom instead of a marker on every declaration:
+
+```wiz
+namespace __root__
+def f : Nat := 0                -- f, not Scry.CstStore.f
+def A.x : Nat := 0              -- A.x, root-level
+end __root__
+
+def __root__.y : Nat := 0       -- y, even inside a namespace
+namespace __root__.Shared       -- the root-level Shared
+def g : Nat := __root__.y       -- names the global y
+end Shared
+```
+
+`namespace __root__` (nothing after the dot) opens the root for a block; `end` or
+`end __root__` closes it. `__root__.` is only meaningful as the first segment: a
+declaration named exactly `__root__`, or one with `__root__` in the middle
+(`A.__root__.x`), is the error `root-name`, and `__root__` alone is not a term. `open
+__root__.X` opens the root-level `X` (`open __root__` is a no-op: the root is always
+searched). The self-hosted frontend mirrors the leading-segment rule for `namespace`,
+`end`, `open` and unqualified reads.
+
+Tests: `namespace` (a root block; a dotted root namespace; `def __root__.x`; the two
+root-name errors), and `selfhost`'s `(13v)` case.
+
 Tests: `namespace` (nested namespaces; qualified use with no `open`; `open` then
 unqualified use; the exact ambiguity error; `open … as` for qualification; `open … as`
 not opening unqualified; an alias shadowing a real prefix; a local binder shadowing an

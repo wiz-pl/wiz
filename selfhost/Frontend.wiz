@@ -888,6 +888,9 @@ def dropNChars : Nat → List Char → List Char
   | .zero, cs => cs
   | .succ _, .nil => .nil
   | .succ k, .cons _ cs => dropNChars k cs
+-- (13v) a `String` with its first nine characters dropped (the `__root__.` escape)
+def drop9S (n : String) : String := match n with
+  | .mk cs => .mk (dropNChars 9 cs)
 def hasDotC : List Char → Bool
   | .nil => .false
   | .cons c cs => Bool.or (Nat.beq (Char.code c) 46) (hasDotC cs)
@@ -961,7 +964,7 @@ def nameOfIdx (gs : Globals) : List Nat → List String
   | .cons i is => .cons (privBase (globalNameOf gs i)) (nameOfIdx gs is)
 -- the scope-free name: a qualified one as written (after the longest alias), an
 -- unqualified one through the namespace/open candidates
-def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes := match x with
+def resolvePlainRel (sc : Scope) (gs : Globals) (x : String) : NameRes := match x with
   | .mk cs => match hasDotC cs with
     | .true =>
       let y := expandAliases gs x;
@@ -985,6 +988,15 @@ def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes := match x w
         | _ => .missing
       | .cons i .nil => .ok i
       | found => .ambiguous (sortStr (nameOfIdx gs found))
+-- (13v) `__root__.x` is exactly the global `x`: no relative or alias fallback
+def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes :=
+  match startsWithS "__root__." x with
+  | .true => let y := drop9S x;
+    match lookupExact sc y with
+    | .ok i => .ok i
+    | .privTo m => .privTo m y
+    | .missing => .missing
+  | .false => resolvePlainRel sc gs x
 def resolveNameV (sc : Scope) (gs : Globals) (n : String) : NameRes :=
   match indexOf (Scope.localNames sc) n 0 with
   | .some i => .ok i
@@ -10455,6 +10467,21 @@ def nsErrStep (gs : Globals) (m : String) : Step := .mk ("error: " +++ m) gs
 -- (13t) `namespace Foo`, `end`/`end Foo`, `open M`/`open M as A`: the file's namespace
 -- state. A stray or mismatching `end` is an error at the `end`; an `open` names a
 -- namespace that already has declarations (elaboration is single-pass).
+-- (13v) `__root__` (Lean's `_root_`): `namespace __root__` opens the root and
+-- `namespace __root__.X` the root-level `X`; both are absolute, not `p`-relative.
+def nsTarget (p n : String) : String :=
+  match strEq n "__root__" with
+  | .true => ""
+  | .false => match startsWithS "__root__." n with
+    | .true => drop9S n
+    | .false => match p with
+      | .mk cs => match cs with
+        | .nil => n
+        | _ => p +++ "." +++ n
+-- (13v) a declaration written `__root__.x` is the true-global `x`
+def stripRootS (n : String) : String := match startsWithS "__root__." n with
+  | .true => drop9S n
+  | .false => n
 def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
   let k := kindOf stx;
   match strEq k "command.namespace" with
@@ -10463,20 +10490,20 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
       | .some n => n
       | .none => "_";
     let p := Globals.nsPrefix gs;
-    let full := match p with
-      | .mk cs => match cs with
-        | .nil => n
-        | _ => p +++ "." +++ n;
+    let full := nsTarget p n;
     .some (.mk "" (Globals.pushNs gs full start))
   | .false => match strEq k "command.end" with
     | .true => match Globals.nsStack gs with
       | .nil => .some (nsErrStep gs "`end` without an open `namespace`")
       | .cons (.mk full off) rest =>
-        let short := nsShort full;
+        let short := match strEq full "" with
+          | .true => "__root__"
+          | .false => nsShort full;
         let given : Option String := firstIdIn (kids (kid stx 1));
         let errOpt : Option String := match given with
           | .none => .none
-          | .some g => match Bool.or (strEq g short) (strEq g full) with
+          | .some g => match Bool.or (Bool.or (strEq g short) (strEq g full))
+              (Bool.and (strEq full "") (strEq g "__root__")) with
             | .true => .none
             | .false => .some ("`end " +++ g +++ "` does not close the namespace `" +++ full
                 +++ "` (write `end` or `end " +++ short +++ "`)");
@@ -10491,18 +10518,22 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
           | .none => .mk "" gs')
     | .false => match strEq k "command.open" with
       | .true =>
-        let n := match getIdOpt (kid stx 1) with
+        let n0 := match getIdOpt (kid stx 1) with
           | .some n => n
           | .none => "_";
+        -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op
+        let n := stripRootS n0;
         let aliasOpt : Option String := firstIdIn (kids (kid stx 2));
-        match Globals.hasDeclUnder gs n with
-        | .false => .some (nsErrStep gs (("unknown namespace '" +++ n)
-            +++ "': there is no declaration `" +++ n +++ ".…`"))
-        | .true => match aliasOpt with
-          | .some a => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs) (Globals.opens gs)
-              (.cons (.mk a n) (Globals.aliases gs)) (Globals.nsStack gs)))
-          | .none => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs)
-              (List.append (Globals.opens gs) (.cons n .nil)) (Globals.aliases gs) (Globals.nsStack gs)))
+        match strEq n "" with
+          | .true => .some (.mk "" gs)
+          | .false => match Globals.hasDeclUnder gs n with
+            | .false => .some (nsErrStep gs (("unknown namespace '" +++ n)
+                +++ "': there is no declaration `" +++ n +++ ".…`"))
+            | .true => match aliasOpt with
+              | .some a => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs) (Globals.opens gs)
+                  (.cons (.mk a n) (Globals.aliases gs)) (Globals.nsStack gs)))
+              | .none => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs)
+                  (List.append (Globals.opens gs) (.cons n .nil)) (Globals.aliases gs) (Globals.nsStack gs)))
       | .false => .none
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
@@ -10511,10 +10542,17 @@ def atLine (start : Nat) (l : Option String) : Option String := match l with
 -- line of its `namespace` (innermost first; the reverse of the output puts them in order)
 def nsUnclosedLines : List NsFrame → List String
   | .nil => .nil
-  | .cons (.mk full off) rest => .cons (match atLine off (.some (("error: namespace " +++ full)
-      +++ " is not closed: add `end` (or `end " +++ nsShort full +++ "`)")) with
-    | .some l => l
-    | .none => "") (nsUnclosedLines rest)
+  | .cons (.mk full off) rest =>
+    let shown := match strEq full "" with
+      | .true => "__root__"
+      | .false => full;
+    let short := match strEq full "" with
+      | .true => "__root__"
+      | .false => nsShort full;
+    .cons (match atLine off (.some (("error: namespace " +++ shown)
+        +++ " is not closed: add `end` (or `end " +++ short +++ "`)")) with
+      | .some l => l
+      | .none => "") (nsUnclosedLines rest)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
     (Bool.or (strEq k "command.reduce") (Bool.or (strEq k "command.eval")
