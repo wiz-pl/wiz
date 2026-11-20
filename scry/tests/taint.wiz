@@ -470,6 +470,22 @@ def main : IO Unit := EIO.toIO (do
   check "null-safe-malloc: the !p guard kills the warning"
     (Bool.not (hasMemRule repN2 "scry/memory/null-dereference"));
 
+  -- the same guard written as an explicit null test: zero null warnings and no
+  -- pointer-vs-integer lowering boundary
+  oN2z ← opts ["tests/fixtures/null-safe-malloc-eq-zero.c", "--null-deref"];
+  repN2z ← Scry.analyzeFile oN2z;
+  check "null-safe-malloc-eq-zero: the p == 0 guard kills the warning"
+    (Nat.beq (countMemRule repN2z "scry/memory/null-dereference") 0);
+  check "null-safe-malloc-eq-zero: no pointer-vs-integer boundary"
+    (Nat.beq (List.length repN2z.boundaries) 0);
+
+  oN2n ← opts ["tests/fixtures/null-safe-malloc-eq-null.c", "--null-deref"];
+  repN2n ← Scry.analyzeFile oN2n;
+  check "null-safe-malloc-eq-null: the p == nullptr guard kills the warning"
+    (Nat.beq (countMemRule repN2n "scry/memory/null-dereference") 0);
+  check "null-safe-malloc-eq-null: no pointer-comparison boundary"
+    (Nat.beq (List.length repN2n.boundaries) 0);
+
   oN3 ← opts ["tests/fixtures/null-unsafe-getenv.c", "--null-deref"];
   repN3 ← Scry.analyzeFile oN3;
   check "null-unsafe-getenv: a null-dereference warning"

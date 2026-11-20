@@ -160,6 +160,10 @@ path-unsafe-realpath-input: realpath does not clean its input: ok
 path-unsafe-argv: argv is a source in the opt-in pack: ok
 null-unsafe-malloc: a null-dereference warning: ok
 null-safe-malloc: the !p guard kills the warning: ok
+null-safe-malloc-eq-zero: the p == 0 guard kills the warning: ok
+null-safe-malloc-eq-zero: no pointer-vs-integer boundary: ok
+null-safe-malloc-eq-null: the p == nullptr guard kills the warning: ok
+null-safe-malloc-eq-null: no pointer-comparison boundary: ok
 null-unsafe-getenv: a null-dereference warning: ok
 null-safe-getenv: the p == 0 early return kills the warning: ok
 null-unsafe-call: a call result that is not checked: ok
