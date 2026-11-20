@@ -89,9 +89,13 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   check "bundle: candidate.stage is verified"
     (String.eq (strAt bundle ["candidate", "stage"]) "verified");
   check "bundle: evidence has a poc item with the marker observed"
-    (List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
-        (String.eq (Json.getStr e "status") "observed"))
-      (Json.getList (match bundle with | .some j => j | .none => Json.mkNull) "evidenceItems"))
+    (evidenceHasPoc bundle)
+
+def evidenceHasPoc (bundle : Option Json) : Bool :=
+  match bundle with
+  | .some j => List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
+      (String.eq (Json.getStr e "status") "observed")) (Json.getList j "evidenceItems")
+  | .none => .false
 
 def main : IO Unit := EIO.toIO (do
   dir ← FS.createTempDir;

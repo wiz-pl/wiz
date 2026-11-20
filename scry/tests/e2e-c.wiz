@@ -94,7 +94,8 @@ def sarifCheck (label out : String) : EIO Unit := do
   readOut ← readText out;
   match readOut with
   | .error e => check (label ++ ": read (" ++ e ++ ")") .false
-  | .ok text => match Json.parse text with
+  | .ok text => do
+    match Json.parse text with
     | .error e => check (label ++ ": parses (" ++ e ++ ")") .false
     | .ok j => do
       let run0 := nthJ (jList j ["runs"]) 0;
