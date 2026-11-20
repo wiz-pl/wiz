@@ -285,6 +285,11 @@ does not parse. A node of kind `command.import` that reaches the elaborator anyw
 hand-built one from a command macro) is rejected in `Wiz.Elab.Command.elabCommand`. -/
 def importDescr : ParserDescr := node "command.import" (seqs ["import", ident])
 
+/-- (13u) `open import M`: the header shorthand for `import M` plus a file-scope
+`open M`. It is parsed with the imports (header-only): `import` is reserved, so
+`command.open`'s `ident` cannot match it, and the node never reaches the elaborator. -/
+def openImportDescr : ParserDescr := node "command.openImport" (seqs [nonReserved "open", "import", ident])
+
 /-- Commands. Each command is parsed inside `withPosition`, so an application can't
 continue onto a line starting at the command's column.
 

@@ -129,6 +129,14 @@ def rootDotted : String :=
 def rootDecl : String :=
   "namespace N\ndef __root__.x : Unit := ()\nend N\n#check x\n#check __root__.x\n"
 
+/-- (13u) `open import M` imports M and opens it for the whole file. -/
+def openImportMod : String := "namespace M\ndef f : Unit := ()\nend M\n"
+
+def openImportUse : String :=
+  "open import M\ndef use : Unit := f\n#check use\n"
+
+def openImportAfterDecl : String := "def four : Unit := ()\nopen import M\n"
+
 /-- (13v) `__root__` is a leading segment only. -/
 def rootMisplaced : String := "namespace N\ndef A.__root__.x : Unit := ()\nend N\n"
 
@@ -254,6 +262,10 @@ def namespaceGroup : Group where
         nsFails [] wrongEnd "`end B` does not close the namespace `A`" },
     { name := "mutual inductive types under a namespace", run := fun _ =>
         nsOk [] mutualNs ["N.A : Type", "N.B : Type"] },
+    { name := "(13u) `open import M` imports M and opens it for the whole file", run := fun _ =>
+        nsOk [("M", openImportMod)] openImportUse ["use : Unit"] },
+    { name := "(13u) `open import` after a declaration is an import-order error", run := fun _ =>
+        nsFailsCode [("M", openImportMod)] openImportAfterDecl "import-order" "imports must precede declarations" },
     { name := "(13v) `namespace __root__` keeps the block's declarations global; `end __root__` closes it", run := fun _ =>
         nsOk [] rootBlock ["r : Unit", "A.x : Unit"] },
     { name := "(13v) `namespace __root__.P` is the root-level P; a namespace nested in a root block is root-level", run := fun _ =>

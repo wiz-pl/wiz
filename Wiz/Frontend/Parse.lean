@@ -87,7 +87,7 @@ category: it is tried first, from `Builtin.importDescr`, so every top-level comm
 position parses it and no `syntax`/macro rule can produce it. -/
 def parseCommand (chars : Array Char) (tables : ParserTables) (pos : Nat) :
     Except ParseError (Syntax × Nat) :=
-  (runDescr (.withPosition (.orelse Builtin.importDescr (.cat "command" 0))) >>= fun r => pure r[0]!).run chars tables pos
+  (runDescr (.withPosition (.orelse Builtin.openImportDescr (.orelse Builtin.importDescr (.cat "command" 0)))) >>= fun r => pure r[0]!).run chars tables pos
 
 /-- The start of the next line beginning in column 0 with a non-space character,
 strictly after `pos`. -/
@@ -141,11 +141,12 @@ where
     if skipWs chars pos ≥ chars.size then acc else
     match parseCommand chars acc.tables pos with
     | .ok (cmd, stop) =>
-      let isImport := cmd.isOfKind "command.import"
+      let isOpenImport := cmd.isOfKind "command.openImport"
+      let isImport := cmd.isOfKind "command.import" || isOpenImport
       let acc :=
         if isImport then
           { acc with commands := acc.commands.push cmd,
-                     imports := acc.imports.push (((cmd.getArg 1).getId?).getD "_") }
+                     imports := acc.imports.push (((cmd.getArg (if isOpenImport then 2 else 1)).getId?).getD "_") }
         else { acc with commands := acc.commands.push cmd }
       let acc := if isImport && !header then
           { acc with messages := acc.messages.push { pos := cmd.info.start, msg := importOrderMessage } }
@@ -172,8 +173,9 @@ where
     if skipWs chars pos ≥ chars.size then (acc, #[]) else
     match parseCommand chars tables pos with
     | .ok (cmd, stop) =>
-      if cmd.isOfKind "command.import" then
-        go chars stop tables (acc.push (((cmd.getArg 1).getId?).getD "_"))
+      if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
+        let openImport := cmd.isOfKind "command.openImport"
+        go chars stop tables (acc.push (((cmd.getArg (if openImport then 2 else 1)).getId?).getD "_"))
       else (acc, #[])
     | .error e =>
       let msg := ((e.explainKeywords tables).render input).splitOn ": " |>.drop 1 |> ": ".intercalate

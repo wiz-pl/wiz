@@ -255,14 +255,18 @@ where
     if skipWs chars pos ≥ chars.size then (s, memo) else
     match parseCommand chars s.tables pos with
     | .ok (cmd, stop) =>
-      if cmd.isOfKind "command.import" then
+      if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
         if s.headerDone then
           -- (import header) an import after a declaration: a fixed header, not a command
           let msg : Msg := { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" }
           go' input base chars stop { s with messages := s.messages.push msg } memo
         else
-          let m := ((cmd.getArg 1).getId?).getD "_"
-          if s.imported.contains m then go' input base chars stop s memo else
+          let openImport := cmd.isOfKind "command.openImport"
+          let m := ((cmd.getArg (if openImport then 2 else 1)).getId?).getD "_"
+          if s.imported.contains m then
+            -- (13u) `open import M` after M was imported is just the open
+            go' input base chars stop (if openImport then
+              { s with globals := { s.globals with opens := s.globals.opens ++ [m] } } else s) memo else
           let err (text code : String) : CommandState R :=
             { s with messages := s.messages.push { info := cmd.info, severity := .error, text, code } }
           match s.loader m, s.checked.get? m with
@@ -313,8 +317,12 @@ where
               { info := cmd.info, severity := .warning, text := s!"module {m}: {w.render src}" }
             -- the info tree is positions in this file: keep only ours (and (11q) the import)
             -- (13m) the module's `local` notation stays in it
-            let infos := if s.termInfo then s.infos.push (.importMod (cmd.getArg 1).info m) else s.infos
-            go' input base chars stop { (inner.endModule s) with messages := msgs, module := s.module, infos } memo
+            let infos := if s.termInfo then s.infos.push (.importMod (cmd.getArg (if openImport then 2 else 1)).info m) else s.infos
+            let s' := inner.endModule s
+            -- (13u) `open import M` is `import M` plus a file-scope `open M`
+            let s' := if openImport then
+                { s' with globals := { s'.globals with opens := s'.globals.opens ++ [m] } } else s'
+            go' input base chars stop { s' with messages := msgs, module := s.module, infos } memo
       else go' input base chars stop (step chars cmd s) memo
     | .error e =>
       -- (13o) a keyword where a name was expected: which notation, from which module

@@ -2318,7 +2318,7 @@ where
       | .ok (cmd, stop) =>
         let text := String.ofList (chars.extract pos stop).toList
         key := key.mixText text
-        if cmd.isOfKind "command.import" then
+        if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
           if s.headerDone then
             -- (import header) an import after a declaration: not brought in, one error
             s := { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" } }
@@ -2326,7 +2326,8 @@ where
             continue
           allCacheable := false
           if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
-          let m := ((cmd.getArg 1).getId?).getD "_"
+          let openImport := cmd.isOfKind "command.openImport"
+          let m := ((cmd.getArg (if openImport then 2 else 1)).getId?).getD "_"
           -- what the rest of the file sees depends on the module's text, through its key
           key := key.mixKey (← keyOf keys m)
           if stack.contains m then
@@ -2364,6 +2365,10 @@ where
               else
               s := { inner with messages := (if errs.isEmpty then s.messages else s.messages.push msg) ++ warns,
                                 module := s.module, infos := s.infos }
+          -- (13u) `open import M` is `import M` plus a file-scope `open M`, whether
+          -- M was just loaded or was already imported by this file
+          if openImport && !stack.contains m then
+            s := { s with globals := { s.globals with opens := s.globals.opens ++ [m] } }
           pos := stop
           continue
         let cacheable? := cacheable.contains cmd.kind

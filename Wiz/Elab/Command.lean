@@ -1868,12 +1868,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   -- extensible `command` category, so `syntax`/`macro_rules` cannot write it. A node of
   -- this kind that still reaches the elaborator was built by a command macro (`Macro`
   -- output) or hand-built: reject it here, the second half of the extension-proofing.
-  if cmd.isOfKind "command.import" then
+  if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
     reportC cmd.info "`import` is only allowed at the top level of a file, before every other command (a command macro cannot produce one)" ErrorCode.importOrder
     return
   -- the wrapper commands parse an `import` only to report which one contains it
   let rejectImportIn (what : String) (inner : Syntax) : StateM (CommandState R) Bool := do
-    if inner.isOfKind "command.import" then
+    if inner.isOfKind "command.import" || inner.isOfKind "command.openImport" then
       reportC inner.info s!"`import` is not allowed inside {what}: imports go at the top level of a file, before every other command" ErrorCode.importOrder
       pure true
     else pure false

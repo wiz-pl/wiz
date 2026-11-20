@@ -893,6 +893,15 @@ its `mutual`/`partial` handler rejects a nested import, and its module loader's
 whole file for import lines (the loader skips imports in the body, so this is where the
 two frontends would otherwise drift). `selfhost/Tables.wiz` is regenerated.
 
+**`open import M`.** The shorthand for `import M` plus a file-scope `open M`, for when a
+file uses M's names unqualified. It is header-only, like `import`: `open` is not reserved,
+but `import` is, so `command.open`'s `ident` cannot match it, and it is parsed with the
+header (a later one is the same `import-order` error). Its `open` has no enclosing block,
+so it is **file-scoped** and visible in every namespace body in the file. It exposes no
+private name of M (privacy is per module). Two `open import`s that provide the same name
+are ambiguous at the use (`ambiguous-name`), not at the import. `open import M in …` does
+not exist (an import cannot be command-scoped).
+
 **Payoff.** `wiz parse --imports FILE` prints the module names, one per line, in source
 order — parse only, no elaboration, no module lookup, and it stops at the first
 declaration. (Before the header rule, dependencies were found by scanning every line of
