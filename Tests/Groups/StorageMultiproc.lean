@@ -46,8 +46,8 @@ def dropImports (src : String) : String :=
 
 def storageMultiprocBody : IO String := do
   let files := ["drafts/storage-engine/Core.wiz",
-    "drafts/storage-engine/Cursor.wiz",
     "drafts/storage-engine/Storage.wiz",
+    "drafts/storage-engine/Cursor.wiz",
     "drafts/storage-engine/Registry.wiz",
     "drafts/storage-engine/Durable.wiz",
     "drafts/storage-engine/Multiproc.wiz",

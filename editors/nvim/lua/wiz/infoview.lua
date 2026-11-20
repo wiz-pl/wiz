@@ -163,7 +163,7 @@ function Builder:item(it)
   if it.kind == 'widget' then
     -- A terminal cannot draw the SVG; name it and point at the browser infoview.
     self:text(it.title or 'widget', 'WizInfoviewHypName')
-    self:text ' (open the browser infoview to draw it)', 'WizInfoviewMuted'
+    self:text(' (open the browser infoview to draw it)', 'WizInfoviewMuted')
   elseif it.kind == 'declaration' then
     self:text(it.title or '', 'WizInfoviewHypName')
     if present(it.type) then
