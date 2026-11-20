@@ -2721,19 +2721,22 @@ def selfHostGroup : Group where
            -- (an axiom: the self-hosted frontend does not yet take a linear scrutinee
            -- apart (`quantityDiffs`), so `Cursor.next`'s definition cannot be written
            -- there; its signature is all the linear-fixpoint cases need)
-           "axiom Cursor.next {a : Type} : (1 c : Cursor a) → Step a\n")
+           "axiom Cursor.next {a : Type} : (1 c : Cursor a) → Step a\n" ++
+           -- (`Nat.succ` is a constructor: the self-hosted frontend checks its payload
+           -- as data, not as an application. A defined function takes the app rule.)
+           "def Nat.inc (n : Nat) : Nat := Nat.succ n\n")
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
             ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.inc (Cursor.length c')\n", true),
             ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
              "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
             ("partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
              "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
              "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n", true),
-            ("inductive Wrap where\n  | base\n  | next (w : Wrap)\n" ++
+            ("inductive Wrap where\n  | base\n  | next (w : Wrap)\ndef Wrap.cons (w : Wrap) : Wrap := Wrap.next w\n" ++
              "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
-             "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.next (Cursor.wrap c')\n", true),
+             "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.cons (Cursor.wrap c')\n", true),
             ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
              "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
             -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
