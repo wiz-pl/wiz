@@ -2725,27 +2725,27 @@ def selfHostGroup : Group where
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
             ("partial def loop (1 t : Tok) (n : Nat) : Nat :=\n" ++
-             "  match n with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
             ("partial def loopB (1 t : Tok) (n : Nat) : Bool :=\n" ++
-             "  match n with\n  | 0 => Nat.beq (Tok.use t) 0\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
+             "  let m := n;\n  match m with\n  | 0 => Nat.beq (Tok.use t) 0\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
             -- a recursive call bound by an ω `let`: a pair of ω types
             ("partial def loopP (1 t : Tok) (n : Nat) : Nat × Nat :=\n" ++
-             "  match n with\n  | 0 => (Tok.use t, 0)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => (Tok.use t, 0)\n" ++
              "  | .succ k =>\n    let r := loopP t k;\n    (r.1 + 1, r.2)\n", true),
             -- ... and an `Option Nat` matched after the let
             ("partial def loopO (1 t : Tok) (n : Nat) : Option Nat :=\n" ++
-             "  match n with\n  | 0 => Option.some (Tok.use t)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Option.some (Tok.use t)\n" ++
              "  | .succ k =>\n    let r := loopO t k;\n    match r with\n" ++
              "    | .none => Option.none\n    | .some v => Option.some (Nat.inc v)\n", true),
             -- the result contains `Tok`: copied at ω it would copy the token
             ("partial def bad (1 t : Tok) (d : Tok) (n : Nat) : Tok × Nat :=\n" ++
-             "  match n with\n  | 0 => (d, 0)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => (d, 0)\n" ++
              "  | .succ k =>\n    let r := bad t d k;\n    r\n", false),
             -- two calls, and a path that never calls
             ("partial def dup (1 t : Tok) (n : Nat) : Nat :=\n" ++
-             "  match n with\n  | 0 => Tok.use t\n  | .succ k => Nat.add (dup t k) (dup t k)\n", false),
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.add (dup t k) (dup t k)\n", false),
             ("partial def drop (1 t : Tok) (n : Nat) : Nat :=\n" ++
-             "  match n with\n  | 0 => Tok.use t\n  | .succ k => 0\n", false)
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => 0\n", false)
           ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
