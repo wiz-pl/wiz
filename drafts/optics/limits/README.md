@@ -1,4 +1,4 @@
-# The four things that do not move
+# The things that do not move
 
 Each file is expected to be *rejected*. Run with a worktree binary (the library is the
 toolchain's own):
@@ -14,7 +14,8 @@ wiz check -I drafts/optics drafts/optics/limits/pair.wiz
 | `traversemut.wiz` | `TraverseMut.traverseM` from a `TraversalP` | `expected: A / inferred: S` |
 | — | `ALens`'s `Result` error | not a failing term: `ALens` is `S → Result (Affine A S)`, and `PrismP` has no error field. No caller uses `ALens`; `MutOpt.ofAffine` takes `S → Affine`, which `MutOpt.ofPrism` covers. |
 
-The reason each is a *cannot* rather than a missing lemma:
+The reason each is a *cannot* rather than a missing lemma (the `PLens` case is the
+positive boundary check in `../Limits.wiz`, not a failing term):
 
 * `pair`: `Strong` adds a context to a `P` (`first'`/`second'`); it has no eliminator
   that decomposes one `S` into two independent places. The store form can, because the
