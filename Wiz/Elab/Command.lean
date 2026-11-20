@@ -1219,7 +1219,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   -- the body context: j, rec, idx, a
   let ctxJ := ctx.bind "j" .size
   let vJ := Val.var ctx.lvl
-  let vF ← evalIn ctx (scofixFunTy g l vI vD vA w)
+  let vF := scofixFunTy g l vI vD vA w
   let vAfterJ := vApp g vF vJ
   let vRecDom := match whnf vAfterJ with
     | .pi _ _ _ dom _ _ => dom
@@ -1242,7 +1242,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   for ((x, _, qq, _), _) in explicit do
     match whnf sty with
     | .sigma _ _ Aty B _ =>
-      cctx := cctx.bindQ x Aty ((Val.toPoly? qq).bind (·.isConst?))
+      cctx := cctx.bindQ x Aty ((Val.toPoly? (cctx.eval qq)).bind (·.isConst?))
       sty := Closure.inst g B (Val.var (cctx.lvl - 1))
     | _ => throwAt info "internal error: state tuple"
   -- the explicit binders that are the same coinductive type as the result: their
@@ -1273,7 +1273,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
     pty ← instM B (← evalIn cctx c)
   let e : Term R ← match ← force I with
     | .unit _ => pure .tt
-    | _ => pure (.refl (q cctx.lvl I) (q cctx.lvl vIdx))
+    | _ => pure (.refl (quote g cctx.lvl I) (quote g cctx.lvl vIdx))
   let payload : Term R := comps.foldr .pair (.pair e .tt)
   -- substitute the body binders by the projections of the state `a`
   let ps : List (Term R) := explicit.zipIdx.map fun ((_, _), pos) =>
