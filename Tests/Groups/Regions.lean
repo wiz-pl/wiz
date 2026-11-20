@@ -107,6 +107,23 @@ def tBoth : Result (Nat × (Nat × Nat)) :=
   Uniq.borrow Region.static (1, 2) (fun ρ h l r => both1 r)
 "#
 
+/-- A returned borrow's spec as `final result` desugars it: one lender scope, the borrow
+consumed (`Mut.close`) inside it; `final(result)` is the quantified `fin`, and the lender
+comes back with `st.2 fin`. -/
+def regionsFinal : String :=
+  "def ret_self {0 ρ : Region} (1 v : Uniq ρ Nat) : Borrowed (Mut ρ Nat Nat) (Uniq ρ Nat) :=\n" ++
+  "  Borrowed.ok (Mut.whole v)\n" ++
+  "def ret_self.Spec (v : Nat) : Prop :=\n" ++
+  "  (fin : Nat) → Result.Holds (fun (r : (Nat × Nat)) => (r.1 = v) × (r.2 = fin)) (\n" ++
+  "    Uniq.borrow Region.static v (fun ρ1 h1 l1 v =>\n" ++
+  "      match ret_self v with\n" ++
+  "      | .ok m =>\n" ++
+  "        let 1 (cur, m) := Mut.peek m;\n" ++
+  "        let 1 u := Mut.close m fin;\n" ++
+  "        .ok cur u\n" ++
+  "      | .err e u => .err e u))\n" ++
+  "def ret_self.spec_holds (v : Nat) : ret_self.Spec v := fun fin => (rfl, rfl)\n"
+
 /-- The front end's state for `src`, with every library importable. -/
 def libsState (src : String) (unbox : Bool := false) : IO (CommandState ZeroOneMany) := do
   let s := runFrontend (R := ZeroOneMany) src
@@ -267,6 +284,22 @@ def regionsGroup : Group where
           "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => zoomP1 r)\n" ++
           "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => borrowP r)")
           ["\"some 5 inl 9\"", "\"none 0 inr true\"", ".ok (1, 9, 2, ())", ".ok (1, 9, 2, ())"] },
+    { name := "a returned borrow's spec: one scope consumes it (final result); double consume and use after the scope are still rejected", run := fun _ => do
+        okLibs ("import Region\n" ++ regionsFinal ++
+          "#eval Uniq.borrow Region.static 3 (fun ρ h l v =>\n" ++
+          "  match ret_self v with\n" ++
+          "  | .ok m => let 1 (cur, m) := Mut.peek m; let 1 u := Mut.close m 9; .ok cur u\n" ++
+          "  | .err e v => .err e v)\n") [".ok (3, 9)"]
+        -- the borrow is consumed once, inside the scope: a second consume is a quantity
+        -- error, not a silently duplicated handle
+        failsLibs ("import Region\n" ++ regionsFinal ++
+          "def bad {0 ρ : Region} (1 m : Mut ρ Nat Nat) : Nat :=\n" ++
+          "  Nat.add (Mut.finish m) (Mut.finish m)\n") "quantity"
+        -- a use after the borrow was closed is rejected too
+        failsLibs ("import Region\n" ++ regionsFinal ++
+          "def bad {0 ρ : Region} (1 m : Mut ρ Nat Nat) : Nat :=\n" ++
+          "  let 1 u := Mut.close m 1;\n" ++
+          "  Uniq.end u (fun x => Nat.add (Mut.finish m) x)\n") "quantity" },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
           "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++
