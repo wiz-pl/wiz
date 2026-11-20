@@ -499,11 +499,11 @@ def hdlGroup : Group where
         unless (← has "cc") do skip "no cc"; return
         cRunLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
           "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" },
-    { name := "L3: signals — `T^s` on the applied former, `registerS`, numerals at a size, and `+`/`if` at size ∞ on Signal.Sig (examples/hdl-l3.wiz)", run := fun _ => do
-        -- lane L3 of the Clash HDL plan: what types today. The applied former `(Signal d A)^i`
-        -- and its one size bump `registerS` check; a numeral at a size is `pureS` + the
-        -- `OfNat` instance; `+` and `if` at size ∞ are the `Hw` operators on `Signal.Sig`.
-        -- The Clash spelling through `Signal.fix` is blocked on lane L2 (group `hdl-signal`, 34b).
+    { name := "L3: signals — sized `mapS`, the counter through `Signal.fix`, the baud generator, and `+`/`if` at a size (examples/hdl-l3.wiz)", run := fun _ => do
+        -- lane L3 of the Clash HDL plan on lane L2: the applied former `(Signal d A)^i`
+        -- and its one size bump `registerS`; a numeral at a size; `+`/`if` at size ∞ on
+        -- `Signal.Sig`; and the sized surface (`mapS`, `Signal.fix`, the Clash counter
+        -- and baud generator) compiled to `scofix`.
         okLibs (← IO.FS.readFile "examples/hdl-l3.wiz")
           [".cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))",
            ".cons (0, 1) (.cons (0, 1) .nil)",
@@ -511,7 +511,10 @@ def hdlGroup : Group where
            ".cons 251 (.cons 251 (.cons 251 (.cons 251 (.cons 251 .nil))))",
            ".cons 7 (.cons 7 (.cons 7 .nil))",
            ".cons 5 (.cons 5 (.cons 5 .nil))",
-           ".cons 3 (.cons 3 (.cons 3 .nil))"] }
+           ".cons 3 (.cons 3 (.cons 3 .nil))",
+           ".cons 251 (.cons 251 (.cons 251 .nil))",
+           ".cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))",
+           ".cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 .nil)))))))))"] }
   ]
 
 builtin_initialize registerGroup hdlGroup
