@@ -997,6 +997,21 @@ end Foo
   ambiguity error. The parser table was regenerated with the grammar; the self-hosted
   frontend compiles the namespace cases in the `selfhost` group.
 
+### 13t.2 Stage 3: the module path is the default namespace
+
+The rule is one line — `CommandState.atModuleStart` sets `namespacePrefix` to
+`Module.nameOf` the module's path (`lib/Scry/CstStore.wiz` is `Scry.CstStore`), and a
+written `__root__.` resets it — but it renames every existing module declaration, so it is
+**guarded**: `CommandState.modulePrefix` is `false` by default, and a run turns it on
+together with `CommandState.legacy`, the stage-0 allowlist (`legacy-names.tsv`, one row
+per declaration that keeps its current absolute name until its migration batch deletes
+the row). With the two set, the default tree is unchanged; a declaration with no row gets
+its module's path. The allowlist lookup is per `(module, written name)` in
+`prefixDeclName`, so `__root__.x` still escapes.
+
+Tests: `namespace` runs `runFrontend` with `modulePrefix := true` (and with and without a
+`legacy` row): module `M`'s `def f` is `M.f`, and a row keeps it `f`.
+
 ### 13t.1 `__root__`: the escape to the global scope
 
 `__root__` is Lean's `_root_`: a **leading name segment**, not a variable and not a

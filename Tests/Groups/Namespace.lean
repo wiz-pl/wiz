@@ -153,6 +153,11 @@ def outerMod : String :=
 
 def openNotTransitive : String := "import Outer\nopen Outer\ndef z : Unit := x\n"
 
+/-- (13t) stage 3: a module's declarations take its path as the default namespace. It is
+guarded (`modulePrefix`) because it renames every existing declaration unless the stage-0
+allowlist (`legacy`) keeps them. -/
+def prefixedMod : String := "def f : Unit := ()\n"
+
 /-- A module's name is not a namespace: its declarations are named as written in it. -/
 def plainMod : String := "def double (n : Unit) : Unit := n\n"
 
@@ -209,6 +214,22 @@ def namespaceGroup : Group where
         nsOk [("Math", mathMod)] openAcrossModules ["use : Unit"] },
     { name := "`open` is not transitive: an importer's `open` does not open what it opened", run := fun _ =>
         nsFails [("Inner", innerMod), ("Outer", outerMod)] openNotTransitive "unknown identifier 'x'" },
+    { name := "(13t) stage 3: a module's declarations take its path as the default prefix (guarded)", run := fun _ => do
+        let loader : Name → Option String := fun m => if m == "M" then some prefixedMod else none
+        let st : CommandState ZeroOneMany := { loader, modulePrefix := true }
+        let src := "import M\n#check M.f\n"
+        let s := runFrontend (R := ZeroOneMany) src st
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        checkEq (repr ["M.f : Unit"]).pretty (repr ((s.messages.filter (·.severity == .info)).toList.map (·.text))).pretty },
+    { name := "(13t) stage 3: an allowlist row keeps the old absolute name", run := fun _ => do
+        let loader : Name → Option String := fun m => if m == "M" then some prefixedMod else none
+        let st : CommandState ZeroOneMany := { loader, modulePrefix := true, legacy := fun m n => m == "M" && n == "f" }
+        let src := "import M\n#check f\n"
+        let s := runFrontend (R := ZeroOneMany) src st
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        checkEq (repr ["f : Unit"]).pretty (repr ((s.messages.filter (·.severity == .info)).toList.map (·.text))).pretty },
     { name := "an `open` names a namespace, not a module: a module's name opens nothing", run := fun _ =>
         nsFails [("Plain", plainMod)] moduleNameNotNamespace "unknown namespace 'Plain'" },
     { name := "an `open … as` alias shadows a real namespace of the same prefix", run := fun _ =>

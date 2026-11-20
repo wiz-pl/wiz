@@ -329,7 +329,7 @@ where
   @[nospecialize] step (chars : Array Char) (cmd : Syntax) (s : CommandState R) : CommandState R :=
     let before := s.globals.order.size
     -- (13t) a declaration in a namespace is named `Foo.bar`: prefix it here, once
-    let cmd := prefixDeclName s.globals.namespacePrefix cmd
+    let cmd := prefixDeclName s.globals.namespacePrefix s.module s.legacy cmd
     -- (11q) for the language server: the syntax the command uses, by where it was declared
     let s := if s.termInfo then { s with infos := s.infos ++ syntaxRefs s cmd } else s
     -- Macro scopes must depend on the command, not on which earlier commands were cache

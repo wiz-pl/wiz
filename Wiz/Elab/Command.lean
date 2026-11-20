@@ -147,6 +147,15 @@ structure CommandState (R : Type) where
   declDocs : Std.HashMap Name DeclDoc := {}
   /-- the module being elaborated (`""` for the main file) -/
   module : String := ""
+  /-- (13t) whether a module's declarations take its path as their default namespace
+  (`Module.nameOf`), so `lib/Scry/CstStore.wiz`'s `def f` is `Scry.CstStore.f`. This is
+  stage 3: off by default, because it renames every existing module declaration. A run
+  turns it on together with `legacy` (the stage-0 allowlist). -/
+  modulePrefix : Bool := false
+  /-- (13t) the stage-0 allowlist: `legacy module writtenName` is true when the
+  declaration keeps its current absolute name (a `legacy-names.tsv` row), so turning
+  `modulePrefix` on changes no existing name. -/
+  legacy : Name → String → Bool := fun _ _ => false
   /-- (13t) the `namespace`s opened in this file, innermost first, with where each was
   declared (for a missing `end` at the end of the file), and the `open`s and aliases the
   block started with (`open` is block-scoped: `end` restores them) -/
@@ -1598,12 +1607,13 @@ and references to `bar` in the body resolve through `Globals.namespacePrefix`
 (`Globals.resolveName`). A written `__root__.` escape resets the prefix (13v). Commands
 that declare no name (`open`, `end`, `#check`, …) are unchanged; a command that declares
 several names has one in the position handled here (`mutual` recurses into its members). -/
-partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
+partial def prefixDeclName (p : Name) (module : Name) (legacy : Name → String → Bool) (cmd : Syntax) : Syntax :=
   let prefixed (n : Name) : Name :=
     if n == rootEscape then n
     else if n.startsWith (rootEscape ++ ".") then
       (n.drop (rootEscape.length + 1)).toString
     else if (n.splitOn rootEscape).length > 1 then n
+    else if legacy module n then n
     else if p.isEmpty then n else p ++ "." ++ n
   let namedAt (i : Nat) : Syntax :=
     match (cmd.getArg i).getId? with
@@ -1634,12 +1644,12 @@ partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
     | none => cmd
   | "command.extern" | "command.cStruct" => cmd.setArg 3 (namedAt 3)
   | "command.instance" => cmd.setArg 2 (optIdent (cmd.getArg 2))
-  | "command.partial" => cmd.setArg 2 (prefixDeclName p (cmd.getArg 2))
+  | "command.partial" => cmd.setArg 2 (prefixDeclName p module legacy (cmd.getArg 2))
   | "command.private" | "command.sealed" | "command.local" =>
-    cmd.setArg 1 (prefixDeclName p (cmd.getArg 1))
+    cmd.setArg 1 (prefixDeclName p module legacy (cmd.getArg 1))
   | "command.mutual" =>
     let body := cmd.getArg 1
-    let members := body.args.map (prefixDeclName p)
+    let members := body.args.map (prefixDeclName p module legacy)
     -- the block's type names, as written (`A`, `B`): a member refers to the others
     -- unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
     let typeShorts := body.args.filterMap fun d =>
@@ -1657,7 +1667,10 @@ partial def prefixDeclName (p : Name) (cmd : Syntax) : Syntax :=
 /-- (13t) Start elaborating a module: its `namespace`s and `open`s are its own (a file's
 `open` does not reach the modules it imports). -/
 def CommandState.atModuleStart (s : CommandState R) : CommandState R :=
-  { s with globals := { s.globals with namespacePrefix := "", opens := [], aliases := [] },
+  -- (13t) stage 3: a module's default namespace is its path (`Module.nameOf`); the
+  -- stage-0 allowlist (`legacy`) keeps the old names until a batch deletes its rows
+  let p := if s.modulePrefix then s.module else ""
+  { s with globals := { s.globals with namespacePrefix := p, opens := [], aliases := [] },
            nsStack := [] }
 
 /-- (13t) A file must close every `namespace` it opens: report each unclosed one at the
@@ -1795,7 +1808,9 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .error e => report .error info s!"{what}: {e}"
     | .ok (cmds, next) =>
       modify fun s => { s with nextScope := next }
-      for c in cmds do elabCommand (prefixDeclName (← get).globals.namespacePrefix c)
+      let st ← get
+      for c in cmds do
+        elabCommand (prefixDeclName st.globals.namespacePrefix st.module st.legacy c)
   -- `deriving C` for the type `T`: run `C`'s deriver
   let derive (C T : Name) (info : SourceInfo) : StateM (CommandState R) Unit := do
     let s ← get
