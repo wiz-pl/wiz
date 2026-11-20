@@ -35,7 +35,7 @@ not a JSON document. This module is the bridge:
   the revision mechanism and is never called the lock file.
 
 The Quire API used: `openQ`/`getQ`/`putQ`/`closeQ`, `QSnapshot.record` (a write-set),
-`QSnapshot.getNode`, `QSnapshot.indexOnlyRange` (a `QCursor`), and `QSnapshot.gen`.
+`QSnapshot.getNode`, `QSnapshot.indexCursorRange` (a `QCursor` over primary ids), and `QSnapshot.gen`.
 `IndexDef` fields 0/1/2 are the record's kind/count/label; the three indices are
 non-unique.
 -/
@@ -204,7 +204,7 @@ def Scry.G.encode (revision : Scry.Revision) (source graphPath : String)
 
 /-- The ids in an index bucket (index-only: no primary read). -/
 def Scry.G.idsOfKind (s : QSnapshot) (kindId : Nat) : List Nat :=
-  QCursor.fold (QSnapshot.indexOnlyRange Scry.G.kindIndex (KeyRange.eq (U64.ofNat kindId)) s)
+  QCursor.fold (QSnapshot.indexCursorRange Scry.G.kindIndex (KeyRange.eq (U64.ofNat kindId)) s)
     (fun acc id => List.cons id.toNat acc) []
 
 /-- The record for `id`. -/
@@ -214,7 +214,7 @@ def Scry.G.nodeOf (s : QSnapshot) (id : Nat) : Option Node :=
 /-- The file path of `id`, through the `file_of` relation (`[node, fileId]`). -/
 def Scry.G.fileOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : String :=
   let rows := QCursor.fold
-    (QSnapshot.indexOnlyRange Scry.G.countIndex (KeyRange.eq (U64.ofNat id)) s)
+    (QSnapshot.indexCursorRange Scry.G.countIndex (KeyRange.eq (U64.ofNat id)) s)
     (fun acc r => List.cons r.toNat acc) [];
   let hit := List.find (fun r => match Scry.G.nodeOf s r with
     | .some n => Nat.beq n.kind.toNat fileRel
