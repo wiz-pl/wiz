@@ -1770,7 +1770,7 @@ def vOut (x : Val) : Val := match whnf x with
     -- the body is at the predecessor of `s` (`∞` is its own predecessor)
     let j := match sizePred s with
       | .some j => j
-      | .none => .szInf;
+      | .none => (.szInf : Val);
     -- fun i a => scofix … j i a;  inside: a0 i1 f2 A3 D4 I5 j6
     let rec_ : Val := .vlam (.cons f (.cons A (.cons D (.cons I (.cons j .nil)))))
       (.lam (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) (.var 6) (.var 1) (.var 0)));
