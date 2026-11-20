@@ -1015,12 +1015,18 @@ partial def rewriteSizedRhs (info : SourceInfo) (name recName idxName : Name) (n
 with a size variable. (Parentheses are transparent.) -/
 partial def resultSizeVar? (stx : Syntax) : Option Name :=
   if stx.isOfKind "term.paren" then resultSizeVar? (stx.getArg 1)
-  else if stx.isOfKind "term.sized" then (stx.getArg 2).getId?
+  else if stx.isOfKind "term.sized" then
+    match stx.args.back? with
+    | some s => s.getId?
+    | none => none
   else none
 
 /-- Does the syntax mention a sized type `_^i`? -/
 partial def mentionsSizedAt (i : Name) (stx : Syntax) : Bool :=
-  (stx.isOfKind "term.sized" && (stx.getArg 2).getId? == some i) ||
+  (stx.isOfKind "term.sized" &&
+    (match stx.args.back? with
+     | some s => s.getId? == some i
+     | none => false)) ||
     stx.args.any (mentionsSizedAt i)
 
 /-- Does a binder of the definition have a type sized by `i`? -/
