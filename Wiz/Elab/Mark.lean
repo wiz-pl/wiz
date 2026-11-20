@@ -356,12 +356,12 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let vI := ctx.eval I
     let D := check ctx D (.desc l vI)
     let vD := ctx.eval D
-    let A := check ctx A (coitStateTy l vI w)
+    let A := check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let f := check ctx f (scofixFunTy g l vI vD vA w)
     let i := check ctx i vI
     let vi := ctx.eval i
-    let a := check ctx a (vApp g vA vi)
+    let a := check ctx a (vApp g (vApp g vA (ctx.eval s)) vi)
     (.scofix l I D A f s i a, some (.nu l vI vD vi (ctx.eval s) none))
   | .coit l I D S st i s =>
     let (I, _) := type ctx I

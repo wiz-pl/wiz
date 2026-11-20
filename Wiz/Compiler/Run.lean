@@ -35,7 +35,7 @@ inductive PapOp where
   | mapK
   /-- `fun j s => coit D step j s`: args `D step`, arity 2 -/
   | coitK
-  /-- `fun j i a => scofix f i a`: args `f`, arity 3 -/
+  /-- `fun i a => scofix f i a`: args `f`, arity 2 -/
   | scofixK
   deriving Repr, Inhabited
 
@@ -69,7 +69,7 @@ def arity : PapOp → Nat
   | .indK => 5
   | .mapK => 4
   | .coitK => 4
-  | .scofixK => 4
+  | .scofixK => 3
 
 /-- A native number looks like its payload when inspected:
 `0 ↦ ⟨0 ⟨0⟩ ⟨0 ◾ ◾⟩⟩` and `n+1 ↦ ⟨0 ⟨1⟩ ⟨0 n ⟨0 ◾ ◾⟩⟩⟩`. -/
@@ -520,7 +520,7 @@ partial def firePap (code : Code) : PapOp → Array RVal → RVal
   | .indK, #[D, m, j, k, h] => ind code D m (apply code j h) (apply code k h)
   | .mapK, #[f, j, k, h] => applyN code f [apply code j h, apply code k h]
   | .coitK, #[D, step, j, s] => .coit D step j s
-  | .scofixK, #[f, _, i, a] => .scofix f i a
+  | .scofixK, #[f, i, a] => .scofix f i a
   | _, _ => panic! "bad partial application"
 
 /-- **Exercise 5.3a.** `ind D m i x = m i u (hyps D u)` with the payload `u = unpack D x`,
