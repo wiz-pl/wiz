@@ -162,7 +162,7 @@ def group : Group where
           "#eval DecidableEq.decide (Option.some 2) (Option.some 2)\n" ++
           "#eval DecidableEq.decide (List.cons 1 List.nil) (List.cons 2 List.nil)\n" ++
           "def cmp (a b : Status) : Bool := DecidableEq.decide a b")
-          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
+          [ ".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
     -- (a tuple literal in inference position) The kernel cannot infer the type of a pair,
     -- only check one against a `Σ`, and the projection (`(a, b).2`) infers its scrutinee:
     -- `inferTuple` now writes the `ann` the self-hosted frontend already wrote, so the

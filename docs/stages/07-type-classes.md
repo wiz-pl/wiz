@@ -114,7 +114,8 @@ Limitations: `BEq`, `Inhabited` and `DecidableEq` reject indexed families (`Repr
 them, and so mutual types); `DecidableEq` is derived only for enumerations and
 single-constructor records (7g); quotations can't splice lists (`$xs*`), so derivers fold
 one-element quotations and use `Syntax.mkApp`; the self-hosted frontend has no macros yet.
-`Repr String` doesn't escape.
+`Repr String` escapes as the lexer reads (`"a\nb"`), so a `Repr` result is Wiz source;
+`Repr (List A)` is hand-written (not derived) and prints `[1, 2, 3]` (13w).
 
 ## 7d: deriving with proof fields and in any universe
 

@@ -97,7 +97,7 @@ def derivingGroup : Group where
     { name := "deriving for a structure, and for the prelude's types", run := fun _ =>
         okDeriving ("import Deriving\nstructure P where\n  x : Nat\n  s : String\n  deriving Repr, BEq, Inhabited\n" ++
           "#eval Repr.repr (List.cons (P.mk 1 \"a\") List.nil)\n#eval BEq.beq (P.mk 1 \"a\") (P.mk 1 \"b\")\n#eval Repr.repr (Inhabited.default : P)")
-          ["\"List.cons (P.mk 1 \\\"a\\\") List.nil\"", ".false", "\"P.mk 0 \\\"\\\"\""] },
+          ["\"[P.mk 1 \\\"a\\\"]\"", ".false", "\"P.mk 0 \\\"\\\"\""] },
     { name := "deriving instance … for …, after the fact", run := fun _ =>
         okDeriving ("import Deriving\ninductive S where\n  | c (r : Nat)\n  | d (o : Option Bool) (w : Nat)\n" ++
           "deriving instance Repr, BEq for S\n#eval Repr.repr (S.d (Option.some Bool.true) 3)")
@@ -141,7 +141,13 @@ def derivingGroup : Group where
         let src ← IO.FS.readFile "examples/deriving.wiz"
         let s ← derivingRun src
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
-        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}") }
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}") },
+    { name := "#eval uses Repr when the type has an instance, and reads back when it doesn't", run := fun _ =>
+        okDeriving ("import Deriving\ninductive NoRep where\n  | a\n" ++
+          "#eval [1, 2, 3]\n#eval ([] : List Nat)\n#eval [\"a\", \"b\"]\n" ++
+          "#eval (Option.some 1 : Option Nat)\n#eval NoRep.a\n#eval Nat.succ 3\n" ++
+          "def xs : List Nat := [1, 2, 3]\n#eval xs")
+          ["[1, 2, 3]", "[]", "[\"a\", \"b\"]", "Option.some 1", ".a", "4", "[1, 2, 3]"] }
   ]
 
 builtin_initialize registerGroup derivingGroup

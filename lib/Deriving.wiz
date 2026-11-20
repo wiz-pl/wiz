@@ -42,9 +42,42 @@ instance : DecidableEq Nat := DecidableEq.mk Nat.beq
 instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
 /-- The empty string. -/
 instance : Inhabited String := Inhabited.mk ""
-/-- The string in double quotes (no escaping). -/
+/-- A hexadecimal digit, lowercase: `String.hexDigit 13` is `d`. -/
+def String.hexDigit (d : Nat) : Char := match Nat.lt d 10 with
+  | .true => Char.mk (Nat.add 48 d)
+  | .false => Char.mk (Nat.add 87 d)
+/-- Two lowercase hexadecimal digits: `String.hex2 13` is `0d` (the escape `\x0d`). -/
+def String.hex2 (n : Nat) : String :=
+  String.ofChars (.cons (String.hexDigit (Nat.div n 16)) (.cons (String.hexDigit (Nat.mod n 16)) .nil))
+/-- One character as it is written in a string literal: the escapes of the lexer
+(`\n`, `\t`, `\"`, `\\`, `\xHH` for a control character), otherwise the character. -/
+def String.escapeChar (c : Char) : String :=
+  let n := Char.code c
+  if Nat.beq n 34 then "\\\"" else
+  if Nat.beq n 92 then "\\\\" else
+  if Nat.beq n 10 then "\\n" else
+  if Nat.beq n 9 then "\\t" else
+  if Nat.lt n 32 then String.append "\\x" (String.hex2 n) else
+  if Nat.beq n 127 then String.append "\\x" (String.hex2 n) else
+  String.singleton c
+/-- The body of a string literal: every character escaped as the lexer reads it back. -/
+def String.reprBody : String → String
+  | .mk cs => String.join (List.map String.escapeChar cs)
+/-- The string in double quotes, with the lexer's escapes (`"a\nb"`). Escaping matters
+now that `#eval` prints a `Repr` result directly: the text is Wiz source. -/
 instance : Repr String := Repr.mk (fun s _ =>
-  String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
+  String.append "\"" (String.append (String.reprBody s) "\""))
+/-- The elements of a list as `x, y, z` (no brackets), each at the top level. -/
+def List.reprItems {A : Type} [Repr A] : List A → String
+  | .nil => ""
+  | .cons x .nil => Repr.reprPrec x 0
+  | .cons x xs => String.append (Repr.reprPrec x 0) (String.append ", " (List.reprItems xs))
+/-- A list as `[x, y, z]`: the `Repr` instance's method for `List A` (so `#eval [1, 2, 3]`
+prints a list literal, not `List.cons 1 …`). -/
+def List.reprPrec {A : Type} [Repr A] (xs : List A) (_ : Nat) : String :=
+  String.append "[" (String.append (List.reprItems xs) "]")
+/-- Lists of showable elements, as `[1, 2, 3]`. -/
+instance {A : Type} [Repr A] : Repr (List A) := Repr.mk List.reprPrec
 /-- Componentwise equality of options (there is no deriver for a recursive type). -/
 def Option.decEq {A : Type} [DecidableEq A] (a b : Option A) : Bool := match a, b with
   | .none, .none => .true
@@ -397,6 +430,8 @@ def deriveDecidableEq : Deriver := fun n => do
   | .false => MacroM.throw (String.append "DecidableEq is derived for an enumeration or a single-constructor record only, and " n)
 attribute [deriver DecidableEq] deriveDecidableEq
 
--- The prelude's types.
-deriving instance Inhabited, BEq, Repr for Option, List
+-- The prelude's types. (`List` has a hand-written `Repr` above, so a list prints as
+-- `[1, 2, 3]` rather than `List.cons 1 …`; `Inhabited` and `BEq` stay derived.)
+deriving instance Inhabited, BEq for Option, List
+deriving instance Repr for Option
 deriving instance Inhabited, BEq, Repr, DecidableEq for Bool

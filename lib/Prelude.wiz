@@ -139,6 +139,11 @@ def String.append : String → String → String
 `xs |> List.length |> Nat.succ`. At any universe, so proofs too: `h |> Eq.symm`. -/
 def pipe.{u, v} {A : Sort u} {B : Sort v} (a : A) (f : A → B) : B := f a
 infixl:10 " |> " => pipe
+/-- `f <| x` is `f x`, the other direction of `|>`: it lets a function stand on the
+left while its argument runs to the end of the line, `Nat.succ <| xs |> List.length`.
+At any universe, like `pipe`. -/
+def apply.{u, v} {A : Sort u} {B : Sort v} (f : A → B) (a : A) : B := f a
+infixr:10 " <| " => apply
 
 /-- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
 index `true` is a tree, `false` a list of trees. A tree is `missing`, an `atom` (a
@@ -1526,6 +1531,29 @@ def ListLit.unexpandCons : Macro := fun stx =>
   | _ => MacroM.throw "not a list literal"
 attribute [app_unexpander List.nil] ListLit.unexpandNil
 attribute [app_unexpander List.cons] ListLit.unexpandCons
+
+-- ## Notation: a projection through the pipe (`|>.`) and `·` sections
+
+-- `x |>.f` is the projection `x.f`, read through the pipe. The dot is part of the
+-- `|>.` token (as in `x.f`), so the form is `x |>.f`: `x |> .f` would parse `.f` as
+-- the dot-constructor form, and a space before the field name reads as a different
+-- expression. The rule takes its left side at precedence 11 (so `x + y |>.f` is
+-- `(x + y).f`) and binds at `max`, like `x.f`; as with `x.f`, an application on the
+-- left is an argument, so write `(f x) |>.f`. A dotted path works (`x |>.a.b` is
+-- `x.a.b`), because the field is one dotted identifier.
+syntax:max (name := pipeProj) term:11 "|>." ident : term
+/-- `x |>.f` expands to the field access `x.f`, so it is the same projection: the same
+field lookup, the same private checks, the same errors. -/
+def PipeProj.expand : Macro := fun stx =>
+  MacroM.pure (Syntax.mkNode "term.field"
+    (.cons (Syntax.getArg stx 0) (.cons (.atom ".") (.cons (Syntax.getArg stx 2) .nil))))
+attribute [macro term.pipeProj] PipeProj.expand
+
+-- `(· + 1)`, `(1 + ·)`, `(· * ·)`: a placeholder, desugared to a lambda by the
+-- elaborator (`Wiz/Elab/Term.lean`, `elabSection`). It is a paren form: the holes in
+-- a parenthesised term are that term's parameters, and the expected type gives their
+-- types, as in `List.map (· + 1) xs`.
+syntax (name := sectionHole) "·" : term
 -- (end of the notation section)
 
 /-- `Syntax.decPowers` with fuel: at most `fuel` powers, so the recursion is
