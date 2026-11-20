@@ -1,16 +1,1 @@
-{
-  "schema": "scry-graph-manifest/1",
-  "source": "fixtures",
-  "graph": "graph.quire",
-  "gen": 0,
-  "revision": { "kind": "unset", "algorithm": "none", "value": "", "dirty": false, "dirtyHash": "" },
-  "files": [],
-  "kinds": [],
-  "relations": [],
-  "edgeLabels": [],
-  "fileTable": [],
-  "nodeCount": 0,
-  "edgeRowCount": 0,
-  "relationRowCount": 0,
-  "view": { "calls": [], "callHeads": [], "errors": [], "nodeCount": 0, "edgeCount": 0, "relationRows": 0 }
-}
+{"schema":"scry-graph-manifest/1","source":"drafts/scry-analysis/fixtures","graph":"drafts/scry-analysis/graph.quire","gen":1,"revision":{"kind":"tree","algorithm":"fnv1a64","value":"t_c8e4a26f0cc5ded1","dirty":false,"dirtyHash":""},"files":[{"path":"alpha.facts.json","bytes":820,"hash":"70beb65bf454a855"},{"path":"beta.facts.json","bytes":651,"hash":"c7f1b80a53095e48"}],"kinds":[["identifier",1],["file:alpha.c",2],["translation_unit",3],["function_definition",4],["call_expression",5],["file:beta.c",6]],"relations":[["call",2000],["file_of",2001]],"edgeLabels":[["function",1000],["child",1001]],"fileTable":[["alpha.c",4],["beta.c",8]],"nodeCount":9,"edgeRowCount":5,"relationRowCount":8,"view":{"calls":[{"node":2,"file":"alpha.c","span":[5,15]},{"node":7,"file":"beta.c","span":[4,14]}],"callHeads":[2],"errors":[],"nodeCount":9,"edgeCount":5,"relationRows":8}}

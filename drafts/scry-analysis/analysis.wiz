@@ -68,32 +68,40 @@ def checkRevision : IO Bool := do
       IO.println (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
       IO.pure .false
 
+/-- Flush standard output, then exit (the C `println` is buffered). -/
+def leave (n : Nat) : IO Unit := do
+  f ← File.stdout;
+  r ← File.flush f;
+  match r with
+  | .ok _ => Process.exit n
+  | .error _ => Process.exit n
+
 def main : IO Unit := do
   match String.eq manifest.revision.kind "unset" with
   | .true => do
     IO.ePrintln "no graph manifest: run the ingest command first";
-    Process.exit 2
+    leave 2
   | .false => do
     fresh ← checkRevision;
     match fresh with
-    | .false => Process.exit 3
+    | .false => leave 3
     | .true => do
       r ← Scry.G.readGraph manifest.graph manifest;
       match r with
       | .error e => do
         IO.ePrintln (String.append "graph: " e);
-        Process.exit 2
+        leave 2
       | .ok (live, gen) =>
         match Nat.beq gen manifest.gen with
         | .false => do
           IO.println (String.append "revision: the store is at generation "
             (String.append (Nat.repr gen) (String.append ", the manifest at "
               (String.append (Nat.repr manifest.gen) ": run ingest"))));
-          Process.exit 3
+          leave 3
         | .true => match Scry.sameView manifest.view live with
           | .false => do
             IO.println "revision: the manifest's view differs from the store's live view";
-            Process.exit 3
+            leave 3
           | .true => do
             IO.println (Scry.renderClaim claim);
             IO.println (String.append "call_expression nodes: "
