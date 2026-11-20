@@ -116,9 +116,34 @@ def Tower.readFileD (f : String) : EIO String := do
 
 -- ## Settings
 
--- The toolchain flags a wrapper passes, in this order (the names of `wiz`'s flags).
+-- The toolchain flags a wrapper passes, in this order (`Wiz/Toolchain.lean`'s `toFlags`).
+-- `root` is a search path (the wrapper writes `-I`), and `region-cache` is a bare flag.
 def Tower.flagKeys : List String :=
-  "cc" :> "cflags" :> "ldflags" :> "libs" :> "llc" :> "gc-cflags" :> "gc-ldflags" :> .nil
+  "cc" :> "cflags" :> "ldflags" :> "libs" :> "gmp" :> "llc" :> "gc-cflags" :> "gc-ldflags" :>
+  "cache" :> "cache-ro" :> "cache-verify" :> "region-cache" :> "root" :> "native-fuel" :> .nil
+
+-- The keys that accumulate, as in `Toolchain.set`: `root` adds a module root and
+-- `cache-ro` a read-only cache. `tower set KEY` with no value clears them all.
+def Tower.appendKeys : List String := "cache-ro" :> "root" :> .nil
+
+-- A flag key's value, checked so that a setting that would do nothing is refused:
+-- `native-fuel` is a number, `region-cache` is a boolean, `cache-verify` a mode.
+def Tower.flagValue (k v : String) : Except String Unit :=
+  match String.isEmpty v with
+  | .true => .ok ()
+  | .false => match String.eq k "native-fuel" with
+    | .true => match String.parseNat v with
+      | .some _ => .ok ()
+      | .none => .error ("native-fuel: expected a number, got " & v)
+    | .false => match String.eq k "region-cache" with
+      | .true => match String.elem v ("true" :> "false" :> .nil) with
+        | .true => .ok ()
+        | .false => .error ("region-cache: expected true or false, got " & v)
+      | .false => match String.eq k "cache-verify" with
+        | .true => match String.elem v ("off" :> "warn" :> "strict" :> .nil) with
+          | .true => .ok ()
+          | .false => .error ("cache-verify: expected off, warn or strict, got " & v)
+        | .false => .ok ()
 
 structure Settings where
   -- the default toolchain (a spec)
@@ -188,9 +213,15 @@ def Settings.set (s : Settings) (k v : String) : Except String Settings :=
     let p := Tower.splitKey v;
     .ok (Settings.setOverrides s (Tower.snoc (Tower.without p.2 s.overrides) (p.2, p.1)))
   | .false => match String.elem k Tower.flagKeys with
-  | .true => .ok (Settings.setFlags s (List.append (Tower.without k s.flags) (match String.isEmpty v with
-    | .true => .nil
-    | .false => (k, v) :> .nil)))
+  | .true => match Tower.flagValue k v with
+    | .ok _ => .ok (Settings.setFlags s (match String.elem k Tower.appendKeys with
+      | .true => match String.isEmpty v with
+        | .true => Tower.without k s.flags
+        | .false => Tower.snoc s.flags (k, v)
+      | .false => List.append (Tower.without k s.flags) (match String.isEmpty v with
+        | .true => .nil
+        | .false => (k, v) :> .nil)))
+    | .error m => .error m
   | .false => .error ("unknown setting " & k & " (default, source, flake, git, releases, nightly-ref, auto-install, "
       & String.intercalate ", " Tower.flagKeys & ")")
 
@@ -248,6 +279,12 @@ def Tower.leanVars : List String :=
   "LAKE" :> "LAKE_HOME" :> "LAKE_PKG_URL_MAP" :> "LEAN" :> "LEAN_PATH" :> "LEAN_SRC_PATH" :>
   "LEAN_SYSROOT" :> "LEAN_AR" :> "LEAN_CC" :> "ELAN_TOOLCHAIN" :> "LD_LIBRARY_PATH" :> .nil
 
+-- How a child ended, as the Lean reference printed it: `exit N` (and `128+N` for a
+-- signal), the value Lean's `Output.exitCode` reports.
+def Tower.exitText : ExitStatus → String
+  | .exited c => Nat.repr c
+  | .signaled s => Nat.repr (128 + s)
+
 -- Run a command, capturing its output (trimmed); an error with its output when it fails.
 def Tower.runOpts (o : SpawnOptions) (cmd : String) (args : List String) : EIO String := do
   r ← EIO.lift (Process.outputWith cmd args "" o);
@@ -255,7 +292,7 @@ def Tower.runOpts (o : SpawnOptions) (cmd : String) (args : List String) : EIO S
   | .error e => EIO.fail e
   | .ok o => match ExitStatus.success o.status with
     | .true => EIO.pure (String.trim o.stdout)
-    | .false => EIO.fail (cmd & " " & String.intercalate " " args & ": " & ExitStatus.toString o.status & "\n" &
+    | .false => EIO.fail (cmd & " " & String.intercalate " " args & ": exit " & Tower.exitText o.status & "\n" &
         String.trim (o.stderr & o.stdout))
 def Tower.run (cmd : String) (args : List String) : EIO String := Tower.runOpts SpawnOptions.default cmd args
 -- ... in a directory
