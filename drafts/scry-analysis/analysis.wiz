@@ -65,7 +65,7 @@ def checkRevision : IO Bool := do
     match Scry.revisionVerdict manifest current with
     | .fresh => IO.pure .true
     | .stale m c reason => do
-      IO.println (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
+      IO.ePrintln (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
       IO.pure .false
 
 /-- Flush standard output, then exit (the C `println` is buffered). -/
@@ -94,16 +94,16 @@ def main : IO Unit := do
       | .ok (live, gen) =>
         match Nat.beq gen manifest.gen with
         | .false => do
-          IO.println (String.append "revision: the store is at generation "
+          IO.ePrintln (String.append "revision: the store is at generation "
             (String.append (Nat.repr gen) (String.append ", the manifest at "
               (String.append (Nat.repr manifest.gen) ": run ingest"))));
           leave 3
         | .true => match Scry.sameView manifest.view live with
           | .false => do
-            IO.println "revision: the manifest's view differs from the store's live view";
+            IO.ePrintln "revision: the manifest's view differs from the store's live view";
             leave 3
           | .true => do
-            IO.println (Scry.renderClaim claim);
-            IO.println (String.append "call_expression nodes: "
+            IO.ePrintln (Scry.renderClaim claim);
+            IO.ePrintln (String.append "call_expression nodes: "
               (Nat.repr (List.length view.calls)));
-            IO.println (String.append "widget: " display)
+            IO.ePrintln (String.append "widget: " display)
