@@ -1524,6 +1524,10 @@ yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in thes
   difference between two preludes, not the file.
 ## 21al: the driver's cache: read-only layers, pruning and manifests (D5)
 
+*(Superseded in part by 21ar: the entries are per module now and the keyed names are the
+host's `.wizc`/`.wizm`/`.wizr`/`.wizs`; the layer, verification and pruning policy below
+is unchanged.)*
+
 The driver's elaboration cache was one writable directory (`--cache DIR`, default
 `~/.cache/wiz`) with one `.check` entry (the frontend's tagged lines and exit status)
 and one `.c` entry (the generated C) per graph key (21n). It now has the host's cache

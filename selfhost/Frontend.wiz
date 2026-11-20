@@ -3400,7 +3400,7 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
   | .false => match strEq (kindOf p) "term.paren" with
   | .true => patOf T (kid p 1)
   | .false => match strEq (kindOf p) "term.anon" with
-  | .true => .anon (nonAtoms (kids (kid p 1)))
+  | .true => .anon (nonAtomsS (kids (kid p 1)))
   | .false => match strEq (kindOf p) "term.num" with
   -- a numeral: `0` is `.zero`, `n + 1` is `.succ n`
   | .true => match numValue p with
@@ -5337,8 +5337,8 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
                             | .ok t0 _ es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
                               | .err m => .err m
                               | .ok sz0 _ es2 => match whnf (force es2 (eval (TCtx.env (Cx.c cx)) t0)) with
-                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i sz0) es2
-                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i sz0) es2
+                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
+                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
                                 | v => .err (String.append "only inductive and coinductive types have sizes, not "
                                     (show (scopeNames (Cx.sc cx)) d (quote d v)))
                           | .false => inferT2 gs es cx s sp
@@ -5478,7 +5478,7 @@ def anonT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp : Optio
       | _ => .err "an anonymous constructor of a pair has at least two components"
     | tyf => match headOf (quote d tyf) .tnil with
       | .mk T _ _ => match Globals.ind gs T with
-        | .some (.mk _ _ _ _ ctors _ _ _) => match ctors with
+        | .some (.mk _ _ _ _ _ ctors _ _ _) => match ctors with
           | .cons (.mk c _ _ _ _ _) .nil => match dotName gs es ty c with
             | .some n => checkT gs es cx (anonApp s (mkNode "term.ident" (one (.ident n)))) ty sp
             | .none => .err bad
@@ -6109,7 +6109,7 @@ def colIsSigma (es : ES) (cx : Cx) (cols : List Col) (k : Nat) : Bool :=
     | _ => .false
 -- (A17) an anonymous constructor pattern needs a type with one constructor
 def anonCtorErr (T : String) (info : IndInfo) : Option String := match info with
-  | .mk _ _ _ _ ctors _ _ _ => match ctors with
+  | .mk _ _ _ _ _ ctors _ _ _ => match ctors with
     | .cons _ .nil => .none
     | cs => .some (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and " T)
         (String.append " has " (Nat.toString (lenL cs))))
@@ -10998,7 +10998,7 @@ inductive StepR where
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
   | .some s => match errSplit s with
-    | .some (.mk p m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
+    | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
     | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
@@ -11396,7 +11396,7 @@ def nestIndent : List String → List String
   | .cons l rest => .cons (String.append "  " l) (nestIndent rest)
 def blockRender (b : ModBlock) : Option String := match b with
   | .mk name own through =>
-    let ownPart := match own with
+    let ownPart : List String := match own with
       | .nil => .nil
       | .cons _ _ => .cons (String.append "module " (String.append name " has errors:")) (nestIndent own)
     let throughPart := mapL (fun t => String.append "imported module " (String.append name (String.append " → " t))) through
@@ -11435,8 +11435,8 @@ def tlOf (s : String) : Option TLine := match s with
   | .mk cs => match cs with
     | .cons c rest => match Nat.beq (Char.code c) 64 with
       | .true => match tlName rest .nil with
-        | .some (.mk nm after) => match tlOff after 0 with
-          | .some (.mk off txt) => .some (.mk (String.mk nm) off (String.mk txt))
+        | .some (nm, after) => match tlOff after 0 with
+          | .some (off, txt) => .some (.mk (String.mk nm) off (String.mk txt))
           | .none => .none
         | .none => .none
       | .false => .none
@@ -11513,7 +11513,7 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
 -- block (`through`: the host's `imported module name → …` entries).
 inductive NestR where
   | mk (run : Run) (through : List String)
-def nestImportsGo (tab : List ModSrc) (run : Run) (stack : List String) (name : String)
+partial def nestImportsGo (tab : List ModSrc) (run : Run) (stack : List String) (name : String)
     (blocks : List ModBlock) : List String → NestR
   | .nil => NestR.mk run .nil
   | .cons m ms => match blockFind blocks m with
@@ -11549,7 +11549,7 @@ def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
           | .mk run2 vis2 _ order2 blocks2 flat2 =>
             -- (D6) the module's imports: nest each broken one under its `import`
             let nest := nestImportsGo tab run2 (.cons name stack) name blocks2 is;
-            let run2b := NestR.run nest;
+            let run2b := match nest with | .mk r _ => r;
             let body := modRunBody run2b name t;
             let loaderN := Nat.sub (List.length (Run.out run2)) entryLen;
             let bodyN := Nat.sub (List.length (Run.out body)) (List.length (Run.out run2b));
@@ -11561,7 +11561,7 @@ def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
             -- too; it is the module's own error, not a nesting line
             let loaderErrs := ownErrs name t (List.reverseOf loaderRaw .nil);
             let bodyErrs := ownErrs name t (List.reverseOf bodyRaw .nil);
-            let blk : ModBlock := .mk name (List.append loaderErrs bodyErrs) (NestR.through nest);
+            let blk : ModBlock := .mk name (List.append loaderErrs bodyErrs) (match nest with | .mk _ t => t);
             match stack with
             -- the root: its own lines (and its imports' blocks) are the program's output
             | .nil => .mk body (modMark vis2 name 2) stack (.cons name order2) blocks2 flat3
@@ -11628,7 +11628,7 @@ def moduleHeaderTexts (text : String) : IO (List Header) :=
 -- the output lines of the graph (each module's `#check`s and errors, in load order),
 def moduleCheck (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : List String :=
   match modCheckRun cats tokens tab roots with
-  | .mk run _ _ _ => stripAts (List.reverseOf (Run.out run) .nil)
+  | .mk run _ _ _ _ _ => stripAts (List.reverseOf (Run.out run) .nil)
 
 -- `s` after `p` when `s` starts with `p`; `none` when it does not or nothing is left
 def modAfterPrefix (p s : String) : Option String := match p with
@@ -11733,6 +11733,6 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
   -- `input`), kept reachable for the checker's own tests; the loader is the default
   | .true => modPrint (checkFileOpts cats tokens trust trustSmt text)
   | .false => match modCheckRunHT cats tokens trust trustSmt hs tab (.cons "Main" .nil) with
-    | .mk run _ _ order => match modHasFlag args "--key" with
+    | .mk run _ _ order _ _ => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)

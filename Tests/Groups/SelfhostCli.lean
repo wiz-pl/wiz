@@ -243,7 +243,9 @@ def cliGroup : Group where
         let cyc := #[("c.wiz", "import Prelude\nimport D\n"), ("D.wiz", "import Prelude\nimport c\n")]
         let (c, _, err) ← cliRun exe cyc #["check", "c.wiz"]
         checkEq 1 c
-        cliCheck err "c.wiz:2:1: error: import cycle: " "cycle position"
+        -- (D6) the cycle is the nested module's own error, under the root's import
+        cliCheck err "c.wiz:2:1: error: imported module D → module c has errors:" "cycle nesting"
+        cliCheck err "  c:2:1: error: import cycle: D -> c -> D" "cycle position"
         cliCheck err "[import-cycle]" "cycle code"
         -- the parser's error, at the command that starts it
         let (c, _, err) ← cliRun exe #[("parse.wiz", "import Prelude\ndef one : Nat := 1\ndef two : Nat :=\n")] #["check", "parse.wiz"]

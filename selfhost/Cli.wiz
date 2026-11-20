@@ -783,12 +783,12 @@ def importKeyParts (keys : StrMap String) : List String → List String
 
 -- the modules' keys in load order (an importer's key names its imports' keys, so the
 -- closure is in the key and a changed dependency misses)
-def keyFold (tab : List ModSrc) (digs : StrMap String) (keys : StrMap String) : List String → StrMap String
+partial def keyFold (tab : List ModSrc) (digs : StrMap String) (keys : StrMap String) : List String → StrMap String
   | .nil => keys
   | .cons name rest => match modFind tab name with
     | .none => keyFold tab digs keys rest
     | .some m =>
-      let base := .cons "key" (.cons toolchainId (.cons "own" (.cons (StrMap.findD digs (Str.ofString name) "")
+      let base : List String := .cons "key" (.cons toolchainId (.cons "own" (.cons (StrMap.findD digs (Str.ofString name) "")
         (importKeyParts keys (modImports m)))));
       keyFold tab digs (StrMap.insert keys (Str.ofString name) (Nat.toString (hashParts base 2166136261))) rest
 
@@ -805,7 +805,8 @@ def planOf (o : Opts) (g : Graph) : IO CachePlan := match g with
     let digs := ownKeysOf shared tab StrMap.empty;
     match loadPlanOf tab with
     | .mk order simple => match simple with
-      | .true => IO.pure (CachePlan.mk order (keyFold tab digs StrMap.empty order) (keyOfGraph o "check" g) .true)
+      -- (a simple graph never uses the graph-key fallback, so it is not computed)
+      | .true => IO.pure (CachePlan.mk order (keyFold tab digs StrMap.empty order) "" .true)
       | .false => IO.pure (CachePlan.mk order StrMap.empty (keyOfGraph o "check" g) .false)
 
 def planRootKey (p : CachePlan) : String := match p with
@@ -1369,7 +1370,7 @@ def throughOf (blocks : List ModBlock) : List String → List String
       | .none => throughOf blocks xs
     | .none => throughOf blocks xs
 
-def blocksOf (tab : List ModSrc) (mods : StrMap (List String)) (acc : List ModBlock) : List String → List ModBlock
+partial def blocksOf (tab : List ModSrc) (mods : StrMap (List String)) (acc : List ModBlock) : List String → List ModBlock
   | .nil => acc
   | .cons name rest => match modFind tab name with
     | .none => blocksOf tab mods acc rest
@@ -1863,7 +1864,7 @@ def legacyCmd (args : List String) : IO Unit := do
   -- `Globals.trustNative`; `genProgramArgs` ignores the flag itself); (C15) it reads
   -- `--trust-smt` as well (the `smt` refusal)
   match modCheckRunHT cats tokens (listHas "--trust-native" args) (modHasFlag args "--trust-smt") hs tab (.cons "Main" .nil) with
-  | .mk run _ _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
+  | .mk run _ _ _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
 -- lsp: the language server (D8), JSON-RPC over stdin/stdout
@@ -2580,7 +2581,7 @@ def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
   let roots := List.cons (lspDir doc.path) st.roots;
   tab ← moduleRootSourcesAs cats tokens roots "Main" doc.path doc.text;
   let run := match modCheckRunHLsp cats tokens hs tab (.cons "Main" .nil) with
-    | .mk r _ _ _ _ => r;
+    | .mk r _ _ _ _ _ => r;
   -- (D8 goals) the document's entries: its body expected types and tactic snapshots
   let doc := { doc with entries := Globals.lspEntries (Run.gs run) };
   let ds := lspOnlyFile doc.path (diagsOf tab (linesOf run));
