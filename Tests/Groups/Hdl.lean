@@ -498,7 +498,20 @@ def hdlGroup : Group where
         let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["--version"] }; pure (o.exitCode == 0)) <|> pure false
         unless (← has "cc") do skip "no cc"; return
         cRunLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
-          "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" }
+          "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" },
+    { name := "L3: signals — `T^s` on the applied former, `registerS`, numerals at a size, and `+`/`if` at size ∞ on Signal.Sig (examples/hdl-l3.wiz)", run := fun _ => do
+        -- lane L3 of the Clash HDL plan: what types today. The applied former `(Signal d A)^i`
+        -- and its one size bump `registerS` check; a numeral at a size is `pureS` + the
+        -- `OfNat` instance; `+` and `if` at size ∞ are the `Hw` operators on `Signal.Sig`.
+        -- The Clash spelling through `Signal.fix` is blocked on lane L2 (group `hdl-signal`, 34b).
+        okLibs (← IO.FS.readFile "examples/hdl-l3.wiz")
+          [".cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))",
+           ".cons (0, 1) (.cons (0, 1) .nil)",
+           ".cons (2, 0) (.cons (2, 0) .nil)",
+           ".cons 251 (.cons 251 (.cons 251 (.cons 251 (.cons 251 .nil))))",
+           ".cons 7 (.cons 7 (.cons 7 .nil))",
+           ".cons 5 (.cons 5 (.cons 5 .nil))",
+           ".cons 3 (.cons 3 (.cons 3 .nil))"] }
   ]
 
 builtin_initialize registerGroup hdlGroup

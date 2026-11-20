@@ -26,7 +26,9 @@ temporal property, and wiz-rv's baud generator as a signal (`Signal.ofCircuit`),
 `Circuit.trace` for every input and to `Circuit.run` on ten cycles by `rfl`. The
 rejections are the typing that sized `scofix` (lane L2) will build on: a register that
 keeps the size (a combinational loop), a size-preserving `map` (not expressible until
-L2), and signals of two clock domains. -/
+L2), and signals of two clock domains. 34b adds lane L3: `pureS` and numerals at a size
+check (they never observe); `+` and `if` at a size, `Signal.fix` and a raw `scofix` are
+rejected, so the Clash counter and baud generator are still written as Mealy machines. -/
 def hdlSignalGroup : Group where
   name := "hdl-signal"
   exercise := "HDL 34a (Clash-style signals)"
@@ -49,7 +51,19 @@ def hdlSignalGroup : Group where
     { name := "34a: a size-preserving map is rejected (needs sized scofix, lane L2)", run := fun _ => do
         failsLibsEvery "import Hdl.Signal\ndef mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i\n  | .head => f s.head\n  | .tail => mapS f s.tail\n" "inferred: Signal^i d A" },
     { name := "34a: signals of two clock domains do not mix", run := fun _ => do
-        failsLibs "import Hdl.Signal\ndef crossDomain (s : Signal ClockDomain.sys Nat) : Signal (ClockDomain.named \"fast\") Nat := s\n" "type mismatch" } ]
+        failsLibs "import Hdl.Signal\ndef crossDomain (s : Signal ClockDomain.sys Nat) : Signal (ClockDomain.named \"fast\") Nat := s\n" "type mismatch" },
+    { name := "34b: L3 partial: `pureS` (pure at any size) and a numeral at a sized signal check; at ∞ they are `pure`", run := fun _ => do
+        okLibs "import Hdl.Signal\ndef p {d : ClockDomain} {A : Type} (a : A) : Signal d A := Signal.pureS (i := ∞) a\ndef numS {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3\ndef reg {d : ClockDomain} {i : Size} (a : Nat) (s : (Signal d Nat)^i) : (Signal d Nat)^(↑i) := Signal.registerS a s\ndef regPure {d : ClockDomain} {i : Size} : (Signal d Nat)^(↑i) := reg 0 (Signal.pureS (i := i) 5)\n#eval Signal.sample 3 (p 5 : Signal ClockDomain.sys Nat)\n#eval Signal.sample 3 (Signal.map BitVec.toNat (numS (d := ClockDomain.sys) (i := ∞) : Signal ClockDomain.sys (BitVec 8)))\n"
+          [".cons 5 (.cons 5 (.cons 5 .nil))", ".cons 3 (.cons 3 (.cons 3 .nil))"] },
+    { name := "34b: L3 blocked on L2: `+` and `if` at size i are rejected (they observe), and `Signal.fix`/`scofix` do not exist", run := fun _ => do
+        -- `+` at a size: no `Add (Signal^i d A)`, because a pointwise add observes its
+        -- arguments at the size it runs at (a size-preserving `zipWith`, lane L2)
+        failsLibs "import Hdl.Signal\ndef addS {d : ClockDomain} {i : Size} (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := a + b\n" "needs an instance of Add"
+        -- `if` at a size: branching on a sized signal needs its head, which is not observable
+        failsLibs "import Hdl.Signal\ndef ifS {d : ClockDomain} {i : Size} (c : (Signal d (BitVec 1))^i) (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := if c then a else b\n" "cannot match on a value of type"
+        -- the fixed point itself needs both the kernel change and a surface `scofix`
+        failsLibs "import Hdl.Signal\ndef counter {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => Signal.registerS (BitVec.ofNat 8 0) c)\n" "unknown identifier 'Signal.fix'"
+        failsLibs "import Hdl.Signal\ndef raw := scofix\n" "unknown identifier 'scofix'" } ]
 
 builtin_initialize registerGroup hdlSignalGroup
 
