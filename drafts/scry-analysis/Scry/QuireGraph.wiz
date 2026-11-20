@@ -152,7 +152,7 @@ partial def Scry.G.relationRows (next : Nat) (rels : List (String × Nat))
   match rs with
   | [] => ([], next)
   | List.cons r rest =>
-    let rid := Nat.add Scry.G.relBase (Scry.G.lookupId rels r.name);
+    let rid := Scry.G.lookupId rels r.name;
     let rows := Scry.mapIdxFrom next (fun i t => match t with
       | List.cons a (List.cons b _) =>
         (i, Node.mk (U32.ofNat rid) (U64.ofNat a) (U32.ofNat b))
@@ -185,8 +185,7 @@ def Scry.G.encode (revision : Scry.Revision) (source graphPath : String)
       (nd.id.n, Node.mk (U32.ofNat (Scry.G.lookupId kinds nd.kind))
         (U64.ofNat nd.span.start) (U32.ofNat nd.span.stop))) facts.nodes;
     let edgeRecs := Scry.mapIdxFrom 0 (fun i e =>
-      (Nat.add n i, Node.mk (U32.ofNat (Nat.add Scry.G.edgeBase
-          (Scry.G.lookupId edgeLabels e.label)))
+      (Nat.add n i, Node.mk (U32.ofNat (Scry.G.lookupId edgeLabels e.label))
         (U64.ofNat e.src.n) (U32.ofNat e.dst.n))) facts.edges;
     let relRecs := Scry.G.relationRows (Nat.add n (List.length facts.edges)) rels facts.relations;
     let oldIds : List Nat := match old with

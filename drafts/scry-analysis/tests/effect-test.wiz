@@ -137,17 +137,7 @@ def ScryTest.main : IO Unit := do
   f15 ← ScryTest.checkOne f14 "the widget payload has the widget schema"
     (String.contains (Scry.analysisDisplay claim m.view) "wiz.widget/1");
 
-  hdbg ← ScryTest.runEIO (openQ graphPath Scry.G.indices);
-  sdbg ← ScryTest.runEIO (getQ hdbg);
-  IO.ePrintln (String.append "debug rows2000=" (Nat.repr (List.length (Scry.G.idsOfKind sdbg 2000))));
-  IO.ePrintln (String.append "debug node14=" (match Scry.G.nodeOf sdbg 14 with
-    | .some n => String.append (Nat.repr n.kind.toNat) (String.append "/" (String.append (Nat.repr n.count.toNat) (String.append "/" (Nat.repr n.label.toNat))))
-    | .none => "none"));
-  ScryTest.runEIO (closeQ hdbg);
   -- 3. the live Quire view matches the manifest and its generation
-  IO.ePrintln (String.append "debug callRel=" (Nat.repr (Scry.G.lookupId m.relations "call")));
-  IO.ePrintln (String.append "debug callKind=" (Nat.repr (Scry.G.lookupId m.kinds "call_expression")));
-  IO.ePrintln (String.append "debug rels=" (Nat.repr (List.length m.relations)));
   lr ← ScryTest.runEIO (Scry.G.readGraph graphPath m);
   f16 ← ScryTest.checkOne f15 "the live generation is the manifest's" (Nat.beq lr.2 m.gen);
   f17 ← ScryTest.checkOne f16 "the live view equals the manifest view" (Scry.sameView m.view lr.1);
