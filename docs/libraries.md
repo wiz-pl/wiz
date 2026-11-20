@@ -510,10 +510,12 @@ a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.mem
   byte written) and `byteDisabled` (enable low: the byte is unchanged).
 * **Byte enables in a word.** `Mem.byteMask dw nb strb` is the `dw`-bit mask of `nb`
   strobe bits (byte `k` is `0xff` when bit `k` is set), `Mem.merge old new mask` is the
-  read-modify-write value, and `Mem.writeBytes` is the masked write. The two closed
-  32-bit cases (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the
-  symbolic mask is checked for every strobe pattern and every byte lane of 8-, 16- and
-  32-bit words in the example (a checked law is *tested*, not proved).
+  read-modify-write value, and `Mem.writeBytes` is the masked write. `Bus.byteMask` is
+  `Mem.byteMask`, and `Bus.ramWC` is written with `Mem.merge`, so a bus, a RAM model and
+  a memory proof share one definition of a strobe. The two closed 32-bit cases
+  (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the symbolic mask is
+  checked for every strobe pattern and every byte lane of 8-, 16- and 32-bit words in
+  the example (a checked law is *tested*, not proved).
 * **One-cycle and two-cycle RAMs.** `Mem.Req`/`Mem.ReqW`/`Mem.Resp` are the bundles and
   `Mem.Ram` the state (`cells` plus a two-bit wait counter). `Mem.ramC1` answers in the
   request cycle (a write lands at the clock edge, so a read sees the old word);
@@ -996,7 +998,15 @@ parameters and no memory map:
   two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
   index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
   `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
-  of the enabled bytes.
+  of the enabled bytes (`Mem.byteMask`/`Mem.merge` from `Hdl.Mem`, so the bus and a
+  memory proof use one definition of a strobe). Its step is written through
+  `Bus.ramWGo`/`ramWIndex`/`ramWMask`/`ramWMerged`/`ramWWait`/`ramWNext`/`ramWOut`.
+  The contract is one outstanding request: `go` is high only when `valid` is and the
+  two-bit wait counter has reached 2, so a request offered at wait 0 is answered in the
+  third cycle and no second request is taken while `wait < 2`; the counter returns to 0
+  at the answer, and a source that drops `valid` withdraws the request (nothing stays in
+  flight). A read in the answering cycle returns the word read before the store: there
+  is no read-during-write bypass, so a write is visible to the next transaction only.
 
 `lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
@@ -1014,6 +1024,14 @@ to the value model's response vector: every non-granted master is quiet and an
 acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
 value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
 `memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
+The byte-enabled RAM is proved too: `ramWStep_write` (a taken write is the masked
+store), `ramWStep_read_same` (a read of that word afterwards is `Bus.ramWMerged`: the
+enabled bytes from `wdata`, the rest from the old word), `ramWStep_read_other` (no
+alias), `ramWStep_no_write` (an untaken request writes nothing),
+`ramWOut_noBypass` (the answering cycle returns the pre-store word) and the closed
+wait-timeline lemmas `ramW_go_first`/`_second`/`_third` and
+`ramW_wait_first`/`_second`/`_third`/`_withdraw0`/`_withdraw1` (one outstanding
+request, two cycles of delay, reset on withdrawal).
 The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
 checks over exhaustively generated or long pseudo-random traces, compared against
 `Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
@@ -1021,7 +1039,10 @@ checks over exhaustively generated or long pseudo-random traces, compared agains
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
 misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
-cycle for cycle. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
+cycle for cycle. `examples/hdl-ramwc.wiz` (test groups `hdl` and `bus-law`) checks the
+wait timeline of `Bus.ramWC`, read-after-write against an independent byte model for
+every 8-, 16- and 32-bit strobe pattern, no alias, the write-answer no-bypass case and
+byte addressing with `shift = 2`. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
 (4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
 sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
 the three simulations. It also exhausts the N-master selector for n = 1..4 (all valid
@@ -1189,10 +1210,24 @@ streaming circuit: input `valid`/`data`, output `valid`/`crc`, one byte per cycl
 `Crc.check_ok` is the kernel-checked known answer (CRC-8/SMBUS of `"123456789"` is
 `0xF4` = 244).
 
+`Crc.protoC` is the line-framed CRC service extracted from the iCEstick's `proto`
+design, with the UART removed so it sits behind any byte transport: input
+`valid`/`data`/`txIdle`, output `ready`/`valid`/`data`/`lines`. A line is bytes other
+than 10 followed by the newline 10; when the newline is accepted the service answers
+the line's CRC as two upper-case hex digits and a newline, one byte per `txIdle`
+cycle. `ready` is low from the accepted newline until the reply ends, and bytes offered
+while it is low are dropped rather than queued: the contract is request/response,
+single outstanding line, no bursts. The host half is `Crc.reply`/`Crc.replies`, and
+`Crc.reply_check` is the kernel-checked on-the-wire known answer (`"F4\n"`).
+
 `examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
 specification on all 65536 `(crc, byte)` pairs, `hexDigit` on all 16 nibbles, the known
 answer, and the streaming circuit through the value simulation, `Netlist.simulate` and
-`Circuit.simFast`.
+`Circuit.simFast`. `examples/hdl-crc-link.wiz` (test groups `hdl` and `bus-crc`) drives
+the service with two lines, checks the reply stream against `Crc.replies`, drops a
+newline offered during a reply, checks that `ready` is low exactly in the reply cycles,
+counts the accepted lines, and compares the value simulation with `Netlist.simulate`
+and `Circuit.simFast`.
 
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 

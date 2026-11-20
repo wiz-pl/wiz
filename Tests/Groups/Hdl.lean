@@ -297,6 +297,22 @@ def hdlGroup : Group where
     { name := "Hdl.Mem: word/byte read-after-write and no-alias laws, every byte-strobe mask, one- and two-cycle RAMs, values = netlist", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
           [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
+    { name := "Hdl.Bus.ramWC: wait timeline, read-after-write for every 8/16/32-bit strobe, no alias, no bypass, byte addressing; values = netlist", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-ramwc.wiz")
+          ("wait timeline 0 0 1 1 2 0 0\n" ++
+           "masked read-after-write 8/16/32: yes yes yes\n" ++
+           "no alias 8/16/32: yes yes yes\n" ++
+           "write answer rvalid 0, data 0 (no bypass; the write is visible to the next read)\n" ++
+           "byte addressing shift=2 yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
+    { name := "Hdl.Crc.protoC: line-framed CRC service (one outstanding line), host model, ready/drop laws, values = netlist", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-crc-link.wiz")
+          ("replies 70 52 10 52 53 10, host model yes, lines 2\n" ++
+           "early newline dropped yes, lines 2\n" ++
+           "ready = not valid yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
         -- (the `#check`s name the proofs the case is about: deleting or weakening one
         -- changes this message list, so the final `#eval` alone cannot keep it green)
