@@ -1,6 +1,6 @@
 import WordMap
 -- Maps from 64-bit words (lib/WordMap.wiz): random inserts, erasures and lookups, the
--- same under the interpreter (the model: a sorted list) and compiled (the natives: a
+-- same under the interpreter (the model: `PMap U64 V`) and compiled (the natives: a
 -- hash table, which also grows and deletes by backward shift here). Group `natives`.
 
 def next (x : Nat) : Nat := Nat.mod (x * 1103515245 + 12345) 2147483648
