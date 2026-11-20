@@ -176,7 +176,7 @@ jobs:
           if grep -q -- --gmp-src web/build.sh 2>/dev/null; then echo "web=yes" >> "$GITHUB_OUTPUT"; else echo "web=no" >> "$GITHUB_OUTPUT"; fi
       - name: Emscripten
         if: steps.web.outputs.web == 'yes'
-        uses: emscripten-core/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
         with:
           version: 6.0.9
           actions-cache-folder: emsdk-cache
