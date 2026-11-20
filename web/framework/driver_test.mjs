@@ -66,6 +66,10 @@ ok(payloadOf("keydown", { key: "s", metaKey: true }) === "s\nm",
 ok(payloadOf("keydown", { key: "Enter", ctrlKey: true, shiftKey: true }) === "Enter\ncs",
   "keydown: every modifier, in a fixed order");
 ok(payloadOf("keyup", { key: "⌘" }) === "⌘", "keyup: the key");
+ok(payloadOf("keydown", { key: "Tab", target: { selectionStart: 1, selectionEnd: 3 } }) === "Tab\n\n@1@3",
+  "keydown: a text field's selection follows the key");
+ok(payloadOf("keydown", { key: "Enter", ctrlKey: true, target: { selectionStart: 2, selectionEnd: 2 } })
+  === "Enter\nc\n@2@2", "keydown: modifiers and selection together");
 ok(payloadOf("click", { target: target("x") }) === "", "click: no payload");
 
 // ## The event strings (the DOM path too: the delegated listeners on `root`)

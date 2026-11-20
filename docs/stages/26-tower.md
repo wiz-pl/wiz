@@ -77,8 +77,9 @@ setting, then realises it from one of three sources:
 * **release**: `RELEASES/TAG/wiz-ARCH-linux.tar.gz` from GitHub Releases (26d) for a
   tag (and `stable`); for anything else, a commit, `REF@COMMIT` (`master@<sha>`), a
   branch or `nightly`, the snapshot of its commit, `RELEASES/snapshot-<sha>/…` (26g).
-  It is checked against its `.sha256`, which a snapshot must have. A commit without a
-  snapshot is an error that lists the retained snapshots and the other sources.
+  It is checked against its `.sha256` when there is one; a snapshot must have one, a tag
+  release is installed without it. A commit without a snapshot is an error that lists the
+  retained snapshots and the other sources.
 * **source**: `git clone`, then `lake build wiz grail` (this needs elan), then the build
   is copied into the layout below and the clone is removed.
 
@@ -108,11 +109,15 @@ toolchain is just links into the store. A toolchain is built in
 
 **Flags, not environment variables** (stage 23a). The wrappers `bin/wiz` and
 `bin/grail` of a release, source or linked toolchain are generated `sh` scripts. They
-`exec` the binary with the C toolchain as flags (`--cc`, `--cflags`, `--ldflags`,
-`--libs`, `--llc`, `--gc-cflags`, `--gc-ldflags`: the `tower set cflags …` settings,
-overridden by `tower toolchain install … --cflags …`), and `wiz` also gets
-`-I share/wiz/lib`. This is the same thing the Nix package's `makeWrapper` does. With no
-flags set, `wiz build` uses `cc` and the system's GMP.
+`exec` the binary with the toolchain's flags (`--cc`, `--cflags`, `--ldflags`,
+`--libs`, `--gmp`, `--llc`, `--gc-cflags`, `--gc-ldflags`, `--cache`, `--cache-ro`,
+`--cache-verify`, `--region-cache`, `-I` for each `root`, `--native-fuel`: the
+`tower set` settings, overridden by `tower toolchain install … --… …`), and `wiz` also
+gets `-I share/wiz/lib`. When the toolchain ships `share/wiz/cache`, both wrappers also
+get `--cache-ro …/share/wiz/cache`, so a toolchain that ships a warm cache uses it, as
+the Nix package's `makeWrapper` does. Unlike the Nix wrapper, tower does not put `coreutils` or
+`git` on the wrappers' `PATH`: children inherit the caller's `PATH`. With no flags set,
+`wiz build` uses `cc` and the system's GMP.
 
 **The shims** are generated `sh` scripts too:
 
@@ -149,7 +154,9 @@ tower default [SPEC]               (installs it)
 tower override set SPEC [DIR] / override unset [DIR] / override list
 tower show / which wiz / run SPEC -- CMD…   (run: SPEC's bin/ first on PATH)
 tower update [NAME…]
-tower set KEY VALUE / settings     source flake git releases nightly-ref auto-install cc cflags …
+tower set KEY VALUE / settings     source flake git releases nightly-ref auto-install,
+                                   cc cflags ldflags libs gmp llc gc-cflags gc-ldflags,
+                                   cache cache-ro cache-verify region-cache root native-fuel
 tower self shims / self install    [--self PATH: the tower the shims call]
 ```
 
@@ -219,6 +226,13 @@ holding a tiny Lake project whose `wiz` and `grail` print their arguments, with 
 * a release install from a tarball made by `scripts/release-tarball.sh` (which works on
   its own), a refused checksum, no release for a branch, and `link` plus `default` of an
   unpacked tarball;
+* a tag release with no `.sha256` installed, and a toolchain that ships
+  `share/wiz/cache` passing it to both wrappers as `--cache-ro`;
+* the error paths: a failing external command (`tar …: exit 2`), `run` of a command that
+  does not exist, `link` of a missing path, and `uninstall` of a dangling symlink;
+* every `tower set` key reaching the wrappers (`--gmp`, the caches, `-I` for `root`,
+  `--native-fuel`, …), the values that would do nothing refused, and `root`/`cache-ro`
+  accumulating and clearing;
 * snapshots (26g): full and short pinned commits, a bare commit with `auto`, a `keep/`
   tag as a spec, a snapshot without its checksum refused, `nightly` following its tag
   while the branch is ahead (and `update` leaving it alone), and the error for a commit
@@ -399,11 +413,31 @@ source.
 The Wiz tower is feature-complete for the command line, and the flake package and the
 release tarball ship it (`scripts/build-tower-wiz.sh`). It was compared command by command
 against the Lean reference implementation and against a local upstream and release
-directory; their stdout, stderr, exit codes and written files agreed (apart from the home
-path, and the OS error text for a path that does not exist). `--version` was
-`tower 0.1.0-dev` in both, and `tower settings` byte-identical. The Lean implementation
-(`Tower/`) and the test driver's `--tower` mode were then removed; `tower/` is the only
-implementation.
+directory: the stdout, stderr, exit codes and written files agreed apart from the home
+path and the named differences below. `--version` was `tower 0.1.0-dev` in both, and
+`tower settings` byte-identical. The Lean implementation (`Tower/`) and the test driver's
+`--tower` mode were then removed; `tower/` is the only implementation.
+
+A failing external command says `cmd args: exit N` (`128+N` for a signal), as the Lean
+source's `exit {o.exitCode}` did. The remaining differences are these, with a case in
+`Tests/Tower.lean` unless it is marked otherwise:
+
+* `run` of a command that does not exist says `tower: <cmd>: No such file or directory`
+  and exits 1: the final Lean source caught a spawn failure in the same place (the
+  `tower:` prefix and status 1), but the last Lean binary printed its runtime's
+  `could not execute external process '<cmd>'` and exited 255.
+* `toolchain link` of a missing path says `tower: <path>: No such file or directory`
+  (Wiz's `FS.realPath`); Lean's `IO.FS.realPath` threw the Lean runtime's text. Both
+  prefix it with `tower:` and exit 1.
+* `toolchain uninstall` of a dangling symlink removes it and says `removed NAME`: Wiz's
+  `Tower.present` is an `lstat`, which counts a dangling link on purpose; Lean's
+  `pathExists` followed the link and said `NAME is not installed`, exiting 1.
+* A linked toolchain's directory is `0755` (documented only): Wiz sets the mode after
+  `mkdtemp` (which makes `0700`); Lean's `createDirAll` followed the caller's umask
+  (`0700` under `umask 077`).
+* The wrappers add `--cache-ro …/share/wiz/cache` when the toolchain has that directory
+  (26c), and `tower set` has all fourteen `Wiz/Toolchain.set` keys; neither was in the
+  Lean tower, which knew the seven C-toolchain flags only.
 
 | feature | `tower/` |
 |---|---|
@@ -411,7 +445,7 @@ implementation.
 | `install` flags `--source`, `--force`, `--cflags …`, several specs, per-spec status | ✓ |
 | `default`, `override set/unset/list`, `show`, `which`, `resolve`, `run`, `update` | ✓ |
 | `set KEY VALUE`, `settings`, `--home`, `--self`, `--self-arg`, `--version`, `--help` | ✓ |
-| settings file: `default`, `source`, `flake`, `git`, `releases`, `nightly-ref`, `auto-install`, seven flag keys, `override` | ✓ |
+| settings file: `default`, `source`, `flake`, `git`, `releases`, `nightly-ref`, `auto-install`, the fourteen `Toolchain.set` flag keys, `override` | ✓ |
 | `wiz-toolchain` (`#`/`--` comments), `wiz-toolchain.local` (spec or path), overrides walking up | ✓ |
 | sources `auto`/`nix`/`release`/`source`; channels as tags (`nightly`, `stable`), `REF@COMMIT`, `keep/`; release snapshots and their `.sha256` | ✓ |
 | layout `toolchains/NAME/{bin,share/wiz,tower.info}`, wrappers with flags, atomic install, linked toolchains | ✓ |

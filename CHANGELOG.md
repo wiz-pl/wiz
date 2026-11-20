@@ -59,10 +59,27 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `lib/Web/DocLive.wiz` draws the live panel (hover Markdown, goals, expected type,
   diagnostics); `web/doc-live.js` keeps the source fetch, the socket and the pin, and
   mounts `wiz-doc-live-ui.mjs`. `web/tagged.js` is deleted; `wiz doc` copies both
-  runtimes and `framework/` into the site. Production page JavaScript is 4,064 lines
-  with the framework half (3,433 without the two test oracles), down from 5,135; the
-  stage 5–6 plan targets are not reached because the editor's pure overlay rules
-  (`editor-model.js`, `squiggles.js`, `completions.js`) and the stage-7 shim remain.
+  runtimes and `framework/` into the site. Production page JavaScript after the merge is
+  **3,906** lines (3,278 `web/*.js` + the 628-line browser half), down from 5,135; the
+  stage 5–6 plan targets (2,570/2,144) are not reached — the editor rules moved in
+  `loom-edit`, but the stage-7 shim (`selfhost-lsp-shim.js`, 669), `lsp-client.js`
+  (480) and the overlay paint modules (`completions.js` 361, `squiggles.js` 235)
+  remain.
+* web: the editor's **rules are the runtime's, and Tab edits through the host**
+  (the editor remainder). `lib/Web/EditorModel.wiz` owns UTF-16 positions, squiggle
+  spans, completion filter/order/insert and Tab's indent; the page asks for one answer
+  at a time through `mount`'s new `ask` (`wiz_loom_editor_*`), and
+  `web/squiggles.js`/`web/completions.js` only paint. `web/editor-model.js` moved to
+  `web/framework/editor-model.mjs` as the test oracle (nothing in production imports
+  it). `host.edit({ insert, from, to })` is the new text-input capability; the driver
+  carries a text field's selection with a keydown, `Page.key` computes the indent, and
+  the page applies it and reports the new selection. The real-page overlay regression
+  test (`web/playground_page_test.mjs`) applies a text patch after mounting the layer and
+  requires the textarea's live value and child-index path to hold. On `loom-edit`,
+  production page JavaScript is **4,467** (4,149 `web/*.js` + the 318-line mount
+  contract), against the stage-4 target 3,733; the remainder is the mirror, the popup
+  and the measured style copy, not rules. After the merge with stages 5–6 it is 3,906.
+
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`

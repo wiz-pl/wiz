@@ -22,6 +22,7 @@ import { hoverContents, hoverLines } from "./framework/hover.mjs";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
+import { rules } from "./framework/editor-model.mjs";
 import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
 
 let failed = 0;
@@ -80,7 +81,7 @@ function startTestInfoview(options = {}) {
       card.removeAttribute("hidden");
     }
   };
-  return startInfoview({ ...options, update: render });
+  return startInfoview({ ...options, rules: options.rules || rules, update: render });
 }
 
 // An unhandled rejection anywhere is a failure: the page may not spam the console.
@@ -501,7 +502,7 @@ checkThat("wiring: didChange after an edit",
 checkThat("wiring: a squiggle for the diagnostic", app.squiggles() && app.squiggles().segments().length === 1,
   JSON.stringify(app.squiggles() && app.squiggles().segments()));
 check("wiring: the squiggle's range",
-  app.squiggles().segments().map((s) => s.start + "-" + s.end).join(","), "0-3");
+  app.squiggles().segments().map((s) => s.start + "-" + s.stop).join(","), "0-3");
 
 // An edit reaches the server before the goal refresh. A keyup asks for goals 120 ms
 // later, while didChange used to wait 250 ms, so the server was asked about a position

@@ -150,5 +150,5 @@ def DocLive.update (m : DocLiveMsg) (_payload : String) (s : DocLive) : DocLive 
   | _ => s
 
 /-- The panel as a `Loom.LiveApp`. -/
-def app : Loom.LiveApp DocLive DocLiveMsg :=
+def docLiveApp : Loom.LiveApp DocLive DocLiveMsg :=
   Loom.LiveApp.mk DocLive.initial DocLive.update DocLive.view

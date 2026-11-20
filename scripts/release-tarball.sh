@@ -74,13 +74,13 @@ if [ -n "$webdir" ]; then
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
   for f in scroll.js scroll-search.js scroll.css lsp-client.js playground-lsp.js \
-           hover.js squiggles.js completions.js editor-model.js doc-live.js doc-live.css; do
+           hover.js squiggles.js completions.js overlays.css doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
-  if [ -d "$webdir/framework" ]; then
-    mkdir -p "$top/share/wiz/web/framework"
-    cp "$webdir/framework/"*.js "$top/share/wiz/web/framework/"
-  fi
+  mkdir -p "$top/share/wiz/web/framework"
+  for f in mount.js driver.js runtime.js editor-text.js; do
+    if [ -f "$webdir/framework/$f" ]; then cp "$webdir/framework/$f" "$top/share/wiz/web/framework/$f"; fi
+  done
 fi
 echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > "$top/share/wiz/TOOLCHAIN"
 cat > "$top/bin/wiz" <<'EOF'

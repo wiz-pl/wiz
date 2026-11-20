@@ -526,10 +526,12 @@ loops, `?`, `U64`, and functions that return borrows.
   `Result U64`); a method call on a variable (`r.push`) is one identifier, so it shows the
   receiver.
 
-Specifications: a `spec f requires (P) ensures (Q)` item states `f.Spec`, a Wiz
+Specifications: a function's clauses are written inline (`fn f … requires (P) ensures (Q) : R := e`)
+or in a `spec f requires (P) ensures (Q)` item; either states `f.Spec`, a Wiz
 proposition over the arguments' values, `result`, `old x` and `final x` (an `&mut`
 argument's value when the borrow ends), with total correctness (`Result.Holds`), proved
-in Wiz. With linear handles a `&mut` argument enters as its value and the call runs
+in Wiz. `final(x)`/`old(x)` are the same as `final x`/`old x`. With linear handles a
+`&mut` argument enters as its value and the call runs
 inside the borrow scopes a caller would open, so the clauses are stated on the values the
 scopes hand back; see [Resources in Wiz](../resources.md).
 

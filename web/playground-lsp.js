@@ -11,6 +11,7 @@ import { LspClient, endpointFromSearch } from "./lsp-client.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
 import { mountHover, wantsHover } from "./hover.js";
+import { caretOffset } from "./framework/editor-text.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -53,7 +54,7 @@ function offsetAt(text, line, character) {
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120, onRender,
+  hover: wantHover, positionDebounce = 120, onRender, rules,
 } = {}) {
   if (!editor && !follow) return null;
   const send = typeof update === "function" ? update
@@ -115,12 +116,20 @@ export function startInfoview({
     },
   });
 
-  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query)
-    ? null : mountSquiggles(editor, { document: pageDocument });
-  const completions = wantCompletionsPopup === false || !wantsCompletions(query)
+  // The editor's features: squiggles under the diagnostics, and the completion popup at
+  // the caret. Both are plain overlay DIVs (no dependency, no editor rewrite) and both
+  // are absent without a DOM or without the runtime's rules (the standalone infoview
+  // passes `squiggles: false`/`completions: false`).
+  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query) || !rules
+    ? null : mountSquiggles(editor, {
+      document: pageDocument,
+      segments: (text, diagnostics) => rules.segments(text, diagnostics),
+    });
+  const completions = wantCompletionsPopup === false || !wantsCompletions(query) || !rules
     ? null : mountCompletions({
       editor,
       document: pageDocument,
+      rules,
       onRequest: (position) => {
         if (!client || client.state !== "open") return null;
         return client.completion(documentUri, position);
@@ -156,7 +165,8 @@ export function startInfoview({
 
   function currentPosition() {
     if (follow) return followPosition;
-    return positionAt(editor.value, editor.selectionStart || 0);
+    return rules ? rules.position(editor.value, caretOffset(editor))
+      : positionAt(editor.value, editor.selectionStart || 0);
   }
 
   // ## Asking the server
@@ -217,7 +227,9 @@ export function startInfoview({
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = positionAt(editor.value, editor.selectionStart || 0);
+    const position = rules
+      ? rules.position(editor.value, caretOffset(editor))
+      : positionAt(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
     if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
@@ -343,7 +355,11 @@ export function startInfoview({
     hover: () => hover,
     refresh,
     reconnect,
-    position: () => positionAt(editor ? editor.value : "", editor ? (editor.selectionStart || 0) : 0),
+    // The caret as the page and the tests see it (UTF-16, line 0-based).
+    position: () => editor
+      ? (rules ? rules.position(editor.value, caretOffset(editor))
+        : positionAt(editor.value, caretOffset(editor)))
+      : { line: 0, character: 0 },
     squiggles: () => squiggles,
     completions: () => completions,
     goTo,

@@ -12,10 +12,12 @@
 //   node web/playground_page_test.mjs FIXTURE.json
 "use strict";
 import { readFileSync } from "node:fs";
-import { applyPatches } from "./framework/runtime.js";
+import { applyPatches, nodeAt } from "./framework/runtime.js";
 import { start } from "./framework/driver.js";
-import { parse, serialize } from "./framework/minidom.mjs";
+import { parse, serialize, document as minidoc } from "./framework/minidom.mjs";
 import { presets } from "./framework/examples.mjs";
+import { rules } from "./framework/editor-model.mjs";
+import { mountSquiggles } from "./squiggles.js";
 
 const fixture = JSON.parse(readFileSync(process.argv[2], "utf-8"));
 let failed = 0;
@@ -65,6 +67,13 @@ ok(initial.includes('<option value="basics" selected="selected">Basics</option>'
   "the default example is selected in the menu");
 ok(!initial.includes("<script"), "the app's text is escaped");
 eq("the first paint asks for no effect", "[]", fixture.initialPage.requests);
+
+// ## The editor rules the page asks for (the runtime's, not the test oracle's)
+const ruleSpans = JSON.parse(fixture.segments || "[]");
+eq("one span for one diagnostic", 1, ruleSpans.length);
+eq("the span's start", 13, ruleSpans[0].start);
+eq("the span's stop", 17, ruleSpans[0].stop);
+eq("the span's severity", 1, ruleSpans[0].severity);
 
 // ## The page's step: a preset load replaces the text, empties the output, requests effects
 eq("the load carries the chosen id", "lists", fixture.loadedPage.preset);
@@ -126,6 +135,13 @@ eq("reset notes itself", "reset to the default program", fixture.resetPage.note)
 eq("clear empties the count", "0 lines", fixture.clearedPage.count);
 ok(!fixture.clearedPage.html.includes(">ok<"), "clear empties the output pane");
 
+// ## Tab asks the host for one edit, at the selection the driver reported
+eq("a Tab requests an edit", "edit", kinds(fixture.tabbedPage));
+const tabEdit = JSON.parse(byKind(fixture.tabbedPage, "edit") || "{}");
+eq("the edit's selection starts at the reported offset", 0, tabEdit.from);
+ok(typeof tabEdit.to === "number" && tabEdit.to >= 3, "the edit replaces to the end of the selected line");
+ok(String(tabEdit.insert).startsWith("  "), "the edit indents the selected lines", String(tabEdit.insert));
+
 // ## The DOM path: mount the SSR, fire the menu's change event, apply the patches
 const strings = new Map();
 let next = 1;
@@ -141,6 +157,14 @@ const wasm = {
 };
 const root = parse("");
 const app = start(wasm, root, { parse, events: ["change"] });
+
+// ## The overlays on the real page, over its child-index patch paths
+// The Loom page patches by child index (`web/framework/runtime.js`). Mount the page's
+// own tree, apply its menu patch, then enable the squiggle layer the page enables
+// (`wireGoals` -> `rules.segments`) and apply a text patch as typing would: the paths
+// must still resolve to the same nodes. A wrapper (the old squiggle layer) would move the
+// textarea one level deeper, and the text patch would reach the wrapper instead of the
+// textarea's live value.
 eq("the driver receives the menu's change", "change\n0\nlists", (() => {
   const select = byId(root, "preset");
   select.value = "lists";
@@ -150,6 +174,43 @@ eq("the driver receives the menu's change", "change\n0\nlists", (() => {
 applyPatches(root, JSON.parse(fixture.initialToLoaded), parse);
 eq("the patches reproduce the loaded SSR", fixture.loaded, serialize(root));
 eq("the textarea's live value is the example", fixture.loadedPage.text, byId(root, "editor").value);
+
+const editor = byId(root, "editor");
+const editorPath = (() => {
+  const parts = [];
+  for (let n = editor; n && n !== root; n = n.parentNode) parts.unshift(n.parentNode.childNodes.indexOf(n));
+  return parts.join(".");
+})();
+eq("the real page puts the editor at its child-index path", "1.0.1", editorPath);
+ok(nodeAt(root, editorPath) === editor, "and nodeAt resolves it");
+const squiggles = mountSquiggles(editor, { document: minidoc(), segments: rules.segments });
+ok(squiggles !== null, "squiggles mount on the Loom page");
+ok(editor.parentNode === byId(root, "editor").parentNode,
+  "the textarea is not wrapped (a wrapper breaks the patch paths)");
+ok(nodeAt(root, editorPath) === editor, "the editor index is unchanged after mounting");
+
+// The next keystroke's patch: the textarea's text node, at the path the app renders.
+const typed = fixture.loadedPage.text + "\n-- typed\n";
+applyPatches(root, [{ op: "text", path: editorPath + ".0", text: typed }], parse);
+eq("a text patch after mounting reaches the textarea's live value", typed, editor.value);
+ok(nodeAt(root, editorPath) === editor, "the text patch still resolves to the textarea");
+eq("the textarea's text child still resolves", typed, nodeAt(root, editorPath + ".0").textContent);
+const firstLine = typed.split("\n")[0];
+squiggles.update([{
+  range: { start: { line: 0, character: 0 }, end: { line: 0, character: firstLine.length } },
+  severity: 1, message: "probe",
+}]);
+const layer = editor.parentNode.childNodes[editor.parentNode.childNodes.length - 1];
+eq("the layer is the editor's last sibling", "squiggle-layer",
+  layer.getAttribute && layer.getAttribute("class"));
+eq("the underline follows the patched text", firstLine, layer.textContent.slice(0, firstLine.length));
+applyPatches(root, [
+  { op: "insert", path: "1.0", index: 3, html: '<div id="late"></div>' },
+], parse);
+eq("an insert at the section's end lands before the layer", "late", nodeAt(root, "1.0.3").getAttribute("id"));
+ok(nodeAt(root, editorPath) === editor, "the editor path survives the insert");
+eq("the layer stays last", "squiggle-layer",
+  editor.parentNode.childNodes[editor.parentNode.childNodes.length - 1].getAttribute("class"));
 eq("the menu's selection moved", "lists",
   walk(byId(root, "preset"), (n) => n.getAttribute && n.getAttribute("selected") != null)
     .map((n) => n.getAttribute("value")).join(","));

@@ -16,9 +16,10 @@ OUT=${WIZ_WEB_OUT:-$HERE/out}
 # The infoview page is JavaScript now (web/playground-lsp.js and the modules under it);
 # copy them beside the page so an older OUT still works.
 cp "$HERE/infoview.html" "$HERE/infoview.js" "$HERE/playground-lsp.js" "$HERE/lsp-client.js" \
-   "$HERE/hover.js" "$HERE/squiggles.js" "$HERE/completions.js" "$HERE/editor-model.js" "$OUT/"
+   "$HERE/squiggles.js" "$HERE/completions.js" "$HERE/hover.js" "$HERE/overlays.css" "$OUT/"
 mkdir -p "$OUT/framework"
-cp "$HERE/framework/mount.js" "$HERE/framework/driver.js" "$HERE/framework/runtime.js" "$OUT/framework/"
+cp "$HERE/framework/mount.js" "$HERE/framework/driver.js" "$HERE/framework/runtime.js" \
+   "$HERE/framework/editor-text.js" "$OUT/framework/"
 python3 -m http.server --bind 127.0.0.1 --directory "$OUT" $((PORT + 1)) >/dev/null 2>&1 &
 HTTP=$!
 TOKDIR=$(mktemp -d)

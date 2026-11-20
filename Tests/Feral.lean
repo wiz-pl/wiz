@@ -131,11 +131,12 @@ def posSrc : String := pre ++ "feral\n  fn double (n : U64) : U64 := n + n\n" ++
 
 def surfaceNames : List String :=
   ["01_swap", "02_push", "03_get_mut", "04_reverse", "05_bst", "06_count", "07_disjoint", "08_first_mut",
-   "09_bsearch", "10_regions", "11_list", "12_pick"]
+   "09_bsearch", "10_regions", "11_list", "12_pick", "13_contracts"]
 
 def rejectedNames : List String :=
   ["E0499_two_mut", "E0502_use_while_mut", "E0515_return_local", "E0515_return_mut", "E0597_not_long_enough",
-   "E0597_store_short", "lifetime_bound_missing", "lifetime_bound_missing_mut", "outlives_wrong_way"]
+   "E0597_store_short", "lifetime_bound_missing", "lifetime_bound_missing_mut", "outlives_wrong_way",
+   "inline_spec_borrow"]
 
 def group : Group where
   name := "feral"
@@ -255,6 +256,26 @@ def group : Group where
         checkEq "[]" (toString (errorsOf rs r))
         let e ← firstError (pre ++ "feral\n  spec nope ensures (True)\nend\n")
         check (has e "no function `nope`") e },
+    { name := "inline contracts (L18): `fn … requires (P) ensures (Q) : R := …` emits `f.Spec`", run := fun _ => do
+        let src := pre ++ "feral\n  fn idf (a : U64)\n    requires (True)\n    ensures (result = a)\n  : U64 := a\nend\n"
+        let s ← frontend src
+        checkEq "[]" (toString (errorsOf s src))
+        let ok := src ++ "def idf_ok (a : U64) : idf.Spec a := fun _ => rfl\n"
+        checkEq "[]" (toString (errorsOf (← frontend ok) ok))
+        let l ← frontend (src.replace "\nferal\n" "\n#lower feral\n")
+        check ((infosOf l).any (has · "def idf.Spec (a : U64) : Prop :=\n  (True) → Result.Holds (fun (r : U64) => (r = a)) ( idf a)"))
+          s!"{infosOf l}"
+        -- Rust's `final(x)`/`old(x)` spellings are the same as `final x`/`old x`
+        let b := pre ++ "feral\n  fn bump {'a} (x : &'a mut U64) (step : U64)\n    ensures (final(x).val = Nat.add old(x).val step.val)\n  : U64 := { *x := *x + step; *x }\nend\n"
+        let bs ← frontend b
+        checkEq "[]" (toString (errorsOf bs b))
+        let bl ← frontend (b.replace "\nferal\n" "\n#lower feral\n")
+        check ((infosOf bl).any (has · "def bump.Spec (x : U64) (step : U64) : Prop :=\n  Result.Holds (fun (r : (U64 × U64)) => (r.2.val = Nat.add x.val step.val))"))
+          s!"{infosOf bl}"
+        -- a function has one specification: an inline clause list and a `spec` item
+        let both := pre ++ "feral\n  fn idf (a : U64)\n    ensures (result = a)\n  : U64 := a\n  spec idf ensures (result = a)\nend\n"
+        let e ← firstError both
+        check (has e "one specification") e },
     { name := "#lower shows the generated Wiz, item by item", run := fun _ => do
         let src := pre ++ "#lower feral\n  fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit := {\n" ++
           "    let t := *x;\n    *x := *y;\n    *y := t\n  }\nend\n"

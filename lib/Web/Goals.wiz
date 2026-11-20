@@ -763,6 +763,12 @@ def Goals.allTags (s : Goals.Model) : List Goals.Tag :=
 /-- The tags of the pane (the older name). -/
 def Goals.tags (s : Goals.Model) : List Goals.Tag := Goals.allTags s
 
+/-- The pane's pending requests as JSON values (for a page that has requests of its
+own, like the playground). -/
+def Goals.requestItems (s : Goals.Model) : List Json :=
+  List.map (fun r => Json.mkObj [Json.field "kind" (Json.mkStr r.1),
+    Json.field "payload" (Json.mkStr r.2)]) s.pending
+
 /-- The messages the pane asks the page for. -/
 def Goals.requestsJson (s : Goals.Model) : String :=
   Json.render (Json.mkArr (List.map (fun r =>

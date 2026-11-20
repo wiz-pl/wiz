@@ -36,6 +36,13 @@ export async function startPage({ doc = globalThis.document, loc = globalThis.lo
   const effect = (kind, a = "", b = "") => {
     if (handle) handle.call("wiz_loom_effect", kind, a, b);
   };
+  // The editor's pure rules are the runtime's (`Web.EditorModel`), read through `ask`.
+  const rules = {
+    position: (text, offset) =>
+      JSON.parse(handle.ask("wiz_loom_editor_position", text, String(offset))),
+    segments: (text, diagnostics) =>
+      JSON.parse(handle.ask("wiz_loom_editor_segments", text, JSON.stringify(diagnostics || []), "0")),
+  };
   const onRequest = (kind, payload) => {
     effect("ack", kind);
     if (app) app.request(kind, payload);
@@ -57,6 +64,7 @@ export async function startPage({ doc = globalThis.document, loc = globalThis.lo
     uri: follow ? null : undefined,
     squiggles: false,
     completions: false,
+    rules,
     document: doc,
     update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
     onRender: (view) => {

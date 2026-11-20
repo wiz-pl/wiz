@@ -15,6 +15,7 @@ import { applyPatches, mount, nodeAt } from "./framework/runtime.js";
 import { document as minidoc, parse, serialize } from "./framework/minidom.mjs";
 import { mountSquiggles } from "./squiggles.js";
 import { mountCompletions } from "./completions.js";
+import { rules } from "./framework/editor-model.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -67,9 +68,9 @@ check("the editor is where the Loom SSR puts it", editor.getAttribute("id"), "ed
 check("the editor's text node is the patch target", nodeAt(body, "1.0.1.0").textContent, "import Prelude\n");
 
 // The page's `wireGoals`: both overlays are on, no Loom-specific flags.
-const squiggles = mountSquiggles(editor, { document: doc });
+const squiggles = mountSquiggles(editor, { document: doc, segments: rules.segments });
 const completions = mountCompletions({
-  editor, document: doc, onRequest: async () => [],
+  editor, document: doc, rules, onRequest: async () => [],
 });
 checkThat("squiggles: mounted under the Loom page", !!squiggles);
 checkThat("completions: mounted under the Loom page", !!completions);

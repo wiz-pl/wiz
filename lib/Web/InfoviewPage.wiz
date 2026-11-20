@@ -94,5 +94,5 @@ def InfoviewPage.requests (s : InfoviewPage) : String := Goals.requestsJson s.pa
 def InfoviewPage.consume (e : Loom.Event) : Bool := Goals.consume e
 
 /-- The page as a `Loom.LiveApp` (the input's payload is the textarea's text). -/
-def app : Loom.LiveApp InfoviewPage InfoviewPage.Msg :=
+def infoviewApp : Loom.LiveApp InfoviewPage InfoviewPage.Msg :=
   Loom.LiveApp.mk InfoviewPage.initial InfoviewPage.update InfoviewPage.view
