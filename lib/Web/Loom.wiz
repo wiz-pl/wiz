@@ -34,10 +34,11 @@ operations, and `web/framework/runtime.js` applies them. Nothing in this file is
 
 A component is a record of `init`, `update` and `view` (`Loom.Component`), with props
 `P`, state `S` and messages `M`. Local state is addressed by a **lens**
-(`lib/Optic.wiz`) into the application state: `useState` is `Lens.get`, `setState` is
-`Lens.over`. Two components' lenses are disjoint paths, so their updates commute
-(`Lens.Indep`), and the lens laws give read-after-write. This fits quantities: an
-ordinary component's state is unrestricted data at ω.
+(`lib/Optic.wiz`) into the application state: `useState` is a lens's `view`, `setState`
+is its `over` (`Loom.useStateP`/`Loom.setStateP` on a `LensP`; the unsuffixed names are
+the store-lens shims). Two components' lenses are disjoint paths, so their updates
+commute (`Lens.Indep`, or `LensP.Indep`), and the lens laws give read-after-write. This
+fits quantities: an ordinary component's state is unrestricted data at ω.
 
 A component that owns a **one-shot resource** (an in-flight request, a focus lease)
 uses `Loom.Owned S`: a linear state cell (quantity 1). Every step takes the token and
@@ -571,15 +572,32 @@ def Loom.patchesJson (ps : List Loom.Patch) : String :=
 
 -- ## Components, state, dispatch
 
-/-- Read a component's local state: `useState` is a lens's get. -/
-def Loom.useState {S A : Type} (l : Lens S A) (s : S) : A := Lens.get l s
+/-- Read a component's local state at a profunctor lens: `useState` is `view`. -/
+def Loom.useStateP {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) : A := view l s
+/-- Update a component's local state at a profunctor lens: `setState` is `over`. The lens
+laws (`LensP.GetPut`, `LensP.PutGet`) give read-after-write; two components' lenses on
+independent paths commute (`LensP.Indep`, which a derived `Lens.Indep` supplies through
+`LensP.ofLens_indep`). -/
+def Loom.setStateP {S : Type} {ω A : Type} (l : LensP S S A A) (f : A → A) (s : S) : S := over l f s
+/-- A reducer on a component's local state (`useReducer`), at a profunctor lens. -/
+def Loom.useReducerP {S : Type} {ω A : Type} {M : Type} (l : LensP S S A A) (step : M → A → A) (m : M) (s : S) : S :=
+  over l (step m) s
+
+/-- Read a component's local state: `useState` is a lens's get (the store-lens shim of
+`Loom.useStateP`, so `deriving Lens` fields work unchanged). -/
+def Loom.useState {S : Type} {ω A : Type} (l : Lens S A) (s : S) : A :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.useStateP lp s
 /-- Update a component's local state: `setState` is a lens's over. The lens laws
 (`Lens.GetPut`, `Lens.PutGet`) give read-after-write; two components' lenses on
 independent paths commute (`Lens.Indep`). -/
-def Loom.setState {S A : Type} (l : Lens S A) (f : A → A) (s : S) : S := Lens.over l f s
+def Loom.setState {S : Type} {ω A : Type} (l : Lens S A) (f : A → A) (s : S) : S :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.setStateP lp f s
 /-- A reducer on a component's local state (`useReducer`). -/
-def Loom.useReducer {S A M : Type} (l : Lens S A) (step : M → A → A) (m : M) (s : S) : S :=
-  Lens.over l (step m) s
+def Loom.useReducer {S : Type} {ω A : Type} {M : Type} (l : Lens S A) (step : M → A → A) (m : M) (s : S) : S :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.useReducerP lp step m s
 
 /-- A component: its initial state from props, its update, and its view. -/
 structure Loom.Component (P S M : Type) where

@@ -18,7 +18,8 @@ An optic is a transformer of profunctors `P : Type → Type → Type`, polymorph
 One optic, many interpretations: `over` is `Hom`, `view` is `Forget`, `toListOf` is
 `ForgetList`, `preview` is `ForgetOpt`, and `overWrite` is `Writer Δ` (update and
 write-set in one pass). `LensP.ofLens` lifts the store `Lens` below, so derived field
-lenses are usable with this layer at no loss.
+lenses are usable with this layer at no loss; `LensP.toLens` is the other direction, and
+`Traversal.ofP` does the same for a store `Traversal`.
 
 **The store encoding (compatibility).** Optics for borrows (RD11), the target library
 of Feral's lowering of mutable borrows. See wiz-notes/borrows-as-optics.md. A Feral
@@ -27,8 +28,10 @@ forward value and a backward closure: `S → Result (A × (A → S))`. That is a
 costate coalgebra `S → Result (Store A S)`, and when its body is a place expression
 (fields, indices, variant payloads) it is a lawful partial lens. The representation
 stays the closure form, which is what reference counting with reuse wants, and a
-returned borrow (`Mut`) is a first-class `Store`, which an optic (only a transformer)
-cannot produce. The profunctor form does not replace it; it is kept.
+returned borrow (`Mut`) is a first-class `Store`: a pure optic can be turned into one
+with `LensP.toLens` (run at `Forget`, then at `Hom` per write), but the optic value
+itself cannot be the field (it is `Type 1`), and a profunctor optic has no error/absent
+branch to hand the lender back. The profunctor form does not replace it; it is kept.
 
 Store definitions: `Store` (a borrowed value and how to put it back), `Lens` and
 `PLens` (total and partial places), `zoom` (run a `&mut` function on a sub-place),
@@ -903,6 +906,54 @@ def LensP.ofLens_putPut {S A : Type} (l : Lens S A) (h : Lens.Lawful l) (s : S) 
       (LensP.ofLensAt l (P := Hom) (fun c => a) s) =
     LensP.ofLensAt l (P := Hom) (fun c => b) s := h.2.2 s a b
 
+-- ## From a pure optic back to a place
+--
+-- The lift `LensP.ofLens` is definitional; the other direction recovers a store by
+-- running the optic at `Forget` for the value and at `Hom` for each write. It is how a
+-- pure optic becomes a place the borrow API can use (`Mut` still *stores* a `Store`;
+-- it cannot store a `LensP`, which is `Type 1` and has no lender).
+
+/-- The store lens of a profunctor lens: `view` for the get, `set` for the put. -/
+def LensP.toLens {S : Type} {ω A : Type} (l : LensP S S A A) : Lens S A :=
+  fun s => (view l s, fun a => set l a s)
+
+/-- `LensP.toLens` reads as `view` (by `rfl`). -/
+def LensP.toLens_get {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) :
+    Lens.get (LensP.toLens l) s = view l s := rfl
+
+/-- `LensP.toLens` writes as `set` (by `rfl`). -/
+def LensP.toLens_set {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) (a : A) :
+    Lens.set (LensP.toLens l) s a = set l a s := rfl
+
+-- ## Independence, restated on `view`/`over`
+--
+-- The store `Lens.Indep` says two places are disjoint *in the lender*: a put to one
+-- leaves the other's value alone, and the two put-backs agree. A profunctor optic does
+-- not expose the lender (only `P S T`), so the put-back clause has no statement; the
+-- frame rule needs exactly the first two clauses, and they are stateable at `P`.
+
+/-- Two profunctor places are independent when a write to one does not change what the
+other reads, and the two writes commute. This is the frame rule's hypothesis restated
+on `view`/`over`; the store `Lens.Indep` also says the two put-backs agree, which a
+profunctor optic does not expose. -/
+def LensP.Indep {S A B : Type} (l : LensP S S A A) (m : LensP S S B B) : Prop :=
+  ((s : S) → (a : A) → view m (over l (fun _ => a) s) = view m s) ×
+  ((s : S) → (b : B) → view l (over m (fun _ => b) s) = view l s) ×
+  ((s : S) → (a : A) → (b : B) →
+    over m (fun _ => b) (over l (fun _ => a) s) = over l (fun _ => a) (over m (fun _ => b) s))
+
+/-- Independence is symmetric. -/
+def LensP.indep_symm {S A B : Type} (l : LensP S S A A) (m : LensP S S B B)
+    (h : LensP.Indep l m) : LensP.Indep m l :=
+  (h.2.1, h.1, fun s b a => Eq.symm (h.2.2 s a b))
+
+/-- Store independence (the `deriving Lens` statement `S.f_g_indep`) transfers to the
+lifted optics, so a derived proof is exactly the hypothesis the profunctor frame rule
+wants. -/
+def LensP.ofLens_indep {S A B : Type} (l : Lens S A) (m : Lens S B) (h : Lens.Indep l m) :
+    LensP.Indep (S := S) (A := A) (B := B) (LensP.ofLens l) (LensP.ofLens m) :=
+  (fun s a => h.1 s a, fun s b => h.2.1 s b, fun s a b => h.2.2 s a b)
+
 -- ## The pair lens, proved lawful
 
 /-- `fstL` obeys GetPut (the componentwise pair equation; pair eta is not definitional). -/
@@ -917,3 +968,14 @@ def fstL_putPut {A C : Type} : LensP.PutPut (S := A × C) (A := A) fstL :=
 /-- `fstL` is a lawful profunctor lens. -/
 def fstL_lawful {A C : Type} : LensP.Lawful (S := A × C) (A := A) fstL :=
   (fstL_getPut, fstL_putGet, fstL_putPut)
+
+-- ## A store traversal from a profunctor traversal
+
+/-- The store `Traversal` of a profunctor one: `view` is `toListOf` and `overAll` is
+`overT`. This is the compatibility wrapper an engine keeps when it wants the
+`view`/`overAll` pair but writes the optic once, at `P`. The focus must carry whatever
+the update needs to name its write (e.g. a key): `overAll` sees only the focus, while
+the store encoding's backward function can close over it. -/
+def Traversal.ofP {S : Type} {ω A : Type} (t : TraversalP S S A A) : Traversal S A :=
+  Traversal.mk (fun s => toListOf t s) (fun f s => overT t f s)
+

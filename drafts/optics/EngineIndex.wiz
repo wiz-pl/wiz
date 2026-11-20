@@ -3,12 +3,10 @@ import Optic
 /-!
 # The index bucket as a profunctor traversal
 
-The engine's `Traversal` (`drafts/optics/Traversal.wiz`) is the store encoding: its
-`overAll : (A → A) → S → S` records a patch inside each place's backward function.
-The profunctor form (`TraversalP`) is the general one: the same optic runs at `Hom`
+The engine's `Storage.indexTraversalP` is the canonical form: one optic run at `Hom`
 (update), `ForgetList` (the bucket's contents) and `Writer Δ` (update + write-set in one
-pass). This module re-expresses the engine's `indexTraversal` as a `TraversalP` and
-checks that the three interpretations agree with the store traversal.
+pass). `Storage.indexTraversal` is the store `Traversal` shim derived from it. This
+module checks that the three interpretations agree with that store shim.
 
 The focus is `U64 × Node` rather than `Node`: the key must be in the focus for the
 `Writer` interpretation to name the patch it records. The store encoding hides the key
@@ -29,35 +27,6 @@ def root0 : Root :=
 def indexDefs : List IndexDef := [kindIndex]
 def db0 : Db := Db.mk (u64 0) (Root.rebuildIndex root0 indexDefs) indexDefs
 def s0 : Snapshot := Db.snapshot db0
-
-/-- Walk the bucket's keys, running `f` on each `(key, node)` and putting the result
-back through the snapshot's recording store. The applicative sequences the deltas (at
-`Writer`) or the reads (at `ForgetList`). -/
-def indexWanderGo (d : IndexDef) (v : U64) {F : Type → Type} [i : Applicative F]
-    (f : U64 × Node → F (U64 × Node)) : List U64 → Snapshot → F Snapshot
-  | .nil, s => @Applicative.pure F i Snapshot s
-  | .cons id ids, s =>
-    match Snapshot.getNode s id with
-    | .none => indexWanderGo d v f ids s
-    | .some n =>
-      @Applicative.seq F i Snapshot Snapshot
-        (@Applicative.seq F i (U64 × Node) (Snapshot → Snapshot)
-          (@Applicative.pure F i (U64 × Node → Snapshot → Snapshot)
-            (fun p => fun s' => Snapshot.record s' id (Patch.ofChange n p.2)))
-          (f (id, n)))
-        (indexWanderGo d v f ids s)
-
-/-- The bucket's traversal function, named so it can be passed to `traversalOf`. -/
-def indexTrav (d : IndexDef) (v : U64) :
-    {F : Type → Type} → [i : Applicative F] →
-      (U64 × Node → F (U64 × Node)) → Snapshot → F Snapshot :=
-  fun {F : Type → Type} [i : Applicative F] f s =>
-    indexWanderGo d v f (Root.lookupIndex s.root (IndexDef.uid d) v) s
-
-/-- Every node in the bucket of index `d` at key `v`, as a profunctor traversal. -/
-def indexTraversalP (d : IndexDef) (v : U64) :
-    TraversalP Snapshot Snapshot (U64 × Node) (U64 × Node) :=
-  traversalOf (indexTrav d v)
 
 /-- The read interpretation: the bucket's `(key, node)` entries. -/
 def indexViewP (d : IndexDef) (v : U64) (s : Snapshot) : List (U64 × Node) :=
