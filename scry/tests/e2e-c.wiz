@@ -99,12 +99,18 @@ def sarifCheck (label out : String) : EIO Unit := do
     | .ok j => do
       let run0 := nthJ (jList j ["runs"]) 0;
       let rs := jList run0 ["results"];
+      let isFinding (r : Json) : Bool :=
+        String.eq (jStr r ["ruleId"]) "scry/c/command-injection";
       check (label ++ ": version 2.1.0") (String.eq (jStr j ["version"]) "2.1.0");
       check (label ++ ": driver scry")
         (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
-      check (label ++ ": two results") (Nat.beq (List.length rs) 2);
-      check (label ++ ": every result has a ruleId")
-        (List.all (fun r => String.eq (jStr r ["ruleId"]) "scry/c/command-injection") rs);
+      check (label ++ ": eight results") (Nat.beq (List.length rs) 8);
+      check (label ++ ": two finding results")
+        (Nat.beq (List.length (List.filter isFinding rs)) 2);
+      check (label ++ ": six coverage results")
+        (Nat.beq (List.length (List.filter (fun r => Bool.not (isFinding r)) rs)) 6);
+      check (label ++ ": every result has a non-empty ruleId")
+        (List.all (fun r => Nat.lt 0 (String.length (jStr r ["ruleId"]))) rs);
       check (label ++ ": every result has a physical location")
         (List.all (fun r => Nat.lt 0 (String.length
           (jStr (nthJ (jList r ["locations"]) 0) ["physicalLocation",
@@ -140,7 +146,9 @@ def main : IO Unit := EIO.toIO (do
     check "taint: seven functions" (Nat.beq (jNat j1 ["functions"]) 7);
     check "taint: two findings" (Nat.beq (jNat j1 ["counts", "findings"]) 2);
     check "taint: both checked" (Nat.beq (jNat j1 ["counts", "checked"]) 2);
-    check "taint: no boundary warnings" (Nat.beq (jNat j1 ["counts", "boundary"]) 0);
+    check "taint: five lowering-boundary warnings"
+      (Nat.beq (jNat j1 ["counts", "boundary"]) 5);
+    check "taint: one memory warning" (Nat.beq (jNat j1 ["counts", "memory"]) 1);
     check "taint: no duplicate symbols" (Nat.beq (List.length (jList j1 ["callgraph", "duplicates"])) 0);
     check "taint: the unresolved callee is recorded"
       (List.any (fun u => String.eq (jStr u ["callee"]) "maybe")

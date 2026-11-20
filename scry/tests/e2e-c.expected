@@ -11,7 +11,8 @@ taint: three translation units: ok
 taint: seven functions: ok
 taint: two findings: ok
 taint: both checked: ok
-taint: no boundary warnings: ok
+taint: five lowering-boundary warnings: ok
+taint: one memory warning: ok
 taint: no duplicate symbols: ok
 taint: the unresolved callee is recorded: ok
 taint: both findings are command-injection: ok
@@ -21,8 +22,10 @@ coverage: app.c has no finding: ok
 gate: --fail-on-finding exits 1: ok
 sarif: version 2.1.0: ok
 sarif: driver scry: ok
-sarif: two results: ok
-sarif: every result has a ruleId: ok
+sarif: eight results: ok
+sarif: two finding results: ok
+sarif: six coverage results: ok
+sarif: every result has a non-empty ruleId: ok
 sarif: every result has a physical location: ok
 usage: no directory exits 2: ok
 usage: the error names the usage: ok

@@ -6,5 +6,6 @@
 # fails too. Paths are relative to `scry/`.
 #
 # path	reason
-corpus/project/macro/macro.c	extern "C" is C++, not C; the project fixture uses it to exercise --allow-errors
+# (tree-sitter-c 0.24.2 accepts `extern "C"`, so corpus/project/macro/macro.c is no
+# longer an exemption; the manifest test fails if it is re-added as one.)
 corpus/csharp/repo/src/Broken.cs	deliberately invalid C#; the driver reports one per-file parse failure row

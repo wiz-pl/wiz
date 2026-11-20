@@ -128,7 +128,7 @@ def main : IO Unit := EIO.toIO (do
     | .some r => do
       check "coverage: one parse failure row" (Nat.beq (jNat r ["count"]) 1);
       check "coverage: the failed file is named"
-        (String.eq (jStr r ["example"]) "src/Broken.cs")
+        (String.startsWith (jStr r ["example"]) "src/Broken.cs:")
     | .none => check "coverage: parse failure row exists" .false;
     check "coverage: the exclusion rules are rows"
       (List.all (fun c => match row j0 ("excluded: " ++ c) with
