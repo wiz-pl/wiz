@@ -144,11 +144,13 @@ and the messages whose range contains the cursor, with the severity as `title`.
 
 ## Widget items
 
-A message whose text starts with `WIZ_WIDGET:` is a **widget**, not prose. The command
-that produces it is `#plot expr` (`Wiz/Elab/Command.lean`, `command.plot`): it
-evaluates a `Plot.Chart` with `Plot.widget` (`lib/Plot.wiz`) and reports the display
-value as the command's message. `wiz/interactiveInfo` reports it with `kind: "widget"`,
-`title: "plot"` and `text` set to the whole display value (the prefix included).
+A message whose text starts with `WIZ_WIDGET:` is a **widget**, not prose. The commands
+that produce it are `#plot expr` (`Wiz/Elab/Command.lean`, `command.plot`), which
+evaluates a `Plot.Chart` with `Plot.widget` (`lib/Plot.wiz`), and `#anim expr` /
+`#animate expr` (`command.anim`/`command.animate`), which evaluates an `Anim` with
+`Anim.widget` (`lib/Anim.wiz`). Both report the display value as the command's message.
+`wiz/interactiveInfo` reports it with `kind: "widget"`, a title taken from the payload's
+`summary`, and `text` set to the whole display value (the prefix included).
 
 The display value is the Loom widget bundle used by `lib/Web/Widget.wiz`:
 
@@ -157,6 +159,10 @@ WIZ_WIDGET:{"schema":"wiz.widget/1","kind":"plot","mimeType":"image/svg+xml",
             "title":string,"summary":string,"width":nat,"height":nat,
             "svg":string,"html":string,"count":1}
 ```
+
+An animation payload has `kind: "anim"` and adds `duration`, `frameCount`, a `frames`
+array of `{t, svg}` samples, a `runtime` state and `controls` (data, not DOM code); see
+`docs/anim.md`.
 
 `html` is the self-contained `<figure class="wiz-plot">` around the SVG and `svg` is
 the drawing on its own (`Plot.svg`); both are deterministic and contain no `href`,

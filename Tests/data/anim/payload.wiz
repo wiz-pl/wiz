@@ -1,0 +1,58 @@
+import Anim
+import Json
+import Plot
+
+def a : Anim := Anim.titled "Demo" (Anim.hold 2 (Anim.scene 120 80 [
+  Anim.dot (Anim.pt 10 10) 4, Anim.arc (Anim.pt 60 40) 20 0 90]))
+
+def p : Json := Anim.payload a
+def raw : String := Json.render p
+def cs : List Json := Json.getList p "controls"
+def fs : List Json := Json.getList p "frames"
+
+def decOf (j : Json) : String := match j with
+  | .dec s => s
+  | _ => ""
+def boolOf (j : Json) : Bool := match j with
+  | .bool b => b
+  | _ => .false
+def nth : List Json → Nat → Json
+  | .nil, _ => Json.null
+  | .cons x xs, .zero => x
+  | .cons x xs, .succ k => nth xs k
+def field (j : Json) (k : String) : Json := match Json.get j k with
+  | .some v => v
+  | .none => Json.null
+
+def rt : Json := field p "runtime"
+#eval Json.getStr p "schema"
+#eval Json.getStr p "kind"
+#eval Json.getStr p "mimeType"
+#eval Json.getStr p "title"
+#eval Json.getStr p "summary"
+#eval Json.getNat p "width"
+#eval Json.getNat p "height"
+#eval decOf (field p "duration")
+#eval Json.getNat p "frameCount"
+#eval List.length fs
+#eval List.length cs
+#eval decOf (field (nth fs 0) "t")
+#eval decOf (field (nth fs 23) "t")
+#eval Json.getStr (nth cs 0) "name"
+#eval Json.getStr (nth cs 2) "kind"
+#eval decOf (field (nth cs 2) "max")
+#eval decOf (field (nth cs 3) "max")
+#eval Json.getStr (Anim.payload (Anim.hold 1 (Anim.scene 10 10 []))) "title"
+#eval String.startsWith (Anim.widget a) "WIZ_WIDGET:"
+#eval String.contains raw "<script"
+#eval String.contains raw "href"
+#eval String.contains (Json.getStr p "html") "<figcaption>Demo</figcaption>"
+#eval String.eq (Json.getStr p "svg") (Anim.svgAt a 0)
+#eval String.eq (Json.getStr (nth fs 0) "svg") (Anim.svgAt a 0)
+#eval Bool.not (boolOf (field rt "playing"))
+#eval String.eq (decOf (field rt "time")) "0"
+#eval String.eq (decOf (field rt "rate")) "1"
+#eval boolOf (field rt "loop")
+#eval String.eq (Json.getStr (nth cs 0) "event") "click"
+#eval String.eq (Json.getStr (nth cs 2) "event") "input"
+#eval Plot.showQ (Anim.duration a)

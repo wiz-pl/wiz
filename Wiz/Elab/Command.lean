@@ -3072,6 +3072,38 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           | some text => report .info cmd.info text
           | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
         | .error err => report .error cmd.info s!"cannot run this: {err}"
+  | "command.anim" | "command.animate" =>
+    -- `#anim expr` / `#animate expr`: elaborate the animation, then run `Anim.widget` on
+    -- it and report the `WIZ_WIDGET:` display value as a message at the command (the
+    -- infoview turns such a message into a widget item).
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+      let (t, _) ← Elab.infer {} (cmd.getArg 1)
+      solveSortConstraints
+      let t ← zonk 0 t
+      ensureNoMVars t cmd.info
+      pure t
+    match r with
+    | .error e => reportErr e
+    | .ok t =>
+      if !s.globals.contains "Anim.widget" then
+        report .error cmd.info "#anim: import Anim first (the widget renderer is Anim.widget)"
+      else
+        let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
+        let ctx : Ctx R := { globals := s.globals, proof := true }
+        let term := Term.app (.const "Anim.widget" []) t
+        let result := do
+          let (ty, _) ← Wiz.infer ctx term
+          let e ← eraseTop ctx term ty
+          let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+          pure (ty, e, code, failed)
+        match result with
+        | .ok (_, _, _, (n, err) :: _) =>
+          report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+        | .ok (_, e, code, []) =>
+          match (run code [] e).toString? with
+          | some text => report .info cmd.info text
+          | none => report .error cmd.info "#anim: the value is not a string (expected an Anim)"
+        | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap
     let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do

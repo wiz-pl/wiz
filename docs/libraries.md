@@ -2338,6 +2338,61 @@ Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB 
 stacked bars (several bar series are drawn at the same positions; grouping is a layout
 policy), and text metrics (labels use fixed offsets, not measured widths).
 
+## Animation: math scenes as a pure function of time (`lib/Anim.wiz`)
+
+`import Anim` animates math pictures. An `Anim` is a title, an exact duration and a
+sampler `at : Q → Scene`; `Anim.frame a t` clamps `t` to `[0, duration]`. The host owns
+the clock, so the library has no state and a frame is reproducible byte for byte.
+
+```
+import Anim
+
+def dot : Anim :=
+  Anim.hold 1 (Anim.scene 200 120 [Anim.dot (Anim.pt 60 60) 8])
+
+#eval Anim.svg (Anim.frame dot (1 : Q))   -- one deterministic SVG document
+#eval Json.render (Anim.render dot)       -- a Jupyter mime bundle
+#anim dot                                 -- a WIZ_WIDGET: anim payload (frame 0)
+```
+
+A scene is a pixel canvas plus `point`, `segment`, `polyline`, `circle`, `arc` and
+`text` shapes with a `Style` (`stroke`, `fill`, `width`, `opacity`, `dash`).
+`Anim.Plane` maps ordinary math coordinates (`y` up) to pixels. Transformations are
+`Shape.translate`, `scaleAbout` and `rotateAbout` (fixed-point trigonometry);
+`Anim.move`, `rotateOver`, `scaleOver`, `fade` and `morph` apply them over time.
+`Shape.morphSome` defines morphing shape by shape (same constructor and arity; text needs
+the same string), and `Shape.morphOr` holds the start shape when no continuous morph
+exists. Easing curves are exact and monotone: `linear`, `easeIn`, `easeOut`,
+`easeInOut`, the cubic variants and `holdEase`.
+
+The sequencing DSL is an algebra:
+
+* `seq` (then) and `par` (with) are associative, with `Anim.empty` as two-sided
+  identity; `par` is not commutative because it paints its right side on top.
+* `stagger g a b = par a (delay g b)`, `loop n a` repeats, `retime f d a` resamples,
+  `speed k`/`slow k` scale time and `reverse` plays backwards.
+* The laws (`seq`/`par` monoids, `delay g (seq a b) = seq (delay g a) b`, reversal
+  involution and anti-composition, `speed` functoriality, `loop` splitting) are stated in
+  `docs/anim.md` and pinned by the `anim` test group on a fixed time grid.
+
+`#anim expr` (also `#animate expr`) is the command. It evaluates `Anim.widget`: a
+`wiz.widget/1` bundle with `kind` `anim`, `mimeType` `image/svg+xml`, `title`,
+`summary`, `width`, `height`, the frame-0 `svg` and `html`, `duration`, `frameCount`,
+`frames` (24 evenly spaced `{t, svg}` samples), a `runtime` state
+(`playing`/`time`/`rate`/`loop`) and `controls` (play, pause, scrub, speed) as data. The
+library half of interactivity is pure: `Anim.handle a runtime event value` handles
+`play`/`pause`/`toggle`/`scrub`/`rate`/`tick`, `Anim.step` advances a runtime by `dt`,
+and `Anim.payloadAt`/`Anim.widgetAt` render the payload at a runtime state. A host can
+either flip through `frames` with its own timer (no callback) or forward events and
+re-render through the session; `docs/anim.md` ("What the host still has to do") spells
+out both. There is no DOM code in the library.
+
+The worked examples are `examples/anim-unwind.wiz` (a circle of radius 55 unwinding to
+a line of length 2πr) and `examples/anim-sine.wiz` (`(x, sin x)` traced from 0 to 2π);
+their frames at fixed times are goldens in `Tests/data/anim/`, compared byte for byte.
+Tests: `anim` (`lake test -- '=anim'`). Not implemented: 3D, clipping, Bézier paths,
+text metrics, colour interpolation in a morph and a JavaScript runtime.
+
 ## Command-line parsing (`lib/Args.wiz`)
 
 **Provisional.** `lib/Args.wiz` is new, so the API and these rules may change; the `args`

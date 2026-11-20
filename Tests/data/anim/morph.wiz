@@ -1,0 +1,43 @@
+import Anim
+import Plot
+
+def scene0 : Anim.Scene := Anim.scene 100 100 []
+
+def c1 : Anim.Shape := .circle (Anim.pt 10 10) 5
+def c2 : Anim.Shape := .circle (Anim.pt 30 20) 15
+
+def seg1 : Anim.Shape := .segment (Anim.pt 0 0) (Anim.pt 10 0)
+def seg2 : Anim.Shape := .segment (Anim.pt 10 10) (Anim.pt 10 20)
+
+def pl1 : Anim.Shape := .polyline [Anim.pt 0 0, Anim.pt 10 0]
+def pl2 : Anim.Shape := .polyline [Anim.pt 10 10, Anim.pt 20 10]
+def pl3 : Anim.Shape := .polyline [Anim.pt 0 0]
+
+def txt : Anim.Shape := .text (Anim.pt 20 20) "x" 12 "middle"
+
+def sv (sh : Anim.Shape) : String := Anim.shapeSvg sh Anim.style
+
+#eval String.contains (sv (Anim.Shape.morphOr c1 c2 (Plot.frac 1 2))) "cx=\"20\""
+#eval String.contains (sv (Anim.Shape.morphOr c1 c2 (Plot.frac 1 2))) "cy=\"15\""
+#eval String.contains (sv (Anim.Shape.morphOr c1 c2 (Plot.frac 1 2))) "r=\"10\""
+#eval String.eq (sv (Anim.Shape.morphOr c1 c1 (Plot.frac 1 2))) (sv c1)
+#eval String.eq (sv (Anim.Shape.morphOr c1 c2 1)) (sv c2)
+#eval String.contains (sv (Anim.Shape.morphOr seg1 seg2 (Plot.frac 1 2))) "x1=\"5\""
+#eval String.contains (sv (Anim.Shape.morphOr seg1 seg2 (Plot.frac 1 2))) "y2=\"10\""
+#eval String.eq (sv (Anim.Shape.morphOr pl1 pl2 (Plot.frac 1 2))) (sv (.polyline [Anim.pt 5 5, Anim.pt 15 5]))
+#eval String.eq (sv (Anim.Shape.morphOr pl1 pl3 (Plot.frac 1 2))) (sv pl1)
+#eval String.eq (sv (Anim.Shape.morphOr pl1 pl3 1)) (sv pl3)
+#eval String.eq (sv (Anim.Shape.morphOr c1 txt (Plot.frac 1 2))) (sv c1)
+#eval String.eq (sv (Anim.Shape.morphOr c1 txt 1)) (sv txt)
+#eval (match Anim.Shape.morphSome c1 txt (Plot.frac 1 2) with | .some _ => (.false : Bool) | .none => (.true : Bool))
+
+def moved : Anim.Scene := Anim.Scene.mapShape (Anim.Shape.translate (Anim.pt 5 5)) (Anim.scene 100 100 [Anim.dot (Anim.pt 10 10) 4])
+#eval String.contains (Anim.svg moved) "cx=\"15\""
+def scaled : Anim.Scene := Anim.Scene.mapShape (Anim.Shape.scaleAbout (Anim.pt 10 10) 2) (Anim.scene 100 100 [Anim.circle (Anim.pt 10 10) 5])
+#eval String.contains (Anim.svg scaled) "r=\"10\""
+def rotated : Anim.Scene := Anim.Scene.mapShape (Anim.Shape.rotateAbout (Anim.pt 0 0) 90) (Anim.scene 100 100 [Anim.dot (Anim.pt 10 0) 4])
+#eval String.contains (Anim.svg rotated) "cx=\"0\""
+#eval String.contains (Anim.svg rotated) "cy=\"10\""
+def faded : Anim.Scene := Anim.Scene.fade (Plot.frac 1 2) (Anim.scene 100 100 [Anim.dot (Anim.pt 10 0) 4])
+#eval String.contains (Anim.svg faded) "opacity=\"0.5\""
+#eval String.contains (Anim.svg (Anim.frame (Anim.morph c1 c2 1 Anim.linear scene0) (Plot.frac 1 2))) "r=\"10\""

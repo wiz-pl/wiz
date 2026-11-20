@@ -1,0 +1,68 @@
+import Anim
+import Plot
+
+def scA : Anim.Scene := Anim.scene 120 80 [Anim.dotColour "#dc2626" (Anim.pt 10 40) 5]
+def scB : Anim.Scene := Anim.scene 120 80 [Anim.dotColour "#059669" (Anim.pt 60 40) 5]
+def scC : Anim.Scene := Anim.scene 120 80 [Anim.dotColour "#2563eb" (Anim.pt 110 40) 5]
+
+/-- Constant animations: first and final frames agree, so seam conventions do not matter. -/
+def a : Anim := Anim.hold 1 scA
+def b : Anim := Anim.hold 2 scB
+def c : Anim := Anim.hold 3 scC
+
+/-- Continuous pieces: `slideA` ends where `slideB` starts, so reversals are seamless. -/
+def slideA : Anim := Anim.move (Anim.pt 0 0) (Anim.pt 30 0) 1 Anim.linear scA
+def slideB : Anim := Anim.move (Anim.pt 30 0) (Anim.pt 60 0) 2 Anim.linear scA
+def slideC : Anim := Anim.move (Anim.pt 60 0) (Anim.pt 90 0) 1 Anim.linear scA
+
+def times : List Q := [
+  0, Plot.frac 1 4, Plot.frac 1 2, 1, Plot.frac 3 2, 2, 3, 4, 5]
+
+def same (x y : Anim) : Bool :=
+  List.all (fun t => String.eq (Anim.svg (Anim.frame x t)) (Anim.svg (Anim.frame y t))) times
+
+def sameAt (x y : Anim) (ts : List Q) : Bool :=
+  List.all (fun t => String.eq (Anim.svg (Anim.frame x t)) (Anim.svg (Anim.frame y t))) ts
+
+def seam : List Q := [0, Plot.frac 1 2, 1, Plot.frac 3 2, 2]
+
+#eval same (Anim.seq (Anim.seq slideA slideB) slideC) (Anim.seq slideA (Anim.seq slideB slideC))
+#eval same (Anim.seq Anim.empty a) a
+#eval same (Anim.seq a Anim.empty) a
+#eval same (Anim.seq Anim.empty slideA) slideA
+#eval same (Anim.seq slideA Anim.empty) slideA
+#eval same (Anim.par (Anim.par a b) c) (Anim.par a (Anim.par b c))
+#eval same (Anim.par Anim.empty a) a
+#eval same (Anim.par a Anim.empty) a
+#eval same (Anim.stagger 0 a b) (Anim.par a b)
+#eval same (Anim.delay 0 a) a
+#eval same (Anim.seq (Anim.delay 2 a) b) (Anim.delay 2 (Anim.seq a b))
+#eval sameAt (Anim.reverse (Anim.reverse slideA)) slideA seam
+#eval sameAt (Anim.reverse (Anim.seq slideA slideB)) (Anim.seq (Anim.reverse slideB) (Anim.reverse slideA)) seam
+#eval same (Anim.reverse Anim.empty) Anim.empty
+#eval Plot.showQ (Anim.duration (Anim.reverse slideA))
+#eval same (Anim.speed 1 slideA) slideA
+#eval same (Anim.speed 2 (Anim.seq slideA slideB)) (Anim.seq (Anim.speed 2 slideA) (Anim.speed 2 slideB))
+#eval same (Anim.speed 2 (Anim.speed 3 slideA)) (Anim.speed 6 slideA)
+#eval same (Anim.loop 1 slideA) slideA
+#eval same (Anim.loop 2 a) (Anim.seq a a)
+#eval same (Anim.loop 3 a) (Anim.seq (Anim.loop 1 a) (Anim.loop 2 a))
+#eval same (Anim.loop 0 a) Anim.empty
+#eval same (Anim.retime (fun t => t) (Anim.duration slideA) slideA) slideA
+#eval Plot.showQ (Anim.duration (Anim.seq slideA slideB))
+#eval Plot.showQ (Anim.duration (Anim.par a b))
+#eval Plot.showQ (Anim.duration (Anim.speed 2 slideA))
+#eval Plot.showQ (Anim.duration (Anim.loop 3 a))
+#eval Plot.showQ (Anim.duration (Anim.reverse slideB))
+#eval String.eq (Anim.svg (Anim.final slideA)) (Anim.svg (Anim.first slideB))
+#eval String.eq (Anim.svg (Anim.frame slideA (Plot.frac 1 2))) (Anim.svg (Anim.frame slideA (Plot.frac 1 2)))
+#eval String.eq (Anim.svg (Anim.frame slideA (-1))) (Anim.svg (Anim.frame slideA 0))
+#eval String.eq (Anim.svg (Anim.frame slideA 99)) (Anim.svg (Anim.frame slideA (Anim.duration slideA)))
+#eval Plot.showQ (Anim.eased 2 Anim.linear 1)
+#eval Plot.showQ (Anim.eased 0 Anim.easeInOut 0)
+#eval Plot.showQ (Anim.eased 2 Anim.linear (-1))
+#eval Plot.showQ (Anim.eased 2 Anim.linear 3)
+#eval String.eq (Anim.svg (Anim.Scene.overlay (Anim.Scene.overlay scA scB) scC)) (Anim.svg (Anim.Scene.overlay scA (Anim.Scene.overlay scB scC)))
+#eval String.eq (Anim.svg (Anim.Scene.overlay Anim.Scene.empty scA)) (Anim.svg scA)
+#eval String.eq (Anim.svg (Anim.Scene.overlay scA Anim.Scene.empty)) (Anim.svg scA)
+#eval String.eq (Anim.svg (Anim.Scene.overlay scA scB)) (Anim.svg (Anim.Scene.overlay scB scA))

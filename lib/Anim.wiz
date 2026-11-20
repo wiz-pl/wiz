@@ -1,0 +1,1098 @@
+import Text
+import Json
+import Rat
+import Plot
+
+local infixr:60 " +++ " => String.append
+/-!
+# Anim
+
+Math animation as **a pure function of time**, plus a small algebra of time.
+
+An `Anim` is a title, an exact duration in seconds and a function `at : Q → Scene`;
+`Anim.frame a t` is the public sampler and **clamps** `t` to `[0, a.duration]`. There is
+no clock, no mutable state and no randomness in the library: the host owns the clock and
+calls `frame`, so a golden test can compare `frame t` for a fixed `t` and a second call
+returns the same bytes.
+
+The combinators form two monoids over animations and one over scenes:
+
+* `seq a b` — run `a`, then `b`; `Anim.empty` is its two-sided identity, and `seq` is
+  associative.
+* `par a b` — overlay the two scenes; associative with `Anim.empty` as identity. It is
+  **not** commutative, because painting order is observable: `par a b` paints `b` over
+  `a`.
+* `Scene.overlay` — list append with a size union, associative with `Scene.empty` as
+  identity.
+
+`stagger g a b` is `par a (delay g b)`, `loop n a` repeats `a` `n` times,
+`reverse a` plays it backwards and `speed k a` (with `k ≥ 1`) runs it `k` times faster.
+The laws, and the tests that pin them, are in `docs/anim.md` and `wiz-notes/anim.md`.
+
+**Arithmetic.** Time, easing, positions and radii are exact rationals (`Q`, `lib/Rat.wiz`);
+rendering rounds each coordinate once to an integer pixel (`Plot.qRound`), so the SVG is
+byte-stable and the whole library is checkable and `#eval`-able. Trigonometry (for arcs
+and rotation) is a fixed-point integer algorithm (`Anim.sinDeg`), not the host's `libm`.
+
+```
+import Anim
+
+def dot : Anim := Anim.hold 1 (Anim.scene 200 120
+  [Anim.dot (Anim.pt 60 60) 8])
+
+#eval Anim.svg (Anim.frame dot (1 : Q)) -- one deterministic SVG document
+#anim dot                              -- a WIZ_WIDGET: anim payload, frame 0
+```
+
+The host protocol: the payload carries the static frame (`svg`/`html`), a sampled
+`frames` array, and `runtime`/`controls`. Play/pause/scrub/speed are **events**, handled
+by the pure `Anim.handle : Anim → Runtime → String → String → Runtime`; the library emits
+no DOM code. `docs/anim.md` ("What the host still has to do") lists the two ways a host
+can drive it.
+-/
+
+-- ## Time and easing
+
+/-- Animation time, in seconds. Exact, so `frame` is a pure function with no float noise. -/
+def Anim.Time : Type := Q
+
+/-- A time in seconds, as a rational (`Anim.sec 3 2` is 1.5 s). -/
+def Anim.sec (n d : Nat) : Q := Plot.frac n d
+
+/-- An easing curve: a map from progress in `[0, 1]` to progress in `[0, 1]`. -/
+def Anim.Ease : Type := Q → Q
+
+/-- `x` restricted to `[0, 1]`. -/
+def Anim.clamp01 (x : Q) : Q :=
+  if Plot.qLt x 0 then 0 else if Plot.qLt 1 x then 1 else x
+
+/-- `x` restricted to `[lo, hi]`. -/
+def Anim.clampQ (lo hi x : Q) : Q :=
+  if Plot.qLt x lo then lo else if Plot.qLt hi x then hi else x
+
+/-- The identity easing. -/
+def Anim.linear (u : Q) : Q := Anim.clamp01 u
+
+/-- `u²`, slow at the start. -/
+def Anim.easeIn (u : Q) : Q :=
+  let u := Anim.clamp01 u; u * u
+
+/-- `1 − (1 − u)²`, fast at the start, slow at the end. -/
+def Anim.easeOut (u : Q) : Q :=
+  let u := Anim.clamp01 u; 1 - (1 - u) * (1 - u)
+
+/-- Smoothstep `3u² − 2u³`: zero slope at both ends, symmetric. -/
+def Anim.easeInOut (u : Q) : Q :=
+  let u := Anim.clamp01 u; 3 * u * u - 2 * u * u * u
+
+/-- `u³`. -/
+def Anim.easeInCubic (u : Q) : Q :=
+  let u := Anim.clamp01 u; u * u * u
+
+/-- `1 − (1 − u)³`. -/
+def Anim.easeOutCubic (u : Q) : Q :=
+  let u := Anim.clamp01 u; 1 - (1 - u) * (1 - u) * (1 - u)
+
+/-- The cubic analogue of `easeInOut`: `4u³` before the midpoint, then the mirror. -/
+def Anim.easeInOutCubic (u : Q) : Q :=
+  let u := Anim.clamp01 u;
+  if Plot.qLt u ((1 : Q) / 2) then 4 * u * u * u
+  else 1 - 4 * (1 - u) * (1 - u) * (1 - u)
+
+/-- A step: 0 until the end, then 1. Useful for a `seq` that changes a picture instantly. -/
+def Anim.holdEase (u : Q) : Q :=
+  if Plot.qLt u 1 then 0 else 1
+
+/-- The eased progress of a duration `d` at time `t`: `ease (clamp01 (t / d))`, and 1 for
+a zero-length interval (it is over as soon as it starts). -/
+def Anim.eased (d : Q) (ease : Anim.Ease) (t : Q) : Q :=
+  match Plot.qLe d 0 with
+  | .true => ease 1
+  | .false => ease (Anim.clamp01 ((t : Q) / d))
+
+-- ## Points and shapes
+
+/-- A point in scene coordinates. Coordinates are CSS pixels with y **down**, exactly as
+SVG draws them; `Anim.Plane` maps ordinary math coordinates (y up) into them. -/
+structure Anim.Point where
+  x : Q
+  y : Q
+
+/-- A point. -/
+def Anim.pt (x y : Q) : Anim.Point := Anim.Point.mk x y
+
+/-- `p + q`. -/
+def Anim.Point.add (p q : Anim.Point) : Anim.Point :=
+  Anim.Point.mk (p.x + q.x) (p.y + q.y)
+
+/-- `p − q`. -/
+def Anim.Point.sub (p q : Anim.Point) : Anim.Point :=
+  Anim.Point.mk (p.x - q.x) (p.y - q.y)
+
+/-- `k · p` in a centre `c`: the point `c + k·(p − c)`. -/
+def Anim.Point.scaleAbout (c : Anim.Point) (k : Q) (p : Anim.Point) : Anim.Point :=
+  Anim.Point.mk (c.x + k * (p.x - c.x)) (c.y + k * (p.y - c.y))
+
+/-- The linear interpolation `a + u·(b − a)`; `u` is not clamped (callers use
+`Anim.clamp01` for a tween). -/
+def Anim.lerp (a b u : Q) : Q := a + (b - a) * u
+
+/-- `Point.lerp`. -/
+def Anim.lerpPt (a b : Anim.Point) (u : Q) : Anim.Point :=
+  Anim.Point.mk (Anim.lerp a.x b.x u) (Anim.lerp a.y b.y u)
+
+/-- A point in ordinary math coordinates (`x` right, `y` up) and the pixel rectangle it
+occupies. `Plane.map` is the one conversion the examples use. -/
+structure Anim.Plane where
+  width : Nat
+  height : Nat
+  cx : Q
+  cy : Q
+  sx : Q
+  sy : Q
+
+/-- A plane with its origin at the centre of a `width × height` scene and `sx`/`sy`
+pixels per math unit (equal values give an undistorted picture). -/
+def Anim.plane (width height : Nat) (sx sy : Q) : Anim.Plane :=
+  Anim.Plane.mk width height
+    (Q.div (Q.ofNat width) 2) (Q.div (Q.ofNat height) 2) sx sy
+
+/-- A plane whose origin is at pixel `(cx, cy)`. -/
+def Anim.planeAt (width height : Nat) (cx cy sx sy : Q) : Anim.Plane :=
+  Anim.Plane.mk width height cx cy sx sy
+
+/-- Math coordinates to pixels: `(cx + x·sx, cy − y·sy)`. -/
+def Anim.Plane.map (pl : Anim.Plane) (p : Anim.Point) : Anim.Point :=
+  Anim.Point.mk (pl.cx + p.x * pl.sx) (pl.cy - p.y * pl.sy)
+
+/-- A plane point from two rationals. -/
+def Anim.Plane.pt (pl : Anim.Plane) (x y : Q) : Anim.Point :=
+  Anim.Plane.map pl (Anim.pt x y)
+
+/-- A style for a shape. `fill` is `"none"` or a colour; `width` is the stroke width in
+pixels; `dash` is `""` or an SVG `stroke-dasharray` value. -/
+structure Anim.Style where
+  stroke : String
+  fill : String
+  width : Q
+  opacity : Q
+  dash : String
+
+/-- The default style: a 2 px blue stroke, no fill, opaque. -/
+def Anim.style : Anim.Style := Anim.Style.mk "#2563eb" "none" 2 1 ""
+
+/-- The style with another stroke colour. -/
+def Anim.strokeColour (c : String) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk c s.fill s.width s.opacity s.dash
+
+/-- The style with a fill colour (`"none"` turns filling off). -/
+def Anim.fillColour (c : String) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk s.stroke c s.width s.opacity s.dash
+
+/-- The style with another stroke width. -/
+def Anim.lineWidth (w : Q) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk s.stroke s.fill w s.opacity s.dash
+
+/-- The style with an opacity, clamped to `[0, 1]`. -/
+def Anim.withOpacity (o : Q) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk s.stroke s.fill s.width (Anim.clamp01 o) s.dash
+
+/-- Multiply a style's opacity (a fade), clamped to `[0, 1]`. -/
+def Anim.multiplyOpacity (k : Q) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk s.stroke s.fill s.width (Anim.clamp01 (k * s.opacity)) s.dash
+
+/-- The style with a dash pattern. -/
+def Anim.dashed (dash : String) (s : Anim.Style) : Anim.Style :=
+  Anim.Style.mk s.stroke s.fill s.width s.opacity dash
+
+/-- The drawn shape of an item. Angles are degrees and grow clockwise on screen (SVG's
+y axis points down). -/
+inductive Anim.Shape where
+  | point (p : Anim.Point) (r : Q)
+  | segment (a b : Anim.Point)
+  | polyline (ps : List Anim.Point)
+  | circle (c : Anim.Point) (r : Q)
+  | arc (c : Anim.Point) (r : Q) (start sweep : Q)
+  | text (p : Anim.Point) (s : String) (size : Q) (anchor : String)
+
+/-- A shape with its style. -/
+structure Anim.Item where
+  shape : Anim.Shape
+  style : Anim.Style
+
+-- ## Scenes
+
+/-- A scene: a fixed pixel canvas and painted items in back-to-front order. A background
+of `"none"` marks `Scene.empty`, the identity of `overlay`. -/
+structure Anim.Scene where
+  width : Nat
+  height : Nat
+  background : String
+  items : List Anim.Item
+
+/-- The empty scene: the identity of `Scene.overlay`. -/
+def Anim.Scene.empty : Anim.Scene := Anim.Scene.mk 0 0 "none" []
+
+/-- A blank white scene, or one with items. -/
+def Anim.scene (width height : Nat) (items : List Anim.Item) : Anim.Scene :=
+  Anim.Scene.mk width height "#ffffff" items
+
+/-- A scene with another background colour. -/
+def Anim.Scene.withBackground (c : String) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height c s.items
+
+/-- A scene with no items (same canvas and background). -/
+def Anim.Scene.blank (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height s.background []
+
+/-- Overlay two scenes: the union of their canvases, `a`'s background (unless it is the
+empty scene's `"none"`), and `a`'s items under `b`'s. Associative, with
+`Scene.empty` as the two-sided identity. -/
+def Anim.Scene.overlay (a b : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk (Nat.max a.width b.width) (Nat.max a.height b.height)
+    (match String.eq a.background "none" with
+      | .true => b.background
+      | .false => a.background)
+    (List.append a.items b.items)
+
+/-- One item on top. -/
+def Anim.Scene.addItem (it : Anim.Item) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height s.background (List.append s.items (List.cons it .nil))
+
+/-- Items on top, in order. -/
+def Anim.Scene.add (its : List Anim.Item) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height s.background (List.append s.items its)
+
+/-- Apply a shape transformation to every item. -/
+def Anim.Scene.mapShape (f : Anim.Shape → Anim.Shape) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height s.background
+    (List.map (fun i => Anim.Item.mk (f i.shape) i.style) s.items)
+
+/-- Apply a style transformation to every item. -/
+def Anim.Scene.mapStyle (f : Anim.Style → Anim.Style) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mk s.width s.height s.background
+    (List.map (fun i => Anim.Item.mk i.shape (f i.style)) s.items)
+
+/-- Multiply every item's opacity by `k` (a fade). -/
+def Anim.Scene.fade (k : Q) (s : Anim.Scene) : Anim.Scene :=
+  Anim.Scene.mapStyle (Anim.multiplyOpacity k) s
+
+-- ## Item constructors
+
+/-- A filled dot of radius `r`. -/
+def Anim.dot (p : Anim.Point) (r : Q) : Anim.Item :=
+  Anim.Item.mk (.point p r) (Anim.fillColour "#2563eb" (Anim.lineWidth 0 Anim.style))
+
+/-- A dot with a stroke colour (the dot is filled with it). -/
+def Anim.dotColour (c : String) (p : Anim.Point) (r : Q) : Anim.Item :=
+  Anim.Item.mk (.point p r) (Anim.fillColour c (Anim.lineWidth 0 Anim.style))
+
+/-- A line segment. -/
+def Anim.seg (a b : Anim.Point) : Anim.Item :=
+  Anim.Item.mk (.segment a b) Anim.style
+
+/-- A polyline through the points, in order. -/
+def Anim.line (ps : List Anim.Point) : Anim.Item :=
+  Anim.Item.mk (.polyline ps) Anim.style
+
+/-- A circle (no fill unless the style says otherwise). -/
+def Anim.circle (c : Anim.Point) (r : Q) : Anim.Item :=
+  Anim.Item.mk (.circle c r) Anim.style
+
+/-- An arc of `sweep` degrees from `start` degrees, clockwise on screen. A `sweep` of 360
+or more draws a circle. -/
+def Anim.arc (c : Anim.Point) (r start sweep : Q) : Anim.Item :=
+  Anim.Item.mk (.arc c r start sweep) Anim.style
+
+/-- A text label, anchored `"start"`, `"middle"` or `"end"`. -/
+def Anim.label (p : Anim.Point) (text : String) : Anim.Item :=
+  Anim.Item.mk (.text p text 12 "middle")
+    (Anim.Style.mk "#111111" "#111111" 0 1 "")
+
+/-- A label at another size. -/
+def Anim.labelSize (size : Q) (p : Anim.Point) (text : String) : Anim.Item :=
+  Anim.Item.mk (.text p text size "middle")
+    (Anim.Style.mk "#111111" "#111111" 0 1 "")
+
+/-- Any item with another stroke colour. -/
+def Anim.itemStroke (c : String) (i : Anim.Item) : Anim.Item :=
+  Anim.Item.mk i.shape (Anim.strokeColour c i.style)
+
+/-- Any item with a fill colour. -/
+def Anim.itemFill (c : String) (i : Anim.Item) : Anim.Item :=
+  Anim.Item.mk i.shape (Anim.fillColour c i.style)
+
+/-- Any item with another stroke width. -/
+def Anim.itemWidth (w : Q) (i : Anim.Item) : Anim.Item :=
+  Anim.Item.mk i.shape (Anim.lineWidth w i.style)
+
+/-- Any item with an opacity. -/
+def Anim.itemOpacity (o : Q) (i : Anim.Item) : Anim.Item :=
+  Anim.Item.mk i.shape (Anim.withOpacity o i.style)
+
+/-- Any item with a dash pattern. -/
+def Anim.itemDashed (dash : String) (i : Anim.Item) : Anim.Item :=
+  Anim.Item.mk i.shape (Anim.dashed dash i.style)
+
+-- ## Trigonometry (fixed point, deterministic)
+
+/-- Fixed-point multiplication, six decimals, truncating (as `Plot.fxMul`). -/
+def Anim.fxMul (a b : Int) : Int := Int.div (Int.mul a b) 1000000
+
+/-- Fixed-point division, six decimals. -/
+def Anim.fxDiv (a b : Int) : Int := Int.div (Int.mul a 1000000) b
+
+/-- The smaller of two naturals. -/
+def Anim.natMin (m n : Nat) : Nat :=
+  match Nat.le m n with
+  | .true => m
+  | .false => n
+
+/-- π to six places, as an exact rational approximation. The library never needs more:
+positions are rounded to pixels. -/
+def Anim.pi : Q := (3141593 : Q) / 1000000
+
+/-- `t` degrees in radians, exactly (up to `Anim.pi`'s six places). -/
+def Anim.rad (deg : Q) : Q := (deg * Anim.pi) / 180
+
+/-- `n` more terms of `sin x = x − x³/3! + x⁵/5! − …`, in fixed point 1e6. `t2` is
+`x²` and `term` is the last term. -/
+def Anim.sinTerms (t2 : Int) (left : Nat) (n : Nat) (term acc : Int) : Int :=
+  match left with
+  | .zero => acc
+  | .succ l =>
+    let term := Int.neg (Int.div (Anim.fxMul term t2)
+      (Int.ofNat (Nat.mul (Nat.mul 2 (Nat.succ n)) (Nat.succ (Nat.mul 2 (Nat.succ n))))))
+    Anim.sinTerms t2 l (Nat.succ n) term (Int.add acc term)
+
+/-- Sine of an angle in **degrees**, in fixed point (1e6) — an integer Taylor series
+after quadrant reduction, so the SVG does not depend on the host's floating point. The
+input is reduced into `[0, 360)` first. -/
+def Anim.sinFixed (deg : Q) : Int :=
+  -- reduce to [0, 360)
+  let turns := Int.div deg.num (Int.mul 360 deg.den);
+  let d := Q.sub deg (Q.mul (Q.ofInt turns) 360);
+  let d := if Plot.qLt d 0 then Q.add d 360 else d;
+  let d := if Plot.qLe 360 d then Q.sub d 360 else d;
+  -- quadrant reduction: x in [0, 90]
+  let sign : Int :=
+    if Plot.qLe d 90 then 1
+    else if Plot.qLe d 180 then 1
+    else if Plot.qLe d 270 then -1
+    else -1;
+  let x :=
+    if Plot.qLe d 90 then d
+    else if Plot.qLe d 180 then Q.sub 180 d
+    else if Plot.qLe d 270 then Q.sub d 180
+    else Q.sub 360 d;
+  let xf := Plot.qRound (Q.mul x 1000000);
+  -- radians in fixed point: xf · π / 180
+  let rf := Int.div (Int.mul xf 3141593) 180000000;
+  let t2 := Anim.fxMul rf rf;
+  Int.mul sign (Anim.sinTerms t2 10 0 rf rf)
+
+/-- Cosine of an angle in degrees, in fixed point. -/
+def Anim.cosFixed (deg : Q) : Int := Anim.sinFixed (Q.add deg 90)
+
+/-- `sin` of an angle in degrees, as an exact rational. -/
+def Anim.sinDeg (deg : Q) : Q := Q.div (Q.ofInt (Anim.sinFixed deg)) 1000000
+
+/-- `cos` of an angle in degrees, as an exact rational. -/
+def Anim.cosDeg (deg : Q) : Q := Q.div (Q.ofInt (Anim.cosFixed deg)) 1000000
+
+/-- `sin` of an angle in radians, as an exact rational (via `Anim.rad`). -/
+def Anim.sinRad (r : Q) : Q := Anim.sinDeg ((r * 180) / Anim.pi)
+
+/-- `cos` of an angle in radians. -/
+def Anim.cosRad (r : Q) : Q := Anim.cosDeg ((r * 180) / Anim.pi)
+
+-- ## Shape transformations
+
+/-- Translate every point of a shape; radii and font sizes are unchanged. -/
+def Anim.Shape.translate (d : Anim.Point) (sh : Anim.Shape) : Anim.Shape :=
+  match sh with
+  | .point p r => .point (Anim.Point.add p d) r
+  | .segment a b => .segment (Anim.Point.add a d) (Anim.Point.add b d)
+  | .polyline ps => .polyline (List.map (fun p => Anim.Point.add p d) ps)
+  | .circle c r => .circle (Anim.Point.add c d) r
+  | .arc c r s w => .arc (Anim.Point.add c d) r s w
+  | .text p s size anchor => .text (Anim.Point.add p d) s size anchor
+
+/-- Scale a shape about a centre. Radii and font sizes scale by `|k|` (so a negative `k`
+mirrors without a negative radius). -/
+def Anim.Shape.scaleAbout (c : Anim.Point) (k : Q) (sh : Anim.Shape) : Anim.Shape :=
+  let ak := Q.abs k;
+  match sh with
+  | .point p r => .point (Anim.Point.scaleAbout c k p) (r * ak)
+  | .segment a b => .segment (Anim.Point.scaleAbout c k a) (Anim.Point.scaleAbout c k b)
+  | .polyline ps => .polyline (List.map (fun p => Anim.Point.scaleAbout c k p) ps)
+  | .circle p r => .circle (Anim.Point.scaleAbout c k p) (r * ak)
+  | .arc p r s w => .arc (Anim.Point.scaleAbout c k p) (r * ak) s w
+  | .text p s size anchor => .text (Anim.Point.scaleAbout c k p) s (size * ak) anchor
+
+/-- Rotate one point about a centre by `deg` degrees, clockwise on screen. Exact rational
+coordinates, with the fixed-point sine and cosine. -/
+def Anim.rotatePoint (c : Anim.Point) (deg : Q) (p : Anim.Point) : Anim.Point :=
+  let cos := Anim.cosFixed deg;
+  let sin := Anim.sinFixed deg;
+  let dx := Q.sub p.x c.x;
+  let dy := Q.sub p.y c.y;
+  let x := Q.div (Q.ofInt (Int.sub (Anim.fxMul (Plot.qRound (Q.mul dx 1000000)) cos)
+    (Anim.fxMul (Plot.qRound (Q.mul dy 1000000)) sin))) 1000000;
+  let y := Q.div (Q.ofInt (Int.add (Anim.fxMul (Plot.qRound (Q.mul dx 1000000)) sin)
+    (Anim.fxMul (Plot.qRound (Q.mul dy 1000000)) cos))) 1000000;
+  Anim.Point.mk (c.x + x) (c.y + y)
+
+/-- Rotate a shape about a centre by `deg` degrees, clockwise on screen. -/
+def Anim.Shape.rotateAbout (c : Anim.Point) (deg : Q) (sh : Anim.Shape) : Anim.Shape :=
+  let rot := fun (p : Anim.Point) => Anim.rotatePoint c deg p;
+  match sh with
+  | .point p r => .point (rot p) r
+  | .segment a b => .segment (rot a) (rot b)
+  | .polyline ps => .polyline (List.map rot ps)
+  | .circle p r => .circle (rot p) r
+  | .arc p r s w => .arc (rot p) r (Q.add s deg) w
+  | .text p s size anchor => .text (rot p) s size anchor
+
+/-- The point at `deg` degrees on the circle of radius `r` around `c`. -/
+def Anim.circlePoint (c : Anim.Point) (r deg : Q) : Anim.Point :=
+  Anim.Point.mk (c.x + r * Anim.cosDeg deg) (c.y + r * Anim.sinDeg deg)
+
+-- ## Morphing
+
+/-- The number of points of a shape (a polyline's length); `0` for shapes with no point
+list. -/
+def Anim.Shape.pointCount : Anim.Shape → Nat
+  | .polyline ps => List.length ps
+  | _ => 0
+
+/-- Pointwise `lerp` of two equal-length lists; `none` if the lengths differ. -/
+def Anim.lerpList (a b : List Anim.Point) (u : Q) : Option (List Anim.Point) :=
+  match a, b with
+  | .nil, .nil => .some .nil
+  | .cons x xs, .cons y ys =>
+    match Anim.lerpList xs ys u with
+    | .some rest => .some (List.cons (Anim.lerpPt x y u) rest)
+    | .none => .none
+  | _, _ => .none
+
+/-- The morph of two shapes at progress `u`, when it is well defined:
+same constructors (and, for `polyline`, the same number of points; for `text`, the same
+string). A point, segment, circle or arc lerps its points and its radius; an arc lerps
+its start and sweep. `none` means there is no continuous morph. -/
+def Anim.Shape.morphSome (a b : Anim.Shape) (u : Q) : Option Anim.Shape :=
+  match a, b with
+  | .point p r, .point q s => .some (.point (Anim.lerpPt p q u) (Anim.lerp r s u))
+  | .segment a1 a2, .segment b1 b2 => .some (.segment (Anim.lerpPt a1 b1 u) (Anim.lerpPt a2 b2 u))
+  | .polyline ps, .polyline qs =>
+    match Anim.lerpList ps qs u with
+    | .some rs => .some (.polyline rs)
+    | .none => .none
+  | .circle p r, .circle q s => .some (.circle (Anim.lerpPt p q u) (Anim.lerp r s u))
+  | .arc p r s w, .arc q t x y =>
+    .some (.arc (Anim.lerpPt p q u) (Anim.lerp r t u) (Anim.lerp s x u) (Anim.lerp w y u))
+  | .text p s size anchor, .text q t size2 anchor2 =>
+    match String.eq s t with
+    | .true =>
+      match String.eq anchor anchor2 with
+      | .true => .some (.text (Anim.lerpPt p q u) s (Anim.lerp size size2 u) anchor)
+      | .false => .none
+    | .false => .none
+  | _, _ => .none
+
+/-- `Shape.morphSome` with a total fallback: an undefined morph holds the start shape until
+the very end, then shows the target (so `morph a b 1` is always `b`). -/
+def Anim.Shape.morphOr (a b : Anim.Shape) (u : Q) : Anim.Shape :=
+  match Anim.Shape.morphSome a b u with
+  | .some s => s
+  | .none => match Plot.qEq u 1 with
+    | .true => b
+    | .false => a
+
+-- ## Animations
+
+/-- An animation: a title (for the widget), an exact duration in seconds, and the raw
+sampler `at`. Use `Anim.frame` to sample: it clamps `t` into `[0, duration]`. -/
+structure Anim where
+  title : String
+  duration : Q
+  at : Q → Anim.Scene
+
+/-- The empty animation: zero seconds, the empty scene, the identity of `seq` and
+`par`. -/
+def Anim.empty : Anim := Anim.mk "" 0 (fun _ => Anim.Scene.empty)
+
+/-- A still picture for `d` seconds. -/
+def Anim.hold (d : Q) (s : Anim.Scene) : Anim := Anim.mk "" d (fun _ => s)
+
+/-- A still picture with a title. -/
+def Anim.holdTitled (title : String) (d : Q) (s : Anim.Scene) : Anim :=
+  Anim.mk title d (fun _ => s)
+
+/-- The public sampler: `frame a t` clamps `t` to `[0, a.duration]`. This is the whole
+contract with the host: a pure function of time, with no hidden clock. -/
+def Anim.frame (a : Anim) (t : Q) : Anim.Scene :=
+  if Plot.qLt t 0 then a.at 0
+  else if Plot.qLt a.duration t then a.at a.duration
+  else a.at t
+
+/-- The final frame. -/
+def Anim.final (a : Anim) : Anim.Scene := Anim.frame a a.duration
+
+/-- The first frame. -/
+def Anim.first (a : Anim) : Anim.Scene := Anim.frame a 0
+
+/-- The scene's dimensions, from the first frame (a scene is fixed-size in practice). -/
+def Anim.width (a : Anim) : Nat := (Anim.first a).width
+
+/-- The scene's height, from the first frame. -/
+def Anim.height (a : Anim) : Nat := (Anim.first a).height
+
+/-- Set the title (metadata only: the frames are unchanged). -/
+def Anim.titled (title : String) (a : Anim) : Anim :=
+  Anim.mk title a.duration a.at
+
+/-- `seq a b`: play `a`, then `b`. `seq` is associative and `Anim.empty` is its
+two-sided identity; a zero-length side is skipped explicitly, so the identity holds even
+at the seam. -/
+def Anim.seq (a b : Anim) : Anim :=
+  Anim.mk (match String.isEmpty a.title with
+      | .true => b.title
+      | .false => a.title)
+    (Q.add a.duration b.duration)
+    (fun t =>
+      match Plot.qEq a.duration 0 with
+      | .true => Anim.frame b t
+      | .false => match Plot.qLe t a.duration with
+        | .true => Anim.frame a t
+        | .false => Anim.frame b (Q.sub t a.duration))
+
+/-- `par a b`: play both at once, painting `b` over `a`. Associative, with
+`Anim.empty` as identity; not commutative (the paint order is observable). -/
+def Anim.par (a b : Anim) : Anim :=
+  Anim.mk (match String.isEmpty a.title with
+      | .true => b.title
+      | .false => a.title)
+    (Plot.qMax a.duration b.duration)
+    (fun t => Anim.Scene.overlay (Anim.frame a t) (Anim.frame b t))
+
+/-- `delay d a`: hold the empty scene for `d` seconds, then play `a`. `delay 0 a = a`. -/
+def Anim.delay (d : Q) (a : Anim) : Anim :=
+  Anim.mk a.title (Q.add d a.duration)
+    (fun t => match Plot.qLt t d with
+      | .true => Anim.Scene.empty
+      | .false => Anim.frame a (Q.sub t d))
+
+/-- `stagger g a b`: play `a` at 0 and `b` at `g`; `par a (delay g b)`. With `g = 0`
+this is `par a b`. -/
+def Anim.stagger (g : Q) (a b : Anim) : Anim := Anim.par a (Anim.delay g b)
+
+/-- `floor x` for `x ≥ 0` (the fraction is not reduced; truncation is the floor there). -/
+def Anim.floorQ (x : Q) : Int := Int.div x.num x.den
+
+/-- `floor x` as a `Nat`, for `x ≥ 0`. -/
+def Anim.floorNat (x : Q) : Nat := Int.toNat (Anim.floorQ x)
+
+/-- `loop n a`: play `a` `n` times. The `n`th pass includes the final frame, so
+`loop 1 a` is `a` (same duration, same frames). `loop 0 a` is empty. -/
+def Anim.loop (n : Nat) (a : Anim) : Anim :=
+  Anim.mk a.title (Q.mul (Q.ofNat n) a.duration)
+    (fun t =>
+      match n with
+      | .zero => Anim.Scene.empty
+      | .succ k =>
+        match Plot.qEq a.duration 0 with
+        | .true => Anim.Scene.empty
+        | .false =>
+          let i := Anim.natMin (Anim.floorNat ((t : Q) / a.duration)) k;
+          Anim.frame a (Q.sub t (Q.mul (Q.ofNat i) a.duration)))
+
+/-- `retime f d a`: sample `a` at `f t`, with the new duration `d`. This is the general
+form of `speed` and `reverse`; the caller promises `f` maps `[0, d]` into
+`[0, a.duration]`. -/
+def Anim.retime (f : Q → Q) (d : Q) (a : Anim) : Anim :=
+  Anim.mk a.title d (fun t => Anim.frame a (f t))
+
+/-- `speed k a`: play `a` `k` times faster (`k ≥ 1`; `speed 0` is the identity so the
+function is total). `speed 1 a = a` and `speed (m·n) a = speed m (speed n a)`. -/
+def Anim.speed (k : Nat) (a : Anim) : Anim :=
+  match k with
+  | .zero => a
+  | .succ j =>
+    let kk := Nat.succ j;
+    Anim.retime (fun t => Q.mul t (Q.ofNat kk)) (Q.div a.duration (Q.ofNat kk)) a
+
+/-- `slow k a`: play `a` `k` times slower (`k ≥ 1`). -/
+def Anim.slow (k : Nat) (a : Anim) : Anim :=
+  match k with
+  | .zero => a
+  | .succ j =>
+    let kk := Nat.succ j;
+    Anim.retime (fun t => Q.div t (Q.ofNat kk)) (Q.mul (Q.ofNat kk) a.duration) a
+
+/-- `reverse a`: play `a` backwards. An involution, and an anti-homomorphism for `seq`:
+`reverse (seq a b) = seq (reverse b) (reverse a)`. -/
+def Anim.reverse (a : Anim) : Anim :=
+  Anim.retime (fun t => Q.sub a.duration t) a.duration a
+
+/-- A tween: for `d` seconds, apply `f` to the eased progress and a base scene. This is
+the one place time becomes a `[0, 1]` parameter; all the transformations below are
+defined through it. -/
+def Anim.tween (d : Q) (ease : Anim.Ease) (f : Q → Anim.Scene → Anim.Scene)
+    (s : Anim.Scene) : Anim :=
+  Anim.mk "" d (fun t => f (Anim.eased d ease t) s)
+
+/-- Move a scene by the vector from `from` to `to` over `d` seconds. -/
+def Anim.move (from to : Anim.Point) (d : Q) (ease : Anim.Ease) (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.mapShape (Anim.Shape.translate (Anim.lerpPt from to u)) sc) s
+
+/-- Fade a scene's opacity from `from` to `to` over `d` seconds. -/
+def Anim.fade (from to : Q) (d : Q) (ease : Anim.Ease) (s : Anim.Scene) : Anim :=
+  Anim.tween d ease (fun u sc => Anim.Scene.fade (Anim.lerp from to u) sc) s
+
+/-- Rotate a scene about `about` from `from` to `to` degrees over `d` seconds. -/
+def Anim.rotateOver (from to : Q) (about : Anim.Point) (d : Q) (ease : Anim.Ease)
+    (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.mapShape (Anim.Shape.rotateAbout about (Anim.lerp from to u)) sc) s
+
+/-- Scale a scene about `about` from `from` to `to` over `d` seconds. -/
+def Anim.scaleOver (from to : Q) (about : Anim.Point) (d : Q) (ease : Anim.Ease)
+    (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.mapShape (Anim.Shape.scaleAbout about (Anim.lerp from to u)) sc) s
+
+/-- Morph the shape `from` into `to` on top of a base scene over `d` seconds; see
+`Shape.morphSome` for when a morph is defined. -/
+def Anim.morph (from to : Anim.Shape) (d : Q) (ease : Anim.Ease) (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.addItem
+      (Anim.Item.mk (Anim.Shape.morphOr from to u) Anim.style) sc) s
+
+/-- `Anim.morph` with an explicit style for the morphing shape. -/
+def Anim.morphWith (style : Anim.Style) (from to : Anim.Shape) (d : Q) (ease : Anim.Ease)
+    (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.addItem
+      (Anim.Item.mk (Anim.Shape.morphOr from to u) style) sc) s
+
+/-- Morph one item into another (its style switches at the end when the morph ends). -/
+def Anim.morphItem (from to : Anim.Item) (d : Q) (ease : Anim.Ease) (s : Anim.Scene) : Anim :=
+  Anim.tween d ease
+    (fun u sc => Anim.Scene.addItem
+      (Anim.Item.mk (Anim.Shape.morphOr from.shape to.shape u)
+        (match Plot.qEq u 1 with
+          | .true => to.style
+          | .false => from.style)) sc) s
+
+-- ## Rendering
+
+/-- The `points` attribute of a polyline, rounded once per coordinate. -/
+def Anim.pointsAttr (ps : List Anim.Point) : String :=
+  String.intercalate " " (List.map (fun p =>
+    Plot.showInt (Plot.qRound p.x) +++ "," +++ Plot.showInt (Plot.qRound p.y)) ps)
+
+/-- A non-negative integer pixel value (a radius, a width, a font size). -/
+def Anim.px (x : Q) : Nat := Int.toNat (Plot.qRound (Q.abs x))
+
+/-- The style attributes of a shape: fill, stroke width, stroke, opacity and dash, in a
+fixed order. -/
+def Anim.styleAttrs (s : Anim.Style) : String :=
+  let fill := Plot.attr "fill" (if String.eq s.fill "none" then "none" else s.fill);
+  let width := if Plot.qLe s.width 0 then ""
+    else Plot.attr "stroke-width" (Nat.repr (Anim.px s.width));
+  let op := if Plot.qEq s.opacity 1 then ""
+    else Plot.attr "opacity" (Plot.showQ s.opacity);
+  let dash := if String.isEmpty s.dash then ""
+    else Plot.attr "stroke-dasharray" s.dash;
+  fill +++ width +++ Plot.attr "stroke" s.stroke +++ op +++ dash
+
+/-- The SVG path of an arc: `M` to its start, then an `A` command with the radius, the
+large-arc and sweep flags. A sweep of at least 360 degrees is drawn as a circle by
+`shapeSvg`. -/
+def Anim.arcPath (c : Anim.Point) (r start sweep : Q) : String :=
+  let a := Anim.circlePoint c r start;
+  let b := Anim.circlePoint c r (Q.add start sweep);
+  let rr := Nat.repr (Anim.px r);
+  let large := if Plot.qLe 180 (Q.abs sweep) then "1" else "0";
+  let dir := if Plot.qLt 0 sweep then "1" else "0";
+  "M " +++ Plot.showInt (Plot.qRound a.x) +++ " " +++ Plot.showInt (Plot.qRound a.y)
+    +++ " A " +++ rr +++ " " +++ rr +++ " 0 " +++ large +++ " " +++ dir
+    +++ " " +++ Plot.showInt (Plot.qRound b.x) +++ " " +++ Plot.showInt (Plot.qRound b.y)
+
+/-- One shape as SVG. A point is a dot filled with the stroke colour; a text label uses
+the fill colour when the style has one, else the stroke colour. -/
+def Anim.shapeSvg (sh : Anim.Shape) (s : Anim.Style) : String :=
+  match sh with
+  | .point p r =>
+    let fill := if String.eq s.fill "none" then s.stroke else s.fill;
+    let op := if Plot.qEq s.opacity 1 then "" else Plot.attr "opacity" (Plot.showQ s.opacity);
+    "<circle" +++ Plot.attr "cx" (Plot.showInt (Plot.qRound p.x))
+      +++ Plot.attr "cy" (Plot.showInt (Plot.qRound p.y))
+      +++ Plot.attr "r" (Nat.repr (Anim.px r))
+      +++ Plot.attr "fill" fill +++ Plot.attr "stroke" "none" +++ op +++ "/>"
+  | .segment a b =>
+    let op := if Plot.qEq s.opacity 1 then "" else Plot.attr "opacity" (Plot.showQ s.opacity);
+    "<line" +++ Plot.attr "x1" (Plot.showInt (Plot.qRound a.x))
+      +++ Plot.attr "y1" (Plot.showInt (Plot.qRound a.y))
+      +++ Plot.attr "x2" (Plot.showInt (Plot.qRound b.x))
+      +++ Plot.attr "y2" (Plot.showInt (Plot.qRound b.y))
+      +++ Plot.attr "stroke" s.stroke
+      +++ (if Plot.qLe s.width 0 then ""
+           else Plot.attr "stroke-width" (Nat.repr (Anim.px s.width)))
+      +++ op
+      +++ (if String.isEmpty s.dash then "" else Plot.attr "stroke-dasharray" s.dash)
+      +++ "/>"
+  | .polyline ps =>
+    "<polyline" +++ Plot.attr "points" (Anim.pointsAttr ps) +++ Anim.styleAttrs s
+      +++ Plot.attr "stroke-linejoin" "round"
+      +++ Plot.attr "stroke-linecap" "round" +++ "/>"
+  | .circle c r =>
+    "<circle" +++ Plot.attr "cx" (Plot.showInt (Plot.qRound c.x))
+      +++ Plot.attr "cy" (Plot.showInt (Plot.qRound c.y))
+      +++ Plot.attr "r" (Nat.repr (Anim.px r)) +++ Anim.styleAttrs s +++ "/>"
+  | .arc c r start sweep =>
+    if Plot.qEq sweep 0 then ""
+    else if Plot.qLe 360 (Q.abs sweep) then
+      "<circle" +++ Plot.attr "cx" (Plot.showInt (Plot.qRound c.x))
+        +++ Plot.attr "cy" (Plot.showInt (Plot.qRound c.y))
+        +++ Plot.attr "r" (Nat.repr (Anim.px r)) +++ Anim.styleAttrs s +++ "/>"
+    else
+      "<path" +++ Plot.attr "d" (Anim.arcPath c r start sweep) +++ Anim.styleAttrs s +++ "/>"
+  | .text p t size anchor =>
+    let fill := if String.eq s.fill "none" then s.stroke else s.fill;
+    let op := if Plot.qEq s.opacity 1 then "" else Plot.attr "opacity" (Plot.showQ s.opacity);
+    "<text" +++ Plot.attr "x" (Plot.showInt (Plot.qRound p.x))
+      +++ Plot.attr "y" (Plot.showInt (Plot.qRound p.y))
+      +++ Plot.attr "font-family" "sans-serif"
+      +++ Plot.attr "font-size" (Nat.repr (Anim.px size))
+      +++ Plot.attr "text-anchor" anchor
+      +++ Plot.attr "fill" fill +++ op
+      +++ ">" +++ Plot.esc t +++ "</text>"
+
+/-- A scene as one deterministic SVG document. Coordinates are rounded once
+(`Plot.qRound`), attributes have a fixed order, and there are no ids, timestamps or
+external references. -/
+def Anim.svg (s : Anim.Scene) : String :=
+  let bg := if String.eq s.background "none" then ""
+    else "<rect" +++ Plot.attr "x" "0" +++ Plot.attr "y" "0"
+      +++ Plot.attr "width" (Nat.repr s.width)
+      +++ Plot.attr "height" (Nat.repr s.height)
+      +++ Plot.attr "fill" s.background +++ "/>";
+  let body := String.intercalate "\n"
+    (List.filter (fun line => Bool.not (String.isEmpty line))
+      (List.map (fun i => Anim.shapeSvg i.shape i.style) s.items));
+  "<svg" +++ Plot.attr "xmlns" "http://www.w3.org/2000/svg"
+    +++ Plot.attr "width" (Nat.repr s.width)
+    +++ Plot.attr "height" (Nat.repr s.height)
+    +++ Plot.attr "viewBox" ("0 0 " +++ Nat.repr s.width +++ " " +++ Nat.repr s.height)
+    +++ Plot.attr "role" "img"
+    +++ Plot.attr "aria-label" "animation"
+    +++ ">" +++ bg +++ body +++ "</svg>"
+
+/-- The SVG of a frame (the static fallback the widget carries). -/
+def Anim.svgAt (a : Anim) (t : Q) : String := Anim.svg (Anim.frame a t)
+
+/-- A self-contained HTML figure of a frame, with the title as a `<figcaption>` when it
+has one. No script, no external reference. -/
+def Anim.htmlAt (a : Anim) (t : Q) : String :=
+  let cap := if String.isEmpty a.title then ""
+    else "<figcaption>" +++ Plot.esc a.title +++ "</figcaption>";
+  "<figure" +++ Plot.attr "class" "wiz-anim"
+    +++ ">" +++ Anim.svgAt a t +++ cap +++ "</figure>"
+
+/-- The static fallback (frame 0). -/
+def Anim.html (a : Anim) : String := Anim.htmlAt a 0
+
+-- ## Sampling and JSON
+
+/-- A time in the sampled-frames array. -/
+def Anim.frameTime (a : Anim) (i n : Nat) : Q :=
+  match n with
+  | .zero => 0
+  | .succ k => match k with
+    | .zero => 0
+    | .succ j => Q.div (Q.mul a.duration (Q.ofNat i)) (Q.ofNat (Nat.succ j))
+
+/-- The `n` sample times, counting up (the counter `i` counts down to 0). -/
+def Anim.sampleTimesGo (a : Anim) (n : Nat) : Nat → List Q
+  | .zero => .nil
+  | .succ i => List.cons (Anim.frameTime a (Nat.sub n (Nat.succ i)) n)
+      (Anim.sampleTimesGo a n i)
+
+/-- `n` evenly spaced times from 0 to the duration, both ends included; `n = 1` is time
+0. -/
+def Anim.sampleTimes (a : Anim) : Nat → List Q
+  | .zero => .nil
+  | .succ .zero => List.cons 0 .nil
+  | .succ (.succ k) => Anim.sampleTimesGo a (Nat.succ (Nat.succ k)) (Nat.succ (Nat.succ k))
+
+/-- One frame as JSON: its time and SVG. -/
+def Anim.frameJson (a : Anim) (t : Q) : Json :=
+  Json.mkObj [
+    Json.field "t" (Json.dec (Plot.showQ t)),
+    Json.field "svg" (Json.str (Anim.svg (Anim.frame a t)))
+  ]
+
+/-- The sampled frames array: `n` SVG documents at evenly spaced times. A host can flip
+through these with no callback at all; a host that wants exact scrub/playback asks the
+kernel for a new payload (see `Anim.handle`). -/
+def Anim.framesJson (n : Nat) (a : Anim) : Json :=
+  Json.mkArr (List.map (fun t => Anim.frameJson a t) (Anim.sampleTimes a n))
+
+/-- The default number of sampled frames in a payload. -/
+def Anim.defaultFrames : Nat := 24
+
+/-- A one-line summary of an animation. -/
+def Anim.summary (a : Anim) : String :=
+  String.append "animation: " (String.append (Plot.showQ a.duration)
+    (String.append " s, " (String.append (Nat.repr (Anim.width a))
+      (String.append "x" (String.append (Nat.repr (Anim.height a))
+        (String.append " px, " (String.append (Nat.repr Anim.defaultFrames)
+          " sampled frames")))))))
+
+/-- The runtime state a host holds for an animation: whether it is playing, the current
+time, the playback rate and whether it loops. Pure data: the library never owns a
+clock. -/
+structure Anim.Runtime where
+  playing : Bool
+  time : Q
+  rate : Q
+  loop : Bool
+
+/-- The initial runtime state: paused at frame 0, rate 1, looping. -/
+def Anim.initial : Anim.Runtime := Anim.Runtime.mk .false 0 1 .true
+
+/-- The runtime state as JSON. -/
+def Anim.runtimeJson (r : Anim.Runtime) : Json :=
+  Json.mkObj [
+    Json.field "playing" (Json.mkBool r.playing),
+    Json.field "time" (Json.dec (Plot.showQ r.time)),
+    Json.field "rate" (Json.dec (Plot.showQ r.rate)),
+    Json.field "loop" (Json.mkBool r.loop)
+  ]
+
+/-- The interactive controls, as data (no DOM): a play button, a pause button, a scrub
+slider over `[0, duration]` and a speed slider over `[0.25, 4]`. `event` is the DOM
+event a host forwards and `value` is what it sends for a button. -/
+def Anim.controls (a : Anim) : Json :=
+  Json.mkArr [
+    Json.mkObj [
+      Json.field "name" (Json.str "play"),
+      Json.field "kind" (Json.str "button"),
+      Json.field "event" (Json.str "click"),
+      Json.field "value" (Json.str "play"),
+      Json.field "label" (Json.str "Play")
+    ],
+    Json.mkObj [
+      Json.field "name" (Json.str "pause"),
+      Json.field "kind" (Json.str "button"),
+      Json.field "event" (Json.str "click"),
+      Json.field "value" (Json.str "pause"),
+      Json.field "label" (Json.str "Pause")
+    ],
+    Json.mkObj [
+      Json.field "name" (Json.str "scrub"),
+      Json.field "kind" (Json.str "slider"),
+      Json.field "event" (Json.str "input"),
+      Json.field "min" (Json.dec "0"),
+      Json.field "max" (Json.dec (Plot.showQ a.duration)),
+      Json.field "step" (Json.dec "0.01"),
+      Json.field "value" (Json.dec "0")
+    ],
+    Json.mkObj [
+      Json.field "name" (Json.str "speed"),
+      Json.field "kind" (Json.str "slider"),
+      Json.field "event" (Json.str "input"),
+      Json.field "min" (Json.dec "0.25"),
+      Json.field "max" (Json.dec "4"),
+      Json.field "step" (Json.dec "0.25"),
+      Json.field "value" (Json.dec "1")
+    ]
+  ]
+
+/-- The widget payload: `wiz.widget/1`, kind `anim`, an `image/svg+xml` fallback (frame
+0), the same as HTML, the duration, 24 sampled frames, the runtime and the controls.
+Self-contained: no script, network, ids or timestamps. -/
+def Anim.payload (a : Anim) : Json :=
+  Json.mkObj [
+    Json.field "schema" (Json.str "wiz.widget/1"),
+    Json.field "kind" (Json.str "anim"),
+    Json.field "mimeType" (Json.str "image/svg+xml"),
+    Json.field "title" (Json.str (match String.isEmpty a.title with
+      | .true => "animation"
+      | .false => a.title)),
+    Json.field "summary" (Json.str (Anim.summary a)),
+    Json.field "width" (Json.ofNat (Anim.width a)),
+    Json.field "height" (Json.ofNat (Anim.height a)),
+    Json.field "svg" (Json.str (Anim.svgAt a 0)),
+    Json.field "html" (Json.str (Anim.htmlAt a 0)),
+    Json.field "duration" (Json.dec (Plot.showQ a.duration)),
+    Json.field "frameCount" (Json.ofNat Anim.defaultFrames),
+    Json.field "frames" (Anim.framesJson Anim.defaultFrames a),
+    Json.field "runtime" (Anim.runtimeJson Anim.initial),
+    Json.field "controls" (Anim.controls a),
+    Json.field "count" (Json.ofNat 1)
+  ]
+
+/-- The infoview display value: `WIZ_WIDGET:` followed by `Anim.payload`. `#anim expr`
+prints this. -/
+def Anim.widget (a : Anim) : String :=
+  String.append "WIZ_WIDGET:" (Json.render (Anim.payload a))
+
+/-- The notebook mime bundle (the same hook as `Plot.render`): `text/plain`, the frame-0
+SVG and the frame-0 HTML. -/
+def Anim.render (a : Anim) : Json :=
+  let svg := Anim.svgAt a 0;
+  Json.mkObj [
+    Json.field "text/plain" (Json.str (Anim.summary a)),
+    Json.field "image/svg+xml" (Json.str svg),
+    Json.field "text/html" (Json.str (String.append "<div class=\"wiz-anim\">"
+      (String.append svg "</div>")))
+  ]
+
+-- ## Parsing event values
+
+/-- The decimal digits of a string as a `Nat` (0 when there are none). -/
+def Anim.digitVal (cs : List Char) : Nat :=
+  List.foldl (fun acc c =>
+    match Json.between (Char.code c) 48 57 with
+    | .true => Nat.add (Nat.mul acc 10) (Nat.sub (Char.code c) 48)
+    | .false => acc) 0 cs
+
+/-- The characters before the first `.` and after it. -/
+def Anim.splitDot (cs : List Char) : List Char × List Char :=
+  match cs with
+  | .nil => (.nil, .nil)
+  | .cons c rest =>
+    match Nat.beq (Char.code c) 46 with
+    | .true => (.nil, rest)
+    | .false =>
+      let r := Anim.splitDot rest;
+      (List.cons c r.1, r.2)
+
+/-- `10^k`. -/
+def Anim.pow10 : Nat → Nat
+  | .zero => 1
+  | .succ k => Nat.mul 10 (Anim.pow10 k)
+
+/-- A rational from a numerator and a positive `Nat` denominator (`den = 0` reads as 1). -/
+def Anim.qOfDen (a : Int) (den : Nat) : Q :=
+  match den with
+  | .zero => Q.ofInt a
+  | .succ k => Q.mk a (Int.ofNat (.succ k)) (Int.ofNat_succ_pos k)
+
+/-- Whether every character is an ASCII digit. -/
+def Anim.digitRun (cs : List Char) : Bool :=
+  List.all (fun c => Json.between (Char.code c) 48 57) cs
+
+/-- Parse a decimal event value (`"0.5"`, `"-1.25"`, `"4"`) exactly. Values the host
+sends for sliders and buttons are decimal strings; anything else is `none`. -/
+def Anim.parseQ (s : String) : Option Q :=
+  let cs := String.chars (String.trim s);
+  let neg : Bool := match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 45 with
+      | .true => .true
+      | .false => .false
+    | .nil => .false;
+  let cs := match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 45 with
+      | .true => rest
+      | .false => cs
+    | .nil => cs;
+  let parts := Anim.splitDot cs;
+  let ip := Anim.digitVal parts.1;
+  let fp := Anim.digitVal parts.2;
+  let den := Anim.pow10 (List.length parts.2);
+  let num := Nat.add (Nat.mul ip den) fp;
+  let ok := Bool.and (Anim.digitRun parts.1) (Anim.digitRun parts.2);
+  let has := Bool.or (Bool.not (List.isEmpty parts.1)) (Bool.not (List.isEmpty parts.2));
+  match Bool.and ok has with
+  | .false => .none
+  | .true => .some (Anim.qOfDen (match neg with
+      | .true => Int.neg (Int.ofNat num)
+      | .false => Int.ofNat num) den)
+
+/-- `t` wrapped into `[0, duration]` when `loop`, else clamped. -/
+def Anim.wrapTime (a : Anim) (loop : Bool) (t : Q) : Q :=
+  match loop with
+  | .false => Anim.clampQ 0 a.duration t
+  | .true =>
+    match Plot.qLe a.duration 0 with
+    | .true => 0
+    | .false =>
+      let t := if Plot.qLt t 0 then 0 else t;
+      let k := Anim.floorNat ((t : Q) / a.duration);
+      Anim.clampQ 0 a.duration (Q.sub t (Q.mul (Q.ofNat k) a.duration))
+
+/-- Set the runtime's time (clamped, or wrapped when it loops). -/
+def Anim.setTime (a : Anim) (r : Anim.Runtime) (t : Q) : Anim.Runtime :=
+  Anim.Runtime.mk r.playing (Anim.wrapTime a r.loop t) r.rate r.loop
+
+/-- Advance a runtime state by `dt` seconds: only while playing, scaled by the rate.
+A pure step function, so a host may call it with its own clock. -/
+def Anim.step (a : Anim) (r : Anim.Runtime) (dt : Q) : Anim.Runtime :=
+  match r.playing with
+  | .false => r
+  | .true => Anim.setTime a r (Q.add r.time (Q.mul dt r.rate))
+
+/-- The runtime after one host event. `event` is the DOM event name and `value` its
+payload (`"play"`, `"pause"`, a decimal time or rate, or a `tick`'s `dt`). Unknown
+events leave it unchanged. This is the library half of interactivity: no DOM code, just
+a pure transition a host can call. -/
+def Anim.handle (a : Anim) (r : Anim.Runtime) (event value : String) : Anim.Runtime :=
+  match String.eq event "play" with
+  | .true => Anim.Runtime.mk .true r.time r.rate r.loop
+  | .false => match String.eq event "pause" with
+    | .true => Anim.Runtime.mk .false r.time r.rate r.loop
+    | .false => match String.eq event "toggle" with
+      | .true => Anim.Runtime.mk (Bool.not r.playing) r.time r.rate r.loop
+      | .false => match String.eq event "scrub" with
+        | .true => match Anim.parseQ value with
+          | .some t => Anim.setTime a r t
+          | .none => r
+        | .false => match String.eq event "rate" with
+          | .true => match Anim.parseQ value with
+            | .some v => match Plot.qLt 0 v with
+              | .true => Anim.Runtime.mk r.playing r.time v r.loop
+              | .false => r
+            | .none => r
+          | .false => match String.eq event "tick" with
+            | .true => match Anim.parseQ value with
+              | .some dt => Anim.step a r dt
+              | .none => r
+            | .false => r
+
+/-- The frame a runtime state shows. -/
+def Anim.frameAtRuntime (a : Anim) (r : Anim.Runtime) : Anim.Scene :=
+  Anim.frame a r.time
+
+/-- A payload at a runtime state: the same frames and controls, but `runtime` says
+where playback is and the static fallback is the current frame. A host that asks the
+kernel for a frame after an event replaces its picture with this `html` (and keeps the
+`frames`/`controls` it already has). -/
+def Anim.payloadAt (a : Anim) (r : Anim.Runtime) : Json :=
+  Json.mkObj [
+    Json.field "schema" (Json.str "wiz.widget/1"),
+    Json.field "kind" (Json.str "anim"),
+    Json.field "mimeType" (Json.str "image/svg+xml"),
+    Json.field "title" (Json.str (match String.isEmpty a.title with
+      | .true => "animation"
+      | .false => a.title)),
+    Json.field "summary" (Json.str (Anim.summary a)),
+    Json.field "width" (Json.ofNat (Anim.width a)),
+    Json.field "height" (Json.ofNat (Anim.height a)),
+    Json.field "svg" (Json.str (Anim.svg (Anim.frameAtRuntime a r))),
+    Json.field "html" (Json.str (Anim.htmlAt a r.time)),
+    Json.field "duration" (Json.dec (Plot.showQ a.duration)),
+    Json.field "frameCount" (Json.ofNat Anim.defaultFrames),
+    Json.field "frames" (Anim.framesJson Anim.defaultFrames a),
+    Json.field "runtime" (Anim.runtimeJson r),
+    Json.field "controls" (Anim.controls a),
+    Json.field "count" (Json.ofNat 1)
+  ]
+
+/-- The `WIZ_WIDGET:` display value at a runtime state. -/
+def Anim.widgetAt (a : Anim) (r : Anim.Runtime) : String :=
+  String.append "WIZ_WIDGET:" (Json.render (Anim.payloadAt a r))

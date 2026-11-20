@@ -1,0 +1,55 @@
+import IO
+import Anim
+import Plot
+/-!
+# Example: a circle unwinding to a line
+
+A circle of radius `r` is peeled at its lowest point; the unwound part grows into a
+horizontal segment of length `r·2π·u`, while the remaining arc shrinks. This is one
+`Anim.tween`: the frame is a pure function of `u` (and so of time), and the three SVG
+documents printed below are the golden frames `t = 0`, `t = 1.5` and `t = 3`.
+
+    wiz run examples/anim-unwind.wiz
+-/
+
+/-- The radius, the centre, and the tangent line's height. -/
+def r : Q := 55
+def centre : Anim.Point := Anim.pt 200 130
+def tangent : Q := 185
+
+/-- The circumference, `2πr`. -/
+def circumference : Q := 2 * Anim.pi * r
+
+/-- The static guides: a dashed ghost circle and the tangent line. -/
+def guides : Anim.Scene := Anim.scene 640 260 [
+  Anim.itemWidth 1 (Anim.itemDashed "5 5" (Anim.itemStroke "#cbd5e1" (Anim.circle centre r))),
+  Anim.itemWidth 1 (Anim.itemStroke "#e5e7eb"
+    (Anim.seg (Anim.pt 80 tangent) (Anim.pt 620 tangent)))
+]
+
+/-- The frame at progress `u` (`0 ≤ u ≤ 1`). -/
+def frame (u : Q) : Anim.Scene :=
+  let remaining := 360 * (1 - u);
+  let startAngle := 90 + 360 * u;
+  let unwound := circumference * u;
+  let free := Anim.pt (200 + unwound) tangent;
+  let arcEnd := Anim.circlePoint centre r startAngle;
+  Anim.Scene.add [
+    Anim.itemWidth 3 (Anim.arc centre r startAngle remaining),
+    Anim.itemWidth 3 (Anim.itemStroke "#059669" (Anim.seg (Anim.pt 200 tangent) free)),
+    Anim.dotColour "#dc2626" arcEnd 5,
+    Anim.dotColour "#059669" free 5,
+    Anim.labelSize 11 (Anim.pt 210 (Q.add tangent 24)) "unwound: 2πr · u"
+  ] guides
+
+/-- The animation: three seconds, eased in and out. -/
+def unwinding : Anim :=
+  Anim.titled "A circle unwinding to a line"
+    (Anim.tween 3 Anim.easeInOut (fun u _ => frame u) guides)
+
+def main : IO Unit := do
+  IO.print (Anim.svgAt unwinding 0);
+  IO.print "\n@@\n";
+  IO.print (Anim.svgAt unwinding (Plot.frac 3 2));
+  IO.print "\n@@\n";
+  IO.print (Anim.svgAt unwinding 3)

@@ -1,0 +1,74 @@
+import IO
+import Anim
+import Plot
+/-!
+# Example: a sine wave traced by a moving point
+
+The point `(x, sin x)` moves from `x = 0` to `x = 2π`, drawing the curve behind it and
+two dashed guides to the axes. The frame is a pure function of the progress; the three
+SVG documents printed below are the golden frames `t = 0`, `t = 2` and `t = 4`.
+
+    wiz run examples/anim-sine.wiz
+-/
+
+/-- `2π`, the end of one period. -/
+def twoPi : Q := 2 * Anim.pi
+
+/-- 560 px for one period, 90 px per unit of `y`, origin at pixel `(50, 140)`. -/
+def plane : Anim.Plane :=
+  Anim.planeAt 640 280 50 140 (Q.div 560 twoPi) 90
+
+/-- The point `(x, sin x)` on the curve. -/
+def curvePoint (x : Q) : Anim.Point :=
+  Anim.Plane.map plane (Anim.pt x (Anim.sinRad x))
+
+/-- The 97 sample points of the curve (96 intervals). -/
+def curvePoints : Nat → List Anim.Point
+  | .zero => List.cons (curvePoint 0) .nil
+  | .succ k =>
+    List.append (curvePoints k)
+      (List.cons (curvePoint (Q.div (Q.mul twoPi (Q.ofNat (Nat.succ k))) (96 : Q))) .nil)
+
+/-- The points of the curve up to `x = xmax`, by pixel x. -/
+def traced (xmax : Q) : List Anim.Point :=
+  List.filter (fun p => Plot.qLe p.x (Q.add 50 (Q.mul xmax (Q.div 560 twoPi))))
+    (curvePoints 96)
+
+/-- The static axes, labels and the ghost of the whole curve. -/
+def guides : Anim.Scene := Anim.scene 640 280 [
+  Anim.itemWidth 1 (Anim.itemStroke "#e5e7eb"
+    (Anim.seg (Anim.pt 50 140) (Anim.pt 610 140))),
+  Anim.itemWidth 1 (Anim.itemStroke "#e5e7eb"
+    (Anim.seg (Anim.pt 50 50) (Anim.pt 50 230))),
+  Anim.itemWidth 1 (Anim.itemDashed "4 4" (Anim.itemStroke "#cbd5e1"
+    (Anim.line (curvePoints 96)))),
+  Anim.labelSize 11 (Anim.pt 618 144) "x",
+  Anim.labelSize 11 (Anim.pt 42 54) "1",
+  Anim.labelSize 11 (Anim.pt 40 234) "-1",
+  Anim.labelSize 11 (Anim.pt 606 160) "2π"
+]
+
+/-- The frame at progress `u` (`0 ≤ u ≤ 1`). -/
+def frame (u : Q) : Anim.Scene :=
+  let x := Q.mul twoPi u;
+  let p := curvePoint x;
+  let onAxis := Anim.pt p.x 140;
+  let onY := Anim.pt 50 p.y;
+  Anim.Scene.add [
+    Anim.itemWidth (Plot.frac 5 2) (Anim.line (traced x)),
+    Anim.itemWidth 1 (Anim.itemDashed "3 3" (Anim.itemStroke "#94a3b8" (Anim.seg p onAxis))),
+    Anim.itemWidth 1 (Anim.itemDashed "3 3" (Anim.itemStroke "#94a3b8" (Anim.seg p onY))),
+    Anim.dotColour "#dc2626" p 6
+  ] guides
+
+/-- The animation: four seconds at a constant speed. -/
+def tracing : Anim :=
+  Anim.titled "A sine wave traced by a moving point"
+    (Anim.tween 4 Anim.linear (fun u _ => frame u) guides)
+
+def main : IO Unit := do
+  IO.print (Anim.svgAt tracing 0);
+  IO.print "\n@@\n";
+  IO.print (Anim.svgAt tracing 2);
+  IO.print "\n@@\n";
+  IO.print (Anim.svgAt tracing 4)

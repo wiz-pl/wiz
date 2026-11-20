@@ -92,6 +92,7 @@
       "optic",
       "persistent",
       "phantom",
+      "=anim",
       "=plot",
       "regions",
       "=reject",

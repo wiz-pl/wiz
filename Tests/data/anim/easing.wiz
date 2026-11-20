@@ -1,0 +1,31 @@
+import Anim
+import Plot
+
+def grid : List Q := [
+  0, Plot.frac 1 8, Plot.frac 1 4, Plot.frac 3 8, Plot.frac 1 2,
+  Plot.frac 5 8, Plot.frac 3 4, Plot.frac 7 8, 1]
+
+partial def monoGo (e : Anim.Ease) : List Q → Bool
+  | .nil => .true
+  | .cons _ .nil => .true
+  | .cons x (.cons y rest) => Bool.and (Plot.qLe (e x) (e y)) (monoGo e (.cons y rest))
+
+def ends (e : Anim.Ease) : Bool :=
+  Bool.and (Plot.qEq (e 0) 0) (Plot.qEq (e 1) 1)
+
+def curves : List Anim.Ease := [
+  Anim.linear, Anim.easeIn, Anim.easeOut, Anim.easeInOut,
+  Anim.easeInCubic, Anim.easeOutCubic, Anim.easeInOutCubic]
+
+#eval List.all ends curves
+#eval List.all (fun e => monoGo e grid) curves
+#eval Plot.qEq (Anim.easeInOut (Plot.frac 1 2)) (Plot.frac 1 2)
+#eval List.all (fun u => Plot.qEq (Anim.easeInOut (1 - u)) (1 - Anim.easeInOut u)) grid
+#eval List.all (fun u => Plot.qEq (Anim.easeInOutCubic (1 - u)) (1 - Anim.easeInOutCubic u)) grid
+#eval Plot.showQ (Anim.easeIn (Plot.frac 1 2))
+#eval Plot.showQ (Anim.easeOut (Plot.frac 1 2))
+#eval Plot.showQ (Anim.easeInOutCubic (Plot.frac 1 4))
+#eval Plot.showQ (Anim.holdEase (Plot.frac 7 8))
+#eval Plot.showQ (Anim.holdEase 1)
+#eval Plot.qEq (Anim.clamp01 (-1)) 0
+#eval Plot.qEq (Anim.clamp01 2) 1

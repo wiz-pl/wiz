@@ -1,0 +1,51 @@
+import Json
+import Anim
+import Plot
+
+def a : Anim := Anim.hold 2 (Anim.scene 20 20 [Anim.dot (Anim.pt 10 10) 2])
+
+def tOf (r : Anim.Runtime) : String := Plot.showQ r.time
+def playOf : Anim.Runtime → Bool
+  | .mk p _ _ _ => p
+
+def r0 : Anim.Runtime := Anim.initial
+def r1 : Anim.Runtime := Anim.handle a r0 "play" ""
+def r2 : Anim.Runtime := Anim.step a r1 1
+def r3 : Anim.Runtime := Anim.handle a r2 "scrub" "1.5"
+def r4 : Anim.Runtime := Anim.handle a r2 "rate" "2"
+def r5 : Anim.Runtime := Anim.step a r4 1
+def r6 : Anim.Runtime := Anim.handle a (Anim.handle a r0 "rate" "-1") "tick" "1"
+def noLoop : Anim.Runtime := Anim.Runtime.mk .true 0 1 .false
+def r7 : Anim.Runtime := Anim.step a noLoop 5
+def r8 : Anim.Runtime := Anim.handle a r0 "pause" ""
+
+#eval playOf r0
+#eval playOf r1
+#eval tOf r2
+#eval tOf r3
+#eval tOf r4
+#eval tOf r5
+#eval tOf r6
+#eval tOf r7
+#eval playOf r8
+#eval (match Anim.parseQ "1.25" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ "-0.5" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ "4" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ "abc" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ "1.2.3" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ "" with | .some q => Plot.showQ q | .none => "none")
+#eval (match Anim.parseQ " 2.5 " with | .some q => Plot.showQ q | .none => "none")
+#eval String.eq (Anim.svg (Anim.frameAtRuntime a r3)) (Anim.svgAt a (Plot.frac 3 2))
+#eval String.eq (Json.getStr (Anim.payloadAt a r3) "runtime") ""
+#eval String.startsWith (Anim.widgetAt a r3) "WIZ_WIDGET:"
+
+def field (j : Json) (k : String) : Json := match Json.get j k with
+  | .some v => v
+  | .none => Json.null
+def decOf (j : Json) : String := match j with
+  | .dec s => s
+  | _ => ""
+#eval String.eq (decOf (field (field (Anim.payloadAt a r3) "runtime") "time")) "1.5"
+#eval String.eq (tOf (Anim.handle a r3 "junk" "x")) "1.5"
+#eval String.eq (tOf (Anim.handle a r3 "toggle" "")) "1.5"
+#eval playOf (Anim.handle a r3 "toggle" "")
