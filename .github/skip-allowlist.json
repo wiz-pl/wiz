@@ -37,24 +37,6 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "cache: --cache-ro is a host layer the driver has not got (a named difference)",
-      "reason": "cache: `--cache-ro DIR` adds a read-only layer",
-      "parity": "D5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D5): the driver's one-file cache has no read-only layers, so it rejects --cache-ro. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)",
-      "reason": "cache verification: the host writes output manifests",
-      "parity": "D5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D5): the self-hosted cache writes no output manifests, so --cache-verify strict never hits. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
       "case": "build: a good file is silent and exit 0 (the artifact is C, not an executable)",
       "reason": "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C",
       "parity": "D4",
@@ -70,15 +52,6 @@
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
       "why": "documented self-host parity difference (D3): --include/--types/-v are driver-only flags the host rejects. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "help and version: exit 0, one version line (the usage documents the subset)",
-      "reason": "usage text: the driver documents the subset it has",
-      "parity": "D2/D8",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D2/D8): the driver's usage documents only the subset it implements (no parse/doc/fmt/lsp, no --llvm). Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",

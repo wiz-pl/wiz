@@ -1,4 +1,5 @@
 import Wiz.Toolchain
+import Tests.Loader
 
 /-!
 # A tiny test harness
@@ -58,8 +59,10 @@ structure Group where
   directory in the work tree), and none of them assert on wall time or on the machine's
   load: see "Running cases in parallel" in `docs/building.md`. -/
   parallel : Bool := false
-  /-- The CI shard that runs the group (`.github/test-shards.json`), when no shard's
-  selectors pick it; empty: the default shard. `tests --list-shards` prints it. -/
+  /-- A hint at the shard that is meant to run the group (`.github/test-shards.json`).
+  It is not a fallback: `scripts/check-shards.py` fails when no shard's selectors pick
+  the group, and shows this hint in the error so the fix is a selector or an exclusion.
+  `tests --list-shards` prints it. -/
   shard    : String := ""
 
 /-- The groups of the modules under `Tests/Groups/`, in their import order: each module
