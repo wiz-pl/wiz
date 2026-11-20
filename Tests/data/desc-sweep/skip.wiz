@@ -1,0 +1,2 @@
+-- test: skip a fixture: its body does not check
+def broken : Nat := Nat.zero Nat.zero
