@@ -559,11 +559,21 @@ for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `Iso`, `LensP
 interpretations. One optic runs at every interpretation: `over` (update), `view` (read
 one), `toListOf` (read all), `preview` (read at most one), `overWrite` (update and
 write-set in one pass). `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
-`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it. A
-`Type 0` store of optics is still impossible here (the profunctor types are `Type 1`), and
-a profunctor optic cannot hand back the `Store A S` that a returned borrow (`Mut` in
-`lib/Region.wiz`) carries; that is why `Lens`/`PLens`/`Store`/`zoom`/`Affine` stay. New
-code that only reads and updates a value should use the `…P` forms.
+`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it;
+`LensP.toLens` is the other direction, and `Traversal.ofP` turns a profunctor traversal
+into the store `view`/`overAll` pair. `LensP.Indep` restates independence on
+`view`/`over` (the frame rule's hypothesis), and `LensP.ofLens_indep` derives it from a
+store `Lens.Indep`.
+
+A `Type 0` store of optics is still impossible here (the profunctor types are `Type 1`),
+and a profunctor optic has no error or absent branch, so it cannot replace the partial
+places that hand the lender back: `PLens` (`&mut v[i]`, which can fail with
+`outOfBounds`), `Affine`/`MutOpt` (`Option<&mut A>`, whose `none` carries the lender),
+`TraverseMut` (the in-place, state-threading `iter_mut` loop) and `Lens.pair` (two
+independent places borrowed at once; `Strong` cannot decompose an `S`). Those, `Mut`'s
+`Store` field and `Uniq.zoom` stay on the store encoding; `Mut.ofLensP` shows the one
+lossless crossing (a pure lens becomes a place through `LensP.toLens`). New code that
+only reads and updates a value should use the `…P` forms.
 
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
