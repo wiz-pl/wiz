@@ -382,6 +382,7 @@ def repoCoverage : IO Unit := do
   checkEq
     ("error 1 parse failure"
      ++ "|warning 1 lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown"
+     -- Equal severity and count sort by construct name: "unknown…" < "unmodelled…".
      ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|warning 1 unmodelled-external"
      ++ "|note 1 excluded: *.Designer.cs"

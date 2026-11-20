@@ -89,17 +89,16 @@ def main : IO Unit := EIO.toIO (do
       | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
           (String.eq (candOf r).verdict "pursue")
       | .none => (.false : Bool));
-  check "refine: candidate.json is written"
-    (match findIn st2 "cwe78-getenv.c" with
-      | .some r => match Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json") with
-        | .some j => String.eq (Json.getStr j "stage") "refined"
-        | .none => (.false : Bool)
-      | .none => (.false : Bool));
-
-  -- 3. repro with the plan-derived harness and input
   let cRec := match findIn st2 "cwe78-getenv.c" with
     | .some r => r
     | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
+  candJson ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "candidate.json");
+  check "refine: candidate.json is written"
+    (match candJson with
+      | .some j => String.eq (Json.getStr j "stage") "refined"
+      | .none => (.false : Bool));
+
+  -- 3. repro with the plan-derived harness and input
   chain ← Scry.dynResolve .none dir;
   let cc := match chain.tool with
     | .some t => t.cc

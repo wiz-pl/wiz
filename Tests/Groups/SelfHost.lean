@@ -2685,7 +2685,7 @@ def selfHostGroup : Group where
           "inductive V (w : Nat) (A : Type) : Nat → Type where\n  | nil : V w A .zero\n")
           ("UIntN : (x0 : Nat) → U0\nProxy : (x0 : U0) → U0\nS : (x0 : Nat) → U0\nS.x : (x0 :0 Nat) → (x1 : (S x0)) → Nat\nN : (x0 : Nat) → U0\n" ++
           "width : (x0 : Nat) → (x1 : (UIntN x0)) → Nat\nu8 : (UIntN (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ (Nat.succ Nat.zero)))))))))\n" ++
-          "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\nN.toNat : (x0 :0 Nat) → (x1 : (N x0)) → Nat\ncon((#1, (tt, tt)))\n" ++
+          "con((#1, (tt, tt)))\ncon((#1, (tt, tt)))\nN.toNat : (x0 : Nat) → (x1 : (N x0)) → Nat\ncon((#1, (tt, tt)))\n" ++
           "error: a parameter that no constructor mentions (a phantom parameter) of an indexed family is not supported by the self-hosted frontend\n") },
     { name := "the self-hosted backend: shared projection prefixes, with the collector and with reference counting (15j)", run := fun _ => do
         selfhostCompileRun selfhostProjShare "21\n17\n43\n22\n23\n"

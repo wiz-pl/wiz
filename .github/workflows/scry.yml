@@ -58,7 +58,12 @@ jobs:
   goldens:
     name: scry goldens (grail test)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # A cold Nix cache spends ~28 min of this job just building `.#wiz` (measured on
+    # run 44659574183: setup 02:16, wiz built 02:45, `grail build scry` 02:57), and the
+    # 60-minute limit then kills the goldens mid-run. This is a setup budget, not a
+    # golden failure: raise the limit so a cold cache still finishes, and keep the
+    # test step's own duration visible in the log.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
