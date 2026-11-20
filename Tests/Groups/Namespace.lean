@@ -87,9 +87,16 @@ def privThroughAlias : String :=
 def privQualified : String :=
   "import Priv\ndef a : Unit := Secret.shown\n"
 
-def openOutlivesNamespace : String :=
+/-- (13t) `open` is block-scoped: an `open` inside a `namespace` ends at its `end`. -/
+def openEndsAtEnd : String :=
   "namespace A\ndef x : Unit := ()\nend A\nnamespace B\nopen A\nend B\n" ++
-  "def use : Unit := x\n#check use\n"
+  "def use : Unit := x\n"
+
+/-- (13t) a file-top `open` has no enclosing block and reaches the end of the file. -/
+def topOpenReachesEnd : String :=
+  "namespace A\ndef x : Unit := ()\nend A\nopen A\n" ++
+  "namespace B\ndef y : Unit := x\nend B\ndef z : Unit := x\n" ++
+  "#check B.y\n#check z\n"
 
 /-- `open` in a module is file-scoped: it does not reach an importer. -/
 def openerMod : String :=
@@ -212,8 +219,10 @@ def namespaceGroup : Group where
         Tests.Reject.cliCheck openAcrossModules [("Math", mathMod)] false },
     { name := "wiz check: an ambiguous name is a command-line error", run := fun _ =>
         Tests.Reject.cliCheck twoOpens [] true },
-    { name := "an `open` is file-scoped: it outlives its namespace's `end`", run := fun _ =>
-        nsOk [] openOutlivesNamespace ["use : Unit"] },
+    { name := "an `open` is block-scoped: it ends at its namespace's `end`", run := fun _ =>
+        nsFails [] openEndsAtEnd "unknown identifier 'x'" },
+    { name := "a file-top `open` has no enclosing block and reaches the end of the file", run := fun _ =>
+        nsOk [] topOpenReachesEnd ["B.y : Unit", "z : Unit"] },
     { name := "an `open` in a module does not reach the files that import it", run := fun _ =>
         nsFails [("Op", openerMod)] importedOpenDoesNotLeak "unknown identifier 'x'" },
     { name := "a namespace with no `end` is reported at its own line", run := fun _ =>

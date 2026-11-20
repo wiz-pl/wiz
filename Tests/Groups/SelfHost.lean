@@ -3549,6 +3549,10 @@ def selfHostGroup : Group where
         selfhostCheckFile ("import Prelude\nnamespace N\nmutual\ninductive A where\n  | mk (b : B)\n" ++
           "inductive B where\n  | mk (a : A)\nend\nend N\n")
           "N.A : U0\nN.B : U0\n" },
+    { name := "(13t) an `open` inside a namespace ends at its `end`", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "namespace B\nopen A\nend B\ndef use : Nat := x\n")
+          "A.x : Nat\nerror: unknown identifier x\n" },
     { name := "(13v) `namespace __root__` keeps the block's declarations global", run := fun _ =>
         selfhostCheckFile ("import Prelude\nnamespace __root__\ndef r : Nat := 1\n" ++
           "def G.x : Nat := 2\nend __root__\n#check r\n#check G.x\n")

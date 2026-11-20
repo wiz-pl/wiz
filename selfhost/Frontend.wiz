@@ -662,9 +662,10 @@ def LspCtx.empty : LspCtx := .mk .false .false Array.empty 0 0 .nil
 -- (13t) `open M as A`: `A.x` is a spelling of `M.x`
 inductive NsAlias where
   | mk (alias : String) (target : String)
--- (13t) an open `namespace`: its full name and the offset of its `namespace` line
+-- (13t) an open `namespace`: its full name, the offset of its `namespace` line, and the
+-- `open`s and aliases the block started with (`end` restores them: `open` is block-scoped)
 inductive NsFrame where
-  | mk (name : String) (off : Nat)
+  | mk (name : String) (off : Nat) (opens : List String) (aliases : List NsAlias)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
@@ -743,10 +744,11 @@ def Globals.atModuleStart (gs : Globals) : Globals := Globals.withNs gs "" .nil 
 -- (13t) `namespace Foo` (nested: `A.B`)
 def Globals.pushNs (gs : Globals) (n : String) (off : Nat) : Globals := match gs with
   | .mk all sc inds ffi cls ins hs pr d p os als st t s l =>
-    .mk all sc inds ffi cls ins hs pr d n os als (.cons (.mk n off) st) t s l
+    .mk all sc inds ffi cls ins hs pr d n os als (.cons (.mk n off os als) st) t s l
 -- (13t) `end`: the innermost namespace, and the one outside it
-def Globals.popNs (gs : Globals) (outer : String) (rest : List NsFrame) : Globals :=
-  Globals.withNs gs outer (Globals.opens gs) (Globals.aliases gs) rest
+def Globals.popNs (gs : Globals) (outer : String) (f : NsFrame) (rest : List NsFrame) : Globals :=
+  match f with
+  | .mk _ _ os als => Globals.withNs gs outer os als rest
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
   | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d np o a st t s l
@@ -10495,7 +10497,7 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
   | .false => match strEq k "command.end" with
     | .true => match Globals.nsStack gs with
       | .nil => .some (nsErrStep gs "`end` without an open `namespace`")
-      | .cons (.mk full off) rest =>
+      | .cons (.mk full off ops als) rest =>
         let short := match strEq full "" with
           | .true => "__root__"
           | .false => nsShort full;
@@ -10508,11 +10510,11 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
             | .false => .some ("`end " +++ g +++ "` does not close the namespace `" +++ full
                 +++ "` (write `end` or `end " +++ short +++ "`)");
         let outer : String := match rest with
-          | .cons (.mk p _) _ => p
+          | .cons (.mk p _ _ _) _ => p
           | .nil => "";
         -- the host reports the mismatch and still closes the namespace (so the file is
         -- not also reported as leaving it open)
-        let gs' := Globals.popNs gs outer rest;
+        let gs' := Globals.popNs gs outer (.mk full off ops als) rest;
         .some (match errOpt with
           | .some m => .mk ("error: " +++ m) gs'
           | .none => .mk "" gs')
@@ -10542,7 +10544,7 @@ def atLine (start : Nat) (l : Option String) : Option String := match l with
 -- line of its `namespace` (innermost first; the reverse of the output puts them in order)
 def nsUnclosedLines : List NsFrame → List String
   | .nil => .nil
-  | .cons (.mk full off) rest =>
+  | .cons (.mk full off _ _) rest =>
     let shown := match strEq full "" with
       | .true => "__root__"
       | .false => full;

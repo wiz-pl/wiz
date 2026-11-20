@@ -938,13 +938,16 @@ end Foo
   `Foo.B.x` if `B.x` names nothing. A type's own name in its fields is rewritten with the
   prefix (`inductive T where | mk : Unit → T` inside `namespace N` is `N.T`), and a
   `mutual` block's members refer to each other unqualified.
-* **Scope: file-scoped, from the `open` on.** `open Foo` makes `Foo`'s names visible
-  unqualified **for the rest of the file**; an `import` does not see its importer's
-  opens, and a module's opens are dropped when it ends (`CommandState.endModule`). An
-  `open` names a namespace that already has declarations: elaboration is single-pass, so
-  `open` normally follows the namespace it opens (and a qualified name needs no `open` at
-  all). `open` makes *names* visible, not notation: `notation` is not scoped by a
-  namespace (13m has `local` for module-scoped grammar).
+* **Scope: block-scoped, from the `open` on.** `open Foo` makes `Foo`'s names visible
+  unqualified in the **enclosing block**: inside a `namespace` body, until its `end`;
+  at file top, where there is no enclosing block, to the end of the file. The enclosing
+  block's opens come back at `end` (`CommandState.nsStack` saves them), so a sibling
+  namespace body needs its own `open`. An `import` does not see its importer's opens,
+  and a module's opens are dropped when it ends (`CommandState.endModule`). An `open`
+  names a namespace that already has declarations: elaboration is single-pass, so `open`
+  normally follows the namespace it opens (and a qualified name needs no `open` at all).
+  `open` makes *names* visible, not notation: `notation` is not scoped by a namespace
+  (13m has `local` for module-scoped grammar).
 * **`open` is not transitive.** `open Foo` brings in exactly the declarations named
   `Foo.…`: a name `Foo` itself opened from `Bar` is `Bar.x`, so it needs its own
   `open Bar`; and a module's opens are dropped when the module ends, so an importer never
@@ -1028,8 +1031,9 @@ Tests: `namespace` (nested namespaces; qualified use with no `open`; `open` then
 unqualified use; the exact ambiguity error; `open … as` for qualification; `open … as`
 not opening unqualified; an alias shadowing a real prefix; a local binder shadowing an
 opened name; a private name through an open and through an alias; an `open` across two
-modules and its non-transitivity; missing and stray `end`; `#check` showing the
-qualified name; `mutual` under a namespace), plus two `wiz check` cases (an `open`
-across two modules, and the ambiguity as a command-line error), and the `selfhost`
+modules and its non-transitivity; **an `open` that ends at its namespace's `end`**, and a
+file-top `open` that reaches the end of the file; missing and stray `end`; `#check`
+showing the qualified name; `mutual` under a namespace), plus two `wiz check` cases (an
+`open` across two modules, and the ambiguity as a command-line error), and the `selfhost`
 group's `(13t)` cases (the same resolution in the self-hosted frontend, including a
 constructor of the matched type and the `end` diagnostics).

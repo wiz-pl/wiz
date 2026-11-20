@@ -148,8 +148,9 @@ structure CommandState (R : Type) where
   /-- the module being elaborated (`""` for the main file) -/
   module : String := ""
   /-- (13t) the `namespace`s opened in this file, innermost first, with where each was
-  declared (for a missing `end` at the end of the file) -/
-  nsStack : List (Name × SourceInfo) := []
+  declared (for a missing `end` at the end of the file), and the `open`s and aliases the
+  block started with (`open` is block-scoped: `end` restores them) -/
+  nsStack : List (Name × SourceInfo × List Name × List (Name × Name)) := []
   /-- the modules whose `builtin` registrations are trusted: the toolchain's library
   (`lib/`). The main file never is, nor a module from a `-I` directory. -/
   trustedModule : String → Bool := fun _ => false
@@ -1663,7 +1664,7 @@ def CommandState.atModuleStart (s : CommandState R) : CommandState R :=
 line of its `namespace` (the error belongs there, not at the end of the file). -/
 def CommandState.checkUnclosedNamespaces (s : CommandState R) : CommandState R :=
   if s.nsStack.isEmpty then s else
-  { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info) =>
+  { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info, _, _) =>
       let shown := if n.isEmpty then rootEscape else n
       let short := if n.isEmpty then rootEscape else (n.splitOn ".").getLast!
       { info, severity := .error, code := ErrorCode.unclosedNamespace
@@ -1870,7 +1871,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let n := ((cmd.getArg 1).getId?).getD "_"
     let p := s.globals.namespacePrefix
     let full := namespaceTarget p n
-    modify fun s => { s with nsStack := (full, cmd.info) :: s.nsStack,
+    -- (13t) the block's `open`s start from what the enclosing block has: `end` restores
+    -- them, so an `open` inside the body does not outlive it
+    modify fun s => { s with nsStack := (full, cmd.info, s.globals.opens, s.globals.aliases) :: s.nsStack,
                              globals := { s.globals with namespacePrefix := full } }
   | "command.end" =>
     -- (13t) `end` closes the innermost `namespace`; `end Foo` must name it (its last
@@ -1878,19 +1881,22 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let given? := (cmd.getArg 1).args.filterMap Syntax.getId? |>.toList.head?
     match s.nsStack with
     | [] => reportC cmd.info "`end` without an open `namespace`" ""
-    | (full, _) :: rest =>
+    | (full, _, savedOpens, savedAliases) :: rest =>
       let short := if full.isEmpty then rootEscape else (full.splitOn ".").getLast!
       let closes (g : Name) : Bool := g == short || g == full || (full.isEmpty && g == rootEscape)
       if let some g := given? then
         unless closes g do
           report .error cmd.info s!"`end {g}` does not close the namespace `{full}` (write `end` or `end {short}`)"
       let outerNs := match rest with
-        | (p, _) :: _ => p
+        | (p, _, _, _) :: _ => p
         | [] => ""
-      let g1 : Globals R := { s.globals with namespacePrefix := outerNs }
+      -- (13t) `open` is block-scoped: the enclosing block's opens and aliases come back
+      let g1 : Globals R := { s.globals with namespacePrefix := outerNs,
+                                             opens := savedOpens, aliases := savedAliases }
       modify fun s => { s with nsStack := rest, globals := g1 }
   | "command.open" =>
-    -- (13t) `open M`: M's names are visible unqualified from here on (file-scoped).
+    -- (13t) `open M`: M's names are visible unqualified from here to the end of the
+    -- enclosing block (at file top, to the end of the file: `nsStack` saves the opens).
     -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
     let n0 := ((cmd.getArg 1).getId?).getD "_"
     -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op (the
