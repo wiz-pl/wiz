@@ -99,17 +99,15 @@ def group : Group where
   exercise := "Scry analysis files: #ingest, view, revision manifest, claim, widget payload"
   parallel := true
   cases := [
-    { name := "#ingest expands to a checked spec; the scanner reports line and paths",
+    { name := "#ingest parses and the scanner reports line and paths",
       run := fun _ => evalTexts
         ("#ingest \"fixtures\" into \"graph.quire\"\n" ++
-         "#eval String.eq scry_ingest_graph_quire.root \"fixtures\"\n" ++
-         "#eval String.eq scry_ingest_graph_quire.dest \"graph.quire\"\n" ++
          "def src : String := \"import X\\n\\n#ingest \\\"fixtures\\\" into \\\"build/graph.quire\\\"\\n\"\n" ++
          "#eval Nat.repr (List.length (Scry.ingestLines src))\n" ++
          "#eval match Scry.ingestLines src with\n" ++
          "  | .cons l _ => Nat.add l.line (Nat.add (String.length l.spec.root) (String.length l.spec.dest))\n" ++
          "  | .nil => 0")
-        ["true", "true", "1", "27"] },
+        ["1", "27"] },
     { name := "merge/view/claim: files, unioned relations, file_of, the refuted claim",
       run := fun _ => evalTexts (fixtures ++
         "#eval Nat.repr (List.length merged.files)\n" ++

@@ -104,18 +104,12 @@ partial def Scry.ingestLinesFrom (off lineNo : Nat) : List String → List Scry.
 def Scry.ingestLines (text : String) : List Scry.IngestLine :=
   Scry.ingestLinesFrom 0 1 (String.splitOn text "\n")
 
-syntax (name := ingest) "#ingest" str "into" str : command
+syntax (name := ingest) "#ingest" term "into" term : command
 
-/-- The `#ingest` expansion. The declaration is pure: the elaborator must not mutate a
-shared artifact, so the file only *records* what to ingest. -/
-def Scry.ingestMacro : CommandMacro := fun stx => do
-  let rootStx := Syntax.getArg stx 1;
-  let destStx := Syntax.getArg stx 3;
-  let dest := match destStx with
-    | .atom s => s
-    | _ => "";
-  let n := Syntax.mkIdent (String.append "scry_ingest_" (Scry.ingestSlug dest));
-  MacroM.pure (.cons `(command| def $n : Scry.IngestSpec := Scry.IngestSpec.mk $rootStx $destStx) .nil)
+/-- The `#ingest` expansion. The declaration is a pure marker: the elaborator must not
+mutate a shared artifact, and the command/runner scans the text for the two paths (the
+macro exists so the file is ordinary Wiz and the parser accepts the line). -/
+def Scry.ingestMacro : CommandMacro := fun _ => MacroM.pure .nil
 
 attribute [macro command.ingest] Scry.ingestMacro
 
