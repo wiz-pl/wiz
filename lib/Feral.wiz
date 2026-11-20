@@ -3122,14 +3122,19 @@ def Fe.specBorrow (sig : Fe.Sig) (cls : List (Nat × Syntax))
   | _, .mopt _ _ _, _, _ =>
     .error "spec: not supported yet: an optional returned borrow (`Option (&mut …)`) (`final result`): `none` hands the lender back without a final value"
   | _, .mutb _ a s, .cons v .nil, .nil =>
-    let vs := .cons v .nil;
-    let fin := .cons ("result", "fin") (.cons (v, "r.2") .nil);
+    -- `v` is the lender's parameter index (`Fe.Sig.lenders : List Nat`); the clauses and
+    -- the generated scope name it, so take its name (`Fe.paramNames`).
+    let vs := Fe.paramNames sig (.cons v .nil);
+    let vn := match vs with
+      | .cons x _ => x
+      | .nil => "";
+    let fin : List (String × String) := .cons ("result", "fin") (.cons (vn, "r.2") .nil);
     let res := "r.1";
     let reqs := Fe.clauses sig.params vs fin res "feral_clause.req" cls;
     let enss := Fe.clauses sig.params vs fin res "feral_clause.ens" cls;
     let rgs := Fe.nubStr (Fe.rgsUsed sig.rgs (List.map (fun (q : String × Fe.Ty) => Fe.paramTyL vs q) sig.params));
     let call := Fe.unwords (.cons sig.name (List.map (fun (q : String × Fe.Ty) => q.1) sig.params));
-    let scope := "Uniq.borrow Region.static " +++ v +++ " (fun ρ1 h1 l1 " +++ v +++ " =>\n      match " +++ call
+    let scope := "Uniq.borrow Region.static " +++ vn +++ " (fun ρ1 h1 l1 " +++ vn +++ " =>\n      match " +++ call
       +++ " with\n      | .ok m =>\n        let 1 (cur, m) := Mut.peek m;\n        let 1 u := Mut.close m fin;\n        .ok cur u\n      | .err e u => .err e u)"
     .ok ("def " +++ sig.name +++ ".Spec "
       +++ (match rgs with
