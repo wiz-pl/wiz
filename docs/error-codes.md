@@ -15,6 +15,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |
 | `import-cycle` | an `import` leads back to the module itself | | |
 | `module-errors` | an imported module has errors (they are listed) | | |
+| `no-such-file` | the file a command names cannot be read | `wiz check no.wiz` | |
 | `missing-case` | a `match` or equations miss constructors | | add missing cases |
 | `missing-copattern` | a copattern definition misses an observation | | |
 | `missing-field` | an instance misses a field of its class | | |

@@ -861,6 +861,40 @@ def descLiftsAll (D : Tm) : List (List Bool) := match D with
   | .darg _ _ (.lam (.ecase _ _ ds)) => mapL (fun d => descLifts d) (tmsToList ds)
   | _ => .nil
 
+-- (D6) the position of the failing **term**. An error message carries the offset of the
+-- term that failed as a trailing `"\x01<offset>"` mark: the term-level entry points
+-- (`inferT`/`checkT`) add the current syntax node's start when the message has none yet,
+-- so the innermost failing node wins (a wrapper keeps the mark it was given). The mark is
+-- internal: `atLine` turns it into the command line's `@OFFSET` and strips it, so no
+-- output ever carries one. (A message without a mark keeps the command's start: the
+-- failing position is not always known — a binder's type, a lookup before a term exists.)
+def errDigit (c : Char) : Bool := Bool.and (Nat.lt 47 (Char.code c)) (Nat.lt (Char.code c) 58)
+def errDigits : List Char → Nat → Nat
+  | .nil, acc => acc
+  | .cons c cs, acc => errDigits cs (Nat.add (Nat.mul acc 10) (Nat.sub (Char.code c) 48))
+-- scan the message backwards: the digits, then `\x01`, then the message
+def errMarkScan : List Char → List Char → Option (Nat × String)
+  | .nil, _ => .none
+  | .cons c cs, ds => match errDigit c with
+    | .true => errMarkScan cs (.cons c ds)
+    | .false => match Nat.beq (Char.code c) 1 with
+      | .true => match ds with
+        | .nil => .none
+        | .cons _ _ => .some (errDigits (List.reverseOf ds .nil) 0, String.mk (List.reverseOf cs .nil))
+      | .false => .none
+def errSplit (m : String) : Option (Nat × String) := match m with
+  | .mk cs => errMarkScan (List.reverseOf cs .nil) .nil
+def errMark (p : Nat) (m : String) : String :=
+  String.append m (String.append "\x01" (Nat.toString p))
+-- the innermost placement wins: a message that already names a position keeps it
+def errMarkIf (sp : Option SpT) (m : String) : String := match errSplit m with
+  | .some _ => m
+  | .none => match sp with
+    | .some t => errMark (SpT.start t) m
+    | .none => m
+-- attach a span's start when it is known (a command-level failure: a declared name)
+def errMarkAt (sp : Option SpT) (m : String) : String := errMarkIf sp m
+
 -- the output of a command, and the globals after it
 inductive Step where
   | mk (out : String) (gs : Globals)
@@ -3266,6 +3300,11 @@ def argSpans (sp : Option SpT) (i : Nat) : List (Option SpT) := spKidsOpt (spKid
 inductive TE where
   | ok (t : Tm) (ty : Val) (es : ES)
   | err (msg : String)
+-- (D6) the term-level entry points attach the current syntax node's start to an error
+-- that has no position yet (the innermost failing node wins; see `errMarkIf`)
+def markTE (sp : Option SpT) : TE → TE
+  | .ok t ty es => .ok t ty es
+  | .err m => .err (errMarkIf sp m)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
   | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
@@ -4782,8 +4821,8 @@ def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT
         | .true => ES.addSnap es' (.goal at (Globals.lspStop gs) (tacGoalsList es' st'))
         | .false => es';
       runTacticSteps gs es'' st' endSp (at + 1) rest (spTail sps)
-    | .err m => .err (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st)))
-    | .abort m => .abort m
+    | .err m => .err (errMarkIf (spHead sps) (String.append m (String.append "\nremaining goals:\n" (tacGoalsShow es st))))
+    | .abort m => .abort (errMarkIf (spHead sps) m)
 
 /-- `by tac₁; tac₂ …`: a hole of the expected type, filled by the tactic script, and
 checked by the kernel as an ordinary term. -/
@@ -4814,7 +4853,7 @@ def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT) : 
   -- a `match` (or `if`) without an expected type: against a new metavariable, a type
   -- (stage 20a)
   let sp := spCheck sp0 s;
-  match Bool.or (strEq (kindOf s) "term.match") (match ifMatch s with
+  markTE sp (match Bool.or (strEq (kindOf s) "term.match") (match ifMatch s with
     | .some _ => Bool.true
     | .none => .false) with
   | .true => match newMeta es cx (.vsort (.lnum 1)) with
@@ -4825,7 +4864,7 @@ def inferT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT) : 
       | e => e
   | .false => match inferHead gs es cx s sp with
     | .ok t ty es' m => insertImplicits gs es' cx t ty m
-    | .err msg => .err msg
+    | .err msg => .err msg)
 -- an application's head: the term, its type and the implicit mask that remains
 def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT) : HE :=
   let k := kindOf s;
@@ -5651,7 +5690,7 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
   let sp := spCheck sp0 s;
   let es := recordTerm es sp cx ty;
   let k := kindOf s;
-  match strEq k "term.letUnit" with
+  markTE sp (match strEq k "term.letUnit" with
   | .true => letUnitT gs es cx s (.some ty)
   | .false => match strEq k "term.letPair" with
     | .true => letPairT gs es cx s ty
@@ -5659,7 +5698,7 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
       | .true => letPairT gs es cx (letTupleToPairs s) ty
       | .false => match strEq k "term.letPat" with
         | .true => letPatT gs es cx s (.some ty)
-        | .false => checkT0 gs es cx s ty sp0
+        | .false => checkT0 gs es cx s ty sp0)
 def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
   let k := kindOf s;
@@ -10223,10 +10262,14 @@ inductive StepR where
 -- (D6) every output line names the offset of the command that produced it, as
 -- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
 -- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
--- line leaves `stepCommand`: the driver entry.)
+-- line leaves `stepCommand`: the driver entry.) An error line that carries the offset of
+-- the failing term (the `\x01` mark, `errMarkIf`) is reported there instead of at the
+-- command's start.
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
-  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+  | .some s => match errSplit s with
+    | .some (.mk p m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
+    | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
@@ -10240,9 +10283,7 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       let gs := Globals.setCmd gs input start stop;
       -- (playground LSP, stage 2) the parser's span side table for this command; `none`
       -- unless the playground asked for the position index (the compiler path stays free)
-      let sp0 : Option SpT := match Globals.watch gs with
-        | .true => spansAt input tokens pos stx0
-        | .false => .none;
+      let sp0 : Option SpT := spansAt input tokens pos stx0;
       match strEq (kindOf stx0) "command.import" with
     -- (A14) with the module loader (`inlineImports = false`) the import was loaded
     -- before the file: skip it (only the Prelude, when checking one file, is inline)
@@ -10318,7 +10359,9 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
                       | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
       match step with
       | .mk line gs' => match newDuplicate gs gs' with
-        | .some x => .next (atLine start (.some (String.append (String.append "error: '" x) "' has already been declared"))) stop gs cats tokens notes
+        -- (D6) the declared name's own token, not the command's start
+        | .some x => .next (atLine start (.some (errMarkAt (declSpanFor input sp x)
+            (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
         -- (A11) `deriving instance` prints no line, as in the Lean toolchain
         | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
             | .true => .none
@@ -10580,10 +10623,139 @@ def modCycleMsg (stack : List String) (name : String) : String :=
   String.append "error: import cycle: "
     (modJoinArrows (List.append (List.reverseOf (modTakeTo stack name) .nil) (.cons name .nil)))
 
+-- (D6) a module's errors, for its importer's `module M has errors:` block. `own` is
+-- the module's own error lines, already rendered as the host renders them
+-- (`M:line:col: error: …`); `through` is the blocks it got from its own imports, already
+-- rendered and prefixed. The host lists a module's own errors at each import of it, and
+-- passes a deeper module's block on as `imported module M → …` (never nested twice).
+inductive ModBlock where
+  | mk (name : String) (own : List String) (through : List String)
+
+def blockFind : List ModBlock → String → Option ModBlock
+  | .nil, _ => .none
+  | .cons b rest, n => match b with
+    | .mk m _ _ => match strEq m n with
+      | .true => .some b
+      | .false => blockFind rest n
+def blockWithout : List ModBlock → String → List ModBlock
+  | .nil, _ => .nil
+  | .cons b rest, n => match b with
+    | .mk m _ _ => match strEq m n with
+      | .true => blockWithout rest n
+      | .false => .cons b (blockWithout rest n)
+def blockPut (bs : List ModBlock) (b : ModBlock) : List ModBlock := match b with
+  | .mk n _ _ => .cons b (blockWithout bs n)
+
+-- (D6) the nested block is one output *line* in the frontend's stream: its line breaks
+-- are `\x02`, which the driver expands when it prints (`selfhost/Cli.wiz`, `diagLine`).
+def nestSep : String := "\x02"
+def nestExpandChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => match Nat.beq (Char.code c) 2 with
+    | .true => .cons (Char.mk 10) (nestExpandChars cs)
+    | .false => .cons c (nestExpandChars cs)
+def expandNest (s : String) : String := match s with
+  | .mk cs => .mk (nestExpandChars cs)
+def nestJoin : List String → String
+  | .nil => ""
+  | .cons x rest => match rest with
+    | .nil => x
+    | .cons _ _ => String.append x (String.append nestSep (nestJoin rest))
+def nestIndent : List String → List String
+  | .nil => .nil
+  | .cons l rest => .cons (String.append "  " l) (nestIndent rest)
+def blockRender (b : ModBlock) : Option String := match b with
+  | .mk name own through =>
+    let ownPart := match own with
+      | .nil => .nil
+      | .cons _ _ => .cons (String.append "module " (String.append name " has errors:")) (nestIndent own)
+    let throughPart := mapL (fun t => String.append "imported module " (String.append name (String.append " → " t))) through
+    match List.append ownPart throughPart with
+    | .nil => .none
+    | .cons _ _ => .some (nestJoin (List.append ownPart throughPart))
+
+-- (the cache payload of the run) the list helpers the loader needs
+def listTake : Nat → List String → List String
+  | .zero, _ => .nil
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (listTake k xs)
+def listDrop : Nat → List String → List String
+  | .zero, xs => xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons _ xs => listDrop k xs
+def Run.withOut (r : Run) (out : List String) : Run := match r with
+  | .mk _ gs cats tokens notes => .mk out gs cats tokens notes
+
+-- `@NAME:OFFSET text` (a line the loader tagged, D6) → its module, offset and text
+inductive TLine where
+  | mk (name : String) (off : Nat) (text : String)
+def tlName : List Char → List Char → Option (List Char × List Char)
+  | .nil, _ => .none
+  | .cons c cs, acc => match Nat.beq (Char.code c) 58 with
+    | .true => .some (List.reverseOf acc .nil, cs)
+    | .false => tlName cs (.cons c acc)
+def tlOff : List Char → Nat → Option (Nat × List Char)
+  | .nil, _ => .none
+  | .cons c cs, acc => match Nat.beq (Char.code c) 32 with
+    | .true => .some (acc, cs)
+    | .false => match Bool.and (Nat.lt 47 (Char.code c)) (Nat.lt (Char.code c) 58) with
+      | .true => tlOff cs (Nat.add (Nat.mul acc 10) (Nat.sub (Char.code c) 48))
+      | .false => .none
+def tlOf (s : String) : Option TLine := match s with
+  | .mk cs => match cs with
+    | .cons c rest => match Nat.beq (Char.code c) 64 with
+      | .true => match tlName rest .nil with
+        | .some (.mk nm after) => match tlOff after 0 with
+          | .some (.mk off txt) => .some (.mk (String.mk nm) off (String.mk txt))
+          | .none => .none
+        | .none => .none
+      | .false => .none
+    | .nil => .none
+
+-- (D6) an error line; a module's own errors are nested into its importer's report and
+-- its other lines (a `#check`'s info) stay at their own position
+def lineIsErr (l : String) : Bool := match tlOf l with
+  | .none => .false
+  | .some (.mk _ _ msg) => match dropPrefix (strChars "error: ") (strChars msg) with
+    | .some _ => .true
+    | .none => .false
+def keepNonErr : List String → List String
+  | .nil => .nil
+  | .cons l rest => match lineIsErr l with
+    | .true => keepNonErr rest
+    | .false => .cons l (keepNonErr rest)
+
+-- the 1-based line and column of a 0-based offset (the host's `Msg.render`)
+inductive LCP where
+  | mk (ln : Nat) (col : Nat)
+def lcScan : List Char → Nat → Nat → Nat → Nat → LCP
+  | .nil, _, _, ln, col => .mk ln col
+  | .cons c cs, i, off, ln, col => match Nat.lt i off with
+    | .false => .mk ln col
+    | .true => match Nat.beq (Char.code c) 10 with
+      | .true => lcScan cs (Nat.succ i) off (Nat.succ ln) 1
+      | .false => lcScan cs (Nat.succ i) off ln (Nat.succ col)
+def lineColAt (text : String) (off : Nat) : LCP := match text with
+  | .mk cs => lcScan cs 0 off 1 1
+
+-- the module's error lines among `ls` (newest first), as `M:line:col: error: …`
+def ownErrs (mName text : String) : List String → List String
+  | .nil => .nil
+  | .cons l rest => match tlOf l with
+    | .none => ownErrs mName text rest
+    | .some (.mk _ off msg) => match dropPrefix (strChars "error: ") (strChars msg) with
+      | .none => ownErrs mName text rest
+      | .some _ => match lineColAt text off with
+        | .mk ln col => .cons (mName +++ ":" +++ Nat.toString ln +++ ":" +++ Nat.toString col +++ ": " +++ msg)
+            (ownErrs mName text rest)
+
 -- the loader's state: the output, globals and tables (`Run`), each module's state, the
--- current import path, and the modules loaded so far (in load order)
+-- current import path, the modules loaded so far (in load order), each module's error
+-- block (D6), and every module's lines before nesting (`flat`, the per-module cache's
+-- payload: D5)
 inductive ModLoad where
   | mk (run : Run) (vis : StrMap Nat) (stack : List String) (order : List String)
+       (blocks : List ModBlock) (flat : List String)
 
 -- one module's commands, its imports already loaded (skipped); the Prelude needs the `do`
 -- grammar and the `←` token, as the inline import did, and its output is silent (it
@@ -10606,27 +10778,70 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
   | .mk out gs' cats' tokens' notes' =>
     .mk (tagFirst name (Nat.sub (List.length out) (List.length (Run.out r))) out) gs' cats' tokens' notes'
 
+-- (D6) emit one nesting line per broken direct import of `name`, at the `import`'s own
+-- offset, tagged to `name`; returns the run and the rendered blocks for `name`'s own
+-- block (`through`: the host's `imported module name → …` entries).
+inductive NestR where
+  | mk (run : Run) (through : List String)
+def nestImportsGo (tab : List ModSrc) (run : Run) (stack : List String) (name : String)
+    (blocks : List ModBlock) : List String → NestR
+  | .nil => NestR.mk run .nil
+  | .cons m ms => match blockFind blocks m with
+    | .none => nestImportsGo tab run stack name blocks ms
+    | .some b => match blockRender b with
+      | .none => nestImportsGo tab run stack name blocks ms
+      | .some txt =>
+        let off := modImportOffset tab run (.cons name stack) m;
+        let run1 := Run.addLine run (tagOne name off (String.append "error: " txt));
+        match nestImportsGo tab run1 stack name blocks ms with
+        | .mk r2 ts => .mk r2 (.cons txt ts)
+
 mutual
 def modLoadOne (tab : List ModSrc) (l : ModLoad) (name : String) : ModLoad :=
   match l with
-  | .mk run vis stack order => match modStateOf vis name with
+  | .mk run vis stack order blocks flat => match modStateOf vis name with
     | .loaded => l
     | .loading => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
-          (modCycleMsg stack name))) vis stack order
+          (modCycleMsg stack name))) vis stack order blocks flat
     | .unseen => match modFind tab name with
       | .none => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
             (String.append "error: cannot find module " name)))
-          (modMark vis name 2) stack order
+          (modMark vis name 2) stack order blocks flat
       | .some (.mk n p t is) => match modEmpty p with
         -- the driver found no file: a `ModSrc` with path "" (or the caller had no entry)
         | .true => .mk (Run.addLine run (tagOne (modImporting stack) (modImportOffset tab run stack name)
               (String.append "error: cannot find module " n)))
-            (modMark vis name 2) stack order
+            (modMark vis name 2) stack order blocks flat
         | .false =>
-          let l1 : ModLoad := .mk run (modMark vis name 1) (.cons name stack) order;
+          let entryLen := List.length (Run.out run);
+          let l1 : ModLoad := .mk run (modMark vis name 1) (.cons name stack) order blocks flat;
           match modLoadAll tab l1 is with
-          | .mk run2 vis2 _ order2 =>
-            .mk (modRunBody run2 name t) (modMark vis2 name 2) stack (.cons name order2)
+          | .mk run2 vis2 _ order2 blocks2 flat2 =>
+            -- (D6) the module's imports: nest each broken one under its `import`
+            let nest := nestImportsGo tab run2 (.cons name stack) name blocks2 is;
+            let run2b := NestR.run nest;
+            let body := modRunBody run2b name t;
+            let loaderN := Nat.sub (List.length (Run.out run2)) entryLen;
+            let bodyN := Nat.sub (List.length (Run.out body)) (List.length (Run.out run2b));
+            let loaderRaw := listTake loaderN (Run.out run2);
+            let bodyRaw := listTake bodyN (Run.out body);
+            -- (D5) the module's own lines in source order, before nesting
+            let flat3 := List.append flat2 (List.append (List.reverseOf loaderRaw .nil) (List.reverseOf bodyRaw .nil));
+            -- a module that fails to load one of its imports reports that at the import
+            -- too; it is the module's own error, not a nesting line
+            let loaderErrs := ownErrs name t (List.reverseOf loaderRaw .nil);
+            let bodyErrs := ownErrs name t (List.reverseOf bodyRaw .nil);
+            let blk : ModBlock := .mk name (List.append loaderErrs bodyErrs) (NestR.through nest);
+            match stack with
+            -- the root: its own lines (and its imports' blocks) are the program's output
+            | .nil => .mk body (modMark vis2 name 2) stack (.cons name order2) blocks2 flat3
+            -- a module: its own errors are nested into its importer's report; its other
+            -- lines (a `#check`'s info) stay at their own position
+            | .cons _ _ =>
+              let newTotal := Nat.sub (List.length (Run.out body)) entryLen;
+              .mk (Run.withOut body (List.append (keepNonErr (listTake newTotal (Run.out body)))
+                    (listDrop newTotal (Run.out body))))
+                (modMark vis2 name 2) stack (.cons name order2) (blockPut blocks2 blk) flat3
 def modLoadAll (tab : List ModSrc) (l : ModLoad) : List String → ModLoad
   | .nil => l
   | .cons n ns => modLoadAll tab (modLoadOne tab l n) ns
@@ -10638,7 +10853,7 @@ end
 def modCheckRunHT (cats : List Cat) (tokens : List String) (trust smtTrust : Bool) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil (Globals.withSmtTrust (Globals.withTrust (Globals.withHeaders Globals.empty headers) trust) smtTrust)
-    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil .nil .nil) roots
 -- (C14) `--trust-native` alone: the branch's driver and tests use this name
 def modCheckRunHTrust (cats : List Cat) (tokens : List String) (trust : Bool) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
@@ -10656,9 +10871,9 @@ def modCheckRunH (cats : List Cat) (tokens : List String) (headers : List Header
 def modCheckRunHLsp (cats : List Cat) (tokens : List String) (headers : List Header)
     (tab : List ModSrc) (roots : List String) : ModLoad :=
   modLoadAll tab (.mk (Run.mk .nil (Globals.withLsp (Globals.withHeaders Globals.empty headers))
-    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil) roots
+    (surfaceCats cats) (List.append surfaceTokens tokens) .nil) StrMap.empty .nil .nil .nil .nil) roots
 def modCheckRun (cats : List Cat) (tokens : List String) (tab : List ModSrc) (roots : List String) : ModLoad :=
-  modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil) roots
+  modLoadAll tab (.mk (Run.mk .nil Globals.empty cats tokens .nil) StrMap.empty .nil .nil .nil .nil) roots
 -- the `import_c "…"` header names of a source text, in order (no preprocessor)
 partial def modHeaderNamesAt : List Char → List String
   | .nil => .nil
@@ -10767,7 +10982,7 @@ def moduleRootSources (cats : List Cat) (tokens : List String) (roots : List Str
 partial def modPrint : List String → IO Unit
   | .nil => IO.pure ()
   | .cons s ss => do
-    IO.println (stripAt s);
+    IO.println (expandNest (stripAt s));
     modPrint ss
 
 -- (A14) the checker's driver: read `input.wiz` and its modules (with `-I` roots), check

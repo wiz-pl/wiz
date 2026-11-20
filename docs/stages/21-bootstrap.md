@@ -1138,9 +1138,10 @@ covers ordinary inductives only), no rewriting in hypotheses, no
 type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
 whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
 written ones), so the exact `unfold List.filter` steps of `lib/Data/ListLemmas` are not
-guaranteed to match the host. The error position is the failed command, as for the rest
-of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
-are not reproduced.
+guaranteed to match the host. The error position is the failing term, as for the rest
+of the self-hosted diagnostics (21ar); where the failing term is not known (a binder's
+type) it falls back to the command. The host's multi-line expected/inferred blocks are
+not reproduced.
 
 ## 21af: how much of the parity group runs the pipeline
 
@@ -1744,3 +1745,56 @@ recurses on a different argument than the host's), notations and operator preced
 and the class/instance layer (a new class or notation in the host prelude does not fail
 the check). Those need elaboration, not a regexp; `selfhost-libdiff`
 measures their consequences, and the check's report names the known gaps on every run.
+
+## 21ar: positioned diagnostics and a per-module cache (D5, D6)
+
+The two driver rows that were still *behaviourally* different from the Lean-hosted `wiz`
+are closed.
+
+**D6, the position of a failure.** The frontend's error messages now carry the offset
+of the **term** that failed, not only the command's start. `inferT`/`checkT` attach the
+current syntax node's start to an error that has none (`errMarkIf`, a trailing
+`"\x01<offset>"` mark), so the *innermost* failing term wins and a wrapper never
+overwrites it; a tactic's failure is placed at the tactic (`runTacticSteps`, so `by smt`
+is reported at the `smt` token) and a duplicate declaration at the declared name
+(`declSpanFor`). `atLine` turns the mark into the line's `@OFFSET` and strips it, so no
+output ever carries one. Spans are now computed for every command, not only for the
+language server. A message without a mark (a binder's type, a lookup before a term
+exists) keeps the command's start, as before.
+
+A module's errors are **nested under its import**, as the host's
+`importErrorsText` does: `import M` of a broken `M` reports one diagnostic at the
+import, `module M has errors:` followed by `  M:line:col: error: …` for each of M's own
+errors, and a deeper module's block is passed on as `imported module M → …` (never
+nested twice). The frontend carries the line breaks of one nested report as `\x02`
+inside one output line (so the cache's line format stays one-line-per-entry) and the
+driver expands them when it prints. A module's non-error lines (a `#check`'s info) stay
+at their own position.
+
+A **missing file** is now one positioned diagnostic in the host too (`no.wiz:1:1:
+error: no such file`, code `no-such-file`, added to `ErrorCode.all` and
+`docs/error-codes.md`) instead of an uncaught `IO.FS.readFile` exception; `check` and
+`build`/`run` read through the same helper, so the two tools print the same line and
+exit 1.
+
+**D5, one cache entry per module.** `<key>.wizc` is a module's tagged output lines and
+status, `<key>.wizm` its manifest; a module's key is the toolchain id, the root's
+`import_c` header texts, the elaboration flags, its own name and text, and each import's
+name and key in source order (a changed dependency misses every importer; a path and an
+mtime are not in the key). A warm `check` computes the load order from the import graph,
+reads every module's entry, rebuilds the nesting report from them and runs no command.
+The program's compiled C is `<key>.wizr` (one per graph: it plays the host's region
+role) with its checksum in `<key>.wizs`; `build`/`run` share it. `--cache-ro`,
+`--cache-verify off|warn|strict` (manifest sidecars are now `<key>.wizm` for `.wizc`/
+`.h` and `<key>.wizs` for `.wizr`) and `--cache-prune` all keep working, and the prune
+summary now uses the host's four keyed names and its exact wording, so an empty prune
+is byte-identical in the two tools.
+
+Not done: **globals are not serialized**. The cache stores a module's output lines, not
+the `Globals` its elaboration produced, so one missing module entry is a cold
+elaboration of the whole graph (the root's key includes every import's key, so a change
+is never served stale). Serializing `Globals` means encoding `Tm` (60 constructors),
+`Val`, `Scope`'s `StrMap`s, `IndInfo`'s `Syntax`, `ClassInfo`, the `FFI` records and the
+flags, and reconstructing them exactly; a cache hit is trusted without a kernel check,
+so a serializer bug would be a soundness bug, not a slow run. That is a separate piece
+of work, sized and deferred rather than approximated.
