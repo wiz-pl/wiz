@@ -91,6 +91,20 @@ def matchGroup : Group where
           "  | .true, .false => trans (cong (fun b => g2 b (isZero m)) h) (cong (fun c => g2 .true c) k)\n" ++
           "  | .false, .true => trans (cong (fun b => g2 b (isZero m)) h) (cong (fun c => g2 .false c) k)\n" ++
           "  | .false, .false => trans (cong (fun b => g2 b (isZero m)) h) (cong (fun c => g2 .false c) k)\n") },
+    -- the equation's type lives after *all* the scrutinee binders and only the
+    -- equations bound before it: an unnamed earlier column must not shift it
+    { name := "a named scrutinee after an unnamed one keeps its equation", run := fun _ =>
+        ok (eqnPrelude ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Nat :=\n" ++
+          "  match b with\n" ++
+          "  | .true => .succ .zero\n" ++
+          "  | .false => .zero\n" ++
+          "def mixed (n : Nat) (b : Bool) : Nat :=\n" ++
+          "  match b, h : isZero n with\n" ++
+          "  | .true, .true => useEq n .true h\n" ++
+          "  | .true, .false => useEq n .false h\n" ++
+          "  | .false, .true => useEq n .true h\n" ++
+          "  | .false, .false => useEq n .false h\n") },
     { name := "a non-dependent match still has its equation", run := fun _ =>
         ok (eqnPrelude ++
           "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Nat :=\n" ++

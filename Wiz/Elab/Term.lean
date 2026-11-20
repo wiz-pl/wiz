@@ -3234,6 +3234,9 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
       | some p => patIsCtor g p
       | none => false
   let mut eqBinders : Array (Name × Term R) := #[]
+  -- how many equations are already in the context (they are innermost, so every
+  -- index below is shifted by this many)
+  let mut eqSeen := 0
   for nm in named, i in [0:named.size] do
     if let some (h, info) := nm then
       -- an indexed type's split refines the index: `e` keeps its outer index, so
@@ -3247,14 +3250,19 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
         throwAt info (s!"the equation for '{h}' is not supported: its type mentions an earlier scrutinee " ++
           "that this match splits; use a helper that takes both values and their equations")
       -- `e` (and its type) with the earlier scrutinees abstracted, then lifted over
-      -- the `nScruts` binders added by the scrutinees and the earlier equations
+      -- the remaining scrutinee binders (this one is not bound yet) and the earlier
+      -- equations
       let mut eTm := ts[i]!
       for t in ts.extract 0 i, k in [0:i] do eTm := eTm.abstract (t.lift k)
-      let eqTy : Term R := .eq ((absBinders[i]!.2).lift nScruts) (eTm.lift nScruts) (.var (nScruts - 1))
+      -- the lift into the context that has all scrutinees and the earlier equations
+      let liftBy := nScruts - i + eqSeen
+      let eqTy : Term R := .eq ((absBinders[i]!.2).lift liftBy) (eTm.lift liftBy)
+        (.var (eqSeen + nScruts - 1 - i))
       let vTy ← evalIn ctx' eqTy
       eqBinders := eqBinders.push (h, eqTy)
       lvls := lvls ++ [ctx'.lvl]
       ctx' := ctx'.bind h vTy
+      eqSeen := eqSeen + 1
   binders := absBinders ++ eqBinders
   -- the equations are the innermost binders: the goal, abstracted over the scrutinees,
   -- is lifted over them
