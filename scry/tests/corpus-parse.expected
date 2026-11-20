@@ -1,0 +1,4 @@
+corpus: 48 .cs, 22 .c, 0 unexpected parse failure(s): ok
+exemptions: 2 row(s), 0 stale: ok
+expected failure: corpus/project/macro/macro.c: ok
+expected failure: corpus/csharp/repo/src/Broken.cs: ok

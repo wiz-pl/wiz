@@ -1,0 +1,144 @@
+-- test: run
+import Sys
+import Text
+import Scry.Native
+
+-- Corpus parse invariant: every `.c` under `corpus/` parses with tree-sitter-c and
+-- every `.cs` parses with tree-sitter-c-sharp, with **0 ERROR/MISSING nodes**.
+--
+-- The exemptions are checked in at `corpus/parse-errors.tsv`; each is an intentionally
+-- invalid file, and a stale row (a file that now parses) fails as well. This is the
+-- check that would have caught `.cs` parsed as C: a C# file parsed with the C grammar
+-- has ERROR nodes, and the test names the file.
+--
+-- The test parses from source with the native shim (the CI, scry goldens job, provides
+-- it); it does not rely on a checked-in spill, so a missing/stale spill cannot hide a
+-- grammar regression.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+mutual
+partial def walkDir (dir : String) : EIO (List String) := do
+  names ← FS.listDir dir;
+  walkNames dir names .nil
+
+partial def walkNames (dir : String) : List String → List String → EIO (List String)
+  | .nil, acc => EIO.pure acc
+  | .cons n rest, acc => do
+    let full := Path.join dir n;
+    isD ← EIO.lift (FS.isDir full);
+    match isD with
+    | .true => do
+      sub ← walkDir full;
+      walkNames dir rest (List.append acc sub)
+    | .false => walkNames dir rest (List.append acc [full])
+end
+
+def insert (p : String) : List String → List String
+  | .nil => [p]
+  | .cons q qs => match String.lt p q with
+    | .true => List.cons p (List.cons q qs)
+    | .false => List.cons q (insert p qs)
+
+def sortPaths (xs : List String) : List String :=
+  List.foldl (fun acc x => insert x acc) .nil xs
+
+def isSource (p : String) : Bool :=
+  Bool.or (String.endsWith p ".cs") (String.endsWith p ".c")
+
+def langOf (p : String) : String :=
+  match String.endsWith p ".cs" with
+  | .true => "c_sharp"
+  | .false => "c"
+
+/-- A manifest row: `path<TAB>reason`; comments and blank lines are skipped. -/
+def rowOf (line : String) : Option (String × String) :=
+  let l := String.trim line;
+  match String.isEmpty l, String.startsWith l "#" with
+  | .true, _ => .none
+  | _, .true => .none
+  | _, _ => match String.splitOn l "\t" with
+    | .cons p (.cons r _) => .some (String.trim p, String.trim r)
+    | _ => .none
+
+def filterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x rest => match f x with
+    | .some y => List.cons y (filterMap f rest)
+    | .none => filterMap f rest
+
+def manifestRows (text : String) : List (String × String) :=
+  filterMap rowOf (String.splitOn text "\n")
+
+def findRow (rows : List (String × String)) (p : String) : Option (String × String) :=
+  List.find (fun r => String.eq r.1 p) rows
+
+/-- The number of `ERROR`/`MISSING` nodes. -/
+def parseCount (p text : String) : EIO Nat := do
+  st ← Scry.Native.parse (langOf p) text;
+  EIO.pure (Scry.Native.errorCount st)
+
+structure Acc where
+  unexpected : List String
+  stale : List String
+
+partial def scanSources (rows : List (String × String)) : List String → Acc → EIO Acc
+  | .nil, acc => EIO.pure acc
+  | .cons p rest, acc => do
+    text ← FS.readFile p;
+    n ← parseCount p text;
+    let acc' := match findRow rows p with
+      | .some _ => match n with
+        | 0 => { acc with stale := List.cons p acc.stale }
+        | _ => acc
+      | .none => match n with
+        | 0 => acc
+        | _ => { acc with unexpected := List.cons (p ++ " (" ++ Nat.repr n
+            ++ " node(s))") acc.unexpected };
+    scanSources rows rest acc'
+
+/-- A manifest row whose file is missing or now parses. -/
+partial def staleRows (rows : List (String × String)) : EIO (List String) :=
+  match rows with
+  | .nil => EIO.pure ([] : List String)
+  | .cons r rest => do
+    there ← EIO.lift (FS.exists r.1);
+    match there with
+    | .false => do
+      more ← staleRows rest;
+      EIO.pure (List.cons (r.1 ++ " (no such file: " ++ r.2 ++ ")") more)
+    | .true => do
+      text ← FS.readFile r.1;
+      n ← parseCount r.1 text;
+      more ← staleRows rest;
+      match n with
+      | 0 => EIO.pure (List.cons (r.1 ++ " (now parses)") more)
+      | _ => EIO.pure more
+
+def main : IO Unit := EIO.toIO (do
+  all ← walkDir "corpus";
+  let sources := sortPaths (List.filter isSource all);
+  let csCount := List.length (List.filter (fun p => String.endsWith p ".cs") sources);
+  let cCount := List.length (List.filter (fun p => String.endsWith p ".c") sources);
+  mtext ← FS.readFile "corpus/parse-errors.tsv";
+  let rows := manifestRows mtext;
+  acc ← scanSources rows sources (Acc.mk .nil .nil);
+  staleMore ← staleRows rows;
+  let stale := List.append acc.stale staleMore;
+  check ("corpus: " ++ Nat.repr csCount ++ " .cs, " ++ Nat.repr cCount
+      ++ " .c, " ++ Nat.repr (List.length acc.unexpected) ++ " unexpected parse failure(s)")
+    (Nat.beq (List.length acc.unexpected) 0);
+  check ("exemptions: " ++ Nat.repr (List.length rows) ++ " row(s), 0 stale")
+    (Nat.beq (List.length stale) 0);
+  for p in List.reverse acc.unexpected do
+    check ("unexpected parse errors: " ++ p) .false;
+  for p in List.reverse stale do
+    check ("stale exemption: " ++ p) .false;
+  for row in rows do
+    text ← FS.readFile row.1;
+    n ← parseCount row.1 text;
+    check ("expected failure: " ++ row.1) (Nat.lt 0 n))

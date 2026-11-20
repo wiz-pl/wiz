@@ -112,6 +112,7 @@
       "=scry-datalog",
       "=scry-cert",
       "=scry-egraph",
+      "=scry-e2e",
       "=smt",
       "std",
       "tactics",

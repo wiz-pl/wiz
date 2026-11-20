@@ -1,0 +1,175 @@
+-- test: run
+import Sys
+import Json
+import Text
+
+-- `scry project`: the C tree driver, end to end on checked-in fixture trees.
+--
+--   corpus/project/clean  one unit, two functions, no source/sink       exit 0
+--   corpus/project/taint  three units, two cross-TU findings           exit 0 / 1 gated
+--   corpus/project/none   no translation unit                          exit 3
+--   a missing directory / a bad flag                                   exit 2
+--
+-- The report is the real `--json` (`scry-project-report/1`) and the real `--sarif`
+-- (SARIF 2.1.0); the test parses both, so a schema drift or a malformed log fails here.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def run (args : List String) : EIO Res := do
+  out ← Process.output ".grail/bin/scry" args "";
+  let code := match out.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code out.stdout out.stderr)
+
+partial def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def nthJ : List Json → Nat → Json
+  | .nil, _ => Json.mkNull
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ k => nthJ xs k
+
+def parseJson (label text : String) : EIO Json :=
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check (label ++ ": JSON parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+def firstLine (s : String) : String :=
+  match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+def fileEntry (j : Json) (name : String) : Option Json :=
+  List.find (fun f => String.eq (jStr f ["file"]) name) (jList j ["files"])
+
+def findingRules (j : Json) : List String :=
+  List.concat (List.map (fun f =>
+    List.map (fun x => jStr x ["rule"]) (jList f ["findings"])) (jList j ["files"]))
+
+def readText (p : String) : EIO (Except String String) := do
+  ok ← EIO.lift (FS.exists p);
+  match ok with
+  | .false => EIO.pure (.error ("no such file: " ++ p))
+  | .true => do
+    t ← FS.readFile p;
+    EIO.pure (.ok t)
+
+def sarifCheck (label out : String) : EIO Unit := do
+  readOut ← readText out;
+  match readOut with
+  | .error e => check (label ++ ": read (" ++ e ++ ")") .false
+  | .ok text => match Json.parse text with
+    | .error e => check (label ++ ": parses (" ++ e ++ ")") .false
+    | .ok j => do
+      let run0 := nthJ (jList j ["runs"]) 0;
+      let rs := jList run0 ["results"];
+      check (label ++ ": version 2.1.0") (String.eq (jStr j ["version"]) "2.1.0");
+      check (label ++ ": driver scry")
+        (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
+      check (label ++ ": two results") (Nat.beq (List.length rs) 2);
+      check (label ++ ": every result has a ruleId")
+        (List.all (fun r => String.eq (jStr r ["ruleId"]) "scry/c/command-injection") rs);
+      check (label ++ ": every result has a physical location")
+        (List.all (fun r => Nat.lt 0 (String.length
+          (jStr (nthJ (jList r ["locations"]) 0) ["physicalLocation",
+            "artifactLocation", "uri"]))) rs)
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "e2e-c: skip (.grail/bin/scry absent)")
+  | .true => do
+    dir ← FS.createTempDir;
+    let sarif := Path.join dir "project.sarif";
+
+    -- 1. clean tree: 0 findings, exit 0, one unit
+    r0 ← run ["project", "corpus/project/clean", "--taint", "--json"];
+    j0 ← parseJson "clean" r0.out;
+    check "clean: exit 0" (Nat.beq r0.code 0);
+    check "clean: schema scry-project-report/1"
+      (String.eq (jStr j0 ["schema"]) "scry-project-report/1");
+    check "clean: kind project" (String.eq (jStr j0 ["kind"]) "project");
+    check "clean: one unit" (Nat.beq (jNat j0 ["units"]) 1);
+    check "clean: two functions" (Nat.beq (jNat j0 ["functions"]) 2);
+    check "clean: no findings" (Nat.beq (jNat j0 ["counts", "findings"]) 0);
+    check "clean: no boundary warnings" (Nat.beq (jNat j0 ["counts", "boundary"]) 0);
+    check "clean: no skipped TU" (Nat.beq (List.length (jList j0 ["skipped"])) 0);
+
+    -- 2. the taint tree: two findings, both checked, both command-injection
+    r1 ← run ["project", "corpus/project/taint", "--taint", "--json",
+      "--sarif", sarif];
+    j1 ← parseJson "taint" r1.out;
+    check "taint: exit 0 without --fail-on-finding" (Nat.beq r1.code 0);
+    check "taint: three translation units" (Nat.beq (jNat j1 ["units"]) 3);
+    check "taint: seven functions" (Nat.beq (jNat j1 ["functions"]) 7);
+    check "taint: two findings" (Nat.beq (jNat j1 ["counts", "findings"]) 2);
+    check "taint: both checked" (Nat.beq (jNat j1 ["counts", "checked"]) 2);
+    check "taint: no boundary warnings" (Nat.beq (jNat j1 ["counts", "boundary"]) 0);
+    check "taint: no duplicate symbols" (Nat.beq (List.length (jList j1 ["callgraph", "duplicates"])) 0);
+    check "taint: the unresolved callee is recorded"
+      (List.any (fun u => String.eq (jStr u ["callee"]) "maybe")
+        (jList j1 ["callgraph", "unresolved"]));
+    check "taint: both findings are command-injection"
+      (String.eq (String.intercalate "," (findingRules j1)) "command-injection,command-injection");
+    -- the coverage view: each real file has its own counts, and the two sinks are in
+    -- io.c and util.c while app.c (the source) has none.
+    match fileEntry j1 "io.c" with
+    | .some f => check "coverage: io.c has one finding" (Nat.beq (jNat f ["counts", "findings"]) 1)
+    | .none => check "coverage: io.c is in the report" .false;
+    match fileEntry j1 "util.c" with
+    | .some f => check "coverage: util.c has one finding" (Nat.beq (jNat f ["counts", "findings"]) 1)
+    | .none => check "coverage: util.c is in the report" .false;
+    match fileEntry j1 "app.c" with
+    | .some f => check "coverage: app.c has no finding" (Nat.beq (jNat f ["counts", "findings"]) 0)
+    | .none => check "coverage: app.c is in the report" .false;
+
+    -- 3. the gate
+    r2 ← run ["project", "corpus/project/taint", "--taint", "--json",
+      "--fail-on-finding"];
+    check "gate: --fail-on-finding exits 1" (Nat.beq r2.code 1);
+
+    -- 4. SARIF
+    sarifCheck "sarif" sarif;
+
+    -- 5. usage/IO: 2; nothing analysed: 3
+    r3 ← run ["project"];
+    check "usage: no directory exits 2" (Nat.beq r3.code 2);
+    check "usage: the error names the usage"
+      (String.startsWith (firstLine r3.err) "scry: usage: scry project");
+    r4 ← run ["project", "corpus/project/does-not-exist"];
+    check "IO: a missing directory exits 2" (Nat.beq r4.code 2);
+    r5 ← run ["project", "corpus/project/none"];
+    check "nothing: an empty tree exits 3" (Nat.beq r5.code 3);
+
+    FS.removeAll dir)
