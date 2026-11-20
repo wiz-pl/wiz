@@ -20,13 +20,25 @@ OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # (11s) the search box's ranking and rendering (no build or browser needed)
-node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/search_gen.wiz" > "$OUT/search.json"
+node "$ROOT/web/scroll-search_test.mjs" "$OUT/search.json" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
   echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (goals) the Wiz goals pane, hover card and status line: the fixture is rendered by
+# `wiz run`, then compared with the Node oracle's answers (no Wasm, no browser)
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/goals_gen.wiz" > "$OUT/goals.json"
+node "$ROOT/web/goals_test.mjs" "$OUT/goals.json" > "$OUT/goals.txt"
+if grep -qF 'goals: all checks passed' "$OUT/goals.txt"; then echo "ok (goals, wiz)"; else
+  echo "FAIL (goals, wiz)"; cat "$OUT/goals.txt"; exit 1; fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
   echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
+# (widgets) the widget host: the #plot and scry payloads, the safety rules, the fallback
+# and the DOM mount (the LSP transport is stubbed in the next check)
+node "$ROOT/web/widgets_test.mjs" > "$OUT/widgets.txt"
+if grep -qF 'widgets: all checks passed' "$OUT/widgets.txt"; then echo "ok (widgets)"; else
+  echo "FAIL (widgets)"; cat "$OUT/widgets.txt"; exit 1; fi
 # (playground-lsp) the language client and goals panel against a mock WebSocket server
 # (no Wasm build, no browser)
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
@@ -61,6 +73,9 @@ if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo 
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-infoview-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-docs-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-doc-live-ui.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
@@ -104,7 +119,7 @@ BRIDGE=$!
 sleep 3
 node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT&token=$TOKEN" > "$OUT/chrome.txt"
 ok=1
-# The page's markup is web/goals.js's (the playground's renderer) since the two infoviews
+# The page's markup is the Wiz goals runtime (`lib/Web/Goals.wiz`) since the two infoviews
 # were unified: a goal's hypothesis is a `.names` span (with its own title/span
 # attributes), a tagged subterm is `.tt k-KIND` with `data-ref`, a clicked one carries
 # `sel`, and the selected subterm is in `#info` as `.selection`.

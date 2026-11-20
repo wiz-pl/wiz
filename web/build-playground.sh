@@ -95,13 +95,14 @@ ENGINE="$OUT/playground.wiz"
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" \
-  "$ROOT/web/playground.css" "$ROOT/web/overlays.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" \
-  "$ROOT/web/playground-engine.js" "$ROOT/web/editor-model.js" \
+  "$ROOT/web/playground.css" "$ROOT/web/overlays.css" "$ROOT/web/widgets.css" \
+  "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" \
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/selfhost-lsp-shim.js" \
+  "$ROOT/web/playground-engine.js" \
   "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$ROOT/web/hover.js" "$OUT/"
 # The entry point imports the mount contract statically (web/framework/mount.js), which
 # imports the driver and its patch applier.
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
-  "$ROOT/web/framework/runtime.js" "$OUT/framework/"
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
 echo "built $OUT/wiz-playground.mjs"

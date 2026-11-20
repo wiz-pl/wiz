@@ -7,6 +7,7 @@
 import { document as minidoc, Element } from "./framework/minidom.mjs";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
+import { rules } from "./framework/editor-model.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -87,7 +88,7 @@ function squiggleTexts(layer) {
   const pane = doc.createElement("div");
   pane.appendChild(editor);
   doc.body.appendChild(pane);
-  const squiggles = mountSquiggles(editor, { document: doc });
+  const squiggles = mountSquiggles(editor, { document: doc, segments: rules.segments });
   checkThat("squiggles: a layer beside the editor", !!squiggles);
   // The editor is not wrapped: it stays where it was and the layer is appended after it,
   // so a child-index patch applier still finds the textarea at its original path.
@@ -148,7 +149,7 @@ function completionPage(options = {}) {
   doc.body.appendChild(editor);
   const calls = [];
   const popup = mountCompletions({
-    editor, document: doc, debounce: options.debounce === undefined ? 5 : options.debounce,
+    editor, document: doc, rules, debounce: options.debounce === undefined ? 5 : options.debounce,
     autoTrigger: options.autoTrigger,
     onRequest: options.onRequest || (async (position) => { calls.push(position); return options.items || NAT_ITEMS; }),
   });

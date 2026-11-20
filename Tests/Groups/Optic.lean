@@ -85,7 +85,18 @@ def opticGroup : Group where
           "#eval Nat.beq (Lens.get Pair2.fstL (over pairP Nat.succ (Pair2.mk 1 2))) (Lens.get Pair2.fstL (Lens.over Pair2.fstL Nat.succ (Pair2.mk 1 2)))\n")
           [".cons (1, 7) (.cons (1, 9) .nil)",
            ".cons (1, 17) (.cons (2, 8) (.cons (1, 19) .nil))",
-           "2", ".true", ".true"] }
+           "2", ".true", ".true"] },
+    { name := "the store bridge: LensP.toLens, LensP.Indep on view/over, a store traversal from a profunctor one", run := fun _ =>
+        okOptic ("import Optic\n" ++
+          "def pairP : LensP (Pair2 Nat Nat) (Pair2 Nat Nat) Nat Nat := LensP.ofLens Pair2.fstL\n" ++
+          "def pairS : Lens (Pair2 Nat Nat) Nat := LensP.toLens pairP\n" ++
+          "#eval Lens.get pairS (Pair2.mk 1 2)\n" ++
+          "#eval Lens.set pairS (Pair2.mk 1 2) 5\n" ++
+          "def indepP : LensP.Indep pairP (LensP.ofLens Pair2.sndL) := LensP.ofLens_indep Pair2.fstL Pair2.sndL Pair2.indep\n" ++
+          "def listS : Traversal (List Nat) Nat := Traversal.ofP (listT (A := Nat))\n" ++
+          "#eval Traversal.view listS (List.cons 1 (List.cons 2 List.nil))\n" ++
+          "#eval toListOf (listT (A := Nat)) (List.cons 1 (List.cons 2 List.nil))\n")
+          ["1", "(5, 2, ())", ".cons 1 (.cons 2 .nil)", ".cons 1 (.cons 2 .nil)"] }
   ]
 
 builtin_initialize registerGroup opticGroup

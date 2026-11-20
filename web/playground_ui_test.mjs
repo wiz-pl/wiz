@@ -76,6 +76,40 @@ ok(byId(root, "engine").textContent === "engine: loading", "the first paint's en
 ok(byId(root, "run").getAttribute("disabled") != null, "Run starts disabled");
 ok(!html.includes("<script"), "the app's text is escaped");
 
+// ## The editor's pure rules are read-only exports (`mount`'s `ask`)
+function ask(name, ...args) {
+  const pointers = [];
+  const rest = args.map((a) => {
+    const p = wasm.stringToNewUTF8(a);
+    pointers.push(p);
+    return big(p);
+  });
+  let result = 0;
+  try {
+    result = wasm["_" + name](...rest);
+    return wasm.UTF8ToString(result);
+  } finally {
+    if (result) wasm._free(result);
+    for (const p of pointers) wasm._free(p);
+  }
+}
+const spans = JSON.parse(ask("wiz_loom_editor_segments", "def f : Nat := nope\n",
+  '[{"range":{"start":{"line":0,"character":13},"end":{"line":0,"character":17}},"severity":1,"message":"m"}]', "0"));
+ok(spans.length === 1 && spans[0].start === 13 && spans[0].stop === 17,
+  "the runtime returns the squiggle spans", JSON.stringify(spans));
+const position = JSON.parse(ask("wiz_loom_editor_position", "a😀b", "3"));
+ok(position.line === 0 && position.character === 3, "the runtime returns a UTF-16 position",
+  JSON.stringify(position));
+
+// ## Tab: the key carries the selection, and the runtime asks for a host edit
+const editorField = byId(root, "editor");
+editorField.selectionStart = 1;
+editorField.selectionEnd = 3;
+editorField.dispatchEvent({ type: "keydown", key: "Tab" });
+ok(JSON.parse(app.requests() || "[]").some((r) => r.kind === "edit"),
+  "Tab asks the page for an edit", app.requests());
+call("wiz_loom_effect", "ack", "edit", "");
+
 // ## The editor: the driver's input payload reaches the app
 const textarea = byId(root, "editor");
 ok(textarea.getAttribute("data-wiz-on-input") === "6",

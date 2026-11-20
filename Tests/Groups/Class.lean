@@ -157,8 +157,8 @@ def classGroup : Group where
         okLib (profunctorClasses ++ "#check Profunctor\n#check Strong\n#check Strong.mk\n#check Strong.first'")
           ["Profunctor : (Type → Type → Type) → Type 1",
            "Strong : (p : Type → Type → Type) → [super : Profunctor p] → Type 1",
-           "Strong.mk : {p : Type → Type → Type} → {super : Profunctor p} → ({A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)) → Strong p super",
-           "Strong.first' : {p : Type → Type → Type} → {super : Profunctor p} → [self : Strong p super] → {A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)"] },
+           "Strong.mk : {0 p : Type → Type → Type} → {0 super : Profunctor p} → ({A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)) → Strong p super",
+           "Strong.first' : {0 p : Type → Type → Type} → {0 super : Profunctor p} → [self : Strong p super] → {A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)"] },
     { name := "30f: a class with a superclass parameter compiles and runs", run := fun _ =>
         okLib (profunctorSrc ++ lensSrc) ["(.true, 3)", "(2, .true)"] },
     { name := "30f: forming `C a` needs `D a`, so a context carries both", run := fun _ =>

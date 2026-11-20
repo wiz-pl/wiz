@@ -244,7 +244,18 @@ through the shared borrow's body and come back with its result -/
 def Shr.borrowIn {S B H : Type} (0 σ : Region) (s : S) (1 outer : H)
     (1 body : (0 ρ : Region) → (0 h : Outlives σ ρ) → (1 o : H) → Shr ρ S → Result1 B H) : Result1 B H :=
   body σ (Outlives.refl σ) outer (Shr.mk s)
-/-- `&mut r.p` for a place with a lens -/
+/-- `&mut r.p` for a place with a *pure* optic (`LensP`): the store is recovered with
+`LensP.toLens` before the body runs, so the borrow is the same `Store` the store-lens
+form builds. -/
+def Uniq.zoomP {0 ρ : Region} {S : Type} {ω X : Type} {B : Type} (l : LensP S S X X) (1 r : Uniq ρ S)
+    (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)) :
+    Result1 B (Uniq ρ S) :=
+  Uniq.end r (fun v =>
+    let st := LensP.toLens l v;
+    ResultH.mapHandle (fun (1 x) => Uniq.end x (fun w => Uniq.mk (st.2 w)))
+      (body ρ (Outlives.refl ρ) (Lent.mk ()) (Uniq.mk st.1)))
+/-- `&mut r.p` for a place with a lens (the store form the lowering emits; `Uniq.zoomP`
+is the profunctor form). -/
 def Uniq.zoom {0 ρ : Region} {S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 x : Uniq ρ' X) → Result1 B (Uniq ρ' X)) :
     Result1 B (Uniq ρ S) :=
@@ -252,6 +263,7 @@ def Uniq.zoom {0 ρ : Region} {S X B : Type} (l : Lens S X) (1 r : Uniq ρ S)
     let st := l v;
     ResultH.mapHandle (fun (1 x) => Uniq.end x (fun w => Uniq.mk (st.2 w)))
       (body ρ (Outlives.refl ρ) (Lent.mk ()) (Uniq.mk st.1)))
+
 /-- the same inside a scope that holds other handles `H`, threaded through and back -/
 def Uniq.zoomIn {0 ρ : Region} {S X B H : Type} (l : Lens S X) (1 r : Uniq ρ S) (1 outer : H)
     (1 body : (0 ρ' : Region) → (0 h : Outlives ρ ρ') → (0 t : Lent ρ' S) → (1 o : H) → (1 x : Uniq ρ' X) →
@@ -284,6 +296,7 @@ attribute [inline] Uniq.share
 attribute [inline] Uniq.shareIn
 attribute [inline] Shr.borrowIn
 attribute [inline] Uniq.zoom
+attribute [inline] Uniq.zoomP
 attribute [inline] Uniq.zoomIn
 attribute [inline] Uniq.both
 
@@ -310,6 +323,15 @@ inductive Borrowed (M H : Type) where
 def Mut.ofLens {0 ρ : Region} {S A : Type} (1 r : Uniq ρ S) (l : Lens S A) : Mut ρ A S :=
   match r with
   | .mk v => Mut.mk (l v)
+/-- `&mut r.p` for a place with a *pure* optic (`LensP`): the class has no lender, so
+the store is recovered from `view`/`set` (`LensP.toLens`). This is the one place the
+profunctor layer reaches the borrow API; `Mut` still stores a `Store` (a `LensP` is
+`Type 1` and cannot be the field). `Mut.ofPLens` stays on `PLens` because its `.err`
+branch hands the lender back; `MutOpt.ofAffine` keeps the `Affine`-valued form, and
+`MutOpt.ofTraversal`/`ofPrism` are its profunctor paths. -/
+def Mut.ofLensP {0 ρ : Region} {S : Type} {ω A : Type} (1 r : Uniq ρ S) (l : LensP S S A A) : Mut ρ A S :=
+  match r with
+  | .mk v => Mut.mk (LensP.toLens l v)
 /-- (a partial place's result as a borrow, or the lender `v` back) -/
 def Mut.ofR {0 ρ : Region} {S A : Type} (v : S) : Result (Store A S) → Borrowed (Mut ρ A S) (Uniq ρ S)
   | .ok st => .ok (Mut.mk st)
@@ -365,6 +387,25 @@ def MutOpt.ofAffine {0 ρ : Region} {A S : Type} (1 r : Uniq ρ S) (l : S → Af
   | .mk v => (match l v with
     | .some a k => .some (Mut.mk (a, k))
     | .none s => .none (Uniq.mk s))
+/-- `Option (&mut A)` from a zero-or-one-focus profunctor optic (`PrismP`). This is the
+profunctor form of the affine case: `preview` decides the branch and `set` rebuilds the
+lender for the backward function. (The `Affine` type stays because `ALens` adds a
+`Result` error on top of the absence; `PrismP` has no error payload.) -/
+def MutOpt.ofPrism {0 ρ : Region} {ω A : Type} {S : Type} (1 r : Uniq ρ S) (p : PrismP S S A A) : MutOpt ρ A S :=
+  match r with
+  | .mk v => (match preview p v with
+    | .some a => .some (Mut.mk (a, fun a' => overP (S := S) (T := S) (A := A) (B := A) p (fun _ => a') v))
+    | .none => .none (Uniq.mk v))
+/-- `Option (&mut A)` from a zero-or-one-focus `TraversalP` (an *affine* traversal): the
+general profunctor form of `Affine`, including a focus inside a context (which a
+`PrismP` cannot rebuild: its `build : B → T` has no lender). The caller guarantees the
+optic has at most one focus. -/
+def MutOpt.ofTraversal {0 ρ : Region} {ω A : Type} {S : Type} (1 r : Uniq ρ S)
+    (t : TraversalP S S A A) : MutOpt ρ A S :=
+  match r with
+  | .mk v => (match toListOf t v with
+    | .cons a .nil => .some (Mut.mk (a, fun a' => overT t (fun _ => a') v))
+    | _ => .none (Uniq.mk v))
 /-- `if let .some x := o then *x := f *x`: the lender, updated or not -/
 def MutOpt.over {0 ρ : Region} {A S : Type} (f : A → A) (1 o : MutOpt ρ A S) : Uniq ρ S :=
   match o with

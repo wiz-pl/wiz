@@ -8,6 +8,7 @@
 import IO
 import Json
 import Web.Draft
+import Web.EditorModel
 import Web.Examples
 import Web.Loom
 import Web.Playground
@@ -42,6 +43,9 @@ def shared : Page := Page.update PageMsg.share "" s0
 def saved : Page := Page.update PageMsg.save "" s0
 def reset : Page := Page.update PageMsg.reset "" s0
 def cleared : Page := Page.update PageMsg.clear "" finished
+-- A Tab on the editor: the keydown handler is 5 on `<main>`, and the payload carries
+-- the selection (`@start@end`) the driver adds for a text field.
+def tabbed : Page := Loom.LiveApp.step pageApp s0 "keydown\n5\nTab\n@1@3"
 
 def exampleJson (e : Examples.Example) : Json :=
   Json.mkObj [ Json.field "id" (jstr e.id), Json.field "title" (jstr e.title)
@@ -80,10 +84,13 @@ def fields : List (String × Json) :=
   , Json.field "savedPage" (nest saved)
   , Json.field "resetPage" (nest reset)
   , Json.field "clearedPage" (nest cleared)
+  , Json.field "tabbedPage" (nest tabbed)
   , Json.field "defaultExampleId" (jstr Examples.defaultExampleId)
   , Json.field "examples" (Json.mkArr (List.map exampleJson Examples.examples))
   , Json.field "customDraft" (jstr (Draft.serializeDraft (Draft.State.mk custom "")))
   , Json.field "listsFragment" (jstr (Draft.encodeFragment listsState))
+  , Json.field "segments" (jstr (EditorModel.segmentsJson "def f : Nat := nope\n"
+      "[{\"range\":{\"start\":{\"line\":0,\"character\":13},\"end\":{\"line\":0,\"character\":17}},\"severity\":1,\"message\":\"m\"}]" 0))
   ]
 
 def main : IO Unit := do

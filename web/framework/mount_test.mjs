@@ -36,6 +36,7 @@ function fakeEnv() {
   const doc = {
     body: { appendChild: (el) => { created.push(el); return el; } },
     querySelector: () => null,
+    defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
     createElement: (tag) => {
       const el = dom.createElement(tag);
       el.style = {};
@@ -84,6 +85,7 @@ function stubModule(html) {
         _wiz_loom_html: () => put(html),
         _wiz_loom_step: (state, p) => { steps.push({ state: Number(state), event: strings.get(Number(p)) }); return Number(state) + 1; },
         _wiz_loom_show: (state, p) => { shown.push(strings.get(Number(p))); return Number(state) + 1; },
+        _wiz_loom_echo: (p) => put("echo:" + strings.get(Number(p))),
         stringToNewUTF8: put,
         UTF8ToString: (p) => strings.get(Number(p)) || "",
         _free: (p) => { strings.delete(Number(p)); },
@@ -122,6 +124,13 @@ let threw = false;
 try { app.call("wiz_loom_missing"); } catch (e) { threw = /no wiz_loom_missing/.test(e.message); }
 ok(threw, "an unknown entry point is an error, not a silent no-op");
 
+// ## A read-only runtime query (`ask`): strings in, a string out, no state
+eq("ask returns the runtime's string", "echo:abc", app.ask("wiz_loom_echo", "abc"));
+eq("ask does not move the state", 9, app.state());
+let askThrew = false;
+try { app.ask("wiz_loom_missing"); } catch (e) { askThrew = /no wiz_loom_missing/.test(e.message); }
+ok(askThrew, "an unknown query is an error, not a silent empty string");
+
 // ## The host capabilities (the only browser reach a runtime gets)
 const host = globalThis.wizHost;
 eq("the host is published", host, app.host);
@@ -148,6 +157,29 @@ host.onResize(() => { resized++; });
 env.observers[0].fn();
 eq("onResize observes the mount point", 1, resized);
 ok(env.observers[0].el === root, "onResize observes the mount point itself");
+
+// ## `host.edit`: one text edit on the mount's field, no policy
+const editRoot = parse("");
+const editApp = await mount(editRoot, {
+  module: stubModule('<div><textarea id="editor">ab</textarea></div>'),
+  env: fakeEnv(), parse,
+});
+const field = editRoot.childNodes[0].childNodes[0];
+field.value = "ab";
+field.selectionStart = 1;
+field.selectionEnd = 1;
+let edits = 0;
+field.addEventListener("input", () => { edits++; });
+const atCaret = editApp.host.edit({ insert: "  " });
+eq("edit inserts at the caret when no range is given", "a  b", atCaret.value);
+eq("edit puts the caret after the insert", 3, atCaret.selectionStart);
+eq("edit reports the selection", 3, atCaret.selectionEnd);
+eq("edit dispatches one input event", 1, edits);
+const replaced = editApp.host.edit({ insert: "X", from: 0, to: 2 });
+eq("edit replaces an explicit range", "X b", replaced.value);
+eq("edit's caret follows the inserted text", 1, replaced.selectionStart);
+eq("edit leaves the field's live value too", "X b", field.value);
+eq("edit without a text field is null", null, app.host.edit({ insert: "x" }));
 
 // ## A module that is not a runtime is refused before the page is touched
 let rejected = null;

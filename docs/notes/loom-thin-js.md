@@ -1,9 +1,11 @@
 # Loom pages: the JavaScript is a mount point
 
-**Status:** design + stages 1–4 (`thin-js-34`, off `integration/train7`, 2026-11-19).
-The migration is staged; each stage is independently landable. Stage 2 (one page, no
-fallback), stage 3 (the state format and the effect protocol) and stage 4 (the keyboard
-policy and the overlays) are on `thin-js-34`.
+**Status:** design + stages 1–6 and the editor remainder (`thin-js-34` for 1–4;
+`loom-edit` for the editor's pure rules and `host.edit`; `loom-56` for 5–6, all off
+`integration/train8`, 2026-11-20). The migration is staged; each stage is independently
+landable. Stage 2 (one page, no fallback), stage 3 (the state format and the effect
+protocol), stage 4 (the keyboard policy and the overlays), the editor's pure rules and
+`host.edit`, and stages 5–6 are on the merged branch.
 
 The browser side of Wiz's pages has grown to about 5.1k lines of production JavaScript
 (`web/*.js`, not counting tests), and most of it is not browser capability: it is page
@@ -40,10 +42,11 @@ mount(document.body, {
 4. **turns DOM events into steps** (`event "\n" index "\n" payload`, the existing
    driver ABI);
 5. **publishes the host capabilities** a Wiz program cannot reach — `clipboard`,
-   `download`, `storage.get/set`, `url`, `tick`, `onResize` — as `globalThis.wizHost`,
-   and `transport` as `globalThis.wizTransport`;
+   `download`, `storage.get/set`, `url`, `tick`, `onResize`, `edit` — as
+   `globalThis.wizHost`, and `transport` as `globalThis.wizTransport`;
 6. returns a handle whose `call(name, ...args)` is the **only** way the page invokes the
-   runtime's own entry points (`wiz_loom_show`, …). The page never sees the module
+   runtime's own entry points (`wiz_loom_show`, …), and whose `ask(name, ...args)` is its
+   read-only counterpart (the editor's pure rules). The page never sees the module
    object, allocates a string or touches the ABI.
 
 The runtime interface is therefore small and stable:
@@ -111,10 +114,10 @@ listed separately because they are the safety net, not the surface being shrunk.
 | `web/framework/mount.js` | 180 | the mount contract + host capabilities | **host** (new, this slice) |
 | `web/playground.js` | 543 → 153 | mount point + engine/goals effects | **done**: the page is the runtime; the old static page is deleted |
 | `web/infoview.js` | 101 | endpoint mapping, follow flag, status text, wiring | endpoint/status → runtime; wiring → `mount`; ~30 |
-| `web/squiggles.js` | 206 | mirror layer, geometry, computed-style copy | geometry → runtime; paint/measure → host; ~80 |
-| `web/completions.js` | 361 | popup DOM, triggers, keys, positioning | policy → runtime; paint/keys → host; ~100 |
+| `web/squiggles.js` | 206 → 250 | mirror layer, geometry, computed-style copy | geometry is the runtime's (`Web.EditorModel`); paint/measure stays |
+| `web/completions.js` | 361 → 370 | popup DOM, triggers, keys, positioning | filter/order/insert are the runtime's; paint/keys stay |
 | `web/lsp-client.js` | 480 | JSON-RPC/WebSocket framing, tokens | **host** (stays; transport, not layout) |
-| `web/editor-model.js` | 346 | pure position/squiggle/completion rules | **stays until stage 5** (the standalone infoview still uses it); the playground's overlay layout is the runtime's |
+| `web/editor-model.js` | 346 | pure position/squiggle/completion rules | **moved** → `lib/Web/EditorModel.wiz` (the editor remainder); `web/framework/editor-model.mjs` is the test oracle |
 | `web/doc-live.js` | 311 | doc-page panel, Markdown, hover/definition | **moves** → runtime; fetch/socket host; ~80 |
 | `web/playground-engine.js` | 170 | engine trampoline, restart, failure kinds | **host** (stays) |
 | `web/playground-state.js` | 155 | URL fragment + draft encoding | **moved** → `Web.Draft` (stage 3); storage/history stay |
@@ -130,9 +133,13 @@ listed separately because they are the safety net, not the surface being shrunk.
 
 Totals: **5,135 lines** of production page JS at the start (plus the 231-line framework
 browser half), of which ~3.5k lines were layout/state/rendering/policy and ~1.6k genuine
-host capability. After stages 1–4 it is **4,380** in `web/*.js` plus the 226-line mount
-contract (4,606); `framework/driver.js` (139) and `runtime.js` (140) are the rest of the
-browser half.
+host capability. After stages 1–4 it was **4,380** in `web/*.js` plus the 226-line mount
+contract (4,606), with `framework/driver.js` (139) and `runtime.js` (140) the rest of the
+browser half. After the editor remainder (`loom-edit`) it is **4,149** in `web/*.js` plus
+the 318-line mount contract (**4,467**), `driver.js` (147), `runtime.js` (140) and
+`framework/editor-text.js` (23) making **4,777** for the whole browser half. The stage-4
+target was 3,733 (4,467 against it: +734); the difference is the mirror, the popup and
+the computed-style copy, which are DOM/measurement, not rules, and so cannot move.
 
 ### Tests (the safety net; they stay, and move with the code they pin)
 
@@ -148,8 +155,8 @@ browser half.
 | `playground_loom_test.mjs` | 89 | the output pane's SSR/patches and value corpus | **keep** |
 | `playground_editor_test.mjs` | 69 | the editor component's LiveApp steps | **keep** |
 | `playground-state_test.mjs` | 170 | URL fragment and draft encoding | **moved** to the runtime (`=loom`), with `playground-state.js` (stage 3) |
-| `editor_test.mjs` | 215 | positions, squiggle ranges, completion rules | **move** to the runtime with `editor-model.js` (stage 4) |
-| `editor_dom_test.mjs` | 309 | the two overlays in the DOM double | **keep**, rewritten against the runtime's items/segments (stage 4) |
+| `editor_test.mjs` | 215 | positions, squiggle ranges, completion rules | **kept as the oracle's test**; the runtime cases are `=loom` (the editor remainder) |
+| `editor_dom_test.mjs` | 309 | the two overlays in the DOM double | **kept**, using the oracle's `rules` adapter for the widgets' paint/key assertions |
 | `hover_test.mjs` | 286 | hover contents and when-to-ask | **move** with `hover.js` (stage 5) |
 | `playground_engine_test.mjs` | 217 | exit/abort/trap handling of the engine guard | **keep** (host) |
 | `scroll-search_test.mjs` | 33 | docs search markup | **move** (stage 6) |
@@ -231,11 +238,83 @@ default is no longer a question: there is one page.
   `Custom program` option, as the static page did), so the menu never lies about which
   example the editor holds.
 
-`web/editor-model.js` is **not** deleted in stage 4: the standalone infoview page
-(`web/infoview.js`, stage 5) still uses its position/squiggle/completion rules through
-the same `web/playground-lsp.js`. The playground's overlay *layout* policy is the
-runtime's (the layer is appended after the rendered children, the popup outside them);
-moving the pure rules waits for stage 5, when the infoview is a Loom app too.
+## 4b. The editor remainder (`loom-edit`)
+
+Stage 4 left `editor-model.js` in place because the standalone infoview still used it.
+This branch finishes the editor side instead of waiting for stage 5:
+
+* **`lib/Web/EditorModel.wiz`** owns the pure rules: UTF-16 positions (the LSP unit and
+  a JavaScript string index; the module expands Wiz's code points at its one boundary),
+  diagnostic ranges → merged, line-clipped spans, completion items/filter/score/order,
+  the keyboard's index arithmetic, snippet stripping, the accepted edit, the popup
+  state, and the Tab indentation. `web/framework/editor-model.mjs` is the test oracle
+  (nothing in production imports it).
+* **`host.edit`** is the missing text-input capability (`web/framework/mount.js`):
+  `edit({ insert, from, to })` replaces `[from, to)` (the current selection when omitted)
+  with `insert`, puts the caret after it, dispatches `input`, and returns
+  `{ value, selectionStart, selectionEnd }`. It is a primitive, not a policy: the runtime
+  decides what an indent is.
+* **Tab-to-indent** is now the runtime's. The driver appends a text field's selection to
+  a keydown payload (`@start@end`), `Page.key` asks `Web.EditorModel.indentJson` for the
+  edit, and the page services the `edit` request with `host.edit` then reports the new
+  text/selection through `wiz_loom_effect "edited"`. `Page.consume` consumes only
+  Ctrl/⌘+Enter, Ctrl/⌘+S and Tab, so typing is still never swallowed.
+* **The overlays ask the runtime.** `playground.js` builds a `rules` object from
+  `mount`'s new `ask(name, ...args)` (a read-only string query over
+  `wiz_loom_editor_*`); `squiggles.js` paints the returned spans and `completions.js`
+  paints/keys the returned items. `framework/editor-text.js` keeps the two lines that
+  genuinely read the control (`caretOffset`, `selectionOffsets`).
+* **The desync regression test is on the real page now.** `web/playground_page_test.mjs`
+  mounts the runtime's SSR, applies the menu patch, enables the squiggle layer, then
+  applies a text patch at the editor's child-index path and requires the textarea's live
+  value to change; `web/loom_overlay_test.mjs` keeps the smaller DOM-double version.
+
+Production JS on `loom-edit` was **4,149** in `web/*.js` + **318** mount =
+**4,467** (against the stage-4 target 3,733). The remaining 734 lines are the parts that
+need the DOM: the mirror and its computed-style copy, the popup's rows/position, and the
+widgets' event wiring. On `loom-edit`, `goals.js` still served the standalone pane's
+geometry and `playground-lsp.js` asked `goals.positionAt` for the caret; stage 5 below
+moves both.
+
+## 4b. Stages 5 and 6 (this branch)
+
+* **Stage 5 — the goals pane, the infoview and the hover card.**
+  `lib/Web/Goals.wiz` renders the pane's status, hint, goals, expected type, term tree,
+  diagnostics, selected subterm and widgets as `Loom.VNode`s; a click on a hypothesis,
+  a goal or a tagged subterm is a message, and the pane asks the page for `reveal`,
+  `subterm` or `reconnect` through `wiz_loom_requests` (the same request list the page
+  already services). `lib/Web/Hover.wiz` owns the hover contents/Markdown lines and the
+  definition label; `web/hover.js` is now only the timers, the caret and the card's
+  position. The playground's `Page` embeds the pane (`lib/Web/Playground.wiz`) and its
+  `wiz_loom_effect "panel"` feeds it. The standalone infoview is a Loom app
+  (`lib/Web/InfoviewPage.wiz`, `web/infoview-ui.wiz`, `wiz-infoview-ui.mjs`): the page
+  mounts it on the body and keeps the URL rule, the socket and the caret; it no longer
+  imports `editor-model.js`. `web/goals.js` and the pure half of `web/hover.js` moved to
+  `web/framework/{goals,hover}.mjs` as the Node test's oracles (as `values.mjs` and
+  `examples.mjs` already are). `wiz_loom_effect "hover"` carries the server's answer and
+  the runtime renders the card; the page positions `#wiz-hover`.
+* **Stage 6 — the docs pages.**
+  `lib/Web/Search.wiz` owns the search's ranking, snippets and hit markup; the new
+  `wiz-docs-ui.mjs` is mounted on `#results`, and `web/scroll-search.js` keeps only the
+  input, Enter/Escape and `location` (37 lines). `lib/Web/DocLive.wiz` owns the live
+  panel's head, hover Markdown, goals, expected type and diagnostics; `wiz-doc-live-ui.mjs`
+  is mounted on the panel, and `web/doc-live.js` keeps the source fetch, the socket and
+  the pin. `web/tagged.js` is deleted (its loader/stepper/delegate are in `scroll.js`;
+  the signatures are still `lib/Tagged.wiz`'s). `wiz doc` copies the two runtimes and
+  `framework/` into the site.
+
+Production JavaScript after both stages and the merged `loom-edit` remainder:
+**3,278** in `web/*.js` plus the **628**-line browser half (`mount` 318, `driver` 147,
+`runtime` 140, `editor-text` 23), **3,906** together. The test oracles
+(`framework/goals.mjs` 481, `framework/hover.mjs` 150, `framework/editor-model.mjs` 396)
+are not page code. That is still above the plan's 2,570/2,144 targets. The gap is not
+the editor rules any more (`editor-model.js` is gone and the overlays paint runtime
+segments/items): it is the irreducible host plus what stages 5–7 have left —
+`selfhost-lsp-shim.js` (669, stage 7; `PositionIndex` is its next move),
+`lsp-client.js` (480), the overlay paint/position modules (`completions.js` 361,
+`squiggles.js` 235) and the pages' transport (`playground-lsp.js` 381,
+`playground-engine.js` 170). The plan's stage-6 number assumed those would be gone by
+then; they are not, so the target is not met rather than redefined.
 
 ## 5. Stages, each landable on its own
 
@@ -248,10 +327,11 @@ Line targets are production JS (`web/*.js` outside tests and `framework/minidom.
 | **1. mount + examples** (this branch) | `mount.js`; entry split; examples menu/data in the runtime | 5,377 (entry 543→151; +190 contract, +444 fallback) |
 | **2. drop the fallback** (this branch) | one page: `playground-static.js`, the static markup and the `?ui` switch deleted; a startup failure is a plain-text reason in the mount point | **4,937** (4,746 `web/*.js` + 191 `mount.js`) |
 | **3. page effects + state format** (this branch) | the `wiz_loom_*` effect entry points become one `wiz_loom_effect` driven by the runtime's request counters; draft/fragment encoding into `Web.Draft`; `playground-state.js` deleted (its cases moved to `=loom`); share/save/reset/clear are runtime messages + `host` calls | **4,606** (target 4,470: 4,380 `web/*.js` + 226 `mount.js`) |
-| **4. keyboard + overlays** (this branch) | `Loom.onPrevent` so a keydown handler prevents only what it consumed; the Enter/Save policy in the runtime; both overlays back on the page, the non-wrapping squiggle layer and `overlays.css` | **4,606** (target 3,733; `editor-model.js` and the overlay rules wait for stage 5) |
-| **5. goals pane** | `goals.js`, most of `playground-lsp.js`, `web/infoview.js`'s page logic into a Loom app (the infoview page becomes `mount`); `lsp-client.js` stays as the transport; `hover.js` into the same app | 2,570 |
-| **6. docs pages** | `scroll.js`, `scroll-search.js`, `doc-live.js` into the docs runtime; the docs page uses `mount`; `tagged.js` deleted | 2,144 |
-| **7. the shim** | `PositionIndex` (pure) into Wiz; `selfhost-lsp-shim.js` becomes the engine adapter (~250 lines); the engine's own LSP surface stays host | ~1,720 |
+| **4. keyboard + overlays** (this branch) | `Loom.onPrevent` so a keydown handler prevents only what it consumed; the Enter/Save policy in the runtime; both overlays back on the page, the non-wrapping squiggle layer and `overlays.css` | **4,606** (target 3,733; the overlay rules waited for 4b) |
+| **4b. editor remainder** (`loom-edit`) | `lib/Web/EditorModel.wiz`; `host.edit`; Tab-to-indent in the runtime; `ask` + `wiz_loom_editor_*`; the overlays paint runtime segments/items; the real-page desync test | **4,467** (4,149 `web/*.js` + 318 `mount.js`; target 3,733) |
+| **5. goals pane** (merged) | `goals.js`, most of `playground-lsp.js`, `web/infoview.js`'s page logic into a Loom app (the infoview page becomes `mount`); `lsp-client.js` stays as the transport; `hover.js` into the same app | **3,906 after 5+6** (target 2,570) |
+| **6. docs pages** (merged) | `scroll.js`, `scroll-search.js`, `doc-live.js` into the docs runtime; the docs page uses `mount`; `tagged.js` deleted | **3,906** (target 2,144; not met — see the breakdown above) |
+| **7. the shim** | `PositionIndex` (`selfhost-lsp-shim.js:322`, with `editorOffset`/`range`) and its lookup/`termGoal`/`goal` rules into Wiz; the shim becomes the engine adapter (~250 lines); the engine's own LSP surface stays host | ~1,720 |
 
 End state: ~1.7k lines of page JS plus the ~420-line framework browser half
 (`driver`/`runtime`/`mount`); the irreducible host is most of it (`lsp-client`, the
@@ -283,15 +363,15 @@ so they landed together with stage 3's effect protocol. `Web.Draft` owns the for
   prevents only what the app consumed (`Page.consume`: Ctrl/⌘+Enter, Ctrl/⌘+S). This is
   the one framework change stage 4 needed.
 * **`?squiggles=off` / `?completions=off`** stay the page's flags (`wantsSquiggles` /
-  `wantsCompletions`). Stage 4 adopted `loom-overlays`' non-wrapping layer and the
-  shared `web/overlays.css`; the completion *rules* (`web/editor-model.js`) still serve
-  the standalone infoview until stage 5, so the playground and the infoview share the
-  widget and differ only in whether the runtime or the module computes the segments.
-* **Tab-to-indent is still the browser's.** The static page inserted two spaces on Tab;
-  the runtime has no edit capability (`host.edit`), so Tab moves focus. Adding
-  `host.edit` (set value, selection, then dispatch `input`) is the next host capability;
-  Enter and Save do not need it. The keydown handler is on `<main>`, so a Ctrl+S with
-  focus in the header (the examples menu) is the browser's Save, not the page's.
+  `wantsCompletions`). The widgets paint the runtime's spans/items; the standalone
+  infoview still passes `squiggles: false`/`completions: false` until stage 5 gives it
+  the runtime's `rules`, so the shared widget and CSS are ready for it.
+* **Tab-to-indent is the runtime's, through `host.edit`.** The driver carries a text
+  field's selection with the key, `Page.key` computes the indent with
+  `Web.EditorModel.indentJson`, and the host applies the edit (value, selection, then
+  `input`). The capability has no indentation policy in it; the keydown handler is on
+  `<main>`, so a Ctrl+S with focus in the header (the examples menu) is still the
+  browser's Save, not the page's.
 * **There is no fallback page.** `wiz-playground-ui.mjs` is a build requirement, and a
   missing or foreign module produces a text reason in the mount point
   (`web/playground_start_test.mjs`), not a second UI. That is the rule this plan exists

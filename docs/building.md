@@ -1364,7 +1364,7 @@ and the page, and the `docs` job's `build-playground.sh --from` copies both.
 | `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
 | `docs/reference.md` | the reference manual as Markdown (`nix build .#reference`'s `index.md`; generated, not committed) |
-| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
+| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/scroll-search.js`, and the search runtime (`wiz-docs-ui.mjs`) | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the web module (the documentation's signatures and the Wiz-language infoview), when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
 | `playground/playground.js`, `playground/playground.css`, `playground/overlays.css` | the page's entry point and styles (the Loom runtime renders the page) |

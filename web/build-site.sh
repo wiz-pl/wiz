@@ -40,16 +40,16 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 # The playground page is index.html, so /playground/ is a directory index; its own
 # links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
-for f in playground.js playground.css overlays.css \
-         lsp-client.js goals.js playground-lsp.js hover.js tagged.js selfhost-lsp-shim.js \
-         playground-engine.js editor-model.js squiggles.js completions.js; do
+for f in playground.js playground.css overlays.css widgets.css \
+         lsp-client.js widgets.js playground-lsp.js hover.js selfhost-lsp-shim.js \
+         playground-engine.js squiggles.js completions.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done
 # The runtime's mount contract (web/framework/mount.js) is a static import of the
 # playground's entry point: mount.js imports driver.js, which imports runtime.js.
 mkdir -p "$SITE/playground/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
-  "$ROOT/web/framework/runtime.js" "$SITE/playground/framework/"
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$SITE/playground/framework/"
 # The page's two modules and the engine's side-car wasm. There is no static fallback:
 # a missing module publishes a playground that cannot start, so stop here instead.
 for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs; do

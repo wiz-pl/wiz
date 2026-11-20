@@ -137,3 +137,20 @@ before it is written (so an encoder bug is a compile error). Its representation,
 the validator and the 34-case `wasm` test group are in
 [08-backend/wasm.md](08-backend/wasm.md).
 
+## 8g: WebGPU (WGSL) prototype
+
+`webgpu/` emits WGSL for a small, data-parallel subset of Wiz and runs it on a WebGPU
+device, comparing every value with the interpreter. This is a **prototype, not a
+`--target`**: `wiz build --target wgpu` does not exist and the C/LLVM/Wasm backends are
+untouched. It reads the syntax tree from `wiz parse` (so it is pre-elaboration and sees
+builtin syntax only), accepts `U32`/`Bool`/`Nat`-index/`Array U32` values with `let`,
+`match` on `Bool`, acyclic scalar helpers and the `UIntN` arithmetic/comparison
+primitives, and refuses everything else (floats, IO, strings, `Nat` arithmetic,
+allocation, closures, recursion, division) with a diagnostic naming the construct.
+
+`webgpu/check.sh` runs three kernels over 8 narrow and 130 wide inputs (three
+workgroups) and gets 414/414 values equal to the interpreter under Deno's wgpu/naga and
+Mesa's lavapipe; `webgpu/tests/reject.mjs` checks 18 rejected fixtures. The browser demo
+is `webgpu/index.html` over `webgpu/serve.mjs`. The subset, the host ABI, the counts and
+the three blockers (unbounded `Nat` and the heap, closures and recursion, the async host
+and the missing `Float32`) are in [08-backend/webgpu.md](08-backend/webgpu.md).

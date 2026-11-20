@@ -1,7 +1,8 @@
-// The playground editor's model: the pure functions behind the features an editor is
-// expected to have, shared by the page (`web/playground-lsp.js`), the two DOM widgets
-// (`web/squiggles.js`, `web/completions.js`) and the Node tests. Nothing here touches
-// the DOM, a socket or a timer, so every rule below is a function of a string.
+// The playground editor's model, **kept as the test oracle**: the pure functions the
+// page used to import. The runtime now owns these rules (`lib/Web/EditorModel.wiz`,
+// reached through `wiz_loom_editor_*`); this module is not served and nothing in
+// production imports it. The Node tests use it for the DOM widgets (`web/editor_dom_test.mjs`,
+// `web/loom_overlay_test.mjs`) and as the reference the Wiz cases are compared with.
 //
 //   * **Positions.** LSP counts UTF-16 code units (docs/playground-lsp.md, "Position
 //     encoding"), and a JavaScript string index is one, so the page sends the textarea's
@@ -15,13 +16,34 @@
 //     `CompletionList`), the identifier prefix of the caret, filtering and ordering, the
 //     keyboard's index arithmetic, and the text an accepted item inserts.
 //
-// `web/goals.js` has the same offset arithmetic for the goals panel; this module imports
-// it rather than keeping a second copy, so the two cannot drift.
+// The offset arithmetic is here, not in a second module: `web/goals.js` is the test
+// oracle for the runtime's `lib/Web/Goals.wiz` now.
 "use strict";
-import { offsetAt as offsetOfPosition, positionAt as positionOfOffset } from "./goals.js";
 
 const clampNat = (n, lo, hi) => (n < lo ? lo : n > hi ? hi : n);
 const num = (x) => (typeof x === "number" && isFinite(x) ? Math.trunc(x) : 0);
+
+function positionOfOffset(text, offset) {
+  const at = Math.max(0, Math.min(text ? text.length : 0, num(offset)));
+  const before = text ? text.slice(0, at) : "";
+  const line = (before.match(/\n/g) || []).length;
+  return { line, character: at - (before.lastIndexOf("\n") + 1) };
+}
+
+function offsetOfPosition(text, position) {
+  if (!text || !position) return 0;
+  const line = Math.max(0, num(position.line));
+  const character = Math.max(0, num(position.character));
+  let offset = 0;
+  for (let l = 0; l < line; l++) {
+    const newline = text.indexOf("\n", offset);
+    if (newline < 0) return text.length;
+    offset = newline + 1;
+  }
+  const newline = text.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? text.length : newline;
+  return Math.min(lineEnd, offset + character);
+}
 
 // ## Positions
 
@@ -344,3 +366,31 @@ export function completionPopupState(text, offset, items, index = 0) {
   const selected = filtered.length === 0 ? -1 : moveSelection(index, 0, filtered.length);
   return { items: filtered, index: selected, prefix };
 }
+
+// The same surface the page gets from the runtime (`wiz_loom_editor_*`, see
+// `web/framework/mount.js`'s `ask`). The DOM tests pass this so they still exercise the
+// widgets with the real rules; production passes the runtime's.
+export const rules = {
+  segments: (text, diagnostics) => squiggleSegments(text, diagnostics).map((s) => ({
+    start: s.start, stop: s.end, severity: s.severity,
+    severityName: SEVERITY_NAME[s.severity] || "info", message: s.message,
+    line: s.line, startCharacter: s.startCharacter, endCharacter: s.endCharacter,
+  })),
+  items: (result) => completionItems(result),
+  popup(text, offset, items, index) {
+    const state = completionPopupState(text, offset, items, index);
+    return {
+      items: state.items,
+      index: state.index,
+      prefixStart: state.prefix.start,
+      prefixWord: state.prefix.word,
+    };
+  },
+  move: (index, delta, count) => moveSelection(index, delta, count),
+  accept: (item, text, offset) => {
+    const a = acceptCompletion(item, text, offset);
+    return { text: a.text, start: a.start, stop: a.end, caret: a.caret, insert: a.insert };
+  },
+  trigger: (text, offset, c) => completionTrigger(text, offset, c),
+  position: (text, offset) => positionFromOffset(text, offset),
+};
