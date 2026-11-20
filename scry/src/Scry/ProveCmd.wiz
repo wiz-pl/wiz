@@ -1,0 +1,423 @@
+import Sys
+import Json
+import Scry.CsCst
+import Scry.CsLower
+import Scry.Lower
+import Scry.CstStore
+import Scry.Rules
+import Scry.Models
+import Scry.RuleTaint
+import Scry.Interproc
+import Scry.Bounds
+import Scry.Prover
+/-!
+# Scry.ProveCmd: the `scry prove` command
+
+The missing command from `scry/PROVER.md` §9.4. It reads a `.cs` (or `.c`) file **and its
+checked-in `scry-cst` spill** (`FILE.cst`, regenerated with `scry-cst FILE > FILE.cst`),
+lowers the unit, runs the rule pack, and proves or checks a claim about **one function's
+EDB**. Reading the spill keeps the command off the native tree-sitter shim, exactly as
+the Lean test groups and the dogfood driver do.
+
+```
+scry prove FILE --claim CLAIM [--script SCRIPT] [--entry] [--pack FILE]
+                [--json] [--dump]
+
+CLAIM  := noFlow FN [SOURCE,…] [rows=P:V,…] [locs=L,…]
+        | constantOrBound FN [SOURCE,…] [rows=…] [locs=…]
+        | cut FN [GUARD,…] [guards=…]
+SOURCE := src | param | retsrc | all
+SCRIPT := intro REL|N; apply RI; close; closeN N; split
+```
+
+A `noFlow` claim defaults to every seed relation; `constantOrBound` defaults to the
+untrusted ones (`src`, `retsrc`), so parameter flows are allowed. A `cut` with no guard
+token uses every guard point in the EDB. `rows=`/`locs=` check a **hand-written**
+certificate instead of searching; `rows={}` is the empty invariant.
+
+Output is one `key: value` line per field, ending with the tagged verdict (`proved`,
+`refuted`, `refused`, `scriptFailed`, `vacuous`). A rejection names the fact that failed:
+a closure miss says which rule and which `tainted`/`mtainted` row, a refutation carries
+the provenance path, and a failed script names the tactic.
+
+The exit status follows `scry cs`: **0 proved; 1 refuted, refused or script-failed; 2
+usage/IO (bad claim or script, missing file/spill/pack, no such function); 3 vacuous**
+(the claim mentions no source or no sink, so nothing was checked). `--json` prints one
+object with the same fields and the exit code; it does not change the status.
+-/
+
+-- ## Options
+
+structure Scry.ProveOpts where
+  file : Option String
+  claim : Option String
+  script : Option String
+  entry : Bool
+  pack : Option String
+  json : Bool
+  dump : Bool
+
+def Scry.Prove.emptyOpts : Scry.ProveOpts :=
+  Scry.ProveOpts.mk .none .none .none .false .none .false .false
+
+def Scry.Prove.usage : String :=
+  "usage: scry prove FILE --claim CLAIM [--script SCRIPT] [--entry] [--pack FILE]\n"
+  ++ "                   [--json] [--dump]\n"
+  ++ "  CLAIM := noFlow FN [src,retsrc] [rows=0:0,2:1] [locs=7]\n"
+  ++ "         | constantOrBound FN [src,retsrc] [rows=…] [locs=…]\n"
+  ++ "         | cut FN [GUARDS] [guards=2,3]\n"
+  ++ "  SCRIPT := intro REL|N; apply RI; close; closeN N; split   (';'-separated)\n"
+  ++ "  A claim without rows=/locs= is searched; with them it is checked as written.\n"
+  ++ "  exit: 0 proved, 1 refuted/refused/script-failed, 2 usage/IO, 3 vacuous.\n"
+
+/-- `FILE.cs`/`FILE.c` -> `FILE.cst` (the checked-in spill beside it). -/
+def Scry.Prove.spillOf (path : String) : String :=
+  if String.endsWith path ".cs" then String.append (String.dropEnd 3 path) ".cst"
+  else if String.endsWith path ".c" then String.append (String.dropEnd 2 path) ".cst"
+  else String.append path ".cst"
+
+partial def Scry.Prove.argsGo (o : Scry.ProveOpts) :
+    List String → Except String Scry.ProveOpts
+  | .nil => match o.file with
+    | .none => .error Scry.Prove.usage
+    | .some _ => match o.claim with
+      | .none => .error ("--claim is required\n" ++ Scry.Prove.usage)
+      | .some _ => .ok o
+  | .cons a rest => match a with
+    | "--claim" => match rest with
+      | .cons v more => Scry.Prove.argsGo { o with claim := .some v } more
+      | .nil => .error "--claim needs a claim text"
+    | "--script" => match rest with
+      | .cons v more => Scry.Prove.argsGo { o with script := .some v } more
+      | .nil => .error "--script needs a tactic script"
+    | "--pack" => match rest with
+      | .cons v more => Scry.Prove.argsGo { o with pack := .some v } more
+      | .nil => .error "--pack needs a rule-pack file"
+    | "--entry" => Scry.Prove.argsGo { o with entry := .true } rest
+    | "--json" => Scry.Prove.argsGo { o with json := .true } rest
+    | "--dump" => Scry.Prove.argsGo { o with dump := .true } rest
+    | "--help" => .error Scry.Prove.usage
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.Prove.usage)
+      | .false => match o.file with
+        | .some _ => .error ("unexpected argument \"" ++ a ++ "\"\n" ++ Scry.Prove.usage)
+        | .none => Scry.Prove.argsGo { o with file := .some a } rest
+
+def Scry.Prove.parseArgs (args : List String) : Except String Scry.ProveOpts :=
+  Scry.Prove.argsGo Scry.Prove.emptyOpts args
+
+-- ## A claim and its script
+
+structure Scry.ProvePlan where
+  spec : Scry.ClaimSpec
+  /-- `none`: the property's default script (or no search, for a cut or a hand-written
+  certificate). -/
+  script : Option (List Scry.Tactic)
+
+/-- The search plan for a parsed claim and an optional script. -/
+def Scry.Prove.scriptPlan (spec : Scry.ClaimSpec) (script : Option String) :
+    Except String Scry.ProvePlan :=
+  match spec.property with
+  | .cut => match script with
+    | .some _ => .error "a cut claim has no search script (the guard set is the proof)"
+    | .none => .ok (Scry.ProvePlan.mk spec .none)
+  | _ => match script with
+    | .none => .ok (Scry.ProvePlan.mk spec .none)
+    | .some t => match Scry.claimSpecHandWritten spec with
+      | .true => .error "a hand-written certificate (rows=/locs=) has no search script"
+      | .false => match Scry.parseScript t with
+        | .error e => .error e
+        | .ok ts => .ok (Scry.ProvePlan.mk spec (.some ts))
+
+/-- Parse the claim and the optional script together, rejecting a script on a claim that
+has no search (a `cut`'s guard set is the proof). -/
+def Scry.Prove.planOf (claimText : String) (script : Option String) :
+    Except String Scry.ProvePlan :=
+  match Scry.parseClaim claimText with
+  | .error e => .error e
+  | .ok spec => Scry.Prove.scriptPlan spec script
+
+-- ## Output
+
+def Scry.Prove.say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def Scry.Prove.sayErr (s : String) : EIO Unit := EIO.lift (IO.ePrintln s)
+
+def Scry.Prove.scriptText (plan : Scry.ProvePlan) : String :=
+  match plan.script with
+  | .some ts => Scry.renderScript ts
+  | .none => match plan.spec.property with
+    | .cut => "(the guard set is the certificate)"
+    | _ => match Scry.claimSpecHandWritten plan.spec with
+      | .true => "(hand-written certificate; no search)"
+      | .false => Scry.defaultScript
+
+def Scry.Prove.claimInv (c : Scry.Claim) : List (Nat × Nat) := c.invariant
+
+def Scry.Prove.claimLocs (c : Scry.Claim) : List Nat := c.locations
+
+def Scry.Prove.claimGuards (c : Scry.Claim) : List Nat := c.guards
+
+/-- The certificate to print: a `proved` verdict carries the claim the search built; a
+rejection has no certificate, so the report shows the (empty) spec the search started
+from and the witness/reason beside it. -/
+def Scry.Prove.claimShown (v : Scry.Verdict) (fallback : Scry.Claim) : Scry.Claim :=
+  match v with
+  | .proved c => c
+  | _ => fallback
+
+def Scry.Prove.count (st : Scry.State Nat) (rel : Nat) : Nat := Scry.Db.relSize st.db rel
+
+/-- The relation counts a report needs to read a verdict: a `proved` claim with zero
+sources or zero sinks is vacuous, and the checker says so, but the counts make the
+distinction visible in every line and in `--json`. -/
+def Scry.Prove.factsLine (st : Scry.State Nat) : String :=
+  "facts: src=" ++ Nat.repr (Scry.Prove.count st Scry.rtSrc)
+  ++ " sink=" ++ Nat.repr (Scry.Prove.count st Scry.rtSink)
+  ++ " flow=" ++ Nat.repr (Scry.Prove.count st Scry.rtFlow)
+  ++ " gen=" ++ Nat.repr (Scry.Prove.count st Scry.rtGen)
+  ++ " san=" ++ Nat.repr (Scry.Prove.count st Scry.rtSan)
+  ++ " mstore=" ++ Nat.repr (Scry.Prove.count st Scry.rtMStore)
+  ++ " mload=" ++ Nat.repr (Scry.Prove.count st Scry.rtMLoad)
+  ++ " mtainted=" ++ Nat.repr (Scry.Prove.count st Scry.rtMTainted)
+  ++ " guard=" ++ Nat.repr (Scry.Prove.count st Scry.rtGuard)
+  ++ " use=" ++ Nat.repr (Scry.Prove.count st Scry.rtUse)
+  ++ " before=" ++ Nat.repr (Scry.Prove.count st Scry.rtBefore)
+
+def Scry.Prove.showVerdict (v : Scry.Verdict) : List String :=
+  match v with
+  | .proved _ => ["verdict: proved"]
+  | .refuted w => ["verdict: refuted", "witness: " ++ w]
+  | .refused r => ["verdict: refused", "reason: " ++ r]
+  | .scriptFailed e => ["verdict: scriptFailed", "reason: " ++ e]
+  | .vacuous r => ["verdict: vacuous", "reason: " ++ r]
+
+def Scry.Prove.render (file : String) (plan : Scry.ProvePlan) (claim : Scry.Claim)
+    (v : Scry.Verdict) (st : Scry.State Nat) : String :=
+  let header :=
+    ["file: " ++ file,
+     "claim: " ++ plan.spec.text,
+     "property: " ++ Scry.Property.show plan.spec.property,
+     "function: " ++ plan.spec.func,
+     "sources: " ++ Scry.showSources (Scry.selectedSources claim),
+     "script: " ++ Scry.Prove.scriptText plan]
+    ++ (match plan.spec.property with
+      | .cut => ["guards: " ++ Scry.showCut (Scry.Prove.claimGuards claim)]
+      | _ => ["invariant: " ++ Scry.showInv (Scry.Prove.claimInv claim),
+              "locations: " ++ Scry.showLocs (Scry.Prove.claimLocs claim)]);
+  String.intercalate "\n" (List.append header
+    (List.cons (Scry.Prove.factsLine st) (Scry.Prove.showVerdict v)))
+
+-- ## JSON
+
+def Scry.Prove.rowJson (p : Nat × Nat) : Json :=
+  Json.mkArr [Json.ofNat p.1, Json.ofNat p.2]
+
+def Scry.Prove.invJson (I : List (Nat × Nat)) : Json :=
+  Json.mkArr (List.map Scry.Prove.rowJson I)
+
+def Scry.Prove.natsJson (xs : List Nat) : Json :=
+  Json.mkArr (List.map Json.ofNat xs)
+
+def Scry.Prove.sourcesJson (rs : List Nat) : Json :=
+  Json.mkArr (List.map (fun r => Json.ofString (Scry.claimSource r)) rs)
+
+def Scry.Prove.factsJson (st : Scry.State Nat) : Json :=
+  Json.mkObj [
+    ("src", Json.ofNat (Scry.Prove.count st Scry.rtSrc)),
+    ("sink", Json.ofNat (Scry.Prove.count st Scry.rtSink)),
+    ("flow", Json.ofNat (Scry.Prove.count st Scry.rtFlow)),
+    ("gen", Json.ofNat (Scry.Prove.count st Scry.rtGen)),
+    ("san", Json.ofNat (Scry.Prove.count st Scry.rtSan)),
+    ("mstore", Json.ofNat (Scry.Prove.count st Scry.rtMStore)),
+    ("mload", Json.ofNat (Scry.Prove.count st Scry.rtMLoad)),
+    ("mtainted", Json.ofNat (Scry.Prove.count st Scry.rtMTainted)),
+    ("guard", Json.ofNat (Scry.Prove.count st Scry.rtGuard)),
+    ("use", Json.ofNat (Scry.Prove.count st Scry.rtUse)),
+    ("before", Json.ofNat (Scry.Prove.count st Scry.rtBefore))]
+
+def Scry.Prove.verdictJson (v : Scry.Verdict) : List (String × Json) :=
+  match v with
+  | .proved _ => [("verdict", Json.ofString "proved")]
+  | .refuted w => [("verdict", Json.ofString "refuted"), ("witness", Json.ofString w)]
+  | .refused r => [("verdict", Json.ofString "refused"), ("reason", Json.ofString r)]
+  | .scriptFailed e =>
+    [("verdict", Json.ofString "scriptFailed"), ("reason", Json.ofString e)]
+  | .vacuous r => [("verdict", Json.ofString "vacuous"), ("reason", Json.ofString r)]
+
+def Scry.Prove.jsonOf (file : String) (plan : Scry.ProvePlan) (claim : Scry.Claim)
+    (v : Scry.Verdict) (st : Scry.State Nat) (status : Nat) : Json :=
+  Json.mkObj (List.append [
+      ("schema", Json.ofString "scry-prove/1"),
+      ("file", Json.ofString file),
+      ("claim", Json.ofString plan.spec.text),
+      ("property", Json.ofString (Scry.Property.show plan.spec.property)),
+      ("function", Json.ofString plan.spec.func),
+      ("sources", Scry.Prove.sourcesJson (Scry.selectedSources claim)),
+      ("script", Json.ofString (Scry.Prove.scriptText plan)),
+      ("invariant", Scry.Prove.invJson (Scry.Prove.claimInv claim)),
+      ("locations", Scry.Prove.natsJson (Scry.Prove.claimLocs claim)),
+      ("guards", Scry.Prove.natsJson (Scry.Prove.claimGuards claim)),
+      ("facts", Scry.Prove.factsJson st)]
+    (List.append (Scry.Prove.verdictJson v) [("exit", Json.ofNat status)]))
+
+-- ## The EDB dump
+
+def Scry.Prove.dumpRel (st : Scry.State Nat) (name : String) (rel : Nat) : EIO Unit := do
+  let rows := List.map Scry.rtNats (Scry.rtRows st rel);
+  Scry.Prove.say (name ++ "[" ++ Nat.repr (List.length rows) ++ "] "
+    ++ String.intercalate " " (List.map Scry.renderNatRow rows))
+
+def Scry.Prove.dump (st : Scry.State Nat) : EIO Unit := do
+  Scry.Prove.dumpRel st "src" Scry.rtSrc;
+  Scry.Prove.dumpRel st "param" Scry.rtParam;
+  Scry.Prove.dumpRel st "retsrc" Scry.rtRetSrc;
+  Scry.Prove.dumpRel st "sink" Scry.rtSink;
+  Scry.Prove.dumpRel st "flow" Scry.rtFlow;
+  Scry.Prove.dumpRel st "gen" Scry.rtGen;
+  Scry.Prove.dumpRel st "san" Scry.rtSan;
+  Scry.Prove.dumpRel st "mstore" Scry.rtMStore;
+  Scry.Prove.dumpRel st "mload" Scry.rtMLoad;
+  Scry.Prove.dumpRel st "mtainted" Scry.rtMTainted;
+  Scry.Prove.dumpRel st "guard" Scry.rtGuard;
+  Scry.Prove.dumpRel st "use" Scry.rtUse;
+  Scry.Prove.dumpRel st "before" Scry.rtBefore
+
+-- ## Running the claim
+
+/-- The first path that exists, or `none`. -/
+partial def Scry.Prove.firstExisting : List String → EIO (Option String)
+  | .nil => EIO.pure .none
+  | .cons p rest => do
+    ok ← EIO.lift (FS.exists p);
+    match ok with
+    | .true => EIO.pure (.some p)
+    | .false => Scry.Prove.firstExisting rest
+
+/-- The default pack: the C# corpus pack when the command runs from the repository root
+(or from `scry/`), else the C default pack. `--pack FILE` is the explicit form. -/
+def Scry.Prove.defaultPack : EIO (Except String String) := do
+  found ← Scry.Prove.firstExisting
+    ["scry/corpus/csharp/csharp.scry", "../scry/corpus/csharp/csharp.scry",
+     "lib/Scry/rules/default.scry", "../lib/Scry/rules/default.scry"];
+  match found with
+  | .some p => EIO.pure (.ok p)
+  | .none => EIO.pure (.error "no rule pack; pass --pack FILE")
+
+def Scry.Prove.lowerFuncs (file text : String) (store : Scry.CstStore) :
+    List Wil.Func :=
+  match String.endsWith file ".cs" with
+  | .true => (Scry.Cs.lowerCst file text (Scry.Cs.ofStore text store)).funcs
+  | .false => (Scry.lowerTU file (Scry.Cst.ofStore text store)).funcs
+
+/-- The proof for one function: add bounds facts when the claim is a cut (or `--dump`),
+build the claim from the spec, run the search (or the checker for a hand-written
+certificate or a cut), then print the report and return the exit status. -/
+def Scry.Prove.runClaim (o : Scry.ProveOpts) (file : String) (plan : Scry.ProvePlan)
+    (r : Scry.FuncResult) (pr : Scry.ProgramResult) : EIO Nat := do
+  let wantBounds := match plan.spec.property with
+    | .cut => .true
+    | _ => o.dump;
+  let st0 := if wantBounds then
+    Scry.addBoundsFacts r.edb (Scry.boundsFactsOfFunc pr.pointsTo r)
+    else r.edb;
+  let claim := Scry.claimSpecFor plan.spec st0;
+  let v := match plan.spec.property with
+    | .cut => Scry.check Scry.ruleTaintProgram st0 claim
+    | _ => match Scry.claimSpecHandWritten plan.spec with
+      | .true => Scry.check Scry.ruleTaintProgram st0 claim
+      | .false => Scry.proveWithSpec Scry.ruleTaintProgram st0 claim
+        (match plan.script with
+          | .some ts => ts
+          | .none => Scry.defaultTacticsFor claim);
+  let status := Scry.verdictStatus v;
+  let shown := Scry.Prove.claimShown v claim;
+  match o.dump with
+  | .true => Scry.Prove.dump st0
+  | .false => EIO.pure ();
+  match o.json with
+  | .true => Scry.Prove.say (Json.render (Scry.Prove.jsonOf file plan shown v st0 status))
+  | .false => Scry.Prove.say (Scry.Prove.render file plan shown v st0);
+  EIO.pure status
+
+def Scry.Prove.withFiles (o : Scry.ProveOpts) (file : String) (plan : Scry.ProvePlan) :
+    EIO Nat := do
+  let spill := Scry.Prove.spillOf file;
+  fileOk ← EIO.lift (FS.exists file);
+  match fileOk with
+  | .false => do
+    Scry.Prove.sayErr ("scry prove: " ++ file ++ ": no such file");
+    EIO.pure 2
+  | .true => do
+    spillOk ← EIO.lift (FS.exists spill);
+    match spillOk with
+    | .false => do
+      Scry.Prove.sayErr ("scry prove: " ++ spill ++ ": no CST spill (run scry-cst "
+        ++ file ++ " > " ++ spill ++ ")");
+      EIO.pure 2
+    | .true => do
+      packPath ← (match o.pack with
+        | .some p => EIO.pure (.ok p)
+        | .none => Scry.Prove.defaultPack);
+      match packPath with
+      | .error e => do
+        Scry.Prove.sayErr ("scry prove: " ++ e);
+        EIO.pure 2
+      | .ok pp => do
+        text ← FS.readFile file;
+        spillText ← FS.readFile spill;
+        packText ← FS.readFile pp;
+        match Scry.CstStore.ofText spillText with
+        | .error e => do
+          Scry.Prove.sayErr ("scry prove: " ++ spill ++ ": " ++ e);
+          EIO.pure 2
+        | .ok store => do
+          let funcs := Scry.Prove.lowerFuncs file text store;
+          let pack := Scry.parseRulePack packText;
+          let pr := match o.entry with
+            | .true => Scry.analyzeC (Wil.program funcs) pack
+            | .false => Scry.analyze (Wil.program funcs) pack;
+          match Scry.findResult pr plan.spec.func with
+          | .none => do
+            Scry.Prove.sayErr ("scry prove: no function \"" ++ plan.spec.func ++
+              "\" in " ++ file);
+            EIO.pure 2
+          | .some r => Scry.Prove.runClaim o file plan r pr
+
+def Scry.Prove.runOpts (o : Scry.ProveOpts) : EIO Nat := do
+  match o.file with
+  | .none => do
+    Scry.Prove.sayErr Scry.Prove.usage;
+    EIO.pure 2
+  | .some file => match o.claim with
+    | .none => do
+      Scry.Prove.sayErr Scry.Prove.usage;
+      EIO.pure 2
+    | .some claimText => match Scry.Prove.planOf claimText o.script with
+      | .error e => do
+        Scry.Prove.sayErr ("scry prove: " ++ e);
+        EIO.pure 2
+      | .ok plan => Scry.Prove.withFiles o file plan
+
+/-- `scry prove …`. `help`/`--help` prints the usage and succeeds. -/
+def Scry.Prove.run (args : List String) : EIO Nat :=
+  match args with
+  | .cons "help" _ => do
+    Scry.Prove.say Scry.Prove.usage;
+    EIO.pure 0
+  | .cons "--help" _ => do
+    Scry.Prove.say Scry.Prove.usage;
+    EIO.pure 0
+  | _ => match Scry.Prove.parseArgs args with
+    | .error e => do
+      Scry.Prove.sayErr e;
+      EIO.pure 2
+    | .ok o => Scry.Prove.runOpts o
+
+/-- `main` for the standalone `scry-prove` entry point: run and exit with the command's
+status (1 with a `scry prove: …` message if an action failed). The full CLI calls
+`Scry.Prove.run` and exits with its number itself. -/
+def Scry.Prove.mainArgs (args : List String) : IO Unit :=
+  IO.bind (Scry.Prove.run args) (fun r => match r with
+    | .ok n => Process.exit n
+    | .error m => IO.bind (IO.ePrintln ("scry prove: " ++ m)) (fun _ => Process.exit 1))

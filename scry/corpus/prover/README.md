@@ -24,6 +24,7 @@ edges; a vacuous claim is never reported as proved.
 | `p7-memcpy-safe.sh` | `c/memcpy-safe.c` (`main`) | every write is preceded by a check (the `memcpy` length `n` is guarded by `n <= 16` and the destination is 32 cells) | `proved (every write is preceded by a check)`; 1 guard row, 1 write use |
 | `p8-memcpy-weak.sh` | `c/memcpy-weak.c` | the same cut, but the guard allows 64 into a 32-cell destination | **refuted**; the witness names `guard(...)`, the copy `use(...)` and the bound/capacity mismatch |
 | `p9-memcpy-unguarded.sh` | `c/memcpy-unguarded.c` | the same cut with no check | **refuted**; the witness names the use and says there is no guard on the length register |
+| `p10-prove-cli.sh` | the CLI itself (`scry-prove`) | the safe/unsafe C# pair, a hand-written certificate, a wrong one, a bad script, a vacuous method and a bad claim | exercises every exit status (`0` proved, `1` refuted/refused/script-failed, `2` usage, `3` vacuous) and the `--json` object |
 
 The `synthetic/` fixtures are written for this corpus. They keep the shape each proof
 exercises and are pure ASCII; no private source is checked in. `p2` runs with
@@ -52,7 +53,7 @@ The driver reads a `.cs`/`.c` file and its checked-in `.cst` spill, so the proof
 neither tree-sitter nor .NET at run time:
 
 ```sh
-scry/corpus/prover/build.sh          # builds scry/build/prover (needs the Wiz toolchain)
+scry/corpus/prover/build.sh          # builds scry/build/prover and scry/build/scry-prove
 scry/corpus/prover/check.sh          # runs every proof and asserts the verdicts
 ```
 
@@ -60,13 +61,44 @@ scry/corpus/prover/check.sh          # runs every proof and asserts the verdicts
 that already supplies its own `--cc`/`--cflags`/`--ldflags`: the script then does not
 override them with `grail.local.wiz`'s paths.
 
+`scry/build/scry-prove` is the `scry prove` command without the native parser, so the
+corpus runs in a worktree that has no `native/` tree-sitter sources. The full CLI has the
+same command as `scry prove`:
+
+```sh
+scry prove scry/corpus/csharp/taint/cwe78-process-safe.cs \
+  --claim "noFlow Fixtures.Runner.Main" --pack scry/corpus/csharp/csharp.scry
+# 0 proved; --json prints the invariant and the verdict; a rejection exits 1 or 3.
+```
+
+`SCRY_PROVE=/path/to/scry-prove` overrides the CLI binary for `p10`.
+
 Regenerate a spill with the native `scry-cst` tool:
 
 ```sh
 scry-cst FILE.cs > FILE.cst
 ```
 
-`PROVER=/path/to/prover` overrides the binary.
+`PROVER=/path/to/prover` overrides the driver; `SCRY_PROVE=/path/to/scry-prove`
+overrides the CLI used by `p10`.
+
+### Known drift (2026-11-20)
+
+On `integration/train8` the untouched dogfood driver disagrees with two checked-in
+expectations; this is analysis/lowering drift since the corpus was recorded, not the
+`scry prove` slice (`lib/Scry/Prover.wiz` is append-only on that branch):
+
+* `p2-sqlcommand` is **refuted** at `sink(15,0,...)` through `src(0,1)` (the
+  `requestedDates` projection); the recorded result was `proved`. Either the lowering
+  now lets the projected element reach the interpolated text, or the fixture needs a
+  shape that does not rely on an unused lambda parameter.
+* `p6-modern-store` is refuted with the same `store -> load -> sink` shape, but the
+  lowering's point ids are `store(3,25,25) -> load(3,33,35) -> sink(34,1,35)` rather
+  than the recorded `(2,23,25)/(2,31,35)/(32,1,35)`.
+
+`p7`–`p9` need the C spills, which `scry-cst` (and therefore `native/`) produces; a
+worktree without `native/` stops at `ensure_spill` with exit 2. `p10` runs before that
+point and needs only the checked-in C# spills.
 
 ## Provenance and caveats
 

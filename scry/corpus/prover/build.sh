@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Build the prover driver. It reads a .cs file and its checked-in .cst spill, so it
-# needs no native tree-sitter shim; the gmp flags come from grail.local.wiz.
+# Build the prover drivers. Both read a .cs/.c file and its checked-in .cst spill, so
+# they need no native tree-sitter shim; the gmp flags come from grail.local.wiz.
+#
+#   scry/build/prover       the dogfood driver (`prover FILE FN [--cut|--cover|…]`)
+#   scry/build/scry-prove   the CLI command (`scry prove FILE --claim … [--json]`)
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
@@ -18,7 +21,10 @@ cd "$ROOT/scry"
 if [ "${WIZ_BUNDLED:-0}" = 1 ]; then
   # A packaged wiz wrapper already supplies its own --cc/--cflags/--ldflags and a
   # read-only cache; passing grail.local.wiz's paths would override them.
-  exec "$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover
+  "$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover
+  exec "$WIZ" build tools/ProveMain.wiz -I src -I ../lib -o build/scry-prove
 fi
-exec "$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover \
+"$WIZ" build tools/ProverMain.wiz -I src -I ../lib -o build/prover \
+  ${CC:+--cc "$CC"} --cflags "$CFLAGS" --ldflags "$LDFLAGS"
+exec "$WIZ" build tools/ProveMain.wiz -I src -I ../lib -o build/scry-prove \
   ${CC:+--cc "$CC"} --cflags "$CFLAGS" --ldflags "$LDFLAGS"

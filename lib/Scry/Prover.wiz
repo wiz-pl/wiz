@@ -893,3 +893,274 @@ def Scry.renderScript : List Scry.Tactic → String
 
 /-- The default script as text. -/
 def Scry.defaultScript : String := Scry.renderScript Scry.defaultTactics
+
+-- ## A small claim and script language (the `scry prove` CLI)
+
+/-- A parsed claim specification. The certificate fields are optional because the CLI
+resolves them against the function's EDB: an absent `sources` selects the property's
+default, and an absent `guards` means "every guard point in the EDB" (the prototype's
+`--cut` default). A hand-written `rows`/`locations` makes the command check that
+certificate directly instead of searching. -/
+structure Scry.ClaimSpec where
+  func : String
+  property : Scry.Property
+  /-- `sources=…` (or a bare selector list): the seed relations the claim quantifies
+  over. -/
+  sources : Option (List Nat)
+  /-- `guards=…` (or a bare point list, a `cut` claim): the cut's certificate. -/
+  guards : Option (List Nat)
+  /-- `rows=…`: a hand-written invariant (check only; no search). -/
+  rows : Option (List (Nat × Nat))
+  /-- `locs=…`: the locations derived by a hand-written invariant. -/
+  locations : Option (List Nat)
+  /-- The claim text as the user wrote it, for reports. -/
+  text : String
+
+/-- The property an empty claim specification starts from. `rows`/`locations` absent
+means "search"; present means "check this certificate". -/
+def Scry.ClaimSpec.empty (func : String) (property : Scry.Property) (text : String) :
+    Scry.ClaimSpec :=
+  Scry.ClaimSpec.mk func property .none .none .none .none text
+
+/-- Build the claim the spec denotes. Sources default to the property's set (`param` is
+included for `noFlow`, excluded for `constantOrBound`); a `cut` with no guard list uses
+every guard point in the EDB. -/
+def Scry.claimSpecFor (spec : Scry.ClaimSpec) (st : Scry.State Nat) : Scry.Claim :=
+  match spec.property with
+  | .cut =>
+    Scry.Claim.cut spec.func (match spec.guards with
+      | .some gs => gs
+      | .none => Scry.guardPoints st)
+  | .noFlow =>
+    Scry.Claim.mk spec.func
+      (match spec.rows with | .some r => r | .none => ([] : List (Nat × Nat)))
+      (match spec.locations with | .some l => l | .none => ([] : List Nat))
+      (match spec.sources with | .some s => s | .none => Scry.allSources)
+      .noFlow []
+  | .constantOrBound =>
+    Scry.Claim.mk spec.func
+      (match spec.rows with | .some r => r | .none => ([] : List (Nat × Nat)))
+      (match spec.locations with | .some l => l | .none => ([] : List Nat))
+      (match spec.sources with | .some s => s | .none => Scry.untrustedSources)
+      .constantOrBound []
+
+/-- Does the spec carry a hand-written certificate? Then the command checks it instead
+of running the search. -/
+def Scry.claimSpecHandWritten (spec : Scry.ClaimSpec) : Bool :=
+  match spec.rows with
+  | .some _ => .true
+  | .none => match spec.locations with
+    | .some _ => .true
+    | .none => .false
+
+/-- The tagged verdict name. `scriptFailed` is written as the design note spells it;
+`Verdict.show` is the human sentence. -/
+def Scry.Verdict.tag : Scry.Verdict → String
+  | .proved _ => "proved"
+  | .refuted _ => "refuted"
+  | .refused _ => "refused"
+  | .scriptFailed _ => "scriptFailed"
+  | .vacuous _ => "vacuous"
+
+/-- The CLI exit status for a verdict: `0` only for `proved`; `1` for a rejected claim
+(`refuted`, `refused`, `script-failed`); `3` for `vacuous` (nothing was checked). `2` is
+reserved for usage and IO, as in `scry cs`. -/
+def Scry.verdictStatus : Scry.Verdict → Nat
+  | .proved _ => 0
+  | .refuted _ => 1
+  | .refused _ => 1
+  | .scriptFailed _ => 1
+  | .vacuous _ => 3
+
+/-- The claim as the small language writes it. -/
+def Scry.showClaim (c : Scry.Claim) : String :=
+  match c.property with
+  | .cut =>
+    "cut " ++ c.func ++ " guards=" ++ String.intercalate "," (List.map Nat.repr c.guards)
+  | .noFlow =>
+    "noFlow " ++ c.func ++ " sources=" ++ Scry.showSources (Scry.selectedSources c) ++
+      " rows=" ++ Scry.showInv c.invariant ++ " locs=" ++ Scry.showLocs c.locations
+  | .constantOrBound =>
+    "constantOrBound " ++ c.func ++ " sources=" ++
+      Scry.showSources (Scry.selectedSources c) ++
+      " rows=" ++ Scry.showInv c.invariant ++ " locs=" ++ Scry.showLocs c.locations
+
+/-- A source relation by name, for `sources=src,retsrc` and `intro src`. -/
+def Scry.sourceNameOf (s : String) : Option Nat :=
+  if String.eq s "src" then .some Scry.rtSrc
+  else if String.eq s "param" then .some Scry.rtParam
+  else if String.eq s "retsrc" then .some Scry.rtRetSrc
+  else .none
+
+/-- Any taint relation by name, for `intro REL` (the numeric form stays legal). -/
+def Scry.relationOfName (s : String) : Option Nat :=
+  match Scry.sourceNameOf s with
+  | .some r => .some r
+  | .none =>
+    if String.eq s "tainted" then .some Scry.rtTainted
+    else if String.eq s "flow" then .some Scry.rtFlow
+    else if String.eq s "sink" then .some Scry.rtSink
+    else if String.eq s "gen" then .some Scry.rtGen
+    else if String.eq s "san" then .some Scry.rtSan
+    else if String.eq s "mstore" then .some Scry.rtMStore
+    else if String.eq s "mload" then .some Scry.rtMLoad
+    else if String.eq s "mtainted" then .some Scry.rtMTainted
+    else if String.eq s "alert" then .some Scry.rtAlert
+    else .none
+
+partial def Scry.parseSourcesGo : List String → Except String (List Nat)
+  | .nil => .ok .nil
+  | .cons w rest => match w with
+    | "all" => .ok Scry.allSources
+    | _ => match Scry.sourceNameOf w with
+      | .none => .error ("unknown source relation \"" ++ w ++ "\" (src, param, retsrc, all)")
+      | .some r => match Scry.parseSourcesGo rest with
+        | .error e => .error e
+        | .ok rs => .ok (List.cons r rs)
+
+/-- `src,retsrc` as a source set. `all` is every seed relation. -/
+def Scry.parseSources (s : String) : Except String (List Nat) :=
+  match Scry.parseSourcesGo (Scry.words (String.replace s "," " ")) with
+  | .error e => .error e
+  | .ok rs => match rs with
+    | .nil => .error "the source list is empty (src, param, retsrc, all)"
+    | _ => .ok rs
+
+partial def Scry.parsePointsGo : List String → Except String (List Nat)
+  | .nil => .ok .nil
+  | .cons w rest => match w with
+    | "none" => .ok .nil
+    | _ => match String.parseNat w with
+      | .none => .error ("\"" ++ w ++ "\" is not a guard point")
+      | .some p => match Scry.parsePointsGo rest with
+        | .error e => .error e
+        | .ok ps => .ok (List.cons p ps)
+
+/-- `2,3` as guard points. `none` is the empty certificate (a legal but useless cut). -/
+def Scry.parsePoints (s : String) : Except String (List Nat) :=
+  Scry.parsePointsGo (Scry.words (String.replace s "," " "))
+
+partial def Scry.parseRowPairsGo : List String → Except String (List (Nat × Nat))
+  | .nil => .ok .nil
+  | .cons part rest => match String.splitOn (String.trim part) ":" with
+    | .cons a (.cons b .nil) => match String.parseNat (String.trim a) with
+      | .none => .error ("\"" ++ part ++ "\" is not a point:register row")
+      | .some p => match String.parseNat (String.trim b) with
+        | .none => .error ("\"" ++ part ++ "\" is not a point:register row")
+        | .some q => match Scry.parseRowPairsGo rest with
+          | .error e => .error e
+          | .ok rs => .ok (List.cons (p, q) rs)
+    | _ => .error ("\"" ++ part ++ "\" is not a point:register row")
+
+/-- `0:0,2:1` as invariant rows. Malformed rows are an error (the prototype dropped
+them, which could silently weaken a hand-written certificate). -/
+def Scry.parseRowPairs (s : String) : Except String (List (Nat × Nat)) :=
+  Scry.parseRowPairsGo (Scry.words (String.replace s "," " "))
+
+/-- Parse one claim token into the spec. Tokens are order-independent; a bare token is a
+selector list for `noFlow`/`constantOrBound` and a guard list for `cut`. -/
+partial def Scry.parseClaimTokens (spec : Scry.ClaimSpec) :
+    List String → Except String Scry.ClaimSpec
+  | .nil => .ok spec
+  | .cons t rest =>
+    match String.stripPrefix t "sources=" with
+    | .some s => match spec.property with
+      | .cut => .error "a cut claim has no source set"
+      | _ => match Scry.parseSources s with
+        | .error e => .error e
+        | .ok ss => Scry.parseClaimTokens { spec with sources := .some ss } rest
+    | .none => match String.stripPrefix t "guards=" with
+      | .some g => match spec.property with
+        | .cut => match Scry.parsePoints g with
+          | .error e => .error e
+          | .ok gs => Scry.parseClaimTokens { spec with guards := .some gs } rest
+        | _ => .error "only a cut claim takes a guard set"
+      | .none => match String.stripPrefix t "rows=" with
+        | .some r => match spec.property with
+          | .cut => .error "a cut claim has no invariant rows"
+          | _ => match Scry.parseRowPairs r with
+            | .error e => .error e
+            | .ok rs => Scry.parseClaimTokens { spec with rows := .some rs } rest
+        | .none => match String.stripPrefix t "locs=" with
+          | .some l => match spec.property with
+            | .cut => .error "a cut claim has no invariant locations"
+            | _ => match Scry.parsePoints l with
+              | .error e => .error e
+              | .ok ls => Scry.parseClaimTokens { spec with locations := .some ls } rest
+          | .none => match String.startsWith t "-" with
+            | .true => .error ("unknown claim option \"" ++ t ++ "\"")
+            | .false => match spec.property with
+              | .cut => match Scry.parsePoints t with
+                | .error e => .error e
+                | .ok gs => Scry.parseClaimTokens { spec with guards := .some gs } rest
+              | _ => match Scry.parseSources t with
+                | .error e => .error e
+                | .ok ss => Scry.parseClaimTokens { spec with sources := .some ss } rest
+
+/-- Parse the small claim language:
+
+```
+noFlow FN [SOURCE,…] [rows=P:V,…] [locs=L,…]
+constantOrBound FN [SOURCE,…] [rows=…] [locs=…]
+cut FN [GUARD,…] [guards=…]
+```
+
+`SOURCE` is `src`, `param`, `retsrc` or `all`; `GUARD` is a control point. `cut FN` with
+no guard token uses every guard point in the EDB. `rows=`/`locs=` make the command check
+a hand-written certificate instead of searching. -/
+def Scry.parseClaim (s : String) : Except String Scry.ClaimSpec :=
+  match Scry.words (String.trim s) with
+  | .nil => .error "the claim is empty (noFlow FN | constantOrBound FN | cut FN)"
+  | .cons kind (.cons fn rest) =>
+    let property : Option Scry.Property :=
+      if String.eq kind "noFlow" then .some Scry.Property.noFlow
+      else if String.eq kind "no-flow" then .some Scry.Property.noFlow
+      else if String.eq kind "constantOrBound" then .some Scry.Property.constantOrBound
+      else if String.eq kind "constant-or-bound" then .some Scry.Property.constantOrBound
+      else if String.eq kind "cut" then .some Scry.Property.cut
+      else .none;
+    match property with
+    | .none => .error ("unknown claim kind \"" ++ kind ++
+        "\" (noFlow, constantOrBound, cut)")
+    | .some p => Scry.parseClaimTokens (Scry.ClaimSpec.empty fn p s) rest
+  | _ => .error ("a claim is KIND FUNCTION, not \"" ++ s ++ "\"")
+
+/-- Parse one tactic. A relation may be named (`intro src`) or a rule index
+(`intro 1`); `apply` takes a rule index, and `split` is the `check` step. -/
+def Scry.parseTactic (ws : List String) : Except String Scry.Tactic :=
+  match ws with
+  | .cons "intro" (.cons a .nil) => match Scry.relationOfName a with
+    | .some r => .ok (Scry.Tactic.intro r)
+    | .none => match String.parseNat a with
+      | .some r => .ok (Scry.Tactic.intro r)
+      | .none => .error ("intro: \"" ++ a ++ "\" is not a relation name or number")
+  | .cons "apply" (.cons a .nil) => match String.parseNat a with
+    | .some ri => .ok (Scry.Tactic.apply ri)
+    | .none => .error ("apply: \"" ++ a ++ "\" is not a rule index")
+  | .cons "close" .nil => .ok .close
+  | .cons "split" .nil => .ok .split
+  | .cons "closeN" (.cons a .nil) => match String.parseNat a with
+    | .some n => .ok (Scry.Tactic.closeN n)
+    | .none => .error ("closeN: \"" ++ a ++ "\" is not a round count")
+  | .nil => .error "empty tactic"
+  | _ => .error ("unknown tactic \"" ++ String.intercalate " " ws ++
+      "\" (intro REL|N, apply RI, close, closeN N, split)")
+
+partial def Scry.parseScriptGo : List String → Except String (List Scry.Tactic)
+  | .nil => .ok .nil
+  | .cons seg rest => match Scry.words (String.trim seg) with
+    | .nil => Scry.parseScriptGo rest
+    | ws => match Scry.parseTactic ws with
+      | .error e => .error e
+      | .ok t => match Scry.parseScriptGo rest with
+        | .error e => .error e
+        | .ok ts => .ok (List.cons t ts)
+
+/-- Parse a tactic script: `intro src; intro retsrc; close; split`. An empty script is a
+usage error (use no `--script` for the property's default script). -/
+def Scry.parseScript (s : String) : Except String (List Scry.Tactic) :=
+  match Scry.parseScriptGo (String.splitOn s ";") with
+  | .error e => .error e
+  | .ok ts => match ts with
+    | .nil => .error "the script is empty"
+    | _ => .ok ts

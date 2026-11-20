@@ -1,6 +1,7 @@
 # scry prover mode: design and first slice
 
-Status: design + prototype (2026-11-19, branch `scry-prover`). Builds on
+Status: design + prototype (2026-11-19, branch `scry-prover`), then the guards/cut slice
+and the `scry prove` command (2026-11-20, `prover-cli`; §9.4, §11). Builds on
 `scry-derivation.md` (S8 certificates), `scry-csharp.md`, and the rule-pack taint engine
 (`lib/Scry/RuleTaint.wiz`, `Scry.Interproc`). The working copy of this note is
 `scry/PROVER.md` in the repo.
@@ -265,10 +266,12 @@ What makes the prototype more than decoration, concretely:
 
 | file | contents |
 |---|---|
-| `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the cut checker, the tactic datatype and `prove`/`proveWith` |
+| `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the cut checker, the tactic datatype and `prove`/`proveWith`, plus the claim/script parser |
 | `lib/Scry/Bounds.wiz` | the out-of-bounds rules and `boundsFactsOfFunc`: `guard`/`use`/`before` rows derived from the same CFG, capacities and copy shapes |
 | `lib/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection, `constantOrBound` and the cut twins |
-| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection, the cut on tiny EDBs and guard extraction |
+| `scry/src/Scry/ProveCmd.wiz` | `scry prove`: IO, the claim/script CLI, the human and JSON reports, the exit status |
+| `scry/tools/ProveMain.wiz` | the `scry-prove` entry point (the same command without the native parser, for the corpus) |
+| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection, the cut on tiny EDBs, guard extraction, and the claim/script language |
 | `scry/PROVER.md` | this note |
 
 Test cases (all in the interpreter, reading the checked-in spills, so no tree-sitter and
@@ -329,10 +332,11 @@ property needs, is the natural second user of the same checker shape.
 3. **Done (this slice): guards/bounds.** `guard`/`use`/`before` EDB rows from
    `Scry.Bounds`, the `cut` claim for "every write preceded by a check", and the
    `memcpy` length property on C fixtures (`scry/corpus/prover/c/`, §10).
-4. A `scry prove FILE --claim …` command: parse a small script, run it, print the
-   invariant and the verdict, and exit non-zero on a rejected claim (with the offending
-   fact). The dogfood driver `scry/tools/ProverMain.wiz` is the prototype; it now has a
-   `--cut` mode.
+4. **Done (this slice): `scry prove`.** `scry prove FILE --claim CLAIM [--script SCRIPT]
+   [--entry] [--pack FILE] [--json] [--dump]` parses the small claim/script language,
+   runs it, prints the invariant and the tagged verdict, and exits non-zero on a
+   rejected claim with the offending fact (§11). The dogfood driver
+   `scry/tools/ProverMain.wiz` remains the prototype and keeps its key/value output.
 5. Mechanise the memory closure induction alongside the taint one.
 
 ## 10. Guards and bounds: the cut
@@ -428,3 +432,89 @@ limit the dogfood recorded for the driver build.
   the write refutable; the claim never silently passes an unanalysed extent.
 * **No mechanised soundness.** The dominance/coverage argument is still a paper argument
   in this note; there is no Wiz theorem `checkCut ... = proved → every write guarded`.
+
+## 11. The command: `scry prove`
+
+Status: implemented on `prover-cli` (2026-11-20), based on `integration/train8`.
+
+§9.4 was the dogfood's most concrete item: every prover run needed a hand-built driver,
+and the interpreted `#eval` path is 10–20x slower than a compiled command (`F7`). The
+command is the same analysis and checker as the driver, with the claim itself as input.
+
+```
+scry prove FILE --claim CLAIM [--script SCRIPT] [--entry] [--pack FILE]
+                [--json] [--dump]
+
+CLAIM  := noFlow FN [SOURCE,…] [rows=P:V,…] [locs=L,…]
+        | constantOrBound FN [SOURCE,…] [rows=…] [locs=…]
+        | cut FN [GUARD,…] [guards=…]
+SOURCE := src | param | retsrc | all
+SCRIPT := intro REL|N; apply RI; close; closeN N; split
+```
+
+* `FILE` is a `.cs` or `.c` file with its checked-in `scry-cst` spill
+  (`scry-cst FILE > FILE.cst`), so no tree-sitter and no .NET are needed at run time.
+* `noFlow` defaults to every seed relation; `constantOrBound` defaults to `src,retsrc`
+  (`param` flows allowed); a `cut` with no guard token uses every guard point in the EDB.
+* `rows=`/`locs=` check a **hand-written** certificate instead of searching. `rows=`
+  with no rows is the empty invariant, which is accepted only when the function has no
+  seeds. The searched and hand-written paths call the same `Scry.check`.
+* `--script` is the search; the default is `Scry.defaultTacticsFor`, i.e.
+  `intro <each selected source>; close; split`. Relation names are accepted as well as
+  the numeric relation ids, so a renumbering does not silently change a script (`F6`).
+* `--entry` selects the C-ABI parameter policy (`Scry.analyzeC`); `--pack` selects the
+  rule pack (default `scry/corpus/csharp/csharp.scry`, else the C default pack).
+* `--json` prints one object (`schema: scry-prove/1`) with the claim, property,
+  selected sources, script, invariant, locations, guard set, relation counts, the tagged
+  verdict and the exit code. It does not change the status.
+
+Output (human) is `key: value` lines ending in the verdict:
+
+```
+file: scry/corpus/csharp/taint/cwe78-process-safe.cs
+claim: noFlow Fixtures.Runner.Main
+property: no-flow
+function: Fixtures.Runner.Main
+sources: src,param,retsrc
+script: intro 1;intro 6;intro 7;close;split;
+invariant: {(0,0)}
+locations: {}
+facts: src=1 sink=1 flow=2 gen=0 san=0 mstore=0 mload=0 mtainted=0 guard=0 use=0 before=0
+verdict: proved
+```
+
+A rejection names the fact: `refused` carries the rule and the missing
+`tainted`/`mtainted` row (e.g. `rule 0 derives tainted (0,0), which is not in the
+invariant`), `refuted` carries the provenance path, and `scriptFailed` names the tactic.
+`vacuous` says whether the selected source set or the sink set was empty.
+
+Exit status, the same convention as `scry cs` / `scry taint`:
+
+| status | meaning |
+|---|---|
+| `0` | `proved` — only acceptance |
+| `1` | `refuted` (a counterexample path), `refused` (the certificate is not closed), `scriptFailed` (an ill-formed script) |
+| `2` | usage/IO: a bad claim or script, a missing file/spill/pack, or a function the unit does not contain |
+| `3` | `vacuous` — nothing was checked (empty selected source set or empty sink set) |
+
+The corpus case `scry/corpus/prover/proofs/p10-prove-cli.sh` exercises every status and
+the JSON object; `check.sh` asserts them.
+
+### What is still missing
+
+* **Interprocedural seeds are still assumptions** (§9.2). `param`/`retsrc` enter the EDB
+  from `Scry.Interproc`'s summary fixpoint; the certificate does not contain the caller's
+  invariant for the argument that produced a `param` row, and `Scry.check` does not
+  demand one. A sound per-caller certificate needs three things the current code does not
+  have: (1) **seed provenance** — for every `param` row, the caller site and argument
+  register, and for every `retsrc` row, the callee `ret` that justifies it
+  (`Scry.Summary` keeps only the positions and a boolean); (2) a **tree/fixpoint
+  checker** over mutually recursive summaries, with an explicit rule for the recursion
+  cycle; and (3) a **subgoal interface** that checks a caller's invariant against the
+  callee's seed, rather than trusting the fixpoint's union. `Scry.graph.sites` has the
+  call edges, but the witnesses are discarded after `growSummaries`, so the first step
+  is to keep them in `FuncResult`/`Summary`.
+* **No mechanised soundness** (§9.1). The closure argument is the paper proof in §4;
+  there is no Wiz theorem `check p edb c = proved → alert empty`.
+* The `cut` command reaches only the write property, and its bounds are constants
+  (§10).

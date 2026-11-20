@@ -234,11 +234,47 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverCutVacuousVerdict) \"write set is empty\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverCutUnorderedVerdict\n" ++
          "#eval String.eq (Scry.Property.show Scry.Property.cut) \"cut (every write is preceded by a check)\"\n" ++
-         "#eval Nat.eq (List.length Scry.guardFnRows) 1\n" ++
+         "#eval Nat.beq (List.length Scry.guardFnRows) 1\n" ++
          "#eval match Scry.guardFnRows with\n" ++
-         "  | .cons r _ => Bool.and (Nat.eq (List.getD r 1 99) 0) (Nat.eq (List.getD r 2 99) 16)\n" ++
-         "  | .nil => .false\n")
-        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
+         "  | .cons r _ => Bool.and (Nat.beq (List.getD r 1 99) 0) (Nat.beq (List.getD r 2 99) 16)\n" ++
+         "  | .nil => (.false : Bool)\n")
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] },
+    { name := "the claim and script language: kinds, source/guard certificates and exit tags",
+      run := fun _ => evalTexts
+        ("def probeClaim (s : String) : String :=\n" ++
+         "  match Scry.parseClaim s with\n" ++
+         "  | .ok sp => Scry.showClaim (Scry.claimSpecFor sp Scry.State.empty)\n" ++
+         "  | .error e => e\n" ++
+         "#eval String.eq (probeClaim \"noFlow F\") \"noFlow F sources=src,param,retsrc rows={} locs={}\"\n" ++
+         "#eval String.eq (probeClaim \"noFlow F src,retsrc\") \"noFlow F sources=src,retsrc rows={} locs={}\"\n" ++
+         "#eval String.eq (probeClaim \"constantOrBound F\") \"constantOrBound F sources=src,retsrc rows={} locs={}\"\n" ++
+         "#eval String.eq (probeClaim \"cut main 2,3\") \"cut main guards=2,3\"\n" ++
+         "#eval String.eq (probeClaim \"noFlow F rows=0:0,2:1 locs=7\") \"noFlow F sources=src,param,retsrc rows={(0,0) (2,1)} locs={7}\"\n" ++
+         "#eval Scry.claimSpecHandWritten (match Scry.parseClaim \"noFlow F rows=0:0\" with\n" ++
+         "  | .ok s => s\n" ++
+         "  | .error _ => Scry.ClaimSpec.empty \"\" .noFlow \"\")\n" ++
+         "#eval match Scry.parseClaim \"bogus F\" with\n" ++
+         "  | .ok _ => (.false : Bool)\n" ++
+         "  | .error _ => (.true : Bool)\n" ++
+         "#eval match Scry.parseClaim \"noFlow F rows=0:x\" with\n" ++
+         "  | .ok _ => (.false : Bool)\n" ++
+         "  | .error _ => (.true : Bool)\n" ++
+         "#eval String.eq (Scry.renderScript (match Scry.parseScript \"intro src; intro retsrc; close; split\" with\n" ++
+         "  | .ok ts => ts\n" ++
+         "  | .error _ => [])) \"intro 1;intro 7;close;split;\"\n" ++
+         "#eval match Scry.parseScript \"frobnicate\" with\n" ++
+         "  | .ok _ => (.false : Bool)\n" ++
+         "  | .error _ => (.true : Bool)\n" ++
+         "#eval String.eq (Scry.Verdict.tag Scry.proverSafeVerdict) \"proved\"\n" ++
+         "#eval Nat.beq (Scry.verdictStatus Scry.proverSafeVerdict) 0\n" ++
+         "#eval Nat.beq (Scry.verdictStatus Scry.proverUnsafeVerdict) 1\n" ++
+         "#eval Nat.beq (Scry.verdictStatus Scry.proverEmptyVerdict) 1\n" ++
+         "#eval Nat.beq (Scry.verdictStatus Scry.proverScriptFailVerdict) 1\n" ++
+         "#eval Nat.beq (Scry.verdictStatus Scry.proverVacuousVerdict) 3\n" ++
+         "#eval String.eq (Scry.Verdict.tag Scry.proverScriptFailVerdict) \"scriptFailed\"\n")
+        [".true", ".true", ".true", ".true", ".true",
+         ".true", ".true", ".true", ".true", ".true",
+         ".true", ".true", ".true", ".true", ".true", ".true", ".true"] }
   ]
 
 builtin_initialize registerGroup group

@@ -6,6 +6,7 @@
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 PROVER=${PROVER:-$ROOT/scry/build/prover}
+PROVE=${SCRY_PROVE:-$ROOT/scry/build/scry-prove}
 OUT=$ROOT/scry/build/prover-proofs
 mkdir -p "$OUT"
 fail=0
@@ -14,7 +15,7 @@ expect() { # proof pattern
   local proof=$1 pattern=$2
   if ! grep -qE "$pattern" "$OUT/$proof.txt"; then
     echo "FAIL $proof: no /$pattern/"
-    grep -E '^(PROPERTY|PROVE|ROWS|INV|LOCS|VERDICT|WITNESS|REFUSED|VACUOUS|SCRIPT|SRC|SINK|FLOW|MSTORE|MLOAD|MTAINTED|COVER|FUNCS)' "$OUT/$proof.txt" | sed 's/^/  /'
+    grep -E '^(case=|PROPERTY|PROVE|ROWS|INV|LOCS|VERDICT|WITNESS|REFUSED|VACUOUS|SCRIPT|SRC|SINK|FLOW|MSTORE|MLOAD|MTAINTED|COVER|FUNCS|verdict:|reason:|witness:|sources:|function:|invariant:|locations:|guards:|facts:|\{)' "$OUT/$proof.txt" | sed 's/^/  /'
     fail=1
   else
     echo "ok   $proof  /$pattern/"
@@ -23,7 +24,7 @@ expect() { # proof pattern
 
 run() { # proof script
   local proof=$1
-  PROVER=$PROVER "$ROOT/scry/corpus/prover/proofs/$proof.sh" > "$OUT/$proof.txt" 2>&1
+  PROVER=$PROVER SCRY_PROVE=$PROVE "$ROOT/scry/corpus/prover/proofs/$proof.sh" > "$OUT/$proof.txt" 2>&1
 }
 
 run p1-process-safe && expect p1-process-safe '^VERDICT[[:space:]]+proved$' \
@@ -56,6 +57,35 @@ run p5-helper-safe && expect p5-helper-safe '^VERDICT[[:space:]]+proved$' \
   && expect p5-helper-safe '^ROWS[[:space:]]+3$'
 run p5b-helper-unsafe && expect p5b-helper-unsafe '^VERDICT[[:space:]]+refuted:' \
   && expect p5b-helper-unsafe 'path .* -> sink\(8,0,7\)'
+# P10: the `scry prove` CLI itself — exit statuses, tagged verdicts and JSON. It reads
+# the checked-in C# spills, so it runs before (and without) the C spill tooling.
+if [ ! -x "$PROVE" ]; then
+  echo "FAIL p10-prove-cli: no scry-prove at $PROVE (run scry/corpus/prover/build.sh)" >&2
+  exit 2
+fi
+run p10-prove-cli && expect p10-prove-cli '^case=proved exit=0 ' \
+  && expect p10-prove-cli '^invariant: \{\(0,0\)\}$' \
+  && expect p10-prove-cli '^case=proved-json exit=0 ' \
+  && expect p10-prove-cli '"verdict":"proved"' \
+  && expect p10-prove-cli '"exit":0' \
+  && expect p10-prove-cli '^case=hand-check exit=0 ' \
+  && expect p10-prove-cli '^case=refuted exit=1 ' \
+  && expect p10-prove-cli '^verdict: refuted$' \
+  && expect p10-prove-cli 'sink\(10,1,9\)' \
+  && expect p10-prove-cli '^case=refuted-json exit=1 ' \
+  && expect p10-prove-cli '"verdict":"refuted"' \
+  && expect p10-prove-cli '"exit":1' \
+  && expect p10-prove-cli '^case=refused exit=1 ' \
+  && expect p10-prove-cli '^verdict: refused$' \
+  && expect p10-prove-cli 'rule 0 derives tainted \(0,0\)' \
+  && expect p10-prove-cli '^case=script-failed exit=1 ' \
+  && expect p10-prove-cli '^verdict: scriptFailed$' \
+  && expect p10-prove-cli 'no such rule' \
+  && expect p10-prove-cli '^case=vacuous exit=3 ' \
+  && expect p10-prove-cli '^verdict: vacuous$' \
+  && expect p10-prove-cli 'source set is empty' \
+  && expect p10-prove-cli '^case=usage exit=2 ' \
+  && expect p10-prove-cli 'unknown claim kind'
 # The C fixtures' spills are checked in when available; regenerate one with scry-cst
 # (SCRY_CST=/path/to/scry-cst) if it is missing.
 ensure_spill() { # c-file

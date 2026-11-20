@@ -1,0 +1,15 @@
+import Scry.ProveCmd
+/-!
+# scry-prove: the `scry prove` command without the native parser
+
+The prover corpus and the Lean groups read checked-in `scry-cst` spills, so they need no
+tree-sitter and no .NET. The full `scry` CLI links the native parser for its other
+commands, which a fresh worktree cannot do without `native/`; this entry point exposes
+exactly the same `Scry.Prove.run` surface (`scry prove …`) so the corpus can be run
+anywhere.
+
+    scry-prove FILE --claim "noFlow Fixtures.Runner.Main"
+
+The full CLI dispatches the same function: `scry prove FILE --claim …`.
+-/
+def main : IO Unit := IO.bind IO.args Scry.Prove.mainArgs

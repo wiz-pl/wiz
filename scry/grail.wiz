@@ -21,6 +21,9 @@ def package : Package := Package.new "scry"
   |> Package.exe "scry" "App.wiz"
   |> Package.exe "scry-schema" "tools/SchemaMain.wiz"
   |> Package.exe "scry-cst" "tools/CstMain.wiz"
+  -- the prover command without the native parser: `scry prove` over a checked-in
+  -- `scry-cst` spill (the corpus and the Lean groups read spills, not tree-sitter).
+  |> Package.exe "scry-prove" "tools/ProveMain.wiz"
   -- the C# external-frequency probe (`scry/CSHARP.md` §"External models"): the merged
   -- program's unmodelled callees, counted. Measurement only; no test depends on it.
   |> Package.exe "cs-externals" "tools/CsExternalsMain.wiz"
