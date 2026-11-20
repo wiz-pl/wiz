@@ -1,0 +1,2 @@
+-- expect: U64
+def f (x : U64) : U64 := x
