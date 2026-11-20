@@ -294,6 +294,18 @@ def group : Group where
         let e ← firstError (pre ++ "feral\n  fn pick2 {'a} (c : Bool) (x : &'a mut U64) (y : &'a mut U64)\n" ++
           "    ensures (final(x) = final(result))\n  : &'a mut U64 := if c then x else y\nend\n")
         check (has e "more than one lender") e
+        -- an outlives bound makes the result's region not the lender's: still rejected
+        let e ← firstError (pre ++ "feral\n  fn pick {'a 'b} {'a : 'b} (c : Bool) (x : &'a mut U64) (y : &'b mut U64)\n" ++
+          "    ensures (final(x) = final(result))\n  : &'b mut U64 := if c then x else y\nend\n")
+        check (has e "outlives bound") e
+        -- an optional borrow has a `none` branch with no final value: still rejected
+        let e ← firstError (pre ++ "feral\n  fn first_mut {'a} (v : &'a mut Vec U64)\n" ++
+          "    ensures (final(v) = final(result))\n  : Option (&'a mut U64) := v.get_mut 0\nend\n")
+        check (has e "optional returned borrow") e
+        -- a returned borrow beside a handed-back `&mut` needs two handles in one scope: still rejected
+        let e ← firstError (pre ++ "feral\n  fn both {'a 'b} (v : &'a mut Vec U64) (w : &'b mut U64)\n" ++
+          "    ensures (final(v) = final(result))\n  : &'a mut U64 := { *w := *w + 1; &mut v[0] }\nend\n")
+        check (has e "beside handed-back") e
         -- nor can a borrow that escapes its lender's scope carry a `final result` spec
         let e ← firstError (pre ++ "feral\n  fn bad {'a} (v : &'a mut U64)\n" ++
           "    ensures (final(v) = final(result))\n  : &'a mut U64 := {\n    let mut l : U64 := 5;\n    &mut l\n  }\nend\n")
