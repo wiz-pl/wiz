@@ -750,6 +750,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
   group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
   `docs/libraries.md:1979` has the API.
+* `match h : e with | p => …` names the branch's equation `h : e = p`, so a split on a
+  computed value (`match h : p n with`) can use what the split learnt; each scrutinee may
+  be named (`match h : e, k : f with`, including after an unnamed one) and the equation
+  works in a non-dependent match too. A named match on an indexed value is reported
+  rather than ill typed (4e, #254).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to
