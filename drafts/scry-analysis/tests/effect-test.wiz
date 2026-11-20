@@ -138,6 +138,9 @@ def ScryTest.main : IO Unit := do
     (String.contains (Scry.analysisDisplay claim m.view) "wiz.widget/1");
 
   -- 3. the live Quire view matches the manifest and its generation
+  IO.ePrintln (String.append "debug callRel=" (Nat.repr (Scry.G.lookupId m.relations "call")));
+  IO.ePrintln (String.append "debug callKind=" (Nat.repr (Scry.G.lookupId m.kinds "call_expression")));
+  IO.ePrintln (String.append "debug rels=" (Nat.repr (List.length m.relations)));
   lr ← ScryTest.runEIO (Scry.G.readGraph graphPath m);
   f16 ← ScryTest.checkOne f15 "the live generation is the manifest's" (Nat.beq lr.2 m.gen);
   f17 ← ScryTest.checkOne f16 "the live view equals the manifest view" (Scry.sameView m.view lr.1);
