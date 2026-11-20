@@ -600,8 +600,11 @@ jobs:
       !cancelled() && needs.changes.outputs.web == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
-    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit
-    timeout-minutes: 45
+    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit.
+    # 75, not 45: run 44795685025 hit the 45-minute limit after 45m15s on a cold
+    # Cachix miss (the nix build of both derivations), and GitHub reports a timed-out
+    # job as "The operation was canceled." — the annotation is the timeout.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
