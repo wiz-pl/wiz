@@ -115,18 +115,21 @@ def matchGroup : Group where
           "  match h : isZero n with\n" ++
           "  | .true => useEq n .true h\n" ++
           "  | .false => useEq n .false h\n") },
+    -- (the inner scrutinee is another variable: both of its branches are possible, and
+    -- the body uses the outer equation `h` and the inner one `k` in every branch)
     { name := "nested matches both keep their equations", run := fun _ =>
         ok (eqnPrelude ++
-          "def nestedEq (n : Nat) : f2 n = isZero (Nat.succ n) :=\n" ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Bool := b\n" ++
+          "def nestedEq (n m : Nat) : Bool × Bool :=\n" ++
           "  match h : isZero n with\n" ++
           "  | .true =>\n" ++
-          "    match k : isZero (Nat.succ n) with\n" ++
-          "    | .true => k\n" ++
-          "    | .false => k\n" ++
+          "    match k : isZero m with\n" ++
+          "    | .true => (useEq n .true h, useEq m .true k)\n" ++
+          "    | .false => (useEq n .true h, useEq m .false k)\n" ++
           "  | .false =>\n" ++
-          "    match k : isZero (Nat.succ n) with\n" ++
-          "    | .true => k\n" ++
-          "    | .false => k\n") },
+          "    match k : isZero m with\n" ++
+          "    | .true => (useEq n .false h, useEq m .true k)\n" ++
+          "    | .false => (useEq n .false h, useEq m .false k)\n") },
     { name := "a plain match on a variable named h still parses", run := fun _ =>
         ok (matchPrelude ++
           "def pick (h : Nat) : Nat := match h with\n" ++
