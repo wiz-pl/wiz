@@ -4135,7 +4135,7 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ um => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                let xt := .vmu l vI vD vi vs;
+                let xt := Val.vmu l vI vD vi vs;
                 match check (erasedIf q c) x xt with
                 | .ok _ ux => .ok (vapp (vapp vP vi) (eval (TCtx.env c) x)) (uAdd um (scaleUsage c q x xt ux))
                 | r => r
