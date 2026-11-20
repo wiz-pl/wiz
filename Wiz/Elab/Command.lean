@@ -983,14 +983,23 @@ private def sProj (info : SourceInfo) (t : Syntax) (n : Nat) : Syntax :=
 private def sUnit (info : SourceInfo) : Syntax :=
   .node info "term.unitVal" #[.atom info "(", .atom info ")"]
 
-/-- The observation `o` of the explicit binder `x` at the body size, as
-`(out x).1` (first field) or `((out x).2…).1`. -/
+/-- `let (x, y) := v; body` as syntax (the pair split, not a projection: the
+payload of a signal has a 0-quantity phantom index field, which R1 forbids
+projecting). -/
+private def sLetPair (info : SourceInfo) (x y : Name) (v body : Syntax) : Syntax :=
+  .node info "term.letPair"
+    #[.node info "null" #[], .ident info x, .ident info y, v, .node info "null" #[], body]
+
+/-- The observation `o` of the explicit binder `x` at the body size, as a pair split
+of `out x` (first field) or of its second component, and so on. -/
 private def sObs (info : SourceInfo) (x : Name) (pos : Nat) : Syntax :=
   let outx := sApp info (sIdent info "out") [sIdent info x]
-  let rec go (t : Syntax) : Nat → Syntax
-    | 0 => sProj info t 1
-    | k + 1 => go (sProj info t 2) k
-  go outx pos
+  let rec go (src : Syntax) (k : Nat) : Syntax :=
+    let v := x ++ "✝v" ++ toString k
+    let r := x ++ "✝r" ++ toString k
+    let body := if k == pos then sIdent info v else go (sIdent info r) (k + 1)
+    sLetPair info v r src body
+  go outx 0
 
 /-- `(e₁, …, eₙ, ())`: the state tuple of the explicit binders (plus the trailing unit,
 which the `Σ` state type has). -/
