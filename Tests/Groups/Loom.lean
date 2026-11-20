@@ -22,12 +22,12 @@ def loomPrelude : String :=
   "inductive Msg where\n  | inc\n" ++
   "structure Model where\n  count : Nat\n" ++
   "def countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n)\n" ++
-  "def view (s : Model) : Loom.VNode Msg :=\n" ++
+  "def counterView (s : Model) : Loom.VNode Msg :=\n" ++
   "  Loom.el \"div\" [Loom.class \"counter\"]\n" ++
   "    [Loom.el \"p\" List.nil [Loom.text \"count \", Loom.text (Nat.toString s.count)],\n" ++
   "     Loom.on \"click\" Msg.inc (Loom.el \"button\" List.nil [Loom.text \"+\"])]\n" ++
   "def app : Loom.App Model Msg := Loom.App.mk (Model.mk 0)\n" ++
-  "  (fun m s => match m with | .inc => Loom.setState countL Nat.succ s) view\n" ++
+  "  (fun m s => match m with | .inc => Loom.setState countL Nat.succ s) counterView\n" ++
   "def item (n : Nat) : Loom.VNode Msg :=\n" ++
   "  Loom.keyed (Nat.toString n) (Loom.el \"li\" List.nil [Loom.text (Nat.toString n)])\n" ++
   "def list (ns : List Nat) : Loom.VNode Msg :=\n" ++
