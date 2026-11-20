@@ -661,8 +661,10 @@ def Goals.hintView {M : Type} (mkReconnect : M) (state message endpoint : String
 
 -- ## The whole pane
 
-/-- The pane's state: the server's answers (as JSON from the page), the selection and the
-requests the page must service. -/
+/-- The pane's state: the server's answers (as JSON from the page), the selection, the
+requests the page must service, and the view/info parsed once per effect (the accessors
+below read the parsed fields; the tags they draw are cached too, so an arrow key does no
+JSON work). -/
 structure Goals.Model where
   view : String
   info : String
@@ -670,17 +672,19 @@ structure Goals.Model where
   hoverLabel : String
   selected : Nat
   pending : List (String × String)
+  parsedView : Json
+  parsedInfo : Json
+  tags : List Goals.Tag
 
 /-- A pane with no server and nothing to show. -/
-def Goals.initial : Goals.Model := Goals.Model.mk "{}" "" "" "" 0 []
+def Goals.initial : Goals.Model :=
+  Goals.Model.mk "{}" "" "" "" 0 [] (Json.mkObj []) Json.mkNull []
 
 /-- The view object the page sends (`undefined` fields read as empty). -/
 def Goals.field (s : Goals.Model) (key : String) : Json :=
-  match Json.parse s.view with
-  | .ok j => match Json.get j key with
-    | .some v => v
-    | .none => Json.mkNull
-  | .error _ => Json.mkNull
+  match Json.get s.parsedView key with
+  | .some v => v
+  | .none => Json.mkNull
 
 def Goals.state (s : Goals.Model) : String := Goals.strAt (Goals.field s "state" ) []
 def Goals.endpoint (s : Goals.Model) : String := Goals.strAt (Goals.field s "endpoint") []
@@ -708,9 +712,7 @@ def Goals.widgetsInPane (s : Goals.Model) : Bool := match Json.asBool (Goals.fie
   | .none => .false
 
 /-- The selected subterm, parsed; `null` when none. -/
-def Goals.infoJson (s : Goals.Model) : Json := match Json.parse s.info with
-  | .ok j => j
-  | .error _ => Json.mkNull
+def Goals.infoJson (s : Goals.Model) : Json := s.parsedInfo
 
 /-- A hypothesis's tagged type and value. -/
 def Goals.tagsOfHyp (hyp : Json) (st : Goals.Walk) : Goals.Walk :=
@@ -757,18 +759,24 @@ def Goals.tagsOfTermResult (result : Json) (st : Goals.Walk) : Goals.Walk :=
     | .some _ => Goals.tagsOf tree s1
     | .none => s1
 
-/-- The tags of the pane, in render order: the goals, the expected type, then the
-selected subterm. -/
-def Goals.allTags (s : Goals.Model) : List Goals.Tag :=
-  let g := Goals.tagsOfGoalsResult (Goals.goalsJson s) (Goals.Walk.mk 0 []);
-  let t := Goals.tagsOfTermResult (Goals.termJson s) g;
-  let i := match Json.get (Goals.infoJson s) "type" with
+/-- The tags of one parsed view/info pair, in render order: the goals, the expected type,
+then the selected subterm. This is the only walk; `Goals.effect` stores its result. -/
+def Goals.tagsOfParsed (view info : Json) : List Goals.Tag :=
+  let g := Goals.tagsOfGoalsResult
+    (match Json.get view "goals" with | .some v => v | .none => Json.mkNull)
+    (Goals.Walk.mk 0 []);
+  let t := Goals.tagsOfTermResult
+    (match Json.get view "term" with | .some v => v | .none => Json.mkNull) g;
+  let i := match Json.get info "type" with
     | .some ty => Goals.tagsOf ty t
     | .none => t;
   i.tags
 
+/-- The tags of the pane, in render order (cached when the view/info effect arrived). -/
+def Goals.allTags (s : Goals.Model) : List Goals.Tag := s.tags
+
 /-- The tags of the pane (the older name). -/
-def Goals.tags (s : Goals.Model) : List Goals.Tag := Goals.allTags s
+def Goals.tags (s : Goals.Model) : List Goals.Tag := s.tags
 
 /-- The pane's pending requests as JSON values (for a page that has requests of its
 own, like the playground). -/
@@ -923,12 +931,22 @@ def Goals.update (m : Goals.Msg) (payload : String) (s : Goals.Model) : Goals.Mo
   | .key => Goals.key s payload
   | .reconnect => Goals.push s "reconnect" ""
 
+/-- A JSON string as a value; a parse error is `null` (what the accessors treated an
+unparseable field as). -/
+def Goals.parseOr (text : String) : Json := match Json.parse text with
+  | .ok j => j
+  | .error _ => Json.mkNull
+
 /-- The page's effects coming in: a new view, a subterm answer, a hover result, an ack. -/
 def Goals.effect (s : Goals.Model) (kind a b : String) : Goals.Model :=
   match String.eq kind "view" with
-  | .true => { s with view := a }
+  | .true =>
+    let view := Goals.parseOr a;
+    { s with view := a, parsedView := view, tags := Goals.tagsOfParsed view s.parsedInfo }
   | .false => match String.eq kind "info" with
-    | .true => { s with info := a }
+    | .true =>
+      let info := Goals.parseOr a;
+      { s with info := a, parsedInfo := info, tags := Goals.tagsOfParsed s.parsedView info }
     | .false => match String.eq kind "hover" with
       | .true => match Json.parse a with
         | .ok j => { s with hover := Json.getStr j "raw", hoverLabel := Json.getStr j "label" }
