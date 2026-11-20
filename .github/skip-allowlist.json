@@ -28,15 +28,6 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "--target llvm|wasm: the host selects the backend, the self-hosted one emits C only (C5)",
-      "reason": "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5)",
-      "parity": "C5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (C5): the self-hosted backend emits C only and refuses the other target names. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
       "case": "build: a good file is silent and exit 0 (the artifact is C, not an executable)",
       "reason": "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C",
       "parity": "D4",
@@ -97,15 +88,6 @@
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
       "why": "documented self-host parity difference (A14/D6): the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "build --llvm: the host has it, the self-hosted backend is C only (C5)",
-      "reason": "backend: the host builds through textual LLVM IR",
-      "parity": "C5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (C5): the self-hosted backend is C only. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "scry-csharp",
