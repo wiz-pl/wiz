@@ -21,23 +21,30 @@ action's `wiz.scry.ingest` would call; the revision manifest is the artifact the
 checks.
 -/
 
+def ScryAnalysis.leave (n : Nat) : IO Unit := do
+  f ← File.stdout;
+  r ← File.flush f;
+  match r with
+  | .ok _ => Process.exit n
+  | .error _ => Process.exit n
+
 def ScryAnalysis.report (r : Scry.G.IngestResult) : IO Unit := do
   IO.println (Scry.G.renderIngest r);
   match r.ok with
-  | .true => Process.exit 0
-  | .false => Process.exit 1
+  | .true => IO.pure ()
+  | .false => ScryAnalysis.leave 1
 
 def ScryAnalysis.usage : IO Unit := do
-  IO.eprintln "usage: scry-analysis DIR --graph FILE [--git] | scry-analysis --file FILE"
-  Process.exit 2
+  IO.ePrintln "usage: scry-analysis DIR --graph FILE [--git] | scry-analysis --file FILE";
+  ScryAnalysis.leave 2
 
 def ScryAnalysis.runFile (file : String) : IO Unit := do
   r ← Scry.G.ingestSourceFile file;
   match r with
   | .ok x => ScryAnalysis.report x
   | .error e => do
-    IO.eprintln (String.append "scry-analysis: " e);
-    Process.exit 1
+    IO.ePrintln (String.append "scry-analysis: " e);
+    ScryAnalysis.leave 1
 
 def main : IO Unit := do
   args ← IO.args;
@@ -49,13 +56,13 @@ def main : IO Unit := do
     match r with
     | .ok x => ScryAnalysis.report x
     | .error e => do
-      IO.eprintln (String.append "scry-analysis: " e);
-      Process.exit 1
+      IO.ePrintln (String.append "scry-analysis: " e);
+      ScryAnalysis.leave 1
   | .cons root (.cons "--graph" (.cons dest (.cons "--git" .nil))) => do
     r ← Scry.G.ingestTree root dest (String.append dest ".manifest.json") .true;
     match r with
     | .ok x => ScryAnalysis.report x
     | .error e => do
-      IO.eprintln (String.append "scry-analysis: " e);
-      Process.exit 1
+      IO.ePrintln (String.append "scry-analysis: " e);
+      ScryAnalysis.leave 1
   | _ => ScryAnalysis.usage

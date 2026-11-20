@@ -1,12 +1,20 @@
 # A scry analysis run is a Wiz file
 
-Status: design + prototype, branch `scry-wiz` (base `integration/train7`), 2026-11-19.
+Status: design + prototype, branch `scry-wiz` (base `integration/train7`), 2026-11-20.
 The pure layer is `scry/src/Scry/AnalysisFile.wiz`; the Quire layer and the command are
-`drafts/scry-analysis/QuireGraph.wiz`, with the worked file
+`drafts/scry-analysis/Scry/QuireGraph.wiz`, with the worked file
 `drafts/scry-analysis/analysis.wiz` and the effect test
 `drafts/scry-analysis/tests/effect-test.wiz`. `scry-quire`'s note
 (`wiz-notes/scry-quire.md` on that branch) is the findings-store prototype; this note uses
 the same engine (`drafts/storage-engine/Quire.wiz`, `QuireCursor.wiz`) for the **graph**.
+
+Verified on 2026-11-20: the Quire effect test passes all 40 checks (2 passed checks per
+line, including the live view/head query, stale/revision, no-op vs new commit, malformed
+store, writer lock and `#ingest` line); `analysis.wiz` runs fresh and prints the refuted
+claim and the widget payload. The pure `scry-analysis` group **compiled** but the test
+driver could not be linked because the generated `Tests.Groups` import fails on an
+existing `Tests.Elab.dropImports` collision between `StorageQuire` and
+`StorageMultiproc` (unrelated to this slice).
 
 **Two corrections from the owner, both applied here.**
 
@@ -197,7 +205,7 @@ conclusion for the findings store (`Multiproc.handle`, one writer, compaction of
 | `putQ h tx` | commit a `QSnapshot` write-set; returns `Outcome` (`committed gen` / `rejected`) |
 | `QSnapshot.record tx id patch` | add a `set`/`del` to the transaction |
 | `QSnapshot.getNode s id` | one primary read |
-| `QSnapshot.indexOnlyRange d kr s` | a `QCursor` over an index bucket (no primary read) |
+| `QSnapshot.indexCursorRange d kr s` | a `QCursor` over an index bucket, projecting **primary ids** (no primary read) |
 | `QCursor.fold` | consume the cursor (the linear handle) |
 | `closeQ h` | close the descriptor (outstanding snapshots keep their mapping) |
 
@@ -219,20 +227,28 @@ the graph is:
 | relation row | `N + E + row index` | `2000 + relation id` | column 0 | column 1 |
 
 `kinds`, `edgeLabels`, `relations` and `fileTable` are interned in the manifest; ids are
-stable for that manifest. Edges are rows too (`child` etc.), so a graph query needs no
-separate edge table. **Arity 2 only**: the graph's `call`, `file_of` and CST edges are
-arity 2; a higher-arity relation is refused with a diagnostic, not truncated. Spans and
-column 1 must fit `U32` (spans under 4 GiB); the encoder refuses otherwise.
+stable for that manifest. `tableOf` already applies the base (`1`/`1000`/`2000`), so the
+record writers use the table's id **directly** (a first version added the base twice and
+the live `call` query missed every row; the effect test catches that). Edges are rows too
+(`child` etc.), so a graph query needs no separate edge table. `fileTable` is
+`(path, file-node id)`: the `file_of` relation's second column is the synthetic
+`file:<path>` node id, not a dense file index. **Arity 2 only**: the graph's `call`,
+`file_of` and CST edges are arity 2; a higher-arity relation is refused with a diagnostic,
+not truncated. Spans and column 1 must fit `U32` (spans under 4 GiB); the encoder refuses
+otherwise.
 
 **Queries.** `Scry.G.viewOf s m`:
 
-* call sites: `indexOnlyRange kindIndex (eq (kinds["call_expression"]))` → ids `< N` →
-  `getNode` for the span, and `fileOf` (below) for the path;
-* call heads: `indexOnlyRange kindIndex (eq (relations["call"]))` → row ids → `getNode`
-  and take `count` (column 0);
+* call sites: `indexCursorRange kindIndex (eq (kinds["call_expression"]))` → **node ids**
+  `< N` → `getNode` for the span, and `fileOf` (below) for the path;
+* call heads: `indexCursorRange kindIndex (eq (relations["call"]))` → **row ids** →
+  `getNode` and take `count` (column 0);
 * errors: the same with `kinds["ERROR"]`;
-* `fileOf`: `indexOnlyRange countIndex (eq nodeId)` → rows → keep the one whose `kind` is
-  `relations["file_of"]`; its `label` is the file id, and `fileTable[label]` is the path.
+* `fileOf`: `indexCursorRange countIndex (eq nodeId)` → row ids → keep the one whose
+  `kind` is `relations["file_of"]`; its `label` is a file-node id, and `fileTable` maps
+  that id to the path. (`indexOnlyRange` projects the *index key*, not the primary id; the
+  first version used it and returned the kind value as if it were a row id, which the
+  effect test caught.)
 
 The manifest also stores `view`, computed from the merged `Scry.Facts` at ingest. The
 editor's claim uses that pure view; the runner re-queries Quire and compares
@@ -300,7 +316,7 @@ pin the shape either way.
 | file | checks |
 |---|---|
 | `Tests/Groups/ScryAnalysis.lean` (`scry-analysis`) | `#ingest` macro/scanner; merge → view → claim (refuted at beta.c/node 7); manifest JSON round-trip; fresh/stale (tree change, kind change, dirty change); diagnostics/code-action JSON; widget bundle (3 widgets, one finding, `scry.analysis/1`) |
-| `drafts/scry-analysis/tests/effect-test.wiz` | real Quire: ingest → graph+manifest (9 nodes, 5 edge rows, 8 relation rows); live `gen`/view match; stale with both revisions; same-revision re-ingest is a no-op; changed revision commits a new snapshot (`gen+1`); malformed store fails closed; writer lock refuses a second ingest; absent git revision says "fetch first"; `#ingest` file form + line 3 diagnostic; widget payload |
+| `drafts/scry-analysis/tests/effect-test.wiz` | real Quire: **40/40 PASS** — ingest → graph+manifest (9 nodes, 5 edge rows, 8 relation rows); live `gen`/view match; stale with both revisions; same-revision re-ingest is a no-op; changed revision commits a new snapshot (`gen+1`); malformed store fails closed; writer lock refuses a second ingest; absent git revision says "fetch first"; `#ingest` file form + line 3 diagnostic; widget payload |
 | `drafts/scry-analysis/analysis.wiz` | the worked pure claim + the effectful runner (revision gate, Quire read, view comparison, display) |
 
 Commands:

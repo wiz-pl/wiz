@@ -91,35 +91,36 @@ partial def Scry.ingestLinesFrom (off lineNo : Nat) : List String → List Scry.
     let here := off;
     let next := Nat.add off (Nat.add (String.length raw) 1);
     let trimmed := String.trim raw;
-    let found := match String.stripPrefix trimmed "#ingest" with
-      | .none => .nil
+    let found : List Scry.IngestLine := match String.stripPrefix trimmed "#ingest" with
+      | .none => List.nil
       | .some after => match Scry.quotedParts (String.chars after) with
         | .cons root (.cons dest _) =>
           List.cons (Scry.IngestLine.mk lineNo here
             (Nat.add here (String.length raw)) (Scry.IngestSpec.mk root dest)) .nil
-        | _ => .nil;
+        | _ => List.nil;
     List.append found (Scry.ingestLinesFrom next (Nat.succ lineNo) rest)
 
 /-- The `#ingest` declarations of a file's text. -/
 def Scry.ingestLines (text : String) : List Scry.IngestLine :=
   Scry.ingestLinesFrom 0 1 (String.splitOn text "\n")
 
-syntax (name := ingest) "#ingest" str "into" str : command
+syntax (name := ingest) "#ingest" term "into" term : command
 
-/-- The `#ingest` expansion. The declaration is pure: the elaborator must not mutate a
-shared artifact, so the file only *records* what to ingest. -/
-def Scry.ingestMacro : CommandMacro := fun stx => do
-  let rootStx := Syntax.getArg stx 1;
-  let destStx := Syntax.getArg stx 3;
-  let dest := match destStx.getStr? with
-    | .some s => s
-    | .none => "";
-  let n := Syntax.mkIdent (String.append "scry_ingest_" (Scry.ingestSlug dest));
-  MacroM.pure (.cons `(command| def $n : Scry.IngestSpec := Scry.IngestSpec.mk $rootStx $destStx) .nil)
+/-- The `#ingest` expansion. The declaration is a pure marker: the elaborator must not
+mutate a shared artifact, and the command/runner scans the text for the two paths (the
+macro exists so the file is ordinary Wiz and the parser accepts the line). -/
+def Scry.ingestMacro : CommandMacro := fun _ => MacroM.pure .nil
 
 attribute [macro command.ingest] Scry.ingestMacro
 
 -- ## The revision manifest: the "lock file" is a content identity
+
+/-- Map and drop the `none`s (Wiz's `List` has no `filterMap`). -/
+partial def Scry.filterMap {A B : Type} (f : A → Option B) : List A → List B
+  | [] => []
+  | List.cons x rest => match f x with
+    | .none => Scry.filterMap f rest
+    | .some y => List.cons y (Scry.filterMap f rest)
 
 /-- JSON a field, or `Json.null` when absent. -/
 def Scry.jsonAt (j : Json) (key : String) : Json :=
@@ -273,7 +274,7 @@ def Scry.tableJson (t : List (String × Nat)) : Json :=
 
 /-- A name↔id table from JSON. -/
 def Scry.tableOfJson (j : Json) : List (String × Nat) :=
-  List.filterMap (fun v => match Json.asList v with
+  Scry.filterMap (fun v => match Json.asList v with
     | .cons name (.cons id _) => match Json.asString name, Json.asNat id with
       | .some s, .some n => .some (s, n)
       | _, _ => .none
@@ -319,7 +320,7 @@ def Scry.graphViewJson (v : Scry.GraphView) : Json :=
 def Scry.graphViewOfJson (j : Json) : Scry.GraphView :=
   Scry.GraphView.mk
     (List.map Scry.callSiteOfJson (Json.asList (Scry.jsonAt j "calls")))
-    (List.filterMap (fun v => Json.asNat v) (Json.asList (Scry.jsonAt j "callHeads")))
+    (Scry.filterMap (fun v => Json.asNat v) (Json.asList (Scry.jsonAt j "callHeads")))
     (List.map Scry.callSiteOfJson (Json.asList (Scry.jsonAt j "errors")))
     (Scry.jsonNatD j "nodeCount" 0) (Scry.jsonNatD j "edgeCount" 0)
     (Scry.jsonNatD j "relationRows" 0)
@@ -396,9 +397,10 @@ def Scry.renderRevision (r : Scry.Revision) : String :=
 /-- The stale verdict as text, with both revisions. -/
 def Scry.renderRevisionVerdict : Scry.RevisionVerdict → String
   | .fresh => "revision: fresh"
-  | .stale m c reason => String.append "revision: STALE (manifest "
-      (String.append (Scry.renderRevision m) (String.append ", source "
-        (String.append (Scry.renderRevision c) (String.append "): " reason)))))
+  | .stale m c reason =>
+    let a := String.append "revision: STALE (manifest " (Scry.renderRevision m);
+    let b := String.append a (String.append ", source " (Scry.renderRevision c));
+    String.append b (String.append "): " reason)
 
 -- ## The view
 
@@ -430,7 +432,7 @@ def Scry.fileOfNode (f : Scry.Facts) (id : Scry.NodeId) : String :=
 def Scry.relationHeads (f : Scry.Facts) (name : String) : List Nat :=
   match Scry.findRelation f.relations name with
   | .none => .nil
-  | .some r => List.filterMap (fun t => match t with
+  | .some r => Scry.filterMap (fun t => match t with
       | .cons a _ => .some a
       | .nil => .none) r.tuples
 
@@ -468,16 +470,18 @@ structure Scry.ClaimResult where
   summary : String
   findings : List Scry.AnalysisFinding
 
+/-- The finding's message: node, what, span and file. -/
+def Scry.findingMessage (c : Scry.CallSite) (what : String) : String :=
+  let a := String.append "node " (String.append (Nat.repr c.node) " (");
+  let b := String.append a (String.append what (String.append ") at [" (Nat.repr c.start)));
+  let d := String.append b (String.append "," (String.append (Nat.repr c.stop) ") in "));
+  String.append d c.file
+
 /-- The one finding for a site violating `claim`. -/
 def Scry.findingOfSite (claim : String) (c : Scry.CallSite) (what : String)
     : Scry.AnalysisFinding :=
   Scry.AnalysisFinding.mk (String.append "a_" (Nat.repr c.node)) claim
-    (String.append "node " (String.append (Nat.repr c.node)
-      (String.append " (" (String.append what
-        (String.append ") at [" (String.append (Nat.repr c.start)
-          (String.append "," (String.append (Nat.repr c.stop)
-            (String.append ") in " c.file))))))))
-    c.file c.node c.start c.stop
+    (Scry.findingMessage c what) c.file c.node c.start c.stop
 
 /-- Whether `id` is in `ids`. -/
 def Scry.hasNat (id : Nat) (ids : List Nat) : Bool :=
@@ -601,7 +605,7 @@ def Scry.analysisNoop (_e : Widget.Event) (ws : List Widget.Widget) : List Widge
 -- ## Merging stores (the frontend the prototype ingests)
 
 /-- `f` applied with a 0-based index. -/
-def Scry.mapIdxFrom {A B : Type} (start : Nat) (f : Nat → A → B) : List A → List B
+partial def Scry.mapIdxFrom {A B : Type} (start : Nat) (f : Nat → A → B) : List A → List B
   | .nil => .nil
   | .cons a rest => List.cons (f start a) (Scry.mapIdxFrom (Nat.succ start) f rest)
 

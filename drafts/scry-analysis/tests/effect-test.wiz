@@ -34,13 +34,26 @@ It checks:
 A non-zero exit means a check failed.
 -/
 
+/-- A value for a branch that `Process.exit` never returns from (the test driver's
+error path). -/
+axiom ScryTest.anyValue {A : Type} : A
+
+/-- Flush standard output, then exit (the C `println` is buffered). -/
+def ScryTest.leave (n : Nat) : IO Unit := do
+  f ← File.stdout;
+  r ← File.flush f;
+  match r with
+  | .ok _ => Process.exit n
+  | .error _ => Process.exit n
+
 def ScryTest.runEIO {A : Type} (x : EIO A) : IO A := do
   r ← x;
   match r with
   | .ok a => IO.pure a
   | .error e => do
-    IO.eprintln (String.append "unexpected EIO error: " e);
-    Process.exit 2
+    IO.ePrintln (String.append "unexpected EIO error: " e);
+    ScryTest.leave 2;
+    IO.pure ScryTest.anyValue
 
 def ScryTest.checkOne (fails : Nat) (name : String) (ok : Bool) : IO Nat := do
   IO.println (String.append (match ok with | .true => "PASS " | .false => "FAIL ") name);
@@ -84,8 +97,9 @@ def ScryTest.manifestOf (path : String) : IO Scry.Manifest := do
   match r with
   | .some m => IO.pure m
   | .none => do
-    IO.eprintln (String.append "no manifest at " path);
-    Process.exit 2
+    IO.ePrintln (String.append "no manifest at " path);
+    ScryTest.leave 2;
+    IO.pure ScryTest.anyValue
 
 def ScryTest.main : IO Unit := do
   tmp ← ScryTest.runEIO FS.createTempDir;
@@ -207,6 +221,6 @@ def ScryTest.main : IO Unit := do
   | 0 => IO.println "ok: scry-analysis Quire effect test"
   | n => do
     IO.println (String.append "FAILED: " (String.append (Nat.repr n) " check(s)"));
-    Process.exit 1
+    ScryTest.leave 1
 
 def main : IO Unit := ScryTest.main
