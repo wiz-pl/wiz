@@ -1011,6 +1011,15 @@ partial def rewriteSizedRhs (info : SourceInfo) (name recName idxName : Name) (n
   | .node i k as => .node i k (as.map (rewriteSizedRhs info name recName idxName n coid))
   | s => s
 
+/-- Is the result syntax a sized type `T^s` whose size is a variable (an identifier),
+rather than `↑s` or `∞`? (Parentheses are transparent.) -/
+partial def sizedVarSyntax? (stx : Syntax) : Bool :=
+  if stx.isOfKind "term.paren" then sizedVarSyntax? (stx.getArg 1)
+  else if stx.isOfKind "term.sized" then
+    stx.args.any (·.isOfKind "term.ident") &&
+      !stx.args.any fun a => a.isOfKind "term.szSuc" || a.isOfKind "term.szInf"
+  else false
+
 /-- The size variable of a `T^s` result, if the result type is written as a sized type
 with a size variable. (Parentheses are transparent.) -/
 partial def resultSizeVar? (stx : Syntax) : Option Name :=
@@ -1313,7 +1322,7 @@ def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : El
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let sized := (resultSizeVar? ((cmd.getArg 4).getArg 1)).isSome
+  let sized := sizedVarSyntax? ((cmd.getArg 4).getArg 1)
   let r ← if sized then elabCopatternsScofix name cmd obs
     else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)
