@@ -889,6 +889,30 @@ def structFiles : List (String × String) :=
 
 def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
 
+/-- (22i, `--unbox-structs`) A one-field and a two-field `c_struct` by value: the last
+field is not in a pair, so `wiz_sin`/`wiz_sout` must read and build the unboxed layout. A
+layout mismatch (the helpers still assuming nested pairs, or erasure still boxing)
+changes the numbers or reads a pair offset as a field. -/
+def unboxStructFiles : List (String × String) :=
+  [("main.wiz", "import IO\nlink_c \"c/unbox.c\"\n" ++
+      "c_struct \"struct one\" One where\n  val : Nat\n" ++
+      "c_struct \"struct two\" Two where\n  a : Nat\n  b : Nat\n" ++
+      "extern \"one_add\" oneAdd : One → Nat\nextern \"one_make\" oneMake : Nat → One\n" ++
+      "extern \"two_sum\" twoSum : Two → Nat\nextern \"two_swap\" twoSwap : Two → Two\n" ++
+      "def main : IO Unit := do\n  IO.println (Nat.toString (oneAdd (One.mk 41)));\n" ++
+      "  let o := oneMake 7;\n  IO.println (Nat.toString o.val);\n" ++
+      "  IO.println (Nat.toString (twoSum (Two.mk 40 2)));\n" ++
+      "  let t := twoSwap (Two.mk 3 9);\n  IO.println (Nat.toString (t.a * 10 + t.b))\n"),
+   ("c/unbox.c", "#include <stdint.h>\n" ++
+      "struct one { uint64_t val; };\n" ++
+      "struct two { uint64_t a; uint64_t b; };\n" ++
+      "uint64_t one_add(struct one x) { return x.val + 1; }\n" ++
+      "struct one one_make(uint64_t n) { struct one x; x.val = n; return x; }\n" ++
+      "uint64_t two_sum(struct two x) { return x.a + x.b; }\n" ++
+      "struct two two_swap(struct two x) { struct two y; y.a = x.b; y.b = x.a; return y; }\n")]
+
+def unboxStructExpected : String := "42\n7\n42\n93\n"
+
 /-- (C8) Structs nested two deep, each passed and returned by value, with a string and a
 number read out of the outermost — the field order and the marshalling helpers compose. -/
 def structDeepHeader : String :=
@@ -2247,6 +2271,45 @@ def surfaceLetUnitProgram : String :=
   "  IO.println (Nat.toString (use ()));\n" ++
   "  IO.println (Nat.toString (twice 21));\n" ++
   "  IO.println (Nat.toString (through () 5))\n"
+
+/-- (A17) `⟨…⟩` terms and patterns: a structure, a one-constructor data type, a pair, a
+nested pair, and `let ⟨a, b⟩`. Every value is a `Nat`, so `selfhostSameNats` can compare
+the two frontends' results. -/
+def surfaceAnonHeader : String :=
+  "structure S where\n  a : Nat\n  b : Nat\n" ++
+  "inductive W where\n  | wrap (n : Nat) (b : Bool)\n" ++
+  "def getA (s : S) : Nat := match s with\n  | ⟨a, _⟩ => a\n" ++
+  "def unwrap (w : W) : Nat := match w with\n  | ⟨n, _⟩ => n\n" ++
+  "def swap (p : Nat × Nat) : Nat × Nat := match p with\n  | ⟨a, b⟩ => ⟨b, a⟩\n" ++
+  "def firstOf (p : Nat × Nat) : Nat := (swap p).2\n" ++
+  "def nested (p : (Nat × Nat) × Nat) : Nat := match p with\n  | ⟨⟨a, b⟩, c⟩ => a * 100 + b * 10 + c\n" ++
+  "def fromLet (p : Nat × Nat) : Nat := let ⟨a, b⟩ := p; a + b\n" ++
+  "def s0 : S := ⟨3, 4⟩\n" ++
+  "def w0 : W := ⟨5, .true⟩\n"
+
+/-- (A17) The `⟨…⟩` cases, as `Nat`s (see `surfaceAnonHeader`). -/
+def surfaceAnonCases : List (String × Nat) :=
+  [("getA s0", 3), ("getA ⟨7, 8⟩", 7), ("unwrap w0", 5),
+   ("firstOf ⟨1, 2⟩", 1), ("nested ⟨⟨1, 2⟩, 3⟩", 123), ("fromLet ⟨4, 5⟩", 9)]
+
+/-- (A17) `¬` and `∃`: the host gets both from lib/Logic.wiz's `notation`/`syntax:lead`
+rules, which this frontend does not load; the parser has their shapes and the frontend
+rewrites them to `Not`/`Ex` (`Parse.wiz` `surfaceCats`, `Frontend.wiz` `notStx`/`exStx`).
+The program declares `Not`/`Ex` itself, and each equation is `rfl` against the expansion,
+so the rewrite is what is checked. -/
+def surfaceNotExProgram : String :=
+  "import Prelude\n" ++
+  "axiom False : Prop\n" ++
+  "def Not (P : Prop) : Prop := P → False\n" ++
+  "def Ex {A : Type} (P : A → Prop) : Prop := (R : Prop) → ((a : A) → P a → R) → R\n" ++
+  "def notEq (P : Prop) : ¬ P = (P → False) := rfl\n" ++
+  "def exEq (P : Nat → Prop) : (∃ x : Nat, P x) = Ex (fun (x : Nat) => P x) := rfl\n" ++
+  "def exTwo (P : Nat → Nat → Prop) : (∃ x y : Nat, P x y) =\n" ++
+  "  Ex (fun (x : Nat) => Ex (fun (y : Nat) => P x y)) := rfl\n" ++
+  "def exParen (P : Nat → Prop) : (∃ (x : Nat), P x) = Ex (fun (x : Nat) => P x) := rfl\n" ++
+  "def notIntro (P : Prop) (h : P → False) : ¬ P := h\n" ++
+  "def useNot (P : Prop) (h : ¬ P) : P → False := h\n"
+
 /-- (E-K) A natural-number type for `Kernel.wiz`'s number literals, written as kernel terms:
 `N` (the description `arg Enum2 [ret, rec ret]`), its constructors, and definitions by
 `ind` (`N.pred`, `N.add`, `N.sub`, `N.mul`, `N.isZero`, `N.beq`, `N.blt`; `N.div` and
@@ -2772,6 +2835,22 @@ def selfHostGroup : Group where
         selfhostCheckFile axiomsDependencyProgram axiomsDependencyExpected },
     { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines setOptionProgram },
+    { name := "A23: `#print`, `#guard`, `example` and `universe` are rejected by both frontends (they are not host commands)", run := fun _ => do
+        let loader ← preludeLoader
+        for d in ["#print Nat\n", "#guard 1 = 1\n", "example : Nat := 1\n", "universe u\n"] do
+          let s := runFrontend (R := ZeroOneMany) ("import Prelude\n" ++ d) { loader, trustedModule := Tests.libModule }
+          if (s.messages.filter (·.severity == .error)).isEmpty then
+            throw (IO.userError s!"the Lean frontend accepts {d}")
+          let some out ← selfhostOutput ("import Prelude\n" ++ d) | return
+          let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+          if bad.isEmpty then
+            throw (IO.userError s!"the self-hosted frontend accepts {d}:\n{out}") },
+    { name := "A23: `#erase`, `#ir`, `#run` and `builtin` are host commands the self-hosted frontend does not run (pinned differences)", run := fun _ =>
+        selfhostVerdicts "" [
+          ("def f (n : Nat) : Nat := n\n#erase f\n", true, false),
+          ("def f (n : Nat) : Nat := n\n#ir f\n", true, false),
+          ("#run 1 + 1\n", true, false),
+          ("axiom N : Type\nbuiltin memo := N\n", true, false)] },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -2800,6 +2879,9 @@ def selfHostGroup : Group where
         selfhostLinkRun structFiles structExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: c_struct is checked as in the Lean frontend (21r)", run := fun _ =>
         selfhostAgreesIO "" structDecls },
+    { name := "c_struct with --unbox-structs: the last field is unboxed, and C reads it back (22i)", run := fun _ => do
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--unbox-structs"])
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--rc", "--unbox-structs"]) },
     { name := "c_struct: two levels of nesting pass and return by value, in both compilers (C8)", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_deep.h"
@@ -3202,12 +3284,61 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
-    -- (A19) the coinductive surface is the one frontend feature with no case at all:
-    -- pin the missing half rather than assuming parity (`command.coinductive` is in
-    -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
-    { name := "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it", run := fun _ =>
-        selfhostVerdicts "" [
-          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n", true, false)] },
+    { name := "A17: `⟨…⟩` terms and patterns (a structure, a one-constructor data type, a pair, nested, `let ⟨a, b⟩`) agree with the host", run := fun _ =>
+        selfhostSameNats surfaceAnonHeader surfaceAnonCases },
+    { name := "A17: `¬` and `∃` elaborate in the self-hosted frontend (the builtin rules over `Not`/`Ex`)", run := fun _ => do
+        let some out ← selfhostOutput surfaceNotExProgram | return
+        let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+        unless bad.isEmpty do
+          throw (IO.userError s!"the self-hosted frontend rejects:\n{"\n".intercalate bad}\n{out}")
+        checkChecked surfaceNotExProgram out },
+    -- **A19/B4**: `coinductive` and copatterns, compared host (the Lean frontend) and
+    -- self-hosted (the kernel's `coit`/`cocon`). A copattern definition whose state (the
+    -- explicit binders) *includes a value of the coinductive type itself* is not covered
+    -- yet: `i.head` in the step's context (a copattern definition …) leaves the
+    -- projection's implicit type parameter unsolved.
+    { name := "A19: coinductive types and copatterns agree with the host (the self-hosted frontend)", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def zeros : Stream Nat\n  | .head => 0\n  | .tail => zeros\n" ++
+           "def register {A : Type} (init : A) (s : Stream A) : Stream A\n  | .head => init\n  | .tail => s\n")
+          [("(nats 0).tail.tail.head", 2),
+           ("(zeros.tail.tail.tail.head)", 0),
+           ("(register 9 (nats 0)).tail.head", 0),
+           ("(Stream.mk 7 (nats 8)).tail.head", 8)] },
+    { name := "A19: the coinduction primitives ν and out agree with the host", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def typed : ν (Stream.desc Nat) () := nats 3\n" ++
+           "def raw : ν (Stream.desc Nat) () := cocon (4, cocon (5, nats 6, (), ()), (), ())\n")
+          [("(out typed).1", 3),
+           ("(out raw).1", 4),
+           ("(out ((out raw).2.1)).1", 5)] },
+    { name := "A19: the coinduction primitives cocon and coit agree with the host", run := fun _ =>
+        selfhostSameNats
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n" ++
+           "def nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (n + 1)\n" ++
+           "def c5 : Stream Nat := cocon (5, nats 6, (), ())\n" ++
+           "def z : Stream Nat := coit (fun (_ : Unit) => Nat) (fun (i : Unit) (s : Nat) => (s, s + 1, (), ())) 0\n")
+          [("(out c5).1", 5),
+           ("(out z).1", 0),
+           ("z.tail.head", 1),
+           ("z.tail.tail.head", 2)] },
+    { name := "A19: copattern errors (missing observation, guardedness, cocon's type) agree with the host", run := fun _ =>
+        selfhostAgrees
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n")
+          [("def ones : Stream Nat\n  | .head => 1\n", false),
+           ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
+           ("def bad : Nat := cocon (0, ())\n", false),
+           ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
+    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) agree with the host", run := fun _ =>
+        selfhostAgrees ""
+          [("def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
+            "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
+            "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
+            "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n", true)] },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules

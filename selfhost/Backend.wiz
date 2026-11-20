@@ -89,6 +89,33 @@ partial def erasable (c : TCtx) (ty : Val) : Bool := match whnf ty with
     | .vpi _ _ _ _ _ _ => Bool.or (erasedFunTy c t (TCtx.lvl c) .false) (isProp c t)
     | _ => isProp c t
 
+-- (22i) a structure's marker tail, `(0 _ : Enum 1) → Unit` (`structTailDom` in the
+-- Lean frontend; the shape only, since `Enum` is a length here). A structure with
+-- fields ends in it, so erasure can tell a structure's last field from an ordinary
+-- pair. Only a tail with no phantom parameter before the marker is recognised: the
+-- smallest set (a structure with no phantom parameter; the rest is deferred).
+def isStructTail (I : Val) : Bool := match whnf I with
+  | .vpi _ _ _ dom env cod => match whnf dom with
+    | .venum k => Bool.and (Nat.beq k 1) (match whnf (eval (.cons .vtt env) cod) with
+      | .vunit _ => Bool.true
+      | _ => Bool.false)
+    | _ => Bool.false
+  | _ => Bool.false
+
+-- (22i) the last field of a structure, at run time: the pair `Σ f. (I = i × Unit)`
+-- whose index type is a structure marker (the description's `ret`, `Templates.mret`).
+-- There the pair is not a pair: the field is the value (`unboxedSigma` in
+-- `Compiler/Erase.lean`, whose `Σ` is the structure itself; here a structure is an
+-- inductive, so the marker shows in the `ret`'s index type).
+def unboxedLast (c : TCtx) (ty : Val) : Bool := Bool.and (TCtx.unbox c) (match whnf ty with
+  | .vsigma _ _ _ _ env snd =>
+    match whnf (eval (.cons (.vne (.hvar (TCtx.lvl c)) .snil) env) snd) with
+    | .vsigma _ _ _ E _ _ => match whnf E with
+      | .vne (.heq I _ _) _ => isStructTail I
+      | _ => Bool.false
+    | _ => Bool.false
+  | _ => Bool.false)
+
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.
 def isNatDesc (D : Val) : Bool := match whnf D with
   | .vdarg _ S F => match whnf S with
@@ -306,9 +333,13 @@ def eraseCheck (ffi : List Foreign) (c : TCtx) (t : Tm) (ty : Val) : ER := match
         | .qz => .ok .erased
         | _ => eraseCheck ffi c a A;
       match ar with
-      | .ok a' => match eraseCheck ffi c b (eval (.cons (eval (TCtx.env c) a) env) B) with
-        | .ok b' => .ok (epair a' b')
-        | e => e
+      | .ok a' =>
+        -- (22i) the last field of a structure: the pair is its first component
+        match unboxedLast c ty with
+        | .true => .ok a'
+        | .false => match eraseCheck ffi c b (eval (.cons (eval (TCtx.env c) a) env) B) with
+          | .ok b' => .ok (epair a' b')
+          | e => e
       | e => e
     | _ => eraseInfer ffi c t
   | .con x => match whnf ty with
@@ -328,20 +359,36 @@ def eraseCheck (ffi : List Foreign) (c : TCtx) (t : Tm) (ty : Val) : ER := match
     | _ => eraseInfer ffi c t
   | .darg _ S D => match whnf ty with
     | .vdesc l I => match eraseCheck ffi c D (.vpi .qw (lsucc l) (lsucc (lsucc l)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
-      | .ok D' => .ok (.obj 1 (etms2 .erased D'))
+      | .ok D' =>
+        -- (22i) a structure's last field: its description has its own tag (5), so the
+        -- runtime reads the payload itself (`hyps` in rt.c)
+        let last := match D with
+          | .lam b => match b with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false
+          | _ => Bool.false;
+        .ok (.obj (match last with | .true => 5 | .false => 1) (etms2 .erased D'))
       | e => e
     | _ => eraseInfer ffi c t
   | .drec _ j D => match whnf ty with
     | .vdesc _ I => match eraseCheck ffi c j I with
       | .ok j' => match eraseCheck ffi c D ty with
-        | .ok D' => .ok (.obj 2 (etms2 j' D'))
+        | .ok D' =>
+          let last := match D with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false;
+          .ok (.obj (match last with | .true => 6 | .false => 2) (etms2 j' D'))
         | e => e
       | e => e
     | _ => eraseInfer ffi c t
   | .dhrec _ H j D => match whnf ty with
     | .vdesc l I => match eraseCheck ffi c j (.vpi .qw (lsucc l) (lsucc l) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
       | .ok j' => match eraseCheck ffi c D ty with
-        | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
+        | .ok D' =>
+          let last := match D with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false;
+          .ok (.obj (match last with | .true => 7 | .false => 3) (.cons .erased (etms2 j' D')))
         | e => e
       | e => e
     | _ => eraseInfer ffi c t
@@ -435,10 +482,18 @@ def eraseInfer (ffi : List Foreign) (c : TCtx) (t : Tm) : ER := match quickType 
       | .letUnit _ _ => eraseCheck ffi c t ty
       | .split _ _ _ _ => eraseCheck ffi c t ty
       | .fst p => match eraseInfer ffi c p with
-        | .ok p' => .ok (.proj 0 p')
+        | .ok p' => match quickType c p with
+          | .some pty => .ok (match unboxedLast c pty with
+            | .true => p'
+            | .false => .proj 0 p')
+          | .none => .ok (.proj 0 p')
         | e => e
       | .snd p => match eraseInfer ffi c p with
-        | .ok p' => .ok (.proj 1 p')
+        | .ok p' => match quickType c p with
+          | .some pty => .ok (match unboxedLast c pty with
+            | .true => .erased
+            | .false => .proj 1 p')
+          | .none => .ok (.proj 1 p')
         | e => e
       | .tag _ i => .ok (.obj i .nil)
       | .ecase m s bs => match eraseInfer ffi c s with
@@ -1957,23 +2012,23 @@ def implOf (n : String) : List Foreign → Option String
       | .true => .some g
       | .false => implOf n rest
     | _ => implOf n rest
-partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
+partial def eraseGlobals (sl unbox : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
   | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
-      | .true => eraseGlobals sl ffi all seen acc k
+      | .true => eraseGlobals sl unbox ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with
-      | .some g => eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
+      | .some g => eraseGlobals sl unbox ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
       | .none => match v with
-        | .axiomC _ _ => eraseGlobals sl ffi all (.cons n seen) acc k
-        | _ => match eraseCheck ffi empty v (eval .nil ty) with
+        | .axiomC _ _ => eraseGlobals sl unbox ffi all (.cons n seen) acc k
+        | _ => match eraseCheck ffi (TCtx.mk .nil .nil 0 .false 0 .false .false .none unbox) v (eval .nil ty) with
           | .err m => .err (n +++ ": " +++ m)
           | .ok e =>
             let e' := match sl with
               | .true => markLets e
               | .false => lazyLets .false e;
-            eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n e') acc) k
+            eraseGlobals sl unbox ffi all (.cons n seen) (.cons (.mk n e') acc) k
 def arities : StrMap Nat → List Erased → StrMap Nat
   | ar, .nil => ar
   | ar, .cons (.mk n e) rest => arities (StrMap.insert ar (Str.ofString n) (lamsOf e)) rest
@@ -2218,14 +2273,20 @@ def structFieldDecls (ffi : List Foreign) : List String → List String → Stri
 def structDefinition (ffi : List Foreign) (ctype : String) (fs ks : List String) : String := match strStarts "struct " ctype with
   | .true => ctype +++ " { " +++ structFieldDecls ffi fs ks +++ "};"
   | .false => "typedef struct { " +++ structFieldDecls ffi fs ks +++ "} " +++ ctype +++ ";"
--- the structure's field `i` (borrowed)
+-- the structure's field `i` (borrowed). The value is `⟨tag, (f₀, (f₁, … ◾))⟩`; with
+-- `--unbox-structs` (22i) the last pair is unboxed, so the last field is the value
+-- left after `n - 1` seconds. (The Lean backend's `fieldPath` has no tag: its
+-- structures are `Σ`s, here an inductive keeps the tag in field 0.)
 def seconds : Nat → String → String
   | .zero, e => e
   | .succ k, e => seconds k ("fld(" +++ e +++ ", 1)")
-def fieldPath (i : Nat) : String := "fld(" +++ seconds i "fld(v, 1)" +++ ", 0)"
-def structIn (ffi : List Foreign) : Nat → List String → List String → String
-  | i, .cons f fs, .cons k ks =>
-    let x := fieldPath i;
+def fieldPath (i n : Nat) (unbox : Bool) : String :=
+  match Bool.and unbox (Nat.beq (i + 1) n) with
+  | .true => seconds i "fld(v, 1)"
+  | .false => "fld(" +++ seconds i "fld(v, 1)" +++ ", 0)"
+def structIn (ffi : List Foreign) (unbox : Bool) : Nat → Nat → List String → List String → String
+  | i, n, .cons f fs, .cons k ks =>
+    let x := fieldPath i n unbox;
     let lhs := "c->" +++ f;
     let dup := fun (conv : String) => "{ V t = " +++ x +++ "; rt_dup(t); " +++ lhs +++ " = " +++ conv +++ "(t); } ";
     (match strEq k "n" with
@@ -2247,8 +2308,8 @@ def structIn (ffi : List Foreign) : Nat → List String → List String → Stri
         "); if (m) memcpy(" +++ lhs +++ ", b->data, m); } "
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sin_" +++ structMangled g +++ "(&" +++ lhs +++ ", " +++ x +++ "); "
-    | .none => "") +++ structIn ffi (i + 1) fs ks
-  | _, _, _ => ""
+    | .none => "") +++ structIn ffi unbox (i + 1) n fs ks
+  | _, _, _, _ => ""
 def structFree (ffi : List Foreign) : List String → List String → String
   | .cons f fs, .cons k ks => (match strEq k "s" with
     | .true => "rt_free_cstr((char *)c->" +++ f +++ "); "
@@ -2276,37 +2337,45 @@ def structOut (ffi : List Foreign) : Nat → List String → List String → Str
     | .some g => "wiz_sout_" +++ structMangled g +++ "(" +++ x +++ ")"
     | .none => "rt_out_nat(" +++ x +++ ")") +++ "; " +++ structOut ffi (i + 1) fs ks
   | _, _, _ => ""
-def structHelpers (ffi : List Foreign) (n ctype : String) (fs ks : List String) : List Doc :=
+def structHelpers (ffi : List Foreign) (unbox : Bool) (n ctype : String) (fs ks : List String) : List Doc :=
   let m := mangle n;
   let k := lenL fs;
-  .cons (.t ("static void wiz_sin_" +++ m +++ "(" +++ ctype +++ " *c, V v) { memset(c, 0, sizeof *c); " +++ structIn ffi 0 fs ks +++ "}"))
-    (.cons (.t ("static void wiz_sfree_" +++ m +++ "(" +++ ctype +++ " *c) { (void)c; " +++ structFree ffi fs ks +++ "}"))
-    (.cons (.t ("static V wiz_sout_" +++ m +++ "(" +++ ctype +++ " c) { V fs[" +++ Nat.toString k +++ "]; " +++ structOut ffi 0 fs ks +++
-      "V r = BOX(0); for (int i = " +++ Nat.toString (k - 1) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }")) .nil))
+  -- (22i) with `--unbox-structs` the last field is not in a pair: the value's payload
+  -- ends in it, and the second field of the last pair is gone
+  let build := match unbox with
+    -- (one field: the value is `⟨tag, field⟩`, no pair at all; `k - 2` would be 0)
+    | .true => match k with
+      | 1 => "V r = fs[0]; return pair(BOX(0), r); }"
+      | _ => "V r = fs[" +++ Nat.toString (k - 1) +++ "]; for (int i = " +++ Nat.toString (k - 2) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }"
+    | .false => "V r = BOX(0); for (int i = " +++ Nat.toString (k - 1) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }";
+  let sinS := "static void wiz_sin_" +++ m +++ "(" +++ ctype +++ " *c, V v) { memset(c, 0, sizeof *c); " +++ structIn ffi unbox 0 k fs ks +++ "}";
+  let sfreeS := "static void wiz_sfree_" +++ m +++ "(" +++ ctype +++ " *c) { (void)c; " +++ structFree ffi fs ks +++ "}";
+  let soutS := "static V wiz_sout_" +++ m +++ "(" +++ ctype +++ " c) { V fs[" +++ Nat.toString k +++ "]; " +++ structOut ffi 0 fs ks +++ build;
+  .cons (.t sinS) (.cons (.t sfreeS) (.cons (.t soutS) .nil))
 -- the headers to include (each once), the structs, and the prototypes
-partial def ffiDecls (ffi : List Foreign) (seen : List String) : List Foreign → List Doc
+partial def ffiDecls (ffi : List Foreign) (unbox : Bool) (seen : List String) : List Foreign → List Doc
   | .nil => .nil
   | .cons f rest => match f with
     | .fn _ cname header ps r _ _ => match strEq header "" with
       | .false => match elemS header seen with
-        | .true => ffiDecls ffi seen rest
-        | .false => .cons (.t ("#include <" +++ header +++ ">")) (ffiDecls ffi (.cons header seen) rest)
+        | .true => ffiDecls ffi unbox seen rest
+        | .false => .cons (.t ("#include <" +++ header +++ ">")) (ffiDecls ffi unbox (.cons header seen) rest)
       | .true => match Bool.or (strStarts "wiz_" cname) (elemS cname seen) with
-        | .true => ffiDecls ffi seen rest
+        | .true => ffiDecls ffi unbox seen rest
         | .false =>
           let pts := ffiProtoParams ffi ps;
           .cons (.t ("extern " +++ extCType ffi r +++ " " +++ cname +++ "(" +++ (match pts with
             | .nil => "void"
-            | .cons _ _ => commaSep pts) +++ ");")) (ffiDecls ffi (.cons cname seen) rest)
+            | .cons _ _ => commaSep pts) +++ ");")) (ffiDecls ffi unbox (.cons cname seen) rest)
     | .cstruct n ctype header fs ks =>
-      let helpers := structHelpers ffi n ctype fs ks;
+      let helpers := structHelpers ffi unbox n ctype fs ks;
       match strEq header "" with
-      | .true => .cons (.t (structDefinition ffi ctype fs ks)) (List.append helpers (ffiDecls ffi seen rest))
+      | .true => .cons (.t (structDefinition ffi ctype fs ks)) (List.append helpers (ffiDecls ffi unbox seen rest))
       | .false => match elemS header seen with
-        | .true => List.append helpers (ffiDecls ffi seen rest)
-        | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi (.cons header seen) rest))
-    | .code text => .cons (.t text) (ffiDecls ffi seen rest)
-    | _ => ffiDecls ffi seen rest
+        | .true => List.append helpers (ffiDecls ffi unbox seen rest)
+        | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi unbox (.cons header seen) rest))
+    | .code text => .cons (.t text) (ffiDecls ffi unbox seen rest)
+    | _ => ffiDecls ffi unbox seen rest
 -- (stage 21q) A C function that applies the Wiz closure `f` (an owned value) to its C
 -- arguments `c0 …` of kinds `ps` (C values become Wiz values: `Nat`/`UInt64` from
 -- `uint64_t`, `Float64` from `double`, `String` copied from a `const char *`, `Bool` from
@@ -2457,9 +2526,9 @@ def hasExport : List Foreign → Bool
 def headerDocs (ffi : List Foreign) : List Doc :=
   (.cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */") (.cons (.t "/* ABI v1 (wiz-notes/prior-art/compilers-runtime-ffi.md, 2.2): kinds are explicit.") (.cons (.t "   n/u=uint64_t, f=double, s=const char* (borrowed in, caller-owned out), b=int,") (.cons (.t "   p=void* (+1 wrapped, borrowed for a call), w=wiz_val (+0 in, +1 out); e/v are omitted.") (.cons (.t "   Structs by value only through c_struct; native reps only on sealed types. */") (.cons (.t "#define WIZ_ABI_MAJOR 1") (.cons (.t "#define WIZ_ABI_MINOR 0") (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED") (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);") (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil)))))))))))))))))
 -- the C of a program's foreign functions (after the runtime)
-def ffiDocs (rc : Bool) (ffi : List Foreign) : List Doc :=
+def ffiDocs (rc unbox : Bool) (ffi : List Foreign) : List Doc :=
   let fs := List.reverseOf ffi .nil;
-  List.append (ffiDecls ffi .nil fs) (List.append (cbDocs rc .nil (cbKinds fs)) (ffiWrappers ffi rc fs))
+  List.append (ffiDecls ffi unbox .nil fs) (List.append (cbDocs rc .nil (cbKinds fs)) (ffiWrappers ffi rc fs))
 -- **Applications pushed into `case`s** (reference counting mode). A match is a method
 -- applied to the payload, and the method is chosen by a `case`: `(case s [bᵢ]) a⃗`
 -- built a closure for the chosen branch and applied it. With cheap arguments
@@ -2507,8 +2576,8 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .true => .nil
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
-def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+def genProgram (lib unbox : Bool) (gs : Globals) : List Doc := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2517,7 +2586,7 @@ def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
       match genCode (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false ffi) (List.append protos
+          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false unbox ffi) (List.append protos
             (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .false (List.reverseOf ffi .nil))
               (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); ap(get_main(), BOX(0)); rt_finishGC(); return 0; }")))))))
 
@@ -3024,8 +3093,8 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
             (.t ("static V w_" +++ g +++ "(V *a) { V r = d_" +++ g +++ "(" +++ argList 0 k +++ "); " +++ wrapDecs 0 sig +++ "return r; } " +++
              "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
-def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+def genProgramRC (lib : Bool) (borrow unbox : Bool) (gs : Globals) : List Doc := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;
@@ -3036,7 +3105,7 @@ def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match
       match genCodeRC sigs (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true ffi) (List.append protos
+          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true unbox ffi) (List.append protos
             (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .true (List.reverseOf ffi .nil))
               (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); dec(ap(get_main(), BOX(0))); rt_finish(); return 0; }"))))))))
 
@@ -3054,11 +3123,11 @@ def wantsRC (text : String) : Bool := match text with
   | .mk cs => match "-- wiz: rc" with
     | .mk ps => charsPrefix ps cs
 -- (`-- wiz: rc-owned`: every parameter owned, no borrowing; for comparisons)
-def genProgramFor (lib : Bool) (text : String) (gs : Globals) : List Doc := match wantsRC text with
+def genProgramFor (lib unbox : Bool) (text : String) (gs : Globals) : List Doc := match wantsRC text with
   | .true => genProgramRC lib (match text with
     | .mk cs => match "-- wiz: rc-owned" with
-      | .mk ps => Bool.not (charsPrefix ps cs)) gs
-  | .false => genProgram lib gs
+      | .mk ps => Bool.not (charsPrefix ps cs)) unbox gs
+  | .false => genProgram lib unbox gs
 -- (stage 21k) the backend the command line asks for: `--rc` (reference counting),
 -- `--rc-owned` (every parameter owned, no borrowing) or `--gc`; without one, the first
 -- line's pragma (`genProgramFor`, kept as a fallback for one release). (Stage 21s)
@@ -3067,15 +3136,18 @@ def genProgramFor (lib : Bool) (text : String) (gs : Globals) : List Doc := matc
 -- `.h`).
 def genProgramArgs (args : List String) (text : String) (gs : Globals) : List Doc :=
   let lib := Bool.or (elemStr "--lib" args) (elemStr "--no-main" args);
+  -- (22i) the representation the flag chooses; off by default (not stable under
+  -- substitution, as in the Lean frontend: `unboxedSigma` in `Compiler/Erase.lean`)
+  let unbox := elemStr "--unbox-structs" args;
   match elemStr "--header" args with
   | .true => headerDocs (Globals.ffi gs)
   | .false => match elemStr "--rc-owned" args with
-  | .true => genProgramRC lib .false gs
+  | .true => genProgramRC lib .false unbox gs
   | .false => match elemStr "--rc" args with
-    | .true => genProgramRC lib .true gs
+    | .true => genProgramRC lib .true unbox gs
     | .false => match elemStr "--gc" args with
-      | .true => genProgram lib gs
-      | .false => genProgramFor lib text gs
+      | .true => genProgram lib unbox gs
+      | .false => genProgramFor lib unbox text gs
 
 -- printing a program: each line's pieces, then a newline
 def printDoc : Doc → IO Unit
