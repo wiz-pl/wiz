@@ -1,0 +1,1086 @@
+import Prelude
+import Text
+import Json
+import Int
+import WordArray
+
+/-!
+# Web.EditorModel
+
+The playground editor's pure rules: positions (LSP counts UTF-16 code units, as a
+JavaScript string index does), the text offsets a diagnostic underlines, the completion
+list's filter, order, index arithmetic and insertion, and the indentation an accepted
+Tab makes.
+
+This is the half of the old `web/editor-model.js` that was never about the DOM (the
+module moved to `web/framework/editor-model.mjs` as the test oracle). The page keeps
+the other half (a textarea's value, selection and caret; measuring a glyph; drawing a
+span). The browser asks for one answer at a time through `wiz_loom_editor_*` in
+`web/playground-ui.wiz` and paints or positions the result.
+
+Text is indexed in **UTF-16 code units**, like the LSP wire format and a JavaScript
+string: an astral character is two code units. Wiz's own `String` is a list of code
+points, so the boundary helpers below expand it to code units and back. That is the only
+place the two conventions meet.
+
+The queries take a `PositionIndex` (`index`): one pass over the code points gives the
+length in units and the line-start table, and a position or offset is then a binary
+search over that table. `indexVersion`/`indexAt` key it by the document version;
+`indexJson`/`indexFromJson` carry the table across a host boundary, so a page can keep
+the build between keyups instead of expanding the document on every query.
+-/
+
+-- ## Text as UTF-16 code units
+
+/-- The UTF-16 code units of a code point (one, or a surrogate pair above the BMP). -/
+def EditorModel.unitsOf (c : Char) : List Nat :=
+  let n := Char.code c;
+  if Nat.lt 0xFFFF n then
+    [ 0xD800 + ((n - 0x10000) >>> 10)
+    , 0xDC00 + ((n - 0x10000) &&& 0x3FF)
+    ]
+  else [n]
+
+/-- The UTF-16 code units of a string. -/
+def EditorModel.units (s : String) : List Nat :=
+  List.concat (List.map EditorModel.unitsOf (String.chars s))
+
+/-- A text's position index: its UTF-16 units, the UTF-16 offset of every line start
+(ascending, line 0 first), and the text's length in units. `version` is the document
+version the index was built for; `EditorModel.indexAt` reuses it for that version.
+
+The line table is what the hot queries need: an offset's line and character are a binary
+search plus a subtraction, and a position's offset is one lookup plus a clamp. The units
+are kept for the operations that genuinely rewrite text (`slice`, `tokenEnd`); an index
+parsed from `indexJson` leaves them out until they are needed. -/
+structure EditorModel.PositionIndex where
+  text : String
+  version : Nat
+  length : Nat
+  lineStarts : U32Array
+  units : Option U32Array
+
+/-- The UTF-16 units of a string, as a native array (`PageSize` pushes, one copy). -/
+def EditorModel.unitsArray (s : String) : U32Array :=
+  U32Array.ofList (List.map U32.ofNat (EditorModel.units s))
+
+/-- The line starts and length only (the units are built on demand): the first keyup
+after an edit needs positions and spans, not the whole UTF-16 expansion. -/
+partial def EditorModel.lineTableGo (cs : List Char) (off : Nat) (lines : List Nat) :
+    Nat × List Nat :=
+  match cs with
+  | .nil => (off, List.reverse lines)
+  | .cons c rest =>
+    let n := Char.code c;
+    let step := if Nat.lt 0xFFFF n then 2 else 1;
+    let line := if Nat.beq n 10 then .cons (off + step) lines else lines;
+    EditorModel.lineTableGo rest (off + step) line
+
+/-- Build the index of `text` for document `version`: one pass over the code points. -/
+def EditorModel.indexVersion (version : Nat) (text : String) : EditorModel.PositionIndex :=
+  let r := EditorModel.lineTableGo (String.chars text) 0 [0];
+  EditorModel.PositionIndex.mk text version r.1
+    (U32Array.ofList (List.map U32.ofNat r.2)) .none
+
+/-- The index of `text` (version 0). -/
+def EditorModel.index (text : String) : EditorModel.PositionIndex :=
+  EditorModel.indexVersion 0 text
+
+/-- Reuse `cached` when it is this version and text, else build a new index. -/
+def EditorModel.indexAt (cached : EditorModel.PositionIndex) (version : Nat) (text : String) :
+    EditorModel.PositionIndex :=
+  if Nat.beq cached.version version && String.eq cached.text text then cached
+  else EditorModel.indexVersion version text
+
+/-- The index as a compact, versioned line table (`{"v":1,"version":N,"length":…,
+"lines":[…]}`) for a host that caches it between queries. -/
+def EditorModel.indexJson (version : Nat) (text : String) : String :=
+  let i := EditorModel.indexVersion version text;
+  Json.render (Json.mkObj
+    [ ("v", Json.ofNat 1)
+    , ("version", Json.ofNat version)
+    , ("length", Json.ofNat i.length)
+    , ("lines", Json.mkArr (List.map (fun x => Json.ofNat x.toNat) (U32Array.toList i.lineStarts)))
+    ])
+
+/-- The index a host cached from `indexJson`, rebuilt around `text` (units are left out:
+the line table is enough for positions and spans). -/
+def EditorModel.indexFromJson (text json : String) : EditorModel.PositionIndex :=
+  match Json.parse json with
+  | .error _ => EditorModel.index text
+  | .ok j =>
+    let lines := match Json.get j "lines" with
+      | .some v => List.map (fun x => match Json.asNat x with
+          | .some n => n
+          | .none => 0) (Json.asList v)
+      | .none => [0];
+    EditorModel.PositionIndex.mk text (Json.getNat j "version") (Json.getNat j "length")
+      (U32Array.ofList (List.map U32.ofNat lines)) .none
+
+/-- The units of the index, built from its text if the index came from `indexFromJson`. -/
+def EditorModel.unitsOfIndex (i : EditorModel.PositionIndex) : U32Array :=
+  match i.units with
+  | .some us => us
+  | .none => EditorModel.unitsArray i.text
+
+/-- The elements of a word array as ordinary naturals. -/
+def EditorModel.natsOfUnits (us : U32Array) : List Nat :=
+  List.map (fun x => x.toNat) (U32Array.toList us)
+
+/-- The code point of a UTF-16 surrogate pair, or `none` when they are not a pair. -/
+def EditorModel.pair (hi lo : Nat) : Option Nat :=
+  if Nat.le 0xD800 hi && Nat.lt hi 0xDC00 && Nat.le 0xDC00 lo && Nat.lt lo 0xE000 then
+    .some (0x10000 + ((hi - 0xD800) <<< 10) + (lo - 0xDC00))
+  else .none
+
+/-- The characters of a list of UTF-16 code units (pairs become one code point; a lone
+surrogate is kept as the character with that code, so an edit cannot drop it silently). -/
+partial def EditorModel.charsOfUnits : List Nat → List Char
+  | .nil => .nil
+  | .cons hi rest => match rest with
+    | .cons lo tail => match EditorModel.pair hi lo with
+      | .some n => .cons (Char.mk n) (EditorModel.charsOfUnits tail)
+      | .none => .cons (Char.mk hi) (EditorModel.charsOfUnits rest)
+    | .nil => .cons (Char.mk hi) .nil
+
+/-- The string of a list of UTF-16 code units. -/
+def EditorModel.stringOfUnits (us : List Nat) : String := .mk (EditorModel.charsOfUnits us)
+
+/-- The length of a string in UTF-16 code units (a JavaScript `.length`). -/
+def EditorModel.length (s : String) : Nat := List.length (EditorModel.units s)
+
+/-- A unit index clamped to `[0, index.length]`. -/
+def EditorModel.clampOffset (i : EditorModel.PositionIndex) (n : Nat) : Nat :=
+  if Nat.lt i.length n then i.length else n
+
+/-- A natural clamped to `[lo, hi]`. -/
+def EditorModel.clamp (n lo hi : Nat) : Nat :=
+  if Nat.lt n lo then lo else if Nat.lt hi n then hi else n
+
+/-- The units of the index before `n`, clamped. -/
+def EditorModel.takeUnits (i : EditorModel.PositionIndex) (n : Nat) : List Nat :=
+  List.take (EditorModel.clampOffset i n) (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i))
+
+/-- The units of the index from `n`, clamped. -/
+def EditorModel.dropUnits (i : EditorModel.PositionIndex) (n : Nat) : List Nat :=
+  List.drop (EditorModel.clampOffset i n) (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i))
+
+/-- `[from, to)` of the indexed text, in UTF-16 code units. -/
+def EditorModel.slice (i : EditorModel.PositionIndex) (from to : Nat) : String :=
+  let a := EditorModel.clampOffset i from;
+  let b := EditorModel.clampOffset i to;
+  if Nat.le b a then "" else
+    EditorModel.stringOfUnits (List.take (b - a) (List.drop a
+      (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i))))
+
+def EditorModel.isNewline (n : Nat) : Bool := Nat.beq n 10
+
+def EditorModel.isSpaceUnit (n : Nat) : Bool :=
+  Nat.beq n 32 || Nat.beq n 9 || Nat.beq n 10 || Nat.beq n 13 || Nat.beq n 12 || Nat.beq n 11
+
+/-- A decimal string as a natural (`0` when it is not one). -/
+def EditorModel.natOf (s : String) : Nat := match String.parseNat s with
+  | .some n => n
+  | .none => 0
+
+/-- A decimal string as an integer, with an optional leading `-`. -/
+def EditorModel.intOf (s : String) : Int :=
+  match String.stripPrefix s "-" with
+  | .some rest => Int.negOfNat (EditorModel.natOf rest)
+  | .none => Int.ofNat (EditorModel.natOf s)
+
+/-- A natural as a decimal string (a helper for the exported wrappers). -/
+def EditorModel.natString (n : Nat) : String := Nat.repr n
+
+/-- An integer as a decimal string. -/
+def EditorModel.intString (n : Int) : String := match n with
+  | .ofNat k => Nat.repr k
+  | .negSucc k => String.append "-" (Nat.repr (k + 1))
+
+-- ## Positions
+
+/-- An LSP position: a line and a UTF-16 character offset within it. -/
+structure EditorModel.Position where
+  line : Nat
+  character : Nat
+
+/-- The number of lines in the index (a trailing newline starts one more, empty line). -/
+def EditorModel.lineCount (i : EditorModel.PositionIndex) : Nat := U32Array.size i.lineStarts
+
+/-- The first line whose start is after `off` (the binary search behind `lineOfOffset`). -/
+partial def EditorModel.firstLineAfter (lines : U32Array) (lo hi off : Nat) : Nat :=
+  if Nat.le hi lo then lo
+  else
+    let mid := Nat.div (lo + hi) 2;
+    if Nat.le (U32Array.getD lines mid 0).toNat off
+    then EditorModel.firstLineAfter lines (mid + 1) hi off
+    else EditorModel.firstLineAfter lines lo mid off
+
+/-- The line containing a UTF-16 offset (the greatest line start at or before it; line 0
+when there is none). -/
+def EditorModel.lineOfOffset (i : EditorModel.PositionIndex) (offset : Nat) : Nat :=
+  let n := EditorModel.lineCount i;
+  if Nat.beq n 0 then 0
+  else
+    let k := EditorModel.firstLineAfter i.lineStarts 0 n offset;
+    if Nat.beq k 0 then 0 else k - 1
+
+/-- The UTF-16 offset of the start of line `line` (the text's end when there is no such
+line). -/
+def EditorModel.lineStartAt (i : EditorModel.PositionIndex) (line : Nat) : Nat :=
+  if Nat.lt line (EditorModel.lineCount i)
+  then (U32Array.getD i.lineStarts line 0).toNat
+  else i.length
+
+/-- The UTF-16 offset of the end of line `line` (just before its newline, or the text's
+end). -/
+def EditorModel.lineEndAt (i : EditorModel.PositionIndex) (line : Nat) : Nat :=
+  if Nat.lt (line + 1) (EditorModel.lineCount i)
+  then EditorModel.lineStartAt i (line + 1) - 1
+  else i.length
+
+/-- The LSP position of a UTF-16 offset (clamped to the text). `character` counts code
+units, as the wire format does (an astral character is two of them). -/
+def EditorModel.positionFromOffset (i : EditorModel.PositionIndex) (offset : Nat) :
+    EditorModel.Position :=
+  let at := EditorModel.clampOffset i offset;
+  let line := EditorModel.lineOfOffset i at;
+  EditorModel.Position.mk line (at - EditorModel.lineStartAt i line)
+
+/-- The UTF-16 offset of an LSP position. A `character` past the end of its line stops at
+the line break, not at the same column of the next line. -/
+def EditorModel.offsetFromPosition (i : EditorModel.PositionIndex)
+    (p : EditorModel.Position) : Nat :=
+  let start := EditorModel.lineStartAt i p.line;
+  let stop := EditorModel.lineEndAt i p.line;
+  let here := start + p.character;
+  if Nat.lt stop here then stop else here
+
+/-- The code-point position of a UTF-16 offset. A lone surrogate counts as one code point,
+as `Array.from` would count it. -/
+partial def EditorModel.codePointPositionGo (us : List Nat) (line char at : Nat) :
+    EditorModel.Position :=
+  match us with
+  | .nil => EditorModel.Position.mk line char
+  | .cons u rest =>
+    if Nat.beq at 0 then EditorModel.Position.mk line char
+    else if EditorModel.isNewline u then
+      EditorModel.codePointPositionGo rest (line + 1) 0 (at - 1)
+    else match rest with
+      | .cons lo tail => match EditorModel.pair u lo with
+        | .some _ =>
+          if Nat.le at 1 then EditorModel.Position.mk line (char + 1)
+          else EditorModel.codePointPositionGo tail line (char + 1) (at - 2)
+        | .none => EditorModel.codePointPositionGo rest line (char + 1) (at - 1)
+      | .nil => EditorModel.Position.mk line (char + 1)
+
+/-- The code-point position of a UTF-16 offset. -/
+def EditorModel.codePointPositionFromOffset (i : EditorModel.PositionIndex) (offset : Nat) :
+    EditorModel.Position :=
+  EditorModel.codePointPositionGo (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i)) 0 0
+    (EditorModel.clampOffset i offset)
+
+/-- The UTF-16 offset of a code-point index (the text's end when it runs out). -/
+partial def EditorModel.utf16FromCodePointsGo (us : List Nat) (n acc : Nat) : Nat :=
+  match us with
+  | .nil => acc
+  | .cons u rest =>
+    if Nat.beq n 0 then acc
+    else match rest with
+      | .cons lo tail => match EditorModel.pair u lo with
+        | .some _ => EditorModel.utf16FromCodePointsGo tail (n - 1) (acc + 2)
+        | .none => EditorModel.utf16FromCodePointsGo rest (n - 1) (acc + 1)
+      | .nil => acc + 1
+
+/-- A UTF-16 offset for a code-point index into the indexed text. -/
+def EditorModel.utf16OffsetFromCodePoints (i : EditorModel.PositionIndex)
+    (codePoints : Nat) : Nat :=
+  EditorModel.utf16FromCodePointsGo (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i))
+    codePoints 0
+
+/-- The code-point index of a UTF-16 offset. -/
+partial def EditorModel.codePointsFromUtf16Go (us : List Nat) (at : Nat) : Nat :=
+  match us with
+  | .nil => 0
+  | .cons u rest =>
+    if Nat.beq at 0 then 0
+    else match rest with
+      | .cons lo tail => match EditorModel.pair u lo with
+        | .some _ =>
+          if Nat.le at 1 then 1 else 1 + EditorModel.codePointsFromUtf16Go tail (at - 2)
+        | .none => 1 + EditorModel.codePointsFromUtf16Go rest (at - 1)
+      | .nil => 1
+
+/-- The code-point index of a UTF-16 offset. -/
+def EditorModel.codePointOffsetFromUtf16 (i : EditorModel.PositionIndex) (offset : Nat) : Nat :=
+  EditorModel.codePointsFromUtf16Go (EditorModel.natsOfUnits (EditorModel.unitsOfIndex i))
+    (EditorModel.clampOffset i offset)
+
+-- ## Squiggles (a diagnostic's range, as something an editor can underline)
+
+/-- LSP's severity name (the class suffix the page paints). -/
+def EditorModel.severityName (n : Nat) : String :=
+  if Nat.beq n 1 then "error"
+  else if Nat.beq n 2 then "warning"
+  else if Nat.beq n 4 then "hint"
+  else "info"
+
+/-- LSP's default when a server omits `severity`: informational (3), as the goals panel. -/
+def EditorModel.severityOf (j : Json) : Nat :=
+  match Json.get j "severity" with
+  | .some v => match Json.asNat v with
+    | .some n => if Nat.le 1 n && Nat.le n 4 then n else 3
+    | .none => 3
+  | .none => 3
+
+/-- A span to underline: UTF-16 offsets, severity and message. -/
+structure EditorModel.Segment where
+  start : Nat
+  stop : Nat
+  severity : Nat
+  message : String
+
+/-- Scan to the next white space or the end, from `i`. -/
+partial def EditorModel.tokenEndGo (us : U32Array) (len i : Nat) : Nat :=
+  if Nat.le len i then i
+  else if EditorModel.isSpaceUnit (U32Array.getD us i 0).toNat then i
+  else EditorModel.tokenEndGo us len (i + 1)
+
+/-- The offset just past the token at `offset`: to the next white space or the end, and
+at least one unit, so a diagnostic with no end still underlines something. -/
+def EditorModel.tokenEnd (i : EditorModel.PositionIndex) (offset : Nat) : Nat :=
+  let at := EditorModel.clampOffset i offset;
+  if Nat.le i.length at then at
+  else
+    let us := EditorModel.unitsOfIndex i;
+    if EditorModel.isSpaceUnit (U32Array.getD us at 0).toNat then at + 1
+    else EditorModel.tokenEndGo us i.length (at + 1)
+
+/-- The `[start, end)` pieces of a range, one per line (a piece never contains `\n`). -/
+partial def EditorModel.splitAtLinesGo (i : EditorModel.PositionIndex) (s e : Nat)
+    (line last : Nat) (acc : List (Nat × Nat)) : List (Nat × Nat) :=
+  if Nat.lt last line then List.reverse acc
+  else
+    let start := EditorModel.lineStartAt i line;
+    let stop := EditorModel.lineEndAt i line;
+    let a := if Nat.lt s start then start else s;
+    let b := if Nat.lt stop e then stop else e;
+    EditorModel.splitAtLinesGo i s e (line + 1) last (.cons (a, b) acc)
+
+/-- The `[start, end)` pieces of a range, one per line. -/
+def EditorModel.splitAtLines (i : EditorModel.PositionIndex) (start stop : Nat) :
+    List (Nat × Nat) :=
+  let s := EditorModel.clampOffset i start;
+  let e := EditorModel.clampOffset i stop;
+  if Nat.le e s then []
+  else
+    EditorModel.splitAtLinesGo i s e (EditorModel.lineOfOffset i s)
+      (EditorModel.lineOfOffset i e) []
+
+/-- The messages joined when two diagnostics merge (`error · warning`). -/
+def EditorModel.joinMessages (a b : String) : String :=
+  if String.isEmpty a then b
+  else if String.isEmpty b then a
+  else if String.eq a b then a
+  else String.append a (String.append " · " b)
+
+/-- Sort key: the smaller `start` wins, then `end`, then severity. -/
+def EditorModel.segmentBefore (a b : EditorModel.Segment) : Bool :=
+  if Nat.lt a.start b.start then .true
+  else if Nat.lt b.start a.start then .false
+  else if Nat.lt a.stop b.stop then .true
+  else if Nat.lt b.stop a.stop then .false
+  else Nat.lt a.severity b.severity
+
+/-- Insert `x` into a sorted list (stable for equal keys). -/
+def EditorModel.insertSorted (x : EditorModel.Segment) :
+    List EditorModel.Segment → List EditorModel.Segment
+  | .nil => [x]
+  | .cons y ys => match EditorModel.segmentBefore x y with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (EditorModel.insertSorted x ys)
+
+/-- A stable insertion sort. -/
+def EditorModel.sortSegments (xs : List EditorModel.Segment) : List EditorModel.Segment :=
+  List.foldl (fun acc x => EditorModel.insertSorted x acc) [] xs
+
+/-- Merge overlapping spans: the stricter severity and both messages. -/
+partial def EditorModel.mergeGo (acc : List EditorModel.Segment) :
+    List EditorModel.Segment → List EditorModel.Segment
+  | .nil => List.reverse acc
+  | .cons seg rest => match acc with
+    | .nil => EditorModel.mergeGo [seg] rest
+    | .cons last prev =>
+      if Nat.lt seg.start last.stop then
+        let severity := if Nat.lt seg.severity last.severity then seg.severity else last.severity;
+        let message := if Nat.lt seg.severity last.severity
+          then EditorModel.joinMessages seg.message last.message
+          else EditorModel.joinMessages last.message seg.message;
+        let merged := EditorModel.Segment.mk last.start
+          (if Nat.lt last.stop seg.stop then seg.stop else last.stop) severity message;
+        EditorModel.mergeGo (.cons merged prev) rest
+      else EditorModel.mergeGo (.cons seg acc) rest
+
+/-- Merge a span list (see `mergeGo`). -/
+def EditorModel.mergeSegments (xs : List EditorModel.Segment) : List EditorModel.Segment :=
+  EditorModel.mergeGo [] (EditorModel.sortSegments xs)
+
+/-- The spans to underline for a JSON diagnostics array: one per line, merged, with no
+empty or past-the-end span. -/
+def EditorModel.squiggleSegments (i : EditorModel.PositionIndex) (diags : String)
+    (maxSegments : Nat) : List EditorModel.Segment :=
+  let ds := match Json.parse diags with
+    | .ok j => Json.asList j
+    | .error _ => [];
+  let raw := List.foldl (fun acc d =>
+    match Json.get d "range" with
+    | .none => acc
+    | .some range => match Json.get range "start" with
+      | .none => acc
+      | .some start =>
+        let from := EditorModel.offsetFromPosition i
+          (EditorModel.Position.mk (Json.getNat start "line") (Json.getNat start "character"));
+        let to := match Json.get range "end" with
+          | .some stop =>
+            let e := EditorModel.offsetFromPosition i
+              (EditorModel.Position.mk (Json.getNat stop "line") (Json.getNat stop "character"));
+            if Nat.lt from e then e else EditorModel.tokenEnd i from
+          | .none => EditorModel.tokenEnd i from;
+        if Nat.le to from then acc
+        else
+          let severity := EditorModel.severityOf d;
+          let message := Json.getStr d "message";
+          let pieces := EditorModel.splitAtLines i from to;
+          List.foldl (fun a p => .cons (EditorModel.Segment.mk p.1 p.2 severity message) a)
+            acc pieces) [] ds;
+  let merged := EditorModel.mergeSegments raw;
+  if Nat.beq maxSegments 0 then merged else List.take maxSegments merged
+
+/-- The spans to underline for the text, building the index first (the one-shot API). -/
+def EditorModel.squiggleSegmentsText (text diags : String) (maxSegments : Nat) :
+    List EditorModel.Segment :=
+  EditorModel.squiggleSegments (EditorModel.index text) diags maxSegments
+
+/-- A span as JSON (`line`/`startCharacter`/`endCharacter` are recomputed from the
+merged offsets). -/
+def EditorModel.segmentJson (i : EditorModel.PositionIndex) (s : EditorModel.Segment) : Json :=
+  let start := EditorModel.positionFromOffset i s.start;
+  let stop := EditorModel.positionFromOffset i s.stop;
+  Json.mkObj
+    [ ("start", Json.ofNat s.start)
+    , ("stop", Json.ofNat s.stop)
+    , ("severity", Json.ofNat s.severity)
+    , ("severityName", Json.mkStr (EditorModel.severityName s.severity))
+    , ("message", Json.mkStr s.message)
+    , ("line", Json.ofNat start.line)
+    , ("startCharacter", Json.ofNat start.character)
+    , ("endCharacter", Json.ofNat stop.character)
+    ]
+
+/-- The spans as a JSON array, for the page's mirror. -/
+def EditorModel.segmentsJson (i : EditorModel.PositionIndex) (diags : String)
+    (maxSegments : Nat) : String :=
+  Json.render (Json.mkArr (List.map (EditorModel.segmentJson i)
+    (EditorModel.squiggleSegments i diags maxSegments)))
+
+/-- The spans of the text, building the index first (the one-shot API). -/
+def EditorModel.segmentsJsonText (text diags : String) (maxSegments : Nat) : String :=
+  EditorModel.segmentsJson (EditorModel.index text) diags maxSegments
+
+-- ## Completions
+
+/-- Characters that continue a Wiz identifier (or a qualified name). -/
+def EditorModel.isIdentUnit (n : Nat) : Bool :=
+  (Nat.le 65 n && Nat.le n 90) || (Nat.le 97 n && Nat.le n 122) ||
+  (Nat.le 48 n && Nat.le n 57) || Nat.beq n 95 || Nat.beq n 39 || Nat.beq n 46
+
+/-- Whether a string is one identifier character. -/
+def EditorModel.isIdentifierChar (c : String) : Bool :=
+  match String.chars c with
+  | .cons ch .nil => EditorModel.isIdentUnit (Char.code ch)
+  | _ => .false
+
+/-- Walk back over identifier units from `i`. -/
+partial def EditorModel.identStartGo (us : U32Array) (i : Nat) : Nat :=
+  if Nat.beq i 0 then 0
+  else if EditorModel.isIdentUnit (U32Array.getD us (i - 1) 0).toNat
+    then EditorModel.identStartGo us (i - 1)
+    else i
+
+/-- The identifier being typed before `offset`: its start and its text. -/
+def EditorModel.identifierPrefix (i : EditorModel.PositionIndex) (offset : Nat) : Nat × String :=
+  let at := EditorModel.clampOffset i offset;
+  let start := EditorModel.identStartGo (EditorModel.unitsOfIndex i) at;
+  (start, EditorModel.slice i start at)
+
+/-- Whether a `--` has been seen on the current line, scanning `[0, at)`. -/
+partial def EditorModel.commentGo (us : U32Array) (at idx prev : Nat) (seen : Bool) : Bool :=
+  if Nat.le at idx then seen
+  else
+    let u := (U32Array.getD us idx 0).toNat;
+    if EditorModel.isNewline u then EditorModel.commentGo us at (idx + 1) 0 .false
+    else EditorModel.commentGo us at (idx + 1) u (seen || (Nat.beq prev 45 && Nat.beq u 45))
+
+/-- `--` starts a line comment; a completion popup in one is noise. -/
+def EditorModel.inLineComment (i : EditorModel.PositionIndex) (offset : Nat) : Bool :=
+  let at := EditorModel.clampOffset i offset;
+  EditorModel.commentGo (EditorModel.unitsOfIndex i) at 0 0 .false
+
+/-- Whether typing `c` at `offset` should ask for completions. -/
+def EditorModel.completionTrigger (i : EditorModel.PositionIndex) (c : String)
+    (offset : Nat) : Bool :=
+  EditorModel.isIdentifierChar c && !(EditorModel.inLineComment i offset)
+
+/-- The items of a `textDocument/completion` result (an array, `{items}`, one item, or
+null), as a list of JSON objects; items without a non-empty string `label` are dropped. -/
+def EditorModel.completionItems (result : String) : List Json :=
+  let raw := match Json.parse result with
+    | .error _ => []
+    | .ok j => match j with
+      | .arr _ => Json.asList j
+      | .obj _ => match Json.get j "items" with
+        | .some items => Json.asList items
+        | .none => match Json.get j "label" with
+          | .some l => match Json.asString l with
+            | .some _ => [j]
+            | .none => []
+          | .none => []
+      | _ => [];
+  List.filter (fun item => match Json.get item "label" with
+    | .some l => match Json.asString l with
+      | .some s => !(String.isEmpty s)
+      | .none => .false
+    | .none => .false) raw
+
+/-- The item's label. -/
+def EditorModel.itemLabel (item : Json) : String := Json.getStr item "label"
+
+/-- The item's `filterText` when one is given, else its label. -/
+def EditorModel.itemFilter (item : Json) : String :=
+  match Json.get item "filterText" with
+  | .some v => match Json.asString v with
+    | .some s => if String.isEmpty s then EditorModel.itemLabel item else s
+    | .none => EditorModel.itemLabel item
+  | .none => EditorModel.itemLabel item
+
+-- (ASCII lower case: completion labels are identifiers, and Wiz has no Unicode case map.)
+def EditorModel.lowerChar (c : Char) : Char :=
+  let n := Char.code c;
+  if Nat.le 65 n && Nat.le n 90 then Char.mk (n + 32) else c
+
+def EditorModel.lower (s : String) : String :=
+  .mk (List.map EditorModel.lowerChar (String.chars s))
+
+/-- The index of the last `.`, or 0 when there is none. -/
+partial def EditorModel.lastDotGo (i found : Nat) : List Char → Nat
+  | .nil => found
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 46 then EditorModel.lastDotGo (i + 1) (i + 1) rest
+    else EditorModel.lastDotGo (i + 1) found rest
+
+/-- The part after the last `.`, or the whole string when it has none. -/
+def EditorModel.cutLastDot (s : String) : String :=
+  let d := EditorModel.lastDotGo 0 0 (String.chars s);
+  if Nat.beq d 0 then s else String.drop d s
+
+/-- How well an item matches the prefix (a lower score is better, `3` no match). -/
+def EditorModel.completionScore (item : Json) (prefix : String) : Nat :=
+  let p := EditorModel.lower prefix;
+  if String.isEmpty p then 0
+  else
+    let h := EditorModel.lower (EditorModel.itemFilter item);
+    if String.startsWith h p then 0
+    else
+      let pTail := EditorModel.cutLastDot p;
+      let hTail := EditorModel.cutLastDot h;
+      if !(String.isEmpty pTail) && String.startsWith hTail pTail then 1
+      else if String.contains h p then 2
+      else 3
+
+/-- A scored item, for sorting. -/
+structure EditorModel.Scored where
+  item : Json
+  score : Nat
+
+def EditorModel.scoredKey (item : Json) : String :=
+  match Json.get item "sortText" with
+  | .some v => match Json.asString v with
+    | .some s => if String.isEmpty s then EditorModel.itemLabel item else s
+    | .none => EditorModel.itemLabel item
+  | .none => EditorModel.itemLabel item
+
+def EditorModel.scoredBefore (a b : EditorModel.Scored) : Bool :=
+  if Nat.lt a.score b.score then .true
+  else if Nat.lt b.score a.score then .false
+  else
+    let ak := EditorModel.scoredKey a.item;
+    let bk := EditorModel.scoredKey b.item;
+    if String.lt ak bk then .true
+    else if String.lt bk ak then .false
+    else String.lt (EditorModel.itemLabel a.item) (EditorModel.itemLabel b.item)
+
+def EditorModel.insertScored (x : EditorModel.Scored) :
+    List EditorModel.Scored → List EditorModel.Scored
+  | .nil => [x]
+  | .cons y ys => match EditorModel.scoredBefore x y with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (EditorModel.insertScored x ys)
+
+/-- The matching items, best first; `limit` bounds the list (0 = no bound). -/
+def EditorModel.filterCompletions (items : List Json) (prefix : String) (limit : Nat) :
+    List Json :=
+  let scored := List.filter (fun s => Nat.lt s.score 3)
+    (List.map (fun item => EditorModel.Scored.mk item (EditorModel.completionScore item prefix))
+      items);
+  let sorted := List.foldl (fun acc x => EditorModel.insertScored x acc) [] scored;
+  let labels := List.map (fun s => s.item) sorted;
+  if Nat.beq limit 0 then labels else List.take limit labels
+
+/-- The selected index after moving `delta` in a list of `count` items, wrapping at both
+ends (`-1` for an empty list; an out-of-range index is clamped). -/
+def EditorModel.moveSelection (index delta count : Int) : Int :=
+  if Int.le count 0 then -1
+  else
+    let from := if Int.lt index 0 then (if Int.lt 0 delta then -1 else 0)
+      else if Int.lt index (count - 1) then index else count - 1;
+    let m := Int.mod (from + delta) count;
+    if Int.lt m 0 then m + count else m
+
+mutual
+/-- A snippet's text without its placeholders (`${1:name}` → `name`, `${0}`/`$1` → "",
+`\$` → `$`). `snippetAt` is entered after a `$`; `snippetGo` is the ordinary scan. -/
+partial def EditorModel.snippetAt : List Char → List Char
+  | .nil => [Char.mk 36]
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 123 then EditorModel.snippetBrace rest
+    else if Char.isDigit c then EditorModel.snippetDigits rest
+    else .cons (Char.mk 36) (EditorModel.snippetGo (.cons c rest))
+
+partial def EditorModel.snippetDigits : List Char → List Char
+  | .nil => .nil
+  | .cons c rest => if Char.isDigit c then EditorModel.snippetDigits rest
+    else EditorModel.snippetGo (.cons c rest)
+
+partial def EditorModel.snippetBrace : List Char → List Char
+  | .nil => [Char.mk 36, Char.mk 123]
+  | .cons c rest =>
+    if Char.isDigit c then EditorModel.snippetBraceDigits rest
+    else .cons (Char.mk 36) (.cons (Char.mk 123) (EditorModel.snippetGo (.cons c rest)))
+
+partial def EditorModel.snippetBody : List Char → List Char
+  | .nil => .nil
+  | .cons d tail => if Nat.beq (Char.code d) 125 then EditorModel.snippetGo tail
+    else .cons d (EditorModel.snippetBody tail)
+
+partial def EditorModel.snippetBraceDigits : List Char → List Char
+  | .nil => .nil
+  | .cons c rest =>
+    if Char.isDigit c then EditorModel.snippetBraceDigits rest
+    else if Nat.beq (Char.code c) 125 then EditorModel.snippetGo rest
+    else if Nat.beq (Char.code c) 58 then EditorModel.snippetBody rest
+    else .cons c (EditorModel.snippetBraceDigits rest)
+
+/-- The parts of a snippet, with placeholders removed. -/
+partial def EditorModel.snippetGo : List Char → List Char
+  | .nil => .nil
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 92 then match rest with
+      | .cons d tail => if Nat.beq (Char.code d) 36 then .cons d (EditorModel.snippetGo tail)
+        else .cons c (EditorModel.snippetGo rest)
+      | .nil => .cons c .nil
+    else if Nat.beq (Char.code c) 36 then EditorModel.snippetAt rest
+    else .cons c (EditorModel.snippetGo rest)
+end
+
+/-- A snippet without placeholders (a safety net: the page asks for no snippets). -/
+def EditorModel.stripSnippet (s : String) : String :=
+  .mk (EditorModel.snippetGo (String.chars s))
+
+/-- What an accepted item inserts: the new text, the replaced span, and the caret. -/
+structure EditorModel.Accept where
+  text : String
+  start : Nat
+  stop : Nat
+  caret : Nat
+  insert : String
+
+/-- The text an edit says, or the item's label/insertText. -/
+def EditorModel.editText (edit : Json) (item : Json) : String :=
+  match Json.get edit "newText" with
+  | .some v => match Json.asString v with
+    | .some s => s
+    | .none => EditorModel.itemLabel item
+  | .none => match Json.get item "insertText" with
+    | .some v => match Json.asString v with
+      | .some s => s
+      | .none => EditorModel.itemLabel item
+    | .none => EditorModel.itemLabel item
+
+/-- The offsets of a range, or `none` when it has no start. -/
+def EditorModel.rangeOf (i : EditorModel.PositionIndex) (range : Json) : Option (Nat × Nat) :=
+  match Json.get range "start" with
+  | .none => .none
+  | .some start =>
+    let from := EditorModel.offsetFromPosition i
+      (EditorModel.Position.mk (Json.getNat start "line") (Json.getNat start "character"));
+    match Json.get range "end" with
+      | .some stop =>
+        let to := EditorModel.offsetFromPosition i
+          (EditorModel.Position.mk (Json.getNat stop "line") (Json.getNat stop "character"));
+        .some (from, if Nat.lt from to then to else from)
+      | .none => .some (from, from)
+
+/-- What an accepted item inserts and where. A `textEdit` is authoritative only when its
+end is the caret; otherwise the identifier prefix at the caret is replaced. -/
+def EditorModel.acceptCompletion (text item : String) (offset : Nat) : EditorModel.Accept :=
+  let i := EditorModel.index text;
+  let at := EditorModel.clampOffset i offset;
+  let prefix := EditorModel.identifierPrefix i at;
+  let prefixStart := prefix.1;
+  let itemJson := match Json.parse item with
+    | .ok j => j
+    | .error _ => Json.mkObj [];
+  let label := EditorModel.itemLabel itemJson;
+  let anchored := fun (from to : Nat) => Nat.beq to at && Nat.le from at;
+  let edit := match Json.get itemJson "textEdit" with
+    | .some e => e
+    | .none => Json.mkObj [];
+  let hasEdit := !(String.eq (Json.render edit) "{}");
+  let range : Option (Nat × Nat) :=
+    if hasEdit then
+      match Json.get edit "range" with
+      | .some r => EditorModel.rangeOf i r
+      | .none => match Json.get edit "replace" with
+        | .some r => EditorModel.rangeOf i r
+        | .none => match Json.get edit "insert" with
+          | .some r => EditorModel.rangeOf i r
+          | .none => .none
+    else .none;
+  let chosen := match range with
+    | .some r => if anchored r.1 r.2 then r else (prefixStart, at)
+    | .none => (prefixStart, at);
+  let insertText :=
+    if hasEdit then EditorModel.editText edit itemJson
+    else match Json.get itemJson "insertText" with
+      | .some v => match Json.asString v with
+        | .some s => s
+        | .none => label
+      | .none => label;
+  let insertText := if Nat.beq (Json.getNat itemJson "insertTextFormat") 2
+    then EditorModel.stripSnippet insertText else insertText;
+  let chosenStart := chosen.1;
+  let chosenEnd := chosen.2;
+  let next := String.append (EditorModel.slice i 0 chosenStart)
+    (String.append insertText (EditorModel.slice i chosenEnd i.length));
+  EditorModel.Accept.mk next chosenStart chosenEnd
+    (chosenStart + EditorModel.length insertText) insertText
+
+/-- The popup's state as JSON: the visible items (at most 100), the selected index, and
+the prefix the items were filtered by. -/
+def EditorModel.popupJson (text items index : String) (offset : Nat) : String :=
+  let all := EditorModel.completionItems items;
+  let prefix := EditorModel.identifierPrefix (EditorModel.index text) offset;
+  let filtered := EditorModel.filterCompletions all prefix.2 100;
+  let count := Int.ofNat (List.length filtered);
+  let i := EditorModel.moveSelection (EditorModel.intOf index) 0 count;
+  Json.render (Json.mkObj
+    [ ("items", Json.mkArr filtered)
+    , ("index", match i with
+        | .ofNat n => Json.ofNat n
+        | .negSucc k => Json.int .true (k + 1))
+    , ("prefixStart", Json.ofNat prefix.1)
+    , ("prefixWord", Json.mkStr prefix.2)
+    ])
+
+/-- An accepted item as JSON, for the page's edit. -/
+def EditorModel.acceptJson (text item : String) (offset : Nat) : String :=
+  let a := EditorModel.acceptCompletion text item offset;
+  Json.render (Json.mkObj
+    [ ("text", Json.mkStr a.text)
+    , ("start", Json.ofNat a.start)
+    , ("stop", Json.ofNat a.stop)
+    , ("caret", Json.ofNat a.caret)
+    , ("insert", Json.mkStr a.insert)
+    ])
+
+/-- A position as JSON. -/
+def EditorModel.positionJson (i : EditorModel.PositionIndex) (offset : Nat) : String :=
+  let p := EditorModel.positionFromOffset i offset;
+  Json.render (Json.mkObj [("line", Json.ofNat p.line), ("character", Json.ofNat p.character)])
+
+/-- The position of an offset, building the index first (the one-shot API). -/
+def EditorModel.positionJsonText (text : String) (offset : Nat) : String :=
+  EditorModel.positionJson (EditorModel.index text) offset
+
+/-- The indentation an accepted Tab makes: a collapsed selection inserts two spaces; a
+selection prefixes every line it touches with two spaces and replaces the selected
+lines. The result is the edit `host.edit` applies. -/
+def EditorModel.indentJson (text from to : String) : String :=
+  let i := EditorModel.index text;
+  let a := EditorModel.clampOffset i (EditorModel.natOf from);
+  let b0 := EditorModel.clampOffset i (EditorModel.natOf to);
+  let b := if Nat.lt b0 a then a else b0;
+  let collapsed := Nat.beq a b;
+  let startLine := EditorModel.lineStartAt i (EditorModel.lineOfOffset i a);
+  let endLine := EditorModel.lineEndAt i (EditorModel.lineOfOffset i b);
+  let block := if collapsed then "" else EditorModel.slice i startLine endLine;
+  let indented := String.intercalate "\n" (List.map (fun l => String.append "  " l)
+    (String.splitOn block "\n"));
+  let insert := if collapsed then "  " else indented;
+  let stop := if collapsed then b else endLine;
+  let from := if collapsed then a else startLine;
+  Json.render (Json.mkObj
+    [ ("insert", Json.mkStr insert)
+    , ("from", Json.ofNat from)
+    , ("to", Json.ofNat stop)
+    ])
+
+-- ## The language server's position index
+
+/-- One entry of a check's `index`: a source span (UTF-16 offsets into the editor's text),
+its kind (`term`, `goal` or `decl`) and the answer it carries. The optional fields use a
+`has…` flag so an absent `expected`/`goals` is distinct from an empty one, as the JSON
+protocol's `typeof` checks were. -/
+structure EditorModel.LspEntry where
+  start : Nat
+  stop : Nat
+  kind : String
+  name : String
+  detail : String
+  ckind : Nat
+  hasCkind : Bool
+  expected : String
+  hasExpected : Bool
+  goals : List String
+  hasGoals : Bool
+
+/-- A string field, or `""`. -/
+def EditorModel.jsonStr (j : Json) (key : String) : String := Json.getStr j key
+
+/-- The string elements of an array field, or `[]`. -/
+def EditorModel.jsonStrings (j : Json) (key : String) : List String :=
+  List.map (fun x => match Json.asString x with
+    | .some s => s
+    | .none => "") (Json.getList j key)
+
+/-- Whether a JSON value has a string at `key` (`typeof === "string"`). -/
+def EditorModel.hasStr (j : Json) (key : String) : Bool :=
+  match Json.get j key with
+  | .some v => match Json.asString v with
+    | .some _ => .true
+    | .none => .false
+  | .none => .false
+
+/-- Whether a JSON value has a number at `key` (`typeof === "number"`). -/
+def EditorModel.hasNat (j : Json) (key : String) : Bool :=
+  match Json.get j key with
+  | .some v => match Json.asNat v with
+    | .some _ => .true
+    | .none => .false
+  | .none => .false
+
+/-- `f` over the elements that produce a value, in order. -/
+def EditorModel.filterMapGo {A B : Type} (f : A → Option B) : List A → List B → List B
+  | .nil, acc => List.reverse acc
+  | .cons x xs, acc => match f x with
+    | .some y => EditorModel.filterMapGo f xs (.cons y acc)
+    | .none => EditorModel.filterMapGo f xs acc
+
+/-- The values `f` produces for a list, in order. -/
+def EditorModel.filterMap {A B : Type} (f : A → Option B) (xs : List A) : List B :=
+  EditorModel.filterMapGo f xs []
+
+/-- An entry of the check's index, with its code-point offsets moved into the editor's
+text; well-formed only when both are numbers and `e >= s`. -/
+def EditorModel.lspEntryOf (source : EditorModel.PositionIndex) (prefixLen textLen : Nat)
+    (j : Json) : Option EditorModel.LspEntry :=
+  let s := Json.getNat j "s";
+  let e := Json.getNat j "e";
+  if !(EditorModel.hasNat j "s") || !(EditorModel.hasNat j "e") || !(Nat.le s e)
+  then .none
+  else
+    let start := EditorModel.utf16OffsetFromCodePoints source s;
+    let stop := EditorModel.utf16OffsetFromCodePoints source e;
+    let start := if Nat.lt start prefixLen then 0 else start - prefixLen;
+    let stop := if Nat.lt stop prefixLen then 0 else stop - prefixLen;
+    let start := if Nat.lt textLen start then textLen else start;
+    let stop := if Nat.lt textLen stop then textLen else stop;
+    .some (EditorModel.LspEntry.mk start stop
+      (EditorModel.jsonStr j "kind") (EditorModel.jsonStr j "name")
+      (EditorModel.jsonStr j "detail") (Json.getNat j "ckind")
+      (EditorModel.hasNat j "ckind")
+      (EditorModel.jsonStr j "expected") (EditorModel.hasStr j "expected")
+      (EditorModel.jsonStrings j "goals") (match Json.get j "goals" with
+        | .some (.arr _) => .true
+        | _ => .false))
+
+/-- The check's `index` (the `s`/`e` entries in code-point offsets into `prefix ++ text`)
+as a versioned JSON index, with the editor's line table beside it. -/
+def EditorModel.lspIndexJson (text prefix entriesJson : String) : String :=
+  let source := EditorModel.index (String.append prefix text);
+  let doc := EditorModel.index text;
+  let prefixLen := List.length (EditorModel.units prefix);
+  let entries := match Json.parse entriesJson with
+    | .ok j => Json.asList j
+    | .error _ => [];
+  let kept := EditorModel.filterMap (fun j =>
+    EditorModel.lspEntryOf source prefixLen doc.length j) entries;
+  Json.render (Json.mkObj
+    [ ("v", Json.ofNat 1)
+    , ("version", Json.ofNat 0)
+    , ("length", Json.ofNat doc.length)
+    , ("lines", Json.mkArr (List.map (fun x => Json.ofNat x.toNat) (U32Array.toList doc.lineStarts)))
+    , ("entries", Json.mkArr (List.map (fun e => Json.mkObj
+        [ ("start", Json.ofNat e.start)
+        , ("stop", Json.ofNat e.stop)
+        , ("kind", Json.mkStr e.kind)
+        , ("name", Json.mkStr e.name)
+        , ("detail", Json.mkStr e.detail)
+        , ("ckind", Json.ofNat e.ckind)
+        , ("hasCkind", Json.mkBool e.hasCkind)
+        , ("expected", Json.mkStr e.expected)
+        , ("hasExpected", Json.mkBool e.hasExpected)
+        , ("goals", Json.mkArr (List.map Json.mkStr e.goals))
+        , ("hasGoals", Json.mkBool e.hasGoals)
+        ]) kept))
+    ])
+
+/-- The entries of an index JSON (the reverse of the encoder above). -/
+def EditorModel.lspEntriesOf (json : String) : List EditorModel.LspEntry :=
+  match Json.parse json with
+  | .error _ => []
+  | .ok j => List.map (fun e => EditorModel.LspEntry.mk
+      (Json.getNat e "start") (Json.getNat e "stop")
+      (EditorModel.jsonStr e "kind") (EditorModel.jsonStr e "name")
+      (EditorModel.jsonStr e "detail") (Json.getNat e "ckind")
+      (match Json.get e "hasCkind" with
+        | .some (.bool b) => b
+        | _ => .false)
+      (EditorModel.jsonStr e "expected") (match Json.get e "hasExpected" with
+        | .some (.bool b) => b
+        | _ => .false)
+      (EditorModel.jsonStrings e "goals") (match Json.get e "hasGoals" with
+        | .some (.bool b) => b
+        | _ => .false)) (Json.getList j "entries")
+
+/-- The document index an LSP index JSON carries (its line table). -/
+def EditorModel.lspDocIndex (text json : String) : EditorModel.PositionIndex :=
+  EditorModel.indexFromJson text json
+
+/-- The number of entries an index carries. -/
+def EditorModel.lspIndexSize (json : String) : Nat := List.length (EditorModel.lspEntriesOf json)
+
+partial def EditorModel.lspLookupGo (kind : String) (offset : Nat)
+    (best : Option EditorModel.LspEntry) : List EditorModel.LspEntry →
+    Option EditorModel.LspEntry
+  | .nil => best
+  | .cons e es =>
+    if String.eq e.kind kind && Nat.le e.start offset && Nat.le offset e.stop then
+      match best with
+      | .none => EditorModel.lspLookupGo kind offset (.some e) es
+      | .some b => if Nat.le (e.stop - e.start) (b.stop - b.start)
+          then EditorModel.lspLookupGo kind offset (.some e) es
+          else EditorModel.lspLookupGo kind offset (.some b) es
+    else EditorModel.lspLookupGo kind offset best es
+
+/-- The innermost entry of `kind` containing `offset` (a caret at an entry's end counts;
+ties go to the later entry). -/
+def EditorModel.lspLookup (entries : List EditorModel.LspEntry) (offset : Nat)
+    (kind : String) : Option EditorModel.LspEntry :=
+  EditorModel.lspLookupGo kind offset (.none : Option EditorModel.LspEntry) entries
+
+/-- A span as an LSP range. -/
+def EditorModel.lspRange (i : EditorModel.PositionIndex) (start stop : Nat) : Json :=
+  let a := EditorModel.positionFromOffset i start;
+  let b := EditorModel.positionFromOffset i stop;
+  Json.mkObj
+    [ ("start", Json.mkObj [("line", Json.ofNat a.line), ("character", Json.ofNat a.character)])
+    , ("end", Json.mkObj [("line", Json.ofNat b.line), ("character", Json.ofNat b.character)])
+    ]
+
+/-- `wiz/plainTermGoal`: `{goal, range}` or null. -/
+def EditorModel.lspTermGoalJson (text json : String) (offset : Nat) : String :=
+  let i := EditorModel.lspDocIndex text json;
+  match EditorModel.lspLookup (EditorModel.lspEntriesOf json) offset "term" with
+  | .some e => if e.hasExpected then Json.render (Json.mkObj
+      [ ("goal", Json.mkStr e.expected)
+      , ("range", EditorModel.lspRange i e.start e.stop)
+      ]) else "null"
+  | .none => "null"
+
+/-- A block of lines accumulated for one goal. -/
+partial def EditorModel.splitGoalsGo (lines : List String) (cur : List String)
+    (acc : List String) : List String :=
+  match lines with
+  | .nil => List.reverse (if List.isEmpty cur then acc else .cons
+      (String.trim (String.intercalate "\n" (List.reverse cur))) acc)
+  | .cons line rest =>
+    if String.isEmpty (String.trim line) then
+      if List.isEmpty cur then EditorModel.splitGoalsGo rest [] acc
+      else EditorModel.splitGoalsGo rest []
+        (.cons (String.trim (String.intercalate "\n" (List.reverse cur))) acc)
+    else EditorModel.splitGoalsGo rest (.cons line cur) acc
+
+/-- Split one goal state's text into its goals (blank-line separated, `no goals` and
+empty text as none). -/
+def EditorModel.splitGoals (text : String) : List String :=
+  let trimmed := String.trim text;
+  if String.isEmpty trimmed || String.eq trimmed "no goals" then []
+  else EditorModel.splitGoalsGo (String.splitOn trimmed "\n") [] []
+
+/-- `wiz/plainGoal`: `{goals, rendered, range}` or null (`goals: []` is finished). -/
+def EditorModel.lspGoalJson (text json : String) (offset : Nat) : String :=
+  let i := EditorModel.lspDocIndex text json;
+  match EditorModel.lspLookup (EditorModel.lspEntriesOf json) offset "goal" with
+  | .none => "null"
+  | .some e => if !e.hasGoals then "null"
+    else
+      let goals := List.concat (List.map EditorModel.splitGoals e.goals);
+      let rendered := match goals with
+        | .nil => "no goals"
+        | _ => String.append "```wiz\n" (String.append
+            (String.intercalate "\n\n" goals) "\n```");
+      Json.render (Json.mkObj
+        [ ("goals", Json.mkArr (List.map Json.mkStr goals))
+        , ("rendered", Json.mkStr rendered)
+        , ("range", EditorModel.lspRange i e.start e.stop)
+        ])
+
+/-- The declarations the checked module added, in source order: `{label, kind, detail,
+range}` (kind is an LSP `CompletionItemKind`). -/
+def EditorModel.lspDeclarationsJson (text json : String) : String :=
+  let i := EditorModel.lspDocIndex text json;
+  let decls := List.filter (fun e => String.eq e.kind "decl" && !(String.isEmpty e.name))
+    (EditorModel.lspEntriesOf json);
+  Json.render (Json.mkArr (List.map (fun e => Json.mkObj
+    [ ("label", Json.mkStr e.name)
+    , ("kind", Json.ofNat (if e.hasCkind then e.ckind else 6))
+    , ("detail", Json.mkStr e.detail)
+    , ("range", EditorModel.lspRange i e.start e.stop)
+    ]) decls))
+
+/-- The declaration a source name denotes: an exact label, else a unique suffix match
+(`mk` for `T.mk`, as a constructor is used after a dot). -/
+def EditorModel.lspDeclarationJson (text json name : String) : String :=
+  let decls := List.filter (fun e => String.eq e.kind "decl" && !(String.isEmpty e.name))
+    (EditorModel.lspEntriesOf json);
+  let exact := List.find (fun e => String.eq e.name name) decls;
+  let found : Option EditorModel.LspEntry := match exact with
+    | .some e => .some e
+    | .none =>
+      let suffix := List.filter (fun e => String.endsWith e.name (String.append "." name)) decls;
+      match suffix with
+      | .cons one rest => match rest with
+        | .nil => .some one
+        | _ => .none
+      | .nil => .none;
+  match found with
+  | .none => "null"
+  | .some e =>
+    let i := EditorModel.lspDocIndex text json;
+    Json.render (Json.mkObj
+      [ ("label", Json.mkStr e.name)
+      , ("kind", Json.ofNat (if e.hasCkind then e.ckind else 6))
+      , ("detail", Json.mkStr e.detail)
+      , ("range", EditorModel.lspRange i e.start e.stop)
+      ])

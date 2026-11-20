@@ -1,4 +1,5 @@
 import Hdl.Core
+import Hdl.Mem
 import Vec
 /-!
 # Hdl.Bus
@@ -103,20 +104,17 @@ def Bus.ReqW.ofReq {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.Req aw d
     (Hw.lit (Nat.div dw 8) (Nat.sub (Nat.pow 2 (Nat.div dw 8)) 1))
 
 /-- The byte mask of a strobe: bit `8 * k` through `8 * k + 7` are set when strobe bit
-`k` is. Built with slices, a byte-wide `mux` and a constant shift, so it is in the same
-synthesisable subset as the rest of `Hdl.Bus` (no loops over widths at run time). -/
-def Bus.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) : (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw)
-  | .zero, _, _ => Hw.lit dw 0
-  | .succ fuel, i, strb =>
-    let bit := Hw.slice i 1 strb;
-    let byte := Hw.mux bit (Hw.lit dw 255) (Hw.lit dw 0);
-    let shifted := Hw.shlBy byte (Hw.lit dw (8 * i));
-    Hw.or shifted (Bus.byteMaskAux dw nb fuel (Nat.succ i) strb)
+`k` is. It is `Mem.byteMaskAux` (`Hdl.Mem`): one implementation of the mask, in the same
+synthesisable subset as the rest of `Hdl.Bus` (slices, a byte-wide `mux` and constant
+shifts, no loops over widths at run time). -/
+def Bus.byteMaskAux {r : HwTy → Type} [Hw r] (dw nb : Nat) :
+    (fuel i : Nat) → r (HwTy.bits nb) → r (HwTy.bits dw) :=
+  Mem.byteMaskAux (r := r) dw nb
 
 /-- `Bus.byteMask dw nb strb`: a `dw`-bit mask from `nb` byte strobes (`nb = dw / 8`
-for a bus). -/
+for a bus). It is `Mem.byteMask`, so a RAM and a bus agree on what a strobe means. -/
 def Bus.byteMask {r : HwTy → Type} [Hw r] {ω dw nb : Nat} (strb : r (HwTy.bits nb)) : r (HwTy.bits dw) :=
-  Bus.byteMaskAux dw nb nb 0 strb
+  Mem.byteMask strb
 
 /-- A response that is not answering anything. -/
 def Bus.noResp {r : HwTy → Type} [Hw r] {ω dw : Nat} : Bus.Resp dw r :=
@@ -527,22 +525,66 @@ def Bus.ramC (shift aw ab dw : Nat) : Circuit (Bus.Req.code aw dw) (Bus.Resp.cod
   Circuit.bundled (Bus.Ram.bundle ab dw) (Bus.Req.bundle aw dw) (Bus.Resp.bundle dw)
     (Bus.ramInit ab dw) (fun s q => Bus.ramStep shift ab dw s q)
 
+/-- The byte-enabled RAM's take signal: the request is answered in this cycle exactly
+when it is offered and the wait counter has reached 2. It is also the write enable, so
+the store of an answered write lands at this cycle's clock edge. Before it is high the
+request is held (the source holds `valid`), and no second request is taken. -/
+def Bus.ramWGo {r : HwTy → Type} [Hw r] {ω aw ab dw : Nat}
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) : r Bus.Bit :=
+  Hw.and q.valid (Bus.isK s.wait 2)
+
+/-- The word index of a byte-enabled request: the `ab` bits of `addr` from bit `shift`. -/
+def Bus.ramWIndex {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (shift ab : Nat)
+    (q : Bus.ReqW aw dw r) : r (HwTy.bits ab) :=
+  Hw.slice shift ab q.addr
+
+/-- The data-width mask of a request's byte strobes (`Mem.byteMask`). -/
+def Bus.ramWMask {r : HwTy → Type} [Hw r] {ω aw dw : Nat} (q : Bus.ReqW aw dw r) :
+    r (HwTy.bits dw) :=
+  Mem.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb
+
+/-- The word a write stores: `wdata` in the enabled bytes, the old word in the rest
+(`Mem.merge`). -/
+def Bus.ramWMerged {r : HwTy → Type} [Hw r] {ω aw ab dw : Nat} (shift : Nat)
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) : r (HwTy.bits dw) :=
+  Mem.merge (Hw.memRead s.cells (Bus.ramWIndex shift ab q)) q.wdata (Bus.ramWMask q)
+
+/-- The next wait counter: 0 after an answered request or after the source drops
+`valid` (the request is withdrawn, so nothing is left in flight), otherwise the count
+towards 2. -/
+def Bus.ramWWait {r : HwTy → Type} [Hw r] {ω aw ab dw : Nat}
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) : r (HwTy.bits 2) :=
+  Hw.mux q.valid
+    (Hw.mux (Bus.ramWGo s q) (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1)))
+    (Hw.lit 2 0)
+
+/-- The next state of the byte-enabled RAM: the masked write when the request is taken,
+else the cells unchanged; the wait counter as `Bus.ramWWait`. -/
+def Bus.ramWNext {r : HwTy → Type} [Hw r] {ω aw ab dw : Nat} (shift : Nat)
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) : Bus.Ram ab dw r :=
+  Bus.Ram.mk
+    (Hw.memWrite s.cells (Hw.and (Bus.ramWGo s q) q.we)
+      (Bus.ramWIndex shift ab q) (Bus.ramWMerged shift s q))
+    (Bus.ramWWait s q)
+
+/-- The answer of the byte-enabled RAM: `ready` (`and` `rvalid` for a read) in the
+answering cycle, with the word read from the cells *before* this cycle's store. There is
+no read-during-write bypass: a read in the answering cycle sees the old word, and the
+masked write is visible to a request that is offered (and answered) after it. -/
+def Bus.ramWOut {r : HwTy → Type} [Hw r] {ω aw ab dw : Nat} (shift : Nat)
+    (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) : Bus.Resp dw r :=
+  let go := Bus.ramWGo s q;
+  Bus.Resp.mk go (Hw.and go (Hw.not q.we))
+    (Hw.memRead s.cells (Bus.ramWIndex shift ab q)) (Hw.lit 1 0)
+
 /-- One cycle of the byte-enabled RAM. It is `Bus.ramStep` with a write mask: the word
 written is `wdata` in the enabled bytes and the old word in the others. Reads answer with
 the old word (the store lands at the clock edge, after this cycle's read). -/
 def Bus.ramWStep {r : HwTy → Type} [Hw r] {ω aw : Nat} (shift ab dw : Nat)
     (s : Bus.Ram ab dw r) (q : Bus.ReqW aw dw r) :
     r (HwTy.prod (Bus.Ram.code ab dw) (Bus.Resp.code dw)) :=
-  let go := Hw.and q.valid (Bus.isK s.wait 2);
-  let ix : r (HwTy.bits ab) := Hw.slice shift ab q.addr;
-  let old := Hw.memRead s.cells ix;
-  let mask := Bus.byteMask (dw := dw) (nb := Nat.div dw 8) q.wstrb;
-  let merged := Hw.or (Hw.and old (Hw.not mask)) (Hw.and q.wdata mask);
-  Hw.pair
-    (Bus.Ram.pack ab dw (Bus.Ram.mk
-      (Hw.memWrite s.cells (Hw.and go q.we) ix merged)
-      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (Hw.add s.wait (Hw.lit 2 1))) (Hw.lit 2 0))))
-    (Bus.Resp.pack dw (Bus.Resp.mk go (Hw.and go (Hw.not q.we)) old (Hw.lit 1 0)))
+  Hw.pair (Bus.Ram.pack ab dw (Bus.ramWNext shift s q))
+    (Bus.Resp.pack dw (Bus.ramWOut shift s q))
 
 /-- The byte-enabled RAM as a circuit. -/
 def Bus.ramWC (shift aw ab dw : Nat) : Circuit (Bus.ReqW.code aw dw) (Bus.Resp.code dw) :=

@@ -1,0 +1,80 @@
+{
+  "schema": "wiz.widget/1",
+  "kind": "scry.analysis",
+  "mimeType": "text/html",
+  "title": "claim calls-recorded: refuted",
+  "summary": "1 of 2 call_expression node(s) are not in the call relation",
+  "html": "<div class=\"wiz-widgets\" data-wiz-widget-root=\"\"><div class=\"wiz-widget wiz-button\" data-wiz-widget=\"claim\" data-wiz-widget-kind=\"button\" data-wiz-widget-event=\"click\" data-wiz-widget-value=\"refuted\"><button type=\"button\">claim calls-recorded: refuted</button></div><div class=\"wiz-widget wiz-button\" data-wiz-widget=\"finding-a_7\" data-wiz-widget-kind=\"button\" data-wiz-widget-event=\"click\" data-wiz-widget-value=\"7\"><button type=\"button\">node 7 (call_expression) at [4,14) in beta.c</button></div><div class=\"wiz-widget wiz-plot\" data-wiz-widget=\"paths\" data-wiz-widget-kind=\"plot\" data-wiz-widget-event=\"click\" data-wiz-widget-value=\"\"><div class=\"wiz-plot-canvas\"></div><output class=\"wiz-widget-value\">{\"name\":\"calls-recorded\",\"status\":\"refuted\"}</output></div></div>",
+  "widgets": [
+    {
+      "id": "claim",
+      "kind": "button",
+      "event": "click",
+      "value": "refuted",
+      "label": "claim calls-recorded: refuted",
+      "callback": "Scry.analysisNoop",
+      "min": "",
+      "max": "",
+      "step": "",
+      "data": ""
+    },
+    {
+      "id": "finding-a_7",
+      "kind": "button",
+      "event": "click",
+      "value": "7",
+      "label": "node 7 (call_expression) at [4,14) in beta.c",
+      "callback": "Scry.analysisNoop",
+      "min": "",
+      "max": "",
+      "step": "",
+      "data": ""
+    },
+    {
+      "id": "paths",
+      "kind": "plot",
+      "event": "click",
+      "value": "{\"name\":\"calls-recorded\",\"status\":\"refuted\"}",
+      "label": "plot",
+      "callback": "Scry.analysisNoop",
+      "min": "",
+      "max": "",
+      "step": "",
+      "data": "{\"name\":\"calls-recorded\",\"status\":\"refuted\",\"summary\":\"1 of 2 call_expression node(s) are not in the call relation\",\"findings\":[{\"id\":\"a_7\",\"claim\":\"calls-recorded\",\"message\":\"node 7 (call_expression) at [4,14) in beta.c\",\"file\":\"beta.c\",\"node\":7,\"span\":[4,14]}]}"
+    }
+  ],
+  "count": 3,
+  "scry": {
+    "schema": "scry.analysis/1",
+    "claim": {
+      "name": "calls-recorded",
+      "status": "refuted",
+      "summary": "1 of 2 call_expression node(s) are not in the call relation",
+      "findings": [
+        {
+          "id": "a_7",
+          "claim": "calls-recorded",
+          "message": "node 7 (call_expression) at [4,14) in beta.c",
+          "file": "beta.c",
+          "node": 7,
+          "span": [4, 14]
+        }
+      ]
+    },
+    "findings": [
+      {
+        "id": "a_7",
+        "claim": "calls-recorded",
+        "message": "node 7 (call_expression) at [4,14) in beta.c",
+        "file": "beta.c",
+        "node": 7,
+        "span": [4, 14]
+      }
+    ],
+    "graph": {
+      "nodes": 9,
+      "edges": 5,
+      "relationRows": 8
+    }
+  }
+}

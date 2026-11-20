@@ -1,33 +1,18 @@
-// (11s) The search box's ranking and result rendering, without a browser: loads
-// web/scroll-search.js with a tiny DOM stub and a two-row index, then checks that a
-// name, a doc comment and a signature each find their declaration, and that a miss says
-// so. Used by web/test.sh (no emcc or Chromium needed for this part).
+// (11s) The search box's ranking and result rendering, without a browser: the fixture
+// `web/search_gen.wiz` renders `lib/Web/Search.wiz` from a two-row index, then the checks
+// are the same ones the old JavaScript renderer had.
+//   usage: node web/scroll-search_test.mjs FIXTURE.json
 import { readFileSync } from "node:fs";
-import vm from "node:vm";
-
-const listeners = {};
-const box = { value: "", addEventListener: (k, f) => { listeners["box:" + k] = f; } };
-const out = { hidden: true, innerHTML: "", contains: () => false };
-const document = {
-  getElementById: (id) => (id === "search" ? box : id === "results" ? out : null),
-  addEventListener: (k, f) => { listeners["doc:" + k] = f; },
-  activeElement: null,
-};
-const window = {
-  wizSearchIndex: [
-    { n: "Point", m: "Shapes", k: "structure", d: "A point in the *plane*.", s: "Type", u: "Shapes.html#Point" },
-    { n: "area", m: "Shapes", k: "def", d: "The area of a circle.", s: "Circle → Nat", u: "Shapes.html#area" },
-  ],
-};
-vm.runInContext(readFileSync(new URL("./scroll-search.js", import.meta.url), "utf8"),
-  vm.createContext({ window, document, location: { href: "" } }));
-const search = (q) => { box.value = q; listeners["box:input"](); return out.innerHTML; };
-const want = (cond, what) => {
-  if (!cond) { console.error("scroll-search: " + what); process.exit(1); }
-};
-want(search("point").includes("Shapes.html#Point"), "a name match");
-want(search("plane").includes("Shapes.html#Point"), "a doc-comment match");
-want(search("Circle").includes("Shapes.html#area"), "a signature match");
-want(search("plane").includes('class="where">docs'), "the matched field is shown");
-want(search("zzz").includes("No declarations"), "the empty result");
+const fixture = JSON.parse(readFileSync(process.argv[2], "utf-8"));
+let failed = 0;
+function want(name, condition, detail) {
+  if (condition) console.log(`ok: ${name}`);
+  else { failed++; console.log(`FAIL: ${name}${detail ? "\n  " + detail : ""}`); }
+}
+want("a name match", fixture.name.includes("Shapes.html#Point"), fixture.name);
+want("a doc-comment match", fixture.docs.includes("Shapes.html#Point"), fixture.docs);
+want("a signature match", fixture.signature.includes("Shapes.html#area"), fixture.signature);
+want("the matched field is shown", fixture.docs.includes('class="where">docs'), fixture.docs);
+want("the empty result", fixture.miss.includes("No declarations"), fixture.miss);
+if (failed) { console.log(`scroll-search: ${failed} check(s) failed`); process.exit(1); }
 console.log("scroll-search: all checks passed");

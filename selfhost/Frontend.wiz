@@ -10229,11 +10229,11 @@ def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
-    (input : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
+    (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
   let start := skipWs input pos;
   match Nat.lt start (Array.size input) with
   | .false => .done
-  | .true => match parseCommandAt cats tokens input pos with
+  | .true => match parseCommandAtLines cats tokens input cols pos with
     | .err m => .next (atLine start (.some (String.append "parse " m))) (Array.size input) gs cats tokens notes
     | .ok stx0 stop =>
       -- (D8 goals) the command's source range, for the language server's entries
@@ -10248,7 +10248,8 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
     -- before the file: skip it (only the Prelude, when checking one file, is inline)
     | .true => match inlineImports with
       | .false => .next .none stop gs cats tokens notes
-      | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes (String.codes preludeText) 0
+      | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes
+          (String.codes preludeText) (columns (String.codes preludeText)) 0
           (Globals.setWatch gs .false) .nil with
         | .mk _ gs' cats' tokens' notes' => .next .none stop (Globals.setWatch gs' (Globals.watch gs)) cats' tokens' notes'
     | .false =>
@@ -10324,10 +10325,10 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
             | .true => .none
             | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
-    (input : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
-  match stepCommand inlineImports cats tokens notes input pos gs with
+    (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
+  match stepCommand inlineImports cats tokens notes input cols pos gs with
   | .done => .mk out gs cats tokens notes
-  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports cats' tokens' notes' input stop gs' (match line with
+  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports cats' tokens' notes' input cols stop gs' (match line with
     | .some l => .cons l out
     | .none => out)
 end
@@ -10397,8 +10398,9 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- (21n) the one-shot file is one module, `input`: a `private` name is private to it (and
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFileOpts (cats : List Cat) (tokens : List String) (trust smtTrust : Bool) (text : String) : List String :=
+  let input := String.codes text;
   match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
-      (String.codes text) 0
+      input (columns input) 0
       (Globals.withSmtTrust (Globals.withTrust (Globals.setModule Globals.empty "input") trust) smtTrust) .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
 -- (C14) `--trust-native` alone: the branch's checker tests use this name
@@ -10494,17 +10496,18 @@ def modCanonical (name : String) : String :=
     | .false => match strEq name "Sys" with
       | .true => "Prelude"
       | .false => name
-partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat) : List String :=
+partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array Nat) (cols : Array Nat) (pos : Nat) : List String :=
   match Nat.lt (skipWs input pos) (Array.size input) with
   | .false => .nil
-  | .true => match parseCommandAt cats tokens input pos with
+  | .true => match parseCommandAtLines cats tokens input cols pos with
     | .err _ => .nil
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
-      | .true => .cons (modCanonical (identOf'' (kid stx 1))) (modImportsAt cats tokens input stop)
-      | .false => modImportsAt cats tokens input stop
+      | .true => .cons (modCanonical (identOf'' (kid stx 1))) (modImportsAt cats tokens input cols stop)
+      | .false => modImportsAt cats tokens input cols stop
 
 def moduleImports (cats : List Cat) (tokens : List String) (text : String) : List String :=
-  modImportsAt cats tokens (String.codes text) 0
+  let input := String.codes text;
+  modImportsAt cats tokens input (columns input) 0
 
 -- the module an import is written in (the head of the loader's stack; `Main` at the top)
 def modImporting : List String → String
@@ -10513,24 +10516,25 @@ def modImporting : List String → String
 
 -- the offset of the `import M` command that named `name` (0 when it is not found: the
 -- loader's own errors — a missing module, a cycle — are reported at that import, D6)
-partial def modImportAt (cats : List Cat) (tokens : List String) (input : Array Nat) (pos : Nat)
+partial def modImportAt (cats : List Cat) (tokens : List String) (input : Array Nat) (cols : Array Nat) (pos : Nat)
     (name : String) : Nat :=
   match Nat.lt (skipWs input pos) (Array.size input) with
   | .false => 0
-  | .true => match parseCommandAt cats tokens input pos with
+  | .true => match parseCommandAtLines cats tokens input cols pos with
     | .err _ => 0
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
       | .true => match strEq (modCanonical (identOf'' (kid stx 1))) name with
         | .true => skipWs input pos
-        | .false => modImportAt cats tokens input stop name
-      | .false => modImportAt cats tokens input stop name
+        | .false => modImportAt cats tokens input cols stop name
+      | .false => modImportAt cats tokens input cols stop name
 
 -- the offset of the import of `name` in the module at the head of the loader's stack
 def modImportOffset (tab : List ModSrc) (run : Run) (stack : List String) (name : String) : Nat :=
   match modFind tab (modImporting stack) with
   | .none => 0
   | .some (.mk _ _ t _) =>
-    modImportAt (Run.catsOf run) (Run.tokensOf run) (String.codes t) 0 name
+    let input := String.codes t;
+    modImportAt (Run.catsOf run) (Run.tokensOf run) input (columns input) 0 name
 
 -- (the cache key) the modules in load order: each module's name and text, mixed into a
 -- number (a rolling hash; the real cache, D5, also keys on the frontend's version)
@@ -10596,12 +10600,14 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- (D8 goals) each module's entries start empty; the root (`Main`) is loaded last, so
   -- the graph's globals end with the document's own entries.
   let gs0 := Globals.lspReset (Globals.setModule (Run.gs r) name);
+  let input := String.codes text;
+  let cols := columns input;
   let r' := match strEq name "Prelude" with
     | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
-        (Run.notesOf r) (String.codes text) 0 gs0 .nil with
+        (Run.notesOf r) input cols 0 gs0 .nil with
       | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
     | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
-        (String.codes text) 0 gs0 (Run.out r);
+        input cols 0 gs0 (Run.out r);
   match r' with
   | .mk out gs' cats' tokens' notes' =>
     .mk (tagFirst name (Nat.sub (List.length out) (List.length (Run.out r))) out) gs' cats' tokens' notes'

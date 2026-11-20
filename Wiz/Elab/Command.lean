@@ -3019,25 +3019,77 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       let t ← zonk 0 t
       ensureNoMVars t cmd.info
       pure t
+    -- `Repr`: when the value's type has a `Repr` instance (lib/Deriving.wiz), run
+    -- `Repr.repr e` instead of reading the value back as a term, so `#eval [1, 2, 3]`
+    -- prints a list literal. The wrapper is elaborated in its own run; if there is no
+    -- instance (or no `Repr` class in scope) the old readback path is used.
+    let reprStx : Syntax :=
+      .node {} "term.app"
+        #[.node {} "term.ident" #[.ident {} "Repr.repr"], .node {} "null" #[cmd.getArg 1]]
+    let reprTerm? : Option (Term R) :=
+      if s.globals.contains "Repr.repr" then
+        match (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+            let (t, _) ← Elab.infer {} reprStx
+            solveSortConstraints
+            let t ← zonk 0 t
+            ensureNoMVars t cmd.info
+            pure t).1 with
+        | .ok t => some t
+        | .error _ => none
+      else none
     match r with
     | .error e => reportErr e
     | .ok t =>
       -- (the sorts pass first: the kernel checks the term erasure is given)
       let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
       let ctx : Ctx R := { globals := s.globals, proof := true }
-      let result := do
-        let (ty, _) ← Wiz.infer ctx t
-        let e ← eraseTop ctx t ty
-        let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
-        pure (ty, e, code, failed)
-      match result with
-      | .ok (_, _, _, (n, err) :: _) =>
-        -- the interpreter can't fail: running a stub would print a wrong value
-        report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
-      | .ok (ty, e, code, []) =>
-        let v := run code [] e
-        report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
-      | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let plain : StateM (CommandState R) Unit := do
+        let result := do
+          let (ty, _) ← Wiz.infer ctx t
+          let e ← eraseTop ctx t ty
+          let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+          pure (ty, e, code, failed)
+        match result with
+        | .ok (_, _, _, (n, err) :: _) =>
+          -- the interpreter can't fail: running a stub would print a wrong value
+          report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+        | .ok (ty, e, code, []) =>
+          let v := run code [] e
+          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+        | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let hintOf (ty : VTy R) : Option Name := match whnf ty with
+        | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
+        | .nu _ _ _ _ _ (some (T, _, _)) => some T
+        | _ => none
+      -- Inductive types are anonymous `μ`s and `Enum` tags are metadata, so two
+      -- structurally equal types share their instances: a two-constructor enum declared
+      -- after `Bool` shadows `Repr Bool`, and the last instance wins (7b). `Bool` keeps
+      -- its constructor readback (`.true`), the stable spelling; a list of Bools still
+      -- goes through the list instance.
+      let keepReadback : Bool :=
+        match (Wiz.infer ctx t).toOption with
+        | some (ty, _) => hintOf ty == some "Bool"
+        | none => false
+      let reprRun : StateM (CommandState R) Unit := do
+        match reprTerm? with
+        | none => plain
+        | some rt => do
+          let rt := if rt.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } rt).1 else rt
+          let result := do
+            let (ty, _) ← Wiz.infer ctx rt
+            let e ← eraseTop ctx rt ty
+            let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+            pure (ty, e, code, failed)
+          match result with
+          | .ok (_, _, _, (n, err) :: _) =>
+            report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+          | .ok (_, e, code, []) =>
+            -- the Repr method returns a `String`: print its text, not the term readback
+            match (run code [] e).toString? with
+            | some text => report .info cmd.info text
+            | none => plain
+          | .error _ => plain
+      if keepReadback then plain else reprRun
   | "command.plot" =>
     -- `#plot expr`: elaborate the chart, then run `Plot.widget` on it and report the
     -- `WIZ_WIDGET:` display value as a message at the command (the infoview turns such

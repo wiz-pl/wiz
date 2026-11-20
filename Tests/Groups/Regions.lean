@@ -107,6 +107,23 @@ def tBoth : Result (Nat × (Nat × Nat)) :=
   Uniq.borrow Region.static (1, 2) (fun ρ h l r => both1 r)
 "#
 
+/-- A returned borrow's spec as `final result` desugars it: one lender scope, the borrow
+consumed (`Mut.close`) inside it; `final(result)` is the quantified `fin`, and the lender
+comes back with `st.2 fin`. -/
+def regionsFinal : String :=
+  "def ret_self {0 ρ : Region} (1 v : Uniq ρ Nat) : Borrowed (Mut ρ Nat Nat) (Uniq ρ Nat) :=\n" ++
+  "  Borrowed.ok (Mut.whole v)\n" ++
+  "def ret_self.Spec (v : Nat) : Prop :=\n" ++
+  "  (fin : Nat) → Result.Holds (fun (r : (Nat × Nat)) => (r.1 = v) × (r.2 = fin)) (\n" ++
+  "    Uniq.borrow Region.static v (fun ρ1 h1 l1 v =>\n" ++
+  "      match ret_self v with\n" ++
+  "      | .ok m =>\n" ++
+  "        let 1 (cur, m) := Mut.peek m;\n" ++
+  "        let 1 u := Mut.close m fin;\n" ++
+  "        .ok cur u\n" ++
+  "      | .err e u => .err e u))\n" ++
+  "def ret_self.spec_holds (v : Nat) : ret_self.Spec v := fun fin => (rfl, rfl)\n"
+
 /-- The front end's state for `src`, with every library importable. -/
 def libsState (src : String) (unbox : Bool := false) : IO (CommandState ZeroOneMany) := do
   let s := runFrontend (R := ZeroOneMany) src
@@ -240,6 +257,49 @@ def regionsGroup : Group where
     { name := "shared reborrows, zooms and pair borrows keep the lender and hand it back", run := fun _ =>
         okLibs ("import Region\n" ++ regionsOptics ++ "#eval tShare\n#eval tShareIn\n#eval tZoom\n#eval tBoth")
           [".ok (2, .cons 1 (.cons 2 .nil))", ".ok ((1, .cons 3 .nil), 5)", ".ok (1, 9, 2, ())", ".ok (3, 1, 2)"] },
+    { name := "the profunctor bridges: Uniq.zoomP, Mut.ofLensP and MutOpt.ofPrism keep the lender", run := fun _ =>
+        okLibs ("import Region\nimport Logic\n" ++
+          "def coprodPrism : PrismP (Coprod Nat Bool) (Coprod Nat Bool) Nat Nat :=\n" ++
+          "  prism (fun c => match c with | .inl a => .inl a | .inr b => .inr (.inr b)) (fun a => .inl a)\n" ++
+          "def showC : Coprod Nat Bool → String\n" ++
+          "  | .inl n => \"inl \" ++ Nat.repr n\n  | .inr b => match b with | .true => \"inr true\" | .false => \"inr false\"\n" ++
+          "def somePrismTest {0 ρ : Region} (1 r : Uniq ρ (Coprod Nat Bool)) : Result1 Nat (Uniq ρ (Coprod Nat Bool)) :=\n" ++
+          "  match MutOpt.ofPrism r coprodPrism with\n" ++
+          "  | .some m => let 1 (x, m) := Mut.peek m; let 1 u := Mut.release (Mut.set m 9); .ok x u\n" ++
+          "  | .none u => .ok 0 u\n" ++
+          "def tSome : Result (Nat × Coprod Nat Bool) :=\n" ++
+          "  Uniq.borrow Region.static (Coprod.inl 5) (fun ρ h l r => somePrismTest r)\n" ++
+          "def tNone : Result (Nat × Coprod Nat Bool) :=\n" ++
+          "  Uniq.borrow Region.static (Coprod.inr Bool.true) (fun ρ h l r => somePrismTest r)\n" ++
+          "#eval match tSome with | .ok (n, c) => \"some \" ++ Nat.repr n ++ \" \" ++ showC c | .err e => \"err\"\n" ++
+          "#eval match tNone with | .ok (n, c) => \"none \" ++ Nat.repr n ++ \" \" ++ showC c | .err e => \"err\"\n" ++
+          "def fstP : LensP (Pair2 Nat Nat) (Pair2 Nat Nat) Nat Nat := LensP.ofLens Pair2.fstL\n" ++
+          "def zoomP1 {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=\n" ++
+          "  Uniq.zoomP fstP p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))\n" ++
+          "def borrowP {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=\n" ++
+          "  let 1 m := Mut.ofLensP p fstP;\n" ++
+          "  let 1 (n, m) := Mut.peek m;\n" ++
+          "  let 1 u := Mut.release (Mut.set m 9);\n" ++
+          "  .ok n u\n" ++
+          "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => zoomP1 r)\n" ++
+          "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => borrowP r)")
+          ["\"some 5 inl 9\"", "\"none 0 inr true\"", ".ok (1, 9, 2, ())", ".ok (1, 9, 2, ())"] },
+    { name := "a returned borrow's spec: one scope consumes it (final result); double consume and use after the scope are still rejected", run := fun _ => do
+        okLibs ("import Region\n" ++ regionsFinal ++
+          "#eval Uniq.borrow Region.static 3 (fun ρ h l v =>\n" ++
+          "  match ret_self v with\n" ++
+          "  | .ok m => let 1 (cur, m) := Mut.peek m; let 1 u := Mut.close m 9; .ok cur u\n" ++
+          "  | .err e v => .err e v)\n") [".ok (3, 9)"]
+        -- the borrow is consumed once, inside the scope: a second consume is a quantity
+        -- error, not a silently duplicated handle
+        failsLibs ("import Region\n" ++ regionsFinal ++
+          "def bad {0 ρ : Region} (1 m : Mut ρ Nat Nat) : Nat :=\n" ++
+          "  Nat.add (Mut.finish m) (Mut.finish m)\n") "quantity"
+        -- a use after the borrow was closed is rejected too
+        failsLibs ("import Region\n" ++ regionsFinal ++
+          "def bad {0 ρ : Region} (1 m : Mut ρ Nat Nat) : Nat :=\n" ++
+          "  let 1 u := Mut.close m 1;\n" ++
+          "  Uniq.end u (fun x => Nat.add (Mut.finish m) x)\n") "quantity" },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
           "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++

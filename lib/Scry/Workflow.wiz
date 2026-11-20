@@ -1,6 +1,7 @@
 import Json
 import Text
 import Scry.Rules
+import Scry.Identity
 import Scry.Sarif
 /-!
 # Scry.Workflow: finding identity, triage and the local evidence store
@@ -33,89 +34,44 @@ deliberate review event, not a silent match.
 
 -- ## Identity
 
-/-- Normalize a path for identity: forward slashes, no leading `./`. Absolute paths are
-kept (the caller should pass a repository-relative path when it has one). -/
-def Scry.wfNormalizePath (p : String) : String :=
-  let q := String.replace p "\\" "/";
-  match String.stripPrefix q "./" with
-  | .some r => r
-  | .none => q
+-- The hash, path normalizer, semantic key/id and line hash are `Scry.Identity`'s. The
+-- `wf*` names stay because the workflow store, the reports and the REPL use them; each
+-- is a delegation, not a second implementation.
 
-/-- Collapse runs of whitespace to one space and trim: the normalized primary line. -/
-partial def Scry.wfNormLineGo (lastSpace : Bool) : List Char → List Char
-  | .nil => .nil
-  | .cons c cs =>
-    match Char.isSpace c with
-    | .true =>
-      match lastSpace with
-      | .true => Scry.wfNormLineGo .true cs
-      | .false => List.cons (Char.mk 32) (Scry.wfNormLineGo .true cs)
-    | .false => List.cons c (Scry.wfNormLineGo .false cs)
+/-- Normalize a path for identity (alias of `Scry.normPath`). -/
+def Scry.wfNormalizePath (p : String) : String := Scry.normPath p
 
-/-- The normalized primary line: whitespace runs collapsed, trimmed. -/
-def Scry.wfNormLine (s : String) : String :=
-  String.trim (String.ofChars (Scry.wfNormLineGo .false (String.chars s)))
+/-- The normalized primary line (alias of `Scry.normLine`). -/
+def Scry.wfNormLine (s : String) : String := Scry.normLine s
 
-/-- FNV-1a over a string's code points, modulo 2^64. Not a cryptographic hash; the
-record says `fnv1a64` next to it so nothing claims otherwise. -/
-def Scry.wfFnvStep (h : Nat) (c : Char) : Nat :=
-  Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) (Nat.pow 2 64)
+/-- The 64-bit identity hash (alias of `Scry.fnv`). -/
+def Scry.wfFnv (s : String) : Nat := Scry.fnv s
 
-def Scry.wfFnv (s : String) : Nat :=
-  List.foldl Scry.wfFnvStep 14695981039346656037 (String.chars s)
+/-- The 16-hex-digit rendering (alias of `Scry.hex16`). -/
+def Scry.wfHex (n : Nat) : String := Scry.hex16 n
 
-/-- 16 lower-case hex digits (64 bits). -/
-partial def Scry.wfHexGo (n : Nat) (fuel : Nat) : List Char :=
-  match fuel with
-  | .zero => .nil
-  | .succ k =>
-    List.cons (Json.hexDigit (Nat.mod n 16)) (Scry.wfHexGo (Nat.div n 16) k)
+/-- The coarse role path (alias of `Scry.pathShape`). -/
+def Scry.wfPathShape (path : List Scry.PathNode) : String := Scry.pathShape path
 
-/-- A stable 16-hex-digit rendering of an FNV-1a value. -/
-def Scry.wfHex (n : Nat) : String :=
-  String.ofChars (List.reverse (Scry.wfHexGo n 16))
+def Scry.wfFirstFunc (path : List Scry.PathNode) : String := Scry.firstFunc path
 
-/-- The coarse role path (`source>flow>sink`): roles, not program points. -/
-def Scry.wfPathShape (path : List Scry.PathNode) : String :=
-  String.intercalate ">" (List.map (fun p => Scry.PathKind.show p.kind) path)
+def Scry.wfLastFunc (path : List Scry.PathNode) : String := Scry.lastFunc path
 
-def Scry.wfFirstFunc : List Scry.PathNode → String
-  | .nil => ""
-  | .cons p _ => p.func
-
-def Scry.wfLastFunc : List Scry.PathNode → String
-  | .nil => ""
-  | .cons p .nil => p.func
-  | .cons _ ps => Scry.wfLastFunc ps
-
-/-- The identity inputs, rendered for debugging and for the record. No line, column,
-program point or timestamp. The source callee is not carried by `RuleFinding` today
-(`PathNode` has `func`/`point`/`var`/`kind` only); the path shape and the first function
-are the available coarse source identity. -/
+/-- The identity inputs (alias of `Scry.semanticKey`), rendered for debugging and for
+the record. No line, column, program point or timestamp. -/
 def Scry.wfSemanticKey (f : Scry.RuleFinding) (file : String) : String :=
-  String.intercalate "|"
-    [ String.append "scry/c/" f.rule
-    , Scry.wfNormalizePath file
-    , f.func
-    , f.name
-    , Nat.repr f.arg
-    , Scry.wfPathShape f.path
-    , Scry.wfFirstFunc f.path
-    , Scry.wfLastFunc f.path ]
+  Scry.semanticKey f file
 
-/-- `f_<16 hex>`: the semantic id. -/
+/-- `f_<16 hex>`: the semantic id (alias of `Scry.semanticId`). -/
 def Scry.wfId (f : Scry.RuleFinding) (file : String) : String :=
-  String.append "f_" (Scry.wfHex (Scry.wfFnv (Scry.wfSemanticKey f file)))
+  Scry.semanticId f file
 
-/-- The GitHub-compatible line identity: rule + normalized primary line + function. A
-whitespace-only change keeps it; a line move keeps it (there is no line number); a
-changed sink creates a new one. -/
+/-- The GitHub-compatible line identity (alias of `Scry.lineKey`). -/
 def Scry.wfLineKey (f : Scry.RuleFinding) (lineText : String) : String :=
-  String.intercalate "|"
-    [ String.append "scry/c/" f.rule, f.func, Scry.wfNormLine lineText ]
+  Scry.lineKey f lineText
 
 def Scry.wfLineHash (f : Scry.RuleFinding) (lineText : String) : String :=
-  Scry.wfHex (Scry.wfFnv (Scry.wfLineKey f lineText))
+  Scry.lineHash f lineText
 
 /-- The rest of a line (up to the newline) as characters. -/
 partial def Scry.wfLineTakeGo : List Char → List Char

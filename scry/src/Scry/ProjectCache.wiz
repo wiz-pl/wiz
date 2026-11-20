@@ -4,6 +4,7 @@ import Functor
 import WordArray
 import Scry.CstStore
 import Json
+import Scry.Identity
 /-!
 # Scry.ProjectCache: the per-translation-unit parse cache
 
@@ -66,22 +67,15 @@ def Scry.CacheStats.writeOne (s : Scry.CacheStats) : Scry.CacheStats :=
   Scry.CacheStats.mk s.enabled s.dir s.hit s.miss (Nat.succ s.write) s.corrupt s.files
     s.reason
 
-/-- FNV-1a 64 over a string's chars (ASCII for C sources and flags). -/
-def Scry.fnv1a (s : String) : Nat :=
-  let h := List.foldl (fun h c =>
-    Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) 18446744073709551616)
-    14695981039346656037 (String.chars s);
-  h
-
 /-- A cache key: the salt, source path, source text, flags and error mode. -/
 def Scry.cacheKey (path text : String) (flags : List String) (allowErrors : Bool) : String :=
   let body := String.intercalate "\u{0}" (List.append ["scry-project-tu-1", path, text]
     (List.append flags [match allowErrors with | .true => "allow-errors" | .false => "strict"]));
-  Nat.repr (Scry.fnv1a body)
+  Nat.repr (Scry.fnv body)
 
 /-- The validation digest: the preprocessed text (so header/macro changes invalidate an
 entry even when the key is unchanged). -/
-def Scry.preDigest (pre : String) : String := Nat.repr (Scry.fnv1a pre)
+def Scry.preDigest (pre : String) : String := Nat.repr (Scry.fnv pre)
 
 /-- Create a directory and its missing parents. -/
 partial def Scry.mkdirp (dir : String) : EIO Unit :=

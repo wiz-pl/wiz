@@ -24,8 +24,9 @@ usage: tower [--home DIR] COMMAND
   run SPEC [--] CMD ARGS…        run CMD with SPEC's bin/ first on PATH
   update [NAME…]                 reinstall channel and branch toolchains that moved
   set KEY VALUE / settings       settings (source, flake, git, releases, nightly-ref,
-                                 auto-install, cc, cflags, ldflags, libs, llc,
-                                 gc-cflags, gc-ldflags)
+                                 auto-install, cc, cflags, ldflags, libs, gmp, llc,
+                                 gc-cflags, gc-ldflags, cache, cache-ro, cache-verify,
+                                 region-cache, root, native-fuel)
   self shims                     write the shims in ~/.tower/bin
   self install                   copy tower to ~/.tower/bin and write the shims
   --version                      print tower's version

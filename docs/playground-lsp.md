@@ -11,15 +11,15 @@ source span in the editor; the in-page server answers the plain goal methods and
 editor's completion, hover and definition from its own check index (the interactive
 tagged methods remain an external server's, so a tagged tree is only clickable there).
 
-The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
-rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
-insertion), `web/squiggles.js` and `web/completions.js` draw them, and
-`web/playground-lsp.js` connects them to the textarea. The pane can also be rendered by
-the repo's own Loom framework (`lib/Web/Loom.wiz`) with `?ui=loom`
-(§ The Loom UI); the default page builds its DOM directly.
+The editor is a plain `<textarea>` with no dependency: `lib/Web/EditorModel.wiz` has the
+pure rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
+insertion, Tab's indent), `web/framework/editor-text.js` reads the control, and
+`web/squiggles.js`/`web/completions.js` paint the runtime's answers. `web/framework/editor-model.mjs`
+is the test oracle, not served. The page itself is one app in the repo's own Loom
+framework (`lib/Web/Loom.wiz`, § The page's runtime); the goals pane is an island in it.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
-is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
+is JSON-RPC 2.0 over a WebSocket, `lib/Web/Goals.wiz` renders the answers, and
 `web/playground-lsp.js` connects the two to the textarea. A language server that speaks
 the protocol below — the Lean one today, a self-hosted one later — is a drop-in: the page
 cannot tell them apart.
@@ -72,8 +72,8 @@ python3 -m http.server -d web/out 8000   # the page, over HTTP
   to start one), and the playground keeps working as a local checker. Nothing is logged
   to the console and no promise is left unhandled.
 * `?squiggles=off` disables the underlines under the editor's diagnostics, and
-  `?completions=off` the completion popup (§ The editor). `?ui=loom` mounts the whole
-  page as the repo's Loom app instead of the static markup (§ The Loom UI).
+  `?completions=off` the completion popup (§ The editor). There is no `?ui` switch: the
+  runtime page is the playground.
 
 The server can be the repository's Lean server (`wiz lsp --ws`, stage 11o) or any
 self-hosted implementation of this document. The server may be given together with
@@ -141,10 +141,11 @@ count UTF-16 units; if it counts scalar values instead, it must make the same BM
 assumption. The playground's positions come from `textarea.selectionStart`, i.e. a
 UTF-16 index.
 
-`web/editor-model.js` has both conversions (`positionFromOffset`,
-`codePointPositionFromOffset`, `utf16OffsetFromCodePoints`) and the Node tests pin that
-they differ only for characters outside the BMP. The page sends the UTF-16 one; the
-code-point helpers exist for a server that counts `String.codes`.
+`lib/Web/EditorModel.wiz` has both conversions (`positionFromOffset`,
+`codePointPositionFromOffset`, `utf16OffsetFromCodePoints`), and the Node tests
+(`web/editor_test.mjs`, against the oracle) and the `=loom` cases pin that they differ
+only for characters outside the BMP. The page sends the UTF-16 one; the code-point
+helpers exist for a server that counts `String.codes`.
 
 ## The editor
 
@@ -152,24 +153,27 @@ Assuming a text field is enough is what makes the playground feel unlike an edit
 pieces fix that without replacing the textarea, and none of them adds a dependency:
 
 * **Squiggles.** `web/squiggles.js` draws every diagnostic range as a wavy underline
-  under the offending source. It puts the editor in a positioned wrapper and places a
-  **mirror** over it: an absolutely positioned `div` with the textarea's font, padding and
-  wrapping, holding the same text with a `<span class="squiggle sev-ERROR">` around each
-  range, transparent text and a coloured `text-decoration`. The layer never takes a
-  pointer event (`pointer-events: none`), so typing, selection and scrolling stay the
-  textarea's, and its colour and caret are untouched. This is the fragile part of
-  decorating a plain textarea — the mirror only lines up if the font metrics and the wrap
-  points match — which is why `web/squiggles.js` copies `getComputedStyle(editor)` on
-  every layout and why `web/playground.css` repeats the same declarations on both sides.
-  If they ever drift, only the underline's position is wrong. `?squiggles=off` (also
-  0/none/false) turns the layer off; the Goals pane's list still selects the spans.
+  under the offending source. It mounts a **mirror** over the editor's *existing parent*
+  (never wrapping the textarea: the Loom page patches by child index): an absolutely
+  positioned `div` with the textarea's font, padding and wrapping, holding the same text
+  with a `<span class="squiggle sev-ERROR">` around each range, transparent text and a
+  coloured `text-decoration`. The layer never takes a pointer event
+  (`pointer-events: none`), so typing, selection and scrolling stay the textarea's, and
+  its colour and caret are untouched. This is the fragile part of decorating a plain
+  textarea — the mirror only lines up if the font metrics and the wrap points match —
+  which is why `web/squiggles.js` copies `getComputedStyle(editor)` on every layout and
+  why `web/overlays.css` repeats the same declarations on both sides. If they ever drift,
+  only the underline's position is wrong. `?squiggles=off` (also 0/none/false) turns the
+  layer off; the Goals pane's list still selects the spans.
 
-  The ranges are computed by `squiggleSegments` (`web/editor-model.js`), which repairs
-  what real servers send: a range with **no end** underlines the token at its start (one
-  character on whitespace, nothing past the end of the text); an **empty** range does the
-  same; a range past the text is clamped; a **multi-line** range becomes one span per
-  line (no newline inside a span); two **overlapping** ranges merge, keeping the stricter
-  severity and both messages. Diagnostics without a `range.start` are not drawn.
+  The ranges are computed by `EditorModel.squiggleSegments`
+  (`lib/Web/EditorModel.wiz`), which repairs what real servers send: a range with **no
+  end** underlines the token at its start (one character on whitespace, nothing past the
+  end of the text); an **empty** range does the same; a range past the text is clamped; a
+  **multi-line** range becomes one span per line (no newline inside a span); two
+  **overlapping** ranges merge, keeping the stricter severity and both messages.
+  Diagnostics without a `range.start` are not drawn. The page asks for the spans through
+  `mount`'s `ask("wiz_loom_editor_segments", …)`; `web/squiggles.js` only paints them.
 
 * **Caret → server.** The caret is sent on selection changes — `keyup`, `click`,
   `mouseup`, `select`, `focus` — debounced by 120 ms (`positionDebounce`), as
@@ -199,25 +203,29 @@ The page's `initialize` advertises `textDocument.completion` (with
 `contextSupport: true` and `snippetSupport: false`), so a server can rely on the client
 asking.
 
-## The Loom UI (`?ui=loom`)
+## The page's runtime
 
-The whole page can be mounted as one Loom app instead of the static markup: with
-`?ui=loom`, `web/playground.js` loads `wiz-playground-ui.mjs` (built by
-`web/build-playground-ui.sh` from `web/playground-ui.wiz`) and `web/framework/driver.js`
-mounts it on `body`.
+The whole page is one Loom app. `web/playground.js` (the entry point) points at the body
+and calls `mount(body, { module, transport })` from `web/framework/mount.js`, which loads
+`wiz-playground-ui.mjs` (built by `web/build-playground-ui.sh` from
+`web/playground-ui.wiz`), mounts its SSR and delegates DOM events. The app
+(`Web.Playground.pageApp`) renders the header and its examples menu, the editor, the
+goals container, the output pane and the footer; its state is `Page`.
 
 ```sh
 web/build-playground.sh web/out         # the engine (wiz-playground.mjs)
-web/build-playground-ui.sh web/out      # the Loom page (wiz-playground-ui.mjs)
-# open http://127.0.0.1:8000/playground.html?ui=loom
+web/build-playground-ui.sh web/out      # the page (wiz-playground-ui.mjs)
+# open http://127.0.0.1:8000/playground.html
 ```
 
 The UI is its own Wasm instance, so a trap or restart in the engine does not touch it.
 The page keeps the effects (the engine, the goals client, the editor overlays) and
-reports their results through the module's `wiz_loom_*` entry points; the static markup
-is the default and the fallback when the module is missing or its ABI is not what the
-driver expects. `web/playground_ui_test.mjs` mounts the real module under Node with the
-driver and the DOM double and checks the panes, the status pair, the count, the value
+reports their results through the module's `wiz_loom_*` entry points. There is no second
+page: if the runtime module cannot start (it was not built, the network refused it, or
+its ABI is not the Loom one), the mount point says so in plain text with the reason and
+the build documentation — it does not fall back to a hand-written UI.
+`web/playground_ui_test.mjs` mounts the real module under Node with the driver and the
+DOM double and checks the panes, the examples menu, the status pair, the count, the value
 classes and the entry points.
 
 ## Documents
@@ -287,8 +295,11 @@ The panel asks for the goals and the expected type at the caret. `wiz/interactiv
 and `wiz/interactiveTermGoal` are preferred because they carry tagged text; the plain
 methods are the fallback (§ Fallback). `wiz/subtermInfo` is optional: it fills the
 "Selected subterm" box when a tagged subterm is clicked, and a `MethodNotFound` answer
-is silently ignored. `wiz/interactiveInfo` exists in the protocol but the panel does not
-use it yet.
+is silently ignored. `wiz/interactiveInfo` is asked at the same position for its
+`widget` items (`WIZ_WIDGET:` payloads): `web/widgets.js` draws the `wiz.widget/1`
+bundle in a widget pane on both pages (the playground's `#widget-list`, the standalone
+page's `#widget-list` aside). The goals panel never renders a payload's markup. Other
+item kinds are not drawn.
 
 ### Shapes
 
@@ -554,8 +565,9 @@ server does.
   state before its step and at its end).
 * `node web/infoview_page_test.mjs` — the standalone page's URL rule (`?port=`, `?lsp=`)
   and its status text; the pane it mounts is the test above.
-* `node web/playground_ui_test.mjs` — the `?ui=loom` page: its module mounted under Node
-  with the framework's driver and DOM double, then the page's `wiz_loom_*` calls.
+* `node web/playground_ui_test.mjs` — the page: its module mounted under Node with the
+  framework's driver and DOM double, then the page's `wiz_loom_*` calls and the examples
+  menu.
 * `node web/mock_lsp_server.mjs [PORT]` — the same mock as a server, for trying the page
   by hand: it prints `ws://127.0.0.1:PORT` to put in `?lsp=`.
 * `node web/hover_test.mjs` — the hover card and go-to-definition: the three LSP content

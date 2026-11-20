@@ -266,9 +266,14 @@ EOF
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
-                ./web/lsp-client.js ./web/goals.js ./web/tagged.js ./web/scroll.js
-                ./web/scroll-search.js ./web/scroll.css
-                ./web/playground-lsp.js ./web/lsp-client.js ./web/goals.js
+                ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
+                ./web/hover.js ./web/squiggles.js ./web/completions.js
+                ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/overlays.css
+                ./web/doc-live.js ./web/doc-live.css
+                ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/editor-text.js
+                ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
+                ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -302,11 +307,22 @@ EOF
                 ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
-                ./web/playground.html ./web/playground.js ./web/playground-values.js
-                ./web/playground-presets.js ./web/playground-state.js
-                ./web/playground.css ./web/lsp-client.js ./web/goals.js
-                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
-                ./web/playground-engine.js ./web/editor-model.js
+                ./web/playground.html ./web/playground.js
+                ./web/playground.css ./web/overlays.css ./web/widgets.css
+                ./web/lsp-client.js ./web/widgets.js
+                ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
+                ./web/playground-engine.js
+                # the entry point's mount contract (mount imports driver, which imports
+                # runtime.js): build-playground.sh copies all three beside the page
+                ./web/framework/mount.js ./web/framework/driver.js
+                ./web/framework/runtime.js ./web/framework/editor-text.js
+                # the page's runtime (web/build-playground-ui.sh, built below): its Wiz
+                # app, the FFI it links and the library modules it imports. The rest of
+                # lib/ resolves from the packaged toolchain's own library.
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
+                ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
+                ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
                 ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
@@ -320,6 +336,9 @@ EOF
               # a module 47 % larger (11.4 MB against 7.75 MB). The script still defaults
               # to the compiler's -O2, so a local build is unchanged.
               sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src} --opt 1
+              # the page's runtime (the whole page as one Loom app), beside the engine:
+              # the site requires it, so one store path carries both modules.
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
             installPhase = ''
@@ -328,7 +347,7 @@ EOF
               runHook postInstall
             '';
             meta = {
-              description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
+              description = "The playground's Wasm modules (the engine and the Loom page, web/build-playground*.sh)";
               platforms = systems;
             };
           };
@@ -345,6 +364,7 @@ EOF
               fileset = fs.unions [
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
                 ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/mount.js
                 ./lib
               ];
             };

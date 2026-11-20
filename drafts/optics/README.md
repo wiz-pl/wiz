@@ -21,8 +21,10 @@ shipped-binary `-I drafts/optics` path is gone because the definitions moved.
 
 | file | contents |
 |---|---|
-| `EngineIndex.wiz` | The storage engine's index bucket as a `TraversalP`: `indexViewP` reads it (`ForgetList`), `bumpKindP` updates it and returns the `WriteSet` in the same pass (`Writer Δ`), and the checks compare both with the store `Traversal`. |
+| `EngineIndex.wiz` | The storage engine's index bucket: `Storage.indexTraversalP` is the canonical `TraversalP`; the module reads it at `ForgetList`, updates it and returns the `WriteSet` in the same pass (`Writer Δ`), and compares both with the store `Traversal` shim. |
 | `Tests.wiz` | `#eval` cases: iso, lens and its three laws on values, composition, traversal, prism, and the `Writer` deltas. |
+| `Limits.wiz` | Where the profunctor layer stops: an indexed place as a `TraversalP` (a 0-or-1 focus that cannot fail), beside `List.atL`'s `.err .outOfBounds`. |
+| `limits/*.wiz` | Expected-to-fail programs for the four things that cannot move: `Lens.pair`, a `Getter`/`Fold`, `TraverseMut`, and `ALens`'s `Result`. Their errors are quoted in the report and in `limits/README.md`. |
 | `Smoke.wiz` | `wiz run` smoke test (compiled output `3`, `2`, `1`). |
 
 ```text

@@ -139,6 +139,11 @@ def String.append : String → String → String
 `xs |> List.length |> Nat.succ`. At any universe, so proofs too: `h |> Eq.symm`. -/
 def pipe.{u, v} {A : Sort u} {B : Sort v} (a : A) (f : A → B) : B := f a
 infixl:10 " |> " => pipe
+/-- `f <| x` is `f x`, the other direction of `|>`: it lets a function stand on the
+left while its argument runs to the end of the line, `Nat.succ <| xs |> List.length`.
+At any universe, like `pipe`. -/
+def apply.{u, v} {A : Sort u} {B : Sort v} (f : A → B) (a : A) : B := f a
+infixr:10 " <| " => apply
 
 /-- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
 index `true` is a tree, `false` a list of trees. A tree is `missing`, an `atom` (a
@@ -1526,18 +1531,55 @@ def ListLit.unexpandCons : Macro := fun stx =>
   | _ => MacroM.throw "not a list literal"
 attribute [app_unexpander List.nil] ListLit.unexpandNil
 attribute [app_unexpander List.cons] ListLit.unexpandCons
+
+-- ## Notation: a projection through the pipe (`|>.`) and `·` sections
+
+-- `x |>.f` is the projection `x.f`, read through the pipe. The dot is part of the
+-- `|>.` token (as in `x.f`), so the form is `x |>.f`: `x |> .f` would parse `.f` as
+-- the dot-constructor form, and a space before the field name reads as a different
+-- expression. The rule takes its left side at precedence 11 (so `x + y |>.f` is
+-- `(x + y).f`) and binds at `max`, like `x.f`; as with `x.f`, an application on the
+-- left is an argument, so write `(f x) |>.f`. A dotted path works (`x |>.a.b` is
+-- `x.a.b`), because the field is one dotted identifier.
+syntax:max (name := pipeProj) term:11 "|>." ident : term
+/-- `x |>.f` expands to the field access `x.f`, so it is the same projection: the same
+field lookup, the same private checks, the same errors. -/
+def PipeProj.expand : Macro := fun stx =>
+  MacroM.pure (Syntax.mkNode "term.field"
+    (.cons (Syntax.getArg stx 0) (.cons (.atom ".") (.cons (Syntax.getArg stx 2) .nil))))
+attribute [macro term.pipeProj] PipeProj.expand
+
+-- `(· + 1)`, `(1 + ·)`, `(· * ·)`: a placeholder, desugared to a lambda by the
+-- elaborator (`Wiz/Elab/Term.lean`, `elabSection`). It is a paren form: the holes in
+-- a parenthesised term are that term's parameters, and the expected type gives their
+-- types, as in `List.map (· + 1) xs`.
+syntax (name := sectionHole) "·" : term
 -- (end of the notation section)
 
+/-- `Syntax.decPowers` with fuel: at most `fuel` powers, so the recursion is
+structural on the fuel rather than a `partial` loop. `n` bounds the loop (each
+step multiplies a power of ten that is already at most `n`), so `Syntax.decPowers`
+passes `Nat.succ n`. -/
+def Syntax.decPowersGo (n p : Nat) : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ fuel, acc => match Nat.lt n p with
+    | .true => acc
+    | .false => Syntax.decPowersGo n (p * 10) fuel (.cons p acc)
 /-- The powers of ten up to `n`, largest first (in front of `acc`), for
 `Syntax.decimal`: a decimal numeral as text, for macros (`Nat.toString` is an extern:
 it only runs compiled). -/
-partial def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat := match Nat.lt n p with
-  | .true => acc
-  | .false => Syntax.decPowers n (p * 10) (.cons p acc)
+def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat :=
+  Syntax.decPowersGo n p (Nat.succ n) acc
+/-- `Syntax.decDigit` with fuel: at most `fuel` subtractions, so the recursion is
+structural on the fuel rather than a `partial` loop. Each step subtracts a positive
+power, so `n` bounds the loop and `Syntax.decDigit` passes `Nat.succ n`. -/
+def Syntax.decDigitGo (n p d : Nat) : Nat → Nat
+  | .zero => d
+  | .succ fuel => match Nat.lt n p with
+    | .true => d
+    | .false => Syntax.decDigitGo (n - p) p (d + 1) fuel
 /-- The decimal digit of `n` at the power `p` (counting from `d`). -/
-partial def Syntax.decDigit (n p d : Nat) : Nat := match Nat.lt n p with
-  | .true => d
-  | .false => Syntax.decDigit (n - p) p (d + 1)
+def Syntax.decDigit (n p d : Nat) : Nat := Syntax.decDigitGo n p d (Nat.succ n)
 /-- The digits of `n` at the powers `ps`, as characters. -/
 def Syntax.decDigits : List Nat → Nat → List Char
   | .nil, _ => .nil

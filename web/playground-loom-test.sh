@@ -27,3 +27,11 @@ if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
 if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 "$WIZ" "$@" > "$OUT/editor.json"
 node "$ROOT/web/playground_editor_test.mjs" "$OUT/editor.json"
+
+# The whole page (increment 3): the examples menu is the runtime's, and a `change` step
+# reproduces the next SSR; the menu's data is checked against the JS oracle.
+set -- run -I "$ROOT/lib" "$ROOT/web/playground_page_gen.wiz"
+if [ -n "${WIZ_CFLAGS:-}" ]; then set -- "$@" --cflags "$WIZ_CFLAGS"; fi
+if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
+"$WIZ" "$@" > "$OUT/page.json"
+node "$ROOT/web/playground_page_test.mjs" "$OUT/page.json"

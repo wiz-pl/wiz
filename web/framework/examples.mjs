@@ -1,6 +1,10 @@
 // (11ab) The playground's examples. They are plain source text: the page puts one in
 // the editor and the self-hosted checker runs it exactly as if it had been typed. Each
 // preset is also checked by web/playground_test.mjs, so an example never rots.
+//
+// **Test oracle only.** The page's examples are `lib/Web/Examples.wiz`; this list is the
+// independent copy `web/playground_page_test.mjs` compares the runtime's menu against,
+// and `web/playground_test.mjs` runs through the engine. It is not served.
 "use strict";
 
 export const presets = Object.freeze([

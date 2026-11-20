@@ -42,9 +42,9 @@ canonicalised again. The guard reads the current database, so a lattice relation
 analysis and the rewrite's equalities feed back into the next Datalog round -- the two
 refine each other. This is the shape `examples/scry-egraph-join.wiz` uses.
 
-The e-graph backend is `Scry.EgraphNative` (the native tables). Swap the import for
-`Scry.Egraph` to run the same plan against the reference list model, exactly as the
-e-graph examples do.
+The e-graph backend is the one engine. This module imports the compatibility name
+`Scry.EgraphNative`, which is `import Scry.Egraph` (the reference surface on the native
+tables); importing either name brings the same names and record type.
 
 Provenance: the canonical rows are inserted into the database without their own
 `ProofStep` (a rewrite of a fact is not a new derivation), so `State.whyTuple` covers the

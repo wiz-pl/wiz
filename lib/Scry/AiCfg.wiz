@@ -201,10 +201,29 @@ def ACond.refine (m : AiMach) (env : AiEnv) : ACond → AiEnv
       | .top => AiEnv.refineNull x .nonNull env
   | .eq x e =>
       let ev := AExpr.eval m env e
-      match ev.itv with
-      | .bot => AiEnv.set x Value.bot env
-      | _ => AiEnv.refineItv x ev.itv env
-  | .ne _ _ => env
+      -- `Value.null` deliberately has a bottom interval, so nullness must be read
+      -- before the interval: `x == NULL` refines x to null, it is not unreachable.
+      match ev.nul with
+      | .nul => match (AiEnv.getD env x Value.top).nul with
+        | .nonNull => AiEnv.set x Value.bot env
+        | _ => AiEnv.refineNull x .nul env
+      | .nonNull => match (AiEnv.getD env x Value.top).nul with
+        | .nul => AiEnv.set x Value.bot env
+        | _ => match ev.itv with
+          | .bot => AiEnv.set x Value.bot env
+          | _ => AiEnv.refineItv x ev.itv env
+      | _ => match ev.itv with
+        | .bot => AiEnv.set x Value.bot env
+        | _ => AiEnv.refineItv x ev.itv env
+  | .ne x e =>
+      let ev := AExpr.eval m env e
+      match ev.nul with
+      | .nul => match (AiEnv.getD env x Value.top).nul with
+        | .nul => AiEnv.set x Value.bot env
+        | _ => AiEnv.refineNull x .nonNull env
+      | _ => match ev.itv with
+        | .bot => AiEnv.set x Value.bot env
+        | _ => env
   | .isNull x => AiEnv.refineNull x .nul env
   | .notNull x => AiEnv.refineNull x .nonNull env
 

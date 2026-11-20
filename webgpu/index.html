@@ -20,7 +20,9 @@
   The kernel is Wiz source (<code>webgpu/kernels/add.wiz</code>); the WGSL in
   <code>webgpu/build/</code> is generated from it by <code>webgpu/tools/wgsl.mjs</code>,
   which reads the syntax tree printed by <code>wiz parse</code>. The expected column is
-  Wiz's own interpreter (<code>#eval</code>), not JavaScript arithmetic.
+  Wiz's own interpreter (<code>#eval</code>), not JavaScript arithmetic. Three kernels are
+  shown here (<code>add</code>, <code>maxMul</code>, <code>mix</code>); the Deno harness
+  runs the same modules over 130-element inputs too (three workgroups).
 </p>
 <p id="status" class="muted">starting…</p>
 <div id="out" class="kernels"></div>

@@ -933,9 +933,10 @@ compiles the program the page runs.
   types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
   are accepted but only Prelude is available (there is no module loader in the page);
   without any import the page prepends `import Prelude`, so a bare `def two : Nat := 1 + 1`
-  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/playground-values.js`
-  recognises the shapes of Nat, Bool and list values and shows `42`, `true`, `[1, 2]`,
-  keeping the raw form in the line's tooltip. Anything else is shown as it comes.
+  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/framework/values.mjs`
+  (the test oracle; the grammar itself is `lib/Web/Playground.wiz`) recognises the shapes of
+  Nat, Bool and list values and shows `42`, `true`, `[1, 2]`, keeping the raw form in the
+  line's tooltip. Anything else is shown as it comes.
 * **Build and serve** (from a checkout after `lake build wiz`):
 
       web/build-playground.sh web/out             # → web/out/wiz-playground.mjs (+ the page)
@@ -951,9 +952,9 @@ compiles the program the page runs.
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
   beside the module. The page needs HTTP (an ES module and a `.wasm` fetch; `file://`
   will not do). `web/build.sh` and its infoview are unchanged and can share `web/out`.
-* **Tests.** `node web/playground-state_test.mjs` checks the pure state module: every
-  example id, the canonical fragment for an example, `#code` round trips for ASCII,
-  Unicode and control characters, malformed fragments and drafts, and full share URLs.
+* **Tests.** `lake test -- '=loom'` checks the state format's cases (every example id, the
+  canonical fragment for an example, `#code` round trips for ASCII, Unicode and control
+  characters, malformed fragments and drafts) against `lib/Web/Draft.wiz`.
   `node web/playground_test.mjs web/out` loads the module under Node, runs a definition,
   a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an error, then
   runs **every example** through the engine and checks the list example renders
@@ -974,9 +975,10 @@ compiles the program the page runs.
   no Wiz build. The editor itself is a plain textarea plus overlays with no dependency:
   diagnostics are underlined by `web/squiggles.js`, the caret is re-asked on selection
   changes, and `web/completions.js` shows `textDocument/completion` at Ctrl-Space or while
-  typing. `?ui=loom` mounts the whole page from `lib/Web/Loom.wiz`
-  (`web/playground-ui.wiz`, built as its own small Wasm module) instead of the static
-  markup, which stays the default and the fallback.
+  typing. The page itself is one app in `lib/Web/Loom.wiz`
+  (`web/playground-ui.wiz`, built as its own small Wasm module): `web/playground.html`
+  points `web/playground.js` at the body, and `web/framework/mount.js` mounts the runtime
+  there. There is no static page.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
   call into Wasm is synchronous), and a very large normal form (a `Nat` in the thousands)
   can exhaust the Wasm stack, so the examples stay small. Only the embedded Prelude

@@ -3,8 +3,8 @@
 # web/build-playground.sh); the generated benchmark page's fixtures and the site check
 # (web/test-bench.sh); run the infoview's Wasm module under Node with
 # infoview/stub_server.py (canned goals) as the server (web/node_test.mjs), and the
-# playground's under Node (web/playground_test.mjs); the playground's pure state and
-# URL encoding (web/playground-state_test.mjs) run first; then serve the infoview with
+# playground's under Node (web/playground_test.mjs); the state format's cases are in
+# `lake test -- '=loom'` (the runtime owns them); then serve the infoview with
 # web/bridge.sh in front of the real server (`wiz lsp --ws`, .lake/build/bin/wiz), load
 # it in headless Chromium (web/chrome_test.mjs, over the DevTools protocol), put the
 # cursor in the page's proof, click a subterm and look for the goals and what the subterm
@@ -19,22 +19,26 @@ PORT=${1:-18765}
 OUT=$(mktemp -d)
 trap 'if [ -n "$BRIDGE" ]; then pkill -P "$BRIDGE" 2>/dev/null || true; kill "$BRIDGE" 2>/dev/null || true; fi; rm -rf "$OUT"' EXIT
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
-# (11ab) the playground's pure state and URL encoding need neither the build nor a
-# browser; run it first so a broken share link fails fast.
-node "$ROOT/web/playground-state_test.mjs" > "$OUT/playground-state.txt"
-if grep -qF 'playground state: all checks passed' "$OUT/playground-state.txt"; then
-  echo "ok (playground state, node)"
-else
-  echo "FAIL (playground state, node)"; cat "$OUT/playground-state.txt"; exit 1
-fi
 # (11s) the search box's ranking and rendering (no build or browser needed)
-node "$ROOT/web/scroll-search_test.mjs" > "$OUT/search.txt"
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/search_gen.wiz" > "$OUT/search.json"
+node "$ROOT/web/scroll-search_test.mjs" "$OUT/search.json" > "$OUT/search.txt"
 grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (search)" || {
   echo "FAIL (search)"; cat "$OUT/search.txt"; exit 1; }
+# (goals) the Wiz goals pane, hover card and status line: the fixture is rendered by
+# `wiz run`, then compared with the Node oracle's answers (no Wasm, no browser)
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/goals_gen.wiz" > "$OUT/goals.json"
+node "$ROOT/web/goals_test.mjs" "$OUT/goals.json" > "$OUT/goals.txt"
+if grep -qF 'goals: all checks passed' "$OUT/goals.txt"; then echo "ok (goals, wiz)"; else
+  echo "FAIL (goals, wiz)"; cat "$OUT/goals.txt"; exit 1; fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
   echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
+# (widgets) the widget host: the #plot and scry payloads, the safety rules, the fallback
+# and the DOM mount (the LSP transport is stubbed in the next check)
+node "$ROOT/web/widgets_test.mjs" > "$OUT/widgets.txt"
+if grep -qF 'widgets: all checks passed' "$OUT/widgets.txt"; then echo "ok (widgets)"; else
+  echo "FAIL (widgets)"; cat "$OUT/widgets.txt"; exit 1; fi
 # (playground-lsp) the language client and goals panel against a mock WebSocket server
 # (no Wasm build, no browser)
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
@@ -69,15 +73,19 @@ if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo 
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-infoview-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-docs-ui.sh" "$OUT" >/dev/null
+"$ROOT/web/build-doc-live-ui.sh" "$OUT" >/dev/null
 node "$ROOT/web/node_test.mjs" "$OUT" python3 "$ROOT/infoview/stub_server.py" --stdio > "$OUT/node.txt"
 for want in 'class="names">A</span>' 'data-ref="5"' 'info: <span class="kind">const</span> <code>Nat : Type</code>'; do
   if grep -qF "$want" "$OUT/node.txt"; then echo "ok (node): $want"; else echo "FAIL (node): missing $want"; cat "$OUT/node.txt"; exit 1; fi
 done
-# (11ab) the playground's module: the self-hosted checker, every example
+# (11ab) the playground's engine: the self-hosted checker, every example
 node "$ROOT/web/playground_test.mjs" "$OUT" > "$OUT/playground.txt"
 if grep -qF 'playground: all checks passed' "$OUT/playground.txt"; then echo "ok (playground, node)"; else echo "FAIL (playground, node)"; cat "$OUT/playground.txt"; exit 1; fi
-# (loom) the whole page as one Loom app (?ui=loom): its module mounted under Node with
-# the framework's driver and DOM double, then the page's wiz_loom_* calls
+# (loom) the whole page as one Loom app, the playground's only page: its module
+# mounted under Node with the framework's driver and DOM double, then the page's
+# wiz_loom_* calls and the examples menu
 node "$ROOT/web/playground_ui_test.mjs" "$OUT" > "$OUT/ui.txt"
 if grep -qF 'playground ui: all checks passed' "$OUT/ui.txt"; then echo "ok (playground, loom ui)"; else echo "FAIL (playground, loom ui)"; cat "$OUT/ui.txt"; exit 1; fi
 # (11s) the documentation pages' half of the module, on a page `wiz doc` made (the
@@ -111,7 +119,7 @@ BRIDGE=$!
 sleep 3
 node "$ROOT/web/chrome_test.mjs" "$CHROME" "http://127.0.0.1:$((PORT + 1))/infoview.html?port=$PORT&token=$TOKEN" > "$OUT/chrome.txt"
 ok=1
-# The page's markup is web/goals.js's (the playground's renderer) since the two infoviews
+# The page's markup is the Wiz goals runtime (`lib/Web/Goals.wiz`) since the two infoviews
 # were unified: a goal's hypothesis is a `.names` span (with its own title/span
 # attributes), a tagged subterm is `.tt k-KIND` with `data-ref`, a clicked one carries
 # `sel`, and the selected subterm is in `#info` as `.selection`.

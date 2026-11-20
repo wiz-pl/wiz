@@ -13,16 +13,29 @@
 // The mirror is the fragile part of any plain-textarea decoration: it only lines up if
 // its font metrics and wrap points are the textarea's. Layout is therefore copied from
 // `getComputedStyle(editor)` on every layout, `white-space: pre-wrap` and
-// `overflow-wrap: break-word` are set on both sides (web/playground.css), and a trailing
+// `overflow-wrap: break-word` are set on both sides (web/overlays.css), and a trailing
 // blank line is appended so a text ending in `\n` has the height the textarea shows. If
 // the two ever drift, only the underline's position is wrong: the textarea can still be
 // typed in and read, which a contenteditable rewrite could not promise. `?squiggles=off`
 // turns the layer off, and the goals pane's diagnostics stay clickable either way.
 //
-// `web/editor-model.js` computes the ranges (the pure half, tested in Node); this file
-// only turns them into DOM.
+// **The editor is never wrapped.** A wrapper would move the textarea one level deeper in
+// the tree, and a patch applier that addresses nodes by child index — `web/framework/
+// runtime.js`, which the Loom page (`?ui=loom`) uses — would then resolve the editor's
+// path to the wrapper and quietly set the textarea's *default* value instead of its live
+// one. The layer is appended to the editor's existing parent instead, after every node
+// that parent renders; the editor's own index never changes, and a later insert at the
+// end of the parent goes before this layer (see web/loom_overlay_test.mjs). The parent is
+// made a containing block so the layer can sit over the textarea's box.
+//
+// `web/framework/editor-model.mjs` (the test oracle) used to compute the ranges; this
+// file only turns them into DOM. The ranges are now `lib/Web/EditorModel.wiz`'s and
+// arrive through `options.segments(text, diagnostics)`; this widget paints them.
 "use strict";
-import { squiggleSegments, SEVERITY_NAME } from "./editor-model.js";
+
+// The class suffix for a severity (the runtime sends `severityName` too; this is the
+// paint fallback).
+const SEVERITY_NAME = { 1: "error", 2: "warning", 3: "info", 4: "hint" };
 
 // The properties that change where a character sits. Copied from the textarea's computed
 // style; web/playground.css has the same declarations so a page without
@@ -48,17 +61,19 @@ function attr(element, name, value) {
   else element.setAttribute(name, String(value));
 }
 
-// Put `editor` inside a positioned wrapper (or reuse one), so the mirror can sit exactly
-// over it. Returns the wrapper.
-function ensureWrapper(editor, doc) {
+// The editor's existing parent, made a containing block. Returns it, or the page's body
+// when the editor is detached (the Node tests mount an editor with no parent).
+function layerHost(editor, doc) {
   const parent = editor.parentNode;
-  if (parent && parent.getAttribute && parent.getAttribute("data-editor-wrap") === "1") return parent;
-  const wrapper = doc.createElement("div");
-  attr(wrapper, "class", "editor-wrap");
-  attr(wrapper, "data-editor-wrap", "1");
-  if (parent) parent.insertBefore(wrapper, editor);
-  wrapper.appendChild(editor);
-  return wrapper;
+  if (parent && typeof parent.appendChild === "function") {
+    let position = null;
+    try {
+      position = typeof getComputedStyle === "function" ? getComputedStyle(parent).position : null;
+    } catch (_) { /* no layout: the inline style below is the fallback */ }
+    if (!position || position === "static") setStyle(parent, "position", "relative");
+    return parent;
+  }
+  return doc && doc.body && typeof doc.body.appendChild === "function" ? doc.body : null;
 }
 
 // The styling the mirror needs: the textarea's own where the browser can tell us.
@@ -79,30 +94,52 @@ function copyTextStyle(editor, text) {
   return style;
 }
 
-// The mirror's available width is the textarea's *client* width: a visible scrollbar takes
-// room from the text, so the layer's right edge is inset by it (and wraps land where the
-// textarea wraps them). An overlay scrollbar reports 0 and changes nothing.
+// The layer's box is the textarea's *client* box: no border of its own, and a visible
+// scrollbar's room is left out so the text wraps where the textarea wraps it. The layer is
+// absolutely positioned in the editor's parent (which `layerHost` made relative), so the
+// textarea's offset within that parent is the layer's position; without layout (a Node
+// test) the layer falls back to the parent's whole box.
 function layoutLayer(editor, layer, style) {
-  if (!style || typeof editor.offsetWidth !== "number") { setStyle(layer, "right", "0"); return; }
-  const border = (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
-  const scrollbar = (editor.offsetWidth || 0) - (editor.clientWidth || 0) - border;
-  setStyle(layer, "right", (scrollbar > 0 ? scrollbar : 0) + "px");
+  const size = (n) => typeof n === "number" && isFinite(n) && n >= 0;
+  if (!size(editor.offsetWidth) || !size(editor.offsetHeight)) {
+    setStyle(layer, "left", "0");
+    setStyle(layer, "top", "0");
+    setStyle(layer, "width", "100%");
+    setStyle(layer, "height", "100%");
+    return;
+  }
+  const border = (parseFloat(style && style.borderLeftWidth) || 0) +
+    (parseFloat(style && style.borderRightWidth) || 0);
+  const width = size(editor.clientWidth) ? editor.clientWidth : editor.offsetWidth - border;
+  const height = size(editor.clientHeight) ? editor.clientHeight : editor.offsetHeight;
+  setStyle(layer, "left", (size(editor.offsetLeft) ? editor.offsetLeft : 0) + "px");
+  setStyle(layer, "top", (size(editor.offsetTop) ? editor.offsetTop : 0) + "px");
+  setStyle(layer, "width", Math.max(0, width) + "px");
+  setStyle(layer, "height", Math.max(0, height) + "px");
 }
 
 // `mountSquiggles(editor, options)` → `{update(diagnostics), refresh(), segments(), destroy()}`.
-// `options.document` defaults to the editor's own document (tests pass a double).
+// `options.segments(text, diagnostics)` is the runtime's rule (a list of `{start, stop,
+// severity, severityName?, message}`); `options.document` defaults to the editor's own
+// document (tests pass a double).
 export function mountSquiggles(editor, options = {}) {
   const doc = options.document || editor.ownerDocument || (typeof document !== "undefined" ? document : null);
-  if (!editor || !doc || typeof doc.createElement !== "function") return null;
-  const wrapper = ensureWrapper(editor, doc);
+  const segmentsOf = options.segments;
+  if (!editor || !doc || typeof doc.createElement !== "function" || typeof segmentsOf !== "function") return null;
+  const host = layerHost(editor, doc);
+  if (!host) return null;
   const layer = doc.createElement("div");
   attr(layer, "class", "squiggle-layer");
+  attr(layer, "data-squiggle-layer", "1");
   attr(layer, "aria-hidden", "true");
   const text = doc.createElement("div");
   attr(text, "class", "squiggle-text");
   layer.appendChild(text);
-  wrapper.appendChild(layer);
+  // Last child, after everything the parent renders: the editor stays where it was and no
+  // existing sibling changes index (the Loom page's patch paths).
+  host.appendChild(layer);
   let spans = [];
+  let diagnostics = [];
 
   const initialStyle = copyTextStyle(editor, text);
   layoutLayer(editor, layer, initialStyle);
@@ -116,11 +153,11 @@ export function mountSquiggles(editor, options = {}) {
     let at = 0;
     for (const span of spans) {
       const start = Math.max(at, Math.min(value.length, span.start));
-      const end = Math.max(start, Math.min(value.length, span.end));
+      const end = Math.max(start, Math.min(value.length, span.stop));
       if (start > at) text.appendChild(doc.createTextNode(value.slice(at, start)));
       if (end > start) {
         const mark = doc.createElement("span");
-        attr(mark, "class", "squiggle sev-" + (SEVERITY_NAME[span.severity] || "info"));
+        attr(mark, "class", "squiggle sev-" + (span.severityName || SEVERITY_NAME[span.severity] || "info"));
         if (span.message) attr(mark, "title", span.message);
         mark.appendChild(doc.createTextNode(value.slice(start, end)));
         text.appendChild(mark);
@@ -131,7 +168,7 @@ export function mountSquiggles(editor, options = {}) {
     // A textarea shows one line box after a trailing newline; the mirror needs one too.
     text.appendChild(doc.createTextNode("\n "));
     attr(layer, "hidden", spans.length ? null : "");
-    attr(wrapper, "data-squiggles", spans.length);
+    attr(host, "data-squiggles", spans.length);
   }
 
   function syncScroll() {
@@ -147,14 +184,20 @@ export function mountSquiggles(editor, options = {}) {
     syncScroll();
   }
 
-  function update(diagnostics) {
-    spans = squiggleSegments(typeof editor.value === "string" ? editor.value : "", diagnostics || []);
-    render();
-    syncScroll();
+  function update(next) {
+    diagnostics = Array.isArray(next) ? next : [];
+    spans = segmentsOf(typeof editor.value === "string" ? editor.value : "", diagnostics) || [];
+    refresh();
     return spans;
   }
 
-  const onInput = () => { render(); syncScroll(); };
+  // Typing changes the text under stale offsets: re-ask the runtime for the same
+  // diagnostics against the new value (the merge/clip rules are the runtime's).
+  function onInput() {
+    spans = segmentsOf(typeof editor.value === "string" ? editor.value : "", diagnostics) || [];
+    render();
+    syncScroll();
+  }
   const onScroll = () => syncScroll();
   const onResize = () => refresh();
   if (typeof editor.addEventListener === "function") {
@@ -189,6 +232,7 @@ export function mountSquiggles(editor, options = {}) {
       if (typeof removeEventListener === "function") removeEventListener("resize", onResize);
       if (observer) { try { observer.disconnect(); } catch (_) { /* gone */ } }
       if (layer.parentNode) layer.parentNode.removeChild(layer);
+      attr(host, "data-squiggles", null);
     },
   };
 }

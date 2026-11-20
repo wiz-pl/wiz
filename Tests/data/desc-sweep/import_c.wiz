@@ -1,0 +1,4 @@
+-- test: check
+import IO
+import_c "string.h"
+def one : Nat := 1

@@ -52,12 +52,6 @@ def strAt (j : Option Json) (path : List String) : String :=
   | _ => ""
 
 
-def candWritten (r : Scry.WfRecord) : EIO Bool := do
-  cj ← Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json");
-  match cj with
-  | .some j => EIO.pure (String.eq (Json.getStr j "stage") "refined")
-  | .none => EIO.pure (.false : Bool)
-
 def evidenceHasPoc (bundle : Option Json) : Bool :=
   match bundle with
   | .some j => List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
@@ -135,17 +129,17 @@ def main : IO Unit := EIO.toIO (do
       | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
           (String.eq (candOf r).verdict "pursue")
       | .none => (.false : Bool));
-  match findIn st2 "cwe78-getenv.c" with
-  | .some r => do
-    b ← candWritten r;
-    check "refine: candidate.json is written" b;
-  | .none => check "refine: candidate.json is written" (.false : Bool);
-
-  -- 3. verify before any repro: the static-only representation. A still-reported
-  -- finding with no stored repro is `still-reported` / `not-run`, never a PoC verdict.
   let cRec := match findIn st2 "cwe78-getenv.c" with
     | .some r => r
     | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
+  candJson ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "candidate.json");
+  check "refine: candidate.json is written"
+    (match candJson with
+      | .some j => String.eq (Json.getStr j "stage") "refined"
+      | .none => (.false : Bool));
+
+  -- 3. verify before any repro: the static-only representation. A still-reported
+  -- finding with no stored repro is `still-reported` / `not-run`, never a PoC verdict.
   n3b ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
   ver0 ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "verify/verify.json");
   check "verify static-only: exit 1 (the finding is still reported)" (Nat.beq n3b 1);
