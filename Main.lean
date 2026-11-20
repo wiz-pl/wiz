@@ -641,8 +641,17 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
+/-- Read the file a command names. A missing one is one diagnostic at `1:1` (the
+`no-such-file` code, D6), as the self-hosted driver reports it, not an uncaught
+`IO.FS.readFile` exception. -/
+def readSourceDiag (path : String) : IO (Option String) := do
+  if ← System.FilePath.pathExists path then pure (some (← IO.FS.readFile path))
+  else
+    IO.eprintln s!"{path}:1:1: error: no such file"
+    pure none
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure 1
   let s ← elaborate tc path input
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
@@ -657,7 +666,7 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure none
   let s ← elaborate tc path input
   for m in s.messages do
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"

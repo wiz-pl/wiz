@@ -540,6 +540,21 @@ def surfaceCats (cats : List Cat) : List Cat :=
   -- process; the shape is the one that rule generates
   let cats := addLeadingTo "term" (.mk "term.listLit" 1024 0
     (.seq (.atom "[") (.seq (.sepBy (.cat "term" 0) "," .false) (.atom "]")))) cats;
+  -- (A17) `¬ P` and `∃ x y : A, P`: the host gets these from lib/Logic.wiz's `notation`
+  -- and `syntax:lead` rules (with a procedural macro for the binders), which this
+  -- frontend does not run. The shapes are the ones those rules generate: `term.not` is
+  -- `["¬", P]`; `term.ex` is `["∃ ", binders, [":" A], ",", P]` with one node per
+  -- binder (`plain` ident, or `typed` "(" idents ":" term ")"). The frontend rewrites
+  -- both to `Not P`/`Ex (fun …)` (`expandNotes`), as the host's macros do.
+  let cats := addLeadingTo "term" (.mk "term.not" 1024 0
+    (.seq (.atom "¬") (.cat "term" 1024))) cats;
+  let cats := addLeadingTo "term" (.mk "term.ex" 1024 0
+    (.seq (.atom "∃") (.seq
+      (.many1 (.orelse (.node "plain" PD.ident)
+        (.node "typed" (.seq (.atom "(") (.seq (.many1 PD.ident)
+          (.seq (.atom ":") (.seq (.cat "term" 0) (.atom ")"))))))))
+      (.seq (.optional (.seq (.atom ":") (.cat "term" 0)))
+        (.seq (.atom ",") (.cat "term" 0)))))) cats;
   -- `if c then a else b`: the branches are `term`s, not application arguments, so a
   -- branch may start on the next line at the `if`'s column (Lean's syntax rule has the
   -- same shape; as an application it was only accepted when indented further)
@@ -549,7 +564,8 @@ def surfaceCats (cats : List Cat) : List Cat :=
 -- `if`/`then`/`else` are reserved too: as identifiers, the condition's application
 -- would swallow `then` (the host's `syntax` reserves them the same way)
 def surfaceTokens : List String :=
-  .cons "if" (.cons "then" (.cons "else" (.cons "!" (.cons "&&" (.cons "||" .nil)))))
+  .cons "if" (.cons "then" (.cons "else" (.cons "!" (.cons "&&" (.cons "||"
+    (.cons "¬" (.cons "∃" .nil)))))))
 
 -- ## Spans (playground LSP, stage 2)
 

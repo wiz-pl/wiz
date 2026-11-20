@@ -22,6 +22,8 @@ def unknownModule := "unknown-module"
 def importCycle := "import-cycle"
 /-- an `import` of a module that has errors of its own -/
 def moduleErrors := "module-errors"
+/-- the file the command names cannot be read (`wiz check no.wiz`) -/
+def noSuchFile := "no-such-file"
 /-- a `match` (or equations) that misses constructors -/
 def missingCase := "missing-case"
 /-- a copattern definition that misses an observation -/
@@ -90,7 +92,7 @@ def nonPattern := "non-pattern"
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
   [unknownIdentifier, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
-   missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
+   noSuchFile, missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
    duplicateHypothesis, duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,

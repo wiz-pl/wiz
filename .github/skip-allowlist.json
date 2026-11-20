@@ -100,39 +100,12 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "check: a bad file has the same line, severity and kind (the column is the command's start)",
-      "reason": "column: the host reports the failing term and the declared name",
-      "parity": "D6",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6): the self-hosted frontend reports the command's start column. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "-I: an error inside a module (the host nests it under the import)",
-      "reason": "structure: the host nests a module's errors under its import",
-      "parity": "D6/A14",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6/A14): the self-hosted loader reports each error at its own module and position. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
       "case": "build --llvm: the host has it, the self-hosted backend is C only (C5)",
       "reason": "backend: the host builds through textual LLVM IR",
       "parity": "C5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
       "why": "documented self-host parity difference (C5): the self-hosted backend is C only. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "a missing file: both exit 1 (the host's message is an uncaught read)",
-      "reason": "message: the host lets IO.readFile throw",
-      "parity": "D6/D7",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "scry-csharp",
@@ -149,14 +122,6 @@
       "owner": "selfhost CLI parity (Tests/Groups/SelfhostCliDiff.lean, selfhost/Cli.wiz)",
       "expires": "2027-05-19",
       "why": "The host's `run` takes flags only and rejects trailing arguments (exit 2); the self-hosted driver passes them to the program. That is a documented host caveat, not a regression, and it needs a host-side `run FILE ARG...` before the entry can go."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "smt: without --trust-smt the refusal is the host's, at the command's start (C15)",
-      "reason": "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6)",
-      "owner": "selfhost diagnostics (Tests/Groups/SelfhostCliDiff.lean, selfhost/Frontend.wiz)",
-      "expires": "2027-05-19",
-      "why": "The message and exit code agree; only the column differs because the host points at the `smt` token while the driver points at the command's start. Fixing it is D6 positioned diagnostics in the self-hosted frontend."
     }
   ]
 }
