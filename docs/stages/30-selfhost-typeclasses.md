@@ -190,20 +190,24 @@ global: no axiom, no new kernel rule, no change to the trust ledger.
     and `String`.
 * **Rejected**, in the host's message shape (`deriving C for T: <reason>`): an indexed
   family (`indexed families are not supported`; the index is a constructor argument the
-  equations would have to generalise, and `lib/Deriving.wiz` rejects it for `BEq` too); a
-  member of a `mutual` block (`not an inductive type or structure: T`, as the host's
-  `MacroM.getInductive` says); an all-recursive type for `Inhabited` (`every constructor
-  of T is recursive or has a proof field`); a recursive type for `DecidableEq`
-  (`DecidableEq is derived for an enumeration or a single-constructor record only, and
-  T`); a class with no entry in the table (`no deriver for C (register one with
-  `attribute [deriver C] f`)`, the host's message); a class with the wrong arity; and a
-  registered deriver this frontend cannot run. A field with no `BEq` instance is rejected
+  equations would have to generalise). This is now a *pinned difference* for `BEq`: the
+  host derives it with a dependent motive (`lib/Deriving.wiz`'s `deriveBEq`), while this
+  frontend's equation-based deriver still refuses the family; `Inhabited` and
+  `DecidableEq` reject it in the host too. A member of a `mutual` block (`not an
+  inductive type or structure: T`, as the host's `MacroM.getInductive` says); an
+  all-recursive type for `Inhabited` (`every constructor of T is recursive or has a proof
+  field`); a recursive type for `DecidableEq` (`DecidableEq is derived for an enumeration
+  or a single-constructor record only, and T`); a class with no entry in the table (`no
+  deriver for C (register one with `attribute [deriver C] f`)`, the host's message); a
+  class with the wrong arity; and a registered deriver this frontend cannot run. A field
+  with no `BEq` instance is rejected
   through ordinary instance resolution when the generated `BEq.beq` cannot be solved.
   `deriving C` on a `mutual` block itself is refused with the command's span (`deriving C
   for T: a mutual inductive is not supported …`): the host
   derives for the joint family (`A_B t`, an indexed family, so one instance covers every
   member), which this frontend's equation-based derivers do not support; `deriving Repr`
-  on a mutual block is therefore a pinned difference (the host accepts it).
+  and `deriving BEq` on a mutual block are therefore pinned differences (the host accepts
+  both).
 * **Positions.** A derivation error is the command's line, so the driver's diagnostics
   position it (`file:line:col`); the checker's own output (`checkFile`) strips the offset
   like every other command's. The host positions the error at the class name inside the

@@ -109,9 +109,51 @@ def derivingGroup : Group where
     { name := "Repr for mutual types: the constructors per type (Ev.s, Od.s), derived for the family", run := fun _ =>
         okDeriving ("import Deriving\nmutual\ninductive Ev where\n  | z\n  | s (o : Od)\n  deriving Repr\ninductive Od where\n  | s (e : Ev)\nend\n" ++
           "#eval Repr.repr (Ev.s (Od.s Ev.z))\n#eval Repr.repr (Od.s (.s (.s .z)))") ["\"Ev.s (Od.s Ev.z)\"", "\"Od.s (Ev.s (Od.s Ev.z))\""] },
-    { name := "deriving BEq for an indexed family is an error", run := fun _ =>
-        failsDeriving ("import Deriving\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A 0\n" ++
-          "  | cons {n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n  deriving BEq") "indexed families are not supported" },
+    { name := "deriving BEq for an indexed family: Vec at the same and different indices", run := fun _ =>
+        okDeriving ("import Deriving\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A 0\n" ++
+          "  | cons {n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n  deriving BEq\n" ++
+          "def v0 : Vec Nat 0 := .nil\n" ++
+          "def v2 : Vec Nat 2 := .cons 1 (.cons 2 .nil)\n" ++
+          "def w2 : Vec Nat 2 := .cons 1 (.cons 2 .nil)\n" ++
+          "def u2 : Vec Nat 2 := .cons 1 (.cons 3 .nil)\n" ++
+          "#eval BEq.beq v0 v0\n#eval BEq.beq v2 w2\n#eval BEq.beq v2 u2\n" ++
+          "#check @instBEqVecAX")
+          [".true", ".true", ".false",
+           "instBEqVecAX : {A : Type} → [inst✝ : BEq A] → {x : Nat} → BEq (Vec A x)"] },
+    { name := "deriving instance BEq for lib/Vec and lib/Vec's Fin", run := fun _ =>
+        okLibs ("import Deriving\nimport Vec\nderiving instance BEq for Vec\nderiving instance BEq for Fin\n" ++
+          "def v : Vec Nat 3 := Vec.fromList [1, 2, 3]\n" ++
+          "def w : Vec Nat 3 := Vec.fromList [1, 2, 3]\n" ++
+          "def u : Vec Nat 3 := Vec.fromList [1, 2, 4]\n" ++
+          "#eval BEq.beq v w\n#eval BEq.beq v u\n" ++
+          "#eval BEq.beq (Vec.nil : Vec Nat 0) (Vec.nil : Vec Nat 0)\n" ++
+          "#eval BEq.beq (Fin.of 5 3 rfl) (Fin.of 5 3 rfl)\n" ++
+          "#eval BEq.beq (Fin.of 5 3 rfl) (Fin.of 5 4 rfl)")
+          [".true", ".false", ".true", ".true", ".false"] },
+    { name := "deriving BEq for a width-indexed family: the index is a compared field", run := fun _ =>
+        okDeriving ("import Deriving\ninductive Bits : Nat → Type where\n  | mk (w : Nat) (bits : Nat) : Bits w\n" ++
+          "  deriving BEq\n" ++
+          "def b4 : Bits 4 := .mk 4 10\ndef c4 : Bits 4 := .mk 4 10\ndef d4 : Bits 4 := .mk 4 11\n" ++
+          "def b8 : Bits 8 := .mk 8 10\ndef c8 : Bits 8 := .mk 8 10\ndef d8 : Bits 8 := .mk 8 11\n" ++
+          "#eval BEq.beq b4 c4\n#eval BEq.beq b4 d4\n#eval BEq.beq b8 c8\n#eval BEq.beq b8 d8")
+          [".true", ".false", ".true", ".false"] },
+    { name := "deriving BEq for an indexed family compares a user-enum index", run := fun _ =>
+        okDeriving ("import Deriving\ninductive Mode where\n  | slow\n  | medium\n  | fast\n  deriving BEq\n" ++
+          "inductive Speed : Mode → Type where\n  | mk (m : Mode) (n : Nat) : Speed m\n  deriving BEq\n" ++
+          "#eval BEq.beq (Speed.mk Mode.slow 1) (Speed.mk Mode.slow 1)\n" ++
+          "#eval BEq.beq (Speed.mk Mode.slow 1) (Speed.mk Mode.slow 2)\n" ++
+          "#eval BEq.beq (Speed.mk Mode.fast 1) (Speed.mk Mode.fast 1)")
+          [".true", ".false", ".true"] },
+    { name := "deriving BEq for an indexed family needs BEq on a compared index", run := fun _ =>
+        failsDeriving ("import Deriving\ninductive Mode where\n  | slow\n  | medium\n  | fast\n" ++
+          "inductive Speed : Mode → Type where\n  | mk (m : Mode) (n : Nat) : Speed m\n  deriving BEq")
+          "failed to synthesize an instance of BEq Mode" },
+    { name := "deriving BEq for mutual types (the joint family is indexed)", run := fun _ =>
+        okDeriving ("import Deriving\nmutual\ninductive Ev where\n  | z\n  | s (o : Od)\n  deriving BEq\n" ++
+          "inductive Od where\n  | s (e : Ev)\nend\n" ++
+          "#eval BEq.beq (Ev.s (Od.s Ev.z)) (Ev.s (Od.s Ev.z))\n" ++
+          "#eval BEq.beq (Ev.s (Od.s Ev.z)) Ev.z")
+          [".true", ".false"] },
     { name := "deriving a class without a deriver is an error", run := fun _ =>
         failsDeriving "import Deriving\ninductive X where\n  | x\n  deriving Frob" "no deriver for Frob" },
     { name := "Inhabited needs a non-recursive constructor", run := fun _ =>
