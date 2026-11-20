@@ -501,7 +501,7 @@ def Scry.G.ingestTreeBody (root graphPath manifestPath : String) (git : Bool) : 
         sg ← (match old with
           | .some _ => Scry.G.storeGen graphPath
           | .none => EIO.pure 0);
-        let sameGen := match old with
+        let sameGen : Bool := match old with
           | .some m => Nat.beq sg m.gen
           | .none => .false;
         match Bool.and sameRevision sameGen with
