@@ -12,7 +12,8 @@ Run from the repository root (compiled: Quire's `mmap`/`flock`/`quire_seal.c` na
 `wiz run` code):
 
 ```
-wiz -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
+wiz --cflags "-Idrafts/storage-engine" \
+    -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
     run drafts/scry-analysis/tests/effect-test.wiz
 ```
 

@@ -8,13 +8,10 @@ The pure layer is `scry/src/Scry/AnalysisFile.wiz`; the Quire layer and the comm
 (`wiz-notes/scry-quire.md` on that branch) is the findings-store prototype; this note uses
 the same engine (`drafts/storage-engine/Quire.wiz`, `QuireCursor.wiz`) for the **graph**.
 
-Verified on 2026-11-20: the Quire effect test passes all 40 checks (2 passed checks per
-line, including the live view/head query, stale/revision, no-op vs new commit, malformed
-store, writer lock and `#ingest` line); `analysis.wiz` runs fresh and prints the refuted
-claim and the widget payload. The pure `scry-analysis` group **compiled** but the test
-driver could not be linked because the generated `Tests.Groups` import fails on an
-existing `Tests.Elab.dropImports` collision between `StorageQuire` and
-`StorageMultiproc` (unrelated to this slice).
+Verified on 2026-11-20: the Quire effect test passes all 39 checks (including the live
+view/head query, stale/revision, no-op vs new commit, malformed store, writer lock and
+`#ingest` line); `analysis.wiz` checks and runs fresh, printing the refuted claim and the
+widget payload. The pure `scry-analysis` group is green on train8 (5/5).
 
 **Two corrections from the owner, both applied here.**
 
@@ -44,10 +41,10 @@ def manifest : Scry.Manifest :=
   | .ok m => m
   | .error _ => Scry.emptyManifest
 
-def view : Scry.GraphView := manifest.view
-def claim : Scry.ClaimResult := Scry.claimCalls view
+def graphView : Scry.GraphView := manifest.view
+def claim : Scry.ClaimResult := Scry.claimCalls graphView
 def findings : List Scry.AnalysisFinding := claim.findings
-def display : String := Scry.analysisDisplay claim view
+def display : String := Scry.analysisDisplay claim graphView
 
 def main : IO Unit := do
   -- check the revision, open Quire, re-query the view, print the claim and payload
@@ -324,7 +321,7 @@ either way.
 | file | checks |
 |---|---|
 | `Tests/Groups/ScryAnalysis.lean` (`scry-analysis`) | `#ingest` macro/scanner; merge → view → claim (refuted at beta.c/node 7); manifest JSON round-trip; fresh/stale (tree change, kind change, dirty change); diagnostics/code-action JSON; widget bundle (3 widgets, one finding, `scry.analysis/1`) |
-| `drafts/scry-analysis/tests/effect-test.wiz` | real Quire: **40/40 PASS** — ingest → graph+manifest (9 nodes, 5 edge rows, 8 relation rows); live `gen`/view match; stale with both revisions; same-revision re-ingest is a no-op; changed revision commits a new snapshot (`gen+1`); malformed store fails closed; writer lock refuses a second ingest; absent git revision says "fetch first"; `#ingest` file form + line 3 diagnostic; widget payload |
+| `drafts/scry-analysis/tests/effect-test.wiz` | real Quire: **39/39 PASS** — ingest → graph+manifest (9 nodes, 5 edge rows, 8 relation rows); live `gen`/view match; stale with both revisions; same-revision re-ingest is a no-op; changed revision commits a new snapshot (`gen+1`); malformed store fails closed; writer lock refuses a second ingest; absent git revision says "fetch first"; `#ingest` file form + line 3 diagnostic; widget payload |
 | `drafts/scry-analysis/analysis.wiz` | the worked pure claim + the effectful runner (revision gate, Quire read, view comparison, display) |
 
 Commands:
@@ -334,7 +331,8 @@ Commands:
 lake test -- '=scry-analysis'
 
 # the Quire slice (compiled: mmap, flock and quire_seal.c)
-wiz -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
+wiz --cflags "-Idrafts/storage-engine" \
+    -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
     run drafts/scry-analysis/tests/effect-test.wiz
 
 # the worked file (after an ingest has written graph.quire + manifest)
