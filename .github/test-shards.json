@@ -22,7 +22,10 @@
       "=selfhost",
       "=selfhost-host",
       "=audit-kernels",
-      "=selfhost-macro"
+      "=selfhost-macro",
+      "=selfhost-cli",
+      "=selfhost-cli-diff",
+      "=selfhost-lsp"
     ],
     "split-cases": true
   },
@@ -56,7 +59,6 @@
     "name": "library",
     "split": 10,
     "jobs": 4,
-    "default": true,
     "select": [
       "=bus-crc",
       "=bus-law",
@@ -160,7 +162,14 @@
       "quantity",
       "rig",
       "sized",
-      "universes"
+      "universes",
+      "=args",
+      "=library",
+      "=list-lemmas",
+      "=scry-modules",
+      "=storage-mmap",
+      "=storage-multiproc",
+      "=storage-quire"
     ]
   },
   {

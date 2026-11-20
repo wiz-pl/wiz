@@ -1,6 +1,9 @@
 {
  "builds": {"checker": 295.238, "compiler": 354.327, "parser": 12.757, "tower-wiz": 25.857},
  "cases": {
+  "args": {
+   "long, short, clustered, --, positionals, subcommands and every error message": {"seconds": 29.45}
+  },
   "audit-kernels": {
    "K10 (closed by 21m): both frontends reject a dropped and a duplicated linear variable": {"seconds": 0.084, "uses": ["checker"]},
    "the two kernels agree on generated typed terms, their normal forms, and the templates": {"seconds": 166.698}
@@ -405,6 +408,10 @@
    "the pipe operator": {"seconds": 0.986},
    "tuple patterns": {"seconds": 1.23}
   },
+  "library": {
+   "encoding: hex and base64 both ways; every invalid input is an error": {"seconds": 27.524},
+   "sha256: the empty message, \"abc\", the 448-bit message, 64 bytes (FIPS 180-4)": {"seconds": 24.552}
+  },
   "linear-case": {
    "a field at 0 is erased in a linear match: used at run time rejected, in an erased position accepted": {"seconds": 1.039},
    "a linear Unit must be consumed: unused is rejected, `let () := u` consumes it once": {"seconds": 1.323},
@@ -435,6 +442,17 @@
    "membership, the binder notation and evals (#check/#eval)": {"seconds": 5.159},
    "reverse, membership and the Boolean laws": {"seconds": 5.068},
    "the library checks, also next to Json, Vec and Functor": {"seconds": 10.724}
+  },
+  "loom": {
+   "SSR: a component tree renders deterministic HTML": {"seconds": 11.874},
+   "escaping: text and attributes are escaped; raw is the trust boundary": {"seconds": 8.211},
+   "events: the handler's event name is checked": {"seconds": 8.948},
+   "events: two events on one element are two attributes": {"seconds": 5.398},
+   "keyed lists: a rotation is two moves, not a re-render": {"seconds": 11.778},
+   "owned state: a quantity-1 cell is updated and ends once": {"seconds": 8.104},
+   "owned state: dropping the cell is a type error": {"seconds": 7.81},
+   "owned state: using the cell twice is a type error": {"seconds": 7.14},
+   "state: a dispatch is a lens update, and its patch is one text node": {"seconds": 10.646}
   },
   "lsp": {
    "13p–q: an updated field's hover and definition; a numeral pattern's variable": {"seconds": 0.951},
@@ -599,17 +617,6 @@
   },
   "prop-kernels": {
    "P5: Kernel.wiz agrees with the Lean kernel on judgments, substitution instances and conversions": {"seconds": 321.903}
-  },
-  "loom": {
-   "SSR: a component tree renders deterministic HTML": {"seconds": 11.874},
-   "escaping: text and attributes are escaped; raw is the trust boundary": {"seconds": 8.211},
-   "events: the handler's event name is checked": {"seconds": 8.948},
-   "events: two events on one element are two attributes": {"seconds": 5.398},
-   "keyed lists: a rotation is two moves, not a re-render": {"seconds": 11.778},
-   "owned state: a quantity-1 cell is updated and ends once": {"seconds": 8.104},
-   "owned state: dropping the cell is a type error": {"seconds": 7.81},
-   "owned state: using the cell twice is a type error": {"seconds": 7.14},
-   "state: a dispatch is a lens update, and its patch is one text node": {"seconds": 10.646}
   },
   "regions": {
    "a borrow can't outlive its scope (E0597)": {"seconds": 2.808},
@@ -821,6 +828,13 @@
    "widening: the loop reaches a post-fixpoint; one narrowing pass lets the checker accept": {"seconds": 8.076},
    "widths: wrap-around and underflow become Top, a safe sum stays exact": {"seconds": 10.318}
   },
+  "scry-analysis": {
+   "#ingest parses and the scanner reports line and paths": {"seconds": 96.814},
+   "diagnostics and the code action have the LSP shapes": {"seconds": 83.798},
+   "merge/view/claim: files, unioned relations, file_of, the refuted claim": {"seconds": 86.322},
+   "the revision manifest round-trips and the verdict is fresh/stale": {"seconds": 84.31},
+   "the widget payload is a wiz.widget/1 bundle with the scry extension": {"seconds": 89.951}
+  },
   "scry-c2wil": {
    "CFG: valid targets, edges, back edge and reachability of the loop function": {"seconds": 21.076},
    "call graph: two resolved edges, a static callee is TU-qualified": {"seconds": 26.445},
@@ -878,6 +892,10 @@
    "fuel: a growing rewrite adds one layer per round and stops at the bound": {"seconds": 7.498},
    "rebuild: a batch of unions canonicalises every class, child and level": {"seconds": 7.069},
    "saturation: x + 0 → x, x * 1 → x and commutativity reach x": {"seconds": 9.352}
+  },
+  "scry-modules": {
+   "Scry.Optics: a statement's origin lens gets, sets and maps": {"seconds": 32.5},
+   "Scry.Report: HTML escaping, no remote resource, deterministic (scry/tests/report-pure.wiz)": {"seconds": 21.807}
   },
   "scry-taint": {
    "SARIF: version, driver, rules, result, locations, related locations and round-trip": {"seconds": 92.612},
@@ -1174,6 +1192,22 @@
    "usage: a missing FILE, extra arguments and an unknown command agree (exit 2)": {"seconds": 0.304, "uses": ["compiler"]},
    "warnings: the host warns about a shadowed Prelude (the driver has none yet)": {"seconds": 5.67, "uses": ["compiler"]}
   },
+  "selfhost-host": {
+   "F3 (audit): the eliminators check the index type's level (and both kernels agree on it below)": {"seconds": 0.053},
+   "F6: literal quantities that differ make types unequal (and both kernels agree on it below)": {"seconds": 0.033},
+   "P2 with #126: a level-generic structurally recursive definition's derived equations agree with its value (checkImplAgrees), at levels 0 and 1": {"seconds": 0.064},
+   "Q4: a small description field is rejected, a lifted one works (and both kernels agree on it below)": {"seconds": 0.077},
+   "Size = Size is stuck, not False (and both kernels agree on it below)": {"seconds": 0.044},
+   "an echoing stub compiler and checker fail every =selfhost case (the pipeline group is not vacuous)": {"seconds": 71.21},
+   "both kernels compare propositions by equivalence (and agree on it below)": {"seconds": 0.046},
+   "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)": {"seconds": 0.047},
+   "projections need an unrestricted pair; positions at 0 are erased; eliminators use their scrutinee ω times (R1; and both kernels agree on it below)": {"seconds": 0.06},
+   "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)": {"seconds": 0.045},
+   "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)": {"seconds": 1.374},
+   "the size of μ and ν is checked (and both kernels agree on it below)": {"seconds": 0.049},
+   "transp is rejected at a proposition, as eq and refl are (and both kernels agree on it below)": {"seconds": 0.036},
+   "∞ is not below itself (and both kernels agree on it below)": {"seconds": 0.042}
+  },
   "selfhost-libdiff": {
    "a self-hosted run that exits 3 (the runtime gave up) is bounded, with its reason; not accepted": {"seconds": 0.064},
    "the library through both compilers: files 1 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
@@ -1182,6 +1216,12 @@
    "the library through both compilers: files 4 of 4 by index (the parity gap list)": {"seconds": 552.0, "uses": ["compiler"]},
    "the sweep's worker pool: every file exactly once, results in order, any worker count": {"seconds": 0.208},
    "the sweep's workers: as asked (or auto), but no more than the CPUs and the free memory hold": {"seconds": 0.067}
+  },
+  "selfhost-lsp": {
+   "lsp: Content-Length is UTF-8 bytes, and initialize's root resolves imports": {"seconds": 60.989},
+   "lsp: a session's messages, in the host's shapes": {"seconds": 61.048},
+   "lsp: no options, and a flag before it is the host's error": {"seconds": 58.069},
+   "lsp: plainTermGoal and plainGoal answer from the check's entries": {"seconds": 57.21}
   },
   "selfhost-macro": {
    "A12's remaining half, pinned: a macro/tactic function's type is not checked (the self-hosted frontend cannot run it) (A12)": {"seconds": 1.723, "uses": ["checker"]},
@@ -1254,6 +1294,15 @@
    "ring: the tactic reads the goal (Nat, Int, ≈ at Q; binders introduced)": {"seconds": 13.254},
    "simp lemmas: normal forms and explicit rw chains (lib/SimpLemmas.wiz)": {"seconds": 7.221},
    "the order of Int, absolute value, the triangle inequality": {"seconds": 9.108}
+  },
+  "storage-mmap": {
+   "mmap a version-1 file: meta pick, checksums, walk, index bucket, out-of-range": {"seconds": 23.629}
+  },
+  "storage-multiproc": {
+   "flock contract: shared readers, deferred commit, mid-scan snapshot, two writers, torn reopen": {"seconds": 28.211}
+  },
+  "storage-quire": {
+   "page commits/open/query: index facts, page counts, stale/unique, reopen": {"seconds": 39.271}
   },
   "tactics": {
    "TacticM.introFresh: the binder's name, made fresh, and returned": {"seconds": 1.439},
@@ -1448,22 +1497,6 @@
    "signed and unsigned division are told apart (one shape, two sealed types)": {"seconds": 2.218},
    "the definitions compute in the kernel": {"seconds": 2.373},
    "the width is part of the type, and is inferred": {"seconds": 3.028}
-  },
-  "selfhost-host": {
-   "F3 (audit): the eliminators check the index type's level (and both kernels agree on it below)": {"seconds": 0.053},
-   "F6: literal quantities that differ make types unequal (and both kernels agree on it below)": {"seconds": 0.033},
-   "P2 with #126: a level-generic structurally recursive definition's derived equations agree with its value (checkImplAgrees), at levels 0 and 1": {"seconds": 0.064},
-   "Q4: a small description field is rejected, a lifted one works (and both kernels agree on it below)": {"seconds": 0.077},
-   "Size = Size is stuck, not False (and both kernels agree on it below)": {"seconds": 0.044},
-   "an echoing stub compiler and checker fail every =selfhost case (the pipeline group is not vacuous)": {"seconds": 71.21},
-   "both kernels compare propositions by equivalence (and agree on it below)": {"seconds": 0.046},
-   "guarded μ/ν descriptions: μ X. X is rejected, Nat/List/tree and a stream are accepted (and both kernels agree below)": {"seconds": 0.047},
-   "projections need an unrestricted pair; positions at 0 are erased; eliminators use their scrutinee ω times (R1; and both kernels agree on it below)": {"seconds": 0.06},
-   "selfhost/Tables.wiz is current (regenerate with `lake build genSelfhostTables`)": {"seconds": 0.045},
-   "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)": {"seconds": 1.374},
-   "the size of μ and ν is checked (and both kernels agree on it below)": {"seconds": 0.049},
-   "transp is rejected at a proposition, as eq and refl are (and both kernels agree on it below)": {"seconds": 0.036},
-   "∞ is not below itself (and both kernels agree on it below)": {"seconds": 0.042}
   }
  }
 }
