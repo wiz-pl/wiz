@@ -247,8 +247,8 @@ def loomGroup : Group where
           "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).text\n" ++
           "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).caret\n" ++
           "#eval (EditorModel.acceptCompletion \"😀 tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 5).caret\n" ++
-          "#eval EditorModel.completionTrigger \"-- no\" \"t\" 5\n" ++
-          "#eval EditorModel.completionTrigger \"-- x\\n\" \"t\" 5")
+          "#eval EditorModel.completionTrigger (EditorModel.index \"-- no\") \"t\" 5\n" ++
+          "#eval EditorModel.completionTrigger (EditorModel.index \"-- x\\n\") \"t\" 5")
           ["6", r#""Nat.add,add""#, r#""Nat.succ,Nat.sub""#, r#""add,Nat.add""#, "11",
            r#""Nat.ad""#, "2", r#""2""#, r#""0""#, r#""foo bar  ""#, r#""def x := twice""#, "14", "8",
            ".false", ".true"] },
@@ -282,7 +282,7 @@ def loomGroup : Group where
           "def p := 16\n" ++
           "def entries := \"[{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"term\\\",\\\"expected\\\":\\\"Nat\\\"}," ++
           "{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"goal\\\",\\\"goals\\\":[\\\"n : Nat\\\\n⊢ Nat\\\"]}," ++
-          "{\\\"s\\\":4,\\\"e\\\":5,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"f\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
+          "{\\\"s\\\":20,\\\"e\\\":21,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"f\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
           "def ix := EditorModel.lspIndexJson text \"import Prelude\\n\\n\" entries\n" ++
           "#eval EditorModel.lspIndexSize ix\n" ++
           "#eval String.contains (EditorModel.lspTermGoalJson text ix 25) \"\\\"goal\\\":\\\"Nat\\\"\"\n" ++
@@ -290,7 +290,7 @@ def loomGroup : Group where
           "#eval String.contains (EditorModel.lspDeclarationsJson text ix) \"\\\"label\\\":\\\"f\\\"\"\n" ++
           "#eval String.contains (EditorModel.lspDeclarationJson text ix \"f\") \"\\\"kind\\\":3\"\n" ++
           "#eval EditorModel.lspTermGoalJson text ix 0")
-          ["3", ".true", ".true", ".true", ".true", "null"] },
+          ["3", ".true", ".true", ".true", ".true", r#""null""#] },
     { name := "session: a step diffs against the retained tree (one render per effect)", run := fun _ =>
         okLoom (loomPrelude ++
           "def live : Loom.LiveApp Model Msg := Loom.LiveApp.mk (Model.mk 0)\n" ++
