@@ -1,4 +1,9 @@
 -- test: run
+-- NOTE: `e2e-c.expected` was written from the checked-in corpus goldens and
+-- the contracts below, not copied from a completed run. The first live run was
+-- blocked before it reached the test (missing tree-sitter-c-sharp out-link), so
+-- treat the expected file as a contract until the scry goldens job has compared
+-- it. Do not mark this case as verified in a report before then.
 import Sys
 import Json
 import Text
