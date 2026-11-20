@@ -2608,73 +2608,78 @@ inductive TCtx where
        -- its result used at ω when the result contains no linear content ("consumed but
        -- not contained", `fixCallSafe`)
        (fix : Option String)
+       -- (22i) `--unbox-structs`: erasure may unbox a structure's last field
+       (unbox : Bool)
 def TCtx.lvl : TCtx → Nat
-  | .mk _ _ l _ _ _ _ _ => l
+  | .mk _ _ l _ _ _ _ _ _ => l
 def TCtx.env : TCtx → Env
-  | .mk e _ _ _ _ _ _ _ => e
+  | .mk e _ _ _ _ _ _ _ _ => e
 def TCtx.types : TCtx → Env
-  | .mk _ t _ _ _ _ _ _ => t
+  | .mk _ t _ _ _ _ _ _ _ => t
 def TCtx.erased : TCtx → Bool
-  | .mk _ _ _ x _ _ _ _ => x
+  | .mk _ _ _ x _ _ _ _ _ => x
 def TCtx.pm : TCtx → Nat
-  | .mk _ _ _ _ m _ _ _ => m
+  | .mk _ _ _ _ m _ _ _ _ => m
 def TCtx.reg : TCtx → Bool
-  | .mk _ _ _ _ _ r _ _ => r
+  | .mk _ _ _ _ _ r _ _ _ => r
 -- checking a partial definition's witness (`checkPartial`): evidence that its type is
 -- inhabited, never run, so its usages are not enforced (it may ignore a linear argument).
 -- The definition's body, the code that runs, is checked strictly.
 def TCtx.witness : TCtx → Bool
-  | .mk _ _ _ _ _ _ w _ => w
+  | .mk _ _ _ _ _ _ w _ _ => w
 def TCtx.fix : TCtx → Option String
-  | .mk _ _ _ _ _ _ _ f => f
+  | .mk _ _ _ _ _ _ _ f _ => f
+-- (22i) `--unbox-structs`: erasure may unbox a structure's last field
+def TCtx.unbox : TCtx → Bool
+  | .mk _ _ _ _ _ _ _ _ u => u
 -- the body of the partial definition `f` is being checked
 def TCtx.withFix (c : TCtx) (f : String) : TCtx := match c with
-  | .mk e t l x m r w _ => .mk e t l x m r w (.some f)
+  | .mk e t l x m r w _ u => .mk e t l x m r w (.some f) u
 def TCtx.erase (c : TCtx) : TCtx := match c with
-  | .mk e t l _ m r w f => .mk e t l .true m r w f
+  | .mk e t l _ m r w f u => .mk e t l .true m r w f u
 -- (P2) inside a proof
 def TCtx.inProof (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 3 with
+  | .mk e t l x m r w f u => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
       -- (the sorts pass, below the kernel: inside a proof, still placing no markers)
-      | .true => .mk e t l x 5 r w f
-      | .false => .mk e t l x 1 r w f
+      | .true => .mk e t l x 5 r w f u
+      | .false => .mk e t l x 1 r w f u
 -- (P2) is `c` inside a proof (`1`; `5` is the same in the sorts pass, which places no
 -- markers: `4` relevant, `5` inside a proof)?
 def inProofMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ _ _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
+  | .mk _ _ _ _ m _ _ _ _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
 def sortsMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ _ _ => Nat.lt 3 m
+  | .mk _ _ _ _ m _ _ _ _ => Nat.lt 3 m
 -- (tests only) no marker requirement anywhere below, and proofs evaluated: the
 -- well-typedness pre-check of the differential tests, so that a term which needs markers
 -- inside a proof reaches the marking passes (review F2; `lazyProofs := false` in Lean)
 def TCtx.noMarkers (c : TCtx) : TCtx := match c with
-  | .mk e t l x _ r w f => .mk e t l x 3 r w f
+  | .mk e t l x _ r w f u => .mk e t l x 3 r w f u
 -- (P2) at the term a marker wraps, and below it
 def TCtx.atMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match m with
-    | .zero => .mk e t l x 2 r w f
+  | .mk e t l x m r w f u => match m with
+    | .zero => .mk e t l x 2 r w f u
     | _ => c
 def TCtx.belowMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 2 with
-    | .true => .mk e t l x 0 r w f
+  | .mk e t l x m r w f u => match Nat.beq m 2 with
+    | .true => .mk e t l x 0 r w f u
     | .false => c
 def erasedIf (q : Q) (c : TCtx) : TCtx := match q with
   | .qz => TCtx.erase c
   | _ => c
 -- a new variable of type `ty`
 def TCtx.bind (c : TCtx) (ty : Val) : TCtx := match c with
-  | .mk e t l x m r w f => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r w f
+  | .mk e t l x m r w f u => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r w f u
 -- a new variable defined as `v`
 def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
-  | .mk e t l x m r w f => .mk (.cons v e) (.cons ty t) (l + 1) x m r w f
+  | .mk e t l x m r w f u => .mk (.cons v e) (.cons ty t) (l + 1) x m r w f u
 -- (PF-C) the same context with regularity at every type on
 def TCtx.fullReg (c : TCtx) : TCtx := match c with
-  | .mk e t l x m _ w f => .mk e t l x m .true w f
+  | .mk e t l x m _ w f u => .mk e t l x m .true w f u
 -- the witness-checking context (`addPartialDecl` in `Check.lean`)
 def TCtx.wit (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r _ f => .mk e t l x m r .true f
+  | .mk e t l x m r _ f u => .mk e t l x m r .true f u
 -- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
 -- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
 -- every type; so while they are compared, a stuck cast is its argument at *any* type, not
@@ -3518,11 +3523,11 @@ def isProofTy (c : TCtx) (ty : Val) : Bool := match kernelLazyProofs with
     | .some l => lvlIsZero l
     | .none => .false
 def TCtx.relevant (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 3 with
+  | .mk e t l x m r w f u => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
-      | .true => .mk e t l x 4 r w f
-      | .false => .mk e t l x 0 r w f
+      | .true => .mk e t l x 4 r w f u
+      | .false => .mk e t l x 0 r w f u
 def modeAt (c : TCtx) (ty : Val) : TCtx := match inProofMode c with
   | .false => c
   | .true => match sortOf c ty with
@@ -4564,7 +4569,7 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0 .false .false .none
+def empty : TCtx := .mk .nil .nil 0 .false 0 .false .false .none .false
 
 -- does the term have a level the predicate rejects, in any level position? (the
 -- declaration check uses it for "every level parameter is declared, and none is left
@@ -5186,7 +5191,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false .false .none
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false .false .none .false
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t
@@ -5204,7 +5209,7 @@ def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ r w => markTy (.mk e ts l x 4 r w) t
+    | .mk e ts l x _ r w f u => markTy (.mk e ts l x 4 r w f u) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v

@@ -889,6 +889,30 @@ def structFiles : List (String × String) :=
 
 def structExpected : String := "3\n2\n42\n6\ntrue\nwiz!\n54\nmade in C\n15\n"
 
+/-- (22i, `--unbox-structs`) A one-field and a two-field `c_struct` by value: the last
+field is not in a pair, so `wiz_sin`/`wiz_sout` must read and build the unboxed layout. A
+layout mismatch (the helpers still assuming nested pairs, or erasure still boxing)
+changes the numbers or reads a pair offset as a field. -/
+def unboxStructFiles : List (String × String) :=
+  [("main.wiz", "import IO\nlink_c \"c/unbox.c\"\n" ++
+      "c_struct \"struct one\" One where\n  val : Nat\n" ++
+      "c_struct \"struct two\" Two where\n  a : Nat\n  b : Nat\n" ++
+      "extern \"one_add\" oneAdd : One → Nat\nextern \"one_make\" oneMake : Nat → One\n" ++
+      "extern \"two_sum\" twoSum : Two → Nat\nextern \"two_swap\" twoSwap : Two → Two\n" ++
+      "def main : IO Unit := do\n  IO.println (Nat.toString (oneAdd (One.mk 41)));\n" ++
+      "  let o := oneMake 7;\n  IO.println (Nat.toString o.val);\n" ++
+      "  IO.println (Nat.toString (twoSum (Two.mk 40 2)));\n" ++
+      "  let t := twoSwap (Two.mk 3 9);\n  IO.println (Nat.toString (t.a * 10 + t.b))\n"),
+   ("c/unbox.c", "#include <stdint.h>\n" ++
+      "struct one { uint64_t val; };\n" ++
+      "struct two { uint64_t a; uint64_t b; };\n" ++
+      "uint64_t one_add(struct one x) { return x.val + 1; }\n" ++
+      "struct one one_make(uint64_t n) { struct one x; x.val = n; return x; }\n" ++
+      "uint64_t two_sum(struct two x) { return x.a + x.b; }\n" ++
+      "struct two two_swap(struct two x) { struct two y; y.a = x.b; y.b = x.a; return y; }\n")]
+
+def unboxStructExpected : String := "42\n7\n42\n93\n"
+
 /-- (C8) Structs nested two deep, each passed and returned by value, with a string and a
 number read out of the outermost — the field order and the marshalling helpers compose. -/
 def structDeepHeader : String :=
@@ -2590,7 +2614,7 @@ def selfHostGroup : Group where
           "Nat : U0\nEv : U0\nOd : U0\n(x0 : Od) → Ev\n(x0 : Ev) → Od\ntwo : Ev\nisZ : (x0 : Ev) → Nat\nunOd : (x0 : Od) → Ev\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\n" },
     { name := "structures and projections, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\nstructure Pair (A B : Type) where\n  fst : A\n  snd : B\n#check Pair.mk\ndef p : Pair Nat (Pair Nat Nat) := .mk .zero (.mk (.succ .zero) .zero)\n#reduce Pair.fst (Pair.snd p)\ndef swap {A B : Type} (q : Pair A B) : Pair B A := .mk (Pair.snd q) (Pair.fst q)\n#reduce Pair.fst (swap p)\n#reduce p.snd.fst\ndef swap2 {A B : Type} (q : Pair A B) : Pair B A := .mk q.snd q.fst\n#reduce (swap2 p).fst\n"
-          "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))\n" },
+          "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\n" },
     { name := "numerals and match as a term, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef add : Nat → Nat → Nat\n  | 0, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add 2 3\ndef isSmall : Nat → Nat\n  | 0 => 1\n  | 1 => 1\n  | _ => 0\n#reduce isSmall 1\n#reduce isSmall 5\ninductive Bool where\n  | false\n  | true\ndef lt : Nat → Nat → Bool\n  | _, 0 => .false\n  | 0, .succ _ => .true\n  | .succ m, .succ n => lt m n\n#reduce lt 1 3\ndef pick (b : Bool) (x y : Nat) : Nat := add (match b with\n  | .true => x\n  | .false => y) 1\n#reduce pick .false 2 5\ndef both (a b : Bool) : Bool := match a, b with\n  | .true, .true => .true\n  | _, _ => .false\n#reduce both .true .false\n"
           "Nat : U0\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nisSmall : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\nBool : U0\nlt : (x0 : Nat) → (x1 : Nat) → Bool\ncon((#1, (tt, tt)))\npick : (x0 : Bool) → (x1 : Nat) → (x2 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nboth : (x0 : Bool) → (x1 : Bool) → Bool\ncon((#0, (tt, tt)))\n" },
@@ -2843,6 +2867,9 @@ def selfHostGroup : Group where
         selfhostLinkRun structFiles structExpected (flags := #["--rc"]) },
     { name := "the self-hosted frontend: c_struct is checked as in the Lean frontend (21r)", run := fun _ =>
         selfhostAgreesIO "" structDecls },
+    { name := "c_struct with --unbox-structs: the last field is unboxed, and C reads it back (22i)", run := fun _ => do
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--unbox-structs"])
+        selfhostLinkRun unboxStructFiles unboxStructExpected (flags := #["--rc", "--unbox-structs"]) },
     { name := "c_struct: two levels of nesting pass and return by value, in both compilers (C8)", run := fun _ => do
         let dir ← IO.FS.createTempDir
         let h := dir / "wiz_deep.h"
