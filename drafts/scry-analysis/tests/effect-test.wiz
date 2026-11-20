@@ -140,12 +140,17 @@ def ScryTest.main : IO Unit := do
   hdbg ← ScryTest.runEIO (openQ graphPath Scry.G.indices);
   sdbg ← ScryTest.runEIO (getQ hdbg);
   IO.ePrintln (String.append "debug rows2000=" (Nat.repr (List.length (Scry.G.idsOfKind sdbg 2000))));
+  let dbgHeads := Scry.filterMap (fun r => match Scry.G.nodeOf sdbg r with
+    | .some n => .some n.count.toNat
+    | .none => .none) (Scry.G.idsOfKind sdbg 2000);
+  IO.ePrintln (String.append "debug heads=" (Nat.repr (List.length dbgHeads)));
   IO.ePrintln (String.append "debug node14=" (match Scry.G.nodeOf sdbg 14 with
     | .some n => String.append (Nat.repr n.kind.toNat) (String.append "/" (String.append (Nat.repr n.count.toNat) (String.append "/" (Nat.repr n.label.toNat))))
     | .none => "none"));
   ScryTest.runEIO (closeQ hdbg);
   -- 3. the live Quire view matches the manifest and its generation
   lr ← ScryTest.runEIO (Scry.G.readGraph graphPath m);
+  IO.ePrintln (String.append "debug lrheads=" (Nat.repr (List.length lr.1.callHeads)));
   f16 ← ScryTest.checkOne f15 "the live generation is the manifest's" (Nat.beq lr.2 m.gen);
   f17 ← ScryTest.checkOne f16 "the live view equals the manifest view" (Scry.sameView m.view lr.1);
   f18 ← ScryTest.checkOne f17 "the live view has two call sites" (Nat.beq (List.length lr.1.calls) 2);
