@@ -26,8 +26,8 @@
 // Stage 1: when the module has `wiz_playground_check` (the same check as JSON, each line
 // with its command's code-point offset), `check` is used and the counting is not needed;
 // a module without it falls back to the text above. The answer may also carry an
-// `index` (positions → expected types and goal states, a later stage); `PositionIndex`
-// answers `wiz/plainTermGoal`/`wiz/plainGoal` from it with no further Wasm call.
+// `index` (positions → expected types and goal states); `Web.EditorModel`'s index
+// answers `wiz/plainTermGoal`/`wiz/plainGoal` from it with no further engine call.
 //
 // Completions, hover and definition: the check's `index` carries one `decl` entry per
 // declaration the module added (`{"s","e","name","detail","ckind"}`: the source name, its
@@ -85,30 +85,26 @@ export function withPrelude(text) {
 
 // ## Positions (LSP: 0-based lines, UTF-16 code units)
 
-export function positionOf(text, offset) {
-  const end = Math.max(0, Math.min(offset, text.length));
-  let line = 0;
-  let lineStart = 0;
-  for (let i = 0; i < end; i++) {
-    if (text.charCodeAt(i) === 10) { line++; lineStart = i + 1; }
-  }
-  return { line, character: end - lineStart };
-}
+// The position arithmetic is `lib/Web/EditorModel.wiz`'s (`PositionIndex`). The shim
+// receives that implementation as `index`, the same adapter the page's overlays use:
+//
+//   position(text, offset)                  -> {line, character}
+//   offset(text, {line, character})         -> UTF-16 offset
+//   lineEnd(text, offset)                   -> end of that line
+//   range(text, from, to)                   -> {start, end}
+//   utf16(text, codePoints)                 -> UTF-16 offset of a code-point offset
+//   editorOffset(text, prefix, codePoints)  -> the same, minus the embedded Prelude
+//
+// `web/framework/index-oracle.mjs` is the Node test oracle for those methods; the page
+// passes an adapter backed by `mount.ask` (`createIndexer` in web/playground-lsp.js).
 
-// A code-point offset (what the self-hosted frontend counts: `String.codes`) as a UTF-16
-// offset into the same text.
-export function utf16OfCodePoints(text, codePoints) {
-  let i = 0;
-  for (let n = 0; n < codePoints && i < text.length; n++) {
-    const c = text.charCodeAt(i);
-    i += c >= 0xd800 && c <= 0xdbff && i + 1 < text.length ? 2 : 1;
+function requireIndex(index) {
+  if (!index || typeof index.position !== "function" || typeof index.range !== "function" ||
+      typeof index.offset !== "function" || typeof index.utf16 !== "function" ||
+      typeof index.editorOffset !== "function" || typeof index.lineEnd !== "function") {
+    throw new TypeError("selfhost-lsp-shim: pass { index } (Web.EditorModel's position index)");
   }
-  return i;
-}
-
-function lineEnd(text, offset) {
-  const nl = text.indexOf("\n", offset);
-  return nl < 0 ? text.length : nl;
+  return index;
 }
 
 // ## Commands
@@ -213,14 +209,11 @@ function messageOf(line) {
   return line;
 }
 
-function range(text, from, to) {
-  return { start: positionOf(text, from), end: positionOf(text, to) };
-}
-
 // The diagnostics for `text` (the editor's) given `output`, the engine's answer for
 // `withPrelude(text).source`. Errors and warnings always; the result of a `#check`/
 // `#eval`/`#reduce`/`#print` as information when its command is known.
-export function diagnosticsFromOutput(text, output) {
+export function diagnosticsFromOutput(text, output, index) {
+  const ix = requireIndex(index);
   const { prefix } = withPrelude(text);
   const lines = outputLines(output);
   const commands = splitCommands(text).filter((c) => !c.silent);
@@ -238,21 +231,21 @@ export function diagnosticsFromOutput(text, output) {
     if (severity === 3 && line === "") continue;
     const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(line) };
     if (command) {
-      diagnostic.range = range(text, command.head, lineEnd(text, command.head));
+      diagnostic.range = ix.range(text, command.head, ix.lineEnd(text, command.head));
     } else {
-      diagnostic.range = range(text, 0, 0);
+      diagnostic.range = ix.range(text, 0, 0);
       diagnostic.message += " (position unknown: the output did not line up with the commands)";
     }
     diagnostics.push(diagnostic);
   }
   if (parseAt !== null) {
     const source = prefix + text;
-    const at = Math.max(0, utf16OfCodePoints(source, parseAt) - prefix.length);
+    const at = ix.editorOffset(text, prefix, parseAt);
     let to = at;
     while (to < text.length && !/\s/.test(text[to])) to++;
     diagnostics.push({
       severity: 1, source: "wiz-selfhost", code: "parse-error",
-      message: messageOf(last), range: range(text, at, Math.max(to, Math.min(at + 1, text.length))),
+      message: messageOf(last), range: ix.range(text, at, Math.max(to, Math.min(at + 1, text.length))),
     });
   }
   return diagnostics;
@@ -270,15 +263,10 @@ export function parseCheck(json) {
   return answer;
 }
 
-// An offset in the checked source (code points, the Prelude line included) as a UTF-16
-// offset into the editor's text, clamped to it.
-function editorOffset(text, prefix, codePoints) {
-  return Math.max(0, Math.min(text.length, utf16OfCodePoints(prefix + text, codePoints) - prefix.length));
-}
-
 // The diagnostics for `text` from a parsed check answer. A line's range is its
 // command's first line (from `off`); a parse error's is the token at its own offset.
-export function diagnosticsFromCheck(text, answer) {
+export function diagnosticsFromCheck(text, answer, index) {
+  const ix = requireIndex(index);
   const { prefix } = withPrelude(text);
   const diagnostics = [];
   for (const line of answer.lines) {
@@ -286,117 +274,48 @@ export function diagnosticsFromCheck(text, answer) {
     const severity = line.sev === 1 || line.sev === 2 ? line.sev : severityOf(raw);
     const parseAt = parseErrorOffset(raw);
     if (parseAt !== null) {
-      const at = editorOffset(text, prefix, parseAt);
+      const at = ix.editorOffset(text, prefix, parseAt);
       let to = at;
       while (to < text.length && !/\s/.test(text[to])) to++;
       diagnostics.push({
         severity: 1, source: "wiz-selfhost", code: "parse-error",
-        message: messageOf(raw), range: range(text, at, Math.max(to, Math.min(at + 1, text.length))),
+        message: messageOf(raw), range: ix.range(text, at, Math.max(to, Math.min(at + 1, text.length))),
       });
       continue;
     }
     const known = typeof line.off === "number";
-    const at = known ? editorOffset(text, prefix, line.off) : 0;
+    const at = known ? ix.editorOffset(text, prefix, line.off) : 0;
     if (severity === 3 && (raw === "" || !known || !RESULT.test(text.slice(at)))) continue;
     const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(raw) };
-    diagnostic.range = known ? range(text, at, lineEnd(text, at)) : range(text, 0, 0);
+    diagnostic.range = known ? ix.range(text, at, ix.lineEnd(text, at)) : ix.range(text, 0, 0);
     if (!known) diagnostic.message += " (position unknown)";
     diagnostics.push(diagnostic);
   }
   return diagnostics;
 }
 
-// `tacGoalsShow`'s text as the goals it lists: one per blank-line-separated block,
-// `"no goals"` (a finished proof) and an empty text as none.
-export function splitGoals(text) {
-  const s = String(text === null || text === undefined ? "" : text).trim();
-  if (s === "" || s === "no goals") return [];
-  return s.split(/\n\s*\n/).map((g) => g.trim()).filter((g) => g !== "");
-}
+// Positions → what the pane asks for, from a check answer's `index`. That index is
+// `lib/Web/EditorModel.wiz`'s (`lspIndexJson`/`lspTermGoalJson`/…); the shim only keeps
+// the opaque value the adapter built and passes the caret to it:
+//
+//   build(text, entries, prefix)   -> opaque index (one per document version)
+//   size(index)                    -> number of entries
+//   term(text, index, offset)      -> {goal, range} or null
+//   goal(text, index, offset)      -> {goals, rendered, range} or null
+//   declarations(text, index)      -> [{label, kind, detail, range}]
+//   declarationNamed(text, index, name) -> a declaration or null
+//
+// `web/framework/index-oracle.mjs` is the Node test oracle; `createIndexer` in
+// web/playground-lsp.js builds the production adapter over `mount.ask`.
 
-// Positions → what the pane asks for, from a check answer's `index`. An entry is
-// `{s, e, kind: "term"|"goal", expected?: string, goals?: [string]}`, `s`/`e` code-point
-// offsets into the checked source (end-exclusive). A lookup is the innermost entry of
-// that kind containing the caret (a caret at an entry's end counts, as in an editor
-// right after a term); ties go to the later entry.
-export class PositionIndex {
-  constructor(text, entries) {
-    const { prefix } = withPrelude(text);
-    this.text = text;
-    this.entries = (Array.isArray(entries) ? entries : [])
-      .filter((x) => x && typeof x.s === "number" && typeof x.e === "number" && x.e >= x.s)
-      .map((x) => Object.assign({}, x, {
-        start: editorOffset(text, prefix, x.s),
-        end: editorOffset(text, prefix, x.e),
-      }));
+function requireIndexer(indexer) {
+  if (!indexer || typeof indexer.build !== "function" || typeof indexer.size !== "function" ||
+      typeof indexer.term !== "function" || typeof indexer.goal !== "function" ||
+      typeof indexer.declarations !== "function" ||
+      typeof indexer.declarationNamed !== "function") {
+    throw new TypeError("selfhost-lsp-shim: pass { index } (Web.EditorModel's position index)");
   }
-
-  get size() { return this.entries.length; }
-
-  lookup(offset, kind) {
-    let best = null;
-    for (const x of this.entries) {
-      if (x.kind !== kind || offset < x.start || offset > x.end) continue;
-      if (best === null || x.end - x.start <= best.end - best.start) best = x;
-    }
-    return best;
-  }
-
-  rangeOf(entry) { return range(this.text, entry.start, entry.end); }
-
-  // `wiz/plainTermGoal`: `{goal, range}` or null
-  termGoal(offset) {
-    const x = this.lookup(offset, "term");
-    return x && typeof x.expected === "string" ? { goal: x.expected, range: this.rangeOf(x) } : null;
-  }
-
-  // The declarations the checked module added, in source order: `{label, kind, detail,
-  // range}` (kind is an LSP `CompletionItemKind`).
-  declarations() {
-    return this.entries
-      .filter((x) => x.kind === "decl" && typeof x.name === "string" && x.name !== "")
-      .map((x) => ({
-        label: x.name,
-        kind: typeof x.ckind === "number" ? x.ckind : 6,
-        detail: typeof x.detail === "string" ? x.detail : "",
-        range: this.rangeOf(x),
-      }));
-  }
-
-  // The declaration a source name denotes: an exact label, else a unique suffix match
-  // (`mk` for `T.mk`, as a constructor is used after a dot).
-  declarationNamed(name) {
-    const n = String(name === undefined || name === null ? "" : name);
-    if (n === "") return null;
-    const all = this.declarations();
-    const exact = all.find((d) => d.label === n);
-    if (exact) return exact;
-    const suffix = all.filter((d) => d.label.endsWith("." + n));
-    return suffix.length === 1 ? suffix[0] : null;
-  }
-
-  // `wiz/plainGoal`: `{goals, rendered}` or null (`goals: []` is a finished proof)
-  goal(offset) {
-    const x = this.lookup(offset, "goal");
-    if (!x || !Array.isArray(x.goals)) return null;
-    const goals = [];
-    for (const g of x.goals) {
-      for (const one of splitGoals(g)) goals.push(one);
-    }
-    const rendered = goals.length ? "```wiz\n" + goals.join("\n\n") + "\n```" : "no goals";
-    return { goals, rendered, range: this.rangeOf(x) };
-  }
-}
-
-// A position (`{line, character}`, UTF-16) as an offset into `text`.
-export function offsetOf(text, position) {
-  let offset = 0;
-  for (let line = 0; line < position.line; line++) {
-    const nl = text.indexOf("\n", offset);
-    if (nl < 0) return text.length;
-    offset = nl + 1;
-  }
-  return Math.min(text.length, lineEnd(text, offset), offset + position.character);
+  return indexer;
 }
 
 // ## Completions
@@ -449,9 +368,10 @@ export function filterCompletions(names, prefix, limit = 200) {
 // for its engine inside it); `check(source) → string | null | Promise<…>` is
 // `wiz_playground_check`, or null when the module has none (then `evaluate` is used).
 export class SelfhostServer {
-  constructor({ evaluate, check = null, serverInfo = SERVER_INFO } = {}) {
+  constructor({ evaluate, check = null, index = null, serverInfo = SERVER_INFO } = {}) {
     this.evaluate = evaluate;
     this.check = check;
+    this.index = index === null ? null : requireIndexer(requireIndex(index));
     this.serverInfo = serverInfo;
     this.docs = new Map();     // uri → {text, version, index?}
     this.session = 0;
@@ -521,19 +441,24 @@ export class SelfhostServer {
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         // Answered from the last check's index; without one (stage 0, or a module whose
         // check has no index yet) there is nothing at the cursor.
-        if (!doc.index || !doc.index.size || !params.position) return ok(null);
-        const offset = offsetOf(doc.text, params.position);
-        return ok(method === "wiz/plainGoal" ? doc.index.goal(offset) : doc.index.termGoal(offset));
+        if (!doc.index || !this.index || !this.index.size(doc.index) || !params.position) return ok(null);
+        const offset = this.index.offset(doc.text, params.position);
+        return ok(method === "wiz/plainGoal"
+          ? this.index.goal(doc.text, doc.index, offset)
+          : this.index.term(doc.text, doc.index, offset));
       }
       case "textDocument/completion": {
         const uri = params.textDocument && params.textDocument.uri;
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         if (!params.position) return ok({ isIncomplete: false, items: [] });
-        const offset = offsetOf(doc.text, params.position);
+        const offset = this.index ? this.index.offset(doc.text, params.position)
+          : completionPrefix(doc.text, 0).start;
         const { start, prefix } = completionPrefix(doc.text, offset);
-        const declarations = doc.index ? doc.index.declarations() : [];
-        const edit = { range: { start: positionOf(doc.text, start), end: positionOf(doc.text, offset) } };
+        const declarations = doc.index && this.index ? this.index.declarations(doc.text, doc.index) : [];
+        const edit = { range: this.index
+          ? this.index.range(doc.text, start, offset)
+          : { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
         const items = filterCompletions(declarations, prefix).map((item) =>
           Object.assign({}, item, { textEdit: { range: edit.range, newText: item.label } }));
         return ok({ isIncomplete: false, items });
@@ -542,9 +467,9 @@ export class SelfhostServer {
         const uri = params.textDocument && params.textDocument.uri;
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
-        if (!doc.index || !doc.index.size || !params.position) return ok(null);
-        const found = wordAt(doc.text, offsetOf(doc.text, params.position));
-        const decl = found.word === "" ? null : doc.index.declarationNamed(found.word);
+        if (!doc.index || !this.index || !this.index.size(doc.index) || !params.position) return ok(null);
+        const found = wordAt(doc.text, this.index.offset(doc.text, params.position));
+        const decl = found.word === "" ? null : this.index.declarationNamed(doc.text, doc.index, found.word);
         if (!decl) return ok(null);
         const signature = decl.detail === "" ? decl.label : decl.label + " : " + decl.detail;
         return ok({ contents: { kind: "markdown", value: "```wiz\n" + signature + "\n```" }, range: decl.range });
@@ -553,9 +478,9 @@ export class SelfhostServer {
         const uri = params.textDocument && params.textDocument.uri;
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
-        if (!doc.index || !doc.index.size || !params.position) return ok(null);
-        const found = wordAt(doc.text, offsetOf(doc.text, params.position));
-        const decl = found.word === "" ? null : doc.index.declarationNamed(found.word);
+        if (!doc.index || !this.index || !this.index.size(doc.index) || !params.position) return ok(null);
+        const found = wordAt(doc.text, this.index.offset(doc.text, params.position));
+        const decl = found.word === "" ? null : this.index.declarationNamed(doc.text, doc.index, found.word);
         return ok(decl ? { uri, range: decl.range } : null);
       }
       default:
@@ -597,17 +522,20 @@ export class SelfhostServer {
     let diagnostics;
     let index = null;
     try {
-      const source = withPrelude(doc.text).source;
+      const { source, prefix } = withPrelude(doc.text);
       const answer = this.check ? parseCheck(await this.check(source)) : null;
       if (answer) {
-        diagnostics = diagnosticsFromCheck(doc.text, answer);
-        index = new PositionIndex(doc.text, answer.index);
+        diagnostics = diagnosticsFromCheck(doc.text, answer, this.index);
+        index = this.index && Array.isArray(answer.index)
+          ? this.index.build(doc.text, answer.index, prefix) : null;
       } else {
-        diagnostics = diagnosticsFromOutput(doc.text, await this.evaluate(source));
+        diagnostics = diagnosticsFromOutput(doc.text, await this.evaluate(source), this.index);
       }
     } catch (e) {
       diagnostics = [{
-        severity: 1, source: "wiz-selfhost", range: range(doc.text, 0, 0),
+        severity: 1, source: "wiz-selfhost",
+        range: this.index ? this.index.range(doc.text, 0, 0)
+          : { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
         message: "the self-hosted engine failed: " + (e && e.message ? e.message : String(e)),
       }];
     }

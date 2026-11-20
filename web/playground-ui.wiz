@@ -62,9 +62,18 @@ def loomConsume (s : Page) (ev : String) : Nat :=
 -- time and paints the answer; these take no runtime state, so they are reads, not
 -- effects. Strings in, strings out, so the browser marshals no objects.
 
+/-- The versioned line table the page caches (`EditorModel.indexJson`). -/
+def loomEditorIndex (version text : String) : String :=
+  EditorModel.indexJson (EditorModel.natOf version) text
+
 /-- The spans a diagnostics array underlines, as JSON. -/
 def loomEditorSegments (text diags maxSegments : String) : String :=
-  EditorModel.segmentsJson text diags (EditorModel.natOf maxSegments)
+  EditorModel.segmentsJsonText text diags (EditorModel.natOf maxSegments)
+
+/-- The spans, taking the cached line table (`wiz_loom_editor_index`). -/
+def loomEditorSegmentsIndex (index text diags maxSegments : String) : String :=
+  EditorModel.segmentsJson (EditorModel.indexFromJson text index) diags
+    (EditorModel.natOf maxSegments)
 
 /-- A `textDocument/completion` result's items, as JSON. -/
 def loomEditorItems (result : String) : String :=
@@ -86,23 +95,86 @@ def loomEditorAccept (text item offset : String) : String :=
 
 /-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
 def loomEditorTrigger (text c offset : String) : String :=
-  match EditorModel.completionTrigger text c (EditorModel.natOf offset) with
+  match EditorModel.completionTrigger (EditorModel.index text) c
+    (EditorModel.natOf offset) with
   | .true => "1"
   | .false => "0"
 
 /-- The LSP position of a UTF-16 offset, as JSON. -/
 def loomEditorPosition (text offset : String) : String :=
-  EditorModel.positionJson text (EditorModel.natOf offset)
+  EditorModel.positionJsonText text (EditorModel.natOf offset)
+
+/-- The LSP position, taking the cached line table. -/
+def loomEditorPositionIndex (index offset : String) : String :=
+  EditorModel.positionJson (EditorModel.indexFromJson "" index)
+    (EditorModel.natOf offset)
 
 /-- The UTF-16 offset of an LSP position. -/
 def loomEditorOffset (text line character : String) : String :=
   EditorModel.natString
-    (EditorModel.offsetFromPosition text
+    (EditorModel.offsetFromPosition (EditorModel.index text)
       (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The UTF-16 offset, taking the cached line table. -/
+def loomEditorOffsetIndex (index line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition (EditorModel.indexFromJson "" index)
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The UTF-16 offset of a code-point offset (the self-hosted engine counts code points). -/
+def loomEditorUtf16 (text codePoints : String) : String :=
+  EditorModel.natString
+    (EditorModel.utf16OffsetFromCodePoints (EditorModel.index text)
+      (EditorModel.natOf codePoints))
+
+/-- A code-point offset into `prefix ++ text` as a UTF-16 offset into `text`. -/
+def loomEditorEditorOffset (text prefix codePoints : String) : String :=
+  let source := EditorModel.index (String.append prefix text);
+  let at := EditorModel.utf16OffsetFromCodePoints source (EditorModel.natOf codePoints);
+  let cut := EditorModel.length prefix;
+  EditorModel.natString (if Nat.lt at cut then 0 else at - cut)
+
+/-- The UTF-16 offset of the end of the line containing `offset`. -/
+def loomEditorLineEnd (text offset : String) : String :=
+  let i := EditorModel.index text;
+  EditorModel.natString
+    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
+
+/-- The line end, taking the cached line table. -/
+def loomEditorLineEndIndex (index offset : String) : String :=
+  let i := EditorModel.indexFromJson "" index;
+  EditorModel.natString
+    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
 
 /-- The edit an accepted Tab makes at `from`..`to`, as JSON (`host.edit` applies it). -/
 def loomEditorIndent (text from to : String) : String :=
   EditorModel.indentJson text from to
+
+-- The self-hosted server's declaration/position index (`wiz_playground_check`'s `index`).
+
+/-- Build the LSP index from the check's entries (code-point offsets into `prefix ++ text`). -/
+def loomIndexBuild (text prefix entries : String) : String :=
+  EditorModel.lspIndexJson text prefix entries
+
+/-- The number of entries in the index. -/
+def loomIndexSize (index : String) : String :=
+  EditorModel.natString (EditorModel.lspIndexSize index)
+
+/-- `wiz/plainTermGoal` at an offset. -/
+def loomIndexTerm (text index offset : String) : String :=
+  EditorModel.lspTermGoalJson text index (EditorModel.natOf offset)
+
+/-- `wiz/plainGoal` at an offset. -/
+def loomIndexGoal (text index offset : String) : String :=
+  EditorModel.lspGoalJson text index (EditorModel.natOf offset)
+
+/-- The declarations, in source order. -/
+def loomIndexDeclarations (text index : String) : String :=
+  EditorModel.lspDeclarationsJson text index
+
+/-- The declaration a source name denotes. -/
+def loomIndexDeclaration (text index name : String) : String :=
+  EditorModel.lspDeclarationJson text index name
 
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
@@ -110,12 +182,26 @@ export "wiz_loom_step" loomStep
 export "wiz_loom_effect" loomEffect
 export "wiz_loom_requests" loomRequests
 export "wiz_loom_consume" loomConsume
+export "wiz_loom_editor_index" loomEditorIndex
 export "wiz_loom_editor_segments" loomEditorSegments
+export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
 export "wiz_loom_editor_items" loomEditorItems
 export "wiz_loom_editor_popup" loomEditorPopup
 export "wiz_loom_editor_move" loomEditorMove
 export "wiz_loom_editor_accept" loomEditorAccept
 export "wiz_loom_editor_trigger" loomEditorTrigger
 export "wiz_loom_editor_position" loomEditorPosition
+export "wiz_loom_editor_position_index" loomEditorPositionIndex
 export "wiz_loom_editor_offset" loomEditorOffset
+export "wiz_loom_editor_offset_index" loomEditorOffsetIndex
+export "wiz_loom_editor_utf16" loomEditorUtf16
+export "wiz_loom_editor_editor_offset" loomEditorEditorOffset
+export "wiz_loom_editor_line_end" loomEditorLineEnd
+export "wiz_loom_editor_line_end_index" loomEditorLineEndIndex
 export "wiz_loom_editor_indent" loomEditorIndent
+export "wiz_loom_index_build" loomIndexBuild
+export "wiz_loom_index_size" loomIndexSize
+export "wiz_loom_index_term" loomIndexTerm
+export "wiz_loom_index_goal" loomIndexGoal
+export "wiz_loom_index_declarations" loomIndexDeclarations
+export "wiz_loom_index_declaration" loomIndexDeclaration

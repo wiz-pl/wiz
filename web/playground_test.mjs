@@ -6,7 +6,7 @@
 import { pathToFileURL } from "node:url";
 import { renderValue } from "./framework/values.mjs";
 import { findPreset, presets } from "./framework/examples.mjs";
-import { PositionIndex } from "./selfhost-lsp-shim.js";
+import { PositionIndex } from "./framework/index-oracle.mjs";
 
 // The page adds the embedded Prelude before the engine sees a source
 // (`Web.Draft.withPrelude`); the engine itself needs the import, so the test does the

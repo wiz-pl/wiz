@@ -21,6 +21,55 @@ function scratchUri() {
   return `file:///playground-${random}.wiz`;
 }
 
+// The runtime's position index (`lib/Web/EditorModel.wiz`), read through `mount.ask`.
+// `ask(name, ...strings) -> string` invokes a `wiz_loom_*` export; `versionOf()` (when
+// given) is the document version the cache is keyed by. The line table is built once per
+// (version, text) and reused by every query: the previous keyup path rebuilt the whole
+// UTF-16 expansion on each call, and the selfhost index repeated it per caret.
+export function createIndexer(ask, versionOf = null) {
+  let cache = { text: null, version: undefined, index: "" };
+  const indexOf = (text) => {
+    const version = versionOf ? versionOf() : undefined;
+    if (cache.text === text && cache.version === version) return cache.index;
+    const index = ask("wiz_loom_editor_index", "0", text);
+    cache = { text, version, index };
+    return index;
+  };
+  return {
+    index: indexOf,
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(offset | 0))),
+    offset: (text, position) => {
+      const line = position && Number.isFinite(position.line) ? Math.trunc(position.line) : 0;
+      const character = position && Number.isFinite(position.character) ? Math.trunc(position.character) : 0;
+      return Number(ask("wiz_loom_editor_offset_index", indexOf(text),
+        String(line), String(character)));
+    },
+    lineEnd: (text, offset) =>
+      Number(ask("wiz_loom_editor_line_end_index", indexOf(text), String(offset | 0))),
+    range: (text, from, to) => ({
+      start: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(from | 0))),
+      end: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(to | 0))),
+    }),
+    utf16: (text, codePoints) => Number(ask("wiz_loom_editor_utf16", text, String(codePoints | 0))),
+    editorOffset: (text, prefix, codePoints) =>
+      Number(ask("wiz_loom_editor_editor_offset", text, prefix, String(codePoints | 0))),
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments_index", indexOf(text), text,
+        JSON.stringify(diagnostics || []), "0")),
+    build: (text, entries, prefix) =>
+      ask("wiz_loom_index_build", text, prefix || "", JSON.stringify(entries || [])),
+    size: (index) => Number(ask("wiz_loom_index_size", index)),
+    term: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_term", text, index, String(offset | 0))),
+    goal: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_goal", text, index, String(offset | 0))),
+    declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
+    declarationNamed: (text, index, name) =>
+      JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+  };
+}
+
 // An LSP position for a JavaScript string index (UTF-16 code units).
 function positionAt(text, offset) {
   const at = Math.max(0, Math.min(text ? text.length : 0, offset | 0));

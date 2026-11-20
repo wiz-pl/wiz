@@ -208,27 +208,27 @@ def loomGroup : Group where
           [".true", ".false", ".true", ".false", ".true", ".true", "1", "0", "1", "1", ".true"] },
     { name := "editor rules: positions are UTF-16, as the LSP wire format is", run := fun _ =>
         okLoom ("import Web.EditorModel\n" ++
-          "#eval (EditorModel.positionFromOffset \"a😀b\\nc\" 3).line\n" ++
-          "#eval (EditorModel.positionFromOffset \"a😀b\\nc\" 3).character\n" ++
-          "#eval EditorModel.offsetFromPosition \"a😀b\\nc\" (EditorModel.Position.mk 1 1)\n" ++
-          "#eval EditorModel.offsetFromPosition \"ab\\ncd\" (EditorModel.Position.mk 0 5)\n" ++
-          "#eval (EditorModel.codePointPositionFromOffset \"a😀b\\nc\" 3).character\n" ++
-          "#eval EditorModel.utf16OffsetFromCodePoints \"a😀b\\nc\" 2\n" ++
-          "#eval EditorModel.codePointOffsetFromUtf16 \"a😀b\\nc\" 3")
+          "#eval (EditorModel.positionFromOffset (EditorModel.index \"a😀b\\nc\") 3).line\n" ++
+          "#eval (EditorModel.positionFromOffset (EditorModel.index \"a😀b\\nc\") 3).character\n" ++
+          "#eval EditorModel.offsetFromPosition (EditorModel.index \"a😀b\\nc\") (EditorModel.Position.mk 1 1)\n" ++
+          "#eval EditorModel.offsetFromPosition (EditorModel.index \"ab\\ncd\") (EditorModel.Position.mk 0 5)\n" ++
+          "#eval (EditorModel.codePointPositionFromOffset (EditorModel.index \"a😀b\\nc\") 3).character\n" ++
+          "#eval EditorModel.utf16OffsetFromCodePoints (EditorModel.index \"a😀b\\nc\") 2\n" ++
+          "#eval EditorModel.codePointOffsetFromUtf16 (EditorModel.index \"a😀b\\nc\") 3")
           ["0", "3", "6", "2", "2", "3", "2"] },
     { name := "editor rules: a diagnostic becomes merged, line-clipped spans", run := fun _ =>
         okLoom ("import Json\nimport Web.EditorModel\n" ++
           "def one := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":13},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":17}},\\\"severity\\\":1,\\\"message\\\":\\\"unknown identifier\\\"}]\"\n" ++
           "def multi := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":4},\\\"end\\\":{\\\"line\\\":2,\\\"character\\\":2}},\\\"severity\\\":2,\\\"message\\\":\\\"w\\\"}]\"\n" ++
           "def overlap := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":1},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":4}},\\\"severity\\\":2,\\\"message\\\":\\\"warning\\\"},{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":2},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":5}},\\\"severity\\\":1,\\\"message\\\":\\\"error\\\"}]\"\n" ++
-          "#eval List.length (EditorModel.squiggleSegments \"def f : Nat := nope\\n\" one 0)\n" ++
-          "#eval String.contains (EditorModel.segmentsJson \"def f : Nat := nope\\n\" one 0) \"\\\"start\\\":13\"\n" ++
-          "#eval List.length (EditorModel.squiggleSegments \"one two\\nthree four\\nfive\" multi 0)\n" ++
-          "#eval String.contains (EditorModel.segmentsJson \"one two\\nthree four\\nfive\" multi 0) \"\\\"start\\\":19\"\n" ++
-          "#eval List.length (EditorModel.squiggleSegments \"abcdef\" overlap 0)\n" ++
-          "#eval match List.head (EditorModel.squiggleSegments \"abcdef\" overlap 0) with | .some s => s.severity | .none => 0\n" ++
-          "#eval match List.head (EditorModel.squiggleSegments \"abcdef\" overlap 0) with | .some s => s.stop | .none => 0\n" ++
-          "#eval List.length (EditorModel.squiggleSegments \"ab\" \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":4,\\\"character\\\":0}}}]\" 0)")
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"def f : Nat := nope\\n\") one 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson (EditorModel.index \"def f : Nat := nope\\n\") one 0) \"\\\"start\\\":13\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"one two\\nthree four\\nfive\") multi 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson (EditorModel.index \"one two\\nthree four\\nfive\") multi 0) \"\\\"start\\\":19\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0)\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0) with | .some s => s.severity | .none => 0\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0) with | .some s => s.stop | .none => 0\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"ab\") \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":4,\\\"character\\\":0}}}]\" 0)")
           ["1", ".true", "3", ".true", "1", "1", "5", "0"] },
     { name := "editor rules: completions filter, order, move and insert", run := fun _ =>
         okLoom ("import Json\nimport Web.EditorModel\n" ++
@@ -238,8 +238,8 @@ def loomGroup : Group where
           "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"Nat.ad\" 0))\n" ++
           "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"NAT.S\" 0))\n" ++
           "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"add\" 0))\n" ++
-          "#eval (EditorModel.identifierPrefix \"def foo := Nat.ad\" 17).1\n" ++
-          "#eval (EditorModel.identifierPrefix \"def foo := Nat.ad\" 17).2\n" ++
+          "#eval (EditorModel.identifierPrefix (EditorModel.index \"def foo := Nat.ad\") 17).1\n" ++
+          "#eval (EditorModel.identifierPrefix (EditorModel.index \"def foo := Nat.ad\") 17).2\n" ++
           "#eval EditorModel.completionScore (Json.mkObj [(\"label\", Json.mkStr \"Nat.add\")]) \"dd\"\n" ++
           "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"0\") (EditorModel.intOf \"-1\") (EditorModel.intOf \"3\"))\n" ++
           "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"2\") (EditorModel.intOf \"1\") (EditorModel.intOf \"3\"))\n" ++
@@ -263,6 +263,44 @@ def loomGroup : Group where
           "#eval String.contains selected \"\\\"from\\\":0\"\n" ++
           "#eval String.contains selected \"\\\"to\\\":3\"")
           [".true", ".true", ".true", ".true", ".true", ".true"] },
+    { name := "editor rules: the position index is a versioned line table that round-trips", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def text := \"ab\\ncd\\nef\"\n" ++
+          "def i := EditorModel.indexVersion 7 text\n" ++
+          "def j := EditorModel.indexFromJson text (EditorModel.indexJson 7 text)\n" ++
+          "#eval i.length\n" ++
+          "#eval (EditorModel.positionFromOffset i 4).line\n" ++
+          "#eval (EditorModel.positionFromOffset i 4).character\n" ++
+          "#eval (EditorModel.positionFromOffset j 4).line\n" ++
+          "#eval EditorModel.offsetFromPosition j (EditorModel.Position.mk 1 2)\n" ++
+          "#eval (EditorModel.indexAt i 7 text).version\n" ++
+          "#eval (EditorModel.indexAt i 8 text).version")
+          ["8", "1", "1", "1", "5", "7", "8"] },
+    { name := "editor rules: the selfhost index answers term, goals and declarations", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def text := \"def f (n : Nat) : Nat := n\\n\"\n" ++
+          "def p := 16\n" ++
+          "def entries := \"[{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"term\\\",\\\"expected\\\":\\\"Nat\\\"}," ++
+          "{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"goal\\\",\\\"goals\\\":[\\\"n : Nat\\\\n⊢ Nat\\\"]}," ++
+          "{\\\"s\\\":4,\\\"e\\\":5,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"f\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
+          "def ix := EditorModel.lspIndexJson text \"import Prelude\\n\\n\" entries\n" ++
+          "#eval EditorModel.lspIndexSize ix\n" ++
+          "#eval String.contains (EditorModel.lspTermGoalJson text ix 25) \"\\\"goal\\\":\\\"Nat\\\"\"\n" ++
+          "#eval String.contains (EditorModel.lspGoalJson text ix 25) \"⊢ Nat\"\n" ++
+          "#eval String.contains (EditorModel.lspDeclarationsJson text ix) \"\\\"label\\\":\\\"f\\\"\"\n" ++
+          "#eval String.contains (EditorModel.lspDeclarationJson text ix \"f\") \"\\\"kind\\\":3\"\n" ++
+          "#eval EditorModel.lspTermGoalJson text ix 0")
+          ["3", ".true", ".true", ".true", ".true", "null"] },
+    { name := "session: a step diffs against the retained tree (one render per effect)", run := fun _ =>
+        okLoom (loomPrelude ++
+          "def live : Loom.LiveApp Model Msg := Loom.LiveApp.mk (Model.mk 0)\n" ++
+          "  (fun m _ s => match m with | .inc => Loom.setState countL Nat.succ s) counterView\n" ++
+          "def s0 : Loom.Session Model Msg := Loom.LiveApp.session live\n" ++
+          "def stepped := Loom.LiveApp.stepSession live s0 \"click\\n0\\n\"\n" ++
+          "#eval stepped.1.state.count\n" ++
+          "#eval Loom.patchesJson stepped.2\n" ++
+          "#eval String.eq (Loom.LiveApp.effectSessionJson live stepped.1 (Model.mk 5)).1.rendered.html (Loom.App.html app (Model.mk 5))")
+          ["1", r#""[{\"op\":\"text\",\"path\":\"0.0.0\",\"text\":\"count 1\"}]""#, ".true"] },
     { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
         -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
         -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters
