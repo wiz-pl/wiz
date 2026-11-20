@@ -2728,31 +2728,31 @@ def selfHostGroup : Group where
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
             ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.inc (Cursor.length c')\n", true),
+             "  let s := Cursor.next c;\n  match s with\n  | .done => 0\n  | .more _ c' => Nat.inc (Cursor.length c')\n", true),
             ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
+             "  let s := Cursor.next c;\n  match s with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
             ("partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
+             "  let s := Cursor.next c;\n  match s with\n  | .done => (0, 0)\n" ++
              "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n", true),
             ("inductive Wrap where\n  | base\n  | next (w : Wrap)\ndef Wrap.cons (w : Wrap) : Wrap := Wrap.next w\n" ++
              "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
-             "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.cons (Cursor.wrap c')\n", true),
+             "  let s := Cursor.next c;\n  match s with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.cons (Cursor.wrap c')\n", true),
             ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
-             "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
+             "  let s := Cursor.next c;\n  match s with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
             -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
             ("partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
+             "  let s := Cursor.next c;\n  match s with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
              "    let r := Cursor.optLen c';\n    match r with\n" ++
              "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
             -- the result contains `Cursor a`: copied at ω it would copy the cursor
             ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => (d, 0)\n" ++
+             "  let s := Cursor.next c;\n  match s with\n  | .done => (d, 0)\n" ++
              "  | .more _ c' =>\n    let r := Cursor.keep c' d;\n    r\n", false),
             -- two calls on one handle, and a path that never calls it
             ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
+             "  let s := Cursor.next c;\n  match s with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
             ("partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1\n", false)
+             "  let s := Cursor.next c;\n  match s with\n  | .done => 0\n  | .more _ _ => 1\n", false)
           ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
