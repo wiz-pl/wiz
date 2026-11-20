@@ -1170,6 +1170,15 @@ partial def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
           | .true => Scry.constInt c a
           | .false => .none
 
+/-- Is the expression a null constant? A C23 `null` literal (`nullptr`), or an integer
+literal `0` (possibly parenthesised or unary `+`). C compares a pointer against either
+form as a null test, not as a comparison of two differently typed values. -/
+def Scry.isNullConst (c : Scry.Cst) (n : Nat) : Bool :=
+  Bool.or (String.eq (c.kindOf n) "null")
+    (match Scry.constInt c n with
+      | .some k => Nat.beq k 0
+      | .none => .false)
+
 /-- The declared length of an array declarator (`0` when the size is not a constant the
 lowering folds). -/
 def Scry.arrayLen (c : Scry.Cst) (n : Nat) : Nat :=
@@ -2282,6 +2291,15 @@ def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Na
         Scry.emitAt c n (Wil.call (.some r) qname args);
         Scry.lret r
 
+/-- A comparison of two lowered operands with equal Wil types; a mixed comparison is a
+lowering boundary (the lowering has no implicit conversions). -/
+def Scry.lowerCmp (c : Scry.Cst) (n : Nat) (op : Wil.Op) (a b : Wil.Var) : Scry.LM Wil.Cond :=
+  match Scry.tyEq a.ty b.ty with
+  | .false => do
+    Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
+    Scry.lret (.const .false)
+  | .true => Scry.lret (.cmp op a b)
+
 /-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
 conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:
 Wil's `Cond.and`/`or` short-circuit evaluation, but any *side effect* in an operand has
@@ -2303,11 +2321,21 @@ def Scry.lowerCond (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Cond :=
           | .some ln, .some rn => do
             a ← Scry.lowerExpr c ln;
             b ← Scry.lowerExpr c rn;
-            match Scry.tyEq a.ty b.ty with
-            | .false => do
-              Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
-              Scry.lret (.const .false)
-            | .true => Scry.lret (.cmp op a b)
+            -- A pointer compared with `0` or a null literal is a null test. Lower the
+            -- constant as a pointer zero of the pointer's own type, so the two sides
+            -- have one Wil type and the nullness pass sees an isNull/notNull guard.
+            match a.ty, b.ty with
+            | .ptr _, _ => match Scry.isNullConst c rn with
+              | .true => do
+                z ← Scry.zeroAt c n a.ty;
+                Scry.lret (.cmp op a z)
+              | .false => Scry.lowerCmp c n op a b
+            | _, .ptr _ => match Scry.isNullConst c ln with
+              | .true => do
+                z ← Scry.zeroAt c n b.ty;
+                Scry.lret (.cmp op z b)
+              | .false => Scry.lowerCmp c n op a b
+            | _, _ => Scry.lowerCmp c n op a b
           | _, _ => Scry.condValue c n
         | .none => Scry.condValue c n
   | .unary => do
