@@ -278,7 +278,7 @@ binding order and dispatch are outside the interpreter. (At the branch base `#ev
 panicked on the `Array` externs, which is why the first version applied the scalar helper
 to the input pairs.)
 
-| i | a[i] | b[i] | Wiz `addScalar` | WGSL `add` | Wiz `maxMulScalar` | WGSL `maxMul` |
+| i | a[i] | b[i] | Wiz `add` | WGSL `add` | Wiz `maxMul` | WGSL `maxMul` |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 3000000000 | 2000000000 | 705032704 | 705032704 | 3000000000 | 3000000000 |
 | 1 | 4294967295 | 1 | 0 | 0 | 4294967295 | 4294967295 |

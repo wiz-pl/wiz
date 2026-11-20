@@ -18,6 +18,7 @@ the subset, the host ABI and the three blockers, is `DESIGN.md` (also in
 | `build/add.wgsl`, `build/maxMul.wgsl`, `build/mix.wgsl` | generated WGSL (committed, so the page works without Wiz) |
 | `build/expected.json` | the interpreter's 8-element values for `inputs.json` |
 | `build/wide.json` | the interpreter's 130-element values (three workgroups) |
+| `build/ref.wiz` | the kernel source plus the `#eval` calls that produce both JSON files |
 | `run.js` | one WebGPU run; shared by the page and the Deno check |
 | `index.html`, `page.js` | the browser demo: inputs, Wiz's values, GPU values, pass/fail |
 | `check.mjs`, `check.sh` | validate with wgpu/naga and run all 414 values, under Deno |
