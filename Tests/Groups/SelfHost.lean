@@ -2718,8 +2718,10 @@ def selfHostGroup : Group where
         selfhostAgrees
           ("inductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
            "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
-           "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
-           "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n")
+           -- (an axiom: the self-hosted frontend does not yet take a linear scrutinee
+           -- apart (`quantityDiffs`), so `Cursor.next`'s definition cannot be written
+           -- there; its signature is all the linear-fixpoint cases need)
+           "axiom Cursor.next {a : Type} : (1 c : Cursor a) → Step a\n")
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
             ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
