@@ -3826,7 +3826,7 @@ def allOfVal (f : Val → Bool) : List Val → Bool
 def fixCallSafe (c : TCtx) (t : Tm) (ty : Val) : Bool := match TCtx.fix c with
   | .none => .false
   | .some fn => match tmSpine t with
-    | .mk h args => match h with
+    | (h, args) => match h with
       | .const n ps ls _ tyD => match kStrEq n fn with
         | .false => .false
         | .true => match peelFix c (eval .nil (substIfAny ps ls tyD)) args .nil .nil with
