@@ -168,6 +168,6 @@ def main : IO Unit := EIO.toIO (do
           (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["level"]) "error")
           (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["ruleId"])
             "scry/prover/no-flow");
-        check "sarif-unsafe: the result is an error with the no-flow rule" isNoFlowError);
+        check "sarif-unsafe: the result is an error with the no-flow rule" isNoFlowError;
 
     FS.removeAll dir)

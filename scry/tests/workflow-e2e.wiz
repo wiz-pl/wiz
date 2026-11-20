@@ -51,6 +51,48 @@ def strAt (j : Option Json) (path : List String) : String :=
   | .str s => s
   | _ => ""
 
+
+def candWritten (r : Scry.WfRecord) : EIO Bool := do
+  cj ← Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json");
+  match cj with
+  | .some j => EIO.pure (String.eq (Json.getStr j "stage") "refined")
+  | .none => EIO.pure (.false : Bool)
+
+/-- The repro -> poc -> verify half, run only when a C compiler was resolved. -/
+def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
+  n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
+  dyn ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "dynamic.json");
+  st3 ← loadStore db;
+  check "repro: exit 0" (Nat.beq n4 0);
+  check "repro: derived from the candidate, not a template"
+    (String.eq (strAt dyn ["derivedFrom"]) "candidate.json");
+  check "repro: harness is the plan's (env) harness"
+    (String.eq (strAt dyn ["harness", "source"]) "derived");
+  check "repro: the plan's marker was observed at the sink"
+    (flag dyn ["run", "markerObserved"]);
+  check "repro: candidate.stage is poc"
+    (match findIn st3 "cwe78-getenv.c" with
+      | .some r => String.eq (candOf r).stage "poc"
+      | .none => (.false : Bool));
+  n5 ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
+  ver ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "verify/verify.json");
+  st4 ← loadStore db;
+  check "verify: exit 0 (PoC observed)" (Nat.beq n5 0);
+  check "verify: verdict names the observed PoC"
+    (String.eq (strAt ver ["verdict"]) "finding-present-poc-observed");
+  check "verify: poc.markerObserved is true" (flag ver ["poc", "markerObserved"]);
+  check "verify: candidate.stage is verified"
+    (match findIn st4 "cwe78-getenv.c" with
+      | .some r => String.eq (candOf r).stage "verified"
+      | .none => (.false : Bool));
+  bundle ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "finding.json");
+  check "bundle: candidate.stage is verified"
+    (String.eq (strAt bundle ["candidate", "stage"]) "verified");
+  check "bundle: evidence has a poc item with the marker observed"
+    (List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
+        (String.eq (Json.getStr e "status") "observed"))
+      (Json.getList (match bundle with | .some j => j | .none => Json.mkNull) "evidenceItems"))
+
 def main : IO Unit := EIO.toIO (do
   dir ← FS.createTempDir;
   let db := Path.join dir "findings.json";
@@ -90,11 +132,7 @@ def main : IO Unit := EIO.toIO (do
           (String.eq (candOf r).verdict "pursue")
       | .none => (.false : Bool));
   candOk ← match findIn st2 "cwe78-getenv.c" with
-    | .some r => do
-      cj ← Scry.wfReadJsonOpt (Path.join r.artifacts "candidate.json");
-      match cj with
-      | .some j => EIO.pure (String.eq (Json.getStr j "stage") "refined")
-      | .none => EIO.pure (.false : Bool)
+    | .some r => candWritten r
     | .none => EIO.pure (.false : Bool);
   check "refine: candidate.json is written" candOk;
 
@@ -121,44 +159,7 @@ def main : IO Unit := EIO.toIO (do
   let ccOpt := chain.tool;
   match ccOpt with
   | .none => EIO.lift (IO.println "repro: skip (no C compiler found; the static half above ran)")
-  | .some t => do
-    let cc := t.cc;
-    n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
-    dyn ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "dynamic.json");
-    st3 ← loadStore db;
-    check "repro: exit 0" (Nat.beq n4 0);
-    check "repro: derived from the candidate, not a template"
-      (String.eq (strAt dyn ["derivedFrom"]) "candidate.json");
-    check "repro: harness is the plan's (env) harness"
-      (String.eq (strAt dyn ["harness", "source"]) "derived");
-    check "repro: the plan's marker was observed at the sink"
-      (flag dyn ["run", "markerObserved"]);
-    check "repro: candidate.stage is poc"
-      (match findIn st3 "cwe78-getenv.c" with
-        | .some r => String.eq (candOf r).stage "poc"
-        | .none => (.false : Bool));
-
-    -- 5. verify again: the same finding, now with the stored PoC
-    n5 ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
-    ver ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "verify/verify.json");
-    st4 ← loadStore db;
-    check "verify: exit 0 (PoC observed)" (Nat.beq n5 0);
-    check "verify: verdict names the observed PoC"
-      (String.eq (strAt ver ["verdict"]) "finding-present-poc-observed");
-    check "verify: poc.markerObserved is true" (flag ver ["poc", "markerObserved"]);
-    check "verify: candidate.stage is verified"
-      (match findIn st4 "cwe78-getenv.c" with
-        | .some r => String.eq (candOf r).stage "verified"
-        | .none => (.false : Bool));
-
-    -- 6. the root bundle carries the same candidate value
-    bundle ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "finding.json");
-    check "bundle: candidate.stage is verified"
-      (String.eq (strAt bundle ["candidate", "stage"]) "verified");
-    check "bundle: evidence has a poc item with the marker observed"
-      (List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
-          (String.eq (Json.getStr e "status") "observed"))
-        (Json.getList (match bundle with | .some j => j | .none => Json.mkNull) "evidenceItems"));
+  | .some t => reproHalf cRec db t.cc;
 
   -- The C# reproducer needs the .NET SDK's file-based app mode (`dotnet run --file`),
   -- which is not part of every toolchain. The C# scan/refine artifacts are asserted
