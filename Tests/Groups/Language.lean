@@ -338,6 +338,35 @@ def languageGroup : Group where
     { name := "match without an expected type", run := fun _ =>
         okLib ("import Prelude\ndef f (b : Bool) (n : Nat) : Nat :=\n  let k := match b with\n    | .true => n\n" ++
           "    | .false => 0;\n  Nat.add k 1\n#eval f .true 4") ["5"] },
+    -- `match h : e with`: the branch's equation is `h : e = p`, usable in a proof and
+    -- after an unnamed column; a plain match has no hypothesis, and an indexed value
+    -- (whose split refines the index) is rejected rather than ill typed.
+    { name := "a named match binds its equation `h : e = p` in each branch (#254)", run := fun _ => do
+        okLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def g (n : Nat) : Bool := isZero n\n" ++
+          "def gEq (n : Nat) : g n = isZero n :=\n" ++
+          "  match h : isZero n with\n" ++
+          "  | .true => by unfold g; rw h; rfl\n" ++
+          "  | .false => by unfold g; rw h; rfl\n" ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Nat := match b with\n" ++
+          "  | .true => 1\n  | .false => 0\n" ++
+          -- a named scrutinee after an unnamed one: the equation's indices are shifted
+          "def mixed (n : Nat) (b : Bool) : Nat :=\n" ++
+          "  match b, h : isZero n with\n" ++
+          "  | .true, .true => useEq n .true h\n" ++
+          "  | .true, .false => useEq n .false h\n" ++
+          "  | .false, .true => useEq n .true h\n" ++
+          "  | .false, .false => useEq n .false h\n" ++
+          "#eval mixed 0 .true\n#eval mixed 1 .true") ["1", "0"]
+        failsLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def noEq (n : Nat) : Bool := match isZero n with\n  | .true => h\n  | .false => .false")
+          "unknown identifier 'h'"
+        failsLib ("import Prelude\n" ++
+          "inductive V (A : Type) : Nat → Type where\n  | nil : V A 0\n" ++
+          "  | cons {0 n : Nat} (x : A) (xs : V A n) : V A (Nat.succ n)\n" ++
+          "def headEq (v : V Nat 1) : Nat :=\n  match h : v with\n  | .cons x _ => x") "indexed type" },
     { name := "tuple patterns", run := fun _ =>
         okLib ("import Prelude\ndef sum3 : Nat × Nat × Nat → Nat\n  | (a, b, c) => Nat.add a (Nat.add b c)\n" ++
           "def firstZero : Nat × Nat → Bool\n  | (.zero, _) => .true\n  | p => .false\n" ++
