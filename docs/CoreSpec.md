@@ -2025,6 +2025,17 @@ proved**, and the D1 experiment shows checking can loop (Status.md).
 * Declarations are checked **once, at symbolic levels**; a use instantiates the
   parameters [std: Lean 4]. Constants have no local usage (`⊣ 0`): globals are not
   tracked by QTT.
+* **Level instantiation of a derivation.** Substituting levels for a declaration's
+  parameters is the meta-operation behind `const`'s `T[us/ν]`; `WizMeta/Spec/LevelSubstitution.lean`
+  proves that the spec's Tprog judgments survive it. The one side condition that does
+  *not* survive an arbitrary instantiation is `Sigma.eq`'s negative `¬ i.IsZero`: mapping
+  the parameter of `i` to `0` can make it false, and the reduct `eqSigma` would then
+  form `a.1 =_A b.1` at a proposition. The other level conditions (`Equiv`, `NeverZero`,
+  `IsZero`, a closed level's `toNat?`) are preserved, so the lemma is stated for *good*
+  instantiations (`Lvl.Good us`: every parameter is instantiated by a level that is never
+  zero). The kernels avoid the issue by forming `a =_A b` only at a sort that is never
+  `Prop` (§8.1: `isNeverZero`), which *is* preserved; the restriction is on the
+  declarative spec's `¬ IsZero`, not a kernel rule.
 * **No recursion in the kernel:** a declaration is checked against the environment
   *without* itself, so a value cannot mention its own name.
 * **Axioms** (`value = none`) are accepted with any well-formed type, including `False`.

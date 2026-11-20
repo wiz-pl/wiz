@@ -59,6 +59,59 @@ def inst (us : List Lvl) : Lvl → Lvl
   | imax a b => imax (inst us a) (inst us b)
   | param i => us.getD i zero
 
+/-- Evaluation commutes with instantiating the parameters: substituting `us` and evaluating
+is evaluating under the assignment the instance gives. -/
+theorem eval_inst (ρ : Nat → Nat) (us : List Lvl) (l : Lvl) :
+    eval ρ (inst us l) = eval (fun i => eval ρ (us.getD i zero)) l := by
+  induction l with
+  | zero => rfl
+  | succ l ih => simp only [inst, eval, ih]
+  | max a b iha ihb => simp only [inst, eval, iha, ihb]
+  | imax a b iha ihb => simp only [inst, eval, iha, ihb]
+  | param i => rfl
+
+/-- `Equiv` is preserved by instantiating the parameters (plan O1, level substitution L2):
+a side condition that holds for all assignments still holds after a substitution, because
+an assignment of the outer parameters composed with the instance is an assignment. -/
+theorem inst_equiv {a b : Lvl} (h : a.Equiv b) (us : List Lvl) : (inst us a).Equiv (inst us b) := by
+  intro ρ
+  rw [eval_inst, eval_inst]
+  exact h _
+
+/-- `NeverZero` is preserved by level instantiation. -/
+theorem inst_neverZero {l : Lvl} (h : l.NeverZero) (us : List Lvl) : (inst us l).NeverZero := by
+  intro ρ
+  rw [eval_inst]
+  exact h _
+
+/-- `IsZero` is preserved by level instantiation. -/
+theorem inst_isZero {l : Lvl} (h : l.IsZero) (us : List Lvl) : (inst us l).IsZero := by
+  intro ρ
+  rw [eval_inst]
+  exact h _
+
+/-- Instantiating twice is one instantiation at the composed parameters. -/
+theorem inst_inst (us' us : List Lvl) (l : Lvl) :
+    inst us (inst us' l) = inst (us'.map (inst us)) l := by
+  induction l with
+  | zero => rfl
+  | succ l ih => simp only [inst, ih]
+  | max a b iha ihb => simp only [inst, iha, ihb]
+  | imax a b iha ihb => simp only [inst, iha, ihb]
+  | param i =>
+    have h : ∀ (vs : List Lvl) (i : Nat),
+        (vs.map (inst us)).getD i zero = inst us (vs.getD i zero) := by
+      intro vs
+      induction vs with
+      | nil => intro i; rfl
+      | cons a as ih =>
+        intro i
+        cases i with
+        | zero => rfl
+        | succ i => exact ih i
+    show inst us (us'.getD i zero) = (us'.map (inst us)).getD i zero
+    exact (h us' i).symm
+
 /-- One more than the largest parameter index (`0` for a closed level). -/
 def bound : Lvl → Nat
   | zero => 0
@@ -120,6 +173,79 @@ def le (a b : Lvl) : Bool := equiv (max a b) b
 
 /-- A closed level's value. -/
 def toNat? (l : Lvl) : Option Nat := if l.bound == 0 then some (eval (fun _ => 0) l) else none
+
+/-- A level with no parameters is not changed by instantiating them. -/
+theorem inst_eq_self {l : Lvl} (h : l.bound = 0) (us : List Lvl) : inst us l = l := by
+  induction l with
+  | zero => rfl
+  | succ l ih => simp only [inst, ih h]
+  | max a b iha ihb =>
+    have ha : a.bound = 0 := Nat.eq_zero_of_le_zero (by rw [← h]; exact Nat.le_max_left _ _)
+    have hb : b.bound = 0 := Nat.eq_zero_of_le_zero (by rw [← h]; exact Nat.le_max_right _ _)
+    simp only [inst, iha ha, ihb hb]
+  | imax a b iha ihb =>
+    have ha : a.bound = 0 := Nat.eq_zero_of_le_zero (by rw [← h]; exact Nat.le_max_left _ _)
+    have hb : b.bound = 0 := Nat.eq_zero_of_le_zero (by rw [← h]; exact Nat.le_max_right _ _)
+    simp only [inst, iha ha, ihb hb]
+  | param i => simp [bound] at h
+
+/-- Under an assignment in which every parameter is at least one, a level evaluates to
+zero only if it is identically zero. (Used for the one *negative* level side condition in
+the rules, `Sigma.eq`'s `¬ i.IsZero`.) -/
+theorem isZero_of_eval_eq_zero {l : Lvl} {τ : Nat → Nat} (hτ : ∀ i, 1 ≤ τ i)
+    (h : eval τ l = 0) : l.IsZero := by
+  induction l generalizing τ with
+  | zero => intro σ; rfl
+  | succ l ih => simp only [eval] at h; exact absurd h (Nat.succ_ne_zero _)
+  | max a b iha ihb =>
+    have hmax : Nat.max (eval τ a) (eval τ b) = 0 := by simpa only [eval] using h
+    have ha : eval τ a = 0 := Nat.eq_zero_of_le_zero (by rw [← hmax]; exact Nat.le_max_left _ _)
+    have hb : eval τ b = 0 := Nat.eq_zero_of_le_zero (by rw [← hmax]; exact Nat.le_max_right _ _)
+    have ia := iha hτ ha
+    have ib := ihb hτ hb
+    intro σ
+    simp only [eval, ia σ, ib σ, Nat.max_zero]
+  | imax a b iha ihb =>
+    by_cases hb0 : eval τ b = 0
+    · have ib := ihb hτ hb0
+      intro σ
+      simp only [eval, ib σ, if_true]
+    · have hmax : Nat.max (eval τ a) (eval τ b) = 0 := by
+        simpa only [eval, hb0, if_false] using h
+      have ha : eval τ a = 0 := Nat.eq_zero_of_le_zero (by rw [← hmax]; exact Nat.le_max_left _ _)
+      have hb : eval τ b = 0 := Nat.eq_zero_of_le_zero (by rw [← hmax]; exact Nat.le_max_right _ _)
+      exact absurd hb hb0
+  | param i =>
+    have : eval τ (param i) ≠ 0 := by simpa only [eval] using Nat.ne_of_gt (hτ i)
+    exact absurd h this
+
+/-- A good level instantiation never maps a parameter to a level that can be zero. It is
+the hypothesis of `Tprog_instL`: `Sigma.eq`'s side condition `¬ i.IsZero` is the one level
+condition that is not preserved by an arbitrary instantiation (see `LevelSubstitution.lean`). -/
+def Good (us : List Lvl) : Prop := ∀ i, (us.getD i zero).NeverZero
+
+theorem not_isZero_inst {l : Lvl} (h : ¬ l.IsZero) {us : List Lvl} (hu : Good us) :
+    ¬ (inst us l).IsZero := by
+  intro hz
+  apply h
+  have hτ : ∀ i, 1 ≤ eval (fun _ => 1) (us.getD i zero) := by
+    intro i
+    have hne := hu i (fun _ => 1)
+    simpa only [eval] using Nat.one_le_iff_ne_zero.mpr hne
+  have h2 : eval (fun i => eval (fun _ => 1) (us.getD i zero)) l = 0 := by
+    rw [← eval_inst]
+    exact hz (fun _ => 1)
+  exact isZero_of_eval_eq_zero hτ h2
+
+theorem toNat?_inst {l : Lvl} {m : Nat} (h : l.toNat? = some m) (us : List Lvl) :
+    (inst us l).toNat? = some m := by
+  have hb : l.bound = 0 := by
+    by_cases h0 : l.bound = 0
+    · exact h0
+    · have hb0 : (l.bound == 0) = false := by simp [h0]
+      simp only [toNat?, hb0, if_false] at h
+      cases h
+  rw [inst_eq_self hb]; exact h
 
 def prettyRaw : Lvl → String
   | zero => "0"
