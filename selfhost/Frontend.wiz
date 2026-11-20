@@ -730,6 +730,15 @@ def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
   | .mk _ sc inds _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
+-- **Coinductive types (A19/B4)**. A coinductive type is not an inductive one for the
+-- match compiler (`Globals.ind` must not find it), so its `IndInfo` lives under
+-- `coinductive T` (the trick `structFields` plays with `structure T`). Its one `Ctor`
+-- holds the observations, in order, `isRec` saying whether the observation is the type
+-- itself.
+def Globals.addCoind (gs : Globals) (T : String) (info : IndInfo) : Globals :=
+  Globals.addInd gs (String.append "coinductive " T) info
+def Globals.coind (gs : Globals) (T : String) : Option IndInfo :=
+  Globals.ind gs (String.append "coinductive " T)
 def Globals.ffi : Globals → List Foreign
   | .mk _ _ _ ffi _ _ _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
@@ -1732,6 +1741,11 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
     let np := List.length ps;
     let ctors := kids (kid stx 6);
     let k := List.length ctors;
+    -- (22i) a structure with fields marks its tail, so that erasure can unbox its
+    -- last field (a structure without fields has none to unbox)
+    let strct0 := Bool.and (isStructCmd stx0) (match kids (kid stx 6) with
+      | .cons c _ => Bool.not (Nat.beq (List.length (ctorFields c)) 0)
+      | _ => .false);
     let sig := sigOf stx;
     let nidx := match sig with
       | .indexed _ => 1
@@ -1763,9 +1777,15 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
             -- mentions (in the descriptions, under `t✝`, the parameter `k` is `np - k`)
             let cP := paramCtx empty pts;
             let doms0 := phantomDoms cP np (fun (j : Nat) => Bool.or (occursTms (np - j) ds0) (occurs (np - 1 - j) I0)) 0 pts;
+            -- (22i) a structure with fields ends in the marker `(0 _ : Enum 1) → Unit`,
+            -- after its phantom tail (`structTailDom` in the Lean frontend; there the
+            -- marker's domain is `Enum [fields✝]`, here it is the same type by length)
+            let doms1 : Tms := match strct0 with
+              | .true => .tcons (.enum 1) doms0
+              | .false => doms0;
             let doms : Tms := match seal with
-              | .some K => .tcons K doms0
-              | .none => doms0;
+              | .some K => .tcons K doms1
+              | .none => doms1;
             let I : Tm := match doms with
               | .tnil => I0
               | .tcons _ _ => STm.tm (sortSpine cP (phantomTy 0 doms));
@@ -1804,7 +1824,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
                 let Tc : Tm := .const Tn us (lvlArgs us) val ty;
                 -- (U2b) which fields the description lifted
                 let lifts := descLiftsAll (mkD ds);
-                match addCtors T us lv ps pts nidx I Tc valI k (isStructCmd stx0) lifts gs1 0 ctors with
+                match addCtors T us lv ps pts nidx I Tc valI k strct0 lifts gs1 0 ctors with
                 | .err => errStep gs "ill-typed constructor"
                 | .ok gs2 cs => .mk (String.append T (String.append " : " (show .nil 0 ty)))
                     (Globals.addInd gs2 T (.mk np lv I (mkD ds) (mkD dsI) cs .none Tc (kids (kid stx 3))))
@@ -3307,6 +3327,8 @@ def elemNat : Nat → List Nat → Bool
 -- a pattern: a constructor and its sub-patterns, or a variable (or `_`)
 inductive Pat where
   | ctor (c : String) (subs : List Syntax)
+  -- (A17) `⟨p₁, …, pₙ⟩`: the constructor of the expected type (`mk` for a structure)
+  | anon (subs : List Syntax)
   | any (x : String)
 -- `T.c` without the `T.`
 def dropPrefix : List Char → List Char → Option (List Char)
@@ -3338,6 +3360,8 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
   | .true => patOf T (kid (unparen p) 2)
   | .false => match strEq (kindOf p) "term.paren" with
   | .true => patOf T (kid p 1)
+  | .false => match strEq (kindOf p) "term.anon" with
+  | .true => .anon (nonAtoms (kids (kid p 1)))
   | .false => match strEq (kindOf p) "term.num" with
   -- a numeral: `0` is `.zero`, `n + 1` is `.succ n`
   | .true => match numValue p with
@@ -3424,6 +3448,8 @@ def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List 
     | .ctor c' subs => match strEq c c' with
       | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
       | .false => specialize T c k F impl col rest
+    | .anon subs =>
+      .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
     | .any x =>
       let binds' := match strEq x "_" with
         | .true => binds0
@@ -3936,6 +3962,17 @@ def Globals.structFields (gs : Globals) (T : String) : Option (List String) := m
   | .none => match Globals.ind gs (String.append "structure " T) with
     | .some info => structFieldsOf info
     | .none => .none
+-- the observations of a coinductive type, in declaration order, with whether each is
+-- recursive (`T` itself): `(name, isRec)`
+def coindFieldsOf (info : IndInfo) : Option (List (String × Bool)) := match info with
+  | .mk _ _ _ _ _ ctors _ _ _ => match ctors with
+    | .cons (.mk _ fields _ _ _ _) _ => .some (mapL (fun (f : CField) => match f with
+        | .mk n r _ _ => (n, r)) fields)
+    | .nil => .some .nil
+def Globals.coindFields (gs : Globals) (T : String) : Option (List (String × Bool)) :=
+  match Globals.coind gs T with
+  | .some info => coindFieldsOf info
+  | .none => .none
 -- the structure a type is (a definition is unfolded, as `structHead?` does)
 partial def structOf (gs : Globals) (es : ES) (ty : Val) : Option String := match force es ty with
   | .vglued (.hconst T _ _ _ _) _ v => match Globals.structFields gs T with
@@ -4032,18 +4069,23 @@ def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
     let p0 := unparen (nthSyntax pats k);
     let p := asInner p0;
     let tuple := strEq (kindOf p) "term.tuple";
-    match Bool.or tuple (isVarPat p) with
+    let anon := strEq (kindOf p) "term.anon";
+    match Bool.or tuple (Bool.or anon (isVarPat p)) with
     | .false => .none
     | .true =>
       let two : List Syntax := match tuple with
         | .true => match tupleItems p with
           | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
           | _ => .cons holeStx (.cons holeStx .nil)
-        | .false => .cons holeStx (.cons holeStx .nil);
+        | .false => match anon with
+          | .true => match nonAtoms (kids (kid p 1)) with
+            | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
+            | _ => .cons holeStx (.cons holeStx .nil)
+          | .false => .cons holeStx (.cons holeStx .nil);
       -- (A18) an as-pattern binds its names to the whole pair; the pattern under it
       -- (a variable, or another tuple) is handled as before
       let binds0 : List Bind := List.append binds (asBinds (asNames p0) col);
-      let binds' : List Bind := match Bool.and (Bool.not tuple) (strEq (kindOf p) "term.ident") with
+      let binds' : List Bind := match Bool.and (Bool.not (Bool.or tuple anon)) (strEq (kindOf p) "term.ident") with
         | .true => match strEq (identOf p) "_" with
           | .true => binds0
           | .false => List.append binds0 (.cons (Bind.mk (identOf p) col) .nil)
@@ -4310,6 +4352,12 @@ def headParamNames (gs : Globals) (cx : Cx) (h : Syntax) : List String :=
 -- (A13) `unfold`'s traversal result (the term, and whether an occurrence changed)
 inductive UnfoldR where
   | mk (t : Tm) (changed : Bool)
+
+-- **A19/B4** the coinduction primitives are recognised by name at the application
+-- (`builtinApp`); the type is outside the elaborator's mutual block, which holds only
+-- definitions.
+inductive BApp where
+  | mk (name : String) (args : List Syntax)
 
 mutual
 -- ------------------------------------------------------------------------------------
@@ -4886,18 +4934,41 @@ def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syn
   | .none => match strEq n "Unit" with
     | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
     | .false => .err (String.append "unknown identifier " n)
--- the projection `T.f t`, for `t : T …`
-def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE := match force es bty with
-  | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
-    | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
-      | .ok pt' pty' es4 => match whnf (force es4 pty') with
-        | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
-          | .some es5 => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
-          | .none => .err (String.append "cannot apply the projection " f)
-        | _ => .err (String.append "not a projection: " f)
-      | .err msg => .err msg
-    | e => e
-  | _ => .err (String.append "no field " f)
+-- a projection chain `a.b.c` as `["a", "b", "c"]` (the lexer reads dotted names as one
+-- identifier, as in `(nats 0).tail.tail.head`)
+def noChars (s : String) : Bool := match s with
+  | .mk cs => match cs with
+    | .nil => .true
+    | .cons _ _ => .false
+def splitDotsGo (cur : String) : List Char → List String
+  | .nil => match noChars cur with
+    | .true => .nil
+    | .false => .cons cur .nil
+  | .cons c rest => match Nat.beq (Char.code c) 46 with
+    | .true => match noChars cur with
+      | .true => splitDotsGo (String.mk .nil) rest
+      | .false => .cons cur (splitDotsGo (String.mk .nil) rest)
+    | .false => splitDotsGo (String.append cur (String.mk (.cons c .nil))) rest
+def splitDots (n : String) : List String := match n with
+  | .mk cs => splitDotsGo (String.mk .nil) cs
+-- the projection `T.f t`, for `t : T …`; a dotted field name is one projection per part
+def projTGo (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) : List String → HE
+  | .nil => .err "no field"
+  | .cons f rest => match force es bty with
+    | .vglued (.hconst T _ _ _ _) _ _ => match identHead gs es cx (String.append (String.append T ".") f) with
+      | .ok pt pty es3 pm => match insertImplicits gs es3 cx pt pty pm with
+        | .ok pt' pty' es4 => match whnf (force es4 pty') with
+          | .vpi _ _ _ dom env cod => match unify es4 cx bty dom with
+            | .some es5 => match rest with
+              | .nil => .ok (.app pt' bt) (codAt cx env cod bt) es5 .nil
+              | .cons _ _ => projTGo gs es5 cx (.app pt' bt) (codAt cx env cod bt) rest
+            | .none => .err (String.append "cannot apply the projection " f)
+          | _ => .err (String.append "not a projection: " f)
+        | .err msg => .err msg
+      | e => e
+    | _ => .err (String.append "no field " f)
+def projT (gs : Globals) (es : ES) (cx : Cx) (bt : Tm) (bty : Val) (f : String) : HE :=
+  projTGo gs es cx bt bty (splitDots f)
 -- a numeral `n`: `Nat.succ` applied `n` times to `Nat.zero` (stage 18f; there are no
 -- number literals in the kernel)
 def numeral (gs : Globals) (es : ES) (cx : Cx) (n : Nat) : TE := match identHead gs es cx "Nat.zero" with
@@ -5027,6 +5098,79 @@ def inferTransp (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT
     | v => .err (String.append "transp: expected a proof of an equation, got "
         (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) v)))
   | e => e
+-- **A19/B4: the coinduction primitives.** `ν D i`, `out x`, `coit S st s` and
+-- `cocon xs` are kernel terms (`Kernel.wiz` `nu`/`out`/`coit`/`cocon`), as in the Lean
+-- frontend's `inferData?`/`checkData?`: an unshadowed identifier applied to its arguments
+-- (`builtinApp?`). `cocon` is what a non-corecursive copattern definition builds, and
+-- `T.mk` is a `cocon`; `coit` is what a corecursive one builds.
+def builtinNames3 : List String := .cons "ν" (.cons "out" (.cons "coit" (.cons "cocon" .nil)))
+def builtinName : List String → String → Bool
+  | .nil, _ => .false
+  | .cons x xs, n => match strEq x n with
+    | .true => .true
+    | .false => builtinName xs n
+def builtinApp (gs : Globals) (cx : Cx) (s : Syntax) : Option BApp :=
+  match strEq (kindOf s) "term.app" with
+  | .false => .none
+  | .true => match strEq (kindOf (kid s 0)) "term.ident" with
+    | .false => .none
+    | .true => let n := identOf (kid s 0);
+      match Bool.and (builtinName builtinNames3 n) (match Scope.lookup (Cx.sc cx) n with
+        | .some _ => .false
+        | .none => .true) with
+      | .true => .some (.mk n (kids (kid s 1)))
+      | .false => .none
+def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Syntax) : TE :=
+  let d := Cx.lvl cx;
+  if strEq n "ν" then match args with
+    | .cons D (.cons i .nil) => match inferT gs es cx D .none with
+      | .err m => .err m
+      | .ok D0 dty es1 => match whnf (force es1 dty) with
+        | .vdesc l Iv => match checkT gs es1 cx i Iv .none with
+          | .ok i0 _ es2 => .ok (.nu l (quote d Iv) D0 i0 .szInf) (.vsort (lsucc l)) es2
+          | e => e
+        | v => .err (String.append "ν expects a description, got " (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | _ => .err "ν takes a description and an index"
+  else if strEq n "out" then match args with
+    | .cons x .nil => match inferT gs es cx x .none with
+      | .err m => .err m
+      | .ok x0 xty es1 => match whnf (force es1 xty) with
+        | .vnu l I D i sz => .ok (.out x0) (vInterp l I D (nuFamily l I D) i) es1
+        | v => .err (String.append "out expects a coinductive value, got " (show (scopeNames (Cx.sc cx)) d (quote d v)))
+    | _ => .err "out takes one value"
+  else if strEq n "coit" then .err "coit builds a coinductive value"
+  else if strEq n "cocon" then .err "cocon builds a coinductive value"
+  else .err (String.append "not a coinduction primitive: " n)
+def checkBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Syntax) (ty : Val) : TE :=
+  let d := Cx.lvl cx;
+  if strEq n "coit" then match args with
+    | .cons S (.cons st (.cons x .nil)) => match whnf (force es ty) with
+      | .vnu l I D i sz => match checkT gs es cx S (coitStateTy l I) .none with
+        | .err m => .err m
+        | .ok S0 _ es1 =>
+          let vS := eval (TCtx.env (Cx.c cx)) S0;
+          match checkT gs es1 cx st (coitStepTy l I D vS) .none with
+          | .err m => .err m
+          | .ok st0 _ es2 => match checkT gs es2 cx x (vapp vS i) .none with
+            | .err m => .err m
+            | .ok x0 _ es3 => .ok (.coit l (quote d I) (quote d D) S0 st0 (quote d i) x0) ty es3
+      | v => .err "coit builds a coinductive value"
+    | _ => .err "coit takes a state type, a step function and a state"
+  else if strEq n "cocon" then match args with
+    | .cons x .nil => match whnf (force es ty) with
+      | .vnu l I D i sz => match sizePred sz with
+        | .none => .err "cocon builds a value of size ↑s, but the expected type is not one"
+        | .some s' => match checkT gs es cx x (vInterp l I D (nuFamilyAt l I D s') i) .none with
+          | .ok x0 _ es1 => .ok (.cocon x0) ty es1
+          | e => e
+      | v => .err "cocon builds a coinductive value"
+    | _ => .err "cocon takes one payload"
+  else match inferBuiltin gs es cx n args with
+    | .err m => .err m
+    | .ok t ty' es1 => match unify es1 cx ty' ty with
+      | .some es2 => .ok t ty es2
+      | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) d (quote d (force es1 ty))))
+          (String.append ", got " (show (scopeNames (Cx.sc cx)) d (quote d (force es1 ty')))))
 -- the other forms
 def inferT1 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT) : TE :=
   match strEq (kindOf s) "term.letUnit" with
@@ -5082,9 +5226,11 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
     | .false => match strEq k "term.rfl" with
     | .true => .err "cannot infer the type of rfl; add a type ascription"
     | .false => match strEq k "term.app" with
-      | .true => match inferHead gs es cx (kid s 0) (spKid sp 0) with
-        | .ok f fty es' m => appArgsNamed gs es' cx (kid s 0) f fty m (kids (kid s 1)) .nil .none .nil (argSpans sp 1)
-        | .err msg => .err msg
+      | .true => match builtinApp gs cx s with
+        | .some (.mk n args) => inferBuiltin gs es cx n args
+        | .none => match inferHead gs es cx (kid s 0) (spKid sp 0) with
+          | .ok f fty es' m => appArgsNamed gs es' cx (kid s 0) f fty m (kids (kid s 1)) .nil .none .nil (argSpans sp 1)
+          | .err msg => .err msg
       | .false => match strEq k "term.arrow" with
         | .true => match inferType gs es cx (kid s 0) with
           | .ok a la es1 => match inferType gs es1 (Cx.bind cx "_" (eval (TCtx.env (Cx.c cx)) a)) (kid s 2) with
@@ -5115,6 +5261,8 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
               | .true => inferLetPair gs es cx s
               | .false => match strEq k "term.letPat" with
               | .true => letPatT gs es cx s .none
+              | .false => match strEq k "term.anon" with
+              | .true => .err "cannot infer the type of an anonymous constructor ⟨…⟩; add a type ascription"
               | .false => match strEq k "term.asPat" with
               | .true => .err "an as-pattern `x@p` is only allowed in a pattern"
               | .false => match strEq k "term.field" with
@@ -5133,7 +5281,28 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
                   | .false => .err "cannot infer the type of a λ; add a type ascription"
                 | .false => match strEq k "term.structUpdate" with
                   | .true => structUpdT gs es cx s
-                  | .false => inferT2 gs es cx s sp
+                  | .false => match strEq k "term.szInf" with
+                    | .true => .ok .szInf .vsize es
+                    | .false => match strEq k "term.szSuc" with
+                      | .true => match checkT gs es cx (kid s 1) .vsize (spKid sp 1) with
+                        | .ok s0 _ es1 => .ok (.szSuc s0) .vsize es1
+                        | e => e
+                      | .false => match strEq k "term.sizeLt" with
+                        | .true => match checkT gs es cx (kid s 1) .vsize (spKid sp 1) with
+                          | .ok s0 _ es1 => .ok (.sizeLt s0) (.vsort (.lnum 1)) es1
+                          | e => e
+                        | .false => match strEq k "term.sized" with
+                          | .true => let d := Cx.lvl cx;
+                            match inferT gs es cx (kid s 0) (spKid sp 0) with
+                            | .err m => .err m
+                            | .ok t0 _ es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
+                              | .err m => .err m
+                              | .ok sz0 _ es2 => match whnf (force es2 (eval (TCtx.env (Cx.c cx)) t0)) with
+                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i sz0) es2
+                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i sz0) es2
+                                | v => .err (String.append "only inductive and coinductive types have sizes, not "
+                                    (show (scopeNames (Cx.sc cx)) d (quote d v)))
+                          | .false => inferT2 gs es cx s sp
 -- `{ s with … }` (13i, 13p): `let upd✝ := s; S.mk …` (`updArgs`), checked against the
 -- type of `s`
 def structUpdT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
@@ -5251,6 +5420,33 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
         | e => e
       | e => e
     | _ => .err (String.append "a tuple against a type that isn't a Σ type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es ty))))
+-- (A17) `⟨e₁, …, eₙ⟩` against a structure `S` (`S.mk …`), a pair (the tuple) or a data
+-- type with one constructor `c` (`.c …`), as `elabAnon` in the Lean frontend. It is
+-- check-only on the host too: `inferT1` has the host's cannot-infer message.
+def anonArgs (s : Syntax) : List Syntax := nonAtoms (kids (kid s 1))
+def anonApp (s : Syntax) (h : Syntax) : Syntax := match anonArgs s with
+  | .nil => h
+  | args => mkNode "term.app" (.cons h (one (mkNull args)))
+def anonT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp : Option SpT) : TE :=
+  let d := Cx.lvl cx;
+  let tyStr : String := show (scopeNames (Cx.sc cx)) d (quote d (force es ty));
+  let bad : String := String.append "an anonymous constructor ⟨…⟩ needs a structure, a pair or a data type with one constructor as its expected type, not " tyStr;
+  match structOf gs es ty with
+  | .some S => checkT gs es cx (anonApp s (mkNode "term.ident" (one (.ident (String.append S ".mk"))))) ty sp
+  | .none => match force es ty with
+    | .vsigma _ _ _ _ _ _ => match anonArgs s with
+      | .cons _ (.cons _ _) => checkTuple gs es cx (anonArgs s) ty (argSpans sp 1)
+      | _ => .err "an anonymous constructor of a pair has at least two components"
+    | tyf => match headOf (quote d tyf) .tnil with
+      | .mk T _ _ => match Globals.ind gs T with
+        | .some (.mk _ _ _ _ ctors _ _ _) => match ctors with
+          | .cons (.mk c _ _ _ _ _) .nil => match dotName gs es ty c with
+            | .some n => checkT gs es cx (anonApp s (mkNode "term.ident" (one (.ident n)))) ty sp
+            | .none => .err bad
+          | cs => .err (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and " T)
+              (String.append " has " (Nat.toString (lenL cs))))
+        | .none => .err bad
+      | .none => .err bad
 -- `fun (x : A) … => b` with every binder typed: `(x : A) → B` (stage 20a)
 def inferLams (gs : Globals) (es : ES) (cx : Cx) (ds : List Bool) (qs : List Q) : List Field → Syntax → Option SpT → TE
   | .nil, body, sp => inferT gs es cx body sp
@@ -5607,7 +5803,18 @@ def letPatT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option V
   | .bad => .err qtyErr
   | .dflt => match letPatIsUnit pat with
     | .true => letUnitT gs es cx s expected
-    | .false => let m := letPatMatch (letPatPattern pat) e body;
+    | .false =>
+      -- (A17) `let ⟨a, b⟩` on a pair is a tuple pattern; on a structure it is `.mk`
+      let pats := match letPatIsAnon pat with
+        | .false => letPatPattern pat
+        | .true => match inferT gs es cx e .none with
+          | .ok _ sty es1 => match structOf gs es1 sty with
+            | .some _ => letPatPattern pat
+            | .none => match force es1 sty with
+              | .vsigma _ _ _ _ _ _ => nestTuple (nonAtoms (kids (kid (letPatInner pat) 1)))
+              | _ => letPatPattern pat
+          | .err _ => letPatPattern pat;
+      let m := letPatMatch pats e body;
       match expected with
       | .some T => checkT gs es cx m T .none
       | .none => inferT gs es cx m .none
@@ -5644,6 +5851,18 @@ def inferLetUnit (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) : TE :=
   | .ok u _ es1 => match inferT gs es1 cx (kid s 6) .none with
     | .ok b ty es2 => .ok (.letUnit u b) ty es2
     | e => e
+-- `()` checks against a `Unit` at any level (its inferred type is `Unit` at level 1;
+-- the index equation of a coinductive payload is `True`, which `vEq` makes of an
+-- equation at a `Unit` type); otherwise it infers and unifies, as `term.unitVal` does
+def checkUnitVal (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) : TE :=
+  match whnf (force es ty) with
+  | .vunit _ => .ok .star ty es
+  | _ => match inferT gs es cx s .none with
+    | .ok t ty' es' => match unify es' cx ty' ty with
+      | .some es2 => .ok t ty es2
+      | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
+          (String.append ", got " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty')))))
+    | e => e
 -- check `s` against `ty`
 -- check `s` against `ty`; `sp` is `s`'s span from the parser's side table (playground LSP,
 -- stage 2), recorded with `ty` for `wiz/plainTermGoal`
@@ -5663,7 +5882,9 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
 def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
   let k := kindOf s;
-  match strEq k "term.by" with
+  match strEq k "term.anon" with
+  | .true => anonT gs es cx s ty sp
+  | .false => match strEq k "term.by" with
   | .true => elabBy gs es cx s ty sp
   | .false => match strEq k "term.paren" with
   | .true => checkT gs es cx (kid s 1) ty (spKid sp 1)
@@ -5693,10 +5914,14 @@ def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Op
         | .false => match strEq k "term.rfl" with
         | .true => checkRfl gs es cx (force es ty)
         | .false => match (match strEq k "term.app" with
-          | .true => match inferHead gs es cx (kid s 0) (spKid sp 0) with
-            | .ok f fty es1 m => appExpected gs es1 cx (kid s 0) f fty m (kids (kid s 1)) ty (argSpans sp 1)
-            | .err msg => TE.err msg
-          | .false => inferT gs es cx s sp) with
+          | .true => match builtinApp gs cx s with
+            | .some (.mk n args) => checkBuiltin gs es cx n args ty
+            | .none => match inferHead gs es cx (kid s 0) (spKid sp 0) with
+              | .ok f fty es1 m => appExpected gs es1 cx (kid s 0) f fty m (kids (kid s 1)) ty (argSpans sp 1)
+              | .err msg => TE.err msg
+          | .false => match strEq k "term.unitVal" with
+            | .true => checkUnitVal gs es cx s ty
+            | .false => inferT gs es cx s sp) with
           | .ok t ty' es' => match unify es' cx ty' ty with
             | .some es2 => .ok t ty es2
             | .none => .err (String.append (String.append "type mismatch: expected " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es' ty))))
@@ -5836,21 +6061,40 @@ def varBinds : List Syntax → List Col → List Bind
       | .false => names;
     List.append (asBinds names' c) (varBinds ps cs)
   | _, _ => .nil
+-- (A17) is column `k`'s type a pair? (`⟨…⟩` is a tuple pattern there, a constructor
+-- pattern on an inductive elsewhere)
+def colIsSigma (es : ES) (cx : Cx) (cols : List Col) (k : Nat) : Bool :=
+  match nthCol cols k with
+  | .mk L ty0 _ _ => match whnf (force es (eval (TCtx.env (Cx.c cx)) (shiftTm (Cx.lvl cx - L) 0 ty0))) with
+    | .vsigma _ _ _ _ _ _ => .true
+    | _ => .false
+-- (A17) an anonymous constructor pattern needs a type with one constructor
+def anonCtorErr (T : String) (info : IndInfo) : Option String := match info with
+  | .mk _ _ _ _ ctors _ _ _ => match ctors with
+    | .cons _ .nil => .none
+    | cs => .some (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and " T)
+        (String.append " has " (Nat.toString (lenL cs))))
+def anonErrIf (anon : Bool) (T : String) (info : IndInfo) : Option String := match anon with
+  | .true => anonCtorErr T info
+  | .false => .none
 -- (13q) split column `k`: by a literal test (`litTest`), or by constructors
 def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let p0 := asInner (patAt k cls);
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
-  match strEq (kindOf p0) "term.tuple" with
+  let anon := strEq (kindOf p0) "term.anon";
+  match Bool.or (strEq (kindOf p0) "term.tuple") (Bool.and anon (colIsSigma es cx cols k)) with
   | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
   | .false => match nthCol cols k with
     | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
       | .mk T _ _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
         | .true => litTest gs mc es cx expected cols top ihLvls cls k
         | .false => match Globals.ind gs T with
-          | .some _ => match litSplitErr T k cls with
+          | .some info => match anonErrIf anon T info with
             | .some m => .err m
-            | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
+            | .none => match litSplitErr T k cls with
+              | .some m => .err m
+              | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
           | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
       | .none => match lit with
         | .true => litTest gs mc es cx expected cols top ihLvls cls k
@@ -7460,6 +7704,454 @@ def withDefault (gs : Globals) (stx : Syntax) : Step := match reorderStructural 
       | .false => command gs1 main .none
   | .no => withDefault' gs stx
 def inductiveCmd (gs : Globals) (stx : Syntax) : Step := inductiveCmdS gs stx .none
+-- **A19/B4: `coinductive T (params) where f₁ : A₁ …`.** As in `elabCoinductive`
+-- (`Inductive.lean`): `T.desc` is a one-constructor description whose fields are the
+-- observations, `T := ν T.desc ()`, each observation `T.f : {params} → T params → A` is
+-- `out` projected (and `down` if the field is lifted), and `T.mk` is a `cocon` of the
+-- fields. There are no indices yet (as in the Lean frontend) and the type is in `Type u`.
+inductive CoinObs where
+  | mk (name : String) (q : Q) (isRec : Bool) (ty : Syntax)
+inductive CoinF where
+  | mk (name : String) (q : Q) (isRec : Bool) (ft : Tm) (fv : Val) (lifted : Bool) (kl : Lvl)
+def coinName (f : Syntax) : String := match kid f 2 with
+    | .ident n => n
+    | _ => "_"
+def coinTy (f : Syntax) : Syntax := kid f 4
+def coinObsGo (T : String) (ps : List String) : List Syntax → Option (List CoinObs)
+  | .nil => .some .nil
+  | .cons f fs => match writtenQ (kid f 1) with
+    | .bad => .none
+    | .is q => match recField T ps 0 (coinTy f) with
+      | .yes _ => match coinObsGo T ps fs with
+        | .some r => .some (.cons (.mk (coinName f) q .true (coinTy f)) r)
+        | .none => .none
+      | .no => match coinObsGo T ps fs with
+        | .some r => .some (.cons (.mk (coinName f) q .false (coinTy f)) r)
+        | .none => .none
+    | .dflt => match recField T ps 0 (coinTy f) with
+      | .yes _ => match coinObsGo T ps fs with
+        | .some r => .some (.cons (.mk (coinName f) .qw .true (coinTy f)) r)
+        | .none => .none
+      | .no => match coinObsGo T ps fs with
+        | .some r => .some (.cons (.mk (coinName f) .qw .false (coinTy f)) r)
+        | .none => .none
+-- the description's body: `darg q S (fun x => rest)` for an observation, `drec q () rest`
+-- for a recursive one; `k` is the number of fields bound so far in the description
+def coinDescGo (lv : Lvl) : List CoinF → Nat → Tm
+  | .nil, _ => .dret .star
+  | .cons (.mk name q isRec ft fv lifted kl) rest, k => match isRec with
+    | .true => .drec (.qlit q) .star (coinDescGo lv rest k)
+    | .false => match lifted with
+      | .true => .darg (.qlit q) (.ulift kl (lsucc lv) (shiftTm k 0 ft)) (.lam (coinDescGo lv rest (k + 1)))
+      | .false => .darg (.qlit q) (shiftTm k 0 ft) (.lam (coinDescGo lv rest (k + 1)))
+def coinLifts : List CoinF → List Bool
+  | .nil => .nil
+  | .cons (.mk _ _ _ _ _ l _) rest => .cons l (coinLifts rest)
+def coinFieldTms : List CoinF → Tms
+  | .nil => .tnil
+  | .cons (.mk _ _ _ ft _ _ _) rest => .tcons ft (coinFieldTms rest)
+def coinFieldQs : List CoinF → List Q
+  | .nil => .nil
+  | .cons (.mk _ q _ _ _ _ _) rest => .cons q (coinFieldQs rest)
+def coinCFields : List CoinF → List CField
+  | .nil => .nil
+  | .cons (.mk name _ isRec ft _ _ _) rest => .cons (.mk name isRec ft ft) (coinCFields rest)
+-- the field types of `T.mk`, each under the fields before it
+def coinMkTys : List Tm → Nat → Tms
+  | .nil, _ => .tnil
+  | .cons ft rest, k => .tcons (shiftTm k 0 ft) (coinMkTys rest (k + 1))
+-- the payload `(f₁, …, (fₙ, ((), ())))`, with `up` for a lifted field; the first field is
+-- `var (n-1)`
+def coinPayload : List Bool → Nat → Nat → Tm
+  | .nil, .zero, _ => .pair .star .star
+  | .cons b bs, .succ r, i => .pair (match b with
+      | .true => .up (.var i)
+      | .false => .var i) (coinPayload bs r (i - 1))
+  | _, _, _ => .pair .star .star
+-- elaborate the non-recursive observations at the parameters; a recursive one stands for
+-- `T params` and is filled in once `T` is built (`coinFixRecs`)
+inductive CoinFR where
+  | ok (fs : List CoinF)
+  | err (msg : String)
+def coinElabFields (gs : Globals) (cxP : Cx) (us : List String) (lv : Lvl) (T : String) (ps : List String) : List CoinObs → CoinFR
+  | .nil => .ok .nil
+  | .cons (.mk name q isRec ty) rest => match isRec with
+    | .true => match coinElabFields gs cxP us lv T ps rest with
+      | .ok r => .ok (.cons (.mk name q .true .star (.vunit (ln 1)) .false (.lnum 0)) r)
+      | .err m => .err m
+    | .false => match typeOccurs T ty with
+      | .true => .err (String.append (String.append "the observation " name) " may be the type itself (a recursive observation) or depend on the parameters only")
+      | .false => match inferType gs (ES.withParams ES.empty us) cxP ty with
+        | .err m => .err (String.append (String.append "the observation " name) (String.append ": " m))
+        | .ok A _ es => match finishElab gs es with
+          | .err m => .err m
+          | .ok es' => match zonk es' (Cx.lvl cxP) A with
+            | .none => .err "could not infer an implicit argument"
+            | .some A' =>
+              let vA := eval (TCtx.env (Cx.c cxP)) A';
+              let kl : Lvl := match sortOf (Cx.c cxP) vA with
+                | .some k => k
+                | .none => .lhole;
+              match coinElabFields gs cxP us lv T ps rest with
+              | .ok r => .ok (.cons (.mk name q .false A' vA (Bool.not (lvlEquiv kl (lsucc lv))) kl) r)
+              | .err m => .err m
+-- fill a recursive observation's field type in (`T params`)
+def coinFixRecs (env : Env) (Tapp : Tm) : List CoinF → List CoinF
+  | .nil => .nil
+  | .cons (.mk name q isRec ft fv lifted kl) rest => match isRec with
+    | .true => .cons (.mk name q .true Tapp (eval env Tapp) .false (.lnum 0)) (coinFixRecs env Tapp rest)
+    | .false => .cons (.mk name q .false ft fv lifted kl) (coinFixRecs env Tapp rest)
+-- add a checked global (each generated declaration is checked on its own, as `inductive`)
+inductive AddG where
+  | ok (gs : Globals)
+  | err (msg : String)
+def addGlobalChecked (gs : Globals) (x : String) (us : List String) (ty val : Tm) (mask : List BKind) (pn : List String) : AddG :=
+  match check empty val (eval .nil ty) with
+  | .err m => .err (String.append (String.append (String.append "in " x) ": ") m)
+  | .ok _ _ => .ok (Globals.add gs (.mk x us ty val (inlineTm gs val) mask pn))
+
+-- the observations: `T.f := fun params x => (projection of (out x))`
+def coinAddObs (T : String) (us : List String) (pts : Tms) (Tapp : Tm) (np : Nat) : Globals → List CoinF → Nat → Step
+  | gs0, .nil, _ => .mk "" gs0
+  | gs0, .cons (.mk name q isRec ft fv lifted kl) rest, k =>
+    let F : Tm := match isRec with
+      | .true => Tapp
+      | .false => ft;
+    let proj : Tm := match lifted with
+      | .true => .down (.fst (sndN k (.out (.var 0))))
+      | .false => .fst (sndN k (.out (.var 0)));
+    let ty := sortTy (piTeleZ pts (piTm .qw Tapp (shiftTm 1 0 F)));
+    let val := tLams np (.lam proj);
+    match addGlobalChecked gs0 (String.append (String.append T ".") name) us ty val (impls np) .nil with
+    | .err m => errStep gs0 m
+    | .ok gs1 => coinAddObs T us pts Tapp np gs1 rest (k + 1)
+def coinductiveCmdL (gs : Globals) (stx : Syntax) : Step :=
+  let T := match kid stx 1 with
+    | .ident n => n
+    | _ => "_";
+  let params := fieldsOf (kids (kid stx 3));
+  let ps := fieldNames params;
+  let np := List.length ps;
+  let us := univParamsOf stx;
+  let lv := dataLevel stx;
+  let qs : List Q := match binderQs (kids (kid stx 3)) with
+    | .some qs => qs
+    | .none => .nil;
+  let mask := paramMask (kids (kid stx 3));
+  match lvlDeclared us lv with
+  | .false => errStep gs (String.append (String.append "the data type's universe must be a declared universe parameter, not " (lvlShow lv))
+      (match us with
+       | .nil => " (declare one: `coinductive T.{u}`)"
+       | .cons _ _ => ""))
+  | .true => match sigOf stx with
+    | .indexed _ => errStep gs "a coinductive type has no indices (yet)"
+    | .bad => errStep gs "a coinductive type must be in Type u"
+    | .plain => match coinObsGo T ps (kids (kid stx 6)) with
+      | .none => errStep gs qtyErr
+      | .some os => match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil) params with
+        | .err m => errStep gs m
+        | .ok pts cxP => match coinElabFields gs cxP us lv T ps os with
+          | .err m => errStep gs m
+          | .ok fs0 =>
+            let I : Tm := .unit (lsucc lv);
+            let D := coinDescGo lv fs0 0;
+            let descTy := sortTy (piTeleQ qs pts (.descr lv I));
+            let descVal := tLams np D;
+            let tTy := sortTy (piTeleQ qs pts (.sortL (lsucc lv)));
+            let tVal := tLams np (.nu lv I D .star .szInf);
+            match addGlobalChecked gs (String.append T ".desc") us descTy descVal mask .nil with
+            | .err m => errStep gs m
+            | .ok gs1 => match addGlobalChecked gs1 T us tTy tVal mask ps with
+              | .err m => errStep gs1 m
+              | .ok gs2 =>
+                let Tconst : Tm := .const (Globals.declName gs T) us (lvlArgs us) tVal tTy;
+                let Tapp : Tm := tApps Tconst (pvars np np);
+                let fs := coinFixRecs (TCtx.env (Cx.c cxP)) Tapp fs0;
+                match coinAddObs T us pts Tapp np gs2 fs 0 with
+                | .mk line gs3 => match strEq line "" with
+                  | .true =>
+                    let n := List.length fs;
+                    let mkTy := sortTy (piTeleZ pts (piTeleQ (coinFieldQs fs) (coinMkTys (tmsToList (coinFieldTms fs)) 0) (shiftTm n 0 Tapp)));
+                    let mkVal := tLams np (tLams n (.cocon (coinPayload (coinLifts fs) n (n - 1))));
+                    let mkName := String.append T ".mk";
+                    match addGlobalChecked gs3 mkName us mkTy mkVal (impls np) .nil with
+                    | .err m => errStep gs3 m
+                    | .ok gs4 =>
+                      let info := IndInfo.mk np lv I D D
+                        (.cons (.mk "mk" (coinCFields fs) .star (coinFieldQs fs) (mapL (fun (_ : CoinF) => .false) fs) (coinLifts fs)) .nil)
+                        .none Tconst (kids (kid stx 3));
+                      .mk (String.append T (String.append " : " (show .nil 0 tTy))) (Globals.addCoind gs4 T info)
+                  | .false => .mk line gs3
+  | _ => errStep gs "a coinductive type needs a name"
+def coinductiveCmd (gs : Globals) (stx : Syntax) : Step := match strEq (kindOf stx) "command.coinductive" with
+  | .true => coinductiveCmdL gs stx
+  | .false => errStep gs "a coinductive type needs a name"
+
+-- **Copatterns (A19/B4).** `def f binders : T args | .obs => rhs …` for a coinductive
+-- `T` compiles to `coit` when observation `obs` is a corecursive call `f e…` (the state
+-- is the tuple of the explicit binders), and to `cocon` when it is not recursive at all
+-- (`register`). Mirrors `elabCopatternsCoit`/`elabCopatternsCocon` in `Command.lean`.
+def altPat (a : Syntax) : Option Syntax := match kids (kid a 1) with
+  | .cons p _ => .some p
+  | .nil => .none
+def altRhs (a : Syntax) : Syntax := kid a 3
+def dotIdentName (p : Syntax) : Option String := match strEq (kindOf p) "term.dotIdent" with
+  | .true => match kid p 1 with
+    | .ident n => .some n
+    | _ => .none
+  | .false => .none
+def allDotAlts : List Syntax → Bool
+  | .nil => .true
+  | .cons a rest => match altPat a with
+    | .some p => match dotIdentName p with
+      | .some _ => allDotAlts rest
+      | .none => .false
+    | .none => .false
+def copatternAlt (alts : List Syntax) (o : String) : Option Syntax := match alts with
+  | .nil => .none
+  | .cons a rest => match altPat a with
+    | .some p => match dotIdentName p with
+      | .some n => match strEq n o with
+        | .true => .some a
+        | .false => copatternAlt rest o
+      | .none => copatternAlt rest o
+    | .none => copatternAlt rest o
+-- is the right-hand side a call of `f` (or bare `f`)?
+def isCorecCall (f : String) (rhs : Syntax) : Bool :=
+  let h := match strEq (kindOf rhs) "term.app" with
+    | .true => kid rhs 0
+    | .false => rhs;
+  match strEq (kindOf h) "term.ident" with
+    | .true => strEq (identOf h) f
+    | .false => .false
+-- the head of a result type `T args`
+partial def resultHead (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node k args => match strEq k "term.ident" with
+    | .true => match kid s 0 with
+      | .ident n => .some n
+      | _ => .none
+    | .false => match strEq k "term.app" with
+      | .true => resultHead (kid s 0)
+      | .false => match strEq k "term.paren" with
+        | .true => resultHead (kid s 1)
+        | .false => match strEq k "term.arrow" with
+          | .true => resultHead (kid s 2)
+          | .false => match strEq k "term.depArrow" with
+            | .true => resultHead (kid s 2)
+            | .false => .none
+  | _ => .none
+def altCorecursive (f : String) (o : String) (alts : List Syntax) : Bool := match copatternAlt alts o with
+  | .some a => isCorecCall f (altRhs a)
+  | .none => .false
+-- one component of a payload, in order, then `(e, ())`
+def coinPairs : List Tm → Tm → Tm
+  | .nil, acc => acc
+  | .cons c cs, acc => .pair c (coinPairs cs acc)
+def coinRhsIndex (d : Nat) (I i : Val) : Tm := match whnf I with
+  | .vunit _ => .star
+  | _ => .eqRefl (quote d I) (quote d i)
+inductive CStat where
+  | ok (comps : List Tm) (es : ES)
+  | err (msg : String)
+-- the non-recursive copattern alternative: one `cocon` cell in front of the values given
+def copatternCoconGo (gs : Globals) (cx : Cx) (alts : List Syntax) (f : String) : List (String × Bool) → Val → List Tm → ES → CStat
+  | .nil, _, comps, es => .ok comps es
+  | .cons (o, isRec) rest, pty, comps, es => match copatternAlt alts o with
+    | .none => .err (String.append "missing copattern ." o)
+    | .some a =>
+      let rhs := altRhs a;
+      match Bool.and isRec (mentionsIdent f rhs) with
+      | .true => .err (String.append (String.append (String.append "the observation ." o) " must be a corecursive call of ") (String.append f " (guardedness)"))
+      | .false => match whnf pty with
+        | .vsigma _ _ _ A env B => match whnf A with
+          | .vulift _ _ A' => match checkT gs es cx rhs A' .none with
+            | .err m => .err m
+            | .ok c _ es1 => copatternCoconGo gs cx alts f rest (eval (.cons (eval (TCtx.env (Cx.c cx)) (.up c)) env) B) (.append comps (.cons (.up c) .nil)) es1
+          | _ => match checkT gs es cx rhs A .none with
+            | .err m => .err m
+            | .ok c _ es1 => copatternCoconGo gs cx alts f rest (eval (.cons (eval (TCtx.env (Cx.c cx)) c) env) B) (.append comps (.cons c .nil)) es1
+        | _ => .err "internal error: a coinductive payload is not a Σ"
+-- the state tuple: `(x₁ : A₁) × … × (xₙ : Aₙ) × Unit`
+def coinStateTy (types : Env) (np : Nat) (lv0 : Lvl) : List (String × Nat) → Nat → Tm
+  | .nil, _ => .unit (lsucc lv0)
+  | .cons (_, k) rest, j => sigmaTm .qw (shiftTm j 0 (quote np (lookup types (np - 1 - k)))) (coinStateTy types np lv0 rest (j + 1))
+-- the explicit parameters, in order, with their position in the parameter list
+def coinExplicit (mask : List BKind) (ps : List String) (i : Nat) : List (String × Nat) := match mask, ps with
+  | .cons b bs, .cons p ps' => match b with
+    | .dflt => .cons (p, i) (coinExplicit bs ps' (i + 1))
+    | _ => coinExplicit bs ps' (i + 1)
+  | _, _ => .nil
+-- bind the state's components from `s` (projections), in the step function's context
+inductive CRB where
+  | ok (cx : Cx) (sv : Val) (es : ES)
+def coinBindExplicit (types : Env) (np : Nat) : Cx → Val → List (String × Nat) → ES → CRB
+  | cx, sv, .nil, es => .ok cx sv es
+  | cx, sv, .cons (name, k) rest, es => match lookup types (np - 1 - k) with
+    | ty => coinBindExplicit types np (Cx.defineL cx name (fun _ => vfst sv) ty) (vsnd sv) rest es
+-- the step function of `coit`: `fun i s => payload` with the state's components replaced
+-- by projections of `s` (as `let`s, in the kernel's term)
+def coinStripLets (n : Nat) (body : Tm) : Tm := match n with
+  | .zero => body
+  | .succ k => coinStripLets k (instAt (.fst (sndN k (.var k))) 0 body)
+inductive CCS where
+  | ok (comps : List Tm) (es : ES)
+  | err (msg : String)
+inductive CArgs where
+  | ok (ts : List Tm) (es : ES)
+  | err (msg : String)
+def coinArgsGo (gs : Globals) (cx : Cx) (types : Env) (np : Nat) : List Syntax → List (String × Nat) → ES → CArgs
+  | .nil, _, es => .ok .nil es
+  | .cons arg args', .cons (_, k) ex', es => match lookup types (np - 1 - k) with
+    | ty => match checkT gs es cx arg ty .none with
+      | .err m => .err m
+      | .ok c _ es1 => match coinArgsGo gs cx types np args' ex' es1 with
+        | .err m => .err m
+        | .ok cs es2 => .ok (.cons c cs) es2
+  | _, .nil, _ => .err "too many arguments"
+def copatternCoitGo (gs : Globals) (cx : Cx) (alts : List Syntax) (f : String) (explicit : List (String × Nat)) (types : Env) (np : Nat) : List (String × Bool) → Val → List Tm → ES → CCS
+  | .nil, _, comps, es => .ok comps es
+  | .cons (o, isRec) rest, pty, comps, es => match copatternAlt alts o with
+    | .none => .err (String.append "missing copattern ." o)
+    | .some a =>
+      let rhs := altRhs a;
+      match whnf pty with
+      | .vsigma _ _ _ A env B => match isRec with
+        | .true =>
+          let head := match strEq (kindOf rhs) "term.app" with
+            | .true => kid rhs 0
+            | .false => rhs;
+          let as : List Syntax := match strEq (kindOf rhs) "term.app" with
+            | .true => kids (kid rhs 1)
+            | .false => .nil;
+          match Bool.and (strEq (kindOf head) "term.ident") (strEq (identOf head) f) with
+          | .false => .err (String.append (String.append (String.append "the observation ." o) " must be a corecursive call of ") (String.append f " (guardedness)"))
+          | .true => match Nat.beq (List.length as) (List.length explicit) with
+            | .false => .err (String.append (String.append (String.append f " takes ") (Nat.toString (List.length explicit))) " explicit arguments")
+            | .true => match coinArgsGo gs cx types np as explicit es with
+              | .err m => .err m
+              | .ok cs es1 =>
+                -- the recursive component of `coit`'s payload is the next state
+                let st := coinPairs cs .star;
+                copatternCoitGo gs cx alts f explicit types np rest
+                  (eval (.cons (eval (TCtx.env (Cx.c cx)) st) env) B) (.append comps (.cons st .nil)) es1
+        | .false => match whnf A with
+          | .vulift _ _ A' => match checkT gs es cx rhs A' .none with
+            | .err m => .err m
+            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types np rest
+              (eval (.cons (eval (TCtx.env (Cx.c cx)) (.up c)) env) B) (.append comps (.cons (.up c) .nil)) es1
+          | _ => match checkT gs es cx rhs A .none with
+            | .err m => .err m
+            | .ok c _ es1 => copatternCoitGo gs cx alts f explicit types np rest
+              (eval (.cons (eval (TCtx.env (Cx.c cx)) c) env) B) (.append comps (.cons c .nil)) es1
+      | _ => .err "internal error: a coinductive payload is not a Σ"
+def coinAnyObs (f : String) (alts : List Syntax) : List (String × Bool) → Bool
+  | .nil => .false
+  | .cons (o, isRec) rest => match Bool.and isRec (altCorecursive f o alts) with
+    | .true => .true
+    | .false => coinAnyObs f alts rest
+-- the copattern result: its type (the definition's Π) and value
+inductive CRes where
+  | ok (ty val : Tm) (es : ES)
+  | err (msg : String)
+def copatternBuild (gs : Globals) (f : String) (stx : Syntax) : CRes :=
+  let T := match resultHead (kid (kid stx 4) 1) with
+    | .some T => T
+    | .none => "";
+  let us := univParamsOf stx;
+  let params := fieldsOf (kids (kid stx 3));
+  let ps := fieldNames params;
+  let np := List.length ps;
+  let qs : List Q := match binderQs (kids (kid stx 3)) with
+    | .some qs => qs
+    | .none => .nil;
+  let mask := paramMask (kids (kid stx 3));
+  let alts := kids (kid stx 5);
+  match elabParams gs us (Cx.mk empty (Globals.scope gs) .nil) params with
+  | .err m => .err m
+  | .ok pts cxP => match inferType gs (ES.withParams ES.empty us) cxP (kid (kid stx 4) 1) with
+    | .err m => .err m
+    | .ok RE _ esR => match finishElab gs esR with
+      | .err m => .err m
+      | .ok esR' => match zonk esR' np RE with
+        | .none => .err "could not infer an implicit argument"
+        | .some REz =>
+          let tyT := sortTy (piTeleQ qs pts REz);
+          let tyV := eval (TCtx.env (Cx.c cxP)) REz;
+          match whnf tyV with
+          | .vnu lv I D i sz => match Globals.coindFields gs T with
+            | .none => .err "copatterns need a coinductive result type"
+            | .some obs =>
+              let corec := coinAnyObs f alts obs;
+              match corec with
+              | .false => match sizePred sz with
+                | .none => .err "a copattern definition builds a value of size ↑s or ∞, not one at an unknown size"
+                | .some s' =>
+                  let pty0 := vInterp lv I D (nuFamilyAt lv I D s') i;
+                  match copatternCoconGo gs cxP alts f obs pty0 .nil ES.empty with
+                  | .err m => .err m
+                  | .ok comps es1 => match finishElab gs es1 with
+                    | .err m => .err m
+                    | .ok es1' => match zonk es1' np (.cocon (coinPairs comps (.pair (coinRhsIndex np I i) .star))) with
+                      | .none => .err "could not infer an implicit argument"
+                      | .some body => .ok tyT (tLams np body) es1'
+              | .true =>
+                let explicit := coinExplicit mask ps 0;
+                let types := TCtx.types (Cx.c cxP);
+                let stateTy := coinStateTy types np lv explicit 0;
+                let cxI := Cx.bind cxP "i" I;
+                let vS := eval (TCtx.env (Cx.c cxI)) (shiftTm 1 0 stateTy);
+                let cxS := Cx.bind cxI "s" vS;
+                let sv0 := fresh (Cx.lvl cxS - 1);
+                match coinBindExplicit types np cxS sv0 explicit esR' with
+                | .ok cxB sv esB =>
+                  -- the payload's type: `⟦T.desc⟧ S i` with the state family `S` in the
+                  -- recursive fields (a corecursive observation is the next state)
+                  let lB := Cx.lvl cxB;
+                  let Sfam : Val := .vlam (TCtx.env (Cx.c cxB)) (shiftTm (lB - np + 1) 0 stateTy);
+                  let pty0 := vInterp lv I D Sfam i;
+                  match copatternCoitGo gs cxB alts f explicit types np obs pty0 .nil esB with
+                  | .err m => .err m
+                  | .ok comps es1 =>
+                    let n := List.length explicit;
+                    -- the index equation is at the step's context (`i` and `s` bound)
+                    let payload : Tm := coinPairs comps (.pair (shiftTm 2 0 (coinRhsIndex np I i)) .star);
+                    let body : Tm := coinStripLets n payload;
+                    let step : Tm := .lam (.lam body);
+                    let Sfn : Tm := .lam (shiftTm 1 0 stateTy);
+                    let init : Tm := coinPairs (mapL (fun (p : String × Nat) => match p with
+                      | (_, k) => .var (np - 1 - k)) explicit) .star;
+                    let coit : Tm := .coit lv (quote np I) (quote np D) Sfn step (quote np i) init;
+                    match finishElab gs es1 with
+                    | .err m => .err m
+                    | .ok es1' => match zonk es1' np (tLams np coit) with
+                      | .none => .err "could not infer an implicit argument"
+                      | .some val => .ok tyT val es1'
+          | v => .err "copatterns need a coinductive result type"
+-- a `defEqns` whose patterns are copatterns of a declared coinductive type
+def copatternDef (gs : Globals) (stx : Syntax) : Option Step :=
+  match strEq (kindOf stx) "command.defEqns" with
+  | .false => .none
+  | .true => match kid stx 1 with
+    | .ident f => match allDotAlts (kids (kid stx 5)) with
+      | .false => .none
+      | .true => match resultHead (kid (kid stx 4) 1) with
+        | .some T => match Globals.coindFields gs T with
+          | .none => .none
+          | .some _ => match copatternBuild gs f stx with
+            | .err m => .some (errStep gs m)
+            | .ok ty val es => match finishElab gs es with
+              | .err m => .some (errStep gs m)
+              | .ok es' => match zonk es' 0 val with
+                | .none => .some (errStep gs "could not infer an implicit argument")
+                | .some v => match checkMarkingParams (univParamsOf stx) v ty with
+                  | .bad m => .some (errStep gs m)
+                  | .good v' => .some (.mk (String.append f (String.append " : " (show .nil 0 ty)))
+                      (Globals.add gs (.mk f (univParamsOf stx) ty v' (inlineTm gs v') (paramMask (kids (kid stx 3)))
+                        (declParamNames stx))))
+        | .none => .none
+    | _ => .none
+
 -- **`sealed inductive T …`** (22k; `command.sealed` in `Elab/Command.lean`): the axiom
 -- `T.seal✝ : Type`, then `T` with the seal as the first domain of its index tail (a
 -- constant is compared by name, so no declaration that can't write the name is `T`)
@@ -7477,19 +8169,21 @@ def sealedCmd (gs : Globals) (stx : Syntax) : Step :=
 -- one definition (or inductive type), by its form
 def defStep (gs : Globals) (stx : Syntax) (sp : Option SpT) : Step := match strEq (kindOf stx) "command.inductive" with
   | .true => inductiveCmd gs stx
+  | .false => match strEq (kindOf stx) "command.coinductive" with
+  | .true => coinductiveCmd gs stx
   | .false => match (match binderQs (kids (kid stx 3)) with
       | .none => Bool.true
       | .some _ => Bool.false) with
   | .true => errStep gs qtyErr
-  | .false => match strEq (kindOf stx) "command.inductive" with
-  | .true => inductiveCmd gs stx
   | .false => match Bool.and (strEq (kindOf stx) "command.def") (Bool.and (strEq (kindOf (kid stx 6)) "term.match")
       (scrutsAreParams (fieldNames (fieldsOf (kids (kid stx 3)))) (nonAtoms (kids (kid (kid stx 6) 1))))) with
     | .true => withDefault gs stx
     | .false => match strEq (kindOf stx) "command.defEqns" with
-      | .true => match eqnsToMatch stx with
-        | .some d => withDefault gs d
-        | .none => errStep gs "equations need a function type"
+      | .true => match copatternDef gs stx with
+        | .some st => st
+        | .none => match eqnsToMatch stx with
+          | .some d => withDefault gs d
+          | .none => errStep gs "equations need a function type"
       | .false => match strEq (kindOf stx) "command.printAxioms" with
         -- (C14) `#print axioms X`
         | .true => printAxiomsCmd gs stx
@@ -9120,6 +9814,38 @@ partial def listLitStx (args : List Syntax) : Syntax := match args with
   | .cons (.atom _) rest => listLitStx rest
   | .cons t rest => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "List.cons")))
       (one (mkNull (.cons t (one (listLitStx rest))))))
+-- (A17) `¬ P` and `∃ x, P` are the host's `notation`/`syntax:lead` rules over `Not` and
+-- `Ex` in lib/Logic.wiz; this frontend does not run those registrations, so the parser
+-- has the shapes (`Parse.wiz`, `surfaceCats`) and the nodes are rewritten here to the
+-- applications the host's macro produces: `Not P`, and one `Ex (fun …)` per binder (a
+-- plain binder takes the trailing `: A`, a typed one its own, as `Ex.wrapBinders`).
+def notStx (p : Syntax) : Syntax :=
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Not"))) (one (mkNull (one p))))
+def exFun (x : String) (A : Option Syntax) (body : Syntax) : Syntax :=
+  let binder := mkNode "binder.explicit" (.cons (.atom "(") (.cons (mkNull .nil)
+    (.cons (mkNull (one (.ident x))) (.cons (match A with
+      | .some a => mkNull (.cons (.atom ":") (one a))
+      | .none => mkNull .nil) (one (.atom ")"))))));
+  let fn := mkNode "term.fun" (.cons (.atom "fun") (.cons (mkNull (one binder))
+    (.cons (.atom "=>") (one body))));
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Ex"))) (one (mkNull (one fn))))
+def exIds (A : Option Syntax) (body : Syntax) : List String → Syntax
+  | .nil => body
+  | .cons x xs => exFun x A (exIds A body xs)
+def exBinderStx (ty : Option Syntax) (b : Syntax) (body : Syntax) : Syntax :=
+  match strEq (kindOf b) "typed" with
+  | .true => exIds (.some (kid b 3)) body (identNames (nonAtoms (kids (kid b 1))))
+  | .false => exIds ty body (identNames (one (kid b 0)))
+def exBindersStx (ty : Option Syntax) (bs : List Syntax) (body : Syntax) : Syntax :=
+  match bs with
+  | .nil => body
+  | .cons b rest => exBinderStx ty b (exBindersStx ty rest body)
+-- the optional `: A` of `∃ x : A, P` (a `null`: `[":", A]` or empty)
+def exBinderTy (opt : Syntax) : Option Syntax := match kids opt with
+  | .cons _ (.cons t _) => .some t
+  | _ => .none
+def exStx (s : Syntax) : Syntax :=
+  exBindersStx (exBinderTy (kid s 2)) (kids (kid s 1)) (kid s 4)
 -- rewrite `s` while a rule matches it (a template may introduce a rule head); `fuel`
 -- only bounds a rewrite loop at one position, so restructuring a subtree never runs out
 partial def expandTop (notes : List Note) (fuel : Nat) (scope : Nat) (s : Syntax) : Syntax :=
@@ -9148,7 +9874,11 @@ partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax 
           | .false => match strEq k2 "term.!" with
             | .true => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Bool.not")))
                 (one (mkNull (one (kid s' 1)))))
-            | .false => s'
+            | .false => match strEq k2 "term.not" with
+              | .true => notStx (kid s' 1)
+              | .false => match strEq k2 "term.ex" with
+                | .true => exStx s'
+                | .false => s'
     | other => other
   | _ => s
 partial def expandNotesArgs (notes : List Note) (scope : Nat) : SyntaxF .false → SyntaxF .false
@@ -10196,7 +10926,7 @@ def mutualDeriving : List Syntax → Option String
 
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
-  (Bool.or (strEq k "command.inductive") (Bool.or (strEq k "command.check")
+  (Bool.or (Bool.or (strEq k "command.inductive") (strEq k "command.coinductive")) (Bool.or (strEq k "command.check")
     (Bool.or (strEq k "command.reduce") (Bool.or (strEq k "command.eval")
       (strEq k "command.printAxioms")))))
 -- the output so far, the globals, and the parser's tables and notations
