@@ -493,7 +493,7 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   -- into the store, and deriving "the checkout" from it never finds the working tree.
   let base := lib.parent.getD "."
   let assets : List System.FilePath :=
-    (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups
+    (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups -- complexity: ok (at most three candidate directories)
   -- (the site keeps its title with --reference; the manual has its own)
   let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs }
   let r ← Doc.run (fun m => elaborateHits tc "<doc>" s!"import {m}\n") mods o
