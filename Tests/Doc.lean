@@ -671,43 +671,55 @@ def docGroup : Group where
         check (!has basic "doc-live.js") "a plain page carries the live client"
         check (!has basic "wiz-doc-serve") "a plain page carries the live data"
         check (!has basic "data-doc-line") "a plain page carries live positions"
-        -- (a served site: the page presents the client, and the server answers)
-        let port ← freePort
+        -- (a served site: the page presents the client, and the server answers.
+        -- `freePort` reserves a port and closes it, so the server can lose the race to
+        -- another process in between; retry with a fresh port rather than `skip`. An
+        -- unexplained skip fails CI's skip gate, and three failed binds are a real
+        -- failure, not a missing capability.)
         let out := dir / "live"
-        let child ← IO.Process.spawn
-          { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
-              "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
-        try
-          let some (r, w) ← connectSoon port | do
+        let attempt (port : UInt16) : IO Bool := do
+          let child ← IO.Process.spawn
+            { cmd := ← wiz, args := #["doc", (dir / "src").toString, "-o", out.toString,
+                "--serve", "--port", toString port, "--lsp", "8765"], stdout := .null, stderr := .piped }
+          try
+            match ← connectSoon port with
+            | .none => do
+              try child.kill catch _ => pure ()
+              let err ← child.stderr.readToEnd
+              unless err.trimAscii.isEmpty do IO.eprintln err
+              pure false
+            | .some (r, w) => do
+              let index ← httpReq r w "/index.html"
+              check (has index "200 OK") s!"GET /index.html: {index.take 200}"
+              check (has index "<title>") index
+              let page ← httpGet port "/Shapes.Basic.html"
+              check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
+              checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
+              checkHas page "id=\"wiz-doc-serve\""
+              checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
+              checkHas page "data-doc-line="
+              -- (the scripts the page imports are in the served tree)
+              checkHas (← httpGet port "/doc-live.js") "readGoalState"
+              checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
+              checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
+              -- (the module's source, for the client to open in the server)
+              let src ← httpGet port "/sources/Shapes.Basic.wiz"
+              check (has src "200 OK") s!"GET /sources: {src.take 200}"
+              checkHas src "structure Point"
+              -- (the landing and API pages stay static even when served)
+              check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
+              check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
+              -- (no path escapes the generated tree)
+              check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
+              pure true
+          finally
             try child.kill catch _ => pure ()
-            let err ← child.stderr.readToEnd
-            IO.eprintln err
-            skip "the documentation server could not bind its port"
-            return
-          let index ← httpReq r w "/index.html"
-          check (has index "200 OK") s!"GET /index.html: {index.take 200}"
-          check (has index "<title>") index
-          let page ← httpGet port "/Shapes.Basic.html"
-          check (has page "200 OK") s!"GET /Shapes.Basic.html: {page.take 200}"
-          checkHas page "<script type=\"module\" src=\"doc-live.js\"></script>"
-          checkHas page "id=\"wiz-doc-serve\""
-          checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
-          checkHas page "data-doc-line="
-          -- (the scripts the page imports are in the served tree)
-          checkHas (← httpGet port "/doc-live.js") "readGoalState"
-          checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
-          checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
-          -- (the module's source, for the client to open in the server)
-          let src ← httpGet port "/sources/Shapes.Basic.wiz"
-          check (has src "200 OK") s!"GET /sources: {src.take 200}"
-          checkHas src "structure Point"
-          -- (the landing and API pages stay static even when served)
-          check (!has (← httpGet port "/index.html") "doc-live.js") "the index carries the live client"
-          check (!has (← httpGet port "/api.html") "doc-live.js") "the API index carries the live client"
-          -- (no path escapes the generated tree)
-          check (has (← httpGet port "/../etc/passwd") "404") "a path above the site is served"
-        finally
-          try child.kill catch _ => pure () },
+        let rec go : Nat → IO Unit
+          | 0 => throw (IO.userError "wiz doc --serve: the server did not bind a port in three attempts")
+          | n + 1 => do
+            let port ← freePort
+            if ← attempt port then pure () else go n
+        go 3 },
     { name := "wiz doc --serve: --port and --lsp need --serve", run := fun _ => do
         let o ← IO.Process.output { cmd := ← wiz, args := #["doc", "lib/Prelude.wiz", "-o", "/tmp/wiz-doc-noserve", "--lsp", "8765"] }
         check (o.exitCode == 2) s!"exit {o.exitCode}"
