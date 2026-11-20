@@ -1235,10 +1235,11 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   let ctxJ := ctx.bind "j" .size
   let vJ := Val.var ctx.lvl
   let vF := scofixFunTy g l vI vD vA w
-  let vAfterJ := vApp g vF vJ
-  let vRecDom := match whnf vAfterJ with
-    | .pi _ _ _ dom _ _ => dom
-    | _ => panic! "scofix rec domain"
+  let .pi _ _ _ _ codJ _ := whnf vF
+    | panic! "scofix f type is not a pi"
+  let vAfterJ := Closure.inst g codJ vJ
+  let .pi _ _ _ vRecDom codR _ := whnf vAfterJ
+    | panic! "scofix rec type is not a pi"
   let recName : Name := name ++ "✝rec"
   let idxName : Name := "idx✝"
   let aName : Name := "a✝"
@@ -1246,8 +1247,10 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   let vRec := Val.var ctxJ.lvl
   let ctxJRI := ctxJR.bind idxName vI
   let vIdx := Val.var ctxJR.lvl
-  let vAfterRec := vApp g vAfterJ vRec
-  let vAfterIdx := vApp g vAfterRec vIdx
+  let vAfterRec := Closure.inst g codR vRec
+  let .pi _ _ _ _ codI _ := whnf vAfterRec
+    | panic! "scofix index type is not a pi"
+  let vAfterIdx := Closure.inst g codI vIdx
   let vStateBody := match whnf vAfterIdx with
     | .pi _ _ _ dom _ _ => dom
     | _ => panic! "scofix body state"
