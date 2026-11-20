@@ -28,7 +28,7 @@ def ScryAnalysis.report (r : Scry.G.IngestResult) : IO Unit := do
   | .false => Process.exit 1
 
 def ScryAnalysis.usage : IO Unit := do
-  IO.ePrintln "usage: scry-analysis DIR --graph FILE [--git] | scry-analysis --file FILE"
+  IO.ePrintln "usage: scry-analysis DIR --graph FILE [--git] | scry-analysis --file FILE";
   Process.exit 2
 
 def ScryAnalysis.runFile (file : String) : IO Unit := do
