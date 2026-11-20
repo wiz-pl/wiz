@@ -536,29 +536,105 @@ def Scry.Cs.errorKind (s : Scry.CstStore) (i : Nat) : String :=
   | .true => "MISSING " ++ Scry.CstStore.kindName s i
   | .false => "ERROR"
 
-/-- Parse and lower one file. `rel` is the path the report uses; `full` is read.
-A tree with `ERROR`/`MISSING` nodes is a failure (never lowered as if recovered); the
-row's location names the first failing node's position and kind. -/
-def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
+/-- A discovered file that has been parsed but not lowered. A project needs every file's
+declarations before the first body is lowered, so parsing and lowering are two passes. -/
+structure Scry.Cs.ParsedFile where
+  /-- The path the report uses (relative to the target root). -/
+  rel : String
+  text : String
+  /-- `none` when the file could not be read, could not be parsed, or a spill is bad. -/
+  cst : Option Scry.Cst
+  parseErrors : Nat
+  /-- The first `ERROR`/`MISSING` node's location, for the coverage row. -/
+  badLoc : String
+  /-- An IO or spill error (`""` when the file was read). -/
+  readError : String
+
+/-- Parse one file. `rel` is the path the report uses; `full` is read. A tree with
+`ERROR`/`MISSING` nodes is kept as a parse failure and is never lowered. -/
+def Scry.Cs.parseFile (rel full : String) : EIO Scry.Cs.ParsedFile := do
   text ← FS.readFile full;
   st ← Scry.Native.parse "c_sharp" text;
   let errs := Scry.Native.errorCount st;
   store ← EIO.lift (Scry.Native.toCstStoreIn "c_sharp" rel st);
-  match Nat.beq errs 0 with
-  | .true => do
-    let l := Scry.Cs.lowerCstWithModels Scry.csModels rel text (Scry.Cs.ofStore text store);
-    EIO.pure (Scry.Cs.resultOfLowered rel text l)
-  | .false => do
-    let pre := Scry.Preprocessed.plain rel text;
-    let loc := match Scry.CstStore.firstError store with
-      | .some i => let sp := Scry.CstStore.spanOf store i;
-        let pos := Scry.posOf pre sp.start;
-        rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
-          ++ " (" ++ Scry.Cs.errorKind store i ++ ")"
-      | .none => rel;
-    EIO.pure (Scry.Cs.FileResult.mk rel .false errs .nil text
-      [Scry.Cs.Diag.mk .error "parse failure" loc
-        (Nat.repr errs ++ " ERROR/MISSING node(s); the file was not lowered")])
+  let pre := Scry.Preprocessed.plain rel text;
+  let loc := match Scry.CstStore.firstError store with
+    | .some i => let sp := Scry.CstStore.spanOf store i;
+      let pos := Scry.posOf pre sp.start;
+      rel ++ ":" ++ Nat.repr pos.line ++ ":" ++ Nat.repr pos.col
+    | .none => rel;
+  EIO.pure (Scry.Cs.ParsedFile.mk rel text (.some (Scry.Cs.ofStore text store)) errs loc "")
+
+/-- A parsed file from a checked-in spill (the Lean tests' path: they cannot call the
+native shim). -/
+def Scry.Cs.parsedOfSpill (rel text spill : String) : Scry.Cs.ParsedFile :=
+  match Scry.CstStore.ofText spill with
+  | .error e => Scry.Cs.ParsedFile.mk rel text .none 1 rel e
+  | .ok s => Scry.Cs.ParsedFile.mk rel text (.some (Scry.Cs.ofStore text s)) 0 rel ""
+
+/-- A file whose parse deliberately failed (the test tree's invalid file). `msg` is the
+reason a native parse would give; the row is a `parse failure`, not an IO error. -/
+def Scry.Cs.parsedOfError (rel text msg : String) : Scry.Cs.ParsedFile :=
+  Scry.Cs.ParsedFile.mk rel text .none 1 rel ""
+
+partial def Scry.Cs.parseAll : List (String × String) → EIO (List Scry.Cs.ParsedFile)
+  | .nil => EIO.pure .nil
+  | .cons (rel, full) rest => do
+    r ← Scry.Cs.attempt (Scry.Cs.parseFile rel full);
+    let fr := match r with
+      | .ok x => x
+      | .error e => Scry.Cs.ParsedFile.mk rel "" .none 1 rel e;
+    rs ← Scry.Cs.parseAll rest;
+    EIO.pure (List.cons fr rs)
+
+/-- The files whose declarations a shared table may use: those that were read and
+parsed cleanly (a recovery tree's partial classes are not a symbol table). -/
+partial def Scry.Cs.unitsOf : List Scry.Cs.ParsedFile → List Scry.Cs.Unit
+  | .nil => .nil
+  | .cons p rest =>
+    let here : List Scry.Cs.Unit := match p.cst with
+      | .none => (.nil : List Scry.Cs.Unit)
+      | .some c => match Nat.beq p.parseErrors 0, String.isEmpty p.readError with
+        | .true, .true => .cons (Scry.Cs.scanUnit c) .nil
+        | _, _ => .nil;
+    List.append here (Scry.Cs.unitsOf rest)
+
+/-- The project's shared symbol table: every clean file's classes, enums and extension
+methods, merged (a `partial` class split across files becomes one class). -/
+def Scry.Cs.sharedOf (ps : List Scry.Cs.ParsedFile) : Scry.Cs.Unit :=
+  Scry.Cs.mergeUnits (Scry.Cs.unitsOf ps)
+
+/-- Sort discovered files by their display path, so the shared table's declaration order
+(and therefore a partial class's field order) does not depend on directory order. -/
+def Scry.Cs.insertPath (p : String × String) : List (String × String) → List (String × String)
+  | .nil => .cons p .nil
+  | .cons x rest => match String.lt p.1 x.1 with
+    | .true => .cons p (.cons x rest)
+    | .false => .cons x (Scry.Cs.insertPath p rest)
+
+def Scry.Cs.sortPaths (ps : List (String × String)) : List (String × String) :=
+  List.foldl (fun acc p => Scry.Cs.insertPath p acc) (.nil : List (String × String)) ps
+
+/-- One parsed file's result, lowered against the project's shared declarations. -/
+def Scry.Cs.lowerParsed (shared : Scry.Cs.Unit) (p : Scry.Cs.ParsedFile) :
+    Scry.Cs.FileResult :=
+  match String.isEmpty p.readError, p.cst with
+  | .false, _ => Scry.Cs.FileResult.mk p.rel .false 1 .nil p.text
+      [Scry.Cs.Diag.mk .error "unreadable file" p.rel p.readError]
+  | .true, .none => Scry.Cs.FileResult.mk p.rel .false p.parseErrors .nil p.text
+      [Scry.Cs.Diag.mk .error "parse failure" p.badLoc
+        (Nat.repr p.parseErrors ++ " ERROR/MISSING node(s); the file was not lowered")]
+  | .true, .some c => match Nat.beq p.parseErrors 0 with
+    | .false => Scry.Cs.FileResult.mk p.rel .false p.parseErrors .nil p.text
+        [Scry.Cs.Diag.mk .error "parse failure" p.badLoc
+          (Nat.repr p.parseErrors ++ " ERROR/MISSING node(s); the file was not lowered")]
+    | .true => Scry.Cs.resultOfLowered p.rel p.text
+        (Scry.Cs.lowerCstSharedWithModels Scry.csModels shared p.rel p.text c)
+
+/-- Parse and lower one file on its own (the single-file path). -/
+def Scry.Cs.analyseFile (rel full : String) : EIO Scry.Cs.FileResult := do
+  p ← Scry.Cs.parseFile rel full;
+  EIO.pure (Scry.Cs.lowerParsed (Scry.Cs.sharedOf (List.cons p .nil)) p)
 
 partial def Scry.Cs.analyseAll : List (String × String) → EIO (List Scry.Cs.FileResult)
   | .nil => EIO.pure .nil
@@ -914,6 +990,120 @@ def Scry.Cs.loadPack (rules : Option String) : EIO (Option (String × Scry.RuleP
       pack ← Scry.packFromText "scry/corpus/csharp/csharp.scry" text;
       EIO.pure (.some ("scry/corpus/csharp/csharp.scry", pack))
 
+-- ## Routing `scry taint` / `scry project` to the C# frontend
+
+/-- Where a `scry taint` invocation goes. `Scry.Cs.routeTaint` decides from the target
+(extension or a directory's contents) and `--lang`; `Scry.Cli` dispatches on it, since
+`Scry.CsCmd` imports `Scry.TaintCmd` (the rule engine lives there) and cannot be
+imported by it. -/
+inductive Scry.Cs.TaintRoute where
+  /-- The C pipeline, with `--lang` removed. -/
+  | c (args : List String)
+  /-- The C# driver (`Scry.Cs.run`), with the taint flags translated. -/
+  | csharp (args : List String)
+  /-- A usage error, already worded. -/
+  | usage (message : String)
+
+/-- Remove `--lang VALUE` from an argument list. -/
+partial def Scry.Cs.stripLang : List String → List String
+  | .nil => .nil
+  | .cons "--lang" (.cons _ rest) => Scry.Cs.stripLang rest
+  | .cons a rest => .cons a (Scry.Cs.stripLang rest)
+
+/-- Flags of the C `taint` pipeline that the C# driver has no counterpart for. They are
+refused, not ignored: silently dropping `--sarif` would make a CI job look like it wrote
+evidence it did not. -/
+def Scry.Cs.taintUnsupported : List String :=
+  ["--sarif", "--allow-errors", "--origin-map", "--diff", "--changed-lines",
+   "--diff-context", "--timeout", "--max-nodes", "--max-rounds"]
+
+partial def Scry.Cs.firstUnsupported (flags : List String) : List String → Option String
+  | .nil => .none
+  | .cons a rest => match String.elem a flags with
+    | .true => .some a
+    | .false => Scry.Cs.firstUnsupported flags rest
+
+/-- The `scry cs` arguments equivalent to parsed taint options: the target, `--rules`,
+`--json`, and `--fail-on-finding` as `--fail-on warning` (a C# finding is a rule
+severity, and a lowering warning is the boundary the C gate also counts). -/
+def Scry.Cs.csArgsOfTaint (o : Scry.TaintOpts) : List String :=
+  List.append [o.file]
+    (List.append (match o.rules with | .some p => ["--rules", p] | .none => [])
+      (List.append (match o.json with | .true => ["--json"] | .false => [])
+        (match o.failOnFinding with | .true => ["--fail-on", "warning"] | .false => [])))
+
+def Scry.Cs.csharpRoute (o : Scry.TaintOpts) (raw : List String) : Scry.Cs.TaintRoute :=
+  match Scry.Cs.firstUnsupported Scry.Cs.taintUnsupported raw with
+  | .some f => .usage ("scry taint on a C# target does not support " ++ f
+      ++ "; use scry cs " ++ o.file ++ " (see scry cs --help)")
+  | .none => .csharp (Scry.Cs.csArgsOfTaint o)
+
+/-- A target `Scry.Cs.discover` found is C#: a `.cs` file, a project or solution, or a
+directory whose walk keeps at least one `.cs` file. -/
+def Scry.Cs.isCSharpTarget (t : Scry.Cs.Target) : Bool :=
+  match t.kind with
+  | "file" => .true
+  | "directory" => match t.walk.files with
+    | .nil => .false
+    | _ => .true
+  | _ => .true
+
+/-- Route `scry taint ARGS`: `--lang cs` forces the C# driver, `--lang c` the C
+pipeline; otherwise `.cs`/`.csproj`/`.sln`/`.slnx` and a C#-bearing directory go to C#.
+A parse error in the flags goes to the C parser, which prints the usage message. -/
+def Scry.Cs.routeTaint (args : List String) : EIO Scry.Cs.TaintRoute := do
+  match Scry.taintArgs args with
+  | .error _ => EIO.pure (.c (Scry.Cs.stripLang args))
+  | .ok o => match o.lang with
+    | .some "cs" => EIO.pure (Scry.Cs.csharpRoute o args)
+    | .some "c" => EIO.pure (.c (Scry.Cs.stripLang args))
+    | _ => do
+      found ← Scry.Cs.attempt (Scry.Cs.discover o.file);
+      match found with
+      | .error _ => EIO.pure (.c (Scry.Cs.stripLang args))
+      | .ok t => match Scry.Cs.isCSharpTarget t with
+        | .true => EIO.pure (Scry.Cs.csharpRoute o args)
+        | .false => EIO.pure (.c (Scry.Cs.stripLang args))
+
+/-- Translate `scry project` flags after the target into `scry cs` flags. `--json`,
+`--rules FILE`, `--taint`, `--fail-on-finding` and `--no-taint` are known; anything else
+is refused, because a silently dropped `--sarif` or `--compdb` would claim evidence the
+C# driver never wrote. -/
+partial def Scry.Cs.projectCsArgs (target : String) (out : List String) :
+    List String → Except String (List String)
+  | .nil => .ok (List.append [target] (List.reverse out))
+  | .cons a rest => match a with
+    | "--json" => Scry.Cs.projectCsArgs target (List.cons "--json" out) rest
+    | "--taint" => Scry.Cs.projectCsArgs target out rest
+    | "--no-taint" => Scry.Cs.projectCsArgs target (List.cons "--no-taint" out) rest
+    | "--fail-on-finding" =>
+      Scry.Cs.projectCsArgs target (List.cons "warning" (List.cons "--fail-on" out)) rest
+    | "--rules" => match rest with
+      | .cons p more => Scry.Cs.projectCsArgs target (List.cons p (List.cons "--rules" out)) more
+      | .nil => .error ("--rules needs a FILE\n" ++ Scry.Cs.usage)
+    | _ => .error ("scry project on a C# target does not support " ++ a
+        ++ "; use scry cs " ++ target ++ " (see scry cs --help)")
+
+/-- `scry project` on a C# target runs the same driver. `PROJECT ARGS` is the project
+command's arguments; the target, `--json`, `--rules FILE` and `--fail-on-finding` (as
+`--fail-on warning`) carry over, and every other C-project flag is refused rather than
+dropped. `.c` means "not a C# target" and the caller keeps the C project path. -/
+def Scry.Cs.routeProject (args : List String) : EIO Scry.Cs.TaintRoute := do
+  let target := match args with
+    | .cons a _ => a
+    | .nil => "";
+  match String.isEmpty target with
+  | .true => EIO.pure (.c args)
+  | .false => do
+    found ← Scry.Cs.attempt (Scry.Cs.discover target);
+    match found with
+    | .error _ => EIO.pure (.c args)
+    | .ok t => match Scry.Cs.isCSharpTarget t with
+      | .false => EIO.pure (.c args)
+      | .true => match Scry.Cs.projectCsArgs target (.nil : List String) (List.drop 1 args) with
+        | .ok cs => EIO.pure (.csharp cs)
+        | .error m => EIO.pure (.usage m)
+
 /-- Try an `EIO` action, keeping its failure as a value (the driver must not abort a
 whole tree on one file). -/
 def Scry.Cs.say (s : String) : EIO Unit := EIO.lift (IO.println s)
@@ -947,7 +1137,9 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
       Scry.Cs.sayErr ("scry cs: " ++ e);
       EIO.pure (Scry.Cs.statusOf .usage)
     | .ok t => do
-      results ← Scry.Cs.analyseAll t.walk.files;
+      parsed ← Scry.Cs.parseAll (Scry.Cs.sortPaths t.walk.files);
+      let shared := Scry.Cs.sharedOf parsed;
+      let results := List.map (Scry.Cs.lowerParsed shared) parsed;
       pack ← match opts.taint with
         | .false => EIO.pure ((.ok .none) : Except String (Option (String × Scry.RulePack)))
         | .true => Scry.Cs.attempt (Scry.Cs.loadPack opts.rules);

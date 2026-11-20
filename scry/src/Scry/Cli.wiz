@@ -63,7 +63,10 @@ def Scry.usage : String :=
   ++ "              [--fail-on-finding] [--origin-map] [--progress]\n"
   ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
+  ++ "              [--lang auto|c|cs]\n"
   ++ "                             C -> Wil -> taint -> findings/SARIF\n"
+  ++ "                             a .cs file, .csproj, .sln/.slnx or a C#-bearing\n"
+  ++ "                             directory runs the scry cs pipeline instead\n"
   ++ "                             (default limits: 300 s, 2 000 000 nodes)\n"
   ++ "  limits: default --timeout 300 --max-nodes 2000000; 0 disables a limit.\n"
   ++ "  A truncated fixpoint is reported as scry/budget/* and \"truncated\": true.\n"
@@ -318,11 +321,21 @@ def Scry.dispatchGo (args : List String) : EIO Nat := match args with
   | .cons "parse" rest => Scry.parseCmd rest
   | .cons "project" rest => match rest with
     | .cons "query" more => Scry.ProjectIO.run .true more
-    | _ => Scry.ProjectIO.run .false rest
+    | _ => do
+      route ← Scry.Cs.routeProject rest;
+      match route with
+      | .c args => Scry.ProjectIO.run .false args
+      | .csharp args => Scry.Cs.run args
+      | .usage m => EIO.fail m
   | .cons "cst" rest => match rest with
     | .cons file (.cons out .nil) => Scry.cstCmd file out
     | _ => EIO.fail "usage: scry cst FILE OUT"
-  | .cons "taint" rest => Scry.taintCmd rest
+  | .cons "taint" rest => do
+    route ← Scry.Cs.routeTaint rest;
+    match route with
+    | .c args => Scry.taintCmd args
+    | .csharp args => Scry.Cs.run args
+    | .usage m => EIO.fail m
   | .cons "dynamic" rest => Scry.dynCmd rest
   | .cons "bench" rest => Scry.benchCmd rest
   | .cons "repl" rest => Scry.replCmd rest

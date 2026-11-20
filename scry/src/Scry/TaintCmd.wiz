@@ -107,6 +107,10 @@ structure Scry.TaintOpts where
   /-- The external-function model pack. The default is `Scry.defaultModels`; a caller
   (a test or a future `--models` flag) can pass another pack without changing the CLI. -/
   models : Scry.ModelPack
+  /-- `--lang auto|c|cs`: force the front end instead of choosing by the target's
+  extension (`auto`, the default, sends `.cs`/`.csproj`/`.sln`/`.slnx` and a C#-bearing
+  directory to the C# driver and everything else to C). -/
+  lang : Option String
 
 /-- The defaults are a **contract**, not an accident: a single file is analysed under a
 300 s wall-clock limit and a 2 M-node CST cap, so an unexpectedly large input produces a
@@ -114,7 +118,7 @@ clear refusal instead of an unbounded run. `--timeout 0` and `--max-nodes 0` dis
 the respective limit. -/
 def Scry.emptyTaintOpts (file : String) : Scry.TaintOpts :=
   Scry.TaintOpts.mk file .none .none .false .false .false .false .false .none .none .none
-    (.some 300) (.some 2000000) .none .false Scry.defaultModels
+    (.some 300) (.some 2000000) .none .false Scry.defaultModels .none
 
 /-- The budget view of the options (`--progress` is included there too). -/
 def Scry.TaintOpts.toBudget (o : Scry.TaintOpts) : Scry.RunBudget :=
@@ -172,7 +176,10 @@ def Scry.taintUsage : String :=
   ++ "                      [--null-deref]\n"
   ++ "                      [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "                      [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
-  ++ "                      [--progress]\n"
+  ++ "                      [--progress] [--lang auto|c|cs]\n"
+  ++ "  A .cs file, .csproj, .sln/.slnx or a directory containing .cs files is analysed\n"
+  ++ "  by the C# driver (scry cs): --rules and --json are supported, --fail-on-finding\n"
+  ++ "  becomes --fail-on warning, and C-only flags are refused with a pointer to scry cs.\n"
   ++ "  limits: default --timeout 300 --max-nodes 2000000; 0 disables a limit.\n"
   ++ "  A truncated fixpoint is reported as scry/budget/* and \"truncated\": true.\n"
 
@@ -222,6 +229,14 @@ partial def Scry.taintArgsGo (file : Option String) (o : Scry.TaintOpts) :
         | .none => .error ("--diff-context needs a number, not \"" ++ p ++ "\"")
       | .nil => .error "--diff-context needs a number"
     | "--progress" => Scry.taintArgsGo file { o with progress := .true } rest
+    | "--lang" => match rest with
+      | .cons v more => match v with
+        | "auto" => Scry.taintArgsGo file { o with lang := .none } more
+        | "c" => Scry.taintArgsGo file { o with lang := .some "c" } more
+        | "cs" => Scry.taintArgsGo file { o with lang := .some "cs" } more
+        | "csharp" => Scry.taintArgsGo file { o with lang := .some "cs" } more
+        | _ => .error ("--lang needs auto, c or cs, not \"" ++ v ++ "\"\n" ++ Scry.taintUsage)
+      | .nil => .error ("--lang needs auto, c or cs\n" ++ Scry.taintUsage)
     | "--help" => .error Scry.taintUsage
     | _ => match String.startsWith a "--" with
       | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.taintUsage)

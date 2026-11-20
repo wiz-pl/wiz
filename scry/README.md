@@ -59,11 +59,14 @@ grail run scry -- egraph fixtures/egraph-const.c --rewrite
 
 Commands: `facts`, `query --kind|--edge|--edge-src|--rel`, `explain`, `parse --stats` (a C source,
 a `scry-cst` spill, or a JSON store), `cst` (JSON store → spill), `taint` (C →
-Wil → taint → findings/SARIF), `dynamic` (compile/run under ASAN/UBSAN/coverage and
+Wil → taint → findings/SARIF; a `.cs` file, `.csproj`, `.sln`/`.slnx` or a directory
+containing `.cs` files dispatches to the C# driver, `--lang cs|c` forces it), `dynamic` (compile/run under ASAN/UBSAN/coverage and
 correlate with the static findings), `bench` (run the checked-in taint corpus and compare
 findings with its manifest), `project` (a `compile_commands.json` multi-file C project:
-cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache), `cs` (a
-directory, `.csproj` or `.sln`/`.slnx` of C#: one summary with a coverage section),
+cross-TU call graph, project EDB, per-file findings/SARIF and a TU cache; a C# target is
+routed to the same driver as `scry cs`), `cs` (a
+directory, `.csproj` or `.sln`/`.slnx` of C#: one shared symbol table and a summary with
+a coverage section),
 `report`
 (one self-contained HTML page of the taint evidence), `fuzz-span` (map a fuzz artifact
 to CST spans for the dynamic-evidence report), `repl` (the Wiz REPL with `Scry.Repl`
@@ -208,6 +211,14 @@ grail run scry -- taint FILE.c --rules ../lib/Scry/rules/default.scry --sarif ou
 grail run scry -- taint FILE.c --json --allow-errors
 grail run scry -- taint FILE.c --fail-on-finding
 ```
+
+A **C# target** (a `.cs` file, `.csproj`, `.sln`/`.slnx`, or a directory containing
+`.cs` files, or anything with `--lang cs`) dispatches to the `scry cs` driver instead:
+one shared symbol table across the tree, the C# lowering and the C# rule pack. `--rules`
+and `--json` carry over, `--fail-on-finding` becomes `--fail-on warning`, and C-only
+flags (`--sarif`, `--diff`, `--timeout`, …) are refused with a pointer to `scry cs`.
+`--lang c` forces the C pipeline. `scry project` routes a C# target through the same
+driver (see `CSHARP.md` §12).
 
 The stages are: parse with the vendored tree-sitter shim (S1) and build the
 `Scry.CstStore`; lower the translation unit with `Scry.Lower` (S2), whose `Wil.Stmt`/

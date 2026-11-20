@@ -1368,3 +1368,143 @@ majority), extension methods called through `HttpContext`/`this` (the 63
 `HttpContext.RequireAuthenticatedCaller` sites), unknown-receiver user extensions,
 constructors and setters — the classes §9 left out. They are coverage rows, not taint
 facts.
+
+## 12. One symbol table per project, and extension methods
+
+`scry cs` already walked a directory, `.csproj` or `.sln`/`.slnx` (§8), but each file
+was lowered against **its own** declarations and the functions were only concatenated
+before the rule engine ran. A call to a helper class declared in another file therefore
+had no callee: `Sink.Run(a)` stayed an external call instead of the lowered function
+`Project.Sink.Run`, and `x.Exec()` never reached a static class's extension method. The
+fix is a two-pass loader and an extension-method index. `scry taint` and `scry project`
+now reach the same driver, so there is one path to the C# frontend.
+
+### 12.1 The loader
+
+```
+discover (directory | .csproj | .sln/.slnx | one .cs)     -- Scry.Cs.discover (§8)
+  -> sort the discovered (relative, full) paths             -- Scry.Cs.sortPaths
+  -> parse every file                                      -- Scry.Cs.parseFile
+  -> scan its declarations, without lowering               -- Scry.Cs.scanUnit
+  -> merge them into one Unit                              -- Scry.Cs.mergeUnits
+  -> lower every file against that shared Unit             -- Scry.Cs.lowerCstShared
+  -> concatenate the functions, run the rule pack          -- unchanged §8 pipeline
+```
+
+* **Shared:** `classes` (merged by qualified name, so one `partial` class split across
+  files is one class with all its fields and methods), `enums` and their values,
+  extension methods, and the union of the files' `using` directives. The union is used
+  only to canonicalise the merged declarations.
+* **Per file:** the file's own `using` directives. A declaration's canonical type is
+  fixed once for the project; what a file may *refer to* stays its own business. The
+  single-file path (`Scry.Cs.programOf`, `Scry.Cs.lowerCst`) is unchanged: it builds a
+  one-file table and lowers against it.
+* **Order:** discovered paths are sorted before the merge, so a partial class's field
+  order (and therefore its lowered field indices) does not depend on directory order.
+* **Broken files:** a file with `ERROR`/`MISSING` nodes, or one that cannot be read,
+  contributes no declarations and is a `parse failure` / `unreadable file` row, exactly
+  as before. A recovery tree's half-parsed classes are not put in the symbol table.
+* **What this fixes:** a call to a static or instance method of a class in another file
+  now names the function that file lowered (`Ns.Helper.M`), so the direct-call summary
+  connects; an inherited call resolves through `base_list` to the declaring class.
+* **Still not interpreted:** `<Compile Remove=`, `EnableDefaultCompileItems` and
+  `ImplicitUsings` (§8), and `global using` in another file. Those change which files or
+  names are in scope, not the table this loader builds.
+
+### 12.2 The extension index
+
+A `static` method whose first parameter has the `this` modifier is indexed by its
+receiver type (`Scry.Cs.extsOfClass`, merged by `Scry.Cs.mergeUnits`):
+
+```
+public static void Exec(this string cmd) { … }          ->  recv "System.String", generic false
+public static T Identity<T>(this T x) { … }             ->  recv "T",            generic true
+```
+
+`x.M(args)` resolves in `Scry.Cs.instanceCall` in this order:
+
+1. a method of the receiver's class (walking `base_list`), lowered as
+   `DeclaringClass.M(x, args)`;
+2. an extension with an **exact** receiver-type match, lowered as `ExtClass.M(x, args)`
+   (the receiver is parameter 0, the same convention as an instance method);
+3. a **generic** extension (`this T`), matched only when the receiver type is known
+   (`?` never matches, so an unknown receiver stays an external call);
+4. the external convention `T.M(x, args)` with a `knownRet` result.
+
+So `string s = Input.Read(); s.Exec();` calls the extension's function, and a sink in
+its body is on the taint path. `s.Count(1)` resolves to the unit's `ShellExtensions.Count`
+(the non-sink method) rather than a wildcard external. Same-named extensions are not
+disambiguated by namespace or generic constraints, like the frontend's overload policy;
+the exact receiver type is the one real selector.
+
+### 12.3 `scry taint` and `scry project` on a C# target
+
+`scry taint PATH` now dispatches:
+
+* `--lang cs` (also `csharp`) forces the C# driver;
+* `--lang c` forces the C pipeline;
+* otherwise a `.cs` file, `.csproj`, `.sln`/`.slnx`, or a directory whose walk keeps at
+  least one `.cs` file goes to the C# driver; anything else to C.
+
+The C# driver accepts `--rules FILE`, `--json` and `--fail-on-finding` from the taint
+argument list. `--fail-on-finding` becomes `--fail-on warning` (a finding is a rule
+severity, and a lowering warning is the boundary the C gate also counts). Flags the C
+pipeline alone implements (`--sarif`, `--diff`, `--changed-lines`, `--allow-errors`,
+`--origin-map`, `--timeout`, `--max-nodes`, `--max-rounds`) are **refused** with a
+pointer to `scry cs`: silently ignoring `--sarif` would make a CI job look like it wrote
+evidence it did not.
+
+`scry project PATH` uses the same routing: a C# file, project, solution or C#-bearing
+directory runs the `scry cs` driver; `--json`, `--rules FILE`, `--taint` and
+`--fail-on-finding` carry over, and a C-project flag (`--compdb`, `--cc`, `--facts`,
+`--sarif`, `--cache`, …) is refused with the same pointer. A C target keeps the C project
+path unchanged.
+
+```
+scry taint src/                          # a C# tree -> scry cs src/
+scry taint src/ --lang cs --json         # explicit
+scry taint src/App.cs --rules pack.scry  # one file
+scry taint main.c                        # C, unchanged
+scry project src/                        # the same C# tree through scry cs
+scry project DIR --compdb build/         # C, unchanged
+```
+
+### 12.4 Fixture and tests
+
+`scry/corpus/csharp/project/` is four files with checked-in spills: `Input.cs` (the
+`Console.ReadLine` source helper), `Sink.cs` (a helper calling `Process.Start`), `Ext.cs`
+(`Exec(this string)` with a sink, `Count(this string, int)` without one, and generic
+`Identity<T>(this T)`), and `Program.cs` (entry points calling across them). The
+`scry-csharp` group checks:
+
+* the shared lowering fires `command-injection` for the source in `Input.cs` reaching the
+  sink in `Sink.cs`, and for the extension's body;
+* `Program.cs` lowered **alone** has no finding (the shared table is the difference);
+* `Program.Main`'s text names `Project.Input.Read` and `Project.Sink.Run`;
+  `Program.Run` names `Project.ShellExtensions.Exec`, while `Program.Safe` names
+  `Project.ShellExtensions.Count` and no `Exec`;
+* the taint → `scry cs` flag translation and the refusal path, with no file system.
+
+### 12.5 Measured before/after
+
+On a private 75-file C# project (the same tree through the single-file lowering and the
+shared table, both with the C# rule pack):
+
+| | before (single file) | after (shared table) |
+|---|---|---|
+| files kept / parsed / with functions | 75 / 75 / 58 | 75 / 75 / 58 |
+| functions | 240 | 240 |
+| lowering warnings | 530 | 530 |
+| memory diagnostics | 4 087 | 3 808 |
+| — `unmodelled-external` | 4 028 | 3 267 |
+| — `unknown-memory` | 59 | 541 |
+| findings | 0 | 0 |
+
+The lowering rows are unchanged: the shared table changes which function a call names,
+not how a body lowers. The memory rows move because 761 calls that were
+`unmodelled-external` (an external call with a pointer result/argument and no model) now
+reach a lowered function, so the analysis sees the call's shape; 482 of those produce an
+`unknown-memory` row at a load/store whose target it still cannot bound. The net is 279
+fewer diagnostics, not a new class of warning. No finding appears or disappears on this
+tree; the four-file fixture in §12.4 is the positive control (0 → 2 findings, and
+`unmodelled-external` 10 → 4).

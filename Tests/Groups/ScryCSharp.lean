@@ -35,6 +35,11 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   instance helper method (interprocedural parameter/return flow), and
   `taint/cwe78-switch-unsafe` shows a `case string command:` binding (and a
   `string command =>` arm binding) carrying the sink on the label's true edge.
+* **Project fixture**: `project/` is four files lowered with **one** shared symbol table
+  (a source helper, a sink helper, extension methods and the entry points). The cases
+  check that a source in one file reaches a sink in another, that `x.Ext()` resolves to
+  the static extension class, that the same file lowered alone has no finding, and that
+  `scry taint` translates its flags to the `scry cs` driver.
 
 A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the actual
 text over the expected file **and still fails the case**, so a regenerated golden is
@@ -142,7 +147,8 @@ def fixtures : List (String × String) :=
    ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe"), ("taint", "cwe78-await-unsafe"),
    ("taint", "cwe78-lambda-unsafe"), ("taint", "cwe78-bcl-unsafe"),
-   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe")]
+   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe"),
+   ("project", "Input"), ("project", "Sink"), ("project", "Ext"), ("project", "Program")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -286,6 +292,84 @@ def taintUnmodelled (name : String) : IO (List String) := do
     pure (if ns.isEmpty then [] else ns.splitOn "|")
   | ms => throw (IO.userError s!"expected one #eval message, got {ms}")
 
+/-! ## The cross-file project fixture
+
+`scry/corpus/csharp/project/` is four files lowered with **one** shared symbol table
+(`Scry.Cs.sharedOf` + `Scry.Cs.lowerCstShared`): `Input.cs` holds the source helper,
+`Sink.cs` the sink helper, `Ext.cs` two string extension methods and a generic one, and
+`Program.cs` the entry points that call across the files. The spills are checked in, so
+the case needs no native build. -/
+
+def projectFiles : List String := ["Input", "Sink", "Ext", "Program"]
+
+def projectDefs : IO String := do
+  let mut defs := ""
+  let mut parsed : List String := []
+  for f in projectFiles do
+    let src ← IO.FS.readFile s!"scry/corpus/csharp/project/{f}.cs"
+    let spill ← IO.FS.readFile s!"scry/corpus/csharp/project/{f}.cst"
+    defs := defs ++ s!"def projText{f} : String := {wizStr src}\n"   -- complexity: ok (four project files)
+    defs := defs ++ s!"def projSpill{f} : String := {wizStr spill}\n"   -- complexity: ok (four project files)
+    parsed := parsed ++ [s!"  Scry.Cs.parsedOfSpill \"{f}.cs\" projText{f} projSpill{f}"]   -- complexity: ok (four project files)
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  pure (defs ++
+    s!"def projParsed : List Scry.Cs.ParsedFile := [\n{",\n".intercalate parsed}]\n" ++
+    "def projShared : Scry.Cs.Unit := Scry.Cs.sharedOf projParsed\n" ++
+    "def projResults : List Scry.Cs.FileResult := List.map (Scry.Cs.lowerParsed projShared) projParsed\n" ++
+    "def projFuncs : List Wil.Func := List.concat (List.map (fun r => r.funcs) projResults)\n" ++
+    s!"def projPack : Scry.RulePack := Scry.RulePack.withModels (Scry.parseRulePack {wizStr pack})\n" ++
+    "def projLine (f : Scry.RuleFinding) : String := f.rule ++ \" \" ++ f.func ++ \" \" ++ f.name ++ \" arg \" ++ Nat.repr f.arg\n" ++
+    "def projFunc (n : String) : String := match List.find (fun (f : Wil.Func) => String.eq f.name n) projFuncs with\n" ++
+    "  | .some f => Scry.Cs.funcText f\n" ++
+    "  | .none => \"missing function \" ++ n\n")
+
+/-- The shared lowering's findings, one `rule func arg` line each. -/
+def projectFindings : IO (List String) := do
+  let body ← projectDefs
+  match ← runProbe csCmdImports (body ++
+      "#eval String.intercalate \"|\" (List.map projLine (Scry.programFindings (Scry.analyze (Wil.program projFuncs) projPack)))\n") with
+  | [fs] => let fs := unquote fs; pure (if fs.isEmpty then [] else fs.splitOn "|")
+  | ms => throw (IO.userError s!"project findings: expected one #eval message, got {ms}")
+
+/-- One shared-lowered function's text (the lowering's own renderer). -/
+def projectFunction (name : String) : IO String := do
+  let body ← projectDefs
+  match ← runProbe csCmdImports (body ++ s!"#eval projFunc {wizStr name}\n") with
+  | [m] => pure (unquote m)
+  | ms => throw (IO.userError s!"project function {name}: expected one #eval message, got {ms}")
+
+def contains (hay needle : String) : Bool := (hay.splitOn needle).length > 1
+
+/-- `Program.cs` lowered **alone**: its calls to another file's helper have no callee and
+the sink is in another file, so the same source → sink flow cannot be seen. -/
+def projectIsolatedFindings : IO (List String) := do
+  let src ← IO.FS.readFile "scry/corpus/csharp/project/Program.cs"
+  let spill ← IO.FS.readFile "scry/corpus/csharp/project/Program.cst"
+  let pack ← IO.FS.readFile "scry/corpus/csharp/csharp.scry"
+  let body := fixtureDefs src spill ++
+    s!"def pack : Scry.RulePack := Scry.parseRulePack {wizStr pack}\n" ++
+    "def prog : Wil.Program := Scry.Cs.programOf \"Program.cs\" src spill\n" ++
+    "def line (f : Scry.RuleFinding) : String := f.rule ++ \" \" ++ f.func ++ \" \" ++ f.name ++ \" arg \" ++ Nat.repr f.arg\n" ++
+    "#eval String.intercalate \"|\" (List.map line (Scry.programFindings (Scry.analyze prog pack)))\n"
+  match ← runProbe csCmdImports body with
+  | [fs] => let fs := unquote fs; pure (if fs.isEmpty then [] else fs.splitOn "|")
+  | ms => throw (IO.userError s!"isolated findings: expected one #eval message, got {ms}")
+
+/-- The `scry taint` → `scry cs` translation, without the file system: `--lang` is
+stripped for the C path, `--fail-on-finding` becomes `--fail-on warning`, and a
+C-only flag is refused rather than silently dropped. -/
+def routeTranslation : IO (List String) := do
+  let body :=
+    "#eval String.intercalate \" \" (Scry.Cs.stripLang [\"x.c\", \"--lang\", \"c\", \"--json\"])\n" ++
+    "#eval match Scry.taintArgs [\"src\", \"--lang\", \"cs\", \"--rules\", \"p.scry\", \"--json\", \"--fail-on-finding\"] with\n" ++
+    "  | .ok o => String.intercalate \" \" (Scry.Cs.csArgsOfTaint o)\n" ++
+    "  | .error e => \"error: \" ++ e\n" ++
+    "#eval match Scry.Cs.firstUnsupported Scry.Cs.taintUnsupported [\"src\", \"--sarif\", \"out.sarif\"] with\n" ++
+    "  | .some f => f\n" ++
+    "  | .none => \"none\"\n"
+  match ← runProbe "import Scry.CsCmd\n" body with
+  | ms => pure (ms.map unquote)
+
 /-! ## The `scry cs` fixture tree
 
 `scry/corpus/csharp/repo/` is a small tree with two excluded directories and three
@@ -327,13 +411,15 @@ def repoDefs (files : List (String × String)) : IO String := do
     match spill? with
     | some spill =>
       defs := defs ++ s!"def repoSpill{i} : String := {wizStr spill}\n"   -- complexity: ok (test helper: one chunk per fixture file)
-      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (Scry.Cs.frontend {wizStr rel} repoText{i} repoSpill{i})"]   -- complexity: ok (test helper: one row per fixture file)
+      entries := entries ++ [s!"  Scry.Cs.parsedOfSpill {wizStr rel} repoText{i} repoSpill{i}"]   -- complexity: ok (test helper: one row per fixture file)
     | none =>
-      entries := entries ++ [s!"  Scry.Cs.resultOfFront {wizStr rel} (.err \"no spill: the native parse rejects this file (invalid C#, or a known grammar gap; CSHARP.md §8.2)\")"]   -- complexity: ok (test helper: one row per fixture file)
+      entries := entries ++ [s!"  Scry.Cs.parsedOfError {wizStr rel} repoText{i} \"no spill: the native parse rejects this file (invalid C#, or a known grammar gap; CSHARP.md §8.2)\""]   -- complexity: ok (test helper: one row per fixture file)
     i := i + 1
   let paths := "[" ++ ", ".intercalate (files.map fun (r, _) => s!"({wizStr r}, {wizStr r})") ++ "]"
   pure (defs ++ s!"def repoPaths : List (String × String) := {paths}\n"
-    ++ s!"def repoResults : List Scry.Cs.FileResult := [\n{",\n".intercalate entries}]\n")
+    ++ s!"def repoParsed : List Scry.Cs.ParsedFile := [\n{",\n".intercalate entries}]\n"
+    ++ "def repoShared : Scry.Cs.Unit := Scry.Cs.sharedOf repoParsed\n"
+    ++ "def repoResults : List Scry.Cs.FileResult := List.map (Scry.Cs.lowerParsed repoShared) repoParsed\n")
 
 /-- The tree's report, built by the same functions `scry cs` calls. -/
 def repoBody (files : List (String × String)) : IO String := do
@@ -579,7 +665,33 @@ def group : Group where
     { name := "taint: CWE-78 through a modelled BCL call (Process.get_StartInfo -> set_Arguments)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-bcl-unsafe"
-        checkEq ["command-injection Fixtures.BclShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
+        checkEq ["command-injection Fixtures.BclShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "project: one symbol table across files, the source in one file and the sink in another fire",
+      run := fun _ => do
+        let expected := ["command-injection Project.ShellExtensions.Exec System.Diagnostics.Process.Start arg 1",
+          "command-injection Project.Sink.Run System.Diagnostics.Process.Start arg 1"]
+        let found ← projectFindings
+        checkEq (expected.toArray.qsort (fun a b => a < b)).toList
+          (found.toArray.qsort (fun a b => a < b)).toList
+        let main ← projectFunction "Project.Program.Main"
+        checkEq true (contains main "call Project.Input.Read")
+        checkEq true (contains main "call Project.Sink.Run") },
+    { name := "project: Program.cs lowered alone has no cross-file finding (the shared table is the difference)",
+      run := fun _ => do
+        let fs ← projectIsolatedFindings
+        checkEq ([] : List String) fs },
+    { name := "extension methods: x.Exec() is the static ShellExtensions.Exec(x); x.Count(1) is not a sink",
+      run := fun _ => do
+        let run ← projectFunction "Project.Program.Run"
+        checkEq true (contains run "call Project.ShellExtensions.Exec")
+        let safe ← projectFunction "Project.Program.Safe"
+        checkEq true (contains safe "call Project.ShellExtensions.Count")
+        checkEq false (contains safe "Exec") },
+    { name := "taint: --lang is stripped, --fail-on-finding maps to --fail-on warning, a C-only flag is refused",
+      run := fun _ => do
+        let ms ← routeTranslation
+        checkEq ["x.c --json",
+          "src --rules p.scry --json --fail-on warning", "--sarif"] ms }
   ]
 
 builtin_initialize registerGroup group

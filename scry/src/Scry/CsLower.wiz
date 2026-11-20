@@ -185,7 +185,25 @@ structure Scry.Cs.Cls where
 
 def Scry.Cs.Cls.empty : Scry.Cs.Cls := Scry.Cs.Cls.mk "" "" .nil .nil .nil .nil .false 0 ""
 
-/-- What every function of the unit sees. -/
+/-- A C# extension method: a `static` method whose first parameter is `this T`. `recv` is
+the receiver type (canonicalised against the unit's `using` directives); `cls` is the
+qualified name of the static class that declares it, so `x.Ext(args)` lowers to the
+direct call `cls.Ext(x, args)` (the receiver is parameter 0, like an instance method).
+`generic` marks `T Id<T>(this T x)`, whose receiver is one of the method's own type
+parameters and therefore matches any receiver type. -/
+structure Scry.Cs.Ext where
+  recv : String
+  cls : String
+  name : String
+  ret : String
+  /-- Declared parameters, including `this`. -/
+  arity : Nat
+  generic : Bool
+
+/-- What every function of the unit sees. A project loader merges the `classes`,
+`enums` and `exts` of every file (`Scry.Cs.mergeUnits`) and leaves `usings` per file:
+the `using` directives are what a file may refer to, while a declaration's canonical
+type is fixed once for the project. -/
 structure Scry.Cs.Unit where
   classes : List Scry.Cs.Cls
   enums : List String
@@ -196,6 +214,8 @@ structure Scry.Cs.Unit where
   guessed. -/
   enumVals : List (String × String × Nat)
   usings : List String
+  /-- Static methods with a `this` first parameter, by receiver type. -/
+  exts : List Scry.Cs.Ext
 
 /-- A local variable: its register, canonical C# type, and the unit method it was
 initialised from when it holds a method-group value (a known delegate target). -/
@@ -321,6 +341,23 @@ partial def Scry.Cs.methodOwner (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) (m : String
       | .true => .none
       | .false => Scry.Cs.methodOwner u b m
     | .none => .none
+
+/-- The extension method named `m` for a receiver of type `t`: an exact receiver-type
+match first, then a generic one (`this T`). `?` (an unknown receiver) never matches: the
+call stays an external call, because binding it to an arbitrary generic extension would
+connect unrelated code. Same-named candidates are not disambiguated beyond this, like
+the frontend's overload policy. -/
+def Scry.Cs.findExt (u : Scry.Cs.Unit) (t m : String) : Option Scry.Cs.Ext :=
+  match List.find (fun e => Bool.and (String.eq e.name m) (String.eq e.recv t)) u.exts with
+  | .some e => .some e
+  | .none => match String.eq t "?" with
+    | .true => .none
+    | .false => List.find (fun e => Bool.and (String.eq e.name m) e.generic) u.exts
+
+/-- Canonicalise an extension method's receiver and return type once the unit is known. -/
+def Scry.Cs.canonExt (u : Scry.Cs.Unit) (e : Scry.Cs.Ext) : Scry.Cs.Ext :=
+  { e with recv := Scry.Cs.canon u Scry.Cs.Cls.empty e.recv,
+           ret := Scry.Cs.canon u Scry.Cs.Cls.empty e.ret }
 
 /-- Split `Ns.Type.Method` at the last `.` (the class name may itself contain dots). -/
 def Scry.Cs.splitLast (s : String) : Option (String × String) :=
@@ -1063,16 +1100,23 @@ partial def Scry.Cs.callByName (c : Scry.Cst) (n : Nat) (s : Scry.Cs.LS) (m : St
     | .none => Scry.Cs.ownCall c n s m
   | .none => Scry.Cs.ownCall c n s m
 
-/-- An instance call `T.m(recv, args)`: a unit method when `T` is a class of the unit. -/
+/-- An instance call `T.m(recv, args)`: a unit method when `T` is a class of the unit
+(named by the class that declares it, so an inherited method resolves through
+`base_list`), an indexed extension method when `T.m` is one (`recv` is parameter 0),
+else the external convention `T.m(recv, args)`. -/
 partial def Scry.Cs.instanceCall (c : Scry.Cst) (n : Nat) (recv : Scry.Cs.EV) (m : String) :
     Scry.Cs.M Scry.Cs.EV := do
   s ← Scry.Cs.st;
-  let ret : String := match Scry.Cs.findCls s.unit recv.ty with
-    | .some k => match Scry.Cs.methodOwner s.unit k m with
-      | .some om => om.2.ret
-      | .none => "?"
-    | .none => Scry.Cs.knownRet (recv.ty ++ "." ++ m);
-  Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) [recv.v] ret
+  match Scry.Cs.findCls s.unit recv.ty with
+  | .some k => match Scry.Cs.methodOwner s.unit k m with
+    | .some om => Scry.Cs.finishCall c n (om.1.qname ++ "." ++ m) (List.cons recv.v .nil) om.2.ret
+    | .none => match Scry.Cs.findExt s.unit recv.ty m with
+      | .some e => Scry.Cs.finishCall c n (e.cls ++ "." ++ e.name) (List.cons recv.v .nil) e.ret
+      | .none => Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) (List.cons recv.v .nil) "?"
+  | .none => match Scry.Cs.findExt s.unit recv.ty m with
+    | .some e => Scry.Cs.finishCall c n (e.cls ++ "." ++ e.name) (List.cons recv.v .nil) e.ret
+    | .none => Scry.Cs.finishCall c n (recv.ty ++ "." ++ m) (List.cons recv.v .nil)
+        (Scry.Cs.knownRet (recv.ty ++ "." ++ m))
 
 /-- A method group: the function value of a unit method. The name is the whole
 expansion (`$method:Ns.Class.Method`), so this needs no resolution beyond the unit's own
@@ -3223,6 +3267,52 @@ partial def Scry.Cs.enumValuesOf (c : Scry.Cst) (ns : String) (n : Nat) :
       | .none => .nil
     else .nil) (Scry.kids c n))
 
+-- ## Extension methods
+
+/-- Whether a parameter is a `this` parameter (the receiver of an extension method). -/
+def Scry.Cs.isThisParam (c : Scry.Cst) (p : Nat) : Bool :=
+  List.any (fun m => String.eq (c.textOf m) "this") (Scry.childrenK c p "modifier")
+
+/-- The name of a `type_parameter` (`<T, U>` gives `T` and `U`). -/
+def Scry.Cs.typeParamName (c : Scry.Cst) (p : Nat) : String :=
+  match Scry.childF c p "name" with
+  | .some nm => c.textOf nm
+  | .none => match Scry.childK c p "identifier" with
+    | .some nm => c.textOf nm
+    | .none => c.textOf p
+
+/-- The type-parameter names of a method declaration (`Id<T>(…)` is `["T"]`). -/
+def Scry.Cs.typeParamsOf (c : Scry.Cst) (n : Nat) : List String :=
+  match Scry.childF c n "type_parameters" with
+  | .some ps => List.map (fun p => Scry.Cs.typeParamName c p) (Scry.childrenK c ps "type_parameter")
+  | .none => .nil
+
+/-- The extension methods declared by one type declaration: every `static` method whose
+first parameter has the `this` modifier. `generic` records that the receiver is one of
+the method's own type parameters (`T Id<T>(this T x)`). -/
+def Scry.Cs.extsOfClass (c : Scry.Cst) (cls : String) (n : Nat) : List Scry.Cs.Ext :=
+  match Scry.childF c n "body" with
+  | .none => .nil
+  | .some b => List.concat (List.map (fun m =>
+      match String.eq (c.kindOf m) "method_declaration", Scry.Cs.isStaticMember c m with
+      | .true, .true => match Scry.childF c m "parameters" with
+        | .some ps => match Scry.childrenK c ps "parameter" with
+          | .cons p rest => match Scry.Cs.isThisParam c p with
+            | .false => .nil
+            | .true =>
+              let recv := Scry.Cs.memberType c p;
+              let tps := Scry.Cs.typeParamsOf c m;
+              .cons (Scry.Cs.Ext.mk recv cls (Scry.Cs.memberName c m)
+                (Scry.Cs.memberType c m) (Nat.succ (List.length rest)) (String.elem recv tps)) .nil
+          | .nil => .nil
+        | .none => .nil
+      | _, _ => .nil) (Scry.kids c b))
+
+/-- Every extension method of the file's type declarations. -/
+def Scry.Cs.extsOf (c : Scry.Cst) (decls : List (String × Nat)) : List Scry.Cs.Ext :=
+  List.concat (List.map (fun d =>
+    Scry.Cs.extsOfClass c (Scry.Cs.scanClass c d.1 d.2).qname d.2) decls)
+
 /-- Canonicalise the member type spellings of a class once the unit is known. -/
 def Scry.Cs.canonCls (u : Scry.Cs.Unit) (k : Scry.Cs.Cls) : Scry.Cs.Cls :=
   { k with fields := List.map (fun f => (f.1, Scry.Cs.canon u k f.2)) k.fields,
@@ -3552,17 +3642,12 @@ def Scry.Cs.stemOf (path : String) : String :=
   | .some s => s
   | .none => base
 
-/-- Lower a parsed C# file (`c` is its `Scry.Cs.ofStore` view) with an explicit model
-pack; the default wrapper is `Scry.Cs.lowerCst`. -/
-def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text : String)
+/-- Lower a parsed C# file against a unit of declarations (its own, or a project's
+shared one): the type declarations of `decls`, then the top-level statements as
+`<stem>.Main`. `u.usings` is what this file's name resolution sees. -/
+def Scry.Cs.lowerDeclsWithModels (models : Scry.ModelPack) (u : Scry.Cs.Unit)
+    (decls : List (String × Nat)) (path : String) (text : String)
     (c : Scry.Cst) : Scry.Cs.Lowered :=
-  let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
-  let raw0 := List.map (fun d => Scry.Cs.scanClass c d.1 d.2) decls;
-  let raw := List.foldl (fun acc k => Scry.Cs.mergeOne acc k .true)
-    (.nil : List Scry.Cs.Cls) raw0;
-  let u0 := Scry.Cs.Unit.mk raw (Scry.Cs.enumsOf c "" 0) (Scry.Cs.enumValuesOf c "" 0)
-    (List.append ["System"] (Scry.Cs.usingsOf c 0));
-  let u := { u0 with classes := List.map (Scry.Cs.canonCls u0) raw };
   let r := List.foldl (fun (acc : Scry.LState × List Wil.Func) d =>
     let k : Scry.Cs.Cls := match Scry.Cs.findCls u (Scry.Cs.scanClass c d.1 d.2).qname with
       | .some x => x
@@ -3591,9 +3676,89 @@ def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text :
       (List.append (Scry.Cs.memberWarnings c decls)
         (List.append (Scry.Cs.itemWarnings c) r2.1.warnings)))
 
+/-- The unit of one parsed file: its classes, enums and extension methods, with member
+type spellings canonicalised against that same file. -/
+def Scry.Cs.scanUnit (c : Scry.Cst) : Scry.Cs.Unit :=
+  let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
+  let raw0 := List.map (fun d => Scry.Cs.scanClass c d.1 d.2) decls;
+  let raw := List.foldl (fun acc k => Scry.Cs.mergeOne acc k .true)
+    (.nil : List Scry.Cs.Cls) raw0;
+  let u0 := Scry.Cs.Unit.mk raw (Scry.Cs.enumsOf c "" 0) (Scry.Cs.enumValuesOf c "" 0)
+    (List.append ["System"] (Scry.Cs.usingsOf c 0)) (.nil : List Scry.Cs.Ext);
+  let u := { u0 with classes := List.map (Scry.Cs.canonCls u0) raw };
+  { u with exts := List.map (Scry.Cs.canonExt u) (Scry.Cs.extsOf c decls) }
+
+/-- Lower a parsed C# file on its own (`c` is its `Scry.Cs.ofStore` view) with an explicit
+model pack; the default wrapper is `Scry.Cs.lowerCst`. -/
+def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text : String)
+    (c : Scry.Cst) : Scry.Cs.Lowered :=
+  let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
+  Scry.Cs.lowerDeclsWithModels models (Scry.Cs.scanUnit c) decls path text c
+
 /-- Lower a parsed C# file with the default model pack. -/
 def Scry.Cs.lowerCst (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lowered :=
   Scry.Cs.lowerCstWithModels Scry.defaultModels path text c
+
+/-- Append `x` unless it is already in the list (first occurrence wins). -/
+def Scry.Cs.addUnique (x : String) : List String → List String
+  | .nil => .cons x .nil
+  | .cons y rest => match String.eq x y with
+    | .true => .cons y rest
+    | .false => .cons y (Scry.Cs.addUnique x rest)
+
+/-- The union of several string lists, in first-seen order. -/
+def Scry.Cs.unionStrs (xs : List String) : List String :=
+  List.foldl (fun acc x => Scry.Cs.addUnique x acc) (.nil : List String) xs
+
+/-- Append an enum member row unless the same `(enum, member, value)` is already present. -/
+def Scry.Cs.addEnumVal (t : String × String × Nat) : List (String × String × Nat) →
+    List (String × String × Nat)
+  | .nil => .cons t .nil
+  | .cons x rest =>
+    match String.eq x.1 t.1, String.eq x.2.1 t.2.1, Nat.beq x.2.2 t.2.2 with
+    | .true, .true, .true => .cons x rest
+    | _, _, _ => .cons x (Scry.Cs.addEnumVal t rest)
+
+/-- Append an extension method unless the index already has `(cls, name, recv)`. -/
+def Scry.Cs.addExt (e : Scry.Cs.Ext) : List Scry.Cs.Ext → List Scry.Cs.Ext
+  | .nil => .cons e .nil
+  | .cons x rest =>
+    match Bool.and (String.eq x.cls e.cls)
+        (Bool.and (String.eq x.name e.name) (String.eq x.recv e.recv)) with
+    | .true => .cons x rest
+    | .false => .cons x (Scry.Cs.addExt e rest)
+
+/-- Merge the declarations of several files into one project symbol table: classes by
+qualified name (so a `partial` class split across files is one class with all its
+members), enums, enum values, extension methods and `using` directives unioned. The
+union of the `using` directives is used only to canonicalise the merged declarations;
+each file's own lowering still sees its own `usings` (`Scry.Cs.lowerCstShared`). -/
+def Scry.Cs.mergeUnits (units : List Scry.Cs.Unit) : Scry.Cs.Unit :=
+  let classes := List.foldl (fun (acc : List Scry.Cs.Cls) (u : Scry.Cs.Unit) =>
+    List.foldl (fun (a : List Scry.Cs.Cls) (k : Scry.Cs.Cls) => Scry.Cs.mergeOne a k .true)
+      acc u.classes) (.nil : List Scry.Cs.Cls) units;
+  let enums := Scry.Cs.unionStrs (List.concat (List.map (fun u => u.enums) units));
+  let enumVals := List.foldl (fun acc t => Scry.Cs.addEnumVal t acc)
+    (.nil : List (String × String × Nat)) (List.concat (List.map (fun u => u.enumVals) units));
+  let usings := Scry.Cs.unionStrs (List.concat (List.map (fun u => u.usings) units));
+  let exts := List.foldl (fun acc e => Scry.Cs.addExt e acc)
+    (.nil : List Scry.Cs.Ext) (List.concat (List.map (fun u => u.exts) units));
+  let u0 := Scry.Cs.Unit.mk classes enums enumVals usings (.nil : List Scry.Cs.Ext);
+  { u0 with classes := List.map (Scry.Cs.canonCls u0) classes,
+    exts := List.map (Scry.Cs.canonExt u0) exts }
+
+/-- Lower a parsed file against a project's shared declarations: classes, enums and
+extension methods come from `shared` (all files), while this file's `using` directives
+are kept for name resolution. -/
+def Scry.Cs.lowerCstSharedWithModels (models : Scry.ModelPack) (shared : Scry.Cs.Unit)
+    (path : String) (text : String) (c : Scry.Cst) : Scry.Cs.Lowered :=
+  let decls := Scry.Cs.typeDecls c "" (Scry.kids c 0);
+  let u := { shared with usings := List.append ["System"] (Scry.Cs.usingsOf c 0) };
+  Scry.Cs.lowerDeclsWithModels models u decls path text c
+
+def Scry.Cs.lowerCstShared (shared : Scry.Cs.Unit) (path : String) (text : String)
+    (c : Scry.Cst) : Scry.Cs.Lowered :=
+  Scry.Cs.lowerCstSharedWithModels Scry.defaultModels shared path text c
 
 /-- The result of the frontend on a spill: lowered, or an unreadable spill. -/
 inductive Scry.Cs.FrontResult where
