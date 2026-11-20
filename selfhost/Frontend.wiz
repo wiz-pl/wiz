@@ -3307,6 +3307,8 @@ def elemNat : Nat → List Nat → Bool
 -- a pattern: a constructor and its sub-patterns, or a variable (or `_`)
 inductive Pat where
   | ctor (c : String) (subs : List Syntax)
+  -- (A17) `⟨p₁, …, pₙ⟩`: the constructor of the expected type (`mk` for a structure)
+  | anon (subs : List Syntax)
   | any (x : String)
 -- `T.c` without the `T.`
 def dropPrefix : List Char → List Char → Option (List Char)
@@ -3338,6 +3340,8 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
   | .true => patOf T (kid (unparen p) 2)
   | .false => match strEq (kindOf p) "term.paren" with
   | .true => patOf T (kid p 1)
+  | .false => match strEq (kindOf p) "term.anon" with
+  | .true => .anon (nonAtomsS (kids (kid p 1)))
   | .false => match strEq (kindOf p) "term.num" with
   -- a numeral: `0` is `.zero`, `n + 1` is `.succ n`
   | .true => match numValue p with
@@ -3424,6 +3428,8 @@ def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List 
     | .ctor c' subs => match strEq c c' with
       | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
       | .false => specialize T c k F impl col rest
+    | .anon subs =>
+      .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
     | .any x =>
       let binds' := match strEq x "_" with
         | .true => binds0
@@ -4032,18 +4038,23 @@ def tupleClauses (col : Col) (k : Nat) : List Clause → Option (List Clause)
     let p0 := unparen (nthSyntax pats k);
     let p := asInner p0;
     let tuple := strEq (kindOf p) "term.tuple";
-    match Bool.or tuple (isVarPat p) with
+    let anon := strEq (kindOf p) "term.anon";
+    match Bool.or tuple (Bool.or anon (isVarPat p)) with
     | .false => .none
     | .true =>
       let two : List Syntax := match tuple with
         | .true => match tupleItems p with
           | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
           | _ => .cons holeStx (.cons holeStx .nil)
-        | .false => .cons holeStx (.cons holeStx .nil);
+        | .false => match anon with
+          | .true => match nonAtoms (kids (kid p 1)) with
+            | .cons a (.cons b more) => .cons a (.cons (nestTuple (.cons b more)) .nil)
+            | _ => .cons holeStx (.cons holeStx .nil)
+          | .false => .cons holeStx (.cons holeStx .nil);
       -- (A18) an as-pattern binds its names to the whole pair; the pattern under it
       -- (a variable, or another tuple) is handled as before
       let binds0 : List Bind := List.append binds (asBinds (asNames p0) col);
-      let binds' : List Bind := match Bool.and (Bool.not tuple) (strEq (kindOf p) "term.ident") with
+      let binds' : List Bind := match Bool.and (Bool.not (Bool.or tuple anon)) (strEq (kindOf p) "term.ident") with
         | .true => match strEq (identOf p) "_" with
           | .true => binds0
           | .false => List.append binds0 (.cons (Bind.mk (identOf p) col) .nil)
@@ -5115,6 +5126,8 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
               | .true => inferLetPair gs es cx s
               | .false => match strEq k "term.letPat" with
               | .true => letPatT gs es cx s .none
+              | .false => match strEq k "term.anon" with
+              | .true => .err "cannot infer the type of an anonymous constructor ⟨…⟩; add a type ascription"
               | .false => match strEq k "term.asPat" with
               | .true => .err "an as-pattern `x@p` is only allowed in a pattern"
               | .false => match strEq k "term.field" with
@@ -5251,6 +5264,33 @@ def checkTuple (gs : Globals) (es : ES) (cx : Cx) (items : List Syntax) (ty : Va
         | e => e
       | e => e
     | _ => .err (String.append "a tuple against a type that isn't a Σ type: " (show (scopeNames (Cx.sc cx)) (Cx.lvl cx) (quote (Cx.lvl cx) (force es ty))))
+-- (A17) `⟨e₁, …, eₙ⟩` against a structure `S` (`S.mk …`), a pair (the tuple) or a data
+-- type with one constructor `c` (`.c …`), as `elabAnon` in the Lean frontend. It is
+-- check-only on the host too: `inferT1` has the host's cannot-infer message.
+def anonArgs (s : Syntax) : List Syntax := nonAtoms (kids (kid s 1))
+def anonApp (s : Syntax) (h : Syntax) : Syntax := match anonArgs s with
+  | .nil => h
+  | args => mkNode "term.app" (.cons h (one (mkNull args)))
+def anonT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp : Option SpT) : TE :=
+  let d := Cx.lvl cx;
+  let tyStr : String := show (scopeNames (Cx.sc cx)) d (quote d (force es ty));
+  let bad : String := String.append "an anonymous constructor ⟨…⟩ needs a structure, a pair or a data type with one constructor as its expected type, not " tyStr;
+  match structOf gs es ty with
+  | .some S => checkT gs es cx (anonApp s (mkNode "term.ident" (one (.ident (String.append S ".mk"))))) ty sp
+  | .none => match force es ty with
+    | .vsigma _ _ _ _ _ _ => match anonArgs s with
+      | .cons _ (.cons _ _) => checkTuple gs es cx (anonArgs s) ty (argSpans sp 1)
+      | _ => .err "an anonymous constructor of a pair has at least two components"
+    | tyf => match headOf (quote d tyf) .tnil with
+      | .mk T _ _ => match Globals.ind gs T with
+        | .some (.mk _ _ _ _ _ ctors _ _ _) => match ctors with
+          | .cons (.mk c _ _ _ _ _) .nil => match dotName gs es ty c with
+            | .some n => checkT gs es cx (anonApp s (mkNode "term.ident" (one (.ident n)))) ty sp
+            | .none => .err bad
+          | cs => .err (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and " T)
+              (String.append " has " (Nat.toString (lenL cs))))
+        | .none => .err bad
+      | .none => .err bad
 -- `fun (x : A) … => b` with every binder typed: `(x : A) → B` (stage 20a)
 def inferLams (gs : Globals) (es : ES) (cx : Cx) (ds : List Bool) (qs : List Q) : List Field → Syntax → Option SpT → TE
   | .nil, body, sp => inferT gs es cx body sp
@@ -5607,7 +5647,18 @@ def letPatT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (expected : Option V
   | .bad => .err qtyErr
   | .dflt => match letPatIsUnit pat with
     | .true => letUnitT gs es cx s expected
-    | .false => let m := letPatMatch (letPatPattern pat) e body;
+    | .false =>
+      -- (A17) `let ⟨a, b⟩` on a pair is a tuple pattern; on a structure it is `.mk`
+      let pats := match letPatIsAnon pat with
+        | .false => letPatPattern pat
+        | .true => match inferT gs es cx e .none with
+          | .ok _ sty es1 => match structOf gs es1 sty with
+            | .some _ => letPatPattern pat
+            | .none => match force es1 sty with
+              | .vsigma _ _ _ _ _ _ => nestTuple (nonAtoms (kids (kid (letPatInner pat) 1)))
+              | _ => letPatPattern pat
+          | .err _ => letPatPattern pat;
+      let m := letPatMatch pats e body;
       match expected with
       | .some T => checkT gs es cx m T .none
       | .none => inferT gs es cx m .none
@@ -5663,7 +5714,9 @@ def checkT (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Opt
 def checkT0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (ty : Val) (sp0 : Option SpT) : TE :=
   let sp := spCheck sp0 s;
   let k := kindOf s;
-  match strEq k "term.by" with
+  match strEq k "term.anon" with
+  | .true => anonT gs es cx s ty sp
+  | .false => match strEq k "term.by" with
   | .true => elabBy gs es cx s ty sp
   | .false => match strEq k "term.paren" with
   | .true => checkT gs es cx (kid s 1) ty (spKid sp 1)
@@ -5836,21 +5889,40 @@ def varBinds : List Syntax → List Col → List Bind
       | .false => names;
     List.append (asBinds names' c) (varBinds ps cs)
   | _, _ => .nil
+-- (A17) is column `k`'s type a pair? (`⟨…⟩` is a tuple pattern there, a constructor
+-- pattern on an inductive elsewhere)
+def colIsSigma (es : ES) (cx : Cx) (cols : List Col) (k : Nat) : Bool :=
+  match nthCol cols k with
+  | .mk L ty0 _ _ => match whnf (force es (eval (TCtx.env (Cx.c cx)) (shiftTm (Cx.lvl cx - L) 0 ty0))) with
+    | .vsigma _ _ _ _ _ _ => .true
+    | _ => .false
+-- (A17) an anonymous constructor pattern needs a type with one constructor
+def anonCtorErr (T : String) (info : IndInfo) : Option String := match info with
+  | .mk _ _ _ _ _ ctors _ _ _ => match ctors with
+    | .cons _ .nil => .none
+    | cs => .some (String.append (String.append "an anonymous constructor ⟨…⟩ needs a type with one constructor, and " T)
+        (String.append " has " (Nat.toString (lenL cs))))
+def anonErrIf (anon : Bool) (T : String) (info : IndInfo) : Option String := match anon with
+  | .true => anonCtorErr T info
+  | .false => .none
 -- (13q) split column `k`: by a literal test (`litTest`), or by constructors
 def splitCol (gs : Globals) (mc : MatchCtx) (es : ES) (cx : Cx) (expected : Val) (cols : List Col)
     (top : Bool) (ihLvls : List Nat) (cls : List Clause) (k : Nat) : CE :=
   let p0 := asInner (patAt k cls);
   let lit := Bool.or (isLitPat p0) (isPlusPat p0);
-  match strEq (kindOf p0) "term.tuple" with
+  let anon := strEq (kindOf p0) "term.anon";
+  match Bool.or (strEq (kindOf p0) "term.tuple") (Bool.and anon (colIsSigma es cx cols k)) with
   | .true => splitTuple gs mc es cx expected cols top ihLvls cls k
   | .false => match nthCol cols k with
     | .mk L ty0 _ _ => match headOf (unfoldTy gs L ty0) .tnil with
       | .mk T _ _ => match Bool.and lit (Bool.not (strEq T "Nat")) with
         | .true => litTest gs mc es cx expected cols top ihLvls cls k
         | .false => match Globals.ind gs T with
-          | .some _ => match litSplitErr T k cls with
+          | .some info => match anonErrIf anon T info with
             | .some m => .err m
-            | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
+            | .none => match litSplitErr T k cls with
+              | .some m => .err m
+              | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
           | .none => splitCtors gs mc es cx expected cols top ihLvls cls k
       | .none => match lit with
         | .true => litTest gs mc es cx expected cols top ihLvls cls k
@@ -9120,6 +9192,38 @@ partial def listLitStx (args : List Syntax) : Syntax := match args with
   | .cons (.atom _) rest => listLitStx rest
   | .cons t rest => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "List.cons")))
       (one (mkNull (.cons t (one (listLitStx rest))))))
+-- (A17) `¬ P` and `∃ x, P` are the host's `notation`/`syntax:lead` rules over `Not` and
+-- `Ex` in lib/Logic.wiz; this frontend does not run those registrations, so the parser
+-- has the shapes (`Parse.wiz`, `surfaceCats`) and the nodes are rewritten here to the
+-- applications the host's macro produces: `Not P`, and one `Ex (fun …)` per binder (a
+-- plain binder takes the trailing `: A`, a typed one its own, as `Ex.wrapBinders`).
+def notStx (p : Syntax) : Syntax :=
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Not"))) (one (mkNull (one p))))
+def exFun (x : String) (A : Option Syntax) (body : Syntax) : Syntax :=
+  let binder := mkNode "binder.explicit" (.cons (.atom "(") (.cons (mkNull .nil)
+    (.cons (mkNull (one (.ident x))) (.cons (match A with
+      | .some a => mkNull (.cons (.atom ":") (one a))
+      | .none => mkNull .nil) (one (.atom ")"))))));
+  let fn := mkNode "term.fun" (.cons (.atom "fun") (.cons (mkNull (one binder))
+    (.cons (.atom "=>") (one body))));
+  mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Ex"))) (one (mkNull (one fn))))
+def exIds (A : Option Syntax) (body : Syntax) : List String → Syntax
+  | .nil => body
+  | .cons x xs => exFun x A (exIds A body xs)
+def exBinderStx (ty : Option Syntax) (b : Syntax) (body : Syntax) : Syntax :=
+  match strEq (kindOf b) "typed" with
+  | .true => exIds (.some (kid b 3)) body (identNames (nonAtoms (kids (kid b 1))))
+  | .false => exIds ty body (identNames (one (kid b 0)))
+def exBindersStx (ty : Option Syntax) (bs : List Syntax) (body : Syntax) : Syntax :=
+  match bs with
+  | .nil => body
+  | .cons b rest => exBinderStx ty b (exBindersStx ty rest body)
+-- the optional `: A` of `∃ x : A, P` (a `null`: `[":", A]` or empty)
+def exBinderTy (opt : Syntax) : Option Syntax := match kids opt with
+  | .cons _ (.cons t _) => .some t
+  | _ => .none
+def exStx (s : Syntax) : Syntax :=
+  exBindersStx (exBinderTy (kid s 2)) (kids (kid s 1)) (kid s 4)
 -- rewrite `s` while a rule matches it (a template may introduce a rule head); `fuel`
 -- only bounds a rewrite loop at one position, so restructuring a subtree never runs out
 partial def expandTop (notes : List Note) (fuel : Nat) (scope : Nat) (s : Syntax) : Syntax :=
@@ -9148,7 +9252,11 @@ partial def expandNotes (notes : List Note) (scope : Nat) (s : Syntax) : Syntax 
           | .false => match strEq k2 "term.!" with
             | .true => mkNode "term.app" (.cons (mkNode "term.ident" (one (.ident "Bool.not")))
                 (one (mkNull (one (kid s' 1)))))
-            | .false => s'
+            | .false => match strEq k2 "term.not" with
+              | .true => notStx (kid s' 1)
+              | .false => match strEq k2 "term.ex" with
+                | .true => exStx s'
+                | .false => s'
     | other => other
   | _ => s
 partial def expandNotesArgs (notes : List Note) (scope : Nat) : SyntaxF .false → SyntaxF .false

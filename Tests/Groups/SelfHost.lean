@@ -2247,6 +2247,49 @@ def surfaceLetUnitProgram : String :=
   "  IO.println (Nat.toString (use ()));\n" ++
   "  IO.println (Nat.toString (twice 21));\n" ++
   "  IO.println (Nat.toString (through () 5))\n"
+
+/-- (A17) `⟨…⟩` terms and patterns: a structure, a one-constructor data type, a pair, a
+nested pair, and `let ⟨a, b⟩`. Every value is a `Nat`, so `selfhostSameNats` can compare
+the two frontends' results. -/
+def surfaceAnonHeader : String :=
+  "structure S where\n  a : Nat\n  b : Nat\n" ++
+  "inductive W where\n  | wrap (n : Nat) (b : Bool)\n" ++
+  "def getA (s : S) : Nat := match s with\n  | ⟨a, _⟩ => a\n" ++
+  "def unwrap (w : W) : Nat := match w with\n  | ⟨n, _⟩ => n\n" ++
+  "def swap (p : Nat × Nat) : Nat × Nat := match p with\n  | ⟨a, b⟩ => ⟨b, a⟩\n" ++
+  "def firstOf (p : Nat × Nat) : Nat := (swap p).2\n" ++
+  "def nested (p : (Nat × Nat) × Nat) : Nat := match p with\n  | ⟨⟨a, b⟩, c⟩ => a * 100 + b * 10 + c\n" ++
+  "def fromLet (p : Nat × Nat) : Nat := let ⟨a, b⟩ := p; a + b\n" ++
+  "def s0 : S := ⟨3, 4⟩\n" ++
+  "def w0 : W := ⟨5, .true⟩\n"
+
+/-- (A17) The `⟨…⟩` cases, as `Nat`s (see `surfaceAnonHeader`). -/
+def surfaceAnonCases : List (String × Nat) :=
+  [("getA s0", 3), ("getA ⟨7, 8⟩", 7), ("unwrap w0", 5),
+   ("firstOf ⟨1, 2⟩", 1), ("nested ⟨⟨1, 2⟩, 3⟩", 123), ("fromLet ⟨4, 5⟩", 9)]
+
+/-- (A17) `¬` and `∃`: the host gets both from lib/Logic.wiz's `notation`/`syntax:lead`
+rules, which this frontend does not load; the parser has their shapes and the frontend
+rewrites them to `Not`/`Ex` (`Parse.wiz` `surfaceCats`, `Frontend.wiz` `notStx`/`exStx`).
+The program declares `Not`/`Ex` itself, and each equation is `rfl` against the expansion,
+so the rewrite is what is checked. -/
+def surfaceNotExProgram : String :=
+  "import Prelude\n" ++
+  "axiom False : Prop\n" ++
+  "def Not (P : Prop) : Prop := P → False\n" ++
+  "def Ex {A : Type} (P : A → Prop) : Prop := (R : Prop) → ((a : A) → P a → R) → R\n" ++
+  "def notIntro (P : Prop) (h : P → False) : ¬ P := h\n" ++
+  "def useNot (P : Prop) (h : ¬ P) : P → False := h\n" ++
+  "def exIntro {A : Type} (P : A → Prop) (a : A) (p : P a) : ∃ x : A, P x :=\n" ++
+  "  fun R k => k a p\n" ++
+  "def exElim {A : Type} {P : A → Prop} {R : Prop} (h : ∃ x : A, P x)\n" ++
+  "    (k : (a : A) → P a → R) : R := h R k\n" ++
+  "def ex2Elim {A : Type} {P : A → A → Prop} {R : Prop} (h : ∃ x y : A, P x y)\n" ++
+  "    (k : (a b : A) → P a b → R) : R :=\n" ++
+  "  h R (fun a h2 => h2 R (fun b p => k a b p))\n" ++
+  "def exParen {A : Type} {P : A → Prop} {R : Prop} (h : ∃ (x : A), P x)\n" ++
+  "    (k : (a : A) → P a → R) : R := h R k\n"
+
 /-- (E-K) A natural-number type for `Kernel.wiz`'s number literals, written as kernel terms:
 `N` (the description `arg Enum2 [ret, rec ret]`), its constructors, and definitions by
 `ind` (`N.pred`, `N.add`, `N.sub`, `N.mul`, `N.isZero`, `N.beq`, `N.blt`; `N.div` and
@@ -3202,6 +3245,14 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
+    { name := "A17: `⟨…⟩` terms and patterns (a structure, a one-constructor data type, a pair, nested, `let ⟨a, b⟩`) agree with the host", run := fun _ =>
+        selfhostSameNats surfaceAnonHeader surfaceAnonCases },
+    { name := "A17: `¬` and `∃` elaborate in the self-hosted frontend (the builtin rules over `Not`/`Ex`)", run := fun _ => do
+        let some out ← selfhostOutput surfaceNotExProgram | return
+        let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+        unless bad.isEmpty do
+          throw (IO.userError s!"the self-hosted frontend rejects:\n{"\n".intercalate bad}\n{out}")
+        checkChecked surfaceNotExProgram out },
     -- (A19) the coinductive surface is the one frontend feature with no case at all:
     -- pin the missing half rather than assuming parity (`command.coinductive` is in
     -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
