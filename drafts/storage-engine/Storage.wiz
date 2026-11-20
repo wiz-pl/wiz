@@ -32,9 +32,11 @@ the write-set it carries.
   delete epoch, per-key first-committer-wins for `set`/`del`, no version check for
   `addCount`, and unique-index rejection.
 
-`Traversal` and `PLens.over` are in `lib/Optic.wiz` (the store-encoding pair, not the
-profunctor `TraversalP`), so this module needs a rebuilt toolchain (a `lib/` edit is
-shadowed by the installed library). See the note, §5.2 and §12.
+`indexTraversalP` is a profunctor traversal over `(key, node)` (the key must be in the
+focus so an update can name the patch it records); `indexTraversal` is the store
+`Traversal` shim derived from it (`Traversal.ofP`), kept for the `view`/`overAll` shape.
+`PLens`/`PLens.over` stay the store pair for the partial place (`nodeAt`), whose error
+path hands the lender back. See the note, §5.2 and §12.
 -/
 
 -- ## Records
@@ -395,29 +397,57 @@ def Root.applyDeltas (r : Root) (ds : List IndexDelta) : Root :=
 
 -- ## A traversal over an index bucket
 --
--- `Traversal` is lib/Optic.wiz's store-encoding pair; `overAll`
--- is the ω update path and records one patch per matched node, while the streaming query
--- path is the linear `Cursor` (`Snapshot.indexNodes`).
+-- The traversal is written once, as a profunctor traversal (`TraversalP`) over
+-- `(key, node)`. The key must be in the focus: `overAll`/`Writer Δ` see only the focus,
+-- while the store encoding's backward function can close over the key. The store
+-- `Traversal` below is the shim the engine keeps for `view`/`overAll`; `bumpOfKind` uses
+-- the profunctor form directly.
 
-/-- The nodes in `d`'s bucket for `v`, as a traversal. Membership is read from the base
-index; a node changed earlier in the transaction is still read through the write-set. -/
+/-- Walk the bucket's keys, running `f` on each `(key, node)` and putting the result
+back through the snapshot's recording store. The applicative sequences the deltas (at
+`Writer`) or the reads (at `ForgetList`). -/
+def indexWanderGo (d : IndexDef) (v : U64) {F : Type → Type} [i : Applicative F]
+    (f : U64 × Node → F (U64 × Node)) : List U64 → Snapshot → F Snapshot
+  | .nil, s => @Applicative.pure F i Snapshot s
+  | .cons id ids, s =>
+    match Snapshot.getNode s id with
+    | .none => indexWanderGo d v f ids s
+    | .some n =>
+      @Applicative.seq F i Snapshot Snapshot
+        (@Applicative.seq F i (U64 × Node) (Snapshot → Snapshot)
+          (@Applicative.pure F i (U64 × Node → Snapshot → Snapshot)
+            (fun p => fun s' => Snapshot.record s' id (Patch.ofChange n p.2)))
+          (f (id, n)))
+        (indexWanderGo d v f ids s)
+
+/-- The bucket's traversal function, named so it can be passed to `traversalOf`. -/
+def indexTrav (d : IndexDef) (v : U64) :
+    {F : Type → Type} → [i : Applicative F] →
+      (U64 × Node → F (U64 × Node)) → Snapshot → F Snapshot :=
+  fun {F : Type → Type} [i : Applicative F] f s =>
+    indexWanderGo d v f (Root.lookupIndex s.root (IndexDef.uid d) v) s
+
+/-- Every node in the bucket of index `d` at key `v`, as a profunctor traversal. The
+focus is `(key, node)` so an update can name the patch it records. -/
+def indexTraversalP (d : IndexDef) (v : U64) :
+    TraversalP Snapshot Snapshot (U64 × Node) (U64 × Node) :=
+  traversalOf (indexTrav d v)
+
+/-- The bucket's nodes, as the store-encoding `Traversal` (the `view`/`overAll` shim over
+`indexTraversalP`; `overAll` updates the node and keeps the key). -/
 def indexTraversal (d : IndexDef) (v : U64) : Traversal Snapshot Node :=
   Traversal.mk
-    (fun s => List.flatMap (Root.lookupIndex s.root (IndexDef.uid d) v)
-      (fun id => Option.toList (Snapshot.getNode s id)))
-    (fun f s => List.foldl (fun s id =>
-        match Snapshot.getNode s id with
-        | .none => s
-        | .some n => Snapshot.record s id (Patch.ofChange n (f n)))
-      s (Root.lookupIndex s.root (IndexDef.uid d) v))
+    (fun s => List.map (fun p => p.2) (toListOf (indexTraversalP d v) s))
+    (fun f s => overT (indexTraversalP d v) (fun p => (p.1, f p.2)) s)
 
 /-- The demo indices the tests build a store with: kind (field 0) and a unique label. -/
 def kindIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
 def uniqueLabel : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .true
 
-/-- Bump every node whose indexed field is `v`. -/
+/-- Bump every node whose indexed field is `v` (the profunctor traversal at `Hom`). -/
 def bumpOfKind (v : U64) (s : Snapshot) : Snapshot :=
-  Traversal.overAll (indexTraversal kindIndex v) (fun n => { n with count := n.count + 1 }) s
+  overT (indexTraversalP kindIndex v)
+    (fun (p : U64 × Node) => let n : Node := p.2; (p.1, { n with count := n.count + 1 })) s
 
 /-- Delete a node (a tombstone in the write-set; the commit bumps the delete epoch). -/
 def delNode (id : U64) (s : Snapshot) : Snapshot :=
