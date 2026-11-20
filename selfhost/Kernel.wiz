@@ -3794,7 +3794,7 @@ end
 -- the head and arguments of an application spine
 def tmSpineGo : Tm → List Tm → Tm × List Tm
   | .app f a, acc => tmSpineGo f (.cons a acc)
-  | t, acc => .mk t acc
+  | t, acc => (t, acc)
 def tmSpine (t : Tm) : Tm × List Tm := tmSpineGo (match t with | .ann inner _ => inner | t => t) .nil
 
 inductive FixCall where
@@ -5215,7 +5215,7 @@ def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ r w => markTy (.mk e ts l x 4 r w) t
+    | .mk e ts l x _ r w fx => markTy (.mk e ts l x 4 r w fx) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v
