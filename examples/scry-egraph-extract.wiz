@@ -29,9 +29,8 @@ def headD : List Nat → Nat
   | .nil => 99
   | .cons x _ => x
 
-/-- The old extraction API returned `Option Nat`; it now returns the cost with
-`Scry.EGraph.inf` for "no finite cost". -/
-def costOr (c : Nat) : Nat := if Nat.lt c Scry.EGraph.inf then c else 1000000
+-- No `Scry.EGraph.inf` here: this example is one of the six that also runs against
+-- `Scry.EgraphNative`, whose cost tables are `Option Nat` and have no `inf` field.
 
 def main : Nat :=
   let xcls := classOfD ga (Scry.ENode.leaf 0) 900;
