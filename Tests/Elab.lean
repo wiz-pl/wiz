@@ -2151,18 +2151,14 @@ def libModuleNames : IO (List String) := do
   pure ((ms.qsort (· < ·)).toList)
 
 /-- Modules of `lib/` that are alternative implementations and cannot be imported into
-one program, paired with the modules each must leave out. `Scry.EgraphNative` declares
-the same top-level names as `Scry.Egraph` (the reference list model), and `Scry.EqPlan`
-imports it; the modules built on the reference (`Scry.EgraphWil`/`Extract`/`Taint`)
-import it too. Every whole-library loader must go through `allLibSource` (or load an
-apart module with `libSourceExcept skip`) — importing all of `lib/` at once fails with
-"declared by both". (`Json` and `Infoview` used to be here when `Json` declared
-`Nat.repr`; `Text` owns it now, so they load with all the rest.) -/
-def libApart : List (String × List String) :=
-  [ ("Scry.EgraphNative",
-     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"])
-  , ("Scry.EqPlan",
-     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"]) ]
+one program, paired with the modules each must leave out. It is empty now: the last two
+entries were `Scry.EgraphNative`/`Scry.EqPlan` against the reference e-graph family, and
+the e-graph is one engine (`Scry.EgraphNative` is a compatibility import of
+`Scry.Egraph`). A whole-library loader can import all of `lib/` at once. The list and
+`libSourceExcept` stay because the loaders and the trust ledger use the mechanism; an
+entry is still the right place for a future pair that cannot co-load. (`Json` and
+`Infoview` used to be here when `Json` declared `Nat.repr`; `Text` owns it now.) -/
+def libApart : List (String × List String) := []
 
 /-- `import` lines for every module of `lib/` except `skip`. -/
 def libSourceExcept (skip : List String) : IO String := do

@@ -271,9 +271,9 @@ def Scry.wgeExtract (g : Scry.EGraph) (allowed : List Nat) (e : Wil.Rhs) :
   match Scry.wgeClassOfRhs g e with
   | .none => .none
   | .some cls =>
-    -- (the e-graph's cost API is the bit-packed one: `costs` is a `U64Array`, a class
-    -- cost is a `Nat` with `EGraph.inf` for "no finite cost", and `buildTerm` takes the
-    -- same array — the `List (Option Nat)` form lives in `Scry.EgraphNative`)
+    -- (the e-graph's canonical cost API is the dense one: `costs` is a `U64Array`, a
+    -- class cost is a `Nat` with `EGraph.inf` for "no finite cost", and `buildTerm`
+    -- takes the same array; the `Option Nat` view is `costsOpt`/`costOpt`)
     let costs := Scry.EGraph.costs g w;
     let root := Scry.EGraph.find g cls;
     let c := Scry.EGraph.cost g w root;

@@ -2195,28 +2195,26 @@ format and the gaps.
 
 ## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
 
-`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
-congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
-extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
-native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
-same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
-and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
-`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
-`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
-record, reads a field, or calls those functions compiles against one import only. It
-adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
-rewrites), union explanations (a flat proof forest), node/round/clock limits with a
-reported stop reason, and `Option Nat` extraction costs. Only six of the eighteen
-`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
-`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
-compares; the analysis, explanation, limit and `EqPlan` surface has no reference
-counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
-byte-identical (matching, instantiation and extraction), so the digests show that the
-two *tables* agree, not that the shared code is independently right. They cannot be
-imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
-operations, so a whole-library import that names both is an error. Every whole-library
-loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
-with everything except the reference family. `import Scry.EqPlan`
+`import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
+rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
+with a fuel bound. The **surface** is the reference one (`Scry.EGraph`, `Scry.ENode`,
+`Scry.ETerm`, `Scry.Pat`, `Scry.Rewrite`, `costs : U64Array` with `Scry.EGraph.inf`, and
+`applyAt`/`applyMatches` without a rule index); the **representation** of the hash cons
+is the native one, a `U64Map` from an e-node hash to a bucket of `(e-node, class)`, so
+`add` and `rebuild` do one bucket lookup and one cons per node instead of scanning a flat
+association list. The record has six fields (`parent`, `rank`, `nodes`, `etable`, `next`,
+`log`); `nodes` is a list, newest first. The module also carries the pieces the old
+native backend added: per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`,
+with guarded rewrites), union explanations (a flat proof forest, `explain`), node/round/
+clock limits with a reported stop reason (`saturateLimited`), and the `Option Nat` cost
+view (`costsOpt`/`costOpt`). `explain` needs the rule index, so the rule-index forms are
+`applyAtN`/`applyMatchesN`; the reference names record rule `0`. `import Scry.EgraphNative`
+is now a **compatibility import** — it just imports `Scry.Egraph` — kept because
+`Scry.EqPlan` and four examples named it; there is no second implementation and no
+import split (the whole of `lib/` loads at once, `Tests.Elab.libApart` is empty). All
+eighteen `examples/scry-egraph-*.wiz` produce their previous digests, including the six
+(`congruence`, `rebuild`, `extract`, `saturate`, `fuel`, `datalog`) that the
+`scry-egraph` group also runs through the compatibility name. `import Scry.EqPlan`
 is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
 relations (a column is not an assertion: a term table `un(term, op, child)` has two
 `eqsort` columns and unions nothing), rules whose head is an equality assertion
