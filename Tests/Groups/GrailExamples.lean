@@ -89,15 +89,15 @@ def expectedMismatch (file : String) (kind : Grail.TestKind) (expected : Option 
 /-- Every example whose `.expected` disagrees with its marker. -/
 def markerFailures : IO (List String) := do
   let files ← Grail.testFiles "." "examples"
-  let mut bad := []
+  let mut bad : Array String := #[]
   for f in files do
     match Grail.TestKind.ofSource (← IO.FS.readFile f) with
-    | .error e => bad := bad ++ [s!"{f}: {e}"]
+    | .error e => bad := bad.push s!"{f}: {e}"
     | .ok kind =>
       let expFile := (System.FilePath.mk f).withExtension "expected"
       let expected ← if ← expFile.pathExists then some <$> IO.FS.readFile expFile else pure none
-      if let some m := expectedMismatch f kind expected then bad := bad ++ [m]
-  pure bad
+      if let some m := expectedMismatch f kind expected then bad := bad.push m
+  pure bad.toList
 
 /-- The guard that every `.expected` is the shape its marker produces. It runs before the
 ranges and names every disagreement, so a digest under a check marker (or check messages
