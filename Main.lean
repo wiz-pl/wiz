@@ -487,10 +487,13 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let web ← match a.web with
     | some w => pure (some (System.FilePath.mk w))
     | none => do pure ((← webDir).map System.FilePath.mk)
-  -- the site's own files: beside the Wasm module (a release), or web/ of the checkout
+  -- the site's own files: `--web` wins, then web/ of the checkout the command runs in,
+  -- then share/wiz/web of a release (beside the toolchain's lib). The checkout directory
+  -- has to be a candidate in its own right: with a packaged `wiz`, `toolchainLib` points
+  -- into the store, and deriving "the checkout" from it never finds the working tree.
   let base := lib.parent.getD "."
   let assets : List System.FilePath :=
-    (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
+    (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups
   -- (the site keeps its title with --reference; the manual has its own)
   let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs }
   let r ← Doc.run (fun m => elaborateHits tc "<doc>" s!"import {m}\n") mods o
