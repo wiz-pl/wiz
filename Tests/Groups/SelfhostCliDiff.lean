@@ -346,7 +346,7 @@ def cliDiffDriverHelp : String :=
   "  --native-fuel: the self-hosted evaluator has no step counter),\n" ++
   "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" ++
   "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" ++
-  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" ++
+  "  backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" ++
   "\n" ++
   "without a command: input.wiz in the working directory to standard output\n\n"
 def cliDiffGroup : Group where

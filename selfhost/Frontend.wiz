@@ -889,7 +889,7 @@ def errMarkScan : List Char → List Char → Option (Nat × String)
     | .false => match Nat.beq (Char.code c) 1 with
       | .true => match ds with
         | .nil => .none
-        | .cons _ _ => .some (errDigits (List.reverseOf ds .nil) 0, String.mk (List.reverseOf cs .nil))
+        | .cons _ _ => .some (errDigits ds 0, String.mk (List.reverseOf cs .nil))
       | .false => .none
 def errSplit (m : String) : Option (Nat × String) := match m with
   | .mk cs => errMarkScan (List.reverseOf cs .nil) .nil

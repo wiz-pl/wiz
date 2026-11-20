@@ -775,7 +775,9 @@ def loadVisitAll (tab : List ModSrc) (names : List String) (w : Walk) : Walk := 
 end
 def loadPlanOf (tab : List ModSrc) : LoadPlan :=
   match loadVisit tab "Main" (Walk.mk StrMap.empty .nil .true) with
-  | .mk _ order simple => LoadPlan.mk order simple
+  -- (the walk conses each module after its imports, so its list is the *reverse* of
+  -- the load order: dependencies first is what the keys and the warm report need)
+  | .mk _ order simple => LoadPlan.mk (List.reverseOf order .nil) simple
 
 def importKeyParts (keys : StrMap String) : List String → List String
   | .nil => .nil
