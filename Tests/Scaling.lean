@@ -609,7 +609,10 @@ passed only the library loader: `glue.wiz` failed as un-preprocessed and a
 def elaborateExample (p : System.FilePath) (src : String) (trustNative : Bool) :
     IO (CommandState ZeroOneMany) := do
   let tc ← toolchain
-  let roots ← Module.roots []
+  -- The package's library roots (`grail.wiz`'s `Package.lib "feral-core"
+  -- "drafts/feral/lib"`), after the toolchain's `lib/`: `examples/resources.wiz` imports
+  -- `FeralCore`, and a sweep that passes only `Module.roots []` cannot see it.
+  let roots ← Module.roots ["drafts/feral/lib"]
   let closure ← Module.loadClosure roots src
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, s) => m.insert n s) {}
   let headers ← Build.preprocessHeaders tc (String.join (src :: lib.values))
