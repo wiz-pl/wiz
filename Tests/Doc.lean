@@ -697,6 +697,7 @@ def docGroup : Group where
           checkHas (← httpGet port "/doc-live.js") "readGoalState"
           checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
           checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
+          checkHas (← httpGet port "/widgets.js") "export function renderWidgets"
           -- (the module's source, for the client to open in the server)
           let src ← httpGet port "/sources/Shapes.Basic.wiz"
           check (has src "200 OK") s!"GET /sources: {src.take 200}"

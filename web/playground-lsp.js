@@ -34,6 +34,7 @@
 "use strict";
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
 import { readGoalState, renderPanel, renderSelection, positionAt, parseSpan, rangeOffsets } from "./goals.js";
+import { mountWidgets } from "./widgets.js";
 import { delegate } from "./tagged.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
@@ -58,11 +59,13 @@ function scratchUri() {
 // mirror the panel HTML into its model), `eventsFrom` (the element the panel's clicks and
 // keys arrive on; `panel` itself by default, and the live Loom container when the panel
 // is rendered into a model), `document` (the page's document; the Node tests pass a
-// double), and `positionDebounce` (ms, 120 by default).
+// double), `widgetPane` (an element for the widget host; when given, widget cards are
+// mounted there and the panel leaves them out), and `positionDebounce` (ms, 120 by
+// default).
 export function startInfoview({
   editor, panel, config, search, uri, follow = false, info, onRender, eventsFrom,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120,
+  hover: wantHover, widgetPane, positionDebounce = 120,
 } = {}) {
   if (!editor || !panel) return null;
   // The panel's markup may be produced here and rendered elsewhere (the playground's
@@ -99,6 +102,9 @@ export function startInfoview({
     items: [],
     position: null,
     canReconnect: false,
+    // The standalone page's widget pane is a grid child of its own: the panel then
+    // leaves the widget cards out, so there is one host, not two.
+    widgetsInPane: !!widgetPane,
     follow,
   };
 
@@ -126,6 +132,9 @@ export function startInfoview({
     // With `info`, the panel leaves the selection out and the box has it alone.
     renderPanel(panel, info ? Object.assign({}, view, { info: null }) : view);
     panel.scrollTop = top;
+    if (widgetPane) {
+      mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+    }
     if (info) info.innerHTML = view.info ? renderSelection(view.info) : "";
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
@@ -354,6 +363,7 @@ export function startInfoview({
       if (hover) hover.close();
       view.state = "closed";
       view.info = null;
+      view.items = [];
       view.diagnostics = [];
       if (squiggles) squiggles.update([]);
       render();
@@ -404,6 +414,7 @@ export function startInfoview({
     view.goalsKind = null;
     view.term = null;
     view.termKind = null;
+    view.items = [];
     render();
     try {
       await client.reconnect();

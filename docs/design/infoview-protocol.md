@@ -8,7 +8,8 @@ This page describes version 1 of that extension as `Wiz/LSP.lean` implements it,
 transports an infoview can reach the server on, and the clients in the repository: the
 Neovim infoview (`editors/nvim/lua/wiz/infoview.lua`), the terminal infoview
 (`infoview/Tui.wiz`, with its layout in `lib/Infoview.wiz`) and the web infoview and
-playground (`web/infoview.js`, `web/goals.js`, `web/lsp-client.js`, `web/tagged.js`). The
+playground (`web/infoview.js`, `web/goals.js`, `web/widgets.js`, `web/lsp-client.js`,
+`web/tagged.js`). The
 design follows Lean's infoview closely: results are pulled at a position, and interactive
 results carry handles that are only valid for one elaboration of the document.
 
@@ -161,12 +162,51 @@ WIZ_WIDGET:{"schema":"wiz.widget/1","kind":"plot","mimeType":"image/svg+xml",
 `html` is the self-contained `<figure class="wiz-plot">` around the SVG and `svg` is
 the drawing on its own (`Plot.svg`); both are deterministic and contain no `href`,
 `src`, script or `url(…)`, so a client needs no network and can insert `html` without
-running code. The browser infoview (`web/goals.js` `renderInfoItems`) inserts it under
-`Widgets`; it refuses a payload containing a script or an external reference. The
-terminal (`lib/Infoview.wiz`) and Neovim (`editors/nvim/lua/wiz/infoview.lua`)
-infoviews show the title and say the picture is in the browser — they cannot draw SVG.
-The item is positioned like a message: the cursor has to be on the `#plot` command
-(`m.info`), so the `range` is the command's range.
+running code. The browser infoview (`web/widgets.js`, used by `web/goals.js` and by the
+standalone page's widget pane) draws it under `Widgets`; it refuses a payload containing
+a script, a style, an event handler or an external reference. The terminal
+(`lib/Infoview.wiz`) and Neovim (`editors/nvim/lua/wiz/infoview.lua`) infoviews show the
+title and say the picture is in the browser — they cannot draw SVG. The item is
+positioned like a message: the cursor has to be on the `#plot` command (`m.info`), so
+the `range` is the command's range.
+
+The scry analysis (`scry/src/Scry/AnalysisFile.wiz` `Scry.analysisDisplay`) is the second
+producer. It emits the same `wiz.widget/1` object with `kind: "scry.analysis"`,
+`mimeType: "text/html"`, a title and summary, and a `scry.analysis/1` extension:
+
+```
+{"schema":"wiz.widget/1","kind":"scry.analysis","mimeType":"text/html",
+ "title":"claim calls-recorded: refuted",
+ "summary":"1 of 2 call_expression node(s) are not in the call relation",
+ "html":string,"widgets":[Widget],"count":nat,
+ "scry":{"schema":"scry.analysis/1","claim":{…},"findings":[…],
+         "graph":{"nodes":nat,"edges":nat,"relationRows":nat}}}
+```
+
+The host draws the claim status, summary, graph counts and one line per finding from the
+extension; the `widgets` list and `html` stay for clients that only understand the Loom
+bundle.
+
+**The widget host.** `web/widgets.js` parses `WIZ_WIDGET:` (or a bare bundle), checks
+`schema: "wiz.widget/1"`, builds a small tree from the payload and mounts it with
+`createElement`/`createTextNode` (or serializes the same tree for the panel's string
+API). It never assigns payload text to `innerHTML`. **Refused:** `script`, `style`,
+`iframe`, `object`, `embed`, form controls, `foreignObject`, `image`, `use`, `a`, event
+handlers (`on*`), `href`/`src`/`style` attributes, `url(...)`, `javascript:`,
+`vbscript:`, `data:`, and any element or attribute outside the allowlist (SVG shapes,
+text and gradients; `figure`, `figcaption`, `div`, `span`, `p`, headings, lists, tables,
+`pre`, `code` and inline emphasis). A refused payload becomes a card that names its
+`kind` and the reason, so an unknown kind still has a useful text view. Cards show the
+payload's `title`, its `kind` and its `summary`; the standalone page puts them in a grid
+pane that is a child of the page's main grid (so a wide plot scrolls in its own column
+and cannot reflow the editor), and the playground puts the same grid under `Widgets` in
+the goals panel.
+
+**A new widget kind** needs: a `WIZ_WIDGET:` producer emitting `schema: "wiz.widget/1"`,
+`kind`, and either an `html`/`svg` body or a structured extension; a renderer branch in
+`web/widgets.js` `renderWidget` for an extension; a fixture in `web/fixtures/`; and a
+case in `web/widgets_test.mjs`. A body-only kind needs no page, transport or CSS change;
+the fallback names the kind until its renderer exists.
 
 **`wiz/browserInfoview`** is sent by the editor only, with no params. It makes the server
 listen on a WebSocket on `127.0.0.1` (a free port) unless it already does, and answers

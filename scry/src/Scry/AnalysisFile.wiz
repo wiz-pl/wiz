@@ -587,12 +587,23 @@ def Scry.analysisExt (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
     ("findings", Json.mkArr (List.map Scry.findingJson r.findings)),
     ("graph", Scry.graphJson v) ]
 
-/-- The bundle: `Widget.bundle`'s `wiz.widget/1` object with one extra key, `scry`. -/
+/-- The card's title: the claim and its verdict. -/
+def Scry.analysisTitle (r : Scry.ClaimResult) : String :=
+  String.append (String.append "claim " r.name) (String.append ": " r.status)
+
+/-- The bundle: `Widget.bundle`'s `wiz.widget/1` object with the card's `kind`,
+`mimeType`, `title` and `summary`, plus the `scry.analysis/1` extension. A widget host
+draws the extension itself (the claim, findings and graph counts); the `widgets` list
+and `html` stay for clients that only understand the Loom bundle. -/
 def Scry.analysisBundle (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
   let ws := Scry.analysisWidgets r v;
   let ext := Scry.analysisExt r v;
   match Widget.bundle ws with
-  | .obj fs => Json.obj (JFields.fcons "scry" ext fs)
+  | .obj fs => Json.obj (JFields.fcons "kind" (Json.mkStr "scry.analysis")
+      (JFields.fcons "mimeType" (Json.mkStr "text/html")
+        (JFields.fcons "title" (Json.mkStr (Scry.analysisTitle r))
+          (JFields.fcons "summary" (Json.mkStr r.summary)
+            (JFields.fcons "scry" ext fs)))))
   | other => other
 
 /-- The display string: `WIZ_WIDGET:` plus the bundle. -/

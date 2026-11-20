@@ -173,6 +173,8 @@ def webAssets : List (String × String) :=
    ("playground-lsp.js", "text/javascript; charset=utf-8"),
    ("lsp-client.js", "text/javascript; charset=utf-8"),
    ("goals.js", "text/javascript; charset=utf-8"),
+   ("widgets.js", "text/javascript; charset=utf-8"),
+   ("widgets.css", "text/css; charset=utf-8"),
    ("tagged.js", "text/javascript; charset=utf-8"),
    ("wiz-infoview.mjs", "text/javascript; charset=utf-8"), ("wiz-infoview.wasm", "application/wasm")]
 

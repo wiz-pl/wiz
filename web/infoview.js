@@ -55,6 +55,7 @@ export function startPage(doc = globalThis.document, loc = globalThis.location) 
   const editor = doc.getElementById("editor");
   const panel = doc.getElementById("goals");
   const info = doc.getElementById("info");
+  const widgetPane = doc.getElementById("widget-list");
   const status = doc.getElementById("status");
   const pos = doc.getElementById("pos");
   if (follow && editor) editor.style.display = "none";
@@ -68,6 +69,7 @@ export function startPage(doc = globalThis.document, loc = globalThis.location) 
     editor,
     panel,
     info,
+    widgetPane,
     config: endpoint,
     follow,
     // Following: the document is the editor's, not ours; the server announces it.

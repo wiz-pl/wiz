@@ -269,6 +269,10 @@ graph store needs a compaction policy once ingests are frequent.
 ```json
 {
   "schema": "wiz.widget/1",
+  "kind": "scry.analysis",
+  "mimeType": "text/html",
+  "title": "claim calls-recorded: refuted",
+  "summary": "1 of 2 call_expression node(s) are not in the call relation",
   "html": "<div class=\"wiz-widgets\" …>…</div>",
   "widgets": [
     {"id":"claim","kind":"button","value":"refuted","label":"claim calls-recorded: refuted",…},
@@ -291,10 +295,14 @@ reads. Each finding button's **value** is the node id, so a click can jump to
 `(file, span)` without parsing the label. `Scry.analysisNoop` is the default callback; a
 file can supply its own.
 
-The editor wiring is the gap: `lib/Infoview.wiz`/the web client have no widget channel.
-Two additive options: recognise `WIZ_WIDGET:` in `#eval`/info output, or add a
-`wiz/widget` request that evaluates the file's `display` definition. The payload tests
-pin the shape either way.
+The web infoview now has a widget host (`web/widgets.js`): it draws this `scry.analysis`
+extension as a claim card (status, summary, graph counts, findings), and the same host
+draws `#plot`'s SVG. `web/fixtures/scry-analysis-widget.json` is the payload shape the
+host test mounts; `wiz/interactiveInfo` already turns any `WIZ_WIDGET:` message into a
+widget item, so the remaining transport gap is getting `display` *evaluated* in the
+session: recognising `WIZ_WIDGET:` in `#eval`/info output, or adding a `wiz/widget`
+request that evaluates the file's `display` definition. The payload tests pin the shape
+either way.
 
 ## 7. Gap list against today's `scry` CLI
 

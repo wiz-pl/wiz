@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the infoview has a **widget host** (`web/widgets.js`). It parses the Loom
+  `wiz.widget/1` payload (`WIZ_WIDGET:`), draws the `#plot` producer's inline
+  `image/svg+xml`/`text/html` figure and the scry analysis's claim/findings card, and
+  shows each card's title, kind and summary. Payload markup is parsed into a checked tree
+  and rebuilt with DOM nodes, never `innerHTML`: scripts, styles, event handlers,
+  `href`/`src`/`style`, `url(...)` and all elements/attributes outside a small allowlist
+  are refused, and a refused or unknown kind falls back to a card naming it. The
+  standalone page's widget pane is a grid child beside the editor and the goals, and
+  the playground keeps the same grid under `Widgets` in the goals panel; both layouts
+  keep a wide plot scrolling in its own column. `Scry.analysisDisplay` now carries
+  `kind`, `mimeType`, `title` and `summary` beside its `scry.analysis/1` extension.
+  Tests: `web/widgets_test.mjs` (fixtures, safety, fallback, DOM mount),
+  `web/playground_lsp_test.mjs` (the payloads through the stubbed LSP transport), and
+  the `=scry-analysis` fields.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
   lines) now only points at the body and calls `web/framework/mount.js`'s one export,
   which loads the Loom page's module (`web/playground-ui.wiz`), mounts its SSR, delegates

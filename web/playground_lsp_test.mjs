@@ -11,6 +11,7 @@
 // reconnect (documents re-opened), and the no-server path. No unhandled rejection is
 // allowed anywhere: the page must keep working without a server.
 "use strict";
+import { readFileSync } from "node:fs";
 import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
 import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
@@ -696,6 +697,41 @@ checkThat("widget: a payload with a script is refused",
 checkThat("widget: a payload with an external reference is refused",
   !renderInfoItems([{ kind: "widget", title: "x",
     text: 'WIZ_WIDGET:{"html":"<figure><img src=\\"https://example.invalid/x.png\\"></figure>"}' }]).includes("example.invalid"));
+
+// ## 10g. The widget pane: `wiz/interactiveInfo` -> `web/playground-lsp.js` ->
+// `web/widgets.js`, with the LSP transport stubbed by the mock server. Both producers
+// are in the answer: `#plot` (an SVG) and the scry analysis (a claim/findings card).
+const scryBundle = JSON.parse(readFileSync(new URL("./fixtures/scry-analysis-widget.json", import.meta.url), "utf-8"));
+const paneDoc = fakeDocument();
+const pane = paneDoc.createElement("div");
+const panePanel = fakePanel();
+const widgetMock = await startMockServer({
+  infoItems: [
+    { kind: "widget", title: "plot", text: "WIZ_WIDGET:" + plotBundle },
+    { kind: "widget", title: "scry", text: "WIZ_WIDGET:" + JSON.stringify(scryBundle) },
+  ],
+});
+const paneApp = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: panePanel, uri: "file:///widgets.wiz",
+  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane,
+});
+const paneWalk = (node, pred, out = []) => {
+  if (pred(node)) out.push(node);
+  for (const c of node.childNodes || []) paneWalk(c, pred, out);
+  return out;
+};
+const paneTag = (name) => paneWalk(pane, (n) => n.tagName === name);
+checkThat("widget pane: the payloads reach the pane",
+  await waitUntil(() => pane.getAttribute("data-widget-count") === "2"), pane.textContent);
+checkThat("widget pane: the SVG is mounted", paneTag("svg").length === 1);
+checkThat("widget pane: the plot's title", pane.textContent.includes("Sales"), pane.textContent);
+checkThat("widget pane: the scry claim is mounted",
+  pane.textContent.includes("refuted") && pane.textContent.includes("beta.c"), pane.textContent);
+checkThat("widget pane: the panel does not duplicate the cards",
+  !panePanel.innerHTML.includes("wiz-widget-grid"));
+checkThat("widget pane: no script element", paneTag("script").length === 0);
+paneApp.stop();
+await widgetMock.close();
 
 // ## 11. Nothing escaped
 

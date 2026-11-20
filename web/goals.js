@@ -17,6 +17,8 @@
 // range. `docs/playground-lsp.md` is the contract.
 "use strict";
 
+import { renderWidgets } from "./widgets.js";
+
 // ## Text, positions and spans
 
 export function escapeHtml(value) {
@@ -280,37 +282,13 @@ function treeSection(tree) {
 
 // ## Items from `wiz/interactiveInfo`
 
-// A widget item's `text` is `WIZ_WIDGET:` plus a Loom widget bundle (`lib/Plot.wiz`
-// `Plot.widget`): `html`/`svg` is a self-contained drawing. The pane inserts it as HTML,
-// but only when it contains no script and no external reference — the plot library
-// emits neither, and a hostile server still cannot run code in the page.
-function widgetBody(item) {
-  const text = typeof item.text === "string" ? item.text : "";
-  const json = text.startsWith("WIZ_WIDGET:") ? text.slice("WIZ_WIDGET:".length) : text;
-  let bundle = null;
-  try { bundle = JSON.parse(json); } catch (_) { bundle = null; }
-  const body = bundle && typeof bundle.html === "string" && bundle.html
-    ? bundle.html
-    : (bundle && typeof bundle.svg === "string" ? bundle.svg : "");
-  if (!body) return null;
-  if (/<\s*script\b/i.test(body) || /\bon[a-z]+\s*=/i.test(body)) return null;
-  if (/\b(?:href|src)\s*=/i.test(body)) return null;
-  return {
-    body,
-    title: (bundle && typeof bundle.title === "string" && bundle.title) || item.title || "plot",
-  };
-}
-
-// The widget items of a `wiz/interactiveInfo` answer (`#plot`), as HTML. Nothing else
-// from that answer is drawn: the goals panel is about the term at the cursor.
+// Widget items are `WIZ_WIDGET:` payloads (the Loom schema `wiz.widget/1`). The host
+// (`web/widgets.js`) parses them, sanitises their markup and draws the kinds it knows
+// (`plot`, `scry.analysis`); a payload it cannot draw becomes a card naming the kind.
+// The standalone page puts the cards in its own pane (`mountWidgets`); the playground
+// uses this string renderer inside the goals panel.
 export function renderInfoItems(items) {
-  const list = Array.isArray(items) ? items.filter((i) => i && i.kind === "widget") : [];
-  if (list.length === 0) return "";
-  return `<div class="widgets">${list.map((item) => {
-    const drawn = widgetBody(item);
-    if (!drawn) return `<div class="widget blocked">${escapeHtml(item.title || "widget")}</div>`;
-    return `<figure class="wiz-widget" data-widget-title="${escapeHtml(drawn.title)}">${drawn.body}</figure>`;
-  }).join("")}</div>`;
+  return renderWidgets(items);
 }
 
 // The expected type: `wiz/interactiveTermGoal` (`{goal, range}`), `plainTermGoal`
@@ -427,8 +405,13 @@ export function renderPanel(element, view) {
       ? renderTermResult(view.term, view.termKind)
       : `<div class="nothing">asking the server…</div>`);
     if (view.info) parts.push(`<h3>Selected subterm</h3>`, renderSelection(view.info));
-    const widgets = renderInfoItems(view.items);
-    if (widgets) parts.push(`<h3>Widgets</h3>`, widgets);
+    // The standalone page has a widget pane of its own (a grid child beside the
+    // editor), so it passes `widgetsInPane` and the goals panel leaves them out. The
+    // playground has no separate pane and keeps the grid under this heading.
+    if (!view.widgetsInPane) {
+      const widgets = renderInfoItems(view.items);
+      if (widgets) parts.push(`<h3>Widgets</h3>`, widgets);
+    }
     parts.push(`<h3>Diagnostics</h3>`, renderDiagnostics(view.diagnostics));
   }
   parts.push("</div>");

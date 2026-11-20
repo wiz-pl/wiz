@@ -162,7 +162,7 @@ def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options
     discard <| copyFirst o.assets f o.out
   -- (11s) the live client: only with --serve, so a plain site is unchanged
   if o.serve then
-    for f in ["lsp-client.js", "goals.js", "doc-live.js", "doc-live.css"] do
+    for f in ["lsp-client.js", "goals.js", "widgets.js", "doc-live.js", "doc-live.css"] do
       unless ← copyFirst o.assets f o.out do
         throw (IO.userError s!"wiz doc: --serve: {f} is not in the web assets: give --web DIR \
           (a release's share/wiz/web) or run in a checkout")
