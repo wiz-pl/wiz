@@ -490,7 +490,7 @@ def Scry.G.ingestTreeBody (root graphPath manifestPath : String) (git : Bool) : 
     | .ok facts =>
       match Scry.G.encode ts.revision root graphPath ts.files facts old with
       | .error e => EIO.pure (Scry.G.failResult graphPath manifestPath e)
-      | .ok eg =>
+      | .ok eg => do
         -- The same revision and the same generation is a no-op: no new snapshot.
         let sameRevision : Bool := match old with
           | .some m => Bool.and (String.eq m.revision.value ts.revision.value)
