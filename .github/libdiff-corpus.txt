@@ -10,6 +10,8 @@ lib/BitVec.wiz
 lib/BitVecAdd.wiz
 lib/BitVecShift.wiz
 lib/BvDecide.wiz
+lib/Class.wiz
+lib/Compare.wiz
 lib/Conc.wiz
 lib/Data/ListLemmas.wiz
 lib/Data/Order.wiz
