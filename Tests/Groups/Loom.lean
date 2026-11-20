@@ -104,6 +104,22 @@ def loomGroup : Group where
     { name := "owned state: dropping the cell is a type error", run := fun _ =>
         failsLoom ("import Web.Loom\n" ++
           "def worse (1 o : Loom.Owned Nat) : Nat := 0\n") "declared with quantity 1 but used 0" },
+    { name := "composition: mapMsg lifts a child's messages and keeps the handler index", run := fun _ =>
+        -- A child component with its own `Msg` composes into a page: the wrapper maps
+        -- every handler (and only the handlers), so the page's dispatch sees `Page.child`.
+        okLoom ("import IO\nimport Web.Loom\n" ++
+          "inductive Child where\n  | tap\n" ++
+          "inductive Page where\n  | child (m : Child)\n" ++
+          "structure Model where\n  tag : Nat\n" ++
+          "def child : Loom.VNode Child :=\n" ++
+          "  Loom.on \"click\" Child.tap (Loom.el \"button\" List.nil [Loom.text \"x\"])\n" ++
+          "def app : Loom.App Model Page := Loom.App.mk (Model.mk 0)\n" ++
+          "  (fun m s => match m with | .child _ => Model.mk 1)\n" ++
+          "  (fun _ => Loom.el \"div\" List.nil [Loom.mapMsg Page.child child])\n" ++
+          "#eval Loom.toHtml (Loom.mapMsg Page.child child)\n" ++
+          "#eval (Loom.App.dispatch app (Model.mk 0) 0).tag\n" ++
+          "#eval (Loom.App.dispatch app (Model.mk 0) 1).tag")
+          [r#""<button data-wiz-on-click=\"0\">x</button>""#, "1", "0"] },
     { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
         -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
         -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters

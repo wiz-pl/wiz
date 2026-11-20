@@ -10,6 +10,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
+  lines) now only points at the body and calls `web/framework/mount.js`'s one export,
+  which loads the Loom page's module (`web/playground-ui.wiz`), mounts its SSR, delegates
+  DOM events and exposes the browser capabilities the runtime cannot reach itself
+  (clipboard, download, `localStorage`, URL, animation frames, resize). The examples
+  menu and its data moved into the runtime (`lib/Web/Examples.wiz`,
+  `lib/Web/Playground.wiz`'s `Page`), so the page no longer knows an example exists. The
+  static hand-written page and the `?ui=loom` switch are gone; if the runtime cannot
+  start, the mount point shows a plain-text reason instead of a second UI. Production
+  page JavaScript is 4,937 lines (4,746 plus the 191-line mount contract), down from
+  5,135. The static page's Share/Save/Reset/Clear controls went with it; share links,
+  drafts, file save and clear return as runtime messages plus host calls in the next
+  stage (`docs/notes/loom-thin-js.md`, stage 3).
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
@@ -35,8 +48,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`web/completions.js`) on Ctrl-Space or while typing, inserting a `textEdit`/`insertText`
   through the normal `input` path. `?squiggles=off` and `?completions=off` disable them.
   The overlays and the hover card are mounted by `web/playground-lsp.js`, so they work
-  on both the static page and the `?ui=loom` app. `docs/playground-lsp.md` documents
-  both.
+  on the playground page (one Loom app). `docs/playground-lsp.md` documents them.
 * **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
   binder with no written quantity is `0` only when its type is a sort or a proposition
   (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index

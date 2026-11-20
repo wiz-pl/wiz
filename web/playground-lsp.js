@@ -65,8 +65,9 @@ export function startInfoview({
   hover: wantHover, positionDebounce = 120,
 } = {}) {
   if (!editor || !panel) return null;
-  // The panel's markup may be produced here and rendered elsewhere (the `?ui=loom`
-  // model): clicks and arrow keys then arrive on the live container, not on `panel`.
+  // The panel's markup may be produced here and rendered elsewhere (the playground's
+  // runtime renders the container as an island): clicks and arrow keys then arrive on
+  // the live container, not on `panel`.
   const eventRoot = eventsFrom || panel;
   const query = search === undefined ? (typeof location !== "undefined" ? location.search : "") : search;
   const endpoint = config === undefined

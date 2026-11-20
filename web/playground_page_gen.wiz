@@ -1,0 +1,52 @@
+-- A fixture for web/playground_page_test.mjs: the whole playground page
+-- (lib/Web/Playground.wiz's Page/pageApp) rendered and stepped, printed as JSON. The
+-- Node test parses `initial`, applies `initialToLoaded` with the framework's browser
+-- half (web/framework/runtime.js) and requires the result to be `loaded`'s SSR exactly,
+-- then checks the examples menu's data against web/playground-presets.js (the oracle
+-- until the Wasm test reads the Wiz list). No Wasm, no browser.
+--
+--   wiz run -I <repo>/lib web/playground_page_gen.wiz
+import IO
+import Json
+import Web.Examples
+import Web.Loom
+import Web.Playground
+
+def jstr (s : String) : Json := Json.mkStr s
+def jnat (n : Nat) : Json := jstr (Nat.toString n)
+
+def s0 : Page := Page.initial
+
+-- The examples menu's handler is 0 (the header renders before the editor); `change`
+-- sends the selected option's value as the payload (web/framework/driver.js).
+def loaded : Page := Loom.LiveApp.step pageApp s0 "change\n0\nlists"
+def unknown : Page := Loom.LiveApp.step pageApp s0 "change\n0\nnope"
+def staleIndex : Page := Loom.LiveApp.step pageApp s0 "change\n99\nlists"
+def staleEvent : Page := Loom.LiveApp.step pageApp s0 "click\n0"
+
+def exampleJson (e : Examples.Example) : Json :=
+  Json.mkObj [ Json.field "id" (jstr e.id), Json.field "title" (jstr e.title)
+             , Json.field "code" (jstr e.code) ]
+
+def fields : List (String × Json) :=
+  [ Json.field "initial" (jstr (Loom.LiveApp.html pageApp s0))
+  , Json.field "loaded" (jstr (Loom.LiveApp.html pageApp loaded))
+  , Json.field "initialToLoaded" (jstr (Loom.LiveApp.patches pageApp s0 loaded))
+  , Json.field "loadedText" (jstr loaded.editor.text)
+  , Json.field "loadedPreset" (jstr loaded.preset)
+  , Json.field "loadedLoads" (jnat loaded.loads)
+  , Json.field "loadedCount" (jstr loaded.output.count)
+  , Json.field "initialPreset" (jstr s0.preset)
+  , Json.field "initialLoads" (jnat s0.loads)
+  , Json.field "unknownPreset" (jstr unknown.preset)
+  , Json.field "unknownText" (jstr unknown.editor.text)
+  , Json.field "unknownLoads" (jnat unknown.loads)
+  , Json.field "staleIndexText" (jstr staleIndex.editor.text)
+  , Json.field "staleIndexLoads" (jnat staleIndex.loads)
+  , Json.field "staleEventText" (jstr staleEvent.editor.text)
+  , Json.field "defaultExampleId" (jstr Examples.defaultExampleId)
+  , Json.field "examples" (Json.mkArr (List.map exampleJson Examples.examples))
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

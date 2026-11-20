@@ -1,5 +1,7 @@
 import IO
 import Text
+import Web.Editor
+import Web.Examples
 import Web.Loom
 
 /-!
@@ -333,3 +335,160 @@ playground serves it from its own Wasm instance. -/
 def app : Loom.App Model PlaygroundMsg := Loom.App.mk Model.empty
   (fun _ s => s)
   Model.view
+
+-- ## The page (the whole playground as one Loom app)
+
+/-- The page's state: the editor component, the output pane's model (which owns
+`#status`'s text and kind and `#count`), the footer's engine line, the example the
+editor holds, and how many examples have been loaded. `loads` is how the page sees an
+effect request it cannot do itself: the runtime is pure, so after a `preset` step the
+page runs the new program (it is the run, exactly as `WebEditor.Msg.run` is a request to
+run and the page does it). -/
+structure Page where
+  editor : WebEditor
+  output : Model
+  engine : String
+  preset : String
+  loads : Nat
+
+/-- The first paint: the default example in the editor, the examples menu on it,
+"loading the engine…", Run disabled, an empty count. -/
+def Page.initial : Page :=
+  Page.mk (WebEditor.initial (Examples.codeOf Examples.defaultExampleId))
+    (Model.mk List.nil 0 "loading the engine…" "running" "")
+    "engine: loading" Examples.defaultExampleId 0
+
+def Page.setEditor (s : Page) (e : WebEditor) : Page :=
+  Page.mk e s.output s.engine s.preset s.loads
+
+/-- The output pane's model, and the editor's `#count` text (the pane owns the count;
+the editor shows it). -/
+def Page.setOutput (s : Page) (o : Model) : Page :=
+  Page.mk (WebEditor.withCount s.editor o.count) o s.engine s.preset s.loads
+
+def Page.setEngine (s : Page) (engine : String) : Page :=
+  Page.mk s.editor s.output engine s.preset s.loads
+
+/-- `setStatus(text, kind)`, the page's status line. -/
+def Page.status (s : Page) (text kind : String) : Page :=
+  let o := s.output;
+  Page.setOutput s (Model.mk o.lines o.failures text kind o.count)
+
+/-- Run on or off (the page while the engine loads and while a run is in flight). -/
+def Page.enable (s : Page) (on : Bool) : Page :=
+  Page.setEditor s (WebEditor.withDisabled s.editor (match on with | .true => .false | .false => .true))
+
+/-- Load example `id`: the editor's text becomes its program and the output pane is
+emptied (the page runs it). `loads` counts the request; an unknown id changes nothing. -/
+def Page.loadExample (s : Page) (id : String) : Page :=
+  match Examples.exampleOf id with
+  | .none => s
+  | .some e =>
+    let s1 := Page.setOutput s (Model.ofText "" s.output.status s.output.statusKind);
+    let s2 := Page.setEditor s1 (WebEditor.withText s1.editor e.code);
+    Page.mk s2.editor s2.output s2.engine id (s.loads + 1)
+
+/-- A run's output text, classified (`wiz_loom_show`). -/
+def Page.show (s : Page) (text : String) : Page :=
+  Page.setOutput s (Model.ofText text s.output.status s.output.statusKind)
+
+/-- An engine failure's lines and the count text the page shows instead (`wiz_loom_fail`). -/
+def Page.fail (s : Page) (text count : String) : Page :=
+  Page.setOutput s (Model.ofFailure text s.output.status count s.output.statusKind)
+
+/-- The editor's text replaced (the page loaded a sample, a share link, the initial
+program). -/
+def Page.setText (s : Page) (text : String) : Page :=
+  Page.setEditor s (WebEditor.withText s.editor text)
+
+/-- The page's messages: the editor's own, and the examples menu's (`preset`, whose
+payload is the chosen id). -/
+inductive PageMsg where
+  | editor (m : WebEditor.Msg)
+  | preset
+
+/-- An example's `<option>` attributes: its id, and `selected` when it is the current one. -/
+def Page.exampleAttrs (current : String) (e : Examples.Example) : List Loom.Attr :=
+  match String.eq current e.id with
+  | .true => [Loom.attr "value" e.id, Loom.attr "selected" "selected"]
+  | .false => [Loom.attr "value" e.id]
+
+/-- The examples menu: a `<select>` whose `change` payload is the chosen id. The options
+are the runtime's data (`Web.Examples`), not the page's. -/
+def Page.toolbar (s : Page) : Loom.VNode PageMsg :=
+  Loom.el "div" [Loom.class "toolbar", Loom.attr "role" "group",
+      Loom.attr "aria-label" "Program actions"]
+    [ Loom.el "label" [Loom.class "select-label", Loom.attr "for" "preset"]
+        [Loom.text "Example"]
+    , Loom.on "change" PageMsg.preset
+        (Loom.el "select" [Loom.id "preset", Loom.attr "aria-label" "Load an example"]
+          (List.map (fun e => Loom.el "option" (Page.exampleAttrs s.preset e) [Loom.text e.title])
+            Examples.examples))
+    ]
+
+def Page.header (s : Page) : Loom.VNode PageMsg :=
+  Loom.el "header" List.nil
+    [ Loom.el "div" [Loom.class "brand"]
+        [ Loom.el "a" [Loom.class "home", Loom.attr "href" "../"] [Loom.text "← Wiz"]
+        , Loom.el "strong" List.nil [Loom.text "Playground"]
+        , Loom.el "span" [Loom.class "dim"]
+            [Loom.text "the self-hosted checker, compiled to WebAssembly — goals from an optional language server"]
+        , Loom.el "nav" [Loom.class "pagenav", Loom.attr "aria-label" "Site"]
+            [Loom.el "a" [Loom.attr "href" "../docs/"] [Loom.text "Docs"]]
+        ]
+    , Page.toolbar s
+    , Loom.el "div" [Loom.class "meta"]
+        [ Loom.el "span" [Loom.id "status", Loom.class (String.append "status " s.output.statusKind),
+            Loom.attr "role" "status"] [Loom.text s.output.status] ]
+    ]
+
+/-- The goals pane's heading and hint (the text is the pane's, unchanged). -/
+def Page.goalsHead : Loom.VNode PageMsg :=
+  Loom.el "div" [Loom.class "pane-head"]
+    [ Loom.el "span" List.nil [Loom.text "Goals"]
+    , Loom.el "span" [Loom.class "hint"]
+        [Loom.text "from ", Loom.el "code" List.nil [Loom.text "?lsp=ws://host:port"]] ]
+
+def Page.outputHead : Loom.VNode PageMsg :=
+  Loom.el "div" [Loom.class "pane-head"]
+    [ Loom.el "span" List.nil [Loom.text "Output"]
+    , Loom.el "span" [Loom.class "hint"]
+        [Loom.text "one line per command; ", Loom.el "code" List.nil [Loom.text "#eval"],
+         Loom.text " is the kernel's normal form"] ]
+
+def Page.main (s : Page) : Loom.VNode PageMsg :=
+  Loom.el "main" List.nil
+    [ Loom.mapMsg PageMsg.editor (WebEditor.view s.editor)
+    , Loom.el "section" [Loom.class "pane side"]
+        [ Page.goalsHead
+        , Loom.el "div" [Loom.id "goals", Loom.class "goals", Loom.attr "tabindex" "0",
+            Loom.attr "aria-live" "polite"] List.nil
+        , Page.outputHead
+        , Model.view s.output
+        ]
+    ]
+
+def Page.footer (s : Page) : Loom.VNode PageMsg :=
+  Loom.el "footer" List.nil
+    [ Loom.el "span" [Loom.id "engine", Loom.class "dim"] [Loom.text s.engine]
+    , Loom.el "span" [Loom.class "dim"]
+        [Loom.text "A definition prints its signature, ",
+         Loom.el "code" List.nil [Loom.text "#check"],
+         Loom.text " a type, ", Loom.el "code" List.nil [Loom.text "#eval"],
+         Loom.text " a value (shown raw if it is not a Nat, Bool or list)."] ]
+
+/-- The whole page: one app, three top-level siblings (a body's children). -/
+def Page.view (s : Page) : Loom.VNode PageMsg :=
+  Loom.seq [Page.header s, Page.main s, Page.footer s]
+
+/-- The page's update: the editor's messages go to the editor, a preset load replaces
+the text and asks the page to run it. -/
+def Page.update (m : PageMsg) (payload : String) (s : Page) : Page :=
+  match m with
+  | .editor em => Page.setEditor s (WebEditor.update em payload s.editor)
+  | .preset => Page.loadExample s payload
+
+/-- The playground page as a `Loom.LiveApp`: the textarea's `input` carries the text, the
+examples menu's `change` carries the chosen id. -/
+def pageApp : Loom.LiveApp Page PageMsg :=
+  Loom.LiveApp.mk Page.initial Page.update Page.view

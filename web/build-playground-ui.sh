@@ -10,8 +10,8 @@
 #   --from DIR, or WIZ_PLAYGROUND_UI_FROM=DIR: copy the module a Nix build made instead
 #   (`nix build .#wiz-playground-ui`); local use is unchanged.)
 #
-# It is a second output beside web/build-playground.sh's wiz-playground.mjs; the page
-# loads it only for `?ui=loom` and falls back to its static markup when it is absent.
+# The page (`web/playground.js`) mounts it; there is no static fallback, so this is
+# part of the playground build, not an option.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GMPSRC=
@@ -59,8 +59,9 @@ fi
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/playground-ui.wiz -o "$OUT/wiz-playground-ui.mjs" --no-main)
-# The page loads the module and the driver at runtime (`?ui=loom`); both live beside
+# The page loads the module and the mount contract at runtime; both live beside
 # playground.js, also under a framework/ subdirectory for the framework's modules.
 mkdir -p "$OUT/framework"
-cp "$ROOT/web/framework/driver.js" "$ROOT/web/framework/runtime.js" "$OUT/framework/"
+cp "$ROOT/web/framework/driver.js" "$ROOT/web/framework/runtime.js" \
+  "$ROOT/web/framework/mount.js" "$OUT/framework/"
 echo "built $OUT/wiz-playground-ui.mjs"

@@ -26,6 +26,7 @@ for f in docs/index.html docs/api.html docs/api.json docs/search.js docs/scroll.
 done
 : > "$WEB/wiz-playground.mjs"
 : > "$WEB/wiz-playground.wasm"
+: > "$WEB/wiz-playground-ui.mjs"
 
 sh "$ROOT/web/build-site.sh" "$SITE" "$WEB" >/dev/null
 sh "$ROOT/web/check-site.sh" "$SITE"
