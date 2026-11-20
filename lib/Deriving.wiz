@@ -148,6 +148,32 @@ def Derive.paramVars : List ParamView → List Syntax
 /-- `T Δ ξ`: the type applied to its parameters and indices. -/
 def Derive.typeApp (v : IndView) : Syntax :=
   Syntax.mkApp (Syntax.mkVar (IndView.name v)) (List.append (Derive.paramVars (IndView.params v)) (Derive.paramVars (IndView.indices v)))
+/-- `T Δ ξ` with the indices given as terms (for a motive that binds them itself). -/
+def Derive.typeAppAt (v : IndView) (idx : List Syntax) : Syntax :=
+  Syntax.mkApp (Syntax.mkVar (IndView.name v)) (List.append (Derive.paramVars (IndView.params v)) idx)
+/-- The indices as fresh variables of a dependent motive: `i✝0`, `i✝1`, … -/
+def Derive.indexVars : List ParamView → Nat → List Syntax
+  | .nil, _ => .nil
+  | .cons _ ps, i => .cons (Derive.var "i✝" i) (Derive.indexVars ps (i + 1))
+/-- The indices as fresh binder names of a dependent motive: `i✝0`, `i✝1`, … -/
+def Derive.indexIdents : List ParamView → Nat → List Syntax
+  | .nil, _ => .nil
+  | .cons _ ps, i => .cons (Syntax.mkIdent (Derive.name "i✝" i)) (Derive.indexIdents ps (i + 1))
+/-- `fun i✝0 => … => b`, one binder per index (then the value binder is added). -/
+def Derive.indexLams : List Syntax → Syntax → Syntax
+  | .nil, b => b
+  | .cons x xs, b =>
+    let r := Derive.indexLams xs b;
+    `(term| fun $x => $r)
+/-- The motive of a dependent elimination into `Sort` at the family `T Δ`: each index is
+bound, so the recursor's methods see the constructor's index refined (`0` in `nil`,
+`.succ n` in `cons`), and the value is ignored. A derived `BEq`, `fun ξ => T Δ ξ → Bool`,
+then matches the second value at that refined index. -/
+def Derive.depMotive (v : IndView) (result : Syntax) : Syntax :=
+  let vars := Derive.indexVars (IndView.indices v) 0;
+  let idents := Derive.indexIdents (IndView.indices v) 0;
+  let ty := Derive.typeAppAt v vars;
+  Derive.indexLams idents `(term| fun _ => $ty → $result)
 /-- The type of the instance of `cls` for `v`:
 `{Δ} → [cls A]… → {ξ} → cls (T Δ ξ)`. -/
 def Derive.instanceType (cls : String) (v : IndView) : Syntax :=
@@ -350,14 +376,18 @@ def Derive.beqMethod (v : IndView) (c : CtorView) : Syntax :=
     | .cons _ .nil => `(term| fun $y => match $yv with | $pat => $same)
     | _ => `(term| fun $y => match $yv with | $pat => $same | _ => Bool.false)
 
-/-- The deriver of `BEq`, by `Derive.elim` with `Derive.beqMethod`. -/
+/-- The deriver of `BEq`, by `Derive.elim` with `Derive.beqMethod`. For an indexed family
+the motive binds the indices (`Derive.depMotive`), so each constructor's method matches the
+second value at the constructor's own index; an unindexed type keeps the index-blind motive
+`fun _ => T → Bool`. -/
 def deriveBEq : Deriver := fun n => do
   v ← Derive.lookup "BEq" n;
-  Derive.noIndices "BEq" v;
   let x := Syntax.mkIdent "x✝";
   let xv := Syntax.mkVar "x✝";
-  let T := Derive.typeApp v;
-  let body := Derive.elim v `(term| fun _ => $T → Bool) (Derive.beqMethod v) xv;
+  let motive := match IndView.indices v with
+    | .nil => let T := Derive.typeApp v; `(term| fun _ => $T → Bool)
+    | _ => Derive.depMotive v `(term| Bool);
+  let body := Derive.elim v motive (Derive.beqMethod v) xv;
   let inst := Derive.instance (Derive.instanceType "BEq" v) `(term| BEq.mk (fun $x => $body));
   MacroM.pure (.cons inst .nil)
 attribute [deriver BEq] deriveBEq
