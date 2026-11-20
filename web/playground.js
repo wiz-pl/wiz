@@ -111,6 +111,32 @@ async function loadEngine() {
   }
 }
 
+// ## The runtime's editor rules
+
+// The runtime owns the editor's pure rules (`lib/Web/EditorModel.wiz`); the page asks
+// it one question at a time through `mount`'s `ask` (a read-only string query) and hands
+// the answer to the overlay widgets, which only paint and position. Nothing here decides
+// what a diagnostic underlines or what a completion inserts.
+function editorRules(handle) {
+  const ask = (name, ...args) => handle.ask(name, ...args);
+  return {
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments", text, JSON.stringify(diagnostics || []), "0")),
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup(text, offset, items, index) {
+      return JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset)));
+    },
+    move: (index, delta, count) =>
+      Number(ask("wiz_loom_editor_move", String(index), String(delta), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position", text, String(offset))),
+  };
+}
+
 // ## The effects the runtime asks for
 
 // The URL fragment and the draft: the runtime hands over the *formatted* values (it
@@ -149,6 +175,15 @@ function onRequest(kind, payload) {
     if (handle.host.download("playground.wiz", payload)) note("saved playground.wiz");
   } else if (kind === "share") share(payload);
   else if (kind === "sync") sync(payload);
+  else if (kind === "edit") {
+    // A Tab: the runtime formatted the edit (insert/indent at the selection); the host
+    // applies it to the textarea and reports the value and the new selection back. The
+    // `input` event the capability dispatches also reaches the runtime's normal path.
+    let edit = null;
+    try { edit = JSON.parse(payload); } catch { edit = null; }
+    const result = edit ? handle.host.edit(edit) : null;
+    if (result) effect("edited", result.value, result.selectionStart + "\n" + result.selectionEnd);
+  }
 }
 
 // ## The goals pane
@@ -158,11 +193,13 @@ function onRequest(kind, payload) {
 // editor overlays are on: the squiggle layer no longer wraps the textarea (it is the
 // last child of the editor's section, so the runtime's child-index patch paths stay
 // stable), and the completion popup is appended to the body, outside the rendered tree.
-function wireGoals(editor) {
+// The rules behind both are the runtime's (`editorRules`).
+function wireGoals(editor, rules) {
   startInfoview({
     editor,
     panel: document.getElementById("goals"),
     config: selfhost,
+    rules,
   });
 }
 
@@ -214,7 +251,7 @@ export async function startPage({ root, module = runtimeModule } = {}) {
   const draft = handle.host.storage.get(DRAFT_KEY) || "";
   handle.call("wiz_loom_effect", "load", hash, draft);
   const editor = document.getElementById("editor");
-  if (editor) wireGoals(editor);
+  if (editor) wireGoals(editor, editorRules(handle));
   if (typeof addEventListener === "function") {
     addEventListener("pagehide", () => {
       if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }

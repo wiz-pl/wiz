@@ -78,5 +78,8 @@ fi
   build web/Web.wiz -o "$OUT/wiz-infoview.mjs" --no-main)
 cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.js" \
   "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" "$ROOT/web/tagged.js" "$ROOT/web/scroll.js" \
-  "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" "$OUT/"
+  "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" "$ROOT/web/overlays.css" \
+  "$ROOT/web/squiggles.js" "$ROOT/web/completions.js" "$ROOT/web/hover.js" "$OUT/"
+mkdir -p "$OUT/framework"
+cp "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
 echo "built $OUT/wiz-infoview.mjs"

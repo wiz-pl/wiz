@@ -70,9 +70,14 @@ if [ -n "$webdir" ]; then
   # which also copies scroll.*); a web dir from before 11s has none of them
   for f in infoview.html infoview.js wiz-infoview.mjs wiz-infoview.wasm; do cp "$webdir/$f" "$top/share/wiz/web/$f"; done
   for f in tagged.js scroll.js scroll-search.js scroll.css \
-           lsp-client.js goals.js playground-lsp.js doc-live.js doc-live.css; do
+           lsp-client.js goals.js playground-lsp.js doc-live.js doc-live.css \
+           squiggles.js completions.js hover.js overlays.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
+  mkdir -p "$top/share/wiz/web/framework"
+  if [ -f "$webdir/framework/editor-text.js" ]; then
+    cp "$webdir/framework/editor-text.js" "$top/share/wiz/web/framework/editor-text.js"
+  fi
 fi
 echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > "$top/share/wiz/TOOLCHAIN"
 cat > "$top/bin/wiz" <<'EOF'

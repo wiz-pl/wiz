@@ -174,6 +174,13 @@ def webAssets : List (String × String) :=
    ("lsp-client.js", "text/javascript; charset=utf-8"),
    ("goals.js", "text/javascript; charset=utf-8"),
    ("tagged.js", "text/javascript; charset=utf-8"),
+   -- the editor's overlays (squiggles, completions, hover), their layout, and the
+   -- text-input helper the completion widget imports
+   ("squiggles.js", "text/javascript; charset=utf-8"),
+   ("completions.js", "text/javascript; charset=utf-8"),
+   ("hover.js", "text/javascript; charset=utf-8"),
+   ("framework/editor-text.js", "text/javascript; charset=utf-8"),
+   ("overlays.css", "text/css; charset=utf-8"),
    ("wiz-infoview.mjs", "text/javascript; charset=utf-8"), ("wiz-infoview.wasm", "application/wasm")]
 
 /-- The server's half of the handshake on a new connection: `true` if it is a WebSocket

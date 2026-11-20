@@ -20,7 +20,12 @@
 //   * `storage.get(key)` / `storage.set(key, value)` — `localStorage`, guarded;
 //   * `url(href)` — `history.replaceState`, guarded (`file://`, an over-long URL);
 //   * `tick(fn)` — run `fn` on the next animation frame (returns a cancel);
-//   * `onResize(fn)` — run `fn` when `el`'s size changes (returns a disconnect).
+//   * `onResize(fn)` — run `fn` when `el`'s size changes (returns a disconnect);
+//   * `edit({ insert, from, to })` — apply one text edit to the mount's text field:
+//     replace `[from, to)` (UTF-16 offsets; the current selection when omitted) with
+//     `insert`, put the caret after it, dispatch `input`, and return
+//     `{ value, selectionStart, selectionEnd }`. It is the *primitive*, not a policy:
+//     the runtime decides what to indent, and this only edits the control.
 //
 // The host object is the boundary: a capability that is not here is not in the runtime
 // either. `env` (for the Node tests, and for a non-browser host) supplies the browser
@@ -35,6 +40,15 @@
 import { start } from "./driver.js";
 
 const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
+
+// Take an owned UTF-8 string out of the module (the module allocated it; free it after
+// copying).
+function takeString(wasm, p) {
+  if (!p) return "";
+  const s = wasm.UTF8ToString(Number(p));
+  wasm._free(p);
+  return s;
+}
 
 // Find the mount point: an element, or a selector (a missing `#id` is created, so a
 // page needs no placeholder); null when there is nothing to mount on.
@@ -71,6 +85,60 @@ async function instantiate(module, options) {
     throw new TypeError("mount: the runtime does not export wiz_loom_init/html/step");
   }
   return wasm;
+}
+
+// The text field inside the mount point: the element itself when it is one, else the
+// first `<textarea>`/text input below it. A page has one editor; the runtime names no
+// selector.
+function textFieldOf(el) {
+  const isField = (n) => {
+    const tag = n && n.tagName ? String(n.tagName).toLowerCase() : "";
+    if (tag === "textarea") return true;
+    if (tag !== "input") return false;
+    const type = typeof n.getAttribute === "function" ? n.getAttribute("type") : null;
+    return !type || type === "text" || type === "search" || type === "url";
+  };
+  if (isField(el)) return el;
+  const walk = (n) => {
+    for (const c of (n.childNodes || [])) {
+      if (isField(c)) return c;
+      const found = walk(c);
+      if (found) return found;
+    }
+    return null;
+  };
+  return el ? walk(el) : null;
+}
+
+// `host.edit`: one text edit on the field, no policy. `from`/`to` are UTF-16 offsets
+// (the current selection when omitted); the caret lands after the inserted text; the
+// `input` event is the page's normal "the text changed" path.
+function applyEdit(el, doc, edit) {
+  const field = textFieldOf(el);
+  if (!field || typeof edit !== "object" || edit === null) return null;
+  const value = typeof field.value === "string" ? field.value : "";
+  const startSel = typeof field.selectionStart === "number" ? field.selectionStart : 0;
+  const endSel = typeof field.selectionEnd === "number" ? field.selectionEnd : startSel;
+  const clamp = (n) => Math.max(0, Math.min(value.length, Number.isFinite(n) ? Math.trunc(n) : 0));
+  const from = edit.from === undefined ? startSel : clamp(edit.from);
+  const to = edit.to === undefined ? (edit.from === undefined ? endSel : from) : clamp(edit.to);
+  const insert = edit.insert === undefined ? "" : String(edit.insert);
+  const next = value.slice(0, from) + insert + value.slice(Math.max(from, to));
+  const caret = from + insert.length;
+  field.value = next;
+  try {
+    if (typeof field.setSelectionRange === "function") field.setSelectionRange(caret, caret);
+    else { field.selectionStart = caret; field.selectionEnd = caret; }
+  } catch { /* a field that refuses a selection: the value still changed */ }
+  // The page's own listeners (didChange, the squiggle refresh) see a normal edit.
+  try {
+    const EventImpl = (doc && doc.defaultView && doc.defaultView.Event) ||
+      (typeof Event === "function" ? Event : null);
+    if (EventImpl && typeof field.dispatchEvent === "function") {
+      field.dispatchEvent(new EventImpl("input", { bubbles: true }));
+    }
+  } catch { /* no event implementation: the caller still gets the new value */ }
+  return { value: next, selectionStart: caret, selectionEnd: caret };
 }
 
 // The browser capabilities, over `env`'s globals. Each is guarded: a private window, a
@@ -146,15 +214,18 @@ function browserHost(el, env) {
       ro.observe(el);
       return () => ro.disconnect();
     },
+    edit: (edit) => applyEdit(el, doc, edit),
   };
 }
 
 // Mount `module`'s runtime on `target`. Returns the handle a page needs for its own
 // effects: `call(name, ...args)` invokes an exported entry point with the current state
-// (the module consumes it and returns the next one), and `state`/`html`/`setState` are
-// the driver's. `onRequest(kind, payload)` receives the effects the runtime asked for
-// (its `wiz_loom_requests` export, a JSON list); the page does them and acknowledges
-// with `call("wiz_loom_effect", "ack", kind, "")`.
+// (the module consumes it and returns the next one), `ask(name, ...args)` invokes a
+// read-only entry point that returns a string without touching the state (the editor's
+// rules), and `state`/`html`/`setState` are the driver's. `onRequest(kind, payload)`
+// receives the effects the runtime asked for (its `wiz_loom_requests` export, a JSON
+// list); the page does them and acknowledges with
+// `call("wiz_loom_effect", "ack", kind, "")`.
 export async function mount(target, { module, transport, env = globalThis, print, printErr,
   events, parse, onStep, onRequest } = {}) {
   const doc = (target && target.ownerDocument) || env.document;
@@ -221,6 +292,27 @@ export async function mount(target, { module, transport, env = globalThis, print
     service();
   };
 
+  // A read-only runtime query (the editor's pure rules, `wiz_loom_editor_*`): strings
+  // in, an owned string out, no state and no effect. The page parses the JSON.
+  const ask = (name, ...args) => {
+    const fn = wasm["_" + name];
+    if (typeof fn !== "function") throw new TypeError("mount: the runtime has no " + name);
+    const pointers = [];
+    const rest = args.map((a) => {
+      if (typeof a === "string") {
+        const p = wasm.stringToNewUTF8(a);
+        pointers.push(p);
+        return big(p);
+      }
+      return typeof a === "number" ? big(a) : a;
+    });
+    try {
+      return takeString(wasm, fn(...rest));
+    } finally {
+      for (const p of pointers) wasm._free(p);
+    }
+  };
+
   service();
-  return { ...app, call, host, module: wasm };
+  return { ...app, call, ask, host, module: wasm };
 }

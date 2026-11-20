@@ -5,8 +5,9 @@
 // `character * charWidth`).
 //
 // The decisions — which items match, the keyboard's index arithmetic, what an accepted
-// item replaces — are `web/editor-model.js`'s pure functions, tested in
-// `web/editor_test.mjs`. This file is the DOM and the timers:
+// item replaces — are `lib/Web/EditorModel.wiz`'s pure functions, reached through
+// `options.rules` (the runtime's `wiz_loom_editor_*` queries). This file is the DOM and
+// the timers:
 //
 //   * **Triggers.** Ctrl/⌘-Space asks unconditionally; typing an identifier character
 //     asks after `debounce` ms (120 by default), outside a line comment. A non-identifier
@@ -20,10 +21,7 @@
 //   * **Closing.** Escape, a blur, a non-identifier key, an empty result, or a server
 //     error. Nothing here throws at the page: a server without completion is silent.
 "use strict";
-import {
-  caretOffset, caretPosition, completionItems, completionPopupState, moveSelection,
-  acceptCompletion, completionTrigger, COMPLETION_LIMIT,
-} from "./editor-model.js";
+import { caretOffset } from "./framework/editor-text.js";
 
 const PAGE = 10;
 
@@ -46,17 +44,26 @@ function itemTitle(item) {
   return item.detail === undefined ? null : String(item.detail);
 }
 
-// `mountCompletions({editor, onRequest, document?, debounce?, autoTrigger?, limit?})`.
-// `onRequest(position)` returns a `textDocument/completion` result (a promise) or null.
+// The caret as `{line, character}` from the runtime's position rule.
+function caretPosition(rules, editor) {
+  const value = typeof editor.value === "string" ? editor.value : "";
+  return rules.position(value, caretOffset(editor));
+}
+
+// `mountCompletions({editor, rules, onRequest, document?, debounce?, autoTrigger?})`.
+// `rules` is the runtime's pure editor model (`items`, `popup`, `move`, `accept`,
+// `trigger`, `position`); `onRequest(position)` returns a `textDocument/completion`
+// result (a promise) or null.
 export function mountCompletions(options = {}) {
   const editor = options.editor;
+  const rules = options.rules;
   const onRequest = options.onRequest;
   const doc = options.document || (editor && editor.ownerDocument) ||
     (typeof document !== "undefined" ? document : null);
-  if (!editor || !doc || typeof doc.createElement !== "function" || typeof onRequest !== "function") return null;
+  if (!editor || !doc || typeof doc.createElement !== "function" ||
+      typeof onRequest !== "function" || !rules) return null;
   const debounce = options.debounce === undefined ? 120 : options.debounce;
   const autoTrigger = options.autoTrigger !== false;
-  const limit = options.limit === undefined ? COMPLETION_LIMIT : options.limit;
 
   const list = doc.createElement("div");
   attr(list, "class", "completions");
@@ -100,7 +107,7 @@ export function mountCompletions(options = {}) {
   }
 
   function place() {
-    const position = caretPosition(editor);
+    const position = caretPosition(rules, editor);
     const m = metrics();
     const rect = typeof editor.getBoundingClientRect === "function"
       ? editor.getBoundingClientRect() : { left: 0, top: 0 };
@@ -163,14 +170,14 @@ export function mountCompletions(options = {}) {
   }
 
   function show(result) {
-    items = completionItems(result);
+    items = rules.items(result) || [];
     if (!items.length) { close(); return []; }
-    const state = completionPopupState(value(), caretOffset(editor), items, 0);
-    filtered = state.items.slice(0, limit);
-    prefix = state.prefix;
+    const state = rules.popup(value(), caretOffset(editor), items, 0);
+    filtered = state.items.slice();
+    prefix = { start: state.prefixStart, word: state.prefixWord };
     if (!filtered.length) { close(); return []; }
     open = true;
-    index = 0;
+    index = state.index < 0 ? 0 : state.index;
     render();
     place();
     return filtered.slice();
@@ -180,7 +187,7 @@ export function mountCompletions(options = {}) {
   // wins, and an answer that arrives after a newer one is dropped.
   async function request(position) {
     if (destroyed) return [];
-    const at = position || caretPosition(editor);
+    const at = position || caretPosition(rules, editor);
     const mine = ++seq;
     let result;
     try {
@@ -193,13 +200,13 @@ export function mountCompletions(options = {}) {
     return show(result);
   }
 
-  function requestAtCaret() { return request(caretPosition(editor)); }
+  function requestAtCaret() { return request(caretPosition(rules, editor)); }
 
   function accept() {
     if (!open || index < 0 || !filtered[index]) return false;
     const item = filtered[index];
     const before = value();
-    const accepted = acceptCompletion(item, before, caretOffset(editor));
+    const accepted = rules.accept(item, before, caretOffset(editor));
     close();
     if (accepted.text !== before) {
       editor.value = accepted.text;
@@ -225,7 +232,8 @@ export function mountCompletions(options = {}) {
 
   function move(delta) {
     if (!open || !filtered.length) return;
-    index = moveSelection(index, delta, filtered.length);
+    index = rules.move(index, delta, filtered.length);
+    if (index < 0) index = 0;
     render();
   }
 
@@ -278,12 +286,13 @@ export function mountCompletions(options = {}) {
     const text = value();
     const at = caretOffset(editor);
     const typed = text.slice(Math.max(0, at - 1), at);
-    if (!completionTrigger(text, at, typed)) { close(); return; }
+    if (!rules.trigger(text, at, typed)) { close(); return; }
     if (open && items.length) {
-      const state = completionPopupState(text, at, items, index);
-      filtered = state.items.slice(0, limit);
-      prefix = state.prefix;
-      index = filtered.length ? moveSelection(index, 0, filtered.length) : -1;
+      const state = rules.popup(text, at, items, index);
+      filtered = state.items.slice();
+      prefix = { start: state.prefixStart, word: state.prefixWord };
+      index = filtered.length ? state.index : -1;
+      if (index < 0) index = filtered.length ? 0 : -1;
       if (!filtered.length) { close(); return; }
       render();
       place();

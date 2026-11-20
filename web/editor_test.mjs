@@ -1,7 +1,8 @@
-// The playground editor's model under Node: positions (UTF-16 versus code points), the
-// ranges diagnostics underline, and the completion list's filtering, ordering, keyboard
-// index and insertion. Pure functions, no DOM, no server: this is the part of the
-// editor's behaviour that a browser test would only repeat.
+// The playground editor's model, **as the test oracle**: positions (UTF-16 versus code
+// points), the ranges diagnostics underline, and the completion list's filtering,
+// ordering, keyboard index and insertion. The runtime owns these rules now
+// (`lib/Web/EditorModel.wiz`, with the `=loom` cases); this test pins the oracle the DOM
+// widgets and the Wiz cases are compared against.
 //
 //   usage: node web/editor_test.mjs
 "use strict";
@@ -12,7 +13,7 @@ import {
   identifierPrefix, isIdentifierChar, inLineComment, completionTrigger,
   completionItems, completionScore, filterCompletions, moveSelection,
   stripSnippet, acceptCompletion, completionPopupState, COMPLETION_LIMIT,
-} from "./editor-model.js";
+} from "./framework/editor-model.mjs";
 
 let failed = 0;
 function check(name, got, want) {

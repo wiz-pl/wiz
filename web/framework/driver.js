@@ -58,9 +58,10 @@ function takeString(wasm, p) {
 //
 // A keydown/keyup carries its modifiers after a newline — `Enter\nc` for Ctrl+Enter,
 // `s\ncm` for ⌘+S — because the keyboard policy (`Page.consume`) must not run a program
-// on a bare Enter or save on a bare `s`. A key is never a newline, and `Loom.splitEvent`
-// keeps the rest of the string as the payload, so the separator is unambiguous. With no
-// modifier the payload is the key alone, as before.
+// on a bare Enter or save on a bare `s`. When the event's target is a text field, the
+// selection follows on another line as `@start@end` (UTF-16), so the runtime can indent
+// a selection; a key is never a newline and `@` is not a modifier, so the format is
+// unambiguous. With no modifier and no selection the payload is the key alone, as before.
 const MOD_SEP = "\n";
 export function payloadOf(type, e) {
   const target = e && e.target;
@@ -73,7 +74,14 @@ export function payloadOf(type, e) {
     const key = e && typeof e.key === "string" ? e.key : "";
     const mods = (e && e.ctrlKey ? "c" : "") + (e && e.metaKey ? "m" : "") +
       (e && e.shiftKey ? "s" : "") + (e && e.altKey ? "a" : "");
-    return mods ? key + MOD_SEP + mods : key;
+    let selection = "";
+    if (target && typeof target.selectionStart === "number") {
+      const start = Math.max(0, Math.trunc(target.selectionStart));
+      const end = typeof target.selectionEnd === "number" ? Math.max(start, Math.trunc(target.selectionEnd)) : start;
+      selection = MOD_SEP + "@" + start + "@" + end;
+    }
+    if (!mods && !selection) return key;
+    return key + MOD_SEP + mods + selection;
   }
   return "";
 }

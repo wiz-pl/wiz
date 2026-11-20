@@ -21,6 +21,7 @@ import {
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
+import { rules } from "./framework/editor-model.mjs";
 import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
 
 let failed = 0;
@@ -377,6 +378,7 @@ const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
 const pageDocument = fakeDocument();
 const app = startInfoview({
+  rules,
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
   document: pageDocument,
 });
@@ -451,7 +453,7 @@ checkThat("wiring: didChange after an edit",
 checkThat("wiring: a squiggle for the diagnostic", app.squiggles() && app.squiggles().segments().length === 1,
   JSON.stringify(app.squiggles() && app.squiggles().segments()));
 check("wiring: the squiggle's range",
-  app.squiggles().segments().map((s) => s.start + "-" + s.end).join(","), "0-3");
+  app.squiggles().segments().map((s) => s.start + "-" + s.stop).join(","), "0-3");
 
 // An edit reaches the server before the goal refresh. A keyup asks for goals 120 ms
 // later, while didChange used to wait 250 ms, so the server was asked about a position
@@ -510,6 +512,7 @@ const selfEditor = fakeEditor(SELF_TEXT);
 const selfPanel = fakePanel();
 const selfDocument = fakeDocument();
 const selfApp = startInfoview({
+  rules,
   editor: selfEditor, panel: selfPanel, uri: "file:///in-page.wiz", document: selfDocument,
   config: selfhostEndpoint({ evaluate: () => "", check: selfCheck }),
 });
