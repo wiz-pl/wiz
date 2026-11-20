@@ -183,7 +183,7 @@ def freshPlaceholder (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Term R) := do
 /-- Names the elaborator treats as data primitives when applied (and not shadowed). -/
 def builtinNames : List Name :=
   ["Desc", "Desc.ret", "Desc.arg", "Desc.rec", "Desc.hrec", "Desc.elim", "Desc.interp", "Desc.All",
-   "μ", "ν", "con", "ind", "out", "coit", "cocon"]
+   "μ", "ν", "con", "ind", "out", "coit", "cocon", "scofix"]
 
 /-- `f a₁ … aₙ` where `f` is an unshadowed built-in name. -/
 def builtinApp? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Name × Array Syntax)) := do
@@ -1663,11 +1663,28 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     let some s' := sizePred? sz
       | throwAt ctx.info s!"cocon builds a value of size ↑s, but the expected type is {← showVal ctx expected}"
     return some (.cocon (← check ctx x (vInterp g l I D (nuFamilyAt l I D s') i)))
+  | "scofix", #[A, f, s, idx, a], .nu l I D _ _ _ =>
+    -- `scofix A f s i a`: `A : (j : Size) → I → Type`,
+    -- `f : (j) → ((i:I) → A j i → ν^j) → (i:I) → A (↑j) i → ν^{↑j}`,
+    -- `a : A s i`; the result is `ν^s D i` (checked against the expected type by
+    -- subtyping, as for any inferred form)
+    let A' ← check ctx A (scofixStateTy l I w)
+    let vA ← evalIn ctx A'
+    let f' ← check ctx f (scofixFunTy g l I D vA w)
+    let s' ← check ctx s .size
+    let vS ← evalIn ctx s'
+    let idx' ← check ctx idx I
+    let a' ← check ctx a (vApp g (vApp g vA vS) (← evalIn ctx idx'))
+    let ty : VTy R := .nu l I D (← evalIn ctx idx') vS none
+    unless subTy g ctx.types.reverse.toArray ty expected do
+      throwAt ctx.info s!"type mismatch\n  expected: {← showVal ctx expected}\n  inferred: {← showVal ctx ty}"
+    return some (.scofix l (q I) (q D) A' f' s' idx' a')
   | "Desc.ret", _, _ | "Desc.arg", _, _ | "Desc.rec", _, _ | "Desc.hrec", _, _ =>
     shapeError s!"{n} builds a description"
   | "con", _, _ => shapeError "con builds an inductive value"
   | "coit", _, _ => shapeError "coit builds a coinductive value"
   | "cocon", _, _ => shapeError "cocon builds a coinductive value"
+  | "scofix", _, _ => shapeError "scofix builds a coinductive value"
   | _, _, _ => return none
 
 /-- Stage 4d: data primitives whose type can be inferred. -/

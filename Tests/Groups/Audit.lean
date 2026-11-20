@@ -241,7 +241,10 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   isType "coitStateTy" c2 st
   let c3' := c2.bind "S" q st
   isType "coitStepTy" c3' (coitStepTy g lv I D (Val.var 3) w)
-  isType "scofixFunTy" c3' (scofixFunTy g lv I D (Val.var 3) w)
+  let stA := scofixStateTy lv I w
+  isType "scofixStateTy" c2 stA
+  let cA := c2.bind "A" q stA
+  isType "scofixFunTy" cA (scofixFunTy g lv I D (Val.var 3) w)
 
 /-! ## Native arithmetic against the definitions -/
 
