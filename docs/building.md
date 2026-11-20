@@ -163,9 +163,12 @@ passes it to the case's process; `tests --libdiff --part 2/6` runs one part loca
 the case's property test checks the partition for `n = 1…8` without a toolchain.
 
 A part writes `.lake/libdiff/records.jsonl` as each record arrives, so a part killed by
-the job timeout still leaves what it finished (a missing file is then named by the union
-check, rather than shrinking the green total). The check, `scripts/ci.py libdiff-union`,
-lives in `CI result` and reads the parts' uploaded `part.txt` and `records.jsonl`.
+the job timeout still leaves what it finished (a missing file is then named by the
+union check, rather than shrinking the green total). That check is the corpus:
+`.github/libdiff-corpus.txt` is the manifest of every `*.wiz` under `lib/` and `scry/`,
+in `LC_ALL=C` order, with no exclusions, and `scripts/check-libdiff-corpus.sh` (with
+`--self-test`, in the static gate) fails when a listed file is absent, a file under the
+two trees is unlisted, or an entry is duplicated or out of order. It needs no build.
 
 ### Flaky tests and the quarantine
 
@@ -889,15 +892,13 @@ setup action keeps the elan cache for those
   partitions its own file list by index (`libDiffPart`: the file at index `k` of the
   sorted list is in part `k % N + 1`), so the parts are deterministic, disjoint and
   their union is the case, unchanged in what each file is compared against.
-  `selfhost-libdiff` is the one: 181 files through both compilers in 3664 s (180 tracked
-  at this commit) is one case against the 1110 s shard limit, so six parts of ~611 s
-  each fit. `scripts/ci.py
-  libdiff-union` (in `CI result`) proves the union from the parts' `part.txt` and
-  `records.jsonl`: the parts are `1..N`, every part names the same `total`, every file
-  in `.github/libdiff-corpus.txt` is checked exactly once, the verdicts sum to the
-  whole-run summary, and no record is `bounded`. A parts shard is not a `split` shard:
-  it has no `.github/test-timings.json` entry, since the case (not the job set) is what
-  the baseline measures, so `make_baseline` skips it deliberately.
+  `.github/libdiff-corpus.txt` is the manifest of the files one whole sweep compares:
+  every `*.wiz` under `lib/` and `scry/` in `LC_ALL=C` order, with no exclusions, and
+  `scripts/check-libdiff-corpus.sh` (in the static gate, with `--self-test`) fails when
+  the manifest and the tree disagree, so no file can silently drop out of the sweep.
+  `selfhost-libdiff` here is a `split` shard (`"split": 2, "split-cases": true`) of four
+  contiguous file-range cases, so it keeps a `.github/test-timings.json` entry per case,
+  unlike a `"parts"` shard.
 * **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
   (after a perf fix, or when a group grows), fetch the last runs and rebalance:
 

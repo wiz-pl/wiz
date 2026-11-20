@@ -121,7 +121,7 @@ jobs:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: four Python checks on the checkout; no build
+    # 5 min: four Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -138,6 +138,7 @@ jobs:
           python3 scripts/check-complexity --diff HEAD^1
           python3 scripts/check-name-collisions.py --self-test
           python3 scripts/check-name-collisions.py --quiet
+          scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
   # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground

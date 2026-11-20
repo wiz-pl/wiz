@@ -1,10 +1,17 @@
 # The files one whole =selfhost-libdiff run compares: every *.wiz under lib/ and
 # scry/, sorted the way Tests/Groups/SelfhostLibDiff.lean's libDiffFiles sorts them.
-# `scripts/ci.py libdiff-union` checks that the shard's parts cover exactly this list
-# once; add or remove a line here in the same change that adds or removes the file
-# under lib/ or scry/. Regenerate with:
+# `scripts/check-libdiff-corpus.sh` checks that this list is exactly that walk: every
+# entry is a file, every file is an entry, there are no duplicates, and the order is
+# `LC_ALL=C`. Add or remove a line here in the same change that adds or removes the
+# file under lib/ or scry/. Regenerate with:
 #
 #   find lib scry -name '*.wiz' | LC_ALL=C sort
+#
+# There are no exclusions. The sweep compares acceptance, the first error's code, span
+# and message, and the declaration count; a file the self-hosted frontend cannot parse
+# is a divergence to report, not a reason to drop it from the corpus. A module that
+# genuinely cannot be compared needs its reason here, next to its absence, not silence.
+lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
 lib/BitVecAdd.wiz
@@ -21,6 +28,7 @@ lib/Eff.wiz
 lib/EffHeap.wiz
 lib/Encoding.wiz
 lib/Feral.wiz
+lib/FingerTree.wiz
 lib/Functor.wiz
 lib/Grail.wiz
 lib/HProp.wiz
@@ -46,6 +54,7 @@ lib/Hdl/Optic.wiz
 lib/Hdl/Pipe.wiz
 lib/Hdl/Prim.wiz
 lib/Hdl/ProtocolLaw.wiz
+lib/Hdl/Signal.wiz
 lib/Hdl/Sim.wiz
 lib/Hdl/Spi.wiz
 lib/Hdl/SpiLaw.wiz
@@ -80,6 +89,7 @@ lib/Ring.wiz
 lib/RingTactic.wiz
 lib/Sat.wiz
 lib/SatTactic.wiz
+lib/Scope.wiz
 lib/Scry/Ai.wiz
 lib/Scry/AiCfg.wiz
 lib/Scry/AiDomain.wiz
@@ -89,15 +99,27 @@ lib/Scry/Analysis.wiz
 lib/Scry/Bounds.wiz
 lib/Scry/Cert.wiz
 lib/Scry/Certify.wiz
+lib/Scry/ConcurrencyExamples.wiz
 lib/Scry/Datalog.wiz
 lib/Scry/Diff.wiz
 lib/Scry/Egraph.wiz
+lib/Scry/EgraphExtract.wiz
+lib/Scry/EgraphNative.wiz
+lib/Scry/EgraphTaint.wiz
+lib/Scry/EgraphWil.wiz
+lib/Scry/Engine.wiz
+lib/Scry/EqPlan.wiz
 lib/Scry/Eval.wiz
 lib/Scry/Interproc.wiz
 lib/Scry/Lifetime.wiz
 lib/Scry/Models.wiz
+lib/Scry/NullExamples.wiz
+lib/Scry/Nullness.wiz
 lib/Scry/Optics.wiz
 lib/Scry/PointsTo.wiz
+lib/Scry/Prover.wiz
+lib/Scry/ProverExamples.wiz
+lib/Scry/Race.wiz
 lib/Scry/Report.wiz
 lib/Scry/RuleExamples.wiz
 lib/Scry/RuleTaint.wiz
@@ -117,15 +139,19 @@ lib/SimpLemmas.wiz
 lib/Std.wiz
 lib/Sys.wiz
 lib/Tagged.wiz
+lib/Task.wiz
 lib/Text.wiz
 lib/Trace.wiz
 lib/Vec.wiz
+lib/Web/Editor.wiz
 lib/Web/Loom.wiz
+lib/Web/Playground.wiz
 lib/Web/Widget.wiz
 lib/Word.wiz
 lib/WordArray.wiz
 lib/WordMap.wiz
 scry/App.wiz
+scry/fixtures/ReplPrelude.wiz
 scry/gen/C/Schema.wiz
 scry/grail.wiz
 scry/src/Scry/Bench.wiz
@@ -133,6 +159,7 @@ scry/src/Scry/BenchCmd.wiz
 scry/src/Scry/Budget.wiz
 scry/src/Scry/Cli.wiz
 scry/src/Scry/Codegen.wiz
+scry/src/Scry/CsCmd.wiz
 scry/src/Scry/CsCst.wiz
 scry/src/Scry/CsLower.wiz
 scry/src/Scry/CstOptics.wiz
@@ -158,7 +185,6 @@ scry/src/Scry/Repro.wiz
 scry/src/Scry/Schema.wiz
 scry/src/Scry/TaintCmd.wiz
 scry/src/Scry/WorkflowCmd.wiz
-scry/tests/ReplPrelude.wiz
 scry/tests/bench.wiz
 scry/tests/cli.wiz
 scry/tests/codegen.wiz
@@ -166,6 +192,8 @@ scry/tests/cst.wiz
 scry/tests/diff-cli.wiz
 scry/tests/diff.wiz
 scry/tests/dynamic.wiz
+scry/tests/egraph-rewrite.wiz
+scry/tests/egraph.wiz
 scry/tests/fuzz.wiz
 scry/tests/native.wiz
 scry/tests/oob.wiz
@@ -184,6 +212,11 @@ scry/tests/schema-index.wiz
 scry/tests/schema.wiz
 scry/tests/taint.wiz
 scry/tests/uaf.wiz
+scry/tests/workflow-e2e.wiz
 scry/tests/workflow.wiz
+scry/tools/CsCover.wiz
+scry/tools/CsExternalsMain.wiz
+scry/tools/CsTraceMain.wiz
 scry/tools/CstMain.wiz
+scry/tools/ProverMain.wiz
 scry/tools/SchemaMain.wiz
