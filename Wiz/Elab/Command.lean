@@ -986,7 +986,7 @@ partial def rewriteSizedRhs (info : SourceInfo) (name recName idxName : Name) (n
   | .node i "term.ident" #[.ident j nm] =>
     match (coid.findSome? fun (x, os) =>
         if nm.startsWith (x ++ ".") then
-          let o := nm.drop (x.length + 1)
+          let o := (nm.drop (x.length + 1)).toString
           os.idxOf? o |>.map fun pos => sObs info x pos
         else none) with
     | some t => t
@@ -1203,25 +1203,26 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
     | _ => none)
     | throwAt tyStx.info s!"a sized copattern definition needs a size variable as its result size, not {← showVal ctx sz}"
   let w : R := QuantitySyntax.explicitDefault
+  let wT : Term R := .qlit w
   let q := quote g ctx.lvl
   let explicit := (tele.toList.zipIdx.filter fun ((_, bi, _, _), _) => bi == .default)
   let n := explicit.length
   -- the state type at the declared size, and the seed (the explicit binders' tuple)
   let stateTy0 : Term R := explicit.zipIdx.foldr (fun (((x, _, _, _), k), j) acc =>
-    .sigma x w ((q ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
+    .sigma x wT ((q ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
   let init : Term R := (explicit.map fun ((_, _, _, _), k) => (.var (ctx.lvl - k - 1) : Term R)).foldr .pair .tt
   -- A := fun j => fun _ => stateTy0[si := j]
   let A : Term R := .lam "j" (.lam "_" (replaceFree (si + 2) (.var 1) (stateTy0.lift 2)))
   let vA ← evalIn ctx A
-  let vI := evalIn ctx I
-  let vD := evalIn ctx D
+  let vI := I
+  let vD := D
   -- the body context: j, rec, idx, a
   let ctxJ := ctx.bind "j" .size
   let vJ := Val.var ctx.lvl
-  let vF := evalIn ctx (scofixFunTy g l vI vD vA w)
+  let vF ← evalIn ctx (scofixFunTy g l vI vD vA w)
   let vAfterJ := vApp g vF vJ
   let vRecDom := match whnf vAfterJ with
-    | .pi _ _ _ dom _ => dom
+    | .pi _ _ _ dom _ _ => dom
     | _ => panic! "scofix rec domain"
   let recName : Name := name ++ "✝rec"
   let idxName : Name := "idx✝"
@@ -1233,14 +1234,14 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   let vAfterRec := vApp g vAfterJ vRec
   let vAfterIdx := vApp g vAfterRec vIdx
   let vStateBody := match whnf vAfterIdx with
-    | .pi _ _ _ dom _ => dom
+    | .pi _ _ _ dom _ _ => dom
     | _ => panic! "scofix body state"
   -- the explicit binders at the body size, as real context binders (from the state)
   let mut cctx := ctxJRI.bind aName vStateBody
   let mut sty := vStateBody
   for ((x, _, qq, _), _) in explicit do
     match whnf sty with
-    | .sigma _ _ Aty B =>
+    | .sigma _ _ Aty B _ =>
       cctx := cctx.bindQ x Aty ((Val.toPoly? qq).bind (·.isConst?))
       sty := Closure.inst g B (Val.var (cctx.lvl - 1))
     | _ => throwAt info "internal error: state tuple"
