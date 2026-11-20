@@ -3218,13 +3218,15 @@ def selfHostGroup : Group where
            ("C.wiz", "import Prelude\nimport D\n"),
            ("D.wiz", "import Prelude\nimport B\n"),
            ("input.wiz", "import Prelude\nimport B\n")]
-          "error: import cycle: B -> C -> D -> B\n" },
+          -- (D6) a three-module cycle nests the whole path under the root's import
+          "error: imported module B → imported module C → module D has errors:\n  D:2:1: error: import cycle: B -> C -> D -> B\n" },
     { name := "modules: a duplicate name in two imported modules is rejected", run := fun _ =>
         selfhostCheckModules
           [("B.wiz", "import Prelude\ndef x : Nat := 1\n"),
            ("C.wiz", "import Prelude\ndef x : Nat := 2\n"),
            ("input.wiz", "import Prelude\nimport B\nimport C\n")]
-          "x : Nat\nerror: 'x' has already been declared\n" },
+          -- (D6) C's duplicate is nested under the root's import
+          "x : Nat\nerror: module C has errors:\n  C:2:5: error: 'x' has already been declared\n" },
     { name := "modules: the cache key includes the module graph", run := fun _ => do
         let root := "import Prelude\nimport B\ndef two : Nat := one\n"
         let files1 := [("B.wiz", "import Prelude\ndef one : Nat := 1\n"), ("input.wiz", root)]
