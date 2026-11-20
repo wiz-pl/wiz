@@ -364,6 +364,7 @@ EOF
               fileset = fs.unions [
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
                 ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/mount.js
                 ./lib
               ];
             };
