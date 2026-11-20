@@ -17,6 +17,20 @@ def grailBuild (dir : System.FilePath) (flags : List String) : IO IO.Process.Out
   let args := #["--grail", "-C", dir.toString] ++ flags.toArray ++ #["build", "app"]
   IO.Process.output { cmd := self.toString, args }
 
+/-- The `region-stats:` lines a build printed, in the jobs' report order. -/
+def regionStatLines (out : String) : List String :=
+  (out.splitOn "\n").filter (fun l => l.startsWith "region-stats:")
+
+/-- The counter `key` (`hits`, `misses`, `commands`) of a `region-stats: key=N …` line. -/
+def regionStat (line key : String) : Nat :=
+  match (line.splitOn (key ++ "=")).drop 1 with
+  | s :: _ => (((s.splitOn " ").head?).bind String.toNat?).getD 0
+  | [] => 0
+
+/-- A build's report without its per-job `region-stats:` lines (for comparing builds). -/
+def withoutRegionStats (out : String) : String :=
+  "\n".intercalate ((out.splitOn "\n").filter (fun l => !l.startsWith "region-stats:"))
+
 /-- (9f) An executable with a `link_c` file: editing the C file relinks it (only). -/
 def linkCCase : Case :=
     { name := "an executable with link_c: a C edit reruns the link only", run := fun _ => do
@@ -149,7 +163,7 @@ def grailGroup : Group where
         let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
         checkEq 0 out.exitCode
         check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
-    { name := "grail build --region-cache: jobs write regions, and a warm build matches the text cache", run := fun _ => do
+    { name := "grail build --region-cache: jobs write regions, --region-stats counts them, and a warm build matches the text cache", run := fun _ => do
         let cache ← IO.FS.createTempDir
         -- the text-only reference, in its own package tree
         let text ← mkTree pkgFiles
@@ -158,15 +172,47 @@ def grailGroup : Group where
         checkEq 0 (← regionFiles cache).size
         -- a first region build: each package module's effects become one .wizr
         let cold ← mkTree pkgFiles
-        let o1 ← grailBuild cold ["--cache", cache.toString, "--region-cache"]
+        let o1 ← grailBuild cold ["--cache", cache.toString, "--region-cache", "--region-stats"]
         checkEq 0 o1.exitCode
         check ((← regionFiles cache).size > 0) "the region build wrote no .wizr"
+        -- every job prints its counters (the text entries were warm here, so a job may
+        -- already find a region another job wrote; the cold/warm distinction is the
+        -- one-job scenario below)
+        let coldStats := regionStatLines o1.stdout
+        check (coldStats.length > 1) s!"not every job printed region-stats: {o1.stdout}{o1.stderr}"
+        check (coldStats.any fun l => regionStat l "commands" > 0) s!"no command came from a region: {coldStats}"
         -- a warm region build in a fresh tree: the same report and job keys as the text build
         let warm ← mkTree pkgFiles
-        let o2 ← grailBuild warm ["--cache", cache.toString, "--region-cache"]
+        let o2 ← grailBuild warm ["--cache", cache.toString, "--region-cache", "--region-stats"]
         checkEq 0 o2.exitCode
-        checkEq o0.stdout o2.stdout
-        checkEq (← buildDirs text) (← buildDirs warm) },
+        check ((regionStatLines o2.stdout).any fun l => regionStat l "hits" > 0)
+          s!"no warm job hit a region: {regionStatLines o2.stdout}"
+        checkEq o0.stdout (withoutRegionStats o2.stdout)
+        checkEq (← buildDirs text) (← buildDirs warm)
+        -- two jobs, one import that has no imports of its own: cold reports zero hits,
+        -- warm reports a hit, and with the region cache off the counters are zero (a job
+        -- does not invent counters). The build files import Grail/Prelude, but the jobs
+        -- import only this leaf module, so config reading cannot warm what they look up.
+        let one : List (String × String) :=
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"one\"\n  |> Package.lib \"mylib\" \"src\"\n  |> Package.check \"app\" \"app.wiz\"\n"),
+           ("src/Leaf.wiz", "-- a leaf module: no imports\n"),
+           ("app.wiz", "import Leaf\n")]
+        let statsCache ← IO.FS.createTempDir
+        let runStats (flags : List String) : IO (List String) := do
+          let dir ← mkTree one
+          let o ← grailBuild dir (["--cache", statsCache.toString, "--region-stats"] ++ flags)
+          checkEq 0 o.exitCode
+          let ls := regionStatLines o.stdout
+          check (ls.length == 2) s!"expected both jobs' counters: {o.stdout}{o.stderr}"
+          pure ls
+        let coldOne ← runStats ["--region-cache"]
+        check (coldOne.all fun l => regionStat l "hits" == 0) s!"a cold job hit a region: {coldOne}"
+        check (coldOne.any fun l => regionStat l "misses" > 0) s!"a cold job did not miss: {coldOne}"
+        let warmOne ← runStats ["--region-cache"]
+        check ((warmOne.any fun l => regionStat l "hits" > 0)) s!"a warm job did not hit: {warmOne}"
+        let offOne ← runStats []
+        check (offOne.all fun l => regionStat l "hits" == 0 && regionStat l "misses" == 0 &&
+          regionStat l "commands" == 0) s!"counters without --region-cache: {offOne}" },
     { name := "grail build --region-cache: a corrupt region falls back, and a read-only layer serves regions", run := fun _ => do
         let cache ← IO.FS.createTempDir
         let dir ← mkTree pkgFiles

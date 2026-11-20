@@ -23,7 +23,7 @@ def xsP : List Nat := .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.con
 def aluOut : List Nat := Pipe.runPacked alu3 xsP
 
 def aluNetOk : Bool :=
-  Bool.and (Hdl.natsEq aluOut (Pipe.simNet .true alu3 xsP)) (Hdl.natsEq aluOut (Pipe.simNet .false alu3 xsP))
+  Bool.and (BEq.beq aluOut (Pipe.simNet .true alu3 xsP)) (BEq.beq aluOut (Pipe.simNet .false alu3 xsP))
 
 def aluVerilog : String := Pipe.verilog "alu3" alu3
 
@@ -103,7 +103,7 @@ def expectedData : List Nat := .cons 13 (.cons 18 (.cons 23 (.cons 28 (.cons 33 
 #eval ((Hdl.map (fun (t : Nat × Nat × Nat) => t.2.1) (Hdl.map fout (Flow.run gen3 genTrace)),
   Hdl.map (fun (t : Nat × Nat × Nat) => t.1) (Hdl.map fout (Flow.run gen3 genTrace))) : List Nat × List Nat)
 #eval transfers (Hdl.map fout (Flow.run gen3 genTrace)) genReady
-#eval Hdl.natsEq (transfers (Hdl.map fout (Flow.run gen3 genTrace)) genReady) expectedData
+#eval BEq.beq (transfers (Hdl.map fout (Flow.run gen3 genTrace)) genReady) expectedData
 #eval Hdl.map (fun (t : Nat × Nat × Nat) => t.2.2) (Hdl.map fout (Flow.run gen3 genTrace))
 
 ------------------------------------------------------------------------------------
@@ -126,11 +126,6 @@ def resetOut : List (Nat × Nat × Nat) := Hdl.map fout (Circuit.run flow3R rese
 ------------------------------------------------------------------------------------
 -- 4. The three simulations agree (compiled; `Array` is not available in `#eval`).
 
-def leavesEq : List (List Nat) → List (List Nat) → Bool
-  | .cons a as, .cons b bs => Bool.and (Hdl.natsEq a b) (leavesEq as bs)
-  | .nil, .nil => .true
-  | _, _ => .false
-
 def yes (b : Bool) : String := match b with
   | .true => "yes"
   | .false => "NO"
@@ -140,9 +135,9 @@ def main : IO Unit := do
   let fA := Circuit.simFast alu3.circuit (Hdl.map (HwTy.unpack B8) xsP);
   let vF := Circuit.runLeaves (Flow.toCircuit flow3) throughTrace;
   let fF := Circuit.simFast (Flow.toCircuit flow3) throughTrace;
-  IO.println ("alu3: simFast = run = netlist: " <+> yes (Bool.and (leavesEq fA vA)
-    (Bool.and (leavesEq fA (Circuit.simLeaves .true alu3.circuit (Hdl.map (HwTy.unpack B8) xsP)))
-      (leavesEq fA (Circuit.simLeaves .false alu3.circuit (Hdl.map (HwTy.unpack B8) xsP))))));
-  IO.println ("flow3: simFast = run = netlist: " <+> yes (Bool.and (leavesEq fF vF)
-    (Bool.and (leavesEq fF (Circuit.simLeaves .true (Flow.toCircuit flow3) throughTrace))
-      (leavesEq fF (Circuit.simLeaves .false (Flow.toCircuit flow3) throughTrace)))))
+  IO.println ("alu3: simFast = run = netlist: " <+> yes (Bool.and (BEq.beq fA vA)
+    (Bool.and (BEq.beq fA (Circuit.simLeaves .true alu3.circuit (Hdl.map (HwTy.unpack B8) xsP)))
+      (BEq.beq fA (Circuit.simLeaves .false alu3.circuit (Hdl.map (HwTy.unpack B8) xsP))))));
+  IO.println ("flow3: simFast = run = netlist: " <+> yes (Bool.and (BEq.beq fF vF)
+    (Bool.and (BEq.beq fF (Circuit.simLeaves .true (Flow.toCircuit flow3) throughTrace))
+      (BEq.beq fF (Circuit.simLeaves .false (Flow.toCircuit flow3) throughTrace)))))

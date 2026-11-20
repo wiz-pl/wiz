@@ -8,6 +8,13 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- Whether a C compiler is on PATH. `Bytes.push` (and so `WordBytes`) is a native
+(`implemented_by`), which only compiled code can run; without `cc` its round-trip has no
+path at all, so the case skips. -/
+def hasCC : IO Bool := do
+  let o ← IO.Process.output { cmd := "cc", args := #["--version"] }
+  pure (o.exitCode == 0)
+
 /-- Machine words (`lib/Word.wiz`): one table of operations at widths 8–100, signed and
 unsigned, with its expected values. The kernel and the interpreters compute with the
 definitions; compiled code calls the natives (`implemented_by`). -/
@@ -90,6 +97,33 @@ def wordGroup : Group where
           (out.splitOn "proj").length == 1) s!"no native call (or a dictionary) in:\n{out}" },
     { name := "compiled: operators at words run natively (C)", run := fun _ =>
         cRun "import Word\ndef main : Nat := ((250 : U8) + 10 * 2).toNat + (-1 / 2 : I8).toNat" "14" },
+    { name := "WordBytes: toU8s (ofU8s l) = l on a known list, empties and 0/255 (C)", run := fun _ => do
+        -- `Bytes.push` is native (`wiz_bytes_push`), so the round-trip is compiled code:
+        -- the interpreters refuse the foreign call ("foreign functions only run in
+        -- compiled code"). The `#eval` half cannot exist, not even in CI.
+        unless ← hasCC do skip "no C toolchain (cc)"; return
+        cRunLibs ("import Prelude\nimport Text\nimport Word\nimport Data.WordBytes\n" ++
+          "def b1 := Bytes.ofU8s (.cons (U8.ofNat 0) (.cons (U8.ofNat 255) .nil))\n" ++
+          "def b2 := Bytes.ofU8s (.cons (U8.ofNat 1) (.cons (U8.ofNat 2) (.cons (U8.ofNat 3) (.cons (U8.ofNat 4) (.cons (U8.ofNat 5) .nil)))))\n" ++
+          "def main : List Nat :=\n" ++
+          "  List.append (List.map UIntN.toNat (Bytes.toU8s b1))\n" ++
+          "    (List.append (List.map UIntN.toNat (Bytes.toU8s b2))\n" ++
+          "      (List.append (List.map UIntN.toNat (Bytes.toU8s (Bytes.ofU8s .nil)))\n" ++
+          "        (List.append (.cons (Bytes.size b1) (.cons (Bytes.size b2) .nil))\n" ++
+          "          (List.map UIntN.toNat (Bytes.toU8s (Bytes.push b1 7))))))\n")
+          ".cons 0 (.cons 255 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 2 (.cons 5 (.cons 0 (.cons 255 (.cons 7 .nil)))))))))))" },
+    { name := "examples/words.wiz: the kernel's refl facts and both interpreters agree", run := fun _ => do
+        -- The file's `refl` proofs are checked by elaboration (the kernel); `main` is the
+        -- 32-bit FNV-1a hash of "hi". docs/stages/22-numbers.md:74 says the values are
+        -- pinned in the kernel, both interpreters, C and LLVM; the compiled half is the
+        -- next case (it skips without a C toolchain).
+        let src ← IO.FS.readFile "examples/words.wiz"
+        okLib (src ++ "\n#eval main\n#run main\n") ["1748694682", "1748694682"] },
+    { name := "examples/words.wiz: C and LLVM agree with the kernel and the interpreters", run := fun _ => do
+        unless ← hasCC do skip "no C toolchain (cc)"; return
+        let src ← IO.FS.readFile "examples/words.wiz"
+        cRunLibs src "1748694682"
+        cRunLibs src "1748694682" (llvm := true) },
     { name := "22l: a word carries its range: no unchecked builder, and the constructor needs the proof", run := fun _ => do
         -- the probe: `UIntN.ofBitsTrusted 5 : UIntN 1` had `toNat = 5` in the kernel while
         -- compiled code computed on other bits; this case is its regression

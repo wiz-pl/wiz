@@ -3,6 +3,7 @@ import Json
 import Text
 import IO
 import Scry.Parse
+import Scry.Preproc
 import Scry.CstStore
 import Scry.Native
 /-!
@@ -21,10 +22,11 @@ findings use:
   (a native crash usually has no input offset; an invariant failure in
   `fuzz/ts_shim_fuzz.c` prints `input_offset=N`, which is what the driver passes here).
 
-Offsets are **bytes** (tree-sitter's spans), and the line/column helper counts
-characters. The C frontend's slice is ASCII, so the two agree for the checked-in corpus;
-the driver skips span mapping for an artifact that is not ASCII or contains NUL, because
-`FS.readFile` stops at NUL and would truncate it.
+Offsets are **bytes** (tree-sitter's spans), and the line/column helper converts through
+the text's `Scry.ByteMap` to a 1-based **character** column. The driver still skips span
+mapping for an artifact that contains NUL, because `FS.readFile` stops at NUL and would
+truncate it; non-ASCII text is fine now (byte and character offsets no longer have to
+coincide).
 
 This module produces evidence, not a verdict: a span says which source range the parser
 was looking at, not that the program is safe or that the analysis is complete.
@@ -40,13 +42,13 @@ structure Scry.FuzzSpan where
   status : String
   /-- The byte range `[start, stop)`. -/
   span : Scry.Span
-  /-- 1-based line of `start` (byte-exact for the ASCII C slice). -/
+  /-- 1-based line of `start`. -/
   line : Nat
-  /-- 1-based column of `start`. -/
+  /-- 1-based **character** column of `start`. -/
   column : Nat
   /-- 1-based line of `stop`. -/
   endLine : Nat
-  /-- 1-based column of `stop`. -/
+  /-- 1-based **character** column of `stop`. -/
   endColumn : Nat
 
 /-- A fuzz input's deterministic CST summary. -/
@@ -84,9 +86,11 @@ partial def Scry.fuzzLineColGo (cs : List Char) (fuel line col : Nat) : Nat × N
       | .true => Scry.fuzzLineColGo rest k (Nat.succ line) 1
       | .false => Scry.fuzzLineColGo rest k line (Nat.succ col)
 
-/-- The 1-based line/column of `off` in `text`. -/
+/-- The 1-based line/character-column of **byte** offset `off` in `text` (tree-sitter
+spans are bytes; a Wiz `String` is characters). -/
 def Scry.fuzzLineCol (text : String) (off : Nat) : Nat × Nat :=
-  Scry.fuzzLineColGo (String.chars text) off 1 1
+  let m := Scry.ByteMap.ofString text;
+  Scry.fuzzLineColGo (String.chars text) (Scry.ByteMap.charOfByte m off) 1 1
 
 -- ## Nodes
 

@@ -160,6 +160,12 @@ searched first, then the `--cache-ro` caches (which are never written), and a mi
 truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
 a warm region build and a text build produce the same outputs.
 
+`--region-stats` is a toolchain flag too (`Toolchain.regionStats`, hence the same
+`region-stats` setting of `grail.wiz`), so every job receives it through `toFlags` and
+prints one line after its report: `region-stats: hits=… misses=… commands=…`. The counters
+are the job's own process; without `--region-cache` (or for a job that does not elaborate,
+such as a link) they are zero rather than absent.
+
 ## 23h: git dependencies and a lock file
 
 `Package.dep NAME URL REV` depends on the package at a git URL (a path, `file://`,
@@ -605,7 +611,9 @@ The snapshot is additive: an index without one is read exactly as before.
   download size cap, and no build sandbox — `grail build` runs the package author's
   Wiz/C code. Expiry and sequence are checked at `update`/`index verify`, not on every
   build. A first use needs an external `--allowed-signers` policy; an index without a
-  snapshot is accepted unless `--require-signature` or a lock pinned one.
+  snapshot is accepted unless `--require-signature` or a lock pinned one. CI and the
+  install docs pass `--require-signature`; `--allow-unsigned` is the explicit escape for
+  a registry without a signed snapshot.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the

@@ -242,7 +242,7 @@ def group : Group where
     { name := "a constructor with a pair argument in a match branch (placeholders solved directly)", run := fun _ =>
         okLib ("import Prelude\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n" ++
           "  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n" ++
-          "def zip {A B : Type} {n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
+          "def zip {A B : Type} {0 n : Nat} : Vec A n → Vec B n → Vec (A × B) n\n" ++
           "  | .nil, .nil => .nil\n  | .cons a as, .cons b bs => .cons (a, b) (zip as bs)") },
     { name := "an argument naming a tuple pattern's component, before a postponed lambda (no scope escape)", run := fun _ =>
         okLib ("import Prelude\nstructure P where\n  a : Nat\n  b : Nat\n" ++
@@ -598,8 +598,10 @@ def group : Group where
         -- `Eq.congrArg f e`/`fstEq e` with `e : f y = (y, y)`: the expected `?p = ?q` computes
         -- to `(?p.1 = ?q.1) × …` and `?q.1 =?= y` is solved by η (`?q := (?a, ?b)`); a cast
         -- computed while the second component's type was a hole is dropped once its two
-        -- types are the same (it would compute away)
-        okLibs "import Logic\ndef fstEq {A B : Type} {p q : (_ : A) × B} (e : p = q) : p.1 = q.1 := Eq.congrArg (fun (r : (_ : A) × B) => r.1) e\ndef t1 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y := fstEq (h y)\ndef t2 (f : Nat → (_ : Nat) × Nat) (y : Nat) (h : f y = (y, y)) : (f y).1 = y := fstEq h\ndef t3 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y :=\n  Eq.congrArg (fun (r : (_ : Nat) × Nat) => r.1) (h y)\n" },
+        -- types are the same (it would compute away). The level is named at the call site:
+        -- the carrier is a product, so `?u` occurs only in an implicit argument's type
+        -- (`wiz-notes/wishful/level-from-implicit-type.md`).
+        okLibs "import Logic\ndef fstEq {A B : Type} {p q : (_ : A) × B} (e : p = q) : p.1 = q.1 := Eq.congrArg.{0, 0} (fun (r : (_ : A) × B) => r.1) e\ndef t1 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y := fstEq (h y)\ndef t2 (f : Nat → (_ : Nat) × Nat) (y : Nat) (h : f y = (y, y)) : (f y).1 = y := fstEq h\ndef t3 (f : Nat → (_ : Nat) × Nat) (h : (x : Nat) → f x = (x, x)) (y : Nat) : (f y).1 = y :=\n  Eq.congrArg.{0, 0} (fun (r : (_ : Nat) × Nat) => r.1) (h y)\n" },
     { name := "pruning: a `let` of an inferred `match` (icestick-cpu C6)", run := fun _ =>
         -- the match's type `?T n` meets `List (?A n x✝)` from a branch, where `x✝` (the
         -- scrutinee) is in scope: `?A` can't depend on `x✝`, so it is pruned to `?A' n`

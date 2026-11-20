@@ -65,8 +65,9 @@ structure Scry.Cst where
   parentOf : Nat → Option Nat
   /-- Node `i`'s children, in tree order. -/
   childrenOf : Nat → List Nat
-  /-- The source text of file `i` (byte offsets index it; ASCII in this slice). Retained
-  for `Scry.spanText` and the lowering tests. -/
+  /-- The source text of file `i`. `Wil.Span` offsets index it as **bytes**, while a
+  `String` is character-indexed: `Scry.spanText` converts through `Scry.ByteMap`.
+  Retained for `Scry.spanText` and the lowering tests. -/
   fileText : Nat → String
   /-- The path of file `i` (as the preprocessor or the caller named it). -/
   filePath : Nat → String
@@ -110,7 +111,9 @@ def Scry.Cst.ofPreprocessed (pre : Scry.Preprocessed) (s : Scry.CstStore) : Scry
     (fun f => List.getD pre.paths f "")
     (List.length pre.paths)
     (fun i => let sp := Scry.CstStore.spanOf s i;
-      Scry.Cst.wordsText nodeBytes sp.start (Nat.sub sp.stop sp.start))
+      let a := Scry.ByteMap.charOfByte pre.textMap sp.start;
+      let b := Scry.ByteMap.charOfByte pre.textMap sp.stop;
+      Scry.Cst.wordsText nodeBytes a (Nat.sub b a))
 
 /-- The view of a `Scry.CstStore`, with the source text its spans index. The shim's
 store has one file per parse, so `text` is file 0. Line and column of every node's
@@ -188,7 +191,7 @@ def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
       (fun i => Scry.CstStore.kindName s i)
       (fun i => Scry.CstStore.fieldName s i)
       (fun i => let sp := Scry.CstStore.spanOf s i;
-        let lc := Scry.lineColFrom starts sp.start;
+        let lc := Scry.lineColFromBytes starts sp.start;
         Wil.Span.mk 0 sp.start sp.stop i lc.1 lc.2)
       (fun i => match Scry.CstStore.parentOf s i with
         | .none => .none
@@ -205,15 +208,18 @@ def Scry.Cst.ofStoreBytesAt (path : String) (b : Bytes) (starts : U32Array)
 def Scry.Cst.ofStoreBytes (path : String) (b : Bytes) (s : Scry.CstStore) : Scry.Cst :=
   Scry.Cst.ofStoreBytesAt path b (Scry.lineStartsOfBytes b) s
 
-/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). Byte
-offsets are used as character indices: the fixtures are ASCII (the shim's offsets are
-bytes; a UTF-8 identifier would need a byte slice, noted in `wiz-notes/scry-c2wil.md`). -/
+/-- The text of node `i` as the parser saw it (`nodeText`), sliced in O(span). In the
+text-backed views the span's byte offsets were converted through `Scry.ByteMap` when
+`nodeText` was built; in the bytes-backed view (`Scry.Cst.ofStoreBytes`) the slice is on
+bytes. A multibyte character before the token therefore does not shift it. -/
 def Scry.Cst.textOf (c : Scry.Cst) (i : Nat) : String := c.nodeText i
 
-/-- The text of an origin. -/
+/-- The text of an origin. `sp.start`/`sp.stop` are byte offsets; the text is sliced by
+character index, so the file's byte map is built here (O(file) per call: this is for
+tests and the REPL, not the lowering's per-token path). -/
 def Scry.spanText (files : List String) (sp : Wil.Span) : String :=
   match List.getD files sp.file "" with
-  | text => String.take (Nat.sub sp.stop sp.start) (String.drop sp.start text)
+  | text => Scry.ByteMap.slice (Scry.ByteMap.ofString text) sp.start sp.stop
 
 -- ## Reading the tree
 
@@ -347,6 +353,8 @@ structure Scry.LState where
   contTo : Option Nat
   /-- Diagnostics, newest first, each with the statement that caused it. -/
   warnings : List Scry.Warning
+  /-- The model pack the lowering consults for allocation/free calls. -/
+  models : Scry.ModelPack
 
 /-- The lowering monad: state in, state and result out. -/
 def Scry.LM (A : Type) : Type := Scry.LState → (Scry.LState × A)
@@ -1161,6 +1169,15 @@ partial def Scry.constInt (c : Scry.Cst) (n : Nat) : Option Nat :=
         | .some a => match String.eq (Scry.tokenF c n "operator") "+" with
           | .true => Scry.constInt c a
           | .false => .none
+
+/-- Is the expression a null constant? A C23 `null` literal (`nullptr`), or an integer
+literal `0` (possibly parenthesised or unary `+`). C compares a pointer against either
+form as a null test, not as a comparison of two differently typed values. -/
+def Scry.isNullConst (c : Scry.Cst) (n : Nat) : Bool :=
+  Bool.or (String.eq (c.kindOf n) "null")
+    (match Scry.constInt c n with
+      | .some k => Nat.beq k 0
+      | .none => .false)
 
 /-- The declared length of an array declarator (`0` when the size is not a constant the
 lowering folds). -/
@@ -2232,14 +2249,17 @@ def Scry.allocCallByShape (c : Scry.Cst) (n : Nat) (name : String) (argNodes : L
       Scry.allocCall c n name sz count
 
 /-- The name-based part of `Scry.lowerCall` (also the path for an external function).
-Allocation and `free` are read from `Scry.Models`, so the lowering and the taint model
-agree on which names allocate and which free; every other call keeps its ordinary
-`Wil.call` and its result is the declared type (or `i32` when undeclared). -/
+Allocation and `free` are read from the lowering state's `Scry.ModelPack` (by name and
+arity), so the lowering and the taint model agree on which names allocate and which
+free; every other call keeps its ordinary `Wil.call` and its result is the declared type
+(or `i32` when undeclared). -/
 def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Nat) :
-    Scry.LM Wil.Var :=
-  match Scry.Models.allocOf name with
+    Scry.LM Wil.Var := do
+  s0 ← Scry.get;
+  let arity := List.length argNodes;
+  match Scry.ModelPack.allocOfAt s0.models name arity with
   | .some shape => Scry.allocCallByShape c n name argNodes shape
-  | .none => match Scry.Models.freeArgOf name with
+  | .none => match Scry.ModelPack.freeArgOfAt s0.models name arity with
     | .some ai => do
       v ← Scry.zeroAt c n Wil.i32;
       match Wil.listNth argNodes ai with
@@ -2271,6 +2291,15 @@ def Scry.directCall (c : Scry.Cst) (n : Nat) (name : String) (argNodes : List Na
         Scry.emitAt c n (Wil.call (.some r) qname args);
         Scry.lret r
 
+/-- A comparison of two lowered operands with equal Wil types; a mixed comparison is a
+lowering boundary (the lowering has no implicit conversions). -/
+def Scry.lowerCmp (c : Scry.Cst) (n : Nat) (op : Wil.Op) (a b : Wil.Var) : Scry.LM Wil.Cond :=
+  match Scry.tyEq a.ty b.ty with
+  | .false => do
+    Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
+    Scry.lret (.const .false)
+  | .true => Scry.lret (.cmp op a b)
+
 /-- A condition: a comparison is a `Wil.Cond` (no register), `&&`/`||` combine
 conditions, and anything else becomes `v != 0`. `&&`/`||` operands are lowered eagerly:
 Wil's `Cond.and`/`or` short-circuit evaluation, but any *side effect* in an operand has
@@ -2292,11 +2321,21 @@ def Scry.lowerCond (c : Scry.Cst) (n : Nat) : Scry.LM Wil.Cond :=
           | .some ln, .some rn => do
             a ← Scry.lowerExpr c ln;
             b ← Scry.lowerExpr c rn;
-            match Scry.tyEq a.ty b.ty with
-            | .false => do
-              Scry.warnAt c n ("comparison of " ++ Scry.tyShow a.ty ++ " and " ++ Scry.tyShow b.ty);
-              Scry.lret (.const .false)
-            | .true => Scry.lret (.cmp op a b)
+            -- A pointer compared with `0` or a null literal is a null test. Lower the
+            -- constant as a pointer zero of the pointer's own type, so the two sides
+            -- have one Wil type and the nullness pass sees an isNull/notNull guard.
+            match a.ty, b.ty with
+            | .ptr _, _ => match Scry.isNullConst c rn with
+              | .true => do
+                z ← Scry.zeroAt c n a.ty;
+                Scry.lret (.cmp op a z)
+              | .false => Scry.lowerCmp c n op a b
+            | _, .ptr _ => match Scry.isNullConst c ln with
+              | .true => do
+                z ← Scry.zeroAt c n b.ty;
+                Scry.lret (.cmp op z b)
+              | .false => Scry.lowerCmp c n op a b
+            | _, _ => Scry.lowerCmp c n op a b
           | _, _ => Scry.condValue c n
         | .none => Scry.condValue c n
   | .unary => do
@@ -2339,7 +2378,7 @@ end
 /-- The state a translation unit's lowering starts from. -/
 def Scry.emptyState : Scry.LState :=
   Scry.LState.mk 0 0 0 .nil .true .nil .nil .nil .nil .nil .nil .nil .nil .nil
-    "" Wil.i32 Wil.noSpan .none .none .nil
+    "" Wil.i32 Wil.noSpan .none .none .nil Scry.defaultModels
 
 /-- Give each parameter a register and bind its name (an unnamed parameter still gets a
 register, so the arity matches). -/
@@ -2495,14 +2534,19 @@ partial def Scry.recoverTop (c : Scry.Cst) : List Nat → List Nat
 first, so a call sees a definition that appears later in the file (C's rule). Parsing is
 recoverable: the passes and the function walk use `Scry.recoverTop`, so functions inside
 tree-sitter's `ERROR` nodes keep their partial AST and facts. -/
-def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
+def Scry.lowerTUWithModels (path : String) (models : Scry.ModelPack) (c : Scry.Cst) :
+    Scry.TU :=
   let top := Scry.recoverTop c (c.childrenOf 0);
-  let s1 := (Scry.runLM (Scry.scanTypes c top) Scry.emptyState).1;
+  let init := { Scry.emptyState with models := models };
+  let s1 := (Scry.runLM (Scry.scanTypes c top) init).1;
   let s2 := (Scry.runLM (Scry.scanSyms c top) s1).1;
   let r := Scry.lowerFuncs c top s2 .nil;
   let files := List.map (fun i => c.fileText i) (Scry.schemaRange c.fileCount);
   let paths := List.map (fun i => c.filePath i) (Scry.schemaRange c.fileCount);
   Scry.TU.mk path files paths r.2 r.1.warnings (Scry.externalOf r.2)
+
+def Scry.lowerTU (path : String) (c : Scry.Cst) : Scry.TU :=
+  Scry.lowerTUWithModels path Scry.defaultModels c
 
 -- ## The CFG
 

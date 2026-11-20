@@ -100,6 +100,8 @@ def scryEgraphGroup : Group where
         interp "scry-egraph-analysis" "1131341" },
     { name := "the analysis example under C and LLVM", run := fun _ =>
         compiled "scry-egraph-analysis" "1131341" },
+    { name := "join: eqsort terms, an interval per e-class and a guarded rewrite refine each other", run := fun _ =>
+        interp "scry-egraph-join" "1131341" },
     { name := "explanation: a rewrite chain and a congruence chain from the union log", run := fun _ =>
         interp "scry-egraph-explain" "1000111" },
     { name := "limits: fixpoint, fuel, node cap and clock cap stop reasons", run := fun _ =>

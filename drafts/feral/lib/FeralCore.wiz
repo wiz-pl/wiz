@@ -57,12 +57,12 @@ structure Vec (A : Type) where
   items : List A
 
 def Vec.new {A : Type} : Vec A := Vec.mk List.nil
-def Vec.len {ρ : Region} {A : Type} (v : Shr ρ (Vec A)) : U64 := U64.mk (List.length v.val.items)
+def Vec.len {0 ρ : Region} {A : Type} (v : Shr ρ (Vec A)) : U64 := U64.mk (List.length v.val.items)
 def List.snoc {A : Type} : List A → A → List A
   | .nil, x => .cons x .nil
   | .cons y ys, x => .cons y (List.snoc ys x)
 -- `v.push(x)`: `&mut self` is handed back. (Natively: in place when unique.)
-def Vec.push {ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (x : A) : Result1 Unit (Uniq ρ (Vec A)) :=
+def Vec.push {0 ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (x : A) : Result1 Unit (Uniq ρ (Vec A)) :=
   let 1 (w, v) := Uniq.peek v;
   .ok () (Uniq.write v (Vec.mk (List.snoc w.items x)))
 def List.getOpt {A : Type} : Nat → List A → Option A
@@ -91,7 +91,7 @@ def Vec.indexMut_lawful {A : Type} (i : U64) : PLens.Lawful (@Vec.indexMut A i) 
    fun v => Store.underR_pp Vec.mkL (List.atL i.val) (Vec.indexMut i) (fun x => rfl)
      (List.atL i.val v.items) (List.atL_pp i.val v.items))
 -- `v.get_mut(i)`: `Option<&mut A>`, a borrow of the element or the vector back
-def Vec.getMut {ρ : Region} {A : Type} (i : U64) (1 v : Uniq ρ (Vec A)) : MutOpt ρ A (Vec A) :=
+def Vec.getMut {0 ρ : Region} {A : Type} (i : U64) (1 v : Uniq ρ (Vec A)) : MutOpt ρ A (Vec A) :=
   match Mut.ofPLens v (Vec.indexMut i) with
   | .ok m => .some m
   | .err _ v => .none v
@@ -125,7 +125,7 @@ def U64.div (a b : U64) : Result U64 := match Nat.beq b.val 0 with
   | .true => .err .divZero
   | .false => .ok (U64.mk (Nat.div a.val b.val))
 -- `v.get_mut i` with the receiver first
-def Vec.get_mut {ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (i : U64) : MutOpt ρ A (Vec A) := Vec.getMut i v
+def Vec.get_mut {0 ρ : Region} {A : Type} (1 v : Uniq ρ (Vec A)) (i : U64) : MutOpt ρ A (Vec A) := Vec.getMut i v
 -- `o.ok_or e`: a Feral `Result T E` is `Except E T` (L2)
 def Option.ok_or {A E : Type} (o : Option A) (e : E) : Except E A := match o with
   | .some a => .ok a

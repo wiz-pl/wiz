@@ -36,6 +36,7 @@ def plan : Scry.Plan Nat :=
   Scry.Plan.mk prog
     [Scry.EqCol.mk 1 0 0, Scry.EqCol.mk 1 1 0, Scry.EqCol.mk 2 0 0,
      Scry.EqCol.mk 3 0 0, Scry.EqCol.mk 4 0 0]
+    [1]
 
 def db : Scry.State Nat :=
   Scry.State.addTuple (Scry.State.addTuple Scry.State.empty 0 [u 1, u 2]) 2 [u 2]

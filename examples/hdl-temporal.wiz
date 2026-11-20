@@ -148,10 +148,10 @@ def Uart.idleHigh_00 :
 -- for ever.
 def Uart.delivers_a5 :
     TL.within 45 (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
-  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 165 o.1 o.2) 45 loopback.init (sendOnce 165) (refl Bool.true)
+  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 165 o.1 o.2) 45 loopback.init (sendOnce 165) (refl .true)
 def Uart.delivers_00 :
     TL.within 45 (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 0 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 0)) 0 :=
-  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 0 o.1 o.2) 45 loopback.init (sendOnce 0) (refl Bool.true)
+  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 0 o.1 o.2) 45 loopback.init (sendOnce 0) (refl .true)
 def Uart.onlyThat_a5 :
     TL.always (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
   Mealy.always_settled_const loopM (onlyByte 165) loopback.init (sendOnce 165) quiet F (loopIdle 165)
@@ -257,15 +257,18 @@ def buf_refines (xs : Trace (Bool × (D × Bool))) (t : Nat) :
 -- Stability (AXI): an offered item that is not taken is offered again, unchanged, in the
 -- next cycle: `out_valid ∧ ¬out_ready |=> out_valid ∧ $stable(out_data)`.
 def Spec.hold3 (d : D) : (v : Bool) → (y : D) → (r : Bool) → r = .false → (Spec.step (.true, d) (v, (y, r))).1 = (.true, d)
-  | v, y, .false, h => refl (Bool.true, d)
+  | v, y, .false, h => refl (.true, d)
   | v, y, .true, h => absurd h.1
 def Spec.hold (d : D) (x : Bool × (D × Bool)) (h : x.2.2 = .false) : (Spec.step (.true, d) x).1 = (.true, d) :=
   Spec.hold3 d x.1 x.2.1 x.2.2 h
 def specRun (xs : Trace (Bool × (D × Bool))) : Trace (Bool × D) := Mealy.stateAt Spec.step (.false, BitVec.ofNat 8 0) xs
 def buf_stable (xs : Trace (Bool × (D × Bool))) (t : Nat) (d : D)
     (offered : specRun xs t = (.true, d)) (notTaken : (xs t).2.2 = .false) : specRun xs (Nat.succ t) = (.true, d) :=
-  @Eq.trans (Bool × D) (specRun xs (Nat.succ t)) (Spec.step (.true, d) (xs t)).1 (.true, d)
-    (@Eq.congrArg (Bool × D) (Bool × D) (fun (s : Bool × D) => (Spec.step s (xs t)).1) (specRun xs t) (.true, d) offered)
+  -- The carriers are products, so a level metavariable occurs only in an implicit
+  -- argument's type and is not solved (`wiz-notes/wishful/level-from-implicit-type.md`):
+  -- name the levels at the call site.
+  Eq.trans.{0} (A := Bool × D)
+    (Eq.congrArg.{0, 0} (fun (s : Bool × D) => (Spec.step s (xs t)).1) offered)
     (Spec.hold d (xs t) notTaken)
 
 -- Liveness: if the consumer is ready infinitely often, an item accepted at cycle t
@@ -273,8 +276,8 @@ def buf_stable (xs : Trace (Bool × (D × Bool))) (t : Nat) (d : D)
 -- cycle after t. The fair event is `out_ready`; `TL.fairStep` does the rest.
 def Spec.accept5 : (f : Bool) → (d : D) → (v : Bool) → (y : D) → (r : Bool) → v = .true →
     (Spec.step (f, d) (v, (y, r))).2.1 = .true → (Spec.step (f, d) (v, (y, r))).1 = (.true, y)
-  | .false, d, .true, y, r, hv, hr => refl (Bool.true, y)
-  | .true, d, .true, y, .true, hv, hr => refl (Bool.true, y)
+  | .false, d, .true, y, r, hv, hr => refl (.true, y)
+  | .true, d, .true, y, .true, hv, hr => refl (.true, y)
   | .true, d, .true, y, .false, hv, hr => absurd hr.1
   | f, d, .false, y, r, hv, hr => absurd hv.1
 def Spec.accept (s : Bool × D) (x : Bool × (D × Bool)) (hv : x.1 = .true) (hr : (Spec.step s x).2.1 = .true) :

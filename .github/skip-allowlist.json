@@ -135,6 +135,14 @@
       "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
+      "group": "scry-csharp",
+      "case": "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+      "reason": "known gap: lambda bodies",
+      "owner": "scry C# frontend (scry/CSHARP.md, scry/corpus/csharp/lower/lambda.cs)",
+      "expires": "2027-05-01",
+      "why": "Joern's LambdaTests fixture: scry emits an opaque `fnptr` for a lambda and warns, so a sink inside the body is absent from the program. The case checks the lowering golden and the skip is the honest report; the golden changes when the gap is fixed."
+    },
+    {
       "group": "selfhost-cli-diff",
       "case": "run: program arguments are the driver's (the host's `run` takes flags only)",
       "reason": "run: the driver passes the words after FILE to the program",

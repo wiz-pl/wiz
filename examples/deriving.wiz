@@ -47,7 +47,7 @@ structure Point where
   y : Nat
   deriving Repr, BEq, Inhabited
 #eval Repr.repr (Point.mk 3 4)
-#eval Repr.repr (List.cons (Point.mk 1 2) List.nil)
+#eval Repr.repr [(Point.mk 1 2)]
 
 -- Standalone, after the fact.
 inductive Shape where

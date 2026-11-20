@@ -82,5 +82,5 @@ def Ref.free {V B : Type} (l : Loc V) {0 v : V} (1 t : Pts l v) (1 next : IO B) 
 
 /-- A token whose index is known equal to another value, retyped (erased proof, linear
 token). -/
-def Pts.cast {V : Type} {l : Loc V} {0 a b : V} (0 e : a = b) (1 t : Pts l a) : Pts l b :=
+def Pts.cast {V : Type} {0 l : Loc V} {0 a b : V} (0 e : a = b) (1 t : Pts l a) : Pts l b :=
   Eq.subst (Pts l) e t

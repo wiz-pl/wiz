@@ -22,3 +22,11 @@ edge labels:
   function 1
 csr out: 8 offsets, 6 arcs
 csr in: 8 offsets, 6 arcs
+project --help: ok
+project query --help: ok
+egraph --help: ok
+findings show --help: ok
+findings verify --help: ok
+facts without a file: ok
+unknown command: ok
+taint without a file: ok

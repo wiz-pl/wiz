@@ -333,7 +333,7 @@ def Mealy.always_settled_const {S I O : Type} (m : Mealy S I O) (p : S → I →
 
 /-- Every finite prefix of a circuit's infinite trace is what its netlist simulates,
 when the circuit and the netlist are in the Mealy-core subset (`Circuit.Simulates`). -/
-def Circuit.Simulates.trace_take {ω i o : HwTy} {c : Circuit i o} {n : Netlist}
+def Circuit.Simulates.trace_take {ω i o : HwTy} {0 c : Circuit i o} {0 n : Netlist}
     (h : Circuit.Simulates c n) (xs : Trace (HwTy.El i)) (k : Nat) :
     Netlist.simulate n (Hdl.map (HwTy.leaves i) (Trace.take k xs)) =
       Hdl.map (HwTy.leaves o) (Trace.take k (Circuit.trace c xs)) :=

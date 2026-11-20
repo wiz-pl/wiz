@@ -1,0 +1,16 @@
+# Dogfood pack: a header value must not reach a filesystem write path.
+#
+# This is the brief's third property, instantiated on the helper under
+# `scry/corpus/prover/helper/Files.cs`. `Path.GetFileName` is the sanitiser the pack
+# already names for path traversal; the sink is the file write's path argument.
+rule path-traversal
+  kind taint
+  severity error
+  message An unvalidated header value reaches a filesystem write
+  source Microsoft.AspNetCore.Http.HttpRequest.get_Headers result
+  sanitise System.IO.Path.GetFileName result
+  sink System.IO.File.WriteAllText arg 0
+  sink System.IO.File.WriteAllBytes arg 0
+  sink System.IO.File.AppendAllText arg 0
+  sink System.IO.FileStream..ctor arg 0
+end

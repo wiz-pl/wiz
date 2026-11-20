@@ -17,7 +17,9 @@ binder.implicit   := "{" [quantity] [names+] [":" type] "}"
 ```
 
 Quantities follow Idris 2: `(1 x : A)`, `{0 A : Type}`. An omitted quantity means ω
-on explicit binders and 0 on implicit ones.
+on explicit binders. On an implicit binder it is 0 when the binder's type is a sort or a
+proposition (`{A : Type}`) and ω otherwise (`{n : Nat}`; write `{0 n : Nat}` to erase it):
+rule (b), `Elab.binderDefaultQty`.
 -/
 
 namespace Wiz.Builtin
@@ -100,6 +102,13 @@ def levelTrailing : List TrailingParser := [
 /-- `⟨t₁, …, tₙ⟩` (13h) -/
 def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "⟩"]
 
+/-- `(p₁, p₂, p₃, …)` with three or more components (13f): a tuple pattern in a `let`.
+Two components are `term.letPair`; more are a `term.tuplePat` node, which `patView`
+reads as the right-nested tuple pattern `(p₁, (p₂, p₃))`. -/
+def tuplePat : ParserDescr :=
+  node "term.tuplePat"
+    (seqs ["(", withoutPosition (seqs [term, ",", term, ",", sepBy1 term ","]), ")"])
+
 /-- Term syntax.
 
 | kind                 | prec | children |
@@ -131,7 +140,8 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 | `term.field` (trailing) | max | t "." ident (a Σ field, or `T.f t` for a nominal `T`) |
 | `term.letUnit`       | lead | "let" "(" ")" ":=" term [";"] term (the unit eliminator: consumes a `Unit`) |
 | `term.letPair`       | lead | "let" [quantity] "(" ident "," ident ")" ":=" term [";"] term |
-| `term.letTuple`      | lead | "let" [quantity] "(" ident "," ident "," [idents,+] ")" ":=" term [";"] term |
+| `term.letPat`        | lead | "let" [quantity] (`term.anon` / `term.paren` / `term.tuplePat`) ":=" term [";"] term (13f, 13h) |
+| `term.tuplePat`      | (in a `let`) | "(" term "," term "," [terms,+] ")": a tuple pattern of three or more |
 | `term.absurd`        | lead | "absurd" term |
 | `term.eq` (trailing) | 50   | a "=" b |
 | `term.refl`          | lead | "refl" term |
@@ -149,7 +159,6 @@ def anonCtor : ParserDescr := seqs ["⟨", withoutPosition (sepBy term ","), "�
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
 | `term.asPat` (trailing) | max | x "@" p, without spaces: an as-pattern (13g; patterns only) |
 | `term.anon`          | max  | "⟨" [terms] "⟩": the constructor of the expected structure (13h; also a pattern) |
-| `term.letPat`        | lead | "let" [quantity] (`term.anon` / `term.paren`) ":=" term [";"] term (13h) |
 | `term.structUpdate`  | max  | "{" term "with" [`structUpdate.field`: ident ":=" term],+ "}" (13i) |
 
 The data primitives `Desc`, `Desc.ret`, `Desc.arg`, `Desc.rec`, `Desc.elim`,
@@ -200,10 +209,6 @@ def termLeading : List LeadingParser := [
   { kind := "term.letPair", prec := leadPrec,
     p := seqs [withPosition (seqs ["let", optional quantity, "(", ident, ",", ident, ")", ":=", term]),
       optional ";", term] },
-  -- three or more components: right-nested pairs (`Elab.letTupleToPairs`)
-  { kind := "term.letTuple", prec := leadPrec,
-    p := seqs [withPosition (seqs ["let", optional quantity, "(", ident, ",", ident, ",", sepBy1 ident ",", ")",
-      ":=", term]), optional ";", term] },
   { kind := "term.absurd", prec := leadPrec, p := seqs ["absurd", term maxPrec] },
   { kind := "term.refl", prec := leadPrec, p := seqs [nonReserved "refl", term maxPrec] },
   { kind := "term.rfl", prec := maxPrec, p := "rfl" },
@@ -218,7 +223,8 @@ def termLeading : List LeadingParser := [
   { kind := "term.anon", prec := maxPrec, p := anonCtor },
   { kind := "term.letPat", prec := leadPrec,
     p := seqs [withPosition (seqs ["let", optional quantity,
-      orelse (node "term.anon" anonCtor) (node "term.paren" (seqs ["(", withoutPosition term, ")"])),
+      orelse (node "term.anon" anonCtor)
+        (orelse (node "term.paren" (seqs ["(", withoutPosition term, ")"])) tuplePat),
       ":=", term]), optional ";", term] },
   -- 13i: structure update
   { kind := "term.structUpdate", prec := maxPrec,

@@ -59,10 +59,59 @@ def one : Nat := 1
 def two : Nat := Nat.add one one
 "
 
+/-- (C14) the smallest `native_refl` program: only with `--trust-native` (27a). The
+import is needed for `Nat`'s constructors (the frontend's numerals are `Nat.succ …`). -/
+def cliNativeRefl : String := "import Prelude
+def x : 1 = 1 := native_refl
+"
+
+/-- (C14) the same `native_refl` with a `main`, for `build` (the host wants an entry
+point there, the self-hosted driver does not). -/
+def cliNativeReflMain : String := "import Prelude
+import IO
+def x : 1 = 1 := native_refl
+def main : IO Unit := do
+  IO.println (Nat.toString 1)
+"
+
 def cliBad : String := "import Prelude
 def one : Nat := 1
 def two : Nat := nope
 "
+
+/-- Copy a directory tree (a cache layer is a copy of a write cache, manifests included). -/
+partial def cliCopyDir (src dst : System.FilePath) : IO Unit := do
+  IO.FS.createDirAll dst
+  for e in ← src.readDir do
+    if ← e.path.isDir then cliCopyDir e.path (dst / e.fileName)
+    else IO.FS.writeBinFile (dst / e.fileName) (← IO.FS.readBinFile e.path)
+
+/-- A directory's files and a hash of their bytes, for "the layer was not written". -/
+partial def cliTree (p : System.FilePath) (rel : String) : IO (Array (String × UInt64)) := do
+  if !(← p.isDir) then return #[]
+  let mut out : Array (String × UInt64) := #[]
+  for e in ← p.readDir do
+    let r := if rel.isEmpty then e.fileName else s!"{rel}/{e.fileName}"
+    if ← e.path.isDir then
+      out := out ++ (← cliTree e.path r)
+    else
+      out := out.push (r, hash ((← IO.FS.readBinFile e.path).toList))
+  return out.qsort (fun a b => a.1 < b.1)
+
+/-- The files of `p` whose name ends with `suf`. -/
+def cliFilesEnding (p : System.FilePath) (suf : String) : IO (Array System.FilePath) := do
+  if !(← p.isDir) then return #[]
+  let mut out : Array System.FilePath := #[]
+  for e in ← p.readDir do
+    if e.fileName.endsWith suf then out := out.push e.path
+  return out
+
+/-- Make `p` look `days` days old (the host prunes by modification time). -/
+def cliTouchOld (p : System.FilePath) (days : Nat) : IO Unit := do
+  let out ← IO.Process.output
+    { cmd := "touch", args := #["-d", s!"{days} days ago", p.toString] }
+  unless out.exitCode == 0 do
+    throw (IO.userError s!"touch -d failed for {p}: {out.stderr}")
 
 /-- The `run` options for this checkout's C toolchain (garbage collector flags included);
 `none` without a collector. -/
@@ -269,6 +318,141 @@ def cliGroup : Group where
         checkEq 1 c
         cliCheck err "cache miss: " "invalidated by the imported edit"
         cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the module's error" },
+    { name := "the cache: --cache-ro layers are read in order and never written", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let d ← IO.FS.createTempDir
+        let w := (d / "w").toString
+        let ro := (d / "ro").toString
+        let w2 := (d / "w2").toString
+        let files := #[("c.wiz", cliGood)]
+        -- a cold run fills the write cache, with its manifests
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "cold"
+        check ((← cliFilesEnding (d / "w") ".mf").size > 0) "the cold run wrote no manifest"
+        -- the layer is a copy; a fresh write cache stays empty on a layer hit
+        cliCopyDir (d / "w") (d / "ro")
+        let before ← cliTree (d / "ro") ""
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w2, "--cache-ro", ro, "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "layer warm"
+        cliCheck err s!"(read-only {ro})" "the hit names the layer"
+        check (!(← (d / "w2").pathExists)) "a layer hit created the write cache"
+        check ((← cliTree (d / "ro") "") == before) "the layer changed on a hit"
+        -- `--no-cache --cache-ro DIR`: read-only only, still a hit, still nothing written
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--no-cache", "--cache-ro", ro, "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "read-only-only warm"
+        check ((← cliTree (d / "ro") "") == before) "the layer changed with --no-cache"
+        -- (`strict` travels with the layer: its manifests were copied with the entries)
+        let (c, _, err) ← cliRun exe files
+          #["check", "c.wiz", "--no-cache", "--cache-ro", ro, "--cache-verify", "strict", "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "a strict layer hit"
+        -- a layer that does not exist is a miss, not a directory to create
+        let missing := (d / "missing").toString
+        let (c, _, _) ← cliRun exe files
+          #["check", "c.wiz", "--no-cache", "--cache-ro", missing]
+        checkEq 0 c
+        check (!(← (d / "missing").pathExists)) "a read-only layer was created"
+        -- two layers: the first one's answer wins (a status-only entry, verification off)
+        let l1 := d / "l1"
+        let l2 := d / "l2"
+        IO.FS.createDirAll l1
+        IO.FS.createDirAll l2
+        let entry := (← cliFilesEnding (d / "w") ".check")[0]!.fileName.getD ""
+        IO.FS.writeFile (l1 / entry) "s0\n"
+        IO.FS.writeFile (l2 / entry) "s1\n"
+        let (c, _, _) ← cliRun exe files
+          #["check", "c.wiz", "--no-cache", "--cache-ro", l1.toString, "--cache-ro",
+            l2.toString, "--cache-verify", "off"]
+        checkEq 0 c
+        let (c, _, _) ← cliRun exe files
+          #["check", "c.wiz", "--no-cache", "--cache-ro", l2.toString, "--cache-ro",
+            l1.toString, "--cache-verify", "off"]
+        checkEq 1 c },
+    { name := "the cache: --cache-verify strict uses and writes manifests", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let d ← IO.FS.createTempDir
+        let w := (d / "w").toString
+        let files := #[("c.wiz", cliGood)]
+        -- strict: a cold miss writes the manifests, and the next run is a hit
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-verify", "strict", "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "strict cold"
+        check ((← cliFilesEnding (d / "w") ".mf").size > 0) "strict wrote no manifest"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-verify", "strict", "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "strict warm"
+        -- `off` writes no manifest; `warn` still reads that entry, `strict` does not
+        let d2 ← IO.FS.createTempDir
+        let w2 := (d2 / "w").toString
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w2, "--cache-verify", "off", "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "off cold"
+        checkEq 0 (← cliFilesEnding (d2 / "w") ".mf").size
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w2, "--cache-verify", "off", "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "off warm"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w2, "--cache-verify", "warn", "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "warn without a manifest"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w2, "--cache-verify", "strict", "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "strict needs a manifest"
+        -- a mismatch is a miss (the bytes are not served): `s1` would exit 1
+        let bad := (← cliFilesEnding (d / "w") ".check")[0]!
+        IO.FS.writeFile bad "s1\n"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-verify", "warn", "-v"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "a mismatched manifest"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-verify", "warn", "-v"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "the rewritten entry" },
+    { name := "the cache: --cache-prune removes old keyed entries from the write cache only", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let d ← IO.FS.createTempDir
+        let w := (d / "w").toString
+        let ro := (d / "ro").toString
+        let files := #[("c.wiz", cliGood)]
+        -- `build` writes one `.check` and one `.c`
+        let (c, _, _) ← cliRun exe files #["build", "c.wiz", "-o", "out.c", "--cache", w]
+        checkEq 0 c
+        checkEq 1 (← cliFilesEnding (d / "w") ".check").size
+        checkEq 1 (← cliFilesEnding (d / "w") ".c").size
+        -- a layer copy, then age both copies (a layer is never pruned)
+        cliCopyDir (d / "w") (d / "ro")
+        let before ← cliTree (d / "ro") ""
+        for f in (← cliFilesEnding (d / "w") ".check") ++ (← cliFilesEnding (d / "w") ".c") do
+          cliTouchOld f 10
+        for f in (← cliFilesEnding (d / "ro") ".check") ++ (← cliFilesEnding (d / "ro") ".c") do
+          cliTouchOld f 10
+        let (c, _, err) ← cliRun exe files
+          #["check", "c.wiz", "--cache", w, "--cache-ro", ro, "--cache-prune", "7", "-v"]
+        checkEq 0 c
+        cliCheck err "cache prune: removed 2 files (1 .check, 1 .c)" "the prune summary"
+        cliCheck err "older than 7 days in " "the prune age"
+        -- the write cache's entries are gone; the layer's are untouched and answer
+        checkEq 0 (← cliFilesEnding (d / "w") ".check").size
+        checkEq 0 (← cliFilesEnding (d / "w") ".c").size
+        check ((← cliTree (d / "ro") "") == before) "the prune touched a layer"
+        cliCheck err "cache hit: " "the layer answers after the prune"
+        checkEq 0 (← cliFilesEnding (d / "w") ".check").size
+        -- a fresh entry is kept: the first run rewrites it (a miss), the second hits
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-prune", "7", "-v"]
+        checkEq 0 c
+        cliCheck err "cache prune: removed 0 files" "nothing old"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-prune", "7", "-v"]
+        checkEq 0 c
+        cliCheck err "cache prune: removed 0 files" "nothing old again"
+        cliCheck err "cache hit: " "a fresh entry is kept"
+        -- the host's argument checks
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-prune", "0"]
+        checkEq 1 c
+        cliCheck err "--cache-prune needs at least one day" "zero days"
+        let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-prune", "x"]
+        checkEq 1 c
+        cliCheck err "--cache-prune needs a number of days, not x" "not a number" },
     { name := "(C15) smt: the host's refusal without --trust-smt; the flag is taken and says what is missing", run := fun _ =>
         withSelfhostCli fun exe => do
         let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
@@ -319,7 +503,69 @@ def cliGroup : Group where
         let (c, out, err) ← cliRun exe #[("input.wiz", "import Prelude\ndef bad : Nat := nope\n")] #[]
         checkEq 1 c
         checkEq "" out
-        cliCheck err "error: unknown identifier nope" "one-shot error" }
+        cliCheck err "error: unknown identifier nope" "one-shot error" },
+    { name := "(C14) --trust-native: native_refl is accepted with it (before or after the command) and refused without it", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- without the flag: the host's message verbatim, exit 1, no output
+        let (c, out, err) ← cliRun exe files #["check", "native.wiz"]
+        checkEq 1 c
+        checkEq "" out
+        cliCheck err "native.wiz:2:1: error: native evaluation is not enabled: `native_refl` decides an equation by running compiled code, which the kernel does not check; run with --trust-native to allow it" "untrusted refusal"
+        -- with the flag, after the command and before it (the host's positional flags)
+        for args in [#["check", "native.wiz", "--trust-native"],
+                     #["--trust-native", "check", "native.wiz"]] do
+          let (c, out, err) ← cliRun exe files args
+          checkEq 0 c
+          checkEq "" out
+          checkEq "" err
+        -- the frontend's own lines: the declaration's type and the axiom `#print axioms` names
+        let files2 := #[("axioms.wiz", cliNativeRefl ++ "#print axioms x\n")]
+        let (c, out, _) ← cliRun exe files2 #["check", "axioms.wiz", "--trust-native", "--types"]
+        checkEq 0 c
+        cliCheck out "axioms.wiz:2:1: info: x : Eq(Nat, (Nat.succ Nat.zero), (Nat.succ Nat.zero))" "the declaration's type"
+        cliCheck out "'x' depends on axioms: [x.native✝]" "the axiom"
+        -- `build` with the flag writes the C; without it, no artifact and exit 1
+        let (dir, c, out, err) ← cliRunDir exe files #["build", "native.wiz", "-o", "out.c", "--trust-native"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        let ctext ← IO.FS.readFile (dir / "out.c")
+        Tests.check (cliHas ctext "/* x : ") "build's comments"
+        let (dir, c, _, err) ← cliRunDir exe files #["build", "native.wiz", "-o", "out.c"]
+        checkEq 1 c
+        cliCheck err "native evaluation is not enabled" "build's refusal"
+        unless !(← (dir / "out.c").pathExists) do throw (IO.userError "build wrote the C of an untrusted native_refl")
+        -- an unknown trust flag is the host's usage error (exit 2); the value form is not
+        -- one in the host either (`--trust-smt` itself is taken: C15)
+        for bad in ["--trust-native=1"] do
+          let (c, out, err) ← cliRun exe files #["check", "native.wiz", bad]
+          checkEq 2 c
+          checkEq "" out
+          cliCheck err (String.append "unknown flag: " bad) "the host's unknown-flag message" },
+    { name := "(C14) --trust-native is part of the cache key: an untrusted refusal is not replayed as an acceptance", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let files := #[("native.wiz", cliNativeRefl)]
+        -- cold, without the flag: an error, cached under the untrusted key
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "untrusted cold"
+        cliCheck err "native evaluation is not enabled" "untrusted diagnostic"
+        -- the same file with the flag must be a miss (a different key), then a hit
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v", "--trust-native"]
+        checkEq 0 c
+        cliCheck err "cache miss: " "the trusted run must not read the untrusted entry"
+        unless !(cliHas err "error:") do throw (IO.userError s!"the trusted warm-up reported an error:\n{err}")
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v", "--trust-native"]
+        checkEq 0 c
+        cliCheck err "cache hit: " "trusted warm"
+        -- and the untrusted key still holds its own answer
+        let (c, _, err) ← cliRun exe files #["check", "native.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache hit: " "untrusted warm"
+        cliCheck err "native evaluation is not enabled" "the replayed refusal" }
   ]
 
 builtin_initialize registerGroup cliGroup

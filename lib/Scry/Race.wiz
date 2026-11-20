@@ -1,0 +1,205 @@
+import Scry.Wil
+import Scry.Analysis
+import Text
+/-!
+# Scry.Race: a lockset data-race check
+
+This is the analysis that uses the concurrent Wil machine
+(`wiz-notes/scry-wil-concurrency.md` §5). It is deliberately small and deliberately
+honest: it reports **one kind of race** — two accesses to the same variable in a function
+that can run in two threads, with no lock held on both — and says what it cannot see.
+
+## What is computed
+
+* A **may-lockset** per program point, by a forward dataflow over `Scry.Analysis`'s CFG.
+  The lock events are the reserved calls of `Wil.syncOf`: `lock v` inserts `v.index`,
+  `unlock v` removes it. A join takes the **intersection** of the predecessors' sets (a
+  lock is held only if it is held on every path); the iteration starts from the empty set,
+  so it under-approximates the locked set — it may over-report a race, never hide one
+  within the locations it compares. A lock's identity is the argument **register**, not
+  the pointer value: two register names for one mutex are two mutexes (over-report), and
+  a lock acquired in a callee is not seen by its caller.
+* The **accesses**: `store p _` is a write and `assign _ (load p)` a read, keyed by the
+  pointer **register** `p.index`. So two accesses conflict only when they use the same
+  variable: a race through `p` and a `q` that points at the same cell is missed.
+* **Concurrency** of a function: it is spawned at two syntactic sites, or spawned once
+  and also called directly. A spawn site inside a loop is one site, so a function spawned
+  only there is treated as single-instance (a false negative).
+
+## What is reported
+
+`Scry.RaceFinding {func, pointA, pointB, key, writeA, writeB}` for each conflicting pair
+whose locksets have empty intersection. It does not claim a bug: it claims *this pair is
+unprotected*, which is a data race if the pair can be concurrent — and that is exactly
+what the concurrency test above is about.
+
+The pair test is `Tests/Groups/ScryWil.lean`: `Scry.raceUnsafe` (one finding) against
+`Scry.raceSafe` (none) and `Scry.raceAtomic` (none), with the concurrent machine's
+dynamics as the other half (`Scry.raceUnsafe` really loses an update under round-robin).
+-/
+
+-- ## Lock events and the lockset dataflow
+
+/-- What a statement does to the lock set: acquire the lock named by register `v`, release
+it, or nothing. Only the reserved names of `Wil.syncOf` count, so the static analysis and
+the machine agree on what a lock is. -/
+inductive Scry.LockEv where
+  | acquire (v : Nat)
+  | release (v : Nat)
+  | keep
+
+def Scry.lockEvOf (s : Wil.Stmt) : Scry.LockEv :=
+  match s with
+  | .call _ (.direct name) args _ => match Wil.syncOf name with
+    | .some .lockOp => match args with
+      | .cons a _ => .acquire a.index
+      | .nil => .keep
+    | .some .unlockOp => match args with
+      | .cons a _ => .release a.index
+      | .nil => .keep
+    | _ => .keep
+  | _ => .keep
+
+/-- One point's transfer on the lockset. -/
+def Scry.raceStep (g : Scry.Fn) (n : Nat) (inp : List Nat) : List Nat :=
+  match Scry.nodeStmt g n with
+  | .none => inp
+  | .some s => match Scry.lockEvOf s with
+    | .acquire v => Scry.insertNat v inp
+    | .release v => Scry.diffNat inp (.cons v .nil)
+    | .keep => inp
+
+partial def Scry.raceLoop (g : Scry.Fn) (fuel : Nat) (ins : List (Nat × List Nat)) :
+    List (Nat × List Nat) :=
+  match fuel with
+  | .zero => ins
+  | .succ k =>
+    let outs := Scry.mapSets g (fun n => Scry.raceStep g n (Scry.lookupSet ins n));
+    let ins' := Scry.mapSets g (fun n =>
+      match Nat.beq n (Scry.entryNode g) with
+      | .true => .nil
+      | .false => match Scry.predsOf g n with
+        | .nil => .nil
+        | preds => Scry.interAll (List.map (fun p => Scry.lookupSet outs p) preds));
+    match Scry.mapsSetEq g ins ins' with
+    | .true => ins'
+    | .false => Scry.raceLoop g k ins'
+
+/-- The lockset held at every point of a function (empty unless the point is reached by a
+`lock` with no `unlock` on any path from the entry). -/
+def Scry.raceLocksets (g : Scry.Fn) : List (Nat × List Nat) :=
+  Scry.raceLoop g (Nat.add (Nat.mul g.count g.count) 4) (Scry.mapSets g (fun _ => .nil))
+
+-- ## Accesses
+
+/-- A memory access: its point, the register it goes through (the location key), and
+whether it writes. -/
+structure Scry.MemAcc where
+  point : Nat
+  key : Nat
+  write : Bool
+
+def Scry.raceAccessAt (g : Scry.Fn) (n : Nat) : Option Scry.MemAcc :=
+  match Scry.nodeStmt g n with
+  | .none => .none
+  | .some s => match s with
+    | .store p _ _ => .some (Scry.MemAcc.mk n p.index .true)
+    | .assign _ (.load p) _ => .some (Scry.MemAcc.mk n p.index .false)
+    | _ => .none
+
+def Scry.raceAccesses (g : Scry.Fn) : List Scry.MemAcc :=
+  Scry.concatLists (fun n => match Scry.raceAccessAt g n with
+    | .some a => .cons a .nil
+    | .none => .nil) (Scry.range g.count)
+
+-- ## Findings
+
+structure Scry.RaceFinding where
+  func : String
+  pointA : Nat
+  pointB : Nat
+  key : Nat
+  writeA : Bool
+  writeB : Bool
+
+def Scry.RaceFinding.show (f : Scry.RaceFinding) : String :=
+  "data race in " ++ f.func ++ ": " ++
+  (match f.writeA with | .true => "store" | .false => "load") ++
+  " at point " ++ Nat.repr f.pointA ++ " and " ++
+  (match f.writeB with | .true => "store" | .false => "load") ++
+  " at point " ++ Nat.repr f.pointB ++ " on register " ++ Nat.repr f.key
+
+/-- Every unprotected conflicting pair of accesses in a function, in point order. -/
+def Scry.raceConflicts (fn : Wil.Func) (ls : List (Nat × List Nat))
+    (accs : List Scry.MemAcc) : List Scry.RaceFinding :=
+  Scry.concatLists (fun a => Scry.concatLists (fun b =>
+    match Nat.lt a.point b.point with
+    | .false => .nil
+    | .true => match Nat.beq a.key b.key with
+      | .false => .nil
+      | .true => match Bool.or a.write b.write with
+        | .false => .nil
+        | .true => match List.isEmpty
+            (Scry.interNat (Scry.lookupSet ls a.point) (Scry.lookupSet ls b.point)) with
+          | .false => .nil
+          | .true => .cons (Scry.RaceFinding.mk fn.name a.point b.point a.key
+              a.write b.write) .nil) accs) accs
+
+-- ## Which functions can run in two threads
+
+/-- Every `spawn:<f>` target in the program, one entry per syntactic site. -/
+def Scry.spawnTargets (p : Wil.Program) : List String :=
+  Scry.concatLists (fun fn =>
+    let g := Scry.flatten fn;
+    Scry.concatLists (fun n => match Scry.nodeStmt g n with
+      | .none => .nil
+      | .some (.call _ (.direct name) _ _) => match Wil.syncOf name with
+        | .some (.spawn f) => .cons f .nil
+        | _ => .nil
+      | _ => .nil) (Scry.range g.count)) p.funcs
+
+/-- Every direct call target in the program, one entry per syntactic site. `Scry.PointsTo`
+has a `directTargets` of its own, and the trust ledger imports the whole library at once,
+where a name two modules declare is an error, so this copy is named for the race check. -/
+def Scry.raceDirectTargets (p : Wil.Program) : List String :=
+  Scry.concatLists (fun fn =>
+    let g := Scry.flatten fn;
+    Scry.concatLists (fun n => match Scry.nodeStmt g n with
+      | .none => .nil
+      | .some (.call _ (.direct name) _ _) => .cons name .nil
+      | _ => .nil) (Scry.range g.count)) p.funcs
+
+def Scry.countName (x : String) : List String → Nat
+  | .nil => 0
+  | .cons y ys => match String.eq y x with
+    | .true => Nat.succ (Scry.countName x ys)
+    | .false => Scry.countName x ys
+
+/-- Whether a function can run in two threads at once: it is spawned twice, or spawned
+once and also called directly (by the root, or by another thread). A function that is
+never spawned runs in one thread. -/
+def Scry.raceConcurrent (p : Wil.Program) (f : String) : Bool :=
+  let spawns := Scry.countName f (Scry.spawnTargets p);
+  let calls := Scry.countName f (Scry.raceDirectTargets p);
+  Bool.or (Nat.le 2 spawns) (Bool.and (Nat.le 1 spawns) (Nat.le 1 calls))
+
+def Scry.raceFindingsIn (p : Wil.Program) (fn : Wil.Func) : List Scry.RaceFinding :=
+  match Scry.raceConcurrent p fn.name with
+  | .false => .nil
+  | .true =>
+    let g := Scry.flatten fn;
+    Scry.raceConflicts fn (Scry.raceLocksets g) (Scry.raceAccesses g)
+
+/-- The data races `Scry.Race` can see in a program, in function/point order. -/
+def Scry.raceFindings (p : Wil.Program) : List Scry.RaceFinding :=
+  Scry.concatLists (fun fn => Scry.raceFindingsIn p fn) p.funcs
+
+def Scry.raceCount (p : Wil.Program) : Nat := List.length (Scry.raceFindings p)
+
+def Scry.raceHas (p : Wil.Program) : Bool :=
+  match Scry.raceFindings p with
+  | .nil => .false
+  | .cons _ _ => .true
+
+def Scry.raceReport (p : Wil.Program) : String :=
+  String.intercalate "\n" (List.map Scry.RaceFinding.show (Scry.raceFindings p))

@@ -1,0 +1,6 @@
+/-- Fixture: the same private source name in another module is not a collision.
+
+A second mention of `def ghost` in a comment; still not a declaration. -/
+private def hidden : Nat := 3
+
+def other : Nat := 4

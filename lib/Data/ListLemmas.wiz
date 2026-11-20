@@ -70,7 +70,7 @@ attribute [macro term.memForall] List.memForallMacro
 def List.All {A : Type} (P : A → Prop) (l : List A) : Prop := ∀ x, x ∈ l → P x
 
 /-- Nothing is in the empty list. -/
-def List.not_mem_nil {A : Type} (x : A) : ¬ (x ∈ (List.nil : List A)) := fun h => h
+def List.not_mem_nil {A : Type} (x : A) : ¬ (x ∈ ([] : List A)) := fun h => h
 /-- The head is in the list. -/
 def List.mem_cons_self {A : Type} (x : A) (xs : List A) : x ∈ List.cons x xs := Or.inl (refl x)
 /-- Membership is preserved by `cons`. -/
@@ -100,7 +100,7 @@ def List.mem_append {A : Type} (x : A) : (l m : List A) →
 -- ## Mapping
 
 /-- Mapping `f` over `[]` is `[]`. -/
-def List.map_nil {A B : Type} (f : A → B) : List.map f (List.nil : List A) = List.nil := rfl
+def List.map_nil {A B : Type} (f : A → B) : List.map f ([] : List A) = [] := rfl
 /-- `map f (x :: xs) = f x :: map f xs`. -/
 def List.map_cons {A B : Type} (f : A → B) (x : A) (xs : List A) :
     List.map f (List.cons x xs) = List.cons (f x) (List.map f xs) := rfl
@@ -133,11 +133,11 @@ def List.append_assoc {A : Type} : (l m n : List A) →
   | .nil, m, n => rfl
   | .cons x xs, m, n => Eq.congrArg (List.cons x) (List.append_assoc xs m n)
 /-- `l ++ [] = l`. -/
-def List.append_nil {A : Type} : (l : List A) → List.append l List.nil = l
+def List.append_nil {A : Type} : (l : List A) → List.append l [] = l
   | .nil => rfl
   | .cons x xs => Eq.congrArg (List.cons x) (List.append_nil xs)
 /-- `[] ++ l = l`, by computation. -/
-def List.nil_append {A : Type} (l : List A) : List.append List.nil l = l := rfl
+def List.nil_append {A : Type} (l : List A) : List.append [] l = l := rfl
 /-- `length (l ++ m) = length l + length m`. (`lib/WordArray.wiz` has the same fact as
 `List.length_append`; this name lets both modules be imported.) -/
 def List.length_append_eq {A : Type} : (l m : List A) →
@@ -164,7 +164,7 @@ def List.length_revApp {A : Type} : (l acc : List A) →
 /-- `reverse` keeps the length. -/
 def List.length_reverse {A : Type} (l : List A) :
     List.length (List.reverse l) = List.length l :=
-  Eq.trans (List.length_revApp l List.nil) (Nat.add_zero (List.length l))
+  Eq.trans (List.length_revApp l []) (Nat.add_zero (List.length l))
 
 /-- `map` commutes with `revApp`. -/
 def List.map_revApp {A B : Type} (f : A → B) : (l acc : List A) →
@@ -174,7 +174,7 @@ def List.map_revApp {A B : Type} (f : A → B) : (l acc : List A) →
 /-- `map` commutes with `reverse`. -/
 def List.map_reverse {A B : Type} (f : A → B) (l : List A) :
     List.map f (List.reverse l) = List.reverse (List.map f l) :=
-  List.map_revApp f l List.nil
+  List.map_revApp f l []
 
 /-- `revApp l acc = reverse l ++ acc`. -/
 def List.revApp_eq_append {A : Type} : (l acc : List A) →
@@ -183,19 +183,19 @@ def List.revApp_eq_append {A : Type} : (l acc : List A) →
   | .cons x xs, acc =>
       Eq.trans (List.revApp_eq_append xs (List.cons x acc))
         (Eq.trans
-          (Eq.symm (List.append_assoc (List.reverse xs) (List.cons x List.nil) acc))
+          (Eq.symm (List.append_assoc (List.reverse xs) [x] acc))
           (Eq.congrArg (fun t => List.append t acc)
-            (Eq.symm (List.revApp_eq_append xs (List.cons x List.nil)))))
+            (Eq.symm (List.revApp_eq_append xs [x]))))
 /-- `reverse (x :: xs) = reverse xs ++ [x]`. -/
 def List.reverse_cons {A : Type} (x : A) (xs : List A) :
-    List.reverse (List.cons x xs) = List.append (List.reverse xs) (List.cons x List.nil) :=
-  List.revApp_eq_append xs (List.cons x List.nil)
+    List.reverse (List.cons x xs) = List.append (List.reverse xs) [x] :=
+  List.revApp_eq_append xs [x]
 /-- `reverse` turns `++` around: `reverse (l ++ m) = reverse m ++ reverse l`. -/
 def List.reverse_append {A : Type} : (l m : List A) →
     List.reverse (List.append l m) = List.append (List.reverse m) (List.reverse l)
   | .nil, m => Eq.symm (List.append_nil (List.reverse m))
   | .cons x xs, m =>
-      Eq.trans (List.revApp_append (List.cons x xs) m List.nil)
+      Eq.trans (List.revApp_append (List.cons x xs) m [])
         (List.revApp_eq_append m (List.reverse (List.cons x xs)))
 /-- `reverse` is an involution. -/
 def List.reverse_reverse {A : Type} : (l : List A) → List.reverse (List.reverse l) = l
@@ -204,9 +204,9 @@ def List.reverse_reverse {A : Type} : (l : List A) → List.reverse (List.revers
       Eq.trans
         (Eq.congrArg List.reverse (List.reverse_cons x xs))
         (Eq.trans
-          (List.reverse_append (List.reverse xs) (List.cons x List.nil))
+          (List.reverse_append (List.reverse xs) [x])
           (Eq.trans
-            (Eq.congrArg (fun t => List.append (List.reverse (List.cons x List.nil)) t)
+            (Eq.congrArg (fun t => List.append (List.reverse [x]) t)
               (List.reverse_reverse xs))
             rfl))
 
@@ -483,8 +483,8 @@ def List.mem_revApp {A : Type} (x : A) : (l acc : List A) →
 def List.mem_reverse {A : Type} (x : A) (l : List A) :
     ((x ∈ List.reverse l) ↔ x ∈ l) :=
   Iff.intro
-    (fun h => Or.elim ((List.mem_revApp x l List.nil).1 h) (fun hx => hx) (fun hn => False.elim hn))
-    (fun h => (List.mem_revApp x l List.nil).2 (Or.inl h))
+    (fun h => Or.elim ((List.mem_revApp x l []).1 h) (fun hx => hx) (fun hn => False.elim hn))
+    (fun h => (List.mem_revApp x l []).2 (Or.inl h))
 
 -- ## The default `simp` set
 --

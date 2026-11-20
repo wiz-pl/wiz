@@ -38,9 +38,11 @@ instance : LT Int := LT.mk Int.Lt
 /-- Transport `Int.NonNeg` along an equation (`int_ring!` gives the equation). -/
 def Int.NonNeg.congr {ω a b : Int} (e : a = b) (h : Int.NonNeg a) : Int.NonNeg b :=
   Eq.mp' Int.NonNeg e h
-/-- Transport `≤` along equations of both sides. -/
+/-- Transport `≤` along equations of both sides. (The equation of pairs computes to a Σ,
+so the carrier's level is not solved from the argument: the levels are named
+explicitly. See `wiz-notes/wishful/level-from-implicit-type.md`.) -/
 def Int.Le.congr {ω a b c d : Int} (e : a = c) (e' : b = d) (h : Int.Le a b) : Int.Le c d :=
-  Eq.mp' (fun (p : Int × Int) => Int.Le p.1 p.2) (congrArg2 (fun x y => (x, y)) e e') h
+  Eq.mp'.{0} (fun (p : Int × Int) => Int.Le p.1 p.2) (Eq.congrArg2.{0, 0, 0} (fun x y => (x, y)) e e') h
 
 /-- A natural number is not negative. -/
 def Int.nonneg_ofNat (n : Nat) : Int.NonNeg (Int.ofNat n) := rfl
@@ -77,7 +79,7 @@ def Int.le_trans (a b c : Int) (h : Int.Le a b) (h' : Int.Le b c) : Int.Le a c :
 /-- `≤` is antisymmetric. -/
 def Int.le_antisymm (a b : Int) (h : Int.Le a b) (h' : Int.Le b a) : a = b :=
   let e : b - a = 0 := Int.nonneg_antisymm (b - a) h (Int.NonNeg.congr (int_ring! a - b = -(b - a)) h');
-  Eq.trans (int_ring! a = b - (b - a)) (Eq.trans (congrArg (fun z => b - z) e) (int_ring! b - 0 = b))
+  Eq.trans (int_ring! a = b - (b - a)) (Eq.trans (Eq.congrArg (fun z => b - z) e) (int_ring! b - 0 = b))
 /-- `≤` is total. -/
 def Int.le_total (a b : Int) : Int.Le a b ∨ Int.Le b a :=
   Or.imp (fun h => h) (fun h => Int.NonNeg.congr (int_ring! -(b - a) = a - b) h) (Int.nonneg_total (b - a))
@@ -117,7 +119,7 @@ def Int.ofPair_nonneg (a b : Nat) (h : Nat.Le b a) : Int.NonNeg (Int.ofPair a b)
 def Int.nonneg_or_pos : (a : Int) → Int.NonNeg a ∨ Int.NonNeg (-a - 1)
   | .ofNat _ => Or.inl rfl
   | .negSucc n => Or.inr (Int.NonNeg.congr
-      (Eq.symm (Eq.trans (congrArg (fun z => z - 1) (Int.ofNat_pair (Nat.succ n))) (Int.ofPair_sub (Nat.succ n) 0 1 0)))
+      (Eq.symm (Eq.trans (Eq.congrArg (fun z => z - 1) (Int.ofNat_pair (Nat.succ n))) (Int.ofPair_sub (Nat.succ n) 0 1 0)))
       (Int.ofPair_nonneg (Nat.succ n + 0) (0 + 1) rfl))
 
 /-- `a ≤ b` or `b < a`. -/
@@ -143,28 +145,28 @@ def Int.lt_trans (a b c : Int) (h : Int.Lt a b) (h' : Int.Lt b c) : Int.Lt a c :
 -- Adjacent `calc` steps compose through `Trans` (lib/Logic.wiz); the equation instances
 -- transport a proof along `=`.
 /-- `a = b → b ≤ c → a ≤ c`. -/
-instance {a b c : Int} : Trans (a = b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Int} : Trans (a = b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Int) => Int.Le x c) (Eq.symm e) h)
 /-- `a ≤ b → b = c → a ≤ c`. -/
-instance {a b c : Int} : Trans (a ≤ b) (b = c) (a ≤ c) :=
+instance {0 a b c : Int} : Trans (a ≤ b) (b = c) (a ≤ c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Int) => Int.Le a x) e h)
 /-- `a = b → b < c → a < c`. -/
-instance {a b c : Int} : Trans (a = b) (b < c) (a < c) :=
+instance {0 a b c : Int} : Trans (a = b) (b < c) (a < c) :=
   Trans.mk (fun e h => Eq.mp' (fun (x : Int) => Int.Lt x c) (Eq.symm e) h)
 /-- `a < b → b = c → a < c`. -/
-instance {a b c : Int} : Trans (a < b) (b = c) (a < c) :=
+instance {0 a b c : Int} : Trans (a < b) (b = c) (a < c) :=
   Trans.mk (fun h e => Eq.mp' (fun (x : Int) => Int.Lt a x) e h)
 /-- `a ≤ b → b ≤ c → a ≤ c`. -/
-instance {a b c : Int} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
+instance {0 a b c : Int} : Trans (a ≤ b) (b ≤ c) (a ≤ c) :=
   Trans.mk (fun h h' => Int.le_trans a b c h h')
 /-- `a ≤ b → b < c → a < c`. -/
-instance {a b c : Int} : Trans (a ≤ b) (b < c) (a < c) :=
+instance {0 a b c : Int} : Trans (a ≤ b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Int.lt_of_le_of_lt a b c h h')
 /-- `a < b → b ≤ c → a < c`. -/
-instance {a b c : Int} : Trans (a < b) (b ≤ c) (a < c) :=
+instance {0 a b c : Int} : Trans (a < b) (b ≤ c) (a < c) :=
   Trans.mk (fun h h' => Int.lt_of_lt_of_le a b c h h')
 /-- `a < b → b < c → a < c`. -/
-instance {a b c : Int} : Trans (a < b) (b < c) (a < c) :=
+instance {0 a b c : Int} : Trans (a < b) (b < c) (a < c) :=
   Trans.mk (fun h h' => Int.lt_trans a b c h h')
 /-- `a ≤ b` and `b < a` contradict each other. -/
 def Int.not_lt_of_le (a b : Int) (h : Int.Le a b) (h' : Int.Lt b a) : False :=
@@ -197,7 +199,7 @@ def Int.lt_of_mul_lt_mul_left (c a b : Int) (hc : Int.NonNeg c) (h : Int.Lt (c *
     (fun h' => h')
 /-- `0 < n + 1`. -/
 def Int.ofNat_succ_pos (n : Nat) : Int.Lt 0 (Int.ofNat (Nat.succ n)) :=
-  Int.NonNeg.congr (Eq.symm (Eq.trans (congrArg (fun z => z - (0 + 1)) (Int.ofNat_pair (Nat.succ n))) (Int.ofPair_sub (Nat.succ n) 0 1 0)))
+  Int.NonNeg.congr (Eq.symm (Eq.trans (Eq.congrArg (fun z => z - (0 + 1)) (Int.ofNat_pair (Nat.succ n))) (Int.ofPair_sub (Nat.succ n) 0 1 0)))
       (Int.ofPair_nonneg (Nat.succ n + 0) (0 + 1) rfl)
 
 -- ## Absolute value
@@ -221,7 +223,7 @@ def Int.abs_le : (a c : Int) → Int.Le a c → Int.Le (-a) c → Int.Le (Int.ab
   | .negSucc _, _, _, h => h
 /-- `|a - b| = |b - a|`. -/
 def Int.abs_sub_comm (a b : Int) : Int.abs (a - b) = Int.abs (b - a) :=
-  Eq.trans (congrArg Int.abs (int_ring! a - b = -(b - a))) (Int.abs_neg (b - a))
+  Eq.trans (Eq.congrArg Int.abs (int_ring! a - b = -(b - a))) (Int.abs_neg (b - a))
 /-- The triangle inequality: `|a + b| ≤ |a| + |b|`. -/
 def Int.abs_add (a b : Int) : Int.Le (Int.abs (a + b)) (Int.abs a + Int.abs b) :=
   Int.abs_le (a + b) (Int.abs a + Int.abs b)
@@ -238,11 +240,11 @@ def Int.abs_of_nonneg : (a : Int) → Int.NonNeg a → Int.abs a = a
   | .negSucc _, h => absurd h.1
 /-- The triangle inequality for distances: `|a - c| ≤ |a - b| + |b - c|`. -/
 def Int.abs_sub_le (a b c : Int) : Int.Le (Int.abs (a - c)) (Int.abs (a - b) + Int.abs (b - c)) :=
-  Int.Le.congr (congrArg Int.abs (int_ring! a - b + (b - c) = a - c)) (refl (Int.abs (a - b) + Int.abs (b - c)))
+  Int.Le.congr (Eq.congrArg Int.abs (int_ring! a - b + (b - c) = a - c)) (refl (Int.abs (a - b) + Int.abs (b - c)))
     (Int.abs_add (a - b) (b - c))
 /-- `|a| · b = |a · b|` for a positive `b`. -/
 def Int.abs_mul_pos (a b : Int) (hb : Int.Lt 0 b) : Int.abs a * b = Int.abs (a * b) :=
-  Eq.symm (Eq.trans (Int.abs_mul a b) (congrArg (fun z => Int.abs a * z) (Int.abs_of_nonneg b (Int.nonneg_of_pos b hb))))
+  Eq.symm (Eq.trans (Int.abs_mul a b) (Eq.congrArg (fun z => Int.abs a * z) (Int.abs_of_nonneg b (Int.nonneg_of_pos b hb))))
 
 -- ## More order facts
 
@@ -250,7 +252,7 @@ def Int.abs_mul_pos (a b : Int) (hb : Int.Lt 0 b) : Int.abs a * b = Int.abs (a *
 def Int.le_of_eq {ω a b : Int} (e : a = b) : Int.Le a b := Int.Le.congr (refl a) e (Int.le_refl a)
 /-- Transport `<` along equations of both sides. -/
 def Int.Lt.congr {ω a b c d : Int} (e : a = c) (e' : b = d) (h : Int.Lt a b) : Int.Lt c d :=
-  Int.Le.congr (congrArg (fun x => x + 1) e) e' h
+  Int.Le.congr (Eq.congrArg (fun x => x + 1) e) e' h
 /-- Cancel a positive factor: `c · a = c · b → a = b`. -/
 def Int.eq_of_mul_eq_mul_left (c a b : Int) (hc : Int.Lt 0 c) (e : c * a = c * b) : a = b :=
   Int.le_antisymm a b (Int.le_of_mul_le_mul_left c a b hc (Int.le_of_eq e))

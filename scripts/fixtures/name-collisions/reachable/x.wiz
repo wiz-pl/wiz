@@ -1,0 +1,2 @@
+/-- Fixture: `x` and `y` are both imported by `all`, so they can load together. -/
+def shared : Nat := 1

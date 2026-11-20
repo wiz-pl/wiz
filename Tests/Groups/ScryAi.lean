@@ -49,21 +49,21 @@ def constSrc : String := "import Scry.AiExamples
 /-- Nullness: the null dereference alarms, a safe array load does not. -/
 def nullSrc : String := "import Scry.AiExamples
 
-#eval Alarm.has (Alarm.nullDeref 1) (check AiEx.m8 AiEx.nullCfg AiEx.nullInv)
-#eval alarmCount (check AiEx.m8 AiEx.nullCfg AiEx.nullInv)
-#eval List.isEmpty (check AiEx.m8 AiEx.safeArrayCfg AiEx.safeArrayInv)
+#eval Alarm.has (Alarm.nullDeref 1) (checkCert AiEx.m8 AiEx.nullCfg AiEx.nullInv)
+#eval alarmCount (checkCert AiEx.m8 AiEx.nullCfg AiEx.nullInv)
+#eval accepts AiEx.m8 AiEx.safeArrayCfg AiEx.safeArrayInv
 "
 
 /-- Out of bounds: `p[8]` on an array of length 4. -/
 def oobSrc : String := "import Scry.AiExamples
 
-#eval Alarm.has (Alarm.outOfBounds 1 8 4) (check AiEx.m8 AiEx.oobCfg AiEx.oobInv)
+#eval Alarm.has (Alarm.outOfBounds 1 8 4) (checkCert AiEx.m8 AiEx.oobCfg AiEx.oobInv)
 "
 
 /-- Overflow: `x + 1` with `x` unknown at 8 bits. -/
 def ovfSrc : String := "import Scry.AiExamples
 
-#eval Alarm.has (Alarm.overflow 0 \"add\") (check AiEx.m8 AiEx.ovfCfg AiEx.ovfInv)
+#eval Alarm.has (Alarm.overflow 0 \"add\") (checkCert AiEx.m8 AiEx.ovfCfg AiEx.ovfInv)
 "
 
 /-- An unsound post-fixpoint: `z = 5` where the transfer gives `z = 6`; the checker
@@ -71,7 +71,7 @@ reports `unsoundEdge 2 3` and does not accept. -/
 def unsoundSrc : String := "import Scry.AiExamples
 
 #eval accepts AiEx.m8 AiEx.constCfg AiEx.constBadInv
-#eval Alarm.has (Alarm.unsoundEdge 2 3) (check AiEx.m8 AiEx.constCfg AiEx.constBadInv)
+#eval Alarm.has (Alarm.unsoundEdge 2 3) (checkCert AiEx.m8 AiEx.constCfg AiEx.constBadInv)
 "
 
 /-- The domain operations, independent of the CFG. -/

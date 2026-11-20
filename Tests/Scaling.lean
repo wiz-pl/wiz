@@ -1,4 +1,5 @@
 import Tests.ElabFix
+import Grail.Test
 
 /-!
 # Scaling (agent/mem-hunt)
@@ -448,6 +449,70 @@ def exampleFiles : IO (Array System.FilePath) := do
     if e.path.extension == some "wiz" then fs := fs.push e.path
   pure (fs.qsort (·.toString < ·.toString))
 
+/-- Does `s` contain `frag` (the substring test the rest of the suite uses)? -/
+def hasSub (s frag : String) : Bool := (s.splitOn frag).length > 1
+
+/-- Does an example use `native_refl` in code (not in a comment)? That declaration is
+accepted only with `--trust-native`, so the sweep must pass the flag for the file; the
+current examples that need it say so in their skip reason, but a file need not be a skip
+test to use it. -/
+def usesNativeRefl (src : String) : Bool :=
+  (src.splitOn "\n").any fun line =>
+    hasSub ((line.splitOn "--").headD "") "native_refl"
+
+/-- What the frontend needs to elaborate an example, beyond its `-- test:` kind: the
+`--trust-native` flag (a `native_refl` in the file, or a skip reason that names it) and
+the C preprocessor (an `import_c` header). -/
+structure ExampleMode where
+  /-- the marker's kind, from the same parser the examples group uses (`Grail.TestKind`) -/
+  kind : Grail.TestKind
+  trustNative : Bool
+  preprocess : Bool
+  deriving Repr
+
+/-- What the Desc sweep does with an example. `skip` carries the reason its marker gives,
+so a skipped example is never silent. -/
+inductive SweepMode where
+  | check
+  | run
+  | skip (reason : String)
+  deriving Repr, BEq
+
+/-- Classify an example the way the examples group does (the marker is
+`Grail.TestKind.ofSource`, so an unknown marker is an error, not a guess), plus the
+frontend capabilities the file needs. `sweepModeOf` decides what to do with a skip: a
+reason that only names `--trust-native` is a capability the sweep supplies, while an
+on-demand or another group's test stays skipped. -/
+def exampleModeOf (src : String) : Except String ExampleMode := do
+  let kind ← Grail.TestKind.ofSource src
+  let reasonNeedsTrust := match kind with
+    | .skip r => hasSub r "--trust-native"
+    | _ => false
+  pure { kind, trustNative := usesNativeRefl src || reasonNeedsTrust,
+         preprocess := hasSub src "import_c \"" }
+
+/-- Does a skip reason say another test group owns the file? (`hdl-verified-native`
+says the `hdl-verified` group runs it; the sweep leaves that work to its owner rather than
+duplicating a multi-minute native check.) -/
+def ownedElsewhere (reason : String) : Bool := hasSub reason "test group runs it"
+
+/-- Is a skip an explicit on-demand test (too slow or too memory-hungry for the suite)?
+`hdl-verified-full` says "on demand: about ten minutes"; its own documentation says it is
+run on demand only, and its native checks exceed the suite's memory cap. -/
+def onDemand (reason : String) : Bool := hasSub reason "on demand"
+
+/-- The sweep's action for a classified example. A skip reason that only asks for
+`--trust-native` is a requirement the sweep can meet (it passes the flag and checks the
+file: see `Tests/data/desc-sweep/skip-trust.wiz`), but an on-demand test or one another
+group owns is skipped for the reason it names. -/
+def sweepModeOf (m : ExampleMode) : SweepMode :=
+  match m.kind with
+  | .check => .check
+  | .run => .run
+  | .skip reason =>
+    if m.trustNative && !onDemand reason && !ownedElsewhere reason then .check
+    else .skip reason
+
 /-- How many cases the examples of the Desc sweep are split into. -/
 def descExampleChunks : Nat := 6
 
@@ -501,17 +566,190 @@ def descSweepApart : IO Unit := do
     unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
     check (n > 0) s!"{m}: no descriptions were compared"
 
-/-- The Desc sweep on chunk `k` of the examples (an example with errors is skipped, as
-an example of an error). -/
+/-- The examples that deliberately show an error (their `.expected` golden holds it):
+`procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
+sweep below treats an error in any other example as a failure, and an allow-listed file
+that stops erroring as one too. -/
+def errorExamples : List String := ["examples/procmacro.wiz", "examples/syntax.wiz"]
+
+/-- The examples the Desc sweep deliberately skips, because their markers name a reason
+the sweep cannot satisfy here (a benchmark, a golden another group owns, or an on-demand
+cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: skipping
+is a decision, not a way to hide a failure. -/
+def descSweepSkips : List String :=
+  [ "examples/closed-table-bench.wiz"
+  , "examples/hdl-sim-bench.wiz"
+  , "examples/hdl-verified-full.wiz"
+  , "examples/hdl-verified-native.wiz"
+  , "examples/natives-bench.wiz"
+  , "examples/plot.wiz"
+  , "examples/scry-datalog-bench.wiz" ]
+
+/-- The example whose skip reason is an on-demand cost: the sweep records that it needs
+`--trust-native` (so its classification is complete) but skips it for the reason it
+names. It is verified separately, with `--trust-native` and enough memory. -/
+def descSweepOnDemandExamples : List String := ["examples/hdl-verified-full.wiz"]
+
+/-- The examples whose frontend path needs the C preprocessor (`import_c`). -/
+def descSweepPreprocessExamples : List String :=
+  [ "examples/glue.wiz", "examples/import_c.wiz" ]
+
+/-- Classify the example at `p`, failing loudly when its marker is unknown (rather than
+guessing `check`, as the old sweep did). -/
+def exampleModeAt (p : System.FilePath) : IO ExampleMode := do
+  match exampleModeOf (← IO.FS.readFile p) with
+  | .ok m => pure m
+  | .error e => throw (IO.userError s!"{p}: {e}")
+
+/-- Elaborate an example the way `wiz check`/`wiz run` does: the toolchain's library as
+the first module root, `import_c` headers preprocessed, `link_c`/`include_str` resolved
+relative to the example, and `--trust-native` for a file that needs it. (The old sweep
+passed only the library loader: `glue.wiz` failed as un-preprocessed and a
+`native_refl` example failed without the flag.) -/
+def elaborateExample (p : System.FilePath) (src : String) (trustNative : Bool) :
+    IO (CommandState ZeroOneMany) := do
+  let tc ← toolchain
+  -- The package's library roots (`grail.wiz`'s `Package.lib "feral-core"
+  -- "drafts/feral/lib"`), after the toolchain's `lib/`: `examples/resources.wiz` imports
+  -- `FeralCore`, and a sweep that passes only `Module.roots []` cannot see it.
+  let roots ← Module.roots ["drafts/feral/lib"]
+  let closure ← Module.loadClosure roots src
+  let lib : Std.HashMap Name String := closure.fold (fun m n (_, s) => m.insert n s) {}
+  let headers ← Build.preprocessHeaders tc (String.join (src :: lib.values))
+  let dir := p.parent.getD "."
+  let sources ← Module.cSourceTable dir src closure
+  let includes ← Module.includeTable dir src closure
+  let own := Module.fromFirstRoot roots closure
+  pure (runFrontend (R := ZeroOneMany) src
+    { loader := (lib[·]?), cHeaders := (headers[·]?),
+      cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes),
+      trustedModule := own.contains, trustNative })
+
+/-- Run a `-- test: run` example: compile `main` through C, compare its output with the
+example's `.expected`, and return `false` only when the C toolchain is missing (the caller
+skips the chunk, as the examples group does). A program that ran and failed is the
+example's failure. -/
+def runExample (p : System.FilePath) (st : CommandState ZeroOneMany) : IO Bool := do
+  let dir ← IO.FS.createTempDir
+  let result ← Build.runGlobal (← toolchain) st "main" dir (timeout := some 300)
+  IO.FS.removeDirAll dir
+  match result with
+  | .error e =>
+    if e.isToolchain then
+      skip "no toolchain"
+      pure false
+    else throw (IO.userError s!"{p}: run failed: {e.message}")
+  | .ok out =>
+    let expectedFile := p.withExtension "expected"
+    unless ← expectedFile.pathExists do
+      throw (IO.userError s!"{p}: a run test needs {expectedFile}")
+    let expected ← IO.FS.readFile expectedFile
+    check (out.trimAscii == expected.trimAscii)
+      s!"{p}: output differs from {expectedFile}:\nexpected: {expected}\nactual:   {out}"
+    pure true
+
+/-- Check one example as its marker says: skip it (for the reason it names), check it, or
+run it. Returns `false` only when a `run` example could not be built for lack of a C
+toolchain. -/
+def sweepExample (p : System.FilePath) : IO Bool := do
+  let src ← IO.FS.readFile p
+  let mode ← exampleModeAt p
+  match sweepModeOf mode with
+  | .skip _ => pure true
+  | .check | .run =>
+    let st ← elaborateExample p src mode.trustNative
+    let errored := st.messages.any (·.severity == .error)
+    if errorExamples.contains p.toString then
+      -- the two files that demonstrate a diagnostic must keep doing so
+      unless errored do throw (IO.userError s!"{p}: expected an error, got none")
+      pure true
+    else if errored then
+      let first := match (st.messages.filter (·.severity == .error))[0]? with
+        | some m => m.render src
+        | none => ""
+      throw (IO.userError s!"examples with errors (only {errorExamples} may fail):\n{p}: {first}")
+    else
+      let (_, bad) := hypsMismatches st.globals
+      unless bad.isEmpty do throw (IO.userError s!"{p}: {bad.take 3}")
+      if mode.kind == .run then runExample p st else pure true
+
+/-- The Desc sweep on chunk `k` of the examples: every example is classified by its
+`-- test:` marker (an unknown one is an error), skip tests are skipped for their named
+reason, run tests are run, and a trust-native or `import_c` file gets the flag or the
+preprocessing the frontend path would give it. -/
 def descSweepExamples (k : Nat) : IO Unit := do
-  let loader ← Tests.Elab.libLoader
   let fs := exampleChunk (← exampleFiles) k
   check (!fs.isEmpty) s!"chunk {k} of the examples is empty"
   for p in fs do
-    let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile p) { trustedModule := Tests.libModule, loader }
-    if st.messages.any (·.severity == .error) then continue
-    let (_, bad) := hypsMismatches st.globals
-    unless bad.isEmpty do throw (IO.userError s!"{p}: {bad.take 3}")
+    -- the chunks are long (several examples take minutes), so a CI log shows which file
+    -- the case is on
+    progress p.toString
+    unless ← sweepExample p do
+      skip "no toolchain"
+      return
+
+/-- The sweep's classification agrees with the examples' markers: every example has a
+known `-- test:` marker, every skip reason is nonempty and on the expected list, an
+on-demand skip records the `--trust-native` need it names but stays skipped, and the
+`import_c` examples are run with preprocessing. -/
+def descSweepModes : IO Unit := do
+  let fs ← exampleFiles
+  let mut skipped : Array String := #[]
+  for p in fs do
+    let mode ← exampleModeAt p
+    match sweepModeOf mode with
+    | .skip reason =>
+      check (!reason.trimAscii.isEmpty) s!"{p}: -- test: skip needs a reason"
+      skipped := skipped.push p.toString
+    | .check | .run => pure ()
+  let got := (skipped.qsort (· < ·)).toList
+  check (got == descSweepSkips)
+    s!"the Desc sweep skips {got}, expected {descSweepSkips} \
+      (a new skip is a decision: name it in descSweepSkips, or fix the example)"
+  for f in descSweepOnDemandExamples do
+    let mode ← exampleModeAt f
+    check mode.trustNative s!"{f}: its skip reason names --trust-native, but its mode does not record it"
+    match sweepModeOf mode with
+    | .skip reason =>
+      check (onDemand reason) s!"{f}: its on-demand skip was not honoured: {reason}"
+    | .check | .run => throw (IO.userError s!"{f}: an on-demand skip was run in the sweep")
+  for f in descSweepPreprocessExamples do
+    let mode ← exampleModeAt f
+    check mode.preprocess s!"{f}: its import_c header would not be preprocessed"
+    check (sweepModeOf mode == .run) s!"{f}: it says -- test: run, but the sweep does not run it"
+
+/-- Fixtures for every branch of the classification (`Tests/data/desc-sweep/`): a check
+(default), a run, a skip with a reason (its body does not check, so elaborating it would
+fail), a `native_refl` file (refused without `--trust-native`), an `import_c` file
+(refused without preprocessing), a skip whose reason only names `--trust-native` (the
+flag is supplied and the file checked), an on-demand skip that names the flag too (honoured
+as a skip), and an unknown marker (an error). -/
+def descSweepFixtures : IO Unit := do
+  let dir : System.FilePath := "Tests/data/desc-sweep"
+  let mode (f : String) := exampleModeAt (dir / f)
+  let checkMode (f : String) (action : SweepMode) (trust preprocess : Bool) : IO Unit := do
+    let m ← mode f
+    check (sweepModeOf m == action) s!"{f}: classified as {repr (sweepModeOf m)}, expected {repr action}"
+    check (m.trustNative == trust) s!"{f}: trustNative is {m.trustNative}, expected {trust}"
+    check (m.preprocess == preprocess) s!"{f}: preprocess is {m.preprocess}, expected {preprocess}"
+  checkMode "check.wiz" .check false false
+  checkMode "run.wiz" .run false false
+  checkMode "skip.wiz" (.skip "a fixture: its body does not check") false false
+  checkMode "trust.wiz" .check true false
+  checkMode "import_c.wiz" .check false true
+  checkMode "skip-trust.wiz" .check true false
+  checkMode "skip-on-demand.wiz"
+    (.skip "on demand: a fixture: it needs --trust-native and is too slow for the suite") true false
+  match exampleModeOf (← IO.FS.readFile (dir / "unknown.wiz")) with
+  | .error e => check (hasSub e "unknown test kind") s!"{e} does not name the unknown kind"
+  | .ok m => throw (IO.userError s!"an unknown marker was taken for {repr (sweepModeOf m)}")
+  -- and through the sweep's own path, so each branch is exercised, not only classified
+  for f in ["check.wiz", "run.wiz", "skip.wiz", "trust.wiz", "import_c.wiz", "skip-trust.wiz",
+      "skip-on-demand.wiz"] do
+    unless ← sweepExample (dir / f) do
+      skip "no toolchain"
+      return
 
 /-- The example chunks cover `examples/` exactly once: their concatenation, sorted, is
 the sorted file list (and no chunk is empty). -/
@@ -561,7 +799,7 @@ def big : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 1) (fun s x => let y :=
 def Rng.trace : Nat → Nat → List Nat
   | .zero, _ => .nil
   | .succ k, s => .cons (Nat.mod s 256) (Rng.trace k (Nat.mod (s * 1103515245 + 12345) 2147483648))
-def ok : Bool × Nat := let xs := Rng.trace 100 7; (Hdl.natsEq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
+def ok : Bool × Nat := let xs := Rng.trace 100 7; (BEq.beq (Circuit.runPacked big xs) (Circuit.simNet .true big xs), Netlist.size (Circuit.netlist \"big\" big))
 #eval ok
 def ctr : Circuit u8 u8 := Circuit.mk u8 (BitVec.ofNat 8 0) (fun s x => Hw.pair (Hw.add s x) s)
 def Rep.go : Nat → List (HwTy.El u8) → List (HwTy.El u8)
@@ -791,6 +1029,10 @@ def group : Group where
     (List.range descExampleChunks).map (fun k => ({
         name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
           descSweepExamples k } : Case)) ++ [
+    { name := "the Desc sweep honours every example's `-- test:` marker, --trust-native and import_c", run := fun _ =>
+        descSweepModes },
+    { name := "the Desc sweep's classification branches are each exercised by a fixture", run := fun _ =>
+        descSweepFixtures },
     { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
         descSweepPartition },
     -- (P3) a universe-polymorphic definition unfolds at the cached levels (0, 1, 2) and at
