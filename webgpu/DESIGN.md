@@ -1,17 +1,20 @@
 # A WebGPU target for Wiz: a restricted data-parallel subset
 
-**Status:** exploration, 2026-11-19. Branch `webgpu-target`, worktree `wt/webgpu`.
-Prototype only: no PR, no merge, no changes to the C/LLVM/Wasm backends. The artefact is
-`webgpu/` in the repository plus this note.
+**Status:** exploration, 2026-11-19; re-run and extended on `integration/train8`,
+2026-11-20. Prototype only: no PR, no merge, no changes to the C/LLVM/Wasm backends, and
+no `--target wgpu`. The artefact is `webgpu/` in the repository plus this note.
 
 **Verdict.** A *map*-shaped subset of Wiz translates to WGSL honestly and cheaply: one
 scalar kernel body per definition, a storage-buffer ABI, and a dispatch. The prototype
-compiles `out[i] = a[i] + b[i]` (and a `select`-shaped second kernel) from the real Wiz
-syntax tree, has its WGSL validated by wgpu/naga, runs it on a GPU (lavapipe), and gets
-exactly the interpreter's numbers. That is the whole positive result. It is not a path to
-running arbitrary Wiz on a GPU: the language's default number is an unbounded `Nat`, its
-data are heap-allocated with reference counting, and its functions are closures. Those are
-not details a WebGPU backend can paper over; they are the three blockers in §6.
+compiles `out[i] = a[i] + b[i]` plus a `select`-shaped kernel and a primitive-coverage
+kernel from the real Wiz syntax tree, has its WGSL validated by wgpu/naga, runs it on a
+GPU (lavapipe), and gets exactly the interpreter's numbers: **414/414 values** (24 over
+8 inputs and 390 over 130 inputs, so three workgroups and the bounds guard are exercised)
+and **18/18 rejected fixtures**, each naming its construct. That is the whole positive
+result. It is not a path to running arbitrary Wiz on a GPU: the language's default number
+is an unbounded `Nat`, its data are heap-allocated with reference counting, and its
+functions are closures. Those are not details a WebGPU backend can paper over; they are
+the three blockers in §6.
 
 ## 1. What "adding a target" means today, and why WebGPU is different
 
@@ -78,7 +81,9 @@ overflow boundary, not assumed (§5).
 
 Accepted:
 
-* variables, `let x : T := e; body` (a WGSL `let`, type annotation required);
+* variables, `let x : T := e; body` (emitted as a WGSL `let`; bindings are
+  alpha-renamed, because WGSL has one flat scope per function and the emitter hoists the
+  declarations, so a shadowing Wiz `let` cannot reuse an outer name);
 * application of a **name** (no higher-order application);
 * `U32.ofNat N` for `N < 2³²` (a `u32` literal; Wiz reduces it mod 2³², and the subset
   rejects a literal that already exceeds the width so a typo is not silently wrapped);
@@ -100,10 +105,15 @@ Rejected, each with a message naming the construct:
   divisor unspecified, so the semantics do not agree;
 * `Float64`, `UInt64`, `IntN`, `String`, `IO`, `Str`, `Bytes`, `Ref`, `Task`, ...;
 * lambdas, partial application, a call whose callee is not a name;
-* recursion (including mutual recursion: the call stack is checked);
+* recursion (direct, and mutual recursion: the reachable call graph is checked for
+  cycles);
 * FFI/externs, axioms, type classes, instances, proofs, implicit binders;
 * an `Array.getD` default other than zero;
-* a helper that takes a buffer under a name the entry does not bind.
+* a helper that takes a buffer under a name the entry does not bind;
+* a def, parameter or local whose name is a WGSL keyword or reserved word (`out`, `main`,
+  `loop`, …), which would otherwise collide in WGSL's one namespace;
+* a duplicate parameter name, or a buffer named `i`/`gid` (the generated entry point's
+  locals).
 
 ### 2.4 Control flow and the host boundary
 
@@ -202,11 +212,25 @@ def maxMulScalar (x y : U32) : U32 :=
   | .true => UIntN.mul y (U32.ofNat 3)
   | .false => x
 
+def mixScalar (x y : U32) : U32 :=
+  let z : U32 := UIntN.add (UIntN.land x y) (UIntN.lor x y);
+  let w : U32 := UIntN.xor z (UIntN.mul (UIntN.sub x y) (U32.ofNat 5));
+  let same : Bool := UIntN.beq x y;
+  match same with
+  | .true => UIntN.land w (U32.ofNat 65535)
+  | .false =>
+    match UIntN.le w (UIntN.add x (U32.ofNat 1)) with
+    | .true => w
+    | .false => UIntN.lor w (U32.ofNat 1)
+
 def add (i : Nat) (a b : Array U32) : U32 :=
   addScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
 
 def maxMul (i : Nat) (a b : Array U32) : U32 :=
   maxMulScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
+
+def mix (i : Nat) (a b : Array U32) : U32 :=
+  mixScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
 ```
 
 Generated `webgpu/build/add.wgsl`:
@@ -232,7 +256,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ```
 
 The `maxMul` module is the same shape with
-`select(a[i], b[i] * 3u, a[i] < b[i])`.
+`select(a[i], b[i] * 3u, a[i] < b[i])`. The `mix` module emits the three `let`s (renamed
+`z_0`, `w_1`, `same_2`), the bitwise/arithmetic expression and a nested `select`; the
+checked-in `webgpu/build/mix.wgsl` is the exact text.
 
 ### 5.1 Inputs and the numerical comparison
 
@@ -244,12 +270,13 @@ b = [2000000000,          1,        0, 4294967295, 987654321, 2147483648,  0, 10
 ```
 
 The reference values are produced by `wiz check webgpu/build/ref.wiz`, i.e. by the Wiz
-**interpreter** (`#eval`) running the same `addScalar`/`maxMulScalar` definitions on the
-same pairs. The interpreter cannot evaluate the `Array` version: `Array.*` are `extern`s
-and `#eval` panics with `foreign functions only run in compiled code (wiz run)`. That is
-why the reference applies the scalar kernel directly; buffer indexing is the only part not
-interpreted. (The compiled path `wiz run` can exercise the `Array` version, but that is a
-C build, not the interpreter.)
+**interpreter** (`#eval`). On this base (post-train8) the interpreter has an `Array`
+model, so the reference calls the entry kernel itself — `add i aNarrow bNarrow` — and
+`Array.getD`, the buffer indexing and the index parameter are interpreted too. The
+generated `ref.wiz` builds its arrays with `Array.push`/`ofList`; only the host's
+binding order and dispatch are outside the interpreter. (At the branch base `#eval`
+panicked on the `Array` externs, which is why the first version applied the scalar helper
+to the input pairs.)
 
 | i | a[i] | b[i] | Wiz `addScalar` | WGSL `add` | Wiz `maxMulScalar` | WGSL `maxMul` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -262,29 +289,42 @@ C build, not the interpreter.)
 | 6 | 42 | 0 | 42 | 42 | 42 | 42 |
 | 7 | 4000000000 | 1000000000 | 705032704 | 705032704 | 4000000000 | 4000000000 |
 
-`make.mjs` printed the interpreter's 16 values:
+`mixScalar` gives `[0, 4294967287, 0, 11, 3158884403, 0, 249, 1410606080]` on the same
+pairs.
+
+`make.mjs` printed the interpreter's 24 narrow values:
 
 ```
 make: add    = [705032704, 0, 0, 0, 1111111110, 0, 42, 705032704]
 make: maxMul = [3000000000, 4294967295, 0, 4294967293, 2962962963, 2147483648, 42, 4000000000]
+make: mix    = [0, 4294967287, 0, 11, 3158884403, 0, 249, 1410606080]
 ```
 
-and they are exactly the WGSL columns. The WGSL was validated and executed with
-**wgpu/naga** through Deno 2.9.8's `navigator.gpu` (adapter `llvmpipe`, Mesa 26.2.6
-lavapipe, Vulkan): `getCompilationInfo()` returned **no messages** for either module, the
-dispatch produced the WGSL column, and `check.mjs` exited 0. The rejected fixtures
-(`webgpu/tests/reject/`) are also checked: all eight are refused with a reason. The same
-page also ran in headless Chromium 157 through `check-browser.mjs` (both kernels, `ok:
-true`, exit 0), so the browser deliverable is not just source.
+and they are exactly the WGSL columns. The same run also generates
+`webgpu/build/wide.json`: 130 inputs chosen so the dispatch needs three workgroups (two
+full and a partial one), which exercises `dispatchWorkgroups(ceil(n/64))` and the
+`i < arrayLength(&out)` guard. All 390 wide values also agree, so the total is
+**414/414**.
+
+The WGSL was validated and executed with **wgpu/naga** through Deno 2.9.8's
+`navigator.gpu` (adapter `llvmpipe`, Mesa 26.2.6 lavapipe, Vulkan):
+`getCompilationInfo()` returned **no messages**, the dispatch produced the WGSL columns,
+and `check.mjs` exited 0. The rejection harness (`webgpu/tests/reject/`) checks 18
+fixtures; each is refused *and* its diagnostic contains the construct named in the
+fixture's `-- expect:` line (float, IO, `Nat` arithmetic, direct and mutual recursion,
+allocation, closures, division, non-zero default, `String`, `U64`, implicit binders and
+malformed entries). The page was driven in headless Chromium 157 when the prototype was
+written; `check-browser.mjs` is optional and was not part of this re-run.
 
 ### 5.2 What the page does
 
-`webgpu/index.html` fetches `build/expected.json` (the interpreter's numbers) and the two
-WGSL files, runs each through the same `run.js` used by the Deno check, and prints a table
-with a per-row PASS/FAIL plus the naga diagnostics. It needs a secure context, so
-`node webgpu/serve.mjs 8080` and `http://127.0.0.1:8080/`; `check-browser.mjs` drives the
-page headlessly over the DevTools protocol when a Chromium and a software Vulkan driver
-are available. The page is the deliverable; the Deno run is the automated proof.
+`webgpu/index.html` fetches `build/expected.json` (the interpreter's numbers) and the
+generated WGSL files, runs each through the same `run.js` used by the Deno check, and
+prints a table with a per-row PASS/FAIL plus the naga diagnostics. It needs a secure
+context, so `node webgpu/serve.mjs 8080` and `http://127.0.0.1:8080/`; `check-browser.mjs`
+drives the page headlessly over the DevTools protocol when a Chromium and a software
+Vulkan driver are available. The page is the deliverable; the Deno run is the automated
+proof.
 
 ## 6. What cannot be done, and the three hardest blockers
 
@@ -332,10 +372,10 @@ prototype makes no proof claims and no optimisation claims.
    and a `Float32` primitive in Wiz if floats are wanted.
 4. **A host runtime and ABI**: buffer descriptors, dispatch, readback; the same shape as
    `web/wasm-host.mjs`, but asynchronous and with limits.
-5. **Differential testing**: the interpreter cannot run `Array` externs, so array kernels
-   need either `wiz run` (C, exact but slower) or a pure-list reference plus the scalar
-   kernel — the prototype's choice. This is a real testing-strategy decision, not a
-   detail.
+5. **Differential testing**: on train8 the interpreter can run the `Array` kernels, so
+   the reference calls the entry function directly. A future scheme should keep that, or
+   use `wiz run`, and add the host's buffer layout to the comparison. This is a real
+   testing-strategy decision, not a detail.
 6. **Validation in CI**: naga as a library (not packaged in nixpkgs at the time of
    writing; Deno's `wgpu` gives the same validator and runs headless with lavapipe).
 
@@ -344,20 +384,32 @@ prototype makes no proof claims and no optimisation claims.
 See `webgpu/README.md` for the layout. The commands used here:
 
 ```sh
-WIZ=<wiz> node webgpu/tools/make.mjs                  # regenerate WGSL + reference
-DENO=<deno> MESA=<mesa> VULKAN_LOADER=<loader> ./webgpu/check.sh
-WIZ=<wiz> node webgpu/tests/reject.mjs                # boundary tests
+WIZ=/path/to/wiz ./webgpu/check-all.sh                 # value tests + boundary tests
+WIZ=/path/to/wiz node webgpu/tools/make.mjs            # regenerate WGSL + reference
+./webgpu/check.sh                                      # just the 414 values
+WIZ=/path/to/wiz node webgpu/tests/reject.mjs          # just the 18 rejects
 node webgpu/serve.mjs 8080                             # the page
 ```
 
+`check.sh` finds Deno and 64-bit lavapipe in the Nix store when they are not on `PATH`
+(`DENO`, `MESA`, `VULKAN_LOADER`, `VK_ICD_FILENAMES` override it).
+
 ## 9. Findings worth keeping
 
-* `#eval` cannot evaluate `Array` (or any extern): it panics "foreign functions only run
-  in compiled code". Any future differential-testing scheme for array/IO code must use
-  `wiz run` or a pure reference.
+* `#eval` could not evaluate `Array` at the branch base (the externs were compiled code
+  only: it panicked with "foreign functions only run in compiled code"). Train8's `Array`
+  model fixes that, so `webgpu/build/ref.wiz` now evaluates the entry kernel itself; any
+  future differential test of array code should check which of `#eval` and `wiz run` the
+  construct is available under.
 * `wiz parse` is a usable front end for a prototype, but it is builtin syntax only: `+`,
   list literals and `if` are `lib/Prelude.wiz` macros, so a parsed-only file cannot use
   them. It is also unelaborated, so the consumer must type-check.
+* `term.let` is not what it first looks like: its annotation is a *list* of result types.
+  The first prototype lowered the body but discarded the value (so the generated WGSL
+  named an unbound variable); it now emits a WGSL `let` and alpha-renames bindings.
+* A per-def call stack finds direct recursion only. Mutual recursion (`g → h → g`) needs
+  a cycle check on the reachable call graph; without it the emitter would produce WGSL
+  that naga rejects at run time instead of a compile-time diagnostic.
 * naga is not a nixpkgs attribute (`naga-cli` does not exist); Deno 2.9.8's WebGPU is the
   practical way to get naga validation *and* a headless GPU run here. Chromium 157 is in
   the store; headless WebGPU is optional and less reliable than Deno.

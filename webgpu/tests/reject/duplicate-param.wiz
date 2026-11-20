@@ -1,0 +1,2 @@
+-- expect: duplicate parameter
+def f (i : Nat) (a : Array U32) (a : U32) : U32 := U32.ofNat 0
