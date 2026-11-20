@@ -90,32 +90,37 @@ def readText (p : String) : EIO (Except String String) := do
     t ← FS.readFile p;
     EIO.pure (.ok t)
 
+def isFindingResult (r : Json) : Bool :=
+  String.eq (jStr r ["ruleId"]) "scry/c/command-injection"
+
+def checkSarifJson (label : String) (j : Json) : EIO Unit := do
+  let run0 := nthJ (jList j ["runs"]) 0;
+  let rs := jList run0 ["results"];
+  check (label ++ ": version 2.1.0") (String.eq (jStr j ["version"]) "2.1.0");
+  check (label ++ ": driver scry")
+    (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
+  check (label ++ ": eight results") (Nat.beq (List.length rs) 8);
+  check (label ++ ": two finding results")
+    (Nat.beq (List.length (List.filter isFindingResult rs)) 2);
+  check (label ++ ": six coverage results")
+    (Nat.beq (List.length (List.filter (fun r => Bool.not (isFindingResult r)) rs)) 6);
+  check (label ++ ": every result has a non-empty ruleId")
+    (List.all (fun r => Nat.lt 0 (String.length (jStr r ["ruleId"]))) rs);
+  check (label ++ ": every result has a physical location")
+    (List.all (fun r => Nat.lt 0 (String.length
+      (jStr (nthJ (jList r ["locations"]) 0) ["physicalLocation",
+        "artifactLocation", "uri"]))) rs)
+
+def checkSarifText (label text : String) : EIO Unit :=
+  match Json.parse text with
+  | .error e => check (label ++ ": parses (" ++ e ++ ")") .false
+  | .ok j => checkSarifJson label j
+
 def sarifCheck (label out : String) : EIO Unit := do
   readOut ← readText out;
   match readOut with
   | .error e => check (label ++ ": read (" ++ e ++ ")") .false
-  | .ok text => do
-    match Json.parse text with
-    | .error e => check (label ++ ": parses (" ++ e ++ ")") .false
-    | .ok j => do
-      let run0 := nthJ (jList j ["runs"]) 0;
-      let rs := jList run0 ["results"];
-      let isFinding (r : Json) : Bool :=
-        String.eq (jStr r ["ruleId"]) "scry/c/command-injection";
-      check (label ++ ": version 2.1.0") (String.eq (jStr j ["version"]) "2.1.0");
-      check (label ++ ": driver scry")
-        (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
-      check (label ++ ": eight results") (Nat.beq (List.length rs) 8);
-      check (label ++ ": two finding results")
-        (Nat.beq (List.length (List.filter isFinding rs)) 2);
-      check (label ++ ": six coverage results")
-        (Nat.beq (List.length (List.filter (fun r => Bool.not (isFinding r)) rs)) 6);
-      check (label ++ ": every result has a non-empty ruleId")
-        (List.all (fun r => Nat.lt 0 (String.length (jStr r ["ruleId"]))) rs);
-      check (label ++ ": every result has a physical location")
-        (List.all (fun r => Nat.lt 0 (String.length
-          (jStr (nthJ (jList r ["locations"]) 0) ["physicalLocation",
-            "artifactLocation", "uri"]))) rs)
+  | .ok text => checkSarifText label text
 
 def main : IO Unit := EIO.toIO (do
   bin ← EIO.lift (FS.exists ".grail/bin/scry");

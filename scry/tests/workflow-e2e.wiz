@@ -58,6 +58,12 @@ def candWritten (r : Scry.WfRecord) : EIO Bool := do
   | .some j => EIO.pure (String.eq (Json.getStr j "stage") "refined")
   | .none => EIO.pure (.false : Bool)
 
+def evidenceHasPoc (bundle : Option Json) : Bool :=
+  match bundle with
+  | .some j => List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
+      (String.eq (Json.getStr e "status") "observed")) (Json.getList j "evidenceItems")
+  | .none => .false
+
 /-- The repro -> poc -> verify half, run only when a C compiler was resolved. -/
 def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
@@ -90,12 +96,6 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
     (String.eq (strAt bundle ["candidate", "stage"]) "verified");
   check "bundle: evidence has a poc item with the marker observed"
     (evidenceHasPoc bundle)
-
-def evidenceHasPoc (bundle : Option Json) : Bool :=
-  match bundle with
-  | .some j => List.any (fun e => Bool.and (String.eq (Json.getStr e "kind") "poc")
-      (String.eq (Json.getStr e "status") "observed")) (Json.getList j "evidenceItems")
-  | .none => .false
 
 def main : IO Unit := EIO.toIO (do
   dir ← FS.createTempDir;
