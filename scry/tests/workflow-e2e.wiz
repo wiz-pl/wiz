@@ -131,10 +131,11 @@ def main : IO Unit := EIO.toIO (do
       | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
           (String.eq (candOf r).verdict "pursue")
       | .none => (.false : Bool));
-  candOk ← match findIn st2 "cwe78-getenv.c" with
-    | .some r => candWritten r
-    | .none => EIO.pure (.false : Bool);
-  check "refine: candidate.json is written" candOk;
+  match findIn st2 "cwe78-getenv.c" with
+  | .some r => do
+    b ← candWritten r;
+    check "refine: candidate.json is written" b;
+  | .none => check "refine: candidate.json is written" (.false : Bool);
 
   -- 3. verify before any repro: the static-only representation. A still-reported
   -- finding with no stored repro is `still-reported` / `not-run`, never a PoC verdict.
