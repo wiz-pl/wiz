@@ -1,0 +1,6 @@
+import Prelude
+
+-- A dotted name outside the module's prefix: module `Thing`, written `Other.f`.
+-- Under the namespace model this would become `Thing.Other.f`, so it is a
+-- violation until its row in legacy-names.tsv is deleted by a migration batch.
+def Other.f : Nat := 0

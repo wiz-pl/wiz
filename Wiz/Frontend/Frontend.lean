@@ -1,5 +1,6 @@
 import Wiz.Elab.Command
 import Wiz.Module
+import Wiz.LegacyNames
 import Wiz.Rig.Instances
 import Wiz.Parser.DocComment
 
@@ -105,6 +106,8 @@ where
         let k₀ := mixHash (hash m) (hash src)
         -- (include-str) the files it includes: their contents decide what it elaborates to
         let k₀ := mixHash k₀ (Module.includesKey (base.includes.getD (fun _ rel => .error s!"include_str: no file {rel}")) m src)
+        -- (the namespace allowlist is an input of a module's names; see Wiz/LegacyNames.lean)
+        let k₀ := mixHash k₀ Wiz.LegacyNames.digestFast
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((base.cHeaders h).getD ""))) k₀
         let (k, memo) ← (Module.importsOf src).foldlM (fun (k, memo) n => do
           let (kn, memo) ← go (m :: stack) n memo

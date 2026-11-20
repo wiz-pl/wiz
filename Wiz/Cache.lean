@@ -2,6 +2,7 @@ import Lean.CompactedRegion
 import Std.Time.DateTime.Timestamp
 import Wiz.Query
 import Wiz.Module
+import Wiz.LegacyNames
 import Wiz.Smt.Sha256
 
 /-!
@@ -665,6 +666,9 @@ where
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
         -- (include-str) the contents of the files it includes (fast half unchanged)
         let k₀ := mixHash k₀ (Module.includesKey includes m src)
+        -- (the namespace allowlist decides a declaration's absolute name, so it
+        -- is an input of what the module elaborates to; both halves mix its digest)
+        let k₀ := mixHash k₀ Wiz.LegacyNames.digestFast
         -- (the strong half hashes the exact fields, each length-framed: not the 64-bit
         -- hashes above, and not a concatenation that can be ambiguous)
         let headerFields := (Module.headersOf src).flatMap fun h => [s!"header:{h}", (headers h).getD ""]
@@ -673,7 +677,8 @@ where
             strong := Smt.Sha256.hexFramed "wiz-cache/module-v1"
               ([s!"salt:{salt}", s!"toolchain:{toolchain}", s!"toolchain-tag:{strongToolchain}",
                 s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src,
-                s!"includes:{includesKeyStrong includes m src}"] ++ headerFields)
+                s!"includes:{includesKeyStrong includes m src}",
+                s!"legacy-names:{Wiz.LegacyNames.digest}"] ++ headerFields)
             toolchain := strongToolchain, target := targetTag }
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
