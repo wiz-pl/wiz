@@ -1487,6 +1487,11 @@ scry project DIR --compdb build/         # C, unchanged
 
 ### 12.5 Measured before/after
 
+The table below was measured on the branch that introduced this loader, whose base
+predates train8's lambda, record and top-level lowering. It is the shape of the change
+(which calls become intra-program and which diagnostics move), not a re-measurement on
+train8; the four-file fixture in §12.4 is the positive control that is re-run here.
+
 On a private 75-file C# project (the same tree through the single-file lowering and the
 shared table, both with the C# rule pack):
 
