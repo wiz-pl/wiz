@@ -204,7 +204,9 @@ def ACond.refine (m : AiMach) (env : AiEnv) : ACond → AiEnv
       -- `Value.null` deliberately has a bottom interval, so nullness must be read
       -- before the interval: `x == NULL` refines x to null, it is not unreachable.
       match ev.nul with
-      | .nul => AiEnv.refineNull x .nul env
+      | .nul => match (AiEnv.getD env x).nul with
+        | .nonNull => AiEnv.set x Value.bot env
+        | _ => AiEnv.refineNull x .nul env
       | .nonNull => match (AiEnv.getD env x).nul with
         | .nul => AiEnv.set x Value.bot env
         | _ => match ev.itv with
@@ -216,12 +218,9 @@ def ACond.refine (m : AiMach) (env : AiEnv) : ACond → AiEnv
   | .ne x e =>
       let ev := AExpr.eval m env e
       match ev.nul with
-      | .nul => AiEnv.refineNull x .nonNull env
-      | .nonNull => match (AiEnv.getD env x).nul with
+      | .nul => match (AiEnv.getD env x).nul with
         | .nul => AiEnv.set x Value.bot env
-        | _ => match ev.itv with
-          | .bot => AiEnv.set x Value.bot env
-          | _ => env
+        | _ => AiEnv.refineNull x .nonNull env
       | _ => match ev.itv with
         | .bot => AiEnv.set x Value.bot env
         | _ => env
