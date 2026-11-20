@@ -3,6 +3,7 @@ import Word
 import Text
 import WordArray
 import WordMap
+import Scry.Identity
 /-!
 # Scry.Store
 
@@ -20,8 +21,8 @@ is the authoritative, insertion-ordered value used by tests and by the certifica
 checker. Two **indexes** are derived data, maintained on every update once a relation is
 big enough to pay for them:
 
-* a `U64Map` from a row's FNV-1a hash to the rows with that hash, so duplicate
-  suppression is expected `O(1)` instead of a scan of every row;
+* a `U64Map` from a row's 64-bit hash (`Scry.Identity.fnvWords`) to the rows with that
+  hash, so duplicate suppression is expected `O(1)` instead of a scan of every row;
 * a `U64Map` from `(column, value)` to the rows with that value in that column, so a
   join can fetch only the rows matching an already-bound column.
 
@@ -60,13 +61,13 @@ def Scry.rowEq : List U64 → List U64 → Bool
 def Scry.memRow (row : List U64) (rows : List (List U64)) : Bool :=
   List.any (fun r => Scry.rowEq row r) rows
 
-/-- FNV-1a over a row, starting from `seed`. A hash is only a bucket selector: equality
-is always checked against the stored rows, so collisions cannot change an answer. -/
-def Scry.rowHash (seed : U64) (row : List U64) : U64 :=
-  List.foldl (fun h x => UIntN.mul (UIntN.xor h x) (U64.ofNat 1099511628211)) seed row
+/-- A row hashed starting from `seed` (`Scry.Identity.fnvWords`; one row element is one
+word). A hash is only a bucket selector: equality is always checked against the stored
+rows, so collisions cannot change an answer. -/
+def Scry.rowHash (seed : U64) (row : List U64) : U64 := Scry.fnvWords seed row
 
-/-- A row's hash. The seed is the FNV offset basis. -/
-def Scry.hashRow (row : List U64) : U64 := Scry.rowHash (U64.ofNat 14695981039346656037) row
+/-- A row's hash. The seed is the hash's offset basis. -/
+def Scry.hashRow (row : List U64) : U64 := Scry.rowHash Scry.fnvOffset row
 
 /-- The index key for column `c` holding `v`. -/
 def Scry.colKey (c : Nat) (v : U64) : U64 :=
