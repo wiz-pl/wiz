@@ -3122,8 +3122,8 @@ def Fe.specBorrow (sig : Fe.Sig) (cls : List (Nat × Syntax))
   | _, .mopt _ _ _, _, _ =>
     .error "spec: not supported yet: an optional returned borrow (`Option (&mut …)`) (`final result`): `none` hands the lender back without a final value"
   | _, .mutb _ a s, .cons v .nil, .nil =>
-    let vs := .cons v .nil;
-    let fin := .cons ("result", "fin") (.cons (v, "r.2") .nil);
+    let vs : List String := .cons v .nil;
+    let fin : List (String × String) := .cons ("result", "fin") (.cons (v, "r.2") .nil);
     let res := "r.1";
     let reqs := Fe.clauses sig.params vs fin res "feral_clause.req" cls;
     let enss := Fe.clauses sig.params vs fin res "feral_clause.ens" cls;
