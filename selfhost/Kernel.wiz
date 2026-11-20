@@ -3696,7 +3696,7 @@ partial def liftTm (k cut : Nat) : Tm → Tm
   -- (a global's value and type are closed; so are literals and their registrations)
   | .const n ps ls v ty => .const n ps ls v ty
   | .axiomC n ty => .axiomC n ty
-  | .ulift k l A => .ulift k l (liftTm k cut A)
+  | .ulift k0 l A => .ulift k0 l (liftTm k cut A)
   | .up a => .up (liftTm k cut a)
   | .down t => .down (liftTm k cut t)
   | .prf l t => .prf l (liftTm k cut t)
@@ -3771,7 +3771,7 @@ partial def tmContainsChildren (target : Tm) : Tm → Bool
   | .cocon x => tmContains target x
   | .scofix _ I D A f s i a => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target A) (Bool.or (tmContains target f) (Bool.or (tmContains target s) (Bool.or (tmContains target i) (tmContains target a))))))
   | .coit _ I D S step i s => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target S) (Bool.or (tmContains target step) (Bool.or (tmContains target i) (tmContains target s)))))
-  | .ind _ I D _ P m i x => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target P) (Bool.or (tmContains target m) (Bool.or (tmContains target i) (tmContains target x))))))
+  | .ind _ I D _ P m i x => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target P) (Bool.or (tmContains target m) (Bool.or (tmContains target i) (tmContains target x)))))
   | .const _ _ _ _ _ => .false
   | .axiomC _ _ => .false
   | .ulift _ _ A => tmContains target A
@@ -3785,7 +3785,7 @@ end
 -- the head and arguments of an application spine
 def tmSpineGo : Tm → List Tm → Tm × List Tm
   | .app f a, acc => tmSpineGo f (.cons a acc)
-  | t, acc => .mk t acc
+  | t, acc => (t, acc)
 def tmSpine (t : Tm) : Tm × List Tm := tmSpineGo (match t with | .ann inner _ => inner | t => t) .nil
 
 inductive FixCall where
@@ -3817,7 +3817,7 @@ def allOfVal (f : Val → Bool) : List Val → Bool
 def fixCallSafe (c : TCtx) (t : Tm) (ty : Val) : Bool := match TCtx.fix c with
   | .none => .false
   | .some fn => match tmSpine t with
-    | .mk h args => match h with
+    | (h, args) => match h with
       | .const n ps ls _ tyD => match kStrEq n fn with
         | .false => .false
         | .true => match peelFix c (eval .nil (substIfAny ps ls tyD)) args .nil .nil with
@@ -4126,7 +4126,7 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ um => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                let xt := .vmu l vI vD vi vs;
+                let xt : Val := .vmu l vI vD vi vs;
                 match check (erasedIf q c) x xt with
                 | .ok _ ux => .ok (vapp (vapp vP vi) (eval (TCtx.env c) x)) (uAdd um (scaleUsage c q x xt ux))
                 | r => r
