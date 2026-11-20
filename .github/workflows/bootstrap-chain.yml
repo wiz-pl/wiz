@@ -99,7 +99,7 @@ jobs:
           fi
           mapfile -t paths < <(nix path-info .#wizc-release .#wizc .#wizc-seed)
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" "${paths[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wizc-release-${{ github.event.workflow_run.head_sha }}
           path: out/
@@ -141,7 +141,7 @@ jobs:
           mkdir -p nightly
           cp "$rel/wizc-$SYS.tar.gz" nightly/
           echo "$COMMIT" > nightly/commit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && hashFiles('nightly/commit') != ''
         with:
           name: wizc-nightly
