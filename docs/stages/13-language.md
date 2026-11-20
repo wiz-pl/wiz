@@ -843,3 +843,87 @@ unrelated `calc_e` syntax category in the `language` group is untouched.
 
 The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
 request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).
+
+## 13w: application operators, sections, and `#eval` through `Repr`
+
+```wiz
+import Prelude
+import Text
+import Deriving
+import Compose
+
+#eval Nat.succ <| 4                       -- 5: `f <| x` is `f x` (infixr 10)
+#eval [1, 2, 3] |> List.length            -- 3: `x |> f` is `f x` (infixl 10)
+
+structure In where
+  x : Nat
+  y : Nat
+structure Out where
+  i : In
+  n : Nat
+def o : Out := Out.mk (In.mk 1 2) 3
+#eval o |>.n                              -- 3: the projection `o.n`
+#eval o |>.i.x                            -- 1: the same as `o.i.x`
+
+#eval List.length (List.map (· + 1) [1, 2, 3])   -- 3: `(· + 1)` is `fun x => x + 1`
+def mul : Nat → Nat → Nat := (· * ·)             -- two holes, two parameters
+#eval mul 3 4                                    -- 12
+
+#eval (Nat.succ ∘ Nat.succ) 0                    -- 2: lib/Compose.wiz
+```
+
+**`<|` and `|>`.** `|>` was already the Prelude's `pipe` (13); `<|` is its
+mirror, `apply` (`f <| x` is `f x`), at `infixr:10` against `infixl:10`, as in
+Lean. Both are at any universe, so proofs compose too (`h |> Eq.symm`), and both
+print back as written (the infix unexpander is the `infixl`/`infixr` declaration).
+
+**`x |>.f`.** A projection through the pipe: `term.pipeProj` is a *trailing* rule,
+`term:11 "|>." ident` (a Prelude `syntax`, not built-in grammar, so the self-hosted
+parser's generated tables are unchanged), and its macro expands to the `term.field`
+node. It is therefore the **same** elaboration as `x.f`: `elabFields`, the same field
+lookup, the same private checks and the same errors, and a dotted path works
+(`x |>.a.b` is `x.a.b`). The surface form is `x |>.f` with no space: the dot is part
+of the `|>.` token, as it is in `x.f`. `x |> .f` is not the projection: there the
+existing `|>` operator sees `.f`, the constructor-dot form, and the space would make
+the two readings differ. The left side is at precedence 11 (so `x + y |>.f` is
+`(x + y).f`) and the result binds at `max`, like a field access; as with `x.f`, an
+application on the left is an argument, so write `(f x) |>.f`. Printed back it is the
+projection (`o.2.1` for this structure), which is the same text `o.f` prints.
+
+**`(· + 1)`.** `·` is `term.sectionHole` (`syntax (name := sectionHole) "·" : term`).
+A parenthesised term whose holes are not inside a nested parenthesis is a section:
+the elaborator replaces each hole by a fresh variable (`section0✝…`, unspellable)
+and checks the body as a lambda, one Π at a time, against the expected type. That
+is what makes `List.map (· + 1) xs` work: the argument's expected `A → B` gives the
+hole its type. `(1 + ·)` is the same, and `(· * ·)` has one parameter per hole.
+Limits: the section must be parenthesised (the parentheses delimit it, as in Lean),
+its expected type must be a function type (`#check (· + 1)` says so), and a hole
+inside a nested `( … )` belongs to that inner section. It is check-mode syntax: a
+section with no function type in view is an error rather than a guessed lambda.
+
+**`Repr` and `#eval`.** `lib/Deriving.wiz` already had `class Repr (A) where
+reprPrec : A → Nat → String` and `Repr.repr a = Repr.reprPrec a 0`; `#eval` now
+uses it. When the elaborated value's type has a `Repr` instance (the wrapper
+`Repr.repr e` elaborates), `#eval` runs that and prints its string; otherwise it
+keeps the old term readback. So `#eval [1, 2, 3]` with `import Deriving` prints
+`[1, 2, 3]` (a hand-written `Repr (List A)` replaced the derived `List.cons …`
+one), while a type without an instance still prints its constructors. `#check`
+and `#print` are unchanged. `Bool` is the one exception: inductive types are anonymous
+`μ`s and `Enum` tags are metadata, so `Repr Bool` and the `Repr` of any other
+two-constructor enum are instances of the *same* class at definitionally equal types,
+and the later one wins (7b); `#eval` therefore keeps `Bool`'s constructor readback
+(`.true`, `.false`), which is the stable spelling a program sees. The `Repr String`
+instance now escapes as the lexer reads (`"a\nb"`, `\x0d` for a carriage return), which
+is what makes printing the `Repr` result directly equal to the old readback of a
+string.
+
+**`∘`.** `lib/Compose.wiz` declares `class Compose (α β γ : Type) where compose :
+(β → γ) → (α → β) → (α → γ)` and registers `infixr:90 " ∘ "`. The instance for
+functions is `Compose.mk (fun g f x => g (f x))`; a type can declare its own, and
+a later instance wins (stage 7b), so the operator is not hard-coded to functions.
+`Compose.assoc`, `Compose.id_left` and `Compose.id_right` (with `id`) hold at
+functions definitionally; `rfl` proves them and `#print axioms` lists none.
+
+Tests: group `language` (`<|`/`|>`, `|>.`, the section forms), `deriving`
+(`#eval` with and without an instance, list/string `Repr`), `std` (`Compose` and
+its laws, a custom instance). Stage 13's earlier letters are 13a–13s.

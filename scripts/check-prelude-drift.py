@@ -97,6 +97,8 @@ EXEMPT: dict[str, str] = {
     "pipe": "a known gap: `def pipe` and its `infixl` line are not in the embedded "
             "copy (the frontend supports `infixl`, so this is cheap to add); lib/ "
             "files that use `|>` are libdiff gaps",
+    "apply": "a known gap, next to `pipe`: `def apply` and its `infixr` line (for `<|`) "
+             "are not in the embedded copy; lib/ files that use `<|` are libdiff gaps",
     "outParam": "class plumbing (`outParam A` in a class declaration); the "
                 "embedded prelude has no classes",
 }
@@ -110,7 +112,7 @@ META_ROOTS: set[str] = {
     "Append", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
     "ExprView", "FieldView", "HAppend", "IndView", "List", "ListLit", "Macro",
     "MacroM", "Monad", "Monad1", "ParamView", "RewriteResult", "SatAnswer", "Simp",
-    "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM",
+    "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM", "PipeProj",
 }
 
 #: Names `preludeText` defines that `lib/` does not declare as identifiers. Every

@@ -1523,6 +1523,13 @@ is an `Applicative` and every `Applicative` a `Functor`; `Monad`/`Functor` insta
 `List.flatMap` (`List.map` is `lib/Text.wiz`'s, which Functor imports). See [13d](stages/13-language.md). The Prelude itself has `if … then …
 else`, short-circuiting `&&` and `||`, and `!` ([13c](stages/13-language.md)).
 
+`lib/Compose.wiz` (`import Compose`): `class Compose (α β γ : Type) where compose :
+(β → γ) → (α → β) → (α → γ)`, the operator `g ∘ f` (`infixr:90`), the function
+instance `compose g f x = g (f x)`, `id`, and the laws `Compose.assoc`,
+`Compose.id_left`, `Compose.id_right` (definitional; `#print axioms` lists none). A
+type with its own composition declares an instance, and a later instance wins (7b).
+See [13w](stages/13-language.md).
+
 ## 9j: text and lists (`lib/Text.wiz`)
 
 `import Text` (only `Prelude` underneath): the string and list functions a program needs,

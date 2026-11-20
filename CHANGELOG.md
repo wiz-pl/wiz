@@ -10,6 +10,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* **Application operators, pipe projections, sections, and `#eval` through `Repr`
+  (13w).** `f <| x` (`apply`, `infixr:10`) joins `x |> f` (`pipe`, `infixl:10`);
+  `x |>.f` is the same projection as `x.f`, nested paths included; `(· + 1)`,
+  `(1 + ·)` and `(· * ·)` are lambdas whose parameters come from the expected type
+  (`List.map (· + 1) xs`). `#eval` now runs `Repr.repr` when the value's type has a
+  `Repr` instance, so `[1, 2, 3]` prints as a list literal instead of `List.cons …`;
+  types without an instance keep the term readback, `Bool` keeps `.true`/`.false`
+  (structurally equal enums share `Repr` instances, so its readback is the stable
+  spelling), and `#check`/`#print` are unchanged. `Repr String` escapes as the lexer
+  reads, and `Repr (List A)` is hand-written (it is no longer derived).
+  `lib/Compose.wiz` adds `class Compose`
+  with `g ∘ f` (`infixr:90`), a function instance, and the definitional laws
+  `Compose.assoc`, `Compose.id_left`, `Compose.id_right`.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`

@@ -1309,6 +1309,64 @@ partial def sameDefinition? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R)
       pure (some t))
     (fun _ => pure none)
 
+/-- Every identifier written in a term (uses and binder names alike). A section's
+parameter is named so that it is not one of these, so it can neither capture a use nor
+be captured by a binder in the body. -/
+partial def sectionNamesIn : Syntax → List Name
+  | .ident _ n => [n]
+  | .node _ _ args => args.toList.flatMap sectionNamesIn
+  | _ => []
+
+/-- A section parameter's name: `x`, then `x1`, `x2`, … — the first one not in `used`. -/
+partial def freshSectionName (used : List Name) (i : Nat) : Name :=
+  let n : Name := if i == 0 then "x" else s!"x{i}"
+  if used.contains n then freshSectionName used (i + 1) else n
+
+/-- Whether a term has a `·` outside a nested parenthesised term (that one is the
+inner term's section). -/
+partial def hasSectionHole : Syntax → Bool
+  | .node _ "term.sectionHole" _ => true
+  | .node _ "term.paren" _ => false
+  | .node _ _ args => args.any hasSectionHole
+  | _ => false
+
+/-- Replace each `·` in a term by a variable, returning the rewritten term, the names
+in order, and the `used` list with them. A `·` inside a nested `( … )` belongs to that
+parenthesised term's section, so it is left for the inner elaboration. -/
+partial def abstractSections (stx : Syntax) (used : List Name) :
+    Syntax × List Name × List Name :=
+  match stx with
+  | .node _ "term.sectionHole" _ =>
+    let n := freshSectionName used 0
+    (.node stx.info "term.ident" #[.ident stx.info n], [n], n :: used)
+  | .node _ "term.paren" _ => (stx, [], used)
+  | .node info k args =>
+    let (args, names, used) := args.foldl (init := (#[], [], used)) fun (acc, ns, us) a =>
+      let (a', ns', us') := abstractSections a us
+      (acc.push a', ns ++ ns', us')
+    (.node info k args, names, used)
+  | s => (s, [], used)
+
+/-- A `·` section `(· + 1)`, `(1 + ·)`, `(· * ·)`: a lambda whose parameters are the
+holes, checked against the expected function type. This is what makes
+`List.map (· + 1) xs` work: the argument's expected type `A → B` gives the hole its
+type. `expected` is forced one Π at a time; implicit Πs were already consumed by
+`check`, so the parameters are explicit. -/
+partial def elabSection (ctx : LocalCtx R) (body : Syntax) (expected : VTy R) : ElabM R (Term R) := do
+  let (body', names, _) := abstractSections body (sectionNamesIn body)
+  let rec go (ctx : LocalCtx R) (names : List Name) (e : VTy R) : ElabM R (Term R) := do
+    match names with
+    | [] => check ctx body' e
+    | n :: ns =>
+      match ← force e with
+      | .pi _ _ q dom cod _ =>
+        let t ← go (ctx.bindQ n dom ((Val.toPoly? q).bind (·.isConst?))) ns (← instM cod (Val.var ctx.lvl))
+        return .lam n t
+      | .neutral (.mvar _) _ =>
+        throwAt body.info "a `·` section is a lambda, so it needs a function type from the context; use it where one is expected (as in `List.map (· + 1) xs`), or write the `fun` out"
+      | e => throwAt body.info s!"a `·` section is a lambda, but the expected type has too few function arguments: {← showVal ctx e}"
+  go ctx names expected
+
 /-- **Exercise 3.8.** Elaborate `stx` against `expected`. Force `expected` first.
 
 1. If `expected` is an implicit Π and `stx` is not an implicit `fun`
@@ -1500,7 +1558,11 @@ where
     -- (13h) `⟨a, b⟩` and `let ⟨a, b⟩ := s; body`
     | "term.anon" => elabAnon ctx stx expected
     | "term.letPat" => return (← elabLetPat ctx stx (some expected)).1
-    | "term.paren" => check ctx (stx.getArg 1) expected
+    | "term.paren" =>
+      if hasSectionHole (stx.getArg 1) then elabSection ctx (stx.getArg 1) expected
+      else check ctx (stx.getArg 1) expected
+    | "term.sectionHole" =>
+      throwAt ctx.info "a `·` is a section placeholder: write it inside parentheses, as in `(· + 1)`, where a function type is expected"
     | "term.app" =>
       if (stx.getArg 0).isOfKind "term.explicit" || (← builtinApp? ctx stx).isSome ||
           !((stx.getArg 1).args.any needsExpected || (← ctorWithParams ctx (stx.getArg 0)) ||
@@ -3611,7 +3673,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
     let l := if stx.isOfKind "term.type" then .succ l else l
     return (.sort l, .sort (.succ l))
   | "term.prop" => return (.sort .zero, .sort (.succ .zero))
-  | "term.paren" => infer ctx (stx.getArg 1)
+  | "term.paren" =>
+    if hasSectionHole (stx.getArg 1) then
+      throwAt ctx.info "a `·` section is a lambda (its parameters are the holes), so it needs a function type from the context; use it where one is expected (as in `List.map (· + 1) xs`), or write the `fun` out"
+    else infer ctx (stx.getArg 1)
+  | "term.sectionHole" =>
+    throwAt ctx.info "a `·` is a section placeholder: write it inside parentheses, as in `(· + 1)`, where a function type is expected"
   | "term.namedArg" => throwAt ctx.info "a named argument `(x := e)` is only allowed as an argument of an application"
   | "term.ascription" =>
     let from_ := (← get).nextInst
