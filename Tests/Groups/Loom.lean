@@ -22,12 +22,12 @@ def loomPrelude : String :=
   "inductive Msg where\n  | inc\n" ++
   "structure Model where\n  count : Nat\n" ++
   "def countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n)\n" ++
-  "def view (s : Model) : Loom.VNode Msg :=\n" ++
+  "def counterView (s : Model) : Loom.VNode Msg :=\n" ++
   "  Loom.el \"div\" [Loom.class \"counter\"]\n" ++
   "    [Loom.el \"p\" List.nil [Loom.text \"count \", Loom.text (Nat.toString s.count)],\n" ++
   "     Loom.on \"click\" Msg.inc (Loom.el \"button\" List.nil [Loom.text \"+\"])]\n" ++
   "def app : Loom.App Model Msg := Loom.App.mk (Model.mk 0)\n" ++
-  "  (fun m s => match m with | .inc => Loom.setState countL Nat.succ s) view\n" ++
+  "  (fun m s => match m with | .inc => Loom.setState countL Nat.succ s) counterView\n" ++
   "def item (n : Nat) : Loom.VNode Msg :=\n" ++
   "  Loom.keyed (Nat.toString n) (Loom.el \"li\" List.nil [Loom.text (Nat.toString n)])\n" ++
   "def list (ns : List Nat) : Loom.VNode Msg :=\n" ++
@@ -198,10 +198,71 @@ def loomGroup : Group where
           "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nEnter\") ready\n" ++
           "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\ns\\ncm\") ready\n" ++
           "#eval Page.consume (Loom.splitEvent \"click\\n5\\n\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nTab\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nTab\\n@3@7\") ready\n" ++
           "#eval (Page.update PageMsg.key \"Enter\\nc\" ready).loads\n" ++
           "#eval (Page.update PageMsg.key \"Enter\" ready).loads\n" ++
-          "#eval (Page.update PageMsg.key \"s\\nm\" ready).save")
-          [".true", ".false", ".true", ".false", "1", "0", "1"] },
+          "#eval (Page.update PageMsg.key \"s\\nm\" ready).save\n" ++
+          "#eval (Page.update PageMsg.key \"Tab\\n@1@2\" ready).edits\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.key \"Tab\\n@1@2\" ready)) \"\\\"kind\\\":\\\"edit\\\"\"")
+          [".true", ".false", ".true", ".false", ".true", ".true", "1", "0", "1", "1", ".true"] },
+    { name := "editor rules: positions are UTF-16, as the LSP wire format is", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "#eval (EditorModel.positionFromOffset \"a😀b\\nc\" 3).line\n" ++
+          "#eval (EditorModel.positionFromOffset \"a😀b\\nc\" 3).character\n" ++
+          "#eval EditorModel.offsetFromPosition \"a😀b\\nc\" (EditorModel.Position.mk 1 1)\n" ++
+          "#eval EditorModel.offsetFromPosition \"ab\\ncd\" (EditorModel.Position.mk 0 5)\n" ++
+          "#eval (EditorModel.codePointPositionFromOffset \"a😀b\\nc\" 3).character\n" ++
+          "#eval EditorModel.utf16OffsetFromCodePoints \"a😀b\\nc\" 2\n" ++
+          "#eval EditorModel.codePointOffsetFromUtf16 \"a😀b\\nc\" 3")
+          ["0", "3", "6", "2", "2", "3", "2"] },
+    { name := "editor rules: a diagnostic becomes merged, line-clipped spans", run := fun _ =>
+        okLoom ("import Json\nimport Web.EditorModel\n" ++
+          "def one := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":13},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":17}},\\\"severity\\\":1,\\\"message\\\":\\\"unknown identifier\\\"}]\"\n" ++
+          "def multi := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":4},\\\"end\\\":{\\\"line\\\":2,\\\"character\\\":2}},\\\"severity\\\":2,\\\"message\\\":\\\"w\\\"}]\"\n" ++
+          "def overlap := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":1},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":4}},\\\"severity\\\":2,\\\"message\\\":\\\"warning\\\"},{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":2},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":5}},\\\"severity\\\":1,\\\"message\\\":\\\"error\\\"}]\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments \"def f : Nat := nope\\n\" one 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson \"def f : Nat := nope\\n\" one 0) \"\\\"start\\\":13\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments \"one two\\nthree four\\nfive\" multi 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson \"one two\\nthree four\\nfive\" multi 0) \"\\\"start\\\":19\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments \"abcdef\" overlap 0)\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments \"abcdef\" overlap 0) with | .some s => s.severity | .none => 0\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments \"abcdef\" overlap 0) with | .some s => s.stop | .none => 0\n" ++
+          "#eval List.length (EditorModel.squiggleSegments \"ab\" \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":4,\\\"character\\\":0}}}]\" 0)")
+          ["1", ".true", "3", ".true", "1", "1", "5", "0"] },
+    { name := "editor rules: completions filter, order, move and insert", run := fun _ =>
+        okLoom ("import Json\nimport Web.EditorModel\n" ++
+          "def items := \"[{\\\"label\\\":\\\"Nat.add\\\"},{\\\"label\\\":\\\"Nat.sub\\\"},{\\\"label\\\":\\\"natPred\\\"},{\\\"label\\\":\\\"Bool.and\\\"},{\\\"label\\\":\\\"Nat.succ\\\",\\\"sortText\\\":\\\"0\\\"},{\\\"label\\\":\\\"add\\\"}]\"\n" ++
+          "def names (xs : List Json) : List String := List.map EditorModel.itemLabel xs\n" ++
+          "#eval List.length (EditorModel.completionItems items)\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"Nat.ad\" 0))\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"NAT.S\" 0))\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"add\" 0))\n" ++
+          "#eval (EditorModel.identifierPrefix \"def foo := Nat.ad\" 17).1\n" ++
+          "#eval (EditorModel.identifierPrefix \"def foo := Nat.ad\" 17).2\n" ++
+          "#eval EditorModel.completionScore (Json.mkObj [(\"label\", Json.mkStr \"Nat.add\")]) \"dd\"\n" ++
+          "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"0\") (EditorModel.intOf \"-1\") (EditorModel.intOf \"3\"))\n" ++
+          "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"2\") (EditorModel.intOf \"1\") (EditorModel.intOf \"3\"))\n" ++
+          "#eval EditorModel.stripSnippet \"foo ${1:bar} $2 ${0}\"\n" ++
+          "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).text\n" ++
+          "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).caret\n" ++
+          "#eval (EditorModel.acceptCompletion \"😀 tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 5).caret\n" ++
+          "#eval EditorModel.completionTrigger \"-- no\" \"t\" 5\n" ++
+          "#eval EditorModel.completionTrigger \"-- x\\n\" \"t\" 5")
+          ["6", r#""Nat.add,add""#, r#""Nat.succ,Nat.sub""#, r#""add,Nat.add""#, "11",
+           r#""Nat.ad""#, "2", r#""2""#, r#""0""#, r#""foo bar  ""#, r#""def x := twice""#, "14", "8",
+           ".false", ".true"] },
+    { name := "editor rules: Tab indents a line or a selection as a host edit", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def atCaret := EditorModel.indentJson \"a\\nb\\nc\" \"1\" \"1\"\n" ++
+          "def selected := EditorModel.indentJson \"a\\nb\\nc\" \"0\" \"3\"\n" ++
+          "#eval String.contains atCaret \"\\\"insert\\\":\\\"  \\\"\"\n" ++
+          "#eval String.contains atCaret \"\\\"from\\\":1\"\n" ++
+          "#eval String.contains selected \"  a\"\n" ++
+          "#eval String.contains selected \"  b\"\n" ++
+          "#eval String.contains selected \"\\\"from\\\":0\"\n" ++
+          "#eval String.contains selected \"\\\"to\\\":3\"")
+          [".true", ".true", ".true", ".true", ".true", ".true"] },
     { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
         -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
         -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters

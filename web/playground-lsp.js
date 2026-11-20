@@ -38,7 +38,7 @@ import { delegate } from "./tagged.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
 import { mountHover, wantsHover } from "./hover.js";
-import { caretOffset } from "./editor-model.js";
+import { caretOffset } from "./framework/editor-text.js";
 
 // A document URI of our own: the server shares documents between every page, so two
 // playground tabs must not edit the same file.
@@ -62,7 +62,7 @@ function scratchUri() {
 export function startInfoview({
   editor, panel, config, search, uri, follow = false, info, onRender, eventsFrom,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120,
+  hover: wantHover, positionDebounce = 120, rules,
 } = {}) {
   if (!editor || !panel) return null;
   // The panel's markup may be produced here and rendered elsewhere (the playground's
@@ -134,13 +134,18 @@ export function startInfoview({
 
   // The editor's features: squiggles under the diagnostics, and the completion popup at
   // the caret. Both are plain overlay DIVs (no dependency, no editor rewrite) and both
-  // are absent without a DOM (the Node tests pass a stub textarea).
-  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query)
-    ? null : mountSquiggles(editor, { document: pageDocument });
-  const completions = wantCompletionsPopup === false || !wantsCompletions(query)
+  // are absent without a DOM or without the runtime's rules (the standalone infoview
+  // passes `squiggles: false`/`completions: false` today).
+  const squiggles = wantSquigglesLayer === false || !wantsSquiggles(query) || !rules
+    ? null : mountSquiggles(editor, {
+      document: pageDocument,
+      segments: (text, diagnostics) => rules.segments(text, diagnostics),
+    });
+  const completions = wantCompletionsPopup === false || !wantsCompletions(query) || !rules
     ? null : mountCompletions({
       editor,
       document: pageDocument,
+      rules,
       onRequest: (position) => {
         if (!client || client.state !== "open") return null;
         return client.completion(documentUri, position);
@@ -242,7 +247,9 @@ export function startInfoview({
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = positionAt(editor.value, caretOffset(editor));
+    const position = rules
+      ? rules.position(editor.value, caretOffset(editor))
+      : positionAt(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
     // The same caret: the server already answered (diagnostics still force a re-ask).
     if (where === lastCursor && view.goalsKind !== null) return;
@@ -432,7 +439,8 @@ export function startInfoview({
     refresh,
     reconnect,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
-    position: () => positionAt(editor.value, caretOffset(editor)),
+    position: () => rules ? rules.position(editor.value, caretOffset(editor))
+      : positionAt(editor.value, caretOffset(editor)),
     squiggles: () => squiggles,
     completions: () => completions,
     goTo,

@@ -1721,11 +1721,16 @@ too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, a
 raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
 with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
 `#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
+`import Web.EditorModel` is the editor's pure rule set — UTF-16 positions, diagnostic
+ranges as merged line-clipped spans, completion filtering/order/insertion, and Tab's
+indent — reached from the page through the read-only `wiz_loom_editor_*` queries
+(`mount`'s `ask`); `web/framework/editor-model.mjs` is the test oracle, not served.
 `web/playground-ui.wiz` composes them into the whole page (`web/playground.html` mounts
 it) and exports its `wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
 module, so a user program's trap in the engine cannot touch the UI state. Tests:
-`web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
-(the page, mounted from the built module under Node).
+`web/playground-loom-test.sh` (the two components), `web/playground_ui_test.mjs`
+(the page, mounted from the built module under Node), and the editor rules' `=loom`
+cases.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 

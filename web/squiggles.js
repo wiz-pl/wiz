@@ -28,10 +28,14 @@
 // end of the parent goes before this layer (see web/loom_overlay_test.mjs). The parent is
 // made a containing block so the layer can sit over the textarea's box.
 //
-// `web/editor-model.js` computes the ranges (the pure half, tested in Node); this file
-// only turns them into DOM.
+// `web/framework/editor-model.mjs` (the test oracle) used to compute the ranges; this
+// file only turns them into DOM. The ranges are now `lib/Web/EditorModel.wiz`'s and
+// arrive through `options.segments(text, diagnostics)`; this widget paints them.
 "use strict";
-import { squiggleSegments, SEVERITY_NAME } from "./editor-model.js";
+
+// The class suffix for a severity (the runtime sends `severityName` too; this is the
+// paint fallback).
+const SEVERITY_NAME = { 1: "error", 2: "warning", 3: "info", 4: "hint" };
 
 // The properties that change where a character sits. Copied from the textarea's computed
 // style; web/playground.css has the same declarations so a page without
@@ -115,10 +119,13 @@ function layoutLayer(editor, layer, style) {
 }
 
 // `mountSquiggles(editor, options)` → `{update(diagnostics), refresh(), segments(), destroy()}`.
-// `options.document` defaults to the editor's own document (tests pass a double).
+// `options.segments(text, diagnostics)` is the runtime's rule (a list of `{start, stop,
+// severity, severityName?, message}`); `options.document` defaults to the editor's own
+// document (tests pass a double).
 export function mountSquiggles(editor, options = {}) {
   const doc = options.document || editor.ownerDocument || (typeof document !== "undefined" ? document : null);
-  if (!editor || !doc || typeof doc.createElement !== "function") return null;
+  const segmentsOf = options.segments;
+  if (!editor || !doc || typeof doc.createElement !== "function" || typeof segmentsOf !== "function") return null;
   const host = layerHost(editor, doc);
   if (!host) return null;
   const layer = doc.createElement("div");
@@ -132,6 +139,7 @@ export function mountSquiggles(editor, options = {}) {
   // existing sibling changes index (the Loom page's patch paths).
   host.appendChild(layer);
   let spans = [];
+  let diagnostics = [];
 
   const initialStyle = copyTextStyle(editor, text);
   layoutLayer(editor, layer, initialStyle);
@@ -145,11 +153,11 @@ export function mountSquiggles(editor, options = {}) {
     let at = 0;
     for (const span of spans) {
       const start = Math.max(at, Math.min(value.length, span.start));
-      const end = Math.max(start, Math.min(value.length, span.end));
+      const end = Math.max(start, Math.min(value.length, span.stop));
       if (start > at) text.appendChild(doc.createTextNode(value.slice(at, start)));
       if (end > start) {
         const mark = doc.createElement("span");
-        attr(mark, "class", "squiggle sev-" + (SEVERITY_NAME[span.severity] || "info"));
+        attr(mark, "class", "squiggle sev-" + (span.severityName || SEVERITY_NAME[span.severity] || "info"));
         if (span.message) attr(mark, "title", span.message);
         mark.appendChild(doc.createTextNode(value.slice(start, end)));
         text.appendChild(mark);
@@ -176,13 +184,20 @@ export function mountSquiggles(editor, options = {}) {
     syncScroll();
   }
 
-  function update(diagnostics) {
-    spans = squiggleSegments(typeof editor.value === "string" ? editor.value : "", diagnostics || []);
+  function update(next) {
+    diagnostics = Array.isArray(next) ? next : [];
+    spans = segmentsOf(typeof editor.value === "string" ? editor.value : "", diagnostics) || [];
     refresh();
     return spans;
   }
 
-  const onInput = () => { render(); syncScroll(); };
+  // Typing changes the text under stale offsets: re-ask the runtime for the same
+  // diagnostics against the new value (the merge/clip rules are the runtime's).
+  function onInput() {
+    spans = segmentsOf(typeof editor.value === "string" ? editor.value : "", diagnostics) || [];
+    render();
+    syncScroll();
+  }
   const onScroll = () => syncScroll();
   const onResize = () => refresh();
   if (typeof editor.addEventListener === "function") {

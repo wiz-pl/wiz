@@ -1,4 +1,6 @@
 import IO
+import Json
+import Web.EditorModel
 import Web.Loom
 import Web.Playground
 
@@ -18,10 +20,14 @@ There are two runtime interfaces, not one per effect:
 
   * `wiz_loom_effect (state) kind a b` — the page's results coming back in: a finished
     run, a failure, a status pair, Run's state, the footer, the editor's text, the
-    initial fragment/draft, a note, and `"ack" a` for a serviced request;
+    initial fragment/draft, a note, an edited text, and `"ack" a` for a serviced request;
   * `wiz_loom_requests (state)` — the effects the page must do, as JSON
     (`[{"kind":"run","payload":""}, …]`), read by `web/framework/mount.js` and handed to
     the page's `onRequest`.
+
+The editor's rules are **reads**, not effects, and take no state: `wiz_loom_editor_*`
+are string-to-string queries (`mount`'s `ask`) over `lib/Web/EditorModel.wiz`, so the
+page can ask "which spans does this diagnostic underline?" without a step.
 
 Everything else (the menu, the layout, the state, the patches, the fragment/draft
 format) is the runtime's.
@@ -52,9 +58,64 @@ def loomConsume (s : Page) (ev : String) : Nat :=
   | .true => 1
   | .false => 0
 
+-- The editor's pure rules (`lib/Web/EditorModel.wiz`). The page asks one question at a
+-- time and paints the answer; these take no runtime state, so they are reads, not
+-- effects. Strings in, strings out, so the browser marshals no objects.
+
+/-- The spans a diagnostics array underlines, as JSON. -/
+def loomEditorSegments (text diags maxSegments : String) : String :=
+  EditorModel.segmentsJson text diags (EditorModel.natOf maxSegments)
+
+/-- A `textDocument/completion` result's items, as JSON. -/
+def loomEditorItems (result : String) : String :=
+  Json.render (Json.mkArr (EditorModel.completionItems result))
+
+/-- The popup's filtered items, selection and prefix, as JSON. -/
+def loomEditorPopup (text items index offset : String) : String :=
+  EditorModel.popupJson text items index (EditorModel.natOf offset)
+
+/-- The selected index after moving `delta` in `count` items. -/
+def loomEditorMove (index delta count : String) : String :=
+  EditorModel.intString
+    (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
+      (EditorModel.intOf count))
+
+/-- What an accepted item inserts and where, as JSON. -/
+def loomEditorAccept (text item offset : String) : String :=
+  EditorModel.acceptJson text item (EditorModel.natOf offset)
+
+/-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
+def loomEditorTrigger (text c offset : String) : String :=
+  match EditorModel.completionTrigger text c (EditorModel.natOf offset) with
+  | .true => "1"
+  | .false => "0"
+
+/-- The LSP position of a UTF-16 offset, as JSON. -/
+def loomEditorPosition (text offset : String) : String :=
+  EditorModel.positionJson text (EditorModel.natOf offset)
+
+/-- The UTF-16 offset of an LSP position. -/
+def loomEditorOffset (text line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition text
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The edit an accepted Tab makes at `from`..`to`, as JSON (`host.edit` applies it). -/
+def loomEditorIndent (text from to : String) : String :=
+  EditorModel.indentJson text from to
+
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
 export "wiz_loom_effect" loomEffect
 export "wiz_loom_requests" loomRequests
 export "wiz_loom_consume" loomConsume
+export "wiz_loom_editor_segments" loomEditorSegments
+export "wiz_loom_editor_items" loomEditorItems
+export "wiz_loom_editor_popup" loomEditorPopup
+export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_accept" loomEditorAccept
+export "wiz_loom_editor_trigger" loomEditorTrigger
+export "wiz_loom_editor_position" loomEditorPosition
+export "wiz_loom_editor_offset" loomEditorOffset
+export "wiz_loom_editor_indent" loomEditorIndent

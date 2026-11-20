@@ -43,6 +43,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   last child, so Loom's child-index patch paths stay valid — and both overlays are back
   on the page; the shared overlay CSS is `web/overlays.css`, and
   `web/loom_overlay_test.mjs` pins the two overlays against the patch paths.
+* web: the editor's **rules are the runtime's, and Tab edits through the host**
+  (the editor remainder). `lib/Web/EditorModel.wiz` owns UTF-16 positions, squiggle
+  spans, completion filter/order/insert and Tab's indent; the page asks for one answer
+  at a time through `mount`'s new `ask` (`wiz_loom_editor_*`), and
+  `web/squiggles.js`/`web/completions.js` only paint. `web/editor-model.js` moved to
+  `web/framework/editor-model.mjs` as the test oracle (nothing in production imports
+  it). `host.edit({ insert, from, to })` is the new text-input capability; the driver
+  carries a text field's selection with a keydown, `Page.key` computes the indent, and
+  the page applies it and reports the new selection. The real-page overlay regression
+  test (`web/playground_page_test.mjs`) applies a text patch after mounting the layer and
+  requires the textarea's live value and child-index path to hold. Production page
+  JavaScript is **4,467** (4,149 `web/*.js` + the 318-line mount contract), against the
+  stage-4 target 3,733; the remainder is the mirror, the popup and the measured style
+  copy, not rules.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
