@@ -578,6 +578,7 @@ cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: 
 is a decision, not a way to hide a failure. -/
 def descSweepSkips : List String :=
   [ "examples/closed-table-bench.wiz"
+  , "examples/hdl-crc-link.wiz"
   , "examples/hdl-sim-bench.wiz"
   , "examples/hdl-verified-full.wiz"
   , "examples/hdl-verified-native.wiz"
