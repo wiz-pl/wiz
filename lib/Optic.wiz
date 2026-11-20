@@ -978,4 +978,3 @@ the update needs to name its write (e.g. a key): `overAll` sees only the focus, 
 the store encoding's backward function can close over it. -/
 def Traversal.ofP {S : Type} {ω A : Type} (t : TraversalP S S A A) : Traversal S A :=
   Traversal.mk (fun s => toListOf t s) (fun f s => overT t f s)
-

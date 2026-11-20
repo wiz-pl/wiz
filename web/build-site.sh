@@ -41,7 +41,7 @@ cp "$ROOT/web/landing/landing.css" "$SITE/landing.css"
 # links (playground.css, playground.js, wiz-playground.mjs) are relative to it.
 cp "$ROOT/web/playground.html" "$SITE/playground/index.html"
 for f in playground.js playground.css overlays.css \
-         lsp-client.js goals.js playground-lsp.js hover.js tagged.js selfhost-lsp-shim.js \
+         lsp-client.js playground-lsp.js hover.js selfhost-lsp-shim.js \
          playground-engine.js squiggles.js completions.js; do
   cp "$ROOT/web/$f" "$SITE/playground/$f"
 done

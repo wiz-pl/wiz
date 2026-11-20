@@ -184,6 +184,7 @@ function onRequest(kind, payload) {
     const result = edit ? handle.host.edit(edit) : null;
     if (result) effect("edited", result.value, result.selectionStart + "\n" + result.selectionEnd);
   }
+  else if (goals) goals.request(kind, payload);
 }
 
 // ## The goals pane
@@ -193,13 +194,17 @@ function onRequest(kind, payload) {
 // editor overlays are on: the squiggle layer no longer wraps the textarea (it is the
 // last child of the editor's section, so the runtime's child-index patch paths stay
 // stable), and the completion popup is appended to the body, outside the rendered tree.
-// The rules behind both are the runtime's (`editorRules`).
+let goals = null;
+
+// The rules behind both overlays are the runtime's (`editorRules`); the pane is the
+// runtime's too (`lib/Web/Goals.wiz`), so its answers go through the page's effect and a
+// click's `reveal`/`subterm` request comes back through onRequest.
 function wireGoals(editor, rules) {
-  startInfoview({
+  goals = startInfoview({
     editor,
-    panel: document.getElementById("goals"),
     config: selfhost,
     rules,
+    update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
   });
 }
 

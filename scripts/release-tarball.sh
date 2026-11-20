@@ -66,18 +66,21 @@ fi
 [ -n "$ccdir" ] && cp -R "$ccdir" "$top/share/wiz/cc"
 if [ -n "$webdir" ]; then
   mkdir -p "$top/share/wiz/web"
-  # (11s) tagged.js is shared by the infoview and the documentation's pages (`wiz doc`,
-  # which also copies scroll.*); a web dir from before 11s has none of them
-  for f in infoview.html infoview.js wiz-infoview.mjs wiz-infoview.wasm; do cp "$webdir/$f" "$top/share/wiz/web/$f"; done
-  for f in tagged.js scroll.js scroll-search.js scroll.css \
-           lsp-client.js goals.js playground-lsp.js doc-live.js doc-live.css \
-           squiggles.js completions.js hover.js overlays.css; do
+  # (11s) the documentation's scripts (`wiz doc` copies scroll.* and the runtimes); the
+  # infoview and the live panel share the goals/hover runtimes (Wiz) and the mount
+  # contract (framework/), and the standalone infoview has its own module.
+  for f in infoview.html infoview.js wiz-infoview.mjs wiz-infoview.wasm \
+           wiz-infoview-ui.mjs wiz-docs-ui.mjs wiz-doc-live-ui.mjs; do
+    if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
+  done
+  for f in scroll.js scroll-search.js scroll.css lsp-client.js playground-lsp.js \
+           hover.js squiggles.js completions.js overlays.css doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
   mkdir -p "$top/share/wiz/web/framework"
-  if [ -f "$webdir/framework/editor-text.js" ]; then
-    cp "$webdir/framework/editor-text.js" "$top/share/wiz/web/framework/editor-text.js"
-  fi
+  for f in mount.js driver.js runtime.js editor-text.js; do
+    if [ -f "$webdir/framework/$f" ]; then cp "$webdir/framework/$f" "$top/share/wiz/web/framework/$f"; fi
+  done
 fi
 echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > "$top/share/wiz/TOOLCHAIN"
 cat > "$top/bin/wiz" <<'EOF'

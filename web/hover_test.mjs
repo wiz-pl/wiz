@@ -6,9 +6,8 @@
 //   usage: node web/hover_test.mjs
 "use strict";
 import { document as minidoc, Element } from "./framework/minidom.mjs";
-import {
-  wantsHover, hoverContents, hoverLines, definitionTarget, locationLabel, mountHover,
-} from "./hover.js";
+import { wantsHover, mountHover } from "./hover.js";
+import { hoverContents, hoverLines, definitionTarget, locationLabel } from "./framework/hover.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -114,14 +113,23 @@ check("label: an encoded name",
   "My File.wiz:1:1");
 check("label: nothing", locationLabel(null), "");
 
-// ## 5. The card (minidom, no layout)
+// ## 5. The widget: timers, the caret and the card the runtime renders
 
-// A page double: minidom's elements plus a body. The widget only needs createElement,
-// appendChild, attributes, textContent and event listeners.
 function makeDoc() {
   const base = minidoc();
   const body = base.createElement("body");
-  return { body, createElement: base.createElement, createTextNode: base.createTextNode };
+  const find = (node, id) => {
+    if (node && node.getAttribute && node.getAttribute("id") === id) return node;
+    for (const c of (node && node.childNodes) || []) {
+      const hit = find(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return {
+    body, createElement: base.createElement, createTextNode: base.createTextNode,
+    getElementById: (id) => find(body, id),
+  };
 }
 function makeEditor(doc, value, selectionStart = value.length) {
   const editor = new Element("textarea");
@@ -141,6 +149,28 @@ function makeEditor(doc, value, selectionStart = value.length) {
 function keys(editor, type, event) {
   for (const fn of editor._ls.get(type) || []) fn(Object.assign({ target: editor }, event));
 }
+// The card is the runtime's; the test's `show` writes the oracle's lines into a double.
+function makeCard(doc, sent) {
+  let card = doc.getElementById("wiz-hover");
+  if (!card) {
+    card = doc.createElement("div");
+    card.setAttribute("id", "wiz-hover");
+    doc.body.appendChild(card);
+  }
+  card.textContent = "";
+  if (!sent.raw && !sent.label) { card.setAttribute("hidden", ""); return; }
+  card.removeAttribute("hidden");
+  if (sent.label) card.appendChild(doc.createTextNode(sent.label));
+  const lines = sent.raw ? hoverLines(hoverContents(JSON.parse(sent.raw))) : [];
+  for (const line of lines) if (!line.rule) card.appendChild(doc.createTextNode(line.text + "\n"));
+}
+function mounts(doc, editor, options) {
+  const card = doc.createElement("div");
+  card.setAttribute("id", "wiz-hover");
+  card.setAttribute("hidden", "");
+  doc.body.appendChild(card);
+  return mountHover({ editor, document: doc, show: (raw, label) => makeCard(doc, { raw, label }), ...options });
+}
 const HOVER = {
   contents: {
     kind: "markdown",
@@ -153,42 +183,33 @@ const sameDoc = { uri: "file:///play.wiz", range: { start: { line: 1, character:
   const doc = makeDoc();
   const editor = makeEditor(doc, "exact n\n", 5);
   const asked = [];
-  const hover = mountHover({
-    editor, document: doc, delay: 5,
+  const hover = mounts(doc, editor, {
+    delay: 5,
     onHover: (position) => { asked.push(position); return HOVER; },
   });
   checkThat("widget: mounted", !!hover);
-  check("widget: hidden at first", hover.card.getAttribute("hidden"), "");
   checkThat("widget: not open", !hover.isOpen());
 
   await hover.inquire();
   check("widget: one request", asked.length, 1);
   check("widget: asked at the caret", asked[0], { line: 0, character: 5 });
-  check("widget: visible", hover.card.getAttribute("hidden"), null);
   checkThat("widget: open", hover.isOpen());
   checkThat("widget: the signature", hover.content().includes("Nat.add : Nat → Nat → Nat"));
   checkThat("widget: the doc comment", hover.content().includes("Adds two Nats."));
-  const classes = hover.card.childNodes.map((n) => n.getAttribute && n.getAttribute("class"));
-  check("widget: the code line is marked", classes[0], "hover-line code");
-  checkThat("widget: the rule is drawn", hover.card.childNodes.some((n) => n.tagName === "hr"));
 
-  // Escape closes it.
   keys(editor, "keydown", { key: "Escape" });
   checkThat("widget: Escape closes", !hover.isOpen());
   check("widget: nothing to see", hover.content(), "");
 
-  // A null answer (nothing at the character) is silence.
   hover.close();
-  const quiet = mountHover({ editor, document: doc, onHover: () => null });
+  const quiet = mounts(doc, editor, { onHover: () => null });
   await quiet.inquire();
   checkThat("widget: null is silence", !quiet.isOpen());
 
-  // A server error (MethodNotFound) is silence too, and never an unhandled rejection.
-  const failing = mountHover({ editor, document: doc, onHover: () => { throw new Error("MethodNotFound"); } });
+  const failing = mounts(doc, editor, { onHover: () => { throw new Error("MethodNotFound"); } });
   await failing.inquire();
   checkThat("widget: an error is silence", !failing.isOpen());
 
-  // Typing closes the card, and so does scrolling.
   await hover.inquire();
   keys(editor, "input", {});
   checkThat("widget: typing closes", !hover.isOpen());
@@ -196,33 +217,30 @@ const sameDoc = { uri: "file:///play.wiz", range: { start: { line: 1, character:
   keys(editor, "scroll", {});
   checkThat("widget: scrolling closes", !hover.isOpen());
 
-  // The caret moving while the answer is out drops the answer.
   hover.close();
   let resolveHover;
-  const slow = mountHover({
-    editor, document: doc,
+  const slow = mounts(doc, editor, {
     onHover: () => new Promise((resolve) => { resolveHover = resolve; }),
   });
   const answer = slow.inquire();
-  editor.selectionStart = 1;         // the user moved on
+  editor.selectionStart = 1;
   resolveHover(HOVER);
   await answer;
   checkThat("widget: a stale answer is dropped", !slow.isOpen());
 
-  // The timer path: a navigation key restarts the delay, then asks once.
   const debounce = [];
-  const timed = mountHover({
-    editor, document: doc, delay: 5,
+  const timed = mounts(doc, editor, {
+    delay: 5,
     onHover: (position) => { debounce.push(position.character); return HOVER; },
   });
   editor.selectionStart = 3;
   keys(editor, "keyup", { key: "ArrowLeft" });
-  keys(editor, "keyup", { key: "ArrowLeft" });    // the second restarts the timer
+  keys(editor, "keyup", { key: "ArrowLeft" });
   await sleep(25);
   check("widget: one request after the rest", debounce, [3]);
   checkThat("widget: the card is up", timed.isOpen());
   timed.destroy();
-  checkThat("widget: destroy removes it", !doc.body.childNodes.includes(timed.card));
+  checkThat("widget: destroy closes it", !timed.isOpen());
 }
 
 // ## 6. Go to definition: F12, Ctrl-click and a library definition
@@ -232,8 +250,7 @@ const sameDoc = { uri: "file:///play.wiz", range: { start: { line: 1, character:
   const editor = makeEditor(doc, "def x := Nat.add 1 2\n", 12);
   const jumps = [];
   const asked = [];
-  const hover = mountHover({
-    editor, document: doc,
+  const hover = mounts(doc, editor, {
     onHover: () => null,
     onDefinition: (position) => { asked.push(position); return sameDoc; },
     onJump: (target) => { jumps.push(target); return true; },
@@ -243,32 +260,26 @@ const sameDoc = { uri: "file:///play.wiz", range: { start: { line: 1, character:
   check("definition: the page jumps", jumps, [sameDoc]);
   checkThat("definition: the card stays closed after a jump", !hover.isOpen());
 
-  // F12 is the same request.
   keys(editor, "keydown", { key: "F12" });
   await sleep(5);
   check("definition: F12 asks", asked.length, 2);
 
-  // Ctrl-click is the same request (the click also moved the caret).
   editor.selectionStart = 19;
   keys(editor, "click", { ctrlKey: true });
   await sleep(5);
   check("definition: Ctrl-click asks", asked.length, 3);
   check("definition: Ctrl-click's caret", asked[2], { line: 0, character: 19 });
 
-  // A definition in a library: no page to open, so the card names the place.
   hover.close();
-  const elsewhere = mountHover({
-    editor, document: doc,
-    onDefinition: () => prelude,
-  });
+  const elsewhere = mounts(doc, editor, { onDefinition: () => prelude });
   const target = await elsewhere.goToDefinition();
   check("definition: the library target", target, prelude);
   checkThat("definition: the card is up", elsewhere.isOpen());
   checkThat("definition: the library is named", elsewhere.content().includes("Prelude.wiz:7:1"));
   check("definition: no jump without onJump", elsewhere.content(), "Prelude.wiz:7:1");
+  elsewhere.close();
 
-  // Nothing at the caret: no card, no throw.
-  const empty = mountHover({ editor, document: doc, onDefinition: () => null });
+  const empty = mounts(doc, editor, { onDefinition: () => null });
   check("definition: null", await empty.goToDefinition(), null);
   checkThat("definition: null is silence", !empty.isOpen());
 }

@@ -19,7 +19,7 @@ is the test oracle, not served. The page itself is one app in the repo's own Loo
 framework (`lib/Web/Loom.wiz`, § The page's runtime); the goals pane is an island in it.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
-is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
+is JSON-RPC 2.0 over a WebSocket, `lib/Web/Goals.wiz` renders the answers, and
 `web/playground-lsp.js` connects the two to the textarea. A language server that speaks
 the protocol below — the Lean one today, a self-hosted one later — is a drop-in: the page
 cannot tell them apart.

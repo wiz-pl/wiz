@@ -266,10 +266,13 @@ EOF
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
-                ./web/lsp-client.js ./web/goals.js ./web/tagged.js ./web/scroll.js
-                ./web/scroll-search.js ./web/scroll.css
-                ./web/squiggles.js ./web/completions.js ./web/hover.js ./web/overlays.css
+                ./web/lsp-client.js ./web/hover.js ./web/squiggles.js ./web/completions.js
+                ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/overlays.css
+                ./web/doc-live.js ./web/doc-live.css
+                ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
                 ./web/framework/editor-text.js
+                ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
+                ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -304,8 +307,8 @@ EOF
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
                 ./web/playground.html ./web/playground.js
-                ./web/playground.css ./web/overlays.css ./web/lsp-client.js ./web/goals.js
-                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+                ./web/playground.css ./web/overlays.css ./web/lsp-client.js
+                ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
                 # the entry point's mount contract (mount imports driver, which imports
                 # runtime.js): build-playground.sh copies all three beside the page
@@ -317,6 +320,7 @@ EOF
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
                 ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
                 ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
+                ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
                 ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };

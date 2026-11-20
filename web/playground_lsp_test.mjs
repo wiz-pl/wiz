@@ -16,8 +16,9 @@ import { connectWebSocket } from "./ws_node_client.mjs";
 import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
 import {
   renderPanel, renderGoalResult, renderTermResult, renderInfoItems, readGoalState, offsetAt, positionAt, rangeOffsets,
-  parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
-} from "./goals.js";
+  parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText, renderSelection,
+} from "./framework/goals.mjs";
+import { hoverContents, hoverLines } from "./framework/hover.mjs";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
@@ -42,6 +43,46 @@ function checkThat(name, condition, detail) {
   }
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The production page sends the runtime effects; this test renders them with the
+// framework's oracles (`framework/goals.mjs`, `framework/hover.mjs`), which the Wiz
+// runtime is compared against by the goals fixture.
+function startTestInfoview(options = {}) {
+  const panel = options.panel || { innerHTML: "", scrollTop: 0 };
+  const info = options.info || null;
+  const doc = options.document || (typeof document !== "undefined" ? document : null);
+  const render = (kind, a, b) => {
+    if (kind === "view") {
+      const view = JSON.parse(a);
+      renderPanel(panel, view);
+      if (info) info.innerHTML = view.info ? renderSelection(view.info) : "";
+      return;
+    }
+    if (kind === "info") {
+      const value = JSON.parse(a);
+      if (info) info.innerHTML = renderSelection(value);
+      else panel.innerHTML = renderPanel ? "" : panel.innerHTML;
+      return;
+    }
+    if (kind === "hover") {
+      const sent = JSON.parse(a);
+      let card = doc && doc.getElementById ? doc.getElementById("wiz-hover") : null;
+      if (!card && doc) {
+        card = doc.createElement("div");
+        card.setAttribute("id", "wiz-hover");
+        doc.body.appendChild(card);
+      }
+      if (!card) return;
+      card.textContent = "";
+      if (!sent.raw && !sent.label) { card.setAttribute("hidden", ""); return; }
+      const lines = sent.raw ? hoverLines(hoverContents(JSON.parse(sent.raw))) : [];
+      if (sent.label) card.appendChild(doc.createTextNode(sent.label));
+      for (const line of lines) card.appendChild(doc.createTextNode(line.text + "\n"));
+      card.removeAttribute("hidden");
+    }
+  };
+  return startInfoview({ ...options, rules: options.rules || rules, update: render });
+}
 
 // An unhandled rejection anywhere is a failure: the page may not spam the console.
 const rejections = [];
@@ -356,11 +397,21 @@ function fakePanel() {
 // `Event`, and the squiggle layer parses through `createRange`).
 function fakeDocument() {
   const base = minidoc();
+  const body = base.createElement("body");
+  const find = (node, id) => {
+    if (node && node.getAttribute && node.getAttribute("id") === id) return node;
+    for (const c of (node && node.childNodes) || []) {
+      const hit = find(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  };
   return {
-    body: base.createElement("body"),
+    body,
     createElement: base.createElement,
     createTextNode: base.createTextNode,
     createRange: base.createRange,
+    getElementById: (id) => find(body, id),
     defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
   };
 }
@@ -377,8 +428,7 @@ const wireMock = await startMockServer();
 const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
 const pageDocument = fakeDocument();
-const app = startInfoview({
-  rules,
+const app = startTestInfoview({
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
   document: pageDocument,
 });
@@ -402,8 +452,7 @@ checkThat("wiring: the request carries the UTF-16 caret",
   wireMock.stats.goalPositions[wireMock.stats.goalPositions.length - 1].character === 8);
 
 // Clicking a hypothesis (a `[data-span]` element) selects its source span.
-const clickTarget = { dataset: { span: "2:8-2:9" }, parentElement: null, closest: () => null };
-wirePanel.listeners.click[0]({ target: clickTarget, preventDefault() {} });
+app.request("reveal", "2:8-2:9");
 check("wiring: a click selects the span", editor.selectionStart, line2 + 8);
 check("wiring: the selection ends there", editor.selectionEnd, line2 + 9);
 
@@ -440,7 +489,7 @@ checkThat("wiring: a library definition is named",
   await waitUntil(() => app.hover().content().includes("Prelude.wiz:7:1")), app.hover().content());
 
 // `?hover=off` (or `hover: false`) mounts nothing.
-const noHover = startInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
+const noHover = startTestInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
 check("wiring: hover: false turns it off", noHover.hover(), null);
 
 // Diagnostics → squiggles: the overlay underlines the same range the panel lists.
@@ -511,8 +560,7 @@ const selfCheck = () => JSON.stringify({ v: 1, lines: [], index: SELF_INDEX });
 const selfEditor = fakeEditor(SELF_TEXT);
 const selfPanel = fakePanel();
 const selfDocument = fakeDocument();
-const selfApp = startInfoview({
-  rules,
+const selfApp = startTestInfoview({
   editor: selfEditor, panel: selfPanel, uri: "file:///in-page.wiz", document: selfDocument,
   config: selfhostEndpoint({ evaluate: () => "", check: selfCheck }),
 });
@@ -540,12 +588,12 @@ check("in-page definition: nothing else in the document", selfDefinition && self
 selfApp.stop();
 
 const idlePanel = fakePanel();
-startInfoview({ editor: fakeEditor(""), panel: idlePanel, config: null });
+startTestInfoview({ editor: fakeEditor(""), panel: idlePanel, config: null });
 checkThat("wiring: no endpoint → no server", idlePanel.innerHTML.includes("no language server"));
 
 // A failed connection is the same state, with a reason and a reconnect button.
 const deadPanel = fakePanel();
-startInfoview({
+startTestInfoview({
   editor: fakeEditor(""), panel: deadPanel, uri: "file:///dead.wiz",
   config: { url: deadUrl, WebSocketImpl: connectWebSocket },
 });
@@ -562,7 +610,7 @@ checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-actio
 
 const followMock = await startMockServer();
 const followPanel = fakePanel();
-const followed = startInfoview({
+const followed = startTestInfoview({
   editor: fakeEditor(""), panel: followPanel, config: { url: followMock.url }, follow: true,
 });
 checkThat("follow: the pane connects", await waitUntil(() => followPanel.innerHTML.includes("connected")));
@@ -593,16 +641,12 @@ await followMock.close();
 const infoMock = await startMockServer();
 const infoPanel = fakePanel();
 const infoBox = { innerHTML: "" };
-const infoApp = startInfoview({
+const infoApp = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: infoPanel, info: infoBox,
   config: { url: infoMock.url }, uri: "file:///info.wiz",
 });
 checkThat("info: the goals arrive", await waitUntil(() => infoPanel.innerHTML.includes('class="names"')));
-const infoTag = {
-  dataset: { ref: "5", span: "2:8-2:9" }, parentElement: null,
-  closest: () => infoTag,
-};
-infoPanel.listeners.click[0]({ target: infoTag, preventDefault() {} });
+infoApp.request("subterm", "5");
 checkThat("info: the subterm is described", await waitUntil(() => infoBox.innerHTML.includes('class="kind"')),
   infoBox.innerHTML);
 checkThat("info: its kind", infoBox.innerHTML.includes('class="kind">const</span>'), infoBox.innerHTML);
@@ -615,7 +659,7 @@ await infoMock.close();
 
 const renders = [];
 const hookMock = await startMockServer();
-const hooked = startInfoview({
+const hooked = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: fakePanel(), config: { url: hookMock.url },
   onRender: (view) => renders.push(view.state),
 });
@@ -632,7 +676,7 @@ await hookMock.close();
   await probePort.close();
   const recoverEditor = fakeEditor("def recovered : Nat := 1\n");
   const recoverPanel = fakePanel();
-  const recoverApp = startInfoview({
+  const recoverApp = startTestInfoview({
     editor: recoverEditor, panel: recoverPanel, uri: "file:///recovered.wiz",
     config: { url: `ws://127.0.0.1:${recoverPort}`, WebSocketImpl: connectWebSocket },
   });
@@ -667,7 +711,7 @@ try { await wrong.connect(); } catch (e) { wrongError = e; }
 checkThat("token: a wrong token, refused", wrongError instanceof Error && tokenMock.stats.refused === 2, String(wrongError));
 wrong.close();
 const tokenPanel = fakePanel();
-const tokenApp = startInfoview({
+const tokenApp = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: tokenPanel, uri: "file:///token.wiz",
   config: { ...endpointFromSearch("?lsp=" + tokenMock.port + "&token=s3cr3t"), WebSocketImpl: connectWebSocket },
 });

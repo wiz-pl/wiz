@@ -172,8 +172,6 @@ def webAssets : List (String × String) :=
    -- (11s) the parts infoview.js shares with the playground and the documentation's pages
    ("playground-lsp.js", "text/javascript; charset=utf-8"),
    ("lsp-client.js", "text/javascript; charset=utf-8"),
-   ("goals.js", "text/javascript; charset=utf-8"),
-   ("tagged.js", "text/javascript; charset=utf-8"),
    -- the editor's overlays (squiggles, completions, hover), their layout, and the
    -- text-input helper the completion widget imports
    ("squiggles.js", "text/javascript; charset=utf-8"),
@@ -181,6 +179,11 @@ def webAssets : List (String × String) :=
    ("hover.js", "text/javascript; charset=utf-8"),
    ("framework/editor-text.js", "text/javascript; charset=utf-8"),
    ("overlays.css", "text/css; charset=utf-8"),
+   -- the mount contract (the standalone infoview's runtime and the playground's)
+   ("framework/mount.js", "text/javascript; charset=utf-8"),
+   ("framework/driver.js", "text/javascript; charset=utf-8"),
+   ("framework/runtime.js", "text/javascript; charset=utf-8"),
+   ("wiz-infoview-ui.mjs", "text/javascript; charset=utf-8"),
    ("wiz-infoview.mjs", "text/javascript; charset=utf-8"), ("wiz-infoview.wasm", "application/wasm")]
 
 /-- The server's half of the handshake on a new connection: `true` if it is a WebSocket

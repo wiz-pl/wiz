@@ -1,0 +1,98 @@
+import IO
+import Json
+import Web.Goals
+import Web.Loom
+
+/-!
+# Web.InfoviewPage
+
+The standalone browser infoview (`web/infoview.html`, served by `wiz lsp --ws`), as a
+Loom app. It renders the header (`#status`, `#pos`), the editor (or, with `?follow=1`,
+only the pane) and the goals pane from `Web.Goals`; `web/infoview.js` mounts it and keeps
+the language server's socket, the URL's endpoint rule and the editor's caret. The pane's
+`reveal`/`subterm`/`reconnect` requests are the page's, exactly as in the playground.
+-/
+
+/-- The page's state: the editor's text, whether it follows another editor, the panel and
+the cursor's `line:col` (1-based, for the header). -/
+structure InfoviewPage where
+  text : String
+  follow : Bool
+  panel : Goals.Model
+  position : String
+
+/-- The example program the page opens with (the static page's textarea). -/
+def InfoviewPage.defaultText : String :=
+  "import Prelude\ndef k : (A : Type) → A → Nat → A := by\n  intro A\n  intro x\n  intro n\n  exact x\ndef two : Nat := Nat.add 1 _\n"
+
+def InfoviewPage.initial : InfoviewPage :=
+  InfoviewPage.mk InfoviewPage.defaultText .false Goals.initial "1:1"
+
+/-- The page's messages: the pane's, and the editor's input. -/
+inductive InfoviewPage.Msg where
+  | tag (idx : Nat)
+  | span (span : String)
+  | key
+  | reconnect
+  | input
+
+/-- The page's update: the pane's messages go to the panel; an edit updates the text. -/
+def InfoviewPage.update (m : InfoviewPage.Msg) (payload : String) (s : InfoviewPage) : InfoviewPage :=
+  match m with
+  | .tag idx => { s with panel := Goals.update (.tag idx) "" s.panel }
+  | .span span => { s with panel := Goals.update (.span span) "" s.panel }
+  | .key => { s with panel := Goals.update .key payload s.panel }
+  | .reconnect => { s with panel := Goals.update .reconnect "" s.panel }
+  | .input => { s with text := payload }
+
+/-- The page's view. -/
+def InfoviewPage.view (s : InfoviewPage) : Loom.VNode InfoviewPage.Msg :=
+  let status := Goals.statusText (Goals.state s.panel) (Goals.endpoint s.panel)
+    (Goals.serverName s.panel) (Goals.serverVersion s.panel) (Goals.infoview s.panel);
+  let header := Loom.el "header" []
+    [ Loom.el "strong" [] [Loom.text "Wiz infoview"]
+    , Loom.el "span" [Loom.class "dim", Loom.id "pos"] [Loom.text s.position]
+    , Loom.el "span" [Loom.id "status"] [Loom.text status]
+    , Loom.el "a" [Loom.class "dim", Loom.attr "href" "https://wiz-pl.github.io/wiz/licenses/"]
+        [Loom.text "licences (mini-gmp, GMP 6.3.0)"] ];
+  let side := Loom.el "section" [Loom.id "side"]
+    [ Goals.panel InfoviewPage.Msg.tag InfoviewPage.Msg.span InfoviewPage.Msg.reconnect
+        InfoviewPage.Msg.key s.panel ];
+  let main := match s.follow with
+    | .true => Loom.el "main" [Loom.class "follow"] [side]
+    | .false => Loom.el "main" []
+        [ Loom.on "input" InfoviewPage.Msg.input
+            (Loom.el "textarea" [Loom.id "editor", Loom.attr "spellcheck" "false"] [Loom.text s.text])
+        , side ];
+  Loom.seq [header, main]
+
+/-- The page's effects (`wiz_loom_effect`): `init` (the text and follow flag), `panel`
+(a pane effect: view/info/hover/ack) and `position` (the header's cursor). -/
+def InfoviewPage.effect (s : InfoviewPage) (kind a b : String) : InfoviewPage :=
+  if String.eq kind "init" then
+    match Json.parse a with
+    | .ok j => { s with
+        text := match Json.get j "text" with
+          | .some (.str t) => t
+          | _ => s.text,
+        follow := match Json.get j "follow" with
+          | .some (.bool f) => f
+          | _ => s.follow }
+    | .error _ => s
+  else if String.eq kind "panel" then
+    { s with panel := Goals.effect s.panel a b "" }
+  else if String.eq kind "position" then
+    { s with position := a }
+  else if String.eq kind "ack" then
+    { s with panel := Goals.ack s.panel a }
+  else s
+
+/-- The pane's pending requests, as JSON. -/
+def InfoviewPage.requests (s : InfoviewPage) : String := Goals.requestsJson s.panel
+
+/-- Whether the pane consumed a handled key's default action. -/
+def InfoviewPage.consume (e : Loom.Event) : Bool := Goals.consume e
+
+/-- The page as a `Loom.LiveApp` (the input's payload is the textarea's text). -/
+def infoviewApp : Loom.LiveApp InfoviewPage InfoviewPage.Msg :=
+  Loom.LiveApp.mk InfoviewPage.initial InfoviewPage.update InfoviewPage.view
