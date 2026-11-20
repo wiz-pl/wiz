@@ -104,10 +104,51 @@ the size: today a size-preserving `map : (Signal d A)^i → (Signal d B)^i` is r
 `scofix` has no surface syntax. That kernel change is lane L2 of the plan, after the
 μ/ν size checks it shares code with. Until then, state is written with `register`,
 `mealy`, `moore`, or as a `Circuit` driven through `ofCircuit`. Blocked behind it:
-`Signal.fix` and size-polymorphic operators on sized signals (L3), the ν denotation of a
-feedback loop in the deep embedding with verified extraction to `Circuit` (L4) and the
-Clash-style surface built on it (L5).
+`Signal.fix` and the observing size-polymorphic operators on sized signals (`+`, `if`;
+numerals already type, see 34b), the ν denotation of a feedback loop in the deep
+embedding with verified extraction to `Circuit` (L4) and the Clash-style surface built on
+it (L5).
 
 **Cost.** Signals are for specifications and short simulations. A `mealy` signal costs
 O(1) per cycle, but a long or feedback-heavy simulation belongs on the circuit
 (`Circuit.run`, `Hdl.Sim`).
+
+## 34b: L3 status — feedback and the sized operator surface
+
+Lane L3 of the plan is `Signal.fix`, the `Hw`-style operators at a *size* (`+`,
+numerals and `if` on `(Signal d A)^i`), and Clash's counter and baud generator written
+with them. On `integration/train8` (2026-11-20) the observing half of L3 is **blocked by
+lane L2**; the non-observing half (numerals, via `Signal.pureS`) is here and checked.
+This section records exactly where the line is; `drafts/hdl-l3/` holds the intended
+`Signal.fix` surface, unchecked.
+
+* `T^s` on the applied former is **not** missing: `(Signal d A)^i` parses and checks
+  today, and `Signal.registerS` (`lib/Hdl/Signal.wiz:137`) is its library use (the
+  `hdl` group and `examples/hdl-l3.wiz` also exercise it). Nothing here needs work.
+* The kernel's `scofix` still has a size-*independent* state: `A : I → Type`, with
+  `scofixFunTy` at `Wiz/Core/Conv.lean:189` and its mirror at
+  `selfhost/Kernel.wiz:3018`. L2's change is `A : Size → I → Type`, so the state can be
+  the loop value at the recursive size (the plan, §2.2).
+* There is no elaboration path from a sized copattern definition to `scofix`:
+  `elabSizedDef` (`Wiz/Elab/Command.lean:498`) compiles sized recursion on an
+  *inductive* argument to `sfix`, and `elabCopatterns` (`:1083`) compiles copatterns to
+  `coit`/`cocon`. `scofix` itself has no surface syntax.
+* Consequently a size-*preserving* `map : (Signal d A)^i → (Signal d B)^i` is rejected
+  (`builds a value of size ↑s or ∞, not i` / `inferred: Signal^i d A`), so `+` and `if`
+  have no pointwise definition at size `i`: each observes its arguments at the size it
+  runs at, which is exactly the size-preserving `map`/`zipWith`. `Signal.fix`'s body is
+  where those are needed, so `cnt = register 0 (cnt + 1)` cannot be typed.
+* What *does* type is the part that never observes: `Signal.pureS` (pure at any size) and
+  therefore a numeral at a sized signal (`OfNat ((Signal d (BitVec n))^i) k`, in
+  `lib/Hdl/Signal.wiz`). At `∞` they are `pure` and `Hw`'s numerals. That is the
+  "numerals" third of the operator surface; `+`/`if` and `fix` stay blocked.
+
+The `hdl` group pins the positive part (`examples/hdl-l3.wiz`: the applied former,
+`registerS`, numerals at a size, and `+`/`if` at size `∞`); the `hdl-signal` group pins
+the rejections (the sized `map`/`+`/`if` and raw `scofix`, plus `Signal.fix` unknown).
+The workaround stays `register`/`mealy`/`moore`/`ofCircuit`; the counter and baud
+generator are in the Mealy spelling in `examples/hdl-signal.wiz`.
+
+A `partial def` knot is not a substitute: it has neither the delay discipline (a
+combinational loop diverges) nor a totality story, and it is opaque to the kernel, so a
+property of a feedback design would not compute.

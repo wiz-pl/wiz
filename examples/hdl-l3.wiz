@@ -1,0 +1,72 @@
+-- Lane L3 of the Clash HDL plan (docs/stages/34-hdl-signals.md, 34b).
+--
+-- The Clash spelling of the two examples is
+--
+--   counter = register 0 (counter + 1)
+--   cnt     = register 0 (if tick then 0 else if ce then cnt + 1 else cnt)
+--   tick    = ce &&& (cnt === n - 1)
+--
+-- with the loop variable at a size. That spelling needs lane L2's sized `scofix`:
+-- `Signal.fix` itself, and the size-preserving `map` behind `+` and `if` at size `i`. On
+-- this base `+`/`if` are rejected and `Signal.fix` does not exist (the `hdl-signal` group
+-- pins the messages). Numerals at a size *do* type (`Signal.pureS` and its `OfNat`
+-- instance: they never observe), and the rest of this file is what checks today: `T^s` on
+-- the applied former (`(Signal d A)^i`, used by `Signal.registerS`), the operator syntax
+-- at size ∞ on `Signal.Sig` (the `Hw` instance), and a numeral at a size. The unchecked
+-- Clash target is drafts/hdl-l3/SignalL3.wiz.
+import Hdl.Core
+import Hdl.Signal
+
+def Sys : ClockDomain := ClockDomain.sys
+def Bit : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+def B8 : HwTy := HwTy.bits 8
+
+------------------------------------------------------------------------------------
+-- `T^s` on an applied former, and the one size bump
+
+-- `(Signal d A)^i` is a type and `registerS` is the only operation that raises its size;
+-- it is the register `Signal.fix` would put on every feedback path.
+def delayed {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^(↑i) :=
+  Signal.registerS init s
+
+------------------------------------------------------------------------------------
+-- Numerals, `+` and `if` at a signal (size ∞), on ordinary `Hw` code
+
+-- wiz-rv's baud step, `lib/Hdl/Uart.wiz:104`, at `r := Signal.Sig Sys` instead of
+-- `Wire`/`HwTy.El`: the same `if`/`+`/numerals, one value per cycle.
+def baudStep (cnt : Signal.Sig Sys B4) (ce : Signal.Sig Sys Bit) : Signal.Sig Sys (HwTy.prod B4 Bit) :=
+  let last := Hw.eq cnt (Hw.ofNat 3);
+  let tick := Hw.and ce last;
+  let next := if tick then 0 else if ce then cnt + 1 else cnt;
+  Hw.pair next tick
+
+def countIn (n : Nat) : Signal.Sig Sys B4 := Signal.pure (BitVec.ofNat 4 n)
+def ceIn (n : Nat) : Signal.Sig Sys Bit := Signal.pure (BitVec.ofNat 1 n)
+
+#eval Signal.sample 3 (Signal.map (fun (p : BitVec 4 × BitVec 1) =>
+  (BitVec.toNat p.1, BitVec.toNat p.2)) (baudStep (countIn 2) (ceIn 1)))
+#eval Signal.sample 2 (Signal.map (fun (p : BitVec 4 × BitVec 1) =>
+  (BitVec.toNat p.1, BitVec.toNat p.2)) (baudStep (countIn 3) (ceIn 1)))
+-- the same two steps with the enable low: hold, no tick
+#eval Signal.sample 2 (Signal.map (fun (p : BitVec 4 × BitVec 1) =>
+  (BitVec.toNat p.1, BitVec.toNat p.2)) (baudStep (countIn 2) (ceIn 0)))
+
+-- the operators on their own, at `r := Signal.Sig`: a numeral, `+`, and `if`
+def inc (x : Signal.Sig Sys B8) : Signal.Sig Sys B8 := x + 1
+def pick (c : Signal.Sig Sys Bit) (a b : Signal.Sig Sys B8) : Signal.Sig Sys B8 :=
+  if c then a else b
+
+#eval Signal.sample 5 (Signal.map BitVec.toNat (inc (Signal.pure (BitVec.ofNat 8 250))))
+#eval Signal.sample 3 (Signal.map BitVec.toNat (pick (Signal.pure (BitVec.ofNat 1 1)) (Signal.pure (BitVec.ofNat 8 7)) (Signal.pure (BitVec.ofNat 8 9))))
+
+------------------------------------------------------------------------------------
+-- The part of the sized operator surface that types today: `pureS` and numerals
+
+-- `Signal.pureS` is `pure` at any size (it never observes); at ∞ it is `pure`.
+def pureInf (a : Nat) : Signal Sys Nat := Signal.pureS (i := ∞) a
+#eval Signal.sample 3 (pureInf 5)
+
+-- A numeral at a size: `lib/Hdl/Signal.wiz`'s `OfNat ((Signal d (BitVec n))^i) k`.
+def numAtSize {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3
+#eval Signal.sample 3 (Signal.map BitVec.toNat (numAtSize (d := Sys) (i := ∞) : Signal Sys (BitVec 8)))
