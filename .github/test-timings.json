@@ -2,7 +2,7 @@
  "builds": {"checker": 295.238, "compiler": 354.327, "parser": 12.757, "tower-wiz": 25.857},
  "cases": {
   "args": {
-   "long, short, clustered, --, positionals, subcommands and every error message": {"seconds": 29.45}
+   "long, short, clustered, --, positionals, subcommands and every error message": {"seconds": 1.732}
   },
   "audit-kernels": {
    "K10 (closed by 21m): both frontends reject a dropped and a duplicated linear variable": {"seconds": 0.084, "uses": ["checker"]},
@@ -420,8 +420,8 @@
    "tuple patterns": {"seconds": 1.23}
   },
   "library": {
-   "encoding: hex and base64 both ways; every invalid input is an error": {"seconds": 27.524},
-   "sha256: the empty message, \"abc\", the 448-bit message, 64 bytes (FIPS 180-4)": {"seconds": 24.552}
+   "encoding: hex and base64 both ways; every invalid input is an error": {"seconds": 2.959},
+   "sha256: the empty message, \"abc\", the 448-bit message, 64 bytes (FIPS 180-4)": {"seconds": 3.245}
   },
   "linear-case": {
    "a field at 0 is erased in a linear match: used at run time rejected, in an erased position accepted": {"seconds": 1.039},
@@ -447,12 +447,12 @@
    "the scrutinee used again after a linear match is rejected": {"seconds": 1.309}
   },
   "list-lemmas": {
-   "any/all, append and the Boolean bridge": {"seconds": 5.069},
-   "filter is sound and complete": {"seconds": 5.153},
-   "map fusion, append and length in proofs": {"seconds": 3.723},
-   "membership, the binder notation and evals (#check/#eval)": {"seconds": 5.159},
-   "reverse, membership and the Boolean laws": {"seconds": 5.068},
-   "the library checks, also next to Json, Vec and Functor": {"seconds": 10.724}
+   "any/all, append and the Boolean bridge": {"seconds": 3.581},
+   "filter is sound and complete": {"seconds": 4.02},
+   "map fusion, append and length in proofs": {"seconds": 3.635},
+   "membership, the binder notation and evals (#check/#eval)": {"seconds": 3.642},
+   "reverse, membership and the Boolean laws": {"seconds": 3.708},
+   "the library checks, also next to Json, Vec and Functor": {"seconds": 9.179}
   },
   "loom": {
    "SSR: a component tree renders deterministic HTML": {"seconds": 11.874},
@@ -831,11 +831,11 @@
    "widths: wrap-around and underflow become Top, a safe sum stays exact": {"seconds": 10.318}
   },
   "scry-analysis": {
-   "#ingest parses and the scanner reports line and paths": {"seconds": 96.814},
-   "diagnostics and the code action have the LSP shapes": {"seconds": 83.798},
-   "merge/view/claim: files, unioned relations, file_of, the refuted claim": {"seconds": 86.322},
-   "the revision manifest round-trips and the verdict is fresh/stale": {"seconds": 84.31},
-   "the widget payload is a wiz.widget/1 bundle with the scry extension": {"seconds": 89.951}
+   "#ingest parses and the scanner reports line and paths": {"seconds": 59.306},
+   "diagnostics and the code action have the LSP shapes": {"seconds": 58.377},
+   "merge/view/claim: files, unioned relations, file_of, the refuted claim": {"seconds": 57.938},
+   "the revision manifest round-trips and the verdict is fresh/stale": {"seconds": 57.627},
+   "the widget payload is a wiz.widget/1 bundle with the scry extension": {"seconds": 58.701}
   },
   "scry-c2wil": {
    "CFG: valid targets, edges, back edge and reachability of the loop function": {"seconds": 21.076},
@@ -896,8 +896,8 @@
    "saturation: x + 0 → x, x * 1 → x and commutativity reach x": {"seconds": 9.352}
   },
   "scry-modules": {
-   "Scry.Optics: a statement's origin lens gets, sets and maps": {"seconds": 32.5},
-   "Scry.Report: HTML escaping, no remote resource, deterministic (scry/tests/report-pure.wiz)": {"seconds": 21.807}
+   "Scry.Optics: a statement's origin lens gets, sets and maps": {"seconds": 9.034},
+   "Scry.Report: HTML escaping, no remote resource, deterministic (scry/tests/report-pure.wiz)": {"seconds": 5.437}
   },
   "scry-taint": {
    "SARIF: version, driver, rules, result, locations, related locations and round-trip": {"seconds": 92.612},
@@ -1298,13 +1298,13 @@
    "the order of Int, absolute value, the triangle inequality": {"seconds": 9.108}
   },
   "storage-mmap": {
-   "mmap a version-1 file: meta pick, checksums, walk, index bucket, out-of-range": {"seconds": 23.629}
+   "mmap a version-1 file: meta pick, checksums, walk, index bucket, out-of-range": {"seconds": 7.381}
   },
   "storage-multiproc": {
-   "flock contract: shared readers, deferred commit, mid-scan snapshot, two writers, torn reopen": {"seconds": 28.211}
+   "flock contract: shared readers, deferred commit, mid-scan snapshot, two writers, torn reopen": {"seconds": 8.54}
   },
   "storage-quire": {
-   "page commits/open/query: index facts, page counts, stale/unique, reopen": {"seconds": 39.271}
+   "page commits/open/query: index facts, page counts, stale/unique, reopen": {"seconds": 17.761}
   },
   "tactics": {
    "TacticM.introFresh: the binder's name, made fresh, and returned": {"seconds": 1.439},
