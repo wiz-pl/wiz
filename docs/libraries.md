@@ -1944,9 +1944,14 @@ instead of one `rw` per step.
 
 ## Native structures: word arrays, word maps, interned strings
 
-`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
-and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
-in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`): list models with laws, run
+natively in compiled code, updated in place when unique. `lib/WordMap.wiz`
+(`U64Map V`) and `lib/Intern.wiz` (`InternTable`, ids as `U32`) use the persistent map
+as the model (`PMap U64 V` and `PMap String U32`) and a native hash table in compiled
+code, so `insert`, `find` and `erase` (and `intern`) are O(log n) in the kernel,
+`#eval` and `#run`, and the natives `empty`/`insert`/`erase`/`find`/`size`/`ofList`/
+`toList` (and `intern`/`lookup`/`find` for a table) are the compiled representation.
+See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets
 
@@ -1960,20 +1965,22 @@ the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotati
 increasing key order, and `fromList` accepts entries in any order (a later duplicate
 wins).
 
-Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
-for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
-define one instance to use any other key type. `PSet` and the map
-algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), declared in
+`lib/Compare.wiz` with instances for `Nat` (through the native `Nat.lt`/`Nat.beq`),
+`U64` (`U64.cmp`, unsigned) and `String` (`String.compare`, lexicographic); define one
+instance to use any other key type. `PSet` and the map
+algorithms are key-generic, and so is `U64Map` now (its model is `PMap U64 V`). `size`
+and the balance checks are O(1) (the
 subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
 O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
 O(n log n) for a list in arbitrary order.
 
 Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
 `find_erase` and `size_insert` (and the sortedness and balance invariants across
-rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+rotations) are checked by the tests rather than proved — for `PMap`, `PSet` and
+`U64Map` (which is `PMap U64 V`). Examples: `examples/persistent.wiz`
 (the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
-complexity, persistence guarantees, benchmark plan and the migration path for replacing
-`U64Map` with a pure model plus a native backend are in
+complexity, persistence guarantees and the benchmark plan are in
 `wiz-notes/persistent-data.md`.
 
 ## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
