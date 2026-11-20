@@ -24,6 +24,7 @@ import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
 import { rules } from "./framework/editor-model.mjs";
+import { index as indexOracle } from "./framework/index-oracle.mjs";
 import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
 
 let failed = 0;
@@ -563,7 +564,7 @@ const selfPanel = fakePanel();
 const selfDocument = fakeDocument();
 const selfApp = startTestInfoview({
   editor: selfEditor, panel: selfPanel, uri: "file:///in-page.wiz", document: selfDocument,
-  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck }),
+  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck, index: indexOracle }),
 });
 checkThat("in-page: connected", await waitUntil(() => selfPanel.innerHTML.includes("connected")),
   selfPanel.innerHTML.slice(0, 300));
@@ -776,6 +777,12 @@ checkThat("widget pane: the scry claim is mounted",
   pane.textContent.includes("refuted") && pane.textContent.includes("beta.c"), pane.textContent);
 checkThat("widget pane: the panel does not duplicate the cards",
   !panePanel.innerHTML.includes("wiz-widget-grid"));
+// A publish with the same payload must not clear and re-sanitise the cards: the mounted
+// node (and its DOM state) survives a refresh whose `items` are unchanged.
+const firstCard = pane.childNodes[0];
+await paneApp.refresh();
+checkThat("widget pane: an unchanged payload keeps the mounted card",
+  pane.childNodes[0] === firstCard, `cards ${firstCard && firstCard.getAttribute("data-widget-kind")}`);
 checkThat("widget pane: no script element", paneTag("script").length === 0);
 paneApp.stop();
 await widgetMock.close();
