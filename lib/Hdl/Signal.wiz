@@ -20,7 +20,8 @@ docs/stages/34-hdl-signals.md.
   (`coit`, state in the arguments: O(1) per cycle) and what is built from them. There is
   no `Signal.fix`: Clash's `cnt = register 0 (cnt + 1)` needs a sized `scofix` whose state
   may depend on the size (lane L2, a kernel change). `registerS` shows the sized typing
-  that will make a combinational loop a size error.
+  that will make a combinational loop a size error, and `pureS` with the `OfNat` instance
+  is the part of the size-polymorphic operator surface that types today (numerals).
 * `Signal.Sig d` is a representation `HwTy → Type`, with a pointwise `Hw` instance: any
   combinational code `{r} → [Hw r] → …` runs on signals, and a `Bundle F` (`deriving
   Bundle`) packs `F (Signal.Sig d)`, a structure of signals, into one signal and back.
@@ -72,6 +73,27 @@ def Signal.fromList {d : ClockDomain} {A : Type} (dflt : A) (xs : List A) : Sign
 def Signal.pure {d : ClockDomain} {A : Type} (a : A) : Signal d A
   | .head => a
   | .tail => Signal.pure a
+
+/-- `pure` at any size: the same value in every cycle, as a signal valid for `i` steps.
+This is the one size-polymorphic combinator the current kernel types, because it never
+*observes* at the size it runs at (`coit` at `∞` used at `i`). `map`/`zipWith` do observe,
+so their size-preserving forms need lane L2's sized `scofix` (stage 34b). -/
+def Signal.pureS {d : ClockDomain} {A : Type} (a : A) {i : Size} : (Signal d A)^i
+  | .head => a
+  | .tail => Signal.pureS a
+
+/-- `pureS` at `∞` is `pure`: the same value at every cycle. -/
+def Signal.pureS_at {d : ClockDomain} {A : Type} (a : A) : (t : Nat) →
+    Signal.at (Signal.pureS (i := ∞) a : Signal d A) t = a
+  | .zero => rfl
+  | .succ t => Signal.pureS_at a t
+
+/-- A numeral at a sized signal (`0`, `1`, …): a constant in every cycle. This is the
+*numerals* half of the plan's size-polymorphic operators. `+` and `if` are not definable
+at size `i` yet: each observes its arguments at the size it runs at, so it needs a
+size-preserving `zipWith` (lane L2; stage 34b). -/
+instance {d : ClockDomain} {n k : Nat} {i : Size} : OfNat ((Signal d (BitVec n))^i) k :=
+  OfNat.mk (Signal.pureS (i := i) (BitVec.ofNat n k))
 
 /-- `f` in every cycle. -/
 def Signal.map {d : ClockDomain} {A B : Type} (f : A → B) (s : Signal d A) : Signal d B

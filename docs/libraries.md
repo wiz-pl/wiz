@@ -559,11 +559,21 @@ for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `Iso`, `LensP
 interpretations. One optic runs at every interpretation: `over` (update), `view` (read
 one), `toListOf` (read all), `preview` (read at most one), `overWrite` (update and
 write-set in one pass). `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
-`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it. A
-`Type 0` store of optics is still impossible here (the profunctor types are `Type 1`), and
-a profunctor optic cannot hand back the `Store A S` that a returned borrow (`Mut` in
-`lib/Region.wiz`) carries; that is why `Lens`/`PLens`/`Store`/`zoom`/`Affine` stay. New
-code that only reads and updates a value should use the `…P` forms.
+`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it;
+`LensP.toLens` is the other direction, and `Traversal.ofP` turns a profunctor traversal
+into the store `view`/`overAll` pair. `LensP.Indep` restates independence on
+`view`/`over` (the frame rule's hypothesis), and `LensP.ofLens_indep` derives it from a
+store `Lens.Indep`.
+
+A `Type 0` store of optics is still impossible here (the profunctor types are `Type 1`),
+and a profunctor optic has no error or absent branch, so it cannot replace the partial
+places that hand the lender back: `PLens` (`&mut v[i]`, which can fail with
+`outOfBounds`), `Affine`/`MutOpt` (`Option<&mut A>`, whose `none` carries the lender),
+`TraverseMut` (the in-place, state-threading `iter_mut` loop) and `Lens.pair` (two
+independent places borrowed at once; `Strong` cannot decompose an `S`). Those, `Mut`'s
+`Store` field and `Uniq.zoom` stay on the store encoding; `Mut.ofLensP` shows the one
+lossless crossing (a pure lens becomes a place through `LensP.toLens`). New code that
+only reads and updates a value should use the `…P` forms.
 
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
@@ -1721,11 +1731,16 @@ too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, a
 raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
 with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
 `#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
+`import Web.EditorModel` is the editor's pure rule set — UTF-16 positions, diagnostic
+ranges as merged line-clipped spans, completion filtering/order/insertion, and Tab's
+indent — reached from the page through the read-only `wiz_loom_editor_*` queries
+(`mount`'s `ask`); `web/framework/editor-model.mjs` is the test oracle, not served.
 `web/playground-ui.wiz` composes them into the whole page (`web/playground.html` mounts
 it) and exports its `wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
 module, so a user program's trap in the engine cannot touch the UI state. Tests:
-`web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
-(the page, mounted from the built module under Node).
+`web/playground-loom-test.sh` (the two components), `web/playground_ui_test.mjs`
+(the page, mounted from the built module under Node), and the editor rules' `=loom`
+cases.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 

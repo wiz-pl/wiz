@@ -36,14 +36,12 @@ need playground/playground.css
 need playground/overlays.css
 need playground/widgets.css
 need playground/lsp-client.js
-need playground/goals.js
 need playground/widgets.js
 need playground/playground-lsp.js
 need playground/hover.js
-need playground/editor-model.js
+need playground/framework/editor-text.js
 need playground/squiggles.js
 need playground/completions.js
-need playground/tagged.js
 need playground/selfhost-lsp-shim.js
 need playground/playground-engine.js
 need playground/wiz-playground.mjs

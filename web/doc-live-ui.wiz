@@ -1,0 +1,28 @@
+import IO
+import Web.DocLive
+import Web.Loom
+
+/-!
+# The live documentation panel's runtime
+
+`web/doc-live.js` creates the `<aside id="doc-live">` mount point and keeps the fetch
+and the socket; `DocLive` renders the panel and asks for a reconnect.
+-/
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+def patched (s s' : DocLive) : IO DocLive := do
+  Js.patch (Loom.LiveApp.patches docLiveApp s s');
+  IO.pure s'
+
+def init : DocLive := DocLive.initial
+def html (s : DocLive) : String := Loom.LiveApp.html docLiveApp s
+def step (s : DocLive) (ev : String) : IO DocLive := patched s (Loom.LiveApp.step docLiveApp s ev)
+def effect (s : DocLive) (kind a b : String) : IO DocLive := patched s (DocLive.effect s kind a b)
+def requests (s : DocLive) : String := DocLive.requests s
+
+export "wiz_loom_init" init
+export "wiz_loom_html" html
+export "wiz_loom_step" step
+export "wiz_loom_effect" effect
+export "wiz_loom_requests" requests

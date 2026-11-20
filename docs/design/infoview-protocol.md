@@ -8,8 +8,9 @@ This page describes version 1 of that extension as `Wiz/LSP.lean` implements it,
 transports an infoview can reach the server on, and the clients in the repository: the
 Neovim infoview (`editors/nvim/lua/wiz/infoview.lua`), the terminal infoview
 (`infoview/Tui.wiz`, with its layout in `lib/Infoview.wiz`) and the web infoview and
-playground (`web/infoview.js`, `web/goals.js`, `web/widgets.js`, `web/lsp-client.js`,
-`web/tagged.js`). The
+playground (`web/infoview.js`, `web/playground-lsp.js`, `web/widgets.js`,
+`web/lsp-client.js`, with the panel rendered by `lib/Web/{Goals,InfoviewPage}.wiz` and
+`web/framework/goals.mjs` as the Node oracle). The
 design follows Lean's infoview closely: results are pulled at a position, and interactive
 results carry handles that are only valid for one elaboration of the document.
 
@@ -162,9 +163,10 @@ WIZ_WIDGET:{"schema":"wiz.widget/1","kind":"plot","mimeType":"image/svg+xml",
 `html` is the self-contained `<figure class="wiz-plot">` around the SVG and `svg` is
 the drawing on its own (`Plot.svg`); both are deterministic and contain no `href`,
 `src`, script or `url(…)`, so a client needs no network and can insert `html` without
-running code. The browser infoview (`web/widgets.js`, used by `web/goals.js` and by the
-standalone page's widget pane) draws it under `Widgets`; it refuses a payload containing
-a script, a style, an event handler or an external reference. The terminal
+running code. The browser infoview (`web/widgets.js`, mounted by
+`web/playground-lsp.js` into the standalone page's widget pane, with
+`web/framework/goals.mjs` as the Node oracle) draws it under `Widgets`; it refuses a
+payload containing a script, a style, an event handler or an external reference. The terminal
 (`lib/Infoview.wiz`) and Neovim (`editors/nvim/lua/wiz/infoview.lua`) infoviews show the
 title and say the picture is in the browser — they cannot draw SVG. The item is
 positioned like a message: the cursor has to be on the `#plot` command (`m.info`), so
@@ -298,12 +300,13 @@ page should open a URI of its own; the web infoview picks `file:///scratch-<rand
 - **The terminal infoview** (`infoview/Tui.wiz`) either connects to `--infoview SOCK` and
   follows `wiz/infoview/cursor`, or starts its own `wiz lsp` with `wizElaborated` set for
   a file and position given on the command line.
-- **The web infoview** (`web/infoview.js` on top of `web/playground-lsp.js`,
-  `web/lsp-client.js` and `web/goals.js`) talks to `--ws`. It is its own editor by
-  default; with `?follow=1` it shows the editor's cursor instead and opens no document of
-  its own. The playground mounts the same pane (one implementation for both pages and for
-  both transports) and falls back to the plain requests. Its rendering also accepts
-  optional `range` fields on hypotheses and tags, which `wiz lsp` does not send today.
+- **The web infoview** (`web/infoview.js` on top of `web/playground-lsp.js` and
+  `web/lsp-client.js`, rendered by `lib/Web/InfoviewPage.wiz` and `lib/Web/Goals.wiz`)
+  talks to `--ws`. It is its own editor by default; with `?follow=1` it shows the
+  editor's cursor instead and opens no document of its own. The playground mounts the
+  same pane (one implementation for both pages and for both transports) and falls back
+  to the plain requests. Its rendering also accepts optional `range` fields on
+  hypotheses and tags, which `wiz lsp` does not send today.
 
 ## Tests
 

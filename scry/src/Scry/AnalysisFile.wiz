@@ -64,23 +64,23 @@ def Scry.ingestSlug (s : String) : String :=
     | .false => Char.mk 95) (String.chars s))
 
 /-- One string literal: the characters up to the closing quote, and the rest. -/
-partial def Scry.untilQuote : List Char → List Char → String × List Char
+partial def Scry.afUntilQuote : List Char → List Char → String × List Char
   | .nil, acc => (String.ofChars (List.reverse acc), .nil)
   | .cons c cs, acc =>
     match Nat.beq (Char.code c) 34 with
     | .true => (String.ofChars (List.reverse acc), cs)
     | .false => match Nat.beq (Char.code c) 92 with
       | .true => match cs with
-        | .cons d more => Scry.untilQuote more (List.cons d acc)
+        | .cons d more => Scry.afUntilQuote more (List.cons d acc)
         | .nil => (String.ofChars (List.reverse acc), .nil)
-      | .false => Scry.untilQuote cs (List.cons c acc)
+      | .false => Scry.afUntilQuote cs (List.cons c acc)
 
 /-- Read the string literals of a line. -/
 partial def Scry.quotedParts : List Char → List String
   | .nil => .nil
   | .cons c cs =>
     match Nat.beq (Char.code c) 34 with
-    | .true => let r := Scry.untilQuote cs .nil;
+    | .true => let r := Scry.afUntilQuote cs .nil;
       List.cons r.1 (Scry.quotedParts r.2)
     | .false => Scry.quotedParts cs
 
@@ -177,7 +177,7 @@ def Scry.revHex (n : Nat) : String :=
 
 /-- A call site (or error site) as the claim sees it: a graph node, the file it is in,
 and its span. -/
-structure Scry.CallSite where
+structure Scry.AfCallSite where
   node : Nat
   file : String
   start : Nat
@@ -187,9 +187,9 @@ structure Scry.CallSite where
 and re-computed from Quire by the runner; comparing the two is the "manifest/view is
 behind the store" check. -/
 structure Scry.GraphView where
-  calls : List Scry.CallSite
+  calls : List Scry.AfCallSite
   callHeads : List Nat
-  errors : List Scry.CallSite
+  errors : List Scry.AfCallSite
   nodeCount : Nat
   edgeCount : Nat
   relationRows : Nat
@@ -295,14 +295,14 @@ def Scry.nthJson (xs : List Json) (i : Nat) (d : Json) : Json :=
     | .false => Scry.nthJson rest (Nat.sub i 1) d
 
 /-- A call site as JSON. -/
-def Scry.callSiteJson (c : Scry.CallSite) : Json :=
+def Scry.callSiteJson (c : Scry.AfCallSite) : Json :=
   Json.mkObj [("node", Json.ofNat c.node), ("file", Json.mkStr c.file),
     ("span", Json.mkArr [Json.ofNat c.start, Json.ofNat c.stop])]
 
 /-- A call site from JSON. -/
-def Scry.callSiteOfJson (j : Json) : Scry.CallSite :=
+def Scry.callSiteOfJson (j : Json) : Scry.AfCallSite :=
   let span := Json.asList (Scry.jsonAt j "span");
-  Scry.CallSite.mk (Scry.jsonNatD j "node" 0) (Json.getStr j "file")
+  Scry.AfCallSite.mk (Scry.jsonNatD j "node" 0) (Json.getStr j "file")
     (Scry.natOfJson (Scry.nthJson span 0 Json.mkNull) 0)
     (Scry.natOfJson (Scry.nthJson span 1 Json.mkNull) 0)
 
@@ -437,8 +437,8 @@ def Scry.relationHeads (f : Scry.Facts) (name : String) : List Nat :=
       | .nil => .none) r.tuples
 
 /-- A node as a call/error site. -/
-def Scry.siteOfNode (f : Scry.Facts) (n : Scry.Node) : Scry.CallSite :=
-  Scry.CallSite.mk n.id.n (Scry.fileOfNode f n.id) n.span.start n.span.stop
+def Scry.siteOfNode (f : Scry.Facts) (n : Scry.Node) : Scry.AfCallSite :=
+  Scry.AfCallSite.mk n.id.n (Scry.fileOfNode f n.id) n.span.start n.span.stop
 
 /-- The claim-relevant projection of a fact store: call sites, the heads of `call`,
 error sites, and counts. -/
@@ -471,14 +471,14 @@ structure Scry.ClaimResult where
   findings : List Scry.AnalysisFinding
 
 /-- The finding's message: node, what, span and file. -/
-def Scry.findingMessage (c : Scry.CallSite) (what : String) : String :=
+def Scry.findingMessage (c : Scry.AfCallSite) (what : String) : String :=
   let a := String.append "node " (String.append (Nat.repr c.node) " (");
   let b := String.append a (String.append what (String.append ") at [" (Nat.repr c.start)));
   let d := String.append b (String.append "," (String.append (Nat.repr c.stop) ") in "));
   String.append d c.file
 
 /-- The one finding for a site violating `claim`. -/
-def Scry.findingOfSite (claim : String) (c : Scry.CallSite) (what : String)
+def Scry.findingOfSite (claim : String) (c : Scry.AfCallSite) (what : String)
     : Scry.AnalysisFinding :=
   Scry.AnalysisFinding.mk (String.append "a_" (Nat.repr c.node)) claim
     (Scry.findingMessage c what) c.file c.node c.start c.stop
@@ -528,7 +528,7 @@ def Scry.renderClaim (r : Scry.ClaimResult) : String :=
 -- ## Comparing the manifest's view with the live Quire query
 
 /-- Whether two site lists have the same node ids. -/
-def Scry.sameSites (xs ys : List Scry.CallSite) : Bool :=
+def Scry.sameSites (xs ys : List Scry.AfCallSite) : Bool :=
   Bool.and (Nat.beq (List.length xs) (List.length ys))
     (Bool.and (List.all (fun x => List.any (fun y => Nat.beq x.node y.node) ys) xs)
       (List.all (fun y => List.any (fun x => Nat.beq x.node y.node) xs) ys))
@@ -547,7 +547,7 @@ def Scry.sameView (a b : Scry.GraphView) : Bool :=
 -- ## The widget payload
 
 /-- A finding as JSON. -/
-def Scry.findingJson (x : Scry.AnalysisFinding) : Json :=
+def Scry.afFindingJson (x : Scry.AnalysisFinding) : Json :=
   Json.mkObj [
     ("id", Json.mkStr x.id), ("claim", Json.mkStr x.claim),
     ("message", Json.mkStr x.message), ("file", Json.mkStr x.file),
@@ -559,7 +559,7 @@ def Scry.claimJson (r : Scry.ClaimResult) : Json :=
   Json.mkObj [
     ("name", Json.mkStr r.name), ("status", Json.mkStr r.status),
     ("summary", Json.mkStr r.summary),
-    ("findings", Json.mkArr (List.map Scry.findingJson r.findings)) ]
+    ("findings", Json.mkArr (List.map Scry.afFindingJson r.findings)) ]
 
 /-- The graph's shape as JSON. -/
 def Scry.graphJson (v : Scry.GraphView) : Json :=
@@ -584,7 +584,7 @@ def Scry.analysisExt (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
   Json.mkObj [
     ("schema", Json.mkStr "scry.analysis/1"),
     ("claim", Scry.claimJson r),
-    ("findings", Json.mkArr (List.map Scry.findingJson r.findings)),
+    ("findings", Json.mkArr (List.map Scry.afFindingJson r.findings)),
     ("graph", Scry.graphJson v) ]
 
 /-- The card's title: the claim and its verdict. -/

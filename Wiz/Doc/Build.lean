@@ -158,11 +158,20 @@ def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options
       for f in ["wiz-infoview.mjs", "wiz-infoview.wasm"] do
         discard <| copyFirst [w] f o.out
       wasm := true
-  for f in ["scroll.css", "scroll.js", "tagged.js", "scroll-search.js"] do
+  for f in ["scroll.css", "scroll.js", "scroll-search.js"] do
     discard <| copyFirst o.assets f o.out
+  -- The pages' runtimes: the search's and, with --serve, the live panel's. They are
+  -- optional, like the Wasm module: a page without them stays static (the search box
+  -- says the runtime is missing).
+  for f in ["wiz-docs-ui.mjs", "wiz-doc-live-ui.mjs"] do
+    discard <| copyFirst o.assets f o.out
+  -- the mount contract the two runtimes share (`framework/mount.js` and its imports)
+  IO.FS.createDirAll (o.out / "framework")
+  for f in ["mount.js", "driver.js", "runtime.js"] do
+    discard <| copyFirst (o.assets.map (fun d => d / "framework")) f (o.out / "framework")
   -- (11s) the live client: only with --serve, so a plain site is unchanged
   if o.serve then
-    for f in ["lsp-client.js", "goals.js", "widgets.js", "doc-live.js", "doc-live.css"] do
+    for f in ["lsp-client.js", "doc-live.js", "doc-live.css"] do
       unless ← copyFirst o.assets f o.out do
         throw (IO.userError s!"wiz doc: --serve: {f} is not in the web assets: give --web DIR \
           (a release's share/wiz/web) or run in a checkout")

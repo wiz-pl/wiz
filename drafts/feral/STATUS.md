@@ -7,9 +7,9 @@ and `lake test -- regions`.
 
 ## The front end (22j, branch agent/feral-surface)
 
-`lib/Feral.wiz` (about 2400 lines of Wiz) implements `feral … end` for the fragment of
-LOWERING.md §1a. Test group `feral`: the twelve `surface/` programs lower, check and
-evaluate like `lowered/`; the nine `rejected/surface/` programs are rejected by the front
+`lib/Feral.wiz` (about 3250 lines of Wiz) implements `feral … end` for the fragment of
+LOWERING.md §1a. Test group `feral`: the thirteen `surface/` programs lower, check and
+evaluate like `lowered/`; the ten `rejected/surface/` programs are rejected by the front
 end (error class and line) and by the kernel on their `#unchecked` lowering.
 
 What Feral is and isn't: Feral is Rust's ownership discipline for a small first-order
@@ -25,9 +25,11 @@ known gap of `regions`). The surface never mentions handles, scopes, tokens or
 handed-back tuples.
 
 Not in the fragment (each is an error "not supported yet", never a silent miscompile):
-inline spec clauses on `fn` (use a `spec f requires (P) ensures (Q)` item), loop invariants, `loop`/`break`/`continue`, `impl`/`trait`, closures, struct literals with
+loop invariants, `loop`/`break`/`continue`, `impl`/`trait`, closures, struct literals with
 fields, assignment to `x.f`/`v[i]`, `while let` directly through a `&mut` (use a cursor),
 more than two lenders, `From.from` in `?`, integer types other than `U64`.
+A function's specification is written inline (`fn f … requires (P) ensures (Q) : R := e`) or
+as a `spec f …` item; one function has one specification, and both emit `f.Spec` (L18).
 Differences from rustc: a `&mut` argument is never implicitly reborrowed at a shorter
 region (rejected/surface/outlives_wrong_way; rustc accepts it); a borrow's extent is
 NLL only for straight-line code (a borrow taken in a branch or a loop body ends with that
@@ -54,20 +56,18 @@ after the block when the block is in tail position.
 | `…/10_regions.wiz` | `'a : 'b` bounds as erased `Outlives` arguments (`longest`, `remember` storing a `&'a` into a `&'b` slot), nested scopes handing out evidence | `.ok 8` |
 | `…/11_list.wiz` | a linked list through `&mut`: `incr_all` recursing on reborrows of the tails (`partial`, reborrow-recursion), `push_back` as a cursor | `.ok [2, 3, 7]` |
 | `…/12_pick.wiz` | returning one of two `&mut` (`Mut.ofUniq`, `Mut.weaken` with `'a : 'b`, `Mut.mapBack`, `Mut.finish`) | `.ok (10, 2)`, `.ok (1, 10)` |
+| `…/13_contracts.wiz` | inline `requires`/`ensures` on `fn` (L18), `final(x)`/`old(x)`, the generated `idf.Spec` proved (`fun _ => rfl`), `bump.Spec` over a handed-back `&mut` | `check.sh`; `feral` (lowers, evaluates like `lowered/13_contracts.wiz`) |
 | `drafts/feral/rejected/*.wiz` | E0515 (return a local's `&` / `&mut`), E0597 (borrow outlives its scope; short reference stored into a long slot), E0499 (two `&mut`), E0502 (lender used while borrowed), missing `'a : 'b` (for `&` and `&mut`), the bound pointing the wrong way at a call, a lengthened borrow; a forged handle (`forge_handle`: the handles' constructors are private to `lib/Region.wiz`, docs/stages/13-language.md, 13b) | each rejected with a type mismatch, the forgery as private (`check.sh`) |
 
 ## Doesn't check (wishful), and why
 
 | file / feature | missing | wishful entry |
 |---|---|---|
-| spec clauses in `drafts/feral/surface/*.wiz` (now comments) | `requires`/`ensures`/`invariant`/`decreases` in the grammar and their lowering | `spec-clauses`, `final-specs`, `decreases-loops` |
+| `invariant`, `decreases` after a loop condition, and `final result` (a returned borrow in a spec) | loop proof obligations; well-founded recursion (`decreases`); `Mut`'s store and its `fin` | `spec-clauses`, `final-specs`, `decreases-loops` |
 | positions inside macro-generated code, state across `feral` blocks, calling Wiz functions from Feral | positions in runtime `Syntax`, a macro environment, `getType` used for interop | `command-proc-macros` (located output by path is done, 22j) |
 | `let (u, ra, rb) := r` (L6) | `let` tuple patterns of more than two components (nested binary lets today) | `let-tuple-patterns` |
 | E0502 enforced by the type checker (today: by the lowering's shape, `Lent` rebinding; the lender is ω). E0499 and escapes are type errors since cohesion M4 | linear lenders, and a Copy notion to read `*x` out of one (K3) | `linear-case` |
 | structural recursion through a field reborrow (05 `insert`, 11 `incr_all` are `partial`) | the termination checker seeing a recursive call on a scope's handle of a pattern variable | `reborrow-recursion` |
-| `invariant`, `decreases`, `final result` | loop specs, returned-borrow specs (`requires`/`ensures` are `spec` items since M7) | `spec-clauses` |
-| `final(x)`, `old(x)` | desugaring over the backward function | `final-specs` |
-| `decreases` on loops | well-founded recursion; loops stay `partial def` (unverifiable) | `decreases-loops` |
 | numerals at integer types other than `U64` (the front end writes `U64.lit n`) | numerals at machine-int types | `machine-int-literals` |
 | `∃`, `∧`, `¬`, `∈` in laws/specs (`drafts/feral/Optic.wiz` §1, surface 09) | Prop connectives | `prop-connectives` |
 | `Lens.pair_putPut` (`drafts/feral/Optic.wiz` §2; `pair_putGet` is in lib/Optic.wiz since `castRefl`) | the unifier comparing an equation with its computed form | `unify-computed-equations` |

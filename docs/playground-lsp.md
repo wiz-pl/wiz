@@ -11,15 +11,15 @@ source span in the editor; the in-page server answers the plain goal methods and
 editor's completion, hover and definition from its own check index (the interactive
 tagged methods remain an external server's, so a tagged tree is only clickable there).
 
-The editor is a plain `<textarea>` with no dependency: `web/editor-model.js` has the pure
-rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
-insertion), `web/squiggles.js` and `web/completions.js` draw them, and
-`web/playground-lsp.js` connects them to the textarea. The page itself is one app in the
-repo's own Loom framework (`lib/Web/Loom.wiz`, § The page's runtime); the goals pane is
-an island in it.
+The editor is a plain `<textarea>` with no dependency: `lib/Web/EditorModel.wiz` has the
+pure rules (UTF-16 positions, the ranges diagnostics underline, completion filtering and
+insertion, Tab's indent), `web/framework/editor-text.js` reads the control, and
+`web/squiggles.js`/`web/completions.js` paint the runtime's answers. `web/framework/editor-model.mjs`
+is the test oracle, not served. The page itself is one app in the repo's own Loom
+framework (`lib/Web/Loom.wiz`, § The page's runtime); the goals pane is an island in it.
 
 The client is transport-agnostic and the page has no new dependency: `web/lsp-client.js`
-is JSON-RPC 2.0 over a WebSocket, `web/goals.js` renders the answers, and
+is JSON-RPC 2.0 over a WebSocket, `lib/Web/Goals.wiz` renders the answers, and
 `web/playground-lsp.js` connects the two to the textarea. A language server that speaks
 the protocol below — the Lean one today, a self-hosted one later — is a drop-in: the page
 cannot tell them apart.
@@ -141,10 +141,11 @@ count UTF-16 units; if it counts scalar values instead, it must make the same BM
 assumption. The playground's positions come from `textarea.selectionStart`, i.e. a
 UTF-16 index.
 
-`web/editor-model.js` has both conversions (`positionFromOffset`,
-`codePointPositionFromOffset`, `utf16OffsetFromCodePoints`) and the Node tests pin that
-they differ only for characters outside the BMP. The page sends the UTF-16 one; the
-code-point helpers exist for a server that counts `String.codes`.
+`lib/Web/EditorModel.wiz` has both conversions (`positionFromOffset`,
+`codePointPositionFromOffset`, `utf16OffsetFromCodePoints`), and the Node tests
+(`web/editor_test.mjs`, against the oracle) and the `=loom` cases pin that they differ
+only for characters outside the BMP. The page sends the UTF-16 one; the code-point
+helpers exist for a server that counts `String.codes`.
 
 ## The editor
 
@@ -152,24 +153,27 @@ Assuming a text field is enough is what makes the playground feel unlike an edit
 pieces fix that without replacing the textarea, and none of them adds a dependency:
 
 * **Squiggles.** `web/squiggles.js` draws every diagnostic range as a wavy underline
-  under the offending source. It puts the editor in a positioned wrapper and places a
-  **mirror** over it: an absolutely positioned `div` with the textarea's font, padding and
-  wrapping, holding the same text with a `<span class="squiggle sev-ERROR">` around each
-  range, transparent text and a coloured `text-decoration`. The layer never takes a
-  pointer event (`pointer-events: none`), so typing, selection and scrolling stay the
-  textarea's, and its colour and caret are untouched. This is the fragile part of
-  decorating a plain textarea — the mirror only lines up if the font metrics and the wrap
-  points match — which is why `web/squiggles.js` copies `getComputedStyle(editor)` on
-  every layout and why `web/playground.css` repeats the same declarations on both sides.
-  If they ever drift, only the underline's position is wrong. `?squiggles=off` (also
-  0/none/false) turns the layer off; the Goals pane's list still selects the spans.
+  under the offending source. It mounts a **mirror** over the editor's *existing parent*
+  (never wrapping the textarea: the Loom page patches by child index): an absolutely
+  positioned `div` with the textarea's font, padding and wrapping, holding the same text
+  with a `<span class="squiggle sev-ERROR">` around each range, transparent text and a
+  coloured `text-decoration`. The layer never takes a pointer event
+  (`pointer-events: none`), so typing, selection and scrolling stay the textarea's, and
+  its colour and caret are untouched. This is the fragile part of decorating a plain
+  textarea — the mirror only lines up if the font metrics and the wrap points match —
+  which is why `web/squiggles.js` copies `getComputedStyle(editor)` on every layout and
+  why `web/overlays.css` repeats the same declarations on both sides. If they ever drift,
+  only the underline's position is wrong. `?squiggles=off` (also 0/none/false) turns the
+  layer off; the Goals pane's list still selects the spans.
 
-  The ranges are computed by `squiggleSegments` (`web/editor-model.js`), which repairs
-  what real servers send: a range with **no end** underlines the token at its start (one
-  character on whitespace, nothing past the end of the text); an **empty** range does the
-  same; a range past the text is clamped; a **multi-line** range becomes one span per
-  line (no newline inside a span); two **overlapping** ranges merge, keeping the stricter
-  severity and both messages. Diagnostics without a `range.start` are not drawn.
+  The ranges are computed by `EditorModel.squiggleSegments`
+  (`lib/Web/EditorModel.wiz`), which repairs what real servers send: a range with **no
+  end** underlines the token at its start (one character on whitespace, nothing past the
+  end of the text); an **empty** range does the same; a range past the text is clamped; a
+  **multi-line** range becomes one span per line (no newline inside a span); two
+  **overlapping** ranges merge, keeping the stricter severity and both messages.
+  Diagnostics without a `range.start` are not drawn. The page asks for the spans through
+  `mount`'s `ask("wiz_loom_editor_segments", …)`; `web/squiggles.js` only paints them.
 
 * **Caret → server.** The caret is sent on selection changes — `keyup`, `click`,
   `mouseup`, `select`, `focus` — debounced by 120 ms (`positionDebounce`), as

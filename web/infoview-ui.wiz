@@ -1,0 +1,76 @@
+import IO
+import Json
+import Web.EditorModel
+import Web.InfoviewPage
+import Web.Loom
+
+/-!
+# The standalone infoview's entry points
+
+`web/infoview.js` mounts this module on the body: the header, the editor (unless
+`?follow=1`) and the goals pane from `Web.InfoviewPage`. The page keeps the endpoint
+rule, the socket and the caret; the runtime keeps the markup and the selection.
+-/
+
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+def patched (s s' : InfoviewPage) : IO InfoviewPage := do
+  Js.patch (Loom.LiveApp.patches infoviewApp s s');
+  IO.pure s'
+
+def loomInit : InfoviewPage := InfoviewPage.initial
+def loomHtml (s : InfoviewPage) : String := Loom.LiveApp.html infoviewApp s
+def loomStep (s : InfoviewPage) (ev : String) : IO InfoviewPage :=
+  patched s (Loom.LiveApp.step infoviewApp s ev)
+def loomEffect (s : InfoviewPage) (kind a b : String) : IO InfoviewPage :=
+  patched s (InfoviewPage.effect s kind a b)
+def loomRequests (s : InfoviewPage) : String := InfoviewPage.requests s
+def loomConsume (s : InfoviewPage) (ev : String) : Nat :=
+  match InfoviewPage.consume (Loom.splitEvent ev) with
+  | .true => 1
+  | .false => 0
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_step" loomStep
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume
+
+-- The editor's pure rules (`lib/Web/EditorModel.wiz`), the same reads the playground's
+-- runtime exports: the page asks through `mount.ask` and the answer is a string.
+def loomEditorSegments (text diags maxSegments : String) : String :=
+  EditorModel.segmentsJson text diags (EditorModel.natOf maxSegments)
+def loomEditorItems (result : String) : String :=
+  Json.render (Json.mkArr (EditorModel.completionItems result))
+def loomEditorPopup (text items index offset : String) : String :=
+  EditorModel.popupJson text items index (EditorModel.natOf offset)
+def loomEditorMove (index delta count : String) : String :=
+  EditorModel.intString
+    (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
+      (EditorModel.intOf count))
+def loomEditorAccept (text item offset : String) : String :=
+  EditorModel.acceptJson text item (EditorModel.natOf offset)
+def loomEditorTrigger (text c offset : String) : String :=
+  match EditorModel.completionTrigger text c (EditorModel.natOf offset) with
+  | .true => "1"
+  | .false => "0"
+def loomEditorPosition (text offset : String) : String :=
+  EditorModel.positionJson text (EditorModel.natOf offset)
+def loomEditorOffset (text line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition text
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+def loomEditorIndent (text from to : String) : String :=
+  EditorModel.indentJson text from to
+
+export "wiz_loom_editor_segments" loomEditorSegments
+export "wiz_loom_editor_items" loomEditorItems
+export "wiz_loom_editor_popup" loomEditorPopup
+export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_accept" loomEditorAccept
+export "wiz_loom_editor_trigger" loomEditorTrigger
+export "wiz_loom_editor_position" loomEditorPosition
+export "wiz_loom_editor_offset" loomEditorOffset
+export "wiz_loom_editor_indent" loomEditorIndent

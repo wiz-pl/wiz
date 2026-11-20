@@ -7,5 +7,6 @@ wiz=${1:?"usage: check.sh /path/to/worktree/.lake/build/bin/wiz"}
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$root"
 "$wiz" check -I drafts/optics drafts/optics/Tests.wiz
+"$wiz" check -I drafts/optics drafts/optics/Limits.wiz
 "$wiz" check -I drafts/storage-engine -I drafts/optics drafts/storage-engine/Storage.wiz
 "$wiz" check -I drafts/storage-engine -I drafts/optics drafts/optics/EngineIndex.wiz

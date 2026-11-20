@@ -1,0 +1,31 @@
+-- A fixture for web/goals_test.mjs: the Wiz goals pane, the hover card and the status
+-- line rendered from the same LSP answers the Node test's oracle uses. Rendered with
+-- `Loom.toHtml`, so the test needs no Wasm and no browser.
+--
+--   .lake/build/bin/wiz run -I lib web/goals_gen.wiz
+import IO
+import Json
+import Web.Goals
+import Web.Hover
+import Web.Loom
+
+inductive FixtureMsg where
+  | tag (idx : Nat)
+  | span (span : String)
+  | key
+  | reconnect
+
+def viewJson : String := "{\"state\":\"open\",\"endpoint\":\"ws://127.0.0.1:8765\",\"serverName\":\"wiz\",\"serverVersion\":\"0.1\",\"infoview\":\"1\",\"message\":null,\"canReconnect\":true,\"diagnostics\":[{\"severity\":1,\"message\":\"mock: unknown identifier\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":3}}}],\"goals\":{\"goals\":[{\"userName\":\"\",\"hyps\":[{\"names\":[\"n\",\"b\"],\"type\":{\"tag\":[{\"ref\":5,\"kind\":\"const\",\"name\":\"Nat\",\"range\":{\"start\":{\"line\":2,\"character\":8},\"end\":{\"line\":2,\"character\":11}}},{\"text\":\"Nat\"}]},\"range\":{\"start\":{\"line\":2,\"character\":8},\"end\":{\"line\":2,\"character\":9}}}],\"type\":{\"tag\":[{\"ref\":6,\"kind\":\"const\",\"name\":\"Nat\"},{\"text\":\"Nat\"}]},\"range\":{\"start\":{\"line\":1,\"character\":28},\"end\":{\"line\":4,\"character\":9}}}],\"session\":1,\"range\":{\"start\":{\"line\":1,\"character\":28},\"end\":{\"line\":4,\"character\":9}},\"messages\":[]},\"goalsKind\":\"interactive\",\"term\":{\"goal\":{\"userName\":\"\",\"hyps\":[],\"type\":{\"tag\":[{\"ref\":7,\"kind\":\"const\",\"name\":\"Nat\"},{\"text\":\"Nat\"}]}},\"range\":{\"start\":{\"line\":1,\"character\":21},\"end\":{\"line\":1,\"character\":23}}},\"termKind\":\"interactive\",\"items\":[]}"
+
+def model : Goals.Model := Goals.effect Goals.initial "view" viewJson ""
+
+def hoverJson : String := "{\"contents\":{\"kind\":\"markdown\",\"value\":\"```wiz\\nNat.add : Nat → Nat → Nat\\n```\\n\\n---\\n\\nAdds two Nats.\"}}"
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj
+    [ Json.field "statusOpen" (Json.mkStr (Goals.statusText "open" "ws://127.0.0.1:8765" "wiz" "0.1" "1"))
+    , Json.field "statusIdle" (Json.mkStr (Goals.statusText "no-server" "" "" "" ""))
+    , Json.field "goals" (Json.mkStr (Loom.toHtml (Goals.panel FixtureMsg.tag FixtureMsg.span FixtureMsg.reconnect FixtureMsg.key model)))
+    , Json.field "clicked" (Json.mkStr (Goals.requestsJson (Goals.update (.tag 0) "" model)))
+    , Json.field "hover" (Json.mkStr (Loom.toHtml (Hover.card (M := FixtureMsg) hoverJson "")))
+    , Json.field "hoverLabel" (Json.mkStr (Loom.toHtml (Hover.card (M := FixtureMsg) "" "Prelude.wiz:7:1"))) ]))

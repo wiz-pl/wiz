@@ -1,0 +1,246 @@
+import IO
+import Json
+import Tagged
+import Web.Loom
+
+/-!
+# Web.Hover
+
+The hover card: `textDocument/hover`'s Markdown as the lines the card shows, and the
+`textDocument/definition` target as a label.
+
+`web/hover.js` used to normalise the three LSP contents shapes, split fences and draw
+each line with `textContent`; it is here now, as a pure view. The host keeps what needs a
+browser: when to ask, the timers, the request generation and the card's position. The
+card's markup is `Loom`'s, so a server's text is escaped by construction.
+-/
+
+/-- One card line: text (maybe code), a thematic rule, or the truncation ellipsis. -/
+structure Hover.Line where
+  text : String
+  code : Bool
+  rule : Bool
+  ellipsis : Bool
+
+/-- A plain line. -/
+def Hover.textLine (s : String) : Hover.Line := Hover.Line.mk s .false .false .false
+/-- A code line. -/
+def Hover.codeLine (s : String) : Hover.Line := Hover.Line.mk s .true .false .false
+/-- A horizontal rule. -/
+def Hover.rule : Hover.Line := Hover.Line.mk "" .false .true .false
+
+/-- One LSP content part as `{kind, text, language}`; `kind` is `markdown` or
+`plaintext`, `language` is the fence's tag when the part says it is code. -/
+def Hover.part (p : Json) : Option (String × String × String) :=
+  match p with
+  | .str s => .some ("plaintext", s, "")
+  | .obj _ =>
+    let value := Json.getStr p "value";
+    let kind := match String.eq (Json.getStr p "kind") "plaintext" with
+      | .true => "plaintext"
+      | .false => "markdown";
+    let language := match Json.get p "language" with
+      | .some (.str s) => s
+      | _ => "";
+    match String.isEmpty (String.trim value) with
+    | .true => .none
+    | .false => .some (kind, value, language)
+  | _ => .none
+
+/-- `Hover.part` on each element, dropping the ones with nothing to show. -/
+def Hover.parts (ps : List Json) : List (String × String × String) :=
+  match ps with
+  | .nil => []
+  | .cons p rest => match Hover.part p with
+    | .none => Hover.parts rest
+    | .some v => List.append [v] (Hover.parts rest)
+
+/-- The parts of an LSP hover result, or `[]` when there is nothing to show. -/
+def Hover.contents (result : Json) : List (String × String × String) :=
+  let raw := match Json.get result "contents" with
+    | .some c => c
+    | .none => result;
+  match raw with
+  | .arr xs => Hover.parts (Jsons.toList xs)
+  | _ => Hover.parts [raw]
+
+/-- The single text lines of a hover result: fenced `{language, value}` parts get a
+fence, so `Hover.lines` keeps them code; plain parts are paragraphs. -/
+def Hover.textOf (result : Json) : Option String :=
+  let ps := Hover.contents result;
+  match ps with
+  | .nil => .none
+  | .cons _ _ =>
+    let text := String.intercalate "\n\n" (List.map (fun p =>
+      match String.isEmpty p.2.2 with
+      | .true => String.trim p.2.1
+      | .false => String.append "```" (String.append p.2.2
+          (String.append "\n" (String.append (String.trimRight p.2.1) "\n```")))) ps);
+    .some text
+
+/-- Whether a line is a fence marker (returns its character: `` ` `` or `~`). -/
+def Hover.fence (s : String) : Option Char :=
+  let t := String.trimLeft s;
+  match String.chars t with
+  | .cons c rest => match Char.eq c (Char.mk 96) with
+    | .true => .some c
+    | .false => match Char.eq c (Char.mk 126) with
+      | .true => .some c
+      | .false => .none
+  | _ => .none
+
+/-- A Markdown thematic break (`---`, `***`, `___`). -/
+def Hover.isRule (s : String) : Bool :=
+  let t := String.trim s;
+  match String.chars t with
+  | .cons c rest =>
+    let same := List.all (fun x => Char.eq x c) rest;
+    Bool.and same (Bool.or (Nat.le 3 (String.length t))
+      (Bool.or (Char.eq c (Char.mk 45)) (Bool.or (Char.eq c (Char.mk 42)) (Char.eq c (Char.mk 95)))))
+  | _ => .false
+
+/-- The card's lines, accumulating in `acc` (reversed); `openFence` is the marker of
+an open fence. -/
+partial def Hover.linesGo (openFence : Option Char) (xs : List String) (acc : List Hover.Line) :
+    List Hover.Line :=
+  match xs with
+  | .nil => List.reverse acc
+  | .cons line rest =>
+    let trimmed := String.trimRight line;
+    match Hover.fence trimmed with
+    | .some c =>
+      match openFence with
+      | .none => Hover.linesGo (.some c) rest acc
+      | .some open => match Char.eq c open with
+        | .true => Hover.linesGo .none rest acc
+        | .false => Hover.linesGo openFence rest (List.append acc [Hover.codeLine trimmed])
+    | .none =>
+      match openFence with
+      | .some _ => Hover.linesGo openFence rest (List.append acc [Hover.codeLine trimmed])
+      | .none =>
+        match Hover.isRule trimmed with
+        | .true => Hover.linesGo .none rest (List.append acc [Hover.rule])
+        | .false => match String.isEmpty trimmed with
+          | .true => Hover.linesGo .none rest acc
+          | .false => Hover.linesGo .none rest (List.append acc [Hover.textLine trimmed])
+
+/-- The card's lines: fences dropped (and their contents kept as code), rules kept,
+blank lines outside code dropped, and an ellipsis when there are more than `limit`
+lines. -/
+def Hover.lines (text : String) (limit : Nat) : List Hover.Line :=
+  let all := Hover.linesGo .none (String.splitOn text "\n") [];
+  match Nat.le (List.length all) limit with
+  | .true => all
+  | .false => List.append (List.take (limit - 1) all) [Hover.Line.mk "…" .false .false .true]
+
+/-- The path's last segment, for people (`file:///lib/Prelude.wiz` → `Prelude.wiz`). -/
+def Hover.documentName (uri : String) : String :=
+  let text := match String.splitOn uri "?" with
+    | .cons h _ => h
+    | _ => uri;
+  let parts := String.splitOn text "/";
+  match List.reverse parts with
+  | .cons name rest => match String.isEmpty name with
+    | .true => "?"
+    | .false => name
+  | _ => "?"
+
+/-- A definition target's range: `LINE:CHAR-LINE:CHAR`. -/
+def Hover.rangeSpan (range : Json) : String :=
+  let start := match Json.get range "start" with
+    | .some s => s
+    | .none => Json.mkNull;
+  let stop := match Json.get range "end" with
+    | .some e => e
+    | .none => start;
+  String.append (Nat.toString (Json.getNat start "line"))
+    (String.append ":" (String.append (Nat.toString (Json.getNat start "character"))
+      (String.append "-" (String.append (Nat.toString (Json.getNat stop "line"))
+        (String.append ":" (Nat.toString (Json.getNat stop "character")))))))
+
+/-- `uri` and its range as a span. -/
+structure Hover.Target where
+  uri : String
+  range : String
+
+/-- One `Location`/`LocationLink`. -/
+def Hover.oneTarget (v : Json) : Option Hover.Target :=
+  let uri := match Json.get v "uri" with
+    | .some (.str s) => s
+    | _ => match Json.get v "targetUri" with
+      | .some (.str s) => s
+      | _ => "";
+  match String.isEmpty uri with
+  | .true => .none
+  | .false =>
+    let range := match Json.get v "range" with
+      | .some r => r
+      | .none => match Json.get v "targetSelectionRange" with
+        | .some r => r
+        | .none => match Json.get v "targetRange" with
+          | .some r => r
+          | .none => Json.mkNull;
+    match Json.get range "start" with
+    | .none => .none
+    | .some _ => .some (Hover.Target.mk uri (Hover.rangeSpan range))
+
+/-- The usable targets, dropping the rest. -/
+def Hover.oneTargets (xs : List Json) : List Hover.Target :=
+  match xs with
+  | .nil => []
+  | .cons x rest => match Hover.oneTarget x with
+    | .none => Hover.oneTargets rest
+    | .some t => List.append [t] (Hover.oneTargets rest)
+
+/-- A `textDocument/definition` result: the first usable location (the server ordered
+them; the page has one editor). -/
+def Hover.target (result : Json) : Option Hover.Target :=
+  match result with
+  | .arr xs => match Hover.oneTargets (Jsons.toList xs) with
+    | .cons t _ => .some t
+    | .nil => .none
+  | _ => Hover.oneTarget result
+
+/-- `file:line:col` for a target, 1-based. -/
+def Hover.label (t : Hover.Target) : String :=
+  let parts := String.splitOn t.range "-";
+  let start := match parts with
+    | .cons s _ => s
+    | _ => t.range;
+  let lc := String.splitOn start ":";
+  let line := match lc with
+    | .cons l _ => l
+    | _ => "0";
+  let col := match lc with
+    | .cons _ (.cons c _) => c
+    | _ => "0";
+  String.append (Hover.documentName t.uri)
+    (String.append ":" (String.append (Nat.toString (Nat.succ (match String.parseNat line with
+      | .some n => n
+      | .none => 0))) (String.append ":" (Nat.toString (Nat.succ (match String.parseNat col with
+        | .some n => n
+        | .none => 0))))))
+
+/-- The card: the label (a definition's place, optionally) and the lines. `raw` is a
+hover result; an empty one draws nothing unless there is a label. -/
+def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
+  let contents := match Json.parse raw with
+    | .ok j => Hover.textOf j
+    | .error _ => (.none : Option String);
+  let lines := match contents with
+    | .some text => Hover.lines text 24
+    | .none => [];
+  match Bool.and (String.isEmpty raw) (String.isEmpty label) with
+  | .true => Loom.text ""
+  | .false =>
+    let head := match String.isEmpty label with
+      | .true => []
+      | .false => [Loom.el "div" [Loom.class "hover-head"] [Loom.text label]];
+    let body := List.map (fun l => match l.rule with
+      | .true => Loom.el "hr" [] []
+      | .false => Loom.el "div" [Loom.class (String.append "hover-line"
+          (String.append (match l.code with | .true => " code" | .false => "")
+            (match l.ellipsis with | .true => " more" | .false => "")))]
+        [Loom.text l.text]) lines;
+    Loom.el "div" [Loom.id "wiz-hover", Loom.class "wiz-hover", Loom.attr "role" "tooltip"]
+      (List.append head body)
