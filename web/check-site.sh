@@ -29,27 +29,25 @@ need docs/search.js
 need docs/scroll.css
 need playground/index.html
 need playground/playground.js
+need playground/framework/mount.js
+need playground/framework/driver.js
+need playground/framework/runtime.js
 need playground/playground.css
-need playground/playground-values.js
-need playground/playground-presets.js
-need playground/playground-state.js
+need playground/overlays.css
+need playground/widgets.css
 need playground/lsp-client.js
-need playground/goals.js
+need playground/widgets.js
 need playground/playground-lsp.js
 need playground/hover.js
-need playground/editor-model.js
+need playground/framework/editor-text.js
 need playground/squiggles.js
 need playground/completions.js
-need playground/tagged.js
 need playground/selfhost-lsp-shim.js
 need playground/playground-engine.js
 need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
-# The Loom page (`?ui=loom`) is optional, but when it was built its scripts must be there.
-if [ -f "$SITE/playground/wiz-playground-ui.mjs" ]; then
-  need playground/framework/driver.js
-  need playground/framework/runtime.js
-fi
+# The page's runtime (its browser half, mount/driver/runtime, is checked above).
+need playground/wiz-playground-ui.mjs
 need notebooks/index.html
 need licenses/index.html
 need licenses/LGPL-3.0.txt

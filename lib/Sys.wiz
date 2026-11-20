@@ -670,6 +670,14 @@ extern "wiz_sys_fd_write" Fd.writeRaw : Fd → Bytes → IO Nat
 extern "wiz_sys_fd_wait" Fd.waitRaw : Fd → Nat → Bool → Nat → IO Nat
 /-- Raw `lseek`; use `Fd.seek`. -/
 extern "wiz_sys_fd_seek" Fd.seekRaw : Fd → Nat → Nat → Bool → IO Nat
+/-- Raw `fsync`; use `Fd.sync`. -/
+extern "wiz_sys_fd_fsync" Fd.syncRaw : Fd → IO Nat
+/-- Raw `fdatasync`; use `Fd.dataSync`. -/
+extern "wiz_sys_fd_fdatasync" Fd.dataSyncRaw : Fd → IO Nat
+/-- Raw `flock(2)`; use `Fd.lock`/`Fd.tryLock`/`Fd.unlock`. -/
+extern "wiz_sys_fd_flock" Fd.lockRaw : Fd → Nat → Bool → IO Nat
+/-- Raw `ftruncate`; use `Fd.truncate`. -/
+extern "wiz_sys_fd_ftruncate" Fd.truncateRaw : Fd → Nat → IO Nat
 /-- Raw `poll`; use `Fd.poll`. -/
 extern "wiz_sys_fd_poll" Fd.pollRaw : List Fd → List Nat → Bool → Nat → IO (List Nat)
 /-- Raw pipe hand-over; use `Child.takePipe`. -/
@@ -804,6 +812,49 @@ def Fd.writableWithin (f : Fd) (d : Duration) : EIO Bool := do
 /-- Move, and say where that is (from the start), as `File.seek`. -/
 def Fd.seek (f : Fd) (to : SeekFrom) : EIO Nat :=
   Sys.check "seek" (Fd.seekRaw f (SeekFrom.whence to) (SeekFrom.offset to) (SeekFrom.negative to))
+/-- Flush this descriptor's data and metadata to stable storage (`fsync`). A commit that
+must survive a crash calls this before publishing the pointer to its pages. -/
+def Fd.sync (f : Fd) : EIO Unit := Sys.lift "fsync" (Fd.syncRaw f)
+/-- Flush this descriptor's data to stable storage (`fdatasync`), leaving metadata that is
+not needed to read the data back to the filesystem. -/
+def Fd.dataSync (f : Fd) : EIO Unit := Sys.lift "fdatasync" (Fd.dataSyncRaw f)
+/-- Set the file's length in bytes: growing zero-fills, shrinking discards the tail. Only
+for a descriptor whose pages nothing holds mapped past the new end. -/
+def Fd.truncate (f : Fd) (n : Nat) : EIO Unit := Sys.lift "ftruncate" (Fd.truncateRaw f n)
+
+-- File locks (flock): one writer, many readers, across processes.
+
+/-- The scope of a file lock: any number of shared readers, or one exclusive writer. -/
+inductive LockMode where
+  | shared
+  | exclusive
+/-- The runtime's code for a `LockMode` (0 shared, 1 exclusive). -/
+def LockMode.toNat : LockMode → Nat
+  | .shared => 0
+  | .exclusive => 1
+/-- A non-blocking lock's answer: someone else holds it, or it is ours. -/
+inductive Locked where
+  | acquired
+  | busy
+
+/-- Take a lock and wait for it: `LOCK_SH` for a reader, `LOCK_EX` for a writer. The lock
+belongs to this open file description, so two descriptors from two `Fd.open` calls
+contend even inside one process, while copies of one handle share it. It is released by
+`Fd.unlock`, by `Fd.close`, and by the kernel when the process exits (so a writer that
+dies cannot leave the file locked for ever). Advisory: a process that does not lock is
+outside the contract. -/
+def Fd.lock (f : Fd) (m : LockMode) : EIO Unit :=
+  Sys.lift "flock" (Fd.lockRaw f (LockMode.toNat m) .false)
+/-- Take a lock, or answer `busy` without waiting: the non-blocking `flock`. -/
+def Fd.tryLock (f : Fd) (m : LockMode) : EIO Locked := do
+  n ← EIO.lift (Fd.lockRaw f (LockMode.toNat m) .true);
+  match Nat.beq n 100002 with
+  | .true => EIO.pure .busy
+  | .false => match Nat.beq n 0 with
+    | .true => EIO.pure .acquired
+    | .false => EIO.fail (Sys.message "flock" n)
+/-- Release whatever lock this open file description holds (`LOCK_UN`). -/
+def Fd.unlock (f : Fd) : EIO Unit := Sys.lift "flock" (Fd.lockRaw f 2 .false)
 
 -- Waiting on several descriptors.
 /-- What `Fd.poll` waits for on a descriptor. -/

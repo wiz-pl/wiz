@@ -2041,6 +2041,31 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
         throw (IO.userError s!"{label}: the compiler printed no C:\n{out.stdout.take 500}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+/-- The host frontend elaborates the two programs the cases below compile. A break in
+`selfhost/*.wiz` used to surface only when a case built one (a merge left a `)` out of
+`knownTopFlag`'s `Bool.or` chain; `classCmd` had a `match` arm whose type the host would
+not infer), minutes into an already heavy shard. This case reads the same files and calls
+the same `checkerSource`/`compilerSource` the builders do, but stops at the host frontend:
+no kernel evaluation, no C toolchain, and the first errors print with their positions.
+The compiler's buffer comes first and a failure there short-circuits: it holds every
+shared file (the frontend and the tables) and the driver, so both incidents surface in
+its half of the ~50 s, not after the checker's. -/
+def selfhostHostGuard : IO Unit := do
+  let loader ← selfhostLoader
+  let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    let prog := source srcs
+    let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
+    if errs.isEmpty then pure [] else
+      pure (s!"the host frontend rejects the self-hosted {what} ({errs.size} error(s)):"
+        :: errs.toList.take 5)
+  let bad ← check "compiler" Selfhost.compilerFiles Selfhost.compilerSource
+  -- (`Check.wiz` is the only file of the checker's buffer the compiler's does not have)
+  let bad ← if bad.isEmpty then check "checker" Selfhost.checkerFiles Selfhost.checkerSource
+    else pure bad
+  unless bad.isEmpty do throw (IO.userError ("\n".intercalate bad))
+
 /-- (A23) `#print axioms` on the forms the host distinguishes: a definition with no
 axioms, a chain to an axiom, an axiom, an inductive type and its constructor, an
 `implemented_by` target (walked as code and marked `native`), a `sealed` type's native
@@ -2679,19 +2704,6 @@ def selfHostGroup : Group where
           "def main : IO Unit := IO.println (Nat.toString (get b + sum p))\n") "6\n" },
     { name := "the self-hosted frontend: written quantities, as in the Lean frontend (21m, K10)", run := fun _ =>
         selfhostAgrees quantityHeader quantityDecls },
-    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
-        -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
-        -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
-        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
-        -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
-        let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
-          "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
-        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
-        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
-        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
-          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
-        ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
-          "ok\nerror\n" },
     { name := "the self-hosted frontend: constructor field quantities (0, 1, ω), implicit and instance fields, as in the Lean frontend (21x, 22a)", run := fun _ =>
         selfhostAgrees fieldQtyHeader fieldQtyDecls },
     { name := "constructor field quantities, implicit and instance fields: the Lean and the self-hosted compilers agree (21x, 22a)", run := fun _ => do
@@ -2702,6 +2714,36 @@ def selfHostGroup : Group where
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
+    { name := "the linear fixpoint: a recursive call's result may be used at ω when it contains no linear content, as in the Lean frontend", run := fun _ =>
+        selfhostAgrees
+          ("inductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
+           "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
+           "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
+           "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n")
+          [
+            -- the call's result is `Nat`: no linear content, so it may be copied
+            ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
+            ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
+            ("partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n", true),
+            ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
+             "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
+            -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
+            ("partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
+             "    let r := Cursor.optLen c';\n    match r with\n" ++
+             "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
+            -- the result contains `Cursor a`: copied at ω it would copy the cursor
+            ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)\n", false),
+            -- two calls on one handle, and a path that never calls it
+            ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
+            ("partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1\n", false)
+          ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
     { name := "`let () := u; b` and split: the Lean and the self-hosted compilers agree (B7)", run := fun _ => do
@@ -3160,6 +3202,12 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
+    -- (A19) the coinductive surface is the one frontend feature with no case at all:
+    -- pin the missing half rather than assuming parity (`command.coinductive` is in
+    -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
+    { name := "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it", run := fun _ =>
+        selfhostVerdicts "" [
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n", true, false)] },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -4202,8 +4250,23 @@ def selfHostHostGroup : Group where
   name := "selfhost-host"
   exercise := "Stages 12b–14q (Lean host only)"
   cases := [
+    { name := "the host frontend elaborates the self-hosted checker and compiler (a fast guard)", run := fun _ =>
+        selfhostHostGuard },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
+    { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do
+        -- (`MTm` has no `Qty` terms; the Lean kernel's verdicts are in
+        -- wiz-notes/fieldq-review-probes: 7a accepted, 15b rejected by `qtyPoly`)
+        let kernel ← IO.FS.readFile "selfhost/Kernel.wiz"
+        -- (mandatory sorts: the sorts pass fills the `Π`s' holes, as the frontend runs it)
+        let verdict := "def piW (a b : Tm) : Tm := .pi .qw .lhole .lhole a b\n" ++
+          "def verdict (t : Tm) : String := match infer empty (sortsInfer t) with\n  | .ok _ _ => \"ok\"\n  | .err _ => \"error\"\n"
+        let dq := "(.ann (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star))) (.descr (ln 0) (.unit (ln 1))))"
+        let p7a := s!"(.ann (.lam (.lam (.letq .qz (.eqTy (.unit (ln 1)) (.unit (ln 1))) (.fst (.var 0)) .star))) (piW .qty (piW (.eq (.descr (ln 0) (.unit (ln 1))) {dq} {dq}) (.unit (ln 1)))))"
+        let p15b := "(.ann (.lam (.con (.pair .star (.pair .star .star)))) (piW (piW (.unit (ln 1)) .qty) (.mu (ln 0) (.unit (ln 1)) " ++
+          "(.app (.ann (.lam (.darg (.var 0) (.unit (ln 1)) (.lam (.dret .star)))) (piW .qty (.descr (ln 0) (.unit (ln 1))))) (.app (.var 0) .star)) .star)))"
+        ioRun (kernel ++ "\n" ++ verdict ++ s!"def main : IO Unit := do\n  IO.println (verdict {p7a});\n  IO.println (verdict {p15b})\n")
+          "ok\nerror\n" },
     -- The anti-vacuity case: the pipeline group must fail when its compiler/checker is a
     -- stub that echoes `input.wiz`. It runs each case of `selfhost` in a child process
     -- with `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` set (the override in

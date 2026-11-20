@@ -20,8 +20,9 @@ import {
   completionPrefix, filterCompletions, splitGoals, wordAt,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
-import { readGoalState, renderPanel } from "./goals.js";
+import { readGoalState, renderPanel } from "./framework/goals.mjs";
 import { startInfoview } from "./playground-lsp.js";
+import { rules } from "./framework/editor-model.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 
 let failed = 0;
@@ -319,7 +320,9 @@ async function waitUntil(predicate, ms = 3000) {
   const editor = fakeEditor("def twice (n : Nat) : Nat := n + n\n#eval twice 21\n");
   const wire = fakePanel();
   const app = startInfoview({
+  rules,
     editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    render: (kind, a) => { if (kind === "view") renderPanel(wire, JSON.parse(a)); },
     document: fakeDocument(),
   });
   checkThat("wiring: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));

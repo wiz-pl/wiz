@@ -1,0 +1,2 @@
+-- expect: implicit
+def f {A : Type} (x : U32) : U32 := x

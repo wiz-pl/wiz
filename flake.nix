@@ -9,8 +9,8 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed); `wiz-web` and `wiz-playground`,
-  # the two Wasm page modules (`web/build.sh`, `web/build-playground.sh`) built by a
+  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground` and
+  # `wiz-playground-ui`, the Wasm page modules (`web/build*.sh`) built by a
   # derivation instead of in each CI job. CI pushes them to the Cachix cache
   # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
@@ -241,15 +241,16 @@ EOF
               platforms = systems;
             };
           };
-          # The two Wiz→wasm page modules (stages 11n/11ab) as derivations, so that Cachix
-          # serves them: CI's `web` job used to run both Emscripten builds inside its
+          # The Wiz→wasm page modules (stages 11n/11ab/11w) as derivations, so that Cachix
+          # serves them: CI's `web` job used to run every Emscripten build inside its
           # single test step (95 % of it, ~10 min and an 8–10 GiB `wasm-opt -O2` tail),
-          # and the `docs` job ran them again on every push. Each derivation runs the same
-          # script a developer runs, with the packaged wiz, `emcc` on PATH (so the script
-          # does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
+          # and the `docs` job ran two of them again on every push. Each derivation runs the
+          # same script a developer runs, with the packaged wiz, `emcc` on PATH (so the
+          # script does not `nix shell`) and mini-gmp from `--gmp-src` (so it does not
           # `nix build`): no network at build time. `$out` is the script's OUT directory
           # — the module pair plus the page files it copies beside them — and the scripts
-          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`).
+          # can copy it with `--from` (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
+          # `WIZ_PLAYGROUND_UI_FROM`).
           #
           # The `src` filesets list exactly what each script reads: a change to a test or
           # a page it does not touch leaves the module in the cache. A script that starts
@@ -264,8 +265,15 @@ EOF
                 # the program it compiles (`link_c "js.c"` is resolved beside Web.wiz)
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
-                ./web/infoview.html ./web/infoview.js ./web/tagged.js ./web/scroll.js
-                ./web/scroll-search.js ./web/scroll.css
+                ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
+                ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
+                ./web/hover.js ./web/squiggles.js ./web/completions.js
+                ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/overlays.css
+                ./web/doc-live.js ./web/doc-live.css
+                ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
+                ./web/framework/editor-text.js
+                ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
+                ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -299,10 +307,23 @@ EOF
                 ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
-                ./web/playground.html ./web/playground.js ./web/playground-values.js
-                ./web/playground.css ./web/lsp-client.js ./web/goals.js
-                ./web/playground-lsp.js ./web/tagged.js ./web/selfhost-lsp-shim.js
+                ./web/playground.html ./web/playground.js
+                ./web/playground.css ./web/overlays.css ./web/widgets.css
+                ./web/lsp-client.js ./web/widgets.js
+                ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
+                # the entry point's mount contract (mount imports driver, which imports
+                # runtime.js): build-playground.sh copies all three beside the page
+                ./web/framework/mount.js ./web/framework/driver.js
+                ./web/framework/runtime.js ./web/framework/editor-text.js
+                # the page's runtime (web/build-playground-ui.sh, built below): its Wiz
+                # app, the FFI it links and the library modules it imports. The rest of
+                # lib/ resolves from the packaged toolchain's own library.
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./lib/Web/Loom.wiz ./lib/Web/Editor.wiz ./lib/Web/EditorModel.wiz
+                ./lib/Web/Playground.wiz ./lib/Web/Examples.wiz
+                ./lib/Web/Goals.wiz ./lib/Web/Hover.wiz
+                ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
             nativeBuildInputs = [ wiz pkgs.emscripten ];
@@ -315,6 +336,9 @@ EOF
               # a module 47 % larger (11.4 MB against 7.75 MB). The script still defaults
               # to the compiler's -O2, so a local build is unchanged.
               sh web/build-playground.sh out --gmp-src ${pkgs.gmp.src} --opt 1
+              # the page's runtime (the whole page as one Loom app), beside the engine:
+              # the site requires it, so one store path carries both modules.
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
               runHook postBuild
             '';
             installPhase = ''
@@ -323,7 +347,40 @@ EOF
               runHook postInstall
             '';
             meta = {
-              description = "The playground's Wasm engine (wiz-playground.mjs/.wasm, web/build-playground.sh)";
+              description = "The playground's Wasm modules (the engine and the Loom page, web/build-playground*.sh)";
+              platforms = systems;
+            };
+          };
+          # The playground page's Loom UI module (`?ui=loom`, stage 11w's page as one Loom
+          # app): small, but built by `web/test.sh` and the web job only through this, so a
+          # `web` job still needs no Emscripten. `lib/` is its `-I` root (the module is
+          # `web/playground-ui.wiz` and imports Web.{Loom,Playground,Editor} and their
+          # dependencies), so any library change rebuilds it — correct, and cheap.
+          wiz-playground-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-playground-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
+                ./web/framework/driver.js ./web/framework/runtime.js
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-playground-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The playground's Loom UI module (wiz-playground-ui.mjs, web/build-playground-ui.sh)";
               platforms = systems;
             };
           };
@@ -543,7 +600,7 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground; default = wiz;
+                   wiz-web wiz-playground wiz-playground-ui; default = wiz;
           wizc = bootstrapChain.wizc;
           wizc-seed = bootstrapChain.seed;
           wizc-release = bootstrapChain.release { };

@@ -1,0 +1,35 @@
+import IO
+import Web.Loom
+import Web.Search
+
+/-!
+# The documentation search's runtime
+
+`web/scroll-search.js` mounts this on `#results`; the index and the box's text arrive as
+`wiz_loom_effect "search" kind value`. The matching and the hit markup are
+`Web.Search`'s; the page keeps the input, Enter/Escape and the `location`.
+-/
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+inductive DocsMsg where
+  | none
+
+def app : Loom.App Search.Model DocsMsg := Loom.App.mk Search.initial
+  (fun _ s => s)
+  (fun s => Search.view s)
+
+def patched (s s' : Search.Model) : IO Search.Model := do
+  Js.patch (Loom.App.patches app s s');
+  IO.pure s'
+
+def init : Search.Model := Search.initial
+def html (s : Search.Model) : String := Loom.App.html app s
+def step (s : Search.Model) (_ev : String) : IO Search.Model := IO.pure s
+def effect (s : Search.Model) (kind a b : String) : IO Search.Model :=
+  patched s (Search.effect s kind a b)
+
+export "wiz_loom_init" init
+export "wiz_loom_html" html
+export "wiz_loom_step" step
+export "wiz_loom_effect" effect

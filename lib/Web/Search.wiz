@@ -1,0 +1,173 @@
+import IO
+import Json
+import Web.Loom
+
+/-!
+# Web.Search
+
+The documentation's search box, as the runtime's view: rank names first (last
+component, prefix, substring), then doc comments and signatures, and draw the hit as
+`<a class="hit">` with a snippet around the match. `web/scroll-search.js` keeps the DOM
+event, the index's script and the keyboard; the matching and its markup are here.
+
+`window.wizSearchIndex` rows: `{n: name, m: module, k: kind, d: doc summary, s:
+signature text, u: target}`. The page sends the rows once (`Search.effect "index"`) and
+the box's text on every input (`"query"`).
+-/
+
+structure Search.Model where
+  rows : List Json
+  query : String
+
+def Search.initial : Search.Model := Search.Model.mk [] ""
+
+/-- ASCII lower case (the index and the query are names and prose; non-ASCII compares
+as it is). -/
+def Search.lowerChar (c : Char) : Char :=
+  let n := Char.code c;
+  match Bool.and (Nat.le 65 n) (Nat.le n 90) with
+  | .true => Char.mk (n + 32)
+  | .false => c
+
+/-- A string in ASCII lower case. -/
+def Search.lower (s : String) : String := String.ofChars (List.map Search.lowerChar (String.chars s))
+
+/-- Whether `q` is in `s`, and where. -/
+partial def Search.indexOfChars (q : List Char) (at : Nat) (s : List Char) : Option Nat :=
+  match s with
+  | .nil => .none
+  | .cons _ rest => match Chars.isPrefix q s with
+    | .true => .some at
+    | .false => Search.indexOfChars q (at + 1) rest
+
+/-- The position of `q` in `s` (already lower-cased), or `none`. -/
+def Search.indexOf (s q : String) : Option Nat :=
+  Search.indexOfChars (String.chars q) 0 (String.chars s)
+
+/-- A snippet around the first match, `n` characters at most. -/
+def Search.around (s q : String) (n : Nat) : String :=
+  let text := String.trim s;
+  match Search.indexOf (Search.lower text) (Search.lower q) with
+  | .none => match Nat.lt n (String.length text) with
+    | .true => String.append (String.trimRight (String.take (n - 1) text)) "…"
+    | .false => text
+  | .some i =>
+    let start := match Nat.le 45 i with
+      | .true => i - 45
+      | .false => 0;
+    let shown := String.take n (String.drop start text);
+    String.append (match Nat.beq start 0 with | .true => "" | .false => "…")
+      (String.append (String.trim shown)
+        (match Nat.lt (start + n) (String.length text) with | .true => "…" | .false => ""))
+
+/-- A name's last component. -/
+def Search.lastPart (name : String) : String :=
+  let parts := String.splitOn name ".";
+  match List.reverse parts with
+  | .cons last _ => last
+  | _ => name
+
+/-- The name's rank (0 exact/last, 1 last prefix, 2 name prefix, 3 substring, 4 doc,
+5 signature, -1 no match). -/
+def Search.rank (row : Json) (q : String) : Nat :=
+  let name := Search.lower (Json.getStr row "n");
+  let last := Search.lastPart name;
+  if String.eq last q then 0
+  else if String.eq name q then 0
+  else if String.startsWith last q then 1
+  else if String.startsWith name q then 2
+  else if String.contains name q then 3
+  else if String.contains (Search.lower (Json.getStr row "d")) q then 4
+  else if String.contains (Search.lower (Json.getStr row "s")) q then 5
+  else 1000
+
+/-- A hit: its rank, name and row. -/
+structure Search.Hit where
+  rank : Nat
+  name : String
+  row : Json
+
+/-- The ranked hits, before sorting. -/
+partial def Search.ranked (q : String) (rows : List Json) : List Search.Hit :=
+  match rows with
+  | .nil => []
+  | .cons row rest =>
+    let r := Search.rank row q;
+    match Nat.lt r 1000 with
+    | .true => List.append [Search.Hit.mk r (Json.getStr row "n") row] (Search.ranked q rest)
+    | .false => Search.ranked q rest
+
+/-- Whether `a` sorts before `b`: rank, then the shorter name, then the name. -/
+def Search.before (a b : Search.Hit) : Bool :=
+  if Nat.lt a.rank b.rank then .true
+  else if Nat.lt b.rank a.rank then .false
+  else if Nat.lt (String.length a.name) (String.length b.name) then .true
+  else if Nat.lt (String.length b.name) (String.length a.name) then .false
+  else String.lt a.name b.name
+
+/-- Insert `h` into a sorted list. -/
+partial def Search.insert (h : Search.Hit) (xs : List Search.Hit) : List Search.Hit :=
+  match xs with
+  | .nil => [h]
+  | .cons x rest => match Search.before h x with
+    | .true => List.append [h] xs
+    | .false => List.append [x] (Search.insert h rest)
+
+/-- `Search.insert` over the list. -/
+partial def Search.sortHits (xs : List Search.Hit) (acc : List Search.Hit) : List Search.Hit :=
+  match xs with
+  | .nil => acc
+  | .cons h rest => Search.sortHits rest (Search.insert h acc)
+
+/-- The hits of `q`, best first. -/
+def Search.hits (s : Search.Model) : List Search.Hit :=
+  let q := Search.lower (String.trim s.query);
+  match String.isEmpty q with
+  | .true => []
+  | .false => List.take 50 (Search.sortHits (Search.ranked q s.rows) [])
+
+/-- One hit as `<a class="hit">`. -/
+def Search.hitView {M : Type} (q : String) (h : Search.Hit) : Loom.VNode M :=
+  let row := h.row;
+  let name := Json.getStr row "n";
+  let module := Json.getStr row "m";
+  let kind := Json.getStr row "k";
+  let href := match Json.get row "u" with
+    | .some (.str u) => u
+    | _ => String.append (String.append module (match String.eq kind "module" with
+        | .true => ".html" | .false => ".html#")) (match String.eq kind "module" with
+          | .true => "" | .false => name);
+  let r := Search.rank row q;
+  let detail := if Nat.beq r 4 then
+      Loom.el "div" [Loom.class "summary"]
+        [Loom.el "span" [Loom.class "where"] [Loom.text "docs"], Loom.text " ",
+         Loom.text (Search.around (Json.getStr row "d") q 150)]
+    else if Nat.beq r 5 then
+      Loom.el "div" [Loom.class "summary"]
+        [Loom.el "span" [Loom.class "where"] [Loom.text "signature"], Loom.text " ",
+         Loom.text (Search.around (Json.getStr row "s") q 150)]
+    else Loom.el "div" [Loom.class "summary"] [Loom.text (Search.around (Json.getStr row "d") q 150)];
+  Loom.el "a" [Loom.class "hit", Loom.attr "href" href]
+    [Loom.el "span" [Loom.class "kind"] [Loom.text kind], Loom.text " ",
+     Loom.el "code" [] [Loom.text name], Loom.text " ",
+     Loom.el "span" [Loom.class "mod"] [Loom.text module], detail]
+
+/-- The results list (empty when the query is empty). -/
+def Search.view {M : Type} (s : Search.Model) : Loom.VNode M :=
+  let q := Search.lower (String.trim s.query);
+  match String.isEmpty q with
+  | .true => Loom.text ""
+  | .false =>
+    let hits := Search.hits s;
+    match hits with
+    | .nil => Loom.el "div" [Loom.class "nothing"]
+        [Loom.text "No declarations, docs or signatures match."]
+    | .cons _ _ => Loom.seq (List.map (Search.hitView q) hits)
+
+/-- The page's effects: the index's rows (once) and the box's text. -/
+def Search.effect (s : Search.Model) (kind a b : String) : Search.Model :=
+  if String.eq kind "index" then match Json.parse a with
+    | .ok j => { s with rows := Json.asList j }
+    | .error _ => s
+  else if String.eq kind "query" then { s with query := a }
+  else s

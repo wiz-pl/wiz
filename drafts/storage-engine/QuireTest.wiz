@@ -1,0 +1,291 @@
+import Sys
+import Word
+import Text
+import Functor
+import Storage
+import Quire
+import QuireCursor
+/-!
+# The page-backed store, end to end
+
+`wiz run -I drafts/storage-engine drafts/storage-engine/QuireTest.wiz` (compiled: the file
+and `mmap` natives are `wiz run` code). It exercises the format the benchmark uses:
+
+* seed 500 nodes in one commit, then read them back through the snapshot and through a
+  fresh open (the meta pick, no map materialisation);
+* an update through the recording lens (`qsetField`), a delete, and the index facts
+  those write;
+* stale and unique rejection;
+* the page cursor: an equality index-only query reads one slot's pages, a full scan reads
+  every slot's, a range reads the slots of its values, and an index→primary query follows
+  the candidates. `Cost.pages` is asserted, not just the counts;
+* group commit (`putMany`): a batch of one-record transactions publishes at one
+  generation with one durability point, a crash between its pages and its commit record
+  (`putManyPagesOnly`) leaves the old root, a stale entry is rejected on its own while
+  the rest of the batch commits, and a unique collision (against the base bucket and
+  inside the batch) rejects only the colliding entry.
+-/
+
+def expect (r : Nat) (what : String) (b : Bool) : EIO Nat :=
+  match b with
+  | .true => EIO.pure (Nat.succ r)
+  | .false => EIO.fail (String.append "check failed: " what)
+
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+def u64 (n : Nat) : U64 := U64.ofNat n
+def u32 (n : Nat) : U32 := U32.ofNat n
+
+def stateIndex : IndexDef := IndexDef.mk (U32.ofNat 3) (U32.ofNat 2) .false
+def schema : List IndexDef := [kindIndex, stateIndex]
+
+/-- Node `i`: kind `i % 10` (rule), count `i` (line), label `i % 5` (state). -/
+def seedNode (i : Nat) : Node :=
+  Node.mk (U32.ofNat (Nat.mod i 10)) (u64 i) (U32.ofNat (Nat.mod i 5))
+
+partial def seedGo (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => seedGo (QSnapshot.record s (u64 i) (.some (.set (seedNode i)))) n (Nat.succ i)
+  | .false => s
+
+def seedAll (s : QSnapshot) (n : Nat) : QSnapshot := seedGo s n 1
+
+def countOf (s : QSnapshot) (i : Nat) : Nat :=
+  match QSnapshot.getNode s (u64 i) with
+  | .none => 0
+  | .some n => n.count.toNat
+
+def labelOf (s : QSnapshot) (i : Nat) : Nat :=
+  match QSnapshot.getNode s (u64 i) with
+  | .none => 999
+  | .some n => n.label.toNat
+
+def has (s : QSnapshot) (i : Nat) : Bool :=
+  match QSnapshot.getNode s (u64 i) with
+  | .some _ => .true
+  | .none => .false
+
+/-- The equality query the benchmark runs: `indexCursor` + `filterKey`. -/
+def eqCost (s : QSnapshot) (d : IndexDef) (v : U64) : Nat × Cost :=
+  QCursor.foldWith (QCursor.filterKey (KeyPred.eq v) (QSnapshot.indexOnlyRange d KeyRange.all s))
+    (fun n _ => Nat.succ n) 0
+
+/-- A node with a distinctive value, for the batch tests. -/
+def markNode (k c : Nat) : Node := Node.mk (u32 k) (u64 c) (u32 0)
+
+/-- One transaction from `s` setting `id` to `n`. -/
+def txSet (s : QSnapshot) (id : Nat) (n : Node) : QSnapshot :=
+  QSnapshot.record s (u64 id) (.some (.set n))
+
+/-- `last - i + 1` one-record transactions from `s`, setting `i` to `seedNode i`. -/
+partial def txsTo (s : QSnapshot) (last : Nat) (i : Nat) : List QSnapshot :=
+  match Nat.le i last with
+  | .true => List.cons (txSet s i (seedNode i)) (txsTo s last (Nat.succ i))
+  | .false => []
+
+/-- Every outcome is `committed`. -/
+def allSucceeded (os : List Outcome) : Bool :=
+  List.all (fun o => succeeded o) os
+
+/-- The number of committed outcomes. -/
+def countCommitted (os : List Outcome) : Nat :=
+  List.foldl (fun n o => match o with
+    | .committed _ => Nat.succ n
+    | .rejected _ => n) 0 os
+
+/-- The number of rejected outcomes. -/
+def countRejected (os : List Outcome) : Nat :=
+  List.foldl (fun n o => match o with
+    | .committed _ => n
+    | .rejected _ => Nat.succ n) 0 os
+
+def allCost (s : QSnapshot) (d : IndexDef) : Nat × Cost :=
+  QCursor.foldWith (QSnapshot.indexOnlyRange d KeyRange.all s) (fun n _ => Nat.succ n) 0
+
+def rangeCost (s : QSnapshot) (d : IndexDef) (lo hi : U64) : Nat × Cost :=
+  QCursor.foldWith
+    (QCursor.filterKey (KeyPred.between lo hi) (QSnapshot.indexOnlyRange d KeyRange.all s))
+    (fun n _ => Nat.succ n) 0
+
+/-- The group-commit checks: one generation for a group, the crash between the pages
+and the commit record, and a stale entry rejected on its own. -/
+def batchCommitCheck (dir : String) (r0 : Nat) : EIO Nat := do
+  -- ## Group commit: a batch of independent transactions with one durability point
+
+  bh ← openQ (Path.join dir "batch.db") schema;
+  b0 ← getQ bh;
+  oSeedB ← putQ bh (seedAll b0 10);
+  r29 ← expect r0 "batch: the seed commits" (succeeded oSeedB);
+  b1 ← getQ bh;
+  -- Five one-record transactions from the same base, committed as one group.
+  outs1 ← putMany bh (txsTo b1 15 11);
+  r30 ← expect r29 "batch: every entry commits" (allSucceeded outs1);
+  b2 ← getQ bh;
+  r31 ← expect r30 "batch: one generation for the whole group" (Nat.beq b2.gen.toNat 2);
+  r32 ← expect r31 "batch: record 11 is present" (Nat.beq (countOf b2 11) 11);
+  r33 ← expect r32 "batch: record 15 is present" (Nat.beq (countOf b2 15) 15);
+  r34 ← expect r33 "batch: the seed records survive" (Nat.beq (countOf b2 1) 1);
+  -- The crash: the pages are written and synced, the commit record is not.
+  outs2 ← putManyPagesOnly bh (txsTo b2 20 16);
+  r35 ← expect r34 "batch: the pages-only phase prepared every entry"
+    (Bool.and (Nat.beq (List.length outs2) 5) (allSucceeded outs2));
+  closeQ bh;
+  bh2 ← openQ (Path.join dir "batch.db") schema;
+  b3 ← getQ bh2;
+  r36 ← expect r35 "crash before the commit record: the old generation" (Nat.beq b3.gen.toNat 2);
+  r37 ← expect r36 "crash before the commit record: the batch is absent"
+    (Bool.not (has b3 16));
+  r38 ← expect r37 "crash before the commit record: the old root is intact"
+    (Nat.beq (countOf b3 15) 15);
+  -- The same batch, published: all five records appear together.
+  outs3 ← putMany bh2 (txsTo b3 20 16);
+  r39 ← expect r38 "batch: the retried group commits" (allSucceeded outs3);
+  b4 ← getQ bh2;
+  r40 ← expect r39 "batch: the retry advances one generation" (Nat.beq b4.gen.toNat 3);
+  -- A stale entry is rejected on its own; the other two commit.
+  sOld ← getQ bh2;
+  oMid ← putQ bh2 (txSet sOld 3 (Node.mk (u32 9) (u64 999) (u32 9)));
+  r41 ← expect r40 "batch: the intervening commit lands" (succeeded oMid);
+  outs4 ← putMany bh2
+    [ txSet sOld 20 (markNode 1 111)
+    , txSet sOld 3 (markNode 2 222)
+    , txSet sOld 21 (markNode 3 333) ];
+  r42 ← expect r41 "batch: the stale entry is rejected alone"
+    (Nat.beq (countRejected outs4) 1);
+  r43 ← expect r42 "batch: the other entries commit" (Nat.beq (countCommitted outs4) 2);
+  closeQ bh2;
+  bh3 ← openQ (Path.join dir "batch.db") schema;
+  b5 ← getQ bh3;
+  r44 ← expect r43 "batch: the group advances one generation" (Nat.beq b5.gen.toNat 5);
+  r45 ← expect r44 "batch: accepted record 20 after reopen" (Nat.beq (countOf b5 20) 111);
+  r46 ← expect r45 "batch: accepted record 21 after reopen" (Nat.beq (countOf b5 21) 333);
+  r47 ← expect r46 "batch: the stale write did not land" (Nat.beq (countOf b5 3) 999);
+  r48 ← expect r47 "batch: the seed is still there" (Nat.beq (countOf b5 5) 5);
+  EIO.pure r48
+
+
+/-- The unique-index checks in a batch: against the base bucket, and inside the
+batch. -/
+def uniqueBatchCheck (dir : String) (r0 : Nat) : EIO Nat := do
+  -- Unique indices in a batch: a collision against the base, and inside the batch.
+  uh ← openQ (Path.join dir "unique-batch.db") [uniqueLabel];
+  u0b ← getQ uh;
+  oU0 ← putQ uh (txSet u0b 1 (Node.mk (u32 0) (u64 1) (u32 7)));
+  r49 ← expect r0 "unique batch: the first node commits" (succeeded oU0);
+  u1b ← getQ uh;
+  outsU ← putMany uh
+    [ txSet u1b 2 (Node.mk (u32 0) (u64 2) (u32 8))
+    , txSet u1b 3 (Node.mk (u32 0) (u64 3) (u32 7))
+    , txSet u1b 4 (Node.mk (u32 0) (u64 4) (u32 9)) ];
+  r50 ← expect r49 "unique batch: the duplicate against the base is rejected"
+    (Nat.beq (countRejected outsU) 1);
+  r51 ← expect r50 "unique batch: the other entries commit" (Nat.beq (countCommitted outsU) 2);
+  u2b ← getQ uh;
+  r52 ← expect r51 "unique batch: node 3 (the duplicate) is absent"
+    (Bool.not (has u2b 3));
+  r53 ← expect r52 "unique batch: node 2 is present" (has u2b 2);
+  r54 ← expect r53 "unique batch: node 4 is present" (has u2b 4);
+  outsV ← putMany uh
+    [ txSet u2b 5 (Node.mk (u32 0) (u64 5) (u32 10))
+    , txSet u2b 6 (Node.mk (u32 0) (u64 6) (u32 10)) ];
+  r55 ← expect r54 "unique batch: a collision inside the batch rejects the second"
+    (Nat.beq (countRejected outsV) 1);
+  r56 ← expect r55 "unique batch: the first of the colliding pair commits"
+    (Nat.beq (countCommitted outsV) 1);
+  closeQ uh;
+  uh2 ← openQ (Path.join dir "unique-batch.db") [uniqueLabel];
+  u3b ← getQ uh2;
+  r57 ← expect r56 "unique batch: reopen keeps node 5" (has u3b 5);
+  r58 ← expect r57 "unique batch: reopen has no node 6" (Bool.not (has u3b 6));
+  r59 ← expect r58 "unique batch: reopen has no node 3" (Bool.not (has u3b 3));
+  closeQ uh2;
+  EIO.pure r59
+
+
+def main : IO Unit := EIO.toIO (do
+  dir ← FS.createTempDir;
+  let path := Path.join dir "quire.db";
+  h ← openQ path schema;
+  s0 ← getQ h;
+  oSeed ← putQ h (seedAll s0 500);
+  r0 ← expect 0 "the seed commits" (succeeded oSeed);
+  s1 ← getQ h;
+  r1 ← expect r0 "generation 1" (Nat.beq s1.gen.toNat 1);
+  r2 ← expect r1 "node 1 count" (Nat.beq (countOf s1 1) 1);
+  r3 ← expect r2 "node 500 count" (Nat.beq (countOf s1 500) 500);
+  r4 ← expect r3 "node 501 absent" (Bool.not (has s1 501));
+  -- 100 nodes have state 2 (500 / 5).
+  let eq := eqCost s1 stateIndex (u64 2);
+  r5 ← expect r4 "state 2 has 100 nodes" (Nat.beq eq.1 100);
+  r6 ← expect r5 "index-only equality reads no primary node" (Nat.beq eq.2.nodes 0);
+  r7 ← expect r6 "index-only equality reads 1 root page + 1 fact page"
+    (Nat.beq eq.2.pages 2);
+  let all := allCost s1 stateIndex;
+  r8 ← expect r7 "all states have 500 nodes" (Nat.beq all.1 500);
+  r9 ← expect r8 "a full index scan reads more pages than equality"
+    (Nat.lt eq.2.pages all.2.pages);
+  let rng := rangeCost s1 kindIndex (u64 0) (u64 2);
+  r10 ← expect r9 "rules 0..2 have 150 nodes" (Nat.beq rng.1 150);
+  r11 ← expect r10 "a range reads fewer pages than a full scan and no node"
+    (Bool.and (Nat.lt rng.2.pages all.2.pages) (Nat.beq rng.2.nodes 0));
+  -- The index→primary composite: one leaf read per result.
+  let followed := QCursor.foldWith
+    (QSnapshot.indexNodesWhere stateIndex (KeyPred.eq (u64 2)) s1) (fun n _ => Nat.succ n) 0;
+  r12 ← expect r11 "follow returns 100 nodes" (Nat.beq followed.1 100);
+  r13 ← expect r12 "follow reads one primary page per node"
+    (Nat.beq followed.2.nodes 100);
+
+  -- Update node 7: state 2 -> 3 through the lens.
+  s2 ← getQ h;
+  oUp ← putQ h (qsetField (u64 7) Node.labelL (U32.ofNat 3) s2);
+  r14 ← expect r13 "the update commits" (succeeded oUp);
+  s3 ← getQ h;
+  r15 ← expect r14 "the update is visible" (Nat.beq (labelOf s3 7) 3);
+  r16 ← expect r15 "state 2 lost node 7" (Nat.beq (eqCost s3 stateIndex (u64 2)).1 99);
+  r17 ← expect r16 "state 3 gained node 7" (Nat.beq (eqCost s3 stateIndex (u64 3)).1 101);
+
+  -- Delete node 8: every index writes a remove fact.
+  oDel ← putQ h ({ s3 with ws := WriteSet.combine s3.ws (u64 8) .del });
+  r18 ← expect r17 "the delete commits" (succeeded oDel);
+  s4 ← getQ h;
+  r19 ← expect r18 "node 8 is gone" (Bool.not (has s4 8));
+  r20 ← expect r19 "state 3 excludes the deleted node" (Nat.beq (eqCost s4 stateIndex (u64 3)).1 100);
+
+  -- A snapshot taken before the update is stale for a `set`.
+  oStale ← putQ h (qsetField (u64 7) Node.labelL (U32.ofNat 4) s2);
+  r21 ← expect r20 "a stale set is rejected" (Bool.not (succeeded oStale));
+
+  -- Reopen: a meta pick, then the same reads.
+  closeQ h;
+  h2 ← openQ path schema;
+  s5 ← getQ h2;
+  r22 ← expect r21 "reopen keeps the generation" (Nat.beq s5.gen.toNat 3);
+  r23 ← expect r22 "reopen keeps node 500" (Nat.beq (countOf s5 500) 500);
+  r24 ← expect r23 "reopen keeps the update" (Nat.beq (labelOf s5 7) 3);
+  r25 ← expect r24 "reopen keeps the delete" (Bool.not (has s5 8));
+  closeQ h2;
+
+  -- A unique index (a small store of its own).
+  h3 ← openQ (Path.join dir "unique.db") [uniqueLabel];
+  u0 ← getQ h3;
+  o1 ← putQ h3 (QSnapshot.record u0 (u64 1) (.some (.set (Node.mk (u32 0) (u64 0) (u32 7)))));
+  r26 ← expect r25 "unique: node 1 commits" (succeeded o1);
+  u1 ← getQ h3;
+  o2 ← putQ h3 (QSnapshot.record u1 (u64 2) (.some (.set (Node.mk (u32 0) (u64 0) (u32 8)))));
+  r27 ← expect r26 "unique: node 2 commits" (succeeded o2);
+  u2 ← getQ h3;
+  o3 ← putQ h3 (QSnapshot.record u2 (u64 2) (.some (.set (Node.mk (u32 0) (u64 0) (u32 7)))));
+  r28 ← expect r27 "unique: a duplicate is rejected" (Bool.not (succeeded o3));
+  closeQ h3;
+
+
+  r48 ← batchCommitCheck dir r28;
+  r59 ← uniqueBatchCheck dir r48;
+
+
+  FS.removeAll dir;
+  EIO.lift (IO.println (String.append "quire: all checks passed: "
+    (Nat.toString r59))))

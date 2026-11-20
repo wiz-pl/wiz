@@ -250,7 +250,7 @@ def Scry.Plan.canonicalise {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
   let facts := Scry.Plan.dbFacts p st.db;
   let m := Scry.Plan.mergeTuples p sorts facts;
   let c := Scry.Plan.canonDb p m.1 st.db;
-  (Scry.State.mk c.db st.nodes st.next st.stepIdx, m.1, Bool.or m.2 c.changed)
+  (Scry.State.mk c.db st.steps st.next st.stepIdx, m.1, Bool.or m.2 c.changed)
 
 -- ## The plan interpreter
 
@@ -267,11 +267,11 @@ partial def Scry.Plan.canonLoop {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSor
     let d := Scry.initialDelta st strat s;
     let m := Scry.Plan.mergeTuples p sorts d.tuples;
     let c := Scry.Plan.canonDb p m.1 st.db;
-    let st1 := Scry.State.mk c.db st.nodes st.next st.stepIdx;
+    let st1 := Scry.State.mk c.db st.steps st.next st.stepIdx;
     let r := Scry.evalRound p.prog strat s d p.prog.rules 0 (Scry.Round.empty st1);
     let m2 := Scry.Plan.mergeTuples p m.1 r.newTuples;
     let c2 := Scry.Plan.canonDb p m2.1 r.st.db;
-    let st2 := Scry.State.mk c2.db r.st.nodes r.st.next r.st.stepIdx;
+    let st2 := Scry.State.mk c2.db r.st.steps r.st.next r.st.stepIdx;
     let changed := Bool.or m.2 (Bool.or c.changed
       (Bool.or m2.2 (Bool.or c2.changed (Bool.not (List.isEmpty r.newTuples)))));
     if changed then Scry.Plan.canonLoop p m2.1 strat s st2 k else (st2, m2.1)
@@ -284,7 +284,7 @@ def Scry.Plan.evalStratum {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
   let d0 := Scry.initialDelta st strat s;
   let m0 := Scry.Plan.mergeTuples p sorts d0.tuples;
   let c0 := Scry.Plan.canonDb p m0.1 st.db;
-  let st0 := Scry.State.mk c0.db st.nodes st.next st.stepIdx;
+  let st0 := Scry.State.mk c0.db st.steps st.next st.stepIdx;
   let st1 := Scry.evalNonRecursive p.prog strat s p.prog.rules 0 st0;
   Scry.Plan.canonLoop p m0.1 strat s st1 fuel
 
@@ -395,14 +395,14 @@ partial def Scry.Plan.canonLoopAn {L : Type} (p : Scry.Plan L) (sorts : Scry.EqS
     let d := Scry.initialDelta st strat s;
     let m := Scry.Plan.mergeTuples p sorts d.tuples;
     let c := Scry.Plan.canonDb p m.1 st.db;
-    let st0 := Scry.State.mk c.db st.nodes st.next st.stepIdx;
+    let st0 := Scry.State.mk c.db st.steps st.next st.stepIdx;
     let r := Scry.evalRound p.prog strat s d p.prog.rules 0 (Scry.Round.empty st0);
     let m2 := Scry.Plan.mergeTuples p m.1 r.newTuples;
     let c2 := Scry.Plan.canonDb p m2.1 r.st.db;
-    let st1 := Scry.State.mk c2.db r.st.nodes r.st.next r.st.stepIdx;
+    let st1 := Scry.State.mk c2.db r.st.steps r.st.next r.st.stepIdx;
     let rw := Scry.Plan.applyRewrites st1 m2.1 rewrites;
     let c3 := Scry.Plan.canonDb p rw.1 st1.db;
-    let st2 := Scry.State.mk c3.db st1.nodes st1.next st1.stepIdx;
+    let st2 := Scry.State.mk c3.db st1.steps st1.next st1.stepIdx;
     let changed := Bool.or m.2 (Bool.or c.changed (Bool.or m2.2 (Bool.or c2.changed
       (Bool.or rw.2 (Bool.or c3.changed (Bool.not (List.isEmpty r.newTuples)))))));
     if changed then Scry.Plan.canonLoopAn p rw.1 strat s st2 k rewrites
@@ -416,7 +416,7 @@ def Scry.Plan.evalAnStratum {L : Type} (p : Scry.Plan L) (sorts : Scry.EqSorts)
   let d0 := Scry.initialDelta st strat s;
   let m0 := Scry.Plan.mergeTuples p sorts d0.tuples;
   let c0 := Scry.Plan.canonDb p m0.1 st.db;
-  let st0 := Scry.State.mk c0.db st.nodes st.next st.stepIdx;
+  let st0 := Scry.State.mk c0.db st.steps st.next st.stepIdx;
   let st1 := Scry.evalNonRecursive p.prog strat s p.prog.rules 0 st0;
   Scry.Plan.canonLoopAn p m0.1 strat s st1 fuel rewrites
 

@@ -2602,61 +2602,79 @@ end
 -- it; `false` (the default) keeps the inert-only rule. (`g.regularity := .full` in
 -- `Conv.lean`; `stripCast` reads it.)
 inductive TCtx where
-  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Bool)
+  | mk (env : Env) (types : Env) (lvl : Nat) (erased : Bool) (pm : Nat) (reg : Bool) (witness : Bool)
+       -- the partial definition whose body is being checked (`Ctx.fixpoint` in
+       -- `Check.lean`): a recursive call to it that consumes a linear parameter may have
+       -- its result used at ω when the result contains no linear content ("consumed but
+       -- not contained", `fixCallSafe`)
+       (fix : Option String)
 def TCtx.lvl : TCtx → Nat
-  | .mk _ _ l _ _ _ => l
+  | .mk _ _ l _ _ _ _ _ => l
 def TCtx.env : TCtx → Env
-  | .mk e _ _ _ _ _ => e
+  | .mk e _ _ _ _ _ _ _ => e
 def TCtx.types : TCtx → Env
-  | .mk _ t _ _ _ _ => t
+  | .mk _ t _ _ _ _ _ _ => t
 def TCtx.erased : TCtx → Bool
-  | .mk _ _ _ x _ _ => x
+  | .mk _ _ _ x _ _ _ _ => x
 def TCtx.pm : TCtx → Nat
-  | .mk _ _ _ _ m _ => m
+  | .mk _ _ _ _ m _ _ _ => m
 def TCtx.reg : TCtx → Bool
-  | .mk _ _ _ _ _ r => r
+  | .mk _ _ _ _ _ r _ _ => r
+-- checking a partial definition's witness (`checkPartial`): evidence that its type is
+-- inhabited, never run, so its usages are not enforced (it may ignore a linear argument).
+-- The definition's body, the code that runs, is checked strictly.
+def TCtx.witness : TCtx → Bool
+  | .mk _ _ _ _ _ _ w _ => w
+def TCtx.fix : TCtx → Option String
+  | .mk _ _ _ _ _ _ _ f => f
+-- the body of the partial definition `f` is being checked
+def TCtx.withFix (c : TCtx) (f : String) : TCtx := match c with
+  | .mk e t l x m r w _ => .mk e t l x m r w (.some f)
 def TCtx.erase (c : TCtx) : TCtx := match c with
-  | .mk e t l _ m r => .mk e t l .true m r
+  | .mk e t l _ m r w f => .mk e t l .true m r w f
 -- (P2) inside a proof
 def TCtx.inProof (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r => match Nat.beq m 3 with
+  | .mk e t l x m r w f => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
       -- (the sorts pass, below the kernel: inside a proof, still placing no markers)
-      | .true => .mk e t l x 5 r
-      | .false => .mk e t l x 1 r
+      | .true => .mk e t l x 5 r w f
+      | .false => .mk e t l x 1 r w f
 -- (P2) is `c` inside a proof (`1`; `5` is the same in the sorts pass, which places no
 -- markers: `4` relevant, `5` inside a proof)?
 def inProofMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
+  | .mk _ _ _ _ m _ _ _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
 def sortsMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ => Nat.lt 3 m
+  | .mk _ _ _ _ m _ _ _ => Nat.lt 3 m
 -- (tests only) no marker requirement anywhere below, and proofs evaluated: the
 -- well-typedness pre-check of the differential tests, so that a term which needs markers
 -- inside a proof reaches the marking passes (review F2; `lazyProofs := false` in Lean)
 def TCtx.noMarkers (c : TCtx) : TCtx := match c with
-  | .mk e t l x _ r => .mk e t l x 3 r
+  | .mk e t l x _ r w f => .mk e t l x 3 r w f
 -- (P2) at the term a marker wraps, and below it
 def TCtx.atMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r => match m with
-    | .zero => .mk e t l x 2 r
+  | .mk e t l x m r w f => match m with
+    | .zero => .mk e t l x 2 r w f
     | _ => c
 def TCtx.belowMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r => match Nat.beq m 2 with
-    | .true => .mk e t l x 0 r
+  | .mk e t l x m r w f => match Nat.beq m 2 with
+    | .true => .mk e t l x 0 r w f
     | .false => c
 def erasedIf (q : Q) (c : TCtx) : TCtx := match q with
   | .qz => TCtx.erase c
   | _ => c
 -- a new variable of type `ty`
 def TCtx.bind (c : TCtx) (ty : Val) : TCtx := match c with
-  | .mk e t l x m r => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r
+  | .mk e t l x m r w f => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r w f
 -- a new variable defined as `v`
 def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
-  | .mk e t l x m r => .mk (.cons v e) (.cons ty t) (l + 1) x m r
+  | .mk e t l x m r w f => .mk (.cons v e) (.cons ty t) (l + 1) x m r w f
 -- (PF-C) the same context with regularity at every type on
 def TCtx.fullReg (c : TCtx) : TCtx := match c with
-  | .mk e t l x m _ => .mk e t l x m .true
+  | .mk e t l x m _ w f => .mk e t l x m .true w f
+-- the witness-checking context (`addPartialDecl` in `Check.lean`)
+def TCtx.wit (c : TCtx) : TCtx := match c with
+  | .mk e t l x m r _ f => .mk e t l x m r .true f
 -- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
 -- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
 -- every type; so while they are compared, a stuck cast is its argument at *any* type, not
@@ -3500,11 +3518,11 @@ def isProofTy (c : TCtx) (ty : Val) : Bool := match kernelLazyProofs with
     | .some l => lvlIsZero l
     | .none => .false
 def TCtx.relevant (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r => match Nat.beq m 3 with
+  | .mk e t l x m r w f => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
-      | .true => .mk e t l x 4 r
-      | .false => .mk e t l x 0 r
+      | .true => .mk e t l x 4 r w f
+      | .false => .mk e t l x 0 r w f
 def modeAt (c : TCtx) (ty : Val) : TCtx := match inProofMode c with
   | .false => c
   | .true => match sortOf c ty with
@@ -3607,6 +3625,227 @@ end
 def unguardedDescription : String :=
   "unguarded recursive description: every recursive field (Desc.rec/Desc.hrec) must occur under a non-recursive (Desc.arg) field; mu X. X is not an inductive type"
 
+-- The linear fixpoint rule (`fixCallSafe` in `Check.lean`, "consumed but not contained").
+-- A term's free variables shifted up by `k` (those at or above `cut`), as `Term.lift`.
+mutual
+partial def liftTm (k cut : Nat) : Tm → Tm
+  | .var i => match Nat.le cut i with
+    | .true => .var (i + k)
+    | .false => .var i
+  | .univ n => .univ n
+  | .prop => .prop
+  | .sortL l => .sortL l
+  | .pi q i j a b => .pi q i j (liftTm k cut a) (liftTm k (cut + 1) b)
+  | .lam b => .lam (liftTm k (cut + 1) b)
+  | .app f a => .app (liftTm k cut f) (liftTm k cut a)
+  | .letE ty v b => .letE (liftTm k cut ty) (liftTm k cut v) (liftTm k (cut + 1) b)
+  | .ann t ty => .ann (liftTm k cut t) (liftTm k cut ty)
+  | .letq q ty v b => .letq q (liftTm k cut ty) (liftTm k cut v) (liftTm k (cut + 1) b)
+  | .sigma q i j a b => .sigma q i j (liftTm k cut a) (liftTm k (cut + 1) b)
+  | .pair a b => .pair (liftTm k cut a) (liftTm k cut b)
+  | .fst p => .fst (liftTm k cut p)
+  | .snd p => .snd (liftTm k cut p)
+  | .unit l => .unit l
+  | .star => .star
+  | .empty l => .empty l
+  | .ptrue => .ptrue
+  | .pfalse => .pfalse
+  | .exfalso m t => .exfalso (liftTm k cut m) (liftTm k cut t)
+  | .letUnit u b => .letUnit (liftTm k cut u) (liftTm k cut b)
+  | .split q s m b => .split q (liftTm k cut s) (liftTm k (cut + 1) m) (liftTm k (cut + 2) b)
+  | .enum n => .enum n
+  | .tag n i => .tag n i
+  | .ecase m s bs => .ecase (liftTm k (cut + 1) m) (liftTm k cut s) (liftTms k cut bs)
+  | .eq A a b => .eq (liftTm k cut A) (liftTm k cut a) (liftTm k cut b)
+  | .eqTy A B => .eqTy (liftTm k cut A) (liftTm k cut B)
+  | .eqRefl A a => .eqRefl (liftTm k cut A) (liftTm k cut a)
+  | .tyRefl X => .tyRefl (liftTm k cut X)
+  | .coe A B e t => .coe (liftTm k cut A) (liftTm k cut B) (liftTm k cut e) (liftTm k cut t)
+  | .subst A a P p b e =>
+    .subst (liftTm k cut A) (liftTm k cut a) (liftTm k cut P) (liftTm k cut p) (liftTm k cut b) (liftTm k cut e)
+  | .qty => .qty
+  | .qlit q => .qlit q
+  | .sigmaQ q i j a b => .sigmaQ (liftTm k cut q) i j (liftTm k cut a) (liftTm k (cut + 1) b)
+  | .descr l I => .descr l (liftTm k cut I)
+  | .dret i => .dret (liftTm k cut i)
+  | .darg q S D => .darg (liftTm k cut q) (liftTm k cut S) (liftTm k cut D)
+  | .drec q j D => .drec (liftTm k cut q) (liftTm k cut j) (liftTm k cut D)
+  | .dhrec q H j D => .dhrec (liftTm k cut q) (liftTm k cut H) (liftTm k cut j) (liftTm k cut D)
+  | .delim v P mret marg mrec mhrec D =>
+    .delim v (liftTm k cut P) (liftTm k cut mret) (liftTm k cut marg) (liftTm k cut mrec) (liftTm k cut mhrec) (liftTm k cut D)
+  | .mu l I D i => .mu l (liftTm k cut I) (liftTm k cut D) (liftTm k cut i)
+  | .con x => .con (liftTm k cut x)
+  | .size => .size
+  | .szInf => .szInf
+  | .szSuc s => .szSuc (liftTm k cut s)
+  | .sizeLt s => .sizeLt (liftTm k cut s)
+  | .mus l I D i s => .mus l (liftTm k cut I) (liftTm k cut D) (liftTm k cut i) (liftTm k cut s)
+  | .sfix l I D v P f s i x =>
+    .sfix l (liftTm k cut I) (liftTm k cut D) v (liftTm k cut P) (liftTm k cut f) (liftTm k cut s) (liftTm k cut i) (liftTm k cut x)
+  | .scase l q I D v P m s i x =>
+    .scase l q (liftTm k cut I) (liftTm k cut D) v (liftTm k cut P) (liftTm k cut m) (liftTm k cut s) (liftTm k cut i) (liftTm k cut x)
+  | .nu l I D i s => .nu l (liftTm k cut I) (liftTm k cut D) (liftTm k cut i) (liftTm k cut s)
+  | .out x => .out (liftTm k cut x)
+  | .cocon x => .cocon (liftTm k cut x)
+  | .scofix l I D A f s i a =>
+    .scofix l (liftTm k cut I) (liftTm k cut D) (liftTm k cut A) (liftTm k cut f) (liftTm k cut s) (liftTm k cut i) (liftTm k cut a)
+  | .coit l I D S step i s =>
+    .coit l (liftTm k cut I) (liftTm k cut D) (liftTm k cut S) (liftTm k cut step) (liftTm k cut i) (liftTm k cut s)
+  | .ind l I D v P m i x =>
+    .ind l (liftTm k cut I) (liftTm k cut D) v (liftTm k cut P) (liftTm k cut m) (liftTm k cut i) (liftTm k cut x)
+  -- (a global's value and type are closed; so are literals and their registrations)
+  | .const n ps ls v ty => .const n ps ls v ty
+  | .axiomC n ty => .axiomC n ty
+  | .ulift lv lw A => .ulift lv lw (liftTm k cut A)
+  | .up a => .up (liftTm k cut a)
+  | .down t => .down (liftTm k cut t)
+  | .prf l t => .prf l (liftTm k cut t)
+  | .nlit n nb => .nlit n nb
+  | .natFn op nb d => .natFn op nb d
+partial def liftTms (k cut : Nat) : Tms → Tms
+  | .tnil => .tnil
+  | .tcons t rest => .tcons (liftTm k cut t) (liftTms k cut rest)
+end
+
+-- does `t` contain `target` as a syntactic subterm? (`termContains`: the target is a
+-- top-level term, lifted past the binders crossed)
+mutual
+partial def tmContains (target : Tm) (t : Tm) : Bool :=
+  Bool.or (tmEq target t) (tmContainsChildren target t)
+partial def tmContainsTms (target : Tm) : Tms → Bool
+  | .tnil => .false
+  | .tcons t rest => Bool.or (tmContains target t) (tmContainsTms target rest)
+partial def tmContainsChildren (target : Tm) : Tm → Bool
+  | .var _ => .false
+  | .univ _ => .false
+  | .prop => .false
+  | .sortL _ => .false
+  | .pi q _ _ a b => Bool.or (tmContains target a) (tmContains (liftTm 1 0 target) b)
+  | .lam b => tmContains (liftTm 1 0 target) b
+  | .app f a => Bool.or (tmContains target f) (tmContains target a)
+  | .letE ty v b => Bool.or (tmContains target ty) (Bool.or (tmContains target v) (tmContains (liftTm 1 0 target) b))
+  | .ann t ty => Bool.or (tmContains target t) (tmContains target ty)
+  | .letq _ ty v b => Bool.or (tmContains target ty) (Bool.or (tmContains target v) (tmContains (liftTm 1 0 target) b))
+  | .sigma q _ _ a b => Bool.or (tmContains target a) (tmContains (liftTm 1 0 target) b)
+  | .pair a b => Bool.or (tmContains target a) (tmContains target b)
+  | .fst p => tmContains target p
+  | .snd p => tmContains target p
+  | .unit _ => .false
+  | .star => .false
+  | .empty _ => .false
+  | .ptrue => .false
+  | .pfalse => .false
+  | .exfalso m t => Bool.or (tmContains target m) (tmContains target t)
+  | .letUnit u b => Bool.or (tmContains target u) (tmContains target b)
+  | .split _ s m b =>
+    Bool.or (tmContains target s) (Bool.or (tmContains (liftTm 1 0 target) m) (tmContains (liftTm 2 0 target) b))
+  | .enum _ => .false
+  | .tag _ _ => .false
+  | .ecase m s bs => Bool.or (tmContains (liftTm 1 0 target) m) (Bool.or (tmContains target s) (tmContainsTms target bs))
+  | .eq A a b => Bool.or (tmContains target A) (Bool.or (tmContains target a) (tmContains target b))
+  | .eqTy A B => Bool.or (tmContains target A) (tmContains target B)
+  | .eqRefl A a => Bool.or (tmContains target A) (tmContains target a)
+  | .tyRefl X => tmContains target X
+  | .coe A B e t => Bool.or (tmContains target A) (Bool.or (tmContains target B) (Bool.or (tmContains target e) (tmContains target t)))
+  | .subst A a P p b e => Bool.or (tmContains target A) (Bool.or (tmContains target a) (Bool.or (tmContains target P) (Bool.or (tmContains target p) (Bool.or (tmContains target b) (tmContains target e)))))
+  | .qty => .false
+  | .qlit _ => .false
+  | .sigmaQ q _ _ a b => Bool.or (tmContains target q) (Bool.or (tmContains target a) (tmContains (liftTm 1 0 target) b))
+  | .descr _ I => tmContains target I
+  | .dret i => tmContains target i
+  | .darg q S D => Bool.or (tmContains target q) (Bool.or (tmContains target S) (tmContains target D))
+  | .drec q j D => Bool.or (tmContains target q) (Bool.or (tmContains target j) (tmContains target D))
+  | .dhrec q H j D => Bool.or (tmContains target q) (Bool.or (tmContains target H) (Bool.or (tmContains target j) (tmContains target D)))
+  | .delim _ P mret marg mrec mhrec D => Bool.or (tmContains target P) (Bool.or (tmContains target mret) (Bool.or (tmContains target marg) (Bool.or (tmContains target mrec) (Bool.or (tmContains target mhrec) (tmContains target D)))))
+  | .mu _ I D i => Bool.or (tmContains target I) (Bool.or (tmContains target D) (tmContains target i))
+  | .con x => tmContains target x
+  | .size => .false
+  | .szInf => .false
+  | .szSuc s => tmContains target s
+  | .sizeLt s => tmContains target s
+  | .mus _ I D i s => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target i) (tmContains target s)))
+  | .sfix _ I D _ P f s i x => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target P) (Bool.or (tmContains target f) (Bool.or (tmContains target s) (Bool.or (tmContains target i) (tmContains target x))))))
+  | .scase _ _ I D _ P m s i x => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target P) (Bool.or (tmContains target m) (Bool.or (tmContains target s) (Bool.or (tmContains target i) (tmContains target x))))))
+  | .nu _ I D i s => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target i) (tmContains target s)))
+  | .out x => tmContains target x
+  | .cocon x => tmContains target x
+  | .scofix _ I D A f s i a => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target A) (Bool.or (tmContains target f) (Bool.or (tmContains target s) (Bool.or (tmContains target i) (tmContains target a))))))
+  | .coit _ I D S step i s => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target S) (Bool.or (tmContains target step) (Bool.or (tmContains target i) (tmContains target s)))))
+  | .ind _ I D _ P m i x => Bool.or (tmContains target I) (Bool.or (tmContains target D) (Bool.or (tmContains target P) (Bool.or (tmContains target m) (Bool.or (tmContains target i) (tmContains target x)))))
+  | .const _ _ _ _ _ => .false
+  | .axiomC _ _ => .false
+  | .ulift _ _ A => tmContains target A
+  | .up a => tmContains target a
+  | .down t => tmContains target t
+  | .prf _ t => tmContains target t
+  | .nlit _ _ => .false
+  | .natFn _ _ _ => .false
+end
+
+-- the head and arguments of an application spine
+def tmSpineGo : Tm → List Tm → Tm × List Tm
+  | .app f a, acc => tmSpineGo f (.cons a acc)
+  | t, acc => (t, acc)
+def tmSpine (t : Tm) : Tm × List Tm := tmSpineGo (match t with | .ann inner _ => inner | t => t) .nil
+
+inductive FixCall where
+  | mk (args : List Tm) (tys : List Val) (rest : Val)
+-- peel a call's arguments off its `Π` type, collecting the `1`-quantity positions
+partial def peelFix (c : TCtx) (ty : Val) (args : List Tm) (as : List Tm) (tys : List Val) : Option FixCall :=
+  match whnf ty, args with
+  | .vpi q _ _ dom env cod, .cons a rest =>
+    let lin := qEq q .qo;
+    let as' := match lin with | .true => List.append as (.cons a .nil) | .false => as;
+    let tys' := match lin with | .true => List.append tys (.cons dom .nil) | .false => tys;
+    peelFix c (instC env (eval (TCtx.env c) a) cod) rest as' tys'
+  | _, .nil => .some (.mk as tys (whnf ty))
+  | _, _ => .none
+
+def allOfTm (f : Tm → Bool) : List Tm → Bool
+  | .nil => .true
+  | .cons a rest => Bool.and (f a) (allOfTm f rest)
+def allOfVal (f : Val → Bool) : List Val → Bool
+  | .nil => .true
+  | .cons a rest => Bool.and (f a) (allOfVal f rest)
+
+-- **the linear fixpoint rule** ("consumed but not contained"): a saturated recursive call
+-- of the definition whose body is being checked (`TCtx.fix`) that consumes a `1`-quantity
+-- argument may have its result used at ω when the result type contains neither that
+-- argument nor its type. The test is syntactic (`tmContains`), so it never unfolds a
+-- definition; a partially applied call is refused, since its closure may capture the
+-- linear value.
+def fixCallSafe (c : TCtx) (t : Tm) (ty : Val) : Bool := match TCtx.fix c with
+  | .none => .false
+  | .some fn => match tmSpine t with
+    | (h, args) => match h with
+      | .const n ps ls _ tyD => match kStrEq n fn with
+        | .false => .false
+        | .true => match peelFix c (eval .nil (substIfAny ps ls tyD)) args .nil .nil with
+          | .none => .false
+          | .some (.mk lins linTys rest) => match lins with
+            | .nil => .false
+            | .cons _ _ => match whnf rest with
+              | .vpi _ _ _ _ _ _ => .false
+              | _ => match whnf ty with
+                | .vpi _ _ _ _ _ _ => .false
+                | _ =>
+                  let lvl := TCtx.lvl c;
+                  let res := quote lvl ty;
+                  Bool.and (allOfTm (fun a => Bool.not (tmContains (quote lvl (eval (TCtx.env c) a)) res)) lins)
+                    (allOfVal (fun A => Bool.not (tmContains (quote lvl A) res)) linTys)
+      | _ => .false
+
+-- scale a checked term's usage by `q`, except that a linear fixpoint call whose result
+-- type is "consumed but not contained" is charged once at ω: the call is evaluated once
+-- even when its result is copied. `q = 0` still scales to 0, so a dropped call is rejected.
+def scaleUsage (c : TCtx) (q : Q) (t : Tm) (ty : Val) (u : List Q) : List Q :=
+  match qEq q .qw with
+  | .true => match fixCallSafe c t ty with
+    | .true => u
+    | .false => uScale q u
+  | .false => uScale q u
+
+
 mutual
 -- (given) `infer`, with the proof marker's requirement
 def infer (c : TCtx) (t : Tm) : TyRes := match inferW (TCtx.belowMarked c) t with
@@ -3656,7 +3895,7 @@ def inferW : TCtx → Tm → TyRes
         -- nested n deep would evaluate the rest at every level)
         | .ok _ ua => .ok (eval (.cons (match usesVar 0 cod with
             | .true => evalAt c a dom
-            | .false => .vtt) env) cod) (uAdd uf (uScale q ua))
+            | .false => .vtt) env) cod) (uAdd uf (scaleUsage c q a dom ua))
         | r => r
       | ty => .err (String.append "not a function: its type is " (showVal c ty))
     | r => r
@@ -3722,7 +3961,7 @@ def inferW : TCtx → Tm → TyRes
           match check (TCtx.bind (TCtx.bind c A) byTy) b (eval (.cons (.vpair vx vy) (TCtx.env c)) m) with
           | .ok _ ub => match popUsageAt (TCtx.bind c A) q byTy ub with
             | .some ub' => match popUsageAt c (qmul q p) A ub' with
-              | .some ub'' => .ok (eval (.cons (evalAt c s sty) (TCtx.env c)) m) (uAdd (uScale q us) ub'')
+              | .some ub'' => .ok (eval (.cons (evalAt c s sty) (TCtx.env c)) m) (uAdd (scaleUsage c q s sty us) ub'')
               | .none => .err "the split's first component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
             | .none => .err "the split's second component's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
           | r => r
@@ -3887,8 +4126,9 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ um => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                match check (erasedIf q c) x (.vmu l vI vD vi vs) with
-                | .ok _ ux => .ok (vapp (vapp vP vi) (eval (TCtx.env c) x)) (uAdd um (uScale q ux))
+                let xt : Val := .vmu l vI vD vi vs;
+                match check (erasedIf q c) x xt with
+                | .ok _ ux => .ok (vapp (vapp vP vi) (eval (TCtx.env c) x)) (uAdd um (scaleUsage c q x xt ux))
                 | r => r
               | r => r
             | r => r
@@ -4105,20 +4345,6 @@ def letIn : TCtx → Q → Tm → Tm → Tm → TyRes
           | r => r
         | r => r
     | r => r
--- `let x :q ty := v; b` against a type: the body is checked against it too
-def checkLet : TCtx → Q → Tm → Tm → Tm → Val → TyRes
-  | c, q, ty, v, b, T => match inferUniv c ty with
-    | .ok _ _ =>
-      let tyv := eval (TCtx.env c) ty;
-      -- (a `let` at 0 never computes its value: an erased position)
-      match check (erasedIf q c) v tyv with
-      | .ok _ uv => match check (TCtx.define c (evalAt c v tyv) tyv) b T with
-        | .ok _ ub => match popUsageAt c q tyv ub with
-          | .some ub' => .ok T (uAdd (uScale q uv) ub')
-          | .none => .err "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
-        | r => r
-      | r => r
-    | r => r
 -- (given) `check` matches on the type's shape (`whnf`), and answers with the type it got
 -- (and with the proof marker's requirement)
 def check (c0 : TCtx) (t : Tm) (ty : Val) : TyRes := match isPropTyU c0 ty with
@@ -4136,12 +4362,18 @@ def isPropTyU (c : TCtx) (ty : Val) : Bool := match sortOf c ty with
   | .some l => lvlIsZero l
   | .none => .false
 -- leave a binder of quantity `q` and type `ty`: a binder whose type is a proposition takes
--- any usage (its variable is a proof, erased and never run; `Ctx.popUsageAt`)
-def popUsageAt (c : TCtx) (q : Q) (ty : Val) (u : List Q) : Option (List Q) := match isPropTyU c ty with
-  | .true => (match u with
+-- any usage (its variable is a proof, erased and never run; `Ctx.popUsageAt`), and a
+-- partial definition's witness (`TCtx.witness`) never runs either, so its usages are not
+-- checked (it may ignore a linear argument; the body that runs is checked strictly)
+def popUsageAt (c : TCtx) (q : Q) (ty : Val) (u : List Q) : Option (List Q) := match TCtx.witness c with
+  | .true => match u with
     | .nil => .some .nil
-    | .cons _ rest => .some rest)
-  | .false => popUsage q u
+    | .cons _ rest => .some rest
+  | .false => match isPropTyU c ty with
+    | .true => (match u with
+      | .nil => .some .nil
+      | .cons _ rest => .some rest)
+    | .false => popUsage q u
 -- inside a proof, a sort that can't be computed is an error as in relevant mode
 -- (`requireMarker`), for a term the requirement would apply to (review F4)
 def unknownSortInProof (c : TCtx) (t : Tm) (ty : Val) : Option String := match Nat.beq (TCtx.pm c) 1 with
@@ -4170,6 +4402,21 @@ def checkUnit (c : TCtx) (u : Tm) : TyRes := match u with
       | .vunit n => .ok (.vunit n) uu
       | ty' => .err (String.append "let () := u needs u of type Unit, not " (showVal c ty'))
     | r => r
+-- `let x :q ty := v; b` against a type: the body is checked against it too
+def checkLet : TCtx → Q → Tm → Tm → Tm → Val → TyRes
+  | c, q, ty, v, b, T => match inferUniv c ty with
+    | .ok _ _ =>
+      let tyv := eval (TCtx.env c) ty;
+      -- (a `let` at 0 never computes its value: an erased position)
+      match check (erasedIf q c) v tyv with
+      | .ok _ uv => match check (TCtx.define c (evalAt c v tyv) tyv) b T with
+        | .ok _ ub => match popUsageAt c q tyv ub with
+          | .some ub' => .ok T (uAdd (scaleUsage c q v tyv uv) ub')
+          | .none => .err "the let-bound variable's usage does not fit its quantity (used too often, or a variable at quantity 1 not used)"
+        | r => r
+      | r => r
+    | r => r
+
 def checkW : TCtx → Tm → Val → TyRes
   --<sol
   -- (P2) a marked term: the level must be the sort of the type
@@ -4196,7 +4443,7 @@ def checkW : TCtx → Tm → Val → TyRes
     | r => r
   | c, .pair a b, .vsigma q i j ta env tb => match check (erasedIf q c) a ta with
     | .ok _ ua => match check c b (eval (.cons (evalAt c a ta) env) tb) with
-      | .ok _ ub => .ok (.vsigma q i j ta env tb) (uAdd (uScale q ua) ub)
+      | .ok _ ub => .ok (.vsigma q i j ta env tb) (uAdd (scaleUsage c q a ta ua) ub)
       | r => r
     | r => r
   -- (21x) at a quantity variable: the first part's usage counts ω times (at least as much
@@ -4204,7 +4451,7 @@ def checkW : TCtx → Tm → Val → TyRes
   -- allows (a quantity that is another stuck term is rejected there)
   | c, .pair a b, .vne (.hvar x) (.ssigq .snil i j ta env tb) => match check c a ta with
     | .ok _ ua => match check c b (eval (.cons (eval (TCtx.env c) a) env) tb) with
-      | .ok _ ub => .ok (.vne (.hvar x) (.ssigq .snil i j ta env tb)) (uAdd (uScale .qw ua) ub)
+      | .ok _ ub => .ok (.vne (.hvar x) (.ssigq .snil i j ta env tb)) (uAdd (scaleUsage c .qw a ta ua) ub)
       | r => r
     | r => r
   | c, .dret i, .vdesc l I => match check c i I with
@@ -4317,7 +4564,7 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0 .false
+def empty : TCtx := .mk .nil .nil 0 .false 0 .false .false .none
 
 -- does the term have a level the predicate rejects, in any level position? (the
 -- declaration check uses it for "every level parameter is declared, and none is left
@@ -4433,7 +4680,7 @@ def checkDeclParams (ps : List String) (ty : Tm) (value : Option Tm) : TyRes :=
 -- witness, a term of that type, checks (erased: it is evidence, never run). The
 -- definition stays opaque, an axiom whose type is inhabited.
 def checkPartial (ty w : Tm) : TyRes := match inferUniv empty ty with
-  | .ok _ _ => check (TCtx.erase empty) w (eval .nil ty)
+  | .ok _ _ => check (TCtx.wit (TCtx.erase empty)) w (eval .nil ty)
   | r => r
 
 -- as `checkPartial`, with the declaration's level parameters checked too
@@ -4939,7 +5186,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false .false .none
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t
@@ -4957,7 +5204,7 @@ def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ r => markTy (.mk e ts l x 4 r) t
+    | .mk e ts l x _ r w f => markTy (.mk e ts l x 4 r w f) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v
@@ -4982,25 +5229,31 @@ def markTop (v ty : Tm) : Tm := match v with
   | .prf _ _ => v
   | _ => match markDecide empty v (eval .nil ty) with
     | .mk w _ => wrapWith w v
-def checkMarking (v0 ty : Tm) : Checked :=
+def checkMarkingFix (f : Option String) (v0 ty : Tm) : Checked :=
+  -- (`f`: the partial definition whose body this is, so the linear fixpoint rule applies
+  -- to its recursive calls; `TCtx.fix`)
+  let c0 := match f with
+    | .none => empty
+    | .some x => TCtx.withFix empty x;
   -- (the sorts first: every hole filled, `sortsClosed`)
   let v := sortsClosed v0 ty;
-  match check empty v (eval .nil ty) with
+  match check c0 v (eval .nil ty) with
   | .ok _ _ => .good v
   | .err m => match isUnmarkedErr m with
     | .false => .bad m
     | .true =>
       -- first a marker on the term itself only (enough for most proofs), then the pass
       let v1 := markTop v ty;
-      match check empty v1 (eval .nil ty) with
+      match check c0 v1 (eval .nil ty) with
       | .ok _ _ => .good v1
       | .err m1 => match isUnmarkedErr m1 with
         | .false => .bad m1
         | .true =>
           let v' := markClosed v ty;
-          match check empty v' (eval .nil ty) with
+          match check c0 v' (eval .nil ty) with
           | .ok _ _ => .good v'
           | .err m' => .bad m'
+def checkMarking (v0 ty : Tm) : Checked := checkMarkingFix .none v0 ty
 
 -- `checkMarking` for a declaration: its level parameters must be declared (and every
 -- level metavariable solved), then its type is a type and its marked value has it
@@ -5010,6 +5263,13 @@ def checkMarkingParams (ps : List String) (v0 ty : Tm) : Checked :=
   | .false => match checkDeclParams ps ty .none with
     | .err m => .bad m
     | .ok _ _ => checkMarking v0 ty
+-- the same for a partial definition's body: `f` is the linear fixpoint (`TCtx.fix`)
+def checkMarkingParamsFix (f : String) (ps : List String) (v0 ty : Tm) : Checked :=
+  match Bool.or (tmHasLvlMVar v0) (tmHasLvlMVar ty) with
+  | .true => .bad "could not infer a universe level; add a universe parameter or annotation"
+  | .false => match checkDeclParams ps ty .none with
+    | .err m => .bad m
+    | .ok _ _ => checkMarkingFix (.some f) v0 ty
 
 -- **(E-K) The frontend's hook for numbers.** The frontend makes literals only once the
 -- Prelude's `builtin` registrations reach it (lane P0-RPREL); until then nothing below is

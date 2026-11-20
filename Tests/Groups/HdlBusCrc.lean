@@ -23,6 +23,13 @@ def hdlBusCrcGroup : Group where
            "arb fast: value = simulate = simFast yes, grants 2 1 2 1 2 1 2 1\n" ++
            "arb hold: value = simulate = simFast yes, grants 4 4 4 4 3 4\n" ++
            "route: value = simulate = simFast yes, errs 0 0 1 1, forwarded 1 1 0 0\n") },
+    { name := "Hdl.Crc.protoC: the line-framed CRC service extracted from the board design: one outstanding line, host model, no queueing", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-crc-link.wiz")
+          ("replies 70 52 10 52 53 10, host model yes, lines 2\n" ++
+           "early newline dropped yes, lines 2\n" ++
+           "ready = not valid yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
     { name := "Hdl.Crc: CRC-8/SMBUS hardware = specification on 65536 inputs; known answer; stream simulation", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-crc.wiz")
           ("crc-8 step = spec: 65536 of 65536 inputs\n" ++

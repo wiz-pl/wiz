@@ -104,6 +104,26 @@ def Scry.rtMStore : Nat := 11
 def Scry.rtMLoad : Nat := 12
 def Scry.rtMTainted : Nat := 13
 
+-- Prover EDB relations (the guards/bounds slice). The taint rules above never read
+-- them: `Scry.Bounds.boundsFactsOfFunc` fills them from the CFG, the points-to
+-- capacities and the copy shapes, and `Scry.Prover.checkCut` reads them. They are in
+-- this table because it is the one place that fixes a relation's number and columns.
+--
+-- `guard (point, var, hi, target)` — on the edge from `point` to `target`, `var <= hi`.
+-- `use (point, var, loc, cap, kind, const)` — a memory access at `point` uses `var` as
+--   an index/length into location `loc`, which holds `cap` cells; `kind` is one of the
+--   `Scry.use*` numbers; `const` is `0` for "not a known constant" and `k+1` for the
+--   constant `k`.
+-- `before (node, usePoint)` — `node` dominates `usePoint` in the CFG.
+def Scry.rtGuard : Nat := 14
+def Scry.rtUse : Nat := 15
+def Scry.rtBefore : Nat := 16
+
+def Scry.useIndexWrite : Nat := 0
+def Scry.useIndexRead : Nat := 1
+def Scry.useCopyWrite : Nat := 2
+def Scry.useCopyRead : Nat := 3
+
 -- ## The plan for one function
 
 /-- A sink occurrence with the rule that owns it: `node` is the call point, `arg` the
@@ -149,6 +169,9 @@ inductive Scry.MemWarnKind where
   /-- A load or store through a pointer that may be null on some path (S5's nullness
   alarm, wired through `Scry.Nullness`). -/
   | nullDereference
+  /-- The rule pack or the analysis registry asks for something this build cannot run
+  (an unknown `check`, or a registered analysis no check can select). -/
+  | registry
 
 def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownMemory => "unknown-memory"
@@ -156,6 +179,7 @@ def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
   | .nullDereference => "null-dereference"
+  | .registry => "registry"
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/
@@ -827,7 +851,7 @@ def Scry.taintAtUse (info : Scry.FnInfo) (rows : List (Nat × Nat)) (u v : Nat) 
 
 def Scry.rtPremiseOfRel {L : Type} (st : Scry.State L) (step : Scry.ProofStep L)
     (rel : Nat) : Option Nat :=
-  List.find (fun id => match Scry.stepByIdL st.nodes id with
+  List.find (fun id => match Scry.stepByIdA st.steps id with
     | .none => .false
     | .some s => Nat.beq s.fact.rel rel) step.premises
 
@@ -856,7 +880,7 @@ function's summary: the path names that function's store and
 `Scry.Interproc.extendPath` expands it. -/
 partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.MemSeed)
     (id : Nat) : List Scry.ChainNode :=
-  match Scry.stepByIdL st.nodes id with
+  match Scry.stepByIdA st.steps id with
   | .none => .nil
   | .some step =>
     match Nat.beq step.fact.rel Scry.rtMTainted with
@@ -871,7 +895,7 @@ partial def Scry.rtChainKinds {L : Type} (st : Scry.State L) (seeds : List Scry.
         let fromTaint := Scry.rtChainKinds st seeds pid;
         let storeNode : Option (Nat × Nat) :=
           match Scry.rtPremiseOfRel st step Scry.rtFlow with
-          | .some fid => match Scry.stepByIdL st.nodes fid with
+          | .some fid => match Scry.stepByIdA st.steps fid with
             | .some fs => .some (Scry.rtRowNat fs.fact.args 1, Scry.rtRowNat fs.fact.args 2)
             | .none => .none
           | .none => .none;
@@ -929,7 +953,7 @@ def Scry.alertDef (st : Scry.State Nat) (sink arg : Nat) : Option (Nat × Nat) :
   | .some step =>
     match Scry.rtPremiseOfRel st step Scry.rtTainted with
     | .none => .none
-    | .some pid => match Scry.stepByIdL st.nodes pid with
+    | .some pid => match Scry.stepByIdA st.steps pid with
       | .none => .none
       | .some s => .some (Scry.rtRowNat s.fact.args 0, Scry.rtRowNat s.fact.args 1)
 

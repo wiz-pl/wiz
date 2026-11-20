@@ -6,6 +6,7 @@ import Scry.Models
 import Scry.Lifetime
 import Scry.Bounds
 import Scry.Nullness
+import Scry.Registry
 import Text
 import WordMap
 /-!
@@ -534,7 +535,9 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
-  let bounds := Scry.boundsCheckModels models p pt pack results;
+  -- The memory analyses are the registry's rows: the model pack is in the input record,
+  -- so this call is the only pipeline hook.
+  let analyses := Scry.runAnalyses Scry.analyses models pack p pt results;
   let nulls : List Scry.MemWarning := match withNull with
     | .true => Scry.nullDerefWarnings p
     | .false => .nil;
@@ -543,9 +546,8 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
         (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels models p r) results)))
-    (List.append bounds.warnings nulls));
-  let memoryFindings := List.append
-    (Scry.lifetimeFindingsWithModels models p pt pack) bounds.findings;
+    (List.append (List.append analyses.warnings nulls) (Scry.registryWarnings pack)));
+  let memoryFindings := analyses.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
 
 /-- The default-pack analysis with the historical signature. -/

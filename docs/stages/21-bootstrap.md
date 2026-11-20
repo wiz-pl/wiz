@@ -484,8 +484,9 @@ that prints one C file.
 * `--lib` or `--no-main`: the C has no `main`; every export's wrapper starts the runtime
   first if nothing has (`rt_ensure`: the collector, or the static objects of reference
   counting). The C compiler links it with the program that calls it (`cc main.c lib.c
-  -Iselfhost …`). Since this compiler prints C and links nothing, the two flags are the
-  same.
+  -Iselfhost …`). The one-shot mode prints C and links nothing, so there the two flags
+  are the same; the `build` subcommand's `--lib` also compiles the object and writes
+  `OUT.h` (21aj).
 * `--header`: instead of the C, the header of the exports, `exportHeader`'s text in
   `C.lean` (the `wiz_val` type, the handle functions and one prototype per export).
 * **Handles** (`rt.c`): `wiz_retain(v)` and `wiz_release(v)` take and give back a
@@ -1149,12 +1150,13 @@ they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel i
 A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
 pipeline measurement. The group is now split by what a case runs:
 
-* `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
+* `=selfhost` (**207 cases** at `integration/train7` `7365f7d1`; 208 with this branch's
+  A19 pin; 172 when this section was written) is the pipeline group. Every case runs the self-hosted
   compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
   (`selfhostChecker`/`selfhostCheckFile`/`selfhostOutput`) and compares what it says —
   against a hand-written expectation, or against the Lean frontend/kernel for the
   differential cases. This is the number to quote for parity.
-* `=selfhost-host` (**14 cases**) runs the Lean host only: the static `Tables.wiz`
+* `=selfhost-host` (**16 cases** at train7; 14 when written) runs the Lean host only: the static `Tables.wiz`
   regeneration check, the additive match (the self-hosted frontend has no additive
   eliminator, A21), in-process probes of the Lean kernel/`MTm` (their Wiz counterpart is
   the "and both kernels agree below" pipeline case), and the anti-vacuity case below.
@@ -1163,13 +1165,15 @@ The anti-vacuity case builds a stub that writes `input.wiz` to standard output a
 the compiler and the checker, runs every `=selfhost` case in a child process with
 `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
 passes. That is the audit's measurement turned into a test, so the pipeline group cannot
-regress into cases that do not reach the pipeline. Twenty-two cases that used to
+regress into cases that do not reach the pipeline. (At `integration/train7` the guard is
+**red**: one of 208 `=selfhost` cases, "Kernel.wiz quantity terms ...", passes with the
+stub, so that case does not reach the pipeline.) Twenty-two cases that used to
 compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
 type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.wiz`'s
 erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
 the cases that cannot — they call the Lean kernel API in process, need the additive
 eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
-`selfhost` shard split 6) selects both groups.
+`selfhost` shard split 3) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 
@@ -1315,6 +1319,38 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/Data/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21aj: build artifacts in the self-hosted driver (`-o`, `--lib`)
+
+The driver's `build` wrote the generated C at `-o` and nothing else; the Lean host's
+`wiz build` compiles that C. The D4 artifacts now match wherever the flags do:
+
+* **`build FILE -o OUT`** is still the C at OUT (the documented workflow: the caller
+  compiles it). `-o` is required in both (`unknown command: build FILE`, exit 2), and a
+  missing `-o` directory fails in both (exit 1, no artifact; the host's stderr is an
+  uncaught `IO.FS.writeFile` trace, the driver's one line).
+* **`build FILE -o OUT --lib`** matches the host's `Build.build`: the C is written at
+  `OUT`'s `.c` (the host's `withExtension`), the header of the exports at `OUT.h`
+  (`exportHeader`'s shape: `wiz_val`, the handle functions and one prototype per
+  export), and the object at `OUT` (`cc -O2 -w -c` with the toolchain's cflags; the
+  self-hosted runtime directory is an include root because the emitted C includes
+  `rt.c`). A library without an export is the host's error, word for word: a library
+  must export something (`export "name" f`), exit 1, no artifact.
+* **`--no-main`** still writes the C without a `main`; the host links an executable
+  without one on the platforms whose toolchain allows it (a gap, C9).
+* **`--header`** is the driver's own output mode (the header text at OUT, also the
+  one-shot `--header`); the host has no such flag, so the differential case asserts its
+  rejection instead.
+* There is no `--object`: the host's object output is `--lib` itself (an object and
+  `OUT.h`), so the driver follows that rather than adding a flag the host rejects.
+* The library's `.c` and `.h` texts are cached beside the `.c` entry (`--cache`), so a
+  warm `--lib` build re-elaborates nothing.
+
+**Tests** (`selfhost-cli-diff`): `--lib` on an exporting file (the exit code, streams
+and the three artifacts' shapes: an ELF `ET_REL` or Mach-O `MH_OBJECT`, the header's
+`wiz_val` and prototype, the C's export wrapper and no `main`; and a warm rebuild), a
+library without an export (the host's message), a missing `-o` and a missing `-o`
+directory, and `--header` as a driver extension.
 
 ## 21ah: the unit eliminator and `split` in the self-hosted toolchain (B7)
 

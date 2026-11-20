@@ -12,7 +12,9 @@
       "lib/Text.wiz",
       "lib/Deriving.wiz",
       "Wiz/Parser/*",
-      "scripts/GenSelfhostTables.lean"
+      "scripts/GenSelfhostTables.lean",
+      "Tests/Groups/SelfHost.lean",
+      "Tests/Elab.lean"
     ],
     "select": [
       "=prop-kernels",
@@ -21,7 +23,8 @@
       "=selfhost-host",
       "=audit-kernels",
       "=selfhost-macro"
-    ]
+    ],
+    "split-cases": true
   },
   {
     "name": "hdl",
@@ -92,6 +95,7 @@
       "=plot",
       "regions",
       "=reject",
+      "=scry-analysis",
       "=scry-wil",
       "=scry-c2wil",
       "=scry-csharp",

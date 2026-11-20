@@ -1,130 +1,37 @@
 import IO
-import Text
-import Web.Editor
+import Json
+import Web.EditorModel
 import Web.Loom
 import Web.Playground
 
 /-!
-# The playground page
+# The playground page's entry points
 
-`web/playground.html` as one Loom app: the header and its `#status`, the editor pane,
-the goals pane's container, the output pane (`Web.Playground`) and the footer with
-`#engine`. The page (`web/playground.js`) mounts it with `web/framework/driver.js`, which
-sends DOM events; the effects stay on the page's side (loading the engine, running it,
-the goals pane's language client), and report their results through the `wiz_loom_*`
-entry points at the bottom:
+The page itself is `Web.Playground.pageApp` (a `Loom.LiveApp Page PageMsg`): the header
+and its toolbar (the examples menu and Share/Save/Reset/Clear), `#status`/`#note`, the
+editor pane, the goals pane's container, the output pane and the footer with `#engine`.
+This file is only the C ABI: every exported function takes the state **by ownership**
+and returns the next one (stage 9g's rule, so the page passes its one reference and
+keeps the result), and a call that only reads the state (`wiz_loom_html` for the first
+paint, `wiz_loom_requests` for the pending requests) needs an extra `wiz_retain`, which
+`web/framework/driver.js` takes.
 
-  * `wiz_loom_init  : S` and `wiz_loom_html : S -> String` — the first paint;
-  * `wiz_loom_step  : S -> String -> IO S` — a DOM event (the driver's `event\nindex\n
-    payload`; the editor's `input` is a `Loom.LiveApp` message), patched with `js_patch`;
-  * `wiz_loom_show  : S -> String -> IO S` — a run's output text (classify, count);
-  * `wiz_loom_fail  : S -> String -> String -> IO S` — an engine failure's text and the
-    `#count` text the page uses instead (`exit code 3`);
-  * `wiz_loom_status`, `wiz_loom_enable`, `wiz_loom_engine`, `wiz_loom_text` — the page's
-    `setStatus(text, kind)`, the Run button's disabled state, the footer and the text.
+There are two runtime interfaces, not one per effect:
 
-Every entry point takes the state **by ownership** and returns the next one: the C ABI's
-exported function consumes its argument (stage 9g), so the page passes its one reference
-and keeps the result. A call that only reads the state (the driver's SSR, `wiz_loom_html`)
-takes an extra `wiz_retain` first — `web/framework/driver.js` does.
+  * `wiz_loom_effect (state) kind a b` — the page's results coming back in: a finished
+    run, a failure, a status pair, Run's state, the footer, the editor's text, the
+    initial fragment/draft, a note, an edited text, and `"ack" a` for a serviced request;
+  * `wiz_loom_requests (state)` — the effects the page must do, as JSON
+    (`[{"kind":"run","payload":""}, …]`), read by `web/framework/mount.js` and handed to
+    the page's `onRequest`.
 
-The `#goals` element is an island: the language client writes into it (`web/goals.js`),
-and the app only renders its empty container, so a re-render never clobbers the pane.
+The editor's rules are **reads**, not effects, and take no state: `wiz_loom_editor_*`
+are string-to-string queries (`mount`'s `ask`) over `lib/Web/EditorModel.wiz`, so the
+page can ask "which spans does this diagnostic underline?" without a step.
+
+Everything else (the menu, the layout, the state, the patches, the fragment/draft
+format) is the runtime's.
 -/
-
-/-- The page's program, as `web/playground.html` has always carried it. -/
-def program : String :=
-  "import Prelude\n\n-- Everything here runs in the page: the self-hosted Wiz frontend and kernel\n-- (selfhost/*.wiz, stage 11ab), compiled to WebAssembly by web/build-playground.sh.\n-- With ?lsp=ws://127.0.0.1:8765 the goals pane shows a language server's state\n-- (for example: def k : Nat → Bool → Nat := by / intro n / intro b / exact n).\ndef twice (n : Nat) : Nat := n + n\n\n#check twice\n#eval twice 21\n"
-
-/-- The page's state: the editor, the output pane's model (which owns `#status`'s text
-and kind and `#count`), and the footer's engine line. -/
-structure Page where
-  editor : WebEditor
-  output : Model
-  engine : String
-
-/-- The first paint: the page's static markup (`loading the engine…`, Run disabled, an
-empty count). -/
-def Page.initial : Page :=
-  Page.mk (WebEditor.initial program)
-    (Model.mk List.nil 0 "loading the engine…" "running" "") "engine: loading"
-
-def Page.setEditor (s : Page) (e : WebEditor) : Page := Page.mk e s.output s.engine
-/-- The output pane's model, and the editor's `#count` text (the pane owns the count;
-the editor shows it). -/
-def Page.setOutput (s : Page) (o : Model) : Page :=
-  Page.mk (WebEditor.withCount s.editor o.count) o s.engine
-def Page.setEngine (s : Page) (engine : String) : Page := Page.mk s.editor s.output engine
-
-/-- `setStatus(text, kind)`, the page's status line. -/
-def Page.status (s : Page) (text kind : String) : Page :=
-  let o := s.output;
-  Page.setOutput s (Model.mk o.lines o.failures text kind o.count)
-
-/-- Run on or off (the page while the engine loads and while a run is in flight). -/
-def Page.enable (s : Page) (on : Bool) : Page :=
-  Page.setEditor s (WebEditor.withDisabled s.editor (match on with | .true => .false | .false => .true))
-
--- ## The view
-
-def header (s : Page) : Loom.VNode WebEditor.Msg :=
-  Loom.el "header" List.nil
-    [ Loom.el "a" [Loom.class "home", Loom.attr "href" "../"] [Loom.text "← Wiz"]
-    , Loom.el "strong" List.nil [Loom.text "Playground"]
-    , Loom.el "span" [Loom.class "dim"]
-        [Loom.text "the self-hosted checker, compiled to WebAssembly — goals from an optional language server"]
-    , Loom.el "nav" [Loom.class "pagenav", Loom.attr "aria-label" "Site"]
-        [Loom.el "a" [Loom.attr "href" "../docs/"] [Loom.text "Docs"]]
-    , Loom.el "span" [Loom.id "status", Loom.class (String.append "status " s.output.statusKind),
-        Loom.attr "role" "status"] [Loom.text s.output.status]
-    ]
-
-/-- The goals pane's heading and hint (the text is the pane's, unchanged). -/
-def goalsHead : Loom.VNode WebEditor.Msg :=
-  Loom.el "div" [Loom.class "pane-head"]
-    [ Loom.el "span" List.nil [Loom.text "Goals"]
-    , Loom.el "span" [Loom.class "hint"]
-        [Loom.text "from ", Loom.el "code" List.nil [Loom.text "?lsp=ws://host:port"]] ]
-
-def outputHead : Loom.VNode WebEditor.Msg :=
-  Loom.el "div" [Loom.class "pane-head"]
-    [ Loom.el "span" List.nil [Loom.text "Output"]
-    , Loom.el "span" [Loom.class "hint"]
-        [Loom.text "one line per command; ", Loom.el "code" List.nil [Loom.text "#eval"],
-         Loom.text " is the kernel's normal form"] ]
-
-def pageMain (s : Page) : Loom.VNode WebEditor.Msg :=
-  Loom.el "main" List.nil
-    [ WebEditor.view s.editor
-    , Loom.el "section" [Loom.class "pane side"]
-        [ goalsHead
-        , Loom.el "div" [Loom.id "goals", Loom.class "goals", Loom.attr "tabindex" "0",
-            Loom.attr "aria-live" "polite"] List.nil
-        , outputHead
-        , Model.view s.output ]
-    ]
-
-def footer (s : Page) : Loom.VNode WebEditor.Msg :=
-  Loom.el "footer" List.nil
-    [ Loom.el "span" [Loom.id "engine", Loom.class "dim"] [Loom.text s.engine]
-    , Loom.el "span" [Loom.class "dim"]
-        [Loom.text "A definition prints its signature, ",
-         Loom.el "code" List.nil [Loom.text "#check"],
-         Loom.text " a type, ", Loom.el "code" List.nil [Loom.text "#eval"],
-         Loom.text " a value (shown raw if it is not a Nat, Bool or list)."] ]
-
-/-- The whole page: one app, three top-level siblings (a body's children). -/
-def view (s : Page) : Loom.VNode WebEditor.Msg :=
-  Loom.seq [header s, pageMain s, footer s]
-
-/-- The page's messages are the editor's (`input` carries the textarea's text, `run` a
-Run request); the update routes them to the editor. -/
-def update (m : WebEditor.Msg) (payload : String) (s : Page) : Page :=
-  Page.setEditor s (WebEditor.update m payload s.editor)
-
-def pageApp : Loom.LiveApp Page WebEditor.Msg := Loom.LiveApp.mk Page.initial update view
-
--- ## The entry points the page calls
 
 link_c "js.c"
 extern "js_patch" Js.patch : String → IO Unit
@@ -138,23 +45,77 @@ def loomInit : Page := Page.initial
 def loomHtml (s : Page) : String := Loom.LiveApp.html pageApp s
 def loomStep (s : Page) (ev : String) : IO Page :=
   patched s (Loom.LiveApp.step pageApp s ev)
-def loomShow (s : Page) (text : String) : IO Page :=
-  patched s (Page.setOutput s (Model.ofText text s.output.status s.output.statusKind))
-def loomFail (s : Page) (text count : String) : IO Page :=
-  patched s (Page.setOutput s (Model.ofFailure text s.output.status count s.output.statusKind))
-def loomStatus (s : Page) (text kind : String) : IO Page := patched s (Page.status s text kind)
-def loomEnable (s : Page) (on : Nat) : IO Page :=
-  patched s (Page.enable s (match Nat.beq on 0 with | .true => .false | .false => .true))
-def loomEngine (s : Page) (text : String) : IO Page := patched s (Page.setEngine s text)
-def loomText (s : Page) (text : String) : IO Page :=
-  patched s (Page.setEditor s (WebEditor.withText s.editor text))
+def loomEffect (s : Page) (kind a b : String) : IO Page :=
+  patched s (Page.effect s kind a b)
+
+/-- The pending effect requests, as JSON (a read-only call: the driver retains first). -/
+def loomRequests (s : Page) : String := Page.requests s
+
+/-- Whether the runtime consumed a handled `Loom.onPrevent` event's default action
+(`web/framework/driver.js` calls this after the step; `1` means prevent). -/
+def loomConsume (s : Page) (ev : String) : Nat :=
+  match Page.consume (Loom.splitEvent ev) s with
+  | .true => 1
+  | .false => 0
+
+-- The editor's pure rules (`lib/Web/EditorModel.wiz`). The page asks one question at a
+-- time and paints the answer; these take no runtime state, so they are reads, not
+-- effects. Strings in, strings out, so the browser marshals no objects.
+
+/-- The spans a diagnostics array underlines, as JSON. -/
+def loomEditorSegments (text diags maxSegments : String) : String :=
+  EditorModel.segmentsJson text diags (EditorModel.natOf maxSegments)
+
+/-- A `textDocument/completion` result's items, as JSON. -/
+def loomEditorItems (result : String) : String :=
+  Json.render (Json.mkArr (EditorModel.completionItems result))
+
+/-- The popup's filtered items, selection and prefix, as JSON. -/
+def loomEditorPopup (text items index offset : String) : String :=
+  EditorModel.popupJson text items index (EditorModel.natOf offset)
+
+/-- The selected index after moving `delta` in `count` items. -/
+def loomEditorMove (index delta count : String) : String :=
+  EditorModel.intString
+    (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
+      (EditorModel.intOf count))
+
+/-- What an accepted item inserts and where, as JSON. -/
+def loomEditorAccept (text item offset : String) : String :=
+  EditorModel.acceptJson text item (EditorModel.natOf offset)
+
+/-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
+def loomEditorTrigger (text c offset : String) : String :=
+  match EditorModel.completionTrigger text c (EditorModel.natOf offset) with
+  | .true => "1"
+  | .false => "0"
+
+/-- The LSP position of a UTF-16 offset, as JSON. -/
+def loomEditorPosition (text offset : String) : String :=
+  EditorModel.positionJson text (EditorModel.natOf offset)
+
+/-- The UTF-16 offset of an LSP position. -/
+def loomEditorOffset (text line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition text
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The edit an accepted Tab makes at `from`..`to`, as JSON (`host.edit` applies it). -/
+def loomEditorIndent (text from to : String) : String :=
+  EditorModel.indentJson text from to
 
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
-export "wiz_loom_show" loomShow
-export "wiz_loom_fail" loomFail
-export "wiz_loom_status" loomStatus
-export "wiz_loom_enable" loomEnable
-export "wiz_loom_engine" loomEngine
-export "wiz_loom_text" loomText
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume
+export "wiz_loom_editor_segments" loomEditorSegments
+export "wiz_loom_editor_items" loomEditorItems
+export "wiz_loom_editor_popup" loomEditorPopup
+export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_accept" loomEditorAccept
+export "wiz_loom_editor_trigger" loomEditorTrigger
+export "wiz_loom_editor_position" loomEditorPosition
+export "wiz_loom_editor_offset" loomEditorOffset
+export "wiz_loom_editor_indent" loomEditorIndent

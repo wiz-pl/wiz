@@ -69,7 +69,7 @@ inductive Done (ρ : Region) where
 /-- Run `body` in a new scope. Its region `ρ` is fresh, so nothing that mentions it (a
 `Join ρ A`) is in its result; the body ends by closing the scope (`Scope.close`), whose
 `Done ρ` it returns with the result. -/
-def Scope.with {A : Type} (1 body : (0 ρ : Region) → (1 s : Scope ρ) → IO (A × Done ρ)) : IO A :=
+def Scope.with {A : Type} (1 body : (ω ρ : Region) → (1 s : Scope ρ) → IO (A × Done ρ)) : IO A :=
   IO.bind (body Region.static (Scope.mk List.nil)) (fun r => IO.pure r.1)
 
 /-- Start `act` in the scope `s`; `k` continues with the scope and the task's handle. The

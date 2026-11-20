@@ -76,12 +76,18 @@ ill-formed), or `vacuous`.
 selected seed; `constantOrBound` is the same no-flow obligation over the *untrusted*
 sources (`src`, `retsrc`), leaving `param` flows allowed. -/
 inductive Scry.Property where
+  /-- No selected seed reaches a sink (the taint/memory closure). -/
   | noFlow
+  /-- No untrusted source reaches a sink argument (a `noFlow` over `src`/`retsrc`). -/
   | constantOrBound
+  /-- Every **write** use is preceded by a guard that bounds its index/length by the
+  buffer's capacity: the cut over the claim's `guards` set. -/
+  | cut
 
 def Scry.Property.show : Scry.Property → String
   | .noFlow => "no-flow"
   | .constantOrBound => "constant-or-parameter-bound"
+  | .cut => "cut (every write is preceded by a check)"
 
 /-- Every seed relation the taint rules read. -/
 def Scry.allSources : List Nat := [Scry.rtSrc, Scry.rtParam, Scry.rtRetSrc]
@@ -89,28 +95,41 @@ def Scry.allSources : List Nat := [Scry.rtSrc, Scry.rtParam, Scry.rtRetSrc]
 /-- The sources that are not a parameter bind: what `constantOrBound` must exclude. -/
 def Scry.untrustedSources : List Nat := [Scry.rtSrc, Scry.rtRetSrc]
 
-/-- A no-flow claim for one function: the invariant `I` (tainted rows), the derived
-tainted locations `M`, and the source relations the claim quantifies over. `func` is a
-label only; the EDB identifies the function. -/
+/-- A claim for one function: the invariant `I` (tainted rows), the derived tainted
+locations `M`, the source relations the claim quantifies over, and (for a `cut` claim)
+the guard points the certificate selects. `func` is a label only; the EDB identifies the
+function. -/
 structure Scry.Claim where
   func : String
   invariant : List (Nat × Nat)
   locations : List Nat
   sources : List Nat
   property : Scry.Property
+  /-- The cut: the guard points a `cut` claim relies on. Unused by the other
+  properties. A point is a control point with at least one `guard` row in the EDB. -/
+  guards : List Nat
 
 /-- A no-flow claim over every source. -/
 def Scry.Claim.noFlow (func : String) (I : List (Nat × Nat)) (M : List Nat) : Scry.Claim :=
-  Scry.Claim.mk func I M Scry.allSources .noFlow
+  Scry.Claim.mk func I M Scry.allSources .noFlow []
 
 /-- "Every sink argument is a constant or a parameter bind": no flow from the untrusted
 sources (`src`, `retsrc`); `param` flows are allowed. -/
 def Scry.Claim.constantOrBound (func : String) (I : List (Nat × Nat)) (M : List Nat) :
     Scry.Claim :=
-  Scry.Claim.mk func I M Scry.untrustedSources .constantOrBound
+  Scry.Claim.mk func I M Scry.untrustedSources .constantOrBound []
+
+/-- A cut claim: every write use is preceded by a guard at one of `guards` that bounds
+its index/length by the buffer's capacity. The guard set is the certificate; the
+invariant and source fields are unused. -/
+def Scry.Claim.cut (func : String) (guards : List Nat) : Scry.Claim :=
+  Scry.Claim.mk func [] [] [] .cut guards
 
 def Scry.Claim.withSources (c : Scry.Claim) (s : List Nat) : Scry.Claim :=
   { c with sources := s }
+
+def Scry.Claim.withGuards (c : Scry.Claim) (g : List Nat) : Scry.Claim :=
+  { c with guards := g }
 
 /-- The source relations a claim quantifies over (`[]` is the legacy "all"). -/
 def Scry.selectedSources (c : Scry.Claim) : List Nat :=
@@ -134,6 +153,7 @@ def Scry.Verdict.show : Scry.Verdict → String
   | .proved c => match c.property with
     | .noFlow => "proved"
     | .constantOrBound => "proved (every sink argument is constant or parameter-bound)"
+    | .cut => "proved (every write is preceded by a check)"
   | .refuted w => String.append "refuted: " w
   | .refused r => String.append "refused: " r
   | .scriptFailed e => String.append "script-failed: " e
@@ -153,6 +173,7 @@ def Scry.invOfClaim (c : Scry.Claim) : Scry.Inv :=
 
 def Scry.claimOfInv (spec : Scry.Claim) (inv : Scry.Inv) : Scry.Claim :=
   Scry.Claim.mk spec.func inv.tainted inv.locations spec.sources spec.property
+    spec.guards
 
 def Scry.pairEq (a b : Nat × Nat) : Bool :=
   if Nat.beq a.1 b.1 then Nat.beq a.2 b.2 else .false
@@ -194,7 +215,7 @@ relation is the seed locations plus the invariant's derived locations. `evalAtom
 then enumerates exactly the rule instances whose tainted/mtainted premises are in the
 certificate. -/
 def Scry.invState (st : Scry.State Nat) (inv : Scry.Inv) : Scry.State Nat :=
-  Scry.State.mk (Scry.invDb st.db inv) st.nodes st.next st.stepIdx
+  Scry.State.mk (Scry.invDb st.db inv) st.steps st.next st.stepIdx
 
 /-- Drop the seed relations the claim did not select, so the closure and the alert check
 only see the sources the claim is about. Memory seeds are kept: their provenance is
@@ -208,13 +229,15 @@ def Scry.selectSources (db : Scry.Db Nat) (selected : List Nat) : Scry.Db Nat :=
     else Scry.Db.setTupleAt db Scry.rtRetSrc Scry.TupleRel.empty;
   db
 
-/-- A row's column as a `Nat` (absent columns read as 0). -/
-def Scry.rowNat (row : List U64) (i : Nat) : Nat :=
+/-- A claim row's column as a `Nat` (absent columns read as 0). `Scry.Taint` also
+declares a `rowNat`, and the trust ledger imports the whole library at once, where a name
+two modules declare is an error; this copy is named for the claim. -/
+def Scry.claimRowNat (row : List U64) (i : Nat) : Nat :=
   UIntN.toNat (List.getD row i (U64.ofNat 0))
 
 /-- The first two columns of a row. -/
 def Scry.rowPair (row : List U64) : Nat × Nat :=
-  (Scry.rowNat row 0, Scry.rowNat row 1)
+  (Scry.claimRowNat row 0, Scry.claimRowNat row 1)
 
 def Scry.showPair (p : Nat × Nat) : String :=
   "(" ++ Nat.repr p.1 ++ "," ++ Nat.repr p.2 ++ ")"
@@ -248,7 +271,7 @@ def Scry.firstBadLocInstance (args : List Scry.Term) (M : List Nat) (ri : Nat) :
   | .nil => .none
   | .cons m rest =>
     let row := List.map (Scry.Term.eval m.1.vals) args;
-    let l := Scry.rowNat row 0;
+    let l := Scry.claimRowNat row 0;
     if Scry.invLocMem l M then Scry.firstBadLocInstance args M ri rest
     else .some ("rule " ++ Nat.repr ri ++ " derives mtainted " ++ Nat.repr l ++
       ", which is not in the invariant's locations")
@@ -293,7 +316,7 @@ def Scry.checkLocationsClosed (p : Scry.Program Nat) (stI : Scry.State Nat)
 matters, not only the sink and its argument. -/
 def Scry.renderClaimRow (row : List U64) : String :=
   "(" ++ String.intercalate ","
-    (List.map (fun i => Nat.repr (Scry.rowNat row i)) (Scry.range (List.length row))) ++ ")"
+    (List.map (fun i => Nat.repr (Scry.claimRowNat row i)) (Scry.range (List.length row))) ++ ")"
 
 /-- The name of a taint relation, for a counterexample's path. -/
 def Scry.relName (rel : Nat) : String :=
@@ -427,12 +450,12 @@ def Scry.alertWitness (p : Scry.Program Nat) (st : Scry.State Nat)
   let v := match t with | .some q => q.2 | .none => 0;
   let pre := Scry.explainTaint p st 64 .nil 0 d v;
   let path := List.append pre
-    [ "flow(" ++ Nat.repr d ++ "," ++ Nat.repr (Scry.rowNat row 0) ++ "," ++
+    [ "flow(" ++ Nat.repr d ++ "," ++ Nat.repr (Scry.claimRowNat row 0) ++ "," ++
        Nat.repr v ++ ")",
-      "sink(" ++ Nat.repr (Scry.rowNat row 0) ++ "," ++ Nat.repr (Scry.rowNat row 1) ++
+      "sink(" ++ Nat.repr (Scry.claimRowNat row 0) ++ "," ++ Nat.repr (Scry.claimRowNat row 1) ++
        "," ++ Nat.repr v ++ ")" ];
-  "the alert rule fires at sink " ++ Nat.repr (Scry.rowNat row 0) ++
-    " argument " ++ Nat.repr (Scry.rowNat row 1) ++ "; path " ++
+  "the alert rule fires at sink " ++ Nat.repr (Scry.claimRowNat row 0) ++
+    " argument " ++ Nat.repr (Scry.claimRowNat row 1) ++ "; path " ++
     String.intercalate " -> " path
 
 /-- The alert rule's instances under `I`: any one is a counterexample to the claim. -/
@@ -462,6 +485,195 @@ def Scry.claimSource (r : Nat) : String :=
 def Scry.showSources (rels : List Nat) : String :=
   String.intercalate "," (List.map Scry.claimSource rels)
 
+-- ## The cut: every write is preceded by a check
+
+/-- A row decoded from the EDB (`use`/`guard`/`before` rows are built by
+`Scry.boundsFactsOfFunc` and read back here as `Nat`s). -/
+def Scry.natRowAt (row : List Nat) (i : Nat) : Nat := List.getD row i 0
+
+def Scry.renderNatRow (row : List Nat) : String :=
+  "(" ++ String.intercalate "," (List.map Nat.repr row) ++ ")"
+
+def Scry.guardRowsOf (st : Scry.State Nat) : List (List Nat) :=
+  List.map Scry.rtNats (Scry.rtRows st Scry.rtGuard)
+
+def Scry.useRowsOf (st : Scry.State Nat) : List (List Nat) :=
+  List.map Scry.rtNats (Scry.rtRows st Scry.rtUse)
+
+def Scry.beforeRowsOf (st : Scry.State Nat) : List (List Nat) :=
+  List.map Scry.rtNats (Scry.rtRows st Scry.rtBefore)
+
+/-- Does the cut name `p`? -/
+def Scry.cutMem (p : Nat) (cut : List Nat) : Bool := List.any (Nat.beq p) cut
+
+/-- Is `node` before `usePoint` in the EDB's dominance relation? -/
+def Scry.beforeHolds (st : Scry.State Nat) (node usePoint : Nat) : Bool :=
+  Scry.Db.memTuple st.db Scry.rtBefore [U64.ofNat node, U64.ofNat usePoint]
+
+/-- Is this use a write? The cut quantifies over writes (an index store and a copy
+destination); reads are facts for a future read property. -/
+def Scry.useIsWrite (kind : Nat) : Bool :=
+  Bool.or (Nat.beq kind Scry.useIndexWrite) (Nat.beq kind Scry.useCopyWrite)
+
+/-- How many writes the cut claim must cover. -/
+def Scry.writeUseCount (st : Scry.State Nat) : Nat :=
+  List.foldl (fun acc u =>
+    if Scry.useIsWrite (Scry.natRowAt u 4) then Nat.succ acc else acc)
+    0 (Scry.useRowsOf st)
+
+def Scry.useKindName (kind : Nat) : String :=
+  if Nat.beq kind Scry.useIndexWrite then "store"
+  else if Nat.beq kind Scry.useIndexRead then "load"
+  else if Nat.beq kind Scry.useCopyWrite then "copy-write"
+  else if Nat.beq kind Scry.useCopyRead then "copy-read"
+  else "use kind " ++ Nat.repr kind
+
+/-- `value` fits a buffer of `cap` cells: an index must be strictly inside
+(`value < cap`); a copy length may equal the capacity (`value <= cap`). -/
+def Scry.cutFits (kind cap value : Nat) : Bool :=
+  if Nat.beq kind Scry.useIndexWrite then Nat.lt value cap
+  else if Nat.beq kind Scry.useIndexRead then Nat.lt value cap
+  else Nat.le value cap
+
+/-- The known-constant code of a use: `none` for "not a constant", `some k` for `k`. -/
+def Scry.constCodeOfUse (u : List Nat) : Option Nat :=
+  match Scry.natRowAt u 5 with
+  | .zero => .none
+  | .succ k => .some k
+
+/-- Does guard row `g` cover use `u` in cut `cut`? All five conditions: the same
+register, the point is in the cut, the guard point dominates the use, the bound-carrying
+edge's target dominates the use, and the bound fits the buffer. -/
+def Scry.guardCovers (st : Scry.State Nat) (cut : List Nat) (u g : List Nat) : Bool :=
+  let point := Scry.natRowAt u 0;
+  let var := Scry.natRowAt u 1;
+  let cap := Scry.natRowAt u 3;
+  let kind := Scry.natRowAt u 4;
+  let gp := Scry.natRowAt g 0;
+  let gv := Scry.natRowAt g 1;
+  let hi := Scry.natRowAt g 2;
+  let tg := Scry.natRowAt g 3;
+  Bool.and (Nat.beq gv var)
+    (Bool.and (Scry.cutMem gp cut)
+      (Bool.and (Scry.beforeHolds st gp point)
+        (Bool.and (Scry.beforeHolds st tg point) (Scry.cutFits kind cap hi))))
+
+def Scry.findCover (st : Scry.State Nat) (cut : List Nat) (u : List Nat) :
+    Option (List Nat) :=
+  List.find (fun g => Scry.guardCovers st cut u g) (Scry.guardRowsOf st)
+
+def Scry.showCut (cut : List Nat) : String :=
+  "{" ++ String.intercalate "," (List.map Nat.repr cut) ++ "}"
+
+/-- The counterexample for one write against one guard: name the guard and the use and
+say why the guard does not cover it (not selected, does not dominate, too weak, or the
+bound only holds on the wrong edge). -/
+def Scry.cutGuardMiss (st : Scry.State Nat) (cut : List Nat) (u g : List Nat) : String :=
+  let point := Scry.natRowAt u 0;
+  let var := Scry.natRowAt u 1;
+  let cap := Scry.natRowAt u 3;
+  let kind := Scry.natRowAt u 4;
+  let gp := Scry.natRowAt g 0;
+  let hi := Scry.natRowAt g 2;
+  let tg := Scry.natRowAt g 3;
+  let useS := "use" ++ Scry.renderNatRow u;
+  let gs := "guard" ++ Scry.renderNatRow g;
+  if Bool.not (Scry.cutMem gp cut) then
+    "the write " ++ useS ++ " is guarded only by " ++ gs ++
+      ", which is not in the cut " ++ Scry.showCut cut ++ "; path " ++ gs ++
+      " -> " ++ useS
+  else if Bool.not (Scry.beforeHolds st gp point) then
+    gs ++ " does not dominate the write " ++ useS ++ "; path " ++ gs ++
+      " -> " ++ useS
+  else if Bool.not (Scry.cutFits kind cap hi) then
+    gs ++ " allows register " ++ Nat.repr var ++ " up to " ++ Nat.repr hi ++
+      " but the buffer holds " ++ Nat.repr cap ++ " cells; path " ++ gs ++
+      " -> before(" ++ Nat.repr gp ++ "," ++ Nat.repr point ++ ") -> " ++ useS
+  else
+    gs ++ " proves the bound only on the edge to " ++ Nat.repr tg ++
+      ", which does not dominate the write " ++ useS ++ "; path " ++ gs ++
+      " -> " ++ useS
+
+/-- The counterexample for one write: name the use, and the nearest guard and why it
+fails. -/
+def Scry.cutMiss (st : Scry.State Nat) (cut : List Nat) (u : List Nat) : String :=
+  let point := Scry.natRowAt u 0;
+  let var := Scry.natRowAt u 1;
+  let cap := Scry.natRowAt u 3;
+  let useS := "use" ++ Scry.renderNatRow u;
+  match Scry.constCodeOfUse u with
+  | .some k =>
+    if Nat.beq cap 0 then
+      "the write " ++ useS ++ " has no statically known capacity (unknown-memory boundary)"
+    else "the constant " ++ Nat.repr k ++ " at " ++ useS ++
+      " does not fit the buffer's " ++ Nat.repr cap ++ " cells"
+  | .none =>
+    if Nat.beq cap 0 then
+      "the write " ++ useS ++ " has no statically known capacity (unknown-memory boundary)"
+    else match List.find (fun g => Nat.beq (Scry.natRowAt g 1) var)
+        (Scry.guardRowsOf st) with
+      | .none =>
+        "the write " ++ useS ++ " has no guard on register " ++ Nat.repr var ++
+          "; path " ++ useS
+      | .some g => Scry.cutGuardMiss st cut u g
+
+/-- One write's obligation: a known constant that fits passes without a guard; otherwise
+a selected guard must cover it. -/
+def Scry.checkCutUse (st : Scry.State Nat) (cut : List Nat) (u : List Nat) :
+    Option String :=
+  let cap := Scry.natRowAt u 3;
+  let kind := Scry.natRowAt u 4;
+  match Scry.constCodeOfUse u with
+  | .some k =>
+    if Nat.beq cap 0 then .some (Scry.cutMiss st cut u)
+    else if Scry.cutFits kind cap k then .none
+    else .some (Scry.cutMiss st cut u)
+  | .none => match Scry.findCover st cut u with
+    | .some _ => .none
+    | .none => .some (Scry.cutMiss st cut u)
+
+def Scry.firstCutMiss (st : Scry.State Nat) (cut : List Nat) :
+    List (List Nat) → Option String
+  | .nil => .none
+  | .cons u rest => match Scry.checkCutUse st cut u with
+    | .some w => .some w
+    | .none => Scry.firstCutMiss st cut rest
+
+/-- A certificate may not name a point that has no guard row: the cut would then contain
+a control point that proves nothing. -/
+def Scry.checkCutPhantom (st : Scry.State Nat) : List Nat → Option String
+  | .nil => .none
+  | .cons p rest =>
+    if List.any (fun g => Nat.beq (Scry.natRowAt g 0) p) (Scry.guardRowsOf st) then
+      Scry.checkCutPhantom st rest
+    else .some ("the cut names point " ++ Nat.repr p ++ ", which has no guard fact")
+
+/-- The guard points present in the EDB, in row order. The default cut certificate. -/
+def Scry.guardPoints (st : Scry.State Nat) : List Nat :=
+  List.foldr (fun g acc =>
+    let p := Scry.natRowAt g 0;
+    if List.any (Nat.beq p) acc then acc else List.cons p acc) .nil
+    (Scry.guardRowsOf st)
+
+/-- **The cut checker.** `c.property = .cut` with certificate `c.guards` asserts that
+every write use in the EDB is preceded by a guard at a point in `c.guards`, on the same
+register, whose bound fits the buffer's capacity. No taint obligation is involved: a cut
+claim is about ordering and extents, not provenance.
+
+Obligations: the write set is non-empty (else `vacuous`); no named point lacks a guard
+row (else `refused`); every write is a known constant in range or is covered (else
+`refuted`, with the guard and use named). -/
+def Scry.checkCut (st : Scry.State Nat) (c : Scry.Claim) : Scry.Verdict :=
+  let writes := List.filter (fun u => Scry.useIsWrite (Scry.natRowAt u 4))
+    (Scry.useRowsOf st);
+  match writes with
+  | .nil => .vacuous "the claim's write set is empty (no store or copy-write use rows)"
+  | .cons _ _ => match Scry.checkCutPhantom st c.guards with
+    | .some r => .refused r
+    | .none => match Scry.firstCutMiss st c.guards writes with
+      | .some w => .refuted w
+      | .none => .proved c
+
 /-- A claim is vacuous when the function has no sink, or (for a `noFlow` claim) when the
 selected source relations are empty. A `constantOrBound` claim with sinks is not vacuous
 when the untrusted source set is empty: then every argument is a constant, which is one
@@ -481,6 +693,7 @@ def Scry.vacuity (st : Scry.State Nat) (c : Scry.Claim) : Option String :=
     if Nat.beq (Scry.Db.relSize st.db Scry.rtSink) 0 then
       .some "the claim's sink set is empty (no sink rows in this function)"
     else .none
+  | .cut => .none
 
 /-- **The checker.** Validate `c` against the function's EDB. It is a pure function of
 the EDB, the rules and the claim; it does not run `Scry.prove`.
@@ -492,20 +705,27 @@ closure failure is a `refused` certificate; an alert instance is a `refuted` cla
 with a provenance witness. -/
 def Scry.check (p : Scry.Program Nat) (st : Scry.State Nat) (c : Scry.Claim) :
     Scry.Verdict :=
-  match Scry.vacuity st c with
-  | .some r => .vacuous r
-  | .none =>
-    let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources c))
-      st.nodes st.next st.stepIdx;
-    let inv := Scry.invOfClaim c;
-    let stI := Scry.invState stSel inv;
-    match Scry.checkRulesClosed p stI inv p.rules 0 with
-    | .some e => .refused e
-    | .none => match Scry.checkLocationsClosed p stI inv p.rules 0 with
+  match c.property with
+  | .cut => Scry.checkCut st c
+  | _ => match Scry.vacuity st c with
+    | .some r => .vacuous r
+    | .none =>
+      let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources c))
+        st.steps st.next st.stepIdx;
+      let inv := Scry.invOfClaim c;
+      let stI := Scry.invState stSel inv;
+      match Scry.checkRulesClosed p stI inv p.rules 0 with
       | .some e => .refused e
-      | .none => match Scry.checkAlertRules p stI p.rules with
-        | .some w => .refuted w
-        | .none => .proved c
+      | .none => match Scry.checkLocationsClosed p stI inv p.rules 0 with
+        | .some e => .refused e
+        | .none => match Scry.checkAlertRules p stI p.rules with
+          | .some w => .refuted w
+          | .none => .proved c
+
+/-- Prove the cut over every guard point in the EDB (the default certificate). -/
+def Scry.proveCut (p : Scry.Program Nat) (st : Scry.State Nat) (func : String) :
+    Scry.Verdict :=
+  Scry.check p st (Scry.Claim.cut func (Scry.guardPoints st))
 
 -- ## The tactic script (the search)
 
@@ -547,7 +767,7 @@ def Scry.closeOne (p : Scry.Program Nat) (st : Scry.State Nat)
       Scry.Inv.mk t inv.locations
     else if Nat.beq rel Scry.rtMTainted then
       let m := List.foldl (fun (acc : List Nat) (m : Scry.Env Nat × List Nat) =>
-        Scry.invLocAdd (Scry.rowNat (List.map (Scry.Term.eval m.1.vals) args) 0) acc)
+        Scry.invLocAdd (Scry.claimRowNat (List.map (Scry.Term.eval m.1.vals) args) 0) acc)
         inv.locations (Scry.evalAtoms p.ops stI r.body Scry.Env.empty);
       Scry.Inv.mk inv.tainted m
     else inv
@@ -610,7 +830,7 @@ the invariant it built (for reports and for checking by hand). -/
 def Scry.searchWithSpec (p : Scry.Program Nat) (st : Scry.State Nat) (spec : Scry.Claim)
     (script : List Scry.Tactic) : Option Scry.Inv :=
   let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources spec))
-    st.nodes st.next st.stepIdx;
+    st.steps st.next st.stepIdx;
   match Scry.runTactic p stSel spec script Scry.Inv.empty with
   | .stop _ => .none
   | .found inv => .some inv
@@ -620,7 +840,7 @@ the result with the claim's property/sources. -/
 def Scry.proveWithSpec (p : Scry.Program Nat) (st : Scry.State Nat) (spec : Scry.Claim)
     (script : List Scry.Tactic) : Scry.Verdict :=
   let stSel := Scry.State.mk (Scry.selectSources st.db (Scry.selectedSources spec))
-    st.nodes st.next st.stepIdx;
+    st.steps st.next st.stepIdx;
   match Scry.runTactic p stSel spec script Scry.Inv.empty with
   | .stop v => v
   | .found inv => Scry.check p st (Scry.claimOfInv spec inv)
@@ -643,10 +863,13 @@ def Scry.defaultTactics : List Scry.Tactic :=
   Scry.defaultTacticsFor (Scry.Claim.noFlow "proved" .nil .nil)
 
 /-- Prove (or refute) a property over the sources the claim spec selects. The invariant
-in `spec` is ignored; the search starts empty. -/
+in `spec` is ignored; the search starts empty. A `cut` claim has no search: its
+certificate is the guard set, so it is checked directly. -/
 def Scry.proveFor (p : Scry.Program Nat) (st : Scry.State Nat) (spec : Scry.Claim) :
     Scry.Verdict :=
-  Scry.proveWithSpec p st spec (Scry.defaultTacticsFor spec)
+  match spec.property with
+  | .cut => Scry.check p st spec
+  | _ => Scry.proveWithSpec p st spec (Scry.defaultTacticsFor spec)
 
 /-- The default no-flow claim over every source. -/
 def Scry.prove (p : Scry.Program Nat) (st : Scry.State Nat) : Scry.Verdict :=

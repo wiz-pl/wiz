@@ -2,28 +2,34 @@ import Sys
 import Text
 import Scry.CsCst
 import Scry.CsLower
+import Scry.Lower
+import Scry.CstStore
 import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
+import Scry.Bounds
 import Scry.Interproc
 import Scry.Prover
 import Scry.Budget
 /-!
-# prover: run a no-flow proof over one C# function
+# prover: run a no-flow or cut proof over one function
 
-A dogfooding driver for `Scry.Prover`. It reads a `.cs` file **and its checked-in
-`scry-cst` spill** (`FILE.cst`, regenerated with `scry-cst FILE.cs > FILE.cst`), lowers
-the unit, runs the rule pack, and then proves or checks a claim about **one function's
-EDB**. Reading the spill keeps the driver off the native tree-sitter shim, exactly as
-the Lean test groups do; a compiled driver is orders of magnitude faster than `#eval` in
-the interpreter.
+A dogfooding driver for `Scry.Prover`. It reads a `.cs` (or `.c`) file **and its
+checked-in `scry-cst` spill** (`FILE.cst`, regenerated with `scry-cst FILE > FILE.cst`),
+lowers the unit, runs the rule pack, and then proves or checks a claim about **one
+function's EDB**. Reading the spill keeps the driver off the native tree-sitter shim,
+exactly as the Lean test groups do; a compiled driver is orders of magnitude faster than
+`#eval` in the interpreter.
 
-    prover FILE.cs NAMESPACE.Type.Method                 # default script
-    prover FILE.cs NAMESPACE.Type.Method --cover         # closure only + check (a
-                                                        # counterexample when the claim
-                                                        # is false)
-    prover FILE.cs NAMESPACE.Type.Method --rows 0:0,2:1  # check a hand-written I
-    prover FILE.cs NAMESPACE.Type.Method --dump          # the EDB relations
+    prover FILE NAMESPACE.Type.Method                 # default no-flow script
+    prover FILE NAMESPACE.Type.Method --cover         # closure only + check (a
+                                                     # counterexample when the claim
+                                                     # is false)
+    prover FILE NAMESPACE.Type.Method --rows 0:0,2:1  # check a hand-written I
+    prover FILE NAMESPACE.Type.Method --dump          # the EDB relations
+    prover FILE.c main --cut                          # "every write is preceded by a
+                                                     # check" over all guard points
+    prover FILE.c main --cut --guards 2,3             # the same, with a chosen cut
 
 Options: `--entry` uses the C-ABI parameter policy (`Scry.analyzeC`), so the parameters
 of an exported entry are sources; `--pack FILE` selects the rule pack (default
@@ -34,7 +40,7 @@ from `Scry.nowMs`; they are informational, not perf-run measurements.
 -/
 
 def Scry.prow (row : List U64) (k : Nat) : String :=
-  Nat.repr (Scry.rowNat row k)
+  Nat.repr (Scry.claimRowNat row k)
 
 /-- One relation's rows, rendered with the row's own width. -/
 def Scry.proRel (st : Scry.State Nat) (name : String) (rel : Nat) : String :=
@@ -44,9 +50,10 @@ def Scry.proRel (st : Scry.State Nat) (name : String) (rel : Nat) : String :=
         let cols := Scry.range (List.length row);
         "(" ++ String.intercalate "," (List.map (fun k => Scry.prow row k) cols) ++ ")") rows)
 
-/-- The checked-in spill next to a `.cs` file: `FILE.cs` -> `FILE.cst`. -/
+/-- The checked-in spill next to a `.cs`/`.c` file: `FILE.cs`/`FILE.c` -> `FILE.cst`. -/
 def Scry.spillOf (path : String) : String :=
   if String.endsWith path ".cs" then String.append (String.dropEnd 3 path) ".cst"
+  else if String.endsWith path ".c" then String.append (String.dropEnd 2 path) ".cst"
   else String.append path ".cst"
 
 /-- A claim's invariant rows (a field projection helper: a projection on a match
@@ -66,7 +73,10 @@ def Scry.proDump (st : Scry.State Nat) : EIO Unit := do
   EIO.lift (IO.println ("san\t" ++ Scry.proRel st "san" Scry.rtSan));
   EIO.lift (IO.println ("mstore\t" ++ Scry.proRel st "mstore" Scry.rtMStore));
   EIO.lift (IO.println ("mload\t" ++ Scry.proRel st "mload" Scry.rtMLoad));
-  EIO.lift (IO.println ("mtainted\t" ++ Scry.proRel st "mtainted" Scry.rtMTainted))
+  EIO.lift (IO.println ("mtainted\t" ++ Scry.proRel st "mtainted" Scry.rtMTainted));
+  EIO.lift (IO.println ("guard\t" ++ Scry.proRel st "guard" Scry.rtGuard));
+  EIO.lift (IO.println ("use\t" ++ Scry.proRel st "use" Scry.rtUse));
+  EIO.lift (IO.println ("before\t" ++ Scry.proRel st "before" Scry.rtBefore))
 
 /-- `0:0,2:1` as invariant rows. Malformed pairs are dropped. -/
 def Scry.parseRowsGo : List String → List (Nat × Nat)
@@ -80,6 +90,16 @@ def Scry.parseRowsGo : List String → List (Nat × Nat)
 def Scry.parseRows (s : String) : List (Nat × Nat) :=
   Scry.parseRowsGo (String.splitOn "," s)
 
+/-- `1,2,3` as a guard-point list. Malformed entries are dropped. -/
+def Scry.parseNatsGo : List String → List Nat
+  | .nil => .nil
+  | .cons part rest => match String.parseNat (String.trim part) with
+    | .some n => List.cons n (Scry.parseNatsGo rest)
+    | .none => Scry.parseNatsGo rest
+
+def Scry.parseNats (s : String) : List Nat :=
+  Scry.parseNatsGo (String.splitOn "," s)
+
 def Scry.coverScript : List Scry.Tactic :=
   [ .intro Scry.rtSrc, .intro Scry.rtParam, .intro Scry.rtRetSrc, .close ]
 
@@ -89,29 +109,56 @@ def Scry.specOf (fn : String) (classify : Bool) : Scry.Claim :=
   if classify then Scry.Claim.constantOrBound fn [] []
   else Scry.Claim.noFlow fn [] []
 
+/-- A lowered unit from either frontend: the functions and the warning count. -/
+structure Scry.Lowered where
+  funcs : List Wil.Func
+  warnings : Nat
+
+/-- Lower a `.cs` with the C# frontend or anything else with the C frontend, from the
+same `scry-cst` spill format. -/
+def Scry.lowerFile (path text spill : String) : Option Scry.Lowered :=
+  match Scry.CstStore.ofText spill with
+  | .error _ => .none
+  | .ok store =>
+    match String.endsWith path ".cs" with
+    | .true =>
+      let l := Scry.Cs.lowerCst path text (Scry.Cs.ofStore text store);
+      .some (Scry.Lowered.mk l.funcs (List.length l.warnings))
+    | .false =>
+      let t := Scry.lowerTU path (Scry.Cst.ofStore text store);
+      .some (Scry.Lowered.mk t.funcs (List.length t.warnings))
+
 /-- The proof for one function. `entryMode` selects the C-ABI parameter policy;
-`classify` selects the "constant or parameter bind" property. -/
+`classify` selects the "constant or parameter bind" property; `guardList` overrides the
+default cut certificate (every guard point in the EDB). -/
 def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
-    (rows : List (Nat × Nat)) (entryMode classify : Bool) : EIO Unit := do
+    (rows : List (Nat × Nat)) (entryMode classify : Bool)
+    (guardList : Option (List Nat)) : EIO Unit := do
   t0 ← EIO.lift Scry.nowMs;
   text ← FS.readFile path;
   spill ← FS.readFile (Scry.spillOf path);
-  match Scry.CstStore.ofText spill with
-  | .error e => EIO.lift (IO.println ("SPILL_ERROR\t" ++ e))
-  | .ok store => do
-    let l := Scry.Cs.lowerCst path text (Scry.Cs.ofStore text store);
+  match Scry.lowerFile path text spill with
+  | .none => EIO.lift (IO.println "SPILL_ERROR\tcould not read the spill")
+  | .some l => do
     let pr := match entryMode with
       | .true => Scry.analyzeC (Wil.program l.funcs) pack
       | .false => Scry.analyze (Wil.program l.funcs) pack;
     t1 ← EIO.lift Scry.nowMs;
     EIO.lift (IO.println ("FUNCS\t" ++ Nat.repr (List.length l.funcs)));
-    EIO.lift (IO.println ("WARNINGS\t" ++ Nat.repr (List.length l.warnings)));
+    EIO.lift (IO.println ("WARNINGS\t" ++ Nat.repr l.warnings));
     EIO.lift (IO.println ("FINDINGS\t" ++ Nat.repr (List.length (Scry.programFindings pr))));
     match Scry.findResult pr fn with
     | .none => EIO.lift (IO.println "NOFUNC\t")
     | .some r => do
-      let st0 := r.edb;
-      let spec := Scry.specOf fn classify;
+      let wantCut := String.eq mode "--cut";
+      let wantDump := String.eq mode "--dump";
+      let st0 := if Bool.or wantCut wantDump then
+        Scry.addBoundsFacts r.edb (Scry.boundsFactsOfFunc pr.pointsTo r)
+        else r.edb;
+      let cutClaim := Scry.Claim.cut fn (match guardList with
+        | .some gs => gs
+        | .none => Scry.guardPoints st0);
+      let spec := if wantCut then cutClaim else Scry.specOf fn classify;
       EIO.lift (IO.println ("ANALYZE_MS\t" ++ Nat.repr (Nat.sub t1 t0)));
       EIO.lift (IO.println ("PROPERTY\t" ++ Scry.Property.show spec.property));
       EIO.lift (IO.println ("SRC\t" ++ Nat.repr (Scry.relN st0 Scry.rtSrc)));
@@ -122,8 +169,22 @@ def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
       EIO.lift (IO.println ("MSTORE\t" ++ Nat.repr (Scry.relN st0 Scry.rtMStore)));
       EIO.lift (IO.println ("MLOAD\t" ++ Nat.repr (Scry.relN st0 Scry.rtMLoad)));
       EIO.lift (IO.println ("MTAINTED\t" ++ Nat.repr (Scry.relN st0 Scry.rtMTainted)));
+      EIO.lift (IO.println ("GUARDS\t" ++ Nat.repr (Scry.relN st0 Scry.rtGuard)));
+      EIO.lift (IO.println ("USES\t" ++ Nat.repr (Scry.relN st0 Scry.rtUse)));
+      EIO.lift (IO.println ("WRITES\t" ++ Nat.repr (Scry.writeUseCount st0)));
+      EIO.lift (IO.println ("BEFORE\t" ++ Nat.repr (Scry.relN st0 Scry.rtBefore)));
       match mode with
       | "--dump" => Scry.proDump st0
+      | "--cut" => do
+        EIO.lift (IO.println ("CUT\t" ++ Scry.showCut cutClaim.guards));
+        let v := Scry.proveFor Scry.ruleTaintProgram st0 cutClaim;
+        EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
+        match v with
+        | .proved _ => EIO.lift (IO.println "CUT_OK\t")
+        | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
+        | .refused rr => EIO.lift (IO.println ("REFUSED\t" ++ rr))
+        | .vacuous rr => EIO.lift (IO.println ("VACUOUS\t" ++ rr))
+        | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
       | "--cover" => do
         let v := Scry.proveWithSpec Scry.ruleTaintProgram st0 spec Scry.coverScript;
         EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
@@ -133,8 +194,8 @@ def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
           EIO.lift (IO.println ("COVER_INV\t" ++ Scry.showInv (Scry.claimRows c)));
           EIO.lift (IO.println ("COVER_LOCS\t" ++ Scry.showLocs c.locations))
         | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
-        | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
-        | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+        | .refused rr => EIO.lift (IO.println ("REFUSED\t" ++ rr))
+        | .vacuous rr => EIO.lift (IO.println ("VACUOUS\t" ++ rr))
         | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
       | "--rows" => do
         let c := { spec with invariant := rows };
@@ -153,13 +214,13 @@ def Scry.proofOf (pack : Scry.RulePack) (path fn : String) (mode : String)
           EIO.lift (IO.println ("INV\t" ++ Scry.showInv (Scry.claimRows c)));
           EIO.lift (IO.println ("LOCS\t" ++ Scry.showLocs c.locations))
         | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
-        | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
-        | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+        | .refused rr => EIO.lift (IO.println ("REFUSED\t" ++ rr))
+        | .vacuous rr => EIO.lift (IO.println ("VACUOUS\t" ++ rr))
         | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
 
 def Scry.proUsage : EIO Unit :=
   EIO.lift (IO.ePrintln
-    "usage: prover FILE.cs FUNCTION [--cover|--dump|--rows p:v,...] [--entry] [--classify] [--pack FILE]")
+    "usage: prover FILE FUNCTION [--cover|--cut|--dump|--rows p:v,...] [--guards p,...] [--entry] [--classify] [--pack FILE]")
 
 def Scry.packPathOf : List String → String
   | .cons "--pack" (.cons p _) => p
@@ -171,25 +232,39 @@ def Scry.stripPack : List String → List String
   | .cons "--pack" _ => .nil
   | other => other
 
-/-- `prover FILE FN [MODE [ROWS]]`, with `--entry`, `--classify` and `--pack FILE`. -/
+/-- A `--guards p,...` option, if present. -/
+def Scry.guardsOf : List String → Option (List Nat)
+  | .cons "--guards" (.cons g _) => .some (Scry.parseNats g)
+  | _ => .none
+
+/-- Drop `--guards ...` from the argument list. -/
+def Scry.stripGuards : List String → List String
+  | .cons "--guards" (.cons _ more) => more
+  | .cons "--guards" _ => .nil
+  | other => other
+
+/-- `prover FILE FN [MODE [ROWS]]`, with `--entry`, `--classify`, `--guards` and
+`--pack FILE`. -/
 def Scry.proMain (args : List String) : EIO Unit :=
   match args with
   | .cons path (.cons fn rest0) => do
     let entryMode := List.any (String.eq "--entry") rest0;
     let classify := List.any (String.eq "--classify") rest0;
+    let guardList := Scry.guardsOf rest0;
     let rest := List.filter (fun a => Bool.not (String.eq a "--entry")) rest0;
     let rest := List.filter (fun a => Bool.not (String.eq a "--classify")) rest;
     let packPath := Scry.packPathOf rest;
     packText ← FS.readFile packPath;
     let pack := Scry.parseRulePack packText;
     let rest := Scry.stripPack rest;
+    let rest := Scry.stripGuards rest;
     match rest with
     | .cons mode (.cons rows _) =>
-      Scry.proofOf pack path fn mode (Scry.parseRows rows) entryMode classify
+      Scry.proofOf pack path fn mode (Scry.parseRows rows) entryMode classify guardList
     | .cons mode _ =>
-      Scry.proofOf pack path fn mode (List.nil : List (Nat × Nat)) entryMode classify
+      Scry.proofOf pack path fn mode (List.nil : List (Nat × Nat)) entryMode classify guardList
     | .nil =>
-      Scry.proofOf pack path fn "" (List.nil : List (Nat × Nat)) entryMode classify
+      Scry.proofOf pack path fn "" (List.nil : List (Nat × Nat)) entryMode classify guardList
   | _ => Scry.proUsage
 
 def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.proMain)

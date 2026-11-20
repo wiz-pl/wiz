@@ -83,14 +83,14 @@ def regionsTwo (name outer body : String) : String :=
 
 /-- Shared reborrows, zooms and pair borrows: the `ResultH.mapHandle`/`ofResult` paths of
 `Uniq.share(In)`, `Uniq.zoom(In)` and `Uniq.both`. -/
-def regionsOptics : String := r#"def share1 {ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
+def regionsOptics : String := r#"def share1 {0 ρ : Region} (1 r : Uniq ρ (List Nat)) : Result1 Nat (Uniq ρ (List Nat)) :=
   Uniq.share r (fun ρ' h x => .ok (List.length x.val))
-def shareIn1 {ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
+def shareIn1 {0 ρa ρb : Region} (1 r : Uniq ρb (List Nat)) (1 o : Uniq ρa Nat) :
     Result1 Nat ((1 _ : Uniq ρa Nat) × Uniq ρb (List Nat)) :=
   Uniq.shareIn r o (fun ρ' h o x => .ok (List.length x.val) o)
-def zoom1 {ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
+def zoom1 {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=
   Uniq.zoom Pair2.fstL p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))
-def both1 {ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
+def both1 {0 ρ : Region} (1 p : Uniq ρ (Nat × Nat)) : Result1 Nat (Uniq ρ (Nat × Nat)) :=
   Uniq.both p (fun ρ' h a b =>
     let 1 (x, a) := Uniq.peek a;
     let 1 (y, b) := Uniq.peek b;
@@ -240,6 +240,33 @@ def regionsGroup : Group where
     { name := "shared reborrows, zooms and pair borrows keep the lender and hand it back", run := fun _ =>
         okLibs ("import Region\n" ++ regionsOptics ++ "#eval tShare\n#eval tShareIn\n#eval tZoom\n#eval tBoth")
           [".ok (2, .cons 1 (.cons 2 .nil))", ".ok ((1, .cons 3 .nil), 5)", ".ok (1, 9, 2, ())", ".ok (3, 1, 2)"] },
+    { name := "the profunctor bridges: Uniq.zoomP, Mut.ofLensP and MutOpt.ofPrism keep the lender", run := fun _ =>
+        okLibs ("import Region\nimport Logic\n" ++
+          "def coprodPrism : PrismP (Coprod Nat Bool) (Coprod Nat Bool) Nat Nat :=\n" ++
+          "  prism (fun c => match c with | .inl a => .inl a | .inr b => .inr (.inr b)) (fun a => .inl a)\n" ++
+          "def showC : Coprod Nat Bool → String\n" ++
+          "  | .inl n => \"inl \" ++ Nat.repr n\n  | .inr b => match b with | .true => \"inr true\" | .false => \"inr false\"\n" ++
+          "def somePrismTest {0 ρ : Region} (1 r : Uniq ρ (Coprod Nat Bool)) : Result1 Nat (Uniq ρ (Coprod Nat Bool)) :=\n" ++
+          "  match MutOpt.ofPrism r coprodPrism with\n" ++
+          "  | .some m => let 1 (x, m) := Mut.peek m; let 1 u := Mut.release (Mut.set m 9); .ok x u\n" ++
+          "  | .none u => .ok 0 u\n" ++
+          "def tSome : Result (Nat × Coprod Nat Bool) :=\n" ++
+          "  Uniq.borrow Region.static (Coprod.inl 5) (fun ρ h l r => somePrismTest r)\n" ++
+          "def tNone : Result (Nat × Coprod Nat Bool) :=\n" ++
+          "  Uniq.borrow Region.static (Coprod.inr Bool.true) (fun ρ h l r => somePrismTest r)\n" ++
+          "#eval match tSome with | .ok (n, c) => \"some \" ++ Nat.repr n ++ \" \" ++ showC c | .err e => \"err\"\n" ++
+          "#eval match tNone with | .ok (n, c) => \"none \" ++ Nat.repr n ++ \" \" ++ showC c | .err e => \"err\"\n" ++
+          "def fstP : LensP (Pair2 Nat Nat) (Pair2 Nat Nat) Nat Nat := LensP.ofLens Pair2.fstL\n" ++
+          "def zoomP1 {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=\n" ++
+          "  Uniq.zoomP fstP p (fun ρ' h t x => let 1 (n, x) := Uniq.peek x; .ok n (Uniq.write x 9))\n" ++
+          "def borrowP {0 ρ : Region} (1 p : Uniq ρ (Pair2 Nat Nat)) : Result1 Nat (Uniq ρ (Pair2 Nat Nat)) :=\n" ++
+          "  let 1 m := Mut.ofLensP p fstP;\n" ++
+          "  let 1 (n, m) := Mut.peek m;\n" ++
+          "  let 1 u := Mut.release (Mut.set m 9);\n" ++
+          "  .ok n u\n" ++
+          "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => zoomP1 r)\n" ++
+          "#eval Uniq.borrow Region.static (Pair2.mk 1 2) (fun ρ h l r => borrowP r)")
+          ["\"some 5 inl 9\"", "\"none 0 inr true\"", ".ok (1, 9, 2, ())", ".ok (1, 9, 2, ())"] },
     { name := "with --unbox-structs a shared handle is its value at run time and its scope is its body run in place (22i); a linear &mut scope is its body run in place, but for the handle's cell", run := fun _ => do
         let s ← libsState ("import Region\n" ++ regionsPush ++
           "def get {0 ρ : Region} (x : Shr ρ Nat) : Nat := x.val\n" ++

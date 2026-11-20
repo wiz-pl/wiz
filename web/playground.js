@@ -1,278 +1,67 @@
-// (11ab) The static playground's page half: load the Wasm module web/build-playground.sh
-// built (the self-hosted Wiz frontend), hand the editor's text to its export
-// `wiz_playground_eval : String → String`, and show the lines it returns. There is no
-// server and nothing to install: the module is the checker.
+// The playground's entry point. It points at an element, loads the page's runtime
+// (`web/playground-ui.wiz`, the whole page as one Loom app) and gives it the effects a
+// Wiz runtime cannot do itself: the self-hosted engine in its own Wasm instance, the
+// goals pane's language client (still a page island, `web/playground-lsp.js`), and the
+// host capabilities `mount` publishes (`download`, `clipboard`, `storage`, `url`).
 //
-// The page's own state is deliberately small: the editor text, the example it came
-// from, an optional draft in localStorage, and a URL fragment for sharing. The pure
-// encoding lives in web/playground-state.js and is tested by playground-state_test.mjs.
-// Those controls belong to the static markup; `?ui=loom` replaces the page with the
-// Loom app (`web/playground-ui.wiz`), which is the `web/` side's own UI.
+// Everything the page shows — the header and its toolbar (the examples menu, Share,
+// Save, Reset, Clear), the editor pane, the output pane, the status line, the footer —
+// is the runtime's. The page keeps no DOM structure of its own and never touches the
+// module's ABI: `mount`'s `call` is the only way in, so the next page to migrate is this
+// file with different effects.
 //
-// `?ui=loom` mounts the page itself from a second Wasm module
-// (`web/build-playground-ui.wiz` → `wiz-playground-ui.mjs`): the whole page is one Loom
-// app (`web/playground-ui.wiz`), and this file only loads the engine and turns its
-// results into the app's states. The default is the static markup the page carries; the
-// Loom path falls back to it when the module is not built, and it is the only path that
-// can move the page's text into a Loom component.
+// The runtime's effects come back as requests (`wiz_loom_requests`, a JSON list of
+// `{kind, payload}`); the page does one and acknowledges it. That is why the page still
+// knows about the engine and the language server but not about the fragment/draft
+// format, the examples or the output's classification: those are the runtime's.
+//
+// There is one page and one runtime. If the runtime cannot start (the module was not
+// built, the network failed, its ABI is not the Loom one), the mount point says so in
+// plain text; it does not switch to a second, hand-written UI. `?lsp=ws://host:port`
+// gives the goals pane an external language server; the default is the in-page one
+// (`web/selfhost-lsp-shim.js`).
 "use strict";
-import { isValue, renderValue } from "./playground-values.js";
-import { findPreset, presets } from "./playground-presets.js";
-import {
-  defaultState,
-  decodeFragment,
-  encodeShareUrl,
-  matchedPresetId,
-  parseDraft,
-  serializeDraft,
-  stateFor,
-} from "./playground-state.js";
+import { mount } from "./framework/mount.js";
 import { startInfoview } from "./playground-lsp.js";
 import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
 
-const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
-const useLoom = params.get("ui") === "loom";
+const runtimeModule = () => import("./wiz-playground-ui.mjs");
 
-// The page's elements: the static markup's at load, or the Loom app's after it mounts.
-// The UX controls (preset/share/save/reset/clear/note) exist only in the static
-// markup, so they stay null under `?ui=loom`.
-let editor = null;
-let runButton = null;
-let output = null;
-let status = null;
-let count = null;
-let engineEl = null;
-let note = null;
-let presetSelect = null;
-let shareButton = null;
-let saveButton = null;
-let resetButton = null;
-let clearButton = null;
-
-// The Loom UI instance (`?ui=loom`), driver's handle and its state marshalling.
-let ui = null;
-let app = null;
-// Whether the Loom app actually mounted; a module that fails to load leaves the static
-// page in place, which then needs its own state (examples, fragment, draft).
-let loomMounted = false;
-
+// The draft's key in the host's storage (`host.storage.get/set`); the value's format is
+// `Web.Draft`'s (the runtime serializes it in a `sync` request), so only the key is the
+// page's.
 const DRAFT_KEY = "wiz-playground-draft-v1";
-let wasm = null;   // web/playground-engine.js: every call guarded; only a trap/OOM restarts it
+
+let wasm = null;        // web/playground-engine.js: the self-hosted checker
+let handle = null;      // mount's handle: the runtime's entry points
 let busy = false;
-let engineFailed = false;
 let syncTimer = 0;
 let noteTimer = 0;
+let pendingSync = "";
 
-const big = (x) => (typeof x === "bigint" ? x : BigInt(x));   // wasm64: pointers are i64
-
-// Call one of the UI module's `wiz_loom_*` entry points: the state first, then strings
-// (allocated here and freed after) and numbers. The app patches the page itself
-// (`js_patch`), so the page only keeps the returned state.
-function uiCall(name, ...args) {
-  if (!ui || !app) return null;
-  const pointers = [];
-  const rest = args.map((a) => {
-    if (typeof a === "string") {
-      const p = ui.stringToNewUTF8(a);
-      pointers.push(p);
-      return big(p);
-    }
-    return typeof a === "number" ? big(a) : a;
-  });
-  try {
-    const next = ui["_" + name](app.state(), ...rest);
-    app.setState(next);
-    return next;
-  } finally {
-    for (const p of pointers) ui._free(p);
-  }
+// The runtime's one effect entry point.
+function effect(kind, a = "", b = "") {
+  if (handle) handle.call("wiz_loom_effect", kind, a, b);
 }
 
-// The UI's getters are not exported: an exported call consumes the state it is given
-// (driver.js's ownership note), so the page computes what it needs from the text it
-// already has (the error count for the status kind) and keeps the app's state.
+function setStatus(text, kind) { effect("status", text, kind || ""); }
+function setEngine(text) { effect("engine", text); }
+function setEnabled(on) { effect("enable", on ? "1" : "0"); }
 
-function setStatus(text, kind) {
-  if (ui) { uiCall("wiz_loom_status", text, kind || ""); return; }
-  status.textContent = text;
-  status.className = "status " + (kind || "");
+// A short-lived message beside the status line (`#note`, the runtime's field).
+function note(text) {
+  effect("note", text);
+  if (noteTimer) clearTimeout(noteTimer);
+  if (text) noteTimer = setTimeout(() => effect("note", ""), 2600);
 }
 
-function setEnabled(on) {
-  if (ui) { uiCall("wiz_loom_enable", on ? 1 : 0); return; }
-  runButton.disabled = !on;
-}
-
-function setEngine(text) {
-  if (ui) { uiCall("wiz_loom_engine", text); return; }
-  engineEl.textContent = text;
-}
-
-// A short-lived message beside the status line (the static page's `#note`).
-function notify(text) {
-  if (!note) return;
-  note.textContent = text;
-  window.clearTimeout(noteTimer);
-  noteTimer = window.setTimeout(() => { note.textContent = ""; }, 2600);
-}
-
-// The engine has the self-hosted frontend's embedded Prelude; a source without an
-// import gets it, so `Nat`, `Bool`, lists, … are in scope as in `wiz check`. (The rule
-// lives in the shim, which moves diagnostics back across the added lines.)
-function withPrelude(text) {
-  return preludeOf(text).source;
-}
-
-// `wiz_playground_eval` on a source: the module's one call, shared by Run and the
-// in-page language server. (stage 1) `wiz_playground_check`: the same check as JSON with
-// each line's offset, for the in-page language server; null with a module built before
-// it existed. Both reject with an `EngineFailure` when the program exits (the module is
-// kept), aborts or traps (the module is replaced).
-const evalSource = (src) => wasm.evaluate(src);
-const checkSource = (src) => wasm.check(src);
-
-// ## The static page's output pane (the Loom app renders its own)
-
-function line(text) {
-  const el = document.createElement("div");
-  el.className = "line";
-  el.textContent = text;
-  if (text.startsWith("error:") || text.startsWith("parse error")) {
-    el.classList.add("err");
-  } else if (isValue(text)) {
-    el.classList.add("val");
-    el.title = text;
-    const shown = renderValue(text);
-    if (shown !== null) el.textContent = shown;
-    else el.classList.add("raw");
-  }
-  return el;
-}
-
-// Show a run's output. Returns how many lines are errors (the status kind; the app owns
-// the `#count` text and the classes).
-function show(text) {
-  if (ui) {
-    uiCall("wiz_loom_show", text);
-  } else {
-    output.replaceChildren();
-    output.scrollTop = 0;
-    const lines = text.split("\n").filter((l) => l !== "");
-    for (const t of lines) output.appendChild(line(t));
-    const bad = lines.filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
-    count.textContent = lines.length + (lines.length === 1 ? " line" : " lines") +
-      (bad ? ` · ${bad} error${bad === 1 ? "" : "s"}` : "");
-  }
-  return text.split("\n").filter((l) => l !== "")
-    .filter((l) => l.startsWith("error:") || l.startsWith("parse error")).length;
-}
-
-// An engine exit, abort or trap: the lines it printed, then what happened.
-function showFailure(e) {
-  const lines = failureLines(e);
-  const countText = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
-  if (ui) { uiCall("wiz_loom_fail", lines.join("\n"), countText); return; }
-  output.replaceChildren(...lines.map(line));
-  output.scrollTop = 0;
-  count.textContent = countText;
-}
-
-// ## The static page's program state (examples, the URL fragment, the draft)
-
-function currentState() {
-  return stateFor(editor ? editor.value : "");
-}
-
-function setEditor(code, preset) {
-  if (ui) uiCall("wiz_loom_text", code);
-  if (editor) editor.value = code;
-  if (presetSelect) presetSelect.value = preset || "";
-}
-
-function buildPresetOptions() {
-  if (!presetSelect) return;
-  presetSelect.replaceChildren();
-  const custom = document.createElement("option");
-  custom.value = "";
-  custom.textContent = "Custom program";
-  custom.disabled = true;
-  presetSelect.appendChild(custom);
-  for (const p of presets) {
-    const option = document.createElement("option");
-    option.value = p.id;
-    option.textContent = p.title;
-    presetSelect.appendChild(option);
-  }
-}
-
-function syncPreset() {
-  if (!presetSelect) return;
-  presetSelect.value = matchedPresetId(editor.value);
-}
-
-function readDraft() {
-  try {
-    return parseDraft(localStorage.getItem(DRAFT_KEY));
-  } catch {
-    return null;
-  }
-}
-
-function writeDraft() {
-  if (!editor) return;
-  try {
-    localStorage.setItem(DRAFT_KEY, serializeDraft(currentState()));
-  } catch {
-    // a private window or a full quota: the page still works, it just won't remember.
-  }
-}
-
-function replaceUrl() {
-  if (!editor) return;
-  try {
-    const href = encodeShareUrl(location.href, currentState());
-    if (href !== location.href) history.replaceState(null, "", href);
-  } catch {
-    // `file://`, a blocked History API, or an over-long URL: sharing still copies the
-    // fragment below even if the address bar cannot be updated.
-  }
-}
-
-function scheduleSync() {
-  if (!editor) return;
-  window.clearTimeout(syncTimer);
-  syncTimer = window.setTimeout(() => {
-    writeDraft();
-    replaceUrl();
-  }, 250);
-}
-
-function syncNow() {
-  if (!editor) return;
-  window.clearTimeout(syncTimer);
-  writeDraft();
-  replaceUrl();
-}
-
-function clearOutput(quiet) {
-  if (ui) {
-    uiCall("wiz_loom_show", "");
-  } else {
-    output.replaceChildren();
-    output.scrollTop = 0;
-    count.textContent = "0 lines";
-  }
-  if (!busy) {
-    if (wasm) setStatus("ready", "ready");
-    else if (engineFailed) setStatus("the engine did not load", "error");
-    else setStatus("loading the engine…", "running");
-  }
-  if (!quiet) notify("output cleared");
-}
-
+// Run the editor's program: the effect behind the Run button, Ctrl/⌘+Enter, an
+// example's load, and the engine becoming ready. The runtime holds the text and the
+// state; the page calls the engine and reports the result.
 function run() {
-  if (!wasm || busy) return;
+  const editor = document.getElementById("editor");
+  if (!wasm || busy || !editor) return;
   busy = true;
   setEnabled(false);
   setStatus("running…", "running");
@@ -280,14 +69,16 @@ function run() {
   setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = await evalSource(withPrelude(editor.value));
+      const text = await wasm.evaluate(preludeOf(editor.value).source);
       const ms = Math.max(0, performance.now() - started);
-      const bad = show(text);
-      setStatus(`done in ${ms < 10 ? "<10" : Math.round(ms)} ms`, bad ? "error" : "ready");
+      effect("finished", text, `done in ${ms < 10 ? "<10" : Math.round(ms)} ms`);
     } catch (e) {
-      if (e && e.name === "EngineFailure") showFailure(e);
-      else show("error: " + (e && e.message ? e.message : String(e)));
-      setStatus("failed", "error");
+      if (e && e.name === "EngineFailure") {
+        const countText = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
+        effect("failed", failureLines(e).join("\n"), countText);
+      } else {
+        effect("finished", "error: " + (e && e.message ? e.message : String(e)), "failed");
+      }
     } finally {
       busy = false;
       setEnabled(true);
@@ -295,249 +86,183 @@ function run() {
   }, 0);
 }
 
-function save() {
-  if (!editor) return;
-  const blob = new Blob([withPrelude(editor.value)], { type: "text/plain;charset=utf-8" });
-  const href = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = href;
-  link.download = "playground.wiz";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(href), 1000);
-  writeDraft();
-  notify("saved playground.wiz");
-}
-
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // fall through: plain HTTP pages often have no clipboard permission
-  }
-  let area = null;
-  try {
-    area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    return document.execCommand("copy");
-  } catch {
-    return false;
-  } finally {
-    if (area) area.remove();
-  }
-}
-
-async function share() {
-  if (!editor) return;
-  syncNow();
-  const url = encodeShareUrl(location.href, currentState());
-  replaceUrl();
-  if (await copyText(url)) {
-    notify("link copied to the clipboard");
-  } else {
-    notify("link is in the address bar");
-    window.prompt("Copy this playground link:", url);
-  }
-}
-
-function reset() {
-  const state = defaultState();
-  setEditor(state.code, state.preset);
-  clearOutput(true);
-  syncNow();
-  if (wasm) setStatus("ready", "ready");
-  notify("reset to the default program");
-}
-
-function applyUrl(hash) {
-  const state = decodeFragment(hash);
-  if (!state) return false;
-  setEditor(state.code, state.preset);
-  clearOutput(true);
-  if (!wasm) setStatus(engineFailed ? "the engine did not load" : "loading the engine…", engineFailed ? "error" : "running");
-  else if (!busy && state.preset) run();
-  else if (!busy) setStatus("ready — press Run", "ready");
-  return true;
-}
-
-// The page's state from the URL fragment, the draft, or the default example.
-function initPageState() {
-  buildPresetOptions();
-  const fromUrl = decodeFragment(location.hash);
-  const initial = fromUrl || readDraft() || defaultState();
-  setEditor(initial.code, initial.preset);
-  if (location.hash && !fromUrl) notify("ignored an invalid playground link");
-  syncPreset();
-  writeDraft();
-  if (fromUrl) notify("loaded the program from the link");
-}
-
-// ## The goals pane (independent of the Wasm engine)
-
-// By default it is the in-page server (web/selfhost-lsp-shim.js): the same Wasm engine
-// answers the pane, so there is nothing to start, and it waits for the engine to load.
-// `?lsp=ws://host:port` switches it to the external language client
-// (web/playground-lsp.js), and `?lsp=off` (or none/0/false) leaves the pane with no
-// server; a failed connection is the same as no server.
-let engineReady;
-const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
-engineLoaded.catch(() => { /* reported by start(); the shim reports it again */ });
-const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
-  ? selfhostEndpoint({
-    evaluate: (src) => engineLoaded.then(() => evalSource(src)),
-    check: (src) => engineLoaded.then(() => checkSource(src)),
-  })
-  : undefined;
-
-function wireGoals() {
-  // The squiggle mirror wraps the textarea in a positioned element, which moves the
-  // textarea's text node off the Loom app's patch paths (the driver addresses nodes by
-  // index), so the Loom page keeps it off. The completion popup is appended to the body
-  // and stays on.
-  startInfoview({
-    editor, panel: document.getElementById("goals"), config: selfhost,
-    squiggles: ui === null,
-  });
-}
-
-// ## Mounting the page
-
-// Mount the Loom app on `body` and return true, or leave the static markup in place and
-// return false (the module is not built, or its ABI is not what the driver expects).
-async function mountLoom() {
-  try {
-    const createModule = (await import("./wiz-playground-ui.mjs")).default;
-    ui = await createModule({ print: (s) => console.log(s), printErr: (s) => console.warn(s) });
-    // A cheap ABI probe before anything is removed from the page: the SSR has to come
-    // back as a string, or the static page stays.
-    const probe = ui._wiz_loom_init();
-    ui._free(ui._wiz_loom_html(probe));
-    const { start: startLoom } = await import("./framework/driver.js");
-    app = startLoom(ui, document.body, { events: ["click", "input"] });
-    loomMounted = true;
-    return true;
-  } catch (e) {
-    console.warn("wiz playground: using the static page: " +
-      (e && e.message ? e.message : String(e)));
-    ui = null;
-    app = null;
-    return false;
-  }
-}
-
-function wireEditor() {
-  editor = document.getElementById("editor");
-  runButton = document.getElementById("run");
-  status = document.getElementById("status");
-  output = document.getElementById("output");
-  count = document.getElementById("count");
-  engineEl = document.getElementById("engine");
-  note = document.getElementById("note");
-  presetSelect = document.getElementById("preset");
-  shareButton = document.getElementById("share");
-  saveButton = document.getElementById("save");
-  resetButton = document.getElementById("reset");
-  clearButton = document.getElementById("clear");
-
-  if (runButton) runButton.addEventListener("click", run);
-  if (clearButton) clearButton.addEventListener("click", () => clearOutput(false));
-  if (shareButton) shareButton.addEventListener("click", share);
-  if (saveButton) saveButton.addEventListener("click", save);
-  if (resetButton) resetButton.addEventListener("click", reset);
-  if (presetSelect) {
-    presetSelect.addEventListener("change", () => {
-      const p = findPreset(presetSelect.value);
-      if (!p) return;
-      setEditor(p.code, p.id);
-      clearOutput(true);
-      syncNow();
-      notify("loaded example: " + p.title);
-      if (wasm && !busy) run();
-      else if (!wasm) setStatus(engineFailed ? "the engine did not load" : "loading the engine…", engineFailed ? "error" : "running");
-    });
-  }
-
-  if (editor) {
-    editor.addEventListener("input", () => {
-      syncPreset();
-      scheduleSync();
-    });
-    editor.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        run();
-        return;
-      }
-      if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-      e.preventDefault();
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      editor.setRangeText("  ", start, end, "end");
-      syncPreset();
-      scheduleSync();
-    });
-  }
-
-  document.addEventListener("keydown", (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    if (e.key.toLowerCase() === "s" && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      save();
-    }
-  });
-
-  window.addEventListener("hashchange", () => { applyUrl(location.hash); });
-  window.addEventListener("pagehide", syncNow);
-}
-
-async function start() {
-  // `?ui=loom`: the page is the Loom app; otherwise the static markup stays.
-  if (useLoom) await mountLoom();
-  wireEditor();
-  // The examples, the URL fragment and the draft are the static page's state; the Loom
-  // app owns its own, so do not overwrite it with a feature it does not render.
-  if (!loomMounted) initPageState();
-  wireGoals();
-
+// The engine: a second Wasm instance (`web/build-playground.sh`), loaded after the page
+// paints so the runtime's first frame is not waiting for it.
+async function loadEngine() {
   setStatus("loading the engine…", "running");
   try {
     const createModule = (await import("./wiz-playground.mjs")).default;
-    const engine = createEngine(createModule, {
+    wasm = createEngine(createModule, {
       print: (s) => console.log(s),
       printErr: (s) => console.warn(s),
       onRestart: (f) => console.warn("wiz playground: restarting the engine: " + f.message),
     });
-    await engine.ready;
-    wasm = engine;
+    await wasm.ready;
     setEngine("engine: ready");
     engineReady.resolve();
     setEnabled(true);
-    if (!loomMounted) {
-      const current = currentState();
-      if (!output.childElementCount && current.preset) run();
-      else if (!output.childElementCount) setStatus("ready — press Run", "ready");
-      else setStatus("ready", "ready");
-    } else if (!output || !output.childElementCount) {
-      run();
-    } else {
-      setStatus("ready", "ready");
-    }
+    setStatus("ready", "ready");
+    run();
   } catch (e) {
-    engineFailed = true;
     setEngine("engine: failed");
     engineReady.reject(e);
-    setStatus("the engine did not load: " + (e && e.message ? e.message : String(e)), "error");
-    show("error: " + (e && e.message ? e.message : String(e)));
+    const reason = e && e.message ? e.message : String(e);
+    effect("finished", "error: " + reason, "the engine did not load: " + reason);
   }
 }
 
-start();
+// ## The runtime's editor rules
+
+// The runtime owns the editor's pure rules (`lib/Web/EditorModel.wiz`); the page asks
+// it one question at a time through `mount`'s `ask` (a read-only string query) and hands
+// the answer to the overlay widgets, which only paint and position. Nothing here decides
+// what a diagnostic underlines or what a completion inserts.
+function editorRules(handle) {
+  const ask = (name, ...args) => handle.ask(name, ...args);
+  return {
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments", text, JSON.stringify(diagnostics || []), "0")),
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup(text, offset, items, index) {
+      return JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset)));
+    },
+    move: (index, delta, count) =>
+      Number(ask("wiz_loom_editor_move", String(index), String(delta), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position", text, String(offset))),
+  };
+}
+
+// ## The effects the runtime asks for
+
+// The URL fragment and the draft: the runtime hands over the *formatted* values (it
+// owns the format); the page writes them, debounced, because a keystroke is not a
+// reason to touch `history` and the storage capability twice. `flushSync` is also the
+// `pagehide` path, so the last keystroke is not lost when the tab closes.
+function flushSync() {
+  if (!pendingSync || !handle) return;
+  let value;
+  try { value = JSON.parse(pendingSync); } catch { return; }
+  try { handle.host.storage.set(DRAFT_KEY, value.draft); } catch { /* private window, full quota */ }
+  if (typeof value.fragment === "string") handle.host.url(value.fragment);
+}
+
+function sync(payload) {
+  pendingSync = payload;
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { syncTimer = 0; flushSync(); }, 250);
+}
+
+async function share(fragment) {
+  const base = typeof location !== "undefined" ? location.href.split("#")[0] : "";
+  const url = base + fragment;
+  handle.host.url(fragment);
+  if (await handle.host.clipboard(url)) note("link copied to the clipboard");
+  else note("link is in the address bar");
+}
+
+// `onRequest(kind, payload)` is mount's face of the runtime's request list. Acknowledge
+// first: an effect that throws or is slow must not be requested again forever.
+function onRequest(kind, payload) {
+  if (!handle) return;
+  effect("ack", kind);
+  if (kind === "run") run();
+  else if (kind === "save") {
+    if (handle.host.download("playground.wiz", payload)) note("saved playground.wiz");
+  } else if (kind === "share") share(payload);
+  else if (kind === "sync") sync(payload);
+  else if (kind === "edit") {
+    // A Tab: the runtime formatted the edit (insert/indent at the selection); the host
+    // applies it to the textarea and reports the value and the new selection back. The
+    // `input` event the capability dispatches also reaches the runtime's normal path.
+    let edit = null;
+    try { edit = JSON.parse(payload); } catch { edit = null; }
+    const result = edit ? handle.host.edit(edit) : null;
+    if (result) effect("edited", result.value, result.selectionStart + "\n" + result.selectionEnd);
+  }
+  else if (goals) goals.request(kind, payload);
+}
+
+// ## The goals pane
+
+// The goals pane is an island (`#goals`): the language client writes into it, and the
+// runtime only renders the empty container, so a re-render never clobbers it. Both
+// editor overlays are on: the squiggle layer no longer wraps the textarea (it is the
+// last child of the editor's section, so the runtime's child-index patch paths stay
+// stable), and the completion popup is appended to the body, outside the rendered tree.
+let goals = null;
+
+// The rules behind both overlays are the runtime's (`editorRules`); the pane is the
+// runtime's too (`lib/Web/Goals.wiz`), so its answers go through the page's effect and a
+// click's `reveal`/`subterm` request comes back through onRequest.
+function wireGoals(editor, rules) {
+  goals = startInfoview({
+    editor,
+    config: selfhost,
+    rules,
+    update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
+  });
+}
+
+// The goals pane's server. The in-page one answers from the same engine, so it waits for
+// the engine's promise; `?lsp=ws://host:port` uses the external client instead.
+let engineReady;
+const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
+engineLoaded.catch(() => { /* reported by loadEngine() */ });
+const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
+  ? selfhostEndpoint({
+    evaluate: (src) => engineLoaded.then(() => wasm.evaluate(src)),
+    check: (src) => engineLoaded.then(() => wasm.check(src)),
+  })
+  : undefined;
+
+// There is no page to fall back to: if the runtime cannot start, the mount point says so
+// in plain text, with the reason. This is the whole failure path — no DOM construction
+// and no second UI, which is what keeps one page's behaviour in one place.
+function cannotStart(root, e) {
+  const reason = e && e.message ? e.message : String(e);
+  console.error("wiz playground: the runtime could not start: " + reason);
+  root.textContent =
+    "The playground could not start: " + reason + "\n\n" +
+    "This page runs the Wiz checker in WebAssembly. It needs the runtime module " +
+    "(wiz-playground-ui.mjs) and the engine (wiz-playground.mjs); see docs/building.md, " +
+    "\"The playground\".";
+}
+
+// Mount the runtime on `root` (the body by default) and give it its effects. Exported for
+// the Node tests, which pass a stub module and a DOM double; `web/playground.html` calls
+// it from a module script.
+export async function startPage({ root, module = runtimeModule } = {}) {
+  const target = root || document.body;
+  try {
+    handle = await mount(target, {
+      module,
+      transport: { engine: () => wasm },
+      events: ["click", "input", "change", "keydown"],
+      onRequest,
+    });
+  } catch (e) {
+    cannotStart(target, e);
+    return false;
+  }
+  // The initial state: the URL fragment wins, then the stored draft, then the default
+  // example. `Web.Draft` owns the precedence and the format; the page only supplies the
+  // two strings it can read.
+  const hash = typeof location !== "undefined" ? location.hash : "";
+  const draft = handle.host.storage.get(DRAFT_KEY) || "";
+  handle.call("wiz_loom_effect", "load", hash, draft);
+  const editor = document.getElementById("editor");
+  if (editor) wireGoals(editor, editorRules(handle));
+  if (typeof addEventListener === "function") {
+    addEventListener("pagehide", () => {
+      if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+      flushSync();
+    });
+  }
+  await loadEngine();
+  return true;
+}

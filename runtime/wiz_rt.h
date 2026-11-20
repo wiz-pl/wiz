@@ -390,6 +390,10 @@ WIZ_API wiz_val wiz_sys_fd_read_exact(void *p, uint64_t n, int timed, uint64_t n
 WIZ_API uint64_t wiz_sys_fd_write(void *p, wiz_val v);
 WIZ_API uint64_t wiz_sys_fd_wait(void *p, uint64_t events, int timed, uint64_t ns);
 WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int back);
+WIZ_API uint64_t wiz_sys_fd_fsync(void *p);
+WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p);
+WIZ_API uint64_t wiz_sys_fd_flock(void *p, uint64_t mode, int nonblock);
+WIZ_API uint64_t wiz_sys_fd_ftruncate(void *p, uint64_t n);
 WIZ_API wiz_val wiz_sys_fd_poll(wiz_val fds, wiz_val events, int timed, uint64_t ns);
 WIZ_API void wiz_set(wiz_val o, uint32_t i, wiz_val v);
 WIZ_API wiz_val wiz_chan_fork(wiz_val child);

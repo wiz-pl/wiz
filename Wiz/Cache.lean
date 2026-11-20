@@ -287,7 +287,7 @@ def cacheable : List Name :=
   ["command.def", "command.axiom", "command.defEqns", "command.inductive", "command.structure",
    "command.class", "command.instance", "command.coinductive", "command.builtin", "command.extern",
    "command.glue", "command.foreignType", "command.cStruct", "command.export", "command.check", "command.reduce", "command.eval",
-   "command.erase", "command.run", "command.ir", "command.printAxioms", "command.private"]
+   "command.plot", "command.erase", "command.run", "command.ir", "command.printAxioms", "command.private"]
 
 def effectOf (s s' : CommandState R) : Effect R :=
   let newNames := s'.globals.order.extract s.globals.order.size s'.globals.order.size

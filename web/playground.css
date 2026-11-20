@@ -145,48 +145,5 @@ ul.tree { list-style: none; margin: 4px 0 0; padding-left: 14px; border-left: 1p
 ul.tree li { margin: 1px 0; }
 ul.tree li.leaf { color: var(--dim); }
 
-/* (playground editor) The wrapper the editor's overlays share: the textarea fills it and
-   the squiggle mirror is absolutely positioned over it. Without JavaScript the textarea
-   is never wrapped and these rules match nothing. */
-.editor-wrap { position: relative; display: flex; flex: 1 1 auto; min-height: 45vh; min-width: 0; }
-.editor-wrap > textarea { flex: 1; min-height: 0; }
-
-/* The squiggle mirror: the editor's text again, transparent, with a wavy underline under
-   every diagnostic range. It never takes a pointer event, so typing and selection stay
-   the textarea's. The font and padding are repeated here (and copied from the textarea by
-   web/squiggles.js where the browser can measure) so the underlines line up. */
-.squiggle-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-.squiggle-layer[hidden] { display: none; }
-.squiggle-text { position: absolute; top: 0; left: 0; width: 100%; margin: 0; box-sizing: border-box;
-  padding: 12px 16px; color: transparent; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; tab-size: 2;
-  will-change: transform; }
-.squiggle { text-decoration: underline wavy; text-decoration-skip-ink: none; text-underline-offset: 2px; }
-.squiggle.sev-error { text-decoration-color: var(--err); }
-.squiggle.sev-warning { text-decoration-color: var(--warn); }
-.squiggle.sev-info, .squiggle.sev-hint { text-decoration-color: var(--val); }
-
-/* (playground editor) The completion popup: fixed over the page at the caret, never in
-   the layout (so a patch or a re-render cannot move it under the cursor). */
-.completions { position: fixed; z-index: 40; min-width: 180px; max-width: 420px; max-height: 40vh;
-  overflow-y: auto; padding: 2px; background: var(--bg); border: 1px solid var(--line);
-  border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
-  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.completions[hidden] { display: none; }
-.completion { display: flex; gap: 12px; align-items: baseline; padding: 3px 8px; border-radius: 4px; white-space: nowrap; }
-.completion.sel { background: var(--hover); }
-.completion-label { color: var(--fg); }
-.completion-detail { margin-left: auto; color: var(--dim); font-size: 12px; }
-/* (editor features) The hover card: `web/hover.js` places it under the caret with
-   fixed coordinates, so it follows the editor when the page scrolls; it never takes a
-   pointer event, so a click still goes to the textarea. */
-.wiz-hover { position: fixed; z-index: 40; max-width: min(46ch, 80vw); max-height: 40vh;
-             overflow: auto; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
-             background: var(--panel); color: var(--fg); box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
-             font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-             white-space: pre-wrap; pointer-events: none; }
-.wiz-hover[hidden] { display: none; }
-.wiz-hover .hover-head { font: 600 12px system-ui, sans-serif; color: var(--dim); margin-bottom: 4px; }
-.wiz-hover .hover-line.code { color: var(--const); }
-.wiz-hover .hover-line.more { color: var(--dim); }
-.wiz-hover hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+/* The editor's overlays (the squiggle layer, the completion popup and the hover card)
+   live in web/overlays.css, shared with the standalone infoview page. */

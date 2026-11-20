@@ -1,0 +1,351 @@
+import Prelude
+import Text
+import Json
+import Web.Examples
+
+/-!
+# Web.Draft
+
+The playground's state format: which program the page holds, a URL fragment that
+encodes it, and the versioned JSON draft in `localStorage`. It is the pure half of
+`web/playground-state.js`, which the page used to own; the browser half is two host
+capabilities, `storage.get`/`storage.set` and `url` (`history.replaceState`).
+
+A fragment is either
+
+    #preset=basics
+
+when the text is exactly an example, or
+
+    #code=<base64url of the UTF-8 text>
+
+otherwise. Base64url (RFC 4648 §5, no padding) keeps the fragment to one URL-safe
+parameter, including for Unicode, quotes, newlines and `&`/`#`/`%` in a program. The
+draft is versioned JSON so a future change can refuse old data instead of guessing.
+
+`web/playground-state_test.mjs` was the contract; its cases live in
+`Tests/Groups/Loom.lean` now (`=loom`), because the format is the runtime's.
+-/
+
+-- ## UTF-8
+
+/-- The UTF-8 bytes of one code point (a character is one code point in Wiz). -/
+def Draft.utf8Char (c : Char) : List Nat :=
+  let n := Char.code c;
+  if Nat.lt n 128 then [n]
+  else if Nat.lt n 2048 then
+    [192 + (n >>> 6), 128 + (n &&& 63)]
+  else if Nat.lt n 65536 then
+    [224 + (n >>> 12), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)]
+  else
+    [240 + (n >>> 18), 128 + ((n >>> 12) &&& 63), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)]
+
+/-- The UTF-8 bytes of a string. -/
+def Draft.utf8Encode (s : String) : List Nat :=
+  List.concat (List.map Draft.utf8Char (String.chars s))
+
+/-- Whether `b` is a UTF-8 continuation byte (`10xxxxxx`). -/
+def Draft.cont (b : Nat) : Bool := Nat.le 128 b && Nat.lt b 192
+
+/-- Decode UTF-8 bytes. Malformed input (a bad lead byte, a missing or stray
+continuation, an overlong form, a surrogate or a code point above U+10FFFF) is `none`,
+as `TextDecoder`'s `fatal` mode refuses it. -/
+partial def Draft.decodeGo (bs : List Nat) (acc : List Nat) : Option (List Nat) :=
+  match bs with
+  | .nil => .some (List.reverse acc)
+  | .cons b rest =>
+    if Nat.lt b 128 then Draft.decodeGo rest (.cons b acc)
+    else if Nat.le 194 b && Nat.lt b 224 then
+      match rest with
+      | .cons b1 r => if Draft.cont b1 then
+          Draft.decodeGo r (.cons (((b &&& 31) <<< 6) ||| (b1 &&& 63)) acc) else .none
+      | .nil => .none
+    else if Nat.le 224 b && Nat.lt b 240 then
+      match rest with
+      | .cons b1 (.cons b2 r) =>
+        let ok1 := Draft.cont b1 && Draft.cont b2;
+        let overlong := Nat.beq b 224 && Nat.lt b1 160;
+        let surrogate := Nat.beq b 237 && Nat.le 160 b1;
+        if ok1 && !overlong && !surrogate then
+          Draft.decodeGo r (.cons ((((b &&& 15) <<< 12) ||| ((b1 &&& 63) <<< 6)) ||| (b2 &&& 63)) acc)
+        else .none
+      | _ => .none
+    else if Nat.le 240 b && Nat.lt b 245 then
+      match rest with
+      | .cons b1 (.cons b2 (.cons b3 r)) =>
+        let ok1 := Draft.cont b1 && Draft.cont b2 && Draft.cont b3;
+        let overlong := Nat.beq b 240 && Nat.lt b1 144;
+        let tooBig := Nat.beq b 244 && Nat.le 144 b1;
+        if ok1 && !overlong && !tooBig then
+          Draft.decodeGo r (.cons (((((b &&& 7) <<< 18) ||| ((b1 &&& 63) <<< 12)) |||
+            ((b2 &&& 63) <<< 6)) ||| (b3 &&& 63)) acc)
+        else .none
+      | _ => .none
+    else .none
+
+/-- Decode UTF-8 bytes into a string, or `none` if they are not valid UTF-8. -/
+def Draft.utf8Decode (bs : List Nat) : Option String :=
+  match Draft.decodeGo bs .nil with
+  | .some cps => .some (.mk (List.map Char.mk cps))
+  | .none => .none
+
+-- ## Base64url (RFC 4648 §5, no padding)
+
+/-- The base64url character for a 6-bit value. -/
+def Draft.b64Char (n : Nat) : Char :=
+  if Nat.lt n 26 then Char.mk (65 + n)
+  else if Nat.lt n 52 then Char.mk (97 + (n - 26))
+  else if Nat.lt n 62 then Char.mk (48 + (n - 52))
+  else if Nat.beq n 62 then Char.mk 45
+  else Char.mk 95
+
+/-- The 6-bit value of a base64url character (`256` when it is not one). -/
+def Draft.b64Val (c : Char) : Nat :=
+  let n := Char.code c;
+  if Nat.le 65 n && Nat.le n 90 then n - 65
+  else if Nat.le 97 n && Nat.le n 122 then n - 97 + 26
+  else if Nat.le 48 n && Nat.le n 57 then n - 48 + 52
+  else if Nat.beq n 45 then 62
+  else if Nat.beq n 95 then 63
+  else 256
+
+/-- The base64url characters for `bytes`, three bytes to four characters, no padding. -/
+partial def Draft.b64Go (bs : List Nat) : List Char :=
+  match bs with
+  | .nil => .nil
+  | .cons a r1 => match r1 with
+    | .nil => [Draft.b64Char (a >>> 2), Draft.b64Char ((a &&& 3) <<< 4)]
+    | .cons b r2 => match r2 with
+      | .nil =>
+        [ Draft.b64Char (a >>> 2)
+        , Draft.b64Char (((a &&& 3) <<< 4) ||| (b >>> 4))
+        , Draft.b64Char ((b &&& 15) <<< 2) ]
+      | .cons c _ =>
+        [ Draft.b64Char (a >>> 2)
+        , Draft.b64Char (((a &&& 3) <<< 4) ||| (b >>> 4))
+        , Draft.b64Char (((b &&& 15) <<< 2) ||| (c >>> 6))
+        , Draft.b64Char (c &&& 63) ]
+        ++ Draft.b64Go (List.drop 3 bs)
+
+/-- Base64url of a string's UTF-8 bytes. -/
+def Draft.base64UrlEncode (text : String) : String :=
+  .mk (Draft.b64Go (Draft.utf8Encode text))
+
+/-- The base64url bytes of `cs`, in reverse order. Canonical input only: a bad
+character, a one-character remainder and non-zero padding bits are `none` (as the JS
+module refused `abc`-style aliases). -/
+partial def Draft.b64DecodeGo (cs : List Char) (acc : List Nat) : Option (List Nat) :=
+  match cs with
+  | .nil => .some (List.reverse acc)
+  | .cons a r1 => match r1 with
+    | .nil => .none
+    | .cons b r2 =>
+      let va := Draft.b64Val a;
+      let vb := Draft.b64Val b;
+      match r2 with
+      | .nil =>
+        if Nat.beq va 256 || Nat.beq vb 256 || !(Nat.beq (vb &&& 15) 0) then .none
+        else .some (List.reverse (.cons ((va <<< 2) ||| (vb >>> 4)) acc))
+      | .cons c r3 =>
+        let vc := Draft.b64Val c;
+        match r3 with
+        | .nil =>
+          if Nat.beq va 256 || Nat.beq vb 256 || Nat.beq vc 256 ||
+             !(Nat.beq (vc &&& 3) 0) then .none
+          else .some (List.reverse
+            (.cons ((va <<< 2) ||| (vb >>> 4))
+              (.cons ((((vb &&& 15) <<< 4) ||| (vc >>> 2))) acc)))
+        | .cons d r4 =>
+          let vd := Draft.b64Val d;
+          if Nat.beq va 256 || Nat.beq vb 256 || Nat.beq vc 256 || Nat.beq vd 256 then .none
+          else
+            Draft.b64DecodeGo r4
+              (.cons (((vc &&& 3) <<< 6) ||| vd)
+                (.cons (((vb &&& 15) <<< 4) ||| (vc >>> 2))
+                  (.cons ((va <<< 2) ||| (vb >>> 4)) acc)))
+
+/-- A base64url string as its UTF-8 text, or `none` if it is not canonical base64url or
+not valid UTF-8. -/
+def Draft.base64UrlDecode (text : String) : Option String :=
+  match Draft.b64DecodeGo (String.chars text) .nil with
+  | .none => .none
+  | .some bytes => Draft.utf8Decode bytes
+
+-- ## Percent-encoded query parameters
+
+/-- The value of a hex digit, if it is one. -/
+def Draft.hexVal (c : Char) : Option Nat :=
+  let n := Char.code c;
+  if Nat.le 48 n && Nat.le n 57 then .some (n - 48)
+  else if Nat.le 65 n && Nat.le n 70 then .some (n - 55)
+  else if Nat.le 97 n && Nat.le n 102 then .some (n - 87)
+  else .none
+
+/-- Two upper-case hex digits. -/
+def Draft.hex2 (n : Nat) : String :=
+  let digit := fun (d : Nat) => if Nat.lt d 10 then Char.mk (48 + d) else Char.mk (55 + d);
+  .mk [digit (n >>> 4), digit (n &&& 15)]
+
+/-- Percent-encode the bytes that are not URL-safe (the same set
+`encodeURIComponent` keeps; the ids the playground generates need no escape). -/
+def Draft.percentEncode (s : String) : String :=
+  String.join (List.map (fun c =>
+    let n := Char.code c;
+    if (Nat.le 48 n && Nat.le n 57) || (Nat.le 65 n && Nat.le n 90) ||
+       (Nat.le 97 n && Nat.le n 122) || Nat.beq n 45 || Nat.beq n 95 || Nat.beq n 46 ||
+       Nat.beq n 33 || Nat.beq n 126 || Nat.beq n 42 || Nat.beq n 39 ||
+       Nat.beq n 40 || Nat.beq n 41 then
+      String.singleton c
+    else
+      "%" ++ Draft.hex2 n) (String.chars s))
+
+/-- Decode `%XX` and `+`; a malformed `%` is kept as it is (a browser's
+`URLSearchParams` would not produce one, and the fragment is then rejected by
+`decodeFragment`). -/
+partial def Draft.percentGo (cs : List Char) (acc : List Char) : List Char :=
+  match cs with
+  | .nil => List.reverse acc
+  | .cons c rest =>
+    if Nat.beq (Char.code c) 43 then Draft.percentGo rest (.cons (Char.mk 32) acc)
+    else if Nat.beq (Char.code c) 37 then
+      match rest with
+      | .cons h1 (.cons h2 r) => match Draft.hexVal h1, Draft.hexVal h2 with
+        | .some a, .some b => Draft.percentGo r (.cons (Char.mk (a * 16 + b)) acc)
+        | _, _ => Draft.percentGo rest (.cons c acc)
+      | _ => Draft.percentGo rest (.cons c acc)
+    else Draft.percentGo rest (.cons c acc)
+
+/-- The decoded form of one query component. -/
+def Draft.percentDecode (s : String) : String := .mk (Draft.percentGo (String.chars s) .nil)
+
+/-- Split `part` at its first `=`: `("key", "value")`, or `(part, "")` when there is
+none. -/
+partial def Draft.splitPairGo : List Char → List Char → String × String
+  | .nil, key => (.mk (List.reverse key), "")
+  | .cons c rest, key =>
+    if Nat.beq (Char.code c) 61 then (.mk (List.reverse key), .mk rest)
+    else Draft.splitPairGo rest (.cons c key)
+
+/-- Split `part` at its first `=`. -/
+def Draft.splitPair (part : String) : String × String :=
+  Draft.splitPairGo (String.chars part) .nil
+
+/-- The query parameters of a fragment (percent-decoded, in order). -/
+def Draft.params (raw : String) : List (String × String) :=
+  List.map (fun part =>
+    let p := Draft.splitPair part;
+    (Draft.percentDecode p.1, Draft.percentDecode p.2)) (String.splitOn raw "&")
+
+/-- The first value of `key`, if present. -/
+def Draft.lookup (key : String) : List (String × String) → Option String
+  | .nil => .none
+  | .cons kv rest => if String.eq kv.1 key then .some kv.2 else Draft.lookup key rest
+
+-- ## The state
+
+/-- The program text and the example it is exactly, if any (`preset` is `""` for a
+custom program: Wiz has no `null`). -/
+structure Draft.State where
+  code : String
+  preset : String
+
+/-- The state of `code`: the matching example's id, or `""`. -/
+def Draft.stateFor (code : String) : Draft.State :=
+  match Examples.presetOf code with
+  | .some e => Draft.State.mk code e.id
+  | .none => Draft.State.mk code ""
+
+/-- The first paint's state: the default example. -/
+def Draft.defaultState : Draft.State :=
+  let id := Examples.defaultExampleId;
+  Draft.State.mk (Examples.codeOf id) id
+
+/-- The example the text is exactly, as a menu value (`""` when it is custom). -/
+def Draft.matchedPresetId (code : String) : String :=
+  match Examples.presetOf code with
+  | .some e => e.id
+  | .none => ""
+
+-- ## The fragment
+
+/-- `#preset=<id>` when the text is an example, `#code=<base64url>` otherwise. -/
+def Draft.encodeFragment (s : Draft.State) : String :=
+  match Examples.presetOf s.code with
+  | .some e => "#preset=" ++ Draft.percentEncode e.id
+  | .none => "#code=" ++ Draft.base64UrlEncode s.code
+
+/-- The state a fragment encodes, or `none` when it is empty, unknown or malformed. -/
+def Draft.decodeFragment (hash : String) : Option Draft.State :=
+  let raw := match String.stripPrefix hash "#" with
+    | .some r => r
+    | .none => hash;
+  if String.isEmpty raw then .none
+  else
+    let ps := Draft.params raw;
+    match Draft.lookup "preset" ps with
+    | .some id => match Examples.exampleOf id with
+      | .some e => .some (Draft.State.mk e.code e.id)
+      | .none => .none
+    | .none => match Draft.lookup "code" ps with
+      | .none => .none
+      | .some enc => match Draft.base64UrlDecode enc with
+        | .some code => .some (Draft.stateFor code)
+        | .none => .none
+
+-- ## The draft (`localStorage`)
+
+/-- The draft's version: a future change refuses old data instead of guessing. -/
+def Draft.version : Nat := 1
+
+/-- Versioned JSON: `{"version":1,"code":…,"preset":…}`; the preset is `null` for a
+custom program and recomputed on the way back in (a stale id is dropped). -/
+def Draft.serializeDraft (s : Draft.State) : String :=
+  let cur := Draft.stateFor s.code;
+  Json.render (Json.mkObj
+    [ ("version", Json.ofNat Draft.version)
+    , ("code", Json.mkStr cur.code)
+    , ("preset", match String.isEmpty cur.preset with
+        | .true => Json.mkNull
+        | .false => Json.mkStr cur.preset)
+    ])
+
+/-- The state a draft holds, or `none` for anything that is not this version. -/
+def Draft.parseDraft (raw : String) : Option Draft.State :=
+  match Json.parse raw with
+  | .error _ => .none
+  | .ok j =>
+    let v : Option Nat := match Json.get j "version" with
+      | .some x => Json.asNat x
+      | .none => .none;
+    match v with
+    | .some n =>
+      if Nat.beq n Draft.version then
+        match Json.get j "code" with
+        | .some (.str code) => .some (Draft.stateFor code)
+        | _ => .none
+      else .none
+    | .none => .none
+
+-- ## The editor's source
+
+/-- Whether one line starts with `import` as a word. -/
+def Draft.hasImportLine (line : String) : Bool :=
+  let t := String.trimLeft line;
+  match String.stripPrefix t "import" with
+  | .none => .false
+  | .some rest => match String.chars rest with
+    | .nil => .true
+    | .cons c _ =>
+      let n := Char.code c;
+      !((Nat.le 48 n && Nat.le n 57) || (Nat.le 65 n && Nat.le n 90) ||
+        (Nat.le 97 n && Nat.le n 122) || Nat.beq n 95)
+
+/-- Whether the text has an `import` at the start of a line (the same test as the
+page's `^\s*import\b`), so the embedded Prelude is added only when it is missing. -/
+def Draft.hasImport (text : String) : Bool :=
+  List.any Draft.hasImportLine (String.splitOn text "\n")
+
+/-- `text` with the embedded Prelude when it has no import of its own, so a bare
+definition works as in `wiz check`. -/
+def Draft.withPrelude (text : String) : String :=
+  if Draft.hasImport text then text else "import Prelude\n\n" ++ text

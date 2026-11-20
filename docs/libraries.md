@@ -444,6 +444,55 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
+## H14 T3: formal harness emission (`lib/Hdl/Formal.wiz`)
+
+`Verilog.emitFormal` emits the same module as `Verilog.emit` plus an
+`` `ifdef FORMAL `` harness: the properties declared with the monitor language become
+immediate `assert`/`assume`/`cover` statements clocked by the design's clock, with
+`$past`, `$stable`, `$rose`, `$fell` and `(* anyconst *)` declarations. Outside the
+`ifdef` the text is byte-identical to `Verilog.emit`; synthesis and simulation are
+unaffected. `Formal.sby` writes a SymbiYosys job (`mode bmc` or `prove`, `depth`,
+`smtbmc`); the harness also runs directly under `yosys -formal` +
+`yosys-smtbmc`.
+
+```wiz no-check
+def props : List FProp := [
+  FProp.impliesNext "stability"
+    (FTerm.and (FTerm.outp "out_valid") (FTerm.not (FTerm.inp "out_ready")))
+    (FTerm.stable 1 (FTerm.outp "out_data")),
+  FProp.cover "transfer" (FTerm.and (FTerm.inp "in_valid") (FTerm.outp "in_ready")) ]
+
+IO.writeFile "queue.v" (Verilog.emitFormal "queue" queueR props)
+IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
+```
+
+* **Signals** are input/output ports by their `HwTy.portNames` name (`in_valid`,
+  `out_data`); a name that is not a port renders as `?` (yosys then rejects the
+  harness). Terms are `FTerm`: references, sized literals, `FTerm.const name width`
+  (an `anyconst`), bitwise/logical operators, `eq`/`ne`/`ult`/`slt`, arithmetic,
+  `cat`/`mux`/`slice`, and the temporal forms `past n`, `stable n` (`$stable` for one
+  cycle), `rose` and `fell`.
+* **Monitors** are named `FProp`s: `always`, `implies` (`|->`), `impliesNext` (`|=>`),
+  `nexts n`, `cover`, and the environment assumptions `assumeAlways`,
+  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is the corresponding
+  `TL` formula from H14 T on the observation trace; the module docs give the table.
+* **History** is handled by a saturating cycle counter: a check that reads `n` cycles of
+  history is gated until the counter reaches `n`, so the unconstrained value of a
+  `$past` before cycle 0 is never mistaken for a failure. A circuit built with
+  `Circuit.withReset` (`rst` in the input type) also gets `initial assume (rst);`.
+* **End to end** (`examples/hdl-formal.wiz`, group `hdl`): a one-entry valid/ready
+  buffer and a deliberately wrong variant share five monitors. `yosys-smtbmc` passes the
+  correct RTL and finds a two-or-three-cycle counterexample for the variant (the
+  stability monitor fails; the other four still pass). The test group runs the same
+  proof with `yosys -formal`, `prep`, `clk2fflogic`, `write_smt2` and `yosys-smtbmc -s
+  z3`; `sby` consumes the generated `.sby` unchanged.
+
+Not emitted yet: SVA sequences (`##[m:n]`, repetition, `throughout`), `until`,
+unbounded liveness (`◇`, leads-to, fairness — safety solvers do not prove it), and
+multi-clock properties. The monitor language is intentionally untyped over the circuit's
+`HwTy`; a typed term layer over `HwTy.leaves` would turn a mistyped reference into a Wiz
+type error instead of a `?` in the emitted text.
+
 ## H14 C1: traces, the common semantics (`lib/Trace.wiz`)
 
 One semantics for everything that runs step by step (design:
@@ -510,10 +559,12 @@ a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.mem
   byte written) and `byteDisabled` (enable low: the byte is unchanged).
 * **Byte enables in a word.** `Mem.byteMask dw nb strb` is the `dw`-bit mask of `nb`
   strobe bits (byte `k` is `0xff` when bit `k` is set), `Mem.merge old new mask` is the
-  read-modify-write value, and `Mem.writeBytes` is the masked write. The two closed
-  32-bit cases (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the
-  symbolic mask is checked for every strobe pattern and every byte lane of 8-, 16- and
-  32-bit words in the example (a checked law is *tested*, not proved).
+  read-modify-write value, and `Mem.writeBytes` is the masked write. `Bus.byteMask` is
+  `Mem.byteMask`, and `Bus.ramWC` is written with `Mem.merge`, so a bus, a RAM model and
+  a memory proof share one definition of a strobe. The two closed 32-bit cases
+  (`byteMask_full32`, `byteMask_zero32`) are proved by evaluation; the symbolic mask is
+  checked for every strobe pattern and every byte lane of 8-, 16- and 32-bit words in
+  the example (a checked law is *tested*, not proved).
 * **One-cycle and two-cycle RAMs.** `Mem.Req`/`Mem.ReqW`/`Mem.Resp` are the bundles and
   `Mem.Ram` the state (`cells` plus a two-bit wait counter). `Mem.ramC1` answers in the
   request cycle (a write lands at the clock edge, so a read sees the old word);
@@ -550,6 +601,30 @@ impossible, while the store lens `Lens S A = S → Store A S` is `Type` and stay
 If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
 (`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
 universe change.
+
+### Profunctor optics (default) and the store encoding
+
+`lib/Optic.wiz` also carries the profunctor layer, which is the default representation
+for new optic code: `Profunctor`, `Strong`, `Choice`, `Wandering`, `Iso`, `LensP`,
+`PrismP`, `TraversalP`, and the `Hom`/`Forget`/`ForgetList`/`ForgetOpt`/`Writer Δ`
+interpretations. One optic runs at every interpretation: `over` (update), `view` (read
+one), `toListOf` (read all), `preview` (read at most one), `overWrite` (update and
+write-set in one pass). `LensP.ofLens` lifts a store `Lens` (`rfl` agreement:
+`LensP.ofLens_view`/`LensP.ofLens_over`), so `deriving Lens` fields work with it;
+`LensP.toLens` is the other direction, and `Traversal.ofP` turns a profunctor traversal
+into the store `view`/`overAll` pair. `LensP.Indep` restates independence on
+`view`/`over` (the frame rule's hypothesis), and `LensP.ofLens_indep` derives it from a
+store `Lens.Indep`.
+
+A `Type 0` store of optics is still impossible here (the profunctor types are `Type 1`),
+and a profunctor optic has no error or absent branch, so it cannot replace the partial
+places that hand the lender back: `PLens` (`&mut v[i]`, which can fail with
+`outOfBounds`), `Affine`/`MutOpt` (`Option<&mut A>`, whose `none` carries the lender),
+`TraverseMut` (the in-place, state-threading `iter_mut` loop) and `Lens.pair` (two
+independent places borrowed at once; `Strong` cannot decompose an `S`). Those, `Mut`'s
+`Store` field and `Uniq.zoom` stay on the store encoding; `Mut.ofLensP` shows the one
+lossless crossing (a pure lens becomes a place through `LensP.toLens`). New code that
+only reads and updates a value should use the `…P` forms.
 
 ## H14 S3: fast simulation for compiled programs (`import Hdl.Sim`)
 
@@ -982,7 +1057,15 @@ parameters and no memory map:
   two cycles after the request (golem's `GBus.ramStep` latency). `shift` selects the word
   index inside `addr`: 0 for a word-addressed bus, 2 for a 32-bit byte-addressed one.
   `Bus.ramWC shift aw ab dw` is the same RAM on `Bus.ReqW`: a write is a read-modify-write
-  of the enabled bytes.
+  of the enabled bytes (`Mem.byteMask`/`Mem.merge` from `Hdl.Mem`, so the bus and a
+  memory proof use one definition of a strobe). Its step is written through
+  `Bus.ramWGo`/`ramWIndex`/`ramWMask`/`ramWMerged`/`ramWWait`/`ramWNext`/`ramWOut`.
+  The contract is one outstanding request: `go` is high only when `valid` is and the
+  two-bit wait counter has reached 2, so a request offered at wait 0 is answered in the
+  third cycle and no second request is taken while `wait < 2`; the counter returns to 0
+  at the answer, and a source that drops `valid` withdraws the request (nothing stays in
+  flight). A read in the answering cycle returns the word read before the store: there
+  is no read-during-write bypass, so a write is visible to the next transaction only.
 
 `lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
@@ -1000,6 +1083,14 @@ to the value model's response vector: every non-granted master is quiet and an
 acknowledging slave answers the master `Bus.arbNStep` grants. Also kernel-checked are the
 value-level memory read-after-write/no-alias lemmas (`memWrite_read_same`,
 `memWrite_read_miss`), the `Bus.ReqW.ofReq`/`toReq` round trip, and `Vec.get_ofFn`.
+The byte-enabled RAM is proved too: `ramWStep_write` (a taken write is the masked
+store), `ramWStep_read_same` (a read of that word afterwards is `Bus.ramWMerged`: the
+enabled bytes from `wdata`, the rest from the old word), `ramWStep_read_other` (no
+alias), `ramWStep_no_write` (an untaken request writes nothing),
+`ramWOut_noBypass` (the answering cycle returns the pre-store word) and the closed
+wait-timeline lemmas `ramW_go_first`/`_second`/`_third` and
+`ramW_wait_first`/`_second`/`_third`/`_withdraw0`/`_withdraw1` (one outstanding
+request, two cycles of delay, reset on withdrawal).
 The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are Boolean
 checks over exhaustively generated or long pseudo-random traces, compared against
 `Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
@@ -1007,7 +1098,10 @@ checks over exhaustively generated or long pseudo-random traces, compared agains
 `examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
 misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
-cycle for cycle. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
+cycle for cycle. `examples/hdl-ramwc.wiz` (test groups `hdl` and `bus-law`) checks the
+wait timeline of `Bus.ramWC`, read-after-write against an independent byte model for
+every 8-, 16- and 32-bit strobe pattern, no alias, the write-answer no-bypass case and
+byte addressing with `shift = 2`. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
 (4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
 sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
 the three simulations. It also exhausts the N-master selector for n = 1..4 (all valid
@@ -1175,10 +1269,24 @@ streaming circuit: input `valid`/`data`, output `valid`/`crc`, one byte per cycl
 `Crc.check_ok` is the kernel-checked known answer (CRC-8/SMBUS of `"123456789"` is
 `0xF4` = 244).
 
+`Crc.protoC` is the line-framed CRC service extracted from the iCEstick's `proto`
+design, with the UART removed so it sits behind any byte transport: input
+`valid`/`data`/`txIdle`, output `ready`/`valid`/`data`/`lines`. A line is bytes other
+than 10 followed by the newline 10; when the newline is accepted the service answers
+the line's CRC as two upper-case hex digits and a newline, one byte per `txIdle`
+cycle. `ready` is low from the accepted newline until the reply ends, and bytes offered
+while it is low are dropped rather than queued: the contract is request/response,
+single outstanding line, no bursts. The host half is `Crc.reply`/`Crc.replies`, and
+`Crc.reply_check` is the kernel-checked on-the-wire known answer (`"F4\n"`).
+
 `examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
 specification on all 65536 `(crc, byte)` pairs, `hexDigit` on all 16 nibbles, the known
 answer, and the streaming circuit through the value simulation, `Netlist.simulate` and
-`Circuit.simFast`.
+`Circuit.simFast`. `examples/hdl-crc-link.wiz` (test groups `hdl` and `bus-crc`) drives
+the service with two lines, checks the reply stream against `Crc.replies`, drops a
+newline offered during a reply, checks that `ready` is low exactly in the reply cycles,
+counts the accepted lines, and compares the value simulation with `Netlist.simulate`
+and `Circuit.simFast`.
 
 ## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
 
@@ -1701,16 +1809,22 @@ Design, survey and migration analysis: `wiz-notes/react-framework.md`.
 `import Web.Playground` is the playground's output pane: `Line` (the engine's text, the
 `err`/`val` classes, what the line shows and its tooltip), `Model` (the lines, the error
 count, the page's status pair and `#count` text), `Model.ofText`/`Model.ofFailure`, and
-`Model.view` for `#output`. The value grammar (`web/playground-values.js`) lives in it
+`Model.view` for `#output`. The value grammar (`web/framework/values.mjs`, the test
+oracle) lives in it
 too: a `con(…)` line becomes a Nat, a Bool or a list when the shape says so, and stays
 raw otherwise; the JavaScript module is the oracle the fixture's corpus is compared
 with. `import Web.Editor` is the editor pane (`#editor`, its label and hint, `#run`,
 `#count`) as a `Loom.LiveApp`: the text arrives as the input event's payload.
-`web/playground-ui.wiz` composes them into the whole page (`?ui=loom`) and exports its
-`wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
+`import Web.EditorModel` is the editor's pure rule set — UTF-16 positions, diagnostic
+ranges as merged line-clipped spans, completion filtering/order/insertion, and Tab's
+indent — reached from the page through the read-only `wiz_loom_editor_*` queries
+(`mount`'s `ask`); `web/framework/editor-model.mjs` is the test oracle, not served.
+`web/playground-ui.wiz` composes them into the whole page (`web/playground.html` mounts
+it) and exports its `wiz_loom_*` entry points; `web/build-playground-ui.sh` builds it as a second Wasm
 module, so a user program's trap in the engine cannot touch the UI state. Tests:
-`web/playground-loom-test.sh` (the two components) and `web/playground_ui_test.mjs`
-(the page, mounted from the built module under Node).
+`web/playground-loom-test.sh` (the two components), `web/playground_ui_test.mjs`
+(the page, mounted from the built module under Node), and the editor rules' `=loom`
+cases.
 
 ## Web: interactive notebook widgets (`lib/Web/Widget.wiz`)
 
@@ -1729,9 +1843,10 @@ them with `web/framework/runtime.js` (no second renderer, no Wasm). Tests:
 `web/widget/test.sh` (golden VDOM and patch application under Node),
 `tools/jupyter/tests/test_widgets.py` (comm round trip) and `test_notebook.py`
 (`nbclient`). Limits: no client-side state (every event is a kernel round trip),
-`plot` data is still opaque JSON in the widget layer (`Plot` exists, but there is no
-widget adapter yet and `Widget.plotNode` renders a placeholder), and `Owned` cannot be
-held across events. The event's `value` (a slider's number) reaches `Widget.Callback`;
+a plain `Widget.plot` still carries opaque JSON and renders the front end's placeholder
+(`Widget.plotOf` is the `Plot` adapter: its fragment is the self-contained SVG, and a
+plot with no callback needs no event round trip), and `Owned` cannot be held across
+events. The event's `value` (a slider's number) reaches `Widget.Callback`;
 the raw `Loom.on`/`Loom.App.event` path passes only a handler index, and an app that
 wants a control's live value uses `Loom.LiveApp` (the driver puts it in the event
 string).
@@ -2305,6 +2420,18 @@ Jupyter hook is **not wired**: a cell must print the bundle (`#eval Json.render
 `{"text/plain": …}` (`tools/jupyter/wiz_kernel/kernel.py`), so the SVG is not shown as
 an image until a display hook is added. `Plot.render` is the intended notebook hook;
 no other kernel path consumes it.
+
+**The infoview widget.** `#plot chart` evaluates the chart with the `Plot.widget`
+renderer and reports one `WIZ_WIDGET:` display value at the command: a Loom widget
+bundle with `schema` `wiz.widget/1`, `kind` `plot`, `mimeType` `image/svg+xml`,
+`title`, `summary`, `width`, `height`, `svg`, `html` and `count`. `html` is
+`Plot.html chart` (the self-contained `<figure class="wiz-plot">` around the same SVG)
+and `svg` is the drawing on its own. The browser infoview turns the message into a
+`widget` item in `wiz/interactiveInfo` and inserts the HTML; the terminal and Neovim
+infoviews show the title and point at the browser, because a terminal cannot draw it.
+The payload has no `href`/`src`, script or `url(…)`, so it needs no network and a
+client can insert it without running code. `Widget.plotOf "sales" chart`
+(`lib/Web/Widget.wiz`) is the same drawing as a notebook widget fragment.
 
 Deliberately not implemented: 3D, animation, colour spaces (the palette is sRGB hex),
 stacked bars (several bar series are drawn at the same positions; grouping is a layout

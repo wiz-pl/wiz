@@ -373,7 +373,25 @@ def group : Group where
           "    | _, _ => 999\n" ++
           "  | .none => 888\n"
         let outs ← wizEval "call" src cst body
-        checkEq ["2", "0", "0"] outs }
+        checkEq ["2", "0", "0"] outs },
+    { name := "block ids and indices: assemble orders by id and fills holes; zipIdx counts from 0",
+      run := fun _ => do
+        let body :=
+          "def blk (n : Nat) : Wil.Block := Wil.Block.mk .nil (.goto (Wil.mkBlockId n) Wil.noSpan)\n" ++
+          "def done : List (Nat × Wil.Block) := .cons (2, blk 2) (.cons (0, blk 0) .nil)\n" ++
+          "def asm : List Wil.Block := Scry.assemble 4 done\n" ++
+          "def target : Wil.Block → Nat\n" ++
+          "  | .mk _ t => match t with\n" ++
+          "    | .goto b _ => b.index\n" ++
+          "    | _ => 999\n" ++
+          "#eval List.map target asm\n" ++
+          "#eval List.map (fun p => p.1) (Scry.zipIdx (.cons 10 (.cons 20 (.cons 30 .nil))) 0)\n" ++
+          "#eval match Scry.assemble 2 .nil with\n" ++
+          "  | .cons a (.cons b .nil) => Nat.add (target a) (target b)\n" ++
+          "  | _ => 999\n"
+        let outs ← wizEvalRaw ("import Scry.Lower\nimport Text\n" ++ body)
+        checkEq [".cons 0 (.cons 999 (.cons 2 (.cons 999 .nil)))",
+                 ".cons 0 (.cons 1 (.cons 2 .nil))", "1998"] outs }
   ]
 
 builtin_initialize registerGroup group

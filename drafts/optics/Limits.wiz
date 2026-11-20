@@ -1,0 +1,57 @@
+import Optic
+
+/-!
+# Where the profunctor layer stops
+
+Two checked examples of the boundary, next to the lossless migrations.
+
+1. `List.atL` is the canonical partial place (`&mut v[i]`). A profunctor traversal can
+   *find* the element (`atTrav`), but it cannot fail: `overT` at an out-of-range index
+   returns the list unchanged, while `PLens.over` returns `.err .outOfBounds`. A
+   `PrismP` cannot express it either: `prism`'s `build : B → T` gets no original list,
+   so it cannot rebuild the elements around the focus.
+2. `Lens.pair` (two independent places on one lender) is not a `Strong` combinator:
+   `Strong` adds a context to a `P`, it does not decompose an `S`. `drafts/optics/limits/`
+   carries the failing programs.
+
+This module is checked by `drafts/optics/check.sh`.
+-/
+
+/-- Walk to index `i`, applying `f` to the one element there (0 or 1 focus). -/
+def atWander {A : Type} {F : Type → Type} [ap : Applicative F]
+    (f : A → F A) : Nat → List A → F (List A)
+  | _, .nil => @Applicative.pure F ap (List A) List.nil
+  | .zero, .cons x xs =>
+    @Applicative.seq F ap (List A) (List A)
+      (@Applicative.seq F ap A (List A → List A)
+        (@Applicative.pure F ap (A → List A → List A) (fun a as => List.cons a as))
+        (f x))
+      (@Applicative.pure F ap (List A) xs)
+  | .succ i, .cons x xs =>
+    @Applicative.seq F ap (List A) (List A)
+      (@Applicative.seq F ap A (List A → List A)
+        (@Applicative.pure F ap (A → List A → List A) (fun a as => List.cons a as))
+        (@Applicative.pure F ap A x))
+      (atWander f i xs)
+
+/-- The traversal function, named so it can be passed to `traversalOf`. -/
+def atTravFn {A : Type} (i : Nat) : {F : Type → Type} → [ap : Applicative F] →
+    (A → F A) → List A → F (List A) :=
+  fun {F : Type → Type} [ap : Applicative F] f xs => atWander (A := A) (F := F) f i xs
+
+/-- `&mut v[i]` as a profunctor traversal: 0 or 1 focus, never an error. -/
+def atTrav {A : Type} (i : Nat) : TraversalP (List A) (List A) A A :=
+  let t : {F : Type → Type} → [ap : Applicative F] → (A → F A) → List A → F (List A) :=
+    atTravFn (A := A) i;
+  traversalOf (S := List A) (T := List A) (A := A) (B := A) t
+
+-- The store place fails past the end; the traversal silently does nothing.
+#eval Result.map Store.extract (List.atL 5 (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
+-- .err .outOfBounds
+#eval overT (atTrav 5) (fun n => n + 1) (List.cons 1 (List.cons 2 (List.cons 3 List.nil)))
+-- .cons 1 (.cons 2 (.cons 3 .nil))
+-- In range they agree.
+#eval Result.map Store.extract (List.atL 1 (List.cons 1 (List.cons 2 (List.cons 3 List.nil))))
+-- .ok (.cons 1 (.cons 3 (.cons 3 .nil)))
+#eval overT (atTrav 1) (fun n => n + 1) (List.cons 1 (List.cons 2 (List.cons 3 List.nil)))
+-- .cons 1 (.cons 3 (.cons 3 .nil))

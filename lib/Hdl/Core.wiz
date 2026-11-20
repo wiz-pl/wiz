@@ -3295,6 +3295,16 @@ def Verilog.clockPorts : Bool → List ClockDomain → String
   | .true, .cons d ds => "input " <+> d.name <+> Verilog.clockPorts .false ds
   | .false, .cons d ds => ", input " <+> d.name <+> Verilog.clockPorts .false ds
 
+/-- The text of a netlist's Verilog-2005 module, without the closing `endmodule`:
+`Verilog.emit` appends it, and `Hdl.Formal` inserts a formal harness before it. -/
+def Verilog.moduleText (n : Netlist) (vn : VNames) (cx : VCtx) : String :=
+  "module " <+> Verilog.ident n.name <+> "(" <+> Verilog.clockPorts .true n.clocks <+> Verilog.portDecls "input" vn.ins n.inputs
+  <+> Verilog.outDecls cx vn.outs n.outputs <+> ");\n" <+> Verilog.errors n.errors <+> Verilog.regDecls vn.regs n.regs
+  <+> Verilog.memDecls vn.mems n.mems
+  <+> Verilog.wires cx 0 n.nodes <+> Verilog.insts cx (Verilog.instOuts 0 n.nodes HTrie.tip) 0 n.nodes
+  <+> Verilog.clockBlocks cx n.clocks vn.regs n.regs vn.mems n.mems
+  <+> Verilog.assigns cx vn.outs n.outputs
+
 /-- A netlist as a Verilog-2005 module: one clock port per clock domain (`clk` first) and
 one port per leaf, one `reg` per register (with its reset and enable), one `wire` per node
 that is neither a port, a register nor a constant (a primitive's output is a wire its
@@ -3308,12 +3318,7 @@ IO.writeFile "blink.v" (Verilog.emit (Circuit.netlist "blink" blink))
 def Verilog.emit (n : Netlist) : String :=
   let ω vn := Verilog.portIdents n;
   let ω cx := Verilog.ctx n vn;
-  "module " <+> Verilog.ident n.name <+> "(" <+> Verilog.clockPorts .true n.clocks <+> Verilog.portDecls "input" vn.ins n.inputs
-  <+> Verilog.outDecls cx vn.outs n.outputs <+> ");\n" <+> Verilog.errors n.errors <+> Verilog.regDecls vn.regs n.regs
-  <+> Verilog.memDecls vn.mems n.mems
-  <+> Verilog.wires cx 0 n.nodes <+> Verilog.insts cx (Verilog.instOuts 0 n.nodes HTrie.tip) 0 n.nodes
-  <+> Verilog.clockBlocks cx n.clocks vn.regs n.regs vn.mems n.mems
-  <+> Verilog.assigns cx vn.outs n.outputs <+> "endmodule\n"
+  Verilog.moduleText n vn cx <+> "endmodule\n"
 
 /-- A `Multi` design's Verilog (`Verilog.emit (Multi.netlist m)`). -/
 def Multi.verilog (m : Multi) : String := Verilog.emit (Multi.netlist m)

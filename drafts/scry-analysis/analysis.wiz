@@ -1,0 +1,109 @@
+import Sys
+import Text
+import IO
+import Scry.AnalysisFile
+import Scry.QuireGraph
+/-!
+# `analysis.wiz`: a scry run as an ordinary Wiz file, over a Quire graph
+
+Run it from the repository root:
+
+```
+wiz -I drafts/storage-engine -I drafts/scry-analysis -I scry/src run drafts/scry-analysis/analysis.wiz
+```
+
+The pure part is checkable in the editor (`wiz check`, hover, diagnostics): `manifest`,
+`graphView`, `claim` and `display` are ordinary definitions. `main` is the effectful runner:
+it checks the revision, opens the Quire snapshot, re-queries the view, and prints the
+claim and the widget payload.
+
+* `#ingest "fixtures" into "graph.quire"` is a declaration. The command
+  `scry-analysis --file drafts/scry-analysis/analysis.wiz` (or the code action) executes
+  it: it hashes the tree, merges the stores, commits a new Quire snapshot and writes
+  `graph.quire.manifest.json`. The manifest is the "lock file": it says which revision
+  the graph corresponds to.
+* `manifest` is embedded with `include_str`; `graphView` is its small projection (call sites,
+  call heads, error sites), so the editor can state the claim without I/O.
+* `main` reports **stale** (both revisions) when the tree on disk differs from the
+  manifest, and "manifest behind store" when the Quire generation is not the manifest's.
+  It never silently analyses a different tree.
+-/
+
+#ingest "fixtures" into "graph.quire"
+
+/-- The manifest sidecar written by ingest (the revision, the Quire generation, the
+interning tables and the claim's view). -/
+def manifestText : String := include_str "graph.quire.manifest.json"
+
+/-- The manifest; a malformed or absent one is the empty manifest, which makes the claim
+vacuous and the revision check say "no manifest". -/
+def manifest : Scry.Manifest :=
+  match Scry.manifestOfText manifestText with
+  | .ok m => m
+  | .error _ => Scry.emptyManifest
+
+/-- The view the claim is about (the ingest-time projection; `main` re-queries Quire). -/
+def graphView : Scry.GraphView := manifest.view
+
+/-- The claim this analysis states. -/
+def claim : Scry.ClaimResult := Scry.claimCalls graphView
+
+/-- The findings of the claim. -/
+def findings : List Scry.AnalysisFinding := claim.findings
+
+/-- The widget payload: a `wiz.widget/1` bundle with the `scry.analysis/1` extension. -/
+def display : String := Scry.analysisDisplay claim graphView
+
+/-- The stale gate, shared by `main` and a future LSP action. -/
+def checkRevision : IO Bool := do
+  r ← Scry.G.currentRevision manifest;
+  match r with
+  | .error e => do
+    IO.println (String.append "revision: cannot read the source: " e);
+    IO.pure .false
+  | .ok current =>
+    match Scry.revisionVerdict manifest current with
+    | .fresh => IO.pure .true
+    | .stale m c reason => do
+      IO.println (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
+      IO.pure .false
+
+/-- Flush standard output, then exit (the C `println` is buffered). -/
+def leave (n : Nat) : IO Unit := do
+  f ← File.stdout;
+  r ← File.flush f;
+  match r with
+  | .ok _ => Process.exit n
+  | .error _ => Process.exit n
+
+def main : IO Unit := do
+  match String.eq manifest.revision.kind "unset" with
+  | .true => do
+    IO.println "no graph manifest: run the ingest command first";
+    leave 2
+  | .false => do
+    fresh ← checkRevision;
+    match fresh with
+    | .false => leave 3
+    | .true => do
+      r ← Scry.G.readGraph manifest.graph manifest;
+      match r with
+      | .error e => do
+        IO.println (String.append "graph: " e);
+        leave 2
+      | .ok (live, gen) =>
+        match Nat.beq gen manifest.gen with
+        | .false => do
+          IO.println (String.append "revision: the store is at generation "
+            (String.append (Nat.repr gen) (String.append ", the manifest at "
+              (String.append (Nat.repr manifest.gen) ": run ingest"))));
+          leave 3
+        | .true => match Scry.sameView manifest.view live with
+          | .false => do
+            IO.println "revision: the manifest's view differs from the store's live view";
+            leave 3
+          | .true => do
+            IO.println (Scry.renderClaim claim);
+            IO.println (String.append "call_expression nodes: "
+              (Nat.repr (List.length graphView.calls)));
+            IO.println (String.append "widget: " display)

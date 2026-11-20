@@ -694,9 +694,10 @@ def docGroup : Group where
           checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
           checkHas page "data-doc-line="
           -- (the scripts the page imports are in the served tree)
-          checkHas (← httpGet port "/doc-live.js") "readGoalState"
+          checkHas (← httpGet port "/doc-live.js") "wiz_loom_effect"
           checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
-          checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
+          checkHas (← httpGet port "/framework/mount.js") "export async function mount"
+          checkHas (← httpGet port "/wiz-doc-live-ui.mjs") "wiz_loom_init"
           -- (the module's source, for the client to open in the server)
           let src ← httpGet port "/sources/Shapes.Basic.wiz"
           check (has src "200 OK") s!"GET /sources: {src.take 200}"

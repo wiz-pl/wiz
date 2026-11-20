@@ -43,12 +43,18 @@ extra nodes per block.
   uses too, so a return value is connected to the definitions that reach it.
 
 The fixpoints are ordinary `partial def` loops (the design's engine is deliberately
-executable, not proved here); the inputs are tiny per-function graphs. Anti-dependence,
-output-dependence and control-dependence edges are not computed: taint needs flow
-dependence only, and the rest belongs to the S4 remainder (`wiz-notes/scry-taint.md`).
+executable, not proved here); the inputs are tiny per-function graphs in the tests and
+large in a generated C unit. `Scry.fnInfo` therefore keeps the point-level `rd`/`dom`
+tables for the analysis tests and the old `Scry.Taint` prototype, while the production
+taint path calls `Scry.fnInfoFlowWith`: a block-level reaching-definitions worklist that
+builds the same def-use edges without materialising a point table, and without the
+dominator sets. Anti-dependence, output-dependence and control-dependence edges are not
+computed: taint needs flow dependence only, and the rest belongs to the S4 remainder
+(`wiz-notes/scry-taint.md`).
 
-Every set is a `List Nat` with membership-based dedup, and every map is an association
-list, so the representation is the same as the rest of scry's pure list model.
+Sets are `List Nat` with membership-based dedup. The point, block and definition indexes
+are `U64Map`s: the model is a sorted list (interpreter and kernel) and the compiled
+representation is a hash table, so a lookup is not a scan of the function.
 -/
 
 -- ## Set and map helpers

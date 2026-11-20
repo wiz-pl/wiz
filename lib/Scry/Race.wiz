@@ -158,8 +158,10 @@ def Scry.spawnTargets (p : Wil.Program) : List String :=
         | _ => .nil
       | _ => .nil) (Scry.range g.count)) p.funcs
 
-/-- Every direct call target in the program, one entry per syntactic site. -/
-def Scry.directTargets (p : Wil.Program) : List String :=
+/-- Every direct call target in the program, one entry per syntactic site. `Scry.PointsTo`
+has a `directTargets` of its own, and the trust ledger imports the whole library at once,
+where a name two modules declare is an error, so this copy is named for the race check. -/
+def Scry.raceDirectTargets (p : Wil.Program) : List String :=
   Scry.concatLists (fun fn =>
     let g := Scry.flatten fn;
     Scry.concatLists (fun n => match Scry.nodeStmt g n with
@@ -178,7 +180,7 @@ once and also called directly (by the root, or by another thread). A function th
 never spawned runs in one thread. -/
 def Scry.raceConcurrent (p : Wil.Program) (f : String) : Bool :=
   let spawns := Scry.countName f (Scry.spawnTargets p);
-  let calls := Scry.countName f (Scry.directTargets p);
+  let calls := Scry.countName f (Scry.raceDirectTargets p);
   Bool.or (Nat.le 2 spawns) (Bool.and (Nat.le 1 spawns) (Nat.le 1 calls))
 
 def Scry.raceFindingsIn (p : Wil.Program) (fn : Wil.Func) : List Scry.RaceFinding :=

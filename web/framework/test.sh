@@ -24,3 +24,11 @@ if [ -n "${WIZ_LDFLAGS:-}" ]; then set -- "$@" --ldflags "$WIZ_LDFLAGS"; fi
 node "$ROOT/web/framework/test.mjs" "$OUT/fixture.json"
 # The driver's ABI (event strings, payloads, onStep, js_patch): Node only, no wiz.
 node "$ROOT/web/framework/driver_test.mjs"
+# The mount contract (one export; element, module, events, host capabilities): Node only.
+node "$ROOT/web/framework/mount_test.mjs"
+# The page is the mount contract (no ABI calls of its own): source-level, Node only.
+node "$ROOT/web/playground_entry_test.mjs"
+# A runtime that cannot start is a text reason, not a second UI: Node only.
+node "$ROOT/web/playground_start_test.mjs"
+# The editor overlays over the Loom page's child-index patch paths: Node only.
+node "$ROOT/web/loom_overlay_test.mjs"

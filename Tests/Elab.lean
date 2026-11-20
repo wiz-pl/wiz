@@ -1878,6 +1878,18 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .ok _ => "ok"
   | .error _ => "error"
 
+/-- The modules the self-hosted programs import may be elaborated against: the
+toolchain's `Prelude`, `IO`, `Std` and `Sys` only. `selfhostChecker` and `selfhostCompiler`
+build their programs' loader from this, and so does the `selfhost-host` group's host
+guard (when a source imports anything else, both must reject it). -/
+def selfhostLoader : IO (Name → Option String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let sysLib ← IO.FS.readFile "lib/Sys.wiz"
+  pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
+
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
 from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
 "an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
@@ -1902,11 +1914,7 @@ def selfhostChecker : IO (Except String System.FilePath) := do
   if ← exe.pathExists then return .ok exe
   let start ← IO.monoMsNow
   IO.FS.createDirAll dir
-  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
-  let ioLib ← IO.FS.readFile "lib/IO.wiz"
-  let stdLib ← IO.FS.readFile "lib/Std.wiz"
-  let loader : Name → Option String := fun m =>
-    if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Std" then some stdLib else none
+  let loader ← selfhostLoader
   let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
   unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
@@ -1937,14 +1945,8 @@ def selfhostCompiler : IO (Except String System.FilePath) := do
   if ← exe.pathExists then return .ok exe
   let start ← IO.monoMsNow
   IO.FS.createDirAll dir
-  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
-  let ioLib ← IO.FS.readFile "lib/IO.wiz"
-  let stdLib ← IO.FS.readFile "lib/Std.wiz"
   -- (the driver ends with `Process.exit` on a frontend error)
-  let sysLib ← IO.FS.readFile "lib/Sys.wiz"
-  let loader : Name → Option String := fun m =>
-    if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Std" then some stdLib
-    else if m == "Sys" then some sysLib else none
+  let loader ← selfhostLoader
   let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
   unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
