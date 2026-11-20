@@ -6,13 +6,16 @@ import Text
 Deriving (HD8). `inductive T … deriving C` and `deriving instance C for T` run C's
 *deriver*: a Wiz function `Deriver := String → MacroM (List Syntax)`, registered with
 `attribute [deriver C] f`. It looks the type up (`MacroM.getInductive`) and returns
-the commands that make the instance. This module defines three classes, their
-derivers, and instances for the prelude's types.
+the commands that make the instance. This module defines the derivers, and instances
+for the prelude's types.
 
-The classes are `Inhabited` (a `default` value), `BEq` (boolean equality) and `Repr`
-(a value as Wiz source); their derivers are `deriveInhabited`, `deriveBEq` and
-`deriveRepr`. The `Derive.*` functions are the toolkit for writing a deriver of your own
-(see docs/stages/07-type-classes.md, exercise 7.2).
+The classes themselves are owned by lib/Text.wiz (which imports only the Prelude, so
+`Text` and every library above it can use them without a cycle): `Inhabited` (a
+`default` value), `BEq` (boolean equality), `Repr` (a value as Wiz source) and
+`DecidableEq` (boolean equality, by the name the machine models use). Their derivers
+are `deriveInhabited`, `deriveBEq`, `deriveRepr` and `deriveDecidableEq`. The
+`Derive.*` functions are the toolkit for writing a deriver of your own (see
+docs/stages/07-type-classes.md, exercise 7.2).
 
 ```
 import Deriving
@@ -26,44 +29,8 @@ inductive Color where
 ```
 -/
 
-/-- Types with a chosen value, `Inhabited.default`. Derivable: the first constructor
-without recursive or proof fields, at `default` values. -/
-class Inhabited.{u} (A : Type u) where
-  default : A
-/-- Boolean equality, `BEq.beq a b`. Derivable: the same constructor, and equal fields
-(proof fields are not compared). -/
-class BEq.{u} (A : Type u) where
-  beq : A → A → Bool
-/-- Showing values as Wiz source. `reprPrec a p` is `a` as Wiz source, in parentheses if
-it is an application and `p` is the precedence of an argument (1024). Derivable:
-`T.c a b` (in parentheses at argument position), `T.c` for a constant. -/
-class Repr.{u} (A : Type u) where
-  reprPrec : A → Nat → String
-/-- Equality as a `Bool`: `DecidableEq.decide a b` is `.true` when `a` and `b` are equal,
-as `BEq.beq` is. It is the comparison Lean's `DecidableEq` provides for `=`, by the name
-the machine models use; Wiz has no `Decidable` proof object to return, so `decide` is the
-`Bool` itself (what `if` and `&&` test). Derivable for an enumeration (every constructor
-is a constant) and for a single-constructor record (no recursive field); fields are
-compared with their own instances and proof fields are not compared, as in `BEq`. -/
-class DecidableEq.{u} (A : Type u) where
-  decide : A → A → Bool
-
-/-- A value as Wiz source, at the top level (no parentheses): `Repr.repr (Option.some 1)`
-is `"Option.some 1"`. -/
-def Repr.repr.{u} {A : Type u} [Repr A] (a : A) : String := Repr.reprPrec a 0
-/-- Put an application in parentheses when it is shown at argument position (`p` ≥ 1024). -/
-def Repr.addAppParen (s : String) (p : Nat) : String := match Nat.lt p 1024 with
-  | .true => s
-  | .false => String.append "(" (String.append s ")")
-
--- Decimal numerals (for `Repr Nat`): `Nat.repr`, lib/Text.wiz's (pure, so `#eval` runs it).
-
-/-- Equality of lists, by an equality of elements. -/
-def List.beqBy {A : Type} (eq : A → A → Bool) : List A → List A → Bool
-  | .nil, .nil => .true
-  | .cons a xs, .cons b ys => Bool.and (eq a b) (List.beqBy eq xs ys)
-  | _, _ => .false
--- (`String.beq` is lib/Text.wiz's)
+-- Instances for the prelude's types. (`BEq String` and `DecidableEq String` are in
+-- lib/Text.wiz, which owns `String` and the classes.)
 
 /-- `0`. -/
 instance : Inhabited Nat := Inhabited.mk 0
@@ -75,10 +42,6 @@ instance : DecidableEq Nat := DecidableEq.mk Nat.beq
 instance : Repr Nat := Repr.mk (fun n _ => Nat.repr n)
 /-- The empty string. -/
 instance : Inhabited String := Inhabited.mk ""
-/-- `String.beq`. -/
-instance : BEq String := BEq.mk String.beq
-/-- `String.beq`, as `DecidableEq`. -/
-instance : DecidableEq String := DecidableEq.mk String.beq
 /-- The string in double quotes (no escaping). -/
 instance : Repr String := Repr.mk (fun s _ =>
   String.append (String.mk (.cons (Char.mk 34) .nil)) (String.append s (String.mk (.cons (Char.mk 34) .nil))))
