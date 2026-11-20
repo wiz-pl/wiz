@@ -23,6 +23,26 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   5,135. The static page's Share/Save/Reset/Clear controls went with it; share links,
   drafts, file save and clear return as runtime messages plus host calls in the next
   stage (`docs/notes/loom-thin-js.md`, stage 3).
+* web: the playground's **state format and effect protocol are the runtime's**
+  (stage 3). `lib/Web/Draft.wiz` owns the URL fragment and `localStorage` draft
+  encoding (UTF-8, base64url, percent-encoded parameters, the versioned JSON draft) and
+  the initial-state precedence (link, draft, default); `web/playground-state.js` is
+  deleted and its cases moved to `lake test -- '=loom'`. The six `wiz_loom_*` effect
+  exports are one `wiz_loom_effect (state) kind a b`; the runtime's effects are a JSON
+  request list (`wiz_loom_requests`) that `web/framework/mount.js` hands to the page's
+  `onRequest`, and the page acknowledges each. Share, Save, Reset and Clear are runtime
+  toolbar buttons again (the page does `clipboard`/`download`/`url`/`storage`).
+  Production page JavaScript is **4,606** lines (4,380 `web/*.js` + the 226-line mount
+  contract), down from 5,135; `web/framework/examples.mjs` and `values.mjs` are test
+  oracles now, not served.
+* web: the playground's **keyboard and editor overlays are the runtime's** (stage 4).
+  `Web.Loom`'s `onPrevent` marks a handler whose default action the runtime decides
+  (`data-wiz-prevent-EVENT`, then `wiz_loom_consume` after the step), so the editor's
+  `keydown` prevents only Ctrl/⌘+Enter (run) and Ctrl/⌘+S (save) and never swallows
+  typing. The squiggle layer no longer wraps the textarea — it is the editor section's
+  last child, so Loom's child-index patch paths stay valid — and both overlays are back
+  on the page; the shared overlay CSS is `web/overlays.css`, and
+  `web/loom_overlay_test.mjs` pins the two overlays against the patch paths.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`

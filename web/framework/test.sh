@@ -30,3 +30,5 @@ node "$ROOT/web/framework/mount_test.mjs"
 node "$ROOT/web/playground_entry_test.mjs"
 # A runtime that cannot start is a text reason, not a second UI: Node only.
 node "$ROOT/web/playground_start_test.mjs"
+# The editor overlays over the Loom page's child-index patch paths: Node only.
+node "$ROOT/web/loom_overlay_test.mjs"

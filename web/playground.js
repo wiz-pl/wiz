@@ -1,12 +1,19 @@
 // The playground's entry point. It points at an element, loads the page's runtime
 // (`web/playground-ui.wiz`, the whole page as one Loom app) and gives it the effects a
-// Wiz runtime cannot do itself: the self-hosted engine in its own Wasm instance, and the
-// goals pane's language client (still a page island, `web/playground-lsp.js`).
+// Wiz runtime cannot do itself: the self-hosted engine in its own Wasm instance, the
+// goals pane's language client (still a page island, `web/playground-lsp.js`), and the
+// host capabilities `mount` publishes (`download`, `clipboard`, `storage`, `url`).
 //
-// Everything the page shows — the header and its examples menu, the editor pane, the
-// output pane, the status line, the footer — is the runtime's. The page keeps no DOM
-// structure of its own and never touches the module's ABI: `mount`'s `call` is the only
-// way in, so the next page to migrate is this file with different effects.
+// Everything the page shows — the header and its toolbar (the examples menu, Share,
+// Save, Reset, Clear), the editor pane, the output pane, the status line, the footer —
+// is the runtime's. The page keeps no DOM structure of its own and never touches the
+// module's ABI: `mount`'s `call` is the only way in, so the next page to migrate is this
+// file with different effects.
+//
+// The runtime's effects come back as requests (`wiz_loom_requests`, a JSON list of
+// `{kind, payload}`); the page does one and acknowledges it. That is why the page still
+// knows about the engine and the language server but not about the fragment/draft
+// format, the examples or the output's classification: those are the runtime's.
 //
 // There is one page and one runtime. If the runtime cannot start (the module was not
 // built, the network failed, its ABI is not the Loom one), the mount point says so in
@@ -21,58 +28,60 @@ import { createEngine, failureLines } from "./playground-engine.js";
 
 const runtimeModule = () => import("./wiz-playground-ui.mjs");
 
+// The draft's key in the host's storage (`host.storage.get/set`); the value's format is
+// `Web.Draft`'s (the runtime serializes it in a `sync` request), so only the key is the
+// page's.
+const DRAFT_KEY = "wiz-playground-draft-v1";
+
 let wasm = null;        // web/playground-engine.js: the self-hosted checker
 let handle = null;      // mount's handle: the runtime's entry points
 let busy = false;
+let syncTimer = 0;
+let noteTimer = 0;
+let pendingSync = "";
 
-const withPrelude = (text) => preludeOf(text).source;
-const isErrorLine = (l) => l.startsWith("error:") || l.startsWith("parse error");
-const errorCount = (text) => text.split("\n").filter((l) => l !== "").filter(isErrorLine).length;
+// The runtime's one effect entry point.
+function effect(kind, a = "", b = "") {
+  if (handle) handle.call("wiz_loom_effect", kind, a, b);
+}
 
-// The goals pane's server. The in-page one answers from the same engine, so it waits for
-// the engine's promise; `?lsp=ws://host:port` uses the external client instead.
-let engineReady;
-const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
-engineLoaded.catch(() => { /* reported by loadEngine() */ });
-const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
-  ? selfhostEndpoint({
-    evaluate: (src) => engineLoaded.then(() => wasm.evaluate(src)),
-    check: (src) => engineLoaded.then(() => wasm.check(src)),
-  })
-  : undefined;
+function setStatus(text, kind) { effect("status", text, kind || ""); }
+function setEngine(text) { effect("engine", text); }
+function setEnabled(on) { effect("enable", on ? "1" : "0"); }
 
-function setStatus(text, kind) { handle.call("wiz_loom_status", text, kind || ""); }
-function setEngine(text) { handle.call("wiz_loom_engine", text); }
+// A short-lived message beside the status line (`#note`, the runtime's field).
+function note(text) {
+  effect("note", text);
+  if (noteTimer) clearTimeout(noteTimer);
+  if (text) noteTimer = setTimeout(() => effect("note", ""), 2600);
+}
 
-// Run the editor's program: the one effect the editor's Run button (and an example's
-// load) asks for. The runtime holds the text and the state; the page calls the engine
-// and reports the result through the runtime's entry points.
+// Run the editor's program: the effect behind the Run button, Ctrl/⌘+Enter, an
+// example's load, and the engine becoming ready. The runtime holds the text and the
+// state; the page calls the engine and reports the result.
 function run() {
   const editor = document.getElementById("editor");
   if (!wasm || busy || !editor) return;
   busy = true;
-  handle.call("wiz_loom_enable", 0);
+  setEnabled(false);
   setStatus("running…", "running");
   // let the status paint before the (synchronous) Wasm call
   setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = await wasm.evaluate(withPrelude(editor.value));
+      const text = await wasm.evaluate(preludeOf(editor.value).source);
       const ms = Math.max(0, performance.now() - started);
-      handle.call("wiz_loom_show", text);
-      const bad = errorCount(text);
-      setStatus(`done in ${ms < 10 ? "<10" : Math.round(ms)} ms`, bad ? "error" : "ready");
+      effect("finished", text, `done in ${ms < 10 ? "<10" : Math.round(ms)} ms`);
     } catch (e) {
       if (e && e.name === "EngineFailure") {
         const countText = e.kind === "exit" ? `exit code ${e.code}` : e.kind;
-        handle.call("wiz_loom_fail", failureLines(e).join("\n"), countText);
+        effect("failed", failureLines(e).join("\n"), countText);
       } else {
-        handle.call("wiz_loom_show", "error: " + (e && e.message ? e.message : String(e)));
+        effect("finished", "error: " + (e && e.message ? e.message : String(e)), "failed");
       }
-      setStatus("failed", "error");
     } finally {
       busy = false;
-      handle.call("wiz_loom_enable", 1);
+      setEnabled(true);
     }
   }, 0);
 }
@@ -91,29 +100,83 @@ async function loadEngine() {
     await wasm.ready;
     setEngine("engine: ready");
     engineReady.resolve();
-    handle.call("wiz_loom_enable", 1);
+    setEnabled(true);
     setStatus("ready", "ready");
     run();
   } catch (e) {
     setEngine("engine: failed");
     engineReady.reject(e);
-    setStatus("the engine did not load: " + (e && e.message ? e.message : String(e)), "error");
-    handle.call("wiz_loom_show", "error: " + (e && e.message ? e.message : String(e)));
+    const reason = e && e.message ? e.message : String(e);
+    effect("finished", "error: " + reason, "the engine did not load: " + reason);
   }
 }
 
+// ## The effects the runtime asks for
+
+// The URL fragment and the draft: the runtime hands over the *formatted* values (it
+// owns the format); the page writes them, debounced, because a keystroke is not a
+// reason to touch `history` and the storage capability twice. `flushSync` is also the
+// `pagehide` path, so the last keystroke is not lost when the tab closes.
+function flushSync() {
+  if (!pendingSync || !handle) return;
+  let value;
+  try { value = JSON.parse(pendingSync); } catch { return; }
+  try { handle.host.storage.set(DRAFT_KEY, value.draft); } catch { /* private window, full quota */ }
+  if (typeof value.fragment === "string") handle.host.url(value.fragment);
+}
+
+function sync(payload) {
+  pendingSync = payload;
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { syncTimer = 0; flushSync(); }, 250);
+}
+
+async function share(fragment) {
+  const base = typeof location !== "undefined" ? location.href.split("#")[0] : "";
+  const url = base + fragment;
+  handle.host.url(fragment);
+  if (await handle.host.clipboard(url)) note("link copied to the clipboard");
+  else note("link is in the address bar");
+}
+
+// `onRequest(kind, payload)` is mount's face of the runtime's request list. Acknowledge
+// first: an effect that throws or is slow must not be requested again forever.
+function onRequest(kind, payload) {
+  if (!handle) return;
+  effect("ack", kind);
+  if (kind === "run") run();
+  else if (kind === "save") {
+    if (handle.host.download("playground.wiz", payload)) note("saved playground.wiz");
+  } else if (kind === "share") share(payload);
+  else if (kind === "sync") sync(payload);
+}
+
+// ## The goals pane
+
 // The goals pane is an island (`#goals`): the language client writes into it, and the
-// runtime only renders the empty container, so a re-render never clobbers it. The
-// squiggle mirror is off on this page for now (it wraps the textarea, and the driver's
-// patch paths are child indices); `loom-overlays` relaxes that with a non-wrapping layer.
+// runtime only renders the empty container, so a re-render never clobbers it. Both
+// editor overlays are on: the squiggle layer no longer wraps the textarea (it is the
+// last child of the editor's section, so the runtime's child-index patch paths stay
+// stable), and the completion popup is appended to the body, outside the rendered tree.
 function wireGoals(editor) {
   startInfoview({
     editor,
     panel: document.getElementById("goals"),
     config: selfhost,
-    squiggles: false,
   });
 }
+
+// The goals pane's server. The in-page one answers from the same engine, so it waits for
+// the engine's promise; `?lsp=ws://host:port` uses the external client instead.
+let engineReady;
+const engineLoaded = new Promise((resolve, reject) => { engineReady = { resolve, reject }; });
+engineLoaded.catch(() => { /* reported by loadEngine() */ });
+const selfhost = typeof location !== "undefined" && wantsSelfhost(location.search)
+  ? selfhostEndpoint({
+    evaluate: (src) => engineLoaded.then(() => wasm.evaluate(src)),
+    check: (src) => engineLoaded.then(() => wasm.check(src)),
+  })
+  : undefined;
 
 // There is no page to fall back to: if the runtime cannot start, the mount point says so
 // in plain text, with the reason. This is the whole failure path — no DOM construction
@@ -137,17 +200,27 @@ export async function startPage({ root, module = runtimeModule } = {}) {
     handle = await mount(target, {
       module,
       transport: { engine: () => wasm },
-      events: ["click", "input", "change"],
-      // An example's load is the page's cue to run it: the runtime is pure, so it
-      // records the request (`Page.loads`) and the page does the effect.
-      onStep: (_state, event) => { if (event === "change") run(); },
+      events: ["click", "input", "change", "keydown"],
+      onRequest,
     });
   } catch (e) {
     cannotStart(target, e);
     return false;
   }
+  // The initial state: the URL fragment wins, then the stored draft, then the default
+  // example. `Web.Draft` owns the precedence and the format; the page only supplies the
+  // two strings it can read.
+  const hash = typeof location !== "undefined" ? location.hash : "";
+  const draft = handle.host.storage.get(DRAFT_KEY) || "";
+  handle.call("wiz_loom_effect", "load", hash, draft);
   const editor = document.getElementById("editor");
   if (editor) wireGoals(editor);
+  if (typeof addEventListener === "function") {
+    addEventListener("pagehide", () => {
+      if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+      flushSync();
+    });
+  }
   await loadEngine();
   return true;
 }

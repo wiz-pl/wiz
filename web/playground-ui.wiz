@@ -6,22 +6,25 @@ import Web.Playground
 # The playground page's entry points
 
 The page itself is `Web.Playground.pageApp` (a `Loom.LiveApp Page PageMsg`): the header
-and its examples menu and `#status`, the editor pane, the goals pane's container, the
-output pane and the footer with `#engine`. This file is only the C ABI: every exported
-function takes the state **by ownership** and returns the next one (stage 9g's rule, so
-the page passes its one reference and keeps the result), and a call that only reads the
-state (`wiz_loom_html` for the first paint) needs an extra `wiz_retain`, which
+and its toolbar (the examples menu and Share/Save/Reset/Clear), `#status`/`#note`, the
+editor pane, the goals pane's container, the output pane and the footer with `#engine`.
+This file is only the C ABI: every exported function takes the state **by ownership**
+and returns the next one (stage 9g's rule, so the page passes its one reference and
+keeps the result), and a call that only reads the state (`wiz_loom_html` for the first
+paint, `wiz_loom_requests` for the pending requests) needs an extra `wiz_retain`, which
 `web/framework/driver.js` takes.
 
-The page (`web/playground.js`) does the effects, because a step is pure: it runs the
-engine and reports through
+There are two runtime interfaces, not one per effect:
 
-  * `wiz_loom_show` / `wiz_loom_fail` — a run's text, or a failure's text and count;
-  * `wiz_loom_status` / `wiz_loom_enable` / `wiz_loom_engine` — the status pair, Run's
-    disabled state and the footer;
-  * `wiz_loom_text` — the editor's text replaced.
+  * `wiz_loom_effect (state) kind a b` — the page's results coming back in: a finished
+    run, a failure, a status pair, Run's state, the footer, the editor's text, the
+    initial fragment/draft, a note, and `"ack" a` for a serviced request;
+  * `wiz_loom_requests (state)` — the effects the page must do, as JSON
+    (`[{"kind":"run","payload":""}, …]`), read by `web/framework/mount.js` and handed to
+    the page's `onRequest`.
 
-Everything else (the menu, the layout, the state, the patches) is the runtime's.
+Everything else (the menu, the layout, the state, the patches, the fragment/draft
+format) is the runtime's.
 -/
 
 link_c "js.c"
@@ -36,20 +39,22 @@ def loomInit : Page := Page.initial
 def loomHtml (s : Page) : String := Loom.LiveApp.html pageApp s
 def loomStep (s : Page) (ev : String) : IO Page :=
   patched s (Loom.LiveApp.step pageApp s ev)
-def loomShow (s : Page) (text : String) : IO Page := patched s (Page.show s text)
-def loomFail (s : Page) (text count : String) : IO Page := patched s (Page.fail s text count)
-def loomStatus (s : Page) (text kind : String) : IO Page := patched s (Page.status s text kind)
-def loomEnable (s : Page) (on : Nat) : IO Page :=
-  patched s (Page.enable s (match Nat.beq on 0 with | .true => .false | .false => .true))
-def loomEngine (s : Page) (text : String) : IO Page := patched s (Page.setEngine s text)
-def loomText (s : Page) (text : String) : IO Page := patched s (Page.setText s text)
+def loomEffect (s : Page) (kind a b : String) : IO Page :=
+  patched s (Page.effect s kind a b)
+
+/-- The pending effect requests, as JSON (a read-only call: the driver retains first). -/
+def loomRequests (s : Page) : String := Page.requests s
+
+/-- Whether the runtime consumed a handled `Loom.onPrevent` event's default action
+(`web/framework/driver.js` calls this after the step; `1` means prevent). -/
+def loomConsume (s : Page) (ev : String) : Nat :=
+  match Page.consume (Loom.splitEvent ev) s with
+  | .true => 1
+  | .false => 0
 
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
-export "wiz_loom_show" loomShow
-export "wiz_loom_fail" loomFail
-export "wiz_loom_status" loomStatus
-export "wiz_loom_enable" loomEnable
-export "wiz_loom_engine" loomEngine
-export "wiz_loom_text" loomText
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume

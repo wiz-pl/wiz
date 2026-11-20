@@ -6,9 +6,9 @@ import Text
 
 The playground's examples, as plain source text: the runtime renders the menu and
 puts the chosen program in the editor. They lived in `web/playground-presets.js`;
-that file stays as the oracle `web/playground_examples_test.mjs` compares this list
-against, and `web/playground_test.mjs` runs every one through the engine until the
-Wasm test reads this list instead.
+that file's data is `web/framework/examples.mjs` now, the independent oracle
+`web/playground_page_test.mjs` compares this list against, and `web/playground_test.mjs`
+runs every one through the engine.
 
 A preset is data, not behaviour: the page never has to know an example exists.
 -/
@@ -47,6 +47,18 @@ def Examples.exampleOfFrom (id : String) : List Examples.Example → Option Exam
     | .false => Examples.exampleOfFrom id es
 
 def Examples.exampleOf (id : String) : Option Examples.Example := Examples.exampleOfFrom id Examples.examples
+
+/-- The first example whose program is exactly `code`, if any (the menu's rule and the
+URL fragment's: the text *is* an example, as opposed to merely coming from one). -/
+def Examples.presetOfFrom (code : String) : List Examples.Example → Option Examples.Example
+  | .nil => .none
+  | .cons e es => match String.eq e.code code with
+    | .true => .some e
+    | .false => Examples.presetOfFrom code es
+
+/-- The example `code` is exactly, if any. -/
+def Examples.presetOf (code : String) : Option Examples.Example :=
+  Examples.presetOfFrom code Examples.examples
 
 /-- The program `id` names; an unknown id is the default example (a stale URL or
 draft cannot leave the editor empty). -/

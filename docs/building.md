@@ -1367,7 +1367,7 @@ and the page, and the `docs` job's `build-playground.sh --from` copies both.
 | `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the web module (the documentation's signatures and the Wiz-language infoview), when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
-| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's entry point, styles and the value grammar (the Loom runtime renders the page) |
+| `playground/playground.js`, `playground/playground.css`, `playground/overlays.css` | the page's entry point and styles (the Loom runtime renders the page) |
 | `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
 | `playground/wiz-playground-ui.mjs` | the playground's runtime (the whole page as a Loom app), from `web/build-playground-ui.sh`; required |
 

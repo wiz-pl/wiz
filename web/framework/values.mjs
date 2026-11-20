@@ -6,6 +6,10 @@
 // That is exact but not friendly. This module parses the shape and shows a Nat, a Bool
 // or a list when the shape says unambiguously what it is; anything else is left as the
 // raw line (and the page always keeps the raw text in the line's `title`).
+//
+// **Test oracle only.** The page's value grammar is `lib/Web/Playground.wiz` now, and
+// `web/playground_loom_test.mjs` compares the two against the corpus in
+// `web/playground_loom_gen.wiz`. This module is not served and not copied to the site.
 "use strict";
 
 // A value is `con(pair(tag, fields))`, a pair `(a, b)`, a tag `#n` or `tt`.

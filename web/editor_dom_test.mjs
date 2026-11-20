@@ -89,41 +89,44 @@ function squiggleTexts(layer) {
   doc.body.appendChild(pane);
   const squiggles = mountSquiggles(editor, { document: doc });
   checkThat("squiggles: a layer beside the editor", !!squiggles);
-  const wrapper = editor.parentNode;
-  check("squiggles: the editor is wrapped", wrapper.getAttribute("data-editor-wrap"), "1");
-  check("squiggles: the layer is in the wrapper", wrapper.childNodes.length, 2);
+  // The editor is not wrapped: it stays where it was and the layer is appended after it,
+  // so a child-index patch applier still finds the textarea at its original path.
+  checkThat("squiggles: the editor is not wrapped", editor.parentNode === pane);
+  check("squiggles: the layer is the parent's last child", pane.childNodes.length, 2);
+  check("squiggles: the layer is beside the editor", pane.childNodes[1].getAttribute("class"), "squiggle-layer");
 
   squiggles.update([{
     range: { start: { line: 0, character: 15 }, end: { line: 0, character: 19 } },
     severity: 1, message: "unknown identifier",
   }]);
-  check("squiggles: one underline", squiggleTexts(wrapper).length, 1);
-  check("squiggles: under the offending text", squiggleTexts(wrapper), ["nope"]);
-  check("squiggles: the message is the tooltip", firstSquiggle(wrapper).getAttribute("title"), "unknown identifier");
-  check("squiggles: the severity class", firstSquiggle(wrapper).getAttribute("class"), "squiggle sev-error");
-  check("squiggles: the count is on the wrapper", wrapper.getAttribute("data-squiggles"), "1");
+  check("squiggles: one underline", squiggleTexts(pane).length, 1);
+  check("squiggles: under the offending text", squiggleTexts(pane), ["nope"]);
+  check("squiggles: the message is the tooltip", firstSquiggle(pane).getAttribute("title"), "unknown identifier");
+  check("squiggles: the severity class", firstSquiggle(pane).getAttribute("class"), "squiggle sev-error");
+  check("squiggles: the count is on the parent", pane.getAttribute("data-squiggles"), "1");
 
   // Diagnostics clear: nothing is drawn.
   squiggles.update([]);
-  check("squiggles: cleared", squiggleTexts(wrapper).length, 0);
-  checkThat("squiggles: the layer is hidden", wrapper.childNodes[1].getAttribute("hidden") === "");
+  check("squiggles: cleared", squiggleTexts(pane).length, 0);
+  checkThat("squiggles: the layer is hidden", pane.childNodes[1].getAttribute("hidden") === "");
 
   // A missing end underlines the token, and a multi-line range is one span per line.
   squiggles.update([{ range: { start: { line: 0, character: 15 } }, message: "m" }]);
-  check("squiggles: a range with no end", squiggleTexts(wrapper), ["nope"]);
+  check("squiggles: a range with no end", squiggleTexts(pane), ["nope"]);
   squiggles.update([{
     range: { start: { line: 0, character: 4 }, end: { line: 1, character: 2 } }, severity: 2,
   }]);
-  check("squiggles: a multi-line range underlines each line", squiggleTexts(wrapper), ["f : Nat := nope"]);
+  check("squiggles: a multi-line range underlines each line", squiggleTexts(pane), ["f : Nat := nope"]);
 
   // Typing re-renders the same spans against the new text (the offsets are stale until
   // the server answers, and must not throw).
   editor.value = "def g : Nat := nope\n";
   for (const fn of editor._ls.get("input") || []) fn({ type: "input" });
-  checkThat("squiggles: re-rendered after typing", squiggleTexts(wrapper).length === 1);
+  checkThat("squiggles: re-rendered after typing", squiggleTexts(pane).length === 1);
 
   squiggles.destroy();
-  check("squiggles: destroyed, the layer is gone", wrapper.childNodes.length, 1);
+  check("squiggles: destroyed, the layer is gone", pane.childNodes.length, 1);
+  checkThat("squiggles: destroyed, the editor stays", editor.parentNode === pane);
 }
 
 check("squiggles: on by default", wantsSquiggles(""), true);
