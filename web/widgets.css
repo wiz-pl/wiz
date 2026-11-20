@@ -1,6 +1,6 @@
 /* The widget host's layout (`web/widgets.js`): the standalone infoview's widget pane
-   (a grid child of `main`, beside the editor and the goals) and the playground's goals
-   panel, which has no pane of its own and puts the same grid under its Widgets heading.
+   (a grid child of `main`, beside the editor and the goals) and the playground's
+   `#widget-list`, under the goals in the right-hand column.
 
    The grid is `minmax(0, …)`, never an intrinsic width: a 640-pixel plot scrolls in its
    own card instead of widening the page or reflowing the editor's column. The palette

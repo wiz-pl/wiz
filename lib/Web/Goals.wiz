@@ -1,6 +1,5 @@
 import IO
 import Json
-import Tagged
 import Web.Hover
 import Web.Loom
 
@@ -11,7 +10,7 @@ The playground's goals pane, as a Loom view.
 
 `web/goals.js` used to build the pane's markup as strings and hand it to an element's
 `innerHTML`. It is here now: the server's answers (`wiz/interactiveGoals`,
-`wiz/interactiveTermGoal`, their `plainGoal` fallbacks, diagnostics and widgets) become
+`wiz/interactiveTermGoal`, their `plainGoal` fallbacks and diagnostics) become
 `Loom.VNode`s, and a click on a hypothesis, a goal or a tagged subterm is a message. The
 page still owns the socket and the document; it sends the answers in (`Panel.effect`) and
 does what the pane asks for (`reveal` a source span, describe a `subterm`, `reconnect`).
@@ -103,7 +102,7 @@ def Goals.spanAttrs (range : Json) : List Loom.Attr :=
 
 -- ## Tagged text (the protocol's §2 shape)
 
-/-- The HTML escaping helper is `Tagged.esc`; text nodes escape themselves. -/
+/-- A tag's class suffix: its kind, or `other` when the server omits one. -/
 def Goals.tagKind (kind : String) : String :=
   match String.isEmpty kind with
   | .true => "other"
@@ -479,7 +478,7 @@ def Goals.termResultView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
           | .none => Json.mkNull;
       (Loom.seq [drawn.1, Goals.treeSection mkMsg tree drawn.1], drawn.2)
 
--- ## Diagnostics, selection, widgets and status
+-- ## Diagnostics, selection and status
 
 /-- A severity's class name. -/
 def Goals.severity (n : Nat) : String :=
@@ -532,46 +531,6 @@ def Goals.selectionView {M : Type} (mkMsg : Nat → M) (info : Json) (next : Nat
     (Loom.el "div" [Loom.class "selection"]
       [Loom.el "span" [Loom.class "names"] [Loom.text name], Loom.text " ",
        kindNode, typeNode.1], typeNode.2)
-
-/-- A widget item's safe body and title, if it has one. -/
-def Goals.widgetBody (item : Json) : Option (String × String) :=
-  let text := Json.getStr item "text";
-  let json := match String.stripPrefix text "WIZ_WIDGET:" with
-    | .some t => t
-    | .none => text;
-  match Json.parse json with
-  | .error _ => .none
-  | .ok b =>
-    let body := match Json.get b "html" with
-      | .some (.str s) => s
-      | _ => match Json.get b "svg" with
-        | .some (.str s) => s
-        | _ => "";
-    match String.isEmpty body with
-    | .true => .none
-    | .false =>
-      let unsafe := Bool.or (Bool.or (String.contains body "<script")
-          (String.contains body "<SCRIPT")) (Bool.or (String.contains body "href=") (String.contains body "src="));
-      match unsafe with
-      | .true => .none
-      | .false =>
-        let title := match Json.get b "title" with
-          | .some (.str s) => match String.isEmpty s with
-            | .true => Json.getStr item "title"
-            | .false => s
-          | _ => Json.getStr item "title";
-        .some (body, title)
-
-/-- The widget items of a `wiz/interactiveInfo` answer. -/
-def Goals.infoItemsView {M : Type} (items : List Json) : Loom.VNode M :=
-  let widgets := List.filter (fun i => Goals.eq (Json.getStr i "kind") "widget") items;
-  match widgets with
-  | .nil => Loom.text ""
-  | .cons _ _ => Loom.el "div" [Loom.class "widgets"] (List.map (fun item =>
-      match Goals.widgetBody item with
-      | .none => Loom.el "div" [Loom.class "widget blocked"] [Loom.text (Json.getStr item "title")]
-      | .some w => Loom.raw (String.append "<figure class=\"wiz-widget\" data-widget-title=\""
-          (String.append (Tagged.esc w.2) (String.append "\">" (String.append w.1 "</figure>"))))) widgets)
 
 /-- The pane's status as plain text (the standalone page's header). -/
 def Goals.statusText (state endpoint serverName serverVersion infoview : String) : String :=
@@ -702,14 +661,6 @@ def Goals.goalsJson (s : Goals.Model) : Json := Goals.field s "goals"
 def Goals.goalsKind (s : Goals.Model) : String := Goals.strAt (Goals.field s "goalsKind") []
 def Goals.termJson (s : Goals.Model) : Json := Goals.field s "term"
 def Goals.termKind (s : Goals.Model) : String := Goals.strAt (Goals.field s "termKind") []
-def Goals.itemsJson (s : Goals.Model) : List Json := Json.asList (Goals.field s "items")
-
-/-- Whether the page mounts widget items in its own pane (`web/widgets.js`), so the
-panel leaves its `Widgets` section out. The standalone infoview sets it; the playground
-does not. -/
-def Goals.widgetsInPane (s : Goals.Model) : Bool := match Json.asBool (Goals.field s "widgetsInPane") with
-  | .some b => b
-  | .none => .false
 
 /-- The selected subterm, parsed; `null` when none. -/
 def Goals.infoJson (s : Goals.Model) : Json := s.parsedInfo
@@ -803,7 +754,7 @@ def Goals.attrBool (j : Json) (key : String) : Bool := match Json.get j key with
   | _ => .false
 
 /-- The pane's view: the status, the hint and, when connected, the goals, expected type,
-selected subterm, widgets and diagnostics. -/
+selected subterm and diagnostics. Widget items are the host's (`web/widgets.js`). -/
 def Goals.view {M : Type} (mkMsg : Nat → M) (msgSpan : String → M) (mkReconnect : M)
     (s : Goals.Model) : Loom.VNode M :=
   let state := Goals.state s;
@@ -829,13 +780,6 @@ def Goals.view {M : Type} (mkMsg : Nat → M) (msgSpan : String → M) (mkReconn
         ++ (match Json.isNull (Goals.infoJson s) with
             | .true => []
             | .false => [Loom.el "h3" [] [Loom.text "Selected subterm"], i.1])
-        ++ (match Goals.widgetsInPane s with
-            | .true => []
-            | .false => match Goals.infoItemsView (M := M) (Goals.itemsJson s) with
-              | .raw h _ => match String.isEmpty h with
-                | .true => []
-                | .false => [Loom.el "h3" [] [Loom.text "Widgets"], Goals.infoItemsView (M := M) (Goals.itemsJson s)]
-              | _ => [])
         ++ [ Loom.el "h3" [] [Loom.text "Diagnostics"]
            , Goals.diagnosticsView (Goals.diagnostics s) ]);
   Loom.el "div" [Loom.class "lsp-view", Loom.attr "data-state" state] body

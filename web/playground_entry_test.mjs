@@ -39,6 +39,8 @@ ok(!/document\.createElement|replaceChildren|appendChild|innerHTML/.test(entry),
   "the entry builds no DOM (the runtime's patches do)");
 ok(/call\("wiz_loom_/.test(entry),
   "its effects use mount's `call`, not the module object");
+ok(/getElementById\("widget-list"\)/.test(entry) && /widgetPane/.test(entry),
+  "the goals pane hands #widget-list to the widget host");
 const exports = [...entry.matchAll(/^export (?:async )?function (\w+)/gm)].map((m) => m[1]);
 ok(exports.length === 1 && exports[0] === "startPage",
   "the entry exports exactly one function (startPage)", exports.join(","));
