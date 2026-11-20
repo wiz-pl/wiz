@@ -3526,7 +3526,7 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
         (.var (eqSeen + nScruts - 1 - i))
       let vTy ← evalIn ctx' eqTy
       eqBinders := eqBinders.push (h, eqTy)
-      lvls := lvls ++ [ctx'.lvl]
+      lvls := lvls ++ [ctx'.lvl] -- complexity: ok (bounded by the match's scrutinees)
       ctx' := ctx'.bind h vTy
       eqSeen := eqSeen + 1
   binders := absBinders ++ eqBinders
