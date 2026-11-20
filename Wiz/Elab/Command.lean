@@ -2239,6 +2239,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | "term.ident" => (stx.getArg 0).getId?
         | "term.app" => resultHead (stx.getArg 0)
         | "term.paren" => resultHead (stx.getArg 1)
+        | "term.sized" => resultHead (stx.getArg 0)
         | "term.arrow" | "term.depArrow" => resultHead (stx.getArg 2)
         | _ => none
       let declared := (resultHead ((cmd.getArg 4).getArg 1)).map s.globals.resolve
