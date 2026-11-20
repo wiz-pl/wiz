@@ -378,8 +378,9 @@ def repoCoverage : IO Unit := do
     ("error 1 parse failure"
      ++ "|warning 1 lambda body not lowered: an opaque function value"
      
-     ++ "|warning 1 unmodelled-external"
+     -- Equal severity and count sort by construct name: "unknown…" < "unmodelled…".
      ++ "|warning 1 unknown name not modelled: havoc"
+     ++ "|warning 1 unmodelled-external"
      ++ "|note 1 excluded: *.Designer.cs"
      ++ "|note 1 excluded: *.g.cs"
      ++ "|note 1 excluded: bin/"
