@@ -8,6 +8,19 @@ the subset, the host ABI and the three blockers, is `DESIGN.md` (also in
 `wiz-notes/webgpu-target.md`); the stage documentation is
 `docs/stages/08-backend/webgpu.md`.
 
+## Proof
+
+One command, after `lake build wiz` in the worktree:
+
+```sh
+WIZ=.lake/build/bin/wiz ./webgpu/check-all.sh
+```
+
+It prints the value comparison (expected `414/414 values agree with the Wiz interpreter`)
+and the boundary result (expected `all 18 non-subset fixtures rejected`). The optional
+Chromium page harness (`check-browser.mjs`) was not run here because the environment has
+no Chromium binary; Deno 2.9.8 + Mesa 26.2.6 lavapipe (`check.sh`) is the automated proof.
+
 ## Layout
 
 | path | what |
