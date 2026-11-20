@@ -2721,25 +2721,29 @@ def selfHostGroup : Group where
         -- constructor payloads, so both kernels reach the same rule)
         selfhostAgrees
           ("axiom Tok : Type\naxiom Tok.use : (1 t : Tok) → Nat\n" ++
+           "axiom Tok.useB : (1 t : Tok) → Bool\n" ++
+           "axiom Tok.useP : (1 t : Tok) → Nat × Nat\n" ++
+           "axiom Tok.useO : (1 t : Tok) → Option Nat\n" ++
+           "axiom Tok.useTok : (1 t : Tok) → Tok × Nat\n" ++
            "def Nat.inc (n : Nat) : Nat := Nat.succ n\n")
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
             ("partial def loop (1 t : Tok) (n : Nat) : Nat :=\n" ++
              "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
             ("partial def loopB (1 t : Tok) (n : Nat) : Bool :=\n" ++
-             "  let m := n;\n  match m with\n  | 0 => Nat.beq (Tok.use t) 0\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
+             "  let m := n;\n  match m with\n  | 0 => Tok.useB t\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
             -- a recursive call bound by an ω `let`: a pair of ω types
             ("partial def loopP (1 t : Tok) (n : Nat) : Nat × Nat :=\n" ++
-             "  let m := n;\n  match m with\n  | 0 => (Tok.use t, 0)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useP t\n" ++
              "  | .succ k =>\n    let r := loopP t k;\n    (r.1 + 1, r.2)\n", true),
             -- ... and an `Option Nat` matched after the let
             ("partial def loopO (1 t : Tok) (n : Nat) : Option Nat :=\n" ++
-             "  let m := n;\n  match m with\n  | 0 => Option.some (Tok.use t)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useO t\n" ++
              "  | .succ k =>\n    let r := loopO t k;\n    match r with\n" ++
              "    | .none => Option.none\n    | .some v => Option.some (Nat.inc v)\n", true),
             -- the result contains `Tok`: copied at ω it would copy the token
             ("partial def bad (1 t : Tok) (d : Tok) (n : Nat) : Tok × Nat :=\n" ++
-             "  let m := n;\n  match m with\n  | 0 => (d, 0)\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useTok t\n" ++
              "  | .succ k =>\n    let r := bad t d k;\n    r\n", false),
             -- two calls, and a path that never calls
             ("partial def dup (1 t : Tok) (n : Nat) : Nat :=\n" ++
