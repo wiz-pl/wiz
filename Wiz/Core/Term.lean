@@ -193,8 +193,9 @@ inductive Term (R : Type) where
   | scase (l : Level) (q : Term R) (I D : Term R) (v : Level) (P m s i x : Term R)
   /-- a ν constructor: `cocon xs : ν^{↑s} D i` for `xs : ⟦D⟧ (ν^s D) i` -/
   | cocon (x : Term R)
-  /-- sized corecursion: `scofix A f s i a : ν^s D i`, where
-  `f : (s : Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i`.
+  /-- sized corecursion: `scofix A f s i a : ν^s D i` for `a : A s i`, where
+  `A : (j : Size) → (i : I) → Type` and
+  `f : (j : Size) → ((i : I) → A j i → ν^j D i) → (i : I) → A (↑j) i → ν^{↑j} D i`.
   It unfolds only when observed with `out`. -/
   | scofix (l : Level) (I D A f s i a : Term R)
   /-- coiteration: unfold a state `s : S i` with `step` -/

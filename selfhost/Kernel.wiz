@@ -1766,11 +1766,15 @@ def vOut (x : Val) : Val := match whnf x with
     let f : Val := .vlam (.cons st (.cons S (.cons D (.cons I .nil))))
       (.lam (.coit l (.var 5) (.var 4) (.var 3) (.var 2) (.var 1) (.var 0)));
     vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (mapTm l)) I) D) S) (nuFamily l I D)) f) i) (vapp (vapp st i) s)
-  | .vscofix l I D A f _ i a =>
-    -- fun i a => scofix … ∞ i a;  inside: a0 i1 f2 A3 D4 I5
-    let rec_ : Val := .vlam (.cons f (.cons A (.cons D (.cons I .nil))))
-      (.lam (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) .szInf (.var 1) (.var 0)));
-    vOut (vapp (vapp (vapp (vapp f .vszInf) rec_) i) a)
+  | .vscofix l I D A f s i a =>
+    -- the body is at the predecessor of `s` (`∞` is its own predecessor)
+    let j := match sizePred s with
+      | .some j => j
+      | .none => (.vszInf : Val);
+    -- fun i a => scofix … j i a;  inside: a0 i1 f2 A3 D4 I5 j6
+    let rec_ : Val := .vlam (.cons f (.cons A (.cons D (.cons I (.cons j .nil)))))
+      (.lam (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) (.var 6) (.var 1) (.var 0)));
+    vOut (vapp (vapp (vapp (vapp f j) rec_) i) a)
   | .vne h sp => outNe h sp
   | x' => x'
 -- `⟦D⟧ X i`
@@ -3008,18 +3012,23 @@ def scaseMethodTy (l v : Lvl) (q : Q) (I D P sz : Val) : Val :=
 
 -- `S : I → Type l`, the states of a coiteration (and `A`, the seeds of a corecursion)
 def coitStateTy (l : Lvl) (I : Val) : Val := .vpi .qw (lsucc l) (lsucc (lsucc l)) I .nil (.sortL (lsucc l))
+-- `A : (j : Size) → (i : I) → Sort (l+1)`, the size-dependent states of a sized corecursion
+def scofixStateTy (l : Lvl) (I : Val) : Val :=
+  let l1 := lsucc l;
+  eval (.cons I .nil) (TS.t (tpi .qz (.mk .size (ln 1))
+    (tpi .qw (.mk (.var 1) l1) (.mk (.sortL l1) (lsucc l1)))))
 -- `step : (i : I) → S i → ⟦D⟧ S i`
 def coitStepTy (l : Lvl) (I D S : Val) : Val :=
   let l1 := lsucc l;
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
   eval (.cons S (.cons D (.cons I .nil)))
     (TS.t (tpiw (.mk (.var 2) l1) (tpiw (.mk (.app (.var 1) (.var 0)) l1) (.mk (interpApp l (.var 4) (.var 3) (.var 2) (.var 1)) l1))))
--- `f : (s :0 Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i`
+-- `f : (j :0 Size) → ((i : I) → A j i → ν^j D i) → (i : I) → A (↑j) i → ν^{↑j} D i`
 def scofixFunTy (l : Lvl) (I D A : Val) : Val :=
   let l1 := lsucc l;
-  eval (.cons A (.cons D (.cons I .nil))) (TS.t (tpi .qz (.mk .size (ln 1))
-    (tpiw (tpiw (.mk (.var 3) l1) (tpiw (.mk (.app (.var 2) (.var 0)) l1) (.mk (.nu l (.var 5) (.var 4) (.var 1) (.var 2)) l1)))
-      (tpiw (.mk (.var 4) l1) (tpiw (.mk (.app (.var 3) (.var 0)) l1) (.mk (.nu l (.var 6) (.var 5) (.var 1) (.szSuc (.var 3))) l1))))))
+  eval (.cons A (.cons D (.cons I .nil))) (TS.t (tpi .qw (.mk .size (ln 1))
+    (tpiw (tpiw (.mk (.var 3) l1) (tpiw (.mk (.app (.app (.var 2) (.var 1)) (.var 0)) l1) (.mk (.nu l (.var 5) (.var 4) (.var 1) (.var 2)) l1)))
+      (tpiw (.mk (.var 4) l1) (tpiw (.mk (.app (.app (.var 3) (.szSuc (.var 2))) (.var 0)) l1) (.mk (.nu l (.var 6) (.var 5) (.var 1) (.szSuc (.var 3))) l1))))))
 
 def andSame (a : Option Nat) (k : Nat → Option Nat) : Option Nat := match a with
   | .some n => k n
@@ -3197,9 +3206,9 @@ def convW : TCtx → Val → Val → Val → Bool
         | .vcocon x => match whnf b with
           | .vcocon y => conv c (vInterp l I D (nuFamily l I D) i) x y
           | _ => convNe c a b
-        | .vscofix _ _ _ A f _ j x => match whnf b with
-          | .vscofix _ _ _ A' f' _ j' x' => Bool.and (conv c (coitStateTy l I) A A')
-              (Bool.and (conv c (scofixFunTy l I D A) f f') (Bool.and (conv c I j j') (conv c (vapp A j) x x')))
+        | .vscofix _ _ _ A f s j x => match whnf b with
+          | .vscofix _ _ _ A' f' s' j' x' => Bool.and (sizeEq s s') (Bool.and (conv c (scofixStateTy l I) A A')
+              (Bool.and (conv c (scofixFunTy l I D A) f f') (Bool.and (conv c I j j') (conv c (vapp (vapp A s) j) x x'))))
           | _ => convNe c a b
         | .vcoit _ _ _ S st j x => match whnf b with
           | .vcoit _ _ _ S' st' j' x' => Bool.and (conv c (coitStateTy l I) S S')
@@ -4165,7 +4174,7 @@ def inferW : TCtx → Tm → TyRes
       match check c D (.vdesc l vI) with
       | .ok _ _ =>
         let vD := eval (TCtx.env c) D;
-        match check c A (coitStateTy l vI) with
+        match check c A (scofixStateTy l vI) with
         | .ok _ _ =>
           let vA := eval (TCtx.env c) A;
           match check c f (scofixFunTy l vI vD vA) with
@@ -4173,7 +4182,8 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ _ => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                match check c a (vapp vA vi) with
+                let vs := eval (TCtx.env c) sz;
+                match check c a (vapp (vapp vA vs) vi) with
                 | .ok _ ua => .ok (.vnu l vI vD vi (eval (TCtx.env c) sz)) (uScale .qw (uAdd uf ua))
                 | r => r
               | r => r
@@ -5116,12 +5126,13 @@ def markInferW : TCtx → Tm → MR
     let vI := eval (TCtx.env c) I';
     let D' := markCheck c D (.vdesc l vI);
     let vD := eval (TCtx.env c) D';
-    let A' := markCheck c A (coitStateTy l vI);
+    let A' := markCheck c A (scofixStateTy l vI);
     let vA := eval (TCtx.env c) A';
     let f' := markCheck c f (scofixFunTy l vI vD vA);
     let i' := markCheck c i vI;
     let vi := eval (TCtx.env c) i';
-    let a' := markCheck c a (vapp vA vi);
+    let vs := eval (TCtx.env c) sz;
+    let a' := markCheck c a (vapp (vapp vA vs) vi);
     .mk (.scofix l I' D' A' f' sz i' a') (.some (.vnu l vI vD vi (eval (TCtx.env c) sz)))
   | c, .coit l I D S st i x =>
     let I' := markTy c I;

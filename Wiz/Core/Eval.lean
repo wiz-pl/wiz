@@ -889,11 +889,14 @@ partial def vOut (g : Globals R) (x : Val R) : Val R :=
       (.lam "s" (.coit l (.var 5) (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))))
     [I, D, S, nuFamily l I D, f, i, [i, s].foldl (vApp g) step].foldl (vApp g) (eval g [] (Templates.mapTm l))
   | .cocon xs => xs
-  | .scofix l I D A f _ i a =>
-    -- a0 i1 f2 A3 D4 I5
-    let rec_ : Val R := .lam "i" (.mk [f, A, D, I]
-      (.lam "a" (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) .szInf (.var 1) (.var 0))))
-    vOut g ([.szInf, rec_, i, a].foldl (vApp g) f)
+  | .scofix l I D A f s i a =>
+    -- the body runs at the predecessor of `s` (`∞` is its own predecessor; a size
+    -- variable cannot be observed, and the limit is the same value)
+    let j := (sizePred? (whnf s)).getD .szInf
+    -- a0 i1 f2 A3 D4 I5 j6
+    let rec_ : Val R := .lam "i" (.mk [f, A, D, I, j]
+      (.lam "a" (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) (.var 6) (.var 1) (.var 0))))
+    vOut g ([j, rec_, i, a].foldl (vApp g) f)
   -- a cast between two `ν` types of a family is observed through (`vCastData`)
   | .neutral (.cast A B e t) #[] => match whnf A, famPayloadEq? g (whnf A) (whnf B) e with
     | .nu .., some (Xi, Xi', e') => vCast g Xi Xi' e' (vOut g t)

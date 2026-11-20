@@ -1873,23 +1873,29 @@ linear variable): a possible later stage.
      ───────────────────────────────────── coit                                              Check.lean:594–606
      Γ ⊢ coit S step i t ⇒ ν D i ^∞ ⊣ ω·(U_st + U_t)
 
-     Γ ⊢ A ⇐ (ω i : I) → Sort (l+1)
-     Γ ⊢ f ⇐ (0 s : Size) → (ω rec : (ω i : I) → A i → ν^s D i) → (ω i : I) → A i → ν^{↑s} D i   ⊣ U_f
-     Γ⁰ ⊢ s ⇐ Size    Γ ⊢ i ⇐ I    Γ ⊢ a ⇐ A i ⊣ U_a
+     Γ ⊢ A ⇐ (0 j : Size) → (ω i : I) → Sort (l+1)
+     Γ ⊢ f ⇐ (ω j : Size) → (ω rec : (ω i : I) → A j i → ν^j D i) →
+              (ω i : I) → A (↑j) i → ν^{↑j} D i   ⊣ U_f
+     Γ⁰ ⊢ s ⇐ Size    Γ ⊢ i ⇐ I    Γ ⊢ a ⇐ A s i ⊣ U_a
      ───────────────────────────────────── scofix                     Check.lean:566–578, scofixFunTy Conv.lean:180
      Γ ⊢ scofix A f s i a ⇒ ν D i ^s ⊣ ω·(U_f + U_a)
 
      out (cocon xs)               ⟶  xs                                                     vOut, Eval.lean:468–487
      out (coit S step i t)        ⟶  map D S (ν D) (λj s. coit S step j s) i (step i t)
-     out (scofix A f s i a)       ⟶  out (f ∞ (λi a. scofix A f ∞ i a) i a)
+     out (scofix A f s i a)       ⟶  out (f j (λi a. scofix A f j i a) i a)   (s = ↑j or ∞)
 ```
 
 * `coit`, `scofix` are **values** (`Val.coit`, `Val.scofix`): they unfold only under `out`
   (the guard against infinite unfolding). [std: Abel's sized coinduction; the
   "unfold under observation" strategy is standard (unverified which paper exactly)]
 * `ν` is contravariant in its size (§11.5): `ν^∞ ≤ ν^s`.
-* `out` requires the size to be visibly a successor or `∞`. Inside `f`, `rec` returns
-  `ν^s` for the generic `s`, which can't be observed; this is the productivity check.
+* `out` requires the size to be visibly a successor or `∞`. The state of `scofix`
+  depends on the size, `A : Size → I → Type`: the body is at `A (↑j)` and its observation
+  at `↑j`; the recursive argument is the value at the predecessor `j`, `A j → ν^j`. Inside
+  `f`, `rec` returns `ν^j` for a generic `j`, which can't be observed; this is the
+  productivity check, and it is what makes a combinational feedback loop a size error.
+  (Sizes are erased bounds: the compiled paths unfold at `∞`, the limit of the same
+  infinite value.)
 
 ---
 
