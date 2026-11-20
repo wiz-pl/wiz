@@ -19,6 +19,7 @@ lib/BitVecShift.wiz
 lib/BvDecide.wiz
 lib/Class.wiz
 lib/Compare.wiz
+lib/Compose.wiz
 lib/Conc.wiz
 lib/Data/ListLemmas.wiz
 lib/Data/Order.wiz
@@ -50,6 +51,7 @@ lib/Hdl/Core.wiz
 lib/Hdl/Crc.wiz
 lib/Hdl/Ddr.wiz
 lib/Hdl/Display.wiz
+lib/Hdl/Formal.wiz
 lib/Hdl/Mem.wiz
 lib/Hdl/Netlist.wiz
 lib/Hdl/Optic.wiz
@@ -112,6 +114,7 @@ lib/Scry/EgraphWil.wiz
 lib/Scry/Engine.wiz
 lib/Scry/EqPlan.wiz
 lib/Scry/Eval.wiz
+lib/Scry/Identity.wiz
 lib/Scry/Interproc.wiz
 lib/Scry/Lifetime.wiz
 lib/Scry/Models.wiz
@@ -122,6 +125,7 @@ lib/Scry/PointsTo.wiz
 lib/Scry/Prover.wiz
 lib/Scry/ProverExamples.wiz
 lib/Scry/Race.wiz
+lib/Scry/Registry.wiz
 lib/Scry/Report.wiz
 lib/Scry/RuleExamples.wiz
 lib/Scry/RuleTaint.wiz
@@ -145,9 +149,17 @@ lib/Task.wiz
 lib/Text.wiz
 lib/Trace.wiz
 lib/Vec.wiz
+lib/Web/DocLive.wiz
+lib/Web/Draft.wiz
 lib/Web/Editor.wiz
+lib/Web/EditorModel.wiz
+lib/Web/Examples.wiz
+lib/Web/Goals.wiz
+lib/Web/Hover.wiz
+lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
+lib/Web/Search.wiz
 lib/Web/Widget.wiz
 lib/Word.wiz
 lib/WordArray.wiz
@@ -156,6 +168,7 @@ scry/App.wiz
 scry/fixtures/ReplPrelude.wiz
 scry/gen/C/Schema.wiz
 scry/grail.wiz
+scry/src/Scry/AnalysisFile.wiz
 scry/src/Scry/Bench.wiz
 scry/src/Scry/BenchCmd.wiz
 scry/src/Scry/Budget.wiz
@@ -203,6 +216,7 @@ scry/tests/optics.wiz
 scry/tests/parse-stats.wiz
 scry/tests/preproc.wiz
 scry/tests/project.wiz
+scry/tests/registry.wiz
 scry/tests/relations.wiz
 scry/tests/repl-prelude.wiz
 scry/tests/repl.wiz
