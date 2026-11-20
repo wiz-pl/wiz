@@ -58,14 +58,14 @@ def Scry.fnvStr (s : String) : U64 :=
 def Scry.fnv (s : String) : Nat := UIntN.toNat (Scry.fnvStr s)
 
 /-- One lower-case hex digit. -/
-def Scry.hexDigit (d : Nat) : Char :=
+def Scry.idHexDigit (d : Nat) : Char :=
   match Nat.lt d 10 with
   | .true => Char.mk (Nat.add 48 d)
   | .false => Char.mk (Nat.add 87 d)
 
 /-- One hex digit off the low end of the value, newest digit first. -/
 def Scry.hexTick (st : Nat × List Char) (_ : Char) : Nat × List Char :=
-  (Nat.div st.1 16, List.cons (Scry.hexDigit (Nat.mod st.1 16)) st.2)
+  (Nat.div st.1 16, List.cons (Scry.idHexDigit (Nat.mod st.1 16)) st.2)
 
 /-- 16 lower-case hex digits (64 bits), most significant first (each tick conses the
 next-more-significant digit, so the accumulated list is already in output order). -/
