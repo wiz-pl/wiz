@@ -1307,7 +1307,7 @@ def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : El
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let sized := (resultSizeVar? ((cmd.getArg 4).getArg 1)).any (hasBinderSizedAt cmd)
+  let sized := (resultSizeVar? ((cmd.getArg 4).getArg 1)).isSome
   let r ← if sized then elabCopatternsScofix name cmd obs
     else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)
