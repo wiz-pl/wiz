@@ -228,10 +228,10 @@ def Scry.G.fileOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : Strin
     | .none => ""
 
 /-- A call/error site from a node id. -/
-def Scry.G.siteOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : Option Scry.CallSite :=
+def Scry.G.siteOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : Option Scry.AfCallSite :=
   match Scry.G.nodeOf s id with
   | .none => .none
-  | .some n => .some (Scry.CallSite.mk id (Scry.G.fileOf s m fileRel id)
+  | .some n => .some (Scry.AfCallSite.mk id (Scry.G.fileOf s m fileRel id)
       n.count.toNat n.label.toNat)
 
 /-- The live view: query the Quire snapshot, with the manifest's counts. -/

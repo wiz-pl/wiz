@@ -95,6 +95,7 @@
       "=plot",
       "regions",
       "=reject",
+      "=scry-analysis",
       "=scry-wil",
       "=scry-c2wil",
       "=scry-csharp",
