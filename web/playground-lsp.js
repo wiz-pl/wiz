@@ -145,10 +145,23 @@ export function startInfoview({
     follow,
   };
 
+  // The widget pane is rebuilt only when the payload changed: `mountWidgets` clears the
+  // container and sanitises every card, and `publish` runs on every answer, diagnostics
+  // notification and cursor move (a plot's SVG is up to 2 MB). The key is the serialized
+  // payload, so identical items keep the mounted DOM (and its `<details open>`, scroll
+  // and focus) across publishes.
+  let lastWidgets = null;
+  const widgetKey = (items) => {
+    try { return JSON.stringify(items || []); } catch { return ""; }
+  };
   const publish = () => {
     send("view", JSON.stringify(view), "");
     if (widgetPane) {
-      mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+      const key = widgetKey(view.items);
+      if (key !== lastWidgets) {
+        mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+        lastWidgets = key;
+      }
     }
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
