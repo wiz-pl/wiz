@@ -1,0 +1,37 @@
+import IO
+import Web.InfoviewPage
+import Web.Loom
+
+/-!
+# The standalone infoview's entry points
+
+`web/infoview.js` mounts this module on the body: the header, the editor (unless
+`?follow=1`) and the goals pane from `Web.InfoviewPage`. The page keeps the endpoint
+rule, the socket and the caret; the runtime keeps the markup and the selection.
+-/
+
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+def patched (s s' : InfoviewPage) : IO InfoviewPage := do
+  Js.patch (Loom.LiveApp.patches app s s');
+  IO.pure s'
+
+def loomInit : InfoviewPage := InfoviewPage.initial
+def loomHtml (s : InfoviewPage) : String := Loom.LiveApp.html app s
+def loomStep (s : InfoviewPage) (ev : String) : IO InfoviewPage :=
+  patched s (Loom.LiveApp.step app s ev)
+def loomEffect (s : InfoviewPage) (kind a b : String) : IO InfoviewPage :=
+  patched s (InfoviewPage.effect s kind a b)
+def loomRequests (s : InfoviewPage) : String := InfoviewPage.requests s
+def loomConsume (s : InfoviewPage) (ev : String) : Nat :=
+  match InfoviewPage.consume (Loom.splitEvent ev) with
+  | .true => 1
+  | .false => 0
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_step" loomStep
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume

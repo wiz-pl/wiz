@@ -20,7 +20,7 @@ import {
   completionPrefix, filterCompletions, splitGoals, wordAt,
 } from "./selfhost-lsp-shim.js";
 import { LspClient, LspError } from "./lsp-client.js";
-import { readGoalState, renderPanel } from "./goals.js";
+import { readGoalState, renderPanel } from "./framework/goals.mjs";
 import { startInfoview } from "./playground-lsp.js";
 import { document as minidoc } from "./framework/minidom.mjs";
 
@@ -320,6 +320,7 @@ async function waitUntil(predicate, ms = 3000) {
   const wire = fakePanel();
   const app = startInfoview({
     editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    render: (kind, a) => { if (kind === "view") renderPanel(wire, JSON.parse(a)); },
     document: fakeDocument(),
   });
   checkThat("wiring: connected", await waitUntil(() => wire.innerHTML.includes("connected")), wire.innerHTML.slice(0, 300));

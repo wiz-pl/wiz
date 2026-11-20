@@ -15,13 +15,34 @@
 //     `CompletionList`), the identifier prefix of the caret, filtering and ordering, the
 //     keyboard's index arithmetic, and the text an accepted item inserts.
 //
-// `web/goals.js` has the same offset arithmetic for the goals panel; this module imports
-// it rather than keeping a second copy, so the two cannot drift.
+// The offset arithmetic is here, not in a second module: `web/goals.js` is the test
+// oracle for the runtime's `lib/Web/Goals.wiz` now.
 "use strict";
-import { offsetAt as offsetOfPosition, positionAt as positionOfOffset } from "./goals.js";
 
 const clampNat = (n, lo, hi) => (n < lo ? lo : n > hi ? hi : n);
 const num = (x) => (typeof x === "number" && isFinite(x) ? Math.trunc(x) : 0);
+
+function positionOfOffset(text, offset) {
+  const at = Math.max(0, Math.min(text ? text.length : 0, num(offset)));
+  const before = text ? text.slice(0, at) : "";
+  const line = (before.match(/\n/g) || []).length;
+  return { line, character: at - (before.lastIndexOf("\n") + 1) };
+}
+
+function offsetOfPosition(text, position) {
+  if (!text || !position) return 0;
+  const line = Math.max(0, num(position.line));
+  const character = Math.max(0, num(position.character));
+  let offset = 0;
+  for (let l = 0; l < line; l++) {
+    const newline = text.indexOf("\n", offset);
+    if (newline < 0) return text.length;
+    offset = newline + 1;
+  }
+  const newline = text.indexOf("\n", offset);
+  const lineEnd = newline < 0 ? text.length : newline;
+  return Math.min(lineEnd, offset + character);
+}
 
 // ## Positions
 

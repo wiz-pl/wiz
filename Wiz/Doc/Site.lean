@@ -41,8 +41,9 @@ structure Options where
   title : String := "Wiz documentation"
   /-- the Wasm module and its JS (`web/build.sh`'s output) -/
   web : Option System.FilePath := none
-  /-- where the site's own files are (scroll.css, scroll.js, tagged.js, and with
-  `--serve` lsp-client.js, goals.js, doc-live.js, doc-live.css): searched in order,
+  /-- where the site's own files are (scroll.css, scroll.js, scroll-search.js, the
+  runtime modules and `framework/`, and with `--serve` lsp-client.js, doc-live.js,
+  doc-live.css): searched in order,
   `web/` of a checkout or share/wiz/web of a release -/
   assets : List System.FilePath := []
   /-- (11s) `--serve`: the pages carry the live documentation client, which asks a

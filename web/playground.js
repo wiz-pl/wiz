@@ -149,6 +149,7 @@ function onRequest(kind, payload) {
     if (handle.host.download("playground.wiz", payload)) note("saved playground.wiz");
   } else if (kind === "share") share(payload);
   else if (kind === "sync") sync(payload);
+  else if (goals) goals.request(kind, payload);
 }
 
 // ## The goals pane
@@ -158,11 +159,15 @@ function onRequest(kind, payload) {
 // editor overlays are on: the squiggle layer no longer wraps the textarea (it is the
 // last child of the editor's section, so the runtime's child-index patch paths stay
 // stable), and the completion popup is appended to the body, outside the rendered tree.
+let goals = null;
+
 function wireGoals(editor) {
-  startInfoview({
+  goals = startInfoview({
     editor,
-    panel: document.getElementById("goals"),
     config: selfhost,
+    // The pane is the runtime's (`lib/Web/Goals.wiz`); this sends it the server's
+    // answers (and a click's `reveal`/`subterm` request comes back through onRequest).
+    update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
   });
 }
 

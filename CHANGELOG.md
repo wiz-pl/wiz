@@ -43,6 +43,26 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   last child, so Loom's child-index patch paths stay valid — and both overlays are back
   on the page; the shared overlay CSS is `web/overlays.css`, and
   `web/loom_overlay_test.mjs` pins the two overlays against the patch paths.
+* web: the **goals pane, the standalone infoview and the hover card are Loom apps**
+  (stage 5). `lib/Web/Goals.wiz` renders the pane (status, hint, goals, expected type,
+  term tree, diagnostics, selected subterm, widgets) and its clicks are messages that
+  ask the page for a source `reveal`, a `subterm` or a `reconnect`;
+  `lib/Web/Hover.wiz` owns the hover contents, Markdown lines and definition label, with
+  `web/hover.js` left as timers, caret and card position. The playground's `Page` embeds
+  the pane; the standalone `web/infoview.html` mounts `wiz-infoview-ui.mjs`
+  (`lib/Web/InfoviewPage.wiz`) on the body, keeping only the URL rule, the socket and the
+  caret, and no longer imports `editor-model.js`. `web/goals.js` and the pure half of
+  `web/hover.js` are test oracles now (`web/framework/{goals,hover}.mjs`).
+* web: the **docs pages' search and live panel are Loom apps** (stage 6).
+  `lib/Web/Search.wiz` ranks names, doc comments and signatures and draws the hits;
+  `web/scroll-search.js` keeps the input and Enter/Escape and mounts `wiz-docs-ui.mjs`.
+  `lib/Web/DocLive.wiz` draws the live panel (hover Markdown, goals, expected type,
+  diagnostics); `web/doc-live.js` keeps the source fetch, the socket and the pin, and
+  mounts `wiz-doc-live-ui.mjs`. `web/tagged.js` is deleted; `wiz doc` copies both
+  runtimes and `framework/` into the site. Production page JavaScript is 4,064 lines
+  with the framework half (3,433 without the two test oracles), down from 5,135; the
+  stage 5–6 plan targets are not reached because the editor's pure overlay rules
+  (`editor-model.js`, `squiggles.js`, `completions.js`) and the stage-7 shim remain.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`

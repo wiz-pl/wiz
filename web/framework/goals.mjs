@@ -1,4 +1,4 @@
-// The goals panel: the LSP answers (`wiz/interactiveGoals`, `wiz/interactiveTermGoal`,
+// The goals panel (test oracle): the LSP answers (`wiz/interactiveGoals`, `wiz/interactiveTermGoal`,
 // their `plainGoal` fallbacks, diagnostics) as HTML, and the geometry that connects a
 // rendered subterm to a source span. No DOM: the page sets `innerHTML` from these
 // strings, and the Node test calls the same functions with a stub element.

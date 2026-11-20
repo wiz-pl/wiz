@@ -1,6 +1,7 @@
 # Loom pages: the JavaScript is a mount point
 
-**Status:** design + stages 1–4 (`thin-js-34`, off `integration/train7`, 2026-11-19).
+**Status:** design + stages 1–6 (`thin-js-34` for 1–4; `loom-56` for 5–6, off
+`integration/train8`, 2026-11-20).
 The migration is staged; each stage is independently landable. Stage 2 (one page, no
 fallback), stage 3 (the state format and the effect protocol) and stage 4 (the keyboard
 policy and the overlays) are on `thin-js-34`.
@@ -236,6 +237,41 @@ default is no longer a question: there is one page.
 the same `web/playground-lsp.js`. The playground's overlay *layout* policy is the
 runtime's (the layer is appended after the rendered children, the popup outside them);
 moving the pure rules waits for stage 5, when the infoview is a Loom app too.
+
+## 4b. Stages 5 and 6 (this branch)
+
+* **Stage 5 — the goals pane, the infoview and the hover card.**
+  `lib/Web/Goals.wiz` renders the pane's status, hint, goals, expected type, term tree,
+  diagnostics, selected subterm and widgets as `Loom.VNode`s; a click on a hypothesis,
+  a goal or a tagged subterm is a message, and the pane asks the page for `reveal`,
+  `subterm` or `reconnect` through `wiz_loom_requests` (the same request list the page
+  already services). `lib/Web/Hover.wiz` owns the hover contents/Markdown lines and the
+  definition label; `web/hover.js` is now only the timers, the caret and the card's
+  position. The playground's `Page` embeds the pane (`lib/Web/Playground.wiz`) and its
+  `wiz_loom_effect "panel"` feeds it. The standalone infoview is a Loom app
+  (`lib/Web/InfoviewPage.wiz`, `web/infoview-ui.wiz`, `wiz-infoview-ui.mjs`): the page
+  mounts it on the body and keeps the URL rule, the socket and the caret; it no longer
+  imports `editor-model.js`. `web/goals.js` and the pure half of `web/hover.js` moved to
+  `web/framework/{goals,hover}.mjs` as the Node test's oracles (as `values.mjs` and
+  `examples.mjs` already are). `wiz_loom_effect "hover"` carries the server's answer and
+  the runtime renders the card; the page positions `#wiz-hover`.
+* **Stage 6 — the docs pages.**
+  `lib/Web/Search.wiz` owns the search's ranking, snippets and hit markup; the new
+  `wiz-docs-ui.mjs` is mounted on `#results`, and `web/scroll-search.js` keeps only the
+  input, Enter/Escape and `location` (37 lines). `lib/Web/DocLive.wiz` owns the live
+  panel's head, hover Markdown, goals, expected type and diagnostics; `wiz-doc-live-ui.mjs`
+  is mounted on the panel, and `web/doc-live.js` keeps the source fetch, the socket and
+  the pin. `web/tagged.js` is deleted (its loader/stepper/delegate are in `scroll.js`;
+  the signatures are still `lib/Tagged.wiz`'s). `wiz doc` copies the two runtimes and
+  `framework/` into the site.
+
+Production JavaScript after both stages: **3,559** in `web/*.js` plus the **505**-line
+browser half (`mount` 226, `driver` 139, `runtime` 140), **4,064** together; the test
+oracles (`framework/goals.mjs` 481, `framework/hover.mjs` 150) are not page code. That is
+above the plan's 2,570/2,144 targets: stages 3–4 left the editor overlays' pure rules in
+`editor-model.js` (367) and `squiggles.js`/`completions.js` (596), which stage 5 in the
+plan assumed would become runtime adapters, and `selfhost-lsp-shim.js` (669) is stage 7.
+`PositionIndex` in the shim is still the next stage's move.
 
 ## 5. Stages, each landable on its own
 

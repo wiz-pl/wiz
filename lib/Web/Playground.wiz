@@ -4,6 +4,7 @@ import Json
 import Web.Draft
 import Web.Editor
 import Web.Examples
+import Web.Goals
 import Web.Loom
 
 /-!
@@ -361,13 +362,14 @@ structure Page where
   share : Nat
   sync : Nat
   note : String
+  panel : Goals.Model
 
 /-- The first paint: the default example in the editor, the examples menu on it,
 "loading the engine…", Run disabled, an empty count. -/
 def Page.initial : Page :=
   Page.mk (WebEditor.initial (Examples.codeOf Examples.defaultExampleId))
     (Model.mk List.nil 0 "loading the engine…" "running" "")
-    "engine: loading" Examples.defaultExampleId 0 0 0 0 ""
+    "engine: loading" Examples.defaultExampleId 0 0 0 0 "" Goals.initial
 
 def Page.setEditor (s : Page) (e : WebEditor) : Page := { s with editor := e }
 
@@ -377,6 +379,9 @@ def Page.setOutput (s : Page) (o : Model) : Page :=
   { s with editor := WebEditor.withCount s.editor o.count, output := o }
 
 def Page.setEngine (s : Page) (engine : String) : Page := { s with engine := engine }
+
+/-- The goals pane's state. -/
+def Page.setPanel (s : Page) (panel : Goals.Model) : Page := { s with panel := panel }
 
 /-- `setStatus(text, kind)`, the page's status line. -/
 def Page.status (s : Page) (text kind : String) : Page :=
@@ -400,7 +405,8 @@ def Page.stateOf (s : Page) : Draft.State :=
 in request order. A counter stays non-zero until the page's `ack` effect clears it, so
 a request that arrives while one is in flight is still visible after the first. -/
 def Page.requests (s : Page) : String :=
-  if Nat.beq s.loads 0 && Nat.beq s.save 0 && Nat.beq s.share 0 && Nat.beq s.sync 0 then "[]"
+  let panelReqs := Goals.requestItems s.panel;
+  if Nat.beq s.loads 0 && Nat.beq s.save 0 && Nat.beq s.share 0 && Nat.beq s.sync 0 && List.isEmpty panelReqs then "[]"
   else
     let st := Page.stateOf s;
     let fragment := Draft.encodeFragment st;
@@ -412,11 +418,13 @@ def Page.requests (s : Page) : String :=
       ++ (if Nat.lt 0 s.save then [Page.requestJson "save" (Draft.withPrelude s.editor.text)] else [])
       ++ (if Nat.lt 0 s.share then [Page.requestJson "share" fragment] else [])
       ++ (if Nat.lt 0 s.sync then [Page.requestJson "sync" syncPayload] else []);
-    Json.render (Json.mkArr reqs)
+    Json.render (Json.mkArr (List.append reqs panelReqs))
 
 /-- Clear a serviced request (`wiz_loom_effect "ack"`). -/
 def Page.ack (s : Page) (kind : String) : Page :=
-  if String.eq kind "run" then { s with loads := 0 }
+  if String.eq kind "reveal" || String.eq kind "subterm" || String.eq kind "reconnect" then
+    Page.setPanel s (Goals.ack s.panel kind)
+  else if String.eq kind "run" then { s with loads := 0 }
   else if String.eq kind "save" then { s with save := 0 }
   else if String.eq kind "share" then { s with share := 0 }
   else if String.eq kind "sync" then { s with sync := 0 }
@@ -506,6 +514,7 @@ def Page.effect (s : Page) (kind a b : String) : Page :=
   else if String.eq kind "note" then Page.noteWith s a
   else if String.eq kind "load" then Page.load s a b
   else if String.eq kind "ack" then Page.ack s a
+  else if String.eq kind "panel" then Page.setPanel s (Goals.effect s.panel a b "")
   else s
 
 /-- The page's messages: the editor's own, the examples menu's (`preset`, whose payload
@@ -518,6 +527,9 @@ inductive PageMsg where
   | reset
   | clear
   | key
+  | tag (idx : Nat)
+  | span (span : String)
+  | reconnect
 
 /-- An example's `<option>` attributes: its id, and `selected` when it is the current one. -/
 def Page.exampleAttrs (current : String) (e : Examples.Example) : List Loom.Attr :=
@@ -555,7 +567,7 @@ def Page.consume (e : Loom.Event) (_s : Page) : Bool :=
   | .false => .false
   | .true =>
     let p := Page.splitKey e.payload;
-    Page.command p.2 && (String.eq p.1 "Enter" || String.eq p.1 "s")
+    Bool.or (Page.command p.2 && (String.eq p.1 "Enter" || String.eq p.1 "s")) (Goals.consume e)
 
 /-- The menu's "Custom program" option: selected when the text is no example exactly
 (`preset` is `""`), and not loadable. -/
@@ -626,8 +638,7 @@ def Page.main (s : Page) : Loom.VNode PageMsg :=
       [ Loom.mapMsg PageMsg.editor (WebEditor.view s.editor)
       , Loom.el "section" [Loom.class "pane side"]
           [ Page.goalsHead
-          , Loom.el "div" [Loom.id "goals", Loom.class "goals", Loom.attr "tabindex" "0",
-              Loom.attr "aria-live" "polite"] List.nil
+          , Goals.panel PageMsg.tag PageMsg.span PageMsg.reconnect PageMsg.key s.panel
           , Page.outputHead
           , Model.view s.output
           ]
@@ -664,6 +675,9 @@ def Page.update (m : PageMsg) (payload : String) (s : Page) : Page :=
   | .reset => Page.reset s
   | .clear => Page.clearOutput s
   | .key => Page.key s payload
+  | .tag idx => Page.setPanel s (Goals.update (.tag idx) "" s.panel)
+  | .span span => Page.setPanel s (Goals.update (.span span) "" s.panel)
+  | .reconnect => Page.setPanel s (Goals.update .reconnect "" s.panel)
 
 /-- The playground page as a `Loom.LiveApp`: the textarea's `input` carries the text, the
 examples menu's `change` carries the chosen id. -/

@@ -35,7 +35,7 @@ def Item.view (i : Item) : Loom.VNode Msg :=
       [Loom.on "click" (Msg.toggle i.id)
         (Loom.el "span" List.nil [Loom.text i.name])])
 
-def view (s : Model) : Loom.VNode Msg :=
+def mainView (s : Model) : Loom.VNode Msg :=
   Loom.el "div" [Loom.class "app"]
     [ Loom.el "p" List.nil
         [Loom.text "count ", Loom.text (Nat.toString s.count)]
@@ -55,7 +55,7 @@ def app : Loom.App Model Msg := Loom.App.mk
         (Loom.map (fun (i : Item) => match Nat.beq id i.id with
           | .true => Lens.over (Item.doneL i) (fun b => match b with | .true => .false | .false => .true) i
           | .false => i)) s)
-  view
+  mainView
 
 def item (n : Nat) (name : String) : Item := Item.mk n name .false
 
