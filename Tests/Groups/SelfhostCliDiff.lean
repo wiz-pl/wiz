@@ -435,7 +435,7 @@ def cliDiffGroup : Group where
         cliDiffSame spec h s
         checkEq 1 s.code
         checkEq "" s.out
-        checkEq ("f.wiz:2:47: error: SMT solving is not enabled: `smt` closes a goal on an " ++
+        checkEq ("f.wiz:2:53: error: SMT solving is not enabled: `smt` closes a goal on an " ++
           "SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n") s.err },
     { name := "prelude surface: `import Prelude` alone carries `IO` in the self-hosted toolchain only", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
@@ -640,6 +640,10 @@ def cliDiffGroup : Group where
         checkEq 0 s.code
         check ((← cliDiffCacheEntries h "c") > 0) "the host wrote no cache entry"
         check ((← cliDiffCacheEntries s "c") > 0) "the driver wrote no cache entry"
+        -- (D5) the driver's names are the host's four classes, one `.wizc` per module
+        check ((← cliFilesEnding (s.dir / "c") ".wizc").size > 0) "the driver wrote no module entry"
+        checkEq 0 (← cliFilesEnding (s.dir / "c") ".check").size
+        checkEq 0 (← cliFilesEnding (s.dir / "c") ".c").size
         -- the same directories again: both read their entry and say the same thing
         let h2 ← cliDiffExec host h.dir spec.hostArgs spec.args
         let s2 ← cliDiffExec exe s.dir spec.shArgs spec.args

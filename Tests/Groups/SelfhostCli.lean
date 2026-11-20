@@ -392,7 +392,7 @@ def cliGroup : Group where
         IO.FS.createDirAll l1
         IO.FS.createDirAll l2
         -- (every module must be warm for a hit: write each module's entry)
-        for f in ← cliFilesEnding (d / "w") ".wizc" do
+        for f in (← cliFilesEnding (d / "w") ".wizc") do
           let name := f.fileName.getD ""
           IO.FS.writeFile (l1 / name) "s0\n"
           IO.FS.writeFile (l2 / name) "s1\n"
@@ -494,8 +494,8 @@ def cliGroup : Group where
     { name := "(C15) smt: the host's refusal without --trust-smt; the flag is taken and says what is missing", run := fun _ =>
         withSelfhostCli fun exe => do
         let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
-        let refuse := "f.wiz:2:47: error: SMT solving is not enabled: `smt` closes a goal on an SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n"
-        let noSolver := "f.wiz:2:47: error: smt: the self-hosted toolchain has no SMT translation or solver (C15); --trust-smt cannot close a goal here\n"
+        let refuse := "f.wiz:2:53: error: SMT solving is not enabled: `smt` closes a goal on an SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n"
+        let noSolver := "f.wiz:2:53: error: smt: the self-hosted toolchain has no SMT translation or solver (C15); --trust-smt cannot close a goal here\n"
         -- (the message is the host's, and the goal is not listed after it: the host's
         -- `smt` error is an elaboration error, not a tactic failure)
         let (c, out, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz"]

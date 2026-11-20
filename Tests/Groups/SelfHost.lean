@@ -3178,7 +3178,9 @@ def selfHostGroup : Group where
           [("B.wiz", "import Prelude\nimport C\n"),
            ("C.wiz", "import Prelude\nimport B\n"),
            ("input.wiz", "import Prelude\nimport B\n")]
-          "error: import cycle: B -> C -> B\n" },
+          -- (D6) the cycle is C's own error, nested under B's import, and B's block is
+          -- passed on at the root's import as `imported module B → …`
+          "error: imported module B → module C has errors:\n  C:2:1: error: import cycle: B -> C -> B\n" },
     { name := "modules: a missing module is an error naming it", run := fun _ =>
         selfhostCheckModules
           [("input.wiz", "import Prelude\nimport Nope\n")]

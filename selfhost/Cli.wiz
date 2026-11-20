@@ -734,7 +734,7 @@ def elabFlags (o : Opts) : List String :=
     | .false => (.nil : List String))
     (match o.trustSmt with
       | .true => .cons "--trust-smt" .nil
-      | .false => .nil)
+      | .false => (.nil : List String))
 
 -- a module's own key: its name, text and the shared root headers
 def ownKeyOf (shared : List String) (m : ModSrc) : String :=
@@ -1406,47 +1406,59 @@ def warmLinesGo (tab : List ModSrc) (blocks : List ModBlock) (run : Run)
     (mods : StrMap (List String)) : List String → List String
   | .nil => .nil
   | .cons name rest =>
-    let ls := nonErrLines (StrMap.findD mods (Str.ofString name) .nil);
+    let ls := StrMap.findD mods (Str.ofString name) .nil;
     let more := warmLinesGo tab blocks run mods rest;
     match strEq name "Main" with
+    -- the root's own errors are the program's (they are not nested anywhere)
     | .true => List.append (rootNest tab blocks run (rootImports tab)) (List.append ls more)
-    | .false => List.append ls more
+    | .false => List.append (nonErrLines ls) more
 
 def warmLines (tab : List ModSrc) (mods : StrMap (List String)) (p : CachePlan) : List String :=
   let blocks := blocksOf tab mods .nil (CachePlan.order p);
   let runStub : Run := .mk .nil Globals.empty cats tokens .nil;
   warmLinesGo tab blocks runStub mods (CachePlan.order p)
 
--- a module cache lookup's answer: the lines, and whether any entry's status says the
--- module had an error (the status is authoritative even for a hand-written test entry)
+-- a module cache lookup's answer: the lines, whether any entry's status says the
+-- module had an error (the status is authoritative even for a hand-written test entry),
+-- and where the first read-only hit came from (for `-v`'s `(read-only DIR)`)
 structure ModuleCache where
   mods : StrMap (List String)
   status : Nat
+  ro : Bool
+  dir : String
 
 def readModuleEntriesGo (o : Opts) (keys : StrMap String) :
-    List String → StrMap (List String) → Nat → IO (Option ModuleCache)
-  | .nil, acc, st => IO.pure (.some (ModuleCache.mk acc st))
-  | .cons name rest, acc, st =>
+    List String → StrMap (List String) → Nat → Bool → String → IO (Option ModuleCache)
+  | .nil, acc, st, ro, dir => IO.pure (.some (ModuleCache.mk acc st ro dir))
+  | .cons name rest, acc, st, ro, dir =>
     let key := StrMap.findD keys (Str.ofString name) "";
     match strEq key "" with
     | .true => IO.pure (.none : Option ModuleCache)
     | .false => IO.bind (cacheRead o key moduleExt) (fun c => match c with
       | .none => IO.pure (.none : Option ModuleCache)
-      | .some (.mk cst payload _ _) =>
+      | .some (.mk cst payload from cro) =>
         let st' := match Nat.beq cst 0 with
           | .true => st
           | .false => 1;
+        let ro' := Bool.or ro cro;
+        let dir' := match cro with
+          | .true => match strEq dir "" with
+            | .true => from
+            | .false => dir
+          | .false => dir;
         readModuleEntriesGo o keys rest (StrMap.insert acc (Str.ofString name)
-          (mapChars (fun cs => String.mk cs) (splitLines payload))) st')
+          (mapChars (fun cs => String.mk cs) (splitLines payload))) st' ro' dir')
 
 def readModuleEntries (o : Opts) (p : CachePlan) : IO (Option ModuleCache) := match p with
-  | .mk order keys _ _ => readModuleEntriesGo o keys order StrMap.empty 0
+  | .mk order keys _ _ => readModuleEntriesGo o keys order StrMap.empty 0 .false ""
 
 def writeModuleEntriesGo (o : Opts) (keys : StrMap String) (flat : List String) : List String → IO Unit
   | .nil => IO.pure ()
-  | .cons name rest => match StrMap.findD keys (Str.ofString name) "" with
-    | "" => writeModuleEntriesGo o keys flat rest
-    | key => do
+  | .cons name rest =>
+    let key := StrMap.findD keys (Str.ofString name) "";
+    match strEq key "" with
+    | .true => writeModuleEntriesGo o keys flat rest
+    | .false => do
       let ls := modLines flat name;
       let st := match anyErr ls with
         | .true => 1
@@ -1503,7 +1515,7 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
         cached ← readModuleEntries o plan;
         match cached with
         | .some mc => do
-          cacheHitMsg o key "" .false;
+          cacheHitMsg o key (ModuleCache.dir mc) (ModuleCache.ro mc);
           let ds := diagsOf tab (warmLines tab (ModuleCache.mods mc) plan);
           let st := match hasError ds with
             | .true => 1
