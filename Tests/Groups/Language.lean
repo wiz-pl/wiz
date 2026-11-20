@@ -237,9 +237,28 @@ def languageGroup : Group where
           "  | k, .nil, ys => ys\n  | k, .cons x xs, ys => .cons (Nat.add x k) (app2 k xs ys)\n" ++
           "#eval addE 9 (.cons 1 .nil)\n#eval app2 10 (.cons 1 .nil) (.cons 7 .nil)")
           [".cons 1 (.cons 9 .nil)", ".cons 11 (.cons 7 .nil)"] },
-    { name := "a parameter must be passed unchanged", run := fun _ =>
-        failsLib "import Prelude\ndef bad (w : Nat) : List Nat → Nat\n  | .nil => w\n  | .cons x xs => bad x xs"
-          "must pass the parameter w unchanged" },
+    { name := "a parameter before the colon that a recursive call changes is elaborated after it", run := fun _ =>
+        -- (fixed-params) Lean's rule: a parameter before the colon is only fixed if no
+        -- recursive call changes it; a changed one is a matched argument, so the
+        -- hypothesis takes its value
+        okLib ("import Prelude\ndef count (acc : Nat) : List Nat → Nat\n  | .nil => acc\n" ++
+          "  | .cons _ xs => count (acc + 1) xs\n" ++
+          "#eval count 0 (.cons 1 (.cons 2 (.cons 3 .nil)))\n" ++
+          -- a later structural column, and a parameter that stays fixed (`n`)
+          "def upTo (n p : Nat) : Nat → List Nat → List Nat\n  | .zero, acc => acc\n" ++
+          "  | .succ fuel, acc => upTo n (p * 2) fuel (.cons p acc)\n" ++
+          "#eval upTo 100 1 2 .nil\n" ++
+          -- two changed parameters, through an `@f` call
+          "def count2 (acc : Nat) (k : Nat) : List Nat → Nat\n  | .nil => acc + k\n" ++
+          "  | .cons _ xs => @count2 (acc + 1) (k * 2) xs\n" ++
+          "#eval count2 0 1 (.cons 1 (.cons 2 .nil))")
+          ["3", ".cons 2 (.cons 1 .nil)", "6"] },
+    { name := "... but a fixed parameter changed in an @f call is still an error", run := fun _ =>
+        -- an implicit parameter is not one of the changed ones (a call that omits it has
+        -- no value for it), so the `@f` form still requires it unchanged
+        failsLib ("import Prelude\ndef bad {n : Nat} : List Nat → Nat\n  | .nil => n\n" ++
+          "  | .cons _ xs => @bad (Nat.succ n) xs")
+          "must pass the parameter n unchanged" },
     { name := "mutual (partial) definitions", run := fun _ =>
         okLib ("import Prelude\nmutual\ndef isEven : Nat → Bool\n  | .zero => .true\n  | .succ n => isOdd n\n" ++
           "def isOdd : Nat → Bool\n  | .zero => .false\n  | .succ n => isEven n\nend\n#eval isOdd 7\n" ++

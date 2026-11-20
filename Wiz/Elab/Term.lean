@@ -542,6 +542,7 @@ its other arguments go to the hypothesis. -/
 structure RecCtx where
   fn : Name
   ihs : List (Lvl × Lvl) := []
+  /-- the parameters that stay fixed: changed ones are `changed` instead -/
   params : List Name := []
   pos : Nat := 0
   /-- the number of matched arguments: a call with no more arguments than that leaves
@@ -555,6 +556,11 @@ structure RecCtx where
   /-- (#249) the matched arguments (in the definition's order) the hypothesis doesn't
   take: index variables generalised by the motive -/
   dropCols : List Nat := []
+  /-- (fixed-params) the parameters before the colon that a recursive call changes, with
+  their position among the explicit parameters. They are elaborated as if they were after
+  the colon: the motive abstracts them and the hypothesis takes their value, so the call
+  passes them to the hypothesis instead of being rejected. -/
+  changed : List (Name × Nat) := []
 
 /-- The constructors of the data type `T` (the tags of its description). -/
 def ctorNames (g : Globals R) (T : Name) : List Name :=
@@ -761,6 +767,68 @@ partial def elabTypeSort? (tys : Array (VTy R)) (v : VTy R) : ElabM R (Option Le
     return some (.max a b)
   | _ => return none
 
+/-- (fixed-params) The names a pattern binds (after `expandPattern`). -/
+partial def patBoundNames (g : Globals R) (p : Syntax) : List Name :=
+  match patViewAs g p with
+  | .ok (ns, v) => ns ++ (match v with
+    | .var n => [n]
+    | .ctor _ _ ps => ps.flatMap (patBoundNames g)
+    | .anon ps => ps.flatMap (patBoundNames g)
+    | .tuple a b => patBoundNames g a ++ patBoundNames g b
+    | .as n q => n :: patBoundNames g q
+    | .plusK q _ => patBoundNames g q
+    | .lit _ | .wild => [])
+  | .error _ => []
+
+/-- (fixed-params) The parameters a call `f …` in `stx` changes: `(name, position among
+the explicit parameters)`. `fields` are the variables of the clause's structural
+pattern. A call passes the parameters when it has an argument after them and the
+argument at the structural column's position is one of `fields`; the parameter at
+position `i` is changed when that argument is not `p` itself. -/
+private partial def changedInCall (fn : Name) (allParams : List (Name × Bool)) (pos cols : Nat)
+    (colExplicit : List Bool) (fields : List Name) (stx : Syntax) : List (Name × Nat) :=
+  let expl : List Name := allParams.filterMap fun (p, e) => if e then some p else none
+  let nP := expl.length
+  let explicitCols : List Nat := (List.range cols).filter fun i => colExplicit[i]?.getD true
+  let isIdentIn (ns : List Name) (a : Syntax) : Bool :=
+    a.isOfKind "term.ident" && (match (a.getArg 0).getId? with
+      | some n => ns.contains n
+      | none => false)
+  -- the call's arguments, with `@f`'s implicit parameters dropped (they stay fixed)
+  let norm (atF : Bool) (args : Array Syntax) : Array Syntax :=
+    if !atF then args else
+      let kept := allParams.zipIdx.filterMap fun ((_, e), i) => if e then args[i]? else none
+      kept.toArray ++ args.extract allParams.length args.size
+  match stx with
+  | .node _ k as =>
+    let here := if k == "term.app" && as.size == 2 &&
+        (as[0]!.isOfKind "term.ident" && (as[0]!.getArg 0).getId? == some fn ||
+          as[0]!.isOfKind "term.explicit" && (as[0]!.getArg 1).getId? == some fn) then
+      let atF := as[0]!.isOfKind "term.explicit"
+      let posE := if atF then some pos else explicitCols.idxOf? pos
+      let args := norm atF (as[1]!.args)
+      match posE with
+      | some pe => if args.size > nP + pe && isIdentIn fields args[nP + pe]! then
+          expl.zipIdx.filterMap fun (p, i) => match args[i]? with
+            | some a => if a.isOfKind "term.hole" || isIdentIn [p] a then none else some (p, i)
+            | none => none
+        else []
+      | none => []
+    else []
+    here ++ as.toList.flatMap (changedInCall fn allParams pos cols colExplicit fields)
+  | _ => []
+
+/-- (fixed-params) The parameters a definition's recursive calls change, as `(name,
+position among the explicit parameters)`. Lean's rule: "a parameter before the colon is
+only fixed if no recursive call changes it". -/
+def changedParams (g : Globals R) (rc : RecCtx) (clauses : List (MClause R)) :
+    List (Name × Nat) :=
+  clauses.flatMap fun c =>
+    let fields := match c.pats[rc.pos]? with
+      | some p => patBoundNames g p
+      | none => []
+    changedInCall rc.fn rc.allParams rc.pos rc.cols rc.colExplicit fields c.rhs
+
 /-- Replace recursive calls `f y a…` (with `y` a field that has a hypothesis `h`) by
 `h a…`, and `f (k e) a…` (with `k` an infinitary field) by `h e a…`. Returns the
 rewritten syntax and the hypothesis bindings it needs. -/
@@ -783,6 +851,11 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
       args := kept ++ args.extract rc.allParams.length args.size
     -- (#249) which columns the call passes: with `@f` all of them, else the explicit ones
     let atF := isExplicitF (stx.getArg 0)
+    -- (fixed-params) the explicit parameters: the fixed and the changed ones share the
+    -- call's leading block, in the definition's order
+    let expl : List Name := rc.allParams.filterMap fun (p, e) => if e then some p else none
+    let nP := expl.length
+    let fixedPos : List (Name × Nat) := rc.params.map fun p => (p, expl.idxOf? p |>.getD 0)
     let explicitCols : List Nat := (List.range rc.cols).filter fun i =>
       atF || (rc.colExplicit[i]?.getD true)
     let nExpl := explicitCols.length
@@ -803,18 +876,29 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
     -- arguments: the parameters are there when they are the parameters' names and the
     -- structural argument after them is a recursive field (`f k _ e` takes no parameter
     -- there, it passes every column)
-    let isParamsAt0 : Bool := !rc.params.isEmpty && args.size > rc.params.length &&
-      (rc.params.zip (args.extract 0 rc.params.length).toList).all (fun (p, a) =>
-        a.isOfKind "term.ident" && (a.getArg 0).getId? == some p) &&
-      isFieldArg (rc.params.length + (explicitCols.idxOf? rc.pos).getD rc.pos)
-    let np := if isParamsAt0 then rc.params.length
-      else if args.size ≤ nExpl || (!atF && args.size ≤ rc.cols && allGiven args) then 0
-      else rc.params.length
-    for p in rc.params.take np, i in [0:np] do
-      let ok := match args[i]? with
+    let isParamsAt0 : Bool := nP > 0 && args.size > nP &&
+      fixedPos.all (fun (p, i) => match args[i]? with
         | some a => a.isOfKind "term.ident" && (a.getArg 0).getId? == some p
-        | none => false
-      unless ok do throw s!"recursive call of {rc.fn} must pass the parameter {p} unchanged"
+        | none => false) &&
+      isFieldArg (nP + (explicitCols.idxOf? rc.pos).getD rc.pos)
+    let np := if isParamsAt0 then nP
+      else if args.size ≤ nExpl || (!atF && args.size ≤ rc.cols && allGiven args) then 0
+      else nP
+    -- a parameter that stays fixed is still passed by its own name (also in `@f` form)
+    for (p, i) in fixedPos do
+      if i < np then
+        let ok := match args[i]? with
+          | some a => a.isOfKind "term.ident" && (a.getArg 0).getId? == some p
+          | none => false
+        unless ok do throw s!"recursive call of {rc.fn} must pass the parameter {p} unchanged"
+    -- (fixed-params) a changed parameter's argument goes to the hypothesis: its value when
+    -- the call passes the parameters, else the parameter itself (unchanged)
+    let curOf (p : Name) : Syntax := .node {} "term.ident" #[.ident {} p]
+    let changedArgs : Array Syntax := (rc.changed.map fun (p, i) =>
+      if i < np then (match args[i]? with
+        | some a => if a.isOfKind "term.hole" then curOf p else a
+        | none => curOf p)
+      else curOf p).toArray
     let given := args.extract np args.size
     -- (the old form, all columns given: keep the explicit columns' arguments, then any
     -- further arguments after the columns)
@@ -877,7 +961,11 @@ partial def rewriteRecCalls (g : Globals R) (rc : RecCtx) (binds : List (Name ×
         | some arg => unless rc.dropCols.contains i do others0 := others0.push arg
         | none => done := true
       | none => unless rc.dropCols.contains i do others0 := others0.push holeStx
-    let others := if done then others0 else others0 ++ colArgs.extract explicitCols.length colArgs.size
+    let others := if done then others0 else others0 ++ changedArgs ++ colArgs.extract explicitCols.length colArgs.size
+    -- (fixed-params: the hypothesis takes the changed parameters after the columns, so a
+    -- partial application of it would not pass them on)
+    if done && !rc.changed.isEmpty then
+      throw s!"recursive call of {rc.fn} leaves out matched arguments, so it cannot change a parameter before the colon"
     let rest ← (kargs ++ others).mapM (rewriteRecCalls g rc binds ihType lvl tys ·)
     let restStx := rest.map (·.1)
     let newBinds := [(ihName, ty, ihVal)] ++ rest.toList.flatMap (·.2)
