@@ -266,7 +266,8 @@ EOF
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
-                ./web/lsp-client.js ./web/hover.js ./web/squiggles.js ./web/completions.js
+                ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
+                ./web/hover.js ./web/squiggles.js ./web/completions.js
                 ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/overlays.css
                 ./web/doc-live.js ./web/doc-live.css
                 ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
@@ -307,7 +308,8 @@ EOF
                 ./selfhost/Tables.wiz
                 # the page files the script copies into OUT
                 ./web/playground.html ./web/playground.js
-                ./web/playground.css ./web/overlays.css ./web/lsp-client.js
+                ./web/playground.css ./web/overlays.css ./web/widgets.css
+                ./web/lsp-client.js ./web/widgets.js
                 ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
                 # the entry point's mount contract (mount imports driver, which imports

@@ -8,6 +8,7 @@
 // (`web/completions.js`). The page's `update(kind, a, b)` is its runtime effect.
 "use strict";
 import { LspClient, endpointFromSearch } from "./lsp-client.js";
+import { mountWidgets } from "./widgets.js";
 import { mountSquiggles, wantsSquiggles } from "./squiggles.js";
 import { mountCompletions, wantsCompletions } from "./completions.js";
 import { mountHover, wantsHover } from "./hover.js";
@@ -50,11 +51,13 @@ function offsetAt(text, line, character) {
 // `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
 // `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
 // a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
-// `render` callback (the Node tests) gets the same events there.
+// `render` callback (the Node tests) gets the same events there. `widgetPane` is an
+// element for the widget host: when given, the cards are mounted there and the pane's
+// `widgetsInPane` tells the runtime to leave its own `Widgets` section out.
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
-  hover: wantHover, positionDebounce = 120, onRender, rules,
+  hover: wantHover, positionDebounce = 120, onRender, rules, widgetPane,
 } = {}) {
   if (!editor && !follow) return null;
   const send = typeof update === "function" ? update
@@ -87,11 +90,17 @@ export function startInfoview({
     items: [],
     position: null,
     canReconnect: false,
+    // The standalone page's widget pane is a grid child of its own: the panel then
+    // leaves the widget cards out, so there is one host, not two.
+    widgetsInPane: !!widgetPane,
     follow,
   };
 
   const publish = () => {
     send("view", JSON.stringify(view), "");
+    if (widgetPane) {
+      mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+    }
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
     }
@@ -276,6 +285,7 @@ export function startInfoview({
       if (hover) hover.close();
       view.state = "closed";
       view.info = null;
+      view.items = [];
       view.diagnostics = [];
       if (squiggles) squiggles.update([]);
       publish();
@@ -322,6 +332,7 @@ export function startInfoview({
     view.goalsKind = null;
     view.term = null;
     view.termKind = null;
+    view.items = [];
     publish();
     try {
       await client.reconnect();

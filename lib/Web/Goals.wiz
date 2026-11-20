@@ -700,6 +700,13 @@ def Goals.termJson (s : Goals.Model) : Json := Goals.field s "term"
 def Goals.termKind (s : Goals.Model) : String := Goals.strAt (Goals.field s "termKind") []
 def Goals.itemsJson (s : Goals.Model) : List Json := Json.asList (Goals.field s "items")
 
+/-- Whether the page mounts widget items in its own pane (`web/widgets.js`), so the
+panel leaves its `Widgets` section out. The standalone infoview sets it; the playground
+does not. -/
+def Goals.widgetsInPane (s : Goals.Model) : Bool := match Json.asBool (Goals.field s "widgetsInPane") with
+  | .some b => b
+  | .none => .false
+
 /-- The selected subterm, parsed; `null` when none. -/
 def Goals.infoJson (s : Goals.Model) : Json := match Json.parse s.info with
   | .ok j => j
@@ -814,11 +821,13 @@ def Goals.view {M : Type} (mkMsg : Nat → M) (msgSpan : String → M) (mkReconn
         ++ (match Json.isNull (Goals.infoJson s) with
             | .true => []
             | .false => [Loom.el "h3" [] [Loom.text "Selected subterm"], i.1])
-        ++ (match Goals.infoItemsView (M := M) (Goals.itemsJson s) with
-            | .raw h _ => match String.isEmpty h with
-              | .true => []
-              | .false => [Loom.el "h3" [] [Loom.text "Widgets"], Goals.infoItemsView (M := M) (Goals.itemsJson s)]
-            | _ => [])
+        ++ (match Goals.widgetsInPane s with
+            | .true => []
+            | .false => match Goals.infoItemsView (M := M) (Goals.itemsJson s) with
+              | .raw h _ => match String.isEmpty h with
+                | .true => []
+                | .false => [Loom.el "h3" [] [Loom.text "Widgets"], Goals.infoItemsView (M := M) (Goals.itemsJson s)]
+              | _ => [])
         ++ [ Loom.el "h3" [] [Loom.text "Diagnostics"]
            , Goals.diagnosticsView (Goals.diagnostics s) ]);
   Loom.el "div" [Loom.class "lsp-view", Loom.attr "data-state" state] body

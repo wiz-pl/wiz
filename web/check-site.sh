@@ -34,7 +34,9 @@ need playground/framework/driver.js
 need playground/framework/runtime.js
 need playground/playground.css
 need playground/overlays.css
+need playground/widgets.css
 need playground/lsp-client.js
+need playground/widgets.js
 need playground/playground-lsp.js
 need playground/hover.js
 need playground/framework/editor-text.js

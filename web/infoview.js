@@ -57,8 +57,12 @@ export async function startPage({ doc = globalThis.document, loc = globalThis.lo
   // Follow mode hides the local editor; normal mode keeps the runtime's default text.
   effect("page", "init", JSON.stringify({ follow }));
   const editor = follow ? null : doc.getElementById("editor");
+  // The widget pane is rendered by the runtime (`Web.InfoviewPage`); its host is
+  // `web/widgets.js`, which `playground-lsp.js` mounts into this element.
+  const widgetPane = doc.getElementById("widget-list");
   app = startInfoview({
     editor,
+    widgetPane,
     follow,
     config: endpoint,
     uri: follow ? null : undefined,

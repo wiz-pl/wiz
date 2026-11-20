@@ -34,6 +34,11 @@ if grep -qF 'goals: all checks passed' "$OUT/goals.txt"; then echo "ok (goals, w
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {
   echo "FAIL (bench page)"; cat "$OUT/bench.txt"; exit 1; }
+# (widgets) the widget host: the #plot and scry payloads, the safety rules, the fallback
+# and the DOM mount (the LSP transport is stubbed in the next check)
+node "$ROOT/web/widgets_test.mjs" > "$OUT/widgets.txt"
+if grep -qF 'widgets: all checks passed' "$OUT/widgets.txt"; then echo "ok (widgets)"; else
+  echo "FAIL (widgets)"; cat "$OUT/widgets.txt"; exit 1; fi
 # (playground-lsp) the language client and goals panel against a mock WebSocket server
 # (no Wasm build, no browser)
 node "$ROOT/web/playground_lsp_test.mjs" > "$OUT/lsp.txt"
