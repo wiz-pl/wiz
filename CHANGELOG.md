@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* language: a parameter before the colon is **fixed only if no recursive call changes
+  it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
+  count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
+  unchanged"); a changed parameter is now elaborated as if it were after the colon, so
+  the motive abstracts it and the induction hypothesis takes its value. A parameter no
+  call changes is still checked (also in `@f` form). `lib/Prelude.wiz`'s
+  `Syntax.decPowersGo` and `Syntax.decDigitGo` are accepted as written, with their
+  accumulators before the colon. Tests: `language` ("a parameter before the colon that a
+  recursive call changes is elaborated after it").
 * web: the infoview has a **widget host** (`web/widgets.js`). It parses the Loom
   `wiz.widget/1` payload (`WIZ_WIDGET:`), draws the `#plot` producer's inline
   `image/svg+xml`/`text/html` figure and the scry analysis's claim/findings card, and
