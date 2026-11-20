@@ -59,13 +59,13 @@ def checkRevision : IO Bool := do
   r ← Scry.G.currentRevision manifest;
   match r with
   | .error e => do
-    IO.ePrintln (String.append "revision: cannot read the source: " e);
+    IO.println (String.append "revision: cannot read the source: " e);
     IO.pure .false
   | .ok current =>
     match Scry.revisionVerdict manifest current with
     | .fresh => IO.pure .true
     | .stale m c reason => do
-      IO.ePrintln (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
+      IO.println (Scry.renderRevisionVerdict (Scry.RevisionVerdict.stale m c reason));
       IO.pure .false
 
 /-- Flush standard output, then exit (the C `println` is buffered). -/
@@ -79,7 +79,7 @@ def leave (n : Nat) : IO Unit := do
 def main : IO Unit := do
   match String.eq manifest.revision.kind "unset" with
   | .true => do
-    IO.ePrintln "no graph manifest: run the ingest command first";
+    IO.println "no graph manifest: run the ingest command first";
     leave 2
   | .false => do
     fresh ← checkRevision;
@@ -89,21 +89,21 @@ def main : IO Unit := do
       r ← Scry.G.readGraph manifest.graph manifest;
       match r with
       | .error e => do
-        IO.ePrintln (String.append "graph: " e);
+        IO.println (String.append "graph: " e);
         leave 2
       | .ok (live, gen) =>
         match Nat.beq gen manifest.gen with
         | .false => do
-          IO.ePrintln (String.append "revision: the store is at generation "
+          IO.println (String.append "revision: the store is at generation "
             (String.append (Nat.repr gen) (String.append ", the manifest at "
               (String.append (Nat.repr manifest.gen) ": run ingest"))));
           leave 3
         | .true => match Scry.sameView manifest.view live with
           | .false => do
-            IO.ePrintln "revision: the manifest's view differs from the store's live view";
+            IO.println "revision: the manifest's view differs from the store's live view";
             leave 3
           | .true => do
-            IO.ePrintln (Scry.renderClaim claim);
-            IO.ePrintln (String.append "call_expression nodes: "
+            IO.println (Scry.renderClaim claim);
+            IO.println (String.append "call_expression nodes: "
               (Nat.repr (List.length view.calls)));
-            IO.ePrintln (String.append "widget: " display)
+            IO.println (String.append "widget: " display)

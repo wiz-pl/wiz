@@ -56,7 +56,7 @@ def ScryTest.runEIO {A : Type} (x : EIO A) : IO A := do
     IO.pure ScryTest.anyValue
 
 def ScryTest.checkOne (fails : Nat) (name : String) (ok : Bool) : IO Nat := do
-  IO.ePrintln (String.append (match ok with | .true => "PASS " | .false => "FAIL ") name);
+  IO.println (String.append (match ok with | .true => "PASS " | .false => "FAIL ") name);
   match ok with
   | .true => IO.pure fails
   | .false => IO.pure (Nat.succ fails)
@@ -218,9 +218,9 @@ def ScryTest.main : IO Unit := do
 
   ScryTest.runEIO (FS.removeAll tmp);
   match f39 with
-  | 0 => IO.ePrintln "ok: scry-analysis Quire effect test"
+  | 0 => IO.println "ok: scry-analysis Quire effect test"
   | n => do
-    IO.ePrintln (String.append "FAILED: " (String.append (Nat.repr n) " check(s)"));
+    IO.println (String.append "FAILED: " (String.append (Nat.repr n) " check(s)"));
     ScryTest.leave 1
 
 def main : IO Unit := ScryTest.main
