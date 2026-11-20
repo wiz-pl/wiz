@@ -2839,6 +2839,22 @@ def selfHostGroup : Group where
         selfhostCheckFile axiomsDependencyProgram axiomsDependencyExpected },
     { name := "the self-hosted frontend: set_option values and unknown options, as in the Lean frontend (A23)", run := fun _ =>
         selfhostSameLines setOptionProgram },
+    { name := "A23: `#print`, `#guard`, `example` and `universe` are rejected by both frontends (they are not host commands)", run := fun _ => do
+        let loader ← preludeLoader
+        for d in ["#print Nat\n", "#guard 1 = 1\n", "example : Nat := 1\n", "universe u\n"] do
+          let s := runFrontend (R := ZeroOneMany) ("import Prelude\n" ++ d) { loader, trustedModule := Tests.libModule }
+          if (s.messages.filter (·.severity == .error)).isEmpty then
+            throw (IO.userError s!"the Lean frontend accepts {d}")
+          let some out ← selfhostOutput ("import Prelude\n" ++ d) | return
+          let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+          if bad.isEmpty then
+            throw (IO.userError s!"the self-hosted frontend accepts {d}:\n{out}") },
+    { name := "A23: `#erase`, `#ir`, `#run` and `builtin` are host commands the self-hosted frontend does not run (pinned differences)", run := fun _ =>
+        selfhostVerdicts "" [
+          ("def f (n : Nat) : Nat := n\n#erase f\n", true, false),
+          ("def f (n : Nat) : Nat := n\n#ir f\n", true, false),
+          ("#run 1 + 1\n", true, false),
+          ("inductive N2 where\n  | z\nbuiltin int := N2\n", true, false)] },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
