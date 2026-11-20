@@ -1,0 +1,186 @@
+import Word
+import Text
+import Storage
+import StorageCursor
+import Cursor
+/-!
+# Findings on Quire: the workflow store as a Quire table
+
+This is the opt-in prototype of `wiz-notes/scry-quire.md`: the `scry findings` store
+(`scry-workflow/findings.json`) modelled as a Quire table, written and read through
+`Durable.wiz`.
+
+The workflow store is a list of `Scry.WfRecord`s; each record is small in its *index*
+fields and large in its `finding` blob. Quire's record is a fixed 32 bytes
+(`id | kind | label | count | version`), so the prototype keeps the **index** in Quire
+and leaves the evidence documents where scry already writes them: the per-finding
+artifact directory (`static.json`, `dynamic.json`, `verify.json`, `candidate.json`,
+`finding.json`). The mapping is:
+
+| Quire field | findings field |
+|---|---|
+| `id`   | FNV-1a-64 of the semantic id (`f_<16 hex>`) |
+| `kind` | rule id, interned from the rule pack (a small closed set) |
+| `label`| triage state: 0 new, 1 triaged, 2 confirmed, 3 false-positive, 4 fixed |
+| `count`| file id, interned from the normalized path |
+| `version` | the commit generation (Quire's per-key first-committer-wins) |
+
+`line`, `history`, `firstSeen`/`lastSeen`, the candidate, and the full finding stay in
+the artifact JSON; they are not index columns and Quire has no variable-length value
+store in this slice. The prototype therefore answers the storage question (snapshots,
+commits, the delete epoch, index cursors) without claiming the record schema is final.
+
+Indices are Quire secondary indices over `kind` (rule), `count` (file) and `label`
+(state), all non-unique: two findings may share a rule, a file or a state. A triage is
+a `set` of the `label` (per-key first-committer-wins), a forget is a Quire `del`
+(the global delete epoch then rejects transactions that began before it), and a scan's
+new findings are `set`s of fresh keys (they commute).
+-/
+
+-- ## Interning: strings to the words a Quire record can hold
+
+/-- FNV-1a-64 over a string's code points, modulo 2^64 (the workflow store's own hash). -/
+def Findings.fnvStep (h : Nat) (c : Char) : Nat :=
+  Nat.mod (Nat.add (Nat.mul h 1099511628211) (Char.code c)) (Nat.pow 2 64)
+
+/-- The 64-bit key of a semantic finding id. A collision would be a false match; the
+workflow id is a 64-bit hash already, so this adds no new collision class in practice,
+but the mapping should be a persisted intern table before it is authoritative. -/
+def Findings.keyOf (fid : String) : U64 :=
+  U64.ofNat (List.foldl Findings.fnvStep 14695981039346656037 (String.chars fid))
+
+/-- The triage-state numbers stored in `label`. -/
+def Findings.stateNew : U32 := U32.ofNat 0
+def Findings.stateTriaged : U32 := U32.ofNat 1
+def Findings.stateConfirmed : U32 := U32.ofNat 2
+def Findings.stateFalsePositive : U32 := U32.ofNat 3
+def Findings.stateFixed : U32 := U32.ofNat 4
+
+/-- The state number of `Scry.WfState.show`'s spelling (kept string-typed here so this
+module does not import the workflow layer). -/
+def Findings.stateId (s : String) : U32 :=
+  match s with
+  | "triaged" => Findings.stateTriaged
+  | "confirmed" => Findings.stateConfirmed
+  | "false-positive" => Findings.stateFalsePositive
+  | "fixed" => Findings.stateFixed
+  | _ => Findings.stateNew
+
+/-- The state's spelling, for a test or a `findings list`. -/
+def Findings.stateShow (v : U32) : String :=
+  match v.toNat with
+  | 1 => "triaged"
+  | 2 => "confirmed"
+  | 3 => "false-positive"
+  | 4 => "fixed"
+  | _ => "new"
+
+-- ## One finding's index columns
+
+/-- What Quire stores for a finding. `line` is carried for rendering only; it is not one
+of the record's columns (it is in `static.json`). -/
+structure Findings.Finding where
+  fid : String
+  rule : U32
+  state : U32
+  file : U64
+  line : U64
+
+/-- The primary key: the id's 64-bit hash. -/
+def Findings.Finding.key (f : Findings.Finding) : U64 := Findings.keyOf f.fid
+
+/-- The 32-byte record: `kind = rule`, `count = file`, `label = state`. -/
+def Findings.Finding.node (f : Findings.Finding) : Node := Node.mk f.rule f.file f.state
+
+/-- The rule (the record's `kind`). -/
+def Findings.nodeRule (n : Node) : U32 := n.kind
+/-- The file (the record's `count`). -/
+def Findings.nodeFile (n : Node) : U64 := n.count
+/-- The state (the record's `label`). -/
+def Findings.nodeState (n : Node) : U32 := n.label
+
+-- ## The schema
+
+/-- Rule, file and state indices. All are non-unique. -/
+def Findings.ruleIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def Findings.fileIndex : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 1) .false
+def Findings.stateIndex : IndexDef := IndexDef.mk (U32.ofNat 2) (U32.ofNat 2) .false
+
+/-- The indices `openDb` rebuilds from the primary table. -/
+def Findings.indices : List IndexDef :=
+  [Findings.ruleIndex, Findings.fileIndex, Findings.stateIndex]
+
+-- ## Writes (all pure; `putDb` validates the write-set)
+
+/-- Create (or replace) a finding's index record. A scan appends fresh keys, so two
+scans' creates commute; re-scanning an existing id from a stale snapshot is a `set` of a
+key the transaction read, and is rejected rather than merged. -/
+def Findings.create (f : Findings.Finding) (s : Snapshot) : Snapshot :=
+  Snapshot.record s f.key (.some (.set f.node))
+
+/-- Create many in one transaction (one scan over many files is one commit). -/
+def Findings.createAll (fs : List Findings.Finding) (s : Snapshot) : Snapshot :=
+  List.foldl (fun s f => Findings.create f s) s fs
+
+/-- Triage: set the state (the record's `label`), or `none` when the id is absent. The
+optic records a `set`, so a concurrent triage of the same finding is a conflict. -/
+def Findings.setState (id : U64) (v : U32) (s : Snapshot) : Option Snapshot :=
+  match PLens.over (PLens.comp (nodeAt id) (Lens.toP Node.labelL)) (fun _ => v) s with
+  | .ok s' => .some s'
+  | .err _ => .none
+
+/-- Forget a finding: a Quire delete. The commit bumps the global delete epoch, so any
+transaction that began before it is rejected (the design's epoch rule). -/
+def Findings.forget (id : U64) (s : Snapshot) : Snapshot := delNode id s
+
+-- ## Queries (linear cursors over the indices)
+
+/-- Findings with rule `r`, as nodes (index → primary). -/
+def Findings.ruleCursor (r : U32) (s : Snapshot) : Cursor Node :=
+  Snapshot.indexNodes Findings.ruleIndex (UIntN.resize 64 r) s
+
+/-- Findings in state `st`. -/
+def Findings.stateCursor (st : U32) (s : Snapshot) : Cursor Node :=
+  Snapshot.indexNodes Findings.stateIndex (UIntN.resize 64 st) s
+
+/-- Findings in file `f`. -/
+def Findings.fileCursor (f : U64) (s : Snapshot) : Cursor Node :=
+  Snapshot.indexNodes Findings.fileIndex f s
+
+/-- Findings with rule `r` *and* state `st`: scan the rule bucket (the more selective
+index in the workflow) and post-filter the state. Quire has no index intersection in this
+slice; a two-index plan would need the composite index from §6 of the design note. -/
+def Findings.ruleStateCursor (r st : U32) (s : Snapshot) : Cursor Node :=
+  Cursor.filter (fun n => UIntN.beq n.label st) (Findings.ruleCursor r s)
+
+/-- Count a node cursor and return what it spent. `Cost.nodes` is primary reads,
+`Cost.keys` is index entries consumed; both are counts, not timings. -/
+def Findings.count (1 c : Cursor Node) : Nat × Cost :=
+  Cursor.foldWith c (fun acc _ => acc + 1) 0
+
+/-- Count an index-only cursor (primary keys, no node fetch). -/
+def Findings.countKeys (1 c : Cursor U64) : Nat × Cost :=
+  Cursor.foldWith c (fun acc _ => acc + 1) 0
+
+/-- The index-only state scan: no primary read at all. -/
+def Findings.stateKeys (st : U32) (s : Snapshot) : Cursor U64 :=
+  Snapshot.indexCursor Findings.stateIndex (UIntN.resize 64 st) s
+
+/-- The table scan (a `findings list` with no filter). -/
+def Findings.tableCount (s : Snapshot) : Nat × Cost :=
+  Findings.count (Snapshot.tableCursor s)
+
+-- ## A small self-check (pure; `#eval` under `wiz check` would need `#eval` support)
+
+/-- The three demo findings, one per state/rule pair. -/
+def Findings.demo : List Findings.Finding :=
+  [ Findings.Finding.mk "f_a" (U32.ofNat 1) Findings.stateNew (U64.ofNat 7) 10
+  , Findings.Finding.mk "f_b" (U32.ofNat 2) Findings.stateConfirmed (U64.ofNat 7) 20
+  , Findings.Finding.mk "f_c" (U32.ofNat 1) Findings.stateFixed (U64.ofNat 8) 30 ]
+
+/-- A committed database holding `Findings.demo`. -/
+def Findings.demoDb : Db :=
+  let root := Root.mk (U64Map.empty : U64Map Node) (U64Map.empty : U64Map U64)
+    (U64Map.empty : U64Map (U64Map (List U64))) (U64.ofNat 0);
+  let db0 := Db.mk (U64.ofNat 0) (Root.rebuildIndex root Findings.indices) Findings.indices;
+  (Db.commit db0 (Findings.createAll Findings.demo (Db.snapshot db0))).1
