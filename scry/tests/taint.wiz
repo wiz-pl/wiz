@@ -565,8 +565,8 @@ def main : IO Unit := EIO.toIO (do
     check "sarif: one run" (Nat.beq (List.length (Json.getList j "runs")) 1);
     let run := nthJ (Json.getList j "runs") 0;
     check "sarif: driver name" (String.eq (jStr run ["tool", "driver", "name"]) "scry");
-    check "sarif: six rule descriptors (four pack rules and two model rules)"
-      (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 6);
+    check "sarif: seven rule descriptors (four pack rules and three model rules)"
+      (Nat.beq (List.length (Json.getList (jAt run ["tool", "driver"]) "rules")) 7);
     check "sarif: one result" (Nat.beq (List.length (Json.getList run "results")) 1);
     let res := nthJ (Json.getList run "results") 0;
     check "sarif: rule id" (String.eq (Json.getStr res "ruleId") "scry/c/command-injection");
