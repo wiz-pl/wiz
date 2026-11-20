@@ -2726,8 +2726,12 @@ def selfHostGroup : Group where
              "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
             ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
              "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
-            ("partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n", true),
+            ("partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
+             "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
+             "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n", true),
+            ("inductive Wrap where\n  | base\n  | next (w : Wrap)\n" ++
+             "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
+             "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.next (Cursor.wrap c')\n", true),
             ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
              "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
             -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
@@ -2737,7 +2741,8 @@ def selfHostGroup : Group where
              "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
             -- the result contains `Cursor a`: copied at ω it would copy the cursor
             ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)\n", false),
+             "  match Cursor.next c with\n  | .done => (d, 0)\n" ++
+             "  | .more _ c' =>\n    let r := Cursor.keep c' d;\n    r\n", false),
             -- two calls on one handle, and a path that never calls it
             ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
              "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
