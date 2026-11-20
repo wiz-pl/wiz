@@ -175,10 +175,12 @@
   {
     "name": "scaling",
     "split": 2,
+    "jobs": 3,
     "select": [
       "=scaling",
       "=prop",
-      "=audit"
+      "=audit",
+      "=desc-sweep"
     ]
   },
   {
