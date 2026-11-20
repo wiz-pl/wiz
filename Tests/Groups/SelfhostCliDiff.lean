@@ -613,7 +613,7 @@ def cliDiffGroup : Group where
         cliCheck h.err "main.wiz:2:1: error: unknown module M" "host import"
         cliCheck h.err "main.wiz:3:18: error: unknown identifier 'one'" "host cascade"
         cliCheck s.err "main.wiz:2:1: error: cannot find module M [unknown-module]" "driver import"
-        cliCheck s.err "main.wiz:3:1: error: unknown identifier one [unknown-identifier]" "driver cascade" },
+        cliCheck s.err "main.wiz:3:18: error: unknown identifier one [unknown-identifier]" "driver cascade" },
     { name := "-I: an error inside a module (the host nests it under the import)", run := fun _ => withSelfhostCli fun exe => do
         let host ← cliDiffHost
         let files := #[("lib/M.wiz", cliBadModule),

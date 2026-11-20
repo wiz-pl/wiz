@@ -1785,8 +1785,11 @@ exit 1.
 status, `<key>.wizm` its manifest; a module's key is the toolchain id, the root's
 `import_c` header texts, the elaboration flags, its own name and text, and each import's
 name and key in source order (a changed dependency misses every importer; a path and an
-mtime are not in the key). A warm `check` computes the load order from the import graph,
-reads every module's entry, rebuilds the nesting report from them and runs no command.
+mtime are not in the key; the load order is the import DFS's dependencies-first order).
+A warm `check` computes the load order from the import graph, reads every module's entry,
+rebuilds the nesting report and the non-error lines from them (`--types` included) and
+runs no command. An entry holds a module's **own** lines, so an importer's entry does not
+repeat a dependency's info line.
 The program's compiled C is `<key>.wizr` (one per graph: it plays the host's region
 role) with its checksum in `<key>.wizs`; `build`/`run` share it. `--cache-ro`,
 `--cache-verify off|warn|strict` (manifest sidecars are now `<key>.wizm` for `.wizc`/
