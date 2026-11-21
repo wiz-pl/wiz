@@ -171,7 +171,7 @@ def runWorkflow : EIO Unit := do
   chain ← Scry.dynResolve .none dir;
   let ccOpt := chain.tool;
   match ccOpt with
-  | .none => EIO.lift (IO.println "repro: skip (no C compiler found; the static half above ran)");
+  | .none => EIO.lift (IO.println "repro: skip (no C compiler found; the static half above ran)")
   | .some t => reproHalf cRec db t.cc;
 
   -- The C# reproducer needs the .NET SDK's file-based app mode (`dotnet run --file`),
