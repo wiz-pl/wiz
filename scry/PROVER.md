@@ -2,7 +2,7 @@
 
 Status: design + prototype (2026-11-19, branch `scry-prover`). Builds on
 `scry-derivation.md` (S8 certificates), `scry-csharp.md`, and the rule-pack taint engine
-(`lib/Scry/RuleTaint.wiz`, `Scry.Interproc`). The working copy of this note is
+(`src/Scry/RuleTaint.wiz`, `Scry.Interproc`). The working copy of this note is
 `scry/PROVER.md` in the repo.
 
 ## 0. The problem, in one sentence
@@ -265,9 +265,9 @@ What makes the prototype more than decoration, concretely:
 
 | file | contents |
 |---|---|
-| `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the cut checker, the tactic datatype and `prove`/`proveWith` |
-| `lib/Scry/Bounds.wiz` | the out-of-bounds rules and `boundsFactsOfFunc`: `guard`/`use`/`before` rows derived from the same CFG, capacities and copy shapes |
-| `lib/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection, `constantOrBound` and the cut twins |
+| `src/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the cut checker, the tactic datatype and `prove`/`proveWith` |
+| `src/Scry/Bounds.wiz` | the out-of-bounds rules and `boundsFactsOfFunc`: `guard`/`use`/`before` rows derived from the same CFG, capacities and copy shapes |
+| `src/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection, `constantOrBound` and the cut twins |
 | `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection, the cut on tiny EDBs and guard extraction |
 | `scry/PROVER.md` | this note |
 
