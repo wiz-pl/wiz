@@ -2578,7 +2578,7 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
 def genProgram (lib unbox : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false unbox ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => match eraseGlobals .false unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -3095,7 +3095,7 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
              "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
 def genProgramRC (lib : Bool) (borrow unbox : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true unbox ffi all .nil .nil (Array.size all) with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => match eraseGlobals .true unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;
@@ -3991,7 +3991,7 @@ def genLLVMCore (all : Array Global) (ffi : List Foreign) : LLVMR :=
 
 -- The LLVM text of the program, or why this program is outside the slice
 def genLLVM (gs : Globals) : LLVMR := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match irAnyLink ffi with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => match irAnyLink ffi with
     | .true => .err (irSliceErr "has a `link_c`/`link_lib` file: the slice emits one textual module and links no C")
     | .false => genLLVMCore all ffi
 

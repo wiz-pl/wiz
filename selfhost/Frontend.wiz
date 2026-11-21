@@ -11427,9 +11427,17 @@ def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
               | .none => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs)
                   (List.append (Globals.opens gs) (.cons n .nil)) (Globals.aliases gs) (Globals.nsStack gs)))
       | .false => .none
+-- (D6) every output line names the offset of the command that produced it, as
+-- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
+-- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
+-- line leaves `stepCommand`: the driver entry.) An error line that carries the offset of
+-- the failing term (the `\x01` mark, `errMarkIf`) is reported there instead of at the
+-- command's start. (13t) the namespace errors and this loop use it too.
 def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .none => .none
-  | .some s => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+  | .some s => match errSplit s with
+    | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
+    | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 -- (13t) a file must close every `namespace` it opens: report each unclosed one at the
 -- line of its `namespace` (innermost first; the reverse of the output puts them in order)
 def nsUnclosedLines : List NsFrame → List String
@@ -11470,17 +11478,6 @@ def Run.addLine (r : Run) (l : String) : Run := match r with
 inductive StepR where
   | done
   | next (line : Option String) (stop : Nat) (gs : Globals) (cats : List Cat) (tokens : List String) (notes : List Note)
--- (D6) every output line names the offset of the command that produced it, as
--- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
--- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
--- line leaves `stepCommand`: the driver entry.) An error line that carries the offset of
--- the failing term (the `\x01` mark, `errMarkIf`) is reported there instead of at the
--- command's start. (13t) the namespace errors and this loop use it too.
-def atLine (start : Nat) (l : Option String) : Option String := match l with
-  | .none => .none
-  | .some s => match errSplit s with
-    | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
-    | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
 -- is the command at `pos` an `import`? (`import_c` is not: the next character is an id
 -- character). `runCommands` uses this to keep the header open across imports and close it
 -- at the first declaration.
