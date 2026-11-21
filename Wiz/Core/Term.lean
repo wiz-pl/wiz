@@ -592,8 +592,17 @@ structure Globals (R : Type) where
   /-- each declaration's position in `order` (its definitional height, for lazy delta in
   unification: `Globals.height`) -/
   heights : Std.HashMap Name Nat := {}
-  /-- `builtin key := name` registrations, such as `("nat", Nat)` and `("nat.add", Nat.add)` -/
+  /-- `builtin key := name` registrations, such as `("nat", Nat)` and `("nat.add", Nat.add)`.
+  The ordered list is the record that is serialised and replayed; the three maps below are
+  its index (first occurrence wins, as `List.lookup`/`List.find?` did). -/
   builtins : List (Name × Name) := []
+  /-- key → name, for the key lookups on the evaluator's and checker's hot paths -/
+  builtinByKey : Std.HashMap Name Name := {}
+  /-- name → key (the first registration of the name) -/
+  builtinByName : Std.HashMap Name Name := {}
+  /-- name → its `nat.…` key: what `vBuiltin?` needs, kept apart because the first
+  registration of a name need not be its numeral operation -/
+  natBuiltinByName : Std.HashMap Name Name := {}
   /-- the registrations made outside the toolchain's library, which nothing checks: each
   is an axiom of the declarations that depend on it (`#print axioms`) -/
   assumed : List (Name × Name) := []
@@ -684,9 +693,55 @@ def find? (g : Globals R) (n : Name) : Option (Decl R) := g.decls[n]?
 
 def contains (g : Globals R) (n : Name) : Bool := g.decls.contains n
 
+/-- The index of an ordered `builtins` list: first occurrence wins, as `List.lookup` and
+`List.find?` did. -/
+def builtinIndex (bs : List (Name × Name)) :
+    Std.HashMap Name Name × Std.HashMap Name Name × Std.HashMap Name Name :=
+  bs.foldr (init := ({}, {}, {})) fun (k, n) (byKey, byName, natName) =>
+    (if byKey.contains k then byKey else byKey.insert k n,
+     if byName.contains n then byName else byName.insert n k,
+     if k.startsWith "nat." && !natName.contains n then natName.insert n k else natName)
+
+/-- Replace the registrations, rebuilding their index. -/
+def setBuiltins (g : Globals R) (bs : List (Name × Name)) : Globals R :=
+  let (byKey, byName, natName) := builtinIndex bs
+  { g with
+    builtins := bs
+    builtinByKey := byKey
+    builtinByName := byName
+    natBuiltinByName := natName }
+
+/-- Register `(key, n)` at the front (the newest registration wins). -/
+def addBuiltin (g : Globals R) (k n : Name) : Globals R :=
+  { g with
+    builtins := ((k, n) :: g.builtins)
+    builtinByKey := g.builtinByKey.insert k n
+    builtinByName := g.builtinByName.insert n k
+    natBuiltinByName := (if k.startsWith "nat." then g.natBuiltinByName.insert n k
+                         else g.natBuiltinByName) }
+
+/-- Register `(key, n)` at the back (the first registration of a key or name wins). -/
+def addBuiltinBack (g : Globals R) (k n : Name) : Globals R :=
+  { g with
+    builtins := (g.builtins ++ [(k, n)])
+    builtinByKey := (if g.builtinByKey.contains k then g.builtinByKey else g.builtinByKey.insert k n)
+    builtinByName := (if g.builtinByName.contains n then g.builtinByName else g.builtinByName.insert n k)
+    natBuiltinByName :=
+      (if k.startsWith "nat." && !g.natBuiltinByName.contains n then g.natBuiltinByName.insert n k
+       else g.natBuiltinByName) }
+
+/-- The name registered under a builtin key. Falls back to the list for a `Globals` built
+as a record literal (the tests do this) rather than through `addBuiltin`/`setBuiltins`. -/
+def builtinOf? (g : Globals R) (k : Name) : Option Name :=
+  match g.builtinByKey[k]? with
+  | some n => some n
+  | none => g.builtins.lookup k
+
 /-- The key `n` is registered under (`nat.add`, ...), if any. -/
 def builtinKey? (g : Globals R) (n : Name) : Option Name :=
-  (g.builtins.find? (·.2 == n)).map (·.1)
+  match g.builtinByName[n]? with
+  | some k => some k
+  | none => (g.builtins.find? (·.2 == n)).map (·.1)
 
 /-- `instCache` with the entry of `d` (its value's instantiations, made when needed), or
 without one (no value, or no level parameters). -/

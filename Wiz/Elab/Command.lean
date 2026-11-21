@@ -335,7 +335,7 @@ def renamePrivate (s : CommandState R) (added : Array Name) : CommandState R :=
   let instCache := added.foldl (fun c n => match decls[f n]? with
     | some d => { g with instCache := c.erase n }.cacheInst d
     | none => c.erase n) g.instCache
-  { s with globals := { g with decls, order, heights, instCache, builtins := rb g.builtins, assumed := rb g.assumed },
+  { s with globals := { g with decls, order, heights, instCache, assumed := rb g.assumed }.setBuiltins (rb g.builtins),
            builtins := rb s.builtins }
 
 /-- Metas are untyped, so `?A : Sort ?u` never learns `?u` from `?A := A`, and
@@ -1526,7 +1526,7 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
-  else match g.builtins.lookup "nat" with
+  else match g.builtinOf? "nat" with
     | none => some "register `builtin nat := …` first"
     | some N =>
       let (as, r) := doms d.type
@@ -2017,8 +2017,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted s.globals { name := sealName T, levelParams := [], type := .sort 1, value := none } with
         | .error e => reportKernel cmd.info (sealName T) e
         | .ok g =>
-          let g := { g with privates := g.privates.insert (sealName T) s.module,
-                            builtins := (sealKey T, sealName T) :: g.builtins }
+          let g := g.addBuiltin (sealKey T) (sealName T)
+          let g := { g with privates := g.privates.insert (sealName T) s.module }
           modify fun s => { s with globals := g, builtins := (sealKey T, sealName T) :: s.builtins }
           -- (`T.desc` is private when a constructor is, 13b: a native type's always is, so
           -- `μ (T.desc …) i` written out elsewhere can't hand the seal to unification; a
@@ -2541,7 +2541,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- one registration per key, and one key per constant: a second `builtin nat.add := K`
     -- would redirect how the first one's constant unfolds (the kernel finds the definition
     -- by key), an assumption that no declaration using it would show
-    else if let some m := s.globals.builtins.lookup key then
+    else if let some m := s.globals.builtinOf? key then
       report .error cmd.info s!"builtin {key} is already registered (as {m}); a builtin can be registered only once"
     else if let some (k, _) := s.globals.builtins.find? fun (k, m) => m == n && known.contains k then
       report .error cmd.info s!"{n} is already registered as builtin {k}"
@@ -2556,10 +2556,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- operation, so the registration is an axiom of whatever depends on `n`
         -- (`builtin int` only says how values print: nothing to trust)
         let trusted := s.trustedModule s.module || key == "int"
+        let g := s.globals.addBuiltin key n
         modify fun s => { s with builtins := (key, n) :: s.builtins,
-                                 globals := { s.globals with builtins := (key, n) :: s.globals.builtins,
-                                                             assumed := if trusted then s.globals.assumed
-                                                                        else (key, n) :: s.globals.assumed } }
+                                 globals := { g with assumed := if trusted then s.globals.assumed
+                                                                else (key, n) :: s.globals.assumed } }
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
   | "command.printAxioms" =>
@@ -2585,7 +2585,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9i) `(c := "T")`: `T *` in an imported header is this type
     let cty := if (cmd.getArg 3).isNone then [] else [(s!"ctype:{(((cmd.getArg 3).getArg 3).getStr?).getD ""}", name)]
     match addDeclSorted s.globals { name, type := .sort 1, value := none } with
-    | .ok g => modify fun s => { s with globals := { g with builtins := cty ++ g.builtins }, builtins := cty ++ s.builtins,
+    | .ok g => modify fun s => { s with globals := g.setBuiltins (cty ++ g.builtins), builtins := cty ++ s.builtins,
                                         foreignTypes := (name, fin) :: s.foreignTypes }
     | .error e => reportKernel cmd.info (name) e
   | "command.importC" =>
@@ -2687,7 +2687,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted st.globals { name := n, type := .sort 1, value := none } with
         | .ok g =>
           let key := s!"ctype:{sp}"
-          modify fun s => { s with globals := { g with builtins := (key, n) :: g.builtins }, builtins := (key, n) :: s.builtins,
+          modify fun s => { s with globals := g.addBuiltin key n, builtins := (key, n) :: s.builtins,
                                    foreignTypes := (n, "") :: s.foreignTypes }
           return some n
         | .error _ => return none
@@ -2759,7 +2759,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         let key : Name := s!"extern:{f.name}:{String.join (ks.toList.map (·.1.toKey))}:{rk.toKey}:{if isPure then "pure" else "io"}:{header}:{fin}"
         match addDeclSorted st.globals { name, type := ty, value := none } with
         | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                            globals := { g with builtins := (key, name) :: g.builtins } }
+                                            globals := g.addBuiltin key name }
         | .error e => reportKernel cmd.info (name) e
   | "command.glue" =>
     -- a foreign function defined by checked C code
@@ -2817,7 +2817,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             match addDeclSorted s.globals { name, type := ty, value := none } with
             | .ok g =>
               modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                       globals := { g with builtins := (key, name) :: g.builtins },
+                                       globals := g.addBuiltin key name,
                                        cCode := s.cCode.push code,
                                        cFuncs := (cname, pairs.map (gty ·.2), gty rk) :: s.cFuncs }
             | .error e => reportKernel cmd.info (name) e
@@ -2873,7 +2873,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let k : RVal.FKind := .struct ctype header kinds
           let code := if header == "" then C.structDefinition ctype kinds else s!"#include <{header}>"
           modify fun s => { s with builtins := (s!"cstruct:{k.toKey}", name) :: s.builtins,
-                                   globals := { s.globals with builtins := (s!"cstruct:{k.toKey}", name) :: s.globals.builtins },
+                                   globals := s.globals.addBuiltin (s!"cstruct:{k.toKey}") name,
                                    cCode := if s.cCode.contains code then s.cCode else s.cCode.push code }
   | "command.linkC" =>
     -- (9f) an unchecked C source file, compiled and linked with the program
@@ -2965,7 +2965,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let key : Name := s!"extern:{cname}:{String.join (ks.map (·.toKey))}:{rk.toKey}:{if io then "io" else "pure"}:{header}:{finOf res}"
           match addDeclSorted s.globals { name, type := ty, value := none } with
           | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                              globals := { g with builtins := (key, name) :: g.builtins } }
+                                              globals := g.addBuiltin key name }
           | .error e => reportKernel cmd.info (name) e
         | _, _ =>
           let msg := "a foreign function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a c_struct, a Wiz data type or a function of those (a callback; the result may be in IO)"
@@ -3188,7 +3188,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             let (_, getArity) := target g 0 (eval g [] dg.type) 1000
             let key := ReprInfo.key T { mkImpl := impl, getImpl := get, tag, nfields, r, mkArity, p, getArity }
             modify fun s => { s with builtins := (key, f) :: s.builtins,
-                                     globals := { s.globals with builtins := (key, f) :: s.globals.builtins } }
+                                     globals := s.globals.addBuiltin key f }
       else if s.builtins.any (fun (k, x) => x == f && k != inlineKey && !k.startsWith RVal.exportPrefix) then
         report .error fStx.info s!"{f} is a builtin or foreign function: it already has an implementation"
       else if f == impl then report .error (cmd.getArg 3).info s!"{f} can't be implemented by itself"
@@ -3227,7 +3227,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         report .error fStx.info s!"{f} is a builtin, foreign or inline function already"
       else
         modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
-                                 globals := { s.globals with builtins := s.globals.builtins ++ [(inlineKey, f)] } }
+                                 globals := s.globals.addBuiltinBack inlineKey f }
   | "command.attrDefaultInstance" =>
     -- (7f) `attribute [default_instance p] i`: when instance problems are stuck, the
     -- instance `i` is tried on those of its class, highest `p` (default 1000) first

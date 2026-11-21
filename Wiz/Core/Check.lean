@@ -808,10 +808,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .mvar m => throw (.other s!"the kernel does not accept metavariables (?m{m})")
   | .natLit _ =>
     -- a numeral means `succ (… zero)`, so it needs both constructors, as definitions
-    let defined (k : Name) := match (ctx.globals.builtins.lookup k).bind ctx.globals.find? with
+    let defined (k : Name) := match (ctx.globals.builtinOf? k).bind ctx.globals.find? with
       | some { value := some _, .. } => true
       | _ => false
-    match ctx.globals.builtins.lookup "nat" with
+    match ctx.globals.builtinOf? "nat" with
     | some N =>
       if defined "nat.zero" && defined "nat.succ" then pure (ctx.eval (.const N []), Usage.zeros ctx.lvl)
       else throw (.other "numerals need `builtin nat.zero := …` and `builtin nat.succ := …`")
