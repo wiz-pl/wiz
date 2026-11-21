@@ -1,0 +1,283 @@
+import Dist.TwoPhase
+import Dist.Checker
+/-!
+# Dist.TwoPhaseFinite
+
+The finite `N = 2` decision instance of two-phase commit (`import Dist.TwoPhaseFinite`):
+the coordinator phase, the two participants' phases, and the decision actions. The
+message-delivery and crash flags of the full `TwoPC` state are a refinement of this
+decision projection: they can delay a decision, but every decision this model takes is
+a decision the full protocol can take (`decideCommit` still requires both participants
+prepared). The parameterized safety theorem is `TwoPC.safety`; this module is the small
+instance the checker runs, so `#eval` is cheap.
+
+The Boolean invariant checks the three clauses of `TwoPC.Inv` at participants `0` and
+`1`: a participant commits only after the coordinator, the coordinator commits only
+after both prepared, and nobody commits while another aborts.
+-/
+
+/-- Boolean equality of Booleans. -/
+def Bool.eq : Bool → Bool → Bool
+  | .true, .true => .true
+  | .false, .false => .true
+  | _, _ => .false
+
+/-- `Bool.eq` is sound. -/
+def Bool.eq_sound : (a b : Bool) → Bool.eq a b = .true → a = b
+  | .true, .true, h => rfl
+  | .false, .false, h => rfl
+  | .true, .false, h => absurd h.1
+  | .false, .true, h => absurd h.1
+
+/-- Equality of lists by a Boolean equality of elements. -/
+def List.eqBy {A : Type} (eq : A → A → Bool) : List A → List A → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => Bool.and (eq x y) (List.eqBy eq xs ys)
+  | _, _ => .false
+
+/-- `List.eqBy` is sound. -/
+def List.eqBy_sound {A : Type} (eq : A → A → Bool)
+    (he : (a b : A) → eq a b = .true → a = b) :
+    (l m : List A) → List.eqBy eq l m = .true → l = m
+  | .nil, .nil, h => rfl
+  | .nil, .cons y ys, h => absurd h.1
+  | .cons x xs, .nil, h => absurd h.1
+  | .cons x xs, .cons y ys, h =>
+      let hx := Bool.and_true_left (eq x y) (List.eqBy eq xs ys) h
+      let hr := Bool.and_true_right (eq x y) (List.eqBy eq xs ys) h
+      Eq.substProp (fun (z : A) => List.cons x xs = List.cons z ys) (he x y hx)
+        (Eq.congrArg (List.cons x) (List.eqBy_sound eq he xs ys hr))
+
+/-- `List.eqBy` is reflexive when the element equality is. -/
+def List.eqBy_refl {A : Type} (eq : A → A → Bool)
+    (he : (a : A) → eq a a = .true) : (l : List A) → List.eqBy eq l l = .true
+  | .nil => rfl
+  | .cons x xs =>
+      Iff.mpr (Bool.and_eq_true (eq x x) (List.eqBy eq xs xs))
+        (And.intro (he x) (List.eqBy_refl eq he xs))
+
+/-- A phase as text. -/
+def Phase.show : Phase → String
+  | .init => "init"
+  | .prepared => "prepared"
+  | .committed => "committed"
+  | .aborted => "aborted"
+
+/-- The decision projection of a two-phase-commit state: the coordinator and the
+participants. -/
+structure TwoPC.Small (N : Nat) where
+  c : Phase
+  p : List Phase
+
+/-- The participant at `i`; out of range is `init`. -/
+def TwoPC.Small.getP {N : Nat} (s : TwoPC.Small N) (i : Nat) : Phase :=
+  TwoPC.listGetDef .init s.p i
+
+/-- Set a participant's phase. -/
+def TwoPC.Small.setP {N : Nat} (s : TwoPC.Small N) (i : Nat) (ph : Phase) : TwoPC.Small N :=
+  { s with p := TwoPC.listSetAt .init i s.p ph }
+
+/-- Set the coordinator phase. -/
+def TwoPC.Small.setC {N : Nat} (s : TwoPC.Small N) (c : Phase) : TwoPC.Small N :=
+  { s with c := c }
+
+/-- The actions of the decision projection. -/
+inductive TwoPC.SmallAct (N : Nat) where
+  | cPrepare
+  | respondYes (i : Nat)
+  | respondNo (i : Nat)
+  | decideCommit
+  | decideAbort
+  | commit (i : Nat)
+  | abort (i : Nat)
+
+/-- Every participant prepared. -/
+def TwoPC.Small.allPrepared (N : Nat) (s : TwoPC.Small N) : Bool :=
+  TwoPC.allN (fun (i : Nat) => Phase.eq (TwoPC.Small.getP s i) .prepared) N
+
+/-- The list is `[x]` when `b` is true and empty otherwise. -/
+def TwoPC.Small.singleIf {N : Nat} (b : Bool) (x : TwoPC.Small N) : List (TwoPC.Small N) :=
+  match b with
+  | .true => List.cons x List.nil
+  | .false => List.nil
+
+/-- Membership in `singleIf b x`. -/
+def TwoPC.Small.mem_singleIf {N : Nat} :
+    (b : Bool) → (x y : TwoPC.Small N) → y ∈ TwoPC.Small.singleIf b x →
+    b = .true ∧ y = x
+  | .true, x, y, h =>
+      And.intro rfl
+        (Or.elim (Iff.mp (List.mem_cons_iff y x ([] : List (TwoPC.Small N))) h)
+          (fun (e : y = x) => e)
+          (fun (hn : y ∈ ([] : List (TwoPC.Small N))) => False.elim hn))
+  | .false, x, y, h => False.elim h
+
+/-- The executable transitions of one decision action. -/
+def TwoPC.Small.nextAct (N : Nat) (a : TwoPC.SmallAct N) (s : TwoPC.Small N) :
+    List (TwoPC.Small N) :=
+  match a with
+  | .cPrepare =>
+      TwoPC.Small.singleIf (Phase.eq s.c .init) (TwoPC.Small.setC s .prepared)
+  | .respondYes i =>
+      TwoPC.Small.singleIf
+        (Bool.and (Nat.lt i N) (Bool.and (Phase.eq s.c .prepared) (Phase.eq (TwoPC.Small.getP s i) .init)))
+        (TwoPC.Small.setP s i .prepared)
+  | .respondNo i =>
+      TwoPC.Small.singleIf
+        (Bool.and (Nat.lt i N) (Bool.and (Phase.eq s.c .prepared) (Phase.eq (TwoPC.Small.getP s i) .init)))
+        (TwoPC.Small.setP s i .aborted)
+  | .decideCommit =>
+      TwoPC.Small.singleIf
+        (Bool.and (Phase.eq s.c .prepared) (TwoPC.Small.allPrepared N s))
+        (TwoPC.Small.setC s .committed)
+  | .decideAbort =>
+      TwoPC.Small.singleIf (Phase.eq s.c .prepared) (TwoPC.Small.setC s .aborted)
+  | .commit i =>
+      TwoPC.Small.singleIf
+        (Bool.and (Nat.lt i N) (Bool.and (Phase.eq s.c .committed) (Phase.eq (TwoPC.Small.getP s i) .prepared)))
+        (TwoPC.Small.setP s i .committed)
+  | .abort i =>
+      TwoPC.Small.singleIf
+        (Bool.and (Nat.lt i N) (Bool.and (Phase.eq s.c .aborted) (Phase.eq (TwoPC.Small.getP s i) .prepared)))
+        (TwoPC.Small.setP s i .aborted)
+
+/-- All actions for `N = 2`. -/
+def TwoPC.Small.allActs2 : List (TwoPC.SmallAct 2) :=
+  [.cPrepare, .respondYes 0, .respondYes 1, .respondNo 0, .respondNo 1,
+   .decideCommit, .decideAbort, .commit 0, .commit 1, .abort 0, .abort 1]
+
+/-- The union of the transitions of every action for `N = 2`. -/
+def TwoPC.Small.nextAll2 (s : TwoPC.Small 2) : List (TwoPC.Small 2) :=
+  List.concat (List.map (fun (a : TwoPC.SmallAct 2) => TwoPC.Small.nextAct 2 a s)
+    TwoPC.Small.allActs2)
+
+/-- The initial state (an empty participant list reads as `init`). -/
+def TwoPC.Small.init2 : TwoPC.Small 2 := TwoPC.Small.mk .init List.nil
+
+/-- Component-wise equality of small states. -/
+def TwoPC.Small.beq2 (s t : TwoPC.Small 2) : Bool :=
+  Bool.and (Phase.eq s.c t.c) (List.eqBy Phase.eq s.p t.p)
+
+/-- Equality of small states from equal fields. -/
+def TwoPC.Small.mk_congr (c c' : Phase) (p p' : List Phase) (hc : c = c') (hp : p = p') :
+    @TwoPC.Small.mk 2 c p = @TwoPC.Small.mk 2 c' p' :=
+  Eq.trans (Eq.congrArg (fun (z : Phase) => @TwoPC.Small.mk 2 z p) hc)
+    (Eq.congrArg (fun (z : List Phase) => @TwoPC.Small.mk 2 c' z) hp)
+
+/-- `beq2` is sound. -/
+def TwoPC.Small.beq2_sound (s t : TwoPC.Small 2) (h : TwoPC.Small.beq2 s t = .true) : s = t :=
+  TwoPC.Small.mk_congr s.c t.c s.p t.p
+    (Phase.eq_sound s.c t.c (Bool.and_true_left (Phase.eq s.c t.c) (List.eqBy Phase.eq s.p t.p) h))
+    (List.eqBy_sound Phase.eq Phase.eq_sound s.p t.p
+      (Bool.and_true_right (Phase.eq s.c t.c) (List.eqBy Phase.eq s.p t.p) h))
+
+/-- `beq2` is complete. -/
+def TwoPC.Small.beq2_complete (s t : TwoPC.Small 2) (h : s = t) : TwoPC.Small.beq2 s t = .true :=
+  Eq.substProp (fun (z : TwoPC.Small 2) => TwoPC.Small.beq2 s z = .true) h
+    (Iff.mpr (Bool.and_eq_true (Phase.eq s.c s.c) (List.eqBy Phase.eq s.p s.p))
+      (And.intro (Phase.eq_complete s.c s.c rfl)
+        (List.eqBy_refl Phase.eq (fun (a : Phase) => Phase.eq_complete a a rfl) s.p)))
+
+/-- Boolean implication. -/
+def Bool.imp (a b : Bool) : Bool := Bool.or (Bool.not a) b
+
+/-- A true implication with a true antecedent has a true consequent. -/
+def Bool.imp_true (a b : Bool) (h : Bool.imp a b = .true) (ha : a = .true) : b = .true :=
+  Or.elim (Iff.mp (Bool.or_eq_true (Bool.not a) b) h)
+    (fun (hn : Bool.not a = .true) =>
+      False.elim (Bool.trueNeFalse (Eq.trans (Eq.symm ha) (Iff.mp (Bool.not_eq_true a) hn))))
+    (fun (hb : b = .true) => hb)
+
+/-- The Boolean safety invariant for `N = 2`. -/
+def TwoPC.Small.invB2 (s : TwoPC.Small 2) : Bool :=
+  Bool.and
+    (Bool.and
+      (Bool.imp (Phase.eq (TwoPC.Small.getP s 0) .committed) (Phase.eq s.c .committed))
+      (Bool.imp (Phase.eq (TwoPC.Small.getP s 1) .committed) (Phase.eq s.c .committed)))
+    (Bool.and
+      (Bool.and
+        (Bool.imp (Phase.eq s.c .committed)
+          (Bool.or (Phase.eq (TwoPC.Small.getP s 0) .prepared) (Phase.eq (TwoPC.Small.getP s 0) .committed)))
+        (Bool.imp (Phase.eq s.c .committed)
+          (Bool.or (Phase.eq (TwoPC.Small.getP s 1) .prepared) (Phase.eq (TwoPC.Small.getP s 1) .committed))))
+      (Bool.and
+        (Bool.imp (Phase.eq (TwoPC.Small.getP s 0) .committed) (Bool.not (Phase.eq (TwoPC.Small.getP s 0) .aborted)))
+        (Bool.and
+          (Bool.imp (Phase.eq (TwoPC.Small.getP s 0) .committed) (Bool.not (Phase.eq (TwoPC.Small.getP s 1) .aborted)))
+          (Bool.and
+            (Bool.imp (Phase.eq (TwoPC.Small.getP s 1) .committed) (Bool.not (Phase.eq (TwoPC.Small.getP s 0) .aborted)))
+            (Bool.imp (Phase.eq (TwoPC.Small.getP s 1) .committed) (Bool.not (Phase.eq (TwoPC.Small.getP s 1) .aborted)))))))
+
+/-- The finite model the checker runs. -/
+def TwoPC.Small.model2 : Checker.Model (TwoPC.Small 2) :=
+  Checker.Model.mk [TwoPC.Small.init2] TwoPC.Small.nextAll2 TwoPC.Small.invB2
+    TwoPC.Small.beq2 TwoPC.Small.beq2_sound TwoPC.Small.beq2_complete
+
+/-- A small state as text. -/
+def TwoPC.Small.show2 (s : TwoPC.Small 2) : String :=
+  String.intercalate " " [
+    String.append "c=" (Phase.show s.c),
+    String.append "p0=" (Phase.show (TwoPC.Small.getP s 0)),
+    String.append "p1=" (Phase.show (TwoPC.Small.getP s 1))]
+
+/-- The deliberately broken transition: a participant may commit after it prepared,
+without the coordinator's commit (the P0 broken twin). -/
+def TwoPC.Small.brokenNextAct (N : Nat) (a : TwoPC.SmallAct N) (s : TwoPC.Small N) :
+    List (TwoPC.Small N) :=
+  match a with
+  | .commit i =>
+      TwoPC.Small.singleIf
+        (Bool.and (Nat.lt i N) (Phase.eq (TwoPC.Small.getP s i) .prepared))
+        (TwoPC.Small.setP s i .committed)
+  | _ => TwoPC.Small.nextAct N a s
+
+/-- The broken instance's transition list for `N = 2`. -/
+def TwoPC.Small.brokenNextAll2 (s : TwoPC.Small 2) : List (TwoPC.Small 2) :=
+  List.concat (List.map (fun (a : TwoPC.SmallAct 2) => TwoPC.Small.brokenNextAct 2 a s)
+    TwoPC.Small.allActs2)
+
+/-- The broken model: same states and invariant, a participant may commit early. -/
+def TwoPC.Small.brokenModel2 : Checker.Model (TwoPC.Small 2) :=
+  Checker.Model.mk [TwoPC.Small.init2] TwoPC.Small.brokenNextAll2 TwoPC.Small.invB2
+    TwoPC.Small.beq2 TwoPC.Small.beq2_sound TwoPC.Small.beq2_complete
+
+/-- The correct instance's check: `ok`, 45 reachable states. -/
+def TwoPC.Small.check2 : Checker.Report (TwoPC.Small 2) :=
+  TwoPC.Small.model2.check 1000
+
+/-- The `ok` is a kernel equation (`refl`), so `check_ok_spec` applies. -/
+def TwoPC.Small.check2_ok : TwoPC.Small.check2 = Checker.Report.ok 45 := rfl
+
+/-- The finite-instance safety theorem: every state reachable in the correct `N = 2`
+instance satisfies the Boolean invariant. -/
+def TwoPC.Small.twoPC2_checked (s : TwoPC.Small 2)
+    (h : Checker.Model.Reachable TwoPC.Small.model2 s) : TwoPC.Small.invB2 s = .true :=
+  Checker.Model.check_ok_spec TwoPC.Small.model2 1000 45 TwoPC.Small.check2_ok s h
+
+/-- The broken instance's check: the concrete path to a state with one participant
+committed and the other aborted. -/
+def TwoPC.Small.brokenCheck : Checker.Report (TwoPC.Small 2) :=
+  TwoPC.Small.brokenModel2.check 200
+
+/-- The states of the broken run: init, prepare, yes from 0, early commit by 0. -/
+def TwoPC.Small.bad1 : TwoPC.Small 2 := TwoPC.Small.setC TwoPC.Small.init2 .prepared
+/-- Participant 0 votes yes. -/
+def TwoPC.Small.bad2 : TwoPC.Small 2 := TwoPC.Small.setP TwoPC.Small.bad1 0 .prepared
+/-- Participant 0 commits although the coordinator only prepared. -/
+def TwoPC.Small.bad3 : TwoPC.Small 2 := TwoPC.Small.setP TwoPC.Small.bad2 0 .committed
+
+/-- The broken checker's `bad` path, by evaluation. -/
+def TwoPC.Small.brokenCheck_bad :
+    TwoPC.Small.brokenCheck =
+      Checker.Report.bad [TwoPC.Small.bad3, TwoPC.Small.bad2, TwoPC.Small.bad1, TwoPC.Small.init2] := rfl
+
+/-- The concrete counterexample: a real execution of the broken protocol reaches a
+state that violates the invariant (participant 0 committed while the coordinator is
+only prepared). This is the assumption the P0 broken twin drops. -/
+def TwoPC.Small.broken_violation :
+    ∃ s, Checker.RPath TwoPC.Small.brokenModel2 s
+      [TwoPC.Small.bad3, TwoPC.Small.bad2, TwoPC.Small.bad1, TwoPC.Small.init2] ∧
+      TwoPC.Small.invB2 s = .false :=
+  Checker.Model.check_bad_spec TwoPC.Small.brokenModel2 200
+    [TwoPC.Small.bad3, TwoPC.Small.bad2, TwoPC.Small.bad1, TwoPC.Small.init2]
+    TwoPC.Small.brokenCheck_bad

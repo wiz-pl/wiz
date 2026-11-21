@@ -171,7 +171,8 @@
       "=scry-modules",
       "=storage-mmap",
       "=storage-multiproc",
-      "=storage-quire"
+      "=storage-quire",
+      "=dist-proofs"
     ]
   },
   {
