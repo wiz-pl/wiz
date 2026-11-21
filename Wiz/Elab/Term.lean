@@ -3088,12 +3088,10 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
       let eqTm : Term R := .eq ((q I).lift (nΞ + 1)) lhs ((q ξi).lift (nΞ + 1))
       let body : Term R := .pi "e" .default (.qlit 0) eqTm (G.lift (nΞ + 2)) ⟨0, vG.getD .hole⟩
       pure ((List.range nΞ).foldr (fun k acc => .lam s!"i{k}" acc) (.lam "x" body))
-  -- a type still to be found (an inferred `match`) is taken to be in `Type`
-  let unknown := match whnf Gv with
-    | .neutral (.mvar _) _ => true
-    | _ => false
-  let some v := vG.orElse fun _ => if unknown then some (.succ .zero) else none
-    | throwAt ctx.info "could not determine the universe of the match's type"
+  -- a type still to be found (an inferred `match`) is taken to be in `Type`. A named
+  -- match wraps the goal in the equation's binders, so the metavariable is not at the
+  -- head of `Gv`; a missing sort is the inferred case either way.
+  let v := vG.getD (.succ .zero)
   let elimName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if useRec then ".rec" else ".casesOn") ++
     (if nondep then "N" else "")
   let some ed := g.find? elimName | throwAt ctx.info s!"{elimName} is missing"

@@ -2790,34 +2790,41 @@ def selfHostGroup : Group where
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
     { name := "the linear fixpoint: a recursive call's result may be used at ω when it contains no linear content, as in the Lean frontend", run := fun _ =>
+        -- (a linear token recurred on an ω `Nat`: the self-hosted frontend cannot yet
+        -- take a linear scrutinee apart, but threading the token through the recursive
+        -- call is exactly the linear fixpoint; `Nat.inc`/`Tok.use` are applications, not
+        -- constructor payloads, so both kernels reach the same rule)
         selfhostAgrees
-          ("inductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
-           "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
-           "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
-           "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n")
+          ("axiom Tok : Type\naxiom Tok.use : (1 t : Tok) → Nat\n" ++
+           "axiom Tok.useB : (1 t : Tok) → Bool\n" ++
+           "axiom Tok.useP : (1 t : Tok) → Nat × Nat\n" ++
+           "axiom Tok.useO : (1 t : Tok) → Option Nat\n" ++
+           "axiom Tok.useTok : (1 t : Tok) → Tok × Nat\n" ++
+           "def Nat.inc (n : Nat) : Nat := Nat.succ n\n")
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
-            ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
-            ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
-            ("partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n", true),
-            ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
-             "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
-            -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
-            ("partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
-             "    let r := Cursor.optLen c';\n    match r with\n" ++
-             "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
-            -- the result contains `Cursor a`: copied at ω it would copy the cursor
-            ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)\n", false),
-            -- two calls on one handle, and a path that never calls it
-            ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
-            ("partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1\n", false)
+            ("partial def loop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
+            ("partial def loopB (1 t : Tok) (n : Nat) : Bool :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useB t\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
+            -- a recursive call bound by an ω `let`: a pair of ω types
+            ("partial def loopP (1 t : Tok) (n : Nat) : Nat × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useP t\n" ++
+             "  | .succ k =>\n    let r := loopP t k;\n    (r.1 + 1, r.2)\n", true),
+            -- ... and an `Option Nat` matched after the let
+            ("partial def loopO (1 t : Tok) (n : Nat) : Option Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useO t\n" ++
+             "  | .succ k =>\n    let r := loopO t k;\n    match r with\n" ++
+             "    | .none => Option.none\n    | .some v => Option.some (Nat.inc v)\n", true),
+            -- the result contains `Tok`: copied at ω it would copy the token
+            ("partial def bad (1 t : Tok) (d : Tok) (n : Nat) : Tok × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useTok t\n" ++
+             "  | .succ k =>\n    let r := bad t d k;\n    r\n", false),
+            -- two calls, and a path that never calls
+            ("partial def dup (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.add (dup t k) (dup t k)\n", false),
+            ("partial def drop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => 0\n", false)
           ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },

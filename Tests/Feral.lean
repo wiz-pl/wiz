@@ -451,7 +451,7 @@ def group : Group where
           "#eval List.length longWords\n#eval String.length (String.intercalate \"\" longWords)\n"
         let s ← frontend src
         checkEq "[]" (toString (errorsOf s src))
-        checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), .cons \"x\" (.cons \"y\" (.cons \"a\" (.cons \"b\" (.cons \"c\" .nil)))), 20000, \"tail\", 3, 20002]"
+        checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), [\"x\", \"y\", \"a\", \"b\", \"c\"], 20000, \"tail\", 3, 20002]"
           (toString (infosOf s)) }
   ]
 
