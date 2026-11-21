@@ -3121,27 +3121,30 @@ def Fe.specBorrow (sig : Fe.Sig) (cls : List (Nat × Syntax))
     .error "spec: not supported yet: a returned borrow with an outlives bound (`final result`): the result's region is not the lender's"
   | _, .mopt _ _ _, _, _ =>
     .error "spec: not supported yet: an optional returned borrow (`Option (&mut …)`) (`final result`): `none` hands the lender back without a final value"
-  | _, .mutb _ a s, .cons v .nil, .nil =>
-    let vs := .cons v .nil;
-    let fin := .cons ("result", "fin") (.cons (v, "r.2") .nil);
-    let res := "r.1";
-    let reqs := Fe.clauses sig.params vs fin res "feral_clause.req" cls;
-    let enss := Fe.clauses sig.params vs fin res "feral_clause.ens" cls;
-    let rgs := Fe.nubStr (Fe.rgsUsed sig.rgs (List.map (fun (q : String × Fe.Ty) => Fe.paramTyL vs q) sig.params));
-    let call := Fe.unwords (.cons sig.name (List.map (fun (q : String × Fe.Ty) => q.1) sig.params));
-    let scope := "Uniq.borrow Region.static " +++ v +++ " (fun ρ1 h1 l1 " +++ v +++ " =>\n      match " +++ call
-      +++ " with\n      | .ok m =>\n        let 1 (cur, m) := Mut.peek m;\n        let 1 u := Mut.close m fin;\n        .ok cur u\n      | .err e u => .err e u)"
-    .ok ("def " +++ sig.name +++ ".Spec "
-      +++ (match rgs with
-        | .nil => ""
-        | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
-      +++ (match sig.tys with
-        | .nil => ""
-        | ts => "{" +++ Fe.words ts +++ ": Type} ")
-      +++ Fe.words (List.map (fun (q : String × Fe.Ty) => "(" +++ q.1 +++ " : " +++ Fe.tyStr (Fe.paramTyL vs q) +++ ")") sig.params)
-      +++ ": Prop :=\n  " +++ Fe.arrows reqs
-        ("(fin : " +++ Fe.tyStr a +++ ") →\n  Result.Holds (fun (r : (" +++ Fe.tyStr a +++ " × " +++ Fe.tyStr s +++ ")) => "
-          +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")"))
+  | _, .mutb _ a s, .cons _ .nil, .nil =>
+    (match Fe.paramNames sig sig.lenders with
+    | .cons l .nil =>
+      let vs : List String := List.cons l List.nil;
+      let fin : List (String × String) := List.cons ("result", "fin") (List.cons (l, "r.2") List.nil);
+      let res := "r.1";
+      let reqs := Fe.clauses sig.params vs fin res "feral_clause.req" cls;
+      let enss := Fe.clauses sig.params vs fin res "feral_clause.ens" cls;
+      let rgs := Fe.nubStr (Fe.rgsUsed sig.rgs (List.map (fun (q : String × Fe.Ty) => Fe.paramTyL vs q) sig.params));
+      let call := Fe.unwords (List.cons sig.name (List.map (fun (q : String × Fe.Ty) => q.1) sig.params));
+      let scope := "Uniq.borrow Region.static " +++ l +++ " (fun ρ1 h1 l1 " +++ l +++ " =>\n      match " +++ call
+        +++ " with\n      | .ok m =>\n        let 1 (cur, m) := Mut.peek m;\n        let 1 u := Mut.close m fin;\n        .ok cur u\n      | .err e u => .err e u)"
+      .ok ("def " +++ sig.name +++ ".Spec "
+        +++ (match rgs with
+          | .nil => ""
+          | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
+        +++ (match sig.tys with
+          | .nil => ""
+          | ts => "{" +++ Fe.words ts +++ ": Type} ")
+        +++ Fe.words (List.map (fun (q : String × Fe.Ty) => "(" +++ q.1 +++ " : " +++ Fe.tyStr (Fe.paramTyL vs q) +++ ")") sig.params)
+        +++ ": Prop :=\n  " +++ Fe.arrows reqs
+          ("(fin : " +++ Fe.tyStr a +++ ") →\n  Result.Holds (fun (r : (" +++ Fe.tyStr a +++ " × " +++ Fe.tyStr s +++ ")) => "
+            +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")"))
+    | _ => .error "spec: an internal error: a returned borrow with no lender")
   | _, .mutb _ _ _, .cons _ (.cons _ _), _ =>
     .error "spec: not supported yet: a returned borrow from more than one lender (`final result`): no single lender ends where the scope closes"
   | _, .mutb _ _ _, .nil, _ =>
