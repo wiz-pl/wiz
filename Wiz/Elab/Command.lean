@@ -1260,7 +1260,9 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
     .sigma x wT ((q ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
   let init : Term R := (explicit.map fun ((_, _, _, _), k) => (.var (ctx.lvl - k - 1) : Term R)).foldr .pair .tt
   -- A := fun j => fun _ => stateTy0[si := j]
-  let A : Term R := .lam "j" (.lam "_" (replaceFree (si + 2) (.var 1) (stateTy0.lift 2)))
+  -- `si` is a level; the de Bruijn index of the size variable in `stateTy0` is
+  -- `ctx.lvl - 1 - si`, and `lift 2` adds the two binders of `A`.
+  let A : Term R := .lam "j" (.lam "_" (replaceFree (ctx.lvl + 1 - si) (.var 1) (stateTy0.lift 2)))
   let vA ← evalIn ctx A
   let vI := I
   let vD := D
