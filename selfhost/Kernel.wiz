@@ -1209,6 +1209,13 @@ def kernelLazyProofs : Bool := .true
 extern "wiz_proof_start" proofStart : Nat → Bool
 extern "wiz_proof_tick" proofTick : Nat → Bool
 extern "wiz_proof_end" proofEnd : Nat → Bool
+-- (the kernel evaluator's per-command budget, its own counter so ordinary evaluation does
+-- not consume the proof read-back's: one tick per structural elimination; the frontend
+-- arms it for a command with `kernelStart` and reports `kernelBudgetMsg` if `kernelEnd`
+-- says it ran out)
+extern "wiz_kernel_start" kernelStart : Nat → Bool
+extern "wiz_kernel_tick" kernelTick : Nat → Bool
+extern "wiz_kernel_end" kernelEnd : Nat → Bool
 -- the budget (Lean's `Budget.defaultSteps`)
 def proofSteps : Nat := 1000000
 -- what a proof reads back as when its budget ran out (Lean's `Budget.message`): a
@@ -1737,25 +1744,38 @@ def vDelimW : Lvl → Val → Val → Val → Val → Val → Val → Val
 def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnfView x)
 def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vcon xs =>
-    -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
-    let f : Val := .vlam (.cons m (.cons P (.cons D (.cons I .nil))))
-      (.lam (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0)));
-    let hyps := vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (hypsTm l v)) I) D) (muFamily l I D)) P) f) i) xs;
-    vapp (vapp (vapp m i) xs) hyps
+    -- (a step bound: structural recursion on a huge numeral is one step per successor,
+    -- and the result is unary here, so `Nat.add`/`Nat.mul`/`Nat.pow` on a big numeral
+    -- grows without bound. The command that armed a budget gets a diagnostic instead of
+    -- an out-of-memory or a stack overflow; no budget runs in the kernel's own work.)
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true =>
+      -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
+      let f : Val := .vlam (.cons m (.cons P (.cons D (.cons I .nil))))
+        (.lam (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0)));
+      let hyps := vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (hypsTm l v)) I) D) (muFamily l I D)) P) f) i) xs;
+      vapp (vapp (vapp m i) xs) hyps
   | l, I, D, v, P, m, i, .vne h sp => .vne h (.sind sp l I D v P m i)
   | _, _, _, _, _, _, _, x => x
 -- sized recursion (`vSfix`): on a constructor, `f ∞ rec i x`, where `rec j i y` recurses
 def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnfView x with
   | .vcon xs =>
-    -- inside: y0 i1 j2 f3 P4 D5 I6
-    let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
-      (.lam (.lam (.sfix l (.var 6) (.var 5) v (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))));
-    vapp (vapp (vapp (vapp f .vszInf) rec_) i) (.vcon xs)
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true =>
+      -- inside: y0 i1 j2 f3 P4 D5 I6
+      let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
+        (.lam (.lam (.sfix l (.var 6) (.var 5) v (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))));
+      vapp (vapp (vapp (vapp f .vszInf) rec_) i) (.vcon xs)
   | .vne h sp => .vne h (.ssfix sp l I D v P f sz i)
   | x' => x'
 -- sized case analysis (`vScase`): `m ∞ i xs` (the quantity plays no part)
 def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnfView x with
-  | .vcon xs => vapp (vapp (vapp m .vszInf) i) xs
+  | .vcon xs =>
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true => vapp (vapp (vapp m .vszInf) i) xs
   | .vne h sp => .vne h (.sscase sp l q I D v P m sz i)
   | x' => x'
 -- observation (`vOut`): run one step of an unfolding, re-wrapping the recursive fields

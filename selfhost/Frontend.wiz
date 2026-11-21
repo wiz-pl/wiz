@@ -11000,6 +11000,69 @@ def atLine (start : Nat) (l : Option String) : Option String := match l with
   | .some s => match errSplit s with
     | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
     | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+def commandStep (gs0 : Globals) (stx : Syntax) (sp : Option SpT) : Step :=
+  match strEq (kindOf stx) "command.partial" with
+    | .true => partialCmd gs0 (one stx)
+    | .false => match strEq (kindOf stx) "command.mutual" with
+      | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
+        | .true => match mutualDeriving (nonAtoms (kids (kid stx 1))) with
+          | .some m => errStep gs0 m
+          | .none => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
+        | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
+      | .false => match strEq (kindOf stx) "command.structure" with
+        | .true => withDeriving gs0 stx (structCmd gs0 stx)
+        | .false => match strEq (kindOf stx) "command.class" with
+          | .true => classCmd gs0 stx
+          | .false => match strEq (kindOf stx) "command.instance" with
+            | .true => instanceCmd gs0 stx
+            | .false => match strEq (kindOf stx) "command.axiom" with
+          | .true => axiomCmd gs0 stx
+          | .false => match strEq (kindOf stx) "command.extern" with
+            -- (to the checker, a foreign function is an axiom)
+            | .true => externCmd gs0 stx
+            | .false => match strEq (kindOf stx) "command.foreignType" with
+              | .true => foreignTypeCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.importC" with
+              | .true => importCCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.glue" with
+              | .true => glueCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.cStruct" with
+              | .true => cStructCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.sealed" with
+                | .true => sealedCmd gs0 stx
+                | .false => match strEq (kindOf stx) "command.printAxioms" with
+                | .true => printAxiomsCmd gs0 stx
+                | .false => match strEq (kindOf stx) "command.deriving" with
+                  | .true => derivingCmd gs0 stx
+                  | .false => match knownCommand (kindOf stx) with
+                  | .true => match strEq (kindOf stx) "command.inductive" with
+                    | .true => withDeriving gs0 stx (defStep gs0 stx sp)
+                    | .false => defStep gs0 stx sp
+                  -- (an unknown command, or a modifier this frontend doesn't know, is
+                  -- an error naming it, never ignored)
+                  | .false => errStep gs0 (String.append "unsupported command " (kindOf stx))
+
+-- (the kernel evaluator's per-command step budget) A structural recursion in the kernel
+-- (`vIndW`) is one step per constructor, and this kernel has no native `Nat` operations:
+-- `Nat.pow 2 32` and `Nat.add` on a 32-bit numeral are billions of unary steps, which used
+-- to grow until the process ran out of memory or its 1 GiB evaluator stack overflowed
+-- (`lib/BitVecAdd.wiz`). A command that reaches the budget is reported as an error, not
+-- crashed: the same bounding principle as the proof read-back's (P2) budget.
+def kernelSteps : Nat := 20000
+def kernelBudgetMsg : String :=
+  "the kernel evaluation hit its 20000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here"
+-- the state a command's step leaves behind (its output line, the globals after it, and
+-- the declaration records), with the duplicate-declaration check
+def finishStep (stop start : Nat) (gs gs' : Globals) (input : Array Nat) (sp : Option SpT)
+    (line : String) (cats : List Cat) (tokens : List String) (notes : List Note) (stx : Syntax) : StepR :=
+  match newDuplicate gs gs' with
+  -- (D6) the declared name's own token, not the command's start
+  | .some x => .next (atLine start (.some (errMarkAt (declSpanFor input sp x)
+      (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
+  -- (A11) `deriving instance` prints no line, as in the Lean toolchain
+  | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
+      | .true => .none
+      | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
 mutual
 def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
@@ -11048,55 +11111,21 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       | .some r => (match r with
         | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
-      let step := match strEq (kindOf stx) "command.partial" with
-        | .true => partialCmd gs0 (one stx)
-        | .false => match strEq (kindOf stx) "command.mutual" with
-          | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
-            | .true => match mutualDeriving (nonAtoms (kids (kid stx 1))) with
-              | .some m => errStep gs0 m
-              | .none => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
-            | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
-          | .false => match strEq (kindOf stx) "command.structure" with
-            | .true => withDeriving gs0 stx (structCmd gs0 stx)
-            | .false => match strEq (kindOf stx) "command.class" with
-              | .true => classCmd gs0 stx
-              | .false => match strEq (kindOf stx) "command.instance" with
-                | .true => instanceCmd gs0 stx
-                | .false => match strEq (kindOf stx) "command.axiom" with
-              | .true => axiomCmd gs0 stx
-              | .false => match strEq (kindOf stx) "command.extern" with
-                -- (to the checker, a foreign function is an axiom)
-                | .true => externCmd gs0 stx
-                | .false => match strEq (kindOf stx) "command.foreignType" with
-                  | .true => foreignTypeCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.importC" with
-                  | .true => importCCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.glue" with
-                  | .true => glueCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.cStruct" with
-                  | .true => cStructCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.sealed" with
-                    | .true => sealedCmd gs0 stx
-                    | .false => match strEq (kindOf stx) "command.printAxioms" with
-                    | .true => printAxiomsCmd gs0 stx
-                    | .false => match strEq (kindOf stx) "command.deriving" with
-                      | .true => derivingCmd gs0 stx
-                      | .false => match knownCommand (kindOf stx) with
-                      | .true => match strEq (kindOf stx) "command.inductive" with
-                        | .true => withDeriving gs0 stx (defStep gs0 stx sp)
-                        | .false => defStep gs0 stx sp
-                      -- (an unknown command, or a modifier this frontend doesn't know, is
-                      -- an error naming it, never ignored)
-                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
-      match step with
-      | .mk line gs' => match newDuplicate gs gs' with
-        -- (D6) the declared name's own token, not the command's start
-        | .some x => .next (atLine start (.some (errMarkAt (declSpanFor input sp x)
-            (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
-        -- (A11) `deriving instance` prints no line, as in the Lean toolchain
-        | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
-            | .true => .none
-            | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
+      -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
+      -- and checking, not its parse. The match on `kernelStart` forces the extern before
+      -- the command is evaluated: a lazy `let` would otherwise run the step first.)
+      match kernelStart kernelSteps with
+      | .false =>
+        match commandStep gs0 stx sp with
+        | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx
+      | .true =>
+        match commandStep gs0 stx sp with
+        | .mk line gs' => match kernelEnd 0 with
+          | .true => finishStep stop start gs gs' input sp line cats tokens notes stx
+          -- (the evaluator gave up mid-command: report the limit, not the stuck value
+          -- the rest of the elaboration would make of it; the declaration is dropped)
+          | .false => .next (atLine start (.some (String.append "error: " kernelBudgetMsg))) stop
+              gs0 cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
   match stepCommand inlineImports cats tokens notes input cols pos gs with
