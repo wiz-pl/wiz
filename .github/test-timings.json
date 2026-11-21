@@ -270,7 +270,7 @@
    "index.wiz lists exactly the packages on disk": {"seconds": 3.117},
    "module-prefix conflicts are an index error and a resolver error": {"seconds": 0.054},
    "publish records the archive's module names": {"seconds": 2.569},
-   "the example grail-index validates offline": {"seconds": 2.614}
+   "the example fate-index validates offline": {"seconds": 2.614}
   },
   "grail-jobs": {
    "a diamond builds with -j 4 as with -j 1, and again runs nothing": {"seconds": 22.362},

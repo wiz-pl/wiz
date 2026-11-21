@@ -29,7 +29,7 @@ so in its header and skips cleanly when the build is absent.
 | `trust-ffi-audit.sh` | lists every `extern` in `lib/` with its ledger rows and, with `--check`, compiles the ledger's C prototypes | docs only (`docs/trust-ledger.md`) |
 | `flaky-ci.sh` | CI glue for `flaky.py`: classify a failed shard, decide the verdict, expire quarantines, `self-test` | docs only; the `ci.yml` half of its commit is not on master yet |
 | `golden-diff.py` | re-runs only the failing golden cases in a temporary copy and emits a Markdown diff | `.github/workflows/golden-diff.yml` |
-| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/grail-index/README.md` |
+| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/fate-index/README.md` |
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
@@ -53,7 +53,7 @@ so in its header and skips cleanly when the build is absent.
 | `tower-init.sh` | the `curl`-to-`sh` installer: tower plus a default toolchain (nightly or a tag) | docs (`docs/install.md`); users |
 | `build-tower-wiz.sh` | builds `tower/` with a grail into `BINDIR/tower`, no Lean at build time | `release.yml`, `flake.nix` |
 | `mkexercises.py` | generates the exercise tree from the solution tree's marker blocks (solution-only files are dropped) | `release.yml` (tags only), docs |
-| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/grail-index/README.md`); by hand |
+| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/fate-index/README.md`); by hand |
 
 ## Benchmarks and performance
 
