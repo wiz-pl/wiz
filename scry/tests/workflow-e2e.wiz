@@ -63,6 +63,11 @@ def stageIs (st : Scry.WfStore) (suffix expected : String) : Bool :=
   | .some r => String.eq (candOf r).stage expected
   | .none => .false
 
+def stageOfCandidate (cj : Option Json) : Bool :=
+  match cj with
+  | .some j => String.eq (Json.getStr j "stage") "refined"
+  | .none => .false
+
 /-- The repro -> poc -> verify half, run only when a C compiler was resolved. -/
 def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
@@ -133,10 +138,7 @@ def main : IO Unit := EIO.toIO (do
     | .some r => r
     | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
   candJson ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "candidate.json");
-  check "refine: candidate.json is written"
-    (match candJson with
-      | .some j => String.eq (Json.getStr j "stage") "refined"
-      | .none => (.false : Bool));
+  check "refine: candidate.json is written" (stageOfCandidate candJson);
 
   -- 3. verify before any repro: the static-only representation. A still-reported
   -- finding with no stored repro is `still-reported` / `not-run`, never a PoC verdict.
