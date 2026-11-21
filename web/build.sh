@@ -78,5 +78,6 @@ fi
   build web/Web.wiz -o "$OUT/wiz-infoview.mjs" --no-main)
 cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.js" \
   "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" "$ROOT/web/tagged.js" "$ROOT/web/scroll.js" \
-  "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" "$OUT/"
+  "$ROOT/web/scroll-search.js" "$ROOT/web/scroll.css" \
+  "$ROOT/web/doc-live.js" "$ROOT/web/doc-live.css" "$OUT/"
 echo "built $OUT/wiz-infoview.mjs"
