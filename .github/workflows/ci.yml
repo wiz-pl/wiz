@@ -573,7 +573,7 @@ jobs:
           [ -f "logs/${{ matrix.shard.name }}.log" ] || exit 0
           shopt -s nullglob
           python3 scripts/ci.py summary "shard ${{ matrix.shard.name }}" logs/${{ matrix.shard.name }}.log logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-log-${{ matrix.shard.name }}
@@ -846,7 +846,7 @@ jobs:
         run: sh web/build-site.sh doc-site web/out
       - name: The site has its three entry points and the landing's links resolve
         run: sh web/check-site.sh doc-site
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-docs
           path: doc-site
@@ -955,7 +955,7 @@ jobs:
             exit 1
           fi
           python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           name: test-timings
@@ -982,7 +982,7 @@ jobs:
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
