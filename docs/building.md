@@ -1285,6 +1285,40 @@ python3 scripts/golden-diff.py --self-test   # the diff engine's synthetic fixtu
 The script uses `.lake/build/bin/grail` (or `$GRAIL`, or `--grail PATH`); `--keep` keeps
 the temporary copy, and `--out FILE` writes the report.
 
+### Running the scry e2e goldens locally
+
+The six end-to-end files (`scry/tests/{e2e-c,e2e-cs,e2e-prover,e2e-egraph,corpus-parse,
+workflow-e2e}.wiz`) need three things, and two of them are easy to miss:
+
+```sh
+lake build wiz grail tests          # the tree's own grail; the installed one matches nothing
+
+# 1. the C# grammar *as a real directory* (see below)
+cp -a /nix/store/<hash>-tree-sitter-c-sharp-0.23.5/. scry/native/tree-sitter-c-sharp/
+
+cd scry
+../.lake/build/bin/grail build scry  # 2. gives e2e-c/cs/egraph/prover .grail/bin/scry
+../.lake/build/bin/grail test --test-timeout 2400 \
+  tests/e2e-c.wiz tests/e2e-cs.wiz tests/e2e-prover.wiz \
+  tests/e2e-egraph.wiz tests/corpus-parse.wiz tests/workflow-e2e.wiz
+```
+
+* **Do not leave the grammar as the Nix out-link.** `nix build .#tree-sitter-c-sharp
+  -o scry/native/tree-sitter-c-sharp` writes a *symlink*; a test run over sshfs cannot
+  read it (`Operation not permitted`) and `src/Scry/Native.wiz` then fails with
+  `link_c: no file ../../native/tree-sitter-c-sharp/src/parser.c`. Copy the store
+  directory into the gitignored path instead (30 MB), and check from the node that
+  `scry/native/tree-sitter-c-sharp/src/parser.c` exists — an sshfs negative dentry can
+  report it missing for a minute after the copy.
+* **Without `grail build scry`** the four golden cases report
+  `skip (.grail/bin/scry absent)` and fail on line 1, which reads like a test failure
+  but is a missing step.
+* Use `grail test`'s own `--test-timeout`; the harness default is 300 s and
+  `tests/scale.wiz` needs more.
+
+`e2e-c` and `workflow-e2e` are the two that exercise the C and workflow pipelines; the
+other four cover C#, the prover, the e-graph and the corpus parse invariant.
+
 ### Documentation site
 
 A push to `master` publishes the site from the `docs` job to GitHub Pages, at
