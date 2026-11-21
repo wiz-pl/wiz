@@ -1534,8 +1534,10 @@ def occursTms : Nat → Tms → Bool
   | i, .tcons t rest => Bool.or (occurs i t) (occursTms i rest)
 end
 -- the phantom domain `D` of the parameter `k` of `np` (its type `A` over the ones
--- before), at depth `np` in the parameters' context `c`; `none` if it gets none
-def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
+-- before), at depth `np` in the parameters' context `c`, for a data type at `l`;
+-- `none` if it gets none or its `D` would raise the tail's universe `l + 1` (as
+-- `phantomTail` in `Elab/Inductive.lean`, which is called at `.succ l`)
+def phantomDom (c : TCtx) (l : Lvl) (np k : Nat) (A : Tm) : Option Tm :=
   let P := shiftTm (np - k) 0 A;
   let p : Tm := .var (np - 1 - k);
   let vP := eval (TCtx.env c) P;
@@ -1548,27 +1550,27 @@ def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
       | .false => .some (sigmaTm .qz P (.eq (shiftTm 1 0 P) (.var 0) (shiftTm 1 0 p)));
   match D with
   | .none => .none
-  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit (ln 1)))) with
+  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit (lsucc l)))) with
     | .ok ty _ => match ty with
-      | .vsort l => match lvlEquiv l (.lnum 1) with
+      | .vsort lI => match lvlEquiv lI (lsucc l) with
         | .true => .some D'
         | .false => .none
       | _ => .none
     | .err _ => .none
 -- the phantom domains of the parameters from the `k`th on that `used` doesn't mention
-def phantomDoms (c : TCtx) (np : Nat) (used : Nat → Bool) : Nat → Tms → Tms
+def phantomDoms (c : TCtx) (l : Lvl) (np : Nat) (used : Nat → Bool) : Nat → Tms → Tms
   | _, .tnil => .tnil
   | k, .tcons A rest =>
-    let more := phantomDoms c np used (k + 1) rest;
+    let more := phantomDoms c l np used (k + 1) rest;
     match used k with
     | .true => more
-    | .false => match phantomDom c np k A with
+    | .false => match phantomDom c l np k A with
       | .some D => .tcons D more
       | .none => more
--- the tail `(0 _ : D₁) → … → Unit` (the `i` domains before already bound)
-def phantomTy : Nat → Tms → Tm
-  | _, .tnil => .unit (ln 1)
-  | i, .tcons D rest => piTm .qz (shiftTm i 0 D) (phantomTy (i + 1) rest)
+-- the tail `(0 _ : D₁) → … → Unit` at universe `u` (the `i` domains before already bound)
+def phantomTy (u : Lvl) : Nat → Tms → Tm
+  | _, .tnil => .unit u
+  | i, .tcons D rest => piTm .qz (shiftTm i 0 D) (phantomTy u (i + 1) rest)
 -- the index of a type without indices: the tail's value `fun _ … _ => tt` (`tt` for `Unit`)
 partial def phantomVal (I : Tm) : Tm := match I with
   | .pi .qz _ _ _ b => .lam (phantomVal b)
@@ -1810,7 +1812,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
             -- phantom parameters: those that neither a constructor nor the index type
             -- mentions (in the descriptions, under `t✝`, the parameter `k` is `np - k`)
             let cP := paramCtx empty pts;
-            let doms0 := phantomDoms cP np (fun (j : Nat) => Bool.or (occursTms (np - j) ds0) (occurs (np - 1 - j) I0)) 0 pts;
+            let doms0 := phantomDoms cP lv np (fun (j : Nat) => Bool.or (occursTms (np - j) ds0) (occurs (np - 1 - j) I0)) 0 pts;
             -- (22i) a structure with fields ends in the marker `(0 _ : Enum 1) → Unit`,
             -- after its phantom tail (`structTailDom` in the Lean frontend; there the
             -- marker's domain is `Enum [fields✝]`, here it is the same type by length)
@@ -1822,7 +1824,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
               | .none => doms1;
             let I : Tm := match doms with
               | .tnil => I0
-              | .tcons _ _ => STm.tm (sortSpine cP (phantomTy 0 doms));
+              | .tcons _ _ => STm.tm (sortSpine cP (phantomTy (lsucc lv) 0 doms));
             let tl := phantomVal I;
             let ds := match doms with
               | .tnil => ds0
