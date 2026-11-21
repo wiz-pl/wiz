@@ -207,8 +207,10 @@ def checkWitness (fuel : Nat) (sig : Sig) (ty : Ty) (w : Tm) : Except String Uni
     check fuel sig [] true w ty
 
 /-- One staged slot body. `dependsOn` is the transaction's *definitional* ordering
-edge: a new helper or a new body must be staged before a body that mentions it. A
-reloadable call through `read` is **not** such an edge (§6.2). -/
+edge among staged slot bodies: a body must be staged before a body that mentions
+it. A real transaction also stages new non-reloadable helper declarations; this
+model has no helper-staging form, so it orders slot bodies only. A reloadable call
+through `read` is **not** such an edge (§6.2). -/
 structure Stage where
   slot : SlotId
   body : Tm

@@ -79,8 +79,10 @@ generation table. It is a *shape* witness for the design, not a Wiz interpreter.
   ill-typed body; `Tests.lean` uses that to exercise the *stage* rejection. A real
   initial generation must run the same `Value`/body/witness checks as a swap.
 * Non-reloadable helper bodies are trusted by the model (`Helper.body`); it has
-  their type but never checks the body. The real elaborator checks every helper,
-  and a changed helper is a new name (§6.3).
+  their type but never checks the body, and it has no form for staging a *new*
+  helper. The real elaborator checks every helper, gives a changed helper a new
+  name (§6.3), and includes the new helper in the transaction's topological
+  order.
 * `bodyRevisionOf`/`helperHashFor` use the model's FNV-1a, not SHA-256. The cache
   integration must use `Wiz/Cache.Key`'s strong key and must keep the binary/salt/
   toolchain domains.
