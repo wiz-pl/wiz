@@ -20,8 +20,9 @@ conventions a new one follows. Details are in the stage sections cited.
 | HDL | `Hdl.Core` | import | `Hdl.Core`: none (combinators `Hw.add`, `Hw.mux`, `Circuit.mk` …); `Hdl.Pipe`: `\|>>` `***` `&>` | libraries.md, H14 |
 | optics | `Optic` | import | none (the target of Feral's lowering) | libraries.md |
 
-**Entering a DSL.** There is no `open`: a library's notation is on from its `import` to
-the end of the file. A language with a grammar of its own is a block command
+**Entering a DSL.** `open` (13t) scopes names, not notation: a library's notation is on
+from its `import` to the end of the file, whether or not a namespace is open. A language
+with a grammar of its own is a block command
 (`feral … end`) whose categories share one *keyword scope* (13j), so its words (`fn`,
 `mut`, `while` …) are keywords inside the block and ordinary identifiers outside it. The
 block's entry word (`feral`) is the one word it reserves everywhere.

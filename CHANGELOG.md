@@ -10,6 +10,18 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* elab: a named `match h : e` inside a definition whose result is an equation keeps the
+  equation as written while its branches are checked. The declared type used to be
+  evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
+  match could not abstract the equation's sides and its own equation
+  (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
+  matches now see both equations; added the computed-goal nested case, an
+  independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
+* registry: the package registry is **Fate**, and its index repository is
+  `wiz-pl/fate-index` (`grail-index` is the historical name). `grail` is unchanged as the
+  client (`grail update/publish/lock`); the hermetic fixture and the example index move
+  to `Tests/fixtures/fate-index/` and `examples/fate-index/`. The registry format and
+  the SSH signature namespace are unchanged.
 * language: a parameter before the colon is **fixed only if no recursive call changes
   it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
   count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
@@ -707,7 +719,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/fate-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -717,9 +729,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `grail update` upgrades them. `grail publish` and the index schema record the size,
   tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
   locks, upgrade, override).
-* grail (23m), the static index side: a `grail-index` repository layout (static
+* grail (23m), the static index side: a `fate-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
-  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  index's Wiz manifest and generator templates), a complete `examples/fate-index/` with
   three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
   semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
   module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index

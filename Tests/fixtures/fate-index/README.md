@@ -1,4 +1,4 @@
-# A minimal, hermetic `grail-index`
+# A minimal, hermetic `fate-index`
 
 This directory is a small package index in the layout a real index repository uses; the
 `grail-deps` tests read it directly (no network, no git, no server).
@@ -32,7 +32,7 @@ should use absolute `https://` (or `file://`) URLs.
 at run time (a normal `tar -xzf` is still used by `grail fetch`):
 
 ```sh
-cd Tests/fixtures/grail-index && ./make.sh
+cd Tests/fixtures/fate-index && ./make.sh
 ```
 
 The archive layout is the fixed one: one top-level `NAME-VERSION/` with `grail.wiz`.

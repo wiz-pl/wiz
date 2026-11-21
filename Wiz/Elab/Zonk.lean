@@ -50,7 +50,7 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     -- at `Nat`: kernel terms, native arithmetic, `rfl` and erasure see what they always did
     if let [A, .natLit n, i] := args then
       if i.mvars.isEmpty then
-        if let some N := (← getGlobals).builtins.lookup "nat" then
+        if let some N := (← getGlobals).builtinOf? "nat" then
           let g ← getGlobals
           let env : Env R := ((List.range l).map fun i => Val.var i).reverse
           let isNat := match A with

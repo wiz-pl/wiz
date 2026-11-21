@@ -4,7 +4,7 @@ import Grail.Config
 /-!
 # Checking a static index (stage 23m)
 
-`grail index check INDEX` validates a `grail-index` repository **offline** by default:
+`grail index check INDEX` validates a `fate-index` repository **offline** by default:
 the entries' names and versions, the SHA-256 of every archive it can reach locally, every
 version requirement, module-prefix conflicts, and the repository manifest (`index.wiz`).
 Absolute `https://` archives are *counted but not fetched* unless `--fetch` is given, so a
@@ -12,7 +12,7 @@ CI job can run it with no network at all (`scripts/grail-index-check.sh`).
 
 The same checks are available as declarations for the test driver:
 
-    IndexCheck.checkDir cache tc salt std "examples/grail-index" false
+    IndexCheck.checkDir cache tc salt std "examples/fate-index" false
 
 The resolver's own module check (R32) lives in `Grail/Index.lean` (`Resolve.resolve`);
 this file is the whole-index audit, which can catch a conflict before anyone resolves the

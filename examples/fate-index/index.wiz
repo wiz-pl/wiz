@@ -4,7 +4,7 @@ import Grail
 it publishes. `grail index check` evaluates `Index.render index` and compares it with
 `index/*.sexpr`, `registry.sexpr` and the archives. -/
 def index : Index :=
-  Index.new "wiz-pl/grail-index-example"
+  Index.new "wiz-pl/fate-index-example"
     |> Index.withFormat 1
     |> Index.package "base"
     |> Index.package "hello"

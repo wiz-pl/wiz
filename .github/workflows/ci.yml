@@ -138,6 +138,8 @@ jobs:
           python3 scripts/check-complexity --diff HEAD^1
           python3 scripts/check-name-collisions.py --self-test
           python3 scripts/check-name-collisions.py --quiet
+          python3 scripts/check-names.py --self-test
+          python3 scripts/check-names.py --quiet
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
@@ -331,7 +333,7 @@ jobs:
         # store path this job built (the `build` job has no Lake and no PATH entry).
         env:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: scripts/grail-index-check.sh examples/grail-index
+        run: scripts/grail-index-check.sh examples/fate-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
         # built from a directory with no checkout, and grail starts

@@ -631,18 +631,21 @@ def dotCtor? (g : Globals R) (tys : Array (VTy R)) (T c : Name) (expected : VTy 
     | _ => none
 
 partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
-  let ctorOf (n : Name) : Option (Name × Name) :=
-    -- (13b) this module's private type's constructor, under its kernel name
-    let n := g.resolve n
-    match (n.splitOn ".").reverse with
-    | c :: T@(_ :: _) =>
-      let T := ".".intercalate T.reverse
-      if g.contains (T ++ ".desc") && g.contains n then some (T, c)
-      -- (13h) a structure's constructor
-      else if c == "mk" && g.contains n && g.contains T then some (T, c)
-      -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
-      else (familyCtor? g n).map (·, n)
-    | _ => none
+  let ctorOf (n : Name) : Except String (Option (Name × Name)) := do
+    -- (13t) the name the current namespace and opens give it; (13b) this module's
+    -- private type's constructor, under its kernel name
+    let n ← g.resolveName n
+    let ofName : Option (Name × Name) :=
+      match (n.splitOn ".").reverse with
+      | c :: T@(_ :: _) =>
+        let T := ".".intercalate T.reverse
+        if g.contains (T ++ ".desc") && g.contains n then some (T, c)
+        -- (13h) a structure's constructor
+        else if c == "mk" && g.contains n && g.contains T then some (T, c)
+        -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
+        else (familyCtor? g n).map (·, n)
+      | _ => none
+    pure ofName
   match stx.kind with
   | "term.paren" => patView g (stx.getArg 1)
   | "term.tuple" =>
@@ -670,8 +673,9 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
   | "term.ident" =>
     let n := (stx.getArg 0).getId?.getD "_"
     match ctorOf n with
-    | some (T, c) => pure (.ctor (some T) c [])
-    | none => pure (.var n)
+    | .error e => .error e
+    | .ok (some (T, c)) => pure (.ctor (some T) c [])
+    | .ok none => pure (.var n)
   | "term.app" =>
     let h := stx.getArg 0
     let args := (stx.getArg 1).args.toList
@@ -680,11 +684,13 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     | "term.ident" =>
       let f := (h.getArg 0).getId?.getD "_"
       match ctorOf f with
-      | some (T, c) => pure (.ctor (some T) c args)
-      | none =>
+      | .error e => .error e
+      | .ok (some (T, c)) => pure (.ctor (some T) c args)
+      | .ok none =>
         -- (13q) `p + k`, as `+` expands (`Add.add p k`, or `HAdd.hAdd p k`), with a numeral `k`
         -- (`HAdd.hAdd` too: `+` of the heterogeneous classes)
-        match g.resolve f == "Add.add" || g.resolve f == "HAdd.hAdd", args with
+        let resolved := (g.resolveName f).toOption
+        match resolved == some "Add.add" || resolved == some "HAdd.hAdd", args with
         | true, [p, k] => match (if k.isOfKind "term.num" then (k.getArg 0).getNat? else none) with
           | some 0 => patView g p
           | some n => pure (.plusK p n)
@@ -3041,6 +3047,15 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   let sized := !(xsz matches .szInf)
   if sized && useRec then
     throwAt ctx.info "structural recursion on a sized argument: give the definition a sized signature instead" ErrorCode.notStructural
+  -- If the goal does not mention the scrutinee, its indices or the reverted variables,
+  -- the branch goal is the goal itself. Keep that value (an equation as written) rather
+  -- than reading the motive's instantiated codomain back: evaluating an equation there
+  -- would compute it (`f2 n = isZero (succ n)` to `True`) and a nested named match would
+  -- lose the side it must abstract. If the goal does mention them, the instantiated
+  -- motive is what refines it (a branch may then get the equation's computed Σ).
+  let goalTm := q goal
+  let inGoal (l : Lvl) : Bool := goalTm.hasVar (ctx.lvl - l - 1)
+  let stuckGoal := !(inGoal x || ξLvls.any inGoal || rs.any inGoal)
   -- G := Π rs. goal
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   let mut G := q goal
@@ -3299,7 +3314,8 @@ data), so its eliminator can only target Prop"
         let dropped (pos : Nat) : List Nat := rsAll.zipIdx.filterMap fun (l, i) =>
           if rs.contains l then none else some (origCol pos (k + 1 + i))
         let rc' := if useRec then rc'.map (fun r => { r with dropCols := dropped r.pos }) else rc'
-        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2 mt rc' false
+        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2
+          (if stuckGoal then goal else mt) rc' false
         let body0 := (rs.map nameOf).foldr .lam inner
         match solution with
         | none => pure body0
@@ -3589,6 +3605,20 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
   let shareApp := hdlApp atInfo (hdlIdent atInfo "Hw.share") [scrut, hdlFun atInfo x body]
   return some (← check ctx shareApp expected)
 
+/-- Evaluate a type for checking a term, but leave an equation at the head stuck, as
+written, rather than letting it compute: a `match` checked against it abstracts the
+equation's sides in its branches, while a computed `True` (or Σ) no longer shows them.
+(`f2 n = isZero (Nat.succ n)` computes to `True`, but a split on `isZero (Nat.succ n)`
+inside the body must still refine the goal's right side.) The kernel still sees the
+computed type. -/
+partial def evalExpected (ctx : LocalCtx R) (ty : Term R) : ElabM R (VTy R) := do
+  match ty with
+  | .eq A a b =>
+    pure (.neutral (.eq (← evalIn ctx A) (← evalIn ctx a) (← evalIn ctx b)) #[])
+  | .eqTy A B =>
+    pure (.neutral (.eqTy (← evalIn ctx A) (← evalIn ctx B)) #[])
+  | _ => evalIn ctx ty
+
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
@@ -3660,8 +3690,13 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     binders := binders.push ("x✝", quote g ctx.lvl ty)
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
+  -- The goal is quoted from value form, so abstract the scrutinee read back the same
+  -- way: the elaborated term may spell a constructor differently (`Nat.succ n` as a
+  -- constant) from its read-back, and then the occurrence would be missed.
   let mut absGoal := goalTm
-  for t in ts, k in [0:ts.size] do absGoal := abstractOutsideHoles absGoal (t.lift k)
+  for t in ts, k in [0:ts.size] do
+    let tv ← evalIn ctx t
+    absGoal := abstractOutsideHoles absGoal ((quote g ctx.lvl tv).lift k)
   let _ := goalTm
   let mut lvls : List Lvl := []
   -- a scrutinee's type mentions the earlier scrutinees (`match e, h with` for
@@ -3719,7 +3754,7 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   -- is lifted over them
   goalTm := if eqCount == 0 then absGoal else absGoal.lift eqCount
   let allLinear := linearScruts ++ (List.replicate eqCount false).toArray
-  let goal ← evalIn ctx' goalTm
+  let goal ← evalExpected ctx' goalTm
   if let some x := lvls.head? then recordMatch stx.info alts clauses0 ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   let body ← compileMatch ctx' lvls clauses goal none true
   let lam := (binders.toList.map (·.1)).foldr .lam body
@@ -3778,8 +3813,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
         return (.var ix, ty)
     -- a macro-scoped name that isn't a local refers to the global of its base name
     let x := stripScope x
-    -- (13b) this module's private declaration of that name, if any
-    let x := (← getGlobals).resolve x
+    -- (13t) this namespace's, this module's, and the open namespaces' declaration of the
+    -- name (an ambiguity is an error naming both); (13b) a private one of this module
+    -- resolves to its kernel name
+    let x ← match (← getGlobals).resolveName x with
+      | .ok x => pure x
+      | .error e => throwAt ctx.info e ErrorCode.ambiguousName
     match (← getGlobals).find? x with
     | some d =>
       -- (13b) a private name of another module
