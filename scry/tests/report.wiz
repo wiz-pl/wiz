@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Scry.ReportCmd
 -- `scry report`: the self-contained HTML page.
