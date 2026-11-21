@@ -1235,6 +1235,20 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
   --| sorry
   --sol>
 
+/-- Does `stx` contain a recursive call `f e…` with a bare sized binder as an
+argument? That is a call at the body size (the state at `↑j`), which subtyping would
+otherwise accept as a value at the predecessor; it must be a size error. -/
+partial def sameSizeRec? (name : Name) (sized : List Name) (stx : Syntax) : Bool :=
+  let bare (a : Syntax) : Bool := match a with
+    | .node _ "term.ident" #[.ident _ x] => sized.contains x
+    | _ => false
+  match stx with
+  | .node _ "term.app" #[h, .node _ "null" args] =>
+    (h.isOfKind "term.ident" && (h.getArg 0).getId? == some name && args.any bare) ||
+      args.any (sameSizeRec? name sized) || sameSizeRec? name sized h
+  | .node _ _ as => as.any (sameSizeRec? name sized)
+  | _ => false
+
 /-- The sized case of `elabCopatterns`: `def f {i : Size} … : T^i | .o => rhs` with a
 binder at size `i` compiles to `scofix`. The state family is the tuple of the explicit
 binders at a size, the seed is their tuple at `i`, and the body is checked at a fresh
@@ -1319,7 +1333,10 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
   for (o, isRec) in obs do
     let some alt := copatternAlt? alts o
       | throwAt info s!"missing copattern .{o}" ErrorCode.missingCopattern
-    let rhs := rewriteSizedRhs info name recName idxName n coid (alt.getArg 3)
+    let rhs0 := alt.getArg 3
+    if sameSizeRec? name (coid.map (·.1)) rhs0 then
+      throwAt info s!"type mismatch: the recursive call must be at the predecessor size, not the body size (a combinational loop)"
+    let rhs := rewriteSizedRhs info name recName idxName n coid rhs0
     let .sigma _ _ Aty B _ ← force pty
       | throwAt info "internal error: observation type"
     let Aty := if isRec then .nu l I D vIdx vJ hint else Aty
@@ -1366,7 +1383,7 @@ def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : El
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let sized := sizedVarSyntax? ((cmd.getArg 4).getArg 1)
+  let sized := corecursive && sizedVarSyntax? ((cmd.getArg 4).getArg 1)
   let r ← if sized then elabCopatternsScofix name cmd obs
     else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)

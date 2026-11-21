@@ -50,7 +50,7 @@ def hdlSignalGroup : Group where
         failsLibs "import Hdl.Signal\ndef badReg {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^i\n  | .head => init\n  | .tail => s\n" "builds a value of size ↑s or ∞, not i" },
     { name := "34a: a size-preserving map checks (sized copattern → scofix, lane L2)", run := fun _ => do
         okLibs "import Hdl.Signal\ndef mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i\n  | .head => f s.head\n  | .tail => mapS f s.tail\n#eval Signal.sample 3 (Signal.map BitVec.toNat (mapS (fun (x : BitVec 8) => BitVec.add x (BitVec.ofNat 8 1)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))\n"
-          [".cons 251 (.cons 251 (.cons 251 .nil))"] },
+          ["[251, 251, 251]"] },
     { name := "34a: a sized copattern that recurses at the same size is a size error, not a loop", run := fun _ => do
         failsLibsEvery "import Hdl.Signal\ndef bad {d : ClockDomain} {i : Size} (s : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i\n  | .head => s.head\n  | .tail => bad s\n" "type mismatch" },
     { name := "34a: signals of two clock domains do not mix", run := fun _ => do
