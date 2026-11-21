@@ -96,8 +96,9 @@
           # (The Wasm module and the infoview page come from `wiz-web`, which needs
           # `wiz`: a release gets them from `web/build.sh`; see scripts/release-tarball.sh.)
           docSiteAssets = [
-            "scroll.css" "scroll.js" "tagged.js" "scroll-search.js"
-            "lsp-client.js" "goals.js" "doc-live.js" "doc-live.css"
+            "scroll.css" "scroll.js" "scroll-search.js"
+            "lsp-client.js" "doc-live.js" "doc-live.css"
+            "framework/mount.js" "framework/driver.js" "framework/runtime.js"
           ];
           docSiteSource = fs.toSource {
             root = ./web;
@@ -287,11 +288,10 @@ EOF
                 ./web/build.sh ./web/Web.wiz ./web/js.c
                 # the page files the script copies into OUT
                 ./web/infoview.html ./web/infoview.js ./web/playground-lsp.js
-                ./web/lsp-client.js ./web/goals.js ./web/widgets.js ./web/widgets.css
+                ./web/lsp-client.js ./web/widgets.js ./web/widgets.css
                 ./web/hover.js ./web/squiggles.js ./web/completions.js
                 ./web/scroll.js ./web/scroll-search.js ./web/scroll.css ./web/overlays.css
                 ./web/doc-live.js ./web/doc-live.css
-                ./web/tagged.js
                 ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
                 ./web/framework/editor-text.js
                 ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz

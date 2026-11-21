@@ -34,11 +34,16 @@ def quoted(text: str) -> list[str]:
     return QUOTED.findall(text)
 
 
+# `Wiz.Doc.run` copies these from the assets' `framework/` subdirectory, but the
+# `for f in [ … ]` loop names the files only; normalize them to their real paths.
+FRAMEWORK = {"mount.js", "driver.js", "runtime.js"}
+
+
 def build_assets(text: str) -> list[str]:
     names: list[str] = []
     for match in ASSET_LOOP.finditer(text):
         names.extend(n for n in quoted(match.group(1)) if not n.endswith(WASM))
-    return names
+    return [f"framework/{n}" if n in FRAMEWORK else n for n in names]
 
 
 def main() -> int:
