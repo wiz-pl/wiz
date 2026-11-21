@@ -1296,6 +1296,8 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
       cctx := cctx.bindQ x Aty ((Val.toPoly? (← evalIn cctx qq)).bind (·.isConst?))
       sty := Closure.inst g B (Val.var (cctx.lvl - 1))
     | _ => throwAt info "internal error: state tuple"
+  if name == "Signal.mapS" then
+    throwAt info s!"DEBUG stateTy0={stateTy0.pretty [] (some g)} | state={← showVal cctx vStateBody} | names={cctx.names}"
   -- the explicit binders that are the same coinductive type as the result: their
   -- observations are read with `out` at the body size
   let some (T0, _, _) := hint
