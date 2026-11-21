@@ -1,3 +1,4 @@
+namespace __root__
 -- The parser, in Wiz (stage 12d). Load it after `Lex.wiz`.
 -- It follows `Wiz/Parser/{Descr,Monad,Interp}.lean`: grammars are data (`PD`, the
 -- `ParserDescr` combinators), organised into syntax categories of leading and trailing
@@ -494,13 +495,19 @@ def parseSyntax (cats : List Cat) (tokens : List String) (cat : String) (text : 
   | .err s => match s with
     | .mk _ e x _ => .err ("error " +++ Nat.toString e +++ ": expected " +++ showExpected x)
 
--- the command at offset `pos` of an input, and where it stops
+-- The command at offset `pos` of an input, and where it stops
+
+-- The fixed header (the host's `Builtin.importDescr`): `import M` is **not** a rule of the
+-- extensible `command` category, so a `syntax` or macro rule cannot produce one; it is
+-- parsed here, before the category, at every top-level command position.
+def importDescr : PD := PD.node "command.import" (PD.seq (PD.atom "import") PD.ident)
+
 inductive PCmd where
   | ok (stx : Syntax) (stop : Nat)
   | err (msg : String)
 def parseCommandAtLines (cats : List Cat) (tokens : List String) (input : Array Nat) (cols : Array Nat) (pos : Nat) : PCmd :=
   let c := Ctx.mk input (tokenBuckets tokens) cats .none 0 cols;
-  match runDescr (.withPosition (.cat "command" 0)) c (St.mk pos 0 .nil StrMap.empty) with
+  match runDescr (.withPosition (PD.orelse importDescr (PD.cat "command" 0))) c (St.mk pos 0 .nil StrMap.empty) with
   | .ok items s => .ok (firstItem items) (St.pos s)
   | .err s => match s with
     | .mk _ e x _ => .err ("error " +++ Nat.toString e +++ ": expected " +++ showExpected x)
@@ -693,4 +700,4 @@ def spansAt (input : Array Nat) (tokens : List String) (pos : Nat) (s : Syntax) 
   match annot (Ctx.mk input (tokenBuckets tokens) .nil .none 0 (columns input)) pos s with
   | .ok sp _ => .some sp
   | .bad => .none
-
+end

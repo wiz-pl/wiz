@@ -151,7 +151,7 @@ def pgiEntries : List LspEntry → String
 -- `match` at command indentation, where the layout parser wants it.)
 def playgroundCheckText (text : String) : String :=
   let input := String.codes text;
-  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+  match runCommands .true .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       input (columns input) 0 (Globals.watching (Globals.setModule Globals.empty "input")) .nil with
   | .mk out gs _ _ _ =>
     let lines := pgcLines (List.reverseOf out .nil);

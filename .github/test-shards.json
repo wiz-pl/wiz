@@ -86,7 +86,7 @@
       "language",
       "lsp",
       "macros",
-      "modules",
+      "modules", "=namespace",
       "=native",
       "=natives",
       "=nvim",

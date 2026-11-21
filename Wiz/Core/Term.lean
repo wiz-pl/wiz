@@ -671,6 +671,15 @@ structure Globals (R : Type) where
   hidden : Std.HashMap Name (Decl R) := {}
   /-- the module being elaborated (`""`: the main file), for `privates` and `opaques` -/
   module : String := ""
+  /-- (13t) the namespace being elaborated (`""` at the top of the file): declarations in
+  it are named `namespacePrefix.name`, and an unqualified name resolves to it first -/
+  namespacePrefix : Name := ""
+  /-- (13t) the namespaces `open ...`ed so far in the file, in order: their names are
+  visible unqualified from the `open` on (a file's `open` does not reach its importers) -/
+  opens : List Name := []
+  /-- (13t) `open M as A` aliases: `A.x` is `M.x`. An alias does *not* open `M`, so it
+  only affects qualified names. -/
+  aliases : List (Name × Name) := []
   /-- (kernel-eval, P3) a universe-polymorphic definition's value instantiated at the
   levels most uses take (every parameter `0`, `1` or `2`: a `casesOn`'s motive in `Prop`,
   `Type`, `Type 1`), computed once (a `Thunk`) instead of copied at every unfolding
@@ -832,6 +841,56 @@ def privateTo? (g : Globals R) (n : Name) : Option String :=
   match g.privates[n]? with
   | some m => if m == g.module then none else some m
   | none => none
+
+/-- (13t) `x` with the longest `open … as` alias replaced by its namespace: `A.x` is
+`M.x` after `open M as A`; a name with no aliased prefix is unchanged. -/
+def expandAliases (g : Globals R) (x : Name) : Name :=
+  let matching := g.aliases.filter fun (a, _) => x.startsWith (a ++ ".")
+  match matching.mergeSort (fun (a, _) (b, _) => a.length > b.length) with
+  | (a, M) :: _ => M ++ (x.drop a.length).toString
+  | [] => x
+
+/-- (13t) What the identifier `x` as written denotes in the module being elaborated.
+
+* A **qualified** name (`A.x`) is resolved as written, after an `open … as` alias maps
+  its prefix (`expandAliases`); inside a namespace, if that names nothing, the namespace
+  prefix is tried too (`B.x` is `Foo.B.x` in `namespace Foo`).
+* An **unqualified** name is looked up, in order, as `namespacePrefix.x` (the innermost
+  `namespace`), as `x` (the module's own declaration, or a builtin), and as `M.x` for
+  every `open M`. The candidates are deduplicated (the same declaration found twice is
+  one candidate); two *different* declarations are an error naming both, rather than a
+  silent last-wins.
+* A private declaration of another module is not a candidate (an `open` cannot reach it).
+
+With no namespace and no opens this is `resolve` (the module's own private `x` under its
+kernel name, or `x`). -/
+def resolveName (g : Globals R) (x : Name) : Except String Name :=
+  if x == "__root__" then
+    .error "'__root__' is not a name: write `__root__.x` for the global `x`"
+  else if x.startsWith "__root__." then
+    -- (13v) the escape is absolute: `__root__.x` is the root `x` (Lean's `_root_.x`)
+    .ok (g.resolve ((x.drop (("__root__.").length)).toString))
+  else if (x.splitOn "__root__").length > 1 then
+    .error s!"'__root__' is only meaningful as the first segment of a name ('{x}')"
+  else if x.contains '.' then
+    let x := g.expandAliases x
+    let k := g.resolve x
+    if g.decls.contains k || g.namespacePrefix.isEmpty then .ok k else
+    -- (13t) inside `namespace Foo`, `B.x` may be the nested namespace's `Foo.B.x`
+    let kp := g.resolve (g.namespacePrefix ++ "." ++ x)
+    if g.decls.contains kp then .ok kp else .ok k
+  else
+    let found := ((if g.namespacePrefix.isEmpty then [] else [g.namespacePrefix ++ "." ++ x])
+      ++ [x] ++ g.opens.map (· ++ "." ++ x)).filterMap fun n =>
+        let k := g.resolve n
+        if g.decls.contains k && (g.privateTo? k).isNone then some k else none
+    match found.eraseDups with
+    | [] => .ok (g.resolve x)
+    | [n] => .ok n
+    | ns =>
+      let names := ns.map privateBase |>.mergeSort
+      .error s!"'{x}' is ambiguous: it refers to {", ".intercalate (names.map (s!"'{·}'"))}; \
+qualify it with a namespace"
 
 end Globals
 

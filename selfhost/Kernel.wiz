@@ -1,4 +1,5 @@
 import IO
+namespace __root__
 -- A type checker in Wiz (stage 14a): the core of `Wiz/Core`, for a small calculus:
 -- variables (de Bruijn indices), universes `U n`, Π types, λ, application, Σ types,
 -- pairs and projections (stage 14e), `Unit`, `Empty`, finite enumerations with case
@@ -5322,3 +5323,4 @@ def natRegistered (nb : NatB) (key : String) (c : Tm) : Tm := match natOpOfKey k
   | .none => match kStrEq key "nat.zero" with
     | .true => .nlit knZero nb
     | .false => c
+end
