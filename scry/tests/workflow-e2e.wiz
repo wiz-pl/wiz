@@ -157,12 +157,11 @@ def main : IO Unit := EIO.toIO (do
   chain ← Scry.dynResolve .none dir;
   let ccOpt := chain.tool;
   match ccOpt with
-  | .none => EIO.lift (IO.println "repro: skip (no C compiler found; the static half above ran)")
+  | .none => EIO.lift (IO.println "repro: skip (no C compiler found; the static half above ran)");
   | .some t => reproHalf cRec db t.cc;
 
   -- The C# reproducer needs the .NET SDK's file-based app mode (`dotnet run --file`),
   -- which is not part of every toolchain. The C# scan/refine artifacts are asserted
   -- above; the repro half is gated here and the reason is printed.
-  EIO.lift (IO.println "csharp-repro: skip (needs the .NET SDK; scan/refine asserted above)")
-
+  EIO.lift (IO.println "csharp-repro: skip (needs the .NET SDK; scan/refine asserted above)");
   FS.removeAll dir)
