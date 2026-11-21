@@ -3797,7 +3797,7 @@ def selfHostGroup : Group where
     { name := "(13v) `namespace __root__` keeps the block's declarations global", run := fun _ =>
         selfhostCheckFile ("import Prelude\nnamespace __root__\ndef r : Nat := 1\n" ++
           "def G.x : Nat := 2\nend __root__\n#check r\n#check G.x\n")
-          "r : Nat\nG.x : Nat\n" },
+          "r : Nat\nG.x : Nat\nNat\nNat\n" },
     { name := "(13t) a module's `open` does not reach the file that imports it", run := fun _ =>
         selfhostCheckModules
           [("A.wiz", "import Prelude\nnamespace A\ndef x : Nat := 1\nend A\nopen A\n"),
