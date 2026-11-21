@@ -217,7 +217,7 @@ def group : Group where
          "#eval Nat.beq (List.length Scry.guardFnRows) 1\n" ++
          "#eval match Scry.guardFnRows with\n" ++
          "  | .cons r _ => Bool.and (Nat.beq (List.getD r 1 99) 0) (Nat.beq (List.getD r 2 99) 16)\n" ++
-         "  | .nil => .false\n")
+         "  | .nil => Bool.false\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
   ]
 
