@@ -574,6 +574,26 @@ def ctorNames (g : Globals R) (T : Name) : List Name :=
     | some v => ((strip descD.type v).descTag?.map (·.1)).getD []
     | none => []
 
+/-- (D6) The source names of the constructors of the inductive type (or structure) whose
+kernel name is `T` (`T.c`), in declaration order: the candidates `constructor` tries.
+`none` if `T` is not an inductive type; `some []` for an inductive with no
+constructors. A private type's kernel name is turned back into its source name
+(`Globals.privateBase`), as `privBase` does in `selfhost/Frontend.wiz`. -/
+def indCtorNames? (g : Globals R) (T : Name) : Option (List Name) := do
+  let base := Globals.privateBase T
+  if g.contains (T ++ ".desc") then
+    pure ((ctorNames g T).map (ctorConst base))
+  else
+    -- a structure has no description: its value is `λ Δ. Σ …`, its only constructor
+    -- `T.mk`
+    let d ← g.find? T
+    let rec strip : Term R → Term R
+      | .lam _ b => strip b
+      | t => t
+    match strip (d.value.getD .tt) with
+    | .sigma .. | .unit _ => if g.contains (T ++ ".mk") then pure [base ++ ".mk"] else none
+    | _ => none
+
 /-- A `mutual` block's constructor `n` (`Ev.s`, `ctorConst`): its family `F`, the data
 type whose constructor it is (the head of its result type), if `n` is one of `F`'s
 qualified tags. -/
@@ -4124,6 +4144,12 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   if tag == TacTag.ctorInfo then
     let ans := match ctorInfo? g (← str (fld 0)) with
       | some (T, nParams, nFields) => mkCon 1 [encodePair (encodeString T) (encodePair (.nat nParams) (.nat nFields))]
+      | none => mkCon 0 []
+    return ← runTac code info st (apply code (fld 1) ans)
+  if tag == TacTag.ctorNames then
+    -- (D6) `constructor`: the goal type's constructors, in declaration order
+    let ans := match indCtorNames? g (← str (fld 0)) with
+      | some ns => mkCon 1 [encodeList (ns.map encodeString)]
       | none => mkCon 0 []
     return ← runTac code info st (apply code (fld 1) ans)
   if tag == TacTag.isDefinition then
