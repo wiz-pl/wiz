@@ -323,9 +323,9 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- module that was elaborated on its own) must not get around that. (Other keys,
   -- `extern:…`, `repr:…`, `inline`, are per constant.)
   let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
-  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtins.lookup k).any (· != n)
+  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
-    let was := (s.globals.builtins.lookup k).getD "?"
+    let was := (s.globals.builtinOf? k).getD "?"
     let text := s!"builtin {k} := {n}: {k} is already registered (as {was}); a builtin can be registered only once"
     { s with messages := s.messages.push { info := {}, severity := .error, text }, pristine := false } else
   -- An effect's declarations were new where it was recorded (a module elaborated on its
@@ -345,10 +345,10 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   | none =>
   -- (the declarations belong to the module being replayed: `Globals.declModule`)
   let globals := e.decls.foldl (·.insert ·) { s.globals with module := s.module }
-  let globals := { globals with builtins := e.builtins ++ globals.builtins,
-                                assumed := e.assumed ++ globals.assumed,
+  let globals := { globals with assumed := e.assumed ++ globals.assumed,
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
-                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }
+                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
+                                (e.builtins ++ globals.builtins)
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,
