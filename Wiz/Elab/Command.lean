@@ -357,13 +357,14 @@ def solveSortConstraints : ElabM R Unit := do
   let typeOf (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (VTy R)) := do
     let t ← zonk ctx.lvl t
     if !t.mvars.isEmpty then return none
-    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env, names := ctx.names,
-                          qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-                          types := ctx.types, lvl := ctx.lvl, proof := true }
+    let kctx : Ctx R := { globals := { (← getGlobals) with sortHolesOk := true }, env := ctx.env,
+                          names := ctx.names.reverse.toArray,
+                          qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+                          types := ctx.types.reverse.toArray, lvl := ctx.lvl, proof := true }
     match Wiz.infer kctx t with
     | .ok (ty, _) => return some ty
     | .error _ =>
-      match Wiz.infer { kctx with types := (← zonkedTypes ctx).toList.reverse } t with
+      match Wiz.infer { kctx with types := (← zonkedTypes ctx) } t with
       | .ok (ty, _) => return some ty
       | .error _ => return none
   let solvedLevels : ElabM R Nat := do

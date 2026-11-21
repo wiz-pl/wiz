@@ -141,9 +141,10 @@ def instArgsWellTyped (ctx : LocalCtx R) (args : Array (Term R × VTy R)) : Elab
     let j := tys.size
     let t ← zonk j (quote g j (← forceMeta v))
     tys := tys.push (eval g (ctx.env.drop (ctx.lvl - j)) t)
-  let kctx : Ctx R := { globals := g, env := ctx.env, names := ctx.names,
-                        qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-                        types := tys.toList.reverse, lvl := ctx.lvl }
+  let kctx : Ctx R := { globals := g, env := ctx.env,
+                        names := ctx.names.reverse.toArray,
+                        qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+                        types := tys, lvl := ctx.lvl }
   let infer := (← get).kernelInfer
   for (t, A) in checks do
     match infer kctx t with
