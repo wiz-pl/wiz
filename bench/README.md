@@ -30,6 +30,8 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `bytes-append` | 2000000 | append a 16-byte chunk N times |
 | `bytes-slice` | 2000000 | slice 64 bytes out of an 8 KiB buffer N times |
 | `bytes-compare` | 2000000 | compare two equal 4 KiB buffers N times |
+| `str-append` | 10000 | append a 100-byte `Str` chunk N times: the `Str.append` builder (1,000,000 bytes at the default) |
+| `str-push` | 200000 | push one byte N times: the `Str.push` builder |
 | `text-split` | 40000 | split an N-chunk string on `,`, 8 passes |
 | `text-replace` | 40000 | replace every `,` with `Z`, 8 passes |
 | `text-trim` | 40000 | trim an N-chunk string padded with spaces, 8 passes |
