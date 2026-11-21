@@ -58,6 +58,32 @@ def evidenceHasPoc (bundle : Option Json) : Bool :=
       (String.eq (Json.getStr e "status") "observed")) (Json.getList j "evidenceItems")
   | .none => .false
 
+def scanCOk (st : Scry.WfStore) : Bool :=
+  match findIn st "cwe78-getenv.c" with
+  | .some r => Bool.and (String.eq (Scry.WfState.show r.state) "new")
+      (String.eq (candOf r).stage "scan")
+  | .none => .false
+
+def scanCsOk (st : Scry.WfStore) : Bool :=
+  match findIn st "cwe78-process-unsafe.cs" with
+  | .some r => String.eq (Json.getStr r.finding "rule") "command-injection"
+  | .none => .false
+
+def refineCOk (st : Scry.WfStore) : Bool :=
+  match findIn st "cwe78-getenv.c" with
+  | .some r => Bool.and (String.eq (Scry.WfState.show r.state) "triaged")
+      (Bool.and (String.eq (candOf r).verdict "pursue")
+        (Bool.and (Nat.le 60 (candOf r).rank)
+          (Bool.and (String.eq (candOf r).plan.channel "env")
+            (String.eq (candOf r).plan.envName "SCRY_CMD"))))
+  | .none => .false
+
+def refineCsOk (st : Scry.WfStore) : Bool :=
+  match findIn st "cwe78-process-unsafe.cs" with
+  | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
+      (String.eq (candOf r).verdict "pursue")
+  | .none => .false
+
 def stageIs (st : Scry.WfStore) (suffix expected : String) : Bool :=
   match findIn st suffix with
   | .some r => String.eq (candOf r).stage expected
@@ -108,32 +134,15 @@ def main : IO Unit := EIO.toIO (do
     "--db", db, "--artifacts", dir, "--quiet"];
   st1 ← loadStore db;
   check "scan: both files analysed" (Bool.and (Nat.beq n1 0) (Nat.beq n2 0));
-  check "scan: C candidate recorded" (match findIn st1 "cwe78-getenv.c" with
-    | .some r => Bool.and (String.eq (Scry.WfState.show r.state) "new")
-        (String.eq (candOf r).stage "scan")
-    | .none => (.false : Bool));
-  check "scan: C# candidate recorded (frontend reached through the CLI)"
-    (match findIn st1 "cwe78-process-unsafe.cs" with
-      | .some r => String.eq (Json.getStr r.finding "rule") "command-injection"
-      | .none => (.false : Bool));
+  check "scan: C candidate recorded" (scanCOk st1);
+  check "scan: C# candidate recorded (frontend reached through the CLI)" (scanCsOk st1);
 
   -- 2. refine
   n3 ← Scry.findingsCmd ["refine", "--db", db, "--quiet"];
   st2 ← loadStore db;
   check "refine: exit 0" (Nat.beq n3 0);
-  check "refine: C candidate is triaged with a derived env plan"
-    (match findIn st2 "cwe78-getenv.c" with
-      | .some r => Bool.and (String.eq (Scry.WfState.show r.state) "triaged")
-          (Bool.and (String.eq (candOf r).verdict "pursue")
-            (Bool.and (Nat.le 60 (candOf r).rank)
-              (Bool.and (String.eq (candOf r).plan.channel "env")
-                (String.eq (candOf r).plan.envName "SCRY_CMD"))))
-      | .none => (.false : Bool));
-  check "refine: C# candidate's plan is stdin (Console.ReadLine)"
-    (match findIn st2 "cwe78-process-unsafe.cs" with
-      | .some r => Bool.and (String.eq (candOf r).plan.channel "stdin")
-          (String.eq (candOf r).verdict "pursue")
-      | .none => (.false : Bool));
+  check "refine: C candidate is triaged with a derived env plan" (refineCOk st2);
+  check "refine: C# candidate's plan is stdin (Console.ReadLine)" (refineCsOk st2);
   let cRec := match findIn st2 "cwe78-getenv.c" with
     | .some r => r
     | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
