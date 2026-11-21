@@ -58,6 +58,11 @@ def evidenceHasPoc (bundle : Option Json) : Bool :=
       (String.eq (Json.getStr e "status") "observed")) (Json.getList j "evidenceItems")
   | .none => .false
 
+def stageIs (st : Scry.WfStore) (suffix expected : String) : Bool :=
+  match findIn st suffix with
+  | .some r => String.eq (candOf r).stage expected
+  | .none => .false
+
 /-- The repro -> poc -> verify half, run only when a C compiler was resolved. -/
 def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   n4 ← Scry.findingsCmd ["repro", cRec.id, "--db", db, "--cc", cc];
@@ -70,10 +75,7 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
     (String.eq (strAt dyn ["harness", "source"]) "derived");
   check "repro: the plan's marker was observed at the sink"
     (flag dyn ["run", "markerObserved"]);
-  check "repro: candidate.stage is poc"
-    (match findIn st3 "cwe78-getenv.c" with
-      | .some r => String.eq (candOf r).stage "poc"
-      | .none => (.false : Bool));
+  check "repro: candidate.stage is poc" (stageIs st3 "cwe78-getenv.c" "poc");
   n5 ← Scry.findingsCmd ["verify", cRec.id, "--db", db];
   ver ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "verify/verify.json");
   st4 ← loadStore db;
@@ -81,15 +83,12 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   check "verify: verdict names the observed PoC"
     (String.eq (strAt ver ["verdict"]) "finding-present-poc-observed");
   check "verify: poc.markerObserved is true" (flag ver ["poc", "markerObserved"]);
-  check "verify: candidate.stage is verified"
-    (match findIn st4 "cwe78-getenv.c" with
-      | .some r => String.eq (candOf r).stage "verified"
-      | .none => (.false : Bool));
+  check "verify: candidate.stage is verified" (stageIs st4 "cwe78-getenv.c" "verified");
   bundle ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "finding.json");
   check "bundle: candidate.stage is verified"
     (String.eq (strAt bundle ["candidate", "stage"]) "verified");
   check "bundle: evidence has a poc item with the marker observed"
-    (evidenceHasPoc bundle);
+    (evidenceHasPoc bundle)
 
 def main : IO Unit := EIO.toIO (do
   dir ← FS.createTempDir;
