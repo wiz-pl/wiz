@@ -43,6 +43,7 @@ import Wiz.Compiler.Borrow
 import Wiz.Compiler.IRRun
 import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
+import Wiz.Compiler.Bpf
 import Wiz.Compiler.Build
 import Wiz.FFI.CParse
 import Wiz.FFI.CGlue

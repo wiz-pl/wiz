@@ -173,7 +173,8 @@
       "=storage-mmap",
       "=storage-multiproc",
       "=storage-quire",
-      "=dist-proofs"
+      "=dist-proofs",
+      "bpf"
     ]
   },
   {

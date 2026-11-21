@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: Array.push allocates; the kernel has no allocator.
+import Bpf
+
+def bad (a : Array (UIntN 32)) : Array (UIntN 32) := Array.push a (UIntN.ofNat 32 1)
