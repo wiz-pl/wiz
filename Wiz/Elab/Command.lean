@@ -783,17 +783,35 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
     | [] => xs
   let params := (tele.filterMap fun (x, bi, _, _) => if bi == .default then some x else none).toList
   let allParams := (tele.map fun (x, bi, _, _) => (x, bi == .default)).toList
-  let rc : Option RecCtx := if recursive then some { fn := name, params, pos, cols := n, allParams, colExplicit } else none
+  -- (fixed-params) a parameter before the colon that a recursive call changes is not
+  -- fixed: it is elaborated as if it were after the colon, i.e. the motive abstracts it
+  -- and the hypothesis takes its value (Lean's rule)
+  let fixedOf (ch : List (Name × Nat)) : List Name :=
+    params.filter fun p => !ch.any (·.1 == p)
+  let found := if recursive then
+      changedParams g ({ fn := name, params, pos, cols := n, allParams, colExplicit } : RecCtx) clauses
+    else []
+  let changed := params.zipIdx.filterMap fun (p, i) => if found.any (·.1 == p) then some (p, i) else none
+  let rc : Option RecCtx := if recursive then
+    some { fn := name, params := fixedOf changed, pos, cols := n, allParams, colExplicit, changed }
+    else none
   if let some x := vars.head? then recordMatch cmd.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   -- a recursive definition whose first argument has a size-variable size: compile to `sfix`
-  if rc.isSome && pos == 0 then
+  if rc.isSome && pos == 0 && changed.isEmpty then
     if let some x0 := vars.head? then
       if let .mu _ _ _ _ (.neutral (.local si) #[]) _ _ ← force ctx'.types[ctx'.lvl - x0 - 1]! then
         if si < ctx.lvl then
           let (t, v) ← elabSizedDef name cmd ctx tele ty si clauses
           return (t, v, none)
-  let clauses := clauses.map fun c => { c with pats := perm c.pats }
-  let body ← compileMatch ctx' (perm vars) clauses tyv rc true
+  -- (fixed-params) the changed parameters join the matched arguments (after them): the
+  -- motive reverts them, and the recursor is applied to their value, so that a recursive
+  -- call passes a new one to the hypothesis. A telescope binder `i` is at level `i` (the
+  -- telescope is the context's first `tele.size` binders).
+  let changedLvls : List Lvl := changed.map fun (p, _) =>
+    ((tele.toList.zipIdx.find? fun ((x, _, _, _), _) => x == p).map (·.2)).getD 0
+  let changedPats : List Syntax := changed.map fun (p, _) => .node {} "term.ident" #[.ident {} p]
+  let clauses := clauses.map fun c => { c with pats := perm c.pats ++ changedPats }
+  let body ← compileMatch ctx' (perm vars ++ changedLvls) clauses tyv rc true
   solveSortConstraints
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (names.foldr .lam body)
   let fullTy := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
@@ -807,7 +825,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   -- index variable escapes into a method (`indexEscapes`): compiled code runs the value
   let g ← getGlobals
   let us := (← get).levelParams.map Level.param
-  let impl := if rc.isNone || indexEscapes g val then none
+  let impl := if rc.isNone || !changed.isEmpty || indexEscapes g val then none
     else deriveImpl g name us tele.size names.length pos val
   checkGuessedDecl info name fullTy (some val)
   pure (fullTy, val, impl)

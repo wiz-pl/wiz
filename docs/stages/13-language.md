@@ -3,7 +3,9 @@
 Writing the lexer and parser in Wiz showed what the language lacked:
 
 * **Recursion on any argument.** The structural argument is the first one the first
-  clause matches; parameters before the colon may be passed unchanged or left out.
+  clause matches; a parameter before the colon is fixed only if no recursive call
+  changes it — a changed one is elaborated as if it were after the colon (the induction
+  hypothesis takes its value), and the others may be passed unchanged or left out.
 * **`partial def` and `mutual … end`.** General recursion: the kernel treats the
   definition as opaque, justified by a witness of its type (22f, so no `False`), and its
   implementation (checked against the type) is what `#eval` and compiled code run. The

@@ -397,12 +397,11 @@ def Seq.popFront {A : Type} (s : Seq A) : Option (Seq A × A) :=
 def Seq.ofList {A : Type} (l : List A) : Seq A := FT.ofList (List.map (fun a => Elem.base a) l)
 
 /-- Catenate two trees at the same level: one deferred node (O(1)); `get` descends by
-the children's cached sizes. Empty operands are dropped, so repeated appends of
-singletons do not build an empty spine. -/
-def FT.append {A : Type} {l : Nat} : FT A l → FT A l → FT A l
-  | .empty, t => t
-  | s, .empty => s
-  | s, t => .cat s t (Nat.add (FT.sizeCached s) (FT.sizeCached t))
+the children's cached sizes. An empty operand is harmless (`cat` is transparent to
+`get`/`pop`/`toList`) but is not dropped: matching the *second* indexed argument against
+`empty` needs an index unification the elaborator does not support yet. -/
+def FT.append {A : Type} {l : Nat} (s t : FT A l) : FT A l :=
+  .cat s t (Nat.add (FT.sizeCached s) (FT.sizeCached t))
 /-- Concatenate two sequences (O(1), as one `FT.cat` node). `Seq.toList_append` is
 then the definition of `FT.toList` at `cat`, and `Seq.size_append` the size law. -/
 def Seq.append {A : Type} (s t : Seq A) : Seq A := FT.append s t
@@ -670,16 +669,16 @@ def FT.toListGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : List A) �
                 (List.concatMap elemToList (Digit.toList s)) acc))))))
 
 /-- **Push on the back.** `push` appends one element, with an accumulator. -/
-def FT.toListGo_push {A : Type} {l : Nat} :
-    (t : FT A l) → (e : Elem A l) → (acc : List A) →
-      FT.toListGo (FT.push t e) acc =
-        FT.toListGo t (List.append (elemToList e) acc)
-  | .empty, e, acc => rfl
-  | .single a _, e, acc => rfl
-  | .deep p m (.one a) _, e, acc => rfl
-  | .deep p m (.two a b) _, e, acc => rfl
-  | .deep p m (.three a b c) _, e, acc => rfl
-  | .deep p m (.four a b c d) _, e, acc =>
+def FT.toListGo_push {A : Type} {l : Nat} (t : FT A l) (e : Elem A l) (acc : List A) :
+    FT.toListGo (FT.push t e) acc =
+      FT.toListGo t (List.append (elemToList e) acc) :=
+  match t with
+  | .empty => rfl
+  | .single a _ => rfl
+  | .deep p m (.one a) _ => rfl
+  | .deep p m (.two a b) _ => rfl
+  | .deep p m (.three a b c) _ => rfl
+  | .deep p m (.four a b c d) _ =>
       Eq.trans
         (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) z)
           (FT.toListGo_push m (.node3 a b c
@@ -688,10 +687,10 @@ def FT.toListGo_push {A : Type} {l : Nat} :
         (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) (FT.toListGo m z))
           (List.append_four (elemToList a) (elemToList b) (elemToList c)
             (List.append (elemToList d) (List.append (elemToList e) acc))))
-  | .cat s t _, e, acc =>
-      Eq.trans
-        (Eq.congrArg (fun z => FT.toListGo s z) (FT.toListGo_push t e acc))
-        rfl
+  | .cat s u _ =>
+      -- the goal's two sides are this equation definitionally (the `cat` clause of
+      -- `push` and of `toListGo`), so the `congrArg` alone is the proof
+      Eq.congrArg (fun z => FT.toListGo s z) (FT.toListGo_push u e acc)
 
 /-- **Push on the back**, in the user-facing form:
 `toList (push t e) = toList t ++ elemToList e`. -/
@@ -747,21 +746,9 @@ def Seq.toList_ofList {A : Type} : (l : List A) → Seq.toList (Seq.ofList l) = 
 
 /-- **The catenation law.** `Seq.append` reads as the two readings concatenated: one
 case per constructor pair, because `FT.append`'s empty checks are the definition. -/
-def Seq.toList_append {A : Type} : (s t : Seq A) →
-    Seq.toList (Seq.append s t) = List.append (Seq.toList s) (Seq.toList t)
-  | .empty, _ => rfl
-  | .single _ _, .empty => rfl
-  | .single _ _, .single _ _ => rfl
-  | .single _ _, .deep _ _ _ _ => rfl
-  | .single _ _, .cat _ _ _ => rfl
-  | .deep _ _ _ _, .empty => rfl
-  | .deep _ _ _ _, .single _ _ => rfl
-  | .deep _ _ _ _, .deep _ _ _ _ => rfl
-  | .deep _ _ _ _, .cat _ _ _ => rfl
-  | .cat _ _ _, .empty => rfl
-  | .cat _ _ _, .single _ _ => rfl
-  | .cat _ _ _, .deep _ _ _ _ => rfl
-  | .cat _ _ _, .cat _ _ _ => rfl
+def Seq.toList_append {A : Type} (s t : Seq A) :
+    Seq.toList (Seq.append s t) = List.append (Seq.toList s) (Seq.toList t) :=
+  rfl
 
 /-- **The catenation size law.** `Seq.size` adds up over `Seq.append`. -/
 def Seq.size_append {A : Type} (s t : Seq A) :
