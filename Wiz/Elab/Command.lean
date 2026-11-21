@@ -996,12 +996,16 @@ private def sLetPair (info : SourceInfo) (x y : Name) (v body : Syntax) : Syntax
 of `out x` (first field) or of its second component, and so on. -/
 private def sObs (info : SourceInfo) (x : Name) (pos : Nat) : Syntax :=
   let outx := sApp info (sIdent info "out") [sIdent info x]
-  let rec go (src : Syntax) (k : Nat) : Syntax :=
-    let v := x ++ "✝v" ++ toString k
-    let r := x ++ "✝r" ++ toString k
-    let body := if k == pos then sIdent info v else go (sIdent info r) (k + 1)
-    sLetPair info v r src body
-  go outx 0
+  let rec go (src : Syntax) : Nat → Syntax
+    | 0 =>
+      let v := x ++ "✝v0"
+      let r := x ++ "✝r0"
+      sLetPair info v r src (sIdent info v)
+    | k + 1 =>
+      let v := x ++ "✝v" ++ toString (k + 1)
+      let r := x ++ "✝r" ++ toString (k + 1)
+      sLetPair info v r src (go (sIdent info r) k)
+  go outx pos
 
 /-- `(e₁, …, eₙ, ())`: the state tuple of the explicit binders (plus the trailing unit,
 which the `Σ` state type has). -/
