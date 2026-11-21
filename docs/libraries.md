@@ -797,6 +797,20 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `deriving BitPack`). The bit-level round trip `S.ofBits (S.toBits s) = s` holds by `rfl`
   for closed values (the example checks one, and all 32 values of a 5-bit bundle); a
   general lemma needs words' range proofs (stage 22l) and lemmas on `concat`/`slice`.
+  For an **inductive with fields** (no parameters) or a **plain structure** it adds
+  `T.tagWidth` (`⌈log₂ #constructors⌉`; 0 for a single constructor or a structure),
+  `T.payloadWidth` (the widest constructor's field widths), `T.width`
+  (`tagWidth + payloadWidth`), `T.code = HwTy.bits T.width`, `T.pack`/`T.unpack` (the tag
+  in the high bits, then the fields, the first highest, zero-padded to the widest
+  constructor; a structure has no tag), `T.toNat`, `T.lit` and `T.bitPack`. A field is
+  `BitVec n`, `Bool`, or a type with its own derived `width`/`pack`/`unpack`. The round
+  trip `T.unpack (T.pack x) = x` holds by `rfl` on closed values (samples; the general
+  lemma is the same value-level one as a bundle's). A recursive, implicit or proof field,
+  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  constructor payload wider than the declared payload width. A representation-
+  parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
+  through `Hw.packBits`/`Hw.unpackBits`). `examples/hdl-bitpack.wiz` checks the UART's
+  `TxState` and the CPU's `Instr` shapes.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
@@ -818,11 +832,10 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   non-zero initial value into inverters around a flip-flop); a reset is for targets
   without initial values and for restarting a design.
 
-Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
-inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
-`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
-reset.
+Not done: a general bit-level round-trip lemma for bundles and for inductives with fields
+(above; both hold on closed values), `!` on signals, `match` on a signal with
+field-binding or literal (`Nat` on `bits n`) patterns (see the `match` bullet above;
+`match` on an enumeration signal itself is done), asynchronous reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
 

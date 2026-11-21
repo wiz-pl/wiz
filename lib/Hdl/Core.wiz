@@ -3924,6 +3924,12 @@ def HdlDerive.checkIndCtors (n : String) : List CtorView → MacroM Unit
     HdlDerive.checkIndFields n (CtorView.fields c);
     HdlDerive.checkIndCtors n cs
 
+/-- A type with no constructors has no tag to pack: reject it before any path (the
+enumeration path needs a first constructor too). -/
+def HdlDerive.checkCtors (n : String) : List CtorView → MacroM Unit
+  | .nil => MacroM.throw (String.append "BitPack: no constructors: " n)
+  | .cons _ _ => MacroM.pure ()
+
 /-- The first constructor (a type with fields has at least one). -/
 def HdlDerive.firstCtor (n : String) : List CtorView → MacroM CtorView
   | .nil => MacroM.throw (String.append "BitPack: no constructors: " n)
@@ -3937,10 +3943,82 @@ def HdlDerive.checkTag (n : String) (ctors tagW : Nat) : MacroM Unit :=
       (String.append " do not fit in " (String.append (Nat.repr tagW) " tag bits"))))
   | .false => MacroM.pure ()
 
+/-- A head that is a prelude type with no `BitPack`: a field of one is rejected with a
+clear error instead of a later missing `<T>.width`. -/
+def HdlDerive.isKnownUnpackable (t : Syntax) : Bool :=
+  let base := fun (s : String) => Bool.or (HdlDerive.isVar s t) (HdlDerive.isAppHead s t);
+  Bool.or (base "Nat") (Bool.or (base "Int") (Bool.or (base "String") (Bool.or (base "Char")
+    (Bool.or (base "List") (Bool.or (base "Option") (Bool.or (base "Unit") (Bool.or (base "Vec")
+      (Bool.or (base "Fin") (Bool.or (base "Type") (Bool.or (base "Prop") (base "SProp")))))))))))
+
+/-- A closed numeral (`HdlDerive.num 3`) as a number, if it is one. -/
+def HdlDerive.natLit (t : Syntax) : Option Nat :=
+  match t with
+  | .node k args => (match String.beq k "term.num" with
+    | .true => (match Syntax.getArg (.node k args) 0 with
+      | .node k2 args2 => (match String.beq k2 "num" with
+        | .true => (match Syntax.getArg (.node k2 args2) 0 with
+          | .atom s => String.parseNat s
+          | _ => .none)
+        | .false => .none)
+      | _ => .none)
+    | .false => .none)
+  | _ => .none
+
+/-- The width of a field whose type is a closed `BitVec n` or `Bool` (an unknown, e.g. a
+derived type, is `none`: its width is a term, not a numeral). -/
+def HdlDerive.fieldWidthNum (t : Syntax) : Option Nat :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => HdlDerive.natLit (HdlDerive.bitVecWidth t)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => .some 1
+    | .false => .none)
+
+/-- The closed width of a constructor's payload, if all its fields' widths are closed. -/
+def HdlDerive.ctorWidthNum : List FieldView → Option Nat
+  | .nil => .some 0
+  | .cons f fs =>
+    match HdlDerive.fieldWidthNum (FieldView.type f), HdlDerive.ctorWidthNum fs with
+    | .some a, .some b => .some (Nat.add a b)
+    | _, _ => .none
+
+/-- The closed widths of the constructors' payloads. -/
+def HdlDerive.ctorWidthNums : List CtorView → Option (List Nat)
+  | .nil => .some .nil
+  | .cons c cs =>
+    match HdlDerive.ctorWidthNum (CtorView.fields c), HdlDerive.ctorWidthNums cs with
+    | .some w, .some ws => .some (.cons w ws)
+    | _, _ => .none
+
+/-- The largest of some numbers (`0` for none). -/
+def HdlDerive.maxNums : Nat → List Nat → Nat
+  | acc, .nil => acc
+  | acc, .cons x xs => HdlDerive.maxNums (Nat.max acc x) xs
+
+/-- The declared payload width is the widest constructor's, so a constructor cannot be
+wider than it; this is the check that says so, with the same number in the error (it also
+catches a hand-written width, if one is ever threaded through). -/
+def HdlDerive.checkPayloads (n : String) (payloadW : Nat) : List Nat → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons w ws =>
+    match Nat.lt payloadW w with
+    | .true => MacroM.throw (String.append "BitPack: a constructor of " (String.append n
+        (String.append " has a " (String.append (Nat.repr w) (String.append "-bit payload, wider than the declared width "
+          (Nat.repr payloadW))))))
+    | .false => HdlDerive.checkPayloads n payloadW ws
+
+/-- Check every closed constructor payload against the declared (widest) payload width.
+Constructors with a symbolic width (a derived field type) are skipped: the declaration is
+the `Nat.max` of the same terms. -/
+def HdlDerive.checkPayloadFit (n : String) (cs : List CtorView) : MacroM Unit :=
+  match HdlDerive.ctorWidthNums cs with
+  | .none => MacroM.pure ()
+  | .some ws => HdlDerive.checkPayloads n (HdlDerive.maxNums 0 ws) ws
+
 /-- A field type `BitVec n` or `Bool`, or a type with a derived `width`/`pack`/`unpack`,
-is packable; a function, a proposition or a universe is not. This is the clear error for
-the obvious mistakes (a `Nat` field, a proof field, a recursive field), before the
-generated code fails to find `<T>.width`. -/
+is packable; a function, a proposition, a universe, or a prelude type with no `BitPack` is
+not. This is the clear error for the obvious mistakes (a `Nat` field, a proof field, a
+recursive field), before the generated code fails to find `<T>.width`. -/
 def HdlDerive.checkFieldType (n : String) (f : FieldView) : MacroM Unit :=
   match Bool.or (FieldView.recursive f) (Bool.not (Derive.isData f)) with
   | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
@@ -3950,7 +4028,10 @@ def HdlDerive.checkFieldType (n : String) (f : FieldView) : MacroM Unit :=
     | .node k _ => (match String.beq k "term.arrow" with
       | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
           " is a function, which has no width"))
-      | .false => MacroM.pure ())
+      | .false => (match HdlDerive.isKnownUnpackable t with
+        | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
+            " has a type with no BitPack (use BitVec n, Bool, or a type with deriving BitPack)"))
+        | .false => MacroM.pure ()))
     | _ => MacroM.pure ()
 
 /-- `HdlDerive.checkFieldType` for a constructor's fields. -/
@@ -3977,6 +4058,7 @@ def HdlDerive.inductivePack (v : IndView) (n : String) : MacroM (List Syntax) :=
   first ← HdlDerive.firstCtor n cs;
   HdlDerive.checkIndCtors n cs;
   HdlDerive.checkFieldTypes n cs;
+  HdlDerive.checkPayloadFit n cs;
   HdlDerive.checkTag n (List.length cs) (Hdl.clog2 (List.length cs));
   let tagW := HdlDerive.num (Hdl.clog2 (List.length cs));
   let payloadS := HdlDerive.natMax (HdlDerive.ctorWidths cs);
@@ -4234,6 +4316,7 @@ whose fields are `r Tᵢ`, or a bundle. -/
 def deriveBitPack : Deriver := fun n => do
   v ← Derive.lookup "BitPack" n;
   Derive.noIndices "BitPack" v;
+  HdlDerive.checkCtors n (IndView.ctors v);
   match IndView.params v, HdlDerive.allNullary (IndView.ctors v) with
   | .nil, .true => HdlDerive.enumPack v n
   | .cons _ _, _ => (match IndView.isStructure v with
