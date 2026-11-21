@@ -584,7 +584,7 @@ structure Scry.PathIndex where
   results : Scry.NameMap Scry.FuncResult
   calls : Scry.CallIndex
 
-def Scry.pathIndex (pr : Scry.ProgramResult) : Scry.PathIndex :=
+def Scry.findingPathIndex (pr : Scry.ProgramResult) : Scry.PathIndex :=
   Scry.PathIndex.mk
     (Scry.NameMap.fromList (List.map (fun r => (r.fn.name, r)) pr.results))
     (Scry.callIndex pr.graph)
@@ -903,7 +903,7 @@ partial def Scry.findParamSourceIdx (pr : Scry.ProgramResult) (ix : Scry.PathInd
 /-- Find a caller that passes taint into parameter `pos` of `callee`. -/
 def Scry.findParamSource (pr : Scry.ProgramResult) (callee : String) (pos : Nat) :
     Option (Scry.FuncResult × Scry.CallSite) :=
-  Scry.findParamSourceIdx pr (Scry.pathIndex pr) callee pos pr.results
+  Scry.findParamSourceIdx pr (Scry.findingPathIndex pr) callee pos pr.results
 
 /-- Replace a parameter or return seed in `path` by the interprocedural evidence behind
 it, recursively. `stack` is the set of `(function, point)` roots already expanded, so
@@ -970,7 +970,7 @@ partial def Scry.extendPathIdx (pr : Scry.ProgramResult) (ix : Scry.PathIndex)
 /-- Compatibility spelling: builds the path index once at the root. -/
 partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × Nat))
     (fuel : Nat) (fr : Scry.FuncResult) (path : List Scry.PathNode) : List Scry.PathNode :=
-  Scry.extendPathIdx pr (Scry.pathIndex pr) stack fuel fr path
+  Scry.extendPathIdx pr (Scry.findingPathIndex pr) stack fuel fr path
 
 -- ## Findings
 
@@ -994,7 +994,7 @@ def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :
 
 /-- All findings of an analysed program, with interprocedural paths. -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
-  let ix := Scry.pathIndex pr;
+  let ix := Scry.findingPathIndex pr;
   Scry.sortRuleFindings (List.append pr.memoryFindings
     (Scry.concatLists (fun r =>
       List.map (fun f =>
