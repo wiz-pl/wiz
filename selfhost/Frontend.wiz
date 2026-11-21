@@ -1,3 +1,4 @@
+namespace __root__
 -- From text to a checked term, all in Wiz (stage 14b): the lexer and parser read the
 -- full Wiz grammar, and this scope checker turns the syntax of a few term forms into
 -- the kernel's `Tm` (names become de Bruijn indices), which `Kernel.wiz` type checks.
@@ -11295,3 +11296,4 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
     | .mk run _ _ order => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)
+end
