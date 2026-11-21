@@ -66,6 +66,7 @@
       "builtins",
       "calc",
       "classes",
+      "context",
       "deriving",
       "=display",
       "=doc",

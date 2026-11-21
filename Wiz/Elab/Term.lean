@@ -4395,7 +4395,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
       | .ok ty => pure ty
       | .error e =>
-        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
         | .ok ty => pure ty
         | .error _ => throwAt info s!"rewrite: {e}" ErrorCode.tacticFailed
     let (A, a, b) ← match ← force hty with
@@ -4430,7 +4430,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
         let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
           | .ok ty => pure ty
           | .error e =>
-            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
             | .ok ty => pure ty
             | .error _ => throwAt info s!"simp: {e}" ErrorCode.tacticFailed
         let htyT ← zonk lvl (quote g lvl hty)
@@ -4577,7 +4577,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
     unless t.mvars.isEmpty do throwAt ctx.info "assign: the assigned term still has holes at the end of the tactic block" ErrorCode.tacticFailed
     -- (the context's types with their holes solved: they may have been holes when the
     -- goal was made, and the kernel takes a hole as rigid)
-    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx).toList.reverse }
+    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx) }
     match (← get).kernelInfer kctx t with
     | .ok ty => unifyAt gl.ctx stx gl.ty ty
     | .error e => throwAt ctx.info s!"assign: {e}" ErrorCode.tacticFailed
