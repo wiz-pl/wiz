@@ -982,7 +982,9 @@ payload of a signal has a 0-quantity phantom index field, which R1 forbids
 projecting). -/
 private def sLetPair (info : SourceInfo) (x y : Name) (v body : Syntax) : Syntax :=
   .node info "term.letPair"
-    #[.node info "null" #[], .ident info x, .ident info y, v, .node info "null" #[], body]
+    #[.atom info "let", .node info "null" #[], .atom info "(",
+      .ident info x, .atom info ",", .ident info y, .atom info ")",
+      .atom info ":=", v, .node info "null" #[], body]
 
 /-- The observation `o` of the explicit binder `x` at the body size, as a pair split
 of `out x` (first field) or of its second component, and so on. -/
@@ -1004,7 +1006,7 @@ which the `Σ` state type has). -/
 private def sStateTuple (info : SourceInfo) (args : List Syntax) : Syntax :=
   match args ++ [sUnit info] with
   | [t] => t
-  | t :: rest => .node info "term.tuple" #[.atom info "(", t, .atom info ",", .node info "null" rest.toArray]
+  | t :: rest => .node info "term.tuple" #[.atom info "(", t, .atom info ",", .node info "null" rest.toArray, .atom info ")"]
   | [] => sUnit info
 
 /-- Rewrite a sized clause's right-hand side: an observation `x.o` of a sized explicit
