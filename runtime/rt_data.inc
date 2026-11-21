@@ -218,15 +218,36 @@ WIZ_API wiz_val wiz_array_set(wiz_val v, uint64_t i, wiz_val x) {
   return v;
 }
 
-/* ---- text ---- */
+/* ---- text ----
 
+   A `wiz_str` is an immutable value: there is no `cap` field, so the unused header
+   word stores the buffer's capacity in bytes (`wiz_hdr.size`, 0 when the capacity is
+   not known or exceeds the header's 32-bit word). `wiz_str_append` may then extend a
+   *unique* buffer in place, exactly as `wiz_bytes_push` does; a shared or aliased
+   string is copied first. The aliasing argument is the reference count: the caller
+   owns one reference (the language calls `wiz_str_append(a, b)` with both operands
+   consumed), so `WIZ_RC(a) == 1` means no other value can observe the buffer. `a == b`
+   is excluded even then, because `Str.append s s` passes the same object twice and
+   copying its bytes while they are read is only safe when the buffer is not realloc'd.
+   Capacity grows geometrically (`max(8, 2 * cap)`), which is what makes a loop of
+   appends amortised linear; a copy-on-share allocates the exact new length. */
+
+static size_t wiz_str_cap(wiz_str *t) {
+  size_t cap = t->h.size;
+  return cap ? cap : t->len; /* a capacity too large for the header is treated as exact */
+}
+static void wiz_str_set_cap(wiz_str *t, size_t cap) {
+  t->h.size = cap <= 0xFFFFFFFFu ? (uint32_t)cap : 0;
+}
 static wiz_val wiz_str_new(const char *s, size_t n) {
   wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + n + 1, WIZ_TAG_STR, 0);
   t->len = n;
+  wiz_str_set_cap(t, n);
   memcpy(t->data, s, n);
   t->data[n] = 0;
   return (wiz_val)t;
 }
+WIZ_API wiz_val wiz_str_empty(void) { return wiz_str_new("", 0); }
 WIZ_API wiz_val wiz_str_of_cstr(const char *s) { return wiz_str_new(s, strlen(s)); }
 WIZ_API const char *wiz_str_to_cstr(wiz_val v) {
   wiz_str *t = (wiz_str *)v;
@@ -236,13 +257,56 @@ WIZ_API const char *wiz_str_to_cstr(wiz_val v) {
   wiz_dec(v);
   return wiz_scratch;
 }
+/* append `n` bytes, growing the buffer in place when `v` is unique */
+static wiz_val wiz_str_grow(wiz_val v, size_t n) {
+  wiz_str *t = (wiz_str *)v;
+  size_t need = t->len + n;
+  if (need > wiz_str_cap(t)) {
+    size_t cap = wiz_str_cap(t);
+    if (cap < 8) cap = 8;
+    while (cap < need) cap *= 2;
+    t = (wiz_str *)wiz_xrealloc(t, sizeof(wiz_str) + cap + 1);
+    wiz_str_set_cap(t, cap);
+  }
+  return (wiz_val)t;
+}
 WIZ_API wiz_val wiz_str_append(wiz_val a, wiz_val b) {
   wiz_str *x = (wiz_str *)a, *y = (wiz_str *)b;
-  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + x->len + y->len + 1, WIZ_TAG_STR, 0);
-  t->len = x->len + y->len;
+  size_t n = y->len;
+  if (a != b && WIZ_RC(&x->h) == 1) {
+    /* unique and not self-append: no other value can see the buffer */
+    x = (wiz_str *)wiz_str_grow(a, n);
+    memcpy(x->data + x->len, y->data, n + 1);
+    x->len += n;
+    wiz_dec(b);
+    return (wiz_val)x;
+  }
+  size_t need = x->len + y->len;
+  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + need + 1, WIZ_TAG_STR, 0);
+  t->len = need;
+  wiz_str_set_cap(t, need);
   memcpy(t->data, x->data, x->len);
   memcpy(t->data + x->len, y->data, y->len + 1);
   wiz_dec(a); wiz_dec(b);
+  return (wiz_val)t;
+}
+WIZ_API wiz_val wiz_str_push(wiz_val v, uint64_t byte) {
+  if (WIZ_RC(&((wiz_str *)v)->h) == 1) {
+    v = wiz_str_grow(v, 1);
+    wiz_str *t = (wiz_str *)v;
+    t->data[t->len++] = (char)(unsigned char)byte;
+    t->data[t->len] = 0;
+    return v;
+  }
+  char c = (char)(unsigned char)byte;
+  wiz_str *x = (wiz_str *)v;
+  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + x->len + 2, WIZ_TAG_STR, 0);
+  t->len = x->len + 1;
+  wiz_str_set_cap(t, t->len);
+  memcpy(t->data, x->data, x->len);
+  t->data[x->len] = c;
+  t->data[x->len + 1] = 0;
+  wiz_dec(v);
   return (wiz_val)t;
 }
 WIZ_API uint64_t wiz_str_size(wiz_val v) { uint64_t n = ((wiz_str *)v)->len; wiz_dec(v); return n; }

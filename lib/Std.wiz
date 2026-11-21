@@ -6,12 +6,15 @@ The standard library for systems code (stage 12a): containers and text with nati
 representations, updated in place when they are unique.
 
 * `Array A`: a growable array (`Array.push`, `Array.getD`, `Array.set`);
-* `Str`: UTF-8 text in a native buffer (`Str.append`, `Str.slice`, `Str.byte`);
+* `Str`: UTF-8 text in a native buffer (`Str.append`, `Str.push`, `Str.join`,
+  `Str.slice`, `Str.byte`);
 * `StrMap V`: a map from `Str` keys to values (`StrMap.insert`, `StrMap.findD`).
 
 They are axioms with `extern` operations, implemented by the runtime (runtime/).
 When a value is unique (its reference count is one), `push`, `set` and `insert`
-update it in place instead of copying it.
+update it in place instead of copying it. `Str.append` and `Str.push` too: a loop
+that keeps only the new text (`s := Str.push s b`) appends in amortised constant
+time, and `Str.join` is the same for a list of pieces.
 
 ```
 def squares : Array Nat :=
@@ -38,12 +41,24 @@ extern "wiz_array_set" Array.set : {A : Type} → Array A → Nat → A → Arra
 /-- UTF-8 text in a native buffer (unlike the Prelude's `String`, which is a value of
 the compiler's own). Sizes and indices count bytes. -/
 axiom Str : Type
+/-- The empty text. -/
+extern "wiz_str_empty" Str.empty : Str
 /-- A `String` as a `Str`. -/
 extern "wiz_str_of_cstr" Str.ofString : String → Str
 /-- A `Str` as a `String`. -/
 extern "wiz_str_to_cstr" Str.toString : Str → String
-/-- The two texts one after the other. -/
+/-- The two texts one after the other (in place when the first is unique). -/
 extern "wiz_str_append" Str.append : Str → Str → Str
+/-- Add one byte at the end (in place when the text is unique). -/
+extern "wiz_str_push" Str.push : Str → Nat → Str
+/-- `Str.joinGo ss acc`: the pieces `ss` appended to `acc` (left to right; a helper
+of `Str.join`). The accumulator is kept unique, so `Str.append` extends it in place;
+a loop of `Str.push` is the byte-at-a-time builder. -/
+def Str.joinGo : List Str → Str → Str
+  | .nil, acc => acc
+  | .cons s rest, acc => Str.joinGo rest (Str.append acc s)
+/-- The pieces one after the other. -/
+def Str.join (ss : List Str) : Str := Str.joinGo ss Str.empty
 /-- The length in bytes. -/
 extern "wiz_str_size" Str.size : Str → Nat
 /-- `Str.byte s i`: the byte at offset `i`, a number below 256 (0 past the end). -/
