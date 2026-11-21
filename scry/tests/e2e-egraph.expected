@@ -1,0 +1,26 @@
+report: exit 0: ok
+report: schema scry-egraph-report/1: ok
+report: kind egraph: ok
+report: one function: ok
+report: 11 statements: ok
+report: 13 e-classes: ok
+report: 28 e-nodes: ok
+report: 2 rewrite steps: ok
+report: stop fixpoint: ok
+report: a 4-entry rewrite log: ok
+report: the first entry is the fold: ok
+human: exit 0: ok
+human: the report names the file: ok
+gate: --fail-on-rewrite exits 1: ok
+rewrite: exit 0: ok
+rewrite: the extract object is present: ok
+rewrite: the report is the same deterministic graph: ok
+usage: no file exits 2: ok
+usage: the error names the usage: ok
+IO: a missing file exits 2: ok
+nothing: a file with no function exits 3: ok
+nothing: the JSON says 0 functions: ok
+sarif: version 2.1.0: ok
+sarif: driver scry: ok
+sarif: one note per log entry: ok
+sarif: every result is a rewrite note: ok
