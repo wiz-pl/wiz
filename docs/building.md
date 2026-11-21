@@ -14,7 +14,9 @@ lake test -- --timings t.jsonl rig    # also append each case's time to t.jsonl
 .lake/build/bin/tests --run selfhost 3  # one case (also selfhost#3): exit 0 passed, 1 failed, 3 skipped
 ```
 
-Every case prints its wall time (`✓ name (12.345 s)`), and every group its total.
+Every case prints its position among the cases the invocation selected and its wall time
+(`[3/42]   ✓ name (12.345 s)`; a shard's total spans its groups), and every group its
+total.
 `--timings FILE` (with `--shard NAME` as a label) appends one line of JSON per case:
 `shard`, `group`, `index`, `case`, `seconds`, `ok`, and `notes`, which say which shared
 programs the case used and built (`Tests.note`: `uses checker`, `built checker 331.2`;
