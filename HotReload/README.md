@@ -42,8 +42,8 @@ generation table. It is a *shape* witness for the design, not a Wiz interpreter.
   `readAt` is the explicit-`Pinned` form used by pure code; `read` alone is the
   hidden `self` of a slot body.
 * **Snapshot consistency.** A `Pinned` is a generation id. `snapshot` names the
-  current generation; `install` appends a new one and never mutates an old one.
-  A reader holding an old `Pinned` reads the old table forever.
+  current generation; `commit` (the install) appends a new one and never mutates
+  an old one. A reader holding an old `Pinned` reads the old table forever.
 * **Atomic multi-slot transaction.** `commit` checks every staged body and
   witness, topologically orders the staged items, then builds the new generation
   and publishes it in one functional step. Any error returns `Except.error` and
