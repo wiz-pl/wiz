@@ -12,7 +12,7 @@ read by a human running `grail test` in the checkout.
 Three of the cases are ranges rather than one case so a failure names a readable block
 (and so the shard can be split); they cover the same files the package-wide `grail test`
 does, minus `examples/tour/` (group `tour` already compares those 14) and the nested
-`examples/grail-index/sources/*` packages (left out by `Grail.testFiles`, as by
+`examples/fate-index/sources/*` packages (left out by `Grail.testFiles`, as by
 `grail test`). A new `examples/*.wiz` falls into one of the ranges without an edit
 here; only a new *nested* directory or a new name class would need one.
 

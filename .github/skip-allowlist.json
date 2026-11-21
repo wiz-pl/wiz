@@ -28,6 +28,24 @@
     },
     {
       "group": "selfhost-cli-diff",
+      "case": "--target llvm: both select it, and `check` is silent in both (C5's first slice)",
+      "reason": "backend: both accept `--target llvm` and `check` compiles nothing; the self-hosted LLVM path is a first slice (C5: a closed `main : Nat`) and is not exercised here",
+      "parity": "C5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
+      "why": "documented self-host parity difference (C5): `check --target llvm` compiles nothing in either, so the self-hosted LLVM path (a first slice: a closed `main : Nat`) is not exercised here. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
+      "case": "--target wasm: the host selects WebAssembly, the driver refuses the name (C5)",
+      "reason": "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C",
+      "parity": "C5",
+      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
+      "expires": "2027-05-01",
+      "why": "documented self-host parity difference (C5): the host selects WebAssembly; the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name instead of silently building C. Allow-listed by the user (2026-11-17) for this one case only."
+    },
+    {
+      "group": "selfhost-cli-diff",
       "case": "build: a good file is silent and exit 0 (the artifact is C, not an executable)",
       "reason": "artifact: `build` writes an executable (via C), the self-hosted `build` the generated C",
       "parity": "D4",

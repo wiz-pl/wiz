@@ -1,7 +1,7 @@
-# `grail-index`: a static package index
+# `fate-index`: a static package index
 
 This directory is a complete, small **index repository** in the layout `grail update`
-reads. It is also the template for the intended `wiz-pl/grail-index`: replace the three
+reads. It is also the template for the intended `wiz-pl/fate-index`: replace the three
 example packages with real releases, keep the layout and the generator.
 
 ```
@@ -45,18 +45,18 @@ index.sexpr               every package in one document (a file index)
 
 ```sh
 # resolve a package against this checkout
-grail update --index examples/grail-index
+grail update --index examples/fate-index
 
 # the single-file form (one document holding every package)
-grail update --index examples/grail-index/index.sexpr
+grail update --index examples/fate-index/index.sexpr
 
 # validate: entries, requirements, local archive hashes, module-prefix conflicts,
 # and index.wiz against the files on disk. No network.
-scripts/grail-index-check.sh examples/grail-index
+scripts/grail-index-check.sh examples/fate-index
 ```
 
 The same directory is used by the `=grail-index` tests. A hosted copy is a git URL:
-`grail update --index https://github.com/wiz-pl/grail-index` (or a `file://` URL in a
+`grail update --index https://github.com/wiz-pl/fate-index` (or a `file://` URL in a
 test), and `grail index check URL --fetch` validates it after cloning.
 
 ## Signing and hosting

@@ -3,6 +3,7 @@ import Json
 import Web.EditorModel
 import Web.Loom
 import Web.Playground
+import Web.Selfhost
 
 /-!
 # The playground page's entry points
@@ -150,6 +151,24 @@ def loomEditorLineEndIndex (index offset : String) : String :=
 def loomEditorIndent (text from to : String) : String :=
   EditorModel.indentJson text from to
 
+/-- A completion item's tooltip (its documentation, else its detail). -/
+def loomEditorItemTitle (item : String) : String :=
+  EditorModel.itemTitleJson item
+
+/-- Whether a key event is Ctrl/⌘-Space (`1` or `0`). -/
+def loomEditorAskKey (key code ctrl meta : String) : String :=
+  match EditorModel.askKey key code (String.eq ctrl "1") (String.eq meta "1") with
+  | .true => "1"
+  | .false => "0"
+
+/-- A `LINE:CHAR-LINE:CHAR` span as `[start, end]` offsets, or `null`. -/
+def loomEditorSpan (text span : String) : String :=
+  EditorModel.spanJson text span
+
+/-- An LSP range as `LINE:CHAR-LINE:CHAR`. -/
+def loomEditorRangeText (range : String) : String :=
+  EditorModel.rangeTextJson range
+
 -- The self-hosted server's declaration/position index (`wiz_playground_check`'s `index`).
 
 /-- Build the LSP index from the check's entries (code-point offsets into `prefix ++ text`). -/
@@ -176,6 +195,64 @@ def loomIndexDeclarations (text index : String) : String :=
 def loomIndexDeclaration (text index name : String) : String :=
   EditorModel.lspDeclarationJson text index name
 
+-- The in-page language server's pure half (`lib/Web/Selfhost.wiz`): the engine's lines
+-- as diagnostics, the command splitter, the Prelude rule and the completion/hover/
+-- definition answers. The shim (`web/selfhost-lsp-shim.js`) is the server around them.
+
+/-- The checked source and the embedded Prelude's prefix, as JSON. -/
+def loomLspPrelude (text : String) : String := Selfhost.preludeJson text
+
+/-- The `initialize` answer's capabilities, as JSON. -/
+def loomLspCapabilities : String := Selfhost.capabilitiesJson
+
+/-- The top-level commands of a source, as JSON. -/
+def loomLspCommands (text : String) : String := Selfhost.commandsJson text
+
+/-- The engine's output lines (the final empty piece dropped), as JSON. -/
+def loomLspOutputLines (output : String) : String :=
+  Json.render (Json.mkArr (List.map Json.mkStr (Selfhost.outputLines output)))
+
+/-- A `parse error N: …` line's code-point offset (`-1` when it is not one). -/
+def loomLspParseError (line : String) : String :=
+  match Selfhost.parseErrorOffset line with
+  | .some n => EditorModel.natString n
+  | .none => "-1"
+
+/-- The diagnostics for the engine's text output, as JSON. -/
+def loomLspDiagnosticsOutput (text output : String) : String :=
+  Selfhost.diagnosticsOutputJson text output
+
+/-- `wiz_playground_check`'s JSON as a parsed check answer, or `null`. -/
+def loomLspParseCheck (json : String) : String := Selfhost.parseCheck json
+
+/-- The diagnostics from a parsed check answer, as JSON. -/
+def loomLspDiagnosticsCheck (text answer : String) : String :=
+  Selfhost.diagnosticsCheckJson text answer
+
+/-- The identifier before the caret: `{start, prefix}`. -/
+def loomLspCompletionPrefix (text offset : String) : String :=
+  Selfhost.completionPrefixJson text (EditorModel.natOf offset)
+
+/-- The identifier under (or before) the caret: `{start, end, word}`. -/
+def loomLspWordAt (text offset : String) : String :=
+  Selfhost.wordAtJson text (EditorModel.natOf offset)
+
+/-- Declarations whose label starts with a prefix, as completion items. -/
+def loomLspFilterCompletions (names prefix limit : String) : String :=
+  Selfhost.filterCompletionsJson names prefix limit
+
+/-- `textDocument/completion` at a position, from the check's declaration index. -/
+def loomLspCompletion (text index position : String) : String :=
+  Selfhost.completionJson text index position
+
+/-- `textDocument/hover` at a position. -/
+def loomLspHover (text index position : String) : String :=
+  Selfhost.hoverJson text index position
+
+/-- `textDocument/definition` at a position. -/
+def loomLspDefinition (text index position uri : String) : String :=
+  Selfhost.definitionJson text index position uri
+
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
@@ -199,9 +276,27 @@ export "wiz_loom_editor_editor_offset" loomEditorEditorOffset
 export "wiz_loom_editor_line_end" loomEditorLineEnd
 export "wiz_loom_editor_line_end_index" loomEditorLineEndIndex
 export "wiz_loom_editor_indent" loomEditorIndent
+export "wiz_loom_editor_item_title" loomEditorItemTitle
+export "wiz_loom_editor_ask_key" loomEditorAskKey
+export "wiz_loom_editor_span" loomEditorSpan
+export "wiz_loom_editor_range_text" loomEditorRangeText
 export "wiz_loom_index_build" loomIndexBuild
 export "wiz_loom_index_size" loomIndexSize
 export "wiz_loom_index_term" loomIndexTerm
 export "wiz_loom_index_goal" loomIndexGoal
 export "wiz_loom_index_declarations" loomIndexDeclarations
 export "wiz_loom_index_declaration" loomIndexDeclaration
+export "wiz_loom_lsp_capabilities" loomLspCapabilities
+export "wiz_loom_lsp_prelude" loomLspPrelude
+export "wiz_loom_lsp_commands" loomLspCommands
+export "wiz_loom_lsp_output_lines" loomLspOutputLines
+export "wiz_loom_lsp_parse_error" loomLspParseError
+export "wiz_loom_lsp_diagnostics_output" loomLspDiagnosticsOutput
+export "wiz_loom_lsp_parse_check" loomLspParseCheck
+export "wiz_loom_lsp_diagnostics_check" loomLspDiagnosticsCheck
+export "wiz_loom_lsp_completion_prefix" loomLspCompletionPrefix
+export "wiz_loom_lsp_word_at" loomLspWordAt
+export "wiz_loom_lsp_filter_completions" loomLspFilterCompletions
+export "wiz_loom_lsp_completion" loomLspCompletion
+export "wiz_loom_lsp_hover" loomLspHover
+export "wiz_loom_lsp_definition" loomLspDefinition

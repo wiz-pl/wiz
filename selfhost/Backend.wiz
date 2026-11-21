@@ -3972,7 +3972,8 @@ def irAnyLink : List Foreign → Bool
     | _ => irAnyLink rest
 
 def genLLVMCore (all : Array Global) (ffi : List Foreign) : LLVMR :=
-  match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+  -- (22i's `unbox` is the C backend's: the LLVM slice does not unbox)
+  match eraseGlobals .false .false ffi all .nil .nil (Array.size all) with
     | .err m => .err ("the erasure failed: " +++ m)
     | .ok es => match llvmEntry "main" es with
       | .none => .err "the LLVM backend's first slice (C5) needs a definition `main`"

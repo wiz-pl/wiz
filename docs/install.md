@@ -183,7 +183,7 @@ a **registry** package by name and version range with `Package.require NAME REQ`
 ```wiz
 import Grail
 def package : Package := Package.new "app"
-  |> Package.set "index" "https://github.com/wiz-pl/grail-index"  -- or --index URL
+  |> Package.set "index" "https://github.com/wiz-pl/fate-index"  -- or --index URL
   |> Package.require "std" "^0.1"
   |> Package.dep "helper" "https://example.org/helper.git" "v1"
 ```
@@ -201,7 +201,7 @@ reads no index, so it checks that entry's shape; add `grail index verify --locke
 re-verify the signature offline. Update a dependency with `grail update`, never by
 editing the lock.
 
-**The escape.** An index without a signed snapshot (the `examples/grail-index` fixture
+**The escape.** An index without a signed snapshot (the `examples/fate-index` fixture
 is one, and so is any registry that predates signing) is accepted only if you say so:
 pass `--allow-unsigned` to `update`/`fetch`/`build`, or simply omit
 `--require-signature` where nothing passes it. Prefer a signed registry; if you use the

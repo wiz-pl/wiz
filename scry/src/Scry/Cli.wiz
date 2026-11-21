@@ -16,6 +16,7 @@ import Scry.Lower
 import Scry.EgraphWil
 import Scry.EgraphExtract
 import Scry.CsCmd
+import Scry.ProverCmd
 /-!
 # Scry.Cli: the `scry` command line
 
@@ -93,15 +94,20 @@ def Scry.usage : String :=
   ++ "              [--diff BASE|all] [--changed-lines FILE] [--diff-context N]\n"
   ++ "              [--timeout SECS] [--max-nodes N] [--max-rounds N]\n"
   ++ "                             self-contained HTML page of the taint evidence\n"
-  ++ "  cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]\n"
+  ++ "  cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note]\n"
+  ++ "          [--rules FILE] [--no-taint]\n"
   ++ "                             walk a directory/.csproj/.sln for *.cs, parse and lower\n"
   ++ "                             each, and report findings plus a coverage section\n"
   ++ "                             (exit 3 when nothing could be analysed)\n"
   ++ "  fuzz-span FILE [--offset N] [--json] [--out FILE]\n"
   ++ "                             map a fuzz artifact's CST/ERROR spans for dynamic evidence\n"
-  ++ "  egraph FILE.c [--fuel N] [--rewrite]\n"
+  ++ "  egraph FILE.c [--fuel N] [--rewrite] [--json] [--sarif OUT]\n"
+  ++ "                [--fail-on-rewrite]\n"
   ++ "                             e-classes from lowered Wil, folds and rewrites;\n"
   ++ "                             --rewrite extracts them back into a checked Wil program\n"
+  ++ "  prover FILE FN [--cover|--cut|--dump|--rows p:v,...] [--guards p,...]\n"
+  ++ "                 [--entry] [--classify] [--pack FILE] [--json] [--sarif OUT]\n"
+  ++ "                             prove one universal claim about one function\n"
   ++ "  help, --help               this text\n"
   ++ "  --version                  the version\n"
 
@@ -220,58 +226,213 @@ def Scry.replCmd (args : List String) : EIO Nat := do
     (List.append rootArgs rest)) SpawnOptions.default;
   EIO.pure (match st with | .exited n => n | _ => 1)
 
-/-- `scry egraph FILE.c [--fuel N] [--rewrite]`: parse C with the native store, lower it
-to Wil, build the e-classes and run the fold/identity saturation. The first report is
-read-only. With `--rewrite`, `Scry.EgraphExtract` extracts the saturated classes back
-into Wil under its soundness checks and prints a second report; the CST and every Datalog
-fact are still untouched (the transformed program is only printed, not re-emitted). -/
-def Scry.egraphCmd (file : String) (fuel : Nat) (rewrite : Bool) : EIO Nat := do
-  st ← Scry.Native.parseFile file;
-  cst ← EIO.lift (Scry.Native.toCstStore file st);
-  src ← FS.readFile file;
-  let c := Scry.Cst.ofStore src cst;
-  let tu := Scry.lowerTU file c;
-  let p := Wil.program tu.funcs;
-  let b := Scry.wgBuildProgram p;
-  let s := Scry.wgSaturate fuel b.g .nil;
-  Scry.say (Scry.wgRenderReport file b s);
-  match rewrite with
-  | .false => EIO.pure 0
-  | .true => do
-    let t := Scry.wgeRewriteProgram fuel p;
-    Scry.say (Scry.wgeRenderReport file t);
-    EIO.pure 0
+/-- `scry egraph`'s options: one file, a fuel bound, the two report modes, and the
+machine-output flags. -/
+structure Scry.EgraphOpts where
+  file : Option String
+  fuel : Nat
+  rewrite : Bool
+  json : Bool
+  sarif : Option String
+  failOnRewrite : Bool
+
+def Scry.EgraphOpts.empty : Scry.EgraphOpts :=
+  Scry.EgraphOpts.mk .none 8 .false .false .none .false
+
+/-- The e-graph report as JSON (`scry-egraph-report/1`). One stable object: the caller
+can gate on `stop`/`rewrites` without parsing the human lines. -/
+def Scry.egraphJson (file : String) (b : Scry.WgBuild) (s : Scry.WgStats)
+    (t : Option Scry.WgeStats) : Json :=
+  let extract := match t with
+    | .some x => Json.mkObj
+        [ ("rounds", Json.ofNat x.rounds)
+        , ("rewritten", Json.ofNat x.rewritten)
+        , ("rejected", Json.ofNat x.rejected)
+        , ("skipped", Json.ofNat x.skipped)
+        , ("stop", Json.mkStr x.stop) ]
+    | .none => Json.mkNull;
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-egraph-report/1")
+    , ("kind", Json.mkStr "egraph")
+    , ("tool", Json.mkStr "scry")
+    , ("file", Json.mkStr file)
+    , ("functions", Json.ofNat b.funcs)
+    , ("statements", Json.ofNat b.stmts)
+    , ("eclasses", Json.ofNat (Scry.EGraph.numClasses s.g))
+    , ("enodes", Json.ofNat (Scry.EGraph.numNodes s.g))
+    , ("rounds", Json.ofNat s.rounds)
+    , ("folds", Json.ofNat s.folds)
+    , ("rewrites", Json.ofNat s.rewrites)
+    , ("ruleRounds", Json.ofNat s.ruleRounds)
+    , ("stop", Json.mkStr s.stop)
+    , ("log", Json.mkArr (List.map (fun r => Json.mkObj
+        [ ("rule", Json.mkStr r.rule), ("from", Json.mkStr r.from)
+        , ("to", Json.mkStr r.to) ]) s.log))
+    , ("extract", extract) ]
+
+/-- One SARIF result for an applied rewrite (a `note`: the transformation is not a
+defect, but a driver still needs the machine-readable list). -/
+def Scry.egraphRewriteResult (file : String) (rule from to : String) : Json :=
+  Json.mkObj
+    [ ("ruleId", Json.mkStr "scry/egraph/rewrite")
+    , ("level", Json.mkStr "note")
+    , ("message", Json.mkObj [("text", Json.mkStr (rule ++ ": " ++ from ++ " -> " ++ to))])
+    , ("locations", Json.mkArr [Json.mkObj
+        [("physicalLocation", Json.mkObj
+          [("artifactLocation", Json.mkObj [("uri", Json.mkStr file)])])]]) ]
+
+def Scry.egraphExtractResult (file : String) (r : Scry.WgeRewrite) : Json :=
+  Json.mkObj
+    [ ("ruleId", Json.mkStr "scry/egraph/extract")
+    , ("level", Json.mkStr "note")
+    , ("message", Json.mkObj [("text", Json.mkStr
+        (r.func ++ "#" ++ Nat.repr r.stmt ++ " " ++ r.rule ++ ": " ++ r.from ++ " -> " ++ r.to))])
+    , ("locations", Json.mkArr [Json.mkObj
+        [("physicalLocation", Json.mkObj
+          [("artifactLocation", Json.mkObj [("uri", Json.mkStr file)])])]]) ]
+
+/-- A SARIF 2.1.0 log of the rewrites the run applied, and of the checked extraction
+when `--rewrite` ran. `egraph` reports transformations, not findings, so every result is
+`level: note` and the rule ids name the transformation. -/
+def Scry.egraphSarif (file : String) (s : Scry.WgStats) (t : Option Scry.WgeStats) : Json :=
+  let rewriteResults := List.map (fun r => Scry.egraphRewriteResult file r.rule r.from r.to) s.log;
+  let extractResults := match t with
+    | .some x => List.map (Scry.egraphExtractResult file) x.log
+    | .none => ([] : List Json);
+  let rules := Json.mkArr
+    [ Json.mkObj
+        [ ("id", Json.mkStr "scry/egraph/rewrite")
+        , ("shortDescription", Json.mkObj
+            [("text", Json.mkStr "an e-graph rewrite was applied")]) ]
+    , Json.mkObj
+        [ ("id", Json.mkStr "scry/egraph/extract")
+        , ("shortDescription", Json.mkObj
+            [("text", Json.mkStr "a saturated class was extracted back to checked Wil")]) ] ];
+  let driver := Json.mkObj
+    [ ("name", Json.mkStr "scry")
+    , ("version", Json.mkStr "0.1.0")
+    , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
+    , ("rules", rules) ];
+  let run := Json.mkObj
+    [ ("tool", Json.mkObj [("driver", driver)])
+    , ("columnKind", Json.mkStr "utf16CodeUnits")
+    , ("results", Json.mkArr (List.append rewriteResults extractResults)) ];
+  Json.mkObj
+    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
+    , ("version", Json.mkStr "2.1.0")
+    , ("runs", Json.mkArr [run]) ]
+
+/-- The status of a completed e-graph run: `0` clean, `1` gated by
+`--fail-on-rewrite` (a rewrite was applied), `3` nothing analysed (no function), and
+`2` for a usage/IO failure (handled by the caller). -/
+def Scry.egraphStatus (o : Scry.EgraphOpts) (b : Scry.WgBuild) (s : Scry.WgStats)
+    (t : Option Scry.WgeStats) : Nat :=
+  match b.funcs with
+  | 0 => 3
+  | _ => match o.failOnRewrite with
+    | .true => match s.rewrites with
+      | 0 => 0
+      | _ => 1
+    | .false => 0
+
+/-- `scry egraph FILE.c [--fuel N] [--rewrite] [--json] [--sarif OUT]
+[--fail-on-rewrite]`: parse C with the native store, lower it to Wil, build the e-classes
+and run the fold/identity saturation. The first report is read-only. With `--rewrite`,
+`Scry.EgraphExtract` extracts the saturated classes back into Wil under its soundness
+checks and prints a second report; the CST and every Datalog fact are still untouched
+(the transformed program is only printed, not re-emitted). -/
+def Scry.egraphRun (o : Scry.EgraphOpts) (file : String) : EIO Nat := do
+  parsed ← Scry.ProjectIO.attempt (Scry.Native.parseFile file);
+  match parsed with
+  | .error e => do
+    EIO.lift (IO.ePrintln ("scry: " ++ e));
+    EIO.pure 2
+  | .ok st => do
+    read ← Scry.ProjectIO.attempt (FS.readFile file);
+    match read with
+    | .error e => do
+      EIO.lift (IO.ePrintln ("scry: " ++ e));
+      EIO.pure 2
+    | .ok src => do
+      cst ← EIO.lift (Scry.Native.toCstStore file st);
+      let c := Scry.Cst.ofStore src cst;
+      let tu := Scry.lowerTU file c;
+      let p := Wil.program tu.funcs;
+      let b := Scry.wgBuildProgram p;
+      let s := Scry.wgSaturate o.fuel b.g .nil;
+      let t : Option Scry.WgeStats := match o.rewrite with
+        | .true => .some (Scry.wgeRewriteProgram o.fuel p)
+        | .false => .none;
+      let status := Scry.egraphStatus o b s t;
+      let human := String.append (Scry.wgRenderReport file b s)
+        (match t with
+          | .some x => String.append "\n" (Scry.wgeRenderReport file x)
+          | .none => "");
+      match o.json with
+      | .true => Scry.say (Json.render (Scry.egraphJson file b s t))
+      | .false => Scry.say human;
+      match o.sarif with
+      | .some out => do
+        w ← Scry.ProjectIO.attempt (FS.writeFile out (String.append
+          (Json.render (Scry.egraphSarif file s t)) "\n"));
+        match w with
+        | .error e => do
+          EIO.lift (IO.ePrintln ("scry: " ++ e));
+          EIO.pure 2
+        | .ok _ => do
+          EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
+            ++ Nat.repr (List.length s.log) ++ " rewrite note(s))"));
+          EIO.pure status
+      | .none => EIO.pure status
 
 /-- `scry egraph`'s usage line. -/
 def Scry.egraphUsage : String :=
-  "usage: scry egraph FILE.c [--fuel N] [--rewrite]"
+  "usage: scry egraph FILE.c [--fuel N] [--rewrite] [--json] [--sarif OUT]\n"
+  ++ "                  [--fail-on-rewrite]\n"
+  ++ "  exit: 0 clean, 1 --fail-on-rewrite with a rewrite applied, 2 usage/IO,\n"
+  ++ "        3 nothing analysed (no function)."
 
-/-- `scry egraph`'s arguments: one file, optional `--fuel N` and `--rewrite`, in any
-order. A second file is a usage error. -/
-partial def Scry.egraphArgsGo (file : Option String) (fuel : Nat) (rewrite : Bool) :
-    List String → EIO Nat
-  | .nil => match file with
-    | .some f => Scry.egraphCmd f fuel rewrite
-    | .none => EIO.fail Scry.egraphUsage
+/-- `scry egraph`'s arguments: one file and the flags, in any order. A second file is a
+usage error. -/
+partial def Scry.egraphArgsGo (o : Scry.EgraphOpts) : List String → Except String Scry.EgraphOpts
+  | .nil => match o.file with
+    | .some _ => .ok o
+    | .none => .error Scry.egraphUsage
   | .cons a rest =>
     if String.eq a "--rewrite" then
-      Scry.egraphArgsGo file fuel .true rest
+      Scry.egraphArgsGo { o with rewrite := .true } rest
+    else if String.eq a "--json" then
+      Scry.egraphArgsGo { o with json := .true } rest
+    else if String.eq a "--fail-on-rewrite" then
+      Scry.egraphArgsGo { o with failOnRewrite := .true } rest
+    else if String.eq a "--sarif" then match rest with
+      | .cons p more => Scry.egraphArgsGo { o with sarif := .some p } more
+      | .nil => .error "--sarif needs an output file"
     else if String.eq a "--fuel" then match rest with
       | .cons n rest' => match String.parseNat n with
-        | .some k => Scry.egraphArgsGo file k rewrite rest'
-        | .none => EIO.fail ("\"" ++ n ++ "\" is not a fuel bound")
-      | .nil => EIO.fail Scry.egraphUsage
-    else match file with
-      | .none => Scry.egraphArgsGo (.some a) fuel rewrite rest
-      | .some _ => EIO.fail ("unexpected argument \"" ++ a ++ "\" (one FILE.c)")
+        | .some k => Scry.egraphArgsGo { o with fuel := k } rest'
+        | .none => .error ("\"" ++ n ++ "\" is not a fuel bound")
+      | .nil => .error Scry.egraphUsage
+    else match o.file with
+      | .none => Scry.egraphArgsGo { o with file := .some a } rest
+      | .some _ => .error ("unexpected argument \"" ++ a ++ "\" (one FILE.c)")
 
-/-- `scry egraph FILE.c [--fuel N] [--rewrite]`. `--help` is help before it is a file. -/
+/-- `scry egraph FILE.c …`. `--help` is help before it is a file; a bad flag is a usage
+error (exit 2). -/
 def Scry.egraphArgs (args : List String) : EIO Nat :=
   match List.any (fun a => String.eq a "--help") args with
   | .true => do
     Scry.say Scry.egraphUsage;
     EIO.pure 0
-  | .false => Scry.egraphArgsGo .none 8 .false args
+  | .false => match Scry.egraphArgsGo Scry.EgraphOpts.empty args with
+    | .error e => do
+      EIO.lift (IO.ePrintln ("scry: " ++ e));
+      EIO.pure 2
+    | .ok o => match o.file with
+      | .some f => Scry.egraphRun o f
+      | .none => do
+        EIO.lift (IO.ePrintln ("scry: " ++ Scry.egraphUsage));
+        EIO.pure 2
 
 /-- The help text a command's `--help` prints: the command's own usage when it has
 subcommands, and the shared command list otherwise. -/
@@ -289,7 +450,9 @@ def Scry.helpText (cmd : String) : Option String :=
   | "report" => .some Scry.usage
   | "fuzz-span" => .some Scry.usage
   | "findings" => .some Scry.findingsUsage
+  | "cs" => .some Scry.Cs.usage
   | "egraph" => .some Scry.egraphUsage
+  | "prover" => .some Scry.proverUsage
   | _ => .none
 
 /-- Run one command; the result is the exit status or an error message. -/
@@ -331,6 +494,7 @@ def Scry.dispatchGo (args : List String) : EIO Nat := match args with
   | .cons "cs" rest => Scry.Cs.run rest
   | .cons "fuzz-span" rest => Scry.fuzzSpanCmd rest
   | .cons "egraph" rest => Scry.egraphArgs rest
+  | .cons "prover" rest => Scry.proverMain rest
   | .cons cmd rest => EIO.fail ("unknown command \"" ++ cmd ++ "\" (see scry help)")
 
 /-- `--help` before positional parsing: a command's arguments that ask for help print it

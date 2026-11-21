@@ -1,0 +1,91 @@
+import Hdl.Core
+-- `deriving BitPack` for inductive types with fields (Clash's layout: a tag in the high
+-- ⌈log₂ #ctors⌉ bits, the constructor's fields next, the first highest, zero-padded to
+-- the widest constructor) and for a plain structure (no tag: its fields back to back).
+--
+-- The two shapes the HDL notes name: the UART's `TxState` (a structure whose fields are a
+-- derived enumeration and a bit vector) and the toy CPU's `Instr` (a tag plus a 4-bit
+-- operand, or no payload). The round trips are checked on every value of the small types
+-- and on samples of the wider one; the packed state is also simulated as one register.
+
+def B1 : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+def B16 : HwTy := HwTy.bits 16
+
+-- Uart.TxPhase / Uart.TxState: 4 constructors, 2 tag bits; the structure has no tag
+inductive TxPhase where
+  | idle
+  | start
+  | data
+  | stop
+  deriving BitPack
+
+structure TxState where
+  phase : TxPhase
+  baud : BitVec 16
+  deriving BitPack
+
+-- Cpu.Instr: 5 constructors, 3 tag bits, a 4-bit operand (halt has none and is padded)
+inductive Instr where
+  | ldi (k : BitVec 4)
+  | lda (a : BitVec 4)
+  | sta (a : BitVec 4)
+  | jmp (a : BitVec 4)
+  | halt
+  deriving BitPack
+
+-- a two-constructor payload type: 1 tag bit, the 4-bit distance below it
+inductive Move where
+  | fwd (d : BitVec 4)
+  | back (d : BitVec 4)
+  deriving BitPack
+
+#eval (TxPhase.width, TxState.width, TxState.tagWidth, TxState.payloadWidth)
+#eval (Instr.width, Instr.tagWidth, Instr.payloadWidth)
+#eval (Move.width, Move.tagWidth, Move.payloadWidth)
+
+-- the layout: tag high, then the fields (first highest); `halt` is tag 4, no payload
+#eval BitVec.toNat (Instr.pack (Instr.ldi (BitVec.ofNat 4 9)))
+#eval BitVec.toNat (Instr.pack (Instr.jmp (BitVec.ofNat 4 3)))
+#eval BitVec.toNat (Instr.pack Instr.halt)
+#eval BitVec.toNat (Move.pack (Move.back (BitVec.ofNat 4 3)))
+-- the structure: no tag, `phase` in the high bits then `baud` (2 + 16 = 18 bits)
+#eval BitVec.toNat (TxState.pack (TxState.mk TxPhase.data (BitVec.ofNat 16 300)))
+
+-- the round trip `unpack (pack x) = x` on samples: `refl`, because the encoding is
+-- closed at a closed value (the general law is the bundle-style one, on values)
+def txLaw : TxState.unpack (TxState.pack (TxState.mk TxPhase.data (BitVec.ofNat 16 300))) = TxState.mk TxPhase.data (BitVec.ofNat 16 300) :=
+  refl (TxState.mk TxPhase.data (BitVec.ofNat 16 300))
+def instrLaw : Instr.unpack (Instr.pack (Instr.ldi (BitVec.ofNat 4 9))) = Instr.ldi (BitVec.ofNat 4 9) :=
+  refl (Instr.ldi (BitVec.ofNat 4 9))
+def moveLaw : Move.unpack (Move.pack (Move.back (BitVec.ofNat 4 3))) = Move.back (BitVec.ofNat 4 3) :=
+  refl (Move.back (BitVec.ofNat 4 3))
+
+def eqNats (xs ys : List Nat) : Bool := List.beqBy Nat.beq xs ys
+def below (n : Nat) (p : Nat → Bool) : Bool := match n with
+  | .zero => p 0
+  | .succ k => Bool.and (p (Nat.succ k)) (below k p)
+def allBelow (n : Nat) (p : Nat → Bool) : Bool := below (n - 1) p
+
+-- every Instr and every 4-bit Move round trip through their packed number
+def instrOk (k : Nat) : Bool :=
+  Nat.beq (BitVec.toNat (Instr.pack (Instr.unpack (Instr.pack (Instr.ldi (BitVec.ofNat 4 k)))))) (BitVec.toNat (Instr.pack (Instr.ldi (BitVec.ofNat 4 k))))
+def instrHaltOk : Bool :=
+  Nat.beq (BitVec.toNat (Instr.pack (Instr.unpack (Instr.pack Instr.halt)))) (BitVec.toNat (Instr.pack Instr.halt))
+def moveOk (k : Nat) : Bool :=
+  Nat.beq (BitVec.toNat (Move.pack (Move.unpack (Move.pack (Move.back (BitVec.ofNat 4 k)))))) (BitVec.toNat (Move.pack (Move.back (BitVec.ofNat 4 k))))
+#eval (allBelow 16 instrOk, instrHaltOk, allBelow 16 moveOk)
+
+-- every phase and every 16-bit sample of the UART state round trips through the packed
+-- number (the structure has no tag: `phase` high, `baud` low)
+def txOk (p : TxPhase) (k : Nat) : Bool :=
+  Nat.beq (BitVec.toNat (TxState.pack (TxState.unpack (TxState.pack (TxState.mk p (BitVec.ofNat 16 k)))))) (BitVec.toNat (TxState.pack (TxState.mk p (BitVec.ofNat 16 k))))
+def phases : List TxPhase :=
+  .cons TxPhase.idle (.cons TxPhase.start (.cons TxPhase.data (.cons TxPhase.stop .nil)))
+def txAll : List Bool := Hdl.map (fun (p : TxPhase) => Bool.and (txOk p 0) (txOk p 300)) phases
+#eval txAll
+
+-- a decoder bit from the packed instruction: `halt` is the constant `Instr.lit Instr.halt`
+def haltC : Circuit (HwTy.bits Instr.width) B1 :=
+  Circuit.comb (fun x => Hw.eq x (Instr.lit Instr.halt))
+#eval Circuit.runPacked haltC (.cons 0 (.cons 9 (.cons 64 (.cons 127 .nil))))

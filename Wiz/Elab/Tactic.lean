@@ -82,6 +82,8 @@ def nativeDecide := 38
 def rewriteAt := 39
 -- (stage 6h S2) the registered `[simp]` lemmas, for the default set
 def getSimpLemmas := 40
+-- (D6) the constructor names of a type, for `constructor`
+def ctorNames := 41
 end TacTag
 
 structure Goal (R : Type) where

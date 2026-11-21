@@ -293,10 +293,16 @@ def languageGroup : Group where
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n" ++
           "partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n" ++
-          -- a pair's first component is at ω: the result `(Nat × Nat) × Nat` has no
-          -- `Cursor` in it
-          "partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n" ++
+          -- a pair of ω types: the recursive call is bound at ω by `let`, and the pair
+          -- components are read from it
+          "partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n" ++
+          -- a constructor field at ω is the same shape as a pair component; `Wrap` is
+          -- recursive, so the call's result type really can be the field's type
+          "inductive Wrap where\n  | base\n  | next (w : Wrap)\n" ++
+          "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
+          "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.next (Cursor.wrap c')\n" ++
           -- a `Bool` result and an `Option Nat` scrutinee are ω too
           "partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
           "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n" ++
@@ -309,10 +315,11 @@ def languageGroup : Group where
           ["2", "3"] },
     { name := "... but a result type that contains the linear parameter stays rejected", run := fun _ =>
         failsLib (cursorHeader ++
-          -- the result is `Cursor a × Nat`, and its first component is checked at ω; the
-          -- call's result contains `Cursor a`, so it cannot be copied
+          -- the result is `Cursor a × Nat`; the recursive result is bound at ω and
+          -- returned, so it is copied, and it contains `Cursor a`
           "partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)")
+          "  match Cursor.next c with\n  | .done => (d, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.keep c' d;\n    r")
           "quantity 1 but used ω" },
     { name := "... and the four bad recursive consumers are still rejected", run := fun _ => do
         -- drop the continuation

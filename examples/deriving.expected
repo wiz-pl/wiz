@@ -1,4 +1,4 @@
-examples/deriving.wiz:30:1: info: .cons "red" (.cons "green" (.cons "blue" .nil))
+examples/deriving.wiz:30:1: info: ["red", "green", "blue"]
 examples/deriving.wiz:31:1: info: "Color.green"
 examples/deriving.wiz:32:1: info: .false
 examples/deriving.wiz:33:1: info: "Color.red"
@@ -6,5 +6,5 @@ examples/deriving.wiz:41:1: info: "Tree.node Tree.leaf 1 (Tree.node Tree.leaf 2 
 examples/deriving.wiz:42:1: info: .true
 examples/deriving.wiz:43:1: info: .false
 examples/deriving.wiz:49:1: info: "Point.mk 3 4"
-examples/deriving.wiz:50:1: info: "List.cons (Point.mk 1 2) List.nil"
+examples/deriving.wiz:50:1: info: "[Point.mk 1 2]"
 examples/deriving.wiz:57:1: info: "Shape.rect (Point.mk 0 0) 2 3"

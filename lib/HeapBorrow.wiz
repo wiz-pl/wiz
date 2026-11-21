@@ -1,4 +1,5 @@
 import HoareTactics
+import Data.Result
 /-!
 # HeapBorrow
 

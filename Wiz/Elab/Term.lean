@@ -574,6 +574,26 @@ def ctorNames (g : Globals R) (T : Name) : List Name :=
     | some v => ((strip descD.type v).descTag?.map (·.1)).getD []
     | none => []
 
+/-- (D6) The source names of the constructors of the inductive type (or structure) whose
+kernel name is `T` (`T.c`), in declaration order: the candidates `constructor` tries.
+`none` if `T` is not an inductive type; `some []` for an inductive with no
+constructors. A private type's kernel name is turned back into its source name
+(`Globals.privateBase`), as `privBase` does in `selfhost/Frontend.wiz`. -/
+def indCtorNames? (g : Globals R) (T : Name) : Option (List Name) := do
+  let base := Globals.privateBase T
+  if g.contains (T ++ ".desc") then
+    pure ((ctorNames g T).map (ctorConst base))
+  else
+    -- a structure has no description: its value is `λ Δ. Σ …`, its only constructor
+    -- `T.mk`
+    let d ← g.find? T
+    let rec strip : Term R → Term R
+      | .lam _ b => strip b
+      | t => t
+    match strip (d.value.getD .tt) with
+    | .sigma .. | .unit _ => if g.contains (T ++ ".mk") then pure [base ++ ".mk"] else none
+    | _ => none
+
 /-- A `mutual` block's constructor `n` (`Ev.s`, `ctorConst`): its family `F`, the data
 type whose constructor it is (the head of its result type), if `n` is one of `F`'s
 qualified tags. -/
@@ -3021,6 +3041,15 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
   let sized := !(xsz matches .szInf)
   if sized && useRec then
     throwAt ctx.info "structural recursion on a sized argument: give the definition a sized signature instead" ErrorCode.notStructural
+  -- If the goal does not mention the scrutinee, its indices or the reverted variables,
+  -- the branch goal is the goal itself. Keep that value (an equation as written) rather
+  -- than reading the motive's instantiated codomain back: evaluating an equation there
+  -- would compute it (`f2 n = isZero (succ n)` to `True`) and a nested named match would
+  -- lose the side it must abstract. If the goal does mention them, the instantiated
+  -- motive is what refines it (a branch may then get the equation's computed Σ).
+  let goalTm := q goal
+  let inGoal (l : Lvl) : Bool := goalTm.hasVar (ctx.lvl - l - 1)
+  let stuckGoal := !(inGoal x || ξLvls.any inGoal || rs.any inGoal)
   -- G := Π rs. goal
   let w : Term R := .qlit QuantitySyntax.explicitDefault
   let mut G := q goal
@@ -3088,12 +3117,10 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
       let eqTm : Term R := .eq ((q I).lift (nΞ + 1)) lhs ((q ξi).lift (nΞ + 1))
       let body : Term R := .pi "e" .default (.qlit 0) eqTm (G.lift (nΞ + 2)) ⟨0, vG.getD .hole⟩
       pure ((List.range nΞ).foldr (fun k acc => .lam s!"i{k}" acc) (.lam "x" body))
-  -- a type still to be found (an inferred `match`) is taken to be in `Type`
-  let unknown := match whnf Gv with
-    | .neutral (.mvar _) _ => true
-    | _ => false
-  let some v := vG.orElse fun _ => if unknown then some (.succ .zero) else none
-    | throwAt ctx.info "could not determine the universe of the match's type"
+  -- a type still to be found (an inferred `match`) is taken to be in `Type`. A named
+  -- match wraps the goal in the equation's binders, so the metavariable is not at the
+  -- head of `Gv`; a missing sort is the inferred case either way.
+  let v := vG.getD (.succ .zero)
   let elimName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if useRec then ".rec" else ".casesOn") ++
     (if nondep then "N" else "")
   let some ed := g.find? elimName | throwAt ctx.info s!"{elimName} is missing"
@@ -3281,7 +3308,8 @@ data), so its eliminator can only target Prop"
         let dropped (pos : Nat) : List Nat := rsAll.zipIdx.filterMap fun (l, i) =>
           if rs.contains l then none else some (origCol pos (k + 1 + i))
         let rc' := if useRec then rc'.map (fun r => { r with dropCols := dropped r.pos }) else rc'
-        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2 mt rc' false
+        let inner ← compileMatch ctx' (vars.take k ++ fieldLvls'.toList ++ restCols ++ ihCols) cls2
+          (if stuckGoal then goal else mt) rc' false
         let body0 := (rs.map nameOf).foldr .lam inner
         match solution with
         | none => pure body0
@@ -3571,6 +3599,20 @@ partial def matchMux? (ctx : LocalCtx R) (stx : Syntax) (alts : Array Syntax) (s
   let shareApp := hdlApp atInfo (hdlIdent atInfo "Hw.share") [scrut, hdlFun atInfo x body]
   return some (← check ctx shareApp expected)
 
+/-- Evaluate a type for checking a term, but leave an equation at the head stuck, as
+written, rather than letting it compute: a `match` checked against it abstracts the
+equation's sides in its branches, while a computed `True` (or Σ) no longer shows them.
+(`f2 n = isZero (Nat.succ n)` computes to `True`, but a split on `isZero (Nat.succ n)`
+inside the body must still refine the goal's right side.) The kernel still sees the
+computed type. -/
+partial def evalExpected (ctx : LocalCtx R) (ty : Term R) : ElabM R (VTy R) := do
+  match ty with
+  | .eq A a b =>
+    pure (.neutral (.eq (← evalIn ctx A) (← evalIn ctx a) (← evalIn ctx b)) #[])
+  | .eqTy A B =>
+    pure (.neutral (.eqTy (← evalIn ctx A) (← evalIn ctx B)) #[])
+  | _ => evalIn ctx ty
+
 /-- Elaborate `match e₁, …, eₙ with | p₁, …, pₙ => rhs …` against `expected`. -/
 partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM R (Term R) := do
   let g ← getGlobals
@@ -3642,8 +3684,13 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     binders := binders.push ("x✝", quote g ctx.lvl ty)
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
+  -- The goal is quoted from value form, so abstract the scrutinee read back the same
+  -- way: the elaborated term may spell a constructor differently (`Nat.succ n` as a
+  -- constant) from its read-back, and then the occurrence would be missed.
   let mut absGoal := goalTm
-  for t in ts, k in [0:ts.size] do absGoal := abstractOutsideHoles absGoal (t.lift k)
+  for t in ts, k in [0:ts.size] do
+    let tv ← evalIn ctx t
+    absGoal := abstractOutsideHoles absGoal ((quote g ctx.lvl tv).lift k)
   let _ := goalTm
   let mut lvls : List Lvl := []
   -- a scrutinee's type mentions the earlier scrutinees (`match e, h with` for
@@ -3701,7 +3748,7 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   -- is lifted over them
   goalTm := if eqCount == 0 then absGoal else absGoal.lift eqCount
   let allLinear := linearScruts ++ (List.replicate eqCount false).toArray
-  let goal ← evalIn ctx' goalTm
+  let goal ← evalExpected ctx' goalTm
   if let some x := lvls.head? then recordMatch stx.info alts clauses0 ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   let body ← compileMatch ctx' lvls clauses goal none true
   let lam := (binders.toList.map (·.1)).foldr .lam body
@@ -4124,6 +4171,12 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   if tag == TacTag.ctorInfo then
     let ans := match ctorInfo? g (← str (fld 0)) with
       | some (T, nParams, nFields) => mkCon 1 [encodePair (encodeString T) (encodePair (.nat nParams) (.nat nFields))]
+      | none => mkCon 0 []
+    return ← runTac code info st (apply code (fld 1) ans)
+  if tag == TacTag.ctorNames then
+    -- (D6) `constructor`: the goal type's constructors, in declaration order
+    let ans := match indCtorNames? g (← str (fld 0)) with
+      | some ns => mkCon 1 [encodeList (ns.map encodeString)]
       | none => mkCon 0 []
     return ← runTac code info st (apply code (fld 1) ans)
   if tag == TacTag.isDefinition then

@@ -710,10 +710,15 @@ def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
     let smtFlag : List String := match o.trustSmt with
       | .true => .cons "--trust-smt" .nil
       | .false => .nil;
+    -- (`--target`: C and LLVM share the `.wizr` region name, D5's model, so the key is
+    -- what keeps the C text and the IR apart; without this an LLVM build reads the C)
+    let targetPart : List String := match o.target with
+      | .some t => .cons t .nil
+      | .none => .cons "c" .nil;
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append trustPart (List.append o.backend (List.append smtFlag (modPathsOf tab names)))))))) 2166136261)
+          (List.append trustPart (List.append targetPart (List.append o.backend (List.append smtFlag (modPathsOf tab names))))))))) 2166136261)
 
 -- ------------------------------------------------------------------------------------
 -- (D5) The per-module cache, as the host's: one `<key>.wizc` per module (its tagged
@@ -1178,11 +1183,6 @@ def targetName (o : Opts) : String := match o.target with
   | .none => "c"
 
 def targetIsLLVM (o : Opts) : Bool := strEq (targetName o) "llvm"
-
--- the artifact's extension: `build` writes the C, or the LLVM IR (C5)
-def targetExt (o : Opts) : String := match targetIsLLVM o with
-  | .true => ".ll"
-  | .false => ".c"
 
 -- `--cache-verify`: the host's modes (`Cache.VerifyMode.ofString?`; `require` is strict)
 def verifyOk (m : String) : Bool :=
@@ -1733,7 +1733,7 @@ def buildMiss (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) (o
   | .none => Process.exit 1
   | .some ctext => do
     if useCache then writeModuleEntries o plan p.flat else IO.pure ();
-    cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
+    cacheWriteIf o useCache cKey cExt 0 ctext;
     writeOut out ctext
 
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheOn o with
@@ -1742,7 +1742,7 @@ def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheOn o
     buildMiss o .false emptyPlan "" out (runGraph o.trustNative o.trustSmt g)
   | .true => do
     let key := keyOfGraph o "c" g;
-    cached ← cacheRead o key (targetExt o);
+    cached ← cacheRead o key cExt;
     match cached with
     | .some (.mk st ctext from ro) => do
       cacheHitMsg o key from ro;
@@ -1887,7 +1887,7 @@ def runText (o : Opts) (key : String) (text : String) (extra : List String) : IO
 
 def runPrepared (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) (p : Prepared)
     (extra : List String) : IO Unit := do
-  cached ← cacheReadIf o useCache cKey (targetExt o);
+  cached ← cacheReadIf o useCache cKey cExt;
   match cached with
   | .some (.mk st ctext from ro) => do
     cacheHitMsg o cKey from ro;
@@ -1905,7 +1905,7 @@ def runPrepared (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) 
       | .true => match genLLVM (Run.gs p.run) with
         | .err m => do IO.ePrintln (String.append "error: " m); Process.exit 1
         | .ok text => do
-          cacheWriteIf o useCache cKey (targetExt o) 0 text;
+          cacheWriteIf o useCache cKey cExt 0 text;
           runText o cKey text extra
       | .false => do
         missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
@@ -1914,7 +1914,7 @@ def runPrepared (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) 
         | .nil => do
           let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
             (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
-          cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
+          cacheWriteIf o useCache cKey cExt 0 ctext;
           runText o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
@@ -1925,7 +1925,7 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
     | .false => runPrepared o .false emptyPlan "nocache" (runGraph o.trustNative o.trustSmt g) extra
     | .true => do
       let cKey := keyOfGraph o "c" g;
-      cached ← cacheRead o cKey (targetExt o);
+      cached ← cacheRead o cKey cExt;
       match cached with
       | .some (.mk st ctext from ro) => do
         cacheHitMsg o cKey from ro;

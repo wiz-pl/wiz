@@ -3777,22 +3777,559 @@ def HdlDerive.bundlePack (v : IndView) (n : String) (pre : List Syntax) : MacroM
     (.cons `(command| def $lN : $lTy := $lVal)
     (.cons `(command| def $bN : $bTy := $bVal) .nil))))))
 
-/-- `deriving BitPack` for an enumeration (no parameters, constructors without fields) or
-a structure. -/
+-- `deriving BitPack` for an inductive type with fields: Clash's layout, a tag in the
+-- high ⌈log₂ #constructors⌉ bits, then the constructor's fields (the first field
+-- highest), zero-padded to the widest constructor. A field is `BitVec n`, `Bool`, or a
+-- type whose own `deriving BitPack` gave `<F>.width`/`<F>.pack`/`<F>.unpack` (an
+-- enumeration or an inductive of this kind). No `HwTy`/kernel change: the type's code is
+-- `HwTy.bits T.width`.
+
+/-- Whether syntax is the application of the name `h` (`BitVec 3`): the head of
+`HdlDerive.split`. -/
+def HdlDerive.isAppHead (h : String) (t : Syntax) : Bool :=
+  let f := (HdlDerive.split t).1;
+  match HdlDerive.unparen f with
+  | .node k args => Bool.and (String.beq k "term.ident") (match SyntaxF.nth args 0 with
+    | .ident x => String.beq x h
+    | _ => .false)
+  | _ => .false
+/-- The `n` of a `BitVec n` field type. -/
+def HdlDerive.bitVecWidth (t : Syntax) : Syntax := (HdlDerive.split t).2
+
+/-- A field's width: `n` for `BitVec n`, 1 for `Bool`, `<F>.width` for a derived type. -/
+def HdlDerive.fieldWidth (t : Syntax) : Syntax :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => HdlDerive.bitVecWidth t
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => HdlDerive.num 1
+    | .false => HdlDerive.suffixed ".width" t)
+
+/-- The widths of a constructor's fields, as a list of `Nat` terms. -/
+def HdlDerive.fieldWidths : List FieldView → List Syntax
+  | .nil => .nil
+  | .cons f fs => .cons (HdlDerive.fieldWidth (FieldView.type f)) (HdlDerive.fieldWidths fs)
+
+/-- The sum of a list of `Nat` terms (`0` for none). -/
+def HdlDerive.natSum : List Syntax → Syntax
+  | .nil => `(term| 0)
+  | .cons x .nil => x
+  | .cons x xs => let rest := HdlDerive.natSum xs; `(term| Nat.add $x $rest)
+
+/-- The largest of a list of `Nat` terms (`0` for none). -/
+def HdlDerive.natMax : List Syntax → Syntax
+  | .nil => `(term| 0)
+  | .cons x .nil => x
+  | .cons x xs => let rest := HdlDerive.natMax xs; `(term| Nat.max $x $rest)
+
+/-- A field's bits as a `Nat`: `BitVec.toNat x`, `BitVec.toNat (Bool.toBits x)`, or the
+field's own `F.pack`. -/
+def HdlDerive.fieldToNat (t : Syntax) (x : Syntax) : Syntax :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => `(term| BitVec.toNat $x)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => `(term| BitVec.toNat (Bool.toBits $x))
+    | .false => let p := HdlDerive.suffixed ".pack" t; `(term| BitVec.toNat ($p $x)))
+
+/-- A constructor's fields, packed as one number (the first field in the high bits). -/
+def HdlDerive.packFields : Nat → List FieldView → Syntax
+  | _, .nil => `(term| 0)
+  | i, .cons f .nil => HdlDerive.fieldToNat (FieldView.type f) (Derive.var "f✝" i)
+  | i, .cons f fs =>
+    let a := HdlDerive.fieldToNat (FieldView.type f) (Derive.var "f✝" i);
+    let b := HdlDerive.packFields (Nat.succ i) fs;
+    let w := HdlDerive.natSum (HdlDerive.fieldWidths fs);
+    `(term| Nat.add (Nat.shiftLeft $a $w) $b)
+
+/-- A constructor's payload: its fields' bits, zero-padded below to the widest
+constructor (`payloadW`). -/
+def HdlDerive.packPayload (payloadW : Syntax) (fs : List FieldView) : Syntax :=
+  let ps := HdlDerive.packFields 0 fs;
+  let cw := HdlDerive.natSum (HdlDerive.fieldWidths fs);
+  let pad := `(term| Nat.sub $payloadW $cw);
+  `(term| Nat.shiftLeft $ps $pad)
+
+/-- One constructor's method for `T.pack`: tag in the high bits, the padded payload below. -/
+def HdlDerive.packBody (wV payloadW tag : Syntax) (fs : List FieldView) : Syntax :=
+  let p := HdlDerive.packPayload payloadW fs;
+  `(term| BitVec.ofNat $wV (Nat.add (Nat.shiftLeft $tag $payloadW) $p))
+
+/-- The `T.rec` methods of `T.pack`, one per constructor. -/
+def HdlDerive.packMethods (wV payloadW : Syntax) : Nat → List CtorView → List Syntax
+  | _, .nil => .nil
+  | i, .cons c cs =>
+    let b := HdlDerive.packBody wV payloadW (HdlDerive.num i) (CtorView.fields c);
+    .cons (Derive.method (CtorView.fields c) b) (HdlDerive.packMethods wV payloadW (Nat.succ i) cs)
+
+/-- A field from its bits: `BitVec.ofNat n k`, `BitVec.isTrue (BitVec.ofNat 1 k)`, or the
+field's own `F.unpack`. -/
+def HdlDerive.fieldOfNat (t : Syntax) (k : Syntax) : Syntax :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => let w := HdlDerive.bitVecWidth t; `(term| BitVec.ofNat $w $k)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => `(term| BitVec.isTrue (BitVec.ofNat 1 $k))
+    | .false => let w := HdlDerive.suffixed ".width" t;
+      let u := HdlDerive.suffixed ".unpack" t;
+      `(term| $u (BitVec.ofNat $w $k)))
+
+/-- A constructor's fields from a payload. Field `i` sits `pad + suffix` bits above the
+bottom, where `suffix` is the widths of the fields after it and `pad` is the constructor's
+low zero padding; the first field is highest. -/
+def HdlDerive.unpackArgsN (payload pad : Syntax) : List FieldView → List Syntax
+  | .nil => .nil
+  | .cons f fs =>
+    let suffix := HdlDerive.natSum (HdlDerive.fieldWidths fs);
+    let off := `(term| Nat.add $pad $suffix);
+    let k := `(term| Nat.shiftRight $payload $off);
+    .cons (HdlDerive.fieldOfNat (FieldView.type f) k) (HdlDerive.unpackArgsN payload pad fs)
+
+/-- The constructor applied to its decoded fields. -/
+def HdlDerive.ctorApp (v : IndView) (c : CtorView) (args : List Syntax) : Syntax :=
+  Syntax.mkApp (Syntax.mkVar (Derive.ctorName v c)) args
+
+/-- `T.unpack`'s if chain: `tag = 0` gives the first constructor, …, and an out-of-range
+tag decodes through the first constructor (as an enumeration's `ofNat` does). -/
+def HdlDerive.unpackChain (v : IndView) (first : CtorView) (tag payload payloadW : Syntax) :
+    Nat → List CtorView → Syntax
+  | _, .nil =>
+    let fw := HdlDerive.natSum (HdlDerive.fieldWidths (CtorView.fields first));
+    let pad := `(term| Nat.sub $payloadW $fw);
+    HdlDerive.ctorApp v first (HdlDerive.unpackArgsN payload pad (CtorView.fields first))
+  | i, .cons c cs =>
+    let cw := HdlDerive.natSum (HdlDerive.fieldWidths (CtorView.fields c));
+    let pad := `(term| Nat.sub $payloadW $cw);
+    let app := HdlDerive.ctorApp v c (HdlDerive.unpackArgsN payload pad (CtorView.fields c));
+    let rest := HdlDerive.unpackChain v first tag payload payloadW (Nat.succ i) cs;
+    let ti := HdlDerive.num i;
+    `(term| if Nat.beq $tag $ti then $app else $rest)
+
+/-- The widths of the constructors' payloads. -/
+def HdlDerive.ctorWidths : List CtorView → List Syntax
+  | .nil => .nil
+  | .cons c cs => .cons (HdlDerive.natSum (HdlDerive.fieldWidths (CtorView.fields c))) (HdlDerive.ctorWidths cs)
+
+/-- Every field must be data (not recursive, implicit or a proof), or its width is
+unknown. -/
+def HdlDerive.checkIndFields (n : String) : List FieldView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons f fs =>
+    match Bool.or (FieldView.recursive f) (Bool.not (Derive.isData f)) with
+    | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
+        " is recursive, implicit or a proof (only data fields are packed)"))
+    | .false => HdlDerive.checkIndFields n fs
+
+/-- `HdlDerive.checkIndFields` for every constructor. -/
+def HdlDerive.checkIndCtors (n : String) : List CtorView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons c cs => do
+    HdlDerive.checkIndFields n (CtorView.fields c);
+    HdlDerive.checkIndCtors n cs
+
+/-- A type with no constructors has no tag to pack: reject it before any path (the
+enumeration path needs a first constructor too). -/
+def HdlDerive.checkCtors (n : String) : List CtorView → MacroM Unit
+  | .nil => MacroM.throw (String.append "BitPack: no constructors: " n)
+  | .cons _ _ => MacroM.pure ()
+
+/-- The first constructor (a type with fields has at least one). -/
+def HdlDerive.firstCtor (n : String) : List CtorView → MacroM CtorView
+  | .nil => MacroM.throw (String.append "BitPack: no constructors: " n)
+  | .cons c _ => MacroM.pure c
+
+/-- The tag must fit the constructors: with `tagW = ⌈log₂ #ctors⌉` this holds by
+construction; a zero-constructor type is rejected by `HdlDerive.firstCtor`. -/
+def HdlDerive.checkTag (n : String) (ctors tagW : Nat) : MacroM Unit :=
+  match Nat.lt (Nat.pow 2 tagW) ctors with
+  | .true => MacroM.throw (String.append "BitPack: the constructors of " (String.append n
+      (String.append " do not fit in " (String.append (Nat.repr tagW) " tag bits"))))
+  | .false => MacroM.pure ()
+
+/-- A head that is a prelude type with no `BitPack`: a field of one is rejected with a
+clear error instead of a later missing `<T>.width`. -/
+def HdlDerive.isKnownUnpackable (t : Syntax) : Bool :=
+  let base := fun (s : String) => Bool.or (HdlDerive.isVar s t) (HdlDerive.isAppHead s t);
+  Bool.or (base "Nat") (Bool.or (base "Int") (Bool.or (base "String") (Bool.or (base "Char")
+    (Bool.or (base "List") (Bool.or (base "Option") (Bool.or (base "Unit") (Bool.or (base "Vec")
+      (Bool.or (base "Fin") (Bool.or (base "Type") (Bool.or (base "Prop") (base "SProp")))))))))))
+
+/-- A closed numeral (`HdlDerive.num 3`) as a number, if it is one. -/
+def HdlDerive.natLit (t : Syntax) : Option Nat :=
+  match t with
+  | .node k args => (match String.beq k "term.num" with
+    | .true => (match Syntax.getArg (.node k args) 0 with
+      | .node k2 args2 => (match String.beq k2 "num" with
+        | .true => (match Syntax.getArg (.node k2 args2) 0 with
+          | .atom s => String.parseNat s
+          | _ => .none)
+        | .false => .none)
+      | _ => .none)
+    | .false => .none)
+  | _ => .none
+
+/-- The width of a field whose type is a closed `BitVec n` or `Bool` (an unknown, e.g. a
+derived type, is `none`: its width is a term, not a numeral). -/
+def HdlDerive.fieldWidthNum (t : Syntax) : Option Nat :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => HdlDerive.natLit (HdlDerive.bitVecWidth t)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => .some 1
+    | .false => .none)
+
+/-- The closed width of a constructor's payload, if all its fields' widths are closed. -/
+def HdlDerive.ctorWidthNum : List FieldView → Option Nat
+  | .nil => .some 0
+  | .cons f fs =>
+    match HdlDerive.fieldWidthNum (FieldView.type f), HdlDerive.ctorWidthNum fs with
+    | .some a, .some b => .some (Nat.add a b)
+    | _, _ => .none
+
+/-- The closed widths of the constructors' payloads. -/
+def HdlDerive.ctorWidthNums : List CtorView → Option (List Nat)
+  | .nil => .some .nil
+  | .cons c cs =>
+    match HdlDerive.ctorWidthNum (CtorView.fields c), HdlDerive.ctorWidthNums cs with
+    | .some w, .some ws => .some (.cons w ws)
+    | _, _ => .none
+
+/-- The largest of some numbers (`0` for none). -/
+def HdlDerive.maxNums : Nat → List Nat → Nat
+  | acc, .nil => acc
+  | acc, .cons x xs => HdlDerive.maxNums (Nat.max acc x) xs
+
+/-- The declared payload width is the widest constructor's, so a constructor cannot be
+wider than it; this is the check that says so, with the same number in the error (it also
+catches a hand-written width, if one is ever threaded through). -/
+def HdlDerive.checkPayloads (n : String) (payloadW : Nat) : List Nat → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons w ws =>
+    match Nat.lt payloadW w with
+    | .true => MacroM.throw (String.append "BitPack: a constructor of " (String.append n
+        (String.append " has a " (String.append (Nat.repr w) (String.append "-bit payload, wider than the declared width "
+          (Nat.repr payloadW))))))
+    | .false => HdlDerive.checkPayloads n payloadW ws
+
+/-- Check every closed constructor payload against the declared (widest) payload width.
+Constructors with a symbolic width (a derived field type) are skipped: the declaration is
+the `Nat.max` of the same terms. -/
+def HdlDerive.checkPayloadFit (n : String) (cs : List CtorView) : MacroM Unit :=
+  match HdlDerive.ctorWidthNums cs with
+  | .none => MacroM.pure ()
+  | .some ws => HdlDerive.checkPayloads n (HdlDerive.maxNums 0 ws) ws
+
+/-- A field type `BitVec n` or `Bool`, or a type with a derived `width`/`pack`/`unpack`,
+is packable; a function, a proposition, a universe, or a prelude type with no `BitPack` is
+not. This is the clear error for the obvious mistakes (a `Nat` field, a proof field, a
+recursive field), before the generated code fails to find `<T>.width`. -/
+def HdlDerive.checkFieldType (n : String) (f : FieldView) : MacroM Unit :=
+  match Bool.or (FieldView.recursive f) (Bool.not (Derive.isData f)) with
+  | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
+      " is recursive, implicit or a proof (only data fields are packed)"))
+  | .false => let t := FieldView.type f;
+    match t with
+    | .node k _ => (match String.beq k "term.arrow" with
+      | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
+          " is a function, which has no width"))
+      | .false => (match HdlDerive.isKnownUnpackable t with
+        | .true => MacroM.throw (String.append "BitPack: a field of " (String.append n
+            " has a type with no BitPack (use BitVec n, Bool, or a type with deriving BitPack)"))
+        | .false => MacroM.pure ()))
+    | _ => MacroM.pure ()
+
+/-- `HdlDerive.checkFieldType` for a constructor's fields. -/
+def HdlDerive.checkFieldList (n : String) : List FieldView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons f fs => do
+    HdlDerive.checkFieldType n f;
+    HdlDerive.checkFieldList n fs
+
+/-- `HdlDerive.checkFieldType` for every field of every constructor. -/
+def HdlDerive.checkFieldTypes (n : String) : List CtorView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons c cs => do
+    HdlDerive.checkFieldList n (CtorView.fields c);
+    HdlDerive.checkFieldTypes n cs
+
+/-- `deriving BitPack` for a parameterless inductive with fields (Clash's layout). It
+defines `T.tagWidth`, `T.payloadWidth`, `T.width`, `T.code`, `T.pack`, `T.unpack`,
+`T.toNat`, `T.lit` (the constant in a circuit) and `T.bitPack`. The round trip
+`T.unpack (T.pack x) = x` is checked on values (`examples/hdl-conveniences.wiz`); like a
+bundle's `toBits`/`ofBits` it is not proved in general here. -/
+def HdlDerive.inductivePack (v : IndView) (n : String) : MacroM (List Syntax) := do
+  let cs := IndView.ctors v;
+  first ← HdlDerive.firstCtor n cs;
+  HdlDerive.checkIndCtors n cs;
+  HdlDerive.checkFieldTypes n cs;
+  HdlDerive.checkPayloadFit n cs;
+  HdlDerive.checkTag n (List.length cs) (Hdl.clog2 (List.length cs));
+  let tagW := HdlDerive.num (Hdl.clog2 (List.length cs));
+  let payloadS := HdlDerive.natMax (HdlDerive.ctorWidths cs);
+  let tagN := Syntax.mkIdent (String.append n ".tagWidth");
+  let payN := Syntax.mkIdent (String.append n ".payloadWidth");
+  let wN := Syntax.mkIdent (String.append n ".width");
+  let codeN := Syntax.mkIdent (String.append n ".code");
+  let packN := Syntax.mkIdent (String.append n ".pack");
+  let unpackN := Syntax.mkIdent (String.append n ".unpack");
+  let toNatN := Syntax.mkIdent (String.append n ".toNat");
+  let litN := Syntax.mkIdent (String.append n ".lit");
+  let bpN := Syntax.mkIdent (String.append n ".bitPack");
+  let tagV := Syntax.mkVar (String.append n ".tagWidth");
+  let payV := Syntax.mkVar (String.append n ".payloadWidth");
+  let wV := Syntax.mkVar (String.append n ".width");
+  let codeV := Syntax.mkVar (String.append n ".code");
+  let packV := Syntax.mkVar (String.append n ".pack");
+  let unpackV := Syntax.mkVar (String.append n ".unpack");
+  let toNatV := Syntax.mkVar (String.append n ".toNat");
+  let tyT := Syntax.mkVar n;
+  let r := Syntax.mkIdent "r";
+  let rv := Syntax.mkVar "r";
+  let x := Syntax.mkIdent "x✝";
+  let xv := Syntax.mkVar "x✝";
+  let nv := Syntax.mkIdent "n✝";
+  let nvv := Syntax.mkVar "n✝";
+  let tagv := Syntax.mkIdent "tag✝";
+  let tagvv := Syntax.mkVar "tag✝";
+  let payv := Syntax.mkIdent "payload✝";
+  let payvv := Syntax.mkVar "payload✝";
+  let motive := `(term| fun _ => BitVec $wV);
+  let packBody := (match IndView.isStructure v with
+    | .true => Derive.elim v motive (fun c => HdlDerive.packBody wV payV (HdlDerive.num 0) (CtorView.fields c)) xv
+    | .false => Syntax.mkApp (Syntax.mkVar (String.append n ".rec"))
+      (List.append (.cons motive .nil)
+        (List.append (HdlDerive.packMethods wV payV 0 cs) (.cons xv .nil))));
+  let chain := HdlDerive.unpackChain v first tagvv payvv payV 0 cs;
+  let unpackBody := `(term| let $nv := BitVec.toNat $xv; let $tagv := Nat.shiftRight $nvv $payV;
+    let $payv := Nat.mod $nvv (Nat.pow 2 $payV); $chain);
+  MacroM.pure (.cons `(command| def $tagN : Nat := $tagW)
+    (.cons `(command| def $payN : Nat := $payloadS)
+    (.cons `(command| def $wN : Nat := Nat.add $tagV $payV)
+    (.cons `(command| def $codeN : HwTy := HwTy.bits $wV)
+    (.cons `(command| def $packN ($x : $tyT) : BitVec $wV := $packBody)
+    (.cons `(command| def $unpackN ($x : BitVec $wV) : $tyT := $unpackBody)
+    (.cons `(command| def $toNatN ($x : $tyT) : Nat := BitVec.toNat ($packV $xv))
+    (.cons `(command| def $litN {$r : HwTy → Type} [Hw $rv] ($x : $tyT) : $rv $codeV := Hw.lit $wV ($toNatV $xv))
+    (.cons `(command| def $bpN : BitPack $tyT := BitPack.mk $wV $packV $unpackV) .nil)))))))))
+
+-- A representation-parameterised inductive `T Δ r` (fields `r Tᵢ`, as a bundle's are)
+-- is packed at any `r`: the tag is `r (bits tagW)`, the payload `r (bits payloadW)`, and
+-- `Hw.packBits`/`Hw.unpackBits` carry the fields (a constructor's fields are its own
+-- product code, zero-padded below). So `T.pack`/`T.unpack` work on wires too, and
+-- `T.bitPack : BitPack (T Δ HwTy.El)` is the value-level one.
+
+/-- A field of a representation-parameterised inductive: the `T` of `r T`. -/
+def HdlDerive.repFieldCode (r : String) (f : FieldView) : Syntax := (HdlDerive.split (FieldView.type f)).2
+/-- Whether a field is `r T` (the representation applied to a code). -/
+def HdlDerive.isRepField (r : String) (f : FieldView) : Bool :=
+  let sp := HdlDerive.split (FieldView.type f);
+  match HdlDerive.isVar r sp.1 with
+  | .true => (match sp.2 with
+    | .missing => .false
+    | _ => .true)
+  | .false => .false
+
+/-- A constructor's fields as a `HwTy` product (the last tail is `bits 0`). -/
+def HdlDerive.repCtorCode (r : String) : List FieldView → Syntax
+  | .nil => `(term| HwTy.bits 0)
+  | .cons f fs =>
+    let c := HdlDerive.repFieldCode r f;
+    let rest := HdlDerive.repCtorCode r fs;
+    `(term| HwTy.prod $c $rest)
+
+/-- A constructor's fields as the value of their `HwTy` product. -/
+def HdlDerive.repCtorValue : Nat → List FieldView → Syntax
+  | _, .nil => `(term| Hw.lit 0 0)
+  | i, .cons f fs =>
+    let v := Derive.var "f✝" i;
+    let rest := HdlDerive.repCtorValue (Nat.succ i) fs;
+    `(term| Hw.pair $v $rest)
+
+/-- The widths of the constructors' payloads (`HwTy.width` of their products). -/
+def HdlDerive.repCtorWidths (r : String) : List CtorView → List Syntax
+  | .nil => .nil
+  | .cons c cs =>
+    let code := HdlDerive.repCtorCode r (CtorView.fields c);
+    let w := Syntax.mkApp (Syntax.mkVar "HwTy.width") (.cons code .nil);
+    .cons w (HdlDerive.repCtorWidths r cs)
+
+/-- `Hw.snd` applied `i` times. -/
+def HdlDerive.projN : Nat → Syntax → Syntax
+  | .zero, x => x
+  | .succ k, x => HdlDerive.projN k (Syntax.mkApp (Syntax.mkVar "Hw.snd") (.cons x .nil))
+/-- The `i`-th field of a constructor's packed value. -/
+def HdlDerive.fstProj (x : Syntax) (i : Nat) : Syntax :=
+  Syntax.mkApp (Syntax.mkVar "Hw.fst") (.cons (HdlDerive.projN i x) .nil)
+/-- The arguments of a constructor, from its unpacked fields. -/
+def HdlDerive.repArgs (x : Syntax) : Nat → List FieldView → List Syntax
+  | _, .nil => .nil
+  | i, .cons f fs => .cons (HdlDerive.fstProj x i) (HdlDerive.repArgs x (Nat.succ i) fs)
+
+/-- One constructor's method for `T.pack`: the tag above `Hw.packBits` of the fields,
+zero-padded below to the widest payload (Clash's layout). -/
+def HdlDerive.repPackBody (r n : String) (delta : List Syntax) (tagi : Syntax) (fs : List FieldView) : Syntax :=
+  let code := HdlDerive.repCtorCode r fs;
+  let val := HdlDerive.repCtorValue 0 fs;
+  let packed := Syntax.mkApp (Syntax.mkVar "Hw.packBits") (.cons code (.cons val .nil));
+  let pay := Syntax.mkApp (Syntax.mkVar (String.append n ".payloadWidth")) delta;
+  let cw := Syntax.mkApp (Syntax.mkVar "HwTy.width") (.cons code .nil);
+  let pad := Syntax.mkApp (Syntax.mkVar "Nat.sub") (.cons pay (.cons cw .nil));
+  let zero := Syntax.mkApp (Syntax.mkVar "Hw.lit") (.cons pad (.cons (HdlDerive.num 0) .nil));
+  let wide := Syntax.mkApp (Syntax.mkVar "Hw.cat") (.cons packed (.cons zero .nil));
+  let tagw := Syntax.mkApp (Syntax.mkVar (String.append n ".tagWidth")) delta;
+  let tag := Syntax.mkApp (Syntax.mkVar "Hw.lit") (.cons tagw (.cons tagi .nil));
+  `(term| Hw.cat $tag $wide)
+
+/-- The `T.rec` methods of `T.pack`. -/
+def HdlDerive.repPackMethods (r n : String) (delta : List Syntax) : Nat → List CtorView → List Syntax
+  | _, .nil => .nil
+  | i, .cons c cs =>
+    let b := HdlDerive.repPackBody r n delta (HdlDerive.num i) (CtorView.fields c);
+    .cons (Derive.method (CtorView.fields c) b) (HdlDerive.repPackMethods r n delta (Nat.succ i) cs)
+
+/-- One constructor from the payload: its fields are `Hw.unpackBits` of its product's
+slice (`pad` bits up, since the fields sit at the top of the payload). -/
+def HdlDerive.repCtorDecode (v : IndView) (r n : String) (delta : List Syntax) (c : CtorView) (payload : Syntax) : Syntax :=
+  let fs := CtorView.fields c;
+  match fs with
+  | .nil => Syntax.mkVar (Derive.ctorName v c)
+  | .cons _ _ =>
+    let code := HdlDerive.repCtorCode r fs;
+    let cw := Syntax.mkApp (Syntax.mkVar "HwTy.width") (.cons code .nil);
+    let payw := Syntax.mkApp (Syntax.mkVar (String.append n ".payloadWidth")) delta;
+    let pad := Syntax.mkApp (Syntax.mkVar "Nat.sub") (.cons payw (.cons cw .nil));
+    let sl := Syntax.mkApp (Syntax.mkVar "HwTy.El.slice") (.cons pad (.cons cw (.cons payload .nil)));
+    let ub := Syntax.mkApp (Syntax.mkVar "HwTy.El.unpackBits") (.cons code (.cons sl .nil));
+    let fvi := Syntax.mkIdent "f✝";
+    let fv := Syntax.mkVar "f✝";
+    let app := HdlDerive.ctorApp v c (HdlDerive.repArgs fv 0 fs);
+    `(term| let $fvi : HwTy.El $code := $ub; $app)
+
+/-- `T.unpack`'s if chain, on the tag as a `Nat` (an out-of-range tag decodes through
+the first constructor). -/
+def HdlDerive.repUnpackChain (v : IndView) (r n : String) (delta : List Syntax) (first : CtorView)
+    (tag payload : Syntax) : Nat → List CtorView → Syntax
+  | _, .nil => HdlDerive.repCtorDecode v r n delta first payload
+  | i, .cons c cs =>
+    let app := HdlDerive.repCtorDecode v r n delta c payload;
+    let rest := HdlDerive.repUnpackChain v r n delta first tag payload (Nat.succ i) cs;
+    let cond := Syntax.mkApp (Syntax.mkVar "Nat.beq") (.cons tag (.cons (HdlDerive.num i) .nil));
+    `(term| if $cond then $app else $rest)
+
+/-- Every field of a representation-parameterised inductive must be `r T`, data. -/
+def HdlDerive.checkRepFields (n r : String) : List FieldView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons f fs =>
+    match Bool.and (HdlDerive.isRepField r f) (Bool.and (Derive.isData f) (Bool.not (FieldView.recursive f))) with
+    | .true => HdlDerive.checkRepFields n r fs
+    | .false => MacroM.throw (String.append "BitPack: a field of " (String.append n
+        (String.append " is not a data field of the form r T (r is the representation parameter "
+          (String.append r ")"))))
+
+/-- `HdlDerive.checkRepFields` for every constructor. -/
+def HdlDerive.checkRepCtors (n r : String) : List CtorView → MacroM Unit
+  | .nil => MacroM.pure ()
+  | .cons c cs => do
+    HdlDerive.checkRepFields n r (CtorView.fields c);
+    HdlDerive.checkRepCtors n r cs
+
+/-- `deriving BitPack` for `T Δ r`, an inductive whose fields are `r Tᵢ` (Clash's layout
+on the wire): `T.tagWidth Δ`, `T.payloadWidth Δ`, `T.width Δ`, `T.code Δ`,
+`T.pack Δ`, `T.unpack Δ`, `T.toBits Δ`, `T.ofBits Δ` and
+`T.bitPack Δ : BitPack (T Δ HwTy.El)`. -/
+def HdlDerive.repInductivePack (v : IndView) (n : String) : MacroM (List Syntax) := do
+  let cs := IndView.ctors v;
+  first ← HdlDerive.firstCtor n cs;
+  let ps := HdlDerive.init (IndView.params v);
+  let delta := Derive.paramVars ps;
+  let r := HdlDerive.lastName (IndView.params v);
+  HdlDerive.checkRepCtors n r cs;
+  HdlDerive.checkTag n (List.length cs) (Hdl.clog2 (List.length cs));
+  let tagW := HdlDerive.num (Hdl.clog2 (List.length cs));
+  let payloadS := HdlDerive.natMax (HdlDerive.repCtorWidths r cs);
+  let app := fun (suffix : String) => Syntax.mkApp (Syntax.mkVar (String.append n suffix)) delta;
+  let ident := fun (suffix : String) => Syntax.mkIdent (String.append n suffix);
+  let tagN := ident ".tagWidth";
+  let payN := ident ".payloadWidth";
+  let wN := ident ".width";
+  let codeN := ident ".code";
+  let packN := ident ".pack";
+  let unpackN := ident ".unpack";
+  let toBitsN := ident ".toBits";
+  let ofBitsN := ident ".ofBits";
+  let bpN := ident ".bitPack";
+  let tagApp := app ".tagWidth";
+  let payApp := app ".payloadWidth";
+  let widthApp := app ".width";
+  let codeApp := app ".code";
+  let packApp := app ".pack";
+  let unpackApp := app ".unpack";
+  let toBitsApp := app ".toBits";
+  let widTy := HdlDerive.explicitPis ps `(term| Nat);
+  let codeTy := HdlDerive.explicitPis ps `(term| HwTy);
+  let tyF := Syntax.mkApp (Syntax.mkVar n) delta;
+  let rid := Syntax.mkIdent r;
+  let rv := Syntax.mkVar r;
+  let tyS := Syntax.mkApp tyF (.cons rv .nil);
+  let tyEl := Syntax.mkApp tyF (.cons `(term| HwTy.El) .nil);
+  let s := Syntax.mkIdent "s✝";
+  let sv := Syntax.mkVar "s✝";
+  let x := Syntax.mkIdent "x✝";
+  let xv := Syntax.mkVar "x✝";
+  let nv := Syntax.mkIdent "n✝";
+  let nvv := Syntax.mkVar "n✝";
+  let tagv := Syntax.mkIdent "tag✝";
+  let tagvv := Syntax.mkVar "tag✝";
+  let payv := Syntax.mkIdent "payload✝";
+  let payvv := Syntax.mkVar "payload✝";
+  let motive := `(term| fun _ => $rv $codeApp);
+  let methods := HdlDerive.repPackMethods r n delta 0 cs;
+  let packBody := Syntax.mkApp (Syntax.mkVar (String.append n ".rec"))
+    (List.append (.cons motive .nil) (List.append methods (.cons xv .nil)));
+  let chain := HdlDerive.repUnpackChain v r n delta first tagvv payvv 0 cs;
+  let unpackBody := `(term| let $nv := BitVec.toNat $xv; let $tagv := Nat.shiftRight $nvv $payApp;
+    let $payv : BitVec $payApp := HwTy.El.slice 0 $payApp $xv; $chain);
+  let packTy := HdlDerive.explicitPis ps `(term| {$rid : HwTy → Type} → [Hw $rv] → $tyS → $rv $codeApp);
+  let unpackTy := HdlDerive.explicitPis ps `(term| BitVec $widthApp → $tyEl);
+  let toBitsTy := HdlDerive.explicitPis ps `(term| {$rid : HwTy → Type} → [Hw $rv] → $tyS → $rv (HwTy.bits $widthApp));
+  let ofBitsTy := HdlDerive.explicitPis ps `(term| BitVec $widthApp → $tyEl);
+  let bpTy := HdlDerive.explicitPis ps `(term| BitPack $tyEl);
+  let tagVal := HdlDerive.lams ps tagW;
+  let payVal := HdlDerive.lams ps payloadS;
+  let wVal := HdlDerive.lams ps `(term| Nat.add $tagApp $payApp);
+  let codeVal := HdlDerive.lams ps `(term| HwTy.bits $widthApp);
+  let packVal := HdlDerive.lams ps `(term| fun $x => $packBody);
+  let unpackVal := HdlDerive.lams ps `(term| fun $x => $unpackBody);
+  let toBitsVal := HdlDerive.lams ps `(term| fun $s => $packApp $sv);
+  let ofBitsVal := HdlDerive.lams ps `(term| fun $x => $unpackApp $xv);
+  let bpVal := HdlDerive.lams ps `(term| BitPack.mk $widthApp $toBitsApp $unpackApp);
+  MacroM.pure (.cons `(command| def $tagN : $widTy := $tagVal)
+    (.cons `(command| def $payN : $widTy := $payVal)
+    (.cons `(command| def $wN : $widTy := $wVal)
+    (.cons `(command| def $codeN : $codeTy := $codeVal)
+    (.cons `(command| def $packN : $packTy := $packVal)
+    (.cons `(command| def $unpackN : $unpackTy := $unpackVal)
+    (.cons `(command| def $toBitsN : $toBitsTy := $toBitsVal)
+    (.cons `(command| def $ofBitsN : $ofBitsTy := $ofBitsVal)
+    (.cons `(command| def $bpN : $bpTy := $bpVal) .nil)))))))))
+
+/-- `deriving BitPack` for an enumeration (no parameters, constructors without fields),
+an inductive type with fields or a plain structure (no parameters; a tag plus the fields,
+zero-padded to the widest constructor), a representation-parameterised inductive `T Δ r`
+whose fields are `r Tᵢ`, or a bundle. -/
 def deriveBitPack : Deriver := fun n => do
   v ← Derive.lookup "BitPack" n;
   Derive.noIndices "BitPack" v;
+  HdlDerive.checkCtors n (IndView.ctors v);
   match IndView.params v, HdlDerive.allNullary (IndView.ctors v) with
   | .nil, .true => HdlDerive.enumPack v n
   | .cons _ _, _ => (match IndView.isStructure v with
     | .true => do
       code ← MacroM.getType (String.append n ".code");
       pre ← (match code with
-        | .some _ => MacroM.pure []
+        | .some _ => MacroM.pure List.nil
         | .none => deriveBundle n);
       HdlDerive.bundlePack v n pre
-    | .false => MacroM.throw (String.append "BitPack: not an enumeration or a bundle: " n))
-  | .nil, .false => MacroM.throw (String.append "BitPack: not an enumeration (constructors without fields) or a bundle: " n)
+    | .false => (match HdlDerive.allNullary (IndView.ctors v) with
+      | .true => MacroM.throw (String.append "BitPack: a parameterised enumeration is a bundle, not an inductive: " n)
+      | .false => HdlDerive.repInductivePack v n))
+  | .nil, .false => HdlDerive.inductivePack v n
 attribute [deriver BitPack] deriveBitPack
 
 ------------------------------------------------------------------------------------

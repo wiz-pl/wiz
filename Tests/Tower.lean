@@ -158,7 +158,8 @@ def readFile? (f : System.FilePath) : IO String := do
 
 /-- A release directory for `tag`: `RELEASES/tag/wiz-ARCH-linux.tar.gz` made from a
 toolchain tree (`bin/wiz` and `bin/grail` print their arguments) that ships
-`share/wiz/cache`. No `.sha256`: a tag release does not need one. -/
+`share/wiz/cache`, and its `.sha256` (mandatory for tags and snapshots since
+51db234c1). -/
 def releaseWithCache (rel : System.FilePath) (tag a : String) : IO Unit := do
   let root ← mkTree [
     (s!"wiz-{a}-linux/bin/wiz", "#!/bin/sh\necho release wiz \"$@\"\n"),
@@ -170,7 +171,11 @@ def releaseWithCache (rel : System.FilePath) (tag a : String) : IO Unit := do
   for b in ["bin/wiz", "bin/grail", "share/wiz/.lake/build/bin/wiz", "share/wiz/.lake/build/bin/grail"] do
     makeExecutable (root / s!"wiz-{a}-linux" / b)
   IO.FS.createDirAll (rel / tag)
-  let _ ← runOut "tar" ["-czf", (rel / tag / tarballName a).toString, "-C", root.toString, s!"wiz-{a}-linux"]
+  let tb := rel / tag / tarballName a
+  let _ ← runOut "tar" ["-czf", tb.toString, "-C", root.toString, s!"wiz-{a}-linux"]
+  -- every release (tag or snapshot) is installed only with its checksum (51db234c1)
+  let sumOut ← runOut "sha256sum" [tb.toString]
+  IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
 
 /-- `tower show` in a directory: the toolchain and why (`none` when it fails). -/
 def showIn (e : Env) (dir : System.FilePath) : IO (Option (String × String)) := do
@@ -350,7 +355,7 @@ def cases (impl : IO Impl) : List Case := [
         checkHas (← runOut (e.binDir / "wiz").toString ["+mine", "x"]) "release wiz -I"
         tower e ["default", "mine"]
         checkHas (← runOut (e.binDir / "grail").toString ["y"] (← IO.FS.createTempDir)) "release grail y" },
-    { name := "a checksum-less tag release, and the wrapper's read-only cache", run := fun _ => do
+    { name := "a tag release's checksum is mandatory, and the wrapper's read-only cache", run := fun _ => do
         let (bare, _) ← upstream
         let a ← arch
         let rel ← IO.FS.createTempDir
@@ -359,8 +364,8 @@ def cases (impl : IO Impl) : List Case := [
         tower e ["set", "git", bare.toString]
         tower e ["set", "releases", rel.toString]
         tower e ["set", "source", "release"]
-        -- a tag has its own release, which is installed with or without its `.sha256`
-        -- (a snapshot must have one: the snapshot case below)
+        -- a tag has its own release, and since 51db234c1 it is installed only with its
+        -- `.sha256` (the snapshot case below covers the snapshot path)
         tower e ["toolchain", "install", "v1"]
         let tc := e.tcDir "v1"
         checkHas (← readFile? (tc / "tower.info")) "source release"
@@ -368,13 +373,20 @@ def cases (impl : IO Impl) : List Case := [
         let out ← runOut (tc / "bin/wiz").toString ["check"]
         checkHas out s!"--cache-ro {tc / "share/wiz/cache"}"
         checkHas out s!"-I {tc / "share/wiz/lib"}"
-        checkHas (← runOut (tc / "bin/grail").toString ["build"]) s!"--cache-ro {tc / "share/wiz/cache"}" },
+        checkHas (← runOut (tc / "bin/grail").toString ["build"]) s!"--cache-ro {tc / "share/wiz/cache"}"
+        -- without its checksum the tag release is refused, not installed unverified
+        IO.FS.removeFile (rel / "v1" / (tarballName a ++ ".sha256"))
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release", "--force"]
+        checkHas m "sha256" },
     { name := "error paths: an external command, run of a missing command, link of a missing path, a dangling link", run := fun _ => do
         let (bare, _) ← upstream
         let a ← arch
         let rel ← IO.FS.createTempDir
         IO.FS.createDirAll (rel / "v1")
-        IO.FS.writeFile (rel / "v1" / tarballName a) "not a tarball\n"
+        let tb := rel / "v1" / tarballName a
+        IO.FS.writeFile tb "not a tarball\n"
+        let sumOut ← runOut "sha256sum" [tb.toString]
+        IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]
         tower e ["set", "releases", rel.toString]

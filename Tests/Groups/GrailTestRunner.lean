@@ -105,7 +105,7 @@ def testRunnerGroup : Group where
           check ((t.message.splitOn "needs --trust-native").length > 1) t.message
           check (!(← (dir / "tests/on-demand.expected").pathExists)) "--update wrote a skipped test's .expected" },
     { name := "a nested package under the tests root is not a test", run := fun _ => do
-        -- examples/grail-index/sources/*: packages with their own grail.wiz (and a
+        -- examples/fate-index/sources/*: packages with their own grail.wiz (and a
         -- directory name with dots), whose modules import each other's packages
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/one.wiz", "import Prelude\ndef x : Nat := 1\n"), ("tests/one.expected", ""),
@@ -189,7 +189,7 @@ def testRunnerGroup : Group where
           pure (o.exitCode, o.stdout ++ o.stderr)
         let has (out s : String) : IO Unit := check ((out.splitOn s).length > 1) s!"no {s} in:\n{out}"
         let (code, out) ← run #["--run", "driver-fixtures", "0"]
-        checkEq 0 code; has out "✓ fixture: passes"; has out "driver-fixtures #0: passed"
+        checkEq 0 code; has out "[1/1]   ✓ fixture: passes"; has out "driver-fixtures #0: passed"
         let (code, out) ← run #["--run", "driver-fixtures", "1"]
         checkEq 1 code; has out "✗ fixture: fails"; has out "fixture failure"
         has out "fixture output before the failure"; has out "FAILED"
@@ -214,12 +214,17 @@ def testRunnerGroup : Group where
         let (c1, one) ← run #["--jobs", "1", "=rig"]
         let (c4, four) ← run #["--jobs", "4", "=rig"]
         checkEq 0 c1; checkEq 0 c4
-        -- the case lines, without their times (`(0.032 s)`); the group total too
+        -- the case lines, without their times (`(0.032 s)`) but with their `[n/total]`
+        -- position (which `--jobs` must not change); the group total too
         let norm (out : String) : List String :=
           (out.splitOn "\n").filterMap fun l =>
             if l.startsWith "── " then some l
-            else if l.startsWith "  ✓ " || l.startsWith "  ⊘ " || l.startsWith "  ✗ " then some (l.splitOn " (").head!
-            else none
+            else
+              let body := match l.splitOn "] " with
+                | [num, rest] => if num.startsWith "[" then rest else l
+                | _ => l
+              if body.startsWith "  ✓ " || body.startsWith "  ⊘ " || body.startsWith "  ✗ " then some (l.splitOn " (").head!
+              else none
         check ((norm four).length > 4) "no cases in the --jobs 4 log"
         checkEq (norm one) (norm four)
         -- and the same result

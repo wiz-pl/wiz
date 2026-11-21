@@ -4,6 +4,7 @@ import Sys
 import Word
 import Scry.CstStore
 import Scry.Native
+import Scry.NativeLink
 -- The S1 shim end to end: `fixtures/hello.c` through the vendored tree-sitter,
 -- the column store, and the model view. Every number is checked (a mismatch exits
 -- 1), then the malformed `fixtures/broken.c` must be refused by `parseChecked`.
