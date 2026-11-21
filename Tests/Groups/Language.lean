@@ -782,7 +782,7 @@ def languageGroup : Group where
     { name := "13u: `(command| import M)` does not parse (a quotation cannot write one)", run := fun _ =>
         failsLib ("import Prelude\nsyntax (name := steal) \"steal\" : command\n" ++
           "macro_rules\n  | `(command| steal) => `(command| import Prelude)\n")
-          "expected" }
+          "expected" },
     -- 13t: `<|`, `|>.` and `·` sections
     { name := "13t: `f <| x` is `f x` (right associative), `x |> f` is `f x` (left associative)", run := fun _ => do
         okLib ("import Prelude\n#eval Nat.succ <| 4\n#eval Nat.succ <| Nat.succ <| 5\n" ++
