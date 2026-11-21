@@ -599,7 +599,7 @@ its class dictionaries, so by the kernel's predicative Π rule — `(x : A) → 
 universe rather than lowering it. A `Type 0` container of such optics is therefore
 impossible, while the store lens `Lens S A = S → Store A S` is `Type` and stays that way.
 If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
-(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
+(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`scry/src/Scry/Optics.wiz:89-93`), not a
 universe change.
 
 ### Profunctor optics (default) and the store encoding
@@ -2087,7 +2087,12 @@ rotations) are checked by the tests rather than proved — for `PMap`, `PSet` an
 complexity, persistence guarantees and the benchmark plan are in
 `wiz-notes/persistent-data.md`.
 
-## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+> **Scry is a package, not a standard-library module** (`separate-repos.md` P0.1): its
+> modules live in `scry/src/Scry/` and its rule packs in `scry/rules/`. `wiz doc --lib`
+> no longer documents them; `scry/README.md` is the package's own guide. The sections
+> below remain as a cross-reference for the language features they exercise.
+
+## Scry: Wil, the analysis IR (`scry/src/Scry/Wil.wiz`)
 
 `import Scry.Wil` is the small three-address IR of the `scry` analyser
 (`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
@@ -2112,14 +2117,14 @@ is the lockset data-race check that consumes it (`Scry.raceFindings`). The model
 memory model, and what is proved vs tested are in `wiz-notes/scry-wil-concurrency.md`.
 
 
-## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+## Scry: CFG, reaching definitions and taint (`scry/src/Scry/Analysis.wiz`, `scry/src/Scry/Taint.wiz`)
 
 `import Scry.Analysis` numbers a Wil function's statements and terminators as program
 points and computes the CFG, dominators, reaching definitions and the PDG's def-use
 (flow-dependence) edges; `Scry.fnInfoWith` adds caller-supplied definitions (a tainted
 parameter at entry, an argument a call writes) and terminator uses (`ret`/`br`) join the
 data edges, so return values are modelled. `import Scry.Taint` feeds those edges to the
-Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
+Datalog engine (`scry/src/Scry/Datalog.wiz`, `scry/src/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, at
@@ -2138,7 +2143,7 @@ The S4 rule pack and interprocedural slice are separate modules:
   `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching. A sink is
   `sink NAME arg K` or `sink NAME args`; the latter checks every argument of a variadic
   call (`execl`), while the finding still names the concrete tainted index.
-  `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
+  `scry/src/Scry/rules/default.scry` is the demo pack as a real spec file.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
@@ -2196,9 +2201,9 @@ The S4 rule pack and interprocedural slice are separate modules:
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
-`lib/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
+`scry/src/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
 `scry/memory/null-dereference` diagnostic with `--null-deref` (opt-in); the CWE-22 `path-traversal` rule is
-opt-in as `lib/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
+opt-in as `scry/src/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
 `realpath` modelled as a sanitiser of its result and destination, not its input).
 Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
@@ -2213,7 +2218,7 @@ context sensitivity, non-ASCII columns); the lowering still warns (havoc) for th
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
 
-## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
+## Scry: e-graph and equality saturation (`scry/src/Scry/Egraph.wiz`, `scry/src/Scry/EgraphNative.wiz`)
 
 `import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
 rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
@@ -2248,7 +2253,7 @@ scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware proven
 no kernel-checked certificates yet; `wiz-notes/datalog-egraph-plan.md` and
 `wiz-notes/code-analysis-design.md` §10 have the design, the API and the gaps.
 
-## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
+## Scry: e-classes from Wil terms and checked extraction (`scry/src/Scry/EgraphWil.wiz`, `scry/src/Scry/EgraphExtract.wiz`)
 
 `import Scry.EgraphWil` turns a `Wil.Program` into an e-graph: every `x = e` is a union
 of the register's class with a structural encoding of `e` (`cst`, `use`, `bin`, `un`,

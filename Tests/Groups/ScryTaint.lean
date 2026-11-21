@@ -5,8 +5,8 @@ import Tests.Harness
 # Tests for scry's taint analyses (`Scry.Analysis`, `Scry.Taint`, `Scry.RuleTaint`,
 `Scry.Interproc`, `Scry.Sarif`, `Scry.Certify`)
 
-The corpus is in `lib/Scry/TaintExamples.wiz` (the intraprocedural prototype) and
-`lib/Scry/RuleExamples.wiz` (the rule pack and interprocedural engine); each case
+The corpus is in `scry/src/Scry/TaintExamples.wiz` (the intraprocedural prototype) and
+`scry/src/Scry/RuleExamples.wiz` (the rule pack and interprocedural engine); each case
 evaluates a summary with `#eval` and compares it with the expected value. No C toolchain
 is needed.
 
@@ -273,7 +273,7 @@ def group : Group where
           "#eval ruleSev Scry.demoRules.rules \"gets-overflow\"\n" ++
           "#eval ruleKind Scry.demoRules.rules \"gets-overflow\"")
           ["\"error\"", "\"forbidden\""]
-        let text ← IO.FS.readFile "lib/Scry/rules/default.scry"
+        let text ← IO.FS.readFile "scry/rules/default.scry"
         let lit := (text.replace "\\" "\\\\").replace "\"" "\\\"" |>.replace "\n" "\\n"
         evalRuleNats (rulePrelude ++
           s!"#eval List.length (Scry.parseRulePack \"{lit}\").rules") [4] },
@@ -489,7 +489,7 @@ def group : Group where
           "#eval List.length (List.filter (fun w => String.eq (Scry.MemWarnKind.show w.kind) \"null-dereference\") prN.warnings)\n") [0, 1] },
     { name := "path rule: opt-in pack, path sinks, the argv directive and the realpath sanitiser",
       run := fun _ => do
-        let text ← IO.FS.readFile "lib/Scry/rules/path-traversal.scry"
+        let text ← IO.FS.readFile "scry/rules/path-traversal.scry"
         let body :=
           s!"def pathPackText : String := {wizStr text}\n" ++
           "def pathPack : Scry.RulePack := Scry.parseRulePack pathPackText\n" ++
