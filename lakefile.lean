@@ -44,6 +44,12 @@ lean_lib STC where
 
 lean_lib Grail
 
+-- Hot-reload P0: the interpreter + transaction + cache prototype (see
+-- `HotReload/README.md`). A separate library, not a default target: nothing else
+-- imports it and `lake build` alone does not build it. The surface is behind the
+-- `hotreload` executable's `--allow-reload` flag; the language path is unchanged.
+lean_lib HotReload
+
 -- The C runtime as text (`include_str`, runtime/WizRuntime.lean), a library of its own so
 -- that only it depends on the runtime's files: `needs` mixes their hashes into its
 -- modules' traces, so editing one rebuilds it and its importers (Lake doesn't track
@@ -61,6 +67,11 @@ lean_lib WizRuntime where
 lean_exe tests where
   root := `Tests.Main
   moreLinkObjs := #[`@/sockets, `@/proc]
+
+-- The P0 prototype's command: `hotreload [--allow-reload]`. Not a default target.
+-- With no flag it prints that hot reload is disabled; it never touches `wiz`.
+lean_exe hotreload where
+  root := `HotReload.Main
 
 /-- `lake build genSelfhostTables`: rewrite `selfhost/Tables.wiz` from the Lean parser's
 tables (`scripts/GenSelfhostTables.lean`). Not a default target: only the grammar's
