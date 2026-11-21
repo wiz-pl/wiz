@@ -56,3 +56,17 @@ def readNow {A : Type} (o : Observable A) : IO A :=
 --   Loom.App.mk (Model.mk 0)
 --     (fun msg m => read p update msg m)
 --     (fun m => read p view m)
+
+-- A parser: one pinned generation per batch keeps the corpus reproducible; a
+-- REPL takes a new snapshot per input.
+--
+-- reloadable def parse (src : String) : Result Ast Error := ...
+-- def compileBatch (p : Pinned) (srcs : List String) : List (Result Ast Error) :=
+--   List.map (read p parse) srcs
+
+-- A scry rule: a scan pins one generation for the whole file/database, so a
+-- mid-scan swap cannot mix two rules; each finding carries the revision.
+--
+-- reloadable def taintRule (f : Func) : List Finding := ...
+-- def analyze (p : Pinned) (db : Db) : List Finding :=
+--   List.concatMap (read p taintRule) (Db.funcs db)
