@@ -42,6 +42,13 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `list-index` | 4000 | 10 passes of N reads of a `List Nat` at a pseudo-random index: the `List` `at`-in-a-loop pattern |
 | `egraph` | 3000 | build N e-nodes, union N pseudo-random pairs, then 10·N `find`s (`Scry.EGraph`, whose union-find tables are `U64Array`s) |
 
+`str-append` is the compiled `Str.append` builder: the loop `s := Str.append s piece`
+keeps the accumulator unique, so the runtime grows it in place; at the default it
+appends 10,000 100-byte chunks (1,000,000 bytes). The old copy-only `wiz_str_append`
+and the in-place one produce the same checksum, so an A/B run can use a baseline
+built from the same sources with the `a != b && WIZ_RC(a) == 1` branch of
+`wiz_str_append` removed. `str-push` is the same builder one byte at a time.
+
 ## Comparing two builds
 
 Two runs of the same build differ by several percent when other work shares the machine.
