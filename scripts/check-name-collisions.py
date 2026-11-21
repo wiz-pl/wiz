@@ -123,7 +123,7 @@ CI: add these two lines to the `docs_style` job's run step in
   python3 scripts/check-name-collisions.py --self-test
   python3 scripts/check-name-collisions.py --quiet
 
-The baseline makes the `--quiet` run green today (12 entries); a stale or expired
+The baseline makes the `--quiet` run green today (13 entries); a stale or expired
 entry is still a failure.  A second, stricter job (recommended; no baseline, import
 graph only) is the truthful co-loadable check and is 0 today:
   python3 scripts/check-name-collisions.py --reachable --quiet

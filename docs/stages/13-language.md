@@ -1077,18 +1077,23 @@ baseline; the parser, resolver and self-hosted changes are stages 1–4 of the p
   It has one tab-separated row per declaration: module, today's absolute name, reason
   class (`module-prefixed`, `first-prefixed`, `leaf-prefixed`, `other-dotted`,
   `principal`, `bare`), source file, line. Rows are sorted by `(module, name)` and the
-  file is deterministic. Before batch 1 (the train8 tree) it is **14,083 rows in 211
-  files** (11,131 / 198 without `selfhost`); after batch 1 it is **10,880 rows in 198
-  files**. `__root__.` declarations are not rows: they already have the true-global name
-  they keep.
+  file is deterministic. Before batch 1 it is **14,353 rows in 216 files** on the
+  train9 tree (14,083 / 211 before the train9 merge; 11,131 / 198 without `selfhost` on
+  the train8 tree); after batch 1 it is **11,150 rows in 203 files** (10,880 / 198
+  before the train9 merge). The merge into train9 added 439 declarations that needed a
+  row and made 169 rows stale; the regenerated file is the same generation, not a
+  hand edit. `__root__.` declarations are not rows: they already have the true-global
+  name they keep.
 * `scripts/check-names.py` reports a declaration whose current name is not under its
   module prefix — the set the migration will rename. Normal mode reports and exits 0; a
   `__root__.` declaration is exempt, and a row suppresses the report. `--quiet` is the
   CI gate: it fails on a declaration with no row (a new name must regenerate the
   baseline) and on a stale row, and passes on today's tree. `--strict-names` makes
-  every prefix violation an error: **12,910 declarations** before batch 1 (9,436 dotted,
-  3,474 bare) and **9,707** after it (9,068 dotted, 639 bare), which is the size of the
-  rename work, not a gate that is green before stage 6. A malformed row is exit 2.
+  every prefix violation an error: **13,173 declarations** before batch 1 (12,487
+  dotted, 686 bare) and **9,970** after it (9,284 dotted, 686 bare) on the train9 tree;
+  the plan's 12,910 → 9,707 (9,436/3,474 → 9,068/639) are the same counts before the
+  train9 merge, whose new declarations add 263 outside-prefix names. That is the size of
+  the rename work, not a gate that is green before stage 6. A malformed row is exit 2.
 * A `namespace __root__` body is explicitly global, like a `__root__.` name: the tools
   take its declarations out of the allowlist (no row), the collision checker reports
   them under the name they are written as rather than as migration names, and
@@ -1103,10 +1108,14 @@ baseline; the parser, resolver and self-hosted changes are stages 1–4 of the p
   cannot hide a name change. `gen-legacy-names.py --update-digest` refreshes it.
 * **Batch 1 (landed)** — `namespace __root__` around `lib/Prelude.wiz` and the twelve
   `selfhost/*.wiz` files (3,203 declarations, 13 files on this tree; zero renames, zero
-  ledger re-keyings). It deleted their rows: the allowlist is 14,083 → 10,880, the
-  `--strict-names` count 12,910 → 9,707, and the collision checker's migration count
-  10,367 → 10,000 (87 baselined, 0 unbaselined). Batch 2 (strip the 1,173
-  module-prefixed declarations) is the next mechanical batch.
+  ledger re-keyings). It deleted their rows: on the train9 tree the allowlist is
+  14,353 → 11,150, the `--strict-names` count 13,173 → 9,970, and the collision
+  checker's migration count 10,221 with 13 baselined groups, 0 unbaselined and 0
+  co-loadable. (Before the train9 merge the same deletion read 14,083 → 10,880,
+  12,910 → 9,707, 10,000 migration and 87 baselined; train9's `egraph-one` collapse
+  removed the 74 `Scry.Egraph`/`Scry.EgraphNative` duplicate rows from the baseline,
+  so 13 is the current truthful baseline, not a regression.) Batch 2 (strip the
+  1,180 module-prefixed declarations) is the next mechanical batch.
 
 CI: add these two lines to the `docs_style` job's run step in
 `.github/workflows/ci.yml` (after the `check-name-collisions.py` lines):
