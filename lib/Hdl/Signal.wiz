@@ -96,25 +96,47 @@ instance {d : ClockDomain} {n k : Nat} {i : Size} : OfNat ((Signal d (BitVec n))
   OfNat.mk (Signal.pureS (i := i) (BitVec.ofNat n k))
 
 /-- `map` at the same size: `f` on the value of every cycle, with the size preserved.
-A sized copattern definition (lane L2): the body is checked at a predecessor size, the
-input's head is observed there, and the recursive call is on its tail at the smaller
-size. -/
+A sized `scofix` (lane L2): the state is the input stream at the running size, the body
+is at a predecessor and observes the input with `out`, and the recursive call is the
+`scofix` seed at that predecessor. `Signal.fix` below is the same shape; writing the
+state family out keeps these three independent of the copattern sugar's state-type
+bookkeeping (the term is what the sugar denotes). -/
 def Signal.mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) :
-    (Signal d B)^i
-  | .head => f s.head
-  | .tail => Signal.mapS f s.tail
+    (Signal d B)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j)
+    (fun (j : Size) rec idx a =>
+      let (h, r) := out a
+      let (t, u) := r
+      cocon (f h, rec idx t, (), ()))
+    i () s
 
 /-- `zipWith` at the same size. -/
 def Signal.zipWithS {d : ClockDomain} {A B C : Type} {i : Size} (f : A → B → C)
-    (a : (Signal d A)^i) (b : (Signal d B)^i) : (Signal d C)^i
-  | .head => f a.head b.head
-  | .tail => Signal.zipWithS f a.tail b.tail
+    (a : (Signal d A)^i) (b : (Signal d B)^i) : (Signal d C)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j × (Signal d B)^j)
+    (fun (j : Size) rec idx p =>
+      let (a, b) := p
+      let (ha, ra) := out a
+      let (ta, ua) := ra
+      let (hb, rb) := out b
+      let (tb, ub) := rb
+      cocon (f ha hb, rec idx (ta, tb), (), ()))
+    i () (a, b)
 
 /-- `zipWith3` at the same size (`if` is a three-way mux). -/
 def Signal.zipWith3S {d : ClockDomain} {A B C D : Type} {i : Size} (f : A → B → C → D)
-    (a : (Signal d A)^i) (b : (Signal d B)^i) (c : (Signal d C)^i) : (Signal d D)^i
-  | .head => f a.head b.head c.head
-  | .tail => Signal.zipWith3S f a.tail b.tail c.tail
+    (a : (Signal d A)^i) (b : (Signal d B)^i) (c : (Signal d C)^i) : (Signal d D)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j × (Signal d B)^j × (Signal d C)^j)
+    (fun (j : Size) rec idx p =>
+      let (a, b, c) := p
+      let (ha, ra) := out a
+      let (ta, ua) := ra
+      let (hb, rb) := out b
+      let (tb, ub) := rb
+      let (hc, rc) := out c
+      let (tc, uc) := rc
+      cocon (f ha hb hc, rec idx (ta, tb, tc), (), ()))
+    i () (a, b, c)
 
 /-- Feedback for a contractive stream function: `g` maps a signal at size `i` to one at
 `↑i`, so it can only use its argument under a register (`registerS`), never observe it.

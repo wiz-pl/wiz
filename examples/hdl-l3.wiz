@@ -74,7 +74,7 @@ def numAtSize {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3
 -- what makes `+`/`if` on `(Signal d A)^i` possible. `registerS` is the only size bump.
 def incS {d : ClockDomain} {i : Size} (s : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i :=
   Signal.mapS (fun (x : BitVec 8) => BitVec.add x (BitVec.ofNat 8 1)) s
-#eval Signal.sample 3 (Signal.map BitVec.toNat (incS (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))
+#eval Signal.sample 3 (Signal.map BitVec.toNat (incS (d := Sys) (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))
 
 -- `counter = register 0 (counter + 1)`: the loop variable `c` is at size `i`, `c + 1`
 -- preserves the size, and only `registerS` raises it to `↑i` for the next knot.

@@ -138,6 +138,8 @@ jobs:
           python3 scripts/check-complexity --diff HEAD^1
           python3 scripts/check-name-collisions.py --self-test
           python3 scripts/check-name-collisions.py --quiet
+          python3 scripts/check-names.py --self-test
+          python3 scripts/check-names.py --quiet
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,

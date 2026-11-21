@@ -114,8 +114,11 @@ def tablesFileHeader : String :=
 /-- `selfhost/Tables.wiz`: the tables as a checked-in Wiz source file, which the
 self-hosted programs read as one more module (the fixpoint's input set therefore holds
 no generated Wiz text). `lake build genSelfhostTables` regenerates it and the `selfhost`
-group fails when it is stale (`selfhost/Tables.wiz` vs `tablesFile`). -/
-def tablesFile : String := tablesFileHeader ++ tablesSource
+group fails when it is stale (`selfhost/Tables.wiz` vs `tablesFile`). (13v) The file is
+wrapped in `namespace __root__` ... `end`, like the hand-written selfhost sources: batch
+1 keeps the whole self-hosted tree global when the module path becomes the default
+prefix, and a table file with a different shape would be a second kind of source. -/
+def tablesFile : String := "namespace __root__\n" ++ tablesFileHeader ++ tablesSource ++ "end\n"
 
 /-- The language: the modules the self-hosted frontend is made of, without an entry
 point. Probes that build their own `main` use this list; the programs use

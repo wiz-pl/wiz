@@ -291,8 +291,8 @@ def hdlGroup : Group where
            "19",
            "131372",
            "(.true, .true, .true)",
-           ".cons .true (.cons .true (.cons .true (.cons .true .nil)))",
-           ".cons 0 (.cons 0 (.cons 1 (.cons 0 .nil)))"]
+           "[Bool.true, Bool.true, Bool.true, Bool.true]",
+           "[0, 0, 1, 0]"]
         failsLibs "import Hdl.Core\ninductive Bad where\n  | c (n : Nat)\n  deriving BitPack" "no BitPack"
         failsLibs "import Hdl.Core\ninductive Bad where\n  | c (b : Bad)\n  deriving BitPack" "recursive, implicit or a proof"
         failsLibs "import Hdl.Core\ninductive Empty where\n  deriving BitPack" "no constructors"
