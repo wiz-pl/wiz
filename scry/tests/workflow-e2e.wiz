@@ -164,7 +164,7 @@ def runWorkflow : EIO Unit := do
   check "verify static-only: comparison.reproRan is false"
     (Bool.not (flag ver0 ["comparison", "reproRan"]));
   check "verify static-only: the claim is explicit"
-    (String.contains (strAt ver0 ["staticAfter", "claim"]) "not a proof of absence");
+    (String.eq (strAt ver0 ["staticAfter", "claim"]) "reported by this run");
 
   -- 4. repro, when a real compiler is available. The plan's harness (env) and input are
   -- derived from candidate.json; the marker must be observed at the sink.
