@@ -31,7 +31,7 @@ partial def walk (dir : System.FilePath) : IO (List System.FilePath) := do
     if ← e.path.isDir then
       out := out ++ (← walk e.path)
     else
-      out := out ++ [e.path]
+      out := out ++ [e.path]   -- complexity: ok (the e2e corpus has a handful of files)
   pure out
 
 def fields (l : String) : List String := l.splitOn "\t"
