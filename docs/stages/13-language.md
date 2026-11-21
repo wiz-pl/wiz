@@ -1075,17 +1075,18 @@ baseline; the parser, resolver and self-hosted changes are stages 1–4 of the p
   It has one tab-separated row per declaration: module, today's absolute name, reason
   class (`module-prefixed`, `first-prefixed`, `leaf-prefixed`, `other-dotted`,
   `principal`, `bare`), source file, line. Rows are sorted by `(module, name)` and the
-  file is deterministic. On the train8 tree it is **14,083 rows in 211 files**
-  (11,131 / 198 without `selfhost`). `__root__.` declarations are not rows: they already
-  have the true-global name they keep.
+  file is deterministic. Before batch 1 (the train8 tree) it is **14,083 rows in 211
+  files** (11,131 / 198 without `selfhost`); after batch 1 it is **10,880 rows in 198
+  files**. `__root__.` declarations are not rows: they already have the true-global name
+  they keep.
 * `scripts/check-names.py` reports a declaration whose current name is not under its
   module prefix — the set the migration will rename. Normal mode reports and exits 0; a
   `__root__.` declaration is exempt, and a row suppresses the report. `--quiet` is the
   CI gate: it fails on a declaration with no row (a new name must regenerate the
   baseline) and on a stale row, and passes on today's tree. `--strict-names` makes
-  every prefix violation an error: **12,910 declarations** today (9,436 dotted, 3,474
-  bare), which is the size of the rename work, not a gate that is green before stage 6.
-  A malformed row is exit 2.
+  every prefix violation an error: **12,910 declarations** before batch 1 (9,436 dotted,
+  3,474 bare) and **9,707** after it (9,068 dotted, 639 bare), which is the size of the
+  rename work, not a gate that is green before stage 6. A malformed row is exit 2.
 * A `namespace __root__` body is explicitly global, like a `__root__.` name: the tools
   take its declarations out of the allowlist (no row), the collision checker reports
   them under the name they are written as rather than as migration names, and
@@ -1098,10 +1099,11 @@ baseline; the parser, resolver and self-hosted changes are stages 1–4 of the p
   and strong module keys, and `Frontend.isoKey` into the in-process isolation key.
   `check-names.py` fails when the constant and the file disagree, so a stale cache
   cannot hide a name change. `gen-legacy-names.py --update-digest` refreshes it.
-* **First migration batch: batch 1 of the plan** — `namespace __root__` around
-  `lib/Prelude.wiz` and the twelve `selfhost/*.wiz` files (3,203 declarations, 13 files
-  on this tree; zero renames, zero ledger re-keyings). It deletes their rows and makes
-  the root files explicit before the default prefix flips. Batch 2 (strip the 1,173
+* **Batch 1 (landed)** — `namespace __root__` around `lib/Prelude.wiz` and the twelve
+  `selfhost/*.wiz` files (3,203 declarations, 13 files on this tree; zero renames, zero
+  ledger re-keyings). It deleted their rows: the allowlist is 14,083 → 10,880, the
+  `--strict-names` count 12,910 → 9,707, and the collision checker's migration count
+  10,367 → 10,000 (87 baselined, 0 unbaselined). Batch 2 (strip the 1,173
   module-prefixed declarations) is the next mechanical batch.
 
 CI: add these two lines to the `docs_style` job's run step in
