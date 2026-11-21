@@ -1312,8 +1312,6 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
     let some alt := copatternAlt? alts o
       | throwAt info s!"missing copattern .{o}" ErrorCode.missingCopattern
     let rhs := rewriteSizedRhs info name recName idxName n coid (alt.getArg 3)
-    if name == "Signal.mapS" && o == "head" then
-      throwAt info s!"DEBUG rhs={reprStr rhs} fTy={← showVal cctx cctx.types[1]} state={← showVal cctx vStateBody}"
     let .sigma _ _ Aty B _ ← force pty
       | throwAt info "internal error: observation type"
     let Aty := if isRec then .nu l I D vIdx vJ hint else Aty
