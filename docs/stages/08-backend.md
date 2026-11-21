@@ -86,6 +86,10 @@ compiled separately with `-DWIZ_API=` so that its functions are exported. In SSA
 join point parameters live in stack slots, and a variable bound in several branches
 gets one name per branch. The LLVM tests are the C tests, through LLVM.
 
+The self-hosted compiler's first slice of this path (a closed `main : Nat`, with no
+ownership or runtime yet) is stage 21aq: it ports the `ETm` → `IR.Decl` lowering and this
+emitter for the allocating-free subset, and refuses the rest precisely.
+
 Still to do in the backend: specialise the eliminators for known descriptions (flat
 constructor objects instead of nested pairs, direct recursion instead of walking the
 description).

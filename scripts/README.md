@@ -22,13 +22,14 @@ so in its header and skips cleanly when the build is absent.
 | `check-docs-examples.py` | runs every fenced `wiz` block through `wiz check`/`wiz run`, compares expected output, and resolves relative doc links | `ci.yml` (`docs_examples`), `--self-test` |
 | `check-repro.sh` | builds `Tests/ReproPaths` under two absolute paths with different environment and byte-compares the artifacts; `--compiler` also builds the compiler twice | `ci.yml`, `pre-commit.sh --full` |
 | `ci.py` | helpers for `ci.yml`: `matrix`, `plan`, `changes`, `check-shards`, `balance`, `summary`, `baseline`, `check-skips` | `.github/workflows/ci.yml`, `pre-commit.sh --fast` (skip lint) |
+| `check-shards.py` | the shard plan's totality gate: every group in a shard or in `.github/test-shard-exclusions.json` (reason and owner), no stale exclusion, and every skip-allowlist entry matches a case; `--self-test`, `--groups FILE` (a captured `tests --list`), `--json` | `.github/workflows/ci.yml` through `ci.py check-shards`; by hand for a review |
 | `host-unsafe-ledger.py` | checks `.github/host-unsafe.tsv` against the `unsafe`/`extern`/`implemented_by` uses in host Lean; `--print` writes rows | `ci.yml`, `pre-commit.sh --fast`, `Tests/host-unsafe-ledger/run.sh` |
 | `trust-ledger.sh` | runs the test driver's `--trust-ledger` gate over `lib/` (check, print, update); needs `lake build wiz tests` | `ci.yml`, `pre-commit.sh --full`; the gate itself is in `Tests/Native.lean` |
 | `trust-ledger-merge_test.sh` | tests the ledger merge driver, including a real `git merge` through `.gitattributes` | `ci.yml` |
 | `trust-ffi-audit.sh` | lists every `extern` in `lib/` with its ledger rows and, with `--check`, compiles the ledger's C prototypes | docs only (`docs/trust-ledger.md`) |
 | `flaky-ci.sh` | CI glue for `flaky.py`: classify a failed shard, decide the verdict, expire quarantines, `self-test` | docs only; the `ci.yml` half of its commit is not on master yet |
 | `golden-diff.py` | re-runs only the failing golden cases in a temporary copy and emits a Markdown diff | `.github/workflows/golden-diff.yml` |
-| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/grail-index/README.md` |
+| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/fate-index/README.md` |
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
@@ -52,7 +53,7 @@ so in its header and skips cleanly when the build is absent.
 | `tower-init.sh` | the `curl`-to-`sh` installer: tower plus a default toolchain (nightly or a tag) | docs (`docs/install.md`); users |
 | `build-tower-wiz.sh` | builds `tower/` with a grail into `BINDIR/tower`, no Lean at build time | `release.yml`, `flake.nix` |
 | `mkexercises.py` | generates the exercise tree from the solution tree's marker blocks (solution-only files are dropped) | `release.yml` (tags only), docs |
-| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/grail-index/README.md`); by hand |
+| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/fate-index/README.md`); by hand |
 
 ## Benchmarks and performance
 

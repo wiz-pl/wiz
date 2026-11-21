@@ -1,0 +1,92 @@
+import Hdl.Formal
+-- A formal harness for a one-entry valid/ready buffer (`lib/Hdl/Formal.wiz`): the same
+-- properties are emitted for the correct RTL and for a deliberately wrong variant, so a
+-- solver can show the first pass and the second fail. The example is checked by the
+-- `hdl` test group, which also runs yosys-smtbmc (or `sby`) on both harnesses when the
+-- tools are installed.
+--
+-- `qv` is `queue.v` (the full `bmc` job `qsby`), `pv` is `queue_prove.v` (the
+-- k-inductive `ready` monitor only, `psby`), `bv` is `queue_bug.v` (`bsby`). The harness
+-- is inside `` `ifdef FORMAL ``; without the define, all three files are byte-identical
+-- to `Verilog.emit`.
+--
+-- Properties:
+--   * stability:   out_valid && !out_ready |=> $stable(out_data)   (AXI rule)
+--   * accepted:    in_valid && in_ready |=> out_valid && out_data == $past(in_data)
+--   * anyconst:    in_valid && in_ready && in_data == k |=> out_data == k, for one
+--                  symbolic k (`(* anyconst *)`), i.e. data independence
+--   * cover:       a transfer (in_valid && in_ready) is reachable
+--
+-- The wrong variant assigns the output data register from the input every cycle instead
+-- of only when an item is taken. The stability property then fails (BMC finds a
+-- two-or-three-cycle counterexample); the other four still pass, which is the point:
+-- the harness tells you *which* rule the RTL broke.
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def band {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.and a b
+def bor {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.or a b
+def bnot {r : HwTy → Type} [Hw r] (a : r Bit) : r Bit := Hw.not a
+
+-- Named ports: the harness refers to them by these names (`in_valid`, `out_data`, …).
+def QIn : HwTy :=
+  HwTy.prod (HwTy.named "in_valid" Bit) (HwTy.prod (HwTy.named "in_data" B8) (HwTy.named "out_ready" Bit))
+def QOut : HwTy :=
+  HwTy.prod (HwTy.named "out_valid" Bit) (HwTy.prod (HwTy.named "out_data" B8) (HwTy.named "in_ready" Bit))
+def QSt : HwTy := HwTy.prod (HwTy.named "full" Bit) (HwTy.named "data" B8)
+
+-- The buffer: in_ready = !full || out_ready; an item is taken when it is offered and
+-- accepted; the data register holds the item while full and not handed on.
+def qStep {r : HwTy → Type} [Hw r] (s : r QSt) (x : r QIn) : r (HwTy.prod QSt QOut) :=
+  let full := Hw.untag (Hw.fst s);
+  let data := Hw.untag (Hw.snd s);
+  let ivalid := Hw.untag (Hw.fst x);
+  let idata := Hw.untag (Hw.fst (Hw.snd x));
+  let ordy := Hw.untag (Hw.snd (Hw.snd x));
+  let irdy := bor (bnot full) ordy;
+  let take := band ivalid irdy;
+  Hw.pair (Hw.pair (Hw.tag "full" (bor take (band full (bnot ordy)))) (Hw.tag "data" (Hw.mux take idata data))) (Hw.pair (Hw.tag "out_valid" full) (Hw.pair (Hw.tag "out_data" data) (Hw.tag "in_ready" irdy)))
+
+def queue : Circuit QIn QOut := Circuit.mk QSt (BitVec.ofNat 1 0, BitVec.ofNat 8 0) qStep
+
+-- The wrong RTL: the data register takes the input every cycle (not only on a transfer).
+def qBugStep {r : HwTy → Type} [Hw r] (s : r QSt) (x : r QIn) : r (HwTy.prod QSt QOut) :=
+  let full := Hw.untag (Hw.fst s);
+  let data := Hw.untag (Hw.snd s);
+  let ivalid := Hw.untag (Hw.fst x);
+  let idata := Hw.untag (Hw.fst (Hw.snd x));
+  let ordy := Hw.untag (Hw.snd (Hw.snd x));
+  let irdy := bor (bnot full) ordy;
+  let take := band ivalid irdy;
+  Hw.pair (Hw.pair (Hw.tag "full" (bor take (band full (bnot ordy)))) (Hw.tag "data" idata)) (Hw.pair (Hw.tag "out_valid" full) (Hw.pair (Hw.tag "out_data" data) (Hw.tag "in_ready" irdy)))
+
+def queueBug : Circuit QIn QOut := Circuit.mk QSt (BitVec.ofNat 1 0, BitVec.ofNat 8 0) qBugStep
+
+-- `rst` is part of the input type, so the harness emits `initial assume (rst);` and the
+-- registers reset to their `initial` values.
+def queueR : Circuit (HwTy.prod (HwTy.named "rst" Bit) QIn) QOut := Circuit.withReset queue
+def queueBugR : Circuit (HwTy.prod (HwTy.named "rst" Bit) QIn) QOut := Circuit.withReset queueBug
+
+-- The symbolic constant of the data-independence property.
+def k8 : FTerm := FTerm.const "k" 8
+
+-- A combinational law of the handshake: it is k-inductive, so `prove` can discharge it
+-- (the `$past` monitors need BMC or a strengthening invariant).
+def readyProp : FProp :=
+  FProp.always "ready" (FTerm.or (FTerm.not (FTerm.outp "out_valid")) (FTerm.eq (FTerm.outp "in_ready") (FTerm.inp "out_ready")))
+
+def props : List FProp :=
+  [readyProp, FProp.impliesNext "stability" (FTerm.and (FTerm.outp "out_valid") (FTerm.not (FTerm.inp "out_ready"))) (FTerm.stable 1 (FTerm.outp "out_data")), FProp.impliesNext "accepted" (FTerm.and (FTerm.inp "in_valid") (FTerm.outp "in_ready")) (FTerm.and (FTerm.outp "out_valid") (FTerm.eq (FTerm.outp "out_data") (FTerm.past 1 (FTerm.inp "in_data")))), FProp.impliesNext "anyconst" (FTerm.and (FTerm.and (FTerm.inp "in_valid") (FTerm.outp "in_ready")) (FTerm.eq (FTerm.inp "in_data") k8)) (FTerm.eq (FTerm.outp "out_data") k8), FProp.cover "transfer" (FTerm.and (FTerm.inp "in_valid") (FTerm.outp "in_ready"))]
+
+-- A `prove` job on the k-inductive property alone; the full harness is a `bmc` job
+-- (the `$past` monitors are not inductive from an arbitrary state on their own).
+def propsProve : List FProp := [readyProp]
+
+-- `qv` is what a user writes as queue.v; `qsby` as queue.sby.
+def qv : String := Verilog.emitFormal "queue" queueR props
+def pv : String := Verilog.emitFormal "queue_prove" queueR propsProve
+def bv : String := Verilog.emitFormal "queue_bug" queueBugR props
+def qsby : String := Formal.sby "queue.v" "queue" "bmc" 8
+def psby : String := Formal.sby "queue_prove.v" "queue_prove" "prove" 4
+def bsby : String := Formal.sby "queue_bug.v" "queue_bug" "bmc" 8

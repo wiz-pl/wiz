@@ -90,13 +90,6 @@ def snapHas (s : Snapshot) (id : U64) : Bool :=
 
 def indices : List IndexDef := [kindIndex, uniqueLabel]
 
-def seedNodes (s : Snapshot) : Snapshot :=
-  Snapshot.record
-    (Snapshot.record s (U64.ofNat 1)
-      (.some (.set (Node.mk (U32.ofNat 1) (U64.ofNat 0) (U32.ofNat 7)))))
-    (U64.ofNat 2)
-    (.some (.set (Node.mk (U32.ofNat 2) (U64.ofNat 0) (U32.ofNat 8))))
-
 /-- `n` nodes with ids and labels `i, i+1, …`, all of kind 1, count 0. Two leaves: 127
 records and the rest. -/
 def seedMany (s : Snapshot) : Nat → Nat → Snapshot
@@ -198,7 +191,7 @@ def snapshotTest (dir : String) : EIO Unit := do
   p1 ← Scan.step (Reader.scan r);
   match p1 with
   | .none => EIO.fail "scan test: the scan ended before its first page"
-  | .some (recs1, scan1) =>
+  | .some (recs1, scan1) => do
     expect "scan test: the first leaf holds 127 records" (Nat.beq (List.length recs1) 127);
     -- The commit lands in the middle of the scan.
     sNow ← Handle.getDb h;
@@ -208,7 +201,7 @@ def snapshotTest (dir : String) : EIO Unit := do
     p2 ← Scan.step scan1;
     match p2 with
     | .none => EIO.fail "scan test: the scan lost its second page"
-    | .some (recs2, scan2) =>
+    | .some (recs2, scan2) => do
       expect "scan test: the second leaf holds the remaining 3 records"
         (Nat.beq (List.length recs2) 3);
       expect "scan test: node 1 is still 0 in the old chain"
@@ -218,7 +211,7 @@ def snapshotTest (dir : String) : EIO Unit := do
       p3 ← Scan.step scan2;
       match p3 with
       | .some _ => EIO.fail "scan test: the scan has a page too many"
-      | .none =>
+      | .none => do
         expect "scan test: the old snapshot still says 0"
           (Nat.beq (snapCount (Reader.snapshot r) 1) 0);
         sAfter ← Handle.getDb h;
@@ -304,6 +297,19 @@ def retentionTest (dir : String) : EIO Unit := do
 
 -- ## 5. A torn last commit, and no lock left behind
 
+/-- The newest checksum-valid meta slot in a whole-file image (`none` if neither is). -/
+def newestMeta (bytes : Bytes) : Option Meta :=
+  let a := Meta.decode (Bytes.slice bytes 0 metaSize);
+  let b := Meta.decode (Bytes.slice bytes pageSize metaSize);
+  match a, b with
+  | .some x, .some y =>
+    match UIntN.lt x.txid y.txid with
+    | .true => .some y
+    | .false => .some x
+  | .some x, .none => .some x
+  | .none, .some y => .some y
+  | .none, .none => .none
+
 def reopenTest (dir : String) : EIO Unit := do
   let path := Path.join dir "reopen.db";
   h ← openDb path indices;
@@ -318,11 +324,15 @@ def reopenTest (dir : String) : EIO Unit := do
     (Bool.and (succeeded oA) (Bool.and (succeeded oB) (succeeded oC)));
   expect "reopen test: at generation 3" (Nat.beq s3.gen.toNat 3);
   closeDb h;
-  -- The crash substitute: drop the file's last page, so the newest slot's root is short
-  -- while the slot still checksums. This is what a writer killed between the page writes
-  -- and the slot switch leaves behind (the pages of the slot are not reachable).
+  -- The crash substitute: cut the file at the newest commit's first data page, so the
+  -- newest slot's root is short while the slot still checksums. This is what a writer
+  -- killed between its page writes and the slot switch leaves behind (the pages of the
+  -- slot are not reachable). Version 2 appends the registry after the data pages, so
+  -- the file's last page is not the newest root's; use the slot's root instead.
   bytes ← FS.readBytes path;
-  let cut := Nat.sub (Bytes.size bytes) pageSize;
+  let cut := match newestMeta bytes with
+    | .some m => Nat.mul m.root.toNat pageSize
+    | .none => Nat.sub (Bytes.size bytes) pageSize;
   let tpath := Path.join dir "reopen-cut.db";
   FS.writeBytes tpath (Bytes.slice bytes 0 cut);
   ht ← openDb tpath indices;
@@ -351,7 +361,7 @@ def reopenTest (dir : String) : EIO Unit := do
 def waitForFile (path : String) : Nat → EIO Bool
   | .zero => EIO.pure .false
   | .succ k => do
-    r ← FS.readFile path;
+    r ← EIO.lift (FS.readFile path);
     match r with
     | .ok _ => EIO.pure .true
     | .error _ => do
@@ -408,6 +418,6 @@ def main : IO Unit := EIO.toIO (do
   match killOn with
   | .true => killTest dir
   | .false =>
-    EIO.lift (IO.println "kill: skipped (WIZ_MULTIPROC_KILL is not set)")
+    EIO.lift (IO.println "kill: skipped (WIZ_MULTIPROC_KILL is not set)");
   FS.removeAll dir;
   EIO.lift (IO.println "multiproc: all checks passed"))

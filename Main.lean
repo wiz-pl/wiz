@@ -487,10 +487,13 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let web ← match a.web with
     | some w => pure (some (System.FilePath.mk w))
     | none => do pure ((← webDir).map System.FilePath.mk)
-  -- the site's own files: beside the Wasm module (a release), or web/ of the checkout
+  -- the site's own files: `--web` wins, then web/ of the checkout the command runs in,
+  -- then share/wiz/web of a release (beside the toolchain's lib). The checkout directory
+  -- has to be a candidate in its own right: with a packaged `wiz`, `toolchainLib` points
+  -- into the store, and deriving "the checkout" from it never finds the working tree.
   let base := lib.parent.getD "."
   let assets : List System.FilePath :=
-    (web.toList ++ [base / "web", base / "share" / "wiz" / "web"]).eraseDups
+    (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups -- complexity: ok (at most three candidate directories)
   -- (the site keeps its title with --reference; the manual has its own)
   let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs }
   let r ← Doc.run (fun m => elaborateHits tc "<doc>" s!"import {m}\n") mods o
@@ -638,8 +641,17 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
+/-- Read the file a command names. A missing one is one diagnostic at `1:1` (the
+`no-such-file` code, D6), as the self-hosted driver reports it, not an uncaught
+`IO.FS.readFile` exception. -/
+def readSourceDiag (path : String) : IO (Option String) := do
+  if ← System.FilePath.pathExists path then pure (some (← IO.FS.readFile path))
+  else
+    IO.eprintln s!"{path}:1:1: error: no such file"
+    pure none
+
 def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure 1
   let s ← elaborate tc path input
   for m in s.messages do
     let line := s!"{path}:{m.render input}"
@@ -654,7 +666,7 @@ def checkCmd (tc : Toolchain) (path : String) : IO UInt32 := do
   pure (if s.messages.any (·.severity == .error) then 1 else 0)
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do
-  let input ← IO.FS.readFile path
+  let some input ← readSourceDiag path | pure none
   let s ← elaborate tc path input
   for m in s.messages do
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"

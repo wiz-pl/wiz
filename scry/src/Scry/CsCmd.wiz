@@ -686,12 +686,18 @@ structure Scry.Cs.Report where
   findings : List Scry.Cs.FindingRow
   coverage : List Scry.Cs.CoverRow
 
-/-- The taint pass's contribution to a report. -/
+/-- The taint pass's contribution to a report. The raw findings, their checked flags,
+the origin map and the rule pack are kept for `--sarif`: the human/JSON report only
+needs the aggregated rows, but SARIF names each result and its location. -/
 structure Scry.Cs.Analysis where
   findings : List Scry.Cs.FindingRow
   rulesPath : Option String
   ruleCount : Nat
   coverage : List Scry.Cs.Diag
+  raw : List Scry.RuleFinding
+  checks : List Bool
+  origins : Scry.OriginMap
+  pack : Scry.RulePack
 
 def Scry.Cs.countIf {A : Type} (p : A → Bool) (xs : List A) : Nat :=
   List.length (List.filter p xs)
@@ -850,10 +856,12 @@ structure Scry.Cs.Opts where
   failOn : Option Scry.Severity
   rules : Option String
   taint : Bool
+  /-- `--sarif OUT`: write the findings as SARIF 2.1.0. -/
+  sarif : Option String
 
 def Scry.Cs.usage : String :=
-  "usage: scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE]\n"
-  ++ "                 [--no-taint]\n"
+  "usage: scry cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note]\n"
+  ++ "                   [--rules FILE] [--no-taint]\n"
   ++ "  PATH is a directory, a .csproj, a .sln/.slnx, or one .cs file.\n"
   ++ "  Walks for *.cs (excluding bin/, obj/, node_modules/, hidden dirs, *.g.cs,\n"
   ++ "  *.Designer.cs), parses and lowers each file, and reports findings plus a\n"
@@ -875,6 +883,9 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
     | .none => .error Scry.Cs.usage
   | .cons a rest => match a with
     | "--json" => Scry.Cs.parseArgsGo target { o with json := .true } rest
+    | "--sarif" => match rest with
+      | .cons v r => Scry.Cs.parseArgsGo target { o with sarif := .some v } r
+      | .nil => .error ("--sarif needs an OUT path\n" ++ Scry.Cs.usage)
     | "--no-taint" => Scry.Cs.parseArgsGo target { o with taint := .false } rest
     | "--fail-on" => match rest with
       | .cons v r => match Scry.Cs.parseFailOn v with
@@ -892,7 +903,7 @@ partial def Scry.Cs.parseArgsGo (target : Option String) (o : Scry.Cs.Opts) :
 
 def Scry.Cs.parseArgs (args : List String) : Except String Scry.Cs.Opts :=
   Scry.Cs.parseArgsGo .none
-    (Scry.Cs.Opts.mk "" .false .none .none .true) args
+    (Scry.Cs.Opts.mk "" .false .none .none .true .none) args
 
 /-- The default C# rule pack: the corpus pack first (a checkout), then an installed
 `lib/Scry/rules/csharp.scry`. A tree with no pack still gets its coverage report. -/
@@ -933,7 +944,20 @@ def Scry.Cs.finish (opts : Scry.Cs.Opts) (t : Scry.Cs.Target)
   match opts.json with
   | .true => Scry.Cs.say (Json.render (Scry.Cs.jsonOf r status))
   | .false => Scry.Cs.say (Scry.Cs.render r);
-  EIO.pure status
+  match opts.sarif with
+  | .some out => do
+    w ← Scry.Cs.attempt (FS.writeFile out (String.append
+      (Scry.renderSarifWith "scry" analysis.origins analysis.pack
+        (Scry.zipFindings analysis.raw analysis.checks) .nil) "\n"));
+    match w with
+    | .error e => do
+      Scry.Cs.sayErr ("scry cs: " ++ e);
+      EIO.pure 2
+    | .ok _ => do
+      Scry.Cs.sayErr ("wrote SARIF 2.1.0: " ++ out ++ " ("
+        ++ Nat.repr (List.length analysis.raw) ++ " result(s))");
+      EIO.pure status
+  | .none => EIO.pure status
 
 def Scry.Cs.run (args : List String) : EIO Nat := do
   match Scry.Cs.parseArgs args with
@@ -957,23 +981,29 @@ def Scry.Cs.run (args : List String) : EIO Nat := do
           Scry.Cs.sayErr ("scry cs: " ++ e);
           EIO.pure (Scry.Cs.statusOf .usage)
         | .none => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil .none 0
-            [Scry.Cs.Diag.mk .note ("taint not run: " ++ e) "(none)" e])
+            [Scry.Cs.Diag.mk .note ("taint not run: " ++ e) "(none)" e]
+            [] [] [] (Scry.RulePack.mk .nil))
       | .ok .none => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil .none 0
           [Scry.Cs.Diag.mk .note (match opts.taint with
               | .true => "taint not run: no rule pack found"
               | .false => "taint not run: --no-taint")
             "(none)" (match opts.taint with
               | .true => "pass --rules FILE"
-              | .false => "")])
+              | .false => "")]
+          [] [] [] (Scry.RulePack.mk .nil))
       | .ok (.some (path, p)) => do
         let funcs := List.concat (List.map (fun r => r.funcs) results);
         match funcs with
         | .nil => Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk .nil (.some path) 0
-            [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""])
+            [Scry.Cs.Diag.mk .note "taint not run: no functions lowered" "(none)" ""]
+            [] [] [] p)
         | _ => do
-          let pr := Scry.analyzeCModels Scry.csModels (Scry.Cs.resolveCalls (Wil.program funcs)) p;
+          let pr := Scry.analyzeCModels Scry.csModels
+            (Scry.Cs.resolveCalls (Wil.program funcs)) p;
+          let raw := Scry.programFindings pr;
           let m := Scry.Cs.originMapOf results;
           Scry.Cs.finish opts t results (Scry.Cs.Analysis.mk
-            (Scry.Cs.findingRows m (Scry.programFindings pr))
+            (Scry.Cs.findingRows m raw)
             (.some path) (List.length p.rules)
-            (List.map (Scry.Cs.diagOfMem m) pr.warnings))
+            (List.map (Scry.Cs.diagOfMem m) pr.warnings)
+            raw (List.map (fun _ => .false) raw) m p)

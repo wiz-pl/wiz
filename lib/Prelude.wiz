@@ -139,6 +139,11 @@ def String.append : String → String → String
 `xs |> List.length |> Nat.succ`. At any universe, so proofs too: `h |> Eq.symm`. -/
 def pipe.{u, v} {A : Sort u} {B : Sort v} (a : A) (f : A → B) : B := f a
 infixl:10 " |> " => pipe
+/-- `f <| x` is `f x`, the other direction of `|>`: it lets a function stand on the
+left while its argument runs to the end of the line, `Nat.succ <| xs |> List.length`.
+At any universe, like `pipe`. -/
+def apply.{u, v} {A : Sort u} {B : Sort v} (f : A → B) (a : A) : B := f a
+infixr:10 " <| " => apply
 
 /-- Syntax trees, as one indexed family (descriptions have no nested inductives yet):
 index `true` is a tree, `false` a list of trees. A tree is `missing`, an `atom` (a
@@ -613,6 +618,9 @@ inductive Tac where
   -- (6h S2) the default `simp` set: each registered lemma's name and (constant) `Expr`,
   -- in the order the driver tries them (priority, then registration)
   | getSimpLemmas (g : Nat) (k : List (String × Expr) → Tac)
+  -- (D6) the source names of `T`'s constructors (`T.c`), in declaration order, for
+  -- `constructor`: `none` if `T` is not an inductive type or a structure
+  | ctorNames (n : String) (k : Option (List String) → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -715,6 +723,10 @@ def TacticM.getSimpLemmas (g : Nat) : TacticM (List (String × Expr)) := fun k =
 number of parameters and the constructor's number of fields: `List.cons` is
 `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
 def TacticM.ctorInfo (n : String) : TacticM (Option (String × Nat × Nat)) := fun k => Tac.ctorInfo n k
+/-- (D6) The source names of the constructors of `n` (`T.c`), in declaration order: the
+candidates `constructor` tries. `none` if `n` is not an inductive type or a structure
+(and `some []` for an inductive with no constructors). -/
+def TacticM.ctorNames (n : String) : TacticM (Option (List String)) := fun k => Tac.ctorNames n k
 /-- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
 or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
 constant `n`. -/
@@ -1278,6 +1290,58 @@ def TacticM.whnfCtorApp (g : Nat) (e : Expr) : TacticM (Option (String × List E
   e' ← TacticM.whnf g e;
   TacticM.ctorApp e'
 
+-- `constructor`: the host wrapper for the self-hosted `tactic.constructor`
+-- (`STacOp.constructor`); it needs `Expr.headName`, so it is defined after the terms.
+/-- `constructor`'s search: try each constructor name in order, applying it as `apply`
+would (its arguments become goals), and return the first that fits the goal. A failed
+attempt is undone (`Tac.catch` restarts from the state before it), so a constructor
+that unifies after the first is found; if none fits, the tactic fails. -/
+def TacticM.tryCtors (g : Nat) (names : List String) : TacticM (List Nat) := fun k => match names with
+  | .nil => TacticM.fail "constructor: no constructor applies" k
+  | .cons n rest => Tac.catch
+      ((do f ← TacticM.elabInfer g (Syntax.mkVar n);
+           TacticM.applyLoop 64 g f.1 f.2 .nil) k)
+      (fun _ => TacticM.tryCtors g rest k)
+      Tac.done
+/-- `constructor`'s goal type: its head constant's constructors. A structure's type is a
+definition (its value is a Σ), so its name is read **before** computing the head, as the
+self-hosted frontend's `indCtorsOf` checks the glued head first; only when the head is
+not an inductive type (`def F := Nat`) is the type computed (`whnf`) and read again. -/
+def TacticM.ctorGoalNames (g : Nat) (fuel : Nat) (ty : Expr) : TacticM (Option (List String)) :=
+  match fuel with
+  | .zero => TacticM.pure .none
+  | .succ k => match Expr.headName ty with
+    | .some T => do
+      csOpt ← TacticM.ctorNames T;
+      match csOpt with
+      | .some cs => TacticM.pure (.some cs)
+      | .none => do
+        ty' ← TacticM.whnf g ty;
+        match Expr.beq ty ty' with
+        | .true => TacticM.pure .none
+        | .false => TacticM.ctorGoalNames g k ty'
+    | .none => TacticM.pure .none
+syntax (name := constructor) "constructor" : tactic
+/-- `constructor`: apply a constructor of the goal's type, as the self-hosted frontend's
+`tactic.constructor` (`STacOp.constructor`) does: the first one in declaration order
+whose result type unifies with the goal. Its arguments are the new goals, in order. It
+fails with `constructor: no constructor applies` when none fits, and with
+`constructor: the goal is not an inductive type (or it has no constructors)` when the
+goal's type is not an inductive type (or structure); it never picks a constructor whose
+result type does not fit. -/
+def Tactic.constructor : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  csOpt ← TacticM.ctorGoalNames g 16 ty;
+  match csOpt with
+  | .none => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+  | .some cs => match cs with
+    | .nil => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+    | .cons _ _ => do
+      new ← TacticM.tryCtors g cs;
+      TacticM.replaceMainGoal new
+attribute [tactic tactic.constructor] Tactic.constructor
+
 -- ## Unfolding and rewriting (stage 6f)
 --
 -- `unfold f, g` unfolds the definitions `f` and `g` in the goal, once each (and fails
@@ -1526,32 +1590,55 @@ def ListLit.unexpandCons : Macro := fun stx =>
   | _ => MacroM.throw "not a list literal"
 attribute [app_unexpander List.nil] ListLit.unexpandNil
 attribute [app_unexpander List.cons] ListLit.unexpandCons
+
+-- ## Notation: a projection through the pipe (`|>.`) and `·` sections
+
+-- `x |>.f` is the projection `x.f`, read through the pipe. The dot is part of the
+-- `|>.` token (as in `x.f`), so the form is `x |>.f`: `x |> .f` would parse `.f` as
+-- the dot-constructor form, and a space before the field name reads as a different
+-- expression. The rule takes its left side at precedence 11 (so `x + y |>.f` is
+-- `(x + y).f`) and binds at `max`, like `x.f`; as with `x.f`, an application on the
+-- left is an argument, so write `(f x) |>.f`. A dotted path works (`x |>.a.b` is
+-- `x.a.b`), because the field is one dotted identifier.
+syntax:max (name := pipeProj) term:11 "|>." ident : term
+/-- `x |>.f` expands to the field access `x.f`, so it is the same projection: the same
+field lookup, the same private checks, the same errors. -/
+def PipeProj.expand : Macro := fun stx =>
+  MacroM.pure (Syntax.mkNode "term.field"
+    (.cons (Syntax.getArg stx 0) (.cons (.atom ".") (.cons (Syntax.getArg stx 2) .nil))))
+attribute [macro term.pipeProj] PipeProj.expand
+
+-- `(· + 1)`, `(1 + ·)`, `(· * ·)`: a placeholder, desugared to a lambda by the
+-- elaborator (`Wiz/Elab/Term.lean`, `elabSection`). It is a paren form: the holes in
+-- a parenthesised term are that term's parameters, and the expected type gives their
+-- types, as in `List.map (· + 1) xs`.
+syntax (name := sectionHole) "·" : term
 -- (end of the notation section)
 
 /-- `Syntax.decPowers` with fuel: at most `fuel` powers, so the recursion is
 structural on the fuel rather than a `partial` loop. `n` bounds the loop (each
 step multiplies a power of ten that is already at most `n`), so `Syntax.decPowers`
 passes `Nat.succ n`. -/
-def Syntax.decPowersGo : Nat → Nat → Nat → List Nat → List Nat
-  | .zero, _, _, acc => acc
-  | .succ fuel, n, p, acc => match Nat.lt n p with
+def Syntax.decPowersGo (n p : Nat) : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ fuel, acc => match Nat.lt n p with
     | .true => acc
-    | .false => Syntax.decPowersGo fuel n (p * 10) (.cons p acc)
+    | .false => Syntax.decPowersGo n (p * 10) fuel (.cons p acc)
 /-- The powers of ten up to `n`, largest first (in front of `acc`), for
 `Syntax.decimal`: a decimal numeral as text, for macros (`Nat.toString` is an extern:
 it only runs compiled). -/
 def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat :=
-  Syntax.decPowersGo (Nat.succ n) n p acc
+  Syntax.decPowersGo n p (Nat.succ n) acc
 /-- `Syntax.decDigit` with fuel: at most `fuel` subtractions, so the recursion is
 structural on the fuel rather than a `partial` loop. Each step subtracts a positive
 power, so `n` bounds the loop and `Syntax.decDigit` passes `Nat.succ n`. -/
-def Syntax.decDigitGo : Nat → Nat → Nat → Nat → Nat
-  | .zero, _, _, d => d
-  | .succ fuel, n, p, d => match Nat.lt n p with
+def Syntax.decDigitGo (n p d : Nat) : Nat → Nat
+  | .zero => d
+  | .succ fuel => match Nat.lt n p with
     | .true => d
-    | .false => Syntax.decDigitGo fuel (n - p) p (d + 1)
+    | .false => Syntax.decDigitGo (n - p) p (d + 1) fuel
 /-- The decimal digit of `n` at the power `p` (counting from `d`). -/
-def Syntax.decDigit (n p d : Nat) : Nat := Syntax.decDigitGo (Nat.succ n) n p d
+def Syntax.decDigit (n p d : Nat) : Nat := Syntax.decDigitGo n p d (Nat.succ n)
 /-- The digits of `n` at the powers `ps`, as characters. -/
 def Syntax.decDigits : List Nat → Nat → List Char
   | .nil, _ => .nil

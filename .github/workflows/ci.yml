@@ -121,7 +121,7 @@ jobs:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: four Python checks on the checkout; no build
+    # 5 min: four Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -138,6 +138,7 @@ jobs:
           python3 scripts/check-complexity --diff HEAD^1
           python3 scripts/check-name-collisions.py --self-test
           python3 scripts/check-name-collisions.py --quiet
+          scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
   # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground
@@ -212,7 +213,7 @@ jobs:
           "$wiz/bin/wiz" --version
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -330,7 +331,7 @@ jobs:
         # store path this job built (the `build` job has no Lake and no PATH entry).
         env:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: scripts/grail-index-check.sh examples/grail-index
+        run: scripts/grail-index-check.sh examples/fate-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
         # built from a directory with no checkout, and grail starts
@@ -366,7 +367,7 @@ jobs:
           exit $status
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -380,7 +381,7 @@ jobs:
           python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
       - name: Save the docs examples cache (master)
         if: steps.docs-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -438,7 +439,7 @@ jobs:
           printf 'prefix=trust-cache-%s-%s-\n' "${{ runner.os }}" "$bin" >> "$GITHUB_OUTPUT"
       - name: Restore the elaboration cache
         id: trust-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/trust-cache
           key: ${{ steps.key.outputs.cache }}
@@ -459,7 +460,7 @@ jobs:
           Tests/host-unsafe-ledger/run.sh
       - name: Save the elaboration cache (master)
         if: steps.trust-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/trust-cache
           key: ${{ steps.key.outputs.cache }}
@@ -529,7 +530,7 @@ jobs:
       # so a partial hit (other Wiz files) is safe.
       - name: Restore the Wiz build caches
         id: wiz-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/wiz
@@ -559,7 +560,7 @@ jobs:
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
         if: always() && steps.wiz-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/wiz
@@ -572,7 +573,7 @@ jobs:
           [ -f "logs/${{ matrix.shard.name }}.log" ] || exit 0
           shopt -s nullglob
           python3 scripts/ci.py summary "shard ${{ matrix.shard.name }}" logs/${{ matrix.shard.name }}.log logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-log-${{ matrix.shard.name }}
@@ -599,14 +600,23 @@ jobs:
       !cancelled() && needs.changes.outputs.web == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
-    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit
-    timeout-minutes: 45
+    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit.
+    # 75, not 45: run 44795685025 hit the 45-minute limit after 45m15s on a cold
+    # Cachix miss (the nix build of both derivations), and GitHub reports a timed-out
+    # job as "The operation was canceled." — the annotation is the timeout.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token. A pull request reads the trusted
+          # cache anonymously and instead adds the untrusted PR cache, which is where the
+          # `build` job publishes `wiz`/`wiz-unwrapped`: without it every web derivation
+          # rebuilt `wiz-unwrapped` from source (the cold 45-minute miss).
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
         id: nix
@@ -732,7 +742,11 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Same cache rule as the wasm job: the PR cache carries `wiz`; the trusted
+          # token is for a master push only.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: nix build (wiz, from Cachix)
         id: nix
@@ -760,7 +774,7 @@ jobs:
           echo "cache: wiz-doc-v1-${{ runner.os }}-$compiler-$sources"
       - name: Restore the elaboration cache (a read-only layer)
         id: cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # `wiz --cache-ro` (a layer wiz only reads): the job cannot corrupt it, and a
           # miss repopulates the write cache, which this run publishes below.
@@ -817,7 +831,7 @@ jobs:
         # a cache quota or upload failure must not fail the site
         continue-on-error: true
         if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .wiz-doc-cache/ro
           key: ${{ steps.key.outputs.cache }}
@@ -832,7 +846,7 @@ jobs:
         run: sh web/build-site.sh doc-site web/out
       - name: The site has its three entry points and the landing's links resolve
         run: sh web/check-site.sh doc-site
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-docs
           path: doc-site
@@ -877,7 +891,7 @@ jobs:
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wiz-docs
           path: doc-site
@@ -887,7 +901,7 @@ jobs:
           path: doc-site
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   # One check for branch protection, and the whole suite's summary.
   result:
@@ -908,7 +922,7 @@ jobs:
           sparse-checkout: |
             scripts
             .github
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           pattern: test-log-*
@@ -941,7 +955,7 @@ jobs:
             exit 1
           fi
           python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           name: test-timings
@@ -968,7 +982,7 @@ jobs:
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
@@ -1034,7 +1048,7 @@ jobs:
           # the fixpoint still builds with Lake (scripts/fixpoint.sh)
           lean: true
       - name: Cache the Lake build and the elaboration cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .lake

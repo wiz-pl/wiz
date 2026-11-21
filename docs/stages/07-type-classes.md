@@ -110,11 +110,24 @@ deriving instance Repr for Shape             -- after the fact
 |-----|--------------------|--------------------------------------------------|
 | 7.2 | `lib/Deriving.wiz` | `Derive.firstPlain`: the constructor `Inhabited` uses |
 
-Limitations: `BEq`, `Inhabited` and `DecidableEq` reject indexed families (`Repr` handles
+Limitations: `BEq` derives for an indexed family too, by a *dependent* motive
+(`Derive.depMotive`): the recursor binds the indices, so each constructor's method
+matches the second value at that constructor's own index. An index that is an explicit
+constructor field is compared like any other field, so its type needs a `BEq` instance
+(a missing one is an ordinary instance-resolution error); an implicit index is not
+compared, because both arguments of `BEq (T Δ ξ)` have the same `ξ`. A family with more
+than one index and a recursive field at several of them still hits the elaborator's
+dependent-match limitation (a hand-written instance fails the same way). `Inhabited` and
+`DecidableEq` still reject indexed families (`Repr` handles them, and so mutual types);
+`DecidableEq` is derived only for enumerations and single-constructor records (7g);
+quotations can't splice lists (`$xs*`), so derivers fold one-element quotations and use
+`Syntax.mkApp`; the self-hosted frontend has no macros yet.
+`Inhabited` and `DecidableEq` reject indexed families (`Repr` handles
 them, and so mutual types); `DecidableEq` is derived only for enumerations and
 single-constructor records (7g); quotations can't splice lists (`$xs*`), so derivers fold
 one-element quotations and use `Syntax.mkApp`; the self-hosted frontend has no macros yet.
-`Repr String` doesn't escape.
+`Repr String` escapes as the lexer reads (`"a\nb"`), so a `Repr` result is Wiz source;
+`Repr (List A)` is hand-written (not derived) and prints `[1, 2, 3]` (13w).
 
 ## 7d: deriving with proof fields and in any universe
 

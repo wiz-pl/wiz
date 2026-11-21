@@ -14,7 +14,10 @@ docs/libraries.md ("H14 T") and wiz-notes/hdl-temporal.md.
   `□φ` at `t` is "φ at `k + t` for every k", `◇φ` "for some k".
 * Two layers: cycle-level operators (○, `##n`, bounded `◇`/`□`, `|->`, `|=>`) for
   properties of one circuit, and actions with stuttering (`TL.stut`, TLA's `□[N]_v`)
-  for refinement of an abstract specification.
+  for refinement of an abstract specification. The same formulas can be discharged by
+  an external solver: `lib/Hdl/Formal.wiz` emits the monitor subset (invariants,
+  `|->`/`|=>`, `$past`/`$stable`, `anyconst`) as `` `ifdef FORMAL `` assertions for
+  yosys/SymbiYosys.
 * The semantic object is a Mealy machine `S → I → S × O`; `Circuit.stepEl c` is one.
   `Mealy.stateAt`/`Mealy.outAt` run it along an input trace, and
   `Mealy.runFrom_take` says that the finite simulation `Circuit.runFrom` is a prefix.

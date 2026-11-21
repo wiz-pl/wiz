@@ -537,7 +537,7 @@ def group : Group where
         -- arguments; the arguments after them are distinct, so this is Miller's pattern
         -- (`?p := (→)`), not a repeat. Before, `?p` had to be named by hand at every use.
         okLib ("import Prelude\n" ++
-          "def apply {A B : Type} (f : {p : Type → Type → Type} → p A B → Nat) (x : A → B) : Nat := f x\n") },
+          "def holeApply {A B : Type} (f : {p : Type → Type → Type} → p A B → Nat) (x : A → B) : Nat := f x\n") },
     { name := "… and the optics-shaped `set` needs no `(p := …)` annotation", run := fun _ =>
         -- the blocker in wiz-notes/reviews/2026-11-18-optics-profunctor.md §2.5:
         -- `l (fun _ => b) s` against `?p A B =?= ?dom → B` (a Π) solves `p := (→)`
@@ -561,7 +561,7 @@ def group : Group where
         -- the two *arguments* are the same variable: a solution is a guess (which
         -- occurrence would it mean?), so the error is the one it was before
         failsLib ("import Prelude\n" ++
-          "def apply {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : A → A) : Nat := f x\n")
+          "def holeApply {A : Type} (f : {p : Type → Type → Type} → p A A → Nat) (x : A → A) : Nat := f x\n")
           "a variable escapes the scope of the hole being solved"
         -- nor is a non-variable argument a pattern
         failsLib ("import Prelude\n" ++

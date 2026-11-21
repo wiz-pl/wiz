@@ -2924,8 +2924,10 @@ def Fe.ctorLines : List (String × List (String × Fe.Ty)) → String
 -- clauses an argument stands for its value (`x.val` for a borrow), `result` for the
 -- returned value, `old x` for an `&mut` argument's value on entry and `final x` for its
 -- value when the borrow ends (the handed-back handle, L3: final-specs without prophecy).
--- Not covered: a function that returns a borrow (`final result`), binders in a clause
--- that shadow an argument's name.
+-- A function that returns a borrow has one lender: the call runs in that lender's scope,
+-- the borrow is `result` (its current value), `final result` is the scope's quantified
+-- `fin`, and `final v` is the lender's value when the scope closes (see `Fe.specBorrow`).
+-- Not covered: binders in a clause that shadow an argument's name.
 --
 -- With linear handles (M4b) the clauses are stated on *values*: a linear handle can't be
 -- read in a proposition (its value is only reachable by consuming it with
@@ -3104,11 +3106,58 @@ def Fe.specLin (sig : Fe.Sig) (hs : List String) (cls : List (Nat × Syntax))
         +++ ": Prop :=\n  " +++ Fe.arrows reqs
           ("Result.Holds (fun (r : " +++ Fe.nestTy (Fe.tyStr sig.ret) hts +++ ") => "
             +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")")))
+/-- The value-level spec of a returned borrow (`final result`, L18/LOWERING.md). One
+lender, opened in the caller's scope; the borrow is consumed (`Mut.close`) on both
+branches *inside* that scope, so it cannot escape or be used twice. `final(result)` is
+the scope's quantified `fin`, `final(v)` the lender's value when the scope closes, and
+`result` the borrow's current value. The returned borrow's region is the lender's (with
+an outlives bound the two can differ and `Mut.weaken` would be needed: rejected). Shapes
+whose borrow cannot be closed in one scope (several lenders, an optional borrow, or a
+borrow beside handed-back handles) stay rejected, naming the condition. -/
+def Fe.specBorrow (sig : Fe.Sig) (cls : List (Nat × Syntax))
+    (ev : List (String × (String × String))) : Except String String :=
+  match ev, sig.ret, sig.lenders, sig.handed with
+  | .cons _ _, _, _, _ =>
+    .error "spec: not supported yet: a returned borrow with an outlives bound (`final result`): the result's region is not the lender's"
+  | _, .mopt _ _ _, _, _ =>
+    .error "spec: not supported yet: an optional returned borrow (`Option (&mut …)`) (`final result`): `none` hands the lender back without a final value"
+  | _, .mutb _ a s, .cons _ .nil, .nil =>
+    (match Fe.paramNames sig sig.lenders with
+    | .cons l .nil =>
+      let vs : List String := List.cons l List.nil;
+      let fin : List (String × String) := List.cons ("result", "fin") (List.cons (l, "r.2") List.nil);
+      let res := "r.1";
+      let reqs := Fe.clauses sig.params vs fin res "feral_clause.req" cls;
+      let enss := Fe.clauses sig.params vs fin res "feral_clause.ens" cls;
+      let rgs := Fe.nubStr (Fe.rgsUsed sig.rgs (List.map (fun (q : String × Fe.Ty) => Fe.paramTyL vs q) sig.params));
+      let call := Fe.unwords (List.cons sig.name (List.map (fun (q : String × Fe.Ty) => q.1) sig.params));
+      let scope := "Uniq.borrow Region.static " +++ l +++ " (fun ρ1 h1 l1 " +++ l +++ " =>\n      match " +++ call
+        +++ " with\n      | .ok m =>\n        let 1 (cur, m) := Mut.peek m;\n        let 1 u := Mut.close m fin;\n        .ok cur u\n      | .err e u => .err e u)"
+      .ok ("def " +++ sig.name +++ ".Spec "
+        +++ (match rgs with
+          | .nil => ""
+          | rs => "{0 " +++ Fe.words rs +++ ": Region} ")
+        +++ (match sig.tys with
+          | .nil => ""
+          | ts => "{" +++ Fe.words ts +++ ": Type} ")
+        +++ Fe.words (List.map (fun (q : String × Fe.Ty) => "(" +++ q.1 +++ " : " +++ Fe.tyStr (Fe.paramTyL vs q) +++ ")") sig.params)
+        +++ ": Prop :=\n  " +++ Fe.arrows reqs
+          ("(fin : " +++ Fe.tyStr a +++ ") →\n  Result.Holds (fun (r : (" +++ Fe.tyStr a +++ " × " +++ Fe.tyStr s +++ ")) => "
+            +++ Fe.joinWith " × " enss +++ ") (\n    " +++ scope +++ ")"))
+    | _ => .error "spec: an internal error: a returned borrow with no lender")
+  | _, .mutb _ _ _, .cons _ (.cons _ _), _ =>
+    .error "spec: not supported yet: a returned borrow from more than one lender (`final result`): no single lender ends where the scope closes"
+  | _, .mutb _ _ _, .nil, _ =>
+    .error "spec: an internal error: a returned borrow with no lender"
+  | _, .mutb _ _ _, _, _ =>
+    .error "spec: not supported yet: a returned borrow beside handed-back `&mut` arguments (`final result`): one scope cannot close both"
+  | _, _, _, _ =>
+    .error "spec: not supported yet: a returned borrow that is not a plain `&'a mut` (`final result`)"
 /-- The `def f.Spec … : Prop` of a clause list (a `spec f …` item's, or a `fn`'s own
 inline clauses). -/
 def Fe.specOf (sig : Fe.Sig) (cls : List (Nat × Syntax)) : Except String String :=
   match sig.lenders with
-  | .cons _ _ => .error "spec: not supported yet: a function that returns a borrow (`final result`)"
+  | .cons _ _ => Fe.specBorrow sig cls (Fe.boundsEv sig.bounds 0)
   | .nil =>
     let ev := Fe.boundsEv sig.bounds 0;
     let hs := Fe.paramNames sig sig.handed;

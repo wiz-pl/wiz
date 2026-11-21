@@ -153,6 +153,11 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(wiz_runners.parse_test_output("\n2 passed, 0 failed, 1 skipped\n")["all_passed"])
         self.assertTrue(wiz_runners.parse_test_output("\n2 passed, 0 failed\n")["all_passed"])
         self.assertFalse(wiz_runners.parse_test_output("── g (x)\n  ✓ a (1 s)\n")["complete"])
+        # The current driver numbers each case `[n/total]` before its marker.
+        numbered = wiz_runners.parse_test_output(
+            "── native (27a)\n[1/2]   ✓ a (0.1 s)\n[2/2]   ✗ b (0.2 s)\n      boom\n\n1 passed, 1 failed\n")
+        self.assertEqual(numbered["groups"]["native"], {"passed": 1, "failed": 1, "skipped": 0})
+        self.assertEqual(numbered["failed"][0]["name"], "b")
 
     def test_ledger_comparison(self) -> None:
         live = wiz_runners.parse_ledger_sources("A\tf\taxiom f\nB\tg\tpartial\nnot a row\n")

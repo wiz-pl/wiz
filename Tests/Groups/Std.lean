@@ -129,6 +129,17 @@ def stdGroup : Group where
           "def main : IO Unit := do\n  let a := fill 10 Array.empty;\n  IO.println (Nat.toString (Array.getD a 9 0));\n" ++
           "  IO.println (Nat.toString (Array.getD (Array.set a 9 5) 9 0));\n  IO.println (Nat.toString (Array.getD a 9 0))")
           "81\n5\n81\n" },
+    { name := "Compose: `∘` is a class (its laws hold at functions), and printing round-trips", run := fun _ =>
+        okLibs ("import Compose\n#eval (Nat.succ ∘ Nat.succ) 0\n" ++
+          "#check fun (n : Nat) => (Nat.succ ∘ Nat.succ) n\n" ++
+          "#check Compose.id_left\n#print axioms Compose.assoc\n#print axioms Compose.id_left\n#print axioms Compose.id_right\n" ++
+          "instance : Compose Bool Bool Bool := Compose.mk (fun g f x => Bool.not (g (f x)))\n" ++
+          "#eval (Bool.not ∘ Bool.not) Bool.true\n")
+          ["2", "fun n => (Nat.succ ∘ Nat.succ) n : Nat → Nat",
+           "Compose.id_left : {α : Type} → {β : Type} → (f : α → β) → (0 x : α) → id β (f x) = f x",
+           "'Compose.assoc' does not depend on any axioms",
+           "'Compose.id_left' does not depend on any axioms",
+           "'Compose.id_right' does not depend on any axioms", ".false"] },
     { name := "native text", run := fun _ =>
         ioRun ("import Std\ndef main : IO Unit := do\n  let t := Str.append (Str.ofString \"hello, \") (Str.ofString \"world\");\n" ++
           "  IO.println (Str.toString (Str.slice t 7 12));\n  IO.println (Nat.toString (Str.size t))") "world\n12\n" },

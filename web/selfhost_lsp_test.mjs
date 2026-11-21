@@ -14,11 +14,14 @@
 // (`startInfoview` with a stub textarea), and no unhandled rejection anywhere.
 "use strict";
 import {
-  isSelfhostSearch, wantsSelfhost, withPrelude, splitCommands, diagnosticsFromOutput, outputLines,
-  parseErrorOffset, utf16OfCodePoints, positionOf, selfhostSocketClass, selfhostEndpoint,
-  SelfhostServer, SELFHOST_URL, parseCheck, diagnosticsFromCheck, PositionIndex, offsetOf,
-  completionPrefix, filterCompletions, splitGoals, wordAt,
+  isSelfhostSearch, wantsSelfhost, selfhostSocketClass, selfhostEndpoint, SelfhostServer,
+  SELFHOST_URL,
 } from "./selfhost-lsp-shim.js";
+import {
+  PositionIndex, offsetOf, positionOf, utf16OfCodePoints, splitGoals, index, withPrelude,
+  splitCommands, diagnosticsFromOutput, outputLines, parseErrorOffset, parseCheck,
+  diagnosticsFromCheck, completionPrefix, filterCompletions, wordAt,
+} from "./framework/index-oracle.mjs";
 import { LspClient, LspError } from "./lsp-client.js";
 import { readGoalState, renderPanel } from "./framework/goals.mjs";
 import { startInfoview } from "./playground-lsp.js";
@@ -100,8 +103,8 @@ check("default: ?lsp=none disables it", wantsSelfhost("?lsp=none"), false);
 check("default: a port keeps the external client", wantsSelfhost("?lsp=8765"), false);
 check("default: a ws url keeps the external client", wantsSelfhost("?lsp=ws://127.0.0.1:8765"), false);
 check("search: nothing", isSelfhostSearch(""), false);
-check("endpoint: the url", selfhostEndpoint({ evaluate: stubEval }).url, SELFHOST_URL);
-check("endpoint: a WebSocketImpl", typeof selfhostEndpoint({ evaluate: stubEval }).WebSocketImpl, "function");
+check("endpoint: the url", selfhostEndpoint({ evaluate: stubEval, index }).url, SELFHOST_URL);
+check("endpoint: a WebSocketImpl", typeof selfhostEndpoint({ evaluate: stubEval, index }).WebSocketImpl, "function");
 
 // ## 2. Positions and the Prelude
 
@@ -149,7 +152,7 @@ check("split: results", commands.filter((c) => c.result).map((c) => c.keyword), 
   // aligned: def, theorem, def, mutual, #check, #eval → six lines
   const out = ["twice : Nat → Nat", "t : Nat", "error: unknown identifier 'g'", "", "twice : Nat → Nat", "42"]
     .map((l) => l + "\n").join("");
-  const ds = diagnosticsFromOutput(SOURCE, out);
+  const ds = diagnosticsFromOutput(SOURCE, out, index);
   check("diagnostics: one error and two results", ds.map((d) => d.severity), [1, 3, 3]);
   check("diagnostics: the error's message", ds[0].message, "unknown identifier 'g'");
   check("diagnostics: on its command's line", ds[0].range, { start: { line: 7, character: 0 }, end: { line: 7, character: 17 } });
@@ -160,24 +163,24 @@ check("split: results", commands.filter((c) => c.result).map((c) => c.keyword), 
   // the playground adds the Prelude line: a parse error's offset is moved back, and an
   // astral character before it counts one code point but two UTF-16 units
   const text = "def a : Nat := 1\n-- 😀\ndef b : Nat := @@ 2\n";
-  const ds = diagnosticsFromOutput(text, stubEval(withPrelude(text).source));
+  const ds = diagnosticsFromOutput(text, stubEval(withPrelude(text).source), index);
   check("parse error: one diagnostic (the def before it prints a signature)", ds.length, 1);
   check("parse error: the code", ds[0].code, "parse-error");
   check("parse error: at the token", ds[0].range, { start: { line: 2, character: 15 }, end: { line: 2, character: 17 } });
   check("parse error: the message", ds[0].message, "parse error: unexpected token '@@'");
 }
 {
-  const ds = diagnosticsFromOutput("def a : Nat := 1\n", "error: one\nerror: two\n");
+  const ds = diagnosticsFromOutput("def a : Nat := 1\n", "error: one\nerror: two\n", index);
   check("misaligned: both reported", ds.length, 2);
   check("misaligned: at the top", ds[0].range.start, { line: 0, character: 0 });
   checkThat("misaligned: says so", ds[0].message.includes("position unknown"), ds[0].message);
 }
-check("clean: no diagnostics", diagnosticsFromOutput("def a : Nat := 1\n", "a : Nat\n").length, 0);
+check("clean: no diagnostics", diagnosticsFromOutput("def a : Nat := 1\n", "a : Nat\n", index).length, 0);
 
 // ## 5. The server through the real client
 
 const uri = "file:///playground-test.wiz";
-const client = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: countingEval }), requestTimeout: 2000 });
+const client = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: countingEval, index }), requestTimeout: 2000 });
 const elaborated = [];
 client.on("wiz/elaborated", (p) => elaborated.push(p));
 await client.connect();
@@ -250,7 +253,7 @@ client.close();
 {
   let release;
   const loaded = new Promise((resolve) => { release = resolve; });
-  const late = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: (s) => loaded.then(() => stubEval(s)) }) });
+  const late = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: (s) => loaded.then(() => stubEval(s)), index }) });
   const t0 = Date.now();
   await late.connect();
   checkThat("late engine: the handshake does not wait for it", Date.now() - t0 < 500);
@@ -263,7 +266,7 @@ client.close();
   late.close();
 }
 {
-  const broken = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: () => Promise.reject(new Error("no wasm")) }) });
+  const broken = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({ evaluate: () => Promise.reject(new Error("no wasm")), index }) });
   await broken.connect();
   const got = waitFor(broken, "diagnostics");
   broken.openDocument(uri, "def a : Nat := 1\n");
@@ -273,7 +276,7 @@ client.close();
 }
 {
   // the handler shape of the planned `wiz_lsp_handle`: text in, messages out
-  const server = new SelfhostServer({ evaluate: stubEval });
+  const server = new SelfhostServer({ evaluate: stubEval, index });
   const out = await server.handle('[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},' +
     '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"u","version":1,"text":"def a : Nat := BAD\\n"}}}]');
   check("handle: a batch answers in order", out.map((m) => m.id !== undefined ? "result" : m.method), ["result", "textDocument/publishDiagnostics"]);
@@ -321,7 +324,7 @@ async function waitUntil(predicate, ms = 3000) {
   const wire = fakePanel();
   const app = startInfoview({
   rules,
-    editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval }), uri: "file:///wire.wiz",
+    editor, panel: wire, config: selfhostEndpoint({ evaluate: stubEval, index }), uri: "file:///wire.wiz",
     render: (kind, a) => { if (kind === "view") renderPanel(wire, JSON.parse(a)); },
     document: fakeDocument(),
   });
@@ -366,7 +369,7 @@ check("check: an old module's null", parseCheck(null), null);
 check("check: no lines", parseCheck('{"v":1}'), null);
 {
   const text = "-- 😀\ndef a : Nat := BAD\n#eval a\ndef b : Nat := @@\n";
-  const ds = diagnosticsFromCheck(text, parseCheck(stubCheck(withPrelude(text).source)));
+  const ds = diagnosticsFromCheck(text, parseCheck(stubCheck(withPrelude(text).source)), index);
   check("check: error, result, parse error", ds.map((d) => d.severity), [1, 3, 1]);
   check("check: the error on its command (after an astral character)", ds[0].range,
     { start: { line: 1, character: 0 }, end: { line: 1, character: 18 } });
@@ -380,7 +383,7 @@ check("check: no lines", parseCheck('{"v":1}'), null);
     { off: 16, sev: 1, text: "error: unsolved goals:\nn : Nat\n⊢ Nat" },
     { off: null, sev: 1, text: "error: cannot find module X" },
   ] }));
-  const ds = diagnosticsFromCheck("def k : Nat → Nat := by\n  intro n\n", answer);
+  const ds = diagnosticsFromCheck("def k : Nat → Nat := by\n  intro n\n", answer, index);
   check("check: a multi-line message is one diagnostic", ds[0].message, "unsolved goals:\nn : Nat\n⊢ Nat");
   check("check: at its command (the Prelude line subtracted)", ds[0].range.start, { line: 0, character: 0 });
   checkThat("check: an untagged line says so", ds[1].message.includes("position unknown"));
@@ -389,7 +392,7 @@ check("check: no lines", parseCheck('{"v":1}'), null);
   // offsets are into the checked source: the Prelude line (16 code points) comes first
   const text = "def f (n : Nat) : Nat := g n\n";
   const p = withPrelude(text).prefix.length;
-  const index = new PositionIndex(text, [
+  const entries = new PositionIndex(text, [
     { s: p + 0, e: p + 28, kind: "term", expected: "Nat → Nat" },
     { s: p + 25, e: p + 28, kind: "term", expected: "Nat" },
     { s: p + 27, e: p + 28, kind: "term", expected: "Nat (n)" },
@@ -397,22 +400,22 @@ check("check: no lines", parseCheck('{"v":1}'), null);
     { s: p + 0, e: p + 3, kind: "goal", goals: [] },
     { s: 5, e: 2, kind: "term", expected: "bad: ends before it starts" },
   ]);
-  check("index: well-formed entries kept", index.size, 5);
-  check("index: the innermost term", index.termGoal(27).goal, "Nat (n)");
-  check("index: the enclosing one", index.termGoal(26).goal, "Nat");
-  check("index: its range", index.termGoal(26).range, { start: { line: 0, character: 25 }, end: { line: 0, character: 28 } });
-  check("index: the caret at an end counts", index.termGoal(28).goal, "Nat (n)");
-  check("index: outside everything", index.termGoal(29), null);
-  check("index: goals", index.goal(26).goals, ["n : Nat\n⊢ Nat"]);
-  check("index: goals rendered as a fence", index.goal(26).rendered, "```wiz\nn : Nat\n⊢ Nat\n```");
-  check("index: a finished proof", index.goal(1).rendered, "no goals");
+  check("index: well-formed entries kept", entries.size, 5);
+  check("index: the innermost term", entries.termGoal(27).goal, "Nat (n)");
+  check("index: the enclosing one", entries.termGoal(26).goal, "Nat");
+  check("index: its range", entries.termGoal(26).range, { start: { line: 0, character: 25 }, end: { line: 0, character: 28 } });
+  check("index: the caret at an end counts", entries.termGoal(28).goal, "Nat (n)");
+  check("index: outside everything", entries.termGoal(29), null);
+  check("index: goals", entries.goal(26).goals, ["n : Nat\n⊢ Nat"]);
+  check("index: goals rendered as a fence", entries.goal(26).rendered, "```wiz\nn : Nat\n⊢ Nat\n```");
+  check("index: a finished proof", entries.goal(1).rendered, "no goals");
   check("offsetOf: line and character", offsetOf("ab\ncd\n", { line: 1, character: 1 }), 4);
   check("offsetOf: clamped to the line", offsetOf("ab\ncd\n", { line: 0, character: 9 }), 2);
 }
 {
   // a module without the export: check answers null and the text path is used
   let evals = 0;
-  const server = new SelfhostServer({ evaluate: (s) => { evals++; return stubEval(s); }, check: () => null });
+  const server = new SelfhostServer({ evaluate: (s) => { evals++; return stubEval(s); }, check: () => null, index });
   await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}');
   const out = await server.handle(JSON.stringify({ jsonrpc: "2.0", method: "textDocument/didOpen",
     params: { textDocument: { uri: "u", version: 1, text: "def a : Nat := BAD\n" } } }));
@@ -424,14 +427,15 @@ check("check: no lines", parseCheck('{"v":1}'), null);
   const text = "def k (n : Nat) : Nat := n\n#eval k 2\n";
   const p = withPrelude(text).prefix.length;
   let evals = 0;
-  const index = [
+  const selfIndex = [
     { s: p + 25, e: p + 26, kind: "term", expected: "Nat" },
     { s: p + 25, e: p + 26, kind: "goal", goals: ["n : Nat\n⊢ Nat"] },
   ];
   const c2 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
     evaluate: (s) => { evals++; return stubEval(s); },
     // the index belongs to the first text only; a new text's check has none
-    check: (s) => Promise.resolve(stubCheck(s, s.includes(":= n\n") ? { index } : {})),
+    check: (s) => Promise.resolve(stubCheck(s, s.includes(":= n\n") ? { index: selfIndex } : {})),
+    index,
   }) });
   await c2.connect();
   const got = waitFor(c2, "diagnostics");
@@ -503,7 +507,7 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
 {
   // the handshake advertises all three, and the answers come from the index
   const c3 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (s) => declCheck(s, DECLS)
+    evaluate: stubEval, check: (s) => declCheck(s, DECLS), index,
   }) });
   await c3.connect();
   const caps = c3.capabilities || {};
@@ -549,7 +553,7 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
     { name: "Box.mk", detail: "Box", kind: 3, s: 24, e: 26 },
   ];
   const c4 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (s) => declCheck(s, decls),
+    evaluate: stubEval, check: (s) => declCheck(s, decls), index,
   }) });
   await c4.connect();
   const got4 = waitFor(c4, "diagnostics");
@@ -563,7 +567,7 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
 }
 {
   // a module without the export: empty lists and nulls, never an error
-  const server = new SelfhostServer({ evaluate: stubEval });
+  const server = new SelfhostServer({ evaluate: stubEval, index });
   check("completion: no check is an empty list",
     (await server.handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'))[0].result
       .capabilities.completionProvider !== undefined, true);
@@ -580,7 +584,7 @@ check("filter: a cap", filterCompletions(declarations, "", 2).length, 2);
   check("definition: no index is null", def[0].result, null);
   // before the handshake an unknown method is still refused, and an unopened document is
   // an invalid parameter (not a crash)
-  const fresh = new SelfhostServer({ evaluate: stubEval });
+  const fresh = new SelfhostServer({ evaluate: stubEval, index });
   const unknown = await fresh.handle('{"jsonrpc":"2.0","id":5,"method":"wiz/frobnicate","params":{}}');
   check("before initialize: an unknown method", unknown[0].error.code, -32601);
   const closed = await fresh.handle('{"jsonrpc":"2.0","id":6,"method":"textDocument/completion",' +
@@ -600,7 +604,7 @@ check("goals: nothing", splitGoals(""), []);
   const p = withPrelude(text).prefix.length;
   const body = text.indexOf("n + n");               // 24
   const second = text.lastIndexOf("n");             // 28
-  const index = [
+  const tacticIndex = [
     { s: p + body, e: p + body + 5, kind: "term", expected: "Nat" },
     { s: p + body, e: p + body + 1, kind: "term", expected: "Nat" },
     { s: p + second, e: p + second + 1, kind: "term", expected: "Nat" },
@@ -609,7 +613,7 @@ check("goals: nothing", splitGoals(""), []);
     { s: p + second + 1, e: p + second + 1, kind: "goal", goals: [] },
   ];
   const c5 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index: tacticIndex })), index,
   }) });
   await c5.connect();
   const got5 = waitFor(c5, "diagnostics");
@@ -640,9 +644,9 @@ check("goals: nothing", splitGoals(""), []);
   const p = withPrelude(text).prefix.length;
   const caret = text.length - 2;                    // the last `n`
   const cp = Array.from(text.slice(0, caret)).length;
-  const index = [{ s: p + cp, e: p + cp + 1, kind: "term", expected: "Nat" }];
+  const astralIndex = [{ s: p + cp, e: p + cp + 1, kind: "term", expected: "Nat" }];
   const c6 = new LspClient({ url: SELFHOST_URL, WebSocketImpl: selfhostSocketClass({
-    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index })),
+    evaluate: stubEval, check: (src) => Promise.resolve(stubCheck(src, { index: astralIndex })), index,
   }) });
   await c6.connect();
   const got6 = waitFor(c6, "diagnostics");

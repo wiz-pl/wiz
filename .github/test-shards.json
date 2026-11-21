@@ -22,7 +22,10 @@
       "=selfhost",
       "=selfhost-host",
       "=audit-kernels",
-      "=selfhost-macro"
+      "=selfhost-macro",
+      "=selfhost-cli",
+      "=selfhost-cli-diff",
+      "=selfhost-lsp"
     ],
     "split-cases": true
   },
@@ -56,7 +59,6 @@
     "name": "library",
     "split": 10,
     "jobs": 4,
-    "default": true,
     "select": [
       "=bus-crc",
       "=bus-law",
@@ -99,6 +101,7 @@
       "=scry-wil",
       "=scry-c2wil",
       "=scry-csharp",
+      "=scry-cs",
       "=scry-prover",
       "=scry-ai",
       "=scry-taint",
@@ -113,6 +116,7 @@
       "=scry-datalog",
       "=scry-cert",
       "=scry-egraph",
+      "=scry-e2e",
       "=smt",
       "std",
       "tactics",
@@ -160,16 +164,25 @@
       "quantity",
       "rig",
       "sized",
-      "universes"
+      "universes",
+      "=args",
+      "=library",
+      "=list-lemmas",
+      "=scry-modules",
+      "=storage-mmap",
+      "=storage-multiproc",
+      "=storage-quire"
     ]
   },
   {
     "name": "scaling",
     "split": 2,
+    "jobs": 3,
     "select": [
       "=scaling",
       "=prop",
-      "=audit"
+      "=audit",
+      "=desc-sweep"
     ]
   },
   {

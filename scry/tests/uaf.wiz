@@ -1,3 +1,4 @@
+import Scry.NativeLink
 -- test: run
 import Sys
 import Json

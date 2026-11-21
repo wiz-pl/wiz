@@ -7,7 +7,7 @@ import WordArray
 /-!
 # The slice-3 read-path test
 
-Builds a store file in the version-1 format (`Mmap.wiz`'s documented assumptions), maps
+Builds a store file in the version-2 format (`Mmap.wiz`'s documented assumptions), maps
 it read-only and reads it through the decoder: the meta-slot pick (a torn, newer slot is
 ignored), the page checksums, a B+tree walk to three nodes, an index bucket, an
 unaligned wide load, and an out-of-range read that is an error rather than a fault. A
@@ -200,9 +200,13 @@ def main : IO Unit := EIO.toIO (do
     EIO.lift (report "bucket3" (showBucket (match MappedSnapshot.indexBucket s (U64.ofNat 3) with
       | .error _ => [] | .ok ids => ids)));
     EIO.lift (report "oob" (showOpt (Map.getU64At m (Nat.sub st.size 4))));
+    -- The unaligned load at byte 3 spans the meta's magic (bytes 0–7) and its format
+    -- (bytes 8–11): magic's bytes 3–7, then the format's low three bytes.
+    let expected := UIntN.lor (UIntN.shiftRight Store.metaMagic 24)
+      (UIntN.shiftLeft (U64.ofNat Store.formatVersion) 40);
     let unaligned := match Map.getU64At m 3 with
       | .none => "out"
-      | .some v => match UIntN.beq v (U64.ofNat 0x00000157495a5354) with
+      | .some v => match UIntN.beq v expected with
         | .true => "ok"
         | .false => "wrong";
     EIO.lift (report "unaligned" unaligned);

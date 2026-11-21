@@ -204,7 +204,9 @@ have to partition a flat list. -/
 def Scry.ProjectReport.json (r : Scry.ProjectReport) : Json :=
   let p := r.project;
   Json.mkObj
-    [ ("tool", Json.mkStr "scry")
+    [ ("schema", Json.mkStr "scry-project-report/1")
+    , ("kind", Json.mkStr "project")
+    , ("tool", Json.mkStr "scry")
     , ("project", Json.mkStr p.root)
     , ("units", Json.ofNat (List.length p.units))
     , ("functions", Json.ofNat (List.length p.funcs))

@@ -35,15 +35,6 @@ function setStyle(element, property, value) {
   if (element && element.style && value !== undefined && value !== null) element.style[property] = value;
 }
 
-// The documentation as a tooltip (`markdown` is shown as it is: this is a popup, not a
-// documentation viewer).
-function itemTitle(item) {
-  const docs = item.documentation;
-  if (typeof docs === "string") return docs;
-  if (docs && typeof docs.value === "string") return docs.value;
-  return item.detail === undefined ? null : String(item.detail);
-}
-
 // The caret as `{line, character}` from the runtime's position rule.
 function caretPosition(rules, editor) {
   const value = typeof editor.value === "string" ? editor.value : "";
@@ -137,7 +128,7 @@ export function mountCompletions(options = {}) {
       attr(row, "role", "option");
       attr(row, "data-index", i);
       attr(row, "aria-selected", i === index ? "true" : "false");
-      const title = itemTitle(item);
+      const title = rules.itemTitle(item);
       if (title) attr(row, "title", title);
       // Two spans: the label and the detail, styled apart (and never as markup).
       const label = doc.createElement("span");
@@ -237,11 +228,10 @@ export function mountCompletions(options = {}) {
     render();
   }
 
-  // Whether an event is Ctrl/⌘-Space (the editor's "ask now").
+  // Whether an event is Ctrl/⌘-Space (the editor's "ask now"): the runtime's rule.
   function isAskKey(event) {
     if (!event) return false;
-    const space = event.key === " " || event.key === "Spacebar" || event.code === "Space";
-    return !!(space && (event.ctrlKey || event.metaKey));
+    return rules.askKey(event.key, event.code, !!event.ctrlKey, !!event.metaKey);
   }
 
   // The editor's keydown handler. Returns true when the event belonged to the popup (and

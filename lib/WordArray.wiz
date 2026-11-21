@@ -171,17 +171,15 @@ def U8Array.size_set (a : U8Array) (i : Nat) (x : U8) : U8Array.size (U8Array.se
       (Eq.trans
         (List.length_setAt x (List.reverse l) i)
         (List.length_reverse l))
-def U8Array.size_mk (l : List U8) : U8Array.size (.mk l) = List.length l := rfl
-def U8Array.getD_set : (a : U8Array) → (i : Nat) → (x d : U8) →
-    Nat.lt i (U8Array.size a) = .true → U8Array.getD (U8Array.set a i x) i d = x
-  | .mk l, i, x, d, h =>
+def U8Array.getD_set (a : U8Array) (i : Nat) (x d : U8) :
+    Nat.lt i (U8Array.size a) = .true → U8Array.getD (U8Array.set a i x) i d = x :=
+  match a with
+  | .mk l => fun h =>
     Eq.trans
       (Eq.congrArg (fun s => List.getD s i d)
         (U8Array.toList_ofList (List.setAt (List.reverse l) i x)))
       (List.getD_setAt x d (List.reverse l) i
-        (Eq.trans
-          (Eq.congrArg (fun z => Nat.lt i z) (List.length_reverse l))
-          (Eq.trans (Eq.symm (Eq.congrArg (fun z => Nat.lt i z) (U8Array.size_mk l))) h)))
+        (Eq.trans (Eq.congrArg (fun n => Nat.lt i n) (List.length_reverse l)) h))
 def U8Array.size_append (a b : U8Array) : U8Array.size (U8Array.append a b) = Nat.add (U8Array.size a) (U8Array.size b) :=
   match a with
   | .mk l => match b with
@@ -279,17 +277,15 @@ def U32Array.size_set (a : U32Array) (i : Nat) (x : U32) : U32Array.size (U32Arr
       (Eq.trans
         (List.length_setAt x (List.reverse l) i)
         (List.length_reverse l))
-def U32Array.size_mk (l : List U32) : U32Array.size (.mk l) = List.length l := rfl
-def U32Array.getD_set : (a : U32Array) → (i : Nat) → (x d : U32) →
-    Nat.lt i (U32Array.size a) = .true → U32Array.getD (U32Array.set a i x) i d = x
-  | .mk l, i, x, d, h =>
+def U32Array.getD_set (a : U32Array) (i : Nat) (x d : U32) :
+    Nat.lt i (U32Array.size a) = .true → U32Array.getD (U32Array.set a i x) i d = x :=
+  match a with
+  | .mk l => fun h =>
     Eq.trans
       (Eq.congrArg (fun s => List.getD s i d)
         (U32Array.toList_ofList (List.setAt (List.reverse l) i x)))
       (List.getD_setAt x d (List.reverse l) i
-        (Eq.trans
-          (Eq.congrArg (fun z => Nat.lt i z) (List.length_reverse l))
-          (Eq.trans (Eq.symm (Eq.congrArg (fun z => Nat.lt i z) (U32Array.size_mk l))) h)))
+        (Eq.trans (Eq.congrArg (fun n => Nat.lt i n) (List.length_reverse l)) h))
 def U32Array.size_append (a b : U32Array) : U32Array.size (U32Array.append a b) = Nat.add (U32Array.size a) (U32Array.size b) :=
   match a with
   | .mk l => match b with
@@ -387,17 +383,15 @@ def U64Array.size_set (a : U64Array) (i : Nat) (x : U64) : U64Array.size (U64Arr
       (Eq.trans
         (List.length_setAt x (List.reverse l) i)
         (List.length_reverse l))
-def U64Array.size_mk (l : List U64) : U64Array.size (.mk l) = List.length l := rfl
-def U64Array.getD_set : (a : U64Array) → (i : Nat) → (x d : U64) →
-    Nat.lt i (U64Array.size a) = .true → U64Array.getD (U64Array.set a i x) i d = x
-  | .mk l, i, x, d, h =>
+def U64Array.getD_set (a : U64Array) (i : Nat) (x d : U64) :
+    Nat.lt i (U64Array.size a) = .true → U64Array.getD (U64Array.set a i x) i d = x :=
+  match a with
+  | .mk l => fun h =>
     Eq.trans
       (Eq.congrArg (fun s => List.getD s i d)
         (U64Array.toList_ofList (List.setAt (List.reverse l) i x)))
       (List.getD_setAt x d (List.reverse l) i
-        (Eq.trans
-          (Eq.congrArg (fun z => Nat.lt i z) (List.length_reverse l))
-          (Eq.trans (Eq.symm (Eq.congrArg (fun z => Nat.lt i z) (U64Array.size_mk l))) h)))
+        (Eq.trans (Eq.congrArg (fun n => Nat.lt i n) (List.length_reverse l)) h))
 def U64Array.size_append (a b : U64Array) : U64Array.size (U64Array.append a b) = Nat.add (U64Array.size a) (U64Array.size b) :=
   match a with
   | .mk l => match b with

@@ -53,6 +53,15 @@ def hdlBusLawGroup : Group where
            "ram read-after-write yes, answered after 2 yes, value = simulate = simFast yes\n" ++
            "ramw strobes yes, value = simulate = simFast yes\n" ++
            "well formed yes\n") },
+    { name := "Bus.ramWC laws: one outstanding request, two-cycle wait timeline, read-after-write every strobe, no alias, no bypass", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/hdl-ramwc.wiz")
+          ("wait timeline 0 0 1 1 2 0 0\n" ++
+           "masked read-after-write 8/16/32: yes yes yes\n" ++
+           "no alias 8/16/32: yes yes yes\n" ++
+           "write answer rvalid 0, data 0 (no bypass; the write is visible to the next read)\n" ++
+           "byte addressing shift=2 yes\n" ++
+           "value = simulate = simFast yes\n" ++
+           "well formed yes\n") },
     { name := "Hdl.Bus N-master circuit: value = Netlist.simulate = simFast for n=2,3,4; value = arbNStep; netlist ownership/progress; yosys when available", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-arb-n.wiz")
           ("n-master circuit selector n=1..4 yes\n" ++

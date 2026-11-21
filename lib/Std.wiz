@@ -51,14 +51,14 @@ extern "wiz_str_to_cstr" Str.toString : Str → String
 extern "wiz_str_append" Str.append : Str → Str → Str
 /-- Add one byte at the end (in place when the text is unique). -/
 extern "wiz_str_push" Str.push : Str → Nat → Str
-/-- `Str.joinGo ss acc`: the pieces `ss` appended to `acc` (left to right; a helper
-of `Str.join`). The accumulator is kept unique, so `Str.append` extends it in place;
-a loop of `Str.push` is the byte-at-a-time builder. -/
-def Str.joinGo : List Str → Str → Str
-  | .nil, acc => acc
-  | .cons s rest, acc => Str.joinGo rest (Str.append acc s)
-/-- The pieces one after the other. -/
-def Str.join (ss : List Str) : Str := Str.joinGo ss Str.empty
+/-- The pieces one after the other (`Str.append` onto the accumulator). -/
+def Str.joinGo (acc : Str) : List Str → Str
+  | .nil => acc
+  | .cons s ss => Str.joinGo (Str.append acc s) ss
+/-- The pieces one after the other. `Str.join` folds from the left, so each step
+keeps the accumulated text unique and `Str.append` extends it in place; a loop of
+`Str.push` is the byte-at-a-time builder. -/
+def Str.join (ss : List Str) : Str := Str.joinGo Str.empty ss
 /-- The length in bytes. -/
 extern "wiz_str_size" Str.size : Str → Nat
 /-- `Str.byte s i`: the byte at offset `i`, a number below 256 (0 past the end). -/

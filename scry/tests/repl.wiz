@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Scry.Repl
 

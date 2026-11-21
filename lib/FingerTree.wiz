@@ -110,6 +110,9 @@ inductive FT (A : Type) : Nat → Type where
   | single {l : Nat} (e : Elem A l) (size : Nat) : FT A l
   | deep {l : Nat} (prefix : Digit (Elem A l)) (middle : FT A (Nat.succ l))
       (suffix : Digit (Elem A l)) (size : Nat) : FT A l
+  /-- A deferred catenation of two trees at the same level (`Seq.append`). Catenating
+  is one node (O(1)); `get` descends by the children's cached sizes. -/
+  | cat {l : Nat} (left right : FT A l) (size : Nat) : FT A l
 
 -- ## Flattening, size and measure
 
@@ -132,7 +135,7 @@ def FT.toList {A : Type} {l : Nat} : FT A l → List A
   | .deep p m s _ =>
     List.append (List.concatMap elemToList (Digit.toList p))
       (List.append (FT.toList m) (List.concatMap elemToList (Digit.toList s)))
-
+  | .cat s t _ => List.append (FT.toList s) (FT.toList t)
 
 /-- The elements of a list of elements, concatenated onto `acc` (the accumulator shape
 of `FT.toList`). -/
@@ -147,7 +150,7 @@ def FT.toListGo {A : Type} {l : Nat} : FT A l → List A → List A
   | .single e _, acc => List.append (elemToList e) acc
   | .deep p m s _, acc =>
     FT.listToListGo (Digit.toList p) (FT.toListGo m (FT.listToListGo (Digit.toList s) acc))
-
+  | .cat s t _, acc => FT.toListGo s (FT.toListGo t acc)
 
 /-- The number of leaves of one element (a node counts all its leaves). -/
 def elemSize {A : Type} {l : Nat} : Elem A l → Nat
@@ -189,7 +192,7 @@ def FT.sizeGo {A : Type} {l : Nat} : FT A l → Nat → Nat
   | .single e _, acc => Nat.add (elemSize e) acc
   | .deep p m s _, acc =>
     listElemSizeGo (Digit.toList p) (FT.sizeGo m (listElemSizeGo (Digit.toList s) acc))
-
+  | .cat s t _, acc => FT.sizeGo s (FT.sizeGo t acc)
 
 /-- The number of leaves in a tree. -/
 def FT.size {A : Type} {l : Nat} (t : FT A l) : Nat := FT.sizeGo t 0
@@ -199,6 +202,7 @@ def FT.sizeCached {A : Type} {l : Nat} : FT A l → Nat
   | .empty => 0
   | .single _ size => size
   | .deep _ _ _ size => size
+  | .cat _ _ size => size
 
 /-- The measure of one element: its `Measure` at a leaf, the `mul` of its parts at a
 node. -/
@@ -229,7 +233,7 @@ def FT.measureGo {A M : Type} [Monoid M] [Measure A M] {l : Nat} : FT A l → M 
   | .single e _, acc => Monoid.mul (elemMeasure e) acc
   | .deep p m s _, acc =>
     listElemMeasureGo (Digit.toList p) (FT.measureGo m (listElemMeasureGo (Digit.toList s) acc))
-
+  | .cat s t _, acc => FT.measureGo s (FT.measureGo t acc)
 
 /-- The measure of a tree. -/
 def FT.measure {A M : Type} [Monoid M] [Measure A M] {l : Nat} (t : FT A l) : M :=
@@ -266,7 +270,7 @@ def FT.push {A : Type} {l : Nat} : FT A l → Elem A l → FT A l
       (FT.push m (.node3 a b c
         (Nat.add (elemSizeCached a) (Nat.add (elemSizeCached b) (elemSizeCached c)))))
       (.two d e) (Nat.add sz (elemSizeCached e))
-
+  | .cat s t sz, e => .cat s (FT.push t e) (Nat.add sz (elemSizeCached e))
 
 /-- Push an element on the front. -/
 def FT.pushFront {A : Type} {l : Nat} : FT A l → Elem A l → FT A l
@@ -280,7 +284,7 @@ def FT.pushFront {A : Type} {l : Nat} : FT A l → Elem A l → FT A l
       (FT.pushFront m (.node3 b c d
         (Nat.add (elemSizeCached b) (Nat.add (elemSizeCached c) (elemSizeCached d)))))
       s (Nat.add sz (elemSizeCached e))
-
+  | .cat s t sz, e => .cat (FT.pushFront s e) t (Nat.add sz (elemSizeCached e))
 
 /-- The children of a node as a digit of the level below. -/
 def nodeDigit {A : Type} {l : Nat} : Elem A (Nat.succ l) → Digit (Elem A l)
@@ -311,7 +315,9 @@ def FT.pop {A : Type} {l : Nat} : FT A l → Option (FT A l × Elem A l)
     | .two a b => .some (.deep p m (.one a) (Nat.sub sz (elemSizeCached b)), b)
     | .three a b c => .some (.deep p m (.two a b) (Nat.sub sz (elemSizeCached c)), c)
     | .four a b c d => .some (.deep p m (.three a b c) (Nat.sub sz (elemSizeCached d)), d)
-
+  | .cat s t sz => match FT.pop t with
+    | .none => FT.pop s
+    | .some (t', e) => .some (.cat s t' (Nat.sub sz (elemSizeCached e)), e)
 
 /-- Pop the first element, if any. -/
 def FT.popFront {A : Type} {l : Nat} : FT A l → Option (FT A l × Elem A l)
@@ -327,7 +333,9 @@ def FT.popFront {A : Type} {l : Nat} : FT A l → Option (FT A l × Elem A l)
     | .two a b => .some (.deep (.one b) m s (Nat.sub sz (elemSizeCached a)), a)
     | .three a b c => .some (.deep (.two b c) m s (Nat.sub sz (elemSizeCached a)), a)
     | .four a b c d => .some (.deep (.three b c d) m s (Nat.sub sz (elemSizeCached a)), a)
-
+  | .cat s t sz => match FT.popFront s with
+    | .none => FT.popFront t
+    | .some (s', e) => .some (.cat s' t (Nat.sub sz (elemSizeCached e)), e)
 
 /-- The element of one level-`l` node containing the leaf at index `i`. -/
 def elemGet {A : Type} {l : Nat} : Elem A l → Nat → Option A
@@ -361,7 +369,9 @@ def FT.get {A : Type} {l : Nat} : FT A l → Nat → Option A
     | .false => match Nat.lt (Nat.sub i np) (FT.sizeCached m) with
       | .true => FT.get m (Nat.sub i np)
       | .false => listElemGet (Digit.toList s) (Nat.sub (Nat.sub i np) (FT.sizeCached m))
-
+  | .cat s t _, i => match Nat.lt i (FT.sizeCached s) with
+    | .true => FT.get s i
+    | .false => FT.get t (Nat.sub i (FT.sizeCached s))
 
 /-- Push an element on the back of a sequence. -/
 def Seq.push {A : Type} (s : Seq A) (a : A) : Seq A := FT.push s (.base a)
@@ -386,12 +396,15 @@ def Seq.popFront {A : Type} (s : Seq A) : Option (Seq A × A) :=
 /-- The sequence of a list. -/
 def Seq.ofList {A : Type} (l : List A) : Seq A := FT.ofList (List.map (fun a => Elem.base a) l)
 
-/-- Concatenate two sequences. This rebuilds the result from the two readings (O(n+m));
-the textbook finger-tree catenation is O(log n) but needs a tree node the indexed
-representation cannot put at the same level, so `Seq.toList_append` stays the law.
-(The cached sizes make `Seq.get` O(log n); catenation is not cached.) -/
-def Seq.append {A : Type} (s t : Seq A) : Seq A :=
-  Seq.ofList (List.append (Seq.toList s) (Seq.toList t))
+/-- Catenate two trees at the same level: one deferred node (O(1)); `get` descends by
+the children's cached sizes. An empty operand is harmless (`cat` is transparent to
+`get`/`pop`/`toList`) but is not dropped: matching the *second* indexed argument against
+`empty` needs an index unification the elaborator does not support yet. -/
+def FT.append {A : Type} {l : Nat} (s t : FT A l) : FT A l :=
+  .cat s t (Nat.add (FT.sizeCached s) (FT.sizeCached t))
+/-- Concatenate two sequences (O(1), as one `FT.cat` node). `Seq.toList_append` is
+then the definition of `FT.toList` at `cat`, and `Seq.size_append` the size law. -/
+def Seq.append {A : Type} (s t : Seq A) : Seq A := FT.append s t
 /-- The leaf at index `i`. -/
 def Seq.get {A : Type} (s : Seq A) (i : Nat) : Option A := FT.get s i
 
@@ -536,6 +549,13 @@ def FT.measureGo_toList {A M : Type} [mo : Monoid M] [Measure A M]
       FT.measureGo t acc = listMeasureGo (FT.toList t) acc
   | .empty, acc => rfl
   | .single e _, acc => elemMeasureGo law e acc
+  | .cat s t _, acc =>
+    Eq.trans
+      (FT.measureGo_toList law s (FT.measureGo t acc))
+      (Eq.trans
+        (Eq.congrArg (fun z => listMeasureGo (FT.toList s) z)
+          (FT.measureGo_toList law t acc))
+        (Eq.symm (listMeasureGo_append (FT.toList s) (FT.toList t) acc)))
   | .deep p m s _, acc =>
     Eq.trans
       (listElemMeasureGo_concat law (Digit.toList p)
@@ -563,6 +583,13 @@ def FT.sizeGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : Nat) →
     FT.sizeGo t acc = listLengthGo (FT.toList t) acc
   | .empty, acc => rfl
   | .single e _, acc => elemSizeGo e acc
+  | .cat s t _, acc =>
+    Eq.trans
+      (FT.sizeGo_toList s (FT.sizeGo t acc))
+      (Eq.trans
+        (Eq.congrArg (fun z => listLengthGo (FT.toList s) z)
+          (FT.sizeGo_toList t acc))
+        (Eq.symm (listLengthGo_append (FT.toList s) (FT.toList t) acc)))
   | .deep p m s _, acc =>
     Eq.trans
       (listElemSizeGo_concat (Digit.toList p)
@@ -612,6 +639,13 @@ def FT.toListGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : List A) �
     FT.toListGo t acc = List.append (FT.toList t) acc
   | .empty, acc => rfl
   | .single e _, acc => rfl
+  | .cat s t _, acc =>
+    Eq.trans
+      (FT.toListGo_toList s (FT.toListGo t acc))
+      (Eq.trans
+        (Eq.congrArg (fun z => List.append (FT.toList s) z)
+          (FT.toListGo_toList t acc))
+        (Eq.symm (List.append_assoc (FT.toList s) (FT.toList t) acc)))
   | .deep p m s _, acc =>
     Eq.trans
       (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) z)
@@ -635,16 +669,16 @@ def FT.toListGo_toList {A : Type} {l : Nat} : (t : FT A l) → (acc : List A) �
                 (List.concatMap elemToList (Digit.toList s)) acc))))))
 
 /-- **Push on the back.** `push` appends one element, with an accumulator. -/
-def FT.toListGo_push {A : Type} {l : Nat} :
-    (t : FT A l) → (e : Elem A l) → (acc : List A) →
-      FT.toListGo (FT.push t e) acc =
-        FT.toListGo t (List.append (elemToList e) acc)
-  | .empty, e, acc => rfl
-  | .single a _, e, acc => rfl
-  | .deep p m (.one a) _, e, acc => rfl
-  | .deep p m (.two a b) _, e, acc => rfl
-  | .deep p m (.three a b c) _, e, acc => rfl
-  | .deep p m (.four a b c d) _, e, acc =>
+def FT.toListGo_push {A : Type} {l : Nat} (t : FT A l) (e : Elem A l) (acc : List A) :
+    FT.toListGo (FT.push t e) acc =
+      FT.toListGo t (List.append (elemToList e) acc) :=
+  match t with
+  | .empty => rfl
+  | .single a _ => rfl
+  | .deep p m (.one a) _ => rfl
+  | .deep p m (.two a b) _ => rfl
+  | .deep p m (.three a b c) _ => rfl
+  | .deep p m (.four a b c d) _ =>
       Eq.trans
         (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) z)
           (FT.toListGo_push m (.node3 a b c
@@ -653,7 +687,10 @@ def FT.toListGo_push {A : Type} {l : Nat} :
         (Eq.congrArg (fun z => FT.listToListGo (Digit.toList p) (FT.toListGo m z))
           (List.append_four (elemToList a) (elemToList b) (elemToList c)
             (List.append (elemToList d) (List.append (elemToList e) acc))))
-
+  | .cat s u _ =>
+      -- the goal's two sides are this equation definitionally (the `cat` clause of
+      -- `push` and of `toListGo`), so the `congrArg` alone is the proof
+      Eq.congrArg (fun z => FT.toListGo s z) (FT.toListGo_push u e acc)
 
 /-- **Push on the back**, in the user-facing form:
 `toList (push t e) = toList t ++ elemToList e`. -/
@@ -687,7 +724,7 @@ def FT.toListGo_pushFront {A : Type} {l : Nat} :
             (List.append (elemToList a) z))
           (List.append_four (elemToList b) (elemToList c) (elemToList d)
             (FT.toListGo m (FT.listToListGo (Digit.toList s) acc))))
-
+  | .cat s t _, e, acc => FT.toListGo_pushFront s e (FT.toListGo t acc)
 
 /-- **Push on the front**, in the user-facing form:
 `toList (pushFront t e) = elemToList e ++ toList t`. -/
@@ -707,10 +744,11 @@ def Seq.toList_ofList {A : Type} : (l : List A) → Seq.toList (Seq.ofList l) = 
       (FT.toList_pushFront (FT.ofList (List.map (fun a => Elem.base a) xs)) (.base x))
       (Eq.congrArg (fun z => List.append (elemToList (.base x)) z) (Seq.toList_ofList xs))
 
-/-- **The catenation law.** `Seq.append` reads as the two readings concatenated. -/
+/-- **The catenation law.** `Seq.append` reads as the two readings concatenated: one
+case per constructor pair, because `FT.append`'s empty checks are the definition. -/
 def Seq.toList_append {A : Type} (s t : Seq A) :
     Seq.toList (Seq.append s t) = List.append (Seq.toList s) (Seq.toList t) :=
-  Seq.toList_ofList (List.append (Seq.toList s) (Seq.toList t))
+  rfl
 
 /-- **The catenation size law.** `Seq.size` adds up over `Seq.append`. -/
 def Seq.size_append {A : Type} (s t : Seq A) :

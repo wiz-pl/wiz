@@ -1,4 +1,5 @@
 import Scry.Rules
+import Scry.Index
 import Text
 /-!
 # Scry.Models
@@ -211,6 +212,9 @@ structure Scry.ModelPack where
   language : String
   entries : List Scry.ModelEntry
   fallback : String → Option Scry.FnModel
+  /-- Internal derived index: source name -> the entries with that name, in pack order.
+  Built once when the pack is made so `find` does not fold the whole table per call. -/
+  index : Scry.NameMap Scry.ModelEntry
 
 /-- The copy/read shape `Bounds` consumes, derived from a model's `copyBounds` effect. -/
 structure Scry.CopyShape where
@@ -1133,6 +1137,15 @@ tool and one input give both numbers. -/
 def Scry.coreModels : List Scry.FnModel :=
   List.append Scry.libcModels (List.append Scry.policyModels Scry.pureModels)
 
+/-- The keyed view of a model table: source name -> entries, in table order. A pack is a
+value, so its index is built once here and every lookup is a bucket read. -/
+def Scry.indexModelEntries (entries : List Scry.ModelEntry) :
+    Scry.NameMap Scry.ModelEntry :=
+  Scry.NameMap.fromList (List.map (fun e => (e.key.name, e)) entries)
+
+def Scry.coreModelsByName : Scry.NameMap Scry.FnModel :=
+  Scry.NameMap.fromList (List.map (fun m => (m.name, m)) Scry.coreModels)
+
 /-- All model entries: the core C table and the CLR layer. `coreModels` stays a list
 for the external-coverage measurement; `defaultModels` is the keyed value the analyses
 take. -/
@@ -1157,17 +1170,19 @@ to `c_sharp`. Its fallback is the CLR shape rules, so a name-only C# lookup such
 kept for compatibility). -/
 def Scry.defaultModels : Scry.ModelPack :=
   Scry.ModelPack.mk "default" "c" Scry.modelEntries Scry.clrModelOf
+    (Scry.indexModelEntries Scry.modelEntries)
 
 def Scry.models : Scry.ModelPack := Scry.defaultModels
 
 /-- The C# default: the same entries looked up with language `c_sharp`. -/
 def Scry.csModels : Scry.ModelPack :=
   Scry.ModelPack.mk "csharp-default" "c_sharp" Scry.modelEntries Scry.clrModelOf
+    (Scry.indexModelEntries Scry.modelEntries)
 
 /-- `isModelled` against the pre-CLR table (the `before` side of the coverage
 measurement). -/
 def Scry.isModelledCore (name : String) : Bool :=
-  match List.find (fun m => String.eq m.name name) Scry.coreModels with
+  match Scry.NameMap.find Scry.coreModelsByName name with
   | .some _ => .true
   | .none => .false
 
@@ -1216,7 +1231,8 @@ def Scry.ModelPack.find (p : Scry.ModelPack) (q : Scry.ModelQuery) :
       | .some b => match Nat.lt (Scry.ModelKey.specificity b.key)
             (Scry.ModelKey.specificity e.key) with
         | .true => .some e
-        | .false => best) (.none : Option Scry.ModelEntry) p.entries
+        | .false => best) (.none : Option Scry.ModelEntry)
+    (Scry.NameMap.findAll p.index q.name)
 
 def Scry.ModelPack.modelOf (p : Scry.ModelPack) (name : String) :
     Option Scry.FnModel :=

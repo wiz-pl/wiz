@@ -301,8 +301,8 @@ def group : Group where
        "inductive V (A : Type) : Nat → Type where\n" ++
        "  | nil : V A 0\n" ++
        "  | cons {n : Nat} (x : A) (xs : V A n) : V A (Nat.succ n)\n" ++
-       "  deriving BEq\n")
-      none "BEq" "indexed families are not supported",
+       "  deriving Inhabited\n")
+      none "Inhabited" "indexed families are not supported",
     rejected "deriving: Inhabited of a recursive type"
       ("import Deriving\ninductive I where\n  | more (i : I)\n  deriving Inhabited\n")
       none "Inhabited" "every constructor of I is recursive",

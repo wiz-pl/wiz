@@ -1,0 +1,4 @@
+{
+  "comment": "Groups that run in no CI shard, each with the reason it is not run and an owner (scripts/ci.py check-shards, scripts/check-shards.py). The plan is total only when every group `tests --list` reports is selected by a shard's selectors in .github/test-shards.json or named here: there is no default-shard fallback. Keep this list empty when possible; an entry whose group no longer exists, or which a shard selects after all, is a failure (a stale exclusion). A group that is temporarily unrun because a tool is missing belongs in .github/skip-allowlist.json with a skip, not here.",
+  "groups": []
+}

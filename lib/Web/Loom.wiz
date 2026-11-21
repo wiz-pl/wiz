@@ -701,6 +701,52 @@ def Loom.LiveApp.patch {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : List Loo
 def Loom.LiveApp.patches {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : String :=
   Loom.patchesJson (Loom.LiveApp.patch a s s')
 
+/-- A live app and the last tree it rendered. The page's state is this pair, so a step
+diffs against the tree the previous step produced instead of rendering the old state
+again (one render per effect, not two), and an effect that arrives while another is in
+flight is applied to the same tree before the next diff. -/
+structure Loom.Session (S M : Type) where
+  state : S
+  rendered : Loom.Rendered M
+
+/-- The session's initial state and first tree (the SSR the page mounts). -/
+def Loom.LiveApp.session {S M : Type} (a : Loom.LiveApp S M) : Loom.Session S M :=
+  Loom.Session.mk a.init (Loom.LiveApp.render a a.init)
+
+/-- The session's HTML (the tree it already rendered). -/
+def Loom.Session.html {S M : Type} (s : Loom.Session S M) : String := s.rendered.html
+
+/-- Move the session to `next`, rendering only the next state: the patches from the
+retained tree and the new session. -/
+def Loom.LiveApp.advance {S M : Type} (a : Loom.LiveApp S M) (s : Loom.Session S M)
+    (next : S) : Loom.Session S M × List Loom.Patch :=
+  let rendered := Loom.LiveApp.render a next;
+  (Loom.Session.mk next rendered, Loom.Rendered.diff s.rendered rendered)
+
+/-- Dispatch one browser event string against the retained tree (`Loom.splitEvent`),
+then render only the next state. -/
+def Loom.LiveApp.stepSession {S M : Type} (a : Loom.LiveApp S M) (s : Loom.Session S M)
+    (ev : String) : Loom.Session S M × List Loom.Patch :=
+  let e := Loom.splitEvent ev;
+  let next := match Loom.at e.index s.rendered.handlers with
+    | .some h => match String.eq h.1 e.name with
+      | .true => a.update h.2 e.payload s.state
+      | .false => s.state
+    | .none => s.state;
+  Loom.LiveApp.advance a s next
+
+/-- The patches of a step, as JSON for `js_patch`, and the next session. -/
+def Loom.LiveApp.stepSessionJson {S M : Type} (a : Loom.LiveApp S M)
+    (s : Loom.Session S M) (ev : String) : Loom.Session S M × String :=
+  let r := Loom.LiveApp.stepSession a s ev;
+  (r.1, Loom.patchesJson r.2)
+
+/-- An effect's result, as a session and its patch JSON. -/
+def Loom.LiveApp.effectSessionJson {S M : Type} (a : Loom.LiveApp S M)
+    (s : Loom.Session S M) (next : S) : Loom.Session S M × String :=
+  let r := Loom.LiveApp.advance a s next;
+  (r.1, Loom.patchesJson r.2)
+
 /-- Dispatch one browser event string (`Loom.splitEvent`), giving the message its
 payload. A stale index from a previous render cannot fire the wrong message: the event
 name has to match the handler's too. -/

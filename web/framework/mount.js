@@ -70,16 +70,20 @@ function resolveTarget(target, doc) {
 // touched, so a module built by an older compiler cannot half-render one: `mount` throws
 // and the page decides what to say.
 async function instantiate(module, options) {
-  const factory = typeof module === "function" ? module
-    : module && typeof module.default === "function" ? module.default
-      : module && typeof module.create === "function" ? module.create
-        : null;
-  if (!factory) throw new TypeError("mount: pass { module } (a runtime module factory)");
-  const wasm = await factory({
+  const opts = {
     print: options.print || ((s) => console.log(s)),
     printErr: options.printErr || ((s) => console.warn(s)),
     transport: options.transport,
-  });
+  };
+  // A page passes either the factory or a loader (`() => import("./x-ui.mjs")`). A
+  // loader resolves to the ES module namespace, whose `default` is the factory; without
+  // this second step `mount` would call the loader as if it were the factory and see a
+  // namespace with no ABI exports (the playground's "does not export" start failure).
+  let wasm = typeof module === "function" ? await module(opts) : module;
+  const factory = wasm && typeof wasm.default === "function" ? wasm.default
+    : wasm && typeof wasm.create === "function" ? wasm.create
+      : null;
+  if (factory) wasm = await factory(opts);
   if (!wasm || typeof wasm._wiz_loom_init !== "function" ||
       typeof wasm._wiz_loom_html !== "function" || typeof wasm._wiz_loom_step !== "function") {
     throw new TypeError("mount: the runtime does not export wiz_loom_init/html/step");

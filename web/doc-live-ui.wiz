@@ -1,4 +1,5 @@
 import IO
+import Json
 import Web.DocLive
 import Web.Loom
 
@@ -7,19 +8,43 @@ import Web.Loom
 
 `web/doc-live.js` creates the `<aside id="doc-live">` mount point and keeps the fetch
 and the socket; `DocLive` renders the panel and asks for a reconnect.
+
+The page's state is a `Loom.Session`: the panel's model *and the last tree it rendered*.
+A step or an effect diffs against that tree, so one effect is one render, not a render
+of the old state and a render of the new one. An `"batch"` effect carries a JSON array
+of `{kind,a,b}` and applies them all before that one render (a hover answers seven
+fields at once; `web/doc-live.js` sends them together).
 -/
 link_c "js.c"
 extern "js_patch" Js.patch : String → IO Unit
 
-def patched (s s' : DocLive) : IO DocLive := do
-  Js.patch (Loom.LiveApp.patches docLiveApp s s');
-  IO.pure s'
+def applyEffects (s : DocLive) (payload : String) : DocLive :=
+  match Json.parse payload with
+  | .error _ => s
+  | .ok j => List.foldl (fun acc e =>
+      DocLive.effect acc (Json.getStr e "kind") (Json.getStr e "a") (Json.getStr e "b"))
+      s (Json.asList j)
 
-def init : DocLive := DocLive.initial
-def html (s : DocLive) : String := Loom.LiveApp.html docLiveApp s
-def step (s : DocLive) (ev : String) : IO DocLive := patched s (Loom.LiveApp.step docLiveApp s ev)
-def effect (s : DocLive) (kind a b : String) : IO DocLive := patched s (DocLive.effect s kind a b)
-def requests (s : DocLive) : String := DocLive.requests s
+def init : Loom.Session DocLive DocLiveMsg := Loom.LiveApp.session docLiveApp
+
+def html (s : Loom.Session DocLive DocLiveMsg) : String := Loom.Session.html s
+
+def patched (s : Loom.Session DocLive DocLiveMsg) (next : DocLive) : IO (Loom.Session DocLive DocLiveMsg) := do
+  let r := Loom.LiveApp.effectSessionJson docLiveApp s next;
+  Js.patch r.2;
+  IO.pure r.1
+
+def step (s : Loom.Session DocLive DocLiveMsg) (ev : String) : IO (Loom.Session DocLive DocLiveMsg) := do
+  let r := Loom.LiveApp.stepSessionJson docLiveApp s ev;
+  Js.patch r.2;
+  IO.pure r.1
+
+def effect (s : Loom.Session DocLive DocLiveMsg) (kind a b : String) :
+    IO (Loom.Session DocLive DocLiveMsg) :=
+  patched s (if String.eq kind "batch" then applyEffects s.state a
+    else DocLive.effect s.state kind a b)
+
+def requests (s : Loom.Session DocLive DocLiveMsg) : String := DocLive.requests s.state
 
 export "wiz_loom_init" init
 export "wiz_loom_html" html

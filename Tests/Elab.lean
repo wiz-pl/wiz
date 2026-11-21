@@ -1112,7 +1112,7 @@ def streamAt (s : MTm) : MTm := nu 0 (unit 0) streamD star s
 def streamTy : MTm := streamAt szInf
 def alt : MTm := coit 0 (unit 0) streamD (lam (enum 2))
   (lams 2 (pair (var 0) (pair (ecase (enum 2) (var 0) [tag 2 1, tag 2 0]) (pair star star)))) star (tag 2 0)
-def zeros : MTm := scofix 0 (unit 0) streamD (lam (unit 0))
+def zeros : MTm := scofix 0 (unit 0) streamD (lams 2 (unit 0))
   (lams 4 (cocon (pair (tag 2 0) (pair (app (app (var 2) (var 1)) (var 0)) (pair star star))))) szInf star star
 def shead (x : MTm) : MTm := fst (out x)
 def stail (x : MTm) : MTm := fst (snd (out x))
@@ -1282,7 +1282,7 @@ def elimRule : List (MTm × Bool) :=
      (ann (lam (scase 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 3 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (sfix 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 4 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (coit 0 (unit 0) streamD (lam (enum 2)) step star (var 0))) (piq q (enum 2) streamTy), ok),
-     (ann (lam (scofix 0 (unit 0) streamD (lam (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
+     (ann (lam (scofix 0 (unit 0) streamD (lams 2 (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
 
 /-- Usage checking at the edges (kernel-lint's findings in Kernel.wiz, whose usage lists
 drop trailing zeros): a variable that is never used has usage 0, which a binder at 1 does
@@ -1369,7 +1369,7 @@ def elimsAt (l : Nat) (I i : MTm) : List MTm :=
    sfix l I uD 1 P (lams 4 (tag 2 0)) szInf i x,
    scase l I uD 1 P (lams 3 (tag 2 0)) szInf i x,
    coit l I sD (lam (unit l)) (lams 2 (pair star (pair star star))) i star,
-   scofix l I sD (lam (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
+   scofix l I sD (lams 2 (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
 
 /-- Audit F3 (fixed): an eliminator checks that its index type is in `Sort (l+1)`, as the
 type formers `μ`/`ν` do. The eliminators check the scrutinee against `μ.{l} I D i` (or
@@ -1879,15 +1879,22 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .error _ => "error"
 
 /-- The modules the self-hosted programs import may be elaborated against: the
-toolchain's `Prelude`, `IO`, `Std` and `Sys` only. `selfhostChecker` and `selfhostCompiler`
-build their programs' loader from this, and so does the `selfhost-host` group's host
-guard (when a source imports anything else, both must reject it). -/
+toolchain's `Prelude`, `IO`, `Std`, `Text` and `Sys` only. `selfhostChecker` and
+`selfhostCompiler` build their programs' loader from this, and so does the
+`selfhost-host` group's host guard (when a source imports anything else, both must
+reject it). `Std` imports `Text` (audit-runtime gave the class family an owner above
+it), so `Text` must be here or every selfhost case fails to build the checker. -/
 def selfhostLoader : IO (Name → Option String) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  -- `Std` imports `Text` (its `List.foldl`/`foldr`, used by `Str.join`), so the
+  -- self-hosted compiler/checker's source closure needs it too.
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
   let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Text" then some textLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
 
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
@@ -2127,42 +2134,23 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  pure fun n => m.lookup n
+/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name (see
+`Tests.loadedModules`, which caches the load for the process). -/
+def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/
 def libModuleNames : IO (List String) := do
-  let mut ms : Array String := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then ms := ms.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  pure ((ms.qsort (· < ·)).toList)
+  pure ((← Tests.loadedModules "lib").map (·.1))
 
 /-- Modules of `lib/` that are alternative implementations and cannot be imported into
-one program, paired with the modules each must leave out. `Scry.EgraphNative` declares
-the same top-level names as `Scry.Egraph` (the reference list model), and `Scry.EqPlan`
-imports it; the modules built on the reference (`Scry.EgraphWil`/`Extract`/`Taint`)
-import it too. Every whole-library loader must go through `allLibSource` (or load an
-apart module with `libSourceExcept skip`) — importing all of `lib/` at once fails with
-"declared by both". (`Json` and `Infoview` used to be here when `Json` declared
-`Nat.repr`; `Text` owns it now, so they load with all the rest.) -/
-def libApart : List (String × List String) :=
-  [ ("Scry.EgraphNative",
-     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"])
-  , ("Scry.EqPlan",
-     ["Scry.Egraph", "Scry.EgraphWil", "Scry.EgraphExtract", "Scry.EgraphTaint"]) ]
+one program, paired with the modules each must leave out. It is empty now: the last two
+entries were `Scry.EgraphNative`/`Scry.EqPlan` against the reference e-graph family, and
+the e-graph is one engine (`Scry.EgraphNative` is a compatibility import of
+`Scry.Egraph`). A whole-library loader can import all of `lib/` at once. The list and
+`libSourceExcept` stay because the loaders and the trust ledger use the mechanism; an
+entry is still the right place for a future pair that cannot co-load. (`Json` and
+`Infoview` used to be here when `Json` declared `Nat.repr`; `Text` owns it now.) -/
+def libApart : List (String × List String) := []
 
 /-- `import` lines for every module of `lib/` except `skip`. -/
 def libSourceExcept (skip : List String) : IO String := do

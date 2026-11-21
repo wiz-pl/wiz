@@ -22,8 +22,8 @@
 // (`web/selfhost-lsp-shim.js`).
 "use strict";
 import { mount } from "./framework/mount.js";
-import { startInfoview } from "./playground-lsp.js";
-import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
+import { startInfoview, createIndexer } from "./playground-lsp.js";
+import { wantsSelfhost, selfhostEndpoint } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
 
 const runtimeModule = () => import("./wiz-playground-ui.mjs");
@@ -69,7 +69,12 @@ function run() {
   setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = await wasm.evaluate(preludeOf(editor.value).source);
+      // The Prelude rule is the runtime's (`Web.Selfhost.preludeOf`, the same one the
+      // in-page server applies) so a Run and a diagnostic agree on the checked source.
+      const source = handle
+        ? JSON.parse(handle.ask("wiz_loom_lsp_prelude", editor.value)).source
+        : editor.value;
+      const text = await wasm.evaluate(source);
       const ms = Math.max(0, performance.now() - started);
       effect("finished", text, `done in ${ms < 10 ? "<10" : Math.round(ms)} ms`);
     } catch (e) {
@@ -117,23 +122,22 @@ async function loadEngine() {
 // it one question at a time through `mount`'s `ask` (a read-only string query) and hands
 // the answer to the overlay widgets, which only paint and position. Nothing here decides
 // what a diagnostic underlines or what a completion inserts.
-function editorRules(handle) {
+function editorRules(handle, versionOf = null) {
   const ask = (name, ...args) => handle.ask(name, ...args);
+  const index = createIndexer(ask, versionOf);
   return {
-    segments: (text, diagnostics) =>
-      JSON.parse(ask("wiz_loom_editor_segments", text, JSON.stringify(diagnostics || []), "0")),
+    segments: index.segments,
     items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
-    popup(text, offset, items, index) {
+    popup(text, offset, items, indexJson) {
       return JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
-        String(index), String(offset)));
+        String(indexJson), String(offset)));
     },
-    move: (index, delta, count) =>
-      Number(ask("wiz_loom_editor_move", String(index), String(delta), String(count))),
+    move: (i, delta, count) =>
+      Number(ask("wiz_loom_editor_move", String(i), String(delta), String(count))),
     accept: (item, text, offset) =>
       JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
     trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
-    position: (text, offset) =>
-      JSON.parse(ask("wiz_loom_editor_position", text, String(offset))),
+    position: index.position,
   };
 }
 
@@ -198,10 +202,14 @@ let goals = null;
 
 // The rules behind both overlays are the runtime's (`editorRules`); the pane is the
 // runtime's too (`lib/Web/Goals.wiz`), so its answers go through the page's effect and a
-// click's `reveal`/`subterm` request comes back through onRequest.
+// click's `reveal`/`subterm` request comes back through onRequest. Widget cards are not
+// the pane's: `web/widgets.js` mounts them into the page's `#widget-list` and the pane
+// never inserts a payload's markup.
 function wireGoals(editor, rules) {
+  const widgetPane = typeof document !== "undefined" ? document.getElementById("widget-list") : null;
   goals = startInfoview({
     editor,
+    widgetPane,
     config: selfhost,
     rules,
     update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
@@ -217,6 +225,9 @@ const selfhost = typeof location !== "undefined" && wantsSelfhost(location.searc
   ? selfhostEndpoint({
     evaluate: (src) => engineLoaded.then(() => wasm.evaluate(src)),
     check: (src) => engineLoaded.then(() => wasm.check(src)),
+    // Positions and the check's declaration index are the runtime's (`Web.EditorModel`);
+    // the adapter closes over `handle`, which is set before the pane starts.
+    index: createIndexer((name, ...args) => handle.ask(name, ...args)),
   })
   : undefined;
 
@@ -256,7 +267,13 @@ export async function startPage({ root, module = runtimeModule } = {}) {
   const draft = handle.host.storage.get(DRAFT_KEY) || "";
   handle.call("wiz_loom_effect", "load", hash, draft);
   const editor = document.getElementById("editor");
-  if (editor) wireGoals(editor, editorRules(handle));
+  if (editor) {
+    // The editor's document version: one per `input`, so an arrow key on unchanged text
+    // reuses the line table instead of keying the cache by the whole string.
+    let editorVersion = 0;
+    editor.addEventListener("input", () => { editorVersion++; });
+    wireGoals(editor, editorRules(handle, () => editorVersion));
+  }
   if (typeof addEventListener === "function") {
     addEventListener("pagehide", () => {
       if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }

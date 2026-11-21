@@ -285,8 +285,8 @@ function treeSection(tree) {
 // Widget items are `WIZ_WIDGET:` payloads (the Loom schema `wiz.widget/1`). The host
 // (`web/widgets.js`) parses them, sanitises their markup and draws the kinds it knows
 // (`plot`, `scry.analysis`); a payload it cannot draw becomes a card naming the kind.
-// The standalone page puts the cards in its own pane (`mountWidgets`); the playground
-// uses this string renderer inside the goals panel.
+// Both pages put the cards in a widget pane (`mountWidgets`); the goals panel never
+// renders them. This string form is for the tests and for a client with no DOM.
 export function renderInfoItems(items) {
   return renderWidgets(items);
 }
@@ -405,13 +405,8 @@ export function renderPanel(element, view) {
       ? renderTermResult(view.term, view.termKind)
       : `<div class="nothing">asking the server…</div>`);
     if (view.info) parts.push(`<h3>Selected subterm</h3>`, renderSelection(view.info));
-    // The standalone page has a widget pane of its own (a grid child beside the
-    // editor), so it passes `widgetsInPane` and the goals panel leaves them out. The
-    // playground has no separate pane and keeps the grid under this heading.
-    if (!view.widgetsInPane) {
-      const widgets = renderInfoItems(view.items);
-      if (widgets) parts.push(`<h3>Widgets</h3>`, widgets);
-    }
+    // Widget cards are the host's (`mountWidgets` into a page pane); the panel never
+    // renders a payload's markup, so there is one renderer, not two.
     parts.push(`<h3>Diagnostics</h3>`, renderDiagnostics(view.diagnostics));
   }
   parts.push("</div>");

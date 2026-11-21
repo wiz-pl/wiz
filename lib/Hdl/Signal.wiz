@@ -13,15 +13,16 @@ docs/stages/34-hdl-signals.md.
 * `Signal d A` is ν of a one-field description (`head`, `tail`). The domain `d` is a
   phantom `ClockDomain`, and phantom parameters are checked (stage 22e): a
   `Signal ClockDomain.sys A` is not a `Signal (ClockDomain.named "fast") A`.
-* Productivity is typing: every definition here elaborates to `coit` (the recursive
-  observations are direct corecursive calls) or `cocon` (no corecursion), which the
-  kernel accepts as total, so `Signal.at s t` is defined for every `t`.
-* State only through `register` (one `cocon` cell in front of a stream), `mealy`/`moore`
-  (`coit`, state in the arguments: O(1) per cycle) and what is built from them. There is
-  no `Signal.fix`: Clash's `cnt = register 0 (cnt + 1)` needs a sized `scofix` whose state
-  may depend on the size (lane L2, a kernel change). `registerS` shows the sized typing
-  that will make a combinational loop a size error, and `pureS` with the `OfNat` instance
-  is the part of the size-polymorphic operator surface that types today (numerals).
+* Productivity is typing: the unsized definitions elaborate to `coit` (direct
+  corecursive calls) or `cocon` (no corecursion), and the size-preserving ones
+  (`mapS`/`zipWithS`) to `scofix`; all are total in the kernel, so `Signal.at s t` is
+  defined for every `t`.
+* State through `register` (one `cocon` cell in front of a stream), `mealy`/`moore`
+  (`coit`, state in the arguments: O(1) per cycle) and what is built from them.
+  `Signal.fix` is Clash's `cnt = register 0 (cnt + 1)`: a sized `scofix` (lane L2) whose
+  state may depend on the size. `registerS` is its only size bump (`Signal.mapS` and
+  `zipWithS` preserve the size), so a combinational loop is a size error, and `+`/`if`
+  work on `(Signal d A)^i` through the sized instances.
 * `Signal.Sig d` is a representation `HwTy → Type`, with a pointwise `Hw` instance: any
   combinational code `{r} → [Hw r] → …` runs on signals, and a `Bundle F` (`deriving
   Bundle`) packs `F (Signal.Sig d)`, a structure of signals, into one signal and back.
@@ -75,9 +76,9 @@ def Signal.pure {d : ClockDomain} {A : Type} (a : A) : Signal d A
   | .tail => Signal.pure a
 
 /-- `pure` at any size: the same value in every cycle, as a signal valid for `i` steps.
-This is the one size-polymorphic combinator the current kernel types, because it never
-*observes* at the size it runs at (`coit` at `∞` used at `i`). `map`/`zipWith` do observe,
-so their size-preserving forms need lane L2's sized `scofix` (stage 34b). -/
+It never *observes* at the size it runs at (`coit` at `∞` used at `i`), so it needs no
+size-dependent state. `mapS`/`zipWithS` do observe; they are the sized copatterns
+(`scofix`, lane L2) below. -/
 def Signal.pureS {d : ClockDomain} {A : Type} (a : A) {i : Size} : (Signal d A)^i
   | .head => a
   | .tail => Signal.pureS a
@@ -88,12 +89,59 @@ def Signal.pureS_at {d : ClockDomain} {A : Type} (a : A) : (t : Nat) →
   | .zero => rfl
   | .succ t => Signal.pureS_at a t
 
-/-- A numeral at a sized signal (`0`, `1`, …): a constant in every cycle. This is the
-*numerals* half of the plan's size-polymorphic operators. `+` and `if` are not definable
-at size `i` yet: each observes its arguments at the size it runs at, so it needs a
-size-preserving `zipWith` (lane L2; stage 34b). -/
+/-- A numeral at a sized signal (`0`, `1`, …): a constant in every cycle. With the
+size-preserving `mapS`/`zipWithS` below, the observing operators (`+`, `if`) are the
+pointwise instances at the same size. -/
 instance {d : ClockDomain} {n k : Nat} {i : Size} : OfNat ((Signal d (BitVec n))^i) k :=
   OfNat.mk (Signal.pureS (i := i) (BitVec.ofNat n k))
+
+/-- `map` at the same size: `f` on the value of every cycle, with the size preserved.
+A sized copattern definition (lane L2): the body is checked at a predecessor size, the
+input's head is observed there, and the recursive call is on its tail at the smaller
+size. -/
+def Signal.mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) :
+    (Signal d B)^i
+  | .head => f s.head
+  | .tail => Signal.mapS f s.tail
+
+/-- `zipWith` at the same size. -/
+def Signal.zipWithS {d : ClockDomain} {A B C : Type} {i : Size} (f : A → B → C)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) : (Signal d C)^i
+  | .head => f a.head b.head
+  | .tail => Signal.zipWithS f a.tail b.tail
+
+/-- `zipWith3` at the same size (`if` is a three-way mux). -/
+def Signal.zipWith3S {d : ClockDomain} {A B C D : Type} {i : Size} (f : A → B → C → D)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) (c : (Signal d C)^i) : (Signal d D)^i
+  | .head => f a.head b.head c.head
+  | .tail => Signal.zipWith3S f a.tail b.tail c.tail
+
+/-- Feedback for a contractive stream function: `g` maps a signal at size `i` to one at
+`↑i`, so it can only use its argument under a register (`registerS`), never observe it.
+The fixed point is `scofix` with no separate state; the recursive argument of `scofix` is
+already the loop value at the predecessor, and the body is `g` at that size. That is
+Clash's `cnt = register 0 (cnt + 1)` with the delay discipline made a type. -/
+def Signal.fix {d : ClockDomain} {A : Type}
+    (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) : Signal d A :=
+  scofix (fun (j : Size) => fun _ => Unit)
+    (fun j rec idx a => g j (rec idx a))
+    ∞ () ()
+
+/-- `+` on a sized signal: the pointwise `BitVec.add`, at the same size. -/
+instance {d : ClockDomain} {n : Nat} {i : Size} : Add ((Signal d (BitVec n))^i) :=
+  Add.mk (Signal.zipWithS BitVec.add)
+
+/-- `-` on a sized signal. -/
+instance {d : ClockDomain} {n : Nat} {i : Size} : Sub ((Signal d (BitVec n))^i) :=
+  Sub.mk (Signal.zipWithS BitVec.sub)
+
+/-- `if` on a sized signal: the condition and both branches at the same size. -/
+instance {d : ClockDomain} {A : Type} {i : Size} :
+    Mux ((Signal d (BitVec 1))^i) ((Signal d A)^i) :=
+  Mux.mk (Signal.zipWith3S (fun (c : BitVec 1) (x y : A) =>
+    match BitVec.isTrue c with
+    | .true => x
+    | .false => y))
 
 /-- `f` in every cycle. -/
 def Signal.map {d : ClockDomain} {A B : Type} (f : A → B) (s : Signal d A) : Signal d B
@@ -152,10 +200,9 @@ def Signal.register {d : ClockDomain} {A : Type} (init : A) (s : Signal d A) : S
   | .tail => s
 
 /-- The sized register: from a signal defined for `i` steps, one defined for `↑i`. It is
-the only operation that raises a size, so once sized `scofix` exists (lane L2) a
-feedback loop `Signal.fix` must pass through it; a register that keeps the size is
-rejected ("builds a value of size ↑s or ∞"), which is a combinational loop as a type
-error. -/
+the only operation that raises a size, so `Signal.fix`'s feedback path must pass through
+it; a register that keeps the size is rejected ("builds a value of size ↑s or ∞"),
+which is a combinational loop as a type error. -/
 def Signal.registerS {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^(↑i)
   | .head => init
   | .tail => s
