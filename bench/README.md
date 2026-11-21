@@ -47,7 +47,9 @@ keeps the accumulator unique, so the runtime grows it in place; at the default i
 appends 10,000 100-byte chunks (1,000,000 bytes). The old copy-only `wiz_str_append`
 and the in-place one produce the same checksum, so an A/B run can use a baseline
 built from the same sources with the `a != b && WIZ_RC(a) == 1` branch of
-`wiz_str_append` removed. `str-push` is the same builder one byte at a time.
+`wiz_str_append` removed. `str-push` is the same builder one byte at a time. Adding
+a mode changes the mode set: a cached A-side executable from before the mode cannot
+run it, so rebuild the A side (in CI, dispatch with `bootstrap: true`) once.
 
 ## Comparing two builds
 
