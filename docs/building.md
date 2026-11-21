@@ -427,7 +427,7 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+The hermetic fixture is `Tests/fixtures/fate-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
@@ -438,9 +438,9 @@ includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; 
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
 expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+`cd Tests/fixtures/fate-index && ./make.sh`. There is no network in these tests.
 
-There is also a complete example **index repository** at `examples/grail-index/`
+There is also a complete example **index repository** at `examples/fate-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
 and a checker: `scripts/grail-index-check.sh DIR` (also `grail index check DIR`) validates
 names, versions, semver requirements, local archive SHA-256s and layouts, `index.wiz`

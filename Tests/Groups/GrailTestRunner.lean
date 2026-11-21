@@ -105,7 +105,7 @@ def testRunnerGroup : Group where
           check ((t.message.splitOn "needs --trust-native").length > 1) t.message
           check (!(← (dir / "tests/on-demand.expected").pathExists)) "--update wrote a skipped test's .expected" },
     { name := "a nested package under the tests root is not a test", run := fun _ => do
-        -- examples/grail-index/sources/*: packages with their own grail.wiz (and a
+        -- examples/fate-index/sources/*: packages with their own grail.wiz (and a
         -- directory name with dots), whose modules import each other's packages
         let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"t\" |> Package.tests \"tests\" \"tests\"\n"),
           ("tests/one.wiz", "import Prelude\ndef x : Nat := 1\n"), ("tests/one.expected", ""),
