@@ -947,7 +947,9 @@ def serverGroup : Group where
         check ((item r "syntax").length == 1 && (item r "expansion").length == 1) s!"syntax items: {r.compress}" },
     { name := "#plot: a message becomes a widget item carrying the WIZ_WIDGET: display value", run := fun _ => do
         let mut libs := (← server).libs
-        for (m, p) in [("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
+        for (m, p) in [("Logic", "lib/Logic.wiz"), ("Class", "lib/Class.wiz"),
+                       ("Data.Order", "lib/Data/Order.wiz"),
+                       ("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
                        ("Ring", "lib/Ring.wiz"), ("Int", "lib/Int.wiz"), ("IntRing", "lib/IntRing.wiz"),
                        ("IntOrder", "lib/IntOrder.wiz"), ("Rat", "lib/Rat.wiz"), ("Plot", "lib/Plot.wiz")] do
           libs := libs.insert m (p, ← IO.FS.readFile p)

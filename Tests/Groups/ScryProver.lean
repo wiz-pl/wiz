@@ -214,9 +214,9 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverCutVacuousVerdict) \"write set is empty\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverCutUnorderedVerdict\n" ++
          "#eval String.eq (Scry.Property.show Scry.Property.cut) \"cut (every write is preceded by a check)\"\n" ++
-         "#eval Nat.eq (List.length Scry.guardFnRows) 1\n" ++
+         "#eval Nat.beq (List.length Scry.guardFnRows) 1\n" ++
          "#eval match Scry.guardFnRows with\n" ++
-         "  | .cons r _ => Bool.and (Nat.eq (List.getD r 1 99) 0) (Nat.eq (List.getD r 2 99) 16)\n" ++
+         "  | .cons r _ => Bool.and (Nat.beq (List.getD r 1 99) 0) (Nat.beq (List.getD r 2 99) 16)\n" ++
          "  | .nil => .false\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
   ]
