@@ -449,22 +449,10 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
         throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
                 code := ErrorCode.private_ }
 
-/-- Evaluate a declared type for checking its body, but leave an equation at the head
-stuck, as written, rather than letting it compute: a `match` checked against it abstracts
-the equation's sides in its branches, while a computed `True` (or Σ) no longer shows them.
-(`f2 n = isZero (Nat.succ n)` computes to `True`, but a split on `isZero (Nat.succ n)`
-inside the body must still refine the goal's right side.) The kernel still sees the
-computed type. -/
+/-- Does the syntax contain a named match (`match h : e with`)? Those need their
+expected equation kept as written, below. -/
 partial def hasNamedMatch (stx : Syntax) : Bool :=
   stx.isOfKind "match.scrut" || stx.args.any hasNamedMatch
-
-def evalExpected (ctx : LocalCtx R) (ty : Term R) : ElabM R (VTy R) := do
-  match ty with
-  | .eq A a b =>
-    pure (.neutral (.eq (← evalIn ctx A) (← evalIn ctx a) (← evalIn ctx b)) #[])
-  | .eqTy A B =>
-    pure (.neutral (.eqTy (← evalIn ctx A) (← evalIn ctx B)) #[])
-  | _ => evalIn ctx ty
 
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)

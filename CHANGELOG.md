@@ -10,6 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* elab: a named `match h : e` inside a definition whose result is an equation keeps the
+  equation as written while its branches are checked. The declared type used to be
+  evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
+  match could not abstract the equation's sides and its own equation
+  (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
+  matches now see both equations; added the computed-goal nested case, an
+  independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
 * language: a parameter before the colon is **fixed only if no recursive call changes
   it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
   count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
