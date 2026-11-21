@@ -98,12 +98,9 @@ instance {d : ClockDomain} {n k : Nat} {i : Size} : OfNat ((Signal d (BitVec n))
 /-- `map` at the same size: `f` on the value of every cycle, with the size preserved.
 A sized `scofix` (lane L2): the state is the input stream at the running size, the body
 is at a predecessor and observes the input with `out`, and the recursive call is the
-`scofix` seed at that predecessor.
-
-(The state family is written out rather than using the copattern sugar: the sugar's
-state type substitutes the size at the wrong de Bruijn index when the coinductive has a
-parameter before the element type (`d` here), which this tree's elaborator does not yet
-repair. The term is the same `scofix` the sugar denotes.) -/
+`scofix` seed at that predecessor. `Signal.fix` below is the same shape; writing the
+state family out keeps these three independent of the copattern sugar's state-type
+bookkeeping (the term is what the sugar denotes). -/
 def Signal.mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) :
     (Signal d B)^i :=
   scofix (fun (j : Size) => fun _ => (Signal d A)^j)
