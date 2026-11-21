@@ -287,10 +287,40 @@ name is derived from the body revision, never from the surface name alone. -/
 def Slot.make (id : SlotId) (surface : String) (ty : Ty) (body witness : Tm)
     (version : Nat := 0) (helpers : List Helper := []) : Slot :=
   let bodyRevision := bodyRevisionOf ty body witness (helperHashFor helpers body)
-  { id := id, ty := ty, surface := surface,
-    internal := surface ++ "@" ++ bodyRevision, bodyRevision := bodyRevision,
-    revision := revisionFor bodyRevision [], body := body, witness := witness,
-    checked := true, version := version }
+  { id := id
+    ty := ty
+    surface := surface
+    internal := surface ++ "@" ++ bodyRevision
+    bodyRevision := bodyRevision
+    revision := revisionFor bodyRevision []
+    body := body
+    witness := witness
+    checked := true
+    version := version }
+
+/-- The revisions a slot's body reads through `self`, in the candidate generation,
+plus its definitional (`deps`) edges. -/
+def depRevs (slots : List Slot) (s : Slot) : List String :=
+  (s.deps ++ Tm.selfSlotIds s.body).map fun d =>
+    match slots.find? (fun x => x.id == d) with
+    | some x => x.revision
+    | none => "missing"
+
+/-- Recompute every slot's memo revision to a fixed point. A body that reads a
+changed callee gets a new revision even though its text is unchanged; this is what
+§8.5 requires. If the `self`-read graph is cyclic the fixed point may not exist
+(the mutual meanings are genuinely recursive), so after `fuel` rounds the whole
+generation is keyed conservatively by its id, exactly the note's fallback. The
+check cache is untouched: only the revision changes, not the kernel verdict. -/
+def refreshRevisions (fuel : Nat) (genId : Nat) (slots : List Slot) : List Slot :=
+  match fuel with
+  | 0 => slots.map (fun s =>
+      { s with revision := shortHash (s.bodyRevision ++ "|gen|" ++ toString genId) })
+  | n + 1 =>
+    let slots' := slots.map fun s =>
+      { s with revision := revisionFor s.bodyRevision (depRevs slots s) }
+    if slots'.map (fun s => s.revision) == slots.map (fun s => s.revision) then slots'
+    else refreshRevisions n genId slots'
 
 /-- An immutable generation. `names` is every internal body name used in the
 history: it is the audit trail (a body name is a function of the body's own
@@ -351,8 +381,8 @@ invalidate old entries, it makes new ones under a new key (§8.5). -/
 abbrev Memo := List ((Nat × SlotId) × Val)
 
 def memoFind (m : Memo) (g : Nat) (s : SlotId) : Option Val :=
-  match m.find? (fun p => p.1.1 == g && p.1.2 == s) with
-  | some p => some p.2
+  match m.find? (fun p => match p with | ((g', s'), _) => g' == g && s' == s) with
+  | some (_, v) => some v
   | none => none
 
 /-- The generation-independent part of a checked body's cache key (the "check
@@ -398,7 +428,7 @@ removed in P0 (§7.4 item 3). -/
 structure Runtime where
   gens : List Gen
   helpers : List Helper := []
-  cache : Cache := {}
+  cache : Cache := { entries := [], hits := 0, misses := 0 }
   memo : Memo := []
   /-- Re-entrant forcing marks, so a data slot that reads itself fails instead of
   looping (§7.2). -/
@@ -410,8 +440,18 @@ def Runtime.current? (rt : Runtime) : Option Gen := rt.gens.reverse.head?
 def Runtime.findGen (rt : Runtime) (g : Nat) : Option Gen :=
   rt.gens.find? (fun x => x.id == g)
 
-/-- The initial generation, id 0, with the fixed shape's slots. -/
+/-- The initial generation, id 0, with the fixed shape's slots. The model trusts
+the initial slot list (a real image checks it); it still normalises each slot's
+body revision against the helper environment and seeds the cache with the checked
+initial bodies, so a later re-stage of an unchanged initial body is a hit. -/
 def Runtime.initial (helpers : List Helper) (slots : List Slot) : Runtime :=
+  let slots := slots.map fun s =>
+    let helperRev := helperHashFor helpers s.body
+    let bodyRev := bodyRevisionOf s.ty s.body s.witness helperRev
+    { s with bodyRevision := bodyRev
+             internal := s.surface ++ "@" ++ bodyRev
+             revision := revisionFor bodyRev s.deps }
+  let slots := refreshRevisions (slots.length + 2) 0 slots
   let g : Gen :=
     { id := 0
       parent := none
@@ -419,7 +459,18 @@ def Runtime.initial (helpers : List Helper) (slots : List Slot) : Runtime :=
       names := slots.map (fun s => s.internal)
       envHash := shortHash "p0-env-0"
       ledger := [] }
-  { gens := [g], helpers := helpers, cache := {}, memo := [], forcing := [] }
+  let entries := slots.map fun s =>
+    { key := { slotTy := shortHash (Ty.render s.ty)
+               body := shortHash (Tm.render s.body)
+               helpers := helperHashFor helpers s.body
+               witness := shortHash (Tm.render s.witness)
+               kernel := kernelVersion }
+      baseRevision := s.bodyRevision }
+  { gens := [g]
+    helpers := helpers
+    cache := { entries := entries, hits := 0, misses := 0 }
+    memo := []
+    forcing := [] }
 
 /-- A snapshot is a generation id. It is an ordinary value (ω): it can be copied,
 stored and passed; reading it is pure. -/
@@ -444,6 +495,7 @@ def Runtime.snapshot (rt : Runtime) : Pinned :=
 failed check vs. a missing witness vs. a shape change), not just `false`. -/
 inductive Err where
   | outOfFuel
+  | noCurrent
   | unbound (i : Nat)
   | noGen (g : Nat)
   | noSlot (g : Nat) (s : SlotId)

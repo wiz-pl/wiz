@@ -185,7 +185,14 @@ def applyVal (fuel : Nat) (rt : Runtime) (f : Val) (a : Val) :
 only state change; the generation is never mutated. -/
 def Runtime.read (rt : Runtime) (fuel : Nat) (p : Pinned) (o : Observable) :
     Except Err (Val × Runtime) :=
-  run fuel rt p.gen [] (.read p.gen o.slot)
+  match rt.findGen p.gen with
+  | none => .error (.noGen p.gen)
+  | some g =>
+    match g.findSlot o.slot with
+    | none => .error (.noSlot p.gen o.slot)
+    | some s =>
+      if s.ty == o.ty then run fuel rt p.gen [] (.read p.gen o.slot)
+      else .error (.typeError "the Observable's type does not match the slot type")
 
 /-- The derived one-shot read: one snapshot, one read. Two `readNow`s are two
 snapshots and may see two generations; use `withPinned` for a consistent scope. -/

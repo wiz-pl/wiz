@@ -231,9 +231,27 @@ def depRevision (base : Gen) (prior : List Slot) (d : SlotId) : String :=
     | some s => s.revision
     | none => "missing"
 
-/-- Stage one body: `Value A`, the type check against slot **types**, the
-read-free witness check, then the cache. A cache hit skips the checker; the
-revision is still recomputed because it includes the callees' revisions. -/
+/-- The slot a successful stage produces; shared by the cache-hit and cache-miss
+paths so the revision/internal-name rule cannot diverge between them. -/
+def finishStage (old : Slot) (st : Stage) (bodyRev : String) (deps : List String)
+    (cache : Cache) : Slot × Cache :=
+  let revision := revisionFor bodyRev deps
+  let internal := old.surface ++ "@" ++ bodyRev
+  ({ old with
+      body := st.body
+      bodyRevision := bodyRev
+      witness := st.witness
+      revision := revision
+      internal := internal
+      version := old.version + 1
+      checked := true
+      deps := st.dependsOn }, cache)
+
+/-- Stage one body: `Value A`, then the cache, then (on a miss) the type check
+against slot **types** and the read-free witness check. A **hit skips the
+checker**: the key names a body+type+helper+witness+kernel whose check already
+succeeded. The revision is still recomputed because it includes the callees'
+revisions. -/
 def prepareStage (fuel : Nat) (base : Gen) (helpers : List Helper) (cache : Cache)
     (prior : List Slot) (st : Stage) : Except Err (Slot × Cache) :=
   match base.findSlot st.slot with
@@ -242,36 +260,27 @@ def prepareStage (fuel : Nat) (base : Gen) (helpers : List Helper) (cache : Cach
     if !old.ty.isValue then .error (.notValue old.ty)
     else
       let sig := Sig.ofGen base helpers kernelVersion
-      match check fuel sig [] true st.body old.ty with
-      | .error msg => .error (.typeError msg)
-      | .ok _ =>
-        match checkWitness fuel sig old.ty st.witness with
-        | .error msg => .error (.witnessFailed msg)
+      let deps := st.dependsOn.map (depRevision base prior)
+      let helperRev := helperHashFor helpers st.body
+      let key : CacheKey :=
+        { slotTy := shortHash (Ty.render old.ty)
+          body := shortHash (Tm.render st.body)
+          helpers := helperRev
+          witness := shortHash (Tm.render st.witness)
+          kernel := kernelVersion }
+      let bodyRev := bodyRevisionOf old.ty st.body st.witness helperRev
+      match cache.lookup key with
+      | some _ =>
+        .ok (finishStage old st bodyRev deps (cache.recordHit))
+      | none =>
+        match check fuel sig [] true st.body old.ty with
+        | .error msg => .error (.typeError msg)
         | .ok _ =>
-          let deps := st.dependsOn.map (depRevision base prior)
-          let helperRev := helperHashFor helpers st.body
-          let key : CacheKey :=
-            { slotTy := shortHash (Ty.render old.ty)
-              body := shortHash (Tm.render st.body)
-              helpers := helperRev
-              witness := shortHash (Tm.render st.witness)
-              kernel := kernelVersion }
-          let bodyRev := bodyRevisionOf old.ty st.body st.witness helperRev
-          let cache' :=
-            match cache.lookup key with
-            | some _ => cache.recordHit
-            | none => cache.insert { key := key, baseRevision := bodyRev }
-          let revision := revisionFor bodyRev deps
-          let internal := old.surface ++ "@" ++ bodyRev
-          .ok ({ old with
-                  body := st.body
-                  bodyRevision := bodyRev
-                  witness := st.witness
-                  revision := revision
-                  internal := internal
-                  version := old.version + 1
-                  checked := true
-                  deps := st.dependsOn }, cache')
+          match checkWitness fuel sig old.ty st.witness with
+          | .error msg => .error (.witnessFailed msg)
+          | .ok _ =>
+            .ok (finishStage old st bodyRev deps
+              (cache.insert { key := key, baseRevision := bodyRev }))
 
 /-- A topological order over the staged items' definitional edges. An edge to a
 slot that is not staged is already satisfied by the base generation. A cycle is an
@@ -297,8 +306,7 @@ def topoOrder (stages : List Stage) : Except Err (List Stage) :=
 
 def prepareAll (fuel : Nat) (base : Gen) (helpers : List Helper)
     (ordered : List Stage) (cache : Cache) (seen : List SlotId)
-    (seenNames : List String) (prior : List Slot) :
-    Except Err (List Slot × Cache) :=
+    (prior : List Slot) : Except Err (List Slot × Cache) :=
   match ordered with
   | [] => .ok (prior, cache)
   | st :: rest =>
@@ -307,47 +315,21 @@ def prepareAll (fuel : Nat) (base : Gen) (helpers : List Helper)
       match prepareStage fuel base helpers cache prior st with
       | .error e => .error e
       | .ok (slot, cache') =>
-        if seenNames.contains slot.internal then .error (.internalNameReused slot.internal)
-        else
-          prepareAll fuel base helpers rest cache' (st.slot :: seen)
-            (slot.internal :: seenNames) (slot :: prior)
-
-/-- The revisions a slot's body reads through `self`, in the candidate generation. -/
-def depRevs (slots : List Slot) (s : Slot) : List String :=
-  (s.deps ++ Tm.selfSlotIds s.body).map fun d =>
-    match slots.find? (fun x => x.id == d) with
-    | some x => x.revision
-    | none => "missing"
-
-/-- Recompute every slot's memo revision to a fixed point. A body that reads a
-changed callee gets a new revision even though its text is unchanged; this is what
-§8.5 requires. If the `self`-read graph is cyclic the fixed point may not exist
-(the mutual meanings are genuinely recursive), so after `fuel` rounds the whole
-generation is keyed conservatively by its id, exactly the note's fallback. The
-check cache is untouched: only the revision changes, not the kernel verdict. -/
-def refreshRevisions (fuel : Nat) (genId : Nat) (slots : List Slot) : List Slot :=
-  match fuel with
-  | 0 => slots.map (fun s =>
-      { s with revision := shortHash (s.bodyRevision ++ "|gen|" ++ toString genId) })
-  | n + 1 =>
-    let slots' := slots.map fun s =>
-      { s with revision := revisionFor s.bodyRevision (depRevs slots s) }
-    if slots'.map (fun s => s.revision) == slots.map (fun s => s.revision) then slots'
-    else refreshRevisions n genId slots'
+        prepareAll fuel base helpers rest cache' (st.slot :: seen) (slot :: prior)
 
 /-- Commit a multi-slot transaction. The new generation is built off to the side
 and returned only if every check passed; on error the caller's `Runtime` (and so
 the current generation) is untouched. A multi-slot swap is all-or-nothing (G5). -/
 def Runtime.commit (rt : Runtime) (tx : Transaction) : Except Err Runtime :=
   match rt.current? with
-  | none => .error .noGen
+  | none => .error .noCurrent
   | some base =>
     if base.id != tx.base then .error (.staleBase tx.base base.id)
     else
       match topoOrder tx.stages with
       | .error e => .error e
       | .ok ordered =>
-        match prepareAll 10000 base rt.helpers ordered rt.cache [] [] [] with
+        match prepareAll 10000 base rt.helpers ordered rt.cache [] [] with
         | .error e => .error e
         | .ok (staged, cache') =>
           let newSlots := base.slots.map (fun old =>
@@ -355,14 +337,17 @@ def Runtime.commit (rt : Runtime) (tx : Transaction) : Except Err Runtime :=
             | some s => s
             | none => old)
           let newSlots := refreshRevisions (newSlots.length + 2) (base.id + 1) newSlots
-          let newNames := base.names ++ staged.map (fun s => s.internal)
-          let revs := staged.foldl (fun acc s => acc ++ "|" ++ s.revision) ""
+          let newNames := staged.foldl (fun acc s =>
+            if acc.contains s.internal then acc else acc ++ [s.internal]) base.names
+          -- `envHash` is the *non-reloadable* environment (helpers and slot
+          -- types), so a slot swap does not change it. A new/changed helper is a
+          -- new image or a separate transaction, never a silent slot swap (§6.3).
           let g' : Gen :=
             { id := base.id + 1
               parent := some base.id
               slots := newSlots
               names := newNames
-              envHash := shortHash (base.envHash ++ revs)
+              envHash := base.envHash
               ledger := base.ledger }
           .ok { rt with gens := rt.gens ++ [g'], cache := cache' }
 

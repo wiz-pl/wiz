@@ -20,11 +20,6 @@ def isNat (r : Except Err (Val × Runtime)) (n : Nat) : Bool :=
   | .ok (.nat m, _) => m == n
   | _ => false
 
-def isBool (r : Except Err (Val × Runtime)) (b : Bool) : Bool :=
-  match r with
-  | .ok (.bool x, _) => x == b
-  | _ => false
-
 def xSlot : Slot := Slot.make 0 "x" .nat (.nat 1) (.nat 0)
 def ySlot : Slot := Slot.make 1 "y" .nat (.nat 1) (.nat 0)
 def xObs : Observable := { slot := 0, ty := .nat }
@@ -278,6 +273,22 @@ def testUnknownSlot : Bool :=
   | .error (.unknownSlot 99) => true
   | _ => false
 
+/-- P0 never frees a generation (§7.4 item 3): the history count is
+`swaps + 1`. P1's arena/GC replaces this test with a retention count. -/
+def testRetentionCount : Bool :=
+  let rt := Runtime.initial [] [xSlot]
+  let tx : Nat → Nat → Transaction := fun n base =>
+    { base := base, stages := [{ slot := 0, body := .nat n, witness := .nat 0 }] }
+  match rt.commit (tx 2 0) with
+  | .error _ => false
+  | .ok rt1 =>
+    match rt1.commit (tx 3 1) with
+    | .error _ => false
+    | .ok rt2 =>
+      match rt2.commit (tx 4 2) with
+      | .error _ => false
+      | .ok rt3 => rt3.gens.length == 4
+
 /-- `readNow` is one snapshot + one read; `withPinned` is one snapshot for a
 scope. Both are the same value here because there is no swap between them. -/
 def testReadNow : Bool :=
@@ -318,6 +329,7 @@ def tests : List (String × Bool) :=
   , ("internal names are versioned, not rebound", testInternalNames)
   , ("a transaction cycle is rejected", testCycle)
   , ("an unknown slot is a shape change", testUnknownSlot)
+  , ("retention count (P0 keeps history)", testRetentionCount)
   , ("readNow", testReadNow)
   , ("withPinned", testWithPinned)
   , ("#check line", testCheckLine)
