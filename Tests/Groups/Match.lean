@@ -134,6 +134,9 @@ def matchGroup : Group where
           "  match h : isZero n with\n" ++
           "  | .true => useEq n .true h\n" ++
           "  | .false => useEq n .false h\n") },
+    -- the goal is a computed equation (`f2 n` and `isZero (succ n)` are definitionally
+    -- equal): it must stay an equation while the inner match refines it, not compute to
+    -- `True`, or `k : isZero (succ n) = p` no longer fits the branch
     { name := "nested matches both keep their equations", run := fun _ =>
         ok (eqnPrelude ++
           "def nestedEq (n : Nat) : f2 n = isZero (Nat.succ n) :=\n" ++
@@ -146,6 +149,34 @@ def matchGroup : Group where
           "    match k : isZero (Nat.succ n) with\n" ++
           "    | .true => k\n" ++
           "    | .false => k\n") },
+    -- the same nesting on independent scrutinees: both equations are in scope, and the
+    -- inner one is the only evidence for its pattern in each branch
+    { name := "nested matches on independent scrutinees keep both equations", run := fun _ =>
+        ok (eqnPrelude ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Bool := b\n" ++
+          "def nestedEq2 (n m : Nat) : Bool × Bool :=\n" ++
+          "  match h : isZero n with\n" ++
+          "  | .true =>\n" ++
+          "    match k : isZero m with\n" ++
+          "    | .true => (useEq n .true h, useEq m .true k)\n" ++
+          "    | .false => (useEq n .true h, useEq m .false k)\n" ++
+          "  | .false =>\n" ++
+          "    match k : isZero m with\n" ++
+          "    | .true => (useEq n .false h, useEq m .false k)\n" ++
+          "    | .false => (useEq n .false h, useEq m .false k)\n") },
+    -- the inner equation is a rewrite (`transp` along `k`), not just a hypothesis
+    { name := "the inner match's equation rewrites the goal", run := fun _ =>
+        ok (eqnPrelude ++
+          "def nestedRewrite (n : Nat) : f2 n = isZero (Nat.succ n) :=\n" ++
+          "  match h : isZero n with\n" ++
+          "  | .true =>\n" ++
+          "    match k : isZero (Nat.succ n) with\n" ++
+          "    | .true => transp (fun t _ => f2 n = t) (refl (f2 n)) k\n" ++
+          "    | .false => transp (fun t _ => f2 n = t) (refl (f2 n)) k\n" ++
+          "  | .false =>\n" ++
+          "    match k : isZero (Nat.succ n) with\n" ++
+          "    | .true => transp (fun t _ => f2 n = t) (refl (f2 n)) k\n" ++
+          "    | .false => transp (fun t _ => f2 n = t) (refl (f2 n)) k\n") },
     { name := "a plain match on a variable named h still parses", run := fun _ =>
         ok (matchPrelude ++
           "def pick (h : Nat) : Nat := match h with\n" ++

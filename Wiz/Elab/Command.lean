@@ -449,6 +449,23 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
         throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
                 code := ErrorCode.private_ }
 
+/-- Evaluate a declared type for checking its body, but leave an equation at the head
+stuck, as written, rather than letting it compute: a `match` checked against it abstracts
+the equation's sides in its branches, while a computed `True` (or Σ) no longer shows them.
+(`f2 n = isZero (Nat.succ n)` computes to `True`, but a split on `isZero (Nat.succ n)`
+inside the body must still refine the goal's right side.) The kernel still sees the
+computed type. -/
+partial def hasNamedMatch (stx : Syntax) : Bool :=
+  stx.isOfKind "match.scrut" || stx.args.any hasNamedMatch
+
+def evalExpected (ctx : LocalCtx R) (ty : Term R) : ElabM R (VTy R) := do
+  match ty with
+  | .eq A a b =>
+    pure (.neutral (.eq (← evalIn ctx A) (← evalIn ctx a) (← evalIn ctx b)) #[])
+  | .eqTy A B =>
+    pure (.neutral (.eqTy (← evalIn ctx A) (← evalIn ctx B)) #[])
+  | _ => evalIn ctx ty
+
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)
     (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none)
@@ -474,7 +491,8 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   -- definition instead. (Only the instance holes, `zonkInsts`: the other holes stay, so
   -- the equation stays as written, as above.)
   let ty ← if (← get).pendingInsts.isEmpty then zonkInsts ctx.lvl ty else pure ty
-  let val ← valStx.mapM fun s => do Elab.check ctx s (← evalIn ctx ty)
+  let val ← valStx.mapM fun s => do
+    Elab.check ctx s (← if hasNamedMatch s then evalExpected ctx ty else evalIn ctx ty)
   let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val := val.map fun v => tele.foldr (fun (x, _, _, _) b => Term.lam x b) v
   solveSortConstraints
@@ -753,7 +771,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let n := (clauses.head?.map (·.pats.length)).getD 0
   -- introduce `n` arguments of the type
   let mut ctx' := ctx
-  let mut tyv ← evalIn ctx ty
+  let mut tyv ← if clauses.any fun c => hasNamedMatch c.rhs then evalExpected ctx ty else evalIn ctx ty
   let mut vars : List Lvl := []
   let mut names : List Name := []
   let mut colExplicit : List Bool := []
