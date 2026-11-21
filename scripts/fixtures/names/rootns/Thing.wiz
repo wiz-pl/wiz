@@ -1,0 +1,9 @@
+import Prelude
+
+-- `namespace __root__` opens the root for the block: every declaration in it is the
+-- true global it is written as, so the whole block is exempt from the module prefix
+-- and needs no compatibility row (13v).
+namespace __root__
+def h : Nat := 0
+def Thing.g : Nat := 1
+end

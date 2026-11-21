@@ -1086,6 +1086,11 @@ baseline; the parser, resolver and self-hosted changes are stages 1–4 of the p
   every prefix violation an error: **12,910 declarations** today (9,436 dotted, 3,474
   bare), which is the size of the rename work, not a gate that is green before stage 6.
   A malformed row is exit 2.
+* A `namespace __root__` body is explicitly global, like a `__root__.` name: the tools
+  take its declarations out of the allowlist (no row), the collision checker reports
+  them under the name they are written as rather than as migration names, and
+  `end __root__` closes the block. It is the bulk form of the escape, for a file whose
+  declarations must stay root (batch 1 below).
 * The allowlist is an input of what a module elaborates to, so its SHA-256 is part of the
   cache key. The digest covers the `(module, name, reason)` rows, not the review-only
   file and line, so moving a declaration's line does not invalidate the cache.
