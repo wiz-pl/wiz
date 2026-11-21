@@ -610,7 +610,13 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token. A pull request reads the trusted
+          # cache anonymously and instead adds the untrusted PR cache, which is where the
+          # `build` job publishes `wiz`/`wiz-unwrapped`: without it every web derivation
+          # rebuilt `wiz-unwrapped` from source (the cold 45-minute miss).
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
         id: nix
@@ -736,7 +742,11 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Same cache rule as the wasm job: the PR cache carries `wiz`; the trusted
+          # token is for a master push only.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: nix build (wiz, from Cachix)
         id: nix
