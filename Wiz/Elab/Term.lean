@@ -728,6 +728,12 @@ partial def trivialProof (g : Globals R) (tys : Array (VTy R)) (ty : Val R) : Op
   | .neutral (.eqTy X Y) _ => if convTy g tys X Y then some (.neutral (.reflTy X) #[]) else none
   | _ => none
 
+/-- Does `target` (a term in the same context) occur in `t`, under `depth` binders? -/
+partial def occursAt (t target : Term R) (depth : Nat := 0) : Bool :=
+  t == target.lift depth ||
+  (Id.run <| t.forChildren (m := StateM Bool) (fun _ => pure ())
+    (fun k c => modify fun b => b || occursAt c target (depth + k)) |>.run false).2
+
 /-- `Term.abstract`, but not inside the arguments of an unsolved hole: there the
 scrutinee stays as it is (still in scope in every branch). Abstracted, `?A b` would be
 `?A .false` in the branch for `.false`, outside the pattern fragment, and could not be
@@ -2305,7 +2311,17 @@ partial def checkApp (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Elab
   let binop ← if numPostpone then binopHead ctx stx else pure false
   for pass in [0:2] do
     for (arg, m, dom, used) in (if pass == 0 then pending else postponed) do
-      if pass == 0 && ((postponable arg && (← unknownDomains ctx.lvl dom (lambdaArity arg))) ||
+      -- an argument whose expected type mentions the placeholder of an argument that is
+      -- already postponed (a `fun` whose binder type the other arguments determine) must
+      -- wait too: checking it now would unify the placeholder with its type, outside the
+      -- pattern fragment when the placeholder is applied to a repeated variable (`#260`)
+      let waitsForPostponed := pass == 0 && !postponed.isEmpty &&
+        let hs := postponed.filterMap fun (_, m', _, _) => match (Term.spine m').1 with
+          | .mvar id => some id
+          | _ => none
+        (quote (← getGlobals) ctx.lvl dom).mvars.any hs.contains
+      if pass == 0 && (waitsForPostponed ||
+          (postponable arg && (← unknownDomains ctx.lvl dom (lambdaArity arg))) ||
           (numPostpone && (numLike arg || (binop && (dotLike arg || (← numTree ctx arg)))) &&
             (← force dom) matches .neutral (.mvar _) _)) then
         postponed := postponed.push (arg, m, dom, used)
@@ -3477,6 +3493,46 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     linearScruts := linearScruts.push (hasCases1 && ctx.linearLvls.any fun l => t.hasVar (ctx.lvl - l - 1))
     -- an inaccessible name, so the user's own `x` isn't shadowed
     binders := binders.push ("x✝", quote g ctx.lvl ty)
+  -- (#259) Lean generalises the local hypotheses that depend on the scrutinees:
+  -- `def f (b : Bool) (h : b = .true) : Nat := match b with | .true => 0 | .false => absurd h.1`.
+  -- Without reverting `h`, every branch sees `h : b = .true` about the *outer* `b`.
+  -- Revert each such hypothesis (transitively: a later hypothesis may mention an earlier
+  -- one) and match it with a variable pattern of its own name, so that the match takes it
+  -- as an extra argument and each right-hand side sees the refined one, as if it were
+  -- written `match b, h with | .true, h => … | .false, h => …`.
+  let mut targets := ts.toList
+  let mut extraNames : List Name := []
+  -- (oldest first: a later hypothesis may mention an earlier one that is reverted, so
+  -- by the time it is reached, the earlier one is in `targets` too)
+  for idx in [0:ctx.lvl] do
+    let lvl := ctx.lvl - idx - 1
+    -- (the dependency is on the type with its solved holes replaced: `t : ?m b` with
+    -- `?m` solved to a constant is not about `b`; a type that is still a hole says
+    -- nothing either, and reverting it would generalise the hole itself)
+    let fv ← force ctx.types[idx]!
+    let holeTy := match fv with
+      | .neutral (.mvar _) _ => true
+      | _ => false
+    let dep ← if holeTy then pure false else do
+      let q ← zonk ctx.lvl (quote g ctx.lvl fv)
+      pure (targets.any fun t => occursAt q t)
+    if ctx.bound[idx]! && isOwnVar ctx.env[idx]! lvl && dep && !ts.any (· == .var idx) then
+      let x := ctx.names[idx]!
+      ts := ts.push (.var idx)
+      binders := binders.push ("x✝", quote g ctx.lvl ctx.types[idx]!)
+      -- (a reverted hypothesis keeps its quantity: a linear one is bound at 1 again,
+      -- so each branch may use it once)
+      linearScruts := linearScruts.push (ctx.linearLvls.contains lvl)
+      extraNames := extraNames ++ [x]
+      targets := targets ++ [.var idx]
+  let clauses := if extraNames.isEmpty then clauses else
+    let extraPats := extraNames.map fun x =>
+      if x == "_" then holeStx else (.node {} "term.ident" #[.ident {} x] : Syntax)
+    -- the equations are the innermost columns: a reverted hypothesis goes before its
+    -- `eqCount` holes, so the pattern columns stay in `binders` order
+    clauses.map fun c =>
+      { c with pats := c.pats.take (c.pats.length - eqCount) ++ extraPats ++
+          c.pats.drop (c.pats.length - eqCount) }
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
   let mut absGoal := goalTm

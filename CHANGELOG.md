@@ -716,6 +716,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   strict run writes them, so the next run is a hit. The selfhost runtime gained the
   host's `wiz_sys_list_dir`/`wiz_sys_stat`/`wiz_sys_unlink`/`wiz_sys_clock_ns` leaves in
   its own representation, so a driver built by either toolchain prunes (21al).
+* Elaboration generalises what a `match` needs: dependent hypotheses that are not
+  written in the match are refined in each branch (#259); an unannotated motive for an
+  implicit-typed argument is postponed until the argument is known instead of failing
+  with "a variable escapes" (#260); and a parameter before the colon that a recursive
+  equation call changes is moved after the colon, as Lean does (#267; stage 4e).
 * `Float64.ofNat` rounds correctly for every `Nat`: it used to abort above `2^64`
   ("a number is too big for a C integer"). The value-level semantics matrix
   (`docs/semantics-matrix.md`, group `=semantics`) pins the numeric and textual
