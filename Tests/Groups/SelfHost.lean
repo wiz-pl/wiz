@@ -2076,17 +2076,29 @@ shared file (the frontend and the tables) and the driver, so both incidents surf
 its half of the ~50 s, not after the checker's. -/
 def selfhostHostGuard : IO Unit := do
   let loader ← selfhostLoader
-  let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
-    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
-    let prog := source srcs
+  let checkProg (what : String) (prog : String) : IO (List String) := do
     let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
     let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
     if errs.isEmpty then pure [] else
       pure (s!"the host frontend rejects the self-hosted {what} ({errs.size} error(s)):"
         :: errs.toList.take 5)
+  let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    checkProg what (source srcs)
   let bad ← check "compiler" Selfhost.compilerFiles Selfhost.compilerSource
   -- (`Check.wiz` is the only file of the checker's buffer the compiler's does not have)
   let bad ← if bad.isEmpty then check "checker" Selfhost.checkerFiles Selfhost.checkerSource
+    else pure bad
+  -- (`web/playground-exports.wiz` is built only by the `wiz-playground` derivation:
+  -- neither `lake build` nor `=selfhost` sees it, so a frontend signature change can
+  -- leave it behind. Check the engine's exact buffer here, as `build-playground.sh`
+  -- assembles it: the frontend's files, the tables, then the export.)
+  let bad ← if bad.isEmpty then do
+    let srcs ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
+    let tables ← IO.FS.readFile "selfhost/Tables.wiz"
+    let exports ← IO.FS.readFile "web/playground-exports.wiz"
+    let prog := "import IO\nimport Std\n" ++ String.join (srcs.map Selfhost.strip) ++ tables ++ exports
+    checkProg "playground export" prog
     else pure bad
   unless bad.isEmpty do throw (IO.userError ("\n".intercalate bad))
 
