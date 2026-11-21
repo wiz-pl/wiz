@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: a `String` is a heap object; a packet is a Packet.
+import Bpf
+
+def bad (s : String) : UIntN 8 := UIntN.ofNat 8 1

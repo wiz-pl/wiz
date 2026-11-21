@@ -158,3 +158,14 @@ Mesa's lavapipe; `webgpu/tests/reject.mjs` checks 18 rejected fixtures. The brow
 is `webgpu/index.html` over `webgpu/serve.mjs`. The subset, the host ABI, the counts and
 the three blockers (unbounded `Nat` and the heap, closures and recursion, the async host
 and the missing `Float32`) are in [08-backend/webgpu.md](08-backend/webgpu.md).
+
+## 8h: eBPF (P0 coding lane)
+
+`wiz build FLOW.toml -o flow.c --target bpf` accepts a narrow, verifier-shaped subset and
+writes freestanding C plus `bpf_rt.h`; `clang -target bpf` is the next step. The input is
+a `bpf-core/1` typed core, **not** the IR: the IR is untyped and a `match` on a recursive
+type has already become the generic `wiz.ind` interpreter, so the target needs the
+elaborated types. The P0 cut (typed core, checker, C emitter skeleton, the exact
+rejection messages, and what the first build/verifier run must establish) is in
+[08-backend/bpf.md](08-backend/bpf.md). It is **written, not built or run** in this
+train; do not treat the presence of `--target bpf` as an exit-criterion pass.
