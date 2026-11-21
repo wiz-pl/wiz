@@ -340,7 +340,7 @@ def Runtime.commit (rt : Runtime) (tx : Transaction) : Except Err Runtime :=
             | none => old)
           let newSlots := refreshRevisions (newSlots.length + 2) (base.id + 1) newSlots
           let newNames := staged.foldl (fun acc s =>
-            if acc.contains s.internal then acc else acc ++ [s.internal]) base.names
+            if acc.contains s.internal then acc else acc ++ [s.internal]) base.names   -- complexity: ok (a handful of slots in the prototype)
           -- `envHash` is the *non-reloadable* environment (helpers and slot
           -- types), so a slot swap does not change it. A new/changed helper is a
           -- new image or a separate transaction, never a silent slot swap (§6.3).

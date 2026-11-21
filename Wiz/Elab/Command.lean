@@ -1364,7 +1364,7 @@ def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)
       | _, _ => pure (Aty, false)
     let c ← Elab.check cctx rhs Aty
     let c := if lifted then .up c else c
-    comps := comps ++ [c]
+    comps := comps ++ [c]   -- complexity: ok (one component per constructor argument)
     pty ← instM B (← evalIn cctx c)
   let e : Term R ← match ← force I with
     | .unit _ => pure .tt
