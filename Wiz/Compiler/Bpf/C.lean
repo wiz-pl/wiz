@@ -170,12 +170,12 @@ static __always_inline __u64 bpf_umod(__u64 a, __u64 b) { return b ? a % b : a; 
 #endif
 
 #ifndef BPF_HOSTED
-static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
+static void *(*bpf_map_lookup_elem)(void *map, const void *key) __attribute__((unused)) = (void *)1;
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
-                                   __u64 flags) = (void *)2;
-static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
-static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
-static __u32 (*bpf_get_prandom_u32)(void) = (void *)7;
+                                   __u64 flags) __attribute__((unused)) = (void *)2;
+static long (*bpf_map_delete_elem)(void *map, const void *key) __attribute__((unused)) = (void *)3;
+static __u64 (*bpf_ktime_get_ns)(void) __attribute__((unused)) = (void *)5;
+static __u32 (*bpf_get_prandom_u32)(void) __attribute__((unused)) = (void *)7;
 #else
 /* The hosted build (BPF_HOSTED) supplies these: maps as small tables and the packet as a
    byte buffer. Defined by the driver, not by this header (P0's hosted-build item). */
@@ -473,6 +473,7 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
     let sv ← fresh "s"
     line s!"{ind}{cTy env s.ty} {sv} = 0;"
     emitTm env prog ind sv s
+    line s!"{ind}{dst} = (({cTy env ty})\{0\});"
     line s!"{ind}switch ({sv}) \{"
     for i in [0:alts.size] do
       line s!"{ind}case {i}:"
@@ -634,7 +635,10 @@ partial def emitRet (env : Env) (prog : Program) (ind : String) (ret : Ty) (t : 
     for i in [0:alts.size] do
       line s!"{ind}case {i}:"
       emitRet env prog (ind ++ "  ") ret alts[i]!
-    line s!"{ind}default: break;"
+    if ret == .unit then
+      line s!"{ind}default: return;"
+    else
+      line s!"{ind}default: return (({cTy env ret})\{0\});"
     line s!"{ind}\}"
   | _ =>
     if ret == .unit then
