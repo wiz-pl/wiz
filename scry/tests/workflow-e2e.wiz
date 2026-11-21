@@ -88,7 +88,8 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
   check "bundle: candidate.stage is verified"
     (String.eq (strAt bundle ["candidate", "stage"]) "verified");
   check "bundle: evidence has a poc item with the marker observed"
-    (evidenceHasPoc bundle)
+    (evidenceHasPoc bundle);
+  EIO.pure ()
 
 def main : IO Unit := EIO.toIO (do
   dir ← FS.createTempDir;
