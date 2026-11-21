@@ -127,7 +127,7 @@ def reproHalf (cRec : Scry.WfRecord) (db cc : String) : EIO Unit := do
     (evidenceHasPoc bundle);
   EIO.pure ()
 
-def main : IO Unit := EIO.toIO (do
+def runWorkflow : EIO Unit := do
   dir ← FS.createTempDir;
   let db := Path.join dir "findings.json";
   let csFixture := "corpus/csharp/taint/cwe78-process-unsafe.cs";
@@ -178,4 +178,6 @@ def main : IO Unit := EIO.toIO (do
   -- which is not part of every toolchain. The C# scan/refine artifacts are asserted
   -- above; the repro half is gated here and the reason is printed.
   EIO.lift (IO.println "csharp-repro: skip (needs the .NET SDK; scan/refine asserted above)");
-  FS.removeAll dir)
+  FS.removeAll dir
+
+def main : IO Unit := EIO.toIO runWorkflow
