@@ -139,7 +139,9 @@ def natNative? : Name → Array Nat → Option Nat
 `Term.natOp` on its arguments, so it computes natively when they are literals. -/
 def vBuiltin? (g : Globals R) (n : Name) : Option (Val R) := do
   -- (its `nat.` key: other registrations on `n`, such as `inline`, don't hide it)
-  let (k, _) ← g.builtins.find? fun (k, m) => m == n && k.startsWith "nat."
+  let k ← match g.natBuiltinByName[n]? with
+    | some k => some k
+    | none => (g.builtins.find? fun (k, m) => m == n && k.startsWith "nat.").map (·.1)
   if k == "nat.zero" then some (.natLit 0)
   else if natOpArity k == 1 then some (.lam "a" (.mk [] (.natOp k #[.var 0])))
   else some (.lam "a" (.mk [] (.lam "b" (.natOp k #[.var 1, .var 0]))))
@@ -611,7 +613,7 @@ the constructors' definitions (not their `vBuiltin?` values). Other values are
 unchanged. -/
 partial def vNatView (g : Globals R) : Val R → Val R
   | .natLit n =>
-    let ctor (k : Name) : Val R := match (g.builtins.lookup k).bind g.find? with
+    let ctor (k : Name) : Val R := match (g.builtinOf? k).bind g.find? with
       | some { value := some v, .. } => eval g [] v
       | _ => panic! s!"numerals need `builtin {k}`"
     if n == 0 then ctor "nat.zero" else vApp g (ctor "nat.succ") (.natLit (n - 1))
@@ -669,7 +671,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
   let lits : Option (Array Nat) := args.foldlM (init := #[]) fun acc a => match whnf a with
     | .natLit n => some (acc.push n)
     | _ => none
-  let d : Val R := match (g.builtins.lookup op).bind g.find? with
+  let d : Val R := match (g.builtinOf? op).bind g.find? with
     | some { value := some v, .. } => eval g [] v
     | _ => panic! s!"no definition for builtin {op}"
   -- not computed natively: the definition, kept glued under its name (`Nat.pred n`, not
@@ -691,7 +693,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
           | _ => false
         firstStuck && (match whnfNumeral g y with | .natLit (_ + 1) => true | _ => false)
       | _ => false
-    match g.builtins.lookup op with
+    match g.builtinOf? op with
     | some n =>
       if stuckSub then .neutral (.global n []) (args.map .app)
       else if op == "nat.succ" then args.foldl (vApp g) d
@@ -705,7 +707,7 @@ partial def vNatOp (g : Globals R) (op : Name) (args : Array (Val R)) : Val R :=
       -- applications compares their arguments (`convGlued`) and never asks; `Nat.mul 0 _`
       -- or `Nat.add 0 _` short-circuit before it (`natFast?`). Before this, evaluating the
       -- argument at all was a process abort, needed or not.
-      match g.builtins.lookup op with
+      match g.builtinOf? op with
       | some n => .unfold n [] (args.map .app) (memoThunk fun _ =>
           match natNative? op ns with
           | some r => .natLit r

@@ -630,7 +630,7 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
   match whnf ty, v with
   | .mu _ _ _ _ _ hint _ , v =>
     -- (the same test as erasure's: a type shaped like `Nat` is a number, R3)
-    if isNatTy { g with builtins := builtins } ty then
+    if isNatTy (g.setBuiltins builtins) ty then
       match v.toNat? with
       | some n => .const (toString n) []
       | none => readbackData ty v
@@ -683,12 +683,12 @@ where
     | .mu l I D i _ hint prop =>
       -- a native value (stage 22d), printed as a number: the model's object around it
       let _ := hint
-      let v := match v, reprOfTy? { g with builtins := builtins } ty with
+      let v := match v, reprOfTy? (g.setBuiltins builtins) ty with
         | .nat n, some ri => RVal.obj ri.tag ((List.range ri.nfields).toArray.map fun k =>
             if k == ri.r then .nat n else .erased)
         | v, _ => v
       let v := match v with
-        | .nat n => if isNatTy { g with builtins := builtins } ty then RVal.natView n else unflat D v
+        | .nat n => if isNatTy (g.setBuiltins builtins) ty then RVal.natView n else unflat D v
         | v => unflat D v
       .con (readback g builtins (vInterp g l I D (muFamily l I D prop) i prop) v)
     | _ => .tt
@@ -770,9 +770,9 @@ def compileReachableE (g : Globals R) (builtins : List (Name × Name)) (roots : 
   -- the conversions are foreign functions
   let isExtern (f : Name) := builtins.any fun (k, x) => x == f && k.startsWith "extern:"
   let g := if externImpls then g else
-    { g with builtins := g.builtins.filter fun (k, _) => match ReprInfo.parse? k with
+    g.setBuiltins (g.builtins.filter fun (k, _) => match ReprInfo.parse? k with
       | some (_, ri) => !isExtern ri.mkImpl && !isExtern ri.getImpl
-      | none => true }
+      | none => true)
   -- `attribute [inline]` (22i): the erased bodies of the inline definitions
   let mut inlines : Std.HashMap Name ETerm := {}
   for (k, f) in g.builtins do

@@ -375,6 +375,10 @@ def trustGroup : Group where
           let (s, _) ← Cache.elaborateCached (some cache) [] both init 0
           check (once s) s!"the cache took a second `builtin nat`: {s.messages.toList.map (·.text)}"
           check (s.globals.builtins.lookup "nat" == some "Nat") "`nat` was redirected"
+          -- (the replay rebuilds the index: `builtinOf?` agrees with the replayed list)
+          check (s.globals.builtinOf? "nat" == some "Nat") "`nat` is not indexed after replay"
+          check (s.globals.builtins.all fun (k, _) =>
+            s.globals.builtinOf? k == s.globals.builtins.lookup k) "the builtin index disagrees with the list"
         IO.FS.removeDirAll dir },
     { name := "a builtin key is registered once (soundness audit T14)", run := fun _ => do
         -- the probe: a second `nat.add` redirected how the Prelude's `Nat.add` unfolds, and
