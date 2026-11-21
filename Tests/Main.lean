@@ -67,6 +67,14 @@ def selectedCases (g : Group) (args : List String) : Option (List Nat) := Id.run
     | _ => return none
   return some ixs
 
+/-- How many of `g`'s cases the selectors pick: all of them when they name the group
+without a `#` list (`selectedCases` returns `none`). This is the denominator of the
+`[n/total]` numbering, over the whole invocation rather than one group. -/
+def selectedCaseCount (g : Group) (args : List String) : Nat :=
+  match selectedCases g args with
+  | none => g.cases.length
+  | some ixs => ((List.range g.cases.length).filter (ixs.contains ·)).length
+
 /-- The group named `name`, among the suite's and the driver's fixtures (`--run` finds
 these; no selector picks them). -/
 def findGroup (name : String) : IO (Option Group) := do
@@ -328,6 +336,10 @@ def main (args : List String) : IO UInt32 := do
     let groups ← allGroups
     let selected := if args.isEmpty then groups
       else groups.filter fun g => args.any (selects g)
+    -- `[n/total]` counts the cases this invocation selected, across its groups (a shard
+    -- runs several), not the whole suite and not each group from 1 again
+    let total := (selected.map (fun g => selectedCaseCount g args)).foldl (· + ·) 0
+    let mut caseNo := 0
     let record (g : Group) (r : CaseResult) : IO Unit := do
       if let some file := timings then
         let h ← IO.FS.Handle.mk file .append
@@ -338,8 +350,9 @@ def main (args : List String) : IO UInt32 := do
     for g in selected do
       let start ← IO.monoMsNow
       let results ← if jobs > 1 && (g.parallel || jobsAll) then
-          g.runJobs jobs (selectedCases g args) (record g)
-        else g.run (selectedCases g args) (record g)
+          g.runJobs jobs (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+        else g.run (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+      caseNo := caseNo + results.length
       let cases := results.foldl (· + ·.ms) 0
       IO.println s!"  ({g.name}: {showMs ((← IO.monoMsNow) - start)} s; cases {showMs cases} s)"
       let p := (results.filter (·.ok)).length
