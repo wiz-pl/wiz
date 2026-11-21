@@ -1879,16 +1879,20 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .error _ => "error"
 
 /-- The modules the self-hosted programs import may be elaborated against: the
-toolchain's `Prelude`, `IO`, `Std` and `Sys` only. `selfhostChecker` and `selfhostCompiler`
-build their programs' loader from this, and so does the `selfhost-host` group's host
-guard (when a source imports anything else, both must reject it). -/
+toolchain's `Prelude`, `IO`, `Std`, `Text` and `Sys` only. `selfhostChecker` and
+`selfhostCompiler` build their programs' loader from this, and so does the
+`selfhost-host` group's host guard (when a source imports anything else, both must
+reject it). `Std` imports `Text` (audit-runtime gave the class family an owner above
+it), so `Text` must be here or every selfhost case fails to build the checker. -/
 def selfhostLoader : IO (Name → Option String) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
   let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
-    else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
+    else if m == "Std" then some stdLib else if m == "Text" then some textLib
+    else if m == "Sys" then some sysLib else none
 
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
 from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
