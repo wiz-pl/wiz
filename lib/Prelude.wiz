@@ -1528,16 +1528,30 @@ attribute [app_unexpander List.nil] ListLit.unexpandNil
 attribute [app_unexpander List.cons] ListLit.unexpandCons
 -- (end of the notation section)
 
+/-- `Syntax.decPowers` with fuel: at most `fuel` powers, so the recursion is
+structural on the fuel rather than a `partial` loop. `n` bounds the loop (each
+step multiplies a power of ten that is already at most `n`), so `Syntax.decPowers`
+passes `Nat.succ n`. -/
+def Syntax.decPowersGo : Nat → Nat → Nat → List Nat → List Nat
+  | .zero, _, _, acc => acc
+  | .succ fuel, n, p, acc => match Nat.lt n p with
+    | .true => acc
+    | .false => Syntax.decPowersGo fuel n (p * 10) (.cons p acc)
 /-- The powers of ten up to `n`, largest first (in front of `acc`), for
 `Syntax.decimal`: a decimal numeral as text, for macros (`Nat.toString` is an extern:
 it only runs compiled). -/
-partial def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat := match Nat.lt n p with
-  | .true => acc
-  | .false => Syntax.decPowers n (p * 10) (.cons p acc)
+def Syntax.decPowers (n p : Nat) (acc : List Nat) : List Nat :=
+  Syntax.decPowersGo (Nat.succ n) n p acc
+/-- `Syntax.decDigit` with fuel: at most `fuel` subtractions, so the recursion is
+structural on the fuel rather than a `partial` loop. Each step subtracts a positive
+power, so `n` bounds the loop and `Syntax.decDigit` passes `Nat.succ n`. -/
+def Syntax.decDigitGo : Nat → Nat → Nat → Nat → Nat
+  | .zero, _, _, d => d
+  | .succ fuel, n, p, d => match Nat.lt n p with
+    | .true => d
+    | .false => Syntax.decDigitGo fuel (n - p) p (d + 1)
 /-- The decimal digit of `n` at the power `p` (counting from `d`). -/
-partial def Syntax.decDigit (n p d : Nat) : Nat := match Nat.lt n p with
-  | .true => d
-  | .false => Syntax.decDigit (n - p) p (d + 1)
+def Syntax.decDigit (n p d : Nat) : Nat := Syntax.decDigitGo (Nat.succ n) n p d
 /-- The digits of `n` at the powers `ps`, as characters. -/
 def Syntax.decDigits : List Nat → Nat → List Char
   | .nil, _ => .nil
