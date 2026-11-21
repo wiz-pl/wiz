@@ -35,16 +35,16 @@ def hdlSignalGroup : Group where
   cases := [
     { name := "34a: signals, registers, Hw code and bundles on signals, the baud generator through Signal.ofCircuit (examples/hdl-signal.wiz)", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-signal.wiz") [
-          ".cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))",
-          ".cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))",
-          ".cons 7 (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil)))))",
-          ".cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 4 .nil)))))",
-          ".cons 7 (.cons 7 (.cons 7 (.cons 2 (.cons 3 (.cons 4 .nil)))))",
-          ".cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))",
-          ".cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))",
-          ".cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))",
-          ".cons 0 (.cons 2 (.cons 4 .nil))",
-          ".cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 .nil)))))))))",
+          "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
+          "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
+          "[7, 0, 1, 2, 3, 4]",
+          "[0, 0, 0, 2, 0, 4]",
+          "[7, 7, 7, 2, 3, 4]",
+          "[1, 2, 3, 4, 5]",
+          "[0, 0, 0, 1, 0]",
+          "[0, 0, 0, 1, 0]",
+          "[0, 2, 4]",
+          "[0, 0, 0, 1, 0, 0, 0, 1, 0, 0]",
           "10"] },
     { name := "34a: a register that keeps the size is rejected (a combinational loop as a size error)", run := fun _ => do
         failsLibs "import Hdl.Signal\ndef badReg {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^i\n  | .head => init\n  | .tail => s\n" "builds a value of size ↑s or ∞, not i" },
@@ -57,11 +57,11 @@ def hdlSignalGroup : Group where
         failsLibs "import Hdl.Signal\ndef crossDomain (s : Signal ClockDomain.sys Nat) : Signal (ClockDomain.named \"fast\") Nat := s\n" "type mismatch" },
     { name := "34b: L3 partial: `pureS` (pure at any size) and a numeral at a sized signal check; at ∞ they are `pure`", run := fun _ => do
         okLibs "import Hdl.Signal\ndef p {d : ClockDomain} {A : Type} (a : A) : Signal d A := Signal.pureS (i := ∞) a\ndef numS {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3\ndef reg {d : ClockDomain} {i : Size} (a : Nat) (s : (Signal d Nat)^i) : (Signal d Nat)^(↑i) := Signal.registerS a s\ndef regPure {d : ClockDomain} {i : Size} : (Signal d Nat)^(↑i) := reg 0 (Signal.pureS (i := i) 5)\n#eval Signal.sample 3 (p 5 : Signal ClockDomain.sys Nat)\n#eval Signal.sample 3 (Signal.map BitVec.toNat (numS (d := ClockDomain.sys) (i := ∞) : Signal ClockDomain.sys (BitVec 8)))\n"
-          [".cons 5 (.cons 5 (.cons 5 .nil))", ".cons 3 (.cons 3 (.cons 3 .nil))"] },
+          ["[5, 5, 5]", "[3, 3, 3]"] },
     { name := "34b: L3: `+`/`if` at size i, `Signal.fix` counter, and the baud generator (lane L2)", run := fun _ => do
         okLibs "import Hdl.Signal\ndef addS {d : ClockDomain} {i : Size} (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := a + b\ndef ifS {d : ClockDomain} {i : Size} (c : (Signal d (BitVec 1))^i) (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := if c then a else b\ndef counter {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => Signal.registerS (BitVec.ofNat 8 0) (c + 1))\n#eval Signal.sample 10 (Signal.map BitVec.toNat (counter : Signal ClockDomain.sys (BitVec 8)))\n#eval Signal.sample 3 (Signal.map BitVec.toNat (addS (Signal.pureS (i := ∞) (BitVec.ofNat 8 7)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 9))))\n"
-          [".cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))",
-           ".cons 16 (.cons 16 (.cons 16 .nil))"] },
+          ["[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
+           "[16, 16, 16]"] },
     { name := "34b: a combinational loop through Signal.fix is a size error (no register in the body)", run := fun _ => do
         -- `c + 1` keeps the size; the body of `fix` must produce `Signal^(↑i)`, and only
         -- `registerS` raises the size. This is the whole point of the lane.

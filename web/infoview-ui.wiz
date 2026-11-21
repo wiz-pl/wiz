@@ -94,6 +94,13 @@ def loomEditorLineEndIndex (index offset : String) : String :=
     (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
 def loomEditorIndent (text from to : String) : String :=
   EditorModel.indentJson text from to
+def loomEditorItemTitle (item : String) : String := EditorModel.itemTitleJson item
+def loomEditorAskKey (key code ctrl meta : String) : String :=
+  match EditorModel.askKey key code (String.eq ctrl "1") (String.eq meta "1") with
+  | .true => "1"
+  | .false => "0"
+def loomEditorSpan (text span : String) : String := EditorModel.spanJson text span
+def loomEditorRangeText (range : String) : String := EditorModel.rangeTextJson range
 
 export "wiz_loom_editor_index" loomEditorIndex
 export "wiz_loom_editor_segments" loomEditorSegments
@@ -112,3 +119,7 @@ export "wiz_loom_editor_editor_offset" loomEditorEditorOffset
 export "wiz_loom_editor_line_end" loomEditorLineEnd
 export "wiz_loom_editor_line_end_index" loomEditorLineEndIndex
 export "wiz_loom_editor_indent" loomEditorIndent
+export "wiz_loom_editor_item_title" loomEditorItemTitle
+export "wiz_loom_editor_ask_key" loomEditorAskKey
+export "wiz_loom_editor_span" loomEditorSpan
+export "wiz_loom_editor_range_text" loomEditorRangeText

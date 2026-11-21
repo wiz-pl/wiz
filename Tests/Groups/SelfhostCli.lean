@@ -474,6 +474,10 @@ def cliGroup : Group where
         checkEq 2 (← cliFilesEnding (d / "w") ".wizm").size
         checkEq 1 (← cliFilesEnding (d / "w") ".wizr").size
         checkEq 1 (← cliFilesEnding (d / "w") ".wizs").size
+        -- (D5) the graph's text is the `.wizr` region, never a per-target `.c`/`.ll`
+        -- entry: the third `.wizm` this case once saw was a `.c` + `.wizm` writer bug
+        checkEq 0 (← cliFilesEnding (d / "w") ".c").size
+        checkEq 0 (← cliFilesEnding (d / "w") ".ll").size
         -- a layer copy, then age both copies (a layer is never pruned)
         cliCopyDir (d / "w") (d / "ro")
         let before ← cliTree (d / "ro") ""
@@ -509,6 +513,27 @@ def cliGroup : Group where
         let (c, _, err) ← cliRun exe files #["check", "c.wiz", "--cache", w, "--cache-prune", "x"]
         checkEq 1 c
         cliCheck err "--cache-prune needs a number of days, not x" "not a number" },
+    { name := "the cache: a C build and an LLVM build of one file are different regions (.wizr keys differ)", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let d ← IO.FS.createTempDir
+        let w := (d / "w").toString
+        -- a closed `main : Nat` is inside C5's LLVM slice (`build` needs no llc)
+        let files := #[("n.wiz", "import Prelude\ndef main : Nat := Nat.add 40 2\n")]
+        let (c, _, err) ← cliRun exe files #["build", "n.wiz", "-o", "out.c", "--cache", w]
+        unless c == 0 do throw (IO.userError s!"the C build failed ({c}):\n{err}")
+        checkEq 1 (← cliFilesEnding (d / "w") ".wizr").size
+        let (c, _, err) ← cliRun exe files #["build", "n.wiz", "-o", "out.ll", "--target", "llvm", "--cache", w]
+        unless c == 0 do throw (IO.userError s!"the LLVM build failed ({c}):\n{err}")
+        -- `--target` is in the graph key, so the IR is a second region rather than the
+        -- C entry read back (both use D5's `.wizr` name)
+        checkEq 2 (← cliFilesEnding (d / "w") ".wizr").size
+        checkEq 2 (← cliFilesEnding (d / "w") ".wizs").size
+        checkEq 0 (← cliFilesEnding (d / "w") ".c").size
+        checkEq 0 (← cliFilesEnding (d / "w") ".ll").size
+        let regions ← cliFilesEnding (d / "w") ".wizr"
+        let cText ← IO.FS.readFile regions[0]!
+        let llText ← IO.FS.readFile regions[1]!
+        unless !(cText == llText) do throw (IO.userError "the C and LLVM regions hold the same text") },
     { name := "(C15) smt: the host's refusal without --trust-smt; the flag is taken and says what is missing", run := fun _ =>
         withSelfhostCli fun exe => do
         let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"

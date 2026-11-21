@@ -82,8 +82,9 @@ authoritative. `parse --stats` prints counts only; the perf agent owns throughpu
 `scry help` prints the command list and `scry findings help` the subcommands. Exit status
 is 0 on success and 1 on an error, including a usage error (a `scry: …` line on stderr);
 `taint` with an expired `--timeout` exits 124, and `--fail-on-finding` exits 1 when a
-finding or a boundary/memory warning is shown. The accepted flags, grouped as the CLI
-groups them, are:
+finding or a boundary/memory warning is shown. The four frontend drivers (`project`,
+`cs`, `prover`, `egraph`) use the 0/1/2/3 vocabulary below instead. The accepted flags,
+grouped as the CLI groups them, are:
 
 | command | arguments and flags |
 |---|---|
@@ -106,8 +107,17 @@ groups them, are:
 | `findings repro` | `ID` + `--db FILE`, `--artifacts DIR`, `--cc CMD`, `--sanitize address\|undefined\|both\|none` (`both`), `--input FILE`, `--harness FILE`, `--env K=V` (repeatable), `--witness FILE`, `--timeout SECS` (10), `--json` |
 | `findings verify` | `ID` + `--db FILE`, `--json` |
 | `fuzz-span` | `FILE` + `--offset N`, `--json`, `--out FILE` |
-| `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite` |
+| `egraph` | `FILE.c` + `--fuel N` (8), `--rewrite`, `--json`, `--sarif OUT`, `--fail-on-rewrite` |
+| `prover` | `FILE FUNCTION` + `--cover`, `--cut`, `--dump`, `--rows p:v,…`, `--guards p,…`, `--entry`, `--classify`, `--pack FILE`, `--json`, `--sarif OUT` |
+| `cs` | `PATH` (directory, `.csproj`, `.sln`/`.slnx`, or one `.cs`) + `--json`, `--sarif OUT`, `--fail-on error\|warning\|note`, `--rules FILE`, `--no-taint` |
 | `repl` | `[FILE.c]`; the remaining arguments go to `wiz repl` (`--script FILE`, `--init CMD`, `--llvm`, `--prelude MODULE`) |
+
+The four frontend drivers use one exit vocabulary: **0** clean, **1** gated (a finding
+at/above `--fail-on-finding` for `project`, `--fail-on` for `cs`, a refuted or refused
+claim for `prover`, `--fail-on-rewrite` for `egraph`), **2** usage or IO, **3** nothing
+analysed (no translation unit or function, no analysable `.cs` file, no such function or
+spill, a vacuous claim, or a file with no function). The other commands keep the older
+contract (`0` success, `1` error, `taint`'s `124` timeout).
 
 Two flags are accepted by the parser but missing from the top-level `scry help` text:
 `bench --baseline-bootstrap` (it is in `scry bench --help`) and `project --cache-dir`

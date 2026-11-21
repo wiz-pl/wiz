@@ -2790,34 +2790,41 @@ def selfHostGroup : Group where
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
     { name := "the linear fixpoint: a recursive call's result may be used at ω when it contains no linear content, as in the Lean frontend", run := fun _ =>
+        -- (a linear token recurred on an ω `Nat`: the self-hosted frontend cannot yet
+        -- take a linear scrutinee apart, but threading the token through the recursive
+        -- call is exactly the linear fixpoint; `Nat.inc`/`Tok.use` are applications, not
+        -- constructor payloads, so both kernels reach the same rule)
         selfhostAgrees
-          ("inductive Cursor (a : Type) where\n  | mk (rest : List a)\n" ++
-           "inductive Step (a : Type) where\n  | done\n  | more (value : a) (1 next : Cursor a)\n" ++
-           "def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with\n" ++
-           "  | .mk .nil => .done\n  | .mk (.cons x xs) => .more x (.mk xs)\n")
+          ("axiom Tok : Type\naxiom Tok.use : (1 t : Tok) → Nat\n" ++
+           "axiom Tok.useB : (1 t : Tok) → Bool\n" ++
+           "axiom Tok.useP : (1 t : Tok) → Nat × Nat\n" ++
+           "axiom Tok.useO : (1 t : Tok) → Option Nat\n" ++
+           "axiom Tok.useTok : (1 t : Tok) → Tok × Nat\n" ++
+           "def Nat.inc (n : Nat) : Nat := Nat.succ n\n")
           [
             -- the call's result is `Nat`: no linear content, so it may be copied
-            ("partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n", true),
-            ("partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n", true),
-            ("partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n", true),
-            ("partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
-             "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n", true),
-            -- a recursive call bound by an ω `let` and matched on: an `Option Nat`
-            ("partial def Cursor.optLen {a : Type} (1 c : Cursor a) : Option Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => Option.none\n  | .more _ c' =>\n" ++
-             "    let r := Cursor.optLen c';\n    match r with\n" ++
-             "    | .none => Option.some 0\n    | .some n => Option.some (Nat.succ n)\n", true),
-            -- the result contains `Cursor a`: copied at ω it would copy the cursor
-            ("partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)\n", false),
-            -- two calls on one handle, and a path that never calls it
-            ("partial def Cursor.dup {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.add (Cursor.dup c') (Cursor.dup c')\n", false),
-            ("partial def Cursor.drop {a : Type} (1 c : Cursor a) : Nat :=\n" ++
-             "  match Cursor.next c with\n  | .done => 0\n  | .more _ _ => 1\n", false)
+            ("partial def loop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
+            ("partial def loopB (1 t : Tok) (n : Nat) : Bool :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useB t\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
+            -- a recursive call bound by an ω `let`: a pair of ω types
+            ("partial def loopP (1 t : Tok) (n : Nat) : Nat × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useP t\n" ++
+             "  | .succ k =>\n    let r := loopP t k;\n    (r.1 + 1, r.2)\n", true),
+            -- ... and an `Option Nat` matched after the let
+            ("partial def loopO (1 t : Tok) (n : Nat) : Option Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useO t\n" ++
+             "  | .succ k =>\n    let r := loopO t k;\n    match r with\n" ++
+             "    | .none => Option.none\n    | .some v => Option.some (Nat.inc v)\n", true),
+            -- the result contains `Tok`: copied at ω it would copy the token
+            ("partial def bad (1 t : Tok) (d : Tok) (n : Nat) : Tok × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useTok t\n" ++
+             "  | .succ k =>\n    let r := bad t d k;\n    r\n", false),
+            -- two calls, and a path that never calls
+            ("partial def dup (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.add (dup t k) (dup t k)\n", false),
+            ("partial def drop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => 0\n", false)
           ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
@@ -3696,6 +3703,43 @@ def selfHostGroup : Group where
         let expected := "error: " ++ (leanBad.toList.head!).text
         unless selfBad.head! == expected do
           throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
+    -- (D6) the host `constructor` matches the self-hosted `STacOp.constructor`: the same
+    -- scripts are accepted (single-constructor structure and enum, several constructors,
+    -- an indexed family whose index unification solves), and the same failures are
+    -- reported with the same text (not an inductive type; no constructor applies)
+    { name := "(D6) constructor: the Lean and self-hosted frontends agree", run := fun _ => do
+        let loader ← preludeLoader
+        let src := "import Prelude\n" ++
+          "structure Named where\n  name : Nat\n" ++
+          "def n : Named := by constructor; exact 7\n" ++
+          "inductive Box where\n  | mk (n : Nat)\n" ++
+          "def b : Box := by constructor; exact 7\n" ++
+          "inductive Two where\n  | a\n  | b\n" ++
+          "def two : Two := by constructor\n" ++
+          "inductive Flag : Bool → Type where\n" ++
+          "  | no : Flag .false\n  | yes (n : Nat) : Flag .true\n" ++
+          "def f : Flag .true := by constructor; exact 7\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let errs := s.messages.filter (·.severity == .error)
+        unless errs.isEmpty do throw (IO.userError "the Lean frontend rejects the constructor script")
+        let some out ← selfhostOutput src | return
+        let selfErrs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless selfErrs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the constructor script:\n{out}")
+        checkChecked src out
+        -- the failing cases: the same verdict and the same message
+        let flagBad := "import Prelude\ninductive Flag : Bool → Type where\n" ++
+          "  | no : Flag .false\n  | yes (n : Nat) : Flag .true\n" ++
+          "def bad (b : Bool) : Flag b := by constructor\n"
+        for bad in ["import Prelude\ndef bad : Nat → Nat := by constructor\n", flagBad] do
+          let sBad := runFrontend (R := ZeroOneMany) bad { loader, trustedModule := Tests.libModule }
+          let leanBad := sBad.messages.filter (·.severity == .error)
+          unless !leanBad.isEmpty do throw (IO.userError s!"the Lean frontend accepts a bad constructor script:\n{bad}")
+          let some badOut ← selfhostOutput bad | return
+          let selfBad := (badOut.splitOn "\n").filter (fun l => l.startsWith "error")
+          unless !selfBad.isEmpty do throw (IO.userError s!"the self-hosted frontend accepts a bad constructor script:\n{badOut}")
+          let expected := "error: " ++ (leanBad.toList.head!).text
+          unless selfBad.head! == expected do
+            throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
     { name := "(A11) the deriver table: the five built-ins on every form (inductive, structure, after the fact, several classes, several types, re-registered)", run := fun _ =>
         selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },
     { name := "(A11) the deriver table's errors: no deriver, an indexed family, a recursive field, a wrong arity, an unrunnable deriver, a mutual block", run := fun _ =>
