@@ -113,8 +113,9 @@ def matchGroup : Group where
     -- (#254 + #259) the equation is an extra column after the reverted hypotheses: both
     -- are in scope, and the branch is refined by both, so the columns must line up
     { name := "#254+#259 a named equation and a reverted hypothesis are both refined", run := fun _ =>
-        okLib ("import Logic\ndef f (b : Bool) (h : b = .false) : b = .false :=\n" ++
-          "  match k : b with\n  | .true => absurd h.1\n  | .false => k\n") },
+        okLib ("import Logic\ndef useL (b : Bool) (k : b = .false) : Nat := 0\n" ++
+          "def f (b : Bool) (h : b = .false) : Nat :=\n" ++
+          "  match k : b with\n  | .true => absurd h.1\n  | .false => useL b k\n") },
     { name := "missing cases are reported", run := fun _ =>
         fails (matchPrelude ++ "def missing : Nat → Nat\n  | .zero => .zero") "missing case" },
     { name := "non-structural recursion is rejected", run := fun _ =>
