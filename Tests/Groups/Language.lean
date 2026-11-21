@@ -237,9 +237,28 @@ def languageGroup : Group where
           "  | k, .nil, ys => ys\n  | k, .cons x xs, ys => .cons (Nat.add x k) (app2 k xs ys)\n" ++
           "#eval addE 9 (.cons 1 .nil)\n#eval app2 10 (.cons 1 .nil) (.cons 7 .nil)")
           [".cons 1 (.cons 9 .nil)", ".cons 11 (.cons 7 .nil)"] },
-    { name := "a parameter must be passed unchanged", run := fun _ =>
-        failsLib "import Prelude\ndef bad (w : Nat) : List Nat → Nat\n  | .nil => w\n  | .cons x xs => bad x xs"
-          "must pass the parameter w unchanged" },
+    { name := "a parameter before the colon that a recursive call changes is elaborated after it", run := fun _ =>
+        -- (fixed-params) Lean's rule: a parameter before the colon is only fixed if no
+        -- recursive call changes it; a changed one is a matched argument, so the
+        -- hypothesis takes its value
+        okLib ("import Prelude\ndef count (acc : Nat) : List Nat → Nat\n  | .nil => acc\n" ++
+          "  | .cons _ xs => count (acc + 1) xs\n" ++
+          "#eval count 0 (.cons 1 (.cons 2 (.cons 3 .nil)))\n" ++
+          -- a later structural column, and a parameter that stays fixed (`n`)
+          "def upTo (n p : Nat) : Nat → List Nat → List Nat\n  | .zero, acc => acc\n" ++
+          "  | .succ fuel, acc => upTo n (p * 2) fuel (.cons p acc)\n" ++
+          "#eval upTo 100 1 2 .nil\n" ++
+          -- two changed parameters, through an `@f` call
+          "def count2 (acc : Nat) (k : Nat) : List Nat → Nat\n  | .nil => acc + k\n" ++
+          "  | .cons _ xs => @count2 (acc + 1) (k * 2) xs\n" ++
+          "#eval count2 0 1 (.cons 1 (.cons 2 .nil))")
+          ["3", ".cons 2 (.cons 1 .nil)", "6"] },
+    { name := "... but a fixed parameter changed in an @f call is still an error", run := fun _ =>
+        -- an implicit parameter is not one of the changed ones (a call that omits it has
+        -- no value for it), so the `@f` form still requires it unchanged
+        failsLib ("import Prelude\ndef bad {n : Nat} : List Nat → Nat\n  | .nil => n\n" ++
+          "  | .cons _ xs => @bad (Nat.succ n) xs")
+          "must pass the parameter n unchanged" },
     { name := "mutual (partial) definitions", run := fun _ =>
         okLib ("import Prelude\nmutual\ndef isEven : Nat → Bool\n  | .zero => .true\n  | .succ n => isOdd n\n" ++
           "def isOdd : Nat → Bool\n  | .zero => .false\n  | .succ n => isEven n\nend\n#eval isOdd 7\n" ++
@@ -274,10 +293,16 @@ def languageGroup : Group where
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => Nat.succ (Cursor.length c')\n" ++
           "partial def Cursor.lengthAdd {a : Type} (1 c : Cursor a) : Nat :=\n" ++
           "  match Cursor.next c with\n  | .done => 0\n  | .more _ c' => 1 + Cursor.lengthAdd c'\n" ++
-          -- a pair's first component is at ω: the result `(Nat × Nat) × Nat` has no
-          -- `Cursor` in it
-          "partial def Cursor.lengthPair {a : Type} (1 c : Cursor a) : (Nat × Nat) × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => ((0, 0), 0)\n  | .more _ c' => (Cursor.lengthPair c', 0)\n" ++
+          -- a pair of ω types: the recursive call is bound at ω by `let`, and the pair
+          -- components are read from it
+          "partial def Cursor.pairCount {a : Type} (1 c : Cursor a) : Nat × Nat :=\n" ++
+          "  match Cursor.next c with\n  | .done => (0, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.pairCount c';\n    (r.1 + 1, r.2)\n" ++
+          -- a constructor field at ω is the same shape as a pair component; `Wrap` is
+          -- recursive, so the call's result type really can be the field's type
+          "inductive Wrap where\n  | base\n  | next (w : Wrap)\n" ++
+          "partial def Cursor.wrap {a : Type} (1 c : Cursor a) : Wrap :=\n" ++
+          "  match Cursor.next c with\n  | .done => Wrap.base\n  | .more _ c' => Wrap.next (Cursor.wrap c')\n" ++
           -- a `Bool` result and an `Option Nat` scrutinee are ω too
           "partial def Cursor.allMore {a : Type} (1 c : Cursor a) : Bool :=\n" ++
           "  match Cursor.next c with\n  | .done => Bool.true\n  | .more _ c' => Bool.and (Cursor.allMore c') Bool.true\n" ++
@@ -290,10 +315,11 @@ def languageGroup : Group where
           ["2", "3"] },
     { name := "... but a result type that contains the linear parameter stays rejected", run := fun _ =>
         failsLib (cursorHeader ++
-          -- the result is `Cursor a × Nat`, and its first component is checked at ω; the
-          -- call's result contains `Cursor a`, so it cannot be copied
+          -- the result is `Cursor a × Nat`; the recursive result is bound at ω and
+          -- returned, so it is copied, and it contains `Cursor a`
           "partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=\n" ++
-          "  match Cursor.next c with\n  | .done => (d, 0)\n  | .more _ c' => (Cursor.keep c' d, 0)")
+          "  match Cursor.next c with\n  | .done => (d, 0)\n" ++
+          "  | .more _ c' =>\n    let r := Cursor.keep c' d;\n    r")
           "quantity 1 but used ω" },
     { name := "... and the four bad recursive consumers are still rejected", run := fun _ => do
         -- drop the continuation
@@ -338,6 +364,35 @@ def languageGroup : Group where
     { name := "match without an expected type", run := fun _ =>
         okLib ("import Prelude\ndef f (b : Bool) (n : Nat) : Nat :=\n  let k := match b with\n    | .true => n\n" ++
           "    | .false => 0;\n  Nat.add k 1\n#eval f .true 4") ["5"] },
+    -- `match h : e with`: the branch's equation is `h : e = p`, usable in a proof and
+    -- after an unnamed column; a plain match has no hypothesis, and an indexed value
+    -- (whose split refines the index) is rejected rather than ill typed.
+    { name := "a named match binds its equation `h : e = p` in each branch (#254)", run := fun _ => do
+        okLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def g (n : Nat) : Bool := isZero n\n" ++
+          "def gEq (n : Nat) : g n = isZero n :=\n" ++
+          "  match h : isZero n with\n" ++
+          "  | .true => by unfold g; rw h; rfl\n" ++
+          "  | .false => by unfold g; rw h; rfl\n" ++
+          "def useEq (n : Nat) (b : Bool) (e : isZero n = b) : Nat := match b with\n" ++
+          "  | .true => 1\n  | .false => 0\n" ++
+          -- a named scrutinee after an unnamed one: the equation's indices are shifted
+          "def mixed (n : Nat) (b : Bool) : Nat :=\n" ++
+          "  match b, h : isZero n with\n" ++
+          "  | .true, .true => useEq n .true h\n" ++
+          "  | .true, .false => useEq n .false h\n" ++
+          "  | .false, .true => useEq n .true h\n" ++
+          "  | .false, .false => useEq n .false h\n" ++
+          "#eval mixed 0 .true\n#eval mixed 1 .true") ["1", "0"]
+        failsLib ("import Prelude\n" ++
+          "def isZero (n : Nat) : Bool := match n with\n  | 0 => .true\n  | _ => .false\n" ++
+          "def noEq (n : Nat) : Bool := match isZero n with\n  | .true => h\n  | .false => .false")
+          "unknown identifier 'h'"
+        failsLib ("import Prelude\n" ++
+          "inductive V (A : Type) : Nat → Type where\n  | nil : V A 0\n" ++
+          "  | cons {0 n : Nat} (x : A) (xs : V A n) : V A (Nat.succ n)\n" ++
+          "def headEq (v : V Nat 1) : Nat :=\n  match h : v with\n  | .cons x _ => x") "indexed type" },
     { name := "tuple patterns", run := fun _ =>
         okLib ("import Prelude\ndef sum3 : Nat × Nat × Nat → Nat\n  | (a, b, c) => Nat.add a (Nat.add b c)\n" ++
           "def firstZero : Nat × Nat → Bool\n  | (.zero, _) => .true\n  | p => .false\n" ++
@@ -728,6 +783,39 @@ def languageGroup : Group where
         failsLib ("import Prelude\nsyntax (name := steal) \"steal\" : command\n" ++
           "macro_rules\n  | `(command| steal) => `(command| import Prelude)\n")
           "expected" }
+    -- 13t: `<|`, `|>.` and `·` sections
+    { name := "13t: `f <| x` is `f x` (right associative), `x |> f` is `f x` (left associative)", run := fun _ => do
+        okLib ("import Prelude\n#eval Nat.succ <| 4\n#eval Nat.succ <| Nat.succ <| 5\n" ++
+          "def sq (n : Nat) : Nat := n * n\n#eval sq <| 1 + 2\n" ++
+          "#eval (fun (f : Nat → Nat) => f 1) <| Nat.succ\n" ++
+          "#check fun (x : Nat) => x |> Nat.succ |> Nat.succ\n" ++
+          "#check fun (x : Nat) => Nat.succ <| Nat.succ <| x")
+          ["5", "7", "9", "2", "fun x => x |> Nat.succ |> Nat.succ : Nat → Nat",
+           "fun x => Nat.succ <| Nat.succ <| x : Nat → Nat"] },
+    { name := "13t: `x |>.f` is the same projection as `x.f` (nested paths too)", run := fun _ => do
+        let decls := "import Prelude\nstructure In where\n  x : Nat\n  y : Nat\n" ++
+          "structure Out where\n  i : In\n  n : Nat\n" ++
+          "def o : Out := Out.mk (In.mk 1 2) 3\n" ++
+          "def mk (n : Nat) : Out := Out.mk (In.mk n 0) n\n"
+        okLib (decls ++ "#eval o |>.n\n#eval o |>.i.x\n#eval o |>.i.y\n#eval (mk 7) |>.n\n" ++
+          "#check o.n\n#check o |>.n\n#check o.i.y\n#check o |>.i.y\n" ++
+          "#check fun (p : Out) => p |>.i.y")
+          ["3", "1", "2", "7", "o.2.1 : Nat", "o.2.1 : Nat", "o.1.2.1 : Nat", "o.1.2.1 : Nat",
+           "fun p => p.1.2.1 : Out → Nat"]
+        failsLib (decls ++ "#eval o |>.z") "has no field 'z'"
+        -- `|>.` needs the dot: `|>` is still the operator
+        failsLib "import Prelude\n#eval 1 |>.x" "no field 'x'" },
+    { name := "13t: `(· + 1)` is a lambda whose parameters come from the expected type", run := fun _ => do
+        okLib ("import Prelude\nimport Text\n#eval List.length (List.map (· + 1) [1, 2, 3])\n" ++
+          "def inc : Nat → Nat := (1 + ·)\n#eval inc 4\ndef mul : Nat → Nat → Nat := (· * ·)\n#eval mul 3 4\n" ++
+          "def twice : Nat → Nat := (· * 2)\n#eval twice 5\ndef addN : Nat → Nat → Nat := (· + ·)\n#eval addN 3 4\n" ++
+          "#check ((· + 1) : Nat → Nat)")
+          ["3", "5", "12", "10", "7", "fun x => x + 1 : Nat → Nat"]
+        failsLib "import Prelude\n#check (· + 1)" "needs a function type"
+        failsLib "import Prelude\ndef x := (· + 1)" "needs a function type"
+        -- the hole is never a term on its own, and a nested paren is its own section
+        failsLib "import Prelude\n#eval · + 1" "write it inside parentheses"
+        failsLib "import Prelude\n#eval (· + 1) + 1" "a `·` section is a lambda" }
   ]
 
 builtin_initialize registerGroup languageGroup

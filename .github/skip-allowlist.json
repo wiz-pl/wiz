@@ -28,30 +28,21 @@
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "--target llvm|wasm: the host selects the backend, the self-hosted one emits C only (C5)",
-      "reason": "backend: --target llvm/wasm selects LLVM/WebAssembly in the host (C5)",
+      "case": "--target llvm: both select it, and `check` is silent in both (C5's first slice)",
+      "reason": "backend: both accept `--target llvm` and `check` compiles nothing; the self-hosted LLVM path is a first slice (C5: a closed `main : Nat`) and is not exercised here",
       "parity": "C5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
-      "why": "documented self-host parity difference (C5): the self-hosted backend emits C only and refuses the other target names. Allow-listed by the user (2026-11-17) for this one case only."
+      "why": "documented self-host parity difference (C5): `check --target llvm` compiles nothing in either, so the self-hosted LLVM path (a first slice: a closed `main : Nat`) is not exercised here. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",
-      "case": "cache: --cache-ro is a host layer the driver has not got (a named difference)",
-      "reason": "cache: `--cache-ro DIR` adds a read-only layer",
-      "parity": "D5",
+      "case": "--target wasm: the host selects WebAssembly, the driver refuses the name (C5)",
+      "reason": "backend: --target wasm selects WebAssembly in the host (C5); the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name (exit 1) instead of silently building C",
+      "parity": "C5",
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D5): the driver's one-file cache has no read-only layers, so it rejects --cache-ro. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "--cache-verify: the modes are accepted and the outputs agree (strict cannot be a hit here)",
-      "reason": "cache verification: the host writes output manifests",
-      "parity": "D5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D5): the self-hosted cache writes no output manifests, so --cache-verify strict never hits. Allow-listed by the user (2026-11-17) for this one case only."
+      "why": "documented self-host parity difference (C5): the host selects WebAssembly; the self-hosted backend emits C and LLVM (a first slice), so the driver refuses the name instead of silently building C. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",
@@ -70,15 +61,6 @@
       "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
       "expires": "2027-05-01",
       "why": "documented self-host parity difference (D3): --include/--types/-v are driver-only flags the host rejects. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "help and version: exit 0, one version line (the usage documents the subset)",
-      "reason": "usage text: the driver documents the subset it has",
-      "parity": "D2/D8",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D2/D8): the driver's usage documents only the subset it implements (no parse/doc/fmt/lsp, no --llvm). Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
       "group": "selfhost-cli-diff",
@@ -126,42 +108,6 @@
       "why": "documented self-host parity difference (A14/D6): the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
-      "group": "selfhost-cli-diff",
-      "case": "check: a bad file has the same line, severity and kind (the column is the command's start)",
-      "reason": "column: the host reports the failing term and the declared name",
-      "parity": "D6",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6): the self-hosted frontend reports the command's start column. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "-I: an error inside a module (the host nests it under the import)",
-      "reason": "structure: the host nests a module's errors under its import",
-      "parity": "D6/A14",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6/A14): the self-hosted loader reports each error at its own module and position. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "build --llvm: the host has it, the self-hosted backend is C only (C5)",
-      "reason": "backend: the host builds through textual LLVM IR",
-      "parity": "C5",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (C5): the self-hosted backend is C only. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "a missing file: both exit 1 (the host's message is an uncaught read)",
-      "reason": "message: the host lets IO.readFile throw",
-      "parity": "D6/D7",
-      "owner": "self-hosted driver parity (Tests/Groups/SelfhostCliDiff.lean, docs/stages/21-bootstrap.md)",
-      "expires": "2027-05-01",
-      "why": "documented self-host parity difference (D6/D7): the driver checks access first and prints one positioned diagnostic. Allow-listed by the user (2026-11-17) for this one case only."
-    },
-    {
       "group": "scry-csharp",
       "case": "known gap: a lambda passed to an unknown callee keeps its body out of the program",
       "reason": "known gap: a lambda passed to an unknown callee",
@@ -176,14 +122,6 @@
       "owner": "selfhost CLI parity (Tests/Groups/SelfhostCliDiff.lean, selfhost/Cli.wiz)",
       "expires": "2027-05-19",
       "why": "The host's `run` takes flags only and rejects trailing arguments (exit 2); the self-hosted driver passes them to the program. That is a documented host caveat, not a regression, and it needs a host-side `run FILE ARG...` before the entry can go."
-    },
-    {
-      "group": "selfhost-cli-diff",
-      "case": "smt: without --trust-smt the refusal is the host's, at the command's start (C15)",
-      "reason": "column: the host reports the `smt` token, the self-hosted frontend the command's start (D6)",
-      "owner": "selfhost diagnostics (Tests/Groups/SelfhostCliDiff.lean, selfhost/Frontend.wiz)",
-      "expires": "2027-05-19",
-      "why": "The message and exit code agree; only the column differs because the host points at the `smt` token while the driver points at the command's start. Fixing it is D6 positioned diagnostics in the self-hosted frontend."
     }
   ]
 }

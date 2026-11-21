@@ -50,11 +50,11 @@ def buildDeps (dir : System.FilePath) (tc : Toolchain) : IO (Except String (Grai
 def readPkg (tc : Toolchain) (d : System.FilePath) : IO (Except String Grail.Package) := do
   pure ((← Grail.readConfig tc (← binId tc) "lib" d).map (·.1))
 
-/-- The checked-in local index fixture (`Tests/fixtures/grail-index`): one `index/`
+/-- The checked-in local index fixture (`Tests/fixtures/fate-index`): one `index/`
 directory of S-expressions, relative `source` paths and their archives. Hermetic: no git,
 no network, no generated tarballs. -/
 def indexFixture : IO System.FilePath := do
-  let p ← IO.FS.realPath "Tests/fixtures/grail-index"
+  let p ← IO.FS.realPath "Tests/fixtures/fate-index"
   unless ← (p / "index").isDir do
     throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
   pure p
@@ -283,7 +283,7 @@ def grailDepsGroup : Group where
           [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
            ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
         writeGreet "1.0.0" tar1.toString sha1
-        IO.FS.writeFile (idxWork / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+        IO.FS.writeFile (idxWork / "registry.sexpr") "(registry (name \"test/fate-index\") (format 1))\n"
         let _ ← gitIn idxWork ["add", "."]
         let _ ← gitIn idxWork ["commit", "--quiet", "-m", "v1"]
         let _ ← runIn root "git" ["clone", "--quiet", "--bare", idxWork.toString, idxBare.toString]
@@ -534,7 +534,7 @@ def grailDepsGroup : Group where
         checkEq 0 (← run ["update", "--locked"])
         -- (R10) `update --locked` reads only the lock: a missing/unreachable index does not
         -- make it re-resolve (a new publication upstream must not fail CI)
-        checkEq 0 (← run ["update", "--locked", "--index", "/nonexistent/grail-index"])
+        checkEq 0 (← run ["update", "--locked", "--index", "/nonexistent/fate-index"])
         -- a cold archive cache: offline fetches nothing
         checkEq 1 (← run ["fetch", "--locked", "--offline"])
         check (!(← (dir / ".grail/packages/greet").pathExists)) "a cold offline fetch unpacked something"
@@ -659,7 +659,7 @@ def grailDepsGroup : Group where
         let cmds := String.ofList (List.replicate 64 'c')
         let lock : Grail.Lock :=
           { format := 3, toolchain := "0.1.0-dev", revision := "abcdef",
-            indexUrl := "https://example.org/grail-index", indexCommit := "123456",
+            indexUrl := "https://example.org/fate-index", indexCommit := "123456",
             git := [
               { name := "zeta", url := "https://example.org/z.git", rev := "v1", commit := "c1", content := "d1" },
               { name := "alpha", url := "https://example.org/a.git", rev := "main", commit := "c2", content := "d2" } ],

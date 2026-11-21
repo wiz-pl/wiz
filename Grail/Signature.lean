@@ -11,7 +11,7 @@ signature, `index/snapshot.sexpr.sig`, signs those bytes with
 `ssh-keygen -Y sign -n grail-index`.
 
     (snapshot
-      (name "wiz-pl/grail-index")
+      (name "wiz-pl/fate-index")
       (seq 7)
       (updated "2026-11-15T00:00:00Z")
       (key "SHA256:…")

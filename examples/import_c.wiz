@@ -2,6 +2,11 @@
 import IO
 import_c "string.h"
 import_c "math.h" (pure)
+-- `pow`/`sqrt` come from libm; the package (`grail.wiz`) links `-lm` for `grail test`,
+-- but a frontend that runs this file with its own toolchain (the Desc sweep in
+-- `Tests/Scaling.lean`) does not read package settings, so declare it here. `-lm` twice
+-- is harmless.
+link_lib "m"
 #check C.strlen
 #check C.pow
 def main : IO Unit := do

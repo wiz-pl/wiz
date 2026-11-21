@@ -1,4 +1,5 @@
 import Wiz.Toolchain
+import Tests.Loader
 
 /-!
 # A tiny test harness
@@ -58,8 +59,10 @@ structure Group where
   directory in the work tree), and none of them assert on wall time or on the machine's
   load: see "Running cases in parallel" in `docs/building.md`. -/
   parallel : Bool := false
-  /-- The CI shard that runs the group (`.github/test-shards.json`), when no shard's
-  selectors pick it; empty: the default shard. `tests --list-shards` prints it. -/
+  /-- A hint at the shard that is meant to run the group (`.github/test-shards.json`).
+  It is not a fallback: `scripts/check-shards.py` fails when no shard's selectors pick
+  the group, and shows this hint in the error so the fix is a selector or an exclusion.
+  `tests --list-shards` prints it. -/
   shard    : String := ""
 
 /-- The groups of the modules under `Tests/Groups/`, in their import order: each module
@@ -200,15 +203,17 @@ structure CaseResult where
   skipped : Option String := none
   output : String := ""
 
-/-- A case's result as the suite prints it: `✓` passed, `✗` failed (with its output),
-`⊘` skipped (with the reason). -/
-def renderResult (r : CaseResult) : String :=
+/-- A case's result as the suite prints it: its position `[n/total]` among the cases this
+run selected, then `✓` passed, `✗` failed (with its output), or `⊘` skipped (with the
+reason). -/
+def renderResult (r : CaseResult) (n total : Nat) : String :=
+  let num := s!"[{n}/{total}] "
   if let some why := r.skipped then
-    s!"  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
+    s!"{num}  ⊘ {r.name} ({showMs r.ms} s)\n      skipped ({why})"
   else if r.ok then
-    s!"  ✓ {r.name} ({showMs r.ms} s)"
+    s!"{num}  ✓ {r.name} ({showMs r.ms} s)"
   else
-    s!"  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
+    s!"{num}  ✗ {r.name} ({showMs r.ms} s)\n      {r.output}"
 
 /-- The result of a case's process: its child's exit code and output, and the time the
 child ran for (`now` - `start`, measured in the process, not around a queue). -/
@@ -237,11 +242,16 @@ def forwardGuessLines (g : Group) (index : Nat) (stderr : String) : IO Unit := d
 
 /-- Run each case in a child process (`<self> --run-case <group> <index>`), because an
 executed `sorry` aborts the whole process; `only` restricts the run to the cases with
-these indices. Prints each case with its wall time (`✓` passed, `✗` failed, with its
-output, `⊘` skipped, with the reason) and gives its result to `onResult` as soon as it
-finishes. -/
+these indices. Prints each case with its position in the run (`[n/total]`) and wall time
+(`✓` passed, `✗` failed, with its output, `⊘` skipped, with the reason) and gives its
+result to `onResult` as soon as it finishes. `start` is the first case's position in the
+whole invocation's selection (the driver runs several groups) and `total` that selection's
+size; both default to this group's own selected cases. -/
 def Group.run (g : Group) (only : Option (List Nat) := none)
-    (onResult : CaseResult → IO Unit := fun _ => pure ()) : IO (List CaseResult) := do
+    (onResult : CaseResult → IO Unit := fun _ => pure ())
+    (start : Nat := 1) (total : Option Nat := none) : IO (List CaseResult) := do
+  let selected := (List.range g.cases.length).filter fun i => only.all (·.contains i)
+  let total := total.getD selected.length
   IO.println s!"── {g.name} ({g.exercise})"
   let stdout ← IO.getStdout
   stdout.flush
@@ -256,10 +266,11 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
   let part ← casePart
   let partArgs := if part.isEmpty then #[] else #["--part", part]
   let mut results := #[]
+  let mut n := start
   for c in g.cases, i in [0:g.cases.length] do
     if let some ixs := only then
       unless ixs.contains i do continue
-    let start ← IO.monoMsNow
+    let began ← IO.monoMsNow
     let child ← IO.Process.spawn
       { cmd := self.toString,
         args := #["--run-case", g.name, toString i] ++ jobArgs ++ partArgs ++ (← flagsRef.get).toArray
@@ -267,15 +278,16 @@ def Group.run (g : Group) (only : Option (List Nat) := none)
     let outT ← IO.asTask child.stdout.readToEnd Task.Priority.dedicated
     let errT ← IO.asTask (readCaseStderr child.stderr) Task.Priority.dedicated
     let code ← child.wait
-    let ms := (← IO.monoMsNow) - start
+    let ms := (← IO.monoMsNow) - began
     let out ← IO.ofExcept outT.get
     let err ← IO.ofExcept errT.get
     forwardGuessLines g i err
     let r := caseResult c i code out err ms
-    IO.println (renderResult r)
+    IO.println (renderResult r n total)
     stdout.flush
     onResult r
     results := results.push r
+    n := n + 1
   pure results.toList
 
 /-! ## Running cases in parallel (`--jobs N`, opt-in per group)
@@ -311,20 +323,25 @@ private def startCase (self : System.FilePath) (g : Group) (i : Nat) (flags : Ar
 
 /-- Run the cases of `g` that `only` picks with a bounded pool of `jobs` child processes
 at a time, printing each case's result (and calling `onResult`) in the group's case
-order, so the log is deterministic. A group must opt in with `parallel := true`.
+order, so the log is deterministic; the `[n/total]` position is assigned when the
+result is printed (not in the child), so parallel cases cannot interleave numbers.
+`start` and `total` are the whole invocation's first position and size, as in
+`Group.run`. A group must opt in with `parallel := true`.
 
 A case's failure does not stop the other cases (the suite reports every failure, as it
 does sequentially); an exception (such as a pipe that could not be read) kills the
 processes still alive before it propagates. -/
 def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
-    (onResult : CaseResult → IO Unit := fun _ => pure ()) : IO (List CaseResult) := do
-  if jobs <= 1 then return ← g.run only onResult
+    (onResult : CaseResult → IO Unit := fun _ => pure ())
+    (start : Nat := 1) (total : Option Nat := none) : IO (List CaseResult) := do
+  if jobs <= 1 then return ← g.run only onResult start total
   IO.println s!"── {g.name} ({g.exercise})"
   (← IO.getStdout).flush
   let self ← IO.appPath
   let part ← casePart
   let flags := (if part.isEmpty then #[] else #["--part", part]) ++ (← flagsRef.get).toArray
   let todo := (List.range g.cases.length).filter fun i => only.all (·.contains i)
+  let total := total.getD todo.length
   let pending ← IO.mkRef todo
   let live ← IO.mkRef ([] : List Live)
   let results ← IO.mkRef ([] : List CaseResult)
@@ -354,7 +371,11 @@ def Group.runJobs (g : Group) (jobs : Nat) (only : Option (List Nat) := none)
           | throw (IO.userError s!"no case {l.index} in {g.name}")
         forwardGuessLines g l.index stderr
         let r := caseResult c l.index code stdout stderr ms
-        IO.println (renderResult r)
+        -- cases are printed in `todo` order, so the results collected so far are the
+        -- numbers just before this one; numbering here (not in the child) keeps the
+        -- pool's parallel processes from interleaving numbers
+        let n := start + (← results.get).length
+        IO.println (renderResult r n total)
         (← IO.getStdout).flush
         results.modify (· ++ [r])
         onResult r

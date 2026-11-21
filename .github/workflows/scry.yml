@@ -1,5 +1,5 @@
 # The Scry tool's own golden suite: `cd scry && grail test`, which runs the
-# `scry/tests/*.expected` goldens (28 today). The Lean-side groups (`=scry-taint`,
+# `scry/tests/*.expected` goldens (33 today). The Lean-side groups (`=scry-taint`,
 # `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
 # the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
 # `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what
@@ -58,7 +58,17 @@ jobs:
   goldens:
     name: scry goldens (grail test)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # A cold Nix cache spends ~28 min of this job just building `.#wiz` (measured on
+    # run 44659574183: setup 02:16, wiz built 02:45, `grail build scry` 02:57), and the
+    # 60-minute limit then kills the goldens mid-run. This is a setup budget, not a
+    # golden failure: raise the limit so a cold cache still finishes, and keep the
+    # test step's own duration visible in the log.
+    #
+    # 120, not 90: run 44855202918 on integration/train8 reached the limit at
+    # 1h30m0s with the `grail test` step still running (the annotation says so); the
+    # train's goldens grew with scry-e2e/prover. A cold build (~25 min) plus the
+    # goldens no longer fit in 90.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup

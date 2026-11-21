@@ -18,6 +18,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |
 | `import-cycle` | an `import` leads back to the module itself | | |
 | `module-errors` | an imported module has errors (they are listed) | | |
+| `no-such-file` | the file a command names cannot be read | `wiz check no.wiz` | |
 | `import-order` | an `import` after a declaration, or nested in a command: imports are a fixed header | `def x := 1` then `import Prelude`; `mutual import M end` | |
 | `missing-case` | a `match` or equations miss constructors | | add missing cases |
 | `missing-copattern` | a copattern definition misses an observation | | |
@@ -36,6 +37,7 @@ table lists exactly those. Messages not listed here have no code yet.
 | `binder-mismatch` | a `fun` binder whose quantity or implicitness differs from the expected type's | | |
 | `private` | a private name of another module, or a type whose constructors are private to it taken apart | | |
 | `duplicate-declaration` | a name declared twice (an import that would redeclare one is not brought in) | | |
+| `duplicate-hypothesis` | a `match` names its equation hypothesis twice | `match h : e, h : f with` | |
 | `duplicate-constructor` | a constructor declared twice in one `inductive` | | |
 | `shadowed-recursive` | a local variable shadows the recursive definition it is in | | |
 | `not-structural` | a recursive call that is not structural | `def f : Nat → Nat \| n => f n` | |

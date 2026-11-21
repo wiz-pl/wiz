@@ -185,14 +185,32 @@ def scaseMethodTy (g : Globals R) (l v : Level) (I D P s q : Val R) : VTy R :=
       (tapps (Templates.interpTm l) [tv 5, tv 4, .lam "j'" (.mu l (tv 6) (tv 5) (tv 0) (tv 2) none false), tv 0])
       (tapps (tv 4) [tv 1, .con (tv 0)]) ⟨l1, v⟩), .imax l1 v))).1
 
-/-- `f : (s : Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i` -/
+/-- `A : (j : Size) → (i : I) → Sort (l+1)`: the state family of a sized corecursion.
+Unlike `coitStateTy`, the state may depend on the size; the body of `scofix` is at
+`A (↑j)`, the recursive call at `A j`. -/
+def scofixStateTy (l : Level) (I : Val R) (w : R) : VTy R :=
+  let l1 : Level := .succ l
+  -- j0 I1 ; i0 j1 I2
+  .pi "j" .default (.qlit 0) .size
+    (.mk [I] (.pi "i" .default (.qlit w) (.var 1) (.sort l1) ⟨l1, .succ l1⟩))
+    ⟨1, .succ l1⟩
+
+/-- `f : (j : Size) → ((i : I) → A j i → ν^j D i) → (i : I) → A (↑j) i → ν^{↑j} D i`.
+The body runs at `↑j`, so its state is `A (↑j)`; the recursive argument is the value at
+the predecessor `j`. `scofix A f s i a : ν^s D i` takes `a : A s i`, and when observed
+at `s = ↑j` it unfolds with `f j`. -/
 def scofixFunTy (g : Globals R) (l : Level) (I D A : Val R) (w : R) : VTy R :=
   let pi := spi w
   let l1 : Level := .succ l
-  -- s0 A1 D2 I3 ; i0 s1 A2 D3 I4 ; a0 i1 s2 A3 D4 I5 ; rec0 s1 A2 D3 I4 ; i0 rec1 s2 A3 D4 I5 ; a0 i1 rec2 s3 A4 D5 I6
-  eval g [A, D, I] (spi 0 "s" (.size, 1)
-    (pi "rec" (pi "i" (tv 3, l1) (pi "a" (.app (tv 2) (tv 0), l1) (.nu l (tv 5) (tv 4) (tv 1) (tv 2) none, l1)))
-      (pi "i" (tv 4, l1) (pi "a" (.app (tv 3) (tv 0), l1) (.nu l (tv 6) (tv 5) (tv 1) (.szSuc (tv 3)) none, l1))))).1
+  -- j0 A1 D2 I3 ; i0 j1 A2 D3 I4 ; a0 i1 j2 A3 D4 I5
+  -- rec0 j1 A2 D3 I4 ; i0 rec1 j2 A3 D4 I5 ; a0 i1 rec2 j3 A4 D5 I6
+  eval g [A, D, I] (pi "j" (.size, 1)
+    (pi "rec" (pi "i" (tv 3, l1)
+        (pi "a" (.app (.app (tv 2) (tv 1)) (tv 0), l1)
+          (.nu l (tv 5) (tv 4) (tv 1) (tv 2) none, l1)))
+      (pi "i" (tv 4, l1)
+        (pi "a" (.app (.app (tv 3) (.szSuc (tv 2))) (tv 0), l1)
+          (.nu l (tv 6) (tv 5) (tv 1) (.szSuc (tv 3)) none, l1))))).1
 
 /-- (Mandatory sorts) Two sorts written on convertible types are equivalent. A hole (only
 in the elaborator, before its sorts pass) is compared with nothing. **Invariant**: no hole
@@ -363,9 +381,10 @@ partial def conv (g : Globals R) (tys : Array (VTy R)) (ty : VTy R) (a b : Val R
     | _, _ => (convNe g tys a b).isSome
   | .nu l I D i _ _ => match a, b with
     | .cocon x, .cocon y => conv g tys (vInterp g l I D (nuFamily l I D) i) x y
-    | .scofix _ _ _ A f _ j x, .scofix _ _ _ A' f' _ j' x' =>
-      conv g tys (coitStateTy l I 1) A A' && conv g tys (scofixFunTy g l I D A 1) f f' &&
-        conv g tys I j j' && conv g tys (vApp g A j) x x'
+    | .scofix _ _ _ A f s j x, .scofix _ _ _ A' f' s' j' x' =>
+      sizeEq s s' && conv g tys (scofixStateTy l I 1) A A' &&
+        conv g tys (scofixFunTy g l I D A 1) f f' &&
+        conv g tys I j j' && conv g tys (vApp g (vApp g A s) j) x x'
     | .coit _ _ _ S st j s, .coit _ _ _ S' st' j' s' =>
       conv g tys (coitStateTy l I 1) S S' && conv g tys (coitStepTy g l I D S 1) st st' &&
         conv g tys I j j' && conv g tys (vApp g S j) s s'

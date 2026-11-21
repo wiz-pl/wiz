@@ -90,6 +90,33 @@ partial def erasable (c : TCtx) (ty : Val) : Bool := match whnf ty with
     | .vpi _ _ _ _ _ _ => Bool.or (erasedFunTy c t (TCtx.lvl c) .false) (isProp c t)
     | _ => isProp c t
 
+-- (22i) a structure's marker tail, `(0 _ : Enum 1) → Unit` (`structTailDom` in the
+-- Lean frontend; the shape only, since `Enum` is a length here). A structure with
+-- fields ends in it, so erasure can tell a structure's last field from an ordinary
+-- pair. Only a tail with no phantom parameter before the marker is recognised: the
+-- smallest set (a structure with no phantom parameter; the rest is deferred).
+def isStructTail (I : Val) : Bool := match whnf I with
+  | .vpi _ _ _ dom env cod => match whnf dom with
+    | .venum k => Bool.and (Nat.beq k 1) (match whnf (eval (.cons .vtt env) cod) with
+      | .vunit _ => Bool.true
+      | _ => Bool.false)
+    | _ => Bool.false
+  | _ => Bool.false
+
+-- (22i) the last field of a structure, at run time: the pair `Σ f. (I = i × Unit)`
+-- whose index type is a structure marker (the description's `ret`, `Templates.mret`).
+-- There the pair is not a pair: the field is the value (`unboxedSigma` in
+-- `Compiler/Erase.lean`, whose `Σ` is the structure itself; here a structure is an
+-- inductive, so the marker shows in the `ret`'s index type).
+def unboxedLast (c : TCtx) (ty : Val) : Bool := Bool.and (TCtx.unbox c) (match whnf ty with
+  | .vsigma _ _ _ _ env snd =>
+    match whnf (eval (.cons (.vne (.hvar (TCtx.lvl c)) .snil) env) snd) with
+    | .vsigma _ _ _ E _ _ => match whnf E with
+      | .vne (.heq I _ _) _ => isStructTail I
+      | _ => Bool.false
+    | _ => Bool.false
+  | _ => Bool.false)
+
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.
 def isNatDesc (D : Val) : Bool := match whnf D with
   | .vdarg _ S F => match whnf S with
@@ -307,9 +334,13 @@ def eraseCheck (ffi : List Foreign) (c : TCtx) (t : Tm) (ty : Val) : ER := match
         | .qz => .ok .erased
         | _ => eraseCheck ffi c a A;
       match ar with
-      | .ok a' => match eraseCheck ffi c b (eval (.cons (eval (TCtx.env c) a) env) B) with
-        | .ok b' => .ok (epair a' b')
-        | e => e
+      | .ok a' =>
+        -- (22i) the last field of a structure: the pair is its first component
+        match unboxedLast c ty with
+        | .true => .ok a'
+        | .false => match eraseCheck ffi c b (eval (.cons (eval (TCtx.env c) a) env) B) with
+          | .ok b' => .ok (epair a' b')
+          | e => e
       | e => e
     | _ => eraseInfer ffi c t
   | .con x => match whnf ty with
@@ -329,20 +360,36 @@ def eraseCheck (ffi : List Foreign) (c : TCtx) (t : Tm) (ty : Val) : ER := match
     | _ => eraseInfer ffi c t
   | .darg _ S D => match whnf ty with
     | .vdesc l I => match eraseCheck ffi c D (.vpi .qw (lsucc l) (lsucc (lsucc l)) (eval (TCtx.env c) S) (.cons I .nil) (.descr l (.var 1))) with
-      | .ok D' => .ok (.obj 1 (etms2 .erased D'))
+      | .ok D' =>
+        -- (22i) a structure's last field: its description has its own tag (5), so the
+        -- runtime reads the payload itself (`hyps` in rt.c)
+        let last := match D with
+          | .lam b => match b with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false
+          | _ => Bool.false;
+        .ok (.obj (match last with | .true => 5 | .false => 1) (etms2 .erased D'))
       | e => e
     | _ => eraseInfer ffi c t
   | .drec _ j D => match whnf ty with
     | .vdesc _ I => match eraseCheck ffi c j I with
       | .ok j' => match eraseCheck ffi c D ty with
-        | .ok D' => .ok (.obj 2 (etms2 j' D'))
+        | .ok D' =>
+          let last := match D with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false;
+          .ok (.obj (match last with | .true => 6 | .false => 2) (etms2 j' D'))
         | e => e
       | e => e
     | _ => eraseInfer ffi c t
   | .dhrec _ H j D => match whnf ty with
     | .vdesc l I => match eraseCheck ffi c j (.vpi .qw (lsucc l) (lsucc l) (eval (TCtx.env c) H) (.cons I .nil) (.var 1)) with
       | .ok j' => match eraseCheck ffi c D ty with
-        | .ok D' => .ok (.obj 3 (.cons .erased (etms2 j' D')))
+        | .ok D' =>
+          let last := match D with
+            | .dret _ => Bool.and (TCtx.unbox c) (isStructTail I)
+            | _ => Bool.false;
+          .ok (.obj (match last with | .true => 7 | .false => 3) (.cons .erased (etms2 j' D')))
         | e => e
       | e => e
     | _ => eraseInfer ffi c t
@@ -436,10 +483,18 @@ def eraseInfer (ffi : List Foreign) (c : TCtx) (t : Tm) : ER := match quickType 
       | .letUnit _ _ => eraseCheck ffi c t ty
       | .split _ _ _ _ => eraseCheck ffi c t ty
       | .fst p => match eraseInfer ffi c p with
-        | .ok p' => .ok (.proj 0 p')
+        | .ok p' => match quickType c p with
+          | .some pty => .ok (match unboxedLast c pty with
+            | .true => p'
+            | .false => .proj 0 p')
+          | .none => .ok (.proj 0 p')
         | e => e
       | .snd p => match eraseInfer ffi c p with
-        | .ok p' => .ok (.proj 1 p')
+        | .ok p' => match quickType c p with
+          | .some pty => .ok (match unboxedLast c pty with
+            | .true => .erased
+            | .false => .proj 1 p')
+          | .none => .ok (.proj 1 p')
         | e => e
       | .tag _ i => .ok (.obj i .nil)
       | .ecase m s bs => match eraseInfer ffi c s with
@@ -1958,23 +2013,23 @@ def implOf (n : String) : List Foreign → Option String
       | .true => .some g
       | .false => implOf n rest
     | _ => implOf n rest
-partial def eraseGlobals (sl : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
+partial def eraseGlobals (sl unbox : Bool) (ffi : List Foreign) (all : Array Global) (seen : List String) (acc : List Erased) : Nat → EraseR
   | .zero => .ok acc
   | .succ k => match Array.getD all k (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v _ _ _ => match Bool.or (elemStr n seen) (isNative n) with
-      | .true => eraseGlobals sl ffi all seen acc k
+      | .true => eraseGlobals sl unbox ffi all seen acc k
       -- (an implemented definition's code is its implementation's)
       | .false => match implOf n ffi with
-      | .some g => eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
+      | .some g => eraseGlobals sl unbox ffi all (.cons n seen) (.cons (.mk n (.glob g)) acc) k
       | .none => match v with
-        | .axiomC _ _ => eraseGlobals sl ffi all (.cons n seen) acc k
-        | _ => match eraseCheck ffi empty v (eval .nil ty) with
+        | .axiomC _ _ => eraseGlobals sl unbox ffi all (.cons n seen) acc k
+        | _ => match eraseCheck ffi (TCtx.mk .nil .nil 0 .false 0 .false .false .none unbox) v (eval .nil ty) with
           | .err m => .err (n +++ ": " +++ m)
           | .ok e =>
             let e' := match sl with
               | .true => markLets e
               | .false => lazyLets .false e;
-            eraseGlobals sl ffi all (.cons n seen) (.cons (.mk n e') acc) k
+            eraseGlobals sl unbox ffi all (.cons n seen) (.cons (.mk n e') acc) k
 def arities : StrMap Nat → List Erased → StrMap Nat
   | ar, .nil => ar
   | ar, .cons (.mk n e) rest => arities (StrMap.insert ar (Str.ofString n) (lamsOf e)) rest
@@ -2219,14 +2274,20 @@ def structFieldDecls (ffi : List Foreign) : List String → List String → Stri
 def structDefinition (ffi : List Foreign) (ctype : String) (fs ks : List String) : String := match strStarts "struct " ctype with
   | .true => ctype +++ " { " +++ structFieldDecls ffi fs ks +++ "};"
   | .false => "typedef struct { " +++ structFieldDecls ffi fs ks +++ "} " +++ ctype +++ ";"
--- the structure's field `i` (borrowed)
+-- the structure's field `i` (borrowed). The value is `⟨tag, (f₀, (f₁, … ◾))⟩`; with
+-- `--unbox-structs` (22i) the last pair is unboxed, so the last field is the value
+-- left after `n - 1` seconds. (The Lean backend's `fieldPath` has no tag: its
+-- structures are `Σ`s, here an inductive keeps the tag in field 0.)
 def seconds : Nat → String → String
   | .zero, e => e
   | .succ k, e => seconds k ("fld(" +++ e +++ ", 1)")
-def fieldPath (i : Nat) : String := "fld(" +++ seconds i "fld(v, 1)" +++ ", 0)"
-def structIn (ffi : List Foreign) : Nat → List String → List String → String
-  | i, .cons f fs, .cons k ks =>
-    let x := fieldPath i;
+def fieldPath (i n : Nat) (unbox : Bool) : String :=
+  match Bool.and unbox (Nat.beq (i + 1) n) with
+  | .true => seconds i "fld(v, 1)"
+  | .false => "fld(" +++ seconds i "fld(v, 1)" +++ ", 0)"
+def structIn (ffi : List Foreign) (unbox : Bool) : Nat → Nat → List String → List String → String
+  | i, n, .cons f fs, .cons k ks =>
+    let x := fieldPath i n unbox;
     let lhs := "c->" +++ f;
     let dup := fun (conv : String) => "{ V t = " +++ x +++ "; rt_dup(t); " +++ lhs +++ " = " +++ conv +++ "(t); } ";
     (match strEq k "n" with
@@ -2248,8 +2309,8 @@ def structIn (ffi : List Foreign) : Nat → List String → List String → Stri
         "); if (m) memcpy(" +++ lhs +++ ", b->data, m); } "
     | .false => match kindStruct ffi k with
     | .some g => "wiz_sin_" +++ structMangled g +++ "(&" +++ lhs +++ ", " +++ x +++ "); "
-    | .none => "") +++ structIn ffi (i + 1) fs ks
-  | _, _, _ => ""
+    | .none => "") +++ structIn ffi unbox (i + 1) n fs ks
+  | _, _, _, _ => ""
 def structFree (ffi : List Foreign) : List String → List String → String
   | .cons f fs, .cons k ks => (match strEq k "s" with
     | .true => "rt_free_cstr((char *)c->" +++ f +++ "); "
@@ -2277,37 +2338,45 @@ def structOut (ffi : List Foreign) : Nat → List String → List String → Str
     | .some g => "wiz_sout_" +++ structMangled g +++ "(" +++ x +++ ")"
     | .none => "rt_out_nat(" +++ x +++ ")") +++ "; " +++ structOut ffi (i + 1) fs ks
   | _, _, _ => ""
-def structHelpers (ffi : List Foreign) (n ctype : String) (fs ks : List String) : List Doc :=
+def structHelpers (ffi : List Foreign) (unbox : Bool) (n ctype : String) (fs ks : List String) : List Doc :=
   let m := mangle n;
   let k := lenL fs;
-  .cons (.t ("static void wiz_sin_" +++ m +++ "(" +++ ctype +++ " *c, V v) { memset(c, 0, sizeof *c); " +++ structIn ffi 0 fs ks +++ "}"))
-    (.cons (.t ("static void wiz_sfree_" +++ m +++ "(" +++ ctype +++ " *c) { (void)c; " +++ structFree ffi fs ks +++ "}"))
-    (.cons (.t ("static V wiz_sout_" +++ m +++ "(" +++ ctype +++ " c) { V fs[" +++ Nat.toString k +++ "]; " +++ structOut ffi 0 fs ks +++
-      "V r = BOX(0); for (int i = " +++ Nat.toString (k - 1) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }")) .nil))
+  -- (22i) with `--unbox-structs` the last field is not in a pair: the value's payload
+  -- ends in it, and the second field of the last pair is gone
+  let build := match unbox with
+    -- (one field: the value is `⟨tag, field⟩`, no pair at all; `k - 2` would be 0)
+    | .true => match k with
+      | 1 => "V r = fs[0]; return pair(BOX(0), r); }"
+      | _ => "V r = fs[" +++ Nat.toString (k - 1) +++ "]; for (int i = " +++ Nat.toString (k - 2) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }"
+    | .false => "V r = BOX(0); for (int i = " +++ Nat.toString (k - 1) +++ "; i >= 0; i--) r = pair(fs[i], r); return pair(BOX(0), r); }";
+  let sinS := "static void wiz_sin_" +++ m +++ "(" +++ ctype +++ " *c, V v) { memset(c, 0, sizeof *c); " +++ structIn ffi unbox 0 k fs ks +++ "}";
+  let sfreeS := "static void wiz_sfree_" +++ m +++ "(" +++ ctype +++ " *c) { (void)c; " +++ structFree ffi fs ks +++ "}";
+  let soutS := "static V wiz_sout_" +++ m +++ "(" +++ ctype +++ " c) { V fs[" +++ Nat.toString k +++ "]; " +++ structOut ffi 0 fs ks +++ build;
+  .cons (.t sinS) (.cons (.t sfreeS) (.cons (.t soutS) .nil))
 -- the headers to include (each once), the structs, and the prototypes
-partial def ffiDecls (ffi : List Foreign) (seen : List String) : List Foreign → List Doc
+partial def ffiDecls (ffi : List Foreign) (unbox : Bool) (seen : List String) : List Foreign → List Doc
   | .nil => .nil
   | .cons f rest => match f with
     | .fn _ cname header ps r _ _ => match strEq header "" with
       | .false => match elemS header seen with
-        | .true => ffiDecls ffi seen rest
-        | .false => .cons (.t ("#include <" +++ header +++ ">")) (ffiDecls ffi (.cons header seen) rest)
+        | .true => ffiDecls ffi unbox seen rest
+        | .false => .cons (.t ("#include <" +++ header +++ ">")) (ffiDecls ffi unbox (.cons header seen) rest)
       | .true => match Bool.or (strStarts "wiz_" cname) (elemS cname seen) with
-        | .true => ffiDecls ffi seen rest
+        | .true => ffiDecls ffi unbox seen rest
         | .false =>
           let pts := ffiProtoParams ffi ps;
           .cons (.t ("extern " +++ extCType ffi r +++ " " +++ cname +++ "(" +++ (match pts with
             | .nil => "void"
-            | .cons _ _ => commaSep pts) +++ ");")) (ffiDecls ffi (.cons cname seen) rest)
+            | .cons _ _ => commaSep pts) +++ ");")) (ffiDecls ffi unbox (.cons cname seen) rest)
     | .cstruct n ctype header fs ks =>
-      let helpers := structHelpers ffi n ctype fs ks;
+      let helpers := structHelpers ffi unbox n ctype fs ks;
       match strEq header "" with
-      | .true => .cons (.t (structDefinition ffi ctype fs ks)) (List.append helpers (ffiDecls ffi seen rest))
+      | .true => .cons (.t (structDefinition ffi ctype fs ks)) (List.append helpers (ffiDecls ffi unbox seen rest))
       | .false => match elemS header seen with
-        | .true => List.append helpers (ffiDecls ffi seen rest)
-        | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi (.cons header seen) rest))
-    | .code text => .cons (.t text) (ffiDecls ffi seen rest)
-    | _ => ffiDecls ffi seen rest
+        | .true => List.append helpers (ffiDecls ffi unbox seen rest)
+        | .false => .cons (.t ("#include <" +++ header +++ ">")) (List.append helpers (ffiDecls ffi unbox (.cons header seen) rest))
+    | .code text => .cons (.t text) (ffiDecls ffi unbox seen rest)
+    | _ => ffiDecls ffi unbox seen rest
 -- (stage 21q) A C function that applies the Wiz closure `f` (an owned value) to its C
 -- arguments `c0 …` of kinds `ps` (C values become Wiz values: `Nat`/`UInt64` from
 -- `uint64_t`, `Float64` from `double`, `String` copied from a `const char *`, `Bool` from
@@ -2458,9 +2527,9 @@ def hasExport : List Foreign → Bool
 def headerDocs (ffi : List Foreign) : List Doc :=
   (.cons (.t "/* generated by wiz build --lib: the functions the Wiz program exports (stage 9g) */") (.cons (.t "/* ABI v1 (wiz-notes/prior-art/compilers-runtime-ffi.md, 2.2): kinds are explicit.") (.cons (.t "   n/u=uint64_t, f=double, s=const char* (borrowed in, caller-owned out), b=int,") (.cons (.t "   p=void* (+1 wrapped, borrowed for a call), w=wiz_val (+0 in, +1 out); e/v are omitted.") (.cons (.t "   Structs by value only through c_struct; native reps only on sealed types. */") (.cons (.t "#define WIZ_ABI_MAJOR 1") (.cons (.t "#define WIZ_ABI_MINOR 0") (.cons (.t "#include <stdint.h>") (.cons (.t "#ifndef WIZ_VAL_DEFINED") (.cons (.t "#define WIZ_VAL_DEFINED") (.cons (.t "typedef uintptr_t wiz_val;") (.cons (.t "#endif") (.cons (.t "void wiz_release(void *v);") (.cons (.t "void wiz_retain(void *v);") (.cons (.t "long wiz_live_objects(void);") (headerProtos (List.reverseOf ffi .nil)))))))))))))))))
 -- the C of a program's foreign functions (after the runtime)
-def ffiDocs (rc : Bool) (ffi : List Foreign) : List Doc :=
+def ffiDocs (rc unbox : Bool) (ffi : List Foreign) : List Doc :=
   let fs := List.reverseOf ffi .nil;
-  List.append (ffiDecls ffi .nil fs) (List.append (cbDocs rc .nil (cbKinds fs)) (ffiWrappers ffi rc fs))
+  List.append (ffiDecls ffi unbox .nil fs) (List.append (cbDocs rc .nil (cbKinds fs)) (ffiWrappers ffi rc fs))
 -- **Applications pushed into `case`s** (reference counting mode). A match is a method
 -- applied to the payload, and the method is chosen by a `case`: `(case s [bᵢ]) a⃗`
 -- built a closure for the chosen branch and applied it. With cheap arguments
@@ -2508,8 +2577,8 @@ def mainDocs (lib : Bool) (m : String) : List Doc := match lib with
   | .true => .nil
   | .false => .cons (.t m) .nil
 -- the program's C text, one `Doc` per line
-def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => match eraseGlobals .false ffi all .nil .nil (Array.size all) with
+def genProgram (lib unbox : Bool) (gs : Globals) : List Doc := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .false unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       -- (applications pushed into `case`s, as under reference counting: a match is then
@@ -2518,7 +2587,7 @@ def genProgram (lib : Bool) (gs : Globals) : List Doc := match gs with
       match genCode (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false ffi) (List.append protos
+          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .false unbox ffi) (List.append protos
             (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .false (List.reverseOf ffi .nil))
               (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); ap(get_main(), BOX(0)); rt_finishGC(); return 0; }")))))))
 
@@ -3025,8 +3094,8 @@ def genCodeRC (sigs : StrMap (List Bool)) : CG → List Doc → List Doc → Lis
             (.t ("static V w_" +++ g +++ "(V *a) { V r = d_" +++ g +++ "(" +++ argList 0 k +++ "); " +++ wrapDecs 0 sig +++ "return r; } " +++
              "static V mk_" +++ g +++ "(void) { return native(w_" +++ g +++ ", " +++ Nat.toString k +++ "); } " +++
              "V get_" +++ g +++ "(void) { static V c = 0; return rt_caf(&c, mk_" +++ g +++ "); }")) defs)) rest
-def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match gs with
-  | .mk all _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => match eraseGlobals .true ffi all .nil .nil (Array.size all) with
+def genProgramRC (lib : Bool) (borrow unbox : Bool) (gs : Globals) : List Doc := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match eraseGlobals .true unbox ffi all .nil .nil (Array.size all) with
     | .err m => .cons (.t ("#error " +++ m)) .nil
     | .ok es0 =>
       let es1 := pushGlobals es0;
@@ -3037,7 +3106,7 @@ def genProgramRC (lib : Bool) (borrow : Bool) (gs : Globals) : List Doc := match
       match genCodeRC sigs (.mk .nil 0 (arities (ffiArities StrMap.empty ffi) es) .idle .nil) .nil .nil es with
       | .mk protos defs st => match st with
         | .mk fns _ _ _ _ =>
-          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true ffi) (List.append protos
+          List.append (linkDocs (List.reverseOf ffi .nil)) (.cons (.t "#define WIZ_RC 1") (.cons (.t "#include \"rt.c\"") (List.append (ffiDocs .true unbox ffi) (List.append protos
             (List.append (List.reverseOf fns .nil) (List.append defs (List.append (exportDocs .true (List.reverseOf ffi .nil))
               (mainDocs lib "int main(int argc, char **argv) { (void)argc; rt_start(argv); dec(ap(get_main(), BOX(0))); rt_finish(); return 0; }"))))))))
 
@@ -3055,11 +3124,11 @@ def wantsRC (text : String) : Bool := match text with
   | .mk cs => match "-- wiz: rc" with
     | .mk ps => charsPrefix ps cs
 -- (`-- wiz: rc-owned`: every parameter owned, no borrowing; for comparisons)
-def genProgramFor (lib : Bool) (text : String) (gs : Globals) : List Doc := match wantsRC text with
+def genProgramFor (lib unbox : Bool) (text : String) (gs : Globals) : List Doc := match wantsRC text with
   | .true => genProgramRC lib (match text with
     | .mk cs => match "-- wiz: rc-owned" with
-      | .mk ps => Bool.not (charsPrefix ps cs)) gs
-  | .false => genProgram lib gs
+      | .mk ps => Bool.not (charsPrefix ps cs)) unbox gs
+  | .false => genProgram lib unbox gs
 -- (stage 21k) the backend the command line asks for: `--rc` (reference counting),
 -- `--rc-owned` (every parameter owned, no borrowing) or `--gc`; without one, the first
 -- line's pragma (`genProgramFor`, kept as a fallback for one release). (Stage 21s)
@@ -3068,15 +3137,18 @@ def genProgramFor (lib : Bool) (text : String) (gs : Globals) : List Doc := matc
 -- `.h`).
 def genProgramArgs (args : List String) (text : String) (gs : Globals) : List Doc :=
   let lib := Bool.or (elemStr "--lib" args) (elemStr "--no-main" args);
+  -- (22i) the representation the flag chooses; off by default (not stable under
+  -- substitution, as in the Lean frontend: `unboxedSigma` in `Compiler/Erase.lean`)
+  let unbox := elemStr "--unbox-structs" args;
   match elemStr "--header" args with
   | .true => headerDocs (Globals.ffi gs)
   | .false => match elemStr "--rc-owned" args with
-  | .true => genProgramRC lib .false gs
+  | .true => genProgramRC lib .false unbox gs
   | .false => match elemStr "--rc" args with
-    | .true => genProgramRC lib .true gs
+    | .true => genProgramRC lib .true unbox gs
     | .false => match elemStr "--gc" args with
-      | .true => genProgram lib gs
-      | .false => genProgramFor lib text gs
+      | .true => genProgram lib unbox gs
+      | .false => genProgramFor lib unbox text gs
 
 -- printing a program: each line's pieces, then a newline
 def printDoc : Doc → IO Unit
@@ -3090,6 +3162,838 @@ def printDocs : List Doc → IO Unit
     printDoc d;
     IO.println "";
     printDocs rest
+
+-- ------------------------------------------------------------------------------------
+-- (C5) The LLVM backend's first slice: `ETm` → the host's IR → the host's LLVM text.
+--
+-- The Lean-hosted `wiz` compiles from the A-normal-form IR of `Wiz/Compiler/IR.lean`
+-- (first-order functions, flat constructors, explicit `dup`/`drop`, closures as
+-- `pap`/`ap`, `case` on a tag), which `Lower.lean` builds from the erased term: lambda
+-- lifting, A-normalisation and join points; `RC.lean`/`Borrow.lean`/`Reuse.lean` refine
+-- it, and `Wiz/Compiler/LLVM.lean` prints it as textual LLVM. The self-hosted frontend
+-- erases to `ETm` (above) and compiles that straight to C (`cgE`), so the IR has to be
+-- built here first. This section ports the path's first slice:
+--
+-- * `lowerE` builds `IRDecl`s from an erased `ETm`, in A-normal form with a `ret`;
+-- * `lbElimDead` is the dead-binding pass of `Reuse.lean`;
+-- * `irExText`/`irBodyText`/`irDeclText`/`llvmProgram` are `LLVM.lean`'s
+--   `expr`/`body`/`decl`/`program`, so a function prints exactly as the host prints it.
+--
+-- **The subset.** Skipping ownership (`RC.lean`'s `dup`/`drop`, `Borrow.lean`) means the
+-- emitted program must not allocate, and it does not: `lowerE` accepts exactly the
+-- closed `Nat` arithmetic that constant folding (`Simp.lean`) reduces to a literal —
+-- `Nat.zero`, `Nat.succ`, `Nat.add`, `Nat.sub`, `Nat.mul`, `Nat.beq`, `Nat.blt` on
+-- numerals, and the `Bool` they return as a nullary constructor (`ctor` without fields is
+-- a scalar tag). A numeral in argument position becomes one `lit`, as the host's
+-- frontend gives `Lower.lean` a `natLit`, so the variable numbers agree with the host's
+-- output. Anything that could allocate or needs the runtime is one explicit error: a
+-- `ctor` with fields, `pap`/`ap`, `proj`, `case`, `λ`, `reset`/`reuse`, an erased
+-- `ind`/`pack`/`unpack` primitive (`PrimCode.lean` walks objects), and any `prim` that
+-- does not fold (the runtime's `wiz_nat_add` builds a big number past 2^62). A `fap`
+-- between two lowered functions stays in the subset, so `main` may call a *parameterized*
+-- function whose body also lowers; a zero-parameter definition may be a CAF (the host
+-- caches it in a slot through `wiz_caf_init`), so only the entry itself is lowered.
+--
+-- The next slice needs the ownership passes before constructors, closures and arithmetic
+-- on a variable can be emitted: those allocate, so every reference has to be counted
+-- (`dup`/`drop`) and borrows inferred, which is `RC.lean`/`Borrow.lean` again.
+--
+-- The module prints `main`'s value itself, decoding the IR's scalar encoding `2n+1`, as
+-- the previous slice did: the host prints through `wiz_finish`/`#run`, the runtime's
+-- result protocol, which the self-hosted compiler does not carry yet (C5's third
+-- blocker, after ownership).
+
+inductive LLVMR where
+  | ok (text : String)
+  | err (msg : String)
+
+-- The host's IR (`Wiz/Compiler/IR.lean`), with `List` for the host's `Array`. A
+-- constructor's branches are `IRBs` (a recursive occurrence cannot be under `List`).
+mutual
+inductive IREx where
+  | erased
+  | lit (n : Nat)
+  | ctor (tag : Nat) (args : List Nat)
+  | proj (i : Nat) (x : Nat)
+  | fap (f : String) (args : List Nat)
+  | pap (f : String) (args : List Nat)
+  | ap (f : Nat) (args : List Nat)
+  | prim (op : String) (args : List Nat)
+  | reset (x : Nat)
+  | reuse (tok : Nat) (tag : Nat) (args : List Nat)
+inductive IRB where
+  | vdecl (x : Nat) (e : IREx) (b : IRB)
+  | case (x : Nat) (alts : IRBs)
+  | ret (x : Nat)
+  | jdecl (j : Nat) (params : List Nat) (body : IRB) (k : IRB)
+  | jmp (j : Nat) (args : List Nat)
+  | dupB (x : Nat) (b : IRB)
+  | dropB (x : Nat) (b : IRB)
+  | unreachable
+inductive IRBs where
+  | nil
+  | cons (b : IRB) (rest : IRBs)
+end
+
+def irbsAppend : IRBs → IRBs → IRBs
+  | .nil, ys => ys
+  | .cons b rest, ys => .cons b (irbsAppend rest ys)
+
+inductive IRDecl where
+  | mk (name : String) (params : List Nat) (body : IRB)
+
+def irExArgs : IREx → List Nat
+  | .erased => .nil
+  | .lit _ => .nil
+  | .ctor _ as => as
+  | .proj _ x => .cons x .nil
+  | .fap _ as => as
+  | .pap _ as => as
+  | .ap f as => .cons f as
+  | .prim _ as => as
+  | .reset x => .cons x .nil
+  | .reuse tok _ as => .cons tok as
+
+-- The registered `Nat` operations the slice lowers (`natives` in `Lower.lean`). The
+-- frontend's globals are `Nat.add`-style names; the IR's are `nat.add`-style keys.
+def irNatOp (g : String) : Option String :=
+  match strEq g "Nat.zero" with
+  | .true => .some "nat.zero"
+  | .false => match strEq g "Nat.succ" with
+    | .true => .some "nat.succ"
+    | .false => match strEq g "Nat.pred" with
+      | .true => .some "nat.pred"
+      | .false => match strEq g "Nat.add" with
+        | .true => .some "nat.add"
+        | .false => match strEq g "Nat.sub" with
+          | .true => .some "nat.sub"
+          | .false => match strEq g "Nat.mul" with
+            | .true => .some "nat.mul"
+            | .false => match strEq g "Nat.beq" with
+              | .true => .some "nat.beq"
+              | .false => match strEq g "Nat.blt" with
+                | .true => .some "nat.blt"
+                | .false => .none
+
+def irOpArity (op : String) : Nat := match strEq op "nat.zero" with
+  | .true => 0
+  | .false => match strEq op "nat.succ" with
+    | .true => 1
+    | .false => match strEq op "nat.pred" with
+      | .true => 1
+      | .false => 2
+
+-- A closed numeral as the frontend builds it: `Nat.zero`, `Nat.succ`, and the binary
+-- `Nat.mul`/`Nat.add` of stage 19f (no wrapping: `natConst`'s word arithmetic is the C
+-- backend's; a numeral here is only accepted while it is a scalar, below 2^62).
+partial def numeralOf (t : ETm) : Option Nat := match t with
+  | .nat n => .some n
+  | .glob g => match strEq g "Nat.zero" with
+    | .true => .some 0
+    | .false => .none
+  | .app f a => match f with
+    | .glob g => match strEq g "Nat.succ" with
+      | .true => match numeralOf a with
+        | .some n => .some (n + 1)
+        | .none => .none
+      | .false => .none
+    | .app h x => match h with
+      | .glob g => match Bool.or (strEq g "Nat.add") (strEq g "Nat.mul") with
+        | .true => match numeralOf x with
+          | .some m => match numeralOf a with
+            | .some n => .some (match strEq g "Nat.mul" with
+              | .true => m * n
+              | .false => m + n)
+            | .none => .none
+          | .none => .none
+        | .false => .none
+      | _ => .none
+    | _ => .none
+  | _ => .none
+
+-- 2^62: a larger literal is a big-number object in the host's LLVM backend
+-- (`wiz_nat_lit`), i.e. an allocation.
+def irScalarLimit : Nat := 4611686018427387904
+
+-- The erased definition of a global, if it has one (natives and axioms have none).
+def llvmEntry : String → List Erased → Option ETm
+  | _, .nil => .none
+  | n, .cons (.mk m e) rest => match strEq n m with
+    | .true => .some e
+    | .false => llvmEntry n rest
+
+def irArityIn (es : List Erased) (g : String) : Option Nat := match llvmEntry g es with
+  | .some e => .some (lamsOf e)
+  | .none => .none
+
+def lstNat : List Nat → Nat → Option Nat
+  | .nil, _ => .none
+  | .cons x rest, i => match i with
+    | .zero => .some x
+    | .succ j => lstNat rest j
+
+-- ------------------------------------------------------------------------------------
+-- Lowering: `ETm` → `IRDecl` (A-normal form; `Lower.lean`'s `lower` without the λs)
+
+inductive LB where
+  | mk (next : Nat) (binds : List (Nat × IREx)) (lits : List (Nat × Nat))
+
+def lbFresh (st : LB) : Nat × LB := match st with
+  | .mk n bs ls => (n, .mk (n + 1) bs ls)
+
+def lbEmit (st : LB) (x : Nat) (e : IREx) : LB := match st with
+  | .mk n bs ls => .mk n (.cons (x, e) bs) (match e with
+    | .lit v => .cons (x, v) ls
+    | _ => ls)
+
+def lbLitGo (x : Nat) : List (Nat × Nat) → Option Nat
+  | .nil => .none
+  | .cons p rest => match Nat.beq x p.1 with
+    | .true => .some p.2
+    | .false => lbLitGo x rest
+
+def lbLit (st : LB) (x : Nat) : Option Nat := match st with
+  | .mk _ _ ls => lbLitGo x ls
+
+def lbLitsOf (st : LB) (xs : List Nat) : Option (List Nat) := match xs with
+  | .nil => .some .nil
+  | .cons x rest => match lbLit st x with
+    | .none => .none
+    | .some v => match lbLitsOf st rest with
+      | .none => .none
+      | .some vs => .some (.cons v vs)
+
+-- `Simp.lean`'s `foldNat`, for the slice's operations. `Nat.sub` truncates, as the
+-- prelude's does; `Nat.beq`/`Nat.blt` are the nullary `Bool` constructors (tags 0/1).
+def irFoldOp (op : String) (ns : List Nat) : Option IREx := match ns with
+  | .cons a .nil => match strEq op "nat.succ" with
+    | .true => .some (.lit (a + 1))
+    | .false => match strEq op "nat.pred" with
+      | .true => .some (.lit (a - 1))
+      | .false => .none
+  | .cons a (.cons b .nil) => match strEq op "nat.add" with
+    | .true => .some (.lit (a + b))
+    | .false => match strEq op "nat.sub" with
+      | .true => .some (.lit (a - b))
+      | .false => match strEq op "nat.mul" with
+        | .true => .some (.lit (a * b))
+        | .false => match strEq op "nat.beq" with
+          | .true => .some (.ctor (match Nat.beq a b with
+              | .true => 1
+              | .false => 0) .nil)
+          | .false => match strEq op "nat.blt" with
+            | .true => .some (.ctor (match Nat.lt a b with
+                | .true => 1
+                | .false => 0) .nil)
+            | .false => .none
+  | _ => .none
+
+inductive LRes where
+  | ok (x : Nat) (st : LB)
+  | err (msg : String)
+
+inductive LArgs where
+  | ok (xs : List Nat) (st : LB)
+  | err (msg : String)
+
+inductive LDecl where
+  | ok (d : IRDecl)
+  | err (msg : String)
+
+def irSliceErr : String → String := fun m =>
+  "the LLVM backend's first slice (C5) " +++ m
+
+-- A native operation on literals: fold it (`Simp.lean`), or refuse. A surviving `prim`
+-- would be a call into the runtime, whose arithmetic may allocate a big number.
+def lowerPrim (st : LB) (op : String) (xs : List Nat) : LRes :=
+  let p := lbFresh st;
+  match lbLitsOf p.2 xs with
+  | .some ns => match irFoldOp op ns with
+    | .some ex => .ok p.1 (lbEmit p.2 p.1 ex)
+    | .none => .err (irSliceErr ("cannot fold `" +++ op +++ "` (the slice folds nat.succ, nat.pred, nat.add, nat.sub, nat.mul, nat.beq and nat.blt)"))
+  | .none => .err (irSliceErr ("applies `" +++ op +++ "` to a value that is not a literal: the runtime's arithmetic (`wiz_nat_…`) may allocate a big number, so it needs reference counting"))
+
+mutual
+
+-- Lower `e` to one value variable (the bindings accumulate in `st`).
+def lowerE (es : List Erased) (st : LB) (env : List Nat) (e : ETm) : LRes := match e with
+  | .erased => let p := lbFresh st; .ok p.1 (lbEmit p.2 p.1 .erased)
+  | .nat n => match Nat.lt n irScalarLimit with
+    | .true => let p := lbFresh st; .ok p.1 (lbEmit p.2 p.1 (.lit n))
+    | .false => .err (irSliceErr ("has a numeral of " +++ Nat.toString n +++ ", a big-number object at runtime: it needs reference counting"))
+  | .var i => match lstNat env i with
+    | .some x => .ok x st
+    | .none => .err (irSliceErr "lowered an unbound variable")
+  | .glob g => lowerGlobal es st g
+  | .lam _ => .err (irSliceErr "needs λ-lifting and closure conversion (`Lower.lean`), which this slice does not build")
+  | .app _ _ => lowerApp es st env e
+  | .letE v b => match lowerE es st env v with
+    | .err m => .err m
+    | .ok x st1 => lowerE es st1 (.cons x env) b
+  | .obj k fs => match fs with
+    | .nil => let p := lbFresh st; .ok p.1 (lbEmit p.2 p.1 (.ctor k .nil))
+    | .cons _ _ => .err (irSliceErr "has an object with fields (`ctor` with arguments): it allocates, so it needs reference counting")
+  | .proj _ _ => .err (irSliceErr "has a projection: it is a runtime call (`wiz_proj`) on an object, which needs reference counting")
+  | .case _ _ => .err (irSliceErr "has a `case`: it needs the host's A-normalisation (join points) and reference counting")
+  | .prim op _ => .err (irSliceErr ("has the erased primitive `" +++ op +++ "`, which walks a description (objects): `PrimCode.lean` and reference counting"))
+
+-- A global used as a value.
+def lowerGlobal (es : List Erased) (st : LB) (g : String) : LRes :=
+  match irNatOp g with
+  | .some op => match irOpArity op with
+    | .zero => let p := lbFresh st; .ok p.1 (lbEmit p.2 p.1 (.lit 0))
+    | _ => .err (irSliceErr ("uses the native `" +++ g +++ "` as a value: that is a closure (`wiz.native.…` via `pap`), which this slice does not build"))
+  | .none => match irArityIn es g with
+    | .some k => match k with
+      | .zero => let p := lbFresh st; .ok p.1 (lbEmit p.2 p.1 (.fap g .nil))
+      | .succ _ => .err (irSliceErr ("uses the function `" +++ g +++ "` as a value: that is a closure (`pap`), which this slice does not build"))
+    | .none => .err (irSliceErr ("refers to `" +++ g +++ "`, which has no definition here (a foreign function or an axiom): its call needs the runtime"))
+
+-- The arguments of an application, left to right. A closed numeral is one `lit`, as
+-- the host's frontend gives `Lower.lean` a `natLit` (so the variable numbers agree).
+def lowerArgs (es : List Erased) (st : LB) (env : List Nat) (args : List ETm) : LArgs := match args with
+  | .nil => .ok .nil st
+  | .cons a rest => match numeralOf a with
+    | .some n => match Nat.lt n irScalarLimit with
+      | .false => .err (irSliceErr ("has a numeral of " +++ Nat.toString n +++ " in argument position: a big-number object at runtime"))
+      | .true => let p := lbFresh st; match lowerArgs es (lbEmit p.2 p.1 (.lit n)) env rest with
+        | .err m => .err m
+        | .ok xs st2 => .ok (.cons p.1 xs) st2
+    | .none => match lowerE es st env a with
+      | .err m => .err m
+      | .ok x st1 => match lowerArgs es st1 env rest with
+        | .err m => .err m
+        | .ok xs st2 => .ok (.cons x xs) st2
+
+-- An application: a native operation, or a full call of a known function.
+def lowerApp (es : List Erased) (st : LB) (env : List Nat) (e : ETm) : LRes := match spineE e .nil with
+  | .mk h args => match h with
+    | .glob g => match irNatOp g with
+      | .some op => match lowerArgs es st env args with
+        | .err m => .err m
+        | .ok xs st1 => match Nat.beq (lenL xs) (irOpArity op) with
+          | .true => lowerPrim st1 op xs
+          | .false => .err (irSliceErr ("applies `" +++ g +++ "` to " +++ Nat.toString (lenL xs) +++ " arguments; its arity is " +++ Nat.toString (irOpArity op) +++ " (a partial application is a closure)"))
+      | .none => match irArityIn es g with
+        | .some k => match lowerArgs es st env args with
+          | .err m => .err m
+          | .ok xs st1 => match Nat.beq (lenL xs) k with
+            | .true => let p := lbFresh st1; .ok p.1 (lbEmit p.2 p.1 (.fap g xs))
+            | .false => .err (irSliceErr ("applies `" +++ g +++ "` to " +++ Nat.toString (lenL xs) +++ " arguments; its arity is " +++ Nat.toString k +++ " (a partial or over-application is a closure)"))
+        | .none => .err (irSliceErr ("calls `" +++ g +++ "`, which has no definition here (a foreign function or an axiom): it needs the runtime"))
+    | _ => .err (irSliceErr "applies a value (a closure, `ap`): that needs closure conversion and reference counting")
+
+end
+
+-- The parameters of a decl: `[0, 1, …, k-1]`; the environment is innermost-first.
+def lbRange : Nat → List Nat
+  | .zero => .nil
+  | .succ j => .cons j (lbRange j)
+
+def lbBinds : List (Nat × IREx) → IRB → IRB
+  | .nil, acc => acc
+  | .cons p rest, acc => lbBinds rest (.vdecl p.1 p.2 acc)
+
+def lbBodyOf (st : LB) (x : Nat) : IRB := match st with
+  | .mk _ bs _ => lbBinds (List.reverseOf bs .nil) (.ret x)
+
+-- ------------------------------------------------------------------------------------
+-- `Reuse.lean`'s `elimDead` (the bindings the constant folding left unused)
+
+def irPure : IREx → Bool
+  | .erased => .true
+  | .lit _ => .true
+  | .ctor _ _ => .true
+  | .proj _ _ => .true
+  | .pap _ _ => .true
+  | .prim op _ => match strEq op "natTag" with
+    | .true => .true
+    | .false => match strEq op "tag" with
+      | .true => .true
+      | .false => match dropPrefix (strChars "nat.") (strChars op) with
+        | .some _ => .true
+        | .none => .false
+  | _ => .false
+
+def fvDel (x : Nat) : List Nat → List Nat
+  | .nil => .nil
+  | .cons y ys => match Nat.beq x y with
+    | .true => fvDel x ys
+    | .false => .cons y (fvDel x ys)
+
+def fvAddAll : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x rest, acc => fvAddAll rest (addVar x acc)
+
+def fvDelAll : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x rest, acc => fvDelAll rest (fvDel x acc)
+
+inductive LDead where
+  | mk (body : IRB) (fv : List Nat)
+
+inductive LDeadEs where
+  | mk (alts : IRBs) (fv : List Nat)
+
+mutual
+
+partial def irFV : IRB → List Nat
+  | .vdecl x e b => fvAddAll (irExArgs e) (fvDel x (irFV b))
+  | .case x alts => addVar x (irFVEs alts)
+  | .ret x => .cons x .nil
+  | .jdecl _ ps body k => fvAddAll (irFV k) (fvDelAll ps (irFV body))
+  | .jmp _ as => as
+  | .dupB x b => addVar x (irFV b)
+  | .dropB x b => addVar x (irFV b)
+  | .unreachable => .nil
+
+partial def irFVEs : IRBs → List Nat
+  | .nil => .nil
+  | .cons b rest => fvAddAll (irFV b) (irFVEs rest)
+
+partial def lbElimDead : IRB → LDead
+  | .vdecl x e rest => match lbElimDead rest with
+    | .mk rest' fv => match Bool.and (irPure e) (Bool.not (elemNat x fv)) with
+      | .true => .mk rest' fv
+      | .false => .mk (.vdecl x e rest') (fvAddAll (irExArgs e) (fvDel x fv))
+  | .case x alts => match lbElimDeadEs alts with
+    | .mk alts' fv => .mk (.case x alts') (addVar x fv)
+  | .ret x => .mk (.ret x) (.cons x .nil)
+  | .jdecl j ps body k => match lbElimDead body with
+    | .mk body' fb => match lbElimDead k with
+      | .mk k' fk => .mk (.jdecl j ps body' k') (fvAddAll fk (fvDelAll ps fb))
+  | .jmp j as => .mk (.jmp j as) as
+  | .dupB x b => match lbElimDead b with
+    | .mk b' fv => .mk (.dupB x b') (addVar x fv)
+  | .dropB x b => match lbElimDead b with
+    | .mk b' fv => .mk (.dropB x b') (addVar x fv)
+  | .unreachable => .mk .unreachable .nil
+
+partial def lbElimDeadEs : IRBs → LDeadEs
+  | .nil => .mk .nil .nil
+  | .cons b rest => match lbElimDead b with
+    | .mk b' fb => match lbElimDeadEs rest with
+      | .mk rest' fr => .mk (.cons b' rest') (fvAddAll fb fr)
+
+end
+
+def lowerDeclAt (es : List Erased) (n : String) (k : Nat) (e : ETm) : LDecl :=
+  match lowerE es (.mk k .nil .nil) (lbRange k) (underLams k e) with
+  | .err m => .err (n +++ ": " +++ m)
+  | .ok x st => match lbElimDead (lbBodyOf st x) with
+    | .mk b _ => .ok (.mk n (List.reverseOf (lbRange k) .nil) b)
+
+def lowerDecl (es : List Erased) (n : String) : LDecl := match llvmEntry n es with
+  | .none => .err (irSliceErr ("has no erased definition for `" +++ n +++ "`"))
+  | .some e => match lamsOf e with
+    -- (a zero-parameter definition may be a CAF: the host decides with `IR.cafs` and
+    -- caches it in a slot built by `wiz_caf_init`; the slice does not decide that and
+    -- carries no runtime, so only the entry itself is lowered)
+    | .zero => match strEq n "main" with
+      | .true => lowerDeclAt es n .zero e
+      | .false => .err (irSliceErr ("refers to the closed definition `" +++ n +++ "`: a zero-parameter definition may be a CAF, which the host caches through the runtime (`wiz_caf_init`), so the slice lowers only the entry"))
+    | .succ k => lowerDeclAt es n (.succ k) e
+
+-- ------------------------------------------------------------------------------------
+-- `LLVM.lean`'s emitter: `expr`, `body`, `decl`, `program`
+
+inductive LS where
+  | mk (lines : List String) (next : Nat) (joins : List (Nat × List Nat))
+
+def lsLines : LS → List String
+  | .mk ls _ _ => ls
+
+def lsEmit (st : LS) (line : String) : LS := match st with
+  | .mk ls n js => .mk (.cons line ls) n js
+
+def lsFresh (st : LS) (base : String) : String × LS := match st with
+  | .mk ls n js => ("%" +++ base +++ "." +++ Nat.toString n, .mk ls (n + 1) js)
+
+def lsJoinAdd (st : LS) (j : Nat) (ps : List Nat) : LS := match st with
+  | .mk ls n js => .mk ls n (.cons (j, ps) js)
+
+def lsJoinGo (j : Nat) : List (Nat × List Nat) → List Nat
+  | .nil => .nil
+  | .cons p rest => match Nat.beq j p.1 with
+    | .true => p.2
+    | .false => lsJoinGo j rest
+
+def lsJoin (st : LS) (j : Nat) : List Nat := match st with
+  | .mk _ _ js => lsJoinGo j js
+
+-- The C `mangle` of `C.lean`: `w_` and each non-alphanumeric character as `_hex_`.
+def irHexDigit (n : Nat) : Char := match Nat.lt n 10 with
+  | .true => Char.mk (48 + n)
+  | .false => Char.mk (87 + n)
+
+partial def irHexChars (n : Nat) : List Char := match Nat.lt n 16 with
+  | .true => .cons (irHexDigit n) .nil
+  | .false => List.append (irHexChars (Nat.div n 16)) (.cons (irHexDigit (Nat.mod n 16)) .nil)
+
+def llvmNameChars : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => let k := Char.code c;
+    match Bool.or (Bool.or (between k 48 57) (between k 65 90)) (between k 97 122) with
+    | .true => .cons c (llvmNameChars cs)
+    | .false => List.append (.cons (Char.mk 95) (List.append (irHexChars k) (.cons (Char.mk 95) .nil))) (llvmNameChars cs)
+
+def llvmMangle (n : String) : String := "w_" +++ (match n with
+  | .mk cs => String.mk (llvmNameChars cs))
+
+def fnName (n : String) : String := "@" +++ llvmMangle n
+
+def lsValGo (x : Nat) : List (Nat × String) → String
+  | .nil => "%x" +++ Nat.toString x
+  | .cons p rest => match Nat.beq x p.1 with
+    | .true => p.2
+    | .false => lsValGo x rest
+
+def lsVal (env : List (Nat × String)) (x : Nat) : String := lsValGo x env
+
+inductive LBind where
+  | mk (env : List (Nat × String)) (name : String) (st : LS)
+
+def lsBind (st : LS) (env : List (Nat × String)) (x : Nat) : LBind :=
+  let p := lsFresh st ("x" +++ Nat.toString x);
+  .mk (.cons (x, p.1) env) p.1 p.2
+
+def irCommaJoin : List String → String
+  | .nil => ""
+  | .cons x rest => match rest with
+    | .nil => x
+    | .cons _ _ => x +++ ", " +++ irCommaJoin rest
+
+def irValueArgsGo (env : List (Nat × String)) (xs : List Nat) : List String := match xs with
+  | .nil => .nil
+  | .cons x rest => .cons ("i64 " +++ lsVal env x) (irValueArgsGo env rest)
+
+def irValueArgs (env : List (Nat × String)) (xs : List Nat) : String :=
+  irCommaJoin (irValueArgsGo env xs)
+
+inductive LArr where
+  | mk (arr : String) (st : LS)
+
+def irArrayGo (env : List (Nat × String)) (xs : List Nat) (i : Nat) (n : Nat) (arr : String) (st : LS) : LS := match xs with
+  | .nil => st
+  | .cons x rest => let q := lsFresh st "p";
+    let p := q.1; let st1 := q.2;
+    irArrayGo env rest (i + 1) n arr (lsEmit (lsEmit st1
+      ("  " +++ p +++ " = getelementptr [" +++ Nat.toString n +++ " x i64], ptr " +++ arr +++ ", i64 0, i64 " +++ Nat.toString i))
+      ("  store i64 " +++ lsVal env x +++ ", ptr " +++ p))
+
+def irArray (env : List (Nat × String)) (xs : List Nat) (st : LS) : LArr := match xs with
+  | .nil => .mk "null" st
+  | .cons _ _ => let q := lsFresh st "arr";
+    let arr := q.1; let st1 := q.2;
+    .mk arr (irArrayGo env xs 0 (lenL xs) arr
+      (lsEmit st1 ("  " +++ arr +++ " = alloca [" +++ Nat.toString (lenL xs) +++ " x i64]")))
+
+def llvmPrim (op : String) : String :=
+  match strEq op "nat.succ" with
+  | .true => "wiz_nat_succ"
+  | .false => match strEq op "nat.pred" with
+    | .true => "wiz_nat_pred"
+    | .false => match strEq op "nat.add" with
+      | .true => "wiz_nat_add"
+      | .false => match strEq op "nat.sub" with
+        | .true => "wiz_nat_sub"
+        | .false => match strEq op "nat.mul" with
+          | .true => "wiz_nat_mul"
+          | .false => match strEq op "nat.beq" with
+            | .true => "wiz_nat_beq"
+            | .false => match strEq op "nat.blt" with
+              | .true => "wiz_nat_blt"
+              | .false => match strEq op "lazyTag" with
+                | .true => "wiz_lazy_tag"
+                | .false => match strEq op "lazySet" with
+                  | .true => "wiz_lazy_set"
+                  | .false => match strEq op "memo" with
+                    | .true => "wiz_memo"
+                    | .false => match strEq op "tag" with
+                      | .true => "wiz_tag_of"
+                      | .false => match strEq op "natTag" with
+                        | .true => "wiz_nat_tag"
+                        | .false => match strEq op "fieldAt" with
+                          | .true => "wiz_field_at"
+                          | .false => match strEq op "mkObj" with
+                            | .true => "wiz_mk_obj"
+                            | .false => match strEq op "dropMoved" with
+                              | .true => "wiz_drop_moved"
+                              | .false => match dropPrefix (strChars "nat.") (strChars op) with
+                                | .some rest => "wiz_nat_" +++ String.mk rest
+                                | .none => "wiz_unknown_prim"
+
+def irArityOf : List (String × Nat) → String → Nat
+  | .nil, _ => 0
+  | .cons p rest, g => match strEq p.1 g with
+    | .true => p.2
+    | .false => irArityOf rest g
+
+-- `ctor`/`reuse` write each field after the allocation.
+def irCtorSets (x : String) (env : List (Nat × String)) (as : List Nat) (i : Nat) (st : LS) : LS := match as with
+  | .nil => st
+  | .cons a rest => irCtorSets x env rest (i + 1) (lsEmit st
+      ("  call void @wiz_set(i64 " +++ x +++ ", i32 " +++ Nat.toString i +++ ", i64 " +++ lsVal env a +++ ")"))
+
+def irExText (ar : List (String × Nat)) (env : List (Nat × String)) (st : LS) (x : String) (e : IREx) : LS := match e with
+  | .erased => lsEmit st ("  " +++ x +++ " = add i64 0, 1")
+  | .lit n => lsEmit st ("  " +++ x +++ " = add i64 0, " +++ Nat.toString (2 * n + 1))
+  | .ctor t as => match as with
+    | .nil => lsEmit st ("  " +++ x +++ " = add i64 0, " +++ Nat.toString (2 * t + 1))
+    | .cons _ _ => irCtorSets x env as 0 (lsEmit st
+        ("  " +++ x +++ " = call i64 @wiz_ctor_new(i32 " +++ Nat.toString t +++ ", i32 " +++ Nat.toString (lenL as) +++ ")"))
+  | .proj i y => lsEmit st ("  " +++ x +++ " = call i64 @wiz_proj(i64 " +++ lsVal env y +++ ", i32 " +++ Nat.toString i +++ ")")
+  | .fap f as => lsEmit st ("  " +++ x +++ " = call i64 " +++ fnName f +++ "(" +++ irValueArgs env as +++ ")")
+  | .pap f as => match irArray env as st with
+    | .mk arr st1 => lsEmit st1 ("  " +++ x +++ " = call i64 @wiz_clo_new(ptr " +++ fnName f +++ "_boxed, i32 " +++ Nat.toString (irArityOf ar f) +++ ", i32 " +++ Nat.toString (lenL as) +++ ", ptr " +++ arr +++ ")")
+  | .ap f as => match irArray env as st with
+    | .mk arr st1 => lsEmit st1 ("  " +++ x +++ " = call i64 @wiz_apply(i64 " +++ lsVal env f +++ ", i32 " +++ Nat.toString (lenL as) +++ ", ptr " +++ arr +++ ")")
+  | .prim op as => lsEmit st ("  " +++ x +++ " = call i64 @" +++ llvmPrim op +++ "(" +++ irValueArgs env as +++ ")")
+  | .reset y => lsEmit st ("  " +++ x +++ " = call i64 @wiz_reset(i64 " +++ lsVal env y +++ ")")
+  | .reuse tok t as => irCtorSets x env as 0 (lsEmit st
+      ("  " +++ x +++ " = call i64 @wiz_reuse(i64 " +++ lsVal env tok +++ ", i32 " +++ Nat.toString t +++ ", i32 " +++ Nat.toString (lenL as) +++ ")"))
+
+def irNoPct (s : String) : String := match s with
+  | .mk (.cons _ cs) => String.mk cs
+  | _ => s
+
+inductive LLabels where
+  | mk (labels : List String) (st : LS)
+
+def irLabelsGo (alts : IRBs) (labels : List String) (st : LS) : LLabels := match alts with
+  | .nil => .mk (List.reverseOf labels .nil) st
+  | .cons _ rest => let q := lsFresh st "case";
+    let l := q.1; let st1 := q.2;
+    irLabelsGo rest (.cons l labels) st1
+
+def irSwitchCases : List String → Nat → List String
+  | .nil, _ => .nil
+  | .cons l rest, i => .cons ("i32 " +++ Nat.toString i +++ ", label " +++ l) (irSwitchCases rest (i + 1))
+
+def irSwitchSpaced : List String → String
+  | .nil => ""
+  | .cons x rest => match rest with
+    | .nil => x
+    | .cons _ _ => x +++ " " +++ irSwitchSpaced rest
+
+def irJmpStores (ps : List Nat) (as : List Nat) (env : List (Nat × String)) (st : LS) : LS := match ps with
+  | .nil => st
+  | .cons p rest => match as with
+    | .nil => st
+    | .cons a more => irJmpStores rest more env (lsEmit st
+        ("  store i64 " +++ lsVal env a +++ ", ptr %jp" +++ Nat.toString p))
+
+def irLoadParams (ps : List Nat) (env : List (Nat × String)) (st : LS) : LBind := match ps with
+  | .nil => .mk env "" st
+  | .cons p rest => match lsBind st env p with
+    | .mk env1 name st1 => irLoadParams rest env1 (lsEmit st1
+        ("  " +++ name +++ " = load i64, ptr %jp" +++ Nat.toString p))
+
+mutual
+
+partial def irCaseGo (ar : List (String × Nat)) (env : List (Nat × String)) (alts : IRBs) (labels : List String) (dflt : String) (st : LS) : LS := match alts with
+  | .nil => lsEmit (lsEmit (lsEmit st (dflt +++ ":")) "  call void @wiz_unreachable()") "  unreachable"
+  | .cons a rest => match labels with
+    | .nil => st
+    | .cons l ls => irCaseGo ar env rest ls dflt (irBodyText ar env a (lsEmit st (irNoPct l +++ ":")))
+
+partial def irBodyText (ar : List (String × Nat)) (env : List (Nat × String)) (b : IRB) (st : LS) : LS := match b with
+  | .vdecl x e rest => match lsBind st env x with
+    | .mk env1 name st1 => irBodyText ar env1 rest (irExText ar env1 st1 name e)
+  | .case x alts => let qt := lsFresh st "tag";
+    let t := qt.1; let st1 := qt.2;
+    let qd := lsFresh st1 "default";
+    let dflt := qd.1; let st2 := qd.2;
+    match irLabelsGo alts .nil st2 with
+    | .mk labels st3 =>
+      let sw := "  " +++ t +++ " = call i32 @wiz_tag(i64 " +++ lsVal env x +++ ")"
+      let br := "  switch i32 " +++ t +++ ", label " +++ dflt +++ " [ "
+        +++ irSwitchSpaced (irSwitchCases labels 0) +++ " ]"
+      irCaseGo ar env alts labels dflt (lsEmit (lsEmit st3 sw) br)
+  | .ret x => lsEmit st ("  ret i64 " +++ lsVal env x)
+  | .jdecl j ps body k => match irBodyText ar env k (lsJoinAdd st j ps) with
+    | st1 => match irLoadParams ps .nil (lsEmit st1 ("j" +++ Nat.toString j +++ ":")) with
+      | .mk env2 _ st2 => irBodyText ar env2 body st2
+  | .jmp j as => lsEmit (irJmpStores (lsJoin st j) as env st) ("  br label %j" +++ Nat.toString j)
+  | .dupB x rest => irBodyText ar env rest (lsEmit st ("  call void @wiz_inc(i64 " +++ lsVal env x +++ ")"))
+  | .dropB x rest => irBodyText ar env rest (lsEmit st ("  call void @wiz_dec(i64 " +++ lsVal env x +++ ")"))
+  | .unreachable => lsEmit (lsEmit st "  call void @wiz_unreachable()") "  unreachable"
+
+end
+
+mutual
+
+partial def irJoinParams : IRB → List Nat
+  | .vdecl _ _ b => irJoinParams b
+  | .dupB _ b => irJoinParams b
+  | .dropB _ b => irJoinParams b
+  | .case _ alts => irJoinParamsEs alts
+  | .jdecl _ ps jb k => List.append ps (List.append (irJoinParams jb) (irJoinParams k))
+  | _ => .nil
+
+partial def irJoinParamsEs : IRBs → List Nat
+  | .nil => .nil
+  | .cons b rest => List.append (irJoinParams b) (irJoinParamsEs rest)
+
+end
+
+def irAllocas (ps : List Nat) (st : LS) : LS := match ps with
+  | .nil => st
+  | .cons p rest => irAllocas rest (lsEmit st ("  %jp" +++ Nat.toString p +++ " = alloca i64"))
+
+def irParamsText : List Nat → String
+  | .nil => ""
+  | .cons p rest => match rest with
+    | .nil => "i64 %x" +++ Nat.toString p
+    | .cons _ _ => "i64 %x" +++ Nat.toString p +++ ", " +++ irParamsText rest
+
+def irParamsCount : List Nat → Nat
+  | .nil => 0
+  | .cons _ rest => irParamsCount rest + 1
+
+def irBoxedArgs : List Nat → Nat → List String
+  | .nil, _ => .nil
+  | .cons _ rest, i => .cons ("i64 %a" +++ Nat.toString i) (irBoxedArgs rest (i + 1))
+
+def irBoxedLoads : Nat → List String
+  | .zero => .nil
+  | .succ k => List.append (irBoxedLoads k) (.cons
+      ("  %p" +++ Nat.toString k +++ " = getelementptr i64, ptr %a, i64 " +++ Nat.toString k)
+      (.cons ("  %a" +++ Nat.toString k +++ " = load i64, ptr %p" +++ Nat.toString k) .nil))
+
+def irDeclText (ar : List (String × Nat)) (d : IRDecl) : List String := match d with
+  | .mk name params body =>
+    let ps := irJoinParams body;
+    let st := irBodyText ar .nil body (irAllocas ps (.mk .nil 0 .nil));
+    let bodyLines := List.reverseOf (lsLines st) .nil;
+    let loads := irBoxedLoads (irParamsCount params);
+    let loadLines : List String := match loads with
+      | .nil => .cons "" .nil
+      | _ => loads;
+    List.append
+      (.cons ("define internal i64 " +++ fnName name +++ "(" +++ irParamsText params +++ ") {")
+        (.cons "entry:" (List.append bodyLines (.cons "}" .nil))))
+      (.cons ("define internal i64 " +++ fnName name +++ "_boxed(ptr %a) {")
+        (List.append loadLines (.cons
+          ("  %r = call i64 " +++ fnName name +++ "(" +++ irCommaJoin (irBoxedArgs params 0) +++ ")")
+          (.cons "  ret i64 %r" (.cons "}" .nil)))))
+
+def irDeclName : IRDecl → String
+  | .mk name _ _ => name
+
+def irDeclArity : IRDecl → Nat
+  | .mk _ params _ => irParamsCount params
+
+def irArities : List IRDecl → List (String × Nat)
+  | .nil => .nil
+  | .cons d rest => .cons (irDeclName d, irDeclArity d) (irArities rest)
+
+def irDeclTexts (ar : List (String × Nat)) (ds : List IRDecl) : List String := match ds with
+  | .nil => .nil
+  | .cons d rest => List.append (irDeclText ar d) (irDeclTexts ar rest)
+
+-- The whole module: the program's functions, then a `main` that calls `wiz.entry` and
+-- prints the scalar (`2n+1`) as a decimal `Nat`. (The host's `main` calls
+-- `wiz_run_main`, the runtime's result protocol: C5's next blocker.)
+def llvmProgram (decls : List IRDecl) : String :=
+  let ar := irArities decls;
+  let fns := irDeclTexts ar decls;
+  let header :=
+    "; generated by `wiz-selfhost --target llvm` (C5, first slice)\n" +++
+    "; `main : Nat`'s erased term was lowered to the host's A-normal-form IR and printed\n" +++
+    "; by the port of `Wiz/Compiler/LLVM.lean`; closed literal arithmetic only, no allocation.\n" +++
+    "@wiz.out = private constant [5 x i8] c\"%lu\\0A\\00\"\n" +++
+    "declare i32 @printf(ptr, ...)\n";
+  let tail :=
+    "define i32 @main() {\n" +++
+    "entry:\n" +++
+    "  %v = call i64 " +++ fnName "wiz.entry" +++ "()\n" +++
+    "  %n = sub i64 %v, 1\n" +++
+    "  %h = lshr i64 %n, 1\n" +++
+    "  %r = call i32 (ptr, ...) @printf(ptr @wiz.out, i64 %h)\n" +++
+    "  ret i32 0\n" +++
+    "}\n";
+  header +++ joinLines fns +++ "\n" +++ tail
+
+-- ------------------------------------------------------------------------------------
+-- The reachable definitions and the driver
+
+def llvmAddName (n : String) : List String → List String
+  | .nil => .cons n .nil
+  | .cons m rest => match strEq n m with
+    | .true => .cons m rest
+    | .false => .cons m (llvmAddName n rest)
+
+mutual
+
+partial def globRefs (e : ETm) (acc : List String) : List String := match e with
+  | .erased => acc
+  | .var _ => acc
+  | .nat _ => acc
+  | .glob g => match isNative g with
+    | .true => acc
+    | .false => llvmAddName g acc
+  | .lam b => globRefs b acc
+  | .app f a => globRefs a (globRefs f acc)
+  | .letE v b => globRefs b (globRefs v acc)
+  | .obj _ fs => globRefsEs fs acc
+  | .proj _ t => globRefs t acc
+  | .case s bs => globRefsEs bs (globRefs s acc)
+  | .prim _ as => globRefsEs as acc
+
+partial def globRefsEs (es : ETms) (acc : List String) : List String := match es with
+  | .nil => acc
+  | .cons e rest => globRefsEs rest (globRefs e acc)
+
+end
+
+partial def reachGo (es : List Erased) (todo : List String) (seen : List String) : List String := match todo with
+  | .nil => List.reverseOf seen .nil
+  | .cons n rest => match elemStr n seen with
+    | .true => reachGo es rest seen
+    | .false => match llvmEntry n es with
+      | .none => reachGo es rest (.cons n seen)
+      | .some e => reachGo es (globRefs e rest) (.cons n seen)
+
+inductive LDecls where
+  | ok (ds : List IRDecl)
+  | err (msg : String)
+
+partial def lowerReachGo (es : List Erased) (names : List String) (acc : List IRDecl) : LDecls := match names with
+  | .nil => .ok (List.reverseOf acc .nil)
+  | .cons n rest => match lowerDecl es n with
+    | .err m => .err m
+    | .ok d => lowerReachGo es rest (.cons d acc)
+
+-- (`link_c`/`link_lib`: C files and libraries, which the slice does not compile or link)
+def irAnyLink : List Foreign → Bool
+  | .nil => .false
+  | .cons f rest => match f with
+    | .link _ _ => .true
+    | _ => irAnyLink rest
+
+def genLLVMCore (all : Array Global) (ffi : List Foreign) : LLVMR :=
+  -- (22i's `unbox` is the C backend's: the LLVM slice does not unbox)
+  match eraseGlobals .false .false ffi all .nil .nil (Array.size all) with
+    | .err m => .err ("the erasure failed: " +++ m)
+    | .ok es => match llvmEntry "main" es with
+      | .none => .err "the LLVM backend's first slice (C5) needs a definition `main`"
+      | .some body => match lamsOf body with
+        | .succ _ => .err (irSliceErr "compiles a closed `main : Nat`; this `main` is a function (`IO`, or arguments), which needs closure conversion and reference counting")
+        | .zero =>
+          let names := reachGo es (.cons "main" .nil) .nil;
+          match lowerReachGo es names .nil with
+          | .err m => .err m
+          | .ok ds => match lowerE es (.mk 0 .nil .nil) .nil (.glob "main") with
+            | .err m => .err (irSliceErr ("could not lower the entry: " +++ m))
+            | .ok x st => match lbElimDead (lbBodyOf st x) with
+              | .mk b _ => .ok (llvmProgram (List.append ds (.cons (.mk "wiz.entry" .nil b) .nil)))
+
+-- The LLVM text of the program, or why this program is outside the slice
+def genLLVM (gs : Globals) : LLVMR := match gs with
+  | .mk all _ _ ffi _ _ _ _ _ _ _ _ => match irAnyLink ffi with
+    | .true => .err (irSliceErr "has a `link_c`/`link_lib` file: the slice emits one textual module and links no C")
+    | .false => genLLVMCore all ffi
 
 -- (stage 21t) The `link_c` files that don't exist, each the error of `command.linkC`, in
 -- order. The frontend is pure, so the driver checks them before it prints the C (as the

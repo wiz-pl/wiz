@@ -118,23 +118,33 @@ def Scry.nEntryEnv (fn : Wil.Func) : AiEnv :=
 
 -- ## Constant-return summaries
 
+/-- The number a constant stands for in a guard: an integer literal, or 0 for the null
+pointer. The lowering writes a pointer zero (`!p`, `p == NULL` on a pointer) as `nul`, so
+without the second case a pointer guard is never an `isNull`/`notNull` test. -/
+def Scry.nConstVal : Wil.Val → Option Nat
+  | .int _ _ n => .some n
+  | .nul => .some 0
+  | _ => .none
+
 /-- A register's only definition is a constant, so it is that constant everywhere. Only
 unambiguous definitions are recorded (`none` marks a conflict); this is enough for a
 status code returned from a failed helper. -/
 def Scry.constVars (g : Scry.Fn) : List (Nat × Option Nat) :=
   List.foldl (fun acc d =>
     match Scry.nodeStmt g d.1 with
-    | .some (.assign x (.cst (.int _ _ n)) _) =>
-      if Nat.beq x.index d.2 then
-        match List.find (fun p => Nat.beq p.1 d.2) acc with
-        | .none => List.cons (d.2, .some n) acc
-        | .some p => match p.2 with
-          | .none => acc
-          | .some m =>
-            if Nat.beq m n then acc
-            else List.cons (d.2, (.none : Option Nat))
-              (List.filter (fun q => Bool.not (Nat.beq q.1 d.2)) acc)
-      else acc
+    | .some (.assign x (.cst v) _) => (match Scry.nConstVal v with
+      | .none => acc
+      | .some n =>
+        if Nat.beq x.index d.2 then
+          match List.find (fun p => Nat.beq p.1 d.2) acc with
+          | .none => List.cons (d.2, .some n) acc
+          | .some p => match p.2 with
+            | .none => acc
+            | .some m =>
+              if Nat.beq m n then acc
+              else List.cons (d.2, (.none : Option Nat))
+                (List.filter (fun q => Bool.not (Nat.beq q.1 d.2)) acc)
+        else acc)
     | _ => acc) .nil (Scry.defsOf g)
 
 /-- The unambiguous constant of a register, if it has one. -/

@@ -21,39 +21,106 @@ function scratchUri() {
   return `file:///playground-${random}.wiz`;
 }
 
-// An LSP position for a JavaScript string index (UTF-16 code units).
-function positionAt(text, offset) {
-  const at = Math.max(0, Math.min(text ? text.length : 0, offset | 0));
-  const before = text ? text.slice(0, at) : "";
-  const line = (before.match(/\n/g) || []).length;
-  return { line, character: at - (before.lastIndexOf("\n") + 1) };
-}
-
-// A source span (`LINE:CHAR-LINE:CHAR`) as offsets in `text`, clamped.
-function parseSpan(text) {
-  const m = /^(\d+):(\d+)-(\d+):(\d+)$/.exec(String(text || ""));
-  if (!m) return null;
-  return { start: Number(m[1]), character: Number(m[2]), endLine: Number(m[3]), endCharacter: Number(m[4]) };
-}
-
-function offsetAt(text, line, character) {
-  let offset = 0;
-  for (let l = 0; l < line; l++) {
-    const newline = text.indexOf("\n", offset);
-    if (newline < 0) return text.length;
-    offset = newline + 1;
-  }
-  const newline = text.indexOf("\n", offset);
-  const lineEnd = newline < 0 ? text.length : newline;
-  return Math.min(lineEnd, offset + character);
+// The runtime's position index (`lib/Web/EditorModel.wiz`), read through `mount.ask`.
+// `ask(name, ...strings) -> string` invokes a `wiz_loom_*` export; `versionOf()` (when
+// given) is the document version the cache is keyed by. The line table is built once per
+// (version, text) and reused by every query: the previous keyup path rebuilt the whole
+// UTF-16 expansion on each call, and the selfhost index repeated it per caret.
+export function createIndexer(ask, versionOf = null) {
+  let cache = { text: null, version: undefined, index: "" };
+  const indexOf = (text) => {
+    const version = versionOf ? versionOf() : undefined;
+    if (cache.text === text && cache.version === version) return cache.index;
+    const index = ask("wiz_loom_editor_index", "0", text);
+    cache = { text, version, index };
+    return index;
+  };
+  return {
+    index: indexOf,
+    position: (text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(offset | 0))),
+    offset: (text, position) => {
+      const line = position && Number.isFinite(position.line) ? Math.trunc(position.line) : 0;
+      const character = position && Number.isFinite(position.character) ? Math.trunc(position.character) : 0;
+      return Number(ask("wiz_loom_editor_offset_index", indexOf(text),
+        String(line), String(character)));
+    },
+    lineEnd: (text, offset) =>
+      Number(ask("wiz_loom_editor_line_end_index", indexOf(text), String(offset | 0))),
+    range: (text, from, to) => ({
+      start: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(from | 0))),
+      end: JSON.parse(ask("wiz_loom_editor_position_index", indexOf(text), String(to | 0))),
+    }),
+    utf16: (text, codePoints) => Number(ask("wiz_loom_editor_utf16", text, String(codePoints | 0))),
+    editorOffset: (text, prefix, codePoints) =>
+      Number(ask("wiz_loom_editor_editor_offset", text, prefix, String(codePoints | 0))),
+    segments: (text, diagnostics) =>
+      JSON.parse(ask("wiz_loom_editor_segments_index", indexOf(text), text,
+        JSON.stringify(diagnostics || []), "0")),
+    build: (text, entries, prefix) =>
+      ask("wiz_loom_index_build", text, prefix || "", JSON.stringify(entries || [])),
+    size: (index) => Number(ask("wiz_loom_index_size", index)),
+    term: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_term", text, index, String(offset | 0))),
+    goal: (text, index, offset) =>
+      JSON.parse(ask("wiz_loom_index_goal", text, index, String(offset | 0))),
+    declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
+    declarationNamed: (text, index, name) =>
+      JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+    // The in-page server's pure rules (`Web.Selfhost.wiz`): the initialize capabilities,
+    // the engine's lines as diagnostics, the command splitter, the Prelude rule and the
+    // completion/hover/definition answers. The shim is the server around them.
+    initializeCapabilities: () => JSON.parse(ask("wiz_loom_lsp_capabilities")),
+    withPrelude: (text) => JSON.parse(ask("wiz_loom_lsp_prelude", text)),
+    splitCommands: (text) => JSON.parse(ask("wiz_loom_lsp_commands", text)),
+    outputLines: (output) => JSON.parse(ask("wiz_loom_lsp_output_lines", output)),
+    parseErrorOffset: (line) => {
+      const n = Number(ask("wiz_loom_lsp_parse_error", line));
+      return n < 0 ? null : n;
+    },
+    diagnosticsFromOutput: (text, output) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_output", text, output)),
+    parseCheck(json) {
+      const text = json === null || json === undefined ? ""
+        : (typeof json === "string" ? json : JSON.stringify(json));
+      return JSON.parse(ask("wiz_loom_lsp_parse_check", text));
+    },
+    diagnosticsFromCheck: (text, answer) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_check", text,
+        JSON.stringify(answer === null || answer === undefined ? {} : answer))),
+    completionPrefix: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_completion_prefix", text, String(offset | 0))),
+    wordAt: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_word_at", text, String(offset | 0))),
+    filterCompletions: (names, prefix, limit = 200) =>
+      JSON.parse(ask("wiz_loom_lsp_filter_completions", JSON.stringify(names || []),
+        String(prefix || ""), String(limit))),
+    completion: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_completion", text, index || "",
+        JSON.stringify(position || {}))),
+    hover: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_hover", text, index || "",
+        JSON.stringify(position || {}))),
+    definition: (text, index, position, uri) =>
+      JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
+        JSON.stringify(position || {}), uri || "")),
+    // The completion popup's paint facts (`web/completions.js`) and the goals pane's
+    // source spans (`highlight`), so neither decides a rule.
+    itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
+    askKey: (key, code, ctrl, meta) =>
+      ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
+        ctrl ? "1" : "0", meta ? "1" : "0") === "1",
+    span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
+    rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+  };
 }
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
 // `endpointFromSearch`, or the page's in-page endpoint (`?lsp=selfhost`). `update(kind,
 // a, b)` is the runtime's effect (`view`, `info`, `hover`); a page that still passes a
 // `render` callback (the Node tests) gets the same events there. `widgetPane` is an
-// element for the widget host: when given, the cards are mounted there and the pane's
-// `widgetsInPane` tells the runtime to leave its own `Widgets` section out.
+// element for the widget host: the cards are mounted there by `mountWidgets`, never
+// rendered into the goals panel.
 export function startInfoview({
   editor, update, render, config, search, uri, follow = false,
   document: pageDocument, squiggles: wantSquigglesLayer, completions: wantCompletionsPopup,
@@ -90,16 +157,26 @@ export function startInfoview({
     items: [],
     position: null,
     canReconnect: false,
-    // The standalone page's widget pane is a grid child of its own: the panel then
-    // leaves the widget cards out, so there is one host, not two.
-    widgetsInPane: !!widgetPane,
     follow,
   };
 
+  // The widget pane is rebuilt only when the payload changed: `mountWidgets` clears the
+  // container and sanitises every card, and `publish` runs on every answer, diagnostics
+  // notification and cursor move (a plot's SVG is up to 2 MB). The key is the serialized
+  // payload, so identical items keep the mounted DOM (and its `<details open>`, scroll
+  // and focus) across publishes.
+  let lastWidgets = null;
+  const widgetKey = (items) => {
+    try { return JSON.stringify(items || []); } catch { return ""; }
+  };
   const publish = () => {
     send("view", JSON.stringify(view), "");
     if (widgetPane) {
-      mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+      const key = widgetKey(view.items);
+      if (key !== lastWidgets) {
+        mountWidgets(widgetPane, view.items, pageDocument || globalThis.document);
+        lastWidgets = key;
+      }
     }
     if (typeof onRender === "function") {
       try { onRender(view); } catch (_) { /* the page's mirror must not break the pane */ }
@@ -147,24 +224,19 @@ export function startInfoview({
 
   // ## Source highlighting (the textarea's native selection)
 
-  function spanText(range) {
-    if (!range || typeof range !== "object") return "";
-    const start = range.start || {};
-    const stop = range.end || start;
-    return `${start.line || 0}:${start.character || 0}-${stop.line || 0}:${stop.character || 0}`;
-  }
-
   function highlight(range) {
-    const span = parseSpan(typeof range === "string" ? range : spanText(range));
-    if (!span || !editor) return;
-    const start = offsetAt(editor.value, span.start, span.character);
-    const end = Math.max(start, offsetAt(editor.value, span.endLine, span.endCharacter));
+    if (!editor || !rules) return;
+    const span = rules.span(editor.value,
+      typeof range === "string" ? range : rules.rangeText(range || {}));
+    if (!span) return;
+    const start = span[0];
+    const end = Math.max(start, span[1]);
     suppressCursor = true;
     try { editor.focus({ preventScroll: true }); } catch (_) { try { editor.focus(); } catch (_) { /* no focus */ } }
     try { editor.setSelectionRange(start, end); } catch (_) { /* not a text field */ }
     try {
       const lineHeight = 21;
-      const top = span.start * lineHeight;
+      const top = rules.position(editor.value, start).line * lineHeight;
       if (top < editor.scrollTop || top + lineHeight > editor.scrollTop + editor.clientHeight) {
         editor.scrollTop = Math.max(0, top - lineHeight * 2);
       }
@@ -174,8 +246,7 @@ export function startInfoview({
 
   function currentPosition() {
     if (follow) return followPosition;
-    return rules ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, editor.selectionStart || 0);
+    return rules ? rules.position(editor.value, caretOffset(editor)) : null;
   }
 
   // ## Asking the server
@@ -236,9 +307,8 @@ export function startInfoview({
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = rules
-      ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, caretOffset(editor));
+    if (!rules) return;
+    const position = rules.position(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
     if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
@@ -367,9 +437,8 @@ export function startInfoview({
     refresh,
     reconnect,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
-    position: () => editor
-      ? (rules ? rules.position(editor.value, caretOffset(editor))
-        : positionAt(editor.value, caretOffset(editor)))
+    position: () => editor && rules
+      ? rules.position(editor.value, caretOffset(editor))
       : { line: 0, character: 0 },
     squiggles: () => squiggles,
     completions: () => completions,

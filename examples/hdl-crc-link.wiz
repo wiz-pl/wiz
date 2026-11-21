@@ -1,3 +1,4 @@
+-- test: skip the `hdl` and `bus-crc` test group runs it
 -- The CRC-8 line service (`Crc.protoC`, `import Hdl.Crc`): the `proto` design of the
 -- iCEstick project with its UART removed, so the protocol/CRC mechanism is reusable
 -- behind any byte transport.

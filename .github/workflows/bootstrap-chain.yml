@@ -68,7 +68,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -99,7 +99,7 @@ jobs:
           fi
           mapfile -t paths < <(nix path-info .#wizc-release .#wizc .#wizc-seed)
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" "${paths[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wizc-release-${{ github.event.workflow_run.head_sha }}
           path: out/
@@ -118,7 +118,7 @@ jobs:
         with:
           fetch-depth: 0 # the flake is read at commits (git+file?rev=), the predecessor's too
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -141,7 +141,7 @@ jobs:
           mkdir -p nightly
           cp "$rel/wizc-$SYS.tar.gz" nightly/
           echo "$COMMIT" > nightly/commit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && hashFiles('nightly/commit') != ''
         with:
           name: wizc-nightly

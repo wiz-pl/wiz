@@ -34,29 +34,9 @@ open Wiz
 
 namespace Tests.ScryProver
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
-def loader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
-
-/-- A Wiz string literal for `s`. -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
+/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+by module name: one loader for the suite (`Tests.scryLoader`). -/
+def loader : IO (Name → Option String) := Tests.scryLoader
 
 /-- Run `body` (after the imports) and return the `#eval` message texts. -/
 def runProbe (imports body : String) : IO (List String) := do
@@ -234,10 +214,10 @@ def group : Group where
          "#eval String.contains (Scry.Verdict.show Scry.proverCutVacuousVerdict) \"write set is empty\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverCutUnorderedVerdict\n" ++
          "#eval String.eq (Scry.Property.show Scry.Property.cut) \"cut (every write is preceded by a check)\"\n" ++
-         "#eval Nat.eq (List.length Scry.guardFnRows) 1\n" ++
+         "#eval Nat.beq (List.length Scry.guardFnRows) 1\n" ++
          "#eval match Scry.guardFnRows with\n" ++
-         "  | .cons r _ => Bool.and (Nat.eq (List.getD r 1 99) 0) (Nat.eq (List.getD r 2 99) 16)\n" ++
-         "  | .nil => .false\n")
+         "  | .cons r _ => Bool.and (Nat.beq (List.getD r 1 99) 0) (Nat.beq (List.getD r 2 99) 16)\n" ++
+         "  | .nil => Bool.false\n")
         [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
   ]
 

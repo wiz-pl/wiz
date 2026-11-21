@@ -453,6 +453,9 @@ def concGroup : Group where
         noThreadsFails ("import IO\nimport MVar\ndef main : IO Unit := do1\n  m ← MVar.new (A := Nat);\n" ++
           "  n ← MVar.take m;\n  IO.println (Nat.toString n)\n")
           "wiz: MVar.take of an empty MVar would wait forever: threads are not available in this build"
+        noThreadsFails ("import IO\nimport MVar\n-- a join: read a value another thread was to write\ndef main : IO Unit := do1\n" ++
+          "  m ← MVar.new (A := Nat);\n  n ← MVar.read m;\n  IO.println (Nat.toString n)\n")
+          "wiz: MVar.read of an empty MVar would wait forever: threads are not available in this build"
         noThreadsFails ("import IO\nimport MVar\n-- a contended cell: it is already full\ndef main : IO Unit := do1\n" ++
           "  m ← MVar.newFull 1;\n  MVar.put m 2\n")
           "wiz: MVar.put into a full MVar would wait forever: threads are not available in this build"

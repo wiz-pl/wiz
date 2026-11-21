@@ -87,7 +87,7 @@ function ask(name, ...args) {
   let result = 0;
   try {
     result = wasm["_" + name](...rest);
-    return wasm.UTF8ToString(result);
+    return wasm.UTF8ToString(Number(result));
   } finally {
     if (result) wasm._free(result);
     for (const p of pointers) wasm._free(p);

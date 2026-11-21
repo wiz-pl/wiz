@@ -64,6 +64,15 @@ def simpleBinder : ParserDescr := orelse (bracketedBinder false) binderIdent
 def matchAlt : ParserDescr :=
   node "match.alt" (seqs ["|", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
 
+/-- `| h : p => rhs`: the equation form written where a pattern belongs. It is parsed
+(`match.altEq`) so that the elaborator can say where `h :` goes; no match accepts it. -/
+def matchAltEq : ParserDescr :=
+  node "match.altEq" (seqs ["|", ident, ":", sepBy1 (cat "term" 0) ",", "=>", cat "term" 0])
+
+/-- A scrutinee of a `match`: `e`, or `h : e` for the branch's equation `h : e = p`. -/
+def matchScrut : ParserDescr :=
+  orelse (node "match.scrut" (seqs [ident, ":", term])) term
+
 /-- A `calc` step: a relation `a ≤ b` and its proof. The relation may start with `_`,
 the previous step's right endpoint. -/
 def calcStep : ParserDescr := node "calc.step" (seqs [term, ":=", term])
@@ -153,7 +162,7 @@ def tuplePat : ParserDescr :=
 | `term.tag`           | max  | "'" ident |
 | `term.ecase`         | lead | "ecase" term "[" [terms] "]" |
 | `term.dotIdent`      | max  | "." ident (a constructor of the expected type) |
-| `term.match`         | lead | "match" [terms] "with" [alts] |
+| `term.match`         | lead | "match" [scrutinees] "with" [alts] (`h : e` names the branch equation) |
 | `term.calc`          | lead | "calc" [`calc.step`: term ":=" term, aligned] |
 | `term.szInf`, `term.szSuc`, `term.sizeLt` | | "∞", "↑" s, "Size<" s |
 | `term.sized` (trailing) | max | T "^" s: an inductive or coinductive type at size `s` |
@@ -236,7 +245,8 @@ def termLeading : List LeadingParser := [
   { kind := "term.match", prec := leadPrec,
     -- alternatives line up at or right of the first `|`, so an outer match's next
     -- alternative ends a nested match (as in Lean)
-    p := seqs ["match", sepBy1 term ",", "with", withPosition (many (seqs [colGe, matchAlt]))] },
+    p := seqs ["match", sepBy1 matchScrut ",", "with",
+      withPosition (many (seqs [colGe, orelse matchAltEq matchAlt]))] },
   -- tactics line up (or are separated by `;`); the tactics themselves come from the prelude
   { kind := "term.by", prec := leadPrec,
     p := seqs ["by", withPosition (many1 (seqs [colGe, cat "tactic" 0, optional ";"]))] },

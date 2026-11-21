@@ -134,7 +134,7 @@ def expectedOf (dir : System.FilePath) (file : String) : IO (System.FilePath × 
 
 /-- Is `rel` (a file's path under `base`) inside a nested package, a directory below
 `base` with its own `grail.wiz`? Such a package has its own dependencies and tests
-(`examples/grail-index/sources/*` are packages a registry fixture publishes), so its
+(`examples/fate-index/sources/*` are packages a registry fixture publishes), so its
 files are not tests of the enclosing one. -/
 def inNestedPackage (base : System.FilePath) (rel : String) : IO Bool := do
   let dirs := (rel.splitOn "/").dropLast

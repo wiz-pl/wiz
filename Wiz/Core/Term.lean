@@ -193,8 +193,9 @@ inductive Term (R : Type) where
   | scase (l : Level) (q : Term R) (I D : Term R) (v : Level) (P m s i x : Term R)
   /-- a ν constructor: `cocon xs : ν^{↑s} D i` for `xs : ⟦D⟧ (ν^s D) i` -/
   | cocon (x : Term R)
-  /-- sized corecursion: `scofix A f s i a : ν^s D i`, where
-  `f : (s : Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i`.
+  /-- sized corecursion: `scofix A f s i a : ν^s D i` for `a : A s i`, where
+  `A : (j : Size) → (i : I) → Type` and
+  `f : (j : Size) → ((i : I) → A j i → ν^j D i) → (i : I) → A (↑j) i → ν^{↑j} D i`.
   It unfolds only when observed with `out`. -/
   | scofix (l : Level) (I D A f s i a : Term R)
   /-- coiteration: unfold a state `s : S i` with `step` -/
@@ -386,10 +387,14 @@ partial def stripMarks : Term R → Term R
   | .prf l t => if l.isZero then .prf l t else stripMarks t
   | t => Id.run <| t.mapChildrenM pure (fun _ c => pure (stripMarks c))
 
-/-- The head and arguments of an application spine. -/
+/-- The head and arguments of an application spine. The arguments are accumulated by
+consing and reversed once, so the cost is linear in the spine's length. -/
 def spine : Term R → Term R × List (Term R)
-  | .app f a => let (h, as) := spine f; (h, as ++ [a])
-  | t => (t, [])
+  | t =>
+    let rec go : Term R → List (Term R) → Term R × List (Term R)
+      | .app f a, acc => go f (a :: acc)
+      | h, acc => (h, acc)
+    go t []
 
 /-- Instantiate universe level parameters `ps` with `us`. -/
 partial def instLevels (ps : List Name) (us : List Level) (t : Term R) : Term R :=

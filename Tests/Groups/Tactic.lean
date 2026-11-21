@@ -112,6 +112,48 @@ def tacticGroup : Group where
         okLib "import Prelude\ndef two : 1 + 1 = 2 := by rfl" },
     { name := "apply makes goals for the arguments", run := fun _ =>
         okLib "import Prelude\ndef ap : (A B : Type) → (A → B) → A → B := by\n  intro A; intro B; intro f; intro a\n  apply f\n  assumption" },
+    -- (D6) `constructor`: the host wrapper for the self-hosted `tactic.constructor`
+    -- (`STacOp.constructor`): the first constructor of the goal's type that applies.
+    { name := "(D6) constructor: a single-constructor structure and enum solve it, leaving the fields as goals in order", run := fun _ => do
+        okLib ("import Prelude\nstructure Named where\n  name : Nat\n" ++
+          "def n : Named := by constructor; exact 7\n" ++
+          "inductive Box where\n  | mk (n : Nat)\n" ++
+          "def b : Box := by constructor; exact 7\n" ++
+          "def whichB : Box → Nat\n  | .mk n => n\n" ++
+          "def whichN : Named → Nat\n  | .mk n => n\n" ++
+          "#eval whichB b\n#eval whichN n")
+          ["7", "7"]
+        -- fields of a structure are the new goals, in the constructor's order
+        failsLib ("import Prelude\nstructure Point where\n  x : Nat\n  y : Bool\n" ++
+          "def p : Point := by constructor")
+          "unsolved goals:\n⊢ Nat\n\n⊢ Bool" },
+    { name := "(D6) constructor: several constructors, the first that applies wins (as the self-hosted op)", run := fun _ =>
+        okLib ("import Prelude\ninductive Two where\n  | a\n  | b\n" ++
+          "def which : Two → Nat\n  | .a => 1\n  | .b => 2\n" ++
+          "def t : Two := by constructor\n#eval which t")
+          ["1"] },
+    { name := "(D6) constructor: an indexed family's index is solved by unification; a constructor that does not fit is skipped", run := fun _ => do
+        okLib ("import Prelude\ninductive Head (A : Type) : Nat → Type where\n" ++
+          "  | atZero : Head A 0\n  | atOne (x : A) : Head A 1\n" ++
+          "def h : Head Nat 1 := by constructor; exact 7\n" ++
+          "def hv : Head Nat 1 → Nat\n  | .atOne x => x\n" ++
+          "#eval hv h")
+          ["7"]
+        -- `atOne` solves the index (1) and leaves its field; a `Vec` cons leaves both
+        -- fields, with the index solved in the recursive one
+        failsLib ("import Prelude\ninductive Vec (A : Type) : Nat → Type where\n" ++
+          "  | nil : Vec A 0\n  | cons {n : Nat} (x : A) (xs : Vec A n) : Vec A (Nat.succ n)\n" ++
+          "def w : Vec Nat 1 := by constructor")
+          "unsolved goals:\n⊢ Nat\n\n⊢ Vec Nat 0" },
+    { name := "(D6) constructor: a non-inductive goal, an empty type, and a rigid index fail with the self-hosted messages", run := fun _ => do
+        failsLib "import Prelude\ndef bad : Nat → Nat := by constructor"
+          "constructor: the goal is not an inductive type (or it has no constructors)"
+        failsLib "import Prelude\ninductive Empty where\ndef bad : Empty := by constructor"
+          "constructor: the goal is not an inductive type (or it has no constructors)"
+        failsLib ("import Prelude\ninductive Vec (A : Type) : Nat → Type where\n" ++
+          "  | nil : Vec A 0\n  | cons {n : Nat} (x : A) (xs : Vec A n) : Vec A (Nat.succ n)\n" ++
+          "def bad {n : Nat} : Vec Nat n := by constructor")
+          "constructor: no constructor applies" },
     { name := "first and try", run := fun _ =>
         okLib "import Prelude\ndef t : Nat := by try exact Bool.true; first | exact Bool.true | exact 3" },
     { name := "unsolved goals are reported with their context", run := fun _ =>

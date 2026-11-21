@@ -467,6 +467,11 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
         throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
                 code := ErrorCode.private_ }
 
+/-- Does the syntax contain a named match (`match h : e with`)? Those need their
+expected equation kept as written, below. -/
+partial def hasNamedMatch (stx : Syntax) : Bool :=
+  stx.isOfKind "match.scrut" || stx.args.any hasNamedMatch
+
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)
     (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none)
@@ -492,7 +497,8 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   -- definition instead. (Only the instance holes, `zonkInsts`: the other holes stay, so
   -- the equation stays as written, as above.)
   let ty ← if (← get).pendingInsts.isEmpty then zonkInsts ctx.lvl ty else pure ty
-  let val ← valStx.mapM fun s => do Elab.check ctx s (← evalIn ctx ty)
+  let val ← valStx.mapM fun s => do
+    Elab.check ctx s (← if hasNamedMatch s then evalExpected ctx ty else evalIn ctx ty)
   let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val := val.map fun v => tele.foldr (fun (x, _, _, _) b => Term.lam x b) v
   solveSortConstraints
@@ -771,7 +777,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let n := (clauses.head?.map (·.pats.length)).getD 0
   -- introduce `n` arguments of the type
   let mut ctx' := ctx
-  let mut tyv ← evalIn ctx ty
+  let mut tyv ← if clauses.any fun c => hasNamedMatch c.rhs then evalExpected ctx ty else evalIn ctx ty
   let mut vars : List Lvl := []
   let mut names : List Name := []
   let mut colExplicit : List Bool := []
@@ -801,17 +807,35 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
     | [] => xs
   let params := (tele.filterMap fun (x, bi, _, _) => if bi == .default then some x else none).toList
   let allParams := (tele.map fun (x, bi, _, _) => (x, bi == .default)).toList
-  let rc : Option RecCtx := if recursive then some { fn := name, params, pos, cols := n, allParams, colExplicit } else none
+  -- (fixed-params) a parameter before the colon that a recursive call changes is not
+  -- fixed: it is elaborated as if it were after the colon, i.e. the motive abstracts it
+  -- and the hypothesis takes its value (Lean's rule)
+  let fixedOf (ch : List (Name × Nat)) : List Name :=
+    params.filter fun p => !ch.any (·.1 == p)
+  let found := if recursive then
+      changedParams g ({ fn := name, params, pos, cols := n, allParams, colExplicit } : RecCtx) clauses
+    else []
+  let changed := params.zipIdx.filterMap fun (p, i) => if found.any (·.1 == p) then some (p, i) else none
+  let rc : Option RecCtx := if recursive then
+    some { fn := name, params := fixedOf changed, pos, cols := n, allParams, colExplicit, changed }
+    else none
   if let some x := vars.head? then recordMatch cmd.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   -- a recursive definition whose first argument has a size-variable size: compile to `sfix`
-  if rc.isSome && pos == 0 then
+  if rc.isSome && pos == 0 && changed.isEmpty then
     if let some x0 := vars.head? then
       if let .mu _ _ _ _ (.neutral (.local si) #[]) _ _ ← force ctx'.types[ctx'.lvl - x0 - 1]! then
         if si < ctx.lvl then
           let (t, v) ← elabSizedDef name cmd ctx tele ty si clauses
           return (t, v, none)
-  let clauses := clauses.map fun c => { c with pats := perm c.pats }
-  let body ← compileMatch ctx' (perm vars) clauses tyv rc true
+  -- (fixed-params) the changed parameters join the matched arguments (after them): the
+  -- motive reverts them, and the recursor is applied to their value, so that a recursive
+  -- call passes a new one to the hypothesis. A telescope binder `i` is at level `i` (the
+  -- telescope is the context's first `tele.size` binders).
+  let changedLvls : List Lvl := changed.map fun (p, _) =>
+    ((tele.toList.zipIdx.find? fun ((x, _, _, _), _) => x == p).map (·.2)).getD 0
+  let changedPats : List Syntax := changed.map fun (p, _) => .node {} "term.ident" #[.ident {} p]
+  let clauses := clauses.map fun c => { c with pats := perm c.pats ++ changedPats }
+  let body ← compileMatch ctx' (perm vars ++ changedLvls) clauses tyv rc true
   solveSortConstraints
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (names.foldr .lam body)
   let fullTy := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
@@ -825,7 +849,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   -- index variable escapes into a method (`indexEscapes`): compiled code runs the value
   let g ← getGlobals
   let us := (← get).levelParams.map Level.param
-  let impl := if rc.isNone || indexEscapes g val then none
+  let impl := if rc.isNone || !changed.isEmpty || indexEscapes g val then none
     else deriveImpl g name us tele.size names.length pos val
   checkGuessedDecl info name fullTy (some val)
   pure (fullTy, val, impl)
@@ -936,6 +960,130 @@ def copatternAlt? (alts : List Syntax) (o : Name) : Option Syntax :=
 def isCorecCall (name : Name) (rhs : Syntax) : Bool :=
   let h := if rhs.isOfKind "term.app" then rhs.getArg 0 else rhs
   h.isOfKind "term.ident" && (h.getArg 0).getId? == some name
+
+/-! ### Sized copatterns → `scofix`
+
+`def f {i : Size} (s : T^i) : T^i` with copatterns is compiled to a `scofix` whose body is
+at `↑j`: the declared size `i` is viewed as a successor (every size is `∞` or `↑j`), the
+explicit binders are the state at the declared size, and a recursive call is the `rec`
+argument at the predecessor `j`. The clause syntax is rewritten (observations of a sized
+explicit binder become payload projections of `out`, and recursive calls become `rec`
+applications) so the existing term elaborator checks the clauses at the body size. -/
+
+/-- Remove the last `n` binders and substitute `ps` (the terms for the binders, in order
+`x₁ … xₙ`) for them. `ps` live in the context without those binders. -/
+partial def substLastVars (n : Nat) (ps : List (Term R)) (t : Term R) (depth : Nat := 0) : Term R :=
+  match t with
+  | .var i =>
+    if i < depth || i < depth + n then
+      if i < depth then .var i
+      else match ps[n - 1 - (i - depth)]? with
+        | some p => p.lift depth
+        | none => .var i
+    else .var (i - n)
+  | t => Id.run <| t.mapChildrenM pure (fun d c => pure (substLastVars n ps c (depth + d)))
+
+/-- Replace the free variable `k` by `s` (a term in the same context). -/
+partial def replaceFree (k : Nat) (s : Term R) (t : Term R) (depth : Nat := 0) : Term R :=
+  match t with
+  | .var i => if i == k + depth then s.lift depth else .var i
+  | t => Id.run <| t.mapChildrenM pure (fun d c => pure (replaceFree k s c (depth + d)))
+
+private def sIdent (info : SourceInfo) (n : Name) : Syntax :=
+  .node info "term.ident" #[.ident info n]
+
+private def sApp (info : SourceInfo) (f : Syntax) (args : List Syntax) : Syntax :=
+  if args.isEmpty then f else .node info "term.app" #[f, .node info "null" args.toArray]
+
+private def sProj (info : SourceInfo) (t : Syntax) (n : Nat) : Syntax :=
+  .node info "term.proj" #[t, .atom info ".", numStx info n]
+
+private def sUnit (info : SourceInfo) : Syntax :=
+  .node info "term.unitVal" #[.atom info "(", .atom info ")"]
+
+/-- The observation `o` of the explicit binder `x` at the body size, as
+`(out x).1` (first field) or `((out x).2…).1`. -/
+private def sObs (info : SourceInfo) (x : Name) (pos : Nat) : Syntax :=
+  let outx := sApp info (sIdent info "out") [sIdent info x]
+  let rec go (t : Syntax) : Nat → Syntax
+    | 0 => sProj info t 1
+    | k + 1 => go (sProj info t 2) k
+  go outx pos
+
+/-- `(e₁, …, eₙ, ())`: the state tuple of the explicit binders (plus the trailing unit,
+which the `Σ` state type has). -/
+private def sStateTuple (info : SourceInfo) (args : List Syntax) : Syntax :=
+  match args ++ [sUnit info] with
+  | [t] => t
+  | t :: rest => .node info "term.tuple" #[.atom info "(", t, .atom info ",", .node info "null" rest.toArray]
+  | [] => sUnit info
+
+/-- Rewrite a sized clause's right-hand side: an observation `x.o` of a sized explicit
+binder `x` is `out x`'s field, and a recursive call `f e…` is the body's `rec` applied to
+the index and the state tuple. The head names `rec` and `idx` are the fresh binders the
+body context uses. -/
+partial def rewriteSizedRhs (info : SourceInfo) (name recName idxName : Name) (n : Nat)
+    (coid : List (Name × List Name)) (stx : Syntax) : Syntax :=
+  match stx with
+  | .node i "term.ident" #[.ident j nm] =>
+    match (coid.findSome? fun (x, os) =>
+        if nm.startsWith (x ++ ".") then
+          let o := (nm.drop (x.length + 1)).toString
+          os.idxOf? o |>.map fun pos => sObs info x pos
+        else none) with
+    | some t => t
+    | none => .node i "term.ident" #[.ident j nm]
+  | .node i "term.field" #[b, d, .ident j o] =>
+    let base := match b with
+      | .node _ "term.ident" #[.ident _ x] => some x
+      | _ => none
+    match base.bind fun x => (coid.find? (·.1 == x)).map (x, ·.2) with
+    | some (x, os) => match os.idxOf? o with
+      | some pos => sObs info x pos
+      | none => .node i "term.field" #[b, d, .ident j o]
+    | none => .node i "term.field" #[b, d, .ident j o]
+  | .node i "term.app" #[h, .node j "null" args] =>
+    let h' := rewriteSizedRhs info name recName idxName n coid h
+    let args' := args.map (rewriteSizedRhs info name recName idxName n coid)
+    if h'.isOfKind "term.ident" && (h'.getArg 0).getId? == some name then
+      if args'.size == n then
+        sApp info (sIdent info recName) [sIdent info idxName, sStateTuple info args'.toList]
+      else .node i "term.app" #[h', .node j "null" args']
+    else .node i "term.app" #[h', .node j "null" args']
+  | .node i k as => .node i k (as.map (rewriteSizedRhs info name recName idxName n coid))
+  | s => s
+
+/-- Is the result syntax a sized type `T^s` whose size is a variable (an identifier),
+rather than `↑s` or `∞`? (Parentheses are transparent.) -/
+partial def sizedVarSyntax? (stx : Syntax) : Bool :=
+  if stx.isOfKind "term.paren" then sizedVarSyntax? (stx.getArg 1)
+  else if stx.isOfKind "term.sized" then
+    stx.args.any (·.isOfKind "term.ident") &&
+      !stx.args.any fun a => a.isOfKind "term.szSuc" || a.isOfKind "term.szInf"
+  else false
+
+/-- The size variable of a `T^s` result, if the result type is written as a sized type
+with a size variable. (Parentheses are transparent.) -/
+partial def resultSizeVar? (stx : Syntax) : Option Name :=
+  if stx.isOfKind "term.paren" then resultSizeVar? (stx.getArg 1)
+  else if stx.isOfKind "term.sized" then
+    match stx.args.back? with
+    | some s => s.getId?
+    | none => none
+  else none
+
+/-- Does the syntax mention a sized type `_^i`? -/
+partial def mentionsSizedAt (i : Name) (stx : Syntax) : Bool :=
+  (stx.isOfKind "term.sized" &&
+    (match stx.args.back? with
+     | some s => s.getId? == some i
+     | none => false)) ||
+    stx.args.any (mentionsSizedAt i)
+
+/-- Does a binder of the definition have a type sized by `i`? -/
+def hasBinderSizedAt (cmd : Syntax) (i : Name) : Bool :=
+  (cmd.getArg 3).args.any fun b =>
+    (binderViews b).any fun v => v.bi == .default && v.type.any (mentionsSizedAt i)
 
 /-- The corecursive case of `elabCopatterns`: `coit`. -/
 def elabCopatternsCoit (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : ElabM R (Term R × Term R) := do
@@ -1090,6 +1238,118 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
   --| sorry
   --sol>
 
+/-- The sized case of `elabCopatterns`: `def f {i : Size} … : T^i | .o => rhs` with a
+binder at size `i` compiles to `scofix`. The state family is the tuple of the explicit
+binders at a size, the seed is their tuple at `i`, and the body is checked at a fresh
+predecessor `j` (the suc view `i = ↑j`): observations of a sized binder read `out`, and a
+recursive call becomes the `rec` argument at `j`. -/
+def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) :
+    ElabM R (Term R × Term R) := do
+  let info := cmd.info
+  let g ← getGlobals
+  let (ctx, tele) ← elabTelescope { info } (((cmd.getArg 3).args.flatMap binderViews)).toList
+  let tyStx := (cmd.getArg 4).getArg 1
+  let (ty, _) ← Elab.checkType ctx tyStx
+  finishInstances
+  let ty ← zonk ctx.lvl ty
+  ensureNoMVars ty info
+  let .nu l I D idx sz hint ← force (← evalIn ctx ty)
+    | throwAt tyStx.info "copatterns need a coinductive result type"
+  let some si := (match sizeView sz with
+    | (some (.neutral (.local si) #[]), 0) => some si
+    | _ => none)
+    | throwAt tyStx.info s!"a sized copattern definition needs a size variable as its result size, not {← showVal ctx sz}"
+  let w : R := QuantitySyntax.explicitDefault
+  let wT : Term R := .qlit w
+  let q := quote g ctx.lvl
+  let explicit := (tele.toList.zipIdx.filter fun ((_, bi, _, _), _) => bi == .default)
+  let n := explicit.length
+  -- the state type at the declared size, and the seed (the explicit binders' tuple)
+  let stateTy0 : Term R := explicit.zipIdx.foldr (fun (((x, _, _, _), k), j) acc =>
+    .sigma x wT ((q ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
+  let init : Term R := (explicit.map fun ((_, _, _, _), k) => (.var (ctx.lvl - k - 1) : Term R)).foldr .pair .tt
+  -- A := fun j => fun _ => stateTy0[si := j]
+  let A : Term R := .lam "j" (.lam "_" (replaceFree (si + 2) (.var 1) (stateTy0.lift 2)))
+  let vA ← evalIn ctx A
+  let vI := I
+  let vD := D
+  -- the body context: j, rec, idx, a
+  let ctxJ := ctx.bind "j" .size
+  let vJ := Val.var ctx.lvl
+  let vF := scofixFunTy g l vI vD vA w
+  let .pi _ _ _ _ codJ _ := whnf vF
+    | panic! "scofix f type is not a pi"
+  let vAfterJ := Closure.inst g codJ vJ
+  let .pi _ _ _ vRecDom codR _ := whnf vAfterJ
+    | panic! "scofix rec type is not a pi"
+  let recName : Name := name ++ "✝rec"
+  let idxName : Name := "idx✝"
+  let aName : Name := "a✝"
+  let ctxJR := ctxJ.bind recName vRecDom
+  let vRec := Val.var ctxJ.lvl
+  let ctxJRI := ctxJR.bind idxName vI
+  let vIdx := Val.var ctxJR.lvl
+  let vAfterRec := Closure.inst g codR vRec
+  let .pi _ _ _ _ codI _ := whnf vAfterRec
+    | panic! "scofix index type is not a pi"
+  let vAfterIdx := Closure.inst g codI vIdx
+  let vStateBody := match whnf vAfterIdx with
+    | .pi _ _ _ dom _ _ => dom
+    | _ => panic! "scofix body state"
+  -- the explicit binders at the body size, as real context binders (from the state)
+  let mut cctx := ctxJRI.bind aName vStateBody
+  let mut sty := vStateBody
+  for ((x, _, qq, _), _) in explicit do
+    match whnf sty with
+    | .sigma _ _ Aty B _ =>
+      cctx := cctx.bindQ x Aty ((Val.toPoly? (← evalIn cctx qq)).bind (·.isConst?))
+      sty := Closure.inst g B (Val.var (cctx.lvl - 1))
+    | _ => throwAt info "internal error: state tuple"
+  -- the explicit binders that are the same coinductive type as the result: their
+  -- observations are read with `out` at the body size
+  let some (T0, _, _) := hint
+    | throwAt tyStx.info "a sized copattern definition needs a nominal coinductive result type"
+  let coid : List (Name × List Name) := explicit.filterMap fun ((x, _, _, _), k) =>
+    match whnf ctx.types[ctx.lvl - k - 1]! with
+    | .nu _ _ _ _ _ (some (T, _, _)) => if T == T0 then some (x, obs.map (·.1)) else none
+    | _ => none
+  -- the clauses at the body size; a recursive call is `rec idx (args, ())`
+  let alts := (cmd.getArg 5).args.toList
+  let mut pty : VTy R := vInterp g l I D (nuFamilyAt l I D vJ) vIdx
+  let mut comps : List (Term R) := []
+  for (o, isRec) in obs do
+    let some alt := copatternAlt? alts o
+      | throwAt info s!"missing copattern .{o}" ErrorCode.missingCopattern
+    let rhs := rewriteSizedRhs info name recName idxName n coid (alt.getArg 3)
+    let .sigma _ _ Aty B _ ← force pty
+      | throwAt info "internal error: observation type"
+    let Aty := if isRec then .nu l I D vIdx vJ hint else Aty
+    let (Aty, lifted) ← match isRec, ← force Aty with
+      | false, .ulift _ _ A' => pure (A', true)
+      | _, _ => pure (Aty, false)
+    let c ← Elab.check cctx rhs Aty
+    let c := if lifted then .up c else c
+    comps := comps ++ [c]
+    pty ← instM B (← evalIn cctx c)
+  let e : Term R ← match ← force I with
+    | .unit _ => pure .tt
+    | _ => pure (.refl (quote g cctx.lvl I) (quote g cctx.lvl vIdx))
+  let payload : Term R := comps.foldr .pair (.pair e .tt)
+  -- substitute the body binders by the projections of the state `a`
+  let ps : List (Term R) := explicit.zipIdx.map fun ((_, _), pos) =>
+    .fst ((List.range pos).foldl (fun t _ => .snd t) (.var 0) : Term R)
+  let body := substLastVars n ps (.cocon payload)
+  let F : Term R := .lam "j" (.lam recName (.lam idxName (.lam aName body)))
+  let scofixT : Term R := .scofix l (q I) (q D) A F (q sz) (q idx) init
+  let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) scofixT
+  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b .hole) ty
+  finishInstances
+  let val ← zonk 0 val
+  ensureNoMVars val info
+  let fullTy ← zonk 0 fullTy
+  ensureNoMVars fullTy info
+  pure (fullTy, val)
+
 /-- Copatterns: `def f binders : T args | .obs => rhs …` for a coinductive `T`
 compiles to `coit`. The state is the tuple of the explicit binders; a recursive
 observation must be a corecursive call `f e…` (that is the guardedness condition),
@@ -1097,14 +1357,19 @@ whose arguments become the next state.
 
 When no observation is corecursive (`register a s | .head => a | .tail => s`), the
 definition is not recursive at all: it compiles to `cocon` of the observations, one
-cell in front of the given streams, and `f` may not occur on any right-hand side. -/
+cell in front of the given streams, and `f` may not occur on any right-hand side.
+
+A result `T^i` at a size variable with a binder also sized at `i` is the sized case:
+`elabCopatternsScofix` compiles it to `scofix`. -/
 def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : ElabM R (Term R × Term R) := do
   let alts := (cmd.getArg 5).args.toList
   for (o, _) in obs do
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let r ← if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
+  let sized := sizedVarSyntax? ((cmd.getArg 4).getArg 1)
+  let r ← if sized then elabCopatternsScofix name cmd obs
+    else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)
   pure r
 
@@ -2263,6 +2528,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | "term.ident" => (stx.getArg 0).getId?
         | "term.app" => resultHead (stx.getArg 0)
         | "term.paren" => resultHead (stx.getArg 1)
+        | "term.sized" => resultHead (stx.getArg 0)
         | "term.arrow" | "term.depArrow" => resultHead (stx.getArg 2)
         | _ => none
       let declared := (resultHead ((cmd.getArg 4).getArg 1)).map s.globals.resolve
@@ -3277,25 +3543,77 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       let t ← zonk 0 t
       ensureNoMVars t cmd.info
       pure t
+    -- `Repr`: when the value's type has a `Repr` instance (lib/Deriving.wiz), run
+    -- `Repr.repr e` instead of reading the value back as a term, so `#eval [1, 2, 3]`
+    -- prints a list literal. The wrapper is elaborated in its own run; if there is no
+    -- instance (or no `Repr` class in scope) the old readback path is used.
+    let reprStx : Syntax :=
+      .node {} "term.app"
+        #[.node {} "term.ident" #[.ident {} "Repr.repr"], .node {} "null" #[cmd.getArg 1]]
+    let reprTerm? : Option (Term R) :=
+      if s.globals.contains "Repr.repr" then
+        match (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+            let (t, _) ← Elab.infer {} reprStx
+            solveSortConstraints
+            let t ← zonk 0 t
+            ensureNoMVars t cmd.info
+            pure t).1 with
+        | .ok t => some t
+        | .error _ => none
+      else none
     match r with
     | .error e => reportErr e
     | .ok t =>
       -- (the sorts pass first: the kernel checks the term erasure is given)
       let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
       let ctx : Ctx R := { globals := s.globals, proof := true }
-      let result := do
-        let (ty, _) ← Wiz.infer ctx t
-        let e ← eraseTop ctx t ty
-        let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
-        pure (ty, e, code, failed)
-      match result with
-      | .ok (_, _, _, (n, err) :: _) =>
-        -- the interpreter can't fail: running a stub would print a wrong value
-        report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
-      | .ok (ty, e, code, []) =>
-        let v := run code [] e
-        report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
-      | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let plain : StateM (CommandState R) Unit := do
+        let result := do
+          let (ty, _) ← Wiz.infer ctx t
+          let e ← eraseTop ctx t ty
+          let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+          pure (ty, e, code, failed)
+        match result with
+        | .ok (_, _, _, (n, err) :: _) =>
+          -- the interpreter can't fail: running a stub would print a wrong value
+          report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+        | .ok (ty, e, code, []) =>
+          let v := run code [] e
+          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+        | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let hintOf (ty : VTy R) : Option Name := match whnf ty with
+        | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
+        | .nu _ _ _ _ _ (some (T, _, _)) => some T
+        | _ => none
+      -- Inductive types are anonymous `μ`s and `Enum` tags are metadata, so two
+      -- structurally equal types share their instances: a two-constructor enum declared
+      -- after `Bool` shadows `Repr Bool`, and the last instance wins (7b). `Bool` keeps
+      -- its constructor readback (`.true`), the stable spelling; a list of Bools still
+      -- goes through the list instance.
+      let keepReadback : Bool :=
+        match (Wiz.infer ctx t).toOption with
+        | some (ty, _) => hintOf ty == some "Bool"
+        | none => false
+      let reprRun : StateM (CommandState R) Unit := do
+        match reprTerm? with
+        | none => plain
+        | some rt => do
+          let rt := if rt.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } rt).1 else rt
+          let result := do
+            let (ty, _) ← Wiz.infer ctx rt
+            let e ← eraseTop ctx rt ty
+            let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+            pure (ty, e, code, failed)
+          match result with
+          | .ok (_, _, _, (n, err) :: _) =>
+            report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+          | .ok (_, e, code, []) =>
+            -- the Repr method returns a `String`: print its text, not the term readback
+            match (run code [] e).toString? with
+            | some text => report .info cmd.info text
+            | none => plain
+          | .error _ => plain
+      if keepReadback then plain else reprRun
   | "command.plot" =>
     -- `#plot expr`: elaborate the chart, then run `Plot.widget` on it and report the
     -- `WIZ_WIDGET:` display value as a message at the command (the infoview turns such

@@ -530,6 +530,29 @@ partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectO
 /-- `scry project`'s output line helper (kept local: `Scry.Cli` imports this module). -/
 def Scry.ProjectIO.say (s : String) : EIO Unit := EIO.lift (IO.println s)
 
+/-- Print one diagnostic on stderr (the `scry: …` line a shell sees on a failure). -/
+def Scry.ProjectIO.sayErr (s : String) : EIO Unit := EIO.lift (IO.ePrintln s)
+
+/-- Try an `EIO` action, keeping its failure as a value: the driver needs to turn a
+build/IO failure into exit 2 (usage/IO) or 3 (nothing analysed) instead of letting the
+top level map every error to 1. -/
+def Scry.ProjectIO.attempt {A : Type} (x : EIO A) : EIO (Except String A) :=
+  IO.bind x (fun r => IO.pure (.ok r))
+
+/-- The exit status of a completed project report. `3` means nothing was analysed (no
+translation unit produced a function), so "no findings" is never confused with "did not
+run"; `1` is the `--fail-on-finding` gate. -/
+def Scry.ProjectIO.reportStatus (r : Scry.ProjectReport) (failOnFinding : Bool) : Nat :=
+  match List.length r.project.analyzed with
+  | 0 => 3
+  | _ =>
+    match Bool.and failOnFinding
+        (Bool.or (Nat.lt 0 (List.length r.findings))
+          (Bool.or (Nat.lt 0 (List.length r.boundaries))
+            (Nat.lt 0 (List.length r.memory)))) with
+    | .true => 1
+    | .false => 0
+
 /-- Write the facts file, or print it when `out` is `-`. -/
 def Scry.ProjectIO.writeFacts (out : String) (p : Scry.Project) : EIO Unit := do
   let text := Scry.renderProjectEdb p;
@@ -560,47 +583,68 @@ def Scry.ProjectIO.emitSarif (opts : Scry.ProjectOpts) (r : Scry.ProjectReport) 
 def Scry.ProjectIO.report (opts : Scry.ProjectOpts) (r : Scry.ProjectReport) : EIO Nat := do
   Scry.ProjectIO.emitReport opts r;
   Scry.ProjectIO.emitSarif opts r;
-  let failing := Bool.and opts.failOnFinding
-    (Bool.or (Nat.lt 0 (List.length r.findings))
-      (Bool.or (Nat.lt 0 (List.length r.boundaries)) (Nat.lt 0 (List.length r.memory))));
-  match failing with
-  | .true => EIO.pure 1
-  | .false => EIO.pure 0
+  EIO.pure (Scry.ProjectIO.reportStatus r opts.failOnFinding)
 
 /-- The command proper: parse the options, build the project, print the summary, the
-requested relation or the whole-project taint report, and write `--facts`/`--sarif`. -/
+requested relation or the whole-project taint report, and write `--facts`/`--sarif`.
+
+Exit status: `0` a clean run, `1` at/above `--fail-on-finding`, `2` usage/IO (a bad
+flag, an unreadable tree, a failed `cc -E`), `3` nothing analysed (no translation unit,
+or no function in any unit). -/
 def Scry.ProjectIO.runArgs (query : Bool) (args : List String) : EIO Nat := do
   match Scry.parseProjectArgs .none (Scry.ProjectOpts.default "") args with
-  | .error e => EIO.fail e
+  | .error e => do
+    Scry.ProjectIO.sayErr ("scry: " ++ e);
+    EIO.pure 2
   | .ok pair => do
     let opts := pair.2;
-    r ← Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc opts.allowErrors
-      opts.keepSystemHeaders opts.skipBroken opts.flags opts.cache;
-    let p := r.1;
-    match opts.facts with
-    | .some out => Scry.ProjectIO.writeFacts out p
-    | .none => EIO.pure ();
-    match query with
-    | .false => match opts.taint with
-      | .true => do
-        pack ← Scry.loadTaintPack opts.rules;
-        let rep := Scry.analyzeProject p pack r.2;
-        Scry.ProjectIO.report opts rep
-      | .false => do
-        Scry.ProjectIO.say (Scry.Project.summary p);
-        match opts.cacheStats with
-        | .true => Scry.ProjectIO.say (Scry.CacheStats.line r.2)
-        | .false => EIO.pure ();
-        EIO.pure 0
-    | .true => match opts.rel with
-      | .some rel => match opts.func with
-        | .some _ => EIO.fail "scry project query takes --rel or --func, not both"
-        | .none => match Scry.Project.relation p rel with
-          | .error e => EIO.fail e
-          | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
-      | .none => match opts.func with
-        | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
-        | .none => EIO.fail (Scry.ProjectIO.usage .true)
+    built ← Scry.ProjectIO.attempt (Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc
+      opts.allowErrors opts.keepSystemHeaders opts.skipBroken opts.flags opts.cache);
+    match built with
+    | .error e => do
+      Scry.ProjectIO.sayErr ("scry: " ++ e);
+      EIO.pure (match String.startsWith e "no C translation units" with
+        | .true => 3
+        | .false => 2)
+    | .ok r => do
+      let p := r.1;
+      match opts.facts with
+      | .some out => Scry.ProjectIO.writeFacts out p
+      | .none => EIO.pure ();
+      match query with
+      | .false => match opts.taint with
+        | .true => do
+          packOpt ← Scry.ProjectIO.attempt (Scry.loadTaintPack opts.rules);
+          match packOpt with
+          | .error e => do
+            Scry.ProjectIO.sayErr ("scry: " ++ e);
+            EIO.pure 2
+          | .ok pack => do
+            let rep := Scry.analyzeProject p pack r.2;
+            Scry.ProjectIO.report opts rep
+        | .false => do
+          Scry.ProjectIO.say (Scry.Project.summary p);
+          match opts.cacheStats with
+          | .true => Scry.ProjectIO.say (Scry.CacheStats.line r.2)
+          | .false => EIO.pure ();
+          EIO.pure (match List.length p.analyzed with
+            | 0 => 3
+            | _ => 0)
+      | .true => match opts.rel with
+        | .some rel => match opts.func with
+          | .some _ => do
+            Scry.ProjectIO.sayErr ("scry: " ++ Scry.ProjectIO.usage .true);
+            EIO.pure 2
+          | .none => match Scry.Project.relation p rel with
+            | .error e => do
+              Scry.ProjectIO.sayErr ("scry: " ++ e);
+              EIO.pure 2
+            | .ok s => do Scry.ProjectIO.say s; EIO.pure 0
+        | .none => match opts.func with
+          | .some name => do Scry.ProjectIO.say (Scry.Project.renderFuncs p name); EIO.pure 0
+          | .none => do
+            Scry.ProjectIO.sayErr ("scry: " ++ Scry.ProjectIO.usage .true);
+            EIO.pure 2
 
 /-- Run `scry project` (or `query` when `query` is true). `--help` prints that command's
 usage and exits 0, before the positional directory is parsed. -/

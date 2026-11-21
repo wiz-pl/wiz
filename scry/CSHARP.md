@@ -736,8 +736,14 @@ every file with the same native shim, lowers it with `Scry.CsLower`, runs the ru
 over the merged program, and writes a summary whose **coverage** section is the point:
 
 ```
-scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+scry cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note] [--rules FILE]
+             [--no-taint]
 ```
+
+`--sarif OUT` writes the findings as SARIF 2.1.0 (`runs[0].results`; coverage rows and
+boundary warnings stay in the JSON/human coverage section). The end-to-end test
+`scry/tests/e2e-cs.wiz` runs the real driver over `corpus/csharp/repo` and asserts the
+JSON schema, the coverage rows, the SARIF shape and all four exit statuses.
 
 `PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or one `.cs` file. An
 SDK-style project (no `<Compile Include=` items) is walked; an explicit item list is

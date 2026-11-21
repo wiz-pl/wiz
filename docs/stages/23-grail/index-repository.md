@@ -1,15 +1,15 @@
-# The `grail-index` repository
+# The `fate-index` repository
 
 The registry (23m, [../23-grail.md](../23-grail.md)) splits package distribution into a
 manifest, a static index and a lock. This section describes the index repository itself:
 its layout, how entries are generated, how they are checked, and what its trust story is
-(and is not). The runnable example is `examples/grail-index/`; the schema is unchanged for
+(and is not). The runnable example is `examples/fate-index/`; the schema is unchanged for
 clients unless an entry opts into the new module fields.
 
 ## Layout
 
 ```
-grail-index/
+fate-index/
   index.wiz                    the index's own manifest (Wiz code)
   registry.sexpr               name, format, updated (plain S-expression metadata)
   index/NAME.sexpr             the static index: one file per package
@@ -40,7 +40,7 @@ resolver does not need it, but a mirror or a dashboard can read it without Wiz.
 import Grail
 
 def index : Index :=
-  Index.new "wiz-pl/grail-index"
+  Index.new "wiz-pl/fate-index"
     |> Index.withFormat 1
     |> Index.package "base"
     |> Index.package "text"
@@ -134,9 +134,9 @@ the directory, the single-file and the `file://` git forms against the example.
 ## Checking an index
 
 ```sh
-scripts/grail-index-check.sh examples/grail-index
+scripts/grail-index-check.sh examples/fate-index
 # or
-grail index check examples/grail-index
+grail index check examples/fate-index
 ```
 
 The check **makes no network requests by default**. It validates:
@@ -163,7 +163,7 @@ directory, verifies their hash and layout, and deletes them.
 
 Exit status is 1 when any error is found; warnings (for example a dependency that another
 index provides, i.e. an overlay) do not fail. CI runs the script on
-`examples/grail-index` in the build job, so the example cannot rot; the `=grail-index`
+`examples/fate-index` in the build job, so the example cannot rot; the `=grail-index`
 test group covers the failure modes.
 
 The resolver has the same module rule: `Resolve.resolve` refuses a selection in which two
@@ -189,7 +189,7 @@ state is a single document, `index/snapshot.sexpr`:
 
 ```lisp
 (snapshot
-  (name "wiz-pl/grail-index")
+  (name "wiz-pl/fate-index")
   (seq 42)
   (updated "2026-11-15T00:00:00Z")
   (key "SHA256:…")
@@ -221,7 +221,7 @@ it accepted:
 
 ```lisp
 (lock
-  (index "https://github.com/wiz-pl/grail-index" "<commit>")
+  (index "https://github.com/wiz-pl/fate-index" "<commit>")
   (index-signature (kind snapshot) (identity "release-key")
     (key "ssh-ed25519 AAAA…") (fingerprint "SHA256:…") (expires "2027-11-15T00:00:00Z")
     (seq 42) (updated "2026-11-15T00:00:00Z") (sha256 "<snapshot digest>"))
@@ -258,7 +258,7 @@ implementation does not use.
 
 The index needs a git host, not a service. Any of these work, with no client change:
 
-* a public repository (`https://github.com/wiz-pl/grail-index` is the intended one);
+* a public repository (`https://github.com/wiz-pl/fate-index` is the intended one);
 * an organisation's private clone (the same URL, with the org's credentials);
 * a static HTTP mirror of the checkout served over HTTPS (the client clones it; the
   Cargo-sparse-style "one file per package over HTTP" is not implemented, R-§2.3);
@@ -338,7 +338,7 @@ What TUF calls out, mapped to this design:
   `.grail/packages/NAME` is refused).
 * Automatic publish: the review is still the gate. A bot that rebuilds the archive from
   the tag and compares the hash would make rule 2 load-bearing rather than decorative.
-* A real hosted `wiz-pl/grail-index` with its first packages; the example here is the
+* A real hosted `wiz-pl/fate-index` with its first packages; the example here is the
   template, not the deployment.
 * The `@org/name` layout is read, but scopes are not enforced in names or manifests.
 

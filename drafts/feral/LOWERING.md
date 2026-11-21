@@ -305,7 +305,10 @@ quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
 stated on values: `f.Spec` takes each `&mut` argument's value, runs the call inside the
 caller's borrow scopes (`Uniq.borrow`/`borrowIn`), and `Result.Holds` states the clauses
 on the values the scopes hand back (`old(x)` is the argument, `final(x)` the lender's
-final value).
+final value). For a returned borrow the one lender's scope is opened, the call's
+`Borrowed` is matched in it, and the borrow is closed there (`Mut.peek`/`Mut.close`):
+`result` is the borrow's value, `final(result)` the quantified `fin`, and `final(v)` the
+lender's value the scope hands back (`lib/Feral.wiz`, `Fe.specBorrow`).
 
 **L19. Interop (RD16).** Wiz calls lowered functions as they are (`R`, handed-back
 tuples, backward closures); `Result.map`, `Result.show`, `Mut.release`, `MutOpt.over`

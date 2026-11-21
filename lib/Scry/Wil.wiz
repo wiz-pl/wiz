@@ -1,5 +1,6 @@
 import Text
 import Functor
+import Scry.Index
 /-!
 # Scry's common IR: Wil
 
@@ -413,6 +414,52 @@ structure Wil.Func where
 structure Wil.Program where
   funcs : List Wil.Func
 
+/-- One definition and its index in `Wil.Program.funcs`. -/
+structure Wil.FuncEntry where
+  index : Nat
+  func : Wil.Func
+
+/-- A program's function table: source name -> every definition, in program order. The
+table is derived data (`Scry.NameMap`); like the program itself it is pure and can be
+built once and passed through a whole analysis. -/
+structure Wil.ProgramIndex where
+  byName : Scry.NameMap Wil.FuncEntry
+
+partial def Wil.funcEntriesGo (i : Nat) :
+    List Wil.Func → List (String × Wil.FuncEntry)
+  | .nil => .nil
+  | .cons f rest =>
+    List.cons (f.name, Wil.FuncEntry.mk i f) (Wil.funcEntriesGo (Nat.succ i) rest)
+
+/-- Build the function table once. A caller that looks several names up (the points-to
+and summary loops) should build this and use `Wil.findFuncIn`; `Wil.findFunc` is the
+compatibility spelling for a one-off lookup. -/
+def Wil.indexProgram (p : Wil.Program) : Wil.ProgramIndex :=
+  Wil.ProgramIndex.mk (Scry.NameMap.fromList (Wil.funcEntriesGo 0 p.funcs))
+
+/-- The first definition of `name`, exactly as `Wil.findFunc`. -/
+def Wil.ProgramIndex.findFunc (ix : Wil.ProgramIndex) (name : String) :
+    Option Wil.Func :=
+  match Scry.NameMap.find ix.byName name with
+  | .none => .none
+  | .some e => .some e.func
+
+/-- The first entry for `name`, with its global index. -/
+def Wil.ProgramIndex.findEntry (ix : Wil.ProgramIndex) (name : String) :
+    Option Wil.FuncEntry :=
+  Scry.NameMap.find ix.byName name
+
+/-- Every definition of `name`, in program order. -/
+def Wil.ProgramIndex.findAll (ix : Wil.ProgramIndex) (name : String) :
+    List Wil.FuncEntry :=
+  Scry.NameMap.findAll ix.byName name
+
+/-- Indexed spelling of `Wil.findFunc`. -/
+def Wil.findFuncIn (ix : Wil.ProgramIndex) (name : String) : Option Wil.Func :=
+  Wil.ProgramIndex.findFunc ix name
+
+/-- Compatibility lookup: one linear scan. Hot callers build `Wil.indexProgram` once
+and use `Wil.findFuncIn`; this wrapper keeps the old public signature for one-offs. -/
 def Wil.findFunc (p : Wil.Program) (name : String) : Option Wil.Func :=
   List.find (fun f => String.eq f.name name) p.funcs
 

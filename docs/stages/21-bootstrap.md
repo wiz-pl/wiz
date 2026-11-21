@@ -1138,9 +1138,10 @@ covers ordinary inductives only), no rewriting in hypotheses, no
 type (e.g. `List (F Nat)`); it cannot find one whose equation the kernel has already
 whnf'd (the selfhost `vEq` reduces the sides of an equation where the host keeps the
 written ones), so the exact `unfold List.filter` steps of `lib/Data/ListLemmas` are not
-guaranteed to match the host. The error position is the failed command, as for the rest
-of the self-hosted diagnostics (D6), and the host's multi-line expected/inferred blocks
-are not reproduced.
+guaranteed to match the host. The error position is the failing term, as for the rest
+of the self-hosted diagnostics (21ar); where the failing term is not known (a binder's
+type) it falls back to the command. The host's multi-line expected/inferred blocks are
+not reproduced.
 
 ## 21af: how much of the parity group runs the pipeline
 
@@ -1523,6 +1524,10 @@ yet — see `=selfhost-libdiff` (21ae). Their remaining blockers are not in thes
   difference between two preludes, not the file.
 ## 21al: the driver's cache: read-only layers, pruning and manifests (D5)
 
+*(Superseded in part by 21ar: the entries are per module now and the keyed names are the
+host's `.wizc`/`.wizm`/`.wizr`/`.wizs`; the layer, verification and pruning policy below
+is unchanged.)*
+
 The driver's elaboration cache was one writable directory (`--cache DIR`, default
 `~/.cache/wiz`) with one `.check` entry (the frontend's tagged lines and exit status)
 and one `.c` entry (the generated C) per graph key (21n). It now has the host's cache
@@ -1744,3 +1749,174 @@ recurses on a different argument than the host's), notations and operator preced
 and the class/instance layer (a new class or notation in the host prelude does not fail
 the check). Those need elaboration, not a regexp; `selfhost-libdiff`
 measures their consequences, and the check's report names the known gaps on every run.
+
+## 21aq: the LLVM backend's first slice, self-hosted (C5)
+
+The Lean-hosted `wiz` has two native backends over one A-normal-form IR
+(`Wiz/Compiler/IR.lean`): `C.lean` and `LLVM.lean`, plus `IRRun.lean` for `#run`.
+The self-hosted compiler has neither the IR nor either consumer: `selfhost/Backend.wiz`
+erases to `ETm` (a lambda term with nested-pair payloads) and compiles that straight to
+C (`cgE`). C5 asked what a real LLVM path would cost and, if it was too large, for the
+smallest honest slice.
+
+### Inventory and size
+
+A full port is an **XL** item, not a week:
+
+* `Lower.lean` (lambda lifting, A-normalisation, join points, constant folding) and the
+  ownership passes `RC.lean`, `Borrow.lean` and `Reuse.lean`, so every `dup`/`drop`,
+  borrow and reuse token is right;
+* `LLVM.lean`'s emitter over that IR, including closures, CAFs, the object model and the
+  C-compiled foreign wrappers;
+* the runtime protocol: `runtime/wiz.c`'s `wiz_finish`/`wiz_run_main`, `IO`, args, and
+  the extern wrappers;
+* `IRRun.lean`'s interpreter for `#run`, which shares the IR but not the backend.
+
+Doing that for `ETm` directly (bypassing IR) would fork the host's semantics rather than
+port them; translating the backend's own C to LLVM would need a C front end and would
+inherit C's runtime calls anyway. Neither is smaller than porting the IR path for a
+subset.
+
+### The slice
+
+`--target llvm` (and the host's `--llvm` alias) now writes a textual `.ll` module for a
+**closed `main : Nat`**:
+
+* the erased term is lowered to the host's `IR.Decl` shape (`Backend.wiz`'s `IREx`,
+  `IRB`, `IRDecl`; `lowerE`) in A-normal form with a `ret`;
+* `Simp.lean`'s constant folding (`irFoldOp`) reduces `Nat.zero/succ/pred/add/sub/mul/
+  beq/blt` on literals; `Reuse.lean`'s `elimDead` (`lbElimDead`) removes the dead
+  argument bindings;
+* `LLVM.lean`'s `expr`/`body`/`decl`/`program` are ported as
+  `irExText`/`irBodyText`/`irDeclText`/`llvmProgram`, so the lowered functions print
+  with the host's names, variable numbers and text;
+* a `fap` between two lowered functions is in the subset, so `main` may call a
+  *parameterized* function whose body also lowers. A zero-parameter definition may be a
+  CAF (`wiz_caf_init` caches it in a slot, which needs the runtime), so only the entry
+  itself is lowered. A nullary constructor is a scalar tag; `Nat.beq`/`Nat.blt` return
+  the `Bool` tags.
+
+Everything that allocates or needs the runtime is one precise error, never a stub:
+`ctor` with fields, `pap`/`ap`, `proj`, `case`, a λ, `reset`/`reuse`, the erased
+`ind`/`pack`/`unpack` primitives, a `prim` that does not fold, a numeral at or above
+`2^62` (a big-number object), a backend flag, or a `link_c` file. `--target wasm` and
+`--split N` are still refused with their own messages. `build --llvm` writes the module
+at `-o`; `run --llvm` assembles it with `llc` (`--llc CMD`) and links it with `cc`.
+
+The module's own `main` prints the scalar (`2n+1` decoded) with `printf`: the host calls
+the runtime's `wiz_run_main`, which the self-hosted compiler does not carry yet.
+
+### Worked example
+
+`def main : Nat := Nat.add 2 3` (after `import Prelude`) produces, with
+`wiz-selfhost build n.wiz -o n.ll --target llvm`:
+
+```llvm
+; generated by `wiz-selfhost --target llvm` (C5, first slice)
+; `main : Nat`'s erased term was lowered to the host's A-normal-form IR and printed
+; by the port of `Wiz/Compiler/LLVM.lean`; closed literal arithmetic only, no allocation.
+@wiz.out = private constant [5 x i8] c"%lu\0A\00"
+declare i32 @printf(ptr, ...)
+define internal i64 @w_main() {
+entry:
+  %x2.0 = add i64 0, 11
+  ret i64 %x2.0
+}
+define internal i64 @w_main_boxed(ptr %a) {
+
+  %r = call i64 @w_main()
+  ret i64 %r
+}
+define internal i64 @w_wiz_2e_entry() {
+entry:
+  %x0.0 = call i64 @w_main()
+  ret i64 %x0.0
+}
+define internal i64 @w_wiz_2e_entry_boxed(ptr %a) {
+
+  %r = call i64 @w_wiz_2e_entry()
+  ret i64 %r
+}
+define i32 @main() {
+entry:
+  %v = call i64 @w_wiz_2e_entry()
+  %n = sub i64 %v, 1
+  %h = lshr i64 %n, 1
+  %r = call i32 (ptr, ...) @printf(ptr @wiz.out, i64 %h)
+  ret i32 0
+}
+```
+
+The same program through the C backend prints `5`; `run --llvm` compiles this module
+with `llc` and prints `5` too. `Nat.add 40 2` lowers to `lit 40`, `lit 2`, `nat.add`,
+folds to `42`, and `elimDead` leaves only `add i64 0, 85` (`42`'s scalar encoding).
+
+### What is left
+
+Ownership is the next blocker: `RC.lean`'s `insertRC` and `Borrow.lean`'s inference,
+then `ctor`/`proj`/`pap`/`ap`/`prim`, the `runtime/` object calls (`wiz_ctor_new`,
+`wiz_inc`, `wiz_dec`, `wiz_apply`, …), and the result protocol (`wiz_finish`,
+`wiz_run_main`, args, `IO`). Big literals (`wiz_nat_lit`) and the foreign wrappers follow
+the runtime. `#run` needs the `IRRun.lean` interpreter, which is a separate port over the
+same IR. None of those is claimed here.
+
+Tests: `=selfhost-cli` builds, prints and runs the slice and pins the outside-slice
+error; `=selfhost-cli-diff` compares `check --target llvm` (silent in both), the lowered
+`w_main`/`w_wiz_2e_entry` text with the host's `out.ll` (equal), `run --llvm` (`42` in
+both) and the still-refused `--target wasm`.
+
+## 21ar: positioned diagnostics and a per-module cache (D5, D6)
+
+The two driver rows that were still *behaviourally* different from the Lean-hosted `wiz`
+are closed.
+
+**D6, the position of a failure.** The frontend's error messages now carry the offset
+of the **term** that failed, not only the command's start. `inferT`/`checkT` attach the
+current syntax node's start to an error that has none (`errMarkIf`, a trailing
+`"\x01<offset>"` mark), so the *innermost* failing term wins and a wrapper never
+overwrites it; a tactic's failure is placed at the tactic (`runTacticSteps`, so `by smt`
+is reported at the `smt` token) and a duplicate declaration at the declared name
+(`declSpanFor`). `atLine` turns the mark into the line's `@OFFSET` and strips it, so no
+output ever carries one. Spans are now computed for every command, not only for the
+language server. A message without a mark (a binder's type, a lookup before a term
+exists) keeps the command's start, as before.
+
+A module's errors are **nested under its import**, as the host's
+`importErrorsText` does: `import M` of a broken `M` reports one diagnostic at the
+import, `module M has errors:` followed by `  M:line:col: error: …` for each of M's own
+errors, and a deeper module's block is passed on as `imported module M → …` (never
+nested twice). The frontend carries the line breaks of one nested report as `\x02`
+inside one output line (so the cache's line format stays one-line-per-entry) and the
+driver expands them when it prints. A module's non-error lines (a `#check`'s info) stay
+at their own position.
+
+A **missing file** is now one positioned diagnostic in the host too (`no.wiz:1:1:
+error: no such file`, code `no-such-file`, added to `ErrorCode.all` and
+`docs/error-codes.md`) instead of an uncaught `IO.FS.readFile` exception; `check` and
+`build`/`run` read through the same helper, so the two tools print the same line and
+exit 1.
+
+**D5, one cache entry per module.** `<key>.wizc` is a module's tagged output lines and
+status, `<key>.wizm` its manifest; a module's key is the toolchain id, the root's
+`import_c` header texts, the elaboration flags, its own name and text, and each import's
+name and key in source order (a changed dependency misses every importer; a path and an
+mtime are not in the key; the load order is the import DFS's dependencies-first order).
+A warm `check` computes the load order from the import graph, reads every module's entry,
+rebuilds the nesting report and the non-error lines from them (`--types` included) and
+runs no command. An entry holds a module's **own** lines, so an importer's entry does not
+repeat a dependency's info line.
+The program's compiled C is `<key>.wizr` (one per graph: it plays the host's region
+role) with its checksum in `<key>.wizs`; `build`/`run` share it. `--cache-ro`,
+`--cache-verify off|warn|strict` (manifest sidecars are now `<key>.wizm` for `.wizc`/
+`.h` and `<key>.wizs` for `.wizr`) and `--cache-prune` all keep working, and the prune
+summary now uses the host's four keyed names and its exact wording, so an empty prune
+is byte-identical in the two tools.
+
+Not done: **globals are not serialized**. The cache stores a module's output lines, not
+the `Globals` its elaboration produced, so one missing module entry is a cold
+elaboration of the whole graph (the root's key includes every import's key, so a change
+is never served stale). Serializing `Globals` means encoding `Tm` (60 constructors),
+`Val`, `Scope`'s `StrMap`s, `IndInfo`'s `Syntax`, `ClassInfo`, the `FFI` records and the
+flags, and reconstructing them exactly; a cache hit is trusted without a kernel check,
+so a serializer bug would be a soundness bug, not a slow run. That is a separate piece
+of work, sized and deferred rather than approximated.

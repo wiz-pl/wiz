@@ -10,6 +10,27 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* elab: a named `match h : e` inside a definition whose result is an equation keeps the
+  equation as written while its branches are checked. The declared type used to be
+  evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
+  match could not abstract the equation's sides and its own equation
+  (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
+  matches now see both equations; added the computed-goal nested case, an
+  independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
+* registry: the package registry is **Fate**, and its index repository is
+  `wiz-pl/fate-index` (`grail-index` is the historical name). `grail` is unchanged as the
+  client (`grail update/publish/lock`); the hermetic fixture and the example index move
+  to `Tests/fixtures/fate-index/` and `examples/fate-index/`. The registry format and
+  the SSH signature namespace are unchanged.
+* language: a parameter before the colon is **fixed only if no recursive call changes
+  it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
+  count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
+  unchanged"); a changed parameter is now elaborated as if it were after the colon, so
+  the motive abstracts it and the induction hypothesis takes its value. A parameter no
+  call changes is still checked (also in `@f` form). `lib/Prelude.wiz`'s
+  `Syntax.decPowersGo` and `Syntax.decDigitGo` are accepted as written, with their
+  accumulators before the colon. Tests: `language` ("a parameter before the colon that a
+  recursive call changes is elaborated after it").
 * web: the infoview has a **widget host** (`web/widgets.js`). It parses the Loom
   `wiz.widget/1` payload (`WIZ_WIDGET:`), draws the `#plot` producer's inline
   `image/svg+xml`/`text/html` figure and the scry analysis's claim/findings card, and
@@ -103,6 +124,19 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   contract), against the stage-4 target 3,733; the remainder is the mirror, the popup
   and the measured style copy, not rules. After the merge with stages 5–6 it is 3,906.
 
+* **Application operators, pipe projections, sections, and `#eval` through `Repr`
+  (13w).** `f <| x` (`apply`, `infixr:10`) joins `x |> f` (`pipe`, `infixl:10`);
+  `x |>.f` is the same projection as `x.f`, nested paths included; `(· + 1)`,
+  `(1 + ·)` and `(· * ·)` are lambdas whose parameters come from the expected type
+  (`List.map (· + 1) xs`). `#eval` now runs `Repr.repr` when the value's type has a
+  `Repr` instance, so `[1, 2, 3]` prints as a list literal instead of `List.cons …`;
+  types without an instance keep the term readback, `Bool` keeps `.true`/`.false`
+  (structurally equal enums share `Repr` instances, so its readback is the stable
+  spelling), and `#check`/`#print` are unchanged. `Repr String` escapes as the lexer
+  reads, and `Repr (List A)` is hand-written (it is no longer derived).
+  `lib/Compose.wiz` adds `class Compose`
+  with `g ∘ f` (`infixr:90`), a function instance, and the definitional laws
+  `Compose.assoc`, `Compose.id_left`, `Compose.id_right`.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
@@ -320,6 +354,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   parse of all 5 560 `.cs` files of a real solution takes the error count from 16 to 0 with no file
   gaining an error. The two reproducers now have spills, `parse/contextual` pins the
   tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
+* scry: **one e-graph engine**. `Scry.Egraph` and `Scry.EgraphNative` were two
+  implementations that shared 74 of the reference module's 80 declarations and could not
+  be imported into one program. `Scry.Egraph` is now the single engine: the reference
+  surface (`Scry.EGraph`, `costs : U64Array` with `EGraph.inf`, `applyAt`/`applyMatches`
+  without a rule index) on the native hash cons (`etable` is a `U64Map` from an e-node
+  hash to a bucket), plus the analyses, explanations, limits and `Option` cost view
+  (`costsOpt`/`costOpt`) that used to live only in the native module. `Scry.EgraphNative`
+  is a compatibility import of `Scry.Egraph`; `Scry.EqPlan` and the examples that named
+  it are unchanged, and every `examples/scry-egraph-*.wiz` digest is identical. `add` and
+  `rebuild` no longer scan a flat association list or append one node at a time (adding
+  1 600 nodes: 18 ms in the audit's reference measurement, 0 ms here; at 12 800 nodes
+  the old module took 501 ms to add and 4.5 s to rebuild, the unified one 3 ms and 3 ms;
+  at 25 600 nodes, 2.0 s/18.7 s against 8 ms/7 ms).
+  The difference was not only the hash cons: a record update (`{ g with … }`) leaves the
+  old record live, so `U64Array.push`/`U64Map.insert` copied the whole table; the hot
+  paths destructure and rebuild with `mk`. The trust ledger and the name-collision
+  baseline drop the duplicate rows, and the whole of `lib/` now loads at once
+  (`Tests.Elab.libApart` is empty).
+
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known
@@ -666,7 +719,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/fate-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -676,9 +729,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `grail update` upgrades them. `grail publish` and the index schema record the size,
   tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
   locks, upgrade, override).
-* grail (23m), the static index side: a `grail-index` repository layout (static
+* grail (23m), the static index side: a `fate-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
-  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  index's Wiz manifest and generator templates), a complete `examples/fate-index/` with
   three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
   semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
   module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
@@ -731,6 +784,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
   group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
   `docs/libraries.md:1979` has the API.
+* `match h : e with | p => …` names the branch's equation `h : e = p`, so a split on a
+  computed value (`match h : p n with`) can use what the split learnt; each scrutinee may
+  be named (`match h : e, k : f with`, including after an unnamed one) and the equation
+  works in a non-dependent match too. A named match on an indexed value is reported
+  rather than ill typed (4e, #254).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

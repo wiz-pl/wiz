@@ -428,3 +428,22 @@ limit the dogfood recorded for the driver build.
   the write refutable; the claim never silently passes an unanalysed extent.
 * **No mechanised soundness.** The dominance/coverage argument is still a paper argument
   in this note; there is no Wiz theorem `checkCut ... = proved → every write guarded`.
+
+## 10. The `scry prover` subcommand (end-to-end test)
+
+`Scry.ProverCmd` is the same driver as `scry/corpus/prover/build.sh`, exposed on the main
+CLI so a checkout with one `scry` binary needs no second build:
+
+```sh
+scry prover FILE FUNCTION [--cover|--cut|--dump|--rows p:v,...] [--guards p,...] \
+                          [--entry] [--classify] [--pack FILE] [--json] [--sarif OUT]
+```
+
+The human output keeps the `key<TAB>value` contract `check.sh` asserts. `--json` is
+`scry-prover-report/1` (property, relation-count coverage, verdict tag/text, invariant
+rows), and `--sarif OUT` writes one `error` result for a refutation (its message is the
+provenance witness) and no result for a proof. Exit status: **0** proved, **1** refuted
+or refused, **2** usage or IO, **3** nothing analysed (no function, no checked-in spill,
+or a vacuous claim — a vacuous verdict is never a proof). `scry/tests/e2e-prover.wiz`
+runs the real subcommand over the checked-in spills and pins the proved/refuted/vacuous
+cases plus every status.

@@ -654,7 +654,7 @@ class Runner:
 #: An exact test selector: `=GROUP` or `=GROUP#1,2`. Prefixes are refused (one letter
 #: would select half the suite), and so is anything that looks like an option.
 TEST_SELECTOR = re.compile(r"^=[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(#[0-9]{1,4}(,[0-9]{1,4}){0,63})?$")
-_CASE = re.compile(r"^  ([✓✗⊘]) (.*) \(([0-9.]+) s\)$")
+_CASE = re.compile(r"^(?:\[\d+/\d+\] )?  ([✓✗⊘]) (.*) \(([0-9.]+) s\)$")
 _GROUP = re.compile(r"^── (\S+)")
 _SUMMARY = re.compile(r"^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?\s*$")
 _STATUS = {"✓": "passed", "✗": "failed", "⊘": "skipped"}

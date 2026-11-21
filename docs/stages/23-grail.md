@@ -439,7 +439,7 @@ visible.) The URL is chosen by, in order:
 2. `Package.set "index" "URL"` in `grail.wiz` (or in the machine's
    `grail.local.wiz`, which wins, as for toolchain settings).
 
-The intended deployment is `https://github.com/wiz-pl/grail-index`, but any git URL is
+The intended deployment is `https://github.com/wiz-pl/fate-index`, but any git URL is
 an index, including an organisation's private one. A URL index is cloned once into
 `<cache>/grail/index`; `grail update` fetches and resets it, and `--offline` reads the
 cached clone (and refuses if there is none, or if it is a clone of another URL). The
@@ -476,7 +476,7 @@ the index/integrity fields, flat sorted entries and machine-local overrides:
 (lock
   (version 3)
   (toolchain 0.1.0-dev abcdef0)          -- Wiz.version and the release commit, when known
-  (index "https://github.com/wiz-pl/grail-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
+  (index "https://github.com/wiz-pl/fate-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
   (dep legacy "https://example.org/legacy.git" v2 "<commit>" "<content>")
   (pkg std 0.1.1 "https://…/std-0.1.1.tar.gz" "<sha256>"
     (size 1042) (tree "<sha256>") (commands "<sha256>")
@@ -622,7 +622,7 @@ unpacked trees (23n), with `.grail/packages/NAME` linked to one; `<cache>/grail/
 the clone of a URL index. `.grail/` is not committed; `grail.lock` is; `grail cache
 path/list/verify` inspects the store.
 
-**Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
+**Deferred:** a real `wiz-pl/fate-index` with CI naming rules and the first packages;
 signed index tags (the signed-snapshot form is implemented) and key rotation without a
 re-lock; per-registry index caches and repeatable `--index` overlays; `grail update -p NAME`
 and `--minimal`; a SHA-256 tree hash for git deps (lock v3's `pkg` and override tree
@@ -630,7 +630,7 @@ hashes are implemented); private-index credential settings, binary artifacts, an
 publish (a bot that verifies the artifact before merging). The reader understands the
 `index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.
 
-**The index repository.** The layout of a `grail-index` (the static `index/NAME.sexpr`
+**The index repository.** The layout of a `fate-index` (the static `index/NAME.sexpr`
 files, deterministic `packages/NAME-VERSION.tar.gz` archives, `index.wiz` and the
 generator), the `grail index check` validation (names, versions, semver ranges, archive
 SHA-256s, module-prefix conflicts) and the hosting/signing plan (TUF stages, Sigsum; no

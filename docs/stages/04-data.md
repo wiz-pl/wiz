@@ -148,9 +148,11 @@ def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
 partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=
   match Cursor.next c with
   | .done => (d, 0)
-  | .more _ c' => (Cursor.keep c' d, 0)
+  | .more _ c' =>
+    let r := Cursor.keep c' d;
+    r
 -- error: variable c' declared with quantity 1 but used ω
---   (the pair's first component is ω, and the recursive result contains `Cursor a`)
+--   (the `let` binds the recursive result at ω and it contains `Cursor a`)
 ```
 
 A `partial` definition's **witness** (the term that shows its type is inhabited) is
@@ -407,6 +409,33 @@ def add : Nat → Nat → Nat
 
 def head {A : Type} {n : Nat} : Vec A (.succ n) → A
   | .cons x _ => x                      -- the `nil` case is impossible, so it's omitted
+```
+
+`match h : e with | p => …` names the branch's equation: in the branch for `p`, the
+hypothesis `h : e = p` is in scope. This is what lets a split on a computed value
+(`match h : p n with`) be related back to `e`; a plain `match e with` still generalises
+`e` in the goal but gives the arm no equation. Each scrutinee may be named
+(`match h : e, k : f with`); the equation's name goes before its scrutinee, not in a
+pattern (`| h : .true => …` is an error).
+
+The elaborator binds each scrutinee to a variable `x` and gives the motive an extra
+argument `(h : e = x) → …`, then applies the whole match to `e` and to
+`rfl : e = e`. Branch `p` therefore sees `h : e = p`, with no index unification needed:
+the equation is a *reverted variable*, in the context before the motive is fixed. It
+works for a non-dependent match too (the goal need not mention `e`), since `h` is
+part of the motive's telescope. The equation is the language's observational equality,
+so it computes as usual (at a proposition it is `True`). A named match on an *indexed*
+value is rejected: the constructor split refines the index in the goal, but the
+scrutinee term keeps its outer index, so `e = p` would not be well typed (the plain
+`match e with` and a helper that takes the value and its equation still work). The same
+applies to a named scrutinee whose type mentions an earlier scrutinee that this match
+splits.
+
+```
+def keep (p : Nat → Bool) (n : Nat) : Nat :=
+  match h : p n with
+  | .true => n
+  | .false => 0
 ```
 
 `match` and equation-style definitions compile to case trees over `T.casesOn`

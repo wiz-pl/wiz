@@ -26,6 +26,9 @@ def package : Package := Package.new "scry"
   |> Package.exe "cs-externals" "tools/CsExternalsMain.wiz"
   -- one function's lowered Wil, source/sink facts and tainted rows (`CSHARP.md` §11).
   |> Package.exe "cs-trace" "tools/CsTraceMain.wiz"
+  -- the standalone prover driver (`scry prover` is the same code); kept so
+  -- `scry/corpus/prover/build.sh` and `check.sh` have a target
+  |> Package.exe "prover" "tools/ProverMain.wiz"
   |> Package.tests "tests" "tests"
   -- the S1 skeleton's end-to-end checks: each command runs the CLI over the fixture.
   -- They are ordinary build jobs (keyed by the exe, the fixture and the arguments), so

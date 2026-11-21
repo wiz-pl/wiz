@@ -10,7 +10,7 @@ set_option compiler.extract_closed false
 `drafts/storage-engine/Mmap.wiz` is the read-only page decoder (the `mmap` native, the
 32-byte page header and node records, the B+tree walk, the two meta slots, and a page
 checksum that can be skipped). `drafts/storage-engine/MmapTest.wiz` builds a store file
-in the version-1 format those modules document, maps it read-only and reads it: a torn
+in the version-2 format those modules document, maps it read-only and reads it: a torn
 newer meta slot is ignored, three nodes and an index bucket are found, an unaligned load
 is exact, and an out-of-range read is an error rather than a fault. A second file has a
 corrupted leaf so the test can show `verify := true` reporting `corrupt` and

@@ -797,6 +797,20 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `deriving BitPack`). The bit-level round trip `S.ofBits (S.toBits s) = s` holds by `rfl`
   for closed values (the example checks one, and all 32 values of a 5-bit bundle); a
   general lemma needs words' range proofs (stage 22l) and lemmas on `concat`/`slice`.
+  For an **inductive with fields** (no parameters) or a **plain structure** it adds
+  `T.tagWidth` (`⌈log₂ #constructors⌉`; 0 for a single constructor or a structure),
+  `T.payloadWidth` (the widest constructor's field widths), `T.width`
+  (`tagWidth + payloadWidth`), `T.code = HwTy.bits T.width`, `T.pack`/`T.unpack` (the tag
+  in the high bits, then the fields, the first highest, zero-padded to the widest
+  constructor; a structure has no tag), `T.toNat`, `T.lit` and `T.bitPack`. A field is
+  `BitVec n`, `Bool`, or a type with its own derived `width`/`pack`/`unpack`. The round
+  trip `T.unpack (T.pack x) = x` holds by `rfl` on closed values (samples; the general
+  lemma is the same value-level one as a bundle's). A recursive, implicit or proof field,
+  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  constructor payload wider than the declared payload width. A representation-
+  parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
+  through `Hw.packBits`/`Hw.unpackBits`). `examples/hdl-bitpack.wiz` checks the UART's
+  `TxState` and the CPU's `Instr` shapes.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
@@ -818,11 +832,10 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   non-zero initial value into inverters around a flip-flop); a reset is for targets
   without initial values and for restarting a design.
 
-Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
-inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
-`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
-reset.
+Not done: a general bit-level round-trip lemma for bundles and for inductives with fields
+(above; both hold on closed values), `!` on signals, `match` on a signal with
+field-binding or literal (`Nat` on `bits n`) patterns (see the `match` bullet above;
+`match` on an enumeration signal itself is done), asynchronous reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
 
@@ -1617,6 +1630,13 @@ is an `Applicative` and every `Applicative` a `Functor`; `Monad`/`Functor` insta
 `List.flatMap` (`List.map` is `lib/Text.wiz`'s, which Functor imports). See [13d](stages/13-language.md). The Prelude itself has `if … then …
 else`, short-circuiting `&&` and `||`, and `!` ([13c](stages/13-language.md)).
 
+`lib/Compose.wiz` (`import Compose`): `class Compose (α β γ : Type) where compose :
+(β → γ) → (α → β) → (α → γ)`, the operator `g ∘ f` (`infixr:90`), the function
+instance `compose g f x = g (f x)`, `id`, and the laws `Compose.assoc`,
+`Compose.id_left`, `Compose.id_right` (definitional; `#print axioms` lists none). A
+type with its own composition declares an instance, and a later instance wins (7b).
+See [13w](stages/13-language.md).
+
 ## 9j: text and lists (`lib/Text.wiz`)
 
 `import Text` (only `Prelude` underneath): the string and list functions a program needs,
@@ -2028,9 +2048,14 @@ instead of one `rw` per step.
 
 ## Native structures: word arrays, word maps, interned strings
 
-`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`), `lib/WordMap.wiz` (`U64Map V`)
-and `lib/Intern.wiz` (`InternTable`, ids as `U32`): list models with laws, run natively
-in compiled code, updated in place when unique. See `docs/stages/29-natives.md`.
+`lib/WordArray.wiz` (`U8Array`, `U32Array`, `U64Array`): list models with laws, run
+natively in compiled code, updated in place when unique. `lib/WordMap.wiz`
+(`U64Map V`) and `lib/Intern.wiz` (`InternTable`, ids as `U32`) use the persistent map
+as the model (`PMap U64 V` and `PMap String U32`) and a native hash table in compiled
+code, so `insert`, `find` and `erase` (and `intern`) are O(log n) in the kernel,
+`#eval` and `#run`, and the natives `empty`/`insert`/`erase`/`find`/`size`/`ofList`/
+`toList` (and `intern`/`lookup`/`find` for a table) are the compiled representation.
+See `docs/stages/29-natives.md`.
 
 ## Persistent data structures: maps and sets
 
@@ -2044,20 +2069,22 @@ the O(log n) nodes on the path to the change (plus O(1) for a rebalancing rotati
 increasing key order, and `fromList` accepts entries in any order (a later duplicate
 wins).
 
-Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), with instances
-for `Nat` (through the native `Nat.lt`/`Nat.beq`) and `U64` (`U64.cmp`, unsigned);
-define one instance to use any other key type. `PSet` and the map
-algorithms are key-generic, unlike `U64Map`. `size` and the balance checks are O(1) (the
+Keys are ordered by a `Compare` instance (`compare : K → K → Ordering`), declared in
+`lib/Compare.wiz` with instances for `Nat` (through the native `Nat.lt`/`Nat.beq`),
+`U64` (`U64.cmp`, unsigned) and `String` (`String.compare`, lexicographic); define one
+instance to use any other key type. `PSet` and the map
+algorithms are key-generic, and so is `U64Map` now (its model is `PMap U64 V`). `size`
+and the balance checks are O(1) (the
 subtree size is stored in each node), so `insert`, `erase`, `find` and `contains` are
 O(log n) worst case, `toList`, `keys` and `foldl` are O(n), and `fromList` is
 O(n log n) for a list in arbitrary order.
 
 Only `find_empty` and `size_empty` are proved on the definitions; `find_insert`,
 `find_erase` and `size_insert` (and the sortedness and balance invariants across
-rotations) are checked by the tests rather than proved. Examples: `examples/persistent.wiz`
+rotations) are checked by the tests rather than proved — for `PMap`, `PSet` and
+`U64Map` (which is `PMap U64 V`). Examples: `examples/persistent.wiz`
 (the checks, group `persistent`) and `examples/persistent-bench.wiz`. The representation,
-complexity, persistence guarantees, benchmark plan and the migration path for replacing
-`U64Map` with a pure model plus a native backend are in
+complexity, persistence guarantees and the benchmark plan are in
 `wiz-notes/persistent-data.md`.
 
 ## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
@@ -2188,28 +2215,26 @@ format and the gaps.
 
 ## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
 
-`import Scry.Egraph` is the S12 e-graph in its **reference** form: a union-find,
-congruence closure by rebuilding a hash-consed e-node table, relational e-matching,
-extraction, and saturation with a fuel bound. `import Scry.EgraphNative` is the
-native-table backend (`U64Array`/`U64Map`). It declares the same *names*, but not the
-same record type: `Scry.EGraph` has seven fields (it also stores a node sequence number
-and a union log) against the reference's five, so `EGraph.mk` takes seven arguments, and
-`applyAt`/`applyMatches` take a `rule : Nat` before the rewrite, and the cost passes take
-`List NodeEntry` instead of `List (Nat × ENode)`. A client that builds the
-record, reads a field, or calls those functions compiles against one import only. It
-adds per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`, with guarded
-rewrites), union explanations (a flat proof forest), node/round/clock limits with a
-reported stop reason, and `Option Nat` extraction costs. Only six of the eighteen
-`examples/scry-egraph-*.wiz` run through both imports — `congruence`, `rebuild`,
-`extract`, `saturate`, `fuel` and `datalog`, whose digests the `scry-egraph` group
-compares; the analysis, explanation, limit and `EqPlan` surface has no reference
-counterpart. The two modules also share seventy-nine top-level names, forty-seven of them
-byte-identical (matching, instantiation and extraction), so the digests show that the
-two *tables* agree, not that the shared code is independently right. They cannot be
-imported into one program: both declare `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm` and the
-operations, so a whole-library import that names both is an error. Every whole-library
-loader uses `Tests.Elab.libApart` (`libSourceExcept`) and loads each native-family module
-with everything except the reference family. `import Scry.EqPlan`
+`import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
+rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
+with a fuel bound. The **surface** is the reference one (`Scry.EGraph`, `Scry.ENode`,
+`Scry.ETerm`, `Scry.Pat`, `Scry.Rewrite`, `costs : U64Array` with `Scry.EGraph.inf`, and
+`applyAt`/`applyMatches` without a rule index); the **representation** of the hash cons
+is the native one, a `U64Map` from an e-node hash to a bucket of `(e-node, class)`, so
+`add` and `rebuild` do one bucket lookup and one cons per node instead of scanning a flat
+association list. The record has six fields (`parent`, `rank`, `nodes`, `etable`, `next`,
+`log`); `nodes` is a list, newest first. The module also carries the pieces the old
+native backend added: per-e-class analyses (the `Interval` lattice of `Scry.AiDomain`,
+with guarded rewrites), union explanations (a flat proof forest, `explain`), node/round/
+clock limits with a reported stop reason (`saturateLimited`), and the `Option Nat` cost
+view (`costsOpt`/`costOpt`). `explain` needs the rule index, so the rule-index forms are
+`applyAtN`/`applyMatchesN`; the reference names record rule `0`. `import Scry.EgraphNative`
+is now a **compatibility import** — it just imports `Scry.Egraph` — kept because
+`Scry.EqPlan` and four examples named it; there is no second implementation and no
+import split (the whole of `lib/` loads at once, `Tests.Elab.libApart` is empty). All
+eighteen `examples/scry-egraph-*.wiz` produce their previous digests, including the six
+(`congruence`, `rebuild`, `extract`, `saturate`, `fuel`, `datalog`) that the
+`scry-egraph` group also runs through the compatibility name. `import Scry.EqPlan`
 is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
 relations (a column is not an assertion: a term table `un(term, op, child)` has two
 `eqsort` columns and unions nothing), rules whose head is an equality assertion

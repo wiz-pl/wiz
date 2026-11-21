@@ -947,7 +947,9 @@ def serverGroup : Group where
         check ((item r "syntax").length == 1 && (item r "expansion").length == 1) s!"syntax items: {r.compress}" },
     { name := "#plot: a message becomes a widget item carrying the WIZ_WIDGET: display value", run := fun _ => do
         let mut libs := (← server).libs
-        for (m, p) in [("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
+        for (m, p) in [("Logic", "lib/Logic.wiz"), ("Class", "lib/Class.wiz"),
+                       ("Data.Order", "lib/Data/Order.wiz"),
+                       ("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
                        ("Ring", "lib/Ring.wiz"), ("Int", "lib/Int.wiz"), ("IntRing", "lib/IntRing.wiz"),
                        ("IntOrder", "lib/IntOrder.wiz"), ("Rat", "lib/Rat.wiz"), ("Plot", "lib/Plot.wiz")] do
           libs := libs.insert m (p, ← IO.FS.readFile p)
@@ -1292,7 +1294,8 @@ def serverGroup : Group where
         let mut libs := (← server).libs
         -- plus whatever Optic/FeralCore import on this tree (Result, Logic, OpticDerive and
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
-        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
+        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Functor", "lib/Functor.wiz"),
+                       ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
                        ("Data.Result", "lib/Data/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do

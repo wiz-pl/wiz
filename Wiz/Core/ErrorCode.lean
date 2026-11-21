@@ -29,6 +29,8 @@ def unknownModule := "unknown-module"
 def importCycle := "import-cycle"
 /-- an `import` of a module that has errors of its own -/
 def moduleErrors := "module-errors"
+/-- the file the command names cannot be read (`wiz check no.wiz`) -/
+def noSuchFile := "no-such-file"
 /-- an `import` after a declaration, or nested in a command (the header is fixed) -/
 def importOrder := "import-order"
 /-- a `match` (or equations) that misses constructors -/
@@ -68,6 +70,8 @@ apart -/
 def private_ := "private"
 /-- a name declared twice -/
 def duplicateDeclaration := "duplicate-declaration"
+/-- a `match` that names its equation hypothesis twice (`match h : e, h : f with`) -/
+def duplicateHypothesis := "duplicate-hypothesis"
 /-- a constructor declared twice in one `inductive` -/
 def duplicateConstructor := "duplicate-constructor"
 /-- a local variable that shadows the recursive definition it is in -/
@@ -97,11 +101,11 @@ def nonPattern := "non-pattern"
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
   [unknownIdentifier, rootName, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
-   importOrder,
+   noSuchFile, importOrder,
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
-   duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
+   duplicateHypothesis, duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
    unknownDeclaration, simpLemmaNotEquation, simpLemmaConditional, quantity, kernelRejected, parseError]
 
 /-- The code a message is reported with: internal codes become the public ones. -/

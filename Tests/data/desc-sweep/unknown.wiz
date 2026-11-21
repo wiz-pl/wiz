@@ -1,0 +1,3 @@
+-- test: perhaps
+import Prelude
+def one : Nat := 1

@@ -45,8 +45,9 @@ def dropImports (src : String) : String :=
   "\n".intercalate ((src.splitOn "\n").filter (fun l => !(l.startsWith "import ")))
 
 def storageMultiprocBody : IO String := do
-  let files := ["drafts/storage-engine/Cursor.wiz",
+  let files := ["drafts/storage-engine/Core.wiz",
     "drafts/storage-engine/Storage.wiz",
+    "drafts/storage-engine/Cursor.wiz",
     "drafts/storage-engine/Registry.wiz",
     "drafts/storage-engine/Durable.wiz",
     "drafts/storage-engine/Multiproc.wiz",
