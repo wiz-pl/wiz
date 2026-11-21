@@ -11048,9 +11048,18 @@ def commandStep (gs0 : Globals) (stx : Syntax) (sp : Option SpT) : Step :=
 -- to grow until the process ran out of memory or its 1 GiB evaluator stack overflowed
 -- (`lib/BitVecAdd.wiz`). A command that reaches the budget is reported as an error, not
 -- crashed: the same bounding principle as the proof read-back's (P2) budget.
-def kernelSteps : Nat := 20000
-def kernelBudgetMsg : String :=
-  "the kernel evaluation hit its 20000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here"
+def kernelSteps : Nat := 200000
+-- (`#reduce`/`#eval` compute a value in the kernel; the Prelude's Bytes model needs more
+-- than 3.6M structural steps for three characters, so a value-level command gets a
+-- larger budget than a declaration's type check)
+def kernelStepsReduce : Nat := 4000000
+def commandSteps (stx : Syntax) : Nat :=
+  match Bool.or (strEq (kindOf stx) "command.reduce") (strEq (kindOf stx) "command.eval") with
+  | .true => kernelStepsReduce
+  | .false => kernelSteps
+def kernelBudgetMsg (steps : Nat) : String :=
+  String.append (String.append "the kernel evaluation hit its " (Nat.toString steps))
+    "-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here"
 -- the state a command's step leaves behind (its output line, the globals after it, and
 -- the declaration records), with the duplicate-declaration check
 def finishStep (stop start : Nat) (gs gs' : Globals) (input : Array Nat) (sp : Option SpT)
@@ -11114,7 +11123,8 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
       -- and checking, not its parse. The match on `kernelStart` forces the extern before
       -- the command is evaluated: a lazy `let` would otherwise run the step first.)
-      match kernelStart kernelSteps with
+      let budget := commandSteps stx;
+      match kernelStart budget with
       | .false =>
         match commandStep gs0 stx sp with
         | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx
@@ -11124,7 +11134,7 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
           | .true => finishStep stop start gs gs' input sp line cats tokens notes stx
           -- (the evaluator gave up mid-command: report the limit, not the stuck value
           -- the rest of the elaboration would make of it; the declaration is dropped)
-          | .false => .next (atLine start (.some (String.append "error: " kernelBudgetMsg))) stop
+          | .false => .next (atLine start (.some (String.append "error: " (kernelBudgetMsg budget)))) stop
               gs0 cats tokens notes
 def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=

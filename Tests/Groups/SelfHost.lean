@@ -3770,7 +3770,7 @@ def selfHostGroup : Group where
     -- diagnostic; the module is the smallest one that reaches it.
     { name := "a kernel reduction needing billions of unary Nat steps is stopped by the step budget, not by an out-of-memory (lib/BitVecAdd.wiz)", run := fun _ =>
         selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 32 = 4294967296 := rfl\n"
-          "input.wiz:2:1: error: the kernel evaluation hit its 20000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here\n" },
+          "input.wiz:2:1: error: the kernel evaluation hit its 200000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here\n" },
     -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
     -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
     -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
