@@ -68,7 +68,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -118,7 +118,7 @@ jobs:
         with:
           fetch-depth: 0 # the flake is read at commits (git+file?rev=), the predecessor's too
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: ${{ env.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
