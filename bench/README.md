@@ -30,6 +30,8 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `bytes-append` | 2000000 | append a 16-byte chunk N times |
 | `bytes-slice` | 2000000 | slice 64 bytes out of an 8 KiB buffer N times |
 | `bytes-compare` | 2000000 | compare two equal 4 KiB buffers N times |
+| `str-append` | 10000 | append a 100-byte `Str` chunk N times: the `Str.append` builder (1,000,000 bytes at the default) |
+| `str-push` | 200000 | push one byte N times: the `Str.push` builder |
 | `text-split` | 40000 | split an N-chunk string on `,`, 8 passes |
 | `text-replace` | 40000 | replace every `,` with `Z`, 8 passes |
 | `text-trim` | 40000 | trim an N-chunk string padded with spaces, 8 passes |
@@ -39,6 +41,15 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `hash` | 300000 | `NatList.hash` of an 8-number list, 300000 times (a different seed each time) |
 | `list-index` | 4000 | 10 passes of N reads of a `List Nat` at a pseudo-random index: the `List` `at`-in-a-loop pattern |
 | `egraph` | 3000 | build N e-nodes, union N pseudo-random pairs, then 10·N `find`s (`Scry.EGraph`, whose union-find tables are `U64Array`s) |
+
+`str-append` is the compiled `Str.append` builder: the loop `s := Str.append s piece`
+keeps the accumulator unique, so the runtime grows it in place; at the default it
+appends 10,000 100-byte chunks (1,000,000 bytes). The old copy-only `wiz_str_append`
+and the in-place one produce the same checksum, so an A/B run can use a baseline
+built from the same sources with the `a != b && WIZ_RC(a) == 1` branch of
+`wiz_str_append` removed. `str-push` is the same builder one byte at a time. Adding
+a mode changes the mode set: a cached A-side executable from before the mode cannot
+run it, so rebuild the A side (in CI, dispatch with `bootstrap: true`) once.
 
 ## Comparing two builds
 
