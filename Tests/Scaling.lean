@@ -1,5 +1,5 @@
 import Tests.ElabFix
-import Grail.Test
+import Tests.Grail
 
 /-!
 # Scaling (agent/mem-hunt)
@@ -601,15 +601,25 @@ def exampleModeAt (p : System.FilePath) : IO ExampleMode := do
   | .ok m => pure m
   | .error e => throw (IO.userError s!"{p}: {e}")
 
+/-- The toolchain with the root package's settings, and its module roots (`lib/` and
+`drafts/feral/lib/` for `feral-core`), as the examples group's runner gets them. -/
+def exampleEnv : IO (Toolchain × List System.FilePath) := do
+  let tc ← toolchain
+  match ← Grail.readConfig tc (← Tests.Grail.binId tc) "lib" "." with
+  | .ok (pkg, machine) =>
+    let tc ← Tests.Grail.withSettings tc pkg machine
+    pure (tc, ← Module.roots (Grail.libRootsOf "." pkg.targets))
+  | .error e => throw (IO.userError s!"cannot read grail.wiz: {e}")
+
 /-- Elaborate an example the way `wiz check`/`wiz run` does: the toolchain's library as
-the first module root, `import_c` headers preprocessed, `link_c`/`include_str` resolved
-relative to the example, and `--trust-native` for a file that needs it. (The old sweep
-passed only the library loader: `glue.wiz` failed as un-preprocessed and a
-`native_refl` example failed without the flag.) -/
+the first module root and the package's other roots, `import_c` headers preprocessed,
+`link_c`/`include_str` resolved relative to the example, and `--trust-native` for a file
+that needs it. (The old sweep passed only the library loader: `glue.wiz` failed as
+un-preprocessed, `resources.wiz` could not find `FeralCore`, and a `native_refl` example
+failed without the flag.) -/
 def elaborateExample (p : System.FilePath) (src : String) (trustNative : Bool) :
     IO (CommandState ZeroOneMany) := do
-  let tc ← toolchain
-  let roots ← Module.roots []
+  let (tc, roots) ← exampleEnv
   let closure ← Module.loadClosure roots src
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, s) => m.insert n s) {}
   let headers ← Build.preprocessHeaders tc (String.join (src :: lib.values))
@@ -628,8 +638,11 @@ example's `.expected`, and return `false` only when the C toolchain is missing (
 skips the chunk, as the examples group does). A program that ran and failed is the
 example's failure. -/
 def runExample (p : System.FilePath) (st : CommandState ZeroOneMany) : IO Bool := do
+  -- The root package sets `libs "-lm"` (`grail.wiz`), and the examples group runs a
+  -- `run` test with its package's settings; `import_c.wiz` needs `-lm` for `pow`/`sqrt`.
+  let (tc, _) ← exampleEnv
   let dir ← IO.FS.createTempDir
-  let result ← Build.runGlobal (← toolchain) st "main" dir (timeout := some 300)
+  let result ← Build.runGlobal tc st "main" dir (timeout := some 300)
   IO.FS.removeDirAll dir
   match result with
   | .error e =>
