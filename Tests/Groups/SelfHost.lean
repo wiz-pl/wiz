@@ -3703,6 +3703,43 @@ def selfHostGroup : Group where
         let expected := "error: " ++ (leanBad.toList.head!).text
         unless selfBad.head! == expected do
           throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
+    -- (D6) the host `constructor` matches the self-hosted `STacOp.constructor`: the same
+    -- scripts are accepted (single-constructor structure and enum, several constructors,
+    -- an indexed family whose index unification solves), and the same failures are
+    -- reported with the same text (not an inductive type; no constructor applies)
+    { name := "(D6) constructor: the Lean and self-hosted frontends agree", run := fun _ => do
+        let loader ← preludeLoader
+        let src := "import Prelude\n" ++
+          "structure Named where\n  name : Nat\n" ++
+          "def n : Named := by constructor; exact 7\n" ++
+          "inductive Box where\n  | mk (n : Nat)\n" ++
+          "def b : Box := by constructor; exact 7\n" ++
+          "inductive Two where\n  | a\n  | b\n" ++
+          "def two : Two := by constructor\n" ++
+          "inductive Flag : Bool → Type where\n" ++
+          "  | no : Flag .false\n  | yes (n : Nat) : Flag .true\n" ++
+          "def f : Flag .true := by constructor; exact 7\n"
+        let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+        let errs := s.messages.filter (·.severity == .error)
+        unless errs.isEmpty do throw (IO.userError "the Lean frontend rejects the constructor script")
+        let some out ← selfhostOutput src | return
+        let selfErrs := (out.splitOn "\n").filter (fun l => l.startsWith "error" || l.startsWith "parse error")
+        unless selfErrs.isEmpty do throw (IO.userError s!"the self-hosted frontend rejects the constructor script:\n{out}")
+        checkChecked src out
+        -- the failing cases: the same verdict and the same message
+        let flagBad := "import Prelude\ninductive Flag : Bool → Type where\n" ++
+          "  | no : Flag .false\n  | yes (n : Nat) : Flag .true\n" ++
+          "def bad (b : Bool) : Flag b := by constructor\n"
+        for bad in ["import Prelude\ndef bad : Nat → Nat := by constructor\n", flagBad] do
+          let sBad := runFrontend (R := ZeroOneMany) bad { loader, trustedModule := Tests.libModule }
+          let leanBad := sBad.messages.filter (·.severity == .error)
+          unless !leanBad.isEmpty do throw (IO.userError s!"the Lean frontend accepts a bad constructor script:\n{bad}")
+          let some badOut ← selfhostOutput bad | return
+          let selfBad := (badOut.splitOn "\n").filter (fun l => l.startsWith "error")
+          unless !selfBad.isEmpty do throw (IO.userError s!"the self-hosted frontend accepts a bad constructor script:\n{badOut}")
+          let expected := "error: " ++ (leanBad.toList.head!).text
+          unless selfBad.head! == expected do
+            throw (IO.userError s!"the error texts differ:\nLean: {expected}\nselfhost: {selfBad.head!}") },
     { name := "(A11) the deriver table: the five built-ins on every form (inductive, structure, after the fact, several classes, several types, re-registered)", run := fun _ =>
         selfhostCheckFile selfhostDerivingTable selfhostDerivingTableExpected },
     { name := "(A11) the deriver table's errors: no deriver, an indexed family, a recursive field, a wrong arity, an unrunnable deriver, a mutual block", run := fun _ =>
