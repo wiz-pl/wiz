@@ -84,6 +84,11 @@ def refineCsOk (st : Scry.WfStore) : Bool :=
       (String.eq (candOf r).verdict "pursue")
   | .none => .false
 
+def recordOf (st : Scry.WfStore) (suffix : String) : Scry.WfRecord :=
+  match findIn st suffix with
+  | .some r => r
+  | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0
+
 def stageIs (st : Scry.WfStore) (suffix expected : String) : Bool :=
   match findIn st suffix with
   | .some r => String.eq (candOf r).stage expected
@@ -143,9 +148,7 @@ def main : IO Unit := EIO.toIO (do
   check "refine: exit 0" (Nat.beq n3 0);
   check "refine: C candidate is triaged with a derived env plan" (refineCOk st2);
   check "refine: C# candidate's plan is stdin (Console.ReadLine)" (refineCsOk st2);
-  let cRec := match findIn st2 "cwe78-getenv.c" with
-    | .some r => r
-    | .none => Scry.WfRecord.mk "" "" "" .new [] "" .none .false Json.mkNull "" .none .none .none .none .none 0 0;
+  let cRec := recordOf st2 "cwe78-getenv.c";
   candJson ← Scry.wfReadJsonOpt (Path.join cRec.artifacts "candidate.json");
   check "refine: candidate.json is written" (stageOfCandidate candJson);
 
