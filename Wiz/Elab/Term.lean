@@ -3647,8 +3647,13 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     binders := binders.push ("x✝", quote g ctx.lvl ty)
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
+  -- The goal is quoted from value form, so abstract the scrutinee read back the same
+  -- way: the elaborated term may spell a constructor differently (`Nat.succ n` as a
+  -- constant) from its read-back, and then the occurrence would be missed.
   let mut absGoal := goalTm
-  for t in ts, k in [0:ts.size] do absGoal := abstractOutsideHoles absGoal (t.lift k)
+  for t in ts, k in [0:ts.size] do
+    let tv ← evalIn ctx t
+    absGoal := abstractOutsideHoles absGoal ((quote g ctx.lvl tv).lift k)
   let _ := goalTm
   let mut lvls : List Lvl := []
   -- a scrutinee's type mentions the earlier scrutinees (`match e, h with` for
