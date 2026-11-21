@@ -10,10 +10,13 @@ def usage : String := "usage:
   wiz parse FILE          print the syntax tree of every command
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz build FILE -o OUT [--target c|llvm|wasm]  compile the definition `main` to an
+  wiz build FILE -o OUT [--target c|llvm|wasm|bpf]  compile the definition `main` to an
                                    executable (C or LLVM) or a WebAssembly module (stage
                                    8f: no IO, Nat/Int, closures, arrays; run it with
                                    web/wasm-host.mjs). `--llvm` and `--wasm` still work.
+                                   `--target bpf` takes a manifest (`bpf.toml`) and its
+                                   `bpf-core/1` typed core, and writes freestanding C
+                                   plus `bpf_rt.h` (run `clang -target bpf` yourself).
   wiz build FILE -o OUT [--split N]  compile the program as N C units in parallel
                                    (default 1: one unit; a split build is faster but the
                                    generated program runs somewhat slower, stage 15k)
@@ -673,16 +676,16 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 /-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm"]
+def targets : List String := ["c", "llvm", "wasm", "bpf"]
 
 /-- Take `--target NAME`, `--llvm` and `--wasm` out of the arguments; return the selected
 backend and the rest. A flag and a conflicting `--target` are an error, as is two
 different targets. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm or wasm"
+  | "--target" :: [] => throw "--target needs c, llvm, wasm or bpf"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm or wasm)"
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm or bpf)"
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
@@ -703,24 +706,34 @@ def takeTarget : List String → Except String (Option String × List String)
 
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
     (noMain : Bool := false) (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
-  | .error e => IO.eprintln e; pure 1
-  | .ok _ => pure 0
+  -- `bpf` is the one target whose input is not the untyped IR: it consumes the typed
+  -- core (`bpf.toml` + `bpf-core/1`) and emits C for `clang -target bpf` (§1.2, §3.2).
+  if target == "bpf" then
+    Wiz.Compiler.Bpf.buildCmd path out lib noMain split
+  else do
+    let some s ← elabFile tc path | pure 1
+    match ← Build.build tc s "main" out (target == "llvm") lib noMain split (target == "wasm") with
+    | .error e => IO.eprintln e; pure 1
+    | .ok _ => pure 0
 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
-  let some s ← elabFile tc path | pure 1
-  let dir ← IO.FS.createTempDir
-  let print (v : String) : IO UInt32 := do
-    IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
-  if target == "wasm" then
-    match ← Build.runWasmGlobal s "main" dir with
-    | .error e => IO.eprintln e; pure 1
-    | .ok v => print v
-  else
-    match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
-    | .error e => IO.eprintln e.message; pure 1
-    | .ok v => print v
+  if target == "bpf" then do
+    IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
+oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
+    pure 2
+  else do
+    let some s ← elabFile tc path | pure 1
+    let dir ← IO.FS.createTempDir
+    let print (v : String) : IO UInt32 := do
+      IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+    if target == "wasm" then
+      match ← Build.runWasmGlobal s "main" dir with
+      | .error e => IO.eprintln e; pure 1
+      | .ok v => print v
+    else
+      match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
+      | .error e => IO.eprintln e.message; pure 1
+      | .ok v => print v
 
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
@@ -1044,7 +1057,10 @@ def main (args : List String) : IO UInt32 := do
   -- when the selected target is; there is no wasm REPL (no `:run` through that backend)
   | "repl" :: rest => do
     if target == "wasm" then
-      IO.eprintln "wiz repl: targets are c and llvm (not wasm)"
+      IO.eprintln "wiz repl: targets are c, llvm and bpf (no wasm REPL)"
+      pure 2
+    else if target == "bpf" then
+      IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"
       pure 2
     else match takePrelude rest with
       | .error e => IO.eprintln e; pure 2
