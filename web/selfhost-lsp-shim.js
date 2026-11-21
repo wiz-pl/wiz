@@ -75,292 +75,35 @@ export function wantsSelfhost(search) {
   }
 }
 
-// The page's rule (web/playground.js): a source without an `import` gets the embedded
-// Prelude. `prefix` is what was added, so offsets can be moved back into the editor.
-export function withPrelude(text) {
-  if (/^\s*import\b/m.test(text)) return { source: text, prefix: "" };
-  const prefix = "import Prelude\n\n";
-  return { source: prefix + text, prefix };
-}
+// ## The runtime's pure rules
 
-// ## Positions (LSP: 0-based lines, UTF-16 code units)
-
-// The position arithmetic is `lib/Web/EditorModel.wiz`'s (`PositionIndex`). The shim
-// receives that implementation as `index`, the same adapter the page's overlays use:
+// `Web.Selfhost.wiz` owns the engine's lines as diagnostics, the command splitter and
+// the completion/hover/definition answers; `lib/Web/EditorModel.wiz` owns positions and
+// the check's position/declaration index. The shim receives both as `index`, the same
+// adapter the page's overlays use (`createIndexer` in web/playground-lsp.js):
 //
-//   position(text, offset)                  -> {line, character}
-//   offset(text, {line, character})         -> UTF-16 offset
-//   lineEnd(text, offset)                   -> end of that line
-//   range(text, from, to)                   -> {start, end}
-//   utf16(text, codePoints)                 -> UTF-16 offset of a code-point offset
-//   editorOffset(text, prefix, codePoints)  -> the same, minus the embedded Prelude
+//   position/offset/lineEnd/range/utf16/editorOffset   -- Web.EditorModel's positions
+//   build/size/term/goal/declarations/declarationNamed -- the check's index
+//   withPrelude/splitCommands/outputLines/parseErrorOffset
+//   diagnosticsFromOutput/parseCheck/diagnosticsFromCheck
+//   completionPrefix/wordAt/filterCompletions/completion/hover/definition
 //
-// `web/framework/index-oracle.mjs` is the Node test oracle for those methods; the page
-// passes an adapter backed by `mount.ask` (`createIndexer` in web/playground-lsp.js).
+// `web/framework/index-oracle.mjs` is the Node test oracle for them (test-only); the
+// page passes an adapter backed by `mount.ask`.
 
 function requireIndex(index) {
-  if (!index || typeof index.position !== "function" || typeof index.range !== "function" ||
-      typeof index.offset !== "function" || typeof index.utf16 !== "function" ||
-      typeof index.editorOffset !== "function" || typeof index.lineEnd !== "function") {
-    throw new TypeError("selfhost-lsp-shim: pass { index } (Web.EditorModel's position index)");
+  const methods = [
+    "position", "range", "offset", "utf16", "editorOffset", "lineEnd",
+    "build", "size", "term", "goal", "declarations", "declarationNamed",
+    "initializeCapabilities", "withPrelude", "splitCommands", "outputLines", "parseErrorOffset",
+    "diagnosticsFromOutput", "parseCheck", "diagnosticsFromCheck",
+    "completionPrefix", "wordAt", "filterCompletions", "completion", "hover", "definition",
+  ];
+  if (!index || methods.some((name) => typeof index[name] !== "function")) {
+    throw new TypeError("selfhost-lsp-shim: pass { index } (Web.Selfhost's rules and Web.EditorModel's position index)");
   }
   return index;
 }
-
-// ## Commands
-
-// Commands that print no line (stepCommand in selfhost/Frontend.wiz: imports, the
-// grammar-changing commands, and `deriving instance` when it succeeds).
-const SILENT = /^(import|syntax|notation|infixl|infixr|infix|prefix|postfix|macro_rules|macro|declare_syntax_cat|deriving\s+instance)\b/;
-// Lines at column 0 that continue a command instead of starting one.
-const CONTINUES = /^(\||where\b|deriving\b|with\b|\)|\]|\}|,|:=)/;
-// What the frontend prints for these is a result worth showing as information.
-const RESULT = /^#(check|eval|reduce|print)\b/;
-
-// The top-level commands of `text`: a command starts at column 0 (after any doc comment
-// or attribute lines, which belong to it), and runs to the next one. Comments, blank
-// lines and the body of a `mutual … end` block do not start a command. Each command is
-// `{start, head, end, keyword, silent, result}` in UTF-16 offsets: `start` is the doc
-// comment's or attribute's start, `head` the keyword line's.
-export function splitCommands(text) {
-  const commands = [];
-  const lines = text.split("\n");
-  let offset = 0;
-  let inBlock = 0;          // nesting depth of `/- … -/`
-  let inMutual = false;
-  let pending = null;       // a doc comment or attribute waiting for its command
-  for (const line of lines) {
-    const here = offset;
-    offset += line.length + 1;
-    if (inBlock > 0) {
-      inBlock = blockDepth(line, inBlock);
-      continue;
-    }
-    if (line.trim() === "" || /^\s*--/.test(line)) continue;
-    if (/^\s/.test(line)) continue;              // indented: part of the previous command
-    if (line.startsWith("/-")) {
-      const depth = blockDepth(line, 0);
-      if (line.startsWith("/--") && pending === null) pending = here;
-      inBlock = depth;
-      continue;
-    }
-    if (inMutual) {
-      if (/^end\b/.test(line)) inMutual = false;
-      continue;
-    }
-    if (CONTINUES.test(line)) continue;
-    if (line.startsWith("@[") && !/\]\s*\S/.test(line)) {
-      if (pending === null) pending = here;      // an attribute on a line of its own
-      continue;
-    }
-    const keyword = line.replace(/^@\[[^\]]*\]\s*/, "")
-      .replace(/^((private|protected|noncomputable|partial|unsafe)\s+)*/, "");
-    const command = {
-      start: pending === null ? here : pending,
-      head: here,
-      end: text.length,
-      keyword: (keyword.match(/^\S+/) || [""])[0],
-      silent: SILENT.test(keyword),
-      result: RESULT.test(keyword),
-    };
-    pending = null;
-    if (commands.length) commands[commands.length - 1].end = command.start;
-    commands.push(command);
-    if (/^mutual\b/.test(keyword)) inMutual = true;
-  }
-  return commands;
-}
-
-function blockDepth(line, depth) {
-  for (let i = 0; i + 1 < line.length; i++) {
-    if (line[i] === "/" && line[i + 1] === "-") { depth++; i++; }
-    else if (line[i] === "-" && line[i + 1] === "/") { depth = Math.max(0, depth - 1); i++; }
-  }
-  return depth;
-}
-
-// ## The frontend's lines as diagnostics
-
-// `wiz_playground_eval`'s output: pgJoin ends every line with "\n", and a command may
-// print an empty line, so only the final empty piece is dropped.
-export function outputLines(output) {
-  const lines = String(output || "").split("\n");
-  if (lines.length && lines[lines.length - 1] === "") lines.pop();
-  return lines;
-}
-
-// `parse error 57: …` → 57 (a code-point offset), as selfhost/Cli.wiz's `parseOff`.
-export function parseErrorOffset(line) {
-  const m = /^parse error (\d+):/.exec(line);
-  return m ? Number(m[1]) : null;
-}
-
-function severityOf(line) {
-  if (line.startsWith("error:") || line.startsWith("parse error")) return 1;
-  if (line.startsWith("warning:")) return 2;
-  return 3;
-}
-
-function messageOf(line) {
-  if (line.startsWith("error: ")) return line.slice(7);
-  if (line.startsWith("warning: ")) return line.slice(9);
-  const m = /^parse error (\d+): ?(.*)$/.exec(line);
-  if (m) return "parse error: " + m[2];
-  return line;
-}
-
-// The diagnostics for `text` (the editor's) given `output`, the engine's answer for
-// `withPrelude(text).source`. Errors and warnings always; the result of a `#check`/
-// `#eval`/`#reduce`/`#print` as information when its command is known.
-export function diagnosticsFromOutput(text, output, index) {
-  const ix = requireIndex(index);
-  const { prefix } = withPrelude(text);
-  const lines = outputLines(output);
-  const commands = splitCommands(text).filter((c) => !c.silent);
-  const last = lines.length ? lines[lines.length - 1] : null;
-  const parseAt = last === null ? null : parseErrorOffset(last);
-  // Lines before a parse error belong to the commands before it, one each.
-  const placed = parseAt === null ? lines.length : lines.length - 1;
-  const aligned = parseAt === null ? placed === commands.length : placed <= commands.length;
-  const diagnostics = [];
-  for (let i = 0; i < placed; i++) {
-    const line = lines[i];
-    const severity = severityOf(line);
-    const command = aligned ? commands[i] : null;
-    if (severity === 3 && !(command && command.result)) continue;
-    if (severity === 3 && line === "") continue;
-    const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(line) };
-    if (command) {
-      diagnostic.range = ix.range(text, command.head, ix.lineEnd(text, command.head));
-    } else {
-      diagnostic.range = ix.range(text, 0, 0);
-      diagnostic.message += " (position unknown: the output did not line up with the commands)";
-    }
-    diagnostics.push(diagnostic);
-  }
-  if (parseAt !== null) {
-    const source = prefix + text;
-    const at = ix.editorOffset(text, prefix, parseAt);
-    let to = at;
-    while (to < text.length && !/\s/.test(text[to])) to++;
-    diagnostics.push({
-      severity: 1, source: "wiz-selfhost", code: "parse-error",
-      message: messageOf(last), range: ix.range(text, at, Math.max(to, Math.min(at + 1, text.length))),
-    });
-  }
-  return diagnostics;
-}
-
-// ## Stage 1: `wiz_playground_check`'s JSON
-
-// `{"v":1,"lines":[{"off","sev","text"}],"index"?:[…]}` → the parsed answer, or null when
-// it is not one (an old module, or garbage): the caller falls back to the text path.
-export function parseCheck(json) {
-  if (json === null || json === undefined) return null;
-  let answer;
-  try { answer = typeof json === "string" ? JSON.parse(json) : json; } catch (_) { return null; }
-  if (!answer || !Array.isArray(answer.lines)) return null;
-  return answer;
-}
-
-// The diagnostics for `text` from a parsed check answer. A line's range is its
-// command's first line (from `off`); a parse error's is the token at its own offset.
-export function diagnosticsFromCheck(text, answer, index) {
-  const ix = requireIndex(index);
-  const { prefix } = withPrelude(text);
-  const diagnostics = [];
-  for (const line of answer.lines) {
-    const raw = String(line.text === undefined ? "" : line.text);
-    const severity = line.sev === 1 || line.sev === 2 ? line.sev : severityOf(raw);
-    const parseAt = parseErrorOffset(raw);
-    if (parseAt !== null) {
-      const at = ix.editorOffset(text, prefix, parseAt);
-      let to = at;
-      while (to < text.length && !/\s/.test(text[to])) to++;
-      diagnostics.push({
-        severity: 1, source: "wiz-selfhost", code: "parse-error",
-        message: messageOf(raw), range: ix.range(text, at, Math.max(to, Math.min(at + 1, text.length))),
-      });
-      continue;
-    }
-    const known = typeof line.off === "number";
-    const at = known ? ix.editorOffset(text, prefix, line.off) : 0;
-    if (severity === 3 && (raw === "" || !known || !RESULT.test(text.slice(at)))) continue;
-    const diagnostic = { severity, source: "wiz-selfhost", message: messageOf(raw) };
-    diagnostic.range = known ? ix.range(text, at, ix.lineEnd(text, at)) : ix.range(text, 0, 0);
-    if (!known) diagnostic.message += " (position unknown)";
-    diagnostics.push(diagnostic);
-  }
-  return diagnostics;
-}
-
-// Positions → what the pane asks for, from a check answer's `index`. That index is
-// `lib/Web/EditorModel.wiz`'s (`lspIndexJson`/`lspTermGoalJson`/…); the shim only keeps
-// the opaque value the adapter built and passes the caret to it:
-//
-//   build(text, entries, prefix)   -> opaque index (one per document version)
-//   size(index)                    -> number of entries
-//   term(text, index, offset)      -> {goal, range} or null
-//   goal(text, index, offset)      -> {goals, rendered, range} or null
-//   declarations(text, index)      -> [{label, kind, detail, range}]
-//   declarationNamed(text, index, name) -> a declaration or null
-//
-// `web/framework/index-oracle.mjs` is the Node test oracle; `createIndexer` in
-// web/playground-lsp.js builds the production adapter over `mount.ask`.
-
-function requireIndexer(indexer) {
-  if (!indexer || typeof indexer.build !== "function" || typeof indexer.size !== "function" ||
-      typeof indexer.term !== "function" || typeof indexer.goal !== "function" ||
-      typeof indexer.declarations !== "function" ||
-      typeof indexer.declarationNamed !== "function") {
-    throw new TypeError("selfhost-lsp-shim: pass { index } (Web.EditorModel's position index)");
-  }
-  return indexer;
-}
-
-// ## Completions
-
-// The identifier before the caret: Wiz names are made of letters, digits, `_`, `'` and
-// `.` (a dotted global such as `Nat.add`), so the scan runs back over exactly those.
-export function completionPrefix(text, offset) {
-  const at = Math.max(0, Math.min(offset, String(text || "").length));
-  let start = at;
-  while (start > 0) {
-    const c = text[start - 1];
-    if (!/[A-Za-z0-9_'.]/.test(c)) break;
-    start--;
-  }
-  return { start, prefix: text.slice(start, at) };
-}
-
-// The identifier under (or just before) the caret, for hover and definition: the same
-// characters as `completionPrefix`, scanned both ways so a caret inside or after a name
-// finds it. `{start, end, word}` in UTF-16 offsets.
-export function wordAt(text, offset) {
-  const s = String(text === undefined || text === null ? "" : text);
-  const at = Math.max(0, Math.min(offset, s.length));
-  let start = at;
-  let end = at;
-  while (start > 0 && /[A-Za-z0-9_'.]/.test(s[start - 1])) start--;
-  while (end < s.length && /[A-Za-z0-9_'.]/.test(s[end])) end++;
-  return { start, end, word: s.slice(start, end) };
-}
-
-// The names whose label starts with `prefix` (case-insensitive), as LSP completion items.
-// An empty prefix keeps the answer order (`newest declaration first`), capped so a large
-// module cannot flood the popup.
-export function filterCompletions(names, prefix, limit = 200) {
-  const want = String(prefix || "").toLowerCase();
-  const items = [];
-  for (const name of Array.isArray(names) ? names : []) {
-    if (!name || typeof name.label !== "string") continue;
-    if (want !== "" && !name.label.toLowerCase().startsWith(want)) continue;
-    items.push(Object.assign({ label: name.label, kind: name.kind }, name.detail ? { detail: name.detail } : {}));
-    if (items.length >= limit) break;
-  }
-  return items;
-}
-
 
 // ## The server (one per connection; documents are per connection)
 
@@ -371,7 +114,7 @@ export class SelfhostServer {
   constructor({ evaluate, check = null, index = null, serverInfo = SERVER_INFO } = {}) {
     this.evaluate = evaluate;
     this.check = check;
-    this.index = index === null ? null : requireIndexer(requireIndex(index));
+    this.index = requireIndex(index);
     this.serverInfo = serverInfo;
     this.docs = new Map();     // uri → {text, version, index?}
     this.session = 0;
@@ -419,17 +162,7 @@ export class SelfhostServer {
       case "initialize": {
         const caps = params.capabilities || {};
         this.wantsElaborated = !!(caps.experimental && caps.experimental.wizElaborated);
-        return ok({
-          capabilities: {
-            positionEncoding: "utf-16",
-            textDocumentSync: 1,
-            hoverProvider: true,
-            definitionProvider: true,
-            completionProvider: { triggerCharacters: ["."], resolveProvider: false },
-            experimental: { wizInfoview: { version: 1, methods: SELFHOST_METHODS.slice() } },
-          },
-          serverInfo: this.serverInfo,
-        });
+        return ok({ capabilities: this.index.initializeCapabilities(), serverInfo: this.serverInfo });
       }
       case "shutdown":
         this.shutdown = true;
@@ -452,36 +185,22 @@ export class SelfhostServer {
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         if (!params.position) return ok({ isIncomplete: false, items: [] });
-        const offset = this.index ? this.index.offset(doc.text, params.position)
-          : completionPrefix(doc.text, 0).start;
-        const { start, prefix } = completionPrefix(doc.text, offset);
-        const declarations = doc.index && this.index ? this.index.declarations(doc.text, doc.index) : [];
-        const edit = { range: this.index
-          ? this.index.range(doc.text, start, offset)
-          : { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
-        const items = filterCompletions(declarations, prefix).map((item) =>
-          Object.assign({}, item, { textEdit: { range: edit.range, newText: item.label } }));
-        return ok({ isIncomplete: false, items });
+        if (!doc.index || !this.index) return ok({ isIncomplete: false, items: [] });
+        return ok(this.index.completion(doc.text, doc.index, params.position));
       }
       case "textDocument/hover": {
         const uri = params.textDocument && params.textDocument.uri;
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         if (!doc.index || !this.index || !this.index.size(doc.index) || !params.position) return ok(null);
-        const found = wordAt(doc.text, this.index.offset(doc.text, params.position));
-        const decl = found.word === "" ? null : this.index.declarationNamed(doc.text, doc.index, found.word);
-        if (!decl) return ok(null);
-        const signature = decl.detail === "" ? decl.label : decl.label + " : " + decl.detail;
-        return ok({ contents: { kind: "markdown", value: "```wiz\n" + signature + "\n```" }, range: decl.range });
+        return ok(this.index.hover(doc.text, doc.index, params.position));
       }
       case "textDocument/definition": {
         const uri = params.textDocument && params.textDocument.uri;
         const doc = this.docs.get(uri);
         if (!doc) return fail(ERR.invalidParams, "the document is not open: " + uri);
         if (!doc.index || !this.index || !this.index.size(doc.index) || !params.position) return ok(null);
-        const found = wordAt(doc.text, this.index.offset(doc.text, params.position));
-        const decl = found.word === "" ? null : this.index.declarationNamed(doc.text, doc.index, found.word);
-        return ok(decl ? { uri, range: decl.range } : null);
+        return ok(this.index.definition(doc.text, doc.index, params.position, uri));
       }
       default:
         return fail(ERR.methodNotFound, "the self-hosted playground server has no " + method);
@@ -522,20 +241,18 @@ export class SelfhostServer {
     let diagnostics;
     let index = null;
     try {
-      const { source, prefix } = withPrelude(doc.text);
-      const answer = this.check ? parseCheck(await this.check(source)) : null;
+      const { source, prefix } = this.index.withPrelude(doc.text);
+      const answer = this.check ? this.index.parseCheck(await this.check(source)) : null;
       if (answer) {
-        diagnostics = diagnosticsFromCheck(doc.text, answer, this.index);
-        index = this.index && Array.isArray(answer.index)
+        diagnostics = this.index.diagnosticsFromCheck(doc.text, answer);
+        index = answer.index && Array.isArray(answer.index)
           ? this.index.build(doc.text, answer.index, prefix) : null;
       } else {
-        diagnostics = diagnosticsFromOutput(doc.text, await this.evaluate(source), this.index);
+        diagnostics = this.index.diagnosticsFromOutput(doc.text, await this.evaluate(source));
       }
     } catch (e) {
       diagnostics = [{
-        severity: 1, source: "wiz-selfhost",
-        range: this.index ? this.index.range(doc.text, 0, 0)
-          : { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        severity: 1, source: "wiz-selfhost", range: this.index.range(doc.text, 0, 0),
         message: "the self-hosted engine failed: " + (e && e.message ? e.message : String(e)),
       }];
     }

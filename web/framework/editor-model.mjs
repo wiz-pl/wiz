@@ -393,4 +393,27 @@ export const rules = {
   },
   trigger: (text, offset, c) => completionTrigger(text, offset, c),
   position: (text, offset) => positionFromOffset(text, offset),
+  // The popup's tooltip and ask key, and the goals pane's source spans (the runtime's
+  // `Web.EditorModel` rules; these are the test oracle's).
+  itemTitle(item) {
+    const docs = item && item.documentation;
+    if (typeof docs === "string") return docs;
+    if (docs && typeof docs.value === "string") return docs.value;
+    return item && item.detail !== undefined && item.detail !== null ? String(item.detail) : "";
+  },
+  askKey: (key, code, ctrl, meta) =>
+    (key === " " || key === "Spacebar" || code === "Space") && (!!ctrl || !!meta),
+  span(text, span) {
+    const m = /^(\d+):(\d+)-(\d+):(\d+)$/.exec(String(span || ""));
+    if (!m) return null;
+    const start = offsetFromPosition(text, { line: Number(m[1]), character: Number(m[2]) });
+    const end = offsetFromPosition(text, { line: Number(m[3]), character: Number(m[4]) });
+    return [start, Math.max(start, end)];
+  },
+  rangeText(range) {
+    if (!range || typeof range !== "object") return "";
+    const start = range.start || {};
+    const stop = range.end || start;
+    return `${start.line || 0}:${start.character || 0}-${stop.line || 0}:${stop.character || 0}`;
+  },
 };

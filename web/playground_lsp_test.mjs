@@ -25,7 +25,8 @@ import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
 import { rules } from "./framework/editor-model.mjs";
 import { index as indexOracle } from "./framework/index-oracle.mjs";
-import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
+import { selfhostEndpoint } from "./selfhost-lsp-shim.js";
+import { withPrelude } from "./framework/index-oracle.mjs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -761,7 +762,7 @@ const widgetMock = await startMockServer({
 });
 const paneApp = startInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: panePanel, uri: "file:///widgets.wiz",
-  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane,
+  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane, rules,
 });
 const paneWalk = (node, pred, out = []) => {
   if (pred(node)) out.push(node);

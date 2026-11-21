@@ -23,7 +23,7 @@
 "use strict";
 import { mount } from "./framework/mount.js";
 import { startInfoview, createIndexer } from "./playground-lsp.js";
-import { wantsSelfhost, selfhostEndpoint, withPrelude as preludeOf } from "./selfhost-lsp-shim.js";
+import { wantsSelfhost, selfhostEndpoint } from "./selfhost-lsp-shim.js";
 import { createEngine, failureLines } from "./playground-engine.js";
 
 const runtimeModule = () => import("./wiz-playground-ui.mjs");
@@ -69,7 +69,12 @@ function run() {
   setTimeout(async () => {
     const started = performance.now();
     try {
-      const text = await wasm.evaluate(preludeOf(editor.value).source);
+      // The Prelude rule is the runtime's (`Web.Selfhost.preludeOf`, the same one the
+      // in-page server applies) so a Run and a diagnostic agree on the checked source.
+      const source = handle
+        ? JSON.parse(handle.ask("wiz_loom_lsp_prelude", editor.value)).source
+        : editor.value;
+      const text = await wasm.evaluate(source);
       const ms = Math.max(0, performance.now() - started);
       effect("finished", text, `done in ${ms < 10 ? "<10" : Math.round(ms)} ms`);
     } catch (e) {
