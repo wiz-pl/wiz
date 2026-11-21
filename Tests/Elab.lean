@@ -1885,9 +1885,13 @@ guard (when a source imports anything else, both must reject it). -/
 def selfhostLoader : IO (Name → Option String) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  -- `Std` imports `Text` (its `List.foldl`/`foldr`, used by `Str.join`), so the
+  -- self-hosted compiler/checker's source closure needs it too.
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
   let stdLib ← IO.FS.readFile "lib/Std.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Text" then some textLib
     else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
 
 /-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
