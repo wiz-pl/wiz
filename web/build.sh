@@ -77,10 +77,11 @@ fi
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build web/Web.wiz -o "$OUT/wiz-infoview.mjs" --no-main)
 cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.js" \
-  "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" "$ROOT/web/widgets.css" \
+  "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" "$ROOT/web/widgets.js" "$ROOT/web/widgets.css" \
   "$ROOT/web/hover.js" "$ROOT/web/squiggles.js" \
   "$ROOT/web/completions.js" "$ROOT/web/scroll.js" "$ROOT/web/scroll-search.js" \
-  "$ROOT/web/scroll.css" "$ROOT/web/overlays.css" "$OUT/"
+  "$ROOT/web/scroll.css" "$ROOT/web/overlays.css" "$ROOT/web/tagged.js" \
+  "$ROOT/web/doc-live.js" "$ROOT/web/doc-live.css" "$OUT/"
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
   "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
