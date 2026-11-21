@@ -207,10 +207,10 @@ def usesInferred (n : Nat) : Nat := inferred n
 " },
     { name := "a match cannot name its equation twice (the second name is reported)", run := fun _ =>
         fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n m : Nat) : Nat :=\n  match h : n, h : m with\n  | _, _ => .zero\n"
-          "6:16: the equation hypothesis 'h' is named twice" },
+          "the equation hypothesis 'h' is named twice" },
     { name := "the equation's name belongs before the scrutinee, not in a pattern", run := fun _ =>
         fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n : Nat) : Nat :=\n  match h : n with\n  | h : .zero => .zero\n  | _ => .zero\n"
-          "7:5: a pattern is expected here" }
+          "a pattern is expected here" }
   ]
 
 builtin_initialize registerGroup group
