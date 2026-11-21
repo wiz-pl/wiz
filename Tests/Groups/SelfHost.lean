@@ -2041,6 +2041,43 @@ def selfhostClosedScrutBounded (secs : Nat) : IO Unit := do
         throw (IO.userError s!"{label}: the compiler printed no C:\n{out.stdout.take 500}")
       note s!"#422 {label}: {t1 - t0} ms"
 
+/-- The host frontend elaborates the two programs the cases below compile. A break in
+`selfhost/*.wiz` used to surface only when a case built one (a merge left a `)` out of
+`knownTopFlag`'s `Bool.or` chain; `classCmd` had a `match` arm whose type the host would
+not infer), minutes into an already heavy shard. This case reads the same files and calls
+the same `checkerSource`/`compilerSource` the builders do, but stops at the host frontend:
+no kernel evaluation, no C toolchain, and the first errors print with their positions.
+The compiler's buffer comes first and a failure there short-circuits: it holds every
+shared file (the frontend and the tables) and the driver, so both incidents surface in
+its half of the ~50 s, not after the checker's. -/
+def selfhostHostGuard : IO Unit := do
+  let loader ← selfhostLoader
+  let checkProg (what : String) (prog : String) : IO (List String) := do
+    let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
+    let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
+    if errs.isEmpty then pure [] else
+      pure (s!"the host frontend rejects the self-hosted {what} ({errs.size} error(s)):"
+        :: errs.toList.take 5)
+  let check (what : String) (files : List String) (source : List String → String) : IO (List String) := do
+    let srcs ← files.mapM (fun (f : String) => IO.FS.readFile f)
+    checkProg what (source srcs)
+  let bad ← check "compiler" Selfhost.compilerFiles Selfhost.compilerSource
+  -- (`Check.wiz` is the only file of the checker's buffer the compiler's does not have)
+  let bad ← if bad.isEmpty then check "checker" Selfhost.checkerFiles Selfhost.checkerSource
+    else pure bad
+  -- (`web/playground-exports.wiz` is built only by the `wiz-playground` derivation:
+  -- neither `lake build` nor `=selfhost` sees it, so a frontend signature change can
+  -- leave it behind. Check the engine's exact buffer here, as `build-playground.sh`
+  -- assembles it: the frontend's files, the tables, then the export.)
+  let bad ← if bad.isEmpty then do
+    let srcs ← Selfhost.frontendFiles.mapM (fun (f : String) => IO.FS.readFile f)
+    let tables ← IO.FS.readFile "selfhost/Tables.wiz"
+    let exports ← IO.FS.readFile "web/playground-exports.wiz"
+    let prog := "import IO\nimport Std\n" ++ String.join (srcs.map Selfhost.strip) ++ tables ++ exports
+    checkProg "playground export" prog
+    else pure bad
+  unless bad.isEmpty do throw (IO.userError ("\n".intercalate bad))
+
 /-- (A23) `#print axioms` on the forms the host distinguishes: a definition with no
 axioms, a chain to an axiom, an axiom, an inductive type and its constructor, an
 `implemented_by` target (walked as code and marked `native`), a `sealed` type's native
@@ -2689,6 +2726,43 @@ def selfHostGroup : Group where
         selfhostVerdicts quantityHeader quantityDiffs },
     { name := "a linear variable used once in each branch of a match: both frontends accept it (21v)", run := fun _ =>
         selfhostAgrees linearMatchHeader linearMatchDecls },
+    { name := "the linear fixpoint: a recursive call's result may be used at ω when it contains no linear content, as in the Lean frontend", run := fun _ =>
+        -- (a linear token recurred on an ω `Nat`: the self-hosted frontend cannot yet
+        -- take a linear scrutinee apart, but threading the token through the recursive
+        -- call is exactly the linear fixpoint; `Nat.inc`/`Tok.use` are applications, not
+        -- constructor payloads, so both kernels reach the same rule)
+        selfhostAgrees
+          ("axiom Tok : Type\naxiom Tok.use : (1 t : Tok) → Nat\n" ++
+           "axiom Tok.useB : (1 t : Tok) → Bool\n" ++
+           "axiom Tok.useP : (1 t : Tok) → Nat × Nat\n" ++
+           "axiom Tok.useO : (1 t : Tok) → Option Nat\n" ++
+           "axiom Tok.useTok : (1 t : Tok) → Tok × Nat\n" ++
+           "def Nat.inc (n : Nat) : Nat := Nat.succ n\n")
+          [
+            -- the call's result is `Nat`: no linear content, so it may be copied
+            ("partial def loop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.inc (loop t k)\n", true),
+            ("partial def loopB (1 t : Tok) (n : Nat) : Bool :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useB t\n  | .succ k => Bool.and (loopB t k) Bool.true\n", true),
+            -- a recursive call bound by an ω `let`: a pair of ω types
+            ("partial def loopP (1 t : Tok) (n : Nat) : Nat × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useP t\n" ++
+             "  | .succ k =>\n    let r := loopP t k;\n    (r.1 + 1, r.2)\n", true),
+            -- ... and an `Option Nat` matched after the let
+            ("partial def loopO (1 t : Tok) (n : Nat) : Option Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useO t\n" ++
+             "  | .succ k =>\n    let r := loopO t k;\n    match r with\n" ++
+             "    | .none => Option.none\n    | .some v => Option.some (Nat.inc v)\n", true),
+            -- the result contains `Tok`: copied at ω it would copy the token
+            ("partial def bad (1 t : Tok) (d : Tok) (n : Nat) : Tok × Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.useTok t\n" ++
+             "  | .succ k =>\n    let r := bad t d k;\n    r\n", false),
+            -- two calls, and a path that never calls
+            ("partial def dup (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => Nat.add (dup t k) (dup t k)\n", false),
+            ("partial def drop (1 t : Tok) (n : Nat) : Nat :=\n" ++
+             "  let m := n;\n  match m with\n  | 0 => Tok.use t\n  | .succ k => 0\n", false)
+          ] },
     { name := "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)", run := fun _ =>
         selfhostAgrees "" splitDecls },
     { name := "`let () := u; b` and split: the Lean and the self-hosted compilers agree (B7)", run := fun _ => do
@@ -3147,6 +3221,12 @@ def selfHostGroup : Group where
         selfhostAgreesHost surfaceLetPairProgram },
     { name := "A18: `let () := u; b` agrees with the host", run := fun _ =>
         selfhostAgreesHost surfaceLetUnitProgram },
+    -- (A19) the coinductive surface is the one frontend feature with no case at all:
+    -- pin the missing half rather than assuming parity (`command.coinductive` is in
+    -- `Tables.wiz`, the host elaborates it, and the self-hosted frontend rejects it).
+    { name := "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it", run := fun _ =>
+        selfhostVerdicts "" [
+          ("coinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n", true, false)] },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -3493,17 +3573,18 @@ def selfHostGroup : Group where
         selfhostCheckFile selfhostDerivingNeg selfhostDerivingNegExpected },
     { name := "(A11) deriving: the Lean host and the self-hosted frontend agree on every form", run := fun _ =>
         derivingAgrees derivingSelfHeader [
+          -- (pinned difference) indexed `BEq` is derived by the host (a dependent motive)
+          -- and still rejected by this frontend; the rejection stays pinned by
+          -- `selfhostDerivingNeg`, and the host's derivation by `=deriving`.
           ("inductive D1 where\n  | a\n  | b\n  | c\n  deriving BEq\n", true),
           ("structure D2 where\n  x : Nat\n  deriving BEq\n", true),
           ("structure D3 where\n  x : Nat\n  b : Bool\nderiving instance BEq, Repr for D3\n", true),
           ("structure D4 where\n  x : Nat\nstructure D5 where\n  x : Bool\nderiving instance BEq for D4, D5\n", true),
           ("inductive D6 where\n  | a\n  deriving Inhabited, BEq, Repr, DecidableEq\n", true),
-          ("inductive Vec (A : Type) : Nat → Type where\n  | vnil : Vec A Nat.zero\n  | vcons (x : A) (xs : Vec A Nat.zero) : Vec A Nat.zero\n  deriving BEq\n", false),
           ("inductive L where\n  | nil\n  | cons (n : Nat) (t : L)\n  deriving DecidableEq\n", false),
           ("inductive R where\n  | mk (r : R)\n  deriving Inhabited\n", false),
           ("class Sz (A : Type) where\n  size : A → Nat\nderiving instance Sz for Nat\n", false),
-          ("def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n", false),
-          ("mutual\ninductive A where\n  | a\ninductive B where\n  | b (x : A)\n  deriving BEq\nend\n", false)] },
+          ("def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n", false)] },
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
@@ -4146,6 +4227,8 @@ def selfHostHostGroup : Group where
   name := "selfhost-host"
   exercise := "Stages 12b–14q (Lean host only)"
   cases := [
+    { name := "the host frontend elaborates the self-hosted checker and compiler (a fast guard)", run := fun _ =>
+        selfhostHostGuard },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do

@@ -1,0 +1,21 @@
+-- A fixture for web/scroll-search_test.mjs: `Web.Search` rendered from the same two-row
+-- index the Node test uses.
+import IO
+import Json
+import Web.Loom
+import Web.Search
+
+inductive M where
+  | x
+
+def index : String := "[{\"n\":\"Point\",\"m\":\"Shapes\",\"k\":\"structure\",\"d\":\"A point in the *plane*.\",\"s\":\"Type\",\"u\":\"Shapes.html#Point\"},{\"n\":\"area\",\"m\":\"Shapes\",\"k\":\"def\",\"d\":\"The area of a circle.\",\"s\":\"Circle → Nat\",\"u\":\"Shapes.html#area\"}]"
+
+def model (q : String) : Search.Model := Search.effect (Search.effect Search.initial "index" index "") "query" q ""
+
+def html (q : String) : String := Loom.toHtml (Search.view (M := M) (model q))
+
+def main : IO Unit := IO.println (Json.render (Json.mkObj
+  [ Json.field "name" (Json.mkStr (html "point"))
+  , Json.field "docs" (Json.mkStr (html "plane"))
+  , Json.field "signature" (Json.mkStr (html "Circle"))
+  , Json.field "miss" (Json.mkStr (html "zzz")) ]))

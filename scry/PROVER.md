@@ -32,6 +32,7 @@ formula    φ ::= R(t⃗) | ¬R(t⃗) | φ ∧ φ | ∀x⃗. φ
 claim      noFlow f I M S      I : tainted (point, register) rows
                                M : derived tainted locations
                                S : the source relations the claim quantifies over
+           cut f G             G : the guard points the cut relies on
 ```
 
 `noFlow f I M S` means:
@@ -73,9 +74,13 @@ bind" (`param` flows are allowed by leaving `param` out).
   a flow property; a `noFlow` claim says nothing about it, and a program can have a
   proof and a forbidden-call finding at the same time. That is correct, not a gap in the
   proof, but a report must not read "checked" as "finding-free".
-* **No arithmetic, no bounds, no guards-as-facts.** The engine has no EDB relation for
-  "here a length was checked", so a `memcpy` length property is outside the current
-  fact language (see §6).
+* **Guards/bounds are facts, not a dominant-check predicate.** `Scry.Bounds` now
+  exports `guard (point, var, hi, target)` ("on the edge to `target`, `var <= hi`"),
+  `use (point, var, loc, cap, kind, const)` (an index/length access into a buffer with
+  `cap` cells) and `before (node, usePoint)` (dominance). A `cut` claim checks that every
+  **write** use has a selected guard that dominates it and whose bound fits the
+  buffer. `Scry.check` still trusts the EDB; the guard rows are the analysis's view of
+  the branch, so a forged EDB is a forged proof, exactly as for `flow`/`src`.
 
 ## 2. The proof object
 
@@ -85,13 +90,14 @@ structure Scry.Claim where
   invariant : List (Nat × Nat)   -- tainted rows
   locations : List Nat           -- derived tainted locations
   sources : List Nat             -- source relations quantified (`[]` = all)
-  property : Scry.Property       -- noFlow | constantOrBound
+  property : Scry.Property       -- noFlow | constantOrBound | cut
+  guards : List Nat              -- the cut's guard points (a `cut` claim)
 ```
 
-That is the certificate: **a finite set of `(point, register)` rows and a finite set of
-locations**. It is tiny compared with the analysis trace (one row for the worked
-example), human-checkable by reading the script, and it is not a re-encoding of the
-evaluator's provenance.
+That is the certificate: **a finite set of `(point, register)` rows, a finite set of
+locations, and for a cut, a finite set of guard points**. It is tiny compared with the
+analysis trace (one row for the worked example), human-checkable by reading the script,
+and it is not a re-encoding of the evaluator's provenance.
 
 A proof of a finding stays a `Scry.Derivation` (`Scry.Cert`); the two certificate kinds
 are duals:
@@ -173,6 +179,28 @@ Two honest caveats:
   principle (a `Derivation`-height relation, as `Scry.Cert` has for the positive
   direction) and is the obvious next step, not a claim made here.
 
+### The cut checker
+
+`property .cut` is a *different* obligation, checked by `Scry.checkCut`:
+
+1. **non-vacuity** — the EDB must have at least one **write** use (`kind` is
+   `index-write` or `copy-write`), else `vacuous`;
+2. **real cut points** — every point in `c.guards` must have at least one `guard` row,
+   else `refused` (a certificate may not name a control point that proves nothing);
+3. **coverage** — for every write use, either its length/index is a known constant that
+   fits, or there is a guard row `(g, var, hi, target)` with `g ∈ c.guards`, `g`
+   dominates the use (`before(g, use)`), the bound-carrying edge's target dominates the
+   use (`before(target, use)`), and `hi` fits the buffer: an index needs `hi < cap`, a
+   copy length needs `hi <= cap`. The first miss is `refuted` with the guard and the use
+   named; an unknown capacity (`cap = 0`, the lowering's marker) is a refutation, never a
+   silent pass.
+
+The guard set is the certificate, not the search: `Scry.proveCut`/`--cut` use every
+guard point in the EDB by default, and a hand-written subset is checked by the same
+function. No taint obligation is involved; a cut says "every write is preceded by a
+check", not "no attacker value reaches a sink". The two claims can be proved separately
+and a report must not merge them.
+
 ## 5. Worked example
 
 The corpus is the C# taint pair; the analyser lowers it with `Scry.Cs.programOf`, then
@@ -198,15 +226,19 @@ Wrong proofs, all rejected:
 This section is the point of the exercise: a tactic system that can only re-derive what
 the analysis already asserts is decoration, not verification.
 
-1. **Nothing about arithmetic or memory safety.** "No unvalidated length reaches
-   `memcpy`" is *not* proved here. It needs an EDB relation for length/guard facts and a
-   bounds domain in the rule pack; the taint engine has neither. The C# twin's
-   `int.Parse` is a *sanitiser* for taint, not a range check — the property proved is
-   data flow, not length validity.
-2. **No temporal/path logic.** "every write to `x` is preceded by a length check" is a
-   dominator/cut property over the CFG. The design for it is: extract `guard(point, var)`
-   and `use(point, var)` rows, prove that every source→use path crosses a guard with a
-   cut certificate. That is a new proposition and a new checker; it is not in this slice.
+1. **Arithmetic only through the analysis's constants.** The `memcpy` length property is
+   now proved (§10), but the guard bound is a **constant** recovered by
+   `Scry.boundsConstAt`; a symbolic `n <= m` or a bound from a function (`cap = min(x,y)`)
+   is not a guard row. There is no interval/bounds domain in the rule pack, and the
+   copy length's unit is the analysis's cell count, not a byte count for element types
+   larger than one. The C# twin's `int.Parse` is a *sanitiser* for taint, not a range
+   check.
+2. **No temporal/path logic beyond dominance.** "every write to `x` is preceded by a
+   length check" is checked as a **cut**: a selected guard point must dominate the write
+   and its bound-carrying edge must reach it. That is a may-cut over the CFG, not LTL; it
+   says nothing about a guard on *another* path, a loop invariant, or an interprocedural
+   check. The `use` rows include loads (`index-read`, `copy-read`) but the `cut`
+   obligation quantifies over **writes** only; a read property needs its own obligation.
 3. **Not interprocedural.** `param`/`retsrc` are assumptions, not proved facts. The
    certificate says "given these seeds, no intraprocedural path"; the caller/callee
    argument is the summary walk's, as in `Scry.Certify`.
@@ -233,9 +265,10 @@ What makes the prototype more than decoration, concretely:
 
 | file | contents |
 |---|---|
-| `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the tactic datatype and `prove`/`proveWith` |
-| `lib/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection and `constantOrBound` |
-| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection |
+| `lib/Scry/Prover.wiz` | `Claim`, `Verdict`, `check`, the cut checker, the tactic datatype and `prove`/`proveWith` |
+| `lib/Scry/Bounds.wiz` | the out-of-bounds rules and `boundsFactsOfFunc`: `guard`/`use`/`before` rows derived from the same CFG, capacities and copy shapes |
+| `lib/Scry/ProverExamples.wiz` | tiny EDBs for the safe/unsafe pair, the memory pair, vacuity, source selection, `constantOrBound` and the cut twins |
+| `Tests/Groups/ScryProver.lean` | group `scry-prover` (library shard): safe twin proves, unsafe twin refuted, memory covered, vacuity rejected, tagged verdicts, source selection, the cut on tiny EDBs and guard extraction |
 | `scry/PROVER.md` | this note |
 
 Test cases (all in the interpreter, reading the checked-in spills, so no tree-sitter and
@@ -252,10 +285,17 @@ no .NET):
 | `constantOrBound` | `proved` on the parameter-only flow, `refuted` when the untrusted source reaches the sink |
 | tagged verdict | `apply 99` is `script-failed`, not `none` |
 | the C# process pair | safe twin proved with a 1-row invariant; unsafe twin refuted at the alert |
+| cut, tiny EDBs | the guarded copy is `proved`; an unordered guard is `refuted` naming `guard(0,3,32,1)` and `use(1,3,7,32,2,0)`; a weak bound, an unknown capacity, a phantom cut point and a constant overflow each have their own verdict |
+| cut, C `memcpy` (corpus) | `memcpy-safe.c`: `proved` (1 guard row, 1 write use); `memcpy-weak.c`: `refuted` naming the guard, the use and the bound/capacity mismatch; `memcpy-unguarded.c`: `refuted` with no guard on the length register |
+
+The `cut, tiny EDBs` and `guard extraction` rows run in the interpreter; the C rows run the
+compiled driver through `scry/corpus/prover/check.sh` (the driver is the only usable entry
+point for the frontend, as §9.5 says).
 
 The dogfood corpus in `scry/corpus/prover/` is a separate, synthetic corpus:
-`RecordSeeder`, `ReportProvider`, `EventEndpoint` and `PathHelper`, plus the modern C#
-memory twin. `check.sh` asserts the tagged verdicts and the memory path.
+`RecordSeeder`, `ReportProvider`, `EventEndpoint` and `PathHelper`, the modern C#
+memory twin, and the C `memcpy-*` cut fixtures. `check.sh` asserts the tagged
+verdicts, the memory path and the cut witnesses.
 
 ## 8. Alternatives considered
 
@@ -286,10 +326,105 @@ property needs, is the natural second user of the same checker shape.
    `Scry.Cert`'s flat-tree machinery).
 2. Interprocedural: make the `param`/`retsrc` seeds *subgoals* (a summary certificate per
    caller), so a corpus-wide claim is a tree of per-function invariants.
-3. Guards/bounds: add `guard`/`use` EDB rows from `Scry.Bounds`, define the cut claim for
-   "every write preceded by a check", and prove the `memcpy` length property on a C
-   fixture.
+3. **Done (this slice): guards/bounds.** `guard`/`use`/`before` EDB rows from
+   `Scry.Bounds`, the `cut` claim for "every write preceded by a check", and the
+   `memcpy` length property on C fixtures (`scry/corpus/prover/c/`, §10).
 4. A `scry prove FILE --claim …` command: parse a small script, run it, print the
    invariant and the verdict, and exit non-zero on a rejected claim (with the offending
-   fact). The dogfood driver `scry/tools/ProverMain.wiz` is the prototype.
+   fact). The dogfood driver `scry/tools/ProverMain.wiz` is the prototype; it now has a
+   `--cut` mode.
 5. Mechanise the memory closure induction alongside the taint one.
+
+## 10. Guards and bounds: the cut
+
+Status: implemented on `prover-guards` (2026-11-19), based on `integration/train7`.
+
+### Facts
+
+`Scry.RuleTaint` fixes three prover-only relations (numbers 14–16; the taint rules never
+read them):
+
+```
+guard (point, var, hi, target)   on the edge from point to target, var <= hi
+use (point, var, loc, cap, kind, const)
+                                 a memory access at point uses var as an index/length
+                                 into location loc (cap cells); kind is index-write,
+                                 index-read, copy-write or copy-read; const is 0 for
+                                 "not a known constant", k+1 for the constant k
+before (node, usePoint)          node dominates usePoint
+```
+
+`Scry.Bounds.boundsFactsOfFunc` derives them from the same inputs as the out-of-bounds
+analysis: `boundsCondBounds` turns each branch edge into `var <= hi` (it mirrors
+`boundsLtProves`; `and`-true and `or`-false distribute), `boundsIndexUsesAt` and
+`boundsCopyUsesAt` read the reached `gepVar` sites and the pack's copy shapes, and
+`boundsPtrCaps` supplies the capacity. `before` is the dominator set of each use point,
+computed once when the production plan is flow-only. `Scry.addBoundsFacts` writes the
+rows into the function's EDB.
+
+### The claim
+
+`Scry.Claim` gains `guards : List Nat`, and `Scry.Property` gains `cut`. Both the
+property and the set are needed: the property selects the obligation, and the set is the
+certificate a second party can read ("these are the checks the proof relies on"). An
+empty `guards` is a legal but useless certificate; if there are writes it is refuted at
+the first one. The default certificate is every guard point in the EDB
+(`Scry.guardPoints`), and `Scry.proveFor` checks a cut claim directly — there is no
+tactic search for a cut, because the set is the proof.
+
+### The memcpy fixture
+
+`scry/corpus/prover/c/memcpy-safe.c` is a 16/32-byte copy:
+
+```c
+char src[16];
+char dst[32];
+if (n > cap) return 1;      /* cap = 16, so n <= 16 */
+memcpy(dst, src, n);
+```
+
+The derived EDB has one guard row `guard(g, n, 16, target)` and one write use
+`use(copyPoint, n, dstLoc, 32, copy-write, 0)`. The cut over `{g}` is **proved**: the
+guard dominates the copy, the edge target dominates it, and 16 ≤ 32.
+
+`memcpy-weak.c` changes `cap` to 64 (same source length, so the checked-in spill still
+matches). The guard is before the copy, but 64 > 32: **refuted**, with a witness of the
+form
+
+```
+guard(g,n,64,target) allows register n up to 64 but the buffer holds 32 cells;
+path guard(g,n,64,target) -> before(g,copyPoint) -> use(copyPoint,n,dstLoc,32,2,0)
+```
+
+`memcpy-unguarded.c` has no branch: **refuted** with `the write use(...) has no guard on
+register n`. The tiny EDB `proverCutUnordered` covers the third shape, a guard that does
+not dominate the copy (`does not dominate`).
+
+### Verification status (this environment)
+
+The implementation was written and inspected on `prover-guards`. The environment's
+`wiz` and `scry-cst` executables hung at startup (`--version` included), and every
+invocation was killed by its timeout. The `wiz check` probes, the `scry-prover` Lean
+group and `check.sh` could therefore not be run here. The verdicts and witnesses above
+are the implementation's expected output, not a measured run; the code, corpus and tests
+are committed on `prover-guards` (`b26b982c`). This is the same class of environment
+limit the dogfood recorded for the driver build.
+
+### Limits (what the cut does not check)
+
+* **The EDB is trusted.** `guard`/`use`/`before` are analysis output; a forged EDB forges
+  a proof, exactly as a forged `flow`/`src` does. The checker does not recompute
+  dominance from a `cfg` relation, and it does not re-run `Scry.Bounds`.
+* **One function, one cut.** The proof is intraprocedural. A check in a caller, a
+  validation helper, or a loop invariant does not produce a guard row for the callee.
+* **Constants only.** The bound is a constant recovered by `boundsConstAt`; symbolic
+  bounds, arithmetic (`n/2`), `min`/`max`, and the result of a function call are not
+  guards. The capacity is the lowering's cell count, and copies are compared in the same
+  units (a byte count into an `int` array is not scaled by the element size).
+* **Writes, not reads.** The `cut` obligation filters `use` rows to index stores and copy
+  destinations. Loads are in the EDB, but a read property (CWE-125 on a load) is not
+  checked.
+* **Unknown capacity is a refusal.** A `cap` of 0 (the lowering's unknown marker) makes
+  the write refutable; the claim never silently passes an unanalysed extent.
+* **No mechanised soundness.** The dominance/coverage argument is still a paper argument
+  in this note; there is no Wiz theorem `checkCut ... = proved → every write guarded`.

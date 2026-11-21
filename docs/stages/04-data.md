@@ -82,6 +82,84 @@ match in both alternatives, nested matches, and the dropping and duplicating cas
 rejects. The `let 1 (.mk a b) := s` form works for inductives (it is a `match`) and still
 stops on a structure's marker tail.
 
+A **recursive consumer** may thread a linear value through its recursive call: the call
+consumes it at quantity 1, exactly as a call to any other linear function does, and the
+branch rule does the rest. `match` on a value held at 1 selects `casesOn1`, whose branches
+are alternatives, so a branch that drops the continuation (`next … used 0`) or a
+definition that calls itself twice on the same handle (`used ω`) is rejected, while one
+call on every path is accepted. `partial` changes nothing: without a termination proof
+the same rule applies, because a diverging path never returns and so never has to give
+the value back.
+
+```wiz
+inductive Cursor (a : Type) where
+  | mk (rest : List a)
+inductive Step (a : Type) where
+  | done
+  | more (value : a) (1 next : Cursor a)
+
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.count {a : Type} (1 c : Cursor a) (n : Nat) : Nat :=
+  match Cursor.next c with
+  | .done => n
+  | .more _ c' => Cursor.count c' (Nat.succ n)
+```
+
+A recursive call that consumes a `1`-parameter may have its **result** used in an ω
+position — `Nat.succ (loop c')`, `1 + loop c'`, a pair's first component — when the result
+type contains neither the linear argument nor its type. The rule is **"consumed but not
+contained"**: the call is evaluated once, so the cursor is threaded exactly once, and a
+result with no linear content (a `Nat`, a `Bool`, a pair of ω types, an `Option Nat`) can
+be copied or dropped without copying the resource. The kernel tests the result type for
+a syntactic occurrence of the call's `1`-quantity arguments and their instantiated
+parameter types (`fixCallSafe`); a partially applied call is refused, because its closure
+may capture the linear value. The test never unfolds a definition, so it is a decidable
+approximation: a type alias that hides the linear type, or a function value that captures
+it, is not seen (and should be avoided).
+
+```wiz
+inductive Cursor (a : Type) where
+  | mk (rest : List a)
+inductive Step (a : Type) where
+  | done
+  | more (value : a) (1 next : Cursor a)
+
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.length {a : Type} (1 c : Cursor a) : Nat :=
+  match Cursor.next c with
+  | .done => 0
+  | .more _ c' => Nat.succ (Cursor.length c')   -- accepted: the result is a Nat
+```
+
+A result type that **contains** the linear parameter stays rejected: copying it would
+copy the cursor. `Cursor a × Nat` is such a type, and so is `Option (Cursor a)`:
+
+```wiz no-check
+def Cursor.next {a : Type} (1 c : Cursor a) : Step a := match c with
+  | .mk .nil => .done
+  | .mk (.cons x xs) => .more x (.mk xs)
+
+partial def Cursor.keep {a : Type} (1 c : Cursor a) (d : Cursor a) : Cursor a × Nat :=
+  match Cursor.next c with
+  | .done => (d, 0)
+  | .more _ c' =>
+    let r := Cursor.keep c' d;
+    r
+-- error: variable c' declared with quantity 1 but used ω
+--   (the `let` binds the recursive result at ω and it contains `Cursor a`)
+```
+
+A `partial` definition's **witness** (the term that shows its type is inhabited) is
+checked without usages, so it may ignore a linear parameter — the body that runs is still
+checked strictly. (`Wiz/Core/Check.lean`, `Ctx.witness` and `fixCallSafe`; the
+self-hosted kernel's `TCtx.witness` and `fixCallSafe`.)
+
 | #   | Where              | What                                                       |
 |-----|--------------------|------------------------------------------------------------|
 | 4.3 | `Core/Eval.lean`   | `eval` cases for Σ / pairs / Unit / Empty                  |
@@ -331,6 +409,33 @@ def add : Nat → Nat → Nat
 
 def head {A : Type} {n : Nat} : Vec A (.succ n) → A
   | .cons x _ => x                      -- the `nil` case is impossible, so it's omitted
+```
+
+`match h : e with | p => …` names the branch's equation: in the branch for `p`, the
+hypothesis `h : e = p` is in scope. This is what lets a split on a computed value
+(`match h : p n with`) be related back to `e`; a plain `match e with` still generalises
+`e` in the goal but gives the arm no equation. Each scrutinee may be named
+(`match h : e, k : f with`); the equation's name goes before its scrutinee, not in a
+pattern (`| h : .true => …` is an error).
+
+The elaborator binds each scrutinee to a variable `x` and gives the motive an extra
+argument `(h : e = x) → …`, then applies the whole match to `e` and to
+`rfl : e = e`. Branch `p` therefore sees `h : e = p`, with no index unification needed:
+the equation is a *reverted variable*, in the context before the motive is fixed. It
+works for a non-dependent match too (the goal need not mention `e`), since `h` is
+part of the motive's telescope. The equation is the language's observational equality,
+so it computes as usual (at a proposition it is `True`). A named match on an *indexed*
+value is rejected: the constructor split refines the index in the goal, but the
+scrutinee term keeps its outer index, so `e = p` would not be well typed (the plain
+`match e with` and a helper that takes the value and its equation still work). The same
+applies to a named scrutinee whose type mentions an earlier scrutinee that this match
+splits.
+
+```
+def keep (p : Nat → Bool) (n : Nat) : Nat :=
+  match h : p n with
+  | .true => n
+  | .false => 0
 ```
 
 `match` and equation-style definitions compile to case trees over `T.casesOn`

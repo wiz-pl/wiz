@@ -107,6 +107,9 @@ function find(n, p) {
 // 8. Determinism flag from Wiz.
 ok(fixture.deterministic === true, "SSR is deterministic (Wiz rendered it twice)");
 ok(fixture.handlers === 3, "the fixture has three handlers", String(fixture.handlers));
+ok(fixture.guard.includes('data-wiz-on-keydown="0"') &&
+   fixture.guard.includes('data-wiz-prevent-keydown="1"'),
+  "onPrevent renders the handler and the runtime-decides marker", fixture.guard);
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log("\nloom framework: all checks passed");

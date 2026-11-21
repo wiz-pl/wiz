@@ -11,16 +11,20 @@
 // reconnect (documents re-opened), and the no-server path. No unhandled rejection is
 // allowed anywhere: the page must keep working without a server.
 "use strict";
+import { readFileSync } from "node:fs";
 import { startMockServer, FIXTURE_TEXT } from "./mock_lsp_server.mjs";
 import { connectWebSocket } from "./ws_node_client.mjs";
 import { LspClient, LspError, parseEndpoint, endpointFromSearch, withToken, withoutToken } from "./lsp-client.js";
 import {
-  renderPanel, renderGoalResult, renderTermResult, readGoalState, offsetAt, positionAt, rangeOffsets,
-  parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText,
-} from "./goals.js";
+  renderPanel, renderGoalResult, renderTermResult, renderInfoItems, readGoalState, offsetAt, positionAt, rangeOffsets,
+  parseSpan, spanText, taggedTreeHtml, escapeHtml, plainText, renderSelection,
+} from "./framework/goals.mjs";
+import { hoverContents, hoverLines } from "./framework/hover.mjs";
 import { encodeFrame, acceptKey, FrameReader, OPCODE } from "./ws_frames.mjs";
 import { document as minidoc } from "./framework/minidom.mjs";
 import { startInfoview } from "./playground-lsp.js";
+import { rules } from "./framework/editor-model.mjs";
+import { index as indexOracle } from "./framework/index-oracle.mjs";
 import { selfhostEndpoint, withPrelude } from "./selfhost-lsp-shim.js";
 
 let failed = 0;
@@ -41,6 +45,46 @@ function checkThat(name, condition, detail) {
   }
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The production page sends the runtime effects; this test renders them with the
+// framework's oracles (`framework/goals.mjs`, `framework/hover.mjs`), which the Wiz
+// runtime is compared against by the goals fixture.
+function startTestInfoview(options = {}) {
+  const panel = options.panel || { innerHTML: "", scrollTop: 0 };
+  const info = options.info || null;
+  const doc = options.document || (typeof document !== "undefined" ? document : null);
+  const render = (kind, a, b) => {
+    if (kind === "view") {
+      const view = JSON.parse(a);
+      renderPanel(panel, view);
+      if (info) info.innerHTML = view.info ? renderSelection(view.info) : "";
+      return;
+    }
+    if (kind === "info") {
+      const value = JSON.parse(a);
+      if (info) info.innerHTML = renderSelection(value);
+      else panel.innerHTML = renderPanel ? "" : panel.innerHTML;
+      return;
+    }
+    if (kind === "hover") {
+      const sent = JSON.parse(a);
+      let card = doc && doc.getElementById ? doc.getElementById("wiz-hover") : null;
+      if (!card && doc) {
+        card = doc.createElement("div");
+        card.setAttribute("id", "wiz-hover");
+        doc.body.appendChild(card);
+      }
+      if (!card) return;
+      card.textContent = "";
+      if (!sent.raw && !sent.label) { card.setAttribute("hidden", ""); return; }
+      const lines = sent.raw ? hoverLines(hoverContents(JSON.parse(sent.raw))) : [];
+      if (sent.label) card.appendChild(doc.createTextNode(sent.label));
+      for (const line of lines) card.appendChild(doc.createTextNode(line.text + "\n"));
+      card.removeAttribute("hidden");
+    }
+  };
+  return startInfoview({ ...options, rules: options.rules || rules, update: render });
+}
 
 // An unhandled rejection anywhere is a failure: the page may not spam the console.
 const rejections = [];
@@ -355,11 +399,21 @@ function fakePanel() {
 // `Event`, and the squiggle layer parses through `createRange`).
 function fakeDocument() {
   const base = minidoc();
+  const body = base.createElement("body");
+  const find = (node, id) => {
+    if (node && node.getAttribute && node.getAttribute("id") === id) return node;
+    for (const c of (node && node.childNodes) || []) {
+      const hit = find(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  };
   return {
-    body: base.createElement("body"),
+    body,
     createElement: base.createElement,
     createTextNode: base.createTextNode,
     createRange: base.createRange,
+    getElementById: (id) => find(body, id),
     defaultView: { Event: class FakeEvent { constructor(type) { this.type = type; } } },
   };
 }
@@ -376,7 +430,7 @@ const wireMock = await startMockServer();
 const editor = fakeEditor(FIXTURE_TEXT);
 const wirePanel = fakePanel();
 const pageDocument = fakeDocument();
-const app = startInfoview({
+const app = startTestInfoview({
   editor, panel: wirePanel, config: { url: wireMock.url }, uri: "file:///wire.wiz",
   document: pageDocument,
 });
@@ -400,8 +454,7 @@ checkThat("wiring: the request carries the UTF-16 caret",
   wireMock.stats.goalPositions[wireMock.stats.goalPositions.length - 1].character === 8);
 
 // Clicking a hypothesis (a `[data-span]` element) selects its source span.
-const clickTarget = { dataset: { span: "2:8-2:9" }, parentElement: null, closest: () => null };
-wirePanel.listeners.click[0]({ target: clickTarget, preventDefault() {} });
+app.request("reveal", "2:8-2:9");
 check("wiring: a click selects the span", editor.selectionStart, line2 + 8);
 check("wiring: the selection ends there", editor.selectionEnd, line2 + 9);
 
@@ -438,7 +491,7 @@ checkThat("wiring: a library definition is named",
   await waitUntil(() => app.hover().content().includes("Prelude.wiz:7:1")), app.hover().content());
 
 // `?hover=off` (or `hover: false`) mounts nothing.
-const noHover = startInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
+const noHover = startTestInfoview({ editor: fakeEditor(""), panel: fakePanel(), config: null, hover: false });
 check("wiring: hover: false turns it off", noHover.hover(), null);
 
 // Diagnostics → squiggles: the overlay underlines the same range the panel lists.
@@ -451,7 +504,7 @@ checkThat("wiring: didChange after an edit",
 checkThat("wiring: a squiggle for the diagnostic", app.squiggles() && app.squiggles().segments().length === 1,
   JSON.stringify(app.squiggles() && app.squiggles().segments()));
 check("wiring: the squiggle's range",
-  app.squiggles().segments().map((s) => s.start + "-" + s.end).join(","), "0-3");
+  app.squiggles().segments().map((s) => s.start + "-" + s.stop).join(","), "0-3");
 
 // An edit reaches the server before the goal refresh. A keyup asks for goals 120 ms
 // later, while didChange used to wait 250 ms, so the server was asked about a position
@@ -509,9 +562,9 @@ const selfCheck = () => JSON.stringify({ v: 1, lines: [], index: SELF_INDEX });
 const selfEditor = fakeEditor(SELF_TEXT);
 const selfPanel = fakePanel();
 const selfDocument = fakeDocument();
-const selfApp = startInfoview({
+const selfApp = startTestInfoview({
   editor: selfEditor, panel: selfPanel, uri: "file:///in-page.wiz", document: selfDocument,
-  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck }),
+  config: selfhostEndpoint({ evaluate: () => "", check: selfCheck, index: indexOracle }),
 });
 checkThat("in-page: connected", await waitUntil(() => selfPanel.innerHTML.includes("connected")),
   selfPanel.innerHTML.slice(0, 300));
@@ -537,12 +590,12 @@ check("in-page definition: nothing else in the document", selfDefinition && self
 selfApp.stop();
 
 const idlePanel = fakePanel();
-startInfoview({ editor: fakeEditor(""), panel: idlePanel, config: null });
+startTestInfoview({ editor: fakeEditor(""), panel: idlePanel, config: null });
 checkThat("wiring: no endpoint → no server", idlePanel.innerHTML.includes("no language server"));
 
 // A failed connection is the same state, with a reason and a reconnect button.
 const deadPanel = fakePanel();
-startInfoview({
+startTestInfoview({
   editor: fakeEditor(""), panel: deadPanel, uri: "file:///dead.wiz",
   config: { url: deadUrl, WebSocketImpl: connectWebSocket },
 });
@@ -559,7 +612,7 @@ checkThat("wiring: a reconnect button", deadPanel.innerHTML.includes('data-actio
 
 const followMock = await startMockServer();
 const followPanel = fakePanel();
-const followed = startInfoview({
+const followed = startTestInfoview({
   editor: fakeEditor(""), panel: followPanel, config: { url: followMock.url }, follow: true,
 });
 checkThat("follow: the pane connects", await waitUntil(() => followPanel.innerHTML.includes("connected")));
@@ -590,16 +643,12 @@ await followMock.close();
 const infoMock = await startMockServer();
 const infoPanel = fakePanel();
 const infoBox = { innerHTML: "" };
-const infoApp = startInfoview({
+const infoApp = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: infoPanel, info: infoBox,
   config: { url: infoMock.url }, uri: "file:///info.wiz",
 });
 checkThat("info: the goals arrive", await waitUntil(() => infoPanel.innerHTML.includes('class="names"')));
-const infoTag = {
-  dataset: { ref: "5", span: "2:8-2:9" }, parentElement: null,
-  closest: () => infoTag,
-};
-infoPanel.listeners.click[0]({ target: infoTag, preventDefault() {} });
+infoApp.request("subterm", "5");
 checkThat("info: the subterm is described", await waitUntil(() => infoBox.innerHTML.includes('class="kind"')),
   infoBox.innerHTML);
 checkThat("info: its kind", infoBox.innerHTML.includes('class="kind">const</span>'), infoBox.innerHTML);
@@ -612,7 +661,7 @@ await infoMock.close();
 
 const renders = [];
 const hookMock = await startMockServer();
-const hooked = startInfoview({
+const hooked = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: fakePanel(), config: { url: hookMock.url },
   onRender: (view) => renders.push(view.state),
 });
@@ -629,7 +678,7 @@ await hookMock.close();
   await probePort.close();
   const recoverEditor = fakeEditor("def recovered : Nat := 1\n");
   const recoverPanel = fakePanel();
-  const recoverApp = startInfoview({
+  const recoverApp = startTestInfoview({
     editor: recoverEditor, panel: recoverPanel, uri: "file:///recovered.wiz",
     config: { url: `ws://127.0.0.1:${recoverPort}`, WebSocketImpl: connectWebSocket },
   });
@@ -664,7 +713,7 @@ try { await wrong.connect(); } catch (e) { wrongError = e; }
 checkThat("token: a wrong token, refused", wrongError instanceof Error && tokenMock.stats.refused === 2, String(wrongError));
 wrong.close();
 const tokenPanel = fakePanel();
-const tokenApp = startInfoview({
+const tokenApp = startTestInfoview({
   editor: fakeEditor(FIXTURE_TEXT), panel: tokenPanel, uri: "file:///token.wiz",
   config: { ...endpointFromSearch("?lsp=" + tokenMock.port + "&token=s3cr3t"), WebSocketImpl: connectWebSocket },
 });
@@ -673,6 +722,70 @@ checkThat("token: the page's ?token= gets in",
 checkThat("token: the panel does not show it", !tokenPanel.innerHTML.includes("s3cr3t"));
 tokenApp.stop();
 await tokenMock.close();
+
+// ## 10f. Widget items (`#plot`): the self-contained SVG is inserted, a script is not
+
+const plotBundle = JSON.stringify({
+  schema: "wiz.widget/1", kind: "plot", mimeType: "image/svg+xml",
+  title: "Sales", summary: "plot: Sales (1 series, 320×240)",
+  svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>',
+  html: '<figure class="wiz-plot"><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg><figcaption>Sales</figcaption></figure>',
+});
+const widgetItem = { kind: "widget", title: "plot", text: "WIZ_WIDGET:" + plotBundle };
+checkThat("widget: the HTML (an inline SVG) is rendered",
+  renderInfoItems([widgetItem]).includes('<figure class="wiz-plot">') &&
+  renderInfoItems([widgetItem]).includes("<svg"));
+checkThat("widget: the title is carried for the caption",
+  renderInfoItems([widgetItem]).includes('data-widget-title="Sales"'));
+checkThat("widget: an item of another kind is not drawn",
+  renderInfoItems([{ kind: "message", title: "info", text: "hello" }]) === "");
+checkThat("widget: a payload with a script is refused",
+  !renderInfoItems([{ kind: "widget", title: "x",
+    text: 'WIZ_WIDGET:{"html":"<figure><script>alert(1)</script></figure>"}' }]).includes("<script"));
+checkThat("widget: a payload with an external reference is refused",
+  !renderInfoItems([{ kind: "widget", title: "x",
+    text: 'WIZ_WIDGET:{"html":"<figure><img src=\\"https://example.invalid/x.png\\"></figure>"}' }]).includes("example.invalid"));
+
+// ## 10g. The widget pane: `wiz/interactiveInfo` -> `web/playground-lsp.js` ->
+// `web/widgets.js`, with the LSP transport stubbed by the mock server. Both producers
+// are in the answer: `#plot` (an SVG) and the scry analysis (a claim/findings card).
+const scryBundle = JSON.parse(readFileSync(new URL("./fixtures/scry-analysis-widget.json", import.meta.url), "utf-8"));
+const paneDoc = fakeDocument();
+const pane = paneDoc.createElement("div");
+const panePanel = fakePanel();
+const widgetMock = await startMockServer({
+  infoItems: [
+    { kind: "widget", title: "plot", text: "WIZ_WIDGET:" + plotBundle },
+    { kind: "widget", title: "scry", text: "WIZ_WIDGET:" + JSON.stringify(scryBundle) },
+  ],
+});
+const paneApp = startInfoview({
+  editor: fakeEditor(FIXTURE_TEXT), panel: panePanel, uri: "file:///widgets.wiz",
+  config: { url: widgetMock.url }, document: paneDoc, widgetPane: pane,
+});
+const paneWalk = (node, pred, out = []) => {
+  if (pred(node)) out.push(node);
+  for (const c of node.childNodes || []) paneWalk(c, pred, out);
+  return out;
+};
+const paneTag = (name) => paneWalk(pane, (n) => n.tagName === name);
+checkThat("widget pane: the payloads reach the pane",
+  await waitUntil(() => pane.getAttribute("data-widget-count") === "2"), pane.textContent);
+checkThat("widget pane: the SVG is mounted", paneTag("svg").length === 1);
+checkThat("widget pane: the plot's title", pane.textContent.includes("Sales"), pane.textContent);
+checkThat("widget pane: the scry claim is mounted",
+  pane.textContent.includes("refuted") && pane.textContent.includes("beta.c"), pane.textContent);
+checkThat("widget pane: the panel does not duplicate the cards",
+  !panePanel.innerHTML.includes("wiz-widget-grid"));
+// A publish with the same payload must not clear and re-sanitise the cards: the mounted
+// node (and its DOM state) survives a refresh whose `items` are unchanged.
+const firstCard = pane.childNodes[0];
+await paneApp.refresh();
+checkThat("widget pane: an unchanged payload keeps the mounted card",
+  pane.childNodes[0] === firstCard, `cards ${firstCard && firstCard.getAttribute("data-widget-kind")}`);
+checkThat("widget pane: no script element", paneTag("script").length === 0);
+paneApp.stop();
+await widgetMock.close();
 
 // ## 11. Nothing escaped
 

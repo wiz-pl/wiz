@@ -16,3 +16,4 @@ import Tower.Cli
   | .error e => e
 #eval Info.render (Info.parse (Info.render (Info.mk "v1" "source" "v1" "abc" "" (("cc", "gcc") :> .nil))))
 #eval Tower.opts ("v1" :> "--source" :> "release" :> "--cc" :> "gcc" :> "--force" :> .nil)
+#eval Tower.flagWords (("root", "/r") :> ("region-cache", "true") :> ("cache-ro", "/a") :> ("cache-ro", "/b") :> .nil)

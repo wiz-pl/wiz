@@ -1,0 +1,298 @@
+import Scry.Rules
+import Scry.RuleTaint
+import Scry.PointsTo
+import Scry.Bounds
+import Scry.Lifetime
+import Scry.Engine
+import Text
+/-!
+# Scry.Registry: analyses selected by a rule pack's `check` names
+
+`lib/Scry/Rules.wiz` has always let a `kind memory` rule name the analysis that supplies
+its evidence (`check NAME`), but until now the analyses behind those names were a fixed
+sequence of calls in `Scry.analyzeStore` (the CLI) and a second copy in
+`Scry.analyzeEntriesBounded` (the library). Adding an analysis meant editing both
+pipelines, plus the analysis module, plus `Scry.RulePack.memoryRuleFor`'s callers. The
+closed set is recorded in `wiz-notes/scry-generic-engine.md` §3 (A1–A5).
+
+This module turns that sequence into a table:
+
+```
+check name  ->  AnalysisSpec { checks, label, sem, lift, run }
+```
+
+`Scry.analyses` is the default table. `Scry.runAnalyses` selects the entries the pack
+enables (in table order) and folds their outputs. Both pipelines call exactly that, so
+adding an analysis is **a row in one table**; the check name in the pack is the only
+contract.
+
+## The semantics a row carries
+
+`AnalysisSpec.sem` is the semantics the analysis runs on and `lift` reads the Wil program
+the frontends produce as a unit of that semantics. A bounds row is
+`Scry.boundsAnalysis Scry.Wil.concrete …`: the same function with a second `Sem` and a
+`lift` for its `Ir` is a second row, not a second pipeline. `run` receives the lifted
+`Ir`, so the engine really passes the semantics through; nothing re-reads
+`Scry.Wil.concrete` behind the analysis's back. (`Scry.Lifetime` is not yet
+event-parameterised — that is P1 — so its row names the default semantics it does read.)
+
+## Why the table is an inductive, not `List`
+
+`Scry.Sem Scry.Event` has `Type`-valued fields, so a semantics value is `Type 1`, and a
+structure that stores one is itself `Type 1`. Wiz's `List (A : Type)` cannot hold it (the
+same reason `lib/Eff.wiz` declares `Row : Type 1` instead of using `List Effect`).
+`AnalysisTable` is the small cons-list that can; every helper below is the list operation
+the table needs.
+
+## Exhaustiveness
+
+A silent skip is the failure mode this table has to rule out:
+
+* **pack → table.** Every `check` name a memory rule selects must have a row.
+  `Scry.unknownChecks` returns the uncovered names and `Scry.analyzeStore` fails the run
+  with them, naming the registered checks. A typo in a pack (`check out-of-bounds-writ`)
+  is therefore an error, not an empty finding list.
+* **table → pipeline.** A row that selection can never return is dead. That is a row with
+  no checks, or whose every check is claimed by an earlier row (the pipeline selects the
+  first). `Scry.unreachableAnalyses` reports those, and the CLI refuses to run while one
+  exists; the registry cannot carry a row that is silently not run.
+
+`Scry.registryProblems` combines both directions for tests and diagnostics.
+-/
+
+-- ## What an analysis consumes and produces
+
+/-- The Wil evidence every analysis of this slice consumes (the fact-bundle
+parameterisation is P3): the model pack, the program, its points-to solution, the
+per-function taint results, and the pack that selected the analysis. P4's model pack is a
+field here, not a pipeline argument to each analysis: both pipelines build this record and
+call `runAnalyses`, so a row reads `i.models` and no pipeline changes when an analysis
+gains a model dependency. -/
+structure Scry.AnalysisInput where
+  /-- The external-function model pack the pack's rules were resolved with (P4). -/
+  models : Scry.ModelPack
+  prog : Wil.Program
+  pt : Scry.PtResult
+  results : List Scry.FuncResult
+  pack : Scry.RulePack
+
+/-- The findings and diagnostics an analysis adds to the program result. `findings` are
+appended in registry order; `warnings` too (the pipeline keeps its own taint warnings
+first, then the analyses' warnings, as before the registry existed). -/
+structure Scry.AnalysisOutput where
+  findings : List Scry.RuleFinding
+  warnings : List Scry.MemWarning
+
+/-- One row of the registry. `checks` are the pack `check` names the analysis implements;
+`label` names it in diagnostics; `sem`/`lift`/`run` are the semantics it runs on, how the
+frontend's Wil program is read as one of its units, and the analysis itself. -/
+structure Scry.AnalysisSpec where
+  checks : List String
+  label : String
+  sem : Scry.Sem Scry.Event
+  lift : Wil.Program → sem.Ir
+  run : Scry.AnalysisInput → sem.Ir → Scry.AnalysisOutput
+
+/-- A registry: an ordered list of `AnalysisSpec`. It is its own inductive because a
+`AnalysisSpec` is `Type 1` (it stores a `Sem`) and `List` takes a `Type`. -/
+inductive Scry.AnalysisTable : Type 1 where
+  | nil
+  | cons (spec : Scry.AnalysisSpec) (rest : Scry.AnalysisTable)
+
+-- ## The default analyses
+
+/-- The two out-of-bounds rules as one analysis: `Scry.boundsCheckWith` already reads both
+`check` names from the pack, so one row serves both and the per-function finding order is
+the order the analysis has always produced. `s` is the semantics whose `events` the
+analysis consumes; the default row passes `Scry.Wil.concrete`. -/
+def Scry.boundsAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
+  Scry.AnalysisSpec.mk
+    ["out-of-bounds-write", "out-of-bounds-read"]
+    "bounds"
+    s
+    lift
+    (fun i ir =>
+      let r := Scry.boundsCheckWithModels i.models s ir i.pt i.pack i.results;
+      Scry.AnalysisOutput.mk r.findings r.warnings)
+
+/-- The use-after-free rule. `Scry.lifetimeFindingsWithModels` still reads the Wil fact
+bundle directly (its event parameterisation is P1), so its row names the default semantics
+and uses the Wil-shaped entry; the row shape is the same as bounds', so extending it later
+is an edit to this constructor, not to either pipeline. -/
+def Scry.lifetimeAnalysis (s : Scry.Sem Scry.Event) (lift : Wil.Program → s.Ir) : Scry.AnalysisSpec :=
+  Scry.AnalysisSpec.mk
+    ["use-after-free"]
+    "lifetime"
+    s
+    lift
+    (fun i _ => Scry.AnalysisOutput.mk
+      (Scry.lifetimeFindingsWithModels i.models i.prog i.pt i.pack) .nil)
+
+/-- The default registry, in pipeline order. Lifetime findings have always preceded
+bounds findings (`memoryFindings := lifetime ++ bounds`), and lifetime contributes no
+warnings, so this order is byte-for-byte the old sequence's output. -/
+def Scry.analyses : Scry.AnalysisTable :=
+  .cons
+    (Scry.lifetimeAnalysis Scry.Wil.concrete (fun p => Scry.WilTarget.mk p "" .nil))
+    (.cons
+      (Scry.boundsAnalysis Scry.Wil.concrete (fun p => Scry.WilTarget.mk p "" .nil))
+      .nil)
+
+-- ## Table operations
+
+/-- `xs ++ ys`. -/
+def Scry.AnalysisTable.append : Scry.AnalysisTable → Scry.AnalysisTable → Scry.AnalysisTable
+  | .nil, ys => ys
+  | .cons x xs, ys => .cons x (Scry.AnalysisTable.append xs ys)
+
+/-- The rows whose spec satisfies `p`, in order. -/
+def Scry.AnalysisTable.filter (p : Scry.AnalysisSpec → Bool) :
+    Scry.AnalysisTable → Scry.AnalysisTable
+  | .nil => .nil
+  | .cons x xs => match p x with
+    | .true => .cons x (Scry.AnalysisTable.filter p xs)
+    | .false => Scry.AnalysisTable.filter p xs
+
+/-- The rows' labels, in order (diagnostics and tests). -/
+def Scry.analysisLabels : Scry.AnalysisTable → List String
+  | .nil => .nil
+  | .cons x xs => List.cons x.label (Scry.analysisLabels xs)
+
+-- ## Selection and execution
+
+/-- Whether `sp` implements the pack's `check` name. -/
+def Scry.analysisHandles (sp : Scry.AnalysisSpec) (check : String) : Bool :=
+  List.any (fun c => String.eq c check) sp.checks
+
+/-- Whether any row in `reg` implements `check`: the selection rule both the pipeline and
+the unknown-check test use. (The row itself is not returned: `Option AnalysisSpec` would
+need `AnalysisSpec : Type`.) -/
+def Scry.implements (reg : Scry.AnalysisTable) (check : String) : Bool :=
+  match reg with
+  | .nil => .false
+  | .cons sp rest => match Scry.analysisHandles sp check with
+    | .true => .true
+    | .false => Scry.implements rest check
+
+/-- Whether the pack selects this analysis (by any of its checks). -/
+def Scry.specSelected (pack : Scry.RulePack) (sp : Scry.AnalysisSpec) : Bool :=
+  List.any (fun c => match pack.memoryRuleFor c with
+    | .some _ => .true
+    | .none => .false) sp.checks
+
+/-- The registry entries this pack enables, in registry order. -/
+def Scry.enabledAnalyses (reg : Scry.AnalysisTable) (pack : Scry.RulePack) :
+    Scry.AnalysisTable :=
+  Scry.AnalysisTable.filter (Scry.specSelected pack) reg
+
+/-- Run one row: lift the Wil program into the row's semantics, then run the analysis. -/
+def Scry.runAnalysis (sp : Scry.AnalysisSpec) (i : Scry.AnalysisInput) :
+    Scry.AnalysisOutput :=
+  sp.run i (sp.lift i.prog)
+
+/-- The combined output of a list of rows, findings and warnings in row order. -/
+def Scry.joinAnalysisOutputs : List Scry.AnalysisOutput → Scry.AnalysisOutput
+  | .nil => Scry.AnalysisOutput.mk .nil .nil
+  | .cons o os =>
+    let rest := Scry.joinAnalysisOutputs os;
+    Scry.AnalysisOutput.mk (List.append o.findings rest.findings)
+      (List.append o.warnings rest.warnings)
+
+/-- Every enabled row's output, in registry order. -/
+def Scry.runEnabled (reg : Scry.AnalysisTable) (i : Scry.AnalysisInput) :
+    List Scry.AnalysisOutput :=
+  match reg with
+  | .nil => .nil
+  | .cons sp rest => match Scry.specSelected i.pack sp with
+    | .true => List.cons (Scry.runAnalysis sp i) (Scry.runEnabled rest i)
+    | .false => Scry.runEnabled rest i
+
+/-- **The whole pipeline hook**: every enabled row, run in registry order. Both
+`Scry.analyzeStore` and `Scry.analyzeEntriesBound` call this and nothing else from the
+analysis set. -/
+def Scry.runAnalyses (reg : Scry.AnalysisTable) (models : Scry.ModelPack)
+    (pack : Scry.RulePack) (prog : Wil.Program) (pt : Scry.PtResult)
+    (results : List Scry.FuncResult) : Scry.AnalysisOutput :=
+  let i := Scry.AnalysisInput.mk models prog pt results pack;
+  Scry.joinAnalysisOutputs (Scry.runEnabled reg i)
+
+-- ## Exhaustiveness checks
+
+/-- The `check` names the pack's memory rules select, deduplicated in pack order. -/
+def Scry.ruleCheckNames (p : Scry.RulePack) : List String :=
+  List.foldl (fun acc c =>
+    match List.any (fun d => String.eq d c) acc with
+    | .true => acc
+    | .false => List.append acc (List.cons c .nil)) .nil
+    (List.map (fun m => m.check) (Scry.RulePack.memoryRules p))
+
+/-- Check names a pack selects that no registry row implements: a **loud** skip. -/
+def Scry.unknownChecks (reg : Scry.AnalysisTable) (pack : Scry.RulePack) :
+    List String :=
+  List.filter (fun c => Bool.not (Scry.implements reg c)) (Scry.ruleCheckNames pack)
+
+/-- `a, b, c` for diagnostics. -/
+def Scry.checksText (cs : List String) : String :=
+  String.intercalate ", " cs
+
+/-- The checks of `sp` that no earlier row claimed. -/
+def Scry.freshChecks (claimed : List String) (sp : Scry.AnalysisSpec) : List String :=
+  List.filter (fun c => Bool.not (List.any (fun d => String.eq d c) claimed)) sp.checks
+
+/-- Walk the table, carrying the checks already claimed by earlier rows; a row with no
+fresh check can never be selected. The table is the first argument so the structural
+recursion is on its tail. -/
+def Scry.unreachableGo (reg : Scry.AnalysisTable) (claimed : List String) :
+    List String :=
+  match reg with
+  | .nil => .nil
+  | .cons sp rest =>
+    let fresh := Scry.freshChecks claimed sp;
+    let here := match List.length fresh with
+      | .zero => List.cons (sp.label ++ " (checks: " ++ Scry.checksText sp.checks ++ ")") .nil
+      | _ => .nil;
+    List.append here (Scry.unreachableGo rest (List.append claimed fresh))
+
+/-- Registry rows the pipeline can never select: an empty `checks` list, or one that only
+repeats a name an earlier row already owns. Reported, never silently skipped. -/
+def Scry.unreachableAnalyses (reg : Scry.AnalysisTable) : List String :=
+  Scry.unreachableGo reg .nil
+
+/-- Every check name the registry implements, in table order (for an error message that
+says what a pack *could* have written). -/
+def Scry.registeredChecks : Scry.AnalysisTable → List String
+  | .nil => .nil
+  | .cons sp rest => List.append sp.checks (Scry.registeredChecks rest)
+
+/-- The two-direction exhaustiveness report: `unknown` names from the pack that no row
+implements, `unreachable` rows no check can select. Empty on both sides means the pack and
+the table agree. -/
+structure Scry.RegistryReport where
+  unknown : List String
+  unreachable : List String
+
+def Scry.checkRegistry (reg : Scry.AnalysisTable) (pack : Scry.RulePack) :
+    Scry.RegistryReport :=
+  Scry.RegistryReport.mk (Scry.unknownChecks reg pack) (Scry.unreachableAnalyses reg)
+
+/-- One diagnostic string per problem; empty means the registry is exhaustive and every
+row is reachable. Tests and the CLI both use this so a failure cannot be a silent skip. -/
+def Scry.registryProblems (reg : Scry.AnalysisTable) (pack : Scry.RulePack) :
+    List String :=
+  let r := Scry.checkRegistry reg pack;
+  List.append
+    (List.map (fun c => "rule pack selects check `" ++ c
+      ++ "` but no analysis is registered for it (registered: "
+      ++ Scry.checksText (Scry.registeredChecks reg) ++ ")") r.unknown)
+    (List.map (fun u => "analysis `" ++ u
+      ++ "` is registered but unreachable (no check of its own: empty, or every check "
+      ++ "claimed by an earlier row)") r.unreachable)
+
+/-- The same problems as memory diagnostics. The library entry points
+(`Scry.analyze`, `Scry.analyzeC`, …) return a `ProgramResult` and have no error channel, so
+they report a pack/registry disagreement here instead of silently running fewer analyses.
+The CLI checks `Scry.registryProblems` before analysing and fails instead. -/
+def Scry.registryWarnings (pack : Scry.RulePack) : List Scry.MemWarning :=
+  List.map (fun problem =>
+    Scry.memWarning Scry.MemWarnKind.registry "<rules>" 0 problem)
+    (Scry.registryProblems Scry.analyses pack)

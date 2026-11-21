@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,6 +36,7 @@ WIZ_API uint64_t wiz_sys_errno(void) { return (uint64_t)wiz_sys_err; }
 WIZ_API const char *wiz_sys_strerror(uint64_t e) {
   if (e == WIZ_SYS_EOF) return "end of file";
   if (e == 100001) return "timed out"; /* WIZ_SYS_TIMEOUT */
+  if (e == 100002) return "busy";      /* WIZ_SYS_BUSY: a non-blocking lock is held */
   return strerror((int)e);
 }
 
@@ -1133,6 +1135,63 @@ WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int bac
   off_t at = lseek(h->fd, back ? -(off_t)off : (off_t)off, wiz_sys_whence(whence));
   wiz_sys_err = at < 0 ? errno : 0;
   return at < 0 ? 0 : (uint64_t)at;
+}
+/* durability: fsync flushes the descriptor's data and metadata, fdatasync only what is
+   needed to read the data back. Both return 0 or errno, like close. */
+WIZ_API uint64_t wiz_sys_fd_fsync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
+}
+WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+#ifdef __EMSCRIPTEN__
+  /* Emscripten's libc does not promise fdatasync; fsync is the portable spelling. */
+  if (fsync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#else
+  if (fdatasync(h->fd) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+#endif
+  wiz_sys_err = 0;
+  return 0;
+}
+/* file locks (flock(2)): one exclusive writer or any number of shared readers, across
+   processes. `mode` 0 shared, 1 exclusive, 2 unlock; `nonblock` makes a held lock the
+   typed `busy` (WIZ_SYS_BUSY) instead of a wait. 0 is success, otherwise errno (also
+   left in `wiz_sys_err`, so a caller that ignores the return still sees it).
+
+   The lock belongs to the open file description: it is dropped by `close` of the last
+   descriptor that shares it, and by the kernel when the process exits or is killed. That
+   is the crash story for the store: an abandoned writer cannot leave the file locked. */
+#define WIZ_SYS_BUSY 100002 /* not an errno: a non-blocking lock that is held */
+WIZ_API uint64_t wiz_sys_fd_flock(void *p, uint64_t mode, int nonblock) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (!h || h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  int op = mode == 0 ? LOCK_SH : mode == 1 ? LOCK_EX : LOCK_UN;
+  if (nonblock) op |= LOCK_NB;
+  if (flock(h->fd, op) != 0) {
+    if (nonblock && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+      wiz_sys_err = 0; /* busy is an answer, not an error */
+      return WIZ_SYS_BUSY;
+    }
+    wiz_sys_err = errno;
+    return (uint64_t)errno;
+  }
+  wiz_sys_err = 0;
+  return 0;
+}
+/* set the file's length: 0 or errno, like fsync. Growing zero-fills; shrinking discards
+   the tail. Only for a descriptor nothing has mapped past the new end: a live mapping of
+   those pages faults on the next read (the store compacts into a new inode instead). */
+WIZ_API uint64_t wiz_sys_fd_ftruncate(void *p, uint64_t n) {
+  wiz_sys_fdh *h = (wiz_sys_fdh *)p;
+  if (h->fd < 0) { wiz_sys_err = EBADF; return EBADF; }
+  if (n > (uint64_t)INT64_MAX) { wiz_sys_err = EINVAL; return EINVAL; }
+  if (ftruncate(h->fd, (off_t)n) < 0) { wiz_sys_err = errno; return (uint64_t)errno; }
+  wiz_sys_err = 0;
+  return 0;
 }
 /* poll several: `fds` a `List Fd`, `events` a `List Nat` (1 read, 2 write, 3 both) of
    the same length; within `ns` if timed. The list of ready positions (each with what

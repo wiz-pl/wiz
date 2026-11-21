@@ -945,6 +945,32 @@ def serverGroup : Group where
         let (_, r) ← ask srv "wiz/interactiveInfo" src (offAfter src "2 *" (-1))
         checkEq ["HMul Nat Nat Nat"] ((item r "instance").map fun i => flatten (LSP.get? i ["type"]).get!)
         check ((item r "syntax").length == 1 && (item r "expansion").length == 1) s!"syntax items: {r.compress}" },
+    { name := "#plot: a message becomes a widget item carrying the WIZ_WIDGET: display value", run := fun _ => do
+        let mut libs := (← server).libs
+        for (m, p) in [("Logic", "lib/Logic.wiz"), ("Class", "lib/Class.wiz"),
+                       ("Data.Order", "lib/Data/Order.wiz"),
+                       ("Text", "lib/Text.wiz"), ("Json", "lib/Json.wiz"), ("Nat", "lib/Nat.wiz"),
+                       ("Ring", "lib/Ring.wiz"), ("Int", "lib/Int.wiz"), ("IntRing", "lib/IntRing.wiz"),
+                       ("IntOrder", "lib/IntOrder.wiz"), ("Rat", "lib/Rat.wiz"), ("Plot", "lib/Plot.wiz")] do
+          libs := libs.insert m (p, ← IO.FS.readFile p)
+        let srv : LSP.Server := { (← server) with libs := libs }
+        let (srv, _) ← LSP.handle srv (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
+        let src := "import Plot\ndef chart : Plot.Chart := Plot.chart \"W\" (Plot.frame [" ++
+          "Plot.line \"a\" [Plot.ptNat 0 1, Plot.ptNat 1 2]])\n#plot chart\n"
+        let (srv, out) ← LSP.handle srv (Lean.Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/didOpen"),
+          ("params", Lean.Json.mkObj [("textDocument", Lean.Json.mkObj [("uri", "file:///t.wiz"), ("version", (1 : Nat)), ("text", src)])])])
+        check (!has (Lean.Json.arr out) "\"severity\":1") s!"errors: {(Lean.Json.arr out).compress}"
+        let item (r : Lean.Json) (kind : String) : List Lean.Json := match LSP.get? r ["items"] with
+          | some (.arr is) => is.toList.filter (LSP.getStr · ["kind"] == kind)
+          | _ => []
+        let (_, r) ← ask srv "wiz/interactiveInfo" src (offAfter src "#plot" (-2))
+        check ((item r "message").length == 0) s!"a widget was left as a message: {r.compress}"
+        let ws := item r "widget"
+        check (ws.length == 1) s!"widget items: {r.compress}"
+        let w := ws[0]!
+        check ((LSP.getStr w ["text"]).startsWith "WIZ_WIDGET:") s!"not the display value: {w.compress}"
+        check (has w "image/svg+xml") s!"no SVG mime type: {w.compress}"
+        check (has w "<svg") s!"no SVG document: {w.compress}" },
     { name := "inlay hints: the types of fun and let binders written without one", run := fun _ => do
         let src := "import Prelude\ndef f : Nat → Nat := fun x => Nat.succ x\ndef g : Nat := let n := 2\n  Nat.add n n\n" ++
           "def h : Nat → Bool → Nat := fun a b => a\ndef k : Nat → Nat := fun (y : Nat) => y\n"
@@ -1268,7 +1294,8 @@ def serverGroup : Group where
         let mut libs := (← server).libs
         -- plus whatever Optic/FeralCore import on this tree (Result, Logic, OpticDerive and
         -- Deriving arrive with the cohesion stack); a module whose file is absent is skipped
-        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
+        for (m, p) in [("Optic", "lib/Optic.wiz"), ("Functor", "lib/Functor.wiz"),
+                       ("Region", "lib/Region.wiz"), ("Text", "lib/Text.wiz"),
                        ("Feral", "lib/Feral.wiz"), ("FeralCore", "drafts/feral/lib/FeralCore.wiz"),
                        ("Data.Result", "lib/Data/Result.wiz"), ("Logic", "lib/Logic.wiz"),
                        ("OpticDerive", "lib/OpticDerive.wiz"), ("Deriving", "lib/Deriving.wiz")] do

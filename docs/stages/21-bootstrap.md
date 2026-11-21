@@ -484,8 +484,9 @@ that prints one C file.
 * `--lib` or `--no-main`: the C has no `main`; every export's wrapper starts the runtime
   first if nothing has (`rt_ensure`: the collector, or the static objects of reference
   counting). The C compiler links it with the program that calls it (`cc main.c lib.c
-  -Iselfhost …`). Since this compiler prints C and links nothing, the two flags are the
-  same.
+  -Iselfhost …`). The one-shot mode prints C and links nothing, so there the two flags
+  are the same; the `build` subcommand's `--lib` also compiles the object and writes
+  `OUT.h` (21aj).
 * `--header`: instead of the C, the header of the exports, `exportHeader`'s text in
   `C.lean` (the `wiz_val` type, the handle functions and one prototype per export).
 * **Handles** (`rt.c`): `wiz_retain(v)` and `wiz_release(v)` take and give back a
@@ -1149,12 +1150,13 @@ they compiled `selfhost/*.wiz` with the *Lean* host, or probed the Lean kernel i
 A stub compiler that echoed its input passed 135 of the 175, so "175/175" was not a
 pipeline measurement. The group is now split by what a case runs:
 
-* `=selfhost` (**172 cases**) is the pipeline group. Every case runs the self-hosted
+* `=selfhost` (**207 cases** at `integration/train7` `7365f7d1`; 208 with this branch's
+  A19 pin; 172 when this section was written) is the pipeline group. Every case runs the self-hosted
   compiler (`selfhostCompiler`/`selfhostCompileRun`/`selfhostLinkRun`) or checker
   (`selfhostChecker`/`selfhostCheckFile`/`selfhostOutput`) and compares what it says —
   against a hand-written expectation, or against the Lean frontend/kernel for the
   differential cases. This is the number to quote for parity.
-* `=selfhost-host` (**14 cases**) runs the Lean host only: the static `Tables.wiz`
+* `=selfhost-host` (**16 cases** at train7; 14 when written) runs the Lean host only: the static `Tables.wiz`
   regeneration check, the additive match (the self-hosted frontend has no additive
   eliminator, A21), in-process probes of the Lean kernel/`MTm` (their Wiz counterpart is
   the "and both kernels agree below" pipeline case), and the anti-vacuity case below.
@@ -1163,13 +1165,15 @@ The anti-vacuity case builds a stub that writes `input.wiz` to standard output a
 the compiler and the checker, runs every `=selfhost` case in a child process with
 `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
 passes. That is the audit's measurement turned into a test, so the pipeline group cannot
-regress into cases that do not reach the pipeline. Twenty-two cases that used to
+regress into cases that do not reach the pipeline. (At `integration/train7` the guard is
+**red**: one of 208 `=selfhost` cases, "Kernel.wiz quantity terms ...", passes with the
+stub, so that case does not reach the pipeline.) Twenty-two cases that used to
 compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
 type checker, `Kernel.wiz` at symbolic levels and on 400 random terms, `Backend.wiz`'s
 erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-host` are
 the cases that cannot — they call the Lean kernel API in process, need the additive
 eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
-`selfhost` shard split 6) selects both groups.
+`selfhost` shard split 3) selects both groups.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 
@@ -1315,6 +1319,38 @@ operations in the host interpreters.
 **Not done:** `Bytes.ofU8s`/`toU8s` (`lib/Data/WordBytes.wiz`, no `U8` in the Prelude),
 `U8Array ↔ Bytes` (29), byte I/O on files and descriptors (`FS.readBytes`,
 `File.readBytes`, `Fd.read`), and the rest of the native surface (22l/29).
+
+## 21aj: build artifacts in the self-hosted driver (`-o`, `--lib`)
+
+The driver's `build` wrote the generated C at `-o` and nothing else; the Lean host's
+`wiz build` compiles that C. The D4 artifacts now match wherever the flags do:
+
+* **`build FILE -o OUT`** is still the C at OUT (the documented workflow: the caller
+  compiles it). `-o` is required in both (`unknown command: build FILE`, exit 2), and a
+  missing `-o` directory fails in both (exit 1, no artifact; the host's stderr is an
+  uncaught `IO.FS.writeFile` trace, the driver's one line).
+* **`build FILE -o OUT --lib`** matches the host's `Build.build`: the C is written at
+  `OUT`'s `.c` (the host's `withExtension`), the header of the exports at `OUT.h`
+  (`exportHeader`'s shape: `wiz_val`, the handle functions and one prototype per
+  export), and the object at `OUT` (`cc -O2 -w -c` with the toolchain's cflags; the
+  self-hosted runtime directory is an include root because the emitted C includes
+  `rt.c`). A library without an export is the host's error, word for word: a library
+  must export something (`export "name" f`), exit 1, no artifact.
+* **`--no-main`** still writes the C without a `main`; the host links an executable
+  without one on the platforms whose toolchain allows it (a gap, C9).
+* **`--header`** is the driver's own output mode (the header text at OUT, also the
+  one-shot `--header`); the host has no such flag, so the differential case asserts its
+  rejection instead.
+* There is no `--object`: the host's object output is `--lib` itself (an object and
+  `OUT.h`), so the driver follows that rather than adding a flag the host rejects.
+* The library's `.c` and `.h` texts are cached beside the `.c` entry (`--cache`), so a
+  warm `--lib` build re-elaborates nothing.
+
+**Tests** (`selfhost-cli-diff`): `--lib` on an exporting file (the exit code, streams
+and the three artifacts' shapes: an ELF `ET_REL` or Mach-O `MH_OBJECT`, the header's
+`wiz_val` and prototype, the C's export wrapper and no `main`; and a warm rebuild), a
+library without an export (the host's message), a missing `-o` and a missing `-o`
+directory, and `--header` as a driver extension.
 
 ## 21ah: the unit eliminator and `split` in the self-hosted toolchain (B7)
 
@@ -1708,3 +1744,118 @@ recurses on a different argument than the host's), notations and operator preced
 and the class/instance layer (a new class or notation in the host prelude does not fail
 the check). Those need elaboration, not a regexp; `selfhost-libdiff`
 measures their consequences, and the check's report names the known gaps on every run.
+
+## 21aq: the LLVM backend's first slice, self-hosted (C5)
+
+The Lean-hosted `wiz` has two native backends over one A-normal-form IR
+(`Wiz/Compiler/IR.lean`): `C.lean` and `LLVM.lean`, plus `IRRun.lean` for `#run`.
+The self-hosted compiler has neither the IR nor either consumer: `selfhost/Backend.wiz`
+erases to `ETm` (a lambda term with nested-pair payloads) and compiles that straight to
+C (`cgE`). C5 asked what a real LLVM path would cost and, if it was too large, for the
+smallest honest slice.
+
+### Inventory and size
+
+A full port is an **XL** item, not a week:
+
+* `Lower.lean` (lambda lifting, A-normalisation, join points, constant folding) and the
+  ownership passes `RC.lean`, `Borrow.lean` and `Reuse.lean`, so every `dup`/`drop`,
+  borrow and reuse token is right;
+* `LLVM.lean`'s emitter over that IR, including closures, CAFs, the object model and the
+  C-compiled foreign wrappers;
+* the runtime protocol: `runtime/wiz.c`'s `wiz_finish`/`wiz_run_main`, `IO`, args, and
+  the extern wrappers;
+* `IRRun.lean`'s interpreter for `#run`, which shares the IR but not the backend.
+
+Doing that for `ETm` directly (bypassing IR) would fork the host's semantics rather than
+port them; translating the backend's own C to LLVM would need a C front end and would
+inherit C's runtime calls anyway. Neither is smaller than porting the IR path for a
+subset.
+
+### The slice
+
+`--target llvm` (and the host's `--llvm` alias) now writes a textual `.ll` module for a
+**closed `main : Nat`**:
+
+* the erased term is lowered to the host's `IR.Decl` shape (`Backend.wiz`'s `IREx`,
+  `IRB`, `IRDecl`; `lowerE`) in A-normal form with a `ret`;
+* `Simp.lean`'s constant folding (`irFoldOp`) reduces `Nat.zero/succ/pred/add/sub/mul/
+  beq/blt` on literals; `Reuse.lean`'s `elimDead` (`lbElimDead`) removes the dead
+  argument bindings;
+* `LLVM.lean`'s `expr`/`body`/`decl`/`program` are ported as
+  `irExText`/`irBodyText`/`irDeclText`/`llvmProgram`, so the lowered functions print
+  with the host's names, variable numbers and text;
+* a `fap` between two lowered functions is in the subset, so `main` may call a
+  *parameterized* function whose body also lowers. A zero-parameter definition may be a
+  CAF (`wiz_caf_init` caches it in a slot, which needs the runtime), so only the entry
+  itself is lowered. A nullary constructor is a scalar tag; `Nat.beq`/`Nat.blt` return
+  the `Bool` tags.
+
+Everything that allocates or needs the runtime is one precise error, never a stub:
+`ctor` with fields, `pap`/`ap`, `proj`, `case`, a λ, `reset`/`reuse`, the erased
+`ind`/`pack`/`unpack` primitives, a `prim` that does not fold, a numeral at or above
+`2^62` (a big-number object), a backend flag, or a `link_c` file. `--target wasm` and
+`--split N` are still refused with their own messages. `build --llvm` writes the module
+at `-o`; `run --llvm` assembles it with `llc` (`--llc CMD`) and links it with `cc`.
+
+The module's own `main` prints the scalar (`2n+1` decoded) with `printf`: the host calls
+the runtime's `wiz_run_main`, which the self-hosted compiler does not carry yet.
+
+### Worked example
+
+`def main : Nat := Nat.add 2 3` (after `import Prelude`) produces, with
+`wiz-selfhost build n.wiz -o n.ll --target llvm`:
+
+```llvm
+; generated by `wiz-selfhost --target llvm` (C5, first slice)
+; `main : Nat`'s erased term was lowered to the host's A-normal-form IR and printed
+; by the port of `Wiz/Compiler/LLVM.lean`; closed literal arithmetic only, no allocation.
+@wiz.out = private constant [5 x i8] c"%lu\0A\00"
+declare i32 @printf(ptr, ...)
+define internal i64 @w_main() {
+entry:
+  %x2.0 = add i64 0, 11
+  ret i64 %x2.0
+}
+define internal i64 @w_main_boxed(ptr %a) {
+
+  %r = call i64 @w_main()
+  ret i64 %r
+}
+define internal i64 @w_wiz_2e_entry() {
+entry:
+  %x0.0 = call i64 @w_main()
+  ret i64 %x0.0
+}
+define internal i64 @w_wiz_2e_entry_boxed(ptr %a) {
+
+  %r = call i64 @w_wiz_2e_entry()
+  ret i64 %r
+}
+define i32 @main() {
+entry:
+  %v = call i64 @w_wiz_2e_entry()
+  %n = sub i64 %v, 1
+  %h = lshr i64 %n, 1
+  %r = call i32 (ptr, ...) @printf(ptr @wiz.out, i64 %h)
+  ret i32 0
+}
+```
+
+The same program through the C backend prints `5`; `run --llvm` compiles this module
+with `llc` and prints `5` too. `Nat.add 40 2` lowers to `lit 40`, `lit 2`, `nat.add`,
+folds to `42`, and `elimDead` leaves only `add i64 0, 85` (`42`'s scalar encoding).
+
+### What is left
+
+Ownership is the next blocker: `RC.lean`'s `insertRC` and `Borrow.lean`'s inference,
+then `ctor`/`proj`/`pap`/`ap`/`prim`, the `runtime/` object calls (`wiz_ctor_new`,
+`wiz_inc`, `wiz_dec`, `wiz_apply`, …), and the result protocol (`wiz_finish`,
+`wiz_run_main`, args, `IO`). Big literals (`wiz_nat_lit`) and the foreign wrappers follow
+the runtime. `#run` needs the `IRRun.lean` interpreter, which is a separate port over the
+same IR. None of those is claimed here.
+
+Tests: `=selfhost-cli` builds, prints and runs the slice and pins the outside-slice
+error; `=selfhost-cli-diff` compares `check --target llvm` (silent in both), the lowered
+`w_main`/`w_wiz_2e_entry` text with the host's `out.ll` (equal), `run --llvm` (`42` in
+both) and the still-refused `--target wasm`.

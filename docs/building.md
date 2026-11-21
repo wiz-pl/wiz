@@ -163,9 +163,12 @@ passes it to the case's process; `tests --libdiff --part 2/6` runs one part loca
 the case's property test checks the partition for `n = 1…8` without a toolchain.
 
 A part writes `.lake/libdiff/records.jsonl` as each record arrives, so a part killed by
-the job timeout still leaves what it finished (a missing file is then named by the union
-check, rather than shrinking the green total). The check, `scripts/ci.py libdiff-union`,
-lives in `CI result` and reads the parts' uploaded `part.txt` and `records.jsonl`.
+the job timeout still leaves what it finished (a missing file is then named by the
+union check, rather than shrinking the green total). That check is the corpus:
+`.github/libdiff-corpus.txt` is the manifest of every `*.wiz` under `lib/` and `scry/`,
+in `LC_ALL=C` order, with no exclusions, and `scripts/check-libdiff-corpus.sh` (with
+`--self-test`, in the static gate) fails when a listed file is absent, a file under the
+two trees is unlisted, or an entry is duplicated or out of order. It needs no build.
 
 ### Flaky tests and the quarantine
 
@@ -283,9 +286,11 @@ Adding a test group touches no shared file:
   `Tests/Groups.lean` (an import of every file in `Tests/Groups/`; not committed, see the
   `testGroups` target in `lakefile.lean`) and `Tests/Main.lean` imports it, so the group
   is in the suite as soon as its file exists. Copy a small one (e.g.
-  `Tests/Groups/Struct.lean`) to start. Set `shard := "selfhost"` (or another name from
-  `.github/test-shards.json`) in the group to run it in a shard other than the default
-  (`library`), or add a selector to the shard's list.
+  `Tests/Groups/Struct.lean`) to start. Add a selector `=GROUP` to a shard's `select`
+  list in `.github/test-shards.json` (or an entry in
+  `.github/test-shard-exclusions.json` with the reason it runs in no CI shard);
+  `scripts/check-shards.py` fails if the group is in neither. `Group.shard` is only a
+  hint shown in the error message now; it does not move a group by itself.
 * **New cases of an existing group** go in its module: the group `elab: structural
   types` is `structGroup` in `Tests/Groups/Struct.lean` (`grep -l 'name := "…"'
   Tests/Groups/*.lean` finds a group by name). A helper only one group uses lives in
@@ -769,15 +774,19 @@ setup action keeps the elan cache for those
 
 * **The test suite** runs in parallel shards, one job per entry of
   `.github/test-shards.json` (each entry is a list of test-driver selectors, the same
-  ones `lake test --` takes; the shards run the Nix-built `tests` binary). A group that
-  no shard's selectors pick runs in
-  the shard its `Group.shard` names, else in the shard marked `"default": true`
-  (`library`), so **a new group needs no edit there**; the build job checks that every
-  case is in exactly one shard (`scripts/ci.py check-shards`, after splitting; a
-  `"parts"` shard's jobs count as the one shard they split, and the check runs again
-  end to end on the matrix the jobs are started from; `check-shards --self-test`
-  checks the check on a stand-in driver). See
-  "Test layout" below for where a new group goes. Each shard's job summary has a table of every case's time
+  ones `lake test --` takes; the shards run the Nix-built `tests` binary). The plan is
+  **total**: every group `tests --list` reports is selected by a shard's selectors, or
+  named in `.github/test-shard-exclusions.json` with the reason it runs in no CI shard
+  and an owner. A group with neither is an error naming it (and its `Group.shard` hint,
+  if any), so a new group cannot silently join another shard's queue; there is no
+  default-shard fallback. The build job runs `scripts/ci.py check-shards` (the same
+  check as `scripts/check-shards.py`), which also fails on an exclusion whose group does
+  not exist or which a shard selects after all, and on a `.github/skip-allowlist.json`
+  entry whose group or case no case matches; `check-shards --self-test` checks each of
+  those failures on stand-in drivers (`scripts/check-shards.py --groups FILE` runs the
+  group-totality half against a captured `lake test -- --list`). The check also runs
+  end to end on the matrix the jobs are started from. See "Test layout" below for where
+  a new group goes. Each shard's job summary has a table of every case's time
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
@@ -839,13 +848,16 @@ setup action keeps the elan cache for those
   Pages outage does not fail the suite. See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
   changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. The
-  two Wasm modules are not built here: the `web_modules` job builds them once as the
-  Nix derivations `packages.wiz-web` and `packages.wiz-playground` (flake.nix) and
-  publishes them to Cachix, and `web/test.sh` copies those directories
-  (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`; `web/modules-from-store.sh` fails the job on
-  a miss instead of rebuilding). The browser-free half then runs:
-  `web/scroll-search_test.mjs`; `web/test-bench.sh` (the benchmark page's fixtures
-  and the site check's rules for it); `web/playground_lsp_test.mjs` and
+  three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the playground's Loom
+  UI, `web/build-playground-ui.sh`) are not built here: the `web_modules` job builds them
+  once as the Nix derivations `packages.wiz-web`, `packages.wiz-playground` and
+  `packages.wiz-playground-ui` (flake.nix) and publishes them to Cachix, and `web/test.sh`
+  copies those directories (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
+  `WIZ_PLAYGROUND_UI_FROM`; `web/modules-from-store.sh` fails the job on a miss instead
+  of rebuilding) and then runs its browser-free half: `web/scroll-search_test.mjs`;
+  `web/test-bench.sh` (the
+  benchmark page's fixtures and the site check's rules for it);
+  `web/playground_lsp_test.mjs` and
   `web/infoview_page_test.mjs` (the language client and goals pane shared by the
   playground and the infoview page, and the page's URL rule); `web/selfhost_lsp_test.mjs`
   (the in-page server shim, against stubs); `web/node_test.mjs` and
@@ -889,15 +901,13 @@ setup action keeps the elan cache for those
   partitions its own file list by index (`libDiffPart`: the file at index `k` of the
   sorted list is in part `k % N + 1`), so the parts are deterministic, disjoint and
   their union is the case, unchanged in what each file is compared against.
-  `selfhost-libdiff` is the one: 181 files through both compilers in 3664 s (180 tracked
-  at this commit) is one case against the 1110 s shard limit, so six parts of ~611 s
-  each fit. `scripts/ci.py
-  libdiff-union` (in `CI result`) proves the union from the parts' `part.txt` and
-  `records.jsonl`: the parts are `1..N`, every part names the same `total`, every file
-  in `.github/libdiff-corpus.txt` is checked exactly once, the verdicts sum to the
-  whole-run summary, and no record is `bounded`. A parts shard is not a `split` shard:
-  it has no `.github/test-timings.json` entry, since the case (not the job set) is what
-  the baseline measures, so `make_baseline` skips it deliberately.
+  `.github/libdiff-corpus.txt` is the manifest of the files one whole sweep compares:
+  every `*.wiz` under `lib/` and `scry/` in `LC_ALL=C` order, with no exclusions, and
+  `scripts/check-libdiff-corpus.sh` (in the static gate, with `--self-test`) fails when
+  the manifest and the tree disagree, so no file can silently drop out of the sweep.
+  `selfhost-libdiff` here is a `split` shard (`"split": 2, "split-cases": true`) of four
+  contiguous file-range cases, so it keeps a `.github/test-timings.json` entry per case,
+  unlike a `"parts"` shard.
 * **Rebalancing.** To re-derive the baseline *and* the `"split"` counts from many runs
   (after a perf fix, or when a group grows), fetch the last runs and rebalance:
 
@@ -1340,12 +1350,12 @@ first, so a JSON change that was not regenerated fails the job (and is visible a
 in the checked-in page). Regenerate it with `python3 web/build-bench.py`; the fixture
 tests and the site-check rules for it are in `web/test-bench.sh`.
 
-The playground's Loom page (`?ui=loom`) needs a fourth build,
-`web/build-playground-ui.sh` (the page's UI module, `wiz-playground-ui.mjs`). The `web`
-job builds and tests it; `web/build-site.sh` copies it when the `docs` job built it into
-`web/out`, and the page falls back to its static markup when it is missing. To publish
-the Loom page, add the command to the `docs` job's module step beside `web/build.sh` and
-`web/build-playground.sh`.
+The playground itself needs a fourth build, `web/build-playground-ui.sh` (the page's
+runtime module, `wiz-playground-ui.mjs`). The `web` job builds and tests it;
+`web/build-site.sh` requires it beside `web/build-playground.sh`'s engine, because the
+page has no static fallback: a missing runtime module is a playground that cannot start.
+The `.#wiz-playground` derivation runs both scripts, so one store path carries the engine
+and the page, and the `docs` job's `build-playground.sh --from` copies both.
 
 | path | what it is |
 |---|---|
@@ -1361,19 +1371,19 @@ the Loom page, add the command to the `docs` job's module step beside `web/build
 | `docs/A.B.html` | one page per module (its declarations, signatures, docs, source links) |
 | `docs/A.B.json` | the same page's data, for the interactive signatures |
 | `docs/reference.md` | the reference manual as Markdown (`nix build .#reference`'s `index.md`; generated, not committed) |
-| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/tagged.js`, `docs/scroll-search.js` | the documentation's scripts and styles (search covers names, doc comments and signatures) |
+| `docs/search.js`, `docs/scroll.css`, `docs/scroll.js`, `docs/scroll-search.js`, and the search runtime (`wiz-docs-ui.mjs`) | the documentation's scripts and styles (search covers names, doc comments and signatures) |
 | `docs/wiz-infoview.mjs`, `docs/wiz-infoview.wasm` | the web module (the documentation's signatures and the Wiz-language infoview), when `web/build.sh` built it |
 | `playground/index.html` | the playground page |
-| `playground/playground.js`, `playground/playground.css`, `playground/playground-values.js` | the page's scripts and styles |
+| `playground/playground.js`, `playground/playground.css`, `playground/overlays.css` | the page's entry point and styles (the Loom runtime renders the page) |
 | `playground/wiz-playground.mjs`, `playground/wiz-playground.wasm` | the playground's engine (the self-hosted checker), when `web/build-playground.sh` built it |
-| `playground/wiz-playground-ui.mjs` | the playground's Loom UI (`?ui=loom`), when `web/build-playground-ui.sh` built it (optional: the page falls back to its static markup) |
+| `playground/wiz-playground-ui.mjs` | the playground's runtime (the whole page as a Loom app), from `web/build-playground-ui.sh`; required |
 
 To build the site locally from a checkout (after `nix develop` and `lake build wiz`):
 
 ```sh
 sh web/build.sh web/out                         # the web module, the infoview page, scroll assets
 sh web/build-playground.sh web/out              # the playground module
-sh web/build-playground-ui.sh web/out           # the playground's Loom UI (?ui=loom)
+sh web/build-playground-ui.sh web/out           # the playground's page (Loom runtime)
 .lake/build/bin/wiz doc --lib -o doc-site/docs --web web/out
 cp "$(nix build .#reference --no-link --print-out-paths)/index.md" doc-site/docs/reference.md
 sh web/build-site.sh doc-site web/out           # landing, /guide/, /bench/ and /playground/
@@ -1382,9 +1392,10 @@ sh web/test-bench.sh                            # the generator's fixtures and /
 python3 -m http.server -d doc-site 8000         # then http://127.0.0.1:8000/
 ```
 
-With the derivations already in the store (`nix build .#wiz-web .#wiz-playground`), the
-two module steps can copy them instead of running Emscripten: pass `--from DIR` (or
-`WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`) the store path, exactly as CI does.
+With the derivations already in the store (`nix build .#wiz-web .#wiz-playground
+.#wiz-playground-ui`), the three module steps can copy them instead of running Emscripten:
+pass `--from DIR` (or `WIZ_WEB_FROM`/`WIZ_PLAYGROUND_FROM`/`WIZ_PLAYGROUND_UI_FROM`) the
+store path, exactly as CI does.
 
 `wiz doc --jobs N` elaborates and renders N modules at once; the default is 1, and
 `--jobs 0` (or `--jobs auto`) takes the CPUs the process may run on, at most 8. The tree

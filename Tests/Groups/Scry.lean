@@ -32,11 +32,10 @@ def interp (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs (src ++ "\n#eval main") [expected]
 
-/-- An example run against another backend module: the file's `import Scry.Egraph` line
-is swapped for `mod`. The native-table engine declares the same operation names, so an
-example that uses only the shared surface (as the six differential examples do) has the
-same source and digest; it is not the same record type (see `Scry.EgraphNative`'s module
-doc for the fields and the `applyAt`/`applyMatches` signature that differ). -/
+/-- An example run through another import: the file's `import Scry.Egraph` line is
+swapped for `mod`. `Scry.EgraphNative` is now the compatibility import of the one
+engine, so the six differential examples keep the same source and digest through it;
+the case pins that the compatibility name still brings the whole surface. -/
 def interpAs (mod name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs ((src.replace "import Scry.Egraph" s!"import {mod}") ++ "\n#eval main") [expected]

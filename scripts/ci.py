@@ -19,11 +19,16 @@
                                      leaves the late entries waiting: the expensive work
                                      should start in the first wave.
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
-                                     shard (after splitting), and that every selector
-                                     of a shard selects something. A group that no
-                                     selector picks goes to the shard it names
-                                     (`Group.shard`) or to the shard with
-                                     "default": true (`resolved`)
+                                     shard (after splitting), that every selector of a
+                                     shard selects something, and that the plan is total:
+                                     every group a shard selects or an entry of
+                                     .github/test-shard-exclusions.json (with a reason
+                                     and an owner) explains. A group with neither is an
+                                     error naming it — the old fallback to a default
+                                     shard is gone — and so is an exclusion whose group
+                                     does not exist or which a shard selects after all.
+                                     Also fails on a .github/skip-allowlist.json entry
+                                     whose group or case no case matches.
   scripts/ci.py plan [BIN]           the split shards' parts with their estimated times
   scripts/ci.py changes BASE [HEAD]  what a change needs (path filters): reads the files
                                      that differ between BASE and HEAD (git diff
@@ -114,6 +119,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARDS = os.path.join(ROOT, ".github", "test-shards.json")
 TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
 SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
+EXCLUSIONS = os.path.join(ROOT, ".github", "test-shard-exclusions.json")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
@@ -142,29 +148,84 @@ def shards():
         return json.load(f)
 
 
-def resolved(binary):
-    """The shards of .github/test-shards.json, with each group that no shard's selectors
-    pick added (as `=NAME`) to the shard that the group names (`Group.shard`, `tests
-    --list-shards`), else to the shard marked `"default": true`. So a new group needs no
-    edit here; selectors still win over a group's own choice."""
+class ShardPlanError(Exception):
+    """The shard plan is not total: a group is in no shard and no exclusion says why, an
+    exclusion is stale, or a selector names nothing. `check-shards` reports it as an
+    error, and `matrix`/`plan` refuse to build a plan that would silently lose cases."""
+
+
+def exclusions(path=None):
+    """The groups that run in no CI shard, each with `group`, `reason` and `owner` (and
+    optional `why`). The plan is total only when every case-listed group is selected by a
+    shard's selectors or named here: a group that is in neither is an error, not a
+    fallback to a default shard. A malformed entry is an error; `check-shards` fails on an
+    entry whose group does not exist, or which a shard selects after all (a stale entry)."""
+    path = path or EXCLUSIONS
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return []
+    out = []
+    for e in doc.get("groups", []):
+        for k in ("group", "reason", "owner"):
+            if not str(e.get(k, "")).strip():
+                raise ShardPlanError(f"{path}: the entry {json.dumps(e)} lacks {k!r}")
+        out.append(dict(e))
+    return out
+
+
+def check_group_plan(groups, hints=None):
+    """The plan's group-totality errors: a group (from `tests --list`) that no shard
+    selects and no exclusion explains; an exclusion whose group does not exist; an
+    exclusion a shard selects after all. `hints` maps a group to its `Group.shard` hint,
+    only to make the first error more useful. Empty when the plan is total."""
     ss = shards()
-    names = {s["name"]: s for s in ss}
-    defaults = [s for s in ss if s.get("default")]
-    if len(defaults) != 1:
-        sys.exit(f"{SHARDS}: exactly one shard must have \"default\": true (found {len(defaults)})")
+    excl = {e["group"]: e for e in exclusions()}
+    hints = hints or {}
+    errors = []
+    if not groups:
+        return ["no test groups listed: the listing is empty, so the plan proves nothing"]
+    for g in groups:
+        picked = [s["name"] for s in ss if any(selects(g, sel) for sel in s["select"])]
+        if g in excl:
+            if picked:
+                errors.append(
+                    f"{EXCLUSIONS}: {g!r} is excluded, but the shard(s) {', '.join(picked)} "
+                    f"select it; either delete the exclusion or the selector")
+        elif not picked:
+            where = f"; its Group.shard hint names {hints[g]!r}" if hints.get(g) else ""
+            errors.append(
+                f"{SHARDS}: no shard selects the group {g!r}{where}. Add '={g}' to a "
+                f"shard's select list, or an entry for it in {EXCLUSIONS} saying why it "
+                f"runs nowhere")
+    for g in excl:
+        if g not in groups:
+            errors.append(
+                f"{EXCLUSIONS}: the exclusion names {g!r}, which is not a test group "
+                f"(`tests --list-shards`)")
+    return errors
+
+
+def resolved(binary):
+    """The shards of .github/test-shards.json, checked to be total: every group that
+    `tests --list-shards` reports must be selected by a shard's selectors or named in
+    .github/test-shard-exclusions.json. There is no default-shard fallback: a new group
+    that nobody wired is an error naming the group (and its `Group.shard` hint, if any),
+    not a case that quietly joins another shard's queue."""
+    ss = shards()
     out = subprocess.run([binary, "--list-shards"], capture_output=True, text=True, check=True,
                          cwd=ROOT).stdout
+    groups, hints = [], {}
     for line in out.split("\n"):
         if not line:
             continue
         g, _, hint = line.partition("\t")
-        if any(selects(g, sel) for s in ss for sel in s["select"]):
-            continue
-        if hint and hint not in names:
-            sys.exit(f"group {g!r} asks for the shard {hint!r}, which .github/test-shards.json lacks")
-        (names[hint] if hint else defaults[0]).setdefault("added", []).append(f"={g}")
-    for s in ss:
-        s["select"] = s["select"] + s.pop("added", [])
+        groups.append(g)
+        hints[g] = hint
+    errors = check_group_plan(groups, hints)
+    if errors:
+        raise ShardPlanError("\n".join(errors))
     return ss
 
 
@@ -348,20 +409,47 @@ def check_shards(binary):
     out = subprocess.run([binary, "--list"], capture_output=True, text=True, check=True).stdout
     groups = [g for g in out.split("\n") if g]
     errors = []
+    if not groups:
+        print("the test driver listed no groups (`--list`): nothing to check", file=sys.stderr)
+        return 1
+    try:
+        excl = {e["group"]: e for e in exclusions()}
+    except ShardPlanError as e:
+        print(e, file=sys.stderr)
+        return 1
+    for g in excl:
+        if g not in groups:
+            errors.append(f"{EXCLUSIONS}: the exclusion names {g!r}, which is not a test group")
     names = set()
     for s in shards():
         if s["name"] in names:
             errors.append(f"shard name {s['name']!r} is used twice")
         names.add(s["name"])
+        if not s["select"]:
+            errors.append(f"shard {s['name']!r}: no selectors (an empty selector list runs "
+                          f"every case, so it is never what was meant)")
         for sel in s["select"]:
-            if not any(selects(g, sel) for g in groups):
+            picked = [g for g in groups if selects(g, sel)]
+            if not picked:
                 errors.append(f"shard {s['name']!r}: selector {sel!r} selects no group")
-    runs = {(g, i): [] for g, i, _ in list_cases(binary, [])}
-    parts = expanded(binary)
+            for g in picked:
+                if g in excl:
+                    errors.append(f"shard {s['name']!r}: selector {sel!r} selects {g!r}, "
+                                  f"which {EXCLUSIONS} excludes")
+    # every group must be in a shard or in the exclusion list; `resolved` is also the
+    # plan the matrix is built from, so check it here (and report rather than exit)
+    try:
+        parts = expanded(binary)
+    except ShardPlanError as e:
+        errors.append(str(e))
+        parts = []
+    runs = {(g, i): [] for g, i, _ in list_cases(binary, []) if g not in excl}
     for name, sel, _, _ in parts:
         for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
+        if g in excl:
+            continue
         missing = [i for (h, i), by in runs.items() if h == g and not by]
         if missing:
             errors.append(f"group {g!r}: {'all' if len(missing) == sum(1 for h, _ in runs if h == g) else len(missing)} "
@@ -372,6 +460,7 @@ def check_shards(binary):
     # end to end: the jobs of the full matrix (what CI runs when every shard is needed),
     # with their selectors read back from the matrix's newline-joined form, run every
     # case of the listing exactly once and nothing else
+    jobs = []
     if not errors:
         jobs = matrix_entries(binary)
         seen = {}
@@ -391,6 +480,11 @@ def check_shards(binary):
                           f"(first: {twice[0][0]} #{twice[0][1]}: {', '.join(seen[twice[0]])})")
         if {g for g, _ in seen} != {g for g, _ in runs}:
             errors.append("the matrix's groups differ from the listing's")
+    # an allow-list entry whose group or case no longer exists cannot fire: it documents a
+    # parity gap that is gone (or renamed), so it is a failure, not a note
+    dead = dead_allowlist_entries(allowlist(), binary)
+    for e, why in dead:
+        errors.append(f"{SKIPS}: the entry {e['group']!r} / {e['case']!r} matches no case: {why}")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -403,8 +497,11 @@ def check_shards(binary):
             if new:
                 warn(f"{len(new)} cases of the split shard {s['name']!r} are unbalanced: not in "
                      f".github/test-timings.json (estimated at their group's median)", "Shard balance")
-    print(f"ok: {len(groups)} groups, {len(runs)} cases, each in exactly one of {len(parts)} shards "
-          f"(the matrix's {len(jobs)} jobs run them all, once)")
+    excluded = sorted(excl)
+    print(f"ok: {len(groups)} groups ({len(excluded)} excluded: {', '.join(excluded) or 'none'}), "
+          f"{len(runs)} cases, each in exactly one of {len(parts)} shards "
+          f"(the matrix's {len(jobs)} jobs run them all, once); "
+          f"{len(allowlist())} allow-list entries all match a case")
     return 0
 
 
@@ -446,52 +543,91 @@ def fake_driver(directory, listing):
 
 
 def check_shards_self_test():
-    """`check-shards` on stand-in drivers and shard files: a good layout (with a split
-    shard and a group that only its own shard hint places) passes, and a dropped case,
-    a case in two shards and a selector that selects nothing fail. Exits 1 if an
-    expectation is wrong."""
+    """`check-shards` on stand-in drivers, shard files and exclusion/allow lists: a good
+    layout (with a split shard and an explicitly excluded group) passes; a dropped case,
+    a case in two shards, a selector that selects nothing, a group no shard selects (the
+    removed default fallback), a stale exclusion, an exclusion for a missing group, an
+    exclusion without a reason, and an allow-list entry no case matches fail. Exits 1 if
+    an expectation is wrong."""
     import contextlib, io, tempfile
-    global SHARDS, TIMINGS
+    global SHARDS, TIMINGS, EXCLUSIONS, SKIPS
     listing = ([("alpha", i, f"a{i}", "") for i in range(5)]
                + [("beta", i, f"b{i}", "") for i in range(7)]
                + [("gamma", i, f"c{i}", "") for i in range(3)]
                + [("delta", 0, "d0", "solo")])
-    good = [{"name": "solo", "select": []},
+    good = [{"name": "solo", "select": ["=delta"]},
             {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
             {"name": "small", "select": ["alp"]}]
+    no_delta = [{"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+                {"name": "small", "select": ["alp"]}]
+    excl = lambda g, reason="fixture: not run in CI": {"groups": [
+        {"group": g, "reason": reason, "owner": "shard self-test"}]}
+    live = {"groups": [{"group": "beta", "case": "b0", "reason": "fixture reason",
+                        "owner": "shard self-test", "expires": "2099-01-01"}]}
+    dead = {"groups": [{"group": "beta", "case": "b99", "reason": "fixture reason",
+                        "owner": "shard self-test", "expires": "2099-01-01"}]}
+    empty = {"groups": []}
+    # (name, listing, shards, exclusions, allow-list, expected exit, needle)
     trials = [
-        ("good", listing, good, 0),
+        ("good (a split shard)", listing, good, empty, empty, 0, None),
         ("a case the shards drop", listing,
-         [{"name": "solo", "select": []},
+         [{"name": "solo", "select": ["=delta"]},
           {"name": "big", "split": 3, "default": True, "select": ["=beta#0,1,2,3,4,5", "=gamma"]},
-          {"name": "small", "select": ["alp"]}], 1),
+          {"name": "small", "select": ["alp"]}], empty, empty, 1, "in no shard"),
         ("a case in two shards", listing,
-         [{"name": "solo", "select": []},
+         [{"name": "solo", "select": ["=delta"]},
           {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
-          {"name": "small", "select": ["alp", "=gamma#1"]}], 1),
+          {"name": "small", "select": ["alp", "=gamma#1"]}], empty, empty, 1, "several shards"),
         ("a selector that selects nothing", listing,
-         [{"name": "solo", "select": []},
+         [{"name": "solo", "select": ["=delta"]},
           {"name": "big", "split": 2, "default": True, "select": ["=beta", "=gamma", "=epsilon"]},
-          {"name": "small", "select": ["alp"]}], 1),
+          {"name": "small", "select": ["alp"]}], empty, empty, 1, "selects no group"),
+        ("a shard with no selectors", listing,
+         [{"name": "solo", "select": ["=delta"]},
+          {"name": "big", "split": 2, "default": True, "select": ["=beta", "=gamma"]},
+          {"name": "small", "select": []}], empty, empty, 1, "no selectors"),
+        ("a group no shard selects (no default fallback)", listing, no_delta, empty, empty, 1,
+         "no shard selects"),
+        ("an exclusion says why delta is not run", listing, no_delta, excl("delta"), empty, 0, None),
+        ("an exclusion for a group that does not exist", listing, good, excl("epsilon"), empty, 1,
+         "not a test group"),
+        ("an exclusion a shard contradicts", listing, good, excl("delta"), empty, 1, "excludes"),
+        ("an exclusion without a reason", listing, no_delta,
+         {"groups": [{"group": "delta", "owner": "shard self-test"}]}, empty, 1, "lacks"),
+        ("an allow-list entry no case matches", listing, good, empty, dead, 1,
+         "matches no case"),
+        ("an allow-list entry that matches a case", listing, good, empty, live, 0, None),
+        ("an empty group listing proves nothing", [], good, empty, empty, 1, "no groups"),
     ]
-    saved, wrong = (SHARDS, TIMINGS), []
+    saved, wrong = (SHARDS, TIMINGS, EXCLUSIONS, SKIPS), []
     try:
-        for name, lst, config, want in trials:
+        for k, (name, lst, config, ex, allow, want, needle) in enumerate(trials):
             with tempfile.TemporaryDirectory() as d:
-                SHARDS, TIMINGS = os.path.join(d, "shards.json"), os.path.join(d, "timings.json")
+                SHARDS = os.path.join(d, "shards.json")
+                TIMINGS = os.path.join(d, "timings.json")
+                EXCLUSIONS = os.path.join(d, "exclusions.json")
+                SKIPS = os.path.join(d, "allow.json")
                 with open(SHARDS, "w") as f:
                     json.dump(config, f)
+                with open(EXCLUSIONS, "w") as f:
+                    json.dump(ex, f)
+                with open(SKIPS, "w") as f:
+                    json.dump(allow, f)
                 with open(TIMINGS, "w") as f:
                     json.dump({"cases": {"beta": {f"b{i}": {"seconds": 10.0 + i} for i in range(7)}},
                                "builds": {}}, f)
                 binary = fake_driver(d, lst)
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                     got = check_shards(binary)
-                print(f"{'ok ' if got == want else 'BAD'} {name}: exit {got} (expected {want})")
-                if got != want:
+                text = err.getvalue()
+                ok = got == want and (needle is None or needle in text)
+                print(f"{'ok ' if ok else 'BAD'} {name}: exit {got} (expected {want})"
+                      + ("" if ok else f"; stderr: {text.strip()}"))
+                if not ok:
                     wrong.append(name)
     finally:
-        SHARDS, TIMINGS = saved
+        SHARDS, TIMINGS, EXCLUSIONS, SKIPS = saved
     return 1 if wrong else 0
 
 
@@ -823,7 +959,7 @@ SKIP_DETAIL = re.compile(r"^      skipped \((.*)\)$")
 NO_REASON = "(the case printed no reason)"
 
 
-def allowlist(path=SKIPS, today=None):
+def allowlist(path=None, today=None):
     """The entries of .github/skip-allowlist.json that may skip in CI, each with the
     reason it may skip for, an owner and the one `case` it excuses, plus an `expires`
     date (YYYY-MM-DD). A malformed entry is an error: an allow-list without an owner is a
@@ -831,6 +967,7 @@ def allowlist(path=SKIPS, today=None):
     expiry is never revisited (an expired entry has to be renewed with a new reason, as
     the flaky quarantine's do). The reason matches as a prefix of the skip's reason — a
     skip usually carries detail after the entry's words — but the case matches exactly."""
+    path = path or SKIPS
     with open(path, encoding="utf-8") as f:
         doc = json.load(f)
     today = today or dt.date.today()
@@ -851,6 +988,24 @@ def allowlist(path=SKIPS, today=None):
             sys.exit(f"{path}: the entry {json.dumps(e)} expired on {raw}; fix the case or "
                      f"renew the entry with a new reason")
         out.append(dict(e, expires=raw))
+    return out
+
+
+def dead_allowlist_entries(allowed, binary):
+    """[(entry, why)] for allow-list entries that no case matches: the group has no cases,
+    or no case of it is named exactly `case`. A dead entry cannot fire — `allowed_entry`
+    only consults entries when a skip happens — and it documents a parity gap that no
+    longer exists; `check-shards` fails on one so the list cannot rot."""
+    names = {}
+    out = []
+    for e in allowed:
+        g = e["group"]
+        if g not in names:
+            names[g] = [n for _, _, n in list_cases(binary, [f"={g}"])]
+        if not names[g]:
+            out.append((e, f"the group {g!r} has no cases"))
+        elif e["case"] not in names[g]:
+            out.append((e, f"no case of {g!r} is named {e['case']!r}"))
     return out
 
 
@@ -1518,7 +1673,7 @@ def rebalance(args):
     return 0
 
 
-def main(args):
+def _main(args):
     if args[:2] == ["matrix", "--only"] and len(args) >= 3:
         matrix(args[3] if len(args) > 3 else DEFAULT_BIN, set(json.loads(args[2])))
         return 0
@@ -1548,6 +1703,16 @@ def main(args):
         return make_baseline(args[1:])
     print(__doc__, file=sys.stderr)
     return 2
+
+
+def main(args):
+    """Run the command; a shard plan that is not total (`ShardPlanError`) is an error with
+    its explanation, never a matrix with quietly missing cases."""
+    try:
+        return _main(args)
+    except ShardPlanError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

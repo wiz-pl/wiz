@@ -1,20 +1,39 @@
 import Data.Result
 import Logic
+import Functor
 
 /-!
 # Optic
 
-Optics for borrows (RD11): the target library of Feral's lowering of mutable borrows.
-See wiz-notes/borrows-as-optics.md.
+Two layers in one module.
 
-A Feral function that returns `&mut A` borrowed from a lender `S` lowers (Aeneas
-style) to a forward value and a backward closure: `S → Result (A × (A → S))`. That
-is a (partial) costate coalgebra `S → Result (Store A S)`, and when its body is a
-place expression (fields, indices, variant payloads) it is a lawful partial lens.
-This file names the pieces and states the laws. The representation stays the
-closure form, which is what reference counting with reuse wants.
+**Profunctor optics (the default).** The representation programming should reach for.
+An optic is a transformer of profunctors `P : Type → Type → Type`, polymorphic in `P`:
 
-Main definitions: `Store` (a borrowed value and how to put it back), `Lens` and
+    Iso       S T A B := {P} → [Profunctor P]                → P A B → P S T
+    LensP     S T A B := {P} → [Profunctor P] → [Strong P]    → P A B → P S T
+    PrismP    S T A B := {P} → [Profunctor P] → [Choice P]    → P A B → P S T
+    TraversalP S T A B := {P} → [Profunctor P] → [Wandering P] → P A B → P S T
+
+One optic, many interpretations: `over` is `Hom`, `view` is `Forget`, `toListOf` is
+`ForgetList`, `preview` is `ForgetOpt`, and `overWrite` is `Writer Δ` (update and
+write-set in one pass). `LensP.ofLens` lifts the store `Lens` below, so derived field
+lenses are usable with this layer at no loss; `LensP.toLens` is the other direction, and
+`Traversal.ofP` does the same for a store `Traversal`.
+
+**The store encoding (compatibility).** Optics for borrows (RD11), the target library
+of Feral's lowering of mutable borrows. See wiz-notes/borrows-as-optics.md. A Feral
+function that returns `&mut A` borrowed from a lender `S` lowers (Aeneas style) to a
+forward value and a backward closure: `S → Result (A × (A → S))`. That is a (partial)
+costate coalgebra `S → Result (Store A S)`, and when its body is a place expression
+(fields, indices, variant payloads) it is a lawful partial lens. The representation
+stays the closure form, which is what reference counting with reuse wants, and a
+returned borrow (`Mut`) is a first-class `Store`: a pure optic can be turned into one
+with `LensP.toLens` (run at `Forget`, then at `Hom` per write), but the optic value
+itself cannot be the field (it is `Type 1`), and a profunctor optic has no error/absent
+branch to hand the lender back. The profunctor form does not replace it; it is kept.
+
+Store definitions: `Store` (a borrowed value and how to put it back), `Lens` and
 `PLens` (total and partial places), `zoom` (run a `&mut` function on a sub-place),
 `Affine` (`Option<&mut A>`), `TraverseMut` (`iter_mut`), the lens laws
 (`Lens.Lawful`, `PLens.Lawful`, `Lens.Indep`) and proofs that composition keeps them
@@ -25,8 +44,9 @@ predicates are in lib/Data/Result.wiz.
 import Optic
 
 def p : Pair2 Nat Nat := Pair2.mk 1 2
-#eval Lens.get Pair2.fstL p                    -- 1
-#eval (Lens.set Pair2.sndL p 5).snd            -- 5
+#eval view fstL ((1, Bool.true) : Nat × Bool)           -- 1
+#eval over fstL Nat.succ ((1, Bool.true) : Nat × Bool)  -- (2, .true)
+#eval Lens.get Pair2.fstL p                             -- 1
 #eval Result.map Store.pos (List.atL 1 (List.cons 7 (List.cons 8 List.nil)))   -- .ok 8
 ```
 -/
@@ -92,6 +112,29 @@ def Lens.toP {S A : Type} (l : Lens S A) : PLens S A := fun s => .ok (l s)
 /-- A partial place inside a partial place (`v[i][j]`): fails if either does. -/
 def PLens.comp {S A B : Type} (l : PLens S A) (m : PLens A B) : PLens S B := fun s =>
   Result.bind (l s) (fun st => Store.compP st m)
+
+/-- Update a partial place with `f`: the partial counterpart of `Lens.over`. -/
+def PLens.over {S A : Type} (l : PLens S A) (f : A → A) (s : S) : Result S :=
+  Result.bind (l s) (fun st => .ok (st.2 (f st.1)))
+
+-- ## Traversal (store encoding): a pure read-and-update
+--
+-- The engine-facing companion of the profunctor `TraversalP` below. It is the store
+-- encoding, not profunctor optics: `overAll` runs a plain `A → A` through the places
+-- and the lens's backward function records any writes (the engine's write-set). Use
+-- `TraversalP` in new code; this is what a store lens gives without a second pass.
+
+/-- A read-and-update traversal: every focus matching a predicate. `view` reads the
+foci; `overAll` applies `f` to each and records the writes through the places' backward
+functions (the engine's write-set). -/
+structure Traversal (S A : Type) where
+  view : S → List A
+  overAll : (A → A) → S → S
+
+/-- The one-focus traversal induced by a lens. -/
+def Traversal.ofLens {S A : Type} (l : Lens S A) : Traversal S A :=
+  Traversal.mk (fun s => List.cons (Lens.get l s) List.nil)
+    (fun f s => Lens.over l f s)
 
 -- ## zoom: run a state transformer through a place
 --
@@ -398,3 +441,540 @@ def List.atL_pp {A : Type} : (i : Nat) → (s : List A) →
 /-- `List.atL i` is a lawful partial lens. -/
 def List.atL_lawful {A : Type} (i : Nat) : PLens.Lawful (@List.atL A i) :=
   (fun s => List.atL_gp i s, fun s => List.atL_pg i s, fun s => List.atL_pp i s)
+
+-- ====================================================================================
+-- Profunctor optics (the default)
+-- ====================================================================================
+--
+-- The van Laarhoven/profunctor encoding. An optic is a transformer of profunctors
+-- `P : Type → Type → Type`, polymorphic in `P`: the caller picks `P` and its instances.
+-- No rank-2 `∀` is needed, because `P` is an ordinary `Π` over `Type → Type → Type`.
+--
+-- `P` is chosen per interpretation: `Hom` updates, `Forget R` reads one value,
+-- `ForgetList R` reads all foci, `ForgetOpt R` reads at most one, and `Writer Δ`
+-- updates while recording a delta (the engine's write-set).
+--
+-- Names ending in `P` are the profunctor forms, so they coexist with the store
+-- encoding's `Lens`/`PLens`/`ALens` above (`LensP`, `PrismP`, `TraversalP`, `IsoP`).
+-- A superclass is an instance-implicit parameter (`[super : Profunctor P]`), not
+-- `extends`, so every signature that forms `Strong P` also carries `[Profunctor P]`;
+-- at a variable `P` a class method is applied with `@` (`@Strong.first' P d i …`),
+-- because instance search does not run on a variable head.
+
+-- ## Sums (the `Choice` side)
+
+/-- A disjoint sum, the type `Choice` acts on. (lib/Eff.wiz's `Sum` carries the effect
+row vocabulary; this one is only the optic's coproduct.) -/
+inductive Coprod (A B : Type) where
+  | inl (a : A)
+  | inr (b : B)
+
+-- ## The classes
+
+/-- A profunctor: `dimap` maps both ends, contravariantly in the source. -/
+class Profunctor (P : Type → Type → Type) where
+  dimap : {A B C D : Type} → (A → B) → (C → D) → P B C → P A D
+
+/-- `Strong`: the profunctor can carry a context `C` alongside (`first'`). -/
+class Strong (P : Type → Type → Type) [super : Profunctor P] where
+  first' : {A B C : Type} → P A B → P (A × C) (B × C)
+
+/-- `Choice`: the profunctor can carry a sum (`left'`). -/
+class Choice (P : Type → Type → Type) [super : Profunctor P] where
+  left' : {A B C : Type} → P A B → P (Coprod A C) (Coprod B C)
+
+/-- `Wandering`: the profunctor can visit any number of foci (the traversal power). The
+argument is the traversal itself, polymorphic in an applicative `F`. -/
+class Wandering (P : Type → Type → Type) [super : Profunctor P] where
+  wander : {A B S T : Type} →
+    ({F : Type → Type} → [i : Applicative F] → (A → F B) → S → F T) → P A B → P S T
+
+/-- `lmap`: map the source. -/
+def Profunctor.lmap {P : Type → Type → Type} [d : Profunctor P] {A B C : Type}
+    (f : A → B) (x : P B C) : P A C :=
+  @Profunctor.dimap P d A B C C f (fun c => c) x
+/-- `rmap`: map the target. -/
+def Profunctor.rmap {P : Type → Type → Type} [d : Profunctor P] {A B C : Type}
+    (g : B → C) (x : P A B) : P A C :=
+  @Profunctor.dimap P d A A B C (fun a => a) g x
+
+/-- The second component of a pair, from `first'` and a swap. -/
+def Strong.second' {P : Type → Type → Type} [d : Profunctor P] [i : Strong P]
+    {A B C : Type} (x : P A B) : P (C × A) (C × B) :=
+  @Profunctor.dimap P d (C × A) (A × C) (B × C) (C × B)
+    (fun ca => (ca.2, ca.1)) (fun bc => (bc.2, bc.1))
+    (@Strong.first' P d i A B C x)
+
+/-- The right injection of a sum, from `left'` and a swap. -/
+def Choice.right' {P : Type → Type → Type} [d : Profunctor P] [c : Choice P]
+    {A B C : Type} (x : P A B) : P (Coprod C A) (Coprod C B) :=
+  @Profunctor.dimap P d (Coprod C A) (Coprod A C) (Coprod B C) (Coprod C B)
+    (fun ca => match ca with | .inl c => .inr c | .inr a => .inl a)
+    (fun cb => match cb with | .inl b => .inr b | .inr c => .inl c)
+    (@Choice.left' P d c A B C x)
+
+-- ## The optics
+
+/-- An iso: a profunctor transformer for any `Profunctor`. -/
+def Iso (S T A B : Type) : Type 1 :=
+  {P : Type → Type → Type} → [pf : Profunctor P] → (P A B → P S T)
+/-- A lens: `Strong` (a focus in a product context). -/
+def LensP (S T A B : Type) : Type 1 :=
+  {P : Type → Type → Type} → [pf : Profunctor P] → [st : Strong P] → (P A B → P S T)
+/-- A prism: `Choice` (a focus in a sum context). -/
+def PrismP (S T A B : Type) : Type 1 :=
+  {P : Type → Type → Type} → [pf : Profunctor P] → [ch : Choice P] → (P A B → P S T)
+/-- A traversal: `Wandering` (any number of foci). -/
+def TraversalP (S T A B : Type) : Type 1 :=
+  {P : Type → Type → Type} → [pf : Profunctor P] → [wd : Wandering P] →
+    (P A B → P S T)
+
+/-- An iso from `to : S → A` and `from : B → T`. -/
+def iso {S T A B : Type} (to : S → A) (from : B → T) : Iso S T A B :=
+  fun {P : Type → Type → Type} [d : Profunctor P] =>
+    @Profunctor.dimap P d S A B T to from
+
+/-- A lens from `get` and `put`: `s ↦ (get s, s)` through `first'`. -/
+def lens {S T A B : Type} (get : S → A) (put : S → B → T) : LensP S T A B :=
+  fun {P : Type → Type → Type} [d : Profunctor P] [i : Strong P] (x : P A B) =>
+    @Profunctor.dimap P d S (A × S) (B × S) T
+      (fun s => (get s, s))
+      (fun bs => put bs.2 bs.1)
+      (@Strong.first' P d i A B S x)
+
+/-- A prism from a matcher `S → A ⊕ T` (`.inl` is a focus; `.inr` is the rebuilt
+non-match) and a builder `B → T`. -/
+def prism {S T A B : Type} (matchS : S → Coprod A T) (build : B → T) :
+    PrismP S T A B :=
+  fun {P : Type → Type → Type} [d : Profunctor P] [c : Choice P] (x : P A B) =>
+    @Profunctor.dimap P d S (Coprod A T) (Coprod B T) T
+      matchS
+      (fun cb => match cb with | .inl b => build b | .inr t => t)
+      (@Choice.left' P d c A B T x)
+
+/-- A traversal from a `traverse`-shaped function. -/
+def traversalOf {S T A B : Type}
+    (trav : {F : Type → Type} → [i : Applicative F] → (A → F B) → S → F T) :
+    TraversalP S T A B :=
+  fun {P : Type → Type → Type} [d : Profunctor P] [w : Wandering P] (x : P A B) =>
+    @Wandering.wander P d w A B S T trav x
+
+-- ## Interpretations
+
+/-- `Hom`: the update interpretation (`P A B = A → B`). -/
+def Hom (A B : Type) : Type := A → B
+/-- `Id`: the identity applicative, used to run a traversal at `Hom`. -/
+def Id (A : Type) : Type := A
+/-- `Forget R`: the read-one interpretation (`P S T = S → R`). -/
+def Forget (R S T : Type) : Type := S → R
+/-- `ForgetList R`: the read-many interpretation (`P S T = S → List R`). -/
+def ForgetList (R S T : Type) : Type := S → List R
+/-- `ForgetOpt R`: the read-at-most-one interpretation (`P S T = S → Option R`). -/
+def ForgetOpt (R S T : Type) : Type := S → Option R
+/-- `ConstList R`: the constant applicative used by `ForgetList`'s `wander`. -/
+def ConstList (R X : Type) : Type := List R
+
+/-- `Writer Δ`: an update that also records a delta (`P S T = S → T × Δ`). -/
+def Writer (M S T : Type) : Type := S → T × M
+/-- The writer applicative `X ↦ X × Δ`. -/
+def WriterF (M X : Type) : Type := X × M
+
+instance : Profunctor Hom where
+  dimap := fun f g h => fun a => g (h (f a))
+instance : Strong Hom where
+  first' := fun h ac => (h ac.1, ac.2)
+instance : Choice Hom where
+  left' := fun h x => match x with
+    | .inl a => .inl (h a)
+    | .inr c => .inr c
+instance : Applicative Id where
+  pure := fun a => a
+  seq := fun f a => f a
+instance : Wandering Hom where
+  wander := fun (trav : {F : Type → Type} → [i : Applicative F] → (A → F B) → S → F T)
+      (h : A → B) (s : S) => trav (F := Id) (fun a => h a) s
+
+instance {R : Type} : Profunctor (Forget R) where
+  dimap := fun f g h => fun a => h (f a)
+instance {R : Type} : Strong (Forget R) where
+  first' := fun h ac => h ac.1
+
+instance {R : Type} : Profunctor (ForgetList R) where
+  dimap := fun f g h => fun a => h (f a)
+instance {R : Type} : Strong (ForgetList R) where
+  first' := fun h ac => h ac.1
+instance {R : Type} : Choice (ForgetList R) where
+  left' := fun h x => match x with
+    | .inl a => h a
+    | .inr c => List.nil
+instance {R : Type} : Applicative (ConstList R) where
+  pure := fun x => List.nil
+  seq := fun xs ys => List.append xs ys
+instance {ω R : Type} : Wandering (ForgetList R) where
+  wander := fun (trav : {F : Type → Type} → [i : Applicative F] → (A → F B) → S → F T)
+      (h : A → List R) (s : S) => trav (F := ConstList R) h s
+
+instance {R : Type} : Profunctor (ForgetOpt R) where
+  dimap := fun f g h => fun a => h (f a)
+instance {R : Type} : Strong (ForgetOpt R) where
+  first' := fun h ac => h ac.1
+instance {R : Type} : Choice (ForgetOpt R) where
+  left' := fun h x => match x with
+    | .inl a => h a
+    | .inr c => Option.none
+
+/-- The monoid of deltas a `Writer` interpretation accumulates. -/
+class Delta (M : Type) where
+  empty : M
+  append : M → M → M
+/-- Lists are the delta monoid of independent records. -/
+instance {A : Type} : Delta (List A) where
+  empty := List.nil
+  append := List.append
+
+instance {M : Type} [m : Delta M] : Applicative (WriterF M) where
+  pure := fun x => (x, Delta.empty)
+  seq := fun gd xd => (gd.1 xd.1, Delta.append gd.2 xd.2)
+instance {M : Type} : Profunctor (Writer M) where
+  dimap := fun f g h => fun a => let r := h (f a); (g r.1, r.2)
+instance {M : Type} : Strong (Writer M) where
+  first' := fun h ac => let r := h ac.1; ((r.1, ac.2), r.2)
+instance {M : Type} [m : Delta M] : Choice (Writer M) where
+  left' := fun h x => match x with
+    | .inl a => let r := h a; (.inl r.1, r.2)
+    | .inr c => (.inr c, Delta.empty)
+instance {ω M : Type} [m : Delta M] : Wandering (Writer M) where
+  wander := fun (trav : {F : Type → Type} → [i : Applicative F] → (A → F B) → S → F T)
+      (h : A → B × M) (s : S) => trav (F := WriterF M) h s
+
+-- ## Reading and writing
+
+/-- `view`: run a lens at `Forget`. -/
+def view {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) : A :=
+  l (P := Forget A) (fun a => a) s
+/-- `over`: run a lens at `Hom`. -/
+def over {S T A B : Type} (l : LensP S T A B) (f : A → B) (s : S) : T :=
+  l (P := Hom) f s
+/-- `set`: `over` with a constant. -/
+def set {S T A B : Type} (l : LensP S T A B) (b : B) (s : S) : T :=
+  over l (fun a => b) s
+/-- `toListOf` for a traversal: run it at `ForgetList`. -/
+def toListOf {S T B : Type} {ω A : Type} (tr : TraversalP S T A B) (s : S) : List A :=
+  tr (P := ForgetList A) (fun a => List.cons a List.nil) s
+/-- `toListOf` for a prism: the same `ForgetList` interpretation, typed at `PrismP`. -/
+def toListOfP {S T B : Type} {ω A : Type} (pr : PrismP S T A B) (s : S) : List A :=
+  pr (P := ForgetList A) (fun a => List.cons a List.nil) s
+/-- `preview`: run a prism at `ForgetOpt`. -/
+def preview {S : Type} {ω A : Type} (pr : PrismP S S A A) (s : S) : Option A :=
+  pr (P := ForgetOpt A) (fun a => Option.some a) s
+/-- `over` for a traversal. -/
+def overT {S T A B : Type} (tr : TraversalP S T A B) (f : A → B) (s : S) : T :=
+  tr (P := Hom) f s
+/-- `over` for a prism. -/
+def overP {S T A B : Type} (pr : PrismP S T A B) (f : A → B) (s : S) : T :=
+  pr (P := Hom) f s
+/-- `over` for an iso. -/
+def overI {S T A B : Type} (i : Iso S T A B) (f : A → B) (s : S) : T :=
+  i (P := Hom) f s
+/-- `view` for an iso (the `Forget` interpretation is a profunctor). -/
+def viewI {S : Type} {ω A : Type} (i : Iso S S A A) (s : S) : A :=
+  i (P := Forget A) (fun a => a) s
+/-- `over` that records a delta: the write-set interpretation. `f` returns the new focus
+and the delta for it; the optic composes the deltas with `Delta.append`. -/
+def overWrite {S T A B : Type} {ω M : Type} [m : Delta M] (tr : TraversalP S T A B)
+    (f : A → B × M) (s : S) : T × M :=
+  tr (P := Writer M) f s
+/-- The lens version of `overWrite`. -/
+def overWriteL {S T A B : Type} {ω M : Type} [m : Delta M] (l : LensP S T A B)
+    (f : A → B × M) (s : S) : T × M :=
+  l (P := Writer M) f s
+/-- The prism version of `overWrite`. -/
+def overWriteP {S T A B : Type} {ω M : Type} [m : Delta M] (pr : PrismP S T A B)
+    (f : A → B × M) (s : S) : T × M :=
+  pr (P := Writer M) f s
+
+-- ## Composition
+
+/-- Compose two lenses (`s.f.g`). -/
+def LensP.comp {S T A B C D : Type} (l : LensP S T A B) (m : LensP A B C D) :
+    LensP S T C D :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [st : Strong P] (x : P C D) =>
+    l (P := P) (m (P := P) x)
+/-- Compose two traversals (every focus of the inner under every focus of the outer). -/
+def TraversalP.comp {S T A B C D : Type} (l : TraversalP S T A B)
+    (m : TraversalP A B C D) : TraversalP S T C D :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [wd : Wandering P] (x : P C D) =>
+    l (P := P) (m (P := P) x)
+/-- Compose two prisms. -/
+def PrismP.comp {S T A B C D : Type} (l : PrismP S T A B) (m : PrismP A B C D) :
+    PrismP S T C D :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [ch : Choice P] (x : P C D) =>
+    l (P := P) (m (P := P) x)
+/-- Compose two isos. -/
+def IsoP.comp {S T A B C D : Type} (l : Iso S T A B) (m : Iso A B C D) :
+    Iso S T C D :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] (x : P C D) =>
+    l (P := P) (m (P := P) x)
+
+-- ## Common optics
+
+/-- The first component of a pair, as a profunctor lens. -/
+def fstL {A C : Type} : LensP (A × C) (A × C) A A :=
+  fun {P : Type → Type → Type} [d : Profunctor P] [i : Strong P] =>
+    @Strong.first' P d i A A C
+/-- The second component of a pair. -/
+def sndL {A C : Type} : LensP (C × A) (C × A) A A :=
+  fun {P : Type → Type → Type} [d : Profunctor P] [i : Strong P] =>
+    @Strong.second' P d i A A C
+
+/-- Every element of a list, as a traversal. -/
+def listWander {A B : Type} {F : Type → Type} [i : Applicative F] (f : A → F B) :
+    List A → F (List B)
+  | .nil => @Applicative.pure F i (List B) (List.nil)
+  | .cons x xs =>
+    @Applicative.seq F i (List B) (List B)
+      (@Applicative.seq F i B (List B → List B)
+        (@Applicative.pure F i (B → List B → List B) (fun b bs => List.cons b bs))
+        (f x))
+      (listWander f xs)
+/-- The list traversal function, named so it can be passed to `traversalOf`. -/
+def listTrav {A : Type} : {F : Type → Type} → [i : Applicative F] →
+    (A → F A) → List A → F (List A) :=
+  fun {F : Type → Type} [i : Applicative F] f xs => listWander (A := A) (B := A) f xs
+/-- The list traversal. -/
+def listT {A : Type} : TraversalP (List A) (List A) A A := traversalOf listTrav
+/-- The head of a list, as a prism (0 or 1 focus). -/
+def headP {A : Type} : PrismP (List A) (List A) A A :=
+  prism
+    (fun s => match s with
+      | .nil => .inr List.nil
+      | .cons x xs => .inl x)
+    (fun a => List.cons a List.nil)
+
+/-- Every element of a list that satisfies `keep`, as a traversal (the shape of an index
+bucket: the predicate chooses the entries in the bucket). -/
+def listWanderWhere {A : Type} (keep : A → Bool) {F : Type → Type} [i : Applicative F]
+    (f : A → F A) : List A → F (List A)
+  | .nil => @Applicative.pure F i (List A) List.nil
+  | .cons x xs =>
+    match keep x with
+    | .true =>
+      @Applicative.seq F i (List A) (List A)
+        (@Applicative.seq F i A (List A → List A)
+          (@Applicative.pure F i (A → List A → List A) (fun a as => List.cons a as))
+          (f x))
+        (listWanderWhere keep f xs)
+    | .false =>
+      @Applicative.seq F i (List A) (List A)
+        (@Applicative.seq F i A (List A → List A)
+          (@Applicative.pure F i (A → List A → List A) (fun a as => List.cons a as))
+          (@Applicative.pure F i A x))
+        (listWanderWhere keep f xs)
+/-- The filtered-list traversal function, named so it can be passed to `traversalOf`. -/
+def listWhereTrav {A : Type} (keep : A → Bool) : {F : Type → Type} → [i : Applicative F] →
+    (A → F A) → List A → F (List A) :=
+  fun {F : Type → Type} [i : Applicative F] f xs => listWanderWhere keep f xs
+/-- Every element of a list that satisfies `keep`. -/
+def listWhereT {A : Type} (keep : A → Bool) : TraversalP (List A) (List A) A A :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [wd : Wandering P] (x : P A A) =>
+    @Wandering.wander P pf wd A A (List A) (List A) (listWhereTrav keep) x
+
+-- ## Laws
+
+/-- `dimap id id = id`. -/
+def Profunctor.Lawful (P : Type → Type → Type) [d : Profunctor P] : Prop :=
+  {A B : Type} → (x : P A B) →
+    @Profunctor.dimap P d A A B B (fun a => a) (fun b => b) x = x
+
+/-- `first'` is natural in both ends. -/
+def Strong.Lawful (P : Type → Type → Type) [d : Profunctor P] [i : Strong P] : Prop :=
+  {A A' B B' C : Type} → (f : A' → A) → (g : B → B') → (x : P A B) →
+    @Strong.first' P d i A' B' C (@Profunctor.dimap P d A' A B B' f g x) =
+    @Profunctor.dimap P d (A' × C) (A × C) (B × C) (B' × C)
+      (fun ac => (f ac.1, ac.2)) (fun bc => (g bc.1, bc.2))
+      (@Strong.first' P d i A B C x)
+
+/-- `left'` is natural in both ends. -/
+def Choice.Lawful (P : Type → Type → Type) [d : Profunctor P] [c : Choice P] : Prop :=
+  {A A' B B' C : Type} → (f : A' → A) → (g : B → B') → (x : P A B) →
+    @Choice.left' P d c A' B' C (@Profunctor.dimap P d A' A B B' f g x) =
+    @Profunctor.dimap P d (Coprod A' C) (Coprod A C) (Coprod B C) (Coprod B' C)
+      (fun ac => match ac with | .inl a => .inl (f a) | .inr c => .inr c)
+      (fun bc => match bc with | .inl b => .inl (g b) | .inr c => .inr c)
+      (@Choice.left' P d c A B C x)
+
+/-- The identity traversal, as a named function. -/
+def idTrav {A : Type} : {F : Type → Type} → [i : Applicative F] →
+    (A → F A) → A → F A :=
+  fun {F : Type → Type} [i : Applicative F] f a => f a
+/-- The identity traversal wanders to the identity. -/
+def Wandering.Lawful (P : Type → Type → Type) [d : Profunctor P] [w : Wandering P] : Prop :=
+  {A : Type} → (x : P A A) →
+    @Wandering.wander P d w A A A A (idTrav (A := A)) x = x
+
+-- The laws hold for the interpretations used here (all by computation; the equations
+-- are of functions, so `funext` is available if a pointwise proof is needed).
+/-- `Hom` is a lawful profunctor (by `rfl`). -/
+def Hom.profunctorLawful : Profunctor.Lawful Hom :=
+  fun {A B} x => rfl
+/-- `Hom` is a lawful strong profunctor (by `rfl`). -/
+def Hom.strongLawful : Strong.Lawful Hom :=
+  fun {A A' B B' C} f g x => rfl
+/-- `Hom` is a lawful choice profunctor (by `rfl`). -/
+def Hom.choiceLawful : Choice.Lawful Hom :=
+  fun {A A' B B' C} f g x =>
+    funext (fun y => match y with
+      | .inl a => rfl
+      | .inr c => rfl)
+/-- `Hom` is a lawful wandering profunctor (by `rfl`). -/
+def Hom.wanderingLawful : Wandering.Lawful Hom :=
+  fun {A} x => rfl
+/-- `ForgetList R` is a lawful profunctor (by `rfl`). -/
+def ForgetList.profunctorLawful {R : Type} : Profunctor.Lawful (ForgetList R) :=
+  fun {A B} x => rfl
+/-- `ForgetList R` is a lawful strong profunctor (by `rfl`). -/
+def ForgetList.strongLawful {R : Type} : Strong.Lawful (ForgetList R) :=
+  fun {A A' B B' C} f g x => rfl
+/-- `ForgetList R` is a lawful choice profunctor (by `rfl`). -/
+def ForgetList.choiceLawful {R : Type} : Choice.Lawful (ForgetList R) :=
+  fun {A A' B B' C} f g x =>
+    funext (fun y => match y with
+      | .inl a => rfl
+      | .inr c => rfl)
+/-- `ForgetList R` is a lawful wandering profunctor (by `rfl`). -/
+def ForgetList.wanderingLawful {ω R : Type} : Wandering.Lawful (ForgetList R) :=
+  fun {A} x => rfl
+
+-- ## Lens laws, on the interpretations
+
+/-- GetPut: reading and writing back the same value is the identity. -/
+def LensP.GetPut {S A : Type} (l : LensP S S A A) : Prop :=
+  (s : S) → over l (fun a => a) s = s
+/-- PutGet: a write is what a subsequent read sees. -/
+def LensP.PutGet {S A : Type} (l : LensP S S A A) : Prop :=
+  (s : S) → (a : A) → view l (over l (fun b => a) s) = a
+/-- PutPut: the last write wins. -/
+def LensP.PutPut {S A : Type} (l : LensP S S A A) : Prop :=
+  (s : S) → (a b : A) → over l (fun c => b) (over l (fun c => a) s) =
+    over l (fun c => b) s
+/-- A lawful profunctor lens: GetPut, PutGet and PutPut. -/
+def LensP.Lawful {S A : Type} (l : LensP S S A A) : Prop :=
+  LensP.GetPut l × LensP.PutGet l × LensP.PutPut l
+
+-- ## Store lenses as profunctor lenses
+
+-- The lift is one way: a store `Lens` is a get and a put, which is exactly what `lens`
+-- needs. The other direction is not definable, and is why the store encoding stays: a
+-- polymorphic optic is a transformer, so it cannot hand back the `Store A S` (the value
+-- and the put-back) that a returned borrow (`Mut` in lib/Region.wiz) carries.
+
+/-- A store lens, as a profunctor lens, at a chosen `P` (fully applied, so it can be
+used where a profunctor optic is being built rather than passed). `view`/`over` agree
+definitionally with `Lens.get`/`Lens.over`. -/
+def LensP.ofLensAt {S A : Type} (l : Lens S A) {P : Type → Type → Type}
+    [pf : Profunctor P] [st : Strong P] (x : P A A) : P S S :=
+  @Profunctor.dimap P pf S (A × S) (A × S) S
+    (fun s => (Lens.get l s, s))
+    (fun bs => Lens.set l bs.2 bs.1)
+    (@Strong.first' P pf st A A S x)
+
+/-- A store lens, as a profunctor lens. `view`/`over` agree definitionally with
+`Lens.get`/`Lens.over` (`LensP.ofLens_view`, `LensP.ofLens_over`), so derived field
+lenses (`deriving Lens`) work with this layer. Bind it to a name before passing it to
+`view`/`over`: a partially applied definition whose result is an optic cannot be an
+argument (`LensP.ofLens l` is fine in a `def` body, not in an argument position). -/
+def LensP.ofLens {S A : Type} (l : Lens S A) : LensP S S A A :=
+  fun {P : Type → Type → Type} [pf : Profunctor P] [st : Strong P] (x : P A A) =>
+    @LensP.ofLensAt S A l P pf st x
+/-- `LensP.ofLensAt` reads as the store lens's get (by `rfl`). -/
+def LensP.ofLens_view {S A : Type} (l : Lens S A) (s : S) :
+    LensP.ofLensAt l (P := Forget A) (fun a => a) s = Lens.get l s := rfl
+/-- `LensP.ofLensAt` writes as the store lens's over (by `rfl`). -/
+def LensP.ofLens_over {S A : Type} (l : Lens S A) (f : A → A) (s : S) :
+    LensP.ofLensAt l (P := Hom) f s = Lens.over l f s := rfl
+
+/-- GetPut transfers through the lift. -/
+def LensP.ofLens_getPut {S A : Type} (l : Lens S A) (h : Lens.Lawful l) (s : S) :
+    LensP.ofLensAt l (P := Hom) (fun a => a) s = s := h.1 s
+/-- PutGet transfers through the lift. -/
+def LensP.ofLens_putGet {S A : Type} (l : Lens S A) (h : Lens.Lawful l) (s : S) (a : A) :
+    LensP.ofLensAt l (P := Forget A) (fun x => x)
+      (LensP.ofLensAt l (P := Hom) (fun x => a) s) = a := h.2.1 s a
+/-- PutPut transfers through the lift. -/
+def LensP.ofLens_putPut {S A : Type} (l : Lens S A) (h : Lens.Lawful l) (s : S) (a b : A) :
+    LensP.ofLensAt l (P := Hom) (fun c => b)
+      (LensP.ofLensAt l (P := Hom) (fun c => a) s) =
+    LensP.ofLensAt l (P := Hom) (fun c => b) s := h.2.2 s a b
+
+-- ## From a pure optic back to a place
+--
+-- The lift `LensP.ofLens` is definitional; the other direction recovers a store by
+-- running the optic at `Forget` for the value and at `Hom` for each write. It is how a
+-- pure optic becomes a place the borrow API can use (`Mut` still *stores* a `Store`;
+-- it cannot store a `LensP`, which is `Type 1` and has no lender).
+
+/-- The store lens of a profunctor lens: `view` for the get, `set` for the put. -/
+def LensP.toLens {S : Type} {ω A : Type} (l : LensP S S A A) : Lens S A :=
+  fun s => (view l s, fun a => set l a s)
+
+/-- `LensP.toLens` reads as `view` (by `rfl`). -/
+def LensP.toLens_get {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) :
+    Lens.get (LensP.toLens l) s = view l s := rfl
+
+/-- `LensP.toLens` writes as `set` (by `rfl`). -/
+def LensP.toLens_set {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) (a : A) :
+    Lens.set (LensP.toLens l) s a = set l a s := rfl
+
+-- ## Independence, restated on `view`/`over`
+--
+-- The store `Lens.Indep` says two places are disjoint *in the lender*: a put to one
+-- leaves the other's value alone, and the two put-backs agree. A profunctor optic does
+-- not expose the lender (only `P S T`), so the put-back clause has no statement; the
+-- frame rule needs exactly the first two clauses, and they are stateable at `P`.
+
+/-- Two profunctor places are independent when a write to one does not change what the
+other reads, and the two writes commute. This is the frame rule's hypothesis restated
+on `view`/`over`; the store `Lens.Indep` also says the two put-backs agree, which a
+profunctor optic does not expose. -/
+def LensP.Indep {S A B : Type} (l : LensP S S A A) (m : LensP S S B B) : Prop :=
+  ((s : S) → (a : A) → view m (over l (fun _ => a) s) = view m s) ×
+  ((s : S) → (b : B) → view l (over m (fun _ => b) s) = view l s) ×
+  ((s : S) → (a : A) → (b : B) →
+    over m (fun _ => b) (over l (fun _ => a) s) = over l (fun _ => a) (over m (fun _ => b) s))
+
+/-- Independence is symmetric. -/
+def LensP.indep_symm {S A B : Type} (l : LensP S S A A) (m : LensP S S B B)
+    (h : LensP.Indep l m) : LensP.Indep m l :=
+  (h.2.1, h.1, fun s b a => Eq.symm (h.2.2 s a b))
+
+/-- Store independence (the `deriving Lens` statement `S.f_g_indep`) transfers to the
+lifted optics, so a derived proof is exactly the hypothesis the profunctor frame rule
+wants. -/
+def LensP.ofLens_indep {S A B : Type} (l : Lens S A) (m : Lens S B) (h : Lens.Indep l m) :
+    LensP.Indep (S := S) (A := A) (B := B) (LensP.ofLens l) (LensP.ofLens m) :=
+  (fun s a => h.1 s a, fun s b => h.2.1 s b, fun s a b => h.2.2 s a b)
+
+-- ## The pair lens, proved lawful
+
+/-- `fstL` obeys GetPut (the componentwise pair equation; pair eta is not definitional). -/
+def fstL_getPut {A C : Type} : LensP.GetPut (S := A × C) (A := A) fstL :=
+  fun s => Optic.pairEq s.1 s.2 s rfl rfl
+/-- `fstL` obeys PutGet. -/
+def fstL_putGet {A C : Type} : LensP.PutGet (S := A × C) (A := A) fstL :=
+  fun s a => rfl
+/-- `fstL` obeys PutPut. -/
+def fstL_putPut {A C : Type} : LensP.PutPut (S := A × C) (A := A) fstL :=
+  fun s a b => rfl
+/-- `fstL` is a lawful profunctor lens. -/
+def fstL_lawful {A C : Type} : LensP.Lawful (S := A × C) (A := A) fstL :=
+  (fstL_getPut, fstL_putGet, fstL_putPut)
+
+-- ## A store traversal from a profunctor traversal
+
+/-- The store `Traversal` of a profunctor one: `view` is `toListOf` and `overAll` is
+`overT`. This is the compatibility wrapper an engine keeps when it wants the
+`view`/`overAll` pair but writes the optic once, at `P`. The focus must carry whatever
+the update needs to name its write (e.g. a key): `overAll` sees only the focus, while
+the store encoding's backward function can close over it. -/
+def Traversal.ofP {S : Type} {ω A : Type} (t : TraversalP S S A A) : Traversal S A :=
+  Traversal.mk (fun s => toListOf t s) (fun f s => overT t f s)

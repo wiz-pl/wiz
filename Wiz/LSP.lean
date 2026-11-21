@@ -281,7 +281,8 @@ def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
                ("source", "wiz"), ("message", m.text)] ++ code)
 
 def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
-  let ds := doc.state.messages.toList.map (diagnostic srv doc)
+  -- a `WIZ_WIDGET:` display value (`#plot`) is an infoview widget, not a diagnostic
+  let ds := (doc.state.messages.toList.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
               ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
 
@@ -525,7 +526,17 @@ def infoItems (srv : Server) (uri : String) (doc : Doc) (off : Nat) :
   for m in st.messages do
     if m.info.start ≤ off && (off < m.info.stop || off == m.info.start) then
       let sev := match m.severity with | .error => "error" | .warning => "warning" | .info => "info"
-      items := items.push ("message", m.info, sev, some m.text, none, Json.null)
+      -- `#plot` emits the Loom widget display value (`WIZ_WIDGET:` + bundle JSON): an
+      -- infoview item of its own, so a browser can draw it rather than a text dump
+      if m.text.startsWith "WIZ_WIDGET:" then
+        let title := match Json.parse (m.text.drop "WIZ_WIDGET:".length).toString with
+          | .ok j => match j.getObjVal? "summary" with
+            | .ok (.str s) => s
+            | _ => "plot"
+          | .error _ => "plot"
+        items := items.push ("widget", m.info, title, some m.text, none, Json.null)
+      else
+        items := items.push ("message", m.info, sev, some m.text, none, Json.null)
   pure items
 
 /-- The type of a subterm, from the kernel, if every variable in scope has a known type. -/

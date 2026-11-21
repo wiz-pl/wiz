@@ -698,10 +698,14 @@ def docGroup : Group where
               checkHas page "id=\"wiz-doc-serve\""
               checkHas page "\"lsp\":\"ws://127.0.0.1:8765\""
               checkHas page "data-doc-line="
-              -- (the scripts the page imports are in the served tree)
-              checkHas (← httpGet port "/doc-live.js") "readGoalState"
+              -- (the scripts the page imports are in the served tree: the live client,
+              -- the transport, and the mount contract — the goals/hover markup is
+              -- Web.{Goals,Hover} in the runtime now, not goals.js. The runtime module
+              -- itself is built by web/build-doc-live-ui.sh, not by `wiz doc`.)
+              checkHas (← httpGet port "/doc-live.js") "wiz-doc-serve"
               checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
-              checkHas (← httpGet port "/goals.js") "export function renderGoalResult"
+              checkHas (← httpGet port "/framework/mount.js") "export async function mount"
+              checkHas (← httpGet port "/framework/runtime.js") "export function applyPatches"
               -- (the module's source, for the client to open in the server)
               let src ← httpGet port "/sources/Shapes.Basic.wiz"
               check (has src "200 OK") s!"GET /sources: {src.take 200}"

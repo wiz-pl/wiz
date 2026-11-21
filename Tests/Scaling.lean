@@ -431,17 +431,21 @@ def hypsMismatches (g : Globals ZeroOneMany) (extra : List (Name × Level × Val
 
 /- `libApart`, `libSourceExcept` and `allLibSource` live in `Tests.Elab`, so every
 whole-library loader (this Desc sweep and the trust ledger) uses the same per-module
-exclusions. -/
+exclusions. `libApart` is empty since the e-graph collapse, so `allLibSource` is all of
+`lib/`. -/
 
 /-! The Desc sweep (direct induction hypotheses against the template, P2) is one check
-over three inputs: `lib/` imported at once, the `libApart` modules, and every example.
-It ran as one case (up to 31 min in CI, most of it the examples, each elaborating its
-imports from source), so it is split into cases that can run in different shards: one
-for `lib/`, one for `libApart`, and `descExampleChunks` for the examples, chunk `k`
-taking the sorted files at positions `k` mod `descExampleChunks`. Together they check
-the same inputs with the same assertions; `descSweepPartition` checks that the chunks
-cover every example exactly once. -/
-
+over two inputs: `lib/` imported at once, and every example. It ran as one case (up to
+31 min in CI, most of it the examples, each elaborating its imports from source), so it
+is split into cases that can run in different shards: one for `lib/`, and
+`descExampleChunks` for the examples, chunk `k` taking the sorted files at positions `k`
+mod `descExampleChunks`. (A third case loaded each `libApart` backend on its own; there
+are none now that `Scry.EgraphNative` is a compatibility import of `Scry.Egraph`.)
+Together they check the same inputs with the same assertions; `descSweepPartition` checks
+that the chunks cover every example exactly once. They are the group `desc-sweep`, which
+sets `parallel := true` so a shard's `--jobs N` runs them N at a time; they share no path
+and none asserts on wall time, so this is the safe way to use the shard's jobs on the
+sweep. -/
 /-- The `.wiz` files directly in `examples/`, sorted by path. -/
 def exampleFiles : IO (Array System.FilePath) := do
   let mut fs := #[]
@@ -547,25 +551,6 @@ def descSweepLib : IO Unit := do
   unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
   check (n > 700) s!"only {n} cases"
 
-/-- The Desc sweep on each alternative backend of `lib/` (`Tests.Elab.libApart`), loaded
-with every other module except the backends it replaces (`Tests.Elab.libSourceExcept`).
-Its reference family (`Scry.Egraph`) declares the same top-level names, so the two cannot
-be imported into one program. -/
-def descSweepApart : IO Unit := do
-  let loader ← Tests.Elab.libLoader
-  let ms ← Tests.Elab.libModuleNames
-  let mut seenApart : List (List String) := []
-  for (m, skip) in Tests.Elab.libApart do
-    if seenApart.contains skip then continue
-    seenApart := skip :: seenApart
-    check (ms.contains m) s!"{m} is not a module of lib/"
-    let st := runFrontend (R := ZeroOneMany) (← Tests.Elab.libSourceExcept skip) { trustedModule := Tests.libModule, loader }
-    unless st.messages.all (·.severity != .error) do
-      throw (IO.userError s!"lib/ with {m} (without {skip}) has errors")
-    let (n, bad) := hypsMismatches st.globals
-    unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
-    check (n > 0) s!"{m}: no descriptions were compared"
-
 /-- The examples that deliberately show an error (their `.expected` golden holds it):
 `procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
 sweep below treats an error in any other example as a failure, and an allow-listed file
@@ -578,6 +563,7 @@ cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: 
 is a decision, not a way to hide a failure. -/
 def descSweepSkips : List String :=
   [ "examples/closed-table-bench.wiz"
+  , "examples/hdl-crc-link.wiz"
   , "examples/hdl-sim-bench.wiz"
   , "examples/hdl-verified-full.wiz"
   , "examples/hdl-verified-native.wiz"
@@ -1018,23 +1004,9 @@ def group : Group where
     { name := "a recursive call in every alternative of a match is computed once per element (C7)", run := fun _ => do
         let _ ← within 30 1000 fun _ => elabOk (matchAltsProgram 200)
         pure () },
-    -- (P2) the direct hypotheses are the template's, on every description of the library
-    -- and the examples, and on stuck descriptions (where the direct one falls back)
-    -- (split into the parts below, so that they can run in different shards: see
-    -- `descSweepLib`, `descSweepApart`, `descSweepExamples`)
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
-        descSweepLib },
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (each alternative backend loaded on its own)", run := fun _ =>
-        descSweepApart }] ++
-    (List.range descExampleChunks).map (fun k => ({
-        name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
-          descSweepExamples k } : Case)) ++ [
-    { name := "the Desc sweep honours every example's `-- test:` marker, --trust-native and import_c", run := fun _ =>
-        descSweepModes },
-    { name := "the Desc sweep's classification branches are each exercised by a fixture", run := fun _ =>
-        descSweepFixtures },
-    { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
-        descSweepPartition },
+    -- (P2) the Desc sweep is the separate group `descGroup` below: its cases are
+    -- independent, so `--jobs` can run them together without putting a wall-clock-sensitive
+    -- `scaling` case in the same pool.
     -- (P3) a universe-polymorphic definition unfolds at the cached levels (0, 1, 2) and at
     -- others alike, and a wrong statement at a cached level is still rejected
     { name := "a polymorphic definition unfolds the same at cached and uncached levels", run := fun _ => do
@@ -1094,6 +1066,30 @@ def group : Group where
         let st := runFrontend (R := ZeroOneMany)
           "import Prelude\ndef w (h : Nat → Nat × Nat) (k : Nat × Nat → Type) (x : k (h 0)) : k (h 1) := x\n" { loader }
         check (st.messages.any (·.severity == .error)) "two different stuck pairs were taken as equal" }]
+
+/-- The Desc sweep: the direct induction hypotheses are the template's on every description
+of `lib/` (once with every module imported, once per alternative backend loaded on its
+own) and on the examples, in `descExampleChunks` cases, plus the check that the example
+chunks cover every example exactly once. The nine cases read the same library but write
+nothing and share no fixed path, and none of them asserts on wall time, so `parallel`
+lets a shard run them `--jobs N` at a time. It was the long tail of the `scaling` group
+(1330 s measured in `.github/test-timings.json`) with no way to use the shard's jobs. -/
+def descGroup : Group where
+  name := "desc-sweep"
+  exercise := "the Desc sweep: induction hypotheses over lib/ and examples/"
+  parallel := true
+  cases := [
+    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
+        descSweepLib }] ++
+    (List.range descExampleChunks).map (fun k => ({
+        name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
+          descSweepExamples k } : Case)) ++ [
+    { name := "the Desc sweep honours every example's `-- test:` marker, --trust-native and import_c", run := fun _ =>
+        descSweepModes },
+    { name := "the Desc sweep's classification branches are each exercised by a fixture", run := fun _ =>
+        descSweepFixtures },
+    { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
+        descSweepPartition }]
 
 
 /-! ### A probe (`tests --probe-checker [unbox] [rc]`): where building the self-hosted checker spends
@@ -1158,13 +1154,7 @@ of every definition of each `lib/` module, and of the self-hosted checker and co
 def probeReuse : IO UInt32 := do
   let loader ← Tests.Elab.libLoader
   let mut failures := 0
-  let mut mods : Array String := #[]
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then mods := mods.push (e.path.fileStem.getD "")
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then mods := mods.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
-  for m in mods.qsort (· < ·) do
+  for m in ← Tests.Elab.libModuleNames do
     let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
     let mine := st.globals.order.toList.filter fun n =>
       st.globals.declModule[n]? == some m && ((st.globals.find? n).bind (·.value)).isSome
@@ -1187,8 +1177,11 @@ def probeReuse : IO UInt32 := do
 
 /-- This module's test groups, which `Tests/Main.lean` runs: one per line, in sorted
 order, so that branches adding groups rarely touch the same lines. A new group also
-needs a shard in `.github/test-shards.json` (CI checks). -/
+needs a selector in a shard's list in `.github/test-shards.json` (or an entry in
+`.github/test-shard-exclusions.json` that says why it runs nowhere); `check-shards`
+fails when it has neither. -/
 def groups : List Group :=
+  descGroup ::
   group ::
   []
 

@@ -162,7 +162,7 @@ def group : Group where
           "#eval DecidableEq.decide (Option.some 2) (Option.some 2)\n" ++
           "#eval DecidableEq.decide (List.cons 1 List.nil) (List.cons 2 List.nil)\n" ++
           "def cmp (a b : Status) : Bool := DecidableEq.decide a b")
-          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
+          [ ".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
     -- (a tuple literal in inference position) The kernel cannot infer the type of a pair,
     -- only check one against a `Σ`, and the projection (`(a, b).2`) infers its scrutinee:
     -- `inferTuple` now writes the `ann` the self-hosted frontend already wrote, so the
@@ -181,7 +181,36 @@ def group : Group where
           "def toStore (n : Nat) : Store Nat Nat := (n, fun x => x)\n" ++
           "def projViaHelper (n : Nat) : Nat := (toStore n).2 n\n" ++
           "def P : Prop := (n : Nat) → (n, fun x => x).2 n = n\n" ++
-          "def p : P := fun n => rfl") }
+          "def p : P := fun n => rfl") },
+    -- `match h : e with`: the equation in an inferred match, and in a tactic's goal
+    { name := "the equation of a match is a tactic hypothesis", run := fun _ =>
+        okLib "import Prelude
+def isZero (n : Nat) : Bool := match n with
+  | 0 => .true
+  | _ => .false
+def f (b : Bool) : Bool := match b with
+  | .true => .true
+  | .false => .false
+def g (n : Nat) : Bool := f (isZero n)
+def gEq (n : Nat) : g n = isZero n :=
+  match h : isZero n with
+  | .true => by unfold g; rw h; rfl
+  | .false => by unfold g; rw h; rfl
+" },
+    { name := "a named match can be inferred", run := fun _ =>
+        okLib "import Prelude
+def inferred (n : Nat) :=
+  match h : n with
+  | 0 => Nat.zero
+  | _ => Nat.succ Nat.zero
+def usesInferred (n : Nat) : Nat := inferred n
+" },
+    { name := "a match cannot name its equation twice (the second name is reported)", run := fun _ =>
+        fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n m : Nat) : Nat :=\n  match h : n, h : m with\n  | _, _ => .zero\n"
+          "6:16: error: the equation hypothesis 'h' is named twice" },
+    { name := "the equation's name belongs before the scrutinee, not in a pattern", run := fun _ =>
+        fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n : Nat) : Nat :=\n  match h : n with\n  | h : .zero => .zero\n  | _ => .zero\n"
+          "7:5: error: a pattern is expected here" }
   ]
 
 builtin_initialize registerGroup group

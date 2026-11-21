@@ -212,11 +212,18 @@ end)
 test("LSP keymaps: 'auto' leaves 0.11+ to Neovim, false never maps", function()
   local lsp = require 'wiz.lsp'
   local buf = vim.api.nvim_create_buf(false, true)
+  -- (`maparg` reads the current buffer; a wiz buffer has Neovim's own `K` from
+  -- `vim.lsp`, so ask about the scratch buffer the plugin was given)
+  local function mapped()
+    return vim.api.nvim_buf_call(buf, function()
+      return vim.fn.maparg('K', 'n')
+    end)
+  end
   lsp.keymaps(buf, false)
-  eq('', vim.fn.maparg('K', 'n'), 'false')
+  eq('', mapped(), 'false')
   if vim.fn.has 'nvim-0.11' == 1 then
     lsp.keymaps(buf, 'auto')
-    eq('', vim.fn.maparg('K', 'n'), 'auto on 0.11+')
+    eq('', mapped(), 'auto on 0.11+')
   end
   vim.api.nvim_buf_delete(buf, { force = true })
 end)
@@ -251,11 +258,11 @@ if vim.fn.executable(wiz) ~= 1 then
   io.stdout:write('  (skipped: ' .. wiz .. ' is not executable)\n')
 else
   local iv = require 'wiz.infoview'
-  local function at(line, col)
+  local function at(line, col, timeout)
     vim.api.nvim_win_set_cursor(0, { line, col })
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = 0 })
     iv.update_now()
-    wait(20000, function()
+    wait(timeout or 20000, function()
       return iv.idle() and iv.state.src and iv.state.src.position.line == line - 1
         and iv.state.src.position.character == col
     end, 'the infoview')
@@ -269,6 +276,27 @@ else
     end
     error(('no line %q in the infoview:\n%s'):format(s, table.concat(lines, '\n')), 2)
   end
+
+  test('widget items: a title and the browser pointer; an unknown kind does not crash', function()
+    local b = iv.layout(nil, nil, nil, nil, { items = {
+      { kind = 'widget', title = 'plot: Sales' },
+      { kind = 'widget', title = vim.NIL }, -- a JSON null title is not a string
+      { kind = 'mystery', title = 'something else' },
+      {}, -- no kind, no title
+      vim.NIL, -- a null item is skipped, not fatal
+      { kind = 'message', text = 'a message' },
+    } })
+    has(b.lines, 'Widgets')
+    has(b.lines, 'plot: Sales (open the browser infoview to draw it)')
+    has(b.lines, 'widget (open the browser infoview to draw it)')
+    has(b.lines, 'Info')
+    has(b.lines, 'something else')
+    has(b.lines, 'Messages')
+    has(b.lines, '  a message')
+    for _, l in ipairs(b.lines) do
+      eq(nil, l:find('WIZ_WIDGET:', 1, true), 'the widget payload is not shown')
+    end
+  end)
 
   test('the server starts on a wiz file and the infoview opens', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(fixture))
@@ -371,6 +399,26 @@ else
       vim.wait(200, iv.idle)
       return vim.tbl_contains(iv.lines(), '⊢ Nat → Nat')
     end, 'the new goal')
+  end)
+
+  test('a #plot widget: its title and the browser pointer, not the SVG payload', function()
+    local widget = here .. '/fixture/Widget.wiz'
+    vim.cmd('edit ' .. vim.fn.fnameescape(widget))
+    wait(30000, function()
+      return require('wiz.lsp').client(0) ~= nil
+    end, 'the wiz client of the widget fixture')
+    -- (#plot runs the widget renderer: the first elaboration of the fixture is slow)
+    local lines = at(5, 7, 120000) -- `chart` in `#plot chart`
+    has(lines, 'Widgets')
+    local title
+    for _, l in ipairs(lines) do
+      if l:find('^plot: Sales', 1) then
+        title = l
+      end
+      eq(nil, l:find('WIZ_WIDGET:', 1, true), 'the widget payload is not shown')
+    end
+    eq(true, title ~= nil and title:find('(open the browser infoview to draw it)', 1, true) ~= nil,
+      'the widget title and the pointer:\n' .. table.concat(lines, '\n'))
   end)
 
   test('the browser infoview: <LocalLeader>b and :WizInfoviewBrowser ask the server to listen', function()

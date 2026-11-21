@@ -43,39 +43,22 @@ always reviewed in the diff and never passes silently.
 `lower/lambda.cs` is a port of Joern's `csharpsrc2cpg` `LambdaTests` fixture. It is a
 **characterization case for a known gap**, not a claim of support: the golden records
 what scry does today, and the case is then reported as skipped with the gap as its
-reason. When the gap is fixed the golden changes, the case fails, and both the golden
-and the skip must be updated (see `.github/skip-allowlist.json`). Joern's
-`TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed on this
-branch, so it is an ordinary lowering case (lowered as `<stem>.Main`).
+reason. A lambda assigned to a local or field and invoked in the same method is now
+lowered inline (so `Run`'s `Process.Start` is in the program); the gap that remains is a
+lambda passed to a callee whose call site is unknown (`Select` here), which is still an
+opaque `fnptr` plus a warning. When that gap is fixed the golden changes, the case fails,
+and both the golden and the skip must be updated (see `.github/skip-allowlist.json`).
+Joern's `TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed, so it
+is an ordinary lowering case (lowered as `<stem>.Main`).
 -/
 
 open Wiz
 
 namespace Tests.ScryCSharp
 
-/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
-def loader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
-
-/-- A Wiz string literal for `s`. -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+by module name: one loader for the suite (`Tests.scryLoader`). -/
+def loader : IO (Name → Option String) := Tests.scryLoader
 
 /-- Undo `#eval`'s quoting of a string result (`"…"` with `\"`, `\\`, `\n`, `\t`). -/
 def unquote (s : String) : String := Id.run do
@@ -135,9 +118,10 @@ def fixtures : List (String × String) :=
    ("lower", "unicode"), ("lower", "expansions"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
-   ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
+   ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe"), ("taint", "cwe78-await-unsafe"),
+   ("taint", "cwe78-lambda-unsafe"), ("taint", "cwe78-bcl-unsafe"),
    ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
@@ -195,6 +179,7 @@ def requiredWarnings : List (String × String) :=
    ("unsupported", "delegate_declaration not modelled"),
    ("unsupported", "local function Local not modelled"),
    ("unsupported", "lambda body not lowered"),
+   ("unsupported", "passed to Demo.Unsupported.Control.Apply"),
    ("unsupported", "lock_statement not modelled"),
    ("unsupported", "goto_statement not modelled"),
    ("unsupported", "labeled_statement not modelled"),
@@ -376,8 +361,7 @@ def repoCoverage : IO Unit := do
     "#eval String.intercalate \"|\" (List.map (fun r => Scry.Severity.show r.level ++ \" \" ++ Nat.repr r.count ++ \" \" ++ r.construct) repoReport.coverage)\n")
   checkEq
     ("error 1 parse failure"
-     ++ "|warning 1 lambda body not lowered: an opaque function value"
-     
+     ++ "|warning 1 lambda body not lowered: assigned to local twice but never invoked in this method, so its call site is unknown"
      -- Equal severity and count sort by construct name: "unknown…" < "unmodelled…".
      ++ "|warning 1 unknown name not modelled: havoc"
      ++ "|warning 1 unmodelled-external"
@@ -482,10 +466,10 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
-    { name := "known gap: lambda bodies are opaque function values (Joern lowers them as methods)",
+    { name := "known gap: a lambda passed to an unknown callee keeps its body out of the program",
       run := fun _ => do
         lowerGolden "lambda"
-        skip "known gap: lambda bodies are an opaque fnptr and its body is not in the program; Joern's LambdaTests lowers each lambda as a method" },
+        skip "known gap: a lambda passed to an unknown callee (Select) is an opaque fnptr; a lambda assigned to a local and invoked in the same method is lowered inline" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"
@@ -568,7 +552,15 @@ def group : Group where
     { name := "taint: CWE-78 across an await (the awaited Task<T> value reaches the setter sink)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-await-unsafe"
-        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
+        checkEq ["command-injection Fixtures.AsyncShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs },
+    { name := "taint: CWE-78 through an invoked lambda (captured value and a sink in the body)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-lambda-unsafe"
+        checkEq ["command-injection Fixtures.LambdaShell.Run System.Diagnostics.Process.Start arg 0"] fs },
+    { name := "taint: CWE-78 through a modelled BCL call (Process.get_StartInfo -> set_Arguments)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-bcl-unsafe"
+        checkEq ["command-injection Fixtures.BclShell.Run System.Diagnostics.ProcessStartInfo.set_Arguments arg 1"] fs }
   ]
 
 builtin_initialize registerGroup group

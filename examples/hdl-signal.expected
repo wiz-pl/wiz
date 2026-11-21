@@ -1,11 +1,11 @@
-examples/hdl-signal.wiz:44:1: info: .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))
-examples/hdl-signal.wiz:45:1: info: .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 (.cons 8 (.cons 9 .nil)))))))))
-examples/hdl-signal.wiz:54:1: info: .cons 7 (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 .nil)))))
-examples/hdl-signal.wiz:56:1: info: .cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 0 (.cons 4 .nil)))))
-examples/hdl-signal.wiz:58:1: info: .cons 7 (.cons 7 (.cons 7 (.cons 2 (.cons 3 (.cons 4 .nil)))))
-examples/hdl-signal.wiz:75:1: info: .cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))
-examples/hdl-signal.wiz:76:1: info: .cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))
-examples/hdl-signal.wiz:87:1: info: .cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))
-examples/hdl-signal.wiz:88:1: info: .cons 0 (.cons 2 (.cons 4 .nil))
-examples/hdl-signal.wiz:108:1: info: .cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 (.cons 0 .nil)))))))))
+examples/hdl-signal.wiz:44:1: info: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+examples/hdl-signal.wiz:45:1: info: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+examples/hdl-signal.wiz:54:1: info: [7, 0, 1, 2, 3, 4]
+examples/hdl-signal.wiz:56:1: info: [0, 0, 0, 2, 0, 4]
+examples/hdl-signal.wiz:58:1: info: [7, 7, 7, 2, 3, 4]
+examples/hdl-signal.wiz:75:1: info: [1, 2, 3, 4, 5]
+examples/hdl-signal.wiz:76:1: info: [0, 0, 0, 1, 0]
+examples/hdl-signal.wiz:87:1: info: [0, 0, 0, 1, 0]
+examples/hdl-signal.wiz:88:1: info: [0, 2, 4]
+examples/hdl-signal.wiz:108:1: info: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0]
 examples/hdl-signal.wiz:109:1: info: 10

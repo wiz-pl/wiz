@@ -1,0 +1,35 @@
+import FeralCore
+import Feral
+-- Inline contracts: a function's `requires`/`ensures` clauses sit between its binders
+-- and its result type (L18), and become a `def f.Spec` next to the lowered `fn`.
+-- Hand-lowered: drafts/feral/lowered/13_contracts.wiz
+
+feral
+  fn idf (a : U64)
+    requires (True)
+    ensures (result = a)
+  : U64 := a
+
+  fn bump {'a} (x : &'a mut U64) (step : U64)
+    requires (Nat.lt x.val 100 = .true)
+    ensures (final(x).val = Nat.add old(x).val step.val)
+    ensures (result = final(x))
+  : U64 := {
+    *x := *x + step;
+    *x
+  }
+end
+
+-- the clauses are a proposition, and a true one is proved in Wiz
+def idf_ok (a : U64) : idf.Spec a := fun _ => rfl
+#check @bump.Spec
+
+#eval Result.map (fun (u : U64) => u.val) (idf (U64.lit 7))
+-- .ok 7
+
+def run (n : Nat) : Result (Nat × Nat) :=
+  match Uniq.borrow Region.static (U64.mk n) (fun ρ h l r => bump r (U64.mk 2)) with
+  | .ok p => .ok (U64.toNat p.1, U64.toNat p.2)
+  | .err e => .err e
+#eval run 5
+-- .ok (7, 7)

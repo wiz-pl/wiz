@@ -449,6 +449,11 @@ def checkGuessedDecl (info : SourceInfo) (name : Name) (ty : Term R) (val : Opti
         throw { info, msg := s!"a hole solved by shape takes a private type for a look-alike; with the definition hidden: {e}",
                 code := ErrorCode.private_ }
 
+/-- Does the syntax contain a named match (`match h : e with`)? Those need their
+expected equation kept as written, below. -/
+partial def hasNamedMatch (stx : Syntax) : Bool :=
+  stx.isOfKind "match.scrut" || stx.args.any hasNamedMatch
+
 /-- Elaborate the header and body of a `def` or `axiom` to closed, zonked terms. -/
 def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : Option Syntax)
     (info : SourceInfo) (declName? : Option (Name × SourceInfo × Nat) := none)
@@ -474,7 +479,8 @@ def elabDeclTerms (binders : Array Syntax) (typeStx : Option Syntax) (valStx : O
   -- definition instead. (Only the instance holes, `zonkInsts`: the other holes stay, so
   -- the equation stays as written, as above.)
   let ty ← if (← get).pendingInsts.isEmpty then zonkInsts ctx.lvl ty else pure ty
-  let val ← valStx.mapM fun s => do Elab.check ctx s (← evalIn ctx ty)
+  let val ← valStx.mapM fun s => do
+    Elab.check ctx s (← if hasNamedMatch s then evalExpected ctx ty else evalIn ctx ty)
   let ty := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
   let val := val.map fun v => tele.foldr (fun (x, _, _, _) b => Term.lam x b) v
   solveSortConstraints
@@ -753,7 +759,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   let n := (clauses.head?.map (·.pats.length)).getD 0
   -- introduce `n` arguments of the type
   let mut ctx' := ctx
-  let mut tyv ← evalIn ctx ty
+  let mut tyv ← if clauses.any fun c => hasNamedMatch c.rhs then evalExpected ctx ty else evalIn ctx ty
   let mut vars : List Lvl := []
   let mut names : List Name := []
   let mut colExplicit : List Bool := []
@@ -783,17 +789,35 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
     | [] => xs
   let params := (tele.filterMap fun (x, bi, _, _) => if bi == .default then some x else none).toList
   let allParams := (tele.map fun (x, bi, _, _) => (x, bi == .default)).toList
-  let rc : Option RecCtx := if recursive then some { fn := name, params, pos, cols := n, allParams, colExplicit } else none
+  -- (fixed-params) a parameter before the colon that a recursive call changes is not
+  -- fixed: it is elaborated as if it were after the colon, i.e. the motive abstracts it
+  -- and the hypothesis takes its value (Lean's rule)
+  let fixedOf (ch : List (Name × Nat)) : List Name :=
+    params.filter fun p => !ch.any (·.1 == p)
+  let found := if recursive then
+      changedParams g ({ fn := name, params, pos, cols := n, allParams, colExplicit } : RecCtx) clauses
+    else []
+  let changed := params.zipIdx.filterMap fun (p, i) => if found.any (·.1 == p) then some (p, i) else none
+  let rc : Option RecCtx := if recursive then
+    some { fn := name, params := fixedOf changed, pos, cols := n, allParams, colExplicit, changed }
+    else none
   if let some x := vars.head? then recordMatch cmd.info alts clauses ctx'.types[ctx'.lvl - x - 1]! ctx'.types.reverse.toArray
   -- a recursive definition whose first argument has a size-variable size: compile to `sfix`
-  if rc.isSome && pos == 0 then
+  if rc.isSome && pos == 0 && changed.isEmpty then
     if let some x0 := vars.head? then
       if let .mu _ _ _ _ (.neutral (.local si) #[]) _ _ ← force ctx'.types[ctx'.lvl - x0 - 1]! then
         if si < ctx.lvl then
           let (t, v) ← elabSizedDef name cmd ctx tele ty si clauses
           return (t, v, none)
-  let clauses := clauses.map fun c => { c with pats := perm c.pats }
-  let body ← compileMatch ctx' (perm vars) clauses tyv rc true
+  -- (fixed-params) the changed parameters join the matched arguments (after them): the
+  -- motive reverts them, and the recursor is applied to their value, so that a recursive
+  -- call passes a new one to the hypothesis. A telescope binder `i` is at level `i` (the
+  -- telescope is the context's first `tele.size` binders).
+  let changedLvls : List Lvl := changed.map fun (p, _) =>
+    ((tele.toList.zipIdx.find? fun ((x, _, _, _), _) => x == p).map (·.2)).getD 0
+  let changedPats : List Syntax := changed.map fun (p, _) => .node {} "term.ident" #[.ident {} p]
+  let clauses := clauses.map fun c => { c with pats := perm c.pats ++ changedPats }
+  let body ← compileMatch ctx' (perm vars ++ changedLvls) clauses tyv rc true
   solveSortConstraints
   let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) (names.foldr .lam body)
   let fullTy := tele.foldr (fun (x, bi, q, a) b => Term.pi x bi q a b .hole) ty
@@ -807,7 +831,7 @@ def elabDefEqns (name : Name) (cmd : Syntax) (isPartial : Bool := false) :
   -- index variable escapes into a method (`indexEscapes`): compiled code runs the value
   let g ← getGlobals
   let us := (← get).levelParams.map Level.param
-  let impl := if rc.isNone || indexEscapes g val then none
+  let impl := if rc.isNone || !changed.isEmpty || indexEscapes g val then none
     else deriveImpl g name us tele.size names.length pos val
   checkGuessedDecl info name fullTy (some val)
   pure (fullTy, val, impl)
@@ -3019,25 +3043,111 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       let t ← zonk 0 t
       ensureNoMVars t cmd.info
       pure t
+    -- `Repr`: when the value's type has a `Repr` instance (lib/Deriving.wiz), run
+    -- `Repr.repr e` instead of reading the value back as a term, so `#eval [1, 2, 3]`
+    -- prints a list literal. The wrapper is elaborated in its own run; if there is no
+    -- instance (or no `Repr` class in scope) the old readback path is used.
+    let reprStx : Syntax :=
+      .node {} "term.app"
+        #[.node {} "term.ident" #[.ident {} "Repr.repr"], .node {} "null" #[cmd.getArg 1]]
+    let reprTerm? : Option (Term R) :=
+      if s.globals.contains "Repr.repr" then
+        match (runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+            let (t, _) ← Elab.infer {} reprStx
+            solveSortConstraints
+            let t ← zonk 0 t
+            ensureNoMVars t cmd.info
+            pure t).1 with
+        | .ok t => some t
+        | .error _ => none
+      else none
     match r with
     | .error e => reportErr e
     | .ok t =>
       -- (the sorts pass first: the kernel checks the term erasure is given)
       let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
       let ctx : Ctx R := { globals := s.globals, proof := true }
-      let result := do
-        let (ty, _) ← Wiz.infer ctx t
-        let e ← eraseTop ctx t ty
-        let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
-        pure (ty, e, code, failed)
-      match result with
-      | .ok (_, _, _, (n, err) :: _) =>
-        -- the interpreter can't fail: running a stub would print a wrong value
-        report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
-      | .ok (ty, e, code, []) =>
-        let v := run code [] e
-        report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
-      | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let plain : StateM (CommandState R) Unit := do
+        let result := do
+          let (ty, _) ← Wiz.infer ctx t
+          let e ← eraseTop ctx t ty
+          let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+          pure (ty, e, code, failed)
+        match result with
+        | .ok (_, _, _, (n, err) :: _) =>
+          -- the interpreter can't fail: running a stub would print a wrong value
+          report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+        | .ok (ty, e, code, []) =>
+          let v := run code [] e
+          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+        | .error err => report .error cmd.info s!"cannot run this: {err}"
+      let hintOf (ty : VTy R) : Option Name := match whnf ty with
+        | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
+        | .nu _ _ _ _ _ (some (T, _, _)) => some T
+        | _ => none
+      -- Inductive types are anonymous `μ`s and `Enum` tags are metadata, so two
+      -- structurally equal types share their instances: a two-constructor enum declared
+      -- after `Bool` shadows `Repr Bool`, and the last instance wins (7b). `Bool` keeps
+      -- its constructor readback (`.true`), the stable spelling; a list of Bools still
+      -- goes through the list instance.
+      let keepReadback : Bool :=
+        match (Wiz.infer ctx t).toOption with
+        | some (ty, _) => hintOf ty == some "Bool"
+        | none => false
+      let reprRun : StateM (CommandState R) Unit := do
+        match reprTerm? with
+        | none => plain
+        | some rt => do
+          let rt := if rt.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } rt).1 else rt
+          let result := do
+            let (ty, _) ← Wiz.infer ctx rt
+            let e ← eraseTop ctx rt ty
+            let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+            pure (ty, e, code, failed)
+          match result with
+          | .ok (_, _, _, (n, err) :: _) =>
+            report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+          | .ok (_, e, code, []) =>
+            -- the Repr method returns a `String`: print its text, not the term readback
+            match (run code [] e).toString? with
+            | some text => report .info cmd.info text
+            | none => plain
+          | .error _ => plain
+      if keepReadback then plain else reprRun
+  | "command.plot" =>
+    -- `#plot expr`: elaborate the chart, then run `Plot.widget` on it and report the
+    -- `WIZ_WIDGET:` display value as a message at the command (the infoview turns such
+    -- a message into a widget item; docs/design/infoview-protocol.md).
+    let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
+      let (t, _) ← Elab.infer {} (cmd.getArg 1)
+      solveSortConstraints
+      let t ← zonk 0 t
+      ensureNoMVars t cmd.info
+      pure t
+    match r with
+    | .error e => reportErr e
+    | .ok t =>
+      if !s.globals.contains "Plot.widget" then
+        report .error cmd.info "#plot: import Plot first (the widget renderer is Plot.widget)"
+      else
+        -- (the sort of the term has already been resolved by `Elab.infer`; the app is a
+        -- plain `String`, so the readback below is the display value itself, unquoted)
+        let t := if t.hasHole then (Mark.infer { globals := s.globals, sortsOnly := true } t).1 else t
+        let ctx : Ctx R := { globals := s.globals, proof := true }
+        let term := Term.app (.const "Plot.widget" []) t
+        let result := do
+          let (ty, _) ← Wiz.infer ctx term
+          let e ← eraseTop ctx term ty
+          let (code, failed) ← compileReachableE s.globals s.builtins (e.globals.toList) (externImpls := false)
+          pure (ty, e, code, failed)
+        match result with
+        | .ok (_, _, _, (n, err) :: _) =>
+          report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
+        | .ok (_, e, code, []) =>
+          match (run code [] e).toString? with
+          | some text => report .info cmd.info text
+          | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
+        | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap
     let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do

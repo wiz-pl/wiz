@@ -154,7 +154,7 @@ def examplesGroup : Group where
         (fun f => f < "examples/hdl") ["examples/closed-table-bench.wiz"]
     , examplesCase "examples/hdl*: the HDL examples, including the large netlist goldens"
         (fun f => f < "examples/import_c" && !(f < "examples/hdl"))
-        ["examples/hdl-sim-bench.wiz", "examples/hdl-verified-full.wiz",
+        ["examples/hdl-crc-link.wiz", "examples/hdl-sim-bench.wiz", "examples/hdl-verified-full.wiz",
          "examples/hdl-verified-native.wiz"]
     , examplesCase "examples/ from import_c: the library, Scry, Rune and Pervasive examples"
         (fun f => !(f < "examples/import_c"))

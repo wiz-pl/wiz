@@ -10,6 +10,128 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* elab: a named `match h : e` inside a definition whose result is an equation keeps the
+  equation as written while its branches are checked. The declared type used to be
+  evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
+  match could not abstract the equation's sides and its own equation
+  (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
+  matches now see both equations; added the computed-goal nested case, an
+  independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
+* language: a parameter before the colon is **fixed only if no recursive call changes
+  it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
+  count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
+  unchanged"); a changed parameter is now elaborated as if it were after the colon, so
+  the motive abstracts it and the induction hypothesis takes its value. A parameter no
+  call changes is still checked (also in `@f` form). `lib/Prelude.wiz`'s
+  `Syntax.decPowersGo` and `Syntax.decDigitGo` are accepted as written, with their
+  accumulators before the colon. Tests: `language` ("a parameter before the colon that a
+  recursive call changes is elaborated after it").
+* web: the infoview has a **widget host** (`web/widgets.js`). It parses the Loom
+  `wiz.widget/1` payload (`WIZ_WIDGET:`), draws the `#plot` producer's inline
+  `image/svg+xml`/`text/html` figure and the scry analysis's claim/findings card, and
+  shows each card's title, kind and summary. Payload markup is parsed into a checked tree
+  and rebuilt with DOM nodes, never `innerHTML`: scripts, styles, event handlers,
+  `href`/`src`/`style`, `url(...)` and all elements/attributes outside a small allowlist
+  are refused, and a refused or unknown kind falls back to a card naming it. The
+  standalone page's widget pane is a grid child beside the editor and the goals, and
+  the playground keeps the same grid under `Widgets` in the goals panel; both layouts
+  keep a wide plot scrolling in its own column. `Scry.analysisDisplay` now carries
+  `kind`, `mimeType`, `title` and `summary` beside its `scry.analysis/1` extension.
+  Tests: `web/widgets_test.mjs` (fixtures, safety, fallback, DOM mount),
+  `web/playground_lsp_test.mjs` (the payloads through the stubbed LSP transport), and
+  the `=scry-analysis` fields.
+* hdl: **formal harness emission** (`lib/Hdl/Formal.wiz`). `Verilog.emitFormal` appends
+  an `` `ifdef FORMAL `` harness to `Verilog.emit`'s module: named monitors become
+  immediate `assert`/`assume`/`cover` statements clocked by the design, with `$past`,
+  `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
+  assumption. The non-formal text is byte-identical to `Verilog.emit`, and
+  `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
+  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
+  finds a counterexample for the second.
+* web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
+  lines) now only points at the body and calls `web/framework/mount.js`'s one export,
+  which loads the Loom page's module (`web/playground-ui.wiz`), mounts its SSR, delegates
+  DOM events and exposes the browser capabilities the runtime cannot reach itself
+  (clipboard, download, `localStorage`, URL, animation frames, resize). The examples
+  menu and its data moved into the runtime (`lib/Web/Examples.wiz`,
+  `lib/Web/Playground.wiz`'s `Page`), so the page no longer knows an example exists. The
+  static hand-written page and the `?ui=loom` switch are gone; if the runtime cannot
+  start, the mount point shows a plain-text reason instead of a second UI. Production
+  page JavaScript is 4,937 lines (4,746 plus the 191-line mount contract), down from
+  5,135. The static page's Share/Save/Reset/Clear controls went with it; share links,
+  drafts, file save and clear return as runtime messages plus host calls in the next
+  stage (`docs/notes/loom-thin-js.md`, stage 3).
+* web: the playground's **state format and effect protocol are the runtime's**
+  (stage 3). `lib/Web/Draft.wiz` owns the URL fragment and `localStorage` draft
+  encoding (UTF-8, base64url, percent-encoded parameters, the versioned JSON draft) and
+  the initial-state precedence (link, draft, default); `web/playground-state.js` is
+  deleted and its cases moved to `lake test -- '=loom'`. The six `wiz_loom_*` effect
+  exports are one `wiz_loom_effect (state) kind a b`; the runtime's effects are a JSON
+  request list (`wiz_loom_requests`) that `web/framework/mount.js` hands to the page's
+  `onRequest`, and the page acknowledges each. Share, Save, Reset and Clear are runtime
+  toolbar buttons again (the page does `clipboard`/`download`/`url`/`storage`).
+  Production page JavaScript is **4,606** lines (4,380 `web/*.js` + the 226-line mount
+  contract), down from 5,135; `web/framework/examples.mjs` and `values.mjs` are test
+  oracles now, not served.
+* web: the playground's **keyboard and editor overlays are the runtime's** (stage 4).
+  `Web.Loom`'s `onPrevent` marks a handler whose default action the runtime decides
+  (`data-wiz-prevent-EVENT`, then `wiz_loom_consume` after the step), so the editor's
+  `keydown` prevents only Ctrl/⌘+Enter (run) and Ctrl/⌘+S (save) and never swallows
+  typing. The squiggle layer no longer wraps the textarea — it is the editor section's
+  last child, so Loom's child-index patch paths stay valid — and both overlays are back
+  on the page; the shared overlay CSS is `web/overlays.css`, and
+  `web/loom_overlay_test.mjs` pins the two overlays against the patch paths.
+* web: the **goals pane, the standalone infoview and the hover card are Loom apps**
+  (stage 5). `lib/Web/Goals.wiz` renders the pane (status, hint, goals, expected type,
+  term tree, diagnostics, selected subterm, widgets) and its clicks are messages that
+  ask the page for a source `reveal`, a `subterm` or a `reconnect`;
+  `lib/Web/Hover.wiz` owns the hover contents, Markdown lines and definition label, with
+  `web/hover.js` left as timers, caret and card position. The playground's `Page` embeds
+  the pane; the standalone `web/infoview.html` mounts `wiz-infoview-ui.mjs`
+  (`lib/Web/InfoviewPage.wiz`) on the body, keeping only the URL rule, the socket and the
+  caret, and no longer imports `editor-model.js`. `web/goals.js` and the pure half of
+  `web/hover.js` are test oracles now (`web/framework/{goals,hover}.mjs`).
+* web: the **docs pages' search and live panel are Loom apps** (stage 6).
+  `lib/Web/Search.wiz` ranks names, doc comments and signatures and draws the hits;
+  `web/scroll-search.js` keeps the input and Enter/Escape and mounts `wiz-docs-ui.mjs`.
+  `lib/Web/DocLive.wiz` draws the live panel (hover Markdown, goals, expected type,
+  diagnostics); `web/doc-live.js` keeps the source fetch, the socket and the pin, and
+  mounts `wiz-doc-live-ui.mjs`. `web/tagged.js` is deleted; `wiz doc` copies both
+  runtimes and `framework/` into the site. Production page JavaScript after the merge is
+  **3,906** lines (3,278 `web/*.js` + the 628-line browser half), down from 5,135; the
+  stage 5–6 plan targets (2,570/2,144) are not reached — the editor rules moved in
+  `loom-edit`, but the stage-7 shim (`selfhost-lsp-shim.js`, 669), `lsp-client.js`
+  (480) and the overlay paint modules (`completions.js` 361, `squiggles.js` 235)
+  remain.
+* web: the editor's **rules are the runtime's, and Tab edits through the host**
+  (the editor remainder). `lib/Web/EditorModel.wiz` owns UTF-16 positions, squiggle
+  spans, completion filter/order/insert and Tab's indent; the page asks for one answer
+  at a time through `mount`'s new `ask` (`wiz_loom_editor_*`), and
+  `web/squiggles.js`/`web/completions.js` only paint. `web/editor-model.js` moved to
+  `web/framework/editor-model.mjs` as the test oracle (nothing in production imports
+  it). `host.edit({ insert, from, to })` is the new text-input capability; the driver
+  carries a text field's selection with a keydown, `Page.key` computes the indent, and
+  the page applies it and reports the new selection. The real-page overlay regression
+  test (`web/playground_page_test.mjs`) applies a text patch after mounting the layer and
+  requires the textarea's live value and child-index path to hold. On `loom-edit`,
+  production page JavaScript is **4,467** (4,149 `web/*.js` + the 318-line mount
+  contract), against the stage-4 target 3,733; the remainder is the mirror, the popup
+  and the measured style copy, not rules. After the merge with stages 5–6 it is 3,906.
+
+* **Application operators, pipe projections, sections, and `#eval` through `Repr`
+  (13w).** `f <| x` (`apply`, `infixr:10`) joins `x |> f` (`pipe`, `infixl:10`);
+  `x |>.f` is the same projection as `x.f`, nested paths included; `(· + 1)`,
+  `(1 + ·)` and `(· * ·)` are lambdas whose parameters come from the expected type
+  (`List.map (· + 1) xs`). `#eval` now runs `Repr.repr` when the value's type has a
+  `Repr` instance, so `[1, 2, 3]` prints as a list literal instead of `List.cons …`;
+  types without an instance keep the term readback, `Bool` keeps `.true`/`.false`
+  (structurally equal enums share `Repr` instances, so its readback is the stable
+  spelling), and `#check`/`#print` are unchanged. `Repr String` escapes as the lexer
+  reads, and `Repr (List A)` is hand-written (it is no longer derived).
+  `lib/Compose.wiz` adds `class Compose`
+  with `g ∘ f` (`infixr:90`), a function instance, and the definitional laws
+  `Compose.assoc`, `Compose.id_left`, `Compose.id_right`.
 * web: the playground's **in-page** server answers `textDocument/completion`,
   `textDocument/hover` and `textDocument/definition` from the check's own index, in the
   shapes the external server uses: a `CompletionList` whose items carry a `textEdit`
@@ -35,8 +157,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`web/completions.js`) on Ctrl-Space or while typing, inserting a `textEdit`/`insertText`
   through the normal `input` path. `?squiggles=off` and `?completions=off` disable them.
   The overlays and the hover card are mounted by `web/playground-lsp.js`, so they work
-  on both the static page and the `?ui=loom` app. `docs/playground-lsp.md` documents
-  both.
+  on the playground page (one Loom app). `docs/playground-lsp.md` documents them.
 * **Implicit binder quantities (rule (b), the language decision of 2026-11-16; #397).** A
   binder with no written quantity is `0` only when its type is a sort or a proposition
   (`{A : Type}`, `{P : Prop}`); every other implicit — including a bare data index
@@ -228,6 +349,25 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   parse of all 5 560 `.cs` files of a real solution takes the error count from 16 to 0 with no file
   gaining an error. The two reproducers now have spills, `parse/contextual` pins the
   tree shape, and `scry/CSHARP.md` §8.2 keeps the before/after list.
+* scry: **one e-graph engine**. `Scry.Egraph` and `Scry.EgraphNative` were two
+  implementations that shared 74 of the reference module's 80 declarations and could not
+  be imported into one program. `Scry.Egraph` is now the single engine: the reference
+  surface (`Scry.EGraph`, `costs : U64Array` with `EGraph.inf`, `applyAt`/`applyMatches`
+  without a rule index) on the native hash cons (`etable` is a `U64Map` from an e-node
+  hash to a bucket), plus the analyses, explanations, limits and `Option` cost view
+  (`costsOpt`/`costOpt`) that used to live only in the native module. `Scry.EgraphNative`
+  is a compatibility import of `Scry.Egraph`; `Scry.EqPlan` and the examples that named
+  it are unchanged, and every `examples/scry-egraph-*.wiz` digest is identical. `add` and
+  `rebuild` no longer scan a flat association list or append one node at a time (adding
+  1 600 nodes: 18 ms in the audit's reference measurement, 0 ms here; at 12 800 nodes
+  the old module took 501 ms to add and 4.5 s to rebuild, the unified one 3 ms and 3 ms;
+  at 25 600 nodes, 2.0 s/18.7 s against 8 ms/7 ms).
+  The difference was not only the hash cons: a record update (`{ g with … }`) leaves the
+  old record live, so `U64Array.push`/`U64Map.insert` copied the whole table; the hot
+  paths destructure and rebuild with `mk`. The trust ledger and the name-collision
+  baseline drop the duplicate rows, and the whole of `lib/` now loads at once
+  (`Tests.Elab.libApart` is empty).
+
 * tests: the anti-vacuity pass (`wiz-notes/reviews/2026-11-17-test-vacuity.md`) closed
   the test-side cases: `prop-kernels` now gates the generated normal forms (not only
   accept/reject; a normal form the Lean kernel cannot print is counted as the known
@@ -639,6 +779,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   timestamps or random ids enter the output. `examples/plot.wiz` is the tour, the `plot`
   group pins four golden SVGs (`Tests/data/plot/{bar,histogram,line,scatter}.svg`), and
   `docs/libraries.md:1979` has the API.
+* `match h : e with | p => …` names the branch's equation `h : e = p`, so a split on a
+  computed value (`match h : p n with`) can use what the split learnt; each scrutinee may
+  be named (`match h : e, k : f with`, including after an unnamed one) and the equation
+  works in a non-dependent match too. A named match on an indexed value is reported
+  rather than ill typed (4e, #254).
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

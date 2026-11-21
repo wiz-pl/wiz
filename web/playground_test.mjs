@@ -1,13 +1,17 @@
 // (11ab) The playground's Wasm module under Node: no page, no server. Calls the exported
 // `wiz_playground_eval` on a small program, reads the string back, and checks a
-// definition, one `#eval` (42, whose kernel normal form web/playground-values.js turns
+// definition, one `#eval` (42, whose kernel normal form web/framework/values.mjs turns
 // into `42`), a Bool and an error.
 //   usage: node web/playground_test.mjs OUT_DIR
 import { pathToFileURL } from "node:url";
-import { renderValue } from "./playground-values.js";
-import { findPreset, presets } from "./playground-presets.js";
-import { withPrelude } from "./playground-state.js";
-import { PositionIndex } from "./selfhost-lsp-shim.js";
+import { renderValue } from "./framework/values.mjs";
+import { findPreset, presets } from "./framework/examples.mjs";
+import { PositionIndex } from "./framework/index-oracle.mjs";
+
+// The page adds the embedded Prelude before the engine sees a source
+// (`Web.Draft.withPrelude`); the engine itself needs the import, so the test does the
+// same thing the page does.
+const withPrelude = (text) => (/^\s*import\b/m.test(text) ? text : "import Prelude\n\n" + text);
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;

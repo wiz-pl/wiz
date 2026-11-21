@@ -34,29 +34,9 @@ open Wiz
 
 namespace Tests.ScryProver
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`). -/
-def loader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
-
-/-- A Wiz string literal for `s`. -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
+/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+by module name: one loader for the suite (`Tests.scryLoader`). -/
+def loader : IO (Name → Option String) := Tests.scryLoader
 
 /-- Run `body` (after the imports) and return the `#eval` message texts. -/
 def runProbe (imports body : String) : IO (List String) := do
@@ -70,7 +50,7 @@ def runProbe (imports body : String) : IO (List String) := do
 
 def proverImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\n" ++
-  "import Scry.Interproc\nimport Scry.Prover\nimport Scry.ProverExamples\nimport Text\n"
+  "import Scry.Bounds\nimport Scry.Interproc\nimport Scry.Prover\nimport Scry.ProverExamples\nimport Text\n"
 
 /-- A fixture's C# text and its checked-in spill. -/
 def fixture (name : String) : IO (String × String) := do
@@ -218,7 +198,27 @@ def group : Group where
       run := fun _ => evalTexts
         ("#eval String.contains (Scry.Verdict.show Scry.proverScriptFailVerdict) \"script-failed\"\n" ++
          "#eval Scry.Verdict.isOk Scry.proverScriptFailVerdict\n")
-        [".true", ".false"] }
+        [".true", ".false"] },
+    { name := "the cut: a guarded write proves; an unordered, weak, unknown-capacity or unguarded write is refuted",
+      run := fun _ => evalTexts
+        ("#eval Scry.Verdict.isOk Scry.proverCutSafeVerdict\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutSafeVerdict) \"proved (every write is preceded by a check)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"does not dominate\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"guard(0,3,32,1)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnorderedVerdict) \"use(1,3,7,32,2,0)\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutWeakVerdict) \"allows register 3 up to 64\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverCutConstOkVerdict\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutConstBadVerdict) \"constant 64\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutUnknownCapVerdict) \"no statically known capacity\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutPhantomVerdict) \"no guard fact\"\n" ++
+         "#eval String.contains (Scry.Verdict.show Scry.proverCutVacuousVerdict) \"write set is empty\"\n" ++
+         "#eval Scry.Verdict.isOk Scry.proverCutUnorderedVerdict\n" ++
+         "#eval String.eq (Scry.Property.show Scry.Property.cut) \"cut (every write is preceded by a check)\"\n" ++
+         "#eval Nat.beq (List.length Scry.guardFnRows) 1\n" ++
+         "#eval match Scry.guardFnRows with\n" ++
+         "  | .cons r _ => Bool.and (Nat.beq (List.getD r 1 99) 0) (Nat.beq (List.getD r 2 99) 16)\n" ++
+         "  | .nil => Bool.false\n")
+        [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".false", ".true", ".true", ".true"] }
   ]
 
 builtin_initialize registerGroup group

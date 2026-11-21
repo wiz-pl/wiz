@@ -2,6 +2,7 @@ import Scry.PointsTo
 import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
+import Scry.Eval
 import Scry.Engine
 import Text
 /-!
@@ -514,3 +515,198 @@ def Scry.boundsFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.Rule
 def Scry.boundsWarnings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack)
     (rs : List Scry.FuncResult) : List Scry.MemWarning :=
   (Scry.boundsCheck p pt pack rs).warnings
+
+-- ## Guard and use facts for the prover's cut
+
+/-- The bounds a condition establishes on one outgoing edge, as `(var, hi)` pairs with
+the meaning `var <= hi`. This is `boundsLtProves` with the bound returned instead of a
+yes/no answer for one access; the two must agree on every condition they both accept.
+`and`-true and `or`-false distribute; the other polarities establish no bound (either
+conjunct may be the false one). -/
+def Scry.boundsCondBounds (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat)
+    (cond : Wil.Cond) (isTrue : Bool) : List (Nat × Nat) :=
+  match cond with
+  | .cmp op a b =>
+    match Scry.boundsConstAt info g at b.index 8 with
+    | .some k =>
+      let hi : Option Nat := match op, isTrue with
+        -- a < K, a >= K false: a <= K-1
+        | .lt, .true => .some (Nat.sub k 1)
+        | .ge, .false => .some (Nat.sub k 1)
+        -- a <= K, a > K false: a <= K
+        | .le, .true => .some k
+        | .gt, .false => .some k
+        | _, _ => (.none : Option Nat);
+      match hi with
+      | .some h => [(a.index, h)]
+      | .none => .nil
+    | .none => match Scry.boundsConstAt info g at a.index 8 with
+      | .some k =>
+        let hi : Option Nat := match op, isTrue with
+          -- K > b, K <= b false: b <= K-1
+          | .gt, .true => .some (Nat.sub k 1)
+          | .le, .false => .some (Nat.sub k 1)
+          -- K >= b, K < b false: b <= K
+          | .ge, .true => .some k
+          | .lt, .false => .some k
+          | _, _ => (.none : Option Nat);
+        match hi with
+        | .some h => [(b.index, h)]
+        | .none => .nil
+      | .none => .nil
+  | .not c => Scry.boundsCondBounds info g at c (Bool.not isTrue)
+  | .and x y =>
+    match isTrue with
+    | .true => List.append (Scry.boundsCondBounds info g at x .true)
+        (Scry.boundsCondBounds info g at y .true)
+    | .false => .nil
+  | .or x y =>
+    match isTrue with
+    | .false => List.append (Scry.boundsCondBounds info g at x .false)
+        (Scry.boundsCondBounds info g at y .false)
+    | .true => .nil
+  | .const _ => .nil
+
+/-- The `guard` rows of one branch: every bound each outgoing edge establishes.
+`target` is the successor point of the edge, so the row says "on the edge to `target`,
+`var <= hi`". -/
+def Scry.boundsGuardsAt (info : Scry.FnInfo) (g : Scry.Fn) (b : Nat) : List (List Nat) :=
+  match Scry.nodeTerm g b with
+  | .some (.br c t f _) =>
+    let tg := Scry.nodeOf g t 0;
+    let fg := Scry.nodeOf g f 0;
+    List.append
+      (List.map (fun p => [b, p.1, p.2, tg])
+        (Scry.boundsCondBounds info g b c .true))
+      (List.map (fun p => [b, p.1, p.2, fg])
+        (Scry.boundsCondBounds info g b c .false))
+  | _ => .nil
+
+/-- Every guard row of a function. -/
+def Scry.boundsGuardRows (info : Scry.FnInfo) (g : Scry.Fn) : List (List Nat) :=
+  Scry.concatLists (fun b => Scry.boundsGuardsAt info g b) (Scry.range g.count)
+
+/-- The points-to id of a location, or `0` when the location is not in the table. -/
+def Scry.boundsLocIdOf (pt : Scry.PtResult) (l : Scry.Loc) : Nat :=
+  match Scry.locId pt l with
+  | .some i => i
+  | .none => 0
+
+/-- The constant code of a register at a point: `0` for "not a known constant", `k+1`
+for the constant `k`. -/
+def Scry.boundsConstCode (info : Scry.FnInfo) (g : Scry.Fn) (point var : Nat) : Nat :=
+  match Scry.boundsConstAt info g point var 8 with
+  | .some k => Nat.succ k
+  | .none => 0
+
+/-- The `use` rows of one subscript access: every reached `gepVar` site and every known
+capacity of its base. `kind` is `useIndexWrite` or `useIndexRead`. A capacity of `0` is
+the lowering's "unknown" marker and is kept: a write into an unknown extent is a refusal,
+not a silent pass. -/
+def Scry.boundsIndexUsesAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (access var kind : Nat) : List (List Nat) :=
+  Scry.concatLists (fun site =>
+    List.map (fun cap =>
+      [access, site.index.index, Scry.boundsLocIdOf pt cap.1,
+       Scry.boundsCeilDiv cap.2 site.scale, kind,
+       Scry.boundsConstCode r.plan.info g access site.index.index])
+      (Scry.boundsPtrCaps pt sizes r.fn.name site.base.index))
+    (Scry.boundsIndexSites r.plan.info g access var)
+
+/-- The `use` rows of one copy/read call: the destination is a write of the count, the
+source (when the shape has one) a read. The count is the length; an unknown capacity is
+kept as `0` for the same reason as above. -/
+def Scry.boundsCopyUsesAtWith (models : Scry.ModelPack) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : List (List Nat) :=
+  match Scry.boundsCopyShapeWith models name (List.length args) with
+  | .none => .nil
+  | .some shape => match Scry.boundsArgAt args shape.count with
+    | .none => .nil
+    | .some countVar =>
+      let konst := Scry.boundsConstCode r.plan.info g point countVar;
+      let dstUses : List (List Nat) := match Scry.boundsArgAt args shape.dst with
+        | .none => .nil
+        | .some dstVar => List.map (fun cap =>
+            [point, countVar, Scry.boundsLocIdOf pt cap.1, cap.2,
+             Scry.useCopyWrite, konst])
+            (Scry.boundsPtrCaps pt sizes r.fn.name dstVar);
+      let srcUses : List (List Nat) := match shape.src with
+        | .none => .nil
+        | .some srcPos => match Scry.boundsArgAt args srcPos with
+          | .none => .nil
+          | .some srcVar => List.map (fun cap =>
+              [point, countVar, Scry.boundsLocIdOf pt cap.1, cap.2,
+               Scry.useCopyRead, konst])
+              (Scry.boundsPtrCaps pt sizes r.fn.name srcVar);
+      List.append dstUses srcUses
+
+def Scry.boundsCopyUsesAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : List (List Nat) :=
+  Scry.boundsCopyUsesAtWith Scry.defaultModels pt sizes r g point name args
+
+/-- The `use` rows one statement contributes: index writes and reads, and copy/read
+calls (whose destination is the write side). -/
+def Scry.boundsUseRowsAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (n : Nat) : List (List Nat) :=
+  match Scry.nodeStmt g n with
+  | .some (.store p _ _) =>
+    Scry.boundsIndexUsesAt pt sizes r g n p.index Scry.useIndexWrite
+  | .some (.assign _ (.load p) _) =>
+    Scry.boundsIndexUsesAt pt sizes r g n p.index Scry.useIndexRead
+  | .some (.call _ (.direct name) args _) =>
+    Scry.boundsCopyUsesAt pt sizes r g n name (List.map (fun v => v.index) args)
+  | _ => .nil
+
+/-- The distinct access points of a use row list (column 0). -/
+def Scry.boundsUsePoints (uses : List (List Nat)) : List Nat :=
+  List.foldr (fun row acc =>
+    let p := List.getD row 0 0;
+    if List.any (Nat.beq p) acc then acc else List.cons p acc) .nil uses
+
+/-- The guard/use/before rows of one function. `before` is the dominance relation
+restricted to a use point: it is `before(node, use)` for every dominator of `use`. -/
+structure Scry.BoundsFacts where
+  guards : List (List Nat)
+  uses : List (List Nat)
+  before : List (List Nat)
+
+def Scry.boundsFactsEmpty : Scry.BoundsFacts :=
+  Scry.BoundsFacts.mk .nil .nil .nil
+
+/-- Build the prover's guard/use/before rows for one analysed function. The dominators
+are computed here when the production plan is flow-only (`dom` empty), exactly as
+`boundsOfUnitWith` does for a candidate finding. The capacities are the ones `Bounds`
+uses (`boundsPtrCaps`), so the cut and the out-of-bounds findings cannot disagree about
+an extent. -/
+def Scry.boundsFactsOfFuncWith (models : Scry.ModelPack) (pt : Scry.PtResult)
+    (r : Scry.FuncResult) : Scry.BoundsFacts :=
+  let fn := r.fn;
+  let g := r.plan.info.g;
+  let sizes := Scry.boundsSizesOfFunc fn;
+  let info := match r.plan.info.dom with
+    | .nil => { r.plan.info with dom := Scry.dominators g }
+    | _ => r.plan.info;
+  let uses := Scry.concatLists (fun n =>
+    Scry.boundsUseRowsAt pt sizes r g n) (Scry.range g.count);
+  let guardRows := Scry.boundsGuardRows info g;
+  let beforeRows := Scry.concatLists (fun u =>
+    List.map (fun d => [d, u]) (Scry.lookupSet info.dom u))
+    (Scry.boundsUsePoints uses);
+  Scry.BoundsFacts.mk guardRows uses beforeRows
+
+def Scry.boundsFactsOfFunc (pt : Scry.PtResult) (r : Scry.FuncResult) :
+    Scry.BoundsFacts :=
+  Scry.boundsFactsOfFuncWith Scry.defaultModels pt r
+
+/-- Add the guard/use/before rows to a function's EDB. -/
+def Scry.addBoundsFacts (st : Scry.State Nat) (f : Scry.BoundsFacts) : Scry.State Nat :=
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtGuard (List.map U64.ofNat row)) st f.guards;
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtUse (List.map U64.ofNat row)) st f.uses;
+  List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtBefore (List.map U64.ofNat row)) st f.before

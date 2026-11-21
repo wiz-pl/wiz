@@ -29,9 +29,9 @@ Files:
 What `lib/Feral.wiz` parses and lowers today is the fragment of §1a. The sketch below is
 the wider design; in it, `struct`/`enum`/`fn`, `let`/`let mut`, borrows, `match`, `if`,
 `if let`, `while`, `while let`, `for`, `return`, `?` and the library calls of the table
-are real, while `requires`/`ensures`/`invariant`/`decreases`, `loop`, `break`/`continue`,
+are real, while `invariant`/`decreases`, `loop`, `break`/`continue`,
 `impl`/`trait`, field and index assignment, closures and tuples of more than two
-components are not parsed yet (spec clauses are comments in `surface/`).
+components are not parsed yet (loop clauses are comments in `surface/`).
 
 ```
 import Feral
@@ -43,10 +43,10 @@ feral
     | leaf
     | node (key : U64) (left : Box Tree) (right : Box Tree)
 
-  fn get_mut {'a} (v : &'a mut Vec U64) (i : USize) : &'a mut U64   -- Wiz binders; region params in braces
-    requires i < v.len                     -- RD13 clauses between the signature and :=
-    ensures final(v) = old(v).set i final(result)
-  := &mut v[i]
+  fn get_mut {'a} (v : &'a mut Vec U64) (i : USize)                 -- Wiz binders; region params in braces
+    requires (i < v.len)                   -- RD13 clauses between the binders and the result type
+    ensures (final(v) = old(v).set i final(result))
+  : &'a mut U64 := &mut v[i]
 
   fn sum_from (s0 : U64) (n : U64) : Result U64 Overflow := {        -- a block: statements separated by ;
     let mut i : U64 := 0;                  -- let / let mut, Wiz's :=
@@ -85,8 +85,9 @@ feral                             -- `#lower feral … end` also shows the gener
   items                           -- `#unchecked feral … end` lowers without the front end's borrow verdict (tests)
 end
 ```
-* items: `fn f {'a 'b} {'a : 'b} {T : Type} (x : τ) … : τ := e`, `struct S where f : τ …`,
-  `enum E where | c (x : τ) …`;
+* items: `fn f {'a 'b} {'a : 'b} {T : Type} (x : τ) … : τ := e`, optionally with inline
+  clauses `requires (P) ensures (Q)` between the binders and the result type,
+  `struct S where f : τ …`, `enum E where | c (x : τ) …`;
 * types: names, `Vec τ`, `Option τ`, `Result τ ε`, `Box τ`, `τ × τ`, `&'a τ`, `&'a mut τ`
   (the region may be elided: a fresh one per parameter; in a result, the first
   reference parameter's; in a local annotation, inferred), `USize` = `U64`;
@@ -290,7 +291,13 @@ handle is the same borrow). A call that **returns a borrow** of a `&mut` argumen
 => …)`: inside, `v` is a `Lent` token until the returned borrow's last use, where it is
 released (03, 08).
 
-**L18. Specs (RD13, RD11).** `requires P ensures Q` ↦ `def f.spec (args) : Prop :=
+**L18. Specs (RD13, RD11).** **(changed, 22j)** The clauses are written inline on the
+`fn` (`fn f … requires (P) ensures (Q) : R := e`; between the binders, because after the
+result type the type's juxtaposition would read the clause words as type arguments) or in
+a `spec f requires (P) ensures (Q)` item; a function has one specification (both is an
+error), and either emits the same `f.Spec`. `final(x)`/`old(x)` (Rust's spelling) are
+`final x`/`old x`.
+`requires P ensures Q` ↦ `def f.spec (args) : Prop :=
 P → Result.All (fun r => Q[result := …, old(x) := x, final(x) := …]) (f args)`; for a
 returned borrow `r : Mut ρ A S`, `*result` is `r.1`, `final(result)` is a universally
 quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
@@ -298,7 +305,10 @@ quantified `fin`, and `final(v)` is `r.2 fin` (03: `get_mut.spec`, proved as
 stated on values: `f.Spec` takes each `&mut` argument's value, runs the call inside the
 caller's borrow scopes (`Uniq.borrow`/`borrowIn`), and `Result.Holds` states the clauses
 on the values the scopes hand back (`old(x)` is the argument, `final(x)` the lender's
-final value).
+final value). For a returned borrow the one lender's scope is opened, the call's
+`Borrowed` is matched in it, and the borrow is closed there (`Mut.peek`/`Mut.close`):
+`result` is the borrow's value, `final(result)` the quantified `fin`, and `final(v)` the
+lender's value the scope hands back (`lib/Feral.wiz`, `Fe.specBorrow`).
 
 **L19. Interop (RD16).** Wiz calls lowered functions as they are (`R`, handed-back
 tuples, backward closures); `Result.map`, `Result.show`, `Mut.release`, `MutOpt.over`
