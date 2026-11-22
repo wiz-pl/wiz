@@ -1,0 +1,503 @@
+import Dist.TwoPhase
+import Dist.Fairness
+/-!
+# Dist.Leader
+
+Leader election (`import Dist.Leader`), the P1 case of
+`wiz-notes/distributed-proofs.md` §8.2.
+
+* `Leader N` is a one-term election: a `voted` flag and a candidate per process, and a
+  role per process. `campaign i` makes a follower a candidate and self-votes, `vote j i`
+  is a voter's single vote for a candidate, and `elect i` promotes a candidate that has
+  **every** vote.
+* `Leader.Inv` is `leader i → every process voted for i`. `Leader.leader_unique` derives
+  "at most one leader per term" from it: two unanimous winners are the same candidate,
+  because any voter (e.g. `0`) voted for both. This is the quorum-intersection argument
+  for the unanimous-quorum instance; P2 replaces the quorum with a majority.
+* `Leader.safety` proves `□ Inv` for all `N` and all runs; `Leader.safety_unique` then
+  gives the at-most-one-leader theorem.
+* `Elect2` is the election-completion protocol: an `advance` action records both votes
+  and promotes the candidate. `Elect2.live` is liveness under `WF(advance)`
+  (`LTS.fairRank`); `Elect2.idleNoLeader` is the stutter run with no leader, which is
+  not fair. The full leader election needs a stable candidate (no competing campaign),
+  which is P3's stable-leader hypothesis; P1 proves the completion phase.
+
+The parameterized spec's `elect` uses unanimity, not a majority: the majority quorum
+(`quorum_inter` for all `N`) is P2, and is the only change needed here.
+-/
+
+/-- A process's role in the current term. -/
+inductive Leader.Role where
+  | follower
+  | candidate
+  | leader
+
+/-- Boolean equality of roles. -/
+def Leader.Role.eq : Leader.Role → Leader.Role → Bool
+  | .follower, .follower => .true
+  | .candidate, .candidate => .true
+  | .leader, .leader => .true
+  | _, _ => .false
+
+/-- `Role.eq` is sound. -/
+def Leader.Role.eq_sound : (a b : Leader.Role) → Leader.Role.eq a b = .true → a = b
+  | .follower, .follower, _ => rfl
+  | .candidate, .candidate, _ => rfl
+  | .leader, .leader, _ => rfl
+  | .follower, .candidate, h => absurd h.1
+  | .follower, .leader, h => absurd h.1
+  | .candidate, .follower, h => absurd h.1
+  | .candidate, .leader, h => absurd h.1
+  | .leader, .follower, h => absurd h.1
+  | .leader, .candidate, h => absurd h.1
+
+/-- `candidate` and `leader` differ. -/
+def Leader.Role.candidate_ne_leader : ¬ Leader.Role.candidate = Leader.Role.leader :=
+  fun (h : Leader.Role.candidate = Leader.Role.leader) => absurd h.1
+
+/-- `follower` and `leader` differ. -/
+def Leader.Role.follower_ne_leader : ¬ Leader.Role.follower = Leader.Role.leader :=
+  fun (h : Leader.Role.follower = Leader.Role.leader) => absurd h.1
+
+/-- A one-term election state: a voted flag and a candidate per process, and a role per
+process. -/
+structure Leader (N : Nat) where
+  voted : List Bool
+  cand : List Nat
+  roles : List Leader.Role
+
+/-- Whether process `i` has voted; out of range is `false`. -/
+def Leader.getVoted {N : Nat} (s : Leader N) (i : Nat) : Bool :=
+  TwoPC.listGetDef Bool.false s.voted i
+/-- The candidate process `i` voted for; out of range is `0`. -/
+def Leader.getCand {N : Nat} (s : Leader N) (i : Nat) : Nat :=
+  TwoPC.listGetDef 0 s.cand i
+/-- The role of process `i`; out of range is `follower`. -/
+def Leader.getRole {N : Nat} (s : Leader N) (i : Nat) : Leader.Role :=
+  TwoPC.listGetDef Leader.Role.follower s.roles i
+
+/-- Set process `i`'s voted flag. -/
+def Leader.setVoted {N : Nat} (s : Leader N) (i : Nat) (b : Bool) : Leader N :=
+  { s with voted := TwoPC.listSetAt Bool.false i s.voted b }
+/-- Set process `i`'s candidate. -/
+def Leader.setCand {N : Nat} (s : Leader N) (i : Nat) (c : Nat) : Leader N :=
+  { s with cand := TwoPC.listSetAt 0 i s.cand c }
+/-- Set process `i`'s role. -/
+def Leader.setRole {N : Nat} (s : Leader N) (i : Nat) (r : Leader.Role) : Leader N :=
+  { s with roles := TwoPC.listSetAt Leader.Role.follower i s.roles r }
+
+/-- Reading the voted flag just written. -/
+def Leader.getVoted_setVoted_same {N : Nat} (s : Leader N) (i : Nat) (b : Bool) :
+    Leader.getVoted (Leader.setVoted s i b) i = b :=
+  TwoPC.getDefSetAtSame Bool.false i s.voted b
+
+/-- Reading another voted flag after a write. -/
+def Leader.getVoted_setVoted_ne {N : Nat} (s : Leader N) (i j : Nat) (b : Bool)
+    (h : ¬ i = j) : Leader.getVoted (Leader.setVoted s i b) j = Leader.getVoted s j :=
+  TwoPC.getDefSetAtNe Bool.false i j s.voted b h
+
+/-- Reading the candidate just written. -/
+def Leader.getCand_setCand_same {N : Nat} (s : Leader N) (i : Nat) (c : Nat) :
+    Leader.getCand (Leader.setCand s i c) i = c :=
+  TwoPC.getDefSetAtSame 0 i s.cand c
+
+/-- Reading another candidate after a write. -/
+def Leader.getCand_setCand_ne {N : Nat} (s : Leader N) (i j : Nat) (c : Nat)
+    (h : ¬ i = j) : Leader.getCand (Leader.setCand s i c) j = Leader.getCand s j :=
+  TwoPC.getDefSetAtNe 0 i j s.cand c h
+
+/-- Setting one field does not change the others. -/
+def Leader.getVoted_setCand {N : Nat} (s : Leader N) (i j : Nat) (c : Nat) :
+    Leader.getVoted (Leader.setCand s i c) j = Leader.getVoted s j := rfl
+/-- Setting one field does not change the others. -/
+def Leader.getCand_setVoted {N : Nat} (s : Leader N) (i j : Nat) (b : Bool) :
+    Leader.getCand (Leader.setVoted s i b) j = Leader.getCand s j := rfl
+/-- Setting the role does not change the voted flag. -/
+def Leader.getVoted_setRole {N : Nat} (s : Leader N) (i j : Nat) (r : Leader.Role) :
+    Leader.getVoted (Leader.setRole s i r) j = Leader.getVoted s j := rfl
+/-- Setting the role does not change the candidate. -/
+def Leader.getCand_setRole {N : Nat} (s : Leader N) (i j : Nat) (r : Leader.Role) :
+    Leader.getCand (Leader.setRole s i r) j = Leader.getCand s j := rfl
+/-- Setting the voted flag does not change the role. -/
+def Leader.getRole_setVoted {N : Nat} (s : Leader N) (i j : Nat) (b : Bool) :
+    Leader.getRole (Leader.setVoted s i b) j = Leader.getRole s j := rfl
+/-- Setting the candidate does not change the role. -/
+def Leader.getRole_setCand {N : Nat} (s : Leader N) (i j : Nat) (c : Nat) :
+    Leader.getRole (Leader.setCand s i c) j = Leader.getRole s j := rfl
+
+/-- Reading the role just written. -/
+def Leader.getRole_setRole_same {N : Nat} (s : Leader N) (i : Nat) (r : Leader.Role) :
+    Leader.getRole (Leader.setRole s i r) i = r :=
+  TwoPC.getDefSetAtSame Leader.Role.follower i s.roles r
+
+/-- Reading another role after a write. -/
+def Leader.getRole_setRole_ne {N : Nat} (s : Leader N) (i j : Nat) (r : Leader.Role)
+    (h : ¬ i = j) : Leader.getRole (Leader.setRole s i r) j = Leader.getRole s j :=
+  TwoPC.getDefSetAtNe Leader.Role.follower i j s.roles r h
+
+/-- Every process voted for `i`. -/
+def Leader.allFor {N : Nat} (s : Leader N) (i : Nat) : Prop :=
+  (j : Nat) → Nat.lt j N = .true →
+    Leader.getVoted s j = .true ∧ Leader.getCand s j = i
+
+/-- Every process voted for `i`, as a Boolean check. -/
+def Leader.allForB {N : Nat} (s : Leader N) (i : Nat) : Bool :=
+  TwoPC.allN (fun (j : Nat) => Bool.and (Leader.getVoted s j) (Nat.beq (Leader.getCand s j) i)) N
+
+/-- `allForB` is sound. -/
+def Leader.allForB_sound {N : Nat} (s : Leader N) (i : Nat)
+    (hb : Leader.allForB s i = .true) : Leader.allFor s i :=
+  fun (j : Nat) (hj : Nat.lt j N = .true) =>
+    let hp := TwoPC.allN_spec
+      (fun (k : Nat) => Bool.and (Leader.getVoted s k) (Nat.beq (Leader.getCand s k) i)) N hb j hj
+    And.intro
+      (Bool.and_true_left (Leader.getVoted s j) (Nat.beq (Leader.getCand s j) i) hp)
+      (Nat.beq_eq (Leader.getCand s j) i
+        (Bool.and_true_right (Leader.getVoted s j) (Nat.beq (Leader.getCand s j) i) hp))
+
+/-- A leader has every vote: the invariant of the election. -/
+def Leader.Inv {N : Nat} (s : Leader N) : Prop :=
+  (i : Nat) → Nat.lt i N = .true → Leader.getRole s i = Leader.Role.leader →
+  Leader.allFor s i
+
+/-- The state has a leader. -/
+def Leader.HasLeader {N : Nat} (s : Leader N) : Prop :=
+  ∃ i, Nat.lt i N = .true ∧ Leader.getRole s i = Leader.Role.leader
+
+/-- A `Nat` below a bound is below a successor: `N` is not zero. -/
+def Nat.exists_succ_of_lt : (i N : Nat) → Nat.lt i N = .true → ∃ n, N = Nat.succ n
+  | i, .zero, h => False.elim (Nat.not_succ_le_zero i h)
+  | i, .succ n, _ => Ex.intro (fun (m : Nat) => Nat.succ n = Nat.succ m) n rfl
+
+/-- Two unanimous winners are equal (a voter exists whenever `N` is a successor). -/
+def Leader.allFor_unique {N : Nat} (s : Leader N) (i j : Nat)
+    (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+    (hvi : Leader.allFor s i) (hvj : Leader.allFor s j) : i = j :=
+  Ex.elim (Nat.exists_succ_of_lt i N hi)
+    (fun (n : Nat) (e : N = Nat.succ n) =>
+      let h0 : Nat.lt 0 N = .true :=
+        Eq.substProp (fun (z : Nat) => Nat.lt 0 z = .true) (Eq.symm e) rfl
+      Eq.trans (Eq.symm (hvi 0 h0).2) (hvj 0 h0).2)
+
+/-- The at-most-one-leader theorem from the invariant. -/
+def Leader.leader_unique {N : Nat} (s : Leader N) (h : Leader.Inv s) (i j : Nat)
+    (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+    (ri : Leader.getRole s i = Leader.Role.leader) (rj : Leader.getRole s j = Leader.Role.leader) :
+    i = j :=
+  Leader.allFor_unique s i j hi hj (h i hi ri) (h j hj rj)
+
+/-- The actions. -/
+inductive Leader.Act (N : Nat) where
+  | campaign (i : Nat)
+  | vote (j i : Nat)
+  | elect (i : Nat)
+
+/-- The list is `[x]` when `b` is true and empty otherwise. -/
+def Leader.singleIf {A : Type} (b : Bool) (x : A) : List A :=
+  match b with
+  | .true => List.cons x List.nil
+  | .false => List.nil
+
+/-- Membership in `singleIf b x`. -/
+def Leader.mem_singleIf {A : Type} : (b : Bool) → (x y : A) → y ∈ Leader.singleIf b x →
+    b = .true ∧ y = x
+  | .true, x, y, h =>
+      And.intro rfl
+        (Or.elim (Iff.mp (List.mem_cons_iff y x ([] : List A)) h)
+          (fun (e : y = x) => e)
+          (fun (hn : y ∈ ([] : List A)) => False.elim hn))
+  | .false, x, y, h => False.elim h
+
+/-- The executable transitions of one action. -/
+def Leader.nextAct {N : Nat} (a : Leader.Act N) (s : Leader N) : List (Leader N) :=
+  match a with
+  | .campaign i =>
+      Leader.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Leader.Role.eq (Leader.getRole s i) .follower) (Bool.not (Leader.getVoted s i))))
+        (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate)
+  | .vote j i =>
+      Leader.singleIf
+        (Bool.and (Nat.lt j N)
+          (Bool.and (Leader.Role.eq (Leader.getRole s i) .candidate) (Bool.not (Leader.getVoted s j))))
+        (Leader.setCand (Leader.setVoted s j .true) j i)
+  | .elect i =>
+      Leader.singleIf
+        (Bool.and (Nat.lt i N)
+          (Bool.and (Leader.Role.eq (Leader.getRole s i) .candidate) (Leader.allForB s i)))
+        (Leader.setRole s i .leader)
+
+/-- A step is membership in the executable transition list. -/
+def Leader.Step {N : Nat} (a : Leader.Act N) (s s' : Leader N) : Prop :=
+  s' ∈ Leader.nextAct a s
+
+/-- The election protocol as an `LTS`. -/
+def Leader.lts (N : Nat) : LTS (Leader N) (Leader.Act N) :=
+  LTS.mk (fun (s : Leader N) =>
+      (i : Nat) → Leader.getRole s i = Leader.Role.follower ∧ Leader.getVoted s i = Bool.false)
+    (Leader.Step)
+
+/-- The invariant holds initially (nobody is a leader). -/
+def Leader.init_inv {N : Nat} (s : Leader N)
+    (h : (i : Nat) → Leader.getRole s i = Leader.Role.follower ∧ Leader.getVoted s i = .false) :
+    Leader.Inv s :=
+  fun (i : Nat) (_ : Nat.lt i N = .true) (hi : Leader.getRole s i = Leader.Role.leader) =>
+    False.elim (Leader.Role.follower_ne_leader (Eq.trans (Eq.symm (h i).1) hi))
+
+/-- No leader when a process has not voted: a leader's unanimity says it did. -/
+def Leader.no_leader_of_not_voted {N : Nat} (s : Leader N) (h : Leader.Inv s) (i : Nat)
+    (hi : Nat.lt i N = .true) (hn : Leader.getVoted s i = .false) :
+    ¬ Leader.HasLeader s :=
+  fun (hh : Leader.HasLeader s) =>
+    Ex.elim hh (fun (k : Nat) (hk : Nat.lt k N = .true ∧ Leader.getRole s k = Leader.Role.leader) =>
+      Bool.trueNeFalse (Eq.trans (Eq.symm (h k hk.1 hk.2 i hi).1) hn))
+
+/-- After a campaign, no process is a leader: the old state had none, the new candidate is
+not a leader, and no other role changed. -/
+def Leader.no_leader_after_campaign {N : Nat} (s : Leader N) (i : Nat)
+    (hno : ¬ Leader.HasLeader s) :
+    ¬ Leader.HasLeader (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) :=
+  fun (hh : Leader.HasLeader (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate)) =>
+    Ex.elim hh (fun (k : Nat) (hk : Nat.lt k N = .true ∧
+        Leader.getRole (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) k =
+          Leader.Role.leader) =>
+      Or.elim (TwoPC.natEqOrNe k i)
+        (fun (e : k = i) =>
+          let same : Leader.getRole
+              (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) i =
+              Leader.Role.candidate :=
+            Leader.getRole_setRole_same (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate
+          let rk' : Leader.getRole
+              (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) k =
+              Leader.Role.candidate :=
+            Eq.substProp (fun (z : Nat) => Leader.getRole
+                (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) z =
+                Leader.Role.candidate) (Eq.symm e) same
+          False.elim (Leader.Role.candidate_ne_leader (Eq.trans (Eq.symm rk') hk.2)))
+        (fun (hne : ¬ k = i) =>
+          let roleEq : Leader.getRole
+              (Leader.setRole (Leader.setCand (Leader.setVoted s i .true) i i) i .candidate) k =
+              Leader.getRole s k :=
+            Eq.trans (Leader.getRole_setRole_ne (Leader.setCand (Leader.setVoted s i .true) i i) i k .candidate
+              (fun (e : i = k) => hne (Eq.symm e)))
+              (Eq.trans (Leader.getRole_setCand (Leader.setVoted s i .true) i k i)
+                (Leader.getRole_setVoted s i k .true))
+          False.elim (hno (Ex.intro
+            (fun (z : Nat) => Nat.lt z N = .true ∧ Leader.getRole s z = Leader.Role.leader)
+            k (And.intro hk.1 (Eq.trans (Eq.symm roleEq) hk.2))))))
+
+/-- After a vote, no process is a leader: roles do not change. -/
+def Leader.no_leader_after_vote {N : Nat} (s : Leader N) (j i : Nat)
+    (hno : ¬ Leader.HasLeader s) : ¬ Leader.HasLeader (Leader.setCand (Leader.setVoted s j .true) j i) :=
+  fun (hh : Leader.HasLeader (Leader.setCand (Leader.setVoted s j .true) j i)) =>
+    Ex.elim hh (fun (k : Nat) (hk : Nat.lt k N = .true ∧
+        Leader.getRole (Leader.setCand (Leader.setVoted s j .true) j i) k = Leader.Role.leader) =>
+      let roleEq : Leader.getRole (Leader.setCand (Leader.setVoted s j .true) j i) k =
+          Leader.getRole s k :=
+        Eq.trans (Leader.getRole_setCand (Leader.setVoted s j .true) j k i)
+          (Leader.getRole_setVoted s j k .true)
+      False.elim (hno (Ex.intro
+        (fun (z : Nat) => Nat.lt z N = .true ∧ Leader.getRole s z = Leader.Role.leader)
+        k (And.intro hk.1 (Eq.trans (Eq.symm roleEq) hk.2)))))
+
+/-- A candidate with every vote cannot coexist with a leader: its unanimity and the
+leader's would make them the same process, but it is a candidate. -/
+def Leader.no_leader_of_allFor_candidate {N : Nat} (s : Leader N) (i : Nat) (h : Leader.Inv s)
+    (hi : Nat.lt i N = .true) (hcand : Leader.getRole s i = Leader.Role.candidate)
+    (hall : Leader.allFor s i) : ¬ Leader.HasLeader s :=
+  fun (hh : Leader.HasLeader s) =>
+    Ex.elim hh (fun (k : Nat) (hk : Nat.lt k N = .true ∧ Leader.getRole s k = Leader.Role.leader) =>
+      let e : k = i := Leader.allFor_unique s k i hk.1 hi (h k hk.1 hk.2) hall
+      let rk : Leader.getRole s i = Leader.Role.leader :=
+        Eq.substProp (fun (z : Nat) => Leader.getRole s z = Leader.Role.leader) e hk.2
+      False.elim (Leader.Role.candidate_ne_leader (Eq.trans (Eq.symm hcand) rk)))
+
+/-- After `elect i`, the invariant holds: the only leader is `i`, and `i` has every vote. -/
+def Leader.inv_after_elect {N : Nat} (s : Leader N) (i : Nat) (hall : Leader.allFor s i)
+    (hno : ¬ Leader.HasLeader s) : Leader.Inv (Leader.setRole s i .leader) :=
+  fun (k : Nat) (hk : Nat.lt k N = .true)
+      (rk : Leader.getRole (Leader.setRole s i .leader) k = Leader.Role.leader) =>
+    Or.elim (TwoPC.natEqOrNe k i)
+      (fun (e : k = i) =>
+        Eq.substProp (fun (z : Nat) => Leader.allFor (Leader.setRole s i .leader) z) (Eq.symm e)
+          (fun (j : Nat) (hj : Nat.lt j N = .true) =>
+            And.intro
+              (Eq.trans (Eq.symm (Leader.getVoted_setRole s i j .leader)) (hall j hj).1)
+              (Eq.trans (Eq.symm (Leader.getCand_setRole s i j .leader)) (hall j hj).2)))
+      (fun (hne : ¬ k = i) =>
+        let roleEq : Leader.getRole (Leader.setRole s i .leader) k = Leader.getRole s k :=
+          Leader.getRole_setRole_ne s i k .leader (fun (e : i = k) => hne (Eq.symm e))
+        False.elim (hno (Ex.intro
+          (fun (z : Nat) => Nat.lt z N = .true ∧ Leader.getRole s z = Leader.Role.leader)
+          k (And.intro hk (Eq.trans (Eq.symm roleEq) rk)))))
+
+/-- A state with no leader satisfies the invariant vacuously. -/
+def Leader.inv_of_no_leader {N : Nat} (s : Leader N) (hno : ¬ Leader.HasLeader s) :
+    Leader.Inv s :=
+  fun (i : Nat) (hi : Nat.lt i N = .true) (ri : Leader.getRole s i = Leader.Role.leader) =>
+    False.elim (hno (Ex.intro
+      (fun (z : Nat) => Nat.lt z N = .true ∧ Leader.getRole s z = Leader.Role.leader)
+      i (And.intro hi ri)))
+
+/-- The invariant is preserved by every action. -/
+def Leader.preserve (N : Nat) :
+    (a : Leader.Act N) → (s s' : Leader N) → Leader.Inv s → Leader.Step a s s' → Leader.Inv s'
+  | .campaign i, s, s', hinv, hmem =>
+      let h := Leader.mem_singleIf _ _ _ hmem
+      let g := h.1
+      let gT : Bool := Bool.and (Leader.Role.eq (Leader.getRole s i) .follower) (Bool.not (Leader.getVoted s i))
+      let hi : Nat.lt i N = .true := Bool.and_true_left (Nat.lt i N) gT g
+      let g2 := Bool.and_true_right (Nat.lt i N) gT g
+      let g3 := Bool.and_true_left (Leader.Role.eq (Leader.getRole s i) .follower)
+        (Bool.not (Leader.getVoted s i)) g2
+      let hnb := Bool.and_true_right (Leader.Role.eq (Leader.getRole s i) .follower)
+        (Bool.not (Leader.getVoted s i)) g2
+      let hn : Leader.getVoted s i = .false :=
+        Iff.mp (Bool.not_eq_true (Leader.getVoted s i)) hnb
+      let hno := Leader.no_leader_of_not_voted s hinv i hi hn
+      Eq.mpr' (fun (z : Leader N) => Leader.Inv z) h.2
+        (Leader.inv_of_no_leader _ (Leader.no_leader_after_campaign s i hno))
+  | .vote j i, s, s', hinv, hmem =>
+      let h := Leader.mem_singleIf _ _ _ hmem
+      let g := h.1
+      let gT : Bool := Bool.and (Leader.Role.eq (Leader.getRole s i) .candidate) (Bool.not (Leader.getVoted s j))
+      let hj : Nat.lt j N = .true := Bool.and_true_left (Nat.lt j N) gT g
+      let g2 := Bool.and_true_right (Nat.lt j N) gT g
+      let g3 := Bool.and_true_left (Leader.Role.eq (Leader.getRole s i) .candidate)
+        (Bool.not (Leader.getVoted s j)) g2
+      let hnb := Bool.and_true_right (Leader.Role.eq (Leader.getRole s i) .candidate)
+        (Bool.not (Leader.getVoted s j)) g2
+      let hn : Leader.getVoted s j = .false :=
+        Iff.mp (Bool.not_eq_true (Leader.getVoted s j)) hnb
+      let hno := Leader.no_leader_of_not_voted s hinv j hj hn
+      Eq.mpr' (fun (z : Leader N) => Leader.Inv z) h.2
+        (Leader.inv_of_no_leader _ (Leader.no_leader_after_vote s j i hno))
+  | .elect i, s, s', hinv, hmem =>
+      let h := Leader.mem_singleIf _ _ _ hmem
+      let g := h.1
+      let gT : Bool := Bool.and (Leader.Role.eq (Leader.getRole s i) .candidate) (Leader.allForB s i)
+      let hi : Nat.lt i N = .true := Bool.and_true_left (Nat.lt i N) gT g
+      let g2 := Bool.and_true_right (Nat.lt i N) gT g
+      let g3 := Bool.and_true_left (Leader.Role.eq (Leader.getRole s i) .candidate)
+        (Leader.allForB s i) g2
+      let hcand : Leader.getRole s i = Leader.Role.candidate :=
+        Leader.Role.eq_sound _ _ g3
+      let hall : Leader.allFor s i :=
+        Leader.allForB_sound s i (Bool.and_true_right _ _ g2)
+      let hno := Leader.no_leader_of_allFor_candidate s i hinv hi hcand hall
+      Eq.mpr' (fun (z : Leader N) => Leader.Inv z) h.2
+        (Leader.inv_after_elect s i hall hno)
+
+/-- Leader safety for every `N` and every run: a leader has every vote. -/
+def Leader.safety (N : Nat) (σ : Trace (Leader N)) (h : (Leader.lts N).Run σ) :
+    TL.always (TL.now (Leader.Inv)) σ 0 :=
+  LTS.invariant (Leader.lts N) Leader.Inv
+    (fun (s : Leader N) (hi : (i : Nat) → Leader.getRole s i = Leader.Role.follower ∧
+        Leader.getVoted s i = .false) => Leader.init_inv s hi)
+    (fun (a : Leader.Act N) (s s' : Leader N) (hinv : Leader.Inv s) (hstep : Leader.Step a s s') =>
+      Leader.preserve N a s s' hinv hstep)
+    σ h
+
+/-- At most one leader per term, for every run. -/
+def Leader.safety_unique (N : Nat) (σ : Trace (Leader N)) (h : (Leader.lts N).Run σ)
+    (t : Nat) (i j : Nat) (hi : Nat.lt i N = .true) (hj : Nat.lt j N = .true)
+    (ri : Leader.getRole (σ t) i = Leader.Role.leader)
+    (rj : Leader.getRole (σ t) j = Leader.Role.leader) : i = j :=
+  let hinv : Leader.Inv (σ t) :=
+    Eq.substProp (fun (u : Nat) => Leader.Inv (σ u)) (Nat.add_zero t) (Leader.safety N σ h t)
+  Leader.leader_unique (σ t) hinv i j hi hj ri rj
+
+--------------------------------------------------------------------------------
+-- Election completion: liveness under weak fairness
+
+/-- A two-voter election-completion state. `advance` records both votes and promotes the
+candidate; the multi-step collection is P3's stable-leader protocol. -/
+structure Elect2 where
+  v0 : Bool
+  v1 : Bool
+  leader : Bool
+
+/-- The only action: complete the election. -/
+inductive Elect2.Act where
+  | advance
+
+/-- One step of the completion protocol: the next state has a leader. The action records
+both votes and promotes; the transition relation only needs the observable effect. -/
+def Elect2.advance (s : Elect2) : Elect2 :=
+  { { { s with v0 := .true } with v1 := .true } with leader := .true }
+
+/-- A step of the completion protocol: the successor is a leader. -/
+def Elect2.Step (_ : Elect2.Act) (s s' : Elect2) : Prop := s'.leader = .true
+
+/-- The initial state: no votes, no leader. -/
+def Elect2.init : Elect2 := Elect2.mk .false .false .false
+
+/-- The completion protocol as an `LTS`. -/
+def Elect2.lts : LTS Elect2 Elect2.Act :=
+  LTS.mk (fun (s : Elect2) => s = Elect2.init) Elect2.Step
+
+/-- The goal: a leader is chosen. -/
+def Elect2.leaderB (s : Elect2) : Bool := s.leader
+
+/-- An advance ends in a leader. -/
+def Elect2.leader_after_advance (s : Elect2) : Elect2.Step .advance s (Elect2.advance s) := rfl
+
+/-- The fair action is always enabled: the successor is `advance s`. -/
+def Elect2.enabled : (s : Elect2) → Elect2.lts.enabled .advance s :=
+  fun (s : Elect2) => Ex.intro (fun (s' : Elect2) => Elect2.Step .advance s s')
+    (Elect2.advance s) (Elect2.leader_after_advance s)
+
+/-- Liveness of the completion protocol: under weak fairness of `advance`, a leader is
+eventually chosen from every time. The proof is a direct use of `WF`: `advance` is always
+enabled, so it is taken at some time, and a taken `advance` ends in a leader. -/
+def Elect2.liveB (σ : Trace Elect2) (hrun : Elect2.lts.Run σ)
+    (hwf : Elect2.lts.WF .advance σ 0) :
+    (u : Nat) → ∃ k, Elect2.leaderB (σ (Nat.add k u)) = .true :=
+  fun (u : Nat) =>
+    let hen : TL.eventually (TL.always (TL.now (Elect2.lts.enabled .advance))) σ 0 :=
+      Ex.intro (fun (k : Nat) => TL.always (TL.now (Elect2.lts.enabled .advance)) σ (Nat.add k 0)) 0
+        (fun (j : Nat) => Elect2.enabled (σ (Nat.add j 0)))
+    let hinf : TL.always (TL.eventually (Elect2.lts.taken .advance)) σ 0 := hwf hen
+    let hAt : TL.eventually (Elect2.lts.taken .advance) σ u :=
+      Eq.mp' (fun (t : Nat) => TL.eventually (Elect2.lts.taken .advance) σ t)
+        (Nat.add_zero u) (hinf u)
+    Ex.elim hAt
+      (fun (k : Nat) (hk : Elect2.lts.taken .advance σ (Nat.add k u)) =>
+        Ex.intro (fun (j : Nat) => Elect2.leaderB (σ (Nat.add j u)) = .true) (Nat.succ k)
+          hk)
+
+/-- Liveness as a leads-to: from a state with no leader, a leader is eventually chosen.
+The hypothesis is exactly the fair action; without it the theorem is false
+(`Elect2.idleNoLeader`). -/
+def Elect2.live (σ : Trace Elect2) (hrun : Elect2.lts.Run σ)
+    (hwf : Elect2.lts.WF .advance σ 0) :
+    TL.leadsTo (TL.nowB (fun (s : Elect2) => Bool.not s.leader)) (TL.nowB Elect2.leaderB) σ 0 :=
+  fun (k : Nat) (_ : Bool.not (σ (Nat.add k 0)).leader = .true) =>
+    Elect2.liveB σ hrun hwf (Nat.add k 0)
+
+/-- The stutter run: no voter ever votes and no leader is chosen. -/
+def Elect2.idleTrace : Trace Elect2 := Trace.const Elect2.init
+
+/-- The idle trace is a run. -/
+def Elect2.idleRun : Elect2.lts.Run Elect2.idleTrace :=
+  And.intro rfl (fun (t : Nat) => Or.inl rfl)
+
+/-- The idle trace never chooses a leader. -/
+def Elect2.idleNoLeader :
+    ¬ TL.eventually (TL.nowB Elect2.leaderB) Elect2.idleTrace 0 :=
+  fun (h : TL.eventually (TL.nowB Elect2.leaderB) Elect2.idleTrace 0) =>
+    Ex.elim h (fun (k : Nat) (hk : Elect2.leaderB (Elect2.idleTrace (Nat.add k 0)) = .true) =>
+      Bool.trueNeFalse hk)
+
+/-- The idle run is not fair: `advance` is always enabled, so `WF` would force it to be
+taken, but the trace never changes. -/
+def Elect2.idleNotFair : ¬ Elect2.lts.WF .advance Elect2.idleTrace 0 :=
+  fun (hwf : Elect2.lts.WF .advance Elect2.idleTrace 0) =>
+    let hen : TL.eventually (TL.always (TL.now (Elect2.lts.enabled .advance))) Elect2.idleTrace 0 :=
+      Ex.intro (fun (k : Nat) => TL.always (TL.now (Elect2.lts.enabled .advance))
+          Elect2.idleTrace (Nat.add k 0)) 0
+        (fun (j : Nat) => Elect2.enabled Elect2.init)
+    let hinf : TL.always (TL.eventually (Elect2.lts.taken .advance)) Elect2.idleTrace 0 := hwf hen
+    Ex.elim (hinf 0)
+      (fun (k : Nat) (hk : Elect2.lts.taken .advance Elect2.idleTrace (Nat.add k 0)) =>
+        Bool.trueNeFalse (Eq.symm hk))

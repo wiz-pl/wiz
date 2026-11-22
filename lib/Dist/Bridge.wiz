@@ -1,0 +1,111 @@
+import Temporal
+import Data.ListLemmas
+/-!
+# Dist.Bridge
+
+The finite-instance bridge (`import Dist.Bridge`), the part of
+`wiz-notes/distributed-proofs.md` §4.4 that turns a finite check into a statement about
+the protocol spec.
+
+`Bridge.SpecModel` is a finite presentation of an `LTS`: a finite state type `F`, an
+abstraction map `abs : F → S`, an initial list, a successor function and a Boolean
+invariant. The two bridge obligations are the note's `nextL_sound` and `nextL_complete`,
+with `abs` playing the role of `decode ∘ encode`:
+
+* `init_sound`/`init_complete`: the finite initial states are exactly the images of the
+  spec's initial states;
+* `nextL_sound`: every finite successor is a real spec step;
+* `nextL_complete`: every real spec step from an image is a finite successor with the
+  same image.
+
+`Bridge.FReach` is reachability in the finite presentation. `Bridge.SpecModel.run_image`
+proves that every state of every spec run is the image of an `FReach` state;
+`Bridge.SpecModel.safety` then proves the **parameterized** safety theorem from the
+finite invariant. The hypothesis `hcheck` is exactly what `Checker.Model.check_ok_spec`
+supplies for the model built from `initL`, `nextL` and `invB`; keeping it abstract here
+avoids a second copy of the P0 checker theorem.
+
+## Boundary for the P0 message pool
+
+The P0 report deferred the full message-pool instance. This module gives the bridge
+interface and the theorem. The 2PC instantiation is deliberately left at the decision
+projection of `Dist.TwoPhaseFinite` (the `Small 2` instance, 45 states), because
+`TwoPC N` stores its pool and delivery flags as `List`s, which have no length bound in
+the type: `nextL` is not finite without a bounded carrier. The decision projection is
+the bounded carrier that matters for `TwoPC.Inv`, which depends only on `c` and `p`, and
+`TwoPC.preserve` proves every full-pool step preserves it. A finite pool instance needs a
+new bounded state type (a `Vec` of flags and a bounded pool) plus the `nextL_sound` /
+`nextL_complete` proofs against `TwoPC.Step`; that, and the `encode`/`decode` arithmetic,
+are P2. The `invB2` formula in `Dist.TwoPhaseFinite` is the Boolean image of
+`TwoPC.InvOf` at `N = 2`; the equivalence `invB2 s = true ↔ TwoPC.InvOf 2 s.c s.p` is the
+remaining `invB ↔ InvOf` obligation recorded in the P1 report.
+-/
+
+/-- A finite presentation of a spec, with the two bridge directions. -/
+structure Bridge.SpecModel (S A F : Type) where
+  /-- The spec. -/
+  M : LTS S A
+  /-- The finite carrier's abstraction map. -/
+  abs : F → S
+  /-- The finite initial states. -/
+  initL : List F
+  /-- The finite successors. -/
+  nextL : F → List F
+  /-- The Boolean invariant on the finite carrier. -/
+  invB : F → Bool
+  /-- Every finite initial state is a spec initial state. -/
+  init_sound : (f : F) → f ∈ initL → M.init (abs f)
+  /-- Every spec initial state is the image of a finite initial state. -/
+  init_complete : (s : S) → M.init s → ∃ f, f ∈ initL ∧ abs f = s
+  /-- Every finite successor is a spec step. -/
+  nextL_sound : (f f' : F) → f' ∈ nextL f → ∃ a, M.step a (abs f) (abs f')
+  /-- Every spec step from an image is a finite successor with the same image. -/
+  nextL_complete : (f : F) → (a : A) → (s' : S) → M.step a (abs f) s' →
+    ∃ f', f' ∈ nextL f ∧ abs f' = s'
+
+/-- Reachability in a finite presentation. -/
+inductive Bridge.FReach {S A F : Type} (m : Bridge.SpecModel S A F) : F → Prop where
+  /-- A finite initial state is reachable. -/
+  | init (f : F) (h : f ∈ m.initL) : Bridge.FReach m f
+  /-- A finite successor of a reachable state is reachable. -/
+  | step (f f' : F) (hr : Bridge.FReach m f) (h : f' ∈ m.nextL f) : Bridge.FReach m f'
+
+/-- Every state of a spec run is the image of a reachable finite state. This is the
+induction that uses both bridge directions. -/
+def Bridge.SpecModel.run_image {S A F : Type} (m : Bridge.SpecModel S A F)
+    (σ : Trace S) (hr : m.M.Run σ) :
+    (t : Nat) → ∃ f, Bridge.FReach m f ∧ m.abs f = σ t
+  | .zero =>
+      Ex.elim (m.init_complete (σ 0) hr.1)
+        (fun (f : F) (hf : f ∈ m.initL ∧ m.abs f = σ 0) =>
+          Ex.intro (fun (g : F) => Bridge.FReach m g ∧ m.abs g = σ 0)
+            f (And.intro (Bridge.FReach.init f hf.1) hf.2))
+  | .succ t =>
+      Ex.elim (Bridge.SpecModel.run_image m σ hr t)
+        (fun (f : F) (hf : Bridge.FReach m f ∧ m.abs f = σ t) =>
+          Or.elim (hr.2 t)
+            (fun (e : σ (Nat.succ t) = σ t) =>
+              Ex.intro (fun (g : F) => Bridge.FReach m g ∧ m.abs g = σ (Nat.succ t))
+                f (And.intro hf.1 (Eq.trans hf.2 (Eq.symm e))))
+            (fun (w : ∃ a, m.M.step a (σ t) (σ (Nat.succ t))) =>
+              Ex.elim w (fun (a : A) (hs : m.M.step a (σ t) (σ (Nat.succ t))) =>
+                let hs' : m.M.step a (m.abs f) (σ (Nat.succ t)) :=
+                  Eq.substProp (fun (s : S) => m.M.step a s (σ (Nat.succ t))) (Eq.symm hf.2) hs
+                Ex.elim (m.nextL_complete f a (σ (Nat.succ t)) hs')
+                  (fun (f' : F) (hf' : f' ∈ m.nextL f ∧ m.abs f' = σ (Nat.succ t)) =>
+                    Ex.intro (fun (g : F) =>
+                        Bridge.FReach m g ∧ m.abs g = σ (Nat.succ t))
+                      f' (And.intro (Bridge.FReach.step f f' hf.1 hf'.1) hf'.2)))))
+
+/-- The bridge theorem: if every finite reachable state satisfies `invB`, and `invB`
+implies `P` on the abstraction, then `□ P` holds of every spec run. The finite
+hypothesis is supplied by `Checker.Model.check_ok_spec` (P0). -/
+def Bridge.SpecModel.safety {S A F : Type} (m : Bridge.SpecModel S A F) (P : S → Prop)
+    (hcheck : (f : F) → Bridge.FReach m f → m.invB f = .true)
+    (hinv : (f : F) → m.invB f = .true → P (m.abs f))
+    (σ : Trace S) (hr : m.M.Run σ) : TL.always (TL.now P) σ 0 :=
+  fun (k : Nat) =>
+    Ex.elim (Bridge.SpecModel.run_image m σ hr (Nat.add k 0))
+      (fun (f : F) (hf : Bridge.FReach m f ∧ m.abs f = σ (Nat.add k 0)) =>
+        Eq.substProp (fun (s : S) => P s) hf.2
+          (hinv f (hcheck f hf.1)))

@@ -1,0 +1,119 @@
+import Temporal
+/-!
+# Dist.Fairness
+
+Fairness rules for protocols (`import Dist.Fairness`), the P1 layer of
+`wiz-notes/distributed-proofs.md` §3.4 and §8.2.
+
+`lib/Temporal.wiz` already has TLA's `WF`/`SF` and the constructive rules `TL.fairStep`
+and `TL.rank`. This module adds the **protocol-shaped** rule used by the leader-election
+case:
+
+* `LTS.fairRank`: if a fair action is always enabled, its steps decrease a `Nat` rank
+  until a Boolean goal is reached, and no step increases the rank, then the goal is
+  reached from every time. The proof uses the fairness witness that `WF` gives (a
+  `□◇taken` function), so it is constructive; no Markov principle is used.
+* `Elect2` (in `Dist.Leader`): a two-voter completion protocol whose liveness is
+  `LTS.fairRank`. The idle stutter run shows that fairness is necessary.
+-/
+
+/-- `Nat.pred a ≤ r` when `a ≤ r + 1`. -/
+def Nat.pred_le_of_le_succ : (a r : Nat) → Nat.le a (Nat.succ r) = .true → Nat.le (Nat.pred a) r = .true
+  | .zero, r, _ => Nat.zero_le r
+  | .succ a, r, h => h
+
+/-- `Nat.le n n = true`, in the form the rank lemmas use. -/
+def Nat.le_self : (n : Nat) → Nat.le n n = .true
+  | .zero => rfl
+  | .succ n => Nat.le_self n
+
+/-- `succ (k + u) = u + (k + 1)`: the time shift between the WF witness and the
+auxiliary induction. -/
+def Nat.succ_add_eq (k u : Nat) : Nat.succ (Nat.add k u) = Nat.add u (Nat.succ k) :=
+  Eq.trans (Eq.congrArg Nat.succ (Nat.add_comm k u)) (Eq.symm (Nat.add_succ u k))
+
+/-- The rank is non-increasing along a run, from any time. -/
+def LTS.rankNoninc {S A : Type} (M : LTS S A) (rk : S → Nat)
+    (hmono : (b : A) → (s : S) → (s' : S) → M.step b s s' → Nat.le (rk s') (rk s) = .true)
+    (σ : Trace S) (hrun : M.Run σ) (u : Nat) :
+    (k : Nat) → Nat.le (rk (σ (Nat.add u k))) (rk (σ u)) = .true
+  | .zero => Eq.mpr' (fun (t : Nat) => Nat.le (rk (σ t)) (rk (σ u)) = .true)
+      (Nat.add_zero u) (Nat.le_self (rk (σ u)))
+  | .succ k =>
+      let hprev := LTS.rankNoninc M rk hmono σ hrun u k
+      let hstep : Nat.le (rk (σ (Nat.succ (Nat.add u k)))) (rk (σ (Nat.add u k))) = .true :=
+        Or.elim (hrun.2 (Nat.add u k))
+          (fun (e : σ (Nat.succ (Nat.add u k)) = σ (Nat.add u k)) =>
+            Eq.mpr' (fun (s : S) => Nat.le (rk s) (rk (σ (Nat.add u k))) = .true) e
+              (Nat.le_self (rk (σ (Nat.add u k)))))
+          (fun (w : ∃ a, M.step a (σ (Nat.add u k)) (σ (Nat.succ (Nat.add u k)))) =>
+            Ex.elim w (fun (a : A) (hs : M.step a (σ (Nat.add u k)) (σ (Nat.succ (Nat.add u k)))) =>
+              hmono a (σ (Nat.add u k)) (σ (Nat.succ (Nat.add u k))) hs))
+      Eq.mpr' (fun (t : Nat) => Nat.le (rk (σ t)) (rk (σ u)) = .true)
+        (Nat.add_succ u k) (Nat.le_trans _ _ _ hstep hprev)
+
+/-- The auxiliary induction of `fairRank`, over a bound on the rank. -/
+def LTS.fairRankAux {S A : Type} (M : LTS S A) (a : A) (rk : S → Nat) (q : S → Bool)
+    (hbase : (s : S) → rk s = 0 → q s = .true)
+    (hdown : (s : S) → (s' : S) → q s = .false → M.step a s s' → rk s' = Nat.pred (rk s))
+    (hmono : (b : A) → (s : S) → (s' : S) → M.step b s s' → Nat.le (rk s') (rk s) = .true)
+    (hen : (s : S) → M.enabled a s)
+    (σ : Trace S) (hrun : M.Run σ) (hinf : (u : Nat) → ∃ k, M.taken a σ (Nat.add k u)) :
+    (r : Nat) → (u : Nat) → Nat.le (rk (σ u)) r = .true →
+    ∃ j, q (σ (Nat.add u j)) = .true
+  | .zero, u, h =>
+      let h0 : rk (σ u) = 0 := Nat.le_antisymm (rk (σ u)) 0 h (Nat.zero_le (rk (σ u)))
+      Ex.intro (fun (j : Nat) => q (σ (Nat.add u j)) = .true) 0
+        (Eq.mpr' (fun (t : Nat) => q (σ t) = .true) (Nat.add_zero u) (hbase (σ u) h0))
+  | .succ r, u, h =>
+      Ex.elim (hinf u)
+        (fun (k : Nat) (hk : M.taken a σ (Nat.add k u)) =>
+          Or.elim (Bool.cases (q (σ (Nat.add k u))))
+            (fun (hq : q (σ (Nat.add k u)) = .true) =>
+              Ex.intro (fun (j : Nat) => q (σ (Nat.add u j)) = .true) k
+                (Eq.mpr' (fun (t : Nat) => q (σ t) = .true) (Nat.add_comm u k) hq))
+            (fun (hnq : q (σ (Nat.add k u)) = .false) =>
+              let hleK : Nat.le (rk (σ (Nat.add k u))) (Nat.succ r) = .true :=
+                Nat.le_trans _ _ _
+                  (Eq.mp' (fun (t : Nat) => Nat.le (rk (σ t)) (rk (σ u)) = .true)
+                    (Nat.add_comm u k) (LTS.rankNoninc M rk hmono σ hrun u k))
+                  h
+              let hdownK : rk (σ (Nat.succ (Nat.add k u))) = Nat.pred (rk (σ (Nat.add k u))) :=
+                hdown (σ (Nat.add k u)) (σ (Nat.succ (Nat.add k u))) hnq hk
+              let hleNext : Nat.le (rk (σ (Nat.succ (Nat.add k u)))) r = .true :=
+                Eq.mpr' (fun (z : Nat) => Nat.le z r = .true) hdownK
+                  (Nat.pred_le_of_le_succ (rk (σ (Nat.add k u))) r hleK)
+              let hleAt : Nat.le (rk (σ (Nat.add u (Nat.succ k)))) r = .true :=
+                Eq.mp' (fun (t : Nat) => Nat.le (rk (σ t)) r = .true)
+                  (Nat.succ_add_eq k u) hleNext
+              Ex.elim (LTS.fairRankAux M a rk q hbase hdown hmono hen σ hrun hinf r
+                  (Nat.add u (Nat.succ k)) hleAt)
+                (fun (j : Nat) (hj : q (σ (Nat.add (Nat.add u (Nat.succ k)) j)) = .true) =>
+                  Ex.intro (fun (i : Nat) => q (σ (Nat.add u i)) = .true)
+                    (Nat.add (Nat.succ k) j)
+                    (Eq.substProp (fun (t : Nat) => q (σ t) = .true)
+                      (Nat.add_assoc u (Nat.succ k) j) hj))))
+
+/-- The protocol-shaped fairness rule: from any time, if a fair action is always enabled
+and its steps decrease the rank until `q` holds, while every step keeps or decreases the
+rank, then `q` is reached. The conclusion is the `◇` witness used by `TL.leadsTo`. -/
+def LTS.fairRank {S A : Type} (M : LTS S A) (a : A) (rk : S → Nat) (q : S → Bool)
+    (hbase : (s : S) → rk s = 0 → q s = .true)
+    (hdown : (s : S) → (s' : S) → q s = .false → M.step a s s' → rk s' = Nat.pred (rk s))
+    (hmono : (b : A) → (s : S) → (s' : S) → M.step b s s' → Nat.le (rk s') (rk s) = .true)
+    (hen : (s : S) → M.enabled a s)
+    (σ : Trace S) (hrun : M.Run σ) (hwf : M.WF a σ 0) :
+    (u : Nat) → ∃ k, q (σ (Nat.add k u)) = .true :=
+  let henAll : TL.eventually (TL.always (TL.now (M.enabled a))) σ 0 :=
+    Ex.intro (fun (k : Nat) => TL.always (TL.now (M.enabled a)) σ (Nat.add k 0)) 0
+      (fun (j : Nat) => hen (σ (Nat.add j 0)))
+  let hinf : TL.always (TL.eventually (M.taken a)) σ 0 := hwf henAll
+  let hinfAt : (u : Nat) → ∃ k, M.taken a σ (Nat.add k u) :=
+    fun (u : Nat) => Eq.mp' (fun (t : Nat) => TL.eventually (M.taken a) σ t)
+      (Nat.add_zero u) (hinf u)
+  fun (u : Nat) =>
+    Ex.elim (LTS.fairRankAux M a rk q hbase hdown hmono hen σ hrun hinfAt
+        (rk (σ u)) u (Nat.le_self (rk (σ u))))
+      (fun (j : Nat) (hj : q (σ (Nat.add u j)) = .true) =>
+        Ex.intro (fun (k : Nat) => q (σ (Nat.add k u)) = .true) j
+          (Eq.substProp (fun (t : Nat) => q (σ t) = .true) (Nat.add_comm u j) hj))
