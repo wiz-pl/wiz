@@ -258,8 +258,10 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
   `x is not null` / `x is T y` (`cwe476-deref-safe`), `?.`/`??`
   (`cwe476-coalesce-safe`), a non-null-annotated local assigned `null`
   (`cwe476-annotated-unsafe`: `scry/cs/nullable-assignment` plus the dereference), the
-  `!` assertion (`cwe476-forgiving-safe`) and a `T?` field read
-  (`cwe476-field-unsafe`).
+  `!` assertion (`cwe476-forgiving-safe`), a `T?` field read
+  (`cwe476-field-unsafe`), and the `as` / `FirstOrDefault` models
+  (`cwe476-models-unsafe`: each is maybe-null, so a non-null-annotated local is
+  `scry/cs/nullable-assignment` plus a dereference).
 * Later, without downloading big corpora: a few hand-reduced cases modelled on the
   Juliet C# suite's CWE-78/89/476 shapes and on OWASP Benchmark-style servlets;
   real-world differential runs only with the user's OK.

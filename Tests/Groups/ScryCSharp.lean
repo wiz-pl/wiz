@@ -29,10 +29,12 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   regresses from a warning to a silent skip (a construct that lowers to nothing without
   a diagnostic, so the analysis reports nothing about code it never read).
 * **Nullability**: `null/*.cs` pairs each fact with its counter-case — an unguarded
-  `T?` dereference (`unsafe`), the `x != null`/`x is not null` guards (`guarded`),
-  `?.`/`??` (`coalesce`), a non-null-annotated local assigned `null`
-  (`annotated-violation`, which reports `scry/cs/nullable-assignment` separately from
-  the dereference), `!` (`forgiving`), and a `T?` field read (`field`). The tests run
+  `T?` dereference (`cwe476-deref-unsafe`), the `x != null` / `x is not null` /
+  `x is T y` guards (`cwe476-deref-safe`), `?.`/`??` (`cwe476-coalesce-safe`), a
+  non-null-annotated local assigned `null` (`cwe476-annotated-unsafe`, which reports
+  `scry/cs/nullable-assignment` separately from the dereference), `!`
+  (`cwe476-forgiving-safe`), a `T?` field read (`cwe476-field-unsafe`), and the
+  `as`/`FirstOrDefault` models (`cwe476-models-unsafe`). The tests run
   `Scry.Cs.nullWarningsOf` (the `Scry.Nullness` pass over the facts the lowering
   publishes in `Scry.Cs.Lowered.nulls`/`nullPoints`) and pin the annotation EDB
   (`nullable(func, %var)` / `nonnull(func, %var)`) with `nullEdbText`. `coalesce` and
@@ -138,7 +140,8 @@ def fixtures : List (String × String) :=
    ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe"),
    ("null", "cwe476-deref-unsafe"), ("null", "cwe476-deref-safe"),
    ("null", "cwe476-coalesce-safe"), ("null", "cwe476-annotated-unsafe"),
-   ("null", "cwe476-forgiving-safe"), ("null", "cwe476-field-unsafe")]
+   ("null", "cwe476-forgiving-safe"), ("null", "cwe476-field-unsafe"),
+   ("null", "cwe476-models-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -514,6 +517,11 @@ def group : Group where
       run := fun _ => nullGolden "cwe476-coalesce-safe" },
     { name := "lower: the ! null-forgiving operator copies its operand and records an assertion",
       run := fun _ => nullGolden "cwe476-forgiving-safe" },
+    { name := "nullness: as and FirstOrDefault are maybe-null, so assigning them to a non-null local is a violation",
+      run := fun _ => do
+        checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference",
+          "scry/cs/nullable-assignment", "scry/memory/null-dereference"]
+          (← nullWarnings "cwe476-models-unsafe") },
     { name := "macro guard: an unknown name is still a havoc with a warning, not a value",
       run := fun _ => do
         let text ← loweredText "expansions"
