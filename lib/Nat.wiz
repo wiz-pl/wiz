@@ -194,7 +194,7 @@ def Nat.le_refl : (n : Nat) → Nat.Le n n
 /-- (P0 `omega`) `a ≤ b` from `a = b`, with all arguments explicit (a proof term `omega`
 can build without inserting implicits). -/
 def Nat.le_of_eq (a b : Nat) (e : a = b) : Nat.Le a b :=
-  Eq.substProp (fun x => Nat.Le a x) e (Nat.le_refl a)
+  Eq.substProp (fun (x : Nat) => Nat.Le a x) e (Nat.le_refl a)
 /-- (P0 `omega`) `b ≤ a` from `a = b`, with all arguments explicit. -/
 def Nat.le_of_eq_sym (a b : Nat) (e : a = b) : Nat.Le b a :=
   Nat.le_of_eq b a (Eq.symm e)

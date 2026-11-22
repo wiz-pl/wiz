@@ -4441,10 +4441,23 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     | some _ =>
       match ← rewriteDeep gl g h rtl with
       | none => return ← runTac code info st (ans (mkCon 0 []))
-      | some (newT, pf) => do
+      | some (A', a', b', app, cand) => do
+        let repl := if rtl then a' else b'
+        -- abstract the subterm the goal really has (the rule's side may only match it up
+        -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
+        let (abstr, (found, _)) :=
+          (abstractOccAt cand goalT (if _all then none else some 0)).run (false, 0)
+        if !found then return ← runTac code info st (ans (mkCon 0 []))
+        let newT := abstr.instantiateAt 0 repl
         -- a rule that rewrites a term to itself is not a step: report no match, so a set
         -- with a degenerate rule (a left side convertible with its right side) terminates
         if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
+        -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
+        let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
+        -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
+        let P : Term R := .lam "x" (.lam "_"
+          (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
+        let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
         let newTy ← evalIn gl.ctx newT
         let m ← freshMeta gl.ctx "goal" newTy
         unifyGoal gl (.cast newT goalT pf m)

@@ -932,62 +932,44 @@ def prepareIn (g : Globals R) (ctx : LocalCtx R) (h : Term R) :
 def eqSym (A a b : Term R) (e : Term R) : Term R :=
   .transp A a (.lam "x" (.eqTy (.var 0) (a.lift 1))) (.reflTy a) b e
 
-/-- Rewrite the first node of goal `gl`'s type that the rule `h` matches, descending
-through λs and non-dependent applications: `(new type, proof new = old)`. -/
+/-- `t` strengthened by removing `n` innermost bound variables, if it does not mention
+them (a subterm under a binder that the replacement in the goal's context can name). -/
+partial def strengthenN : Nat → Term R → Option (Term R)
+  | 0, t => some t
+  | n + 1, t => match t.strengthen? 0 with
+    | some t' => strengthenN n t'
+    | none => none
+
+/-- Find the first subterm of the goal type that the rule matches **in the goal's
+context**: a subterm under a binder is a candidate only if it can be strengthened (it
+does not mention the bound variables). The Wiz driver still owns rule order and fuel;
+the host owns the depth-aware scan and the transport. -/
 partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) :
-    ElabM R (Option (Term R × Term R)) := do
+    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
   let goalT ← zonk gl.ctx.lvl (quote g gl.ctx.lvl gl.ty)
-  let rec go (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (Term R × Term R)) := do
-    let depth := ctx.lvl - gl.ctx.lvl
-    let prepared ← prepareIn g ctx (h.lift depth)
-    let matched ← match prepared with
-      | some (A, lhs, rhs, happ, pairs) =>
-        let pat := if rtl then rhs else lhs
-        match ← matchCand g ctx A pat lhs rhs happ pairs t with
-        | some (A', a', b', app, _) =>
-          -- `a'` is the rule's left side, `b'` its right side; the node is `a'` up to
-          -- conversion; return `new = old`
-          if rtl then pure (some (a', app))
-          else pure (some (b', eqSym A' a' b' app))
-        | none => pure none
-      | none => pure none
-    match matched with
-    | some r => pure (some r)
-    | none => match t with
-      | .pi .. => pure none
-      | .lam x body => do
-        let tyTerm ← freshTypeMeta ctx "simp binder"
-        let ty ← evalIn ctx tyTerm
-        let ctx' := ctx.bind x ty
-        match ← go ctx' body with
-        | some (bodyNew, pfBody) => pure (some (.lam x bodyNew, .lam x pfBody))
-        | none => pure none
-      | _ => do
-        -- immediate children at binder depth 0, in order
-        let kids := (t.forChildren (m := StateM (List (Term R))) (fun _ => pure ())
-          (fun k c => if k == 0 then modify fun xs => xs ++ [c] else pure ()) []).2
-        let rec tryKids : List (Term R) → ElabM R (Option (Term R × Term R))
-          | [] => pure none
-          | kid :: rest => do
-            let s ← get
-            match ← go ctx kid with
-            | some (kidNew, pf) => do
-              let C := t.abstract kid
-              let parentNew := C.instantiateAt 0 kidNew
-              if parentNew == t then do set s; tryKids rest
-              else do
-                -- `A` is the child's type; quoting it keeps `transp`'s type index
-                -- determined (a bare metavariable is not solved by `transp`)
-                let ty? ← (RCtx.ofLocal ctx).typeOf? kid
-                let A ← match ty? with
-                  | some ty => zonk ctx.lvl (quote g ctx.lvl ty)
-                  | none => freshTypeMeta ctx "simp congr"
-                let sym := .transp A kidNew (.lam "x" (.eqTy (.var 0) (kidNew.lift 1)))
-                  (.reflTy kidNew) kid pf
-                let P : Term R := .lam "x" (.eqTy (.app (C.lift 1) (.var 0)) (t.lift 1))
-                pure (some (parentNew, .transp A kid P (.reflTy t) kidNew sym))
-            | none => do set s; tryKids rest
-        tryKids kids
-  go gl.ctx goalT
+  match ← prepareIn g gl.ctx h with
+  | none => pure none
+  | some (A, lhs, rhs, happ, pairs) =>
+    let pat := if rtl then rhs else lhs
+    let rec scan (t : Term R) (depth : Nat) :
+        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+      let cand? := strengthenN depth t
+      match cand? with
+      | some cand => match ← matchCand g gl.ctx A pat lhs rhs happ pairs cand with
+        | some r => pure (some r)
+        | none => scanKids t depth
+      | none => scanKids t depth
+    and scanKids (t : Term R) (depth : Nat) :
+        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+      let kids := (t.forChildren (m := StateM (List (Nat × Term R))) (fun _ => pure ())
+        (fun k c => modify fun xs => xs ++ [(k, c)]) []).2
+      let rec goKids : List (Nat × Term R) →
+          ElabM R (Option (Term R × Term R × Term R × Term R × Term R))
+        | [] => pure none
+        | (k, c) :: rest => match ← scan c (depth + k) with
+          | some r => pure (some r)
+          | none => goKids rest
+      goKids kids
+    scan goalT 0
 
 end Wiz.Elab
