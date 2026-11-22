@@ -11622,7 +11622,7 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
       let budget := commandSteps stx;
       -- (13t) a namespace command changes the state (and validates it), not the globals;
       -- it takes the step's place when it is one, as on train9's side.
-      let step := match commandStep gs0 stx sp with
+      let step : Step := match commandStep gs0 stx sp with
         | .mk line gs' => match nsCommand gs0 stx start with
           | .some s => s
           | .none => .mk line gs'
