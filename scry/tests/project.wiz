@@ -307,14 +307,14 @@ def main : IO Unit := EIO.toIO (do
   check "cache: the strict entry warms too" (Nat.beq cs2.2.hit 3);
   -- a rule pack is not part of the CST key: findings are recomputed from the CST, so a
   -- changed pack on a warm cache must change the report rather than replay an old one
-  oob ← Scry.loadTaintPack (.some "../lib/Scry/rules/oob.scry");
+  oob ← Scry.loadTaintPack (.some "scry/rules/oob.scry");
   let repOob := Scry.analyzeProject c2.1 oob s2;
   check "cache: a rule-pack change cannot replay stale findings" (Bool.not (String.eq (findingsText repWarm) (findingsText repOob)));
 
   -- one source file: its content is the key (not its timestamp)
   let srcDir := String.append tmp "/src";
   FS.createDir srcDir;
-  let srcCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/srccache");
+  let srcCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/srccache") .json;
   let srcFile := String.append srcDir "/a.c";
   FS.writeFile srcFile "int f(void) { return 1; }\n";
   b0 ← build srcDir srcCache;
@@ -330,7 +330,7 @@ def main : IO Unit := EIO.toIO (do
   -- a header is not in the outer key, but its text reaches the preprocessed digest
   let hdrDir := String.append tmp "/hdr";
   FS.createDir hdrDir;
-  let hdrCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/hdrcache");
+  let hdrCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/hdrcache") .json;
   FS.writeFile (String.append hdrDir "/h.h") "#define CALL a\nchar *a(void);\nchar *b(void);\n";
   FS.writeFile (String.append hdrDir "/m.c") "#include \"h.h\"\nvoid m(void) { CALL(); }\n";
   h1 ← build hdrDir hdrCache;
@@ -349,7 +349,7 @@ def main : IO Unit := EIO.toIO (do
   let fmtDir := String.append tmp "/fmt";
   FS.createDir fmtDir;
   let fmtCacheDir := String.append tmp "/fmtcache";
-  let fmtCache : Scry.CacheOpts := Scry.CacheOpts.mk .true fmtCacheDir;
+  let fmtCache : Scry.CacheOpts := Scry.CacheOpts.mk .true fmtCacheDir .json;
   FS.writeFile (String.append fmtDir "/x.c") "int x(void) { return 0; }\n";
   f0 ← build fmtDir fmtCache;
   check "cache: the one-TU version fixture is cold" (Nat.beq f0.2.miss 1);

@@ -629,6 +629,9 @@ inductive Tac where
   -- (P0) the `[hint]` database: each entry's name, kind (`apply`/`intro`/`elim`) and
   -- reflected constant, in the order `auto` tries them (priority, then registration)
   | getHints (g : Nat) (k : List (String × (String × Expr)) → Tac)
+  -- (P0) the raw open goals, including the main goal a tactic has just solved: what
+  -- `replaceMainGoal` replaces (so it does not drop the next goal)
+  | getOpen (k : List Nat → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -656,6 +659,9 @@ def TacticM.fresh : TacticM Nat := fun k => Tac.fresh k
 /-- The open goals, the main goal first. Goals are numbers, handles held by the
 elaborator. -/
 def TacticM.getGoals : TacticM (List Nat) := fun k => Tac.getGoals k
+/-- The open goals **as the tactic started**, including the main goal a tactic just
+solved: what `TacticM.replaceMainGoal` replaces. (The filtered list is `getGoals`.) -/
+def TacticM.getOpen : TacticM (List Nat) := fun k => Tac.getOpen k
 /-- Replace the list of open goals. -/
 def TacticM.setGoals (gs : List Nat) : TacticM Unit := fun k => Tac.setGoals gs (k ())
 /-- The type of goal `g` (what is to be proved), reflected. -/
@@ -971,9 +977,11 @@ def TacticM.mainGoal : TacticM Nat := do
   | .nil => TacticM.fail "no goals"
   | .cons g _ => TacticM.pure g
 
-/-- Replace the main goal by the goals `new` (none, when it was closed). -/
+/-- Replace the main goal by the goals `new` (none, when it was closed). It reads the
+goals **as the tactic found them**, not the filtered list after the tactic solved the
+main goal, so closing one goal keeps the others. -/
 def TacticM.replaceMainGoal (new : List Nat) : TacticM Unit := do
-  gs ← TacticM.getGoals;
+  gs ← TacticM.getOpen;
   match gs with
   | .nil => TacticM.setGoals new
   | .cons _ rest => TacticM.setGoals (List.append new rest)
@@ -1316,6 +1324,11 @@ def List.dropN {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => List.dropN n xs
+/-- The first `n` elements of a list (at most what it has). -/
+def List.takeN {A : Type} : Nat → List A → List A
+  | .zero, _ => .nil
+  | .succ _, .nil => .nil
+  | .succ n, .cons x xs => .cons x (List.takeN n xs)
 /-- `e` as a constructor application: the constructor's name and its fields (the
 arguments after the type's parameters). `List.cons A x L` is `("List.cons", [x, L])`. -/
 def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match Expr.constApp e with
@@ -1718,7 +1731,7 @@ partial def TacticM.autoHints
           let restGoals : List Nat := match before with
             | .nil => .nil
             | .cons _ t => t;
-          let fresh := List.dropN (List.length restGoals) after;
+          let fresh := List.takeN (Nat.sub (List.length after) (List.length restGoals)) after;
           go fresh (Nat.sub depth 1) (Nat.sub fuel 1) all)
         (fun _ => TacticM.autoHints go g depth fuel hs all)
 
@@ -1957,6 +1970,31 @@ def TacticM.omegaHypTerms (g : Nat) : List (String × Expr) → TacticM (List Ex
             TacticM.pure (List.append ts rest)
         | .none => TacticM.pure rest
 
+/-- A direct proof of `Nat.Le a c` from an equality hypothesis `a + k = c` (the
+transitive closure's equality edges can hit instance-metavariable mismatches; this is
+the common bound shape and is checked directly). -/
+def TacticM.omegaDirectAdd (g : Nat) (i : Nat) (a c : Expr) :
+    List (String × Expr) → TacticM (Option Expr)
+  | .nil => TacticM.pure .none
+  | .cons h hs => do
+    ev ← TacticM.eqView g h.2;
+    match ev with
+    | .some q => match q with
+      | (_, u, v) => do
+        vc ← TacticM.isDefEq g v c;
+        match vc with
+        | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+        | .true => do
+          u' ← TacticM.normalize g u;
+          match Expr.addPair u' with
+          | .some (x, k) => do
+            xa ← TacticM.isDefEq g x a;
+            match xa with
+            | .true => TacticM.pure (.some (Expr.ap4 (.const "Nat.le_of_eq_add'") a c k (Expr.var i)))
+            | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+          | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+    | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+
 /-- Prove `Nat.Le src target` by the BFS; assign it to `g`, or fail. -/
 def TacticM.omegaLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
     (src target : Expr) : TacticM Unit := do
@@ -2006,7 +2044,10 @@ def Tactic.omega : Tactic := fun _ => do
     | .some (.cons a (.cons b .nil)) => do
       ts ← TacticM.omegaCollect g (.cons a (.cons b .nil));
       hs ← TacticM.omegaHypTerms g hyps;
-      TacticM.omegaLe g hyps (List.append ts hs) a b
+      d ← TacticM.omegaDirectAdd g 0 a b hyps;
+      match d with
+      | .some pr => TacticM.assign g pr
+      | .none => TacticM.omegaLe g hyps (List.append ts hs) a b
     | _ => match Expr.appOf "Nat.Lt" ty with
       | .some (.cons a (.cons b .nil)) => do
         let sa : Expr := .app (.const "Nat.succ") a;

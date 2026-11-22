@@ -1,0 +1,40 @@
+import IO
+import Std
+import Text
+
+-- (audit F19) The smallest verification of the `Str` builder, usable with a compiler
+-- from before and after the runtime change: N `Str.append`s of a one-byte piece. A
+-- unique receiver grows in place (geometric capacity), so the total work is linear in
+-- N; a copying append is quadratic, which is unmistakable at 1k/10k/100k.
+--
+--   wiz build bench/str-append.wiz -o str-append
+--   ./str-append 1000        # prints: <size> <checksum>
+--
+-- The checksum samples 1000 offsets, so a compiler or runtime change cannot delete the
+-- work as dead code and two builds can be compared on the same input.
+
+def piece : Str := Str.ofString "x"
+
+def write : Nat → Str → Str
+  | .zero, s => s
+  | .succ k, s => write k (Str.append s piece)
+
+def digest (acc x : Nat) : Nat := Nat.mod (Nat.add (Nat.mul acc 131) (Nat.mod x 1000000007)) 1000000007
+
+def sample (s : Str) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.mod (Nat.mul k 7919) n;
+    sample s n k (digest acc (Str.byte s i))
+
+def checksum (s : Str) : Nat := sample s (Str.size s) 1000 0
+
+def argN : List String → Nat
+  | .cons s _ => match String.parseNat s with
+    | .some n => n
+    | .none => 1000
+  | _ => 1000
+
+def main : IO Unit := IO.bind IO.args (fun as =>
+  let s := write (argN as) (Str.ofString "");
+  IO.println (String.append (Nat.toString (Str.size s)) (String.append " " (Nat.toString (checksum s)))))

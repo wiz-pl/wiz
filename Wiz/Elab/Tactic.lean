@@ -88,6 +88,8 @@ def ctorNames := 41
 def byCases := 42
 -- (P0) the `[hint]` database, for `auto`
 def getHints := 43
+-- (P0) the raw open-goal list (before filtering solved goals), for `replaceMainGoal`
+def getOpen := 44
 end TacTag
 
 structure Goal (R : Type) where

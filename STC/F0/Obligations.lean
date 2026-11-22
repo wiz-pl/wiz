@@ -5,11 +5,36 @@ import STC.F0.Renaming
 M0 asks F0 to **state** what its metatheory will prove (see `STC.lean`'s module doc), not to prove it yet. This file is that list:
 
 * `SoundF0 sg`: a checker exists that is sound, complete and total for F0 typing;
-* `Con sg`: an axiom-free signature has no closed term of type `Empty prop`;
+* `Con sg`: a well-formed, axiom-free signature has no closed term of type `Empty prop`;
 * `WHN sg`: a deterministic, typed weak-head strategy reaches a whnf at every relevant
   type (a proposition is excluded: `WhRed` is empty there);
 * `DecConv sg`: conversion is decided by a sound and complete whnf-interleaved algorithm;
 * `DecTC sg`: typing is decided by a sound and complete bidirectional algorithm.
+
+Every obligation below carries two signature hypotheses, and neither is decoration:
+
+* `SigWF F0 sg` (`Spec/Fragments.lean`): declarations have fresh names, every declared type
+  is a sort *in the signature before it*, and every value is typed at its declared type.
+  Without it, `Global.const` (`Spec/Global.lean`) types a constant at `d.type` for any `d`
+  with `sg.find? c = some d`, whatever `d.type` is, and `Global.delta` unfolds any value.
+  That makes the old unrestricted `Con` **false**, not merely unproved:
+  `F0/Regression.lean` refutes it with
+  `badSig = [{ name := "bad", type := Empty prop, value := some tt }]`
+  (`conUnrestricted_false`). The writer/checker obligations quantify over the same
+  non-signatures, where `Global.const`/`delta` expose declarations the kernel would reject,
+  so they carry the hypothesis too. `SigWF` is not a syntactic filter: it would fail for
+  `badSig` only by forcing the inconsistency `Con []` denies
+  (`badSig_sigWF_gives_empty`, `badSig_not_sigWF_of_con`).
+* `Sig.Closed sg` (`Syntax.lean`): every declaration is closed under substitution. This is
+  the licence `Struct.eqTyped`/`ctxConv` carry (`Spec/Struct.lean`). **Without it
+  `Struct sg` has no instances**, so `F0 sg` admits exactly the `F0Base sg` derivations and
+  an obligation named `F0` would silently be about the fragment without the structural
+  conversion rules; the two lemmas `F0_rename_of`/`F0_subst_of` (`F0/Typing.lean`) already
+  take it.
+
+`F0/Regression.lean` also proves that the hypotheses are jointly inhabited, with a
+non-empty signature (`sigWF_closed_axiomFree_inhabited`), so the obligations are not
+vacuous.
 
 The checker shape is `WizMeta/Checker.lean`'s: fuel-indexed, substitution-based, `M` a
 result or a fuel/error. The functions themselves are M1 work; nothing here is proved.
@@ -54,16 +79,40 @@ def Total (check : Checker) (sg : Sig) : Prop :=
   ∀ Γ t A, ¬ Derivable (F0 sg) (Γ ⊢ t ∶ A) → ∃ n, check n Γ t A = .ok false
 
 /-- **`Sound(F0)`**: there is a sound, complete and total checker for F0. The proof is M1/M2
-(the M1 checker plus the logical relation for completeness); M0 states it. -/
-def SoundF0 (sg : Sig) : Prop :=
-  ∃ check : Checker, Sound check sg ∧ Complete check sg ∧ Total check sg
+(the M1 checker plus the logical relation for completeness); M0 states it.
 
-/-- **`Con(F0)`**: for an axiom-free signature there is no closed proof of `Empty prop`.
-The route is PT23's set model of codes plus the Σ/Unit/Enum/ULift cases of the model memo;
-no mechanised model in M0. `castRefl` is not a rule, so consistency is relative to a
-signature that does not declare it. -/
+`SigWF F0 sg` keeps the claim to signatures the kernel could accept (without it
+`Global.const`/`delta` expose a declaration whose type is not a sort or whose value is not
+at its type); `Sig.Closed sg` is the licence `Struct`'s rules carry, so this is about `F0`
+and not silently about `F0Base` (module doc, `F0/Regression.lean`). -/
+def SoundF0 (sg : Sig) : Prop :=
+  SigWF F0 sg → Sig.Closed sg →
+    ∃ check : Checker, Sound check sg ∧ Complete check sg ∧ Total check sg
+
+/-- **`Con(F0)`**: for a well-formed, closed, axiom-free signature there is no closed proof
+of `Empty prop`. The route is PT23's set model of codes plus the Σ/Unit/Enum/ULift cases of
+the model memo; no mechanised model in M0. `castRefl` is not a rule, so consistency is
+relative to a signature that does not declare it.
+
+**The `SigWF` hypothesis is load-bearing.** The unrestricted statement is false, and not
+merely unproved: `Global.const` types `const c` at `d.type` for any declaration `d` found by
+`sg.find? c`, and nothing checks that `d.type` is a sort or that `d.value` is at it. The
+signature `badSig = [{ name := "bad", type := Empty prop, value := some tt }]` is
+`AxiomFree` and proves `[] ⊢ const "bad" ∶ Empty prop` (`F0/Regression.lean`,
+`badSig_derives_empty`), refuting the old form (`conUnrestricted_false`).
+
+`SigWF` excludes `badSig` for the right reason: its `defn` constructor checks a value at the
+declared type in the signature **before** the declaration, so `SigWF F0 badSig` would give
+`[] ⊢ tt ∶ Empty prop` in `F0 []` (`badSig_sigWF_gives_empty`) — the very judgment `Con []`
+forbids (`badSig_not_sigWF_of_con`). The hypothesis therefore fails only when the fragment
+is already inconsistent; it does not hide the malformed declaration.
+
+`Sig.Closed sg` is there because `F0` includes `Struct`'s two rules and those are licensed
+by it: with no `Sig.Closed` proof `Struct sg` is empty, so the statement would be about
+`F0Base sg`. -/
 def Con (sg : Sig) : Prop :=
-  AxiomFree sg → ∀ t : Tm, ¬ Derivable (F0 sg) (([] : Ctx) ⊢ t ∶ .empty .prop)
+  SigWF F0 sg → Sig.Closed sg → AxiomFree sg →
+    ∀ t : Tm, ¬ Derivable (F0 sg) (([] : Ctx) ⊢ t ∶ .empty .prop)
 
 /-- A weak-head normal form: well typed, and no further reduction step. -/
 def Whnf (sg : Sig) (Γ : Ctx) (t A : Tm) : Prop :=
@@ -80,24 +129,30 @@ abbrev WhnfStrategy := Nat → Ctx → Tm → Tm → Option Tm
 /-- **`WHN`**: a deterministic weak-head strategy reaches a whnf at every term of a type
 that is not a proposition. At a proposition no proof is reduced (`WhRed` is empty there),
 so the hypothesis `s.NeverZero` is essential. The emptiness of `WhRed` at a proposition
-needs the sorting lemma `SortUniqueAt` (`F0/WhRed.lean`); see the note there. -/
+needs the sorting lemma `SortUniqueAt` (`F0/WhRed.lean`); see the note there.
+
+The signature hypotheses are those of the module doc: `SigWF` (the strategy is about
+signatures the kernel could accept) and `Sig.Closed` (the licence of `Struct`, which is part
+of `F0`). -/
 def WHN (sg : Sig) : Prop :=
-  ∃ whnf : WhnfStrategy,
-    (∀ n Γ A t u, whnf n Γ A t = some u → RedStar sg Γ A t u ∧ Whnf sg Γ u A) ∧
-    (∀ Γ A t s, Derivable (F0 sg) (Γ ⊢ t ∶ A) → Derivable (F0 sg) (Γ ⊢ A ∶ .sort s) →
-      s.NeverZero → ∃ n u, whnf n Γ A t = some u)
+  SigWF F0 sg → Sig.Closed sg →
+    ∃ whnf : WhnfStrategy,
+      (∀ n Γ A t u, whnf n Γ A t = some u → RedStar sg Γ A t u ∧ Whnf sg Γ u A) ∧
+      (∀ Γ A t s, Derivable (F0 sg) (Γ ⊢ t ∶ A) → Derivable (F0 sg) (Γ ⊢ A ∶ .sort s) →
+        s.NeverZero → ∃ n u, whnf n Γ A t = some u)
 
 /-- A conversion checker: `conv fuel Γ t u A` decides `Γ ⊢ t ≡ u ∶ A`. -/
 abbrev ConvChecker := Nat → Ctx → Tm → Tm → Tm → M Bool
 
 /-- **`DecConv`**: conversion is decided by a typed, whnf-interleaved algorithm (proof
 irrelevance at `Prop` first; η at Π/Σ/Unit/ULift; tags; neutral spines), sound and
-complete. -/
+complete. The signature hypotheses are those of the module doc: `SigWF` and `Sig.Closed`. -/
 def DecConv (sg : Sig) : Prop :=
-  ∃ conv : ConvChecker,
-    (∀ n Γ t u A, conv n Γ t u A = .ok true → Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A)) ∧
-    (∀ n Γ t u A, conv n Γ t u A = .ok false → ¬ Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A)) ∧
-    (∀ Γ t u A, Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A) → ∃ n, conv n Γ t u A = .ok true)
+  SigWF F0 sg → Sig.Closed sg →
+    ∃ conv : ConvChecker,
+      (∀ n Γ t u A, conv n Γ t u A = .ok true → Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A)) ∧
+      (∀ n Γ t u A, conv n Γ t u A = .ok false → ¬ Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A)) ∧
+      (∀ Γ t u A, Derivable (F0 sg) (Γ ⊢ t ≡ u ∶ A) → ∃ n, conv n Γ t u A = .ok true)
 
 /-! ## The sorting lemma's supporting statements
 
@@ -201,12 +256,14 @@ theorem tyUniqueTyped_of_tyUnique {sg : Sig} (h : TyUnique sg) : TyUniqueTyped s
 /-- A bidirectional typing checker: `tc fuel Γ t A` decides `Γ ⊢ t ⇐ A`. -/
 abbrev TCChecker := Nat → Ctx → Tm → Tm → M Bool
 
-/-- **`DecTC`**: bidirectional typing is sound and complete, hence decidable. -/
+/-- **`DecTC`**: bidirectional typing is sound and complete, hence decidable. The signature
+hypotheses are those of the module doc: `SigWF` and `Sig.Closed`. -/
 def DecTC (sg : Sig) : Prop :=
-  ∃ tc : TCChecker,
-    (∀ n Γ t A, tc n Γ t A = .ok true → Derivable (F0 sg) (Γ ⊢ t ∶ A)) ∧
-    (∀ n Γ t A, tc n Γ t A = .ok false → ¬ Derivable (F0 sg) (Γ ⊢ t ∶ A)) ∧
-    (∀ Γ t A, Derivable (F0 sg) (Γ ⊢ t ∶ A) → ∃ n, tc n Γ t A = .ok true)
+  SigWF F0 sg → Sig.Closed sg →
+    ∃ tc : TCChecker,
+      (∀ n Γ t A, tc n Γ t A = .ok true → Derivable (F0 sg) (Γ ⊢ t ∶ A)) ∧
+      (∀ n Γ t A, tc n Γ t A = .ok false → ¬ Derivable (F0 sg) (Γ ⊢ t ∶ A)) ∧
+      (∀ Γ t A, Derivable (F0 sg) (Γ ⊢ t ∶ A) → ∃ n, tc n Γ t A = .ok true)
 
 end Spec
 end F0
