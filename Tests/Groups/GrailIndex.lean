@@ -444,9 +444,10 @@ def grailIndexGroup : Group where
         let snapText ← IO.FS.readFile (idx / "index" / "snapshot.sexpr")
         let .ok snap := Grail.Snapshot.parse snapText
           | throw (IO.userError "the snapshot did not parse")
-        let yankedEntry := entry.replace " (deps))))" " (deps))) (yanked \"1.2.0\" \"bad tarball\"))"
-        let .ok pkgs := Grail.Index.parse yankedEntry
-          | throw (IO.userError "the yanked index did not parse")
+        let yankedEntry := entry.replace " (deps))))" " (deps)) (yanked \"1.2.0\" \"bad tarball\")))"
+        let pkgs ← match Grail.Index.parse yankedEntry with
+          | .ok ps => pure ps
+          | .error e => throw (IO.userError s!"the yanked index did not parse: {e}; text={yankedEntry}")
         let byName := pkgs.foldl (fun m p => m.insert p.name p) {}
         -- the old snapshot says "live"; the index says yanked: covers refuses
         match Grail.Snapshot.covers snap byName with
