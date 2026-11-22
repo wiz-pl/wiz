@@ -307,7 +307,7 @@ def main : IO Unit := EIO.toIO (do
   check "cache: the strict entry warms too" (Nat.beq cs2.2.hit 3);
   -- a rule pack is not part of the CST key: findings are recomputed from the CST, so a
   -- changed pack on a warm cache must change the report rather than replay an old one
-  oob ← Scry.loadTaintPack (.some "../lib/Scry/rules/oob.scry");
+  oob ← Scry.loadTaintPack (.some "scry/rules/oob.scry");
   let repOob := Scry.analyzeProject c2.1 oob s2;
   check "cache: a rule-pack change cannot replay stale findings" (Bool.not (String.eq (findingsText repWarm) (findingsText repOob)));
 
