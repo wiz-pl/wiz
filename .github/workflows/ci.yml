@@ -120,17 +120,28 @@ jobs:
   # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
   # a PR before the build starts. A bounded site is excused inline, on the line or the
   # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
+  # Early in the job, scripts/check-companion-lists.py checks the lists a commit must
+  # move with its source (libdiff corpus, legacy names + digest, collision baseline),
+  # and scripts/check-release-consistency.py checks the release packet and that the
+  # docs still name the versions, channels, commands and artifacts the tree produces.
   # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 5 min: four Python checks and the libdiff corpus check on the checkout; no build
+    # 5 min: six Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          fetch-depth: 2 # the diff base for scripts/check-complexity
+          # 0: check-release-consistency resolves the packet's candidate (an older
+          # commit) and its counts; check-complexity uses HEAD^1.
+          fetch-depth: 0
+      - name: Check the generated companion lists
+        shell: bash
+        run: |
+          python3 scripts/check-companion-lists.py --self-test
+          python3 scripts/check-companion-lists.py
       - name: Check the docs, and the checker's fixtures
         shell: bash
         run: |
@@ -145,6 +156,11 @@ jobs:
           python3 scripts/check-names.py --self-test
           python3 scripts/check-names.py --quiet
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
+      - name: Check the release packet and the machinery it describes
+        shell: bash
+        run: |
+          python3 scripts/check-release-consistency.py --self-test
+          python3 scripts/check-release-consistency.py --quiet
 
   # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
   # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground

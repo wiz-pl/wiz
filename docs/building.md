@@ -998,6 +998,17 @@ setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+  The same job runs `scripts/check-companion-lists.py` early: it checks the lists that
+  must move with their source of truth — `.github/libdiff-corpus.txt` against the walk
+  over `lib/` and `scry/`, `legacy-names.tsv` and `Wiz/LegacyNames.lean`'s digest against
+  the declarations, and stale or expired entries in
+  `.github/name-collisions-baseline.json` — by calling the existing checks and reporting
+  one `companion drift:` line naming both sides. (The test-shard total needs the test
+  binary, so that check stays in the build job; the trust ledger and scry goldens have
+  their own jobs.) It also runs `scripts/check-release-consistency.py`, which checks the
+  release packet and, for the machinery, that a version, channel, `scripts/...` command
+  or release artifact named in `docs/release*`, `docs/building.md`, `README.md` or
+  `CHANGELOG.md` is still produced by the tree.
   The same job runs `scripts/check-doc-links.py`: every relative link and `#anchor` in
   those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
   to `wiz-notes/...` are reported as external notes (the notes live outside the
