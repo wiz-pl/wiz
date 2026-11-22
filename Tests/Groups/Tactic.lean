@@ -433,7 +433,7 @@ def tacticGroup : Group where
           "  simp?\n  rfl\n" ++
           "def addZero' (n : Nat) : n + 0 = n := by\n" ++
           "  simp only [Nat.add_zero]\n  rfl")
-          ["Try this: simp only [Nat.add_zero]", "rulesUsed: [Nat.add_zero]"] },
+          ["Try this: simp only [Nat.add_zero]; rfl", "simp?: rulesUsed: [Nat.add_zero]"] },
     -- P0 auto and [hint]
     { name := "auto closes a hypothesis chain and a conjunction", run := fun _ =>
         okLib ("import Logic\n" ++
