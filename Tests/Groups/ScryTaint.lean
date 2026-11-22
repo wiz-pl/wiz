@@ -465,15 +465,16 @@ def group : Group where
           "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
           "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
           -- the R7 fields: codeFlows, the GitHub fingerprint key, and the run-level
-          -- invocation for a complete and for a truncated run
-          "#eval jLen (firstResult sar) \"codeFlows\"\n" ++
-          "#eval match Json.getList (firstResult sar) \"codeFlows\" with | .cons cf _ => (match Json.getList cf \"threadFlows\" with | .cons tf _ => (if Nat.lt 0 (List.length (Json.getList tf \"locations\")) then 1 else 0) | .nil => 0) | .nil => 0\n" ++
-          "#eval match Json.get (firstResult sar) \"partialFingerprints\" with | .some fp => (match Json.get fp \"primaryLocationLineHash\" with | .some (.str s) => (if Nat.lt 0 (String.length s) then 1 else 0) | _ => 0) | .none => 0\n" ++
+          -- invocation for a complete and for a truncated run. Definitions first: some
+          -- Wiz frontends treat `#eval` as the end of a declaration block.
           "def inv := headJ Json.mkNull (Json.getList (sarifRun sar) \"invocations\")\n" ++
-          "#eval match Json.get inv \"executionSuccessful\" with | .some (.bool b) => (if b then 1 else 0) | _ => 0\n" ++
           "def note := Scry.Budget.terminationNotes (Scry.Termination.rounds 2 2)\n" ++
           "def sarT : Json := match Json.parse (Scry.renderSarifPartialWith \"scry\" originMap Scry.demoRules (List.map (fun f => (f, .true)) (Scry.programFindings prI)) .nil note) with | .ok j => j | .error _ => Json.mkNull\n" ++
           "def invT := headJ Json.mkNull (Json.getList (sarifRun sarT) \"invocations\")\n" ++
+          "#eval jLen (firstResult sar) \"codeFlows\"\n" ++
+          "#eval match Json.getList (firstResult sar) \"codeFlows\" with | .cons cf _ => (match Json.getList cf \"threadFlows\" with | .cons tf _ => (if Nat.lt 0 (List.length (Json.getList tf \"locations\")) then 1 else 0) | .nil => 0) | .nil => 0\n" ++
+          "#eval match Json.get (firstResult sar) \"partialFingerprints\" with | .some fp => (match Json.get fp \"primaryLocationLineHash\" with | .some (.str s) => (if Nat.lt 0 (String.length s) then 1 else 0) | _ => 0) | .none => 0\n" ++
+          "#eval match Json.get inv \"executionSuccessful\" with | .some (.bool b) => (if b then 1 else 0) | _ => 0\n" ++
           "#eval match Json.get invT \"executionSuccessful\" with | .some (.bool b) => (if b then 0 else 1) | _ => 0\n" ++
           "#eval List.length (Json.getList invT \"toolExecutionNotifications\")") [1, 4, 1, 1, 3, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1]
         evalRuleTexts (rulePrelude ++
