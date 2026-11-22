@@ -1,9 +1,9 @@
 # Numerics and solver trust: the host-side recommendations
 
-Status: implemented on `agent/recs-numerics-host`, 2026-11-22. This is the host-side
+Status: implemented 2026-11-22, host side. This is the host-side
 half of `wiz-notes/sota-numerics.md` §5 (tracker rows R2–R7 of
-`wiz-notes/roadmap/sota-recommendations.md`). R1 (the self-hosted `Nat`) is another
-lane's file and is not touched here.
+`wiz-notes/roadmap/sota-recommendations.md`). R1 (the self-hosted `Nat`) is a
+separate change and is not touched here.
 
 The trust question is not "fast or slow" but **which equations the kernel decides by
 computation and which facts enter as axioms**. This page records, for each host-side
