@@ -542,7 +542,7 @@ else
   local lsp = require 'wiz.lsp'
 
   test('a file of an installed toolchain is found to be one', function()
-    eq({ lib = share .. '/lib', wiz = tc .. '/bin/wiz' }, lsp.toolchain(share .. '/lib/Hdl/Core.wiz'), 'toolchain')
+    eq({ lib = share .. '/lib', wiz = tc .. '/bin/wiz' }, lsp.toolchain(share .. '/lib/Word.wiz'), 'toolchain')
     eq(nil, lsp.toolchain(here .. '/fixture/Goals.wiz'), 'not a toolchain')
     eq({ tc .. '/bin/wiz', 'lsp' }, lsp.cmd(share .. '/lib'), 'the command')
   end)
@@ -576,10 +576,10 @@ else
     end
     eq(true, uri ~= nil and uri:find('/lib/Prelude.wiz$') ~= nil, 'the definition of Nat at ' .. row .. ':' .. col .. ' (' .. vim.inspect(res) .. ')')
     -- another file of the same toolchain: the same client
-    vim.cmd('edit ' .. vim.fn.fnameescape(share .. '/lib/Hdl/Core.wiz'))
+    vim.cmd('edit ' .. vim.fn.fnameescape(share .. '/lib/Word.wiz'))
     wait(10000, function()
       return lsp.client(0) ~= nil
-    end, 'the client for Hdl/Core.wiz')
+    end, 'the client for Word.wiz')
     eq(c.id, lsp.client(0).id, 'one client per toolchain')
   end)
 end

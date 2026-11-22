@@ -150,12 +150,8 @@ def examplesGroup : Group where
   exercise := "examples/ (grail test)"
   cases :=
     [ markerCase
-    , examplesCase "examples/ before hdl: the stage demos, classes, std-like and FFI examples"
-        (fun f => f < "examples/hdl") ["examples/closed-table-bench.wiz"]
-    , examplesCase "examples/hdl*: the HDL examples, including the large netlist goldens"
-        (fun f => f < "examples/import_c" && !(f < "examples/hdl"))
-        ["examples/hdl-crc-link.wiz", "examples/hdl-sim-bench.wiz", "examples/hdl-verified-full.wiz",
-         "examples/hdl-verified-native.wiz"]
+    , examplesCase "examples/ before import_c: the stage demos, classes, std-like and FFI examples"
+        (fun f => f < "examples/import_c") ["examples/closed-table-bench.wiz"]
     , examplesCase "examples/ from import_c: the library, Scry, Rune and Pervasive examples"
         (fun f => !(f < "examples/import_c"))
         ["examples/natives-bench.wiz", "examples/plot.wiz", "examples/scry-datalog-bench.wiz"] ]

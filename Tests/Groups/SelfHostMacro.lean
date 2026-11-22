@@ -10,7 +10,8 @@ namespace Tests.Elab
 
 /-! # `selfhost-macro`: A12, notation and macros in the self-hosted frontend
 
-The forms are counted in `lib/**/*.wiz` (78 files, including `lib/Hdl/`; a declaration
+The forms are counted in `lib/**/*.wiz` and the Hdl package's `hdl/src/Hdl/*.wiz` (78
+files together, the Hdl modules having moved out of `lib/`; a declaration
 at the start of a line, comments skipped, 2026-11-15 at `24218ce4`):
 
 | form                    | declarations | files |

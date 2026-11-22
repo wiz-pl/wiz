@@ -235,7 +235,7 @@ reach.
 
 `lib/*.wiz` has `deriving` clauses for six names; this milestone implements the five
 that `lib/Deriving.wiz` registers. `Lens` (`lib/OpticDerive.wiz`) and `Bundle`/`BitPack`
-(`lib/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
+(`hdl/src/Hdl/Core.wiz`, `drafts/hdl/`) are user derivers and need the pieces above.
 
 ### Tests
 

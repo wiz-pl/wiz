@@ -19,8 +19,8 @@ def failsLibsEvery (input : String) (fragment : String) : IO Unit := do
     unless (e.splitOn fragment).length > 1 do
       throw (IO.userError s!"error does not mention '{fragment}':\n{e}")
 
-/-- Stage 34a: Clash-style signals (`lib/Hdl/Signal.wiz`, lane L1 of the Clash HDL plan).
-The positive file is `examples/hdl-signal.wiz`: counters as Mealy machines, registers
+/-- Stage 34a: Clash-style signals (`hdl/src/Hdl/Signal.wiz`, lane L1 of the Clash HDL plan).
+The positive file is `hdl/examples/hdl-signal.wiz`: counters as Mealy machines, registers
 with reset and enable, `Hw` code and a derived `Bundle` on signals, an every-cycle
 temporal property, and wiz-rv's baud generator as a signal (`Signal.ofCircuit`), equal to
 `Circuit.trace` for every input and to `Circuit.run` on ten cycles by `rfl`. 34b adds
@@ -33,8 +33,8 @@ def hdlSignalGroup : Group where
   name := "hdl-signal"
   exercise := "HDL 34a (Clash-style signals)"
   cases := [
-    { name := "34a: signals, registers, Hw code and bundles on signals, the baud generator through Signal.ofCircuit (examples/hdl-signal.wiz)", run := fun _ => do
-        okLibs (← IO.FS.readFile "examples/hdl-signal.wiz") [
+    { name := "34a: signals, registers, Hw code and bundles on signals, the baud generator through Signal.ofCircuit (hdl/examples/hdl-signal.wiz)", run := fun _ => do
+        okLibs (← IO.FS.readFile "hdl/examples/hdl-signal.wiz") [
           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
           "[7, 0, 1, 2, 3, 4]",

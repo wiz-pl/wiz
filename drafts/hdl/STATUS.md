@@ -6,14 +6,14 @@ the planned surface. Check a file with:
     .lake/build/bin/wiz check -I drafts/hdl drafts/hdl/<File>.wiz
 
 Import chain: `Shim` ← `Bits` ← `Signal` ← {`Counter`, `Fir`, `Uart`, `Cpu`, `Synth`} ← `Staged`.
-`Synth` also imports `Hdl.Core` (lib/Hdl/Core.wiz): since stage S0 (2026-11-10) the L2 layer
+`Synth` also imports `Hdl.Core` (hdl/src/Hdl/Core.wiz): since stage S0 (2026-11-10) the L2 layer
 (`HwTy`, `Hw`, the El and Wire instances, the hash-consing netlist builder, `Circuit`, the
 netlist interpreter, Verilog) is library code, checked and tested (`lake test -- =hdl`,
-examples in `examples/hdl.wiz`); `Synth.wiz` keeps the design notes and `Circuit.sim` over
+examples in `hdl/examples/hdl.wiz`); `Synth.wiz` keeps the design notes and `Circuit.sim` over
 `Signal`.
 
 **Revived (2026-11-17, stage 34a):** the stream half of `Signal.wiz` is library code in
-`lib/Hdl/Signal.wiz` (`import Hdl.Signal`), on `ClockDomain` and lib/BitVec rather than
+`hdl/src/Hdl/Signal.wiz` (`import Hdl.Signal`), on `ClockDomain` and lib/BitVec rather than
 `Shim`/`Bits`, with `Signal.ofCircuit` bridging to `Circuit` and its proof against
 `Circuit.trace`; tests in the `hdl-signal` group, docs/stages/34-hdl-signals.md.
 `Signal.fix` is still wishful (sized `scofix`, lane L2 of wiz-notes/clash-hdl-plan.md).
@@ -43,7 +43,7 @@ the reductions. Callers follow lib's argument orders (`Vec.replicate n x`,
 `BitVec.getBit a i`). The BitPack instances for ×/Option/Vec and `BitPack.ofIso` pass
 their instance arguments explicitly (`@BitPack.pack A ia …`): with the instance a meta,
 unifying its width with `bitWidth A ()` is outside the pattern fragment. With
-lib/Hdl/Core.wiz from agent/hdl-s0, `Core` checks and hdl-s0's `Synth.wiz` checks (exits 1
+hdl/src/Hdl/Core.wiz from agent/hdl-s0, `Core` checks and hdl-s0's `Synth.wiz` checks (exits 1
 only through Bits).
 
 | File | Status | Remaining errors → wishful entry |

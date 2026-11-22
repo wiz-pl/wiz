@@ -9,7 +9,7 @@ set_option compiler.extract_closed false
 namespace Tests.Elab
 
 /-- The display group: the reusable SSD1306/SSD1331 OLED command, data and window layer
-(`lib/Hdl/Display.wiz`). The case compiles and runs the example, which decodes the pins
+(`hdl/src/Hdl/Display.wiz`). The case compiles and runs the example, which decodes the pins
 of the two writers back into command/data bytes, and compares the report: the datasheet
 command bytes and init/window sequences, the pixel and colour helpers, the value
 simulation = `Netlist.simulate` = `Hdl.Sim`'s `simFast`, and a well-formed netlist. -/
@@ -19,7 +19,7 @@ def displayGroup : Group where
   parallel := true
   cases := [
     { name := "Display: SSD1306/SSD1331 command bytes, init, windows, pixel/colour helpers; seqC/serC decoded byte streams; values = Netlist.simulate = simFast", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-display.wiz")
+        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-display.wiz")
           "ssd columns: 33 0 127 pages 32: 34 0 3 pages 64: 34 0 7 \n\
            ssd window 32: 33 0 127 34 0 3 window 64: 33 0 127 34 0 7 \n\
            ssd init 32: len 24, comPins 218 2 pump 141 20 start len 31\n\

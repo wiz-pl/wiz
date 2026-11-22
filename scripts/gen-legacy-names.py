@@ -30,11 +30,12 @@ module name in the tree (`Main` in `tower/Main.wiz` and `selfhost/Main.wiz`) is
 two packages that never load together; both rows are emitted (same key, same
 reason, different file), exactly as the plan records.
 
-Roots: by default the six library/tool trees the plan's stage-0 gate names:
-`lib/`, `scry/src/`, `scry/gen/`, `tower/`, `web/` and `selfhost/`.  `examples/`
-and `drafts/` are out of scope (the plan: `examples/` is stage 9, `drafts/` is
-not migrated); add one with `--root DIR`.  The module root for `scry/src` is
-`scry/src`, so `scry/src/Scry/CstStore.wiz` is `Scry.CstStore`.
+Roots: by default the seven library/tool trees the plan's stage-0 gate names:
+`lib/`, `scry/src/`, `scry/gen/`, `hdl/src/`, `tower/`, `web/` and `selfhost/`.
+`examples/` and `drafts/` are out of scope (the plan: `examples/` is stage 9,
+`drafts/` is not migrated); add one with `--root DIR`. The module root for
+`scry/src` is `scry/src`, so `scry/src/Scry/CstStore.wiz` is `Scry.CstStore`;
+likewise `hdl/src/Hdl/Core.wiz` is `Hdl.Core`.
 
 Usage
   scripts/gen-legacy-names.py                     write legacy-names.tsv
@@ -493,7 +494,7 @@ def under_module_prefix(decl: Decl) -> bool:
     return decl.full.startswith(decl.module + ".")
 
 
-DEFAULT_ROOTS = ("lib", "scry/src", "scry/gen", "tower", "web", "selfhost")
+DEFAULT_ROOTS = ("lib", "scry/src", "scry/gen", "hdl/src", "tower", "web", "selfhost")
 
 
 def default_roots(repo: Path) -> list[Path]:
@@ -604,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--root", type=Path, action="append", metavar="DIR",
-        help="module root to scan (repeatable; default: lib, scry/src, scry/gen, tower, web, selfhost)",
+        help="module root to scan (repeatable; default: lib, scry/src, scry/gen, hdl/src, tower, web, selfhost)",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, metavar="FILE",
                         help="output file (default: legacy-names.tsv)")

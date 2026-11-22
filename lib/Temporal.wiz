@@ -8,7 +8,7 @@ formula `TL A` is a proposition about a trace at a time, and a protocol is a lab
 transition system `LTS S A`. Design: `wiz-notes/distributed-proofs.md` §2–§4 and
 `wiz-notes/hdl-temporal.md`.
 
-This module is the generic part of the former `lib/Hdl/Temporal.wiz`, moved here so a
+This module is the generic part of the former `hdl/src/Hdl/Temporal.wiz`, moved here so a
 protocol or concurrency library does not import the HDL. `Hdl.Temporal` imports it and
 keeps the HDL-specific lemmas.
 
