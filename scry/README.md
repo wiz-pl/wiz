@@ -640,11 +640,19 @@ results are kept with `baselineState: "unchanged"` when the diff proves the line
 unchanged, in-diff ones are `"new"`, and no state is claimed when the diff cannot decide
 (a binary file, no matching entry, a deleted file), so an upload diff never marks an
 untouched finding as fixed. Every result carries
-`partialFingerprints: {"scry/v1": "f_<16 hex>"}` (or `b_…` for a boundary warning), a
-line-independent id built from the rule, normalized path, sink function/callee/argument
-and path shape; moving a finding keeps the id, renaming the sink or changing the path
-shape creates a new one. Two identical sinks in one function with the same path shape can
-still collide (the id is a handle, not a proof of uniqueness).
+`partialFingerprints: {"scry/v1": "f_<16 hex>", "primaryLocationLineHash": "…"}` (or
+`b_…` for a boundary warning). `scry/v1` is the line-independent id built from the rule,
+normalized path, sink function/callee/argument and path shape; moving a finding keeps the
+id, renaming the sink or changing the path shape creates a new one. Two identical sinks in
+one function with the same path shape can still collide (the id is a handle, not a proof
+of uniqueness). `primaryLocationLineHash` is the key GitHub code scanning uses for
+cross-run identity: `Scry.lineHash` when the writer has the primary line's text, and the
+semantic id as a stable fallback. A taint result also carries a `codeFlows` entry with
+one `threadFlowLocation` per path step (source -> sink, with `nestingLevel` for call
+depth), so the evidence path renders in the code-scanning UI. A partial run (a
+`scry/budget/*` note) is a run-level `invocations[0].toolExecutionNotifications` entry
+with `executionSuccessful: false`; a consumer that sees only the results can no longer
+mistake a truncated run for a complete one.
 
 ## `scry report`: one self-contained HTML page
 
