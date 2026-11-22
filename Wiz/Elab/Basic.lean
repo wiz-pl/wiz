@@ -1,4 +1,5 @@
 import Wiz.Core.Check
+import Wiz.Elab.Mismatch
 import Std.Data.TreeMap
 import Wiz.Syntax.Basic
 import Wiz.Syntax.Children
@@ -356,6 +357,17 @@ structure ElabState (R : Type) where
   command's globals before the definition that uses them -/
   sideDecls : Array (Decl R) := #[]
 
+/-- A diagnostic that points at another place: the root of a cascade (`'broken' failed
+to elaborate`), a declaration's first site, a use of a variable. It is carried on the
+message (and the language server's `relatedInformation`) rather than concatenated into
+the text, so a client can jump to it. -/
+structure Related where
+  info : SourceInfo
+  text : String
+  /-- the stable code of the related error, when it has one -/
+  code : String := ""
+  deriving Repr, Inhabited
+
 structure ElabError (R : Type) where
   info : SourceInfo
   msg : String
@@ -363,6 +375,10 @@ structure ElabError (R : Type) where
   code : String := ""
   /-- the state where it was thrown: what was recorded up to the error (`throwAt` sets it) -/
   state? : Option (ElabState R) := none
+  /-- other places the message points at (a cascade's root, a declaration, a use) -/
+  related : Array Related := #[]
+  /-- a failed unification's structured diff, when the message is a type mismatch -/
+  mismatch : Option Mismatch := none
 
 instance : Inhabited (ElabError R) := ⟨{ info := {}, msg := "" }⟩
 

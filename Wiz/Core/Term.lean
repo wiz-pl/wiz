@@ -584,6 +584,20 @@ inductive InertReg where
   | conv
   deriving BEq, Repr, Inhabited
 
+/-- A declaration whose command failed to elaborate. It is not a global (the kernel
+never sees it): later references resolve to this record, so they report `'x' failed to
+elaborate` with the root error as a related diagnostic, instead of the fictional
+`unknown identifier 'x'`. -/
+structure FailedDecl where
+  name : Name
+  /-- the declaration's name, where the user wrote it -/
+  site : SourceInfo
+  /-- the root error of the failed command -/
+  info : SourceInfo
+  message : String
+  code : String := ""
+  deriving Repr, Inhabited
+
 /-- The global environment. `order` records insertion order so anything that walks
 the environment does so deterministically (never iterate the hash map directly). -/
 structure Globals (R : Type) where
@@ -665,7 +679,9 @@ structure Globals (R : Type) where
   /-- (13b) structures with a private constructor, with their module: elsewhere the
   elaborator sees them as opaque (`Globals.elabView`). The kernel ignores this. -/
   opaques : Std.HashMap Name String := {}
-  /-- (13b) the definitions `elabView` hid (the opaque types of other modules), kept so
+  /-- (diagnostics) declarations whose command failed, by the name the user wrote: later
+  references report the failure instead of `unknown identifier`. The kernel ignores this. -/
+  failed : Std.HashMap Name FailedDecl := {}  /-- (13b) the definitions `elabView` hid (the opaque types of other modules), kept so
   that conversion can compare two *values* of such a type in the full view (`conv`; only
   a Bool comes out, so nothing of the definition is exposed) -/
   hidden : Std.HashMap Name (Decl R) := {}
@@ -841,6 +857,18 @@ def privateTo? (g : Globals R) (n : Name) : Option String :=
   match g.privates[n]? with
   | some m => if m == g.module then none else some m
   | none => none
+
+/-- (diagnostics) The failed declaration `x` denotes, if any: the same candidates
+`resolveName` tries (this namespace, the name itself, an open's member). -/
+def failedOf? (g : Globals R) (x : Name) : Option FailedDecl :=
+  let at (n : Name) : Option FailedDecl := g.failed[g.resolve n]?
+  if x.contains '.' then
+    at (g.expandAliases x) <|>
+      (if g.namespacePrefix.isEmpty then none else at (g.namespacePrefix ++ "." ++ x))
+  else
+    (if g.namespacePrefix.isEmpty then none else at (g.namespacePrefix ++ "." ++ x)) <|>
+      at x <|> g.opens.findSome? fun M => at (M ++ "." ++ x)
+
 
 /-- (13t) `x` with the longest `open … as` alias replaced by its namespace: `A.x` is
 `M.x` after `open M as A`; a name with no aliased prefix is unchanged. -/

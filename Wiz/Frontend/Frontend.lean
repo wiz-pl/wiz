@@ -80,7 +80,7 @@ partial def isoKey (base : CommandState R) (m : Name) : Option UInt64 := do
   -- (every option of `Globals` that a module's state depends on or carries)
   -- (and every field of `Globals` that is not data checked empty above: the kept state
   -- carries them to the importer, `pp.notation` included)
-  unless g.decls.isEmpty && g.privates.isEmpty && g.opaques.isEmpty && g.declModule.isEmpty do none
+  unless g.decls.isEmpty && g.privates.isEmpty && g.opaques.isEmpty && g.failed.isEmpty && g.declModule.isEmpty do none
   let ppKeys (m : List Name) : List Name := m.mergeSort (fun a b => decide (a ≤ b))
   let settings := hash (base.termInfo, base.nextScope, g.eager, g.predicativeProp, toString (repr g.regularity),
     toString (repr g.inertReg), g.builtins, g.unboxStructs, g.lazyProofs,
@@ -277,7 +277,11 @@ where
           let err (text code : String) : CommandState R :=
             { s with messages := s.messages.push { info := cmd.info, severity := .error, text, code } }
           match s.loader m, s.checked.get? m with
-          | none, _ => go' input base chars stop (err s!"unknown module {m}" ErrorCode.unknownModule) memo
+          | none, _ =>
+            let hint := match suggestModule s.modules m with
+              | some n => s!"; did you mean '{n}'?"
+              | none => ""
+            go' input base chars stop (err s!"unknown module {m}{hint}" ErrorCode.unknownModule) memo
           | some _, some none => go' input base chars stop (err s!"import cycle through {m}" ErrorCode.importCycle) memo
           | some src, done =>
             let srcChars := src.toList.toArray
