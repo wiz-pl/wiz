@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "5fd578f60988a972f49c1efd09d3fb770ad081c0",
+  "git": "unstaged",
   "subsets": {
     "docs": {
       "files": 114,
@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "5d2831d69f0643098c0b8be2a558fba102120973185154b77b2e91dd1e57eae0"
+      "sha256": "454546df574a464cd9f59d81a816ca4b35ca68adb739cf46bfa0dd589636acbd"
     },
     "packages": {
       "files": 911,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "092e8cc956180bd7caa839420ab4a4bd1c52832cac9b5481ccd066b2e1f2d3b5"
+      "sha256": "66f8cf0dae9691fe69feeb0f3ca0d889b53c1f839cd3f50d8e0ed3cf60e86a23"
     },
     "wizlib": {
       "files": 108,
