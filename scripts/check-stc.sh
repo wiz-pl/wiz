@@ -165,7 +165,7 @@ PY
     if [ "$rc" -eq 0 ]; then
       error "self-check: a new Tm constructor compiled; the theorems are not guarded"
       bad=1
-    elif ! has_error_in "$out" 'missing cases' || ! grep -q 'probe' "$out"; then
+    elif ! grep -qi 'missing cases' "$out" || ! grep -q 'probe' "$out"; then
       error "self-check: the build failed without a missing-cases error for Tm.probe"
       tail -20 "$out"
       bad=1
