@@ -30,6 +30,11 @@ same `js_*` FFI the infoview uses: `Loom.patchesJson` gives JavaScript a list of
 operations, and `web/framework/runtime.js` applies them. Nothing in this file is
 `unsafe`, and no proof in it is evaluated natively (it trusts no native axiom).
 
+The split between this runtime, the JavaScript host, the static SSR shell and the
+designer/builder, the data path of each surface, the single validation table, the wire
+envelope and the adopt contract are canonical in `docs/notes/loom-wire-protocol.md`.
+This comment states only what the renderer guarantees; it does not restate that model.
+
 ## Components and local state
 
 A component is a record of `init`, `update` and `view` (`Loom.Component`), with props

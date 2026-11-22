@@ -1,0 +1,47 @@
+import Text
+/-!
+# Web.Wire
+
+The Wiz side of the Loom wire. This P0 module owns the two things the runtime must agree
+on with the host before the first message: the exact envelope version and the adopt
+hash. The protocol values, the generated monitor and the call/reply handlers are P1;
+the model and the single validation table are `docs/notes/loom-wire-protocol.md`.
+
+`Wire.ssrHash` is FNV-1a 32 over the UTF-8 bytes of an HTML string, lower-case eight hex
+digits — the same function as `hashHtml` in `web/framework/adopt.js`. A runtime can
+export it as `wiz_loom_ssr_hash`; `mount` then compares it with the island's
+`data-wiz-ssr` instead of hashing the HTML in JavaScript. The hash includes class
+attributes because the whole HTML string is hashed.
+-/
+
+/-- The exact envelope version. A mismatch is refused, never downgraded. -/
+def Wire.version : String := "wiz.loom.wire/1"
+
+-- ## UTF-8
+
+/-- The UTF-8 bytes of one code point (a character is one code point in Wiz). -/
+def Wire.utf8Char (c : Char) : List Nat :=
+  let n := Char.code c;
+  if Nat.lt n 128 then [n] else if Nat.lt n 2048 then [192 + (n >>> 6), 128 + (n &&& 63)] else if Nat.lt n 65536 then [224 + (n >>> 12), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)] else [240 + (n >>> 18), 128 + ((n >>> 12) &&& 63), 128 + ((n >>> 6) &&& 63), 128 + (n &&& 63)]
+
+/-- The UTF-8 bytes of a string. -/
+def Wire.utf8Encode (s : String) : List Nat := List.concat (List.map Wire.utf8Char (String.chars s))
+
+-- ## FNV-1a 32
+
+/-- FNV-1a over bytes, starting from `h` and reducing modulo 2^32 at every step. The
+list is the decreasing argument; `h` is the accumulator. -/
+def Wire.fnv1a : List Nat → Nat → Nat
+  | .nil, h => h
+  | .cons b rest, h => Wire.fnv1a rest (Nat.mod (Nat.mul (Nat.xor h b) 16777619) 4294967296)
+
+/-- One lower-case hexadecimal digit. -/
+def Wire.hexDigit (n : Nat) : Char := if Nat.lt n 10 then Char.mk (48 + n) else Char.mk (87 + n)
+
+/-- Eight lower-case hex digits, the form `data-wiz-ssr` carries. -/
+def Wire.hex8 (n : Nat) : String :=
+  .mk [Wire.hexDigit (Nat.mod (Nat.div n 268435456) 16), Wire.hexDigit (Nat.mod (Nat.div n 16777216) 16), Wire.hexDigit (Nat.mod (Nat.div n 1048576) 16), Wire.hexDigit (Nat.mod (Nat.div n 65536) 16), Wire.hexDigit (Nat.mod (Nat.div n 4096) 16), Wire.hexDigit (Nat.mod (Nat.div n 256) 16), Wire.hexDigit (Nat.mod (Nat.div n 16) 16), Wire.hexDigit (Nat.mod n 16)]
+
+/-- The `data-wiz-ssr` hash of a server-rendered HTML string. -/
+def Wire.ssrHash (html : String) : String :=
+  Wire.hex8 (Wire.fnv1a (Wire.utf8Encode html) 2166136261)
