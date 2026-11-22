@@ -191,6 +191,22 @@ jobs:
           sh elan-init.sh -y --default-toolchain none
           rm -f elan-init.sh
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: The Lean toolchain is path-free
+        # bundle-cc.sh copies the toolchain's libatomic/libgcc_s/libz/libLLVM into the
+        # release, and the checklist promises no /nix/store in the tarball. Check the
+        # toolchain as soon as elan installs it (lean --print-prefix triggers the
+        # download): a dirty one fails here in seconds instead of at the bundle gate
+        # after the build. This is the supply-chain assumption, stated where it is made.
+        run: |
+          lean=$(lean --print-prefix)
+          echo "lean toolchain: $lean ($(lean --version | head -1))"
+          hits=$(grep -al /nix/store "$lean"/lib/*.so* 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::the Lean toolchain names /nix/store in these libraries:"
+            echo "$hits"
+            grep -aoh '/nix/store/[^:"]*' $hits | sort -u | head -10 || true
+            exit 1
+          fi
       - name: Cache the Lake build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
