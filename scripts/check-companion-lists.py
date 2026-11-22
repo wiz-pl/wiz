@@ -17,7 +17,7 @@ different file, so review does not pair the two changes):
   * `test-shards.json` not covering every case exactly once (the
     `scripts/ci.py check-shards` check, which needs the test binary).
 
-This script is the early, no-build gate for the three lists that have a cheap
+This script is the early, no-build gate for the five lists that have a cheap
 check already:
 
   libdiff corpus  `scripts/check-libdiff-corpus.sh --quiet` walks lib/ and
@@ -29,6 +29,13 @@ check already:
                   companion-drift shape so the cause is obvious.
   name collisions `scripts/check-name-collisions.py --quiet` reports a
                   baseline entry whose group is gone (or has expired).
+  repo subsets    `scripts/repo-subsets.py --check` compares the committed
+                  `.github/repo-subsets.json` with the tracked files' hashes;
+                  the JSON is a cache key (and a reviewed list of what each
+                  subset reads), so it moves with its source like the others.
+  csharp spills   a fixture under `scry/corpus/csharp/` needs the generated
+                  `.cst` spill beside it (the scry suite reads the pair).
+
 
 The test-shard total needs `.lake/build/bin/tests`; `docs_style` has no build,
 so it is skipped here.  The build job runs `scripts/ci.py check-shards` on the
@@ -58,6 +65,7 @@ CORPUS = ".github/libdiff-corpus.txt"
 OLD_NAMES = "legacy-names.tsv"
 LEGACY_MODULE = "Wiz/LegacyNames.lean"
 COLLISIONS = ".github/name-collisions-baseline.json"
+SUBSETS = ".github/repo-subsets.json"
 CSPILLS = "scry/corpus/csharp/**/*.cs (a sibling .cst each)"
 TEST_DRIVER = ".lake/build/bin/tests"
 
@@ -213,6 +221,32 @@ def check_csharp_spills() -> list[str]:
     lines.append("  regenerate with the command in scry/README.md ('spills')")
     return lines
 
+def parse_subsets(output: str) -> list[str]:
+    """One `companion drift` line for a stale or missing subset table."""
+    stale = re.search(r"stale for ([^;\n]+);", output)
+    if stale:
+        return [
+            f"companion drift: {SUBSETS} is stale for {stale.group(1).strip()}; "
+            "run scripts/repo-subsets.py"
+        ]
+    if "is missing" in output:
+        return [
+            f"companion drift: {SUBSETS} is missing; run scripts/repo-subsets.py"
+        ]
+    if "is unreadable" in output:
+        return [
+            f"companion drift: {SUBSETS} is unreadable; run scripts/repo-subsets.py"
+        ]
+    return [
+        f"companion drift: {SUBSETS} does not match the tracked files; run "
+        "scripts/repo-subsets.py"
+    ]
+
+
+def check_subsets() -> list[str]:
+    proc = run("python3", "scripts/repo-subsets.py", "--check")
+    return [] if proc.returncode == 0 else parse_subsets(proc.stdout + proc.stderr)
+
 
 def self_test() -> int:
     failures: list[str] = []
@@ -274,11 +308,24 @@ def self_test() -> int:
         ),
         ("entry 3", "'Foo.bar'", "expired on 2026-01-01"),
     )
+    expect(
+        "subsets stale",
+        parse_subsets(
+            "repo-subsets: .github/repo-subsets.json is stale for lean, tests; "
+            "run scripts/repo-subsets.py --write\n"
+        ),
+        (SUBSETS, "is stale for lean, tests", "run scripts/repo-subsets.py"),
+    )
+    expect(
+        "subsets missing",
+        parse_subsets("repo-subsets: .github/repo-subsets.json is missing\n"),
+        (SUBSETS, "is missing", "run scripts/repo-subsets.py"),
+    )
     if failures:
         for failure in failures:
             print(f"self-test FAIL: {failure}", file=sys.stderr)
         return 1
-    print("check-companion-lists self-test: ok (6 parser fixtures)")
+    print("check-companion-lists self-test: ok (8 parser fixtures)")
     return 0
 
 
@@ -302,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         (f"{OLD_NAMES} + {LEGACY_MODULE}", check_legacy),
         (COLLISIONS, check_collisions),
         (CSPILLS, check_csharp_spills),
+        (SUBSETS, check_subsets),
     )
     drift: list[str] = []
     failed = 0
