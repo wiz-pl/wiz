@@ -1,11 +1,11 @@
 # An eBPF target — P0 (typed core, checker, C emitter skeleton)
 
-**Status, 2026-11-21:** P0 **coding lane**, branch `agent/ebpf` on
-`origin/integration/train10` (`d705b4578`). The code below is **written and not built or
-run**: this lane is deliberately off the build queue. Everything in this document that
-says "must" is a test or a verifier assertion that still needs a queue slot. The design
-is `wiz-notes/ebpf-target.md`; this file records what the P0 cut actually contains and
-what the first build/verifier run has to establish.
+**Status, 2026-11-22:** P0 **builds and its pure tests are green**. `lake build wiz tests`
+completed (590 jobs) and `lake test -- '=bpf'` passed 22/22 on the build node. The
+remaining "must" items below are the post-`clang` / kernel-verifier half; they need a
+clang and/or privileged slot. Branch `agent/ebpf` on `origin/integration/train10`. The
+design is `wiz-notes/ebpf-target.md`; this file records what the P0 cut contains and what
+the remaining verifier run has to establish.
 
 `wiz build FLOW.toml -o flow.c --target bpf` writes `flow.c` and `bpf_rt.h`. It does not
 call `clang` (see "needs a queue slot"). `--target bpf` is a normal entry in the selector
@@ -25,7 +25,7 @@ The target is **verifier-shaped by construction**, not "Wiz on eBPF":
 | `Wiz/Compiler/Bpf/C.lean` | the flat-C emitter: `SEC`, BTF map declarations, `static __always_inline` functions, `#line`, checked packet accessors, copy-out map lookups, `Map.add` as lookup + `XADD`. |
 | `Wiz/Compiler/Bpf.lean` | the manifest reader (`bpf.toml`, §5.1) and `buildCmd`. |
 | `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`) and the source-level reject/accept corpus. |
-| `Tests/Groups/Bpf.lean` | pure rejection/value tests. **Written, not run.** |
+| `Tests/Groups/Bpf.lean` | pure rejection/value tests. **Green, 22/22.** |
 
 Implemented in P0:
 
@@ -72,13 +72,13 @@ Not in P0 (do not mistake the skeleton for them):
 
 ## What the first build must establish
 
-1. `lake build` (or `lake build Tests`) compiles `Wiz/Compiler/Bpf/*`,
-   `Wiz/Compiler/Bpf.lean`, `Main.lean` and `Tests/Groups/Bpf.lean`. This lane could not
-   run it; expect ordinary Lean elaboration errors to be the first work item.
-2. `lake test -- '=bpf'` runs the group. Every case is pure and unprivileged; the fixture
-   case is the whole path manifest → reader → checker → C text.
+1. **Done (2026-11-22).** `lake build wiz tests` compiles all of `Wiz/Compiler/Bpf/*`,
+   `Wiz/Compiler/Bpf.lean`, `Main.lean` and `Tests/Groups/Bpf.lean` (590 jobs).
+2. **Done (2026-11-22).** `lake test -- '=bpf'` passes 22/22. Every case is pure and
+   unprivileged; the fixture case is the whole path manifest → reader → checker → C text.
 3. `wiz build Tests/fixtures/bpf/allow.toml -o /tmp/allow.c --target bpf` exits 0 and
-   writes `/tmp/allow.c` + `/tmp/allow.h` (`bpf_rt.h` beside it).
+   writes `/tmp/allow.c` + `/tmp/allow.h` (`bpf_rt.h` beside it). **Pending**: the same
+   pipeline is exercised in-process by the fixture case; the CLI path has not run yet.
 4. `clang -target bpfel -mcpu=v2 -O2 -g -ffreestanding -fno-builtin
    -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlibinc -Wall -Werror
    -c /tmp/allow.c -o /tmp/allow.o` succeeds. The expected object shape: `.text`, `.maps`,
@@ -142,13 +142,13 @@ with the clang/loader work.
 
 ## Known unverified assumptions
 
-These are the places where a build will most likely disagree first:
+The Lean-level assumptions are now confirmed by the build: recursive `BEq`/`Inhabited`,
+the `s!"…\{…\}"` escaping, the `mutual`/`partial` parsers, the `StateT` emitter, and
+`Tm.ty` for `let` (the node carries the *binder* type; the term's type is the body's).
 
-* Lean's ability to derive `BEq`/`Inhabited` for the recursive `Ty`/`STy` with `Array`
-  fields, and the exact `s!"…\{…\}"` escaping in the C strings;
-* the `mutual`/`partial` shape of `Sexp`'s parsers and the `StateT` emitter;
-* `Tm.ty` for `let` (the node carries the *binder* type; the term's type is the body's);
-  the checker and emitter both rely on that choice;
+Still unverified until the `clang`/verifier slot:
+
 * the C's `__sync_fetch_and_add` on a per-CPU map value, and whether `-Wall -Werror`
   accepts the helper-pointer idiom with `(void *)N`;
-* the BTF macro forms for an anonymous map struct whose key/value are typedefs.
+* the BTF macro forms for an anonymous map struct whose key/value are typedefs;
+* the object's stack/symbol/relocation shape and the kernel verifier's acceptance.

@@ -167,5 +167,6 @@ a `bpf-core/1` typed core, **not** the IR: the IR is untyped and a `match` on a 
 type has already become the generic `wiz.ind` interpreter, so the target needs the
 elaborated types. The P0 cut (typed core, checker, C emitter skeleton, the exact
 rejection messages, and what the first build/verifier run must establish) is in
-[08-backend/bpf.md](08-backend/bpf.md). It is **written, not built or run** in this
-train; do not treat the presence of `--target bpf` as an exit-criterion pass.
+[08-backend/bpf.md](08-backend/bpf.md). The P0 code builds and its pure group is green
+(22/22); the object/verifier half (`clang -target bpf`, a privileged load) is still
+pending, so do not treat the presence of `--target bpf` as the P0 exit criterion.
