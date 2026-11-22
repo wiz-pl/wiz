@@ -819,17 +819,39 @@ are `hdl/examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches w
   For an **inductive with fields** (no parameters) or a **plain structure** it adds
   `T.tagWidth` (`⌈log₂ #constructors⌉`; 0 for a single constructor or a structure),
   `T.payloadWidth` (the widest constructor's field widths), `T.width`
-  (`tagWidth + payloadWidth`), `T.code = HwTy.bits T.width`, `T.pack`/`T.unpack` (the tag
-  in the high bits, then the fields, the first highest, zero-padded to the widest
-  constructor; a structure has no tag), `T.toNat`, `T.lit` and `T.bitPack`. A field is
-  `BitVec n`, `Bool`, or a type with its own derived `width`/`pack`/`unpack`. The round
-  trip `T.unpack (T.pack x) = x` holds by `rfl` on closed values (samples; the general
-  lemma is the same value-level one as a bundle's). A recursive, implicit or proof field,
-  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  (`tagWidth + payloadWidth`), `T.width_eq` (`refl`: `T.width` is that sum),
+  `T.code = HwTy.bits T.width`, `T.pack`/`T.decode`/`T.unpack` (the tag in the high
+  bits, then the fields, the first highest, zero-padded to the widest constructor; a
+  structure has no tag), `T.toNat`, `T.lit`, `T.pack_lt` (a theorem: the packed value's
+  `toNat` is below `2^T.width`, so the width and the value agree for every `x`) and
+  `T.bitPack`. A field is `BitVec n`, `Bool`, or a type with its own derived
+  `width`/`pack`/`unpack`. The round trip `T.unpack (T.pack x) = x` holds by `rfl` on
+  closed values (samples); its general proof is not emitted yet. The bit arithmetic is
+  in place (`Bits.pack_field`, the high-fields-aware `Bits.pack_field_high`,
+  `Bits.packed_tag`, `BitVec.ofNat_low`, …). The named follow-up is:
+
+  **HDL-2.4b — general `unpack_pack` for multi-field inductives.** Blocked on the
+  list split
+  `packFields fs · 2^pad = high · 2^(pad+s+w) + (v · 2^s + rest) · 2^pad`
+  for fields after the first, and on the kernel equality step with a symbolic
+  `Nat.shiftLeft` payload: the stuck goal is
+  `T.unpack (T.pack (T.c f…)) = T.c f…`, whose canonical form is
+  `T.decode tag (Nat.shiftLeft …) = T.c f…` (the kernel keeps the `decode`
+  application glued and reports the equality tuple
+  `(field = field) × True × True` instead). It needs a list-level
+  `Bits.unpack_field : (fs : List (Nat × Nat)) → …` proved by recursion, and a
+  `Nat`/power split lemma for `packFields`; the pinned bit strings and the
+  emitted/netlist concat checks already establish the *layout*, so this is a law
+  gap, not an encoding question.
+
+  A recursive, implicit or proof field, a field of a type with no `BitPack`, and a type
+  with no constructors are errors; so is a
   constructor payload wider than the declared payload width. A representation-
   parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
   through `Hw.packBits`/`Hw.unpackBits`). `hdl/examples/hdl-bitpack.wiz` checks the UART's
-  `TxState` and the CPU's `Instr` shapes.
+  `TxState` and the CPU's `Instr` shapes, a nested `Point`, a `Bool`/enum/`BitVec`
+  `Flags`, an `Option`-shaped `Maybe`, and the emitted/netlist concat for `Point` and
+  `Flags`.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as

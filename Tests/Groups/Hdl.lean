@@ -292,7 +292,15 @@ def hdlGroup : Group where
            "131372",
            "(.true, .true, .true)",
            "[Bool.true, Bool.true, Bool.true, Bool.true]",
-           "[0, 0, 1, 0]"]
+           "[0, 0, 1, 0]",
+           "(8, 6, 4)",
+           "(165, 90)",
+           "53",
+           "(0, 13)",
+           "((), ())",
+           ".true",
+           ".true",
+           "\"module point(input clk, input [3:0] x_0, input [3:0] x_1, output [7:0] y);\\n  wire [7:0] n3 = {x_0, x_1};\\n  assign y = n3;\\nendmodule\\n\""]
         failsLibs "import Hdl.Core\ninductive Bad where\n  | c (n : Nat)\n  deriving BitPack" "no BitPack"
         failsLibs "import Hdl.Core\ninductive Bad where\n  | c (b : Bad)\n  deriving BitPack" "recursive, implicit or a proof"
         failsLibs "import Hdl.Core\ninductive Empty where\n  deriving BitPack" "no constructors"

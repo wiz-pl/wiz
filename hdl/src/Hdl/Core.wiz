@@ -1,4 +1,5 @@
 import BitVec
+import Hdl.BitPack
 import Logic
 import Trace
 import Deriving
@@ -483,6 +484,29 @@ def Bool.toBits (b : Bool) : BitVec 1 := match b with
   | .false => BitVec.ofNat 1 0
 /-- Whether a bit vector is non-zero (how a condition bit is read). -/
 def BitVec.isTrue {0 n : Nat} (v : BitVec n) : Bool := Bool.not (Nat.beq v.toNat 0)
+
+/-- The number of a `Bool`'s bit (0 or 1). -/
+def Bool.toBits_toNat : (b : Bool) →
+    BitVec.toNat (Bool.toBits b) = (match b with | .true => 1 | .false => 0)
+  | .true => rfl
+  | .false => rfl
+
+/-- A `Bool`'s bit fits its one-bit width. -/
+def Bool.toBits_lt : (b : Bool) →
+    Nat.lt (BitVec.toNat (Bool.toBits b)) (Nat.pow 2 1) = .true
+  | .true => rfl
+  | .false => rfl
+
+/-- One bit with the bits of `Bool.toBits b`: `BitVec.isTrue` recovers `b` (the
+`Bool` field decoder of `deriving BitPack`). -/
+def BitVec.isTrue_ofNat_low (n : Nat) : (b : Bool) →
+    (h : Bits.low 1 n = BitVec.toNat (Bool.toBits b)) → BitVec.isTrue (BitVec.ofNat 1 n) = b
+  | .true, h =>
+    let e : BitVec.ofNat 1 n = Bool.toBits .true := BitVec.ofNat_low n (Bool.toBits .true) h;
+    Eq.substProp (fun (v : BitVec 1) => BitVec.isTrue v = Bool.true) (Eq.symm e) (refl Bool.true)
+  | .false, h =>
+    let e : BitVec.ofNat 1 n = Bool.toBits .false := BitVec.ofNat_low n (Bool.toBits .false) h;
+    Eq.substProp (fun (v : BitVec 1) => BitVec.isTrue v = Bool.false) (Eq.symm e) (refl Bool.false)
 
 -- (H14 S4) The shifts by a signal and the signed comparison on numbers below `2^w`: the
 -- value simulation, the netlist simulation and `Hdl.Sim` all compute with these. An
@@ -3643,6 +3667,15 @@ structure BitPack (A : Type) where
   pack : A → BitVec width
   unpack : BitVec width → A
 
+/-- A nested derived field's decoder: if the bits are the nested type's packed value,
+its `unpack` gives the field back (the `derived` field case of `deriving BitPack`). -/
+def BitPack.derived_field {A : Type} (F : BitPack A)
+    (law : (a : A) → F.unpack (F.pack a) = a) (a : A) (n : Nat)
+    (h : Bits.low F.width n = (F.pack a).toNat) :
+    F.unpack (BitVec.ofNat F.width n) = a :=
+  let e : BitVec.ofNat F.width n = F.pack a := BitVec.ofNat_low n (F.pack a) h;
+  Eq.substProp (fun (v : BitVec F.width) => F.unpack v = a) (Eq.symm e) (law a)
+
 /-- the number of bits for `k` values: the least `w` with `k ≤ 2^w` -/
 def Hdl.clog2Go : Nat → Nat → Nat → Nat
   | .zero, w, _ => w
@@ -3830,10 +3863,11 @@ def HdlDerive.fieldToNat (t : Syntax) (x : Syntax) : Syntax :=
     | .true => `(term| BitVec.toNat (Bool.toBits $x))
     | .false => let p := HdlDerive.suffixed ".pack" t; `(term| BitVec.toNat ($p $x)))
 
-/-- A constructor's fields, packed as one number (the first field in the high bits). -/
+/-- A constructor's fields, packed as one number (the first field in the high bits).
+Every field is shifted and the tail added, including the last (whose shift is zero):
+the `+ 0` keeps the shape `Bits.pack_field` proves, and the value is unchanged. -/
 def HdlDerive.packFields : Nat → List FieldView → Syntax
   | _, .nil => `(term| 0)
-  | i, .cons f .nil => HdlDerive.fieldToNat (FieldView.type f) (Derive.var "f✝" i)
   | i, .cons f fs =>
     let a := HdlDerive.fieldToNat (FieldView.type f) (Derive.var "f✝" i);
     let b := HdlDerive.packFields (Nat.succ i) fs;
@@ -3873,13 +3907,14 @@ def HdlDerive.fieldOfNat (t : Syntax) (k : Syntax) : Syntax :=
 
 /-- A constructor's fields from a payload. Field `i` sits `pad + suffix` bits above the
 bottom, where `suffix` is the widths of the fields after it and `pad` is the constructor's
-low zero padding; the first field is highest. -/
+low zero padding; the first field is highest. (`Bits.high` is `Nat.shiftRight` by a power
+of two, but the `Bits` lemmas are what the round-trip proof rewrites.) -/
 def HdlDerive.unpackArgsN (payload pad : Syntax) : List FieldView → List Syntax
   | .nil => .nil
   | .cons f fs =>
     let suffix := HdlDerive.natSum (HdlDerive.fieldWidths fs);
     let off := `(term| Nat.add $pad $suffix);
-    let k := `(term| Nat.shiftRight $payload $off);
+    let k := `(term| Bits.high $off $payload);
     .cons (HdlDerive.fieldOfNat (FieldView.type f) k) (HdlDerive.unpackArgsN payload pad fs)
 
 /-- The constructor applied to its decoded fields. -/
@@ -4048,11 +4083,140 @@ def HdlDerive.checkFieldTypes (n : String) : List CtorView → MacroM Unit
     HdlDerive.checkFieldList n (CtorView.fields c);
     HdlDerive.checkFieldTypes n cs
 
+------------------------------------------------------------------------------------
+-- The general `unpack (pack x) = x` proof. The generated code is
+--
+--   def T.decode (tag payload : Nat) : T := if tag = 0 then … else …
+--   def T.unpack (x : BitVec T.width) : T := T.decode (Bits.high P x.toNat) (Bits.low P x.toNat)
+--
+-- so the proof can rewrite the numeric `toNat`, tag and payload with `Eq.substProp`
+-- before the kernel reduces `T.decode`, and the field decoders with
+-- `Bits.pack_field`/`BitVec.ofNat_low` (and a derived field's own `unpack_pack`).
+
+/-- A field's value fits its width: `UIntN.toNat_lt x`, `Bool.toBits_lt x`, or
+`UIntN.toNat_lt (F.pack x)`. -/
+def HdlDerive.fieldRange (t : Syntax) (x : Syntax) : Syntax :=
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => `(term| UIntN.toNat_lt $x)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => `(term| Bool.toBits_lt $x)
+    | .false => let p := HdlDerive.suffixed ".pack" t; `(term| UIntN.toNat_lt ($p $x)))
+
+/-- The fields' values as variables (`f✝0`, `f✝1`, …). -/
+def HdlDerive.fieldVars : Nat → List FieldView → List Syntax
+  | _, .nil => .nil
+  | i, .cons _ fs => .cons (Derive.var "f✝" i) (HdlDerive.fieldVars (Nat.succ i) fs)
+
+/-- `packFields` is below `2^(sum of the widths)` (the bound `Bits.pack_field` needs
+for the fields below a given one). -/
+def HdlDerive.restBound (i : Nat) : List FieldView → Syntax
+  | .nil => `(term| Word.pow_pos 0)
+  | .cons f fs =>
+    let x := Derive.var "f✝" i;
+    let v := HdlDerive.fieldToNat (FieldView.type f) x;
+    let w := HdlDerive.fieldWidth (FieldView.type f);
+    let s := HdlDerive.natSum (HdlDerive.fieldWidths fs);
+    let rest := HdlDerive.packFields (Nat.succ i) fs;
+    let hv := HdlDerive.fieldRange (FieldView.type f) x;
+    let hr := HdlDerive.restBound (Nat.succ i) fs;
+    `(term| Bits.add_mul_pow_lt' $v $w $s $rest $hv $hr)
+
+/-- One field's decoder equals the field: `BitVec.ofNat_low`, `isTrue_ofNat_low`, or a
+nested `BitPack.derived_field` with the nested type's own law. -/
+def HdlDerive.fieldProof (payload0 hpay payloadW allPacked cw : Syntax) (i : Nat) (f : FieldView)
+    (tail : List FieldView) : Syntax :=
+  let t := FieldView.type f;
+  let x := Derive.var "f✝" i;
+  let v := HdlDerive.fieldToNat t x;
+  let w := HdlDerive.fieldWidth t;
+  let s := HdlDerive.natSum (HdlDerive.fieldWidths tail);
+  let pad := `(term| Nat.sub $payloadW $cw);
+  let rest := HdlDerive.packFields (Nat.succ i) tail;
+  let high := `(term| Bits.high (Nat.add $pad $s) $payload0);
+  let hv := HdlDerive.fieldRange t x;
+  let hr := HdlDerive.restBound (Nat.succ i) tail;
+  let hf := `(term| Bits.pack_field_low $payload0 $v $w $s $pad $rest $hpay $hv $hr);
+  match HdlDerive.isAppHead "BitVec" t with
+  | .true => `(term| BitVec.ofNat_low $high $x $hf)
+  | .false => (match HdlDerive.isVar "Bool" t with
+    | .true => `(term| BitVec.isTrue_ofNat_low $high $x $hf)
+    | .false => let bp := HdlDerive.suffixed ".bitPack" t;
+      let law := HdlDerive.suffixed ".unpack_pack" t;
+      `(term| BitPack.derived_field $bp $law $x $high $hf))
+
+/-- Replace argument `i` of a constructor application with `x`, leaving the decoded
+arguments before it and the original ones after it. -/
+def HdlDerive.pickArgs (i : Nat) (x : Syntax) : Nat → List Syntax → List Syntax → List Syntax
+  | _, .nil, _ => .nil
+  | _, .cons _ _, .nil => .nil
+  | j, .cons d ds, .cons o os =>
+    match Nat.beq i j with
+    | .true => .cons x (HdlDerive.pickArgs i x (Nat.succ j) ds os)
+    | .false => (match Nat.lt j i with
+      | .true => .cons d (HdlDerive.pickArgs i x (Nat.succ j) ds os)
+      | .false => .cons o (HdlDerive.pickArgs i x (Nat.succ j) ds os))
+
+/-- Fold the field equalities from the last field to the first: starting from
+`refl (T.c f…)`, each step rewrites one field of the right side back to its decoded
+form. The result is `T.c (decoded…) = T.c f…`. -/
+def HdlDerive.lawFold (v : IndView) (c : CtorView) (payload0 hpay payloadW allPacked cw : Syntax)
+    (decoded orig : List Syntax) (i : Nat) : List FieldView → Syntax → Syntax
+  | .nil, current => current
+  | .cons f fs, current =>
+    let after := HdlDerive.lawFold v c payload0 hpay payloadW allPacked cw decoded orig (Nat.succ i) fs current;
+    let xn := Syntax.mkIdent "x✝";
+    let xv := Syntax.mkVar "x✝";
+    let args := HdlDerive.pickArgs i xv 0 decoded orig;
+    let ft := FieldView.type f;
+    let left := HdlDerive.ctorApp v c args;
+    let right := HdlDerive.ctorApp v c orig;
+    let motive := `(term| fun ($xn : $ft) => $left = $right);
+    let e := HdlDerive.fieldProof payload0 hpay payloadW allPacked cw i f fs;
+    let fi := Hdl.nthD xv orig i;
+    let di := Hdl.nthD xv decoded i;
+    `(term| @Eq.substProp $ft $motive $fi $di (Eq.symm $e) $after)
+
+def HdlDerive.lawOf (v : IndView) (tagV payV wV decodeV unpackV packV : Syntax) (i : Nat) (c : CtorView) : Syntax :=
+  let fs := CtorView.fields c;
+  let cw := HdlDerive.natSum (HdlDerive.fieldWidths fs);
+  let pad := `(term| Nat.sub $payV $cw);
+  let allPacked := HdlDerive.packFields 0 fs;
+  let payloadShift := `(term| Nat.shiftLeft $allPacked $pad);
+  let tagi := HdlDerive.num i;
+  let X := `(term| Nat.add (Nat.mul $tagi $payV) $payloadShift);
+  let orig := HdlDerive.fieldVars 0 fs;
+  let ctorOrig := HdlDerive.ctorApp v c orig;
+  let hrest := HdlDerive.restBound 0 fs;
+  let hTag : Syntax := `(term| rfl);
+  let hPayload := `(term| Bits.shift_lt $allPacked $cw $pad $payV $hrest rfl);
+  let ePay := `(term| Bits.low_add_mul_pow $payV $tagi $payloadShift $hPayload);
+  let payload0 := `(term| Bits.low $payV $X);
+  let decoded := HdlDerive.unpackArgsN payload0 pad fs;
+  let eFieldsRaw := HdlDerive.lawFold v c payload0 ePay payV allPacked cw decoded orig 0 fs
+    `(term| refl $ctorOrig);
+  let eFields : Syntax := `(term| ($eFieldsRaw : $decodeV $tagi $payload0 = $ctorOrig));
+  let hX := `(term| Bits.add_mul_pow_lt' $tagi $tagV $payV $payloadShift $hTag $hPayload);
+  let hto := `(term| BitVec.toNat_ofNat_lt $wV $X $hX);
+  let eTag := `(term| Bits.packed_tag $payV $tagi $payloadShift $hPayload);
+  let eTagged := `(term| @Eq.substProp Nat
+    (fun (t : Nat) => $decodeV t $payload0 = $ctorOrig)
+    $tagi (Bits.high $payV $X) (Eq.symm $eTag) $eFields);
+  let final := `(term| @Eq.substProp Nat
+    (fun (n : Nat) => $decodeV (Bits.high $payV n) (Bits.low $payV n) = $ctorOrig)
+    $X (BitVec.toNat ($packV $ctorOrig)) (Eq.symm $hto) $eTagged);
+  `(term| ($final : $unpackV ($packV $ctorOrig) = $ctorOrig))
+
+/-- The `T.rec` methods of the round-trip law, one per constructor, with its index. -/
+def HdlDerive.lawMethods (f : Nat → CtorView → Syntax) : Nat → List CtorView → List Syntax
+  | _, .nil => .nil
+  | i, .cons c cs => .cons (Derive.method (CtorView.fields c) (f i c))
+      (HdlDerive.lawMethods f (Nat.succ i) cs)
+
 /-- `deriving BitPack` for a parameterless inductive with fields (Clash's layout). It
-defines `T.tagWidth`, `T.payloadWidth`, `T.width`, `T.code`, `T.pack`, `T.unpack`,
-`T.toNat`, `T.lit` (the constant in a circuit) and `T.bitPack`. The round trip
-`T.unpack (T.pack x) = x` is checked on values (`examples/hdl-conveniences.wiz`); like a
-bundle's `toBits`/`ofBits` it is not proved in general here. -/
+defines `T.tagWidth`, `T.payloadWidth`, `T.width`, `T.width_eq`, `T.code`, `T.pack`,
+`T.decode`, `T.unpack`, `T.toNat`, `T.lit`, `T.pack_lt` (the packed value fits
+`T.width`) and `T.bitPack`. The round trip `T.unpack (T.pack x) = x` is checked on values
+(`hdl/examples/hdl-bitpack.wiz`); a general kernel proof is not emitted yet. -/
 def HdlDerive.inductivePack (v : IndView) (n : String) : MacroM (List Syntax) := do
   let cs := IndView.ctors v;
   first ← HdlDerive.firstCtor n cs;
@@ -4068,6 +4232,11 @@ def HdlDerive.inductivePack (v : IndView) (n : String) : MacroM (List Syntax) :=
   let codeN := Syntax.mkIdent (String.append n ".code");
   let packN := Syntax.mkIdent (String.append n ".pack");
   let unpackN := Syntax.mkIdent (String.append n ".unpack");
+  let decodeN := Syntax.mkIdent (String.append n ".decode");
+  let decodeV := Syntax.mkVar (String.append n ".decode");
+  let lawN := Syntax.mkIdent (String.append n ".unpack_pack");
+  let ltN := Syntax.mkIdent (String.append n ".pack_lt");
+  let weqN := Syntax.mkIdent (String.append n ".width_eq");
   let toNatN := Syntax.mkIdent (String.append n ".toNat");
   let litN := Syntax.mkIdent (String.append n ".lit");
   let bpN := Syntax.mkIdent (String.append n ".bitPack");
@@ -4096,17 +4265,22 @@ def HdlDerive.inductivePack (v : IndView) (n : String) : MacroM (List Syntax) :=
       (List.append (.cons motive .nil)
         (List.append (HdlDerive.packMethods wV payV 0 cs) (.cons xv .nil))));
   let chain := HdlDerive.unpackChain v first tagvv payvv payV 0 cs;
-  let unpackBody := `(term| let $nv := BitVec.toNat $xv; let $tagv := Nat.shiftRight $nvv $payV;
-    let $payv := Nat.mod $nvv (Nat.pow 2 $payV); $chain);
+  let unpackBody := `(term| $decodeV (Bits.high $payV (BitVec.toNat $xv))
+    (Bits.low $payV (BitVec.toNat $xv)));
+  let packLtBody := `(term| UIntN.toNat_lt ($packV $xv));
+  let widthEqBody := `(term| rfl);
   MacroM.pure (.cons `(command| def $tagN : Nat := $tagW)
     (.cons `(command| def $payN : Nat := $payloadS)
     (.cons `(command| def $wN : Nat := Nat.add $tagV $payV)
+    (.cons `(command| def $weqN : $wV = Nat.add $tagV $payV := $widthEqBody)
     (.cons `(command| def $codeN : HwTy := HwTy.bits $wV)
     (.cons `(command| def $packN ($x : $tyT) : BitVec $wV := $packBody)
+    (.cons `(command| def $decodeN ($tagv : Nat) ($payv : Nat) : $tyT := $chain)
     (.cons `(command| def $unpackN ($x : BitVec $wV) : $tyT := $unpackBody)
     (.cons `(command| def $toNatN ($x : $tyT) : Nat := BitVec.toNat ($packV $xv))
     (.cons `(command| def $litN {$r : HwTy → Type} [Hw $rv] ($x : $tyT) : $rv $codeV := Hw.lit $wV ($toNatV $xv))
-    (.cons `(command| def $bpN : BitPack $tyT := BitPack.mk $wV $packV $unpackV) .nil)))))))))
+    (.cons `(command| def $ltN ($x : $tyT) : Nat.lt (BitVec.toNat ($packV $xv)) (Nat.pow 2 $wV) = .true := $packLtBody)
+    (.cons `(command| def $bpN : BitPack $tyT := BitPack.mk $wV $packV $unpackV) .nil))))))))))))
 
 -- A representation-parameterised inductive `T Δ r` (fields `r Tᵢ`, as a bundle's are)
 -- is packed at any `r`: the tag is `r (bits tagW)`, the payload `r (bits payloadW)`, and
