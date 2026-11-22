@@ -266,8 +266,6 @@ jobs:
           ldd .lake/build/bin/tower
           if ldd .lake/build/bin/tower | grep -q /nix/store; then echo "tower links /nix/store paths"; exit 1; fi
           .lake/build/bin/tower --version
-      - name: patchelf (release-tarball.sh removes the unused builder RUNPATH)
-        run: command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y -q patchelf
       - name: Tarball
         env:
           BUNDLE_CC: ${{ steps.bundle.outputs.cc }}
