@@ -964,7 +964,6 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
             ${{ steps.nix.outputs.web }} ${{ steps.nix.outputs.playground }} ${{ steps.nix.outputs.ui }} ${{ steps.nix.outputs.source_ui }}
 
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
