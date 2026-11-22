@@ -113,6 +113,44 @@ def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
     pure (if out.exitCode == 0 then .ok () else .error s!"{cmd} failed:\n{out.stderr}")
   catch e => pure (.error s!"{cmd}: {e}")
 
+/-- (F36) The inputs of one split unit's object file (`splitObjectKey` hashes them all). -/
+structure SplitObject where
+  /-- the C compiler -/
+  cc : String
+  /-- every flag `cc` gets for this unit: `-O2 -w -c`, `-DWIZ_API=` for the support unit,
+  `--cflags`, and the `-ffile-prefix-map`s that name the build directory (which `-g`
+  records in the object) -/
+  flags : Array String
+  /-- the include-path variables `cc` reads (`CPATH`, `C_INCLUDE_PATH`, …): they change
+  what an `#include` finds, so they change the object -/
+  env : Array (String × Option String) := #[]
+  /-- the unit's own C text -/
+  text : String
+  /-- the generated header (`wiz_split.h`); a part's text only includes it, so the
+  declarations it compiles against are an input of the part's object, not of its text -/
+  header : String
+  deriving Repr, Inhabited
+
+/-- (F36) The environment variables a C compiler takes include paths from. They are not
+read through a flag, and they change what `#include` finds, so the split object key names
+them too. -/
+def includeEnv : IO (Array (String × Option String)) := do
+  let cpath ← IO.getEnv "CPATH"
+  let cinclude ← IO.getEnv "C_INCLUDE_PATH"
+  let cplus ← IO.getEnv "CPLUS_INCLUDE_PATH"
+  let objc ← IO.getEnv "OBJC_INCLUDE_PATH"
+  pure #[("CPATH", cpath), ("C_INCLUDE_PATH", cinclude), ("CPLUS_INCLUDE_PATH", cplus),
+    ("OBJC_INCLUDE_PATH", objc)]
+
+/-- (F36) The key of one split unit's object: a SHA-256 of every input, so a collision
+cannot reuse an unrelated object (the old key was a 64-bit `mixHash` of the text and a
+re-spelling of the flags, which left the header, the `-ffile-prefix-map`s and the
+compiler's include environment out). -/
+def splitObjectKey (i : SplitObject) : String :=
+  Smt.Sha256.hexFramed "wiz-build/split-object-v2"
+    ([i.cc, "\n".intercalate i.flags.toList, i.text, i.header] ++
+      i.env.toList.map fun (k, v) => k ++ "=" ++ v.getD "")
+
 /-- Compile the C of a program. One translation unit by default; with `--split N` a
 support unit (`-DWIZ_API=`: the runtime and glue are exported) and `N` units of generated
 functions are compiled by `cc -c` in parallel (stage 15k), then linked. `--lib` stays one
@@ -131,22 +169,29 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   let headerText := C.splitHeader decls exports
   IO.FS.writeFile (dir / header) headerText
   let parts := C.splitParts decls n
-  -- (deterministic inputs; a part whose text and flags are unchanged reuses its object)
+  -- (deterministic inputs; a part whose inputs are unchanged reuses its object)
   let inputs : Array (String × String × Bool) :=
     #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
     parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
   let cc := tc.cc
   let cflags := tc.cflags.toArray
   let map ← pathMapFlags tc.cflags dir
-  let keyOf (text : String) (api : Bool) : String :=
-    toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
+  let env ← includeEnv
+  -- (F36) the key names the *actual* flags `cc -c` is given for the unit (plus its
+  -- include environment), not a re-spelling of some of them
+  let flagsOf (api : Bool) : Array String :=
+    #["-O2", "-w", "-c"] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map
+  let keyOf (text header : String) (api : Bool) : String :=
+    splitObjectKey { cc, flags := flagsOf api, env, text, header }
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
     runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
       (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
-    let stamp := keyOf text api
+    -- (F36) the support unit does not include `wiz_split.h`; a part's object is compiled
+    -- against it, so the header is part of a part's key
+    let stamp := keyOf text (if api then "" else headerText) api
     let hit ← if (← (dir / (name ++ ".stamp")).pathExists) && (← (dir / (name ++ ".o")).pathExists) then
         pure ((← IO.FS.readFile (dir / (name ++ ".stamp"))).trimAscii.toString == stamp)
       else pure false
@@ -374,19 +419,46 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
       | none => pure (.error s!"could not read the result: {out.stdout}")
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
+/-- (F09) A header name that may be written into `#include <…>`. A name with `"`, `<`,
+`>`, a backslash, whitespace or a newline would leave the directive (a newline starts
+another one) or close the bracket, so a string in the source could inject preprocessor
+directives — and their output is the C text spliced into the program. Paths (`stdio.h`,
+`sys/types.h`, `/tmp/x.h`) are names; only the characters are checked. -/
+def validHeaderName (h : String) : Bool :=
+  !h.isEmpty && h.toList.all fun c =>
+    c.isAlphanum || c == '_' || c == '.' || c == '/' || c == '-' || c == '+'
+
+/-- (F09) The error for a header name that is not a header name. The offending text is
+not quoted back: it may hold a newline and a preprocessor directive, which would then be
+a directive in a log as well. -/
+def badHeaderName : String :=
+  "import_c: not a valid C header name (letters, digits and `_ . / + -` only; a newline, " ++
+  "quote, angle bracket or backslash would inject a preprocessor directive)"
+
+/-- (F09) The error for a header the C compiler could not preprocess. -/
+def preprocessFailed (cc h : String) (exitCode : UInt32) (stderr : String) : String :=
+  s!"import_c {h}: {cc} -E failed ({exitCode}): {stderr.trimAscii}"
+
 /-- Preprocess the headers a file imports (`import_c "h"`), since the frontend is pure. -/
 def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
   for part in (input.splitOn "import_c \"").drop 1 do
     let h := (part.splitOn "\"").headD ""
     if h.isEmpty || m.contains h then continue
+    -- (F09) only a plausible header name reaches `cc`: a newline or `>` in it would
+    -- splice another preprocessor directive into the generated `#include`
+    unless validHeaderName h do throw (IO.userError badHeaderName)
     let cc := tc.cc
     let dir ← IO.FS.createTempDir
     -- (F11) one scratch directory per header, removed whatever `cc` does
     try
       IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
       let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-      if out.exitCode == 0 then m := m.insert h out.stdout
+      -- (F09) a header that cannot be preprocessed is an error: skipping it would let a
+      -- check pass with types that nothing read (and hide a broken `--cflags`)
+      if out.exitCode != 0 then
+        throw (IO.userError (preprocessFailed cc h out.exitCode out.stderr))
+      m := m.insert h out.stdout
     finally
       try IO.FS.removeDirAll dir catch _ => pure ()
   pure m

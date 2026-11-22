@@ -15,17 +15,26 @@ open Wiz
 /-- `--region-stats`' counters, per process (a grail job is one process). -/
 initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
 
-/-- Preprocess the headers (`import_c "h"`) of some sources with the toolchain's C compiler. -/
+/-- Preprocess the headers (`import_c "h"`) of some sources with the toolchain's C
+compiler. A header that is not a plausible `#include` name, or that the compiler cannot
+preprocess, is an error: splicing unparsed text into `#include <…>` lets a newline or `>`
+inject another directive, and skipping the header silently would leave its types unread
+(F09). -/
 def preprocessHeaders (tc : Toolchain) (srcs : List String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
   for src in srcs do
     for h in Module.headersOf src do
-      if m.contains h then continue
+      if h.isEmpty || m.contains h then continue
+      unless Build.validHeaderName h do throw (IO.userError Build.badHeaderName)
       let dir ← IO.FS.createTempDir
-      IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
-      let out ← IO.Process.output { cmd := tc.cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-      IO.FS.removeDirAll dir
-      if out.exitCode == 0 then m := m.insert h out.stdout
+      try
+        IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
+        let out ← IO.Process.output { cmd := tc.cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
+        if out.exitCode != 0 then
+          throw (IO.userError (Build.preprocessFailed tc.cc h out.exitCode out.stderr))
+        m := m.insert h out.stdout
+      finally
+        try IO.FS.removeDirAll dir catch _ => pure ()
   pure m
 
 /-- A file ready to elaborate: what it can import, its headers, and its key. -/
