@@ -921,20 +921,27 @@ trusted cache; a pull request's `build` writes its own untrusted cache instead
 nothing and its shards build the paths. A merge-queue run publishes nothing either, so
 its shards build too.
 
-A **pull request** gets one further step before `build` compiles anything: it restores
-a previous run's compiled modules (`.lake`, an Actions cache entry; `scripts/lake-cache.sh
-key` names it from `flake.lock`, `flake.nix` and the `lean`/`runtime` subset hashes) and
-builds the same packages from flake.nix's `withLakeCache`, a *second* derivation that
+A **pull request**'s `build` job does not compile from scratch. A push to master's
+`lake_seed` job builds `wiz`, `grail` and `tests` **cold** — `nix develop --command lake
+build wiz grail tests`, with no cache restored (the job asserts its checkout has no
+`.lake`) — and saves that `.lake` under two Actions-cache keys
+(`scripts/lake-cache.sh key`: `flake.lock`, the `lean-toolchain` stamp, the
+architecture and the `lean`/`runtime` subset hashes), a trusted one and an untrusted
+one. A pull request
+restores the untrusted key first (its own previous run) and the trusted one second, and
+builds the same packages from flake.nix's `withLakeCache`: a second derivation that
 starts from that `.lake` and lets Lake recompile only the modules whose inputs changed.
-The run saves its seed back, so a pull request's first build (or its first after a
-toolchain or compiler change) is cold and the later ones are incremental; a missing or
-rejected seed is the cold build, never an error. Those store paths differ from the pure
-build's — the seed is an input — so the shards, `trust-ledger`, `web` and `web_modules`
-ask for the `build` job's paths directly (`nix build /nix/store/…`, which substitutes
-them from Cachix) instead of recomputing the derivation. Pushes, the merge queue and the
-release workflows keep the pure `nix build`: the trusted cache and every release
-artifact name the pure derivation, and nothing in the release path reads
-`withLakeCache`.
+The seed is cold by construction, because a seed harvested from a warm tree is only as
+good as whatever produced the warmth; **nothing a pull request writes is read by a
+trusted job** — a pull request writes no seed at all (the seeded build's output is
+`bin/` only, as `flake.nix`'s `installPhase` says, so the oleans never enter the store),
+and the producer has no restore step. A missing seed is the cold build, never an error.
+Those store paths differ from the pure build's — the seed is an input — so the shards,
+`trust-ledger`, `web` and `web_modules` ask for the `build` job's paths directly
+(`nix build /nix/store/…`, which substitutes them from Cachix) instead of recomputing
+the derivation. Pushes, the merge queue and the release workflows keep the pure
+`nix build`: the trusted cache and every release artifact name the pure derivation, and
+nothing in the release path reads `withLakeCache`.
 
 The `docs` job builds `.#reference` (the standard library's
 reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
@@ -943,7 +950,8 @@ only (`skipPush: true`); on a pull request it reads the trusted cache anonymousl
 the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
 `web` and `web_modules`) also add the PR cache as an extra substituter for that job
 only. No job on the critical path runs `lake build` directly, and the only `.lake`
-Actions cache is a pull request's seed (above). The shards run the Nix-built test driver
+Actions caches are the `lake_seed` job's cold seed and a pull request's restore of it
+(above). The shards run the Nix-built test driver
 (`packages.tests`), not
 `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and

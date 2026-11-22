@@ -119,18 +119,13 @@
               '';
               installPhase = ''
                 runHook preInstall
-                mkdir -p $out/bin $out/lake/.lake/build
+                # Only the binaries, exactly like the pure derivation: the seed (the
+                # `.lake` CI caches) is produced by a cold `lake build` in the dev
+                # shell (scripts/lake-cache.sh save), never harvested from a build
+                # output — a Nix output would make the store the seed's origin and
+                # blur where a trusted seed came from.
+                mkdir -p $out/bin
                 install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
-                if [ ! -d .lake/build/lib ]; then
-                  echo "withLakeCache: lake build wrote no .lake/build/lib" >&2
-                  exit 1
-                fi
-                # the next run's seed: the modules and their traces. `bin/` is relinked
-                # in seconds, so leaving it out keeps the cache entry small.
-                cp -a .lake/build/lib $out/lake/.lake/build/lib
-                if [ -d .lake/build/ir ]; then cp -a .lake/build/ir $out/lake/.lake/build/ir; fi
-                if [ -d .lake/config ]; then cp -a .lake/config $out/lake/.lake/config; fi
-                cp ${./lean-toolchain} $out/toolchain
                 runHook postInstall
               '';
             };

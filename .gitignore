@@ -6,7 +6,7 @@
 
 # Lean
 .lake
-.lake-seed
+.lake-seed*
 .wiz-cache/
 web/out/
 doc-site/
