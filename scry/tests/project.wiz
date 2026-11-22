@@ -23,7 +23,7 @@ import Scry.TaintCmd
 def check (label : String) (ok : Bool) : EIO Unit :=
   EIO.lift (match ok with
     | .true => IO.println (label ++ ": ok")
-    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+    | .false => IO.bind (IO.ePrintln (label ++ ": FAILED"))
         (fun _ => Process.exit 1))
 
 def build (dir : String) (cache : Scry.CacheOpts) :
@@ -38,6 +38,11 @@ def reportOf (dir : String) (cache : Scry.CacheOpts) :
   r ← build dir cache;
   pack ← Scry.loadTaintPack .none;
   EIO.pure (Scry.analyzeProject r.1 pack r.2, r.2)
+
+/-- A report's findings, rendered in order, so two runs can be compared as text. -/
+def findingsText (rep : Scry.ProjectReport) : String :=
+  String.join (List.map (fun pair => Scry.renderFinding rep.origins pair.1 pair.2)
+    (Scry.zipFindings rep.findings rep.checks))
 
 def jNat (j : Json) (k : String) : Nat :=
   match Json.get j k with
@@ -272,16 +277,113 @@ def main : IO Unit := EIO.toIO (do
             | .none => .false
           | .nil => .false);
 
-  -- cache: cold, warm, changed declaration, corrupt entry
+  -- cache: cold, warm, identical findings, every key input, corrupt/truncated entries
   tmp ← FS.createTempDir;
   let cacheDir := String.append tmp "/cache";
   let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true cacheDir;
+  check "cache: the frontend stamp is in the key" (Bool.not (String.eq (Scry.cacheKeyFor "frontend-a" "p.c" "p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKeyFor "frontend-b" "p.c" "p.c" "int f(void);\n" .nil .true .false)));
+  check "cache: --keep-system-headers is in the key" (Bool.not (String.eq (Scry.cacheKey "p.c" "p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKey "p.c" "p.c" "int f(void);\n" .nil .true .true)));
+  check "cache: --allow-errors is in the key" (Bool.not (String.eq (Scry.cacheKey "p.c" "p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKey "p.c" "p.c" "int f(void);\n" .nil .false .false)));
+  check "cache: the flags are in the key" (Bool.not (String.eq (Scry.cacheKey "p.c" "p.c" "int f(void);\n" ["-DX=1"] .true .false) (Scry.cacheKey "p.c" "p.c" "int f(void);\n" ["-DX=2"] .true .false)));
+  check "cache: the source path is in the key" (Bool.not (String.eq (Scry.cacheKey "a/p.c" "a/p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKey "b/p.c" "b/p.c" "int f(void);\n" .nil .true .false)));
+  check "cache: the stored CST path is in the key" (Bool.not (String.eq (Scry.cacheKey "p.c" "a/p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKey "p.c" "b/p.c" "int f(void);\n" .nil .true .false)));
+  check "cache: the source text is in the key" (Bool.not (String.eq (Scry.cacheKey "p.c" "p.c" "int f(void);\n" .nil .true .false) (Scry.cacheKey "p.c" "p.c" "int f(void) { return 0; }\n" .nil .true .false)));
   c1 ← build "corpus/project/taint" cache;
   let s1 := c1.2;
   check "cache: cold miss for every TU" (Bool.and (Nat.beq s1.hit 0) (Bool.and (Nat.beq s1.miss 3) (Nat.beq s1.write 3)));
   c2 ← build "corpus/project/taint" cache;
   let s2 := c2.2;
   check "cache: warm hit for every TU" (Bool.and (Nat.beq s2.hit 3) (Nat.beq s2.miss 0));
+  pack ← Scry.loadTaintPack .none;
+  let repCold := Scry.analyzeProject c1.1 pack s1;
+  let repWarm := Scry.analyzeProject c2.1 pack s2;
+  check "cache: a warm cache reproduces the findings byte for byte" (String.eq (findingsText repCold) (findingsText repWarm));
+  -- an option that changes the cached result is in the key: a strict run does not
+  -- reuse an --allow-errors entry, and its own entry warms separately
+  cs1 ← Scry.ProjectIO.buildProject "corpus/project/taint" .none "cc" .false .false .false .nil cache;
+  check "cache: --allow-errors is in the key (a strict run misses)" (Bool.and (Nat.beq cs1.2.hit 0) (Nat.beq cs1.2.miss 3));
+  cs2 ← Scry.ProjectIO.buildProject "corpus/project/taint" .none "cc" .false .false .false .nil cache;
+  check "cache: the strict entry warms too" (Nat.beq cs2.2.hit 3);
+  -- a rule pack is not part of the CST key: findings are recomputed from the CST, so a
+  -- changed pack on a warm cache must change the report rather than replay an old one
+  oob ← Scry.loadTaintPack (.some "../lib/Scry/rules/oob.scry");
+  let repOob := Scry.analyzeProject c2.1 oob s2;
+  check "cache: a rule-pack change cannot replay stale findings" (Bool.not (String.eq (findingsText repWarm) (findingsText repOob)));
+
+  -- one source file: its content is the key (not its timestamp)
+  let srcDir := String.append tmp "/src";
+  FS.createDir srcDir;
+  let srcCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/srccache");
+  let srcFile := String.append srcDir "/a.c";
+  FS.writeFile srcFile "int f(void) { return 1; }\n";
+  b0 ← build srcDir srcCache;
+  check "cache: a single-TU project is cold" (Nat.beq b0.2.miss 1);
+  FS.writeFile srcFile "int f(void) { return 1; }\n";
+  b1 ← build srcDir srcCache;
+  check "cache: rewriting identical source text still hits" (Nat.beq b1.2.hit 1);
+  FS.writeFile srcFile "int f(void) { return 1; }\nint g(void) { return f(); }\n";
+  b2 ← build srcDir srcCache;
+  check "cache: a changed source file misses" (Bool.and (Nat.beq b2.2.hit 0) (Nat.beq b2.2.miss 1));
+  check "cache: the changed source is what was analysed (two functions)" (Nat.beq (List.length b2.1.funcs) 2);
+
+  -- a header is not in the outer key, but its text reaches the preprocessed digest
+  let hdrDir := String.append tmp "/hdr";
+  FS.createDir hdrDir;
+  let hdrCache : Scry.CacheOpts := Scry.CacheOpts.mk .true (String.append tmp "/hdrcache");
+  FS.writeFile (String.append hdrDir "/h.h") "#define CALL a\nchar *a(void);\nchar *b(void);\n";
+  FS.writeFile (String.append hdrDir "/m.c") "#include \"h.h\"\nvoid m(void) { CALL(); }\n";
+  h1 ← build hdrDir hdrCache;
+  check "cache: a header project is cold" (Nat.beq h1.2.miss 1);
+  h2 ← build hdrDir hdrCache;
+  check "cache: a header project warms" (Nat.beq h2.2.hit 1);
+  check "cache: the header's first macro names the callee" (List.any (fun r => String.eq r.2 "a") h2.1.unresolved);
+  FS.writeFile (String.append hdrDir "/h.h") "#define CALL b\nchar *a(void);\nchar *b(void);\n";
+  h3 ← build hdrDir hdrCache;
+  check "cache: a changed header misses" (Bool.and (Nat.beq h3.2.hit 0) (Nat.beq h3.2.miss 1));
+  check "cache: the changed header's macro is what was parsed" (List.any (fun r => String.eq r.2 "b") h3.1.unresolved);
+
+  -- the entry names its own format and frontend version: a grammar, shim, spill-format
+  -- or preprocessing change is a clean miss, never a stale CST. The literal pins
+  -- Scry.projectCacheFrontend; a deliberate bump updates this test in the same commit.
+  let fmtDir := String.append tmp "/fmt";
+  FS.createDir fmtDir;
+  let fmtCacheDir := String.append tmp "/fmtcache";
+  let fmtCache : Scry.CacheOpts := Scry.CacheOpts.mk .true fmtCacheDir;
+  FS.writeFile (String.append fmtDir "/x.c") "int x(void) { return 0; }\n";
+  f0 ← build fmtDir fmtCache;
+  check "cache: the one-TU version fixture is cold" (Nat.beq f0.2.miss 1);
+  fnames ← FS.listDir fmtCacheDir;
+  let fentry := match fnames with
+    | .cons n _ => String.append fmtCacheDir (String.append "/" n)
+    | .nil => "";
+  ftext ← FS.readFile fentry;
+  check "cache: the entry names its format version" (String.startsWith ftext "scry-project-tu 2\n");
+  check "cache: the entry names the frontend stamp" (String.contains ftext "frontend cst-1 ts-0.27.2 c-0.24.2 abi-15");
+  let oldFront := "frontend cst-1 ts-0.27.2 c-0.24.2 abi-15";
+  let fchanged := String.replace ftext oldFront "frontend cst-0 ts-0.0.0 c-0.0.0 abi-0";
+  check "cache: the frontend fixture rewrote its stamp" (Bool.not (String.eq fchanged ftext));
+  FS.writeFile fentry fchanged;
+  f1 ← build fmtDir fmtCache;
+  check "cache: an entry from another frontend is a clean miss" (Bool.and (Nat.beq f1.2.hit 0) (Bool.and (Nat.beq f1.2.miss 1) (Nat.beq f1.2.corrupt 0)));
+  f2 ← build fmtDir fmtCache;
+  check "cache: the frontend-mismatched entry warms after rewrite" (Nat.beq f2.2.hit 1);
+  -- an entry from an older format version is a miss, not corruption
+  ftext2 ← FS.readFile fentry;
+  let fold := String.replace ftext2 "scry-project-tu " "scry-project-tu 99";
+  check "cache: the format fixture rewrote its magic" (Bool.not (String.eq fold ftext2));
+  FS.writeFile fentry fold;
+  f3 ← build fmtDir fmtCache;
+  check "cache: an entry from another format is a clean miss" (Bool.and (Nat.beq f3.2.hit 0) (Bool.and (Nat.beq f3.2.miss 1) (Nat.beq f3.2.corrupt 0)));
+  f4 ← build fmtDir fmtCache;
+  check "cache: the format-mismatched entry warms after rewrite" (Nat.beq f4.2.hit 1);
+  -- a truncated entry is recomputed, not a hit and not a crash
+  ftext3 ← FS.readFile fentry;
+  FS.writeFile fentry (String.take (Nat.div (String.length ftext3) 2) ftext3);
+  f5 ← build fmtDir fmtCache;
+  check "cache: a truncated entry is recomputed, not a hit" (Bool.and (Nat.beq f5.2.hit 0) (Bool.and (Nat.lt 0 f5.2.corrupt) (Nat.beq f5.2.miss 1)));
+  f6 ← build fmtDir fmtCache;
+  check "cache: the truncated entry warms after rewrite" (Nat.beq f6.2.hit 1);
+
   -- corrupt every entry, then the run must recompute and rewrite
   names ← FS.listDir cacheDir;
   Scry.corruptCacheEntries cacheDir names;

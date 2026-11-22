@@ -18,12 +18,38 @@ the outer key did not change. A stale hit therefore cannot silently reuse a tree
 different code.
 
 The cache is a separate directory (`--cache[=DIR]`, default `.scry-project-cache`). Each
-entry is `DIR/<key>.tu`, written through a sibling `.tmp` and renamed. A malformed,
-truncated or key/pre-digest-mismatched entry is `corrupt`: it is recomputed and rewritten.
+entry is `DIR/<key>.tu`, written through a sibling `.tmp` and renamed. A malformed or
+truncated entry is `corrupt`; an entry from another format or frontend, or one whose
+key/pre-digest does not match, is a `miss`. Both are recomputed and rewritten, so a bad
+entry costs a parse, never a wrong result.
 
 The store format (`native/store.c`, `scry-cst 1`) is unchanged. This cache stores the
 same text the `scry cst` command writes; it does not add a second serialisation of the
 CST.
+
+## What an entry depends on
+
+An entry is reused only when every one of these agrees:
+
+| input | where it is checked |
+|---|---|
+| the resolved source path, the spelling interned in the CST's path table, and the source text | the outer key |
+| the unit's preprocessing flags, in order | the outer key |
+| `--allow-errors` and `--keep-system-headers` | the outer key (strictness, and which text the store was built from) |
+| the preprocessed text (headers, macros, `-I`, the environment `cc` saw) | the `pre` digest, recomputed from the actual `cc -E` output |
+| the entry format | the first line (`Scry.projectCacheMagic`); another format is a **miss**, not corruption |
+| the frontend that produced the CST (tree-sitter runtime/grammar, the shim, `Scry.Native`, the `scry-cst` spill, preprocessing/stripping policy) | the `frontend` line (`Scry.projectCacheFrontend`); another frontend is a **miss** |
+| the CST body | `scry-cst 1`'s magic, section counts, row widths and the stored byte length |
+
+A rule pack is deliberately **not** keyed: it cannot change the cached CST, and findings
+are recomputed from the CST on every run, so a warm cache with a changed pack produces
+the new findings (pinned by `scry/tests/project.wiz`). Lowering, points-to and the rule
+engine are likewise rerun rather than cached.
+
+The frontend stamp is a constant, not a hash of the grammar sources: an installed
+toolchain has no source path to hash, and hashing a 30 MB `parser.c` per translation unit
+would cost more than the parse it protects. Bumping the constant is the contract; the
+golden pins it.
 -/
 
 /-- Cache policy: off, or a directory. `--cache-stats` implies enabled. -/
@@ -67,11 +93,50 @@ def Scry.CacheStats.writeOne (s : Scry.CacheStats) : Scry.CacheStats :=
   Scry.CacheStats.mk s.enabled s.dir s.hit s.miss (Nat.succ s.write) s.corrupt s.files
     s.reason
 
-/-- A cache key: the salt, source path, source text, flags and error mode. -/
-def Scry.cacheKey (path text : String) (flags : List String) (allowErrors : Bool) : String :=
-  let body := String.intercalate "\u{0}" (List.append ["scry-project-tu-1", path, text]
-    (List.append flags [match allowErrors with | .true => "allow-errors" | .false => "strict"]));
+/-- The cache-entry format version. Bump it when `cacheEntryText`/`cacheEntryOf` change;
+an entry written by another version is a clean miss and is rewritten. -/
+def Scry.projectCacheMagic : String := "scry-project-tu 2"
+
+/-- The frontend stamp of a cached CST: everything outside the preprocessed text that can
+change what `Scry.Native.parse` + `Scry.Native.toCstStore` produce for that text. Bump it
+in the same commit as any of:
+
+* the tree-sitter runtime (`scry/native/tree-sitter`, v0.27.2), the C grammar
+  (`scry/native/tree-sitter-c`, v0.24.2) or its `LANGUAGE_VERSION` (ABI 15);
+* `scry/native/ts_shim.c` (the native store layout, flags or error counting);
+* `Scry.Native.parse`/`toCstStore` (kind/field id assignment, span conversion);
+* the `scry-cst 1` spill (`Scry.CstStore.render`/`ofText`);
+* the preprocessing policy that turns `cc -E` output into the `pre` text
+  (`Scry.Preproc.preprocess`, `Scry.markerPaths`, `Scry.normalisePath`,
+  `Scry.ProjectIO.stripSystem`, `Scry.Project.isSystemPath`).
+
+A stale CST is worse than a reparse, so this is a deliberate version stamp rather than a
+guess about the grammar's own version at run time (see the module doc). -/
+def Scry.projectCacheFrontend : String := "cst-1 ts-0.27.2 c-0.24.2 abi-15"
+
+/-- One length-prefixed key field: a field that contains the `\u{0}` separator (or the
+digit/colon prefix) cannot make two different inputs share a key. -/
+def Scry.cacheKeyField (s : String) : String :=
+  String.append (Nat.repr (String.length s)) (String.append ":" s)
+
+/-- A cache key: the format salt, the frontend stamp, the resolved source path, the path
+the CST was built with (it is interned in the store's path table), the source text, the
+flags and the two options that select the cached result. -/
+def Scry.cacheKeyFor (frontend path storedPath text : String) (flags : List String)
+    (allowErrors keepSystem : Bool) : String :=
+  let mode := match allowErrors with | .true => "allow-errors" | .false => "strict";
+  let system := match keepSystem with | .true => "keep-system" | .false => "blank-system";
+  let fields := List.append [Scry.projectCacheMagic, frontend, path, storedPath, text]
+    (List.append flags [mode, system]);
+  let body := String.intercalate "\u{0}" (List.map Scry.cacheKeyField fields);
   Nat.repr (Scry.fnv body)
+
+/-- The cache key of a translation unit under this build's frontend. `path` is the
+resolved source path and `storedPath` the spelling `Scry.Native.toCstStore` interns. -/
+def Scry.cacheKey (path storedPath text : String) (flags : List String)
+    (allowErrors keepSystem : Bool) : String :=
+  Scry.cacheKeyFor Scry.projectCacheFrontend path storedPath text flags allowErrors
+    keepSystem
 
 /-- The validation digest: the preprocessed text (so header/macro changes invalidate an
 entry even when the key is unchanged). -/
@@ -99,52 +164,68 @@ def Scry.cachePath (dir key : String) : String :=
 
 /-- The cache entry text. -/
 def Scry.cacheEntryText (key pre errors cst : String) : String :=
-  "scry-project-tu 1\nkey " ++ key ++ "\npre " ++ pre ++ "\nerrors " ++ errors
+  Scry.projectCacheMagic ++ "\nfrontend " ++ Scry.projectCacheFrontend
+    ++ "\nkey " ++ key ++ "\npre " ++ pre ++ "\nerrors " ++ errors
     ++ "\nbytes " ++ Nat.repr (String.length cst) ++ "\n" ++ cst
 
-/-- Parse a cache entry. Returns `(store, errors)` or a reason (`corrupt`/`miss`). -/
+/-- Parse a cache entry. Returns `(store, errors)` or a reason: `miss` for an entry
+written by another format or frontend (it is recomputed and rewritten, not corruption),
+`corrupt` for a malformed or truncated body. -/
 def Scry.cacheEntryOf (key pre text : String) :
     Except String (Scry.CstStore × Nat) :=
   match String.splitOn text "\n" with
-  | .cons magic (.cons keyLine (.cons preLine (.cons errLine (.cons bytesLine rest)))) =>
-    match String.eq magic "scry-project-tu 1" with
-    | .false => .error "corrupt"
-    | .true => match String.startsWith keyLine "key " with
+  | .cons magic rest =>
+    match String.eq magic Scry.projectCacheMagic with
+    | .false => match String.startsWith magic "scry-project-tu " with
+      | .true => .error "miss"
       | .false => .error "corrupt"
-      | .true => match String.startsWith preLine "pre " with
+    | .true => match rest with
+      | .cons frontLine (.cons keyLine (.cons preLine
+          (.cons errLine (.cons bytesLine rest2)))) =>
+        match String.startsWith frontLine "frontend " with
         | .false => .error "corrupt"
-        | .true => match String.startsWith errLine "errors " with
-          | .false => .error "corrupt"
-          | .true => match String.startsWith bytesLine "bytes " with
+        | .true => match String.eq (String.drop 9 frontLine) Scry.projectCacheFrontend with
+          | .false => .error "miss"
+          | .true => match String.startsWith keyLine "key " with
             | .false => .error "corrupt"
-            | .true =>
-              let k := String.drop 4 keyLine;
-              let p := String.drop 4 preLine;
-              let es := String.drop 7 errLine;
-              let bs := String.drop 6 bytesLine;
-              let cst := String.intercalate "\n" rest;
-              match Bool.and (String.eq k key) (String.eq p pre) with
-              | .false => .error "miss"
-              | .true => match String.parseNat bs with
-                | .none => .error "corrupt"
-                | .some n => match Nat.beq n (String.length cst) with
+            | .true => match String.startsWith preLine "pre " with
+              | .false => .error "corrupt"
+              | .true => match String.startsWith errLine "errors " with
+                | .false => .error "corrupt"
+                | .true => match String.startsWith bytesLine "bytes " with
                   | .false => .error "corrupt"
-                  | .true => match String.parseNat es with
-                    | .none => .error "corrupt"
-                    | .some e => match Scry.CstStore.ofText cst with
-                      | .error _ => .error "corrupt"
-                      | .ok st => .ok (st, e)
-  | _ => .error "corrupt"
+                  | .true =>
+                    let k := String.drop 4 keyLine;
+                    let p := String.drop 4 preLine;
+                    let es := String.drop 7 errLine;
+                    let bs := String.drop 6 bytesLine;
+                    let cst := String.intercalate "\n" rest2;
+                    match Bool.and (String.eq k key) (String.eq p pre) with
+                    | .false => .error "miss"
+                    | .true => match String.parseNat bs with
+                      | .none => .error "corrupt"
+                      | .some n => match Nat.beq n (String.length cst) with
+                        | .false => .error "corrupt"
+                        | .true => match String.parseNat es with
+                          | .none => .error "corrupt"
+                          | .some e => match Scry.CstStore.ofText cst with
+                            | .error _ => .error "corrupt"
+                            | .ok st => .ok (st, e)
+      | _ => .error "corrupt"
+  | .nil => .error "corrupt"
 
-/-- Read a cache entry; `none` is a cold miss, `error reason` a corrupt/mismatched one. -/
+/-- Read a cache entry; an absent entry is `cold`, an unreadable one `corrupt` (the run
+recomputes instead of failing), and a mismatched one `miss`. -/
 def Scry.cacheLoad (dir key pre : String) : EIO (Except String (Scry.CstStore × Nat)) := do
   let p := Scry.cachePath dir key;
   there ← EIO.lift (FS.exists p);
   match there with
   | .false => EIO.pure (.error "cold")
   | .true => do
-    text ← FS.readFile p;
-    EIO.pure (Scry.cacheEntryOf key pre text)
+    textRes ← EIO.lift (FS.readFile p);
+    match textRes with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok text => EIO.pure (Scry.cacheEntryOf key pre text)
 
 /-- Write a cache entry atomically (sibling `.tmp`, then rename over the target). A
 `.tmp` that is a symbolic link is refused: `FS.writeFile` opens with `O_TRUNC`, so a

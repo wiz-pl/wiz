@@ -31,8 +31,11 @@ A unit whose preprocessed text still has `ERROR`/`MISSING` nodes is an error unl
 so the summary and the facts keep the boundary visible.
 
 `--cache[=DIR]` (see `Scry.ProjectCache`) reuses a TU's `scry-cst 1` store across runs.
-The entry is validated against the actual preprocessed text, so an edited header or macro
-is a miss rather than a stale hit; a corrupt entry is recomputed and rewritten.
+The outer key covers the source path/text, the unit's flags, `--allow-errors` and
+`--keep-system-headers`; the entry is validated against the actual preprocessed text, so
+an edited header or macro is a miss rather than a stale hit. The entry also names its
+format and frontend stamp, so a grammar, shim, spill-format or preprocessing change is a
+clean miss; a corrupt or truncated entry is recomputed and rewritten.
 `--skip-broken` records a TU whose preprocessor/parse fails and continues with the rest;
 without it the first failure aborts the project.
 
@@ -196,8 +199,8 @@ def Scry.ProjectIO.buildUnit (cc : String) (allowErrors : Bool) (keepSystem : Bo
     | .true => pre1
     | .false => Scry.ProjectIO.stripSystem pre1;
   sourceText ← Scry.ProjectIO.readSource cmd.directory cmd.file;
-  let key := Scry.cacheKey (Scry.ProjectIO.resolvePath cmd.directory cmd.file) sourceText
-    cmd.flags allowErrors;
+  let key := Scry.cacheKey (Scry.ProjectIO.resolvePath cmd.directory cmd.file) cmd.file
+    sourceText cmd.flags allowErrors keepSystem;
   let pd := Scry.preDigest pre.text;
   found ← match cache.enabled with
     | .false => EIO.pure (.error "disabled" : Except String (Scry.CstStore × Nat))
