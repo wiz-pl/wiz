@@ -1,9 +1,14 @@
-# `=selfhost-libdiff` classification (169 diverging of 209)
+# `=selfhost-libdiff` classification (194 diverging of 239)
 
 Source: the four-part `=selfhost-libdiff` run on `libdiff-corpus` (`de5de5a64`,
 2026-11-20 20:28–21:32) — `records-{1..4}-of-4.jsonl` and `summary-{1..4}-of-4.txt` in
-that worktree's `.lake/libdiff/`. 209 files: 169 diverging, 31 bounded, 8 both-reject,
-1 ok. The host is the Lean frontend; the self side is the self-hosted compiler
+that worktree's `.lake/libdiff/`. That run checked 209 files: 169 diverging, 31 bounded,
+8 both-reject, 1 ok. Train10's corpus (`.github/libdiff-corpus.txt`, `0c85dd743`) has
+239 files: 30 were added after the 209-file run (the Loom/HDL/Scry/notations merges and
+the Scry move from `lib/Scry/` to `scry/src/Scry/`). The 30 are classified in
+*Train10 additions* below; the 209 rows keep their `de5de5a64` verdicts.
+
+The host is the Lean frontend; the self side is the self-hosted compiler
 (`check FILE --types`). The first error is the harness's first error **in the file**,
 or the first import error when the root file has none; a row whose error is in an
 import says so in the location.
@@ -13,14 +18,37 @@ makes this file fail first, not every later error in it. For cascades the `why` 
 names the failing base module; the `file` in the first-error column is where the
 harness saw it.
 
-## Counts by group
+## Counts by group (239 files)
 
 | group | files |
 |---|---:|
-| real selfhost bug | 131 |
-| host-only syntax | 25 |
-| expected divergence | 13 |
-| **total** | **169** |
+| real selfhost bug | 154 |
+| host-only syntax | 26 |
+| expected divergence | 14 |
+| **diverging subtotal** | **194** |
+| bounded (host timeout) | 35 |
+| both-reject | 8 |
+| ok | 2 |
+| **total** | **239** |
+
+The 169-file breakdown below is the `de5de5a64` run; the +25 diverging are the train10
+additions in the next section (23 real, 1 host-only, 1 expected). Bounded grows
+31 → 35 (four new host-bound roots); ok grows 1 → 2 (`lib/Class.wiz`). There are no
+unclassified files left in the 239-file corpus.
+
+**Evidence for the 30 additions.** CI run 44976704026 (train10 PR #549, head
+`9b059a3d5`, 2026-11-22) `test-log-selfhost-libdiff-{1,2}` gives the verdict and time
+per file. That run's part 3 was cancelled at 41/60, so `scry/src/Scry/NativeLink.wiz`
+and `scry/src/Scry/ProverCmd.wiz` have no CI label; their rows say so. A first error
+quoted from an import is the base-module row already in the 209 table (same compiler
+family); a first error in the file itself is from a targeted
+`tests --libdiff --json --only FILE` run at `0c85dd743`. Reproduce one file (the sweep
+builds the selfhost compiler once, ~10 min on a cold tree):
+
+```sh
+lake build tests
+./.lake/build/bin/tests --libdiff --json --jobs 1 --only lib/Compose.wiz
+```
 
 ### Reading the groups
 
@@ -36,6 +64,74 @@ harness saw it.
 `lib/Sys.wiz` itself is in **real selfhost bug** (its first error, `EIO.bind`, is a
 fixable elaboration bug); its clients are in **expected divergence** because their
 remaining surface is the File/Sys/process/clock FFI (C12).
+
+## Train10 additions (30 files)
+
+These are the corpus entries with no row in the 209-file table. `ci` is the
+`test-log-selfhost-libdiff` verdict (with host/self seconds where CI printed them);
+`first error` is the first error the selfhost reports for the file (or the base module
+its first failing import drops). Group names are the same as above.
+
+| file | cause | first error | group | ci |
+|---|---|---|---|---|
+| `lib/Class.wiz` | ok | — | ok | ok 3.2 s (host 1.9, self 1.2) |
+| `lib/Compare.wiz` | Nat `Eq.congrArg2` (via `Nat`/`Word`/`Text`) | `lib/Nat.wiz:46:1` type mismatch (Eq.congrArg2) | real selfhost bug | diverging 13.6 s |
+| `lib/Compose.wiz` | `rfl` computed further | `lib/Compose.wiz:37:34` rfl: the expected type is not an equation (it may have computed further) | real selfhost bug | diverging 2.3 s |
+| `lib/Dist/Checker.wiz` | meta API (`Macro`) via `Data.ListLemmas` | `lib/Data/ListLemmas.wiz:60:1` unknown identifier Macro | host-only syntax | diverging 10.7 s |
+| `lib/Dist/TwoPhase.wiz` | `Mealy.outAt` via `Temporal` → `Trace` | `lib/Trace.wiz:56:1` type mismatch (Mealy.outAt Prod/World) | real selfhost bug | diverging 23.1 s |
+| `lib/Dist/TwoPhaseFinite.wiz` | `Mealy.outAt` via `Dist.TwoPhase` → `Temporal` | `lib/Trace.wiz:56:1` (cascade: TwoPhase → Temporal) | real selfhost bug | diverging 26.9 s |
+| `lib/Hdl/Formal.wiz` | `Hdl.indexed` via `Hdl.Core` | `lib/Hdl/Core.wiz:113:1` unknown identifier Hdl | real selfhost bug | diverging 42.1 s |
+| `lib/Temporal.wiz` | `Mealy.outAt` via `Trace` | `lib/Trace.wiz:56:1` type mismatch (Mealy.outAt Prod/World) | real selfhost bug | diverging 7.1 s |
+| `lib/Web/DocLive.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 33.6 s |
+| `lib/Web/Draft.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 5.5 s |
+| `lib/Web/EditorModel.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 17.0 s |
+| `lib/Web/Examples.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 4.1 s |
+| `lib/Web/Goals.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 22.1 s |
+| `lib/Web/Hover.wiz` | `String ++` via `Json` (`Tagged` is downstream) | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 22.4 s |
+| `lib/Web/InfoviewPage.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 30.4 s |
+| `lib/Web/Search.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 22.6 s |
+| `lib/Web/Selfhost.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 26.8 s |
+| `scry/corpus/csharp/parity/pipeline-probe.wiz` | host bound | — | bounded | bounded 80.6 s (host 60.0, self 20.6) |
+| `scry/src/Scry/AnalysisFile.wiz` | host bound | — | bounded | bounded 81.7 s (host 60.0, self 21.6) |
+| `scry/src/Scry/Identity.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 11.5 s |
+| `scry/src/Scry/Index.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 21.9 s |
+| `scry/src/Scry/NativeLink.wiz` | `U32Array` missing via `Scry.Native` → `WordArray` | `scry/src/Scry/Native.wiz:98:1` unknown identifier U32Array | real selfhost bug | not in CI (part 3 cancelled) |
+| `scry/src/Scry/ProverCmd.wiz` | C12 process/FS surface via `Sys` | `lib/Sys.wiz:71:1` could not elaborate a constructor argument (EIO.bind) | expected divergence | not in CI (part 3 cancelled); targeted run hit the 120 s self bound |
+| `scry/src/Scry/Registry.wiz` | host bound | — | bounded | bounded 87.8 s (host 60.0, self 27.8) |
+| `scry/tests/corpus-parse.wiz` | Text prelude duplicate (`List.map`) | `lib/Text.wiz:45:1` 'List.map' has already been declared | real selfhost bug | diverging 40.4 s |
+| `scry/tests/e2e-c.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 4.6 s |
+| `scry/tests/e2e-cs.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 4.6 s |
+| `scry/tests/e2e-egraph.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 4.5 s |
+| `scry/tests/e2e-prover.wiz` | `String ++` via `Json` | `lib/Json.wiz:359:1` type mismatch: expected (List …), got String | real selfhost bug | diverging 4.6 s |
+| `scry/tests/registry.wiz` | host bound | — | bounded | bounded 92.9 s (host 60.0, self 32.9) |
+
+The four bounded additions are the same host-side 60 s bound as the existing lane (the
+self side finishes in 20–33 s); raising `--host-secs` for those roots would turn them
+into verdicts. `scry/src/Scry/ProverCmd.wiz` is the one new row that is not a verdict:
+it is grouped with the other `scry` command drivers as C12-expected; its 495 lines and
+`Sys`/`Json`/`Text` imports put it on the same File/Sys/process surface, and the
+targeted run did not finish inside the 120 s self bound on the loaded machine.
+
+## Train10 real gaps, by cause
+
+Only the **23** real selfhost bugs among the 30 additions; the host-only-syntax and
+expected rows are not in this queue. Order is by new files whose first error names the
+cause.
+
+| # | cause | files | module | likely owner lane |
+|---:|---|---:|---|---|
+| 1 | `String ++` inferred as `List.append` | **9** | `lib/Json.wiz` (and its `Tagged`/`Web`/`e2e` users) | `elab` (overloaded `++`/coercion); `sh-features` if it lands as a frontend feature |
+| 2 | Text prelude alignment: duplicate `List.map`, no `List.foldl` | **7** | `lib/Text.wiz` vs the embedded prelude | `sh-realprelude` / selfhost prelude |
+| 3 | `Mealy.outAt` Prod/World mismatch | **3** | `lib/Trace.wiz` (`Temporal`, `Dist.TwoPhase*` clients) | `elab` (IO/World pair and Prod telescope) |
+| 4 | `Hdl.indexed` dotted recursive name | **1** | `lib/Hdl/Core.wiz` (`Hdl/Formal` client) | `hdl-l2` (with `elab`/`fixed-params` for the recursive-name fix) |
+| 5 | `Eq.congrArg2` implicit mismatch | **1** | `lib/Nat.wiz` (`Compare` client) | `elab` (implicit unification) |
+| 6 | `rfl` computed further | **1** | `lib/Compose.wiz` (`Compose.assoc`) | `elab`/kernel (`rfl` on a redex) |
+| 7 | `U32Array` missing from `WordArray` | **1** | `lib/WordArray.wiz` (`Scry/NativeLink` client) | `sh-nat` / `audit-runtime` (`UIntN`/array) |
+| 8 | meta `Macro` missing (host-only syntax) | **1** | `lib/Data/ListLemmas.wiz` (`Dist/Checker` client) | `sh-meta` / `elab` (elaborator-time API) |
+
+The first two causes clear 16 of the 23; neither is new (both are in the 209-file
+*Top five fixes*), so the train10 additions reinforce the existing queue rather than
+opening a new one.
 
 ## Counts by root cause (top 25)
 
@@ -337,12 +433,15 @@ python3 scripts/libdiff-classify.py --records-dir .lake/libdiff -o /tmp/libdiff.
 
 ## Caveats
 
-* The report is the **209-file** corpus on `libdiff-corpus`; train9's corpus is **225**
-  files (16 modules added by the Loom/HDL/Scry/notations merges after that run). The 16
-  are not in this table; a train9 rerun flags them as `unknown` until rows are added.
-* The self-hosted compiler binary used for the report is the 20:16 build; running it
+* The 209 rows are the `libdiff-corpus` run; train10's corpus is **239** files. The 30
+  additions are classified in *Train10 additions* above, so a train10 rerun has no
+  `unknown` rows. The old Scry rows were written under `lib/Scry/`; the corpus now
+  names them `scry/src/Scry/` (`859b28379`, the Scry move). Only the path changed.
+* The self-hosted compiler binary used for the 209 rows is the 20:16 build; running it
   with a stale default cache can move diagnostics to `1:1 unknown identifier outParam`.
-  The classification uses the report's records, not a fresh cache.
+  The classification uses the report's records, not a fresh cache. The 30 additions
+  were checked with the same compiler family; `ProverCmd` is the one non-verdict
+  (no CI part, targeted run hit its bound), marked as such in its row.
 * A "first error" is often a cascade (e.g. `unknown U64` because `Word` failed). The
   `why` and `root cause` columns give the cause the file should be queued under.
 
