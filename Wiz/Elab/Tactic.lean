@@ -964,7 +964,7 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
         let cand? := strengthenN depth t
         match cand? with
         | some cand => do
-          r? ← matchCand g gl.ctx A pat lhs rhs happ pairs cand
+          let r? ← matchCand g gl.ctx A pat lhs rhs happ pairs cand
           match r? with
           | some r => pure (some r)
           | none => go (List.append (kidsOf t depth) rest)
