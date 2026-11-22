@@ -30,9 +30,13 @@ Usage
 `--cross` is the cross-implementation check: it generates `--cross-programs`
 programs from the same seed, writes each as the `c` batch (a `main` printing every
 value), runs it through `wiz run` and through the self-hosted driver's `run`, and
-compares stdout line for line. A self-hosted frontend that rejects a generated program
-is a finding, not a skip (the program is in the fragment the generator emits); a
-missing C toolchain is a skip, and the run exits 3 when every program skipped.
+compares stdout line for line. `--cross-json FILE` writes one classification row per
+program (`program`, `shape`, `status`, `cause`) and exits 0, for the `=selfhost-trust`
+case's committed table (`Tests/data/selfhost-trust-cross.tsv`); without it a finding is
+a nonzero exit. A self-hosted frontend that rejects a generated program is a
+`disagree` row with its first cause, not a skip (the program is in the fragment the
+generator emits); a missing C toolchain is a skip, and the run exits 3 when every
+program skipped.
 
 A skipped pipeline (no `wiz`, no C compiler) is a skip, not a pass: the run says
 which pipelines ran.
@@ -44,6 +48,7 @@ The `--wiz-arg` flag is repeatable and forwards a flag to every `wiz` invocation
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import re
@@ -877,6 +882,30 @@ def cross_values(out: Outcome) -> list[str] | None:
     return [l.strip() for l in out.values if l.strip() != ""]
 
 
+UNKNOWN_IDENT_RE = re.compile(r"unknown identifier ([A-Za-z0-9_.✝]+)")
+ERROR_LINE_RE = re.compile(r": error: (.*)$", re.MULTILINE)
+
+
+def cross_cause(out: Outcome) -> str:
+    """A stable one-line cause for a self-hosted rejection (the classification key)."""
+    if out.status == "skip":
+        return "skip"
+    if out.status == "timeout":
+        return "timeout"
+    text = out.stderr
+    m = UNKNOWN_IDENT_RE.search(text)
+    if m:
+        return f"unknown-identifier {m.group(1)}"
+    m = ERROR_LINE_RE.search(text)
+    if m:
+        msg = " ".join(m.group(1).split())
+        return f"error: {msg[:120]}"
+    if out.status == "failed":
+        # (the driver prints `error` alone for some frontend failures; the exit code is 1)
+        return "selfhost-error"
+    return out.status
+
+
 def cross_findings(case: Case, host: Outcome, self: Outcome) -> list[str]:
     """The observable disagreements between the two frontends for one program."""
     if self.status == "skip":
@@ -890,6 +919,22 @@ def cross_findings(case: Case, host: Outcome, self: Outcome) -> list[str]:
     if h != s:
         return [f"host printed {h!r}, the self-hosted compiler {s!r}"]
     return []
+
+
+def cross_row(index: int, shape: str, host: Outcome, self: Outcome) -> dict[str, object]:
+    """One classification row: what this program did, and why if the selfhost rejected it."""
+    h, s = cross_values(host), cross_values(self)
+    if self.status == "skip":
+        status, cause = "skip", "no C toolchain"
+    elif h is not None and s is not None and h == s:
+        status, cause = "agree", ""
+    elif self.status != "ok":
+        status, cause = "disagree", cross_cause(self)
+    elif host.status != "ok":
+        status, cause = "disagree", f"host-{host.status}: {cross_cause(host)}"
+    else:
+        status, cause = "disagree", "output: host and selfhost differ"
+    return {"program": index, "shape": shape, "status": status, "cause": cause}
 
 
 def run_cross_case(case: Case, ctx: Ctx) -> tuple[Outcome, Outcome]:
@@ -918,6 +963,7 @@ def cross_campaign(args: argparse.Namespace, ctx: Ctx) -> int:
     n = args.cross_programs
     findings = 0
     skipped = 0
+    rows: list[dict[str, object]] = []
     print(f"cross-frontends: {n} programs, seed {seed} (host: {' '.join(ctx.wiz)}; "
           f"self: {' '.join(ctx.selfhost or [])})")
     for i in range(n):
@@ -926,6 +972,7 @@ def cross_campaign(args: argparse.Namespace, ctx: Ctx) -> int:
         if self.status == "skip":
             skipped += 1
             print(f"  skip    p{i} {case.shape}: no C toolchain for the self-hosted run")
+            rows.append(cross_row(i, case.shape, host, self))
             continue
         fs = cross_findings(case, host, self)
         if fs:
@@ -937,8 +984,16 @@ def cross_campaign(args: argparse.Namespace, ctx: Ctx) -> int:
                 (p / "prog.wiz").write_text(cross_source(case))
         else:
             print(f"  ok      p{i} {case.shape}")
+        rows.append(cross_row(i, case.shape, host, self))
     print(f"cross-frontends: {n - skipped - findings} agree, {findings} disagree, "
           f"{skipped} skipped")
+    if args.cross_json:
+        # the classification is the product (the =selfhost-trust case compares it with
+        # the checked-in table); a disagreement is a row, not a failed process
+        with open(args.cross_json, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        return 0
     return 1 if findings else (3 if skipped == n else 0)
 
 
@@ -988,6 +1043,8 @@ def main(argv: list[str]) -> int:
                     help="run the generator through both frontends (host and --selfhost)")
     ap.add_argument("--cross-programs", type=int, default=20,
                     help="programs in --cross mode (default 20)")
+    ap.add_argument("--cross-json", default=None,
+                    help="write one classification JSON line per program (and exit 0)")
     ap.add_argument("--cross-self-test", action="store_true",
                     help="check that the cross comparison reports a disagreement")
     ap.add_argument("--selfhost", default=os.environ.get("WIZ_SELFHOST_COMPILER"),

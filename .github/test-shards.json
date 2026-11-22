@@ -16,6 +16,7 @@
       "scripts/check-wizc-release.sh",
       "scripts/fixtures/wizc-release/*",
       "scripts/diff-fuzz.py",
+      "Tests/data/selfhost-trust-cross.tsv",
       "Tests/Groups/SelfHost.lean",
       "Tests/Groups/SelfhostTrust.lean",
       "Tests/Elab.lean"
