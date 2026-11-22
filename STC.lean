@@ -12,6 +12,7 @@ import STC.F0.ConvJoin
 import STC.F0.Typing
 import STC.F0.TopSort
 import STC.F0.Sanity
+import STC.F0.Regression
 
 /-!
 # STC: the F0 specification of the STC track
@@ -34,9 +35,11 @@ adds risk without being needed for M0: regularity and `Desc`/`μ`. Its deliberat
   reduction.
 
 M0 **states** the metatheory as `Prop`s (`F0/Obligations`) rather than proving it:
-soundness/completeness/totality of a checker, consistency for an axiom-free signature,
-weak-head normalisation, and decidability of conversion and typing. Not claimed:
-consistency of full Wiz, soundness of the kernels themselves, strong normalisation.
+soundness/completeness/totality of a checker, consistency for a well-formed and axiom-free
+signature, weak-head normalisation, and decidability of conversion and typing. Not claimed:
+consistency of full Wiz, soundness of the kernels themselves, strong normalisation. The
+signature hypotheses (`SigWF`, `Sig.Closed`) are part of those statements, not decoration:
+`F0/Regression` refutes the old, unrestricted `Con` and shows the repairs are not vacuous.
 
 The files:
 
@@ -66,9 +69,13 @@ The files:
   the remaining law obligation (`StructRenClosed`, `StructSubClosed`);
 * `F0/TopSort`: the checked refutation of `TyUnique` at the top universe (the obligation
   is the corrected pair `TyUniqueTyped` + `TopSortUnique`);
-* `F0/Obligations`: `Sound(F0)`, `Con(F0)`, `WHN`, `DecConv`, `DecTC` as `Prop`s, and the
-  sorting lemma's supporting statements (`TyUnique`, `ConvInj*`);
-* `F0/Sanity`: small derivations that witness that the rules are inhabited.
+* `F0/Obligations`: `Sound(F0)`, `Con(F0)`, `WHN`, `DecConv`, `DecTC` as `Prop`s, each for a
+  `SigWF`/`Sig.Closed` signature, and the sorting lemma's supporting statements (`TyUnique`,
+  `ConvInj*`);
+* `F0/Sanity`: small derivations that witness that the rules are inhabited;
+* `F0/Regression`: the checked counterexample to the old unrestricted `Con` (`badSig`), the
+  proof that `SigWF` fails for it exactly when the fragment is already inconsistent, and a
+  well-formed non-empty signature that keeps the repaired obligations non-vacuous.
 
 Not a default Lake target (`lake build STC` builds it); nothing imports it yet.
 -/
