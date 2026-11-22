@@ -156,7 +156,8 @@ def subset_sha256(root: Path, paths: list[str]) -> str:
     """sha256 over `"{file hash}  {path}\\n"` in byte-sorted path order."""
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda p: p.encode("utf-8", "surrogateescape")):
-        digest.update(f"{file_sha256(root / path)}  {path}\n".encode())
+        line = f"{file_sha256(root / path)}  {path}\n"
+        digest.update(line.encode("utf-8", "surrogateescape"))
     return digest.hexdigest()
 
 

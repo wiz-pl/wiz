@@ -87,6 +87,15 @@ case ${1:-} in
       exit 2
     }
     seed=$(cd "$seed" && pwd)
+    # A seed from another lean-toolchain is not a failure for CI: discard it and
+    # build cold (the flake would refuse it, and a cache restore falling back under
+    # a broader restore-key must not fail the job).
+    if [ ! -f "$seed/toolchain" ] || ! cmp -s "$seed/toolchain" "$root/lean-toolchain"; then
+      echo "lake-cache: $seed has no matching toolchain stamp; discarding it (cold build)" >&2
+      rm -rf "$seed/.lake"
+      mkdir -p "$seed/.lake"
+      cp "$root/lean-toolchain" "$seed/toolchain"
+    fi
     sys=$(system)
     for attr in "$@"; do
       # LAKE_CACHE_NIX_ARGS: extra `nix build` flags (e.g. `--max-jobs 1`, for the
