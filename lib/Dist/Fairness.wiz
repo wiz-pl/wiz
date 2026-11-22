@@ -13,8 +13,11 @@ case:
   until a Boolean goal is reached, and no step increases the rank, then the goal is
   reached from every time. The proof uses the fairness witness that `WF` gives (a
   `□◇taken` function), so it is constructive; no Markov principle is used.
-* `Elect2` (in `Dist.Leader`): a two-voter completion protocol whose liveness is
-  `LTS.fairRank`. The idle stutter run shows that fairness is necessary.
+* `Elect2` (in `Dist.Leader`): a two-voter completion protocol whose liveness is a
+  direct `WF` argument (`advance` is always enabled, so it is eventually taken). The idle
+  stutter run shows that fairness is necessary. `LTS.fairRank` is the reusable rank rule
+  for protocols whose fair action is not always enabled; it is proved here and is
+  available to P3's stable-leader proof.
 -/
 
 /-- `Nat.pred a ≤ r` when `a ≤ r + 1`. -/

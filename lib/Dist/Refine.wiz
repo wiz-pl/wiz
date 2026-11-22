@@ -18,8 +18,10 @@ Refinement between labelled transition systems (`import Dist.Refine`), the P1 la
   but its abstract image never reaches the abstract goal, while every fair abstract run
   does (`Refine.CounterAbsLive`). The missing ingredient is the fairness link of
   `RefinesLive`, which is a P3 deliverable.
-* `RefineCheck` is a finite Boolean check of the two obligations with proved soundness
-  (`RefineCheck.sound`); a broken map returns a witness initial state or step.
+The finite companion is the `Dist.Bridge` interface: a `RefineCheck` Boolean check of the
+two obligations over a finite carrier was scoped in the design note, but the P1 bridge is
+the state-typed `Bridge.SpecModel` (the checker is already generic over the state type),
+so a separate `encode`/`decode` checker is not needed here.
 -/
 
 /-- `f` refines the implementation `I` to the abstract `A`: initial states map to initial
