@@ -1,5 +1,5 @@
-import Core
-import Storage
+import Scry.QuireCore
+import Scry.QuireStorage
 import Word
 import Text
 import Functor
@@ -69,11 +69,6 @@ inductive Cursor (a : Type) where
 inductive Step (a : Type) where
   | done
   | more (value : a) (1 next : Cursor a)
-
-/-- Whether to keep going after a step (early exit is `stop`). -/
-inductive Control (b : Type) where
-  | stop (b : b)
-  | go (b : b)
 
 -- ## Making a plan
 

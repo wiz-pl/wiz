@@ -336,6 +336,9 @@ def cases (impl : IO Impl) : List Case := [
         let x ← IO.FS.createTempDir
         let _ ← runOut "tar" ["-xzf", (rel / "v1" / tarballName a).toString, "-C", x.toString]
         checkHas (← runOut (x / s!"wiz-{a}-linux/bin/wiz").toString ["check"]) s!"wiz-{a}-linux/share/wiz/lib check"
+        -- (F12) the toolchain's Wasm host is beside lib/, where `wiz run --target wasm` looks
+        unless ← (x / s!"wiz-{a}-linux/share/wiz/web/wasm-host.mjs").pathExists do
+          throw (IO.userError "the release tarball has no share/wiz/web/wasm-host.mjs")
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]
         tower e ["set", "releases", rel.toString]

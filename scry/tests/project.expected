@@ -48,4 +48,14 @@ cache: corrupt entries are recomputed: ok
 cache: warm again after corruption: ok
 cache: symlink tmp refused: ok
 cache: symlink target unchanged: ok
+index: json cold: ok
+index: json hit: ok
+index: quire cold: ok
+index: quire hit: ok
+index: json and quire hold the same findings: ok
+index: quire severity query: ok
+index: json severity query: ok
+index: corrupt quire is a miss: ok
+index: quire hit after repair: ok
+index: truncated quire is a miss: ok
 cache: cleanup: ok

@@ -4,7 +4,7 @@ import Word
 import Text
 import WordMap
 import Functor
-import Core
+import Scry.QuireCore
 /-!
 # Storage engine, pure half: recording optics, indices, patches
 

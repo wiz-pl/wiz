@@ -3,8 +3,8 @@ import Word
 import Text
 import Functor
 import Json
-import Quire
-import QuireCursor
+import Scry.Quire
+import Scry.QuireCursor
 import Scry.Facts
 import Scry.CstStore
 import Scry.AnalysisFile

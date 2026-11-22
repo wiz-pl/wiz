@@ -440,6 +440,28 @@ def wasmGroup : Group where
           match ← Build.runWasmGlobal s "main" dir with
           | .error e => throw (IO.userError e)
           | .ok v => checkEq "42" v },
+    { name := "wiz run --target wasm finds the host beside the toolchain's lib/, not in the CWD (F12)", run := fun _ => do
+        -- an installed toolchain has `share/wiz/web/wasm-host.mjs` beside `share/wiz/lib`
+        let host ← Build.wasmHostPath
+        check (host.toString.endsWith "web/wasm-host.mjs") s!"unexpected host path: {host}"
+        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+        unless ← nodeAvailable do skip "no node"; return
+        let tc ← toolchain
+        let dir ← IO.FS.createTempDir
+        try
+          let src := dir / "wasm.wiz"
+          IO.FS.writeFile src "import Prelude\ndef main : Nat := 6 * 7\n"
+          let exe ← IO.FS.realPath ((← IO.appPath).parent.getD "." / "wiz")
+          -- an empty CWD has no `web/`: the old lookup was relative to the CWD and failed
+          let out ← IO.Process.output
+            { cmd := exe.toString,
+              args := (tc.toFlags ++ ["run", src.toString, "--target", "wasm"]).toArray,
+              cwd := dir }
+          if out.exitCode != 0 then
+            throw (IO.userError s!"wiz run --target wasm from another directory failed ({out.exitCode}):\n{out.stdout}\n{out.stderr}")
+          check ((out.stdout.splitOn "42").length > 1) s!"no result:\n{out.stdout}"
+        finally
+          IO.FS.removeDirAll dir },
     { name := "--lib and --no-main are refused for the Wasm target", run := fun _ => do
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef main : Nat := 1"
           { loader := ← libLoader, trustedModule := Tests.libModule }

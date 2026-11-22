@@ -7,7 +7,7 @@ set_option compiler.extract_closed false
 /-!
 # Storage slice 3: the `mmap` read path
 
-`drafts/storage-engine/Mmap.wiz` is the read-only page decoder (the `mmap` native, the
+`lib/Scry/QuireMmap.wiz` is the read-only page decoder (the `mmap` native, the
 32-byte page header and node records, the B+tree walk, the two meta slots, and a page
 checksum that can be skipped). `drafts/storage-engine/MmapTest.wiz` builds a store file
 in the version-2 format those modules document, maps it read-only and reads it: a torn
@@ -16,8 +16,8 @@ is exact, and an out-of-range read is an error rather than a fault. A second fil
 corrupted leaf so the test can show `verify := true` reporting `corrupt` and
 `verify := false` reading the page.
 
-The case concatenates the decoder and the test (the test's own `import Mmap` line is
-dropped), because the suite's loader only serves `lib/` modules.
+The case concatenates the promoted decoder and the test (the test's own import line
+is dropped).
 -/
 
 namespace Tests.Elab
@@ -42,7 +42,7 @@ def storageMmapExpected : String :=
   "clean 20 2 200 8 5\n"
 
 def storageMmap : IO Unit := do
-  let decoder ← IO.FS.readFile "drafts/storage-engine/Mmap.wiz"
+  let decoder ← IO.FS.readFile "lib/Scry/QuireMmap.wiz"
   let test ← IO.FS.readFile "drafts/storage-engine/MmapTest.wiz"
   let fragment := "\n".intercalate
     ((test.splitOn "\n").filter (fun l => !l.startsWith "import "))

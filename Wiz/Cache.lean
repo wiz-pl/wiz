@@ -49,6 +49,13 @@ partial def Sx.parse (s : String) : Option Sx :=
   | some (x, rest) => if rest.all (·.isWhitespace) then some x else none
   | none => none
 where
+  /-- A hexadecimal digit's value, or none. (F27) A malformed escape rejects the
+  entry: the value used to be computed with `toNat - 87` for any character, so a
+  corrupt cache file could yield an arbitrary character rather than a miss. -/
+  hexDigit (c : Char) : Option Nat :=
+    if !c.isHexDigit then none
+    else if c.isDigit then some (c.toNat - 48)
+    else some (c.toLower.toNat - 87)
   go (cs : List Char) : Option (Sx × List Char) := do
     let cs := cs.dropWhile (·.isWhitespace)
     match cs with
@@ -65,13 +72,19 @@ where
         match cs with
         | '\\' :: 'n' :: cs => str cs ('\n' :: acc)
         | '\\' :: 't' :: cs => str cs ('\t' :: acc)
-        | '\\' :: 'x' :: h₁ :: h₂ :: cs =>
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str cs (Char.ofNat (16 * hex h₁ + hex h₂) :: acc)
+        | '\\' :: 'x' :: h₁ :: h₂ :: cs => do
+          let a ← hexDigit h₁
+          let b ← hexDigit h₂
+          str cs (Char.ofNat (16 * a + b) :: acc)
         | '\\' :: 'u' :: '{' :: cs =>
           let ds := cs.takeWhile (· != '}')
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str (cs.drop (ds.length + 1)) (Char.ofNat (ds.foldl (fun n c => 16 * n + hex c) 0) :: acc)
+          match ds.mapM hexDigit with
+          | none => none
+          | some [] => none
+          | some vals =>
+            let code := vals.foldl (fun n d => 16 * n + d) 0
+            if code > 0x10FFFF then none
+            else str (cs.drop (ds.length + 1)) (Char.ofNat code :: acc)
         | '\\' :: c :: cs => str cs (c :: acc)
         | '"' :: cs => some (String.ofList acc.reverse, cs)
         | c :: cs => str cs (c :: acc)

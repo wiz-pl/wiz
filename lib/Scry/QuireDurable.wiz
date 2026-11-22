@@ -4,8 +4,8 @@ import Text
 import WordMap
 import Functor
 import MVar
-import Storage
-import Registry
+import Scry.QuireStorage
+import Scry.QuireRegistry
 /-!
 # A durable single-file store (storage engine, slice 2)
 
@@ -197,7 +197,7 @@ def buildPage (txid right : U64) (recs : List Rec) : Bytes :=
   LE.setU64 padded 16 (fnv padded)
 
 /-- The page's header fields, when the page is well formed for `txid`. -/
-structure Page where
+structure PageData where
   recs : List Rec
   right : U64
 
@@ -209,7 +209,7 @@ def decodeRecs (b : Bytes) : Nat → Nat → List Rec
       (decodeRecs b k (Nat.succ i))
 
 /-- A page, if its kind, record count, generation and checksum are right. -/
-def decodePage (b : Bytes) (txid : U64) : Option Page :=
+def decodePage (b : Bytes) (txid : U64) : Option PageData :=
   match Nat.beq (Bytes.size b) pageSize with
   | .false => .none
   | .true =>
@@ -222,7 +222,7 @@ def decodePage (b : Bytes) (txid : U64) : Option Page :=
     match Bool.and (Nat.beq kind 1)
         (Bool.and (Nat.le n recordsPerPage)
           (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed))) with
-    | .true => .some (Page.mk (decodeRecs b n 0) right)
+    | .true => .some (PageData.mk (decodeRecs b n 0) right)
     | .false => .none
 
 -- ## Meta slots
@@ -401,7 +401,7 @@ def readAt (fd : Fd) (off n : Nat) : EIO (Option Bytes) := do
   | .false => EIO.pure .none
 
 /-- A page, or `none` when it is short, torn or not part of `txid`'s commit. -/
-def readPage (fd : Fd) (txid page : U64) : EIO (Option Page) := do
+def readPage (fd : Fd) (txid page : U64) : EIO (Option PageData) := do
   r ← readAt fd (Nat.mul page.toNat pageSize) pageSize;
   match r with
   | .none => EIO.pure .none
@@ -795,7 +795,7 @@ def commit (fd : Fd) (st : StoreState) (tx : Snapshot) :
 /-- A store: its path (compaction replaces the file), its published state behind the
 single-writer cell, and the schema's indices (rebuilt on open; there is no index page in
 this slice). -/
-structure Handle where
+structure DurableHandle where
   path : String
   state : MVar StoreState
   indices : List IndexDef
@@ -812,7 +812,7 @@ def trimTail (fd : Fd) (pages : U64) : EIO Unit := do
 
 /-- Open (creating if needed) and recover a store, retaining the newest `keep` roots
 (plus leased ones; at least one). -/
-def openDbWith (path : String) (indices : List IndexDef) (keep : Nat) : EIO Handle := do
+def openDbWith (path : String) (indices : List IndexDef) (keep : Nat) : EIO DurableHandle := do
   fd ← Fd.open path .readWrite
     (OpenFlags.mk .true .false .false .false .false .false);
   let k := match Nat.lt 0 keep with
@@ -821,14 +821,14 @@ def openDbWith (path : String) (indices : List IndexDef) (keep : Nat) : EIO Hand
   p ← recoverWith fd indices k;
   trimTail fd p.2;
   cell ← EIO.lift (MVar.newFull p.1);
-  EIO.pure (Handle.mk path cell indices)
+  EIO.pure (DurableHandle.mk path cell indices)
 
 /-- Open with the default retention (K = 8). -/
-def openDb (path : String) (indices : List IndexDef) : EIO Handle :=
+def openDb (path : String) (indices : List IndexDef) : EIO DurableHandle :=
   openDbWith path indices 8
 
 /-- The latest committed snapshot. -/
-def getDb (h : Handle) : EIO Snapshot :=
+def getDb (h : DurableHandle) : EIO Snapshot :=
   EIO.lift (do
     st ← MVar.read h.state;
     IO.pure (Db.snapshot st.db))
@@ -836,7 +836,7 @@ def getDb (h : Handle) : EIO Snapshot :=
 /-- Commit a transaction, or reject it. The cell is held for the whole commit: one
 writer, and `getDb` never observes a half-written `Db`. A snapshot whose generation the
 retention policy no longer keeps is `expired` (its pages are gone or about to be). -/
-def putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
+def putDb (h : DurableHandle) (tx : Snapshot) : EIO Outcome :=
   MVar.borrow h.state (fun st hole =>
     match Registry.retained st.registry tx.gen with
     | .false =>
@@ -848,7 +848,7 @@ def putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
         (fun r => MVar.fill h.state hole r.1 (IO.pure r.2)))
 
 /-- Close the descriptor. The in-memory state is dropped with the handle. -/
-def closeDb (h : Handle) : EIO Unit := do
+def closeDb (h : DurableHandle) : EIO Unit := do
   st ← EIO.lift (MVar.read h.state);
   Fd.close st.fd
 

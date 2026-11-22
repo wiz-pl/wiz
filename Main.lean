@@ -937,16 +937,21 @@ oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
   else do
     let some s ← elabFile tc path | pure 1
     let dir ← IO.FS.createTempDir
-    let print (v : String) : IO UInt32 := do
-      IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
-    if target == "wasm" then
-      match ← Build.runWasmGlobal s "main" dir with
-      | .error e => IO.eprintln e; pure 1
-      | .ok v => print v
-    else
-      match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
-      | .error e => IO.eprintln e.message; pure 1
-      | .ok v => print v
+    -- (F11) the build's scratch directory is removed on every path: the run's output and
+    -- exit status are the same either way, and a failed cleanup is not the program's error
+    try
+      let print (v : String) : IO UInt32 := do
+        IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
+      if target == "wasm" then
+        match ← Build.runWasmGlobal s "main" dir with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v => print v
+      else
+        match ← Build.runGlobal tc s "main" dir (target == "llvm") (split := split) with
+        | .error e => IO.eprintln e.message; pure 1
+        | .ok v => print v
+    finally
+      try IO.FS.removeDirAll dir catch _ => pure ()
 
 /-- The modules the REPL can import, and the hooks the frontend needs: every module under
 the roots (so a `:reset` need not read them again), its C headers and `link_c` files. -/
@@ -1062,9 +1067,13 @@ def replCmd (tc : Toolchain) (llvm : Bool) (preludes : List String := [])
           match c.splitOn " " with
           | [":run", name] =>
             let dir ← IO.FS.createTempDir
-            match ← Build.runGlobal tc state name dir llvm with
-            | .error e => stderr.putStrLn e.message
-            | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            -- (F11) remove the scratch directory on success and failure alike
+            try
+              match ← Build.runGlobal tc state name dir llvm with
+              | .error e => stderr.putStrLn e.message
+              | .ok v => stdout.putStr (if v.endsWith "\n" then v else v ++ "\n")
+            finally
+              try IO.FS.removeDirAll dir catch _ => pure ()
             stdout.flush
             return some state
           | _ => stderr.putStrLn s!"unknown command {c} (`:help`)"; return some state

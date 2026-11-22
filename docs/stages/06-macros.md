@@ -300,3 +300,85 @@ the algorithm is Wiz (`lib/Prelude.wiz`), and the host adds two requests:
 transport) and `Tac.getSimpLemmas` (the default set registered with `attribute [simp]`,
 including `local` scoping). There is no automatic closer; fuel bounds the rewrites.
 Full section: [`06-macros/simp.md`](06-macros/simp.md).
+
+## 6j: `by_cases`
+
+`by_cases e` (`e : Bool`) is a case split on a Boolean expression: two goals, one with
+`e = .true` and one with `e = .false` as a hypothesis. The surface is in
+`lib/Prelude.wiz`; the host adds one request, `Tac.byCases` (tag 42), which builds the
+proof with the kernel's own `Bool.casesOn` eliminator.
+
+```wiz
+import Prelude
+
+def split (p : Nat → Bool) (n : Nat) (R : Prop)
+    (ht : p n = .true → R) (hf : p n = .false → R) : R := by
+  by_cases p n            -- h : p n = .true, then h : p n = .false
+  exact ht h
+  exact hf h
+
+def splitAs (p : Nat → Bool) (n : Nat) (R : Prop)
+    (ht : p n = .true → R) (hf : p n = .false → R) : R := by
+  by_cases hp : p n       -- the hypotheses are called `hp`
+  exact ht hp
+  exact hf hp
+```
+
+* The proof is `Bool.casesOn (fun b => e = b → G) (fun h => m_false) (fun h => m_true)
+  e (refl e)`: the motive is the goal with the branch equation added, the two method
+  holes are the new goals, and the kernel checks the finished term. Nothing is trusted.
+* The hypotheses take fresh **accessible** names from the binder (`h`, `h1`, …), or the
+  name in `by_cases h : e`; either way a name already in the context is made fresh
+  (`n`, `n1`, …), so nothing is shadowed.
+* It replaces the `@Or.elim (e = .true) (e = .false) … (Bool.cases e) (fun h => …)
+  (fun h => …)` a manual proof used to spell out. `lib/ListLemmas.wiz` uses it in
+  `List.any_append` and `List.all_append`: the cons case of each is 12 lines of
+  `Or.elim`/`Bool.cases`/`Eq.trans` before, 9 lines after.
+* The branch hypothesis is put in the goal's context; the binders of `G` are not
+  introduced, so a goal that is itself a function type keeps them for the next tactic.
+* The connectives are library definitions (a Σ and Church encodings), not inductives,
+  so this is not a general `cases`: case analysis on an arbitrary inductive value, and
+  `induction`, are still not implemented. The self-hosted frontend has no `by_cases`
+  (its grammar is generated in `Wiz/Selfhost.lean`), which `=selfhost-libdiff` reports as
+  a gap.
+
+Tests: `=tactics`, "by_cases splits a Bool expression into its two equations", "by_cases:
+a named hypothesis, and a goal that is a function type", and "by_cases rejects a non-Bool
+expression".
+
+## P0: `simp` congruence, `simp?`, `auto` and `omega`
+
+* **`simp` congruence.** `Tac.rewriteAt` now walks the goal type with the real local
+  context of each λ binder: it matches the rule at every node, rebuilds the term, and
+  transports the child's equality through the parent (`Term.abstract` and `transp`); under
+  a λ the proof is the pointwise (definitional) function equality. Non-dependent
+  applications were already reachable by the pre-order matcher; λs were not (their
+  subterms use the extended context). A `Π` **type former** is not traversed: an equality
+  of `Π`s is not pointwise in this kernel, so `simp` leaves it to `intro` (P1). The Wiz
+  driver still owns rule order, direction, fuel and messages.
+* **`simp?`.** The driver records `(rule, direction)` for every successful
+  `simpStep`, in firing order. `simp?` traces `Try this: simp only […]` (adding `; rfl`
+  when the single residual goal is a reflexive equation) and a second
+  `simp?: rulesUsed: […]` line. Replaying the suggestion closes the same goal.
+* **`auto`.** Deterministic bounded search: closers `assumption`, `rfl`, `True.intro`;
+  then local hypotheses (context order) and `[hint]` lemmas (`apply`) by priority and
+  registration order. Budgets are explicit: depth 8 and 5,000 rule applications; a
+  failure is all-or-nothing and reports the first unsolved goal. There is no random or
+  clock-based choice, and an exhausted budget is an error.
+* **`[hint]`.** `attribute [hint] f`, `[hint 500] f` (higher first) and
+  `[hint intro] f`/`[hint elim] f` (kind) register a theorem in the same command-state
+  array as `[simp]`; the sets stay independent (`getSimpLemmas` skips hints,
+  `getHints` skips simps). A bare axiom is refused (the axiom firewall), and `local`
+  hints are dropped at `endModule` with the rest of the module's registrations.
+* **`omega`.** Linear `Nat`: a deterministic transitive-closure search over `Nat.Le`
+  hypotheses and `Nat.le_refl`, `Nat.le_trans`, `Nat.le_succ`, `Nat.le_add_right`,
+  `Nat.le_add_left`, `Nat.le_of_eq`, `Nat.le_of_eq_sym`; `<` is read as
+  `succ a ≤ b`, `=` closes by antisymmetry. Multiplication, division, modulo and powers
+  are refused (`omega: non-linear`); the node budget is 10,000. `Int` order is not the
+  same code (its `Le` is a sign predicate), so it remains P1.
+* **`by_cases`.** Landed from `tactics-gap` as `Tac.byCases` (tag 42), built with
+  `Bool.casesOn`; nothing is trusted.
+
+The must-fail cases are in `=tactics`: `simp` on `a + b = b + a` with the default set,
+`auto` on the affirming-the-consequent goal, `omega` on `n < n`, `n + 1 = n` and
+`a * b = b * a`, `[hint]` of an axiom, and `by_cases` on a non-`Bool` expression.

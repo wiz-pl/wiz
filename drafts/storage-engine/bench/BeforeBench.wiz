@@ -2,9 +2,9 @@ import Sys
 import Word
 import Text
 import Functor
-import Storage
+import Scry.QuireStorage
 import StorageCursor
-import Durable
+import Scry.QuireDurable
 /-!
 # The "before" side: train7's durable store
 
