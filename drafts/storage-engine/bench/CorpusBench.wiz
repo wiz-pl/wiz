@@ -35,7 +35,7 @@ wiz build -I scry/src -I scry/gen drafts/storage-engine/bench/CorpusBench.wiz -o
 def i2s (n : Nat) : String := Nat.toString n
 
 /-- A corpus project's report and findings rows. -/
-def corpusReport (cc : String) : EIO (Scry.ProjectReport × List Scry.FindingRow) := do
+def corpusReport (cc : String) : EIO (Scry.ProjectReport × List Scry.FindingsIndexRow) := do
   built ← Scry.ProjectIO.buildProject "scry/corpus/project/taint" .none cc .true .false
     .false .nil Scry.CacheOpts.none;
   pack ← Scry.loadTaintPack .none;
@@ -76,7 +76,9 @@ def backendOf (s : String) : EIO Scry.CacheBackend :=
 def run (backend op cc dir : String) : EIO Unit := do
   b ← backendOf backend;
   let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true dir b;
-  (rep, rows) ← corpusReport cc;
+  pair ← corpusReport cc;
+  let rep := pair.1;
+  let rows := pair.2;
   let id := Scry.ProjectIO.projectIndexId rep.project;
   match op with
   | "write" => do
@@ -87,10 +89,10 @@ def run (backend op cc dir : String) : EIO Unit := do
       (String.append "backend " backend))
   | "read" => do
     t0 ← EIO.lift Clock.monotonic;
-    loaded ← Scry.findingsLoad cache id;
+    loaded ← Scry.findingsProbe cache id;
     t1 ← EIO.lift Clock.monotonic;
     let n := match loaded with
-      | .ok ks => List.length ks
+      | .ok pr => pr.1
       | .error _ => 0;
     EIO.lift (report "read" n t0 t1 (String.append "backend " backend))
   | "query" => do

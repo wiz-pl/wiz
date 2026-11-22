@@ -250,16 +250,32 @@ def Scry.findingsLoad (cache : Scry.CacheOpts) (id : String) :
     loaded ← Scry.fiLoadJson p;
     match loaded with
     | .error e => EIO.pure (.error e)
-    | .ok rows => EIO.pure (.ok (List.map Scry.FindingRow.key rows))
+    | .ok rows => EIO.pure (.ok (List.map Scry.FindingsIndexRow.key rows))
   | .quire => Scry.fiLoadQuire p
 
 /-- Write the findings index. -/
 def Scry.findingsSave (cache : Scry.CacheOpts) (id : String)
-    (rows : List Scry.FindingRow) : EIO Unit :=
+    (rows : List Scry.FindingsIndexRow) : EIO Unit :=
   let p := Scry.findingsCachePath cache id;
   match cache.backend with
   | .json => Scry.fiSaveJson p rows
   | .quire => Scry.fiSaveQuire p rows
+
+/-- The warm read: `(rows, fingerprint)`. Quire reads the meta and two sentinel records
+(a warm run is O(1), not a page walk); JSON parses the document, which is the format's
+cost. A missing, truncated or garbage file is a clean `error`. -/
+def Scry.findingsProbe (cache : Scry.CacheOpts) (id : String) :
+    EIO (Except String (Nat × U64)) :=
+  let p := Scry.findingsCachePath cache id;
+  match cache.backend with
+  | .json => do
+    loaded ← Scry.fiLoadJson p;
+    match loaded with
+    | .error e => EIO.pure (.error e)
+    | .ok rows =>
+      let ks := List.map Scry.FindingsIndexRow.key rows;
+      EIO.pure (.ok (List.length ks, Scry.fiPrint ks))
+  | .quire => Scry.fiProbe p
 
 /-- The index hit: how many findings have `severity`. `quire` answers through the
 severity index (no primary read); `json` parses and filters the document. -/
@@ -271,7 +287,7 @@ def Scry.findingsQuery (cache : Scry.CacheOpts) (id : String) (severity : Nat) :
   | .quire => Scry.fiCountSeverityQuire p (U32.ofNat severity)
 
 /-- The severity counts of `rows`: the numbers a query must reproduce. -/
-def Scry.severityCounts (rows : List Scry.FindingRow) : List (Nat × Nat) :=
+def Scry.severityCounts (rows : List Scry.FindingsIndexRow) : List (Nat × Nat) :=
   List.map (fun n => (n, List.length (List.filter (fun r => Nat.beq r.severity n) rows)))
     [0, 1, 2]
 
@@ -280,17 +296,17 @@ report is never read from the index: the index is a derived projection, so an in
 cannot change what the analysis reports. A hit requires the same row count and
 fingerprint; a stale or corrupt entry is rewritten. -/
 def Scry.cacheFindings (cache : Scry.CacheOpts) (id : String)
-    (rows : List Scry.FindingRow) : EIO Scry.FindingsCacheStats :=
-  let want := List.map Scry.FindingRow.key rows;
+    (rows : List Scry.FindingsIndexRow) : EIO Scry.FindingsCacheStats :=
+  let want := List.map Scry.FindingsIndexRow.key rows;
   let stats := Scry.FindingsCacheStats.mk (Scry.CacheBackend.show cache.backend) ""
     (List.length rows) (Scry.severityCounts rows);
   match cache.enabled with
   | .false => EIO.pure { stats with reason := "disabled" }
   | .true => do
-    loaded ← Scry.findingsLoad cache id;
+    loaded ← Scry.findingsProbe cache id;
     let reason := match loaded with
-      | .ok ks => match Bool.and (Nat.beq (List.length ks) (List.length want))
-            (UIntN.beq (Scry.fiPrint ks) (Scry.fiPrint want)) with
+      | .ok pr => match Bool.and (Nat.beq pr.1 (List.length want))
+            (UIntN.beq pr.2 (Scry.fiPrint want)) with
         | .true => "hit"
         | .false => "corrupt"
       | .error e => e;

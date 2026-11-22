@@ -143,9 +143,10 @@ def KeyPred.test (p : KeyPred) (v : U64) : Bool :=
 def KeyRange.tighten (r : KeyRange) (p : KeyPred) : KeyRange :=
   KeyRange.intersect r (KeyPred.toRange p)
 
-/-- Whether to keep going after a step (early exit is `stop`). The cursors in
-`Scry.Quire.Cursor` (draft slice) and `Scry.QuireCursor` share it, and it lives in the
-engine-wide module so the page cursor does not depend on the pure cursor. -/
+/-- Whether to keep going after a step (early exit is `stop`). The pure cursor
+(`drafts/storage-engine/Cursor.wiz`) and the page cursor (`Scry.QuireCursor`) share it,
+and it lives in the engine-wide module so the page cursor does not depend on the draft
+slice. -/
 inductive Control (b : Type) where
   | stop (b : b)
   | go (b : b)
