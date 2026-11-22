@@ -861,13 +861,13 @@ def privateTo? (g : Globals R) (n : Name) : Option String :=
 /-- (diagnostics) The failed declaration `x` denotes, if any: the same candidates
 `resolveName` tries (this namespace, the name itself, an open's member). -/
 def failedOf? (g : Globals R) (x : Name) : Option FailedDecl :=
-  let at (n : Name) : Option FailedDecl := g.failed[g.resolve n]?
+  let lookupAt (n : Name) : Option FailedDecl := g.failed[g.resolve n]?
   if x.contains '.' then
-    at (g.expandAliases x) <|>
-      (if g.namespacePrefix.isEmpty then none else at (g.namespacePrefix ++ "." ++ x))
+    lookupAt (g.expandAliases x) <|>
+      (if g.namespacePrefix.isEmpty then none else lookupAt (g.namespacePrefix ++ "." ++ x))
   else
-    (if g.namespacePrefix.isEmpty then none else at (g.namespacePrefix ++ "." ++ x)) <|>
-      at x <|> g.opens.findSome? fun M => at (M ++ "." ++ x)
+    (if g.namespacePrefix.isEmpty then none else lookupAt (g.namespacePrefix ++ "." ++ x)) <|>
+      lookupAt x <|> g.opens.findSome? fun M => lookupAt (M ++ "." ++ x)
 
 
 /-- (13t) `x` with the longest `open … as` alias replaced by its namespace: `A.x` is
