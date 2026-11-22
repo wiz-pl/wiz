@@ -90,13 +90,27 @@ def moduleLoader (roots : List (String × String)) : IO (Name → Option String)
     ms := (← loadedModules root pfx) ++ ms
   pure fun n => ms.lookup n
 
+/-- The Hdl package root: `HDL_ROOT` (a copy of the package, e.g. a parity checkout),
+default `hdl`. The `=hdl-*` groups read the package's sources and examples from here,
+as the Scry groups read `SCRY_ROOT`; nothing in the harness may bake in `hdl/`. The
+package's own roots are relative to this directory (`grail.wiz`: the library is `src/`,
+the tests are `examples/`). -/
+def hdlRoot : IO System.FilePath := do
+  pure (((← IO.getEnv "HDL_ROOT").map System.FilePath.mk).getD (System.FilePath.mk "hdl"))
+
+/-- A file under the Hdl package (`HDL_ROOT`, default `hdl`), read as text. -/
+def hdlRead (path : String) : IO String := do
+  IO.FS.readFile ((← hdlRoot) / path)
+
 /-- Every module of `lib/` (`lib/Dir/Mod.wiz` is `Dir.Mod`) and of the Scry and Hdl
 packages (`scry/src/Scry/Mod.wiz` is `Scry.Mod`, `hdl/src/Hdl/Mod.wiz` is `Hdl.Mod`), by
 import name. Scry and Hdl moved out of `lib/` (`separate-repos.md` P0.1, §1.2), so the
 loader offers all three roots: the engine groups elaborate the lowering they test
-against the std and the packages. -/
-def libLoader : IO (Name → Option String) :=
-  moduleLoader [("lib", ""), ("scry/src/Scry", "Scry."), ("hdl/src/Hdl", "Hdl.")]
+against the std and the packages. The Hdl root is `HDL_ROOT` (default `hdl`), so a
+parity run reads the package copy. -/
+def libLoader : IO (Name → Option String) := do
+  let hdl ← hdlRoot
+  moduleLoader [("lib", ""), ("scry/src/Scry", "Scry."), ((hdl / "src" / "Hdl").toString, "Hdl.")]
 
 /-- Every module of `lib/` and of the Scry package: today the same roots as `libLoader`.
 Kept as the named loader the Scry groups use (a parity group reads the package, not

@@ -170,6 +170,7 @@ jobs:
           python3 scripts/check-name-collisions.py --quiet
           python3 scripts/check-names.py --self-test
           python3 scripts/check-names.py --quiet
+          python3 scripts/check-boundaries.py --self-test && python3 scripts/check-boundaries.py --quiet
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
       - name: Check the release packet and the machinery it describes
         shell: bash

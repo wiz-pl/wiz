@@ -12,11 +12,18 @@ so `cd hdl && grail test` compares every `hdl/examples/*.wiz` with its `.expecte
 root `examples` group covers the root package only, so once the `hdl-*` examples moved out
 of `examples/` nothing in CI ran these goldens: this group is their gate.
 
-Each case runs `runTests "hdl"` over a name range of `hdl/examples/`, so every
-`.expected` there is compared in CI, not only read by a human running `grail test` in the
-package. The ranges are the same split the root `examples` group uses (one before the
-middle of the list, one after), and a new `hdl/examples/*.wiz` falls into one of them
-without an edit here; only a new *nested* directory would need one.
+The package root is `HDL_ROOT` (default `hdl`, as `SCRY_ROOT` defaults to `scry/`), so the
+same cases run against a standalone copy (`HDL_ROOT=/tmp/hdl-copy`) or a parity checkout;
+no case here names `hdl/` itself. `hdl/scripts/check-standalone.sh` copies only the package
+and runs `grail build && grail test` on the copy, which is the build-side half of the same
+claim.
+
+Each case runs `runTests` over a name range of the package's `examples/` (the root is
+`HDL_ROOT`, default `hdl`), so every `.expected` there is compared in CI, not only read by
+a human running `grail test` in the package. The ranges are the same split the root
+`examples` group uses (one before the middle of the list, one after), and a new
+`$HDL_ROOT/examples/*.wiz` falls into one of them without an edit here; only a new
+*nested* directory would need one.
 
 `-- test: skip` in an example still applies: four are skipped with a reason
 (`hdl-crc-link`, `hdl-sim-bench`, `hdl-verified-full`, `hdl-verified-native`) and are
@@ -93,8 +100,8 @@ def hdlExpectedMismatch (file : String) (kind : Grail.TestKind)
 
 /-- Every `hdl/examples/*.wiz` whose `.expected` disagrees with its marker. -/
 def hdlMarkerFailures : IO (List String) := do
-  let files ← Grail.testFiles "hdl" "examples"
-  let pkg : System.FilePath := "hdl"
+  let pkg ← Tests.hdlRoot
+  let files ← Grail.testFiles pkg "examples"
   let mut bad : Array String := #[]
   for f in files do
     match Grail.TestKind.ofSource (← IO.FS.readFile (pkg / f)) with
@@ -113,7 +120,7 @@ def hdlSkips : List String :=
 /-- The package's goldens: `hdl/examples/*.wiz` minus the four skips (32 today), each
 compared against its `.expected`. -/
 def hdlGoldens : IO (List String) := do
-  let files ← Grail.testFiles "hdl" "examples"
+  let files ← Grail.testFiles (← Tests.hdlRoot) "examples"
   pure (files.toList.filter fun f => !hdlSkips.contains f)
 
 /-- The marker guard: it runs before the ranges and names every disagreement. -/
@@ -132,13 +139,13 @@ def hdlMarkerCase : Case :=
       check ((hdlExpectedMismatch "examples/x.wiz" .check (some "examples/x.wiz:1:2: info: ok\n")).isNone)
         "the guard rejects a real check output"
       -- the golden set is total: a move that drops one fails here, not silently
-      let files ← Grail.testFiles "hdl" "examples"
+      let pkg ← Tests.hdlRoot
+      let files ← Grail.testFiles pkg "examples"
       check (files.size == 36)
-        s!"hdl/examples has {files.size} .wiz; expected 36 (32 goldens + 4 `-- test: skip`): update HdlExamples.lean"
+        s!"{pkg}/examples has {files.size} .wiz; expected 36 (32 goldens + 4 `-- test: skip`): update HdlExamples.lean"
       let goldens ← hdlGoldens
       check (goldens.length == 32)
         s!"{goldens.length} goldens; expected 32 (a `.expected` is compared for each): update HdlExamples.lean"
-      let pkg : System.FilePath := "hdl"
       for f in files do
         let hasExpected ← ((pkg / f).withExtension "expected").pathExists
         check (hasExpected == !hdlSkips.contains f)
@@ -155,13 +162,14 @@ verified examples need more than the harness's 300 s default). -/
 def hdlExamplesCase (name : String) (keep : String → Bool) (skips : List String)
     (limitSecs : Nat := 300) : Case :=
   { name := name, run := fun _ => do
-      let files ← Grail.testFiles "hdl" "examples"
+      let root ← Tests.hdlRoot
+      let files ← Grail.testFiles root "examples"
       let sel := files.toList.filter keep
       check (!sel.isEmpty) "no examples in this range (the range in Tests/Groups/HdlExamples.lean is stale)"
       -- (the driver's elaboration cache, from `--cache`: the files share imports, so the
       -- first one pays for Prelude/Hdl.Core, the rest replay it)
       let tc ← toolchain
-      let (res, _) ← runTests "hdl" tc (testTimeoutMs := some (1000 * limitSecs)) (filters := sel)
+      let (res, _) ← runTests root tc (testTimeoutMs := some (1000 * limitSecs)) (filters := sel)
       checkEq sel.length res.size
       checkEq skips (res.filter (·.skipped) |>.toList.map (·.file))
       for t in res do
