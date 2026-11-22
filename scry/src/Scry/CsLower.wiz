@@ -3300,7 +3300,7 @@ partial def Scry.Cs.lowerLocalFn (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
     | .some x => c.textOf x
     | .none => "local";
   let qname := Scry.Cs.localFnName s0.ls.fname name (Scry.Cs.countLocalFn name s0.localFns);
-  let ps : List (String × String × Scry.Cs.NullAnn) := match Scry.childK c n "parameters" with
+  let ps : List (String × String × Scry.Cs.NullAnn) := match Scry.childF c n "parameters" with
     | .some pl => List.map (fun p =>
         let nm := match Scry.childF c p "name" with
           | .some x => c.textOf x
@@ -4509,6 +4509,15 @@ def Scry.Cs.stemOf (path : String) : String :=
   | .some s => s
   | .none => base
 
+/-- Is this the first declaration of its class in the file? `partial class C` is one
+class table after `mergeOne`, so a constructor the compiler implies is emitted once, at
+the first part, not once per part. -/
+def Scry.Cs.firstDeclOf (c : Scry.Cst) (decls : List (String × Nat)) (d : String × Nat) : Bool :=
+  let q := (Scry.Cs.scanClass c d.1 d.2).qname;
+  match List.find (fun e => String.eq (Scry.Cs.scanClass c e.1 e.2).qname q) decls with
+  | .some e => Nat.beq e.2 d.2
+  | .none => .true
+
 /-- Lower a parsed C# file (`c` is its `Scry.Cs.ofStore` view) with an explicit model
 pack; the default wrapper is `Scry.Cs.lowerCst`. -/
 def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text : String)
@@ -4531,22 +4540,24 @@ def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text :
     -- the compiler's own constructors: a primary one (positional parameters), the
     -- implicit parameterless one an initialiser-only class needs, and the static
     -- constructor for static initialisers. Each runs from the previous one's final
-    -- state, so the annotation/point facts of all of them are kept.
-    let p1 : Option Scry.Cs.FnOut := match Scry.Cs.needsPrimaryCtor c d.2 k with
-      | .true => .some (Scry.Cs.lowerPrimaryCtor c u k r1.1 d.2 (Scry.Cs.baseArgsOf c d.2))
-      | .false => .none;
+    -- state, so the annotation/point facts of all of them are kept. A `partial` class is
+    -- one table, so they are emitted at its first declaration only.
+    let first := Scry.Cs.firstDeclOf c decls d;
+    let p1 : Option Scry.Cs.FnOut := match first, Scry.Cs.needsPrimaryCtor c d.2 k with
+      | .true, .true => .some (Scry.Cs.lowerPrimaryCtor c u k r1.1 d.2 (Scry.Cs.baseArgsOf c d.2))
+      | _, _ => .none;
     let st1 : Scry.LState := match p1 with
       | .some p => p.ls
       | .none => r1.1;
-    let i1 : Option Scry.Cs.FnOut := match Scry.Cs.needsInitCtor k with
-      | .true => .some (Scry.Cs.lowerInitCtor c u k st1 d.2)
-      | .false => .none;
+    let i1 : Option Scry.Cs.FnOut := match first, Scry.Cs.needsInitCtor k with
+      | .true, .true => .some (Scry.Cs.lowerInitCtor c u k st1 d.2)
+      | _, _ => .none;
     let st2 : Scry.LState := match i1 with
       | .some p => p.ls
       | .none => st1;
-    let c1 : Option Scry.Cs.FnOut := match Scry.Cs.anyInits k.sinits with
-      | .true => .some (Scry.Cs.lowerCctor c u k st2 d.2)
-      | .false => .none;
+    let c1 : Option Scry.Cs.FnOut := match first, Scry.Cs.anyInits k.sinits with
+      | .true, .true => .some (Scry.Cs.lowerCctor c u k st2 d.2)
+      | _, _ => .none;
     let st3 : Scry.LState := match c1 with
       | .some p => p.ls
       | .none => st2;

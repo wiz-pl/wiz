@@ -37,26 +37,26 @@ namespace Demo.InitOrder
             return n;
         }
     }
-}
 
-// The order is observable at run time: `Check` constructs a `Traced`, whose two
-// initialisers step a static log, and returns it — 12 in declaration order, 21 reversed,
-// 0 if the initialisers never run.
-public class Traced
-{
-    private static int log = 0;
-    private int first = Step(1);
-    private int second = Step(2);
-
-    private static int Step(int n)
+    // The order is observable at run time: `Check` constructs a `Traced`, whose two
+    // initialisers step a static log, and returns it — 12 in declaration order, 21
+    // reversed, 0 if the initialisers never run.
+    public class Traced
     {
-        log = log * 10 + n;
-        return n;
-    }
+        private static int log = 0;
+        private int first = Step(1);
+        private int second = Step(2);
 
-    public static int Check()
-    {
-        var made = new Traced();
-        return log;
+        private static int Step(int n)
+        {
+            log = log * 10 + n;
+            return n;
+        }
+
+        public static int Check()
+        {
+            var made = new Traced();
+            return log;
+        }
     }
 }
