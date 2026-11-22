@@ -2,9 +2,9 @@ import Sys
 import Word
 import Text
 import WordMap
-import Storage
-import Registry
-import Durable
+import Scry.QuireStorage
+import Scry.QuireRegistry
+import Scry.QuireDurable
 /-!
 # Compaction and space accounting (storage engine, slice 3)
 
@@ -241,13 +241,13 @@ def statsOf (st : StoreState) : EIO Stats := do
   EIO.pure (Plan.stats p st.registryPages)
 
 /-- The current store's statistics. -/
-def storeStats (h : Handle) : EIO Stats := do
+def storeStats (h : DurableHandle) : EIO Stats := do
   st ← EIO.lift (MVar.read h.state);
   statsOf st
 
 /-- Take a lease on `gen`: its pages stay live across compaction until released. Fails
 (`false`) when the generation is not one the policy still keeps. -/
-def leaseRoot (h : Handle) (gen : U64) : EIO Bool :=
+def leaseRoot (h : DurableHandle) (gen : U64) : EIO Bool :=
   MVar.borrow h.state (fun st hole =>
     let held := Registry.retained st.registry gen;
     let reg := match held with
@@ -257,7 +257,7 @@ def leaseRoot (h : Handle) (gen : U64) : EIO Bool :=
       (IO.pure (.ok held) : IO (Except String Bool)))
 
 /-- Release a lease (a double release is a no-op). -/
-def releaseRoot (h : Handle) (gen : U64) : EIO Unit :=
+def releaseRoot (h : DurableHandle) (gen : U64) : EIO Unit :=
   MVar.borrow h.state (fun st hole =>
     MVar.fill h.state hole { st with registry := Registry.release st.registry gen }
       (IO.pure (.ok ()) : IO (Except String Unit)))
@@ -324,7 +324,7 @@ structure Prepared where
 /-- Build the compacted image at `<path>.compact` and fsync it. The store itself is not
 touched: this is crash states 1–3 of the module header. The new registry is written
 before either meta record, and the whole image is fsynced before the rename switch. -/
-def prepareCompaction (h : Handle) : EIO Prepared := do
+def prepareCompaction (h : DurableHandle) : EIO Prepared := do
   st ← EIO.lift (MVar.read h.state);
   p ← planOf st;
   let remapped := Registry.remap st.registry p.rootMap;
@@ -366,7 +366,7 @@ def abandonCompaction (p : Prepared) : EIO Unit := do
 /-- The switch: `rename` over the path, fsync the directory, then publish a state that
 writes to the new descriptor. If the store moved on since `prepareCompaction`, the image
 is thrown away and nothing changes. -/
-def finishCompaction (h : Handle) (p : Prepared) : EIO Compacted :=
+def finishCompaction (h : DurableHandle) (p : Prepared) : EIO Compacted :=
   MVar.borrow h.state (fun st hole =>
     match UIntN.beq st.db.gen p.fromGen with
     | .false =>
@@ -393,7 +393,7 @@ def finishCompaction (h : Handle) (p : Prepared) : EIO Compacted :=
                     (Plan.after p.plan p.registryPages)))))))
 
 /-- The whole protocol: build, fsync, rename, fsync the directory, publish. -/
-def compactStore (h : Handle) : EIO Compacted := do
+def compactStore (h : DurableHandle) : EIO Compacted := do
   p ← prepareCompaction h;
   finishCompaction h p
 
@@ -404,6 +404,6 @@ def readRef (fd : Fd) (r : RootRef) (pageCount : U64) : EIO (Option (List Rec)) 
     r.delEpoch (U64.ofNat 0) (U64.ofNat 0) pageCount)
 
 /-- The retained roots, newest first. -/
-def retainedRoots (h : Handle) : EIO (List RootRef) := do
+def retainedRoots (h : DurableHandle) : EIO (List RootRef) := do
   st ← EIO.lift (MVar.read h.state);
   EIO.pure (Registry.roots st.registry)

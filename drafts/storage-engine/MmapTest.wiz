@@ -1,4 +1,4 @@
-import Mmap
+import Scry.QuireMmap
 import Word
 import IO
 import Sys
