@@ -331,7 +331,7 @@ def Scry.resultJsonFullLine (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) (checked : Bool) (baseline : Option String)
     (lineText : Option String) : Json :=
   let file := Scry.findingFile m f;
-  let flow := match f.path with
+  let flow : Option Json := match f.path with
     | .nil => .none
     | _ => .some (Scry.codeFlowsJson m f.path);
   Scry.resultJsonCore (Scry.sarifRuleId f.rule) (.some (Scry.ruleIndexOf pack f.rule))
