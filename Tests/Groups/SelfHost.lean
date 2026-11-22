@@ -1335,6 +1335,33 @@ def classInstParamExpected : String :=
   "instMyCommute : ((((((MyCommute Nat) Nat) Option) instMyMonadOption) instMyHandlerNatOption) instMyHandlerNatOption)\n" ++
   "con((#1, (tt, tt)))\n"
 
+/-- (`String ++`) `++` is a class problem through `Append` in both frontends: on String
+(`"ab" ++ "c"` is `String.append`) and on a `List`. The embedded prelude used to declare
+`infixr:67 " ++ " => List.append`, so `"a" ++ "b"` elaborated to `List.append` and was
+rejected (`expected List, got String`) while the host reached `String.append` through
+`HAppend`'s default instance. `strEq` and `nth` are local because `lib/Text.wiz` cannot
+be imported by the self-hosted frontend yet (its `List.map` duplicates the prelude's). -/
+def appendHeader : String :=
+  "def chEq : List Char → List Char → Bool\n" ++
+  "  | .nil, .nil => .true\n" ++
+  "  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (chEq as bs)\n" ++
+  "  | _, _ => .false\n" ++
+  "def strEq : String → String → Bool\n  | .mk a, .mk b => chEq a b\n" ++
+  "def flag (b : Bool) : Nat := if b then 1 else 0\n" ++
+  "def nth : List Nat → Nat → Nat\n" ++
+  "  | .cons x _, .zero => x\n" ++
+  "  | .cons _ xs, .succ k => nth xs k\n" ++
+  "  | .nil, _ => 0\n"
+
+/-- (`String ++`) The same values in both frontends: `"a" ++ "b"` is `"ab"` (not `"ba"`),
+and a `List` append keeps the elements in order. -/
+def appendCases : List (String × Nat) := [
+  ("flag (strEq (\"a\" ++ \"b\") \"ab\")", 1),
+  ("flag (strEq (\"a\" ++ \"b\") \"ba\")", 0),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 0", 1),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 2", 3),
+  ("List.length (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil)", 3)]
+
 /-- (A10) A method call with no instance for its class argument: an error. -/
 def classMissing : String :=
   "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
@@ -3470,6 +3497,13 @@ def selfHostGroup : Group where
           ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ninstance instDefaultNat2 : Default Nat := Default.mk 8\n", true, false),
           -- (an output parameter rewrites a class parameter's type; not implemented here)
           ("class MyAdd (A B : Type) (C : outParam Type) where\n  add : A → B → C\ninstance instMyAdd : MyAdd Nat Nat Nat := MyAdd.mk Nat.add\ndef three : Nat := MyAdd.add 1 2\n", true, false)] },
+    { name := "the self-hosted frontend: `++` is `Append` on String and List, as in the Lean frontend (String ++)", run := fun _ => do
+        selfhostAgrees appendHeader [
+          ("def s : String := \"a\" ++ \"b\"\n", true),
+          ("def xs : List Nat := List.cons 1 List.nil ++ List.cons 2 List.nil\n", true),
+          -- (the operands fix the instance: a string append is not a list append)
+          ("def bad : List Nat := \"a\" ++ \"b\"\n", false)]
+        selfhostSameNats appendHeader appendCases },
     { name := "the self-hosted backend: a class's dictionary passing compiles and runs (A10)", run := fun _ =>
         selfhostCompileRun classProgram "7\n1\n" },
     { name := "the proof surface: Prop, Sort, equality, refl/rfl, cast and transp, as in the Lean frontend (A16)", run := fun _ => do
