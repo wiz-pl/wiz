@@ -25,7 +25,6 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
   and a SIGSEGV reported as signal 11).
 
-* compiler: the C backend now **fails the compile** on a partial application of a
 * compiler: the **C and LLVM backends fail the compile** on a partial application of a
   function with no known arity and on a jump with no join point in scope, instead of
   emitting a closure with arity 0 and an assignment-free jump; the C backend's locals
@@ -33,6 +32,10 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
   as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
   `=llvm`, `=scaling`.
+* modules: the `import_c` header scan skips `--` comment lines. The scan is textual
+  (F10), so `selfhost/Frontend.wiz` documenting the syntax yielded the header `…`,
+  which the header-name check (F09) rightly rejects; the playground build failed on a
+  comment. Block comments are still scanned (the remaining F10 gap). Tests: `=modules`.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
