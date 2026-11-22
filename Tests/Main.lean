@@ -208,8 +208,8 @@ memory or CPUs are short). `--jobs-all` also parallelizes groups that did not op
 auditing a group's isolation, not for CI).
 
 `--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
-runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and
-reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
+runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file
+and reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
 `Tests/Groups/SelfhostLibDiff.lean` documents the format). `--jobs N` checks N files at a
 time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memory at
 `--mem` MB per file. The driver's `--jobs` reaches the group's one case; `--jobs 1` is the

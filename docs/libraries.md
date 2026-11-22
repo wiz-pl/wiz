@@ -140,6 +140,11 @@ sizes) is O(n) as well; a cached measure would be a node carrying its value and 
 equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The deque ends
 (push, pop, pushFront, popFront) are the amortised-constant operations.
 
+The package's examples are its tests: `hdl/grail.wiz` declares
+`Package.tests "examples" "examples"`, so `cd hdl && grail test` compares every
+`hdl/examples/*.wiz` with its `.expected`. CI's `hdl-examples` group (shard `hdl`) runs
+the same comparisons (`Tests/Groups/HdlExamples.lean`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `hdl/src/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
