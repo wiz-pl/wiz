@@ -44,10 +44,10 @@ def badSig : Sig := [badDecl]
 
 /-- The lookup `Global.const` uses. For any declaration, a singleton signature finds its
 name at its head; `LawfulBEq String` gives `d.name == d.name`. -/
-theorem find_singleton (d : Decl) : ([d] : Sig).find? d.name = some d := by
-  simp [Sig.find?, List.find?, beq_self_eq_true]
+theorem find_singleton (d : Decl) : Sig.find? ([d] : Sig) d.name = some d := by
+  simp [Sig.find?, List.find?_cons, beq_self_eq_true]
 
-theorem badSig_find : badSig.find? "bad" = some badDecl := by
+theorem badSig_find : Sig.find? badSig "bad" = some badDecl := by
   simpa [badSig, badDecl] using find_singleton badDecl
 
 /-- `badSig` is axiom-free: its only declaration has a value. -/
@@ -101,7 +101,7 @@ theorem badSig_sigWF_gives_empty (h : SigWF F0 badSig) :
   -- `axiom` is a keyword, so the constructor alternative needs guillemets in a pattern.
   cases h with
   | «axiom» _ _ hval _ => simp [badDecl] at hval
-  | defn _ _ hval hty _ =>
+  | defn _ _ hval _ hty =>
       simp only [badDecl, Option.some.injEq] at hval
       subst hval
       simpa [badDecl] using hty
