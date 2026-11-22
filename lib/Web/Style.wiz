@@ -117,9 +117,9 @@ inductive Style.Value where
 /-- The CSS spelling of a value. -/
 def Style.valueCss : Style.Value → String
   | .kw k => Style.keywordCss k
-  | .px n => String.append (Nat.toString n) "px"
-  | .rem n => String.append (Nat.toString n) "rem"
-  | .number n => Nat.toString n
+  | .px n => String.append (Nat.repr n) "px"
+  | .rem n => String.append (Nat.repr n) "rem"
+  | .number n => Nat.repr n
   | .var name => String.append "var(--" (String.append name ")")
   | .shadow v => v
   | .seq a b => String.append (Style.valueCss a) (String.append " " (Style.valueCss b))
@@ -243,7 +243,7 @@ def Style.mediaCss : Style.Media → String
   | .reducedMotion => "(prefers-reduced-motion:reduce)"
   | .moreContrast => "(prefers-contrast:more)"
   | .hoverNone => "(hover:none)"
-  | .maxWidth px => String.append "(max-width:" (String.append (Nat.toString px) "px)")
+  | .maxWidth px => String.append "(max-width:" (String.append (Nat.repr px) "px)")
 
 /-- A pseudo-class or a media condition attached to a rule. The list is outer-to-inner. -/
 inductive Style.Attach where
@@ -548,8 +548,8 @@ source order emit the same bytes. -/
 def Style.canonicalDecls (decls : List Style.Decl) : List Style.Decl :=
   let last := List.foldl (fun acc d =>
     List.append (List.filter (fun x => Bool.not (String.eq (Style.propCss x.prop) (Style.propCss d.prop))) acc)
-      [d]) [] decls;
-  List.foldl (fun acc d => Style.insertDecl d acc) [] last
+      [d]) ([] : List Style.Decl) decls;
+  List.foldl (fun acc d => Style.insertDecl d acc) ([] : List Style.Decl) last
 
 /-- `property:value` pairs, in canonical order. -/
 def Style.declsCss (decls : List Style.Decl) : String :=
