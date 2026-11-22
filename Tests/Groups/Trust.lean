@@ -13,20 +13,16 @@ def formatMessages (s : CommandState ZeroOneMany) : List String :=
   s.messages.toList.map fun m => (match m.severity with
     | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text
 
-/-- Messages of `input`, with every module under `lib/` importable **from disk**.
+/-- Messages of `input`, with every module of `lib/` (and of the Scry and Hdl packages)
+importable **from disk**.
 
 `preludeLoader` only carries Prelude/Word/Functor/Logic/Text/IO/Std/Sys, so a case that
 imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
-saw `unknown module` (and passed or failed for the wrong reason). Resolving the closure
-means the case exercises the module it names. -/
-def libLoader (input : String) : IO (Name → Option String) := do
-  let ms ← Wiz.Module.loadClosure ["lib"] input
-  pure fun n => (ms[n]?).map (·.2)
-
-/-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
+saw `unknown module` and then failed for a reason unrelated to what it pins. `libLoader` is
+the suite's cached whole-library loader (`Tests/Loader.lean`). -/
 def messagesLib (input : String) : IO (List String) := do
   let s := runFrontend (R := ZeroOneMany) input
-    { loader := ← libLoader input, trustedModule := Tests.libModule }
+    { loader := ← libLoader, trustedModule := Tests.libModule }
   pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/

@@ -391,10 +391,12 @@ def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat 
   cRunWith (← preludeLoader) src expected llvm split
 
 /-- `cRun` for a program that imports a module `preludeLoader` does not carry
-(`WordArray`, `Intern`, `Data.PMap`, …): resolve the closure from `lib/` on disk. -/
+(`WordArray`, `Intern`, `Data.PMap`, `Web.EditorModel`, …): the suite's cached
+whole-library loader resolves it from disk. -/
 def cRunOnDisk (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
-  let ms ← Module.loadClosure ["lib"] src
-  cRunWith (fun n => (ms[n]?).map (·.2)) src expected llvm
+  -- `Tests.libLoader` directly: the `Tests.Elab.libLoader` alias is defined below in this
+  -- file, after this point.
+  cRunWith (← Tests.libLoader) src expected llvm
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
