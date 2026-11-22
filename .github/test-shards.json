@@ -92,6 +92,7 @@
       "=natives",
       "=nvim",
       "=loom",
+      "=wire",
       "optic",
       "persistent",
       "phantom",
