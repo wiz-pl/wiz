@@ -112,6 +112,10 @@ export function createIndexer(ask, versionOf = null) {
         ctrl ? "1" : "0", meta ? "1" : "0") === "1",
     span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
     rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+    // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+    // page only decides whether it can open the target's document.
+    target: (result) => JSON.parse(ask("wiz_loom_hover_target",
+      result === null || result === undefined ? "null" : JSON.stringify(result))),
   };
 }
 
@@ -186,9 +190,14 @@ export function startInfoview({
 
   // ## Hover
 
-  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+  const hover = wantHover === false || !wantsHover(query) || !rules ||
+    typeof rules.position !== "function" ? null : mountHover({
     editor,
     document: pageDocument,
+    // The caret and the definition answer are the runtime's rules (`Web.EditorModel`,
+    // `Web.Hover`); this module supplies the browser's caret and the socket's answer.
+    position: (text, offset) => rules.position(text, offset),
+    target: typeof rules.target === "function" ? (result) => rules.target(result) : undefined,
     onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
     onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
     onJump: (target) => {

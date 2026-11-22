@@ -104,6 +104,7 @@ function squiggleTexts(layer) {
   check("squiggles: under the offending text", squiggleTexts(pane), ["nope"]);
   check("squiggles: the message is the tooltip", firstSquiggle(pane).getAttribute("title"), "unknown identifier");
   check("squiggles: the severity class", firstSquiggle(pane).getAttribute("class"), "squiggle sev-error");
+
   check("squiggles: the count is on the parent", pane.getAttribute("data-squiggles"), "1");
 
   // Diagnostics clear: nothing is drawn.
@@ -128,6 +129,26 @@ function squiggleTexts(layer) {
   squiggles.destroy();
   check("squiggles: destroyed, the layer is gone", pane.childNodes.length, 1);
   checkThat("squiggles: destroyed, the editor stays", editor.parentNode === pane);
+}
+
+// The class suffix is the runtime's `severityName`, not a numeric map in the widget: a
+// name the page does not know is still the one painted (`sev-hint` for a severity-1
+// span). The oracle's `rules.segments` would re-derive the name, so this uses a rule
+// that returns a runtime-shaped span directly.
+{
+  const doc = makeDoc();
+  const editor = makeEditor(doc, "def f : Nat := nope\n");
+  const pane = doc.createElement("div");
+  pane.appendChild(editor);
+  doc.body.appendChild(pane);
+  const squiggles = mountSquiggles(editor, {
+    document: doc,
+    segments: () => [{ start: 15, stop: 19, severity: 1, severityName: "hint", message: "m" }],
+  });
+  squiggles.update([]);
+  check("squiggles: the runtime's severity name is painted verbatim",
+    firstSquiggle(pane).getAttribute("class"), "squiggle sev-hint");
+  squiggles.destroy();
 }
 
 check("squiggles: on by default", wantsSquiggles(""), true);
