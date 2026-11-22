@@ -45,7 +45,9 @@ def badSig : Sig := [badDecl]
 /-- The lookup `Global.const` uses. For any declaration, a singleton signature finds its
 name at its head; `LawfulBEq String` gives `d.name == d.name`. -/
 theorem find_singleton (d : Decl) : Sig.find? ([d] : Sig) d.name = some d := by
-  simp [Sig.find?, List.find?_cons, beq_self_eq_true]
+  have h : Sig.find? ([d] : Sig) d.name =
+      (match d.name == d.name with | true => some d | false => none) := rfl
+  rw [h, beq_self_eq_true]
 
 theorem badSig_find : Sig.find? badSig "bad" = some badDecl := by
   simpa [badSig, badDecl] using find_singleton badDecl
