@@ -2,7 +2,7 @@ import Sys
 import Word
 import Text
 import Functor
-import Scry.Quire.Storage
+import Scry.QuireStorage
 import Scry.Quire
 import Scry.QuireCursor
 /-!

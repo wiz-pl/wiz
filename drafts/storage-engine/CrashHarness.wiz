@@ -2,10 +2,10 @@ import Sys
 import Word
 import Text
 import MVar
-import Scry.Quire.Storage
-import Scry.Quire.Durable
-import Scry.Quire.Registry
-import Scry.Quire.Compact
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
 /-!
 # The crash matrix's two roles
 

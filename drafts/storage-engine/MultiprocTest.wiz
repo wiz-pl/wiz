@@ -1,8 +1,8 @@
 import Sys
 import Word
 import Text
-import Scry.Quire.Storage
-import Scry.Quire.Durable
+import Scry.QuireStorage
+import Scry.QuireDurable
 import Multiproc
 /-!
 # The multi-process contract, exercised end to end

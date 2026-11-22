@@ -2,11 +2,11 @@ import Sys
 import Word
 import Text
 import MVar
-import Scry.Quire.Storage
-import Scry.Quire.Durable
-import Scry.Quire.Registry
-import Scry.Quire.Compact
-import Scry.Quire.Mmap
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
+import Scry.QuireMmap
 /-!
 # Compaction, retention and crash states, end to end
 

@@ -2,7 +2,7 @@ import Word
 import Text
 import Json
 import Scry.Quire
-import Scry.Quire.Core
+import Scry.QuireCore
 import Scry.QuireCursor
 /-!
 # Scry.QuireFindings: a findings index on Quire

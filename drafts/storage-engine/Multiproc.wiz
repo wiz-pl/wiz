@@ -4,9 +4,9 @@ import Text
 import WordMap
 import Functor
 import MVar
-import Scry.Quire.Storage
-import Scry.Quire.Registry
-import Scry.Quire.Durable
+import Scry.QuireStorage
+import Scry.QuireRegistry
+import Scry.QuireDurable
 /-!
 # Slice 3b: one writer, many readers, across processes
 

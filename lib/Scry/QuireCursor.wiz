@@ -2,8 +2,8 @@ import Word
 import Text
 import Functor
 import WordMap
-import Scry.Quire.Core
-import Scry.Quire.Storage
+import Scry.QuireCore
+import Scry.QuireStorage
 import Scry.Quire
 /-!
 # Page cursors: index scans over Quire's fact pages

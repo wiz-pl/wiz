@@ -28,7 +28,7 @@ namespace Tests.Elab
 def storageQuireImports : String :=
   "import Sys\nimport Word\nimport Text\nimport WordMap\nimport Functor\nimport MVar\n" ++
   "import WordArray\nimport IO\nimport Optic\nimport OpticDerive\n" ++
-  "import Scry.Quire\nimport Scry.QuireCursor\nimport Scry.Quire.Storage\n\n"
+  "import Scry.Quire\nimport Scry.QuireCursor\nimport Scry.QuireStorage\n\n"
 
 /-- Every `import` line dropped, so the body forms the main file. -/
 def dropImportsQ (src : String) : String :=

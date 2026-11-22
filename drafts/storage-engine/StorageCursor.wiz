@@ -1,4 +1,4 @@
-import Scry.Quire.Storage
+import Scry.QuireStorage
 import Cursor
 /-!
 # Storage cursors: table scans, index scans, index-only scans, pushdown

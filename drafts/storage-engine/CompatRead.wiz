@@ -1,7 +1,7 @@
 import Sys
 import Word
 import Text
-import Scry.Quire.Mmap
+import Scry.QuireMmap
 /-!
 # Read a durable-written store through the `mmap` path (the format-merge check)
 

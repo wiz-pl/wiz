@@ -11,9 +11,9 @@ root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 wiz=${1:-${WIZ:-$root/.lake/build/bin/wiz}}
 run_flags=${WIZ_RUN_FLAGS:-}
 cd "$root"
-"$wiz" check lib/Scry/Quire/Registry.wiz
-"$wiz" check lib/Scry/Quire/Compact.wiz
+"$wiz" check lib/Scry/QuireRegistry.wiz
+"$wiz" check lib/Scry/QuireCompact.wiz
 "$wiz" check drafts/storage-engine/CompactPure.wiz
-"$wiz" check lib/Scry/Quire/Mmap.wiz
+"$wiz" check lib/Scry/QuireMmap.wiz
 # shellcheck disable=SC2086
 "$wiz" run -I drafts/storage-engine -I drafts/optics $run_flags drafts/storage-engine/CompactTest.wiz

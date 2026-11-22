@@ -7,12 +7,12 @@ the compaction policy are now library modules, so a package can `import` them:
 |---|---|
 | `Scry.Quire` | `lib/Scry/Quire.wiz` (the page-backed engine, `putQ`/`putMany`, `compactQ`) |
 | `Scry.QuireCursor` | `lib/Scry/QuireCursor.wiz` (the page cursor, `Cost.pages`) |
-| `Scry.Quire.Storage` | `lib/Scry/Quire/Storage.wiz` (the pure half: records, patches, indices, `Db.commit`) |
-| `Scry.Quire.Core` | `lib/Scry/Quire/Core.wiz` (`Cost`, `Entry`, `KeyRange`, `Control`, …) |
-| `Scry.Quire.Registry` | `lib/Scry/Quire/Registry.wiz` (the retention registry) |
-| `Scry.Quire.Mmap` | `lib/Scry/Quire/Mmap.wiz` (the mapping, page header, meta pick) |
-| `Scry.Quire.Durable` | `lib/Scry/Quire/Durable.wiz` (slice 2, the whole-chain predecessor) |
-| `Scry.Quire.Compact` | `lib/Scry/Quire/Compact.wiz` (the two-file compaction) |
+| `Scry.QuireStorage` | `lib/Scry/QuireStorage.wiz` (the pure half: records, patches, indices, `Db.commit`) |
+| `Scry.QuireCore` | `lib/Scry/QuireCore.wiz` (`Cost`, `Entry`, `KeyRange`, `Control`, …) |
+| `Scry.QuireRegistry` | `lib/Scry/QuireRegistry.wiz` (the retention registry) |
+| `Scry.QuireMmap` | `lib/Scry/QuireMmap.wiz` (the mapping, page header, meta pick) |
+| `Scry.QuireDurable` | `lib/Scry/QuireDurable.wiz` (slice 2, the whole-chain predecessor) |
+| `Scry.QuireCompact` | `lib/Scry/QuireCompact.wiz` (the two-file compaction) |
 
 The page seal is `lib/Scry/quire_seal.c` (linked by `Scry.Quire` from its own directory;
 the C name has no `wiz_` prefix, so the compiler emits its prototype and there is no
@@ -27,7 +27,7 @@ index).
 What stays in this directory:
 
 * `QuireTest.wiz`, `DurableTest.wiz`, `CompactTest.wiz`, `RegistryTest.wiz`,
-  `MultiprocTest.wiz`, `MmapTest.wiz` — the runtime tests, now importing the `Scry.Quire.*`
+  `MultiprocTest.wiz`, `MmapTest.wiz` — the runtime tests, now importing the `Scry.Quire*`
   modules;
 * `Cursor.wiz`, `StorageCursor.wiz`, `CursorLoop.wiz`, `CursorRecursive.wiz`,
   `CursorReject.wiz`, `Tests.wiz`, `CompactPure.wiz` — the draft-only pure cursor and its

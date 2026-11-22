@@ -17,7 +17,7 @@ wiz=${1:-${WIZ:-$root/.lake/build/bin/wiz}}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/wiz-multiproc.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cd "$root"
-for f in lib/Scry/Quire/Storage.wiz lib/Scry/Quire/Registry.wiz lib/Scry/Quire/Durable.wiz; do
+for f in lib/Scry/QuireStorage.wiz lib/Scry/QuireRegistry.wiz lib/Scry/QuireDurable.wiz; do
   "$wiz" check "$f"
 done
 for f in Multiproc MultiprocTest CompatSeed CompatRead; do

@@ -2,9 +2,9 @@ import Sys
 import Word
 import Text
 import WordMap
-import Scry.Quire.Storage
-import Scry.Quire.Registry
-import Scry.Quire.Durable
+import Scry.QuireStorage
+import Scry.QuireRegistry
+import Scry.QuireDurable
 /-!
 # Compaction and space accounting (storage engine, slice 3)
 

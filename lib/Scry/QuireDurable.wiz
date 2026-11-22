@@ -4,8 +4,8 @@ import Text
 import WordMap
 import Functor
 import MVar
-import Scry.Quire.Storage
-import Scry.Quire.Registry
+import Scry.QuireStorage
+import Scry.QuireRegistry
 /-!
 # A durable single-file store (storage engine, slice 2)
 

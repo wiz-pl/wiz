@@ -4,10 +4,10 @@ import Text
 import Functor
 import WordMap
 import MVar
-import Scry.Quire.Storage
-import Scry.Quire.Core
-import Scry.Quire.Mmap
-import Scry.Quire.Durable
+import Scry.QuireStorage
+import Scry.QuireCore
+import Scry.QuireMmap
+import Scry.QuireDurable
 /-!
 # Quire: the page-backed durable store
 
