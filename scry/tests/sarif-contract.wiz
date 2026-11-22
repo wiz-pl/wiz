@@ -173,8 +173,8 @@ def main : IO Unit := EIO.toIO (do
       ["message", "text"]) "max-rounds");
   check "truncation: the finding is unchanged"
     (Bool.and
-      (Nat.beq (List.length (jList (runOf jT) "results"))
-        (List.length (jList (runOf j) "results")))
+      (Nat.beq (List.length (jList (runOf jT) ["results"]))
+        (List.length (jList (runOf j) ["results"])))
       (String.eq (jStr resT ["ruleId"]) (jStr res ["ruleId"])));
 
   -- the existing CLI shape: the note arrives as an extra boundary result
@@ -185,9 +185,9 @@ def main : IO Unit := EIO.toIO (do
   let invA := invocationOf jA;
   check "run: a budget boundary result is promoted to a notification"
     (Bool.and (Bool.not (jBool invA ["executionSuccessful"]))
-      (Nat.beq (List.length (jList invA ["toolExecutionNotifications"])) 1)));
+      (Nat.beq (List.length (jList invA ["toolExecutionNotifications"])) 1));
   check "run: promotion does not add a result"
-    (Nat.beq (List.length (jList (runOf jA) "results")) 2);
+    (Nat.beq (List.length (jList (runOf jA) ["results"])) 2);
   check "run: promotion leaves the finding's rule id alone"
     (String.eq (jStr (resultOf jA) ["ruleId"]) "scry/c/command-injection")
 )
