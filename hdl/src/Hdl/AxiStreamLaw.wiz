@@ -83,7 +83,7 @@ example supplies the payload sequence the generator actually accepted (its input
 circuit under test. -/
 def AxiStream.Law.Order {ω dw : Nat} (expected : List Nat)
     (outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
-  Hdl.natsEq (AxiStream.Law.accepted outs) expected
+  BEq.beq (AxiStream.Law.accepted outs) expected
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas
