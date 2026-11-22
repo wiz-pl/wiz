@@ -1090,7 +1090,8 @@ mutual exclusion),
 `NoStarvation` (every offered request is answered within `k` cycles under a fair sink;
 the example uses `k = 16`), `RouteCorrect` (hit forwards unchanged, miss
 answers with `err`) and `ReadAfterWrite` (the RAM reads back a completed write, with byte
-strobes). The kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
+strobes; `ReadAfterWriteStep` is its executable form, which the example calls). The
+kernel-checked part now includes the arbiter: `arbStepAt_mutex` (one
 step never acknowledges both masters), `pick_busy` (`pick` grants to the owner while a
 request is in flight), `arbStepAt_ownerAck` (only the owner is answered),
 `arbStepAt_someAck`/`arbProgress` (every cycle in which the sink acknowledges answers

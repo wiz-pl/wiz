@@ -147,6 +147,41 @@ same-size-recursion rejection and the combinational-loop rejection. The workarou
 (`register`/`mealy`/`moore`/`ofCircuit`) stays for designs that do not need the sized
 surface; the Mealy baud generator is still in `hdl/examples/hdl-signal.wiz`.
 
+## 34c: the laws (P2.1)
+
+`hdl/src/Hdl/Signal.wiz` proves the algebra the sized operators imply, all in the kernel
+(no `sorry`, `#print axioms` lists none):
+
+* **At the limit.** `Signal.mapS_at`, `Signal.zipWithS_at` and `Signal.zipWith3S_at`: at
+  `∞` the sized operators are `map`/`zipWith`/`zipWith3` on the value of every cycle.
+* **At a size.** `Signal.mapS_head`, `zipWithS_head` and `zipWith3S_head` are the
+  first-observation form a sized proof uses (`out` is only defined at a successor size):
+  the head is the function on the heads. The tail equations are `Signal.mapS_tail` and
+  `Signal.zipWithS_tail`, stated at `∞`: the surface `out` types the payload's recursive
+  field at the family (`ν^∞`), not at the predecessor size, so the size-indexed tail
+  equation is not stateable — the `∞` form is what a proof composes with, and the size
+  information at a successor is the head equation plus the `scofix` seed.
+* **Algebra.** `Signal.mapS_id` (`mapS id` is the identity), `Signal.mapS_comp`
+  (`mapS f ∘ mapS g = mapS (f ∘ g)`), `Signal.zipWithS_fst`/`_snd` (the projections), all
+  as pointwise `Signal.Eqv`.
+* **The delay.** `Signal.registerS_head` (the register's head is `init`) and
+  `Signal.registerS_eq_register` (`registerS` at `∞` is `register`, so the tail is the
+  input — one size step).
+* **The knot.** `Signal.fix_unfold` (`fix g` is `g ∞ (fix g)`), `Signal.register_fixed_unique`
+  (a fixed point of `register init` is `pure init`), `Signal.fix_pure` (`fix` of the pure
+  delay is `pure init`) and `Signal.fix_delay_eq_circuit` (the same fixed point is
+  `Signal.ofCircuit (Circuit.delay t init) (pure init)`, through `ofCircuit_delay`).
+  `Signal.counter_sample` states the counter's `0, 1, 2, …`, and `Signal.counterLoop_sample`
+  states that `Signal.ofCircuit` of the same step as a `Circuit.loop` samples the same
+  list: the `Signal.fix` and `Circuit.loop` spellings agree on the counter.
+* **Congruence.** `Signal.Eqv.map`, `Eqv.mapS`, `Eqv.zipWith`, `Eqv.zipWithS`,
+  `Eqv.zipWith3S` (so the `Mux`/`+` instances), `Eqv.register`, `Eqv.registerS`,
+  `Eqv.mealy` and `Eqv.ofCircuit`: equivalent signals give equivalent results, so a proof
+  about the model transfers under the combinators and to the circuit bridge.
+
+The `hdl-signal` group pins each law with `#check` (its rendered statement is the expected
+text, so changing a statement fails the group) and `#print axioms` (no axiom).
+
 A `partial def` knot is not a substitute: it has neither the delay discipline (a
 combinational loop diverges) nor a totality story, and it is opaque to the kernel, so a
 property of a feedback design would not compute.

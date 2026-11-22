@@ -26,6 +26,21 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   `Axi4.Law.ResponsesInOrder`/`Axi4.ResponseOrder` are removed; `docs/libraries.md`
   lists the checks that now run.
 
+* HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves `Signal.mapS_at`,
+  `zipWithS_at`/`zipWith3S_at` (the sized operators at `∞` are `map`/`zipWith`/`zipWith3`),
+  the first-observation prefix forms at a size (`mapS_head`, `zipWithS_head`,
+  `zipWith3S_head`, `registerS_head`) and the tail forms at `∞` (`mapS_tail`,
+  `zipWithS_tail`), `mapS_id`/`mapS_comp`/`zipWithS_fst`/`zipWithS_snd`,
+  `registerS_eq_register`, the knot (`fix_unfold`, `register_fixed_unique`, `fix_pure`,
+  `fix_delay_eq_circuit`) and the counter's `0, 1, 2, …` in the signal and `Circuit.loop`
+  spellings, plus `Signal.Eqv` congruence for `map`/`mapS`/`zipWith`/`zipWithS`/
+  `zipWith3S`/`register`/`registerS`/`mealy`/`ofCircuit`. `mapS`/`zipWithS`/`zipWith3S`
+  now observe their input with payload projections instead of a pair split (a split of a
+  neutral payload is stuck, which made the bodies opaque); the algebra has no axioms
+  (`#print axioms` lists none for the 25 algebraic laws), while the four statements that
+  mention a `Circuit` or compute `BitVec` literals inherit the library's trusted
+  `Hw HwTy.El`/`UIntN` natives. All are pinned by `#check` in the `hdl-signal` group.
+
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
   paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a

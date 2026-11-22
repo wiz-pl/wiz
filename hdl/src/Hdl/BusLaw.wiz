@@ -385,7 +385,7 @@ def Bus.Law.beqSelf {ω n : Nat} (a : BitVec n) : BitVec.beq a a = .true := Bus.
 
 /-- The value-level read-after-write of the memory model: with the write enable high, a
 read of the same address is the word written. (The RAM's two-cycle version is
-`ReadAfterWrite` above, checked in the example.) -/
+`ReadAfterWrite` above, checked in the example as `ReadAfterWriteStep`.) -/
 def Bus.Law.memWrite_read_same {ω aw dw : Nat} (m : HwTy.El (HwTy.mem aw dw))
     (a : HwTy.El (HwTy.bits aw)) (d : HwTy.El (HwTy.bits dw)) :
     Hw.memRead (Hw.memWrite m Bit.one a d) a = d :=
