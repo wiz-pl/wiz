@@ -3078,8 +3078,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           -- the interpreter can't fail: running a stub would print a wrong value
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (ty, e, code, []) =>
-          let v := run code [] e
-          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"cannot run this: {m}"
+          | v => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
         | .error err => report .error cmd.info s!"cannot run this: {err}"
       let hintOf (ty : VTy R) : Option Name := match whnf ty with
         | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
@@ -3144,9 +3145,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ok (_, _, _, (n, err) :: _) =>
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (_, e, code, []) =>
-          match (run code [] e).toString? with
-          | some text => report .info cmd.info text
-          | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"#plot: {m}"
+          | v =>
+            match v.toString? with
+            | some text => report .info cmd.info text
+            | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
         | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap

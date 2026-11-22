@@ -141,7 +141,9 @@ partial def runMacroTac (code : Code) (env : MacroEnv) (what : String) (info : S
     let ans := (env.declType? (str (v.conField 0))).map (mkCon 1 [·]) |>.getD (mkCon 0 [])
     runMacroTac code env what info scope (apply code (v.conField 1) ans) next traces
   | some t => (traces, throw s!"{what} made a request ({t}) that only tactics can make")
-  | none => (traces, throw s!"{what} returned a malformed result")
+  | none => match v with
+    | .stuck m => (traces, throw s!"{what}: {m}")
+    | _ => (traces, throw s!"{what} returned a malformed result")
 
 /-- Run the macro `f` on `stx`: its traces, and the expansion and the next free scope.
 
