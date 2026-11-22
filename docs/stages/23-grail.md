@@ -391,6 +391,7 @@ already uses for `grail.lock`):
       (size 1042)
       (tree "…")
       (commands "…")
+      (commit "…")                     ; the release commit; a tag is not a pin
       (toolchain ">=0.1.0 <0.3.0")
       (deps (dep "std" "^0.1") (dep "text" "~1.0")))
     (yanked "1.2.1" "wrong tarball; use 1.2.2")))
@@ -398,9 +399,11 @@ already uses for `grail.lock`):
 
 * `source` is the immutable archive (an `https`, `file://` or plain path URL);
   `sha256` is the SHA-256 of its bytes. `size` is the archive's byte length (R19), `tree`
-  the SHA-256 of its unpacked file tree (R20) and `commands` a digest of the package's
-  declared `Package.command` set (R36); `grail publish` writes all three and a lock v3
-  records them. Older entries have none of them.
+  the SHA-256 of its unpacked file tree (R20), `commands` a digest of the package's
+  declared `Package.command` set (R36) and `commit` the release commit in `repo` (P0);
+  `grail publish` writes them (pass `--commit`) and a lock v3 records the first three.
+  Older entries have none of them. A build uses the locked tree, never `commit` alone:
+  `commit` binds the *source* claim, the tree binds the *content*.
 * `deps` is **authoritative for resolution**; it
   must agree with the published manifest, so a lock records the whole graph and a build
   never re-reads dependency manifests to resolve.
@@ -572,15 +575,20 @@ v1's 64-bit content hash (accident detection, not cryptographic); registry entri
 the strong path.
 
 **Signed index state (Stage 1).** An index may publish `index/snapshot.sexpr` — every
-`name@version` with its SHA-256 and size, a monotone `(seq)`, an `(updated)` time, the
-signing key's fingerprint `(key)` and its `(expires)` date — signed as
+`name@version` with its SHA-256, size, `tree`, `commit`, **entry digest** and yank
+reason, a monotone `(seq)`, an `(updated)` time, the signing key's fingerprint `(key)`
+and its `(expires)` date — signed as
 `index/snapshot.sexpr.sig` with `ssh-keygen -Y sign -n grail-index`. `grail update
 --require-signature --allowed-signers FILE` verifies the signature offline and writes an
 `(index-signature …)` entry in `grail.lock` with the key, fingerprint, sequence and
 snapshot digest. Later updates re-verify from that pinned key even without the flag, and
 refuse a changed key, a lower `(seq)` (rollback; `--allow-rewind` accepts a deliberate
-rewind), a same-sequence rewrite, an expired key, or an entry whose hash differs from the
-snapshot. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
+rewind), a same-sequence rewrite, an expired key, or an entry whose archive hash, tree,
+commit, entry digest or yank state differs from the snapshot. The **entry digest** is
+SHA-256 over the canonical `(version …)` node, so one signature covers the archive hash,
+size, tree, command digest, commit, toolchain range, modules/prefixes and dependency
+edges; `grail index snapshot` writes it, and an older snapshot without one still verifies
+a minimal entry but refuses an entry that carries those extra claims. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
 `grail index check --require-signature` audits a repository. The `allowed_signers` file
 is a trust root from outside the index: the copy inside a checkout proves nothing. This
 gives authorship for an index state, not freshness: there is no transparency log or
@@ -605,8 +613,9 @@ The snapshot is additive: an index without one is read exactly as before.
 * **A signed index** is verified with `ssh-keygen -Y verify` against an
   `allowed_signers` file passed from outside the index (or the key a `grail.lock`
   already pinned); the snapshot must cover every entry of the index with the same
-  SHA-256, `(seq)` must not go backwards, the key must not change, the same sequence
-  must not be rewritten, and `(expires)` must be in the future.
+  SHA-256, tree, commit, entry digest and yank state, `(seq)` must not go backwards,
+  the key must not change, the same sequence must not be rewritten, and `(expires)`
+  must be in the future.
 * **Not verified:** git `dep` entries keep a 64-bit content hash (accident detection,
   not cryptographic); there are no signed git tags, no transparency log, no gossip, no
   download size cap, and no build sandbox — `grail build` runs the package author's

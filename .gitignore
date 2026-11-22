@@ -40,3 +40,7 @@ bench/.build/
 # environment snapshot: not build output, ignored so `git add -A` does not take them.
 /.b6tmp/
 /.devenv/
+
+# Nix build outputs
+/result
+/result-*

@@ -78,6 +78,8 @@ lake test           # the test suite (`lake test -- --list` for the groups)
 ```
 
 See [docs/building.md](docs/building.md) for the details, CI and caches.
+`nix build .#release-tarball` writes the reproducible source tarball and its manifest
+(`docs/building.md`, "Reproducible source tarball").
 
 ## Documentation
 
@@ -88,6 +90,8 @@ See [docs/building.md](docs/building.md) for the details, CI and caches.
 * [docs/selfhost-compiler.md](docs/selfhost-compiler.md): the self-hosted compiler,
   the bootstrap fixpoint, and what parity with the Lean toolchain does and does not mean.
 * [docs/index.md](docs/index.md): the stage-by-stage docs, one file per stage.
+* [docs/attestation.md](docs/attestation.md): signed in-toto statements, build manifests
+  and TPM 2.0 quotes, and how to verify them.
 * [docs/CoreSpec.md](docs/CoreSpec.md): the kernel's calculus as inference rules.
 * [docs/Status.md](docs/Status.md): what is proved, what is conjectured, and the known
   soundness issues. Nothing about Wiz as a whole is proved yet.
