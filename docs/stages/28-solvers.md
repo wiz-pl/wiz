@@ -31,9 +31,10 @@ differ in what is trusted:
 **How.** The host translates the goal and its context to SMT-LIB 2 (`Wiz/Smt/Translate.lean`),
 asserts the hypotheses and the negated goal, and runs the solver
 (`Wiz/Smt/Process.lean`: a process call behind an `opaque`, as the module cache does;
-answers are kept in `<cache>/smt` in a file named by the SHA-256 of the solver's identity
-and the query, which the entry stores and every read compares; only a definite `sat` or
-`unsat` is kept, never a timeout or a crash). `unsat`: the goal is closed by a new axiom
+a **certificate** is kept in `<cache>/smt` in a file named by the SHA-256 of the solver's
+identity (which includes the solver binary's SHA-256) and the query; the entry stores the
+proof's digest and is re-checked on every read. A verdict is never cached — `smt` calls
+with no output file, so it always runs the solver (R5; `docs/numerics-trust.md`). `unsat`: the goal is closed by a new axiom
 **`X.smt✝N⟨z3 5.1.0⟩ : Π ctx, goal`** (the goal over its context, with erased binders,
 named after the definition, the use and the solver), applied to the context. `sat`: the
 tactic fails with the solver's model, in the user's names. The definition gets a warning;
@@ -55,16 +56,21 @@ SMT operations or sorts.
 *atom* (a fresh constant; equal terms are the same constant): sound, since a formula valid
 for an arbitrary value is valid for this one. Hypotheses outside it are dropped.
 
-**Words are bit vectors because they are in range.** Mapping `UIntN w` to `(_ BitVec w)`
-is sound only if every value is below `2^w`, where Word's definitions are the bit-vector
-operations. Since 22l the constructor carries that proof. Before it, the kernel's
-`UIntN 8` had values like `ofBitsTrusted 300`, on which `UIntN.not (UIntN.not x) = x`
-is false (the kernel refuted it), so the prototype required a range hypothesis per word.
+**Words are bit vectors because they are in range — and the translation checks it.**
+Mapping `UIntN w` to `(_ BitVec w)` is sound only if every value is below `2^w`, where
+Word's definitions are the bit-vector operations. Since 22l the constructor carries that
+proof. The translator does not assume it: `Smt.sealedPrivate` requires both the
+`seal:UIntN` registration and the private constructor, `sortOfChecked` refuses any other
+`UIntN`-sorted type, and a `Nat` literal outside `[0, 2^w)` at a word sort is an error
+(R3; group *smt* has the negative control). Before 22l the kernel's `UIntN 8` had values
+like `ofBitsTrusted 300`, on which `UIntN.not (UIntN.not x) = x` is false (the kernel
+refuted it), so the prototype required a range hypothesis per word.
 
-**What is trusted**: the solver (named in the axiom), the translation (one Lean file,
-reviewed), the process plumbing (only the exact answer `unsat` closes a goal) and the
-answer cache (named by a SHA-256 digest, each entry checked against the query it stores;
-the command and module cache keys include the solver's version). Not trusted: whatever
+**What is trusted**: the solver (named in the axiom) and the translation (one Lean file,
+reviewed); the process plumbing can only make the tactic fail, and the answer cache holds
+no trusted state (it stores only a proof, whose digest is checked and whose steps the
+kernel re-checks; a verdict is refused, so `smt` never replays one). The command and
+module cache keys include the solver's settings. Not trusted: whatever
 built the goal (the axiom's statement is the goal itself, checked by the kernel as a
 type). The flag and the solver settings are in the cache keys (commands, modules, grail's
 jobs), so an acceptance is never replayed without the flag. `lib/` never uses `smt`
@@ -109,7 +115,8 @@ self-hosted tactic engine has not got (`STacOp`, `selfhost/Frontend.wiz`).
   are atoms, `σ := Sat.envOf [t₀, …]`), builds the circuit, asks the SAT solver
   (`TacticM.satSolve`: DIMACS out, LRAT back; `--sat-solver CMD`, default `cadical`, and
   `--solver-timeout MS`; flags only, so a grail file can't name a program to run;
-  answers are kept in `<cache>/smt`, crashes and timeouts not) and
+  LRAT proofs are kept in `<cache>/smt` with their digest (crashes, timeouts and SAT
+  models not), and a cached proof is re-parsed and kernel-checked on every use) and
   closes the goal with `Sat.decide_sound f nodes out proof Sat.trivial σ`. The kernel
   checks `Sat.trivial : IsTrue .true` against `IsTrue (checkAll …)` by running the checker,
   and `BForm.eval σ f = .true` against the goal by conversion. A model is shown as a
