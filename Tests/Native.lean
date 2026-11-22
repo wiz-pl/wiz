@@ -961,8 +961,7 @@ def hdlVerifiedGroup : Group where
   exercise := "—"
   cases := [
     { name := "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)", run := fun _ => do
-        let path := "hdl/examples/hdl-verified.wiz"
-        let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
+        let s := runFrontend (R := ZeroOneMany) (← Tests.hdlRead "examples/hdl-verified.wiz")
           { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
         let ms := s.messages.toList.map fun m =>
           s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
@@ -970,10 +969,11 @@ def hdlVerifiedGroup : Group where
         expect ms "info: (20, 19)"
         if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}")
         -- the trust ledger's part for this file: it must add no source of trust
-        let _ ← checkExampleTrustLedger path s.globals
+        -- (the label stays the repository-relative one, even under `HDL_ROOT`)
+        let _ ← checkExampleTrustLedger "hdl/examples/hdl-verified.wiz" s.globals
         pure () },
     { name := "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "hdl/examples/hdl-verified-native.wiz")
+        let ms ← msgsLibs (← Tests.hdlRead "examples/hdl-verified-native.wiz")
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"

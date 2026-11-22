@@ -46,7 +46,7 @@ def hdlMemTools : IO Unit := do
     let iv ← has "iverilog"
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
     unless iv || ys do skip "no iverilog, no yosys"; return
-    let src ← IO.FS.readFile "hdl/examples/hdl-mem.wiz"
+    let src ← Tests.hdlRead "examples/hdl-mem.wiz"
     let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval vRom\n#eval tbRam\n#eval vecRam\n" ++
         "def big : HwTy.El (HwTy.mem 8 8) := fun (a : BitVec 8) => BitVec.ofNat 8 (Nat.mul a.toNat 3)\n" ++
         "def bigC : Circuit (HwTy.bits 8) B8 := Circuit.mk B8 (BitVec.ofNat 8 0) (fun s a => Hw.pair (Hw.memRead (Hw.const (HwTy.mem 8 8) big) a) s)\n" ++
@@ -74,7 +74,7 @@ def hdlMemTools : IO Unit := do
 /-- hdl/examples/hdl-arty.wiz through the front end: its eight `#eval` texts (four about the
 board's pin constraints, then four Verilog modules). -/
 def hdlArtyTexts : IO (List String) := do
-    let src ← IO.FS.readFile "hdl/examples/hdl-arty.wiz"
+    let src ← Tests.hdlRead "examples/hdl-arty.wiz"
     let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
     let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
     unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
@@ -109,7 +109,7 @@ def hdlArtyTools : IO Unit := do
 
 /-- hdl/examples/hdl-prim.wiz through the front end: its seven `#eval` texts. -/
 def hdlPrimTexts : IO (List String) := do
-    let src ← IO.FS.readFile "hdl/examples/hdl-prim.wiz"
+    let src ← Tests.hdlRead "examples/hdl-prim.wiz"
     let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
     let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
     unless errs.isEmpty do throw (IO.userError s!"unexpected errors: {errs}")
@@ -161,7 +161,7 @@ hdl/examples/hdl-pipe.wiz (when yosys is on PATH). -/
 def hdlPipeTools : IO Unit := do
     let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
     unless ys do skip "no yosys"; return
-    let src ← IO.FS.readFile "hdl/examples/hdl-pipe.wiz"
+    let src ← Tests.hdlRead "examples/hdl-pipe.wiz"
     let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval aluVerilog\n#eval flowVerilog\n")
       { trustedModule := Tests.libModule, loader := ← libLoader }
     let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
@@ -178,7 +178,7 @@ def hdlPipeTools : IO Unit := do
 /-- hdl/examples/hdl-formal.wiz's emitted texts: the correct, `prove` and wrong harnesses,
 then their `.sby` files (`qv`, `pv`, `bv`, `qsby`, `psby`, `bsby`). -/
 def hdlFormalTexts : IO (List String) := do
-    let src ← IO.FS.readFile "hdl/examples/hdl-formal.wiz"
+    let src ← Tests.hdlRead "examples/hdl-formal.wiz"
     let s := runFrontend (R := ZeroOneMany)
       (src ++ "\n#eval qv\n#eval pv\n#eval bv\n#eval qsby\n#eval psby\n#eval bsby\n")
       { trustedModule := Tests.libModule, loader := ← libLoader }
@@ -241,7 +241,7 @@ def hdlGroup : Group where
         -- the three designs agree with their Hw-operation twins (Verilog text); the counter
         -- wraps at 10; shifts by 3, 0, 8 places; the counter's Verilog; three terms printed
         -- in notation; `if` on a Bool, a dependent `if b then rfl else rfl`, Nat bitwise
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-operators.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-operators.wiz")
           [
           "(.true, .true, .true)",
           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1]",
@@ -256,7 +256,7 @@ def hdlGroup : Group where
         -- netlist simulations = values (shifter, comparisons, gates, a phase register, a
         -- bundle in one register, the registers with rst/en), operator twins' Verilog,
         -- printing, enum and bundle encodings, the reset/enable Verilog
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-gaps.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-gaps.wiz")
           ["(.true, .true)",
            "(.true, 12)",
            "(.true, .true)",
@@ -281,7 +281,7 @@ def hdlGroup : Group where
         -- Instr (3 tag bits + a 4-bit operand), a two-constructor payload (Move); the tags
         -- and payloads pinned, the round trip on every small value and on samples, and
         -- `Instr.lit` as a decoder constant in a circuit
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-bitpack.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-bitpack.wiz")
           ["(2, 18, 0, 18)",
            "(7, 3, 4)",
            "(5, 1, 4)",
@@ -311,7 +311,7 @@ def hdlGroup : Group where
           "syntax (name := tag) \"tag_bad\" : command\n" ++
           "attribute [macro command.tag] tagM\ntag_bad") "do not fit in 1 tag bits" },
     { name := "S4: match on a signal: an enumeration case tree equals the if chain (same netlist), Bool, nested, non-exhaustive rejected", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-match.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-match.wiz")
           [
           "[0, 1, 2, 3]",
           "[0, 1, 2, 3]",
@@ -338,7 +338,7 @@ def hdlGroup : Group where
         -- simulations (hash-consed, naive). q1: the chain at k = 20 (nodes, adders, builder
         -- work). q2: the chain at k = 3 simulated. q3: the chain without sharing (`let ω`) at
         -- k = 10 (nodes, work, naive nodes). Last: (x + y) * (y + x) has one adder.
-        okLibs (← IO.FS.readFile "hdl/examples/hdl.wiz") ["((4, 4), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))))", "((7, 7), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))))", "((28, 35), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))))", "((8, 9), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))))", "(22, 20, 22)", "(.cons 8 (.cons 16 (.cons 24 (.cons 32 (.cons 64 (.cons 56 .nil))))), .cons 8 (.cons 16 (.cons 24 (.cons 32 (.cons 64 (.cons 56 .nil))))))", "(11, 2047, 2047)", "4"] },
+        okLibs (← Tests.hdlRead "examples/hdl.wiz") ["((4, 4), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))), .cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 .nil))))))", "((7, 7), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))), .cons 250 (.cons 251 (.cons 252 (.cons 253 (.cons 254 (.cons 255 .nil))))))", "((28, 35), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))), .cons 1 (.cons 1 (.cons 2 (.cons 1 (.cons 3 (.cons 3 .nil))))))", "((8, 9), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))), .cons 1 (.cons 4 (.cons 9 (.cons 15 (.cons 216 (.cons 162 .nil))))))", "(22, 20, 22)", "(.cons 8 (.cons 16 (.cons 24 (.cons 32 (.cons 64 (.cons 56 .nil))))), .cons 8 (.cons 16 (.cons 24 (.cons 32 (.cons 64 (.cons 56 .nil))))))", "(11, 2047, 2047)", "4"] },
     { name := "auto-share elaborates an object let to ShareLet.share; an erased or meta let stays a let", run := fun _ =>
         okLibs ("import Hdl.Core\ndef f {r : HwTy → Type} [Hw r] (x : r (HwTy.bits 8)) : r (HwTy.bits 8) := let y := Hw.add x x; Hw.add y y\n" ++
           "def g {r : HwTy → Type} [Hw r] (x : r (HwTy.bits 8)) (k : Nat) : r (HwTy.bits 8) := let j := Nat.succ k; Hw.lit 8 j\n#erase f\n#erase g")
@@ -357,7 +357,7 @@ def hdlGroup : Group where
     { name := "H14 P1: yosys synth_xilinx keeps PLLE2_BASE, BUFG, OSERDESE2, IOBUF, ODDR, OBUF (skipped without yosys)", run := fun _ => hdlPrimTools },
     { name := "Xilinx 7-series: yosys synth_xilinx maps two RAMs, a 1024-byte ROM and a multiply to RAMB18E1, RAMB36E1 and DSP48E1 (skipped without yosys)", run := fun _ => hdlArtyTools },
     { name := "optics: deriving Lens on structures and bundles (laws, independence by rfl); a step zoomed into a field, the frame rule", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-optic.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-optic.wiz")
           ["(.cons 1 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 1 (.cons 0 .nil))))))))))), .true)"]
         okLibs ("import OpticDerive\nstructure P where\n  x : Nat\n  y : Bool\n  z : Nat\n  deriving Lens\n" ++
           "structure Q (A : Type) (n : Nat) where\n  a : A\n  b : List A\n  deriving Lens\n" ++
@@ -381,7 +381,7 @@ def hdlGroup : Group where
     { name := "docs/hardware.md's example: a circuit refines a specification; a temporal property of every run; simulation agrees", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hardware-tour.wiz") ["(.cons 2 (.cons 0 (.cons 0 (.cons 1 (.cons 2 (.cons 0 .nil))))), .true)"] },
     { name := "memories: RAM with a registered read, ROM, enable and reset; values = netlist; read/write lemmas; misuse reported; Verilog arrays", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-mem.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-mem.wiz")
           [
           "(.cons 0 (.cons 0 (.cons 42 (.cons 99 (.cons 13 (.cons 99 (.cons 0 .nil)))))), .true)",
           "(.cons 0 (.cons 9 (.cons 225 (.cons 0 (.cons 49 .nil)))), .true)",
@@ -390,11 +390,11 @@ def hdlGroup : Group where
           "\"module ram(input clk, input [0:0] we, input [3:0] waddr, input [7:0] wdata, input [3:0] raddr, output [7:0] y);\\n  reg [7:0] q; initial q = 8'd0;\\n  reg [7:0] cells [0:15];\\n  initial begin\\n    cells[0] = 8'd0;\\n    cells[1] = 8'd0;\\n    cells[2] = 8'd0;\\n    cells[3] = 8'd0;\\n    cells[4] = 8'd0;\\n    cells[5] = 8'd0;\\n    cells[6] = 8'd0;\\n    cells[7] = 8'd0;\\n    cells[8] = 8'd0;\\n    cells[9] = 8'd0;\\n    cells[10] = 8'd0;\\n    cells[11] = 8'd0;\\n    cells[12] = 8'd0;\\n    cells[13] = 8'd0;\\n    cells[14] = 8'd0;\\n    cells[15] = 8'd0;\\n  end\\n  wire [7:0] n5 = cells[raddr];\\n  always @(posedge clk) q <= n5;\\n  always @(posedge clk) begin\\n    if (we) cells[waddr] <= wdata;\\n  end\\n  assign y = q;\\nendmodule\\n\""] },
     { name := "memories in Verilog: Icarus replays the RAM's test bench; yosys maps RAM and a 256-word ROM to SB_RAM40_4K (skipped without the tools)", run := fun _ => hdlMemTools },
     { name := "Hdl.Mem: word/byte read-after-write and no-alias laws, every byte-strobe mask, one- and two-cycle RAMs, values = netlist", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-mem-laws.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-mem-laws.wiz")
           [
           "[Bool.true, Bool.true, Bool.true, Bool.true, Bool.true, Bool.true, Bool.true, Bool.true, Bool.true]"] },
     { name := "Hdl.Bus.ramWC: wait timeline, read-after-write for every 8/16/32-bit strobe, no alias, no bypass, byte addressing; values = netlist", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-ramwc.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-ramwc.wiz")
           ("wait timeline 0 0 1 1 2 0 0\n" ++
            "masked read-after-write 8/16/32: yes yes yes\n" ++
            "no alias 8/16/32: yes yes yes\n" ++
@@ -403,7 +403,7 @@ def hdlGroup : Group where
            "value = simulate = simFast yes\n" ++
            "well formed yes\n") },
     { name := "Hdl.Crc.protoC: line-framed CRC service (one outstanding line), host model, ready/drop laws, values = netlist", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-crc-link.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-crc-link.wiz")
           ("replies 70 52 10 52 53 10, host model yes, lines 2\n" ++
            "early newline dropped yes, lines 2\n" ++
            "ready = not valid yes\n" ++
@@ -412,7 +412,7 @@ def hdlGroup : Group where
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
         -- (the `#check`s name the proofs the case is about: deleting or weakening one
         -- changes this message list, so the final `#eval` alone cannot keep it green)
-        okLibs ((← IO.FS.readFile "hdl/examples/hdl-bits.wiz") ++
+        okLibs ((← Tests.hdlRead "examples/hdl-bits.wiz") ++
           "\n#check stall_out\n#check stall_halt\n#check stall_is_mux\n")
           ["1",
            "stall_out : (tx : BitVec 1) → (rx : BitVec 1) → stall HwTy.El instHwHwTyEl Bit.one tx Bit.zero rx Bit.zero = ~~~tx",
@@ -448,7 +448,7 @@ def hdlGroup : Group where
         -- (accepted), its core and PLL-wrapper Verilog, a pin-sourced second clock, XDC and
         -- PCF constraints from ClockDomain.periodPs, a BUFG output as a synchroniser's
         -- clock (Prim.withOutDom), and the multi-clock simulation refusal
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-cdc.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-cdc.wiz")
           [
           "[]",
           "\"module cross(input clk, input clk2, output [0:0] y);\\n  reg [0:0] r; initial r = 1'd0;\\n  reg [0:0] s; initial s = 1'd0;\\n  wire [0:0] n3;\\n  wiz_sync2 u2 (.clk(clk2), .d(r), .q(n3));\\n  always @(posedge clk) r <= r;\\n  always @(posedge clk2) s <= n3;\\n  assign y = s;\\nendmodule\\n\"",
@@ -479,7 +479,7 @@ def hdlGroup : Group where
         -- two instances, and reset and enable driven at random cycles; then the counter's
         -- Verilog (named ports and registers, `if (rst) … else if (en)`), pin constraints,
         -- the problems of a bad pin list, a waveform, and the sizes of a list of designs
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-compose.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-compose.wiz")
           [
           "(.true, .cons 17 (.cons 0 (.cons 0 (.cons 0 (.cons 0 (.cons 2 (.cons 4 (.cons 6 (.cons 8 (.cons 8 (.cons 10 (.cons 10 (.cons 10 (.cons 12 (.cons 14 (.cons 14 (.cons 14 (.cons 16 (.cons 19 (.cons 16 (.cons 14 (.cons 12 (.cons 12 (.cons 12 (.cons 12 (.cons 10 (.cons 8 (.cons 6 (.cons 6 (.cons 4 (.cons 2 .nil)))))))))))))))))))))))))))))))",
           "(.true, .cons 5 (.cons 9 (.cons 7 (.cons 0 (.cons 0 (.cons 140 (.cons 173 (.cons 172 (.cons 30 (.cons 11 (.cons 226 (.cons 250 (.cons 211 .nil)))))))))))))",
@@ -511,7 +511,7 @@ def hdlGroup : Group where
           "#eval Mealy.stateAt (Mealy.seq cnt acc) (0, 0) up 4\n")
           ["(4, 6)"] },
     { name := "H14 T: temporal properties (UART idle-high and delivery for ever, valid/ready refinement, stability, liveness)", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-temporal.wiz") },
+        okLibs (← Tests.hdlRead "examples/hdl-temporal.wiz") },
     { name := "H14 T: temporal notation □ ◇ ○ ~> |-> |=>, printed back; `|=>` leaves `fun`/`match` alone (13o)", run := fun _ => do
         okLibs ("import Hdl.Temporal\n" ++
           "def p (a b : TL Nat) : TL Nat := □ (a ~> ◇ b)\n#check p\n#check fun (a b : TL Nat) => TL.always (TL.leadsTo a (TL.eventually b))\n" ++
@@ -577,7 +577,7 @@ def hdlGroup : Group where
             unless o.exitCode == 0 do throw (IO.userError s!"iverilog rejects module {i}:\n{o.stderr}\n{text}")
         -- the composed circuits, and the generated test bench replaying the counter with
         -- reset and enable at random cycles against its value simulation
-        let src ← IO.FS.readFile "hdl/examples/hdl-compose.wiz"
+        let src ← Tests.hdlRead "examples/hdl-compose.wiz"
         let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval vCounter\n#eval vTwo\n#eval vPipe\n#eval tbCounter\n#eval vecCounter\n")
           { trustedModule := Tests.libModule, loader := ← libLoader }
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render ""
@@ -597,7 +597,7 @@ def hdlGroup : Group where
             throw (IO.userError s!"test bench: {r.stdout}{r.stderr}")
         -- (H14 S4) the shifts by a signal and the signed comparisons: Icarus Verilog
         -- replays their value simulations
-        let src ← IO.FS.readFile "hdl/examples/hdl-gaps.wiz"
+        let src ← Tests.hdlRead "examples/hdl-gaps.wiz"
         let s := runFrontend (R := ZeroOneMany) (src ++ "\n#eval vShift\n#eval tbShift\n#eval vecShift\n#eval vCmp\n#eval tbCmp\n#eval vecCmp\n")
           { trustedModule := Tests.libModule, loader := ← libLoader }
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render ""
@@ -617,7 +617,7 @@ def hdlGroup : Group where
         -- hdl/examples/hdl-sim-theorem.wiz: a one-bit delay built with Circuit.netlist; the
         -- relation's oneClock/memFree/initOk/stepOk are discharged by kernel evaluation,
         -- the theorem is applied to a four-cycle trace, and both simulations agree
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-sim-theorem.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-sim-theorem.wiz")
           [
           "[[0], [1], [0], [1]]",
           "[[0], [1], [0], [1]]",
@@ -626,7 +626,7 @@ def hdlGroup : Group where
         -- hdl/examples/hdl-sim.wiz: every netlist operation (shifts by a signal too), 70-bit widths, reset and enable, a
         -- table tree, composition, memories (two write ports, read-during-write, a ROM,
         -- out-of-range addresses); 3000 random cycles each, hash-consed and naive netlists
-        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-sim.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-sim.wiz")
           ("alu: yes, 3000 cycles, well formed yes, checksum 840993931\n" ++
            "alu with reset and enable: yes, 3000 cycles, well formed yes, checksum 86608463\n" ++
            "piped: yes, 3000 cycles, well formed yes, checksum 623585979\n" ++
@@ -635,7 +635,7 @@ def hdlGroup : Group where
            "shifter: yes, 3000 cycles, well formed yes, checksum 331396695\n" ++
            "not well formed: yes, simFast = simulate: yes\n") },
     { name := "H14 S5: pipeline arrows (Pipe/Flow): latency, identity/associativity laws, throughput, stalls, reset; values = netlist; notation round-trip", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-pipe.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-pipe.wiz")
           [
           "(1, 2, 3)",
           "[0, 254, 254, 13, 18, 23, 28, 33, 38]",
@@ -654,14 +654,14 @@ def hdlGroup : Group where
     { name := "H14 S5: simFast = Circuit.run = netlist for the pipelines (compiled; skipped without a C toolchain)", run := fun _ => do
         let has (c : String) : IO Bool := (do let o ← IO.Process.output { cmd := c, args := #["--version"] }; pure (o.exitCode == 0)) <|> pure false
         unless (← has "cc") do skip "no cc"; return
-        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-pipe.wiz")
+        cRunLibs (← Tests.hdlRead "examples/hdl-pipe.wiz")
           "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" },
     { name := "L3: signals — sized `mapS`, the counter through `Signal.fix`, the baud generator, and `+`/`if` at a size (hdl/examples/hdl-l3.wiz)", run := fun _ => do
         -- lane L3 of the Clash HDL plan on lane L2: the applied former `(Signal d A)^i`
         -- and its one size bump `registerS`; a numeral at a size; `+`/`if` at size ∞ on
         -- `Signal.Sig`; and the sized surface (`mapS`, `Signal.fix`, the Clash counter
         -- and baud generator) compiled to `scofix`.
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-l3.wiz")
+        okLibs (← Tests.hdlRead "examples/hdl-l3.wiz")
           [".cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))",
            ".cons (0, 1) (.cons (0, 1) .nil)",
            ".cons (2, 0) (.cons (2, 0) .nil)",

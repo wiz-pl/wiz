@@ -1,0 +1,79 @@
+WIZ RUNTIME LIBRARY EXCEPTION
+
+Version 1.0, 11 November 2026
+
+This Wiz Runtime Library Exception ("Exception") is an additional permission
+under section 7 of the GNU General Public License, version 3 ("GPLv3"). It
+applies to the Runtime Library, defined below, which is part of Wiz and is
+licensed under the GNU General Public License, either version 3 of the
+License, or (at your option) any later version ("the GPL"). The text of the
+GPL is in the file LICENSE.
+
+When you convey a copy of the Runtime Library, or a work based on it, you may
+at your option remove this Exception from that copy, as section 7 of GPLv3
+permits.
+
+0. Definitions.
+
+"Wiz" means the software in this repository: the Wiz compilers, checkers and
+kernels (including the self-hosted ones), the build tool grail, the toolchain
+manager tower, the editor support, the libraries and the runtime.
+
+The "Runtime Library" means those parts of Wiz that end up inside, or are
+combined with, the programs that Wiz compiles:
+
+  (a) the files under runtime/;
+  (b) the file selfhost/rt.c;
+  (c) the files under lib/;
+  (d) the prelude that the self-hosted front end carries inside it (the
+      definitions that every program compiled by it starts from); and
+  (e) any other portion of Wiz that a Wiz compiler copies into its output, or
+      emits as part of its output, when it compiles a program, such as
+      runtime support code, code templates and foreign-function glue.
+
+The Runtime Library does not include the rest of Wiz. In particular it does
+not include the compilers, checkers and kernels themselves, grail, tower or
+the editor support, except for the portions described in (d) and (e).
+
+An "Independent Program" is a program, library or other work that is not Wiz
+and is not based on Wiz, other than by using the Runtime Library through the
+interfaces it provides: importing its modules, calling its definitions, being
+compiled against it, or being linked with it.
+
+A "Compiled Work" is anything produced by compiling an Independent Program
+with a Wiz compiler, or by combining the result with the Runtime Library, in
+any form: generated source code in another language (such as C or LLVM IR),
+object code, a library, an executable, or code for another target (such as
+WebAssembly or a hardware description).
+
+1. Grant of additional permission.
+
+You have permission to propagate and convey a Compiled Work under terms of
+your choice, even though the Compiled Work contains portions of the Runtime
+Library or is combined with it, and even though such a combination would
+otherwise be covered by the GPL. You need not provide the source code of the
+Independent Program, and the Independent Program and the Compiled Work need
+not be licensed under the GPL.
+
+2. What this Exception does not change.
+
+  (a) The Runtime Library itself, and any modified version of it, remains
+      under the GPL. If you convey the Runtime Library, or a modified version
+      of it, other than as part of a Compiled Work, you must do so under the
+      GPL (with or without this Exception, as you choose).
+
+  (b) The rest of Wiz remains under the GPL without any additional
+      permission. A work that is based on the compilers, checkers, kernels,
+      grail, tower or the editor support is not an Independent Program.
+
+  (c) This Exception gives no permission regarding software that is not part
+      of Wiz. A Compiled Work may be linked with other libraries (for example
+      GMP or a garbage collector); their own licences continue to apply.
+
+  (d) This Exception does not invalidate any other reason why a Compiled Work
+      might be covered by the GPL.
+
+3. No warranty.
+
+The disclaimer of warranty and the limitation of liability in sections 15 and
+16 of GPLv3 apply to the Runtime Library and to this Exception.
