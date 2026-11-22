@@ -41,6 +41,31 @@ def ffiGroup : Group where
         ioRun "import IO\ndef main : IO Unit := do\n  IO.println \"one\";\n  IO.println \"two\"" "one\ntwo\n" },
     { name := "IO.arg past the end is empty (no i+1 overflow at 2^64-1)", run := fun _ =>
         ioRun "import IO\ndef main : IO Unit := do\n  a ← IO.arg 18446744073709551615;\n  IO.println a" "\n" },
+    { name := "IO.readFile: a missing file is empty text, any other failure is reported and exits 1 (so is a failed IO.writeFile)", run := fun _ => do
+        -- absence is an answer (the module loader probes candidate paths with a read):
+        -- a missing file reads as "", indistinguishable from an empty one
+        cRunLibs ("import IO\ndef main : IO Unit := do\n" ++
+          "  s ← IO.readFile \"/nonexistent-wiz-test/x\";\n" ++
+          "  IO.print \"[\";\n  IO.print s;\n  IO.println \"]\"") "[]\n"
+        -- a directory is not empty text: the failure names the path and exits 1
+        match ← cRunLibsOut ("import IO\ndef main : IO Unit := do\n" ++
+          "  s ← IO.readFile \"/\";\n  IO.println s") with
+        | .ok v => throw (IO.userError s!"a directory read as {repr v}, expected a reported failure")
+        | .error (.run code err) => do
+          checkEq (1 : UInt32) code
+          unless (err.splitOn "wiz: /: ").length > 1 do
+            throw (IO.userError s!"the failure does not name the path: {repr err}")
+        | .error e => failRun e
+        -- a write that cannot open its path is reported, not dropped (`IO.writeFile` is
+        -- declared in lib/Std.wiz)
+        match ← cRunLibsOut ("import Std\ndef main : IO Unit := do\n" ++
+          "  IO.writeFile \"/nonexistent-wiz-test/x\" \"x\"") with
+        | .ok v => throw (IO.userError s!"a failed write printed {repr v}")
+        | .error (.run code err) => do
+          checkEq (1 : UInt32) code
+          unless (err.splitOn "wiz: /nonexistent-wiz-test/x: ").length > 1 do
+            throw (IO.userError s!"the failure does not name the path: {repr err}")
+        | .error e => failRun e },
     { name := "the world is linear: it can't be duplicated", run := fun _ =>
         ioFails "import IO\ndef bad (x : IO Unit) : IO Unit := fun w =>\n  let 1 (a, w') := x w; x w" "quantity 1" },
     { name := "linear sequencing: IO.bind, IO.then1 and do1 take an action and a continuation that use a linear value (L6)", run := fun _ => do
