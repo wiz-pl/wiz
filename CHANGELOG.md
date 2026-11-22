@@ -16,6 +16,15 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* ci: a pull request's `build` job starts from a `.lake` a previous run saved
+  (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `flake.nix` and the
+  `lean`/`runtime` subset hashes), so Lake recompiles only the modules the branch
+  changed; pushes, the merge queue and the release path keep the pure `nix build`, and
+  a missing or stale seed is a cold build, not a failure. The subset hashes are one
+  committed table, `.github/repo-subsets.json` (`scripts/repo-subsets.py`), which the
+  `docs_style` job checks and `.githooks/pre-commit` refreshes (`git config
+  core.hooksPath .githooks`).
+
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
   paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
