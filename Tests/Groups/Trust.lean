@@ -39,6 +39,14 @@ def failsWithLib (input : String) (fragment : String) : IO Unit := do
   unless errs.any (fun e => (e.splitOn fragment).length > 1) do
     throw (IO.userError s!"no error mentions '{fragment}': {errs}")
 
+/-- Every message of `input`, with every module of `lib/` importable. (`msgsLib` is
+misnamed: it uses the fixed prelude loader.) -/
+def msgsLibs (input : String) : IO (List String) := do
+  let s := runFrontend (R := ZeroOneMany) input
+    { loader := ← libLoader, trustedModule := Tests.libModule }
+  pure (s.messages.toList.map fun m =>
+    s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}")
+
 /-- Some message of `messagesLib` contains `fragment` (the whole signature when the
 fragment is the whole line). -/
 def expectMsg (ms : List String) (fragment : String) : IO Unit :=
@@ -476,8 +484,10 @@ def trustGroup : Group where
         expectMsg ms "(0 e : A = A)"
         expectMsg ms "(0 a : A)"
         expectMsg ms "= a"
-        checkEq #["castRefl"] (printAxiomsOf ms "castRefl")
-        checkEq #["castRefl"] (printAxiomsOf ms "cr")
+        let axCast := printAxiomsOf ms "castRefl"
+        let axCr := printAxiomsOf ms "cr"
+        check (axCast == ["castRefl"]) s!"castRefl lists {axCast}"
+        check (axCr == ["castRefl"]) s!"cr lists {axCr}"
         -- an unrelated proposition, and a proof of `A = B` where `A = A` is required:
         -- neither may elaborate through castRefl
         failsWithLib "import Prelude\ndef bad : (0 : Nat) = 1 := castRefl (refl 0) 0\n" "type mismatch"
@@ -488,7 +498,7 @@ def trustGroup : Group where
         -- statements (`#check`), the declaration set (so a new evidence constructor or a
         -- redefinition as a `def` fails), what each derivation depends on, and two pairs
         -- the relation must not derive.
-        let ms ← messagesLib ("import Region\n#check Region\n#check Region.static\n" ++
+        let ms ← msgsLibs ("import Region\n#check Region\n#check Region.static\n" ++
           "#check Outlives\n#check Outlives.refl\n#check Outlives.static\n#check Outlives.trans\n" ++
           "def r1 (0 ρ : Region) : Outlives ρ ρ := Outlives.refl ρ\n" ++
           "def r2 (0 ρ : Region) : Outlives Region.static ρ := Outlives.static ρ\n" ++
@@ -512,9 +522,9 @@ def trustGroup : Group where
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
-          { loader := ← preludeLoader, trustedModule := Tests.libModule }
+          { loader := ← libLoader, trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
-        checkEq 4 names.length
+        checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
           check (names.contains n) s!"{n} is missing: {names}"
           let some d := s.globals.find? n | throw (IO.userError s!"{n} is missing")
@@ -524,9 +534,9 @@ def trustGroup : Group where
           check (d.value.isNone && d.witness.isNone) s!"{n} is not an axiom"
         -- non-derivable: a fresh region does not outlive `'static`, and transitivity
         -- needs both premises
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
     { name := "Std.Str.empty / Str.push: copying a shared text, in C and LLVM (ledger rows 334-335, 342-343)", run := fun _ => do
         -- The reason for `Str.push` says it grows in place when the text is unique and
         -- copies when shared. A wrong uniqueness check mutates a shared literal, which
@@ -598,7 +608,7 @@ def trustGroup : Group where
           "import WordArray\ndef bad : U64Array := U64Array.mk .nil",
           "import WordMap\ndef bad : U64Map Nat := U64Map.mk PMap.empty" ]
         for src in bads do
-          let ms ← messagesLib src
+          let ms ← msgsLibs src
           check (ms.any fun m => m.startsWith "error" && (m.splitOn "private").length > 1)
             s!"a private constructor was reachable: {ms}"
         let lookalikes := [
@@ -609,11 +619,11 @@ def trustGroup : Group where
           "import WordArray\ninductive Fake where\n  | mk (l : List U64)\ndef bad (a : U64Array) : Fake := a",
           "import WordMap\ninductive Fake where\n  | mk (m : PMap U64 Nat)\ndef bad (m : U64Map Nat) : Fake := m" ]
         for src in lookalikes do
-          let ms ← messagesLib src
+          let ms ← msgsLibs src
           check (ms.any (·.startsWith "error")) s!"a look-alike was accepted as the sealed type: {ms}"
         -- and each user of the type still depends on the seal (the two rows together);
         -- U64Map.empty also names its native registration
-        let ms ← messagesLib ("import Data.PMap\nimport Intern\nimport WordArray\nimport WordMap\n" ++
+        let ms ← msgsLibs ("import Data.PMap\nimport Intern\nimport WordArray\nimport WordMap\n" ++
           "#print axioms PMap.empty\n#print axioms InternTable.empty\n" ++
           "#print axioms U8Array.empty\n#print axioms U32Array.empty\n#print axioms U64Array.empty\n" ++
           "#print axioms U64Map.empty\n")
@@ -634,8 +644,8 @@ def trustGroup : Group where
           "      (.cons (U32.ofNat 70000) .nil))))\n" ++
           "      (List.map UIntN.toNat (U64Array.toList (U64Array.ofList\n" ++
           "        (.cons (U64.ofNat 18446744073709551615) .nil)))))"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunLibs src expected
+        cRunLibs src expected (llvm := true) },
     { name := "EditorModel partials: the compiled editor path runs them (C and LLVM)", run := fun _ => do
         -- The five `partial` rows (firstLineAfter, lineTableGo, lspLookupGo,
         -- splitGoalsGo, tokenEndGo) are compiled-only general recursion; call each
@@ -651,14 +661,24 @@ def trustGroup : Group where
           "  (.cons (match EditorModel.lspLookup (.cons e1 .nil) 1 \"term\" with\n" ++
           "    | .some e => e.stop\n    | .none => 0)\n" ++
           "  .nil)))))\n"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunLibs src expected
+        cRunLibs src expected (llvm := true) },
+    { name := "Web.Hover.percentGo: the URI decoder in compiled code (C and LLVM)", run := fun _ => do
+        -- Hover.percentGo is a `partial` list walk on the hover path with no other test.
+        let src := "import Web.Hover\ndef b2n : Bool → Nat\n  | .true => 1\n  | .false => 0\n" ++
+          "def main : List Nat :=\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"a%20b\") \"a b\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"%2F%zz\") \"/%zz\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"p+q\") \"p+q\"))\n" ++
+          "  .nil)))\n"
+        cRunLibs src ".cons 1 (.cons 1 (.cons 1 .nil))"
+        cRunLibs src ".cons 1 (.cons 1 (.cons 1 .nil))" (llvm := true) },
     { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
         -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
         -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is
         -- still a `partial def` in the package source.
         let text ← IO.FS.readFile "scry/trust-baseline.tsv"
-        let rows := text.splitOn "\n" |>.filterMap fun l =>
+        let rows := (text.splitOn "\n").filterMap fun l =>
           if l.isEmpty || l.startsWith "#" then none
           else match l.splitOn "\t" with
             | [m, n, item, _, _, _] => some (m, n, item)

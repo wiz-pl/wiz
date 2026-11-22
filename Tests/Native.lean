@@ -539,6 +539,11 @@ def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustR
         problems := problems ++ [s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD"]
       else if r.review < today then
         problems := problems ++ [s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})"]
+      -- A bulk `--update` writes one placeholder reason for the rows it adds; the
+      -- review must replace every one of them. Treat the placeholder as a gate failure
+      -- so a half-finished reason pass cannot be committed (or merged).
+      if (r.reason.splitOn "PENDING-REVIEW").length > 1 then
+        problems := problems ++ [s!"{TrustRow.key r}: placeholder reason (PENDING-REVIEW); replace it with the reviewed reason"]
   if strictLegacy && legacy > 0 then
     problems := problems ++ [s!"{legacy} legacy rows still have the pre-gate reason/owner (review them, or run without --strict-legacy)"]
   if added.isEmpty && removed.isEmpty && problems.isEmpty then

@@ -271,7 +271,7 @@ def Scry.fiProbe (path : String) : EIO (Except String (Nat × U64)) := do
               (Bool.and (UIntN.beq c.label Scry.fiSentinelLabel)
                 (Bool.and (UIntN.beq p.kind Scry.fiPrintMagic)
                   (UIntN.beq p.label Scry.fiSentinelLabel)))
-          | _, _ => .false;
+          | _, _ => Bool.false;
         match good with
         | .false => EIO.pure (.error "corrupt")
         | .true => EIO.pure (match countNode, printNode with
@@ -303,7 +303,7 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
       | .true => do
         let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
         let good := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
               (UIntN.beq n.label Scry.fiSentinelLabel);
         let rows := match good with
@@ -313,7 +313,7 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
                 (Bool.not (UIntN.beq r.id Scry.fiFingerprintId)))
               (QAllRecords s.map s.root);
         let countOk := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Nat.beq (UIntN.toNat n.count) (List.length rows);
         closeQ h;
         match Bool.and good countOk with
@@ -343,7 +343,7 @@ def Scry.fiCountSeverityQuire (path : String) (severity : U32) : EIO (Except Str
       | .true => do
         let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
         let good := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
               (UIntN.beq n.label Scry.fiSentinelLabel);
         let n := match good with

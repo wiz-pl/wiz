@@ -240,6 +240,14 @@ run 0 update-check --check --tree "$root/Tests/trust-ledger/new/tree" \
   --ledger "$ledger" --today "$today"
 has "0 legacy rows" update-check
 
+# A placeholder reason from a bulk --update (PENDING-REVIEW) is not a review.
+placeholder=$tmp/placeholder.tsv
+awk -F'\t' 'BEGIN{OFS="\t"} /^#/ {print; next} NF {$4="PENDING-REVIEW: new lib source"} {print}' \
+  "$root/Tests/trust-ledger/clean/ledger.tsv" >"$placeholder"
+run 1 placeholder --check --tree "$root/Tests/trust-ledger/clean/tree" \
+  --ledger "$placeholder" --today "$today"
+has "placeholder reason (PENDING-REVIEW)" placeholder
+
 # The counts quoted in docs/trust-ledger.md and CHANGELOG.md are generated from the
 # ledger by scripts/trust-counts.py; a drift is a failure. (No build needed.)
 if ! python3 "$root/scripts/trust-counts.py" --check >"$tmp/counts.out" 2>&1; then
