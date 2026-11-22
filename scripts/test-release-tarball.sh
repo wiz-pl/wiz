@@ -87,6 +87,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+start_seconds=$(date +%s)
 fail() {
   echo "release-tarball test: $*" >&2
   work_kept=yes
@@ -169,12 +170,20 @@ build_full() { # SIDE
   cat > "$work/$side/build.sh" <<'EOS'
 set -eu
 export C_INCLUDE_PATH="$(lean --print-prefix)/include/clang:/usr/include/x86_64-linux-gnu:/usr/include"
-lake build -j "$WIZ_RELEASE_JOBS" wiz grail
+export LEAN_NUM_THREADS="${WIZ_RELEASE_JOBS:-4}"
+t0=$(date +%s)
+lake build wiz grail
+echo "build seconds: $(( $(date +%s) - t0 ))"
 flags=
 if [ -f grail.local.wiz ]; then
   flags=$(awk -F'"' '/Settings.set "(cflags|ldflags|gc-cflags|gc-ldflags|llc)"/ { printf " --%s \"%s\"", $2, $4 }' grail.local.wiz)
 fi
 eval "scripts/build-tower-wiz.sh .lake/build/bin/tower .lake/build/bin/grail $flags"
+# the step's cgroup peak: the number heavy-local prints for a --rsync job
+cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
+if [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/memory.peak" ]; then
+  echo "build cgroup peak: $(cat "/sys/fs/cgroup$cg/memory.peak") bytes"
+fi
 EOS
   (
     cd "$work/$side/repo"
@@ -442,4 +451,5 @@ else:
 PY
 fi
 
+echo "release-tarball test: total $(( $(date +%s) - start_seconds )) s"
 echo "release-tarball test: ok"
