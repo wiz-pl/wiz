@@ -17,7 +17,7 @@ representation of a program or an analysis result, and nothing here mutates a st
 
 The CST/facts half lives in `Scry.CstOptics` (in `scry/src`), because `Scry.Node`,
 `Scry.Facts` and `Scry.CstStore` are in the `scry` package's source root. This module is
-in the library root so a `lib/Scry` pass or rule can import it without depending on the
+in the library root so a `src/Scry` pass or rule can import it without depending on the
 CLI package. The split is deliberate: the core optics and the Wil analysis are usable by
 both, while only the CST-aware code pays for `Scry.CstStore`.
 

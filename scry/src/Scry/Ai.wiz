@@ -12,7 +12,7 @@ transfer stays below its target's invariant and the entry state is covered, a ch
 linear in the program's size.
 
 `import Scry.Ai` gives the interfaces and the engine; tests and examples use
-`Scry.AiExamples` (`lib/Scry/AiExamples.wiz`). Nothing here imports Wil or tree-sitter.
+`Scry.AiExamples` (`src/Scry/AiExamples.wiz`). Nothing here imports Wil or tree-sitter.
 
 ```
 import Scry.Ai
