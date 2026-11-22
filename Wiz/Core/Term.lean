@@ -850,18 +850,6 @@ def expandAliases (g : Globals R) (x : Name) : Name :=
   | (a, M) :: _ => M ++ (x.drop a.length).toString
   | [] => x
 
-/-- (diagnostics) The failed declaration `x` denotes, if any: the same candidates
-`resolveName` tries (this namespace, the name itself, an open's member). -/
-def failedOf? (g : Globals R) (x : Name) : Option FailedDecl :=
-  let lookupAt (n : Name) : Option FailedDecl := g.failed[g.resolve n]?
-  if x.contains '.' then
-    lookupAt (g.expandAliases x) <|>
-      (if g.namespacePrefix.isEmpty then none else lookupAt (g.namespacePrefix ++ "." ++ x))
-  else
-    (if g.namespacePrefix.isEmpty then none else lookupAt (g.namespacePrefix ++ "." ++ x)) <|>
-      lookupAt x <|> g.opens.findSome? fun M => lookupAt (M ++ "." ++ x)
-
-
 /-- (13t) What the identifier `x` as written denotes in the module being elaborated.
 
 * A **qualified** name (`A.x`) is resolved as written, after an `open … as` alias maps
