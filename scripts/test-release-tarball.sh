@@ -162,6 +162,20 @@ fi
 # how to reach its toolchain); it runs with cwd = the root and the side's environment.
 build_full() { # SIDE
   side=$1
+  # The default build: wiz and grail with lake, then tower. build-tower-wiz.sh builds
+  # in a temp dir, so it does not read the root's grail.local.wiz; pass the checkout's
+  # machine settings as flags (the release job does the same). A caller whose toolchain
+  # is different sets RELEASE_BUILD_CMD.
+  cat > "$work/$side/build.sh" <<'EOS'
+set -eu
+export C_INCLUDE_PATH="$(lean --print-prefix)/include/clang:/usr/include/x86_64-linux-gnu:/usr/include"
+lake build -j "$WIZ_RELEASE_JOBS" wiz grail
+flags=
+if [ -f grail.local.wiz ]; then
+  flags=$(awk -F'"' '/Settings.set "(cflags|ldflags|gc-cflags|gc-ldflags|llc)"/ { printf " --%s \"%s\"", $2, $4 }' grail.local.wiz)
+fi
+eval "scripts/build-tower-wiz.sh .lake/build/bin/tower .lake/build/bin/grail $flags"
+EOS
   (
     cd "$work/$side/repo"
     # the checkout's toolchain settings (GMP/GC/llc paths) for `grail build`; a
@@ -171,11 +185,7 @@ build_full() { # SIDE
     if [ -n "${RELEASE_BUILD_CMD:-}" ]; then
       set -- sh -c "$RELEASE_BUILD_CMD"
     else
-      set -- sh -c '
-        set -eu
-        export C_INCLUDE_PATH="$(lean --print-prefix)/include/clang:/usr/include/x86_64-linux-gnu:/usr/include"
-        lake build -j "$WIZ_RELEASE_JOBS" wiz grail
-        scripts/build-tower-wiz.sh .lake/build/bin/tower .lake/build/bin/grail'
+      set -- sh "$work/$side/build.sh"
     fi
     env HOME="$work/$side/home" TMPDIR="$work/$side/tmp" \
       LC_ALL="$(eval echo \$lc_$side)" TZ="$(eval echo \$tz_$side)" \
