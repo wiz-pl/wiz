@@ -50,7 +50,7 @@ def distProofsGroup : Group where
         okLibs ("import Dist.Leader\n" ++
           "#eval Elect2.leaderB (Elect2.advance Elect2.init)\n" ++
           "#eval Elect2.leaderB Elect2.init\n")
-          ["true", "false"] },
+          [".true", ".false"] },
     { name := "the library checks, and the safety and checker theorems are axiom-free", run := fun _ =>
         okLibs ("import Dist.TwoPhaseFinite\n" ++
           "#print axioms TwoPC.safety\n" ++
