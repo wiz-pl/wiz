@@ -1965,6 +1965,31 @@ def TacticM.omegaHypTerms (g : Nat) : List (String × Expr) → TacticM (List Ex
             TacticM.pure (List.append ts rest)
         | .none => TacticM.pure rest
 
+/-- A direct proof of `Nat.Le a c` from an equality hypothesis `a + k = c` (the
+transitive closure's equality edges can hit instance-metavariable mismatches; this is
+the common bound shape and is checked directly). -/
+def TacticM.omegaDirectAdd (g : Nat) (i : Nat) (a c : Expr) :
+    List (String × Expr) → TacticM (Option Expr)
+  | .nil => TacticM.pure .none
+  | .cons h hs => do
+    ev ← TacticM.eqView g h.2;
+    match ev with
+    | .some q => match q with
+      | (_, u, v) => do
+        vc ← TacticM.isDefEq g v c;
+        match vc with
+        | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+        | .true => do
+          u' ← TacticM.normalize g u;
+          match Expr.addPair u' with
+          | .some (x, k) => do
+            xa ← TacticM.isDefEq g x a;
+            match xa with
+            | .true => TacticM.pure (.some (Expr.ap4 (.const "Nat.le_of_eq_add'") a c k (Expr.var i)))
+            | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+          | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+    | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+
 /-- Prove `Nat.Le src target` by the BFS; assign it to `g`, or fail. -/
 def TacticM.omegaLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
     (src target : Expr) : TacticM Unit := do
@@ -2014,7 +2039,10 @@ def Tactic.omega : Tactic := fun _ => do
     | .some (.cons a (.cons b .nil)) => do
       ts ← TacticM.omegaCollect g (.cons a (.cons b .nil));
       hs ← TacticM.omegaHypTerms g hyps;
-      TacticM.omegaLe g hyps (List.append ts hs) a b
+      d ← TacticM.omegaDirectAdd g 0 a b hyps;
+      match d with
+      | .some pr => TacticM.assign g pr
+      | .none => TacticM.omegaLe g hyps (List.append ts hs) a b
     | _ => match Expr.appOf "Nat.Lt" ty with
       | .some (.cons a (.cons b .nil)) => do
         let sa : Expr := .app (.const "Nat.succ") a;

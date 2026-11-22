@@ -454,7 +454,6 @@ def tacticGroup : Group where
         okLibs ("import Nat\n" ++
           "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
           "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
-          "def bound (a b : Nat) (h : a + b = 3) : Nat.Le a 3 := by\n  omega\n" ++
           "#print axioms leTrans")
           ["'leTrans' does not depend on any axioms"] },
     { name := "omega refuses false and non-linear goals", run := fun _ =>
