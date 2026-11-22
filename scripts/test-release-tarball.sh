@@ -291,7 +291,37 @@ for rows, path in zip(members, out):
 for s, rows in zip(side, members):
     names = [r["path"] for r in rows]
     assert names, f"root {s}: the tarball is empty"
-    assert names == sorted(names), f"root {s}: members are not sorted"
+    assert len(names) == len(set(names)), f"root {s}: duplicate members"
+    # `tar --sort=name` sorts each directory's entries and recurses, so the flattened
+    # list is a depth-first walk with each directory's children sorted by basename.
+    # It is NOT Python's full-path sort: at a directory D, D's children come before a
+    # sibling `D.h` (tar sees `D` < `D.h`; a full-path sort sees `D.h` < `D/...`).
+    # The cc bundle has exactly that pair (`include/gc/` and `include/gc.h`).
+    kids = {}
+    for n in names:
+        parent, _, base = n.rpartition("/")
+        kids.setdefault(parent, []).append((base, n))
+    dirs = {r["path"] for r in rows if r["kind"] == "d"}
+    expected = []
+
+    def walk(parent):
+        for base, full in sorted(kids.get(parent, []),
+                                 key=lambda kn: kn[0].encode("utf-8", "surrogateescape")):
+            expected.append(full)
+            if full in dirs:
+                walk(full)
+
+    walk("")
+    if names != expected:
+        for got, want in zip(names, expected):
+            if got != want:
+                print(f"release-tarball test: root {s}: first out-of-order member: "
+                      f"{got!r} (expected {want!r})", file=sys.stderr)
+                break
+        else:
+            print(f"release-tarball test: root {s}: {len(names)} members, "
+                  f"{len(expected)} expected", file=sys.stderr)
+        raise AssertionError(f"root {s}: members are not in tar --sort=name order")
     top = names[0].split("/")[0]
     assert all(n == top or n.startswith(top + "/") for n in names), \
         f"root {s}: a member is outside the top directory"
