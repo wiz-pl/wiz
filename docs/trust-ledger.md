@@ -8,7 +8,7 @@ The counts below are generated from the file (not hand-typed):
 `scripts/trust-counts.py --write` rewrites this marker, `--check` fails when it drifts,
 and the `native` group runs the check.
 
-<!-- trust-counts: rows=823 partial=233 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=553 shared_reasons=270 legacy=0 expired=0 -->
+<!-- trust-counts: rows=829 partial=239 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=559 shared_reasons=270 legacy=0 expired=0 -->
 
 ## What is a source of trust
 
@@ -54,7 +54,7 @@ implementation is not unfolded there. `checkCovered` still requires every entry
 
 ## Scope
 
-The gate walks `lib/` and the axiom-free examples. `selfhost/*.wiz`, the Wiz source of the
+The gate walks `lib/` (at any depth: the loader's walk used to stop two levels down and silently dropped `lib/Web/Source/*.wiz`) and the axiom-free examples. `selfhost/*.wiz`, the Wiz source of the
 self-hosted toolchain, is **outside** it. At the last reviewed base (`c2efe881`) that tree
 has 9 `extern` declarations (18 rows: an `axiom` and a `builtin extern:` for each), 172
 `partial def` declarations, and 79 definition `mutual` blocks with 388 more `def` members
@@ -66,7 +66,7 @@ unchecked step the ledger exists to list. Widening also needs a multi-root walk 
 `Tests/Native.lean` (`--tree` is for fixtures, not a second root), a reviewed reason per
 row, and the `--check` job would elaborate 13 more modules. A prototype of the widened
 walk measured **~9m30s cold** (against ~7m26s for `lib/` alone) and the same +578 delta
-(823 → 1401 rows). That is a scope decision, not a mechanical update, and it is
+(829 → 1407 rows). That is a scope decision, not a mechanical update, and it is
 deliberately not made here.
 
 The **Scry package** (`scry/src/Scry/`) is outside the gate for the same reason: the
@@ -162,8 +162,8 @@ committing: a new `axiom` is a proof obligation, not a formality.
 The migration gave the 753 pre-gate rows the reason `legacy: pre-gate baseline; not
 individually reviewed`, owner `unassigned`, and review date `2027-05-14`. That migration
 is **complete**: no row carries the marker, `--strict-legacy` passes, and every row has
-a reason, an owner and a review date. The reasons are not all declaration-specific: 553
-distinct reasons cover the 823 rows, and 270 rows share a reason with another row (the
+a reason, an owner and a review date. The reasons are not all declaration-specific: 559
+distinct reasons cover the 829 rows, and 270 rows share a reason with another row (the
 `Feral` block and the FFI marshalling rows describe a block
 where the declarations are one reviewed unit).
 
@@ -207,8 +207,8 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The ledger now has 823 rows: the migration's 753, minus the 73 removals below, plus 143
-rows added by later modules (the `partial` group is 233 rows). The removals are
+The ledger now has 829 rows: the migration's 753, minus the 73 removals below, plus 149
+rows added by later modules (the `partial` group is 239 rows). The removals are
 all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -239,10 +239,11 @@ The reviewed base falls into these groups:
   bulk-renew them. `UInt64.ofNat` reduces mod 2^64 (the marshalling used to panic above
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
-* **Mutual recursion and `partial`, 233 rows.** The rows come from `Feral` (70: 67
+* **Mutual recursion and `partial`, 239 rows.** The rows come from `Feral` (70: 67
   mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), the web modules (`Web.EditorModel` 20,
   `Web.Selfhost` 14, `Web.Loom` 14, `Web.Goals` 13, `Web.Playground` 9,
-  `Web.Draft` 5, `Web.Search` 4, `Web.Hover` 2), `Scry.Quire` 25,
+  `Web.Draft` 5, `Web.Search` 4, `Web.Hover` 2), `Web.Highlight` 1, `Web.Source` 5
+  (`Model` 1, `Span` 1, `Static` 2, `View` 1), `Scry.Quire` 25,
   `Scry.QuireCursor` 5, `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`),
   `SatTactic` (7), `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3),
   `Ring` (2), `Prelude` (6) and `IO` (1).
@@ -250,7 +251,7 @@ The reviewed base falls into these groups:
   kernel treats a `partial`
   definition as opaque: the definition is justified by an inhabited witness of its
   type (22f), never by a termination proof, so a row is not a claim that the recursion
-  terminates. The 233 rows are accepted as one reviewed group, deliberately not
+  terminates. The 239 rows are accepted as one reviewed group, deliberately not
   de-mutualised: each reason names its block and what would remove the row —
   de-mutualising into structural recursion over the syntax or data tree, or a checked
   measure (fuel, a decreasing counter, or a worklist/visited-set measure). A

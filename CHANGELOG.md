@@ -12,7 +12,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=823 partial=233 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=553 shared_reasons=270 legacy=0 expired=0 -->
+<!-- trust-counts: rows=829 partial=239 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=559 shared_reasons=270 legacy=0 expired=0 -->
 
 ## [Unreleased]
 
