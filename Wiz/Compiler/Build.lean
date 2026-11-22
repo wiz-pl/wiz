@@ -442,8 +442,12 @@ def preprocessFailed (cc h : String) (exitCode : UInt32) (stderr : String) : Str
 /-- Preprocess the headers a file imports (`import_c "h"`), since the frontend is pure. -/
 def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
-  for part in (input.splitOn "import_c \"").drop 1 do
-    let h := (part.splitOn "\"").headD ""
+  -- `Module.headersOf` is the one scan: it skips `--` comment lines. A second copy here
+  -- re-introduced the bug F09 fixed -- a comment that documents `import_c "..."` was read
+  -- as a directive, and its ellipsis rejected as a header name. That is what failed the
+  -- playground build: the engine concatenates `selfhost/Frontend.wiz`, whose comment
+  -- names the syntax.
+  for h in Module.headersOf input do
     if h.isEmpty || m.contains h then continue
     -- (F09) only a plausible header name reaches `cc`: a newline or `>` in it would
     -- splice another preprocessor directive into the generated `#include`
