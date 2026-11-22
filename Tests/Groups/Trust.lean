@@ -8,12 +8,26 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
+/-- A message list as the diagnostic lines the trust cases check (`error: …`). -/
+def formatMessages (s : CommandState ZeroOneMany) : List String :=
+  s.messages.toList.map fun m => (match m.severity with
+    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text
+
+/-- Messages of `input`, with every module under `lib/` importable **from disk**.
+
+`preludeLoader` only carries Prelude/Word/Functor/Logic/Text/IO/Std/Sys, so a case that
+imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
+saw `unknown module` (and passed or failed for the wrong reason). Resolving the closure
+means the case exercises the module it names. -/
+def libLoader (input : String) : IO (Name → Option String) := do
+  let ms ← Wiz.Module.loadClosure ["lib"] input
+  pure fun n => (ms[n]?).map (·.2)
+
 /-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
 def messagesLib (input : String) : IO (List String) := do
-  let loader ← preludeLoader
-  let s := runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule }
-  pure (s.messages.toList.map fun m => (match m.severity with
-    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text)
+  let s := runFrontend (R := ZeroOneMany) input
+    { loader := ← libLoader input, trustedModule := Tests.libModule }
+  pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/
 def failsWith (input : String) (fragment : String) : IO Unit := do
@@ -634,8 +648,8 @@ def trustGroup : Group where
           "      (.cons (U32.ofNat 70000) .nil))))\n" ++
           "      (List.map UIntN.toNat (U64Array.toList (U64Array.ofList\n" ++
           "        (.cons (U64.ofNat 18446744073709551615) .nil)))))"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
     { name := "EditorModel partials: the compiled editor path runs them (C and LLVM)", run := fun _ => do
         -- The five `partial` rows (firstLineAfter, lineTableGo, lspLookupGo,
         -- splitGoalsGo, tokenEndGo) are compiled-only general recursion; call each
@@ -651,8 +665,8 @@ def trustGroup : Group where
           "  (.cons (match EditorModel.lspLookup (.cons e1 .nil) 1 \"term\" with\n" ++
           "    | .some e => e.stop\n    | .none => 0)\n" ++
           "  .nil)))))\n"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
     { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
         -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
         -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is

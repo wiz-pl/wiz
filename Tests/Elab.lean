@@ -376,14 +376,25 @@ def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
 
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
-  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit :=
+  cRunWith (← preludeLoader) src expected llvm split
+
+/-- `cRun` with `loader` resolving `src`'s imports. -/
+def cRunWith (loader : Name → Option String) (src : String) (expected : String) (llvm : Bool := false)
+    (split : Nat := 0) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e => failRun e
+
+/-- `cRun` for a program that imports a module `preludeLoader` does not carry
+(`WordArray`, `Intern`, `Data.PMap`, …): resolve the closure from `lib/` on disk. -/
+def cRunOnDisk (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+  let ms ← Module.loadClosure ["lib"] src
+  cRunWith (fun n => (ms[n]?).map (·.2)) src expected llvm
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
