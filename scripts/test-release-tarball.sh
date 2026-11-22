@@ -154,6 +154,9 @@ build_full() { # SIDE
   side=$1
   (
     cd "$work/$side/repo"
+    # the checkout's toolchain settings (GMP/GC/llc paths) for `grail build`; a
+    # release in CI has none and takes them from the bundled C toolchain
+    [ -f "$root/grail.local.wiz" ] && cp "$root/grail.local.wiz" .
     umask "$(eval echo \$umask_$side)"
     if [ -n "${RELEASE_BUILD_CMD:-}" ]; then
       set -- sh -c "$RELEASE_BUILD_CMD"
