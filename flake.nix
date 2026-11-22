@@ -97,6 +97,9 @@
               share=$out/share/wiz
               mkdir -p $share/.lake/build/bin $out/bin
               cp -r ${fs.toSource { root = ./lib; fileset = ./lib; }} $share/lib
+              # (F12) the Wasm backend's JS host, beside lib/ where `wiz run` looks for it
+              mkdir -p $share/web
+              install -m644 ${./web/wasm-host.mjs} $share/web/wasm-host.mjs
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/
