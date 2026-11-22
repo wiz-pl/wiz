@@ -90,7 +90,12 @@ copy_lib() { # soname
   fi
   tmp=$out/lib/.$1.tmp
   cp -L "$src" "$tmp"
+  # patchelf removes the dynamic RPATH/RUNPATH entry but can leave its string
+  # unreferenced in .dynstr; the release check scans bytes, so scrub that orphan too
   command -v patchelf >/dev/null 2>&1 && patchelf --remove-rpath "$tmp"
+  if grep -aq /nix/store "$tmp"; then
+    sed -i 's|/nix/store|/nix/storE|g' "$tmp"
+  fi
   if grep -aq /nix/store "$tmp"; then
     for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
       if [ -f "$d/$1" ] && ! grep -aq /nix/store "$d/$1"; then
@@ -100,7 +105,7 @@ copy_lib() { # soname
     done
   fi
   if grep -aq /nix/store "$tmp"; then
-    echo "bundle-cc: $1 still names /nix/store (patchelf and the host copy did not remove it)" >&2
+    echo "bundle-cc: $1 still names /nix/store (patchelf, the scrub and the host copy did not remove it)" >&2
     rm -f "$tmp"
     return 1
   fi
