@@ -517,7 +517,7 @@ def trustGroup : Group where
         expectMsg ms "Outlives.refl : (0 ρ : Region) → Outlives ρ ρ"
         expectMsg ms "Outlives.static : (0 ρ : Region) → Outlives Region.static ρ"
         expectMsg ms "Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : Region) → Outlives ρ₁ ρ₂ → Outlives ρ₂ ρ₃ → Outlives ρ₁ ρ₃"
-        let known := ["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
+        let known := ["Region", "Region.static", "Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
         for (nm, needs) in [("r1", "Outlives.refl"), ("r2", "Outlives.static"),
             ("r3", "Outlives.trans"), ("r4", "Outlives.trans")] do
           let ax := printAxiomsOf ms nm
