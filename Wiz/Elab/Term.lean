@@ -302,27 +302,6 @@ partial def expandPattern (stx : Syntax) : ElabM R Syntax := do
     | none => pure stx
   | _ => pure stx
 
-/-- A type mismatch where the inferred type is a function type and the expected type is
-not: the application is missing arguments. Classify it as `wrong-argument-count` before
-calling it a mismatch between a type and a function (the printed head's name and its
-explicit-parameter count make the fix obvious). -/
-def missingArgs? (g : Globals R) (stx : Syntax) (expected inferred : Term R) : Option String := do
-  unless stx.isOfKind "term.app" do none
-  let .pi .. := inferred | none
-  match expected with
-  | .pi .. | .mvar .. => none
-  | _ => pure ()
-  let f := stx.getArg 0
-  let explicit := f.isOfKind "term.explicit"
-  unless f.isOfKind "term.ident" || explicit do none
-  let some x := (f.getArg (if explicit then 1 else 0)).getId? | none
-  let some d := g.find? (g.resolve (stripScope x)) | none
-  let ps := piInfos d.type
-  let nexp := (ps.filter (·.2.1 == .default)).length
-  let given := (stx.getArg 1).args.size
-  if nexp ≤ given then none
-  some s!"`{x}` is missing {plural (nexp - given) "argument"} ({nexp} explicit parameters, {given} given)"
-
 /-- Unify, turning a failure into a readable type mismatch at `stx`.
 
 Unification is untyped, so it misses the η-rule for `Unit` (`P x =?= P ()` with
@@ -338,25 +317,13 @@ def unifyAt0 (ctx : LocalCtx R) (stx : Syntax) (expected inferred : VTy R) : Ela
       -- hole, the guess and both types (`checkGuessTypes`): not as a reason under the mismatch
       if e.code == ErrorCode.private_ && e.msg.endsWith forgingGuessTail then
         .error { e with info := (ctx.withInfo stx).info, state? := some s } else
-      let qe := quote s.globals ctx.lvl expected
-      let qi := quote s.globals ctx.lvl inferred
       let show' (v : VTy R) := elideLong ((quote s.globals ctx.lvl v).pretty ctx.names (some s.globals))
-      -- an application of a function at a type that is not a function: missing arguments
-      match missingArgs? s.globals stx qe qi with
-      | some msg =>
-        .error { info := (ctx.withInfo stx).info, msg, code := ErrorCode.wrongArgumentCount,
-                 state? := some s }
-      | none =>
-        let diff := mismatchOf s.globals ctx.names qe qi e.msg
-        let at := if diff.path.isEmpty then "" else
-          s!"\n  at {Mismatch.pathText diff.path}: expected {diff.expectedAt}, inferred {diff.inferredAt}"
-        .error { info := (ctx.withInfo stx).info,
-                 msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++
-                   mismatchReason (show' expected) (show' inferred) e.msg ++ at,
-                 code := if e.code == ErrorCode.nonPattern || e.code == ErrorCode.private_ then e.code else ErrorCode.typeMismatch,
-                 mismatch := some diff,
-                 -- what was recorded up to here (the info tree, `trace`s)
-                 state? := some s }
+      .error { info := (ctx.withInfo stx).info,
+               msg := s!"type mismatch\n  expected: {show' expected}\n  inferred: {show' inferred}" ++
+                 mismatchReason (show' expected) (show' inferred) e.msg,
+               code := if e.code == ErrorCode.nonPattern || e.code == ErrorCode.private_ then e.code else ErrorCode.typeMismatch,
+               -- what was recorded up to here (the info tree, `trace`s)
+               state? := some s }
 
 /-- A type evaluated while some of its holes were unsolved: an equation in it computed
 (or got stuck) on the holes, and stays so after they are solved (`w ?n = 8`). Evaluate it
@@ -487,23 +454,14 @@ partial def elabFields (ctx : LocalCtx R) (t : Term R) (ty : VTy R) (fields : Li
     let ty0 := ty
     let noField : ElabM R (Term R × VTy R) := do
       let g ← getGlobals
-      -- (diagnostics) a field of a value whose type is still a hole: report the hole (at
-      -- its own `_`), not `no field 'x'` in a value of type `?m0`; the fix is to annotate
-      match ← forceMeta ty0 with
-      | .neutral (.mvar m) _ =>
-        let e ← lookupMeta m
-        let here := if e.info.stop == 0 || e.info.synthetic then ctx.info else e.info
-        throwAt here s!"the type of {← showTermM ctx t} is not known: annotate it before projecting '.{f}'"
-          ErrorCode.unsolvedHole
-      | _ =>
-        match structHead? g (← forceMeta ty0) with
-        | some (S, _, _) =>
-          let fields := ((structLayout? g S).map (·.fields)).getD []
-          throwFix ctx.info s!"{Globals.privateBase S} has no field '{f}' (its fields are {", ".intercalate fields})"
-            ErrorCode.noSuchField [("name", [f]), ("type", [S]), ("fieldsOnly", [])]
-        | none =>
-          let msg := s!"no field '{f}' in a value of type {← showVal ctx ty0}"
-          throwFix ctx.info msg ErrorCode.noSuchField [("name", [f]), ("type", (hint?.map (·.1)).toList)]
+      match structHead? g (← forceMeta ty0) with
+      | some (S, _, _) =>
+        let fields := ((structLayout? g S).map (·.fields)).getD []
+        throwFix ctx.info s!"{Globals.privateBase S} has no field '{f}' (its fields are {", ".intercalate fields})"
+          ErrorCode.noSuchField [("name", [f]), ("type", [S]), ("fieldsOnly", [])]
+      | none =>
+        let msg := s!"no field '{f}' in a value of type {← showVal ctx ty0}"
+        throwFix ctx.info msg ErrorCode.noSuchField [("name", [f]), ("type", (hint?.map (·.1)).toList)]
     let rec walk (t : Term R) (ty : VTy R) : ElabM R (Term R × VTy R) := do
       match ← force ty with
       | .sigma x _ A B _ =>
@@ -3030,15 +2988,6 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
     let x := vars[k]!
     let .sigma _ sq A B _ ← force (typeOf x)
       | throwAt (cl.pats[k]!).info s!"a tuple pattern needs a pair, not {← showVal ctx (typeOf x)}"
-    -- (diagnostics) classify by arity first: `(a, b, c)` at `Nat × Bool` is 3 components
-    -- against 2, not a pair pattern at a non-pair type
-    if let .tuple a b := views[k]! then
-      let n := (tuplePatComponents g a b).length
-      let leaves := sigmaLeaves (q (typeOf x))
-      if n != leaves then
-        throwAt (cl.pats[k]!).info
-          s!"this pattern has {plural n "component"}; {← showVal ctx (typeOf x)} has {leaves}"
-          ErrorCode.wrongArgumentCount
     let xv ← evalIn ctx (varTm x)
     let v1 := vFst xv
     let ty2 := Closure.inst g B v1
@@ -3864,13 +3813,6 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
         return (.var ix, ty)
     -- a macro-scoped name that isn't a local refers to the global of its base name
     let x := stripScope x
-    -- (diagnostics) a declaration whose command failed: say so, with its root error as a
-    -- related diagnostic (never `unknown identifier` for a name the file plainly defines)
-    if let some fd := (← getGlobals).failedOf? x then
-      throw { info := ctx.info, msg := s!"'{x}' failed to elaborate",
-              code := ErrorCode.failedDeclaration,
-              related := #[{ info := fd.info, text := fd.message, code := fd.code }],
-              state? := some (← get) }
     -- (13t) this namespace's, this module's, and the open namespaces' declaration of the
     -- name (an ambiguity is an error naming both); (13b) a private one of this module
     -- resolves to its kernel name

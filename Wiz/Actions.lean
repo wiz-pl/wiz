@@ -349,7 +349,6 @@ def messageData (s : CommandState R) (m : Msg) (text : String := "") (modules : 
       -- code action request)
       [("name", [x]), ("suggestions", (suggestions s x locals).toList)]
     | _ => []
-  | "missing-import" => m.data
   | "missing-case" =>
     match missingCases s m.info with
     | some (_, missing) => [("missing", missing.map (·.1))]
@@ -366,31 +365,16 @@ missing import"). -/
 def actionsAt (s : CommandState R) (text : String) (start stop : Nat) (modules : List (Name × String) := []) :
     Array Action := Id.run do
   let mut out : Array Action := #[]
-  -- (diagnostics) one `import M` per file: a module already imported, or added by an
-  -- earlier diagnostic of this request, is not offered again
-  let mut addedImports : Std.HashSet String :=
-    s.imported.foldl (fun acc n => acc.insert n) {}
   for m in s.messages, k in [0:s.messages.size] do
     unless m.info.start ≤ stop && start ≤ max m.info.stop (m.info.start + 1) do continue
     match m.code with
     | "unknown-identifier" =>
       if let some (.unknownIdent r x locals) := around s m.info (· matches .unknownIdent ..) then
-        let at_ := importAt text
-        -- an exact declaration in a module the file does not import is the fix; it comes
-        -- before the edit-distance candidates
-        for md in importsFor s text modules x do
-          unless addedImports.contains md do
-            addedImports := addedImports.insert md
-            out := out.push { title := s!"Add `import {md}`", kind := "quickfix", fixes := some k,
-                              edits := #[{ start := at_, stop := at_, text := s!"import {md}\n" }] }
         for n in suggestions s x locals do
           out := out.push { title := s!"Did you mean '{n}'?", kind := "quickfix", fixes := some k,
                             edits := #[{ start := r.start, stop := r.stop, text := n }] }
-    | "missing-import" =>
-      let at_ := importAt text
-      for md in (m.data.lookup "modules").getD [] do
-        unless addedImports.contains md do
-          addedImports := addedImports.insert md
+        let at_ := importAt text
+        for md in importsFor s text modules x do
           out := out.push { title := s!"Add `import {md}`", kind := "quickfix", fixes := some k,
                             edits := #[{ start := at_, stop := at_, text := s!"import {md}\n" }] }
     | "no-such-field" | "unknown-constructor" | "unknown-module" =>

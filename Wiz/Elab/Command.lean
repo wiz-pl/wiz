@@ -12,7 +12,6 @@ import Wiz.Elab.Reflect
 import Wiz.Frontend.Parse
 import Wiz.Elab.Witness
 import Wiz.Elab.Info
-import Wiz.Elab.NameIndex
 import Wiz.Lint.Basic
 
 /-!
@@ -50,26 +49,12 @@ structure Msg where
   text : String
   /-- a stable name for the kind of error (`unknown-identifier`, …), or `""` -/
   code : String := ""
-  /-- other places the diagnostic points at (a cascade's root, a declaration, a use) -/
-  related : Array Related := #[]
-  /-- a failed unification's structured diff, for a type mismatch -/
-  mismatch : Option Mismatch := none
-  /-- (extension surface) data a client needs for a quick fix, such as the module a
-  `missing-import` names -/
-  data : List (String × List String) := []
   deriving Repr, Inhabited
 
 def Msg.render (input : String) (m : Msg) : String :=
   let (l, c) := lineCol input m.info.start
   let sev := match m.severity with | .error => "error" | .warning => "warning" | .info => "info"
-  let base := s!"{l + 1}:{c + 1}: {sev}: {m.text}"
-  -- a related place is a note under the message: its own line and column, then its text
-  -- (the same rendering the language server's `relatedInformation` gives as a location)
-  let note (r : Related) : String :=
-    let (rl, rc) := lineCol input r.info.start
-    let code := if r.code.isEmpty then "" else s!" [{r.code}]"
-    s!"\n  note: {rl + 1}:{rc + 1}: {r.text}{code}"
-  String.join (base :: m.related.toList.map note)
+  s!"{l + 1}:{c + 1}: {sev}: {m.text}"
 
 /-- The error at an `import` of a module `m` (text `src`) whose own check reported
 `errs`. Its own errors are listed once, one per line with their positions in `m`; an
@@ -141,13 +126,6 @@ structure CommandState (R : Type) where
   /-- library sources by module name (supplied by the caller: the frontend is pure) -/
   loader : Name → Option String := fun _ => none
   imported : List Name := []
-  /-- (diagnostics) every module `import` can reach (the loader's keys, sorted by the
-  driver), for "add the missing import" and module name suggestions; empty when the
-  caller supplies none -/
-  modules : Array Name := #[]
-  /-- (diagnostics) the declaration index of `modules`, built on the first missing-import
-  hint and kept for the rest of the state -/
-  declIndex : Option DeclIndex := none
   /-- `builtin key := name` registrations -/
   builtins : List (Name × Name) := []
   /-- `attribute [macro k] f` registrations, latest first -/
@@ -2109,40 +2087,25 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
   let reportErr (e : ElabError R) : StateM (CommandState R) Unit :=
     modify fun s =>
       -- an unknown identifier: the names close to it (computed here, not where it is
-      -- thrown: elaboration may throw and catch many on its way). An exact declaration in
-      -- a module the file does not import is the answer, and outranks edit distance.
-      let (hint, idx?) := if e.code != "unknown-identifier" then ("", none) else
+      -- thrown: elaboration may throw and catch many on its way)
+      let hint := if e.code != "unknown-identifier" then "" else
         match e.state?.bind fun st => st.infos.findRev? (· matches .done (.unknownIdent ..)) with
         | some (.done (.unknownIdent _ x locals)) =>
-          let idx := s.declIndex.getD (buildDeclIndex s.modules s.loader)
-          let mods := idx.modulesDeclaring s.imported s.module x
-          if !mods.isEmpty then
-            let names := mods.map (s!"`{·}`")
-            let which := if mods.length == 1 then s!"module {names.head!}" else s!"modules {", ".intercalate names}"
-            (s!"; '{x}' is declared in {which}, which is not imported: add {if mods.length == 1 then s!"`import {mods.head!}`" else "those imports"}", some idx)
-          else
-            let h := didYouMean s.globals x locals
-            -- a name of the Prelude, which this file doesn't import
-            let inPrelude := !s.imported.contains "Prelude" && s.module != "Prelude" &&
-              match s.loader "Prelude" with
-              | some src => ["def", "inductive", "structure", "class", "axiom"].any fun k =>
-                  (src.splitOn s!"\n{k} {x} ").length > 1 || (src.splitOn s!"\n{k} {x}.\{").length > 1 ||
-                  (src.splitOn s!"\n{k} {x}\n").length > 1
-              -- (`wiz check` loads only the modules the file imports: the best-known names)
-              | none => ["Nat", "Bool", "List", "Option", "String", "Char", "Except", "Monad",
-                         "Add", "Sub", "Mul", "OfNat", "Syntax", "Tactic"].contains x
-            (if h.isEmpty && inPrelude then s!"; {x} is defined in the Prelude: add `import Prelude`"
-             else h, some idx)
-        | _ => ("", none)
-      { s with declIndex := idx? <|> s.declIndex,
-        messages := s.messages.push { info := e.info, severity := .error, text := e.msg ++ hint,
-                                     code := ErrorCode.reported e.code, related := e.related,
-                                     mismatch := e.mismatch } }
-  -- a declaration whose command failed: remember it, so a later reference says so (with
-  -- this root error as a related diagnostic) instead of `unknown identifier`
-  let markFailed (name : Name) (site : SourceInfo) (e : ElabError R) : StateM (CommandState R) Unit :=
-    modify fun s => { s with globals := { s.globals with failed := s.globals.failed.insert name
-      { name, site, info := e.info, message := e.msg, code := ErrorCode.reported e.code } } }
+          let h := didYouMean s.globals x locals
+          -- a name of the Prelude, which this file doesn't import
+          let inPrelude := !s.imported.contains "Prelude" && s.module != "Prelude" &&
+            match s.loader "Prelude" with
+            | some src => ["def", "inductive", "structure", "class", "axiom"].any fun k =>
+                (src.splitOn s!"\n{k} {x} ").length > 1 || (src.splitOn s!"\n{k} {x}.\{").length > 1 ||
+                (src.splitOn s!"\n{k} {x}\n").length > 1
+            -- (`wiz check` loads only the modules the file imports: the best-known names)
+            | none => ["Nat", "Bool", "List", "Option", "String", "Char", "Except", "Monad",
+                       "Add", "Sub", "Mul", "OfNat", "Syntax", "Tactic"].contains x
+          if h.isEmpty && inPrelude then s!"; {x} is defined in the Prelude: add `import Prelude`"
+          else h
+        | _ => ""
+      { s with messages := s.messages.push { info := e.info, severity := .error, text := e.msg ++ hint,
+                                             code := ErrorCode.reported e.code } }
   -- the info tree of a declaration; its `trace`s become info messages
   let addInfos (is : Array (Info R)) : StateM (CommandState R) Unit :=
     unless is.isEmpty do modify fun s =>
@@ -2240,31 +2203,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       elabExpansion s!"deriving {C} for {T}" r info
   let derivingClause (stx : Syntax) (T : Name) : StateM (CommandState R) Unit := do
     unless stx.isNone do
-      let cs : List (Name × SourceInfo) := (stx.getArg 1).args.filterMap fun c => c.getId?.map fun C => (C, c.info)
-      let s ← get
-      -- (diagnostics) a class with no deriver here whose deriver an unimported module
-      -- registers: one `missing-import` for that module, not one "no deriver" per class
-      let idx := s.declIndex.getD (buildDeclIndex s.modules s.loader)
-      let candidates := cs.filter fun (C, _) => s.derivers.lookup C |>.isNone &&
-        !(idx.modulesDeriving s.imported s.module C).isEmpty
-      let mods := candidates.map (fun (C, _) => (idx.modulesDeriving s.imported s.module C).head!) |>.eraseDups   -- complexity: ok (the modules for one deriving clause)
-      let mut rest := cs
-      for m in mods do
-        let classes := (candidates.filter fun (C, _) =>
-          (idx.modulesDeriving s.imported s.module C).contains m).map (·.1)
-        rest := rest.filter fun (C, _) => !classes.contains C
-        let quoted := classes.map (s!"`{·}`")
-        let list := match quoted.reverse with
-          | [] => ""
-          | last :: revInit =>
-            if revInit.isEmpty then last
-            else String.intercalate ", " revInit.reverse ++ " and " ++ last
-        let text := if classes.length == 1 then s!"{list} is derived by module `{m}` (not imported)"
-          else s!"{list} are derived by module `{m}` (not imported)"
-        modify fun s => { s with messages := s.messages.push
-          { info := stx.info, severity := .error, text, code := ErrorCode.missingImport,
-            data := [("modules", [m]), ("classes", classes)] } }
-      for (C, info) in rest do derive C T info
+      for c in (stx.getArg 1).args do
+        if let some C := c.getId? then derive C T c.info
   let addDeclChecked (name : Name) (levelParams : List Name) (ty : Term R) (val : Option (Term R))
       (impl : Option (Term R) := none) := do
     match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl } with
@@ -2564,7 +2504,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
               else
                 report .warning cmd.info s!"{name} is accepted on the strength of the axiom{pl} {names} that its tactics added, not checked by the kernel; `#print axioms` lists {if axs.size == 1 then "it" else "them"} for everything that uses {name}"
             | .error e => report .error cmd.info s!"kernel rejected {name}: {e}"
-      | (.error e, hv) => addInfos hv; reportErr e; markFailed name (cmd.getArg 1).info e
+      | (.error e, hv) => addInfos hv; reportErr e
   | "command.partial" | "command.mutual" =>
     -- each definition, with the witness written for it (`partial (default := w) def …`)
     let unwrap (d : Syntax) : Syntax × Option Syntax :=
@@ -2722,7 +2662,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | (.ok (ty, val, impl), hv) =>
         addInfos hv
         addDeclChecked name levelParams ty (some val) impl
-      | (.error e, hv) => addInfos hv; reportErr e; markFailed name (cmd.getArg 1).info e
+      | (.error e, hv) => addInfos hv; reportErr e
   | "command.coinductive" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
     let levelParams := ((cmd.getArg 2).getArg 1).args.toList.filterMap Syntax.getId?

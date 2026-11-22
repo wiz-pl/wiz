@@ -45,20 +45,16 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
     (dir : System.FilePath := ".") : IO Loaded := do
   let closure ← Module.loadClosure roots src
   let lib := closure.fold (fun m n (_, s) => m.insert n s) ({} : Std.HashMap Name String)
-  -- (diagnostics) every module `import` can reach, not only this file's closure: the
-  -- missing-import hint is about the module the file does *not* import
-  let all ← Module.loadAll roots
-  let modules := (all.toList.map (·.1)).mergeSort (· ≤ ·) |>.toArray
   let headers ← preprocessHeaders tc (src :: lib.values)
   -- (9f) the `link_c` files, relative to their files (`dir` is the main file's)
   let sources ← Module.cSourceTable dir src closure
   -- (include-str) the `include_str` files, relative to their files
   let includes ← Module.includeTable dir src closure
-  let loader : Name → Option String := fun n => (all[n]?).map (·.2)
+  let loader : Name → Option String := (lib[·]?)
   -- `builtin` registrations are trusted only in the toolchain's library, the first root
   let own := Module.fromFirstRoot roots closure
   let init : CommandState ZeroOneMany :=
-    { loader, modules, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
+    { loader, cHeaders := (headers[·]?), cSources := some (Module.cSourceResolver sources),
       includes := some (Module.includeResolver includes),
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve }

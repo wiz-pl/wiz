@@ -584,20 +584,6 @@ inductive InertReg where
   | conv
   deriving BEq, Repr, Inhabited
 
-/-- A declaration whose command failed to elaborate. It is not a global (the kernel
-never sees it): later references resolve to this record, so they report `'x' failed to
-elaborate` with the root error as a related diagnostic, instead of the fictional
-`unknown identifier 'x'`. -/
-structure FailedDecl where
-  name : Name
-  /-- the declaration's name, where the user wrote it -/
-  site : SourceInfo
-  /-- the root error of the failed command -/
-  info : SourceInfo
-  message : String
-  code : String := ""
-  deriving Repr, Inhabited
-
 /-- The global environment. `order` records insertion order so anything that walks
 the environment does so deterministically (never iterate the hash map directly). -/
 structure Globals (R : Type) where
@@ -679,9 +665,7 @@ structure Globals (R : Type) where
   /-- (13b) structures with a private constructor, with their module: elsewhere the
   elaborator sees them as opaque (`Globals.elabView`). The kernel ignores this. -/
   opaques : Std.HashMap Name String := {}
-  /-- (diagnostics) declarations whose command failed, by the name the user wrote: later
-  references report the failure instead of `unknown identifier`. The kernel ignores this. -/
-  failed : Std.HashMap Name FailedDecl := {}  /-- (13b) the definitions `elabView` hid (the opaque types of other modules), kept so
+  /-- (13b) the definitions `elabView` hid (the opaque types of other modules), kept so
   that conversion can compare two *values* of such a type in the full view (`conv`; only
   a Bool comes out, so nothing of the definition is exposed) -/
   hidden : Std.HashMap Name (Decl R) := {}
