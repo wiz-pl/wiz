@@ -375,7 +375,7 @@ def smtGroup : Group where
         check ((txt.splitOn "wiz-smt-cache-v2").length > 1) s!"an entry without the v2 marker: {txt.take 200}"
         check ((txt.splitOn "kind proof").length > 1) "the entry does not say it is a proof"
         check ((txt.splitOn "out-sha256 ").length > 1) "the entry does not record the proof's digest"
-        check ((← parseEntry txt).isSome) s!"the test cannot read its own entry format: {txt.take 200}"
+        check ((parseEntry txt).isSome) s!"the test cannot read its own entry format: {txt.take 200}"
         -- a SAT answer (exit 10, no proof file) must not become a cached counterexample
         let ms ← msgs ("import SatTactic\ndef bad (a b : Bool) : Bool.and a b = Bool.or a b := by sat_decide\n") cfg
         expect ms "sat_decide: the goal is false; a counterexample:"
@@ -387,7 +387,8 @@ def smtGroup : Group where
         noErrors (← msgs src cfg)
         let es ← cacheEntries dir.toString
         check (es.length == 1) s!"expected one certificate entry, got {es.length}"
-        let some e ← parseEntry (← IO.FS.readFile es.head!)
+        let entryText ← IO.FS.readFile es.head!
+        let some e := parseEntry entryText
           | throw (IO.userError "cannot parse the cache entry")
         -- replace the proof and update the digest: the entry is still served (its bytes
         -- match the record), and only the re-parse/kernel check can reject it
@@ -422,17 +423,17 @@ def smtGroup : Group where
         let cfg : Smt.Config := { cacheDir := some dir.toString }
         let mk (body : String) : List String := ["-c", body, "sh", "{out}"]
         -- (a) `wantOut = false`: the answer is a verdict, so it must not be kept
-        let r ← Smt.runSolver cfg "sh" (mk "printf 'unsat\\n'; exit 0") "q" "smt2" false (fun a => a.exitCode == 0)
+        let r := Smt.runSolver cfg "sh" (mk "printf 'unsat\\n'; exit 0") "q" "smt2" false (fun a => a.exitCode == 0)
         (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
         check ((← cacheEntries dir.toString).isEmpty) "a verdict (wantOut = false) was cached"
         -- (b) `wantOut = true` but the solver wrote no proof: also not a certificate
-        let r ← Smt.runSolver cfg "sh" (mk "printf 's UNSATISFIABLE\\n'; : > \"$1\"; exit 20") "q" "smt2" true (fun a => a.exitCode == 20)
+        let r := Smt.runSolver cfg "sh" (mk "printf 's UNSATISFIABLE\\n'; : > \"$1\"; exit 20") "q" "smt2" true (fun a => a.exitCode == 20)
         (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
         check ((← cacheEntries dir.toString).isEmpty) "an answer with an empty proof file was cached"
         -- (c) a non-empty proof is cached, and a changed proof with a stale digest is a miss
         let marker := (dir / "run-marker").toString
         let body := s!"if [ -f {marker} ]; then exit 3; else printf 'PROOF1' > \"$1\"; exit 20; fi"
-        let r ← Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20)
+        let r := Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20)
         let (_, a) ← match r with
           | .ok x => pure x
           | .error e => throw (IO.userError e)
@@ -440,7 +441,8 @@ def smtGroup : Group where
         let es ← cacheEntries dir.toString
         check (es.length == 1) s!"expected one entry, got {es.length}"
         let path := es.head!
-        let some e ← parseEntry (← IO.FS.readFile path) | throw (IO.userError "cannot parse the entry")
+        let entryText ← IO.FS.readFile path
+        let some e := parseEntry entryText | throw (IO.userError "cannot parse the entry")
         -- (c1) digest updated: served from the cache, without running the solver
         IO.FS.writeFile (System.FilePath.mk marker) ""
         IO.FS.writeFile path ((e.withDigest (Smt.Sha256.hexBytes "PROOF2".toUTF8)).render)
