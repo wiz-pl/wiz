@@ -1490,6 +1490,14 @@ def parseDiffCorpus : List (Name × String) := [
   ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
   ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
   ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
+  -- (the numeral is decimal text until the kernel types it: a hexadecimal literal above
+  -- 2^63 is not clamped, and one above 2^64-1 is still its exact value here, as in the
+  -- Lean lexer; the parenthesised application is the shape that exposed the clamp)
+  ("term", "f b (Nat.succ (Nat.div (Bytes.size b) 512)) 0 (U64.ofNat 0xcbf29ce484222325)"),
+  ("term", "14695981039346656037"), ("term", "18446744073709551615"),
+  ("term", "18446744073709551616"), ("term", "0x10000000000000000"),
+  ("command", "#eval 0xcbf29ce484222325"),
+  ("command", "def f : Nat → Nat\n  | 0xFFFFFFFFFFFFFFFF => 1\n  | _ => 0"),
   ("command", "def f (x : Nat) : Nat := x"),
   ("command", "inductive T where\n  | a\n  | b (t : T)"),
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
@@ -3965,6 +3973,12 @@ def selfHostGroup : Group where
         let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
           "inductive T where | a | b (t : T)\ndef s : String := \"hi\\n\" -- strings\ndef α₁ : List.cons → Nat.add := λ x => x.1\n" ++
           "0x3F 0b1010 0XfF 0B1 0x 0b2 0xg 007 0x7FFFFFFFFFFFFFFF 0x8000000000000000 " ++
+          -- (the radix is converted in decimal-string arithmetic: a literal above 2^63 is
+          -- not clamped, and one above 2^64-1 is still its exact value; decimal literals
+          -- keep their digits, so the same values read the same way)
+          "0xFFFFFFFFFFFFFFFF 0x10000000000000000 0x0000000000000001 " ++
+          "0b1111111111111111111111111111111111111111111111111111111111111111 " ++
+          "14695981039346656037 18446744073709551615 18446744073709551616 " ++
           -- every escape, then a bad one (both lexers stop there with the same message)
           "def e := \"a\\r\\t\\\\\\\"\\'\\x41\\u{3bb}\\u{1F600}z\" \"bad \\q\""
         let toks := Builtin.tables.tokens

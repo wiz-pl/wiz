@@ -209,19 +209,34 @@ def digitIn (r c : Nat) : Nat := match isDigit c with
     | .false => r
 inductive NumTok where
   | mk (digits : String) (stop : Nat)
-partial def radixEnd (r : Nat) (input : Array Nat) (j : Nat) : Nat := match Nat.lt (digitIn r (at input j)) r with
-  | .true => radixEnd r input (j + 1)
-  | .false => j
--- the digits from `j` on, read in radix `r` onto `acc`; a value from 2^63 on is read
--- as 2^63 (which the frontend rejects, as it does the decimal numeral: the numbers of
--- the self-compiled lexer are 63-bit words)
-partial def radixNum (r : Nat) (input : Array Nat) (j acc : Nat) : NumTok :=
+-- A decimal numeral's digits, least significant first (each 0 to 9). A hexadecimal or
+-- binary numeral is converted with decimal-string arithmetic, not in `Nat`: the numbers
+-- of the self-compiled lexer are words (`selfhost/rt.c`), so accumulating there would
+-- clamp or wrap `0xcbf29ce484222325` instead of reading 14695981039346656037, which the
+-- Lean lexer reads (its `Nat` is unbounded: `readToken` in `Wiz/Parser/Token.lean`).
+-- `ds * r + carry`, on `ds`'s digits.
+partial def mulAddDigits (r : Nat) (ds : List Nat) (carry : Nat) : List Nat :=
+  match ds with
+  | .nil => match Nat.beq carry 0 with
+    | .true => .nil
+    | .false => .cons (Nat.mod carry 10) (mulAddDigits r .nil (Nat.div carry 10))
+  | .cons x xs =>
+    let v := Nat.add (Nat.mul x r) carry;
+    .cons (Nat.mod v 10) (mulAddDigits r xs (Nat.div v 10))
+def digitChars : List Nat → List Char → List Char
+  | .nil, acc => acc
+  | .cons d ds, acc => digitChars ds (.cons (Char.mk (Nat.add 48 d)) acc)
+-- the decimal text of a numeral's digits (least significant first); `0` if none
+-- (`digitChars` prepends each digit, so it puts the most significant digit first)
+def digitsString (ds : List Nat) : String := match ds with
+  | .nil => "0"
+  | .cons _ _ => String.mk (digitChars ds .nil)
+-- the digits from `j` on, read in radix `r` onto `acc` (their decimal value, unbounded)
+partial def radixNum (r : Nat) (input : Array Nat) (j : Nat) (acc : List Nat) : NumTok :=
   let d := digitIn r (at input j);
   match Nat.lt d r with
-  | .false => .mk (Nat.toString acc) j
-  | .true => match Nat.lt (Nat.div (9223372036854775807 - d) r) acc with
-    | .true => .mk "9223372036854775808" (radixEnd r input (j + 1))
-    | .false => radixNum r input (j + 1) (acc * r + d)
+  | .false => .mk (digitsString acc) j
+  | .true => radixNum r input (j + 1) (mulAddDigits r acc d)
 def decimalTok (input : Array Nat) (i : Nat) : TokInfo :=
   let j := digitsEnd input i;
   TokInfo.mk (Tok.num (String.mk (slice (j - i) input i))) i j
@@ -241,7 +256,7 @@ def readToken (tokens : List String) (input : Array Nat) (i : Nat) : TokInfo :=
     | .true => match radixOf (at input (i + 1)) with
       -- `0x3F`, `0b1010` (13q): read as the decimal numeral they denote
       | .some r => match Bool.and (Nat.beq c 48) (Nat.lt (digitIn r (at input (i + 2))) r) with
-        | .true => match radixNum r input (i + 2) 0 with
+        | .true => match radixNum r input (i + 2) .nil with
           | .mk n j => TokInfo.mk (Tok.num n) i j
         | .false => decimalTok input i
       | .none => decimalTok input i
