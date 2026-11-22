@@ -64,9 +64,9 @@ structure Attach where
 
 /-- Split a tracepoint section `tracepoint/<category>/<event>`. Exactly two non-empty
 parts are required; a typo is a `none`, never a guessed category. -/
-def tracepointParts? (section : String) : Option (String × String) :=
-  if section.startsWith "tracepoint/" then
-    match (section.drop "tracepoint/".length).toString.splitOn "/" with
+def tracepointParts? (sec : String) : Option (String × String) :=
+  if sec.startsWith "tracepoint/" then
+    match (sec.drop "tracepoint/".length).toString.splitOn "/" with
     | [category, event] =>
       if category.isEmpty || event.isEmpty then none else some (category, event)
     | _ => none
@@ -76,9 +76,9 @@ def tracepointParts? (section : String) : Option (String × String) :=
 path (`uprobe//bin/sh:readline` leaves `/bin/sh`), and the symbol is the last non-empty
 part. A binary path containing `:` is not supported (the loader's section grammar is
 ambiguous there); use a symlink without a colon. -/
-def uprobeParts? (section : String) : Option (String × String) :=
-  if section.startsWith "uprobe/" then
-    match (section.drop "uprobe/".length).toString.splitOn ":" with
+def uprobeParts? (sec : String) : Option (String × String) :=
+  if sec.startsWith "uprobe/" then
+    match (sec.drop "uprobe/".length).toString.splitOn ":" with
     | [binary, symbol] =>
       if binary.isEmpty || symbol.isEmpty then none else some (binary, symbol)
     | _ => none
@@ -86,31 +86,31 @@ def uprobeParts? (section : String) : Option (String × String) :=
 
 /-- The attach metadata for a kind and a section spelling, if the spelling has the shape
 that kind needs. -/
-def ProgKind.attach? (k : ProgKind) (section : String) : Option Attach :=
+def ProgKind.attach? (k : ProgKind) (sec : String) : Option Attach :=
   match k with
   | .xdp =>
-    if section == "xdp" then some { kind := "xdp", target := "", event := "", spec := "xdp" }
+    if sec == "xdp" then some { kind := "xdp", target := "", event := "", spec := "xdp" }
     else none
   | .tc =>
-    if section == "tc" || section == "classifier" || section == "sched_cls" then
+    if sec == "tc" || sec == "classifier" || sec == "sched_cls" then
       some { kind := "tc", target := "", event := "", spec := "classifier" }
     else none
   | .tracepoint =>
-    (tracepointParts? section).map fun (category, event) =>
+    (tracepointParts? sec).map fun (category, event) =>
       { kind := "tracepoint", target := category, event, spec := s!"{category}:{event}" }
   | .uprobe =>
-    (uprobeParts? section).map fun (binary, symbol) =>
+    (uprobeParts? sec).map fun (binary, symbol) =>
       { kind := "uprobe", target := binary, event := symbol, spec := s!"{binary}:{symbol}" }
 
 /-- Accept the section spellings of §5.2 (and libbpf's `sched_cls` alias), plus the two
 declared tracing shapes. -/
-def ProgKind.ofSection? (section : String) : Option ProgKind :=
-  match section with
+def ProgKind.ofSection? (sec : String) : Option ProgKind :=
+  match sec with
   | "xdp" => some .xdp
   | "tc" | "classifier" | "sched_cls" => some .tc
   | _ =>
-    if (tracepointParts? section).isSome then some .tracepoint
-    else if (uprobeParts? section).isSome then some .uprobe
+    if (tracepointParts? sec).isSome then some .tracepoint
+    else if (uprobeParts? sec).isSome then some .uprobe
     else none
 
 /-- `true` for the two tracing kinds (the sensor half). -/
