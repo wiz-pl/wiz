@@ -210,6 +210,17 @@ def group : Group where
         let (out, verr, vcode) ← verify other tc "prog.attest.json" "prog" ["--artifact-only"]
         check (vcode == 0) s!"--artifact-only failed: {verr}"
         check ((out.splitOn "artifact only").length > 1) out },
+    -- The skip wiring itself: a missing compiler/GMP header is a "no toolchain" skip,
+    -- while a build that ran and failed (including the old catch-all word "failed") is
+    -- not. Without this case the classifier could be widened back to "any non-zero
+    -- exit" without a test noticing.
+    { name := "only a missing cc/llc or gmp.h is a 'no toolchain' skip", run := fun _ => do
+        let tc : Toolchain := {}
+        check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
+        check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"
+        check (Build.missingToolchain tc "llc failed:\ncould not execute external process 'llc'") "a missing llc"
+        check (!Build.missingToolchain tc "cc failed:\nmain.c:3:1: error: 'x' undeclared") "a rejected program"
+        check (!Build.missingToolchain tc "attestation write failed") "a broken attest step (the old 'failed' test)" },
     { name := "the envelope is explicitly unsigned; a forged signature is refused", run := fun _ => do
         let (dir, tc, cache) ← project
         unless (← buildOrSkip dir tc cache) do return
