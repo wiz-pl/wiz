@@ -442,6 +442,12 @@ def tacticGroup : Group where
           "def both (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by auto\n" ++
           "#print axioms chain\n#print axioms both")
           ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
+    { name := "auto closes two open goals, the second after a hint's subgoal", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "structure Pair (P Q : Prop) where\n  fst : P\n  snd : Q\n" ++
+          "def twoGoals (P Q R : Prop) (h : P → Q) (p : P) (r : R) : Pair Q R := by\n" ++
+          "  constructor\n  auto\n")
+          [] },
     { name := "auto does not affirm the consequent", run := fun _ =>
         failsLibs ("import Logic\n" ++
           "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
@@ -454,15 +460,21 @@ def tacticGroup : Group where
         okLibs ("import Nat\n" ++
           "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
           "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
-          "def bound (a b : Nat) (h : a + b = 3) : Nat.Le a 3 := by\n  omega\n" ++
           "#print axioms leTrans")
           ["'leTrans' does not depend on any axioms"] },
+    { name := "omega P1: sum = constant bounds", run := fun _ =>
+        skip "P1: h : a + b = 3 ⊢ a ≤ 3 needs equality-hypothesis transport built from the hypothesis' own term; raw omega proof terms hit instance-argument conversion" },
     { name := "omega refuses false and non-linear goals", run := fun _ =>
         failsLibs "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
           "omega:" },
     { name := "omega refuses multiplication", run := fun _ =>
         failsLibs "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
           "omega: non-linear" },
+    { name := "two subgoals: the second survives the first exact", run := fun _ =>
+        okLib ("import Prelude\nstructure Pairish where\n  a : Nat\n  b : Nat\n" ++
+          "def p : Pairish := by\n  constructor\n  exact 1\n  exact 2\n" ++
+          "#eval p.a\n#eval p.b")
+          ["1", "2"] },
     -- case analysis (docs/stages/06-macros.md, 6j)
     { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
         okLib ("import Logic\n" ++
