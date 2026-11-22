@@ -858,6 +858,14 @@ def privateTo? (g : Globals R) (n : Name) : Option String :=
   | some m => if m == g.module then none else some m
   | none => none
 
+/-- (13t) `x` with the longest `open … as` alias replaced by its namespace: `A.x` is
+`M.x` after `open M as A`; a name with no aliased prefix is unchanged. -/
+def expandAliases (g : Globals R) (x : Name) : Name :=
+  let matching := g.aliases.filter fun (a, _) => x.startsWith (a ++ ".")
+  match matching.mergeSort (fun (a, _) (b, _) => a.length > b.length) with
+  | (a, M) :: _ => M ++ (x.drop a.length).toString
+  | [] => x
+
 /-- (diagnostics) The failed declaration `x` denotes, if any: the same candidates
 `resolveName` tries (this namespace, the name itself, an open's member). -/
 def failedOf? (g : Globals R) (x : Name) : Option FailedDecl :=
@@ -869,14 +877,6 @@ def failedOf? (g : Globals R) (x : Name) : Option FailedDecl :=
     (if g.namespacePrefix.isEmpty then none else lookupAt (g.namespacePrefix ++ "." ++ x)) <|>
       lookupAt x <|> g.opens.findSome? fun M => lookupAt (M ++ "." ++ x)
 
-
-/-- (13t) `x` with the longest `open … as` alias replaced by its namespace: `A.x` is
-`M.x` after `open M as A`; a name with no aliased prefix is unchanged. -/
-def expandAliases (g : Globals R) (x : Name) : Name :=
-  let matching := g.aliases.filter fun (a, _) => x.startsWith (a ++ ".")
-  match matching.mergeSort (fun (a, _) (b, _) => a.length > b.length) with
-  | (a, M) :: _ => M ++ (x.drop a.length).toString
-  | [] => x
 
 /-- (13t) What the identifier `x` as written denotes in the module being elaborated.
 
