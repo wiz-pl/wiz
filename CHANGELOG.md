@@ -10,13 +10,13 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
-* compiler: the C backend now **fails the compile** on a partial application of a
+* compiler: the **C and LLVM backends fail the compile** on a partial application of a
   function with no known arity and on a jump with no join point in scope, instead of
-  emitting a closure with arity 0 and an assignment-free jump; a body's locals are
-  collected in linear time (the old collector appended each join's parameters to the
+  emitting a closure with arity 0 and an assignment-free jump; the C backend's locals
+  are collected in linear time (the old collector appended each join's parameters to the
   accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
   as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
-  `=scaling`.
+  `=llvm`, `=scaling`.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
