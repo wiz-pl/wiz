@@ -91,6 +91,8 @@ def load_fuzz_lower() -> Any:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
+    # dataclasses in the loaded module resolve their own module through sys.modules
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -552,6 +554,43 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
             shutil.rmtree(root, ignore_errors=True)
 
 
+def self_test() -> int:
+    """Check the comparators themselves (a harness that cannot fail is worthless)."""
+    with tempfile.TemporaryDirectory(prefix="incr-scry-selftest-", dir=str(TMP_ROOT)) as d:
+        a = Path(d) / "a"
+        b = Path(d) / "b"
+        a.mkdir()
+        b.mkdir()
+        (a / "x").write_text("one\ntwo\n")
+        (b / "x").write_text("one\ntwo\n")
+        if compare_trees("selftest", a, b) is not None:
+            print("incremental-fuzz: self-test FAILED: equal trees differ", file=sys.stderr)
+            return 2
+        # cache statistics in the manifest are metadata, not an artifact
+        (a / "manifest.txt").write_text("units\t1\ncache-metadata\tcache: hit=0\n")
+        (b / "manifest.txt").write_text("units\t1\ncache-metadata\tcache: hit=9\n")
+        if compare_trees("selftest", a, b) is not None:
+            print("incremental-fuzz: self-test FAILED: cache metadata is compared",
+                  file=sys.stderr)
+            return 2
+        # one byte in one nested file must be found, with a line diff
+        (b / "x").write_text("one\ntwo!\n")
+        why = compare_trees("selftest", a, b)
+        if why is None or "x differs" not in why or "line 2" not in why:
+            print(f"incremental-fuzz: self-test FAILED: a one-byte change was not "
+                  f"reported ({why!r})", file=sys.stderr)
+            return 2
+        # the CLI's cache object is dropped, other JSON changes are not
+        one = normalize_json('{"a":1,"cache":{"hit":0},"b":[2]}')
+        two = normalize_json('{"a":1,"cache":{"hit":9},"b":[2]}')
+        three = normalize_json('{"a":2,"cache":{"hit":0},"b":[2]}')
+        if one != two or one == three:
+            print("incremental-fuzz: self-test FAILED: JSON normalization", file=sys.stderr)
+            return 2
+    print("incremental-fuzz: self-test ok (trees, cache metadata, JSON normalization)")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="differential fuzzing for scry's incremental (warm-cache) path")
@@ -576,7 +615,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--replay", type=int, metavar="SEED",
                     help="one campaign from SEED (with --programs 1)")
     ap.add_argument("--json-out", type=Path, help="write one result row per campaign")
+    ap.add_argument("--self-test", action="store_true",
+                    help="check the comparison logic on synthetic trees and JSON")
     args = ap.parse_args(argv)
+
+    if args.self_test:
+        TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        return self_test()
 
     if args.replay is not None:
         args.seed = args.replay

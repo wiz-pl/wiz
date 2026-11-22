@@ -108,7 +108,7 @@ def Scry.adRelRows (s : Scry.CstStore) (i : Nat) : List String :=
   let count := match arity with
     | .zero => 0
     | .succ _ => Nat.div (Nat.sub hi lo) arity;
-  let tupleRow (j : Nat) : String :=
+  let tupleRow := fun (j : Nat) =>
     Scry.adLine (Scry.adRange arity (fun k =>
       Nat.repr (UIntN.toNat (U32Array.get s.relTuples
         (Nat.add lo (Nat.add (Nat.mul j arity) k))))));
