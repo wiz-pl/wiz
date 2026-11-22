@@ -75,7 +75,33 @@ def grailJobsGroup : Group where
         checkEq [] (Grail.sleepChunks 0)
         checkEq [5] (Grail.sleepChunks 5)
         checkEq [4294967295] (Grail.sleepChunks 4294967295)
-        checkEq [4294967295, 1] (Grail.sleepChunks 4294967296) }
+        checkEq [4294967295, 1] (Grail.sleepChunks 4294967296) },
+    { name := "the ready queue starts jobs in the graph's order, not in the order they became ready", run := fun _ => do
+        -- node 3 depends on node 0; 1, 2, 4 and 5 are ready from the start. With one job
+        -- at a time the scheduler prepares 3 when 0 finishes; the old FIFO queue appended
+        -- it behind 1, 2, 4 and 5, so it started last: 0,1,2,4,5,3. Ready jobs start in
+        -- node-index order.
+        let dir ← IO.FS.createTempDir
+        let nodes : Array Grail.Node := #[
+          { label := "0", action := .check "0", deps := #[] },
+          { label := "1", action := .check "1", deps := #[] },
+          { label := "2", action := .check "2", deps := #[] },
+          { label := "3", action := .check "3", deps := #[0] },
+          { label := "4", action := .check "4", deps := #[] },
+          { label := "5", action := .check "5", deps := #[] }]
+        let order ← IO.mkRef (#[] : Array Nat)
+        let log ← IO.mkRef ""
+        let r ← runner dir { cacheDir := some (← IO.FS.createTempDir) }
+          { name := "scheduler", targets := [], settings := [] } 1 log
+        let prep := fun (nd : Grail.Node) (_ : Array (Except String Grail.Done)) => do
+          let i := nd.label.toNat!
+          pure (.job { key := i.toUInt64, timeoutMs := 1000,
+                       how := .here fun _ => do
+                         order.modify (·.push i)
+                         pure (.ok ()) })
+        let res ← r.schedule { nodes } prep
+        check (res.all (· matches some (.ok _))) "a node failed"
+        checkEq [0, 1, 2, 3, 4, 5] (← order.get).toList }
   ]
 
 builtin_initialize registerGroup grailJobsGroup

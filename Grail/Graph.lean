@@ -499,14 +499,67 @@ inductive Res where
 
 structure Sched where
   res : Array (Option Res)
-  started : Array Bool
+  /-- each node's dependencies that have not finished yet -/
+  depsLeft : Array Nat
   /-- each node's report (stdout, stderr), printed in order -/
   logs : Array (Option (String × String))
   next : Nat := 0
-  /-- ready jobs, in the graph's order -/
+  /-- the ready jobs, a min-heap on the node's index (`heapPush`) -/
   queue : Array (Nat × Job) := #[]
+  /-- nodes that finished, whose dependents have not been told yet -/
+  settle : Array Nat := #[]
   running : Std.HashMap Nat (System.FilePath × Job) := {}
   tasks : List (Task (Nat × Except IO.Error Outcome)) := []
+
+/-! ### The ready queue
+
+`GraphM.add` numbers a node after its dependencies, so the graph's index order is a
+topological order. The scheduler therefore builds two indexes once — for each node, how
+many dependencies are unfinished, and for each node, the nodes that depend on it — and a
+node enters `queue` exactly once, when its last dependency finishes. `queue` is a binary
+min-heap on the node's index, so the job started next is always the ready job with the
+smallest index: the schedule does not depend on the order nodes became ready (the old FIFO
+queue appended a node when it finished its last dependency, so a low-index node could start
+behind higher-index siblings), and the report stays in node-index order. Every edge is
+walked once and every node is pushed and popped once, `O(V + E log V)`, rather than
+rescanning all `V` nodes on every pass and copying the queue on every pop (`O(V²)`). -/
+
+/-- The index key of `h[i]` (0 for an index outside the heap). -/
+private def heapKey (h : Array (Nat × Job)) (i : Nat) : Nat :=
+  match h[i]? with
+  | some x => x.1
+  | none => 0
+
+/-- Push a ready job on the min-heap `h`, ordered by node index. -/
+private def heapPush (h : Array (Nat × Job)) (x : Nat × Job) : Array (Nat × Job) := Id.run do
+  let mut h := h.push x
+  let mut i := h.size - 1
+  while i > 0 do
+    let p := (i - 1) / 2
+    if heapKey h p ≤ heapKey h i then break
+    h := h.swapIfInBounds p i
+    i := p
+  pure h
+
+/-- The smallest-index job of the min-heap `h`, and the heap without it. -/
+private def heapPop (h : Array (Nat × Job)) : Option ((Nat × Job) × Array (Nat × Job)) := Id.run do
+  if h.isEmpty then return none
+  let some top := h[0]? | return none
+  -- move the root to the end and drop it (a pop is O(1)), then sift the new root down
+  let mut h := h.swapIfInBounds 0 (h.size - 1)
+  h := h.pop
+  let n := h.size
+  let mut i := 0
+  while true do
+    let l := 2 * i + 1
+    let r := l + 1
+    let mut m := i
+    if l < n && heapKey h l < heapKey h m then m := l
+    if r < n && heapKey h r < heapKey h m then m := r
+    if m == i then break
+    h := h.swapIfInBounds i m
+    i := m
+  pure (some (top, h))
 
 def Runner.stat (r : Runner) (f : Stats → Stats) : IO Unit := r.stats.modify f
 
@@ -514,9 +567,19 @@ def Runner.stat (r : Runner) (f : Stats → Stats) : IO Unit := r.stats.modify f
 partial def Runner.schedule (r : Runner) (g : Graph)
     (prep : Node → Array (Except String Done) → IO Prep) : IO (Array (Option Res)) := do
   let n := g.nodes.size
-  let st ← IO.mkRef ({ res := .replicate n none, started := .replicate n false, logs := .replicate n none } : Sched)
+  -- the reverse edges: a finished node tells each of its dependents that one more
+  -- dependency is done (built once, so the scheduler never rescans the graph)
+  let dependents : Array (Array Nat) := Id.run do
+    let mut d : Array (Array Nat) := .replicate n #[]
+    for i in [0:n] do
+      for j in g.nodes[i]!.deps do
+        if h : j < n then d := d.set! j ((d[j]!).push i)
+    pure d
+  let depsLeft := g.nodes.map (fun nd => nd.deps.size)
+  let st ← IO.mkRef ({ res := .replicate n none, depsLeft := depsLeft, logs := .replicate n none } : Sched)
   let finishNode (i : Nat) (res : Res) (out err : String) : IO Unit :=
-    st.modify fun s => { s with res := s.res.set! i (some res), logs := s.logs.set! i (some (out, err)) }
+    st.modify fun s => { s with res := s.res.set! i (some res), logs := s.logs.set! i (some (out, err)),
+                                settle := s.settle.push i }
   let failNode (i : Nat) (msg log : String) : IO Unit := do
     r.stat fun s => { s with failed := s.failed + 1 }
     let label := g.nodes[i]!.label
@@ -599,7 +662,7 @@ partial def Runner.schedule (r : Runner) (g : Graph)
         r.stat fun s => { s with upToDate := s.upToDate + 1 }
         let extra ← try j.onOk true out catch e => pure s!"{e}\n"
         finishNode i (.ok { key := j.key, out }) extra ""
-      else st.modify fun s => { s with queue := s.queue.push (i, j) }
+      else st.modify fun s => { s with queue := heapPush s.queue (i, j) }
   let emit : IO Unit := do
     repeat
       let s ← st.get
@@ -608,30 +671,38 @@ partial def Runner.schedule (r : Runner) (g : Graph)
         r.out o; r.err e
         st.set { s with next := s.next + 1 }
       | _ => break
-  repeat
-    -- every node whose dependencies are done is prepared
-    let mut progress := true
-    while progress do
-      progress := false
-      for i in [0:n] do
-        let s ← st.get
-        if !s.started[i]! && g.nodes[i]!.deps.all (s.res[·]!.isSome) then
-          st.modify fun s => { s with started := s.started.set! i true }
-          ready i
-          progress := true
-    -- start jobs
-    let mut ranHere := false
+  -- a node finished: tell its dependents, and prepare each one whose last dependency this
+  -- was. A preparation that finishes the node at once (`.done`, `.fail`, up to date, or a
+  -- failed dependency) pushes it on this worklist instead of recursing.
+  let settleAll : IO Unit := do
     repeat
       let s ← st.get
+      let some i := s.settle.back? | break
+      st.set { s with settle := s.settle.pop }
+      for j in dependents[i]! do
+        let s ← st.get
+        let left := s.depsLeft[j]! - 1
+        st.set { s with depsLeft := s.depsLeft.set! j left }
+        if left == 0 then ready j
+  -- the nodes with no dependencies are ready before any job runs
+  for i in [0:n] do
+    if g.nodes[i]!.deps.isEmpty then ready i
+  settleAll
+  repeat
+    -- start jobs, smallest node index first
+    repeat
+      -- a node that finished (a `here` job inline, or the job whose task just completed)
+      -- may have made its dependents ready: settle before deciding what to start
+      settleAll
+      let s ← st.get
       if s.queue.isEmpty || s.tasks.length ≥ max 1 r.jobs then break
-      let some (i, j) := s.queue[0]? | break
-      st.set { s with queue := s.queue.extract 1 s.queue.size }
-      if j.how matches .here _ then ranHere := true
+      let some ((i, j), q) := heapPop s.queue | break
+      st.set { s with queue := q }
       start i j
     emit
     let s ← st.get
     match s.tasks with
-    | [] => if !ranHere && s.queue.isEmpty then break
+    | [] => if s.queue.isEmpty then break
     | t :: ts =>
       let ((i, o), rest) ← IO.waitAny' (t :: ts)
       st.modify fun s => { s with tasks := rest }
