@@ -1,10 +1,11 @@
 # The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).
 # One row per source of trust, tab-separated:
 #   module, declaration, item, reason, owner, review
-# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for
-# implemented_by, `native T := mk/get` for a repr registration, `native_refl
-# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt
-# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
+# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a
+# second row next to `partial` when a partial definition's implementation is a native
+# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`
+# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,
+# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
 # `builtin inline` (a compiler hint) and `builtin int` (how values print) are not
 # trust and are not listed.
 # Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row
@@ -14,11 +15,10 @@
 # A new source fails the `native` group and scripts/trust-ledger.sh --check; add a
 # reviewed row with:
 #   scripts/trust-ledger.sh --update --reason "why it is trusted" --owner "who"
-# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a
-# second row next to `partial` when a partial definition's implementation is a native
-# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`
-# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,
-# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
+# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for
+# implemented_by, `native T := mk/get` for a repr registration, `native_refl
+# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt
+# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.
 BvDecide	BvD.cmps	partial	compiled-only general recursion in the `BvD.cmps/cmpsL` mutual block (conjunction over a list of expressions); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by de-mutualising into structural recursion on `Expr` and `List Expr`	Reuben Steenekamp	2027-05-14
 BvDecide	BvD.cmpsL	partial	compiled-only general recursion in the `BvD.cmps/cmpsL` mutual block (conjunction over a list of expressions); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by de-mutualising into structural recursion on `Expr` and `List Expr`	Reuben Steenekamp	2027-05-14
 BvDecide	BvD.subNodes	partial	compiled-only general recursion in the `BvD.word/word2/word3/subNodes` mutual block (bit-blasting with the existing fuel); opaque to the kernel, justified by an inhabited witness at 22f with no termination claim; remove by de-mutualising into structural recursion on `Expr` with the fuel as a checked measure	Reuben Steenekamp	2027-05-14
