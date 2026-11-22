@@ -1,0 +1,438 @@
+import Sys
+import Text
+import Scry.ProjectIO
+import Scry.Project
+import Scry.ProjectTaint
+import Scry.CstStore
+import Scry.Wil
+import Scry.NativeLink
+/-!
+# scry-artifacts: a canonical, comparable artifact bundle for a project
+
+`scry-artifacts DIR [--compdb FILE] [--cc CMD] [--cache[=DIR]] [--allow-errors]
+[--keep-system-headers] [--skip-broken] [--rules FILE] --out DIR` builds a project
+through the same `Scry.ProjectIO.buildProject` path the CLI uses (same parse cache, same
+lowering) and writes a canonical bundle:
+
+```
+manifest.txt      unit order, paths, skipped units, cache statistics (metadata)
+units/000.cst     every CST column, including the child CSR and childField
+units/000.tu      canonical Wil, warnings, external calls, file/path digests
+project.edb       renderProjectEdb (project-global ids; order is visible)
+project.summary   Scry.Project.summary
+report.json       analyzeProject with cache statistics disabled
+report.sarif      renderProjectSarif
+report.human      ProjectReport.human
+```
+
+It exists for the differential harness (`scripts/incremental-fuzz.py`): a cold build and
+a warm build of the same final state must produce byte-identical bundles. The `cst`
+bundle is deliberately **not** `CstStore.render` (the `scry-cst 1` spill): the spill does
+not write `nextSib` or the child CSR, and `ofText` re-derives them, so a spill-only
+comparison hides exactly the class of round-trip bug the harness is for.
+
+The report is written with `Scry.CacheStats.empty`, so neither build has a cache line;
+the cache statistics that must differ are in `manifest.txt` only.
+-/
+
+-- ## Small formatting helpers
+
+/-- A line for the canonical dump. -/
+def Scry.adLine (xs : List String) : String := String.intercalate "\t" xs
+
+/-- Lines joined with a final newline. -/
+def Scry.adLines (ls : List String) : String :=
+  List.foldr (fun l acc => l ++ "\n" ++ acc) "" ls
+
+/-- `f 0, f 1, …, f (n-1)`, by index (structural on the fuel). -/
+partial def Scry.adRangeGo (f : Nat → String) : Nat → Nat → List String
+  | .zero, _ => .nil
+  | .succ k, i => List.cons (f i) (Scry.adRangeGo f k (Nat.succ i))
+
+def Scry.adRange (n : Nat) (f : Nat → String) : List String := Scry.adRangeGo f n 0
+
+/-- A zero-padded three-digit unit number. -/
+def Scry.adPad3 (n : Nat) : String :=
+  match Nat.lt n 10 with
+  | .true => "00" ++ Nat.repr n
+  | .false => match Nat.lt n 100 with
+    | .true => "0" ++ Nat.repr n
+    | .false => Nat.repr n
+
+-- ## The CST columns
+
+/-- A name from an intern table, by numeric id. -/
+def Scry.adIntern (t : InternTable) (i : Nat) : String :=
+  InternTable.lookup t (U32.ofNat i)
+
+/-- One node row: kind id, field id, flags, parent+1, file, span, nextSib+1. -/
+def Scry.adNodeRow (s : Scry.CstStore) (i : Nat) : String :=
+  let sp := Scry.CstStore.spanOf s i;
+  Scry.adLine
+    [ Nat.repr (UIntN.toNat (U32Array.get s.kindCol i))
+    , Nat.repr (UIntN.toNat (U32Array.get s.fieldCol i))
+    , Nat.repr (UIntN.toNat (U32Array.get s.flags i))
+    , Nat.repr (UIntN.toNat (U32Array.get s.parent i))
+    , Nat.repr (UIntN.toNat (U32Array.get s.fileCol i))
+    , Nat.repr sp.start
+    , Nat.repr sp.stop
+    , Nat.repr (UIntN.toNat (U32Array.get s.nextSib i)) ]
+
+/-- One child-CSR row: `lo`, `hi`, then `child:fieldId:fieldName` for each arc. The
+field name is the point of the dump: `finish` puts the interned `child` name there while
+a cold native store used to write id 0 (`""`). -/
+def Scry.adChildRow (s : Scry.CstStore) (i : Nat) : String :=
+  let lo := UIntN.toNat (U32Array.get s.childOff i);
+  let hi := UIntN.toNat (U32Array.get s.childOff (Nat.succ i));
+  let arcs := Scry.adRange (Nat.sub hi lo) (fun k =>
+    let j := Nat.add lo k;
+    let f := U32Array.get s.childField j;
+    Nat.repr (UIntN.toNat (U32Array.get s.children j)) ++ ":"
+      ++ Nat.repr (UIntN.toNat f) ++ ":" ++ Scry.cstEnc (InternTable.lookup s.fields f));
+  String.append (Nat.repr lo) (String.append "\t" (String.append (Nat.repr hi)
+    (String.append "\t" (String.intercalate " " arcs))))
+
+/-- One edge row: source, target, label id and name. -/
+def Scry.adEdgeRow (s : Scry.CstStore) (i : Nat) : String :=
+  let l := U32Array.get s.edgeLabel i;
+  Scry.adLine
+    [ Nat.repr (UIntN.toNat (U32Array.get s.edgeSrc i))
+    , Nat.repr (UIntN.toNat (U32Array.get s.edgeDst i))
+    , Nat.repr (UIntN.toNat l) ++ ":" ++ Scry.cstEnc (InternTable.lookup s.fields l) ]
+
+/-- One relation's header and tuples. -/
+def Scry.adRelRows (s : Scry.CstStore) (i : Nat) : List String :=
+  let arity := UIntN.toNat (U32Array.get s.relArity i);
+  let lo := UIntN.toNat (U32Array.get s.relOff i);
+  let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ i));
+  let count := match arity with
+    | .zero => 0
+    | .succ _ => Nat.div (Nat.sub hi lo) arity;
+  let tupleRow (j : Nat) : String :=
+    Scry.adLine (Scry.adRange arity (fun k =>
+      Nat.repr (UIntN.toNat (U32Array.get s.relTuples
+        (Nat.add lo (Nat.add (Nat.mul j arity) k))))));
+  List.append
+    [ "rel\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (InternTable.lookup s.relNames (U32.ofNat i))
+        ++ "\t" ++ Nat.repr arity ++ "\t" ++ Nat.repr count ]
+    (List.map (fun j => "tuple\t" ++ Nat.repr j ++ "\t" ++ tupleRow j)
+      (Scry.schemaRange count))
+
+/-- Every column of a CST store. The intern tables are dumped by id, so the *ids* are
+compared too, not only the names. All arrays are read by index, so this is O(size). -/
+def Scry.adStoreDump (s : Scry.CstStore) : String :=
+  let n := Scry.CstStore.nodeCount s;
+  let m := Scry.CstStore.edgeCount s;
+  let r := Scry.CstStore.relationCount s;
+  let nk := InternTable.size s.kinds;
+  let nf := InternTable.size s.fields;
+  let np := InternTable.size s.paths;
+  let nb := U64Array.size s.bytes;
+  let nr := InternTable.size s.relNames;
+  let kinds := Scry.adRange nk (fun i =>
+    "kind\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (Scry.adIntern s.kinds i));
+  let fields := Scry.adRange nf (fun i =>
+    "field\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (Scry.adIntern s.fields i));
+  let paths := Scry.adRange np (fun i =>
+    "path\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (Scry.adIntern s.paths i));
+  let bytes := Scry.adRange nb (fun i =>
+    "bytes\t" ++ Nat.repr i ++ "\t" ++ Nat.repr (UIntN.toNat (U64Array.get s.bytes i)));
+  let nodes := Scry.adRange n (fun i =>
+    "node\t" ++ Nat.repr i ++ "\t" ++ Scry.adNodeRow s i);
+  let children := Scry.adRange n (fun i =>
+    "child\t" ++ Nat.repr i ++ "\t" ++ Scry.adChildRow s i);
+  let edges := Scry.adRange m (fun i =>
+    "edge\t" ++ Nat.repr i ++ "\t" ++ Scry.adEdgeRow s i);
+  let relnames := Scry.adRange nr (fun i =>
+    "relname\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (Scry.adIntern s.relNames i));
+  let rels := List.concat (Scry.adRange r (fun i => Scry.adRelRows s i));
+  Scry.adLines (List.concat
+    [ [ "store\tv1"
+      , "language\t" ++ Scry.cstEnc s.language
+      , "kinds\t" ++ Nat.repr nk ]
+    , kinds
+    , [ "fields\t" ++ Nat.repr nf ]
+    , fields
+    , [ "paths\t" ++ Nat.repr np ]
+    , paths
+    , [ "bytes\t" ++ Nat.repr nb ]
+    , bytes
+    , [ "nodes\t" ++ Nat.repr n ]
+    , nodes
+    , [ "childcsr\t" ++ Nat.repr n ]
+    , children
+    , [ "edges\t" ++ Nat.repr m ]
+    , edges
+    , [ "relations\t" ++ Nat.repr r ++ "\tnames\t" ++ Nat.repr nr ]
+    , relnames
+    , rels ])
+
+-- ## The lowered TU
+
+/-- A type. -/
+def Scry.adTy : Wil.Ty → String
+  | .int w s => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
+  | .ptr t => "ptr(" ++ Scry.adTy t ++ ")"
+  | .fn n t => "fn(" ++ Nat.repr n ++ "," ++ Scry.adTy t ++ ")"
+  | .record i => "record" ++ Nat.repr i
+  | .dyn => "dyn"
+  | .unknown => "unknown"
+
+/-- A concrete value. -/
+def Scry.adVal : Wil.Val → String
+  | .int w s b => "int" ++ Nat.repr w ++ (match s with | .true => "s" | .false => "u")
+      ++ ":" ++ Nat.repr b
+  | .ptr b o => "ptr:" ++ Nat.repr b ++ ":" ++ Nat.repr o
+  | .nul => "null"
+  | .undef => "undef"
+
+/-- A register: index and declared type. -/
+def Scry.adVar (v : Wil.Var) : String :=
+  Nat.repr v.index ++ ":" ++ Scry.adTy v.ty
+
+/-- An operator. -/
+def Scry.adOp : Wil.Op → String
+  | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div" | .rem => "rem"
+  | .and => "and" | .or => "or" | .xor => "xor" | .shl => "shl" | .shr => "shr"
+  | .eq => "eq" | .ne => "ne" | .lt => "lt" | .le => "le" | .gt => "gt" | .ge => "ge"
+  | .neg => "neg" | .not => "not"
+
+/-- A condition. -/
+def Scry.adCond : Wil.Cond → String
+  | .const b => "const" ++ (match b with | .true => "1" | .false => "0")
+  | .cmp op a b => "cmp:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
+  | .not c => "not(" ++ Scry.adCond c ++ ")"
+  | .and a b => "and(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
+  | .or a b => "or(" ++ Scry.adCond a ++ "," ++ Scry.adCond b ++ ")"
+
+/-- A right-hand side. -/
+def Scry.adRhs : Wil.Rhs → String
+  | .use v => "use:" ++ Scry.adVar v
+  | .cst v => "cst:" ++ Scry.adVal v
+  | .bin op a b => "bin:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a ++ ":" ++ Scry.adVar b
+  | .un op a => "un:" ++ Scry.adOp op ++ ":" ++ Scry.adVar a
+  | .load p => "load:" ++ Scry.adVar p
+  | .gep p k => "gep:" ++ Scry.adVar p ++ ":" ++ Nat.repr k
+  | .alloc n => "alloc:" ++ Nat.repr n
+  | .havoc t => "havoc:" ++ Scry.adTy t
+  | .slot n => "slot:" ++ Nat.repr n
+  | .globalRef n => "global:" ++ n
+  | .fnptr n => "fnptr:" ++ n
+  | .gepVar p i k => "gepvar:" ++ Scry.adVar p ++ ":" ++ Scry.adVar i ++ ":" ++ Nat.repr k
+
+/-- A callee. -/
+def Scry.adCallee : Wil.Callee → String
+  | .direct n => "direct:" ++ n
+  | .indirect v => "indirect:" ++ Scry.adVar v
+
+/-- An origin: file, byte range, CST node, line, column. -/
+def Scry.adSpan (sp : Wil.Span) : String :=
+  Scry.adLine [Nat.repr sp.file, Nat.repr sp.start, Nat.repr sp.stop, Nat.repr sp.node,
+    Nat.repr sp.line, Nat.repr sp.col]
+
+/-- A statement (one line). -/
+def Scry.adStmt : Wil.Stmt → String
+  | .assign x e o => "assign\t" ++ Scry.adVar x ++ "\t" ++ Scry.adRhs e ++ "\t" ++ Scry.adSpan o
+  | .assume c o => "assume\t" ++ Scry.adCond c ++ "\t" ++ Scry.adSpan o
+  | .store p v o => "store\t" ++ Scry.adVar p ++ "\t" ++ Scry.adVar v ++ "\t" ++ Scry.adSpan o
+  | .free p o => "free\t" ++ Scry.adVar p ++ "\t" ++ Scry.adSpan o
+  | .call r c args o => "call\t"
+      ++ (match r with | .some v => Scry.adVar v | .none => "-")
+      ++ "\t" ++ Scry.adCallee c
+      ++ "\t" ++ String.intercalate "," (List.map Scry.adVar args)
+      ++ "\t" ++ Scry.adSpan o
+  | .nop o => "nop\t" ++ Scry.adSpan o
+
+/-- A terminator (one line). -/
+def Scry.adTerm : Wil.Term → String
+  | .goto b o => "goto\t" ++ Nat.repr b.index ++ "\t" ++ Scry.adSpan o
+  | .br c t f o => "br\t" ++ Scry.adCond c ++ "\t" ++ Nat.repr t.index ++ "\t"
+      ++ Nat.repr f.index ++ "\t" ++ Scry.adSpan o
+  | .ret v o => "ret\t" ++ (match v with | .some x => Scry.adVar x | .none => "-")
+      ++ "\t" ++ Scry.adSpan o
+  | .unreachable o => "unreachable\t" ++ Scry.adSpan o
+
+/-- One block's statements and terminator, each prefixed with its block and statement
+index. -/
+partial def Scry.adStmtsGo (b i : Nat) : List Wil.Stmt → List String
+  | .nil => .nil
+  | .cons s rest => List.cons
+      ("b" ++ Nat.repr b ++ "\ts" ++ Nat.repr i ++ "\t" ++ Scry.adStmt s)
+      (Scry.adStmtsGo b (Nat.succ i) rest)
+
+/-- Every block of a function, in order. -/
+partial def Scry.adBlocksGo (i : Nat) : List Wil.Block → List String
+  | .nil => .nil
+  | .cons blk rest => List.append
+      (Scry.adStmtsGo i 0 blk.stmts)
+      (List.cons ("b" ++ Nat.repr i ++ "\tterm\t" ++ Scry.adTerm blk.term)
+        (Scry.adBlocksGo (Nat.succ i) rest))
+
+/-- One function: name, entry, params, locals, origin, blocks. -/
+def Scry.adFunc (i : Nat) (f : Wil.Func) : List String :=
+  List.append
+    [ "func\t" ++ Nat.repr i ++ "\t" ++ f.name
+    , "entry\t" ++ Nat.repr f.entry.index
+    , "origin\t" ++ Scry.adSpan f.origin
+    , "params\t" ++ String.intercalate "," (List.map Scry.adVar f.params)
+    , "locals\t" ++ String.intercalate "," (List.map Scry.adVar f.locals) ]
+    (Scry.adBlocksGo 0 f.blocks)
+
+/-- Every function of a TU, with its index. -/
+partial def Scry.adFuncsGo (i : Nat) : List Wil.Func → List String
+  | .nil => .nil
+  | .cons f rest => List.append (Scry.adFunc i f) (Scry.adFuncsGo (Nat.succ i) rest)
+
+/-- One warning: function, message, origin. -/
+def Scry.adWarning (w : Scry.Warning) : String :=
+  "warning\t" ++ w.func ++ "\t" ++ w.message ++ "\t" ++ Scry.adSpan w.span
+
+/-- Every warning, in the TU's order (newest first). -/
+def Scry.adWarnings (ws : List Scry.Warning) : List String :=
+  List.map (fun w => Scry.adWarning w) ws
+
+/-- Every external call, in the TU's order. -/
+def Scry.adExternals (xs : List (String × String)) : List String :=
+  List.map (fun p => "external\t" ++ p.1 ++ "\t" ++ p.2) xs
+
+/-- The source files of a TU: index, path, text length, and a 64-bit digest of the text
+(so a line-map/text change is visible even when the CST is identical). -/
+def Scry.adFiles (tu : Scry.TU) : List String :=
+  List.append [ "files\t" ++ Nat.repr (List.length tu.files) ]
+    (List.map (fun p =>
+      let i := p.1;
+      let text := p.2;
+      "file\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc (List.getD tu.paths i "")
+        ++ "\t" ++ Nat.repr (String.length text) ++ "\t" ++ Nat.repr (Scry.fnv text))
+      (Scry.zipIdx tu.files 0))
+
+/-- The canonical dump of one project unit. -/
+def Scry.adUnit (u : Scry.ProjectUnit) : String :=
+  let tu := u.tu;
+  let files := Scry.adFiles tu;
+  let funcs := Scry.adFuncsGo 0 tu.funcs;
+  let warnings := Scry.adWarnings tu.warnings;
+  let externals := Scry.adExternals tu.externalCalls;
+  Scry.adLines (List.concat
+    [ [ "unit\t" ++ Scry.cstEnc u.path
+      , "errors\t" ++ Nat.repr u.errors ]
+    , files
+    , [ "funcs\t" ++ Nat.repr (List.length tu.funcs) ]
+    , funcs
+    , [ "warnings\t" ++ Nat.repr (List.length tu.warnings) ]
+    , warnings
+    , [ "externals\t" ++ Nat.repr (List.length tu.externalCalls) ]
+    , externals ])
+
+-- ## The command
+
+structure Scry.ArtifactOpts where
+  target : String
+  compdb : Option String
+  cc : String
+  cache : Scry.CacheOpts
+  allowErrors : Bool
+  keepSystem : Bool
+  skipBroken : Bool
+  rules : Option String
+  out : String
+
+def Scry.artifactUsage : String :=
+  "usage: scry-artifacts DIR [--compdb FILE] [--cc CMD] [--cache[=DIR]] [--allow-errors] [--keep-system-headers] [--skip-broken] [--rules FILE] --out DIR"
+
+partial def Scry.parseArtifactArgs (target : Option String) (opts : Scry.ArtifactOpts) :
+    List String → Except String (String × Scry.ArtifactOpts)
+  | .nil => match target with
+    | .some t => .ok (t, opts)
+    | .none => .error Scry.artifactUsage
+  | .cons a rest => match a with
+    | "--compdb" => match rest with
+      | .cons v r => Scry.parseArtifactArgs target { opts with compdb := .some v } r
+      | .nil => .error "--compdb needs a FILE"
+    | "--cc" => match rest with
+      | .cons v r => Scry.parseArtifactArgs target { opts with cc := v } r
+      | .nil => .error "--cc needs a CMD"
+    | "--cache" => Scry.parseArtifactArgs target
+        { opts with cache := { opts.cache with enabled := .true } } rest
+    | "--cache-dir" => match rest with
+      | .cons v r => Scry.parseArtifactArgs target
+          { opts with cache := { opts.cache with enabled := .true, dir := v } } r
+      | .nil => .error "--cache-dir needs a DIRECTORY"
+    | "--no-cache" => Scry.parseArtifactArgs target
+        { opts with cache := { opts.cache with enabled := .false } } rest
+    | "--allow-errors" => Scry.parseArtifactArgs target { opts with allowErrors := .true } rest
+    | "--keep-system-headers" => Scry.parseArtifactArgs target
+        { opts with keepSystem := .true } rest
+    | "--skip-broken" => Scry.parseArtifactArgs target { opts with skipBroken := .true } rest
+    | "--rules" => match rest with
+      | .cons v r => Scry.parseArtifactArgs target { opts with rules := .some v } r
+      | .nil => .error "--rules needs a FILE"
+    | "--out" => match rest with
+      | .cons v r => Scry.parseArtifactArgs target { opts with out := v } r
+      | .nil => .error "--out needs a DIRECTORY"
+    | _ => match target with
+      | .none => match String.startsWith a "--" with
+        | .true => .error ("unknown option \"" ++ a ++ "\"")
+        | .false => Scry.parseArtifactArgs (.some a) opts rest
+      | .some _ => .error "scry-artifacts takes one DIRECTORY"
+
+/-- The cache statistics line, marked as metadata (a cold and a warm build must differ
+here; the invariant excludes it). -/
+def Scry.artifactCacheLine (s : Scry.CacheStats) : String :=
+  "cache-metadata\t" ++ Scry.CacheStats.line s
+
+/-- The manifest: unit order (an artifact), paths, skipped units, cache metadata. -/
+partial def Scry.artifactUnitsGo (i : Nat) : List Scry.ProjectUnit → List String
+  | .nil => .nil
+  | .cons u rest => List.cons
+      ("unit\t" ++ Nat.repr i ++ "\t" ++ Scry.cstEnc u.path)
+      (Scry.artifactUnitsGo (Nat.succ i) rest)
+
+def Scry.artifactManifest (p : Scry.Project) (cache : Scry.CacheStats) : String :=
+  let units := Scry.artifactUnitsGo 0 p.units;
+  let skipped := List.map (fun x => "skipped\t" ++ x.1 ++ "\t" ++ x.2) p.skipped;
+  Scry.adLines (List.concat
+    [ [ "scry-artifacts 1"
+      , "root\t" ++ Scry.cstEnc p.root
+      , "units\t" ++ Nat.repr (List.length p.units) ]
+    , units
+    , skipped
+    , [ Scry.artifactCacheLine cache ] ])
+
+/-- Write one unit's CST and Wil dumps. -/
+partial def Scry.artifactUnitsGo2 (out : String) (i : Nat) :
+    List Scry.ProjectUnit → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons u rest => do
+    let stem := out ++ "/units/" ++ Scry.adPad3 i;
+    FS.writeFile (stem ++ ".cst") (Scry.adStoreDump u.store);
+    FS.writeFile (stem ++ ".tu") (Scry.adUnit u);
+    Scry.artifactUnitsGo2 out (Nat.succ i) rest
+
+/-- Build, dump, and return. -/
+def Scry.artifactRun (args : List String) : EIO Nat := do
+  match Scry.parseArtifactArgs .none
+      (Scry.ArtifactOpts.mk "" .none "cc" Scry.CacheOpts.none .false .false .false .none "") args with
+  | .error e => do
+    EIO.lift (IO.ePrintln ("scry-artifacts: " ++ e));
+    EIO.pure 2
+  | .ok pair => do
+    let opts := pair.2;
+    r ← Scry.ProjectIO.buildProject pair.1 opts.compdb opts.cc opts.allowErrors
+      opts.keepSystem opts.skipBroken .nil opts.cache;
+    let p := r.1;
+    Scry.mkdirp opts.out;
+    Scry.mkdirp (opts.out ++ "/units");
+    FS.writeFile (opts.out ++ "/manifest.txt") (Scry.artifactManifest p r.2);
+    Scry.artifactUnitsGo2 opts.out 0 p.units;
+    FS.writeFile (opts.out ++ "/project.edb") (Scry.renderProjectEdb p);
+    FS.writeFile (opts.out ++ "/project.summary") (Scry.Project.summary p);
+    pack ← Scry.loadTaintPack opts.rules;
+    let rep := Scry.analyzeProject p pack Scry.CacheStats.empty;
+    FS.writeFile (opts.out ++ "/report.json") (Scry.renderProjectJson rep);
+    FS.writeFile (opts.out ++ "/report.sarif") (Scry.renderProjectSarif rep);
+    FS.writeFile (opts.out ++ "/report.human") (Scry.ProjectReport.human rep);
+    EIO.pure 0
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  IO.bind (EIO.toIO (Scry.artifactRun args)) (fun n => Process.exit n))
