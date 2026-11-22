@@ -30,6 +30,14 @@ grep -qF 'scroll-search: all checks passed' "$OUT/search.txt" && echo "ok (searc
 node "$ROOT/web/goals_test.mjs" "$OUT/goals.json" > "$OUT/goals.txt"
 if grep -qF 'goals: all checks passed' "$OUT/goals.txt"; then echo "ok (goals, wiz)"; else
   echo "FAIL (goals, wiz)"; cat "$OUT/goals.txt"; exit 1; fi
+# (source reader) the hand-written fixture: the reader's SSR, its Loom patches and its
+# cards, with no scry and no Wasm (`scry web`'s bundle acceptance runs in scry.yml,
+# where the scry binary exists)
+"$WIZ" run -I "$ROOT/lib" "$ROOT/web/source_fixture_gen.wiz" > "$OUT/source-fixture.json"
+node "$ROOT/web/source_fixture_test.mjs" "$OUT/source-fixture.json" > "$OUT/source-fixture.txt"
+if grep -qF 'source fixture: all checks passed' "$OUT/source-fixture.txt"; then
+  echo "ok (source reader fixture)"; else
+  echo "FAIL (source reader fixture)"; cat "$OUT/source-fixture.txt"; exit 1; fi
 # (bench) the benchmark page's generator fixtures and the site check's rules for it
 "$ROOT/web/test-bench.sh" > "$OUT/bench.txt"
 grep -qF 'test-bench: ok' "$OUT/bench.txt" && echo "ok (bench page)" || {

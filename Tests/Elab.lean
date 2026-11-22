@@ -374,16 +374,29 @@ prefixes the failure (`"(llvm) "`). -/
 def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
   if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
 
-/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
-the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
-  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
+/-- `cRun` with `loader` resolving `src`'s imports. -/
+def cRunWith (loader : Name → Option String) (src : String) (expected : String) (llvm : Bool := false)
+    (split : Nat := 0) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e => failRun e
+
+/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
+the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
+  cRunWith (← preludeLoader) src expected llvm split
+
+/-- `cRun` for a program that imports a module `preludeLoader` does not carry
+(`WordArray`, `Intern`, `Data.PMap`, `Web.EditorModel`, …): the suite's cached
+whole-library loader resolves it from disk. -/
+def cRunOnDisk (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+  -- `Tests.libLoader` directly: the `Tests.Elab.libLoader` alias is defined below in this
+  -- file, after this point.
+  cRunWith (← Tests.libLoader) src expected llvm
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop

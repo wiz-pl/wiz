@@ -171,6 +171,13 @@ union check, rather than shrinking the green total). That check is the corpus:
 in `LC_ALL=C` order, with no exclusions, and `scripts/check-libdiff-corpus.sh` (with
 `--self-test`, in the static gate) fails when a listed file is absent, a file under the
 two trees is unlisted, or an entry is duplicated or out of order. It needs no build.
+`hdl/src/` is a **pending** root: the harness takes it (`libDiffRoots`, `libDiffModule`
+and the cover case know it), but all 32 of its modules diverge today through the
+self-hosted frontend's `Hdl.Core` cluster, so a corpus of them would be 32/32 diverging
+and measure nothing. The corpus header records that reason (and the per-file causes in
+`scripts/libdiff-causes.tsv`); adding the root to `libDiffFiles` and the corpus lines is
+the change once the frontend accepts the cluster. Until then `=hdl-examples` is the Hdl
+gate.
 
 ### Flaky tests and the quarantine
 
@@ -954,7 +961,7 @@ setup action keeps the elan cache for those
   (three decimals), group subtotals and the shard's total; the `CI result` job sums the
   shards up (a table of shard totals and the grand total, and the 15 slowest cases) and
   uploads every case's time as the `test-timings` artifact.
-* **The examples are tests** (the `examples` shard, group `examples`): every
+* **The examples are tests** (the `library` shard, group `examples`): every
   `examples/*.wiz` is compared with its `.expected` exactly as `grail test` does (the
   same `runTests` helper the tour group uses), in a marker-guard case and three cases
   split by name, so a library change that changes an example's output fails CI instead
@@ -966,6 +973,24 @@ setup action keeps the elan cache for those
   file, or a missing `.expected`. The shard runs when `examples/`, `lib/` or
   `drafts/feral/lib/` changes, and (like every shard) when the Lean sources or the
   harness change.
+* **The Hdl package's goldens** (the `hdl` shard, group `hdl-examples`): `hdl/` is a
+  package of its own (`hdl/grail.wiz`, `Package.tests "examples" "examples"`), so
+  `cd hdl && grail test` compares `hdl/examples/*.wiz` against their `.expected` files.
+  Group `hdl-examples` runs the same comparisons through `runTests` in a marker-guard
+  case and two name ranges split by name, so a change to `Hdl.*` that drifts a golden
+  fails CI instead of only a command a contributor runs by hand. The four
+  `-- test: skip` examples are named per range, so a new skip (or a benchmark that
+  stops skipping) fails the gate; the two `-- test: run` examples are compiled and
+  their `main` output compared. The second range gives each test a 900 s limit because
+  `hdl-uart-temporal` and `hdl-verified` take minutes; they are also elaborated by
+  their own cases in the shard (properties and axioms), so their `.expected` files are
+  compared here rather than skipped. The marker case asserts the set is total: 36
+  `*.wiz`, 32 with a `.expected` (the other four are skips), each of the 32 in the
+  walk, so a move cannot silently drop a golden again. The group runs in the `hdl`
+  shard, which is split in two by measured time (`"split": 2, "split-cases": true`:
+  32 minutes of goldens plus the verified and UART cases would otherwise make it the
+  run's longest job), and (like every shard without a path filter) whenever code
+  changes.
 * **Documentation style** (the `docs_style` job): `scripts/check-docs-style.py` fails on
   absolute paths from an agent's scratch tree, internal `agent/...` branch names and AI
   worker roles, U+2705 status checkmarks, and decision/step phrases attributed to
@@ -973,6 +998,17 @@ setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+  The same job runs `scripts/check-companion-lists.py` early: it checks the lists that
+  must move with their source of truth — `.github/libdiff-corpus.txt` against the walk
+  over `lib/` and `scry/`, `legacy-names.tsv` and `Wiz/LegacyNames.lean`'s digest against
+  the declarations, and stale or expired entries in
+  `.github/name-collisions-baseline.json` — by calling the existing checks and reporting
+  one `companion drift:` line naming both sides. (The test-shard total needs the test
+  binary, so that check stays in the build job; the trust ledger and scry goldens have
+  their own jobs.) It also runs `scripts/check-release-consistency.py`, which checks the
+  release packet and, for the machinery, that a version, channel, `scripts/...` command
+  or release artifact named in `docs/release*`, `docs/building.md`, `README.md` or
+  `CHANGELOG.md` is still produced by the tree.
   The same job runs `scripts/check-doc-links.py`: every relative link and `#anchor` in
   those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
   to `wiz-notes/...` are reported as external notes (the notes live outside the
@@ -1073,7 +1109,8 @@ setup action keeps the elan cache for those
   sorted list is in part `k % N + 1`), so the parts are deterministic, disjoint and
   their union is the case, unchanged in what each file is compared against.
   `.github/libdiff-corpus.txt` is the manifest of the files one whole sweep compares:
-  every `*.wiz` under `lib/` and `scry/` in `LC_ALL=C` order, with no exclusions, and
+  every `*.wiz` under `lib/` and `scry/` in `LC_ALL=C` order, with no exclusions (and
+  the reason `hdl/src/` is a *pending* root, below), and
   `scripts/check-libdiff-corpus.sh` (in the static gate, with `--self-test`) fails when
   the manifest and the tree disagree, so no file can silently drop out of the sweep.
   `selfhost-libdiff` here is a `split` shard (`"split": 2, "split-cases": true`) of four
@@ -1150,8 +1187,8 @@ setup action keeps the elan cache for those
   limit cannot be split by `"split"` alone: `grail-selfhost` is one case of several
   minutes, and `selfhost-libdiff` was one of 45 minutes. Split such a case in its test
   instead, into cases over parts of its input that together check the same things:
-  `selfhost-libdiff` is now four cases, each a contiguous range of `lib/` and `scry/` by
-  index (`"split-cases": true`, so the splitter may put them in different jobs), about 16
+  `selfhost-libdiff` is now four cases, each a contiguous range of `lib/` and `scry/`
+  by index (`"split-cases": true`, so the splitter may put them in different jobs), about 16
   minutes each including the self-hosted compiler build it must do again, plus one case
   that checks the four ranges cover the file list exactly once. `scaling`'s sweep of the
   induction hypotheses over `lib/` and `examples/` (up to 31 min as one case) was one

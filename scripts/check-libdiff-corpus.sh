@@ -2,6 +2,11 @@
 # Check that .github/libdiff-corpus.txt is exactly the list `=selfhost-libdiff` sweeps:
 # every *.wiz under lib/ and scry/, recursively, in `LC_ALL=C` order.
 #
+# hdl/src/ is a pending root, not a swept one: all 32 of its modules diverge today, so
+# they stay out of the corpus with their reason in the corpus header (the Hdl gate is
+# the `=hdl-examples` test group). An entry for one of them fails here, as an entry
+# outside the two scanned roots, until the walk is extended with it.
+#
 # The group does not read this file. It walks the two trees itself
 # (Tests/Groups/SelfhostLibDiff.lean, `libDiffFiles`) and splits the result into four
 # contiguous parts by index, so what makes the corpus meaningful is that it is total:
@@ -61,7 +66,7 @@ check() {
     echo "libdiff corpus: no such file: $corpus" >&2
     return 1
   fi
-  if [ ! -d "$root/lib" ] || [ ! -d "$root/scry" ]; then
+  if [ ! -d "$root/lib" ] || [ ! -d "$root/scry" ] || [ ! -d "$root/hdl/src" ]; then
     echo "libdiff corpus: $root has no lib/ and scry/ to scan" >&2
     return 1
   fi
@@ -88,7 +93,7 @@ check() {
 
   awk '$0 !~ /^(lib|scry)\//' "$tmp/list" > "$tmp/outside"
   if [ -s "$tmp/outside" ]; then
-    echo "libdiff corpus: entries outside lib/ and scry/:" >&2
+    echo "libdiff corpus: entries outside lib/ and scry/ (or a pending root such as hdl/src/):" >&2
     sed 's/^/  /' "$tmp/outside" >&2
     rc=1
   fi
@@ -140,11 +145,13 @@ self_test() {
   d=$(mktemp -d "${TMPDIR:-/tmp}/libdiff-corpus-test.XXXXXX") || return 2
   # shellcheck disable=SC2064
   trap "rm -rf '$d'" RETURN
-  mkdir -p "$d/tree/lib/Sub" "$d/tree/scry/tests"
+  mkdir -p "$d/tree/lib/Sub" "$d/tree/scry/tests" "$d/tree/hdl/src/Hdl"
   : > "$d/tree/lib/A.wiz"
   : > "$d/tree/lib/Sub/B.wiz"
   : > "$d/tree/scry/C.wiz"
   : > "$d/tree/scry/tests/D.wiz"
+  : > "$d/tree/hdl/src/Hdl/E.wiz"
+  # hdl/src/Hdl/E.wiz exists but is a pending root: not in the corpus, not scanned
   printf '# a comment\n\nlib/A.wiz\nlib/Sub/B.wiz\nscry/C.wiz\nscry/tests/D.wiz\n' > "$d/good"
 
   printf '\n%s\n' "self-test (fixtures under $d/tree):"
@@ -166,10 +173,12 @@ self_test() {
   printf 'lib/Sub/B.wiz\nlib/A.wiz\nscry/C.wiz\nscry/tests/D.wiz\n' > "$d/unsorted"
   self_test_run "an unsorted list fails" 1 --root "$d/tree" --corpus "$d/unsorted" || rc=1
 
-  # outside the two roots
+  # outside the scanned roots: docs/, and a pending root (hdl/src) nobody extended yet
   printf 'lib/A.wiz\nlib/Sub/B.wiz\nscry/C.wiz\nscry/tests/D.wiz\ndocs/E.wiz\n' > "$d/outside"
   mkdir -p "$d/tree/docs"; : > "$d/tree/docs/E.wiz"
   self_test_run "an entry outside lib/ and scry/ fails" 1 --root "$d/tree" --corpus "$d/outside" || rc=1
+  printf 'hdl/src/Hdl/E.wiz\nlib/A.wiz\nlib/Sub/B.wiz\nscry/C.wiz\nscry/tests/D.wiz\n' > "$d/pending"
+  self_test_run "a pending root's file is not in the corpus until the walk is extended" 1 --root "$d/tree" --corpus "$d/pending" || rc=1
 
   # no corpus at all
   self_test_run "a missing corpus fails" 1 --root "$d/tree" --corpus "$d/nope" || rc=1

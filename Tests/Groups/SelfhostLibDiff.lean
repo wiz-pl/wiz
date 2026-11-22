@@ -12,7 +12,7 @@ namespace Tests.Elab
 # `=selfhost-libdiff`: where replacement parity actually stands
 
 The parity matrix (`wiz-notes/selfhost-parity.md`) counts features; this group measures
-the library. For every `*.wiz` under `lib/` (and `scry/`) it runs **both** compilers on
+the library. For every `*.wiz` under `lib/` and `scry/` it runs **both** compilers on
 the file as a root module and compares
 
 * acceptance (does the frontend report an error at all),
@@ -51,9 +51,12 @@ the group, is what takes the time.
 -/
 
 /-- The module roots both toolchains resolve `import M` under, in order. The checkout's
-`lib/` first (the toolchain library), then the package roots of `scry/`. -/
+`lib/` first (the toolchain library), then the package roots of `scry/` and the Hdl
+package's `hdl/src` (which resolves `Hdl.*` from the `hdl/src/Hdl` tree; it is a pending
+walk root, see `libDiffPendingRoots`, not a corpus root yet). -/
 def libDiffRoots : List String :=
-  ["lib", "drafts/feral/lib", "scry/src", "scry/gen", "scry", "scry/tests", "scry/tools"]
+  ["lib", "drafts/feral/lib", "scry/src", "scry/gen", "scry", "scry/tests", "scry/tools",
+   "hdl/src"]
 
 /-- Every `*.wiz` under `dir`, recursively. -/
 partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array String) := do
@@ -65,6 +68,13 @@ partial def libDiffWalk (dir : System.FilePath) (acc : Array String) : IO (Array
     else if e.path.extension == some "wiz" then
       acc := acc.push e.path.toString
   pure acc
+
+/-- Package roots that are ready to be swept but whose files are not in the corpus yet,
+each with its reason in `.github/libdiff-corpus.txt`: `hdl/src`'s 32 modules all diverge
+through the Hdl.Core cluster today, so a corpus of them would be 32/32 diverging. The
+import roots and `libDiffModule` already handle the root; adding it to `libDiffFiles`
+(and the corpus lines) is the whole change once the frontend accepts the cluster. -/
+def libDiffPendingRoots : List String := ["hdl/src"]
 
 /-- Every `*.wiz` under `lib/` and `scry/`, sorted. -/
 def libDiffFiles : IO (Array String) := do
@@ -88,7 +98,7 @@ def libDiffChunk (files : Array String) (k : Nat) : Array String :=
   files.extract lo hi
 
 /-- The module a file's path names, for `--only`: `lib/Data/ListLemmas.wiz` is
--- `Data.ListLemmas`. (Hdl moved out of `lib/` to its package; it is not in this walk.) -/
+-- `Data.ListLemmas`, and (for a pending root) `hdl/src/Hdl/Core.wiz` is `Hdl.Core`. -/
 def libDiffModule (file : String) : String :=
   let rel :=
     if file.startsWith "lib/" then (file.drop 4).toString
@@ -97,6 +107,7 @@ def libDiffModule (file : String) : String :=
     else if file.startsWith "scry/tests/" then (file.drop 11).toString
     else if file.startsWith "scry/tools/" then (file.drop 11).toString
     else if file.startsWith "scry/" then (file.drop 5).toString
+    else if file.startsWith "hdl/src/" then (file.drop 8).toString
     else file
   (rel.dropEnd 4).toString.replace "/" "."
 
@@ -403,7 +414,8 @@ def libDiffCompare (file : String) (h s : Side) : LibRec :=
 def jsonOfRec (r : LibRec) : Lean.Json :=
   Lean.Json.mkObj [
     ("file", .str r.file), ("module", .str (libDiffModule r.file)),
-    ("scope", .str (if r.file.startsWith "lib/" then "lib" else "scry")),
+    ("scope", .str (if r.file.startsWith "lib/" then "lib"
+                    else if r.file.startsWith "hdl/src/" then "hdl" else "scry")),
     ("verdict", .str r.verdict), ("divergence", .str r.divergence),
     ("class", .str r.klass), ("note", .str r.note),
     ("host", jsonOfSide r.host), ("self", jsonOfSide r.self)]
@@ -928,6 +940,18 @@ def libDiffGroup : Group where
           check (hi - lo ≤ 1) s!"size {size}: part sizes differ: {lo}..{hi}"
         -- and on the sweep's real list: every lib/ and scry/ file in exactly one part
         let all ← libDiffFiles
+        -- each swept root is actually walked: a list that lost one would still partition
+        -- cleanly, and its files would drop out of the sweep without a red
+        let roots := ["lib/", "scry/"]
+        check (roots.all (fun r => all.any (fun f => f.startsWith r)))
+          "the walk misses lib/ or scry/ (a root is not scanned)"
+        -- the pending roots exist and are deliberately not swept (their reason is in the
+        -- corpus header); scanning one without adding it to the corpus is a red, so the
+        -- cover case pins both halves of the future one-line change
+        for r in libDiffPendingRoots do
+          check (← (System.FilePath.mk r).pathExists) s!"pending root {r} is gone (update the corpus note)"
+          check (!(all.any (fun f => f.startsWith (r ++ "/"))))
+            s!"{r} is swept but not in the corpus (add it to libDiffFiles and the corpus together)"
         let parts := (List.range libDiffChunks).map (libDiffChunk all)
         checkEq all (parts.foldl (· ++ ·) (#[] : Array String)) -- complexity: ok (libDiffChunks is 4)
       },

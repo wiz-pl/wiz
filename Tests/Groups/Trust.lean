@@ -8,12 +8,22 @@ set_option compiler.extract_closed false
 
 namespace Tests.Elab
 
-/-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
+/-- A message list as the diagnostic lines the trust cases check (`error: …`). -/
+def formatMessages (s : CommandState ZeroOneMany) : List String :=
+  s.messages.toList.map fun m => (match m.severity with
+    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text
+
+/-- Messages of `input`, with every module of `lib/` (and of the Scry and Hdl packages)
+importable **from disk**.
+
+`preludeLoader` only carries Prelude/Word/Functor/Logic/Text/IO/Std/Sys, so a case that
+imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
+saw `unknown module` and then failed for a reason unrelated to what it pins. `libLoader` is
+the suite's cached whole-library loader (`Tests/Loader.lean`). -/
 def messagesLib (input : String) : IO (List String) := do
-  let loader ← preludeLoader
-  let s := runFrontend (R := ZeroOneMany) input { loader, trustedModule := Tests.libModule }
-  pure (s.messages.toList.map fun m => (match m.severity with
-    | .error => "error: " | .warning => "warning: " | .info => "") ++ m.text)
+  let s := runFrontend (R := ZeroOneMany) input
+    { loader := ← libLoader, trustedModule := Tests.libModule }
+  pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/
 def failsWith (input : String) (fragment : String) : IO Unit := do
@@ -503,7 +513,12 @@ def trustGroup : Group where
         expectMsg ms "Outlives.refl : (0 ρ : Region) → Outlives ρ ρ"
         expectMsg ms "Outlives.static : (0 ρ : Region) → Outlives Region.static ρ"
         expectMsg ms "Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : Region) → Outlives ρ₁ ρ₂ → Outlives ρ₂ ρ₃ → Outlives ρ₁ ρ₃"
-        let known := ["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
+        -- The six ledger rows are `Region`, `Region.static` and the four `Outlives` ones, and
+        -- `#print axioms` reports the axioms in a derivation's *type* as well as its value, so
+        -- `r1 : (0 ρ : Region) → Outlives ρ ρ` depends on `Region` too. The assertion below is
+        -- "no axiom outside the six", not "no type axiom": that is what the case pins.
+        let known := ["Region", "Region.static", "Outlives", "Outlives.refl",
+          "Outlives.static", "Outlives.trans"]
         for (nm, needs) in [("r1", "Outlives.refl"), ("r2", "Outlives.static"),
             ("r3", "Outlives.trans"), ("r4", "Outlives.trans")] do
           let ax := printAxiomsOf ms nm
@@ -634,8 +649,8 @@ def trustGroup : Group where
           "      (.cons (U32.ofNat 70000) .nil))))\n" ++
           "      (List.map UIntN.toNat (U64Array.toList (U64Array.ofList\n" ++
           "        (.cons (U64.ofNat 18446744073709551615) .nil)))))"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
     { name := "EditorModel partials: the compiled editor path runs them (C and LLVM)", run := fun _ => do
         -- The five `partial` rows (firstLineAfter, lineTableGo, lspLookupGo,
         -- splitGoalsGo, tokenEndGo) are compiled-only general recursion; call each
@@ -651,8 +666,8 @@ def trustGroup : Group where
           "  (.cons (match EditorModel.lspLookup (.cons e1 .nil) 1 \"term\" with\n" ++
           "    | .some e => e.stop\n    | .none => 0)\n" ++
           "  .nil)))))\n"
-        cRun src expected
-        cRun src expected (llvm := true) },
+        cRunOnDisk src expected
+        cRunOnDisk src expected (llvm := true) },
     { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
         -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
         -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is

@@ -25,13 +25,38 @@ namespace Wiz
 
 open P
 
-/-- Column of an offset, 0-based. -/
-def colOf (input : Array Char) (i : Nat) : Nat :=
-  go i 0 i
-where
-  go (j col : Nat) : Nat → Nat
-    | 0 => col
-    | fuel + 1 => if j > 0 && input[j - 1]! != '\n' then go (j - 1) (col + 1) fuel else col
+/-- Column of an offset (0-based), with every offset it walked over added to `cache`.
+
+The column of `i` is the column of an earlier offset plus the distance, so the walk
+stops at an offset whose column is already known (or at the start of the line) and keeps
+the columns it passed: the characters of a line are scanned once, not once per token.
+`colGt`/`colGe` run for every application argument and every entry of a layout block, so
+the old walk back to the line start per check was quadratic in the width of a line. -/
+def colOfCached (input : Array Char) (i : Nat) (cache : Std.HashMap Nat Nat) :
+    Nat × Std.HashMap Nat Nat := Id.run do
+  let mut cache := cache
+  let mut walked : Array Nat := #[] -- offsets on the way back whose column is not known
+  let mut j := i
+  let mut base : Option Nat := none -- the column at `j`, once found
+  while base.isNone do
+    match cache[j]? with
+    | some col => base := some col
+    | none =>
+      if j == 0 || input[j - 1]! == '\n' then
+        base := some 0
+        cache := cache.insert j 0
+      else
+        walked := walked.push j
+        j := j - 1
+  let col := base.getD 0 + (i - j)
+  for k in walked do
+    cache := cache.insert k (col - (i - k))
+  return (col, cache)
+
+/-- Column of an offset, 0-based, memoised in the parser state. -/
+def colOf (i : Nat) : P Nat := fun c s =>
+  let (col, cache) := colOfCached c.input i s.cols
+  .ok col { s with cols := cache }
 
 private def tokSyntax (t : TokInfo) : Syntax :=
   let info := { start := t.start, stop := t.stop }
@@ -82,10 +107,11 @@ def tryAlternative (p : P Syntax) (prec priority index : Nat) : P (Option Candid
       -- make the next `memoStore` copy the whole table
       let memo := s'.memo
       let toks := s'.toks
+      let cols := s'.cols
       let state := { s' with memo := {}, toks := {} }
       .ok (some { stx, stop := s'.pos, prec, priority, index, state })
-        { s₀ with err := s'.err, memo, toks }
-    | .error s' => .ok none { s₀ with err := s'.err, memo := s'.memo, toks := s'.toks }
+        { s₀ with err := s'.err, memo, toks, cols }
+    | .error s' => .ok none { s₀ with err := s'.err, memo := s'.memo, toks := s'.toks, cols := s'.cols }
 
 /-- Commit to a candidate's state, keeping the accumulated errors and memo. -/
 def commit (cand : Candidate) : P Unit := fun _ s =>
@@ -188,16 +214,20 @@ partial def runDescr : ParserDescr → P (Array Syntax)
     let i ← nextPos
     match c.savedPos? with
     | some sp =>
-      if colOf c.input i > colOf c.input sp then pure #[]
-      else failAt i s!"token right of column {colOf c.input sp + 1}"
+      let spCol ← colOf sp
+      let iCol ← colOf i
+      if iCol > spCol then pure #[]
+      else failAt i s!"token right of column {spCol + 1}"
     | none => pure #[]
   | .colGe => do
     let c ← ctx
     let i ← nextPos
     match c.savedPos? with
     | some sp =>
-      if colOf c.input i ≥ colOf c.input sp then pure #[]
-      else failAt i s!"token at or right of column {colOf c.input sp + 1}"
+      let spCol ← colOf sp
+      let iCol ← colOf i
+      if iCol ≥ spCol then pure #[]
+      else failAt i s!"token at or right of column {spCol + 1}"
     | none => pure #[]
   | .noWs => do
     let s ← state
@@ -295,7 +325,11 @@ partial def trailingLoop (cat : Category) (rbp : Nat) (lhs : Syntax) (lhsPrec : 
 partial def categoryParser (c : Name) (rbp : Nat) : P Syntax := do
   -- the saved position only matters through its column (`colGt`/`colGe`), so key on that:
   -- nested layout blocks then share their memo entries
-  let key : MemoKey := { cat := c, prec := rbp, pos := (← state).pos, saved := (← ctx).savedPos?.map (colOf (← ctx).input) }
+  let saved ←
+    match (← ctx).savedPos? with
+    | some sp => some <$> colOf sp
+    | none => pure none
+  let key : MemoKey := { cat := c, prec := rbp, pos := (← state).pos, saved }
   match ← memoLookup key with
   | some (some (stx, stop)) => setPos stop; pure stx
   | some none => failAt (← nextPos) c

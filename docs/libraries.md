@@ -140,6 +140,11 @@ sizes) is O(n) as well; a cached measure would be a node carrying its value and 
 equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The deque ends
 (push, pop, pushFront, popFront) are the amortised-constant operations.
 
+The package's examples are its tests: `hdl/grail.wiz` declares
+`Package.tests "examples" "examples"`, so `cd hdl && grail test` compares every
+`hdl/examples/*.wiz` with its `.expected`. CI's `hdl-examples` group (shard `hdl`) runs
+the same comparisons (`Tests/Groups/HdlExamples.lean`).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `hdl/src/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
@@ -2213,6 +2218,11 @@ The S4 rule pack and interprocedural slice are separate modules:
   `scry/memory/null-dereference` diagnostic, and a `p != NULL`/`!p` guard kills the null
   value on the other edge. It reuses `Scry.AiFixpoint`'s worklist and `Alarm.nullDeref`;
   `Scry.analyze` does not run it; `Scry.analyzeWithNull` does (the CLI flag is `--null-deref`).
+  A frontend that knows more than Wil's types can pass a `Scry.NullTables` per function
+  (the C# lowering does, through `Scry.CsNull`): annotated-maybe-null parameters enter as
+  maybe-null, receiver dereferences become `AStmt.check`, and an assignment to a
+  non-null-annotated variable that may be null is the separate
+  `Alarm.nullableAssign` (`scry/cs/nullable-assignment`).
 * `import Scry.RuleTaint` also carries the memory rules: `mstore`/`mload`/`mtainted`
   make a `store` taint the locations it may alias and a later `load` receive it, with
   `store`/`load` path nodes. Diagnostics that are not findings (unknown memory, use after

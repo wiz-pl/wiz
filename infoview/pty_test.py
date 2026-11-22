@@ -2,10 +2,20 @@
 """Drive the terminal infoview in a pseudo-terminal and print the screen it leaves.
     usage: pty_test.py COLS ROWS KEYS -- PROGRAM ARGS...
 KEYS is a Python string literal (escapes allowed), sent a character group at a time
-(split on '|'), with a pause before each. A tiny terminal emulator applies the cursor
-moves (CSI H), clears (CSI K, CSI J) and drops colours (CSI m), so the result is the
-text on the screen, one line per row, trailing spaces removed."""
+(split on '|'). A tiny terminal emulator applies the cursor moves (CSI H), clears
+(CSI K, CSI J) and drops colours (CSI m), so the result is the text on the screen, one
+line per row, trailing spaces removed.
+
+Waiting is by **quiescence**, not by a fixed sleep: after each key group the reader
+pumps until the program has written nothing for `QUIET` seconds (or the deadline passes),
+so a loaded CI runner that takes two seconds to draw the first screen still gets its keys
+after the screen, not into an empty terminal."""
 import ast, fcntl, os, pty, re, select, struct, sys, termios, time
+
+QUIET = 0.30      # seconds of silence that count as "the program has finished drawing"
+SLICE = 0.02      # select() granularity
+FIRST = 20.0      # deadline for the first screen (a cold start, a loaded runner)
+AFTER = 5.0       # deadline for each key group's redraw
 
 def run(cols, rows, keys, argv):
     pid, fd = pty.fork()
@@ -14,19 +24,36 @@ def run(cols, rows, keys, argv):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     os.kill(pid, 28)  # SIGWINCH, in case it started before the size was set
     out = b""
-    def pump(t):
+    def pump(quiet, limit):
+        """Read until the program has been silent for `quiet` s, or `limit` s pass.
+        Returns whether any output arrived."""
         nonlocal out
-        end = time.time() + t
+        got = False
+        end = time.time() + limit
+        last = time.time()
         while time.time() < end:
-            r, _, _ = select.select([fd], [], [], 0.05)
+            r, _, _ = select.select([fd], [], [], SLICE)
             if r:
-                try: out += os.read(fd, 65536)
-                except OSError: return False
-        return True
-    pump(1.5)
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    return got
+                if data:
+                    out += data
+                    got = True
+                    last = time.time()
+            elif time.time() - last >= quiet:
+                return got
+        return got
+    # The first screen: keep waiting (up to FIRST) until the program has drawn something,
+    # then let that screen finish.
+    deadline = time.time() + FIRST
+    while not out and time.time() < deadline:
+        pump(QUIET, min(AFTER, max(0.0, deadline - time.time())))
+    pump(QUIET, AFTER)
     for k in keys:
-        os.write(fd, k.encode()); pump(0.7)
-    pump(0.5)
+        os.write(fd, k.encode()); pump(QUIET, AFTER)
+    pump(QUIET, AFTER)
     try: os.kill(pid, 15)
     except ProcessLookupError: pass
     return out.decode("utf-8", "replace")
