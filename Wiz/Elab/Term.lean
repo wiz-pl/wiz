@@ -4526,7 +4526,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
     let some d := g.find? "Bool.casesOn"
       | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
-    let us ← d.levelParams.mapM fun _ => freshLevelMeta
+    let us ← d.levelParams.mapM fun _ => pure Level.zero
     -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
     let proof : Term R :=
       .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))
