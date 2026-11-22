@@ -21,7 +21,9 @@ def id {0 A : Type} (1 x : A) : A := x
   descriptions with `μ`/`ν`; dependent pattern matching, mutual and indexed families.
 * **Sized types** for termination and productivity, and **codata** (`ν`, copatterns).
 * **Self-hosted**: the kernel, frontend and compiler in `selfhost/*.wiz` check and
-  compile themselves, and the bootstrap reaches a fixpoint (stages 1-3 emit the same C).
+  compile themselves, and the bootstrap reaches a three-stage byte fixpoint — a
+  build-stability check, not a correctness proof
+  ([docs/bootstrap-chain.md](docs/bootstrap-chain.md#what-each-check-claims-separately)).
 * **Native code**: erasure to an IR with Perceus reference counting and reuse, C and
   LLVM backends, a C FFI with header import, and machine integers and bit vectors.
 * **Tooling**: a language server with an infoview (terminal and browser clients),

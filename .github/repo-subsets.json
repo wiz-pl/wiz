@@ -11,10 +11,10 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "400d7317b263e1cc747670066dc384ec16c86739ebfad31658bdbb2dbf7f9d0c"
+      "sha256": "4c59d1550b1cb31a7e01889861d675621790d74a584fecc46aabfe9cf1eb4c36"
     },
     "lean": {
-      "files": 160,
+      "files": 162,
       "paths": [
         "Wiz/**",
         "Grail/**",
@@ -27,16 +27,16 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "80a189a954ad4bcfa3c48a20acfd26c0b57ce1fa625ab0285cca4aa5ea44ee73"
+      "sha256": "456d4d41ec6110237e1c53a0c0ae051442d8b93fd924c9776d10318534676f6c"
     },
     "packages": {
-      "files": 908,
+      "files": 911,
       "paths": [
         "scry/**",
         "hdl/**",
         "tower/**"
       ],
-      "sha256": "9210d55d8555b044bec4bdb6a098e29739cfa5df5cb0e04b12d74f6d8aa573d1"
+      "sha256": "5030193a23fe92e3fd0e16605f27f0475c1b97769e7d67871fc7fd7e2dbfc774"
     },
     "runtime": {
       "files": 11,
@@ -47,19 +47,19 @@
       "sha256": "3ad2db9958aea5c6d6003f78719211337b2456a928750b27ccb396f3c27bbc9c"
     },
     "tests": {
-      "files": 365,
+      "files": 371,
       "paths": [
         "Tests/**",
         "web/**"
       ],
-      "sha256": "255cd6371f6eb416fbfc5057845350d4ed6cfb34357dc53372eb7eb215dd1a5d"
+      "sha256": "4346ed42101858faed197daad3cea4c31a786cdd66f17045f04797da324df906"
     },
     "wizlib": {
-      "files": 106,
+      "files": 108,
       "paths": [
         "lib/**"
       ],
-      "sha256": "266fd0c776b2f2b81f0b3cc54ec7b755ae31bc36c86197574d0f6a4d44191bd8"
+      "sha256": "779c69a1454038442d5758cc152d0006fd68bbd9f6cbe4ef0b2791757de1fb4c"
     }
   }
 }

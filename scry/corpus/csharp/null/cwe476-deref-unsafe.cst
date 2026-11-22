@@ -40,7 +40,7 @@ type
 expression
 child
 paths	1
-corpus/csharp/null/unsafe.cs
+corpus/csharp/null/cwe476-deref-unsafe.cs
 bytes	1
 187
 nodes	45

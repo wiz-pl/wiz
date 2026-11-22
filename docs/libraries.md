@@ -449,7 +449,7 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
-## H14 T3: formal harness emission (`hdl/src/Hdl/Formal.wiz`)
+## H14 T3: property-monitor emission (`hdl/src/Hdl/Formal.wiz`)
 
 `Verilog.emitFormal` emits the same module as `Verilog.emit` plus an
 `` `ifdef FORMAL `` harness: the properties declared with the monitor language become
@@ -459,6 +459,13 @@ immediate `assert`/`assume`/`cover` statements clocked by the design's clock, wi
 unaffected. `Formal.sby` writes a SymbiYosys job (`mode bmc` or `prove`, `depth`,
 `smtbmc`); the harness also runs directly under `yosys -formal` +
 `yosys-smtbmc`.
+
+`Hdl.Formal` is an **unverified second rendering** of the properties, not a proof that
+the monitors mean what `FProp` says. Nothing relates `FProp` to the `TL` formulas it is
+supposed to denote; the emitted text is checked only by running an external tool. The
+`hdl` group's formal case is **skipped when `yosys`, `yosys-smtbmc` or `z3` is missing**
+(`Tests/Groups/Hdl.lean:196-203`), so on a runner without the toolchain the case is
+evidence of nothing.
 
 ```wiz no-check
 def props : List FProp := [
@@ -479,8 +486,9 @@ IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
   cycle), `rose` and `fell`.
 * **Monitors** are named `FProp`s: `always`, `implies` (`|->`), `impliesNext` (`|=>`),
   `nexts n`, `cover`, and the environment assumptions `assumeAlways`,
-  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is the corresponding
-  `TL` formula from H14 T on the observation trace; the module docs give the table.
+  `assumeInitial` and `assumeImplies`/`assumeImpliesNext`. Each is *intended* to mean the
+  corresponding `TL` formula from H14 T on the observation trace (the module docs give the
+  table); the emission does not prove that it does.
 * **History** is handled by a saturating cycle counter: a check that reads `n` cycles of
   history is gated until the counter reaches `n`, so the unconstrained value of a
   `$past` before cycle 0 is never mistaken for a failure. A circuit built with
@@ -490,7 +498,8 @@ IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
   correct RTL and finds a two-or-three-cycle counterexample for the variant (the
   stability monitor fails; the other four still pass). The test group runs the same
   proof with `yosys -formal`, `prep`, `clk2fflogic`, `write_smt2` and `yosys-smtbmc -s
-  z3`; `sby` consumes the generated `.sby` unchanged.
+  z3`; `sby` consumes the generated `.sby` unchanged. The case requires all three
+  tools and is a skip, not a pass, when one is absent (`Tests/Groups/Hdl.lean:196-203`).
 
 Not emitted yet: SVA sequences (`##[m:n]`, repetition, `throughout`), `until`,
 unbounded liveness (`◇`, leads-to, fairness — safety solvers do not prove it), and
@@ -699,11 +708,13 @@ Netlist.simulate n (Hdl.map (HwTy.leaves i) xs) = Hdl.map (HwTy.leaves o) (Circu
 for the infinite `Circuit.trace`: every finite prefix of the value trace is what the
 netlist simulates.
 
-**The obligations are discharged for a synthesised design.**
+**The obligations are discharged for one template, not generally.**
 `hdl/examples/hdl-sim-theorem.wiz` builds a one-bit delay with `Circuit.netlist "delay"`,
 proves `Circuit.Simulates` for it by `rfl` (the kernel evaluates the netlist's nodes),
 and applies the theorem to a four-cycle trace. That is a proof about the actual
-`Circuit.netlist` output, not a hand-written netlist; the test case in the `hdl` group
+`Circuit.netlist` output for that template, not a hand-written netlist and not a proof
+that scales: the same `rfl` gets stuck on a symbolic `BitVec` operation such as a 32-bit
+adder (`wiz-notes/sota-hdl-verification.md` §0.2). The test case in the `hdl` group
 runs the example and compares the netlist and value traces.
 
 **Outside the theorem** (stated in the module header too): multi-clock `Multi`/`Cdc`
