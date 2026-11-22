@@ -8,7 +8,7 @@ The counts below are generated from the file (not hand-typed):
 `scripts/trust-counts.py --write` rewrites this marker, `--check` fails when it drifts,
 and the `native` group runs the check.
 
-<!-- trust-counts: rows=835 partial=245 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=549 shared_reasons=286 legacy=0 expired=0 -->
+<!-- trust-counts: rows=837 partial=247 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=550 shared_reasons=287 legacy=0 expired=0 -->
 
 ## What is a source of trust
 
