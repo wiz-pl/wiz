@@ -1,7 +1,9 @@
 import IO
 import Json
-import Web.Hover
 import Web.Highlight
+import Web.Hover
+import Web.InfoPanel
+import Web.InfoTree
 import Web.Loom
 
 /-!
@@ -25,254 +27,32 @@ Source spans are `LINE:CHAR-LINE:CHAR` in `data-span`, which the page's `reveal`
 turns into a textarea selection. Nothing here reads or measures the DOM.
 -/
 
--- ## JSON helpers
-
-/-- A number field at a path, or 0. -/
-partial def Goals.natAt (j : Json) : List String → Nat
-  | .nil => match Json.asNat j with
-    | .some n => n
-    | .none => 0
-  | .cons k ks => match Json.get j k with
-    | .some v => Goals.natAt v ks
-    | .none => 0
-
-/-- A string field. -/
-partial def Goals.strAt (j : Json) : List String → String
-  | .nil => match Json.asString j with
-    | .some s => s
-    | .none => ""
-  | .cons k ks => match Json.get j k with
-    | .some v => Goals.strAt v ks
-    | .none => ""
-
-/-- A tag's numeric `ref` as the attribute text (`""` when absent). -/
-def Goals.refText (info : Json) : String := match Json.get info "ref" with
-  | .some v => match Json.asNat v with
-    | .some n => Nat.toString n
-    | .none => match Json.asString v with
-      | .some x => x
-      | .none => ""
-  | .none => ""
-
-/-- The string at the front of a list, or the default for anything else. -/
-def Goals.strings (js : List Json) : List String := List.map (fun j => match Json.asString j with
-  | .some s => s
-  | .none => "") js
-
-/-- An array's elements, or none for any other value. -/
-def Goals.arrOf (j : Json) : List Json := match j with
-  | .arr xs => Jsons.toList xs
-  | _ => []
-
-/-- The `[info, body]` of a tagged-text `tag`, if that is the shape. -/
-def Goals.tagParts (o : Option Json) : Option (Json × Json) := match o with
-  | .some v => match v with
-    | .arr xs => match Jsons.toList xs with
-      | .cons info (.cons body .nil) => .some (info, body)
-      | _ => .none
-    | _ => .none
-  | .none => .none
+-- ## The shared model
 
 /-- Whether two strings are equal. -/
 def Goals.eq (a b : String) : Bool := String.eq a b
 
-/-- A list's length as a `Nat`. -/
+/-- A string is non-empty. -/
 def Goals.has (s : String) : Bool := Bool.not (String.isEmpty s)
 
--- ## Spans
-
-/-- A range as `LINE:CHAR-LINE:CHAR`, or `""` when there is no start. -/
-def Goals.spanText (range : Json) : String :=
-  match Json.get range "start" with
-  | .none => ""
-  | .some start =>
-    let stop := match Json.get range "end" with
-      | .some e => e
-      | .none => start;
-    String.append (Nat.toString (Goals.natAt start ["line"]))
-      (String.append ":" (String.append (Nat.toString (Goals.natAt start ["character"]))
-        (String.append "-" (String.append (Nat.toString (Goals.natAt stop ["line"]))
-          (String.append ":" (Nat.toString (Goals.natAt stop ["character"])))))))
-
-/-- `data-span` for a range, or `[]` when there is no span. -/
-def Goals.spanAttrs (range : Json) : List Loom.Attr :=
-  let s := Goals.spanText range;
-  match String.isEmpty s with
-  | .true => []
-  | .false => [Loom.attr "data-span" s]
-
--- ## Tagged text (the protocol's §2 shape)
-
-/-- A tag's class suffix: its kind, or `other` when the server omits one. -/
-def Goals.tagKind (kind : String) : String :=
-  match String.isEmpty kind with
-  | .true => "other"
-  | .false => kind
-
-/-- One tag of a rendered view: its `data-idx`, the server's `ref` and its source span. -/
-structure Goals.Tag where
-  idx : Nat
-  ref : String
-  span : String
-
-/-- A tag's range (`tag.range`, when a server sends one). -/
-def Goals.tagRange (info : Json) : Json := match Json.get info "range" with
-  | .some r => r
-  | .none => Json.mkNull
-
-/-- The state of a tagged-text traversal: the next tag index and the tags seen. -/
-structure Goals.Walk where
-  next : Nat
-  tags : List Goals.Tag
-
-mutual
-/-- Collect a tagged text's tags, in document order, onto `st`. -/
-partial def Goals.tagsOf (j : Json) (st : Goals.Walk) : Goals.Walk :=
-  match Json.get j "text" with
-  | .some _ => st
-  | .none => match Json.get j "append" with
-    | .some v => Goals.tagsOfAll (Goals.arrOf v) st
-    | .none => match Json.get j "tag" with
-      | .some v => match Goals.tagParts (.some v) with
-        | .some p =>
-          let span := Goals.spanText (Goals.tagRange p.1);
-          let st1 := Goals.Walk.mk (st.next + 1)
-            (List.append st.tags [Goals.Tag.mk st.next (Goals.refText p.1) span]);
-          Goals.tagsOf p.2 st1
-        | .none => st
-      | .none => st
-
-/-- `Goals.tagsOf` on each element. -/
-partial def Goals.tagsOfAll (xs : List Json) (st : Goals.Walk) : Goals.Walk :=
-  match xs with
-  | .nil => st
-  | .cons x rest => Goals.tagsOfAll rest (Goals.tagsOf x st)
-end
-
-mutual
-/-- A tagged text as a Loom tree, numbering tags from `next`; `mkMsg` turns a tag's
-index into the pane's message (a click selects it). A text leaf goes through
-`Web.Highlight.text`, the same escaped-text path the hover card and the source pane use;
-the tag classes stay the infoview protocol's (`tt k-KIND`), not the docs' `hl-*` set. -/
-partial def Goals.taggedView {M : Type} (sel next : Nat) (mkMsg : Nat → M) (j : Json) :
+/-- Tagged text as the infoview view: `Web.InfoTree` owns the tree, its numbering and the
+markup; this name is the pane's public entry point (same signature and bytes). -/
+def Goals.taggedView {M : Type} (sel next : Nat) (mkMsg : Nat → M) (j : Json) :
     Loom.VNode M × Nat :=
-  match Json.get j "text" with
-  | .some (.str s) => (Highlight.text s, next)
-  | .some _ => (Loom.text "", next)
-  | .none => match Json.get j "append" with
-    | .some v => Goals.appendAll sel next mkMsg (Goals.arrOf v) []
-    | .none => match Json.get j "tag" with
-      | .some v => match Goals.tagParts (.some v) with
-        | .none => (Loom.text "", next)
-        | .some p =>
-        let info := p.1;
-        let body := p.2;
-        let idx := next;
-        let kind := Goals.tagKind (Json.getStr info "kind");
-        let name := Json.getStr info "name";
-        let ref := Goals.refText info;
-        let span := Goals.spanText (Goals.tagRange info);
-        let bodyNext := Goals.taggedView sel (next + 1) mkMsg body;
-        let selCls := match Nat.beq sel (idx + 1) with
-          | .true => " sel"
-          | .false => "";
-        let attrs : List Loom.Attr :=
-          List.append [Loom.class (String.append "tt k-" (String.append kind selCls))]
-            (List.append (match String.isEmpty ref with
-                | .true => []
-                | .false => [Loom.attr "data-ref" ref])
-              (List.append [Loom.attr "data-idx" (Nat.toString idx)]
-                (List.append (match String.isEmpty name with
-                    | .true => []
-                    | .false => [Loom.attr "title" name])
-                  (match String.isEmpty span with
-                    | .true => []
-                    | .false => [Loom.attr "data-span" span]))));
-        (Loom.on "click" (mkMsg idx) (Loom.el "span" attrs [bodyNext.1]), bodyNext.2)
-      | .none => (Loom.text "", next)
+  InfoTree.view sel next mkMsg (InfoTree.ofJson j)
 
-/-- The siblings of a tagged text, in order. -/
-partial def Goals.appendAll {M : Type} (sel next : Nat) (mkMsg : Nat → M)
-    (xs : List Json) (acc : List (Loom.VNode M)) : Loom.VNode M × Nat :=
-  match xs with
-  | .nil => (Loom.seq acc, next)
-  | .cons x rest =>
-    let r := Goals.taggedView sel next mkMsg x;
-    Goals.appendAll sel r.2 mkMsg rest (List.append acc [r.1])
-end
+/-- The plain text of tagged text. -/
+def Goals.taggedText (j : Json) : String := InfoTree.plainText (InfoTree.ofJson j)
 
-/-- The plain text of a tagged text. -/
-partial def Goals.taggedText (j : Json) : String :=
-  match Json.get j "text" with
-  | .some (.str s) => s
-  | .none => match Json.get j "append" with
-    | .some v => String.join (List.map Goals.taggedText (Goals.arrOf v))
-    | .none => match Json.get j "tag" with
-      | .some v => match Goals.tagParts (.some v) with
-        | .some p => Goals.taggedText p.2
-        | .none => ""
-      | .none => ""
-  | _ => ""
+/-- The optional term tree under a goal result. -/
+def Goals.treeSection {M : Type} (mkMsg : Nat → M) (tree : Json)
+    (head : Loom.VNode M) : Loom.VNode M :=
+  InfoTree.treeSection mkMsg tree head
 
-mutual
-/-- One tagged node of the term tree. -/
-partial def Goals.treeView {M : Type} (mkMsg : Nat → M) (j : Json) (next fuel : Nat) :
-    Loom.VNode M × Nat :=
-  match Nat.beq fuel 0 with
-  | .true => (Loom.text "", next)
-  | .false => match Json.get j "tag" with
-    | .some v => match Goals.tagParts (.some v) with
-      | .none => (Loom.text "", next)
-      | .some p =>
-      let info := p.1;
-      let body := p.2;
-      let idx := next;
-      let kind := Goals.tagKind (Json.getStr info "kind");
-      let name := Json.getStr info "name";
-      let text := Goals.taggedText body;
-      let shown := match Nat.lt 80 (String.length text) with
-        | .true => String.append (String.take 79 text) "…"
-        | .false => text;
-      let label := match String.isEmpty name with
-        | .true => kind
-        | .false => String.append name (String.append " · " kind);
-      let kids := Goals.treeChildren mkMsg body (next + 1) (fuel - 1);
-      let nested := match kids.1 with
-        | .nil => []
-        | _ => [Loom.el "ul" [] kids.1];
-      (Loom.el "li" []
-        (List.append [Loom.on "click" (mkMsg idx)
-          (Loom.el "span" [Loom.class (String.append "tt k-" kind), Loom.attr "data-idx" (Nat.toString idx),
-            Loom.attr "title" label] [Loom.text shown])] nested), kids.2)
-    | .none => (Loom.text "", next)
+/-- A JSON tagged text's tags, numbered from the walk's next index. -/
+def Goals.tagsOfJson (j : Json) (st : InfoTree.Walk) : InfoTree.Walk :=
+  InfoTree.tagsOf (InfoTree.ofJson j) st
 
-/-- A tree node's children; `append` nodes are flattened into the list. -/
-partial def Goals.treeChildren {M : Type} (mkMsg : Nat → M) (j : Json) (next fuel : Nat) :
-    List (Loom.VNode M) × Nat :=
-  match Json.get j "tag" with
-  | .some _ => let r := Goals.treeView mkMsg j next fuel; ([r.1], r.2)
-  | .none => match Json.get j "append" with
-    | .some v => Goals.treeChildrenAll mkMsg (Goals.arrOf v) next fuel []
-    | .none => ([], next)
-
-/-- `Goals.treeChildren` for each element. -/
-partial def Goals.treeChildrenAll {M : Type} (mkMsg : Nat → M) (xs : List Json)
-    (next fuel : Nat) (acc : List (Loom.VNode M)) : List (Loom.VNode M) × Nat :=
-  match xs with
-  | .nil => (acc, next)
-  | .cons x rest =>
-    let r := Goals.treeChildren mkMsg x next fuel;
-    Goals.treeChildrenAll mkMsg rest r.2 fuel (List.append acc r.1)
-end
-
-/-- The optional tagged term tree under a goal result. -/
-def Goals.treeSection {M : Type} (mkMsg : Nat → M) (tree : Json) (head : Loom.VNode M) : Loom.VNode M :=
-  match Json.get tree "tag" with
-  | .some _ =>
-    let t := Goals.treeView mkMsg tree 1 200;
-    Loom.el "details" [Loom.class "tree-wrap"]
-      [Loom.el "summary" [] [Loom.text "term tree"], Loom.el "ul" [Loom.class "tree"] [t.1]]
-  | _ => Loom.text ""
 
 -- ## Goals
 
@@ -280,13 +60,13 @@ mutual
 /-- A hypothesis as a `.hyp` with its names, type and value. -/
 partial def Goals.hypView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
     (fallback : Json) (hyp : Json) (next : Nat) : Loom.VNode M × Nat :=
-  let names := Goals.strings (Json.getList hyp "names");
+  let names := InfoTree.strings (Json.getList hyp "names");
   let range := match Json.get hyp "range" with
     | .some r => match Json.get r "start" with
       | .some _ => r
       | .none => fallback
     | .none => fallback;
-  let span := Goals.spanText range;
+  let span := InfoTree.spanText range;
   let namesHtml := List.map (fun name =>
     Loom.el "span" [Loom.class "names", Loom.attr "title" name] [Loom.text name]) names;
   let nameNodes := match namesHtml with
@@ -307,7 +87,7 @@ partial def Goals.hypView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M
     | .none => (Loom.text "", typeNode.2);
   let kids := List.append nameNodes
     (List.append [Loom.text " : "] (List.append [typeNode.1] [valNode.1]));
-  (Loom.on "click" (msgSpan span) (Loom.el "div" (List.append [Loom.class "hyp"] (Goals.spanAttrs range)) kids),
+  (Loom.on "click" (msgSpan span) (Loom.el "div" (List.append [Loom.class "hyp"] (InfoTree.spanAttrs range)) kids),
     valNode.2)
 
 /-- Each hypothesis. -/
@@ -329,7 +109,7 @@ def Goals.goalView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
       | .some _ => r
       | .none => fallback
     | .none => fallback;
-  let span := Goals.spanText range;
+  let span := InfoTree.spanText range;
   let name := Json.getStr goal "userName";
   let hyps := Goals.hypsView mkMsg msgSpan range (Json.getList goal "hyps") next [];
   let prefix := match Json.get goal "goalPrefix" with
@@ -347,7 +127,7 @@ def Goals.goalView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
   let target := Loom.el "div" [Loom.class "target"]
     [Loom.el "span" [Loom.class "turnstile"] [Loom.text prefix], typeNode.1];
   (Loom.on "click" (msgSpan span)
-    (Loom.el "div" (List.append [Loom.class "goal"] (Goals.spanAttrs range))
+    (Loom.el "div" (List.append [Loom.class "goal"] (InfoTree.spanAttrs range))
       (List.append caseNode [Loom.el "div" [Loom.class "hyps"] [hyps.1], target])),
     typeNode.2)
 
@@ -364,7 +144,7 @@ partial def Goals.goalsView {M : Type} (mkMsg : Nat → M) (msgSpan : String →
 /-- The plain goal text of a `plainGoal` answer. -/
 def Goals.plainGoals (result : Json) : List String :=
   match Json.get result "goals" with
-  | .some v => Goals.strings (Goals.arrOf v)
+  | .some v => InfoTree.strings (InfoTree.arrOf v)
   | _ => match Json.get result "rendered" with
     | .some (.str s) =>
       let text := match String.splitOn s "```" with
@@ -384,7 +164,7 @@ def Goals.isPlainGoals (result : Json) : Bool :=
   | _ => match Json.get result "goals" with
     | .some v => List.all (fun j => match Json.asString j with
         | .some _ => .true
-        | .none => .false) (Goals.arrOf v)
+        | .none => .false) (InfoTree.arrOf v)
     | _ => .false
 
 /-- The messages of a goals result. -/
@@ -413,10 +193,10 @@ def Goals.goalResultView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
         let range := match Json.get result "range" with
           | .some r => r
           | .none => Json.mkNull;
-        let span := Goals.spanText range;
+        let span := InfoTree.spanText range;
         let block := Loom.seq (List.map (fun g =>
           Loom.on "click" (msgSpan span)
-            (Loom.el "div" (List.append [Loom.class "goal plain"] (Goals.spanAttrs range))
+            (Loom.el "div" (List.append [Loom.class "goal plain"] (InfoTree.spanAttrs range))
               [Loom.el "pre" [] [Loom.text g]])) gs);
         (Loom.seq [block, Goals.messagesView (Json.getList result "messages")], next)
   | .false => match Json.get result "goals" with
@@ -450,9 +230,9 @@ def Goals.termResultView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
       let range := match Json.get result "range" with
         | .some r => r
         | .none => Json.mkNull;
-      let span := Goals.spanText range;
+      let span := InfoTree.spanText range;
       (Loom.on "click" (msgSpan span)
-        (Loom.el "div" (List.append [Loom.class "goal plain"] (Goals.spanAttrs range))
+        (Loom.el "div" (List.append [Loom.class "goal plain"] (InfoTree.spanAttrs range))
           [Loom.el "pre" [] [Loom.text s]]), next)
     | _ => (Goals.nothing, next)
   | .false =>
@@ -483,34 +263,12 @@ def Goals.termResultView {M : Type} (mkMsg : Nat → M) (msgSpan : String → M)
 
 -- ## Diagnostics, selection and status
 
-/-- A severity's class name. -/
-def Goals.severity (n : Nat) : String :=
-  match Nat.beq n 1 with
-  | .true => "error"
-  | .false => match Nat.beq n 2 with
-    | .true => "warning"
-    | .false => match Nat.beq n 3 with
-      | .true => "info"
-      | .false => "hint"
+/-- A severity's class name (`Web.InfoPanel`'s table). -/
+def Goals.severity (n : Nat) : String := InfoPanel.severity n
 
-/-- The diagnostics list. -/
+/-- The diagnostics list (the shared row renderer, `Web.InfoPanel`). -/
 def Goals.diagnosticsView {M : Type} (diagnostics : List Json) : Loom.VNode M :=
-  match diagnostics with
-  | .nil => Loom.el "div" [Loom.class "nothing"] [Loom.text "no diagnostics"]
-  | .cons _ _ => Loom.el "div" [Loom.class "diags"] (List.map (fun d =>
-      let sev := Goals.severity (Json.getNat d "severity");
-      let range := match Json.get d "range" with
-        | .some r => r
-        | .none => Json.mkNull;
-      let atText := match Json.get range "start" with
-        | .some s => String.append (Nat.toString (Goals.natAt s ["line"] + 1))
-            (String.append ":" (Nat.toString (Goals.natAt s ["character"] + 1)))
-        | .none => "";
-      Loom.el "div" (List.append [Loom.class (String.append "diag sev-" sev)]
-        (Goals.spanAttrs range))
-        [ Loom.el "span" [Loom.class "sev"] [Loom.text sev]
-        , Loom.el "span" [Loom.class "msg"] [Loom.text (Json.getStr d "message")]
-        , Loom.el "span" [Loom.class "where"] [Loom.text atText] ]) diagnostics)
+  InfoPanel.diagnostics diagnostics
 
 /-- The selected subterm (`wiz/subtermInfo`) as `.selection`. -/
 def Goals.selectionView {M : Type} (mkMsg : Nat → M) (info : Json) (next : Nat) : Loom.VNode M × Nat :=
@@ -636,7 +394,7 @@ structure Goals.Model where
   pending : List (String × String)
   parsedView : Json
   parsedInfo : Json
-  tags : List Goals.Tag
+  tags : List InfoTree.WalkTag
 
 /-- A pane with no server and nothing to show. -/
 def Goals.initial : Goals.Model :=
@@ -648,12 +406,12 @@ def Goals.field (s : Goals.Model) (key : String) : Json :=
   | .some v => v
   | .none => Json.mkNull
 
-def Goals.state (s : Goals.Model) : String := Goals.strAt (Goals.field s "state" ) []
-def Goals.endpoint (s : Goals.Model) : String := Goals.strAt (Goals.field s "endpoint") []
-def Goals.message (s : Goals.Model) : String := Goals.strAt (Goals.field s "message") []
-def Goals.serverName (s : Goals.Model) : String := Goals.strAt (Goals.field s "serverName") []
-def Goals.serverVersion (s : Goals.Model) : String := Goals.strAt (Goals.field s "serverVersion") []
-def Goals.infoview (s : Goals.Model) : String := Goals.strAt (Goals.field s "infoview") []
+def Goals.state (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "state" ) []
+def Goals.endpoint (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "endpoint") []
+def Goals.message (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "message") []
+def Goals.serverName (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "serverName") []
+def Goals.serverVersion (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "serverVersion") []
+def Goals.infoview (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "infoview") []
 def Goals.canReconnect (s : Goals.Model) : Bool := match Json.get (Goals.field s "canReconnect") "canReconnect" with
   | _ => match Json.asBool (Goals.field s "canReconnect") with
     | .some b => b
@@ -661,43 +419,43 @@ def Goals.canReconnect (s : Goals.Model) : Bool := match Json.get (Goals.field s
 
 def Goals.diagnostics (s : Goals.Model) : List Json := Json.asList (Goals.field s "diagnostics")
 def Goals.goalsJson (s : Goals.Model) : Json := Goals.field s "goals"
-def Goals.goalsKind (s : Goals.Model) : String := Goals.strAt (Goals.field s "goalsKind") []
+def Goals.goalsKind (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "goalsKind") []
 def Goals.termJson (s : Goals.Model) : Json := Goals.field s "term"
-def Goals.termKind (s : Goals.Model) : String := Goals.strAt (Goals.field s "termKind") []
+def Goals.termKind (s : Goals.Model) : String := InfoTree.strAt (Goals.field s "termKind") []
 
 /-- The selected subterm, parsed; `null` when none. -/
 def Goals.infoJson (s : Goals.Model) : Json := s.parsedInfo
 
 /-- A hypothesis's tagged type and value. -/
-def Goals.tagsOfHyp (hyp : Json) (st : Goals.Walk) : Goals.Walk :=
+def Goals.tagsOfHyp (hyp : Json) (st : InfoTree.Walk) : InfoTree.Walk :=
   let s1 := match Json.get hyp "type" with
-    | .some t => Goals.tagsOf t st
+    | .some t => Goals.tagsOfJson t st
     | .none => st;
   match Json.get hyp "val" with
     | .some v => match Json.get v "tag" with
-      | .some _ => Goals.tagsOf v s1
+      | .some _ => Goals.tagsOfJson v s1
       | .none => s1
     | .none => s1
 
 /-- A goal's hypotheses and target. -/
-def Goals.tagsOfGoal (goal : Json) (st : Goals.Walk) : Goals.Walk :=
+def Goals.tagsOfGoal (goal : Json) (st : InfoTree.Walk) : InfoTree.Walk :=
   let s1 := List.foldl (fun acc h => Goals.tagsOfHyp h acc) st (Json.getList goal "hyps");
   match Json.get goal "type" with
-    | .some t => Goals.tagsOf t s1
+    | .some t => Goals.tagsOfJson t s1
     | .none => s1
 
 /-- The tags a goals result draws: its goals and, when present, its tree. -/
-def Goals.tagsOfGoalsResult (result : Json) (st : Goals.Walk) : Goals.Walk :=
+def Goals.tagsOfGoalsResult (result : Json) (st : InfoTree.Walk) : InfoTree.Walk :=
   let s1 := List.foldl (fun acc g => Goals.tagsOfGoal g acc) st (Json.getList result "goals");
   match Json.get result "tree" with
-    | .some t => Goals.tagsOf t s1
+    | .some t => Goals.tagsOfJson t s1
     | .none => match Json.get result "term" with
-      | .some t => Goals.tagsOf t s1
+      | .some t => Goals.tagsOfJson t s1
       | .none => s1
 
 /-- The tags an expected-type result draws: its goal and its tree (which defaults to the
 goal's type). -/
-def Goals.tagsOfTermResult (result : Json) (st : Goals.Walk) : Goals.Walk :=
+def Goals.tagsOfTermResult (result : Json) (st : InfoTree.Walk) : InfoTree.Walk :=
   let goal := match Json.get result "goal" with
     | .some g => g
     | .none => result;
@@ -710,27 +468,27 @@ def Goals.tagsOfTermResult (result : Json) (st : Goals.Walk) : Goals.Walk :=
       | .some t => t
       | .none => Json.mkNull;
   match Json.get tree "tag" with
-    | .some _ => Goals.tagsOf tree s1
+    | .some _ => Goals.tagsOfJson tree s1
     | .none => s1
 
 /-- The tags of one parsed view/info pair, in render order: the goals, the expected type,
 then the selected subterm. This is the only walk; `Goals.effect` stores its result. -/
-def Goals.tagsOfParsed (view info : Json) : List Goals.Tag :=
+def Goals.tagsOfParsed (view info : Json) : List InfoTree.WalkTag :=
   let g := Goals.tagsOfGoalsResult
     (match Json.get view "goals" with | .some v => v | .none => Json.mkNull)
-    (Goals.Walk.mk 0 []);
+    (InfoTree.Walk.mk 0 []);
   let t := Goals.tagsOfTermResult
     (match Json.get view "term" with | .some v => v | .none => Json.mkNull) g;
   let i := match Json.get info "type" with
-    | .some ty => Goals.tagsOf ty t
+    | .some ty => Goals.tagsOfJson ty t
     | .none => t;
   i.tags
 
 /-- The tags of the pane, in render order (cached when the view/info effect arrived). -/
-def Goals.allTags (s : Goals.Model) : List Goals.Tag := s.tags
+def Goals.allTags (s : Goals.Model) : List InfoTree.WalkTag := s.tags
 
 /-- The tags of the pane (the older name). -/
-def Goals.tags (s : Goals.Model) : List Goals.Tag := s.tags
+def Goals.tags (s : Goals.Model) : List InfoTree.WalkTag := s.tags
 
 /-- The pane's pending requests as JSON values (for a page that has requests of its
 own, like the playground). -/
@@ -762,30 +520,33 @@ def Goals.view {M : Type} (mkMsg : Nat → M) (msgSpan : String → M) (mkReconn
     (s : Goals.Model) : Loom.VNode M :=
   let state := Goals.state s;
   let open := Goals.eq state "open";
-  let body : List (Loom.VNode M) :=
+  let head : List (Loom.VNode M) :=
     [ Goals.statusView state (Goals.endpoint s) (Goals.serverName s) (Goals.serverVersion s) (Goals.infoview s)
-    , Goals.hintView mkReconnect state (Goals.message s) (Goals.endpoint s) (Goals.canReconnect s) ]
-    ++ (match open with
-      | .false => []
-      | .true =>
-        let g := Goals.goalResultView mkMsg msgSpan (Goals.goalsJson s) (Goals.goalsKind s) 0;
-        let t := Goals.termResultView mkMsg msgSpan (Goals.termJson s) (Goals.termKind s) g.2;
-        let i := Goals.selectionView mkMsg (Goals.infoJson s) t.2;
-        [ Loom.el "h3" [] [Loom.text "Goals"]
-        , (match String.isEmpty (Goals.goalsKind s) with
-            | .true => Loom.el "div" [Loom.class "nothing"] [Loom.text "asking the server…"]
-            | .false => g.1)
-        , Loom.el "h3" [] [Loom.text "Expected type"]
-        , (match String.isEmpty (Goals.termKind s) with
-            | .true => Loom.el "div" [Loom.class "nothing"] [Loom.text "asking the server…"]
-            | .false => t.1)
+    , Goals.hintView mkReconnect state (Goals.message s) (Goals.endpoint s) (Goals.canReconnect s) ];
+  let sections : List (InfoPanel.Section M) :=
+    match open with
+    | .false => []
+    | .true =>
+      let g := Goals.goalResultView mkMsg msgSpan (Goals.goalsJson s) (Goals.goalsKind s) 0;
+      let t := Goals.termResultView mkMsg msgSpan (Goals.termJson s) (Goals.termKind s) g.2;
+      let i := Goals.selectionView mkMsg (Goals.infoJson s) t.2;
+      List.append
+        [ InfoPanel.section "Goals"
+            (match String.isEmpty (Goals.goalsKind s) with
+              | .true => Loom.el "div" [Loom.class "nothing"] [Loom.text "asking the server…"]
+              | .false => g.1)
+        , InfoPanel.section "Expected type"
+            (match String.isEmpty (Goals.termKind s) with
+              | .true => Loom.el "div" [Loom.class "nothing"] [Loom.text "asking the server…"]
+              | .false => t.1)
         ]
-        ++ (match Json.isNull (Goals.infoJson s) with
+        (List.append
+          (match Json.isNull (Goals.infoJson s) with
             | .true => []
-            | .false => [Loom.el "h3" [] [Loom.text "Selected subterm"], i.1])
-        ++ [ Loom.el "h3" [] [Loom.text "Diagnostics"]
-           , Goals.diagnosticsView (Goals.diagnostics s) ]);
-  Loom.el "div" [Loom.class "lsp-view", Loom.attr "data-state" state] body
+            | .false => [InfoPanel.section "Selected subterm" i.1])
+          [ InfoPanel.section "Diagnostics" (Goals.diagnosticsView (Goals.diagnostics s)) ]);
+  Loom.el "div" [Loom.class "lsp-view", Loom.attr "data-state" state]
+    (List.append head [InfoPanel.render sections])
 
 /-- The hover card, from `Web.Hover`'s model. -/
 def Goals.hoverCard {M : Type} (s : Goals.Model) : Loom.VNode M :=
@@ -806,7 +567,7 @@ def Goals.panel {M : Type} (mkMsg : Nat → M) (msgSpan : String → M) (mkRecon
 -- ## State transitions
 
 /-- Find a tag by index. -/
-def Goals.tagAt (tags : List Goals.Tag) (idx : Nat) : Option Goals.Tag :=
+def Goals.tagAt (tags : List InfoTree.WalkTag) (idx : Nat) : Option InfoTree.WalkTag :=
   match tags with
   | .nil => .none
   | .cons t ts => match Nat.beq t.idx idx with

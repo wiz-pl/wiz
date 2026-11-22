@@ -61,9 +61,14 @@ structure Options where
   verbose : Nat := 0
   /-- modules elaborated and rendered at once (`--jobs`; `1`: one at a time) -/
   jobs : Nat := 1
-  /-- highlight `wiz` fences at render time (`--no-highlight` turns it off: the pages
+  /-- highlight fenced code at render time (`--no-highlight` turns it off: the pages
   are then byte-identical to the pre-highlighting output) -/
   highlight : Bool := true
+  /-- external language-registry files (`--languages FILE`, repeatable); also read from
+  `WIZ_DOC_LANGUAGES` (colon-separated) by `Build.run` -/
+  languages : List System.FilePath := []
+  /-- the resolved registry: built-ins merged with `languages` (`Build.run` fills it) -/
+  registry : Highlight.Registry := Highlight.Registry.builtins
 
 /-- What `run` made: the site's pages, the reference files that are not up to date (with
 `--check`), and the reference files it wrote. -/
@@ -112,8 +117,10 @@ structure Ctx where
   modules : List String
   /-- the module being documented -/
   current : String
-  /-- highlight `wiz` fences (`--no-highlight`: false, for the old bytes) -/
+  /-- highlight fenced code (`--no-highlight`: false, for the old bytes) -/
   highlight : Bool := true
+  /-- the language registry (built-ins plus any `--languages` file) -/
+  registry : Highlight.Registry := Highlight.Registry.builtins
 
 /-- Where a constant is documented: `M.html#n`, if it is. -/
 def Ctx.href? (c : Ctx) (n : Name) : Option String := do
@@ -250,14 +257,14 @@ def docLink (c : Ctx) (code : String) : Option String :=
 
 def docHtml (c : Ctx) (doc : Option String) : String :=
   match doc with
-  | some d => s!"<div class=\"doc\">{(renderWith (docLink c) c.st.tables.tokens c.highlight d).html}</div>"
+  | some d => s!"<div class=\"doc\">{(renderWith (docLink c) c.registry c.st.tables.tokens c.highlight d).html}</div>"
   | none => ""
 
-/-- The highlighted fenced blocks of a doc comment, in order (for the page's
-`wizHighlight` data; empty with `--no-highlight`). -/
+/-- The fenced blocks of a doc comment, in order (for the page's `wizHighlight` data;
+a plain fence has no spans; empty with `--no-highlight`). -/
 def docBlocks (c : Ctx) (doc : Option String) : Array Highlight.Block :=
   match doc with
-  | some d => if c.highlight then (renderWith (docLink c) c.st.tables.tokens true d).blocks else #[]
+  | some d => if c.highlight then (renderWith (docLink c) c.registry c.st.tables.tokens true d).blocks else #[]
   | none => #[]
 
 /-- A page's `wizHighlight` data: the spans of every `wiz` fence, for the hover runtime
