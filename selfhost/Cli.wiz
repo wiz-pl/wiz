@@ -8,7 +8,8 @@ namespace __root__
 --                                     `--lib` also OUT.c, the header OUT.h and the object OUT
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost lsp                   a language server on stdin/stdout (D8: the
---                                      protocol subset `web/selfhost-lsp-shim.js` answers)
+--                                      protocol subset `web/selfhost-lsp-shim.js` answers,
+--                                      plus hover/definition/completion)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --cache-ro DIR
 --            (a read-only cache layer, repeatable), --no-cache, --cache-prune DAYS,
@@ -1973,17 +1974,21 @@ def legacyCmd (args : List String) : IO Unit := do
 -- lsp: the language server (D8), JSON-RPC over stdin/stdout
 --
 -- The subset is the one the playground's self-hosted shim answers
--- (`web/selfhost-lsp-shim.js`, the `docs/playground-lsp.md` contract): `initialize`
--- (`textDocumentSync` 1: full text, `wizInfoview` v1), `textDocument/didOpen`,
--- `didChange`, `didClose`, `textDocument/publishDiagnostics`, the `wiz/elaborated`
--- notification when the client asks for it, and the infoview's plain queries
--- (`wiz/plainGoal`, `wiz/plainTermGoal`): a check with the collection on records each
--- definition body's expected type and, in a `by` block, the goals after each tactic
--- (`LspEntry` in `selfhost/Frontend.wiz`), and the queries answer from those entries in
--- the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
+-- (`web/selfhost-lsp-shim.js`, the `docs/playground-lsp.md` contract), plus the
+-- declaration navigation the shim has: `initialize` (`textDocumentSync` 1: full text,
+-- `positionEncoding` UTF-16, hover/definition/completion providers, `wizInfoview` v1),
+-- `textDocument/didOpen`, `didChange`, `didClose`, `textDocument/publishDiagnostics`, the
+-- `wiz/elaborated` notification when the client asks for it, and the infoview's plain
+-- queries (`wiz/plainGoal`, `wiz/plainTermGoal`). A check with the collection on records
+-- each definition body's expected type, the goals after each tactic, and each
+-- declaration (`LspEntry` in `selfhost/Frontend.wiz`); the queries answer from those
+-- entries in the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
 -- innermost term at the cursor, `plainGoal` the nearest snapshot at or before it
 -- (`{rendered, goals, messages}`, `null` outside every `by` block). `textDocument/hover`
--- is `null` and the interactive infoview methods are `MethodNotFound`, as in the shim.
+-- is the declaration's signature as Markdown, `definition` its `Location`, and
+-- `completion` the declarations matching the identifier before the caret (the shim's
+-- three, with the host's item fields); a name the index does not know is `null`. The
+-- interactive infoview methods are `MethodNotFound`, as in the shim.
 -- Diagnostics are `check`'s, with `source: "wiz"`,
 -- the code `check` prints, and a range from the diagnostic's position to the end of its
 -- line. An imported module's diagnostics are not published: open that module. A
@@ -1991,13 +1996,13 @@ def legacyCmd (args : List String) : IO Unit := do
 -- the text is the buffer's, and the path only names it in diagnostics and is the first
 -- `import` root. (`import_c` headers are read from the server's working directory, as
 -- `check` reads them; the Lean server resolves them beside the document.) Positions are
--- the frontend's, which count characters; as in the Lean server (`Wiz/LSP.lean`), that
--- agrees with LSP's UTF-16 unit outside the BMP.
+-- LSP's: `character` counts UTF-16 code units, so an astral character is two and every
+-- column after it on the line moves by one (the frontend's columns count code points and
+-- are converted at the boundary).
 --
--- Not here (see `wiz-notes/selfhost-parity.md` D8): definition, references,
--- completion, signature help, inlay hints, semantic tokens, document and workspace
--- symbols, folding, code actions, formatting (`fmt`), the documentation generator
--- (`doc`), and `repl`.
+-- Not here (see `wiz-notes/selfhost-parity.md` D8): references, signature help, inlay
+-- hints, semantic tokens, document and workspace symbols, folding, code actions,
+-- formatting (`fmt`), the documentation generator (`doc`), and `repl`.
 
 -- one byte of the client's stream. `getchar` is C's `int`; the return is read as
 -- `UInt64`, so the end of the file (a negative `int`, hence above any byte) is seen
@@ -2469,28 +2474,60 @@ def lspLineLen : List Char → Nat
   | .nil => 0
   | .cons c cs => if Nat.beq (Char.code c) 10 then 0 else Nat.succ (lspLineLen cs)
 
--- the line's length in characters (the end of a diagnostic's range)
+-- the line's length in code points (the end of a diagnostic's range)
 def lspLineEnd (text : String) (ln : Nat) : Nat := match text with
   | .mk cs => lspLineLen (lspDropLines cs (Nat.sub ln 1))
 
+-- ## UTF-16 positions
+--
+-- LSP's `character` counts UTF-16 code units (the default `positionEncoding`, and the
+-- one this server advertises). The frontend's columns, like Wiz's `Char`, count code
+-- points, so the two agree only below the BMP: an astral character (U+10000 and above)
+-- is one code point but two UTF-16 units, and every column after it on the same line is
+-- one more than the frontend's.
+
+-- the UTF-16 code units of a code point (an astral character is two)
+def lspUnitsOf (c : Char) : Nat :=
+  if Nat.lt (Char.code c) 65536 then 1 else 2
+
+-- the UTF-16 width of the first `k` code points of a line (stopping at its newline)
+partial def lspWidthGo (acc : Nat) : List Char → Nat → Nat
+  | .nil, _ => acc
+  | .cons _ _, .zero => acc
+  | .cons c cs, .succ k =>
+    if strEqC c 10 then acc else lspWidthGo (Nat.add acc (lspUnitsOf c)) cs k
+
+-- line `ln` (1-based) and code-point column `col` (0-based) as a UTF-16 column
+def lspUtf16Col (text : String) (ln col : Nat) : Nat :=
+  lspWidthGo 0 (lspDropLines (charsOf text) (Nat.sub ln 1)) col
+
+-- a diagnostic's position (1-based line and code-point column) and the end of its line,
+-- in UTF-16 units
 def lspRange (text : String) (ln col : Nat) : J :=
   let l0 := Nat.sub ln 1;
-  let c0 := Nat.sub col 1;
-  let e := Nat.max (lspLineEnd text ln) c0;
+  let c0 := lspUtf16Col text ln (Nat.sub col 1);
+  let e := Nat.max (lspUtf16Col text ln (lspLineEnd text ln)) c0;
   .jobj (.ocons "start" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
       (.ocons "character" (.jnum (Nat.toString c0)) .onil)))
     (.ocons "end" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
       (.ocons "character" (.jnum (Nat.toString e)) .onil))) .onil))
 
+-- the host's `Pos` (1-based line and code-point column) as a JSON position
+def lspPosJ (text : String) (p : Pos) : J := match p with
+  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
+    (.ocons "character" (.jnum (Nat.toString (lspUtf16Col text line (Nat.sub col 1)))) .onil))
+
+-- a range from character offsets (the host's `range`: exactly `start` to `stop`, so an
+-- empty range stays empty; the goal helpers below widen theirs instead)
+def lspRangeOffJ (text : String) (start stop : Nat) : J :=
+  .jobj (.ocons "start" (lspPosJ text (lineCol text start))
+    (.ocons "end" (lspPosJ text (lineCol text stop)) .onil))
+
 -- (D8 goals) a range from character offsets, as the host's `range` (`Wiz/LSP.lean`):
 -- start at `start`, end at `stop` (at least one character on, as an empty range is not
 -- clickable)
-def lspPosJ (p : Pos) : J := match p with
-  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
-    (.ocons "character" (.jnum (Nat.toString (Nat.sub col 1))) .onil))
 def lspRangeOff (text : String) (start stop : Nat) : J :=
-  .jobj (.ocons "start" (lspPosJ (lineCol text start))
-    (.ocons "end" (lspPosJ (lineCol text (Nat.max stop (Nat.add start 1)))) .onil))
+  lspRangeOffJ text start (Nat.max stop (Nat.add start 1))
 
 -- (D8 goals) the innermost term entry at `off` (a caret at an entry's end counts, as
 -- `Query.termGoalAt`'s `endIn`; ties go to the later entry, and the list is newest
@@ -2535,16 +2572,192 @@ def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
     | .term _ _ _ => lspGoalAt rest off
     | .decl _ _ _ _ _ => lspGoalAt rest off
 
--- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
-partial def lspOffGo : List Char → Nat → Nat → Nat
+-- ## Declarations (the check's `.decl` entries: hover, definition, completion)
+--
+-- The check records one `decl` entry per declaration the document added (`LspEntry` in
+-- `selfhost/Frontend.wiz`): the declaration's source name, its type as the kernel prints
+-- it, and the span of the name's token. The host answers these three methods from its
+-- info tree; here they are answered from that index, in the host's JSON shapes. Only
+-- this document's declarations are in it (an imported module's are in its own document's
+-- index), so a name from an import is `null`; a Prelude name is `null` too.
+
+structure LspDecl where
+  start : Nat
+  stop : Nat
+  name : String
+  ty : String
+  kind : Nat
+
+def lspDeclsOf : List LspEntry → List LspDecl
+  | .nil => .nil
+  | .cons e es => match e with
+    | .decl s t n ty k => .cons (LspDecl.mk s t n ty k) (lspDeclsOf es)
+    | .term _ _ _ => lspDeclsOf es
+    | .goal _ _ _ => lspDeclsOf es
+
+-- an identifier character (a dotted name is one word, as the host's `wordStart`)
+def lspIdCode (n : Nat) : Bool := Bool.or (isIdRest n) (Nat.beq n 46)
+
+structure LspWord where
+  start : Nat
+  stop : Nat
+
+partial def lspWordStartGo (us : Array Nat) (i : Nat) : Nat :=
+  match Nat.beq i 0 with
+  | .true => 0
+  | .false => match lspIdCode (Array.getD us (Nat.sub i 1) 0) with
+    | .true => lspWordStartGo us (Nat.sub i 1)
+    | .false => i
+
+partial def lspWordEndGo (us : Array Nat) (len i : Nat) : Nat :=
+  match Nat.le len i with
+  | .true => i
+  | .false => match lspIdCode (Array.getD us i 0) with
+    | .true => lspWordEndGo us len (Nat.add i 1)
+    | .false => i
+
+-- The identifier under the caret or just before it (a caret at a name's end is on it)
+def lspWordRange (text : String) (off : Nat) : LspWord :=
+  let us := String.codes text;
+  let len := Array.size us;
+  let at := match Nat.lt len off with
+    | .true => len
+    | .false => off;
+  LspWord.mk (lspWordStartGo us at) (lspWordEndGo us len at)
+
+def lspWordText (text : String) (w : LspWord) : String :=
+  String.mk (slice (Nat.sub w.stop w.start) (String.codes text) w.start)
+
+def lspLowerCode (n : Nat) : Nat := match Bool.and (Nat.le 65 n) (Nat.le n 90) with
+  | .true => Nat.add n 32
+  | .false => n
+
+def lspLowerGo : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => .cons (Char.mk (lspLowerCode (Char.code c))) (lspLowerGo cs)
+
+-- ASCII lowercase, for a case-insensitive completion prefix
+def lspLower (s : String) : String := match s with
+  | .mk cs => String.mk (lspLowerGo cs)
+
+def lspFindExact : List LspDecl → String → Option LspDecl
+  | .nil, _ => .none
+  | .cons d rest, name => match strEq d.name name with
+    | .true => .some d
+    | .false => lspFindExact rest name
+
+-- a suffix match's result: the declaration and how many names ended with `.name`
+structure LspSuffix where
+  hit : Option LspDecl
+  count : Nat
+
+def lspFindSuffixGo : List LspDecl → String → LspSuffix
+  | .nil, _ => LspSuffix.mk .none 0
+  | .cons d rest, name => match endsWithS d.name (String.append "." name) with
+    | .true => match lspFindSuffixGo rest name with
+      | .mk _ n => LspSuffix.mk (.some d) (Nat.add n 1)
+    | .false => lspFindSuffixGo rest name
+
+-- The declaration a source name denotes: an exact name, else a unique suffix (`mk` for
+-- `T.mk`, as the shim and `EditorModel.lspDeclarationJson` look it up)
+def lspFindDecl (ds : List LspDecl) (name : String) : Option LspDecl :=
+  match strEq name "" with
+  | .true => .none
+  | .false => match lspFindExact ds name with
+    | .some d => .some d
+    | .none => match lspFindSuffixGo ds name with
+      | .mk hit n => match Nat.beq n 1 with
+        | .true => hit
+        | .false => .none
+
+-- the host's hover text for a declaration (a `wiz` fence with `name : type`)
+def lspSignature (d : LspDecl) : String := match strEq d.ty "" with
+  | .true => d.name
+  | .false => String.append d.name (String.append " : " d.ty)
+
+def lspHoverResult (text : String) (es : List LspEntry) (off : Nat) : J :=
+  let w := lspWordRange text off;
+  match lspFindDecl (lspDeclsOf es) (lspWordText text w) with
+  | .none => .jnull
+  | .some d => .jobj (.ocons "contents" (.jobj (.ocons "kind" (.jstr "markdown")
+      (.ocons "value" (.jstr (String.append "```wiz\n"
+        (String.append (lspSignature d) "\n```"))) .onil))) .onil)
+
+def lspDefinitionResult (text uri : String) (es : List LspEntry) (off : Nat) : J :=
+  let w := lspWordRange text off;
+  match lspFindDecl (lspDeclsOf es) (lspWordText text w) with
+  | .none => .jnull
+  | .some d => .jobj (.ocons "uri" (.jstr uri)
+    (.ocons "range" (lspRangeOffJ text d.start d.stop) .onil))
+
+def lspFilterDecls : List LspDecl → String → List LspDecl
+  | .nil, _ => .nil
+  | .cons d rest, want => match Bool.or (strEq want "") (startsWithS want (lspLower d.name)) with
+    | .true => .cons d (lspFilterDecls rest want)
+    | .false => lspFilterDecls rest want
+
+def lspTakeDecls : Nat → List LspDecl → List LspDecl
+  | _, .nil => .nil
+  | .zero, _ => .nil
+  | .succ k, .cons d rest => .cons d (lspTakeDecls k rest)
+
+-- `detail` only when the type is not empty (the host's items omit an empty one)
+def lspDetailField (ty : String) : JObj := match strEq ty "" with
+  | .true => .onil
+  | .false => .ocons "detail" (.jstr ty) .onil
+
+-- a completion item in the host's shape: `label`, `kind` (`kindFunction`: the frontend
+-- records these as globals), `sortText`/`filterText` as the host's `globalItem` sets
+-- them, then its `textEdit` over the typed prefix
+def lspCompletionItem (text : String) (start off : Nat) (d : LspDecl) : J :=
+  .jobj (.ocons "label" (.jstr d.name)
+    (.ocons "kind" (.jnum "3")
+    (.ocons "sortText" (.jstr (String.append "3" d.name))
+    (.ocons "filterText" (.jstr d.name)
+    (.ocons "textEdit" (.jobj (.ocons "range" (lspRangeOffJ text start off)
+      (.ocons "newText" (.jstr d.name) .onil)))
+    (lspDetailField d.ty))))))
+
+def lspCompletionItems (text : String) (start off : Nat) : List LspDecl → JList
+  | .nil => .jnil
+  | .cons d rest => .jcons (lspCompletionItem text start off d) (lspCompletionItems text start off rest)
+
+-- `textDocument/completion`: `{isIncomplete, items}`; the declarations whose name starts
+-- with the identifier before the caret (case-insensitively), capped at 200
+def lspCompletionResult (text : String) (es : List LspEntry) (off : Nat) : J :=
+  let us := String.codes text;
+  let len := Array.size us;
+  let at := match Nat.lt len off with
+    | .true => len
+    | .false => off;
+  let start := lspWordStartGo us at;
+  let want := lspLower (String.mk (slice (Nat.sub at start) us start));
+  let ds := lspTakeDecls 200 (lspFilterDecls (lspDeclsOf es) want);
+  .jobj (.ocons "isIncomplete" (.jbool .false)
+    (.ocons "items" (.jarr (lspCompletionItems text start at ds)) .onil))
+
+-- (D8 goals) an LSP position (0-based line, UTF-16 character) as a code-point offset
+partial def lspSkipLines : List Char → Nat → Nat → Nat
+  | _, .zero, i => i
   | .nil, _, i => i
-  | .cons _ _, .zero, i => i
   | .cons c cs, .succ k, i => match strEqC c 10 with
-    | .true => lspOffGo cs k (i + 1)
-    | .false => lspOffGo cs (.succ k) (i + 1)
+    | .true => lspSkipLines cs k (Nat.add i 1)
+    | .false => lspSkipLines cs (.succ k) (Nat.add i 1)
+
+partial def lspUnitsGo : List Char → Nat → Nat → Nat
+  | .nil, _, i => i
+  | _, .zero, i => i
+  | .cons c cs, .succ k, i => match strEqC c 10 with
+    | .true => i
+    | .false => lspUnitsGo cs (Nat.sub (Nat.succ k) (lspUnitsOf c)) (Nat.add i 1)
+
+-- An LSP position as a code-point offset (`ofPos` in `Wiz/LSP.lean`): the line's start,
+-- then `character` UTF-16 units into it. A character inside a surrogate pair (not a
+-- position an editor sends) counts as after the pair.
 def lspOffOf (text : String) (line col : Nat) : Nat :=
-  match text with
-  | .mk cs => Nat.add (lspOffGo cs line 0) col
+  let cs := charsOf text;
+  let base := lspSkipLines cs line 0;
+  lspUnitsGo (lspDropLines cs line) col base
 
 def lspStrList : List String → JList
   | .nil => .jnil
@@ -2621,7 +2834,8 @@ def lspFrame (body : String) : String :=
 def lspSend (j : J) : IO Unit := IO.print (lspFrame (jRender j))
 
 -- the host's `capabilities`, restricted to what this server answers (an absent provider
--- is not supported; the shim says `hoverProvider: false` the same way)
+-- is not supported). `positionEncoding` is UTF-16 and positions are counted in UTF-16
+-- units; hover, definition and completion answer from the check's declaration index.
 def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
   (.ocons "methods" (.jarr (.jcons (.jstr "wiz/plainGoal")
     (.jcons (.jstr "wiz/plainTermGoal") .jnil)))
@@ -2629,8 +2843,11 @@ def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
 
 def lspCaps : J := .jobj (.ocons "positionEncoding" (.jstr "utf-16")
   (.ocons "textDocumentSync" (.jnum "1")
-  (.ocons "hoverProvider" (.jbool .false)
-  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))
+  (.ocons "hoverProvider" (.jbool .true)
+  (.ocons "definitionProvider" (.jbool .true)
+  (.ocons "completionProvider" (.jobj (.ocons "triggerCharacters"
+    (.jarr (.jcons (.jstr ".") .jnil)) .onil))
+  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))))
 
 def lspServerInfo : J := .jobj (.ocons "name" (.jstr "wiz-selfhost")
   (.ocons "version" (.jstr wizVersion) .onil))
@@ -2723,6 +2940,30 @@ def lspDidChange (st : LspState) (msg : J) : IO LspState := do
     let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version (.nil : List LspEntry);
     lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
 
+def lspIsDocMethod (method : String) : Bool :=
+  Bool.or (strEq method "textDocument/hover")
+    (Bool.or (strEq method "textDocument/definition") (strEq method "textDocument/completion"))
+
+-- `textDocument/hover`, `/definition` and `/completion`: the cursor's code-point offset
+-- (the position's UTF-16 `character`, converted), then the check's declaration index.
+def lspDocRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState := do
+  let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+  let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+  let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+  match lspFind st.docs uri with
+  -- (as the host: no document is `null`, not an error)
+  | .none => do
+    lspSend (lspReply id .jnull);
+    IO.pure st
+  | .some doc => do
+    let off := lspOffOf doc.text line col;
+    match strEq method "textDocument/hover" with
+    | .true => lspSend (lspReply id (lspHoverResult doc.text doc.entries off))
+    | .false => match strEq method "textDocument/definition" with
+      | .true => lspSend (lspReply id (lspDefinitionResult doc.text uri doc.entries off))
+      | .false => lspSend (lspReply id (lspCompletionResult doc.text doc.entries off));
+    IO.pure st
+
 def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState :=
   match strEq method "initialize" with
   | .true => do
@@ -2759,10 +3000,8 @@ def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspStat
             | .none => lspSend (lspReply id .jnull)
           | .none => lspSend (lspReply id .jnull);
           IO.pure st
-        | .false => match strEq method "textDocument/hover" with
-          | .true => do
-            lspSend (lspReply id .jnull);
-            IO.pure st
+        | .false => match lspIsDocMethod method with
+          | .true => lspDocRequest st id method msg
           | .false => do
             lspSend (lspError id "-32601" (String.append "the self-hosted server has no " method));
             IO.pure st
