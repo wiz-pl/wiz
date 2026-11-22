@@ -38,25 +38,25 @@ namespace Demo.InitOrder
         }
     }
 
-    // The order is observable at run time: `Check` constructs a `Traced`, whose two
-    // initialisers step a static log, and returns it — 12 in declaration order, 21
-    // reversed, 0 if the initialisers never run.
-    public class Traced
+    // That the initialisers run is observable at run time: `Check` builds a `Seeded`
+    // (whose two initialisers store constants into its fields) and sums them — 42 if they
+    // ran, 0 if the constructor left the fields at their defaults. The *order* is pinned
+    // by the lowering golden, not here: C# makes instance-initialiser order observable
+    // only through side effects (statics), and Wil's concrete semantics has no globals.
+    public class Seeded
     {
-        private static int log = 0;
-        private int first = Step(1);
-        private int second = Step(2);
+        private int first = 20;
+        private int second = 22;
 
-        private static int Step(int n)
+        public int Sum()
         {
-            log = log * 10 + n;
-            return n;
+            return first + second;
         }
 
         public static int Check()
         {
-            var made = new Traced();
-            return log;
+            var made = new Seeded();
+            return made.Sum();
         }
     }
 }

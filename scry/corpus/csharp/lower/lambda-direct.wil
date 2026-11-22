@@ -1,0 +1,9 @@
+func Demo.DirectLambda.Runner.Run(%0)
+  b0:
+    %1 = %0
+    %2 = global $str:"/bin/sh"
+    %3 = call System.Diagnostics.Process.Start(%2, %1)
+    %4 = %3
+    %5 = fnptr $lambda:72
+    %6 = call System.Collections.Generic.List.ForEach(%0, %5)
+    ret

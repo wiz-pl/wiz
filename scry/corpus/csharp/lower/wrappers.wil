@@ -1,0 +1,32 @@
+func Demo.Wrappers.Wrapped.Run(%0, %1)
+  b0:
+    %2 = call System.Object..ctor()
+    %3 = %2
+    call System.Threading.Monitor.Enter(%3)
+    %4 = global $str:"/bin/sh"
+    %5 = call System.Diagnostics.Process.Start(%4, %0)
+    call System.Threading.Monitor.Exit(%3)
+    %6 = %1
+    %7 = global $str:"/bin/sh"
+    %8 = call System.Diagnostics.Process.Start(%7, %0)
+    %9 = call System.Console.WriteLine(%0)
+    %10 = call System.Console.WriteLine(%0)
+    %11 = global $str:"/bin/sh"
+    %12 = call System.Diagnostics.Process.Start(%11, %0)
+    %13 = global $str:"/bin/sh"
+    %14 = global $str:"debug"
+    %15 = call System.Diagnostics.Process.Start(%13, %14)
+    %16 = global $str:"release"
+    %17 = call System.Console.WriteLine(%16)
+    %18 = global $str:"other"
+    %19 = call System.Console.WriteLine(%18)
+    ret
+warning: Demo.Wrappers.Wrapped.Run:15: lock_statement not modelled: the body is lowered, but mutual exclusion is not
+warning: Demo.Wrappers.Wrapped.Run:20: fixed_statement not modelled: the pinned pointer is unknown, the body is lowered
+warning: Demo.Wrappers.Wrapped.Run:25: checked_statement not modelled: the body is lowered, its semantics are not
+warning: Demo.Wrappers.Wrapped.Run:30: unsafe_statement not modelled: the body is lowered, its semantics are not
+warning: Demo.Wrappers.Wrapped.Run:35: goto_statement not modelled
+warning: Demo.Wrappers.Wrapped.Run:37: labeled_statement not modelled: the label is ignored, the body is lowered
+warning: Demo.Wrappers.Wrapped.Run:40: preproc_if not modelled: the condition is not evaluated, every branch is lowered
+warning: Demo.Wrappers.Wrapped.Run:42: preproc_elif not modelled: the condition is not evaluated, every branch is lowered
+warning: Demo.Wrappers.Wrapped.Run:44: preproc_else not modelled: the condition is not evaluated, every branch is lowered

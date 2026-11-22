@@ -561,15 +561,15 @@ def group : Group where
       run := fun _ => lowerGolden "lambda" },
     { name := "lower: field and property initialisers run in declaration order (ctor and synthetic .cctor)",
       run := fun _ => lowerGolden "init-order" },
-    { name := "lower: initialisers run in declaration order (Traced.Check = 12 under Wil)",
+    { name := "lower: the constructors run the initialisers (Seeded.Check = 42 under Wil)",
       run := fun _ => do
         let (src, spill) ← fixture "lower" "init-order"
         let body :=
           fixtureDefs src spill ++
           "def prog : Wil.Program := Scry.Cs.programOf \"init-order.cs\" src spill\n" ++
-          "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.InitOrder.Traced.Check\" ([] : List Wil.Val))\n"
+          "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.InitOrder.Seeded.Check\" ([] : List Wil.Val))\n"
         let ms ← runProbe lowerImports body
-        checkEq ["\"ok 12\""] ms },
+        checkEq ["\"ok 42\""] ms },
     { name := "lower: a local function is a function with its captures as parameters, called directly",
       run := fun _ => lowerGolden "local-function" },
     { name := "lower: lock/fixed/checked/unsafe/label/#if bodies are ordinary code",
