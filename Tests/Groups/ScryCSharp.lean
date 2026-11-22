@@ -136,8 +136,9 @@ def fixtures : List (String × String) :=
    ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe"), ("taint", "cwe78-await-unsafe"),
    ("taint", "cwe78-lambda-unsafe"), ("taint", "cwe78-bcl-unsafe"),
    ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe"),
-   ("null", "unsafe"), ("null", "guarded"), ("null", "coalesce"),
-   ("null", "annotated-violation"), ("null", "forgiving"), ("null", "field")]
+   ("null", "cwe476-deref-unsafe"), ("null", "cwe476-deref-safe"),
+   ("null", "cwe476-coalesce-safe"), ("null", "cwe476-annotated-unsafe"),
+   ("null", "cwe476-forgiving-safe"), ("null", "cwe476-field-unsafe")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -488,31 +489,31 @@ def group : Group where
       run := fun _ => lowerGolden "expansions" },
     { name := "nullness: a T? parameter dereferenced without a guard is a finding",
       run := fun _ => do
-        checkEq ["scry/memory/null-dereference"] (← nullWarnings "unsafe") },
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "cwe476-deref-unsafe") },
     { name := "nullness: x != null and x is not null guards silence the dereference",
       run := fun _ => do
-        checkEq ([] : List String) (← nullWarnings "guarded") },
+        checkEq ([] : List String) (← nullWarnings "cwe476-deref-safe") },
     { name := "nullness: ?. and ?? guard the receiver and yield a non-null value",
       run := fun _ => do
-        checkEq ([] : List String) (← nullWarnings "coalesce") },
+        checkEq ([] : List String) (← nullWarnings "cwe476-coalesce-safe") },
     { name := "nullness: a non-null-annotated local assigned null is nullable-assignment plus a dereference",
       run := fun _ => do
         checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference"]
-          (← nullWarnings "annotated-violation") },
+          (← nullWarnings "cwe476-annotated-unsafe") },
     { name := "nullness: ! records an assertion and suppresses the dereference alarm",
       run := fun _ => do
-        checkEq ([] : List String) (← nullWarnings "forgiving") },
+        checkEq ([] : List String) (← nullWarnings "cwe476-forgiving-safe") },
     { name := "nullness: a T? field read is maybe-null, so the next member access is a finding",
       run := fun _ => do
-        checkEq ["scry/memory/null-dereference"] (← nullWarnings "field") },
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "cwe476-field-unsafe") },
     { name := "nullness: the annotation EDB publishes nullable(var) and nonnull(var)",
       run := fun _ => do
-        checkEq "nullable(NullFixtures.Unsafe.Length, %0)" (← nullEdb "unsafe")
-        checkEq "nonnull(NullFixtures.Violation.Length, %1)" (← nullEdb "annotated-violation") },
+        checkEq "nullable(NullFixtures.Unsafe.Length, %0)" (← nullEdb "cwe476-deref-unsafe")
+        checkEq "nonnull(NullFixtures.Violation.Length, %1)" (← nullEdb "cwe476-annotated-unsafe") },
     { name := "lower: ?. and ?? lower as guarded branches (the null path yields default)",
-      run := fun _ => nullGolden "coalesce" },
+      run := fun _ => nullGolden "cwe476-coalesce-safe" },
     { name := "lower: the ! null-forgiving operator copies its operand and records an assertion",
-      run := fun _ => nullGolden "forgiving" },
+      run := fun _ => nullGolden "cwe476-forgiving-safe" },
     { name := "macro guard: an unknown name is still a havoc with a warning, not a value",
       run := fun _ => do
         let text ← loweredText "expansions"

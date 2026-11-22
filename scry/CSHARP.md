@@ -253,11 +253,13 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
 * `scry/corpus/csharp/taint/*.cs`: paired unsafe/safe fixtures per CWE (78 first, then
   89, 22), named like the C corpus (`cwe78-process-unsafe.cs`,
   `cwe78-process-safe.cs`), with a `manifest.json` row each once `scry bench` reads C#.
-* `scry/corpus/csharp/null/*.cs`: the nullability fixtures (2026-11-22): an unguarded
-  `T?` dereference (`unsafe`), its guards `x != null` / `x is not null` / `x is T y`
-  (`guarded`), `?.`/`??` (`coalesce`), a non-null-annotated local assigned `null`
-  (`annotated-violation`: `scry/cs/nullable-assignment` plus the dereference), the `!`
-  assertion (`forgiving`) and a `T?` field read (`field`).
+* `scry/corpus/csharp/null/cwe476-*.cs`: the nullability fixtures (2026-11-22): an
+  unguarded `T?` dereference (`cwe476-deref-unsafe`), its guards `x != null` /
+  `x is not null` / `x is T y` (`cwe476-deref-safe`), `?.`/`??`
+  (`cwe476-coalesce-safe`), a non-null-annotated local assigned `null`
+  (`cwe476-annotated-unsafe`: `scry/cs/nullable-assignment` plus the dereference), the
+  `!` assertion (`cwe476-forgiving-safe`) and a `T?` field read
+  (`cwe476-field-unsafe`).
 * Later, without downloading big corpora: a few hand-reduced cases modelled on the
   Juliet C# suite's CWE-78/89/476 shapes and on OWASP Benchmark-style servlets;
   real-world differential runs only with the user's OK.
