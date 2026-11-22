@@ -264,8 +264,17 @@ class ReleaseSbomTest(unittest.TestCase):
             self.assertIn("licenses", component)
         self.assertIn("toolchain:lean", by_ref)
         self.assertIn("nix:nixpkgs", by_ref)
-        self.assertIn("gha:actions/checkout@v5", by_ref)
-        self.assertIn("gha:mymindstorm/setup-emsdk@v14", by_ref)
+        # the fixture is this repository's release workflow: derive the expected action
+        # refs from it, so pinning a tag to a SHA does not make the test lie
+        workflow = sbom.parse_workflow(self.fixture)
+        self.assertTrue(workflow["actions"], "no `uses:` refs in the workflow fixture")
+        for action in workflow["actions"]:
+            ref = f"gha:{action['name']}@{action['ref']}"
+            self.assertIn(ref, by_ref)
+            props = {p["name"]: p["value"] for p in by_ref[ref]["properties"]}
+            self.assertEqual(props["wiz:role"], "ci-action")
+            self.assertEqual(props["wiz:pinned"],
+                             "true" if action["pinned"] else "false")
         self.assertEqual(by_ref["toolchain:lean"]["version"], "v4.35.0")
         self.assertEqual(
             by_ref["input:gmp-6.3.0.tar.xz"]["licenses"][0]["expression"],
@@ -348,13 +357,20 @@ class ReleaseSbomTest(unittest.TestCase):
         self.assertIn("wiz:source-tree", dependencies)
         self.assertIn("wiz:lean-toolchain", dependencies)
         self.assertIn("wiz:flake-lock", dependencies)
-        self.assertIn("gha:actions/checkout@v5",
-                      {d["uri"] for d in
-                       predicate["buildDefinition"]["resolvedDependencies"]})
-        self.assertNotIn("digest", dependencies["gha:actions/checkout@v5"])
-        self.assertEqual(
-            dependencies["gha:actions/checkout@v5"]["annotations"]["wiz:pinned"],
-            "false")
+        # an action pinned to a commit binds that commit; a tag/major ref binds nothing
+        workflow = sbom.parse_workflow(self.fixture)
+        for action in workflow["actions"]:
+            uri = f"gha:{action['name']}@{action['ref']}"
+            self.assertIn(uri, dependencies)
+            if action["pinned"]:
+                self.assertEqual(dependencies[uri]["digest"],
+                                 {"gitCommit": action["ref"]})
+                self.assertEqual(
+                    dependencies[uri]["annotations"]["wiz:pinned"], "true")
+            else:
+                self.assertNotIn("digest", dependencies[uri])
+                self.assertEqual(
+                    dependencies[uri]["annotations"]["wiz:pinned"], "false")
         self.assertFalse(predicate["wiz:note"].startswith("SLSA L"))
 
     def test_outputs_are_deterministic(self) -> None:
