@@ -7,7 +7,7 @@ import Hdl.Temporal
 an `` `ifdef FORMAL `` harness: the properties become immediate assertions (`assert`,
 `assume`, `cover`) clocked by the design's clock, with `$past`, `$stable`, `$rose` and
 `$fell`, and `(* anyconst *)` declarations for symbolic constants. The harness is the
-external-checking side of `lib/Hdl/Temporal.wiz`: each constructor says which `TL`
+external-checking side of `hdl/src/Hdl/Temporal.wiz`: each constructor says which `TL`
 formula it is (over the design's observation trace), and the emitted check is the same
 formula on the Verilog signals. A kernel proof is still what `Hdl.Temporal` gives; this
 lets SymbiYosys (`sby`) or `yosys-smtbmc` discharge the same property without one.

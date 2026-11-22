@@ -1,4 +1,4 @@
--- Lenses for HDL bundles (lib/Hdl/Optic.wiz, lib/OpticDerive.wiz), checked by the `hdl`
+-- Lenses for HDL bundles (hdl/src/Hdl/Optic.wiz, lib/OpticDerive.wiz), checked by the `hdl`
 -- test group. A transmitter's state is a bundle; its countdown is a sub-step zoomed into
 -- one field, and the frame rule says the other field is unchanged, for every state.
 import Hdl.Optic

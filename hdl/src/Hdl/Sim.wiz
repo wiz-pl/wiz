@@ -5,7 +5,7 @@ import Std
 
 Fast netlist simulation for compiled programs (`import Hdl.Sim`).
 
-`Netlist.simulate` (lib/Hdl/Core.wiz) is the netlist's semantics, written for the
+`Netlist.simulate` (hdl/src/Hdl/Core.wiz) is the netlist's semantics, written for the
 kernel: node values in a persistent random-access list, O(nodes · log nodes) per cycle
 with an allocation per node. `Circuit.run` (the value simulation) is the circuit's
 semantics; compiled, it runs the step function at `HwTy.El` every cycle, with every

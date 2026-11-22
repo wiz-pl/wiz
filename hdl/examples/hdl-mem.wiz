@@ -1,4 +1,4 @@
--- Memories (lib/Hdl/Core.wiz, `HwTy.mem`), checked by the `hdl` test group: a RAM with a
+-- Memories (hdl/src/Hdl/Core.wiz, `HwTy.mem`), checked by the `hdl` test group: a RAM with a
 -- registered read (what an iCE40 block RAM is) and a ROM. The value simulation, the
 -- netlist simulation and (in the test) Icarus Verilog agree; yosys maps both to
 -- SB_RAM40_4K.

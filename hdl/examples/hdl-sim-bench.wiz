@@ -6,7 +6,7 @@
 -- address bits), simulated for CYCLES cycles by
 --   value   the value simulation, `Design.runLeaves` (the step at `HwTy.El` every cycle)
 --   net     the netlist semantics, `Netlist.simulate`
---   fast    the fast netlist simulation, `Design.simFast` (lib/Hdl/Sim.wiz)
+--   fast    the fast netlist simulation, `Design.simFast` (hdl/src/Hdl/Sim.wiz)
 --   check   all three on CYCLES cycles, which must agree
 -- It prints the number of netlist nodes and a checksum of the outputs (the same for
 -- every mode). Timed by /workspace/wiz-tools/bench/hdl-sim.

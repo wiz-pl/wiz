@@ -1,4 +1,4 @@
--- The memory interface of lib/Hdl/Mem.wiz, checked by the `hdl` test group.
+-- The memory interface of hdl/src/Hdl/Mem.wiz, checked by the `hdl` test group.
 --
 -- The proved laws are instantiated at the bottom (`law_same`, `law_other`, `law_off`,
 -- `law_byte`). The checks are the ones a proof does not cover: every 4-bit byte-strobe
