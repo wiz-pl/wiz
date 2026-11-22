@@ -953,12 +953,12 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
     let pat := if rtl then rhs else lhs
     let kidsOf (t : Term R) (depth : Nat) : List (Term R × Nat) :=
       (t.forChildren (m := StateM (List (Term R × Nat))) (fun _ => pure ())
-        (fun k c => modify fun xs => xs ++ [(depth + k, c)]) []).2
+        (fun k c => modify fun xs => xs ++ [(c, depth + k)]) []).2
     let rec go (work : List (Term R × Nat)) :
-        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) :=
+        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
       match work with
       | [] => pure none
-      | .cons p rest =>
+      | .cons p rest => do
         let t := p.1
         let depth := p.2
         let cand? := strengthenN depth t
