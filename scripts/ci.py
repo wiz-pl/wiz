@@ -34,9 +34,12 @@
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, docs=true when a doc
-                                     changed, web=true when a browser-facing file
-                                     (`web/*`) changed, and shards=[NAMES], the shards of
+                                     unless only docs or the STC metatheory changed,
+                                     docs=true when a doc changed, web=true when a
+                                     browser-facing file (`web/*`) changed, stc=true
+                                     when `STC.lean` or `STC/` changed (the `stc` job
+                                     typechecks that library, which nothing else
+                                     imports), and shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). `changes --all`
                                      prints everything
@@ -650,6 +653,13 @@ SELF_TESTED = ["scripts/attest/*"]
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
               ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz",
               "web/*"]
+# The STC metatheory (`STC.lean`, `STC/`) is a separate Lake library, deliberately not a
+# default target, and nothing else imports it; `flake.nix` does not copy it into the Nix
+# build either (that would rebuild the compiler on every STC edit). An edit there needs
+# the `stc` job and nothing else, so STC paths are kept out of EVERYTHING: otherwise the
+# `*.lean` entry sends every wiz/grail shard to test a tree none of them reads. The `stc`
+# job also runs when `code` is true, since a toolchain or lakefile change can break it.
+STC = ["STC.lean", "STC/*"]
 
 
 def matches(path, globs):
@@ -676,16 +686,18 @@ def lib_closure(paths):
 
 
 def is_code_change(files):
-    """Whether `files` needs the Lean build; docs and self-tested scripts do not."""
-    return any(not matches(f, DOCS + SELF_TESTED) for f in files)
+    """Whether `files` needs the default Lean build (wiz/grail/tests); docs, self-tested
+    scripts and the STC metatheory (its own `stc` job) do not."""
+    return any(not matches(f, DOCS + SELF_TESTED + STC) for f in files)
 
 
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
-    when one of its inputs changed, and a shard without "inputs" when anything but docs
-    or scripts/attest changed. Nothing for a docs/attest-only change."""
-    code = [f for f in files if not matches(f, DOCS + SELF_TESTED)]
+    when one of its inputs changed, and a shard without "inputs" when anything but docs,
+    scripts/attest or the STC metatheory (the `stc` job, not a shard) changed. Nothing
+    for a docs/attest/STC-only change."""
+    code = [f for f in files if not matches(f, DOCS + SELF_TESTED + STC)]
     ss = shards()
     if any(matches(f, EVERYTHING) for f in code):
         return [s["name"] for s in ss]
@@ -709,6 +721,7 @@ def changes(args):
         print("code=true")
         print("docs=true")
         print("web=true")
+        print("stc=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -719,12 +732,14 @@ def changes(args):
     code = is_code_change(files)
     docs = any(matches(f, DOCS) for f in files)
     web = any(matches(f, WEB) for f in files)
+    stc = any(matches(f, STC) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
     print(f"web={'true' if web else 'false'}")
+    print(f"stc={'true' if stc else 'false'}")
     print(f"shards={json.dumps(names)}")
     print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
-          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
+          f"stc: {stc}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
