@@ -547,8 +547,7 @@ def Scry.bitsSingleton (i : Nat) : Scry.Bits :=
   let bit := Nat.mod i 64;
   Scry.Bits.mk (List.cons (w, UIntN.shiftLeft (U64.ofNat 1) bit) List.nil)
 
-/-- `a ∪ b`, and whether `a` grew. Both inputs are sparse, so this is a merge of the
-non-zero words, not a pass over the location universe. -/
+/-- The word table of a sparse bitset, for the union below. -/
 def Scry.bitsWordMap (ws : List (Nat × U64)) : U64Map U64 :=
   List.foldl (fun m p => U64Map.insert m (Scry.u64 p.1) p.2) U64Map.empty ws
 
@@ -922,7 +921,8 @@ def Scry.ptTargetsGo (t : Scry.PtTable) : List Nat → List String → Bool →
     | .none => Scry.ptTargetsGo t rest names .true
 
 def Scry.ptTargetsOf (t : Scry.PtTable) (b : Scry.Bits) : List String × Bool :=
-  Scry.ptTargetsGo t (Scry.bitsToList b) .nil .false
+  let r := Scry.ptTargetsGo t (Scry.bitsToList b) .nil .false;
+  (r.1, Bool.or (List.isEmpty r.1) r.2)
 
 /-- Argument → parameter flow for one resolved target. -/
 partial def Scry.ptArgsGo (e : Scry.PtEval) (caller callee : String)
@@ -998,7 +998,9 @@ def Scry.ptEvalCall (ix : Wil.ProgramIndex) (w : Scry.PtWork) (func : String)
       | .true, .cons a _ =>
         let aid := U64Map.findD e1.work.vids
           (Scry.vkKey (Scry.vk func a.index)) 0;
-        let b := Scry.ptSetOf e1.work.pt aid;
+        -- The old `externalFrees` read the call's input state, before parameter and
+        -- result edges were applied.
+        let b := Scry.ptSetOf w.pt aid;
         let e3 := Scry.ptEvalFree e1 b;
         Scry.PtEval.mk e3.work (List.cons (Scry.ptNodeVar aid) e3.reads)
           e3.changed e3.stateChanged

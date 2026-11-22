@@ -1,0 +1,3 @@
+points-to-diff: units=10
+points-to-diff: identical=10 mismatched=0
+points-to-diff: ok

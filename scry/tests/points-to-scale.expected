@@ -1,7 +1,7 @@
-points-to-scale: n=3000 checksum=698893434: ok
+points-to-scale: n=3000 checksum=319105: ok
 points-to-scale: n=3000 four locations: ok
 points-to-scale: n=3000 rounds=2: ok
-points-to-scale: n=6000 checksum=909438125: ok
+points-to-scale: n=6000 checksum=948664: ok
 points-to-scale: n=6000 four locations: ok
 points-to-scale: n=6000 rounds=2: ok
 points-to-scale: 2n within 3t+80ms: ok

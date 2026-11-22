@@ -45,8 +45,8 @@ def checksum (p : Wil.Program) (r : Scry.PtResult) : Nat :=
     List.foldl (fun acc v =>
       let ids := Scry.ptIds r fn.name v.index;
       let h := List.foldl (fun h i =>
-        Nat.mod (Nat.add (Nat.mul h 131) (Nat.succ i)) 1000000007) 17 ids;
-      Nat.mod (Nat.add (Nat.mul acc 1000003) h) 1000000007) acc fn.locals) 0 p.funcs
+        Nat.mod (Nat.add (Nat.mul h 131) (Nat.succ i)) 1000003) 17 ids;
+      Nat.mod (Nat.add (Nat.mul acc 1009) h) 1000003) acc fn.locals) 0 p.funcs
 
 /-- The four base registers have one location; every chain register has exactly four. -/
 def sizesOk (p : Wil.Program) (r : Scry.PtResult) : Bool :=
