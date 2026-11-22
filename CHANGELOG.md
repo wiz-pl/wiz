@@ -16,15 +16,15 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
-* ci: a pull request's `build` job starts from a `.lake` a **cold** build saved
+* ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
   (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
   architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the
-  modules the branch
-  changed; the seed comes from the master-only `lake_seed` job's cold
-  `nix develop --command lake build wiz grail tests`, and nothing a pull request writes
-  is ever read by a trusted job. Pushes, the merge queue and the release path keep the
-  pure `nix build`, and a missing or stale seed is a cold build, not a failure. The
-  subset hashes are one committed table, `.github/repo-subsets.json`
+  modules the branch changed. The seed is the `lake` output of the master-only
+  `lake_seed` job's `withLakeCache empty-lake` build (a cold compile the sandbox
+  enforces), whose `bin` is byte-identical to the pure build's; nothing a pull request
+  writes is ever read by a trusted job. Pushes, the merge queue and the release path
+  keep the pure `nix build`, and a missing seed is the same cold build, not a failure.
+  The subset hashes are one committed table, `.github/repo-subsets.json`
   (`scripts/repo-subsets.py`), which the `docs_style` job checks and
   `.githooks/pre-commit` refreshes (`git config core.hooksPath .githooks`).
 

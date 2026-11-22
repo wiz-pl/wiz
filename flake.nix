@@ -31,13 +31,23 @@
         gc-ldflags = "-L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.boehmgc}/lib -lgc -lpthread";
       };
 
+      # The empty seed `withLakeCache` starts from: a real store path, so the function's
+      # argument is never nullable and the producer is an ordinary derivation whose cold
+      # compile the sandbox enforces (no cache, no dev shell, no network).
+      emptyLake = pkgs:
+        pkgs.runCommand "empty-lake" { } ''
+          mkdir -p $out/.lake/build
+          install -Dm644 ${./lean-toolchain} $out/toolchain
+        '';
+
       packagesFor = pkgs: packagesWith pkgs null;
 
-      # The same packages, built from a prebuilt `.lake` (`lakeCache`): CI's PR-only
-      # fast path, called through scripts/lake-cache.sh with `nix build --impure
-      # --expr` (a flake output cannot be a function in `packages`, but `lib` may hold
-      # one). It is a *different* derivation from the pure `unwrapped` — the seed is an
-      # extra input, so the hash differs — and the release path above never names it.
+      # The same packages, built from a prebuilt `.lake` (`lakeCache`): a *different*
+      # derivation from the pure build (the seed is an input, so the hash differs).
+      # Applied to `empty-lake` it is the trusted producer (a cold build inside the
+      # sandbox); applied to a restored seed it is a pull request's warm build. The
+      # `unwrapped` derivation also has a `lake` output: the seed the producer saves.
+      # A flake output cannot be a function in `packages`, but `lib` may hold one.
       withLakeCache = pkgs: lakeCache: packagesWith pkgs lakeCache;
 
       packagesWith = pkgs: lakeCache:
@@ -89,14 +99,19 @@
           # The same three binaries from `lakeCache`'s compiled modules. Lake keys an
           # olean on its inputs' content hashes, so it recompiles exactly what the tree
           # changed and links the rest; the `toolchain` stamp refuses a seed built for
-          # another lean-toolchain, and `scripts/lake-cache.sh key` binds the toolchain
-          # (flake.lock, flake.nix) and the compiler sources (`lean`, `runtime`) into the
-          # cache key, so a seed from different sources never sits under the exact key.
+          # another lean-toolchain. This derivation has two outputs:
+          #   `out`   the binaries, exactly as the pure build has them (a build from
+          #           `empty-lake` is the same compile, so its bytes are identical);
+          #   `lake`  what Lake wrote, for the next build: `.lake/build/lib` (oleans,
+          #           `.ilean`, traces), `.lake/build/ir`, `.lake/config`, and the
+          #           `toolchain` stamp. `build/bin` is left out (the consumer relinks
+          #           in seconds) and `.lake/cache` never exists here (the build phase
+          #           puts `LAKE_CACHE_DIR` in `$TMPDIR`).
           cachedUnwrapped =
             assert lib.assertMsg (lakeCache != null)
               "flake.nix withLakeCache: no lakeCache seed";
             assert lib.assertMsg (builtins.pathExists (lakeCache + "/toolchain"))
-              "flake.nix withLakeCache: ${toString lakeCache} has no toolchain stamp (a seed is written by scripts/lake-cache.sh)";
+              "flake.nix withLakeCache: ${toString lakeCache} has no toolchain stamp (a seed is a withLakeCache `lake` output or `empty-lake`)";
             assert lib.assertMsg
               ((builtins.readFile (lakeCache + "/toolchain")) == (builtins.readFile ./lean-toolchain))
               "flake.nix withLakeCache: ${toString lakeCache} was built for another lean-toolchain; refusing a stale .lake";
@@ -105,6 +120,7 @@
               version = "0.1.0";
               src = buildSrc;
               nativeBuildInputs = [ lean ];
+              outputs = [ "out" "lake" ];
               buildPhase = ''
                 runHook preBuild
                 export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
@@ -119,13 +135,19 @@
               '';
               installPhase = ''
                 runHook preInstall
-                # Only the binaries, exactly like the pure derivation: the seed (the
-                # `.lake` CI caches) is produced by a cold `lake build` in the dev
-                # shell (scripts/lake-cache.sh save), never harvested from a build
-                # output — a Nix output would make the store the seed's origin and
-                # blur where a trusted seed came from.
+                # the binaries, as the pure derivation installs them
                 mkdir -p $out/bin
                 install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
+                if [ ! -d .lake/build/lib ]; then
+                  echo "withLakeCache: lake build wrote no .lake/build/lib" >&2
+                  exit 1
+                fi
+                # the next build's seed, without the linked binaries
+                mkdir -p $lake/.lake/build
+                cp -a .lake/build/lib $lake/.lake/build/lib
+                if [ -d .lake/build/ir ]; then cp -a .lake/build/ir $lake/.lake/build/ir; fi
+                if [ -d .lake/config ]; then cp -a .lake/config $lake/.lake/config; fi
+                install -Dm644 ${./lean-toolchain} $lake/toolchain
                 runHook postInstall
               '';
             };
@@ -719,13 +741,14 @@ EOF
       legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
 
       # The function set (a flake output cannot be a function, so `packages` cannot hold
-      # `withLakeCache`). CI's PR-only path:
+      # `withLakeCache`). CI's producer and consumer both call it through
+      # scripts/lake-cache.sh:
       #   nix build --impure --expr \
       #     'let f = builtins.getFlake "/path/to/checkout"; in
-      #      (f.lib.x86_64-linux.withLakeCache /path/to/seed).wiz'
-      # `scripts/lake-cache.sh build` is the wrapper the workflow calls.
+      #      (f.lib."x86_64-linux".withLakeCache f.lib."x86_64-linux"."empty-lake").unwrapped.lake'
       lib = forAll (pkgs: {
         withLakeCache = lakeCache: packagesWith pkgs lakeCache;
+        empty-lake = emptyLake pkgs;
       });
 
       apps = forAll (pkgs:

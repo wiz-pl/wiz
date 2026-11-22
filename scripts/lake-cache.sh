@@ -1,26 +1,23 @@
 #!/bin/sh
-# The Lake seed: cache keys, the cold producer's save, and the seeded build.
+# The Lake seed: cache keys, the trusted producer, and the seeded build.
 #
 # Trust direction — seeds come from **cold trusted builds**; PRs consume them and
 # may add their own untrusted seed; nothing a PR writes is ever read by a trusted
 # job.
 #
-#   producer   The `lake_seed` job runs on a push to master only. It restores no
-#              cache (the workflow asserts the checkout has no `.lake`), runs a cold
-#              `nix develop --command lake build wiz grail tests`, and saves the
-#              resulting `.lake` under both the trusted and the untrusted key. A
-#              seed harvested from a warm tree is only as good as whatever produced
-#              the warmth, so cold is the point.
+#   producer   A push to master's `lake_seed` job builds flake.nix's
+#              `withLakeCache empty-lake`: a cold compile *inside* the derivation, so
+#              the sandbox — not an assertion about cache restores — enforces it. Its
+#              `unwrapped.lake` output is the seed; the job saves it under both the
+#              trusted and the untrusted key. It publishes no store path, and its
+#              `bin` is byte-identical to the pure build's (measured).
 #   consumer   A pull request restores the untrusted namespace first (its own
 #              previous run, or the producer's copy) and the trusted one second, and
-#              builds flake.nix's `withLakeCache` from it. A pull request writes
-#              nothing: `withLakeCache` installs only `bin/` (the oleans never enter
-#              the store), so a Nix build has no `.lake` to save, and the design
-#              deliberately does not add a `.lake` store output. A PR's later runs
-#              restore the trusted seed again and recompile only its own modules.
-#   guard      Every seed carries a `toolchain` stamp (lean-toolchain's text);
-#              `withLakeCache` refuses a seed whose stamp differs, and the cache key
-#              names the toolchain (`flake.lock` and the `lean-toolchain` stamp), the
+#              builds `withLakeCache <seed>` from it; with no usable restore it builds
+#              `withLakeCache empty-lake`, the same cold build, never a failure.
+#   guard      Every seed's `lake` output carries a `toolchain` stamp
+#              (lean-toolchain's text); `withLakeCache` refuses a seed whose stamp
+#              differs, and the cache key names flake.lock and the stamp, the
 #              architecture and the `lean`/`runtime` subset hashes, so a seed from
 #              another toolchain is never offered under an exact key or a prefix.
 #
@@ -36,23 +33,23 @@
 #       not in the key: it names the derivation, not the oleans' inputs — Lake
 #       content-keys every module, so a changed fileset or flag recompiles what changed.
 #
-#   scripts/lake-cache.sh save [DIR]
-#       copy the checkout's `.lake` (a dev-shell `lake build wiz grail tests`) and
-#       the toolchain stamp into DIR (default `.lake-seed`). A cold build's `.lake`
-#       is the only producer: it drops `.lake/build/bin`, which the seeded build
-#       relinks.
+#   scripts/lake-cache.sh empty
+#       build and print `lib.<system>.empty-lake`: a store path with an empty
+#       `.lake/build` and the toolchain stamp. It is the producer's seed and the
+#       consumer's fallback, so the function's argument is never nullable.
+#
+#   scripts/lake-cache.sh save OUT [DIR]
+#       copy OUT/.lake and OUT/toolchain (OUT is a `withLakeCache` `lake` output) into
+#       DIR (default `.lake-seed`): the path an Actions cache entry carries.
 #
 #   scripts/lake-cache.sh choose DIR...
-#       print the first DIR with a `.lake` and a matching stamp; with none, make and
-#       print `.lake-seed-cold` (an empty seed: the cold build, never a failure).
-#
-#   scripts/lake-cache.sh init DIR
-#       make an empty seed in DIR (for a run with no cache to restore).
+#       print the first DIR with a `.lake` and a matching stamp; with none, print
+#       `empty` (the same cold build the producer runs).
 #
 #   scripts/lake-cache.sh build SEED ATTR...
-#       build `lib.<system>.withLakeCache SEED` and print `attr=<store path>` for
-#       each attr (`unwrapped`, `wiz`, `tests`, `wiz-web`, ...). The flake output
-#       cannot be a function, so this evaluates the `lib` output with
+#       build `lib.<system>.withLakeCache SEED` and print `attr=<store path>` for each
+#       attr (`wiz`, `tests`, `unwrapped`, `unwrapped.lake`, `wiz-web`, ...). The flake
+#       output cannot be a function, so this evaluates the `lib` output with
 #       `nix build --impure --expr`.
 #
 # `LAKE_CACHE_NIX_ARGS` adds flags to `build`'s `nix build` (the wasm job passes
@@ -79,10 +76,9 @@ system() {
   fi
 }
 
-empty_seed() { # DIR
-  rm -rf "$1/.lake"
-  mkdir -p "$1/.lake"
-  cp lean-toolchain "$1/toolchain"
+empty_seed() {
+  nix build -L --impure --no-link --print-out-paths --expr "
+    (builtins.getFlake \"$root\").lib.\"$(system)\".\"empty-lake\""
 }
 
 case ${1:-} in
@@ -99,21 +95,21 @@ case ${1:-} in
     printf 'trusted-key=%s-trusted-%s\n' "$base" "$sources"
     printf 'trusted-prefix=%s-trusted-\n' "$base"
     ;;
+  empty)
+    empty_seed
+    ;;
   save)
-    [ $# -le 2 ] || { usage >&2; exit 2; }
-    dir=${2:-.lake-seed}
-    [ -d .lake/build/lib ] || {
-      echo "lake-cache: the checkout has no .lake/build/lib; run" >&2
-      echo "  nix develop --command lake build wiz grail tests" >&2
-      echo "first (save does not harvest a Nix build: its output is only bin/)" >&2
+    [ $# -le 3 ] || { usage >&2; exit 2; }
+    out=$2
+    dir=${3:-.lake-seed}
+    [ -d "$out/.lake" ] || {
+      echo "lake-cache: $out/.lake is missing (is OUT a withLakeCache \`lake\` output?)" >&2
       exit 2
     }
     rm -rf "$dir"
     mkdir -p "$dir"
-    cp -a .lake "$dir/.lake"
-    # the seeded build relinks the binaries; leaving them out keeps the entry small
-    rm -rf "$dir/.lake/build/bin"
-    cp lean-toolchain "$dir/toolchain"
+    cp -a "$out/.lake" "$dir/.lake"
+    cp "$out/toolchain" "$dir/toolchain"
     chmod -R u+w "$dir"
     printf 'lake-cache: seed in %s (%s)\n' "$dir" "$(du -sh "$dir/.lake" | cut -f1)"
     ;;
@@ -125,40 +121,36 @@ case ${1:-} in
         exit 0
       fi
     done
-    dir=.lake-seed-cold
-    empty_seed "$dir"
-    printf 'lake-cache: no usable seed restored; %s is empty (cold build)\n' "$dir" >&2
-    printf '%s\n' "$dir"
-    ;;
-  init)
-    [ $# -eq 2 ] || { usage >&2; exit 2; }
-    empty_seed "$2"
-    printf 'lake-cache: empty seed in %s (a cold run)\n' "$2"
+    printf 'lake-cache: no usable seed restored; using empty-lake (cold build)\n' >&2
+    empty_seed
     ;;
   build)
     [ $# -ge 3 ] || { usage >&2; exit 2; }
     seed=$1
     shift
     [ -d "$seed/.lake" ] || {
-      echo "lake-cache: $seed/.lake is missing; run 'scripts/lake-cache.sh init $seed'" >&2
+      echo "lake-cache: $seed/.lake is missing (see 'scripts/lake-cache.sh empty')" >&2
       exit 2
     }
-    seed=$(cd "$seed" && pwd)
-    # A seed from another lean-toolchain is not a failure for CI: discard it and
-    # build cold (the flake would refuse it, and a cache restore falling back under
-    # a broader restore-key must not fail the job).
+    # A seed from another lean-toolchain is not a failure for CI: build cold instead
+    # (the flake would refuse it, and a restore-key fallback must not fail the job).
     if [ ! -f "$seed/toolchain" ] || ! cmp -s "$seed/toolchain" "$root/lean-toolchain"; then
-      echo "lake-cache: $seed has no matching toolchain stamp; discarding it (cold build)" >&2
-      empty_seed "$seed"
+      printf 'lake-cache: %s has no matching toolchain stamp; building from empty-lake\n' "$seed" >&2
+      seed=$(empty_seed)
     fi
     sys=$(system)
+    # a store path is passed as itself (`builtins.storePath`), a restored Actions-cache
+    # directory is copied in (`builtins.path`, keyed by its contents)
+    case $seed in
+      /nix/store/*) seed_expr="builtins.storePath \"$seed\"" ;;
+      *) seed_expr="builtins.path { path = \"$seed\"; name = \"lake-cache\"; }" ;;
+    esac
     for attr in "$@"; do
       # LAKE_CACHE_NIX_ARGS: extra `nix build` flags (e.g. `--max-jobs 1`, for the
       # memory-hungry wasm derivations)
       out=$(nix build -L ${LAKE_CACHE_NIX_ARGS:-} --impure --no-link --print-out-paths --expr "
         let f = builtins.getFlake \"$root\";
-            s = f.lib.\"$sys\".withLakeCache
-                  (builtins.path { path = \"$seed\"; name = \"lake-cache\"; });
+            s = f.lib.\"$sys\".withLakeCache ($seed_expr);
         in s.$attr")
       printf '%s=%s\n' "$attr" "$out"
     done
