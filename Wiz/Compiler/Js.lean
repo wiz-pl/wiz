@@ -78,8 +78,9 @@ def checkDecls (decls : Array IR.Decl) : Except String Unit :=
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   decls.foldl (fun acc d => acc.bind fun _ => checkBody arities {} d.body) (.ok ())
 
-/-- The JS expression for one IR expression. -/
-def exprE (arities : Std.HashMap Name Nat) (x : Var) : Expr → Except String String
+/-- The JS expression for one IR expression. (The variable it is bound to is the
+caller's; the expression only names its operands.) -/
+def exprE (arities : Std.HashMap Name Nat) : Expr → Except String String
   | .erased => pure "null"
   | .lit n => pure s!"{n}n"
   | .ctor t as =>
@@ -106,7 +107,7 @@ def exprE (arities : Std.HashMap Name Nat) (x : Var) : Expr → Except String St
 driver loop, so a jump to it is constant stack (the C backend's `goto`). -/
 partial def bodyE (arities : Std.HashMap Name Nat) (ind : String) : Body → Except String String
   | .vdecl x e rest => do
-    let r ← exprE arities x e
+    let r ← exprE arities e
     let rest ← bodyE arities ind rest
     pure s!"{ind}{var x} = {r};\n{rest}"
   | .case x alts => do
@@ -148,10 +149,19 @@ def declE (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Dec
   else
     pure s!"function {m}({args d.params}) {lb}\n{loc}{bodyT}{rb}\n"
 
-/-- The kinds `wizExtern` marshals. A struct (`S`), a callback (`k`/`K`) and a
-byte buffer (`y`/`Y`) need the C layout or a C function pointer, so they are refused at
-compile time rather than passed to JavaScript as something else. -/
+/-- The kinds `wizExtern` marshals. A struct (`S`) and a byte buffer (`y`/`Y`) need
+the C layout, so they are refused at compile time. A callback (`k`/`K`) is refused for
+a `wiz_` native (the C runtime expects a function pointer and a context) and allowed for
+a `js.` host function, which receives the Wiz closure itself (a callable JS function). -/
 def simpleKinds : List Char := ['e', 'n', 'u', 'f', 's', 'b', 'v', 'p', 'w']
+
+/-- Is this a kind the JS backend marshals for a `js.` extern (a simple letter, or a
+callback)? -/
+def simpleOrCallback (cname : String) (kind : String) : Bool :=
+  match kind.toList with
+  | [c] => simpleKinds.contains c
+  | 'k' :: '[' :: _ | 'K' :: '[' :: _ => cname.startsWith "js."
+  | _ => false
 
 /-- The C runtime's foreign functions this backend implements. (`wiz_io_read_file` and
 `wiz_io_write_file` are deliberately absent: there is no filesystem in a browser, and
@@ -179,10 +189,11 @@ def checkExtern (key : Name) : Except String Unit :=
   match RVal.ExternSig.ofKey? key with
   | none => .error s!"JS backend: `{key}` is not a foreign-function key"
   | some sig =>
-    let kinds := sig.params.map (fun k => k.letter) ++ [sig.result.letter]
-    if kinds.any (fun c => !simpleKinds.contains c) then
-      .error s!"JS backend: `{sig.cname}` passes a struct, callback or byte buffer; the JS \
-backend marshals only {String.ofList simpleKinds}"
+    let kinds := sig.params.map (fun k => k.toKey) ++ [sig.result.toKey]
+    if kinds.any (fun k => !simpleOrCallback sig.cname k) then
+      .error s!"JS backend: `{sig.cname}` passes a struct or byte buffer, which the JS \
+backend does not marshal (it marshals {String.ofList simpleKinds} and, for a `js.` host, \
+callbacks)"
     else if sig.cname.startsWith "js." then
       if sig.cname == "js." then .error "JS backend: `js.` needs a function name"
       else .ok ()

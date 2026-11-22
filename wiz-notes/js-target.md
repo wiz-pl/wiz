@@ -115,10 +115,14 @@ parser (and the C/LLVM/Wasm backends with it). The dotted spelling is the one-li
 compromise of this prototype; it costs nothing at run time and nothing in the other
 backends.
 
-Kinds the JS emitter refuses: a C struct (`S`), a callback passed as `k`/`K` (the C
-function-pointer + context pair), and a byte buffer with a length (`y`/`Y`). JavaScript
-has no C layout, and a `Callback T` value is the portable way to hand Wiz code to the
-host. A `js.…` extern may still take and return `w` (any Wiz value) and `p` (a handle).
+Kinds the JS emitter refuses: a C struct (`S`) and a byte buffer with a length
+(`y`/`Y`). JavaScript has no C layout for those. A callback (`k`/`K`) is allowed for a
+`js.` host function: the Wiz closure *is* the JavaScript function, so `wizExtern` passes
+it as one argument (the C glue's function-pointer + context pair is a C detail). A
+`Callback (A → IO B)` handed to the host is called with its argument and the world (or
+through `wizApply(f, [x, 0])`); the demo's delegated listener is exactly that. A
+callback is refused for a `wiz_` native, whose C signature expects the C pair; a
+`js.…` extern may still take and return `w` (any Wiz value) and `p` (a handle).
 
 ## 4. Blockers, honestly
 
@@ -187,11 +191,18 @@ one (created elements, attributes, text, listener registrations, appends).
 
 It prints one `PASS` line per assertion and `PASS loom demo: mount, route and patch are
 Wiz`. The `=js` group also builds a variant whose first route branch is changed from
-`.home` to `.about`; the same harness then reports `FAIL` and exits 1, which is the
-evidence that the assertions are about the Wiz code and not about the harness. The
-demo is not wired into Loom's `web/source-*.js`; replacing those files is the next
-step, and the host adapter (the `wiz.dom` namespace over the real `Element`) is a thin
-JS file, not Wiz.
+`.home` to `.about`; the same harness then reports
+
+```
+FAIL the initial patch list renders Home
+...
+FAIL loom demo: 1 assertion(s) failed
+```
+
+and exits 1, which is the evidence that the assertions are about the Wiz code and not
+about the harness. The demo is not wired into Loom's `web/source-*.js`; replacing those
+files is the next step, and the host adapter (the `wiz.dom` namespace over the real
+`Element`) is a thin JS file, not Wiz.
 
 ## 6. Tests and files
 
@@ -202,7 +213,8 @@ acceptance programs with the **C backend** through `Build.runGlobal` and
 `Build.runJsGlobal` (the same value for a pure `main`, the same stdout for `IO`). It
 also checks that the emitted module is deterministic, has `main` and the `wiz_*` entry
 points, that `IO.readFile` and an unimplemented native are refused by name, that
-`Build.buildJs` writes `OUT.mjs`, and runs both demo variants.
+`Build.buildJs` writes `OUT.mjs`, and runs both demo variants. The group is 22 cases;
+it ran 22/22 (0 failed) in 37 s on the controller.
 
 Files added:
 
@@ -222,8 +234,8 @@ Out of scope, and the boundary is real. `selfhost/Backend.wiz` is a C emitter ov
 self-hosted frontend's own `ETm`, not over `Wiz/Compiler/IR.lean`; it has no target
 parameter and no JS vocabulary. A self-hosted JS backend would need a second emitter
 over `ETm` (or a shared lowered IR), and it would have to refuse the same subset this
-one does: no filesystem/process/thread natives, no C structs, the `s`/`p` FFI only, and
-the same `Nat`-as-`BigInt` choice or an explicit agreement with `Js.lean` on the
+one does: no filesystem/process/thread natives, no C structs, the `s`/`p`/callback FFI
+only, and the same `Nat`-as-`BigInt` choice or an explicit agreement with `Js.lean` on the
 representation. Today the self-hosted compiler emits C only; `--target js` is the Lean
 backend. `selfhost/Backend.wiz` must not pretend otherwise until that emitter exists.
 
@@ -234,7 +246,7 @@ backend. `selfhost/Backend.wiz` must not pretend otherwise until that emitter ex
 * a native small-integer `Nat`, unboxed records, or any performance claim;
 * source maps, bundling, tree-shaking, a browser test bed;
 * `Str`, `WordArray`, `StrMap`, `Store`, `MVar`/`Ref`/`Chan`, threads;
-* the C struct/callback/buffer FFI kinds;
+* the C struct and byte-buffer FFI kinds (a callback is supported for a `js.` host);
 * the self-hosted backend.
 
 ## 9. What "adding a target" cost

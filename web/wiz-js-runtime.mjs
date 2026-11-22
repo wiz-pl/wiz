@@ -162,6 +162,18 @@ export function wizLazySet(x, p) {
   return p;
 }
 
+/* ---- the closed primitives' C runtime names ----
+ * `Wiz/Compiler/Js.lean` emits `PrimOp.runtimeSymbols`, the same names the C backend
+ * calls; these are the aliases the emitter binds them to. */
+export const wiz_memo = wizMemo;
+export const wiz_lazy_tag = wizLazyTag;
+export const wiz_lazy_set = wizLazySet;
+export const wiz_tag_of = wizTagOf;
+export const wiz_nat_tag = wizNatTag;
+export const wiz_field_at = wizFieldAt;
+export const wiz_mk_obj = wizMkObj;
+export const wiz_drop_moved = wizDropMoved;
+
 /* ---- numbers: Nat is BigInt, the C runtime's GMP ---- */
 
 export function wizNatLit(digits) {
@@ -541,6 +553,7 @@ function wizToBigInt(v) {
 }
 
 function wizToJs(kind, v) {
+  if (kind.length > 1) return v; /* a callback `k[...]`/`K[...]`: the Wiz closure is the function */
   switch (kind) {
     case "n":
     case "u":
@@ -561,6 +574,7 @@ function wizToJs(kind, v) {
 }
 
 function wizFromJs(kind, v) {
+  if (kind.length > 1) return v; /* a callback result: already a JS function */
   switch (kind) {
     case "n":
       return wizToBigInt(v);
@@ -573,7 +587,7 @@ function wizFromJs(kind, v) {
     case "b":
       return v ? 1 : 0;
     case "v":
-      return v === undefined ? 0 : v;
+      return v === undefined || v === null ? 0 : v;
     case "p":
     case "w":
     default:
@@ -602,15 +616,33 @@ export function wizCallJs(path, args) {
 }
 
 /* A foreign call: the key is the IR's `extern:cname:kinds:result:io:header:fin`.
- * The kinds are checked by the emitter (`Wiz/Compiler/Js.lean`): structs, callbacks
- * and byte buffers with a length are refused there, so a kind here is one letter. */
+ * The kinds are checked by the emitter (`Wiz/Compiler/Js.lean`): structs and byte
+ * buffers are refused there; a kind here is one letter or a callback `k[...]`/`K[...]`. */
+function wizKinds(s) {
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "k" || c === "K") {
+      const j = s.indexOf("]", i);
+      if (j < 0) throw new Error("wiz: unterminated callback kind: " + s);
+      out.push(s.slice(i, j + 1));
+      i = j + 1;
+    } else {
+      out.push(c);
+      i += 1;
+    }
+  }
+  return out;
+}
+
 export function wizExtern(key, args) {
   const parts = key.split(":");
   if (parts.length !== 7 || parts[0] !== "extern") {
     throw new Error("wiz: not a foreign-function key: " + key);
   }
   const cname = parts[1];
-  const kinds = parts[2];
+  const kinds = wizKinds(parts[2]);
   const resultKind = parts[3];
   const io = parts[4] === "io";
   const callArgs = [];
