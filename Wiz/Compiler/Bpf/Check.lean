@@ -159,6 +159,8 @@ struct or keep the large data in a map."
         rejectTop s!"the struct `{t.describe}` is not plain old data"
   | .option inner =>
     checkTy inner
+    if inner == .unit then
+      rejectTop "an `Option Unit` has no payload representation (P0); use a `Bool` or an enum"
     match t.byteSize with
     | none => rejectTop s!"`{t.describe}` has no C layout"
     | some n => do
@@ -251,6 +253,8 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
     checkTm p ctx expected a
     checkTm p ctx expected b
   | .letE ty x v body =>
+    if ty == .unit then
+      reject t.span "a `Unit` binding has no C representation"
     unless x == ctx.size do
       reject t.span s!"the binder x{x} is not the next slot (the context has {ctx.size}); \
 `BpfCore` is A-normal and variables are unique"
@@ -281,15 +285,15 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
     match ty.optionInner with
     | some _ => pure ()
     | none => reject t.span s!"`none` needs an `Option`, not `{ty.describe}`"
-  | .switchOption ty s none x some =>
+  | .switchOption ty s onNone x onSome =>
     match s.ty.optionInner with
     | none => reject t.span s!"`match` on an `Option` needs an `Option`, not `{s.ty.describe}`"
     | some inner =>
       checkTm p ctx s.ty s
-      checkTm p ctx expected none
+      checkTm p ctx expected onNone
       unless x == ctx.size do
         reject t.span s!"the `some` binder x{x} is not the next slot"
-      checkTm p (ctx.push inner) expected some
+      checkTm p (ctx.push inner) expected onSome
       checkTy ty
   | .switchTag ty s alts =>
     match s.ty.enumArity with
@@ -303,13 +307,13 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
   | .repeat _ bound _ _ =>
     if bound == 0 then reject t.span "`Bpf.repeat`'s bound must be positive"
     else reject t.span loopMessage
-  | .pktLoad ty width be p off =>
+  | .pktLoad ty width be pkt off =>
     match Ty.unsignedOf? width with
     | none => reject t.span s!"a packet load is 8, 16, 32 or 64 bits, not {width}"
     | some word =>
       if ty != .option word then
         typeMismatch t.span "a packet load's result" (.option word) ty
-      checkTm p ctx .packet p
+      checkTm p ctx .packet pkt
       checkTm p ctx .u32 off
       let _ := be
       pure ()
@@ -343,10 +347,10 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
 `{d.value.describe}`"
     checkTm p ctx d.key k
     checkTm p ctx .u64 n
-  | .cast ty from v =>
+  | .cast ty src v =>
     let _ ← wordWidth t.span ty
-    let _ ← wordWidth t.span from
-    checkTm p ctx from v
+    let _ ← wordWidth t.span src
+    checkTm p ctx src v
   | .call ty f args =>
     match p.decl? f with
     | none => reject t.span s!"the call to `{f}` has no definition in this program"
@@ -375,6 +379,8 @@ partial def checkTail (p : Program) (ctx : Array Ty) (ret : Ty) (t : Tm) :
   match t.node with
   | .ret v => checkTm p ctx ret v
   | .letE ty x v body =>
+    if ty == .unit then
+      reject t.span "a `Unit` binding has no C representation"
     unless x == ctx.size do
       reject t.span s!"the binder x{x} is not the next slot (the context has {ctx.size})"
     checkTm p ctx ty v
@@ -383,15 +389,15 @@ partial def checkTail (p : Program) (ctx : Array Ty) (ret : Ty) (t : Tm) :
     checkTm p ctx .bool c
     checkTail p ctx ret a
     checkTail p ctx ret b
-  | .switchOption _ s none x some =>
+  | .switchOption _ s onNone x onSome =>
     match s.ty.optionInner with
     | none => reject t.span s!"`match` on an `Option` needs an `Option`, not `{s.ty.describe}`"
     | some inner =>
       checkTm p ctx s.ty s
-      checkTail p ctx ret none
+      checkTail p ctx ret onNone
       unless x == ctx.size do
         reject t.span s!"the `some` binder x{x} is not the next slot"
-      checkTail p (ctx.push inner) ret some
+      checkTail p (ctx.push inner) ret onSome
   | .switchTag _ s alts =>
     match s.ty.enumArity with
     | none => reject t.span s!"a tag switch needs a nullary enum, not `{s.ty.describe}`"
@@ -412,14 +418,16 @@ def checkDecl (p : Program) (d : Decl) : Except String Unit := do
     | .map _ _ _ =>
       reject d.body.span s!"`{d.name}` takes a map as a parameter. A map is a handle, not a \
 value: it cannot be passed, stored or returned; name it in the program's map table instead"
+    | .unit =>
+      reject d.body.span s!"`{d.name}` has a `Unit` parameter, which has no C representation"
     | _ => checkTy ty
   checkTy d.ret
   checkTail p d.params d.ret d.body
 
 /-- Does `from` reach `target` through calls? `seen` breaks cycles in the *query*; the
 answer is still `true` for a cycle, which is the point. -/
-partial def reaches (p : Program) (target : String) (seen : List String) (from : String) : Bool :=
-  match p.decl? from with
+partial def reaches (p : Program) (target : String) (seen : List String) (src : String) : Bool :=
+  match p.decl? src with
   | none => false
   | some d =>
     d.body.calls.toList.any fun c =>
@@ -467,7 +475,7 @@ def checkBudgets (p : Program) : Except String Unit := do
 def checkMaps (p : Program) : Except String Unit := do
   let names := p.maps.foldl (fun (s : List String) m =>
     if s.contains m.name then s else m.name :: s) []
-  if names.size != p.maps.size then
+  if names.length != p.maps.size then
     rejectTop "two maps have the same name"
   for m in p.maps.toList do
     checkTy m.key
@@ -495,11 +503,11 @@ def checkMaps (p : Program) : Except String Unit := do
 def checkProgram (p : Program) : Except String Unit := do
   let some entry := p.entryDecl? |
     rejectTop s!"the entry `{p.entry}` has no definition"
-  match ProgKind.ofSection? p.section with
-  | none => rejectTop s!"unknown section `{p.section}` (choose xdp, tc or classifier)"
+  match ProgKind.ofSection? p.sectionName with
+  | none => rejectTop s!"unknown section `{p.sectionName}` (choose xdp, tc or classifier)"
   | some k =>
     if k != p.kind then
-      rejectTop s!"the section `{p.section}` is a {k.describe} program, but the manifest \
+      rejectTop s!"the section `{p.sectionName}` is a {k.describe} program, but the manifest \
 says {p.kind.describe}"
   if p.license.isEmpty then
     rejectTop "a program needs a licence (`\"GPL\"` for GPL-only helpers)"
@@ -524,7 +532,7 @@ has at least {need}"
 context"
   let names := p.decls.foldl (fun (s : List String) d =>
     if s.contains d.name then s else d.name :: s) []
-  if names.size != p.decls.size then rejectTop "two definitions have the same name"
+  if names.length != p.decls.size then rejectTop "two definitions have the same name"
   checkMaps p
   for d in p.decls.toList do checkDecl p d
   checkAcyclic p

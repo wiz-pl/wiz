@@ -58,7 +58,7 @@ partial def STy.describe : STy → String
   | .int w => s!"IntN {w}"
   | .bitvec n => s!"BitVec {n}"
   | .enum n => s!"enum {n}"
-  | .struct fs => s!"structure ({String.intercalate ", " (fs.toList.map STy.describe)})"
+  | .struct fs => s!"structure ({commaSep (fs.toList.map STy.describe)})"
   | .option t => s!"Option ({t.describe})"
   | .packet => "Packet"
   | .ctx k => s!"{k.describe}Context"
@@ -90,7 +90,7 @@ inductive IOp where
 its subtree. `letE` carries its annotation because that annotation is what makes the core
 typed (§4.2: "the type annotation is required"). -/
 inductive STm where
-  | at (span : Span) (t : STm)
+  | withSpan (span : Span) (t : STm)
   | var (x : Nat)
   | uintLit (w : Nat) (v : Nat)
   /-- `v` is the two's-complement bit pattern, as `IntN` stores it -/
@@ -106,7 +106,7 @@ inductive STm where
   | intOp (w : Nat) (op : IOp) (a b : STm)
   | bitvecOp (n : Nat) (op : UOp) (a b : STm)
   | shift (w : Nat) (left : Bool) (a : STm) (k : Nat)
-  | resize (from to : Nat) (a : STm)
+  | resize (srcW dstW : Nat) (a : STm)
   | eq (a b : STm)
   | lt (signed : Bool) (a b : STm)
   | le (signed : Bool) (a b : STm)
@@ -116,7 +116,7 @@ inductive STm where
   | mkStruct (fs : Array STm)
   | mkSome (t : STm)
   | mkNone (ty : STy)
-  | switchOption (s : STm) (none : STm) (x : Nat) (some : STm)
+  | switchOption (s : STm) (onNone : STm) (x : Nat) (onSome : STm)
   | pktLoad (w : Nat) (be : Bool) (p off : STm)
   | ctxPacket (c : STm)
   | ctxIfindex (c : STm)
@@ -129,11 +129,11 @@ inductive STm where
   | helper (h : String) (args : Array STm)
   | ret (t : STm)
 
-def STm.span (t : STm) : Span := match t with | .at s _ => s | _ => {}
+def STm.span (t : STm) : Span := match t with | .withSpan s _ => s | _ => {}
 
 /-- Strip the source-position wrapper (only the outermost one is needed by `lowerConst`). -/
 def STm.strip : STm → STm
-  | .at _ t => t
+  | .withSpan _ t => t
   | t => t
 
 structure SDecl where
@@ -143,7 +143,7 @@ structure SDecl where
   ret : STy
   body : STm
   /-- `partial`: rejected outright (§2.1) -/
-  partial : Bool := false
+  isPartial : Bool := false
   span : Span := {}
 
 structure SMapDecl where
@@ -158,7 +158,7 @@ structure SMapDecl where
 the restriction pass's output). -/
 structure SProgram where
   entry : String
-  section : String
+  sectionName : String
   kind : ProgKind
   license : String
   version : Nat
@@ -219,6 +219,9 @@ struct or keep the large data in a map."
       else pure ty
   | .option inner =>
     let i ← lowerTy span inner
+    if i == .unit then
+      reject span "an `Option Unit` has no payload representation; use a `Bool` or a \
+nullary enum instead"
     let ty : Ty := .option i
     unless i.isPod do
       reject span s!"`{ty.describe}` wraps a non-POD payload"
@@ -252,7 +255,7 @@ the program to completion on one packet"
 offsets use (`12 + 2`) are accepted; this is §4.3's "`Nat` is a compile-time type only". -/
 partial def lowerConst (span : Span) (t : STm) : Except String Nat := do
   match t.strip with
-  | .at s inner => lowerConst s inner
+  | .withSpan s inner => lowerConst s inner
   | .natLit v => pure v
   | .natOp op a b =>
     let x ← lowerConst span a
@@ -273,6 +276,8 @@ structure Sig where
 
 def lowerSig (d : SDecl) : Except String Sig := do
   let params ← d.params.toList.mapM (lowerTy d.span)
+  if params.any (fun p => p == .unit) then
+    reject d.span s!"`{d.name}` has a `Unit` parameter, which has no C representation"
   let ret ← lowerTy d.span d.ret
   pure { params := params.toArray, ret }
 
@@ -292,7 +297,7 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     (ctx : Array Ty) (span : Span) (t : STm) : Except String Tm := do
   let mk (node : TmNode) : Tm := .mk span node
   match t with
-  | .at s inner => lowerTm maps sigs ctx s inner
+  | .withSpan s inner => lowerTm maps sigs ctx s inner
   | .var x =>
     match ctx[x]? with
     | some ty => pure (mk (.var ty x))
@@ -364,12 +369,12 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     unless a.ty == ty do reject span s!"the operand of a `UIntN {w}` shift is `{a.ty.describe}`"
     let amount : Tm := .mk span (.lit ty k)
     pure (mk (.bin ty (if left then .shl else .shr) a amount))
-  | .resize from to a =>
-    let fty ← lowerUnsigned span from
-    let tty ← lowerUnsigned span to
+  | .resize srcW dstW a =>
+    let fty ← lowerUnsigned span srcW
+    let tty ← lowerUnsigned span dstW
     let a ← lowerTm maps sigs ctx span a
     unless a.ty == fty do
-      reject span s!"`UIntN.resize {from} {to}` of a `{a.ty.describe}`"
+      reject span s!"`UIntN.resize {srcW} {dstW}` of a `{a.ty.describe}`"
     pure (mk (.cast tty fty a))
   | .eq a b =>
     let a ← lowerTm maps sigs ctx span a
@@ -409,6 +414,8 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     pure (mk (.ite a.ty c a b))
   | .letE x sty v body =>
     let ty ← lowerTy span sty
+    if ty == .unit then
+      reject span "a `Unit` binding has no C representation; bind the value the program uses"
     match ty with
     | .map _ _ _ =>
       reject span "a map is a handle, not a value: it cannot be bound, stored or returned"
@@ -450,18 +457,18 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     match ty.optionInner with
     | some _ => pure (mk (.mkNone ty))
     | none => reject span s!"`none` needs an `Option`, not `{sty.describe}`"
-  | .switchOption s none x some =>
+  | .switchOption s onNone x onSome =>
     let s ← lowerTm maps sigs ctx span s
     match s.ty.optionInner with
     | none => reject span s!"`match` on an `Option` needs an `Option`, not `{s.ty.describe}`"
     | some inner =>
-      let none ← lowerTm maps sigs ctx span none
+      let onNone ← lowerTm maps sigs ctx span onNone
       unless x == ctx.size do
         reject span s!"the `some` binder x{x} is not the next slot (the context has {ctx.size})"
-      let some ← lowerTm maps sigs (ctx.push inner) span some
-      unless none.ty == some.ty do
-        reject span s!"the arms of a `match` are `{none.ty.describe}` and `{some.ty.describe}`"
-      pure (mk (.switchOption none.ty s none x some))
+      let onSome ← lowerTm maps sigs (ctx.push inner) span onSome
+      unless onNone.ty == onSome.ty do
+        reject span s!"the arms of a `match` are `{onNone.ty.describe}` and `{onSome.ty.describe}`"
+      pure (mk (.switchOption onNone.ty s onNone x onSome))
   | .pktLoad w be p off =>
     let ty ← match Ty.unsignedOf? w with
       | some u => pure (.option u)
@@ -536,7 +543,7 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     for i in [0:sig.params.size] do
       unless args[i]!.ty == sig.params[i]! do
         reject span s!"argument {i + 1} of `{f}` is `{args[i]!.ty.describe}`, not \
-`{sig.params[i]!.ty.describe}`"
+`{sig.params[i]!.describe}`"
     pure (mk (.call sig.ret f args.toArray))
   | .helper h args =>
     let some d := Helpers.find? h |
@@ -547,7 +554,7 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
     for i in [0:d.args.size] do
       unless args[i]!.ty == d.args[i]! do
         reject span s!"argument {i + 1} of `{h}` is `{args[i]!.ty.describe}`, not \
-`{d.args[i]!.ty.describe}`"
+`{d.args[i]!.describe}`"
     pure (mk (.helper d.res d args.toArray))
   | .ret v =>
     let v ← lowerTm maps sigs ctx span v
@@ -557,7 +564,7 @@ partial def lowerTm (maps : Array MapDecl) (sigs : Array (String × Sig))
 
 def lowerDecl (maps : Array MapDecl) (sigs : Array (String × Sig)) (d : SDecl) :
     Except String Decl := do
-  if d.partial then reject d.span (partialMessage d.name)
+  if d.isPartial then reject d.span (partialMessage d.name)
   let params ← d.params.toList.mapM (lowerTy d.span)
   let ret ← lowerTy d.span d.ret
   let body ← lowerTm maps sigs params.toArray d.span d.body
@@ -567,7 +574,7 @@ def lowerDecl (maps : Array MapDecl) (sigs : Array (String × Sig)) (d : SDecl) 
 for a program that came through this function: the lowering is not assumed correct. -/
 def lowerProgram (p : SProgram) : Except String Program := do
   for d in p.decls.toList do
-    if d.partial then reject d.span (partialMessage d.name)
+    if d.isPartial then reject d.span (partialMessage d.name)
   let sigs ← p.decls.toList.mapM fun d => do
     let s ← lowerSig d
     pure ((d.name, s) : String × Sig)
@@ -579,7 +586,7 @@ def lowerProgram (p : SProgram) : Except String Program := do
   let decls ← p.decls.toList.mapM (lowerDecl maps.toArray sigs.toArray)
   let prog : Program :=
     { entry := p.entry
-      section := p.section
+      sectionName := p.sectionName
       kind := p.kind
       license := p.license
       version := p.version

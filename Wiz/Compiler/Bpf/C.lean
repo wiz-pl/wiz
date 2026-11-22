@@ -23,6 +23,7 @@ guessing. `bpf_rt.h` is emitted beside the C file; the post-`clang` checks (stac
 relocations, instruction budget) are the missing half of this phase and need a build slot
 (§4.4's last two diagnostics are *post-emission*).
 -/
+import Init.Control.State
 import Wiz.Compiler.Bpf.Check
 
 namespace Wiz.Compiler.Bpf
@@ -296,8 +297,8 @@ def cBin (env : Env) (ty : Ty) (op : BinOp) (a b : String) (k : Option Nat) : St
   | .xor => wrap s!"(({uty})({a}) ^ ({uty})({b}))"
   | .div => wrap s!"bpf_udiv(({uty})({a}), ({uty})({b}))"
   | .mod => wrap s!"bpf_umod(({uty})({a}), ({uty})({b}))"
-  /-- The amount is checked to be a literal below the width, so this is not a bare `<<`
-  with the ISA's 63/31 mask. -/
+  -- The amount is checked to be a literal below the width, so this is not a bare `<<`
+  -- with the ISA's 63/31 mask.
   | .shl => wrap s!"(({uty})({a}) << {k.getD 0})"
   | .shr =>
     if ty.isSigned then wrap s!"(({cty})({a}) >> {k.getD 0})"
@@ -332,7 +333,7 @@ partial def simple : Tm → Bool
     | _ => false
 
 partial def expr (env : Env) (t : Tm) : Except String String := do
-  let at := t.span.describe
+  let pos := t.span.describe
   match t.node with
   | .var _ x => pure s!"x{x}"
   | .lit ty v => pure (cLit ty v)
@@ -343,7 +344,7 @@ partial def expr (env : Env) (t : Tm) : Except String String := do
     | .shl | .shr =>
       match b.node with
       | .lit _ k => pure (cBin env ty op as bs (some k))
-      | _ => throw s!"bpf: internal: a shift amount is not a literal (at {at})"
+      | _ => throw s!"bpf: internal: a shift amount is not a literal (at {pos})"
     | _ => pure (cBin env ty op as bs none)
   | .cmp op a b =>
     let as ← expr env a
@@ -356,15 +357,15 @@ partial def expr (env : Env) (t : Tm) : Except String String := do
     let parts ← fs.toList.mapM fun f => do
       let e ← expr env f
       pure e
-    if parts.isEmpty then pure s!"(({cTy env ty}){{0}})"
+    if parts.isEmpty then pure s!"(({cTy env ty})\{0})"
     else
       let fields := (List.range parts.length).map fun i =>
         s!".f{i} = {parts[i]!}"
-      pure s!"(({cTy env ty})\{ {String.intercalate ", " fields} \})"
+      pure s!"(({cTy env ty})\{ {commaSep fields} })"
   | .mkSome ty v =>
     let e ← expr env v
-    pure s!"(({cTy env ty})\{ .tag = 1, .value = {e} \})"
-  | .mkNone ty => pure s!"(({cTy env ty})\{ .tag = 0 \})"
+    pure s!"(({cTy env ty})\{ .tag = 1, .value = {e} })"
+  | .mkNone ty => pure s!"(({cTy env ty})\{ .tag = 0 })"
   | .cast ty _ v =>
     let e ← expr env v
     pure s!"(({cTy env ty})({e}))"
@@ -373,7 +374,7 @@ partial def expr (env : Env) (t : Tm) : Except String String := do
     helperCall h es
   | .call _ f args =>
     let es ← args.toList.mapM (expr env)
-    pure s!"{cName f}({String.intercalate ", " es})"
+    pure s!"{cName f}({commaSep es})"
   | .ctxPacket c => expr env c
   | .ctxIfindex c =>
     let e ← expr env c
@@ -382,7 +383,7 @@ partial def expr (env : Env) (t : Tm) : Except String String := do
     let e ← expr env c
     pure s!"ctx_rx_queue({e})"
   | _ => throw s!"bpf: internal: a control-flow or effectful term is in a value \
-position (at {at}); `Bpf.C` emits it with `operand`"
+position (at {pos}); `Bpf.C` emits it with `operand`"
 
 /-! ## Lines and temporaries -/
 
@@ -434,15 +435,15 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
     emitTm env prog ind cv c
     line s!"{ind}if ({cv}) \{"
     emitTm env prog (ind ++ "  ") dst a
-    line s!"{ind}\} else \{"
+    line s!"{ind}} else \{"
     emitTm env prog (ind ++ "  ") dst b
-    line s!"{ind}\}"
+    line s!"{ind}}"
   | .letE ty x v body =>
     line s!"{ind}\{"
-    line s!"{ind}  {cTy env ty} x{x} = \{0\};"
+    line s!"{ind}  {cTy env ty} x{x} = \{0};"
     emitTm env prog (ind ++ "  ") s!"x{x}" v
     emitTm env prog (ind ++ "  ") dst body
-    line s!"{ind}\}"
+    line s!"{ind}}"
   | .proj _ i s =>
     let ss ← operand env prog ind s
     line s!"{ind}{dst} = (({ss}).f{i});"
@@ -451,36 +452,36 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
     if es.isEmpty then line s!"{ind}{dst} = (({cTy env ty})\{0});"
     else
       let fields := (List.range es.length).map fun i => s!".f{i} = {es[i]!}"
-      line s!"{ind}{dst} = (({cTy env ty})\{ {String.intercalate ", " fields} \});"
+      line s!"{ind}{dst} = (({cTy env ty})\{ {commaSep fields} });"
   | .mkSome ty v =>
     let e ← operand env prog ind v
-    line s!"{ind}{dst} = (({cTy env ty})\{ .tag = 1, .value = {e} \});"
-  | .mkNone ty => line s!"{ind}{dst} = (({cTy env ty})\{ .tag = 0 \});"
-  | .switchOption ty s none x some =>
+    line s!"{ind}{dst} = (({cTy env ty})\{ .tag = 1, .value = {e} });"
+  | .mkNone ty => line s!"{ind}{dst} = (({cTy env ty})\{ .tag = 0 });"
+  | .switchOption ty s onNone x onSome =>
     match s.ty.optionInner with
     | none => throw s!"bpf: internal: `switchOption` on a non-Option (at {t.span.describe})"
     | some inner =>
       let sv ← fresh "s"
-      line s!"{ind}{cTy env s.ty} {sv} = \{0\};"
+      line s!"{ind}{cTy env s.ty} {sv} = \{0};"
       emitTm env prog ind sv s
       line s!"{ind}if ({sv}.tag) \{"
       line s!"{ind}  {cTy env inner} x{x} = {sv}.value;"
-      emitTm env prog (ind ++ "  ") dst some
-      line s!"{ind}\} else \{"
-      emitTm env prog (ind ++ "  ") dst none
-      line s!"{ind}\}"
+      emitTm env prog (ind ++ "  ") dst onSome
+      line s!"{ind}} else \{"
+      emitTm env prog (ind ++ "  ") dst onNone
+      line s!"{ind}}"
   | .switchTag ty s alts =>
     let sv ← fresh "s"
     line s!"{ind}{cTy env s.ty} {sv} = 0;"
     emitTm env prog ind sv s
-    line s!"{ind}{dst} = (({cTy env ty})\{0\});"
+    line s!"{ind}{dst} = (({cTy env ty})\{0});"
     line s!"{ind}switch ({sv}) \{"
     for i in [0:alts.size] do
       line s!"{ind}case {i}:"
       emitTm env prog (ind ++ "  ") dst alts[i]!
       line s!"{ind}  break;"
     line s!"{ind}default: break;"
-    line s!"{ind}\}"
+    line s!"{ind}}"
   | .pktLoad ty w be p off =>
     match ty.optionInner with
     | none => throw s!"bpf: internal: a packet load is not an Option (at {t.span.describe})"
@@ -495,11 +496,11 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
         | 64 => if be then "pkt_load64be" else "pkt_load64le"
         | _ => "pkt_load32be"
       line s!"{ind}{cTy env word} {scratch} = 0;"
-      line s!"{ind}{dst} = (({cTy env ty})\{0\});"
+      line s!"{ind}{dst} = (({cTy env ty})\{0});"
       line s!"{ind}if ({load}({pe}, {oe}, &{scratch})) \{"
       line s!"{ind}  {dst}.tag = 1;"
       line s!"{ind}  {dst}.value = {scratch};"
-      line s!"{ind}\}"
+      line s!"{ind}}"
   | .ctxPacket c =>
     let ce ← operand env prog ind c
     line s!"{ind}{dst} = {ce};"
@@ -517,9 +518,9 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
       let kt ← fresh "k"
       let vp ← fresh "v"
       line s!"{ind}{cTy env d.key} {kt} = {ke};"
-      line s!"{ind}{dst} = (({cTy env ty})\{0\});"
+      line s!"{ind}{dst} = (({cTy env ty})\{0});"
       line s!"{ind}\{ {cTy env d.value} *{vp} = ({cTy env d.value} *)bpf_map_lookup_elem(&{cName m}, &{kt});"
-      line s!"{ind}  if ({vp}) \{ {dst}.tag = 1; {dst}.value = *{vp}; \} \}"
+      line s!"{ind}  if ({vp}) \{ {dst}.tag = 1; {dst}.value = *{vp}; } }"
   | .mapUpdate ty m k v =>
     match prog.map? m with
     | none => throw s!"bpf: internal: the map `{m}` is not declared"
@@ -556,7 +557,7 @@ partial def emitTm (env : Env) (prog : Program) (ind : String) (dst : String) (t
     line s!"{ind}{dst} = (({cTy env ty})({ve}));"
   | .call _ f args =>
     let es ← args.toList.mapM (operand env prog ind)
-    line s!"{ind}{dst} = {cName f}({String.intercalate ", " es});"
+    line s!"{ind}{dst} = {cName f}({commaSep es});"
   | .helper _ h args =>
     let es ← args.toList.mapM (operand env prog ind)
     let e ← match helperCall h es with
@@ -582,7 +583,7 @@ partial def operand (env : Env) (prog : Program) (ind : String) (t : Tm) :
       emitTm env prog ind tmp t
       pure "0"
     else
-      line s!"{ind}{cTy env ty} {tmp} = \{0\};"
+      line s!"{ind}{cTy env ty} {tmp} = \{0};"
       emitTm env prog ind tmp t
       pure tmp
 
@@ -605,28 +606,28 @@ partial def emitRet (env : Env) (prog : Program) (ind : String) (ret : Ty) (t : 
     emitTm env prog ind cv c
     line s!"{ind}if ({cv}) \{"
     emitRet env prog (ind ++ "  ") ret a
-    line s!"{ind}\} else \{"
+    line s!"{ind}} else \{"
     emitRet env prog (ind ++ "  ") ret b
-    line s!"{ind}\}"
+    line s!"{ind}}"
   | .letE ty x v body =>
     line s!"{ind}\{"
-    line s!"{ind}  {cTy env ty} x{x} = \{0\};"
+    line s!"{ind}  {cTy env ty} x{x} = \{0};"
     emitTm env prog (ind ++ "  ") s!"x{x}" v
     emitRet env prog (ind ++ "  ") ret body
-    line s!"{ind}\}"
-  | .switchOption _ s none x some =>
+    line s!"{ind}}"
+  | .switchOption _ s onNone x onSome =>
     match s.ty.optionInner with
     | none => throw s!"bpf: internal: `match` on a non-Option (at {t.span.describe})"
     | some inner =>
       let sv ← fresh "s"
-      line s!"{ind}{cTy env s.ty} {sv} = \{0\};"
+      line s!"{ind}{cTy env s.ty} {sv} = \{0};"
       emitTm env prog ind sv s
       line s!"{ind}if ({sv}.tag) \{"
       line s!"{ind}  {cTy env inner} x{x} = {sv}.value;"
-      emitRet env prog (ind ++ "  ") ret some
-      line s!"{ind}\} else \{"
-      emitRet env prog (ind ++ "  ") ret none
-      line s!"{ind}\}"
+      emitRet env prog (ind ++ "  ") ret onSome
+      line s!"{ind}} else \{"
+      emitRet env prog (ind ++ "  ") ret onNone
+      line s!"{ind}}"
   | .switchTag _ s alts =>
     let sv ← fresh "s"
     line s!"{ind}{cTy env s.ty} {sv} = 0;"
@@ -638,8 +639,8 @@ partial def emitRet (env : Env) (prog : Program) (ind : String) (ret : Ty) (t : 
     if ret == .unit then
       line s!"{ind}default: return;"
     else
-      line s!"{ind}default: return (({cTy env ret})\{0\});"
-    line s!"{ind}\}"
+      line s!"{ind}default: return (({cTy env ret})\{0});"
+    line s!"{ind}}"
   | _ =>
     if ret == .unit then
       throw s!"bpf: P0 requires an explicit `ret` (a unit-typed body would drop its \
@@ -658,16 +659,16 @@ def emitDecl (env : Env) (prog : Program) (d : Decl) : EmitM Unit := do
   let params := (List.range d.params.size).map fun i => s!"{cTy env d.params[i]!} x{i}"
   let retTy := if d.ret == .unit then "void" else cTy env d.ret
   lineDirective d.body.span
-  line s!"static __always_inline {retTy} {cName d.name}({String.intercalate ", " params}) \{"
+  line s!"static __always_inline {retTy} {cName d.name}({commaSep params}) \{"
   emitRet env prog "  " d.ret d.body
-  line "\}"
+  line "}"
 
 def emitEntry (env : Env) (prog : Program) : EmitM Unit := do
   let some d := prog.entryDecl? | throw s!"bpf: internal: the entry `{prog.entry}` is missing"
   lineDirective d.body.span
-  line s!"SEC(\"{prog.kind.section}\") int {cName prog.entry}(bpf_ctx *x0) \{"
+  line s!"SEC(\"{prog.kind.elfSection}\") int {cName prog.entry}(bpf_ctx *x0) \{"
   emitRet env prog "  " prog.ret d.body
-  line "\}"
+  line "}"
 
 def emitTypes (env : Env) : EmitM Unit := do
   let decls :=
@@ -679,15 +680,14 @@ def emitTypes (env : Env) : EmitM Unit := do
     match t with
     | .struct fs =>
       line s!"typedef struct {n} \{"
-      for pair in fs.toList.enum do
-        let (i, f) := pair
-        line s!"  {cFieldTy env f} f{i};"
-      line s!"\} {n};"
+      for i in [0:fs.size] do
+        line s!"  {cFieldTy env fs[i]!} f{i};"
+      line ("} " ++ n ++ ";")
     | .option inner =>
       line s!"typedef struct {n} \{"
       line "  __u8 tag;"
       line s!"  {cFieldTy env inner} value;"
-      line s!"\} {n};"
+      line ("} " ++ n ++ ";")
     | _ => pure ()
 
 def emitMaps (env : Env) (prog : Program) : EmitM Unit := do
@@ -697,7 +697,7 @@ def emitMaps (env : Env) (prog : Program) : EmitM Unit := do
     line s!"  __uint(max_entries, {m.maxEntries});"
     line s!"  __type(key, {cTy env m.key});"
     line s!"  __type(value, {cTy env m.value});"
-    line s!"\} {cName m.name} SEC(\".maps\");"
+    line ("} " ++ cName m.name ++ " SEC(\".maps\");")
 
 /-- Print the whole program. The checker runs first; the emitter is not a second gate. -/
 def emitProgram (prog : Program) : Except String String := do

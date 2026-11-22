@@ -32,7 +32,7 @@ inductive ProgKind where
   deriving Repr, BEq, Inhabited
 
 /-- The ELF section name libbpf expects. -/
-def ProgKind.section : ProgKind → String
+def ProgKind.elfSection : ProgKind → String
   | .xdp => "xdp"
   | .tc => "classifier"
 
@@ -141,6 +141,9 @@ partial def Ty.align : Ty → Nat
   | .struct fs => fs.foldl (fun a f => max a f.align) 1
   | _ => 1
 
+/-- Join with `", "` (used in diagnostics and C type spellings). -/
+def commaSep (xs : List String) : String := String.intercalate ", " xs
+
 /-- Round `n` up to a multiple of `a` (`a ≥ 1`). -/
 def alignUp (n a : Nat) : Nat :=
   if a <= 1 then n else ((n + a - 1) / a) * a
@@ -197,7 +200,7 @@ partial def Ty.describe : Ty → String
   | .i32 => "IntN 32"
   | .i64 => "IntN 64"
   | .enum n => s!"enum {n}"
-  | .struct fs => s!"struct \{ {String.intercalate ", " (fs.toList.map Ty.describe)} \}"
+  | .struct fs => s!"struct \{ {commaSep (fs.toList.map Ty.describe)} }"
   | .option t => s!"Option ({t.describe})"
   | .packet => "Packet"
   | .ctx k => s!"{k.describe}Context"
@@ -285,7 +288,7 @@ inductive TmNode where
   | mkSome (ty : Ty) (v : Tm)
   | mkNone (ty : Ty)
   /-- `match s with | none => none | some x => some` -/
-  | switchOption (ty : Ty) (s : Tm) (none : Tm) (x : Nat) (some : Tm)
+  | switchOption (ty : Ty) (s : Tm) (onNone : Tm) (x : Nat) (onSome : Tm)
   /-- an exhaustive switch on an enum tag -/
   | switchTag (ty : Ty) (s : Tm) (alts : Array Tm)
   /-- `Bpf.repeat`: `step` is the name of a function `S → UIntN 32 → S`. P0 rejects it;
@@ -302,7 +305,7 @@ inductive TmNode where
   | mapDelete (ty : Ty) (m : String) (k : Tm)
   | mapAdd (ty : Ty) (m : String) (k n : Tm)
   /-- zero-extend/truncate between accepted widths (`UIntN.resize`) -/
-  | cast (ty : Ty) (from : Ty) (v : Tm)
+  | cast (ty : Ty) (src : Ty) (v : Tm)
   | call (ty : Ty) (f : String) (args : Array Tm)
   | helper (ty : Ty) (h : Helper) (args : Array Tm)
   | ret (t : Tm)
@@ -362,7 +365,7 @@ def TmNode.children : TmNode → Array Tm
   | .mkStruct _ fs => fs
   | .mkSome _ v => #[v]
   | .mkNone _ => #[]
-  | .switchOption _ s none _ some => #[s, none, some]
+  | .switchOption _ s onNone _ onSome => #[s, onNone, onSome]
   | .switchTag _ s alts => #[s] ++ alts
   | .repeat _ _ init _ => #[init]
   | .pktLoad _ _ _ p off => #[p, off]
@@ -389,7 +392,7 @@ partial def Tm.calls (t : Tm) : Array String :=
   t.node.children.foldl (fun acc c => acc ++ c.calls) here
 
 /-- Wrap a node with a source position. -/
-def Tm.at (s : Span) (n : TmNode) : Tm := .mk s n
+def Tm.withSpan (s : Span) (n : TmNode) : Tm := .mk s n
 
 /-- The nearest explicit source position, if any (fixtures often omit them). -/
 def Tm.spanOf (t : Tm) : Option Span :=
@@ -421,7 +424,7 @@ structure Program where
   /-- the Wiz definition and the C function name -/
   entry : String
   /-- `"xdp"` / `"classifier"` -/
-  section : String
+  sectionName : String
   kind : ProgKind
   license : String
   /-- a `UIntN 32` literal (`bpf_attr.prog_version`) -/

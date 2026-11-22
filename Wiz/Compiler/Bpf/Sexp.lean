@@ -297,11 +297,11 @@ partial def parseTmForm (p : P) : Except String (Tm × P) := do
   | "switch-option" =>
     let (ty, p) ← parseTy p
     let (s, p) ← parseTm p
-    let (none, p) ← parseTm p
+    let (onNone, p) ← parseTm p
     let (x, p) ← p.nat
-    let (some, p) ← parseTm p
+    let (onSome, p) ← parseTm p
     let p ← p.expectRp
-    pure (.mk {} (.switchOption ty s none x some), p)
+    pure (.mk {} (.switchOption ty s onNone x onSome), p)
   | "switch-tag" =>
     let (ty, p) ← parseTy p
     let (s, p) ← parseTm p
@@ -369,10 +369,10 @@ partial def parseTmForm (p : P) : Except String (Tm × P) := do
     pure (.mk {} (.mapAdd ty m k n), p)
   | "cast" =>
     let (ty, p) ← parseTy p
-    let (from, p) ← parseTy p
+    let (src, p) ← parseTy p
     let (v, p) ← parseTm p
     let p ← p.expectRp
-    pure (.mk {} (.cast ty from v), p)
+    pure (.mk {} (.cast ty src v), p)
   | "call" =>
     let (ty, p) ← parseTy p
     let (f, p) ← p.str

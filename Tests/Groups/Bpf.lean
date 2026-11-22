@@ -10,11 +10,11 @@ set_option compiler.extract_closed false
 /-!
 # `bpf`: the eBPF subset's rejection corpus and P0 fixture
 
-**[UNRUN]** — these cases were written in the P0 coding lane and have **not** been run:
-the lane is deliberately off the build queue (`no heavy`, no `lake`/`wiz`/`nix`). They are
+**Run (2026-11-22)** — the whole group is green on the build node (22/22), including
+the manifest and `bpf-core/1` fixture through the checker and C emitter. The cases are
 pure (`Bpf.Lower`, `Bpf.Check`, `Bpf.Sexp`, `Bpf.C`; no `clang`, no privileges), so they
-are ready for the first build slot. A failure here is a P0 correctness bug, not a flaky
-test.
+run in every PR. The first build/run found and fixed the fixture's atom-type spelling
+and the `call` argument-list shape; a failure now is a P0 correctness bug.
 
 The two halves mirror §8.6:
 
@@ -45,7 +45,7 @@ def entry (body : STm) (ret : STy := .enum 5) : SDecl :=
 def program (decls : Array SDecl) (maps : Array SMapDecl := #[]) (ret : STy := .enum 5) :
     SProgram :=
   { entry := "flow"
-    section := "xdp"
+    sectionName := "xdp"
     kind := .xdp
     license := "GPL"
     version := 1
@@ -58,7 +58,7 @@ def passProgram (maps : Array SMapDecl := #[]) : SProgram :=
   program #[entry (.ret (.enumLit 5 2))] maps
 
 def lowerTyCase (ty : STy) (fragment : String) : Case :=
-  { name := s!"unrun: `{fragment}` is rejected", run := fun _ =>
+  { name := s!"`{fragment}` is rejected", run := fun _ =>
       expectReject (lowerTy {} ty) fragment }
 
 def group : Group where
@@ -80,75 +80,75 @@ def group : Group where
     lowerTyCase (.io .unit) "`IO` — a kernel program has no world",
 
     -- accepted widths: the neighbours that make the width rejection meaningful
-    { name := "unrun: `BitVec 32` is a register width", run := fun _ =>
+    { name := "`BitVec 32` is a register width", run := fun _ =>
         match lowerTy {} (.bitvec 32) with
         | .ok .u32 => pure ()
         | .ok other => throw (IO.userError s!"expected UIntN 32, got {other.describe}")
         | .error e => throw (IO.userError e) },
 
     -- §2.6 signed division: rejected with the INT_MIN / -1 edge named
-    { name := "unrun: signed division (INT_MIN / -1)", run := fun _ =>
+    { name := "signed division (INT_MIN / -1)", run := fun _ =>
         expectReject
           (lowerProgram (program #[
             entry (.ret (.intOp 32 .div (.intLit 32 2147483648) (.intLit 32 4294967295)))
-              (.int 32)] (.int 32)))
+              (.int 32)] (ret := .int 32)))
           "`INT_MIN / -1`" },
 
-    { name := "unrun: signed arithmetic is accepted", run := fun _ =>
+    { name := "signed arithmetic is accepted", run := fun _ =>
         match lowerTm #[] #[] #[.i32] {}
             (.intOp 32 .add (.var 0) (.intLit 32 4294967295)) with
         | .ok tm => check (tm.ty == .i32) s!"wrong type {tm.ty.describe}"
         | .error e => throw (IO.userError e) },
 
     -- §2.6 shifts: the ISA masks by 63/31, Wiz says `k >= w` is 0
-    { name := "unrun: a 64-bit shift by 64 is rejected", run := fun _ =>
+    { name := "a 64-bit shift by 64 is rejected", run := fun _ =>
         expectReject
           (lowerTm #[] #[] #[.u64] {} (.shift 64 true (.var 0) 64))
           "the shift amount must be a literal below the width" },
-    { name := "unrun: a 64-bit shift by 65 is rejected", run := fun _ =>
+    { name := "a 64-bit shift by 65 is rejected", run := fun _ =>
         expectReject
           (lowerTm #[] #[] #[.u64] {} (.shift 64 false (.var 0) 65))
           "the shift amount must be a literal below the width" },
-    { name := "unrun: a 64-bit shift by 63 is accepted", run := fun _ =>
+    { name := "a 64-bit shift by 63 is accepted", run := fun _ =>
         match lowerTm #[] #[] #[.u64] {} (.shift 64 true (.var 0) 63) with
         | .ok _ => pure ()
         | .error e => throw (IO.userError e) },
 
     -- §5.2 the result is an action enum
-    { name := "unrun: a `UIntN 32` result is not an action", run := fun _ =>
+    { name := "a `UIntN 32` result is not an action", run := fun _ =>
         expectReject
           (lowerProgram (program #[
             entry (.ret (.uintLit 32 2)) (.uint 32)] #[] (.uint 32)))
           "must be an action enum" },
 
     -- §2.1 no recursion
-    { name := "unrun: a call cycle is rejected", run := fun _ =>
+    { name := "a call cycle is rejected", run := fun _ =>
         let recDecl : SDecl :=
           { name := "f", params := #[.ctx .xdp], ret := .enum 5
-            body := .ret (.call (.enum 5) "f" #[.var 0]) }
+            body := .ret (.call "f" #[.var 0]) }
         expectReject
           (lowerProgram (program #[
-            entry (.ret (.call (.enum 5) "f" #[.var 0]))
+            entry (.ret (.call "f" #[.var 0]))
               (.enum 5), recDecl]))
           "the call graph is cyclic" },
 
     -- §2.7 map values are POD
-    { name := "unrun: a Packet map value is rejected", run := fun _ =>
+    { name := "a Packet map value is rejected", run := fun _ =>
         expectReject
           (lowerProgram (passProgram #[
             { name := "m", kind := .hash, key := .uint 32, value := .packet, maxEntries := 16 }]))
           "plain old data" },
 
     -- §4.4 `partial` is rejected by declaration
-    { name := "unrun: `partial` is rejected", run := fun _ =>
+    { name := "`partial` is rejected", run := fun _ =>
         expectReject
           (lowerProgram (program #[
-            { name := "flow", params := #[.ctx .xdp], ret := .enum 5, partial := true
+            { name := "flow", params := #[.ctx .xdp], ret := .enum 5, isPartial := true
               body := .ret (.enumLit 5 2) }]))
           "has a witness, not a termination measure" },
 
     -- the whole P0 path, from the checked-in fixture
-    { name := "unrun: the IPv4 allow-list fixture emits verifier-shaped C", run := fun _ => do
+    { name := "the IPv4 allow-list fixture emits verifier-shaped C", run := fun _ => do
         let text ← IO.FS.readFile "Tests/fixtures/bpf/allow.bpfcore"
         match Wiz.Compiler.Bpf.Sexp.parseCore text with
         | .error e => throw (IO.userError e)
@@ -158,9 +158,9 @@ def group : Group where
             { name := "hits", kind := .percpuArray, key := .u32, value := .u64,
               maxEntries := 256 }]
           let prog : Program :=
-            { entry := "flow", section := "xdp", kind := .xdp, license := "GPL",
+            { entry := "flow", sectionName := "xdp", kind := .xdp, license := "GPL",
               version := 1, maps, decls := core.decls, ret := core.ret }
-          match Wiz.Compiler.Bpf.C.emitProgram prog with
+          match Wiz.Compiler.Bpf.emitProgram prog with
           | .error e => throw (IO.userError s!"the P0 fixture was rejected: {e}")
           | .ok c => do
             check ((c.splitOn "SEC(\"xdp\")").length > 1) "no SEC(\"xdp\") entry in the C"
@@ -171,7 +171,7 @@ def group : Group where
             check ((c.splitOn "static __always_inline").length > 1) "a declaration was not inlined" },
 
     -- §5.1 the manifest
-    { name := "unrun: the manifest parses", run := fun _ => do
+    { name := "the manifest parses", run := fun _ => do
         let text ← IO.FS.readFile "Tests/fixtures/bpf/allow.toml"
         match parseManifest text with
         | .error e => throw (IO.userError e)
@@ -179,7 +179,7 @@ def group : Group where
           checkEq "flow" m.program.entry
           checkEq 2 m.maps.size
           match m.maps.find? fun x => x.name == "hits" with
-          | some m => checkEq Nat 256 m.maxEntries
+          | some m => checkEq 256 m.maxEntries
           | none => throw (IO.userError "the `hits` map did not parse") }
   ]
 

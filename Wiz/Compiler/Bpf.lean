@@ -29,7 +29,7 @@ namespace Wiz.Compiler.Bpf
 structure ProgramSpec where
   name : String
   entry : String
-  section : String
+  sectionName : String
   kind : ProgKind
   license : String
   version : Nat
@@ -58,11 +58,11 @@ def unquote (v : String) : String :=
   else v
 
 /-- Strip a section prefix (`program.` / `map.`) and return the rest, or an error. -/
-def sectionSuffix (prefix : String) (s : Sect) : Except String String :=
-  if s.name.startsWith prefix then
-    pure (s.name.drop prefix.length).toString
+def sectionSuffix (pfx : String) (s : Sect) : Except String String :=
+  if s.name.startsWith pfx then
+    pure (s.name.drop pfx.length).toString
   else
-    .error s!"bpf.toml: `[{s.name}]` is not a `{prefix}` section"
+    .error s!"bpf.toml: `[{s.name}]` is not a `{pfx}` section"
 
 partial def sections (lines : List String) (cur : Option Sect) (acc : List Sect) :
     Except String (List Sect) :=
@@ -72,11 +72,11 @@ partial def sections (lines : List String) (cur : Option Sect) (acc : List Sect)
     | some s => pure (s :: acc).reverse
     | none => pure acc.reverse
   | line :: rest =>
-    let line := line.trim
+    let line := line.trimAscii.toString
     if line.isEmpty || line.startsWith "#" then
       sections rest cur acc
     else if line.startsWith "[" && line.endsWith "]" then
-      let name := (line.drop 1).dropEnd 1 |>.trim
+      let name := ((line.drop 1).dropEnd 1).trimAscii.toString
       let acc := match cur with | some s => s :: acc | none => acc
       sections rest (some { name, entries := #[] }) acc
     else
@@ -86,7 +86,7 @@ partial def sections (lines : List String) (cur : Option Sect) (acc : List Sect)
         match line.splitOn "=" with
         | [k, v] =>
           sections rest (some { s with
-            entries := s.entries.push (k.trim, unquote v.trim) }) acc
+            entries := s.entries.push (k.trimAscii.toString, unquote (v.trimAscii.toString)) }) acc
         | _ => .error s!"bpf.toml: expected `key = value`, got `{line}`"
 
 /-- P0 map keys and values are scalars: the manifest names a type, it does not parse the
@@ -109,7 +109,7 @@ struct keys and BTF layouts arrive with the P2 map declarations."
 def parseProgramSect (s : Sect) : Except String ProgramSpec := do
   let name ← sectionSuffix "program." s
   let entry ← reqEntry s "entry"
-  let section ← reqEntry s "section"
+  let sectionName ← reqEntry s "section"
   let typ ← reqEntry s "type"
   let license ← reqEntry s "license"
   let versionS ← reqEntry s "version"
@@ -121,15 +121,15 @@ def parseProgramSect (s : Sect) : Except String ProgramSpec := do
     | "tc" => pure .tc
     | other => .error s!"bpf.toml: `type = \"{other}\"` (choose \"xdp\" or \"tc\"; tracing \
 is outside the packet subset)"
-  match ProgKind.ofSection? section with
-  | none => .error s!"bpf.toml: unknown section `{section}` (choose \"xdp\", \"tc\" or \
+  match ProgKind.ofSection? sectionName with
+  | none => .error s!"bpf.toml: unknown section `{sectionName}` (choose \"xdp\", \"tc\" or \
 \"classifier\")"
   | some k =>
     if k != kind then
-      .error s!"bpf.toml: the section `{section}` is {k.describe}, but `type` is \
+      .error s!"bpf.toml: the section `{sectionName}` is {k.describe}, but `type` is \
 {kind.describe}"
     else pure ()
-  pure { name, entry, section, kind, license, version, core := findEntry s "core" }
+  pure { name, entry, sectionName, kind, license, version, core := findEntry s "core" }
 
 def parseMapSect (s : Sect) : Except String MapDecl := do
   let name ← sectionSuffix "map." s
@@ -173,8 +173,8 @@ def compileManifest (manifestPath : System.FilePath) : IO (Except String String)
   | .ok m =>
     let dir := manifestPath.parent.getD "."
     let corePath := dir / coreFileName m.program
-    let exists ← corePath.pathExists
-    if !exists then
+    let present ← corePath.pathExists
+    if !present then
       pure (.error s!"bpf: `{manifestPath}` needs the typed core `{corePath}` (a \
 `bpf-core/1` file). P0 cannot read Wiz source: the compiler IR is untyped, so the \
 restriction pass needs the elaborated types and is not wired yet (see \
@@ -186,14 +186,14 @@ Wiz/Compiler/Bpf/Lower.lean).")
       | .ok core =>
         let prog : Program :=
           { entry := m.program.entry
-            section := m.program.section
+            sectionName := m.program.sectionName
             kind := m.program.kind
             license := m.program.license
             version := m.program.version
             maps := m.maps
             decls := core.decls
             ret := core.ret }
-        pure (C.emitProgram prog)
+        pure (emitProgram prog)
 
 def buildCmd (path out : String) (lib noMain : Bool) (split : Nat) : IO UInt32 := do
   if lib || noMain || split != 0 then do
@@ -216,7 +216,7 @@ types; it is not wired yet (see Wiz/Compiler/Bpf/Lower.lean)."
       let dir := outFile.parent.getD "."
       let hdr := dir / "bpf_rt.h"
       IO.FS.writeFile outFile c
-      IO.FS.writeFile hdr C.header
+      IO.FS.writeFile hdr header
       IO.println s!"bpf: wrote {outPath} and {hdr}"
       IO.eprintln "bpf: the C is verifier-shaped; `clang -target bpf` and the post-clang \
 checks (stack, undefined symbols, relocations, instruction budget) are the next P0 step."
