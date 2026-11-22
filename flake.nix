@@ -671,16 +671,13 @@ EOF
             if [ -f grail.wiz ]; then
               local_wiz=$(printf '%s\n' \
                 '-- This machine'"'"'s toolchain, written by the nix dev shell (flake.nix); not committed.' \
-                '-- The root is the co-development root for examples/scry-*.wiz: Scry is a' \
-                '-- package (scry/src), not part of lib/ (separate-repos.md P0.1).' \
                 'import Grail' \
                 'def settings : Settings := Settings.empty' \
                 "  |> Settings.set \"cflags\" \"$WIZ_CFLAGS\"" \
                 "  |> Settings.set \"ldflags\" \"$WIZ_LDFLAGS\"" \
                 "  |> Settings.set \"llc\" \"$WIZ_LLC\"" \
                 "  |> Settings.set \"gc-cflags\" \"$WIZ_GC_CFLAGS\"" \
-                "  |> Settings.set \"gc-ldflags\" \"$WIZ_GC_LDFLAGS\"" \
-                '  |> Settings.set "root" "scry/src"')
+                "  |> Settings.set \"gc-ldflags\" \"$WIZ_GC_LDFLAGS\"")
               [ "$(cat grail.local.wiz 2>/dev/null)" = "$local_wiz" ] || printf '%s\n' "$local_wiz" > grail.local.wiz
             fi
           '';
