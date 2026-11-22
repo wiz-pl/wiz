@@ -208,6 +208,56 @@ def cliGroup : Group where
           checkEq 0 c
           checkEq "hello from the selfhost driver\n42\n" out
           cliCheck err "cache hit: " "run's warm cache" },
+    { name := "run: a `--rt` path and program arguments with spaces, `;`, `$` and `'` are quoted",
+      run := fun _ => do
+        match ← cliRunOptions with
+        | none => skip "no garbage collector, --gc-cflags"
+        | some opts => withSelfhostCli fun exe => do
+          let cacheDir ← IO.FS.createTempDir
+          let cache := (cacheDir / "c").toString
+          -- a runtime directory and a source path with the shell's own characters, and
+          -- a runtime copy there: the driver's `-I` and the file's name are quoted, so
+          -- the compile sees one word each
+          let rtDir := "rt dir;x$y"
+          let rtText ← IO.FS.readFile "selfhost/rt.c"
+          let prog := "import Prelude\n" ++
+            "def printAll : List String → IO Unit\n" ++
+            "  | .nil => IO.pure ()\n" ++
+            "  | .cons s rest => do\n" ++
+            "    IO.println s;\n" ++
+            "    printAll rest\n" ++
+            "def main : IO Unit := do\n" ++
+            "  n ← IO.argCount;\n" ++
+            "  IO.println (Nat.toString n);\n" ++
+            "  args ← IO.args;\n" ++
+            "  printAll args\n"
+          let files := #[(s!"{rtDir}/rt.c", rtText), ("a b;c$d/prog.wiz", prog)]
+          -- (the `--rt` after FILE overrides the checkout's; the words after FILE that
+          -- do not start with `-` are the program's own arguments)
+          let args := #["run", "a b;c$d/prog.wiz"] ++ opts ++
+            #["--rt", rtDir, "one two", "a;b", "$HOME", "it's", "back\\slash", "--cache", cache]
+          let (c, out, err) ← cliRun exe files args
+          checkEq 0 c
+          checkEq "5\none two\na;b\n$HOME\nit's\nback\\slash\n" out
+          checkEq "" err },
+    { name := "run: a program killed by a signal is a failure, not exit 0", run := fun _ => do
+        match ← cliRunOptions with
+        | none => skip "no garbage collector, --gc-cflags"
+        | some opts => withSelfhostCli fun exe => do
+          let cacheDir ← IO.FS.createTempDir
+          let cache := (cacheDir / "c").toString
+          let prog := "import Prelude\n" ++
+            "extern \"raise\" (header := \"signal.h\") cRaise : Nat → IO Unit\n" ++
+            "def main : IO Unit := do\n" ++
+            "  cRaise 11;\n" ++
+            "  IO.println \"not reached\"\n"
+          let (c, out, err) ← cliRun exe #[("segv.wiz", prog)] (#["run", "segv.wiz", "--cache", cache] ++ opts)
+          -- (a shell that execs the program leaves the signal 11 in the wait status; one
+          -- that forks reports 128 + 11, and either is a failure, never 0)
+          checkEq 1 c
+          checkEq "" out
+          unless cliHas err "killed by signal 11" || cliHas err "exited with code 139" do
+            throw (IO.userError s!"a SIGSEGV was not reported as one (exit {c}): {err}") },
     { name := "-I: a module root, and a module's errors at its own position", run := fun _ =>
         withSelfhostCli fun exe => do
         let files := #[("lib/M.wiz", "import Prelude\ndef one : Nat := 1\n"), ("main.wiz", cliGood.replace "def one : Nat := 1" "import M")]

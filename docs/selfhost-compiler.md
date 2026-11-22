@@ -36,6 +36,18 @@ toolchain flags and the backend flags (`selfhost/Cli.wiz`). Its diagnostics are 
 per error (`file:line:col: severity: message [code]`), using the Lean frontend's error
 code where the message names the same mistake (`selfhost/Cli.wiz`).
 
+`run`/`eval` compile with the C toolchain and then run the program with its own words.
+`--cc PATH` and `--llc PATH` are **one executable each**, not a command line (use a
+wrapper script to add arguments), `--rt DIR` is the directory holding `rt.c`, and
+`--cflags`/`--ldflags` are whitespace-separated word lists, as the Lean-hosted `wiz`
+reads them. `system(3)` takes a shell string, so the driver POSIX-quotes every
+interpolated component — the compiler path, the runtime directory, each flag, an
+input/output path, and every program argument — and a path or argument with a space,
+`;`, `$`, a quote or a newline stays exactly one word instead of starting a second
+command. The program's wait status is decoded (`WIFEXITED`/`WIFSIGNALED`): a program
+killed by a signal is a failure, `error: the program was killed by signal N` and exit 1
+(the shell's `128 + N`), never exit 0.
+
 ## The bootstrap and the fixpoint
 
 Stage 1 is the self-hosted compiler **built by the Lean toolchain** (`Wiz/Selfhost.lean`

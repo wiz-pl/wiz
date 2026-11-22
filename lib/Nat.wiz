@@ -306,6 +306,11 @@ def Nat.le_of_add_le_add_right (k a b : Nat) (h : Nat.Le (a + k) (b + k)) : Nat.
 /-- `b = a + k → a ≤ b`. -/
 def Nat.le_of_eq_add (a b k : Nat) (e : b = a + k) : Nat.Le a b :=
   Eq.mpr' (fun (x : Nat) => Nat.Le a x) e (Nat.le_add_right a k)
+
+/-- (P0 `omega`) `a ≤ c` from `a + k = c`, with all arguments explicit (the right
+orientation for an equality hypothesis whose left side is a sum). -/
+def Nat.le_of_eq_add' (a c k : Nat) (h : Nat.add a k = c) : Nat.Le a c :=
+  Eq.substProp (fun (x : Nat) => Nat.Le a x) h (Nat.le_add_right a k)
 /-- `a + (k + 1) ≤ a` is impossible. -/
 def Nat.not_add_succ_le : (a x : Nat) → Nat.Le (a + Nat.succ x) a → False
   | .zero, x, h => Nat.not_succ_le_zero x h

@@ -26,6 +26,7 @@ on:
     branches: [master]
     paths:
       - scripts/release-tarball.sh
+      - scripts/test-release-tarball.sh
       - scripts/source-tarball.py
       - scripts/sbom.py
       - scripts/release-sbom.py
@@ -126,13 +127,26 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit || github.sha }}
-      # this workflow's own scripts (a dispatched old commit may predate them)
+      # This workflow's own scripts, pinned to the commit being built: a re-run of an
+      # older dispatch must package that commit with that commit's scripts, licences
+      # and inputs, not with today's. (An old commit that predates a script is guarded
+      # where the script is optional.)
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.commit || github.sha }}
           path: .release-tools
           sparse-checkout: scripts
+      - name: Pin the source date epoch
+        # The tarball derives its epoch from the commit; this also pins every other
+        # tool that reads SOURCE_DATE_EPOCH. A dispatched older commit gets its own.
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - name: The snapshot scripts work (a fake gh, nothing published)
-        run: sh .release-tools/scripts/test-release-snapshots.sh
+        run: |
+          if [ -f .release-tools/scripts/test-release-snapshots.sh ]; then
+            sh .release-tools/scripts/test-release-snapshots.sh
+          else
+            echo "commit $GITHUB_SHA predates the snapshot scripts; not testing them"
+          fi
       - name: A dispatched commit is on master
         if: inputs.commit != ''
         env:
@@ -142,6 +156,28 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$OLD_COMMIT" ] || { echo "commit: give the full 40-hex sha"; exit 1; }
           st=$(gh api "repos/${{ github.repository }}/compare/$OLD_COMMIT...master" --jq .status)
           case $st in ahead|identical) ;; *) echo "$OLD_COMMIT is not on master ($st)"; exit 1 ;; esac
+      - name: The dispatched commit has the release tooling
+        # The `.release-tools` checkout is pinned to this commit, so a commit that
+        # predates one of the scripts the job calls would fail at that step, after the
+        # build. Refuse it in seconds instead: a dispatch publishes a snapshot, and
+        # every publish path calls the commit's own release-snapshots.sh.
+        if: inputs.commit != ''
+        run: |
+          missing=
+          for f in scripts/release-tarball.sh scripts/release-snapshots.sh \
+                   scripts/build-tower-wiz.sh scripts/release-licenses/NOTICE; do
+            [ -f ".release-tools/$f" ] || missing="$missing .release-tools/$f"
+          done
+          [ -d tower ] || missing="$missing tower/"
+          if grep -q withBundled Wiz/Toolchain.lean 2>/dev/null; then
+            for f in scripts/bundle-cc.sh scripts/bundle-cc.sources; do
+              [ -f ".release-tools/$f" ] || missing="$missing .release-tools/$f"
+            done
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::commit $OLD_COMMIT predates the release tooling:$missing; dispatch a commit from the release era (26d or later)"
+            exit 1
+          fi
       - name: elan
         # Pinned to the elan v4.3.0 commit, not `master`, and checked by hash: this
         # script is fetched over the network and run with `sh` (deps-02/03). To bump it,
@@ -235,10 +271,18 @@ jobs:
       - name: Build tower (Wiz, stage 26h)
         run: |
           set -eu
+          # A partial/sparse checkout can leave tracked paths out of the worktree even
+          # though the commit has them; restore before deciding the commit is old.
+          if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
+            git checkout -- tower scripts/build-tower-wiz.sh 2>/dev/null || true
+          fi
           if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
             # Every commit with the Wiz tower (26e and later) has both; an older commit
             # has no shipped tower, and a Lean build step is no longer used here.
             echo "::error::commit $GITHUB_SHA predates the Wiz tower (tower/, 26e)"
+            echo "  pwd=$(pwd)"
+            git ls-tree --name-only HEAD | head -20
+            git status --short | head -10
             exit 1
           fi
           # The bundled C toolchain links GMP statically and targets the tarball's glibc
@@ -261,8 +305,29 @@ jobs:
           cc=; [ "$BUNDLE_CC" = yes ] && cc="cc-bundle"
           web=; [ "$BUNDLE_WEB" = yes ] && web="web-out"
           [ -z "$cc" ] && [ -n "$web" ] && { echo "a web dir needs the cc argument before it"; exit 1; }
-          .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz .lake/build/bin "$(git rev-parse HEAD)" $cc $web
+          # the sixth argument is the checkout at this commit: lib/, editors/ and the
+          # licences are read from the commit, not from the working tree
+          .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz \
+            .lake/build/bin "$(git rev-parse HEAD)" $cc $web "$GITHUB_WORKSPACE"
           ls -l dist
+      - name: The binary tarball is reproducible (two roots, different environments)
+        # The same commit, packaged twice in two independent roots with a different
+        # PWD, HOME, TMPDIR, umask, LC_ALL, TZ and ambient SOURCE_DATE_EPOCH. It
+        # compares the tarballs, their .sha256 files and a per-member manifest, and
+        # names the first differing member. Publishing is gated on this (below).
+        id: repro
+        env:
+          BUNDLE_CC: ${{ steps.bundle.outputs.cc }}
+          BUNDLE_WEB: ${{ steps.web.outputs.web }}
+        run: |
+          if [ ! -f .release-tools/scripts/test-release-tarball.sh ]; then
+            echo "commit $GITHUB_SHA predates test-release-tarball.sh; not checking"
+            exit 0
+          fi
+          cc=; [ "$BUNDLE_CC" = yes ] && cc="--cc cc-bundle"
+          web=; [ "$BUNDLE_WEB" = yes ] && web="--web web-out"
+          sh .release-tools/scripts/test-release-tarball.sh --strict \
+            --bindir .lake/build/bin $cc $web --rev "$(git rev-parse HEAD)"
       - name: The source tarball and its manifest (reproducible)
         # docs/building.md, "Reproducible source tarball": from the tagged commit, twice,
         # in different directories; a mismatch publishes nothing.
@@ -292,6 +357,11 @@ jobs:
         env:
           WIZ_ATTEST_KEY: ${{ secrets.WIZ_ATTEST_KEY }}
         run: |
+          if [ ! -f .release-tools/scripts/test_release_sbom.py ] ||
+             [ ! -f .release-tools/scripts/release-sbom.py ]; then
+            echo "commit $GITHUB_SHA predates the SBOM scripts; skipping them"
+            exit 0
+          fi
           python3 .release-tools/scripts/test_release_sbom.py -v
           if ! ls dist/wiz-*-src.tar.gz.manifest.json >/dev/null 2>&1; then
             echo "no source tarball; skipping the supply-chain artifacts"
@@ -431,7 +501,8 @@ jobs:
           # the artifact is a convenience: 90 days for a tag, 7 for a snapshot, 3 for a PR
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || (github.event_name == 'pull_request' && 3 || 7) }}
       - name: Publish (a tag)
-        if: startsWith(github.ref, 'refs/tags/v')
+        # nothing is published unless the two-root comparison above passed
+        if: startsWith(github.ref, 'refs/tags/v') && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         # the notes are the tag's section of CHANGELOG.md (`## [X.Y.Z] - date`), which must
@@ -452,12 +523,12 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --title "Wiz ${GITHUB_REF_NAME}" --notes-file "$notes"
       # snapshot-<sha>, then pruning (26g); nightly.yml moves nightly once CI passed
       - name: Publish (snapshot, from master)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .release-tools/scripts/release-snapshots.sh publish "$GITHUB_SHA" dist
       - name: Publish (snapshot of a dispatched commit)
-        if: inputs.commit != ''
+        if: inputs.commit != '' && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .release-tools/scripts/release-snapshots.sh publish "$OLD_COMMIT" dist

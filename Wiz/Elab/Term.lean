@@ -4171,6 +4171,10 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | some gl => gl.isOpen
       | none => pure false
     return ← runTac code info { st with «open» := opens } (apply code (fld 0) (encodeList (opens.map encodeNat)))
+  if tag == TacTag.getOpen then
+    -- (P0) the raw open list: the main goal a tactic has just solved is still first, so
+    -- `replaceMainGoal` knows which goal it replaces and keeps the next ones
+    return ← runTac code info st (apply code (fld 0) (encodeList (st.open.map encodeNat)))
   if tag == TacTag.setGoals then
     let some gs := decodeList (fld 0) | throwAt info "tactic: malformed goal list"
     return ← runTac code info { st with «open» := ← gs.mapM num } (fld 1)
@@ -4522,7 +4526,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
     let some d := g.find? "Bool.casesOn"
       | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
-    let us ← d.levelParams.mapM fun _ => freshLevelMeta
+    let us ← d.levelParams.mapM fun _ => pure Level.zero
     -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
     let proof : Term R :=
       .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))

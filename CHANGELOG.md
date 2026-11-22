@@ -8,8 +8,30 @@ release (0.1.0 → 0.1.1) fixes bugs only. What a patch release keeps is in
 Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 `docs/stages/NN-*.md`. `#n` is a pull request on GitHub.
 
+The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
+`scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
+`native` group runs the check), so this file cannot drift from the ledger.
+
+<!-- trust-counts: rows=776 partial=197 axiom_rows=254 builtin_rows=249 native_rows=76 implemented_by=71 repr=5 extern_declarations=221 seal=8 other_builtin=20 pure_axioms=33 distinct_reasons=506 shared_reasons=270 legacy=0 expired=0 -->
+
 ## [Unreleased]
 
+* selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
+  command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
+  paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
+  quote or a newline is one word and cannot start a second command, and `--cc` is
+  documented as one executable. A program killed by a signal is now a failure decoded
+  from the wait status (`WIFSIGNALED`/`WTERMSIG` → `128 + signal`) instead of exit 0
+  (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
+  and a SIGSEGV reported as signal 11).
+
+* compiler: the C backend now **fails the compile** on a partial application of a
+  function with no known arity and on a jump with no join point in scope, instead of
+  emitting a closure with arity 0 and an assignment-free jump; a body's locals are
+  collected in linear time (the old collector appended each join's parameters to the
+  accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
+  as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
+  `=scaling`.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
@@ -24,8 +46,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
   sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
   are reported (a size-keeping register, a same-size recursive copattern); `Hdl.Signal`
-  contributes no trust sources (the ledger is 864/864). Tests: `=hdl-signal` 9/9,
-  `=hdl` 32/0, `=copatterns` 18/18, `=sized` 7/7.
+  contributes no trust sources (the ledger size is the `trust-counts` marker above). Tests: `=hdl-signal` 9/9,
+  `=hdl` 32/0, `=copatterns` 18/18, `=sized types` 7/7.
 * web: the site now installs **`wiz-playground-ui.wasm`** with its `.mjs` (the page
   aborted fetching it: "both async and sync fetching of the wasm failed"), and
   `mount` resolves a page's loader namespace (`() => import("./…-ui.mjs")`) to its
@@ -41,7 +63,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   runs, enabled/taken/invariants/safety-during/bounded), `lib/Dist/Checker.wiz` (a BFS
   reachability checker with soundness for `ok` and `bad`), and `lib/Dist/TwoPhase.wiz`
   (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
-  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (5/0).
+  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (7/0).
 
 * run, cache, wasm: `wiz run`, the REPL's `:run` and `import_c` preprocessing remove
   their temporary directories on success and failure (each leaked one per run/header),

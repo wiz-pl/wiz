@@ -39,6 +39,21 @@ def failsWithLib (input : String) (fragment : String) : IO Unit := do
   unless errs.any (fun e => (e.splitOn fragment).length > 1) do
     throw (IO.userError s!"no error mentions '{fragment}': {errs}")
 
+/-- Some message of `messagesLib` contains `fragment` (the whole signature when the
+fragment is the whole line). -/
+def expectMsg (ms : List String) (fragment : String) : IO Unit :=
+  unless ms.any (fun m => (m.splitOn fragment).length > 1) do
+    throw (IO.userError s!"no message contains '{fragment}': {ms}")
+
+/-- The axiom names of the `#print axioms n` line in `ms` (the tests' `severity: ` prefix
+included), or `[]` when no such line says `n` depends on nothing. Parsing the line
+rather than matching its text pins the *set* of listed trust, not the print order. -/
+def printAxiomsOf (ms : List String) (n : String) : List String :=
+  let key := s!"'{n}' depends on axioms: ["
+  match ms.findSome? (fun m => match m.splitOn key with | [_, rest] => some rest | _ => none) with
+  | none => []
+  | some rest => (rest.splitOn "]").head!.splitOn ", "
+
 /-- O3: a registration outside the library that disagrees with native addition. -/
 def badAdd : String :=
   ownNat ++
@@ -448,6 +463,213 @@ def trustGroup : Group where
            "'useB' depends on axioms: [native b := p, ext]" ++ note,
            "'p' does not depend on any axioms",
            "'c' depends on axioms: [native c := fx]" ++ note] },
+    { name := "castRefl: the statement is pinned, not just the name (ledger Prelude.castRefl)", run := fun _ => do
+        -- The ledger row is `axiom castRefl`, so a changed *statement* is invisible to the
+        -- gate: a stronger or more general axiom makes casts trivial and can keep every
+        -- other test green. Pin the argument types and the result here; the negative
+        -- cases are the ones a strengthening has to break.
+        let ms ← messagesLib ("import Prelude\n#check castRefl\n#print axioms castRefl\n" ++
+          "def cr (A : Type) (0 e : A = A) (0 a : A) : (cast e a : A) = a := @castRefl A e a\n" ++
+          "def cr2 (A : Type) (0 a : A) : (cast (refl a) a : A) = a := @castRefl A (refl a) a\n" ++
+          "#print axioms cr\n")
+        expectMsg ms "castRefl : "
+        expectMsg ms "(0 e : A = A)"
+        expectMsg ms "(0 a : A)"
+        expectMsg ms "= a"
+        checkEq ["castRefl"] (printAxiomsOf ms "castRefl")
+        checkEq ["castRefl"] (printAxiomsOf ms "cr")
+        -- an unrelated proposition, and a proof of `A = B` where `A = A` is required:
+        -- neither may elaborate through castRefl
+        failsWithLib "import Prelude\ndef bad : (0 : Nat) = 1 := castRefl (refl 0) 0\n" "type mismatch"
+        failsWithLib ("import Prelude\ndef bad (A B : Type) (0 e : A = B) (0 a : A) : A = a :=\n" ++
+          "  @castRefl A e a\n") "type mismatch" },
+    { name := "Region.Outlives: only the three evidence axioms, and their derivable/non-derivable pairs", run := fun _ => do
+        -- The six Region rows are pure axioms; the ledger only sees their names. Pin the
+        -- statements (`#check`), the declaration set (so a new evidence constructor or a
+        -- redefinition as a `def` fails), what each derivation depends on, and two pairs
+        -- the relation must not derive.
+        let ms ← messagesLib ("import Region\n#check Region\n#check Region.static\n" ++
+          "#check Outlives\n#check Outlives.refl\n#check Outlives.static\n#check Outlives.trans\n" ++
+          "def r1 (0 ρ : Region) : Outlives ρ ρ := Outlives.refl ρ\n" ++
+          "def r2 (0 ρ : Region) : Outlives Region.static ρ := Outlives.static ρ\n" ++
+          "def r3 (0 a b c : Region) (h1 : Outlives a b) (h2 : Outlives b c) : Outlives a c :=\n" ++
+          "  Outlives.trans a b c h1 h2\n" ++
+          "def r4 (0 ρ : Region) : Outlives Region.static ρ :=\n" ++
+          "  Outlives.trans Region.static Region.static ρ (Outlives.static Region.static) (Outlives.static ρ)\n" ++
+          "#print axioms r1\n#print axioms r2\n#print axioms r3\n#print axioms r4\n")
+        expectMsg ms "Region : Type"
+        expectMsg ms "Region.static : Region"
+        expectMsg ms "Outlives : Region → Region → Prop"
+        expectMsg ms "Outlives.refl : (0 ρ : Region) → Outlives ρ ρ"
+        expectMsg ms "Outlives.static : (0 ρ : Region) → Outlives Region.static ρ"
+        expectMsg ms "Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : Region) → Outlives ρ₁ ρ₂ → Outlives ρ₂ ρ₃ → Outlives ρ₁ ρ₃"
+        let known := ["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
+        for (nm, needs) in [("r1", "Outlives.refl"), ("r2", "Outlives.static"),
+            ("r3", "Outlives.trans"), ("r4", "Outlives.trans")] do
+          let ax := printAxiomsOf ms nm
+          check (ax.contains needs) s!"{nm} does not depend on {needs}: {ax}"
+          for a in ax do
+            check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
+        -- the declarations: exactly the six rows, each an axiom (not a `def`)
+        let s := runFrontend (R := ZeroOneMany) "import Region\n"
+          { loader := ← preludeLoader, trustedModule := Tests.libModule }
+        let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
+        checkEq 4 names.size
+        for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
+          check (names.contains n) s!"{n} is missing: {names}"
+          let some d := s.globals.find? n | throw (IO.userError s!"{n} is missing")
+          check (d.value.isNone && d.witness.isNone) s!"{n} is not an axiom"
+        for n in (["Region", "Region.static"] : List Name) do
+          let some d := s.globals.find? n | throw (IO.userError s!"{n} is missing")
+          check (d.value.isNone && d.witness.isNone) s!"{n} is not an axiom"
+        -- non-derivable: a fresh region does not outlive `'static`, and transitivity
+        -- needs both premises
+        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
+        failsWithLib "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
+        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
+    { name := "Std.Str.empty / Str.push: copying a shared text, in C and LLVM (ledger rows 334-335, 342-343)", run := fun _ => do
+        -- The reason for `Str.push` says it grows in place when the text is unique and
+        -- copies when shared. A wrong uniqueness check mutates a shared literal, which
+        -- output-level string tests need not catch: the existing `=std` fixtures pin the
+        -- copy, and this names it against the ledger rows and runs both backends.
+        for f in ["shared-push", "shared-join"] do
+          let src ← IO.FS.readFile s!"Tests/fixtures/std-aliasing/{f}.wiz"
+          let want ← IO.FS.readFile s!"Tests/fixtures/std-aliasing/{f}.expected"
+          cRunIO src want
+          cRunIO src want (llvm := true)
+        -- `Str.empty` is a fresh empty value: pushing to it leaves it empty, and appending
+        -- two empties is empty
+        let src := "import Std\ndef main : IO Unit := do\n" ++
+          "  let e := Str.empty;\n  let p := (e, Str.push e 65);\n" ++
+          "  IO.println (Str.toString p.1);\n  IO.println (Str.toString p.2);\n" ++
+          "  IO.println (Nat.toString (Str.size (Str.append Str.empty Str.empty)))\n"
+        cRunIO src "\nA\n0\n"
+        cRunIO src "\nA\n0\n" (llvm := true) },
+    { name := "Word.UIntN.toNat + the word seals: bits at 0/1/7/8/63/64/65/127/128 in kernel, interpreters, C, LLVM", run := fun _ => do
+        -- The row is `native UIntN.toNat := UIntN.toBits`; its reason claims the word
+        -- tests pin the IR, but not the value at width 0 or above 64. `toNat` must equal
+        -- the bits the model stores at the scalar/raw-box/GMP boundaries.
+        let expected := ".cons 0 (.cons 1 (.cons 5 (.cons 5 (.cons 4611686018427387905 " ++
+          "(.cons 9223372036854775809 (.cons 18446744073709551617 " ++
+          "(.cons 85070591730234615865843651857942052865 " ++
+          "(.cons 170141183460469231731687303715884105729 .nil))))))))"
+        let src := "import Word\ndef main : List Nat :=\n" ++
+          "  (.cons ((UIntN.ofNat 0 5).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 1 5).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 7 133).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 8 261).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 63 (Nat.add (Nat.pow 2 62) 1)).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 64 (Nat.add (Nat.pow 2 63) 1)).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 65 (Nat.add (Nat.pow 2 64) 1)).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 127 (Nat.add (Nat.pow 2 126) 1)).toNat)\n" ++
+          "  (.cons ((UIntN.ofNat 128 (Nat.add (Nat.pow 2 127) 1)).toNat)\n" ++
+          "  .nil)))))))))\n"
+        okLib (src ++ s!"def t : main = ({expected} : List Nat) := refl main\n#eval main\n#run main\n")
+          [expected, expected]
+        cRun src expected
+        cRun src expected (llvm := true)
+        -- the fast path is still the native one: `#print axioms` names it, and the IR has
+        -- no word constructor or projection
+        let ms ← messagesLib ("import Word\ndef bits (a : UIntN 128) : Nat := a.toNat\n#print axioms bits\n" ++
+          "def f (a : UIntN 128) : Nat := a.toNat\n#ir f\n")
+        let ax := printAxiomsOf ms "bits"
+        check (ax.contains "native UIntN.toNat := UIntN.toBits") s!"UIntN.toNat is no longer the native fast path: {ax}"
+        check (ax.any (· == "UIntN.seal✝")) s!"UIntN.seal✝ is not a dependency: {ax}"
+        let out := String.intercalate "\n" ms
+        check ((out.splitOn "wiz_word_to_bits").length > 1) s!"toNat does not read the bits natively:\n{out}"
+        check ((out.splitOn "ctor").length == 1 && (out.splitOn "proj").length == 1) s!"a word object in the IR:\n{out}"
+        -- the two word seals: no constructor outside lib/Word.wiz, and no look-alike
+        let bads := ["import Word\ndef bad : UIntN 8 := UIntN.mk 5 rfl",
+          "import Word\ndef bad : IntN 8 := IntN.mk 5 rfl",
+          "import Word\ninductive Fake where\n  | mk (n : Nat) (0 h : Nat.lt n (Nat.pow 2 8) = .true)\ndef bad (w : UIntN 8) : Fake := w",
+          "import Word\ninductive Fake where\n  | mk (n : Nat) (0 h : Nat.lt n (Nat.pow 2 8) = .true)\ndef bad (w : IntN 8) : Fake := w"]
+        for src in bads do
+          let ms ← messagesLib src
+          check (ms.any (·.startsWith "error")) s!"a word was built or coerced outside Word.wiz: {ms}" },
+    { name := "the seal registrations: PMap, InternTable, U8/U32/U64Array, U64Map cannot be forged or coerced", run := fun _ => do
+        -- Each ledger pair `axiom T.seal✝` + `builtin seal:T := T.seal✝` claims T is
+        -- opaque. A private constructor that became reachable, or a look-alike that
+        -- became convertible, would leave both rows unchanged.
+        let bads := [
+          "import Data.PMap\ndef bad : PMap Nat Nat := PMap.mk Tree.leaf",
+          "import Intern\ndef bad : InternTable := InternTable.mk PMap.empty",
+          "import WordArray\ndef bad : U8Array := U8Array.mk .nil",
+          "import WordArray\ndef bad : U32Array := U32Array.mk .nil",
+          "import WordArray\ndef bad : U64Array := U64Array.mk .nil",
+          "import WordMap\ndef bad : U64Map Nat := U64Map.mk PMap.empty" ]
+        for src in bads do
+          let ms ← messagesLib src
+          check (ms.any fun m => m.startsWith "error" && (m.splitOn "private").length > 1)
+            s!"a private constructor was reachable: {ms}"
+        let lookalikes := [
+          "import Data.PMap\ninductive Fake where\n  | leaf\ndef bad (m : PMap Nat Nat) : Fake := m",
+          "import Intern\ndef bad (t : InternTable) : PMap String U32 := t",
+          "import WordArray\ninductive Fake where\n  | mk (l : List U8)\ndef bad (a : U8Array) : Fake := a",
+          "import WordArray\ninductive Fake where\n  | mk (l : List U32)\ndef bad (a : U32Array) : Fake := a",
+          "import WordArray\ninductive Fake where\n  | mk (l : List U64)\ndef bad (a : U64Array) : Fake := a",
+          "import WordMap\ninductive Fake where\n  | mk (m : PMap U64 Nat)\ndef bad (m : U64Map Nat) : Fake := m" ]
+        for src in lookalikes do
+          let ms ← messagesLib src
+          check (ms.any (·.startsWith "error")) s!"a look-alike was accepted as the sealed type: {ms}"
+        -- and each user of the type still depends on the seal (the two rows together);
+        -- U64Map.empty also names its native registration
+        let ms ← messagesLib ("import Data.PMap\nimport Intern\nimport WordArray\nimport WordMap\n" ++
+          "#print axioms PMap.empty\n#print axioms InternTable.empty\n" ++
+          "#print axioms U8Array.empty\n#print axioms U32Array.empty\n#print axioms U64Array.empty\n" ++
+          "#print axioms U64Map.empty\n")
+        for n in ["PMap", "InternTable", "U8Array", "U32Array", "U64Array", "U64Map"] do
+          let ax := printAxiomsOf ms s!"{n}.empty"
+          check (ax.any (fun a => a == s!"{n}.seal✝")) s!"{n}.empty does not depend on {n}.seal✝: {ax}"
+        let axMap := printAxiomsOf ms "U64Map.empty"
+        check (axMap.any (fun a => a == "native U64Map.empty := U64Map.emptyNative"))
+          s!"U64Map.empty no longer names its native: {axMap}" },
+    { name := "WordArray.ofList/toList: the native pair round-trips at 8/32/64 bits (C and LLVM)", run := fun _ => do
+        -- The six WordArray native rows claim ofList/toList agree with the model's
+        -- reversed-list representation; compile the round-trip with the natives.
+        let expected := ".cons 5 (.cons 200 (.cons 70000 (.cons 18446744073709551615 .nil)))"
+        let src := "import WordArray\ndef main : List Nat :=\n" ++
+          "  List.append (List.map UIntN.toNat (U8Array.toList (U8Array.ofList\n" ++
+          "    (.cons (U8.ofNat 5) (.cons (U8.ofNat 200) .nil)))))\n" ++
+          "    (List.append (List.map UIntN.toNat (U32Array.toList (U32Array.ofList\n" ++
+          "      (.cons (U32.ofNat 70000) .nil))))\n" ++
+          "      (List.map UIntN.toNat (U64Array.toList (U64Array.ofList\n" ++
+          "        (.cons (U64.ofNat 18446744073709551615) .nil)))))"
+        cRun src expected
+        cRun src expected (llvm := true) },
+    { name := "EditorModel partials: the compiled editor path runs them (C and LLVM)", run := fun _ => do
+        -- The five `partial` rows (firstLineAfter, lineTableGo, lspLookupGo,
+        -- splitGoalsGo, tokenEndGo) are compiled-only general recursion; call each
+        -- through its public entry point in compiled code, in both backends.
+        let expected := ".cons 1 (.cons 7 (.cons 2 (.cons 2 (.cons 3 .nil))))"
+        let src := "import Web.EditorModel\n" ++
+          "def e1 : EditorModel.LspEntry := EditorModel.LspEntry.mk 0 3 \"term\" \"\" \"\" 0 .false \"\" .false .nil .false\n" ++
+          "def main : List Nat :=\n  let i := EditorModel.index \"abc\\ndef\";\n" ++
+          "  (.cons (EditorModel.lineOfOffset i 5)\n" ++
+          "  (.cons (EditorModel.tokenEnd i 5)\n" ++
+          "  (.cons (EditorModel.lineCount i)\n" ++
+          "  (.cons (List.length (EditorModel.splitGoals \"a\\n\\nb\"))\n" ++
+          "  (.cons (match EditorModel.lspLookup (.cons e1 .nil) 1 \"term\" with\n" ++
+          "    | .some e => e.stop\n    | .none => 0)\n" ++
+          "  .nil)))))\n"
+        cRun src expected
+        cRun src expected (llvm := true) },
+    { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
+        -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
+        -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is
+        -- still a `partial def` in the package source.
+        let text ← IO.FS.readFile "scry/trust-baseline.tsv"
+        let rows := text.splitOn "\n" |>.filterMap fun l =>
+          if l.isEmpty || l.startsWith "#" then none
+          else match l.splitOn "\t" with
+            | [m, n, item, _, _, _] => some (m, n, item)
+            | _ => none
+        checkEq 8 rows.length
+        for (m, n, item) in rows do
+          check (item == "partial") s!"{m} {n}: expected a partial row, got '{item}'"
+          let base := (m.splitOn ".").getLast!
+          let src ← IO.FS.readFile s!"scry/src/Scry/{base}.wiz"
+          check ((src.splitOn ("partial def " ++ n)).length > 1)
+            s!"{m} {n} is not a `partial def` in scry/src/Scry/{base}.wiz" },
     { name := "O2 in the self-hosted frontend", run := fun _ =>
         selfhostCheckFile (familyTF ++ "inductive Nat where\n  | zero\n  | succ (n : Nat)\n" ++
             "partial def bad : T .f := bad\npartial def bad2 : T .t → T .f := bad2\n" ++

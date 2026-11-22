@@ -23,7 +23,7 @@ The target is **verifier-shaped by construction**, not "Wiz on eBPF":
 | `Wiz/Compiler/Bpf/Sexp.lean` | `bpf-core/1`, the serialised typed core the P0 CLI consumes. A fixture format, not yet the public §9.4 schema. |
 | `Wiz/Compiler/Bpf/C.lean` | the flat-C emitter: `SEC`, BTF map declarations, `static __always_inline` functions, `#line`, checked packet accessors, copy-out map lookups, `Map.add` as lookup + `XADD`. |
 | `Wiz/Compiler/Bpf.lean` | the manifest reader (`bpf.toml`, §5.1) and `buildCmd`. |
-| `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`) and the source-level reject/accept corpus. |
+| `Tests/fixtures/bpf/` | the IPv4 allow-list fixture (`allow.toml` + `allow.bpfcore`), consumed by the group's manifest and emitter cases. There is no source-level `.wiz` corpus: it could not run before the elaborator adapter existed, so it was removed rather than left `[UNRUN]`. |
 | `Tests/Groups/Bpf.lean` | pure rejection/value tests. **Green, 22/22.** |
 
 Implemented in P0:
@@ -120,9 +120,9 @@ with the clang/loader work.
 ## Roadblocks that need a queue slot
 
 1. **The elaborator adapter** (`Term R` with types and spans → `STm`). Without it the
-   CLI cannot take a `.wiz` file, and the source-level `.wiz` reject fixtures in
-   `Tests/fixtures/bpf/reject/` can only be checked by inspection. This is the largest
-   P0 item after the emitter.
+   CLI cannot take a `.wiz` file. (The source-level `.wiz` reject fixtures that assumed
+   this adapter had been removed — nothing could run them; the rejection contract is the
+   `STm` group in `Tests/Groups/Bpf.lean`.) This is the largest P0 item after the emitter.
 2. **The build and the test group.** Nothing here has been elaborated by Lean; the
    unrun marker in `Tests/Groups/Bpf.lean` is deliberate.
 3. **`clang -target bpf` and the post-`clang` checks.** The emitter is a text printer;
