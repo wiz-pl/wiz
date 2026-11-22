@@ -150,6 +150,7 @@ scry/src/Scry/ConcurrencyExamples.wiz
 scry/src/Scry/CsCmd.wiz
 scry/src/Scry/CsCst.wiz
 scry/src/Scry/CsLower.wiz
+scry/src/Scry/CsNull.wiz
 scry/src/Scry/CstOptics.wiz
 scry/src/Scry/CstStore.wiz
 scry/src/Scry/Datalog.wiz
