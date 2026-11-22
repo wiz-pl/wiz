@@ -1,4 +1,5 @@
 import Wiz
+import Wiz.Lint
 import Tests.Harness
 
 open Wiz
@@ -793,8 +794,12 @@ def serverGroup : Group where
           if l.startsWith "| `" then some ((((l.drop 3).toString.splitOn "`").headD "")) else none
         for c in ErrorCode.all do
           check (rows.contains c) s!"docs/error-codes.md has no row for {c}"
+        -- Lint rules are user-visible codes too and live in their own registry, not in
+        -- `ErrorCode.all`; the docs table is the union (WizLint checks the other direction).
+        let lintIds := (Lint.registry Nat).map (fun r => r.id)
         for c in rows do
-          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all" },
+          check (ErrorCode.all.contains c || lintIds.contains c)
+            s!"docs/error-codes.md lists {c}, which is in neither ErrorCode.all nor the lint registry" },
     { name := "code action: did you mean (fields, namespace, constructors)", run := fun _ => do
         let pre := "import Prelude\nstructure P where\n  count : Nat\n  total : Nat\ninductive Box where\n  | mk (n : Nat)\ndef Box.double : Box → Nat\n  | .mk n => n + n\ninductive Color where\n  | red\n  | green\n"
         for (body, needle, title, fixed) in [
