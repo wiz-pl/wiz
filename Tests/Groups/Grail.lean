@@ -85,13 +85,15 @@ def grailLspDiagnostics (dir : System.FilePath) (file : String) : IO (Option (Li
       ("version", (1 : Nat)), ("text", ← IO.FS.readFile path)])])])
   let mut diags := none
   repeat
-    let some m ← LSP.readMessage output | break
-    if LSP.getStr m ["method"] == "textDocument/publishDiagnostics" then
-      let ds := match LSP.get? m ["params", "diagnostics"] with
-        | some (.arr ds) => ds.toList.map (LSP.getStr · ["message"])
-        | _ => []
-      diags := some ds
-      break
+    match ← LSP.readMessage output with
+    | .ok (some m) =>
+      if LSP.getStr m ["method"] == "textDocument/publishDiagnostics" then
+        let ds := match LSP.get? m ["params", "diagnostics"] with
+          | some (.arr ds) => ds.toList.map (LSP.getStr · ["message"])
+          | _ => []
+        diags := some ds
+        break
+    | _ => break
   done.set true
   child.kill
   let _ ← child.wait
