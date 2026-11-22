@@ -128,6 +128,7 @@ reminder, never as a security or merge gate.
 
 | file | is |
 |---|---|
+| `checks-ledger-transcript.txt` | captured output of the three reminder behaviours (no record, a clean run, an amend) |
 | `bundle-cc.sources` | the external inputs of `bundle-cc.sh`: `FILE SHA256 URL…`, mirrors in order |
 | `fixtures/perf/history.tsv` | a small perf-history log for `test-perf-dashboard.sh` |
 | `fixtures/perf/ci-2026-11-12.jsonl`, `ci-2026-11-13-2ebcfd13.jsonl` | two CI `test-timings.jsonl` runs (a trend and a failing case) for the same test |
