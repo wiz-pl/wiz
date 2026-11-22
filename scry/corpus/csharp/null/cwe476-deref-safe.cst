@@ -58,7 +58,7 @@ expression
 pattern
 child
 paths	1
-corpus/csharp/null/guarded.cs
+corpus/csharp/null/cwe476-deref-safe.cs
 bytes	1
 653
 nodes	145
