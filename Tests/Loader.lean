@@ -25,18 +25,26 @@ open Wiz
 /-- The modules of one root: the import name and the source of each `.wiz` file. -/
 abbrev LoadedModules := List (Name × String)
 
-/-- `root`'s `.wiz` files, with the module name each one is imported as:
-`root/*.wiz` as `NAME`, `root/DIR/*.wiz` as `DIR.NAME`, prefixed by `pfx`. Sorted by
-module name, so a loader's behaviour does not depend on the directory order. -/
-private def moduleFiles (root : String) (pfx : String) : IO (List (String × System.FilePath)) := do
-  let mut out : Array (String × System.FilePath) := #[]
-  for e in ← System.FilePath.readDir root do
+/-- `root`'s `.wiz` files at any depth, with the module name each one is imported as:
+`root/*.wiz` as `NAME`, `root/DIR/…/X.wiz` as `DIR.….X`, prefixed by `pfx`. Sorted by
+module name, so a loader's behaviour does not depend on the directory order. (A fixed
+two-level walk silently dropped `lib/Web/Source/*.wiz` from the whole-library walk and
+from the trust ledger.) -/
+private partial def moduleFilesGo (dir : System.FilePath) (pfx name : String)
+    (out : Array (String × System.FilePath)) : IO (Array (String × System.FilePath)) := do
+  let mut out := out
+  for e in ← dir.readDir do
     if e.path.extension == some "wiz" then
-      out := out.push (pfx ++ e.path.fileStem.getD "", e.path)
+      let stem := e.path.fileStem.getD ""
+      let mod := pfx ++ (if name.isEmpty then stem else name ++ "." ++ stem)
+      out := out.push (mod, e.path)
     else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          out := out.push (pfx ++ e.fileName ++ "." ++ f.path.fileStem.getD "", f.path)
+      let sub := if name.isEmpty then e.fileName else name ++ "." ++ e.fileName
+      out ← moduleFilesGo e.path pfx sub out
+  pure out
+
+private def moduleFiles (root : String) (pfx : String) : IO (List (String × System.FilePath)) := do
+  let out ← moduleFilesGo root pfx "" #[]
   pure ((out.qsort (fun a b => a.1 < b.1)).toList)
 
 /-- A fingerprint of a root's files: their names, sizes and modification times. A cached

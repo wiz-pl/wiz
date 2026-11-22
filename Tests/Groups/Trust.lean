@@ -18,11 +18,16 @@ importable **from disk**.
 
 `preludeLoader` only carries Prelude/Word/Functor/Logic/Text/IO/Std/Sys, so a case that
 imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
-saw `unknown module` and then failed for a reason unrelated to what it pins. `libLoader` is
-the suite's cached whole-library loader (`Tests/Loader.lean`). -/
+saw `unknown module` (and passed or failed for the wrong reason). Resolving the closure
+means the case exercises the module it names. -/
+def diskLoader (input : String) : IO (Name → Option String) := do
+  let ms ← Wiz.Module.loadClosure ["lib"] input
+  pure fun n => (ms[n]?).map (·.2)
+
+/-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
 def messagesLib (input : String) : IO (List String) := do
   let s := runFrontend (R := ZeroOneMany) input
-    { loader := ← libLoader, trustedModule := Tests.libModule }
+    { loader := ← diskLoader input, trustedModule := Tests.libModule }
   pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/
@@ -527,7 +532,7 @@ def trustGroup : Group where
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
-          { loader := ← libLoader, trustedModule := Tests.libModule }
+          { loader := ← diskLoader "import Region\n", trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
         checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
@@ -539,9 +544,9 @@ def trustGroup : Group where
           check (d.value.isNone && d.witness.isNone) s!"{n} is not an axiom"
         -- non-derivable: a fresh region does not outlive `'static`, and transitivity
         -- needs both premises
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
-        failsWithLib "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.refl ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ : Region) : Outlives ρ Region.static := Outlives.static ρ\n" "type mismatch"
+        failsLibs "import Region\ndef bad (0 ρ σ : Region) : Outlives ρ σ := Outlives.trans\n" "type mismatch" },
     { name := "Std.Str.empty / Str.push: copying a shared text, in C and LLVM (ledger rows 334-335, 342-343)", run := fun _ => do
         -- The reason for `Str.push` says it grows in place when the text is unique and
         -- copies when shared. A wrong uniqueness check mutates a shared literal, which
@@ -668,12 +673,22 @@ def trustGroup : Group where
           "  .nil)))))\n"
         cRunOnDisk src expected
         cRunOnDisk src expected (llvm := true) },
+    { name := "Web.Hover.percentGo: the URI decoder in compiled code (C and LLVM)", run := fun _ => do
+        -- Hover.percentGo is a `partial` list walk on the hover path with no other test.
+        let src := "import Web.Hover\ndef b2n : Bool → Nat\n  | .true => 1\n  | .false => 0\n" ++
+          "def main : List Nat :=\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"a%20b\") \"a b\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"%2F%zz\") \"/%zz\"))\n" ++
+          "  (.cons (b2n (String.eq (Hover.percentDecode \"p+q\") \"p+q\"))\n" ++
+          "  .nil)))\n"
+        cRunOnDisk src ".cons 1 (.cons 1 (.cons 1 .nil))"
+        cRunOnDisk src ".cons 1 (.cons 1 (.cons 1 .nil))" (llvm := true) },
     { name := "the Scry review record: the moved rows still name its partial definitions", run := fun _ => do
         -- Scry moved to scry/src/Scry, outside the lib/ walk; its eight reviewed rows
         -- live in scry/trust-baseline.tsv. Check the record is not stale: every row is
         -- still a `partial def` in the package source.
         let text ← IO.FS.readFile "scry/trust-baseline.tsv"
-        let rows := text.splitOn "\n" |>.filterMap fun l =>
+        let rows := (text.splitOn "\n").filterMap fun l =>
           if l.isEmpty || l.startsWith "#" then none
           else match l.splitOn "\t" with
             | [m, n, item, _, _, _] => some (m, n, item)

@@ -2019,7 +2019,7 @@ its output. -/
 def selfhostCheckFile (file expected : String) : IO Unit := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain (← toolchain) e then skip "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     IO.FS.writeFile (dir / "input.wiz") file
@@ -2031,7 +2031,7 @@ def selfhostCheckFile (file expected : String) : IO Unit := do
 def selfhostOutput (file : String) : IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
+    if Build.missingToolchain (← toolchain) e then
       skip "no toolchain"
       pure none
     else throw (IO.userError e)
@@ -2049,7 +2049,7 @@ the self-check pass 10 GB) is caught here rather than by a CI OOM. -/
 def selfhostOutputPeak (file : String) (boundMB : Nat) : IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
+    if Build.missingToolchain (← toolchain) e then
       skip "no toolchain"
       pure none
     else throw (IO.userError e)
@@ -2091,7 +2091,7 @@ def selfhostModuleOutput (files : List (String × String)) (args : Array String 
     IO (Option String) := do
   match ← selfhostChecker with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then
+    if Build.missingToolchain (← toolchain) e then
       skip "no toolchain"
       pure none
     else throw (IO.userError e)
@@ -2110,7 +2110,7 @@ files are written beside it, so its `import`s find them. -/
 def selfhostModuleCompileFails (files : List (String × String)) (phrases : List String) : IO Unit := do
   match ← selfhostCompiler with
   | .error e =>
-    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain (← toolchain) e then skip "no toolchain" else throw (IO.userError e)
   | .ok exe =>
     let dir ← IO.FS.createTempDir
     for (name, text) in files do
@@ -2168,7 +2168,7 @@ def ioDiverges (src : String) (secs : Nat := 5) : IO Unit := do
     let exe := dir / "wiz_main"
     match ← Build.compileC (← toolchain) (C.program decls true (Build.extraC s)) exe with
     | .error e =>
-      if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+      if Build.missingToolchain (← toolchain) e then skip "no toolchain" else throw (IO.userError e)
     | .ok () =>
       let out ← IO.Process.output { cmd := "sh", args := #["-c",
         s!"ulimit -v 8000000; exec timeout {secs} \"$0\"", exe.toString] }
