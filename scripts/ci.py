@@ -1585,7 +1585,7 @@ def fetch_runs(args):
 
 
 def rebalance(args):
-    jobs, assume, write, binary, paths = None, None, False, DEFAULT_BIN, []
+    jobs, assume, write, counts_only, binary, paths = None, None, False, False, DEFAULT_BIN, []
     it = iter(args)
     for a in it:
         if a == "--jobs":
@@ -1594,6 +1594,8 @@ def rebalance(args):
             assume = next(it)
         elif a == "--write":
             write = True
+        elif a == "--counts-only":
+            counts_only = True
         elif a == "--bin":
             binary = next(it)
         else:
@@ -1749,9 +1751,10 @@ def rebalance(args):
     for n in sorted(set(was) | set(now), key=lambda n: -max(was.get(n, 0), now.get(n, 0))):
         f = lambda d: f"{d[n]:.0f}" if n in d else ""
         print(f"| {md(n)} | {f(was)} | {f(now)} |")
-    if write:
-        with open(TIMINGS, "w", encoding="utf-8") as f:
-            f.write(baseline_json(base) + "\n")
+    if write or counts_only:
+        if write:
+            with open(TIMINGS, "w", encoding="utf-8") as f:
+                f.write(baseline_json(base) + "\n")
         text = open(SHARDS, encoding="utf-8").read()
         for sh, n in counts.items():
             text, k = re.subn(r'("name": "' + re.escape(sh) + r'",\s*"split": )\d+', lambda m: m.group(1) + str(n), text)
@@ -1760,7 +1763,8 @@ def rebalance(args):
         with open(SHARDS, "w", encoding="utf-8") as f:
             f.write(text)
         print()
-        print(f"Wrote {os.path.relpath(TIMINGS, ROOT)} and the split counts of {os.path.relpath(SHARDS, ROOT)}.")
+        wrote = (os.path.relpath(TIMINGS, ROOT) + " and ") if write else ""
+        print(f"Wrote {wrote}the split counts of {os.path.relpath(SHARDS, ROOT)}.")
     return 0
 
 
