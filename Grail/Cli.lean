@@ -4,6 +4,7 @@ import Grail.Registry
 import Grail.IndexCheck
 import Grail.Lsp
 import Grail.New
+import Wiz.Attest
 import Wiz.Version
 
 /-!
@@ -23,8 +24,10 @@ def usage : String := "usage:
                           into DIR (default: ./NAME); an existing non-empty
                           directory is refused, the name must be a letter then
                           letters, digits, '_' or '-'
-  grail build [TARGET…]   build the package's targets (by default all but the
-                          bootstrap check, which takes minutes)
+  grail build [TARGET…] [--attest DIR]
+                          build the package's targets (by default all but the
+                          bootstrap check, which takes minutes); --attest DIR also
+                          writes one unsigned build attestation per executable
   grail test [FILTER…] [--update] [--rerun]
                           run the tests (of `tests` targets) whose path contains a
                           filter; --update writes the actual output to .expected;
@@ -138,6 +141,8 @@ structure Opts where
   vendor : Option String := none
   /-- (23m) `grail publish`: the archive's public URL -/
   source : Option String := none
+  /-- `grail build --attest DIR`: write one statement per built executable -/
+  attest : Option String := none
 
 /-- `-C DIR`, `--dir DIR`, `--std DIR`, `-j N`, `--timeout SECS`, `--test-timeout SECS`, taken out of the arguments. -/
 partial def grailOpts (o : Opts) : List String → Opts × List String
@@ -159,6 +164,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
+  | "--attest" :: d :: rest => grailOpts { o with attest := some d } rest
   | a :: rest =>
     if a.startsWith "-j" && (a.drop 2).toString.toNat?.isSome then grailOpts { o with jobs := (a.drop 2).toString.toNat? } rest
     else let (o, r) := grailOpts o rest; (o, a :: r)
@@ -589,7 +595,20 @@ def cliMain (args : List String) : IO UInt32 := do
         unless pkg.targets.any (·.name == w) do IO.eprintln s!"no target {w}"; return 1
       let some roots ← depRoots | return 1
       let r ← mkRunner { dir, std, tc, binId, libRoots := libRootsOf dir pkg.targets ++ roots }
-      let ok ← r.build pkg.targets targets
+      let mut ok ← r.build pkg.targets targets
+      if let some a := opts.attest then do
+        let adir := System.FilePath.mk a
+        IO.FS.createDirAll adir
+        for t in targets do
+          if let .exe n f := t then do
+            let bin := dir / ".grail" / "bin" / n
+            if ← bin.pathExists then do
+              let src := if System.FilePath.isAbsolute f then System.FilePath.mk f else dir / f
+              let out := adir / (n ++ ".attest.json")
+              match ← Wiz.Attest.emit tc src.toString bin false false false 0 out (some r.ctx.roots) with
+              | .ok () => IO.eprintln s!"grail: attestation written to {out}"
+              | .error e => IO.eprintln s!"grail attest: {e}"; ok := false
+          else pure ()
       let st ← r.stats.get
       IO.println s!"{st.ran} jobs run, {st.upToDate} up to date{if st.failed > 0 then s!", {st.failed} failed" else ""}{if st.skipped > 0 then s!", {st.skipped} skipped" else ""}"
       pure (if ok then 0 else 1)
