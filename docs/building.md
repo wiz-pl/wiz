@@ -1194,22 +1194,27 @@ setup action keeps the elan cache for those
   estimate low and sort late, and giving them entries in `.github/test-timings.json`
   would refine the order.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
-  test shard's test time is over 1.5× the median shard's**. Every split shard's cases
-  have an entry in `.github/test-timings.json`, and no shared program is built by two
-  parts of one split shard (a `"split-cases": true` shard excepted: its parts each build
-  it by design, and the estimates charge for it). It is tracked in two places:
+  test shard's job wall is over 1.5× the median shard's job wall**. Every split shard's
+  cases have an entry in `.github/test-timings.json`, and no shared program is built by
+  two parts of one split shard (a `"split-cases": true` shard excepted: its parts each
+  build it by design, and the estimates charge for it). It is tracked in two places:
   * `scripts/ci.py check-shards` (the build job) warns when a split shard has cases
     that are not in the baseline.
-  * `scripts/ci.py balance` (the `CI result` job) checks the run's measured case times.
-    It adds a "Shard balance" table to the run summary and a warning annotation for each
-    violation.
+  * `scripts/ci.py balance` (the `CI result` job) takes the run's job list from the API
+    and compares each `tests --` step's wall, so a shard that runs cases in parallel
+    (`"jobs": N`) is judged on its wall, not on its summed case seconds (which it also
+    reports; the two differ by the shard's `--jobs` factor). It adds a "Shard balance"
+    table to the run summary and an annotation for each violation.
 
-  Both only warn, on pull requests and on master. A new case has no time until a CI run
-  has measured it, and runner times vary, so a failure here would block merges that are
-  correct.
+  Both warn on pull requests; a push to `master` is strict. A new case has no time until
+  a CI run has measured it, so a master run with a split-shard case missing from the
+  baseline is red until the baseline is refreshed (below). That is deliberate: as a
+  warning, the baseline went stale for three current runs while every shard stayed over
+  the limit.
 
   On a master push whose tests all passed and whose balance drifted, the `CI result`
-  job uploads the regenerated baseline as the `test-timings-baseline` artifact. It also
+  job uploads the regenerated baseline as the `test-timings-baseline` artifact (also when
+  it is the strict balance step that failed). It also
   prints the command that applies it, in the warning and in the summary:
   `gh run download RUN -R wiz-pl/wiz -n test-timings-baseline -D .github`.
   Commit the result in a small PR. CI does not open that PR itself. A PR opened with the
