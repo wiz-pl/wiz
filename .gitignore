@@ -28,3 +28,6 @@ bench/.build/
 # scry: the fetched C# grammar, an out-link to `nix build .#tree-sitter-c-sharp` (scry/native/README.md)
 /scry/native/tree-sitter-c-sharp
 .scratch-*.log
+# Nix build outputs
+/result
+/result-*

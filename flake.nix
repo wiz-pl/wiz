@@ -469,6 +469,26 @@ EOF
             };
           };
 
+          # A deterministic source tarball with a manifest and a CycloneDX SBOM
+          # (scripts/source-tarball.py, docs/building.md "Reproducible source tarball"):
+          # sorted entries, epoch mtimes, uid/gid 0, normalised modes, no
+          # .git/caches/build outputs. The epoch is the flake's commit time (0 for a
+          # source archive) and the revision the commit, so two builds of one commit are
+          # byte-identical. `source-tarball` is the same derivation under the name the
+          # docs use.
+          release-tarball =
+            let
+              revision = self.rev or self.dirtyRev or "unknown";
+              epoch = toString self.lastModified;
+            in
+            pkgs.runCommand "wiz-release-tarball" {
+              nativeBuildInputs = [ pkgs.python3 ];
+            } ''
+              mkdir -p $out
+              python3 ${./scripts}/source-tarball.py --root ${./.} --mode tree \
+                --out $out --revision ${lib.escapeShellArg revision} --epoch ${epoch}
+            '';
+
           # The Neovim plugin (editors/nvim, docs/stages/11-tooling.md 11p), without its tests.
           wiz-nvim = pkgs.vimUtils.buildVimPlugin {
             pname = "wiz-nvim";
@@ -623,7 +643,9 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground wiz-playground-ui; default = wiz;
+                   wiz-web wiz-playground wiz-playground-ui release-tarball;
+          source-tarball = release-tarball;
+          default = wiz;
           wizc = bootstrapChain.wizc;
           wizc-seed = bootstrapChain.seed;
           wizc-release = bootstrapChain.release { };

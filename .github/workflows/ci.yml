@@ -226,6 +226,42 @@ jobs:
           python3 scripts/check-docs-examples.py --self-test
           python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
 
+  # (seconds, no build) The source tarball and the release supply-chain artifacts
+  # (scripts/source-tarball.py, scripts/release-sbom.py, docs/building.md): two builds
+  # in different directories and environments are byte-identical, the manifest matches
+  # the archive, SOURCE_DATE_EPOCH changes only the metadata, and the SBOM/provenance
+  # parse, match every digest and are byte-identical on a second run. The Nix target
+  # (.#release-tarball) is checked with `nix build --rebuild` in the `build` job.
+  source-tarball:
+    name: source tarball
+    needs: changes
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Two builds are identical, and the manifest matches
+        shell: bash
+        run: scripts/test-source-tarball.sh
+      - name: SBOMs and provenance parse, match every digest, and are deterministic
+        shell: bash
+        run: python3 scripts/test_release_sbom.py -v
+
+  # (seconds, no build) Manifest canonicalization, DSSE/Ed25519 signing and
+  # quote verification (scripts/attest).  The unit tests generate a throwaway
+  # ssh-keygen key, use a stub tpm2_checkquote, and need no TPM, no Wiz build,
+  # no committed private key and no network.
+  attest:
+    name: attestation verifier
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test the statement signing, manifest format and verifier
+        shell: bash
+        run: python3 -m unittest discover -s scripts/attest/tests -v
+
   build:
     name: build
     needs: changes
@@ -276,6 +312,12 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: The source tarball is reproducible under Nix
+        # a second build in a different build directory, compared byte for byte
+        # (Nix 2.34 calls it --rebuild; older releases spell it --check)
+        run: |
+          nix build .#release-tarball -L --print-out-paths
+          nix build .#release-tarball --rebuild -L
       - name: Publish the store paths to Cachix (master)
         # Only a push to master writes the trusted cache; a pull request writes its own
         # untrusted cache in the next step. Explicit (not the action's post-step) so that
@@ -692,6 +734,7 @@ jobs:
           lean: false
       - name: nix build (wiz, from Cachix)
         id: nix
+
         run: |
           wiz=$(nix build .#wiz --no-link --print-out-paths)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
@@ -911,7 +954,7 @@ jobs:
     # `docs` is wanted on a push only (it is push-only): making it a need here is what
     # makes a broken site red on master (review ci-02). It is skipped on a pull request
     # and on a merge-queue entry, where `check` below accepts `skipped`.
-    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, build, trust_ledger, test, web_modules, web, docs]
+    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, build, trust_ledger, test, web_modules, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -997,6 +1040,8 @@ jobs:
           echo "docs style: ${{ needs.docs_style.result }}"
           echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
+          echo "source tarball: ${{ needs['source-tarball'].result }}"
+          echo "attestation: ${{ needs.attest.result }}"
           echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, test: ${{ needs.test.result }}, wasm modules: ${{ needs.web_modules.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
@@ -1020,6 +1065,8 @@ jobs:
           check "name collisions (reachable)" "${{ needs.name_collisions_reachable.result }}" true
           check "prelude drift" "${{ needs.prelude_drift.result }}" true
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
+          check "source tarball" "${{ needs['source-tarball'].result }}" "$code"
+          check "attestation" "${{ needs.attest.result }}" true
           check build "${{ needs.build.result }}" "$code"
           check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
           check test "${{ needs.test.result }}" "$want_tests"
