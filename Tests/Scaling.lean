@@ -263,7 +263,12 @@ def expr : P IR.Expr := do
   | "F" => let f ← tok; return .fap f (← nums)
   | "A" => let f ← tok; return .pap f (← nums)
   | "X" => let f ← num; return .ap f (← nums)
-  | "O" => let f ← tok; return .prim f (← nums)
+  | "O" =>
+    let f ← tok
+    let p := match IR.PrimOp.ofKey? f.toName with
+      | some p => p
+      | none => .extern f.toName
+    return .prim p (← nums)
   | "S" => return .reset (← num)
   | "Z" => let t ← num; let g ← num; return .reuse t g (← nums)
   | t => throw s!"bad expression {t}"
