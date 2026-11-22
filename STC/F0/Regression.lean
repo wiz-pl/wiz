@@ -108,6 +108,29 @@ theorem badSig_sigWF_gives_empty (h : SigWF F0 badSig) :
       subst hval
       simpa [badDecl] using hty
 
+/-- The converse of `badSig_sigWF_gives_empty`: a closed proof of `Empty prop` in the empty
+signature makes `badSig` `SigWF` (the declaration is then a well-typed definition at its
+declared type). So the two are **equivalent** (`badSig_sigWF_iff`), and an unconditional
+`¬ SigWF F0 badSig` would be a fragment of the consistency theorem itself, not a syntactic
+check — which is why this file proves the conditional form the repair uses. -/
+theorem badSig_sigWF_of_empty
+    (h : Derivable (F0 ([] : Sig)) (([] : Ctx) ⊢ Tm.tt ∶ Tm.empty .prop)) :
+    SigWF F0 badSig := by
+  have hty : Derivable (F0 ([] : Sig)) (([] : Ctx) ⊢ Tm.empty .prop ∶ Tm.sort .prop) :=
+    ofRule (empty_in_F0 (Empty.form (s := .prop))) (by
+      simp only [List.mem_cons, List.mem_nil_iff, or_false, forall_eq]
+      exact wf_nil)
+  exact SigWF.defn (T := F0) (sg := ([] : Sig)) (d := badDecl) (s := .prop) (v := .tt)
+    SigWF.nil rfl rfl hty h
+
+/-- `SigWF F0 badSig` is exactly "the empty signature proves `Empty prop`". The malformed
+declaration is excluded by `SigWF` precisely because the fragment is consistent, not because
+of a name or shape test. -/
+theorem badSig_sigWF_iff :
+    SigWF F0 badSig ↔
+      Derivable (F0 ([] : Sig)) (([] : Ctx) ⊢ Tm.tt ∶ Tm.empty .prop) :=
+  ⟨badSig_sigWF_gives_empty, badSig_sigWF_of_empty⟩
+
 /-- **The repaired `Con` excludes the counterexample.** If `Con` holds at the empty
 signature (it is `SigWF`, closed and axiom-free), `badSig` cannot be `SigWF`: the extracted
 premise `badSig_sigWF_gives_empty` is exactly the judgment `Con []` denies. -/
