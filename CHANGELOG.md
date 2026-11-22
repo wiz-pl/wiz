@@ -90,7 +90,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
   assumption. The non-formal text is byte-identical to `Verilog.emit`, and
   `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
-  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  `hdl/examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
   yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
   finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
