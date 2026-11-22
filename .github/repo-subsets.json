@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "d4479d730cbb4d580bbbdf91e929521729446676",
+  "git": "0a0ac93920dfe56828910b5d36dee91f28c33ab8",
   "subsets": {
     "docs": {
       "files": 114,
@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "b0ea8714f3106d611f36e445890ced25530191aae52cd397b7ef9184307ec8a6"
+      "sha256": "b8cb84d2abf7a36c37a54fb53835664d7750904db5ae33076c9fda5044b53c80"
     },
     "lean": {
       "files": 162,
