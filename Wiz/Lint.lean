@@ -844,8 +844,12 @@ def baselineHeader : String :=
 Findings are keyed by `findingKey`; the message texts are not in the file, so a reworded
 finding with the same anchor is not a new row. -/
 def baselineText (path : String) (msgs : Array Msg) : String :=
-  let keys := (msgs.map (findingKey path)).toList.eraseDups
-  let sorted := keys.mergeSort (· ≤ ·)
+  let keys := (msgs.map (findingKey path)).toList.mergeSort (· ≤ ·)
+  -- adjacent duplicates after the sort: one pass, not `List.eraseDups` (O(n²))
+  let sorted := keys.foldr (fun k acc =>
+    match acc with
+    | [] => [k]
+    | h :: _ => if k == h then acc else k :: acc) []
   baselineHeader ++ String.join (sorted.map (fun k => k ++ "\n"))
 
 /-- The keys in a baseline file. Blank lines and `#` comments are ignored, so the header
