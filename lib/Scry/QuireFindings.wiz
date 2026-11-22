@@ -269,7 +269,8 @@ def Scry.fiProbe (path : String) : EIO (Except String (Nat × U64)) := do
       s ← getQ h;
       let gen := UIntN.toNat s.gen;
       let root := UIntN.toNat s.root;
-      match Bool.and (Nat.lt 0 gen) (Nat.lt 0 root) with
+      let ok1 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok1 with
       | .false => do
         closeQ h;
         EIO.pure (.error "corrupt")
@@ -307,7 +308,8 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
       -- A fresh, truncated or garbage image has no valid meta (gen 0) or no root.
       -- Stop here: reading a record through that "root" would walk a page that is not
       -- a leaf.
-      match Bool.and (Nat.lt 0 gen) (Nat.lt 0 root) with
+      let ok2 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok2 with
       | .false => do
         closeQ h;
         EIO.pure (.error "corrupt")
@@ -327,7 +329,8 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
           | .none => Bool.false
           | .some n => Nat.beq (UIntN.toNat n.count) (List.length rows);
         closeQ h;
-        match Bool.and good countOk with
+        let ok3 := Bool.and good countOk;
+        match ok3 with
         | .false => EIO.pure (.error "corrupt")
         | .true => EIO.pure (.ok (List.map Scry.FindingKey.ofRec rows))
 
@@ -347,7 +350,8 @@ def Scry.fiCountSeverityQuire (path : String) (severity : U32) : EIO (Except Str
       s ← getQ h;
       let gen := UIntN.toNat s.gen;
       let root := UIntN.toNat s.root;
-      match Bool.and (Nat.lt 0 gen) (Nat.lt 0 root) with
+      let ok4 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok4 with
       | .false => do
         closeQ h;
         EIO.pure (.error "corrupt")

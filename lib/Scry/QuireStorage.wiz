@@ -99,7 +99,8 @@ def Patch.ofChange (old new : Node) : Option Patch :=
   match Node.beq old new with
   | .true => .none
   | .false =>
-    match Bool.and (UIntN.beq old.kind new.kind) (UIntN.beq old.label new.label) with
+    let ok1 := Bool.and (UIntN.beq old.kind new.kind) (UIntN.beq old.label new.label);
+    match ok1 with
     | .true =>
       match UIntN.lt new.count old.count with
       | .false => .some (.addCount (new.count - old.count))
