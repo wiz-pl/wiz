@@ -606,7 +606,7 @@ is a program, and its test (the first line, `-- test: run`) runs it.
 
 ## 10: hardware
 
-`lib/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
+`hdl/src/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
 simulated by evaluation and turned into Verilog.
 
 ```wiz
@@ -650,7 +650,7 @@ The library also has bundles of named signals (`deriving Bundle`), reset and ena
 test benches, waveforms (VCD) and pin constraints, and the combinators come with
 lemmas (`Circuit.run_seq`: running `seq a b` is running `b` on the outputs of `a`). A
 UART for a Lattice iCEstick FPGA board is written in it.
-(`examples/tour/10-hdl.wiz`; `examples/hdl.wiz`, `examples/hdl-compose.wiz`;
+(`examples/tour/10-hdl.wiz`; `hdl/examples/hdl.wiz`, `hdl/examples/hdl-compose.wiz`;
 [libraries.md](libraries.md), H14.)
 
 ## 11: packages
@@ -690,8 +690,9 @@ is refused, so `new` never overwrites work, and the name must start with a lette
 ([stages/23-grail.md](stages/23-grail.md), 23o.)
 
 Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
-library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
-one name can be declared only once among everything a file imports. Mark helpers
+library `lib/`, a package's `lib` directories, `-I DIR`). There is no selective import,
+so one name can be declared only once among everything a file imports (`namespace`,
+13t, prefixes a declaration's name but does not let two modules reuse one). Mark helpers
 `private` to keep them out of other modules.
 
 ## 12: taint analysis with scry

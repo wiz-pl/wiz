@@ -1,0 +1,419 @@
+import Hdl.Core
+import Hdl.Temporal
+import Trace
+/-!
+# Hdl.Signal
+
+Clash-style signals (`import Hdl.Signal`): a `Signal d A` is the value of a wire in
+every cycle of the clock domain `d`, as a coinductive stream. This is lane L1 of
+wiz-notes/clash-hdl-plan.md, a layer over `Circuit` (hdl/src/Hdl/Core.wiz), not a
+replacement: netlists, Verilog, `simFast` and the proofs stay on `Circuit`. Stage notes:
+docs/stages/34-hdl-signals.md.
+
+* `Signal d A` is ν of a one-field description (`head`, `tail`). The domain `d` is a
+  phantom `ClockDomain`, and phantom parameters are checked (stage 22e): a
+  `Signal ClockDomain.sys A` is not a `Signal (ClockDomain.named "fast") A`.
+* Productivity is typing: the unsized definitions elaborate to `coit` (direct
+  corecursive calls) or `cocon` (no corecursion), and the size-preserving ones
+  (`mapS`/`zipWithS`) to `scofix`; all are total in the kernel, so `Signal.at s t` is
+  defined for every `t`.
+* State through `register` (one `cocon` cell in front of a stream), `mealy`/`moore`
+  (`coit`, state in the arguments: O(1) per cycle) and what is built from them.
+  `Signal.fix` is Clash's `cnt = register 0 (cnt + 1)`: a sized `scofix` (lane L2) whose
+  state may depend on the size. `registerS` is its only size bump (`Signal.mapS` and
+  `zipWithS` preserve the size), so a combinational loop is a size error, and `+`/`if`
+  work on `(Signal d A)^i` through the sized instances.
+* `Signal.Sig d` is a representation `HwTy → Type`, with a pointwise `Hw` instance: any
+  combinational code `{r} → [Hw r] → …` runs on signals, and a `Bundle F` (`deriving
+  Bundle`) packs `F (Signal.Sig d)`, a structure of signals, into one signal and back.
+* The bridge: `Signal.ofCircuit c xs` runs a `Circuit` on a signal, and
+  `Signal.ofCircuit_at` proves it is `Circuit.trace` at every cycle. `Signal.register` is
+  `Circuit.delay` (`Signal.ofCircuit_delay`).
+* Equality at ν is stuck, so equivalence is pointwise (`Signal.Eqv`, with a
+  bisimulation principle), and temporal properties are `TL` formulas over
+  `Signal.toTrace` (`Signal.sat`).
+-/
+
+------------------------------------------------------------------------------------
+-- Signals
+
+/-- A synchronous signal in clock domain `d`: a value of type `A` in every cycle. `head`
+is the value now, `tail` the signal from the next cycle on. The domain is a phantom
+parameter: signals of different domains do not mix. -/
+coinductive Signal (d : ClockDomain) (A : Type) where
+  head : A
+  tail : Signal d A
+
+/-- The value at cycle `t`. -/
+def Signal.at {d : ClockDomain} {A : Type} : Signal d A → Nat → A
+  | s, .zero => s.head
+  | s, .succ n => Signal.at s.tail n
+
+/-- The values of the first `n` cycles (simulation). -/
+def Signal.sample {d : ClockDomain} {A : Type} : Nat → Signal d A → List A
+  | .zero, _ => .nil
+  | .succ n, s => .cons s.head (Signal.sample n s.tail)
+
+/-- The signal as a trace (lib/Trace.wiz), the semantics `Circuit.trace` and hdl/src/Hdl/Temporal.wiz use. -/
+def Signal.toTrace {d : ClockDomain} {A : Type} (s : Signal d A) : Trace A :=
+  fun (t : Nat) => Signal.at s t
+
+/-- The elements of the list, then `dflt` for ever. -/
+def Signal.fromList {d : ClockDomain} {A : Type} (dflt : A) (xs : List A) : Signal d A
+  | .head => match xs with
+    | .nil => dflt
+    | .cons x _ => x
+  | .tail => Signal.fromList dflt (match xs with
+    | .nil => List.nil
+    | .cons _ r => r)
+
+------------------------------------------------------------------------------------
+-- Combinational lifting (each a `coit`: the state is the explicit arguments)
+
+/-- The same value in every cycle. -/
+def Signal.pure {d : ClockDomain} {A : Type} (a : A) : Signal d A
+  | .head => a
+  | .tail => Signal.pure a
+
+/-- `pure` at any size: the same value in every cycle, as a signal valid for `i` steps.
+It never *observes* at the size it runs at (`coit` at `∞` used at `i`), so it needs no
+size-dependent state. `mapS`/`zipWithS` do observe; they are the sized copatterns
+(`scofix`, lane L2) below. -/
+def Signal.pureS {d : ClockDomain} {A : Type} (a : A) {i : Size} : (Signal d A)^i
+  | .head => a
+  | .tail => Signal.pureS a
+
+/-- `pureS` at `∞` is `pure`: the same value at every cycle. -/
+def Signal.pureS_at {d : ClockDomain} {A : Type} (a : A) : (t : Nat) →
+    Signal.at (Signal.pureS (i := ∞) a : Signal d A) t = a
+  | .zero => rfl
+  | .succ t => Signal.pureS_at a t
+
+/-- A numeral at a sized signal (`0`, `1`, …): a constant in every cycle. With the
+size-preserving `mapS`/`zipWithS` below, the observing operators (`+`, `if`) are the
+pointwise instances at the same size. -/
+instance {d : ClockDomain} {n k : Nat} {i : Size} : OfNat ((Signal d (BitVec n))^i) k :=
+  OfNat.mk (Signal.pureS (i := i) (BitVec.ofNat n k))
+
+/-- `map` at the same size: `f` on the value of every cycle, with the size preserved.
+A sized `scofix` (lane L2): the state is the input stream at the running size, the body
+is at a predecessor and observes the input with `out`, and the recursive call is the
+`scofix` seed at that predecessor. `Signal.fix` below is the same shape; writing the
+state family out keeps these three independent of the copattern sugar's state-type
+bookkeeping (the term is what the sugar denotes). -/
+def Signal.mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) :
+    (Signal d B)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j)
+    (fun (j : Size) rec idx a =>
+      let (h, r) := out a
+      let (t, u) := r
+      cocon (f h, rec idx t, (), ()))
+    i () s
+
+/-- `zipWith` at the same size. -/
+def Signal.zipWithS {d : ClockDomain} {A B C : Type} {i : Size} (f : A → B → C)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) : (Signal d C)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j × (Signal d B)^j)
+    (fun (j : Size) rec idx p =>
+      let (a, b) := p
+      let (ha, ra) := out a
+      let (ta, ua) := ra
+      let (hb, rb) := out b
+      let (tb, ub) := rb
+      cocon (f ha hb, rec idx (ta, tb), (), ()))
+    i () (a, b)
+
+/-- `zipWith3` at the same size (`if` is a three-way mux). -/
+def Signal.zipWith3S {d : ClockDomain} {A B C D : Type} {i : Size} (f : A → B → C → D)
+    (a : (Signal d A)^i) (b : (Signal d B)^i) (c : (Signal d C)^i) : (Signal d D)^i :=
+  scofix (fun (j : Size) => fun _ => (Signal d A)^j × (Signal d B)^j × (Signal d C)^j)
+    (fun (j : Size) rec idx p =>
+      let (a, b, c) := p
+      let (ha, ra) := out a
+      let (ta, ua) := ra
+      let (hb, rb) := out b
+      let (tb, ub) := rb
+      let (hc, rc) := out c
+      let (tc, uc) := rc
+      cocon (f ha hb hc, rec idx (ta, tb, tc), (), ()))
+    i () (a, b, c)
+
+/-- Feedback for a contractive stream function: `g` maps a signal at size `i` to one at
+`↑i`, so it can only use its argument under a register (`registerS`), never observe it.
+The fixed point is `scofix` with no separate state; the recursive argument of `scofix` is
+already the loop value at the predecessor, and the body is `g` at that size. That is
+Clash's `cnt = register 0 (cnt + 1)` with the delay discipline made a type. -/
+def Signal.fix {d : ClockDomain} {A : Type}
+    (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) : Signal d A :=
+  scofix (fun (j : Size) => fun _ => Unit)
+    (fun j rec idx a => g j (rec idx a))
+    ∞ () ()
+
+/-- `+` on a sized signal: the pointwise `BitVec.add`, at the same size. -/
+instance {d : ClockDomain} {n : Nat} {i : Size} : Add ((Signal d (BitVec n))^i) :=
+  Add.mk (Signal.zipWithS BitVec.add)
+
+/-- `-` on a sized signal. -/
+instance {d : ClockDomain} {n : Nat} {i : Size} : Sub ((Signal d (BitVec n))^i) :=
+  Sub.mk (Signal.zipWithS BitVec.sub)
+
+/-- `if` on a sized signal: the condition and both branches at the same size. -/
+instance {d : ClockDomain} {A : Type} {i : Size} :
+    Mux ((Signal d (BitVec 1))^i) ((Signal d A)^i) :=
+  Mux.mk (Signal.zipWith3S (fun (c : BitVec 1) (x y : A) =>
+    match BitVec.isTrue c with
+    | .true => x
+    | .false => y))
+
+/-- `f` in every cycle. -/
+def Signal.map {d : ClockDomain} {A B : Type} (f : A → B) (s : Signal d A) : Signal d B
+  | .head => f s.head
+  | .tail => Signal.map f s.tail
+
+/-- `f` on the two values of each cycle. -/
+def Signal.zipWith {d : ClockDomain} {A B C : Type} (f : A → B → C) (a : Signal d A) (b : Signal d B) : Signal d C
+  | .head => f a.head b.head
+  | .tail => Signal.zipWith f a.tail b.tail
+
+/-- `f` on the three values of each cycle. -/
+def Signal.zipWith3 {d : ClockDomain} {A B C D : Type} (f : A → B → C → D)
+    (a : Signal d A) (b : Signal d B) (c : Signal d C) : Signal d D
+  | .head => f a.head b.head c.head
+  | .tail => Signal.zipWith3 f a.tail b.tail c.tail
+
+/-- `f` on the four values of each cycle. -/
+def Signal.zipWith4 {d : ClockDomain} {A B C D E : Type} (f : A → B → C → D → E)
+    (a : Signal d A) (b : Signal d B) (c : Signal d C) (e : Signal d D) : Signal d E
+  | .head => f a.head b.head c.head e.head
+  | .tail => Signal.zipWith4 f a.tail b.tail c.tail e.tail
+
+/-- `map` at every cycle. -/
+def Signal.map_at {d : ClockDomain} {A B : Type} (f : A → B) :
+    (s : Signal d A) → (t : Nat) → Signal.at (Signal.map f s) t = f (Signal.at s t)
+  | s, .zero => rfl
+  | s, .succ t => Signal.map_at f s.tail t
+
+/-- `zipWith` at every cycle. -/
+def Signal.zipWith_at {d : ClockDomain} {A B C : Type} (f : A → B → C) :
+    (a : Signal d A) → (b : Signal d B) → (t : Nat) →
+    Signal.at (Signal.zipWith f a b) t = f (Signal.at a t) (Signal.at b t)
+  | a, b, .zero => rfl
+  | a, b, .succ t => Signal.zipWith_at f a.tail b.tail t
+
+/-- `pure` at every cycle. -/
+def Signal.pure_at {d : ClockDomain} {A : Type} (a : A) : (t : Nat) → Signal.at (Signal.pure a : Signal d A) t = a
+  | .zero => rfl
+  | .succ t => Signal.pure_at a t
+
+/-- The `n`-cycle sample has `n` elements, for every signal: every observation is
+defined (productivity, stated). -/
+def Signal.sample_length {d : ClockDomain} {A : Type} : (n : Nat) → (s : Signal d A) → List.length (Signal.sample n s) = n
+  | .zero, s => rfl
+  | .succ n, s => Eq.congrArg Nat.succ (Signal.sample_length n s.tail)
+
+------------------------------------------------------------------------------------
+-- State
+
+/-- A D flip-flop with a power-on value: `init`, then `s` one cycle late
+(`init, s₀, s₁, …`). A copattern with no corecursive observation: one `cocon` cell in
+front of `s`. -/
+def Signal.register {d : ClockDomain} {A : Type} (init : A) (s : Signal d A) : Signal d A
+  | .head => init
+  | .tail => s
+
+/-- The sized register: from a signal defined for `i` steps, one defined for `↑i`. It is
+the only operation that raises a size, so `Signal.fix`'s feedback path must pass through
+it; a register that keeps the size is rejected ("builds a value of size ↑s or ∞"),
+which is a combinational loop as a type error. -/
+def Signal.registerS {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^(↑i)
+  | .head => init
+  | .tail => s
+
+/-- A Mealy machine: the state `S` in a register, the output from the state and the
+input. `coit`: the state is an argument, so a cycle costs O(1). -/
+def Signal.mealy {d : ClockDomain} {S I O : Type} (f : S → I → S × O) (st : S) (xs : Signal d I) : Signal d O
+  | .head => (f st xs.head).2
+  | .tail => Signal.mealy f (f st xs.head).1 xs.tail
+
+/-- A Moore machine: the output depends on the state only. -/
+def Signal.moore {d : ClockDomain} {S I O : Type} (f : S → I → S) (o : S → O) (st : S) (xs : Signal d I) : Signal d O :=
+  Signal.mealy (fun (s : S) (x : I) => (f s x, o s)) st xs
+
+/-- A register with a synchronous reset (one bit, high: reset): `init` at cycle 0, and at
+`t + 1` `init` if `rst` was high at `t`, else `s` at `t`. -/
+def Signal.registerR {d : ClockDomain} {A : Type} (init : A) (rst : Signal d (BitVec 1)) (s : Signal d A) : Signal d A :=
+  Signal.register init (Signal.zipWith (fun (r : BitVec 1) (x : A) => match BitVec.isTrue r with
+    | .true => init
+    | .false => x) rst s)
+
+/-- A register with a clock enable (one bit, high: load): it keeps its value while `en`
+is low. -/
+def Signal.registerEn {d : ClockDomain} {A : Type} (init : A) (en : Signal d (BitVec 1)) (s : Signal d A) : Signal d A :=
+  Signal.mealy (fun (cur : A) (p : BitVec 1 × A) => (match BitVec.isTrue p.1 with
+    | .true => p.2
+    | .false => cur, cur)) init (Signal.zipWith (fun (e : BitVec 1) (x : A) => (e, x)) en s)
+
+/-- `register` at cycle 0. -/
+def Signal.register_zero {d : ClockDomain} {A : Type} (init : A) (s : Signal d A) :
+    Signal.at (Signal.register init s) 0 = init := rfl
+/-- `register` at cycle `t + 1`: the input at `t`. -/
+def Signal.register_succ {d : ClockDomain} {A : Type} (init : A) (s : Signal d A) (t : Nat) :
+    Signal.at (Signal.register init s) (Nat.succ t) = Signal.at s t := rfl
+
+/-- A `mealy` signal is the Mealy machine's output trace (`Mealy.outAt`, lib/Trace.wiz),
+at every cycle. -/
+def Signal.mealy_at {d : ClockDomain} {S I O : Type} (f : S → I → S × O) :
+    (t : Nat) → (s : S) → (xs : Signal d I) →
+    Signal.at (Signal.mealy f s xs) t = Mealy.outAt f s (Signal.toTrace xs) t
+  | .zero, s, xs => rfl
+  | .succ t, s, xs =>
+    Eq.trans (Signal.mealy_at f t (f s xs.head).1 xs.tail)
+      (Eq.symm (Mealy.outAt_succ f s (Signal.toTrace xs) t))
+
+------------------------------------------------------------------------------------
+-- Equivalence: pointwise (equality at ν is stuck)
+
+/-- Two signals are equivalent when they agree at every cycle. -/
+def Signal.Eqv {d : ClockDomain} {A : Type} (s s' : Signal d A) : Prop :=
+  (t : Nat) → Signal.at s t = Signal.at s' t
+
+/-- Every signal is equivalent to itself. -/
+def Signal.Eqv.refl {d : ClockDomain} {A : Type} (s : Signal d A) : Signal.Eqv s s :=
+  fun (t : Nat) => rfl
+/-- Equivalence is symmetric. -/
+def Signal.Eqv.symm {d : ClockDomain} {A : Type} {s s' : Signal d A} (h : Signal.Eqv s s') : Signal.Eqv s' s :=
+  fun (t : Nat) => Eq.symm (h t)
+/-- Equivalence is transitive. -/
+def Signal.Eqv.trans {d : ClockDomain} {A : Type} {s s' s'' : Signal d A}
+    (h : Signal.Eqv s s') (h' : Signal.Eqv s' s'') : Signal.Eqv s s'' :=
+  fun (t : Nat) => Eq.trans (h t) (h' t)
+
+/-- Equivalent signals have equal traces (`funext` is a definition). -/
+def Signal.Eqv.toTrace {d : ClockDomain} {A : Type} {s s' : Signal d A} (h : Signal.Eqv s s') :
+    Signal.toTrace s = Signal.toTrace s' :=
+  funext h
+
+/-- Bisimulation: a relation that relates the heads and is closed under `tail` relates
+only equivalent signals. -/
+def Signal.bisim {d : ClockDomain} {A : Type} (R : Signal d A → Signal d A → Prop)
+    (hh : (s s' : Signal d A) → R s s' → s.head = s'.head)
+    (ht : (s s' : Signal d A) → R s s' → R s.tail s'.tail) :
+    (t : Nat) → (s s' : Signal d A) → R s s' → Signal.at s t = Signal.at s' t
+  | .zero, s, s', r => hh s s' r
+  | .succ t, s, s', r => Signal.bisim R hh ht t s.tail s'.tail (ht s s' r)
+
+/-- `register` of a signal's head in front of its tail is the signal. -/
+def Signal.register_head_tail {d : ClockDomain} {A : Type} (s : Signal d A) :
+    Signal.Eqv (Signal.register s.head s.tail) s
+  | .zero => rfl
+  | .succ t => rfl
+
+------------------------------------------------------------------------------------
+-- Temporal properties: the `TL` formulas of hdl/src/Hdl/Temporal.wiz over `toTrace`
+
+/-- `φ` holds of the signal (at cycle 0, the anchored semantics). Every proof rule of
+hdl/src/Hdl/Temporal.wiz applies to `Signal.toTrace s`. -/
+def Signal.sat {d : ClockDomain} {A : Type} (s : Signal d A) (φ : TL A) : Prop :=
+  TL.sat (Signal.toTrace s) φ
+
+/-- Equivalent signals satisfy the same formulas. -/
+def Signal.sat_eqv {d : ClockDomain} {A : Type} {s s' : Signal d A} (h : Signal.Eqv s s') (φ : TL A) :
+    Signal.sat s φ = Signal.sat s' φ :=
+  Eq.congrArg (fun (σ : Trace A) => TL.sat σ φ) (Signal.Eqv.toTrace h)
+
+------------------------------------------------------------------------------------
+-- Signals of hardware values: the `Hw` representation
+
+/-- Signals of the values of a hardware type: a representation `HwTy → Type`, so that
+code written against `[Hw r]` runs on signals and a structure `F (Signal.Sig d)` is a
+structure of signals (Clash's unbundled record). -/
+def Signal.Sig (d : ClockDomain) (t : HwTy) : Type := Signal d (HwTy.El t)
+
+/-- Every combinational operation, cycle by cycle at the values (`Hw HwTy.El`). -/
+instance {d : ClockDomain} : Hw (Signal.Sig d) where
+  lit := fun n k => Signal.pure (BitVec.ofNat n k)
+  add := fun a b => Signal.zipWith BitVec.add a b
+  sub := fun a b => Signal.zipWith BitVec.sub a b
+  mul := fun a b => Signal.zipWith BitVec.mul a b
+  and := fun a b => Signal.zipWith BitVec.and a b
+  or := fun a b => Signal.zipWith BitVec.or a b
+  xor := fun a b => Signal.zipWith BitVec.xor a b
+  not := fun a => Signal.map BitVec.not a
+  eq := fun a b => Signal.zipWith (fun x y => Bool.toBits (BitVec.beq x y)) a b
+  ult := fun a b => Signal.zipWith (fun x y => Bool.toBits (BitVec.ult x y)) a b
+  shlBy := fun a s => Signal.zipWith HwTy.El.shlBy a s
+  lshrBy := fun a s => Signal.zipWith HwTy.El.lshrBy a s
+  ashrBy := fun a s => Signal.zipWith HwTy.El.ashrBy a s
+  slt := fun a b => Signal.zipWith HwTy.El.slt a b
+  mux := fun c x y => Signal.zipWith3 HwTy.El.mux c x y
+  cat := fun a b => Signal.zipWith HwTy.El.cat a b
+  slice := fun lo w a => Signal.map (fun x => HwTy.El.slice lo w x) a
+  pair := fun a b => Signal.zipWith (fun x y => (x, y)) a b
+  fst := fun p => Signal.map (fun q => q.1) p
+  snd := fun p => Signal.map (fun q => q.2) p
+  share := fun a f => f a
+  const := fun t v => Signal.pure v
+  tag := fun s a => Signal.map (fun x => HwTy.El.tag s x) a
+  untag := fun a => Signal.map HwTy.El.untag a
+  label := fun s a => Signal.map (fun x => HwTy.El.label s x) a
+  resetTo := fun rst v x => Signal.zipWith (fun c y => HwTy.El.resetTo c v y) rst x
+  hold := fun en x cur => Signal.zipWith3 HwTy.El.mux en x cur
+  memRead := fun m a => Signal.zipWith HwTy.El.memRead m a
+  memWrite := fun m we a v => Signal.zipWith4 HwTy.El.memWrite m we a v
+  prim := fun p x => Signal.map (HwTy.El.prim p) x
+  clockOf := fun (c : ClockDomain) => Signal.pure (BitVec.ofNat 1 0)
+
+/-- Clash's `bundle`: a structure of signals as one signal of the structure's code. -/
+def Signal.bundle {d : ClockDomain} {F : (HwTy → Type) → Type} (b : Bundle F) (v : F (Signal.Sig d)) :
+    Signal d (HwTy.El b.code) :=
+  b.pack (r := Signal.Sig d) v
+/-- Clash's `unbundle`: a signal of a structure's code as a structure of signals. -/
+def Signal.unbundle {d : ClockDomain} {F : (HwTy → Type) → Type} (b : Bundle F) (s : Signal d (HwTy.El b.code)) :
+    F (Signal.Sig d) :=
+  b.unpack (r := Signal.Sig d) s
+
+/-- A signal of pairs as a pair of signals. -/
+def Signal.unbundle2 {d : ClockDomain} {A B : Type} (s : Signal d (A × B)) : Signal d A × Signal d B :=
+  (Signal.map (fun (p : A × B) => p.1) s, Signal.map (fun (p : A × B) => p.2) s)
+/-- A pair of signals as a signal of pairs. -/
+def Signal.bundle2 {d : ClockDomain} {A B : Type} (p : Signal d A × Signal d B) : Signal d (A × B) :=
+  Signal.zipWith (fun (a : A) (b : B) => (a, b)) p.1 p.2
+
+------------------------------------------------------------------------------------
+-- The bridge to `Circuit`
+
+/-- A circuit driven by a signal: the Mealy machine of its step, from its power-on
+state. -/
+def Signal.ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) : Signal d (HwTy.El o) :=
+  Signal.mealy (Circuit.stepEl c) c.init xs
+
+/-- The signal of a circuit is its trace (`Circuit.trace`), at every cycle. -/
+def Signal.ofCircuit_at {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) (t : Nat) :
+    Signal.at (Signal.ofCircuit c xs) t = Circuit.trace c (Signal.toTrace xs) t :=
+  Signal.mealy_at (Circuit.stepEl c) t c.init xs
+
+/-- The same, as traces. -/
+def Signal.toTrace_ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) :
+    Signal.toTrace (Signal.ofCircuit c xs) = Circuit.trace c (Signal.toTrace xs) :=
+  funext (Signal.ofCircuit_at c xs)
+
+/-- A temporal property of a circuit's signal is the property of its trace, so what is
+proved of one transfers to the other (and from there through `Circuit.Simulates` to the
+netlist). -/
+def Signal.sat_ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) (φ : TL (HwTy.El o)) :
+    Signal.sat (Signal.ofCircuit c xs) φ = TL.sat (Circuit.trace c (Signal.toTrace xs)) φ :=
+  Eq.congrArg (fun (σ : Trace (HwTy.El o)) => TL.sat σ φ) (Signal.toTrace_ofCircuit c xs)
+
+/-- `Circuit.delay` from any state `s` is `register s` (the induction behind
+`ofCircuit_delay`). -/
+def Signal.delay_from {d : ClockDomain} (t : HwTy) (v : HwTy.El t) :
+    (n : Nat) → (s : HwTy.El t) → (xs : Signal d (HwTy.El t)) →
+    Signal.at (Signal.mealy (Circuit.stepEl (Circuit.delay t v)) s xs) n = Signal.at (Signal.register s xs) n
+  | .zero, s, xs => rfl
+  | .succ n, s, xs =>
+    Eq.trans (Signal.delay_from t v n xs.head xs.tail) (Signal.register_head_tail xs n)
+
+/-- `register` is `Circuit.delay`. -/
+def Signal.ofCircuit_delay {d : ClockDomain} (t : HwTy) (init : HwTy.El t) (xs : Signal d (HwTy.El t)) :
+    Signal.Eqv (Signal.ofCircuit (Circuit.delay t init) xs) (Signal.register init xs) :=
+  fun (n : Nat) => Signal.delay_from t init n init xs

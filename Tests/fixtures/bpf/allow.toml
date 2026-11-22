@@ -1,0 +1,25 @@
+# P0 fixture: the IPv4 allow-list of ebpf-target.md §5.5.
+# [UNRUN] — the tests that consume this file are written but have not run (P0 coding lane).
+#
+# The manifest declares the program and its maps; the typed terms are in allow.bpfcore.
+# `wiz build allow.toml -o allow.c --target bpf` writes allow.c and bpf_rt.h.
+
+[program.flow]
+entry   = "flow"
+section = "xdp"
+type    = "xdp"
+license = "GPL"
+version = 1
+core    = "allow.bpfcore"
+
+[map.allow]
+kind        = "hash"
+key         = "u32"
+value       = "u8"
+max_entries = 4096
+
+[map.hits]
+kind        = "percpu_array"
+key         = "u32"
+value       = "u64"
+max_entries = 256

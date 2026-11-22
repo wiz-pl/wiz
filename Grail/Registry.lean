@@ -12,7 +12,7 @@ version, archive URL and SHA-256 of every registry package, so a build needs no 
 no network unless something is missing from the cache.
 
     (lock
-      (index "https://github.com/wiz-pl/grail-index" "<commit>")
+      (index "https://github.com/wiz-pl/fate-index" "<commit>")
       (dep "greet" "https://example.org/greet.git" "v1" "<commit>" "<content>")
       (pkg "std" "0.1.2" "https://…/std-0.1.2.tar.gz" "<sha256>"
            (deps (dep "unused" "^0"))))

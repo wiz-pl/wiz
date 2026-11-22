@@ -1,0 +1,5 @@
+import Prelude
+
+-- `__root__.` resets the prefix: this declaration is the true global `g` and is
+-- exempt from the namespace rule (and needs no compatibility row).
+def __root__.g : Nat := 0

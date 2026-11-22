@@ -67,34 +67,68 @@ export function createIndexer(ask, versionOf = null) {
     declarations: (text, index) => JSON.parse(ask("wiz_loom_index_declarations", text, index)),
     declarationNamed: (text, index, name) =>
       JSON.parse(ask("wiz_loom_index_declaration", text, index, name)),
+    // The in-page server's pure rules (`Web.Selfhost.wiz`): the initialize capabilities,
+    // the engine's lines as diagnostics, the command splitter, the Prelude rule and the
+    // completion/hover/definition answers. The shim is the server around them.
+    initializeCapabilities: () => JSON.parse(ask("wiz_loom_lsp_capabilities")),
+    withPrelude: (text) => JSON.parse(ask("wiz_loom_lsp_prelude", text)),
+    splitCommands: (text) => JSON.parse(ask("wiz_loom_lsp_commands", text)),
+    outputLines: (output) => JSON.parse(ask("wiz_loom_lsp_output_lines", output)),
+    parseErrorOffset: (line) => {
+      const n = Number(ask("wiz_loom_lsp_parse_error", line));
+      return n < 0 ? null : n;
+    },
+    diagnosticsFromOutput: (text, output) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_output", text, output)),
+    parseCheck(json) {
+      const text = json === null || json === undefined ? ""
+        : (typeof json === "string" ? json : JSON.stringify(json));
+      return JSON.parse(ask("wiz_loom_lsp_parse_check", text));
+    },
+    diagnosticsFromCheck: (text, answer) =>
+      JSON.parse(ask("wiz_loom_lsp_diagnostics_check", text,
+        JSON.stringify(answer === null || answer === undefined ? {} : answer))),
+    completionPrefix: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_completion_prefix", text, String(offset | 0))),
+    wordAt: (text, offset) =>
+      JSON.parse(ask("wiz_loom_lsp_word_at", text, String(offset | 0))),
+    filterCompletions: (names, prefix, limit = 200) =>
+      JSON.parse(ask("wiz_loom_lsp_filter_completions", JSON.stringify(names || []),
+        String(prefix || ""), String(limit))),
+    completion: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_completion", text, index || "",
+        JSON.stringify(position || {}))),
+    hover: (text, index, position) =>
+      JSON.parse(ask("wiz_loom_lsp_hover", text, index || "",
+        JSON.stringify(position || {}))),
+    definition: (text, index, position, uri) =>
+      JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
+        JSON.stringify(position || {}), uri || "")),
+    // The completion popup's rules (`Web.EditorModel`): the result's items, the popup's
+    // filtered items/selection/prefix, the key command and the accepted edit. The popup
+    // only paints them, so none of this is decided in `web/completions.js`.
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup: (text, offset, items, index) =>
+      JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset))),
+    key: (key, index, count) =>
+      JSON.parse(ask("wiz_loom_editor_key", String(key || ""), String(index), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    // The popup's tooltip and ask key, and the goals pane's source spans (`highlight`),
+    // so neither decides a rule.
+    itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
+    askKey: (key, code, ctrl, meta) =>
+      ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
+        ctrl ? "1" : "0", meta ? "1" : "0") === "1",
+    span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
+    rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+    // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+    // page only decides whether it can open the target's document.
+    target: (result) => JSON.parse(ask("wiz_loom_hover_target",
+      result === null || result === undefined ? "null" : JSON.stringify(result))),
   };
-}
-
-// An LSP position for a JavaScript string index (UTF-16 code units).
-function positionAt(text, offset) {
-  const at = Math.max(0, Math.min(text ? text.length : 0, offset | 0));
-  const before = text ? text.slice(0, at) : "";
-  const line = (before.match(/\n/g) || []).length;
-  return { line, character: at - (before.lastIndexOf("\n") + 1) };
-}
-
-// A source span (`LINE:CHAR-LINE:CHAR`) as offsets in `text`, clamped.
-function parseSpan(text) {
-  const m = /^(\d+):(\d+)-(\d+):(\d+)$/.exec(String(text || ""));
-  if (!m) return null;
-  return { start: Number(m[1]), character: Number(m[2]), endLine: Number(m[3]), endCharacter: Number(m[4]) };
-}
-
-function offsetAt(text, line, character) {
-  let offset = 0;
-  for (let l = 0; l < line; l++) {
-    const newline = text.indexOf("\n", offset);
-    if (newline < 0) return text.length;
-    offset = newline + 1;
-  }
-  const newline = text.indexOf("\n", offset);
-  const lineEnd = newline < 0 ? text.length : newline;
-  return Math.min(lineEnd, offset + character);
 }
 
 // `config` is `{url}` (a `ws://` URL, or `null` for no server), an endpoint from
@@ -168,9 +202,14 @@ export function startInfoview({
 
   // ## Hover
 
-  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+  const hover = wantHover === false || !wantsHover(query) || !rules ||
+    typeof rules.position !== "function" ? null : mountHover({
     editor,
     document: pageDocument,
+    // The caret and the definition answer are the runtime's rules (`Web.EditorModel`,
+    // `Web.Hover`); this module supplies the browser's caret and the socket's answer.
+    position: (text, offset) => rules.position(text, offset),
+    target: typeof rules.target === "function" ? (result) => rules.target(result) : undefined,
     onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
     onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
     onJump: (target) => {
@@ -206,24 +245,19 @@ export function startInfoview({
 
   // ## Source highlighting (the textarea's native selection)
 
-  function spanText(range) {
-    if (!range || typeof range !== "object") return "";
-    const start = range.start || {};
-    const stop = range.end || start;
-    return `${start.line || 0}:${start.character || 0}-${stop.line || 0}:${stop.character || 0}`;
-  }
-
   function highlight(range) {
-    const span = parseSpan(typeof range === "string" ? range : spanText(range));
-    if (!span || !editor) return;
-    const start = offsetAt(editor.value, span.start, span.character);
-    const end = Math.max(start, offsetAt(editor.value, span.endLine, span.endCharacter));
+    if (!editor || !rules) return;
+    const span = rules.span(editor.value,
+      typeof range === "string" ? range : rules.rangeText(range || {}));
+    if (!span) return;
+    const start = span[0];
+    const end = Math.max(start, span[1]);
     suppressCursor = true;
     try { editor.focus({ preventScroll: true }); } catch (_) { try { editor.focus(); } catch (_) { /* no focus */ } }
     try { editor.setSelectionRange(start, end); } catch (_) { /* not a text field */ }
     try {
       const lineHeight = 21;
-      const top = span.start * lineHeight;
+      const top = rules.position(editor.value, start).line * lineHeight;
       if (top < editor.scrollTop || top + lineHeight > editor.scrollTop + editor.clientHeight) {
         editor.scrollTop = Math.max(0, top - lineHeight * 2);
       }
@@ -233,8 +267,7 @@ export function startInfoview({
 
   function currentPosition() {
     if (follow) return followPosition;
-    return rules ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, editor.selectionStart || 0);
+    return rules ? rules.position(editor.value, caretOffset(editor)) : null;
   }
 
   // ## Asking the server
@@ -295,9 +328,8 @@ export function startInfoview({
   function onCursor(closePopup = false) {
     if (suppressCursor) return;
     if (closePopup && completions) completions.close();
-    const position = rules
-      ? rules.position(editor.value, caretOffset(editor))
-      : positionAt(editor.value, caretOffset(editor));
+    if (!rules) return;
+    const position = rules.position(editor.value, caretOffset(editor));
     const where = position.line + ":" + position.character;
     if (where === lastCursor && view.goalsKind !== null) return;
     scheduleRefresh();
@@ -426,9 +458,8 @@ export function startInfoview({
     refresh,
     reconnect,
     // The caret as the page and the tests see it (UTF-16, line 0-based).
-    position: () => editor
-      ? (rules ? rules.position(editor.value, caretOffset(editor))
-        : positionAt(editor.value, caretOffset(editor)))
+    position: () => editor && rules
+      ? rules.position(editor.value, caretOffset(editor))
       : { line: 0, character: 0 },
     squiggles: () => squiggles,
     completions: () => completions,

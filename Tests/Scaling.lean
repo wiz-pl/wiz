@@ -1,5 +1,6 @@
 import Tests.ElabFix
 import Grail.Test
+import Tests.Grail
 
 /-!
 # Scaling (agent/mem-hunt)
@@ -262,7 +263,12 @@ def expr : P IR.Expr := do
   | "F" => let f ← tok; return .fap f (← nums)
   | "A" => let f ← tok; return .pap f (← nums)
   | "X" => let f ← num; return .ap f (← nums)
-  | "O" => let f ← tok; return .prim f (← nums)
+  | "O" =>
+    let f ← tok
+    let p := match IR.PrimOp.ofKey? f with
+      | some p => p
+      | none => .extern f
+    return .prim p (← nums)
   | "S" => return .reset (← num)
   | "Z" => let t ← num; let g ← num; return .reuse t g (← nums)
   | t => throw s!"bad expression {t}"
@@ -446,11 +452,14 @@ that the chunks cover every example exactly once. They are the group `desc-sweep
 sets `parallel := true` so a shard's `--jobs N` runs them N at a time; they share no path
 and none asserts on wall time, so this is the safe way to use the shard's jobs on the
 sweep. -/
-/-- The `.wiz` files directly in `examples/`, sorted by path. -/
+/-- The `.wiz` files directly in `examples/` and the HDL package's `hdl/examples/`,
+sorted by path. The HDL examples moved with their package (`separate-repos.md` §1.2);
+the sweep still checks them, resolving `Hdl.*` from the root package's `root` setting. -/
 def exampleFiles : IO (Array System.FilePath) := do
   let mut fs := #[]
-  for e in ← System.FilePath.readDir "examples" do
-    if e.path.extension == some "wiz" then fs := fs.push e.path
+  for dir in ["examples", "hdl/examples"] do
+    for e in ← System.FilePath.readDir dir do
+      if e.path.extension == some "wiz" then fs := fs.push e.path
   pure (fs.qsort (·.toString < ·.toString))
 
 /-- Does `s` contain `frag` (the substring test the rest of the suite uses)? -/
@@ -530,8 +539,10 @@ def exampleChunk (fs : Array System.FilePath) (k : Nat) : Array System.FilePath 
 /-- The Desc sweep on `lib/` imported at once (all modules but the apart backends), with
 the stuck descriptions, and the check that a wrong variant is caught. The pre-split case
 asserted one bound over lib, the apart backends and the examples together (`> 1000`);
-since the parts run as separate cases, this part asserts its own floor: it compares 787
-descriptions (measured), and `> 700` catches a loader that stopped early. -/
+since the parts run as separate cases, this part asserts its own floor: before Hdl moved
+to its package the lib sweep compared 787 descriptions (measured); Hdl's 32 modules were
+about a quarter of that, so the lib-only floor is 500, which still catches a loader that
+stopped early. -/
 def descSweepLib : IO Unit := do
   let loader ← Tests.Elab.libLoader
   let lib := runFrontend (R := ZeroOneMany) (← Tests.Elab.allLibSource) { trustedModule := Tests.libModule, loader }
@@ -549,7 +560,7 @@ def descSweepLib : IO Unit := do
     ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
   let (n, bad) := hypsMismatches lib.globals stuck
   unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
-  check (n > 700) s!"only {n} cases"
+  check (n > 500) s!"only {n} cases"
 
 /-- The examples that deliberately show an error (their `.expected` golden holds it):
 `procmacro` throws from a macro, `syntax` prints the rejected-syntax diagnostic. The
@@ -563,18 +574,18 @@ cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: 
 is a decision, not a way to hide a failure. -/
 def descSweepSkips : List String :=
   [ "examples/closed-table-bench.wiz"
-  , "examples/hdl-crc-link.wiz"
-  , "examples/hdl-sim-bench.wiz"
-  , "examples/hdl-verified-full.wiz"
-  , "examples/hdl-verified-native.wiz"
   , "examples/natives-bench.wiz"
   , "examples/plot.wiz"
-  , "examples/scry-datalog-bench.wiz" ]
+  , "examples/scry-datalog-bench.wiz"
+  , "hdl/examples/hdl-crc-link.wiz"
+  , "hdl/examples/hdl-sim-bench.wiz"
+  , "hdl/examples/hdl-verified-full.wiz"
+  , "hdl/examples/hdl-verified-native.wiz" ]
 
 /-- The example whose skip reason is an on-demand cost: the sweep records that it needs
 `--trust-native` (so its classification is complete) but skips it for the reason it
 names. It is verified separately, with `--trust-native` and enough memory. -/
-def descSweepOnDemandExamples : List String := ["examples/hdl-verified-full.wiz"]
+def descSweepOnDemandExamples : List String := ["hdl/examples/hdl-verified-full.wiz"]
 
 /-- The examples whose frontend path needs the C preprocessor (`import_c`). -/
 def descSweepPreprocessExamples : List String :=
@@ -587,18 +598,27 @@ def exampleModeAt (p : System.FilePath) : IO ExampleMode := do
   | .ok m => pure m
   | .error e => throw (IO.userError s!"{p}: {e}")
 
+/-- The toolchain with the root package's settings, and its module roots (`lib/` and
+`drafts/feral/lib/` for `feral-core`), as the examples group's runner gets them. -/
+def exampleEnv : IO (Toolchain × List System.FilePath) := do
+  let tc ← toolchain
+  match ← Grail.readConfig tc (← Tests.Grail.binId tc) "lib" "." with
+  | .ok (pkg, machine) =>
+    let tc ← Tests.Grail.withSettings tc pkg machine
+    -- `tc.searchPath` carries the manifest's `root` settings (for packages that left
+    -- `lib/`, like `scry/src` and `hdl/src`); an example imports those modules too.
+    pure (tc, ← Module.roots (Grail.libRootsOf "." pkg.targets ++ tc.searchPath))
+  | .error e => throw (IO.userError s!"cannot read grail.wiz: {e}")
+
 /-- Elaborate an example the way `wiz check`/`wiz run` does: the toolchain's library as
-the first module root, `import_c` headers preprocessed, `link_c`/`include_str` resolved
-relative to the example, and `--trust-native` for a file that needs it. (The old sweep
-passed only the library loader: `glue.wiz` failed as un-preprocessed and a
-`native_refl` example failed without the flag.) -/
+the first module root and the package's other roots, `import_c` headers preprocessed,
+`link_c`/`include_str` resolved relative to the example, and `--trust-native` for a file
+that needs it. (The old sweep passed only the library loader: `glue.wiz` failed as
+un-preprocessed, `resources.wiz` could not find `FeralCore`, and a `native_refl` example
+failed without the flag.) -/
 def elaborateExample (p : System.FilePath) (src : String) (trustNative : Bool) :
     IO (CommandState ZeroOneMany) := do
-  let tc ← toolchain
-  -- The package's library roots (`grail.wiz`'s `Package.lib "feral-core"
-  -- "drafts/feral/lib"`), after the toolchain's `lib/`: `examples/resources.wiz` imports
-  -- `FeralCore`, and a sweep that passes only `Module.roots []` cannot see it.
-  let roots ← Module.roots ["drafts/feral/lib"]
+  let (tc, roots) ← exampleEnv
   let closure ← Module.loadClosure roots src
   let lib : Std.HashMap Name String := closure.fold (fun m n (_, s) => m.insert n s) {}
   let headers ← Build.preprocessHeaders tc (String.join (src :: lib.values))
@@ -617,8 +637,11 @@ example's `.expected`, and return `false` only when the C toolchain is missing (
 skips the chunk, as the examples group does). A program that ran and failed is the
 example's failure. -/
 def runExample (p : System.FilePath) (st : CommandState ZeroOneMany) : IO Bool := do
+  -- The root package sets `libs "-lm"` (`grail.wiz`), and the examples group runs a
+  -- `run` test with its package's settings; `import_c.wiz` needs `-lm` for `pow`/`sqrt`.
+  let (tc, _) ← exampleEnv
   let dir ← IO.FS.createTempDir
-  let result ← Build.runGlobal (← toolchain) st "main" dir (timeout := some 300)
+  let result ← Build.runGlobal tc st "main" dir (timeout := some 300)
   IO.FS.removeDirAll dir
   match result with
   | .error e =>
@@ -853,7 +876,7 @@ def group : Group where
     -- argument for the codomain, which a non-dependent Π doesn't mention: O(n²) on a
     -- nested spine (4000 characters: 32 s to build)
     -- the kernel's first `.1` rule (Q1) evaluated the pair to find the second part's
-    -- fields, so `(Circuit.netlistS c).1` (lib/Hdl/Core.wiz) ran the netlist builder at
+    -- fields, so `(Circuit.netlistS c).1` (hdl/src/Hdl/Core.wiz) ran the netlist builder at
     -- check time and overflowed the stack; here the second part takes 2^40 steps to
     -- evaluate. (R1: the rule no longer looks at the components at all.)
     { name := "p.1 is checked without evaluating p", run := fun _ =>

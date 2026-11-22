@@ -1,0 +1,16 @@
+import Prelude
+
+def keep (x : Nat) : Nat := x + 1
+
+def letUsed : Nat :=
+  let n := (1 : Nat)
+  n
+
+def notAValue : Nat :=
+  let _notAValue := (1 : Nat)
+  0
+
+def lambdaUsed : Nat := (fun (z : Nat) => z + 1) 1
+
+/-- A documented public value. -/
+def documented : Nat := 1

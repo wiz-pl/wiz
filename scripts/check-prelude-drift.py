@@ -14,7 +14,8 @@ There are two preludes, and they are not meant to be equal:
 
 The embedded copy is a subset by design. Its arithmetic is monomorphic
 (`infixl " + " => Nat.add`, where the host goes through `HAdd`/`Add` and an instance),
-it declares no classes, and it does not carry the transport names (`castRefl`,
+its only class is `Append` (so `++` is a class problem where the host's is
+`HAppend`/`[default_instance]`), and it does not carry the transport names (`castRefl`,
 `Eq.cast`, `Eq.subst`). Comparing bytes, or hashing
 either file, would therefore fail forever, and generating the embedded copy from
 `lib/Prelude.wiz` is impossible while the frontend cannot check the host prelude. What
@@ -100,7 +101,7 @@ EXEMPT: dict[str, str] = {
     "apply": "a known gap, next to `pipe`: `def apply` and its `infixr` line (for `<|`) "
              "are not in the embedded copy; lib/ files that use `<|` are libdiff gaps",
     "outParam": "class plumbing (`outParam A` in a class declaration); the "
-                "embedded prelude has no classes",
+                "embedded prelude's only class is the homogeneous `Append`",
 }
 
 #: The namespaces of the host prelude's metaprogramming layer: the declarations after
@@ -261,10 +262,20 @@ def parse_wiz(text: str, where: str) -> Surface:
         if not line or line[0].isspace():
             i += 1
             continue
-        if re.match(r"^(namespace|section)\b", line):
+        if re.match(r"^namespace\b", line):
+            # `namespace __root__` is the explicit-global wrapper (its body is the
+            # root namespace, so the declarations stay unprefixed); another namespace
+            # would prefix them and the scanner does not model that.
+            ns = line.split(maxsplit=1)[1].strip() if len(line.split()) > 1 else ""
+            if ns != "__root__":
+                raise CheckError(
+                    f"{where}:{i + 1}: `namespace {ns}` is not handled by this checker "
+                    "(only `namespace __root__`, whose body is global)")
+            i += 1
+            continue
+        if re.match(r"^section\b", line):
             raise CheckError(
-                f"{where}:{i + 1}: `{line.split()[0]}` blocks are not handled by this "
-                "checker; teach scripts/check-prelude-drift.py about them")
+                f"{where}:{i + 1}: `section` blocks are not handled by this checker")
         if line in ("mutual", "end"):
             # A `mutual` block's declarations are top-level and at column 0; `end`
             # closes it. Both are transparent for the surface.

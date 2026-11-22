@@ -302,7 +302,8 @@ A browser can't open a Unix socket, so `wiz lsp --ws PORT` also listens on a Web
 `--no-stdio` there is no editor on stdin). `Wiz/WebSocket.lean` is the protocol: the
 HTTP upgrade (the answer proves the server understood it: base64 of the SHA-1 of the
 client's key and a fixed GUID, both written here), an `Origin` check (any web page may
-open a WebSocket to `127.0.0.1`, so only local pages are let in), and frames (a length
+open a WebSocket to `127.0.0.1`, so only local pages are let in; an opaque `null` origin
+— what a sandboxed iframe or a `data:`/`file:` page sends — is refused), and frames (a length
 in 7, 16 or 64 bits; the client's payload XORed with a mask; fragments; ping and close).
 One JSON-RPC message travels per text frame. A WebSocket client is an infoview (it is
 told where the cursor is and pulls goals) and may also edit documents of its own, so the

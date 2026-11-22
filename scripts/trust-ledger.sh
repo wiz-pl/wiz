@@ -21,6 +21,10 @@
 #                                       regenerate the ledger and add the new rows
 #                                       (an explicit --review also renews migration rows)
 #
+# Scry is a package (`scry/`), not part of lib/ (separate-repos.md P0.1): its modules
+# and rule packs moved to `scry/src/Scry/` and `scry/rules/`, and its rows left this
+# ledger with them. Add a scry trust check when the package gets its own CI.
+#
 # `--cache DIR` is the elaboration cache the walk writes and `--cache-ro DIR` (repeatable)
 # a read-only layer it searches, in the order given (the same flags as `wiz`). The walk
 # elaborates every module of `lib/`, so a warm cache replays an unchanged module instead of

@@ -8,7 +8,7 @@ import Hdl.Core
 
 -- A small, deterministic benchmark of the standard library's hot data structures:
 -- `StrMap`, `Array`, `Bytes`, `String` (a `List Char`), the ordered read-back of
--- `U64Map` (`toList` sorts), and `NatList.hash` (lib/Hdl/Core.wiz).
+-- `U64Map` (`toList` sorts), and `NatList.hash` (hdl/src/Hdl/Core.wiz).
 --
 --   wiz build bench/stdlib-bench.wiz -o stdlib-bench
 --   ./stdlib-bench MODE N
@@ -31,6 +31,8 @@ import Hdl.Core
 --   bytes-append  (2000000) append a 16-byte chunk N times
 --   bytes-slice   (2000000) slice 64 bytes out of an 8 KiB buffer N times
 --   bytes-compare (2000000) compare two equal 4 KiB buffers N times
+--   str-append    (10000)   append a 100-byte chunk N times (the `Str.append` builder)
+--   str-push      (200000)  push one byte N times (the `Str.push` builder)
 --   text-split    (40000)   split an N-chunk string on ","
 --   text-replace  (40000)   replace every "," with "Z" in an N-chunk string
 --   text-trim     (40000)   trim an N-chunk string padded with spaces
@@ -200,6 +202,40 @@ def bytesCompareGo (a b : Bytes) : Nat → Nat → Nat
 
 def runBytesCompare (n : Nat) : Nat := bytesCompareGo (Bytes.range 4096) (Bytes.range 4096) n 0
 
+-- ## Str (the native text builder)
+
+-- The builder is the loop `s := Str.append s piece`: the accumulator is the only
+-- reference to the receiver, so the runtime grows that buffer in place (geometric
+-- capacity) instead of copying it. The chunk is 100 bytes, so the default 10,000
+-- appends build 1,000,000 bytes, the measurement in the runtime change's commit.
+-- `Str.push` is the same argument one byte at a time.
+def strChunk : Str :=
+  Str.ofString "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+
+def strAppendGo (piece : Str) : Nat → Str → Str
+  | .zero, s => s
+  | .succ k, s => strAppendGo piece k (Str.append s piece)
+
+def strSample (s : Str) (n : Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.mod (k * 7919) n;
+    strSample s n k (digest acc (Str.byte s i))
+
+def runStrAppend (n : Nat) : Nat :=
+  let s := strAppendGo strChunk n Str.empty;
+  let ω sz := Str.size s;
+  digest sz (strSample s sz 1000 0)
+
+def strPushGo : Nat → Nat → Str → Str
+  | .zero, _, s => s
+  | .succ k, i, s => strPushGo k (Nat.mod (i * 7919 + 1) 2147483648) (Str.push s (Nat.mod i 256))
+
+def runStrPush (n : Nat) : Nat :=
+  let s := strPushGo n n Str.empty;
+  let ω sz := Str.size s;
+  digest sz (strSample s sz 1000 0)
+
 -- ## String (a `List Char`)
 
 def chunk : String := "abcdefghij"
@@ -350,7 +386,7 @@ def runEgraph (n : Nat) : Nat :=
 -- ## driver
 
 def run (mode : String) (n : Nat) : Nat :=
-  if String.eq mode "strmap-insert" then runStrMapInsert n else if String.eq mode "strmap-find" then runStrMapFind n else if String.eq mode "strmap-miss" then runStrMapMiss n else if String.eq mode "strmap-iterate" then runStrMapIterate n else if String.eq mode "array-push" then runArrayPush n else if String.eq mode "array-index" then runArrayIndex n else if String.eq mode "array-map" then runArrayMap n else if String.eq mode "array-fold" then runArrayFold n else if String.eq mode "bytes-append" then runBytesAppend n else if String.eq mode "bytes-slice" then runBytesSlice n else if String.eq mode "bytes-compare" then runBytesCompare n else if String.eq mode "text-split" then runTextSplit n else if String.eq mode "text-replace" then runTextReplace n else if String.eq mode "text-trim" then runTextTrim n else if String.eq mode "text-eq" then runTextEq n else if String.eq mode "text-suffix" then runTextSuffix n else if String.eq mode "sort" then runSort n else if String.eq mode "hash" then runHash n else if String.eq mode "list-index" then runListIndex n else if String.eq mode "egraph" then runEgraph n else 0
+  if String.eq mode "strmap-insert" then runStrMapInsert n else if String.eq mode "strmap-find" then runStrMapFind n else if String.eq mode "strmap-miss" then runStrMapMiss n else if String.eq mode "strmap-iterate" then runStrMapIterate n else if String.eq mode "array-push" then runArrayPush n else if String.eq mode "array-index" then runArrayIndex n else if String.eq mode "array-map" then runArrayMap n else if String.eq mode "array-fold" then runArrayFold n else if String.eq mode "bytes-append" then runBytesAppend n else if String.eq mode "bytes-slice" then runBytesSlice n else if String.eq mode "bytes-compare" then runBytesCompare n else if String.eq mode "str-append" then runStrAppend n else if String.eq mode "str-push" then runStrPush n else if String.eq mode "text-split" then runTextSplit n else if String.eq mode "text-replace" then runTextReplace n else if String.eq mode "text-trim" then runTextTrim n else if String.eq mode "text-eq" then runTextEq n else if String.eq mode "text-suffix" then runTextSuffix n else if String.eq mode "sort" then runSort n else if String.eq mode "hash" then runHash n else if String.eq mode "list-index" then runListIndex n else if String.eq mode "egraph" then runEgraph n else 0
 
 def argN : List String → Nat
   | .cons _ (.cons s _) => match String.parseNat s with
@@ -362,10 +398,10 @@ def argMode : List String → String
   | .nil => "all"
 
 def defaultN (mode : String) : Nat :=
-  if String.eq mode "strmap-insert" then 200000 else if String.eq mode "strmap-find" then 200000 else if String.eq mode "strmap-miss" then 200000 else if String.eq mode "strmap-iterate" then 200000 else if String.eq mode "array-push" then 2000000 else if String.eq mode "array-index" then 500000 else if String.eq mode "array-map" then 1000000 else if String.eq mode "array-fold" then 1000000 else if String.eq mode "bytes-append" then 2000000 else if String.eq mode "bytes-slice" then 2000000 else if String.eq mode "bytes-compare" then 2000000 else if String.eq mode "text-split" then 40000 else if String.eq mode "text-replace" then 40000 else if String.eq mode "text-trim" then 40000 else if String.eq mode "text-eq" then 40000 else if String.eq mode "text-suffix" then 40000 else if String.eq mode "sort" then 100000 else if String.eq mode "hash" then 300000 else if String.eq mode "list-index" then 4000 else if String.eq mode "egraph" then 3000 else 1000
+  if String.eq mode "strmap-insert" then 200000 else if String.eq mode "strmap-find" then 200000 else if String.eq mode "strmap-miss" then 200000 else if String.eq mode "strmap-iterate" then 200000 else if String.eq mode "array-push" then 2000000 else if String.eq mode "array-index" then 500000 else if String.eq mode "array-map" then 1000000 else if String.eq mode "array-fold" then 1000000 else if String.eq mode "bytes-append" then 2000000 else if String.eq mode "bytes-slice" then 2000000 else if String.eq mode "bytes-compare" then 2000000 else if String.eq mode "str-append" then 10000 else if String.eq mode "str-push" then 200000 else if String.eq mode "text-split" then 40000 else if String.eq mode "text-replace" then 40000 else if String.eq mode "text-trim" then 40000 else if String.eq mode "text-eq" then 40000 else if String.eq mode "text-suffix" then 40000 else if String.eq mode "sort" then 100000 else if String.eq mode "hash" then 300000 else if String.eq mode "list-index" then 4000 else if String.eq mode "egraph" then 3000 else 1000
 
 def modes : List String :=
-  .cons "strmap-insert" (.cons "strmap-find" (.cons "strmap-miss" (.cons "strmap-iterate" (.cons "array-push" (.cons "array-index" (.cons "array-map" (.cons "array-fold" (.cons "bytes-append" (.cons "bytes-slice" (.cons "bytes-compare" (.cons "text-split" (.cons "text-replace" (.cons "text-trim" (.cons "text-eq" (.cons "text-suffix" (.cons "sort" (.cons "hash" (.cons "list-index" (.cons "egraph" .nil)))))))))))))))))))
+  .cons "strmap-insert" (.cons "strmap-find" (.cons "strmap-miss" (.cons "strmap-iterate" (.cons "array-push" (.cons "array-index" (.cons "array-map" (.cons "array-fold" (.cons "bytes-append" (.cons "bytes-slice" (.cons "bytes-compare" (.cons "str-append" (.cons "str-push" (.cons "text-split" (.cons "text-replace" (.cons "text-trim" (.cons "text-eq" (.cons "text-suffix" (.cons "sort" (.cons "hash" (.cons "list-index" (.cons "egraph" .nil)))))))))))))))))))))
 
 def printModes : List String → IO Unit
   | .nil => IO.pure ()

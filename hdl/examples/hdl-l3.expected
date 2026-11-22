@@ -1,0 +1,10 @@
+examples/hdl-l3.wiz:43:1: info: .cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))
+examples/hdl-l3.wiz:45:1: info: .cons (0, 1) (.cons (0, 1) .nil)
+examples/hdl-l3.wiz:48:1: info: .cons (2, 0) (.cons (2, 0) .nil)
+examples/hdl-l3.wiz:56:1: info: [251, 251, 251, 251, 251]
+examples/hdl-l3.wiz:57:1: info: [7, 7, 7]
+examples/hdl-l3.wiz:64:1: info: [5, 5, 5]
+examples/hdl-l3.wiz:68:1: info: [3, 3, 3]
+examples/hdl-l3.wiz:77:1: info: [251, 251, 251]
+examples/hdl-l3.wiz:84:1: info: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+examples/hdl-l3.wiz:99:1: info: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0]

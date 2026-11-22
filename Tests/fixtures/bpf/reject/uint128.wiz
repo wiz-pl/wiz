@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: a word wider than a register.
+import Bpf
+
+def bad (x : UIntN 128) : UIntN 128 := UIntN.add x x

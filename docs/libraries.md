@@ -142,7 +142,7 @@ equation (the `Digits`/`Node` of the textbook `FingerTree (V := …) A`). The de
 
 ## H14 S0: hardware as tagless-final code, with sharing
 
-`lib/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
+`hdl/src/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational
 logic is code polymorphic in its representation, `{r : HwTy → Type} → [Hw r] → r a → r b`,
 over hardware type codes `HwTy` (`bits n`, `prod a b`). `Hw` has the operations (`lit`,
 `add`, `sub`, `mul`, `and`, `or`, `xor`, `not`, `eq`, `ult`, `mux`, `cat`, `slice`, `pair`,
@@ -152,7 +152,7 @@ builder). A `Circuit i o` is a Mealy machine whose step is such code: `Circuit.r
 simulates it on values, `Circuit.netlist` builds its netlist, `Netlist.simulate` runs the
 netlist, and `Verilog.emit` prints Verilog-2005. The module declares its registers (with sized initial
 values), then one wire per node, then the register updates, so every name is declared
-before its use (Icarus Verilog insists; the `hdl` test group runs it when it is installed). `examples/hdl.wiz` has a counter, a
+before its use (Icarus Verilog insists; the `hdl` test group runs it when it is installed). `hdl/examples/hdl.wiz` has a counter, a
 saturating counter, a popcount, a 4-tap sum and a doubling chain.
 
 Sharing has two parts:
@@ -170,8 +170,8 @@ Sharing has two parts:
 
 Driven by a real design (a UART on a Lattice iCEstick, written in this library and run on
 the board; its findings G1–G10 are the requirements). Design notes:
-`wiz-notes/hdl-usability.md`. Everything is in `lib/Hdl/Core.wiz`; examples and
-tests in `examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
+`wiz-notes/hdl-usability.md`. Everything is in `hdl/src/Hdl/Core.wiz`; examples and
+tests in `hdl/examples/hdl-compose.wiz` (group `hdl`) and in the `scaling` group.
 
 ```wiz no-check
 structure Tx (r : HwTy → Type) where      -- a bundle: a structure of signals
@@ -243,7 +243,7 @@ binders (an elaborator hook, wishful `hdl-let-names`), asynchronous reset, sever
 Signals are written with operators: `c + 1`, `x &&& ~~~y`, `s.left === 0`,
 `if go then 10 else if tick then s.left - 1 else s.left`, instead of
 `Hw.add c (Hw.lit 7 1)` …, `Hw.mux go (Hw.lit 4 10) (Hw.mux tick …)`.
-`examples/hdl-operators.wiz` shows each design both ways.
+`hdl/examples/hdl-operators.wiz` shows each design both ways.
 
 | notation (at `r (HwTy.bits n)`, `[Hw r]`) | meaning | precedence |
 |---|---|---|
@@ -278,7 +278,7 @@ Signals are written with operators: `c + 1`, `x &&& ~~~y`, `s.left === 0`,
   expression is `Hw.ofNat e` (`c === Hw.ofNat (n - 1)`), whose width comes from the type.
 * **Same circuits.** The instances are the `Hw` operations, so a circuit written with the
   operators has the netlist and the Verilog of the one written with `Hw.add` …, byte for
-  byte (`examples/hdl-operators.wiz`; also the iCEstick UART's `txStep` and `rxStep`
+  byte (`hdl/examples/hdl-operators.wiz`; also the iCEstick UART's `txStep` and `rxStep`
   rewritten). Associativity matters for that: `a &&& b &&& c` is `(a &&& b) &&& c`, a
   different (equivalent) netlist from `Hw.and a (Hw.and b c)`.
 * **Printing.** The operators print back as written (11r): `fun x y => if x === y then
@@ -292,8 +292,8 @@ shift and `&&`/`||` on signals: H14 S4.)
 ## H14 T: temporal properties of circuits (prototype)
 
 Stating and proving properties of circuits over unbounded time, after TLA+, LTL and
-SVA. `lib/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Trace.wiz`);
-examples and tests in `examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
+SVA. `hdl/src/Hdl/Temporal.wiz`, on the traces and Mealy machines of H14 C1 (`lib/Trace.wiz`);
+examples and tests in `hdl/examples/hdl-temporal.wiz` (group `hdl`). Survey and design:
 `wiz-notes/hdl-temporal.md`.
 
 ```wiz no-check
@@ -345,7 +345,7 @@ Bool-level specification for every input trace (eight cases of the control bits,
 variables), keeps an offered item stable (AXI), and hands on every accepted item if the
 consumer is ready infinitely often.
 
-The iCEstick UART (`examples/hdl-uart-temporal.wiz`, group `hdl-uart-temporal` in a
+The iCEstick UART (`hdl/examples/hdl-uart-temporal.wiz`, group `hdl-uart-temporal` in a
 heavy shard, about three minutes) is the same method on a real design: the transmitter
 is idle-high and frames every accepted byte for 40 cycles, the receiver reports a
 well-formed frame (and nothing on a bad stop bit or a short glitch), and the loopback
@@ -360,14 +360,14 @@ the sealed type; wishful `uintn-range-proof`), a tactic for the Bool case splits
 
 The first use of H14 T on a real design: the UART of wiz-icestick-uart
 (`src/Icestick/Uart.wiz`: transmitter, two-flip-flop synchroniser, receiver), copied
-unchanged into `examples/hdl-uart-temporal.wiz` (group `hdl-uart-temporal`, a heavy
+unchanged into `hdl/examples/hdl-uart-temporal.wiz` (group `hdl-uart-temporal`, a heavy
 shard: about three minutes cold), with 4 clock cycles per bit. Everything is
 kernel-checked, for **every input trace** and **every byte** (a byte is 8 Booleans,
 `Bits8`; `byte d : BitVec 8` is the word), with no `sat_decide`, no `native_refl` and no
 bit lemmas beyond four lemmas about the shift registers. The generated table proofs are
 at statement level (they build each equation through a propositional motive rather than
 unfolding the `transp`/cast spines), so the file checks in ~171 s cold instead of >700 s
-(`scripts/gen-uart-temporal.py` regenerates it).
+(`hdl/scripts/gen-uart-temporal.py` regenerates it).
 
 | claim | statement |
 |---|---|
@@ -389,7 +389,7 @@ its *decision form* `Tx.G`/`Rx.G` (the same gates on plain tuples, with the comp
 lemma for all 128 idle counter values of the receiver) are evaluations of the decision
 form with the data as variables, plus four word lemmas (`Uart.shift_reg9`,
 `Uart.bit0_reg9`, `Uart.frame_byte`, `Uart.shift8_byte`, each 2^9 Boolean evaluations
-via `Bool.forall9`). The cases are generated by `scripts/gen-uart-temporal.py`. (3)
+via `Bool.forall9`). The cases are generated by `hdl/scripts/gen-uart-temporal.py`. (3)
 `Mealy.simulatesInv` gives the circuit's run as the image of the specification's, for
 ever; `Mealy.seq_outAt` and the synchroniser's refinement give the loopback's. (4) The
 properties are proved on the specifications: `Mealy.follows` (a run along a known path:
@@ -444,7 +444,7 @@ counter (the counter lemmas `Rx.incs` are already per value).
   `Loop.firstByte`); "nothing is reported that was not sent" (needs reasoning backwards
   from a report).
 
-## H14 T3: formal harness emission (`lib/Hdl/Formal.wiz`)
+## H14 T3: formal harness emission (`hdl/src/Hdl/Formal.wiz`)
 
 `Verilog.emitFormal` emits the same module as `Verilog.emit` plus an
 `` `ifdef FORMAL `` harness: the properties declared with the monitor language become
@@ -480,7 +480,7 @@ IO.writeFile "queue.sby" (Formal.sby "queue.v" "queue" "bmc" 8)
   history is gated until the counter reaches `n`, so the unconstrained value of a
   `$past` before cycle 0 is never mistaken for a failure. A circuit built with
   `Circuit.withReset` (`rst` in the input type) also gets `initial assume (rst);`.
-* **End to end** (`examples/hdl-formal.wiz`, group `hdl`): a one-entry valid/ready
+* **End to end** (`hdl/examples/hdl-formal.wiz`, group `hdl`): a one-entry valid/ready
   buffer and a deliberately wrong variant share five monitors. `yosys-smtbmc` passes the
   correct RTL and finds a two-or-three-cycle counterexample for the variant (the
   stability monitor fails; the other four still pass). The test group runs the same
@@ -532,17 +532,17 @@ In the netlist a memory is a `NetMem` (name, widths, initial contents, its write
 order) read by `memRead k` nodes; the simulator keeps its contents in a trie. Verilog: an
 array with an `initial` block, reads `m[addr]`, the writes in one `always` block (a later
 write wins). yosys maps a memory whose read data (or address) goes through a register to
-iCE40 block RAM (`SB_RAM40_4K`): `examples/hdl-mem.wiz` (a 16×8 RAM with a registered read,
+iCE40 block RAM (`SB_RAM40_4K`): `hdl/examples/hdl-mem.wiz` (a 16×8 RAM with a registered read,
 a ROM; checked by Icarus and yosys in group `hdl` when they are on PATH). Small ROMs
 become LUTs, a 256-word one block RAM. For Xilinx 7-series (`synth_xilinx`) the same RAMs
 become RAMB18E1 or RAMB36E1 and `Hw.mul` a DSP48E1; a ROM of 4 Kbit or more is declared
 `(* rom_style = "block" *)`, without which synth_xilinx builds it of LUTs
-(`examples/hdl-arty.wiz`, below). What the netlist cannot express is listed in
+(`hdl/examples/hdl-arty.wiz`, below). What the netlist cannot express is listed in
 `Netlist.errors` and printed as `// error:` lines: a choice between two different
 memories, a memory in a port, a state memory replaced instead of written.
-## H14 C5: a reusable memory interface (`lib/Hdl/Mem.wiz`)
+## H14 C5: a reusable memory interface (`hdl/src/Hdl/Mem.wiz`)
 
-`lib/Hdl/Mem.wiz` (`import Hdl.Mem`) collects the memory facts a proof or a RAM model
+`hdl/src/Hdl/Mem.wiz` (`import Hdl.Mem`) collects the memory facts a proof or a RAM model
 keeps needing. It is a thin layer over `HwTy.mem` (`H14 C3`), not a second memory model:
 a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.memRead` and
 `Hw.memWrite`.
@@ -572,12 +572,12 @@ a word memory is still `BitVec aw → BitVec dw`, and the operations are `Hw.mem
   `Mem.ramWC1`/`Mem.ramWC2` take byte strobes and do the read-modify-write of
   `Bus.ramWC`; `Mem.ram1_write_read` is the one-cycle RAM's read-after-write law.
 
-Example: `examples/hdl-mem-laws.wiz` (test group `hdl`) exhaustively checks the mask and
+Example: `hdl/examples/hdl-mem-laws.wiz` (test group `hdl`) exhaustively checks the mask and
 the byte-enable value against an independent byte-memory model, replays every strobe
 through both RAMs, and checks value simulation = netlist simulation over a deterministic
 stream for the plain and byte-enabled variants.
 
-## H14 C2: lenses for structures and bundles (`lib/OpticDerive.wiz`, `lib/Hdl/Optic.wiz`)
+## H14 C2: lenses for structures and bundles (`lib/OpticDerive.wiz`, `hdl/src/Hdl/Optic.wiz`)
 
 `deriving Lens` gives every field of a structure a lens (lib/Optic.wiz's `Lens S A`), its
 laws and the independence of every two distinct fields, all by `rfl`:
@@ -590,7 +590,7 @@ and wires in synthesis. `Hdl.zoom l g` runs a sub-step `g` on the place `l` of a
 (`Hdl.zoom_get`), and `Hdl.zoom_frame` is the frame rule: a place independent of `l` is
 unchanged, for every state (no evaluation needed). `Bundle.lens b` (with
 `Bundle.Lawful b`, `rfl` for derived bundles) and `HwTy.fstL`/`sndL` are the packed
-views at values. Example: `examples/hdl-optic.wiz` (group `hdl`).
+views at values. Example: `hdl/examples/hdl-optic.wiz` (group `hdl`).
 
 A profunctor-style optic quantifies over a type constructor (`p : Type → Type → Type`) and
 its class dictionaries, so by the kernel's predicative Π rule — `(x : A) → B` has sort
@@ -599,7 +599,7 @@ its class dictionaries, so by the kernel's predicative Π rule — `(x : A) → 
 universe rather than lowering it. A `Type 0` container of such optics is therefore
 impossible, while the store lens `Lens S A = S → Store A S` is `Type` and stays that way.
 If a `Type 0` optic is ever needed as data, the fix is a record of `get`/`over`
-(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`lib/Scry/Optics.wiz:89-93`), not a
+(`RecLens : Type → Type → Type`), as in `Scry.Lens` (`scry/src/Scry/Optics.wiz:89-93`), not a
 universe change.
 
 ### Profunctor optics (default) and the store encoding
@@ -638,7 +638,7 @@ operation. Profiled on the iCEstick OLED demo (`oled_fast`, 1068 netlist nodes, 
 table trees (`RomT.go`, `List.take`) are rebuilt in every cycle. `Netlist.simulate` is no
 faster (an allocation per node in its random-access list).
 
-`lib/Hdl/Sim.wiz` runs the netlist instead: synthesis is the partial evaluation (all the
+`hdl/src/Hdl/Sim.wiz` runs the netlist instead: synthesis is the partial evaluation (all the
 meta-level work is done once, and the netlist is hash-consed), and the netlist is turned
 once into a flat program (a constructor per node with exactly its operands, constants
 written once, input ports and register outputs as slots) that runs over native arrays
@@ -658,8 +658,8 @@ in the same cycle sees the old contents; the netlist's bypass nodes give the new
   group and a design's own check, such as `oled gen`'s, establish).
 * Compiled code only: `Array` has no definition the kernel or `#eval` could run.
 * About 25× the value simulation on `oled_fast` (about 35000 cycles/s) and 13× on
-  `examples/hdl-sim-bench.wiz` (informal numbers; `bench/hdl-sim` in wiz-tools times it).
-  `examples/hdl-sim.wiz` (the `hdl` group) checks `simFast` against `Netlist.simulate`
+  `hdl/examples/hdl-sim-bench.wiz` (informal numbers; `bench/hdl-sim` in wiz-tools times it).
+  `hdl/examples/hdl-sim.wiz` (the `hdl` group) checks `simFast` against `Netlist.simulate`
   (hash-consed and naive netlists) and `Circuit.run` on every operation, 70-bit widths,
   reset and enable, a table tree and composition, and the fallback.
 
@@ -667,9 +667,9 @@ Not done: skipping nodes whose arguments did not change (event-driven simulation
 generated C for a netlist, a value simulation that keeps its meta-level work (caching
 closed top-level definitions in compiled code would remove the table rebuilding).
 
-### When `Netlist.simulate` is `Circuit.run` (`lib/Hdl/Netlist.wiz`)
+### When `Netlist.simulate` is `Circuit.run` (`hdl/src/Hdl/Netlist.wiz`)
 
-`lib/Hdl/Netlist.wiz` (`import Hdl.Netlist`) proves the scoped simulation theorem
+`hdl/src/Hdl/Netlist.wiz` (`import Hdl.Netlist`) proves the scoped simulation theorem
 (HW-05's `Netlist.simulate = Circuit.run`). The two simulations are different programs —
 one runs the Mealy step at `HwTy.El` values, the other the synthesised nodes — so their
 agreement is a theorem. `Circuit.Simulates c n` is the smallest relation that says so,
@@ -695,7 +695,7 @@ for the infinite `Circuit.trace`: every finite prefix of the value trace is what
 netlist simulates.
 
 **The obligations are discharged for a synthesised design.**
-`examples/hdl-sim-theorem.wiz` builds a one-bit delay with `Circuit.netlist "delay"`,
+`hdl/examples/hdl-sim-theorem.wiz` builds a one-bit delay with `Circuit.netlist "delay"`,
 proves `Circuit.Simulates` for it by `rfl` (the kernel evaluates the netlist's nodes),
 and applies the theorem to a four-cycle trace. That is a proof about the actual
 `Circuit.netlist` output, not a hand-written netlist; the test case in the `hdl` group
@@ -708,18 +708,18 @@ asynchronous-reset crossing cells (a synchronous reset is part of the step, but 
 assertion/deassertion is not modelled); primitives without a behavioural `model`
 (`NetPrim.eval` falls back to a default); and `Netlist.simFast` (it computes
 `Netlist.simulate` for a `Netlist.wellFormed` netlist and falls back otherwise; that is
-the executable differential check in `examples/hdl-sim.wiz`, since `Hdl.Sim` uses
+the executable differential check in `hdl/examples/hdl-sim.wiz`, since `Hdl.Sim` uses
 `Array`, which the kernel does not reduce). The existing differential tests
-(`examples/hdl-sim.wiz`, `examples/hdl-bus.wiz`, `examples/hdl-crc.wiz`) remain the
+(`hdl/examples/hdl-sim.wiz`, `hdl/examples/hdl-bus.wiz`, `hdl/examples/hdl-crc.wiz`) remain the
 broader, executable check over operations, memories and `simFast`; primitives are
-checked separately in `examples/hdl-prim.wiz`.
+checked separately in `hdl/examples/hdl-prim.wiz`.
 
 ## H14 S4: the iCEstick gaps: shifts by a signal, signed operations, `&&`/`||`, BitPack, reset and enable
 
 What the iCEstick projects (`wiz-icestick-uart`, FINDINGS.md) still had to
-work around after S1 and S2. Everything is in `lib/Hdl/Core.wiz`; the examples and tests
-are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
-`iverilog` is installed) and a shifter in `examples/hdl-sim.wiz` (S3's fast simulation).
+work around after S1 and S2. Everything is in `hdl/src/Hdl/Core.wiz`; the examples and tests
+are `hdl/examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
+`iverilog` is installed) and a shifter in `hdl/examples/hdl-sim.wiz` (S3's fast simulation).
 
 | notation (at `r (HwTy.bits n)`) | meaning | Verilog |
 |---|---|---|
@@ -734,7 +734,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   memories, H14 C3). The values (`HwTy.El`), the netlist simulation and `Hdl.Sim` all
   compute them with one set of functions on numbers (`Hdl.shlN`, `lshrN`, `ashrN`,
   `sltN`), and an amount of `n` or more gives 0 (or all sign bits) without computing
-  `2^s`. `examples/hdl-gaps.wiz` checks the values against lib/BitVec.wiz's own
+  `2^s`. `hdl/examples/hdl-gaps.wiz` checks the values against lib/BitVec.wiz's own
   `BitVec.shl`/`lshr`/`ashr`/`slt`/`sle` (every 8-bit value and amount), and the
   Verilog with a test bench that replays the value simulation in Icarus Verilog.
 * **The shift notation takes any amount type.** `<<<` and `>>>` are now the prelude's
@@ -771,7 +771,7 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   ```
   The lowering is exactly the `if` chain on `T.lit` (the same comparators, in the same
   order, with the same right-nested mux association), so the netlist and its node count
-  are identical (`examples/hdl-match.wiz` checks both, and that the Verilog text is
+  are identical (`hdl/examples/hdl-match.wiz` checks both, and that the Verilog text is
   byte-identical). Exhaustiveness is checked as the ordinary matcher checks it: a missing
   constructor on a multi-constructor signal is a spanned error, not a silent
   fall-through. Not covered: a constructor pattern that binds fields (a wire has no
@@ -797,6 +797,20 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   `deriving BitPack`). The bit-level round trip `S.ofBits (S.toBits s) = s` holds by `rfl`
   for closed values (the example checks one, and all 32 values of a 5-bit bundle); a
   general lemma needs words' range proofs (stage 22l) and lemmas on `concat`/`slice`.
+  For an **inductive with fields** (no parameters) or a **plain structure** it adds
+  `T.tagWidth` (`⌈log₂ #constructors⌉`; 0 for a single constructor or a structure),
+  `T.payloadWidth` (the widest constructor's field widths), `T.width`
+  (`tagWidth + payloadWidth`), `T.code = HwTy.bits T.width`, `T.pack`/`T.unpack` (the tag
+  in the high bits, then the fields, the first highest, zero-padded to the widest
+  constructor; a structure has no tag), `T.toNat`, `T.lit` and `T.bitPack`. A field is
+  `BitVec n`, `Bool`, or a type with its own derived `width`/`pack`/`unpack`. The round
+  trip `T.unpack (T.pack x) = x` holds by `rfl` on closed values (samples; the general
+  lemma is the same value-level one as a bundle's). A recursive, implicit or proof field,
+  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  constructor payload wider than the declared payload width. A representation-
+  parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
+  through `Hw.packBits`/`Hw.unpackBits`). `hdl/examples/hdl-bitpack.wiz` checks the UART's
+  `TxState` and the CPU's `Instr` shapes.
 * **Reset and enable: the convention.** A design with a reset or a clock enable takes
   them as its first inputs, named `rst` and `en`, reset first: both synchronous and
   active high, and the reset wins over the enable, as
@@ -818,15 +832,14 @@ are `examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches when
   non-zero initial value into inverters around a flip-flop); a reset is for targets
   without initial values and for restarting a design.
 
-Not done: a general bit-level round-trip lemma for bundles (above), `BitPack` for
-inductive types with fields (a tag and the widest constructor's fields), `!` on signals,
-`match` on a signal with field-binding or literal (`Nat` on `bits n`) patterns (see the
-`match` bullet above; `match` on an enumeration signal itself is done), asynchronous
-reset.
+Not done: a general bit-level round-trip lemma for bundles and for inductives with fields
+(above; both hold on closed values), `!` on signals, `match` on a signal with
+field-binding or literal (`Nat` on `bits n`) patterns (see the `match` bullet above;
+`match` on an enumeration signal itself is done), asynchronous reset.
 
 ## Xilinx 7-series pin constraints and the Arty A7 (`Hdl.Xdc`, `Hdl.Arty`)
 
-`lib/Hdl/Xdc.wiz` (`import Hdl.Xdc`) is `Pcf` for Xilinx: an `XBoard` is the clock's
+`hdl/src/Hdl/Xdc.wiz` (`import Hdl.Xdc`) is `Pcf` for Xilinx: an `XBoard` is the clock's
 package pin and period (picoseconds), an I/O standard and a table of resources (`XPin.one
 port pin`, `XPin.bus port pins`, bit 0 first; `XPin.rename`, `XPin.take k`).
 `Xdc.emit n board` writes the XDC (`set_property -dict { PACKAGE_PIN … IOSTANDARD … }`
@@ -834,12 +847,12 @@ per port bit, `create_clock` for `clk`) that Vivado and nextpnr-xilinx read; por
 looked up by name, so the table can list the whole board. `Xdc.check n board` lists the
 ports without a resource and those of another width.
 
-`lib/Hdl/Arty.wiz` (`import Hdl.Arty`) is the Digilent Arty A7 (Artix-7, CSG324): its pins
+`hdl/src/Hdl/Arty.wiz` (`import Hdl.Arty`) is the Digilent Arty A7 (Artix-7, CSG324): its pins
 from Digilent's master XDC (`clk` E3 at 100 MHz, `led` 4, `rgb` 12, `btn` 4, `sw` 4,
 `uart_rx` A9 and `uart_tx` D10 (FT2232 channel B), `ck_rst`, the Pmod headers `ja` … `jd`
 8 each; all LVCMOS33) as `Arty.board`, and its two devices, `Arty.Device.a35t`
 (xc7a35ticsg324-1L, the default) and `.a100t` (xc7a100tcsg324-1), with the part names
-Project X-Ray and nextpnr use. `examples/hdl-arty.wiz` (group `hdl`) checks the XDC and
+Project X-Ray and nextpnr use. `hdl/examples/hdl-arty.wiz` (group `hdl`) checks the XDC and
 that synth_xilinx maps its RAMs, ROM and multiply to RAMB18E1, RAMB36E1 and DSP48E1. The
 flow from there to a bitstream (yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit; the
 openXC7 toolchain from Nix) is a separate package, wiz-arty, as wiz-icestick-uart is for
@@ -856,7 +869,7 @@ iCEstick's 12 MHz / 104 = 115384.6 baud equals the FT2232's rate exactly, which 
 it never showed there. Compute the divider from the host's real rate and round it down
 (wiz-arty's `Ftdi.divisor` and `clocksPerBit`: 866 at 100 MHz).
 
-## H14 S5: pipelines as arrows (`lib/Hdl/Pipe.wiz`)
+## H14 S5: pipelines as arrows (`hdl/src/Hdl/Pipe.wiz`)
 
 An *arrow* for pipelines over `Circuit`: a `Pipe i o` is a circuit plus its latency in
 cycles, and the combinators compose circuits and add (or max) the latencies. The module
@@ -913,7 +926,7 @@ cycle it hands one on, and `Flow.source` is a free-running counter source for te
 `Flow.toCircuit` lowers a flow to an ordinary `Circuit` over the bundles `FlowIn`
 (`in_data`, `in_valid`, `out_ready`) and `FlowOut` (`out_data`, `out_valid`, `in_ready`).
 
-`examples/hdl-pipe.wiz` is the 3-stage ALU plus a 3-stage flow: latency 3 in both,
+`hdl/examples/hdl-pipe.wiz` is the 3-stage ALU plus a 3-stage flow: latency 3 in both,
 throughput one item per cycle with ready high (valid delayed by 3), data held while ready
 is low, and transfer order preserved under backpressure (7 transfers, no loss or
 duplication in a 12-cycle trace with a 3-cycle stall); reset clears the elastic
@@ -982,7 +995,7 @@ express (a merged event schedule is not implemented).
 `Hdl.Xilinx7` (`X7.*`) declares the 7-series cells of a DDR3 PHY: OBUF, IBUF, IOBUF,
 OBUFDS, IOBUFDS, BUFG (with models), ODDR, OSERDESE2 (8:1 DDR with tristate),
 ISERDESE2 (NETWORKING 8:1 DDR, from an IDELAYE2), IDELAYE2 (VAR_LOAD, 200 MHz reference),
-IDELAYCTRL, and PLLE2_BASE as a `Clocking`. Tests (group `hdl`, examples/hdl-prim.wiz):
+IDELAYCTRL, and PLLE2_BASE as a `Clocking`. Tests (group `hdl`, hdl/examples/hdl-prim.wiz):
 the Verilog, refusal, buffer models and kind errors, and yosys synth_xilinx keeping every
 cell.
 
@@ -1010,14 +1023,14 @@ first falls back to the board's period) and a package pin for a second clock the
 table names; `Xdc.check` also compares the first domain's period with the board's and
 asks every later domain for a period (`Netlist.clockProblems`). `Pcf.emit` writes a
 `set_frequency` for each domain with a known period, and `Pcf.check` reports a missing
-one. The example/tests (group `hdl`, examples/hdl-cdc.wiz) are a `link` crossing
+one. The example/tests (group `hdl`, hdl/examples/hdl-cdc.wiz) are a `link` crossing
 (rejected) and a `Cdc.wire` crossing (accepted) between two parts, their core and wrapper
 Verilog, the XDC/PCF text, a BUFG output as a synchroniser's clock (`Prim.withOutDom`),
 and the multi-clock simulation refusal.
 
-## A generic valid/ready bus (`lib/Hdl/Bus.wiz`)
+## A generic valid/ready bus (`hdl/src/Hdl/Bus.wiz`)
 
-`lib/Hdl/Bus.wiz` (`import Hdl.Bus`) is the board-independent part of golem's
+`hdl/src/Hdl/Bus.wiz` (`import Hdl.Bus`) is the board-independent part of golem's
 `GBus` (`wiz-rv`'s `src/Rv/Golem/Bus.wiz`), with the address and data widths as
 parameters and no memory map:
 
@@ -1067,7 +1080,7 @@ parameters and no memory map:
   flight). A read in the answering cycle returns the word read before the store: there
   is no read-during-write bypass, so a write is visible to the next transaction only.
 
-`lib/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
+`hdl/src/Hdl/BusLaw.wiz` (`import Hdl.BusLaw`) states the protocol laws over value traces:
 `Stable`/`ValidStable`/`PayloadStable`/`AddressStable` (the source holds `valid` and the
 payload while stalled), `AnsweredAfter` (a response answers a request `d` cycles
 earlier; 0 for the router, 2 for the RAM), `AtMostOneAck` (arbiter mutual exclusion),
@@ -1095,20 +1108,20 @@ The remaining laws (`StableStep`, `RouteOk`, per-master `NoStarvation`, …) are
 checks over exhaustively generated or long pseudo-random traces, compared against
 `Netlist.simulate` and `Circuit.simFast`: **tested, not proved**.
 
-`examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
+`hdl/examples/hdl-bus.wiz` (test group `bus-crc`) writes and reads the RAM, checks the
 arbiter's grants alternate (and hold while the slave is not ready), and routes hits and
 misses; every circuit's value simulation, `Netlist.simulate` and `Circuit.simFast` agree
-cycle for cycle. `examples/hdl-ramwc.wiz` (test groups `hdl` and `bus-law`) checks the
+cycle for cycle. `hdl/examples/hdl-ramwc.wiz` (test groups `hdl` and `bus-law`) checks the
 wait timeline of `Bus.ramWC`, read-after-write against an independent byte model for
 every 8-, 16- and 32-bit strobe pattern, no alias, the write-answer no-bypass case and
-byte addressing with `shift = 2`. `examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
+byte addressing with `shift = 2`. `hdl/examples/hdl-bus-law.wiz` (test group `bus-law`) exhausts the router
 (4608 inputs), checks 256 generated arbiter cycles with a compliant source and a fair
 sink, and checks the RAM read-after-write and all 16-bit byte-strobe masks, again across
 the three simulations. It also exhausts the N-master selector for n = 1..4 (all valid
 masks, every `last`), checks the N response law for n = 3 over every busy/owner/last,
 request mask and sink acknowledgement (288 steps), and runs the N-master Mealy machine
 for 32 start cycles with all masters asking and an always-ready sink, checking that
-each master is answered within n = 3 cycles. `examples/hdl-arb-n.wiz` (also test group
+each master is answered within n = 3 cycles. `hdl/examples/hdl-arb-n.wiz` (also test group
 `bus-law`) drives `Bus.arbNC` for n = 2, 3 and 4 for 64 cycles each: the value
 simulation, `Netlist.simulate` and `Circuit.simFast` agree, the output equals the
 `Bus.arbNStep` model cycle for cycle, and the packed netlist output satisfies the
@@ -1118,14 +1131,14 @@ n = 3, and the test case runs yosys `check -assert` and `synth_ice40` on the emi
 Verilog when yosys is on PATH; without yosys the case is marked skipped with the reason
 `no yosys`, never silently passed.
 
-## APB, Wishbone, AXI4-Lite and AXI4 bursts (`lib/Hdl/Apb.wiz`, `lib/Hdl/Wishbone.wiz`, `lib/Hdl/AxiLite.wiz`, `lib/Hdl/Axi4.wiz`)
+## APB, Wishbone, AXI4-Lite and AXI4 bursts (`hdl/src/Hdl/Apb.wiz`, `hdl/src/Hdl/Wishbone.wiz`, `hdl/src/Hdl/AxiLite.wiz`, `hdl/src/Hdl/Axi4.wiz`)
 
 `Bus` is the single-outstanding, AXI4-Lite-shaped core; these four modules put the
 standard names on it rather than inventing another on-chip protocol. The first three are
 unchanged by the burst module: `Hdl.Axi4` adds channels and adapters, it does not alter
 `Hdl.AxiLite`, `Hdl.Apb` or `Hdl.Wishbone`.
 
-* `lib/Hdl/Apb.wiz` (`import Hdl.Apb`): the AMBA APB4 subset (one transfer, `PSTRB`,
+* `hdl/src/Hdl/Apb.wiz` (`import Hdl.Apb`): the AMBA APB4 subset (one transfer, `PSTRB`,
   `PSLVERR`). `Apb.busToApbC aw dw` is the full two-phase bridge: it captures a
   `Bus.ReqW` at IDLE -> SETUP, drives `PSEL` in SETUP and `PSEL`/`PENABLE` in ACCESS until
   `PREADY`, then answers the bus in that cycle (`ready` for both, `rvalid` for a read).
@@ -1135,19 +1148,19 @@ unchanged by the burst module: `Hdl.Axi4` adds channels and adapters, it does no
   direction: APB ACCESS (`PSEL && PENABLE`) is the bus `valid`, `PWRITE`/`PADDR`/`PWDATA`/
   `PSTRB` the payload, and `PREADY`/`PRDATA`/`PSLVERR` the bus answer; SETUP is not a bus
   request.
-* `lib/Hdl/Wishbone.wiz` (`import Hdl.Wishbone`): classic Wishbone B4 (`CYC`/`STB`/`ACK`/
+* `hdl/src/Hdl/Wishbone.wiz` (`import Hdl.Wishbone`): classic Wishbone B4 (`CYC`/`STB`/`ACK`/
   `ERR`, no pipelining). `Wishbone.busToWbC aw dw` maps `valid` to `CYC`/`STB`, `we` to
   `WE`, `addr`/`wdata`/`wstrb` to `ADR`/`DAT_W`/`SEL`, and `ACK`/`ERR`/`RTY` to the bus
   answer (`RTY` becomes `err`: the bus has no retry). `Wishbone.wbToBusC aw dw` is the
   reverse combinational mapping (`CYC && STB` is `valid`, `RTY`/`STALL` are low).
-* `lib/Hdl/AxiLite.wiz` (`import Hdl.AxiLite`): the ARM AXI4-Lite channel bundles
+* `hdl/src/Hdl/AxiLite.wiz` (`import Hdl.AxiLite`): the ARM AXI4-Lite channel bundles
   (`Aw`/`W`/`B`/`Ar`/`R`, and `SlaveIn`/`SlaveOut`/`MasterIn`/`MasterOut` with the
   `*READY` directions). `AxiLite.writeOf`/`readOf` give the `Bus.ReqW` view of the
   single-outstanding subset (`AWVALID && WVALID` is `valid`; no bursts, IDs, attributes
   or separate `AW`/`W` arrival), and `AxiLite.errOf` turns a non-`OKAY` response into
   `err`. A full AXI4-Lite slave still needs the `AW`/`W` queue that this subset does not
   claim.
-* `lib/Hdl/Axi4.wiz` (`import Hdl.Axi4`): the AXI4 burst subset. `Axi4.Aw`/`W`/`B` and
+* `hdl/src/Hdl/Axi4.wiz` (`import Hdl.Axi4`): the AXI4 burst subset. `Axi4.Aw`/`W`/`B` and
   `Axi4.Ar`/`R` add `AxLEN`, `AxSIZE`, `AxBURST` (FIXED/INCR/WRAP), `AxID`, `WLAST`/
   `RLAST` and the response ID to the AXI4-Lite shapes; `SlaveIn`/`SlaveOut`/`MasterIn`/
   `MasterOut` are the five channels with their ready directions. `Axi4.beatAddr` is the
@@ -1163,7 +1176,7 @@ unchanged by the burst module: `Hdl.Axi4` adds channels and adapters, it does no
   models the general multi-ID ordering rule (each ID's completions in issue order) at
   values.
 
-`lib/Hdl/ProtocolLaw.wiz` (`import Hdl.ProtocolLaw`) is the bridge obligation set:
+`hdl/src/Hdl/ProtocolLaw.wiz` (`import Hdl.ProtocolLaw`) is the bridge obligation set:
 `Bus.Law.ReqWStable` and its components (a `Bus.ReqW` source holds `valid`, `we`, `addr`,
 `wdata` and `wstrb` while stalled); `Apb.Law.Stable` (`PSEL`, `PADDR`, `PWDATA`,
 `PWRITE`, `PSTRB` held while `PSEL && !PREADY`; `PENABLE` may rise at SETUP -> ACCESS);
@@ -1176,7 +1189,7 @@ definitional mapping lemmas (`Apb.toBusReq_valid`, `Apb.respOfBus_pready`,
 `Wishbone.toBusReq_valid`, `Wishbone.respOfBus_ack`, `AxiLite.writeOf_valid`); the rest
 are Boolean checks over generated traces: **tested, not proved**.
 
-`examples/hdl-protocols.wiz` (test group `bus-protocol`) drives the bus-to-APB bridge for
+`hdl/examples/hdl-protocols.wiz` (test group `bus-protocol`) drives the bus-to-APB bridge for
 96 cycles (32 transfers, APB stalling every third cycle), the APB-to-bus direction for
 100 cycles through `Bus.ramWC` (12 transfers: a full write, a masked write and a read at
 each of the four 16-bit masks, read back as `43690 43616 21930 21878`), the bus-to-
@@ -1186,7 +1199,7 @@ response/request matching, response order and strobe preservation, its value sim
 `Netlist.simulate` and `Circuit.simFast` agree cycle for cycle, and the four bridge
 netlists are `Netlist.wellFormed`.
 
-`lib/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set:
+`hdl/src/Hdl/Axi4Law.wiz` (`import Hdl.Axi4Law`) is the AXI4 burst obligation set:
 `Axi4.Law.AddressProgression` (the bus addresses are `Axi4.beatSeq`), `Axi4.Law.BeatCount`
 (`LEN + 1` beats), `Axi4.Law.WrBeatOk`/`RdBeatOk` (one beat's address, data and byte
 strobes at the adapter pins), `Axi4.Law.WLastOk`/`RLastOk` (the last marker is on beat
@@ -1196,7 +1209,7 @@ small facts (`legalWrap` for 2/4/8/16 beats and its rejection of 5, `beats 0 = 1
 `bytes 0 = 1`, the quiet channels and the reset phases, and the `respOfErr` codes); the
 rest are Boolean checks over generated traces: **tested, not proved**.
 
-`examples/hdl-axi4.wiz` (test group `bus-protocol`) runs an INCR and a WRAP write burst
+`hdl/examples/hdl-axi4.wiz` (test group `bus-protocol`) runs an INCR and a WRAP write burst
 and an INCR and a WRAP read burst, four beats each, through `Axi4.wrC`/`Axi4.rdC` with a
 bus slave that stalls (one bus answer in three cycles for the INCR write, one in two for
 the WRAP write, and one `R` accepted in three for the reads). It checks the `LEN + 1` bus beats and W handshakes, the address progression
@@ -1212,9 +1225,9 @@ group has four cases: APB/Wishbone/AXI4-Lite, AXI4 bursts, AXI4-Stream and SPI (
 last two run their value/netlist checks even when yosys is absent, and add the yosys
 check when it is on PATH).
 
-## AXI4-Stream (`lib/Hdl/AxiStream.wiz`)
+## AXI4-Stream (`hdl/src/Hdl/AxiStream.wiz`)
 
-`lib/Hdl/AxiStream.wiz` (`import Hdl.AxiStream`) is the AXI4-Stream handshake subset: a
+`hdl/src/Hdl/AxiStream.wiz` (`import Hdl.AxiStream`) is the AXI4-Stream handshake subset: a
 beat is `tdata`, `tvalid`, `tlast`, `tkeep`, `tuser` and `tready`, width-parameterised by
 `dw`, with one `tkeep` bit per byte (`AxiStream.keepW dw = dw / 8`). `AxiStream.Beat dw`
 is the full bundle, `AxiStream.Tx dw` the source-driven half (no `tready`), and
@@ -1237,7 +1250,7 @@ sequence.
   `AxiStream.sliceInReady`, `AxiStream.upInReady` and `AxiStream.downInReady` expose the
   input-ready term to wire back to a source.
 
-`lib/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
+`hdl/src/Hdl/AxiStreamLaw.wiz` (`import Hdl.AxiStreamLaw`) is the obligation set:
 `AxiStream.Law.Stable` (a stalled beat is held unchanged and stays valid),
 `NoLoss`/`NoDup`/`Order` (the accepted output payloads are exactly the accepted input
 payloads: same count, each once, in order), `Backpressure` (the three together) and
@@ -1245,7 +1258,7 @@ payloads: same count, each once, in order), `Backpressure` (the three together) 
 `keepW_8`, the slice/source/sink initial values); the rest are Boolean checks over
 generated traces, **tested, not proved**.
 
-`examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
+`hdl/examples/hdl-stream.wiz` (test group `bus-protocol`) runs the source/sink pair with an
 always-ready, a 2-cycle and a 3-cycle stall pattern, the slice with a stalling sink
 (10 beats, checking that the accepted sequence is exactly `0 … 9`), and 8→16 and 16→8
 conversion with the grouping, `tkeep` split/merge and `tlast` placement checked against
@@ -1257,9 +1270,9 @@ is full, and a downsize always emits all `ratio` narrow beats), `tuser` is carri
 never interpreted, there are no `TID`/`TDEST`/`TSTRB` attributes or null-byte
 suppression, and the slice is one beat deep (compose slices for a deeper pipeline).
 
-## CRC-8/SMBUS (`lib/Hdl/Crc.wiz`)
+## CRC-8/SMBUS (`hdl/src/Hdl/Crc.wiz`)
 
-`lib/Hdl/Crc.wiz` (`import Hdl.Crc`) is the iCEstick CRC
+`hdl/src/Hdl/Crc.wiz` (`import Hdl.Crc`) is the iCEstick CRC
 (the iCEstick project's `src/Icestick/Crc.wiz`) without the board vocabulary:
 polynomial `x^8 + x^2 + x + 1` (`0x07`), initial value 0, MSB first, no reflection and
 no final xor. The specification is on numbers (`Crc.bit`, `Crc.iter`, `Crc.step`,
@@ -1279,20 +1292,20 @@ while it is low are dropped rather than queued: the contract is request/response
 single outstanding line, no bursts. The host half is `Crc.reply`/`Crc.replies`, and
 `Crc.reply_check` is the kernel-checked on-the-wire known answer (`"F4\n"`).
 
-`examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
+`hdl/examples/hdl-crc.wiz` (test group `bus-crc`) checks the hardware step against the
 specification on all 65536 `(crc, byte)` pairs, `hexDigit` on all 16 nibbles, the known
 answer, and the streaming circuit through the value simulation, `Netlist.simulate` and
-`Circuit.simFast`. `examples/hdl-crc-link.wiz` (test groups `hdl` and `bus-crc`) drives
+`Circuit.simFast`. `hdl/examples/hdl-crc-link.wiz` (test groups `hdl` and `bus-crc`) drives
 the service with two lines, checks the reply stream against `Crc.replies`, drops a
 newline offered during a reply, checks that `ready` is low exactly in the reply cycles,
 counts the accepted lines, and compares the value simulation with `Netlist.simulate`
 and `Circuit.simFast`.
 
-## H14 V1: verified circuit optimisation (`lib/Hdl/Verified.wiz`)
+## H14 V1: verified circuit optimisation (`hdl/src/Hdl/Verified.wiz`)
 
 The OLED demo's arithmetic units (wiz-icestick-uart, branch oled-demo: `Sphere.wiz`,
 `Blobs.wiz`) are hand-optimised: no multiplier, no divider, one result bit a cycle.
-`lib/Hdl/Verified.wiz` copies them (the same `Hw` code, with the control multiplexers
+`hdl/src/Hdl/Verified.wiz` copies them (the same `Hw` code, with the control multiplexers
 resolved for the phase each unit is in) and states each against its plain `Nat`
 definition, one input at a time (`Hv.sqOk`, `Hv.rtOk`, …); `allBelow p n = .true` decides
 it for every input of the domain, and `allBelow_sound` turns that into a `∀`.
@@ -1319,12 +1332,12 @@ Two structure lemmas tie the 24-bit units to the kernel-checked pieces by defini
 (`max(max(a, c), t(a + c))`). The lower bound n² ≤ a² + c² is what makes the march safe
 (a step never passes through a surface).
 
-**Trust.** `examples/hdl-verified.wiz` is kernel-checked, nothing trusted.
-`examples/hdl-verified-native.wiz` uses `native_refl` (27a): with `--trust-native` only,
+**Trust.** `hdl/examples/hdl-verified.wiz` is kernel-checked, nothing trusted.
+`hdl/examples/hdl-verified-native.wiz` uses `native_refl` (27a): with `--trust-native` only,
 one axiom per check (`#print axioms` lists it), trusting erasure and the interpreter.
 Both run in the test group *hdl-verified* (a heavy shard: minutes). The two 2²⁰-input
-checks (about ten minutes) are `examples/hdl-verified-full.wiz`, run on demand:
-`wiz check --trust-native examples/hdl-verified-full.wiz`.
+checks (about ten minutes) are `hdl/examples/hdl-verified-full.wiz`, run on demand:
+`wiz check --trust-native hdl/examples/hdl-verified-full.wiz`.
 
 **What was hard (findings).** `sat_decide` (28b/28c, PRs #197/#208) was meant to do the word-level
 units, but: (F1) it is Boolean only, and nothing bit-blasts `UIntN`/`BitVec` (the bit
@@ -1336,7 +1349,7 @@ about 14 ms per case for eight word operations, so the kernel stops near 2¹² i
 A computing reflection (`bit_decide`) is in drafts/hdl-verified/, for when the check is
 fast (compiled, or a faster kernel evaluator).
 
-## H14 C4: bit-level reasoning (`lib/Hdl/Bits.wiz`)
+## H14 C4: bit-level reasoning (`hdl/src/Hdl/Bits.wiz`)
 
 The toy CPU's finding C2: `rfl` reduces a multiplexer on a known select but not a gate on
 a symbolic bit (`Hw.and 0 x`), so a circuit had to be written with multiplexers for its
@@ -1350,13 +1363,13 @@ distributivity; the multiplexer normal form (`Bit.and_mux`: `a & b = a ? b : 0`,
 `or_mux`, `not_mux`, `xor_mux`; `HwTy.El.mux_same`, `mux_not` at any type); and the
 Boolean bridge `Bit.toBool` (a homomorphism: `toBool_and/or/xor/not/mux`;
 `Bit.eq_of_toBool`), which turns an equation of bits into a Boolean goal for
-`sat_decide` (28b). Example: `examples/hdl-bits.wiz` (the CPU's stall signal written
+`sat_decide` (28b). Example: `hdl/examples/hdl-bits.wiz` (the CPU's stall signal written
 with gates, proved equal to its multiplexer form and, once the opcode is known, to
 `!txReady`, for every value of the status bits).
 
 ## Rune: a standard library of simulated primitives (UART, SPI, DDR)
 
-`lib/Hdl/Uart.wiz`, `lib/Hdl/Spi.wiz` and `lib/Hdl/Ddr.wiz` are the first slice of
+`hdl/src/Hdl/Uart.wiz`, `hdl/src/Hdl/Spi.wiz` and `hdl/src/Hdl/Ddr.wiz` are the first slice of
 *rune*, the HDL standard library: reusable interfaces and primitives that are ordinary
 `Circuit`s, so they simulate at values, run as netlists (`Hdl.Sim`), and synthesise from
 the same definition. They are new files with no primitives and no vendor cells, so a
@@ -1428,14 +1441,14 @@ counter, and three chip selects selecting slaves 0, 1 and 2), `examples/rune-ddr
 value simulation = `Netlist.simFast`, the loopback bytes, the SPI shift order and edges,
 the chip-select patterns, the DDR handshake and masked write.
 
-`lib/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
+`hdl/src/Hdl/SpiLaw.wiz` (`import Hdl.SpiLaw`) states the SPI obligations over link traces:
 `Spi.Law.SampleStable` (`mosi` does not change on a sample edge),
 `Spi.Law.MosiOnShift` (after the start cycle it changes only on a shift edge),
 `Spi.Law.SampleCount` (eight samples per transfer), `Spi.Law.Divider` (`done` exactly
 `16 * div` cycles after `start`), and `Spi.Law.ByteRoundTrip` (the master receives the
 reply and the slave the sent byte). The mode table, the sample/shift levels, `divN` and
 concrete loopback bytes are kernel-checked; the trace laws are **tested, not proved**.
-`examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
+`hdl/examples/hdl-spi.wiz` runs all four modes, a divider sweep `1 … 8`, the loopback and
 the mock-slave link, checks the timing and divider laws, exercises `Spi.transferLoop` on
 all 256 bytes in every mode, and compares the value simulation, `Netlist.simulate` and
 `Circuit.simFast`; its netlists are `Netlist.wellFormed` and yosys runs on the emitted
@@ -1454,7 +1467,7 @@ real DDR controller's wrapper and timing, and clock-domain crossing for the port
 
 ## Hdl.Display: the OLED command, data and window layer
 
-`lib/Hdl/Display.wiz` (`import Hdl.Display`) is the reusable part of the OLED project
+`hdl/src/Hdl/Display.wiz` (`import Hdl.Display`) is the reusable part of the OLED project
 (`wiz-icestick-uart`'s SSD1306 and SSD1331 demos and their Arty ports), with the board's
 power switches, reset pulse, frame timing and effect generators removed. It is a new
 file with no board imports and no primitives.
@@ -1477,7 +1490,7 @@ the pins are registers of the state, so they cannot glitch. The interface is fou
 SPI only: neither the SSD1306 nor the SSD1331 source supports a parallel (8080/6800)
 path, so none is invented here.
 
-The example `examples/hdl-display.wiz` (test group `display`) checks the command bytes,
+The example `hdl/examples/hdl-display.wiz` (test group `display`) checks the command bytes,
 the two init sequences and windows, the RGB and pixel helpers, and decodes the pins of
 `Display.seqC` (an SSD1306 `start` for 32 rows, a window plus two data bytes, an SSD1331
 start) and `Display.serC` back into command/data bytes; the value simulation,
@@ -2074,7 +2087,12 @@ rotations) are checked by the tests rather than proved — for `PMap`, `PSet` an
 complexity, persistence guarantees and the benchmark plan are in
 `wiz-notes/persistent-data.md`.
 
-## Scry: Wil, the analysis IR (`lib/Scry/Wil.wiz`)
+> **Scry is a package, not a standard-library module** (`separate-repos.md` P0.1): its
+> modules live in `scry/src/Scry/` and its rule packs in `scry/rules/`. `wiz doc --lib`
+> no longer documents them; `scry/README.md` is the package's own guide. The sections
+> below remain as a cross-reference for the language features they exercise.
+
+## Scry: Wil, the analysis IR (`scry/src/Scry/Wil.wiz`)
 
 `import Scry.Wil` is the small three-address IR of the `scry` analyser
 (`wiz-notes/code-analysis-design.md` §4.3): typed variables and ids, `Rhs`/`Stmt`/
@@ -2099,14 +2117,14 @@ is the lockset data-race check that consumes it (`Scry.raceFindings`). The model
 memory model, and what is proved vs tested are in `wiz-notes/scry-wil-concurrency.md`.
 
 
-## Scry: CFG, reaching definitions and taint (`lib/Scry/Analysis.wiz`, `lib/Scry/Taint.wiz`)
+## Scry: CFG, reaching definitions and taint (`scry/src/Scry/Analysis.wiz`, `scry/src/Scry/Taint.wiz`)
 
 `import Scry.Analysis` numbers a Wil function's statements and terminators as program
 points and computes the CFG, dominators, reaching definitions and the PDG's def-use
 (flow-dependence) edges; `Scry.fnInfoWith` adds caller-supplied definitions (a tainted
 parameter at entry, an argument a call writes) and terminator uses (`ret`/`br`) join the
 data edges, so return values are modelled. `import Scry.Taint` feeds those edges to the
-Datalog engine (`lib/Scry/Datalog.wiz`, `lib/Scry/Eval.wiz`) with a `TaintSpec` of
+Datalog engine (`scry/src/Scry/Datalog.wiz`, `scry/src/Scry/Eval.wiz`) with a `TaintSpec` of
 source, sanitiser and sink calls; the source -> sink path of each finding comes from the
 engine's provenance. `import Scry.TaintExamples` is the hand-built corpus used by the
 `scry-taint` group. `Scry.Store` keeps the authoritative insertion-ordered rows and, at
@@ -2125,7 +2143,7 @@ The S4 rule pack and interprocedural slice are separate modules:
   `.scry` block format (`Scry.parseRulePack`) and `*` function-name matching. A sink is
   `sink NAME arg K` or `sink NAME args`; the latter checks every argument of a variadic
   call (`execl`), while the finding still names the concrete tainted index.
-  `lib/Scry/rules/default.scry` is the demo pack as a real spec file.
+  `scry/src/Scry/rules/default.scry` is the demo pack as a real spec file.
 * `import Scry.RuleTaint` — variable-indexed taint as Datalog over a rule pack; an
   argument source/sanitiser becomes an extra definition point, and a `gen` fact is the
   ordinary definition a statement's tainted input transfers to.
@@ -2183,9 +2201,9 @@ The S4 rule pack and interprocedural slice are separate modules:
 `import Scry.RuleExamples` is the rule-pack/interprocedural corpus. The `scry` package's
 `scry taint` command wires the whole pipeline: S1's tree-sitter parse, S2's
 `Scry.Lower` (spans on every statement), these S4 modules with
-`lib/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
+`scry/src/Scry/rules/default.scry`, and SARIF 2.1.0. `Scry.Nullness` adds the
 `scry/memory/null-dereference` diagnostic with `--null-deref` (opt-in); the CWE-22 `path-traversal` rule is
-opt-in as `lib/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
+opt-in as `scry/src/Scry/rules/path-traversal.scry` (the default pack plus the rule, with
 `realpath` modelled as a sanitiser of its result and destination, not its input).
 Memory is modelled: structs, arrays,
 pointers, `&`/`*`, allocation and `free`, globals, function pointers and pointer returns
@@ -2200,7 +2218,7 @@ context sensitivity, non-ASCII columns); the lowering still warns (havoc) for th
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
 
-## Scry: e-graph and equality saturation (`lib/Scry/Egraph.wiz`, `lib/Scry/EgraphNative.wiz`)
+## Scry: e-graph and equality saturation (`scry/src/Scry/Egraph.wiz`, `scry/src/Scry/EgraphNative.wiz`)
 
 `import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
 rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
@@ -2235,7 +2253,7 @@ scheduler/backoff, no sharing-aware extraction, no canonicalisation-aware proven
 no kernel-checked certificates yet; `wiz-notes/datalog-egraph-plan.md` and
 `wiz-notes/code-analysis-design.md` §10 have the design, the API and the gaps.
 
-## Scry: e-classes from Wil terms and checked extraction (`lib/Scry/EgraphWil.wiz`, `lib/Scry/EgraphExtract.wiz`)
+## Scry: e-classes from Wil terms and checked extraction (`scry/src/Scry/EgraphWil.wiz`, `scry/src/Scry/EgraphExtract.wiz`)
 
 `import Scry.EgraphWil` turns a `Wil.Program` into an e-graph: every `x = e` is a union
 of the register's class with a structural encoding of `e` (`cst`, `use`, `bin`, `un`,

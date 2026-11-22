@@ -1,0 +1,105 @@
+import Text
+import WordMap
+/-!
+# Scry.Index
+
+The one string-keyed symbol index (`import Scry.Index`). Every layer that used to answer
+"which function/site/result/model is called `name`?" with `List.find` builds its lookup
+once here and passes it down; the representation is private to this module.
+
+`Scry.NameMap V` is a hash-bucketed map from `String` to `V`. The bucket key is an
+FNV-1a hash of the name and each bucket keeps the names it holds, so a collision only
+makes the bucket longer and equality is always decided by `String.eq` (the same shape
+`Scry.TupleRel`'s hash index uses). A compiled `U64Map` is the native open-addressing
+table; the kernel/interpreter model is its sorted `PMap`, so a lookup is O(log n) there
+and expected O(1) in a `grail` build.
+
+`fromList` builds every map with `foldr`, so a bucket preserves the input order and
+`find` is exactly the old "first in the program/pack order" match. The index is derived
+data: the lists it indexes remain the authoritative values and are never reordered.
+
+The index is deliberately one type, not one per caller. `Scry.ProgramIndex` is the
+function table (name -> its global index and `Wil.Func`, in program order);
+`Scry.SymbolIndex` names project symbols by both source and qualified name; `Scry.PathIndex`
+is the path walk's result/call-site view. `Scry.Interproc` and `Scry.Models` build their
+own views from the same `NameMap`; `Scry.Project` can adopt `Scry.SymbolIndex` without a
+second representation.
+-/
+
+/-- FNV-1a over a string's code points, starting from the offset basis. A hash is only a
+bucket selector: `Scry.NameMap` compares the stored names with `String.eq`, so a
+collision cannot change an answer. -/
+def Scry.Index.hashName (s : String) : U64 :=
+  List.foldl (fun h c =>
+    UIntN.mul (UIntN.xor h (U64.ofNat (Char.code c))) (U64.ofNat 1099511628211))
+    (U64.ofNat 14695981039346656037) (String.chars s)
+
+/-- A string-keyed map. The `buckets` field is private to this module's operations; the
+stored lists are the authoritative values. Insertion prepends to a bucket, so building
+with `fromList`'s `foldr` preserves the input order. -/
+structure Scry.NameMap (V : Type) where
+  buckets : U64Map (List (String × V))
+
+def Scry.NameMap.empty {V : Type} : Scry.NameMap V := Scry.NameMap.mk U64Map.empty
+
+/-- Add `k ↦ v`. The value list a key owns is ordered by insertion; `find` sees the most
+recent value and `findAll` every value (the program and model tables need duplicates). -/
+def Scry.NameMap.insert {V : Type} (m : Scry.NameMap V) (k : String) (v : V) :
+    Scry.NameMap V :=
+  let h := Scry.Index.hashName k;
+  let b := U64Map.findD m.buckets h .nil;
+  Scry.NameMap.mk (U64Map.insert m.buckets h (List.cons (k, v) b))
+
+/-- The first value stored for `k` (`none` when it is absent). -/
+def Scry.NameMap.find {V : Type} (m : Scry.NameMap V) (k : String) : Option V :=
+  match U64Map.find m.buckets (Scry.Index.hashName k) with
+  | .none => .none
+  | .some b => match List.find (fun p => String.eq p.1 k) b with
+    | .none => .none
+    | .some p => .some p.2
+
+/-- Every value stored for `k`, in insertion order (duplicates included). -/
+def Scry.NameMap.findAll {V : Type} (m : Scry.NameMap V) (k : String) : List V :=
+  match U64Map.find m.buckets (Scry.Index.hashName k) with
+  | .none => .nil
+  | .some b => List.map (fun p => p.2) (List.filter (fun p => String.eq p.1 k) b)
+
+/-- Whether `k` has at least one entry. -/
+def Scry.NameMap.contains {V : Type} (m : Scry.NameMap V) (k : String) : Bool :=
+  match Scry.NameMap.find m k with
+  | .none => .false
+  | .some _ => .true
+
+/-- Build from `(key, value)` entries. `foldr` gives each bucket the input order, so
+`find` and `findAll` agree with an equivalent `List.find`/`List.filter`. -/
+def Scry.NameMap.fromList {V : Type} (xs : List (String × V)) : Scry.NameMap V :=
+  List.foldr (fun p m => Scry.NameMap.insert m p.1 p.2) Scry.NameMap.empty xs
+
+/-- One project symbol, the shape `Scry.Project.Symbol` carries (kept here so the index
+does not depend on the IO project module). -/
+structure Scry.SymbolEntry where
+  name : String
+  qualified : String
+  tu : Nat
+  index : Nat
+  isStatic : Bool
+
+/-- Project symbols by source name and by qualified name. `qualified` is the link-time
+name the project analysis uses (`static:<tu>:<name>` for a TU-local function). -/
+structure Scry.SymbolIndex where
+  byName : Scry.NameMap Scry.SymbolEntry
+  byQualified : Scry.NameMap Scry.SymbolEntry
+
+def Scry.indexSymbols (syms : List Scry.SymbolEntry) : Scry.SymbolIndex :=
+  Scry.SymbolIndex.mk
+    (Scry.NameMap.fromList (List.map (fun s => (s.name, s)) syms))
+    (Scry.NameMap.fromList (List.map (fun s => (s.qualified, s)) syms))
+
+partial def Scry.pathEntriesGo (i : Nat) : List String → List (String × Nat)
+  | .nil => .nil
+  | .cons p rest => List.cons (p, i) (Scry.pathEntriesGo (Nat.succ i) rest)
+
+/-- Source file path -> its project file index. The first occurrence of a duplicated path
+wins, exactly as `Scry.Project.addFile` keeps the first text. -/
+def Scry.indexPaths (paths : List String) : Scry.NameMap Nat :=
+  Scry.NameMap.fromList (Scry.pathEntriesGo 0 paths)

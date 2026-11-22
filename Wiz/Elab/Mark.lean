@@ -153,10 +153,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
   let g := ctx.globals
   let w : R := QuantitySyntax.explicitDefault
   match t with
-  | .var ix => (t, ctx.types[ix]?)
+  | .var ix => (t, ctx.typeAt? ix)
   | .const n us => (t, (g.find? n).bind fun d =>
       if d.levelParams.length == us.length then some (eval g [] (d.type.instLevels d.levelParams us)) else none)
-  | .natLit _ => (t, (g.builtins.lookup "nat").map fun N => ctx.eval (.const N []))
+  | .natLit _ => (t, (g.builtinOf? "nat").map fun N => ctx.eval (.const N []))
   | .sort l => (t, some (.sort (.succ l)))
   -- (the sorts pass: a hole gets the component's level)
   | .pi x bi q A B σ =>
@@ -356,12 +356,12 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let vI := ctx.eval I
     let D := check ctx D (.desc l vI)
     let vD := ctx.eval D
-    let A := check ctx A (coitStateTy l vI w)
+    let A := check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let f := check ctx f (scofixFunTy g l vI vD vA w)
     let i := check ctx i vI
     let vi := ctx.eval i
-    let a := check ctx a (vApp g vA vi)
+    let a := check ctx a (vApp g (vApp g vA (ctx.eval s)) vi)
     (.scofix l I D A f s i a, some (.nu l vI vD vi (ctx.eval s) none))
   | .coit l I D S st i s =>
     let (I, _) := type ctx I

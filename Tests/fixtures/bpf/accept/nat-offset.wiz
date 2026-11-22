@@ -1,0 +1,4 @@
+-- [UNRUN] P0 accept neighbour: a Nat that folds to a literal is an immediate offset.
+import Bpf
+
+def ok (p : Packet) : Option (UIntN 16) := Packet.load16be p (12 + 2)

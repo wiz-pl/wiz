@@ -21,7 +21,7 @@ that needs more says so itself.
 
 Relative Markdown links and `examples/...` paths in inline code or prose are resolved
 against the document (and the repository root for `examples/...`); a missing target is
-reported.  Anchors are not checked, and globs such as `examples/hdl-verified-*.wiz` are
+reported.  Anchors are not checked, and globs such as `hdl/examples/hdl-verified-*.wiz` are
 skipped.
 
 Caching.  `--cache DIR` (default `.lake/docs-examples`) holds both Wiz's own
@@ -358,6 +358,13 @@ def _run_wiz(
     wiz: str, mode: str, path: Path, root: Path, cache: Path | None, timeout: int
 ) -> tuple[int, str, str]:
     cmd = [wiz, "run" if mode == "run" else "check"]
+    # The library packages that live outside lib/ must be on the module path, or a
+    # snippet whose first import is `Hdl.Core` (docs/tour.md §10) is checked against
+    # no Prelude and no Hdl at all: `Circuit` is unknown and a list literal fails to
+    # parse. Only directories that exist are added, so a minimal checkout still works.
+    for pkg in ("hdl/src", "scry/src", "tower"):
+        if (root / pkg).is_dir():
+            cmd += ["-I", str(root / pkg)]
     if cache is not None:
         cmd += ["--cache", str(cache)]
     else:

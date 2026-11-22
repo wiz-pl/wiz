@@ -10,6 +10,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* hdl: the **sized signal surface** (`lib/Hdl/Signal.wiz`): `Signal.fix`, `mapS`,
+  `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
+  sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
+  are reported (a size-keeping register, a same-size recursive copattern); `Hdl.Signal`
+  contributes no trust sources (the ledger is 864/864). Tests: `=hdl-signal` 9/9,
+  `=hdl` 32/0, `=copatterns` 18/18, `=sized` 7/7.
+* web: the site now installs **`wiz-playground-ui.wasm`** with its `.mjs` (the page
+  aborted fetching it: "both async and sync fetching of the wasm failed"), and
+  `mount` resolves a page's loader namespace (`() => import("./…-ui.mjs")`) to its
+  `default` factory instead of calling the loader as the factory (the "does not export
+  wiz_loom_init/html/step" start failure). Tests: `web/framework/mount_test.mjs`, the
+  site fixture in `web/test-bench.sh`.
+* kernel: `Globals.builtins` is **indexed by key and name** (three maps beside the
+  ordered list). Writes go through `setBuiltins`/`addBuiltin`/`addBuiltinBack`, so a
+  record update cannot leave the index stale; the cache format is unchanged and replay
+  rebuilds it. Structure-only in measured wall time; the win is that key/name lookups no
+  longer scan every registration. Tests: `=language`/`=elab`/`=elabfix`/`=selfhost-host`.
+* distributed: **temporal/LTS core and 2PC safety**. `lib/Temporal.wiz` (an `LTS`, its
+  runs, enabled/taken/invariants/safety-during/bounded), `lib/Dist/Checker.wiz` (a BFS
+  reachability checker with soundness for `ok` and `bad`), and `lib/Dist/TwoPhase.wiz`
+  (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
+  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (5/0).
+
 * elab: a named `match h : e` inside a definition whose result is an equation keeps the
   equation as written while its branches are checked. The declared type used to be
   evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
@@ -17,6 +40,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
   matches now see both equations; added the computed-goal nested case, an
   independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
+* registry: the package registry is **Fate**, and its index repository is
+  `wiz-pl/fate-index` (`grail-index` is the historical name). `grail` is unchanged as the
+  client (`grail update/publish/lock`); the hermetic fixture and the example index move
+  to `Tests/fixtures/fate-index/` and `examples/fate-index/`. The registry format and
+  the SSH signature namespace are unchanged.
 * language: a parameter before the colon is **fixed only if no recursive call changes
   it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
   count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
@@ -46,7 +74,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
   assumption. The non-formal text is byte-identical to `Verilog.emit`, and
   `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
-  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  `hdl/examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
   yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
   finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
@@ -714,7 +742,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/fate-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -724,9 +752,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `grail update` upgrades them. `grail publish` and the index schema record the size,
   tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
   locks, upgrade, override).
-* grail (23m), the static index side: a `grail-index` repository layout (static
+* grail (23m), the static index side: a `fate-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
-  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  index's Wiz manifest and generator templates), a complete `examples/fate-index/` with
   three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
   semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
   module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index

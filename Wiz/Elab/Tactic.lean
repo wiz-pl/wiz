@@ -82,6 +82,8 @@ def nativeDecide := 38
 def rewriteAt := 39
 -- (stage 6h S2) the registered `[simp]` lemmas, for the default set
 def getSimpLemmas := 40
+-- (D6) the constructor names of a type, for `constructor`
+def ctorNames := 41
 end TacTag
 
 structure Goal (R : Type) where
@@ -396,8 +398,8 @@ partial def reflectT (rc : RCtx R) (t : Term R) (ty? : Option (VTy R)) : ReflM R
     reflectArgs rc (mkCon 1 [encodeString T]) (rc.headType? (← globalsR) (.const T us)) args
   | .natOp op args =>
     let g ← globalsR
-    match g.builtins.find? (·.1 == op) with
-    | some (_, n) => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
+    match g.builtinOf? op with
+    | some n => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
     | none => mkOpq
   | .con (.pair tag rest) =>
     match ← reflectCtor rc tag rest ty? with
@@ -485,9 +487,10 @@ def introName (taken : List Name) (hint binder : Name) (isProof inaccessible : B
 
 /-- The kernel context for a goal, for inferring the types of complete terms. -/
 def Goal.kernelCtx (gl : Goal R) (g : Globals R) : Ctx R :=
-  { globals := g, env := gl.ctx.env, names := gl.ctx.names,
-    qtys := gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-    types := gl.ctx.types, lvl := gl.ctx.lvl, erased := true }
+  { globals := g, env := gl.ctx.env,
+    names := gl.ctx.names.reverse.toArray,
+    qtys := (gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+    types := gl.ctx.types.reverse.toArray, lvl := gl.ctx.lvl, erased := true }
 
 /-- Is the goal's hole still unsolved? -/
 def Goal.isOpen (gl : Goal R) : ElabM R Bool := do

@@ -1,0 +1,533 @@
+import Data.ListLemmas
+import Text
+/-!
+# Dist.Checker
+
+A total, first-order reachability checker for a finite protocol instance
+(`import Dist.Checker`). Design: `wiz-notes/distributed-proofs.md` §6.
+
+`Checker.Model S` is a finite transition system: an initial list, a successor function,
+an invariant as a `Bool`, and a Boolean equality on states (`beq_true`/`beq_complete`
+make it decidable equality). `Checker.Model.check fuel` explores the reachable states:
+
+* `ok n` means the exploration reached a closed set containing every initial state and
+  every state in it satisfies `inv` (`check_ok_spec`);
+* `bad path` means it found a reachable state that violates `inv`, and `path` is a
+  concrete execution from an initial state to it, current state first
+  (`check_bad_spec`);
+* `unknown n` means the fuel ran out. `unknown` is **not** `ok`: a bounded search that
+  stops early never claims safety.
+
+The soundness theorem is proved, not assumed: `check_ok_spec` is a theorem about the
+same `next` and `inv` a protocol supplies, so an `ok` is a proof for every reachable
+state of the finite instance. It is a general `Model S`, not only `Model Nat`, so the
+protocol's finite instance need not encode its state in `Nat`; `S` is the state type of
+the finite instance and `beq` is its decidable equality.
+-/
+
+structure Checker.Model (S : Type) where
+  /-- The initial states (a list; a state may occur once or many times). -/
+  init : List S
+  /-- The successors of a state. -/
+  next : S → List S
+  /-- The safety invariant, as a Boolean check. -/
+  inv : S → Bool
+  /-- Decidable equality on states. -/
+  beq : S → S → Bool
+  /-- `beq` is sound: equal by `beq` means equal. -/
+  beq_true : (a b : S) → beq a b = .true → a = b
+  /-- `beq` is complete: equal means equal by `beq`. -/
+  beq_complete : (a b : S) → a = b → beq a b = .true
+
+/-- What a check found. -/
+inductive Checker.Report (S : Type) where
+  /-- The reachable set is closed and every state in it satisfies the invariant. -/
+  | ok (visited : Nat)
+  /-- A reachable state violates the invariant; `path` is a concrete execution to it,
+  current state first. -/
+  | bad (path : List S)
+  /-- Fuel ran out. **Not** a proof of safety. -/
+  | unknown (visited : Nat)
+
+/-- `s` is in `seen`, by `beq`. -/
+def Checker.memB {S : Type} (beq : S → S → Bool) : List S → S → Bool
+  | .nil, _ => .false
+  | .cons x xs, s => Bool.or (beq x s) (Checker.memB beq xs s)
+
+/-- `memB` is sound (using only `beq_true`). -/
+def Checker.memB_sound {S : Type} (beq : S → S → Bool)
+    (bt : (a b : S) → beq a b = .true → a = b) :
+    (l : List S) → (s : S) → Checker.memB beq l s = .true → s ∈ l
+  | .nil, s, h => absurd h.1
+  | .cons x xs, s, h =>
+      Or.elim (Iff.mp (Bool.or_eq_true (beq x s) (Checker.memB beq xs s)) h)
+        (fun (e : beq x s = .true) => Or.inl (Eq.symm (bt x s e)))
+        (fun (e : Checker.memB beq xs s = .true) =>
+          Or.inr (Checker.memB_sound beq bt xs s e))
+
+/-- `memB` is complete (using only `beq_complete`). -/
+def Checker.memB_complete {S : Type} (beq : S → S → Bool)
+    (bc : (a b : S) → a = b → beq a b = .true) :
+    (l : List S) → (s : S) → s ∈ l → Checker.memB beq l s = .true
+  | .nil, s, h => False.elim h
+  | .cons x xs, s, h =>
+      Or.elim h
+        (fun (e : s = x) =>
+          Eq.mpr' (fun (t : S) => Bool.or (beq x t) (Checker.memB beq xs t) = .true) e
+            (Eq.mpr' (fun (t : Bool) => Bool.or t (Checker.memB beq xs x) = .true)
+              (bc x x rfl) (Bool.true_or (Checker.memB beq xs x))))
+        (fun (h' : s ∈ xs) =>
+          Eq.mpr' (fun (t : Bool) => Bool.or (beq x s) t = .true)
+            (Checker.memB_complete beq bc xs s h')
+            (Bool.or_true_right (beq x s)))
+
+/-- A state/path pair is at the head of its own queue. -/
+def Checker.mem_pair_self {S : Type} (q : S × List S) (rest : List (S × List S)) :
+    q ∈ List.cons q rest := Or.inl rfl
+
+/-- The states of a frontier (the pending queue), forgetting its paths. -/
+def Checker.frontierStates {S : Type} (f : List (S × List S)) : List S :=
+  List.map (fun (p : S × List S) => p.1) f
+
+/-- The first component of an equality of pairs. -/
+def Checker.pair_eq_fst {A B : Type} (a c : A) (b d : B) (h : (a, b) = (c, d)) : a = c := h.1
+/-- The second component of an equality of pairs. -/
+def Checker.pair_eq_snd {A B : Type} (a c : A) (b d : B) (h : (a, b) = (c, d)) : b = d := h.2
+
+/-- A pair whose first component is `s` is in the list, from a pair with that first
+component. -/
+def Checker.pair_mem_fst {S : Type} (f : List (S × List S)) (x : S × List S) (s : S)
+    (hx : x ∈ f) (e : x.1 = s) : (s, x.2) ∈ f :=
+  Eq.substProp (fun (z : S) => (z, x.2) ∈ f) e hx
+
+/-- Membership in the frontier's state list is existential membership in the frontier. -/
+def Checker.mem_frontierStates {S : Type} (f : List (S × List S)) (s : S) :
+    (s ∈ Checker.frontierStates f) ↔ (∃ p, (s, p) ∈ f) :=
+  Iff.intro
+    (fun (h : s ∈ Checker.frontierStates f) =>
+      Ex.elim (Iff.mp (List.mem_map (fun (p : S × List S) => p.1) s f) h)
+        (fun (x : S × List S) (hx : x ∈ f ∧ x.1 = s) =>
+          Ex.intro (fun (p : List S) => (s, p) ∈ f) x.2
+            (Checker.pair_mem_fst f x s hx.1 hx.2)))
+    (fun (h : ∃ p, (s, p) ∈ f) =>
+      Ex.elim h (fun (p : List S) (hp : (s, p) ∈ f) =>
+        Iff.mpr (List.mem_map (fun (x : S × List S) => x.1) s f)
+          (Ex.intro (fun (x : S × List S) => x ∈ f ∧ x.1 = s) (s, p)
+            (And.intro hp rfl))))
+
+/-- The states of a consed frontier. -/
+def Checker.frontierStates_cons {S : Type} (s : S) (p : List S) (f : List (S × List S)) :
+    Checker.frontierStates (List.cons (s, p) f) = List.cons s (Checker.frontierStates f) := rfl
+
+/-- The states of an appended frontier. -/
+def Checker.frontierStates_append {S : Type} (f g : List (S × List S)) :
+    Checker.frontierStates (List.append f g) =
+      List.append (Checker.frontierStates f) (Checker.frontierStates g) :=
+  List.map_append (fun (p : S × List S) => p.1) f g
+
+/-- The initial frontier of a list of states: each with itself as its path. -/
+def Checker.initFrontierOf {S : Type} (l : List S) : List (S × List S) :=
+  List.map (fun (s : S) => (s, List.cons s List.nil)) l
+
+/-- The initial frontier: every initial state, with itself as its path. -/
+def Checker.initFrontier {S : Type} (m : Checker.Model S) : List (S × List S) :=
+  Checker.initFrontierOf m.init
+
+/-- The states of `initFrontierOf l` are exactly `l`. -/
+def Checker.mem_initFrontierOf {S : Type} :
+    (l : List S) → (s : S) →
+    ((s ∈ Checker.frontierStates (Checker.initFrontierOf l)) ↔ (s ∈ l))
+  | .nil, s => Iff.intro (fun (h : s ∈ ([] : List S)) => False.elim h)
+      (fun (h : s ∈ ([] : List S)) => False.elim h)
+  | .cons x xs, s =>
+      Iff.intro
+        (fun (h : s ∈ List.cons x (Checker.frontierStates (Checker.initFrontierOf xs))) =>
+          Or.elim (Iff.mp (List.mem_cons_iff s x (Checker.frontierStates (Checker.initFrontierOf xs))) h)
+            (fun (e : s = x) => Or.inl e)
+            (fun (h' : s ∈ Checker.frontierStates (Checker.initFrontierOf xs)) =>
+              Or.inr (Iff.mp (Checker.mem_initFrontierOf xs s) h')))
+        (fun (h : s ∈ List.cons x xs) =>
+          Or.elim h
+            (fun (e : s = x) =>
+              Eq.substProp (fun (z : S) => z ∈ List.cons x (Checker.frontierStates (Checker.initFrontierOf xs)))
+                (Eq.symm e) (List.mem_cons_self x (Checker.frontierStates (Checker.initFrontierOf xs))))
+            (fun (h' : s ∈ xs) =>
+              Or.inr (Iff.mpr (Checker.mem_initFrontierOf xs s) h')))
+
+/-- The states of `initFrontier m` are exactly the initial states. -/
+def Checker.mem_initFrontier {S : Type} (m : Checker.Model S) (s : S) :
+    (s ∈ Checker.frontierStates (Checker.initFrontier m)) ↔ (s ∈ m.init) :=
+  Checker.mem_initFrontierOf m.init s
+
+/-- Add the successors of `s` that are not in `seen`, with their paths (`s' :: path`). -/
+def Checker.addNew {S : Type} (m : Checker.Model S) (seen : List S) (path : List S)
+    (nexts : List S) : List (S × List S) :=
+  List.map (fun (s' : S) => (s', List.cons s' path))
+    (List.filter (fun (s' : S) => Bool.not (Checker.memB m.beq seen s')) nexts)
+
+/-- Every pair `addNew` adds comes from a successor not in `seen`, with the path extended. -/
+def Checker.addNew_sound {S : Type} (m : Checker.Model S) (seen : List S) (path : List S)
+    (nexts : List S) (t : S) (p : List S) :
+    ((t, p) ∈ Checker.addNew m seen path nexts) →
+    (∃ s', s' ∈ nexts ∧ Checker.memB m.beq seen s' = .false ∧ t = s' ∧ p = List.cons s' path)
+  | h =>
+      Ex.elim (List.mem_of_mem_map (fun (s' : S) => (s', List.cons s' path)) (t, p)
+          (List.filter (fun (s' : S) => Bool.not (Checker.memB m.beq seen s')) nexts) h)
+        (fun (s' : S) (hs : s' ∈ List.filter (fun (x : S) => Bool.not (Checker.memB m.beq seen x)) nexts
+            ∧ (s', List.cons s' path) = (t, p)) =>
+          Ex.intro (fun (x : S) => x ∈ nexts ∧ Checker.memB m.beq seen x = .false ∧ t = x ∧ p = List.cons x path)
+            s'
+            (And.intro (Iff.mp (List.mem_filter (fun (x : S) => Bool.not (Checker.memB m.beq seen x)) s' nexts) hs.1).1
+              (And.intro
+                (Iff.mp (Bool.not_eq_true (Checker.memB m.beq seen s'))
+                  (Iff.mp (List.mem_filter (fun (x : S) => Bool.not (Checker.memB m.beq seen x)) s' nexts) hs.1).2)
+                (And.intro (Eq.symm (Checker.pair_eq_fst s' t (List.cons s' path) p hs.2)) (Eq.symm (Checker.pair_eq_snd s' t (List.cons s' path) p hs.2))))))
+
+/-- Every successor not in `seen` is added by `addNew`, with its path extended. -/
+def Checker.addNew_complete {S : Type} (m : Checker.Model S) (seen : List S) (path : List S)
+    (nexts : List S) (s' : S) (hmem : s' ∈ nexts) (hnot : Checker.memB m.beq seen s' = .false) :
+    ((s', List.cons s' path) ∈ Checker.addNew m seen path nexts) :=
+  List.mem_map_of_mem (fun (x : S) => (x, List.cons x path)) s'
+    (List.filter (fun (x : S) => Bool.not (Checker.memB m.beq seen x)) nexts)
+    (List.filter_complete (fun (x : S) => Bool.not (Checker.memB m.beq seen x)) s' nexts hmem
+      (Iff.mpr (Bool.not_eq_true (Checker.memB m.beq seen s')) hnot))
+
+/-- An execution from an initial state to the current state, the current state first. -/
+inductive Checker.RPath {S : Type} (m : Checker.Model S) : S → List S → Prop where
+  /-- Start at an initial state. -/
+  | here (s : S) (h : s ∈ m.init) : Checker.RPath m s (List.cons s List.nil)
+  /-- Follow a successor, extending the path. -/
+  | step (s t : S) (path : List S) (hp : Checker.RPath m s path) (h : t ∈ m.next s) :
+      Checker.RPath m t (List.cons t path)
+
+/-- Reachability: the reflexive-transitive closure of `next` from `init`. -/
+inductive Checker.Model.Reachable {S : Type} (m : Checker.Model S) : S → Prop where
+  /-- An initial state is reachable. -/
+  | init (s : S) (h : s ∈ m.init) : Checker.Model.Reachable m s
+  /-- A successor of a reachable state is reachable. -/
+  | step (s t : S) (hr : Checker.Model.Reachable m s) (h : t ∈ m.next s) :
+      Checker.Model.Reachable m t
+
+/-- `T` contains every initial state. -/
+def Checker.ContainsInit {S : Type} (m : Checker.Model S) (T : List S) : Prop :=
+  (s : S) → s ∈ m.init → s ∈ T
+
+/-- `T` is closed under `next`. -/
+def Checker.Closed {S : Type} (m : Checker.Model S) (T : List S) : Prop :=
+  (s : S) → s ∈ T → (t : S) → t ∈ m.next s → t ∈ T
+
+/-- Every state of `T` satisfies the invariant. -/
+def Checker.AllInv {S : Type} (m : Checker.Model S) (T : List S) : Prop :=
+  (s : S) → s ∈ T → m.inv s = .true
+
+/-- The queue invariant of the checker: `seen` satisfies `inv`, its successors are in
+`seen` or pending, and every initial state is in `seen` or pending. -/
+def Checker.QueueInv {S : Type} (m : Checker.Model S) (seen : List S)
+    (frontier : List (S × List S)) : Prop :=
+  Checker.AllInv m seen ∧
+  ((s : S) → s ∈ seen → (t : S) → t ∈ m.next s →
+      t ∈ seen ∨ t ∈ Checker.frontierStates frontier) ∧
+  ((s : S) → s ∈ m.init → s ∈ seen ∨ s ∈ Checker.frontierStates frontier)
+
+/-- Every pending pair is a real execution path to its state. -/
+def Checker.PathInv {S : Type} (m : Checker.Model S) (frontier : List (S × List S)) : Prop :=
+  (q : S × List S) → q ∈ frontier → Checker.RPath m q.1 q.2
+
+/-- The checker's step: match on the invariant, with the recursive result supplied. -/
+def Checker.exploreGo {S : Type} (nextResult : Checker.Report S) (path : List S) (d : Bool) :
+    Checker.Report S :=
+  match d with
+  | .true => nextResult
+  | .false => Checker.Report.bad path
+
+/-- Breadth-first exploration: `fuel` steps, `seen` processed, `frontier` pending. -/
+def Checker.explore {S : Type} (m : Checker.Model S) : Nat → List S → List (S × List S) →
+    Checker.Report S
+  | .zero, seen, _ => Checker.Report.unknown (List.length seen)
+  | .succ fuel, seen, .nil => Checker.Report.ok (List.length seen)
+  | .succ fuel, seen, .cons (s, path) rest =>
+      Checker.exploreGo
+        (Checker.explore m fuel (List.cons s seen)
+          (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))))
+        path (m.inv s)
+
+/-- The equation at a satisfying state. -/
+def Checker.explore_inv_true {S : Type} (m : Checker.Model S) (fuel : Nat) (seen : List S)
+    (s : S) (path : List S) (rest : List (S × List S)) (h : m.inv s = .true) :
+    Checker.explore m (Nat.succ fuel) seen (List.cons (s, path) rest) =
+      Checker.explore m fuel (List.cons s seen)
+        (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) := by
+  change Checker.exploreGo
+      (Checker.explore m fuel (List.cons s seen)
+        (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))))
+      path (m.inv s) =
+    Checker.explore m fuel (List.cons s seen)
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s)))
+  rw h
+  rfl
+
+/-- The equation at a violating state. -/
+def Checker.explore_inv_false {S : Type} (m : Checker.Model S) (fuel : Nat) (seen : List S)
+    (s : S) (path : List S) (rest : List (S × List S)) (h : m.inv s = .false) :
+    Checker.explore m (Nat.succ fuel) seen (List.cons (s, path) rest) =
+      Checker.Report.bad path := by
+  change Checker.exploreGo
+      (Checker.explore m fuel (List.cons s seen)
+        (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))))
+      path (m.inv s) = Checker.Report.bad path
+  rw h
+  rfl
+
+/-- An invariant of the initial queue: initial states are pending, `seen` is empty. -/
+def Checker.initQueueInv {S : Type} (m : Checker.Model S) :
+    Checker.QueueInv m ([] : List S) (Checker.initFrontier m) :=
+  And.intro (fun (s : S) (h : s ∈ ([] : List S)) => False.elim h)
+    (And.intro
+      (fun (s : S) (h : s ∈ ([] : List S)) => False.elim h)
+      (fun (s : S) (h : s ∈ m.init) =>
+        Or.inr (Iff.mpr (Checker.mem_initFrontier m s) h)))
+
+/-- The paths of the initial queue are valid. -/
+def Checker.initPathInv {S : Type} (m : Checker.Model S) :
+    Checker.PathInv m (Checker.initFrontier m) :=
+  fun (q : S × List S) (h : q ∈ Checker.initFrontier m) =>
+    Ex.elim (List.mem_of_mem_map (fun (x : S) => (x, List.cons x List.nil)) q m.init h)
+      (fun (x : S) (hx : x ∈ m.init ∧ (x, List.cons x List.nil) = q) =>
+        Eq.substProp (fun (z : S) => Checker.RPath m z q.2)
+          (Checker.pair_eq_fst x q.1 (List.cons x List.nil) q.2 hx.2)
+          (Eq.substProp (fun (r : List S) => Checker.RPath m x r)
+            (Checker.pair_eq_snd x q.1 (List.cons x List.nil) q.2 hx.2)
+            (Checker.RPath.here x hx.1)))
+
+/-- A successor of the current state is in the new `seen` or the new frontier. -/
+def Checker.queueInv_current {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S)) (t : S) (ht : t ∈ m.next s) :
+    t ∈ List.cons s seen ∨
+    t ∈ Checker.frontierStates
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  Or.elim (Bool.cases (Checker.memB m.beq (List.cons s seen) t))
+    (fun (hb : Checker.memB m.beq (List.cons s seen) t = .true) =>
+      Or.inl (Checker.memB_sound m.beq m.beq_true (List.cons s seen) t hb))
+    (fun (hb : Checker.memB m.beq (List.cons s seen) t = .false) =>
+      Or.inr
+        (Eq.mpr' (fun (z : List S) => t ∈ z)
+          (Checker.frontierStates_append rest
+            (Checker.addNew m (List.cons s seen) path (m.next s)))
+          (Iff.mpr (List.mem_append t (Checker.frontierStates rest)
+              (Checker.frontierStates (Checker.addNew m (List.cons s seen) path (m.next s))))
+            (Or.inr (Iff.mpr (Checker.mem_frontierStates
+                (Checker.addNew m (List.cons s seen) path (m.next s)) t)
+              (Ex.intro (fun (p : List S) => (t, p) ∈
+                  Checker.addNew m (List.cons s seen) path (m.next s)) (List.cons t path)
+                (Checker.addNew_complete m (List.cons s seen) path (m.next s) t ht hb)))))))
+
+/-- A pending state that was already pending stays in `seen` or the new frontier. -/
+def Checker.frontier_succ_old {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S)) (t : S)
+    (hf : t ∈ Checker.frontierStates (List.cons (s, path) rest)) :
+    t ∈ List.cons s seen ∨
+    t ∈ Checker.frontierStates
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  Or.elim (Iff.mp (List.mem_cons_iff t s (Checker.frontierStates rest))
+      (Eq.mp' (fun (z : List S) => t ∈ z) (Checker.frontierStates_cons s path rest) hf))
+    (fun (e : t = s) =>
+      @Or.inl (t ∈ List.cons s seen)
+        (t ∈ Checker.frontierStates (List.append rest
+          (Checker.addNew m (List.cons s seen) path (m.next s))))
+        (Or.inl e))
+    (fun (hr : t ∈ Checker.frontierStates rest) =>
+      @Or.inr (t ∈ List.cons s seen)
+        (t ∈ Checker.frontierStates (List.append rest
+          (Checker.addNew m (List.cons s seen) path (m.next s))))
+        (Eq.mpr' (fun (z : List S) => t ∈ z)
+          (Checker.frontierStates_append rest
+            (Checker.addNew m (List.cons s seen) path (m.next s)))
+          (Iff.mpr (List.mem_append t (Checker.frontierStates rest)
+              (Checker.frontierStates (Checker.addNew m (List.cons s seen) path (m.next s))))
+            (Or.inl hr))))
+
+/-- A successor of an already-processed state stays in `seen` or the new frontier. -/
+def Checker.queueInv_old {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S))
+    (hq : Checker.QueueInv m seen (List.cons (s, path) rest))
+    (u : S) (hu : u ∈ seen) (t : S) (ht : t ∈ m.next u) :
+    t ∈ List.cons s seen ∨
+    t ∈ Checker.frontierStates
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  Or.elim (hq.2.1 u hu t ht)
+    (fun (hs : t ∈ seen) =>
+      @Or.inl (t ∈ List.cons s seen)
+        (t ∈ Checker.frontierStates (List.append rest
+          (Checker.addNew m (List.cons s seen) path (m.next s))))
+        (Or.inr hs))
+    (fun (hf : t ∈ Checker.frontierStates (List.cons (s, path) rest)) =>
+      Checker.frontier_succ_old m seen s path rest t hf)
+
+/-- An initial state stays in `seen` or the new frontier. -/
+def Checker.queueInv_init {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S))
+    (hq : Checker.QueueInv m seen (List.cons (s, path) rest))
+    (u : S) (hu : u ∈ m.init) :
+    u ∈ List.cons s seen ∨
+    u ∈ Checker.frontierStates
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  Or.elim (hq.2.2 u hu)
+    (fun (hs : u ∈ seen) =>
+      @Or.inl (u ∈ List.cons s seen)
+        (u ∈ Checker.frontierStates (List.append rest
+          (Checker.addNew m (List.cons s seen) path (m.next s))))
+        (Or.inr hs))
+    (fun (hf : u ∈ Checker.frontierStates (List.cons (s, path) rest)) =>
+      Checker.frontier_succ_old m seen s path rest u hf)
+
+/-- The queue invariant is preserved by one exploration step. -/
+def Checker.queueInv_step {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S))
+    (hq : Checker.QueueInv m seen (List.cons (s, path) rest)) (hi : m.inv s = .true) :
+    Checker.QueueInv m (List.cons s seen)
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  And.intro
+    (fun (u : S) (hu : u ∈ List.cons s seen) =>
+      Or.elim hu
+        (fun (e : u = s) => Eq.substProp (fun (z : S) => m.inv z = .true) (Eq.symm e) hi)
+        (fun (h : u ∈ seen) => hq.1 u h))
+    (And.intro
+      (fun (u : S) (hu : u ∈ List.cons s seen) (t : S) (ht : t ∈ m.next u) =>
+        Or.elim hu
+          (fun (e : u = s) =>
+            Checker.queueInv_current m seen s path rest t
+              (Eq.substProp (fun (z : S) => t ∈ m.next z) e ht))
+          (fun (h : u ∈ seen) => Checker.queueInv_old m seen s path rest hq u h t ht))
+      (fun (u : S) (hu : u ∈ m.init) =>
+        Checker.queueInv_init m seen s path rest hq u hu))
+
+/-- The path invariant is preserved by one exploration step. -/
+def Checker.pathInv_step {S : Type} (m : Checker.Model S) (seen : List S) (s : S)
+    (path : List S) (rest : List (S × List S))
+    (hp : Checker.PathInv m (List.cons (s, path) rest)) :
+    Checker.PathInv m
+      (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) :=
+  fun (q : S × List S) (hmem : q ∈ List.append rest
+      (Checker.addNew m (List.cons s seen) path (m.next s))) =>
+    Or.elim (Iff.mp (List.mem_append q rest
+        (Checker.addNew m (List.cons s seen) path (m.next s))) hmem)
+      (fun (hr : q ∈ rest) => hp q (Or.inr hr))
+      (fun (hn : q ∈ Checker.addNew m (List.cons s seen) path (m.next s)) =>
+        Ex.elim (Checker.addNew_sound m (List.cons s seen) path (m.next s) q.1 q.2 hn)
+          (fun (x : S) (hx : x ∈ m.next s ∧ Checker.memB m.beq (List.cons s seen) x = .false ∧ q.1 = x ∧ q.2 = List.cons x path) =>
+            Eq.substProp (fun (z : S) => Checker.RPath m z q.2) (Eq.symm hx.2.2.1)
+              (Eq.substProp (fun (r : List S) => Checker.RPath m x r) (Eq.symm hx.2.2.2)
+                (Checker.RPath.step s x path (hp (s, path) (Checker.mem_pair_self (s, path) rest)) hx.1))))
+
+/-- If the exploration returns `ok`, the processed set is closed, contains every initial
+state, and satisfies the invariant. -/
+def Checker.explore_ok_spec {S : Type} (m : Checker.Model S) :
+    (fuel : Nat) → (seen : List S) → (frontier : List (S × List S)) →
+    Checker.QueueInv m seen frontier → (n : Nat) →
+    Checker.explore m fuel seen frontier = Checker.Report.ok n →
+    ∃ T, Checker.ContainsInit m T ∧ Checker.Closed m T ∧ Checker.AllInv m T
+  | .zero, seen, frontier, hq, n, h => absurd h.1
+  | .succ fuel, seen, .nil, hq, n, h =>
+      Ex.intro (fun (T : List S) => Checker.ContainsInit m T ∧ Checker.Closed m T ∧ Checker.AllInv m T)
+        seen
+        (And.intro
+          (fun (s : S) (hs : s ∈ m.init) =>
+            Or.elim (hq.2.2 s hs)
+              (fun (h : s ∈ seen) => h)
+              (fun (hf : s ∈ Checker.frontierStates ([] : List (S × List S))) => False.elim hf))
+          (And.intro
+            (fun (s : S) (hs : s ∈ seen) (t : S) (ht : t ∈ m.next s) =>
+              Or.elim (hq.2.1 s hs t ht)
+                (fun (h : t ∈ seen) => h)
+                (fun (hf : t ∈ Checker.frontierStates ([] : List (S × List S))) => False.elim hf))
+            hq.1))
+  | .succ fuel, seen, .cons (s, path) rest, hq, n, h =>
+      @Or.elim (m.inv s = .true) (m.inv s = .false)
+        (∃ T, Checker.ContainsInit m T ∧ Checker.Closed m T ∧ Checker.AllInv m T)
+        (Bool.cases (m.inv s))
+        (fun (hi : m.inv s = .true) =>
+          let h' : Checker.explore m fuel (List.cons s seen)
+              (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s))) =
+              Checker.Report.ok n :=
+            Eq.mp' (fun (r : Checker.Report S) => r = Checker.Report.ok n)
+              (Checker.explore_inv_true m fuel seen s path rest hi) h
+          Checker.explore_ok_spec m fuel (List.cons s seen)
+            (List.append rest (Checker.addNew m (List.cons s seen) path (m.next s)))
+            (Checker.queueInv_step m seen s path rest hq hi) n h')
+        (fun (hf : m.inv s = .false) =>
+          let h' : Checker.Report.bad path = Checker.Report.ok n :=
+            Eq.mp' (fun (r : Checker.Report S) => r = Checker.Report.ok n)
+              (Checker.explore_inv_false m fuel seen s path rest hf) h
+          absurd h'.1)
+
+/-- If the exploration returns `bad path`, `path` is a real execution path to a state
+that violates the invariant. -/
+def Checker.explore_bad_spec {S : Type} (m : Checker.Model S) :
+    (fuel : Nat) → (seen : List S) → (frontier : List (S × List S)) →
+    Checker.PathInv m frontier → (path : List S) →
+    Checker.explore m fuel seen frontier = Checker.Report.bad path →
+    ∃ s, Checker.RPath m s path ∧ m.inv s = .false
+  | .zero, seen, frontier, hp, path, h => absurd h.1
+  | .succ fuel, seen, .nil, hp, path, h => absurd h.1
+  | .succ fuel, seen, .cons q rest, hp, path, h =>
+      @Or.elim (m.inv q.1 = .true) (m.inv q.1 = .false)
+        (∃ z, Checker.RPath m z path ∧ m.inv z = .false)
+        (Bool.cases (m.inv q.1))
+        (fun (hi : m.inv q.1 = .true) =>
+          let h' : Checker.explore m fuel (List.cons q.1 seen)
+              (List.append rest (Checker.addNew m (List.cons q.1 seen) q.2 (m.next q.1))) =
+              Checker.Report.bad path :=
+            Eq.mp' (fun (r : Checker.Report S) => r = Checker.Report.bad path)
+              (Checker.explore_inv_true m fuel seen q.1 q.2 rest hi) h
+          Checker.explore_bad_spec m fuel (List.cons q.1 seen)
+            (List.append rest (Checker.addNew m (List.cons q.1 seen) q.2 (m.next q.1)))
+            (Checker.pathInv_step m seen q.1 q.2 rest hp) path h')
+        (fun (hf : m.inv q.1 = .false) =>
+          let h' : Checker.Report.bad q.2 = Checker.Report.bad path :=
+            Eq.mp' (fun (r : Checker.Report S) => r = Checker.Report.bad path)
+              (Checker.explore_inv_false m fuel seen q.1 q.2 rest hf) h
+          Ex.intro (fun (z : S) => Checker.RPath m z path ∧ m.inv z = .false) q.1
+            (And.intro
+              (Eq.substProp (fun (p : List S) => Checker.RPath m q.1 p) h'.1
+                (hp q (Checker.mem_pair_self q rest)))
+              hf))
+
+/-- The checker: explore from the initial states. -/
+def Checker.Model.check {S : Type} (m : Checker.Model S) (fuel : Nat) : Checker.Report S :=
+  Checker.explore m fuel ([] : List S) (Checker.initFrontier m)
+
+/-- A closed set containing the initial states contains every reachable state. -/
+def Checker.Model.reachable_closed {S : Type} (m : Checker.Model S) (T : List S)
+    (hInit : Checker.ContainsInit m T) (hClosed : Checker.Closed m T) :
+    (s : S) → Checker.Model.Reachable m s → s ∈ T :=
+  fun (s : S) (hr : Checker.Model.Reachable m s) =>
+    Checker.Model.Reachable.rec
+      (fun (z : S) (_ : Checker.Model.Reachable m z) => z ∈ T)
+      (fun (z : S) (hz : z ∈ m.init) => hInit z hz)
+      (fun (z : S) (w : S) (hz : Checker.Model.Reachable m z) (p : w ∈ m.next z)
+          (ih : z ∈ T) => hClosed z ih w p)
+      hr
+
+/-- If `check` returns `ok`, every reachable state satisfies the invariant. -/
+def Checker.Model.check_ok_spec {S : Type} (m : Checker.Model S) (fuel n : Nat)
+    (h : Checker.Model.check m fuel = Checker.Report.ok n) :
+    (s : S) → Checker.Model.Reachable m s → m.inv s = .true :=
+  fun (s : S) (hr : Checker.Model.Reachable m s) =>
+    Ex.elim (Checker.explore_ok_spec m fuel ([] : List S) (Checker.initFrontier m)
+        (Checker.initQueueInv m) n h)
+      (fun (T : List S) (hT : Checker.ContainsInit m T ∧ Checker.Closed m T ∧ Checker.AllInv m T) =>
+        hT.2.2 s (Checker.Model.reachable_closed m T hT.1 hT.2.1 s hr))
+
+/-- If `check` returns `bad path`, `path` is an execution from an initial state to a
+state that violates the invariant (the current state first). -/
+def Checker.Model.check_bad_spec {S : Type} (m : Checker.Model S) (fuel : Nat) (path : List S)
+    (h : Checker.Model.check m fuel = Checker.Report.bad path) :
+    ∃ s, Checker.RPath m s path ∧ m.inv s = .false :=
+  Checker.explore_bad_spec m fuel ([] : List S) (Checker.initFrontier m)
+    (Checker.initPathInv m) path h
+
+/-- A report as text: `ok: n visited states`, a concrete `bad` path, or `unknown`. -/
+def Checker.Report.show {S : Type} (showS : S → String) : Checker.Report S → String
+  | .ok n => String.append "ok: " (String.append (Nat.repr n) " visited states")
+  | .bad path => String.append "bad: " (String.intercalate " -> " (List.map showS path))
+  | .unknown n => String.append "unknown: " (String.append (Nat.repr n) " visited states")

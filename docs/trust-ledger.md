@@ -88,7 +88,7 @@ check fails with "missing a reason", "missing an owner" or "missing a review dat
 
 `scripts/trust-ledger.sh --check` fails when:
 
-* a source of trust in `lib/` (or `examples/hdl-verified.wiz`) has no matching row —
+* a source of trust in `lib/` (or `hdl/examples/hdl-verified.wiz`) has no matching row —
   the **new-entry gate**;
 * a row names a declaration that is no longer there (a stale row; a renamed declaration
   is called out explicitly when the item kind matches);

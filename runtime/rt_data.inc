@@ -844,12 +844,18 @@ WIZ_API wiz_val wiz_itab_of_list(wiz_val l) {
   return (wiz_val)t;
 }
 
+/* An `IO` call has no error channel, so a file operation that fails is reported on
+   standard error and the program stops with 1: it must not look like success. The stop
+   is clean (`wiz_clean_exit`, rt_core.inc): an armed boundary catches it, the native
+   CLI exits. */
+__attribute__((noreturn)) static void wiz_io_fail(const char *path, int e) {
+  fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
+  wiz_clean_exit(1);
+}
+
 /* `IO.writeFile`: the text as UTF-8 up to its first NUL (the `String` representation
-   ends there; `FS.writeBytes` is for binary data). An `IO Unit` call has no error
-   channel, so a failure is reported and the program stops with 1: a bad path, a full
-   disk (a short write, or `fclose` flushing the last buffer) must not look like
-   success. The stop is clean (`wiz_clean_exit`, rt_core.inc): an armed boundary catches
-   it, the native CLI exits. */
+   ends there; `FS.writeBytes` is for binary data). A bad path, a full disk (a short
+   write, or `fclose` flushing the last buffer) is reported and stops the program. */
 WIZ_API void wiz_io_write_file(const char *path, const char *text) {
   FILE *f = fopen(path, "wb");
   int e = 0;
@@ -859,33 +865,47 @@ WIZ_API void wiz_io_write_file(const char *path, const char *text) {
     if (fwrite(text, 1, n, f) != n) e = errno ? errno : EIO;
     if (fclose(f) < 0 && !e) e = errno;
   }
-  if (e) {
-    fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
-    wiz_clean_exit(1);
-  }
+  if (e) wiz_io_fail(path, e);
 }
 
-/* files, for the library */
+/* `IO.readFile`: the whole file into the `wiz_scratch` buffer, as text up to the first
+   NUL. A path that does not exist reads as empty text: the library's callers (the
+   module loader's candidate paths) ask "is there a file here?" with a read, so absence is
+   an answer, and a missing file and an empty one look alike. Any other failure (a
+   directory, no permission, a read error, out of memory) is reported and stops the
+   program, as `IO.writeFile` does: it is not the empty text. `FS.readFile` in lib/Sys.wiz
+   is the variant with an `EIO` error channel. */
 WIZ_API const char *wiz_io_read_file(const char *path) {
   FILE *f = fopen(path, "rb");
+  int e = f ? 0 : errno;
   free(wiz_scratch);
   wiz_scratch = NULL;
-  if (!f) return wiz_scratch = (char *)wiz_xcalloc(1, 1);
+  if (!f) {
+    if (e == ENOENT) return wiz_scratch = (char *)wiz_xcalloc(1, 1);
+    wiz_io_fail(path, e);
+  }
   size_t cap = 1024, len = 0;
   wiz_scratch = (char *)malloc(cap);
-  if (!wiz_scratch) { fclose(f); return ""; }
+  if (!wiz_scratch) { fclose(f); wiz_io_fail(path, ENOMEM); }
   size_t n;
   while ((n = fread(wiz_scratch + len, 1, cap - len - 1, f)) > 0) {
     len += n;
     if (len + 1 == cap) {
       cap *= 2;
       char *nb = (char *)realloc(wiz_scratch, cap);
-      if (!nb) { free(wiz_scratch); wiz_scratch = NULL; fclose(f); return ""; }
+      if (!nb) {
+        free(wiz_scratch); wiz_scratch = NULL; fclose(f); wiz_io_fail(path, ENOMEM);
+      }
       wiz_scratch = nb;
     }
   }
-  wiz_scratch[len] = 0;
+  if (ferror(f)) e = errno ? errno : EIO; /* a read error is not the end of the file */
   fclose(f);
+  if (e) {
+    free(wiz_scratch); wiz_scratch = NULL;
+    wiz_io_fail(path, e);
+  }
+  wiz_scratch[len] = 0;
   return wiz_scratch;
 }
 
@@ -932,3 +952,13 @@ static __thread uint64_t wiz_proof_left = 0;
 WIZ_API int wiz_proof_start(uint64_t steps) { if (wiz_proof_on) return 0; wiz_proof_on = 1; wiz_proof_left = steps + 1; return 1; }
 WIZ_API int wiz_proof_tick(uint64_t x) { (void)x; if (!wiz_proof_on) return 1; if (wiz_proof_left <= 1) { wiz_proof_left = 0; return 0; } wiz_proof_left--; return 1; }
 WIZ_API int wiz_proof_end(uint64_t x) { (void)x; wiz_proof_on = 0; return wiz_proof_left > 0; }
+
+/* The kernel evaluator's per-command budget: one tick per structural elimination
+   (`vIndW`/`vSfix`/`vScase`), not per beta step. It is its own counter so a command's
+   budget does not make the proof read-back's `wiz_proof_*` budget run for ordinary
+   evaluation. */
+static __thread int wiz_kernel_on = 0;
+static __thread uint64_t wiz_kernel_left = 0;
+WIZ_API int wiz_kernel_start(uint64_t steps) { if (wiz_kernel_on) return 0; wiz_kernel_on = 1; wiz_kernel_left = steps + 1; return 1; }
+WIZ_API int wiz_kernel_tick(uint64_t x) { (void)x; if (!wiz_kernel_on) return 1; if (wiz_kernel_left <= 1) { wiz_kernel_left = 0; return 0; } wiz_kernel_left--; return 1; }
+WIZ_API int wiz_kernel_end(uint64_t x) { (void)x; wiz_kernel_on = 0; return wiz_kernel_left > 0; }

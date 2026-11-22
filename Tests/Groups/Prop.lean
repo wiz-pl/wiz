@@ -829,12 +829,12 @@ def chk (cx : Cx) (t T : Tm) : Bool :=
 /-- the variables whose type is convertible with `T` -/
 def varsOfTy (cx : Cx) (T : Tm) : Array Tm :=
   let vT := cx.k.eval T
-  ((List.range cx.size).filter fun i => Wiz.convTy cx.g cx.k.tys cx.k.types[i]! vT).toArray.map Term.var
+  ((List.range cx.size).filter fun i => Wiz.convTy cx.g cx.k.tys (cx.k.typeAt? i).get! vT).toArray.map Term.var
 
 /-- the type of variable `i`, as written, in this context -/
 def rawTy (cx : Cx) (i : Nat) : Tm := liftT (i + 1) cx.tys[i]!
 
-def names (cx : Cx) : List Name := cx.k.names
+def names (cx : Cx) : List Name := cx.k.prettyNames
 
 end Cx
 
@@ -1047,7 +1047,7 @@ type) to as many generated arguments as it takes to reach the type `T`. -/
 partial def headAlts (cx : Cx) (T : Tm) (fuel : Nat) : Gen (Array (Gen Tm)) := do
   let vT := cx.k.eval T
   let fnVars : List Tm := (List.range cx.size).filterMap fun i =>
-    match whnf cx.k.types[i]! with
+    match whnf (cx.k.typeAt? i).get! with
     | .pi .. => some (.var i)
     | _ => none
   let mut alts : Array (Gen Tm) := #[]
@@ -1115,13 +1115,15 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
       let vI := cx.k.eval I
       let vD := cx.k.eval D
       let unitS : Tm := .lam "i" (.unit (.succ l))
+      let unitA : Tm := .lam "j" (.lam "i" (.unit (.succ l)))
       let vS := cx.k.eval unitS
+      let vA := cx.k.eval unitA
       let viaCoit : Array (Gen Tm) := #[do
         let st ← genTm cx (quote g cx.k.lvl (coitStepTy g l vI vD vS .many)) f
         return .ann (.coit l I D unitS st i .tt) Tw]
       let viaScofix : Array (Gen Tm) := #[do
-        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vS .many)) f
-        return .scofix l I D unitS fn s i .tt]
+        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vA .many)) f
+        return .scofix l I D unitA fn s i .tt]
       (match sizePred? (cx.k.eval s) with
        | some s' =>
          let P := quote g cx.k.lvl (vInterp g l vI vD (nuFamilyAt l vI vD s') (cx.k.eval i))
@@ -1184,7 +1186,7 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
           alts := alts.push (do return .cast A B (.var i) (← genTm cx A f))
     -- from an empty hypothesis
     for i in [0:cx.size] do
-      if let .empty _ := whnf cx.k.types[i]! then alts := alts.push (pure (.absurd T (.var i)))
+      if let .empty _ := whnf (cx.k.typeAt? i).get! then alts := alts.push (pure (.absurd T (.var i)))
     if let some l := lT then
       -- a cast from a variant of the type, along a generated proof
       alts := alts.push (do

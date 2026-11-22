@@ -321,6 +321,11 @@ WIZ_API const char *wiz_nat_show(uint64_t a);
 WIZ_API int wiz_proof_start(uint64_t steps);
 WIZ_API int wiz_proof_tick(uint64_t x);
 WIZ_API int wiz_proof_end(uint64_t x);
+/* the kernel evaluator's per-command budget (see `kernelSteps` in selfhost/Frontend.wiz):
+   one tick per structural elimination, independent of the proof read-back's budget */
+WIZ_API int wiz_kernel_start(uint64_t steps);
+WIZ_API int wiz_kernel_tick(uint64_t x);
+WIZ_API int wiz_kernel_end(uint64_t x);
 WIZ_API uint64_t wiz_sys_errno(void);
 WIZ_API const char *wiz_sys_strerror(uint64_t e);
 WIZ_API const char *wiz_sys_getenv(const char *k);

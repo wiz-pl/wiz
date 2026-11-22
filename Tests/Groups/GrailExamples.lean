@@ -12,7 +12,7 @@ read by a human running `grail test` in the checkout.
 Three of the cases are ranges rather than one case so a failure names a readable block
 (and so the shard can be split); they cover the same files the package-wide `grail test`
 does, minus `examples/tour/` (group `tour` already compares those 14) and the nested
-`examples/grail-index/sources/*` packages (left out by `Grail.testFiles`, as by
+`examples/fate-index/sources/*` packages (left out by `Grail.testFiles`, as by
 `grail test`). A new `examples/*.wiz` falls into one of the ranges without an edit
 here; only a new *nested* directory or a new name class would need one.
 
@@ -150,12 +150,8 @@ def examplesGroup : Group where
   exercise := "examples/ (grail test)"
   cases :=
     [ markerCase
-    , examplesCase "examples/ before hdl: the stage demos, classes, std-like and FFI examples"
-        (fun f => f < "examples/hdl") ["examples/closed-table-bench.wiz"]
-    , examplesCase "examples/hdl*: the HDL examples, including the large netlist goldens"
-        (fun f => f < "examples/import_c" && !(f < "examples/hdl"))
-        ["examples/hdl-crc-link.wiz", "examples/hdl-sim-bench.wiz", "examples/hdl-verified-full.wiz",
-         "examples/hdl-verified-native.wiz"]
+    , examplesCase "examples/ before import_c: the stage demos, classes, std-like and FFI examples"
+        (fun f => f < "examples/import_c") ["examples/closed-table-bench.wiz"]
     , examplesCase "examples/ from import_c: the library, Scry, Rune and Pervasive examples"
         (fun f => !(f < "examples/import_c"))
         ["examples/natives-bench.wiz", "examples/plot.wiz", "examples/scry-datalog-bench.wiz"] ]

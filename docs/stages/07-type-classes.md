@@ -284,7 +284,7 @@ the homogeneous classes of 7e, whose instances are unchanged. `^` is `HPow A B C
   compiles to `prim nat.add` (or `wiz_word_add` at a word).
 * **Named instances.** `instance name binders : C args` names the instance (an unnamed
   one is still named after its type, `instAddNat`).
-* **HDL signals** (lib/Hdl/Core.wiz) have homogeneous instances `Add (r (bits n))`; through
+* **HDL signals** (hdl/src/Hdl/Core.wiz) have homogeneous instances `Add (r (bits n))`; through
   `instHAdd` they are the signals' `+` with no change, and `x + 1` at a signal puts the
   numeral at the signal's width.
 

@@ -1,0 +1,9 @@
+import Std
+
+-- Negative case for the unique `Str.push` fast path: the receiver is shared with
+-- `p.1`, so the byte append must copy. 68 is 'D'; `p.1` must stay "abc".
+def main : IO Unit := do
+  let s := Str.ofString "abc";
+  let p := (s, Str.push s 68);
+  IO.println (Str.toString p.1);
+  IO.println (Str.toString p.2)

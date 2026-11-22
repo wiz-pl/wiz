@@ -1,0 +1,170 @@
+file	cause	group	root	fix	why
+lib/Args.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+lib/BitBlast.wiz	Eq.congrArg implicit mismatch	real selfhost bug	Eq congrArg	eq-congr	`Eq.congrArg f e` is checked with the wrong implicit arguments (same shape as Nat).
+lib/BitVec.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/BitVecShift.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/BvDecide.wiz	macro/meta API (Expr)	host-only syntax	selfhost: no meta API	meta-api	`Expr`; `Expr` is in lib/Prelude but not in the selfhost embedded prelude (and BvDecide imports SatTactic/Sat).
+lib/Conc.wiz	nested inductive occurrence	real selfhost bug	nested inductives	nested-inductives	`the type being defined may only occur as the type of a recursive field or the result`; the host allows this nesting.
+lib/Data/ListLemmas.wiz	macro/meta API (Macro)	host-only syntax	selfhost: no meta API	meta-api	`def List.memForallMacro : Macro := …`; the embedded prelude has no `Macro`.
+lib/Data/Order.wiz	Logic.wiz:47 True vs Unit0	real selfhost bug	Logic True/Unit	logic-true	`def True.intro : True := ()` is rejected (`expected True, got Unit0`); Logic then loses Eq.congrArg2 and cascades.
+lib/Data/PMap.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Data/Result.wiz	quantity term (%t)	host-only syntax	selfhost: quantity terms	quantity	`(%q a : A)`; quantity terms `%t` are explicitly refused by the selfhost frontend.
+lib/Data/WordBytes.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Deriving.wiz	macro/meta API (Syntax)	host-only syntax	selfhost: no meta API	meta-api	`Syntax.mkVar`; no elaborator-time `Syntax` API in the embedded prelude.
+lib/Eff.wiz	ULift universe lift	real selfhost bug	ULift	ulift	`class Functor (f : Type → Type)` / `structure Effect` cannot lift the class type through ULift (Sort 2).
+lib/EffHeap.wiz	Effect missing (Eff fails)	real selfhost bug	ULift	ulift	`Effect` is unknown because Eff.wiz fails at its ULift class declaration.
+lib/Encoding.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Feral.wiz	Fe.inst List×Ty mismatch	real selfhost bug	Feral	feral	`Fe.inst` sees the signature list as a dependent pair (`List (String × Fe.Ty)`) mismatch.
+lib/FingerTree.wiz	Monoid instance mismatch	real selfhost bug	FingerTree	fingertree	`Monoid.Lawful` sees the instance argument as the carrier (`expected Monoid M, got M`).
+lib/Functor.wiz	ULift universe lift	real selfhost bug	ULift	ulift	`class Functor (f : Type → Type)` / `structure Effect` cannot lift the class type through ULift (Sort 2).
+lib/Grail.wiz	macro/meta API (Syntax)	host-only syntax	selfhost: no meta API	meta-api	`Syntax.decimal`; same missing `Syntax` API.
+lib/HProp.wiz	Option.orElse_none mismatch	real selfhost bug	HProp	hprop	`Option.orElse o .none = o` fails a dependent equality at the `Option` eliminator.
+lib/Handle.wiz	let (x,y) on IO/Owned pair	real selfhost bug	pair let	pair-let	`let 1 (o, w') := …` is rejected (`expects a pair`) for the Prod/World pair produced by IO.
+hdl/src/Hdl/Apb.wiz	numeral term (term.num)	host-only syntax	selfhost: term.num	numeral-term	`Nat.div dw 8` (a numeral in a type term) reaches the parser as an unsupported `term.num`.
+hdl/src/Hdl/Arty.wiz	Logic.wiz:47 True vs Unit0	real selfhost bug	Logic True/Unit	logic-true	`def True.intro : True := ()` is rejected (`expected True, got Unit0`); Logic then loses Eq.congrArg2 and cascades.
+hdl/src/Hdl/Axi4.wiz	custom deriver (Bundle)	host-only syntax	selfhost: no general deriver	deriver-bundle	`deriving Bundle` on `Axi4.Aw`; `attribute [deriver Bundle]` needs the general deriver registry (A11).
+hdl/src/Hdl/Axi4Law.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/AxiLite.wiz	custom deriver (Bundle)	host-only syntax	selfhost: no general deriver	deriver-bundle	`deriving Bundle` on `AxiLite.Aw`; `attribute [deriver Bundle]` needs the general deriver registry (A11).
+hdl/src/Hdl/AxiStream.wiz	custom deriver (Bundle)	host-only syntax	selfhost: no general deriver	deriver-bundle	`deriving Bundle` on `AxiStream.Beat`; `attribute [deriver Bundle]` needs the general deriver registry (A11).
+hdl/src/Hdl/AxiStreamLaw.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Bits.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+hdl/src/Hdl/Bus.wiz	custom deriver (Bundle)	host-only syntax	selfhost: no general deriver	deriver-bundle	`deriving Bundle` on `Bus.Req`; `attribute [deriver Bundle]` needs the general deriver registry (A11).
+hdl/src/Hdl/BusLaw.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Cdc.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Core.wiz	Hdl/Core.wiz:113 Hdl.indexed	real selfhost bug	Hdl/Core	hdl-core	`def Hdl.indexed {A} : Nat → List A → List (Nat × A)` with two equation arguments: the recursive dotted name is not resolved (the product return triggers it).
+hdl/src/Hdl/Crc.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Ddr.wiz	custom deriver (Bundle)	host-only syntax	selfhost: no general deriver	deriver-bundle	`deriving Bundle` on `Ddr.Req`; `attribute [deriver Bundle]` needs the general deriver registry (A11).
+hdl/src/Hdl/Display.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Mem.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Netlist.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Optic.wiz	Hdl.zoom Lens/Store mismatch	real selfhost bug	Hdl Optic	hdl-optic	`Hdl.zoom` applies `Lens.get`/`Store` with the wrong implicit telescope.
+hdl/src/Hdl/Pipe.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Prim.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/ProtocolLaw.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Signal.wiz	coinductive command	host-only syntax	selfhost: command.coinductive	coinductive	`coinductive Signal …`; the selfhost has no coinductive command (A19).
+hdl/src/Hdl/Sim.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Spi.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/SpiLaw.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Temporal.wiz	existential syntax (term.ex)	host-only syntax	selfhost: term.ex	exists	`∃ k, …` in a term; the selfhost parser has no `term.ex` (A17 surface).
+hdl/src/Hdl/Uart.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Verified.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Wishbone.wiz	numeral term (term.num)	host-only syntax	selfhost: term.num	numeral-term	Same `Nat.div dw 8` numeral-in-a-type `term.num` parser gap as Hdl/Apb.
+hdl/src/Hdl/Xdc.wiz	Hdl/Core failure (Hw/HwTy.El/Hdl/Prim/Circuit/SimNode)	real selfhost bug	Hdl/Core	hdl-core	The name is declared in Hdl/Core.wiz, which fails at Hdl.indexed (and later needs BitVec/Word).
+hdl/src/Hdl/Xilinx7.wiz	X7.spread equations need a function type	real selfhost bug	Hdl Xilinx7	hdl-xilinx7	Another `equations need a function type` (the same equation compiler bug as Word, on X7.spread).
+lib/HeapBorrow.wiz	Prog missing (Hoare fails)	real selfhost bug	nested inductives	nested-inductives	`Prog` is unknown because Hoare.wiz fails on the inductive occurrence check.
+lib/Hoare.wiz	nested inductive occurrence	real selfhost bug	nested inductives	nested-inductives	`the type being defined may only occur as the type of a recursive field or the result`; the host allows this nesting.
+lib/HoareExamples.wiz	Prog missing (Hoare fails)	real selfhost bug	nested inductives	nested-inductives	`Prog` is unknown because Hoare.wiz fails on the inductive occurrence check.
+lib/HoareTactics.wiz	star✝3 / Hoare syntax	real selfhost bug	nested inductives	nested-inductives	The Hoare DSL binder is lost because Hoare.wiz fails; same inductive root.
+lib/IO.wiz	extern/native IO (World duplicate)	expected divergence	expected: C12 FFI/IO		`axiom World`; the selfhost embeds its own World/IO, so lib/IO collides. FFI boundary (C12).
+lib/Infoview.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Int.wiz	builtin command	host-only syntax	selfhost: command.builtin	builtin	`builtin int := Int`; same missing `builtin` command.
+lib/IntOrder.wiz	IntOrder.wiz:29 expected Nat, got Int	real selfhost bug	Int order	int-order	`Int.Le`/`Int.Lt` elaboration mismatch; downstream Rat/Plot lose Q/Int.Lt.
+lib/IntRing.wiz	Logic.wiz:47 True vs Unit0	real selfhost bug	Logic True/Unit	logic-true	`def True.intro : True := ()` is rejected (`expected True, got Unit0`); Logic then loses Eq.congrArg2 and cascades.
+lib/Intern.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Json.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	The first `++` inside the mutual parser (`"nesting too deep (limit " ++ …`) is inferred as List.append.
+lib/Logic.wiz	Logic.wiz:47 True vs Unit0	real selfhost bug	Logic True/Unit	logic-true	`def True.intro : True := ()` is rejected (`expected True, got Unit0`); Logic then loses Eq.congrArg2 and cascades.
+lib/MVar.wiz	let (x,y) on IO/Owned pair	real selfhost bug	pair let	pair-let	`let 1 (o, w') := …` is rejected (`expects a pair`) for the Prod/World pair produced by IO.
+lib/Nat.wiz	Nat.wiz:46 congrArg2	real selfhost bug	Nat congrArg	eq-congr	`Eq.congrArg2` application is mis-unified (implicit arguments).
+lib/Optic.wiz	Data.Result quantity failure (Result.map)	host-only syntax	selfhost: quantity terms	quantity	`Result.map` is missing because Data.Result.wiz fails at its `%q` quantity field (ResultQ).
+lib/OpticDerive.wiz	macro/meta API (ParamView)	host-only syntax	selfhost: no meta API	meta-api	`ParamView`; the embedded prelude omits the `ParamView`/`FieldView` meta types.
+lib/Plot.wiz	Q missing (Rat fails)	real selfhost bug	Int order	int-order	`Q` is unavailable because Rat.wiz fails on `Int.Lt` (IntOrder).
+lib/Prelude.wiz	builtin command	host-only syntax	selfhost: command.builtin	builtin	`builtin nat := Nat`; the selfhost has no `builtin` command (B18/D9).
+lib/Rat.wiz	Int.Lt missing (IntOrder fails)	real selfhost bug	Int order	int-order	`Int.Lt` is unavailable because IntOrder.wiz first fails with `expected Nat, got Int`.
+lib/Ref.wiz	let (x,y) on IO/Owned pair	real selfhost bug	pair let	pair-let	`let 1 (o, w') := …` is rejected (`expects a pair`) for the Prod/World pair produced by IO.
+lib/Region.wiz	quantity term (%t)	host-only syntax	selfhost: quantity terms	quantity	`(%q h : H)`; same explicit quantity-term refusal.
+lib/Ring.wiz	Ring.Key.cmp_eq equations need a function type	real selfhost bug	Word equations	word-equations	Same equation-compiler failure as Word.add_succ.
+lib/RingTactic.wiz	macro/meta API (Expr)	host-only syntax	selfhost: no meta API	meta-api	`Expr`; same missing meta API (also imports Rat/Ring).
+lib/Sat.wiz	absurd (term.absurd)	host-only syntax	selfhost: term.absurd	absurd	`absurd h.1`; `absurd` is a host prelude primitive the selfhost lacks.
+lib/SatTactic.wiz	macro/meta API (Expr)	host-only syntax	selfhost: no meta API	meta-api	`Expr` and term-building meta API; no elaborator-time evaluation in the selfhost.
+lib/Scope.wiz	Scope.with Prod/Done mismatch	real selfhost bug	Scope	scope	`Scope.with` expects `Prod A×Done` vs the `IO`/`Done` pair; likely the pair-let/IO issue.
+lib/Scry/Ai.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Scry/AiCfg.wiz	type class problem is stuck	real selfhost bug	typeclass search	typeclass	Instance search is stuck on `AbsDomain`/`Widen`; the host resolves them.
+lib/Scry/AiDomain.wiz	type class problem is stuck	real selfhost bug	typeclass search	typeclass	Instance search is stuck on `AbsDomain`/`Widen`; the host resolves them.
+lib/Scry/AiExamples.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`narrowOnce` is in AiFixpoint, which fails because `List.foldl` is absent from the embedded prelude.
+lib/Scry/AiFixpoint.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/Analysis.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Bounds.wiz	Scry.flatten missing (Scry base)	real selfhost bug	Scry base		Scry.flatten is unavailable because Analysis/PointsTo/Rules/Models fail (Word/Text).
+lib/Scry/Cert.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Certify.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/ConcurrencyExamples.wiz	Wil.cstep missing (Wil fails)	real selfhost bug	Scry Wil	scry-wil	Wil.wiz fails at Wil.Val.bin; the example loses the whole Wil namespace.
+lib/Scry/Datalog.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Diff.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/Egraph.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	U64Array is missing because WordArray.wiz fails at its length_snoc lemma.
+lib/Scry/EgraphExtract.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	Scry.EGraph is missing because WordArray.wiz fails at its length_snoc lemma.
+lib/Scry/EgraphNative.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	U64Array is missing because WordArray.wiz fails at its length_snoc lemma.
+lib/Scry/EgraphTaint.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`Scry.WgeAlert` is in Taint, which fails because `List.foldl` is absent from the embedded prelude.
+lib/Scry/EgraphWil.wiz	63-bit numeral (C13)	expected divergence	expected: C13 64-bit Nat		10^30/2·10^30 sentinels; the selfhost Nat is 63/64-bit (C13), the host is unbounded.
+lib/Scry/Engine.wiz	ULift universe lift	real selfhost bug	ULift	ulift	`structure Scry.Sem (Ev : Type)` hits the same ULift/Sort-2 failure.
+lib/Scry/EqPlan.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	Scry.EGraph is missing because WordArray.wiz fails at its length_snoc lemma.
+lib/Scry/Eval.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Interproc.wiz	Scry.siteOfCall missing (Scry base)	real selfhost bug	Scry base		The Scry base modules (Analysis/PointsTo/Rules/Models/Lifetime) fail first.
+lib/Scry/Lifetime.wiz	Scry.uCurGet missing (Scry base)	real selfhost bug	Scry base		The Scry base modules (Analysis/PointsTo/Rules/Models/Engine) fail first.
+lib/Scry/Models.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/NullExamples.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Scry/Nullness.wiz	Scry.nMaxVar missing (Scry base)	real selfhost bug	Scry base		Wil/Analysis/AiCfg/AiDomain fail first.
+lib/Scry/Optics.wiz	not a function (optic composition)	real selfhost bug	Scry Optics	scry-optics	`Scry.Getter.comp_get` applies an optic whose type is not a function; elaboration of the composition is wrong.
+lib/Scry/PointsTo.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Prover.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/ProverExamples.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Race.wiz	Scry.raceStep missing (Scry base)	real selfhost bug	Scry base		Scry.Fn/nodeStmt are unavailable because Analysis/Word fails.
+lib/Scry/Report.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/RuleExamples.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+lib/Scry/RuleTaint.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+lib/Scry/Rules.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/Sarif.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/Store.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/Scry/Taint.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Scry/TaintExamples.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Scry/UafExamples.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+lib/Scry/Wil.wiz	Exception `do` desugared as IO	real selfhost bug	Except do	except-do	`Wil.Val.bin` returns `Except String …`; the `do` block is desugared with the IO/World bind, not Except.bind.
+lib/Scry/WilExamples.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Scry/Workflow.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+lib/Serial.wiz	Sys/FFI API (EIO)	expected divergence	expected: C12 FFI/IO		Uses `EIO`/`Fd` from lib/Sys; the selfhost has no File/Sys native surface (C12).
+lib/Session.wiz	nested inductive occurrence	real selfhost bug	nested inductives	nested-inductives	`the type being defined may only occur as the type of a recursive field or the result`; the host allows this nesting.
+lib/Sha.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/SimpLemmas.wiz	notation `^` missing	host-only syntax	selfhost: notation ^	notation-pow	`b ^ 0 = 1`; the selfhost embedded prelude has no `^` notation, so the parser stops at `^`.
+lib/Std.wiz	extern/native Str/Array (Array duplicate)	expected divergence	expected: C12 FFI/IO		`axiom Array`/`Str` natives; the selfhost embeds Array and implements only part of the Str surface (C12).
+lib/Sys.wiz	Sys.wiz:71 EIO.bind	real selfhost bug	Sys EIO		`EIO.bind` fails to elaborate its constructor argument; every EIO/FS/Clock user then sees EIO unknown.
+lib/Tagged.wiz	Json.parse missing (Json fails on String ++)	real selfhost bug	String ++	string-append	`Json.parse` is unavailable because Json.wiz first fails on a `++` inferred as List.append.
+lib/Task.wiz	rfl computed further	real selfhost bug	Task	task	`Task.both_eq` rfl leaves a cast/transp redex; the host computes it away.
+lib/Text.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Trace.wiz	Mealy.outAt tuple mismatch	real selfhost bug	Trace	trace	`Mealy.outAt` expects a nested Prod/World shape instead of the S→I→S×O function.
+lib/Vec.wiz	Nat.lt_self mismatch	real selfhost bug	Vec	vec	`Nat.lt_self` fails the same Eq/induction shape as Nat/WordArray.
+lib/Web/Editor.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Web/Loom.wiz	Web/Loom.wiz:228 Loom.toR	real selfhost bug	Loom toR	loom-tor	`Loom.toR` tuple/Prod mismatch; also needs List.foldl/List.revOnto later.
+lib/Web/Playground.wiz	Text.wiz:45 duplicate List.map	real selfhost bug	Text prelude duplicate	prelude-text	The embedded prelude already declares `List.map`/`String.length`; lib/Text defines them again (and lacks List.foldl).
+lib/Web/Widget.wiz	Loom missing (Web/Loom fails)	real selfhost bug	Loom toR	loom-tor	`Loom` is unknown because Web/Loom.wiz fails at `Loom.toR`.
+lib/Word.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+lib/WordArray.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	`List.length_snoc` type mismatch; U64Array/U32Array are then unknown to Egraph/Lower.
+lib/WordMap.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+scry/gen/C/Schema.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+scry/grail.wiz	package DSL syntax	host-only syntax	selfhost: package DSL	grail-syntax	`|> Package.lib …` (grail build-file DSL); the selfhost parses commands only.
+scry/src/Scry/Budget.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/src/Scry/Codegen.wiz	recursive Scry.indexedFrom	real selfhost bug	Scry Codegen	scry-codegen	`def Scry.indexedFrom {A B} (f : …) : Nat → List A → List B` with two equation arguments: the recursive dotted name is not resolved.
+scry/src/Scry/CsCst.wiz	Scry.CstStore missing (CstStore/Word)	real selfhost bug	Scry base		CstStore/Lower/WordArray fail first.
+scry/src/Scry/CsLower.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+scry/src/Scry/CstOptics.wiz	Scry.Facts missing (Scry base)	real selfhost bug	Scry base		Optics/Schema/Facts/CstStore fail first.
+scry/src/Scry/CstStore.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+scry/src/Scry/Dynamic.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/src/Scry/Facts.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+scry/src/Scry/Lower.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	U32Array is missing because WordArray.wiz fails at its length_snoc lemma.
+scry/src/Scry/OpticsExamples.wiz	Scry.Facts missing (Scry base)	real selfhost bug	Scry base		Optics/Wil/Analysis/PointsTo/Facts/CstStore fail first.
+scry/src/Scry/Preproc.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+scry/src/Scry/Project.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+scry/src/Scry/ProjectCache.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
+scry/src/Scry/Query.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+scry/src/Scry/Repro.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/src/Scry/Schema.wiz	field projection a.n	real selfhost bug	Scry Schema	scry-schema	`a.n` is unknown when projecting a structure field through a parameter named `a`.
+scry/tests/cli.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/codegen.wiz	Json.parse missing (Json fails on String ++)	real selfhost bug	String ++	string-append	`Json.parse` is unavailable because Json.wiz first fails on a `++` inferred as List.append.
+scry/tests/cst.wiz	String `++` resolved as List.append	real selfhost bug	String ++	string-append	`"…" ++ s` is inferred as `List.append` (`expected List, got String`) instead of `String.append`; one overload/coercion bug.
+scry/tests/diff.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/dynamic.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/optics.wiz	could not elaborate a constructor argument	real selfhost bug	Scry test constructors	scry-test-ctors	A `List`/`Scry.NodeId` constructor argument is rejected; the host accepts it.
+scry/tests/relations.wiz	could not elaborate a constructor argument	real selfhost bug	Scry test constructors	scry-test-ctors	A `List`/`Scry.NodeId` constructor argument is rejected; the host accepts it.
+scry/tests/repl-prelude.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/report-pure.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/sarif-id.wiz	Lean IO/Sys API (EIO/FS/Clock/ExitStatus/SpawnOptions)	expected divergence	expected: C12 FFI/IO		Uses the lib/Sys process/FS/clock API; the selfhost deliberately lacks the File/Sys natives (C12) and its EIO.bind fails first.
+scry/tests/schema-index.wiz	Word.wiz:42 equations need a function type	real selfhost bug	Word equations	word-equations	Word.wiz fails at 42 (`Word.add_succ`), so `UIntN`/`U8`/`U16`/`U32`/`U64`/`BitVec` and every importer lose those names.
+scry/tests/schema.wiz	match in #eval term (term.match)	host-only syntax	selfhost: term.match	term-match	`#eval match … with`; the selfhost parser has no `term.match` in this position.
+scry/tools/SchemaMain.wiz	Json.parse missing (Json fails on String ++)	real selfhost bug	String ++	string-append	`Json.parse` is unavailable because Json.wiz first fails on a `++` inferred as List.append.

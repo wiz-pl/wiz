@@ -183,7 +183,7 @@ def freshPlaceholder (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Term R) := do
 /-- Names the elaborator treats as data primitives when applied (and not shadowed). -/
 def builtinNames : List Name :=
   ["Desc", "Desc.ret", "Desc.arg", "Desc.rec", "Desc.hrec", "Desc.elim", "Desc.interp", "Desc.All",
-   "μ", "ν", "con", "ind", "out", "coit", "cocon"]
+   "μ", "ν", "con", "ind", "out", "coit", "cocon", "scofix"]
 
 /-- `f a₁ … aₙ` where `f` is an unshadowed built-in name. -/
 def builtinApp? (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Option (Name × Array Syntax)) := do
@@ -574,6 +574,26 @@ def ctorNames (g : Globals R) (T : Name) : List Name :=
     | some v => ((strip descD.type v).descTag?.map (·.1)).getD []
     | none => []
 
+/-- (D6) The source names of the constructors of the inductive type (or structure) whose
+kernel name is `T` (`T.c`), in declaration order: the candidates `constructor` tries.
+`none` if `T` is not an inductive type; `some []` for an inductive with no
+constructors. A private type's kernel name is turned back into its source name
+(`Globals.privateBase`), as `privBase` does in `selfhost/Frontend.wiz`. -/
+def indCtorNames? (g : Globals R) (T : Name) : Option (List Name) := do
+  let base := Globals.privateBase T
+  if g.contains (T ++ ".desc") then
+    pure ((ctorNames g T).map (ctorConst base))
+  else
+    -- a structure has no description: its value is `λ Δ. Σ …`, its only constructor
+    -- `T.mk`
+    let d ← g.find? T
+    let rec strip : Term R → Term R
+      | .lam _ b => strip b
+      | t => t
+    match strip (d.value.getD .tt) with
+    | .sigma .. | .unit _ => if g.contains (T ++ ".mk") then pure [base ++ ".mk"] else none
+    | _ => none
+
 /-- A `mutual` block's constructor `n` (`Ev.s`, `ctorConst`): its family `F`, the data
 type whose constructor it is (the head of its result type), if `n` is one of `F`'s
 qualified tags. -/
@@ -611,18 +631,21 @@ def dotCtor? (g : Globals R) (tys : Array (VTy R)) (T c : Name) (expected : VTy 
     | _ => none
 
 partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
-  let ctorOf (n : Name) : Option (Name × Name) :=
-    -- (13b) this module's private type's constructor, under its kernel name
-    let n := g.resolve n
-    match (n.splitOn ".").reverse with
-    | c :: T@(_ :: _) =>
-      let T := ".".intercalate T.reverse
-      if g.contains (T ++ ".desc") && g.contains n then some (T, c)
-      -- (13h) a structure's constructor
-      else if c == "mk" && g.contains n && g.contains T then some (T, c)
-      -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
-      else (familyCtor? g n).map (·, n)
-    | _ => none
+  let ctorOf (n : Name) : Except String (Option (Name × Name)) := do
+    -- (13t) the name the current namespace and opens give it; (13b) this module's
+    -- private type's constructor, under its kernel name
+    let n ← g.resolveName n
+    let ofName : Option (Name × Name) :=
+      match (n.splitOn ".").reverse with
+      | c :: T@(_ :: _) =>
+        let T := ".".intercalate T.reverse
+        if g.contains (T ++ ".desc") && g.contains n then some (T, c)
+        -- (13h) a structure's constructor
+        else if c == "mk" && g.contains n && g.contains T then some (T, c)
+        -- a `mutual` block's constructor `Ev.s`: the family, and the tag (the name itself)
+        else (familyCtor? g n).map (·, n)
+      | _ => none
+    pure ofName
   match stx.kind with
   | "term.paren" => patView g (stx.getArg 1)
   | "term.tuple" =>
@@ -650,8 +673,9 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
   | "term.ident" =>
     let n := (stx.getArg 0).getId?.getD "_"
     match ctorOf n with
-    | some (T, c) => pure (.ctor (some T) c [])
-    | none => pure (.var n)
+    | .error e => .error e
+    | .ok (some (T, c)) => pure (.ctor (some T) c [])
+    | .ok none => pure (.var n)
   | "term.app" =>
     let h := stx.getArg 0
     let args := (stx.getArg 1).args.toList
@@ -660,11 +684,13 @@ partial def patView (g : Globals R) (stx : Syntax) : Except String PatView :=
     | "term.ident" =>
       let f := (h.getArg 0).getId?.getD "_"
       match ctorOf f with
-      | some (T, c) => pure (.ctor (some T) c args)
-      | none =>
+      | .error e => .error e
+      | .ok (some (T, c)) => pure (.ctor (some T) c args)
+      | .ok none =>
         -- (13q) `p + k`, as `+` expands (`Add.add p k`, or `HAdd.hAdd p k`), with a numeral `k`
         -- (`HAdd.hAdd` too: `+` of the heterogeneous classes)
-        match g.resolve f == "Add.add" || g.resolve f == "HAdd.hAdd", args with
+        let resolved := (g.resolveName f).toOption
+        match resolved == some "Add.add" || resolved == some "HAdd.hAdd", args with
         | true, [p, k] => match (if k.isOfKind "term.num" then (k.getArg 0).getNat? else none) with
           | some 0 => patView g p
           | some n => pure (.plusK p n)
@@ -1813,11 +1839,28 @@ partial def checkData? (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) :
     let some s' := sizePred? sz
       | throwAt ctx.info s!"cocon builds a value of size ↑s, but the expected type is {← showVal ctx expected}"
     return some (.cocon (← check ctx x (vInterp g l I D (nuFamilyAt l I D s') i)))
+  | "scofix", #[A, f, s, idx, a], .nu l I D _ _ _ =>
+    -- `scofix A f s i a`: `A : (j : Size) → I → Type`,
+    -- `f : (j) → ((i:I) → A j i → ν^j) → (i:I) → A (↑j) i → ν^{↑j}`,
+    -- `a : A s i`; the result is `ν^s D i` (checked against the expected type by
+    -- subtyping, as for any inferred form)
+    let A' ← check ctx A (scofixStateTy l I w)
+    let vA ← evalIn ctx A'
+    let f' ← check ctx f (scofixFunTy g l I D vA w)
+    let s' ← check ctx s .size
+    let vS ← evalIn ctx s'
+    let idx' ← check ctx idx I
+    let a' ← check ctx a (vApp g (vApp g vA vS) (← evalIn ctx idx'))
+    let ty : VTy R := .nu l I D (← evalIn ctx idx') vS none
+    unless subTy g ctx.types.reverse.toArray ty expected do
+      throwAt ctx.info s!"type mismatch\n  expected: {← showVal ctx expected}\n  inferred: {← showVal ctx ty}"
+    return some (.scofix l (q I) (q D) A' f' s' idx' a')
   | "Desc.ret", _, _ | "Desc.arg", _, _ | "Desc.rec", _, _ | "Desc.hrec", _, _ =>
     shapeError s!"{n} builds a description"
   | "con", _, _ => shapeError "con builds an inductive value"
   | "coit", _, _ => shapeError "coit builds a coinductive value"
   | "cocon", _, _ => shapeError "cocon builds a coinductive value"
+  | "scofix", _, _ => shapeError "scofix builds a coinductive value"
   | _, _, _ => return none
 
 /-- Stage 4d: data primitives whose type can be inferred. -/
@@ -3770,8 +3813,12 @@ partial def infer (ctx : LocalCtx R) (stx : Syntax) : ElabM R (Term R × VTy R) 
         return (.var ix, ty)
     -- a macro-scoped name that isn't a local refers to the global of its base name
     let x := stripScope x
-    -- (13b) this module's private declaration of that name, if any
-    let x := (← getGlobals).resolve x
+    -- (13t) this namespace's, this module's, and the open namespaces' declaration of the
+    -- name (an ambiguity is an error naming both); (13b) a private one of this module
+    -- resolves to its kernel name
+    let x ← match (← getGlobals).resolveName x with
+      | .ok x => pure x
+      | .error e => throwAt ctx.info e ErrorCode.ambiguousName
     match (← getGlobals).find? x with
     | some d =>
       -- (13b) a private name of another module
@@ -4136,6 +4183,12 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
       | some (T, nParams, nFields) => mkCon 1 [encodePair (encodeString T) (encodePair (.nat nParams) (.nat nFields))]
       | none => mkCon 0 []
     return ← runTac code info st (apply code (fld 1) ans)
+  if tag == TacTag.ctorNames then
+    -- (D6) `constructor`: the goal type's constructors, in declaration order
+    let ans := match indCtorNames? g (← str (fld 0)) with
+      | some ns => mkCon 1 [encodeList (ns.map encodeString)]
+      | none => mkCon 0 []
+    return ← runTac code info st (apply code (fld 1) ans)
   if tag == TacTag.isDefinition then
     let ans := match g.find? (← str (fld 0)) with
       | some { value := some _, inline := false, .. } => mkCon 1 [encodeBool true]
@@ -4352,7 +4405,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
       | .ok ty => pure ty
       | .error e =>
-        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+        match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
         | .ok ty => pure ty
         | .error _ => throwAt info s!"rewrite: {e}" ErrorCode.tacticFailed
     let (A, a, b) ← match ← force hty with
@@ -4387,7 +4440,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
         let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
           | .ok ty => pure ty
           | .error e =>
-            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx).toList.reverse } h with
+            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
             | .ok ty => pure ty
             | .error _ => throwAt info s!"simp: {e}" ErrorCode.tacticFailed
         let htyT ← zonk lvl (quote g lvl hty)
@@ -4534,7 +4587,7 @@ partial def elabBy (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : ElabM 
     unless t.mvars.isEmpty do throwAt ctx.info "assign: the assigned term still has holes at the end of the tactic block" ErrorCode.tacticFailed
     -- (the context's types with their holes solved: they may have been holes when the
     -- goal was made, and the kernel takes a hole as rigid)
-    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx).toList.reverse }
+    let kctx := { gl.kernelCtx (← getGlobals) with types := (← zonkedTypes gl.ctx) }
     match (← get).kernelInfer kctx t with
     | .ok ty => unifyAt gl.ctx stx gl.ty ty
     | .error e => throwAt ctx.info s!"assign: {e}" ErrorCode.tacticFailed

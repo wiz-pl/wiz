@@ -20,6 +20,7 @@ so in its header and skips cleanly when the build is absent.
 | `test-embed.sh` | checks that Lake re-embeds `runtime/rt_*.inc` after an edit (a temporary copy of the checkout) | local dev shell only (`docs/building.md`); needs an incremental Lake build, so CI does not run it |
 | `check-docs-style.py` | fails on authoring artefacts in user-facing docs: `/workspace` paths, agent roles, status checkmarks, "the user's decision" | `ci.yml` (`docs_style`), `pre-commit.sh --fast` |
 | `check-docs-examples.py` | runs every fenced `wiz` block through `wiz check`/`wiz run`, compares expected output, and resolves relative doc links | `ci.yml` (`docs_examples`), `--self-test` |
+| `check-names.py` | checks every declaration's current name against `legacy-names.tsv`: normal reports, `--quiet` is the CI gate, `--strict-names` fails on every name outside its module prefix; a stale row is an error, a malformed row exit 2 | `ci.yml` (`docs_style`, added by the namespace train) |
 | `check-repro.sh` | builds `Tests/ReproPaths` under two absolute paths with different environment and byte-compares the artifacts; `--compiler` also builds the compiler twice | `ci.yml`, `pre-commit.sh --full` |
 | `ci.py` | helpers for `ci.yml`: `matrix`, `plan`, `changes`, `check-shards`, `balance`, `summary`, `baseline`, `check-skips` | `.github/workflows/ci.yml`, `pre-commit.sh --fast` (skip lint) |
 | `check-shards.py` | the shard plan's totality gate: every group in a shard or in `.github/test-shard-exclusions.json` (reason and owner), no stale exclusion, and every skip-allowlist entry matches a case; `--self-test`, `--groups FILE` (a captured `tests --list`), `--json` | `.github/workflows/ci.yml` through `ci.py check-shards`; by hand for a review |
@@ -29,7 +30,7 @@ so in its header and skips cleanly when the build is absent.
 | `trust-ffi-audit.sh` | lists every `extern` in `lib/` with its ledger rows and, with `--check`, compiles the ledger's C prototypes | docs only (`docs/trust-ledger.md`) |
 | `flaky-ci.sh` | CI glue for `flaky.py`: classify a failed shard, decide the verdict, expire quarantines, `self-test` | docs only; the `ci.yml` half of its commit is not on master yet |
 | `golden-diff.py` | re-runs only the failing golden cases in a temporary copy and emits a Markdown diff | `.github/workflows/golden-diff.yml` |
-| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/grail-index/README.md` |
+| `grail-index-check.sh` | finds a `grail` binary and runs `grail index check` on a static index | `ci.yml`, `examples/fate-index/README.md` |
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
@@ -53,7 +54,7 @@ so in its header and skips cleanly when the build is absent.
 | `tower-init.sh` | the `curl`-to-`sh` installer: tower plus a default toolchain (nightly or a tag) | docs (`docs/install.md`); users |
 | `build-tower-wiz.sh` | builds `tower/` with a grail into `BINDIR/tower`, no Lean at build time | `release.yml`, `flake.nix` |
 | `mkexercises.py` | generates the exercise tree from the solution tree's marker blocks (solution-only files are dropped) | `release.yml` (tags only), docs |
-| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/grail-index/README.md`); by hand |
+| `grail-archive.sh` | the deterministic registry archive: `git archive` plus `gzip -n`, printing the SHA-256 the index records | docs (`docs/stages/23-grail/index-repository.md`, `examples/fate-index/README.md`); by hand |
 
 ## Benchmarks and performance
 
@@ -74,7 +75,7 @@ so in its header and skips cleanly when the build is absent.
 | `GenSelfhost.lean` | writes the fixpoint inputs (`compiler.wiz`, `self.wiz`) into `$OUT` | `fixpoint.sh`, `bench/selfhost-build.sh` |
 | `GenSelfhostTables.lean` | the `genSelfhostTables` Lake target: regenerates `selfhost/Tables.wiz` from the grammar | `lakefile.lean` |
 | `gen-semantics-matrix.py` | regenerates `docs/semantics-matrix.md` and `Tests/Semantics/cells.tsv` from the stage rules | by hand (`docs/semantics-matrix.md`) |
-| `gen-uart-temporal.py` | regenerates the marked case analyses inside `examples/hdl-uart-temporal.wiz` | by hand (`docs/libraries.md`) |
+| `gen-legacy-names.py` | regenerates `legacy-names.tsv` (module, name, reason class, file, line) from the seven library/tool roots (`lib`, `scry/src`, `scry/gen`, `hdl/src`, `tower`, `web`, `selfhost`); `--check`, `--print-digest`, `--update-digest` | by hand (namespace compatibility baseline) |
 
 ## Wasm experiments
 

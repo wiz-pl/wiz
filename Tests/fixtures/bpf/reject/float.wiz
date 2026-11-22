@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: the ISA has no floating point.
+import Bpf
+
+def bad (x : Float64) : Float64 := x

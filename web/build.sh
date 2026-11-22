@@ -80,7 +80,8 @@ cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.j
   "$ROOT/web/lsp-client.js" "$ROOT/web/widgets.js" "$ROOT/web/widgets.css" \
   "$ROOT/web/hover.js" "$ROOT/web/squiggles.js" \
   "$ROOT/web/completions.js" "$ROOT/web/scroll.js" "$ROOT/web/scroll-search.js" \
-  "$ROOT/web/scroll.css" "$ROOT/web/overlays.css" "$OUT/"
+  "$ROOT/web/scroll.css" "$ROOT/web/highlight.css" "$ROOT/web/overlays.css" \
+  "$ROOT/web/doc-live.js" "$ROOT/web/doc-live.css" "$OUT/"
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
   "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
