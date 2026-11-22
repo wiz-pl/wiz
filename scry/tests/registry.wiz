@@ -1,11 +1,11 @@
-import Scry.NativeLink
 -- test: run
+import Scry.NativeLink
 import WordMap
 import Sys
 import Text
 import Scry.Registry
 import Scry.TaintCmd
--- The analysis registry (`lib/Scry/Registry.wiz`): a pack's `check` names select rows,
+-- The analysis registry (`scry/src/Scry/Registry.wiz`): a pack's `check` names select rows,
 -- and the two-direction exhaustiveness check refuses a silent skip.
 --
 --   pack -> table   every `check` a memory rule names has a row (`unknownChecks`)
@@ -81,8 +81,8 @@ def main : IO Unit := EIO.toIO (do
     (List.isEmpty (Scry.unknownChecks Scry.analyses packUaf));
   check "a typo check is unknown"
     (hasCheck (Scry.unknownChecks Scry.analyses packTypo) "out-of-bounds-writ");
-  oobText ← FS.readFile "../lib/Scry/rules/oob.scry";
-  uafText ← FS.readFile "../lib/Scry/rules/uaf.scry";
+  oobText ← FS.readFile "rules/oob.scry";
+  uafText ← FS.readFile "rules/uaf.scry";
   check "the shipped oob.scry has no unknown check"
     (List.isEmpty (Scry.unknownChecks Scry.analyses (Scry.parseRulePack oobText)));
   check "the shipped uaf.scry has no unknown check"

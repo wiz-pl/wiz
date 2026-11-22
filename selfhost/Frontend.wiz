@@ -1,3 +1,4 @@
+namespace __root__
 -- From text to a checked term, all in Wiz (stage 14b): the lexer and parser read the
 -- full Wiz grammar, and this scope checker turns the syntax of a few term forms into
 -- the kernel's `Tm` (names become de Bruijn indices), which `Kernel.wiz` type checks.
@@ -603,7 +604,7 @@ inductive Foreign where
   | code (text : String)
 -- (A11) the deriver of each class the frontend implements (`deriving C` runs it): the
 -- Lean toolchain registers these with `attribute [deriver C] f` on import of
--- `lib/Deriving.wiz`, and the self-hosted prelude has no classes, so the five are
+-- `lib/Deriving.wiz`, and the self-hosted prelude declares only `Append`, so the five are
 -- pre-registered here. The value is the deriver's name (`deriveBEq`, …), as
 -- `attribute [deriver C] f` records it: dispatch is by **name**, like the host's table
 -- (`CommandState.derivers`), not by the class's method shape.
@@ -652,82 +653,129 @@ def LspCtx.empty : LspCtx := .mk .false .false Array.empty 0 0 .nil
 -- instances (the latest first), the preprocessed header texts (`import_c`; the driver
 -- reads them, since the frontend is pure), the derivers by class, (C14) whether
 -- `--trust-native` was given, (C15) whether `--trust-smt` was given (it selects the
--- `smt` refusal), and (D8 goals) the language server's collection state
+-- `smt` refusal), (D8 goals) the language server's collection state, and (13t) the
+-- namespace being elaborated, the `open`ed namespaces, the `open … as` aliases, and the
+-- namespaces still open (with where each was declared, for a missing `end`)
 --
 -- (C14) `trustNative` is the run's `--trust-native` (`--trust-native` of the host's
 -- `wiz`): `native_refl` is accepted only with it, and it is a flag of the run, not a
 -- property of the source (the host's `CommandState.trustNative`)
+-- (13t) `open M as A`: `A.x` is a spelling of `M.x`
+inductive NsAlias where
+  | mk (alias : String) (target : String)
+-- (13t) an open `namespace`: its full name, the offset of its `namespace` line, and the
+-- `open`s and aliases the block started with (`end` restores them: `open` is block-scoped)
+inductive NsFrame where
+  | mk (name : String) (off : Nat) (opens : List String) (aliases : List NsAlias)
 inductive Globals where
   | mk (all : Array Global) (scope : Scope) (inds : StrMap (Option IndInfo)) (ffi : List Foreign)
        (classes : StrMap (Option ClassInfo)) (insts : List InstInfo) (headers : List Header)
-       (priv : Bool) (ders : StrMap (Option String)) (trust : Bool) (smtTrust : Bool) (lsp : LspCtx)
-def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers .false .false LspCtx.empty
+       (priv : Bool) (ders : StrMap (Option String))
+       (nsPrefix : String) (opens : List String) (aliases : List NsAlias)
+       (nsStack : List NsFrame) (trust : Bool) (smtTrust : Bool) (lsp : LspCtx)
+def Globals.empty : Globals := .mk Array.empty Scope.empty StrMap.empty .nil StrMap.empty .nil .nil .false builtinDerivers
+  "" .nil .nil .nil .false .false LspCtx.empty
 def Globals.scope : Globals → Scope
-  | .mk _ sc _ _ _ _ _ _ _ _ _ _ => sc
+  | .mk _ sc _ _ _ _ _ _ _ _ _ _ _ _ _ _ => sc
 -- (C14) `--trust-native`: `native_refl` may decide an equation by running it
 def Globals.trustNative : Globals → Bool
-  | .mk _ _ _ _ _ _ _ _ _ t _ _ => t
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ t _ _ => t
+-- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
+-- frontend can parse and refuse but not run; the flag says which refusal to give
+def Globals.smtTrust : Globals → Bool
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ s _ => s
+-- (D8 goals) the language server's collection state
+def Globals.lsp : Globals → LspCtx
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => l
 def Globals.withTrust (gs : Globals) (t : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d _ s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st _ s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
+def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs p d np o a st tr _ l => .mk all sc inds ffi cls ins hs p d np o a st tr t l
 -- (playground LSP, stage 2) whether to record spans and expected types at all: the
 -- page's check turns it on, the compiler and the external server leave it off
 def Globals.watch (gs : Globals) : Bool := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.watch l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.watch l
 def Globals.watching (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) .true (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) .true (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 def Globals.setWatch (gs : Globals) (w : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) w (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) w (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 -- (D8 goals) what the collection sees: the command's source range, and the entries so far
 def Globals.lspOn (gs : Globals) : Bool := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.on l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.on l
 def Globals.lspSrc (gs : Globals) : Array Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.src l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.src l
 def Globals.lspStart (gs : Globals) : Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStart l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStart l
 def Globals.lspStop (gs : Globals) : Nat := match gs with
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStop l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.cmdStop l
 def Globals.lspEntries : Globals → List LspEntry
-  | .mk _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.entries l
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ l => LspCtx.entries l
 def Globals.setCmd (gs : Globals) (src : Array Nat) (start stop : Nat) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
-    .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) src start stop (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
+    .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) src start stop (LspCtx.entries l))
 def Globals.addLsp (gs : Globals) (e : LspEntry) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match Bool.or (LspCtx.on l) (LspCtx.watch l) with
-    | .true => .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (.cons e (LspCtx.entries l)))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match Bool.or (LspCtx.on l) (LspCtx.watch l) with
+    | .true => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (.cons e (LspCtx.entries l)))
     | .false => gs
 def Globals.withLsp (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p d t s (.mk .true (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk .true (LspCtx.watch l) (LspCtx.src l) (LspCtx.cmdStart l) (LspCtx.cmdStop l) (LspCtx.entries l))
 -- (a module's commands start a new document's entries; `modRunBody` resets it per module)
 def Globals.lspReset (gs : Globals) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p d t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) 0 0 .nil)
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s (.mk (LspCtx.on l) (LspCtx.watch l) (LspCtx.src l) 0 0 .nil)
+-- (13t) the namespace state, replaced as a whole
+def Globals.withNs (gs : Globals) (p : String) (ops : List String) (als : List NsAlias)
+    (st : List NsFrame) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs pr d _ _ _ _ t s l => .mk all sc inds ffi cls ins hs pr d p ops als st t s l
+-- (13t) the namespace being elaborated (`""` at the top of the file)
+def Globals.nsPrefix (gs : Globals) : String := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ p _ _ _ _ _ _ => p
+-- (13t) the namespaces `open`ed so far in this file (their names are visible unqualified)
+def Globals.opens (gs : Globals) : List String := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ os _ _ _ _ _ => os
+-- (13t) the `open M as A` aliases (`A.x` is `M.x`; an alias opens nothing unqualified)
+def Globals.aliases (gs : Globals) : List NsAlias := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ _ al _ _ _ _ => al
+-- (13t) the open namespaces, innermost first, with the offset of each `namespace`
+def Globals.nsStack (gs : Globals) : List NsFrame := match gs with
+  | .mk _ _ _ _ _ _ _ _ _ _ _ _ st _ _ _ => st
+-- (13t) a file's namespaces and opens are its own: an importer starts without them
+def Globals.atModuleStart (gs : Globals) : Globals := Globals.withNs gs "" .nil .nil .nil
+-- (13t) `namespace Foo` (nested: `A.B`)
+def Globals.pushNs (gs : Globals) (n : String) (off : Nat) : Globals := match gs with
+  | .mk all sc inds ffi cls ins hs pr d p os als st t s l =>
+    .mk all sc inds ffi cls ins hs pr d n os als (.cons (.mk n off os als) st) t s l
+-- (13t) `end`: the innermost namespace, and the one outside it
+def Globals.popNs (gs : Globals) (outer : String) (f : NsFrame) (rest : List NsFrame) : Globals :=
+  match f with
+  | .mk _ _ os als => Globals.withNs gs outer os als rest
 -- the module whose commands are being elaborated (`private` is module-scoped)
 def Globals.setModule (gs : Globals) (m : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all (Scope.setModule sc m) inds ffi cls ins hs p d np o a st t s l
 def Globals.setPrivate (gs : Globals) (p : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs _ d t s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs _ d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
 -- the kernel name a declaration `x` of the command being elaborated gets
 def Globals.declName (gs : Globals) (x : String) : String := match gs with
-  | .mk _ sc _ _ _ _ _ p _ _ _ _ => match p with
+  | .mk _ sc _ _ _ _ _ p _ _ _ _ _ _ _ _ => match p with
     | .true => privName (Scope.cur sc) x
     | .false => x
 def Globals.add (gs : Globals) (g : Global) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match g with
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match g with
     | .mk x ps ty v iv im ns =>
       let k := match p with
         | .true => privName (Scope.cur sc) x
         | .false => x;
-      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d t s l
+      .mk (Array.push all (.mk k ps ty v iv im ns)) (Scope.addGlobal sc k x (Scope.cur sc) p) inds ffi cls ins hs p d np o a st t s l
 def Globals.addInd (gs : Globals) (T : String) (info : IndInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l =>
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l =>
     let k := match p with
       | .true => privName (Scope.cur sc) T
       | .false => T;
-    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d t s l
+    .mk all sc (StrMap.insert inds (Str.ofString k) (.some info)) ffi cls ins hs p d np o a st t s l
 -- an inductive type by its name (`T`, a source name, or a term's kernel name)
 def Globals.ind (gs : Globals) (T : String) : Option IndInfo := match gs with
-  | .mk _ sc inds _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
+  | .mk _ sc inds _ _ _ _ _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName (Scope.cur sc) T)) .none with
     | .some info => .some info
     | .none => StrMap.findD inds (Str.ofString T) .none
 -- **Coinductive types (A19/B4)**. A coinductive type is not an inductive one for the
@@ -740,13 +788,13 @@ def Globals.addCoind (gs : Globals) (T : String) (info : IndInfo) : Globals :=
 def Globals.coind (gs : Globals) (T : String) : Option IndInfo :=
   Globals.ind gs (String.append "coinductive " T)
 def Globals.ffi : Globals → List Foreign
-  | .mk _ _ _ ffi _ _ _ _ _ _ _ _ => ffi
+  | .mk _ _ _ ffi _ _ _ _ _ _ _ _ _ _ _ _ => ffi
 def Globals.addFFI (gs : Globals) (f : Foreign) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds (.cons f ffi) cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds (.cons f ffi) cls ins hs p d np o a st t s l
 def Globals.headers : Globals → List Header
-  | .mk _ _ _ _ _ _ hs _ _ _ _ _ => hs
+  | .mk _ _ _ _ _ _ hs _ _ _ _ _ _ _ _ _ => hs
 def Globals.addHeader (gs : Globals) (name text : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins (.cons (Header.mk name text) hs) p d np o a st t s l
 def headerGo (name : String) : List Header → Option String
   | .nil => .none
   | .cons e rest => match strEq e.name name with
@@ -755,39 +803,33 @@ def headerGo (name : String) : List Header → Option String
 def Globals.header (gs : Globals) (name : String) : Option String :=
   headerGo name (Globals.headers gs)
 def Globals.withHeaders (gs : Globals) (hs : List Header) : Globals := match gs with
-  | .mk all sc inds ffi cls ins _ p d t s l => .mk all sc inds ffi cls ins hs p d t s l
+  | .mk all sc inds ffi cls ins _ p d np o a st t s l => .mk all sc inds ffi cls ins hs p d np o a st t s l
 -- (A10) the classes by name
 def Globals.class (gs : Globals) (T : String) : Option ClassInfo := match gs with
-  | .mk _ _ _ _ cls _ _ _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
+  | .mk _ _ _ _ cls _ _ _ _ _ _ _ _ _ _ _ => match StrMap.findD cls (Str.ofString T) .none with
     | .some info => .some info
     | .none => .none
 def Globals.addClass (gs : Globals) (T : String) (info : ClassInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi (StrMap.insert cls (Str.ofString T) (.some info)) ins hs p d np o a st t s l
 -- (A11) the deriver registered for a class (`deriving C` runs it), by class name
 def Globals.deriver (gs : Globals) (C : String) : Option String := match gs with
-  | .mk _ _ _ _ _ _ _ _ ders _ _ _ => match StrMap.findD ders (Str.ofString C) .none with
+  | .mk _ _ _ _ _ _ _ _ ders _ _ _ _ _ _ _ => match StrMap.findD ders (Str.ofString C) .none with
     | .some f => .some f
     | .none => .none
 def Globals.addDeriver (gs : Globals) (C f : String) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) t s l
--- (C15) `--trust-smt`: `smt` is a library tactic (lib/Prelude.wiz, stage 28a) that this
--- frontend can parse and refuse but not run; the flag says which refusal to give
-def Globals.smtTrust : Globals → Bool
-  | .mk _ _ _ _ _ _ _ _ _ _ s _ => s
-def Globals.withSmtTrust (gs : Globals) (t : Bool) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d tr _ l => .mk all sc inds ffi cls ins hs p d tr t l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls ins hs p (StrMap.insert d (Str.ofString C) (.some f)) np o a st t s l
 -- (A10) the instances, the latest first
 def Globals.insts : Globals → List InstInfo
-  | .mk _ _ _ _ _ ins _ _ _ _ _ _ => ins
+  | .mk _ _ _ _ _ ins _ _ _ _ _ _ _ _ _ _ => ins
 def Globals.addInst (gs : Globals) (i : InstInfo) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => .mk all sc inds ffi cls (.cons i ins) hs p d t s l
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => .mk all sc inds ffi cls (.cons i ins) hs p d np o a st t s l
 -- (A10) a global's parameter kinds replaced (a class's type former inserts its
 -- instance parameters at every use, as in Lean)
 def Globals.setMask (gs : Globals) (n : String) (m : List BKind) : Globals := match gs with
-  | .mk all sc inds ffi cls ins hs p d t s l => match Scope.lookup sc n with
+  | .mk all sc inds ffi cls ins hs p d np o a st t s l => match Scope.lookup sc n with
     | .none => gs
     | .some i => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
-      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d t s l
+      | .mk nm ps ty v iv _ ns => .mk (Array.set all (Array.size all - 1 - i) (.mk nm ps ty v iv m ns)) sc inds ffi cls ins hs p d np o a st t s l
 -- the instances of class `C`, the latest first
 def instsOf : String → List InstInfo → List InstInfo
   | _, .nil => .nil
@@ -796,13 +838,13 @@ def instsOf : String → List InstInfo → List InstInfo
     | .false => instsOf C rest
 -- the global at index `i` (the latest is `0`): a constant, or its value inlined
 def globalTm (inline : Bool) (gs : Globals) (i : Nat) : Tm := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk n _ ty v iv _ _ => match inline with
       | .true => iv
       | .false => .const n .nil .nil v ty
 -- the universe parameters a global declares (none at all before U1 for every definition)
 def globalParams (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ ps _ _ _ _ _ => ps
 -- a global's own parameters as levels (`fun u => .lparam u`, for a polymorphic global
 -- used where no level syntax is available)
@@ -814,8 +856,171 @@ def lparamLvls : List String → List Lvl
 def globalKeyOf (gs : Globals) (f : String) : String := match Scope.lookup (Globals.scope gs) f with
   | .none => f
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk k _ _ _ _ _ _ => k
+-- (13t) the kernel name at index `i` (the latest is `0`)
+def globalNameOf (gs : Globals) (i : Nat) : String := match gs with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk k _ _ _ _ _ _ => k
+-- (13t) a string's length (`lib/Prelude.wiz` has no `String.length`)
+def lenChars : List Char → Nat
+  | .nil => 0
+  | .cons _ cs => 1 + lenChars cs
+def lenStr (s : String) : Nat := match s with
+  | .mk cs => lenChars cs
+-- (13t) `p` a prefix of `s`
+def startsWithS (p s : String) : Bool := match p with
+  | .mk ps => match s with
+    | .mk ss => match matchPrefix ps ss with
+      | .some _ => .true
+      | .none => .false
+-- (13t) whether a namespace has any (public) declaration `n.…`: what `open n` needs
+partial def nameHasPrefix (all : Array Global) (i : Nat) (p : String) : Bool := match i with
+  | .zero => .false
+  | .succ j => match Array.getD all j (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk n _ _ _ _ _ _ => Bool.or (startsWithS p n) (nameHasPrefix all j p)
+def Globals.hasDeclUnder (gs : Globals) (n : String) : Bool := match gs with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => nameHasPrefix all (Array.size all) (n +++ ".")
+
+-- (13t) **Names in a namespace.** `x` as written denotes: a local binder, else (in
+-- `namespace Foo`) `Foo.x`, else the module's own `x`, else `M.x` for each `open M`; two
+-- *different* declarations are an error naming both (`ambiguous-name`), never a
+-- silent last-wins. A qualified name (`A.x`) is used as written, after the longest
+-- `open … as` alias maps its prefix (`Al.x` is `A.x`); inside a namespace, `B.x` that
+-- names nothing is also tried as `Foo.B.x`. This is the host's `Globals.resolveName`
+-- (`Wiz/Core/Term.lean`) over this frontend's scope.
+inductive NameRes where
+  | ok (i : Nat)
+  | privTo (mod name : String)
+  | missing
+  | ambiguous (names : List String)
+-- `dropL` is defined later in this file; `Cli.wiz` has a `dropChars` of its own (the
+-- compiler is one source, so the names must differ)
+def dropNChars : Nat → List Char → List Char
+  | .zero, cs => cs
+  | .succ _, .nil => .nil
+  | .succ k, .cons _ cs => dropNChars k cs
+-- (13v) a `String` with its first nine characters dropped (the `__root__.` escape)
+def drop9S (n : String) : String := match n with
+  | .mk cs => .mk (dropNChars 9 cs)
+def hasDotC : List Char → Bool
+  | .nil => .false
+  | .cons c cs => Bool.or (Nat.beq (Char.code c) 46) (hasDotC cs)
+def memIdx (x : Nat) : List Nat → Bool
+  | .nil => .false
+  | .cons y ys => Bool.or (Nat.beq x y) (memIdx x ys)
+def strLtChars : List Char → List Char → Bool
+  | .nil, .nil => .false
+  | .nil, _ => .true
+  | .cons _ _, .nil => .false
+  | .cons a as, .cons b bs => match Nat.lt (Char.code a) (Char.code b) with
+    | .true => .true
+    | .false => match Nat.beq (Char.code a) (Char.code b) with
+      | .true => strLtChars as bs
+      | .false => .false
+def strLtS (a b : String) : Bool := match a with
+  | .mk as => match b with
+    | .mk bs => strLtChars as bs
+def insertStr (x : String) : List String → List String
+  | .nil => .cons x .nil
+  | .cons y ys => match strLtS x y with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (insertStr x ys)
+def sortStr : List String → List String
+  | .nil => .nil
+  | .cons x xs => insertStr x (sortStr xs)
+def joinCommaStrs : List String → String
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x rest => x +++ ", " +++ joinCommaStrs rest
+def quoteStr : List String → List String
+  | .nil => .nil
+  | .cons x rest => .cons ("'" +++ x +++ "'") (quoteStr rest)
+def ambiguousMsg (x : String) (names : List String) : String :=
+  "'" +++ x +++ "' is ambiguous: it refers to " +++ joinCommaStrs (quoteStr names)
+    +++ "; qualify it with a namespace"
+-- the longest `open … as` alias whose prefix matches `x`
+def aliasBest (x : String) : List NsAlias → Option NsAlias
+  | .nil => .none
+  | .cons (.mk a m) rest =>
+    let best := aliasBest x rest;
+    match Bool.and (startsWithS (a +++ ".") x) (match best with
+      | .none => .true
+      | .some (.mk b _) => Nat.lt (lenStr a) (lenStr b)) with
+    | .true => .some (.mk a m)
+    | .false => best
+def expandAliases (gs : Globals) (x : String) : String := match aliasBest x (Globals.aliases gs) with
+  | .none => x
+  | .some (.mk a m) => m +++ String.mk (dropNChars (lenStr a) (match x with | .mk cs => cs))
+def prefixOpens : List String → String → List String
+  | .nil, _ => .nil
+  | .cons m ms, x => .cons (m +++ "." +++ x) (prefixOpens ms x)
+-- the names an unqualified `x` may denote, in the host's order
+def nsCandidates (gs : Globals) (x : String) : List String :=
+  let p := Globals.nsPrefix gs;
+  let here : List String := match p with
+    | .mk cs => match cs with
+      | .nil => .nil
+      | _ => .cons (p +++ "." +++ x) .nil;
+  List.append here (.cons x (prefixOpens (Globals.opens gs) x))
+def candOf (sc : Scope) (acc : List Nat) (n : String) : List Nat := match lookupExact sc n with
+  | .ok i => match memIdx i acc with
+    | .true => acc
+    | .false => .cons i acc
+  | _ => acc
+partial def candsOf (sc : Scope) (acc : List Nat) : List String → List Nat
+  | .nil => acc
+  | .cons x xs => candsOf sc (candOf sc acc x) xs
+def nameOfIdx (gs : Globals) : List Nat → List String
+  | .nil => .nil
+  | .cons i is => .cons (privBase (globalNameOf gs i)) (nameOfIdx gs is)
+-- the scope-free name: a qualified one as written (after the longest alias), an
+-- unqualified one through the namespace/open candidates
+def resolvePlainRel (sc : Scope) (gs : Globals) (x : String) : NameRes := match x with
+  | .mk cs => match hasDotC cs with
+    | .true =>
+      let y := expandAliases gs x;
+      match lookupExact sc y with
+      | .ok i => .ok i
+      | .privTo m => .privTo m y
+      | .missing =>
+        let p := Globals.nsPrefix gs;
+        match p with
+        | .mk ps => match ps with
+          | .nil => .missing
+          | _ => (match lookupExact sc (p +++ "." +++ y) with
+            | .ok i => .ok i
+            | .privTo m => .privTo m (p +++ "." +++ y)
+            | .missing => .missing)
+    | .false => match candsOf sc .nil (nsCandidates gs x) with
+      | .nil => match lookupExact sc x with
+        -- the bare name is another module's private declaration: name the module (an
+        -- `open` cannot reach it, so a name found only through one is just unknown)
+        | .privTo m => .privTo m x
+        | _ => .missing
+      | .cons i .nil => .ok i
+      | found => .ambiguous (sortStr (nameOfIdx gs found))
+-- (13v) `__root__.x` is exactly the global `x`: no relative or alias fallback
+def resolvePlain (sc : Scope) (gs : Globals) (x : String) : NameRes :=
+  match startsWithS "__root__." x with
+  | .true => let y := drop9S x;
+    match lookupExact sc y with
+    | .ok i => .ok i
+    | .privTo m => .privTo m y
+    | .missing => .missing
+  | .false => resolvePlainRel sc gs x
+def resolveNameV (sc : Scope) (gs : Globals) (n : String) : NameRes :=
+  match indexOf (Scope.localNames sc) n 0 with
+  | .some i => .ok i
+  -- (13t) a helper this frontend generated keeps its `✝` in its name (`f✝s`, the
+  -- reordered structural parameter): its declaration is exactly that name, so it is
+  -- tried before the scope-free spelling; a macro's template is looked up stripped
+  | .none => match strEq n (stripScope n) with
+    | .false => match lookupExact sc n with
+      | .ok i => .ok i
+      | .privTo m => .privTo m n
+      | .missing => resolvePlain sc gs (stripScope n)
+    | .true => resolvePlain sc gs n
 
 -- close a scope-checked term: the variables beyond the `d` binders it is under are
 -- globals (each command is checked in the empty context, so usage vectors and lookups
@@ -916,7 +1121,7 @@ inductive Step where
 -- added may be in scope before it, or twice among them. One exception: a partial
 -- definition's signature (an axiom) is followed, once, by its body under the same name.
 def Globals.all : Globals → Array Global
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => all
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => all
 inductive Seen where
   | mk (name : String) (axiomOnly : Bool)
 def isAxiomTm : Tm → Bool
@@ -1534,8 +1739,10 @@ def occursTms : Nat → Tms → Bool
   | i, .tcons t rest => Bool.or (occurs i t) (occursTms i rest)
 end
 -- the phantom domain `D` of the parameter `k` of `np` (its type `A` over the ones
--- before), at depth `np` in the parameters' context `c`; `none` if it gets none
-def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
+-- before), at depth `np` in the parameters' context `c`, for a data type at `l`;
+-- `none` if it gets none or its `D` would raise the tail's universe `l + 1` (as
+-- `phantomTail` in `Elab/Inductive.lean`, which is called at `.succ l`)
+def phantomDom (c : TCtx) (l : Lvl) (np k : Nat) (A : Tm) : Option Tm :=
   let P := shiftTm (np - k) 0 A;
   let p : Tm := .var (np - 1 - k);
   let vP := eval (TCtx.env c) P;
@@ -1548,27 +1755,27 @@ def phantomDom (c : TCtx) (np k : Nat) (A : Tm) : Option Tm :=
       | .false => .some (sigmaTm .qz P (.eq (shiftTm 1 0 P) (.var 0) (shiftTm 1 0 p)));
   match D with
   | .none => .none
-  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit (ln 1)))) with
+  | .some D' => match inferUniv c (sortsTyIn c (piTm .qz D' (.unit (lsucc l)))) with
     | .ok ty _ => match ty with
-      | .vsort l => match lvlEquiv l (.lnum 1) with
+      | .vsort lI => match lvlEquiv lI (lsucc l) with
         | .true => .some D'
         | .false => .none
       | _ => .none
     | .err _ => .none
 -- the phantom domains of the parameters from the `k`th on that `used` doesn't mention
-def phantomDoms (c : TCtx) (np : Nat) (used : Nat → Bool) : Nat → Tms → Tms
+def phantomDoms (c : TCtx) (l : Lvl) (np : Nat) (used : Nat → Bool) : Nat → Tms → Tms
   | _, .tnil => .tnil
   | k, .tcons A rest =>
-    let more := phantomDoms c np used (k + 1) rest;
+    let more := phantomDoms c l np used (k + 1) rest;
     match used k with
     | .true => more
-    | .false => match phantomDom c np k A with
+    | .false => match phantomDom c l np k A with
       | .some D => .tcons D more
       | .none => more
--- the tail `(0 _ : D₁) → … → Unit` (the `i` domains before already bound)
-def phantomTy : Nat → Tms → Tm
-  | _, .tnil => .unit (ln 1)
-  | i, .tcons D rest => piTm .qz (shiftTm i 0 D) (phantomTy (i + 1) rest)
+-- the tail `(0 _ : D₁) → … → Unit` at universe `u` (the `i` domains before already bound)
+def phantomTy (u : Lvl) : Nat → Tms → Tm
+  | _, .tnil => .unit u
+  | i, .tcons D rest => piTm .qz (shiftTm i 0 D) (phantomTy u (i + 1) rest)
 -- the index of a type without indices: the tail's value `fun _ … _ => tt` (`tt` for `Unit`)
 partial def phantomVal (I : Tm) : Tm := match I with
   | .pi .qz _ _ _ b => .lam (phantomVal b)
@@ -1810,7 +2017,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
             -- phantom parameters: those that neither a constructor nor the index type
             -- mentions (in the descriptions, under `t✝`, the parameter `k` is `np - k`)
             let cP := paramCtx empty pts;
-            let doms0 := phantomDoms cP np (fun (j : Nat) => Bool.or (occursTms (np - j) ds0) (occurs (np - 1 - j) I0)) 0 pts;
+            let doms0 := phantomDoms cP lv np (fun (j : Nat) => Bool.or (occursTms (np - j) ds0) (occurs (np - 1 - j) I0)) 0 pts;
             -- (22i) a structure with fields ends in the marker `(0 _ : Enum 1) → Unit`,
             -- after its phantom tail (`structTailDom` in the Lean frontend; there the
             -- marker's domain is `Enum [fields✝]`, here it is the same type by length)
@@ -1822,7 +2029,7 @@ def inductiveCmdL (gs : Globals) (stx0 : Syntax) (seal : Option Tm) : Step := ma
               | .none => doms1;
             let I : Tm := match doms with
               | .tnil => I0
-              | .tcons _ _ => STm.tm (sortSpine cP (phantomTy 0 doms));
+              | .tcons _ _ => STm.tm (sortSpine cP (phantomTy (lsucc lv) 0 doms));
             let tl := phantomVal I;
             let ds := match doms with
               | .tnil => ds0
@@ -3327,11 +3534,11 @@ def markTE (sp : Option SpT) : TE → TE
   | .err m => .err (errMarkIf sp m)
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ m _ => m
 -- a global's parameter names (A9: named arguments)
 def globalNames (gs : Globals) (i : Nat) : List String := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
     | .mk _ _ _ _ _ _ ns => ns
 -- Pattern matching in definitions (stages 16b, 16e): `def f (ps) : R := match x, y with
 -- | p₁, q₁ => rhs₁ …`, the scrutinees parameters and `R` not mentioning them, is
@@ -3382,11 +3589,15 @@ def ctorOfName (T n : String) : Option String := match String.append (privBase T
     | .mk ns => match dropPrefix ts ns with
       | .some c => .some (.mk c)
       | .none => .none
-def headCtor (T : String) (h : Syntax) : Option String := match strEq (kindOf h) "term.dotIdent" with
+def headCtor (gs : Globals) (T : String) (h : Syntax) : Option String := match strEq (kindOf h) "term.dotIdent" with
   | .true => match kid h 1 with
     | .ident c => .some c
     | _ => .none
-  | .false => ctorOfName T (identOf h)
+  -- (13t) a plain name goes through the same namespace/open/alias path as a term's: after
+  -- `open A`, a constructor of the matched type may be written unqualified
+  | .false => match resolveNameV (Globals.scope gs) gs (identOf h) with
+    | .ok i => ctorOfName T (globalNameOf gs i)
+    | _ => .none
 -- (A18) `x@y@p`: the names an as-pattern binds, and the pattern under them
 partial def asNames (p : Syntax) : List String := match strEq (kindOf (unparen p)) "term.asPat" with
   | .true => .cons (identOf (kid (unparen p) 0)) (asNames (kid (unparen p) 2))
@@ -3395,10 +3606,10 @@ partial def asInner (p : Syntax) : Syntax := match strEq (kindOf (unparen p)) "t
   | .true => asInner (kid (unparen p) 2)
   | .false => unparen p
 -- `x@p` matches `p` and also binds `x` to the scrutinee
-partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
-  | .true => patOf T (kid (unparen p) 2)
+partial def patOf (gs : Globals) (T : String) (p : Syntax) : Pat := match strEq (kindOf (unparen p)) "term.asPat" with
+  | .true => patOf gs T (kid (unparen p) 2)
   | .false => match strEq (kindOf p) "term.paren" with
-  | .true => patOf T (kid p 1)
+  | .true => patOf gs T (kid p 1)
   | .false => match strEq (kindOf p) "term.anon" with
   | .true => .anon (nonAtomsS (kids (kid p 1)))
   | .false => match strEq (kindOf p) "term.num" with
@@ -3412,16 +3623,16 @@ partial def patOf (T : String) (p : Syntax) : Pat := match strEq (kindOf (unpare
       | .true => match kids (kid p 1) with
         | .cons a (.cons b .nil) => match strEq (kindOf b) "term.num" with
           | .true => match numValue b with
-            | .zero => patOf T a
+            | .zero => patOf gs T a
             | .succ k => .ctor "succ" (one (match k with
               | .zero => a
               | _ => mkNode "term.app" (.cons (kid p 0) (one (mkNull (.cons a (one (mkNode "term.num" (one (.atom (Nat.toString k)))))))))))
           | .false => .any "_"
         | _ => .any "_"
-      | .false => match headCtor T (kid p 0) with
+      | .false => match headCtor gs T (kid p 0) with
         | .some c => .ctor c (kids (kid p 1))
         | .none => .any "_"
-    | .false => match headCtor T p with
+    | .false => match headCtor gs T p with
       | .some c => .ctor c .nil
       | .none => .any (identOf p)
 def isVarPat (p : Syntax) : Bool := match strEq (kindOf p) "term.ident" with
@@ -3475,7 +3686,7 @@ def explicitPats : List Bool → List Syntax → List Syntax
 -- column `k` (`col`): a clause with `c` there gets its sub-patterns in place of that
 -- column (`padPats F`), one with a variable gets `F` holes and binds the variable to
 -- `col` (unless it is `_`), and one with another constructor is dropped.
-def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List Clause → List Clause
+def specialize (gs : Globals) (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List Clause → List Clause
   --<sol
   | .nil => .nil
   | .cons (.mk pats binds rhs) rest =>
@@ -3483,17 +3694,17 @@ def specialize (T c : String) (k F : Nat) (impl : List Bool) (col : Col) : List 
     let after := dropL (k + 1) pats;
     -- (A18) `x@p` binds `x` to this column and matches `p` in it
     let binds0 := List.append binds (asBinds (asNames (nthSyntax pats k)) col);
-    match patOf T (nthSyntax pats k) with
+    match patOf gs T (nthSyntax pats k) with
     | .ctor c' subs => match strEq c c' with
-      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
-      | .false => specialize T c k F impl col rest
+      | .true => .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize gs T c k F impl col rest)
+      | .false => specialize gs T c k F impl col rest
     | .anon subs =>
-      .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize T c k F impl col rest)
+      .cons (.mk (List.append before (List.append (padPats F (explicitPats impl subs)) after)) binds0 rhs) (specialize gs T c k F impl col rest)
     | .any x =>
       let binds' := match strEq x "_" with
         | .true => binds0
         | .false => List.append binds0 (.cons (Bind.mk x col) .nil);
-      .cons (.mk (List.append before (List.append (holes F) after)) binds' rhs) (specialize T c k F impl col rest)
+      .cons (.mk (List.append before (List.append (holes F) after)) binds' rhs) (specialize gs T c k F impl col rest)
   --|ex
   --| | _ => .nil
   --sol>
@@ -3995,7 +4206,8 @@ def structFieldsOf (info : IndInfo) : Option (List String) := match info with
 -- is the marker's too, stage 21n)
 def Globals.structFields (gs : Globals) (T : String) : Option (List String) := match privSplit T with
   | .some (.mk m base) => match gs with
-    | .mk _ _ inds _ _ _ _ _ _ _ _ _ => match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
+    | .mk _ _ inds _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+      match StrMap.findD inds (Str.ofString (privName m ("structure " +++ base))) .none with
       | .some info => structFieldsOf info
       | .none => .none
   | .none => match Globals.ind gs (String.append "structure " T) with
@@ -4936,8 +5148,9 @@ def inferHead (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT) 
         | .err m => HE.err m
 def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
   let d := Cx.lvl cx;
-  match Scope.lookupV (Cx.sc cx) n with
-  | .privTo m => .err (("'" +++ privBase n) +++ "' is private to module " +++ m)
+  match resolveNameV (Cx.sc cx) gs n with
+  | .privTo m nm => .err (("'" +++ privBase nm) +++ "' is private to module " +++ m)
+  | .ambiguous names => .err (ambiguousMsg n names)
   | .missing => match splitLast n with
     -- `x.f`: the projection `T.f x`, for `x : T …`
     | .some (.mk base f) => match identHead gs es cx base with
@@ -4964,13 +5177,15 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
 -- a fresh level metavariable). A local variable has no levels.
 def identUnivHead (gs : Globals) (es : ES) (cx : Cx) (n : String) (ls : List Syntax) : HE :=
   let d := Cx.lvl cx;
-  match Scope.lookup (Cx.sc cx) n with
-  | .some i => match Nat.lt i d with
+  match resolveNameV (Cx.sc cx) gs n with
+  | .privTo m nm => HE.err (("'" +++ privBase nm) +++ "' is private to module " +++ m)
+  | .ambiguous names => HE.err (ambiguousMsg n names)
+  | .ok i => match Nat.lt i d with
     | .true => HE.err (String.append "a local variable has no universe levels: " n)
     | .false => match globalUse gs es cx (i - d) ls with
       | .ok t ty es' m => .ok t ty es' m
       | .err msg => .err msg
-  | .none => match strEq n "Unit" with
+  | .missing => match strEq n "Unit" with
     | .true => HE.err "Unit has no universe levels in the self-hosted frontend"
     | .false => .err (String.append "unknown identifier " n)
 -- a projection chain `a.b.c` as `["a", "b", "c"]` (the lexer reads dotted names as one
@@ -6361,7 +6576,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
     match col with
     | .mk L _ _ _ => match fieldCols np L d0 args ls cx5 0 qs fs with
       | .mk wrap fcols recs cx6 =>
-        let cls' := specialize T c k F impl col cls;
+        let cls' := specialize gs T c k F impl col cls;
         match Bool.and modeB (Bool.or (isNilCl cls') (otherMember idx res)) with
         | .true =>
           -- no clause (or another member's constructor): ruled out by the index (else a
@@ -6442,7 +6657,7 @@ def branches (gs : Globals) (mc : MatchCtx) (es : ES) (cx3 : Cx) (expected : Val
                   let cols'' := match top with
                     | .true => regen p n (base + 1 + eB + eB) pts pts cols'
                     | .false => cols';
-                  match compileM gs mc es cx9 expected' cols'' .false ihLvls' (specialize T c k F impl curCol cls) with
+                  match compileM gs mc es cx9 expected' cols'' .false ihLvls' (specialize gs T c k F impl curCol cls) with
                   | .err m => .err (match strEq m "missing case" with
                     | .true => String.append "missing case " c
                     | .false => m)
@@ -7395,6 +7610,24 @@ def joinUnder : List String → String
   | .cons n rest => match rest with
     | .nil => n
     | .cons _ _ => String.append (String.append n "_") (joinUnder rest)
+-- (13t) `mutual` members in a namespace are `N.A`, `N.B`: one family `N.A_B` (the
+-- namespace before the underscore, so that `N.A_B.Tag` parses as a name)
+def shortName (n : String) : String := match splitLast n with
+  | .some (.mk _ f) => f
+  | .none => n
+def nsPart (n : String) : String := match splitLast n with
+  | .some (.mk b _) => b
+  | .none => ""
+def familyName (members : List String) : String :=
+  let first := match members with
+    | .cons n _ => n
+    | .nil => "";
+  let ns := nsPart first;
+  let shorts := joinUnder (mapL shortName members);
+  match ns with
+    | .mk cs => match cs with
+      | .nil => shorts
+      | _ => ns +++ "." +++ shorts
 -- the member types `A := fun ps => F ps (tag j)`
 def addMembers (F FI : Tm) (np : Nat) (pts : Tms) (m : Nat) : Globals → Nat → List String → Globals
   | gs, _, .nil => gs
@@ -7454,7 +7687,7 @@ def mutualInductiveCmd0 (gs : Globals) (defs : List Syntax) : Step := match mutu
   | .none =>
   let members := memberNames defs;
   let m := List.length members;
-  let F := joinUnder members;
+  let F := familyName members;
   let mcs := memberCtors defs 0;
   let k := List.length mcs;
   let params := fieldsOf (kids (kid (nthSyntax defs 0) 3));
@@ -7578,6 +7811,146 @@ def setNthSyn (v : Syntax) : List Syntax → Nat → List Syntax
 def setKid (s : Syntax) (i : Nat) (v : Syntax) : Syntax := mkNode (kindOf s) (setNthSyn v (kids s) i)
 -- a generated parameter binder is implicit at quantity 0 (as the Lean elaborator's
 -- `implicitΔ`), whatever its type
+-- (13t) a node's name: an `ident`, or the first `ident` under it (a `term.ident`, or the
+-- `null` an `optional ident` makes), as the host's `Syntax.getId?` reads these commands
+partial def getIdOpt (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node _ _ => match kids s with
+    | .cons x _ => getIdOpt x
+    | .nil => .none
+  | _ => .none
+-- the first `ident` anywhere under a node (an `optional` sequence such as
+-- `open M as A`'s `as A`: its keywords are atoms, the alias is the only ident)
+mutual
+partial def firstIdName (s : Syntax) : Option String := match s with
+  | .ident n => .some n
+  | .node _ _ => firstIdIn (kids s)
+  | _ => .none
+partial def firstIdIn : List Syntax → Option String
+  | .nil => .none
+  | .cons x xs => match firstIdName x with
+    | .some n => .some n
+    | .none => firstIdIn xs
+end
+-- (13t) rename every `ident` the function maps
+mutual
+partial def renameIdents (f : String → Option String) (s : Syntax) : Syntax := match s with
+  | .ident n => match f n with
+    | .some m => .ident m
+    | .none => s
+  | .node k args => .node k (renameIdsList f args)
+  | _ => s
+partial def renameIdsList (f : String → Option String) : SyntaxF .false → SyntaxF .false
+  | .nil => .nil
+  | .cons x xs => .cons (renameIdents f x) (renameIdsList f xs)
+end
+-- (13t) one of a `mutual` block's type names, as written: a member refers to its
+-- siblings unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
+def mutualTypeShorts : List Syntax → List String
+  | .nil => .nil
+  | .cons d rest =>
+    let d := match strEq (kindOf d) "command.private" with
+      | .true => kid d 1
+      | .false => d;
+    let shortOpt : Option String := match strEq (kindOf d) "command.inductive" with
+      | .true => getIdOpt (kid d 1)
+      | .false => match strEq (kindOf d) "command.structure" with
+        | .true => getIdOpt (kid d 1)
+        | .false => match strEq (kindOf d) "command.class" with
+          | .true => getIdOpt (kid d 1)
+          | .false => match strEq (kindOf d) "command.coinductive" with
+            | .true => getIdOpt (kid d 1)
+            | .false => .none;
+    match shortOpt with
+    | .some sh => .cons sh (mutualTypeShorts rest)
+    | .none => mutualTypeShorts rest
+def rewriteShort (p : String) : List String → String → Option String
+  | .nil, _ => .none
+  | .cons sh rest, n => match strEq n sh with
+    | .true => .some (p +++ "." +++ sh)
+    | .false => match startsWithS (sh +++ ".") n with
+      | .true => .some (p +++ "." +++ n)
+      | .false => rewriteShort p rest n
+-- (13t) Prefix the name a declaration command declares with the current namespace, so
+-- that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
+-- rewritten once, where it is elaborated (`stepCommand`); the handlers then see the full
+-- name, and references to `bar` in the body resolve through `resolveNameV`. Commands that
+-- declare no name (`open`, `end`, `#check`, …) are unchanged.
+partial def prefixDeclName (p : String) (cmd : Syntax) : Syntax := match p with
+  | .mk cs => match cs with
+    | .nil => cmd
+    | _ =>
+      let namedAt : Nat → Syntax := fun i => match getIdOpt (kid cmd i) with
+        | .some n => setKid cmd i (.ident (p +++ "." +++ n))
+        | .none => cmd;
+      -- an optional name: the `null` node `optional ident` makes, a bare ident, or nothing
+      let prefOpt : Syntax → Syntax := fun stx => match getIdOpt stx with
+        | .some n => .ident (p +++ "." +++ n)
+        | .none => match stx with
+          | .node k args => match args with
+            | .cons x rest => .node k (.cons (match getIdOpt x with
+                | .some n => .ident (p +++ "." +++ n)
+                | .none => x) rest)
+            | .nil => stx
+          | _ => stx;
+      -- a type declaration's own name, and its short spelling in its fields (`| mk : T →
+      -- T`, which the elaborator binds as `N.T`)
+      let typeDecl : Syntax :=
+        let named := match getIdOpt (kid cmd 1) with
+          | .some n => setKid cmd 1 (.ident (p +++ "." +++ n))
+          | .none => cmd;
+        match getIdOpt (kid cmd 1) with
+        | .some sh => renameIdents (fun n => match strEq n sh with
+            | .true => .some (p +++ "." +++ sh)
+            | .false => match startsWithS (sh +++ ".") n with
+              | .true => .some (p +++ "." +++ n)
+              | .false => .none) named
+        | .none => named;
+      let k := kindOf cmd;
+      match strEq k "command.def" with
+      | .true => namedAt 1
+      | .false => match strEq k "command.defEqns" with
+        | .true => namedAt 1
+        | .false => match strEq k "command.axiom" with
+          | .true => namedAt 1
+          | .false => match strEq k "command.glue" with
+            | .true => namedAt 1
+            | .false => match strEq k "command.foreignType" with
+              | .true => namedAt 1
+              | .false => match strEq k "command.inductive" with
+                | .true => typeDecl
+                | .false => match strEq k "command.structure" with
+                  | .true => typeDecl
+                  | .false => match strEq k "command.class" with
+                    | .true => typeDecl
+                    | .false => match strEq k "command.coinductive" with
+                      | .true => typeDecl
+                      | .false => match strEq k "command.extern" with
+                        | .true => namedAt 3
+                        | .false => match strEq k "command.cStruct" with
+                          | .true => namedAt 3
+                          | .false => match strEq k "command.instance" with
+                            | .true => setKid cmd 2 (prefOpt (kid cmd 2))
+                            | .false => match strEq k "command.partial" with
+                              | .true => setKid cmd 2 (prefixDeclName p (kid cmd 2))
+                              | .false => match strEq k "command.private" with
+                                | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                | .false => match strEq k "command.sealed" with
+                                  | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                  | .false => match strEq k "command.local" with
+                                    | .true => setKid cmd 1 (prefixDeclName p (kid cmd 1))
+                                    | .false => match strEq k "command.mutual" with
+                                      | .true =>
+                                        -- every member's name, and a member's unqualified
+                                        -- use of its siblings
+                                        let body := kid cmd 1;
+                                        let members := kids body;
+                                        let shorts := mutualTypeShorts members;
+                                        let step : Syntax → Syntax := fun c =>
+                                          renameIdents (rewriteShort p shorts) (prefixDeclName p c);
+                                        setKid cmd 1 (mkNode (kindOf body) (mapL step members))
+                                      | .false => cmd
+-- (an implicit binder keeps its quantity: its default 0 is written out, stage 21m)
 def zeroQtyStx : Syntax := mkNull (one (mkNode "quantity" (one (mkNode "num" (one (.atom "0"))))))
 -- a quantity as binder syntax (ω is a bare binder)
 def qtyStxOf (q : Q) : Syntax := match q with
@@ -8347,7 +8720,7 @@ partial def headIndex (all : Array Global) (i : Nat) (m : StrMap (List Nat)) : S
     | .none => m
     | .some h => StrMap.insert m (Str.ofString h) (.cons j (StrMap.findD m (Str.ofString h) .nil)))
 def WEnv.of (gs : Globals) : WEnv := match gs with
-  | .mk all _ _ _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
+  | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => .mk all (headIndex all (Array.size all) StrMap.empty)
 def WEnv.global (we : WEnv) (i : Nat) : Global := match we with
   | .mk all _ => Array.getD all i (.mk "?" .nil .star .star .star .nil .nil)
 def WEnv.cands (we : WEnv) (h : HeadArgs) : List Nat := match we with
@@ -8693,8 +9066,8 @@ def externCmd (gs : Globals) (stx : Syntax) : Step :=
   match axiomCmd gs (mkNode "command.axiom" (.cons (.atom "axiom") (.cons (kid stx 3)
       (.cons (mkNull .nil) (.cons (mkNull .nil) (one (mkNull (.cons (.atom ":") (one (kid stx 5)))))))))) with
   | .mk line gs' => match gs' with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
-      | .mk all0 _ _ _ _ _ _ _ _ _ _ _ => Array.size all0) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Nat.beq (Array.size all) (match gs with
+      | .mk all0 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => Array.size all0) with
       | .true => .mk line gs'
       | .false => match Array.getD all (Array.size all - 1) (.mk "?" .nil .star .star .star .nil .nil) with
         | .mk _ _ ty _ _ _ _ => match ffiSig (Globals.ffi gs) (isNativeC cname) ty with
@@ -8761,7 +9134,7 @@ def exportedAs (cname : String) : List Foreign → Bool
 def globalTyOf (gs : Globals) (f : String) : Option Tm := match Scope.lookup (Globals.scope gs) f with
   | .none => .none
   | .some i => match gs with
-    | .mk all _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
+    | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
       | .mk _ _ ty _ _ _ _ => .some ty
 -- `export "c_name" f (: T)?` (stage 21o, as `command.export` in the Lean frontend)
 def exportCmd (gs : Globals) (stx : Syntax) : LinkR :=
@@ -8977,9 +9350,18 @@ def defsSteps : Globals → List Syntax → Step
       | .mk lines gs'' => .mk (match rest with
           | .nil => line
           | .cons _ _ => String.append (String.append line "\n") lines) gs''
-def partialCmd (gs : Globals) (defs : List Syntax) : Step := match addPartials gs defs with
-  | .err m => errStep gs m
-  | .ok gs1 => defsSteps gs1 (unwrapDefs defs)
+-- an `import` among `defs` (`partial import M`, `mutual … import M … end`): the fixed
+-- header does not allow one inside a command
+def hasImportCmd : List Syntax → Bool
+  | .nil => .false
+  | .cons s rest => match strEq (kindOf s) "command.import" with
+    | .true => .true
+    | .false => hasImportCmd rest
+def partialCmd (gs : Globals) (defs : List Syntax) : Step := match hasImportCmd defs with
+  | .true => errStep gs "`import` is not allowed inside a `mutual`/`partial` block: imports go at the top level of a file, before every other command"
+  | .false => match addPartials gs defs with
+    | .err m => errStep gs m
+    | .ok gs1 => defsSteps gs1 (unwrapDefs defs)
 
 -- Structures (stage 18e): `structure T (ps) where f₁ : A₁ …` is the inductive type
 -- `T (ps) where | mk (f₁ : A₁) …` and a projection `T.fᵢ {ps} (s : T ps) : Aᵢ` for each
@@ -9234,7 +9616,11 @@ def instanceCmd (gs : Globals) (stx : Syntax) : Step :=
       | .ok vS =>
         let name := match optIdent (kid stx 2) with
           | .some n => n
-          | .none => freshName gs (String.append "inst" C) 0;
+          -- (13t) an anonymous instance in a namespace is `Foo.inst…` too
+          | .none => freshName gs (match Globals.nsPrefix gs with
+              | .mk cs => match cs with
+                | .nil => String.append "inst" C
+                | _ => Globals.nsPrefix gs +++ "." +++ "inst" +++ C) 0;
         match defT gs ES.empty (Cx.mk empty (Globals.scope gs) .nil) bs tyS vS .none with
         | .err m => errStep gs m
         | .ok ty0 v0 es0 => match finishElab gs es0 with
@@ -9707,7 +10093,7 @@ def glueCmd (gs : Globals) (stx : Syntax) : Step :=
           let gs2 := Globals.addFFI gs1 (.code ("static " +++ kindCType gs rk +++ " " +++ cname +++ "(" +++
             (if strEq cparams "" then "void" else cparams) +++ ") {\n" +++ body +++ "\n}"));
           .mk "" (Globals.addFFI gs2 (.fn name cname "" ks rk io ""))
-def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" ++ \" => List.append\ninfixr:67 \" :: \" => List.cons\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive Bytes where\n  | private mk (data : List Nat)\ninductive Except (E A : Type) where\n  | error (e : E)\n  | ok (val : A)\ndef Bytes.getAux : List Nat → Nat → Nat\n  | .nil, _ => 0\n  | .cons x xs, i => match i with\n    | .zero => x\n    | .succ j => Bytes.getAux xs j\ndef Bytes.empty : Bytes := .mk .nil\ndef Bytes.push (b : Bytes) (x : Nat) : Bytes := match b with\n  | .mk bs => .mk (List.append bs (.cons (Nat.mod x 256) .nil))\ndef Bytes.size (b : Bytes) : Nat := match b with\n  | .mk bs => List.length bs\ndef Bytes.get (b : Bytes) (i : Nat) : Nat := match b with\n  | .mk bs => Bytes.getAux bs i\ndef Bytes.dropN : Nat → List Nat → List Nat\n  | .zero, xs => xs\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => Bytes.dropN k xs\ndef Bytes.takeN : Nat → List Nat → List Nat\n  | .zero, _ => .nil\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => .cons x (Bytes.takeN k xs)\ndef Bytes.slice (b : Bytes) (start len : Nat) : Bytes := match b with\n  | .mk bs => .mk (Bytes.takeN len (Bytes.dropN start bs))\ndef Bytes.append (a b : Bytes) : Bytes := match a with\n  | .mk xs => match b with\n    | .mk ys => .mk (List.append xs ys)\ndef Bytes.eqAux : List Nat → List Nat → Bool\n  | .nil, .nil => .true\n  | .cons x xs, .cons y ys => match Nat.beq x y with\n    | .true => Bytes.eqAux xs ys\n    | .false => .false\n  | _, _ => .false\ndef Bytes.eq (a b : Bytes) : Bool := match a with\n  | .mk xs => match b with\n    | .mk ys => Bytes.eqAux xs ys\ndef Bytes.isScalar (c : Nat) : Bool := Bool.not (Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)))\ndef Bytes.scalar (c : Nat) : Nat := match Bytes.isScalar c with\n  | .true => c\n  | .false => 65533\ndef Bytes.pushCp (b : Bytes) (c0 : Nat) : Bytes :=\n  let c := Bytes.scalar c0;\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Nat.lt c 65536 with\n      | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n      | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n          (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofStringAux : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => match Nat.beq (Char.code c) 0 with\n    | .true => acc\n    | .false => Bytes.ofStringAux cs (Bytes.pushCp acc (Char.code c))\ndef Bytes.ofString (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofStringAux cs Bytes.empty\ndef Bytes.contOk : Nat → List Nat → Bool\n  | .zero, _ => .true\n  | .succ k, .nil => .false\n  | .succ k, .cons x xs => Bool.and (Bool.and (Nat.lt 127 x) (Nat.lt x 192)) (Bytes.contOk k xs)\ndef Bytes.contVal : Nat → Nat → List Nat → Nat\n  | .zero, cp, _ => cp\n  | .succ k, cp, .nil => cp\n  | .succ k, cp, .cons x xs => Bytes.contVal k (Nat.lor (Nat.shiftLeft cp 6) (Nat.land x 63)) xs\ndef Bytes.revChars : List Char → List Char → List Char\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.revChars cs (.cons c acc)\ndef Bytes.beforeNul : List Nat → List Nat\n  | .nil => .nil\n  | .cons c cs => match Nat.beq c 0 with\n    | .true => .nil\n    | .false => .cons c (Bytes.beforeNul cs)\ndef Bytes.width (c : Nat) : Nat :=\n  match Nat.lt c 128 with\n  | .true => 1\n  | .false => match Nat.beq (Nat.div c 32) 6 with\n    | .true => 2\n    | .false => match Nat.beq (Nat.div c 16) 14 with\n      | .true => 3\n      | .false => match Nat.beq (Nat.div c 8) 30 with\n        | .true => 4\n        | .false => 1\ndef Bytes.leadVal (c : Nat) : Nat :=\n  match Nat.lt c 128 with\n  | .true => c\n  | .false => match Nat.beq (Nat.div c 32) 6 with\n    | .true => Nat.land c 31\n    | .false => match Nat.beq (Nat.div c 16) 14 with\n      | .true => Nat.land c 15\n      | .false => match Nat.beq (Nat.div c 8) 30 with\n        | .true => Nat.land c 7\n        | .false => 65533\ndef Bytes.minWidth (len : Nat) : Nat :=\n  match len with\n  | 2 => 127\n  | 3 => 2047\n  | 4 => 65535\n  | _ => 0\ndef Bytes.decodeFrom : Nat → List Nat → List Char → List Char\n  | .zero, _, acc => acc\n  | .succ fuel, .nil, acc => acc\n  | .succ fuel, .cons c xs, acc => match Nat.beq c 0 with\n    | .true => acc\n    | .false => let len := Bytes.width c;\n      let raw := Bytes.contVal (Nat.sub len 1) (Bytes.leadVal c) xs;\n      let ok := Bool.and (Bytes.contOk (Nat.sub len 1) xs)\n        (Bool.and (Nat.lt (Bytes.minWidth len) raw) (Bytes.isScalar raw));\n      Bytes.decodeFrom fuel (Bytes.dropN len xs) (.cons (Char.mk (match ok with | .true => raw | .false => 65533)) acc)\ndef Bytes.toString (b : Bytes) : String := match b with\n  | .mk bs => let t := Bytes.beforeNul bs; .mk (Bytes.revChars (Bytes.decodeFrom (List.length t) t .nil) .nil)\ndef Bytes.isEmpty (b : Bytes) : Bool := Nat.beq (Bytes.size b) 0\ndef Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b) with\n  | .true => .some (Bytes.get b i)\n  | .false => .none\ndef Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n\ndef Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)\ndef Bytes.ofListAux : List Nat → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons x xs, acc => Bytes.ofListAux xs (Bytes.push acc x)\ndef Bytes.ofList (l : List Nat) : Bytes := Bytes.ofListAux l Bytes.empty\ndef Bytes.toListAux (b : Bytes) : Nat → List Nat → List Nat\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.toListAux b k (.cons (Bytes.get b k) acc)\ndef Bytes.toList (b : Bytes) : List Nat := Bytes.toListAux b (Bytes.size b) .nil\ndef Bytes.singleton (x : Nat) : Bytes := Bytes.push Bytes.empty x\ndef Bytes.rangeAux : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ k, i, acc => Bytes.rangeAux k (Nat.succ i) (Bytes.push acc i)\ndef Bytes.range (n : Nat) : Bytes := Bytes.rangeAux n 0 Bytes.empty\ndef Bytes.showAux : List Nat → String\n  | .nil => \"]\"\n  | .cons x .nil => String.append (Nat.toString x) \"]\"\n  | .cons x xs => String.append (Nat.toString x) (String.append \", \" (Bytes.showAux xs))\ndef Bytes.show (b : Bytes) : String := String.append \"[\" (Bytes.showAux (Bytes.toList b))\ndef Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n      | .true => Bytes.push (Bytes.push (Bytes.push b 239) 191) 189\n      | .false => match Nat.lt c 65536 with\n        | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n        | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n            (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofCharsUtf8 : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.ofCharsUtf8 cs (Bytes.pushUtf8 acc (Char.code c))\ndef Bytes.ofUtf8 (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofCharsUtf8 cs Bytes.empty\ndef Bytes.contOp (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with\n  | .some x => match Bool.and (Nat.lt 127 x) (Nat.lt x 192) with\n    | .true => .some (Nat.sub x 128)\n    | .false => .none\n  | .none => .none\ndef Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=\n  let x := Bytes.get b i;\n  match Nat.lt x 128 with\n  | .true => .some (x, 1)\n  | .false => match Bool.and (Nat.lt 193 x) (Nat.lt x 224) with\n    | .true => (match Bytes.contOp b (i + 1) with\n      | .some y => .some ((Nat.sub x 192) * 64 + y, 2)\n      | .none => .none)\n    | .false => match Bool.and (Nat.lt 223 x) (Nat.lt x 240) with\n      | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2) with\n        | .some y, .some z =>\n          let c := (Nat.sub x 224) * 4096 + y * 64 + z;\n          (match Bool.or (Nat.lt c 2048) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n          | .true => .none\n          | .false => .some (c, 3))\n        | _, _ => .none)\n      | .false => match Bool.and (Nat.lt 239 x) (Nat.lt x 245) with\n        | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2), Bytes.contOp b (i + 3) with\n          | .some y, .some z, .some w =>\n            let c := (Nat.sub x 240) * 262144 + y * 4096 + z * 64 + w;\n            (match Bool.or (Nat.lt c 65536) (Nat.lt 1114111 c) with\n            | .true => .none\n            | .false => .some (c, 4))\n          | _, _, _ => .none)\n        | .false => .none\ndef Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat String\n  | .zero, _, acc => .ok (.mk (Bytes.revChars acc .nil))\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .false => .ok (.mk (Bytes.revChars acc .nil))\n    | .true => match Bytes.utf8At b i with\n      | .some p => Bytes.decodeUtf8 b fuel (i + p.2) (.cons (Char.mk p.1) acc)\n      | .none => .error i\ndef Bytes.toUtf8 (b : Bytes) : Except String String :=\n  match Bytes.decodeUtf8 b (Bytes.size b) 0 .nil with\n  | .ok s => .ok s\n  | .error i => .error (String.append \"invalid UTF-8 at byte \" (Nat.toString i))\ndef Bytes.latin1Chars (b : Bytes) : Nat → List Char → List Char\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.latin1Chars b k (.cons (Char.mk (Bytes.get b k)) acc)\ndef Bytes.toLatin1 (b : Bytes) : String := .mk (Bytes.latin1Chars b (Bytes.size b) .nil)\ndef Bytes.ofLatin1Aux : Nat → List Char → Bytes → Except String Bytes\n  | _, .nil, acc => .ok acc\n  | i, .cons c cs, acc => match Nat.lt (Char.code c) 256 with\n    | .true => Bytes.ofLatin1Aux (Nat.succ i) cs (Bytes.push acc (Char.code c))\n    | .false => .error (String.append \"not Latin-1: character \" (String.append (Nat.toString i)\n        (String.append \" is U+\" (Nat.toString (Char.code c)))))\ndef Bytes.ofLatin1 (s : String) : Except String Bytes := match s with\n  | .mk cs => Bytes.ofLatin1Aux 0 cs Bytes.empty\ndef Bytes.ofArrayAux (a : Array Nat) : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Array.size a) with\n    | .true => Bytes.ofArrayAux a fuel (Nat.succ i) (Bytes.push acc (Array.getD a i 0))\n    | .false => acc\ndef Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a (Array.size a) 0 Bytes.empty\ndef Bytes.toArrayAux (b : Bytes) : Nat → Nat → Array Nat → Array Nat\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .true => Bytes.toArrayAux b fuel (Nat.succ i) (Array.push acc (Bytes.get b i))\n    | .false => acc\ndef Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b (Bytes.size b) 0 Array.empty\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
+def preludeText : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\ninductive Bool where\n  | false\n  | true\ninductive List (A : Type) where\n  | nil\n  | cons (head : A) (tail : List A)\ninductive Option (A : Type) where\n  | none\n  | some (val : A)\nstructure Prod (A B : Type) where\n  fst : A\n  snd : B\nstructure Char where\n  code : Nat\nstructure String where\n  data : List Char\ndef Nat.add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (Nat.add m n)\ndef Nat.mul : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ m, n => Nat.add n (Nat.mul m n)\ndef Nat.pred : Nat → Nat\n  | .zero => .zero\n  | .succ n => n\ndef Nat.sub : Nat → Nat → Nat\n  | m, .zero => m\n  | m, .succ n => Nat.pred (Nat.sub m n)\ninfixl:65 \" + \" => Nat.add\ninfixl:65 \" - \" => Nat.sub\ninfixl:70 \" * \" => Nat.mul\ndef Nat.beq : Nat → Nat → Bool\n  | .zero, .zero => .true\n  | .succ m, .succ n => Nat.beq m n\n  | _, _ => .false\ndef Nat.blt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.blt m n\ndef Nat.lt : Nat → Nat → Bool\n  | _, .zero => .false\n  | .zero, .succ _ => .true\n  | .succ m, .succ n => Nat.lt m n\ndef Nat.le (m n : Nat) : Bool := Nat.lt m (.succ n)\ndef Nat.max (m n : Nat) : Nat := if Nat.lt m n then n else m\ndef Bool.not : Bool → Bool\n  | .true => .false\n  | .false => .true\ndef Bool.and : Bool → Bool → Bool\n  | .true, b => b\n  | .false, _ => .false\ndef Bool.or : Bool → Bool → Bool\n  | .true, _ => .true\n  | .false, b => b\ndef Nat.divGo : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, n, m => if Nat.lt n m then .zero else .succ (Nat.divGo fuel (Nat.sub n m) m)\ndef Nat.div (n m : Nat) : Nat := match m with\n  | .zero => .zero\n  | .succ _ => Nat.divGo n n m\ndef Nat.mod (n m : Nat) : Nat := Nat.sub n (Nat.mul m (Nat.div n m))\ninfixl:70 \" / \" => Nat.div\ndef Nat.pow : Nat → Nat → Nat\n  | _, .zero => .succ .zero\n  | b, .succ e => Nat.mul b (Nat.pow b e)\ndef Bool.xor : Bool → Bool → Bool\n  | .true, b => Bool.not b\n  | .false, b => b\ndef Nat.isOdd (n : Nat) : Bool := Nat.beq (Nat.mod n 2) 1\ndef Nat.bitwise (f : Bool → Bool → Bool) : Nat → Nat → Nat → Nat\n  | .zero, _, _ => .zero\n  | .succ fuel, a, b =>\n    let rest := Nat.mul 2 (Nat.bitwise f fuel (Nat.div a 2) (Nat.div b 2));\n    if f (Nat.isOdd a) (Nat.isOdd b) then .succ rest else rest\ndef Nat.land (a b : Nat) : Nat := Nat.bitwise Bool.and (Nat.add a b) a b\ndef Nat.lor (a b : Nat) : Nat := Nat.bitwise Bool.or (Nat.add a b) a b\ndef Nat.xor (a b : Nat) : Nat := Nat.bitwise Bool.xor (Nat.add a b) a b\ndef Nat.shiftLeft (a n : Nat) : Nat := Nat.mul a (Nat.pow 2 n)\ndef Nat.shiftRight (a n : Nat) : Nat := Nat.div a (Nat.pow 2 n)\ndef Nat.log2Go : Nat → Nat → Nat\n  | .zero, _ => .zero\n  | .succ fuel, n => if Nat.lt n 2 then .zero else .succ (Nat.log2Go fuel (Nat.div n 2))\ndef Nat.log2 (n : Nat) : Nat := Nat.log2Go n n\ndef Nat.testBit (n i : Nat) : Bool := Nat.isOdd (Nat.shiftRight n i)\ndef List.length {A : Type} : List A → Nat\n  | .nil => .zero\n  | .cons _ t => .succ (List.length t)\ndef List.append {A : Type} : List A → List A → List A\n  | .nil, ys => ys\n  | .cons x xs, ys => .cons x (List.append xs ys)\ninfixr:67 \" :: \" => List.cons\ndef List.map {A B : Type} (f : A → B) : List A → List B\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (List.map f xs)\ndef String.append (a b : String) : String := .mk (List.append a.data b.data)\n-- `++` is a class problem: `Append` (as in lib/Prelude.wiz). The host reaches it\n-- through `HAppend` and `[default_instance]`; this frontend has no `outParam` or\n-- default instances, so the homogeneous class is what `++` can resolve here.\nclass Append (A : Type) where\n  append : A → A → A\ninstance instAppendList {A : Type} : Append (List A) where\n  append := List.append\ninstance instAppendString : Append String where\n  append := String.append\ninfixr:67 \" ++ \" => Append.append\ndef String.length (s : String) : Nat := List.length s.data\ndef memo {A : Type} (f : Unit → A) : Unit → A := f\naxiom Array : Type → Type\naxiom Array.empty {A : Type} : Array A\naxiom Array.push {A : Type} (a : Array A) (x : A) : Array A\naxiom Array.size {A : Type} (a : Array A) : Nat\naxiom Array.getD {A : Type} (a : Array A) (i : Nat) (d : A) : A\naxiom Array.set {A : Type} (a : Array A) (i : Nat) (x : A) : Array A\naxiom World : Type\ndef IO (A : Type) : Type := World → Prod A World\ndef IO.pure {A : Type} (a : A) : IO A := fun w => .mk a w\ndef IO.bind {A B : Type} (x : IO A) (f : A → IO B) : IO B := fun w =>\n  let r := x w;\n  f r.fst r.snd\naxiom IO.println : String → IO Unit\naxiom IO.print : String → IO Unit\naxiom IO.ePrintln : String → IO Unit\naxiom Process.exit : Nat → IO Unit\naxiom IO.readFile : String → IO String\naxiom IO.argCount : IO Nat\naxiom IO.arg : Nat → IO String\ndef IO.argsFrom : Nat → Nat → IO (List String)\n  | .zero, _ => IO.pure .nil\n  | .succ k, i => IO.bind (IO.arg i) (fun a => IO.bind (IO.argsFrom k (Nat.succ i)) (fun rest => IO.pure (List.cons a rest)))\ndef IO.args : IO (List String) := IO.bind IO.argCount (fun n => IO.argsFrom n 0)\ndef Callback (T : Type) : Type := T\naxiom Nat.toString : Nat → String\naxiom UInt64 : Type\nextern \"wiz_u64_id\" UInt64.ofNat : Nat → UInt64\nextern \"wiz_u64_id\" UInt64.toNat : UInt64 → Nat\nextern \"wiz_u64_add\" UInt64.add : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_sub\" UInt64.sub : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mul\" UInt64.mul : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_div\" UInt64.div : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_mod\" UInt64.mod : UInt64 → UInt64 → UInt64\nextern \"wiz_u64_lt\" UInt64.lt : UInt64 → UInt64 → Bool\nextern \"wiz_u64_eq\" UInt64.eq : UInt64 → UInt64 → Bool\naxiom Float64 : Type\nextern \"wiz_f64_of_nat\" Float64.ofNat : Nat → Float64\nextern \"wiz_f64_add\" Float64.add : Float64 → Float64 → Float64\nextern \"wiz_f64_sub\" Float64.sub : Float64 → Float64 → Float64\nextern \"wiz_f64_mul\" Float64.mul : Float64 → Float64 → Float64\nextern \"wiz_f64_div\" Float64.div : Float64 → Float64 → Float64\nextern \"wiz_f64_lt\" Float64.lt : Float64 → Float64 → Bool\nextern \"wiz_f64_show\" Float64.toString : Float64 → String\naxiom Str : Type\naxiom Str.ofString : String → Str\naxiom StrMap : Type → Type\naxiom StrMap.empty {V : Type} : StrMap V\naxiom StrMap.insert {V : Type} (m : StrMap V) (k : Str) (v : V) : StrMap V\naxiom StrMap.findD {V : Type} (m : StrMap V) (k : Str) (d : V) : V\naxiom StrMap.size {V : Type} (m : StrMap V) : Nat\ninductive Bytes where\n  | private mk (data : List Nat)\ninductive Except (E A : Type) where\n  | error (e : E)\n  | ok (val : A)\ndef Bytes.getAux : List Nat → Nat → Nat\n  | .nil, _ => 0\n  | .cons x xs, i => match i with\n    | .zero => x\n    | .succ j => Bytes.getAux xs j\ndef Bytes.empty : Bytes := .mk .nil\ndef Bytes.push (b : Bytes) (x : Nat) : Bytes := match b with\n  | .mk bs => .mk (List.append bs (.cons (Nat.mod x 256) .nil))\ndef Bytes.size (b : Bytes) : Nat := match b with\n  | .mk bs => List.length bs\ndef Bytes.get (b : Bytes) (i : Nat) : Nat := match b with\n  | .mk bs => Bytes.getAux bs i\ndef Bytes.dropN : Nat → List Nat → List Nat\n  | .zero, xs => xs\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => Bytes.dropN k xs\ndef Bytes.takeN : Nat → List Nat → List Nat\n  | .zero, _ => .nil\n  | .succ k, .nil => .nil\n  | .succ k, .cons x xs => .cons x (Bytes.takeN k xs)\ndef Bytes.slice (b : Bytes) (start len : Nat) : Bytes := match b with\n  | .mk bs => .mk (Bytes.takeN len (Bytes.dropN start bs))\ndef Bytes.append (a b : Bytes) : Bytes := match a with\n  | .mk xs => match b with\n    | .mk ys => .mk (List.append xs ys)\ndef Bytes.eqAux : List Nat → List Nat → Bool\n  | .nil, .nil => .true\n  | .cons x xs, .cons y ys => match Nat.beq x y with\n    | .true => Bytes.eqAux xs ys\n    | .false => .false\n  | _, _ => .false\ndef Bytes.eq (a b : Bytes) : Bool := match a with\n  | .mk xs => match b with\n    | .mk ys => Bytes.eqAux xs ys\ndef Bytes.isScalar (c : Nat) : Bool := Bool.not (Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)))\ndef Bytes.scalar (c : Nat) : Nat := match Bytes.isScalar c with\n  | .true => c\n  | .false => 65533\ndef Bytes.pushCp (b : Bytes) (c0 : Nat) : Bytes :=\n  let c := Bytes.scalar c0;\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Nat.lt c 65536 with\n      | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n      | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n          (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofStringAux : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => match Nat.beq (Char.code c) 0 with\n    | .true => acc\n    | .false => Bytes.ofStringAux cs (Bytes.pushCp acc (Char.code c))\ndef Bytes.ofString (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofStringAux cs Bytes.empty\ndef Bytes.contOk : Nat → List Nat → Bool\n  | .zero, _ => .true\n  | .succ k, .nil => .false\n  | .succ k, .cons x xs => Bool.and (Bool.and (Nat.lt 127 x) (Nat.lt x 192)) (Bytes.contOk k xs)\ndef Bytes.contVal : Nat → Nat → List Nat → Nat\n  | .zero, cp, _ => cp\n  | .succ k, cp, .nil => cp\n  | .succ k, cp, .cons x xs => Bytes.contVal k (Nat.lor (Nat.shiftLeft cp 6) (Nat.land x 63)) xs\ndef Bytes.revChars : List Char → List Char → List Char\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.revChars cs (.cons c acc)\ndef Bytes.beforeNul : List Nat → List Nat\n  | .nil => .nil\n  | .cons c cs => match Nat.beq c 0 with\n    | .true => .nil\n    | .false => .cons c (Bytes.beforeNul cs)\ndef Bytes.width (c : Nat) : Nat :=\n  match Nat.lt c 128 with\n  | .true => 1\n  | .false => match Nat.beq (Nat.div c 32) 6 with\n    | .true => 2\n    | .false => match Nat.beq (Nat.div c 16) 14 with\n      | .true => 3\n      | .false => match Nat.beq (Nat.div c 8) 30 with\n        | .true => 4\n        | .false => 1\ndef Bytes.leadVal (c : Nat) : Nat :=\n  match Nat.lt c 128 with\n  | .true => c\n  | .false => match Nat.beq (Nat.div c 32) 6 with\n    | .true => Nat.land c 31\n    | .false => match Nat.beq (Nat.div c 16) 14 with\n      | .true => Nat.land c 15\n      | .false => match Nat.beq (Nat.div c 8) 30 with\n        | .true => Nat.land c 7\n        | .false => 65533\ndef Bytes.minWidth (len : Nat) : Nat :=\n  match len with\n  | 2 => 127\n  | 3 => 2047\n  | 4 => 65535\n  | _ => 0\ndef Bytes.decodeFrom : Nat → List Nat → List Char → List Char\n  | .zero, _, acc => acc\n  | .succ fuel, .nil, acc => acc\n  | .succ fuel, .cons c xs, acc => match Nat.beq c 0 with\n    | .true => acc\n    | .false => let len := Bytes.width c;\n      let raw := Bytes.contVal (Nat.sub len 1) (Bytes.leadVal c) xs;\n      let ok := Bool.and (Bytes.contOk (Nat.sub len 1) xs)\n        (Bool.and (Nat.lt (Bytes.minWidth len) raw) (Bytes.isScalar raw));\n      Bytes.decodeFrom fuel (Bytes.dropN len xs) (.cons (Char.mk (match ok with | .true => raw | .false => 65533)) acc)\ndef Bytes.toString (b : Bytes) : String := match b with\n  | .mk bs => let t := Bytes.beforeNul bs; .mk (Bytes.revChars (Bytes.decodeFrom (List.length t) t .nil) .nil)\ndef Bytes.isEmpty (b : Bytes) : Bool := Nat.beq (Bytes.size b) 0\ndef Bytes.at (b : Bytes) (i : Nat) : Option Nat := match Nat.lt i (Bytes.size b) with\n  | .true => .some (Bytes.get b i)\n  | .false => .none\ndef Bytes.take (b : Bytes) (n : Nat) : Bytes := Bytes.slice b 0 n\ndef Bytes.drop (b : Bytes) (n : Nat) : Bytes := Bytes.slice b n (Bytes.size b)\ndef Bytes.ofListAux : List Nat → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons x xs, acc => Bytes.ofListAux xs (Bytes.push acc x)\ndef Bytes.ofList (l : List Nat) : Bytes := Bytes.ofListAux l Bytes.empty\ndef Bytes.toListAux (b : Bytes) : Nat → List Nat → List Nat\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.toListAux b k (.cons (Bytes.get b k) acc)\ndef Bytes.toList (b : Bytes) : List Nat := Bytes.toListAux b (Bytes.size b) .nil\ndef Bytes.singleton (x : Nat) : Bytes := Bytes.push Bytes.empty x\ndef Bytes.rangeAux : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ k, i, acc => Bytes.rangeAux k (Nat.succ i) (Bytes.push acc i)\ndef Bytes.range (n : Nat) : Bytes := Bytes.rangeAux n 0 Bytes.empty\ndef Bytes.showAux : List Nat → String\n  | .nil => \"]\"\n  | .cons x .nil => String.append (Nat.toString x) \"]\"\n  | .cons x xs => String.append (Nat.toString x) (String.append \", \" (Bytes.showAux xs))\ndef Bytes.show (b : Bytes) : String := String.append \"[\" (Bytes.showAux (Bytes.toList b))\ndef Bytes.pushUtf8 (b : Bytes) (c : Nat) : Bytes :=\n  match Nat.lt c 128 with\n  | .true => Bytes.push b c\n  | .false => match Nat.lt c 2048 with\n    | .true => Bytes.push (Bytes.push b (192 + Nat.div c 64)) (128 + Nat.mod c 64)\n    | .false => match Bool.or (Nat.lt 1114111 c) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n      | .true => Bytes.push (Bytes.push (Bytes.push b 239) 191) 189\n      | .false => match Nat.lt c 65536 with\n        | .true => Bytes.push (Bytes.push (Bytes.push b (224 + Nat.div c 4096)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\n        | .false => Bytes.push (Bytes.push (Bytes.push (Bytes.push b (240 + Nat.div c 262144))\n            (128 + Nat.mod (Nat.div c 4096) 64)) (128 + Nat.mod (Nat.div c 64) 64)) (128 + Nat.mod c 64)\ndef Bytes.ofCharsUtf8 : List Char → Bytes → Bytes\n  | .nil, acc => acc\n  | .cons c cs, acc => Bytes.ofCharsUtf8 cs (Bytes.pushUtf8 acc (Char.code c))\ndef Bytes.ofUtf8 (s : String) : Bytes := match s with\n  | .mk cs => Bytes.ofCharsUtf8 cs Bytes.empty\ndef Bytes.contOp (b : Bytes) (i : Nat) : Option Nat := match Bytes.at b i with\n  | .some x => match Bool.and (Nat.lt 127 x) (Nat.lt x 192) with\n    | .true => .some (Nat.sub x 128)\n    | .false => .none\n  | .none => .none\ndef Bytes.utf8At (b : Bytes) (i : Nat) : Option (Nat × Nat) :=\n  let x := Bytes.get b i;\n  match Nat.lt x 128 with\n  | .true => .some (x, 1)\n  | .false => match Bool.and (Nat.lt 193 x) (Nat.lt x 224) with\n    | .true => (match Bytes.contOp b (i + 1) with\n      | .some y => .some ((Nat.sub x 192) * 64 + y, 2)\n      | .none => .none)\n    | .false => match Bool.and (Nat.lt 223 x) (Nat.lt x 240) with\n      | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2) with\n        | .some y, .some z =>\n          let c := (Nat.sub x 224) * 4096 + y * 64 + z;\n          (match Bool.or (Nat.lt c 2048) (Bool.and (Nat.lt 55295 c) (Nat.lt c 57344)) with\n          | .true => .none\n          | .false => .some (c, 3))\n        | _, _ => .none)\n      | .false => match Bool.and (Nat.lt 239 x) (Nat.lt x 245) with\n        | .true => (match Bytes.contOp b (i + 1), Bytes.contOp b (i + 2), Bytes.contOp b (i + 3) with\n          | .some y, .some z, .some w =>\n            let c := (Nat.sub x 240) * 262144 + y * 4096 + z * 64 + w;\n            (match Bool.or (Nat.lt c 65536) (Nat.lt 1114111 c) with\n            | .true => .none\n            | .false => .some (c, 4))\n          | _, _, _ => .none)\n        | .false => .none\ndef Bytes.decodeUtf8 (b : Bytes) : Nat → Nat → List Char → Except Nat String\n  | .zero, _, acc => .ok (.mk (Bytes.revChars acc .nil))\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .false => .ok (.mk (Bytes.revChars acc .nil))\n    | .true => match Bytes.utf8At b i with\n      | .some p => Bytes.decodeUtf8 b fuel (i + p.2) (.cons (Char.mk p.1) acc)\n      | .none => .error i\ndef Bytes.toUtf8 (b : Bytes) : Except String String :=\n  match Bytes.decodeUtf8 b (Bytes.size b) 0 .nil with\n  | .ok s => .ok s\n  | .error i => .error (String.append \"invalid UTF-8 at byte \" (Nat.toString i))\ndef Bytes.latin1Chars (b : Bytes) : Nat → List Char → List Char\n  | .zero, acc => acc\n  | .succ k, acc => Bytes.latin1Chars b k (.cons (Char.mk (Bytes.get b k)) acc)\ndef Bytes.toLatin1 (b : Bytes) : String := .mk (Bytes.latin1Chars b (Bytes.size b) .nil)\ndef Bytes.ofLatin1Aux : Nat → List Char → Bytes → Except String Bytes\n  | _, .nil, acc => .ok acc\n  | i, .cons c cs, acc => match Nat.lt (Char.code c) 256 with\n    | .true => Bytes.ofLatin1Aux (Nat.succ i) cs (Bytes.push acc (Char.code c))\n    | .false => .error (String.append \"not Latin-1: character \" (String.append (Nat.toString i)\n        (String.append \" is U+\" (Nat.toString (Char.code c)))))\ndef Bytes.ofLatin1 (s : String) : Except String Bytes := match s with\n  | .mk cs => Bytes.ofLatin1Aux 0 cs Bytes.empty\ndef Bytes.ofArrayAux (a : Array Nat) : Nat → Nat → Bytes → Bytes\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Array.size a) with\n    | .true => Bytes.ofArrayAux a fuel (Nat.succ i) (Bytes.push acc (Array.getD a i 0))\n    | .false => acc\ndef Bytes.ofArray (a : Array Nat) : Bytes := Bytes.ofArrayAux a (Array.size a) 0 Bytes.empty\ndef Bytes.toArrayAux (b : Bytes) : Nat → Nat → Array Nat → Array Nat\n  | .zero, _, acc => acc\n  | .succ fuel, i, acc => match Nat.lt i (Bytes.size b) with\n    | .true => Bytes.toArrayAux b fuel (Nat.succ i) (Array.push acc (Bytes.get b i))\n    | .false => acc\ndef Bytes.toArray (b : Bytes) : Array Nat := Bytes.toArrayAux b (Bytes.size b) 0 Array.empty\ninductive SyntaxF : Bool → Type where\n  | missing : SyntaxF .true\n  | atom (val : String) : SyntaxF .true\n  | ident (val : String) : SyntaxF .true\n  | node (kind : String) (args : SyntaxF .false) : SyntaxF .true\n  | nil : SyntaxF .false\n  | cons (head : SyntaxF .true) (tail : SyntaxF .false) : SyntaxF .false\ndef Syntax : Type := SyntaxF .true\ndef SyntaxF.nth {b : Bool} : SyntaxF b → Nat → Syntax\n  | .cons x t, n => match n with\n    | .zero => x\n    | .succ m => SyntaxF.nth t m\n  | _, _ => .missing\ndef Syntax.getArg (stx : Syntax) (i : Nat) : Syntax := match stx with\n  | .node _ args => SyntaxF.nth args i\n  | _ => .missing\n"
 
 -- Notation and macros (stage 19b; A12). `notation`, `infixl`/`infixr`/`infix`, `syntax`
 -- and `macro_rules` all become parser-table changes and *macro rules*: a pattern tree, a
@@ -10964,6 +11350,111 @@ def mutualDeriving : List Syntax → Option String
 
 
 -- the commands `defStep` elaborates (`#eval` is `#reduce` here, stage 21u)
+-- (13t) `namespace`/`open`/`end` print no line (an error is a line of its own)
+def quietCommand (k : String) : Bool := Bool.or (strEq k "command.namespace")
+  (Bool.or (strEq k "command.open") (strEq k "command.end"))
+-- (13t) the last component of a dotted name (`A.B` is `B`)
+def nsShort (n : String) : String := match splitLast n with
+  | .some (.mk _ s) => s
+  | .none => n
+def nsErrStep (gs : Globals) (m : String) : Step := .mk ("error: " +++ m) gs
+-- (13t) `namespace Foo`, `end`/`end Foo`, `open M`/`open M as A`: the file's namespace
+-- state. A stray or mismatching `end` is an error at the `end`; an `open` names a
+-- namespace that already has declarations (elaboration is single-pass).
+-- (13v) `__root__` (Lean's `_root_`): `namespace __root__` opens the root and
+-- `namespace __root__.X` the root-level `X`; both are absolute, not `p`-relative.
+def nsTarget (p n : String) : String :=
+  match strEq n "__root__" with
+  | .true => ""
+  | .false => match startsWithS "__root__." n with
+    | .true => drop9S n
+    | .false => match p with
+      | .mk cs => match cs with
+        | .nil => n
+        | _ => p +++ "." +++ n
+-- (13v) a declaration written `__root__.x` is the true-global `x`
+def stripRootS (n : String) : String := match startsWithS "__root__." n with
+  | .true => drop9S n
+  | .false => n
+def nsCommand (gs : Globals) (stx : Syntax) (start : Nat) : Option Step :=
+  let k := kindOf stx;
+  match strEq k "command.namespace" with
+  | .true =>
+    let n := match getIdOpt (kid stx 1) with
+      | .some n => n
+      | .none => "_";
+    let p := Globals.nsPrefix gs;
+    let full := nsTarget p n;
+    .some (.mk "" (Globals.pushNs gs full start))
+  | .false => match strEq k "command.end" with
+    | .true => match Globals.nsStack gs with
+      | .nil => .some (nsErrStep gs "`end` without an open `namespace`")
+      | .cons (.mk full off ops als) rest =>
+        let short := match strEq full "" with
+          | .true => "__root__"
+          | .false => nsShort full;
+        let given : Option String := firstIdIn (kids (kid stx 1));
+        let errOpt : Option String := match given with
+          | .none => .none
+          | .some g => match Bool.or (Bool.or (strEq g short) (strEq g full))
+              (Bool.and (strEq full "") (strEq g "__root__")) with
+            | .true => .none
+            | .false => .some ("`end " +++ g +++ "` does not close the namespace `" +++ full
+                +++ "` (write `end` or `end " +++ short +++ "`)");
+        let outer : String := match rest with
+          | .cons (.mk p _ _ _) _ => p
+          | .nil => "";
+        -- the host reports the mismatch and still closes the namespace (so the file is
+        -- not also reported as leaving it open)
+        let gs' := Globals.popNs gs outer (.mk full off ops als) rest;
+        .some (match errOpt with
+          | .some m => .mk ("error: " +++ m) gs'
+          | .none => .mk "" gs')
+    | .false => match strEq k "command.open" with
+      | .true =>
+        let n0 := match getIdOpt (kid stx 1) with
+          | .some n => n
+          | .none => "_";
+        -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op
+        let n := stripRootS n0;
+        let aliasOpt : Option String := firstIdIn (kids (kid stx 2));
+        match strEq n "" with
+          | .true => .some (.mk "" gs)
+          | .false => match Globals.hasDeclUnder gs n with
+            | .false => .some (nsErrStep gs (("unknown namespace '" +++ n)
+                +++ "': there is no declaration `" +++ n +++ ".…`"))
+            | .true => match aliasOpt with
+              | .some a => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs) (Globals.opens gs)
+                  (.cons (.mk a n) (Globals.aliases gs)) (Globals.nsStack gs)))
+              | .none => .some (.mk "" (Globals.withNs gs (Globals.nsPrefix gs)
+                  (List.append (Globals.opens gs) (.cons n .nil)) (Globals.aliases gs) (Globals.nsStack gs)))
+      | .false => .none
+-- (D6) every output line names the offset of the command that produced it, as
+-- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
+-- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
+-- line leaves `stepCommand`: the driver entry.) An error line that carries the offset of
+-- the failing term (the `\x01` mark, `errMarkIf`) is reported there instead of at the
+-- command's start. (13t) the namespace errors and this loop use it too.
+def atLine (start : Nat) (l : Option String) : Option String := match l with
+  | .none => .none
+  | .some s => match errSplit s with
+    | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
+    | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+-- (13t) a file must close every `namespace` it opens: report each unclosed one at the
+-- line of its `namespace` (innermost first; the reverse of the output puts them in order)
+def nsUnclosedLines : List NsFrame → List String
+  | .nil => .nil
+  | .cons (.mk full off _ _) rest =>
+    let shown := match strEq full "" with
+      | .true => "__root__"
+      | .false => full;
+    let short := match strEq full "" with
+      | .true => "__root__"
+      | .false => nsShort full;
+    .cons (match atLine off (.some (("error: namespace " +++ shown)
+        +++ " is not closed: add `end` (or `end " +++ short +++ "`)")) with
+      | .some l => l
+      | .none => "") (nsUnclosedLines rest)
 def knownCommand (k : String) : Bool := Bool.or (Bool.or (strEq k "command.def") (strEq k "command.defEqns"))
   (Bool.or (Bool.or (strEq k "command.inductive") (strEq k "command.coinductive")) (Bool.or (strEq k "command.check")
     (Bool.or (strEq k "command.reduce") (Bool.or (strEq k "command.eval")
@@ -10989,19 +11480,91 @@ def Run.addLine (r : Run) (l : String) : Run := match r with
 inductive StepR where
   | done
   | next (line : Option String) (stop : Nat) (gs : Globals) (cats : List Cat) (tokens : List String) (notes : List Note)
--- (D6) every output line names the offset of the command that produced it, as
--- `@OFFSET text`; the driver (`selfhost/Cli.wiz`) turns that into `file:line:col`, and
--- `checkFile` strips it again, so `checkFile`'s output is unchanged. (The one place a
--- line leaves `stepCommand`: the driver entry.) An error line that carries the offset of
--- the failing term (the `\x01` mark, `errMarkIf`) is reported there instead of at the
--- command's start.
-def atLine (start : Nat) (l : Option String) : Option String := match l with
-  | .none => .none
-  | .some s => match errSplit s with
-    | .some (p, m) => .some (String.append (String.append "@" (Nat.toString p)) (String.append " " m))
-    | .none => .some (String.append (String.append "@" (Nat.toString start)) (String.append " " s))
+def commandStep (gs0 : Globals) (stx : Syntax) (sp : Option SpT) : Step :=
+  match strEq (kindOf stx) "command.partial" with
+    | .true => partialCmd gs0 (one stx)
+    | .false => match strEq (kindOf stx) "command.mutual" with
+      | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
+        | .true => match mutualDeriving (nonAtoms (kids (kid stx 1))) with
+          | .some m => errStep gs0 m
+          | .none => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
+        | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
+      | .false => match strEq (kindOf stx) "command.structure" with
+        | .true => withDeriving gs0 stx (structCmd gs0 stx)
+        | .false => match strEq (kindOf stx) "command.class" with
+          | .true => classCmd gs0 stx
+          | .false => match strEq (kindOf stx) "command.instance" with
+            | .true => instanceCmd gs0 stx
+            | .false => match strEq (kindOf stx) "command.axiom" with
+          | .true => axiomCmd gs0 stx
+          | .false => match strEq (kindOf stx) "command.extern" with
+            -- (to the checker, a foreign function is an axiom)
+            | .true => externCmd gs0 stx
+            | .false => match strEq (kindOf stx) "command.foreignType" with
+              | .true => foreignTypeCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.importC" with
+              | .true => importCCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.glue" with
+              | .true => glueCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.cStruct" with
+              | .true => cStructCmd gs0 stx
+              | .false => match strEq (kindOf stx) "command.sealed" with
+                | .true => sealedCmd gs0 stx
+                | .false => match strEq (kindOf stx) "command.printAxioms" with
+                | .true => printAxiomsCmd gs0 stx
+                | .false => match strEq (kindOf stx) "command.deriving" with
+                  | .true => derivingCmd gs0 stx
+                  | .false => match knownCommand (kindOf stx) with
+                  | .true => match strEq (kindOf stx) "command.inductive" with
+                    | .true => withDeriving gs0 stx (defStep gs0 stx sp)
+                    | .false => defStep gs0 stx sp
+                  -- (an unknown command, or a modifier this frontend doesn't know, is
+                  -- an error naming it, never ignored)
+                  | .false => match strEq (kindOf stx) "command.import" with
+                    | .true => errStep gs0 "`import` is not allowed inside a command: imports go at the top level of a file, before every other command"
+                    | .false => errStep gs0 (String.append "unsupported command " (kindOf stx))
+
+-- (the kernel evaluator's per-command step budget) A structural recursion in the kernel
+-- (`vIndW`) is one step per constructor, and this kernel has no native `Nat` operations:
+-- `Nat.pow 2 32` and `Nat.add` on a 32-bit numeral are billions of unary steps, which used
+-- to grow until the process ran out of memory or its 1 GiB evaluator stack overflowed
+-- (`lib/BitVecAdd.wiz`). A command that reaches the budget is reported as an error, not
+-- crashed: the same bounding principle as the proof read-back's (P2) budget.
+def kernelSteps : Nat := 200000
+-- (`#reduce`/`#eval` compute a value in the kernel; the Prelude's Bytes model needs more
+-- than 3.6M structural steps for three characters, so a value-level command gets a
+-- larger budget than a declaration's type check)
+def kernelStepsReduce : Nat := 4000000
+def commandSteps (stx : Syntax) : Nat :=
+  match Bool.or (strEq (kindOf stx) "command.reduce") (strEq (kindOf stx) "command.eval") with
+  | .true => kernelStepsReduce
+  | .false => kernelSteps
+def kernelBudgetMsg (steps : Nat) : String :=
+  String.append (String.append "the kernel evaluation hit its " (Nat.toString steps))
+    "-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here"
+-- the state a command's step leaves behind (its output line, the globals after it, and
+-- the declaration records), with the duplicate-declaration check
+def finishStep (stop start : Nat) (gs gs' : Globals) (input : Array Nat) (sp : Option SpT)
+    (line : String) (cats : List Cat) (tokens : List String) (notes : List Note) (stx : Syntax) : StepR :=
+  match newDuplicate gs gs' with
+  -- (D6) the declared name's own token, not the command's start
+  | .some x => .next (atLine start (.some (errMarkAt (declSpanFor input sp x)
+      (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
+  -- (A11) `deriving instance` prints no line, as in the Lean toolchain
+  | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
+      | .true => .none
+      | .false => match Bool.and (quietCommand (kindOf stx)) (strEq line "") with
+        | .true => .none
+        | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
+-- is the command at `pos` an `import`? (`import_c` is not: the next character is an id
+-- character). `runCommands` uses this to keep the header open across imports and close it
+-- at the first declaration.
+def startsImport (input : Array Nat) (pos : Nat) : Bool :=
+  let i := skipWs input pos;
+  Bool.and (cStarts (toChars "import") (slice 6 input i))
+    (Bool.not (isIdRest (at input (Nat.add i 6))))
 mutual
-def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
+def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) : StepR :=
   let start := skipWs input pos;
   match Nat.lt start (Array.size input) with
@@ -11016,13 +11579,16 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       let sp0 : Option SpT := spansAt input tokens pos stx0;
       match strEq (kindOf stx0) "command.import" with
     -- (A14) with the module loader (`inlineImports = false`) the import was loaded
-    -- before the file: skip it (only the Prelude, when checking one file, is inline)
-    | .true => match inlineImports with
-      | .false => .next .none stop gs cats tokens notes
-      | .true => match runCommands .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes
-          (String.codes preludeText) (columns (String.codes preludeText)) 0
-          (Globals.setWatch gs .false) .nil with
-        | .mk _ gs' cats' tokens' notes' => .next .none stop (Globals.setWatch gs' (Globals.watch gs)) cats' tokens' notes'
+    -- before the file: skip it (only the Prelude, when checking one file, is inline).
+    -- The header is fixed: an `import` after a declaration is an error (code import-order).
+    | .true => match header with
+      | .false => .next (atLine start (.some "error: imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)")) stop gs cats tokens notes
+      | .true => match inlineImports with
+        | .false => .next .none stop gs cats tokens notes
+        | .true => match runCommands .true .true (doCats cats) (.cons "←" (.cons "do" tokens)) notes
+            (String.codes preludeText) (columns (String.codes preludeText)) 0
+            (Globals.setWatch gs .false) .nil with
+          | .mk _ gs' cats' tokens' notes' => .next .none stop (Globals.setWatch gs' (Globals.watch gs)) cats' tokens' notes'
     | .false =>
       -- (A12) the grammar-changing commands: `syntax`, `notation`, `infixl`/`infixr`/
       -- `infix`, `macro_rules`, `declare_syntax_cat`, and the macro/tactic registrations
@@ -11043,65 +11609,42 @@ def stepCommand (inlineImports : Bool) (cats : List Cat) (tokens : List String) 
       -- (`privName`), and `stepCommand` clears the flag again after this command
       let stx := unwrapPrivate stx1;
       let sp := unwrapSp spA stx1 "command.private";
+      -- (13t) a declaration in a namespace is named `Foo.bar`: prefix it here, once
+      let stx := prefixDeclName (Globals.nsPrefix gs) stx;
       let gs0 := Globals.setPrivate gs (strEq (kindOf stx1) "command.private");
       match linkStep gs0 stx with
       | .some r => (match r with
         | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
-      let step := match strEq (kindOf stx) "command.partial" with
-        | .true => partialCmd gs0 (one stx)
-        | .false => match strEq (kindOf stx) "command.mutual" with
-          | .true => match strEq (kindOf (nthSyntax (nonAtoms (kids (kid stx 1))) 0)) "command.inductive" with
-            | .true => match mutualDeriving (nonAtoms (kids (kid stx 1))) with
-              | .some m => errStep gs0 m
-              | .none => mutualInductiveCmd gs0 (nonAtoms (kids (kid stx 1)))
-            | .false => partialCmd gs0 (nonAtoms (kids (kid stx 1)))
-          | .false => match strEq (kindOf stx) "command.structure" with
-            | .true => withDeriving gs0 stx (structCmd gs0 stx)
-            | .false => match strEq (kindOf stx) "command.class" with
-              | .true => classCmd gs0 stx
-              | .false => match strEq (kindOf stx) "command.instance" with
-                | .true => instanceCmd gs0 stx
-                | .false => match strEq (kindOf stx) "command.axiom" with
-              | .true => axiomCmd gs0 stx
-              | .false => match strEq (kindOf stx) "command.extern" with
-                -- (to the checker, a foreign function is an axiom)
-                | .true => externCmd gs0 stx
-                | .false => match strEq (kindOf stx) "command.foreignType" with
-                  | .true => foreignTypeCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.importC" with
-                  | .true => importCCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.glue" with
-                  | .true => glueCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.cStruct" with
-                  | .true => cStructCmd gs0 stx
-                  | .false => match strEq (kindOf stx) "command.sealed" with
-                    | .true => sealedCmd gs0 stx
-                    | .false => match strEq (kindOf stx) "command.printAxioms" with
-                    | .true => printAxiomsCmd gs0 stx
-                    | .false => match strEq (kindOf stx) "command.deriving" with
-                      | .true => derivingCmd gs0 stx
-                      | .false => match knownCommand (kindOf stx) with
-                      | .true => match strEq (kindOf stx) "command.inductive" with
-                        | .true => withDeriving gs0 stx (defStep gs0 stx sp)
-                        | .false => defStep gs0 stx sp
-                      -- (an unknown command, or a modifier this frontend doesn't know, is
-                      -- an error naming it, never ignored)
-                      | .false => errStep gs0 (String.append "unsupported command " (kindOf stx));
-      match step with
-      | .mk line gs' => match newDuplicate gs gs' with
-        -- (D6) the declared name's own token, not the command's start
-        | .some x => .next (atLine start (.some (errMarkAt (declSpanFor input sp x)
-            (String.append (String.append "error: '" x) "' has already been declared")))) stop gs cats tokens notes
-        -- (A11) `deriving instance` prints no line, as in the Lean toolchain
-        | .none => .next (atLine start (match Bool.and (strEq (kindOf stx) "command.deriving") (strEq line "") with
-            | .true => .none
-            | .false => .some line)) stop (recordDecls gs (Globals.setPrivate gs' .false) input sp) cats tokens notes
-def runCommands (inlineImports : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
+      -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
+      -- and checking, not its parse. The match on `kernelStart` forces the extern before
+      -- the command is evaluated: a lazy `let` would otherwise run the step first.)
+      let budget := commandSteps stx;
+      -- (13t) a namespace command changes the state (and validates it), not the globals;
+      -- it takes the step's place when it is one, as on train9's side.
+      let step : Step := match commandStep gs0 stx sp with
+        | .mk line gs' => match nsCommand gs0 stx start with
+          | .some s => s
+          | .none => .mk line gs'
+      match kernelStart budget with
+      | .false =>
+        match step with
+        | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx
+      | .true =>
+        match step with
+        | .mk line gs' => match kernelEnd 0 with
+          | .true => finishStep stop start gs gs' input sp line cats tokens notes stx
+          -- (the evaluator gave up mid-command: report the limit, not the stuck value
+          -- the rest of the elaboration would make of it; the declaration is dropped)
+          | .false => .next (atLine start (.some (String.append "error: " (kernelBudgetMsg budget)))) stop
+              gs0 cats tokens notes
+def runCommands (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens : List String) (notes : List Note)
     (input : Array Nat) (cols : Array Nat) (pos : Nat) (gs : Globals) (out : List String) : Run :=
-  match stepCommand inlineImports cats tokens notes input cols pos gs with
-  | .done => .mk out gs cats tokens notes
-  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports cats' tokens' notes' input cols stop gs' (match line with
+  match stepCommand inlineImports header cats tokens notes input cols pos gs with
+  -- (13t) a namespace the file left open is an error at its `namespace` (the output is
+  -- reversed, so prepending innermost-first leaves them last, outermost first)
+  | .done => .mk (List.append (nsUnclosedLines (Globals.nsStack gs)) out) (Globals.atModuleStart gs) cats tokens notes
+  | .next line stop gs' cats' tokens' notes' => runCommands inlineImports (Bool.and header (startsImport input pos)) cats' tokens' notes' input cols stop gs' (match line with
     | .some l => .cons l out
     | .none => out)
 end
@@ -11172,7 +11715,7 @@ def tagOne (name : String) (off : Nat) (s : String) : String :=
 -- so visible throughout the file, as in the Lean frontend's single-file mode).
 def checkFileOpts (cats : List Cat) (tokens : List String) (trust smtTrust : Bool) (text : String) : List String :=
   let input := String.codes text;
-  match runCommands .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
+  match runCommands .true .true (surfaceCats cats) (List.append surfaceTokens tokens) .nil
       input (columns input) 0
       (Globals.withSmtTrust (Globals.withTrust (Globals.setModule Globals.empty "input") trust) smtTrust) .nil with
   | .mk out _ _ _ _ => stripAts (List.reverseOf out .nil)
@@ -11190,9 +11733,11 @@ def checkFile (cats : List Cat) (tokens : List String) (text : String) : List St
 -- elaborated once, before the modules that import it, into the same globals (`Globals`)
 -- and parser tables, so an importer sees the declarations of the modules it imports.
 -- `Prelude` is always the embedded prelude (`preludeText`): the self-hosted prelude is
--- what this frontend can check, not `lib/Prelude.wiz` (A9-A23). A module's imports are
--- hoisted: they are loaded (and the modules checked) before any other command of the
--- module, in source order; the module's own declarations keep their source order.
+-- what this frontend can check, not `lib/Prelude.wiz` (A9-A23). A module's **header**
+-- imports (before its first declaration) are loaded (and the modules checked) before any
+-- other command of the module, in source order; the module's own declarations keep their
+-- source order. An `import` after a declaration is an error (`imports must precede
+-- declarations`, 13u), never a dependency the loader silently drops.
 --
 -- The loader is pure: the driver reads the files (moduleRootSources) and `moduleCheck`
 -- builds the dependency graph from the sources. A cycle is an error naming the cycle, and
@@ -11276,7 +11821,9 @@ partial def modImportsAt (cats : List Cat) (tokens : List String) (input : Array
     | .err _ => .nil
     | .ok stx stop => match strEq (kindOf stx) "command.import" with
       | .true => .cons (modCanonical (identOf'' (kid stx 1))) (modImportsAt cats tokens input cols stop)
-      | .false => modImportsAt cats tokens input cols stop
+      -- the header is fixed: the first command that is not an import ends it, so the
+      -- graph never depends on an import written after a declaration
+      | .false => .nil
 
 def moduleImports (cats : List Cat) (tokens : List String) (text : String) : List String :=
   let input := String.codes text;
@@ -11511,14 +12058,15 @@ def modRunBody (r : Run) (name : String) (text : String) : Run :=
   -- declarations are private to it, and every name it declares is marked in its name.
   -- (D8 goals) each module's entries start empty; the root (`Main`) is loaded last, so
   -- the graph's globals end with the document's own entries.
-  let gs0 := Globals.lspReset (Globals.setModule (Run.gs r) name);
+  -- (13t) its namespaces and opens are its own: an `open` does not reach an importer
+  let gs0 := Globals.atModuleStart (Globals.lspReset (Globals.setModule (Run.gs r) name));
   let input := String.codes text;
   let cols := columns input;
   let r' := match strEq name "Prelude" with
-    | .true => match runCommands .false (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
+    | .true => match runCommands .false .true (doCats (Run.catsOf r)) (.cons "←" (.cons "do" (Run.tokensOf r)))
         (Run.notesOf r) input cols 0 gs0 .nil with
       | .mk _ gs' cats' tokens' notes' => .mk (Run.out r) gs' cats' tokens' notes'
-    | .false => runCommands .false (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
+    | .false => runCommands .false .true (Run.catsOf r) (Run.tokensOf r) (Run.notesOf r)
         input cols 0 gs0 (Run.out r);
   match r' with
   | .mk out gs' cats' tokens' notes' =>
@@ -11754,3 +12302,4 @@ def moduleMain (cats : List Cat) (tokens : List String) : IO Unit := do
     | .mk run _ _ order _ _ => match modHasFlag args "--key" with
       | .true => IO.println (Nat.toString (moduleGraphKey order tab))
       | .false => modPrint (List.reverseOf (Run.out run) .nil)
+end

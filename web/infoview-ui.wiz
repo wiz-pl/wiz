@@ -1,6 +1,7 @@
 import IO
 import Json
 import Web.EditorModel
+import Web.Hover
 import Web.InfoviewPage
 import Web.Loom
 
@@ -55,6 +56,8 @@ def loomEditorMove (index delta count : String) : String :=
   EditorModel.intString
     (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
       (EditorModel.intOf count))
+def loomEditorKey (key index count : String) : String :=
+  EditorModel.popupKeyJson key index count
 def loomEditorAccept (text item offset : String) : String :=
   EditorModel.acceptJson text item (EditorModel.natOf offset)
 def loomEditorTrigger (text c offset : String) : String :=
@@ -102,12 +105,16 @@ def loomEditorAskKey (key code ctrl meta : String) : String :=
 def loomEditorSpan (text span : String) : String := EditorModel.spanJson text span
 def loomEditorRangeText (range : String) : String := EditorModel.rangeTextJson range
 
+/-- A `textDocument/definition` result as `{uri, range, label}`, or `null`. -/
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
 export "wiz_loom_editor_index" loomEditorIndex
 export "wiz_loom_editor_segments" loomEditorSegments
 export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
 export "wiz_loom_editor_items" loomEditorItems
 export "wiz_loom_editor_popup" loomEditorPopup
 export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_key" loomEditorKey
 export "wiz_loom_editor_accept" loomEditorAccept
 export "wiz_loom_editor_trigger" loomEditorTrigger
 export "wiz_loom_editor_position" loomEditorPosition
@@ -123,3 +130,4 @@ export "wiz_loom_editor_item_title" loomEditorItemTitle
 export "wiz_loom_editor_ask_key" loomEditorAskKey
 export "wiz_loom_editor_span" loomEditorSpan
 export "wiz_loom_editor_range_text" loomEditorRangeText
+export "wiz_loom_hover_target" loomHoverTarget

@@ -231,9 +231,9 @@ def lineOf (src : String) (off : Nat) : Nat :=
   (String.ofList (src.toList.take off)).splitOn "\n" |>.length
 
 /-- The examples that are meant to be axiom-free (kernel-checked, nothing trusted):
-their own declarations must add no trust. `examples/hdl-verified.wiz` is checked by the
+their own declarations must add no trust. `hdl/examples/hdl-verified.wiz` is checked by the
 `hdl-verified` group too; `-native`/`-full` are deliberately trusted and are not here. -/
-def trustLedgerExamples : List String := ["examples/hdl-verified.wiz"]
+def trustLedgerExamples : List String := ["hdl/examples/hdl-verified.wiz"]
 
 /-- Where the ledger's walk reads and writes the elaboration cache (`--cache DIR` is
 written, each `--cache-ro DIR` is a read-only layer). The walk elaborates every module of
@@ -571,7 +571,8 @@ def checkTrustLedger (includeExamples : Bool := true) (root : Option String := n
   let (actual, hits) ← ledgerSources includeExamples root cache
   let rows ← readTrustRows ledger
   -- `--lib-only` (the `native` group) leaves the examples' rows out, as before.
-  let rows := if includeExamples then rows else rows.filter fun r => !r.module.startsWith "examples/"
+  let rows := if includeExamples then rows else
+    rows.filter fun r => !r.module.startsWith "examples/" && !r.module.startsWith "hdl/examples/"
   let report ← compareTrust "the trust ledger" actual rows today strictLegacy
   pure { report with hits }
 
@@ -909,13 +910,13 @@ def group : Group where
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat
 definitions. Slow (minutes: kernel evaluation over every input of each unit's domain,
 and native_refl), so a group of its own, in a heavy shard. The 2^20-input checks,
-examples/hdl-verified-full.wiz, are run on demand only. -/
+hdl/examples/hdl-verified-full.wiz, are run on demand only. -/
 def hdlVerifiedGroup : Group where
   name := "hdl-verified"
   exercise := "—"
   cases := [
-    { name := "V1: kernel-checked on the units' domains, nothing trusted (examples/hdl-verified.wiz)", run := fun _ => do
-        let path := "examples/hdl-verified.wiz"
+    { name := "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)", run := fun _ => do
+        let path := "hdl/examples/hdl-verified.wiz"
         let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
           { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
         let ms := s.messages.toList.map fun m =>
@@ -926,8 +927,8 @@ def hdlVerifiedGroup : Group where
         -- the trust ledger's part for this file: it must add no source of trust
         let _ ← checkExampleTrustLedger path s.globals
         pure () },
-    { name := "V1: full widths by native_refl, each an axiom #print axioms names (examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "examples/hdl-verified-native.wiz")
+    { name := "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)", run := fun _ => do
+        let ms ← msgsLibs (← IO.FS.readFile "hdl/examples/hdl-verified-native.wiz")
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"

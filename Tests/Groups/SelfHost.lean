@@ -1335,6 +1335,33 @@ def classInstParamExpected : String :=
   "instMyCommute : ((((((MyCommute Nat) Nat) Option) instMyMonadOption) instMyHandlerNatOption) instMyHandlerNatOption)\n" ++
   "con((#1, (tt, tt)))\n"
 
+/-- (`String ++`) `++` is a class problem through `Append` in both frontends: on String
+(`"ab" ++ "c"` is `String.append`) and on a `List`. The embedded prelude used to declare
+`infixr:67 " ++ " => List.append`, so `"a" ++ "b"` elaborated to `List.append` and was
+rejected (`expected List, got String`) while the host reached `String.append` through
+`HAppend`'s default instance. `strEq` and `nth` are local because `lib/Text.wiz` cannot
+be imported by the self-hosted frontend yet (its `List.map` duplicates the prelude's). -/
+def appendHeader : String :=
+  "def chEq : List Char → List Char → Bool\n" ++
+  "  | .nil, .nil => .true\n" ++
+  "  | .cons a as, .cons b bs => Bool.and (Nat.beq (Char.code a) (Char.code b)) (chEq as bs)\n" ++
+  "  | _, _ => .false\n" ++
+  "def strEq : String → String → Bool\n  | .mk a, .mk b => chEq a b\n" ++
+  "def flag (b : Bool) : Nat := if b then 1 else 0\n" ++
+  "def nth : List Nat → Nat → Nat\n" ++
+  "  | .cons x _, .zero => x\n" ++
+  "  | .cons _ xs, .succ k => nth xs k\n" ++
+  "  | .nil, _ => 0\n"
+
+/-- (`String ++`) The same values in both frontends: `"a" ++ "b"` is `"ab"` (not `"ba"`),
+and a `List` append keeps the elements in order. -/
+def appendCases : List (String × Nat) := [
+  ("flag (strEq (\"a\" ++ \"b\") \"ab\")", 1),
+  ("flag (strEq (\"a\" ++ \"b\") \"ba\")", 0),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 0", 1),
+  ("nth (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil) 2", 3),
+  ("List.length (List.cons 1 (List.cons 2 List.nil) ++ List.cons 3 List.nil)", 3)]
+
 /-- (A10) A method call with no instance for its class argument: an error. -/
 def classMissing : String :=
   "import Prelude\nclass Default (A : Type) where\n  d : A\n" ++
@@ -2869,7 +2896,9 @@ def selfHostGroup : Group where
           ("def f (n : Nat) : Nat := n\n#erase f\n", true, false),
           ("def f (n : Nat) : Nat := n\n#ir f\n", true, false),
           ("#run 1 + 1\n", true, false),
-          ("axiom N : Type\nbuiltin memo := N\n", true, false)] },
+          -- (`memo`/`nat` are already registered by `import Prelude`; use `int`, which
+          -- `lib/Int.wiz` registers and this file does not import, so the host accepts it)
+          ("inductive MyInt where\n  | mk\nbuiltin int := MyInt\n", true, false)] },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -3123,7 +3152,11 @@ def selfHostGroup : Group where
     -- fix (and the whole self-check at 10.7 GB); it is ~17 MB now. The bound is loose
     -- enough for the compiler's own heap, and catches the exponential cache again.
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
-        let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter (!·.startsWith "import"))
+        -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
+        -- this snippet concatenates two of them and cuts the second, so drop the wrapper
+        -- (both lines) rather than inherit an unclosed block.
+        let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
+          !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
@@ -3356,12 +3389,16 @@ def selfHostGroup : Group where
            ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
            ("def bad : Nat := cocon (0, ())\n", false),
            ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
-    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) agree with the host", run := fun _ =>
-        selfhostAgrees ""
-          [("def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
-            "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
-            "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
-            "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n", true)] },
+    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) are accepted by the self-hosted frontend (selfhost-only: the Lean frontend does not implement them yet)", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
+          "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
+          "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
+          "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n"
+        let some out ← selfhostOutput src | return
+        let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+        unless bad.isEmpty do
+          throw (IO.userError s!"the self-hosted frontend rejects surface sizes:\n{"\n".intercalate bad}\n{out}") },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -3460,6 +3497,13 @@ def selfHostGroup : Group where
           ("class Default (A : Type) where\n  d : A\ninstance instDefaultNat : Default Nat := Default.mk 7\ninstance instDefaultNat2 : Default Nat := Default.mk 8\n", true, false),
           -- (an output parameter rewrites a class parameter's type; not implemented here)
           ("class MyAdd (A B : Type) (C : outParam Type) where\n  add : A → B → C\ninstance instMyAdd : MyAdd Nat Nat Nat := MyAdd.mk Nat.add\ndef three : Nat := MyAdd.add 1 2\n", true, false)] },
+    { name := "the self-hosted frontend: `++` is `Append` on String and List, as in the Lean frontend (String ++)", run := fun _ => do
+        selfhostAgrees appendHeader [
+          ("def s : String := \"a\" ++ \"b\"\n", true),
+          ("def xs : List Nat := List.cons 1 List.nil ++ List.cons 2 List.nil\n", true),
+          -- (the operands fix the instance: a string append is not a list append)
+          ("def bad : List Nat := \"a\" ++ \"b\"\n", false)]
+        selfhostSameNats appendHeader appendCases },
     { name := "the self-hosted backend: a class's dictionary passing compiles and runs (A10)", run := fun _ =>
         selfhostCompileRun classProgram "7\n1\n" },
     { name := "the proof surface: Prop, Sort, equality, refl/rfl, cast and transp, as in the Lean frontend (A16)", run := fun _ => do
@@ -3760,10 +3804,60 @@ def selfHostGroup : Group where
           ("def myD (x y : String) : String := x\nattribute [deriver Foo] myD\n", false)] },
     { name := "(A11) a rejected derivation is reported at the command's line and column (D6)", run := fun _ =>
         selfhostCheckFails selfhostDerivingSpan selfhostDerivingSpanExpected },
+    -- (13t) namespaces and `open`, as the Lean frontend has them (`Tests/Groups/Namespace.lean`)
+    { name := "(13t) namespaces, `open` and `open … as`, and a constructor of the matched type", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\nnamespace B\ninductive T where\n  | mk (n : Nat)\n" ++
+          "def x : Nat := 1\ndef get (t : T) : Nat := match t with\n  | T.mk n => n\nend B\n" ++
+          "def y : Nat := B.x\nend A\nopen A\ndef use : Nat := A.B.x + y\n" ++
+          "def p : Nat := A.B.get (A.B.T.mk 3)\nopen A as Al\ndef use2 : Nat := Al.y + A.B.x\n")
+          ("A.B.T : U0\nA.B.x : Nat\nA.B.get : (x0 : A.B.T) → Nat\nA.y : Nat\n" ++
+           "use : Nat\np : Nat\nuse2 : Nat\n") },
+    { name := "(13t) two opens that provide the same name are an error naming both (never last-wins)", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "namespace B\ndef x : Nat := 2\nend B\nopen A\nopen B\ndef y : Nat := x\n")
+          ("A.x : Nat\nB.x : Nat\nerror: 'x' is ambiguous: it refers to 'A.x', 'B.x'; " ++
+           "qualify it with a namespace\n") },
+    { name := "(13t) `open A as Al` does not open A unqualified", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "open A as Al\ndef y : Nat := Al.x\ndef bad : Nat := x\n")
+          "A.x : Nat\ny : Nat\nerror: unknown identifier x\n" },
+    { name := "(13t) a namespace with no `end` is reported at the `namespace`; a stray or mismatching `end` at the `end`", run := fun _ => do
+        selfhostCheckFile "import Prelude\nnamespace A\ndef x : Nat := 1\n"
+          "A.x : Nat\nerror: namespace A is not closed: add `end` (or `end A`)\n"
+        selfhostCheckFile "import Prelude\nend\n"
+          "error: `end` without an open `namespace`\n"
+        selfhostCheckFile "import Prelude\nnamespace A\ndef x : Nat := 1\nend B\n"
+          "A.x : Nat\nerror: `end B` does not close the namespace `A` (write `end` or `end A`)\n"
+        selfhostCheckFile "import Prelude\nopen Z\n"
+          "error: unknown namespace 'Z': there is no declaration `Z.…`\n" },
+    { name := "(13t) mutual inductive types under a namespace", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace N\nmutual\ninductive A where\n  | mk (b : B)\n" ++
+          "inductive B where\n  | mk (a : A)\nend\nend N\n")
+          "N.A : U0\nN.B : U0\n" },
+    { name := "(13t) an `open` inside a namespace ends at its `end`", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace A\ndef x : Nat := 1\nend A\n" ++
+          "namespace B\nopen A\nend B\ndef use : Nat := x\n")
+          "A.x : Nat\nerror: unknown identifier x\n" },
+    { name := "(13v) `namespace __root__` keeps the block's declarations global", run := fun _ =>
+        selfhostCheckFile ("import Prelude\nnamespace __root__\ndef r : Nat := 1\n" ++
+          "def G.x : Nat := 2\nend __root__\n#check r\n#check G.x\n")
+          "r : Nat\nG.x : Nat\nNat\nNat\n" },
+    { name := "(13t) a module's `open` does not reach the file that imports it", run := fun _ =>
+        selfhostCheckModules
+          [("A.wiz", "import Prelude\nnamespace A\ndef x : Nat := 1\nend A\nopen A\n"),
+           ("input.wiz", "import Prelude\nimport A\ndef y : Nat := x\n")]
+          "A.x : Nat\nerror: unknown identifier x\n" },
     { name := "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)", run := fun _ => do
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
         selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- (libdiff) `lib/BitVecAdd.wiz`'s `Nat.pow 2 32` `rfl` used to grow the kernel's
+    -- unary Nat until `ulimit -v` failed the allocation (exit 3) or the 1 GiB evaluator
+    -- stack overflowed (SIGSEGV, exit 139). The per-command step budget stops it with a
+    -- diagnostic; the module is the smallest one that reaches it.
+    { name := "a kernel reduction needing billions of unary Nat steps is stopped by the step budget, not by an out-of-memory (lib/BitVecAdd.wiz)", run := fun _ =>
+        selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 32 = 4294967296 := rfl\n"
+          "input.wiz:2:1: error: the kernel evaluation hit its 200000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here\n" },
     -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
     -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
     -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
@@ -4524,7 +4618,16 @@ def selfHostHostGroup : Group where
     { name := "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)", run := fun _ =>
         selfhostCheckFile superclassParam superclassParamExpected },
     { name := "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)", run := fun _ =>
-        selfhostCompileRun superclassProgram "5\n" }
+        selfhostCompileRun superclassProgram "5\n" },
+    -- the import header (13u): the self-hosted loader skips imports, so it must agree
+    { name := "13u: comments and imports form the header (accepted)", run := fun _ =>
+        selfhostChecks "import Prelude\n-- a comment\n/- a block -/\ndef two : Nat := 1 + 1\n#check two\n" },
+    { name := "13u: an import after a declaration is an error", run := fun _ =>
+        selfhostCheckFails "import Prelude\ndef two : Nat := 1 + 1\nimport Prelude\n"
+          "input.wiz:3:1: error: imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)\n" },
+    { name := "13u: an import inside `mutual` is an error naming the block", run := fun _ =>
+        selfhostCheckFails "import Prelude\nmutual\nimport Prelude\ndef two : Nat := 1 + 1\nend\n"
+          "input.wiz:2:1: error: `import` is not allowed inside a `mutual`/`partial` block: imports go at the top level of a file, before every other command\n" }
 
   ]
 

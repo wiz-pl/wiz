@@ -104,14 +104,30 @@ export function createIndexer(ask, versionOf = null) {
     definition: (text, index, position, uri) =>
       JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
         JSON.stringify(position || {}), uri || "")),
-    // The completion popup's paint facts (`web/completions.js`) and the goals pane's
-    // source spans (`highlight`), so neither decides a rule.
+    // The completion popup's rules (`Web.EditorModel`): the result's items, the popup's
+    // filtered items/selection/prefix, the key command and the accepted edit. The popup
+    // only paints them, so none of this is decided in `web/completions.js`.
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup: (text, offset, items, index) =>
+      JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset))),
+    key: (key, index, count) =>
+      JSON.parse(ask("wiz_loom_editor_key", String(key || ""), String(index), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    // The popup's tooltip and ask key, and the goals pane's source spans (`highlight`),
+    // so neither decides a rule.
     itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
     askKey: (key, code, ctrl, meta) =>
       ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
         ctrl ? "1" : "0", meta ? "1" : "0") === "1",
     span: (text, span) => JSON.parse(ask("wiz_loom_editor_span", text, span)),
     rangeText: (range) => ask("wiz_loom_editor_range_text", JSON.stringify(range || {})),
+    // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+    // page only decides whether it can open the target's document.
+    target: (result) => JSON.parse(ask("wiz_loom_hover_target",
+      result === null || result === undefined ? "null" : JSON.stringify(result))),
   };
 }
 
@@ -186,9 +202,14 @@ export function startInfoview({
 
   // ## Hover
 
-  const hover = wantHover === false || !wantsHover(query) ? null : mountHover({
+  const hover = wantHover === false || !wantsHover(query) || !rules ||
+    typeof rules.position !== "function" ? null : mountHover({
     editor,
     document: pageDocument,
+    // The caret and the definition answer are the runtime's rules (`Web.EditorModel`,
+    // `Web.Hover`); this module supplies the browser's caret and the socket's answer.
+    position: (text, offset) => rules.position(text, offset),
+    target: typeof rules.target === "function" ? (result) => rules.target(result) : undefined,
     onHover: (position) => (client && client.state === "open" ? client.hover(documentUri, position) : null),
     onDefinition: (position) => (client && client.state === "open" ? client.definition(documentUri, position) : null),
     onJump: (target) => {

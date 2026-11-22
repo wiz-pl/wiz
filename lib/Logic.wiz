@@ -355,7 +355,7 @@ def Bool.or_false : (a : Bool) → (a || Bool.false) = a
   | .false => rfl
 /-- `.false` is a left identity of `Bool.or`. -/
 def Bool.false_or (a : Bool) : Bool.or .false a = a := rfl
-/-- `.true` is absorbing on the right for `Bool.or`. (`lib/Hdl/Temporal.wiz` uses the name
+/-- `.true` is absorbing on the right for `Bool.or`. (`hdl/src/Hdl/Temporal.wiz` uses the name
 `Bool.or_true` for the elimination form of a true disjunction.) -/
 def Bool.or_true_right : (a : Bool) → Bool.or a .true = .true
   | .true => rfl

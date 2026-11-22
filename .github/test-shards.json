@@ -66,6 +66,7 @@
       "builtins",
       "calc",
       "classes",
+      "context",
       "deriving",
       "=display",
       "=doc",
@@ -86,11 +87,12 @@
       "language",
       "lsp",
       "macros",
-      "modules",
+      "modules", "=namespace",
       "=native",
       "=natives",
       "=nvim",
       "=loom",
+      "=wire",
       "optic",
       "persistent",
       "phantom",
@@ -157,6 +159,7 @@
       "lexer",
       "lift",
       "=lint",
+      "=wiz-lint",
       "match",
       "=meta",
       "observational",
@@ -172,7 +175,8 @@
       "=storage-mmap",
       "=storage-multiproc",
       "=storage-quire",
-      "=dist-proofs"
+      "=dist-proofs",
+      "bpf"
     ]
   },
   {

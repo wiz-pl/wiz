@@ -1,3 +1,4 @@
+namespace __root__
 -- Reading C headers, in Wiz (stage 30a): the subset of `Wiz/FFI/CParse.lean` that the
 -- self-hosted frontend needs for `import_c` and `glue`. The header is read as it is (the
 -- self-hosted driver does not run the C preprocessor): preprocessor lines and comments
@@ -569,3 +570,4 @@ def cParseHeader (src : String) : Hdr :=
   let p : CP := CP.mk (cTokenize src) .nil .nil .nil 0;
   let r := cParseDecls p .nil 1000000;
   Hdr.mk (cpDedupeFuncs r.funcs) (cpDedupeStructs (cpFinishStructs r.p))
+end

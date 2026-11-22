@@ -1,0 +1,15 @@
+{
+  "schema": "wiz.loom.style.refused/1",
+  "comment": "Values the P0 generator refuses whole. Each case is checked by web/framework/style_test.mjs; none may be repaired into a declaration.",
+  "cases": [
+    { "name": "a semicolon starts a second declaration", "prop": "color", "value": "red;display:block", "code": "raw" },
+    { "name": "a closing brace escapes the rule", "prop": "color", "value": "red}", "code": "raw" },
+    { "name": "an opening brace starts a rule", "prop": "color", "value": "red{", "code": "raw" },
+    { "name": "an at-rule would escape the block", "prop": "color", "value": "@import url(https://example.test/x.css)", "code": "raw" },
+    { "name": "url() could fetch a remote resource", "prop": "background", "value": "url(https://example.test/x.png)", "code": "raw" },
+    { "name": "a non-identifier property is refused", "prop": "Color", "value": "red", "code": "raw" },
+    { "name": "a property with a colon is refused", "prop": "color:red", "value": "red", "code": "raw" },
+    { "name": "a backslash escape is refused", "prop": "content", "value": "\"a\\62 c\"", "code": "raw" },
+    { "name": "an empty value is refused", "prop": "color", "value": "", "code": "raw" }
+  ]
+}

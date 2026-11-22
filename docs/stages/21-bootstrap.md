@@ -949,8 +949,8 @@ automatic struct/pointer import for `import_c`.
 The frontend had one form of notation (`infixl`/`infixr`, stage 19b) and expanded it
 with an ad-hoc `Note`; `syntax`, `notation`, `macro_rules` and the macro/tactic
 registrations were "unsupported command". `lib/` uses them: counting declarations at the
-start of a line in the 78 `lib/**/*.wiz` files (comments skipped, including `lib/Hdl/`,
-2026-11-15 at `24218ce4`) gives
+start of a line in the 78 files of `lib/**/*.wiz` and `hdl/src/Hdl/*.wiz` (comments
+skipped; the Hdl modules have since moved out of `lib/`, 2026-11-15 at `24218ce4`) gives
 
 | form                            | declarations | files |
 |---------------------------------|-------------:|------:|

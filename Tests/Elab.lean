@@ -2134,8 +2134,9 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name (see
-`Tests.loadedModules`, which caches the load for the process). -/
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`), `scry/src/Scry/*.wiz` (as `Scry.X`)
+and `hdl/src/Hdl/*.wiz` (as `Hdl.X`), by module name (see `Tests.loadedModules`, which
+caches the load for the process). -/
 def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/

@@ -47,6 +47,8 @@ for b in wiz grail; do
   cp "$bindir/$b" "$top/share/wiz/.lake/build/bin/$b"
 done
 [ -f "$bindir/tower" ] && cp "$bindir/tower" "$top/bin/tower"
+# `lib/` is the standard library alone: Scry is a package (`scry/`, separate-repos.md
+# P0.1) and is not shipped in the toolchain tarball.
 cp -R lib "$top/share/wiz/lib"
 [ -d editors ] && cp -R editors "$top/share/wiz/editors"
 echo "$rev" > "$top/share/wiz/REVISION"
@@ -73,7 +75,7 @@ if [ -n "$webdir" ]; then
            wiz-infoview-ui.mjs wiz-docs-ui.mjs wiz-doc-live-ui.mjs; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
-  for f in scroll.js scroll-search.js scroll.css lsp-client.js playground-lsp.js \
+  for f in scroll.js scroll-search.js scroll.css highlight.css lsp-client.js playground-lsp.js \
            widgets.js widgets.css hover.js squiggles.js completions.js overlays.css \
            doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi

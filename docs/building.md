@@ -57,7 +57,7 @@ printing the case's name and result, a failure's output, and a last line
 plain `lake build` does not, and a stale driver runs whichever case had that index.
 
 **The trust ledger.** `scripts/trust-ledger.sh` walks every declaration of `lib/` (and
-`examples/hdl-verified.wiz`, which must stay axiom-free), runs `#print axioms`, and
+`hdl/examples/hdl-verified.wiz`, which must stay axiom-free), runs `#print axioms`, and
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
@@ -642,7 +642,7 @@ python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-chec
 | `check-std` | `wiz check --no-cache lib/Std.wiz` | 1 GiB |
 | `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
 | `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
-| `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
+| `check-example-hdl` | `wiz check --no-cache -I hdl/src hdl/examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
 | `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz -o bench-out/stdlib-bench` (elaborate, lower, C, `cc`) | 2 GiB |
 | `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
 
@@ -1028,7 +1028,7 @@ setup action keeps the elan cache for those
   case it excuses: prefer putting the tool in the dev shell.
 * **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
   test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
-  `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
+  `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
   library through the host; this is the package's own suite, and no other job ran it
   (`golden-diff.yml` only *shows* what `--update` would write, after a shard failed for
   another reason). The workflow never passes `--update`: a non-zero `grail test` fails,

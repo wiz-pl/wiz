@@ -50,7 +50,7 @@ def main : IO Unit := EIO.toIO (do
     let cIdx := Scry.TextIndex.ofString cText;
     let csIdx := Scry.TextIndex.ofString csText;
     let nIdx := Scry.TextIndex.ofString nullText;
-    let cOpts := opts "scry/tests/fixtures/taint-unsafe.c" "lib/Scry/rules/default.scry";
+    let cOpts := opts "scry/tests/fixtures/taint-unsafe.c" "scry/rules/default.scry";
     let csOpts := opts "scry/corpus/csharp/parity/taint-unsafe.cs" "scry/corpus/csharp/csharp.scry";
     let nOpts := opts "scry/corpus/csharp/parity/null-unsafe.cs" "scry/corpus/csharp/csharp.scry";
     rc ← Scry.analyzeStore cOpts 0 cText cIdx cc (Scry.CstStore.nodeCount cc);

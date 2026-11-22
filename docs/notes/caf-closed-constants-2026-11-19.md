@@ -42,7 +42,7 @@ self-hosted C backend has its own unconditional `get_g()` cache for nullary glob
 `examples/closed-table-bench.wiz` is the synthetic bounded case already in the tree: a
 256-entry list and a balanced ROM tree built from it, both closed definitions, read
 100000 times in a loop. I also used a copy that builds the **real**
-`lib/Hdl/Display.wiz` type (`Display.romBuild 7` font table, `Display.romBuild 8`
+`hdl/src/Hdl/Display.wiz` type (`Display.romBuild 7` font table, `Display.romBuild 8`
 program table) and reads it with a pure `RomT` descent; it is the OLED project's
 `Fx.fontT` / `Prog.tree` shape.
 
@@ -59,8 +59,8 @@ is unchanged.
 | `closed-table`, C | `c2efe881` (CAF on) | 1,856 | 64,144 | 1,098 |
 | `closed-table`, LLVM | `a916e13` | 204,900,055 | 6,352,006,160 | 204,900,073 |
 | `closed-table`, LLVM | `3ef38ad8` | 1,851 | 63,504 | 1,097 |
-| `lib/Hdl/Display.RomT` bench, C | `c2efe881`, `IR.cafs := {}` | 511,800,067 | 16,376,006,544 | 511,800,085 |
-| `lib/Hdl/Display.RomT` bench, C | `c2efe881` (CAF on) | 5,568 | 185,920 | 4,427 |
+| `hdl/src/Hdl/Display.RomT` bench, C | `c2efe881`, `IR.cafs := {}` | 511,800,067 | 16,376,006,544 | 511,800,085 |
+| `hdl/src/Hdl/Display.RomT` bench, C | `c2efe881` (CAF on) | 5,568 | 185,920 | 4,427 |
 
 For 100000 iterations, the old `closed-table` code did ~2049 allocations per iteration
 (the table and the ROM rebuilt at every use); the cached code does none. The HDL-shaped
@@ -122,7 +122,7 @@ the current-master check used the worktree's own `.lake/build/bin/wiz` built fro
 No compiler or library code is changed. The only repository change on this branch is
 this note (and the stale-candidate status in the dogfooding note).
 
-## Appendix: the `lib/Hdl/Display.RomT` benchmark
+## Appendix: the `hdl/src/Hdl/Display.RomT` benchmark
 
 ```wiz
 import Prelude

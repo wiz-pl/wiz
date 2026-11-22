@@ -132,7 +132,33 @@ def backendGroup : Group where
           check (cafs.contains n) s!"{n} is not cached"
         -- `tab` is `table` again, `four` and `Tab` are erased, `addTen` is a function
         for n in ["tab", "four", "Tab", "addTen", "wiz.entry", "range", "loop"] do
-          check (!cafs.contains n) s!"{n} is cached" }
+          check (!cafs.contains n) s!"{n} is cached" },
+    { name := "the typed primitive table covers every closed primitive (C and LLVM)", run := fun _ => do
+        -- (prim-table) A primitive that is not in the backend's table must be a
+        -- registration error, not a `wiz_unknown_prim` call: check the invariant the
+        -- backends rely on, before any code generation.
+        let closed := IR.PrimOp.runtimeSymbols.map (·.1) ++ [IR.PrimOp.natZero]
+        for (backend, label) in [(IR.Backend.c, "C"), (IR.Backend.llvm, "LLVM")] do
+          for p in closed do
+            if p != IR.PrimOp.natZero then
+              if ((IR.PrimOp.table backend).find? fun e => e.prim == p).isNone then
+                throw (IO.userError s!"{label}: no primitive-table entry for `{p.key}`")
+        for p in closed do
+          if p != IR.PrimOp.natZero then
+            match IR.PrimOp.ofKey? p.key with
+            | some q => if q != p then throw (IO.userError s!"`{p.key}` resolved to the wrong primitive")
+            | none => throw (IO.userError s!"`{p.key}` does not resolve to a primitive")
+        -- an unregistered key is not a primitive
+        check ((IR.PrimOp.ofKey? "wiz_unknown_prim").isNone) "an unknown key resolved" },
+    { name := "the IR still prints primitive keys the old way (wire compatibility)", run := fun _ => do
+        let s := runFrontend (R := ZeroOneMany)
+          "import Prelude\ndef f (x : Nat) : Nat := x + 1\ndef g (a b : Nat) : Bool := Nat.beq a b\n#ir f\n#ir g"
+          { trustedModule := Tests.libModule, loader := ← preludeLoader }
+        let errs := (s.messages.filter (·.severity == .error)).map (·.text)
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        let texts := s.messages.toList.map (·.text)
+        check (texts.any fun t => (t.splitOn "prim nat.add").length > 1) s!"no `prim nat.add` in {texts}"
+        check (texts.any fun t => (t.splitOn "prim nat.beq").length > 1) s!"no `prim nat.beq` in {texts}" }
   ]
 
 builtin_initialize registerGroup backendGroup

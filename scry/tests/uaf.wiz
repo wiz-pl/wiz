@@ -1,12 +1,12 @@
-import Scry.NativeLink
 -- test: run
+import Scry.NativeLink
 import Sys
 import Json
 import Scry.TaintCmd
 import Scry.Rules
 -- CWE-416 lifetime rule over the fixtures in `fixtures/uaf-*.c`.
 --
---   scry taint FILE.c --rules ../lib/Scry/rules/uaf.scry
+--   scry taint FILE.c --rules rules/uaf.scry
 --
 -- Nine vulnerable fixtures (basic, conditional free, alias, double free, loop,
 -- interprocedural free, strdup, and the CVE-2020-1752 / CVE-2019-7317 shapes) must each yield
@@ -54,7 +54,7 @@ def checkRule (label : String) (rep : Scry.TaintReport) : EIO Unit := do
 /-- A vulnerable fixture: one finding, `memory` kind, an alloc -> free -> sink path, and
 the free is in `freeFunc` (the callee for an interprocedural/callback free). -/
 def checkUaf (label file freeFunc : String) (arg : Nat) : EIO Unit := do
-  o ← opts [file, "--rules", "../lib/Scry/rules/uaf.scry"];
+  o ← opts [file, "--rules", "rules/uaf.scry"];
   rep ← Scry.analyzeFile o;
   check (label ++ ": one finding") (Nat.beq (List.length rep.findings) 1);
   checkRule label rep;
@@ -74,7 +74,7 @@ def checkUaf (label file freeFunc : String) (arg : Nat) : EIO Unit := do
     check (label ++ ": argument " ++ Nat.repr arg) (Nat.beq f.arg arg)
 
 def checkSafe (label file : String) : EIO Unit := do
-  o ← opts [file, "--rules", "../lib/Scry/rules/uaf.scry"];
+  o ← opts [file, "--rules", "rules/uaf.scry"];
   rep ← Scry.analyzeFile o;
   check (label ++ ": zero findings") (Nat.beq (List.length rep.findings) 0);
   checkRule label rep

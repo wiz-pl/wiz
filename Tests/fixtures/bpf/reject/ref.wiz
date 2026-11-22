@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: Ref is mutable heap state; a map is the only store.
+import Bpf
+
+def bad (r : Ref (UIntN 32)) : UIntN 32 := Ref.get r

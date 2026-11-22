@@ -21,7 +21,7 @@ that needs more says so itself.
 
 Relative Markdown links and `examples/...` paths in inline code or prose are resolved
 against the document (and the repository root for `examples/...`); a missing target is
-reported.  Anchors are not checked, and globs such as `examples/hdl-verified-*.wiz` are
+reported.  Anchors are not checked, and globs such as `hdl/examples/hdl-verified-*.wiz` are
 skipped.
 
 Caching.  `--cache DIR` (default `.lake/docs-examples`) holds both Wiz's own

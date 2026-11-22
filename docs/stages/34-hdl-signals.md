@@ -1,6 +1,6 @@
 # Stage 34: Clash-style signals
 
-Wiz's HDL (`lib/Hdl/Core.wiz`, docs/libraries.md "H14") describes a design as a
+Wiz's HDL (`hdl/src/Hdl/Core.wiz`, docs/libraries.md "H14") describes a design as a
 `Circuit`: a Mealy machine whose step is tagless-final code over a representation
 `r : HwTy → Type`, run at values for simulation and proofs and at `Wire` for a netlist.
 Clash describes the same hardware as functions on *signals*, infinite streams of values
@@ -9,10 +9,10 @@ in a clock domain, with registers inline. This stage adds that view as a layer o
 circuits stay where they are, and a signal is connected to them by a theorem. The plan
 and its later lanes are in `wiz-notes/clash-hdl-plan.md`; this is lane L1.
 
-## 34a: signals as ν-streams (`lib/Hdl/Signal.wiz`)
+## 34a: signals as ν-streams (`hdl/src/Hdl/Signal.wiz`)
 
 ```wiz no-check
--- (from lib/Hdl/Signal.wiz; the whole module is checked by the hdl-signal group)
+-- (from hdl/src/Hdl/Signal.wiz; the whole module is checked by the hdl-signal group)
 coinductive Signal (d : ClockDomain) (A : Type) where
   head : A
   tail : Signal d A
@@ -32,7 +32,7 @@ corecursive call, and to `cocon` when there is none; both are total in the kerne
 **The operations.**
 
 * Observation: `Signal.at`, `Signal.sample n`, `Signal.toTrace` (a `Trace A`, the
-  semantics `Circuit.trace` and lib/Hdl/Temporal.wiz use), `Signal.fromList`.
+  semantics `Circuit.trace` and hdl/src/Hdl/Temporal.wiz use), `Signal.fromList`.
 * Combinational: `pure`, `map`, `zipWith`/`zipWith3`/`zipWith4`, each a `coit`, with
   `map_at`, `zipWith_at`, `pure_at`.
 * State: `register init s` (`init, s₀, s₁, …`; one `cocon` cell, no corecursion),
@@ -55,14 +55,14 @@ the bundle's code; `bundle2`/`unbundle2` do the same for plain pairs.
 decision"), so two signals are equivalent when they agree at every cycle
 (`Signal.Eqv`, with `refl`/`symm`/`trans`). `Signal.bisim` is the bisimulation
 principle: a relation that relates heads and is closed under `tail` relates only
-equivalent signals. Temporal properties are the `TL` formulas of lib/Hdl/Temporal.wiz
+equivalent signals. Temporal properties are the `TL` formulas of hdl/src/Hdl/Temporal.wiz
 over `toTrace` (`Signal.sat`), so every proof rule there applies, and `Signal.sat_eqv`
 moves a property between equivalent signals.
 
 **The bridge to `Circuit`.**
 
 ```wiz no-check
--- (from lib/Hdl/Signal.wiz)
+-- (from hdl/src/Hdl/Signal.wiz)
 def Signal.ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : Signal d (HwTy.El i)) : Signal d (HwTy.El o) :=
   Signal.mealy (Circuit.stepEl c) c.init xs
 
@@ -75,14 +75,14 @@ traces and `sat_ofCircuit` transfers a temporal property between a circuit's sig
 its trace (and from there through `Circuit.Simulates` to the netlist).
 `Signal.ofCircuit_delay` proves that `register` is `Circuit.delay`.
 
-**Example** (`examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy
+**Example** (`hdl/examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy
 machines (`natCounter` is `t` at every cycle `t`, and always steps by one as a `TL`
 property), the three registers on ten cycles, `Hw` code and a derived bundle on signals,
 and wiz-rv's baud generator (`Uart.baudCw 10 4`, a 10-bit counter with period 4) driven
 as a signal:
 
 ```wiz no-check
--- (from examples/hdl-signal.wiz)
+-- (from hdl/examples/hdl-signal.wiz)
 def baud4 {d : ClockDomain} (ce : Signal d (BitVec 1)) : Signal d (BitVec 1) :=
   Signal.ofCircuit (Uart.baudCw 10 4) ce
 
@@ -133,7 +133,7 @@ operators. The design is `wiz-notes/hdl-l2.md`.
   `i` as `↑j`, checks the body at `↑j`, binds the explicit arguments from the state, and
   turns a recursive call into the `rec` argument at `j`. A clause that recurses at the
   same size is a size error. `elabSizedDef`'s `sfix` path is unchanged.
-* `Signal.mapS`/`zipWithS`/`zipWith3S` (`lib/Hdl/Signal.wiz`) preserve the size; only
+* `Signal.mapS`/`zipWithS`/`zipWith3S` (`hdl/src/Hdl/Signal.wiz`) preserve the size; only
   `registerS` raises it. `Add`/`Sub` and `Mux` at `(Signal d A)^i` are the pointwise
   operations, so `c + 1` and `if c then a else b` work at size `i`.
 * `Signal.fix g` is `scofix` with unit state: `g j (rec idx ())` is the body at `j`, so
@@ -141,11 +141,11 @@ operators. The design is `wiz-notes/hdl-l2.md`.
   is the counter; `Signal.fix (fun i c => c + 1)` is a size error at the lambda (the
   body is not a `Signal^i → Signal^{↑i}`), which is the causality check.
 
-The `hdl` group checks `examples/hdl-l3.wiz` (the counter, the baud generator, the sized
+The `hdl` group checks `hdl/examples/hdl-l3.wiz` (the counter, the baud generator, the sized
 `map`, `+` and `if`); the `hdl-signal` group pins the sized `map` positive, the
 same-size-recursion rejection and the combinational-loop rejection. The workaround
 (`register`/`mealy`/`moore`/`ofCircuit`) stays for designs that do not need the sized
-surface; the Mealy baud generator is still in `examples/hdl-signal.wiz`.
+surface; the Mealy baud generator is still in `hdl/examples/hdl-signal.wiz`.
 
 A `partial def` knot is not a substitute: it has neither the delay discipline (a
 combinational loop diverges) nor a totality story, and it is opaque to the kernel, so a

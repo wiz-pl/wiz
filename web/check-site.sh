@@ -48,6 +48,7 @@ need playground/wiz-playground.mjs
 need playground/wiz-playground.wasm
 # The page's runtime (its browser half, mount/driver/runtime, is checked above).
 need playground/wiz-playground-ui.mjs
+need playground/wiz-playground-ui.wasm
 need notebooks/index.html
 need licenses/index.html
 need licenses/LGPL-3.0.txt

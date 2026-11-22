@@ -118,26 +118,23 @@ async function loadEngine() {
 
 // ## The runtime's editor rules
 
-// The runtime owns the editor's pure rules (`lib/Web/EditorModel.wiz`); the page asks
-// it one question at a time through `mount`'s `ask` (a read-only string query) and hands
-// the answer to the overlay widgets, which only paint and position. Nothing here decides
-// what a diagnostic underlines or what a completion inserts.
+// The runtime owns the editor's pure rules (`lib/Web/EditorModel.wiz`); `createIndexer`
+// is the one adapter that names the `wiz_loom_editor_*` queries, and the overlay widgets
+// only paint and position. Nothing here decides what a diagnostic underlines, which item
+// the popup selects, what a key does, or what a completion inserts.
 function editorRules(handle, versionOf = null) {
-  const ask = (name, ...args) => handle.ask(name, ...args);
-  const index = createIndexer(ask, versionOf);
+  const index = createIndexer((name, ...args) => handle.ask(name, ...args), versionOf);
   return {
     segments: index.segments,
-    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
-    popup(text, offset, items, indexJson) {
-      return JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
-        String(indexJson), String(offset)));
-    },
-    move: (i, delta, count) =>
-      Number(ask("wiz_loom_editor_move", String(i), String(delta), String(count))),
-    accept: (item, text, offset) =>
-      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
-    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    items: index.items,
+    popup: index.popup,
+    key: index.key,
+    accept: index.accept,
+    trigger: index.trigger,
+    itemTitle: index.itemTitle,
+    askKey: index.askKey,
     position: index.position,
+    target: index.target,
   };
 }
 

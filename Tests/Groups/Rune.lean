@@ -9,7 +9,7 @@ set_option compiler.extract_closed false
 namespace Tests.Elab
 
 /-- The rune group: the HDL standard library of reusable, simulated primitives
-(`lib/Hdl/Uart.wiz`, `lib/Hdl/Spi.wiz`, `lib/Hdl/Ddr.wiz`). Each case runs the example
+(`hdl/src/Hdl/Uart.wiz`, `hdl/src/Hdl/Spi.wiz`, `hdl/src/Hdl/Ddr.wiz`). Each case runs the example
 through the front end, compiles it, and compares its report: the value simulation and
 the fast netlist simulation (`Hdl.Sim`) agree and the protocol behaves (a byte through
 the UART loopback at each counter width, the SPI edges and byte, the DDR handshake and

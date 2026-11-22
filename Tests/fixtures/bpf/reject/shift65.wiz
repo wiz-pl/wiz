@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: the boundary next to the ISA's 63-bit mask.
+import Bpf
+
+def bad (x : UIntN 64) : UIntN 64 := UIntN.shiftRight x 65

@@ -1,5 +1,6 @@
 import IO
 import Std
+namespace __root__
 -- The lexer, in Wiz: the first piece of the self-hosted frontend (stage 12b).
 -- It follows `Wiz/Parser/Token.lean`: tokens are read on demand at an offset of the
 -- input (an array of code points), so the parser can look ahead from anywhere.
@@ -277,3 +278,4 @@ def printAll : List String → IO Unit
 
 def tokenize (tokens : List String) (input : String) : List String :=
   lex tokens (String.codes input) 0 .nil
+end

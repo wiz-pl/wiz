@@ -8,13 +8,13 @@ controller. The libraries are described in [libraries.md](libraries.md) (section
 
 | piece | where | what it is |
 |---|---|---|
-| circuits | `lib/Hdl/Core.wiz` | `Circuit i o`: a Mealy machine whose step is code over any representation `r : HwTy → Type` (values, or wires for synthesis) |
-| bundles | `lib/Hdl/Core.wiz`, `lib/Hdl/Optic.wiz` | structures of signals (`deriving Bundle`), with a lens per field (`deriving Lens`) |
-| memories | `lib/Hdl/Core.wiz` | `HwTy.mem aw dw`, `Hw.memRead`/`memWrite`; block RAM on iCE40 |
+| circuits | `hdl/src/Hdl/Core.wiz` | `Circuit i o`: a Mealy machine whose step is code over any representation `r : HwTy → Type` (values, or wires for synthesis) |
+| bundles | `hdl/src/Hdl/Core.wiz`, `hdl/src/Hdl/Optic.wiz` | structures of signals (`deriving Bundle`), with a lens per field (`deriving Lens`) |
+| memories | `hdl/src/Hdl/Core.wiz` | `HwTy.mem aw dw`, `Hw.memRead`/`memWrite`; block RAM on iCE40 |
 | traces | `lib/Trace.wiz` | `Trace A := Nat → A`, `Mealy`, invariants, refinement |
-| temporal logic | `lib/Hdl/Temporal.wiz` (PR #146) | `□`, `◇`, `○`, SVA-style implications, fairness, over traces |
-| formal harness | `lib/Hdl/Formal.wiz` | `` `ifdef FORMAL `` `assert`/`assume`/`cover` monitors with `$past`/`$stable`/`anyconst`, plus a generated `.sby` |
-| bit reasoning | `lib/Hdl/Bits.wiz` (PR, needs 22l) | laws of one-bit logic by case split; the bridge to `sat_decide` |
+| temporal logic | `hdl/src/Hdl/Temporal.wiz` (PR #146) | `□`, `◇`, `○`, SVA-style implications, fairness, over traces |
+| formal harness | `hdl/src/Hdl/Formal.wiz` | `` `ifdef FORMAL `` `assert`/`assume`/`cover` monitors with `$past`/`$stable`/`anyconst`, plus a generated `.sby` |
+| bit reasoning | `hdl/src/Hdl/Bits.wiz` (PR, needs 22l) | laws of one-bit logic by case split; the bridge to `sat_decide` |
 | solvers | `sat_decide` (stage 28b), `native_refl` (stage 27a) | certified SAT for Boolean goals; compiled evaluation for long closed runs |
 
 ## 1. A circuit
@@ -83,7 +83,7 @@ When a step obligation has *symbolic* bits (a register left as a variable, a con
 input not embedded from Booleans), `rfl` gets stuck on gates such as `Hw.and 0 x` (finding
 C2 of the toy CPU). Three tools cover that, in increasing strength:
 
-* `lib/Hdl/Bits.wiz`: `Bit.ind` (a property of every bit is a property of 0 and of 1,
+* `hdl/src/Hdl/Bits.wiz`: `Bit.ind` (a property of every bit is a property of 0 and of 1,
   from the words' range, stage 22l) and the laws it proves (`Bit.and_zero`, `Bit.or_mux`,
   `HwTy.El.mux_same`, …): case split, then `rfl`.
 * `Bit.toBool` is a homomorphism (`Bit.toBool_and`, …), and `Bit.eq_of_toBool` turns an
@@ -106,7 +106,7 @@ light_phase xs t : (stateAt lightC (map embI xs) t).phase = Color.code (stateAt 
 ```
 
 The property is proved once, on the specification (a case analysis); refinement carries
-it to the circuit's phase register. With the temporal library (`lib/Hdl/Temporal.wiz`) the
+it to the circuit's phase register. With the temporal library (`hdl/src/Hdl/Temporal.wiz`) the
 statement is the formula `□ (green → ○ ¬red)`, i.e.
 `TL.always (TL.imp (TL.now isGreen) (TL.next (TL.not (TL.now isRed))))` over the trace,
 and its proof rules (invariance, `TL.splitAt` for a transient phase followed by an
@@ -118,7 +118,7 @@ invariant, fairness and ranking for liveness) apply to the same traces.
 a value simulation), `Vcd.ofRun` (a waveform) and `Pcf.emit` (pin constraints) take the
 same circuit to an iCE40 board; the hdl test group checks that the value simulation, the
 netlist simulation and Icarus Verilog agree. For long simulations in compiled programs,
-`Design.simFast` (`lib/Hdl/Sim.wiz`, PR #199) runs the netlist about 25 times faster than
+`Design.simFast` (`hdl/src/Hdl/Sim.wiz`, PR #199) runs the netlist about 25 times faster than
 the value simulation; the value simulation stays the reference that proofs are about.
 Memories (`HwTy.mem`) become Verilog arrays,
 which yosys maps to the iCE40's block RAM; at values a memory is a function, so a proof
@@ -127,9 +127,9 @@ about it is pointwise (`HwTy.El.memRead_write_miss`).
 ## Running examples
 
 * `examples/hardware-tour.wiz`: this page.
-* `examples/hdl-compose.wiz`: composition, reset and enable, emitters.
-* `examples/hdl-optic.wiz`: lenses on bundles, the frame rule.
-* `examples/hdl-mem.wiz`: a RAM with a registered read, a ROM, block RAM inference.
-* `examples/hdl-temporal.wiz` (PR #146): a UART's line is idle-high for ever, the
+* `hdl/examples/hdl-compose.wiz`: composition, reset and enable, emitters.
+* `hdl/examples/hdl-optic.wiz`: lenses on bundles, the frame rule.
+* `hdl/examples/hdl-mem.wiz`: a RAM with a registered read, a ROM, block RAM inference.
+* `hdl/examples/hdl-temporal.wiz` (PR #146): a UART's line is idle-high for ever, the
   loopback delivers every byte, a valid/ready buffer is stable and live.
 * The iCEstick project (UART, toy CPU) uses all of the above; its findings drove them.

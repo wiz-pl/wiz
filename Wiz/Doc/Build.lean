@@ -79,7 +79,7 @@ def pieceOf (o : Options) (mods : Array Module) (names : List String) (wasm : Bo
   let tElab ← IO.monoMsNow
   let errors := st.messages.filter (·.severity == .error) |>.map (·.text)
   for e in errors do IO.eprintln s!"{m.name}: {e}"
-  let c : Ctx := { st, modules := names, current := m.name }
+  let c : Ctx := { st, modules := names, current := m.name, highlight := o.highlight }
   let es := entries c m.src
   let decls := es.foldl (fun n e => n + 1 + e.children.size) 0
   if o.verbose > 1 then
@@ -158,7 +158,7 @@ def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options
       for f in ["wiz-infoview.mjs", "wiz-infoview.wasm"] do
         discard <| copyFirst [w] f o.out
       wasm := true
-  for f in ["scroll.css", "scroll.js", "scroll-search.js"] do
+  for f in ["scroll.css", "highlight.css", "scroll.js", "scroll-search.js"] do
     discard <| copyFirst o.assets f o.out
   -- The pages' runtimes: the search's and, with --serve, the live panel's. They are
   -- optional, like the Wasm module: a page without them stays static (the search box

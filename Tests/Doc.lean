@@ -74,6 +74,30 @@ def pkgFiles : List (String × String) :=
   [("grail.wiz", "import Grail\ndef package : Package := Package.new \"shapes\" |> Package.lib \"shapes\" \"src\"\n"),
    ("src/Shapes/Basic.wiz", basicSrc), ("src/Shapes/Use.wiz", useSrc)]
 
+/-- A doc comment with a tagged `wiz` fence and an untagged one, for the highlighting
+tests. -/
+def hlSrc : String := "import Prelude
+
+/-- Highlighted and plain code in one comment.
+
+```wiz
+def answer : Nat := 42 -- the answer
+def greeting : String := \"hi\"
+```
+
+An untagged block stays plain:
+
+```
+a < b & c <script>alert(1)</script>
+```
+-/
+def highlighted : Nat := 1
+"
+
+def hlPkgFiles : List (String × String) :=
+  [("grail.wiz", "import Grail\ndef package : Package := Package.new \"hl\" |> Package.lib \"hl\" \"src\"\n"),
+   ("src/Highlight/A.wiz", hlSrc)]
+
 /-- A package for the reference manual: an implicit argument, a class with two
 instances, an infix operator of its own, markup in a doc comment, and a module without
 any doc comments. -/
@@ -338,7 +362,9 @@ def httpGet (port : UInt16) (path : String) : IO String := do
   let (r, w) ← Wiz.Socket.tcpConnect Wiz.Socket.loopback port
   httpReq r w path
 
-/-- Connect to `port`, retrying while the server starts (about 10 s in all). -/
+/-- Connect to `port`, retrying while the server starts (about 30 s in all: `wiz doc`
+elaborates the module and copies the site before it binds, and on a shared build node
+that has been measured at ~16 s). -/
 def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := do
   let rec go : Nat → IO (Option (IO.FS.Handle × IO.FS.Handle))
     | 0 => pure none
@@ -346,7 +372,7 @@ def connectSoon (port : UInt16) : IO (Option (IO.FS.Handle × IO.FS.Handle)) := 
       match ← (try some <$> Wiz.Socket.tcpConnect Wiz.Socket.loopback port catch _ => pure none) with
       | some c => pure (some c)
       | none => IO.sleep 25; go n
-  go 400
+  go 1200
 
 /-- `wiz doc` on the package's source directory, plain (no Wasm). -/
 def makeSite (dir : System.FilePath) : IO System.FilePath := do
@@ -528,7 +554,41 @@ def docGroup : Group where
         checkEq "<p>a <em>b</em> <strong>c</strong> <a href=\"M.html#f\"><code>f</code></a> <code>g</code></p>\n" (r "a *b* **c** `f` `g`")
         checkEq "<ul><li>x</li><li>y z</li></ul>\n" (r "* x\n* y\n  z")
         checkEq "<pre><code>a &lt; b\n</code></pre>\n".length (r "```\na < b\n\n```").length
+        -- (a `wiz` fence is tokenised by the parser's own reader; an untagged fence and
+        -- an unknown language stay plain)
+        checkEq "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> x : Nat := <span class=\"hl-num\">1</span></code></pre>\n"
+          (r "```wiz\ndef x : Nat := 1\n```")
+        -- (a fence directive after the language word does not change the language)
+        checkEq "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> x : Nat := <span class=\"hl-num\">1</span></code></pre>\n"
+          (r "```wiz no-check\ndef x : Nat := 1\n```")
+        checkEq "<pre><code class=\"language-unknown\">x</code></pre>\n" (r "```nope\nx\n```")
         checkEq "<p>&lt;script&gt; <a href=\"https://e.org\">l</a> j</p>\n" (r "<script> [l](https://e.org) [j](javascript:x)") },
+    { name := "wiz doc: a ```wiz fence is highlighted with the parser's lexer; an untagged fence is plain", run := fun _ => do
+        let dir ← mkTree hlPkgFiles
+        let out ← makeSite dir
+        let html ← IO.FS.readFile (out / "Highlight.A.html")
+        -- (the real lexer: `def` is a keyword, 42 a number, the comment a comment, the
+        -- string a string; nothing is re-tokenised in the browser)
+        checkHas html "<pre><code class=\"language-wiz\"><span class=\"hl-kw\">def</span> answer : Nat := <span class=\"hl-num\">42</span> <span class=\"hl-com\">-- the answer"
+        checkHas html "<span class=\"hl-str\">&quot;hi&quot;</span>"
+        -- (an untagged block is exactly the pre-highlighting renderer, escaped)
+        checkHas html "<pre><code>a &lt; b &amp; c &lt;script&gt;alert(1)&lt;/script&gt;</code></pre>"
+        -- (the page carries the spans for the hover runtime: the P0 data hook)
+        checkHas html "\"wizHighlight\":{\"blocks\""
+        checkHas html "\"schema\":\"wiz.highlight/1\""
+        checkHas html "\"language\":\"wiz\""
+        checkHas html "\"spans\":[[0,3,\"hl-kw\"]"
+        -- (--no-highlight is the old renderer: no spans, no sheet, no data)
+        let outPlain := dir / "site-plain"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", outPlain.toString,
+          "--source-url", "https://example.org/blob/abc/src/", "--web", (dir / "no-web").toString,
+          "--no-highlight"]
+        let plain ← IO.FS.readFile (outPlain / "Highlight.A.html")
+        check (!has plain "class=\"hl-") "--no-highlight emitted a span"
+        check (!has plain "highlight.css") "--no-highlight linked the sheet"
+        check (!has plain "wiz.highlight/1") "--no-highlight emitted the highlight data"
+        checkHas plain "<pre><code class=\"language-wiz\">def answer : Nat := 42 -- the answer"
+        check (!has html "<script>alert") "raw script markup in a fence" },
     { name := "wiz doc: a page per module, kinds, docs as HTML, source links, instances, index", run := fun _ => do
         let dir ← mkTree pkgFiles
         let out ← makeSite dir
