@@ -374,11 +374,6 @@ prefixes the failure (`"(llvm) "`). -/
 def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
   if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
 
-/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
-the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit :=
-  cRunWith (← preludeLoader) src expected llvm split
-
 /-- `cRun` with `loader` resolving `src`'s imports. -/
 def cRunWith (loader : Name → Option String) (src : String) (expected : String) (llvm : Bool := false)
     (split : Nat := 0) : IO Unit := do
@@ -389,6 +384,11 @@ def cRunWith (loader : Name → Option String) (src : String) (expected : String
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
   | .error e => failRun e
+
+/-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
+the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
+  cRunWith (← preludeLoader) src expected llvm split
 
 /-- `cRun` for a program that imports a module `preludeLoader` does not carry
 (`WordArray`, `Intern`, `Data.PMap`, …): resolve the closure from `lib/` on disk. -/

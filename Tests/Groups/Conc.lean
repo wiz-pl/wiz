@@ -551,12 +551,13 @@ def concGroup : Group where
     -- The classifier itself: a build that cannot start a program, or cannot find GMP's
     -- header, is a missing toolchain; a compiler that ran and rejected the program (or a
     -- missing test input file) is not; and no program failure ever is.
-    { name := "only a missing compiler, llc or gmp.h is classified as 'no toolchain'", run := fun _ => do
+    { name := "only a missing compiler, llc, gmp.h or gmp library is classified as 'no toolchain'", run := fun _ => do
         let tc : Wiz.Toolchain := {}
         check (Build.missingToolchain tc "cc failed:\ncould not execute external process 'cc'") "a missing cc"
         check (Build.missingToolchain tc "llc failed:\ncould not execute external process 'llc'") "a missing llc"
         check (Build.missingToolchain tc "cc: no such file or directory (error code: 2)") "cc could not start"
         check (Build.missingToolchain tc "cc failed:\nfatal error: gmp.h: No such file or directory") "gmp.h"
+        check (Build.missingToolchain tc "cc failed:\nld: cannot find -lgmp: No such file or directory") "the gmp library at link time"
         check (!Build.missingToolchain tc "cc failed:\ncc: error: c/helper.c: No such file or directory") "a missing link_c file"
         check (!Build.missingToolchain tc "cc failed:\nmain.c:3:1: error: 'x' undeclared") "a rejected program"
         check (!(Build.RunError.run 3 "No such file or directory").isToolchain) "a program failure"

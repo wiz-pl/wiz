@@ -351,16 +351,19 @@ end RunError
 
 /-- Is this build failure a missing C toolchain? The message names the compiler (or `llc`)
 as a program that could not be started ("could not execute external process 'cc'", or
-`cc: no such file…`), or the compiler cannot find `gmp.h`. A compiler that ran and
-rejected the program does not count — and neither does a message that merely mentions a
-missing file (such as a `link_c` source in the test): that is a failing build, not a
-missing toolchain. -/
+`cc: no such file…`), the compiler cannot find `gmp.h`, or the linker cannot find the
+toolchain's `-lgmp`/`-lgc` library. A compiler that ran and rejected the program does
+not count — and neither does a message that merely mentions a missing file (such as a
+`link_c` source in the test): that is a failing build, not a missing toolchain. -/
 def missingToolchain (tc : Toolchain) (msg : String) : Bool :=
   let lower := msg.toLower
   let names (p : String) : Bool :=
     p != "" && ((msg.splitOn s!"could not execute external process '{p}'").length > 1 ||
       (msg.startsWith (p ++ ":") && (lower.splitOn "no such file").length > 1))
-  (msg.splitOn "gmp.h").length > 1 || [tc.cc, tc.llc].any names
+  (msg.splitOn "gmp.h").length > 1 ||
+  (lower.splitOn "cannot find -lgmp").length > 1 ||
+  (lower.splitOn "cannot find -lgc").length > 1 ||
+  [tc.cc, tc.llc].any names
 
 /-- Build and run the global `n` (through C, or LLVM); returns its result, read back
 with its type. With `timeout`, the program is stopped after that many seconds (by

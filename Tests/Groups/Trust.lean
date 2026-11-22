@@ -19,14 +19,14 @@ def formatMessages (s : CommandState ZeroOneMany) : List String :=
 imports `Region`, `Vec`, `WordArray`, `Intern`, `WordMap`, `Data.PMap` or `Web.EditorModel`
 saw `unknown module` (and passed or failed for the wrong reason). Resolving the closure
 means the case exercises the module it names. -/
-def libLoader (input : String) : IO (Name → Option String) := do
+def diskLoader (input : String) : IO (Name → Option String) := do
   let ms ← Wiz.Module.loadClosure ["lib"] input
   pure fun n => (ms[n]?).map (·.2)
 
 /-- Messages of `input` (with `lib/` importable), without positions, errors marked. -/
 def messagesLib (input : String) : IO (List String) := do
   let s := runFrontend (R := ZeroOneMany) input
-    { loader := ← libLoader input, trustedModule := Tests.libModule }
+    { loader := ← diskLoader input, trustedModule := Tests.libModule }
   pure (formatMessages s)
 
 /-- Some error mentions `fragment` (others may follow from it). -/
@@ -526,7 +526,7 @@ def trustGroup : Group where
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
-          { loader := ← libLoader "import Region\n", trustedModule := Tests.libModule }
+          { loader := ← diskLoader "import Region\n", trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
         checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
