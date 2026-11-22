@@ -1,0 +1,107 @@
+import Sys
+import Word
+import Text
+import Scry.QuireFindings
+import Scry.ProjectCache
+/-!
+# The project findings index, cold write / warm read / hit
+
+`cache-bench BACKEND OP N DIR` where `BACKEND` is `json` or `quire` and `OP` is `write`
+(`Scry.findingsSave` on a fresh directory), `read` (`Scry.findingsProbe`) or `query`
+(`Scry.findingsQuery` for severity 0). The rows are synthetic findings with the corpus's
+schema (rule, severity, file, line, function, message); N of them are built before the
+timer starts. This is the adopted consumer's own API, so it measures exactly what
+`Scry.ProjectIO --taint --cache` pays on a cold run and on a warm one.
+
+The live `scry/corpus/project` run needs `Scry.NativeLink` and the vendored C# grammar,
+which a worktree does not have; `bench/corpus.sh` holds that measurement for a checkout
+that does. This program has no native shim.
+-/
+
+def i2s (n : Nat) : String := Nat.toString n
+
+def mkRow (i : Nat) : Scry.FindingsIndexRow :=
+  Scry.FindingsIndexRow.make
+    (String.append "rule-" (i2s (Nat.mod i 100)))
+    (Nat.mod i 3)
+    (String.append "file-" (i2s (Nat.mod i 1024)))
+    i
+    (String.append "fn-" (i2s (Nat.mod i 256)))
+    (String.append "message " (i2s i))
+
+partial def rowsGo (n i : Nat) (acc : List Scry.FindingsIndexRow) :
+    List Scry.FindingsIndexRow :=
+  match Nat.le i n with
+  | .true => rowsGo n (Nat.succ i) (List.cons (mkRow i) acc)
+  | .false => acc
+
+def rowsOf (n : Nat) : List Scry.FindingsIndexRow := List.reverse (rowsGo n 1 [])
+
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (rows : Nat) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println (String.append "rows " (i2s rows));
+  IO.println extra
+
+def backendOf (s : String) : EIO Scry.CacheBackend :=
+  match Scry.CacheBackend.ofName s with
+  | .some b => EIO.pure b
+  | .none => EIO.fail "backend must be json or quire"
+
+def run (backend op ns : String) (dir : String) : EIO Unit := do
+  n ← match String.parseNat ns with
+    | .some k => EIO.pure k
+    | .none => EIO.fail "bad N";
+  b ← backendOf backend;
+  let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true dir b;
+  let rows := rowsOf n;
+  let id := "cache-bench";
+  match op with
+  | "write" => do
+    t0 ← EIO.lift Clock.monotonic;
+    Scry.findingsSave cache id rows;
+    t1 ← EIO.lift Clock.monotonic;
+    EIO.lift (report "write" (List.length rows) t0 t1 (String.append "backend " backend))
+  | "read" => do
+    t0 ← EIO.lift Clock.monotonic;
+    got ← Scry.findingsProbe cache id;
+    t1 ← EIO.lift Clock.monotonic;
+    let k := match got with
+      | .ok pr => pr.1
+      | .error _ => 0;
+    EIO.lift (report "read" k t0 t1 (String.append "backend " backend))
+  | "query" => do
+    t0 ← EIO.lift Clock.monotonic;
+    got ← Scry.findingsQuery cache id 0;
+    t1 ← EIO.lift Clock.monotonic;
+    let k := match got with
+      | .ok c => c
+      | .error _ => 0;
+    EIO.lift (report "query" k t0 t1 (String.append "backend " backend))
+  | _ => EIO.fail "op must be write, read or query"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  match args with
+  | backend :: op :: n :: dir :: _ => run backend op n dir
+  | _ => EIO.fail "usage: cache-bench BACKEND OP N DIR")
