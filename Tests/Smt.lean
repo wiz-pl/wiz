@@ -83,7 +83,7 @@ def cacheEntries (dir : String) : IO (List System.FilePath) := do
   pure out
 
 structure Entry where
-  meta : String
+  metadata : String
   proof : String
   query : String
   stdout : String
@@ -92,17 +92,17 @@ def parseEntry (txt : String) : Option Entry :=
   match txt.splitOn (cacheSep ++ "query" ++ cacheSep) with
   | [metaAndProof, rest] =>
     match rest.splitOn (cacheSep ++ "stdout" ++ cacheSep), metaAndProof.splitOn cacheSep with
-    | [q, out], [meta, proof] => some { meta, proof, query := q, stdout := out }
+    | [q, out], [metadata, proof] => some { metadata, proof, query := q, stdout := out }
     | _, _ => none
   | _ => none
 
 def Entry.render (e : Entry) : String :=
-  e.meta ++ cacheSep ++ e.proof ++ cacheSep ++ "query" ++ cacheSep ++ e.query ++
+  e.metadata ++ cacheSep ++ e.proof ++ cacheSep ++ "query" ++ cacheSep ++ e.query ++
     cacheSep ++ "stdout" ++ cacheSep ++ e.stdout
 
 /-- Replace the `out-sha256` line of an entry's metadata. -/
 def Entry.withDigest (e : Entry) (digest : String) : Entry :=
-  { e with meta := "\n".intercalate ((e.meta.splitOn "\n").map fun l =>
+  { e with metadata := "\n".intercalate ((e.metadata.splitOn "\n").map fun l =>
       if l.startsWith "out-sha256 " then "out-sha256 " ++ digest else l) }
 
 /-- The four clauses over two variables, refuted by CaDiCaL (its LRAT, by hand). -/

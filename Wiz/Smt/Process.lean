@@ -123,9 +123,9 @@ def solverIdentity (cmd : String) : IO String := solverId cmd
 /-- The metadata lines of a cache entry (`meta ++ sep ++ outFile`), or none if it is not
 the current format, does not carry a proof, or the proof's bytes do not match the
 recorded digest. -/
-private def readCached (meta outFile query stdout query' : String) : Option Answer :=
+private def readCached (metadata outFile query stdout query' : String) : Option Answer :=
   if query' != query || outFile.isEmpty then none else
-  match meta.splitOn "\n" with
+  match metadata.splitOn "\n" with
   | [magic, kind, exitLine, shaLine] =>
     if magic != cacheMagic || kind != "kind proof" then none else
     let code? := (exitLine.splitOn " ").getLast?.bind fun s => s.toNat?
@@ -163,8 +163,8 @@ private def runIO (cfg : Config) (cmd : String) (args : List String) (input : St
         match rest.splitOn s!"{sep}stdout{sep}" with
         | [q, out] =>
           match metaAndProof.splitOn sep with
-          | [meta, file] =>
-            if let some a := readCached meta file query out q then return .ok (id, a)
+          | [metadata, file] =>
+            if let some a := readCached metadata file query out q then return .ok (id, a)
           | _ => pure ()
         | _ => pure ()
       | _ => pure ()
