@@ -222,6 +222,68 @@ int main(int argc, char **argv) {
     wiz_val l = wiz_lock_new(); wiz_inc(l); wiz_inc(l);
     wiz_lock_acquire(l); wiz_lock_acquire(l); puts("acquired twice"); return 0;
   }
+  /* (audit F15) the expansive number natives refuse a result above 2^24 bits, the same
+     bound as the interpreter's `maxBits`: a clean exit 3, not a GMP allocation. */
+  if (!strcmp(what, "natshift")) { wiz_nat_shiftLeft(WIZ_BOX(1), WIZ_BOX(1000000000)); puts("shifted"); return 0; }
+  if (!strcmp(what, "natpow")) { wiz_nat_pow(WIZ_BOX(2), WIZ_BOX(1000000000)); puts("powered"); return 0; }
+  if (!strcmp(what, "natpow-base3")) { wiz_nat_pow(WIZ_BOX(3), WIZ_BOX(20000000)); puts("powered"); return 0; }
+  if (!strcmp(what, "natbound-ok")) {
+    /* the bases whose result stays small are never refused */
+    EXPECT(wiz_nat_shiftLeft(WIZ_BOX(0), WIZ_BOX(1000000000)) == WIZ_BOX(0));
+    EXPECT(wiz_nat_pow(WIZ_BOX(0), WIZ_BOX(1000000000)) == WIZ_BOX(0));
+    EXPECT(wiz_nat_pow(WIZ_BOX(1), WIZ_BOX(1000000000)) == WIZ_BOX(1));
+    /* a result just under the bound is computed: 2^1000 has 1001 bits, 5·2^200 has 203 */
+    wiz_val big = wiz_nat_pow(WIZ_BOX(2), WIZ_BOX(1000));
+    EXPECT(wiz_is_big(big) && mpz_sizeinbase(((wiz_big *)big)->z, 2) == 1001);
+    wiz_dec(big);
+    wiz_val sh = wiz_nat_shiftLeft(WIZ_BOX(5), WIZ_BOX(200));
+    EXPECT(wiz_is_big(sh) && mpz_sizeinbase(((wiz_big *)sh)->z, 2) == 203);
+    wiz_dec(sh);
+    puts("bounded");
+    return 0;
+  }
+  /* (audit F17) `wiz_sys_remove_all` never follows a link, so a link (reached with a
+     trailing slash, which `lstat`/`opendir` would resolve) is removed as a link and the
+     tree it names survives; a real tree containing a link goes without entering it. */
+  if (!strcmp(what, "rmrf-link")) {
+    char base[] = "/tmp/wiz-rmrf-XXXXXX", p[512];
+    EXPECT(mkdtemp(base) != NULL);
+    snprintf(p, sizeof p, "%s/d", base); EXPECT(mkdir(p, 0700) == 0);
+    snprintf(p, sizeof p, "%s/outside", base); EXPECT(mkdir(p, 0700) == 0);
+    snprintf(p, sizeof p, "%s/outside/keep", base);
+    FILE *f = fopen(p, "w"); EXPECT(f != NULL); fputs("kept", f); fclose(f);
+    snprintf(p, sizeof p, "%s/outside", base);
+    { char l[512]; snprintf(l, sizeof l, "%s/d/link", base); EXPECT(symlink(p, l) == 0); }
+    { char l[512]; snprintf(l, sizeof l, "%s/d/link/", base); EXPECT(wiz_sys_remove_all(l) == 0); }
+    struct stat st;
+    snprintf(p, sizeof p, "%s/outside/keep", base); EXPECT(lstat(p, &st) == 0);
+    snprintf(p, sizeof p, "%s/d/link", base); EXPECT(lstat(p, &st) != 0);
+    snprintf(p, sizeof p, "%s/d", base); EXPECT(lstat(p, &st) == 0); /* the parent stays */
+    EXPECT(wiz_sys_remove_all(base) == 0);
+    EXPECT(lstat(base, &st) != 0);
+    puts("rmrf link");
+    return 0;
+  }
+  if (!strcmp(what, "rmrf-tree")) {
+    char base[] = "/tmp/wiz-rmrf-XXXXXX", p[512];
+    EXPECT(mkdtemp(base) != NULL);
+    snprintf(p, sizeof p, "%s/tree", base); EXPECT(mkdir(p, 0700) == 0);
+    snprintf(p, sizeof p, "%s/tree/sub", base); EXPECT(mkdir(p, 0700) == 0);
+    snprintf(p, sizeof p, "%s/tree/sub/file", base);
+    FILE *f = fopen(p, "w"); EXPECT(f != NULL); fputs("x", f); fclose(f);
+    snprintf(p, sizeof p, "%s/outside", base); EXPECT(mkdir(p, 0700) == 0);
+    snprintf(p, sizeof p, "%s/outside/keep", base);
+    f = fopen(p, "w"); EXPECT(f != NULL); fputs("k", f); fclose(f);
+    snprintf(p, sizeof p, "%s/tree/sub/link", base);
+    { char o[512]; snprintf(o, sizeof o, "%s/outside", base); EXPECT(symlink(o, p) == 0); }
+    snprintf(p, sizeof p, "%s/tree", base); EXPECT(wiz_sys_remove_all(p) == 0);
+    struct stat st;
+    snprintf(p, sizeof p, "%s/outside/keep", base); EXPECT(lstat(p, &st) == 0);
+    snprintf(p, sizeof p, "%s/tree", base); EXPECT(lstat(p, &st) != 0);
+    EXPECT(wiz_sys_remove_all(base) == 0);
+    puts("rmrf tree");
+    return 0;
+  }
   return 1;
 }
 EOF
@@ -292,5 +354,17 @@ expect "the boundary catches Process.exit and the next call runs" 0 survived \
 expect "WIZ_NO_THREADS: the boundary catches the refusal" 0 survived \
   "wiz: Guard.test: threads are not available in this build (WIZ_NO_THREADS)" "$tmp/st" guard-nothreads
 expect "no boundary: Process.exit still exits with its code" 7 "" "" "$tmp/mt" sysexit
+# (audit F15) the compiled number natives refuse a result above 2^24 bits, the same bound
+# as the interpreter's `maxBits`: a clean error, not a 125 MB (or larger) GMP allocation.
+expect "Nat.shiftLeft refuses a shift above 2^24 bits" 3 "" \
+  "wiz: Nat.shiftLeft: the result would have more than 16777216 bits" "$tmp/mt" natshift
+expect "Nat.pow refuses an exponent above 2^24 bits" 3 "" \
+  "wiz: Nat.pow: the result would have more than 16777216 bits" "$tmp/mt" natpow
+expect "Nat.pow refuses a base > 1 whose log bound reaches 2^24 bits" 3 "" \
+  "wiz: Nat.pow: the result would have more than 16777216 bits" "$tmp/mt" natpow-base3
+expect "0/1 bases are not refused, and a result under the bound computes" 0 bounded "" "$tmp/mt" natbound-ok
+# (audit F17) the recursive delete walks from an opened descriptor and never follows a link.
+expect "removeAll removes a link, not the tree it names (a trailing slash)" 0 "rmrf link" "" "$tmp/mt" rmrf-link
+expect "removeAll removes a tree without entering a link inside it" 0 "rmrf tree" "" "$tmp/mt" rmrf-tree
 
 echo "test-runtime: all checks passed"

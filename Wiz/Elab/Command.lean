@@ -12,6 +12,7 @@ import Wiz.Elab.Reflect
 import Wiz.Frontend.Parse
 import Wiz.Elab.Witness
 import Wiz.Elab.Info
+import Wiz.Lint.Basic
 
 /-!
 # Elaborating commands
@@ -81,6 +82,40 @@ structure DeclDoc where
   a `mutual` block's definitions each have their own -/
   start : Nat := 0
   deriving Inhabited, Repr, BEq
+
+/-- (lint P1) One rule a package lint module registered with a `lint` command. The
+metadata is the registry's data; `runner` names the module's pure `String → String`
+function, which reads the stable `Lint.Command` view and writes its findings. -/
+structure LintRuleDecl where
+  code : String := ""
+  name : String := ""
+  category : Lint.Category := .api
+  defaultSeverity : Lint.Severity := .warning
+  scope : Lint.Scope := .declaration
+  requires : List Lint.Capability := []
+  suppressible : Bool := true
+  runner : Name := "_"
+  deriving Repr, Inhabited
+
+/-- (lint P1) The header a package lint module declares with `lint-set`: the set's name,
+the ABI range it was written against, and the capabilities its rules may read. The
+registry checks every rule's `requires` against `capabilities`. -/
+structure LintSetDecl where
+  name : String := ""
+  abi : String := ""
+  capabilities : List Lint.Capability := []
+  rules : Array LintRuleDecl := #[]
+  deriving Repr, Inhabited
+
+/-- (lint P1) A validated package lint set: the metadata and the erased code of the
+set's module (its runners run in the interpreter, never as host code). -/
+structure LintPackageSet where
+  name : String
+  abi : String
+  capabilities : List Lint.Capability
+  rules : Array LintRuleDecl
+  code : Code := {}
+  deriving Inhabited
 
 structure CommandState (R : Type) where
   globals : Globals R := {}
@@ -156,6 +191,15 @@ structure CommandState (R : Type) where
   /-- (lint) direct imports that contribute an effect (instance, syntax, notation,
   builtin, attribute, export, FFI/link code), so `W302` never reports them -/
   lintEffectful : Std.HashSet Name := {}
+  /-- (lint P1) the package lint sets the driver loaded (a package contributes one; the
+  loader validates it before it enters the state) -/
+  lintPackageSets : Array LintPackageSet := #[]
+  /-- (lint P1) the package set names enabled for this run (`wiz lint --set NAME`);
+  empty means none. A package set is opt-in and never transitive. -/
+  lintSets : List String := []
+  /-- (lint P1) what a package lint module's `lint-set`/`lint` commands declared; the
+  loader reads it once, and a target elaboration never carries it -/
+  lintSetDecl : LintSetDecl := {}
   declSites : Std.HashMap Name (SourceInfo × String) := {}
   /-- (11s) what each declaration is and its doc comment (`/-- … -/`), for `wiz doc` and
   hovers: filled by the frontend (`runFrontend.step`), replayed by the cache -/
@@ -1819,6 +1863,19 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
                             -- (import header) the importer's header is not the module's
                             headerDone := outer.headerDone,
                             nsStack := outer.nsStack,
+                            -- (lint) the driver's configuration and its import facts belong
+                            -- to the importer, not the module: an isolated (cached) module
+                            -- state must not clear the consumer's enabled sets, sources or
+                            -- accumulated imports/effects
+                            lintEnabled := outer.lintEnabled,
+                            lintPath := outer.lintPath,
+                            lintPublicRoots := outer.lintPublicRoots,
+                            lintRules := outer.lintRules,
+                            lintImports := outer.lintImports,
+                            lintEffectful := outer.lintEffectful,
+                            lintPackageSets := outer.lintPackageSets,
+                            lintSets := outer.lintSets,
+                            lintSetDecl := outer.lintSetDecl,
                             globals := g1 }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
@@ -2868,6 +2925,54 @@ a proposition is not data (proofs are erased and all its proofs are definitional
                                                                 else (key, n) :: s.globals.assumed } }
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
+  | "command.lintSet" =>
+    -- (P1) the header of a package lint set: `lint-set "scry" "wiz-lint/1" [decl, spans]`
+    let name := ((cmd.getArg 1).getStr?).getD ""
+    let abi := ((cmd.getArg 2).getStr?).getD ""
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 3).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with name, abi, capabilities := caps.reverse } }
+  | "command.lint" =>
+    -- (P1) one rule of a package lint set:
+    -- `lint W501 "no-raw-path" api warning declaration [decl, spans] noRawPath`
+    let code := ((cmd.getArg 1).getId?).getD "_"
+    let name := ((cmd.getArg 2).getStr?).getD ""
+    let catText := ((cmd.getArg 3).getId?).getD "_"
+    let sevText := ((cmd.getArg 4).getId?).getD "_"
+    let scopeText := ((cmd.getArg 5).getId?).getD "_"
+    let category ← match Lint.Category.ofKey? catText with
+      | some c => pure c
+      | none => report .error cmd.info s!"unknown lint category '{catText}'"; pure .api
+    let defaultSeverity ← match Lint.Severity.ofKey? sevText with
+      | some s => pure s
+      | none => report .error cmd.info s!"unknown lint severity '{sevText}'"; pure .warning
+    let scope ← match Lint.Scope.ofKey? scopeText with
+      | some sc => pure sc
+      | none => report .error cmd.info s!"unknown lint scope '{scopeText}'"; pure .declaration
+    let mut caps : List Lint.Capability := []
+    for stx in ((cmd.getArg 6).getArg 1).args do
+      match stx.getId? with
+      | none => pure ()
+      | some n =>
+        match Lint.Capability.ofKey? n with
+        | some c => caps := c :: caps
+        | none => report .error stx.info s!"unknown lint capability '{n}'"
+    -- the runner must be declared before the `lint` command (the loader looks it up in
+    -- this module's globals; a later definition would not be found)
+    let runnerStx := cmd.getArg 7
+    let runnerName := (runnerStx.getId?).getD "_"
+    let runner := (s.globals.resolveName runnerName).toOption.getD runnerName
+    if s.globals.find? runner |>.isNone then
+      report .error runnerStx.info s!"the lint rule {code} names '{runnerName}', which is not declared above it"
+    let rule : LintRuleDecl := { code, name, category, defaultSeverity, scope,
+                                 requires := caps.reverse, runner }
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with rules := s.lintSetDecl.rules.push rule } }
   | "command.printAxioms" =>
     let nStx := cmd.getArg 2
     match s.globals.resolveName ((nStx.getId?).getD "_") with
@@ -3628,8 +3733,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           -- the interpreter can't fail: running a stub would print a wrong value
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (ty, e, code, []) =>
-          let v := run code [] e
-          report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"cannot run this: {m}"
+          | v => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
         | .error err => report .error cmd.info s!"cannot run this: {err}"
       let hintOf (ty : VTy R) : Option Name := match whnf ty with
         | .mu _ _ _ _ _ (some (T, _, _)) _ => some T
@@ -3694,9 +3800,12 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ok (_, _, _, (n, err) :: _) =>
           report .error cmd.info s!"cannot run this: cannot erase {n}: {err}"
         | .ok (_, e, code, []) =>
-          match (run code [] e).toString? with
-          | some text => report .info cmd.info text
-          | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
+          match run code [] e with
+          | .stuck m => report .error cmd.info s!"#plot: {m}"
+          | v =>
+            match v.toString? with
+            | some text => report .info cmd.info text
+            | none => report .error cmd.info "#plot: the value is not a string (expected a Plot.Chart)"
         | .error err => report .error cmd.info s!"cannot run this: {err}"
   | "command.run" =>
     -- like `#eval`, but through the IR, with reference counting, on a checked heap
