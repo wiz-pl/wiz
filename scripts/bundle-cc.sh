@@ -160,14 +160,18 @@ exec "$d/bin/clang" -Wno-override-module $kind $opt $pic -x ir -o "${o:--}" "$in
 EOF
 chmod 755 "$out/bin/cc" "$out/bin/llc"
 
-# GMP and the Boehm GC, static and position-independent, into the sysroot
+# GMP and the Boehm GC, static and position-independent, into the sysroot.
+# CC is `cc` by name, with $out/bin first on PATH: GMP records the compiler in the
+# installed gmp.h (`__GMP_CC`), and an absolute $out/bin/cc there would make that
+# header (and so the tarball) depend on the bundle's build directory.
 cc=$out/bin/cc
+PATH="$out/bin:$PATH"; export PATH
 tar -xJf "$dl/gmp-6.3.0.tar.xz" -C "$work"
 (cd "$work/gmp-6.3.0" &&
   # --enable-fat: code for every x86-64 CPU, picked at run time (a build tuned to this
   # machine's CPU would fail on older ones)
   ./configure -q --host=x86_64-pc-linux-gnu --enable-fat --enable-static --disable-shared --with-pic \
-    --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 cp "$work/gmp-6.3.0/COPYING.LESSERv3" "$out/LICENSES/gmp-COPYING.LESSERv3"
 cp "$work/gmp-6.3.0/COPYINGv3" "$out/LICENSES/gmp-COPYINGv3"
@@ -175,7 +179,7 @@ cp "$work/gmp-6.3.0/COPYINGv2" "$out/LICENSES/gmp-COPYINGv2"
 tar -xzf "$dl/gc-8.2.8.tar.gz" -C "$work"
 (cd "$work/gc-8.2.8" &&
   ./configure -q --host=x86_64-pc-linux-gnu --enable-static --disable-shared --with-pic --enable-threads=posix \
-    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 # its licence is the top of README.QUICK
 cp "$work/gc-8.2.8/README.QUICK" "$out/LICENSES/bdwgc-README.QUICK"

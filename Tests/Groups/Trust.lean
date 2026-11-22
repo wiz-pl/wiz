@@ -476,8 +476,8 @@ def trustGroup : Group where
         expectMsg ms "(0 e : A = A)"
         expectMsg ms "(0 a : A)"
         expectMsg ms "= a"
-        checkEq #["castRefl"] (printAxiomsOf ms "castRefl")
-        checkEq #["castRefl"] (printAxiomsOf ms "cr")
+        checkEq ["castRefl"] (printAxiomsOf ms "castRefl")
+        checkEq ["castRefl"] (printAxiomsOf ms "cr")
         -- an unrelated proposition, and a proof of `A = B` where `A = A` is required:
         -- neither may elaborate through castRefl
         failsWithLib "import Prelude\ndef bad : (0 : Nat) = 1 := castRefl (refl 0) 0\n" "type mismatch"
