@@ -159,12 +159,4 @@ def Registry.loadFiles (paths : List System.FilePath) : IO Highlight.Registry :=
     | .error e => throw (IO.userError s!"{p}: {e}")
     | .ok reg => pure reg) Highlight.Registry.builtins
 
-/-- The `WIZ_DOC_LANGUAGES` hook: a colon-separated list of registry files. The `wiz
-doc`/`grail doc` flag is the explicit path; this environment variable is the host-side
-hook until the flag is parsed (see the lane's report). -/
-def Registry.envFiles : IO (List System.FilePath) := do
-  match ← IO.getEnv "WIZ_DOC_LANGUAGES" with
-  | some s => pure ((List.map System.FilePath.mk) ((s.splitOn ":").filter fun x => !x.isEmpty))
-  | none => pure []
-
 end Wiz.Doc

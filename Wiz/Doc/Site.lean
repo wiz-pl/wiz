@@ -64,8 +64,8 @@ structure Options where
   /-- highlight fenced code at render time (`--no-highlight` turns it off: the pages
   are then byte-identical to the pre-highlighting output) -/
   highlight : Bool := true
-  /-- external language-registry files (`--languages FILE`, repeatable); also read from
-  `WIZ_DOC_LANGUAGES` (colon-separated) by `Build.run` -/
+  /-- external language-registry files (`--languages FILE`, repeatable); the compiler
+  reads no environment variable for them -/
   languages : List System.FilePath := []
   /-- the resolved registry: built-ins merged with `languages` (`Build.run` fills it) -/
   registry : Highlight.Registry := Highlight.Registry.builtins

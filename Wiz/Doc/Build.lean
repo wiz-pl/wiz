@@ -151,7 +151,7 @@ partial def mapWindow (jobs : Nat) (xs : Array α) (f : α → IO β) : IO (Arra
 def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options) : IO RunResult := do
   let tAll ← IO.monoMsNow
   -- the language registry: built-ins, then `--languages` files, then the host hook
-  let registry ← Wiz.Doc.Registry.loadFiles ((← Wiz.Doc.Registry.envFiles) ++ o.languages)
+  let registry ← Wiz.Doc.Registry.loadFiles o.languages
   let o : Options := { o with registry := registry }
   IO.FS.createDirAll o.out
   let names := mods.toList.map (·.name)
