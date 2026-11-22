@@ -28,3 +28,13 @@ the `Tac.getSimpLemmas` read; conditional rules (dischargers), `simp at h` and `
 are S3–S4 and need their own requests (premise goals, `changeHyp`/`addHyp`/`clearHyp`).
 There is no automatic closer: `simp` rewrites and the user writes
 `rfl`/`exact`/`assumption`, and `simp only []` is the identity.
+
+**P0 (landed).** `Tac.rewriteAt` is now depth-aware: it walks the goal type with the
+context of each λ binder, matches the rule there, and transports the child equality
+through the parent (under a λ the proof is pointwise function equality). Rewriting under
+a `Π` *type former* is still not done (it needs the P1/P2 type-congruence path), and
+dependent application arguments fail at the kernel rather than producing a wrong term.
+The Wiz driver records the rules that fired (`rulesUsed`), and `simp?` traces
+`Try this: simp only […]` plus `; rfl` when the residual goal is reflexive. The step
+budget remains 100 rewrites per goal; the host matcher is one request per winning node,
+and the Wiz loop restarts the pass on a rewrite as before.
