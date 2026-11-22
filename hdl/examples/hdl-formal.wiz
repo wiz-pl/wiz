@@ -1,5 +1,5 @@
 import Hdl.Formal
--- A formal harness for a one-entry valid/ready buffer (`lib/Hdl/Formal.wiz`): the same
+-- A formal harness for a one-entry valid/ready buffer (`hdl/src/Hdl/Formal.wiz`): the same
 -- properties are emitted for the correct RTL and for a deliberately wrong variant, so a
 -- solver can show the first pass and the second fail. The example is checked by the
 -- `hdl` test group, which also runs yosys-smtbmc (or `sby`) on both harnesses when the

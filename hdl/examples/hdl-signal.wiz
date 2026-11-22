@@ -1,4 +1,4 @@
--- Clash-style signals (lib/Hdl/Signal.wiz, stage 34a): counters as Mealy machines,
+-- Clash-style signals (hdl/src/Hdl/Signal.wiz, stage 34a): counters as Mealy machines,
 -- registers, combinational `Hw` code and bundles on signals, a temporal property, and
 -- wiz-rv's baud generator driven as a signal through `Signal.ofCircuit`. Checked by the
 -- `hdl-signal` test group, which also checks that a size-keeping register, a
@@ -31,7 +31,7 @@ def natCounter_from {d : ClockDomain} : (t : Nat) → (s : Nat) →
 def natCounter_at {d : ClockDomain} (t : Nat) : Signal.at (natCounter : Signal d Nat) t = Nat.add t Nat.zero :=
   natCounter_from t Nat.zero
 
--- the same as a temporal property (lib/Hdl/Temporal.wiz): always, the next value is one more
+-- the same as a temporal property (hdl/src/Hdl/Temporal.wiz): always, the next value is one more
 def natCounter_steps {d : ClockDomain} :
     Signal.sat (natCounter : Signal d Nat) (TL.always (TL.act (fun (a b : Nat) => b = Nat.succ a))) :=
   fun (k : Nat) =>

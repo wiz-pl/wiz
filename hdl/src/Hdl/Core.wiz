@@ -25,7 +25,7 @@ whose step is such code; its state is the registers.
 * **Memories**: `HwTy.mem aw dw`, `2^aw` words of `dw` bits, a function at values; read
   with `Hw.memRead` (combinational), written with `Hw.memWrite` (at the clock edge, when
   it is the state's next value). In Verilog an array, which yosys maps to block RAM.
-* **Primitives**: `Prim i o` (lib/Hdl/Prim.wiz) is a vendor cell, a black box printed as
+* **Primitives**: `Prim i o` (hdl/src/Hdl/Prim.wiz) is a vendor cell, a black box printed as
   its Verilog module; `Hw.prim` instantiates it. Their ports carry a kind (data, a clock
   net, a pad, a bidirectional pad, marked by a `named` segment beginning with `@`); only
   primitives' ports connect clock and pad leaves, and `Netlist.kindErrors` checks it.
@@ -219,7 +219,7 @@ def HwTy.unpack : (ω t : HwTy) → Nat → HwTy.El t
 --  numerals or macros; wishful: numerals-in-class-decls)
 /-- One bit, `HwTy.bits 1`: the type of conditions, resets and enables. -/
 def HwTy.bit : HwTy := HwTy.bits 1
--- the kinds of leaves that connect primitives only (`PortKind`, `lib/Hdl/Prim.wiz`)
+-- the kinds of leaves that connect primitives only (`PortKind`, `hdl/src/Hdl/Prim.wiz`)
 /-- `HwTy`. -/
 def HwTy.clock : HwTy := HwTy.named "@clock" HwTy.bit
 /-- `HwTy`. -/
@@ -241,9 +241,9 @@ def ClockDomain.sys : ClockDomain := ClockDomain.mk "clk" 10000
 `Clocking`'s wrapper). -/
 def ClockDomain.named (name : String) : ClockDomain := ClockDomain.mk name 0
 
--- A primitive (a vendor cell, a black box: `lib/Hdl/Prim.wiz`): module name, parameters,
+-- A primitive (a vendor cell, a black box: `hdl/src/Hdl/Prim.wiz`): module name, parameters,
 -- port names (one per leaf of `i`, then of `o`), and a behavioural model at values, if any.
-/-- A primitive (a vendor cell, a black box: `lib/Hdl/Prim.wiz`): its module name, its
+/-- A primitive (a vendor cell, a black box: `hdl/src/Hdl/Prim.wiz`): its module name, its
 parameters (names and Verilog text), its port names (one per leaf of `i`, then of `o`),
 a behavioural model at values, if it has one, and whether it is a synchroniser
 (`Prim.declSync`: a cell that may take its data from another clock domain, and whose
@@ -455,9 +455,9 @@ class Hw (r : HwTy → Type) where
   -- takes its writes at the clock edge). A reset leaves a memory's contents alone.
   memRead : {ω aw dw : Nat} → r (HwTy.mem aw dw) → r (HwTy.bits aw) → r (HwTy.bits dw)
   memWrite : {ω aw dw : Nat} → r (HwTy.mem aw dw) → r HwTy.bit → r (HwTy.bits aw) → r (HwTy.bits dw) → r (HwTy.mem aw dw)
-  -- primitive instances (vendor cells, `lib/Hdl/Prim.wiz`), and the clock of a domain as a
+  -- primitive instances (vendor cells, `hdl/src/Hdl/Prim.wiz`), and the clock of a domain as a
   -- clock net for their clock ports
-  /-- `prim p x`: a primitive instance (a vendor cell, `lib/Hdl/Prim.wiz`) on `x`. -/
+  /-- `prim p x`: a primitive instance (a vendor cell, `hdl/src/Hdl/Prim.wiz`) on `x`. -/
   prim : {ω i o : HwTy} → Prim i o → r i → r o
   /-- The clock net of domain `d`, for primitives' clock ports. -/
   clockOf : (ω d : ClockDomain) → r HwTy.clock
@@ -619,7 +619,7 @@ instance : Hw HwTy.El where
 ------------------------------------------------------------------------------------
 -- The netlist IR: flat, widths concrete, one node per bit-vector operation
 
--- Primitive instances (vendor cells: black boxes, `lib/Hdl/Prim.wiz`). A leaf of a
+-- Primitive instances (vendor cells: black boxes, `hdl/src/Hdl/Prim.wiz`). A leaf of a
 -- primitive's port types, or of a circuit's input or output, is data, or one of three
 -- kinds that only connect primitives: a clock net, a pad (a package pin driven or read
 -- by an I/O buffer) and a bidirectional pad. They are marked by a `named` segment
@@ -1750,7 +1750,7 @@ def Circuit.runFrom_mealy {0 i o : HwTy} (c : Circuit i o) : (s : HwTy.El c.st) 
     Circuit.runFrom c s xs = Mealy.run (Circuit.mealy c) s xs
   | s, .nil => rfl
   | s, .cons x xs => Eq.congrArg (List.cons (Circuit.stepEl c s x).2) (Circuit.runFrom_mealy c (Circuit.stepEl c s x).1 xs)
-/-- (the statement lib/Hdl/Temporal.wiz uses) -/
+/-- (the statement hdl/src/Hdl/Temporal.wiz uses) -/
 def Mealy.runFrom_take {0 i o : HwTy} (c : Circuit i o) (n : Nat) (s : HwTy.El c.st) (xs : Trace (HwTy.El i)) :
     Circuit.runFrom c s (Trace.take n xs) = Trace.take n (Mealy.outAt (Circuit.stepEl c) s xs) :=
   Eq.trans (Circuit.runFrom_mealy c s (Trace.take n xs)) (Mealy.run_take (Circuit.mealy c) n s xs)

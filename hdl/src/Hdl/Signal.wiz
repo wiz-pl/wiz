@@ -6,7 +6,7 @@ import Trace
 
 Clash-style signals (`import Hdl.Signal`): a `Signal d A` is the value of a wire in
 every cycle of the clock domain `d`, as a coinductive stream. This is lane L1 of
-wiz-notes/clash-hdl-plan.md, a layer over `Circuit` (lib/Hdl/Core.wiz), not a
+wiz-notes/clash-hdl-plan.md, a layer over `Circuit` (hdl/src/Hdl/Core.wiz), not a
 replacement: netlists, Verilog, `simFast` and the proofs stay on `Circuit`. Stage notes:
 docs/stages/34-hdl-signals.md.
 
@@ -54,7 +54,7 @@ def Signal.sample {d : ClockDomain} {A : Type} : Nat → Signal d A → List A
   | .zero, _ => .nil
   | .succ n, s => .cons s.head (Signal.sample n s.tail)
 
-/-- The signal as a trace (lib/Trace.wiz), the semantics `Circuit.trace` and lib/Hdl/Temporal.wiz use. -/
+/-- The signal as a trace (lib/Trace.wiz), the semantics `Circuit.trace` and hdl/src/Hdl/Temporal.wiz use. -/
 def Signal.toTrace {d : ClockDomain} {A : Type} (s : Signal d A) : Trace A :=
   fun (t : Nat) => Signal.at s t
 
@@ -309,10 +309,10 @@ def Signal.register_head_tail {d : ClockDomain} {A : Type} (s : Signal d A) :
   | .succ t => rfl
 
 ------------------------------------------------------------------------------------
--- Temporal properties: the `TL` formulas of lib/Hdl/Temporal.wiz over `toTrace`
+-- Temporal properties: the `TL` formulas of hdl/src/Hdl/Temporal.wiz over `toTrace`
 
 /-- `φ` holds of the signal (at cycle 0, the anchored semantics). Every proof rule of
-lib/Hdl/Temporal.wiz applies to `Signal.toTrace s`. -/
+hdl/src/Hdl/Temporal.wiz applies to `Signal.toTrace s`. -/
 def Signal.sat {d : ClockDomain} {A : Type} (s : Signal d A) (φ : TL A) : Prop :=
   TL.sat (Signal.toTrace s) φ
 

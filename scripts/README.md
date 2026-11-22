@@ -75,8 +75,7 @@ so in its header and skips cleanly when the build is absent.
 | `GenSelfhost.lean` | writes the fixpoint inputs (`compiler.wiz`, `self.wiz`) into `$OUT` | `fixpoint.sh`, `bench/selfhost-build.sh` |
 | `GenSelfhostTables.lean` | the `genSelfhostTables` Lake target: regenerates `selfhost/Tables.wiz` from the grammar | `lakefile.lean` |
 | `gen-semantics-matrix.py` | regenerates `docs/semantics-matrix.md` and `Tests/Semantics/cells.tsv` from the stage rules | by hand (`docs/semantics-matrix.md`) |
-| `gen-legacy-names.py` | regenerates `legacy-names.tsv` (module, name, reason class, file, line) from the six library/tool roots; `--check`, `--print-digest`, `--update-digest` | by hand (namespace compatibility baseline) |
-| `gen-uart-temporal.py` | regenerates the marked case analyses inside `examples/hdl-uart-temporal.wiz` | by hand (`docs/libraries.md`) |
+| `gen-legacy-names.py` | regenerates `legacy-names.tsv` (module, name, reason class, file, line) from the seven library/tool roots (`lib`, `scry/src`, `scry/gen`, `hdl/src`, `tower`, `web`, `selfhost`); `--check`, `--print-digest`, `--update-digest` | by hand (namespace compatibility baseline) |
 
 ## Wasm experiments
 

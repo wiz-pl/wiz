@@ -29,7 +29,7 @@ def delayed {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)
 ------------------------------------------------------------------------------------
 -- Numerals, `+` and `if` at a signal (size ∞), on ordinary `Hw` code
 
--- wiz-rv's baud step, `lib/Hdl/Uart.wiz:104`, at `r := Signal.Sig Sys` instead of
+-- wiz-rv's baud step, `hdl/src/Hdl/Uart.wiz:104`, at `r := Signal.Sig Sys` instead of
 -- `Wire`/`HwTy.El`: the same `if`/`+`/numerals, one value per cycle.
 def baudStep (cnt : Signal.Sig Sys B4) (ce : Signal.Sig Sys Bit) : Signal.Sig Sys (HwTy.prod B4 Bit) :=
   let last := Hw.eq cnt (Hw.ofNat 3);
@@ -63,7 +63,7 @@ def pick (c : Signal.Sig Sys Bit) (a b : Signal.Sig Sys B8) : Signal.Sig Sys B8 
 def pureInf (a : Nat) : Signal Sys Nat := Signal.pureS (i := ∞) a
 #eval Signal.sample 3 (pureInf 5)
 
--- A numeral at a size: `lib/Hdl/Signal.wiz`'s `OfNat ((Signal d (BitVec n))^i) k`.
+-- A numeral at a size: `hdl/src/Hdl/Signal.wiz`'s `OfNat ((Signal d (BitVec n))^i) k`.
 def numAtSize {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3
 #eval Signal.sample 3 (Signal.map BitVec.toNat (numAtSize (d := Sys) (i := ∞) : Signal Sys (BitVec 8)))
 

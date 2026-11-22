@@ -11,6 +11,11 @@ def package : Package := Package.new "wiz"
   -- examples/scry-*.wiz still import Scry.* during co-development. This is a module
   -- root, not a check target: `grail build std` and the `std` lib target stay `lib/`.
   |> Package.set "root" "scry/src"
+  -- Hdl is its own package too (`hdl/src/Hdl`, separate-repos.md §1.2). The remaining
+  -- examples and benches here that import Hdl.* (rune-*, hardware-tour, stdlib-bench)
+  -- still resolve it during co-development; `grail build std` stays `lib/` alone and
+  -- hdl's own examples are tested by `cd hdl && grail test`.
+  |> Package.set "root" "hdl/src"
   |> Package.tests "examples" "examples"
   |> Package.exe "io" "examples/io.wiz"
   |> Package.exe "std-demo" "examples/std.wiz"

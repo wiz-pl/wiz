@@ -8,7 +8,7 @@ import Hdl.Core
 
 -- A small, deterministic benchmark of the standard library's hot data structures:
 -- `StrMap`, `Array`, `Bytes`, `String` (a `List Char`), the ordered read-back of
--- `U64Map` (`toList` sorts), and `NatList.hash` (lib/Hdl/Core.wiz).
+-- `U64Map` (`toList` sorts), and `NatList.hash` (hdl/src/Hdl/Core.wiz).
 --
 --   wiz build bench/stdlib-bench.wiz -o stdlib-bench
 --   ./stdlib-bench MODE N

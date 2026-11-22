@@ -36,7 +36,7 @@ import Hdl.Core
 -- errors become the fallback rather than the definition.
 
 ------------------------------------------------------------------------------------
--- L2 now lives in lib/Hdl/Core.wiz (`import Hdl.Core`, stage S0): `HwTy`, `Hw`, the El
+-- L2 now lives in hdl/src/Hdl/Core.wiz (`import Hdl.Core`, stage S0): `HwTy`, `Hw`, the El
 -- and Wire instances, the netlist IR with a hash-consing builder, `Circuit`, the netlist
 -- interpreter and the Verilog printer. Meta-level `let`s of object values are shared
 -- automatically (`ShareLet`, auto-share); `Hw.share` remains for explicit use. What

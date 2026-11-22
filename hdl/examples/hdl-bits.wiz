@@ -1,4 +1,4 @@
--- Bit-level reasoning (lib/Hdl/Bits.wiz), checked by the `hdl` test group: control logic
+-- Bit-level reasoning (hdl/src/Hdl/Bits.wiz), checked by the `hdl` test group: control logic
 -- written with gates, as a designer writes it, proved with symbolic inputs. (The toy
 -- CPU's finding C2: `rfl` alone needs such logic written as multiplexers.)
 import Hdl.Bits

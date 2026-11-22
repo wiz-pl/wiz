@@ -126,7 +126,7 @@ def F : Nat := Nat.succ 47
 -- after cycle 0 the input is quiet
 def sendOnce_from (b : Nat) : Trace.From (sendOnce b) F quiet := Trace.once_from (sendByte b) quiet 47
 
--- The theorems, for two bytes. Each is a generic rule (lib/Hdl/Temporal.wiz) applied to
+-- The theorems, for two bytes. Each is a generic rule (hdl/src/Hdl/Temporal.wiz) applied to
 -- facts about the first F cycles, which the kernel evaluates (`refl` with the value).
 -- They are stated per byte: with the byte a variable, the elaborator evaluates the run
 -- symbolically to check the hypotheses' types (tens of seconds each), and the settled

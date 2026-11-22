@@ -1,6 +1,6 @@
 -- Verified circuit optimisation (docs/libraries.md, H14 V1): the OLED demo's arithmetic
 -- units (wiz-icestick-uart, oled-demo: Sphere.wiz, Blobs.wiz), copied into
--- lib/Hdl/Verified.wiz, proved against their plain Nat definitions by the kernel, with
+-- hdl/src/Hdl/Verified.wiz, proved against their plain Nat definitions by the kernel, with
 -- nothing trusted: each property is decided for every input of the unit's domain by
 -- evaluation (`rfl`), and `allBelow_sound` turns the decision into a `∀`.
 -- The full-width checks that are out of the kernel's reach (2^20 inputs) are in

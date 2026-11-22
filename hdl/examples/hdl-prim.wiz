@@ -1,4 +1,4 @@
--- Vendor primitives in the HDL (lib/Hdl/Prim.wiz, lib/Hdl/Xilinx7.wiz), checked by the
+-- Vendor primitives in the HDL (hdl/src/Hdl/Prim.wiz, hdl/src/Hdl/Xilinx7.wiz), checked by the
 -- `hdl` test group: a Xilinx 7-series output path (an OSERDESE2 into an IOBUF, a clock
 -- forwarded by an ODDR through an OBUF) under a PLL wrapper, its Verilog and what yosys's
 -- synth_xilinx makes of it; a buffer with a model, simulated; the refusal to simulate

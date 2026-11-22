@@ -1,5 +1,5 @@
 -- The Xilinx 7-series side of the HDL library, checked by the `hdl` test group: pin
--- constraints (XDC) for the Digilent Arty A7 (lib/Hdl/Arty.wiz, lib/Hdl/Xdc.wiz), and
+-- constraints (XDC) for the Digilent Arty A7 (hdl/src/Hdl/Arty.wiz, hdl/src/Hdl/Xdc.wiz), and
 -- Verilog that yosys's synth_xilinx maps to block RAM (RAMB18E1, RAMB36E1) and to a
 -- DSP slice (DSP48E1): a RAM of 1024 and one of 2048 16-bit words, both with a
 -- registered read, a 1024-byte ROM (which asks for block RAM, `rom_style`), and a

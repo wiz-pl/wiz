@@ -16,7 +16,7 @@ docs/libraries.md ("H14 T") and wiz-notes/hdl-temporal.md.
 * Two layers: cycle-level operators (○, `##n`, bounded `◇`/`□`, `|->`, `|=>`) for
   properties of one circuit, and actions with stuttering (`TL.stut`, TLA's `□[N]_v`)
   for refinement of an abstract specification. The same formulas can be discharged by
-  an external solver: `lib/Hdl/Formal.wiz` emits the monitor subset (invariants,
+  an external solver: `hdl/src/Hdl/Formal.wiz` emits the monitor subset (invariants,
   `|->`/`|=>`, `$past`/`$stable`, `anyconst`) as `` `ifdef FORMAL `` assertions for
   yosys/SymbiYosys.
 * The semantic object is a Mealy machine `S → I → S × O`; `Circuit.stepEl c` is one.

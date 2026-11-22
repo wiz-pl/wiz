@@ -87,7 +87,8 @@ def libDiffChunk (files : Array String) (k : Nat) : Array String :=
   let hi := files.size * (k + 1) / libDiffChunks
   files.extract lo hi
 
-/-- The module a file's path names, for `--only`: `lib/Hdl/Uart.wiz` is `Hdl.Uart`. -/
+/-- The module a file's path names, for `--only`: `lib/Data/ListLemmas.wiz` is
+-- `Data.ListLemmas`. (Hdl moved out of `lib/` to its package; it is not in this walk.) -/
 def libDiffModule (file : String) : String :=
   let rel :=
     if file.startsWith "lib/" then (file.drop 4).toString

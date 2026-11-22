@@ -581,7 +581,7 @@ set the status (open PRs in *italics*). Sections: §3 fixed, §4 open, §5 stuck
   hand-written and belongs to the trusted backends (§7).
 * **Cost.** One more check per structurally recursive definition. Rough timings of
   `wiz check --no-cache` (best of three, a shared machine): the Prelude 0.27 → 0.31 s,
-  `lib/Hoare.wiz` 3.3 → 3.7 s, `lib/Hdl/Core.wiz` 2.0 → 2.3 s, `selfhost/Kernel.wiz`
+  `lib/Hoare.wiz` 3.3 → 3.7 s, `hdl/src/Hdl/Core.wiz` 2.0 → 2.3 s, `selfhost/Kernel.wiz`
   5.0 → 5.1 s, all five self-hosted sources together within noise.
 * **Regression tests.** Group *trust*: "the kernel checks a definition's implementation
   for the compiler (Decl.impl)" (ill-typed, another type, a wrong sort note, a linear

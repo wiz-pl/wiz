@@ -457,15 +457,15 @@ def group : Group where
         let okSrc := "import Prelude\ndef f (P : Prop) : Prop := P → P\ndef thm (A : Type) (a : A) : A := a\n"
         discard <| cliCheckWith ["--predicative-prop"] okSrc [] false },
     { name := "kernel mode --strict-privacy: the documented over-rejection class (a proof that quotes an evaluated UIntN)", run := fun _ => do
-        -- `lib/Hdl/Mem.wiz` checks normally. With the flag the second check rejects
+        -- `hdl/src/Hdl/Mem.wiz` checks normally. With the flag the second check rejects
         -- `Mem.ram1_write_read`: its `rfl` quotes the evaluated `BitVec 1` as
         -- `μ (UIntN.desc 1) …`, which has no name once `UIntN` (a sealed type of another
         -- module) has no definition. This is the "legitimate proof that computes through
         -- a library operation" the documentation says the flag is off for (13b; the file
         -- it names, `drafts/feral/lowered/03_get_mut.wiz`, no longer triggers).
-        let mem : System.FilePath := System.FilePath.mk "lib/Hdl/Mem.wiz"
-        let some _ ← cliRun ["--cache", cacheDir.toString] mem false | return
-        let some out ← cliRun ["--strict-privacy"] mem true | return
+        let mem : System.FilePath := System.FilePath.mk "hdl/src/Hdl/Mem.wiz"
+        let some _ ← cliRun ["--cache", cacheDir.toString, "-I", "hdl/src"] mem false | return
+        let some out ← cliRun ["--strict-privacy", "-I", "hdl/src"] mem true | return
         check (out.contains "Mem.ram1_write_read depends on the definition of UIntN (module Word), which is hidden outside its module")
           s!"the --strict-privacy message changed:\n{out}" },
     { name := "kernel mode --strict-privacy: the first-order forgery it was added for is now rejected without the flag", run := fun _ => do
