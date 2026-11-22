@@ -854,25 +854,6 @@ def takeTarget : List String → Except String (Option String × List String)
     let (t, rest) ← takeTarget rest
     pure (t, a :: rest)
 
-/-- Take `--attest [FILE]` out of the arguments: `some FILE` when a file is given,
-`some ""` for the bare flag (the default path, `OUT.attest.json`), `none` without it.
-`--attest` also takes no file when the next word is another flag. -/
-partial def takeAttestOpt : List String → Except String (Option String × List String)
-  | "--attest" :: rest =>
-    match rest with
-    | f :: more =>
-      if f.startsWith "-" then do
-        let (o, a) ← takeAttestOpt rest
-        return (o.orElse (fun _ => some ""), a)
-      else do
-        let (_, a) ← takeAttestOpt more
-        return (some f, a)
-    | [] => return (some "", [])
-  | a :: rest => do
-    let (o, r) ← takeAttestOpt rest
-    return (o, a :: r)
-  | [] => return (none, [])
-
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
     (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
   -- `bpf` is the one target whose input is not the untyped IR: it consumes the typed
@@ -1223,9 +1204,6 @@ def main (args : List String) : IO UInt32 := do
   if let some days ← cachePruneOpt.get then
     if let some dir := tc.cacheDir then IO.eprintln (← Cache.pruneSummary dir days)
   let split ← splitOpt.get
-  let (args, attest) ← match takeAttestOpt args with
-    | .ok (o, a) => pure (a, o)
-    | .error e => do IO.eprintln e; return 1
   let (target?, args) ← match takeTarget args with
     | .ok r => pure r
     | .error e => do IO.eprintln e; return 1

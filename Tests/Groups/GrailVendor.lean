@@ -161,8 +161,9 @@ def grailVendorGroup : Group where
           check ((e.splitOn "the lock says").length > 1) e
         | .ok _ => throw (IO.userError "fetched a package whose tree disagrees with the lock")
         -- nothing was installed under the wrong tree identity
-        let stores := if ← (cache / "grail" / "packages").pathExists then
-            (← (cache / "grail" / "packages").readDir).size else 0
+        let stores ← if ← (cache / "grail" / "packages").pathExists then
+            pure (← (cache / "grail" / "packages").readDir).size
+          else pure 0
         checkEq 0 stores }
   ]
 
