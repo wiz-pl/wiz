@@ -9,8 +9,8 @@
 #
 #   scripts/lake-cache.sh key
 #       `key=<key>` and `prefix=<prefix>` lines for $GITHUB_OUTPUT.
-#       key    = lake-<os>-<toolchain>-<sources>
-#       prefix = lake-<os>-<toolchain>-
+#       key    = lake-<os>-<arch>-<toolchain>-<sources>
+#       prefix = lake-<os>-<arch>-<toolchain>-
 #       <toolchain> hashes flake.lock and flake.nix (nixpkgs' Lean, the flags, the
 #       fileset); <sources> hashes the `lean` and `runtime` subset hashes
 #       (scripts/repo-subsets.py). The exact key is never reused for a seed from a
@@ -62,7 +62,9 @@ system() {
 
 case ${1:-} in
   key)
-    os=$(uname -s)
+    # the architecture is part of the key: a .lake is not reusable across it (the
+    # Actions cache is shared, and an aarch64 runner must never restore an x64 seed)
+    os=$(uname -s)-$(uname -m)
     toolchain=$( { printf 'lake-cache-v1\n'
                    hash_file flake.lock
                    hash_file flake.nix; } | sha256sum | cut -d' ' -f1)
