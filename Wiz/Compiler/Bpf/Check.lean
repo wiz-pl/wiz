@@ -455,7 +455,7 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
     if argv.ty != .userPtr then
       typeMismatch t.span s!"`TraceCtx.argvSlot`'s argv" .userPtr argv.ty
     checkTm p ctx .userPtr argv
-  | .probeEmit ty events kind slot c pid tgid ppid ts data =>
+  | .probeEmit ty events _kind slot c pid tgid ppid ts data =>
     if ty != .bool then typeMismatch t.span "`Probe.emit`" .bool ty
     if slot >= 8 then
       reject t.span s!"the capture slot {slot} is outside 0..7; a probe emits a bounded \
