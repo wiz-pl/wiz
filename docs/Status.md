@@ -6,11 +6,11 @@ mean what they claim. It is meant to be honest first: if something is not proved
 so. The calculus itself is specified in [CoreSpec.md](CoreSpec.md); section numbers
 written "§n" refer to it.
 
-The page was first written at `9717950` (2026-11-09) and last refreshed in full at
-`f6fd4a3` (2026-11-11, after PR #142), plus the results of the probes listed in the
-"Probes" section. Items whose PRs merged after that were folded into their sections as
-they landed; the [ledger](#0-ledger) names the PR that set each status, and section 9 is
-where a change queued by an open PR is listed.
+The page was first written at `9717950` (2026-11-09) and refreshed in full at
+`d853fde79` (2026-11-22, `integration/train12`). The size and test-case counts in §7 and
+§8 were measured on that tree on 2026-11-22, and each says how to re-measure it. The
+[ledger](#0-ledger) names the PR that set each status, and section 9 is where a change
+queued by an open PR is listed.
 
 > **Merge status checked 2026-11-22, against `master` at `f045e5ea1`.** Every PR that
 > section 9 listed when this page was last refreshed has merged: #120, #121, #128, #129,
@@ -1268,9 +1268,11 @@ None of these is implemented. Their status is **design and conjecture**:
 * **STC / normalisation plan**: `wiz-notes/stc-plan.md` (M0–M5): a
   specification of a fragment F0 in Lean, then normalisation by logical relations and an
   extracted checker. It targets modules with regularity off or a predicative `Prop`.
-  **M0 is partly done**: `STC/F0/` (26 files, about 4.3k lines, `lean_lib STC`, no `sorry`
-  or `axiom`) has the F0 syntax, typing, reduction and substitution/renaming, and the
-  sorting lemma is *reduced to* `TyUnique` + `ConvInjSort` with the rule-level gap named in
+  **M0 is partly done**: `STC/F0/` (28 files, 5,136 lines by
+  `find STC/F0 -name '*.lean' | wc -l` and `… -print0 | xargs -0 cat | wc -l`,
+  2026-11-22; `lean_lib STC`, no `sorry` or `axiom`) has the F0 syntax, typing, reduction
+  and substitution/renaming, and the sorting lemma is *reduced to* `TyUnique` +
+  `ConvInjSort` with the rule-level gap named in
   `STC/F0/Sorting.lean` — it is not proved. M1 (logical relations, certified checker) and
   M2–M5 do not exist. Nothing in `STC/` is part of the kernel's trusted base.
 
@@ -1286,7 +1288,7 @@ default options (`master` at `f045e5ea1`). "Listed" means `#print axioms d` name
 
 | component | what is trusted | listed? | notes |
 |---|---|---|---|
-| the Lean kernel | `Wiz/Core/{Term,Value,Level,QPoly,Usage,Eval,Conv,Check,Templates}.lean`, `Wiz/Rig*.lean` (about 4 500 lines) | — | not proved; termination not proved (all `partial`) |
+| the Lean kernel | `Wiz/Core/{Term,Value,Level,QPoly,Usage,Eval,Conv,Check,Templates}.lean`, `Wiz/Rig.lean`, `Wiz/Rig/Instances.lean` (6 286 lines by `wc -l`, 2026-11-22) | — | not proved; termination not proved (all `partial`) |
 | Lean's compiler and runtime | they run the Lean kernel; Lean's `Nat` under the native operations | — | |
 | `selfhost/Kernel.wiz` and the self-hosted frontend | for the self-hosted toolchain only; the frontend is trusted for what `checkDecl` does not see (unique names: Y4, F11; levels) | — | Wiz's own backend runs it |
 | templates and kernel-built types | `Templates.lean`, method/motive types, the terms built in `vEq`/`vEqType`/`vCast` | — | type-checked by audit-2's tests (#120), not by the kernel |
@@ -1307,19 +1309,21 @@ The **de Bruijn criterion** asks that a proof checker have a small, independent 
 that checks everything. Wiz's situation:
 
 * **Size.** The Lean kernel is `Wiz/Core/{Term,Value,Level,QPoly,Usage,Eval,Conv,Check,
-  Templates}.lean` plus `Wiz/Rig.lean` and `Wiz/Rig/Instances.lean`: about **4 500
-  lines** at `f6fd4a3`, about 3 600 without blank lines and line comments (it was about
-  3 200 and 2 500 at `9717950`). (`Pretty.lean` and
+  Templates}.lean` plus `Wiz/Rig.lean` and `Wiz/Rig/Instances.lean`: **6 286 lines** at
+  `d853fde79` (2026-11-22; `wc -l` over the eleven files), **4 998** excluding blank lines
+  and lines that start with `--` (the same `grep -v` over the concatenation). It was about
+  4 500 and 3 600 at `f6fd4a3`, about 3 200 and 2 500 at `9717950`. (`Pretty.lean` and
   `Raw.lean` are not trusted. `Term.hasVar`, which `Ctx.instArg` relies on, and the
   traversal `Term.mapChildrenM`/`forChildren`, which `hasVar` and `Val.lvlBound` rely on,
   are in `Term.lean`: `hasVar` was moved there from `Pretty.lean` when the kernel started
-  to depend on it. A constructor missing from `mapChildrenM` is a kernel bug: see F7.) This includes the computation rules of OTT, descriptions
-  and sizes, so it is larger than a Lean-4-style kernel per feature.
-* **Two kernels.** `selfhost/Kernel.wiz` (about 2 900 lines) is an independent
-  reimplementation in Wiz of a fragment (CoreSpec §15). It was written from the Lean
-  kernel, so it can share design mistakes (it shared both F1 and F2), but not
-  implementation slips, and it had three of its own (O1, W1, and K9 with lin-proj); K6 was
-  in both.
+  to depend on it. A constructor missing from `mapChildrenM` is a kernel bug: see F7.)
+  This includes the computation rules of OTT, descriptions and sizes, so it is larger than
+  a Lean-4-style kernel per feature.
+* **Two kernels.** `selfhost/Kernel.wiz` (**5 346 lines** at `d853fde79`, `wc -l`,
+  2026-11-22) is an independent reimplementation in Wiz of a fragment (CoreSpec §15). It
+  was written from the Lean kernel, so it can share design mistakes (it shared both F1
+  and F2), but not implementation slips, and it had three of its own (O1, W1, and K9
+  with lin-proj); K6 was in both.
 * **A third voter: WizMeta** (PR #122; `WizMeta/`, group *meta*). A declarative spec of
   the core rules (one file per former) and a total reference checker written from them,
   compared with the Lean kernel on the differential test's terms: **0 disagreements**
@@ -1397,10 +1401,13 @@ that checks everything. Wiz's situation:
 
 ## 8. Testing evidence
 
-* **Negative tests**: the test suite has about 55 cases in `Tests/Elab.lean` that must be
-  *rejected* (`fails …`), plus the quantity and structural cases in `Tests/Check.lean`
-  (e.g. "linear variable used twice is rejected", "linear pair projected twice is
-  rejected", "Type : Type is rejected").
+* **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 43 cases and 24
+  checks that must be *rejected* (`grep -c -E '^\s+\{ name :='` and
+  `grep -c -E '\bfails(Lib|LibW|Libs|LibsWithin)? '`; counted 2026-11-22), plus the
+  quantity and structural cases in `Tests/Check.lean` (e.g. "linear variable used twice
+  is rejected", "linear pair projected twice is rejected", "Type : Type is rejected").
+  Across `Tests/Groups/*.lean` the same two patterns count 1,986 case entries and 457
+  rejection checks (`grep -rhc … | awk '{s+=$1} END {print s}'`).
 * **Attacks that are regression tests**: F1 and F2 above (both kernels), and every
   fixed item of §3 since (F3–F14, T1), with the probe files of
   `wiz-notes/soundness-probes/`.

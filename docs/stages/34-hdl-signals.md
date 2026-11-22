@@ -72,7 +72,10 @@ def Signal.ofCircuit_at {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : S
 
 `ofCircuit_at` is proved from `mealy_at`; `toTrace_ofCircuit` states it as an equation of
 traces and `sat_ofCircuit` transfers a temporal property between a circuit's signal and
-its trace (and from there through `Circuit.Simulates` to the netlist).
+its trace (and from there through `Circuit.Simulates` to the netlist, on a design for
+which the relation is discharged — today the one-bit-delay template in
+`hdl/examples/hdl-sim-theorem.wiz`, not designs generally; see
+[libraries.md](../libraries.md#when-netlistsimulate-is-circuitrun-hdlsrchdlnetlistwiz)).
 `Signal.ofCircuit_delay` proves that `register` is `Circuit.delay`.
 
 **Example** (`hdl/examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy

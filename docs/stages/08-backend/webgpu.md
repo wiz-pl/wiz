@@ -92,6 +92,47 @@ The browser demo (`webgpu/index.html`, served by `webgpu/serve.mjs`) runs the sa
 `run.js` and prints the Wiz value, the GPU value and a PASS/FAIL per element. WebGPU needs
 a secure context, so use `http://127.0.0.1:8080/`, not `file://`.
 
+## `wiz-gpu/1`: the core profile
+
+`wiz-gpu/1` is the dispatch contract for a Wiz kernel on WebGPU. It is deliberately the
+*core* profile: what a browser must support, not what a device may optionally offer.
+
+* **Types.** Scalars are `u32`, `i32` and `f32` only. `Bool` is WGSL `bool` (a local and
+  a match scrutinee, not a buffer element). `Nat` may appear only as the entry index. No
+  `f64`, `f16`, `u64` or `i64`; no pointers and no aggregates as parameters.
+* **Entry.** One compute entry point per dispatch, `@workgroup_size(64)`, a one-dimensional
+  `global_invocation_id`; the body starts with the bounds guard
+  `if (i < arrayLength(&out))`. One entry means one pipeline per dispatch; a new shape is
+  a new entry, not a branch in a mega-kernel.
+* **Buffers.** One storage binding per parameter at `@group(0) @binding(n)`, all the same
+  length and all `array<u32>` (or `array<i32>`/`array<f32>` in the same position). The
+  result is the last binding. The host creates and owns every buffer and maps the staging
+  buffer back; nothing allocates on the device inside a kernel.
+* **Passes are host-composed.** One compute pass per dispatch, no first-class pass graph,
+  and no render/compute interleaving inside a kernel. A pipeline of kernels is a sequence
+  of dispatches the host records.
+* **No dynamic dispatch.** WGSL has no function values and forbids recursion (mutual too);
+  a helper is a direct, acyclic call. That is why the profile has one entry per dispatch
+  rather than a tagged union of kernels.
+* **Limits.** The WebGPU 2026 CRD defaults are 128 MiB per storage-buffer binding,
+  256 MiB per buffer and 65,535 workgroups per dimension. `maxImmediateSize` gates
+  immediates; timestamp queries, subgroups and `f16` are optional features and are **not**
+  in core v1. The host must query and enforce the limits, not assume them.
+* **Status.** The prototype in this directory emits the `u32`/`Bool` part of the profile
+  (plus the `Nat` index); `i32`, `f32` and the binding-shape checks are the v1 additions
+  and are not implemented. `webgpu/check.sh` checks what exists against the Wiz
+  interpreter on lavapipe or a GPU; CI does not run it.
+* **Versioning.** `wiz-gpu/1` is this table. A new scalar type, a second entry shape or a
+  required feature is `wiz-gpu/2`.
+
+**Unverified.** Mobile WebGPU coverage, Firefox-Android's flag status and the "84 % global
+support" figure are secondary sources. Whether `subgroups` and immediates are available in
+Safari 26.x or Firefox 14x today is unverified (the CRD lists them; shipping differs), as
+is Safari's `f16` support. Per-dispatch and per-call overheads are order-of-magnitude from
+secondary benchmarks, not measured here. The limits and feature status are from the WebGPU
+CRD as cited in `wiz-notes/sota-web-wasm-gpu.md` §3 and §7 (fetched 2026-11-22); the
+emitted subset is defined by `webgpu/tools/wgsl.mjs` and exercised by `webgpu/check.sh`.
+
 ## Why this is not yet an IR backend
 
 The existing backends consume the IR after lowering and Perceus (`Compiler/IR.lean`):
