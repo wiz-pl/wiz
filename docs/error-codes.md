@@ -18,6 +18,8 @@ table lists exactly those. Messages not listed here have no code yet.
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |
 | `import-cycle` | an `import` leads back to the module itself | | |
 | `module-errors` | an imported module has errors (they are listed) | | |
+| `failed-declaration` | a reference to a declaration whose own command failed to elaborate; the root error is a related diagnostic (the reference is never also `unknown-identifier`) | `def broken : Nat := Bool.true` then `def uses : Nat := broken` | fix the first declaration |
+| `missing-import` | a name (or a `deriving` class) declared in a module the file does not import | `Array` without `import Std`; `deriving Repr` without `import Deriving` | add `import M` (one per module) |
 | `no-such-file` | the file a command names cannot be read | `wiz check no.wiz` | |
 | `import-order` | an `import` after a declaration, or nested in a command: imports are a fixed header | `def x := 1` then `import Prelude`; `mutual import M end` | |
 | `missing-case` | a `match` or equations miss constructors | | add missing cases |

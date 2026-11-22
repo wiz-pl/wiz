@@ -42,7 +42,8 @@ def libModules : IO (Std.HashMap Name String) := do
 def stateFor (extra : List (Name × String) := []) : IO (CommandState ZeroOneMany) := do
   let mut table ← libModules
   for (n, text) in extra do table := table.insert n text
-  pure { loader := fun m => table[m]?, trustedModule := Tests.libModule }
+  pure { loader := fun m => table[m]?, modules := (table.toList.map (·.1)).mergeSort (· ≤ ·) |>.toArray,
+         trustedModule := Tests.libModule }
 
 /-- A cache the group's cases share: the first one elaborates the library, the rest
 deserialize it (`wiz check` uses the same cache path in a run, one process per case). -/

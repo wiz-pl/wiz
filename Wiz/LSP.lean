@@ -237,6 +237,7 @@ def elabText (srv : Server) (eng : Query.Engine ZeroOneMany)
   let libs := srv.libs
   let trusted := srv.trusted
   let init : St := { loader := fun m => (libs.get? m).map (·.2), termInfo := true, includes := includes,
+                     modules := (libs.toList.map (·.1)).mergeSort (· ≤ ·) |>.toArray,
                      trustedModule := trusted.contains, trustNative := srv.trustNative, nativeFuel := srv.nativeFuel, smt := srv.smt }
   let key₀ := hash (libs.toList.map (·.2.2) |>.toString)
   Query.elaborate eng text init key₀
@@ -271,18 +272,29 @@ def completion (srv : Server) (doc : Doc) (off : Nat) : Json :=
                  | none => []))
   Json.mkObj [("isIncomplete", r.incomplete), ("items", Json.arr items)]
 
-def diagnostic (srv : Server) (doc : Doc) (m : Msg) : Json :=
+def diagnostic (srv : Server) (uri : String) (doc : Doc) (m : Msg) : Json :=
   let code := if m.code.isEmpty then [] else
+    let base := Actions.messageData doc.state m doc.text srv.importable
+    let diff : List (String × Json) := match m.mismatch with
+      | some d => [("diff", Json.mkObj [("kind", Json.str d.kind), ("path", Json.arr (d.path.map Json.num).toArray),
+          ("expected", Json.str d.expected), ("inferred", Json.str d.inferred),
+          ("expectedAt", Json.str d.expectedAt), ("inferredAt", Json.str d.inferredAt)])]
+      | none => []
     [("code", Json.str m.code),
-     ("data", Json.mkObj ((Actions.messageData doc.state m doc.text srv.importable).map fun (k, vs) =>
-        (k, if k == "name" then Json.str (vs.headD "") else Json.arr (vs.map Json.str).toArray)))]
+     ("data", Json.mkObj (base.map fun (k, vs) =>
+        (k, if k == "name" then Json.str (vs.headD "") else Json.arr (vs.map Json.str).toArray)) ++ diff)]
+  -- a cascade's root (or another place the diagnostic points at): a location, not text
+  let related := if m.related.isEmpty then [] else
+    [("relatedInformation", Json.arr (m.related.map fun r =>
+      Json.mkObj [("location", Json.mkObj [("uri", Json.str uri), ("range", range doc.text r.info)]),
+                  ("message", Json.str (if r.code.isEmpty then r.text else s!"[{r.code}] {r.text}"))]).toArray)]
   Json.mkObj ([("range", range doc.text m.info),
                ("severity", (match m.severity with | .error => 1 | .warning => 2 | .info => 3 : Nat)),
-               ("source", "wiz"), ("message", m.text)] ++ code)
+               ("source", "wiz"), ("message", m.text)] ++ code ++ related)
 
 def diagnostics (srv : Server) (uri : String) (doc : Doc) : Json :=
   -- a `WIZ_WIDGET:` display value (`#plot`) is an infoview widget, not a diagnostic
-  let ds := (doc.state.messages.toList.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv doc)
+  let ds := (doc.state.messages.toList.filter (fun m => !m.text.startsWith "WIZ_WIDGET:")).map (diagnostic srv uri doc)
   Json.mkObj [("jsonrpc", "2.0"), ("method", "textDocument/publishDiagnostics"),
               ("params", Json.mkObj [("uri", uri), ("diagnostics", Json.arr ds.toArray)])]
 
@@ -703,7 +715,7 @@ def infoview (srv : Server) (uri : String) (doc : Doc) (method : String) (msg : 
 /-- A code action as JSON: with its edit, or (`resolveId`) with what `codeAction/resolve` needs. -/
 def codeAction (srv : Server) (uri : String) (doc : Doc) (a : Actions.Action) (resolveId : Option Nat) : Json :=
   let diags := match a.fixes.bind (doc.state.messages[·]?) with
-    | some m => [("diagnostics", Json.arr #[diagnostic srv doc m])]
+    | some m => [("diagnostics", Json.arr #[diagnostic srv uri doc m])]
     | none => []
   let rest := match resolveId with
     | some k => [("data", Json.mkObj [("uri", uri), ("session", doc.session), ("id", k)])]

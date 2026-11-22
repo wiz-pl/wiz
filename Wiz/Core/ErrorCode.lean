@@ -29,6 +29,12 @@ def unknownModule := "unknown-module"
 def importCycle := "import-cycle"
 /-- an `import` of a module that has errors of its own -/
 def moduleErrors := "module-errors"
+/-- a reference to a declaration whose own command failed to elaborate (reported once as
+`failed-declaration`, with that root error as a related diagnostic; never repeated as
+`unknown-identifier`) -/
+def failedDeclaration := "failed-declaration"
+/-- a name (or a `deriving` class) that exists in a module the file does not import -/
+def missingImport := "missing-import"
 /-- the file the command names cannot be read (`wiz check no.wiz`) -/
 def noSuchFile := "no-such-file"
 /-- an `import` after a declaration, or nested in a command (the header is fixed) -/
@@ -101,6 +107,7 @@ def nonPattern := "non-pattern"
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
   [unknownIdentifier, rootName, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
+   failedDeclaration, missingImport,
    noSuchFile, importOrder,
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,

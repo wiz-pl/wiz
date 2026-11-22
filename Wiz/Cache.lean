@@ -295,6 +295,9 @@ structure Effect (R : Type) where
   /-- (13b) names made private, and structures made opaque, with their module -/
   privates : Array (Name × String) := #[]
   opaques : Array (Name × String) := #[]
+  /-- (diagnostics) failed declarations, so an importer still reports `failed to
+  elaborate` (not `unknown identifier`) after the module comes from the cache -/
+  failed : Array (Name × FailedDecl) := #[]
 
 /-- The command kinds whose effect is just the fields of `Effect`. -/
 def cacheable : List Name :=
@@ -318,7 +321,9 @@ def effectOf (s s' : CommandState R) : Effect R :=
     sites := newNames.filterMap fun n => (s'.declSites.get? n).map fun (i, m) => (n, i, m)
     docs := newNames.filterMap fun n => (s'.declDocs.get? n).map fun d => (n, d)
     privates := newEntries s.globals.privates s'.globals.privates
-    opaques := newEntries s.globals.opaques s'.globals.opaques }
+    opaques := newEntries s.globals.opaques s'.globals.opaques
+    failed := (s'.globals.failed.toList.filterMap fun (n, d) =>
+      if s.globals.failed.contains n then none else some (n, d)).qsort (fun a b => a.1 < b.1) }
 where
   newEntries (old new : Std.HashMap Name String) : Array (Name × String) :=
     if old.size == new.size then #[] else
@@ -361,7 +366,8 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   let globals := e.decls.foldl (·.insert ·) { s.globals with module := s.module }
   let globals := { globals with assumed := e.assumed ++ globals.assumed,
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
-                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
+                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques,
+                                failed := e.failed.foldl (fun m (n, d) => m.insert n d) globals.failed }.setBuiltins
                                 (e.builtins ++ globals.builtins)
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
@@ -469,7 +475,14 @@ def Effect.toSx (e : Effect R) : Sx :=
     (match d.impl with | some v => term v | none => .a "none"),
     (match d.witness with | some v => term v | none => .a "none")]
   let sev : Severity → Sx | .error => .a "error" | .warning => .a "warning" | .info => .a "info"
-  let msg (m : Msg) : Sx := list [info m.info, sev m.severity, str m.text, str m.code]
+  let rel (r : Related) : Sx := list [info r.info, str r.text, str r.code]
+  let diff (d : Mismatch) : Sx := list [str d.expected, str d.inferred, list (d.path.map nat),
+    str d.expectedAt, str d.inferredAt, str d.kind, str d.reason]
+  let dm (m : Mismatch) : Sx := diff m
+  let msg (m : Msg) : Sx := list [info m.info, sev m.severity, str m.text, str m.code,
+    list (m.related.toList.map rel), (match m.mismatch with | some d => dm d | none => .a "none"),
+    list (m.data.map fun (k, vs) => list [str k, list (vs.map str)])]
+  let fd (n : Name) (d : FailedDecl) : Sx := list [str n, info d.site, info d.info, str d.message, str d.code]
   list [list (e.decls.toList.map decl), list (e.messages.toList.map msg),
     list (e.builtins.map fun (k, n) => list [str k, str n]),
     list (e.assumed.map fun (k, n) => list [str k, str n]),
@@ -482,10 +495,11 @@ def Effect.toSx (e : Effect R) : Sx :=
     list (e.sites.toList.map fun (n, i, m) => list [str n, info i, str m]),
     list (e.privates.toList.map fun (n, m) => list [str n, str m]),
     list (e.opaques.toList.map fun (n, m) => list [str n, str m]),
-    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start])]
+    list (e.docs.toList.map fun (n, d) => list [str n, str d.kind, list (d.doc.toList.map str), names d.parent.toList, nat d.start]),
+    list (e.failed.toList.map fun (n, d) => fd n d)]
 
 def Effect.ofSx? (x : Sx) : Option (Effect R) := do
-  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs] ← items? x | none
+  let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs, fs] ← items? x | none
   let decl (x : Sx) : Option (Decl R) := do
     let #[n, ps, ty, v, inl, im, w] ← items? x | none
     pure { name := ← atom? n, levelParams := ← (← items? ps).toList.mapM atom?, type := ← dterm ty,
@@ -494,10 +508,29 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
            impl := ← (match im with | .a "none" => some none | v => (dterm v).map some),
            witness := ← (match w with | .a "none" => some none | v => (dterm v).map some) }
   let msg (x : Sx) : Option Msg := do
-    let #[i, sev, t, c] ← items? x | none
+    let #[i, sev, t, c, rs, mm, dt] ← items? x | none
     let severity : Severity := match ← atom? sev with
       | "error" => .error | "warning" => .warning | _ => .info
-    pure { info := ← dinfo i, severity, text := ← atom? t, code := ← atom? c }
+    let rel (x : Sx) : Option Related := do
+      let #[r, tx, rc] ← items? x | none
+      pure { info := ← dinfo r, text := ← atom? tx, code := ← atom? rc }
+    let diff (x : Sx) : Option Mismatch := do
+      let #[e, inf, p, ea, ia, k, r] ← items? x | none
+      pure { expected := ← atom? e, inferred := ← atom? inf,
+             path := ← (← items? p).toList.mapM fun v => (← atom? v).toNat?,
+             expectedAt := ← atom? ea, inferredAt := ← atom? ia, kind := ← atom? k,
+             reason := ← atom? r }
+    let data (x : Sx) : Option (String × List String) := do
+      let #[k, vs] ← items? x | none
+      pure (← atom? k, ← (← items? vs).toList.mapM atom?)
+    pure { info := ← dinfo i, severity, text := ← atom? t, code := ← atom? c,
+           related := ← (← items? rs).mapM rel,
+           mismatch := ← (match mm with | .a "none" => some none | v => (diff v).map some),
+           data := ← (← items? dt).toList.mapM data }
+  let fd (x : Sx) : Option (Name × FailedDecl) := do
+    let #[n, s, i, m, c] ← items? x | none
+    let n ← atom? n
+    pure (n, { name := n, site := ← dinfo s, info := ← dinfo i, message := ← atom? m, code := ← atom? c })
   let pair (x : Sx) : Option (String × String) := do
     let #[a, b] ← items? x | none
     pure (← atom? a, ← atom? b)
@@ -529,12 +562,13 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
     docs := (← (← items? dcs).mapM fun x => do
       let #[n, k, d, p, st] ← items? x | none
       pure (← atom? n, { kind := ← atom? k, doc := (← (← items? d).toList.mapM atom?).head?,
-                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? })) }
+                         parent := (← dnames p).head?, start := ← (← atom? st).toNat? }))
+    failed := (← (← items? fs).mapM fd) }
 
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-31-deterministic-macro-scopes"  -- 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-32-diagnostics-related-mismatch"  -- 32: a message's related diagnostics, structured mismatch and data, and failed declarations in an effect; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 
@@ -2352,7 +2386,11 @@ where
             s := { s with messages := s.messages.push { info := cmd.info, severity := .error, text := s!"import cycle through {m}", code := ErrorCode.importCycle } }
           else if !s.imported.contains m then
             match s.loader m with
-            | none => s := { s with messages := s.messages.push { info := cmd.info, severity := .error, text := s!"unknown module {m}", code := ErrorCode.unknownModule } }
+            | none =>
+              let hint := match suggestModule s.modules m with
+                | some n => s!"; did you mean '{n}'?"
+                | none => ""
+              s := { s with messages := s.messages.push { info := cmd.info, severity := .error, text := s!"unknown module {m}{hint}", code := ErrorCode.unknownModule } }
             | some src =>
               let (inner, h) ← importModule keys base stack s m src
               hits := hits + h
