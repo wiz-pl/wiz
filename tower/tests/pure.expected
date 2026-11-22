@@ -11,3 +11,13 @@ tests/pure.wiz:14:1: info: "unknown setting colour (default, source, flake, git,
 tests/pure.wiz:17:1: info: "spec v1\nsource source\nref v1\ncommit abc\npath \nflag cc gcc\n"
 tests/pure.wiz:18:1: info: (.cons ("cc", "gcc") .nil, .some "release", .true, .cons "v1" .nil, ())
 tests/pure.wiz:19:1: info: " --cache-ro '/a' --cache-ro '/b' --region-cache -I '/r'"
+tests/pure.wiz:20:1: info: .true
+tests/pure.wiz:21:1: info: .false
+tests/pure.wiz:22:1: info: .false
+tests/pure.wiz:23:1: info: .false
+tests/pure.wiz:24:1: info: .true
+tests/pure.wiz:25:1: info: .none
+tests/pure.wiz:26:1: info: .some "'../escape' would be written outside the extraction directory (an absolute path or a `..` component)"
+tests/pure.wiz:27:1: info: .some "'wiz-x86_64-linux/evil' is not a regular file or a directory (tar type 'l'); links, devices and fifos are refused"
+tests/pure.wiz:28:1: info: .none
+tests/pure.wiz:29:1: info: .some "'a' is not a regular file or a directory (tar type 'l'); links, devices and fifos are refused"

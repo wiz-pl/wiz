@@ -177,6 +177,18 @@ def releaseWithCache (rel : System.FilePath) (tag a : String) : IO Unit := do
   let sumOut ← runOut "sha256sum" [tb.toString]
   IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
 
+/-- A release tarball at `rel/tag/wiz-ARCH-linux.tar.gz`, built at test time by `tar` with
+`args` (after `-czf TB`), and its mandatory `.sha256`. A caller gives `tar` a
+`--transform` or `-P` to put a member in it that should never be extracted; nothing
+hostile is stored in the repository. -/
+def releaseTar (rel : System.FilePath) (tag a : String) (args : List String) : IO System.FilePath := do
+  IO.FS.createDirAll (rel / tag)
+  let tb := rel / tag / tarballName a
+  let _ ← runOut "tar" (["-czf", tb.toString] ++ args)
+  let sumOut ← runOut "sha256sum" [tb.toString]
+  IO.FS.writeFile (tb.toString ++ ".sha256") ((sumOut.splitOn " ").headD "" ++ "\n")
+  pure tb
+
 /-- `tower show` in a directory: the toolchain and why (`none` when it fails). -/
 def showIn (e : Env) (dir : System.FilePath) : IO (Option (String × String)) := do
   let (r, out, _) ← towerOut e ["show"] dir
@@ -381,6 +393,70 @@ def cases (impl : IO Impl) : List Case := [
         IO.FS.removeFile (rel / "v1" / (tarballName a ++ ".sha256"))
         let m ← towerFails e ["toolchain", "install", "v1", "--source", "release", "--force"]
         checkHas m "sha256" },
+    { name := "F16: a release tarball with escaping or linked members is refused, and a good one installs", run := fun _ => do
+        let (bare, _) ← upstream
+        let a ← arch
+        let e ← mkEnv (← impl)
+        tower e ["set", "git", bare.toString]
+        -- every hostile fixture also carries a complete toolchain layout, so an install
+        -- that succeeds would be evidence the member scan did not run
+        let layout : List (String × String) := [
+          (s!"wiz-{a}-linux/bin/wiz", "#!/bin/sh\necho hostile wiz \"$@\"\n"),
+          (s!"wiz-{a}-linux/bin/grail", "#!/bin/sh\necho hostile grail \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/wiz", "#!/bin/sh\necho hostile wiz \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/grail", "#!/bin/sh\necho hostile grail \"$@\"\n"),
+          (s!"wiz-{a}-linux/share/wiz/lib/Prelude.wiz", "")]
+        let staging ← mkTree (layout ++ [("payload/escape", "x\n")])
+        -- (1) a member above the extraction root
+        let rel1 ← IO.FS.createTempDir
+        let tb1 ← releaseTar rel1 "v1" a
+          ["--transform", "s,^payload/escape$,../escape,", "-C", staging.toString, s!"wiz-{a}-linux", "payload/escape"]
+        check (contains (← runOut "tar" ["-tzf", tb1.toString]) "../escape")
+          "the fixture archive has no ../escape member"
+        tower e ["set", "releases", rel1.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "../escape"
+        checkHas m "would be written outside"
+        check (!contains m "tar -xzf") s!"the tarball was extracted before it was refused: {m}"
+        check (!(← (e.tcDir "v1").pathExists)) "a refused tarball left a toolchain"
+        -- (2) an absolute member (tar would strip the `/` on extraction, and still write
+        -- it below the extraction root; the scan refuses it, and the target never exists)
+        let outside ← IO.FS.createTempDir
+        let target := outside / "escaped.txt"
+        let rel2 ← IO.FS.createTempDir
+        let tb2 ← releaseTar rel2 "v1" a
+          ["-P", "--transform", "s,^payload/escape$," ++ target.toString ++ ",", "-C", staging.toString,
+           s!"wiz-{a}-linux", "payload/escape"]
+        check (contains (← runOut "tar" ["-tzf", tb2.toString]) target.toString)
+          "the fixture archive has no absolute member"
+        tower e ["set", "releases", rel2.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m target.toString
+        checkHas m "would be written outside"
+        check (!(← target.pathExists)) "an absolute member was written outside the extraction root"
+        -- (3) an escaping symlink (any link, device or fifo is refused, not only one that
+        -- resolves outside)
+        let tree3 ← mkTree layout
+        let _ ← runOut "ln" ["-s", "../../outside/escaped.txt", (tree3 / s!"wiz-{a}-linux/evil").toString]
+        let rel3 ← IO.FS.createTempDir
+        let tb3 ← releaseTar rel3 "v1" a ["-C", tree3.toString, s!"wiz-{a}-linux"]
+        check (contains (← runOut "tar" ["-tvzf", tb3.toString]) "../../outside/escaped.txt")
+          "the fixture archive has no escaping symlink"
+        tower e ["set", "releases", rel3.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "not a regular file or a directory"
+        checkHas m "evil"
+        check (!(← (e.tcDir "v1").pathExists)) "a refused tarball left a toolchain"
+        -- (4) a good archive still installs: the scan is not a blanket refusal
+        let rel4 ← IO.FS.createTempDir
+        releaseWithCache rel4 "v1" a
+        tower e ["set", "releases", rel4.toString]
+        tower e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas (← readFile? (e.tcDir "v1" / "tower.info")) "source release"
+        checkHas (← runOut (e.tcDir "v1" / "bin/wiz").toString ["check"]) "release wiz" },
     { name := "error paths: an external command, run of a missing command, link of a missing path, a dangling link", run := fun _ => do
         let (bare, _) ← upstream
         let a ← arch
@@ -393,9 +469,10 @@ def cases (impl : IO Impl) : List Case := [
         let e ← mkEnv (← impl)
         tower e ["set", "git", bare.toString]
         tower e ["set", "releases", rel.toString]
-        -- a failing external command (here `tar`) says `exit N`, as the Lean reference did
+        -- a failing external command (here `tar`'s listing pass, which runs before the
+        -- extraction) says `exit N`, as the Lean reference did
         let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
-        checkHas m "tar -xzf"
+        checkHas m "tar -tzf"
         checkHas m ": exit 2"
         check (!contains m "exit code") s!"external command text: {m}"
         -- a linked toolchain, for `run`
