@@ -44,15 +44,15 @@ Usage
 The registry is the CHECKS table: adding a check is one line.  Commands are
 argv lists, run in the repository root.
 
-Exit status: 0 success (a `run` returns its command's status), 1 self-test
-failure, 2 usage error or a tree that cannot be read.  `warn` always exits 0,
-because the hook must not block a push.
+Exit status: 0 success; a `run` returns its command's status even when that is
+nonzero.  1 means a failed self-test, 2 a usage error or a tree that cannot be
+read.  `warn` always exits 0, because the hook must not block a push.
 """
 
 from __future__ import annotations
 
 import json
-import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,14 +60,14 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
 LEDGER_DIR = ".checks"
 LEDGER_FILE = "records.jsonl"
 
 # The light checks that exist today.  One line per check.  The two update
-# scripts are registered too: run on a current tree they write nothing, so they
-# can be clean; run on a stale tree they edit a file, which makes that record
-# dirty (and the next commit needs its own run).
+# scripts are registered too: on a current tree they normally write nothing,
+# and when one does write (repo-subsets --write refreshes its informational
+# `git` field) the run started clean, so `dirty_after` records the output that
+# still needs committing or discarding.
 CHECKS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("docs-style", ("python3", "scripts/check-docs-style.py")),
     ("companion-lists", ("python3", "scripts/check-companion-lists.py")),
@@ -127,13 +127,13 @@ def read_records(root: Path) -> list[dict]:
     """The ledger, in file order.  Malformed lines are skipped: untrusted."""
     path = ledger_path(root)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return []
     except OSError as exc:
         raise Error(f"cannot read {path}: {exc}") from exc
     records = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -178,7 +178,7 @@ def is_clean(record: dict | None) -> bool:
     return bool(record) and record.get("exit") == 0 and record.get("dirty") is False
 
 
-def state_for(record: dict | None, records: list[dict], name: str, commit: str) -> str:
+def state_for(record: dict | None, records: list[dict], name: str) -> str:
     if record is not None:
         if record.get("exit") != 0:
             return "failed"
@@ -209,7 +209,10 @@ def run_command(root: Path, name: str, command: list[str]) -> int:
     commit = head_commit(root)
     # Create the ledger directory before the cleanliness probe: if it is not
     # gitignored, that shows up as dirty instead of being silently invisible.
-    ledger_path(root).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ledger_path(root).parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Error(f"cannot create {ledger_path(root).parent}: {exc}") from exc
     before = porcelain(root)
     if before:
         print(
@@ -217,7 +220,7 @@ def run_command(root: Path, name: str, command: list[str]) -> int:
             " the record will not count as clean",
             file=sys.stderr,
         )
-    shown = " ".join(command)
+    shown = shlex.join(command)
     print(f"checks-ledger: running {name}: {shown}", file=sys.stderr)
     try:
         proc = subprocess.run(command, cwd=root)
@@ -265,7 +268,7 @@ def status(root: Path) -> int:
     clean = 0
     for name, _ in CHECKS:
         record = index.get((commit, name))
-        state = state_for(record, records, name, commit)
+        state = state_for(record, records, name)
         if state == "clean":
             clean += 1
             shown = record
@@ -341,7 +344,7 @@ def warn_commits(root: Path, pre_push: bool, commits: list[str]) -> int:
             record = index.get((commit, name))
             if is_clean(record):
                 continue
-            state = state_for(record, records, name, commit)
+            state = state_for(record, records, name)
             detail = state
             if record is not None and state in ("dirty", "failed"):
                 detail = f"{state} run (exit {record.get('exit', '?')})"
