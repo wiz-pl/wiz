@@ -863,6 +863,13 @@ jobs:
     # Cachix miss (the nix build of both derivations), and GitHub reports a timed-out
     # job as "The operation was canceled." — the annotation is the timeout.
     timeout-minutes: 75
+    # The paths it built (and pushed). A pull request's are *seeded* derivations:
+    # their store paths differ from `.#wiz-web` and friends, so `web`/`docs` must
+    # take these, not recompute the pure attrs (which can never match).
+    outputs:
+      web: ${{ steps.nix.outputs.web }}
+      playground: ${{ steps.nix.outputs.playground }}
+      ui: ${{ steps.nix.outputs.ui }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -1002,6 +1009,10 @@ jobs:
         env:
           # only the fork-pull-request fallback in the script reads it
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # the producer's seeded paths (a pull request's differ from the pure attrs)
+          WIZ_MODULES_WEB: ${{ needs.web_modules.outputs.web }}
+          WIZ_MODULES_PLAYGROUND: ${{ needs.web_modules.outputs.playground }}
+          WIZ_MODULES_UI: ${{ needs.web_modules.outputs.ui }}
         run: sh web/modules-from-store.sh
       - name: The browser-free half of web/test.sh
         env:
@@ -1089,6 +1100,10 @@ jobs:
         env:
           # only the fork-pull-request fallback in the script reads it (this job is a push)
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # the producer's paths: on a pull request they are seeded derivations
+          WIZ_MODULES_WEB: ${{ needs.web_modules.outputs.web }}
+          WIZ_MODULES_PLAYGROUND: ${{ needs.web_modules.outputs.playground }}
+          WIZ_MODULES_UI: ${{ needs.web_modules.outputs.ui }}
         run: sh web/modules-from-store.sh
       - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
         env:

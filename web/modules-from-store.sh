@@ -16,7 +16,14 @@
 # Writes `web=…`, `playground=…` and `ui=…` (store paths) to $GITHUB_OUTPUT.
 set -eu
 ids=".#wiz-web .#wiz-playground .#wiz-playground-ui"
-if paths=$(nix build $ids --no-link --print-out-paths --max-jobs 0 2>/dev/null); then
+# The producer's paths, when the workflow passes them. On a pull request they are
+# `withLakeCache` derivations (the seed is an input), so their store paths differ
+# from the pure attrs above; recomputing those can never match what was pushed.
+producer="${WIZ_MODULES_WEB:-} ${WIZ_MODULES_PLAYGROUND:-} ${WIZ_MODULES_UI:-}"
+if [ -n "${WIZ_MODULES_WEB:-}" ] && [ -n "${WIZ_MODULES_PLAYGROUND:-}" ] && [ -n "${WIZ_MODULES_UI:-}" ] \
+   && paths=$(nix build $producer --no-link --print-out-paths --max-jobs 0 2>/dev/null); then
+  :
+elif paths=$(nix build $ids --no-link --print-out-paths --max-jobs 0 2>/dev/null); then
   :
 elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
   echo "::warning title=Cachix::a fork pull request has no token: building .#wiz-web, .#wiz-playground and .#wiz-playground-ui in this job"
