@@ -24,6 +24,15 @@ Usage
   scripts/diff-fuzz.py --nightly                    # today's seed, 2000 programs
   scripts/diff-fuzz.py --seed 7 --programs 500      # a campaign
   scripts/diff-fuzz.py --replay SEED INDEX CHOICES  # one case again
+  scripts/diff-fuzz.py --cross --selfhost PATH --cross-programs 12
+                                                    # both frontends, both backends (R7)
+
+`--cross` is the cross-implementation check: it generates `--cross-programs`
+programs from the same seed, writes each as the `c` batch (a `main` printing every
+value), runs it through `wiz run` and through the self-hosted driver's `run`, and
+compares stdout line for line. A self-hosted frontend that rejects a generated program
+is a finding, not a skip (the program is in the fragment the generator emits); a
+missing C toolchain is a skip, and the run exits 3 when every program skipped.
 
 A skipped pipeline (no `wiz`, no C compiler) is a skip, not a pass: the run says
 which pipelines ran.
@@ -487,6 +496,8 @@ class Ctx:
     work: Path
     timeout: float
     verbose: bool
+    selfhost: list[str] | None = None
+    selfhost_args: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -846,6 +857,105 @@ def replay(args: argparse.Namespace, ctx: Ctx) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Crossing the two frontends (R7)
+# ---------------------------------------------------------------------------
+
+# The generator's `c` batches are the common fragment: a closed program with a `main`
+# that prints every case's value.  The Lean pipeline runs it with `wiz run` (frontend,
+# erasure, optimiser, C emitter, runtime); the self-hosted compiler runs the same file
+# with `run` (its frontend, erasure, C emitter and rt.c).  Both are observable as stdout,
+# so a disagreement is a miscompile on one side, not a pretty-printer difference.
+
+
+def cross_source(case: Case) -> str:
+    return (PREAMBLE + "\n" + "\n".join(case.c_defs) + "\n" + c_main([case]))
+
+
+def cross_values(out: Outcome) -> list[str] | None:
+    if out.status != "ok":
+        return None
+    return [l.strip() for l in out.values if l.strip() != ""]
+
+
+def cross_findings(case: Case, host: Outcome, self: Outcome) -> list[str]:
+    """The observable disagreements between the two frontends for one program."""
+    if self.status == "skip":
+        return []
+    if self.status != "ok":
+        why = first_error(self.stderr) or f"exit {self.exit}"
+        return [f"the self-hosted frontend did not accept/run it: {why}"]
+    h, s = cross_values(host), cross_values(self)
+    if h is None:
+        return [f"the host did not run it: {first_error(host.stderr) or host.status}"]
+    if h != s:
+        return [f"host printed {h!r}, the self-hosted compiler {s!r}"]
+    return []
+
+
+def run_cross_case(case: Case, ctx: Ctx) -> tuple[Outcome, Outcome]:
+    d = ctx.work / "cross" / f"p{case.index}"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "prog.wiz"
+    path.write_text(cross_source(case))
+    assert ctx.selfhost is not None
+    hcode, hout, herr, htimed = run_wiz(ctx.wiz + ctx.wiz_args + ["run", str(path)],
+                                       ctx.timeout, ctx.cwd)
+    host = (Outcome("timeout", stderr=hout + "\n" + herr, exit=hcode) if htimed else
+            Outcome("ok" if hcode == 0 else "failed",
+                    [l for l in hout.splitlines()], [], hout + "\n" + herr, hcode))
+    scode, sout, serr, stimed = run_wiz(
+        ctx.selfhost + ctx.selfhost_args + ["run", str(path)], ctx.timeout, ctx.cwd)
+    sh = (Outcome("timeout", stderr=sout + "\n" + serr, exit=scode) if stimed else
+          Outcome("ok" if scode == 0 else "failed",
+                  [l for l in sout.splitlines()], [], sout + "\n" + serr, scode))
+    if sh.status == "failed" and any(m in sh.stderr for m in TOOLCHAIN_MISSING):
+        sh.status = "skip"
+    return host, sh
+
+
+def cross_campaign(args: argparse.Namespace, ctx: Ctx) -> int:
+    seed = args.seed
+    n = args.cross_programs
+    findings = 0
+    skipped = 0
+    print(f"cross-frontends: {n} programs, seed {seed} (host: {' '.join(ctx.wiz)}; "
+          f"self: {' '.join(ctx.selfhost or [])})")
+    for i in range(n):
+        case = make_case(seed, i)
+        host, self = run_cross_case(case, ctx)
+        if self.status == "skip":
+            skipped += 1
+            print(f"  skip    p{i} {case.shape}: no C toolchain for the self-hosted run")
+            continue
+        fs = cross_findings(case, host, self)
+        if fs:
+            findings += 1
+            print(f"  DIFFER  p{i} {case.shape}: {fs[0]}")
+            if args.pin:
+                p = Path(args.pin) / f"cross-p{i}"
+                p.mkdir(parents=True, exist_ok=True)
+                (p / "prog.wiz").write_text(cross_source(case))
+        else:
+            print(f"  ok      p{i} {case.shape}")
+    print(f"cross-frontends: {n - skipped - findings} agree, {findings} disagree, "
+          f"{skipped} skipped")
+    return 1 if findings else (3 if skipped == n else 0)
+
+
+def cross_self_test() -> int:
+    """Prove the cross comparison reacts to a one-value disagreement."""
+    ok = True
+    mk = Case(0, "arith", [], ["def p0_out : Nat := 5"], "p0_out",
+              ["def p0_out : Nat := 5"], ["p0_out"], 1)
+    same = cross_findings(mk, Outcome("ok", ["5"]), Outcome("ok", ["5"]))
+    differ = cross_findings(mk, Outcome("ok", ["5"]), Outcome("ok", ["6"]))
+    ok = ok and same == [] and len(differ) == 1
+    print(f"  an agreeing program: {'PASS' if same == [] else 'FAIL'}")
+    print(f"  a one-value disagreement: {'PASS' if len(differ) == 1 else 'FAIL'}")
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -874,6 +984,16 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--replay", action="store_true")
     ap.add_argument("--self-test", action="store_true",
                     help="check that a panic and a timeout are reported")
+    ap.add_argument("--cross", action="store_true",
+                    help="run the generator through both frontends (host and --selfhost)")
+    ap.add_argument("--cross-programs", type=int, default=20,
+                    help="programs in --cross mode (default 20)")
+    ap.add_argument("--cross-self-test", action="store_true",
+                    help="check that the cross comparison reports a disagreement")
+    ap.add_argument("--selfhost", default=os.environ.get("WIZ_SELFHOST_COMPILER"),
+                    help="the self-hosted compiler driver for --cross")
+    ap.add_argument("--selfhost-arg", action="append", default=[],
+                    help="a flag for every self-hosted invocation (repeatable)")
     ap.add_argument("--index", type=int, default=0)
     ap.add_argument("--choices", default="")
     args = ap.parse_args(argv)
@@ -888,10 +1008,19 @@ def main(argv: list[str]) -> int:
         args.seed = 1 if args.seed is None else args.seed
         args.programs = 100 if args.programs is None else args.programs
 
+    if args.cross_self_test:
+        return cross_self_test()
+
     wiz = args.wiz.split() if " " in args.wiz else [args.wiz]
     if not Path(wiz[0]).exists():
         print(f"diff-fuzz: wiz not found: {wiz[0]}", file=sys.stderr)
         return 2
+    selfhost = None
+    if args.selfhost:
+        selfhost = args.selfhost.split() if " " in args.selfhost else [args.selfhost]
+        if args.cross and not Path(selfhost[0]).exists():
+            print(f"diff-fuzz: selfhost not found: {selfhost[0]}", file=sys.stderr)
+            return 2
     # A toolchain flag with an empty value (`--cflags ""`) is meaningful and `wiz`
     # accepts it; a stray empty argument is not.  Keep the former, drop the latter.
     value_flags = {"--cc", "--cflags", "--ldflags", "--libs", "--gmp", "--llc",
@@ -923,10 +1052,17 @@ def main(argv: list[str]) -> int:
         if cache is not None:
             cache.mkdir(parents=True, exist_ok=True)
             wiz_args += ["--cache", str(cache)]
-    ctx = Ctx(wiz, wiz_args, ROOT, work, args.timeout, args.verbose)
+    ctx = Ctx(wiz, wiz_args, ROOT, work, args.timeout, args.verbose,
+              selfhost, args.selfhost_arg)
     try:
         if args.self_test:
             return self_test(ctx)
+        if args.cross:
+            if ctx.selfhost is None:
+                print("diff-fuzz: --cross needs --selfhost PATH (or WIZ_SELFHOST_COMPILER)",
+                      file=sys.stderr)
+                return 2
+            return cross_campaign(args, ctx)
         if args.replay:
             return replay(args, ctx)
         return campaign(args, ctx)
