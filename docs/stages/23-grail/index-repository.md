@@ -13,7 +13,8 @@ fate-index/
   index.wiz                    the index's own manifest (Wiz code)
   registry.sexpr               name, format, updated (plain S-expression metadata)
   index/NAME.sexpr             the static index: one file per package
-  index/snapshot.sexpr         the signed state (all name@version + SHA-256 + size)
+  index/snapshot.sexpr         the signed state (name@version + SHA-256, tree, commit,
+                               entry digest and yank reason)
   index/snapshot.sexpr.sig     its detached SSH signature
   entries/NAME.sexpr.in        templates the generator fills in
   sources/NAME-VERSION/        unpacked sources; the generator's input
@@ -67,6 +68,7 @@ index side adds two optional fields for module checking:
       (size 1042)
       (tree "…")
       (commands "…")
+      (commit "…")
       (toolchain ">=0.1.0 <0.3.0")
       (modules "Alpha" "Alpha.Ctrl")
       (prefix "Alpha")
@@ -81,9 +83,12 @@ index side adds two optional fields for module checking:
   neither is accepted exactly as before; only entries that opt in are checked.
 * `(size BYTES)`, `(tree SHA256)` and `(commands SHA256)` are the integrity fields: the
   archive's length (R19), the hash of its unpacked file tree (R20) and a digest of the
-  package's declared `Package.command` set (R36). `grail publish` computes all three and
-  records them in the lock (v3); older entries have none, which is accepted. A tree hash
-  is checked after every unpack and a hand-edited `.grail/packages/NAME` is refused.
+  package's declared `Package.command` set (R36). `(commit SHA)` is the release commit
+  the entry came from (P0); it is a source claim, not a build instruction, and a tag is
+  never a pin. `grail publish --commit SHA` writes it, and the signed snapshot's entry
+  digest covers it. `grail publish` computes the rest and records size/tree/commands in
+  the lock (v3); older entries have none, which is accepted. A tree hash is checked
+  after every unpack and a hand-edited `.grail/packages/NAME` is refused.
   The checker validates the shape of the hashes and `--fetch`'s download still has no
   maximum (the size is recorded for the lock, not used as a cap yet).
 
@@ -194,8 +199,10 @@ state is a single document, `index/snapshot.sexpr`:
   (updated "2026-11-15T00:00:00Z")
   (key "SHA256:…")
   (expires "2027-11-15T00:00:00Z")
-  (package "base" "0.1.0" "90fab0…" (size 1234))
-  (package "hello" "1.0.0" "6c8ecf…" (size 345))
+  (package "base" "0.1.0" "90fab0…" (size 1234)
+    (tree "…") (commit "…") (entry "…") (yanked ""))
+  (package "hello" "1.0.0" "6c8ecf…" (size 345)
+    (tree "…") (commit "…") (entry "…") (yanked ""))
   …)
 ```
 
@@ -203,6 +210,14 @@ state is a single document, `index/snapshot.sexpr`:
   when it was made; `(key FP)` names the signing key's SHA-256 fingerprint, and
   `(expires T)` bounds how long that key is accepted. `(size BYTES)` is the archive's
   length when the generator could see it (a remote `https://` source omits it).
+  `(tree …)` and `(commit …)` name the content and source identities; `(entry DIGEST)`
+  is SHA-256 over the canonical `(version …)` node (`Grail/Index.entryDigest`), so one
+  signature covers every field of the entry, not only the tarball; `(yanked "…")` signs
+  the state too (`""` when live, the reason when yanked). A yank is therefore as
+  authenticated as a publish, and removing one from an index file fails `covers`.
+  `grail index snapshot` writes all of these; a snapshot made before P0 still verifies a
+  minimal entry, but refuses one that carries a tree, commit, modules or deps it cannot
+  cover.
 * `index/snapshot.sexpr.sig` is a detached SSH signature over the exact bytes:
   `ssh-keygen -Y sign -n grail-index -f KEY index/snapshot.sexpr`. Any OpenSSH key type
   works; the namespace is `grail-index`.

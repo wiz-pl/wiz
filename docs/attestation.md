@@ -352,6 +352,11 @@ produce the same manifest; `wiz-attest` writes that form directly.
 
 ## Trust model
 
+This is a **release** authority, not a kernel trust source: it adds no `axiom`,
+`implemented_by` or `builtin` and no row in the trust ledger (`docs/trust-ledger.md`).
+`wiz verify` checks that a statement describes an artifact; it does not make the release
+key, the builder or the package part of the trusted base.
+
 A successful verification says:
 
 * the artifact bytes match the signed statement's `subject` and the manifest;

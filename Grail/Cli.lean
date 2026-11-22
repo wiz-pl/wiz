@@ -62,9 +62,10 @@ def usage : String := "usage:
   grail index snapshot [INDEX] [--seq N] [--updated T] [--key FP] [--expires T]
                           write index/snapshot.sexpr from the entries (then sign it
                           with ssh-keygen -Y sign -n grail-index)
-  grail publish ARCHIVE --source URL
+  grail publish ARCHIVE --source URL [--commit SHA]
                           hash a release archive and print its index entry (after
-                          checking the manifest and the archive layout)
+                          checking the manifest and the archive layout); --commit
+                          records the release commit the signed entry binds
   grail run TARGET [-- ARGS…]
                           build an exe or command target's needs and run it with
                           ARGS, its input and output grail's own; exits with its code
@@ -141,6 +142,8 @@ structure Opts where
   vendor : Option String := none
   /-- (23m) `grail publish`: the archive's public URL -/
   source : Option String := none
+  /-- (P0) `grail publish`: the release commit the signed entry binds -/
+  commit : Option String := none
   /-- `grail build --attest DIR`: write one statement per built executable -/
   attest : Option String := none
 
@@ -161,6 +164,7 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--allow-unsigned" :: rest => grailOpts { o with requireSignature := false } rest
   | "--allowed-signers" :: f :: rest => grailOpts { o with allowedSigners := some f } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
+  | "--commit" :: c :: rest => grailOpts { o with commit := some c } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
@@ -524,7 +528,8 @@ def cliMain (args : List String) : IO UInt32 := do
           pure 0
     | "publish" :: rest =>
       let archive := rest.find? (fun a => !a.startsWith "-")
-      match ← Registry.publish (archive.map System.FilePath.mk) (opts.source.getD "") pkg with
+      match ← Registry.publish (archive.map System.FilePath.mk) (opts.source.getD "") pkg
+          (opts.commit.getD "") with
       | .error e => IO.eprintln e; pure 1
       | .ok entry => IO.println entry; pure 0
     | "index" :: "resolve" :: _ =>
