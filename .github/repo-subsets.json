@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "92b87215f6f7e8c2e7addc79da2ed55a29c140e4",
+  "git": "unstaged",
   "subsets": {
     "docs": {
       "files": 114,
@@ -11,7 +11,7 @@
         "AGENTS.md",
         ".github/**"
       ],
-      "sha256": "37c2a7974d1e245b858fed6a0d26eae5ccea587dc71f84072ebd3cd187962d4d"
+      "sha256": "927e1d1b6459d3030966237fc8844fe72abb574f10c8382ff7ce753e06ee7d9c"
     },
     "lean": {
       "files": 162,
@@ -52,14 +52,14 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "e142e9c8fd877c39c08920414d964d06e5738a9a9d850a6110f552bcc5ba1bdf"
+      "sha256": "0c0473ead404d572f0a86fd1be898a40b1140642528bac0deabd8a4191ad29c0"
     },
     "wizlib": {
       "files": 108,
       "paths": [
         "lib/**"
       ],
-      "sha256": "779c69a1454038442d5758cc152d0006fd68bbd9f6cbe4ef0b2791757de1fb4c"
+      "sha256": "91a458b1e94fa1612e8d8c36a9a9e83764f9e80e9f4aed230836c975bc337f85"
     }
   }
 }

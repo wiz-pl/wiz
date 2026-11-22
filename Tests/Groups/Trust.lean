@@ -531,6 +531,8 @@ def trustGroup : Group where
           for a in ax do
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
+        -- `libLoader`, not `preludeLoader`: the latter does not carry `Region` (and the
+        -- module doc above says so); with it the import failed and the check saw 0 names.
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
           { loader := ← diskLoader "import Region\n", trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
