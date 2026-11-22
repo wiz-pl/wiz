@@ -159,7 +159,7 @@ is `webgpu/index.html` over `webgpu/serve.mjs`. The subset, the host ABI, the co
 the three blockers (unbounded `Nat` and the heap, closures and recursion, the async host
 and the missing `Float32`) are in [08-backend/webgpu.md](08-backend/webgpu.md).
 
-## 8h: eBPF (P0 coding lane)
+## 8h: eBPF (P0)
 
 `wiz build FLOW.toml -o flow.c --target bpf` accepts a narrow, verifier-shaped subset and
 writes freestanding C plus `bpf_rt.h`; `clang -target bpf` is the next step. The input is

@@ -10,7 +10,7 @@ set_option compiler.extract_closed false
 /-!
 # `bpf`: the eBPF subset's rejection corpus and P0 fixture
 
-**Run (2026-11-22)** — the whole group is green on the build node (22/22), including
+**Run (2026-11-22)** — the whole group is green (22/22), including
 the manifest and `bpf-core/1` fixture through the checker and C emitter. The cases are
 pure (`Bpf.Lower`, `Bpf.Check`, `Bpf.Sexp`, `Bpf.C`; no `clang`, no privileges), so they
 run in every PR. The first build/run found and fixed the fixture's atom-type spelling

@@ -1,11 +1,10 @@
 # An eBPF target — P0 (typed core, checker, C emitter skeleton)
 
-**Status, 2026-11-22:** P0 **builds and its pure tests are green**. `lake build wiz tests`
-completed (590 jobs) and `lake test -- '=bpf'` passed 22/22 on the build node. The
-remaining "must" items below are the post-`clang` / kernel-verifier half; they need a
-clang and/or privileged slot. Branch `agent/ebpf` on `origin/integration/train10`. The
-design is `wiz-notes/ebpf-target.md`; this file records what the P0 cut contains and what
-the remaining verifier run has to establish.
+**Status, 2026-11-22:** P0 implementation in progress. The typed core, checker and C
+emitter skeleton are implemented, and their pure test group is green. The post-`clang`
+object checks and the kernel verifier remain; they need a clang and/or privileged slot.
+The design is `wiz-notes/ebpf-target.md`; this file records what the P0 cut contains and
+what the remaining verifier run has to establish.
 
 `wiz build FLOW.toml -o flow.c --target bpf` writes `flow.c` and `bpf_rt.h`. It does not
 call `clang` (see "needs a queue slot"). `--target bpf` is a normal entry in the selector
