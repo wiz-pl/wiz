@@ -15,11 +15,14 @@ def usage : String := "usage:
                           module root (a package's src/), before or after FILE
   wiz lint [-I DIR] FILE|- [--json] [--deny] [--rule Wxxx]...
                           [--public-roots DIR]... [--package-lint FILE]... [--set NAME]...
+                          [--lint-baseline FILE | --lint-baseline-write FILE]
                           post-elaboration lint warnings (`W101`, `W102`, `W103`, `W301`,
                           `W302`); a package lint module adds its own `W5xx` rules when
                           the consumer enables the set with `--set`; exit 0 on warnings
                           unless --deny; --json carries the stable `W` code; `-` reads
-                          standard input
+                          standard input; --lint-baseline reports (and fails on) only
+                          findings whose path/rule/anchor key is not in FILE, and
+                          --lint-baseline-write records this run as that file
   wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js]  compile the definition `main` to an
                                    executable (C or LLVM) or a WebAssembly module (stage
                                    8f: no IO, Nat/Int, closures, arrays; run it with
@@ -782,6 +785,10 @@ structure LintArgs where
   publicRoots : List String := ["lib"]
   packageLints : List String := []
   sets : List String := []
+  /-- (P2) compare with a baseline and report only findings it does not name -/
+  baseline : Option String := none
+  /-- (P2) write this run's findings as a baseline -/
+  baselineWrite : Option String := none
 
 def parseLintArgs : List String → Except String LintArgs
   | [] => pure {}
@@ -801,6 +808,14 @@ def parseLintArgs : List String → Except String LintArgs
   | "--set" :: n :: rest => do
       let a ← parseLintArgs rest
       pure { a with sets := n :: a.sets }
+  | "--lint-baseline" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with baseline := some f }
+  | "--lint-baseline" :: [] => throw "wiz lint: --lint-baseline needs a file"
+  | "--lint-baseline-write" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with baselineWrite := some f }
+  | "--lint-baseline-write" :: [] => throw "wiz lint: --lint-baseline-write needs a file"
   | a :: rest =>
     if a.startsWith "-" && a != "-" then throw s!"wiz lint: unknown option {a}" else do
       let args ← parseLintArgs rest
@@ -838,25 +853,64 @@ def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     else do
       let some text ← readSourceDiag file | return 1
       pure (file, text)
-  let s ← elaborate tc (if file == "-" then "<stdin>" else file) input
-    { enabled := true, path := (if file == "-" then "<stdin>" else file),
-      publicRoots := a.publicRoots.reverse, rules := a.rules.reverse,
-      packageLints := a.packageLints.reverse, sets := a.sets.reverse }
+  -- a bad package set is a registration error: report it, do not crash with the
+  -- runtime's "uncaught exception" text
+  let s? ← try
+      pure (some (← elaborate tc (if file == "-" then "<stdin>" else file) input
+        { enabled := true, path := (if file == "-" then "<stdin>" else file),
+          publicRoots := a.publicRoots.reverse, rules := a.rules.reverse,
+          packageLints := a.packageLints.reverse, sets := a.sets.reverse }))
+    catch e =>
+      IO.eprintln s!"wiz lint: {e}"
+      pure none
+  let some s := s? | return 1
   let lintMsgs := s.messages.filter fun m => m.code.startsWith "W"
-  let errors := s.messages.filter (·.severity == .error)
+  let errors := s.messages.filter (fun m => m.severity == .error)
+  -- (P2) write mode: a baseline records a finished run, never one with errors
+  if let some baselineFile := a.baselineWrite then
+    if !errors.isEmpty then
+      IO.eprintln s!"wiz lint: not writing {baselineFile}: the run has {errors.size} error(s)"
+      return 1
+    let fpath : System.FilePath := baselineFile
+    IO.FS.createDirAll (fpath.parent.getD ".")
+    IO.FS.writeFile fpath (Wiz.Lint.baselineText path lintMsgs)
+    IO.eprintln s!"wiz lint: wrote {lintMsgs.size} finding(s) to {baselineFile}"
+    return 0
+  -- (P2) diff mode: a finding whose stable key the baseline does not name is new
+  let mut fresh : Array Msg := #[]
+  let mut baselineError := false
+  if let some baselineFile := a.baseline then
+    let bpath : System.FilePath := baselineFile
+    if !(← bpath.pathExists) then
+      IO.eprintln s!"wiz lint: cannot read the baseline {baselineFile} (write one with --lint-baseline-write)"
+      baselineError := true
+    else
+      let text ← IO.FS.readFile bpath
+      fresh := Wiz.Lint.newFindings (Wiz.Lint.parseBaseline text) path lintMsgs
+      if fresh.isEmpty then
+        IO.eprintln s!"wiz lint: no new findings against {baselineFile}"
+      else
+        IO.eprintln s!"wiz lint: {fresh.size} new finding(s) not in {baselineFile}"
+  let shown := if a.baseline.isSome then fresh else lintMsgs
   if a.json then
     IO.println (Lean.Json.mkObj [
       ("file", Lean.Json.str path),
-      ("diagnostics", Lean.Json.arr (lintMsgs.map (lintMsgJson input))),
-      ("warnings", Lean.Json.num (Lean.JsonNumber.fromNat (lintMsgs.filter (·.severity == .warning)).size)),
+      ("diagnostics", Lean.Json.arr (shown.map (lintMsgJson input))),
+      ("warnings", Lean.Json.num (Lean.JsonNumber.fromNat (shown.filter (fun m => m.severity == .warning)).size)),
       ("errors", Lean.Json.num (Lean.JsonNumber.fromNat errors.size))]).compress
-  else
+  else do
+    let freshKeys := (fresh.map (Wiz.Lint.findingKey path)).toList
     for m in s.messages do
+      -- a baselined finding is not reported in diff mode (only a new one is)
+      if a.baseline.isSome && m.code.startsWith "W" &&
+          !freshKeys.contains (Wiz.Lint.findingKey path m) then continue
       let line := s!"{path}:{m.render input}"
       let line := if m.code.isEmpty then line else line ++ s!" [{m.code}]"
       if m.severity == .error then IO.eprintln line else IO.println line
-  if !errors.isEmpty then pure 1
-  else if a.deny && !lintMsgs.isEmpty then pure 1
+  if baselineError then pure 3
+  else if !errors.isEmpty then pure 1
+  else if a.deny && !shown.isEmpty then pure 1
+  else if a.baseline.isSome && !fresh.isEmpty then pure 1
   else pure 0
 
 def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOneMany)) := do

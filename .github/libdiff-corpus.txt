@@ -66,6 +66,7 @@ lib/IntOrder.wiz
 lib/IntRing.wiz
 lib/Intern.wiz
 lib/Json.wiz
+lib/Lint.wiz
 lib/Logic.wiz
 lib/MVar.wiz
 lib/Nat.wiz

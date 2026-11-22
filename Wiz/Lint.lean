@@ -685,7 +685,8 @@ def runPackageRules [BEq R] [Zero R] (s : CommandState R) (input : RuleInput R)
 /-- A finding as the ordinary message the rest of the toolchain already knows. -/
 def Finding.toMsg (f : Finding) : Msg :=
   { info := f.info, severity := (match f.severity with
-      | .error => .error | .warning => .warning | _ => .info), text := f.text, code := f.code }
+      | .error => .error | .warning => .warning | _ => .info), text := f.text, code := f.code,
+    anchor := f.anchor }
 
 def makeInput (s : CommandState R) (cmd : Syntax) (chars : Array Char)
     (added : Array Name) : RuleInput R :=
@@ -816,6 +817,123 @@ def finish [BEq R] [Zero R] (s : CommandState R) (chars : Array Char) : CommandS
   let findings := runModule s chars
   let s := { s with messages := s.messages ++ findings.map Finding.toMsg }
   applySuppressions s chars
+
+/-! ## Baselines and the repository policy
+
+`wiz lint --lint-baseline FILE` compares a run with a recorded baseline and reports only
+findings the baseline does not name; `--lint-baseline-write FILE` records one. A row is
+the finding's **stable key**: the file path, the rule code and the rule's anchor (a
+declaration name plus an occurrence), never a line number, so a reindent or a line move
+does not churn the file and a rename is a stale row, which is a signal rather than a
+silent match. A suppressed finding is already absent from `messages`, so it is never
+re-admitted by a baseline.
+
+The format is line-oriented, like the other gates' baselines: a `#` header, then one key
+per line, sorted and deduplicated so a rewrite is byte-for-byte stable. -/
+
+/-- A finding's baseline key: path, rule code, anchor. A rule that returns no anchor
+(a package runner may) falls back to its text. -/
+def findingKey (path : String) (m : Msg) : String :=
+  s!"{path}\t{m.code}\t{if m.anchor.isEmpty then m.text else m.anchor}"
+
+/-- The first line of a baseline file. -/
+def baselineHeader : String :=
+  "# wiz-lint baseline v1: one finding per line, TAB-separated path, rule, anchor\n"
+
+/-- A baseline file's text for these messages: sorted, deduplicated keys, one per line.
+Findings are keyed by `findingKey`; the message texts are not in the file, so a reworded
+finding with the same anchor is not a new row. -/
+def baselineText (path : String) (msgs : Array Msg) : String :=
+  let keys := (msgs.map (findingKey path)).toList.eraseDups
+  let sorted := keys.mergeSort (· ≤ ·)
+  baselineHeader ++ String.join (sorted.map (fun k => k ++ "\n"))
+
+/-- The keys in a baseline file. Blank lines and `#` comments are ignored, so the header
+and a hand-written note do not become findings. -/
+def parseBaseline (text : String) : Std.HashSet String :=
+  (text.splitOn "\n").foldl (init := ({} : Std.HashSet String)) fun keys line =>
+    let line := line.trimAscii.toString
+    if line.isEmpty || line.startsWith "#" then keys else keys.insert line
+
+/-- The findings whose key is not in the baseline (the "new entries" a diff-mode run
+reports and fails on). -/
+def newFindings (baseline : Std.HashSet String) (path : String) (msgs : Array Msg) :
+    Array Msg :=
+  msgs.filter fun m => !baseline.contains (findingKey path m)
+
+/-! ## `lint.conf`: the repository's policy
+
+`Package.lintSet` in `grail.wiz` declares a package's sets (name and module); `lint.conf`
+enables them and names the public roots. `grail lint` resolves the manifest against this
+file and passes the result to `wiz lint`; `wiz lint` itself reads no manifest, so the
+parser lives here and both sides agree on the syntax.
+
+```
+# lint.conf
+set fixture                          # a set declared by grail.wiz
+set scratch lint/Scratch.wiz         # a set this file declares
+public-roots lib src
+```
+
+A `set` name that neither the manifest nor the line itself declares is an error naming
+the missing declaration: a typo must not silently enable nothing. -/
+
+/-- The policy `lint.conf` carries. `sets` are the enabled package sets, each with the
+module that defines it. -/
+structure LintConf where
+  /-- enabled sets: name and module path -/
+  sets : List (String × String) := []
+  /-- roots whose declarations are public (`W301`) -/
+  publicRoots : List String := []
+  deriving Repr, Inhabited
+
+/-- Whether the policy enables the named set. -/
+def LintConf.hasSet (c : LintConf) (name : String) : Bool :=
+  c.sets.any (fun (n, _) => n == name)
+
+/-- The words of a `lint.conf` line (spaces and tabs separate; `#` starts a comment only
+at the start of the trimmed line, so a path containing `#` is written as is). -/
+def confWords (line : String) : List String :=
+  ((line.replace "\t" " ").splitOn " ").filter (· != "")
+
+/-- Parse `lint.conf`. `declared` is the manifest's `Package.lintSet` list (name and
+module); a bare `set NAME` resolves there, and an unknown name is an error that says
+where the declaration belongs. A second form, `set NAME MODULE`, declares the set in the
+file itself (for a repository that has no manifest). -/
+def parseLintConf (declared : List (String × String)) (text : String) :
+    Except String LintConf :=
+  let rec go (lines : List String) (n : Nat) (c : LintConf) : Except String LintConf :=
+    match lines with
+    | [] => .ok { c with sets := c.sets.reverse, publicRoots := c.publicRoots.reverse }
+    | line :: rest =>
+      let line := line.trimAscii.toString
+      if line.isEmpty || line.startsWith "#" then go rest (n + 1) c
+      else match confWords line with
+      | [] => go rest (n + 1) c
+      | d :: args =>
+        if d == "set" then
+          match args with
+          | [] => .error s!"line {n}: `set NAME [MODULE]`"
+          | [name] =>
+            if c.hasSet name then .error s!"line {n}: set '{name}' is enabled twice"
+            else match declared.find? (fun p => p.1 == name) with
+              | some (_, path) => go rest (n + 1) { c with sets := (name, path) :: c.sets }
+              | none =>
+                .error s!"line {n}: set '{name}' is not declared by grail.wiz (add `Package.lintSet \"{name}\" \"path/to/Lints.wiz\"`, or name its module here)"
+          | [name, path] =>
+            if c.hasSet name then .error s!"line {n}: set '{name}' is enabled twice"
+            else if name.isEmpty || path.isEmpty then
+              .error s!"line {n}: `set NAME MODULE` needs both words"
+            else go rest (n + 1) { c with sets := (name, path) :: c.sets }
+          | _ => .error s!"line {n}: `set NAME [MODULE]` takes at most two words"
+        else if d == "public-roots" then
+          match args with
+          | [] => .error s!"line {n}: `public-roots` needs at least one directory"
+          | _ => go rest (n + 1)
+              { c with publicRoots := args.foldl (fun acc p => p :: acc) c.publicRoots }
+        else
+          .error s!"line {n}: unknown directive '{d}' (expected `set` or `public-roots`)"
+  go (text.splitOn "\n") 1 {}
 
 end Lint
 end Wiz

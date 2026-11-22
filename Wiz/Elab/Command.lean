@@ -49,6 +49,10 @@ structure Msg where
   text : String
   /-- a stable name for the kind of error (`unknown-identifier`, …), or `""` -/
   code : String := ""
+  /-- (lint) a finding's stable baseline key (a declaration name plus an occurrence,
+  never a line); `""` for an ordinary message. `Lint.Finding.toMsg` carries it, so a
+  baseline can be compared without re-running the rule. -/
+  anchor : String := ""
   deriving Repr, Inhabited
 
 def Msg.render (input : String) (m : Msg) : String :=
