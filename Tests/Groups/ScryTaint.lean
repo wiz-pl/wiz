@@ -1,5 +1,6 @@
 import Wiz
 import Tests.Harness
+import Tests.Elab
 
 /-!
 # Tests for scry's taint analyses (`Scry.Analysis`, `Scry.Taint`, `Scry.RuleTaint`,
@@ -7,8 +8,9 @@ import Tests.Harness
 
 The corpus is in `scry/src/Scry/TaintExamples.wiz` (the intraprocedural prototype) and
 `scry/src/Scry/RuleExamples.wiz` (the rule pack and interprocedural engine); each case
-evaluates a summary with `#eval` and compares it with the expected value. No C toolchain
-is needed.
+evaluates a summary with `#eval` and compares it with the expected value. Only the final
+SARIF-contract fixture case compiles a program (through `Elab.cRunIO`); every other
+case is interpreter-only.
 
 The cases cover:
 
@@ -31,8 +33,10 @@ The cases cover:
   descriptors;
 * certificates: a finding's derivation checks, reports its axioms and assumptions, and a
   tampered derivation is rejected;
-* SARIF 2.1.0 shape, locations from an origin map, related locations, and the JSON
-  round-trip through `Json.parse`;
+* SARIF 2.1.0 shape, locations from an origin map, related locations, the JSON
+  round-trip through `Json.parse`, `codeFlows`, `primaryLocationLineHash`, and the
+  run-level partial notification (the package fixture `scry/tests/sarif-contract.wiz`
+  is compiled and diffed against its `.expected` here, so CI runs it in this group);
 * the checked e-graph extraction (`Scry.EgraphExtract`): an identity keeps a finding, a
   mask removes exactly one false positive and adds none, a multi-block function and a
   two-definition register are refused, and no corpus program gains an alert.
@@ -459,7 +463,19 @@ def group : Group where
           "#eval Json.getNat (firstResult sar) \"ruleIndex\"\n" ++
           "#eval match Json.getList (firstResult sar) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
           "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"physicalLocation\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
-          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9") [1, 4, 1, 1, 3, 0, 1, 0, 1]
+          "#eval match Json.getList (firstResult sarNo) \"locations\" with | .cons loc _ => (match Json.get loc \"logicalLocations\" with | .some _ => 1 | .none => 0) | .nil => 9\n" ++
+          -- the R7 fields: codeFlows, the GitHub fingerprint key, and the run-level
+          -- invocation for a complete and for a truncated run
+          "#eval jLen (firstResult sar) \"codeFlows\"\n" ++
+          "#eval match Json.getList (firstResult sar) \"codeFlows\" with | .cons cf _ => (match Json.getList cf \"threadFlows\" with | .cons tf _ => (if Nat.lt 0 (List.length (Json.getList tf \"locations\")) then 1 else 0) | .nil => 0) | .nil => 0\n" ++
+          "#eval match Json.get (firstResult sar) \"partialFingerprints\" with | .some fp => (match Json.get fp \"primaryLocationLineHash\" with | .some (.str s) => (if Nat.lt 0 (String.length s) then 1 else 0) | _ => 0) | .none => 0\n" ++
+          "def inv := headJ Json.mkNull (Json.getList (sarifRun sar) \"invocations\")\n" ++
+          "#eval match Json.get inv \"executionSuccessful\" with | .some (.bool b) => (if b then 1 else 0) | _ => 0\n" ++
+          "def note := Scry.Budget.terminationNotes (Scry.Termination.rounds 2 2)\n" ++
+          "def sarT : Json := match Json.parse (Scry.renderSarifPartialWith \"scry\" originMap Scry.demoRules (List.map (fun f => (f, .true)) (Scry.programFindings prI)) .nil note) with | .ok j => j | .error _ => Json.mkNull\n" ++
+          "def invT := headJ Json.mkNull (Json.getList (sarifRun sarT) \"invocations\")\n" ++
+          "#eval match Json.get invT \"executionSuccessful\" with | .some (.bool b) => (if b then 0 else 1) | _ => 0\n" ++
+          "#eval List.length (Json.getList invT \"toolExecutionNotifications\")") [1, 4, 1, 1, 3, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1]
         evalRuleTexts (rulePrelude ++
           "def prI : Scry.ProgramResult := Scry.analyze Scry.interprocProgram Scry.demoRules\n" ++
           "def sar : Json := Scry.sarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)\n" ++
@@ -469,6 +485,11 @@ def group : Group where
           "#eval jStr (firstResult sar) \"level\"\n" ++
           "#eval match Json.parse (Scry.renderSarif \"scry\" originMap Scry.demoRules (Scry.programFindings prI)) with | .ok j => Json.getStr j \"version\" | .error e => e")
           ["\"2.1.0\"", "\"scry\"", "\"scry/c/command-injection\"", "\"error\"", "\"2.1.0\""] },
+    { name := "SARIF contract fixture: codeFlows, primaryLocationLineHash, partial-run notification (scry/tests/sarif-contract.wiz)",
+      run := fun _ => do
+        let src ← IO.FS.readFile "scry/tests/sarif-contract.wiz"
+        let expected ← IO.FS.readFile "scry/tests/sarif-contract.expected"
+        Elab.cRunIO src expected },
     { name := "nullness: allocation, call and literal sources; the guard kills the null",
       run := fun _ => evalRuleNats
         ("#eval List.length (Scry.nullDerefWarnings Scry.nullAlloc)\n" ++
