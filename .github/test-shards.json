@@ -101,6 +101,7 @@
       "modules", "=namespace",
       "=native",
       "=natives",
+      "=numerics",
       "=nvim",
       "=loom",
       "=wire",

@@ -87,6 +87,9 @@ line below.
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
 * [The trust ledger](trust-ledger.md): the reviewed trusted base of `lib/`, its gate and expiry policy
 * [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
+* [Numerics and solver trust](numerics-trust.md): the GMP pin and attestation, the SMT
+  range check, the trust-boundary audit, the proof-not-verdict cache, Ryu float printing,
+  and the `omega` certificate plan
 
 ### Self-hosting
 
