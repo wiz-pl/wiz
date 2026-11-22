@@ -1322,8 +1322,9 @@ is lowered inline at the call site (`lowerArgsCb`), and the emitted call still p
 opaque `fnptr`; the row says nothing about the callee's result or memory effect —
 `Scry.Models` owns those. Rows for `Task.Run`, `ContinueWith`, the DI `Add*`/
 `Configure` factories and the minimal-API `Map*` handlers cover the framework's other
-invocation shapes; a handler's request parameter is a havoc, because the request object
-is not a value the lowering has. The table is **not** applied to a class of the unit:
+invocation shapes; a handler's request parameter is bound to the pattern argument (a
+conservative value: the request object is not a value the lowering has, so no request
+source is invented, and a flow that needs one is still a later slice). The table is **not** applied to a class of the unit:
 its body is visible and analysed, and guessing its invocation policy would inline a
 lambda it may never call.
 

@@ -23,6 +23,10 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   `lower/switch` covers compared int/string/enum labels, stacked labels, a typed
   `case T x` binding, `when` guards and switch-expression arms;
   `lower/toplevel` covers top-level statements (lowered as `<stem>.Main`);
+  `lower/init-order` pins field/property initialisers in declaration order (and runs one
+  under `Wil.runFunction`), `lower/local-function` a local function's captures and direct
+  call, `lower/wrappers` the `lock`/`fixed`/`checked`/`unsafe`/label/`#if` bodies, and
+  `lower/lambda-direct` a direct lambda inlined at a modelled callee;
   `lower/unsupported` is the warning golden for everything out of scope.
 * **Silent skip**: `lower/{modern,toplevel,unsupported}` must each keep the warning that
   names every out-of-scope construct they contain. The case fails when one of them
@@ -51,14 +55,13 @@ A golden mismatch prints the actual text. Setting `SCRY_CS_WRITE=1` writes the a
 text over the expected file **and still fails the case**, so a regenerated golden is
 always reviewed in the diff and never passes silently.
 
-`lower/lambda.cs` is a port of Joern's `csharpsrc2cpg` `LambdaTests` fixture. It is a
-**characterization case for a known gap**, not a claim of support: the golden records
-what scry does today, and the case is then reported as skipped with the gap as its
-reason. A lambda assigned to a local or field and invoked in the same method is now
-lowered inline (so `Run`'s `Process.Start` is in the program); the gap that remains is a
-lambda passed to a callee whose call site is unknown (`Select` here), which is still an
-opaque `fnptr` plus a warning. When that gap is fixed the golden changes, the case fails,
-and both the golden and the skip must be updated (see `.github/skip-allowlist.json`).
+`lower/lambda.cs` is a port of Joern's `csharpsrc2cpg` `LambdaTests` fixture. Both
+shapes are now lowered: a lambda assigned to a local and invoked in the same method is
+inlined at the call, and a lambda passed directly to a callee whose invocation policy the
+callback table knows (`Select` here) is lowered at the call site too, so `Main`'s body is
+in the program. The golden records the body's operator on the bound element as an
+unknown-typed havoc (`operator * on ? and ?`), because the lowering binds a collection
+operator's parameter to the receiver, not to an element location (generics are erased).
 Joern's `TopLevelStatementTests` fixture is `lower/toplevel.cs`; that gap is fixed, so it
 is an ordinary lowering case (lowered as `<stem>.Main`).
 -/
@@ -558,6 +561,15 @@ def group : Group where
       run := fun _ => lowerGolden "lambda" },
     { name := "lower: field and property initialisers run in declaration order (ctor and synthetic .cctor)",
       run := fun _ => lowerGolden "init-order" },
+    { name := "lower: initialisers run in declaration order (Traced.Check = 12 under Wil)",
+      run := fun _ => do
+        let (src, spill) ← fixture "lower" "init-order"
+        let body :=
+          fixtureDefs src spill ++
+          "def prog : Wil.Program := Scry.Cs.programOf \"init-order.cs\" src spill\n" ++
+          "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.InitOrder.Traced.Check\" ([] : List Wil.Val))\n"
+        let ms ← runProbe lowerImports body
+        checkEq ["\"ok 12\""] ms },
     { name := "lower: a local function is a function with its captures as parameters, called directly",
       run := fun _ => lowerGolden "local-function" },
     { name := "lower: lock/fixed/checked/unsafe/label/#if bodies are ordinary code",
