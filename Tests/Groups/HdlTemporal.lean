@@ -27,7 +27,7 @@ def uartTheoremTypes : List String :=
    "Loop.delivers : (xs : Trace (Bool × Bits8)) → (t : Nat) → (e : Bits8) → Loop.Quiet xs t → xs t = (.true, e) → (if Nat.beq (RxS.ph (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) 1 then Bool.and (Nat.beq (RxS.c (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) 3) (Loop.rs xs (Nat.add 38 (.succ (.succ (.succ t))))) else .false, RxS.cs (Mealy.stateAt RxS Bool (Bool × Bits8) Rx.spec Rx.s0 (Loop.rs xs) (Nat.add 38 (.succ (.succ (.succ t)))))) = (.true, e)"]
 
 /-- H14 T2: the temporal properties of the iCEstick UART, for every input trace and byte
-(`examples/hdl-uart-temporal.wiz`). One `wiz check` of the whole file: the transmitter is
+(`hdl/examples/hdl-uart-temporal.wiz`). One `wiz check` of the whole file: the transmitter is
 idle-high, frames a byte for 40 cycles, takes the next one; the receiver reports a
 well-formed frame (and nothing on a bad stop bit or a glitch), for ever; the loopback
 delivers each byte 41 cycles after it is accepted. About three minutes cold, so a group
@@ -44,12 +44,12 @@ def hdlUartTemporalGroup : Group where
   exercise := "HDL H14 T2 (iCEstick UART, temporal properties)"
   shard := "hdl-uart-temporal"
   cases := [
-    { name := "H14 T2: the iCEstick UART's temporal properties for every trace and byte (examples/hdl-uart-temporal.wiz)", run := fun _ => do
+    { name := "H14 T2: the iCEstick UART's temporal properties for every trace and byte (hdl/examples/hdl-uart-temporal.wiz)", run := fun _ => do
         let props := ["Tx.idleHigh", "Tx.frame", "Tx.returns",
                       "Rx.receives", "Rx.badStop", "Rx.glitch", "Loop.delivers"]
         -- these five are axiom-free; the other two unfold native UIntN operations
         let axiomFree := ["Tx.returns", "Rx.receives", "Rx.badStop", "Rx.glitch", "Loop.delivers"]
-        let src := (← IO.FS.readFile "examples/hdl-uart-temporal.wiz") ++ "\n" ++
+        let src := (← IO.FS.readFile "hdl/examples/hdl-uart-temporal.wiz") ++ "\n" ++
           "\n".intercalate (axiomFree.map fun n => s!"#print axioms {n}")
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
         let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src

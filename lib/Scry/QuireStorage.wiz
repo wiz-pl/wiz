@@ -1,0 +1,581 @@
+import Optic
+import OpticDerive
+import Word
+import Text
+import WordMap
+import Functor
+import Scry.QuireCore
+/-!
+# Storage engine, pure half: recording optics, indices, patches
+
+The pure half of the design in `wiz-notes/storage-engine.md`. There is no IO here: a
+`Snapshot` is an immutable value, `over` produces a new one, and the transaction *is*
+the write-set it carries.
+
+* `Snapshot` is `(generation, root, write-set)`. The root is the committed state; the
+  write-set (`U64Map Patch`) is the pending diff.
+* `nodeAt`/`nodeOr` are store-encoding optics: their backward function (`Store`'s
+  second component) *records* a `Patch` into the snapshot's write-set. So
+  `Lens.over`/`PLens.over` produce the diff as they run; the engine never diffs the
+  whole state afterwards. This is the store encoding from `lib/Optic.wiz`, not
+  profunctor optics: there is one interpretation (apply the update), and the recording
+  point is the store's `A → S` arrow.
+* `Patch` is one key's change: `set` (overwrite), `addCount` (the commutative delta),
+  `del`. `Patch.seq` composes two patches on one key; `WriteSet.combine` keeps one
+  composed patch per key.
+* `IndexDef`/`IndexDelta`/`Traversal` are the secondary-index half. An index entry is
+  a fact `(index, key, node)`; a delete is a `remove` fact (a tombstone); the delta is
+  a commutative monoid of fact sets; the committed index is the fold. Commit maintains
+  the index incrementally from the primary write-set; `Root.rebuildIndex` recomputes it
+  from the primary map for repair and as the consistency check.
+* `Db.commit` is the pure commit/validation core that `putDb` will wrap in IO: the
+  delete epoch, per-key first-committer-wins for `set`/`del`, no version check for
+  `addCount`, and unique-index rejection.
+
+`indexTraversalP` is a profunctor traversal over `(key, node)` (the key must be in the
+focus so an update can name the patch it records); `indexTraversal` is the store
+`Traversal` shim derived from it (`Traversal.ofP`), kept for the `view`/`overAll` shape.
+`PLens`/`PLens.over` stay the store pair for the partial place (`nodeAt`), whose error
+path hands the lender back. See the note, §5.2 and §12.
+-/
+
+-- ## Records
+
+/-- A fixed-size flatgraph node. Production stores this in 32 bytes (see the note). -/
+structure Node where
+  kind : U32
+  count : U64
+  label : U32
+  deriving Lens
+
+/-- Field equality (there is no `BEq` instance for `Node` in the prototype). -/
+def Node.beq (a b : Node) : Bool :=
+  Bool.and (UIntN.beq a.kind b.kind)
+    (Bool.and (UIntN.beq a.count b.count) (UIntN.beq a.label b.label))
+
+/-- The value of a field, by the schema's field number: 0 kind, 1 count, 2 label. -/
+def Node.field (n : Node) : Nat → U64
+  | 0 => UIntN.resize 64 n.kind
+  | 1 => n.count
+  | _ => UIntN.resize 64 n.label
+
+-- ## The write-set: the transaction is a diff
+
+/-- One record's change. `addCount` is the commutative delta (two `+1`s compose to `+2`
+and rebase over anything); `set` and `del` are not commutative. -/
+inductive Patch where
+  | set (node : Node)
+  | addCount (d : U64)
+  | del
+
+/-- Apply a patch to a record (absent is `none`). -/
+def Patch.apply (p : Patch) (old : Option Node) : Option Node :=
+  match p, old with
+  | .set n, _ => .some n
+  | .del, _ => .none
+  | .addCount d, .some n => .some { n with count := n.count + d }
+  | .addCount _, .none => .none
+
+/-- `q` followed by `p`, as one patch (the transaction monoid on one key). -/
+def Patch.seq (q p : Patch) : Patch :=
+  match q, p with
+  | .del, .set n => .set n
+  | .del, _ => .del
+  | .addCount d1, .addCount d2 => .addCount (d1 + d2)
+  | .addCount _, .set n => .set n
+  | .addCount _, .del => .del
+  | .set n, .addCount d => .set { n with count := n.count + d }
+  | .set _, .set m => .set m
+  | .set _, .del => .del
+
+/-- The patch taking `old` to `new`: an `addCount` when only the counter grew, otherwise
+a `set`; `none` when they are equal (so GetPut holds).
+
+The inference is sound only for *translations* of the counter (`over (+1)`); a generic
+`A → A` is not a delta. The production contract is a delta-aware combinator
+(`overAdd`/`append`/`union`), with a generic `over` recording a `set`. The prototype
+keeps `ofChange` to show the mechanism; see the note, §3.3 and §13.3. -/
+def Patch.ofChange (old new : Node) : Option Patch :=
+  match Node.beq old new with
+  | .true => .none
+  | .false =>
+    let ok1 := Bool.and (UIntN.beq old.kind new.kind) (UIntN.beq old.label new.label);
+    match ok1 with
+    | .true =>
+      match UIntN.lt new.count old.count with
+      | .false => .some (.addCount (new.count - old.count))
+      | .true => .some (.set new)
+    | .false => .some (.set new)
+
+/-- Whether the patch is the commutative delta. -/
+def Patch.isAdd : Patch → Bool
+  | .addCount _ => .true
+  | _ => .false
+
+/-- Whether the patch overwrites the record. -/
+def Patch.isSet : Patch → Bool
+  | .set _ => .true
+  | _ => .false
+
+/-- Whether the patch deletes the record. -/
+def Patch.isDel : Patch → Bool
+  | .del => .true
+  | _ => .false
+
+/-- The counter delta a patch carries (0 for `set`/`del`). -/
+def Patch.deltaOf : Patch → U64
+  | .addCount d => d
+  | _ => U64.ofNat 0
+
+/-- Patch equality (the expected patch in a test, without a `BEq` instance). -/
+def Patch.beq (a b : Patch) : Bool :=
+  match a, b with
+  | .set x, .set y => Node.beq x y
+  | .addCount x, .addCount y => UIntN.beq x y
+  | .del, .del => .true
+  | _, _ => .false
+
+/-- A write-set: at most one patch per key, composed by `Patch.seq`. -/
+def WriteSet : Type := U64Map Patch
+
+/-- Record a patch for `id`, composing with what the transaction already has. -/
+def WriteSet.combine (m : WriteSet) (id : U64) (p : Patch) : WriteSet :=
+  match U64Map.find m id with
+  | .none => U64Map.insert m id p
+  | .some q => U64Map.insert m id (Patch.seq q p)
+
+/-- The number of keys the transaction touches. -/
+def WriteSet.size (ws : WriteSet) : Nat := U64Map.size ws
+
+/-- The pending patch for `id`, if any. -/
+def WriteSet.patchOf (ws : WriteSet) (id : U64) : Option Patch := U64Map.find ws id
+
+-- ## Roots and snapshots
+
+/-- A materialised root (the production store's is a page number). `index` is the
+registry: index id → (key → node ids). -/
+structure Root where
+  pages : U64Map Node
+  versions : U64Map U64
+  index : U64Map (U64Map (List U64))
+  delEpoch : U64
+
+/-- An immutable snapshot: a base root, its generation, and the pending write-set.
+`getDb` returns one with an empty `ws`; each `over` extends `ws`; `putDb` commits it. -/
+structure Snapshot where
+  gen : U64
+  root : Root
+  ws : WriteSet
+
+/-- Read a node through the pending write-set: the overlay wins over the base. -/
+def Snapshot.getNode (s : Snapshot) (id : U64) : Option Node :=
+  match U64Map.find s.ws id with
+  | .some p => Patch.apply p (U64Map.find s.root.pages id)
+  | .none => U64Map.find s.root.pages id
+
+/-- The store's counted read path: one primary-node fetch, recorded as `Cost.node`.
+A query that never reaches this function (an index-only scan) reads no primary node,
+so its `Cost.nodes` is zero. -/
+def Snapshot.fetch (s : Snapshot) (id : U64) : Option Node × Cost :=
+  (Snapshot.getNode s id, Cost.node)
+
+/-- The primary keys in the snapshot's base pages (a table scan's entries). -/
+def Snapshot.nodeIds (s : Snapshot) : List U64 := U64Map.keys s.root.pages
+
+/-- Extend the write-set (a no-op patch leaves the snapshot alone, keeping GetPut). -/
+def Snapshot.record (s : Snapshot) (id : U64) (p : Option Patch) : Snapshot :=
+  match p with
+  | .none => s
+  | .some q => { s with ws := WriteSet.combine s.ws id q }
+
+-- ## The optics: puts record; the store's `Lens`/`PLens` are enough
+
+/-- The place of an existing node: a partial lens whose backward function records the
+change in the snapshot's write-set. -/
+def nodeAt (id : U64) : PLens Snapshot Node := fun s =>
+  match Snapshot.getNode s id with
+  | .none => .err .outOfBounds
+  | .some n => .ok (n, fun n' => Snapshot.record s id (Patch.ofChange n n'))
+
+/-- The place of a node, with a default for an absent one (create-on-first-write).
+Lawful on the nodes that exist; on a missing node it creates one, so it is
+create-on-write, not a lawful total lens for the empty case. -/
+def nodeOr (id : U64) (d : Node) : Lens Snapshot Node := fun s =>
+  let cur := match Snapshot.getNode s id with
+    | .some n => n
+    | .none => d;
+  (cur, fun n' => match Snapshot.getNode s id with
+    | .some old => Snapshot.record s id (Patch.ofChange old n')
+    | .none => match Node.beq d n' with
+      | .true => s
+      | .false => Snapshot.record s id (.some (.set n')))
+
+/-- The owner's shape, pure and total: `over (nodeOr id d ∘ Node.countL) (+1) db`. The
+composite's backward function runs inside the outer store, so the write-set gets one
+record-level patch, not one per field and not a diff over the map. -/
+def bumpCount (id : U64) (s : Snapshot) : Snapshot :=
+  Lens.over (Lens.comp (nodeOr id (Node.mk 0 0 0)) Node.countL) (fun c => c + 1) s
+
+/-- The same through the partial place, with the absent case explicit. -/
+def bumpCountAt (id : U64) (s : Snapshot) : Result Snapshot :=
+  PLens.over (PLens.comp (nodeAt id) (Lens.toP Node.countL)) (fun c => c + 1) s
+
+-- ## Secondary indices
+
+/-- An index: a numbered field, non-unique or unique. A string name is parsed once by the
+schema loader and interned; the runtime uses the `U32`. -/
+structure IndexDef where
+  id : U32
+  field : U32
+  unique : Bool
+
+/-- The index key of a node for `d`. -/
+def IndexDef.key (d : IndexDef) (n : Node) : U64 := Node.field n d.field.toNat
+
+/-- `d`'s number as a map key. -/
+def IndexDef.uid (d : IndexDef) : U64 := U64.ofNat d.id.toNat
+
+/-- The bucket map of one index. -/
+def Root.indexOf (r : Root) (ix : U64) : U64Map (List U64) :=
+  U64Map.findD r.index ix U64Map.empty
+
+/-- The node ids in a bucket. -/
+def Root.lookupIndex (r : Root) (ix : U64) (v : U64) : List U64 :=
+  U64Map.findD (Root.indexOf r ix) v []
+
+/-- Whether `id` is already in a bucket list. -/
+def List.hasU64 (id : U64) (ids : List U64) : Bool :=
+  List.any (fun x => UIntN.beq x id) ids
+
+/-- Add `id` to a bucket list (set insertion). -/
+def List.addU64 (ids : List U64) (id : U64) : List U64 :=
+  match List.hasU64 id ids with
+  | .true => ids
+  | .false => List.append ids [id]
+
+/-- Remove `id` from a bucket list. -/
+def List.removeU64 (ids : List U64) (id : U64) : List U64 :=
+  List.filter (fun x => Bool.not (UIntN.beq x id)) ids
+
+/-- Add `id` to key `v`'s bucket. -/
+def Root.addBucket (b : U64Map (List U64)) (v : U64) (id : U64) : U64Map (List U64) :=
+  U64Map.insert b v (List.addU64 (U64Map.findD b v []) id)
+
+/-- Add `id` to `ix`'s bucket `v`. -/
+def Root.addIndex (r : Root) (ix : U64) (v : U64) (id : U64) : Root :=
+  { r with index := U64Map.insert r.index ix (Root.addBucket (Root.indexOf r ix) v id) }
+
+/-- Remove `id` from key `v`'s bucket. -/
+def Root.removeBucket (b : U64Map (List U64)) (v : U64) (id : U64) : U64Map (List U64) :=
+  U64Map.insert b v (List.removeU64 (U64Map.findD b v []) id)
+
+/-- Remove `id` from `ix`'s bucket `v`. -/
+def Root.removeIndex (r : Root) (ix : U64) (v : U64) (id : U64) : Root :=
+  { r with index := U64Map.insert r.index ix (Root.removeBucket (Root.indexOf r ix) v id) }
+
+/-- Build one index's bucket map from a primary map (the repair/computation path). -/
+def Root.buildBuckets (d : IndexDef) (pages : U64Map Node) : U64Map (List U64) :=
+  U64Map.foldl (fun b id n => Root.addBucket b (IndexDef.key d n) id) U64Map.empty pages
+
+/-- Recompute the given indices from the primary map: the repair path, and how a new
+index is built (in production this runs at open after a crash, when an index is added,
+and in compaction, not on every commit). -/
+def Root.rebuildIndex (r : Root) (defs : List IndexDef) : Root :=
+  List.foldl (fun r d =>
+    { r with index := U64Map.insert r.index (IndexDef.uid d) (Root.buildBuckets d r.pages) })
+    r defs
+
+/-- The first unique bucket holding more than one node, if any. Run on the *resulting*
+primary map, so two nodes moving to one unique key in the same transaction are caught
+(and a node moving away frees its old key for the same transaction). -/
+def Root.uniqueViolation (d : IndexDef) (pages : U64Map Node) : Option (U32 × U64) :=
+  U64Map.foldl (fun acc v ids =>
+    match acc with
+    | .some e => .some e
+    | .none => match ids with
+      | .cons _ (.cons _ _) => .some (d.id, v)
+      | _ => .none) .none (Root.buildBuckets d pages)
+
+-- ## Index deltas: facts, tombstones, and their fold
+
+/-- One index fact: index `index`, key `key`, node `node`. An entry is an `add` fact; a
+delete is a `remove` fact (the tombstone). -/
+structure IndexFact where
+  index : U64
+  key : U64
+  node : U64
+
+/-- Fact equality (all three components). -/
+def IndexFact.beq (a b : IndexFact) : Bool :=
+  Bool.and (UIntN.beq a.index b.index)
+    (Bool.and (UIntN.beq a.key b.key) (UIntN.beq a.node b.node))
+
+/-- Whether the fact is in the list (set membership). -/
+def IndexFact.mem (f : IndexFact) (fs : List IndexFact) : Bool :=
+  List.any (fun g => IndexFact.beq f g) fs
+
+/-- Set union of fact lists (commutative, associative, idempotent). -/
+def IndexFact.union (xs ys : List IndexFact) : List IndexFact :=
+  List.foldl (fun acc f =>
+    match IndexFact.mem f acc with
+    | .true => acc
+    | .false => List.append acc [f]) xs ys
+
+/-- Whether two fact lists are the same set. -/
+def IndexFact.sameSet (xs ys : List IndexFact) : Bool :=
+  Bool.and (List.all (fun f => IndexFact.mem f ys) xs)
+    (List.all (fun f => IndexFact.mem f xs) ys)
+
+/-- The index delta of one transaction: the facts added and the facts removed. As a set
+of facts this is a join-semilattice: `combine` is commutative, associative and
+idempotent, so a transaction's index delta does not depend on the order the write-set is
+visited in. A *sequence* of commits is applied in generation order (`Root.applyDeltas`):
+a later commit can remove a fact an earlier one added, which a single union cannot
+express. -/
+structure IndexDelta where
+  added : List IndexFact
+  removed : List IndexFact
+
+/-- The identity delta. -/
+def IndexDelta.empty : IndexDelta := IndexDelta.mk [] []
+
+/-- The sum of two deltas: set union of added and of removed facts. -/
+def IndexDelta.combine (a b : IndexDelta) : IndexDelta :=
+  IndexDelta.mk (IndexFact.union a.added b.added) (IndexFact.union a.removed b.removed)
+
+/-- The monoid sum of a list of deltas (the order is not observable: facts are a set). -/
+def IndexDelta.fold (ds : List IndexDelta) : IndexDelta :=
+  List.foldl (fun acc d => IndexDelta.combine acc d) IndexDelta.empty ds
+
+/-- Whether two deltas are the same fact sets. -/
+def IndexDelta.beq (a b : IndexDelta) : Bool :=
+  Bool.and (IndexFact.sameSet a.added b.added) (IndexFact.sameSet a.removed b.removed)
+
+/-- The number of facts in a delta. -/
+def IndexDelta.size (d : IndexDelta) : Nat :=
+  Nat.add (List.length d.added) (List.length d.removed)
+
+/-- The facts one changed record contributes to index `d`. A movement (old key ≠ new
+key) is a remove plus an add; an in-place change is nothing. -/
+def IndexDelta.ofChange (d : IndexDef) (id : U64) (old new : Option Node) : IndexDelta :=
+  match old, new with
+  | .none, .none => IndexDelta.empty
+  | .some a, .none => IndexDelta.mk [] [IndexFact.mk (IndexDef.uid d) (IndexDef.key d a) id]
+  | .none, .some b => IndexDelta.mk [IndexFact.mk (IndexDef.uid d) (IndexDef.key d b) id] []
+  | .some a, .some b =>
+    match UIntN.beq (IndexDef.key d a) (IndexDef.key d b) with
+    | .true => IndexDelta.empty
+    | .false => IndexDelta.mk
+      [IndexFact.mk (IndexDef.uid d) (IndexDef.key d b) id]
+      [IndexFact.mk (IndexDef.uid d) (IndexDef.key d a) id]
+
+/-- Every index's delta for a transaction: the monoid fold of the changed records'
+facts. `base` is the *current* primary map (the commit rebases deltas onto it), not the
+transaction's base root. -/
+def IndexDelta.ofEntries (defs : List IndexDef) (base : U64Map Node)
+    (entries : List (U64 × Patch)) : IndexDelta :=
+  IndexDelta.fold (List.flatMap entries (fun e =>
+    let old := U64Map.find base e.1;
+    let new := Patch.apply e.2 old;
+    List.map (fun d => IndexDelta.ofChange d e.1 old new) defs))
+
+/-- Apply one fact to the root's index registry. -/
+def Root.addFact (r : Root) (f : IndexFact) : Root :=
+  Root.addIndex r f.index f.key f.node
+
+/-- Remove one fact from the root's index registry. -/
+def Root.removeFact (r : Root) (f : IndexFact) : Root :=
+  Root.removeIndex r f.index f.key f.node
+
+/-- The index after one delta: remove the tombstoned facts, then add the new facts. -/
+def Root.applyDelta (r : Root) (d : IndexDelta) : Root :=
+  let r1 := List.foldl (fun r f => Root.removeFact r f) r d.removed;
+  List.foldl (fun r f => Root.addFact r f) r1 d.added
+
+/-- The index after a log of deltas, in generation order. -/
+def Root.applyDeltas (r : Root) (ds : List IndexDelta) : Root :=
+  List.foldl (fun r d => Root.applyDelta r d) r ds
+
+-- ## A traversal over an index bucket
+--
+-- The traversal is written once, as a profunctor traversal (`TraversalP`) over
+-- `(key, node)`. The key must be in the focus: `overAll`/`Writer Δ` see only the focus,
+-- while the store encoding's backward function can close over the key. The store
+-- `Traversal` below is the shim the engine keeps for `view`/`overAll`; `bumpOfKind` uses
+-- the profunctor form directly.
+
+/-- Walk the bucket's keys, running `f` on each `(key, node)` and putting the result
+back through the snapshot's recording store. The applicative sequences the deltas (at
+`Writer`) or the reads (at `ForgetList`). -/
+def indexWanderGo (d : IndexDef) (v : U64) {F : Type → Type} [i : Applicative F]
+    (f : U64 × Node → F (U64 × Node)) : List U64 → Snapshot → F Snapshot
+  | .nil, s => @Applicative.pure F i Snapshot s
+  | .cons id ids, s =>
+    match Snapshot.getNode s id with
+    | .none => indexWanderGo d v f ids s
+    | .some n =>
+      @Applicative.seq F i Snapshot Snapshot
+        (@Applicative.seq F i (U64 × Node) (Snapshot → Snapshot)
+          (@Applicative.pure F i (U64 × Node → Snapshot → Snapshot)
+            (fun p => fun s' => Snapshot.record s' id (Patch.ofChange n p.2)))
+          (f (id, n)))
+        (indexWanderGo d v f ids s)
+
+/-- The bucket's traversal function, named so it can be passed to `traversalOf`. -/
+def indexTrav (d : IndexDef) (v : U64) :
+    {F : Type → Type} → [i : Applicative F] →
+      (U64 × Node → F (U64 × Node)) → Snapshot → F Snapshot :=
+  fun {F : Type → Type} [i : Applicative F] f s =>
+    indexWanderGo d v f (Root.lookupIndex s.root (IndexDef.uid d) v) s
+
+/-- Every node in the bucket of index `d` at key `v`, as a profunctor traversal. The
+focus is `(key, node)` so an update can name the patch it records. -/
+def indexTraversalP (d : IndexDef) (v : U64) :
+    TraversalP Snapshot Snapshot (U64 × Node) (U64 × Node) :=
+  traversalOf (indexTrav d v)
+
+/-- The bucket's nodes, as the store-encoding `Traversal` (the `view`/`overAll` shim over
+`indexTraversalP`; `overAll` updates the node and keeps the key). -/
+def indexTraversal (d : IndexDef) (v : U64) : Traversal Snapshot Node :=
+  Traversal.mk
+    (fun s => List.map (fun p => p.2) (toListOf (indexTraversalP d v) s))
+    (fun f s => overT (indexTraversalP d v) (fun p => (p.1, f p.2)) s)
+
+/-- The demo indices the tests build a store with: kind (field 0) and a unique label. -/
+def kindIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def uniqueLabel : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .true
+
+/-- Bump every node whose indexed field is `v` (the profunctor traversal at `Hom`). -/
+def bumpOfKind (v : U64) (s : Snapshot) : Snapshot :=
+  overT (indexTraversalP kindIndex v)
+    (fun (p : U64 × Node) => let n : Node := p.2; (p.1, { n with count := n.count + 1 })) s
+
+/-- Delete a node (a tombstone in the write-set; the commit bumps the delete epoch). -/
+def delNode (id : U64) (s : Snapshot) : Snapshot :=
+  { s with ws := WriteSet.combine s.ws id .del }
+
+/-- Set a node's label through the lens (the update records a `set` patch). -/
+def setLabel (id : U64) (v : U32) (s : Snapshot) : Snapshot :=
+  Lens.over (Lens.comp (nodeOr id (Node.mk 0 0 0)) Node.labelL) (fun _ => v) s
+
+-- ## Commit and validation
+
+/-- Why a commit was rejected. -/
+inductive CommitError where
+  | stale (base : U64) (current : U64)
+  | conflict (id : U64) (expected : U64) (actual : U64)
+  | missing (id : U64)
+  | duplicate (ix : U32) (value : U64)
+  /-- The retention policy no longer keeps the transaction's base generation
+  (its root's pages may since have been compacted away). -/
+  | expired (base : U64) (floor : U64)
+
+/-- A commit's outcome. -/
+inductive Outcome where
+  | committed (gen : U64)
+  | rejected (e : CommitError)
+
+/-- The committed database (the in-memory stand-in for the handle's root). -/
+structure Db where
+  gen : U64
+  root : Root
+  indices : List IndexDef
+
+/-- A snapshot of a committed database, with no pending writes. -/
+def Db.snapshot (db : Db) : Snapshot := Snapshot.mk db.gen db.root U64Map.empty
+
+/-- The version a root records for a key (0: never written). -/
+def Root.versionOf (r : Root) (id : U64) : U64 := U64Map.findD r.versions id (U64.ofNat 0)
+
+/-- The delete barrier: a transaction that began before a delete is stale, whatever
+keys it touches (the conservative global rule; the note refines it per key). -/
+def Db.checkStale (db : Db) (tx : Snapshot) : Option CommitError :=
+  match UIntN.lt tx.gen db.root.delEpoch with
+  | .true => .some (.stale tx.gen db.gen)
+  | .false => .none
+
+/-- The per-key rule: `addCount` rebases; `set`/`del` need the version the tx read. -/
+def Db.checkOp (db : Db) (tx : Snapshot) (id : U64) (p : Patch) : Option CommitError :=
+  let seen := Root.versionOf tx.root id;
+  let now := Root.versionOf db.root id;
+  match p with
+  | .addCount _ => match U64Map.find db.root.pages id with
+    | .none => .some (.missing id)
+    | .some _ => .none
+  | .set _ => match UIntN.beq seen now with
+    | .true => .none
+    | .false => .some (.conflict id seen now)
+  | .del => match UIntN.beq seen now with
+    | .true => .none
+    | .false => .some (.conflict id seen now)
+
+/-- A unique index may not hold two nodes under one key. The check runs on the primary
+map the commit would produce, so a collision between the transaction's own writes is
+caught (not just a collision with the current root). -/
+def Db.checkUnique (db : Db) (pages : U64Map Node) : Option CommitError :=
+  List.foldl (fun acc d =>
+    match acc with
+    | .some e => .some e
+    | .none => match d.unique with
+      | .false => .none
+      | .true => match Root.uniqueViolation d pages with
+        | .some e => .some (.duplicate e.1 e.2)
+        | .none => .none) .none db.indices
+
+/-- The first failing op of a write-set, if any (the version checks; uniqueness is a
+whole-result check, `Db.checkUnique`). -/
+def Db.firstError (db : Db) (tx : Snapshot) : List (U64 × Patch) → Option CommitError
+  | .nil => .none
+  | .cons e es =>
+    match Db.checkOp db tx e.1 e.2 with
+    | .some c => .some c
+    | .none => Db.firstError db tx es
+
+/-- The new primary map: apply every patch in the write-set. -/
+def Db.applyPages (db : Db) (entries : List (U64 × Patch)) : U64Map Node :=
+  List.foldl (fun m e => match Patch.apply e.2 (U64Map.find m e.1) with
+    | .none => U64Map.erase m e.1
+    | .some n => U64Map.insert m e.1 n) db.root.pages entries
+
+/-- The index delta the commit will apply (derived from the current primary map). -/
+def Db.indexDeltaOf (db : Db) (entries : List (U64 × Patch)) : IndexDelta :=
+  IndexDelta.ofEntries db.indices db.root.pages entries
+
+/-- The new index roots, derived incrementally from the primary change. -/
+def Db.applyIndex (db : Db) (entries : List (U64 × Patch)) : Root :=
+  Root.applyDelta db.root (Db.indexDeltaOf db entries)
+
+/-- The new version table: every touched key gets the new generation. -/
+def Db.applyVersions (db : Db) (entries : List (U64 × Patch)) (g : U64) : U64Map U64 :=
+  List.foldl (fun m e => U64Map.insert m e.1 g) db.root.versions entries
+
+/-- Whether the write-set contains a delete. -/
+def Db.hasDelete (entries : List (U64 × Patch)) : Bool :=
+  List.any (fun e => match e.2 with | .del => .true | _ => .false) entries
+
+/-- The pure commit: validate, then materialise. The single-writer critical section of
+the real `putDb` is exactly this function plus the log append and `fsync`. -/
+def Db.commit (db : Db) (tx : Snapshot) : Db × Outcome :=
+  match Db.checkStale db tx with
+  | .some e => (db, .rejected e)
+  | .none =>
+    let entries := U64Map.toList tx.ws;
+    let pages' := Db.applyPages db entries;
+    match Db.firstError db tx entries with
+    | .some e => (db, .rejected e)
+    | .none => match Db.checkUnique db pages' with
+      | .some e => (db, .rejected e)
+      | .none =>
+        let g := db.gen + 1;
+        let delta := Db.indexDeltaOf db entries;
+        let root' := Root.mk pages' (Db.applyVersions db entries g)
+          (Root.applyDelta db.root delta).index
+          (match Db.hasDelete entries with
+            | .true => g
+            | .false => db.root.delEpoch);
+        (Db.mk g root' db.indices, .committed g)
+
+/-- Recompute every index from the primary map (repair). A committed database's index
+must equal this; the tests check it after each commit. -/
+def Db.rebuildIndices (db : Db) : Db :=
+  { db with root := Root.rebuildIndex db.root db.indices }

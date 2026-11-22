@@ -2,6 +2,7 @@ import Lean.CompactedRegion
 import Std.Time.DateTime.Timestamp
 import Wiz.Query
 import Wiz.Module
+import Wiz.LegacyNames
 import Wiz.Smt.Sha256
 
 /-!
@@ -48,6 +49,13 @@ partial def Sx.parse (s : String) : Option Sx :=
   | some (x, rest) => if rest.all (·.isWhitespace) then some x else none
   | none => none
 where
+  /-- A hexadecimal digit's value, or none. (F27) A malformed escape rejects the
+  entry: the value used to be computed with `toNat - 87` for any character, so a
+  corrupt cache file could yield an arbitrary character rather than a miss. -/
+  hexDigit (c : Char) : Option Nat :=
+    if !c.isHexDigit then none
+    else if c.isDigit then some (c.toNat - 48)
+    else some (c.toLower.toNat - 87)
   go (cs : List Char) : Option (Sx × List Char) := do
     let cs := cs.dropWhile (·.isWhitespace)
     match cs with
@@ -64,13 +72,19 @@ where
         match cs with
         | '\\' :: 'n' :: cs => str cs ('\n' :: acc)
         | '\\' :: 't' :: cs => str cs ('\t' :: acc)
-        | '\\' :: 'x' :: h₁ :: h₂ :: cs =>
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str cs (Char.ofNat (16 * hex h₁ + hex h₂) :: acc)
+        | '\\' :: 'x' :: h₁ :: h₂ :: cs => do
+          let a ← hexDigit h₁
+          let b ← hexDigit h₂
+          str cs (Char.ofNat (16 * a + b) :: acc)
         | '\\' :: 'u' :: '{' :: cs =>
           let ds := cs.takeWhile (· != '}')
-          let hex (c : Char) : Nat := if c.isDigit then c.toNat - 48 else c.toLower.toNat - 87
-          str (cs.drop (ds.length + 1)) (Char.ofNat (ds.foldl (fun n c => 16 * n + hex c) 0) :: acc)
+          match ds.mapM hexDigit with
+          | none => none
+          | some [] => none
+          | some vals =>
+            let code := vals.foldl (fun n d => 16 * n + d) 0
+            if code > 0x10FFFF then none
+            else str (cs.drop (ds.length + 1)) (Char.ofNat code :: acc)
         | '\\' :: c :: cs => str cs (c :: acc)
         | '"' :: cs => some (String.ofList acc.reverse, cs)
         | c :: cs => str cs (c :: acc)
@@ -323,9 +337,9 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   -- module that was elaborated on its own) must not get around that. (Other keys,
   -- `extern:…`, `repr:…`, `inline`, are per constant.)
   let once (k : Name) : Bool := k == "nat" || k.startsWith "nat." || k == "string" || k == "memo"
-  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtins.lookup k).any (· != n)
+  let clash := e.builtins.filter fun (k, n) => once k && (s.globals.builtinOf? k).any (· != n)
   if let (k, n) :: _ := clash then
-    let was := (s.globals.builtins.lookup k).getD "?"
+    let was := (s.globals.builtinOf? k).getD "?"
     let text := s!"builtin {k} := {n}: {k} is already registered (as {was}); a builtin can be registered only once"
     { s with messages := s.messages.push { info := {}, severity := .error, text }, pristine := false } else
   -- An effect's declarations were new where it was recorded (a module elaborated on its
@@ -345,10 +359,10 @@ def Effect.apply (e : Effect R) (s : CommandState R) : CommandState R :=
   | none =>
   -- (the declarations belong to the module being replayed: `Globals.declModule`)
   let globals := e.decls.foldl (·.insert ·) { s.globals with module := s.module }
-  let globals := { globals with builtins := e.builtins ++ globals.builtins,
-                                assumed := e.assumed ++ globals.assumed,
+  let globals := { globals with assumed := e.assumed ++ globals.assumed,
                                 privates := e.privates.foldl (fun m (n, md) => m.insert n md) globals.privates,
-                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }
+                                opaques := e.opaques.foldl (fun m (n, md) => m.insert n md) globals.opaques }.setBuiltins
+                                (e.builtins ++ globals.builtins)
   { s with globals, messages := s.messages ++ e.messages, builtins := e.builtins ++ s.builtins,
            classes := e.classes ++ s.classes, instances := s.instances ++ e.instances,
            coinductives := s.coinductives ++ e.coinductives, foreignTypes := e.foreignTypes ++ s.foreignTypes,
@@ -665,6 +679,9 @@ where
         let k₀ := (Module.headersOf src).foldl (fun k h => mixHash k (hash ((headers h).getD ""))) k₀
         -- (include-str) the contents of the files it includes (fast half unchanged)
         let k₀ := mixHash k₀ (Module.includesKey includes m src)
+        -- (the namespace allowlist decides a declaration's absolute name, so it
+        -- is an input of what the module elaborates to; both halves mix its digest)
+        let k₀ := mixHash k₀ Wiz.LegacyNames.digestFast
         -- (the strong half hashes the exact fields, each length-framed: not the 64-bit
         -- hashes above, and not a concatenation that can be ambiguous)
         let headerFields := (Module.headersOf src).flatMap fun h => [s!"header:{h}", (headers h).getD ""]
@@ -673,7 +690,8 @@ where
             strong := Smt.Sha256.hexFramed "wiz-cache/module-v1"
               ([s!"salt:{salt}", s!"toolchain:{toolchain}", s!"toolchain-tag:{strongToolchain}",
                 s!"target-tag:{targetTag}", s!"module:{m}", s!"trusted:{trusted m}", "source", src,
-                s!"includes:{includesKeyStrong includes m src}"] ++ headerFields)
+                s!"includes:{includesKeyStrong includes m src}",
+                s!"legacy-names:{Wiz.LegacyNames.digest}"] ++ headerFields)
             toolchain := strongToolchain, target := targetTag }
         let (k, memo) := (Module.importsOf src).foldl (fun (k, memo) n =>
           let (kn, memo) := go (m :: stack) n memo
@@ -2213,7 +2231,7 @@ partial def elaborateWith (store : Store R) (input : String) (init : CommandStat
     | some _ => pure (some { module := init.module, effects := ← IO.mkRef #[], keys := ← IO.mkRef #[],
                              rerun := ← IO.mkRef #[], region := false, entries := ← IO.mkRef #[] })
     | none => pure none
-  let result ← go keys init [] input init chainKey .write manifestKey none rootSink
+  let result ← go keys init [] input { init with headerDone := false } chainKey .write manifestKey none rootSink
   match store.manifests with
   | some ms =>
     if !rootPath.isEmpty then
@@ -2259,7 +2277,7 @@ where
                        rerun := ← IO.mkRef #[], region := store.region.isSome,
                        entries := ← IO.mkRef #[] })
         else pure none
-      let (_, h) ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
+      let (_, h) ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write k none sink
       store.markSeen k m
       pure (some h)
     -- (the isolated run above wrote the artifact if it was missing or unusable)
@@ -2271,7 +2289,7 @@ where
       | none => pure 0
     -- (the command loop still runs: imports, keys and duplicate checks are unchanged; the
     -- effects come from the region when it has them)
-    let (s', h) ← go keys base (m :: stack) src { s with imported := m :: s.imported, messages := #[], module := m } k .replay k region
+    let (s', h) ← go keys base (m :: stack) src ({ s with imported := m :: s.imported, messages := #[], module := m }).atModuleStart k .replay k region
     let brokenAfter ← match store.manifests with
       | some ms => ms.broken.get
       | none => pure brokenBefore
@@ -2285,7 +2303,7 @@ where
                            rerun := ← IO.mkRef #[], region := true,
                            entries := ← IO.mkRef #[] })
             else pure none
-          let _ ← go keys base (m :: stack) src { base with imported := [m], messages := #[], module := m } k .write k none sink
+          let _ ← go keys base (m :: stack) src ({ base with imported := [m], messages := #[], module := m }).atModuleStart k .write k none sink
           pure ()
       | none => pure ()
     -- after a fresh isolated run, the hits are that run's (the replay reads what it wrote)
@@ -2318,10 +2336,16 @@ where
       | .ok (cmd, stop) =>
         let text := String.ofList (chars.extract pos stop).toList
         key := key.mixText text
-        if cmd.isOfKind "command.import" then
+        if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
+          if s.headerDone then
+            -- (import header) an import after a declaration: not brought in, one error
+            s := { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.importOrder, text := "imports must precede declarations: an `import` may appear only at the top of the file, before every other command (comments are not commands)" } }
+            pos := stop
+            continue
           allCacheable := false
           if let some sink := sink then sink.rerun.modify (·.push (pos, stop))
-          let m := ((cmd.getArg 1).getId?).getD "_"
+          let openImport := cmd.isOfKind "command.openImport"
+          let m := ((cmd.getArg (if openImport then 2 else 1)).getId?).getD "_"
           -- what the rest of the file sees depends on the module's text, through its key
           key := key.mixKey (← keyOf keys m)
           if stack.contains m then
@@ -2359,6 +2383,10 @@ where
               else
               s := { inner with messages := (if errs.isEmpty then s.messages else s.messages.push msg) ++ warns,
                                 module := s.module, infos := s.infos }
+          -- (13u) `open import M` is `import M` plus a file-scope `open M`, whether
+          -- M was just loaded or was already imported by this file
+          if openImport && !stack.contains m then
+            s := { s with globals := { s.globals with opens := s.globals.opens ++ [m] } }
           pos := stop
           continue
         let cacheable? := cacheable.contains cmd.kind
@@ -2408,7 +2436,11 @@ where
               if store.manifests.isSome then
                 sink.entries.modify (·.push (ManifestEntry.ofEffect store.binary key e))
           s := s'
+        -- (import header) a command that is not an import closes the header
+        s := { s with headerDone := true }
         pos := stop
+    -- (13t) a namespace the module left open is an error in it
+    s := s.checkUnclosedNamespaces
     -- (write the module's region after a complete isolated run; a manifest is written even
     -- for an aborted run: the entries before a parse error were elaborated and their bytes
     -- are valid, and without a manifest every run re-elaborated the file's whole prefix)

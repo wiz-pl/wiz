@@ -1,6 +1,6 @@
 import Word
 import Text
-import Storage
+import Scry.QuireStorage
 import StorageCursor
 import Cursor
 /-!

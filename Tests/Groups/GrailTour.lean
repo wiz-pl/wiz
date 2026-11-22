@@ -18,7 +18,12 @@ def tourCase (f : String) : Case :=
         (p ++ ".wiz", ← IO.FS.readFile (p ++ ".wiz")),
         (p ++ ".expected", ← IO.FS.readFile (p ++ ".expected"))]
       let tc ← toolchain
-      let tc : Toolchain := { tc with cacheDir := some (← tc.cacheDir.getDM IO.FS.createTempDir) }
+      -- The tour's later sections import the packages that moved out of lib/:
+      -- `10-hdl` needs `Hdl`, `12-scry` needs `Scry`. A package gets those roots
+      -- from its dependencies; this throwaway package has none, so name them here.
+      let tc : Toolchain := { tc with
+        cacheDir := some (← tc.cacheDir.getDM IO.FS.createTempDir)
+        searchPath := tc.searchPath ++ [System.FilePath.mk "hdl/src", System.FilePath.mk "scry/src"] }
       let (res, _) ← runTests dir tc
       checkEq 1 res.size
       for t in res do

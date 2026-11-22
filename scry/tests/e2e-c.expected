@@ -1,0 +1,33 @@
+clean: exit 0: ok
+clean: schema scry-project-report/1: ok
+clean: kind project: ok
+clean: one unit: ok
+clean: two functions: ok
+clean: no findings: ok
+clean: no boundary warnings: ok
+clean: no skipped TU: ok
+taint: exit 0 without --fail-on-finding: ok
+taint: three translation units: ok
+taint: seven functions: ok
+taint: two findings: ok
+taint: both checked: ok
+taint: five lowering-boundary warnings: ok
+taint: one memory warning: ok
+taint: no duplicate symbols: ok
+taint: the unresolved callee is recorded: ok
+taint: both findings are command-injection: ok
+coverage: io.c has one finding: ok
+coverage: util.c has one finding: ok
+coverage: app.c has no finding: ok
+gate: --fail-on-finding exits 1: ok
+sarif: version 2.1.0: ok
+sarif: driver scry: ok
+sarif: eight results: ok
+sarif: two finding results: ok
+sarif: six coverage results: ok
+sarif: every result has a non-empty ruleId: ok
+sarif: every result has a physical location: ok
+usage: no directory exits 2: ok
+usage: the error names the usage: ok
+IO: a missing directory exits 2: ok
+nothing: an empty tree exits 3: ok

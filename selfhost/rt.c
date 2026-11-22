@@ -116,6 +116,13 @@ _Static_assert(sizeof(Map) == 48 && offsetof(Map, count) == 16 && offsetof(Map, 
 
 static V unreach(void) { fprintf(stderr, "wiz: unreachable\n"); exit(3); }
 static void die(const char *m) { fprintf(stderr, "wiz: %s\n", m); exit(3); }
+/* A failed `IO` file operation: the message the host runtime prints
+   (runtime/rt_data.inc, `wiz_io_fail`), and exit 1. An `IO` call has no error
+   channel, so a failure must not look like success. */
+__attribute__((noreturn)) static void io_fail(const char *path, int e) {
+  fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
+  exit(1);
+}
 
 /* ---- the locking the runtime needs between threads (25a) ----
    The natives and the shared-thunk lock (below) use these; a `WIZ_NO_THREADS` build
@@ -537,12 +544,20 @@ static V lazyHyp(V nat, V D, V m, V j, V y, V rest) {
   V fs[3] = {mkclo(recFn, 5, env), rest, BOX(0)};
   return mkobj(T_HYP, 3, fs);
 }
+/* (`--unbox-structs`, 22i) The last field of a structure is not in a pair: the backend
+   erases its description as `arg`/`rec`/`hrec` with tags 5/6/7 instead of 1/2/3, so the
+   payload itself is the field and there is no rest payload (and no hypothesis after it
+   for an `arg`). */
 static V hyps(V nat, V D, V m, V d, V pl) {
   switch (tagof(d)) {
   case 1: return hyps(nat, D, m, ap(fld(d, 1), fld(pl, 0)), fld(pl, 1));
   case 2: return lazyHyp(nat, D, m, fld(d, 0), fld(pl, 0), hyps(nat, D, m, fld(d, 1), fld(pl, 1)));
   case 3: { V env[5] = {nat, D, m, fld(d, 1), fld(pl, 0)};
     return pair(mkclo(hrecFn, 5, env), hyps(nat, D, m, fld(d, 2), fld(pl, 1))); }
+  case 5: return BOX(0);
+  case 6: return lazyHyp(nat, D, m, fld(d, 0), pl, BOX(0));
+  case 7: { V env[5] = {nat, D, m, fld(d, 1), pl};
+    return pair(mkclo(hrecFn, 5, env), BOX(0)); }
   default: return BOX(0);
   }
 }
@@ -582,6 +597,8 @@ static V lazyHyp(V nat, V D, V m, V j, V y, V rest) {
   return mkobj(T_HYP, 3, fs);
 }
 /* (`D`, `m`, `d`, `pl` borrowed) */
+/* (`--unbox-structs`, 22i) the last field of a structure is the payload, not
+   `fld(pl, 0)`, and there is no rest payload; its description is tag 5/6/7. */
 static V hyps(V nat, V D, V m, V d, V pl) {
   switch (tagof(d)) {
   case 1: {
@@ -597,6 +614,11 @@ static V hyps(V nat, V D, V m, V d, V pl) {
     inc(D); inc(m); inc(env[3]); inc(env[4]);
     V c = mkclo(hrecFn, 5, env);
     return pair(c, hyps(nat, D, m, fld(d, 2), fld(pl, 1))); }
+  case 5: return BOX(0);
+  case 6: return lazyHyp(nat, D, m, fld(d, 0), pl, BOX(0));
+  case 7: { V env[5] = {nat, D, m, fld(d, 1), pl};
+    inc(D); inc(m); inc(env[3]); inc(env[4]);
+    return pair(mkclo(hrecFn, 5, env), BOX(0)); }
   default: return BOX(0);
   }
 }
@@ -648,6 +670,29 @@ static V p_hypAt(V vw, V jj) {
       }
       k--; d = fld(d, 1); p = fld(p, 1);
       continue;
+    /* (`--unbox-structs`, 22i) the last field of a structure: the payload is the
+       field, and nothing follows it */
+    case 5:
+      r = unreach();
+      goto done;
+    case 6:
+      if (k == 0) {
+        V j = fld(d, 0), y = p;
+        inc(D); inc(m); inc(j); inc(y);
+        r = p_indv(nat, D, m, j, y);
+        goto done;
+      }
+      r = unreach();
+      goto done;
+    case 7:
+      if (k == 0) {
+        V env[5] = {nat, D, m, fld(d, 1), p};
+        inc(D); inc(m); inc(env[3]); inc(env[4]);
+        r = mkclo(hrecFnV, 5, env);
+        goto done;
+      }
+      r = unreach();
+      goto done;
     case 3:
       if (k == 0) {
         V env[5] = {nat, D, m, fld(d, 1), fld(p, 0)};
@@ -792,14 +837,24 @@ NATIVE(IO_46_println, 2, puts(cstr(a[0])); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_print, 2, fputs(cstr(a[0]), stdout); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_ePrintln, 2, fflush(stdout); fprintf(stderr, "%s\n", cstr(a[0])); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_readFile, 2,
-  FILE *f = fopen(cstr(a[0]), "rb");
-  if (!f) return prodv(wstr("", 0), a[1]);
+  char *p = cstr(a[0]);
+  FILE *f = fopen(p, "rb");
+  int e = f ? 0 : errno;
+  if (!f) {
+    /* a path that does not exist is empty text (`IO.readFile` is how the library
+       asks "is there a file here?"); any other failure is reported and stops, as in
+       the host runtime */
+    if (e == ENOENT) return prodv(wstr("", 0), a[1]);
+    io_fail(p, e);
+  }
   size_t cap = 4096, len = 0; char *buf = (char *)GC_MALLOC_ATOMIC(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
     if (len == cap) { char *nb = (char *)GC_MALLOC_ATOMIC(cap * 2); memcpy(nb, buf, len); buf = nb; cap *= 2; }
   }
+  if (ferror(f)) e = errno ? errno : EIO; /* a read error is not the end of the file */
   fclose(f);
+  if (e) io_fail(p, e);
   return prodv(wstr(buf, len), a[1]);)
 #else
 NATIVE(IO_46_println, 2, char *s = cstr(a[0]); dec(a[0]); puts(s); free(s); return prodv(BOX(0), a[1]);)
@@ -808,16 +863,21 @@ NATIVE(IO_46_ePrintln, 2, char *s = cstr(a[0]); dec(a[0]); fflush(stdout); fprin
 NATIVE(IO_46_readFile, 2,
   char *p = cstr(a[0]); dec(a[0]);
   FILE *f = fopen(p, "rb");
-  free(p);
-  if (!f) return prodv(wstr("", 0), a[1]);
+  int e = f ? 0 : errno;
+  if (!f) {
+    if (e == ENOENT) { free(p); return prodv(wstr("", 0), a[1]); }
+    io_fail(p, e);
+  }
   size_t cap = 4096, len = 0; char *buf = (char *)malloc(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
     if (len == cap) { buf = (char *)realloc(buf, cap * 2); if (!buf) die("out of memory"); cap *= 2; }
   }
+  if (ferror(f)) e = errno ? errno : EIO;
   fclose(f);
+  if (e) io_fail(p, e);
   V s = wstr(buf, len);
-  free(buf);
+  free(buf); free(p);
   return prodv(s, a[1]);)
 #endif
 
@@ -1795,6 +1855,13 @@ static uint64_t wiz_proof_left = 0;
 static int wiz_proof_start(uint64_t steps) { if (wiz_proof_on) return 0; wiz_proof_on = 1; wiz_proof_left = steps + 1; return 1; }
 static int wiz_proof_tick(uint64_t x) { (void)x; if (!wiz_proof_on) return 1; if (wiz_proof_left <= 1) { wiz_proof_left = 0; return 0; } wiz_proof_left--; return 1; }
 static int wiz_proof_end(uint64_t x) { (void)x; wiz_proof_on = 0; return wiz_proof_left > 0; }
+/* the kernel evaluator's per-command budget (see `kernelSteps` in Frontend.wiz): one
+   tick per structural elimination, a counter of its own (as in runtime/rt_data.inc) */
+static int wiz_kernel_on = 0;
+static uint64_t wiz_kernel_left = 0;
+static int wiz_kernel_start(uint64_t steps) { if (wiz_kernel_on) return 0; wiz_kernel_on = 1; wiz_kernel_left = steps + 1; return 1; }
+static int wiz_kernel_tick(uint64_t x) { (void)x; if (!wiz_kernel_on) return 1; if (wiz_kernel_left <= 1) { wiz_kernel_left = 0; return 0; } wiz_kernel_left--; return 1; }
+static int wiz_kernel_end(uint64_t x) { (void)x; wiz_kernel_on = 0; return wiz_kernel_left > 0; }
 /* (21s) the runtime's set-up, once: by `rt_start`, or by the first exported function a C
    program calls (a library has no `main`) */
 static int rt_ready;

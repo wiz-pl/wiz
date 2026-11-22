@@ -203,6 +203,21 @@ def toolingGroup : Group where
           match (Cache.Sx.parse text).bind (Cache.dterm (R := ZeroOneMany)) with
           | some t => check (t == d.type) s!"{n}: the type changed in the round trip"
           | none => throw (IO.userError s!"{n}: could not read back {text.take 200}") },
+    { name := "the cache's format rejects a malformed escape instead of decoding it (F27)", run := fun _ => do
+        let atom (s : String) : Option String :=
+          match Cache.Sx.parse s with
+          | some (.a v) => some v
+          | _ => none
+        -- valid escapes still decode, in either case
+        checkEq (some "A") (atom "\"\\x41\"")
+        checkEq (some "J") (atom "\"\\x4a\"")
+        checkEq (some "→") (atom "\"\\u{2192}\"")
+        -- quoted atoms round-trip: a space forces quoting, a control character an escape
+        checkEq (some "a b") (atom (Cache.Sx.render (.a "a b")))
+        checkEq (some "a\x01b") (atom (Cache.Sx.render (.a "a\x01b")))
+        -- a malformed escape is a parse failure, not an arbitrary character
+        for bad in ["\"\\xZZ\"", "\"\\x4g\"", "\"\\u{zz}\"", "\"\\u{}\"", "\"\\u{110000}\""] do
+          check (Cache.Sx.parse bad).isNone s!"accepted the malformed escape {bad}" },
     { name := "the language server answers requests", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let srv : LSP.Server := { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude), trusted := ["Prelude"] }
@@ -272,6 +287,51 @@ def toolingGroup : Group where
         check ((err.splitOn "unknown module NoSuchPrelude").length > 1)
           s!"no clear missing-module error:\n{out}\n{err}"
         check ((out.splitOn "1").length == 1) s!"the session ran anyway:\n{out}\n{err}" },
+    { name := "wiz parse --imports lists the header, and parse reports an import after a declaration", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let file := dir / "deps.wiz"
+        IO.FS.writeFile file "-- a comment\nimport Prelude\n/- block -/\nimport Logic\ndef x : Nat := 1\nimport Text\n"
+        -- the dependency fact: header only, one module per line
+        let (code, out, err) := ← runWiz ["parse", "--imports", file.toString]
+        checkEq 0 code
+        checkEq "Prelude\nLogic\n" out
+        checkEq "" err
+        -- `wiz parse` reports the order violation (and still prints the trees)
+        let (code, _, err) := ← runWiz ["parse", file.toString]
+        checkEq 1 code
+        check ((err.splitOn "imports must precede declarations").length > 1) s!"no order error:\n{err}" },
+    { name := "wiz run and REPL :run remove their temporary directories (F11)", run := fun _ => do
+        let tc ← toolchain
+        -- a TMPDIR of our own: every temporary directory a child makes lands there
+        let tmp ← IO.FS.createTempDir
+        let dir ← IO.FS.createTempDir
+        try
+          let file := dir / "prog.wiz"
+          -- the `import_c` header is preprocessed in a temporary directory of its own
+          IO.FS.writeFile file "import Prelude\nimport_c \"stddef.h\"\ndef main : Nat := 40 + 2\n"
+          let env : Array (String × Option String) := #[("TMPDIR", some tmp.toString)]
+          let (code, out, err) := ← runWiz (tc.toFlags ++ ["run", file.toString]) env
+          if code != 0 then
+            if ["gmp", "No such file", "not preprocessed", "cannot find"].any (fun s => ((out ++ err).splitOn s).length > 1) then
+              skip "no toolchain"
+              return
+            throw (IO.userError s!"wiz run failed ({code}):\n{out}\n{err}")
+          check ((out.splitOn "42").length > 1) s!"no result:\n{out}\n{err}"
+          -- a second run must not leave a second directory either
+          let (code, out, err) := ← runWiz (tc.toFlags ++ ["run", file.toString]) env
+          checkEq 0 code
+          check ((out.splitOn "42").length > 1) s!"no result:\n{out}\n{err}"
+          -- `:run` twice in one session (and the session's preprocessed headers)
+          let script := dir / "session.wiz"
+          IO.FS.writeFile script "def main : Nat := 40 + 2\n:run main\n:run main\n"
+          let (code, out, err) := ← runWiz (tc.toFlags ++ ["repl", "--script", script.toString]) env
+          checkEq 0 code
+          check ((out.splitOn "42").length > 2) s!"the session's :run printed nothing:\n{out}\n{err}"
+          let left := (← tmp.readDir).map (·.fileName)
+          check left.isEmpty s!"temporary directories were left behind: {left.toList}"
+        finally
+          IO.FS.removeDirAll tmp
+          IO.FS.removeDirAll dir },
     { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath
         let (code, out, err) := ← runWiz ["test-driver", "--driver", self.toString, "--list"] #[]

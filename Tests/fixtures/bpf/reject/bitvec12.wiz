@@ -1,0 +1,10 @@
+-- [UNRUN] P0 reject fixture. The restriction pass (elaborated types -> STm) is not
+-- wired; when it is, `wiz build --target bpf` must produce bitvec12.expected.
+import Bpf
+
+bpf_program bad (section := "xdp", type := .xdp, license := "GPL")
+    : XdpContext -> BpfM XdpAction
+  | ctx => do1
+    let x : BitVec 12 := 0xabc
+    let _ := UIntN.land (UIntN.resize 12 32 x) (UIntN.ofNat 32 1)
+    BpfM.pure .pass

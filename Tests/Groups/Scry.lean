@@ -5,9 +5,9 @@ import Tests.Elab
 /-!
 # scry's Datalog engine (S3, deep embedding)
 
-The group `scry-datalog` checks `lib/Scry/Store.wiz`, `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
-checks the S12 e-graph (`lib/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
+The group `scry-datalog` checks `scry/src/Scry/Store.wiz`, `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
+checks the S12 e-graph (`scry/src/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
 The Datalog group's cases are:
 
 * transitive closure and a provenance witness;
@@ -19,8 +19,8 @@ The Datalog group's cases are:
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
 compiled (C and LLVM); the transitive-closure case runs both. The embedding and the
-evaluator are described in the module docs of `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz`.
+evaluator are described in the module docs of `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz`.
 -/
 
 open Wiz
@@ -67,7 +67,7 @@ def strataCase : IO Unit := do
 
 def scryEgraphGroup : Group where
   name := "scry-egraph"
-  exercise := "S12: lib/Scry/Egraph.wiz"
+  exercise := "S12: scry/src/Scry/Egraph.wiz"
   parallel := true
   cases := [
     { name := "congruence: a = b also equates f a = f b and g (f a) = g (f b)", run := fun _ =>
@@ -121,7 +121,7 @@ def scryEgraphGroup : Group where
 
 def scryGroup : Group where
   name := "scry-datalog"
-  exercise := "S3: lib/Scry/Store.wiz, lib/Scry/Datalog.wiz, lib/Scry/Eval.wiz"
+  exercise := "S3: scry/src/Scry/Store.wiz, scry/src/Scry/Datalog.wiz, scry/src/Scry/Eval.wiz"
   parallel := true
   cases := [
     { name := "transitive closure: the delta loop, and a witness for (1, 4) (interp)", run := fun _ =>

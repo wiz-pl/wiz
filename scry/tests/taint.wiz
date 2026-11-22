@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Json
 import Scry.TaintCmd
@@ -427,7 +428,7 @@ def main : IO Unit := EIO.toIO (do
   check "mem-indirect-unknown: an unknown location" (hasLocKind repM10 "unknown");
 
   -- path traversal: opt-in pack, a request buffer reaches open
-  let pathRules := "../lib/Scry/rules/path-traversal.scry";
+  let pathRules := "rules/path-traversal.scry";
   oP1 ← opts ["tests/fixtures/path-unsafe.c", "--rules", pathRules];
   repP1 ← Scry.analyzeFile oP1;
   check "path-unsafe: one path-traversal finding"

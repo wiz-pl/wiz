@@ -52,7 +52,7 @@ cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
   "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$SITE/playground/framework/"
 # The page's two modules and the engine's side-car wasm. There is no static fallback:
 # a missing module publishes a playground that cannot start, so stop here instead.
-for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs; do
+for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs wiz-playground-ui.wasm; do
   if [ ! -f "$WEB/$f" ]; then
     echo "build-site: $WEB/$f is missing: run web/build-playground.sh and web/build-playground-ui.sh $WEB first" >&2
     exit 1

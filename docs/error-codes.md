@@ -9,12 +9,17 @@ table lists exactly those. Messages not listed here have no code yet.
 
 | code | the error | example | quick fixes |
 |---|---|---|---|
+| `root-name` | `__root__` not as the first segment of a name, or a declaration named exactly `__root__` (it is the root escape) | `def A.__root__.x`, `def __root__` | write `__root__.x` for a global, or drop the segment |
 | `unknown-identifier` | a name that is neither a local nor a global in scope | `doubel 2` | did you mean (locals and globals, edit distance ≤ 2); add the missing `import` of a module of the package or the library that declares it |
+| `ambiguous-name` | an unqualified name that two `open`s, or an `open` and a declaration, both provide | `open A` and `open B` with `A.x` and `B.x`, then `x` | qualify it with a namespace |
+| `unclosed-namespace` | a `namespace` with no `end` (the error is at the `namespace`) | `namespace A` … end of file | add `end` |
 | `no-such-field` | the type has no field (or name in its namespace) of that name | `p.cuont`, `{ p with cuont := 1 }` | did you mean (a structure's fields; for a data type `T`, the names `T.f` that `t.f` can mean) |
 | `unknown-constructor` | the type has no constructor of that name | `(.gren : Color)`, `\| .gren => …` | did you mean (the type's constructors) |
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |
 | `import-cycle` | an `import` leads back to the module itself | | |
 | `module-errors` | an imported module has errors (they are listed) | | |
+| `no-such-file` | the file a command names cannot be read | `wiz check no.wiz` | |
+| `import-order` | an `import` after a declaration, or nested in a command: imports are a fixed header | `def x := 1` then `import Prelude`; `mutual import M end` | |
 | `missing-case` | a `match` or equations miss constructors | | add missing cases |
 | `missing-copattern` | a copattern definition misses an observation | | |
 | `missing-field` | an instance misses a field of its class | | |
@@ -44,6 +49,30 @@ table lists exactly those. Messages not listed here have no code yet.
 | `quantity` | a variable used against its quantity (erased, linear) | | |
 | `kernel-rejected` | any other error of the kernel's | | |
 | `parse-error` | the parser's errors | `def := 1` | |
+
+## Lint codes
+
+Lint findings use the same `Msg.code` namespace but a different table: a `W` code is a
+judgement about a program the elaborator **accepted**, never an error code
+(`Wiz/Core/ErrorCode.lean` does not list them). The registry is `Wiz/Lint.lean`
+(`Wiz.Lint.registry`); `wiz lint --json` carries the code, and the language server sends
+it as a diagnostic's `code`. `default` is the rule's severity before repository policy;
+`scope` says whether the rule runs per command or once per module; `suppressible` says
+whether the per-site `-- lint: allow Wxxx (reason)` marker may silence it.
+
+| code | rule | category | default | scope | suppressible | detects |
+|---|---|---|---|---|---|---|
+| `W101` | unused-binding | correctness | warning | declaration | yes | a `pi`/`lam`/`letE` binder with no occurrence in its scope; `_`, `_…`, `x✝` and quantity-0 binders are exempt |
+| `W102` | shadowed-local | correctness | hint | declaration | yes | an inner local binder with the same name as an outer local, where the inner binder is used (never a global) |
+| `W103` | discarded-result | correctness | warning | declaration | yes | `let _ := e` where `e : Result`/`ResultQ`/`Option`; `do e` is `Monad.bind` and is not reported |
+| `W301` | missing-doc | api | warning | declaration | yes | a top-level public `def`/`abbrev`/`structure`/`class`/`inductive`/`coinductive`/`axiom`/`opaque`/`theorem` under a public root with no doc comment |
+| `W302` | unused-import | api | warning | module | yes | a direct import no target declaration uses, and that contributes no instance, syntax, notation, builtin, attribute, export or FFI/link effect |
+
+A rule retired later keeps its row as `default: off` (the code is never reused). Core
+owns `W001`–`W499`; a package lint set owns `W500`–`W999` and registers its rules with
+`lint-set`/`lint` (`docs/lint-abi.md`). The registry refuses a code outside the package
+block, a duplicate in the enabled closure, and a rule whose declared capability the set
+does not declare. Core registers only the five rules above.
 
 One more quick fix is not keyed on a code: an error inside `@f a…` where `f` is given
 as many arguments as it has explicit parameters offers to let the implicit ones be

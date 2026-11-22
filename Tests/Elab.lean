@@ -498,6 +498,39 @@ def linkRun (files : List (String × String)) (expected : String) (llvm : Bool :
   | .ok v => checkEq expected v
   | .error e => failRun e
 
+/-- `elabTree` with extra module roots (a package's `src`/`gen`, e.g. `scry/src`),
+after the toolchain's `lib` root and before the temp directory. This keeps `link_c` and
+`include_str` resolution relative to each module's own file, as `wiz` does. -/
+def elabTreeRoots (roots : List String) (files : List (String × String)) :
+    IO (CommandState ZeroOneMany × String × System.FilePath) := do
+  let dir ← IO.FS.createTempDir
+  for (p, text) in files do
+    let f := dir / p
+    if let some d := f.parent then IO.FS.createDirAll d
+    IO.FS.writeFile f text
+  let src ← IO.FS.readFile (dir / "main.wiz")
+  let mods ← Module.loadClosure ((("lib" :: roots).map System.FilePath.mk) ++ [dir]) src
+  let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
+  let s := runFrontend (R := ZeroOneMany) src
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
+  pure (s, src, dir)
+
+/-- `elabTreeRoots`, then build and run `main` (through C, or LLVM) and compare its
+output. `timeout` is the program's limit (a project run parses and analyses several
+translation units). -/
+def linkRunRoots (roots : List String) (files : List (String × String)) (expected : String)
+    (llvm : Bool := false) (cflags : List String := []) (timeout : Nat := 300) : IO Unit := do
+  let (s, src, dir) ← elabTreeRoots roots files
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm
+      (timeout := some timeout) with
+  | .ok v => checkEq expected v
+  | .error e => failRun e
+
 /-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
 def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
   let (s, src, dir) ← elabTree files
@@ -1112,7 +1145,7 @@ def streamAt (s : MTm) : MTm := nu 0 (unit 0) streamD star s
 def streamTy : MTm := streamAt szInf
 def alt : MTm := coit 0 (unit 0) streamD (lam (enum 2))
   (lams 2 (pair (var 0) (pair (ecase (enum 2) (var 0) [tag 2 1, tag 2 0]) (pair star star)))) star (tag 2 0)
-def zeros : MTm := scofix 0 (unit 0) streamD (lam (unit 0))
+def zeros : MTm := scofix 0 (unit 0) streamD (lams 2 (unit 0))
   (lams 4 (cocon (pair (tag 2 0) (pair (app (app (var 2) (var 1)) (var 0)) (pair star star))))) szInf star star
 def shead (x : MTm) : MTm := fst (out x)
 def stail (x : MTm) : MTm := fst (snd (out x))
@@ -1282,7 +1315,7 @@ def elimRule : List (MTm × Bool) :=
      (ann (lam (scase 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 3 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (sfix 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 4 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (coit 0 (unit 0) streamD (lam (enum 2)) step star (var 0))) (piq q (enum 2) streamTy), ok),
-     (ann (lam (scofix 0 (unit 0) streamD (lam (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
+     (ann (lam (scofix 0 (unit 0) streamD (lams 2 (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
 
 /-- Usage checking at the edges (kernel-lint's findings in Kernel.wiz, whose usage lists
 drop trailing zeros): a variable that is never used has usage 0, which a binder at 1 does
@@ -1369,7 +1402,7 @@ def elimsAt (l : Nat) (I i : MTm) : List MTm :=
    sfix l I uD 1 P (lams 4 (tag 2 0)) szInf i x,
    scase l I uD 1 P (lams 3 (tag 2 0)) szInf i x,
    coit l I sD (lam (unit l)) (lams 2 (pair star (pair star star))) i star,
-   scofix l I sD (lam (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
+   scofix l I sD (lams 2 (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
 
 /-- Audit F3 (fixed): an eliminator checks that its index type is in `Sort (l+1)`, as the
 type formers `μ`/`ν` do. The eliminators check the scrutinee against `μ.{l} I D i` (or
@@ -1879,9 +1912,11 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .error _ => "error"
 
 /-- The modules the self-hosted programs import may be elaborated against: the
-toolchain's `Prelude`, `IO`, `Std` and `Sys` only. `selfhostChecker` and `selfhostCompiler`
-build their programs' loader from this, and so does the `selfhost-host` group's host
-guard (when a source imports anything else, both must reject it). -/
+toolchain's `Prelude`, `IO`, `Std`, `Text` and `Sys` only. `selfhostChecker` and
+`selfhostCompiler` build their programs' loader from this, and so does the
+`selfhost-host` group's host guard (when a source imports anything else, both must
+reject it). `Std` imports `Text` (audit-runtime gave the class family an owner above
+it), so `Text` must be here or every selfhost case fails to build the checker. -/
 def selfhostLoader : IO (Name → Option String) := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
@@ -1889,6 +1924,7 @@ def selfhostLoader : IO (Name → Option String) := do
   -- self-hosted compiler/checker's source closure needs it too.
   let textLib ← IO.FS.readFile "lib/Text.wiz"
   let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
   let sysLib ← IO.FS.readFile "lib/Sys.wiz"
   pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
     else if m == "Text" then some textLib
@@ -2131,8 +2167,9 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/*/*.wiz` (as `D.X`), by module name (see
-`Tests.loadedModules`, which caches the load for the process). -/
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`), `scry/src/Scry/*.wiz` (as `Scry.X`)
+and `hdl/src/Hdl/*.wiz` (as `Hdl.X`), by module name (see `Tests.loadedModules`, which
+caches the load for the process). -/
 def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/

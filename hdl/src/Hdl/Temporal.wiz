@@ -1,0 +1,162 @@
+import Hdl.Core
+import Hdl.Netlist
+import Temporal
+import Trace
+/-!
+# Hdl.Temporal
+
+Temporal logic for circuits (`import Hdl.Temporal`): properties over unbounded time, in
+the style of LTL, SVA and TLA+, with the proof rules to establish them. Design notes:
+docs/libraries.md ("H14 T") and wiz-notes/hdl-temporal.md.
+
+* A trace is a function `Nat → A` (not a ν-stream: equality at ν is stuck, while
+  equality of functions is pointwise). A formula `TL A` is a proposition about a trace
+  at a time: `φ σ t` says that `φ` holds of `σ` at cycle `t` (the anchored semantics).
+  `□φ` at `t` is "φ at `k + t` for every k", `◇φ` "for some k".
+* Two layers: cycle-level operators (○, `##n`, bounded `◇`/`□`, `|->`, `|=>`) for
+  properties of one circuit, and actions with stuttering (`TL.stut`, TLA's `□[N]_v`)
+  for refinement of an abstract specification. The same formulas can be discharged by
+  an external solver: `hdl/src/Hdl/Formal.wiz` emits the monitor subset (invariants,
+  `|->`/`|=>`, `$past`/`$stable`, `anyconst`) as `` `ifdef FORMAL `` assertions for
+  yosys/SymbiYosys.
+* The semantic object is a Mealy machine `S → I → S × O`; `Circuit.stepEl c` is one.
+  `Mealy.stateAt`/`Mealy.outAt` run it along an input trace, and
+  `Mealy.runFrom_take` says that the finite simulation `Circuit.runFrom` is a prefix.
+
+Proof rules: invariance (`Mealy.invariant`), induction on time (`TL.always_ind`),
+bounded checks by evaluation (`Mealy.checkFrom_spec`, `Mealy.findFrom_spec`), a
+transient phase followed by an invariant (`TL.splitAt`), refinement by a
+representation map (`Mealy.simulates`) and with stuttering (`Mealy.refinesStut`),
+liveness from fairness (`TL.fairStep`) and from a ranking function (`TL.rank`).
+-/
+
+
+------------------------------------------------------------------------------------
+-- Refinement up to stuttering
+
+/-- Refinement with stuttering (TLA): if, on the states the run can reach (`inv`), every
+step is a step of the abstract relation `next` or leaves the abstraction `f`
+unchanged, the abstract trace satisfies `□[next]_f`. -/
+def Mealy.refinesStut {S I O T : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (f : S → T) (next : T → T → Prop)
+    (inv : S → Prop) (hinv : (t : Nat) → inv (Mealy.stateAt m s0 xs t))
+    (h : (s : S) → (x : I) → inv s → next (f s) (f (m s x).1) ∨ f s = f (m s x).1) :
+    (t : Nat) → TL.stut next (Trace.map f (Mealy.stateAt m s0 xs)) t :=
+  fun (t : Nat) => h (Mealy.stateAt m s0 xs t) (xs t) (hinv t)
+
+------------------------------------------------------------------------------------
+-- Bounded checks by evaluation. `checkFrom` walks the run once (linear, unlike asking
+-- `stateAt k` for each k); the `_spec` lemmas turn a `.true` (by `refl`, or by trusted
+-- compiled evaluation, stage 27a, when it is long) into a statement about the trace.
+
+/-- Whether `p` holds of the state and input at every cycle below `n` (one walk of the
+run). -/
+def Mealy.checkFrom {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) : Nat → S → Trace I → Bool
+  | .zero, s, xs => .true
+  | .succ n, s, xs => Bool.and (p s (xs 0)) (Mealy.checkFrom m p n (m s (xs 0)).1 (Trace.tail xs))
+/-- some cycle below `n` satisfies `p` -/
+def Mealy.findFrom {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) : Nat → S → Trace I → Bool
+  | .zero, s, xs => .false
+  | .succ n, s, xs => Bool.or (p s (xs 0)) (Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs))
+
+def Bool.or_true : (a b : Bool) → Bool.or a b = .true → a = .true ∨ b = .true
+  | .true, b, h => Or.inl rfl
+  | .false, b, h => Or.inr h
+
+/-- A `checkFrom` that returned `true` says `p` of every cycle below `n`. -/
+def Mealy.checkFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) :
+    (n : Nat) → (s : S) → (xs : Trace I) → Mealy.checkFrom m p n s xs = .true →
+    (k : Nat) → Nat.lt k n = .true → p (Mealy.stateAt m s xs k) (xs k) = .true
+  | .zero, s, xs, h, k, hk => absurd (Nat.lt_zero_absurd k hk)
+  | .succ n, s, xs, h, .zero, hk => Bool.and_true_left (p s (xs 0)) (Mealy.checkFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h
+  | .succ n, s, xs, h, .succ k, hk =>
+    Eq.substProp (fun (u : S) => p u (xs (Nat.succ k)) = .true) (Eq.symm (Mealy.stateAt_succ m s xs k))
+      (Mealy.checkFrom_spec m p n (m s (xs 0)).1 (Trace.tail xs)
+        (Bool.and_true_right (p s (xs 0)) (Mealy.checkFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h) k hk)
+
+/-- A `findFrom` that returned `true` gives a cycle below `n` where `p` holds. -/
+def Mealy.findFrom_spec {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) :
+    (n : Nat) → (s : S) → (xs : Trace I) → Mealy.findFrom m p n s xs = .true →
+    ∃ k, Nat.lt k n = .true ∧ p (Mealy.stateAt m s xs k) (xs k) = .true
+  | .zero, s, xs, h => absurd h.1
+  | .succ n, s, xs, h => Or.elim (Bool.or_true (p s (xs 0)) (Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs)) h)
+      (fun (e : p s (xs 0) = .true) =>
+        Ex.intro (fun (k : Nat) => Nat.lt k (Nat.succ n) = .true ∧ p (Mealy.stateAt m s xs k) (xs k) = .true) 0 (And.intro rfl e))
+      (fun (e : Mealy.findFrom m p n (m s (xs 0)).1 (Trace.tail xs) = .true) =>
+        Ex.elim (Mealy.findFrom_spec m p n (m s (xs 0)).1 (Trace.tail xs) e)
+          (fun (k : Nat) (w : Nat.lt k n = .true ∧ p (Mealy.stateAt m (m s (xs 0)).1 (Trace.tail xs) k) (xs (Nat.succ k)) = .true) =>
+            Ex.intro (fun (j : Nat) => Nat.lt j (Nat.succ n) = .true ∧ p (Mealy.stateAt m s xs j) (xs j) = .true) (Nat.succ k)
+              (And.intro w.1 (Eq.substProp (fun (u : S) => p u (xs (Nat.succ k)) = .true) (Eq.symm (Mealy.stateAt_succ m s xs k)) w.2))))
+
+/-- A bounded check on the observations gives `φ` throughout the next `n` cycles. -/
+def Mealy.checkFrom_during {S I O : Type} (m : Mealy S I O) (p : S × I → Bool) (n : Nat) (s : S) (xs : Trace I)
+    (h : Mealy.checkFrom m (fun (a : S) (x : I) => p (a, x)) n s xs = .true) :
+    (k : Nat) → Nat.lt k n = .true → TL.nowB p (Mealy.obs m s xs) k :=
+  Mealy.checkFrom_spec m (fun (a : S) (x : I) => p (a, x)) n s xs h
+/-- A bounded search on the observations gives `◇` within `n` cycles. -/
+def Mealy.findFrom_within {S I O : Type} (m : Mealy S I O) (p : S × I → Bool) (n : Nat) (s : S) (xs : Trace I)
+    (h : Mealy.findFrom m (fun (a : S) (x : I) => p (a, x)) n s xs = .true) :
+    TL.within n (TL.nowB p) (Mealy.obs m s xs) 0 :=
+  Ex.imp (fun (k : Nat) (w : Nat.lt k n = .true ∧ p (Mealy.stateAt m s xs k, xs k) = .true) =>
+      And.intro w.1 (Eq.substProp (fun (u : Nat) => p (Mealy.stateAt m s xs u, xs u) = .true) (Eq.symm (Nat.add_zero k)) w.2))
+    (Mealy.findFrom_spec m (fun (a : S) (x : I) => p (a, x)) n s xs h)
+
+/-- A transient phase, then rest: if the run is in state `c` at cycle `F` and `c` is fixed
+under the inputs from then on, it stays in `c`; a property checked for the first `F`
+cycles and true of `c` (with those inputs) then holds at every cycle. -/
+def Mealy.settles {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (F : Nat) (c : S)
+    (hF : Mealy.stateAt m s0 xs F = c) (fixed : (j : Nat) → (m c (xs (Nat.add j F))).1 = c) :
+    (j : Nat) → Mealy.stateAt m s0 xs (Nat.add j F) = c
+  | .zero => hF
+  | .succ j => Eq.trans (Eq.congrArg (fun (s : S) => (m s (xs (Nat.add j F))).1) (Mealy.settles m s0 xs F c hF fixed j)) (fixed j)
+/-- A transient phase, then rest: a property checked for the first `F` cycles and true of
+the settled state holds at every cycle. -/
+def Mealy.always_settled {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) (s0 : S) (xs : Trace I) (F : Nat) (c : S)
+    (early : Mealy.checkFrom m p F s0 xs = .true)
+    (hF : Mealy.stateAt m s0 xs F = c) (fixed : (j : Nat) → (m c (xs (Nat.add j F))).1 = c)
+    (late : (j : Nat) → p c (xs (Nat.add j F)) = .true) :
+    TL.always (TL.nowB (fun (o : S × I) => p o.1 o.2)) (Mealy.obs m s0 xs) 0 :=
+  TL.always_of (TL.nowB (fun (o : S × I) => p o.1 o.2)) (Mealy.obs m s0 xs)
+    (TL.splitAt (TL.nowB (fun (o : S × I) => p o.1 o.2)) (Mealy.obs m s0 xs) F
+      (Mealy.checkFrom_spec m p F s0 xs early)
+      (fun (j : Nat) => Eq.substProp (fun (u : S) => p u (xs (Nat.add j F)) = .true)
+        (Eq.symm (Mealy.settles m s0 xs F c hF fixed j)) (late j))) 0
+
+/-- inputs after a single event -/
+def Trace.once_late {A : Type} (x y : A) (j F : Nat) : Trace.once x y (Nat.add j (Nat.succ F)) = y :=
+  Eq.congrArg (Trace.once x y) (Nat.add_succ j F)
+/-- The same when the inputs from cycle `F` on are all `y` (e.g. after a single event,
+`Trace.once_from`): the settled state is fixed under `y`, and `p` holds there with `y`.
+The facts are wrapped in definitions (`Mealy.Reaches`, `Mealy.Fixed`, `Trace.From`) so
+that a caller's concrete instances are matched by name: an equation between states is a
+product equation, and the elaborator would otherwise compute it (slowly) to compare. -/
+def Mealy.Reaches {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (F : Nat) (c : S) : Prop :=
+  Mealy.stateAt m s0 xs F = c
+/-- The state `c` is fixed under the input `y`. -/
+def Mealy.Fixed {S I O : Type} (m : Mealy S I O) (c : S) (y : I) : Prop := (m c y).1 = c
+/-- The trace is `y` from cycle `F` on. -/
+def Trace.From {A : Type} (xs : Trace A) (F : Nat) (y : A) : Prop := (j : Nat) → xs (Nat.add j F) = y
+/-- After the event of `Trace.once`, the trace is `y`. -/
+def Trace.once_from {A : Type} (x y : A) (F : Nat) : Trace.From (Trace.once x y) (Nat.succ F) y :=
+  fun (j : Nat) => Trace.once_late x y j F
+
+/-- The settled form when the inputs from cycle `F` on are all `y`. -/
+def Mealy.always_settled_const {S I O : Type} (m : Mealy S I O) (p : S → I → Bool) (s0 : S) (xs : Trace I) (y : I) (F : Nat) (c : S)
+    (rest : Trace.From xs F y) (early : Mealy.checkFrom m p F s0 xs = .true)
+    (hF : Mealy.Reaches m s0 xs F c) (fixed : Mealy.Fixed m c y) (late : p c y = .true) :
+    TL.always (TL.nowB (fun (o : S × I) => p o.1 o.2)) (Mealy.obs m s0 xs) 0 :=
+  Mealy.always_settled m p s0 xs F c early hF
+    (fun (j : Nat) => Eq.substProp (fun (z : I) => (m c z).1 = c) (Eq.symm (rest j)) fixed)
+    (fun (j : Nat) => Eq.substProp (fun (z : I) => p c z = .true) (Eq.symm (rest j)) late)
+
+--------------------------------------------------------------------------------
+-- The netlist simulation theorem as a temporal law (Hdl.Netlist)
+
+/-- Every finite prefix of a circuit's infinite trace is what its netlist simulates,
+when the circuit and the netlist are in the Mealy-core subset (`Circuit.Simulates`). -/
+def Circuit.Simulates.trace_take {ω i o : HwTy} {0 c : Circuit i o} {0 n : Netlist}
+    (h : Circuit.Simulates c n) (xs : Trace (HwTy.El i)) (k : Nat) :
+    Netlist.simulate n (Hdl.map (HwTy.leaves i) (Trace.take k xs)) =
+      Hdl.map (HwTy.leaves o) (Trace.take k (Circuit.trace c xs)) :=
+  Eq.trans (Circuit.Simulates.simulate_eq_run h (Trace.take k xs))
+    (Eq.congrArg (fun (ys : List (HwTy.El o)) => Hdl.map (HwTy.leaves o) ys)
+      (Circuit.run_take c k xs))

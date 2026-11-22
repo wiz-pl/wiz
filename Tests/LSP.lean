@@ -1,4 +1,5 @@
 import Wiz
+import Wiz.Lint
 import Tests.Harness
 
 open Wiz
@@ -66,6 +67,37 @@ where
     (j.getObjVal? "result").toOption.getD ((j.getObjVal? "error").toOption.getD Lean.Json.null)
 
 def has (j : Lean.Json) (s : String) : Bool := (j.compress.splitOn s).length > 1
+
+/-- The next framed message on `h`; a failure if the stream ended or its framing is broken. -/
+def nextMessage (h : IO.FS.Stream) : IO Lean.Json := do
+  match ← LSP.readMessage h with
+  | .ok (some j) => pure j
+  | .ok none => throw (IO.userError "the stream ended")
+  | .error why => throw (IO.userError why)
+
+/-- A read-only stream over `data` that returns at most `chunk` bytes per `read`: a pipe
+or a socket may return fewer bytes than asked, even when more are coming. `getLine` reads
+through the same cursor one byte at a time, so it is chunk-capped too. -/
+def chunkedStream (data : ByteArray) (chunk : Nat) : IO IO.FS.Stream := do
+  let pos ← IO.mkRef 0
+  let nxt (n : Nat) : IO ByteArray := do
+    let p ← pos.get
+    let k := min n (min (max chunk 1) (data.size - p))
+    pos.set (p + k)
+    pure (data.extract p (p + k))
+  let getLine : IO String := do
+    let mut bs := ByteArray.empty
+    let mut done := false
+    while !done do
+      let b ← nxt 1
+      if b.isEmpty then done := true
+      else
+        let c := b.get! 0
+        bs := bs.push c
+        if c == 0x0a then done := true
+    pure ((String.fromUTF8? bs).getD "")
+  pure ({ flush := pure (), read := fun n => nxt n.toNat, write := fun _ => pure ()
+          getLine, putStr := fun _ => pure (), isTty := pure false } : IO.FS.Stream)
 
 /-- Open `src` as the document `uri` (one with a real path, for `include_str`). -/
 def openAt (srv : LSP.Server) (uri src : String) : IO (LSP.Server × Array Lean.Json) :=
@@ -346,9 +378,7 @@ def socketCase : IO Unit := do
         let (ed, edW) := (IO.FS.Stream.ofHandle edIn, IO.FS.Stream.ofHandle edOut)
         let done ← IO.asTask (prio := .dedicated)
           (LSP.serveInfoview (← server).libs (IO.FS.Stream.ofHandle srvIn) (IO.FS.Stream.ofHandle srvOut) sock ["Prelude"])
-        let next (h : IO.FS.Stream) : IO Lean.Json := do
-          let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
-          pure j
+        let next := nextMessage
         let src := "import Prelude\ndef k : Nat → Bool → Nat := by\n  intro n\n  intro b\n  exact n\n"
         LSP.writeMessage edW (req "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
         check (has (← next ed) "documentHighlightProvider") "documentHighlight not asked for"
@@ -360,6 +390,9 @@ def socketCase : IO Unit := do
           | 0 => Socket.connect sock
           | n + 1 => do try Socket.connect sock catch _ => do IO.sleep 50; conn n
         let (ivIn, ivOut) ← conn 100
+        -- the socket is owner-only: the infoview is a local capability, and the default
+        -- umask (022) would otherwise make it 0755 and connectable by any local user
+        checkEq 0o600 (← Socket.mode sock)
         let (iv, ivW) := (IO.FS.Stream.ofHandle ivIn, IO.FS.Stream.ofHandle ivOut)
         let c ← next iv
         checkEq "wiz/infoview/cursor" (LSP.getStr c ["method"])
@@ -402,7 +435,9 @@ def socketCase : IO Unit := do
         | .ok () => pure ()
         | .error e => throw e
         check (!(← System.FilePath.pathExists sock)) "the socket file is still there"
-        check ((← LSP.readMessage iv).isNone) "the infoview's connection is still open"
+        match ← LSP.readMessage iv with
+        | .ok none => pure ()
+        | _ => throw (IO.userError "the infoview's connection is still open")
 
 
 /-- The body of the WebSocket case: an editor on stdio (a socket pair), and two
@@ -419,9 +454,7 @@ def wsCase : IO Unit := do
         let some token := token | throw (IO.userError "no token without --ws-insecure")
         check (token.length == 32) s!"token: {token}"
         let path := s!"/?token={token}"
-        let next (h : IO.FS.Stream) : IO Lean.Json := do
-          let some j ← LSP.readMessage h | throw (IO.userError "the stream ended")
-          pure j
+        let next := nextMessage
         let tcp : IO (IO.FS.Stream × IO.FS.Stream) := do
           let (r, w) ← Socket.tcpConnect Socket.loopback port
           pure (IO.FS.Stream.ofHandle r, IO.FS.Stream.ofHandle w)
@@ -764,8 +797,12 @@ def serverGroup : Group where
           if l.startsWith "| `" then some ((((l.drop 3).toString.splitOn "`").headD "")) else none
         for c in ErrorCode.all do
           check (rows.contains c) s!"docs/error-codes.md has no row for {c}"
+        -- Lint rules are user-visible codes too and live in their own registry, not in
+        -- `ErrorCode.all`; the docs table is the union (WizLint checks the other direction).
+        let lintIds := (Lint.registry Nat).map (fun r => r.id)
         for c in rows do
-          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all" },
+          check (ErrorCode.all.contains c || lintIds.contains c)
+            s!"docs/error-codes.md lists {c}, which is in neither ErrorCode.all nor the lint registry" },
     { name := "code action: did you mean (fields, namespace, constructors)", run := fun _ => do
         let pre := "import Prelude\nstructure P where\n  count : Nat\n  total : Nat\ninductive Box where\n  | mk (n : Nat)\ndef Box.double : Box → Nat\n  | .mk n => n + n\ninductive Color where\n  | red\n  | green\n"
         for (body, needle, title, fixed) in [
@@ -1273,9 +1310,12 @@ def serverGroup : Group where
           (String.join ((WebSocket.sha1 "The quick brown fox jumps over the lazy dog".toUTF8).toList.map fun b =>
             let h := Nat.toDigits 16 b.toNat; String.ofList (if h.length < 2 then '0' :: h else h)))
         checkEq "Zm9vYmE=" (WebSocket.base64 "fooba".toUTF8)
-        for o in ["null", "http://localhost:8766", "http://127.0.0.1", "vscode-webview://abc"] do
+        for o in ["http://localhost:8766", "http://127.0.0.1", "vscode-webview://abc"] do
           check (WebSocket.localOrigin o) s!"{o} refused"
-        for o in ["https://example.com", "http://localhost.example.com", "http://127.0.0.1.nip.io:80"] do
+        -- an opaque origin (a sandboxed iframe, a `data:`/`file:` page) is what any site can
+        -- create, so `null` is refused along with foreign pages and lookalike hosts
+        for o in ["null", "https://example.com", "http://localhost.example.com", "http://127.0.0.1.nip.io:80",
+                  "data:", "file:///tmp/x.html"] do
           check (!WebSocket.localOrigin o) s!"{o} let in"
         -- frames of each length class, masked and not, read back
         let ((r, w), (r', w')) ← Socket.pair
@@ -1289,6 +1329,58 @@ def serverGroup : Group where
         -- an unmasked frame from a client breaks the protocol
         WebSocket.sendText w "x"
         checkEq none (← WebSocket.recvText r' w') },
+    { name := "framing: a short read, a bad or oversized Content-Length, invalid UTF-8", run := fun _ => do
+        let read (data : ByteArray) (chunk : Nat := 1) : IO (Except String (Option Lean.Json)) := do
+          LSP.readMessage (← chunkedStream data chunk)
+        let describe (r : Except String (Option Lean.Json)) : String :=
+          match r with
+          | .ok none => "end of stream"
+          | .ok (some j) => s!"a message: {j.compress}"
+          | .error e => s!"an error: {e}"
+        let mentions (s e : String) : Bool := (e.splitOn s).length > 1
+        let frame (body : String) : String := s!"Content-Length: {body.utf8ByteSize}\r\n\r\n{body}"
+        -- the body arrives one byte per `read`: a reader that trusted a single short read
+        -- would parse a truncated body (old code turned that into `Json.null`)
+        let body := "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}"
+        match ← read (frame body).toUTF8 1 with
+        | .ok (some j) => checkEq "exit" (LSP.getStr j ["method"])
+        | r => throw (IO.userError s!"a short read: {describe r}")
+        -- a clean end of stream is `ok none`, not an error
+        match ← read .empty 8 with
+        | .ok none => pure ()
+        | r => throw (IO.userError s!"end of stream: {describe r}")
+        -- a non-numeric Content-Length is reported, not a panic
+        match ← read "Content-Length: abc\r\n\r\n{}".toUTF8 8 with
+        | .error e => check (mentions "Content-Length" e) e
+        | r => throw (IO.userError s!"a bad Content-Length was accepted: {describe r}")
+        -- an unbounded length is refused before any body is read ...
+        match ← read (s!"Content-Length: {LSP.maxContentLength + 1}\r\n\r\n").toUTF8 8 with
+        | .error e => check (mentions "limit" e) e
+        | r => throw (IO.userError s!"an oversized Content-Length was accepted: {describe r}")
+        -- ... and the limit itself is allowed (the body is missing here, so it ends short)
+        match ← read (s!"Content-Length: {LSP.maxContentLength}\r\n\r\n").toUTF8 8 with
+        | .error e => check (mentions "short" e) e
+        | r => throw (IO.userError s!"a body at the limit: {describe r}")
+        -- invalid UTF-8 in the body
+        match ← read (("Content-Length: 2\r\n\r\n".toUTF8) ++ ByteArray.mk #[0xff, 0xfe]) 8 with
+        | .error e => check (mentions "UTF-8" e) e
+        | r => throw (IO.userError s!"invalid UTF-8 was accepted: {describe r}")
+        -- a body cut short (Content-Length 10, 7 bytes, then EOF)
+        match ← read "Content-Length: 10\r\n\r\n{\"a\":1}".toUTF8 4 with
+        | .error e => check (mentions "short" e) e
+        | r => throw (IO.userError s!"a truncated body was accepted: {describe r}")
+        -- valid framing, bad JSON
+        match ← read (frame "{oops").toUTF8 4 with
+        | .error e => check (mentions "JSON" e) e
+        | r => throw (IO.userError s!"bad JSON was accepted: {describe r}")
+        -- EOF in the middle of a head is an error, not a silent end
+        match ← read "Content-Length: 2\r\n".toUTF8 4 with
+        | .error e => check (mentions "head" e) e
+        | r => throw (IO.userError s!"a truncated head: {describe r}")
+        -- no Content-Length at all
+        match ← read "X: y\r\n\r\n{}".toUTF8 8 with
+        | .error e => check (mentions "Content-Length" e) e
+        | r => throw (IO.userError s!"no Content-Length: {describe r}") },
     { name := "inside a feral block: hovers, go to definition and errors at the Feral source", run := fun _ => do
         -- the server's library: Prelude, Feral and the runtime of lowered code
         let mut libs := (← server).libs
@@ -1359,6 +1451,10 @@ def serverGroup : Group where
           check ((out.splitOn "404").length > 1) s!"{path}: {out}"
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\nOrigin: https://example.com\r\n\r\n"
         check ((out.splitOn "403").length > 1) s!"foreign origin: {out}"
+        -- an opaque origin (`Origin: null`: a sandboxed iframe, or a `data:`/`file:` page)
+        -- is not a page on this machine, so it is refused for the files too
+        let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\nOrigin: null\r\n\r\n"
+        check ((out.splitOn "403").length > 1) s!"opaque origin: {out}"
         -- without the directory (plain `--ws`): no files at all
         let (_, out) ← ask "GET /infoview.html HTTP/1.1\r\n\r\n" none
         check ((out.splitOn "426").length > 1) s!"no web directory: {out}"
@@ -1382,6 +1478,9 @@ def serverGroup : Group where
             ("bearer", "/", "Authorization: Bearer s3cr3t\r\n")] do
           let (ok, out) ← ask (upgrade target extra)
           check (ok && (out.splitOn "101 Switching Protocols").length > 1) s!"{what}: {out}"
+        -- an opaque origin is refused even with the right token (the origin is checked first)
+        let (ok, out) ← ask (upgrade "/?token=s3cr3t" "Origin: null\r\n")
+        check (!ok && (out.splitOn "403").length > 1 && (out.splitOn "101").length == 1) s!"opaque origin: {out}"
         -- `--ws-insecure` (no token): any local client
         let (ok, _) ← ask (upgrade "/") (token := none)
         check ok "insecure: refused"

@@ -1,0 +1,473 @@
+import Text
+/-!
+# Scry.Rules
+
+A **rule pack** for taint-style analyses (`import Scry.Rules`): named rules with an id, a
+severity, a message, sources and sanitisers *per argument*, sinks *per argument*, and
+function-name matching. This is the S4 "real rule pack and spec file" slice; the
+prototype's `Scry.TaintSpec` (a bare source/sanitiser/sink triple) stays for the
+intraprocedural examples.
+
+## The `.scry` format
+
+A pack is a sequence of blocks:
+
+```
+# command injection
+rule command-injection
+  kind taint
+  severity error
+  message Attacker-controlled data reaches a command interpreter
+  source getenv result
+  source recv result
+  source read arg 1
+  sanitise escape_shell result
+  sanitise sanitize arg 0
+  sink system arg 0
+  sink popen arg 0
+end
+```
+
+* `rule ID` starts a block and `end` closes it. A missing `end` is closed at end of file.
+* `kind taint` (the default) or `kind forbidden` (a call that is unsafe whenever it
+  appears: `gets`, `strcpy`).
+* `severity error|warning|note` (default `warning`).
+* `message TEXT` takes the rest of the line.
+* `source NAME result|arg K`, `sanitise NAME result|arg K` (also spelled `sanitize`),
+  `sink NAME arg K`. `result` is the default when the argument selector is omitted.
+  `sink NAME args` checks every argument, for a variadic callee such as `execl`. A
+  finding still names the concrete argument index that carried the taint.
+* `call NAME` (§`kind forbidden` only) names a forbidden callee.
+* Blank lines and lines starting with `#` are comments; unknown keywords are ignored.
+
+`NAME` is matched against the callee name with `*` as a wildcard, so `mem*` matches
+`memcpy` and `memset`. Matching is over the whole name (`strcpy*` does not match
+`astrcpy`), and `Scry.TaintSpec`'s exact matching is unchanged.
+
+## What a per-argument source means
+
+`source read arg 1` says that argument 1 is written by the call (a buffer filled with
+attacker data); `source getenv result` says the *result* is. Likewise a sanitiser can
+clean its result or an argument in place. The caller of these models is
+`Scry.RuleTaint`, which turns a written argument into an extra definition point so the
+ordinary def-use layer can carry the value on.
+-/
+
+-- ## Severity, argument selectors and path nodes
+
+inductive Scry.Severity where
+  | error
+  | warning
+  | note
+
+def Scry.Severity.show : Scry.Severity → String
+  | .error => "error"
+  | .warning => "warning"
+  | .note => "note"
+
+/-- The severity number the findings index stores in a record's `label` (the same order
+as `show`: error, warning, note). -/
+def Scry.Severity.id : Scry.Severity → Nat
+  | .error => 0
+  | .warning => 1
+  | .note => 2
+
+/-- The SARIF `level` spelling. -/
+def Scry.Severity.sarif : Scry.Severity → String := Scry.Severity.show
+
+def Scry.Severity.parse (s : String) : Scry.Severity :=
+  if String.eq s "error" then .error
+  else if String.eq s "note" then .note
+  else .warning
+
+/-- Which part of a call a source or sanitiser names. -/
+inductive Scry.ArgRef where
+  | result
+  | arg (index : Nat)
+
+def Scry.ArgRef.show : Scry.ArgRef → String
+  | .result => "result"
+  | .arg k => String.append "arg " (Nat.repr k)
+
+/-- The kind of a finding. -/
+inductive Scry.FindingKind where
+  | taint
+  | forbidden
+  /-- A memory-lifetime finding (use after free): the rule's `check` names the analysis. -/
+  | memory
+
+def Scry.FindingKind.show : Scry.FindingKind → String
+  | .taint => "taint"
+  | .forbidden => "forbidden"
+  | .memory => "memory"
+
+/-- A step of a source -> sink path (the `origin`-carrying location is a separate map,
+see `Scry.Sarif`). `var` is the register that carries the value, `point` the program
+point of `func`. -/
+inductive Scry.PathKind where
+  | source
+  | param
+  | call
+  | returnSeed
+  | returnValue
+  | flow
+  /-- A store into a memory location (`store`): the path enters memory here. -/
+  | store
+  /-- A load from a memory location: the path leaves memory here. -/
+  | load
+  /-- An allocation site (`malloc`/`calloc`/`realloc`/`strdup`). -/
+  | alloc
+  /-- A `free` (direct or through a callee/callback). -/
+  | free
+  | sink
+  | recursion
+  | assumed
+
+def Scry.PathKind.show : Scry.PathKind → String
+  | .source => "source"
+  | .param => "parameter"
+  | .call => "call"
+  | .returnSeed => "return"
+  | .returnValue => "return-value"
+  | .flow => "flow"
+  | .store => "store"
+  | .load => "load"
+  | .alloc => "alloc"
+  | .free => "free"
+  | .sink => "sink"
+  | .recursion => "recursion"
+  | .assumed => "assumed"
+
+structure Scry.PathNode where
+  func : String
+  point : Nat
+  var : Nat
+  kind : Scry.PathKind
+
+/-- A finding with its rule metadata and evidence path. The path is evidence, not a
+proof; `Scry.Certify` turns the underlying alert into a checked derivation. -/
+structure Scry.RuleFinding where
+  rule : String
+  severity : Scry.Severity
+  message : String
+  kind : Scry.FindingKind
+  /-- The function the sink is in. -/
+  func : String
+  /-- The sink's program point. -/
+  sink : Nat
+  /-- The callee name. -/
+  name : String
+  /-- The checked argument index. -/
+  arg : Nat
+  path : List Scry.PathNode
+
+-- ## The rules
+
+/-- Which argument(s) of a call a sink names. `one k` is the fixed index `k`; `any` is
+every argument, for a variadic callee such as `execl(path, arg0, …, NULL)` where any of
+the command-line words can carry attacker data. `any` is spelled `args` in the pack. -/
+inductive Scry.SinkArg where
+  | one (index : Nat)
+  | any
+
+def Scry.SinkArg.show : Scry.SinkArg → String
+  | .one k => Nat.repr k
+  | .any => "any"
+
+structure Scry.RuleSink where
+  name : String
+  arg : Scry.SinkArg
+
+structure Scry.TaintRule where
+  id : String
+  severity : Scry.Severity
+  message : String
+  /-- `(callee pattern, part written by the call)`. -/
+  sources : List (String × Scry.ArgRef)
+  /-- `(callee pattern, part cleaned by the call)`. -/
+  sanitisers : List (String × Scry.ArgRef)
+  sinks : List Scry.RuleSink
+
+structure Scry.ForbiddenRule where
+  id : String
+  severity : Scry.Severity
+  message : String
+  calls : List String
+
+/-- A memory-kind rule: `check NAME` selects the analysis (`use-after-free`). Unlike a
+taint rule it has no sources/sinks; the analysis itself supplies the evidence. -/
+structure Scry.MemoryRule where
+  id : String
+  severity : Scry.Severity
+  message : String
+  check : String
+
+inductive Scry.PackRule where
+  | taint (r : Scry.TaintRule)
+  | forbidden (r : Scry.ForbiddenRule)
+  | memory (r : Scry.MemoryRule)
+
+def Scry.PackRule.id : Scry.PackRule → String
+  | .taint r => r.id
+  | .forbidden r => r.id
+  | .memory r => r.id
+
+def Scry.PackRule.severity : Scry.PackRule → Scry.Severity
+  | .taint r => r.severity
+  | .forbidden r => r.severity
+  | .memory r => r.severity
+
+def Scry.PackRule.message : Scry.PackRule → String
+  | .taint r => r.message
+  | .forbidden r => r.message
+  | .memory r => r.message
+
+def Scry.PackRule.kind : Scry.PackRule → Scry.FindingKind
+  | .taint _ => .taint
+  | .forbidden _ => .forbidden
+  | .memory _ => .memory
+
+structure Scry.RulePack where
+  rules : List Scry.PackRule
+
+def Scry.rulePackConcat {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (Scry.rulePackConcat f xs)
+
+def Scry.RulePack.taintRules (p : Scry.RulePack) : List Scry.TaintRule :=
+  Scry.rulePackConcat (fun r => match r with
+    | .taint t => [t]
+    | .forbidden _ => .nil
+    | .memory _ => .nil) p.rules
+
+def Scry.RulePack.forbiddenRules (p : Scry.RulePack) : List Scry.ForbiddenRule :=
+  Scry.rulePackConcat (fun r => match r with
+    | .taint _ => .nil
+    | .forbidden f => [f]
+    | .memory _ => .nil) p.rules
+
+def Scry.RulePack.memoryRules (p : Scry.RulePack) : List Scry.MemoryRule :=
+  Scry.rulePackConcat (fun r => match r with
+    | .taint _ => .nil
+    | .forbidden _ => .nil
+    | .memory m => [m]) p.rules
+
+/-- The first memory rule whose `check` the analysis implements. -/
+def Scry.RulePack.memoryRuleFor (p : Scry.RulePack) (check : String) :
+    Option Scry.MemoryRule :=
+  List.find (fun m => String.eq m.check check) (Scry.RulePack.memoryRules p)
+
+/-- Does the pack declare the C `argv` parameter as a source? The spelling is
+`source argv result`; it is not a call pattern (no call is named `argv`), it asks the
+interprocedural engine to seed `main`'s second parameter. The default pack does not use
+it, so `argv` taint is opt-in with the rule pack that needs it. -/
+def Scry.RulePack.sourcesArgv (p : Scry.RulePack) : Bool :=
+  List.any (fun r => List.any (fun pair => String.eq pair.1 "argv") r.sources)
+    (p.taintRules)
+
+-- ## Function-name matching
+
+/-- Glob matching with `*` as "any sequence": the character list form. -/
+partial def Scry.globChars (pat s : List Char) : Bool :=
+  match pat with
+  | .nil => List.isEmpty s
+  | .cons c ps =>
+    if Char.eq c (Char.mk 42) then
+      Bool.or (Scry.globChars ps s)
+        (match s with
+          | .nil => .false
+          | .cons _ ss => Scry.globChars pat ss)
+    else
+      match s with
+      | .nil => .false
+      | .cons d ds => Bool.and (Char.eq c d) (Scry.globChars ps ds)
+
+/-- Whether the callee name matches the rule pattern (`*` is a wildcard). -/
+def Scry.nameMatches (pat name : String) : Bool :=
+  Scry.globChars (String.chars pat) (String.chars name)
+
+-- ## The parser
+
+/-- Split on spaces, dropping the empty words a run of spaces produces. -/
+def Scry.words (s : String) : List String :=
+  List.filter (fun w => Bool.not (String.isEmpty w)) (String.splitOn s " ")
+
+/-- The text after `kw ` on a trimmed line, if the line starts with it. -/
+def Scry.restOf (line kw : String) : Option String :=
+  String.stripPrefix line (String.append kw " ")
+
+/-- Parse the `result` / `arg K` selector (default `result`). -/
+def Scry.parseArgRef (rest : List String) : Scry.ArgRef :=
+  match rest with
+  | .cons head (.cons k _) =>
+    if String.eq head "arg" then
+      match String.parseNat (String.trim k) with
+      | .some n => Scry.ArgRef.arg n
+      | .none => .result
+    else .result
+  | _ => .result
+
+structure Scry.PartialRule where
+  id : String
+  kind : String
+  severity : Scry.Severity
+  message : String
+  sources : List (String × Scry.ArgRef)
+  sanitisers : List (String × Scry.ArgRef)
+  sinks : List Scry.RuleSink
+  calls : List String
+  check : String
+
+def Scry.PartialRule.fresh (id : String) : Scry.PartialRule :=
+  Scry.PartialRule.mk id "taint" .warning "" .nil .nil .nil .nil ""
+
+def Scry.PartialRule.finish (r : Scry.PartialRule) : Scry.PackRule :=
+  if String.eq r.kind "forbidden" then
+    .forbidden (Scry.ForbiddenRule.mk r.id r.severity r.message r.calls)
+  else if String.eq r.kind "memory" then
+    .memory (Scry.MemoryRule.mk r.id r.severity r.message r.check)
+  else
+    .taint (Scry.TaintRule.mk r.id r.severity r.message r.sources r.sanitisers r.sinks)
+
+structure Scry.PackState where
+  cur : Option Scry.PartialRule
+  rules : List Scry.PackRule
+
+def Scry.PackState.empty : Scry.PackState := Scry.PackState.mk .none .nil
+
+def Scry.PackState.finish (st : Scry.PackState) : Scry.PackState :=
+  match st.cur with
+  | .none => st
+  | .some r => Scry.PackState.mk .none (List.cons (Scry.PartialRule.finish r) st.rules)
+
+/-- Parse a sink's argument selector: `arg K` (the default) or `args` (every
+argument). -/
+def Scry.parseSinkArg (rest : List String) : Scry.SinkArg :=
+  match rest with
+  | .cons sel (.cons idx _) =>
+    if String.eq sel "args" then .any
+    else if String.eq sel "arg" then
+      match String.parseNat (String.trim idx) with
+      | .some n => .one n
+      | .none => .one 0
+    else .one 0
+  | .cons sel _ => if String.eq sel "args" then .any else .one 0
+  | .nil => .one 0
+
+def Scry.PartialRule.addSink (name : String) (rest : List String)
+    (r : Scry.PartialRule) : Scry.PartialRule :=
+  match rest with
+  | .nil => r
+  | .cons _ _ => { r with sinks := List.cons
+      (Scry.RuleSink.mk name (Scry.parseSinkArg rest)) r.sinks }
+
+def Scry.PartialRule.addLine (words : List String) (r : Scry.PartialRule) : Scry.PartialRule :=
+  match words with
+  | .cons kw rest =>
+    if String.eq kw "kind" then
+      match rest with
+      | .cons k _ => { r with kind := k }
+      | .nil => r
+    else if String.eq kw "severity" then
+      match rest with
+      | .cons s _ => { r with severity := Scry.Severity.parse s }
+      | .nil => r
+    else if Bool.or (String.eq kw "source")
+        (Bool.or (String.eq kw "sanitise") (String.eq kw "sanitize")) then
+      match rest with
+      | .cons name sel =>
+        let ref := Scry.parseArgRef sel;
+        if String.eq kw "source" then { r with sources := List.cons (name, ref) r.sources }
+        else { r with sanitisers := List.cons (name, ref) r.sanitisers }
+      | .nil => r
+    else if String.eq kw "sink" then
+      match rest with
+      | .cons name sel => Scry.PartialRule.addSink name sel r
+      | .nil => r
+    else if String.eq kw "call" then
+      match rest with
+      | .cons name _ => { r with calls := List.cons name r.calls }
+      | .nil => r
+    else if String.eq kw "check" then
+      match rest with
+      | .cons name _ => { r with check := name }
+      | .nil => r
+    else r
+  | .nil => r
+
+def Scry.PackState.addLine (line : String) (st : Scry.PackState) : Scry.PackState :=
+  let line := String.trim line;
+  if String.isEmpty line then st
+  else if String.startsWith line "#" then st
+  else
+    let ws := Scry.words line;
+    match ws with
+    | .cons kw rest =>
+      if String.eq kw "rule" then
+        match rest with
+        | .cons id _ =>
+          let st' := st.finish;
+          Scry.PackState.mk (.some (Scry.PartialRule.fresh id)) st'.rules
+        | .nil => st
+      else if String.eq kw "end" then st.finish
+      else if String.eq kw "message" then
+        match st.cur with
+        | .none => st
+        | .some r =>
+          match Scry.restOf line "message" with
+          | .some msg => Scry.PackState.mk (.some { r with message := String.trim msg }) st.rules
+          | .none => st
+      else
+        match st.cur with
+        | .none => st
+        | .some r =>
+          Scry.PackState.mk (.some (Scry.PartialRule.addLine ws r)) st.rules
+    | .nil => st
+
+/-- Parse a `.scry` rule pack. Unknown keywords and lines outside a block are ignored. -/
+def Scry.parseRulePack (text : String) : Scry.RulePack :=
+  let st := List.foldl (fun acc line => Scry.PackState.addLine line acc) Scry.PackState.empty
+    (String.splitOn text "\n");
+  let st := st.finish;
+  Scry.RulePack.mk (List.reverse st.rules)
+
+-- ## Rendering (for round-trip tests and diagnostics)
+
+def Scry.renderSourceLine (kw name : String) (ref : Scry.ArgRef) : String :=
+  match ref with
+  | .result =>
+    String.append (String.append (String.append "  " kw) (String.append " " name)) " result"
+  | .arg k =>
+    String.append (String.append (String.append (String.append "  " kw) (String.append " " name))
+      " arg ") (Nat.repr k)
+
+def Scry.RuleSink.render (s : Scry.RuleSink) : String :=
+  match s.arg with
+  | .one k => String.append (String.append (String.append "  sink " s.name) " arg ") (Nat.repr k)
+  | .any => String.append (String.append "  sink " s.name) " args"
+
+def Scry.PackRule.render (r : Scry.PackRule) : String :=
+  match r with
+  | .taint t =>
+    let head := String.append (String.append (String.append (String.append
+      (String.append (String.append "rule " t.id) "\n  kind taint\n  severity ")
+      (Scry.Severity.show t.severity)) "\n  message ") t.message) "\n";
+    let sources := String.join (List.map (fun p => Scry.renderSourceLine "source" p.1 p.2) t.sources);
+    let sans := String.join (List.map (fun p => Scry.renderSourceLine "sanitise" p.1 p.2) t.sanitisers);
+    let sinks := String.join (List.map Scry.RuleSink.render t.sinks);
+    String.append (String.append (String.append head (String.append sources sans)) "\n")
+      (String.append sinks "\nend")
+  | .forbidden f =>
+    let head := String.append (String.append (String.append (String.append
+      (String.append (String.append "rule " f.id) "\n  kind forbidden\n  severity ")
+      (Scry.Severity.show f.severity)) "\n  message ") f.message) "\n";
+    let calls := String.join (List.map (fun c => String.append "  call " c) f.calls);
+    String.append (String.append head calls) "\nend"
+  | .memory m =>
+    let head := String.append (String.append (String.append (String.append
+      (String.append "rule " m.id) "\n  kind memory\n  severity ")
+      (Scry.Severity.show m.severity)) "\n  message ") m.message;
+    String.append (String.append head "\n  check ") (String.append m.check "\nend")
+
+def Scry.RulePack.render (p : Scry.RulePack) : String :=
+  String.join (List.map (fun r => String.append (Scry.PackRule.render r) "\n") p.rules)

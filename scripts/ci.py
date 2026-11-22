@@ -34,9 +34,12 @@
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, docs=true when a doc
-                                     changed, web=true when a browser-facing file
-                                     (`web/*`) changed, and shards=[NAMES], the shards of
+                                     unless only docs or the STC metatheory changed,
+                                     docs=true when a doc changed, web=true when a
+                                     browser-facing file (`web/*`) changed, stc=true
+                                     when `STC.lean` or `STC/` changed (the `stc` job
+                                     typechecks that library, which nothing else
+                                     imports), and shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). `changes --all`
                                      prints everything
@@ -639,6 +642,9 @@ DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
 # Wasm modules and runs the browser-free half of web/test.sh when one of these changes;
 # the Chromium half of that script stays local.
 WEB = ["web/*"]
+# The attestation tooling is covered by the `attest` job's Python unit tests. It does not
+# feed the Lean build, so a change only under scripts/attest must not schedule a shard.
+SELF_TESTED = ["scripts/attest/*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
 # build and its toolchain, the C runtime, CI itself, and the web/ tree — its Wiz
 # sources and JS hosts are read by test groups (`web/Web.wiz`, `web/framework/gen.wiz`,
@@ -647,6 +653,13 @@ WEB = ["web/*"]
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
               ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz",
               "web/*"]
+# The STC metatheory (`STC.lean`, `STC/`) is a separate Lake library, deliberately not a
+# default target, and nothing else imports it; `flake.nix` does not copy it into the Nix
+# build either (that would rebuild the compiler on every STC edit). An edit there needs
+# the `stc` job and nothing else, so STC paths are kept out of EVERYTHING: otherwise the
+# `*.lean` entry sends every wiz/grail shard to test a tree none of them reads. The `stc`
+# job also runs when `code` is true, since a toolchain or lakefile change can break it.
+STC = ["STC.lean", "STC/*"]
 
 
 def matches(path, globs):
@@ -672,12 +685,19 @@ def lib_closure(paths):
     return out
 
 
+def is_code_change(files):
+    """Whether `files` needs the default Lean build (wiz/grail/tests); docs, self-tested
+    scripts and the STC metatheory (its own `stc` job) do not."""
+    return any(not matches(f, DOCS + SELF_TESTED + STC) for f in files)
+
+
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
-    when one of its inputs changed, and a shard without "inputs" when anything but docs
-    changed. Nothing for a docs-only change."""
-    code = [f for f in files if not matches(f, DOCS)]
+    when one of its inputs changed, and a shard without "inputs" when anything but docs,
+    scripts/attest or the STC metatheory (the `stc` job, not a shard) changed. Nothing
+    for a docs/attest/STC-only change."""
+    code = [f for f in files if not matches(f, DOCS + SELF_TESTED + STC)]
     ss = shards()
     if any(matches(f, EVERYTHING) for f in code):
         return [s["name"] for s in ss]
@@ -701,6 +721,7 @@ def changes(args):
         print("code=true")
         print("docs=true")
         print("web=true")
+        print("stc=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -708,22 +729,26 @@ def changes(args):
                          text=True, check=True, cwd=ROOT).stdout
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
-    code = any(not matches(f, DOCS) for f in files)
+    code = is_code_change(files)
     docs = any(matches(f, DOCS) for f in files)
     web = any(matches(f, WEB) for f in files)
+    stc = any(matches(f, STC) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
     print(f"web={'true' if web else 'false'}")
+    print(f"stc={'true' if stc else 'false'}")
     print(f"shards={json.dumps(names)}")
     print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
-          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
+          f"stc: {stc}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
 GROUP = re.compile(r"^── (.*?) \((.*)\)$")
-PASS = re.compile(r"^  ✓ (.*?)(?: \([\d.]+ s\))?$")
-FAIL = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
-SKIP = re.compile(r"^  ⊘ (.*?)(?: \([\d.]+ s\))?$")
+# a case line starts with its position in the run (`[n/total] `; optional for older logs)
+POS = r"(?:\[\d+/\d+\] )?"
+PASS = re.compile(rf"^{POS}  ✓ (.*?)(?: \([\d.]+ s\))?$")
+FAIL = re.compile(rf"^{POS}  ✗ (.*?)(?: \([\d.]+ s\))?$")
+SKIP = re.compile(rf"^{POS}  ⊘ (.*?)(?: \([\d.]+ s\))?$")
 TIME = re.compile(r"^  \((.*): ([\d.]+) s(?:;.*)?\)$")
 TOTAL = re.compile(r"^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?$")
 
@@ -1182,11 +1207,12 @@ def self_test():
         out = []
         for g, cs in groups:
             out.append(f"── {g} (fixture)")
-            for c in cs:
+            for k, c in enumerate(cs, 1):
+                pos = f"[{k}/{len(cs)}] "
                 if isinstance(c, tuple):
-                    out += [f"  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
+                    out += [f"{pos}  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
                 else:
-                    out.append(f"  ✓ {c} (0.010 s)")
+                    out.append(f"{pos}  ✓ {c} (0.010 s)")
             out.append(f"  ({g}: 0.010 s; cases 0.010 s)")
         return "\n".join(out) + "\n"
 

@@ -17,15 +17,26 @@ namespace Wiz.C
 open IR
 
 /-- A C identifier for a Wiz name: letters and digits stay, anything else is `_xx`. -/
-def mangle (n : Name) : String :=
-  "w_" ++ String.join (n.toList.map fun c =>
-    if c.isAlphanum then c.toString
-    else "_" ++ (Nat.toDigits 16 c.toNat).asString ++ "_")
+def mangle (n : Name) : String := PrimOp.mangle n
 
 def var (x : Var) : String := s!"x{x}"
 
 /-- The C wrapper of a foreign function. -/
-def externWrapper (key : Name) : String := "wiz_ext" ++ (mangle key).drop 1
+def externWrapper (key : Name) : String := PrimOp.externWrapper key
+
+/-- This backend's checked primitive table (the shared runtime symbols, stamped `.c`).
+The C and LLVM backends read the same table; neither copies the other's dispatch. -/
+def primTable : List PrimEntry := PrimOp.table .c
+
+/-- The runtime function for a primitive, from this backend's table. A missing entry is
+a compiler error (there is no `wiz_unknown_prim` fallback). -/
+def primFn (op : PrimOp) : String :=
+  match op with
+  | .extern key => externWrapper key
+  | _ =>
+    match primTable.find? (·.prim == op) with
+    | some e => e.symbol
+    | none => panic! s!"C backend: no primitive-table entry for `{op.key}`"
 
 /-- The variables a body binds (to declare them up front). -/
 partial def bound (b : Body) (acc : Array Var := #[]) : Array Var :=
@@ -58,15 +69,7 @@ def expr (arities : Std.HashMap Name Nat) (x : Var) : Expr → String
     let sets := as.toList.zipIdx.map fun (a, i) => s!" WIZ_SET({var x}, {i}, {var a});"
     s!"{var x} = wiz_reuse({var tok}, {t}, {as.size});" ++ String.join sets
   | .prim op as =>
-    let fn := match op with
-      | "nat.succ" => "wiz_nat_succ" | "nat.pred" => "wiz_nat_pred"
-      | "nat.add" => "wiz_nat_add" | "nat.sub" => "wiz_nat_sub" | "nat.mul" => "wiz_nat_mul"
-      | "nat.beq" => "wiz_nat_beq" | "nat.blt" => "wiz_nat_blt" | "lazyTag" => "wiz_lazy_tag" | "lazySet" => "wiz_lazy_set" | "memo" => "wiz_memo"
-      | "tag" => "wiz_tag_of" | "natTag" => "wiz_nat_tag" | "fieldAt" => "wiz_field_at" | "mkObj" => "wiz_mk_obj"
-      | "dropMoved" => "wiz_drop_moved"
-      | op => if op.startsWith "nat." then "wiz_nat_" ++ (op.drop 4).toString
-        else if (RVal.ExternSig.ofKey? op).isSome then externWrapper op else "wiz_unknown_prim"
-    s!"{var x} = {fn}({args as});"
+    s!"{var x} = {primFn op}({args as});"
 where
   lb := "{"
   rb := "}"
@@ -74,7 +77,8 @@ where
 /-- The foreign functions a program uses. -/
 partial def externs (decls : Array IR.Decl) : Array Name :=
   let rec go : Body → Array Name → Array Name
-    | .vdecl _ (.prim op _) b, acc => go b (if (RVal.ExternSig.ofKey? op).isSome && !acc.contains op then acc.push op else acc)
+    | .vdecl _ (.prim (.extern key) _) b, acc => go b (if !acc.contains key then acc.push key else acc)
+    | .vdecl _ (.prim _ _) b, acc => go b acc
     | .vdecl _ _ b, acc | .dup _ b, acc | .drop _ b, acc => go b acc
     | .case _ alts, acc => alts.foldl (fun acc a => go a acc) acc
     | .jdecl _ _ jb k, acc => go k (go jb acc)

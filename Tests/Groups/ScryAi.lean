@@ -3,9 +3,9 @@ import Tests.Harness
 import Tests.Elab
 
 /-!
-# S5: the abstract-interpretation core (`lib/Scry/Ai*.wiz`)
+# S5: the abstract-interpretation core (`scry/src/Scry/Ai*.wiz`)
 
-The hand-built CFGs in `lib/Scry/AiExamples.wiz` exercise the parts of stage S5 that do
+The hand-built CFGs in `scry/src/Scry/AiExamples.wiz` exercise the parts of stage S5 that do
 not need Wil:
 
 * a loop that needs widening, and one narrowing pass that makes its post-fixpoint

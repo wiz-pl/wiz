@@ -1,0 +1,99 @@
+-- The `scry-cs` group's probe (Tests/Groups/ScryCs.lean compiles it with the Scry
+-- package's loader). It runs the real `scry taint` pipeline entry points on the
+-- checked-in `scry-cst` spills; a failing check is an `EIO` error, so the program exits
+-- 1 with the label on stderr. Paths are relative to the repository root.
+import Sys
+import IO
+import Text
+import Scry.CstStore
+import Scry.Sarif
+import Scry.TaintCmd
+
+def ok (label : String) (b : Bool) : EIO Unit :=
+  match b with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (label ++ ": FAILED")
+
+def opts (file rules : String) : Scry.TaintOpts :=
+  { Scry.emptyTaintOpts file with rules := .some rules, timeoutSecs := .none }
+
+def first (fs : List Scry.RuleFinding) : Option Scry.RuleFinding :=
+  match fs with
+  | .cons f _ => .some f
+  | .nil => .none
+
+def locText (rep : Scry.TaintReport) (f : Scry.RuleFinding) : String :=
+  match Scry.originAt rep.origins f.func f.sink with
+  | .some o => Nat.repr o.line ++ ":" ++ Nat.repr o.column
+  | .none => "none"
+
+def firstBool (bs : List Bool) : Option Bool :=
+  match bs with
+  | .cons b _ => .some b
+  | .nil => .none
+
+def memCount (rep : Scry.TaintReport) (rule : String) : Nat :=
+  List.length (List.filter (fun b => String.eq b.rule rule) rep.memory)
+
+def hasNote (rep : Scry.TaintReport) (rule : String) : Bool :=
+  List.any (fun n => String.eq n.rule rule) rep.budgetNotes
+
+def main : IO Unit := EIO.toIO (do
+  cText ← FS.readFile "scry/tests/fixtures/taint-unsafe.c";
+  cSpill ← FS.readFile "scry/tests/fixtures/taint-unsafe.cst";
+  csText ← FS.readFile "scry/corpus/csharp/parity/taint-unsafe.cs";
+  csSpill ← FS.readFile "scry/corpus/csharp/parity/taint-unsafe.cst";
+  nullText ← FS.readFile "scry/corpus/csharp/parity/null-unsafe.cs";
+  nullSpill ← FS.readFile "scry/corpus/csharp/parity/null-unsafe.cst";
+  match Scry.CstStore.ofText cSpill, Scry.CstStore.ofText csSpill, Scry.CstStore.ofText nullSpill with
+  | .ok cc, .ok sc, .ok nc => do
+    let cIdx := Scry.TextIndex.ofString cText;
+    let csIdx := Scry.TextIndex.ofString csText;
+    let nIdx := Scry.TextIndex.ofString nullText;
+    let cOpts := opts "scry/tests/fixtures/taint-unsafe.c" "scry/rules/default.scry";
+    let csOpts := opts "scry/corpus/csharp/parity/taint-unsafe.cs" "scry/corpus/csharp/csharp.scry";
+    let nOpts := opts "scry/corpus/csharp/parity/null-unsafe.cs" "scry/corpus/csharp/csharp.scry";
+    rc ← Scry.analyzeStore cOpts 0 cText cIdx cc (Scry.CstStore.nodeCount cc);
+    rs ← Scry.analyzeCsStore csOpts 0 csText csIdx sc (Scry.CstStore.nodeCount sc);
+    match first rc.findings, first rs.findings with
+    | .some fc, .some fs => do
+      ok "parity: C has one finding" (Nat.beq (List.length rc.findings) 1);
+      ok "parity: C# has one finding" (Nat.beq (List.length rs.findings) 1);
+      ok "parity: both rules are command-injection"
+        (Bool.and (String.eq fc.rule "command-injection") (String.eq fs.rule fc.rule));
+      ok "parity: the sink is on the same line:column"
+        (String.eq (locText rc fc) (locText rs fs));
+      ok "parity: the certificate status agrees"
+        (match firstBool rc.checks, firstBool rs.checks with
+          | .some a, .some b => match a, b with
+            | .true, .true => .true
+            | .false, .false => .true
+            | _, _ => .false
+          | _, _ => .false);
+      ok "parity: the rule id is the same"
+        (String.eq fc.rule fs.rule)
+    | _, _ => ok "parity: both pipelines have a finding" .false;
+    rc0 ← Scry.analyzeStore { cOpts with maxRounds := .some 0 } 0 cText cIdx
+      cc (Scry.CstStore.nodeCount cc);
+    ok "c max-rounds: truncated" rc0.truncated;
+    ok "c max-rounds: zero summary rounds" (Nat.beq rc0.summaryRounds 0);
+    ok "c max-rounds: summary is incomplete" (Bool.not rc0.summaryComplete);
+    ok "c max-rounds: summaries-incomplete note"
+      (hasNote rc0 "scry/budget/summaries-incomplete");
+    ok "c max-rounds: at least one budget note" (Nat.lt 0 (List.length rc0.budgetNotes));
+    rs0 ← Scry.analyzeCsStore { csOpts with maxRounds := .some 0 } 0 csText csIdx
+      sc (Scry.CstStore.nodeCount sc);
+    ok "cs max-rounds: truncated" rs0.truncated;
+    ok "cs max-rounds: zero summary rounds" (Nat.beq rs0.summaryRounds 0);
+    ok "cs max-rounds: summary is incomplete" (Bool.not rs0.summaryComplete);
+    ok "cs max-rounds: summaries-incomplete note"
+      (hasNote rs0 "scry/budget/summaries-incomplete");
+    ok "cs max-rounds: at least one budget note" (Nat.lt 0 (List.length rs0.budgetNotes));
+    n0 ← Scry.analyzeCsStore nOpts 0 nullText nIdx nc (Scry.CstStore.nodeCount nc);
+    n1 ← Scry.analyzeCsStore { nOpts with nullDeref := .true } 0 nullText nIdx nc
+      (Scry.CstStore.nodeCount nc);
+    ok "null-deref: off has no null warning"
+      (Nat.beq (memCount n0 "scry/memory/null-dereference") 0);
+    ok "null-deref: on adds the null warning"
+      (Nat.lt 0 (memCount n1 "scry/memory/null-dereference"))
+  | _, _, _ => ok "the checked-in spills parse" .false)

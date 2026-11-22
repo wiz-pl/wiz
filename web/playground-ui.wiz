@@ -1,8 +1,11 @@
 import IO
 import Json
+import Web.EditorBridge
 import Web.EditorModel
+import Web.Hover
 import Web.Loom
 import Web.Playground
+import Web.Selfhost
 
 /-!
 # The playground page's entry points
@@ -26,7 +29,7 @@ There are two runtime interfaces, not one per effect:
     the page's `onRequest`.
 
 The editor's rules are **reads**, not effects, and take no state: `wiz_loom_editor_*`
-are string-to-string queries (`mount`'s `ask`) over `lib/Web/EditorModel.wiz`, so the
+are string-to-string queries (`mount`'s `ask`) over `lib/Web/EditorBridge.wiz`, so the
 page can ask "which spans does this diagnostic underline?" without a step.
 
 Everything else (the menu, the layout, the state, the patches, the fragment/draft
@@ -58,97 +61,9 @@ def loomConsume (s : Page) (ev : String) : Nat :=
   | .true => 1
   | .false => 0
 
--- The editor's pure rules (`lib/Web/EditorModel.wiz`). The page asks one question at a
--- time and paints the answer; these take no runtime state, so they are reads, not
--- effects. Strings in, strings out, so the browser marshals no objects.
-
-/-- The versioned line table the page caches (`EditorModel.indexJson`). -/
-def loomEditorIndex (version text : String) : String :=
-  EditorModel.indexJson (EditorModel.natOf version) text
-
-/-- The spans a diagnostics array underlines, as JSON. -/
-def loomEditorSegments (text diags maxSegments : String) : String :=
-  EditorModel.segmentsJsonText text diags (EditorModel.natOf maxSegments)
-
-/-- The spans, taking the cached line table (`wiz_loom_editor_index`). -/
-def loomEditorSegmentsIndex (index text diags maxSegments : String) : String :=
-  EditorModel.segmentsJson (EditorModel.indexFromJson text index) diags
-    (EditorModel.natOf maxSegments)
-
-/-- A `textDocument/completion` result's items, as JSON. -/
-def loomEditorItems (result : String) : String :=
-  Json.render (Json.mkArr (EditorModel.completionItems result))
-
-/-- The popup's filtered items, selection and prefix, as JSON. -/
-def loomEditorPopup (text items index offset : String) : String :=
-  EditorModel.popupJson text items index (EditorModel.natOf offset)
-
-/-- The selected index after moving `delta` in `count` items. -/
-def loomEditorMove (index delta count : String) : String :=
-  EditorModel.intString
-    (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
-      (EditorModel.intOf count))
-
-/-- What an accepted item inserts and where, as JSON. -/
-def loomEditorAccept (text item offset : String) : String :=
-  EditorModel.acceptJson text item (EditorModel.natOf offset)
-
-/-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
-def loomEditorTrigger (text c offset : String) : String :=
-  match EditorModel.completionTrigger (EditorModel.index text) c
-    (EditorModel.natOf offset) with
-  | .true => "1"
-  | .false => "0"
-
-/-- The LSP position of a UTF-16 offset, as JSON. -/
-def loomEditorPosition (text offset : String) : String :=
-  EditorModel.positionJsonText text (EditorModel.natOf offset)
-
-/-- The LSP position, taking the cached line table. -/
-def loomEditorPositionIndex (index offset : String) : String :=
-  EditorModel.positionJson (EditorModel.indexFromJson "" index)
-    (EditorModel.natOf offset)
-
-/-- The UTF-16 offset of an LSP position. -/
-def loomEditorOffset (text line character : String) : String :=
-  EditorModel.natString
-    (EditorModel.offsetFromPosition (EditorModel.index text)
-      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
-
-/-- The UTF-16 offset, taking the cached line table. -/
-def loomEditorOffsetIndex (index line character : String) : String :=
-  EditorModel.natString
-    (EditorModel.offsetFromPosition (EditorModel.indexFromJson "" index)
-      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
-
-/-- The UTF-16 offset of a code-point offset (the self-hosted engine counts code points). -/
-def loomEditorUtf16 (text codePoints : String) : String :=
-  EditorModel.natString
-    (EditorModel.utf16OffsetFromCodePoints (EditorModel.index text)
-      (EditorModel.natOf codePoints))
-
-/-- A code-point offset into `prefix ++ text` as a UTF-16 offset into `text`. -/
-def loomEditorEditorOffset (text prefix codePoints : String) : String :=
-  let source := EditorModel.index (String.append prefix text);
-  let at := EditorModel.utf16OffsetFromCodePoints source (EditorModel.natOf codePoints);
-  let cut := EditorModel.length prefix;
-  EditorModel.natString (if Nat.lt at cut then 0 else at - cut)
-
-/-- The UTF-16 offset of the end of the line containing `offset`. -/
-def loomEditorLineEnd (text offset : String) : String :=
-  let i := EditorModel.index text;
-  EditorModel.natString
-    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
-
-/-- The line end, taking the cached line table. -/
-def loomEditorLineEndIndex (index offset : String) : String :=
-  let i := EditorModel.indexFromJson "" index;
-  EditorModel.natString
-    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
-
-/-- The edit an accepted Tab makes at `from`..`to`, as JSON (`host.edit` applies it). -/
-def loomEditorIndent (text from to : String) : String :=
-  EditorModel.indentJson text from to
+-- The editor's pure rules are `lib/Web/EditorBridge.wiz` (the same twenty rules the
+-- infoview and the source reader re-export). The page asks one question at a time and
+-- paints the answer; these take no runtime state, so they are reads, not effects.
 
 -- The self-hosted server's declaration/position index (`wiz_playground_check`'s `index`).
 
@@ -176,32 +91,114 @@ def loomIndexDeclarations (text index : String) : String :=
 def loomIndexDeclaration (text index name : String) : String :=
   EditorModel.lspDeclarationJson text index name
 
+-- The in-page language server's pure half (`lib/Web/Selfhost.wiz`): the engine's lines
+-- as diagnostics, the command splitter, the Prelude rule and the completion/hover/
+-- definition answers. The shim (`web/selfhost-lsp-shim.js`) is the server around them.
+
+/-- The checked source and the embedded Prelude's prefix, as JSON. -/
+def loomLspPrelude (text : String) : String := Selfhost.preludeJson text
+
+/-- The `initialize` answer's capabilities, as JSON. -/
+def loomLspCapabilities : String := Selfhost.capabilitiesJson
+
+/-- The top-level commands of a source, as JSON. -/
+def loomLspCommands (text : String) : String := Selfhost.commandsJson text
+
+/-- The engine's output lines (the final empty piece dropped), as JSON. -/
+def loomLspOutputLines (output : String) : String :=
+  Json.render (Json.mkArr (List.map Json.mkStr (Selfhost.outputLines output)))
+
+/-- A `parse error N: …` line's code-point offset (`-1` when it is not one). -/
+def loomLspParseError (line : String) : String :=
+  match Selfhost.parseErrorOffset line with
+  | .some n => EditorModel.natString n
+  | .none => "-1"
+
+/-- The diagnostics for the engine's text output, as JSON. -/
+def loomLspDiagnosticsOutput (text output : String) : String :=
+  Selfhost.diagnosticsOutputJson text output
+
+/-- `wiz_playground_check`'s JSON as a parsed check answer, or `null`. -/
+def loomLspParseCheck (json : String) : String := Selfhost.parseCheck json
+
+/-- The diagnostics from a parsed check answer, as JSON. -/
+def loomLspDiagnosticsCheck (text answer : String) : String :=
+  Selfhost.diagnosticsCheckJson text answer
+
+/-- The identifier before the caret: `{start, prefix}`. -/
+def loomLspCompletionPrefix (text offset : String) : String :=
+  Selfhost.completionPrefixJson text (EditorModel.natOf offset)
+
+/-- The identifier under (or before) the caret: `{start, end, word}`. -/
+def loomLspWordAt (text offset : String) : String :=
+  Selfhost.wordAtJson text (EditorModel.natOf offset)
+
+/-- Declarations whose label starts with a prefix, as completion items. -/
+def loomLspFilterCompletions (names prefix limit : String) : String :=
+  Selfhost.filterCompletionsJson names prefix limit
+
+/-- `textDocument/completion` at a position, from the check's declaration index. -/
+def loomLspCompletion (text index position : String) : String :=
+  Selfhost.completionJson text index position
+
+/-- `textDocument/hover` at a position. -/
+def loomLspHover (text index position : String) : String :=
+  Selfhost.hoverJson text index position
+
+/-- `textDocument/definition` at a position. -/
+def loomLspDefinition (text index position uri : String) : String :=
+  Selfhost.definitionJson text index position uri
+
+/-- A `textDocument/definition` result as `{uri, range, label}`, or `null` (the runtime's
+rule for the answer; `web/hover.js` only applies it). -/
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
 export "wiz_loom_init" loomInit
 export "wiz_loom_html" loomHtml
 export "wiz_loom_step" loomStep
 export "wiz_loom_effect" loomEffect
 export "wiz_loom_requests" loomRequests
 export "wiz_loom_consume" loomConsume
-export "wiz_loom_editor_index" loomEditorIndex
-export "wiz_loom_editor_segments" loomEditorSegments
-export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
-export "wiz_loom_editor_items" loomEditorItems
-export "wiz_loom_editor_popup" loomEditorPopup
-export "wiz_loom_editor_move" loomEditorMove
-export "wiz_loom_editor_accept" loomEditorAccept
-export "wiz_loom_editor_trigger" loomEditorTrigger
-export "wiz_loom_editor_position" loomEditorPosition
-export "wiz_loom_editor_position_index" loomEditorPositionIndex
-export "wiz_loom_editor_offset" loomEditorOffset
-export "wiz_loom_editor_offset_index" loomEditorOffsetIndex
-export "wiz_loom_editor_utf16" loomEditorUtf16
-export "wiz_loom_editor_editor_offset" loomEditorEditorOffset
-export "wiz_loom_editor_line_end" loomEditorLineEnd
-export "wiz_loom_editor_line_end_index" loomEditorLineEndIndex
-export "wiz_loom_editor_indent" loomEditorIndent
+export "wiz_loom_editor_index" EditorBridge.indexJson
+export "wiz_loom_editor_segments" EditorBridge.segments
+export "wiz_loom_editor_segments_index" EditorBridge.segmentsIndex
+export "wiz_loom_editor_items" EditorBridge.items
+export "wiz_loom_editor_popup" EditorBridge.popup
+export "wiz_loom_editor_move" EditorBridge.move
+export "wiz_loom_editor_key" EditorBridge.key
+export "wiz_loom_editor_accept" EditorBridge.accept
+export "wiz_loom_editor_trigger" EditorBridge.trigger
+export "wiz_loom_editor_position" EditorBridge.position
+export "wiz_loom_editor_position_index" EditorBridge.positionIndex
+export "wiz_loom_editor_offset" EditorBridge.offset
+export "wiz_loom_editor_offset_index" EditorBridge.offsetIndex
+export "wiz_loom_editor_utf16" EditorBridge.utf16
+export "wiz_loom_editor_editor_offset" EditorBridge.editorOffset
+export "wiz_loom_editor_line_end" EditorBridge.lineEnd
+export "wiz_loom_editor_line_end_index" EditorBridge.lineEndIndex
+export "wiz_loom_editor_indent" EditorBridge.indent
+export "wiz_loom_editor_item_title" EditorBridge.itemTitle
+export "wiz_loom_editor_ask_key" EditorBridge.askKey
+export "wiz_loom_editor_span" EditorBridge.span
+export "wiz_loom_editor_range_text" EditorBridge.rangeText
+export "wiz_loom_hover_target" loomHoverTarget
 export "wiz_loom_index_build" loomIndexBuild
 export "wiz_loom_index_size" loomIndexSize
 export "wiz_loom_index_term" loomIndexTerm
 export "wiz_loom_index_goal" loomIndexGoal
 export "wiz_loom_index_declarations" loomIndexDeclarations
 export "wiz_loom_index_declaration" loomIndexDeclaration
+export "wiz_loom_lsp_capabilities" loomLspCapabilities
+export "wiz_loom_lsp_prelude" loomLspPrelude
+export "wiz_loom_lsp_commands" loomLspCommands
+export "wiz_loom_lsp_output_lines" loomLspOutputLines
+export "wiz_loom_lsp_parse_error" loomLspParseError
+export "wiz_loom_lsp_diagnostics_output" loomLspDiagnosticsOutput
+export "wiz_loom_lsp_parse_check" loomLspParseCheck
+export "wiz_loom_lsp_diagnostics_check" loomLspDiagnosticsCheck
+export "wiz_loom_lsp_completion_prefix" loomLspCompletionPrefix
+export "wiz_loom_lsp_word_at" loomLspWordAt
+export "wiz_loom_lsp_filter_completions" loomLspFilterCompletions
+export "wiz_loom_lsp_completion" loomLspCompletion
+export "wiz_loom_lsp_hover" loomLspHover
+export "wiz_loom_lsp_definition" loomLspDefinition

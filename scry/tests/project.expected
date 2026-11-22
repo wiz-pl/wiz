@@ -42,10 +42,51 @@ sarif: four artifacts: ok
 sarif: first artifact is app.c: ok
 sarif: one result per finding and warning: ok
 sarif: result artifact has uriBaseId and index: ok
+cache: the frontend stamp is in the key: ok
+cache: --keep-system-headers is in the key: ok
+cache: --allow-errors is in the key: ok
+cache: the flags are in the key: ok
+cache: the source path is in the key: ok
+cache: the stored CST path is in the key: ok
+cache: the source text is in the key: ok
 cache: cold miss for every TU: ok
 cache: warm hit for every TU: ok
+cache: a warm cache reproduces the findings byte for byte: ok
+cache: --allow-errors is in the key (a strict run misses): ok
+cache: the strict entry warms too: ok
+cache: a rule-pack change cannot replay stale findings: ok
+cache: a single-TU project is cold: ok
+cache: rewriting identical source text still hits: ok
+cache: a changed source file misses: ok
+cache: the changed source is what was analysed (two functions): ok
+cache: a header project is cold: ok
+cache: a header project warms: ok
+cache: the header's first macro names the callee: ok
+cache: a changed header misses: ok
+cache: the changed header's macro is what was parsed: ok
+cache: the one-TU version fixture is cold: ok
+cache: the entry names its format version: ok
+cache: the entry names the frontend stamp: ok
+cache: the frontend fixture rewrote its stamp: ok
+cache: an entry from another frontend is a clean miss: ok
+cache: the frontend-mismatched entry warms after rewrite: ok
+cache: the format fixture rewrote its magic: ok
+cache: an entry from another format is a clean miss: ok
+cache: the format-mismatched entry warms after rewrite: ok
+cache: a truncated entry is recomputed, not a hit: ok
+cache: the truncated entry warms after rewrite: ok
 cache: corrupt entries are recomputed: ok
 cache: warm again after corruption: ok
 cache: symlink tmp refused: ok
 cache: symlink target unchanged: ok
+index: json cold: ok
+index: json hit: ok
+index: quire cold: ok
+index: quire hit: ok
+index: json and quire hold the same findings: ok
+index: quire severity query: ok
+index: json severity query: ok
+index: corrupt quire is a miss: ok
+index: quire hit after repair: ok
+index: truncated quire is a miss: ok
 cache: cleanup: ok

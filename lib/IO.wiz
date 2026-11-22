@@ -206,8 +206,12 @@ partial def Nat.toString (n : Nat) : String := match Nat.lt n 100000000000000000
 extern "wiz_io_println" IO.println : String → IO Unit
 /-- Print text on standard output, without a newline. -/
 extern "wiz_io_print" IO.print : String → IO Unit
-/-- The contents of a file, as text. (For errors as values, use `FS.readFile` in
-lib/Sys.wiz.) -/
+/-- The contents of a file, as text. A path that does not exist reads as empty text
+(so a missing file and an empty one look alike: this is how the module loader asks
+"is there a file here?"), while any other failure (a directory, no permission, a read
+error) prints `wiz: <path>: <message>` on standard error and exits 1, like
+`IO.writeFile`. `IO String` has no error channel; for errors as values use
+`FS.readFile` in lib/Sys.wiz. -/
 extern "wiz_io_read_file" IO.readFile : String → IO String
 
 -- The program's command-line arguments, without its name (stage 21k). (`#eval` and `#run`

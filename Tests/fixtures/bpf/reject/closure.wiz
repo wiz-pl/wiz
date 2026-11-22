@@ -1,0 +1,4 @@
+-- [UNRUN] P0 reject fixture: a closure has no eBPF representation.
+import Bpf
+
+def bad (f : UIntN 32 -> UIntN 32) (x : UIntN 32) : UIntN 32 := f x

@@ -792,6 +792,108 @@ def EditorModel.popupJson (text items index : String) (offset : Nat) : String :=
     , ("prefixWord", Json.mkStr prefix.2)
     ])
 
+/-- The documentation as a tooltip: a string, a `{value}` object, else the item's detail.
+(`web/completions.js` used to do this before drawing the row.) -/
+def EditorModel.itemTitleJson (item : String) : String :=
+  let j := match Json.parse item with
+    | .ok v => v
+    | .error _ => Json.mkObj [];
+  let detail := match Json.get j "detail" with
+    | .some v => match Json.asString v with
+      | .some s => s
+      | .none => ""
+    | .none => "";
+  match Json.get j "documentation" with
+  | .some (.str s) => s
+  | .some v => match Json.get v "value" with
+    | .some (.str s) => s
+    | _ => detail
+  | .none => detail
+
+/-- Whether a key event asks for completions now: Ctrl/⌘-Space. -/
+def EditorModel.askKey (key code : String) (ctrl meta : Bool) : Bool :=
+  (String.eq key " " || String.eq key "Spacebar" || String.eq code "Space") &&
+  (ctrl || meta)
+
+/-- How far a popup key moves the selection: `1`/`-1` for an arrow, `10`/`-10` for a page,
+`0` for a key that does not move. -/
+def EditorModel.completionDelta (key : String) : Int :=
+  if String.eq key "ArrowDown" then (1 : Int)
+  else if String.eq key "ArrowUp" then (-1 : Int)
+  else if String.eq key "PageDown" then (10 : Int)
+  else if String.eq key "PageUp" then (-10 : Int)
+  else (0 : Int)
+
+/-- The popup's response to a keydown, as JSON: `{"action":"move","index":N}` (the
+runtime's selected index after moving from `index` in `count` items), `{"action":"accept"}`,
+`{"action":"close"}`, or `{"action":"ignore"}`. The popup host only carries the action out
+and calls `preventDefault`; it keeps no key table of its own. -/
+def EditorModel.popupKeyJson (key index count : String) : String :=
+  let d := EditorModel.completionDelta key;
+  let j :=
+    if Int.beq d 0 then
+      if String.eq key "Enter" || String.eq key "Tab" then
+        Json.mkObj [("action", Json.mkStr "accept")]
+      else if String.eq key "Escape" then
+        Json.mkObj [("action", Json.mkStr "close")]
+      else Json.mkObj [("action", Json.mkStr "ignore")]
+    else
+      Json.mkObj
+        [ ("action", Json.mkStr "move")
+        , ("index", match EditorModel.moveSelection (EditorModel.intOf index) d
+              (EditorModel.intOf count) with
+            | .ofNat n => Json.ofNat n
+            | .negSucc k => Json.int .true (k + 1))
+        ];
+  Json.render j
+
+/-- Split `s` at exactly one `sep` (`none` otherwise). -/
+def EditorModel.split2 (s sep : String) : Option (String × String) :=
+  match String.splitOn s sep with
+  | .cons a (.cons b .nil) => .some (a, b)
+  | _ => .none
+
+/-- The `start`/`end` offsets of a `LINE:CHAR-LINE:CHAR` span, as JSON `[start, end]`, or
+`null` when the text is not one. -/
+def EditorModel.spanJson (text span : String) : String :=
+  match EditorModel.split2 span "-" with
+  | .none => "null"
+  | .some (a, b) => match EditorModel.split2 a ":" with
+    | .none => "null"
+    | .some (sl, sc) => match EditorModel.split2 b ":" with
+      | .none => "null"
+      | .some (el, ec) => match String.parseNat sl, String.parseNat sc,
+          String.parseNat el, String.parseNat ec with
+        | .some line, .some character, .some endLine, .some endCharacter =>
+          let i := EditorModel.index text;
+          let start := EditorModel.offsetFromPosition i
+            (EditorModel.Position.mk line character);
+          let stop := EditorModel.offsetFromPosition i
+            (EditorModel.Position.mk endLine endCharacter);
+          Json.render (Json.mkArr
+            [Json.ofNat start, Json.ofNat (if Nat.lt start stop then stop else start)])
+        | _, _, _, _ => "null"
+
+/-- A JSON position's `line` or `character` as a decimal string. -/
+def EditorModel.jsonCoord (v : Json) (k : String) : String :=
+  Nat.repr (Json.getNat v k)
+
+/-- An LSP range (`{start: {line, character}, end: …}`) as `LINE:CHAR-LINE:CHAR`. -/
+def EditorModel.rangeTextJson (range : String) : String :=
+  let j := match Json.parse range with
+    | .ok v => v
+    | .error _ => Json.mkObj [];
+  let start := match Json.get j "start" with
+    | .some v => v
+    | .none => Json.mkObj [];
+  let stop := match Json.get j "end" with
+    | .some v => v
+    | .none => start;
+  String.append (String.append (EditorModel.jsonCoord start "line")
+      (String.append ":" (EditorModel.jsonCoord start "character")))
+    (String.append "-" (String.append (EditorModel.jsonCoord stop "line")
+      (String.append ":" (EditorModel.jsonCoord stop "character"))))
+
 /-- An accepted item as JSON, for the page's edit. -/
 def EditorModel.acceptJson (text item : String) (offset : Nat) : String :=
   let a := EditorModel.acceptCompletion text item offset;

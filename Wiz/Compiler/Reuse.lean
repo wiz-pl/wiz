@@ -193,7 +193,7 @@ partial def dropScalars (b : Body) (sc : Std.HashSet Var := {}) : Body :=
       | .lit n => n < 2 ^ 62
       | .ctor _ as => as.isEmpty
       -- tests and tags are scalars too
-      | .prim op _ => op == "nat.beq" || op == "nat.blt" || op == "natTag" || op == "tag"
+      | .prim op _ => op.borrows
       | _ => false
     .vdecl x e (dropScalars rest (if scalar then sc.insert x else sc))
   | .dup x rest => if sc.contains x then dropScalars rest sc else .dup x (dropScalars rest sc)
@@ -212,7 +212,7 @@ partial def elimDead : Body → Body × Std.HashSet Var
     let pure := match e with
       | .erased | .lit _ | .ctor _ _ | .proj _ _ | .pap _ _ => true
       -- operations on numbers, tests and tags (often left unused by constant folding)
-      | .prim op _ => op.startsWith "nat." || op == "natTag" || op == "tag"
+      | .prim op _ => op.isNat || op == .natTag || op == .tag
       | _ => false
     if pure && !fv.contains x then (rest', fv)
     else (.vdecl x e rest', e.args.foldl (·.insert ·) (fv.erase x))

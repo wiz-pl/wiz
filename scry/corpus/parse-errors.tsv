@@ -1,0 +1,11 @@
+# Corpus files that are deliberately not valid for their language.
+#
+# `scry/tests/corpus-parse.wiz` parses every `.c` with tree-sitter-c and every `.cs`
+# with tree-sitter-c-sharp and requires 0 ERROR/MISSING nodes for every file *not*
+# listed here. A row here is an exemption, and a stale row (a file that now parses)
+# fails too. Paths are relative to `scry/`.
+#
+# path	reason
+# (tree-sitter-c 0.24.2 accepts `extern "C"`, so corpus/project/macro/macro.c is no
+# longer an exemption; the manifest test fails if it is re-added as one.)
+corpus/csharp/repo/src/Broken.cs	deliberately invalid C#; the driver reports one per-file parse failure row

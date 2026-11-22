@@ -1,0 +1,4 @@
+-- [UNRUN] P0 accept neighbour: the largest literal below a 64-bit width.
+import Bpf
+
+def ok (x : UIntN 64) : UIntN 64 := UIntN.shiftLeft x 63

@@ -1,0 +1,11 @@
+examples/hdl-bitpack.wiz:43:1: info: (2, 18, 0, 18)
+examples/hdl-bitpack.wiz:44:1: info: (7, 3, 4)
+examples/hdl-bitpack.wiz:45:1: info: (5, 1, 4)
+examples/hdl-bitpack.wiz:48:1: info: 9
+examples/hdl-bitpack.wiz:49:1: info: 51
+examples/hdl-bitpack.wiz:50:1: info: 64
+examples/hdl-bitpack.wiz:51:1: info: 19
+examples/hdl-bitpack.wiz:53:1: info: 131372
+examples/hdl-bitpack.wiz:77:1: info: (.true, .true, .true)
+examples/hdl-bitpack.wiz:86:1: info: [Bool.true, Bool.true, Bool.true, Bool.true]
+examples/hdl-bitpack.wiz:91:1: info: [0, 0, 1, 0]

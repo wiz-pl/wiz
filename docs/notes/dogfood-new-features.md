@@ -52,10 +52,10 @@ The other candidates (equality lemmas at `Sort u`, `BEq` in the Prelude, the HDL
 | `Optic`/`OpticDerive`, `Functor`, `Eff`/`Handle`, `Region`/`Result1` | **now** | `lib/Optic.wiz`, `lib/OpticDerive.wiz`, `lib/Functor.wiz`, `lib/Eff.wiz`, `lib/Handle.wiz`, `lib/Region.wiz`. |
 | `sat_decide_native` | **not a PR** | an axiom whose statement mentions the certificate costs as much as the check itself: no gain, more trust. Do not adopt. (It has since been added anyway as [28e](../stages/28-solvers.md), behind `--trust-native`.) |
 | scry typed columns / e-graph | **after stack** | `lib/Scry/*` and the `scry/` package only exist on that stack. |
-| Hdl named ports / bundles / reset / enable | **now** | `lib/Hdl/Core.wiz:148,1749-1785,2534-2660`; structured wires (`Wire t := NetM (HwTy.Ids t)`, `Core.wiz:931`). |
-| Hdl multi-clock / CDC | **after stack** | design and prototype only at the audit; now `Multi`, `Clocking.domains` and `lib/Hdl/Cdc.wiz` ([libraries.md](../libraries.md), H14 P2). |
+| Hdl named ports / bundles / reset / enable | **now** | `hdl/src/Hdl/Core.wiz:148,1749-1785,2534-2660`; structured wires (`Wire t := NetM (HwTy.Ids t)`, `Core.wiz:931`). |
+| Hdl multi-clock / CDC | **after stack** | design and prototype only at the audit; now `Multi`, `Clocking.domains` and `hdl/src/Hdl/Cdc.wiz` ([libraries.md](../libraries.md), H14 P2). |
 
-`--trust-native` appears only in examples and tests (`examples/hdl-verified-*.wiz`,
+`--trust-native` appears only in examples and tests (`hdl/examples/hdl-verified-*.wiz`,
 `Tests/Native.lean`), with a trust note at each use; no library file uses `native_refl`
 (9 non-comment uses, all in examples). No `sorry` in `lib/` or `selfhost/`. The 22 `axiom`s in
 `lib/` are the documented natives and `Region`'s lifetime primitives (`lib/Region.wiz:33-48`,
@@ -74,11 +74,11 @@ the workstreams' main prizes and should not be read as rejected.
 | 2 | Equality lemmas at `Sort u`/`Type u` (**now**) | `lib/Logic.wiz:197-232`, duplicate `congrArg` at `lib/Nat.wiz:43-48`; downstream copy `wiz-cats/src/Cats/Eq.wiz:1-12` (G1 in `wiz-cats/FINDINGS.md`) | 1 | deletes a 29-line workaround module and the every-lemma-is-`Type`-only papercut; categories and any `Type u` proof get the standard lemmas | 10.0 |
 | 3 | Delete the duplicated Text utilities (**now**) | `lib/Json.wiz:57-88` (`divMod`, `natChars`, `charsEq`, `revOnto`, despite `import Text` at `:2`); `lib/Feral.wiz:137-175,160-168,1016-1024` (`leq`, `seq`, `lpre`, `map`, `any`, `splitGo`, `wordsOf`) | 1 | −~90 lines, one copy of list/string helpers; `Json.divMod` becomes the native `Nat.div`/`Nat.mod`, and the two O(n²) one-char-at-a-time accumulates in Feral become linear | 10.0 |
 | 4 | `do` blocks in the I/O library (**now**) | `lib/Sys.wiz` (31 `IO.bind`/`EIO.bind`, e.g. `:205-236`), `lib/IO.wiz:189-194`, `lib/Handle.wiz` | 1 | −~40 lines of `bind (fun x => …)`; `Monad IO`/`Monad1 IO` already exist (`lib/IO.wiz:52-59`), so this is semantics-preserving | 10.0 |
-| 5 | Modernize the HDL examples and drop the local list helpers (**now**) | `examples/hdl-gaps.wiz:145-154`, `examples/hdl-mem.wiz:65-72`, `examples/hdl-sim.wiz:62`, `examples/hdl-compose.wiz:67,115-116`; `lib/Hdl/Core.wiz:63-70` (`Hdl.map`/`Hdl.rev`), `:81` (`Hdl.natsEq`), `:948` (`Hdl.wEq`) | 1 | a `Circuit.RstEn`/`HwTy.rstEn` alias next to `withResetEnable` (`Core.wiz:1771`) removes the 3-line `prod (named "rst") (prod (named "en") …)` from 5 files; `BEq` for `List Nat`/triples removes 3 hand-written equalities (~40 lines) | 10.0 |
+| 5 | Modernize the HDL examples and drop the local list helpers (**now**) | `hdl/examples/hdl-gaps.wiz:145-154`, `hdl/examples/hdl-mem.wiz:65-72`, `hdl/examples/hdl-sim.wiz:62`, `hdl/examples/hdl-compose.wiz:67,115-116`; `hdl/src/Hdl/Core.wiz:63-70` (`Hdl.map`/`Hdl.rev`), `:81` (`Hdl.natsEq`), `:948` (`Hdl.wEq`) | 1 | a `Circuit.RstEn`/`HwTy.rstEn` alias next to `withResetEnable` (`Core.wiz:1771`) removes the 3-line `prod (named "rst") (prod (named "en") …)` from 5 files; `BEq` for `List Nat`/triples removes 3 hand-written equalities (~40 lines) | 10.0 |
 | 6 | `wiz build --split 4/8` in the fixpoint and CI selfhost builds (**after stack**) | `scripts/fixpoint.sh:26`; the CI selfhost compile step (`grail selfhost`/`wiz build` in `Grail/Selfhost.lean`) | 1 | the stage-1 selfhost compile is faster at `--split 8` (informal), but the built binary is slower, so the net fixpoint gain is smaller | 9.0 |
 | 7 | Ship the Nix package with a warmed read-only cache (**after stack**) | `flake.nix:88-103` (installPhase), plus `--cache-ro $out/share/wiz/cache` in the wrappers | 1 | clean-`HOME` `grail build` of a one-target package 3.2 → 0.9 s, 437 store entries hit (informal) | 8.0 |
-| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; informal), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
-| 9 | Thread the hash through `HTrie`, cheapen `NatList.hash` (**now**) | `lib/Hdl/Core.wiz:761-766` (hash), `:785-810` (find/insert: 20 × `Nat.testBit h d`, each a division by `2^d`) | 1 | one shift per level instead of 20 `div`+`pow` per emitted node; est. 5–15% off `Circuit.netlist` on big designs (measure `examples/hdl-temporal.wiz`) | 6.0 |
+| 8 | Give Grail jobs the region cache (**now feature, plumbing ours**) | `Wiz/Toolchain.lean:28-31,104-111`; `Grail/Elab.lean:66-69` (`elaborate`); `Grail/Cli.lean:96-118` (the job process) | 2 | ~1.0 s of a 3.3 s warm `wiz check` of `hdl/examples/hdl-compose.wiz` is `.wizc` decode (12 modules, 15.5 MB text vs 5.5 MB regions; informal), so est. 15–25% off warm grail builds plus lower RSS | 6.0 |
+| 9 | Thread the hash through `HTrie`, cheapen `NatList.hash` (**now**) | `hdl/src/Hdl/Core.wiz:761-766` (hash), `:785-810` (find/insert: 20 × `Nat.testBit h d`, each a division by `2^d`) | 1 | one shift per level instead of 20 `div`+`pow` per emitted node; est. 5–15% off `Circuit.netlist` on big designs (measure `hdl/examples/hdl-temporal.wiz`) | 6.0 |
 | 10 | Native store and array-backed e-graph for scry (**after stack**) | `lib/Scry/Store.wiz:30-95` (`memRow`/`insert` linear), `lib/Scry/Egraph.wiz:177-250` (`List.append g.parent [id]` per node, linear `find`); `scry/src/Scry/CstStore.wiz` (already `U32Array`/`U64Array`) | 4 | the Wiz-side copy into the model is ~85% of parse wall time (0.53–0.91 MB/s vs the shim's 3.3–6.5; informal); store/e-graph go from O(n²) to near-linear | 5.0 (6.25 if the native store lands as designed) |
 
 **Big rocks, not in the scored top 10** (high impact, high effort, confidence still medium):
@@ -112,7 +112,7 @@ term kernel-checked and unchanged in statement.
 * `lib/IntRing.wiz:96-110` (transports whose equations are `nat_ring!` steps).
 * `lib/Rat.wiz:208-237` (`Q.trans` is 4 nested `Eq.via`s, `Q.add_congr`, `Q.mul_congr`).
 * `lib/Nat.wiz:50-57`, `lib/Ring.wiz:91-200`, `lib/Vec.wiz`, `lib/HProp.wiz:108-113,312`,
-  `lib/HoareExamples.wiz:125`, `lib/Hdl/Bits.wiz:180`, `lib/Hdl/Temporal.wiz:164,302`.
+  `lib/HoareExamples.wiz:125`, `hdl/src/Hdl/Bits.wiz:180`, `hdl/src/Hdl/Temporal.wiz:164,302`.
 * `wiz-reals/src/Reals/QSeq.wiz:11,31-35` (same style, downstream).
 
 Also add the missing instances: `HEquiv` (`lib/HoareTactics.wiz:47`) so separation-logic chains
@@ -147,7 +147,7 @@ from several jobs must be summed by the scheduler.
 
 ### W3. Numeric and data-structure fast paths (**now**)
 
-* `lib/Hdl/Core.wiz:761-766`: hash with `Nat.land` (or at least fold without a division per
+* `hdl/src/Hdl/Core.wiz:761-766`: hash with `Nat.land` (or at least fold without a division per
   element); `:775-810`: carry the hash halved down the trie and test the low bit, instead of
   `Nat.testBit h d` at every level. Check that `HTrie.depth = 20` is still the right trade.
 * `lib/Ring.wiz:56-70,81-107`: `Ring.Key.merge` should merge two sorted lists in one pass instead of
@@ -166,7 +166,7 @@ from several jobs must be summed by the scheduler.
   at 100k operations pmap is ~0.31 s vs umap ~0.03 s (informal).
 
 Expected: checking time for ring-heavy files (est. 5–15% on `lib/Rat.wiz`/`lib/IntRing.wiz`),
-netlist build 5–15% (`Circuit.netlist` on `examples/hdl-temporal.wiz`), fewer allocations.
+netlist build 5–15% (`Circuit.netlist` on `hdl/examples/hdl-temporal.wiz`), fewer allocations.
 Confidence: HTrie/ring high that the work is safe, medium on the size; measure first.
 
 ### W4. Result / Region / IO plumbing (**now + after stack**)
@@ -187,8 +187,8 @@ Expected: −80–120 lines, clearer specs; `=regions`, `=effects`, `=seplogic` 
 
 ### W5. HDL modernization and CDC (**now + after stack**)
 
-* Now: add `HwTy.rstEn`/`Circuit.RstEn` beside `Circuit.withResetEnable` (`lib/Hdl/Core.wiz:1771`)
-  and use it in `examples/hdl-gaps.wiz:145-154`, `hdl-mem.wiz:65-72`, `hdl-sim.wiz:62`,
+* Now: add `HwTy.rstEn`/`Circuit.RstEn` beside `Circuit.withResetEnable` (`hdl/src/Hdl/Core.wiz:1771`)
+  and use it in `hdl/examples/hdl-gaps.wiz:145-154`, `hdl-mem.wiz:65-72`, `hdl-sim.wiz:62`,
   `hdl-compose.wiz:67,115-116`.
 * Now: remove `Hdl.map`/`Hdl.rev`/`Hdl.reverse` (`Core.wiz:63-70`) in favour of `List.map`/
   `List.reverse` (in scope through `Deriving` → `Text`; add `import Text` if that ever stops
@@ -197,11 +197,11 @@ Expected: −80–120 lines, clearer specs; `=regions`, `=effects`, `=seplogic` 
   Caveat: the `Hdl.` prefix was chosen so importers keep the general names; with `private`
   (wishful `private-decls`) the reason disappears.
 * After CDC merges (it has since, see the table at the top): a second register domain per composed top, CDC cells
-  (`sync2`, `asyncFifo`) and domain annotations on wires; the prototype `examples/hdl-cdc.wiz`
+  (`sync2`, `asyncFifo`) and domain annotations on wires; the prototype `hdl/examples/hdl-cdc.wiz`
   already emits two clocks but cannot clock a register, and crossing domains is silently
   accepted. Port `wiz-rv/src/Rv/{Core,Pipe,Board}.wiz` (already `deriving Bundle`) and check the
-  `Clocking`/`Prim` kind checks (`lib/Hdl/Prim.wiz:97-175`).
-* `lib/Hdl/Sim.wiz` is already the fast path (`Array`-based `simFast`, `:362-385`); document in
+  `Clocking`/`Prim` kind checks (`hdl/src/Hdl/Prim.wiz:97-175`).
+* `hdl/src/Hdl/Sim.wiz` is already the fast path (`Array`-based `simFast`, `:362-385`); document in
   examples that value simulation of a big circuit should use `Circuit.simFast`, not `Circuit.run`
   (CAF issue in the big-rocks list).
 
@@ -236,7 +236,7 @@ the e-graph benchmarks.
   and `lib/Feral.wiz` (the `Fe.splitGo`/`Fe.wordsOf` char-by-char append is O(n²) in the word
   length; use a reversed accumulator and one reverse, as `Chars.splitGo` does at `lib/Text.wiz:158-166`).
 * After `wiz fmt` merges: run it on `lib/Feral.wiz`, `selfhost/{Kernel,Frontend,Backend}.wiz`,
-  `lib/BitBlast.wiz`, `lib/Hdl/Core.wiz` (236/165/164/121/113 lines over 110 columns today) and
+  `lib/BitBlast.wiz`, `hdl/src/Hdl/Core.wiz` (236/165/164/121/113 lines over 110 columns today) and
   keep a `--check` gate for new files.
 * After `wiz lint` merges: `wiz lint lib/Prelude.wiz` reports 26 warnings including 2 real binder
   shadows in `Eq.subst`/`Eq.substBack` (found by the linter's prototype); fix those 2 and run lint over `lib/`
@@ -257,7 +257,7 @@ and a selfhost prelude that cannot drift.
   every global name with `Str.ofString`; keep a `StrMap` on the `String` (it already is one) but
   avoid the conversion by keeping `Str` in the scope, or intern names and key a `U64Map`.
 * `selfhost/Kernel.wiz:572-576` (`lookup`): walks the de Bruijn environment per variable; a
-  random-access structure (the `Hdl.RList` pattern, `lib/Hdl/Core.wiz:1230-1260`, or a trie)
+  random-access structure (the `Hdl.RList` pattern, `hdl/src/Hdl/Core.wiz:1230-1260`, or a trie)
   would make it O(log n). This is the stage-2 hot path; measure before changing (array copies on
   `bind` can lose).
 * `selfhost/Backend.wiz:435-450,2465`: `StrMap` lookups per codegen application; the same intern
@@ -285,7 +285,7 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 | `Int*` | `IntRing` 64 `Eq.trans`/50 `congrArg`, many with explicit `@Eq.trans Int …` (`:96-110`); `Int.beq` is hand-written (`lib/Int.wiz:84-88`) | ring reflection normalises polynomials with sorted-list inserts (`lib/Ring.wiz:81-123`), quadratic in the monomial count; small goals only | `Int`'s pair representation is sound and well documented; `Int.beq`/`Int.lt` are candidates for `deriving BEq`/instances |
 | `Rat` | `Q.trans`/`Q.add_congr`/`Q.mul_congr` are 4-deep `Eq.via` chains (`:208-237`), the best calc target after BitVecShift | `q_ring!`/`int_ring!` run at check time; the Ring fast paths (W3) help | `≈` is a setoid over unreduced fractions; `Q.ofEq`/`Q.refl` are fine |
 | `Vec` | 13 `Eq.trans`, 16 `congrArg`; induction lemmas (`Vec.get_set`, `Vec.map_map`) | `Vec.length` counts the list (`:77`), used in proofs; `Vec.fromList`/`toList` are the runtime representation | indices are erased, so runtime is a list; the missing Nat div/mod lemmas block the `BitVec.toVec`/`ofVec` round-trips (an open request) |
-| `Hdl/*` | bundles/`deriving Bundle`/`Hw.label` are adopted in `examples/hdl-compose.wiz` and wiz-rv; `Hdl.map`/`natsEq` are leftovers | `HTrie` uses 20 `Nat.testBit` per lookup (`Core.wiz:785-810`); `simFast` is already array-based (`Sim.wiz:362-385`); netlists are `List Nat` (kernel-friendly) | CDC absent (after stack); async reset not supported (an open request); the state is one register per leaf, documented |
+| `Hdl/*` | bundles/`deriving Bundle`/`Hw.label` are adopted in `hdl/examples/hdl-compose.wiz` and wiz-rv; `Hdl.map`/`natsEq` are leftovers | `HTrie` uses 20 `Nat.testBit` per lookup (`Core.wiz:785-810`); `simFast` is already array-based (`Sim.wiz:362-385`); netlists are `List Nat` (kernel-friendly) | CDC absent (after stack); async reset not supported (an open request); the state is one register per leaf, documented |
 | `Hoare*` / `HProp` / seplogic | `Heap.trans` (`HProp.wiz:112`) and `:312` use explicit `@Eq.trans`; `HEquiv` has no `Trans` instance | `Heap` is a function `Nat → Option V`, so a state is symbolic; the tactics do list scans over `starL`, which is the design | `HProp`'s heap is a total function (no partiality), and `Result.Holds`/`Triple` line up; no axioms |
 | `Region`/`Result`/`Eff`/`IO` | `Region.wiz:133-215` nests `match` on the handle inside the result match; `Sys.wiz` uses 31 explicit binds | region scopes are `[inline]` and unboxed (`Region.wiz:73-76`); `Eff` interprets a tree (no native path), unused outside `EffHeap` | `Region` has 6 documented lifetime axioms; `Result1` and `Outlives` are the only unsafe surface; `IO1`/`Monad1` are the linear I/O story |
 | `Grail` | one-job is in (`Graph.lean:51-56`); `addCheck` and `addCheckImports` (`:102-124`) read and parse the same imports twice | region cache not used (main gap); `-j` default `min(cores,4)` (`Cli.lean:107`) is deliberate: 8 jobs only bought 1.27× (informal) | scheduler is serial for keys but measured at 1.3 s for a 59-node no-op build (informal), not a bottleneck |
@@ -317,13 +317,13 @@ plus fewer duplicated utilities. Do not change `selfhost/*.wiz` while a test rea
 1. **calc**: no timing expectation; record line counts of the four proof files and check time of
    `wiz check` on them before/after (must be neutral).
 2. **Grail region cache**: base vs branch, warm `grail build std` and `grail build` of
-   `examples/hdl-compose.wiz`'s package (or `wiz check --region-cache` on hdl-compose), 2–3
+   `hdl/examples/hdl-compose.wiz`'s package (or `wiz check --region-cache` on hdl-compose), 2–3
    interleaved rounds, wall + peak RSS; plus `--region-stats` hits/misses.
 3. **`--split`**: `scripts/fixpoint.sh` stage 1/2 wall on base vs `--split 4/8`, and the built
    binary's run time (the known regression on `compiler-self.wiz`, informal).
 4. **Nix store cache**: clean-`HOME` `grail build` of a one-target package, installPhase wall,
    store hits.
-5. **HTrie/ring**: `Circuit.netlist` on `examples/hdl-temporal.wiz` (wall/RSS), and `wiz check` of
+5. **HTrie/ring**: `Circuit.netlist` on `hdl/examples/hdl-temporal.wiz` (wall/RSS), and `wiz check` of
    `lib/Rat.wiz`/`lib/IntRing.wiz` for the ring fast paths.
 6. **scry**: `scry parse --stats` corpus and the e-graph bench.
 7. **selfhost**: `lake test -- '=selfhost'` and selfcheck wall/RSS after the Scope/intern changes.

@@ -3,6 +3,7 @@ import Text
 import Functor
 import Scry.Project
 import Scry.ProjectCache
+import Scry.QuireFindings
 import Scry.Models
 import Scry.TaintCmd
 import Scry.Sarif
@@ -158,6 +159,20 @@ def Scry.ProjectReport.fileOf (r : Scry.ProjectReport) (path : String) : Scry.Pr
 def Scry.ProjectReport.fileCounts (r : Scry.ProjectReport) : List Scry.ProjectFile :=
   List.map (fun path => r.fileOf path) r.project.realPaths
 
+/-- The findings index's rows for a report (see `Scry.QuireFindings`). The line is the
+sink's origin line; the message and the evidence path stay in the report's JSON. -/
+def Scry.rowsOfReport (r : Scry.ProjectReport) : List Scry.FindingsIndexRow :=
+  List.map (fun f =>
+    let o := Scry.originAt r.origins f.func f.sink;
+    let file := match o with
+      | .some x => x.uri
+      | .none => "";
+    let line := match o with
+      | .some x => x.line
+      | .none => 0;
+    Scry.FindingsIndexRow.make f.rule (Scry.Severity.id f.severity) file line f.func f.message)
+    r.findings
+
 -- ## JSON
 
 def Scry.ProjectFile.json (f : Scry.ProjectFile) : Json :=
@@ -204,7 +219,9 @@ have to partition a flat list. -/
 def Scry.ProjectReport.json (r : Scry.ProjectReport) : Json :=
   let p := r.project;
   Json.mkObj
-    [ ("tool", Json.mkStr "scry")
+    [ ("schema", Json.mkStr "scry-project-report/1")
+    , ("kind", Json.mkStr "project")
+    , ("tool", Json.mkStr "scry")
     , ("project", Json.mkStr p.root)
     , ("units", Json.ofNat (List.length p.units))
     , ("functions", Json.ofNat (List.length p.funcs))

@@ -625,7 +625,7 @@ def main : IO Unit := do
 </section>
 <section class="cell cell-markdown" id="cell-93">
 <h2>10: hardware</h2>
-<p><code>lib/Hdl/Core.wiz</code> is a hardware description library: circuits are Wiz values, simulated by evaluation and turned into Verilog.</p>
+<p><code>hdl/src/Hdl/Core.wiz</code> is a hardware description library: circuits are Wiz values, simulated by evaluation and turned into Verilog.</p>
 </section>
 <section class="cell cell-markdown" id="cell-94">
 <p>A circuit written against any signal representation <code>r</code>; simulate it at values and at a netlist.</p>
@@ -698,7 +698,7 @@ grail new: wrote hello (grail.wiz, src/Main.wiz, tests/hello.wiz, README.md, .gi
 </section>
 <section class="cell cell-markdown" id="cell-104">
 <p>It writes a library, an executable and a golden test; <code>grail run hello</code> prints <code>hello from hello</code>, and the test checks the same line. An existing non-empty directory is refused, so <code>new</code> never overwrites work, and the name must start with a letter. (<a href="../stages/23-grail.md">stages/23-grail.md</a>, 23o.)</p>
-<p>Modules are files: <code>import A.B</code> reads <code>A/B.wiz</code> from a module root (the standard library <code>lib/</code>, a package&#x27;s <code>lib</code> directories, <code>-I DIR</code>). Wiz has no namespaces yet, so one name can be declared only once among everything a file imports. Mark helpers <code>private</code> to keep them out of other modules.</p>
+<p>Modules are files: <code>import A.B</code> reads <code>A/B.wiz</code> from a module root (the standard library <code>lib/</code>, a package&#x27;s <code>lib</code> directories, <code>-I DIR</code>). There is no selective import, so one name can be declared only once among everything a file imports (<code>namespace</code>, 13t, prefixes a declaration&#x27;s name but does not let two modules reuse one). Mark helpers <code>private</code> to keep them out of other modules.</p>
 </section>
 <section class="cell cell-markdown" id="cell-105">
 <h2>12: taint analysis with scry</h2>

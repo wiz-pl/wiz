@@ -1,0 +1,33 @@
+repo: exit 0 without --fail-on: ok
+repo: schema scry-cs-report/1: ok
+repo: kind directory: ok
+repo: 11 .cs before exclusions: ok
+repo: 6 kept: ok
+repo: 5 excluded: ok
+repo: 6 found, 5 parsed, 5 lowered, 1 failed: ok
+repo: 6 functions: ok
+repo: 5 rules: ok
+repo: one error finding: ok
+repo: the rule is command-injection: ok
+repo: the finding is in src/Helper.cs: ok
+coverage: 9 rows: ok
+coverage: one parse failure row: ok
+coverage: the failed file is named: ok
+coverage: the exclusion rules are rows: ok
+gate: --fail-on error exits 1: ok
+gate: the JSON exit field is 1: ok
+gate: --fail-on warning exits 1 (coverage row): ok
+sarif: version 2.1.0: ok
+sarif: driver scry: ok
+sarif: one result: ok
+sarif: the result names command-injection: ok
+clean: exit 0: ok
+clean: kind file: ok
+clean: one file found: ok
+clean: no findings: ok
+nothing: only excluded files exits 3: ok
+nothing: the JSON says 0 found: ok
+nothing: the JSON exit field is 3: ok
+IO: a missing path exits 2: ok
+IO: the error line names scry cs: ok
+usage: a bad flag exits 2: ok

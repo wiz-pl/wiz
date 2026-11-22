@@ -13,7 +13,7 @@ yosys is on PATH; a design with an unmapped cell or a combinational loop fails h
 def hdlArbNSynthesis : IO Unit := do
   let ys ← (do let o ← IO.Process.output { cmd := "yosys", args := #["-V"] }; pure (o.exitCode == 0)) <|> pure false
   unless ys do skip "no yosys"; return
-  let src ← IO.FS.readFile "examples/hdl-arb-n.wiz"
+  let src ← IO.FS.readFile "hdl/examples/hdl-arb-n.wiz"
   let body := "import Hdl.Core\nimport Hdl.Bus\n" ++ src ++
     "\n#eval Verilog.emit (Circuit.netlist \"arbn2\" (Bus.arbNC 2 8 8))\n" ++
     "#eval Verilog.emit (Circuit.netlist \"arbn3\" (Bus.arbNC 3 8 8))\n" ++
@@ -43,7 +43,7 @@ def hdlBusLawGroup : Group where
   parallel := true
   cases := [
     { name := "Hdl.Bus law: stability, arbiter exclusion/progress, route, RAM read-after-write and strobes", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-bus-law.wiz")
+        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-bus-law.wiz")
           ("route: all laws yes, value = simulate = simFast yes, 4608 inputs\n" ++
            "arb mutex yes, answers only requests yes, stable under stall yes, windows yes, generated matches yes, value = simulate = simFast yes\n" ++
            "arb fast grants 2 1 2 1 2 1 2 1 2 1 2 1 2 1 2 1 yes, hold grants 4 4 4 4 3 4 yes\n" ++
@@ -54,7 +54,7 @@ def hdlBusLawGroup : Group where
            "ramw strobes yes, value = simulate = simFast yes\n" ++
            "well formed yes\n") },
     { name := "Bus.ramWC laws: one outstanding request, two-cycle wait timeline, read-after-write every strobe, no alias, no bypass", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-ramwc.wiz")
+        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-ramwc.wiz")
           ("wait timeline 0 0 1 1 2 0 0\n" ++
            "masked read-after-write 8/16/32: yes yes yes\n" ++
            "no alias 8/16/32: yes yes yes\n" ++
@@ -63,7 +63,7 @@ def hdlBusLawGroup : Group where
            "value = simulate = simFast yes\n" ++
            "well formed yes\n") },
     { name := "Hdl.Bus N-master circuit: value = Netlist.simulate = simFast for n=2,3,4; value = arbNStep; netlist ownership/progress; yosys when available", run := fun _ => do
-        cRunLibs (← IO.FS.readFile "examples/hdl-arb-n.wiz")
+        cRunLibs (← IO.FS.readFile "hdl/examples/hdl-arb-n.wiz")
           ("n-master circuit selector n=1..4 yes\n" ++
            "n=2 circuit: value = simulate = simFast yes, value = arbNStep yes, netlist law yes, well formed yes, 64 cycles\n" ++
            "n=3 circuit: value = simulate = simFast yes, value = arbNStep yes, netlist law yes, well formed yes, 64 cycles\n" ++

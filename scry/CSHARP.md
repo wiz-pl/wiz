@@ -165,7 +165,7 @@ without short-circuit blocks; the copy sits on the branch edge instead.
 | lambdas, delegates | a lambda assigned to a local or a field of the current class and invoked in the same method is lowered inline at the call site: its parameters are bound to the call's arguments and its result is the body's value (a block body gets an exit block for `return`). A lambda with no known call site is an opaque `fnptr "$lambda:<n>"` + a warning naming the site that would invoke it; a recursive lambda call warns and is havoc. |
 
 External calls whose **value** the lowering can name are summarised once in
-`lib/Scry/Models.wiz` (`Scry.csExternals`): each entry gives the call's result type, the
+`src/Scry/Models.wiz` (`Scry.csExternals`): each entry gives the call's result type, the
 type `await` yields for an async call, and a note saying what the entry claims. The
 table is a *type* table only: memory effects stay in the CLR model table (`clrModels`),
 which deliberately leaves writes, sinks and constructors unmodelled, so a call this table
@@ -492,7 +492,7 @@ that, not the lowering.
   with no known call site still warns, naming the callee it was passed to or the
   local/field whose call site is unknown; a recursive lambda call warns and is havoc.
 * **C# external calls** have their result and awaited types in
-  `lib/Scry/Models.wiz`'s `Scry.csExternals` value table, which `knownRet` and
+  `src/Scry/Models.wiz`'s `Scry.csExternals` value table, which `knownRet` and
   `awaitedType` consult. `Process.GetCurrentProcess().StartInfo` keeps its
   `ProcessStartInfo` type, so `Arguments` reaches the modelled sink; the table says
   nothing about memory effects, so an unknown external still warns with its name.
@@ -771,8 +771,14 @@ every file with the same native shim, lowers it with `Scry.CsLower`, runs the ru
 over the merged program, and writes a summary whose **coverage** section is the point:
 
 ```
-scry cs PATH [--json] [--fail-on error|warning|note] [--rules FILE] [--no-taint]
+scry cs PATH [--json] [--sarif OUT] [--fail-on error|warning|note] [--rules FILE]
+             [--no-taint]
 ```
+
+`--sarif OUT` writes the findings as SARIF 2.1.0 (`runs[0].results`; coverage rows and
+boundary warnings stay in the JSON/human coverage section). The end-to-end test
+`scry/tests/e2e-cs.wiz` runs the real driver over `corpus/csharp/repo` and asserts the
+JSON schema, the coverage rows, the SARIF shape and all four exit statuses.
 
 `PATH` is a directory, a `.csproj`, a `.sln`/`.slnx`, or one `.cs` file. An
 SDK-style project (no `<Compile Include=` items) is walked; an explicit item list is
@@ -853,7 +859,7 @@ failure surfaces as every file failing, which is also `3`.
 `--no-taint` stops after parse/lower and reports coverage only (the `taint not run`
 row says so). `--rules FILE` selects a pack; otherwise the walk tries
 `scry/corpus/csharp/csharp.scry`, then `../scry/corpus/csharp/csharp.scry`, then
-`lib/Scry/rules/csharp.scry`. With no pack the findings section is empty and a
+`rules/csharp.scry`. With no pack the findings section is empty and a
 `taint not run: no rule pack found` row is printed.
 
 ### Fixture and tests

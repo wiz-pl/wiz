@@ -245,7 +245,7 @@ Findings and comparisons:
   registry URLs. Still open (listed as deferred).
 * **No default index.** A `require` without `--index` or `Package.set "index"` is an error:
   a deliberate no-magic stance, but the first run means reading a doc. **R8.** Compile in a
-  default (the intended `https://github.com/wiz-pl/grail-index`), overridable by `--index`
+  default (the intended `https://github.com/wiz-pl/fate-index`), overridable by `--index`
   and `Package.set "index"`, as Cargo defaults to crates.io. Still open.
 * **Schema gaps against Bzlmod**, the closest published schema (V): mirrors
   (`mirror_urls`), archive type, `strip_prefix`, patches/overlays with their own hashes,

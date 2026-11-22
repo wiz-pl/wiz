@@ -143,6 +143,72 @@ def stdGroup : Group where
     { name := "native text", run := fun _ =>
         ioRun ("import Std\ndef main : IO Unit := do\n  let t := Str.append (Str.ofString \"hello, \") (Str.ofString \"world\");\n" ++
           "  IO.println (Str.toString (Str.slice t 7 12));\n  IO.println (Nat.toString (Str.size t))") "world\n12\n" },
+    { name := "native text: self-append and a shared value copy (no mutation)", run := fun _ =>
+        ioRun ("import Std\ndef both (s : Str) : Str × Str := (s, Str.append s (Str.ofString \"x\"))\n" ++
+          "def main : IO Unit := do\n  let s := Str.ofString \"abc\";\n  let t := Str.append s s;\n" ++
+          "  IO.println (Str.toString t);\n  IO.println (Str.toString s);\n" ++
+          "  let p := both (Str.ofString \"abc\");\n  IO.println (Str.toString p.1);\n  IO.println (Str.toString p.2);\n" ++
+          "  let b := Str.push (Str.push (Str.ofString \"\") 65) 66;\n  IO.println (Str.toString b);\n" ++
+          "  IO.println (Str.toString (Str.join (.cons (Str.ofString \"a\") (.cons (Str.ofString \"b\") (.cons (Str.ofString \"c\") .nil)))))")
+          "abcabc\nabc\nabc\nabcx\nAB\nabc\n" },
+    { name := "native text: aliasing fixtures (compiled; the original is never mutated)", run := fun _ => do
+        for f in ["self-append", "shared-receiver", "shared-push", "shared-join"] do
+          let src ← IO.FS.readFile ("Tests/fixtures/std-aliasing/" ++ f ++ ".wiz")
+          let want ← IO.FS.readFile ("Tests/fixtures/std-aliasing/" ++ f ++ ".expected")
+          ioRun src want },
+    -- (audit F19) `Str.append` grows the receiver in place when it is unique, so the
+    -- builder loop is linear; `Str.join` and a `Str.push` loop must build the same bytes.
+    { name := "native text: append, join and push build the same bytes", run := fun _ =>
+        ioRun ("import Std\ndef piece : Str := Str.ofString \"ab\"\n" ++
+          "def appendN : Nat → Str → Str\n  | .zero, s => s\n  | .succ k, s => appendN k (Str.append s piece)\n" ++
+          "def piecesN : Nat → List Str → List Str\n  | .zero, acc => acc\n  | .succ k, acc => piecesN k (.cons piece acc)\n" ++
+          "def pushN : Nat → Nat → Str → Str\n  | .zero, _, s => s\n  | .succ k, b, s => pushN k (Nat.sub 1 b) (Str.push s (Nat.add 97 b))\n" ++
+          "def main : IO Unit := do\n  let a := appendN 2000 Str.empty;\n" ++
+          "  let j := Str.join (piecesN 2000 .nil);\n  let p := pushN 4000 0 Str.empty;\n" ++
+          "  IO.println (Nat.toString (Str.size a));\n  IO.println (Nat.toString (Str.size j));\n" ++
+          "  IO.println (Nat.toString (Str.size p));\n  IO.println (Str.toString (Str.slice p 0 6));\n" ++
+          "  IO.println (Nat.toString (match Str.eq a j with\n    | .true => 1\n    | .false => 0));\n" ++
+          "  IO.println (Nat.toString (match Str.eq j p with\n    | .true => 1\n    | .false => 0))")
+          "4000\n4000\n4000\nababab\n1\n1\n" },
+    { name := "native text: append under the address sanitiser", run := fun _ => do
+        -- The in-place path reallocs the receiver and the copy path reads both
+        -- operands; a use-after-free there is invisible to an output comparison, so
+        -- the same shapes run under AddressSanitizer. LeakSanitizer is off for the run:
+        -- the runtime keeps two process-lifetime scratch buffers (`wiz_scratch` and the
+        -- free worklist) that its own exit check does not count as objects, and it is
+        -- those, not a Str, that LSan reports.
+        let tc ← toolchain
+        let src := "import Std\ndef piece : Str := Str.ofString \"ab\"\n" ++
+          "def appendN : Nat → Str → Str\n  | .zero, s => s\n  | .succ k, s => appendN k (Str.append s piece)\n" ++
+          "def piecesN : Nat → List Str → List Str\n  | .zero, acc => acc\n  | .succ k, acc => piecesN k (.cons piece acc)\n" ++
+          "def pushN : Nat → Nat → Str → Str\n  | .zero, _, s => s\n  | .succ k, b, s => pushN k (Nat.sub 1 b) (Str.push s (Nat.add 97 b))\n" ++
+          "def main : IO Unit := do\n  let a := appendN 500 Str.empty;\n" ++
+          "  let j := Str.join (piecesN 500 .nil);\n  let p := pushN 1000 0 Str.empty;\n" ++
+          "  let shared := Str.ofString \"ab\";\n  let x := Str.append shared (Str.ofString \"cd\");\n" ++
+          "  let y := Str.append shared shared;\n" ++
+          "  IO.println (Nat.toString (Str.size a));\n" ++
+          "  IO.println (Nat.toString (match Str.eq a j with\n    | .true => 1\n    | .false => 0));\n" ++
+          "  IO.println (Nat.toString (match Str.eq j p with\n    | .true => 1\n    | .false => 0));\n" ++
+          "  IO.println (Str.toString shared);\n  IO.println (Str.toString x);\n" ++
+          "  IO.println (Str.toString y)"
+        let dir ← IO.FS.createTempDir
+        IO.FS.writeFile (dir / "main.wiz") src
+        let exe := dir / "main"
+        let wiz ← IO.FS.realPath ".lake/build/bin/wiz"
+        let args := ["build", (dir / "main.wiz").toString, "-o", exe.toString,
+          "--cc", tc.cc,
+          "--cflags", String.intercalate " " (tc.cflags ++ ["-O1", "-g", "-fsanitize=address"]),
+          "--ldflags", String.intercalate " " (tc.ldflags ++ ["-fsanitize=address"]),
+          "--libs", String.intercalate " " tc.libs,
+          "--gmp", String.intercalate " " tc.gmp]
+        let b ← IO.Process.output { cmd := wiz.toString, args := args.toArray, cwd := some dir }
+        if b.exitCode != 0 then
+          if (b.stderr.splitOn "gmp.h").length > 1 then skip "no toolchain"
+          else throw (IO.userError s!"the asan probe did not build:\n{b.stderr}")
+        let spawn : IO.Process.SpawnArgs := { cmd := exe.toString }
+        let spawn := { spawn with env := #[("ASAN_OPTIONS", some "detect_leaks=0:abort_on_error=1")] }
+        let r ← IO.Process.output spawn
+        checkEq "1000\n1\n1\nab\nabcd\nabab\n" r.stdout },
     { name := "maps from text", run := fun _ =>
         ioRun ("import Std\ndef count : List String → StrMap Nat → StrMap Nat\n  | .nil, m => m\n" ++
           "  | .cons w ws, m => count ws (StrMap.insert m (Str.ofString w) (StrMap.findD m (Str.ofString w) 0 + 1))\n" ++

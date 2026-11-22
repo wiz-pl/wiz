@@ -204,10 +204,10 @@ def Data.href? (d : Data) (n : String) : Option String :=
   if d.names.contains n then some s!"#{n}" else none
 
 /-- A doc comment as HTML (the doc pages' renderer; backticked names link inside the
-manual). -/
+manual). The manual is Markdown, which has no span syntax: the fences stay plain. -/
 def Data.docHtml (d : Data) (doc : Option String) : String :=
   match doc with
-  | some s => s!"<div class=\"doc\">{render (fun c => d.href? c) s}</div>"
+  | some s => s!"<div class=\"doc\">{renderPlain (fun c => d.href? c) s}</div>"
   | none => ""
 
 /-- A doc comment as inline HTML (for a constructor's or field's line). -/
@@ -281,7 +281,7 @@ def markdown (d : Data) : String :=
     s!"- [{m.name}](#module-{m.name}) ({es.size} declaration{if es.size == 1 then "" else "s"}){summary}"
   let sections := d.sections.toList.map fun (m, es) =>
     let doc := match moduleDocOf m.src with
-      | some s => s!"<a id=\"module-{htmlEscape m.name}\"></a>\n" ++ s!"<div class=\"doc\">{render (fun c => d.href? c) s}</div>\n"
+      | some s => s!"<a id=\"module-{htmlEscape m.name}\"></a>\n" ++ s!"<div class=\"doc\">{renderPlain (fun c => d.href? c) s}</div>\n"
       | none => s!"<a id=\"module-{htmlEscape m.name}\"></a>\n"
     s!"\n## {m.name}\n\n" ++ doc ++ "\n" ++
     (if es.isEmpty then "No public declarations.\n" else
@@ -356,7 +356,7 @@ def refNotationHtml (d : Data) : String :=
 
 def refSectionHtml (o : Options) (d : Data) (mods : List String) (m : Module) (es : Array Entry)
     (st : St) : String :=
-  let c : Ctx := { st, modules := mods, current := "" }
+  let c : Ctx := { st, modules := mods, current := "", highlight := o.highlight }
   let count := es.foldl (fun n e => n + 1 + e.children.size) 0
   s!"<section class=\"ref-module\" id=\"module-{htmlEscape m.name}\">" ++
   s!"<h2><a href=\"{htmlEscape (pageOf m.name)}\">{htmlEscape m.name}</a> " ++

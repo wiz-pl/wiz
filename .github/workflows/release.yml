@@ -26,10 +26,17 @@ on:
     branches: [master]
     paths:
       - scripts/release-tarball.sh
+      - scripts/test-release-tarball.sh
+      - scripts/source-tarball.py
+      - scripts/sbom.py
+      - scripts/release-sbom.py
+      - scripts/test-source-tarball.sh
+      - scripts/test_release_sbom.py
       - scripts/bundle-cc.sh
       - web/**
       - scripts/bundle-cc.sources
       - scripts/release-licenses/**
+      - flake.lock
       - .github/workflows/release.yml
       - tower/**
       - scripts/build-tower-wiz.sh
@@ -86,7 +93,7 @@ jobs:
       - name: Generate the exercise tree
         run: python3 scripts/mkexercises.py . "$RUNNER_TEMP/exercises"
       - name: Cache its Lake build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/exercises/.lake
           key: exercises-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.*', '**/*.lean') }}
@@ -120,13 +127,26 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit || github.sha }}
-      # this workflow's own scripts (a dispatched old commit may predate them)
+      # This workflow's own scripts, pinned to the commit being built: a re-run of an
+      # older dispatch must package that commit with that commit's scripts, licences
+      # and inputs, not with today's. (An old commit that predates a script is guarded
+      # where the script is optional.)
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ inputs.commit || github.sha }}
           path: .release-tools
           sparse-checkout: scripts
+      - name: Pin the source date epoch
+        # The tarball derives its epoch from the commit; this also pins every other
+        # tool that reads SOURCE_DATE_EPOCH. A dispatched older commit gets its own.
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - name: The snapshot scripts work (a fake gh, nothing published)
-        run: sh .release-tools/scripts/test-release-snapshots.sh
+        run: |
+          if [ -f .release-tools/scripts/test-release-snapshots.sh ]; then
+            sh .release-tools/scripts/test-release-snapshots.sh
+          else
+            echo "commit $GITHUB_SHA predates the snapshot scripts; not testing them"
+          fi
       - name: A dispatched commit is on master
         if: inputs.commit != ''
         env:
@@ -150,7 +170,7 @@ jobs:
           rm -f elan-init.sh
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Cache the Lake build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake
           key: release-lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}
@@ -176,7 +196,7 @@ jobs:
           if grep -q -- --gmp-src web/build.sh 2>/dev/null; then echo "web=yes" >> "$GITHUB_OUTPUT"; else echo "web=no" >> "$GITHUB_OUTPUT"; fi
       - name: Emscripten
         if: steps.web.outputs.web == 'yes'
-        uses: emscripten-core/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984 # v16
         with:
           version: 6.0.9
           actions-cache-folder: emsdk-cache
@@ -204,13 +224,13 @@ jobs:
       # needs no outside server; master also copies them to the release bundle-inputs
       - name: Cache the bundle's downloads
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bundle-downloads
           key: bundle-inputs-${{ hashFiles('.release-tools/scripts/bundle-cc.sources') }}
       - name: Cache the bundled C toolchain
         if: steps.bundle.outputs.cc == 'yes'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: cc-bundle
           key: release-cc-${{ runner.os }}-${{ hashFiles('lean-toolchain', '.release-tools/scripts/bundle-cc.sh', '.release-tools/scripts/bundle-cc.sources') }}
@@ -229,10 +249,18 @@ jobs:
       - name: Build tower (Wiz, stage 26h)
         run: |
           set -eu
+          # A partial/sparse checkout can leave tracked paths out of the worktree even
+          # though the commit has them; restore before deciding the commit is old.
+          if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
+            git checkout -- tower scripts/build-tower-wiz.sh 2>/dev/null || true
+          fi
           if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
             # Every commit with the Wiz tower (26e and later) has both; an older commit
             # has no shipped tower, and a Lean build step is no longer used here.
             echo "::error::commit $GITHUB_SHA predates the Wiz tower (tower/, 26e)"
+            echo "  pwd=$(pwd)"
+            git ls-tree --name-only HEAD | head -20
+            git status --short | head -10
             exit 1
           fi
           # The bundled C toolchain links GMP statically and targets the tarball's glibc
@@ -255,7 +283,95 @@ jobs:
           cc=; [ "$BUNDLE_CC" = yes ] && cc="cc-bundle"
           web=; [ "$BUNDLE_WEB" = yes ] && web="web-out"
           [ -z "$cc" ] && [ -n "$web" ] && { echo "a web dir needs the cc argument before it"; exit 1; }
-          .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz .lake/build/bin "$(git rev-parse HEAD)" $cc $web
+          # the sixth argument is the checkout at this commit: lib/, editors/ and the
+          # licences are read from the commit, not from the working tree
+          .release-tools/scripts/release-tarball.sh dist/wiz-x86_64-linux.tar.gz \
+            .lake/build/bin "$(git rev-parse HEAD)" $cc $web "$GITHUB_WORKSPACE"
+          ls -l dist
+      - name: The binary tarball is reproducible (two roots, different environments)
+        # The same commit, packaged twice in two independent roots with a different
+        # PWD, HOME, TMPDIR, umask, LC_ALL, TZ and ambient SOURCE_DATE_EPOCH. It
+        # compares the tarballs, their .sha256 files and a per-member manifest, and
+        # names the first differing member. Publishing is gated on this (below).
+        id: repro
+        env:
+          BUNDLE_CC: ${{ steps.bundle.outputs.cc }}
+          BUNDLE_WEB: ${{ steps.web.outputs.web }}
+        run: |
+          if [ ! -f .release-tools/scripts/test-release-tarball.sh ]; then
+            echo "commit $GITHUB_SHA predates test-release-tarball.sh; not checking"
+            exit 0
+          fi
+          cc=; [ "$BUNDLE_CC" = yes ] && cc="--cc cc-bundle"
+          web=; [ "$BUNDLE_WEB" = yes ] && web="--web web-out"
+          sh .release-tools/scripts/test-release-tarball.sh --strict \
+            --bindir .lake/build/bin $cc $web --rev "$(git rev-parse HEAD)"
+      - name: The source tarball and its manifest (reproducible)
+        # docs/building.md, "Reproducible source tarball": from the tagged commit, twice,
+        # in different directories; a mismatch publishes nothing.
+        shell: bash
+        run: |
+          if [ ! -f .release-tools/scripts/source-tarball.py ]; then
+            echo "commit $GITHUB_SHA predates the source tarball script; not building one"
+            exit 0
+          fi
+          root=$(git rev-parse --show-toplevel)
+          rev=$(git rev-parse HEAD)
+          epoch=$(git log -1 --format=%ct)
+          python3 .release-tools/scripts/source-tarball.py --root "$root" --mode git \
+            --out dist --revision "$rev" --epoch "$epoch"
+          (cd "$RUNNER_TEMP" && python3 "$GITHUB_WORKSPACE/.release-tools/scripts/source-tarball.py" \
+             --root "$root" --mode git --out "$RUNNER_TEMP/src-check" \
+             --revision "$rev" --epoch "$epoch")
+          cmp dist/wiz-*-src.tar.gz "$RUNNER_TEMP"/src-check/*.tar.gz
+          cmp dist/wiz-*-src.tar.gz.manifest.json "$RUNNER_TEMP"/src-check/*.manifest.json
+          ls -l dist
+      - name: SBOMs and SLSA-style provenance
+        # The tests need no build: they make a tiny source tree and a fake tarball. The
+        # provenance records the builder id, inputs, toolchain hashes and output digests;
+        # it does not claim a hosted SLSA level. Signing uses the E1 offline Ed25519 path
+        # when the WIZ_ATTEST_KEY secret is present, and is skipped otherwise.
+        shell: bash
+        env:
+          WIZ_ATTEST_KEY: ${{ secrets.WIZ_ATTEST_KEY }}
+        run: |
+          if [ ! -f .release-tools/scripts/test_release_sbom.py ] ||
+             [ ! -f .release-tools/scripts/release-sbom.py ]; then
+            echo "commit $GITHUB_SHA predates the SBOM scripts; skipping them"
+            exit 0
+          fi
+          python3 .release-tools/scripts/test_release_sbom.py -v
+          if ! ls dist/wiz-*-src.tar.gz.manifest.json >/dev/null 2>&1; then
+            echo "no source tarball; skipping the supply-chain artifacts"
+            exit 0
+          fi
+          root=$(git rev-parse --show-toplevel)
+          channel=snapshot
+          case "$GITHUB_REF" in refs/tags/v*) channel=tag ;; esac
+          source_manifest=$(ls dist/wiz-*-src.tar.gz.manifest.json)
+          binary=dist/wiz-$(uname -m)-linux.tar.gz
+          sign=
+          if [ -n "${WIZ_ATTEST_KEY:-}" ] && [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
+            key="$RUNNER_TEMP/wiz-attest-key"
+            printf '%s' "$WIZ_ATTEST_KEY" > "$key"
+            chmod 600 "$key"
+            sign="--sign-key $key"
+          fi
+          manifest_skeleton=
+          [ -f "$root/docs/release/release-manifest.json" ] &&
+            manifest_skeleton="--release-manifest $root/docs/release/release-manifest.json"
+          tagarg=
+          [ "$channel" = tag ] && tagarg="--tag $GITHUB_REF_NAME"
+          python3 .release-tools/scripts/release-sbom.py \
+            --out dist --root "$root" \
+            --source-manifest "$source_manifest" --binary-tarball "$binary" \
+            --channel "$channel" \
+            --builder-id "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --workflow-file "$root/.github/workflows/release.yml" \
+            --workflow-ref "$GITHUB_REF" \
+            --invocation-id "${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
+            --json $sign $manifest_skeleton $tagarg
+          [ -z "$sign" ] || rm -f "$RUNNER_TEMP/wiz-attest-key"
           ls -l dist
       - name: The tarball builds programs with no C compiler or GMP installed (plain Ubuntu containers)
         # the acceptance test of 26f: the images have no gcc, cc, clang, libgmp or libc
@@ -355,7 +471,7 @@ jobs:
             [ -f "$f" ] || continue
             echo "$have" | grep -qxF "$(basename "$f")" || gh release upload bundle-inputs $r "$f"
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-x86_64-linux
           path: dist/
@@ -363,7 +479,8 @@ jobs:
           # the artifact is a convenience: 90 days for a tag, 7 for a snapshot, 3 for a PR
           retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 90 || (github.event_name == 'pull_request' && 3 || 7) }}
       - name: Publish (a tag)
-        if: startsWith(github.ref, 'refs/tags/v')
+        # nothing is published unless the two-root comparison above passed
+        if: startsWith(github.ref, 'refs/tags/v') && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         # the notes are the tag's section of CHANGELOG.md (`## [X.Y.Z] - date`), which must
@@ -384,12 +501,12 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --title "Wiz ${GITHUB_REF_NAME}" --notes-file "$notes"
       # snapshot-<sha>, then pruning (26g); nightly.yml moves nightly once CI passed
       - name: Publish (snapshot, from master)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .release-tools/scripts/release-snapshots.sh publish "$GITHUB_SHA" dist
       - name: Publish (snapshot of a dispatched commit)
-        if: inputs.commit != ''
+        if: inputs.commit != '' && steps.repro.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: .release-tools/scripts/release-snapshots.sh publish "$OLD_COMMIT" dist

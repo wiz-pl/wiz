@@ -1,0 +1,51 @@
+-- Bit-level reasoning (hdl/src/Hdl/Bits.wiz), checked by the `hdl` test group: control logic
+-- written with gates, as a designer writes it, proved with symbolic inputs. (The toy
+-- CPU's finding C2: `rfl` alone needs such logic written as multiplexers.)
+import Hdl.Bits
+
+def Bit : HwTy := HwTy.bits 1
+
+-- the CPU's stall signal: waiting to send, waiting for input, or halted
+def stall {r : HwTy → Type} [Hw r] (isOut txReady isIn rxFull isHalt : r Bit) : r Bit :=
+  isOut &&& ~~~txReady ||| isIn &&& ~~~rxFull ||| isHalt
+
+-- With the opcode decoded (an `out`), the stall is exactly "the transmitter is busy",
+-- for every value of the two status bits: a case split, then evaluation.
+def stall_out (tx rx : BitVec 1) :
+    @stall HwTy.El _ Bit.one tx Bit.zero rx Bit.zero = ~~~tx :=
+  Bit.ind2 (fun (a b : BitVec 1) => @stall HwTy.El _ Bit.one a Bit.zero b Bit.zero = ~~~a)
+    (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) tx rx
+
+-- halted: always stalled, whatever else
+def stall_halt (o t i f : BitVec 1) : @stall HwTy.El _ o t i f Bit.one = Bit.one :=
+  Bit.or_one_r ((o &&& ~~~t) ||| (i &&& ~~~f))
+
+-- the gate form equals the multiplexer form of the original proof, for every input
+def stallMux (isOut txReady isIn rxFull isHalt : BitVec 1) : BitVec 1 :=
+  @HwTy.El.mux HwTy.bit isHalt Bit.one
+    (@HwTy.El.mux HwTy.bit isOut (@HwTy.El.mux HwTy.bit txReady (isIn &&& ~~~rxFull) Bit.one)
+      (isIn &&& ~~~rxFull))
+def stall_is_mux (o t i f h : BitVec 1) : @stall HwTy.El _ o t i f h = stallMux o t i f h :=
+  Bit.ind3 (fun (a b c : BitVec 1) => (d e : BitVec 1) → @stall HwTy.El _ a b c d e = stallMux a b c d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.zero Bit.zero Bit.zero x y = stallMux Bit.zero Bit.zero Bit.zero x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.zero Bit.zero Bit.one x y = stallMux Bit.zero Bit.zero Bit.one x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.zero Bit.one Bit.zero x y = stallMux Bit.zero Bit.one Bit.zero x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.zero Bit.one Bit.one x y = stallMux Bit.zero Bit.one Bit.one x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.one Bit.zero Bit.zero x y = stallMux Bit.one Bit.zero Bit.zero x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.one Bit.zero Bit.one x y = stallMux Bit.one Bit.zero Bit.one x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.one Bit.one Bit.zero x y = stallMux Bit.one Bit.one Bit.zero x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    (fun d e => Bit.ind2 (fun (x y : BitVec 1) => @stall HwTy.El _ Bit.one Bit.one Bit.one x y = stallMux Bit.one Bit.one Bit.one x y) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) (Bit.eqv _ _ rfl) d e)
+    o t i f h
+
+-- the Boolean view (what `sat_decide` takes): the stall is a Boolean formula of the bits
+def stall_bool (o t i f h : BitVec 1) : Bit.toBool (@stall HwTy.El _ o t i f h) =
+    Bool.or (Bool.or (Bool.and (Bit.toBool o) (Bool.not (Bit.toBool t))) (Bool.and (Bit.toBool i) (Bool.not (Bit.toBool f)))) (Bit.toBool h) :=
+  Eq.trans (Bit.toBool_or ((o &&& ~~~t) ||| (i &&& ~~~f)) h)
+    (Eq.congrArg (fun (z : Bool) => Bool.or z (Bit.toBool h))
+      (Eq.trans (Bit.toBool_or (o &&& ~~~t) (i &&& ~~~f))
+        (Eq.trans (Eq.congrArg (fun (z : Bool) => Bool.or z (Bit.toBool (i &&& ~~~f)))
+            (Eq.trans (Bit.toBool_and o ~~~t) (Eq.congrArg (Bool.and (Bit.toBool o)) (Bit.toBool_not t))))
+          (Eq.congrArg (Bool.or (Bool.and (Bit.toBool o) (Bool.not (Bit.toBool t))))
+            (Eq.trans (Bit.toBool_and i ~~~f) (Eq.congrArg (Bool.and (Bit.toBool i)) (Bit.toBool_not f)))))))
+
+#eval BitVec.toNat (@stall HwTy.El _ Bit.one Bit.zero Bit.zero Bit.zero Bit.zero)

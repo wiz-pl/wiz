@@ -12,7 +12,9 @@ Two mutually recursive judgments, each also producing a **usage vector**:
     Γ ⊢ t ⇐ A  ⊣ U      check : Ctx → Term → VTy → TCM (Usage R)
     Γ ⊢ t ⇒ A  ⊣ U      infer : Ctx → Term → TCM (VTy × Usage R)
 
-`U` says how many times `t` uses each variable of `Γ` (head = innermost).
+`U` says how many times `t` uses each variable of `Γ` (head = innermost). It is
+**sparse**: it stops after the last variable used, and the variables after the end are
+unused (`Usage.zeros n = []`).
 
 ## Rules (`n = |Γ|`, `0ₙ` = `Usage.zeros n`, `q·U` = `Usage.scale q U`)
 
@@ -231,14 +233,21 @@ def kernelRejectedCode : TypeError → String
 
 abbrev TCM := Except TypeError
 
-/-- The typing context. All the lists are aligned: index 0 is the innermost binder. -/
+/-- The typing context. `names`, `qtys` and `types` are indexed **by level** (index 0
+is the outermost binder) and extended with `Array.push`; a de Bruijn index is read with
+`ctx.lvl - 1 - ix` (`Ctx.nameAt?`, `Ctx.qtyAt?`, `Ctx.typeAt?`). `env` is the
+evaluator's environment, indexed by de Bruijn index (index 0 is the innermost binder),
+because `Eval` and the closures it builds consume it that way. -/
 structure Ctx (R : Type) where
   globals : Globals R
-  /-- values of locals, for evaluating types that mention them -/
+  /-- values of locals, for evaluating types that mention them (innermost first) -/
   env   : Env R := []
-  names : List Name := []
-  qtys  : List (QPoly R) := []
-  types : List (VTy R) := []
+  /-- the names, by level (outermost first) -/
+  names : Array Name := #[]
+  /-- the declared quantities, by level -/
+  qtys  : Array (QPoly R) := #[]
+  /-- the types, by level -/
+  types : Array (VTy R) := #[]
   /-- number of locals in scope = the next fresh de Bruijn level -/
   lvl   : Lvl := 0
   /-- checking an erased position (a type, or an argument to a `0` binder)? There,
@@ -276,19 +285,34 @@ variable [QRig R] [DecidableEq R] [QuantitySyntax R]
 def bind (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) : Ctx R :=
   { ctx with
     env := Val.var ctx.lvl :: ctx.env
-    names := x :: ctx.names
-    qtys := q :: ctx.qtys
-    types := ty :: ctx.types
+    names := ctx.names.push x
+    qtys := ctx.qtys.push q
+    types := ctx.types.push ty
     lvl := ctx.lvl + 1 }
 
 /-- Go under a `let`: the new variable has a known value. -/
 def define (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (val : Val R) : Ctx R :=
   { ctx with
     env := val :: ctx.env
-    names := x :: ctx.names
-    qtys := q :: ctx.qtys
-    types := ty :: ctx.types
+    names := ctx.names.push x
+    qtys := ctx.qtys.push q
+    types := ctx.types.push ty
     lvl := ctx.lvl + 1 }
+
+/-- The name at de Bruijn index `ix` (0 is the innermost binder). -/
+def nameAt? (ctx : Ctx R) (ix : Nat) : Option Name :=
+  if ix < ctx.lvl then ctx.names[ctx.lvl - 1 - ix]? else none
+
+/-- The quantity at de Bruijn index `ix`. -/
+def qtyAt? (ctx : Ctx R) (ix : Nat) : Option (QPoly R) :=
+  if ix < ctx.lvl then ctx.qtys[ctx.lvl - 1 - ix]? else none
+
+/-- The type at de Bruijn index `ix`. -/
+def typeAt? (ctx : Ctx R) (ix : Nat) : Option (VTy R) :=
+  if ix < ctx.lvl then ctx.types[ctx.lvl - 1 - ix]? else none
+
+/-- The names, innermost first, as `Term.pretty` wants them. -/
+def prettyNames (ctx : Ctx R) : List Name := ctx.names.toList.reverse
 
 def eval (ctx : Ctx R) (t : Term R) : Val R := Wiz.eval ctx.globals ctx.env t
 
@@ -303,16 +327,16 @@ def instArg (ctx : Ctx R) (c : Closure R) (a : Term R) : Val R :=
   | .mk env body => Wiz.eval ctx.globals ((if body.hasVar 0 then ctx.eval a else default) :: env) body
 
 /-- The types of the locals indexed by level, as `conv` wants them. -/
-def tys (ctx : Ctx R) : Array (VTy R) := ctx.types.reverse.toArray
+def tys (ctx : Ctx R) : Array (VTy R) := ctx.types
 
 variable [QuantitySyntax R] [DecidableEq R]
 
 /-- Render a value for error messages. (P2: without evaluating a suspended proof, which
 reads back as `()`; so no path of the kernel, accepting or rejecting, runs a proof.) -/
 def showVal (ctx : Ctx R) (v : Val R) : String :=
-  elideLong ((quote { ctx.globals with quoteErasesProofs := true } ctx.lvl v).pretty ctx.names (some ctx.globals))
+  elideLong ((quote { ctx.globals with quoteErasesProofs := true } ctx.lvl v).pretty ctx.prettyNames (some ctx.globals))
 
-def showTerm (ctx : Ctx R) (t : Term R) : String := elideLong (t.pretty ctx.names (some ctx.globals))
+def showTerm (ctx : Ctx R) (t : Term R) : String := elideLong (t.pretty ctx.prettyNames (some ctx.globals))
 
 end Ctx
 
@@ -327,13 +351,20 @@ def qtyPoly (ctx : Ctx R) (q : Val R) : TCM (QPoly R) :=
 
 /-- **Exercise 1.5.** Leave the scope of a binder `x` declared at quantity `q`:
 pop the binder's own usage off the head of the vector and check it is compatible
-with `q` (using `QPoly.le`), returning the rest. Throw `quantityMismatch` otherwise. -/
+with `q` (using `QPoly.le`), returning the rest. Throw `quantityMismatch` otherwise.
+
+The vector is sparse, so it may already have stopped before this binder. The missing
+entry is `0`, and it must still be checked: a linear binder (`q = 1`) used zero times is
+a quantity error (`0 ≤ 1` is false), while an erased (`q = 0`) or unrestricted binder
+allows it. -/
 def popUsage (x : Name) (q : QPoly R) : Usage R → TCM (Usage R)
   --<sol
   | used :: rest =>
     if QPoly.le used q then pure rest
     else throw (.quantityMismatch x (toString q) (toString used))
-  | [] => throw (.other "internal error: usage vector underflow")
+  | [] =>
+    if QPoly.le (QPoly.const 0) q then pure []
+    else throw (.quantityMismatch x (toString q) "0")
   --|ex
   --| | u => sorry
   --sol>
@@ -362,8 +393,11 @@ def methodUsage (ctx : Ctx R) (u : Usage R) : TCM (Usage R) :=
   match QRig.many? (R := R) with
   | some m => pure (QPoly.const m • u)
   | none =>
-    match (u.zip ctx.names).find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
-    | some (p, x) => throw (.other s!"a method may run any number of times, so it can't use {x} ({p} times): the rig has no unrestricted quantity")
+    match u.zipIdx.find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
+    | some (p, ix) =>
+      match ctx.nameAt? ix with
+      | some x => throw (.other s!"a method may run any number of times, so it can't use {x} ({p} times): the rig has no unrestricted quantity")
+      | none => throw (.other "internal error: usage beyond the context")
     | none => pure u
 
 /-- Does the term `t` contain `target` as a syntactic subterm? `target` is a term at the
@@ -477,14 +511,21 @@ def projUsage (ctx : Ctx R) (t : Term R) (ty : Val R) (field : String) (u : Usag
   | some m =>
     let u' := QPoly.const m • u
     -- (a variable `t` doesn't use is not this rule's business: 0 ≤ 1 is false)
-    match ((u'.zip ctx.qtys).zip ctx.names).find? fun ((p, q), _) => !QPoly.le p (QPoly.const 0) && !QPoly.le p q with
-    | some ((_, q), x) => fail x (toString q)
+    match u'.zipIdx.find? fun (p, ix) =>
+        !QPoly.le p (QPoly.const 0) && !QPoly.le p ((ctx.qtyAt? ix).getD []) with
+    | some (_, ix) =>
+      match ctx.nameAt? ix, ctx.qtyAt? ix with
+      | some x, some q => fail x (toString q)
+      | _, _ => throw (.other "internal error: usage beyond the context")
     | none => pure u'
   | none =>
     -- a rig without an unrestricted quantity (exact counting): only pairs that use no
     -- local variable at all can be projected
-    match ((u.zip ctx.qtys).zip ctx.names).find? fun ((p, _), _) => !QPoly.le p (QPoly.const 0) with
-    | some ((_, q), x) => fail x (toString q)
+    match u.zipIdx.find? fun (p, _) => !QPoly.le p (QPoly.const 0) with
+    | some (_, ix) =>
+      match ctx.nameAt? ix, ctx.qtyAt? ix with
+      | some x, some q => fail x (toString q)
+      | _, _ => throw (.other "internal error: usage beyond the context")
     | none => pure u
 
 /-- A position whose usage is scaled by `q`: when `q` is the constant 0 it is erased (the
@@ -565,7 +606,7 @@ def Ctx.popUsageAt (ctx : Ctx R) (x : Name) (q : QPoly R) (ty : VTy R) (u : Usag
   else if ctx.isPropTy ty then
     match u with
     | _ :: rest => pure rest
-    | [] => throw (.other "internal error: usage vector underflow")
+    | [] => pure []
   else popUsage x q u
 
 /-- Is this type a proposition (its sort is computed, and is `0`)? -/
@@ -808,10 +849,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .mvar m => throw (.other s!"the kernel does not accept metavariables (?m{m})")
   | .natLit _ =>
     -- a numeral means `succ (… zero)`, so it needs both constructors, as definitions
-    let defined (k : Name) := match (ctx.globals.builtins.lookup k).bind ctx.globals.find? with
+    let defined (k : Name) := match (ctx.globals.builtinOf? k).bind ctx.globals.find? with
       | some { value := some _, .. } => true
       | _ => false
-    match ctx.globals.builtins.lookup "nat" with
+    match ctx.globals.builtinOf? "nat" with
     | some N =>
       if defined "nat.zero" && defined "nat.succ" then pure (ctx.eval (.const N []), Usage.zeros ctx.lvl)
       else throw (.other "numerals need `builtin nat.zero := …` and `builtin nat.succ := …`")
@@ -833,7 +874,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   --<sol
   -- (an index beyond the context is an error: `[ix]!` would panic and go on with the
   -- default value `Sort 0`, as the variable's type and as its value: a term `Prop : Prop`)
-  | .var ix => match ctx.types[ix]? with
+  | .var ix => match ctx.typeAt? ix with
     | some ty => pure (ty, Usage.single ctx.lvl ix)
     | none => throw (.other s!"variable #{ix} is out of scope ({ctx.lvl} in scope)")
   | .const n us => match ctx.globals.find? n with
@@ -1040,8 +1081,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
       match ub with
       | none => ub := some u
       | some u' =>
-        let joined := (u.zip u').mapM fun (p, p') => QPoly.join? p p'
-        let some j := joined | throw (.other "the branches of a case use variables incompatibly")
+        let some j := Usage.join? u u' | throw (.other "the branches of a case use variables incompatibly")
         ub := some j
     pure (Closure.inst ctx.globals mc (ctx.eval s), us + ub.getD (Usage.zeros ctx.lvl))
   | .desc l I => do
@@ -1128,12 +1168,12 @@ stores data), so its eliminator can only target Prop")
     let _ ← check ctx D (.desc l vI)
     let vD := ctx.eval D
     let w := QuantitySyntax.explicitDefault
-    let _ ← check ctx A (coitStateTy l vI w)
+    let _ ← check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let uf ← check ctx f (scofixFunTy ctx.globals l vI vD vA w)
     let _ ← check { ctx with erased := true } s .size
     let _ ← check ctx i vI
-    let ua ← check ctx a (vApp ctx.globals vA (ctx.eval i))
+    let ua ← check ctx a (vApp ctx.globals (vApp ctx.globals vA (ctx.eval s)) (ctx.eval i))
     pure (.nu l vI vD (ctx.eval i) (ctx.eval s) none, ← methodUsage ctx (uf + ua))
   | .scase l q I D v P m s i x => do
     -- (K1) the case at quantity `q`: the method runs once (unscaled) and receives the
@@ -1806,7 +1846,7 @@ partial def Globals.axiomsOf (g : Globals R) (n : Name) : List String := Id.run 
   let mut todo : List (Name × Bool) := [(n, false)]
   let mut out : Array String := #[]
   let mut reprs : List Name := []
-  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap (List.lookup · g.builtins)
+  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap g.builtinOf?
   while true do
     match todo with
     | [] => break

@@ -1,7 +1,7 @@
 # The findings-store benchmark
 
 `run.sh` runs the incumbent (JSON through `lib/Json` + whole-file `FS.writeFile`/
-`FS.readFile`) and Quire (the page-backed store in `../Quire.wiz`) through the same
+`FS.readFile`) and Quire (the page-backed store in `lib/Scry/Quire.wiz`) through the same
 operations, for the same N, on one machine, in one `heavy` job:
 
 ```
@@ -44,3 +44,15 @@ markdown). The N list defaults to `1000 10000 100000` (`BENCH_NS` overrides).
 
 The programs are built once, before the measurements (`wiz build`), so the timings are
 the compiled path, not `#eval`.
+
+## The project corpus (`corpus.sh`)
+
+`corpus.sh` runs the benchmark's schema over the *real* findings of
+`scry/corpus/project/taint`: `CorpusBench.wiz` builds and analyses the project, then times
+one cache operation per process — `write` (`Scry.cacheFindings` on a fresh directory),
+`read` (`Scry.findingsLoad`) and `query` (`Scry.findingsQuery` for severity 0) — once
+with the JSON backend and once with Quire. The project analysis is repeated in every
+process so the rows are real, but it is outside the timed region; the harness's wall
+column includes it. This is the measurement of the one adopted consumer
+(`scry/src/Scry/ProjectCache.wiz`); `run.sh` remains the 1k/10k/100k findings-store
+comparison.

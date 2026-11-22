@@ -1,0 +1,12 @@
+import Prelude
+import Data.Result
+
+def discarded : Nat :=
+  let _result := (Result.ok 1 : Result Nat)
+  0
+
+def discardedOption : Nat :=
+  let _option := (Option.some 1 : Option Nat)
+  0
+
+def propagated : Result Nat := do Result.ok 1; Result.ok 2

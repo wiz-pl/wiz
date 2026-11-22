@@ -221,8 +221,27 @@ theorem isZero_of_eval_eq_zero {l : Lvl} {τ : Nat → Nat} (hτ : ∀ i, 1 ≤ 
 
 /-- A good level instantiation never maps a parameter to a level that can be zero. It is
 the hypothesis of `Tprog_instL`: `Sigma.eq`'s side condition `¬ i.IsZero` is the one level
-condition that is not preserved by an arbitrary instantiation (see `LevelSubstitution.lean`). -/
+condition that is not preserved by an arbitrary instantiation (see `LevelSubstitution.lean`).
+
+**This predicate is unsatisfiable for a finite `us`.** Past the end of the list
+`us.getD i zero` is `zero`, and `zero.NeverZero` is false, so `Good us` quantifies over a
+parameter that every finite list maps to `0` (`not_good` below). Instantiations that a
+caller can actually write (`us = []`, `[1]`, …) are therefore not "good", and the theorems
+that take `Good` as a hypothesis are vacuous as stated. A usable hypothesis has to bound
+the levels occurring in the judgment (only `i < j` for the parameters a term actually
+mentions) rather than quantify over every `i`; see the note in `LevelSubstitution.lean`. -/
 def Good (us : List Lvl) : Prop := ∀ i, (us.getD i zero).NeverZero
+
+/-- `Good us` is false for every finite list: the entry past the end is `zero`. -/
+theorem not_good (us : List Lvl) : ¬ Good us := by
+  intro h
+  have hz : us.getD us.length zero = zero := by
+    induction us with
+    | nil => rfl
+    | cons a as ih => simpa using ih
+  have h0 := h us.length
+  rw [hz] at h0
+  exact h0 (fun _ => 0) rfl
 
 theorem not_isZero_inst {l : Lvl} (h : ¬ l.IsZero) {us : List Lvl} (hu : Good us) :
     ¬ (inst us l).IsZero := by

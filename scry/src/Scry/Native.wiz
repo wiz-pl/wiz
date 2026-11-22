@@ -34,11 +34,9 @@ recovery nodes).
 The shim is sequential: one parser, one tree, one file. Threads are S1's next step.
 -/
 
-link_c "../../native/ts_shim.c"
-link_c "../../native/tree-sitter/lib/src/lib.c"
-link_c "../../native/tree-sitter-c/src/parser.c"
-link_c "../../native/tree-sitter-c-sharp/src/parser.c"
-link_c "../../native/tree-sitter-c-sharp/src/scanner.c"
+-- The C sources behind these externs are declared by `Scry.NativeLink`, which an
+-- executable that actually parses imports. A program that only lowers or analyses a
+-- checked-in `scry-cst` store does not link the native grammar.
 
 /-- A parsed file's native store. The shim returns one `calloc` block, so the finalizer
 is plain `free` (no prototype of our own needed in the generated C). -/

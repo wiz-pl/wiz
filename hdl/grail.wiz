@@ -1,0 +1,18 @@
+import Grail
+-- Hdl, the hardware-description package (design: wiz-notes/separate-repos.md §1.2).
+-- The modules moved out of the std library (`lib/Hdl` -> `hdl/src/Hdl`) with no import
+-- change: they are still `Hdl.*`, and the std primitives they import (`BitVec`, `Vec`,
+-- `Trace`, `Optic`, `Deriving`, `IO`, `Text`, `Std`) come from the toolchain's `lib/`,
+-- not from a root of this package.
+--
+--   grail build                 check src/, then every example in examples/
+--   grail build hdl             just the library
+--   grail test                  every example, its messages against examples/NAME.expected
+--
+-- `scripts/gen-uart-temporal.py` regenerates the marked case analyses inside
+-- `examples/hdl-uart-temporal.wiz`.
+def package : Package := Package.new "hdl"
+  |> Package.version "0.1.0"
+  |> Package.toolchain ">=0.1.0 <0.3.0"
+  |> Package.lib "hdl" "src"
+  |> Package.tests "examples" "examples"

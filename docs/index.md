@@ -31,6 +31,8 @@ what "self-hosted" means here.
   2026-11-14 candidate
 * [release/v0.1-checklist.md](release/v0.1-checklist.md): the 0.1 gate list, and
   [release-manifest.json](release/release-manifest.json): the machine-readable record
+* [attestation.md](attestation.md): signed in-toto statements, build manifests and
+  TPM 2.0 quotes, and how to verify them
 * [CHANGELOG.md](../CHANGELOG.md)
 * [building.md](building.md)
 * [tools/wiz-mcp/README.md](../tools/wiz-mcp/README.md): a stdlib-only MCP server that

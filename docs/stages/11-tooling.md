@@ -302,7 +302,8 @@ A browser can't open a Unix socket, so `wiz lsp --ws PORT` also listens on a Web
 `--no-stdio` there is no editor on stdin). `Wiz/WebSocket.lean` is the protocol: the
 HTTP upgrade (the answer proves the server understood it: base64 of the SHA-1 of the
 client's key and a fixed GUID, both written here), an `Origin` check (any web page may
-open a WebSocket to `127.0.0.1`, so only local pages are let in), and frames (a length
+open a WebSocket to `127.0.0.1`, so only local pages are let in; an opaque `null` origin
+— what a sandboxed iframe or a `data:`/`file:` page sends — is refused), and frames (a length
 in 7, 16 or 64 bits; the client's payload XORed with a mask; fragments; ping and close).
 One JSON-RPC message travels per text frame. A WebSocket client is an infoview (it is
 told where the cursor is and pulls goals) and may also edit documents of its own, so the
@@ -1057,3 +1058,52 @@ $ wiz test-driver =rig --jobs 4
 …
 8 passed, 0 failed
 ```
+## 11ae: build attestations
+
+`wiz build --attest [FILE]` (default `OUT.attest.json`; `Wiz/Attest.lean`) writes what
+the build did as an **in-toto Statement** (`https://in-toto.io/Statement/v1`) with a
+project predicate, `https://wiz-lang.org/attestation/wiz-build/v1`:
+
+* `subject`: the output binary's name and SHA-256;
+* `source`: the root file, its SHA-256, and `git.commit`/`git.dirty` when the invocation
+  directory is a Git repository (tracked modifications only; untracked build outputs do
+  not count);
+* `inputs`: every input with its SHA-256 — the root file (`source`), each imported module
+  (`module`, named by module name, not path, so the record is portable), and each
+  `link_c` file (`link-c`) — plus `inputsRoot`, a SHA-256 over the canonical manifest
+  lines; `headers` lists `import_c` names (their preprocessed text is the C compiler's,
+  so it is not hashed);
+* `toolchain`: the running `wiz` (version, optional release revision, SHA-256 of its
+  bytes) and `cc`/`llc` (resolved path, SHA-256, `--version` line);
+* `flags`: backend, output kind, `cc`, cflags, ldflags, libs, GMP, `llc`, the GC flags,
+  split count, and the `-I` roots;
+* `output` (kind, name, SHA-256) and `byproducts` (the generated `.c`, a `.h`, `.ll`, and
+  a split build's units, each hashed);
+* `environment`: the Lean platform target only — no environment variables, no
+  timestamps, no hostname, so an identical build serialises identically.
+
+The statement is the `payload` (base64) of a DSSE-style envelope with
+`payloadType: application/vnd.in-toto+json` and **`signatures: []`**: this is provenance,
+not authenticity. `wiz verify [--attest FILE] ARTIFACT` (default
+`ARTIFACT.attest.json`) checks the statement and predicate types, the subject and
+`predicate.output` digests against the artifact, re-hashes the recorded inputs (modules
+through the toolchain's roots, so pass the same `-I` flags), recomputes `inputsRoot`, and
+re-checks byproducts that are still present. `--artifact-only` skips the inputs (a
+released artifact without its source tree). Exit status is 0 on a match, 1 on a
+mismatch. A non-empty `signatures` array is refused: signature verification is not
+implemented, and an unsigned verifier must not silently accept a "signed" claim.
+
+Trust model: the statement is a claim by the builder, not proof that the builder told
+the truth. It proves integrity of the artifact relative to the statement and that the
+named inputs still hash as recorded; it does **not** prove the source was reviewed, that
+the toolchain was honest, or that the output is reproducible. Anyone can edit an unsigned
+statement and its hashes together. Signing, a reproducible rebuild by an independent
+builder, or a TEE-held key are the missing steps
+(`wiz-notes/build-attest.md`, `wiz-notes/attested-enclave-builds.md`). The attestation is
+independent of the elaboration cache: it does not claim a cache hit was a source build
+and records no cache manifest.
+
+`grail build --attest DIR` writes one statement per built executable to
+`DIR/NAME.attest.json`, with the package's module roots (verify with
+`wiz verify -I PKG -I PKG/src …`). Its statements have no `byproducts` (the generated C
+stays in `.grail/build/<key>/`, whose key the CLI does not expose).

@@ -4,6 +4,7 @@ import Wiz.Compiler.LLVM
 import Wiz.Compiler.Wasm
 import Wiz.Compiler.WasmValidate
 import Wiz.Compiler.Lower
+import Wiz.Module
 import Wiz.Toolchain
 
 /-!
@@ -249,7 +250,9 @@ where
   ws (cs : List Char) : List Char := cs.dropWhile (·.isWhitespace)
   num (cs : List Char) : Option (Nat × List Char) :=
     let ds := cs.takeWhile Char.isDigit
-    if ds.isEmpty then none else some (String.mk ds |>.toNat!, cs.drop ds.length)
+    match ds with
+    | [] => none
+    | _ => (String.ofList ds).toNat?.map fun n => (n, cs.drop ds.length)
   go (cs : List Char) : Option (RVal × List Char) := do
     match ws cs with
     | '(' :: rest =>
@@ -338,6 +341,15 @@ def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.Fil
       | none => pure (.error (.readback s!"could not read the result: {out.stdout}"))
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
+/-- (8f, F12) The JS host of a Wasm module: beside the toolchain's library, so
+`share/wiz/web` in a Nix package or release tarball and `web` in a checkout (as `webDir`
+does for the infoview), else `./web/wasm-host.mjs` for a checkout run from its root. -/
+def wasmHostPath : IO System.FilePath := do
+  let base := (← Module.toolchainLib).parent.getD "."
+  let installed := base / "web" / "wasm-host.mjs"
+  if ← installed.pathExists then return installed
+  pure ("web" / "wasm-host.mjs")
+
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
 (`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
 def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (Except String String) := do
@@ -348,9 +360,9 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
     match ← compileWasm decls (isIO ty) wasmFile with
     | .error e => pure (.error e)
     | .ok () =>
-      let host : System.FilePath := "web" / "wasm-host.mjs"
+      let host ← wasmHostPath
       unless ← host.pathExists do
-        return .error "web/wasm-host.mjs is missing (run from the Wiz checkout)"
+        return .error s!"the Wasm host is missing: no {host} (a toolchain ships it in share/wiz/web; a checkout has web/wasm-host.mjs)"
       let out ← try
         -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
         IO.Process.output
@@ -370,9 +382,13 @@ def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String
     if h.isEmpty || m.contains h then continue
     let cc := tc.cc
     let dir ← IO.FS.createTempDir
-    IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
-    let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-    if out.exitCode == 0 then m := m.insert h out.stdout
+    -- (F11) one scratch directory per header, removed whatever `cc` does
+    try
+      IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
+      let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
+      if out.exitCode == 0 then m := m.insert h out.stdout
+    finally
+      try IO.FS.removeDirAll dir catch _ => pure ()
   pure m
 
 

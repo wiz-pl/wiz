@@ -8,8 +8,62 @@ release (0.1.0 → 0.1.1) fixes bugs only. What a patch release keeps is in
 Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 `docs/stages/NN-*.md`. `#n` is a pull request on GitHub.
 
+The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
+`scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
+`native` group runs the check), so this file cannot drift from the ledger.
+
+<!-- trust-counts: rows=776 partial=197 axiom_rows=254 builtin_rows=249 native_rows=76 implemented_by=71 repr=5 extern_declarations=221 seal=8 other_builtin=20 pure_axioms=33 distinct_reasons=506 shared_reasons=270 legacy=0 expired=0 -->
+
 ## [Unreleased]
 
+* selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
+  command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
+  paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
+  quote or a newline is one word and cannot start a second command, and `--cc` is
+  documented as one executable. A program killed by a signal is now a failure decoded
+  from the wait status (`WIFSIGNALED`/`WTERMSIG` → `128 + signal`) instead of exit 0
+  (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
+  and a SIGSEGV reported as signal 11).
+
+* release: a deterministic source tarball (`nix build .#release-tarball`, or
+  `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
+  SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
+  it beside the binary tarball, and CI builds it twice and compares; the binary tarball
+  is not deterministic yet (docs/building.md, "Reproducible source tarball").
+* release: a CycloneDX 1.6 SBOM for the binary tarball and an in-toto/SLSA-style
+  provenance statement (`provenance.intoto.json`) recording the builder, source,
+  toolchain and input hashes and every output digest. It can be DSSE-signed with the
+  offline E1 key; no hosted SLSA level is claimed (docs/building.md, "Release SBOM and
+  provenance").
+* hdl: the **sized signal surface** (`lib/Hdl/Signal.wiz`): `Signal.fix`, `mapS`,
+  `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
+  sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
+  are reported (a size-keeping register, a same-size recursive copattern); `Hdl.Signal`
+  contributes no trust sources (the ledger size is the `trust-counts` marker above). Tests: `=hdl-signal` 9/9,
+  `=hdl` 32/0, `=copatterns` 18/18, `=sized types` 7/7.
+* web: the site now installs **`wiz-playground-ui.wasm`** with its `.mjs` (the page
+  aborted fetching it: "both async and sync fetching of the wasm failed"), and
+  `mount` resolves a page's loader namespace (`() => import("./…-ui.mjs")`) to its
+  `default` factory instead of calling the loader as the factory (the "does not export
+  wiz_loom_init/html/step" start failure). Tests: `web/framework/mount_test.mjs`, the
+  site fixture in `web/test-bench.sh`.
+* kernel: `Globals.builtins` is **indexed by key and name** (three maps beside the
+  ordered list). Writes go through `setBuiltins`/`addBuiltin`/`addBuiltinBack`, so a
+  record update cannot leave the index stale; the cache format is unchanged and replay
+  rebuilds it. Structure-only in measured wall time; the win is that key/name lookups no
+  longer scan every registration. Tests: `=language`/`=elab`/`=elabfix`/`=selfhost-host`.
+* distributed: **temporal/LTS core and 2PC safety**. `lib/Temporal.wiz` (an `LTS`, its
+  runs, enabled/taken/invariants/safety-during/bounded), `lib/Dist/Checker.wiz` (a BFS
+  reachability checker with soundness for `ok` and `bad`), and `lib/Dist/TwoPhase.wiz`
+  (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
+  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (7/0).
+
+* run, cache, wasm: `wiz run`, the REPL's `:run` and `import_c` preprocessing remove
+  their temporary directories on success and failure (each leaked one per run/header),
+  and a malformed escape in a cache entry (`\xZZ`, `\u{zz}`) is a miss rather than a
+  decoded character. The Wasm backend's JS host is found beside the toolchain's `lib/`
+  (`share/wiz/web`), so `wiz run --target wasm` works from an installed toolchain and
+  from any current directory; the Nix package and a release tarball ship it there.
 * elab: a named `match h : e` inside a definition whose result is an equation keeps the
   equation as written while its branches are checked. The declared type used to be
   evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
@@ -17,6 +71,11 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`k : isZero (Nat.succ n) = p`) no longer fit the computed branch goal. Nested named
   matches now see both equations; added the computed-goal nested case, an
   independent-scrutinee nested case, and an inner-equation `transp` rewrite (#539).
+* registry: the package registry is **Fate**, and its index repository is
+  `wiz-pl/fate-index` (`grail-index` is the historical name). `grail` is unchanged as the
+  client (`grail update/publish/lock`); the hermetic fixture and the example index move
+  to `Tests/fixtures/fate-index/` and `examples/fate-index/`. The registry format and
+  the SSH signature namespace are unchanged.
 * language: a parameter before the colon is **fixed only if no recursive call changes
   it**, as in Lean. `def count (acc : Nat) : List Nat → Nat | .nil => acc | .cons _ xs =>
   count (acc + 1) xs` used to fail ("recursive call of count must pass the parameter acc
@@ -46,7 +105,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
   assumption. The non-formal text is byte-identical to `Verilog.emit`, and
   `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
-  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  `hdl/examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
   yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
   finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153
@@ -714,7 +773,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   versions, lock v2 (index URL+commit and `pkg` entries), `grail update/fetch
   [--locked] [--offline]`, `--index URL#COMMIT`/`index-commit` pins, rollback protection
   over the index's git history (`--allow-rewind`), SHA-256-before-unpack fetching with a
-  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/grail-index`
+  content-addressed archive cache, `grail publish`, and a hermetic `Tests/fixtures/fate-index`
   fixture (`=grail-deps`).
 * grail (23m): **lock v3**. `(version 3)` and the resolving `(toolchain …)`; package
   `(size …)`, `(tree …)` (checked after every unpack) and `(commands …)` digests; flat,
@@ -724,9 +783,9 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `grail update` upgrades them. `grail publish` and the index schema record the size,
   tree and command digest. Tests: the four new `=grail-deps` cases (round-trip, old
   locks, upgrade, override).
-* grail (23m), the static index side: a `grail-index` repository layout (static
+* grail (23m), the static index side: a `fate-index` repository layout (static
   `index/NAME.sexpr`, deterministic `packages/NAME-VERSION.tar.gz`, `index.wiz` as the
-  index's Wiz manifest and generator templates), a complete `examples/grail-index/` with
+  index's Wiz manifest and generator templates), a complete `examples/fate-index/` with
   three packages, `grail index check` / `scripts/grail-index-check.sh` (names, versions,
   semver requirements, local archive SHA-256s and layouts, `index.wiz` completeness,
   module-prefix conflicts; offline by default), `(modules …)`/`(prefix …)` in the index
@@ -784,6 +843,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   be named (`match h : e, k : f with`, including after an unnamed one) and the equation
   works in a non-dependent match too. A named match on an indexed value is reported
   rather than ill typed (4e, #254).
+* release: a deterministic source tarball (`nix build .#release-tarball`, or
+  `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
+  SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
+  it beside the binary tarball, and CI builds it twice and compares; the binary tarball
+  is not deterministic yet (docs/building.md, "Reproducible source tarball").
+* release: a CycloneDX 1.6 SBOM for the binary tarball and an in-toto/SLSA-style
+  provenance statement (`provenance.intoto.json`) recording the builder, source,
+  toolchain and input hashes and every output digest. It can be DSSE-signed with the
+  offline E1 key; no hosted SLSA level is claimed (docs/building.md, "Release SBOM and
+  provenance").
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

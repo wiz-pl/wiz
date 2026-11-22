@@ -385,7 +385,7 @@ partial def Scry.scanArgsGo (o : Scry.ScanOpts) : List String → Except String 
       | .false => Scry.scanArgsGo { o with files := List.append o.files [a] } rest
 
 partial def Scry.wfPackTextGo : List String → EIO (String × String)
-  | .nil => EIO.pure ("lib/Scry/rules/default.scry", "")
+  | .nil => EIO.pure ("scry/rules/default.scry", "")
   | .cons p rest => do
     t ← Scry.wfReadTextOpt p;
     match t with
@@ -1268,8 +1268,11 @@ def Scry.verifyCmd (args : List String) : EIO Nat :=
                   | .false => "not-reported-and-repro-clean";
         now ← EIO.lift Scry.wfNow;
         let plan : Option Scry.WfPlan := match rec0.candidate with | .some c => .some c.plan | .none => (.none : Option Scry.WfPlan);
+        -- A static-only verify must not claim the candidate was verified: the stage
+        -- only advances when the stored repro actually ran.
         let recCand : Option Scry.WfCandidate := match rec0.candidate with
-          | .some c => .some { c with stage := "verified" }
+          | .some c => .some { c with stage := (match dc.ran with
+              | .true => "verified" | .false => c.stage) }
           | .none => (.none : Option Scry.WfCandidate);
         let verifyJson := Json.mkObj
           [ ("schema", Json.mkStr "scry-workflow-verify/1")

@@ -1,3 +1,4 @@
+namespace __root__
 /-!
 # Prelude
 
@@ -395,7 +396,7 @@ macro_rules
 shifts `a <<< k`, `a >>> k` by a number of places `k : Nat` (Lean's take it at the
 operand's type; a fixed amount is what hardware shifts by wiring). Precedences as in
 Lean: `|||` 55, `^^^` 58, `&&&` 60 (below `+`), shifts 75, `~~~` max. Instances: `Nat`
-here, words in lib/Word.wiz, HDL signals in lib/Hdl/Core.wiz. -/
+here, words in lib/Word.wiz, HDL signals in hdl/src/Hdl/Core.wiz. -/
 class AndOp (A : Type) where
   and : A → A → A
 /-- Types with bitwise or, written `a ||| b`. -/
@@ -474,7 +475,7 @@ app_unexpander Bool.casesOn
   | `(term| $f $m $b Bool.true $a) => `(term| $a || $b)
   | `(term| $f $m $e $t $c) => `(term| if $c then $t else $e)
 /-- A condition that is a signal (H14 S2): when the type `C` of `c` is not a data type and
-has an instance `Mux C C` (an HDL signal, lib/Hdl/Core.wiz), `if c then a else b` is
+has an instance `Mux C C` (an HDL signal, hdl/src/Hdl/Core.wiz), `if c then a else b` is
 `Mux.mux c a b`, a multiplexer, at an instance `Mux C A` for the branches' type `A`.
 Any other condition is the `match` above (and its messages). -/
 class Mux (C A : Type) where
@@ -618,6 +619,19 @@ inductive Tac where
   -- (6h S2) the default `simp` set: each registered lemma's name and (constant) `Expr`,
   -- in the order the driver tries them (priority, then registration)
   | getSimpLemmas (g : Nat) (k : List (String × Expr) → Tac)
+  -- (D6) the source names of `T`'s constructors (`T.c`), in declaration order, for
+  -- `constructor`: `none` if `T` is not an inductive type or a structure
+  | ctorNames (n : String) (k : Option (List String) → Tac)
+  -- (6j) a case split on the Boolean expression `e` (of type `ty`): two goals, with
+  -- `e = .true` and `e = .false` as hypotheses (named from `hint`, freshly); `k` gets
+  -- their numbers
+  | byCases (g : Nat) (e : Expr) (ty : Expr) (hint : String) (k : List Nat → Tac)
+  -- (P0) the `[hint]` database: each entry's name, kind (`apply`/`intro`/`elim`) and
+  -- reflected constant, in the order `auto` tries them (priority, then registration)
+  | getHints (g : Nat) (k : List (String × (String × Expr)) → Tac)
+  -- (P0) the raw open goals, including the main goal a tactic has just solved: what
+  -- `replaceMainGoal` replaces (so it does not drop the next goal)
+  | getOpen (k : List Nat → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -645,6 +659,9 @@ def TacticM.fresh : TacticM Nat := fun k => Tac.fresh k
 /-- The open goals, the main goal first. Goals are numbers, handles held by the
 elaborator. -/
 def TacticM.getGoals : TacticM (List Nat) := fun k => Tac.getGoals k
+/-- The open goals **as the tactic started**, including the main goal a tactic just
+solved: what `TacticM.replaceMainGoal` replaces. (The filtered list is `getGoals`.) -/
+def TacticM.getOpen : TacticM (List Nat) := fun k => Tac.getOpen k
 /-- Replace the list of open goals. -/
 def TacticM.setGoals (gs : List Nat) : TacticM Unit := fun k => Tac.setGoals gs (k ())
 /-- The type of goal `g` (what is to be proved), reflected. -/
@@ -720,6 +737,18 @@ def TacticM.getSimpLemmas (g : Nat) : TacticM (List (String × Expr)) := fun k =
 number of parameters and the constructor's number of fields: `List.cons` is
 `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
 def TacticM.ctorInfo (n : String) : TacticM (Option (String × Nat × Nat)) := fun k => Tac.ctorInfo n k
+/-- (D6) The source names of the constructors of `n` (`T.c`), in declaration order: the
+candidates `constructor` tries. `none` if `n` is not an inductive type or a structure
+(and `some []` for an inductive with no constructors). -/
+def TacticM.ctorNames (n : String) : TacticM (Option (List String)) := fun k => Tac.ctorNames n k
+/-- Split goal `g` on the Boolean expression `e`: two goals, with `e = .true` and
+`e = .false` as hypotheses, named freshly from `hint` when it is not `""`. -/
+def TacticM.byCases (g : Nat) (e : Expr) (ty : Expr) (hint : String) : TacticM (List Nat) := fun k =>
+  Tac.byCases g e ty hint k
+/-- The `[hint]` database: each hint's name, kind (`apply`/`intro`/`elim`) and reflected
+constant, in the order `auto` tries them (priority, then registration). -/
+def TacticM.getHints (g : Nat) : TacticM (List (String × (String × Expr))) := fun k =>
+  Tac.getHints g k
 /-- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
 or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
 constant `n`. -/
@@ -948,9 +977,11 @@ def TacticM.mainGoal : TacticM Nat := do
   | .nil => TacticM.fail "no goals"
   | .cons g _ => TacticM.pure g
 
-/-- Replace the main goal by the goals `new` (none, when it was closed). -/
+/-- Replace the main goal by the goals `new` (none, when it was closed). It reads the
+goals **as the tactic found them**, not the filtered list after the tactic solved the
+main goal, so closing one goal keeps the others. -/
 def TacticM.replaceMainGoal (new : List Nat) : TacticM Unit := do
-  gs ← TacticM.getGoals;
+  gs ← TacticM.getOpen;
   match gs with
   | .nil => TacticM.setGoals new
   | .cons _ rest => TacticM.setGoals (List.append new rest)
@@ -1177,6 +1208,31 @@ def Tactic.renameI : Tactic := fun stx => do
   TacticM.replaceMainGoal (.cons g' .nil)
 attribute [tactic tactic.renameI] Tactic.renameI
 
+-- ## Case analysis (stage 6j)
+--
+-- `by_cases e` splits on a Boolean expression: two goals, with `e = .true` and
+-- `e = .false` as hypotheses. It is the `Bool.casesOn` eliminator at the motive
+-- `fun b => e = b → G`, applied to `refl e`; the kernel checks the term.
+/-- Split the goal at `stx`'s expression, naming the hypotheses from `hint`. -/
+def TacticM.byCasesAt (g : Nat) (hint : String) (stx : Syntax) : TacticM Unit := do
+  p ← TacticM.elabInfer g stx;
+  gs ← TacticM.byCases g p.1 p.2 hint;
+  TacticM.replaceMainGoal gs
+syntax (name := byCases) "by_cases" term : tactic
+/-- `by_cases e` (`e : Bool`): two goals, with `e = .true` and `e = .false` as
+hypotheses named `h`/`h1` (fresh). -/
+def Tactic.byCases : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.byCasesAt g "" (Syntax.getArg stx 1)
+attribute [tactic tactic.byCases] Tactic.byCases
+syntax (name := byCasesAs) "by_cases" ident ":" term : tactic
+/-- `by_cases h : e`: as `by_cases e`, with the branch hypotheses named `h`. -/
+def Tactic.byCasesAs : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  h ← Syntax.identName (Syntax.getArg stx 1);
+  TacticM.byCasesAt g h (Syntax.getArg stx 3)
+attribute [tactic tactic.byCasesAs] Tactic.byCasesAs
+
 -- ## Reading and building terms (stage 6g)
 --
 -- A reflected term is an application spine: a head (a constant, a variable, …) and its
@@ -1268,6 +1324,11 @@ def List.dropN {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => List.dropN n xs
+/-- The first `n` elements of a list (at most what it has). -/
+def List.takeN {A : Type} : Nat → List A → List A
+  | .zero, _ => .nil
+  | .succ _, .nil => .nil
+  | .succ n, .cons x xs => .cons x (List.takeN n xs)
 /-- `e` as a constructor application: the constructor's name and its fields (the
 arguments after the type's parameters). `List.cons A x L` is `("List.cons", [x, L])`. -/
 def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match Expr.constApp e with
@@ -1282,6 +1343,58 @@ def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match
 def TacticM.whnfCtorApp (g : Nat) (e : Expr) : TacticM (Option (String × List Expr)) := do
   e' ← TacticM.whnf g e;
   TacticM.ctorApp e'
+
+-- `constructor`: the host wrapper for the self-hosted `tactic.constructor`
+-- (`STacOp.constructor`); it needs `Expr.headName`, so it is defined after the terms.
+/-- `constructor`'s search: try each constructor name in order, applying it as `apply`
+would (its arguments become goals), and return the first that fits the goal. A failed
+attempt is undone (`Tac.catch` restarts from the state before it), so a constructor
+that unifies after the first is found; if none fits, the tactic fails. -/
+def TacticM.tryCtors (g : Nat) (names : List String) : TacticM (List Nat) := fun k => match names with
+  | .nil => TacticM.fail "constructor: no constructor applies" k
+  | .cons n rest => Tac.catch
+      ((do f ← TacticM.elabInfer g (Syntax.mkVar n);
+           TacticM.applyLoop 64 g f.1 f.2 .nil) k)
+      (fun _ => TacticM.tryCtors g rest k)
+      Tac.done
+/-- `constructor`'s goal type: its head constant's constructors. A structure's type is a
+definition (its value is a Σ), so its name is read **before** computing the head, as the
+self-hosted frontend's `indCtorsOf` checks the glued head first; only when the head is
+not an inductive type (`def F := Nat`) is the type computed (`whnf`) and read again. -/
+def TacticM.ctorGoalNames (g : Nat) (fuel : Nat) (ty : Expr) : TacticM (Option (List String)) :=
+  match fuel with
+  | .zero => TacticM.pure .none
+  | .succ k => match Expr.headName ty with
+    | .some T => do
+      csOpt ← TacticM.ctorNames T;
+      match csOpt with
+      | .some cs => TacticM.pure (.some cs)
+      | .none => do
+        ty' ← TacticM.whnf g ty;
+        match Expr.beq ty ty' with
+        | .true => TacticM.pure .none
+        | .false => TacticM.ctorGoalNames g k ty'
+    | .none => TacticM.pure .none
+syntax (name := constructor) "constructor" : tactic
+/-- `constructor`: apply a constructor of the goal's type, as the self-hosted frontend's
+`tactic.constructor` (`STacOp.constructor`) does: the first one in declaration order
+whose result type unifies with the goal. Its arguments are the new goals, in order. It
+fails with `constructor: no constructor applies` when none fits, and with
+`constructor: the goal is not an inductive type (or it has no constructors)` when the
+goal's type is not an inductive type (or structure); it never picks a constructor whose
+result type does not fit. -/
+def Tactic.constructor : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  csOpt ← TacticM.ctorGoalNames g 16 ty;
+  match csOpt with
+  | .none => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+  | .some cs => match cs with
+    | .nil => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+    | .cons _ _ => do
+      new ← TacticM.tryCtors g cs;
+      TacticM.replaceMainGoal new
+attribute [tactic tactic.constructor] Tactic.constructor
 
 -- ## Unfolding and rewriting (stage 6f)
 --
@@ -1396,18 +1509,28 @@ def Simp.args (stx : Syntax) : List (Syntax × Bool) := match stx with
   | .node _ xs => Simp.argTerms xs
   | _ => .nil
 
-/-- Elaborate each rule argument in goal `g`'s context: the term and its direction. -/
-def TacticM.elabArgs : Nat → List (Syntax × Bool) → TacticM (List (Expr × Bool))
+/-- The name of a rule argument when it is an identifier (a local hypothesis or a
+constant); other terms are printed after elaboration. -/
+def Syntax.ruleName (stx : Syntax) : Option String := match stx with
+  | .ident s => .some s
+  | _ => .none
+
+/-- Elaborate each rule argument in goal `g`'s context: a printable name, the term and
+its direction. -/
+def TacticM.elabArgs : Nat → List (Syntax × Bool) → TacticM (List (String × (Expr × Bool)))
   | _, .nil => TacticM.pure .nil
   | g, .cons s ss => do
     p ← TacticM.elabInfer g s.1;
+    name ← match Syntax.ruleName s.1 with
+      | .some n => TacticM.pure n
+      | .none => TacticM.ppExpr g p.1;
     rest ← TacticM.elabArgs g ss;
-    TacticM.pure (.cons (p.1, s.2) rest)
+    TacticM.pure (.cons (name, (p.1, s.2)) rest)
 
-/-- The default set as rules: registered lemmas are used left to right. -/
-def Simp.defaultRules : List (String × Expr) → List (Expr × Bool)
+/-- The default set as rules (registered lemmas are used left to right). -/
+def Simp.defaultRules : List (String × Expr) → List (String × (Expr × Bool))
   | .nil => .nil
-  | .cons p ps => .cons (p.2, .false) (Simp.defaultRules ps)
+  | .cons p ps => .cons (p.1, (p.2, .false)) (Simp.defaultRules ps)
 
 /-- One `simp` step: try rule `r` on goal `g` in its direction `rtl`; the new goal and
 its type, or `.none` when it does not match. A rule that is not an equation after its
@@ -1423,46 +1546,533 @@ def TacticM.simpStep (g : Nat) (r : Expr) (rtl : Bool) : TacticM (Option (Nat ×
 
 /-- The `simp` loop. `rules` is the set, `rest` the rules not yet tried in this pass; a
 rewrite restarts the pass, and a pass that changes nothing returns the goal. `fuel`
-counts the rewrites (not the attempts). -/
-partial def TacticM.simpGo : Nat → Nat → List (Expr × Bool) → List (Expr × Bool) → TacticM Nat
-  | .zero, _, _, _ => TacticM.fail "simp: maximum steps (100) reached: possible loop (a lemma keeps growing the goal)"
-  | .succ _, g, _, .nil => TacticM.pure g
-  | .succ fuel, g, rules, .cons r rs => do
-    s ← TacticM.simpStep g r.1 r.2;
-    match s with
-    | .some p => TacticM.simpGo fuel p.1 rules rules
-    | .none => TacticM.simpGo (Nat.succ fuel) g rules rs
+counts the rewrites (not the attempts); `used` records the rules that fired, in firing
+order (the `simp?` suggestion). -/
+partial def TacticM.simpGo : Nat → Nat → List (String × (Expr × Bool)) →
+    List (String × (Expr × Bool)) → List (String × Bool) → TacticM (Nat × List (String × Bool))
+  | .zero, _, _, _, _ => TacticM.fail "simp: maximum steps (100) reached: possible loop (a lemma keeps growing the goal)"
+  | .succ _, g, _, .nil, used => TacticM.pure (g, used)
+  | .succ fuel, g, rules, .cons r rs, used => do
+    match r with
+    | (name, (e, dir)) => do
+      s ← TacticM.simpStep g e dir;
+      match s with
+      | .some p => TacticM.simpGo fuel p.1 rules rules (List.append used (.cons (name, dir) .nil))
+      | .none => TacticM.simpGo (Nat.succ fuel) g rules rs used
 
 /-- `simp`'s body: the explicit rules (if any), then the default set unless `only`;
-rewrite until none applies. -/
-def TacticM.simpMain (arg : Syntax) (only : Bool) : TacticM Unit := do
+rewrite until none applies; the final goal and the rules that fired. -/
+def TacticM.simpMain (arg : Syntax) (only : Bool) : TacticM (Nat × List (String × Bool)) := do
   g ← TacticM.mainGoal;
   ls ← TacticM.elabArgs g (Simp.args arg);
   ds ← match only with
     | .true => TacticM.pure .nil
     | .false => TacticM.getSimpLemmas g;
   let rules := List.append ls (Simp.defaultRules ds);
-  n ← TacticM.simpGo Simp.fuel g rules rules;
-  TacticM.pure ()
+  TacticM.simpGo Simp.fuel g rules rules .nil
+
+/-- A used rule, written as `simp only` wants it (`← r` right to left). -/
+def Simp.ruleText (r : String × Bool) : String :=
+  match r with
+  | (n, dir) => match dir with
+    | .true => String.append "← " n
+    | .false => n
+/-- The used rules as the inside of `simp only […]`. -/
+def Simp.showUsed : List (String × Bool) → String
+  | .nil => ""
+  | .cons r .nil => Simp.ruleText r
+  | .cons r rs => String.append (Simp.ruleText r) (String.append ", " (Simp.showUsed rs))
+
+/-- Is goal `g` a reflexive equation (`a = a` up to definitional equality)? Then the
+`simp?` suggestion can append the explicit `rfl` (the driver has no closer). -/
+def TacticM.goalRefl (g : Nat) : TacticM Bool := do
+  ty ← TacticM.goalType g;
+  ev ← TacticM.eqView g ty;
+  match ev with
+  | .some p => match p with
+    | (A, a, b) => TacticM.isDefEq g a b
+  | .none => TacticM.pure .false
+
+/-- The closer to suggest after `simp?`: `rfl` when the single residual goal is a
+reflexive equation. -/
+def TacticM.simpCloser : List Nat → TacticM Bool
+  | .cons g .nil => TacticM.goalRefl g
+  | _ => TacticM.pure .false
+
+/-- Trace the `simp?` suggestion: replay the rules that fired, and `rfl` when the single
+residual goal is reflexive. Also reports the recorded `rulesUsed` list. -/
+def TacticM.simpSuggest (used : List (String × Bool)) : TacticM Unit := do
+  gs ← TacticM.getGoals;
+  closer ← TacticM.simpCloser gs;
+  let base := String.append "Try this: simp only [" (String.append (Simp.showUsed used) "]");
+  TacticM.trace (match closer with
+    | .true => String.append base "; rfl"
+    | .false => base);
+  TacticM.trace (String.append "simp?: rulesUsed: [" (String.append (Simp.showUsed used) "]"))
 
 syntax (name := simp) "simp" "[" sepBy(simp_arg, ",") "]" : tactic
 /-- `simp [h₁, ← h₂]`: rewrite the goal with the default set and the equations `h₁ …`
 (explicit rules first) until none applies; `← h` uses `h` right to left. -/
-def Tactic.simp : Tactic := fun stx => TacticM.simpMain (Syntax.getArg stx 2) .false
+def Tactic.simp : Tactic := fun stx => do
+  r ← TacticM.simpMain (Syntax.getArg stx 2) .false;
+  TacticM.pure ()
 attribute [tactic tactic.simp] Tactic.simp
 syntax (name := simpNil) "simp" : tactic
 /-- `simp`: rewrite with the default set (the registered `[simp]` lemmas). -/
-def Tactic.simpNil : Tactic := fun _ => TacticM.simpMain .missing .false
+def Tactic.simpNil : Tactic := fun _ => do
+  r ← TacticM.simpMain .missing .false;
+  TacticM.pure ()
 attribute [tactic tactic.simpNil] Tactic.simpNil
 syntax (name := simpOnly) "simp" "only" "[" sepBy(simp_arg, ",") "]" : tactic
 /-- `simp only [h₁, …]`: rewrite the goal with exactly the equations `h₁ …`, not the
 default set. -/
-def Tactic.simpOnly : Tactic := fun stx => TacticM.simpMain (Syntax.getArg stx 3) .true
+def Tactic.simpOnly : Tactic := fun stx => do
+  r ← TacticM.simpMain (Syntax.getArg stx 3) .true;
+  TacticM.pure ()
 attribute [tactic tactic.simpOnly] Tactic.simpOnly
 syntax (name := simpOnlyNil) "simp" "only" : tactic
 /-- `simp only`: as `simp only []`: no rules, so the goal is unchanged (identity). -/
-def Tactic.simpOnlyNil : Tactic := fun _ => TacticM.simpMain .missing .true
+def Tactic.simpOnlyNil : Tactic := fun _ => do
+  r ← TacticM.simpMain .missing .true;
+  TacticM.pure ()
 attribute [tactic tactic.simpOnlyNil] Tactic.simpOnlyNil
+syntax (name := simpQuestion) "simp?" : tactic
+/-- `simp?`: run `simp`, record the rules that fired and trace `Try this: simp only […]`
+(with `; rfl` when the residual goal is reflexive), plus the `rulesUsed` list. -/
+def Tactic.simpQuestion : Tactic := fun _ => do
+  r ← TacticM.simpMain .missing .false;
+  TacticM.simpSuggest r.2
+attribute [tactic tactic.simpQuestion] Tactic.simpQuestion
+syntax (name := simpQuestionArgs) "simp?" "[" sepBy(simp_arg, ",") "]" : tactic
+/-- `simp? [h₁, …]`: as `simp?`, with the explicit rules of `simp [h₁, …]`. -/
+def Tactic.simpQuestionArgs : Tactic := fun stx => do
+  r ← TacticM.simpMain (Syntax.getArg stx 2) .false;
+  TacticM.simpSuggest r.2
+attribute [tactic tactic.simpQuestionArgs] Tactic.simpQuestionArgs
+
+-- ## `auto` (P0)
+--
+-- Deterministic bounded search over local hypotheses (as `apply` rules) and the `[hint]`
+-- database, after the closers `assumption`, `rfl` and `True.intro`. No random or
+-- time-based choice: local hypotheses in context order, then hints by priority and
+-- registration order. The budgets are explicit and exhausting one is an error.
+
+/-- `auto`'s search depth (the note's budget: depth 8). -/
+def Auto.depth : Nat := 8
+/-- `auto`'s rule-application budget (the note's budget: 5,000 per declaration run). -/
+def Auto.fuel : Nat := 5000
+
+/-- Close `g` with the first tactic of a list that succeeds (restoring the state after a
+failed attempt). -/
+def TacticM.firstOf : List (TacticM Unit) → TacticM Unit
+  | .nil => TacticM.fail "auto: no closer"
+  | .cons t ts => TacticM.tryCatch t (fun _ => TacticM.firstOf ts)
+
+/-- `rfl` as a closer: the goal is an equation whose sides are definitionally equal. -/
+def TacticM.autoRfl (g : Nat) : TacticM Unit := do
+  ty ← TacticM.goalType g;
+  ev ← TacticM.eqView g ty;
+  match ev with
+  | .some p => match p with
+    | (_, a, b) => do
+      ok ← TacticM.isDefEq g a b;
+      match ok with
+      | .true => do
+        pr ← TacticM.elabInfer g (Syntax.mkVar "rfl");
+        TacticM.assign g pr.1
+      | .false => TacticM.fail "auto: not rfl"
+  | .none => TacticM.fail "auto: not an equation"
+
+/-- `True.intro` as a closer (the name must be in scope: `import Logic`). -/
+def TacticM.autoTrue (g : Nat) : TacticM Unit := do
+  p ← TacticM.elabInfer g (Syntax.mkVar "True.intro");
+  TacticM.assign g p.1
+
+/-- Apply the reflected term `e` to the goal (as `apply`, from an `Expr`). -/
+def TacticM.applyExpr (g : Nat) (e : Expr) : TacticM Unit := do
+  ty ← TacticM.inferType g e;
+  new ← TacticM.applyLoop 64 g e ty .nil;
+  TacticM.replaceMainGoal new
+
+/-- The local hypotheses as `apply` candidates, innermost first (the `i`th is
+`Expr.var i`). -/
+def TacticM.hypHints : List (String × Expr) → Nat → List (String × (String × Expr))
+  | .nil, _ => .nil
+  | .cons h hs, i => .cons (h.1, ("apply", Expr.var i)) (TacticM.hypHints hs (Nat.succ i))
+
+/-- The explicit `auto` budgets: depth 8 and 5,000 rule applications. -/
+def TacticM.autoBudget (depth fuel : Nat) : TacticM Unit :=
+  match depth with
+  | .zero => TacticM.fail "auto: depth budget exhausted (8)"
+  | .succ _ => match fuel with
+    | .zero => TacticM.fail "auto: budget exhausted (5000 rule applications)"
+    | .succ _ => TacticM.pure ()
+
+/-- Try one hint: `apply`, then close the new goals at depth - 1; on failure restore and
+try the next hint. `go` is `TacticM.autoGoals`, passed in so the two are not a mutual
+block (`mutual` does not take `partial` definitions). -/
+partial def TacticM.autoHints
+    (go : List Nat → Nat → Nat → List (String × (String × Expr)) → TacticM Unit)
+    (g : Nat) (depth : Nat) (fuel : Nat)
+    (rest : List (String × (String × Expr)))
+    (all : List (String × (String × Expr))) : TacticM Unit :=
+  match rest with
+  | .nil => do
+    s ← TacticM.ppGoal g;
+    TacticM.fail (String.append "auto: no proof; first unsolved goal:\n" s)
+  | .cons h hs => do
+    match h with
+    | (name, (kind, e)) => do
+      TacticM.tryCatch
+        (do
+          before ← TacticM.getGoals;
+          TacticM.applyExpr g e;
+          after ← TacticM.getGoals;
+          let restGoals : List Nat := match before with
+            | .nil => .nil
+            | .cons _ t => t;
+          let fresh := List.takeN (Nat.sub (List.length after) (List.length restGoals)) after;
+          go fresh (Nat.sub depth 1) (Nat.sub fuel 1) all)
+        (fun _ => TacticM.autoHints go g depth fuel hs all)
+
+/-- Run `auto` on the goals in order: closers first, else a hint or local hypothesis. -/
+partial def TacticM.autoGoals (gs : List Nat) (depth : Nat) (fuel : Nat)
+    (hints : List (String × (String × Expr))) : TacticM Unit :=
+  match gs with
+  | .nil => TacticM.pure ()
+  | .cons g rest => do
+    TacticM.autoBudget depth fuel;
+    ty ← TacticM.goalType g;
+    hyps ← TacticM.goalHyps g;
+    TacticM.tryCatch
+      (do
+        TacticM.firstOf (.cons (TacticM.findHyp hyps 0 g ty)
+          (.cons (TacticM.autoRfl g) (.cons (TacticM.autoTrue g) .nil)));
+        TacticM.autoGoals rest depth fuel hints)
+      (fun _ => do
+        let local := TacticM.hypHints hyps 0;
+        let all := List.append local hints;
+        TacticM.autoHints TacticM.autoGoals g depth fuel all all;
+        TacticM.autoGoals rest depth fuel hints)
+
+syntax (name := auto) "auto" : tactic
+/-- `auto`: deterministic bounded search. Closers `assumption`, `rfl`, `True.intro`; then
+local hypotheses and `[hint]` lemmas by `apply`, depth 8 and 5,000 applications. It
+succeeds only if every goal closes, and otherwise fails with the first unsolved goal. -/
+def Tactic.auto : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  hints ← TacticM.getHints g;
+  gs ← TacticM.getGoals;
+  TacticM.tryCatch
+    (TacticM.autoGoals gs Auto.depth Auto.fuel hints)
+    (fun msg => TacticM.fail msg)
+attribute [tactic tactic.auto] Tactic.auto
+
+-- ## `omega` (P0, linear `Nat`)
+--
+-- A bounded, deterministic transitive-closure search over `Nat.Le` hypotheses and the
+-- order lemmas `Nat.le_refl`, `Nat.le_trans`, `Nat.le_succ`, `Nat.le_add_right`,
+-- `Nat.le_add_left`, `Nat.le_of_eq`, `Nat.le_of_eq_sym`. It proves goals of the form
+-- `a ≤ b`, `a < b` (read as `a + 1 ≤ b`) and `a = b` (antisymmetry) in the linear
+-- fragment; every step is one of those lemmas, so the kernel checks the proof. Products,
+-- division, modulo and powers are outside the fragment and are refused (`omega:
+-- non-linear`). `Int` order lemmas do not share this code (their `Le` is a sign
+-- predicate, not a Boolean), so `Int` is P1.
+
+/-- Whether a string is in a list (names, for the non-linear check). -/
+def List.hasString (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x xs => match Expr.nameEq s x with
+    | .true => .true
+    | .false => List.hasString s xs
+
+/-- Does the head constant of `e` have one of these names? -/
+def Expr.hasHeadOp (names : List String) (e : Expr) : Bool :=
+  match Expr.headName e with
+  | .some n => List.hasString n names
+  | .none => .false
+
+/-- Does `e` mention a constant with one of these heads? (After normalization; the
+non-linear check for `omega`.) -/
+partial def Expr.hasOp (names : List String) (e : Expr) : Bool :=
+  match e with
+  | .app f a => Bool.or (Expr.hasOp names f) (Bool.or (Expr.hasOp names a) (Expr.hasHeadOp names e))
+  | .lam _ b => Expr.hasOp names b
+  | .pi _ _ q d b => Bool.or (Expr.hasOp names q) (Bool.or (Expr.hasOp names d) (Expr.hasOp names b))
+  | _ => Expr.hasHeadOp names e
+
+/-- The subterms of `e`, in pre-order (for the `omega` add-term index). -/
+partial def Expr.subterms (e : Expr) : List Expr :=
+  let rest : List Expr := match e with
+    | .app f a => List.append (Expr.subterms f) (Expr.subterms a)
+    | .lam _ b => Expr.subterms b
+    | .pi _ _ q d b => List.append (Expr.subterms q) (List.append (Expr.subterms d) (Expr.subterms b))
+    | _ => .nil;
+  .cons e rest
+
+/-- Is `e` in the list (syntactic equality)? -/
+def Expr.inList (e : Expr) : List Expr → Bool
+  | .nil => .false
+  | .cons x xs => match Expr.beq e x with
+    | .true => .true
+    | .false => Expr.inList e xs
+
+/-- `f a b`, without a list literal (this block is before `[a, b]` is defined). -/
+def Expr.ap2 (f a b : Expr) : Expr := .app (.app f a) b
+/-- `f a b c`. -/
+def Expr.ap3 (f a b c : Expr) : Expr := .app (Expr.ap2 f a b) c
+/-- `f a b c d`. -/
+def Expr.ap4 (f a b c d : Expr) : Expr := .app (Expr.ap3 f a b c) d
+/-- `f a b c d e`. -/
+def Expr.ap5 (f a b c d e : Expr) : Expr := .app (Expr.ap4 f a b c d) e
+
+/-- The two operands of an addition, after the class/instance arguments: `Nat.add a b`,
+`Add.add A inst a b` or `HAdd.hAdd A B C inst a b`. -/
+def Expr.addPair (e : Expr) : Option (Expr × Expr) :=
+  match Expr.constApp e with
+  | .some (n, args) =>
+    let k := if Expr.nameEq n "Nat.add" then 0
+      else if Expr.nameEq n "Add.add" then 2
+      else if Expr.nameEq n "HAdd.hAdd" then 4
+      else 99;
+    match List.dropN k args with
+    | .cons a (.cons b .nil) => .some (a, b)
+    | _ => .none
+  | .none => .none
+
+/-- The edges out of `node` from the `Nat.add` terms: `a → a + k` and `k → a + k`. -/
+def TacticM.omegaAddEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
+    List Expr → TacticM (List (Expr × Expr))
+  | .nil => TacticM.pure (.nil : List (Expr × Expr))
+  | .cons t ts => do
+    rest ← TacticM.omegaAddEdges g src node proof ts;
+    match Expr.addPair t with
+    | .some (u, k) => do
+      eu ← TacticM.isDefEq g node u;
+      ek ← TacticM.isDefEq g node k;
+      let right : List (Expr × Expr) := match eu with
+        | .true => .cons (t, Expr.ap5 (.const "Nat.le_trans") src node t proof
+              (Expr.ap2 (.const "Nat.le_add_right") u k)) .nil
+        | .false => .nil;
+      let left : List (Expr × Expr) := match ek with
+        | .true => .cons (t, Expr.ap5 (.const "Nat.le_trans") src node t proof
+              (Expr.ap2 (.const "Nat.le_add_left") k u)) .nil
+        | .false => .nil;
+      TacticM.pure (List.append (List.append right left) rest)
+    | _ => TacticM.pure rest
+
+/-- The two edges an equality hypothesis gives, through `Nat.le_of_eq` and
+`Nat.le_of_eq_sym`. -/
+def TacticM.omegaEqEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr)
+    (A u v : Expr) (h : Expr) : TacticM (List (Expr × Expr)) := do
+  eu ← TacticM.isDefEq g node u;
+  ev ← TacticM.isDefEq g node v;
+  let fwd : List (Expr × Expr) := match eu with
+    | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof
+          (Expr.ap3 (.const "Nat.le_of_eq") u v h)) .nil
+    | .false => .nil;
+  let bwd : List (Expr × Expr) := match ev with
+    | .true => .cons (u, Expr.ap5 (.const "Nat.le_trans") src node u proof
+          (Expr.ap3 (.const "Nat.le_of_eq_sym") u v h)) .nil
+    | .false => .nil;
+  TacticM.pure (List.append fwd bwd)
+
+/-- The edges out of `node` from the hypotheses: `Le`, `Lt` and equalities (both ways,
+through `Nat.le_of_eq`/`Nat.le_of_eq_sym`). -/
+def TacticM.omegaHypEdges (g : Nat) (i : Nat) (src : Expr) (node : Expr) (proof : Expr) :
+    List (String × Expr) → TacticM (List (Expr × Expr))
+  | .nil => TacticM.pure (.nil : List (Expr × Expr))
+  | .cons h hs => do
+    rest ← TacticM.omegaHypEdges g (Nat.succ i) src node proof hs;
+    let hp : Expr := Expr.var i;
+    match Expr.appOf "Nat.Le" h.2 with
+    | .some (.cons u (.cons v .nil)) => do
+      ok ← TacticM.isDefEq g node u;
+      let here : List (Expr × Expr) := match ok with
+        | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof hp) .nil
+        | .false => .nil;
+      TacticM.pure (List.append here rest)
+    | _ => match Expr.appOf "Nat.Lt" h.2 with
+      | .some (.cons u (.cons v .nil)) => do
+        let su : Expr := .app (.const "Nat.succ") u;
+        ok ← TacticM.isDefEq g node su;
+        let here : List (Expr × Expr) := match ok with
+          | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof hp) .nil
+          | .false => .nil;
+        TacticM.pure (List.append here rest)
+      | _ => do
+        ev ← TacticM.eqView g h.2;
+        match ev with
+        | .some q => match q with
+          | (A, u, v) => do
+            here ← TacticM.omegaEqEdges g src node proof A u v hp;
+            TacticM.pure (List.append here rest)
+        | .none => TacticM.pure rest
+
+/-- The successor edge `n → n + 1`, from `Nat.le_succ`. -/
+def TacticM.omegaSuccEdges (src : Expr) (node : Expr) (proof : Expr) : List (Expr × Expr) :=
+  let s : Expr := .app (.const "Nat.succ") node;
+  .cons (s, Expr.ap5 (.const "Nat.le_trans") src node s proof
+    (.app (.const "Nat.le_succ") node)) .nil
+
+/-- All successors of a BFS node, in a deterministic order: successor, add terms, then
+hypotheses. -/
+def TacticM.omegaSuccs (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
+    (src : Expr) (node : Expr) (proof : Expr) : TacticM (List (Expr × Expr)) := do
+  adds ← TacticM.omegaAddEdges g src node proof terms;
+  hs ← TacticM.omegaHypEdges g 0 src node proof hyps;
+  TacticM.pure (List.append (TacticM.omegaSuccEdges src node proof) (List.append adds hs))
+
+/-- Breadth-first (queue order deterministic) search for `Le src target`; the proof of
+the reached `Le src node` rides with each node. `fuel` is the node budget. -/
+partial def TacticM.omegaBFS (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
+    (src target : Expr) : Nat → List (Expr × Expr) → List Expr → TacticM (Option Expr)
+  | .zero, _, _ => TacticM.fail "omega: budget exhausted (10000 nodes)"
+  | .succ f, .nil, _ => TacticM.pure .none
+  | .succ f, .cons p rest, seen => do
+    match Expr.inList p.1 seen with
+    | .true => TacticM.omegaBFS g hyps terms src target f rest seen
+    | .false => do
+      hit ← TacticM.isDefEq g p.1 target;
+      match hit with
+      | .true => TacticM.pure (.some p.2)
+      | .false => do
+        new ← TacticM.omegaSuccs g hyps terms src p.1 p.2;
+        TacticM.omegaBFS g hyps terms src target f (List.append rest new) (.cons p.1 seen)
+
+/-- Normalize and collect the subterms of a list of expressions (the add-term index). -/
+def TacticM.omegaCollect (g : Nat) : List Expr → TacticM (List Expr)
+  | .nil => TacticM.pure .nil
+  | .cons e es => do
+    e' ← TacticM.normalize g e;
+    rest ← TacticM.omegaCollect g es;
+    TacticM.pure (List.append (Expr.subterms e') rest)
+
+/-- The hypotheses as endpoints, for the add-term index. -/
+def TacticM.omegaHypTerms (g : Nat) : List (String × Expr) → TacticM (List Expr)
+  | .nil => TacticM.pure .nil
+  | .cons h hs => do
+    rest ← TacticM.omegaHypTerms g hs;
+    match Expr.appOf "Nat.Le" h.2 with
+    | .some (.cons u (.cons v .nil)) => do
+      ts ← TacticM.omegaCollect g (.cons u (.cons v .nil));
+      TacticM.pure (List.append ts rest)
+    | _ => match Expr.appOf "Nat.Lt" h.2 with
+      | .some (.cons u (.cons v .nil)) => do
+        ts ← TacticM.omegaCollect g (.cons u (.cons v .nil));
+        TacticM.pure (List.append ts rest)
+      | _ => do
+        ev ← TacticM.eqView g h.2;
+        match ev with
+        | .some q => match q with
+          | (A, u, v) => do
+            ts ← TacticM.omegaCollect g (.cons u (.cons v .nil));
+            TacticM.pure (List.append ts rest)
+        | .none => TacticM.pure rest
+
+/-- A direct proof of `Nat.Le a c` from an equality hypothesis `a + k = c` (the
+transitive closure's equality edges can hit instance-metavariable mismatches; this is
+the common bound shape and is checked directly). -/
+def TacticM.omegaDirectAdd (g : Nat) (i : Nat) (a c : Expr) :
+    List (String × Expr) → TacticM (Option Expr)
+  | .nil => TacticM.pure .none
+  | .cons h hs => do
+    ev ← TacticM.eqView g h.2;
+    match ev with
+    | .some q => match q with
+      | (_, u, v) => do
+        vc ← TacticM.isDefEq g v c;
+        match vc with
+        | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+        | .true => do
+          u' ← TacticM.normalize g u;
+          match Expr.addPair u' with
+          | .some (x, k) => do
+            xa ← TacticM.isDefEq g x a;
+            match xa with
+            | .true => TacticM.pure (.some (Expr.ap4 (.const "Nat.le_of_eq_add'") a c k (Expr.var i)))
+            | .false => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+          | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+    | .none => TacticM.omegaDirectAdd g (Nat.succ i) a c hs
+
+/-- Prove `Nat.Le src target` by the BFS; assign it to `g`, or fail. -/
+def TacticM.omegaLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
+    (src target : Expr) : TacticM Unit := do
+  let start : Expr := .app (.const "Nat.le_refl") src;
+  r ← TacticM.omegaBFS g hyps terms src target 10000 (.cons (src, start) .nil) .nil;
+  match r with
+  | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+  | .some pr => TacticM.assign g pr
+
+/-- Is `e`, or either side of the equation it is, non-linear? -/
+def TacticM.omegaEqBad (g : Nat) (bad : List String) (e : Expr) : TacticM Bool := do
+  ev ← TacticM.eqView g e;
+  match ev with
+  | .some q => match q with
+    | (_, u, v) => do
+      u' ← TacticM.normalize g u;
+      v' ← TacticM.normalize g v;
+      TacticM.pure (Bool.or (Expr.hasOp bad u') (Expr.hasOp bad v'))
+  | .none => TacticM.pure .false
+
+/-- Does any hypothesis type mention a non-linear operation (after normalization)? -/
+def TacticM.omegaHypsBad (g : Nat) (bad : List String) : List (String × Expr) → TacticM Bool
+  | .nil => TacticM.pure .false
+  | .cons h hs => do
+    h' ← TacticM.normalize g h.2;
+    eqb ← TacticM.omegaEqBad g bad h.2;
+    more ← TacticM.omegaHypsBad g bad hs;
+    TacticM.pure (Bool.or (Bool.or (Expr.hasOp bad h') eqb) more)
+
+syntax (name := omega) "omega" : tactic
+/-- `omega`: linear `Nat` arithmetic (`≤`, `<`, `=`), built from `Nat.le_trans` and the
+order lemmas. Non-linear terms are refused; no external oracle. -/
+def Tactic.omega : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  hyps ← TacticM.goalHyps g;
+  -- the linear fragment: refuse multiplication, division, modulo and powers
+  ty' ← TacticM.normalize g ty;
+  let bad : List String := .cons "Nat.mul" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow"
+    (.cons "HMul.hMul" (.cons "Mul.mul" (.cons "HDiv.hDiv" (.cons "HMod.hMod" .nil)))))));
+  hb ← TacticM.omegaHypsBad g bad hyps;
+  gb ← TacticM.omegaEqBad g bad ty;
+  match Bool.or (Bool.or (Expr.hasOp bad ty') hb) gb with
+  | .true => TacticM.fail "omega: non-linear (multiplication/division is outside the linear Nat fragment)"
+  | .false => do
+    match Expr.appOf "Nat.Le" ty with
+    | .some (.cons a (.cons b .nil)) => do
+      ts ← TacticM.omegaCollect g (.cons a (.cons b .nil));
+      hs ← TacticM.omegaHypTerms g hyps;
+      d ← TacticM.omegaDirectAdd g 0 a b hyps;
+      match d with
+      | .some pr => TacticM.assign g pr
+      | .none => TacticM.omegaLe g hyps (List.append ts hs) a b
+    | _ => match Expr.appOf "Nat.Lt" ty with
+      | .some (.cons a (.cons b .nil)) => do
+        let sa : Expr := .app (.const "Nat.succ") a;
+        ts ← TacticM.omegaCollect g (.cons sa (.cons b .nil));
+        hs ← TacticM.omegaHypTerms g hyps;
+        TacticM.omegaLe g hyps (List.append ts hs) sa b
+      | _ => do
+        ev ← TacticM.eqView g ty;
+        match ev with
+        | .some q => match q with
+          | (_, a, b) => do
+            ts ← TacticM.omegaCollect g (.cons a (.cons b .nil));
+            hs ← TacticM.omegaHypTerms g hyps;
+            let terms := List.append ts hs;
+            h1 ← TacticM.omegaBFS g hyps terms a b 10000
+              (.cons (a, .app (.const "Nat.le_refl") a) .nil) .nil;
+            h2 ← TacticM.omegaBFS g hyps terms b a 10000
+              (.cons (b, .app (.const "Nat.le_refl") b) .nil) .nil;
+            match h1 with
+            | .some p1 => match h2 with
+              | .some p2 => TacticM.assign g (Expr.ap4 (.const "Nat.le_antisymm") a b p1 p2)
+              | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+            | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
+        | .none => TacticM.fail "omega: not a linear Nat goal (expected ≤, < or =)"
+attribute [tactic tactic.omega] Tactic.omega
 
 -- ## Notation: `++` and list literals (agent/notation)
 --
@@ -1618,3 +2228,4 @@ def Syntax.infoAt (path : List Nat) (msg : String) : Syntax :=
 at `path` (so errors in it point there). -/
 def Syntax.sourceAt (path : List Nat) (src : String) : Syntax :=
   Syntax.mkNode "macro.source" (.cons (Syntax.pathNode path) (.cons (.atom src) .nil))
+end

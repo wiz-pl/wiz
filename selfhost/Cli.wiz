@@ -1,3 +1,4 @@
+namespace __root__
 -- The self-hosted toolchain's driver (stage 21, gaps D2-D7 of
 -- `wiz-notes/selfhost-parity.md`). It replaces the generated `def main` strings of
 -- `Wiz/Selfhost.lean` with a real command line:
@@ -17,9 +18,15 @@
 --            declaration's type),
 --            --trust-native (27a: `def X : a = b := native_refl` is decided by running
 --            a and b; the frontend's `Globals.trustNative`), --trust-smt (C15: the `smt`
---            tactic is refused; there is no solver here), --cc, --llc, --rt, --cflags,
---            --ldflags (the C toolchain for `run`),
---            --rc | --rc-owned | --gc | --lib | --no-main | --header (the C backend),
+--            tactic is refused; there is no solver here), --cc PATH, --llc PATH, --rt DIR,
+--            --cflags FLAGS, --ldflags FLAGS (the C toolchain for `run`: `--cc` and
+--            `--llc` are one executable each, not a command line — a wrapper script is
+--            the way to add arguments; FLAGS is a whitespace-separated word list, as the
+--            host reads it). Every interpolated component is POSIX-quoted before it goes
+--            into the `system(3)` string, and a program killed by a signal is a failure
+--            (`128 + signal`).
+--            --rc | --rc-owned | --gc | --unbox-structs | --lib | --no-main |
+--            --header (the backend),
 --            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
 --            recognised and refused with the reason (C5/D5), not as unknown flags.
 --   exit codes: 0 ok, 1 user error (no file, the frontend's errors, cc, the program,
@@ -44,13 +51,22 @@
 -- (`ErrorCode.lean`). A stack trace is never printed: every failure is one line, and a
 -- missing file is checked with `access` first.
 --
--- Cache: `--cache DIR` (default `~/.cache/wiz`) keys an entry by the toolchain id
--- (`toolchainId`, injected by `Wiz/Selfhost.lean` from the selfhost sources and the
--- version), the subcommand's backend flags, the loader's module graph key (every
--- module's name and text, from the graph before elaboration: `keyOfGraph`), the root's
--- `import_c` header texts and the modules' paths. A `.check` entry is the
--- tagged lines and the exit status; a `.c` entry is the C `build` writes (and `run`
--- prints), so a warm build or run skips elaboration and code generation.
+-- Cache (D5): `--cache DIR` (default `~/.cache/wiz`) has one entry per **module**, as
+-- the Lean-hosted `wiz`'s does: `<key>.wizc` is the module's tagged output lines and its
+-- status, and `<key>.wizm` is its manifest. A module's key is its own content and its
+-- dependency closure: the toolchain id (`toolchainId`, injected by `Wiz/Selfhost.lean`
+-- from the selfhost sources and the version), the root's `import_c` header texts and the
+-- elaboration flags (`--trust-native`, `--trust-smt`), the module's name and text, and
+-- each import's name and key in source order (a changed dependency misses every
+-- importer; a path and an mtime are not in the key). A warm `check` computes the load
+-- order from the import graph (`planOf`/`loadPlanOf`), reads every `.wizc` and
+-- concatenates the lines, so it runs no command; one missing module entry is a cold
+-- elaboration of the graph (globals are not serialized). A graph with a cycle or a
+-- missing module has no load order and is cached as one graph-key `.wizc`.
+--
+-- The program's compiled C is `<key>.wizr` (one per graph: it plays the host's region
+-- role) with its checksum in `<key>.wizs`; `build`/`run` share it, so a warm build skips
+-- elaboration and code generation.
 --
 -- The cache is layered, as the Lean-hosted `wiz`'s is (`Wiz/Cache.lean`, D5):
 -- `--cache-ro DIR` (repeatable) adds read-only layers, searched in the order given
@@ -58,20 +74,21 @@
 -- as it is and never copied back. `--no-cache` clears both lists (a later `--cache` or
 -- `--cache-ro` adds one again), so `--no-cache --cache-ro DIR` reads a shared layer and
 -- writes nothing. A layer is never created or modified:
--- `--cache-prune DAYS` walks only the write cache and removes the driver's keyed
--- entries (`.check`, `.c`) whose modification time is older than DAYS days; a pruned
--- entry is an ordinary miss, and a layer is never pruned.
+-- `--cache-prune DAYS` walks only the write cache and removes the keyed entries
+-- (`.wizc`, `.wizm`, `.wizr`, `.wizs`) whose modification time is older than DAYS days;
+-- a pruned entry is an ordinary miss, and a layer is never pruned.
 --
 -- `--cache-verify off|warn|strict` (the host's flag; `require` is `strict`) checks an
--- entry's bytes against an output manifest, `<entry>.mf`: one line, `m<digest>`, the
--- driver's `hashStep` digest (FNV-1a-shaped, modulo 4294967291) of the whole
--- `s<status>\n<payload>` text. The host's
--- manifest is per module (`manifest.d/*.wizmf`, SHA-256 and a Merkle root); the
--- driver's one-file-per-graph cache needs only a digest per entry, and the file names
--- already carry the key. `off` neither reads nor writes manifests, `warn` (the default)
--- verifies one when it exists and otherwise keeps the old unverified lookup, and
--- `strict` uses only manifested entries (a cold strict run writes the manifests, so the
--- next one is warm). Manifests are written to the write cache only, never to a layer.
+-- entry's bytes against an output manifest: `.wizc` and `.h` against `<key>.wizm`,
+-- `.wizr` against `<key>.wizs`. A manifest is one line, `m<digest>`, the driver's
+-- `hashStep` digest (FNV-1a-shaped, modulo 4294967291) of the whole
+-- `s<status>\n<payload>` text. The host's manifest is per module
+-- (`manifest.d/*.wizmf`, SHA-256 and a Merkle root); the driver's per-entry marker needs
+-- only a digest, and the file name already carries the key. `off` neither reads nor
+-- writes manifests, `warn` (the default) verifies one when it exists and otherwise keeps
+-- the old unverified lookup, and `strict` uses only manifested entries (a cold strict
+-- run writes the manifests, so the next one is warm). Manifests are written to the write
+-- cache only, never to a layer.
 
 -- ------------------------------------------------------------------------------------
 -- Options
@@ -119,7 +136,11 @@ extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
 extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
-extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+-- `system(3)` runs the string through `/bin/sh`, so every component is quoted before it
+-- is put in one (`shellQuote` below). Its `int` result is read as `UInt64`: `-1`
+-- (`system` could not start the shell) is 2^64-1 here, which `UInt64.toNat` would refuse
+-- (a `Nat` is 63 bits in the selfhost runtime), and `exitCodeOf` decodes it.
+extern "system" (header := "stdlib.h") cSystem : String → IO UInt64
 -- `--cache-prune` (D5): the host runtime's interfaces (`lib/Sys.wiz`, `Wiz/Cache.lean`);
 -- the selfhost runtime has the same three leaves (a list of `kind, size, mtime, ns,
 -- mode`; the directory's names; the wall clock).
@@ -232,10 +253,6 @@ def joinSpaces : List String → String
     | .nil => s
     | .cons _ _ => String.append s (String.append " " (joinSpaces rest))
 
-def spacesOf : List String → String
-  | .nil => ""
-  | .cons s rest => String.append " " (String.append s (spacesOf rest))
-
 def docText : Doc → String
   | .t s => s
   | .c a b => String.append (docText a) (docText b)
@@ -257,11 +274,13 @@ def commentsOf (lines : List String) : String :=
 -- Modules and the prepared source
 
 -- a prepared program: the loader's module table (root `Main` last), the run it produced
--- (output lines tagged with their module, globals, tables) and the load order
+-- (output lines tagged with their module, globals, tables), the load order, and every
+-- module's own lines before nesting (the per-module cache's payload, D5)
 structure Prepared where
   tab : List ModSrc
   run : Run
   order : List String
+  flat : List String
 
 -- (`some`/`none` in `IO ... (Option ...)` need their type written out: inside a bound
 -- lambda the frontend has no expected type for a bare constructor, gap A18)
@@ -292,7 +311,7 @@ def loadGraph (roots : List String) (file : String) : IO (Option Graph) :=
 -- `--trust-smt`, which selects the `smt` refusal
 def runGraph (trust smtTrust : Bool) (g : Graph) : Prepared := match g with
   | .mk tab hs => match modCheckRunHT cats tokens trust smtTrust hs tab (.cons "Main" .nil) with
-    | .mk run _ _ order => Prepared.mk tab run order
+    | .mk run _ _ order _ flat => Prepared.mk tab run order flat
 
 -- the whole program: the loader, every module checked, and the run it produced
 def prepare (trust smtTrust : Bool) (roots : List String) (file : String) : IO (Option Prepared) :=
@@ -583,10 +602,11 @@ def diagOf (tab : List ModSrc) (l : String) : Diag := match taggedOf l with
     let off' := match parseOff rest with
       | .some n => n
       | .none => off;
+    -- (D6) a nested block's line breaks are stored in the line as `\x02`
     match modTextOf tab m with
-    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (msgOfTagged tab m off' rest) (codeOf rest)
+    | .none => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) 1 1 (expandNest (msgOfTagged tab m off' rest)) (codeOf rest)
     | .some t => match lineCol t off' with
-      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (msgOfTagged tab m off' rest) (codeOf rest)
+      | .mk ln col => Diag.mk (sevOfTagged tab m off' rest) (modFile tab m) ln col (expandNest (msgOfTagged tab m off' rest)) (codeOf rest)
 
 def diagsOf (tab : List ModSrc) : List String → List Diag
   | .nil => .nil
@@ -696,12 +716,130 @@ def keyOfGraph (o : Opts) (kind : String) (g : Graph) : String := match g with
     let smtFlag : List String := match o.trustSmt with
       | .true => .cons "--trust-smt" .nil
       | .false => .nil;
+    -- (`--target`: C and LLVM share the `.wizr` region name, D5's model, so the key is
+    -- what keeps the C text and the IR apart; without this an LLVM build reads the C)
+    let targetPart : List String := match o.target with
+      | .some t => .cons t .nil
+      | .none => .cons "c" .nil;
     Nat.toString (hashParts (.cons kind (.cons toolchainId
       (.cons (Nat.toString (moduleGraphKey names tab))
         (.cons (Nat.toString (headerHash hs 17))
-          (List.append trustPart (List.append o.backend (List.append smtFlag (modPathsOf tab names)))))))) 2166136261)
+          (List.append trustPart (List.append targetPart (List.append o.backend (List.append smtFlag (modPathsOf tab names))))))))) 2166136261)
+
+-- ------------------------------------------------------------------------------------
+-- (D5) The per-module cache, as the host's: one `<key>.wizc` per module (its tagged
+-- output lines) and one `<key>.wizm` marker/manifest per module; the program's compiled
+-- C is one `<key>.wizr` per graph (the "region"), with its checksum in `<key>.wizs`.
+--
+-- A module's key is its own content and its dependency closure: the toolchain id, the
+-- root's `import_c` header texts (every module elaborates against them), the module's
+-- name and text, and each import's name and key in source order. A changed dependency
+-- changes every importer; a path and an mtime are not in the key. A graph with a cycle
+-- or a missing module has no load order, so it is cached under the graph key as one
+-- `.wizc` entry (the loader's errors live in a module's stream).
+
+def headerParts : List Header → List String
+  | .nil => .nil
+  | .cons (.mk n t) rest => .cons n (.cons t (headerParts rest))
+
+-- the flags of the *elaboration* (the C's backend flags are in the C key only)
+def elabFlags (o : Opts) : List String :=
+  List.append (match o.trustNative with
+    | .true => .cons "--trust-native" .nil
+    | .false => (.nil : List String))
+    (match o.trustSmt with
+      | .true => .cons "--trust-smt" .nil
+      | .false => (.nil : List String))
+
+-- a module's own key: its name, text and the shared root headers
+def ownKeyOf (shared : List String) (m : ModSrc) : String :=
+  Nat.toString (hashParts (.cons "module" (.cons toolchainId (List.append shared
+    (.cons (modName m) (.cons (modText m) .nil))))) 2166136261)
+
+def ownKeysOf (shared : List String) : List ModSrc → StrMap String → StrMap String
+  | .nil, acc => acc
+  | .cons m rest, acc =>
+    ownKeysOf shared rest (StrMap.insert acc (Str.ofString (modName m)) (ownKeyOf shared m))
+
+-- the load order (dependencies first, imports in source order) from the import graph
+-- alone, before elaboration; `simple` is false for a cycle or a missing module
+inductive LoadPlan where
+  | mk (order : List String) (simple : Bool)
+structure Walk where
+  vis : StrMap Nat
+  order : List String
+  simple : Bool
+mutual
+def loadVisit (tab : List ModSrc) (name : String) (w : Walk) : Walk := match w with
+  | .mk vis order simple => match StrMap.findD vis (Str.ofString name) 0 with
+    | .zero => match modFind tab name with
+      | .none => Walk.mk (StrMap.insert vis (Str.ofString name) 2) order .false
+      | .some m => match modEmpty (modPath m) with
+        | .true => Walk.mk (StrMap.insert vis (Str.ofString name) 2) order .false
+        | .false =>
+          let w1 : Walk := Walk.mk (StrMap.insert vis (Str.ofString name) 1) order simple;
+          match loadVisitAll tab (modImports m) w1 with
+          | .mk vis2 order2 simple2 =>
+            Walk.mk (StrMap.insert vis2 (Str.ofString name) 2) (.cons name order2) simple2
+    | .succ k => match k with
+      | .zero => Walk.mk vis order .false
+      | _ => w
+def loadVisitAll (tab : List ModSrc) (names : List String) (w : Walk) : Walk := match names with
+  | .nil => w
+  | .cons n ns => loadVisitAll tab ns (loadVisit tab n w)
+end
+def loadPlanOf (tab : List ModSrc) : LoadPlan :=
+  match loadVisit tab "Main" (Walk.mk StrMap.empty .nil .true) with
+  -- (the walk conses each module after its imports, so its list is the *reverse* of
+  -- the load order: dependencies first is what the keys and the warm report need)
+  | .mk _ order simple => LoadPlan.mk (List.reverseOf order .nil) simple
+
+def importKeyParts (keys : StrMap String) : List String → List String
+  | .nil => .nil
+  | .cons n ns => .cons n (.cons (StrMap.findD keys (Str.ofString n) "") (importKeyParts keys ns))
+
+-- the modules' keys in load order (an importer's key names its imports' keys, so the
+-- closure is in the key and a changed dependency misses)
+partial def keyFold (tab : List ModSrc) (digs : StrMap String) (keys : StrMap String) : List String → StrMap String
+  | .nil => keys
+  | .cons name rest => match modFind tab name with
+    | .none => keyFold tab digs keys rest
+    | .some m =>
+      let base : List String := .cons "key" (.cons toolchainId (.cons "own" (.cons (StrMap.findD digs (Str.ofString name) "")
+        (importKeyParts keys (modImports m)))));
+      keyFold tab digs (StrMap.insert keys (Str.ofString name) (Nat.toString (hashParts base 2166136261))) rest
+
+structure CachePlan where
+  order : List String
+  keys : StrMap String
+  -- the graph key: the fallback entry for a cycle or a missing module
+  raw : String
+  simple : Bool
+
+def planOf (o : Opts) (g : Graph) : IO CachePlan := match g with
+  | .mk tab hs =>
+    let shared := List.append (headerParts hs) (elabFlags o);
+    let digs := ownKeysOf shared tab StrMap.empty;
+    match loadPlanOf tab with
+    | .mk order simple => match simple with
+      -- (a simple graph never uses the graph-key fallback, so it is not computed)
+      | .true => IO.pure (CachePlan.mk order (keyFold tab digs StrMap.empty order) "" .true)
+      | .false => IO.pure (CachePlan.mk order StrMap.empty (keyOfGraph o "check" g) .false)
+
+def planRootKey (p : CachePlan) : String := match p with
+  | .mk _ keys raw _ => StrMap.findD keys (Str.ofString "Main") raw
 def cachePath (dir key ext : String) : String :=
   String.append dir (String.append "/" (String.append key ext))
+
+-- (D5) the keyed extensions, the host's: a module's output is `.wizc`, its manifest
+-- `.wizm`; the program's compiled C is `.wizr` (one per graph: the host's region role),
+-- its checksum `.wizs`. (`--lib`'s header stays `.h`; its manifest is `.wizm`.)
+def moduleExt : String := ".wizc"
+def cExt : String := ".wizr"
+def headerExt : String := ".h"
+def manifestExtOf (ext : String) : String := match strEq ext cExt with
+  | .true => ".wizs"
+  | .false => ".wizm"
 
 inductive FirstLine where
   | mk (line : List Char) (rest : String)
@@ -739,7 +877,7 @@ def entryText (status : Nat) (payload : String) : String :=
 def entryHash (text : String) : Nat := hashStep (charsOf text) 2166136261
 
 def manifestPath (dir key ext : String) : String :=
-  String.append (cachePath dir key ext) ".mf"
+  String.append dir (String.append "/" (String.append key (manifestExtOf ext)))
 
 def manifestText (text : String) : String :=
   String.append "m" (String.append (Nat.toString (entryHash text)) "\n")
@@ -890,15 +1028,18 @@ def pruneNatAt : List Nat → Nat → Nat
 
 -- what a prune removed: the driver's two keyed extensions, and their bytes
 structure PruneCounts where
-  checks : Nat
-  programs : Nat
+  entries : Nat
+  markers : Nat
+  regions : Nat
+  sums : Nat
   bytes : Nat
 
-def PruneCounts.total (c : PruneCounts) : Nat := Nat.add c.checks c.programs
+def PruneCounts.total (c : PruneCounts) : Nat :=
+  Nat.add (Nat.add c.entries c.markers) (Nat.add c.regions c.sums)
 
 def PruneCounts.plus (a b : PruneCounts) : PruneCounts :=
-  PruneCounts.mk (Nat.add a.checks b.checks) (Nat.add a.programs b.programs)
-    (Nat.add a.bytes b.bytes)
+  PruneCounts.mk (Nat.add a.entries b.entries) (Nat.add a.markers b.markers)
+    (Nat.add a.regions b.regions) (Nat.add a.sums b.sums) (Nat.add a.bytes b.bytes)
 
 def sizeText (n : Nat) : String := match Nat.lt n 1024 with
   | .true => String.append (Nat.toString n) " B"
@@ -908,27 +1049,37 @@ def sizeText (n : Nat) : String := match Nat.lt n 1024 with
       | .true => String.append (Nat.toString (Nat.div n (Nat.mul 1024 1024))) " MiB"
       | .false => String.append (Nat.toString (Nat.div n (Nat.mul (Nat.mul 1024 1024) 1024))) " GiB"
 
--- the host's `PruneCounts.render`, with the driver's extensions
+-- the host's `PruneCounts.render`, word for word: the four keyed classes are the same
+-- ones (`Wiz/Cache.lean`), so a prune summary is comparable between the tools
 def pruneRender (c : PruneCounts) (days : Nat) (dir : String) : String :=
   "cache prune: removed " +++ Nat.toString (PruneCounts.total c) +++ " files (" +++
-    Nat.toString c.checks +++ " .check, " +++ Nat.toString c.programs +++ " .c), " +++
+    Nat.toString c.entries +++ " .wizc, " +++ Nat.toString c.markers +++ " .wizm, " +++
+    Nat.toString c.regions +++ " .wizr, " +++ Nat.toString c.sums +++ " .wizs), " +++
     sizeText c.bytes +++ " older than " +++ Nat.toString days +++ " days in " +++ dir
 
 inductive Keyed where
-  | check
-  | program
+  | entry
+  | marker
+  | region
+  | sum
 
--- only the driver's keyed entries: a `.mf` manifest, a subdirectory or anything else in
--- the write cache is left alone (the host leaves its manifests too)
-def keyedOf (name : String) : Option Keyed := match strSuffix name ".check" with
-  | .true => .some Keyed.check
-  | .false => match strSuffix name ".c" with
-    | .true => .some Keyed.program
-    | .false => .none
+-- only the four keyed extensions; a subdirectory or anything else in the write cache is
+-- left alone (the host leaves its manifests and its `bin/` memo too)
+def keyedOf (name : String) : Option Keyed := match strSuffix name ".wizc" with
+  | .true => .some Keyed.entry
+  | .false => match strSuffix name ".wizm" with
+    | .true => .some Keyed.marker
+    | .false => match strSuffix name ".wizr" with
+      | .true => .some Keyed.region
+      | .false => match strSuffix name ".wizs" with
+        | .true => .some Keyed.sum
+        | .false => .none
 
 def addKeyed (k : Keyed) (size : Nat) (c : PruneCounts) : PruneCounts := match k with
-  | .check => PruneCounts.mk (Nat.succ c.checks) c.programs (Nat.add c.bytes size)
-  | .program => PruneCounts.mk c.checks (Nat.succ c.programs) (Nat.add c.bytes size)
+  | .entry => PruneCounts.mk (Nat.succ c.entries) c.markers c.regions c.sums (Nat.add c.bytes size)
+  | .marker => PruneCounts.mk c.entries (Nat.succ c.markers) c.regions c.sums (Nat.add c.bytes size)
+  | .region => PruneCounts.mk c.entries c.markers (Nat.succ c.regions) c.sums (Nat.add c.bytes size)
+  | .sum => PruneCounts.mk c.entries c.markers c.regions (Nat.succ c.sums) (Nat.add c.bytes size)
 
 -- one directory's entries: the old keyed files are removed (or counted), and the
 -- subdirectories are returned for the walk (links are not followed, as in the host)
@@ -936,7 +1087,7 @@ inductive PruneStep where
   | mk (counts : PruneCounts) (subdirs : List String)
 
 def pruneNames (dir : String) (cutoff : Nat) : List String → IO PruneStep
-  | .nil => IO.pure (PruneStep.mk (PruneCounts.mk 0 0 0) .nil)
+  | .nil => IO.pure (PruneStep.mk (PruneCounts.mk 0 0 0 0 0) .nil)
   | .cons n rest => do
     tail ← pruneNames dir cutoff rest;
     match tail with
@@ -964,9 +1115,9 @@ def pruneNames (dir : String) (cutoff : Nat) : List String → IO PruneStep
 -- directories (a keyed cache is flat, so it is only a safety net)
 def pruneWalk (fuel : Nat) (dirs : List String) (cutoff : Nat) : IO PruneCounts :=
   match fuel with
-  | .zero => IO.pure (PruneCounts.mk 0 0 0)
+  | .zero => IO.pure (PruneCounts.mk 0 0 0 0 0)
   | .succ k => match dirs with
-    | .nil => IO.pure (PruneCounts.mk 0 0 0)
+    | .nil => IO.pure (PruneCounts.mk 0 0 0 0 0)
     | .cons d rest => do
       names ← cListDir d;
       step ← pruneNames d cutoff names;
@@ -1014,7 +1165,8 @@ inductive Kind where
 
 def isBackendFlag (a : String) : Bool :=
   Bool.or (strEq a "--rc") (Bool.or (strEq a "--rc-owned") (Bool.or (strEq a "--gc")
-    (Bool.or (strEq a "--lib") (Bool.or (strEq a "--no-main") (strEq a "--header")))))
+    (Bool.or (strEq a "--unbox-structs") (Bool.or (strEq a "--lib")
+      (Bool.or (strEq a "--no-main") (strEq a "--header"))))))
 
 -- a word in a list
 def listHas (s : String) : List String → Bool
@@ -1037,11 +1189,6 @@ def targetName (o : Opts) : String := match o.target with
   | .none => "c"
 
 def targetIsLLVM (o : Opts) : Bool := strEq (targetName o) "llvm"
-
--- the artifact's extension: `build` writes the C, or the LLVM IR (C5)
-def targetExt (o : Opts) : String := match targetIsLLVM o with
-  | .true => ".ll"
-  | .false => ".c"
 
 -- `--cache-verify`: the host's modes (`Cache.VerifyMode.ofString?`; `require` is strict)
 def verifyOk (m : String) : Bool :=
@@ -1199,14 +1346,16 @@ def usageText : String :=
   "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" +++
   "  strict: only manifested entries), --target c|llvm (LLVM is a first slice, C5:\n" +++
   "  a closed `main : Nat` lowered to the host's IR; `--llvm` is its alias;\n" +++
-  "  --wasm/--split are the host's and are refused), --llc CMD,\n" +++
+  "  --wasm/--split are the host's and are refused),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" +++
   "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" +++
   "  --native-fuel: the self-hosted evaluator has no step counter),\n" +++
-  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
-  "  backend: --rc, --rc-owned, --gc, --lib, --no-main, --header\n" +++
+  "  --cc PATH, --llc PATH (one executable each, not a command line), --rt DIR (the\n" +++
+  "  selfhost runtime, default selfhost), --cflags FLAGS, --ldflags FLAGS (word\n" +++
+  "  lists, as the host reads them), --trust-smt (the `smt` tactic is refused: no\n" +++
+  "  solver here, C15);\n" +++
+  "  backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
 
@@ -1227,9 +1376,163 @@ def statusOf (ds : List Diag) : Nat := match hasError ds with
 
 def linesOf (r : Run) : List String := List.reverseOf (Run.out r) .nil
 
+-- the lines of `flat` that belong to module `m` (its own lines, before nesting, D5)
+def modLines : List String → String → List String
+  | .nil, _ => .nil
+  | .cons l rest, m => match taggedOf l with
+    | .mk n _ _ => match strEq n m with
+      | .true => .cons l (modLines rest m)
+      | .false => modLines rest m
+
+def lineErr (l : String) : Bool := match taggedOf l with
+  | .mk _ _ rest => match sevOf rest with
+    | .error => .true
+    | _ => .false
+def anyErr : List String → Bool
+  | .nil => .false
+  | .cons l rest => match lineErr l with
+    | .true => .true
+    | .false => anyErr rest
+
+-- (D6) the blocks a warm run rebuilds from the cached per-module lines, without
+-- elaborating: a module's own error lines (as `M:line:col: error: …`) and its imports'
+-- rendered blocks (`through`) are all a nesting report needs.
+def throughOf (blocks : List ModBlock) : List String → List String
+  | .nil => .nil
+  | .cons x xs => match blockFind blocks x with
+    | .some b => match blockRender b with
+      | .some t => .cons t (throughOf blocks xs)
+      | .none => throughOf blocks xs
+    | .none => throughOf blocks xs
+
+partial def blocksOf (tab : List ModSrc) (mods : StrMap (List String)) (acc : List ModBlock) : List String → List ModBlock
+  | .nil => acc
+  | .cons name rest => match modFind tab name with
+    | .none => blocksOf tab mods acc rest
+    | .some m =>
+      let ls := StrMap.findD mods (Str.ofString name) .nil;
+      let b := ModBlock.mk name (ownErrs name (modText m) (List.reverseOf ls .nil)) (throughOf acc (modImports m));
+      blocksOf tab mods (List.append acc (.cons b .nil)) rest
+
+-- the `module M has errors:` lines at the root's own imports, at each import's offset
+def rootNest (tab : List ModSrc) (blocks : List ModBlock) (run : Run) : List String → List String
+  | .nil => .nil
+  | .cons x xs => match blockFind blocks x with
+    | .some b => match blockRender b with
+      | .some t => .cons (tagOne "Main" (modImportOffset tab run (.cons "Main" .nil) x)
+          (String.append "error: " t)) (rootNest tab blocks run xs)
+      | .none => rootNest tab blocks run xs
+    | .none => rootNest tab blocks run xs
+
+def rootImports (tab : List ModSrc) : List String := match modFind tab "Main" with
+  | .some m => modImports m
+  | .none => .nil
+
+-- the lines a warm run serves: every module's non-error lines (a `#check`'s info) in
+-- load order, with the root's nested blocks just before the root's own lines
+def isErrPrefixed (l : String) : Bool := match taggedOf l with
+  | .mk _ _ rest => strStarts "error: " rest
+def nonErrLines : List String → List String
+  | .nil => .nil
+  | .cons l rest => match isErrPrefixed l with
+    | .true => nonErrLines rest
+    | .false => .cons l (nonErrLines rest)
+
+def warmLinesGo (tab : List ModSrc) (blocks : List ModBlock) (run : Run)
+    (mods : StrMap (List String)) : List String → List String
+  | .nil => .nil
+  | .cons name rest =>
+    let ls := StrMap.findD mods (Str.ofString name) .nil;
+    let more := warmLinesGo tab blocks run mods rest;
+    match strEq name "Main" with
+    -- the root's own errors are the program's (they are not nested anywhere)
+    | .true => List.append (rootNest tab blocks run (rootImports tab)) (List.append ls more)
+    | .false => List.append (nonErrLines ls) more
+
+def warmLines (tab : List ModSrc) (mods : StrMap (List String)) (p : CachePlan) : List String :=
+  let blocks := blocksOf tab mods .nil (CachePlan.order p);
+  let runStub : Run := .mk .nil Globals.empty cats tokens .nil;
+  warmLinesGo tab blocks runStub mods (CachePlan.order p)
+
+-- a module cache lookup's answer: the lines, whether any entry's status says the
+-- module had an error (the status is authoritative even for a hand-written test entry),
+-- and where the first read-only hit came from (for `-v`'s `(read-only DIR)`)
+structure ModuleCache where
+  mods : StrMap (List String)
+  status : Nat
+  ro : Bool
+  dir : String
+
+def readModuleEntriesGo (o : Opts) (keys : StrMap String) :
+    List String → StrMap (List String) → Nat → Bool → String → IO (Option ModuleCache)
+  | .nil, acc, st, ro, dir => IO.pure (.some (ModuleCache.mk acc st ro dir))
+  | .cons name rest, acc, st, ro, dir =>
+    let key := StrMap.findD keys (Str.ofString name) "";
+    match strEq key "" with
+    | .true => IO.pure (.none : Option ModuleCache)
+    | .false => IO.bind (cacheRead o key moduleExt) (fun c => match c with
+      | .none => IO.pure (.none : Option ModuleCache)
+      | .some (.mk cst payload from cro) =>
+        let st' := match Nat.beq cst 0 with
+          | .true => st
+          | .false => 1;
+        let ro' := Bool.or ro cro;
+        let dir' := match cro with
+          | .true => match strEq dir "" with
+            | .true => from
+            | .false => dir
+          | .false => dir;
+        readModuleEntriesGo o keys rest (StrMap.insert acc (Str.ofString name)
+          (mapChars (fun cs => String.mk cs) (splitLines payload))) st' ro' dir')
+
+def readModuleEntries (o : Opts) (p : CachePlan) : IO (Option ModuleCache) := match p with
+  | .mk order keys _ _ => readModuleEntriesGo o keys order StrMap.empty 0 .false ""
+
+def writeModuleEntriesGo (o : Opts) (keys : StrMap String) (flat : List String) : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons name rest =>
+    let key := StrMap.findD keys (Str.ofString name) "";
+    match strEq key "" with
+    | .true => writeModuleEntriesGo o keys flat rest
+    | .false => do
+      let ls := modLines flat name;
+      let st := match anyErr ls with
+        | .true => 1
+        | .false => 0;
+      cacheWrite o key moduleExt st (linesPayload ls);
+      writeModuleEntriesGo o keys flat rest
+
+def writeModuleEntries (o : Opts) (p : CachePlan) (flat : List String) : IO Unit := match p with
+  | .mk order keys _ _ => writeModuleEntriesGo o keys flat order
+
+-- the graph-key fallback: a cycle or a missing module has no load order, so its one
+-- entry is the graph's (the loader errors live in a module's stream)
+def checkGraphRaw (o : Opts) (g : Graph) (tab : List ModSrc) (p : CachePlan) : IO Unit := do
+  let key := CachePlan.raw p;
+  cached ← cacheRead o key moduleExt;
+  match cached with
+  | .some (.mk st payload from ro) => do
+    cacheHitMsg o key from ro;
+    let ds := diagsOf tab (mapChars (fun cs => String.mk cs) (splitLines payload));
+    emitDiags o ds;
+    match Nat.beq st 0 with
+    | .true => IO.pure ()
+    | .false => Process.exit 1
+  | .none => do
+    if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+    let p := runGraph o.trustNative o.trustSmt g;
+    let lines := linesOf p.run;
+    let ds := diagsOf p.tab lines;
+    let st := statusOf ds;
+    cacheWrite o key moduleExt st (linesPayload lines);
+    emitDiags o ds;
+    match Nat.beq st 0 with
+    | .true => IO.pure ()
+    | .false => Process.exit 1
+
 def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
   | .mk tab _ => match cacheOn o with
-    -- no cache: do not even build the key (it hashes every module's text)
+    -- no cache: do not even build the keys (they hash every module's text)
     | .false => do
       cacheMissMsg o .false "";
       let p := runGraph o.trustNative o.trustSmt g;
@@ -1240,27 +1543,34 @@ def checkGraph (o : Opts) (g : Graph) : IO Unit := match g with
       | .true => IO.pure ()
       | .false => Process.exit 1
     | .true => do
-      let key := keyOfGraph o "check" g;
-      cached ← cacheRead o key ".check";
-      match cached with
-      | .some (.mk st payload from ro) => do
-        cacheHitMsg o key from ro;
-        let ds := diagsOf tab (mapChars (fun cs => String.mk cs) (splitLines payload));
-        emitDiags o ds;
-        match Nat.beq st 0 with
-        | .true => IO.pure ()
-        | .false => Process.exit 1
-      | .none => do
-        if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
-        let p := runGraph o.trustNative o.trustSmt g;
-        let lines := linesOf p.run;
-        let ds := diagsOf p.tab lines;
-        let st := statusOf ds;
-        cacheWrite o key ".check" st (linesPayload lines);
-        emitDiags o ds;
-        match Nat.beq st 0 with
-        | .true => IO.pure ()
-        | .false => Process.exit 1
+      plan ← planOf o g;
+      match CachePlan.simple plan with
+      | .false => checkGraphRaw o g tab plan
+      | .true => do
+        let key := planRootKey plan;
+        cached ← readModuleEntries o plan;
+        match cached with
+        | .some mc => do
+          cacheHitMsg o key (ModuleCache.dir mc) (ModuleCache.ro mc);
+          let ds := diagsOf tab (warmLines tab (ModuleCache.mods mc) plan);
+          let st := match hasError ds with
+            | .true => 1
+            | .false => ModuleCache.status mc;
+          emitDiags o ds;
+          match Nat.beq st 0 with
+          | .true => IO.pure ()
+          | .false => Process.exit 1
+        | .none => do
+          if o.verbose then IO.ePrintln (String.append "cache miss: " key) else IO.pure ();
+          let p := runGraph o.trustNative o.trustSmt g;
+          let lines := linesOf p.run;
+          let ds := diagsOf p.tab lines;
+          let st := statusOf ds;
+          writeModuleEntries o plan p.flat;
+          emitDiags o ds;
+          match Nat.beq st 0 with
+          | .true => IO.pure ()
+          | .false => Process.exit 1
 
 def missingFile (file : String) : IO Unit := do
   IO.ePrintln (diagLine (Diag.mk .error file 1 1 "no such file" ""));
@@ -1388,11 +1698,86 @@ def libOf (o : Opts) (p : Prepared) : IO (Option LibText) := do
       | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneLib)
       | .nil => someLib (LibText.mk (cText o p lines) (headerTextOf p)))
 
+-- ------------------------------------------------------------------------------------
+-- Shell quoting and wait status
+--
+-- `system(3)` runs its string through `/bin/sh`, so every component the driver
+-- interpolates — `--cc`, `--llc`, `--rt`, `--cflags`, `--ldflags`, an input or output
+-- path, and the program's own arguments — is quoted with `shellQuote` first: a path or
+-- argument with a space, `;`, `$`, a quote or a newline stays exactly one shell word and
+-- cannot start a second command. The fixed flags (`-O2`, `-w`, `-c`, `-o`, `-I`) are the
+-- driver's own literals and are not quoted. There is no argv-form process call in the
+-- selfhost runtime (`selfhost/rt.c` has no `wiz_sys_spawn`, unlike
+-- `runtime/rt_sys.inc`), and the extern FFI here cannot pass a `char *argv[]`, so a
+-- quoted shell string is the form `system(3)` takes.
+--
+-- POSIX single-quote quoting: everything between the quotes is literal, and an embedded
+-- `'` is closed, escaped and reopened (`'\''`), which is the one character a single-quoted
+-- string cannot hold.
+def shellQuoteBody : List Char → String
+  | .nil => ""
+  | .cons c cs => match Nat.beq (Char.code c) 39 with
+    | .true => String.append "'\\''" (shellQuoteBody cs)
+    | .false => String.append (String.mk (.cons c .nil)) (shellQuoteBody cs)
+
+def shellQuote (s : String) : String :=
+  String.append "'" (String.append (shellQuoteBody (charsOf s)) "'")
+
+-- one quoted shell word per element, each preceded by a space (empty for `.nil`, so a
+-- command never ends in one)
+def quoteAll : List String → String
+  | .nil => ""
+  | .cons s rest => String.append " " (String.append (shellQuote s) (quoteAll rest))
+
+-- `--cflags FLAGS` is a word list, as the host reads it (`Wiz/Toolchain.lean`'s
+-- `words`): one shell word per whitespace-separated flag, then each quoted. So
+-- `--cflags "-I/a -I/b"` stays two flags, and a flag's own `$` or `;` is still literal.
+def isFlagSpace (c : Nat) : Bool := Bool.or (Nat.beq c 32) (Nat.beq c 9)
+
+def wordsGo : List Char → List Char → List String
+  | .nil, acc => match acc with
+    | .nil => .nil
+    | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) .nil
+  | .cons c cs, acc => match isFlagSpace (Char.code c) with
+    | .true => match acc with
+      | .nil => wordsGo cs .nil
+      | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) (wordsGo cs .nil)
+    | .false => wordsGo cs (.cons c acc)
+
+def wordsOf (s : String) : List String := match s with
+  | .mk cs => wordsGo cs .nil
+
+-- the `--cflags`/`--ldflags` values as quoted shell words
+def quoteFlags : List String → String
+  | .nil => ""
+  | .cons s rest => String.append (quoteAll (wordsOf s)) (quoteFlags rest)
+
+-- `system(3)` returns `waitpid`'s status: a program that exited normally leaves its code
+-- in bits 8–15 (`WEXITSTATUS`), and a program killed by a signal has that signal in the
+-- low seven bits (`WIFSIGNALED`/`WTERMSIG`). The old `st / 256` read every such status
+-- (1–127) as exit 0 and reported a killed program as a success. `st` is the `int`
+-- widened to `UInt64`, so C's -1 (the shell could not start) is 2^64-1, which no wait
+-- status reaches; it is the one value above 2^31 here, and both functions read it as
+-- "no status" (`127`, the shell's "not found" code) rather than letting `UInt64.toNat`
+-- refuse 2^64-1.
+def waitSignal (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .true => Nat.land (UInt64.toNat st) 127
+  | .false => 0
+
+def exitCodeOf (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .false => 127
+  | .true => match Nat.beq (waitSignal st) 0 with
+    | .true => Nat.land (Nat.shiftRight (UInt64.toNat st) 8) 255
+    | .false => Nat.add 128 (waitSignal st)
+
 -- the host's `compileC` library path: `cc -O2 -w -c -o OUT OUT.c` with the toolchain's
 -- flags (the self-hosted C includes `rt.c`, so the runtime directory is an include root)
 def objectCommand (o : Opts) (src out : String) : String :=
-  String.append o.cc (String.append " -O2 -w -c -o " (String.append out (String.append " "
-    (String.append src (String.append " -I" (String.append o.rt (spacesOf o.cflags)))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -c -o " (String.append (shellQuote out)
+    (String.append " " (String.append (shellQuote src) (String.append " -I"
+      (String.append (shellQuote o.rt) (quoteFlags o.cflags)))))))
 
 def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
   let cFile := withExtension out "c";
@@ -1406,7 +1791,7 @@ def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
     | .false => do IO.ePrintln (String.append "error: cannot write " hFile); Process.exit 1
     | .true => do
       st ← cSystem (objectCommand o cFile out);
-      match Nat.beq st 0 with
+      match Nat.beq (exitCodeOf st) 0 with
       | .true => IO.pure ()
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append cFile "):"));
@@ -1418,55 +1803,59 @@ def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
 def libMode (o : Opts) : Bool :=
   Bool.and (listHas "--lib" o.backend) (Bool.not (listHas "--header" o.backend))
 
--- the C for `p`, through the cache: `build` and `run` share the `.c` entry (the key
+-- the C for `p`, through the cache: `build` and `run` share the `.wizr` entry (the key
 -- covers the backend flags), so a second build is a hit, as the Lean-hosted `wiz`'s is.
 -- The key is the graph's (`keyOfGraph`), so a hit skips elaboration; a miss, or
--- `--no-cache` (no key at all), elaborates.
-def buildMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String) (p : Prepared) : IO Unit := do
+-- `--no-cache` (no key at all), elaborates and writes the per-module `.wizc` entries.
+def emptyPlan : CachePlan := CachePlan.mk .nil StrMap.empty "" .false
+
+def buildMiss (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) (out : String)
+    (p : Prepared) : IO Unit := do
   c ← cOf o p;
   match c with
   | .none => Process.exit 1
   | .some ctext => do
-    cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
-    cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
+    if useCache then writeModuleEntries o plan p.flat else IO.pure ();
+    cacheWriteIf o useCache cKey cExt 0 ctext;
     writeOut out ctext
 
 def buildWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheOn o with
   | .false => do
     cacheMissMsg o .false "";
-    buildMiss o .false "" "" out (runGraph o.trustNative o.trustSmt g)
+    buildMiss o .false emptyPlan "" out (runGraph o.trustNative o.trustSmt g)
   | .true => do
     let key := keyOfGraph o "c" g;
-    cached ← cacheRead o key (targetExt o);
+    cached ← cacheRead o key cExt;
     match cached with
     | .some (.mk st ctext from ro) => do
       cacheHitMsg o key from ro;
       writeOut out ctext
     | .none => do
       cacheMissMsg o .true key;
-      buildMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustNative o.trustSmt g)
+      plan ← planOf o g;
+      buildMiss o .true plan key out (runGraph o.trustNative o.trustSmt g)
 
 -- (`--lib`'s two texts share the C entry's key: the backend flags are in it, so a
 -- non-library C is never served as a library)
-def buildLibMiss (o : Opts) (useCache : Bool) (cKey checkKey : String) (out : String)
+def buildLibMiss (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) (out : String)
     (p : Prepared) : IO Unit := do
   l ← libOf o p;
   match l with
   | .none => Process.exit 1
   | .some lt => do
-    cacheWriteIf o useCache checkKey ".check" 0 (linesPayload (linesOf p.run));
-    cacheWriteIf o useCache cKey ".c" 0 lt.c;
-    cacheWriteIf o useCache cKey ".h" 0 lt.h;
+    if useCache then writeModuleEntries o plan p.flat else IO.pure ();
+    cacheWriteIf o useCache cKey cExt 0 lt.c;
+    cacheWriteIf o useCache cKey headerExt 0 lt.h;
     writeLib o out lt
 
 def buildLibWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheOn o with
   | .false => do
     cacheMissMsg o .false "";
-    buildLibMiss o .false "" "" out (runGraph o.trustNative o.trustSmt g)
+    buildLibMiss o .false emptyPlan "" out (runGraph o.trustNative o.trustSmt g)
   | .true => do
     let key := keyOfGraph o "c" g;
-    cachedC ← cacheRead o key ".c";
-    cachedH ← cacheRead o key ".h";
+    cachedC ← cacheRead o key cExt;
+    cachedH ← cacheRead o key headerExt;
     match cachedC with
     | .some (.mk _ ctext dir ro) => match cachedH with
       | .some (.mk _ htext _ _) => do
@@ -1474,10 +1863,12 @@ def buildLibWith (o : Opts) (out : String) (g : Graph) : IO Unit := match cacheO
         writeLib o out (LibText.mk ctext htext)
       | .none => do
         cacheMissMsg o .true key;
-        buildLibMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustNative o.trustSmt g)
+        plan ← planOf o g;
+        buildLibMiss o .true plan key out (runGraph o.trustNative o.trustSmt g)
     | .none => do
       cacheMissMsg o .true key;
-      buildLibMiss o .true key (keyOfGraph o "check" g) out (runGraph o.trustNative o.trustSmt g)
+      plan ← planOf o g;
+      buildLibMiss o .true plan key out (runGraph o.trustNative o.trustSmt g)
 
 def buildCmd (o : Opts) (file : String) : IO Unit :=
   match o.out with
@@ -1498,10 +1889,22 @@ def buildCmd (o : Opts) (file : String) : IO Unit :=
 -- run / eval
 
 def ccCommand (o : Opts) (src prog : String) : String :=
-  String.append o.cc (String.append " -O2 -w -I" (String.append o.rt (String.append (spacesOf o.cflags)
-    (String.append " " (String.append src (String.append " -o " (String.append prog (spacesOf o.ldflags))))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -I" (String.append (shellQuote o.rt)
+    (String.append (quoteFlags o.cflags) (String.append " " (String.append (shellQuote src)
+      (String.append " -o " (String.append (shellQuote prog) (quoteFlags o.ldflags))))))))
 
-def exitCodeOf (st : Nat) : Nat := Nat.div st 256
+-- `prog ARG…`, every word quoted: the program's own arguments are data, not shell text
+def programCommand (prog : String) (extra : List String) : String :=
+  String.append (shellQuote prog) (quoteAll extra)
+
+-- how a program's wait status is reported: a signal death (`128 + signal`, as a shell
+-- reports it) says so, so a SIGSEGV is visible as one instead of "exited with code 0"
+def reportProgramStatus (st : UInt64) : IO Unit :=
+  match Nat.beq (waitSignal st) 0 with
+  | .true => IO.ePrintln (String.append "error: the program exited with code "
+      (Nat.toString (exitCodeOf st)))
+  | .false => IO.ePrintln (String.append "error: the program was killed by signal "
+      (Nat.toString (waitSignal st)))
 
 def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List String) : IO Unit := do
   let dir := String.append "/tmp/wiz-selfhost-" key;
@@ -1517,17 +1920,17 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
     let prog := String.append dir "/prog";
     let cmd := ccCommand o src prog;
     st ← cSystem cmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append src "):"));
       IO.ePrintln cmd;
       Process.exit 1
     | .true => do
-      st2 ← cSystem (String.append prog (spacesOf extra));
+      st2 ← cSystem (programCommand prog extra);
       match Nat.beq (exitCodeOf st2) 0 with
       | .true => IO.pure ()
       | .false => do
-        IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
+        reportProgramStatus st2;
         Process.exit 1
 
 -- (C5) Compile the slice's LLVM text with `llc` and `cc` and run it. The module calls
@@ -1546,29 +1949,30 @@ def compileAndRunLLVM (o : Opts) (key : String) (lltext : String) (extra : List 
     | .none => IO.pure ();
     let obj := String.append dir "/main.o";
     let prog := String.append dir "/prog";
-    let llcCmd := String.append o.llc (String.append " -O2 -filetype=obj -relocation-model=pic -o "
-      (String.append obj (String.append " " src)));
+    let llcCmd := String.append (shellQuote o.llc) (String.append " -O2 -filetype=obj -relocation-model=pic -o "
+      (String.append (shellQuote obj) (String.append " " (shellQuote src))));
     st ← cSystem llcCmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: llc failed (the IR is " (String.append src "):"));
       IO.ePrintln llcCmd;
       Process.exit 1
     | .true => do
-      let ccCmd := String.append o.cc (String.append " -O2 -w -o "
-        (String.append prog (String.append " " (String.append obj (spacesOf o.ldflags)))));
+      let ccCmd := String.append (shellQuote o.cc) (String.append " -O2 -w -o "
+        (String.append (shellQuote prog) (String.append " " (String.append (shellQuote obj)
+          (quoteFlags o.ldflags)))));
       st2 ← cSystem ccCmd;
-      match Nat.beq st2 0 with
+      match Nat.beq (exitCodeOf st2) 0 with
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed to link " (String.append obj ":"));
         IO.ePrintln ccCmd;
         Process.exit 1
       | .true => do
-        st3 ← cSystem (String.append prog (spacesOf extra));
+        st3 ← cSystem (programCommand prog extra);
         match Nat.beq (exitCodeOf st3) 0 with
         | .true => IO.pure ()
         | .false => do
-          IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st3)));
+          reportProgramStatus st3;
           Process.exit 1
 
 -- the kept text, compiled and run by the selected backend
@@ -1577,9 +1981,9 @@ def runText (o : Opts) (key : String) (text : String) (extra : List String) : IO
   | .true => compileAndRunLLVM o key text extra
   | .false => compileAndRun o key text extra
 
-def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepared)
+def runPrepared (o : Opts) (useCache : Bool) (plan : CachePlan) (cKey : String) (p : Prepared)
     (extra : List String) : IO Unit := do
-  cached ← cacheReadIf o useCache cKey (targetExt o);
+  cached ← cacheReadIf o useCache cKey cExt;
   match cached with
   | .some (.mk st ctext from ro) => do
     cacheHitMsg o cKey from ro;
@@ -1589,7 +1993,7 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
     let lines := linesOf p.run;
     let ds := diagsOf p.tab lines;
     let st := statusOf ds;
-    cacheWriteIf o useCache checkKey ".check" st (linesPayload lines);
+    if useCache then writeModuleEntries o plan p.flat else IO.pure ();
     match Nat.beq st 0 with
     | .false => do emitErrors ds; Process.exit 1
     | .true => do
@@ -1597,7 +2001,7 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
       | .true => match genLLVM (Run.gs p.run) with
         | .err m => do IO.ePrintln (String.append "error: " m); Process.exit 1
         | .ok text => do
-          cacheWriteIf o useCache cKey (targetExt o) 0 text;
+          cacheWriteIf o useCache cKey cExt 0 text;
           runText o cKey text extra
       | .false => do
         missing ← missingLinks (List.reverseOf (Globals.ffi (Run.gs p.run)) .nil);
@@ -1606,7 +2010,7 @@ def runPrepared (o : Opts) (useCache : Bool) (cKey checkKey : String) (p : Prepa
         | .nil => do
           let ctext := String.append (commentsOf (mapS (fun l => stripAt l) lines))
             (docsText (genProgramArgs o.backend (modTextOr p.tab "Main" "") (Run.gs p.run)));
-          cacheWriteIf o useCache cKey (targetExt o) 0 ctext;
+          cacheWriteIf o useCache cKey cExt 0 ctext;
           runText o cKey ctext extra
 
 def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
@@ -1614,15 +2018,17 @@ def runCmd (o : Opts) (file : String) (extra : List String) : IO Unit := do
   match gopt with
   | .none => missingFile file
   | .some g => match cacheOn o with
-    | .false => runPrepared o .false "nocache" "" (runGraph o.trustNative o.trustSmt g) extra
+    | .false => runPrepared o .false emptyPlan "nocache" (runGraph o.trustNative o.trustSmt g) extra
     | .true => do
       let cKey := keyOfGraph o "c" g;
-      cached ← cacheRead o cKey (targetExt o);
+      cached ← cacheRead o cKey cExt;
       match cached with
       | .some (.mk st ctext from ro) => do
         cacheHitMsg o cKey from ro;
         runText o cKey ctext extra
-      | .none => runPrepared o .true cKey (keyOfGraph o "check" g) (runGraph o.trustNative o.trustSmt g) extra
+      | .none => do
+        plan ← planOf o g;
+        runPrepared o .true plan cKey (runGraph o.trustNative o.trustSmt g) extra
 
 -- ------------------------------------------------------------------------------------
 -- the one-shot mode: input.wiz → standard output (the fixpoint and the tests), the
@@ -1656,7 +2062,7 @@ def legacyCmd (args : List String) : IO Unit := do
   -- `Globals.trustNative`; `genProgramArgs` ignores the flag itself); (C15) it reads
   -- `--trust-smt` as well (the `smt` refusal)
   match modCheckRunHT cats tokens (listHas "--trust-native" args) (modHasFlag args "--trust-smt") hs tab (.cons "Main" .nil) with
-  | .mk run _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
+  | .mk run _ _ _ _ _ => legacyFinish args text (linesOf run) (Run.gs run)
 
 -- ------------------------------------------------------------------------------------
 -- lsp: the language server (D8), JSON-RPC over stdin/stdout
@@ -2373,7 +2779,7 @@ def lspCheck (st : LspState) (doc : LspDoc) : IO LspState := do
   let roots := List.cons (lspDir doc.path) st.roots;
   tab ← moduleRootSourcesAs cats tokens roots "Main" doc.path doc.text;
   let run := match modCheckRunHLsp cats tokens hs tab (.cons "Main" .nil) with
-    | .mk r _ _ _ => r;
+    | .mk r _ _ _ _ _ => r;
   -- (D8 goals) the document's entries: its body expected types and tactic snapshots
   let doc := { doc with entries := Globals.lspEntries (Run.gs run) };
   let ds := lspOnlyFile doc.path (diagsOf tab (linesOf run));
@@ -2655,3 +3061,4 @@ def dispatch : List String → IO Unit
                               | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
 -- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)
+end

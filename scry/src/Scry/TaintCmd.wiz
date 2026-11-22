@@ -7,6 +7,7 @@ import Scry.Budget
 import Scry.Native
 import Scry.CstStore
 import Scry.Lower
+import Scry.CsCst
 import Scry.CsLower
 import Scry.CsNull
 import Scry.Rules
@@ -47,7 +48,7 @@ fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnost
   are printed (and written to SARIF as `lowering-boundary` results), never dropped as a
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
-  `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
+  `scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
   `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
   S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
@@ -246,10 +247,10 @@ def Scry.taintArgs (args : List String) : Except String Scry.TaintOpts :=
 -- ## The rule pack
 
 /-- Where the default pack is, relative to the repository root and to `scry/` (the two
-working directories the CLI is run from). -/
+working directories the CLI is run from). The pack is part of this package, not `lib/`. -/
 def Scry.defaultPackCandidates : List String :=
-  .cons "lib/Scry/rules/default.scry"
-    (.cons "../lib/Scry/rules/default.scry" .nil)
+  .cons "scry/rules/default.scry"
+    (.cons "rules/default.scry" .nil)
 
 def Scry.readIfExists (path : String) : EIO (Option String) := do
   ok ← EIO.lift (FS.exists path);
@@ -283,10 +284,10 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
   | .none => do
     found ← Scry.readFirst Scry.defaultPackCandidates;
     match found with
-    | .some text => Scry.packFromText "lib/Scry/rules/default.scry" text
+    | .some text => Scry.packFromText "rules/default.scry" text
     | .none => EIO.fail
-        ("default rule pack not found (tried lib/Scry/rules/default.scry and "
-         ++ "../lib/Scry/rules/default.scry); pass --rules FILE")
+        ("default rule pack not found (tried scry/rules/default.scry and "
+         ++ "rules/default.scry); pass --rules FILE")
 
 -- ## Spans and locations
 
@@ -1060,8 +1061,92 @@ def Scry.refuseRegistryProblems (o : Scry.TaintOpts) (pack : Scry.RulePack) : EI
         | .zero => ""
         | n => " (and " ++ Nat.repr n ++ " more registry problem(s))"))
 
-/-- The pipeline from a parsed store to the report: lower, analyse, certify-status,
-locate. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
+/-- The analysis tail shared by the C and C# frontends: points-to, the summary fixpoint,
+the rule pack, certificates, origins and the real budget fields. The caller has already
+parsed (`cst` and its node count) and lowered (`tu`) **from that same store**; this
+function never re-parses and certifies each finding once.
+
+`--null-deref` and `--max-rounds` are read here, so both frontends honour them and report
+the limits they actually used (`truncated`, `summaryRounds`, `summaryComplete`,
+`budgetNotes`). -/
+def Scry.analyzeLowered (o : Scry.TaintOpts) (startMs : Nat) (text : String)
+    (idx : Scry.TextIndex) (cst : Scry.CstStore) (nodes : Nat) (tu : Scry.TU)
+    (pack : Scry.RulePack) (models : Scry.ModelPack)
+    (nullTables : Option (Wil.Func → Scry.NullTables)) : EIO Scry.TaintReport := do
+  let errs := Scry.CstStore.errorCount cst;
+  let prog := Wil.program tu.funcs;
+  let pt := Scry.pointsToBounded prog o.maxRounds;
+  Scry.reportStage o startMs "points-to" (Nat.repr (Scry.ptVarCount pt)
+    ++ " vars, " ++ Nat.repr (Scry.ptLocCount pt) ++ " locations, "
+    ++ Nat.repr pt.rounds ++ " round(s)"
+    ++ (match pt.complete with
+      | .true => ""
+      | .false => " (incomplete)"));
+  Scry.checkDeadline o startMs "points-to";
+  let graph := Scry.callGraph prog pt;
+  /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
+  address taken is an exported entry, so its parameters are sources. -/
+  let entries := Scry.entrySources prog graph;
+  let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
+  let summaryFuel := Scry.summaryFuel o prog pt;
+  -- Plans depend on the function, the rule pack, points-to and the entry policy only,
+  -- so they are built once; the summary fixpoint and the final pass reuse them.
+  let plans := Scry.prepareAllWithEntriesModels models prog pack pt entries;
+  Scry.reportStage o startMs "plans" (Nat.repr (List.length plans) ++ " plan(s)");
+  Scry.checkDeadline o startMs "plans";
+  run ← Scry.summaryRounds o startMs prog graph pack pt entries plans summaryFuel 0 sums0;
+  Scry.checkDeadline o startMs "summaries";
+  -- A converged round evaluated every function under summaries equal to the final
+  -- ones, so its results are the final results.
+  results ← match run.complete with
+    | .true => EIO.pure run.results
+    | .false => Scry.evalAllStaged o startMs "results" graph pack pt entries plans
+        (Scry.allMemSeeds run.summaries) run.summaries prog.funcs 0
+        (List.length prog.funcs);
+  Scry.checkDeadline o startMs "results";
+  let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
+    | .some _ => .true
+    | .none => .false;
+  -- The memory analyses are the registry's rows: the model pack is in the input
+  -- record, and this call is the only pipeline hook.
+  let analyses := Scry.runAnalyses Scry.analyses models pack prog pt results;
+  let nulls : List Scry.MemWarning := match o.nullDeref, nullTables with
+    | .true, .some tablesOf => Scry.nullDerefWarningsWith prog tablesOf
+    | .true, .none => Scry.nullDerefWarnings prog
+    | .false, _ => .nil;
+  let warnings := Scry.dedupWarnings (List.append
+    (List.filter (Scry.keepMemWarning hasLifetime)
+      (List.append
+        (Scry.concatLists (fun r => r.plan.memWarnings) results)
+        (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels models prog r) results)))
+    (List.append analyses.warnings nulls));
+  let memoryFindings := analyses.findings;
+  let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
+  Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
+    ++ " function(s), " ++ Nat.repr run.rounds ++ " summary round(s)"
+    ++ (match run.complete with
+      | .true => ""
+      | .false => " (incomplete)"));
+  let findings := Scry.programFindings pr;
+  let origins := Scry.originEntries o.file idx tu.funcs;
+  Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
+  Scry.checkDeadline o startMs "origins";
+  let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
+    (List.length tu.funcs)) (Scry.boundaryFindings o.file idx tu);
+  let memory := Scry.memoryFindings origins pr.warnings;
+  -- One certificate per finding; `checks` is derived from it, not computed again.
+  let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
+  let checks := List.map Scry.certVerified certificates;
+  let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
+    (Scry.summariesBudgetNotes o.maxRounds run.rounds run.complete);
+  let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not run.complete);
+  endMs ← EIO.lift Scry.nowMs;
+  EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
+    boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds
+    run.complete notes)
+
+/-- The C pipeline from a parsed store to the report: lower, then run the shared analysis
+tail. `Scry.analyzeFile` calls it after parsing; `scry repl` calls it on a cached store,
 so a session does not parse the C again. -/
 def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx : Scry.TextIndex)
     (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
@@ -1081,79 +1166,34 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
-    let prog := Wil.program tu.funcs;
-    let pt := Scry.pointsToBounded prog o.maxRounds;
-    Scry.reportStage o startMs "points-to" (Nat.repr (Scry.ptVarCount pt)
-      ++ " vars, " ++ Nat.repr (Scry.ptLocCount pt) ++ " locations, "
-      ++ Nat.repr pt.rounds ++ " round(s)"
-      ++ (match pt.complete with
-        | .true => ""
-        | .false => " (incomplete)"));
-    Scry.checkDeadline o startMs "points-to";
-    let graph := Scry.callGraph prog pt;
-    /-- The C-ABI policy: a non-`static`, non-`main` function with no caller and no
-    address taken is an exported entry, so its parameters are sources. -/
-    let entries := Scry.entrySources prog graph;
-    let sums0 := List.map (fun fn => Scry.Summary.mk fn.name .nil .false .nil) prog.funcs;
-    let summaryFuel := Scry.summaryFuel o prog pt;
-    -- Plans depend on the function, the rule pack, points-to and the entry policy only,
-    -- so they are built once; the summary fixpoint and the final pass reuse them.
-    let plans := Scry.prepareAllWithEntriesModels o.models prog pack pt entries;
-    Scry.reportStage o startMs "plans" (Nat.repr (List.length plans) ++ " plan(s)");
-    Scry.checkDeadline o startMs "plans";
-    run ← Scry.summaryRounds o startMs prog graph pack pt entries plans summaryFuel 0 sums0;
-    Scry.checkDeadline o startMs "summaries";
-    -- A converged round evaluated every function under summaries equal to the final
-    -- ones, so its results are the final results.
-    results ← match run.complete with
-      | .true => EIO.pure run.results
-      | .false => Scry.evalAllStaged o startMs "results" graph pack pt entries plans
-          (Scry.allMemSeeds run.summaries) run.summaries prog.funcs 0
-          (List.length prog.funcs);
-    Scry.checkDeadline o startMs "results";
-    let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
-      | .some _ => .true
-      | .none => .false;
-    -- The memory analyses are the registry's rows: the model pack is in the input
-    -- record, and this call is the only pipeline hook.
-    let analyses := Scry.runAnalyses Scry.analyses o.models pack prog pt results;
-    let nulls : List Scry.MemWarning := match o.nullDeref with
-      | .true => Scry.nullDerefWarnings prog
-      | .false => .nil;
-    let warnings := Scry.dedupWarnings (List.append
-      (List.filter (Scry.keepMemWarning hasLifetime)
-        (List.append
-          (Scry.concatLists (fun r => r.plan.memWarnings) results)
-          (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels o.models prog r) results)))
-      (List.append analyses.warnings nulls));
-    let memoryFindings := analyses.findings;
-    let pr := Scry.ProgramResult.mk results run.summaries graph pt warnings memoryFindings;
-    Scry.reportStage o startMs "analyse" (Nat.repr (List.length results)
-      ++ " function(s), " ++ Nat.repr run.rounds ++ " summary round(s)"
-      ++ (match run.complete with
-        | .true => ""
-        | .false => " (incomplete)"));
-    let findings := Scry.programFindings pr;
-    let origins := Scry.originEntries o.file idx tu.funcs;
-    Scry.reportStage o startMs "origins" (Nat.repr (List.length origins) ++ " entries");
-    Scry.checkDeadline o startMs "origins";
-    let boundaries := List.append (Scry.parseRecoveryFindings o.file text cst errs
-      (List.length tu.funcs)) (Scry.boundaryFindings o.file idx tu);
-    let memory := Scry.memoryFindings origins pr.warnings;
-    let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
-    let checks := List.map Scry.certVerified certificates;
-    let notes := List.append (Scry.pointsToBudgetNotes o.maxRounds pr.pointsTo)
-      (Scry.summariesBudgetNotes o.maxRounds run.rounds run.complete);
-    let truncated := Bool.or (Bool.not pr.pointsTo.complete) (Bool.not run.complete);
-    endMs ← EIO.lift Scry.nowMs;
-    EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates origins
-      boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs) truncated run.rounds
-      run.complete notes)
+    Scry.analyzeLowered o startMs text idx cst nodes tu pack o.models .none
 
-/-- The C# pipeline: parse with tree-sitter-c-sharp, lower with `Scry.CsLower`, then run
-the same points-to/summary/rule engine as C. The spill is the boundary `Scry.Cs.frontend`
-already reads (the tests use checked-in spills for exactly this reason). Origins work
-because `Scry.CsLower` gives every statement a `Wil.Span` into the `.cs` text. -/
+/-- The C# pipeline from a parsed store to the report. The lowering reads the
+`Scry.CstStore` directly through `Scry.Cs.ofStore`; it is **not** rendered to a spill and
+parsed again (the old path spent one extra serialise/parse per file). Origins work because
+`Scry.CsLower` gives every statement a `Wil.Span` into the `.cs` text. -/
+def Scry.analyzeCsStore (o : Scry.TaintOpts) (startMs : Nat) (text : String)
+    (idx : Scry.TextIndex) (cst : Scry.CstStore) (nodes : Nat) : EIO Scry.TaintReport := do
+  let errs := Scry.CstStore.errorCount cst;
+  match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
+  | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
+      ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
+  | .false => do
+    Scry.checkDeadline o startMs "parse";
+    pack ← Scry.loadTaintPack o.rules;
+    Scry.reportStage o startMs "rules" (Nat.repr (List.length (Scry.RulePack.taintRules pack))
+      ++ " taint rule(s), " ++ Nat.repr (List.length (Scry.RulePack.memoryRules pack))
+      ++ " memory rule(s)");
+    Scry.refuseRegistryProblems o pack;
+    let l := Scry.Cs.lowerCstWithModels Scry.csModels o.file text (Scry.Cs.ofStore text cst);
+    let tu := Scry.TU.mk o.file [text] [o.file] l.funcs l.warnings .nil;
+    Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs)
+      ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
+    Scry.checkDeadline o startMs "lower";
+    Scry.analyzeLowered o startMs text idx cst nodes tu pack Scry.csModels
+      (.some (fun fn => Scry.Cs.nullTablesOf l fn))
+
+/-- Parse a C# file with tree-sitter-c-sharp and run the pipeline on that one store. -/
 def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)
     (idx : Scry.TextIndex) : EIO Scry.TaintReport := do
   st ← Scry.Native.parse "c_sharp" text;
@@ -1163,42 +1203,7 @@ def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)
   | .some msg => EIO.fail msg
   | .none => do
     cst ← EIO.lift (Scry.Native.toCstStore o.file st);
-    let errs := Scry.CstStore.errorCount cst;
-    match Bool.and (Nat.lt 0 errs) (Bool.not o.allowErrors) with
-    | .true => EIO.fail (o.file ++ ": " ++ Nat.repr errs
-        ++ " parse error node(s); pass --allow-errors to analyse the recovered tree")
-    | .false => do
-      Scry.checkDeadline o startMs "parse";
-      pack ← Scry.loadTaintPack o.rules;
-      Scry.refuseRegistryProblems o pack;
-      let spill := Scry.CstStore.render cst;
-      match Scry.Cs.frontendWithModels Scry.csModels o.file text spill with
-      | .err e => EIO.fail e
-      | .ok l => do
-        let tu := Scry.TU.mk o.file [text] [o.file] l.funcs l.warnings .nil;
-        Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs)
-          ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
-        let prog := Wil.program tu.funcs;
-        let pr0 := Scry.analyzeModels Scry.csModels prog pack;
-        -- `--null-deref` is the C# frontend's nullability check: the S5 pass over the
-        -- facts the lowering published (`Scry.CsNull`), appended to the memory
-        -- diagnostics. The default run stays pinned without it.
-        let nulls : List Scry.MemWarning := match o.nullDeref with
-          | .true => Scry.Cs.nullWarningsOf l
-          | .false => .nil;
-        let pr := { pr0 with warnings := List.append pr0.warnings nulls };
-        let findings := Scry.programFindings pr;
-        let checks := List.map (fun f => Scry.findingChecked pr f) findings;
-        let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;
-        let origins := Scry.originEntries o.file idx tu.funcs;
-        let boundaries := List.append
-          (Scry.parseRecoveryFindings o.file text cst errs (List.length tu.funcs))
-          (Scry.boundaryFindings o.file idx tu);
-        let memory := Scry.memoryFindings origins pr.warnings;
-        endMs ← EIO.lift Scry.nowMs;
-        EIO.pure (Scry.TaintReport.mk o.file errs pack tu findings checks certificates
-          origins boundaries memory pr.pointsTo nodes (Nat.sub endMs startMs)
-          .false 1 .true .nil)
+    Scry.analyzeCsStore o startMs text idx cst nodes
 
 /-- The pipeline up to the report: parse, lower, analyse, certify-status, locate. -/
 def Scry.analyzeFile (o : Scry.TaintOpts) : EIO Scry.TaintReport := do
