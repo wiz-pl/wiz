@@ -4,6 +4,12 @@
 axiom-free examples) that the kernel does not check. `scripts/trust-ledger.sh` regenerates
 it, and the `trust-ledger` CI job plus the `native` test group compare it with the source.
 
+The counts below are generated from the file (not hand-typed):
+`scripts/trust-counts.py --write` rewrites this marker, `--check` fails when it drifts,
+and the `native` group runs the check.
+
+<!-- trust-counts: rows=776 partial=197 axiom_rows=254 builtin_rows=249 native_rows=76 implemented_by=71 repr=5 extern_declarations=221 seal=8 other_builtin=20 pure_axioms=33 distinct_reasons=506 shared_reasons=270 legacy=0 expired=0 -->
+
 ## What is a source of trust
 
 The ledger is produced by elaborating every module and walking its declarations (with
@@ -60,8 +66,23 @@ unchecked step the ledger exists to list. Widening also needs a multi-root walk 
 `Tests/Native.lean` (`--tree` is for fixtures, not a second root), a reviewed reason per
 row, and the `--check` job would elaborate 13 more modules. A prototype of the widened
 walk measured **~9m30s cold** (against ~7m26s for `lib/` alone) and the same +578 delta
-(730 → 1308 rows). That is a scope decision, not a mechanical update, and it is
+(776 → 1354 rows). That is a scope decision, not a mechanical update, and it is
 deliberately not made here.
+
+The **Scry package** (`scry/src/Scry/`) is outside the gate for the same reason: the
+walk imports the modules physically under `lib/`, and the package's modules are offered
+by the loader but not imported by `allLibSource`. Eight reviewed `partial` rows
+(`Scry.Index`, `Scry.Interproc`, `Scry.Wil`) moved with the package to
+`scry/trust-baseline.tsv`; they are a review record, not a gate. `Tests/Groups/Trust.lean`
+checks that each of those rows still names a `partial def` in the package source, and a
+full scry walk (which would surface every unreviewed source in the package) belongs to
+the package's own CI. Deleting the rows instead would erase the review; leaving them in
+`.github/trust-baseline.tsv` makes them stale, because the walk cannot see their modules.
+
+The **Quire storage engine** was promoted into `lib/Scry/`, so it *is* in the walk: its
+30 `partial` definitions, 5 storage FFI declarations and `Map` foreign type add rows to
+the lib ledger like any other `lib/` source, and a new one fails `--check` until it has a
+reviewed row (see "The Quire storage rows" below).
 
 Release signing and build attestation are **not** Wiz trust sources: a DSSE/Ed25519 key
 and a SLSA-style provenance statement (`docs/attestation.md`, `docs/building.md`) are
@@ -113,16 +134,33 @@ scripts/trust-ledger.sh --update --reason "why this is trusted" \
 `--update` regenerates the ledger from the source and preserves the metadata of rows
 that stay. It **refuses to add a new row without `--reason`** (exit 2) and lists the new
 sources. New rows get `--owner` (default: `git config user.name`, then `$USER`) and
-`--review` (default: today + 180 days). A review date in the past is refused. An
-explicit `--review` also renews rows that still carry the migration marker, so a bulk
-deferral is `--update --review YYYY-MM-DD` (no `--reason` needed if there are no new
-sources). Review the diff before committing: a new `axiom` is a proof obligation, not a
-formality.
+`--review` (default: today + 180 days). A review date in the past is refused, and an
+explicit `--review` for a new or renewed row must be at least 90 days after today: a
+same-day stamp expires the next morning, and that is the failure the floor exists for.
+An explicit `--review` also renews rows that still carry the migration marker.
+`--renew-expired` renews the rows whose review date has passed. A renewal is not
+automatic: it needs `--owner` (the person or lane re-reviewing), `--reason` (what was
+re-checked) and `--review`, and the row's reason gains
+` | renewed YYYY-MM-DD by OWNER: BASIS` while its owner becomes the re-reviewer. A
+date-only bump is exactly the failure the 2026-11-21 batch had, so the tool records
+the provenance instead of repeating it. A renewal is:
+
+```
+scripts/trust-ledger.sh --update --renew-expired --review YYYY-MM-DD \
+  --owner "who re-reviewed" --reason "what was re-checked"
+```
+
+Without `--renew-expired`, `--update --review` leaves a reasoned expired row exactly as
+it was (renewal used to apply only to migration rows). Review the diff before
+committing: a new `axiom` is a proof obligation, not a formality.
 
 The migration gave the 753 pre-gate rows the reason `legacy: pre-gate baseline; not
-individually reviewed`, owner `unassigned`, and review date `2027-05-14`. That
-migration is **complete**: every row now has a declaration-specific reason and a named
-owner, so no row carries the marker and `--strict-legacy` passes.
+individually reviewed`, owner `unassigned`, and review date `2027-05-14`. That migration
+is **complete**: no row carries the marker, `--strict-legacy` passes, and every row has
+a reason, an owner and a review date. The reasons are not all declaration-specific: 506
+distinct reasons cover the 776 rows, and 270 rows share a reason with another row (the
+`Feral` block, the `Scry` module groups and the FFI marshalling rows describe a block
+where the declarations are one reviewed unit).
 
 ## Merging the ledger
 
@@ -164,8 +202,8 @@ missing a source. After any merge of this file, run `scripts/trust-ledger.sh --c
 
 ## Reducing the legacy rows
 
-The ledger now has 730 rows: the migration's 753, minus the 73 removals below, plus 50
-`partial` rows added by later modules (the `partial` group is 182 rows). The removals are
+The ledger now has 776 rows: the migration's 753, minus the 73 removals below, plus 96
+rows added by later modules (the `partial` group is 197 rows). The removals are
 all structural, not a loosening of the gate:
 
 | what was removed | rows | why it was not trust |
@@ -186,47 +224,54 @@ constructor or projection.
 
 The reviewed base falls into these groups:
 
-* **FFI, 210 declarations (420 rows).** Each `extern` contributes an axiom (the C
+* **FFI, 221 declarations (442 rows).** Each `extern` contributes an axiom (the C
   function) and a `builtin extern:` row (the marshalling). Both FFI audits are done:
-  the OS/runtime modules (142 declarations, 208 rows) and the word/array/map modules
-  (68 declarations, 212 rows: `Word`, `WordArray`, `WordMap` and `Intern`) carry
+  the OS/runtime modules are 153 of the declarations, and the word/array/map modules
+  (`Word`, `WordArray`, `WordMap`, `Intern`) are 68 (220 ledger rows with their
+  natives and seals). All carry
   symbol-specific reasons, naming the C function,
   the property that makes it the definition, and the marshalling's kind string. Do not
   bulk-renew them. `UInt64.ofNat` reduces mod 2^64 (the marshalling used to panic above
   2^64 while the doc promised modulo), and `scripts/trust-ffi-audit.sh --check`
   compiles each `builtin extern:` declaration against `runtime/wiz_rt.h`.
-* **Mutual recursion and `partial`, 182 rows.** The rows come from `Feral` (70: 67
-  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), `Web.Loom` (14), the `Scry` modules
-  (49), `Json` (10: 9 mutual plus the deliberately opaque `Json.sub`), `SatTactic` (7),
-  `Infoview` (7), `Tagged` (6), `BvDecide` (6), `Plot` (4), `Text` (3), `Prelude` (3),
-  `Ring` (2) and `IO` (1). Wiz's kernel treats a `partial`
+* **Mutual recursion and `partial`, 197 rows.** The rows come from `Feral` (70: 67
+  mutual plus `Fe.core`/`Fe.tyStr`/`Fe.zonk`), the web modules (`Web.EditorModel` 20,
+  `Web.Selfhost` 14, `Web.Loom` 14, `Web.Goals` 13, `Web.Playground` 9,
+  `Web.Draft` 5, `Web.Search` 4, `Web.Hover` 1), `Json` (10: 9 mutual plus the
+  deliberately opaque `Json.sub`), `SatTactic` (7), `Infoview` (7), `Tagged` (6),
+  `BvDecide` (6), `Plot` (4), `Text` (3), `Ring` (2), `Prelude` (1) and `IO` (1).
+  (The eight Scry package rows are in `scry/trust-baseline.tsv`, not here.) Wiz's
+  kernel treats a `partial`
   definition as opaque: the definition is justified by an inhabited witness of its
   type (22f), never by a termination proof, so a row is not a claim that the recursion
-  terminates. The 182 rows are accepted as one reviewed group, deliberately not
+  terminates. The 197 rows are accepted as one reviewed group, deliberately not
   de-mutualised: each reason names its block and what would remove the row —
   de-mutualising into structural recursion over the syntax or data tree, or a checked
   measure (fuel, a decreasing counter, or a worklist/visited-set measure). A
   `mutual`/`partial` row is therefore a documented design choice, not an unreviewed
   gap: a new one still needs a reason, and `--strict-legacy` still lists any that has
   not been through this review.
-* **`implemented_by`, 56 rows.** The remaining ones are the performance-critical
+* **`implemented_by`/`repr:`, 76 rows** (71 `implemented_by` and 5 `repr:`). The
+  remaining ones are the performance-critical
   `UIntN`, array, map, intern and channel fast paths. They are covered by the
   differential `=word`/`=natives`/`=conc` tests; each reason names the Wiz model it
   replaces and the group that compares the two.
-* **`builtin`, 30 rows and `repr:`, 7 rows.** The seals (opaque native
-  representations) and the twenty `Prelude` numeral/operation/`memo` registrations are
+* **`builtin`, 249 rows.** 221 are the FFI marshalling registrations counted above;
+  8 are the seals (opaque native representations); the other 20 are the `Prelude`
+  numeral/operation/`memo` and string registrations, which are
   load-bearing: numerals, string literals and compiled arithmetic do not work without
   them. They are reviewed individually: each reason says what the registration makes
   native, why the Wiz definition is the specification, and what would remove it
   (unsealing the type, or deleting the registration and falling back to the definition
   that `=audit` already checks).
 
-The 35 pure axioms (the foreign types, the seals, `Region`'s `Outlives` evidence and
-`Prelude.castRefl`) carry a specific reason and the owner `Reuben Steenekamp`; so do
+The 33 non-extern axiom rows are 25 foreign types/`Region`/`castRefl` rows plus the 8
+seal axioms. They carry a specific reason and the owner `Reuben Steenekamp`; so do
 the kept `UIntN.toNat` native (the word tests pin it in the compiled IR) and the six
 signed shift/compare rows. The last migration rows are gone: `Float64.ofNat` was
 renamed `Float64.ofNatU64` when the rounding moved into Wiz and is reasoned under the
-new name; the twenty `Prelude` numeral/`memo` registrations, the `PMap`/`Scry` seals
+new name; the twenty `Prelude` numeral/`memo` registrations, the `PMap`, `Intern`,
+`WordArray` and `WordMap` seals
 and `Proc.runLinked` now have their own reasons. `Json.sub` is partial by intent (it
 is an elaboration fence, not recursion) and has a reason.
 
@@ -234,7 +279,10 @@ is an elaboration fence, not recursion) and has a reason.
 
 Every row has a review date; a row is expired when that date is before today, so a
 review is due at least every 180 days and `--check` fails until it is renewed with
-`--update --review YYYY-MM-DD`. A new row defaults to today + 180 days. The migration
+`--update --renew-expired --review YYYY-MM-DD --owner WHO --reason WHAT`. A new row
+defaults to today + 180 days, and an explicit date for a new or renewed row must be at
+least 90 days after today (a same-day stamp is what expired the batch added on
+2026-11-21). The migration
 marker cannot come back: `--strict-legacy` is now enforced in CI (the ledger step of
 the `build` job runs `scripts/trust-ledger.sh --check --strict-legacy`), and the `native` group
 checks the same ledger.
@@ -290,8 +338,20 @@ not on any one function. `UInt64`/`Float64`/`Array`/`Str`/`StrMap` externs are i
 
 `Tests/trust-ledger/run.sh` checks the gate's exit codes and messages against small
 trees: a new axiom with no row, a row with no reason, an expired row, a renamed
-declaration, a legacy row, a clean tree, and `--update` with and without a reason. The
-`native` group runs it, so `lake test -- '=native'` covers it.
+declaration, a legacy row, a clean tree, `--update` with and without a reason,
+`--renew-expired` (the renewal note, and the refusals for a missing `--review`,
+`--owner` or `--reason`), and the 90-day floor on an explicit `--review`. The `native`
+group runs it, so `lake test -- '=native'` covers it.
+
+The `trust` group pins the *meaning* of the rows ranked highest by the ledger audit,
+rather than adding their names: `#check` signatures and negative elaborations for
+`castRefl` (`Tests/Groups/Trust.lean`), the `Region.Outlives` statement set and
+derivable/non-derivable pairs, the `Str.push` copy-on-write case in C and LLVM,
+`UIntN.toNat` at widths 0/1/7/8/63/64/65/127/128 in the kernel, both interpreters, C
+and LLVM plus its IR lowering, and a private-constructor/look-alike case for each seal
+registration (`PMap`, `InternTable`, `UInt8Array`, `UInt32Array`, `UInt64Array`,
+`UInt64Map`, with `UIntN`/`IntN` in the word case). These are the tests a changed
+statement or native body has to break; the ledger itself still records names only.
 
 `scripts/trust-ledger-merge_test.sh` checks the merge driver without a build: disjoint
 rows, the same row, a reasoned row against a legacy one, two reasoned rows (must
