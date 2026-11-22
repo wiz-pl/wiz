@@ -1,9 +1,9 @@
 # An eBPF target — P0 (typed core, checker, C emitter skeleton)
 
-**Status, 2026-11-21:** P0 **coding lane**, branch `agent/ebpf` on
-`origin/integration/train10` (`d705b4578`). The code below is **written and not built or
-run**: this lane is deliberately off the build queue. Everything in this document that
-says "must" is a test or a verifier assertion that still needs a queue slot. The design
+**Status, 2026-11-22:** P0 implementation in progress. The typed core, the checker
+and the C emitter skeleton are written; they are **not yet built or run**. Everything in
+this document that says "must" is a test or a verifier assertion that still needs a
+build/verifier run. The design
 is `wiz-notes/ebpf-target.md`; this file records what the P0 cut actually contains and
 what the first build/verifier run has to establish.
 
