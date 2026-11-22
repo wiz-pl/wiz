@@ -425,7 +425,7 @@ def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
     | .false => match Scry.nodeHas tbls.asserts node v with
       | .true => AExpr.alloc (AExpr.lit 1)
       | .false => d;
-  let def := fun (v : Wil.Var) (d : AExpr) =>
+  let defOf := fun (v : Wil.Var) (d : AExpr) =>
     match List.any (Nat.beq v.index) tbls.nonNull with
     | .true => AStmt.checkAssign v.index (over v.index d)
     | .false => AStmt.assign v.index (over v.index d);
@@ -439,12 +439,12 @@ def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
       -- null field (no memory nullness); treating every one as maybe-null would warn on
       -- every `p = s->field; p->x` chain. The access through the base is still checked.
       List.cons (AStmt.assign (Scry.nHavoc fn) (AExpr.load p.index (AExpr.lit 0) 1))
-        (List.cons (def x (AExpr.alloc (AExpr.lit 1))) .nil)
+        (List.cons (defOf x (AExpr.alloc (AExpr.lit 1))) .nil)
     | .assign x e _ =>
       let rhs : AExpr := match e, x.ty with
         | .cst (.int _ _ 0), .ptr _ => AExpr.null
         | _, _ => Scry.nRhs fn tab e;
-      List.cons (def x rhs) .nil
+      List.cons (defOf x rhs) .nil
     | .assume c _ => match Scry.nCond consts c with
       | .some a => List.cons (AStmt.assume a) .nil
       | .none => .nil
