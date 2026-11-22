@@ -93,6 +93,7 @@ lib/Web/Loom.wiz
 lib/Web/Playground.wiz
 lib/Web/Search.wiz
 lib/Web/Selfhost.wiz
+lib/Web/Style.wiz
 lib/Web/Widget.wiz
 lib/Web/Wire.wiz
 lib/Word.wiz
