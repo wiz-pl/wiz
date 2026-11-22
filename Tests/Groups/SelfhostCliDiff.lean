@@ -356,13 +356,15 @@ def cliDiffDriverHelp : String :=
   "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" ++
   "  strict: only manifested entries), --target c|llvm (LLVM is a first slice, C5:\n" ++
   "  a closed `main : Nat` lowered to the host's IR; `--llvm` is its alias;\n" ++
-  "  --wasm/--split are the host's and are refused), --llc CMD,\n" ++
+  "  --wasm/--split are the host's and are refused),\n" ++
   "  -v (cache hits and misses), --types (each declaration's type),\n" ++
   "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" ++
   "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" ++
   "  --native-fuel: the self-hosted evaluator has no step counter),\n" ++
-  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" ++
-  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" ++
+  "  --cc PATH, --llc PATH (one executable each, not a command line), --rt DIR (the\n" ++
+  "  selfhost runtime, default selfhost), --cflags FLAGS, --ldflags FLAGS (word\n" ++
+  "  lists, as the host reads them), --trust-smt (the `smt` tactic is refused: no\n" ++
+  "  solver here, C15);\n" ++
   "  backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" ++
   "\n" ++
   "without a command: input.wiz in the working directory to standard output\n\n"

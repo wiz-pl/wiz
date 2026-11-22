@@ -32,6 +32,7 @@ deviation and coefficient of variation (`cv`).  Use `--size MODE=N` for an exper
 | `bytes-compare` | 2000000 | compare two equal 4 KiB buffers N times |
 | `str-append` | 10000 | append a 100-byte `Str` chunk N times: the `Str.append` builder (1,000,000 bytes at the default) |
 | `str-push` | 200000 | push one byte N times: the `Str.push` builder |
+| `str-join` | 10000 | `Str.join` N 100-byte chunks: the same builder, from a list |
 | `text-split` | 40000 | split an N-chunk string on `,`, 8 passes |
 | `text-replace` | 40000 | replace every `,` with `Z`, 8 passes |
 | `text-trim` | 40000 | trim an N-chunk string padded with spaces, 8 passes |
@@ -50,6 +51,24 @@ built from the same sources with the `a != b && WIZ_RC(a) == 1` branch of
 `wiz_str_append` removed. `str-push` is the same builder one byte at a time. Adding
 a mode changes the mode set: a cached A-side executable from before the mode cannot
 run it, so rebuild the A side (in CI, dispatch with `bootstrap: true`) once.
+
+`bench/str-append.wiz` is the smallest form of the same builder: one byte per append, the
+size on the command line, and only APIs that predate the in-place change, so the *same
+source* builds with a compiler from either side of it (the runtime is embedded in the
+compiler, so the A side is `6ca079382^`'s `Str` text section plus its `lib/Std.wiz`).
+Five interleaved pairs on one node, medians:
+
+| appends | copy-only | in-place | ratio |
+|---:|---:|---:|---:|
+| 1 000 | 0.47 ms | 0.51 ms | 0.9x |
+| 10 000 | 0.88 ms | 0.46 ms | 1.9x |
+| 100 000 | 58.2 ms | 1.22 ms | 47.8x |
+
+The first row is program start-up (about 0.4 ms) on both sides; from 10 000 to 100 000
+the copy-only time grows by 66 for ten times the appends (quadratic), the in-place one by
+2.6 (linear). `str-join` is the same builder from a list (its checksum equals
+`str-append`'s at every N); at 100 000 pieces it takes 100 ms, the N-piece list
+dominating.
 
 ## Comparing two builds
 

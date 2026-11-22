@@ -1,0 +1,166 @@
+import Text
+import Web.EditorModel
+
+/-!
+# Web.Source.Span
+
+The reader's only position type: a half-open range of **UTF-16 code units**,
+`[start, stop)`, into one file's text.
+
+That is the unit every browser surface counts (`selectionStart`, `Range`, the Loom
+driver's payloads), so the shared core never sees a byte offset or a code-point column.
+The two adapters convert once, at the edge:
+
+* scry's origins are 1-based **code-point** line/column pairs over UTF-8 bytes
+  (`scry/src/Scry/Sarif.wiz`, `Scry.Origin`); `Source.Span.ofOrigin` turns them into
+  UTF-16 here, in `scry web`, before anything reaches a bundle;
+* LSP positions are also code points; the live adapter (P1) does the same conversion
+  with `Source.Span.ofPosition`.
+
+All line/offset arithmetic is `Web.EditorModel`'s (`lineOfOffset`,
+`lineStartAt`, `slice`, `utf16OffsetFromCodePoints`), so there is one line table
+implementation, not a fourth copy.
+-/
+
+/-- A half-open UTF-16 range in one file. `stop` is exclusive. -/
+structure Source.Span where
+  start : Nat
+  stop : Nat
+
+/-- The empty span at `n`. -/
+def Source.Span.at (n : Nat) : Source.Span := Source.Span.mk n n
+
+/-- A span with its ends in order. -/
+def Source.Span.make (start stop : Nat) : Source.Span :=
+  match Nat.le start stop with
+  | .true => Source.Span.mk start stop
+  | .false => Source.Span.mk stop start
+
+/-- No text. -/
+def Source.Span.isEmpty (s : Source.Span) : Bool := Nat.le s.stop s.start
+
+/-- The span's length in UTF-16 units (0 when inverted). -/
+def Source.Span.length (s : Source.Span) : Nat :=
+  match Nat.le s.stop s.start with
+  | .true => 0
+  | .false => s.stop - s.start
+
+/-- `s` clipped to `[0, n)`, ends in order. -/
+def Source.Span.clamp (n : Nat) (s : Source.Span) : Source.Span :=
+  let hi := match Nat.le n s.stop with
+    | .true => n
+    | .false => s.stop;
+  let lo := match Nat.le hi s.start with
+    | .true => hi
+    | .false => s.start;
+  Source.Span.mk lo hi
+
+/-- Whether offset `n` is inside the span (`start ≤ n < stop`). -/
+def Source.Span.contains (s : Source.Span) (n : Nat) : Bool :=
+  Bool.and (Nat.le s.start n) (Nat.lt n s.stop)
+
+/-- Whether the spans share a unit. -/
+def Source.Span.overlaps (a b : Source.Span) : Bool :=
+  Bool.and (Nat.lt a.start b.stop) (Nat.lt b.start a.stop)
+
+/-- The smallest span covering both (also for a caret next to a range). -/
+def Source.Span.merge (a b : Source.Span) : Source.Span :=
+  let start := match Nat.le a.start b.start with
+    | .true => a.start
+    | .false => b.start;
+  let stop := match Nat.le a.stop b.stop with
+    | .true => b.stop
+    | .false => a.stop;
+  Source.Span.mk start stop
+
+/-- The UTF-16 offset of the end of line `line` (0-based), in the indexed text. -/
+def Source.Span.lineStart (i : EditorModel.PositionIndex) (line : Nat) : Nat :=
+  EditorModel.lineStartAt i line
+
+/-- The UTF-16 column of a 1-based code-point column on `line` (0-based). A character
+outside the BMP counts as two UTF-16 units; a column past the line stops at its break,
+as `EditorModel.offsetFromPosition` does. -/
+partial def Source.Span.utf16ColumnGo (cs : List Char) (want : Nat) (n acc : Nat) : Nat :=
+  match cs with
+  | .nil => acc
+  | .cons c rest => match Nat.beq n want with
+    | .true => acc
+    | .false =>
+      let units := match Nat.lt 0xFFFF (Char.code c) with
+        | .true => 2
+        | .false => 1;
+      Source.Span.utf16ColumnGo rest want (n + 1) (acc + units)
+
+/-- The UTF-16 offset of a 1-based code-point line/column (scry's origin shape). A
+`line` of 0 means "no origin": the empty span at the start. -/
+def Source.Span.ofLineColumn (i : EditorModel.PositionIndex) (line column : Nat) : Nat :=
+  match Nat.beq line 0 with
+  | .true => 0
+  | .false =>
+    let line0 := line - 1;
+    let start := EditorModel.lineStartAt i line0;
+    let stop := EditorModel.lineEndAt i line0;
+    let text := EditorModel.slice i start stop;
+    let col0 := match Nat.beq column 0 with
+      | .true => 0
+      | .false => column - 1;
+    start + Source.Span.utf16ColumnGo (String.chars text) col0 0 0
+
+/-- A scry origin (1-based code-point lines/columns) as a UTF-16 span. A missing end
+(`endLine = 0`) is a one-unit caret at the start. -/
+def Source.Span.ofOrigin (i : EditorModel.PositionIndex)
+    (line column endLine endColumn : Nat) : Source.Span :=
+  let start := Source.Span.ofLineColumn i line column;
+  let stop := match Nat.beq endLine 0 with
+    | .true => start + 1
+    | .false => Source.Span.ofLineColumn i endLine endColumn;
+  Source.Span.make start stop
+
+/-- An LSP position (0-based line, UTF-16 character) as a span of one unit. -/
+def Source.Span.ofPosition (i : EditorModel.PositionIndex)
+    (p : EditorModel.Position) : Source.Span :=
+  let start := EditorModel.offsetFromPosition i p;
+  Source.Span.mk start (start + 1)
+
+/-- The 0-based line of an offset. -/
+def Source.Span.lineOf (i : EditorModel.PositionIndex) (n : Nat) : Nat :=
+  EditorModel.lineOfOffset i n
+
+/-- The 0-based line and UTF-16 column of an offset. -/
+def Source.Span.positionOf (i : EditorModel.PositionIndex) (n : Nat) : Nat × Nat :=
+  let p := EditorModel.positionFromOffset i n;
+  (p.line, p.character)
+
+/-- The text a span covers. -/
+def Source.Span.text (i : EditorModel.PositionIndex) (s : Source.Span) : String :=
+  EditorModel.slice i (Source.Span.clamp (EditorModel.length i.text) s).start
+    (Source.Span.clamp (EditorModel.length i.text) s).stop
+
+/-- The 1-based `LINE:COL` of an offset, for a route or a label. -/
+def Source.Span.lineColumnText (i : EditorModel.PositionIndex) (n : Nat) : String :=
+  let p := Source.Span.positionOf i n;
+  String.append (Nat.repr (p.1 + 1)) (String.append ":" (Nat.repr (p.2 + 1)))
+
+/-- The 1-based `LINE:COL-LINE:COL` of a span. -/
+def Source.Span.show (i : EditorModel.PositionIndex) (s : Source.Span) : String :=
+  String.append (Source.Span.lineColumnText i s.start)
+    (String.append "-" (Source.Span.lineColumnText i s.stop))
+
+/-- One `LINE:COL` part (1-based) as a pair. -/
+def Source.Span.parseOne (part : String) : Option (Nat × Nat) :=
+  match String.splitOn part ":" with
+  | .cons l (.cons c .nil) => match String.parseNat l, String.parseNat c with
+    | .some ln, .some col => .some (ln, col)
+    | _, _ => .none
+  | _ => .none
+
+/-- A `L:C` or `L:C-L:C` fragment (1-based) as a span. A missing end is a caret. -/
+def Source.Span.parse (i : EditorModel.PositionIndex) (fragment : String) : Option Source.Span :=
+  match String.splitOn fragment "-" with
+  | .cons a .nil => match Source.Span.parseOne a with
+    | .some p => .some (Source.Span.ofOrigin i p.1 p.2 0 0)
+    | .none => .none
+  | .cons a (.cons b _) => match Source.Span.parseOne a, Source.Span.parseOne b with
+    | .some p, .some q => .some (Source.Span.ofOrigin i p.1 p.2 q.1 q.2)
+    | _, _ => .none
+  | _ => .none

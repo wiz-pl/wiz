@@ -18,8 +18,13 @@ namespace __root__
 --            declaration's type),
 --            --trust-native (27a: `def X : a = b := native_refl` is decided by running
 --            a and b; the frontend's `Globals.trustNative`), --trust-smt (C15: the `smt`
---            tactic is refused; there is no solver here), --cc, --llc, --rt, --cflags,
---            --ldflags (the C toolchain for `run`),
+--            tactic is refused; there is no solver here), --cc PATH, --llc PATH, --rt DIR,
+--            --cflags FLAGS, --ldflags FLAGS (the C toolchain for `run`: `--cc` and
+--            `--llc` are one executable each, not a command line — a wrapper script is
+--            the way to add arguments; FLAGS is a whitespace-separated word list, as the
+--            host reads it). Every interpolated component is POSIX-quoted before it goes
+--            into the `system(3)` string, and a program killed by a signal is a failure
+--            (`128 + signal`).
 --            --rc | --rc-owned | --gc | --unbox-structs | --lib | --no-main |
 --            --header (the backend),
 --            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
@@ -131,7 +136,11 @@ extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
 extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
-extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+-- `system(3)` runs the string through `/bin/sh`, so every component is quoted before it
+-- is put in one (`shellQuote` below). Its `int` result is read as `UInt64`: `-1`
+-- (`system` could not start the shell) is 2^64-1 here, which `UInt64.toNat` would refuse
+-- (a `Nat` is 63 bits in the selfhost runtime), and `exitCodeOf` decodes it.
+extern "system" (header := "stdlib.h") cSystem : String → IO UInt64
 -- `--cache-prune` (D5): the host runtime's interfaces (`lib/Sys.wiz`, `Wiz/Cache.lean`);
 -- the selfhost runtime has the same three leaves (a list of `kind, size, mtime, ns,
 -- mode`; the directory's names; the wall clock).
@@ -243,10 +252,6 @@ def joinSpaces : List String → String
   | .cons s rest => match rest with
     | .nil => s
     | .cons _ _ => String.append s (String.append " " (joinSpaces rest))
-
-def spacesOf : List String → String
-  | .nil => ""
-  | .cons s rest => String.append " " (String.append s (spacesOf rest))
 
 def docText : Doc → String
   | .t s => s
@@ -1341,13 +1346,15 @@ def usageText : String :=
   "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" +++
   "  strict: only manifested entries), --target c|llvm (LLVM is a first slice, C5:\n" +++
   "  a closed `main : Nat` lowered to the host's IR; `--llvm` is its alias;\n" +++
-  "  --wasm/--split are the host's and are refused), --llc CMD,\n" +++
+  "  --wasm/--split are the host's and are refused),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" +++
   "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" +++
   "  --native-fuel: the self-hosted evaluator has no step counter),\n" +++
-  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
+  "  --cc PATH, --llc PATH (one executable each, not a command line), --rt DIR (the\n" +++
+  "  selfhost runtime, default selfhost), --cflags FLAGS, --ldflags FLAGS (word\n" +++
+  "  lists, as the host reads them), --trust-smt (the `smt` tactic is refused: no\n" +++
+  "  solver here, C15);\n" +++
   "  backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
@@ -1691,11 +1698,86 @@ def libOf (o : Opts) (p : Prepared) : IO (Option LibText) := do
       | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneLib)
       | .nil => someLib (LibText.mk (cText o p lines) (headerTextOf p)))
 
+-- ------------------------------------------------------------------------------------
+-- Shell quoting and wait status
+--
+-- `system(3)` runs its string through `/bin/sh`, so every component the driver
+-- interpolates — `--cc`, `--llc`, `--rt`, `--cflags`, `--ldflags`, an input or output
+-- path, and the program's own arguments — is quoted with `shellQuote` first: a path or
+-- argument with a space, `;`, `$`, a quote or a newline stays exactly one shell word and
+-- cannot start a second command. The fixed flags (`-O2`, `-w`, `-c`, `-o`, `-I`) are the
+-- driver's own literals and are not quoted. There is no argv-form process call in the
+-- selfhost runtime (`selfhost/rt.c` has no `wiz_sys_spawn`, unlike
+-- `runtime/rt_sys.inc`), and the extern FFI here cannot pass a `char *argv[]`, so a
+-- quoted shell string is the form `system(3)` takes.
+--
+-- POSIX single-quote quoting: everything between the quotes is literal, and an embedded
+-- `'` is closed, escaped and reopened (`'\''`), which is the one character a single-quoted
+-- string cannot hold.
+def shellQuoteBody : List Char → String
+  | .nil => ""
+  | .cons c cs => match Nat.beq (Char.code c) 39 with
+    | .true => String.append "'\\''" (shellQuoteBody cs)
+    | .false => String.append (String.mk (.cons c .nil)) (shellQuoteBody cs)
+
+def shellQuote (s : String) : String :=
+  String.append "'" (String.append (shellQuoteBody (charsOf s)) "'")
+
+-- one quoted shell word per element, each preceded by a space (empty for `.nil`, so a
+-- command never ends in one)
+def quoteAll : List String → String
+  | .nil => ""
+  | .cons s rest => String.append " " (String.append (shellQuote s) (quoteAll rest))
+
+-- `--cflags FLAGS` is a word list, as the host reads it (`Wiz/Toolchain.lean`'s
+-- `words`): one shell word per whitespace-separated flag, then each quoted. So
+-- `--cflags "-I/a -I/b"` stays two flags, and a flag's own `$` or `;` is still literal.
+def isFlagSpace (c : Nat) : Bool := Bool.or (Nat.beq c 32) (Nat.beq c 9)
+
+def wordsGo : List Char → List Char → List String
+  | .nil, acc => match acc with
+    | .nil => .nil
+    | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) .nil
+  | .cons c cs, acc => match isFlagSpace (Char.code c) with
+    | .true => match acc with
+      | .nil => wordsGo cs .nil
+      | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) (wordsGo cs .nil)
+    | .false => wordsGo cs (.cons c acc)
+
+def wordsOf (s : String) : List String := match s with
+  | .mk cs => wordsGo cs .nil
+
+-- the `--cflags`/`--ldflags` values as quoted shell words
+def quoteFlags : List String → String
+  | .nil => ""
+  | .cons s rest => String.append (quoteAll (wordsOf s)) (quoteFlags rest)
+
+-- `system(3)` returns `waitpid`'s status: a program that exited normally leaves its code
+-- in bits 8–15 (`WEXITSTATUS`), and a program killed by a signal has that signal in the
+-- low seven bits (`WIFSIGNALED`/`WTERMSIG`). The old `st / 256` read every such status
+-- (1–127) as exit 0 and reported a killed program as a success. `st` is the `int`
+-- widened to `UInt64`, so C's -1 (the shell could not start) is 2^64-1, which no wait
+-- status reaches; it is the one value above 2^31 here, and both functions read it as
+-- "no status" (`127`, the shell's "not found" code) rather than letting `UInt64.toNat`
+-- refuse 2^64-1.
+def waitSignal (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .true => Nat.land (UInt64.toNat st) 127
+  | .false => 0
+
+def exitCodeOf (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .false => 127
+  | .true => match Nat.beq (waitSignal st) 0 with
+    | .true => Nat.land (Nat.shiftRight (UInt64.toNat st) 8) 255
+    | .false => Nat.add 128 (waitSignal st)
+
 -- the host's `compileC` library path: `cc -O2 -w -c -o OUT OUT.c` with the toolchain's
 -- flags (the self-hosted C includes `rt.c`, so the runtime directory is an include root)
 def objectCommand (o : Opts) (src out : String) : String :=
-  String.append o.cc (String.append " -O2 -w -c -o " (String.append out (String.append " "
-    (String.append src (String.append " -I" (String.append o.rt (spacesOf o.cflags)))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -c -o " (String.append (shellQuote out)
+    (String.append " " (String.append (shellQuote src) (String.append " -I"
+      (String.append (shellQuote o.rt) (quoteFlags o.cflags)))))))
 
 def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
   let cFile := withExtension out "c";
@@ -1709,7 +1791,7 @@ def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
     | .false => do IO.ePrintln (String.append "error: cannot write " hFile); Process.exit 1
     | .true => do
       st ← cSystem (objectCommand o cFile out);
-      match Nat.beq st 0 with
+      match Nat.beq (exitCodeOf st) 0 with
       | .true => IO.pure ()
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append cFile "):"));
@@ -1807,10 +1889,22 @@ def buildCmd (o : Opts) (file : String) : IO Unit :=
 -- run / eval
 
 def ccCommand (o : Opts) (src prog : String) : String :=
-  String.append o.cc (String.append " -O2 -w -I" (String.append o.rt (String.append (spacesOf o.cflags)
-    (String.append " " (String.append src (String.append " -o " (String.append prog (spacesOf o.ldflags))))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -I" (String.append (shellQuote o.rt)
+    (String.append (quoteFlags o.cflags) (String.append " " (String.append (shellQuote src)
+      (String.append " -o " (String.append (shellQuote prog) (quoteFlags o.ldflags))))))))
 
-def exitCodeOf (st : Nat) : Nat := Nat.div st 256
+-- `prog ARG…`, every word quoted: the program's own arguments are data, not shell text
+def programCommand (prog : String) (extra : List String) : String :=
+  String.append (shellQuote prog) (quoteAll extra)
+
+-- how a program's wait status is reported: a signal death (`128 + signal`, as a shell
+-- reports it) says so, so a SIGSEGV is visible as one instead of "exited with code 0"
+def reportProgramStatus (st : UInt64) : IO Unit :=
+  match Nat.beq (waitSignal st) 0 with
+  | .true => IO.ePrintln (String.append "error: the program exited with code "
+      (Nat.toString (exitCodeOf st)))
+  | .false => IO.ePrintln (String.append "error: the program was killed by signal "
+      (Nat.toString (waitSignal st)))
 
 def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List String) : IO Unit := do
   let dir := String.append "/tmp/wiz-selfhost-" key;
@@ -1826,17 +1920,17 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
     let prog := String.append dir "/prog";
     let cmd := ccCommand o src prog;
     st ← cSystem cmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append src "):"));
       IO.ePrintln cmd;
       Process.exit 1
     | .true => do
-      st2 ← cSystem (String.append prog (spacesOf extra));
+      st2 ← cSystem (programCommand prog extra);
       match Nat.beq (exitCodeOf st2) 0 with
       | .true => IO.pure ()
       | .false => do
-        IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
+        reportProgramStatus st2;
         Process.exit 1
 
 -- (C5) Compile the slice's LLVM text with `llc` and `cc` and run it. The module calls
@@ -1855,29 +1949,30 @@ def compileAndRunLLVM (o : Opts) (key : String) (lltext : String) (extra : List 
     | .none => IO.pure ();
     let obj := String.append dir "/main.o";
     let prog := String.append dir "/prog";
-    let llcCmd := String.append o.llc (String.append " -O2 -filetype=obj -relocation-model=pic -o "
-      (String.append obj (String.append " " src)));
+    let llcCmd := String.append (shellQuote o.llc) (String.append " -O2 -filetype=obj -relocation-model=pic -o "
+      (String.append (shellQuote obj) (String.append " " (shellQuote src))));
     st ← cSystem llcCmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: llc failed (the IR is " (String.append src "):"));
       IO.ePrintln llcCmd;
       Process.exit 1
     | .true => do
-      let ccCmd := String.append o.cc (String.append " -O2 -w -o "
-        (String.append prog (String.append " " (String.append obj (spacesOf o.ldflags)))));
+      let ccCmd := String.append (shellQuote o.cc) (String.append " -O2 -w -o "
+        (String.append (shellQuote prog) (String.append " " (String.append (shellQuote obj)
+          (quoteFlags o.ldflags)))));
       st2 ← cSystem ccCmd;
-      match Nat.beq st2 0 with
+      match Nat.beq (exitCodeOf st2) 0 with
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed to link " (String.append obj ":"));
         IO.ePrintln ccCmd;
         Process.exit 1
       | .true => do
-        st3 ← cSystem (String.append prog (spacesOf extra));
+        st3 ← cSystem (programCommand prog extra);
         match Nat.beq (exitCodeOf st3) 0 with
         | .true => IO.pure ()
         | .false => do
-          IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st3)));
+          reportProgramStatus st3;
           Process.exit 1
 
 -- the kept text, compiled and run by the selected backend

@@ -37,9 +37,15 @@ def importsOf (src : String) : List Name := Id.run do
       if !m.isEmpty && !out.contains m then out := out.push m
   pure out.toList
 
-/-- The `import_c "h"` headers of a source text. -/
+/-- The `import_c "h"` headers of a source text.
+
+This is a text scan (F10), so a `import_c "` sequence inside a comment would otherwise be
+read as a directive: `selfhost/Frontend.wiz` documents the syntax in a `--` comment, and
+the header-name check (F09) then rejects the ellipsis it extracted. Skip comment lines. -/
 def headersOf (src : String) : List String :=
-  ((src.splitOn "import_c \"").drop 1).filterMap fun part =>
+  let code := (src.splitOn "\n").filter fun line =>
+    !(line.trimAsciiStart.toString.startsWith "--")
+  ((String.intercalate "\n" code |>.splitOn "import_c \"").drop 1).filterMap fun part =>
     let h := (part.splitOn "\"").headD ""
     if h.isEmpty then none else some h
 

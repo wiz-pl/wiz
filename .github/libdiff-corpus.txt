@@ -1,3 +1,27 @@
+# The files one whole =selfhost-libdiff run compares: every *.wiz under lib/ and scry/,
+# sorted the way Tests/Groups/SelfhostLibDiff.lean's libDiffFiles sorts them.
+# `scripts/check-libdiff-corpus.sh` checks that this list is exactly that walk: every
+# entry is a file, every file is an entry, there are no duplicates, and the order is
+# `LC_ALL=C`. Add or remove a line here in the same change that adds or removes the
+# file under lib/ or scry/. Regenerate with:
+#
+#   find lib scry -name '*.wiz' | LC_ALL=C sort
+#
+# There are no exclusions among lib/ and scry/. The sweep compares acceptance, the first
+# error's code, span and message, and the declaration count; a file the self-hosted
+# frontend cannot parse is a divergence to report, not a reason to drop it from the
+# corpus. A module that genuinely cannot be compared needs its reason here, next to its
+# absence, not silence.
+#
+# NOT swept yet: hdl/src/ (32 modules, hdl/src/Hdl/*.wiz). The harness already takes the
+# root (libDiffRoots has `hdl/src`, libDiffModule knows `Hdl.Core`, and the cover case
+# asserts the root exists and is not walked); adding it to libDiffFiles and the lines
+# below is the whole change. It stays out because all 32 modules diverge today, through
+# the self-hosted frontend's Hdl.Core cluster (`Hdl.indexed`, Core:113) and the bundle
+# deriver; a corpus that is 32/32 diverging measures nothing (see
+# scripts/libdiff-causes.tsv: hdl-core 18, deriver-bundle 5, numeral-term 2, and one
+# each of logic-true, word-equations, hdl-optic, coinductive, exists, hdl-xilinx7;
+# Formal.wiz fails through Hdl.Core). The Hdl gate meanwhile is `=hdl-examples`.
 lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
@@ -80,15 +104,22 @@ lib/Vec.wiz
 lib/Web/DocLive.wiz
 lib/Web/Draft.wiz
 lib/Web/Editor.wiz
+lib/Web/EditorBridge.wiz
 lib/Web/EditorModel.wiz
 lib/Web/Examples.wiz
 lib/Web/Goals.wiz
+lib/Web/Highlight.wiz
 lib/Web/Hover.wiz
 lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
 lib/Web/Search.wiz
 lib/Web/Selfhost.wiz
+lib/Web/Source/Facts.wiz
+lib/Web/Source/Model.wiz
+lib/Web/Source/Span.wiz
+lib/Web/Source/Static.wiz
+lib/Web/Source/View.wiz
 lib/Web/Style.wiz
 lib/Web/Widget.wiz
 lib/Web/Wire.wiz
@@ -175,6 +206,7 @@ scry/src/Scry/Taint.wiz
 scry/src/Scry/TaintCmd.wiz
 scry/src/Scry/TaintExamples.wiz
 scry/src/Scry/UafExamples.wiz
+scry/src/Scry/WebCmd.wiz
 scry/src/Scry/Wil.wiz
 scry/src/Scry/WilExamples.wiz
 scry/src/Scry/Workflow.wiz

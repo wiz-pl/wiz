@@ -9,6 +9,7 @@ import Scry.CstStore
 import Scry.Lower
 import Scry.CsCst
 import Scry.CsLower
+import Scry.CsNull
 import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
@@ -674,7 +675,7 @@ findings use. -/
 def Scry.memoryFindings (origins : Scry.OriginMap) (ws : List Scry.MemWarning) :
     List Scry.BoundaryFinding :=
   List.map (fun w => Scry.BoundaryFinding.mk
-    (String.append "scry/memory/" (Scry.MemWarnKind.show w.kind)) w.detail
+    (Scry.MemWarnKind.ruleId w.kind) w.detail
     w.func w.point (Scry.originAt origins w.func w.point)) ws
 
 -- ## Derivation status
@@ -834,7 +835,7 @@ def Scry.boundaryFields (b : Scry.BoundaryFinding) : List (String × Json) :=
   let loc := match b.origin with
     | .some o => Scry.originJson o
     | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat b.point)];
-  let kindText := match String.startsWith b.rule "scry/memory/" with
+  let kindText := match Scry.memoryRuleId b.rule with
     | .true => "memory"
     | .false => "boundary";
   [ ("rule", Json.mkStr b.rule)
@@ -1070,7 +1071,8 @@ the limits they actually used (`truncated`, `summaryRounds`, `summaryComplete`,
 `budgetNotes`). -/
 def Scry.analyzeLowered (o : Scry.TaintOpts) (startMs : Nat) (text : String)
     (idx : Scry.TextIndex) (cst : Scry.CstStore) (nodes : Nat) (tu : Scry.TU)
-    (pack : Scry.RulePack) (models : Scry.ModelPack) : EIO Scry.TaintReport := do
+    (pack : Scry.RulePack) (models : Scry.ModelPack)
+    (nullTables : Option (Wil.Func → Scry.NullTables)) : EIO Scry.TaintReport := do
   let errs := Scry.CstStore.errorCount cst;
   let prog := Wil.program tu.funcs;
   let pt := Scry.pointsToBounded prog o.maxRounds;
@@ -1108,9 +1110,10 @@ def Scry.analyzeLowered (o : Scry.TaintOpts) (startMs : Nat) (text : String)
   -- The memory analyses are the registry's rows: the model pack is in the input
   -- record, and this call is the only pipeline hook.
   let analyses := Scry.runAnalyses Scry.analyses models pack prog pt results;
-  let nulls : List Scry.MemWarning := match o.nullDeref with
-    | .true => Scry.nullDerefWarnings prog
-    | .false => .nil;
+  let nulls : List Scry.MemWarning := match o.nullDeref, nullTables with
+    | .true, .some tablesOf => Scry.nullDerefWarningsWith prog tablesOf
+    | .true, .none => Scry.nullDerefWarnings prog
+    | .false, _ => .nil;
   let warnings := Scry.dedupWarnings (List.append
     (List.filter (Scry.keepMemWarning hasLifetime)
       (List.append
@@ -1163,7 +1166,7 @@ def Scry.analyzeStore (o : Scry.TaintOpts) (startMs : Nat) (text : String) (idx 
     Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs) ++ " functions, "
       ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
-    Scry.analyzeLowered o startMs text idx cst nodes tu pack o.models
+    Scry.analyzeLowered o startMs text idx cst nodes tu pack o.models .none
 
 /-- The C# pipeline from a parsed store to the report. The lowering reads the
 `Scry.CstStore` directly through `Scry.Cs.ofStore`; it is **not** rendered to a spill and
@@ -1188,6 +1191,7 @@ def Scry.analyzeCsStore (o : Scry.TaintOpts) (startMs : Nat) (text : String)
       ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
     Scry.checkDeadline o startMs "lower";
     Scry.analyzeLowered o startMs text idx cst nodes tu pack Scry.csModels
+      (.some (fun fn => Scry.Cs.nullTablesOf l fn))
 
 /-- Parse a C# file with tree-sitter-c-sharp and run the pipeline on that one store. -/
 def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)

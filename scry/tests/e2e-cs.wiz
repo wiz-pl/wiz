@@ -127,8 +127,20 @@ def main : IO Unit := EIO.toIO (do
     match row j0 "parse failure" with
     | .some r => do
       check "coverage: one parse failure row" (Nat.beq (jNat r ["count"]) 1);
+      -- The row's location is deterministic (`src/Scry/CsCmd.wiz`'s `analyseFile`:
+      -- `rel ++ ":" ++ line ++ ":" ++ col ++ " (" ++ kind ++ ")"`), so pin its shape:
+      -- the file, and the first failing node's kind in parentheses. A
+      -- `startsWith "src/Broken.cs:"` alone accepts a truncated location, and the old
+      -- `== "src/Broken.cs"` was simply wrong (the row has carried a position since
+      -- `e3f27195d`). The line:column digits need a live C# run to pin; the scry
+      -- golden job is where that can be observed.
+      let ex := jStr r ["example"];
       check "coverage: the failed file is named"
-        (String.startsWith (jStr r ["example"]) "src/Broken.cs:")
+        (String.startsWith ex "src/Broken.cs:");
+      check "coverage: the failure names its node kind, not just the path"
+        (Bool.and (String.endsWith ex ")")
+          (Bool.or (String.contains ex " (ERROR)")
+                   (String.contains ex " (MISSING ")))
     | .none => check "coverage: parse failure row exists" .false;
     check "coverage: the exclusion rules are rows"
       (List.all (fun c => match row j0 ("excluded: " ++ c) with

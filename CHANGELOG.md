@@ -16,6 +16,26 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
+  command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
+  paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
+  quote or a newline is one word and cannot start a second command, and `--cc` is
+  documented as one executable. A program killed by a signal is now a failure decoded
+  from the wait status (`WIFSIGNALED`/`WTERMSIG` → `128 + signal`) instead of exit 0
+  (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
+  and a SIGSEGV reported as signal 11).
+
+* compiler: the **C and LLVM backends fail the compile** on a partial application of a
+  function with no known arity and on a jump with no join point in scope, instead of
+  emitting a closure with arity 0 and an assignment-free jump; the C backend's locals
+  are collected in linear time (the old collector appended each join's parameters to the
+  accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
+  as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
+  `=llvm`, `=scaling`.
+* modules: the `import_c` header scan skips `--` comment lines. The scan is textual
+  (F10), so `selfhost/Frontend.wiz` documenting the syntax yielded the header `…`,
+  which the header-name check (F09) rightly rejects; the playground build failed on a
+  comment. Block comments are still scanned (the remaining F10 gap). Tests: `=modules`.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
@@ -96,7 +116,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
   assumption. The non-formal text is byte-identical to `Verilog.emit`, and
   `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
-  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  `hdl/examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
   yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
   finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153

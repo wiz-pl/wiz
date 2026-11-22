@@ -1,6 +1,0 @@
--- [UNRUN] P0 reject fixture: the result must be an action enum.
-import Bpf
-
-bpf_program bad (section := "xdp", type := .xdp, license := "GPL")
-    : XdpContext -> BpfM (UIntN 32)
-  | ctx => BpfM.pure (UIntN.ofNat 32 2)

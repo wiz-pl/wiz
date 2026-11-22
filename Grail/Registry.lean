@@ -188,18 +188,38 @@ def lookupVendor (dir : System.FilePath) (sha256 : String) : IO (Option System.F
       if e.fileName.startsWith (sha256 ++ ".") then return some e.path
   pure none
 
-/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). -/
+/-- The `curl` arguments for a download. `--` ends the options before the URL: a
+registry-supplied URL beginning with `-` must be an address, not a curl option. -/
+def curlArgs (url : String) (dest : System.FilePath) : Array String :=
+  #["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", dest.toString, "--", url]
+
+/-- A downloaded archive must exist and have bytes. `curl -f` fails on an HTTP error, but
+a connection that closes early can still leave a partial (or empty) file, and an empty
+file is never an archive. -/
+def nonEmptyFile (dest : System.FilePath) : IO (Except String Unit) := do
+  if !(← dest.pathExists) then return .error s!"{dest}: the download wrote no file"
+  if (← dest.metadata).byteSize == 0 then
+    return .error s!"{dest}: the download is empty (a truncated or failed transfer)"
+  pure (.ok ())
+
+/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). The
+URL is never allowed to look like an option, and the result must be a non-empty file: a
+failed or truncated transfer is an error, not a cache entry. -/
 def download (url : String) (dest : System.FilePath) : IO (Except String Unit) := do
   if url.startsWith "file://" then
     if let .error e ← copyFile (url.drop 7).toString dest then return .error e
-    return .ok ()
+    return ← nonEmptyFile dest
   if !url.contains "://" then
-    return (← copyFile url dest).map (fun _ => ())
+    match ← copyFile url dest with
+    | .error e => return .error e
+    | .ok () => return ← nonEmptyFile dest
   try
-    let o ← IO.Process.output { cmd := "curl", args :=
-      #["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", dest.toString, url] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"curl {url}: {o.stderr.trimAscii}")
+    let o ← IO.Process.output { cmd := "curl", args := curlArgs url dest }
+    if o.exitCode != 0 then
+      -- do not leave a partial file behind for a later run to pick up
+      if ← dest.pathExists then IO.FS.removeFile dest
+      return .error s!"curl {url}: {o.stderr.trimAscii}"
+    nonEmptyFile dest
   catch e => pure (.error s!"curl: {e}")
 
 where
@@ -210,14 +230,74 @@ where
       pure (.ok ())
     catch e => pure (.error s!"{src}: {e}")
 
-/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. -/
+/-! ## Checking an archive before it is unpacked
+
+The SHA-256 in the lock says *which* bytes are wanted, not that the publisher's archive is
+safe to extract: the publisher chooses the member names and types. A listing pass (`tar
+-t` and `tar -tv`) runs first and refuses a member that is absolute, has a `..` component,
+or is not a regular file or directory (a symlink, hardlink, device or fifo). This is a
+pre-scan, not a path check after extraction, so nothing is written outside `dest` even
+briefly. `--strip-components=1` is not a sanitiser: it can *expose* a `..` that was hidden
+below the stripped component. -/
+
+/-- One member of an archive: its name, and the type character of `tar -tv` (`'-'` a
+regular file, `'d'` a directory). -/
+structure TarMember where
+  name : String
+  kind : Char
+  deriving Repr, BEq, Inhabited
+
+/-- Could `name` be written outside the extraction root? Rejected: an absolute name, and
+any `..` component (the root itself is `.` and stays inside). -/
+def safeMemberName (name : String) : Bool :=
+  !name.startsWith "/" && name != ".." && !(name.splitOn "/").contains ".."
+
+/-- The first unsafe member, described, or `none` when every member is a regular file or
+directory under the extraction root. -/
+def unsafeMember? (members : List TarMember) : Option String :=
+  members.findSome? fun m =>
+    if !safeMemberName m.name then
+      some s!"{repr m.name} would be written outside the extraction directory (an absolute path or a `..` component)"
+    else if m.kind != '-' && m.kind != 'd' then
+      some s!"{repr m.name} is not a regular file or a directory (tar type {repr m.kind}); links, devices and fifos are refused"
+    else none
+
+/-- List `tar`'s members without extracting: the names from `tar -t` and the type
+characters from `tar -tv`, which must line up one for one. -/
+def tarMembers (tar : System.FilePath) : IO (Except String (List TarMember)) := do
+  let listing (verbose : Bool) : IO (Except String (List String)) := do
+    try
+      let args := if verbose then #["-tvzf", tar.toString] else #["-tzf", tar.toString]
+      let o ← IO.Process.output { cmd := "tar", args }
+      if o.exitCode != 0 then return .error s!"tar -t {tar}: {o.stderr.trimAscii}"
+      pure (.ok ((o.stdout.splitOn "\n").filter (· != "")))
+    catch e => pure (.error s!"tar -t: {e}")
+  let names ← listing false
+  let verbose ← listing true
+  match names, verbose with
+  | .ok names, .ok verbose =>
+    if names.length != verbose.length then
+      return .error s!"tar -t {tar}: the name and type listings disagree ({names.length} vs {verbose.length} entries)"
+    pure (.ok (names.zipWith (fun n v => { name := n, kind := (v.toList.head?).getD '?' }) verbose))
+  | .error e, _ => pure (.error e)
+  | _, .error e => pure (.error e)
+
+/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. The archive
+is listed and checked first; a member that could escape `dest` (or is not a file or
+directory) refuses the whole archive, before `tar -x` runs. -/
 def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String Unit) := do
-  try
-    let o ← IO.Process.output { cmd := "tar", args :=
-      #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"tar {tar}: {o.stderr.trimAscii}")
-  catch e => pure (.error s!"tar: {e}")
+  match ← tarMembers tar with
+  | .error e => pure (.error e)
+  | .ok members =>
+    match unsafeMember? members with
+    | some why => pure (.error s!"{tar}: refusing to unpack: {why}")
+    | none =>
+      try
+        let o ← IO.Process.output { cmd := "tar", args :=
+          #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
+        pure (if o.exitCode == 0 then .ok ()
+          else .error s!"tar {tar}: {o.stderr.trimAscii}")
+      catch e => pure (.error s!"tar: {e}")
 
 /-- The tree hash of an archive's contents: unpack into a temporary directory (the same
 `--strip-components=1` layout `fetch` uses) and hash the tree. -/

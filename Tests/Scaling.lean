@@ -857,6 +857,14 @@ def recordEqEta : String :=
   "def tSlow (xs : Trace (Bool × Bits8)) (t : Nat) :\n" ++
   "    Mealy.stateAt spec s0 xs (Nat.succ t) = (spec (Mealy.stateAt spec s0 xs t) (xs t)).1 := rfl\n"
 
+/-- (F25) A body with `n` nested join points, binding `2 n` distinct locals: the shape the
+C backend's local collection walks. -/
+def joinChain (n : Nat) : IR.Body := Id.run do
+  let mut b : IR.Body := .ret 0
+  for i in [0:n] do
+    b := .jdecl i #[2 * i, 2 * i + 1] (.ret 0) b
+  b
+
 def group : Group where
   name := "scaling"
   exercise := "super-linear time and memory"
@@ -886,6 +894,12 @@ def group : Group where
           "def y : N := big.1\n") },
     { name := "a 20000-character string literal is checked and erased in linear time", run := fun _ =>
         longLiteral 20000 60 },
+    -- the C backend collected a body's locals by appending each join's parameters to the
+    -- accumulator and de-duplicating the result as a list: quadratic in the locals (50000
+    -- joins: the old collector took about 30 s here, the linear one about 0.5 s)
+    { name := "a body with 50000 nested joins collects its locals in linear time (F25)", run := fun _ => do
+        let locals ← within 10 2000 fun _ => pure (C.bound (joinChain 50000))
+        checkEq 100000 locals.size },
     -- reuse across `case` (`reuseAcross`) tried a drop it could not pair again from each
     -- enclosing search, and the drop's parts with it: along the chain of projections
     -- that reads a structure's fields without rebuilding it (a bundle's `pack`),
@@ -1209,3 +1223,4 @@ def groups : List Group :=
   []
 
 end Tests.Scaling
+

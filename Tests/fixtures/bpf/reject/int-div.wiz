@@ -1,6 +1,0 @@
--- [UNRUN] P0 reject fixture: every signed division is rejected in P0-P2, and the
--- message names the INT_MIN / -1 edge (SDIV/SMOD are ISA v4).
-import Bpf
-
-def bad (x : IntN 32) : IntN 32 :=
-  IntN.div (IntN.ofNeg 32 2147483648) (IntN.ofNeg 32 1)

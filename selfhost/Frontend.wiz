@@ -10970,6 +10970,95 @@ def alt2 (p q : Syntax) (rhs : Syntax) : Syntax :=
   mkNode "match.alt" (.cons (.atom "|") (.cons (mkNull (.cons p (one q))) (.cons (.atom "=>") (one rhs))))
 def fieldIsProof (np i : Nat) (f : CField) : Bool := match f with
   | .mk _ _ ty _ => isProp empty (eval (dummyEnv (np + i)) ty)
+
+-- (A11, HD8) The reflection view a deriver reads is the prelude's `IndView`
+-- (`lib/Prelude.wiz:538`, the host's `Elab/Reflect.lean:17` shape): the parameters,
+-- constructors and fields, with the parameter types as **syntax**. `Globals.view`
+-- builds it from the already-elaborated `IndInfo`, so a deriver never sees `Tm`.
+--
+-- Two parts of the host's view are not reflected yet: a field's type and a
+-- constructor's result indices are `.missing`/empty, because reflecting them means
+-- printing a `Tm` under its binder names and re-parsing the text (`termSyntax` in the
+-- host), which this frontend does not do. Every deriver reads only the flags below;
+-- the index *count* is kept (`Globals.view`), which is what "indexed families are not
+-- supported" needs.
+--
+-- (The prelude's `ParamView.name`/`kind`/`type`, `FieldView.*` and `IndView.*` are the
+-- accessors; only the builders are here.)
+def binderKindV (b : Syntax) : BinderKind := match strEq (kindOf b) "binder.implicit" with
+  | .true => .implicit
+  | .false => match isInstB b with
+    | .true => .instImplicit
+    | .false => .default
+-- one `ParamView` per name a binder introduces (`(a b : A)` is two)
+def paramViewsGo (k : BinderKind) (t : Syntax) : List String → List ParamView
+  | .nil => .nil
+  | .cons x xs => .cons (.mk x k t) (paramViewsGo k t xs)
+def paramViews : List Syntax → List ParamView
+  | .nil => .nil
+  | .cons b bs =>
+    let t : Syntax := match binderType b with
+      | .some x => x
+      | .none => .missing;
+    List.append (paramViewsGo (binderKindV b) t (binderNames b)) (paramViews bs)
+-- the parameters of a type as the deriver names them (`Derive.paramVars`)
+def paramViewNames : List ParamView → List String
+  | .nil => .nil
+  | .cons p ps => .cons (ParamView.name p) (paramViewNames ps)
+-- a constructor's fields as the view spells them (`impl` is the field's implicit mask)
+def fieldViewOf (np i : Nat) (f : CField) (im : Bool) : FieldView := match f with
+  | .mk n r ty _ => .mk n (match im with
+      | .true => .implicit
+      | .false => .default) .missing r (fieldIsProof np i f)
+def fieldViews (np : Nat) : Nat → List CField → List Bool → List FieldView
+  | _, .nil, _ => .nil
+  | i, .cons f fs, .cons im rest => .cons (fieldViewOf np i f im) (fieldViews np (i + 1) fs rest)
+  | i, .cons f fs, .nil => .cons (fieldViewOf np i f .false) (fieldViews np (i + 1) fs .nil)
+def ctorViews (np : Nat) : List Ctor → List CtorView
+  | .nil => .nil
+  | .cons c cs => match c with
+    | .mk n fs _ _ impl _ => .cons (.mk n (fieldViews np 0 fs impl) .nil) (ctorViews np cs)
+-- the indices as their number: each is a `.missing`-typed anonymous parameter (the host
+-- reflects the real ones; the derivers reject or ignore them for now)
+def idxViews : Nat → List ParamView
+  | .zero => .nil
+  | .succ k => .cons (.mk "i✝" .default .missing) (idxViews k)
+-- (A11) the reflection `MacroM.getInductive` answers with, for `T`: `none` when `T` is
+-- not an inductive type or structure (the host's `inductiveView`), including a member of
+-- a `mutual` block, which the host has no view of either
+def Globals.view (gs : Globals) (T : String) : Option IndView := match Globals.ind gs T with
+  | .none => .none
+  | .some (.mk np _ _ _ _ ctors fixed _ params) => match fixed with
+    | .some _ => .none
+    | .none =>
+      let nidx := match globalTyOf gs T with
+        | .some ty => Nat.sub (piArity ty) np
+        | .none => 0;
+      .some (.mk T .nil (paramViews params) (idxViews nidx) (ctorViews np ctors)
+        (match Globals.structFields gs T with
+          | .some _ => .true
+          | .none => .false))
+
+-- (A11, HD8) The deriver runner. A deriver is the prelude's `Deriver := String →
+-- MacroM (List Syntax)` (`lib/Prelude.wiz:897`), the same interface as the host's: it
+-- asks the elaborator for the type's reflection (`MacroM.getInductive`) and returns the
+-- commands that make the instance. The prelude's `MacroM` is CPS over `Tac`, so running
+-- a deriver is interpreting the `Tac` it builds (the host's `Elab.runMacroTac`) and
+-- answering `getInductive` with `Globals.view`. No new evaluator is involved; a deriver
+-- written in *Wiz source* still needs one (wishful/selfhost-deriving.md 1-3), and this
+-- is the interface it will be run through.
+inductive MOut where
+  | ok (cmds : List Syntax)
+  | err (msg : String)
+partial def runMacroTac (gs : Globals) : Tac → MOut
+  | .result stx => .ok (kids stx)
+  | .fail msg => .err msg
+  | .trace _ next => runMacroTac gs next
+  | .getInductive n k => runMacroTac gs (k (Globals.view gs n))
+  | .done => .ok .nil
+  | _ => .err "the deriver asked for a request the self-hosted runner does not answer yet (only getInductive is served)"
+def runDeriver (f : Deriver) (gs : Globals) (T : String) : MOut :=
+  runMacroTac gs (f T (fun cmds => Tac.result (Syntax.mkNode "null" cmds)))
 def nthBool : List Bool → Nat → Bool
   | .nil, _ => .false
   | .cons b _, .zero => b
@@ -10989,11 +11078,6 @@ def holeVars : Nat → List Bool → List Syntax
   | i, .cons b bs => match b with
     | .true => holeVars (i + 1) bs
     | .false => .cons holeStx (holeVars (i + 1) bs)
-def explicitCount : List Bool → Nat
-  | .nil => 0
-  | .cons b bs => match b with
-    | .true => explicitCount bs
-    | .false => Nat.succ (explicitCount bs)
 -- `Bool.and c₁ (Bool.and c₂ … Bool.true)`
 def andAll : List Syntax → Syntax
   | .nil => identStx "Bool.true"
@@ -11076,38 +11160,67 @@ def deriveBEq (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := mat
             | .true => .err line
             | .false => deriveInstance gs1 C m tapp bs allNames helper
 -- `Inhabited`: the first constructor without recursive or proof fields (there is no
--- `default` proof), at `default` for each explicit field.
-def plainFields (np : Nat) : Nat → List CField → List Q → List Bool → Bool
-  | i, .nil, _, _ => .true
-  | i, .cons f fs, qs, impl => match Bool.or (fieldIsRec f) (fieldIsProof np i f) with
+-- `default` proof), at `Inhabited.default` for each explicit field. This is the first
+-- deriver ported onto the runner: it reads the `IndView` (`Globals.view`) and emits an
+-- `instance` command, exactly as `lib/Deriving.wiz`'s `deriveInhabited` does. The class
+-- and method it names are its own, not the table entry's, as they are in the host (a
+-- class that re-registers `deriveInhabited` would get an `Inhabited` instance there
+-- too); the other four keep the registered class until they are ported.
+def allPlainV : List FieldView → Bool
+  | .nil => .true
+  | .cons f fs => match Bool.or (FieldView.recursive f) (FieldView.proof f) with
     | .true => .false
-    | .false => plainFields np (i + 1) fs qs impl
-def ctorPlain (np : Nat) (c : Ctor) : Bool := match c with
-  | .mk _ fs _ qs impl _ => plainFields np 0 fs qs impl
-def firstPlain (np : Nat) : List Ctor → Option Ctor
+    | .false => allPlainV fs
+def firstPlainV : List CtorView → Option CtorView
   | .nil => .none
-  | .cons c cs => match ctorPlain np c with
+  | .cons c cs => match allPlainV (CtorView.fields c) with
     | .true => .some c
-    | .false => firstPlain np cs
+    | .false => firstPlainV cs
 def defaultArgs (dv : String) : Nat → List Syntax
   | .zero => .nil
   | .succ k => .cons (identStx dv) (defaultArgs dv k)
-def deriveInhabited (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := match info with
-  | .mk np _ I D DI ctors fixed fam params =>
-    match deriveShape gs T np fixed with
-    | .some r => deriveErr C T r
-    | .none => match firstPlain np ctors with
-      | .none => deriveErr C T ("every constructor of " +++ T +++ " is recursive or has a proof field")
-      | .some (.mk cn fs res qs impl _) =>
-        match deriveBinders C params with
+-- the explicit fields (`Derive.explicitVars`: a field at an implicit binder is filled by
+-- the elaborator)
+def explicitFieldsV : List FieldView → Nat
+  | .nil => 0
+  | .cons f fs => match FieldView.kind f with
+    | .default => Nat.succ (explicitFieldsV fs)
+    | _ => explicitFieldsV fs
+-- the parameters as binders (`Derive.instBinder`/`instType`), from the syntax-valued view
+def deriveBinderV1 (C x : String) (k : BinderKind) (ty : Syntax) (i : Nat) : DBuild :=
+  let main := match k with
+    | .instImplicit => binderStx "[" "]" x ty
+    | _ => binderStx "{" "}" x ty;
+  let extra : List Syntax := match k with
+    | .instImplicit => .nil
+    | _ => match strEq (kindOf ty) "term.type" with
+      | .true => .cons (binderStx "[" "]" (deriveInstName i)
+          (mkNode "term.app" (.cons (identStx C) (one (mkNull (one (identStx x))))))) .nil
+      | .false => .nil;
+  let ns : List String := match extra with
+    | .nil => .cons x .nil
+    | .cons _ _ => .cons x (.cons (deriveInstName i) .nil);
+  .mk (.cons main extra) ns (i + 1)
+def deriveBindersVGo (C : String) : Nat → List ParamView → DBuild
+  | i, .nil => .mk .nil .nil i
+  | i, .cons p rest => match deriveBinderV1 C (ParamView.name p) (ParamView.kind p) (ParamView.type p) i with
+    | .mk bs ns i1 => match deriveBindersVGo C i1 rest with
+      | .mk bs' ns' i2 => .mk (List.append bs bs') (List.append ns ns') i2
+def deriveBindersV (C : String) (ps : List ParamView) : DBuild := deriveBindersVGo C 0 ps
+def deriveInhabitedV : Deriver := fun T k => MacroM.getInductive T (fun view =>
+  match view with
+  | .none => MacroM.throw ("not an inductive type or structure: " +++ T) k
+  | .some v => match IndView.indices v with
+    | .cons _ _ => MacroM.throw "indexed families are not supported" k
+    | .nil => match firstPlainV (IndView.ctors v) with
+      | .none => MacroM.throw ("every constructor of " +++ T +++ " is recursive or has a proof field") k
+      | .some c =>
+        let tapp := appIdents T (paramViewNames (IndView.params v));
+        let val := appStx (identStx (T +++ "." +++ CtorView.name c))
+          (defaultArgs "Inhabited.default" (explicitFieldsV (CtorView.fields c)));
+        match deriveBindersV "Inhabited" (IndView.params v) with
         | .mk bs _ _ =>
-          let ps := binderParamNames params;
-          let tapp := appIdents T ps;
-          let val := appStx (identStx (T +++ "." +++ cn)) (defaultArgs (C +++ "." +++ m) (explicitCount impl));
-          match instanceCmd gs (instanceStx bs (appStx (identStx C) (.cons tapp .nil)) m val) with
-          | .mk line gs1 => match stepFailed line with
-            | .true => .err line
-            | .false => .ok gs1 line
+          k (.cons (instanceStx bs (appStx (identStx "Inhabited") (.cons tapp .nil)) "default" val) .nil))
 -- `DecidableEq`: an enumeration (every constructor is a constant) or a
 -- single-constructor record with no recursive field -- a recursive field's comparison
 -- would need the instance being defined (as in `lib/Deriving.wiz`)
@@ -11287,7 +11400,38 @@ def deriveRepr (gs : Globals) (C m T : String) (info : IndInfo) : DerivedR := ma
           | .mk line gs1 => match stepFailed line with
             | .true => .err line
             | .false => deriveInstance gs1 C m tapp bs allNames helper
--- (30b) the dispatch: the deriver the class's entry names, run for `T`
+-- (A11) Elaborate the commands a deriver emitted, in order, and report the last output
+-- line (`deriveEach`'s rule). A deriver emits ordinary `instance`/`def` commands, so
+-- this is the host's `elabExpansion`: the kernel checks the result like hand-written
+-- code, and nothing is trusted. The remaining four derivers emit a `command.defEqns`
+-- and a `command.instance`; a command kind added here later is a runner feature, not a
+-- new deriver.
+def elabDerivedGo : List Syntax → Globals → DerivedR
+  | .nil, gs => .ok gs ""
+  | .cons c cs, gs =>
+    let r : Step := match strEq (kindOf c) "command.instance" with
+      | .true => instanceCmd gs c
+      | .false => match strEq (kindOf c) "command.defEqns" with
+        | .true => defStep gs c .none
+        | .false => errStep gs ("a deriver emitted a " +++ kindOf c +++ " command, which the runner cannot elaborate yet");
+    match r with
+    | .mk line gs1 => match stepFailed line with
+      | .true => .err line
+      | .false => match elabDerivedGo cs gs1 with
+        | .err m => .err m
+        | .ok gs2 line2 => .ok gs2 (match strEq line2 "" with
+          | .true => line
+          | .false => line2)
+-- (A11) The ported `Inhabited`: run the deriver against the view, then elaborate what it
+-- emitted. Its refusal messages are the deriver's reasons, in the host's wrapper shape.
+def deriveInhabitedR (gs : Globals) (C T : String) : DerivedR :=
+  match runDeriver deriveInhabitedV gs T with
+  | .err m => deriveErr C T m
+  | .ok cmds => elabDerivedGo cmds gs
+-- (30b) the dispatch: the deriver the class's entry names, run for `T`. `deriveInhabited`
+-- runs through the `Deriver`/`runDeriver` runner above; the other four are still the
+-- hardcoded functions and are the remaining port (`deriveBEq`, `deriveRepr`,
+-- `deriveDecidableEq`, `deriveCompare`, in `lib/Deriving.wiz`).
 def deriveClassOn (gs : Globals) (C T : String) : DerivedR := match Globals.deriver gs C with
   | .none => .err ("error: no deriver for " +++ C +++ " (register one with `attribute [deriver " +++ C +++ "] f`)")
   | .some f => match deriverKind f with
@@ -11303,7 +11447,7 @@ def deriveClassOn (gs : Globals) (C T : String) : DerivedR := match Globals.deri
           | .some info => match methods with
             | .nil => deriveErr C T "the class has no methods"
             | .cons m _ => match deriverKind f with
-              | .succ (.zero) => deriveInhabited gs C m T info
+              | .succ (.zero) => deriveInhabitedR gs C T
               | .succ (.succ (.zero)) => deriveBEq gs C m T info
               | .succ (.succ (.succ (.zero))) => deriveRepr gs C m T info
               | .succ (.succ (.succ (.succ (.zero)))) => deriveDecidableEq gs C m T info

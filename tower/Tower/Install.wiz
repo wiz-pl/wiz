@@ -235,6 +235,60 @@ def Tower.firstDir (x : String) : List String → EIO (Option String)
     | .true => EIO.pure (.some (Path.join x n))
     | .false => Tower.firstDir x rest
 
+-- ## Checking an archive before it is unpacked (F16)
+
+-- One member of a tarball: its name, and the type character `tar -tv` prints (`-` a
+-- regular file, `d` a directory).
+structure TarMember where
+  name : String
+  kind : String
+
+-- Could `name` be written outside the extraction root? An absolute name and any `..`
+-- component are refused (the root itself is `.` and stays inside).
+def Tower.safeMemberName (name : String) : Bool :=
+  Bool.and (Bool.not (String.startsWith name "/"))
+    (Bool.and (Bool.not (String.eq name ".."))
+      (Bool.not (List.any (fun (c : String) => String.eq c "..") (String.splitOn name "/"))))
+
+-- the members that the paired name and type listings describe (the type is the first
+-- character of a `tar -tv` line: `-` a file, `d` a directory, `l` a symlink, …)
+def Tower.tarMembers : List String → List String → List TarMember
+  | .cons n ns, .cons k ks => TarMember.mk n (String.take 1 k) :> Tower.tarMembers ns ks
+  | _, _ => .nil
+
+-- `tar`'s listing of `file`, one member per line
+def Tower.tarListing (flags file : String) : EIO (List String) := do
+  out ← Tower.run "tar" (flags :> file :> .nil);
+  EIO.pure (List.filter (fun (l : String) => Bool.not (String.isEmpty l)) (String.splitOn out "\n"))
+
+-- The first member that may not be unpacked, described, or `none`: a name that is
+-- absolute or has a `..` component, or a member that is not a regular file or a
+-- directory (a symlink, hardlink, device or fifo).
+def Tower.unsafeMember : List TarMember → Option String
+  | .nil => .none
+  | .cons m rest => match Tower.safeMemberName m.name with
+    | .false => .some ("'" & m.name & "' would be written outside the extraction directory (an absolute path or a `..` component)")
+    | .true => match Bool.or (String.eq m.kind "-") (String.eq m.kind "d") with
+      | .true => Tower.unsafeMember rest
+      | .false => .some ("'" & m.name & "' is not a regular file or a directory (tar type '" & m.kind & "'); links, devices and fifos are refused")
+
+-- Refuse an archive whose members could escape the extraction root, before anything is
+-- extracted: list it with `tar -t` and `tar -tv` (the names and the types, which must line
+-- up one for one) and check each member. The SHA-256 next to a release says which bytes
+-- are wanted, not that the publisher chose safe members, so this runs on every tarball.
+-- This is `Grail/Registry.lean`'s `untar` check (F16), ported: `--strip-components` is not
+-- a sanitiser, because it can expose a `..` hidden below the stripped component.
+def Tower.checkTarball (url file : String) : EIO Unit := do
+  names ← Tower.tarListing "-tzf" file;
+  kinds ← Tower.tarListing "-tvzf" file;
+  (match Nat.beq (List.length names) (List.length kinds) with
+    | .false => EIO.fail (url & ": tar -t: the name and type listings disagree (" &
+        Nat.repr (List.length names) & " vs " & Nat.repr (List.length kinds) & " entries)")
+    | .true => EIO.pure () : EIO Unit);
+  (match Tower.unsafeMember (Tower.tarMembers names kinds) with
+    | .some why => EIO.fail (url & ": refusing to unpack: " & why)
+    | .none => EIO.pure () : EIO Unit)
+
 -- unpack the release tarball of `tag` into `work`; the toolchain directory in it. The
 -- `.sha256` next to it is mandatory (every release publishes one): a missing or
 -- mismatched checksum is an error, never a fallback to the unverified tarball.
@@ -261,6 +315,7 @@ def Tower.releaseFetch (s : Settings) (tag work : String) (missing : String → 
       match String.eq want got with
       | .true => EIO.pure ()
       | .false => EIO.fail (url & ": sha256 " & got & ", expected " & want) : EIO Unit);
+  Tower.checkTarball url file;
   let x := Path.join work "x";
   Tower.createDirAll x;
   o ← Tower.run "tar" ("-xzf" :> file :> "-C" :> x :> .nil);

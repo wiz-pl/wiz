@@ -27,6 +27,19 @@ on:
       - "scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "lib/Web/Source/**"
+      - "lib/Web/Highlight.wiz"
+      - "lib/Web/EditorBridge.wiz"
+      - "lib/Web/Hover.wiz"
+      - "lib/Web/Goals.wiz"
+      - "web/source-ui.wiz"
+      - "web/source-static.js"
+      - "web/source-app.js"
+      - "web/source.css"
+      - "web/source_fixture_gen.wiz"
+      - "web/source_fixture_test.mjs"
+      - "web/source_static_test.mjs"
+      - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   push:
     branches: [master]
@@ -34,6 +47,19 @@ on:
       - "scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "lib/Web/Source/**"
+      - "lib/Web/Highlight.wiz"
+      - "lib/Web/EditorBridge.wiz"
+      - "lib/Web/Hover.wiz"
+      - "lib/Web/Goals.wiz"
+      - "web/source-ui.wiz"
+      - "web/source-static.js"
+      - "web/source-app.js"
+      - "web/source.css"
+      - "web/source_fixture_gen.wiz"
+      - "web/source_fixture_test.mjs"
+      - "web/source_static_test.mjs"
+      - "web/build-source-ui.sh"
       - ".github/workflows/scry.yml"
   workflow_dispatch:
 
@@ -96,6 +122,23 @@ jobs:
           cd scry
           cp ../grail.local.wiz .   # this machine's toolchain, written by the dev shell
           grail build scry
+      - name: The static source reader (`scry web` + the bundle acceptance)
+        # The P0 reader's export path: `scry web` writes the bundle the browser host
+        # serves, and `web/source_static_test.mjs` replays the SSR and every scripted
+        # Loom patch through the real patch applier. The second export must be
+        # byte-identical (`sha256sum data/*.json`): no timestamp, machine or order in
+        # the data. The reader's modules (`lib/Web/Source/**`, `Highlight`, `EditorBridge`,
+        # `Hover`, `Goals`) and the `web/source-*` files are in this workflow's paths, so a
+        # change to the reader's core or host runs this too.
+        run: |
+          out=$(mktemp -d)
+          ./scry/.grail/bin/scry web scry/tests/fixtures/report --out "$out/b"
+          node web/source_static_test.mjs "$out/b"
+          ./scry/.grail/bin/scry web scry/tests/fixtures/report --out "$out/b2"
+          (cd "$out/b" && sha256sum data/*.json) > "$out/h1"
+          (cd "$out/b2" && sha256sum data/*.json) > "$out/h2"
+          diff "$out/h1" "$out/h2"
+          echo "rebuild identical: $(wc -l < "$out/h1") data/*.json files"
       - name: grail test (the *.expected goldens)
         run: |
           cd scry
