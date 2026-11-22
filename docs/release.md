@@ -45,6 +45,25 @@ Each item says what must be true and how to check it.
    package. Also run the tests that CI does not run: the Chromium half of
    `web/test.sh` (leave `WIZ_WEB_NO_BROWSER` unset), `infoview/test.sh`
    and the `nvim` group with a real Neovim.
+7. **The supply-chain artifacts match the tarballs.** Generate both SBOMs and the
+   provenance from the snapshot (release.yml does this for a real run) and run the
+   checks:
+
+   ```sh
+   python3 scripts/test_release_sbom.py -v
+   python3 scripts/release-sbom.py --out dist --root . \
+     --source-manifest dist/wiz-<version>-src.tar.gz.manifest.json \
+     --binary-tarball dist/wiz-x86_64-linux.tar.gz \
+     --channel snapshot --builder-id https://wiz-lang.org/builders/local \
+     --invocation-id local-1 --json
+   ```
+
+   Every SBOM component hash must match the unpacked tarball, the provenance subject
+   digests must match the source tarball, source manifest, source SBOM, binary tarball
+   and binary SBOM, and two runs with the same arguments must be byte-identical. The
+   provenance is SLSA-style, not a hosted SLSA level; `--sign-key` adds the E1 DSSE
+   signature and is optional. Fill `release-manifest.json`'s `supplyChain` object from
+   the generated files.
 
 ## The tagging commit
 
@@ -66,8 +85,12 @@ git push origin vX.Y.Z
 
 The tag push runs release.yml. Its `exercises` job builds the exercise tree. Then
 `tarball` builds and tests the tarball, runs the install smoke test with the tag's name,
-and publishes the release `vX.Y.Z` with `wiz-x86_64-linux.tar.gz` and its `.sha256`.
-The release notes are CHANGELOG.md's section `[X.Y.Z]` plus the install line; the step
+and publishes the release `vX.Y.Z` with `wiz-x86_64-linux.tar.gz`, its `.sha256` and
+`.cdx.json`, the reproducible source tarball `wiz-<version>-src.tar.gz` with its
+`.manifest.json`, `.sha256` and `.cdx.json`, `provenance.intoto.json`, and (when the
+`WIZ_ATTEST_KEY` secret is set) the `.dsse` envelope and detached `.sig`
+([building.md](building.md), "Reproducible source tarball" and "Release SBOM and
+provenance"). The release notes are CHANGELOG.md's section `[X.Y.Z]` plus the install line; the step
 fails if the section is missing. If the release already exists (a re-run), the step
 fails rather than replace its assets. Delete a half-made draft release by hand before
 re-running. The release is not a pre-release.
@@ -78,13 +101,39 @@ Snapshot pruning keeps every snapshot that a `v*` tag points at.
 
 1. `sh scripts/test-release-install.sh --online wiz-x86_64-linux.tar.gz vX.Y.Z`, with the
    tarball downloaded from the release, checks the published URLs too.
-2. On a clean machine (`docker run --rm -it ubuntu:24.04`):
+2. The source tarball reproduces from the tag. Check out the tag and build it twice,
+   then compare with each other and with the published asset:
+
+   ```sh
+   root=$(git rev-parse --show-toplevel)
+   python3 "$root/scripts/source-tarball.py" --root "$root" --out /tmp/src-a --mode git
+   (cd /tmp && python3 "$root/scripts/source-tarball.py" --root "$root" \
+      --out /tmp/src-b --mode git)
+   cmp /tmp/src-a/*.tar.gz /tmp/src-b/*.tar.gz
+   cmp /tmp/src-a/*.cdx.json /tmp/src-b/*.cdx.json
+   sha256sum /tmp/src-a/*.tar.gz
+   ```
+
+   The SHA-256 must equal the published `.sha256` file and the manifest's
+   `tarball.sha256`; both manifests' `tree.sha256` must match; the source SBOM's digest
+   must equal the manifest's `sbom.sha256` and its top component digest must equal the
+   tarball's. A mismatch means the tag was not built from the source it claims (the
+   epoch is the commit's, so it does not depend on the machine).
+
+3. On a clean machine (`docker run --rm -it ubuntu:24.04`):
    `curl -sSfL -o tower-init.sh https://raw.githubusercontent.com/wiz-pl/wiz/vX.Y.Z/scripts/tower-init.sh`,
    check it against the release notes' `sha256sum`, then `sh tower-init.sh vX.Y.Z`.
    Then check that `wiz --version` prints `wiz X.Y.Z (<sha of the tag>)` and that
    `tower default stable` resolves to `vX.Y.Z`. Also run once with Nix:
    `nix run github:wiz-pl/wiz/vX.Y.Z#wiz -- --version`.
-3. Open a PR that sets the version to the next `-dev` (`0.2.0-dev`) in the four places
+
+4. Verify the published supply-chain files: parse both `.cdx.json` files, check the
+   subject digests in `provenance.intoto.json` against the downloaded assets, and if
+   the release has a `.dsse`/`.sig`, verify it with the pinned E1 key fingerprint. The
+   provenance claims the build inputs and outputs; it does not claim a hosted SLSA
+   level.
+
+5. Open a PR that sets the version to the next `-dev` (`0.2.0-dev`) in the four places
    above. If `scripts/tower-init.sh` changed since the last release, update the pinned
    hash in `docs/install.md` and `web/landing/index.html` in the same PR
    (`sha256sum scripts/tower-init.sh`): the install command there fails closed.

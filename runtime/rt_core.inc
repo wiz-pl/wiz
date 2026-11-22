@@ -178,7 +178,31 @@ WIZ_API void wiz_inc(wiz_val v) {
   if (wiz_watch) wiz_watch_log("inc", v, __builtin_return_address(0));
 }
 
-static void wiz_free(wiz_val v);
+/* Freeing is a worklist, not recursion: a long list (or string, which is a list of
+   characters) must not turn its destruction into one call frame per element. A Wasm
+   engine charges those frames against its native stack, not the module's linear stack,
+   so the recursive version trapped in Firefox on a few thousand characters. The
+   self-hosted runtime (`selfhost/rt.c`) already frees from a worklist. */
+static __thread wiz_val *wiz_work;
+static __thread size_t wiz_nwork, wiz_capwork;
+static __thread int wiz_draining;
+
+static void wiz_work_push(wiz_val v) {
+  if (wiz_nwork == wiz_capwork) {
+    wiz_capwork = wiz_capwork ? 2 * wiz_capwork : 1024;
+    wiz_work = (wiz_val *)realloc(wiz_work, wiz_capwork * sizeof(wiz_val));
+    if (!wiz_work) wiz_panic("out of memory");
+  }
+  wiz_work[wiz_nwork++] = v;
+}
+
+static void wiz_free_shell(wiz_val v);
+static void wiz_drain(void) {
+  if (wiz_draining) return; /* a child's `wiz_dec`; the outer loop will free it */
+  wiz_draining = 1;
+  while (wiz_nwork) wiz_free_shell(wiz_work[--wiz_nwork]);
+  wiz_draining = 0;
+}
 
 WIZ_API void wiz_dec(wiz_val v) {
   if (wiz_watch) wiz_watch_log("dec", v, __builtin_return_address(0));
@@ -186,11 +210,11 @@ WIZ_API void wiz_dec(wiz_val v) {
   wiz_hdr *h = (wiz_hdr *)v;
   int64_t rc = WIZ_RC(h);
   if (rc > 1) WIZ_RC_OWNED_DEC(h, rc);
-  else if (rc == 1) wiz_free(v);
-  else if (rc < 0 && WIZ_RC_SHARED_DEC(h) == 0) wiz_free(v);
+  else if (rc == 1) { wiz_work_push(v); wiz_drain(); }
+  else if (rc < 0 && WIZ_RC_SHARED_DEC(h) == 0) { wiz_work_push(v); wiz_drain(); }
 }
 
-static void wiz_free(wiz_val v) {
+static void wiz_free_shell(wiz_val v) {
   wiz_hdr *h = (wiz_hdr *)v;
   if (h->tag == WIZ_TAG_CLO) {
     wiz_clo *c = (wiz_clo *)v;

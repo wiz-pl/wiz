@@ -121,12 +121,21 @@ WIZ_API wiz_val wiz_nat_xor(wiz_val a, wiz_val b) {
   if (WIZ_IS_SCALAR(a) && WIZ_IS_SCALAR(b)) return WIZ_BOX(WIZ_UNBOX(a) ^ WIZ_UNBOX(b));
   return wiz_nat_big_op(WIZ_OP_XOR, a, b);
 }
+/* The result-size bound for the expansive number natives: the same 2^24 bits
+   `Wiz.Compiler.NativeRun.maxBits` uses for the interpreter (Lean's `Nat.pow` panics on
+   exponents from 2^24, so the interpreter refuses them and a compiled program must too).
+   A request above it is a clean `wiz_panic`, never an attempt to allocate 2^24 bits or
+   more (an absurd shift or exponent would otherwise reach GMP and OOM or hang). */
+#define WIZ_NAT_MAX_BITS 16777216
+
 /* `a * 2^n`; a shift by a big number of a nonzero number has no representation */
 WIZ_API wiz_val wiz_nat_shiftLeft(wiz_val a, wiz_val n) {
   if (WIZ_IS_SCALAR(a) && WIZ_UNBOX(a) == 0) { wiz_dec(n); return a; }
   if (!WIZ_IS_SCALAR(n)) wiz_panic("Nat.shiftLeft: the shift is too big");
   uintptr_t k = WIZ_UNBOX(n);
   if (WIZ_IS_SCALAR(a) && k < 62 && WIZ_UNBOX(a) <= (WIZ_MAX_SMALL >> k)) return WIZ_BOX(WIZ_UNBOX(a) << k);
+  /* the interpreter's rule, exactly: a nonzero value shifted by `maxBits` or more */
+  if (k >= WIZ_NAT_MAX_BITS) wiz_panic("Nat.shiftLeft: the result would have more than 16777216 bits");
   mpz_t x;
   wiz_to_mpz(x, a);
   mpz_mul_2exp(x, x, (mp_bitcnt_t)k);
@@ -158,8 +167,18 @@ WIZ_API wiz_val wiz_nat_pow(wiz_val b, wiz_val e) {
       if (__builtin_mul_overflow(r, x, &r) || r > WIZ_MAX_SMALL) break;
     if (i == k) return WIZ_BOX(r);
   }
+  if (k == 0) { wiz_dec(b); return WIZ_BOX(1); } /* a^0 = 1, whatever the base's size */
   mpz_t x;
   wiz_to_mpz(x, b);
+  /* the interpreter's rule, exactly: for a base above 1, refuse when the exponent is
+     `maxBits` or more, or when floor(log2 base) * exponent reaches `maxBits`. The ceiling
+     division keeps the product from overflowing. */
+  if (k >= WIZ_NAT_MAX_BITS ||
+      mpz_sizeinbase(x, 2) - 1 >= (WIZ_NAT_MAX_BITS + k - 1) / k) {
+    mpz_clear(x);
+    wiz_dec(b);
+    wiz_panic("Nat.pow: the result would have more than 16777216 bits");
+  }
   mpz_pow_ui(x, x, (unsigned long)k);
   wiz_dec(b);
   return wiz_big_norm(x);

@@ -45,7 +45,24 @@ def runGroup : Group where
             "def e7 : Nat := ((lem (loop ()), 7) : (0 = 0) × Nat).2\n" ++
             "#eval e1\n#run e1\n#eval e2\n#run e2\n#eval e3\n#run e3\n#eval e4\n#run e4\n" ++
             "#eval e5\n#run e5\n#eval e6\n#run e6\n#eval e7\n#run e7")
-          ["7", "7", "8", "8", "9", "9", "2", "2", "4", "4", "6", "6", "7", "7"] }
+          ["7", "7", "8", "8", "9", "9", "2", "2", "4", "4", "6", "6", "7", "7"] },
+    -- (audit F14) a value the interpreter cannot produce is `stuck` with the reason, not
+    -- a panic (which returns a default value here) and not `◾` in the function position
+    { name := "a global with no code is a stuck value naming it", run := fun _ => do
+        -- (`Tests.Elab.run` shadows `Wiz.run` here)
+        match Wiz.run ({} : Wiz.Code) [] (.global "nowhere") with
+        | .stuck m =>
+          check ((m.splitOn "no code for `nowhere`").length > 1) s!"the reason does not name the global: {m}"
+        | _ => throw (IO.userError "a global with no code did not produce a stuck value") },
+    { name := "applying a non-function is a stuck value, not ◾", run := fun _ => do
+        match Wiz.apply ({} : Wiz.Code) (.nat 7) (.nat 1) with
+        | .stuck m =>
+          check ((m.splitOn "not a function").length > 1) s!"the reason does not say why: {m}"
+        | _ => throw (IO.userError "applying a non-function did not produce a stuck value") },
+    { name := "a stuck function position is not replaced by a new failure", run := fun _ => do
+        match Wiz.apply ({} : Wiz.Code) (.stuck "the real reason") (.nat 1) with
+        | .stuck "the real reason" => pure ()
+        | _ => throw (IO.userError "apply replaced the reason") }
   ]
 
 builtin_initialize registerGroup runGroup

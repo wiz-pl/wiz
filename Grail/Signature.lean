@@ -43,6 +43,14 @@ structure SnapshotEntry where
   version : String
   sha256 : String
   size : Nat := 0
+  /-- (P0) the tree identity the signed entry binds -/
+  tree : String := ""
+  /-- (P0) the release commit the signed entry binds; a tag is never a pin -/
+  commit : String := ""
+  /-- (P0) `Index.entryDigest` over the canonical version node -/
+  entry : String := ""
+  /-- (P0) the yank reason (`""` when live); a yank is a signed state change -/
+  yanked : String := ""
   deriving Repr, Inhabited, BEq
 
 /-- `index/snapshot.sexpr`: the signed state of an index. -/
@@ -88,7 +96,11 @@ def render (s : Snapshot) : String :=
   let field (tag val : String) : Sx := node tag [str val]
   let pkg (e : SnapshotEntry) : Sx :=
     node "package" ([str e.name, str e.version, str e.sha256] ++
-      (if e.size == 0 then [] else [node "size" [nat e.size]]))
+      (if e.size == 0 then [] else [node "size" [nat e.size]]) ++
+      (if e.tree.isEmpty then [] else [node "tree" [str e.tree]]) ++
+      (if e.commit.isEmpty then [] else [node "commit" [str e.commit]]) ++
+      (if e.entry.isEmpty then [] else [node "entry" [str e.entry]]) ++
+      [node "yanked" [str e.yanked]])
   "(snapshot\n  " ++ "\n  ".intercalate
     ([ (field "name" s.name).render,
        (node "seq" [nat s.seq]).render,
@@ -119,14 +131,23 @@ def parse (text : String) : Except String Snapshot := do
       match ys.toList with
       | .a "package" :: .a name :: .a version :: .a sha :: rest =>
         let mut size : Nat := 0
+        let mut tree : String := ""
+        let mut commit : String := ""
+        let mut entry : String := ""
+        let mut yanked : String := ""
         for r in rest do
           match r with
           | .l #[.a "size", .a n] =>
             match n.toNat? with
             | some k => size := k
             | none => throw s!"snapshot.sexpr: size {n} is not a number"
+          | .l #[.a "tree", .a t] => tree := t
+          | .l #[.a "commit", .a c] => commit := c
+          | .l #[.a "entry", .a d] => entry := d
+          | .l #[.a "yanked", .a y] => yanked := y
           | _ => pure ()
-        s := { s with packages := s.packages ++ [{ name, version, sha256 := sha, size }] }
+        s := { s with packages := s.packages ++
+          [{ name, version, sha256 := sha, size, tree, commit, entry, yanked }] }
       | _ => pure ()
     | _ => pure ()
   pure s
@@ -147,6 +168,23 @@ def covers (s : Snapshot) (pkgs : Std.HashMap String IxPackage) : Except String 
       | some e =>
         if e.sha256 != v.sha256 then
           throw s!"the signed snapshot has {name} {ver} sha256 {e.sha256}, the index says {v.sha256}"
+        -- (P0) the entry digest binds every field of the canonical version node. A
+        -- snapshot made before the digest existed still verifies a minimal entry (only
+        -- the archive hash), but never one carrying an extra integrity or naming claim.
+        let digest := Index.entryDigest v
+        if e.entry.isEmpty then
+          let extended := !v.tree.isEmpty || !v.commands.isEmpty || !v.commit.isEmpty ||
+            !v.modules.isEmpty || !v.prefixes.isEmpty || !v.deps.isEmpty
+          if extended then
+            throw s!"the signed snapshot has no entry digest for {name} {ver}; regenerate it with `grail index snapshot` (the signature does not cover its tree, commit, modules or deps)"
+        else if e.entry != digest then
+          throw s!"the signed snapshot has {name} {ver} entry {e.entry}, the index entry digest is {digest} (a field of the entry changed)"
+        if !e.tree.isEmpty && e.tree != v.tree then
+          throw s!"the signed snapshot has {name} {ver} tree {e.tree}, the index says {v.tree}"
+        if !e.commit.isEmpty && e.commit != v.commit then
+          throw s!"the signed snapshot has {name} {ver} commit {e.commit}, the index says {v.commit}"
+        if e.yanked != v.yanked then
+          throw s!"the signed snapshot has {name} {ver} yanked \"{e.yanked}\", the index says \"{v.yanked}\""
   for e in s.packages do
     match pkgs[e.name]? with
     | none => throw s!"the signed snapshot lists {e.name} {e.version}, which is not in the index"
@@ -468,7 +506,9 @@ def ofIndex (root : System.FilePath) (name : String)
         | some md => size := md.byteSize.toNat
         | none => pure ()
       entries := entries ++ [{ name := pname, version := Version.render v.version,
-                               sha256 := v.sha256, size }]
+                               sha256 := v.sha256, size, tree := v.tree,
+                               commit := v.commit, entry := Index.entryDigest v,
+                               yanked := v.yanked }]
   pure { name, seq, updated, key, expires, packages := entries }
 
 /-- The index's name from `registry.sexpr` (empty when there is no such file). -/
@@ -509,6 +549,10 @@ def checkResolved (s : Snapshot) (rs : List Resolved) : Except String Unit := do
     | some e =>
       if e.sha256 != r.sha256 then
         throw s!"{r.name} {ver}: the signed snapshot has sha256 {e.sha256}, the index says {r.sha256}"
+      if !e.tree.isEmpty && e.tree != r.tree then
+        throw s!"{r.name} {ver}: the signed snapshot has tree {e.tree}, the index says {r.tree}"
+      if !e.commit.isEmpty && e.commit != r.commit then
+        throw s!"{r.name} {ver}: the signed snapshot has commit {e.commit}, the index says {r.commit}"
 
 end Snapshot
 

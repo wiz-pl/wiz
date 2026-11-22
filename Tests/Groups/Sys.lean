@@ -353,7 +353,29 @@ def sysGroup : Group where
             "        (fun c o => Child.releaseOwned c o (fun r => IO.pure r));\n" ++
             "  say (ExitStatus.toString s))\n")]
         linkRun files "exit code 0\n"
-        linkRun files "exit code 0\n" (llvm := true) }
+        linkRun files "exit code 0\n" (llvm := true) },
+    -- (audit F17) `FS.removeAll` opens each entry with `O_DIRECTORY | O_NOFOLLOW` and
+    -- walks from that descriptor, so a link is removed as a link and the tree it points
+    -- at is never entered. Deterministic form of the lstat→opendir race: a path naming a
+    -- link with a trailing slash (which the OS resolves for `lstat`/`opendir`) must still
+    -- remove only the link.
+    { name := "FS.removeAll: a link is refused, not followed into another tree", run := fun _ =>
+        sysRun ["d ← FS.createTempDir",
+          "FS.createDir (Path.join d \"outside\")",
+          "FS.writeFile (Path.join d \"outside/keep\") \"kept\"",
+          "FS.symlink (Path.join d \"outside\") (Path.join d \"link\")",
+          "FS.removeAll (String.append (Path.join d \"link\") \"/\")",
+          "k ← EIO.lift (FS.exists (Path.join d \"outside/keep\"))", "say (yesNo k)",
+          "l ← EIO.lift (FS.exists (Path.join d \"link\"))", "say (yesNo l)",
+          "FS.createDir (Path.join d \"tree\")",
+          "FS.createDir (Path.join d \"tree/sub\")",
+          "FS.writeFile (Path.join d \"tree/sub/file\") \"f\"",
+          "FS.symlink (Path.join d \"outside\") (Path.join d \"tree/sub/link\")",
+          "FS.removeAll (Path.join d \"tree\")",
+          "k2 ← EIO.lift (FS.exists (Path.join d \"outside/keep\"))", "say (yesNo k2)",
+          "t ← EIO.lift (FS.exists (Path.join d \"tree\"))", "say (yesNo t)",
+          "FS.removeAll d"]
+          "yes\nno\nyes\nno\n" sysShow }
   ] ++ sysBytesCases
 
 builtin_initialize registerGroup sysGroup

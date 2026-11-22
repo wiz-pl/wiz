@@ -76,6 +76,7 @@
       "=grail-commands",
       "=grail-deps",
       "=grail-e2e",
+      "=attest",
       "=grail-hygiene",
       "=grail-index",
       "=grail-jobs",

@@ -820,8 +820,8 @@ are the package's module names (from `archiveModules`), recorded so the resolver
 refuse two packages that would collide at `import` (R32). `size`, `tree` and `commands`
 are the v3 integrity fields (R19/R20/R36). -/
 def publishEntry (pkg : Package) (source sha : String) (modules : List String := [])
-    (size : Option Nat := none) (tree : String := "") (commands : String := "") :
-    Except String IxVersion := do
+    (size : Option Nat := none) (tree : String := "") (commands : String := "")
+    (commit : String := "") : Except String IxVersion := do
   if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
   if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
   let v ← Version.parse pkg.version
@@ -832,6 +832,11 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
   if !tree.isEmpty && !isSha256 tree then throw s!"tree {tree}: expected 64 lowercase hex digits"
   if !commands.isEmpty && !isSha256 commands then
     throw s!"command digest {commands}: expected 64 lowercase hex digits"
+  if !commit.isEmpty then
+    let hex (s : String) : Bool := s.toList.all fun c =>
+      ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')
+    unless (commit.length == 40 || commit.length == 64) && hex commit do
+      throw s!"commit {commit}: expected a 40- or 64-digit lowercase hex git commit (a tag is not a pin)"
   if !pkg.toolchain.isEmpty then
     if let .error e := Requirement.parse pkg.toolchain then
       throw s!"Package.toolchain {pkg.toolchain}: {e}"
@@ -839,7 +844,7 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
     if let .error e := Requirement.parse r.req then
       throw s!"Package.require {r.name} {r.req}: {e}"
   pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules,
-         size, tree, commands, deps := pkg.requires }
+         size, tree, commands, commit, deps := pkg.requires }
 
 /-- The members of a `.tar.gz` (`tar -tzf`), one path per line. -/
 def archiveMembers (archive : System.FilePath) : IO (Except String (List String)) := do
@@ -888,8 +893,8 @@ def checkArchiveLayout (archive : System.FilePath) (name version : String) : IO 
 /-- `grail publish ARCHIVE --source URL`: hash the release archive and print the index
 entry, after checking the manifest and the archive layout. Printing (not writing) is the
 MVP: publishing is a reviewed pull request to the index repository. -/
-def publish (archive : Option System.FilePath) (source : String) (pkg : Package) :
-    IO (Except String String) := do
+def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
+    (commit : String := "") : IO (Except String String) := do
   let some ar := archive | return .error "usage: grail publish ARCHIVE --source URL"
   unless ← ar.pathExists do return .error s!"{ar}: no such archive"
   if let .error e ← checkArchiveLayout ar pkg.name pkg.version then return .error e
@@ -905,7 +910,7 @@ def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
       | .error e => return .error e
       | .ok h => pure h
     let commands := commandDigest pkg.targets
-    match publishEntry pkg source sha modules size tree commands with
+    match publishEntry pkg source sha modules size tree commands commit with
     | .error e => pure (.error e)
     | .ok v => pure (.ok (Index.renderVersion v))
 
