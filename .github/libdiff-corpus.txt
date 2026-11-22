@@ -27,7 +27,11 @@ lib/Data/PMap.wiz
 lib/Data/Result.wiz
 lib/Data/WordBytes.wiz
 lib/Deriving.wiz
+lib/Dist/Bridge.wiz
 lib/Dist/Checker.wiz
+lib/Dist/Fairness.wiz
+lib/Dist/Leader.wiz
+lib/Dist/Refine.wiz
 lib/Dist/TwoPhase.wiz
 lib/Dist/TwoPhaseFinite.wiz
 lib/Eff.wiz
