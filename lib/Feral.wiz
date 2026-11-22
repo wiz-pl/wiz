@@ -2603,11 +2603,15 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
         let lens := Fe.the String (match Fe.head sty with
           | .some (sn, _) => sn +++ "." +++ zf +++ "L"
           | .none => "_");
-        let z2 := Fe.Out.s "Uniq.zoom (S := " ⊕ Fe.Out.t sty ⊕ Fe.Out.s ") (X := " ⊕ Fe.Out.t zt
-          ⊕ Fe.Out.s ") (B := " ⊕ Fe.Out.t bty ⊕ Fe.Out.s ")";
         (match thrN with
-        | .nil => z2 ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " ")
-        | _ => z2 ⊕ Fe.Out.s " (H := " ⊕ hty ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "))
+        | .nil =>
+          Fe.Out.s "Uniq.zoom (S := " ⊕ Fe.Out.t sty ⊕ Fe.Out.s ") (X := " ⊕ Fe.Out.t zt
+            ⊕ Fe.Out.s ") (B := " ⊕ Fe.Out.t bty ⊕ Fe.Out.s ")"
+            ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " ")
+        | _ =>
+          Fe.Out.s "Uniq.zoomIn (S := " ⊕ Fe.Out.t sty ⊕ Fe.Out.s ") (X := " ⊕ Fe.Out.t zt
+            ⊕ Fe.Out.s ") (B := " ⊕ Fe.Out.t bty ⊕ Fe.Out.s ") (H := " ⊕ hty
+            ⊕ Fe.Out.s (") " +++ lens +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "))
       | _, _, .nil => Fe.scopeNamed2 sty bty "Uniq.reborrow"
           ⊕ Fe.Out.s (" " +++ rq.lender +++ " ")
       | _, _, _ => Fe.scopeNamed3 sty bty hty "Uniq.reborrowIn"
