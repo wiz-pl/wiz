@@ -471,7 +471,7 @@ def Scry.budgetNotesOfResults (results : List Json) : List Scry.BudgetNote :=
 
 /-- The result objects for these findings, with `primaryLocationLineHash` from `at` when
 it knows the primary line. -/
-def Scry.resultsWith (m : Scry.OriginMap) (pack : Scry.RulePack)
+def Scry.sarifResultsWith (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.SarifFinding) (at : Scry.LineTextAt) : List Json :=
   List.map (fun r => Scry.resultJsonFullLine m pack r.finding r.checked r.baseline
     (Scry.findingLineText m at r.finding)) findings
@@ -482,7 +482,7 @@ def Scry.sarifWithBaselinesLineNotes (tool : String) (m : Scry.OriginMap)
     (pack : Scry.RulePack) (findings : List Scry.SarifFinding) (extra : List Json)
     (at : Scry.LineTextAt) (notes : List Scry.BudgetNote) : Json :=
   Scry.sarifLogWithNotes tool pack .nil
-    (List.append (Scry.resultsWith m pack findings at) extra) notes
+    (List.append (Scry.sarifResultsWith m pack findings at) extra) notes
 
 /-- The SARIF log for findings with their derivation status, plus extra results
 (boundary warnings). A `scry/budget/*` extra result is promoted to a run-level
@@ -490,7 +490,7 @@ notification, so this existing call shape cannot emit a truncated run that looks
 complete. `tool` names the driver ("scry"). -/
 def Scry.sarifWithBaselines (tool : String) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (findings : List Scry.SarifFinding) (extra : List Json) : Json :=
-  let results := List.append (Scry.resultsWith m pack findings Scry.noLineText) extra;
+  let results := List.append (Scry.sarifResultsWith m pack findings Scry.noLineText) extra;
   Scry.sarifLogWithNotes tool pack .nil results (Scry.budgetNotesOfResults results)
 
 /-- `sarifWithBaselines` with explicit budget notes (the `EvalOutcome` path). -/
