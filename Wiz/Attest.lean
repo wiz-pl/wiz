@@ -265,22 +265,22 @@ def subjectDigest (st : Json) : Option (String × String) := do
 /-- The generated files beside the output (`.c`, `.h`, `.ll`, a split's units). -/
 def byproductsOf (out : FilePath) (lib : Bool) (split : Nat) : IO (List (String × String)) := do
   let base := out.parent.getD "."
-  let mut files : List FilePath := []
+  let mut files : Array FilePath := #[]
   let mut cands := [out.withExtension "c", out.withExtension "ll"]
   if lib then cands := cands ++ [out.withExtension "h"]
   for f in cands do
-    if ← f.pathExists then files := files ++ [f]
+    if ← f.pathExists then files := files.push f
   if split ≥ 2 then
     let dir := base / ((out.fileName.getD "wiz") ++ ".split")
     if ← dir.isDir then
       for e in ← dir.readDir do
         if e.path.extension == some "c" || e.path.extension == some "h" then
-          files := files ++ [e.path]
-  let mut out : List (String × String) := []
-  for f in files do
+          files := files.push e.path
+  let mut out : Array (String × String) := #[]
+  for f in files.toList do
     let name ← portablePath base f
-    if let some h ← digestFile f then out := out ++ [(name, h)]
-  pure out
+    if let some h ← digestFile f then out := out.push (name, h)
+  pure out.toList
 
 /-- Write a build attestation for `out` to `attestPath`. `source` is the path as the
 user gave it; the input manifest hashes that file, every module `wiz build` loaded
@@ -297,20 +297,20 @@ def emit (tc : Toolchain) (source : String) (out : FilePath)
     let closure ← Module.loadClosure roots text
     let dir := (FilePath.mk source).parent.getD "."
     -- the manifest: the root file, the modules it reaches, and the link_c files
-    let mut inputs : List Input :=
-      [{ role := "source", path := source, sha256 := Wiz.Smt.Sha256.hex text }]
+    let mut inputs : Array Input :=
+      #[{ role := "source", path := source, sha256 := Wiz.Smt.Sha256.hex text }]
     for (n, _, src) in closure.toList do
-      inputs := inputs ++ [{ role := "module", name := n, sha256 := Wiz.Smt.Sha256.hex src }]
+      inputs := inputs.push { role := "module", name := n, sha256 := Wiz.Smt.Sha256.hex src }
     let linkC ← Module.cSourceTable dir text closure
     for (_, p) in linkC.toList do
       let f := FilePath.mk p
       if let some h ← digestFile f then
-        inputs := inputs ++ [{ role := "link-c", path := ← portablePath (← IO.currentDir) f, sha256 := h }]
-    let entries := inputs.toArray.qsort (fun a b => a.lt b) |>.toList
+        inputs := inputs.push { role := "link-c", path := ← portablePath (← IO.currentDir) f, sha256 := h }
+    let entries := inputs.qsort (fun a b => a.lt b) |>.toList
     -- the headers the file and its modules import (names only: the preprocessed text is
     -- the C compiler's, and hashing it would make the statement cc-version-specific)
     let headers := (Module.headersOf text ++ closure.toList.flatMap fun (_, _, s) => Module.headersOf s)
-      |>.eraseDups |>.toArray.qsort (· < ·) |>.toList
+      |>.eraseDups |>.toArray.qsort (· < ·) |>.toList   -- complexity: ok (header names only, bounded by the module closure, sorted after)
     let head ← digestFile out
     let some outDigest := head | return .error s!"the output {out} does not exist"
     let wizExe ← try IO.appPath catch _ => pure (FilePath.mk "wiz")

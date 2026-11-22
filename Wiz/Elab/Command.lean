@@ -2935,9 +2935,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | none => pure ()
       | some n =>
         match Lint.Capability.ofKey? n with
-        | some c => caps := caps ++ [c]
+        | some c => caps := c :: caps
         | none => report .error stx.info s!"unknown lint capability '{n}'"
-    modify fun s => { s with lintSetDecl := { s.lintSetDecl with name, abi, capabilities := caps } }
+    modify fun s => { s with lintSetDecl := { s.lintSetDecl with name, abi, capabilities := caps.reverse } }
   | "command.lint" =>
     -- (P1) one rule of a package lint set:
     -- `lint W501 "no-raw-path" api warning declaration [decl, spans] noRawPath`
@@ -2961,7 +2961,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | none => pure ()
       | some n =>
         match Lint.Capability.ofKey? n with
-        | some c => caps := caps ++ [c]
+        | some c => caps := c :: caps
         | none => report .error stx.info s!"unknown lint capability '{n}'"
     -- the runner must be declared before the `lint` command (the loader looks it up in
     -- this module's globals; a later definition would not be found)
@@ -2971,7 +2971,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     if s.globals.find? runner |>.isNone then
       report .error runnerStx.info s!"the lint rule {code} names '{runnerName}', which is not declared above it"
     let rule : LintRuleDecl := { code, name, category, defaultSeverity, scope,
-                                 requires := caps, runner }
+                                 requires := caps.reverse, runner }
     modify fun s => { s with lintSetDecl := { s.lintSetDecl with rules := s.lintSetDecl.rules.push rule } }
   | "command.printAxioms" =>
     let nStx := cmd.getArg 2
