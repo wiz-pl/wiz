@@ -10,6 +10,29 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* hdl: the **sized signal surface** (`lib/Hdl/Signal.wiz`): `Signal.fix`, `mapS`,
+  `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
+  sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
+  are reported (a size-keeping register, a same-size recursive copattern); `Hdl.Signal`
+  contributes no trust sources (the ledger is 864/864). Tests: `=hdl-signal` 9/9,
+  `=hdl` 32/0, `=copatterns` 18/18, `=sized` 7/7.
+* web: the site now installs **`wiz-playground-ui.wasm`** with its `.mjs` (the page
+  aborted fetching it: "both async and sync fetching of the wasm failed"), and
+  `mount` resolves a page's loader namespace (`() => import("./…-ui.mjs")`) to its
+  `default` factory instead of calling the loader as the factory (the "does not export
+  wiz_loom_init/html/step" start failure). Tests: `web/framework/mount_test.mjs`, the
+  site fixture in `web/test-bench.sh`.
+* kernel: `Globals.builtins` is **indexed by key and name** (three maps beside the
+  ordered list). Writes go through `setBuiltins`/`addBuiltin`/`addBuiltinBack`, so a
+  record update cannot leave the index stale; the cache format is unchanged and replay
+  rebuilds it. Structure-only in measured wall time; the win is that key/name lookups no
+  longer scan every registration. Tests: `=language`/`=elab`/`=elabfix`/`=selfhost-host`.
+* distributed: **temporal/LTS core and 2PC safety**. `lib/Temporal.wiz` (an `LTS`, its
+  runs, enabled/taken/invariants/safety-during/bounded), `lib/Dist/Checker.wiz` (a BFS
+  reachability checker with soundness for `ok` and `bad`), and `lib/Dist/TwoPhase.wiz`
+  (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
+  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (5/0).
+
 * elab: a named `match h : e` inside a definition whose result is an equation keeps the
   equation as written while its branches are checked. The declared type used to be
   evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
