@@ -111,6 +111,8 @@ lib/Web/Examples.wiz
 lib/Web/Goals.wiz
 lib/Web/Highlight.wiz
 lib/Web/Hover.wiz
+lib/Web/InfoPanel.wiz
+lib/Web/InfoTree.wiz
 lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
@@ -240,6 +242,7 @@ scry/tests/repl-prelude.wiz
 scry/tests/repl.wiz
 scry/tests/report-pure.wiz
 scry/tests/report.wiz
+scry/tests/sarif-contract.wiz
 scry/tests/sarif-id.wiz
 scry/tests/scale.wiz
 scry/tests/schema-index.wiz
