@@ -27,6 +27,9 @@ lib/Data/PMap.wiz
 lib/Data/Result.wiz
 lib/Data/WordBytes.wiz
 lib/Deriving.wiz
+lib/Dist/Checker.wiz
+lib/Dist/TwoPhase.wiz
+lib/Dist/TwoPhaseFinite.wiz
 lib/Eff.wiz
 lib/EffHeap.wiz
 lib/Encoding.wiz
@@ -102,6 +105,7 @@ lib/Std.wiz
 lib/Sys.wiz
 lib/Tagged.wiz
 lib/Task.wiz
+lib/Temporal.wiz
 lib/Text.wiz
 lib/Trace.wiz
 lib/Vec.wiz
