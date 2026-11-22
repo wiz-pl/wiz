@@ -174,6 +174,9 @@ export LEAN_NUM_THREADS="${WIZ_RELEASE_JOBS:-4}"
 t0=$(date +%s)
 lake build wiz grail
 echo "build seconds: $(( $(date +%s) - t0 ))"
+# Lean's include path is for lake's C link; grail's tower link uses the C compiler's
+# own headers, and a Nix gcc wrapper finds them only with a clean C_INCLUDE_PATH
+unset C_INCLUDE_PATH
 flags=
 if [ -f grail.local.wiz ]; then
   flags=$(awk -F'"' '/Settings.set "(cflags|ldflags|gc-cflags|gc-ldflags|llc)"/ { printf " --%s \"%s\"", $2, $4 }' grail.local.wiz)
@@ -366,33 +369,59 @@ got=$(cut -d' ' -f1 "$a.sha256")
 grep -q "  $name.tar.gz\$" "$a.sha256" || fail "$a.sha256 does not name $name.tar.gz"
 
 # --- absolute paths in the members ---------------------------------------------------
+# Every member is scanned as bytes (so an ELF's strings are covered), and the text
+# members are also scanned for the caller's $HOME and for the tool input directories
+# --cc/--web/--bindir. sysroot/usr/include/*.h is text: GMP's gmp.h records __GMP_CC,
+# which used to be the absolute $out/bin/cc and so leaked the bundle directory into a
+# header the release promises is path-free.
 if [ "$leak_scan" = yes ]; then
   python3 - "$a" "$work/a/repo" "$work/b/repo" "$work/a/home" "$work/b/home" \
-    "$work/a/tmp" "$work/b/tmp" "$strict" <<'PY'
-import sys, tarfile
+    "$work/a/tmp" "$work/b/tmp" "$strict" "$ccdir" "$webdir" "$bindir" \
+    "$real_home" <<'PY'
+import re, sys, tarfile
 
 path = sys.argv[1]
-patterns = sys.argv[2:8]
+patterns = [p for p in sys.argv[2:8] if p]
 strict = sys.argv[8] == "yes"
+ccdir, webdir, bindir, home = sys.argv[9], sys.argv[10], sys.argv[11], sys.argv[12]
+tools = [p for p in (ccdir, webdir, bindir) if p]
+text_suffixes = (".h", ".hpp", ".c", ".inc", ".lean", ".wiz", ".txt", ".md", ".json",
+                 ".mjs", ".js", ".css", ".html", ".py", ".sh", ".toml", ".lock")
+text_names = {"LICENSE", "NOTICE", "REVISION", "TOOLCHAIN", "VERSIONS",
+              "COPYING.RUNTIME"}
 tf = tarfile.open(path, "r:gz")
 hits = 0
+
+
+def hit(message):
+    global hits
+    print(f"release-tarball test: {message}", file=sys.stderr)
+    hits += 1
+
+
 for m in tf.getmembers():
     if not m.isfile():
         continue
     data = tf.extractfile(m).read()
-    for p in patterns:
+    for p in patterns + tools:
         if p.encode() in data:
-            print(f"release-tarball test: {m.name} contains the build path {p}",
-                  file=sys.stderr)
-            hits += 1
+            hit(f"{m.name} contains the build path {p}")
+    base = m.name.rsplit("/", 1)[-1]
+    is_text = m.name.lower().endswith(text_suffixes) or base in text_names
+    if home and is_text and home.encode() in data:
+        hit(f"{m.name} is text and contains $HOME ({home})")
+    if m.name.endswith("/sysroot/usr/include/gmp.h"):
+        mm = re.search(rb'^#define\s+__GMP_CC\s+"([^"]*)"', data, re.M)
+        if mm and mm.group(1).startswith(b"/"):
+            hit(f"{m.name}: __GMP_CC is the absolute path "
+                f"{mm.group(1).decode(errors='replace')} (it must be \"cc\")")
     if strict and b"/nix/store" in data:
-        print(f"release-tarball test: {m.name} contains a /nix/store path",
-              file=sys.stderr)
-        hits += 1
+        hit(f"{m.name} contains a /nix/store path")
 if hits:
     sys.exit(1)
-print("ok: no member contains a build root, $HOME or $TMPDIR"
-      + (" or /nix/store" if strict else ""))
+print("ok: no member contains a build root, tool input or /tmp path"
+      + (", text $HOME" if home else "")
+      + (", or /nix/store" if strict else ""))
 PY
 fi
 
