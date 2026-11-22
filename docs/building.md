@@ -179,6 +179,14 @@ and measure nothing. The corpus header records that reason (and the per-file cau
 the change once the frontend accepts the cluster. Until then `=hdl-examples` is the Hdl
 gate.
 
+The sweep compares the **elaborated types** (one canonical `name : type` line per
+declaration and info message), not only the declaration count, and it **ratchets**
+against `Tests/libdiff-baseline.tsv` (`gen-libdiff-baseline.py` regenerates it from the
+checked-in classification; all 239 rows are frozen, including the pending `hdl/src`
+ones): a file the baseline calls `ok` may not become `diverging`, `rejected` or
+`bounded`. The listed gaps may be fixed or reclassified; the run's report is written
+before the ratchet fails, so a red part still says which file moved.
+
 ### Flaky tests and the quarantine
 
 A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`

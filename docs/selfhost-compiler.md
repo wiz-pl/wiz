@@ -67,6 +67,9 @@ a reference-counting compiler instead of a garbage-collected one (stage 21g–21
 the CI job declares that and runs nightly on the heavy runner
 (`.github/workflows/fixpoint.yml`), with a weekly `fixpoint` job on `ubuntu-latest` as
 the fallback (`.github/workflows/ci.yml`). It is not part of the pull-request suite.
+The nightly job skips cleanly when `WIZ_RUNNER_HEAVY` is unset, and the weekly job is
+not part of `CI result`: "checked on every relevant build" would overclaim, so the
+exact schedule is what this page says.
 
 The bootstrap is why the numbers in stage 21 matter: the self-hosted compiler is a few
 thousand lines of Wiz that produce tens of thousands of lines of C, and stage 2 runs
@@ -82,18 +85,27 @@ Parity is **measured agreement on named observable surfaces**, not a proof:
   (`scripts/fixpoint.sh`).
 * **Library parity** (`=selfhost-libdiff`) runs both frontends over every `*.wiz` under
   `lib/` and `scry/` and compares acceptance, the first error's code, its span (file,
-  line, column), its whitespace-normalised message, and the number of declarations
-  produced for that file. It reports the first divergence, grouped by the construct the
-  self-hosted frontend lacks (`by`, `syntax`, `namespace`, …). **It never fails because
-  of a gap: it measures** (`Tests/Groups/SelfhostLibDiff.lean`).
+  line, column), its whitespace-normalised message, and the **elaborated types** (one
+  `name : type` line per declaration and info message, canonicalised; the declaration
+  count is kept as a cheap pre-check). It reports the first divergence, grouped by the
+  construct the self-hosted frontend lacks (`by`, `syntax`, `namespace`, …). It also
+  **ratchets** against the checked-in classification (`Tests/libdiff-baseline.tsv`): a
+  file classified `ok` may not become `diverging`, `rejected` or `bounded`; the other
+  listed gaps may be fixed or reclassified, and a corpus file newer than the
+  classification is measured and reported as unclassified
+  (`Tests/Groups/SelfhostLibDiff.lean`).
 * **CLI parity** (`=selfhost-cli-diff`) runs both toolchains over the same input tree in
   a fresh directory and compares the exit code, standard output, standard error, cache
   entries and artifacts — the things a user sees (`Tests/Groups/SelfhostCliDiff.lean`).
 * **The selfhost group** checks the driver's own promises (`Tests/Groups/SelfhostCli.lean`).
 
 A pass therefore means: on the cases and files in those groups, the two toolchains
-agree. It does not mean the self-hosted toolchain accepts every program the Lean one
-does, or that where both accept, the results are semantically identical.
+agree — including the elaborated types where both accept — and the library sweep has not
+regressed against its checked-in baseline. It does not mean the self-hosted toolchain
+accepts every program the Lean one does, or that where both accept, the results are
+semantically identical: a type comparison is a much sharper oracle than a declaration
+count, but it is still a comparison of printed forms, not a proof of denotational
+equality.
 
 ## What parity does not mean
 
@@ -134,10 +146,35 @@ The gaps are documented, tracked and ordinary:
   text while `lib/Prelude.wiz` is the library's; the duplication is a known drift risk
   (`docs/notes/dogfood-new-features.md`, W7).
 
-So "self-hosted" means the toolchain can check and compile itself, and that this is
-checked on every relevant build; it does not mean the two frontends are interchangeable
-yet. The list above is the honest boundary, and the sweeps that produce it are the way
-to move it.
+So "self-hosted" means the toolchain can check and compile itself, and that the fixpoint
+is checked by the nightly chain and fixpoint jobs (not on every pull request); it does
+not mean the two frontends are interchangeable yet. The list above is the honest
+boundary, and the sweeps that produce it are the way to move it.
+
+## What "credible bootstrap" means
+
+"Credible bootstrap" is four separately-claimed properties — reproducibility for a
+pinned toolchain, the three-stage byte fixpoint, diverse double compilation of `seed.c`
+through two C compilers, and no Lean in the path after the root — with the evidence and
+the open requirements for each in [the chain page](bootstrap-chain.md#what-credible-bootstrap-claims).
+Three consequences for this page: the fixpoint is claim 2, not correctness; the chain's
+cross mode is convergence, not DDC; and no root is declared. The behavioural gate on the
+packed `wizc` (`scripts/check-wizc-release.sh`) adds a second input to one compiler; it
+does not make any of the four claims a theorem.
+
+## Where the assurance budget goes
+
+The elaborator is untrusted **by construction**: it produces a term, and the kernel
+re-checks it (the de Bruijn criterion, `docs/Status.md` §7.1). That is why the next
+formal step belongs to the kernel, not the elaborator: a declarative kernel spec with a
+checked equivalence to the algorithmic checker (WizMeta is the third voter today, with
+0 disagreements; its validity and subject reduction are stated, not proved), and
+proof-carrying export for independent re-checking. A verified elaborator is not the next
+step and is not claimed. The cost evidence is CompCert's: about 100 kLoC of Coq and
+roughly six person-years bought semantic preservation for C, a far simpler language than
+a quantitative type theory with observational equality, metavariables, unification and an
+extensible macro system (`docs/Status.md` §7.2). The compiler, the C backend and the C
+toolchain are outside the kernel; `docs/Status.md` §7.0 lists what is trusted.
 
 ## Working on it
 

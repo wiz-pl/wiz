@@ -1399,6 +1399,22 @@ that checks everything. Wiz's situation:
   perform reduction in the proof-irrelevant layer".
   (`wiz-notes/p2-proofs.md`, `prf-marker.md`, `plt-vs-inert.md` §6.)
 
+### 7.2 Where the assurance budget goes
+
+The elaborator is untrusted by construction (the de Bruijn criterion above): it produces
+a term and the kernel re-checks it. The marginal value of verifying the *elaborator* is
+therefore low, and the marginal value of hardening the *kernel* is high. The next formal
+step is a declarative kernel spec with a **checked** equivalence to the algorithmic
+checker (WizMeta is the third voter today: 0 disagreements, with validity and subject
+reduction stated, not proved), plus a proof-carrying export that serialises an elaborated
+term for independent re-checking — not a verified elaborator. For scale: CompCert spent
+about 100 kLoC of Coq and roughly six person-years on semantic preservation for C, whose
+semantics, type system and compiler are far simpler than a quantitative type theory with
+observational equality, metavariables, unification and an extensible macro system
+(`docs/selfhost-compiler.md`, "Where the assurance budget goes"). None of this is a
+claim that the compiler is correct: the C backend, the C compiler and the runtime remain
+outside the kernel (`docs/Status.md` §7.0).
+
 ## 8. Testing evidence
 
 * **Negative tests**: the `elab` group (`Tests/Groups/Elab.lean`) has 43 cases and 24
