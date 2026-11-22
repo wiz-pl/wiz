@@ -1,5 +1,6 @@
 import Word
 import Text
+import WordMap
 import Json
 import Scry.Quire
 import Scry.QuireCore
@@ -89,6 +90,12 @@ def Scry.FindingsIndexRow.make (rule : String) (severity : Nat) (file : String) 
     (function message : String) : Scry.FindingsIndexRow :=
   Scry.FindingsIndexRow.mk (Scry.fiId rule file function message line) rule severity file line
     function message
+
+/-- The rows as a set by `id`: the index is a set, so two findings with the same
+identity are one record (the report still lists both). -/
+def Scry.fiDedupe (rows : List Scry.FindingsIndexRow) : List Scry.FindingsIndexRow :=
+  List.map (fun p => p.2)
+    (U64Map.toList (U64Map.ofList (List.map (fun r => (r.id, r)) rows)))
 
 /-- The numeric projection Quire stores. -/
 structure Scry.FindingKey where
@@ -184,8 +191,8 @@ def Scry.fiFilterMap {A B : Type} (f : A → Option B) : List A → List B
     | .none => Scry.fiFilterMap f xs
 
 /-- Write the JSON index. -/
-def Scry.fiSaveJson (path : String) (rows : List Scry.FindingsIndexRow) : EIO Unit :=
-  FS.writeFile path (Scry.fiJsonText rows)
+def Scry.fiSaveJson (path : String) (rows0 : List Scry.FindingsIndexRow) : EIO Unit :=
+  FS.writeFile path (Scry.fiJsonText (Scry.fiDedupe rows0))
 
 /-- Read the JSON index: `"cold"` when absent, `"corrupt"` for a bad document. -/
 def Scry.fiLoadJson (path : String) : EIO (Except String (List Scry.FindingsIndexRow)) := do
@@ -223,8 +230,12 @@ def Scry.fiNodes (s : QSnapshot) (rows : List Scry.FindingsIndexRow) : QSnapshot
 
 /-- Write the Quire index: a fresh file, one commit for the rows, the count sentinel and
 the fingerprint sentinel (so a warm read is a meta pick, not a page walk). -/
-def Scry.fiSaveQuire (path : String) (rows : List Scry.FindingsIndexRow) : EIO Unit := do
-  FS.removeAll path;
+def Scry.fiSaveQuire (path : String) (rows0 : List Scry.FindingsIndexRow) : EIO Unit := do
+  let rows := Scry.fiDedupe rows0;
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .true => FS.removeAll path
+  | .false => EIO.pure ();
   h ← openQ path Scry.fiIndices;
   s ← getQ h;
   let s := Scry.fiNodes s rows;
@@ -271,7 +282,7 @@ def Scry.fiProbe (path : String) : EIO (Except String (Nat × U64)) := do
               (Bool.and (UIntN.beq c.label Scry.fiSentinelLabel)
                 (Bool.and (UIntN.beq p.kind Scry.fiPrintMagic)
                   (UIntN.beq p.label Scry.fiSentinelLabel)))
-          | _, _ => .false;
+          | _, _ => Bool.false;
         match good with
         | .false => EIO.pure (.error "corrupt")
         | .true => EIO.pure (match countNode, printNode with
@@ -303,17 +314,17 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
       | .true => do
         let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
         let good := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
               (UIntN.beq n.label Scry.fiSentinelLabel);
         let rows := match good with
-          | .false => []
+          | .false => ([] : List Rec)
           | .true => List.filter (fun r =>
               Bool.and (Bool.not (UIntN.beq r.id Scry.fiSentinelId))
                 (Bool.not (UIntN.beq r.id Scry.fiFingerprintId)))
               (QAllRecords s.map s.root);
         let countOk := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Nat.beq (UIntN.toNat n.count) (List.length rows);
         closeQ h;
         match Bool.and good countOk with
@@ -343,7 +354,7 @@ def Scry.fiCountSeverityQuire (path : String) (severity : U32) : EIO (Except Str
       | .true => do
         let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
         let good := match sentinel with
-          | .none => .false
+          | .none => Bool.false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
               (UIntN.beq n.label Scry.fiSentinelLabel);
         let n := match good with

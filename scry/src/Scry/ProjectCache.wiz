@@ -296,7 +296,8 @@ report is never read from the index: the index is a derived projection, so an in
 cannot change what the analysis reports. A hit requires the same row count and
 fingerprint; a stale or corrupt entry is rewritten. -/
 def Scry.cacheFindings (cache : Scry.CacheOpts) (id : String)
-    (rows : List Scry.FindingsIndexRow) : EIO Scry.FindingsCacheStats :=
+    (rows0 : List Scry.FindingsIndexRow) : EIO Scry.FindingsCacheStats :=
+  let rows := Scry.fiDedupe rows0;
   let want := List.map Scry.FindingsIndexRow.key rows;
   let stats := Scry.FindingsCacheStats.mk (Scry.CacheBackend.show cache.backend) ""
     (List.length rows) (Scry.severityCounts rows);
