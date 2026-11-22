@@ -463,6 +463,11 @@ def tacticGroup : Group where
     { name := "omega refuses multiplication", run := fun _ =>
         failsLibs "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
           "omega: non-linear" },
+    { name := "two subgoals: the second survives the first exact", run := fun _ =>
+        okLib ("import Prelude\nstructure Pairish where\n  a : Nat\n  b : Nat\n" ++
+          "def p : Pairish := by\n  constructor\n  exact 1\n  exact 2\n" ++
+          "#eval p.a\n#eval p.b")
+          ["1", "2"] },
     -- case analysis (docs/stages/06-macros.md, 6j)
     { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
         okLib ("import Logic\n" ++
