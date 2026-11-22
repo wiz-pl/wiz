@@ -8,7 +8,7 @@ import Text
 /-!
 # Scry.Registry: analyses selected by a rule pack's `check` names
 
-`lib/Scry/Rules.wiz` has always let a `kind memory` rule name the analysis that supplies
+`src/Scry/Rules.wiz` has always let a `kind memory` rule name the analysis that supplies
 its evidence (`check NAME`), but until now the analyses behind those names were a fixed
 sequence of calls in `Scry.analyzeStore` (the CLI) and a second copy in
 `Scry.analyzeEntriesBounded` (the library). Adding an analysis meant editing both

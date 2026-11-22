@@ -5,7 +5,7 @@ import Sys
 import Text
 import Scry.Registry
 import Scry.TaintCmd
--- The analysis registry (`lib/Scry/Registry.wiz`): a pack's `check` names select rows,
+-- The analysis registry (`scry/src/Scry/Registry.wiz`): a pack's `check` names select rows,
 -- and the two-direction exhaustiveness check refuses a silent skip.
 --
 --   pack -> table   every `check` a memory rule names has a row (`unknownChecks`)

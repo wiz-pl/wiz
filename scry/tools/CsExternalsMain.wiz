@@ -16,7 +16,7 @@ the next model can be chosen from data instead of from guesswork:
 `PATH` is anything `scry cs` accepts (a directory, a `.csproj`, a `.sln`/`.slnx`, one
 `.cs`), and the file set is exactly `Scry.CsCmd`'s walk (same exclusions). With no pack
 argument it reads the frontend's default pack (`scry/corpus/csharp/csharp.scry`, then
-`lib/Scry/rules/csharp.scry`), so the findings are comparable with `scry cs`'s.
+`rules/csharp.scry`), so the findings are comparable with `scry cs`'s.
 
 The program is **merged across files**, as `scry cs` does, so a call to a method the tree
 defines is not external. Output is tab-separated for `sort`/`awk`:

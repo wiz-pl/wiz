@@ -47,6 +47,8 @@ for b in wiz grail; do
   cp "$bindir/$b" "$top/share/wiz/.lake/build/bin/$b"
 done
 [ -f "$bindir/tower" ] && cp "$bindir/tower" "$top/bin/tower"
+# `lib/` is the standard library alone: Scry is a package (`scry/`, separate-repos.md
+# P0.1) and is not shipped in the toolchain tarball.
 cp -R lib "$top/share/wiz/lib"
 [ -d editors ] && cp -R editors "$top/share/wiz/editors"
 echo "$rev" > "$top/share/wiz/REVISION"

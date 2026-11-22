@@ -47,7 +47,7 @@ fixpoint early and marks the result `truncated`, with a `scry/budget/*` diagnost
   are printed (and written to SARIF as `lowering-boundary` results), never dropped as a
   silent false negative.
 * **analyse.** `Scry.analyze` (`Scry.Interproc`): the default pack is
-  `lib/Scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
+  `scry/rules/default.scry`, or `--rules FILE`; the intraprocedural engine is
   `Scry.RuleTaint`, and direct-call summaries stitch the paths. `--null-deref` adds the
   S5 nullness pass (`Scry.analyzeWithNull` / `Scry.Nullness`); it is off by default.
 * **derive.** `Scry.Certify.certifyFinding` checks each alert's derivation against the
