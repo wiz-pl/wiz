@@ -27,6 +27,7 @@ on:
       - "scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "flake.nix"
       - "lib/Web/Source/**"
       - "lib/Web/Highlight.wiz"
       - "lib/Web/EditorBridge.wiz"
@@ -36,6 +37,8 @@ on:
       - "web/source-static.js"
       - "web/source-app.js"
       - "web/source.css"
+      - "web/source-bundle.sh"
+      - "web/source_chrome_test.mjs"
       - "web/source_fixture_gen.wiz"
       - "web/source_fixture_test.mjs"
       - "web/source_static_test.mjs"
@@ -47,6 +50,7 @@ on:
       - "scry/**"
       - "Wiz/**"
       - "selfhost/**"
+      - "flake.nix"
       - "lib/Web/Source/**"
       - "lib/Web/Highlight.wiz"
       - "lib/Web/EditorBridge.wiz"
@@ -56,6 +60,8 @@ on:
       - "web/source-static.js"
       - "web/source-app.js"
       - "web/source.css"
+      - "web/source-bundle.sh"
+      - "web/source_chrome_test.mjs"
       - "web/source_fixture_gen.wiz"
       - "web/source_fixture_test.mjs"
       - "web/source_static_test.mjs"
@@ -139,6 +145,22 @@ jobs:
           (cd "$out/b2" && sha256sum data/*.json) > "$out/h2"
           diff "$out/h1" "$out/h2"
           echo "rebuild identical: $(wc -l < "$out/h1") data/*.json files"
+      - name: The source reader in headless Chromium (`.#wiz-source-ui` + the built bundle)
+        # The reader's runtime is a Wasm module, so the Node test above cannot see whether
+        # it mounts: this loads the exported bundle in a real browser, with scripting off
+        # (the SSR must already list the files and findings) and on (mount, a hover at
+        # taint.c's sink answers `command-injection`, and #/f/<id> selects the row on a
+        # cold load). `web/source-bundle.sh` adds Emscripten's `.wasm` side-car, which
+        # `scry web --ui` alone does not copy.
+        run: |
+          out=$(mktemp -d)
+          ui=$(nix build .#wiz-source-ui --no-link --print-out-paths)
+          sh web/source-bundle.sh ./scry/.grail/bin/scry "$out/b" --ui "$ui"
+          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
+          if [ -z "$chrome" ]; then
+            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
+          fi
+          node web/source_chrome_test.mjs "$chrome" "$out/b"
       - name: grail test (the *.expected goldens)
         run: |
           cd scry
