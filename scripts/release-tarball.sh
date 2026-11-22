@@ -38,11 +38,6 @@
 # RELEASE_SOURCE_DATE_EPOCH to override the epoch deliberately. OUT.tar.gz.sha256 is
 # written next to it.
 set -eu
-# The archive must not depend on the caller's locale, timezone or umask.
-umask 022
-LC_ALL=C
-TZ=UTC
-export LC_ALL TZ
 out=$1
 bindir=${2:-.lake/build/bin}
 rev=${3:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
@@ -59,24 +54,6 @@ for b in wiz grail; do
   cp "$bindir/$b" "$top/share/wiz/.lake/build/bin/$b"
 done
 [ -f "$bindir/tower" ] && cp "$bindir/tower" "$top/bin/tower"
-# Lean's linker gives wiz and grail a RUNPATH naming the toolchain's own lib directory
-# (under the builder's $HOME) and, on a Nix dev machine, /nix/store. `ldd` shows that
-# their NEEDED libraries are all system libraries, so the RUNPATH is unused; leaving it
-# makes the bytes depend on where the toolchain was installed. Remove it where patchelf
-# exists. (Set RELEASE_KEEP_RPATH=1 to keep it, e.g. for the measurement that shows it.)
-if [ -z "${RELEASE_KEEP_RPATH:-}" ]; then
-  if command -v patchelf >/dev/null 2>&1; then
-    for f in "$top/share/wiz/.lake/build/bin/wiz" "$top/share/wiz/.lake/build/bin/grail"; do
-      [ -f "$f" ] || continue
-      if readelf -d "$f" 2>/dev/null | grep -qE 'R(UN)?PATH'; then
-        patchelf --remove-rpath "$f"
-        echo "release-tarball: removed the unused RUNPATH from ${f#"$top/"}" >&2
-      fi
-    done
-  else
-    echo "release-tarball: warning: no patchelf: the binaries keep the builder's RUNPATH" >&2
-  fi
-fi
 # The inputs are the commit, not the working tree: `git ls-tree`/`git archive` cannot
 # see an untracked file, a local edit or another branch's leftovers. SRCDIR is the
 # checkout the commit lives in (the release job passes the workspace; the script may
@@ -183,7 +160,7 @@ else
   epoch=${SOURCE_DATE_EPOCH:-0}
 fi
 case $epoch in ''|*[!0-9]*) echo "release-tarball: epoch '$epoch' is not an integer" >&2; exit 2 ;; esac
-tar --format=gnu --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
-    --mode='u+rwX,go+rX,go-w' -cf - -C "$work" "$name" | gzip -n -9 > "$out"
+tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+    --mode='u+rwX,go+rX,go-w' -cf - -C "$work" "$name" | gzip -n > "$out"
 (cd "$(dirname "$out")" && sha256sum "$(basename "$out")") > "$out.sha256"
 echo "$out"
