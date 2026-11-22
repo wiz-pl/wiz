@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "unstaged",
+  "git": "e8b734fe8c7d9a124a1cf1bca5c09c928708eecf",
   "subsets": {
     "docs": {
       "files": 114,
@@ -52,7 +52,7 @@
         "Tests/**",
         "web/**"
       ],
-      "sha256": "777625b8243a606d992a40a690481f574c393df7d3d178f70704eab70572d965"
+      "sha256": "4a4cb6bbae474c61628d0a67d7a5aefaeeff53b5226d5647401b552c9b3498fa"
     },
     "wizlib": {
       "files": 108,
