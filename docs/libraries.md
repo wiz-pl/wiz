@@ -2092,6 +2092,15 @@ complexity, persistence guarantees and the benchmark plan are in
 > no longer documents them; `scry/README.md` is the package's own guide. The sections
 > below remain as a cross-reference for the language features they exercise.
 
+The one exception is the **Quire storage engine** (`lib/Scry/Quire.wiz`,
+`QuireCursor.wiz`, `QuireFindings.wiz` and the `Quire*` siblings). It is library-level,
+not part of the analyser: the suite's module loader and the toolchain's `lib` root serve
+`lib/`, and the engine has no scry dependency (it imports `Sys`, `Word`, `WordMap`,
+`Optic` and friends). Its only consumer is the scry package's project cache
+(`scry/src/Scry/ProjectCache.wiz`); `drafts/storage-engine/README.md` maps the files and
+`wiz-notes/storage-engine.md` and `wiz-notes/quire-perf.md` are the design and
+measurements.
+
 ## Scry: Wil, the analysis IR (`scry/src/Scry/Wil.wiz`)
 
 `import Scry.Wil` is the small three-address IR of the `scry` analyser
