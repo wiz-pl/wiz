@@ -27,6 +27,64 @@ definitions. -/
 def exports (s : CommandState R) : List (RVal.ExternSig × Name) :=
   s.builtins.reverse.filterMap fun (k, f) => (RVal.ExternSig.ofExportKey? k).map (·, f)
 
+/-- The foreign-function keys a program's IR calls, in first-use order. The keys are the
+same `extern:` keys the C and LLVM backends see (erasure left one `prim` per call). -/
+partial def externKeysOf (decls : Array IR.Decl) : Array Name :=
+  let rec body : IR.Body → Array Name → Array Name
+    | .vdecl _ (.prim (.extern key) _) b, acc =>
+      body b (if acc.contains key then acc else acc.push key)
+    | .vdecl _ _ b, acc | .dup _ b, acc | .drop _ b, acc => body b acc
+    | .case _ alts, acc => alts.foldl (fun acc a => body a acc) acc
+    | .jdecl _ _ jb k, acc => body k (body jb acc)
+    | _, acc => acc
+  decls.foldl (fun acc d => body d.body acc) #[]
+
+/-- Where a declaration is, for a build-time error: `lib/M.wiz:line:col` for a toolchain
+library module (the caller's `trustedModule` is the library), `M` otherwise, and the byte
+offset when `Build` has no text for the module (the main file: its text is the caller's).
+`SourceInfo.start` is the command's first character, so an extern's position is its
+`extern` keyword. -/
+def declPosition (s : CommandState R) (n : Name) : String :=
+  match s.declSites.get? n with
+  | none => toString n
+  | some (info, mod) =>
+    let path := if mod.isEmpty then "this file"
+      else if s.trustedModule mod then "lib/" ++ ".".intercalate (mod.splitOn ".") ++ ".wiz"
+      else mod
+    match (if mod.isEmpty then none else s.loader mod) with
+    | some src =>
+      let (l, c) := lineCol src info.start
+      s!"{path}:{l + 1}:{c + 1}"
+    | none => s!"{path} (byte {info.start})"
+
+/-- The Wasm implementations of a program's reachable externs: `extern:` key → the
+in-module runtime function, selected from the shared registry `impls` (default
+`IR.externImpls`) by the **declaration's Wiz name** and the `wasm` target. The key is the
+same one the C and LLVM backends use; the row is the target's implementation.
+
+A reachable extern with no `wasm` row is a positioned `no-target-implementation` error
+before any code is generated, naming the declaration and the targets that do implement it
+(`c` is implicit in `extern`). This is a property of the program (what it reaches), not of
+`Wasm.program`, so an unused extern is never an error. -/
+def selectWasmExterns (s : CommandState R) (decls : Array IR.Decl)
+    (impls : List IR.ExternImpl := IR.externImpls) : Except String (Std.HashMap Name String) := do
+  let mut out : Std.HashMap Name String := {}
+  for key in externKeysOf decls do
+    match RVal.ExternSig.ofKey? key with
+    | none => throw s!"the program calls `{key}`, a primitive key that is not a foreign function"
+    | some sig =>
+      let names := s.builtins.filter fun (k, _) => k == key
+      let hit := names.findSome? fun (_, n) => (IR.externImplIn impls .wasm n).map fun row => (n, row)
+      match hit with
+      | some (_, row) => out := out.insert key row.symbol
+      | none =>
+        let decl := match names with
+          | (_, n) :: _ => n
+          | [] => sig.cname
+        let others := (["c"] ++ (impls.filter (·.decl == decl)).map (·.backend.name)).eraseDups
+        throw s!"{declPosition s decl}: error: no-target-implementation: `{decl}` has no `wasm` implementation (implemented by: {", ".intercalate others})"
+  pure out
+
 /-- The optimised IR of a program computing the global `n`, and `n`'s type, with the
 exported functions. A library (`lib`) has only the exports. -/
 def irProgram (s : CommandState R) (n : Name) (lib : Bool := false) : Except String (Array IR.Decl × Term R) := do
@@ -249,8 +307,9 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
 and type-checked by `WasmValidate.validate` before they are written, so an encoder bug
 (or an instruction outside the supported subset) is a compile error, not a module that
 an engine rejects later. -/
-def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath) : IO (Except String Unit) := do
-  match Wasm.program decls io with
+def compileWasm (decls : Array IR.Decl) (io : Bool) (out : System.FilePath)
+    (externs : Std.HashMap Name String := {}) : IO (Except String Unit) := do
+  match Wasm.program decls io externs with
   | .error e => pure (.error e)
   | .ok bytes =>
     match WasmValidate.validate bytes with
@@ -279,7 +338,10 @@ def build (tc : Toolchain) (s : CommandState R) (n : Name) (out : System.FilePat
     let ex := (exports s).map (·.1)
     let unbox := s.globals.unboxStructs
     if lib then IO.FS.writeFile (out.withExtension "h") (C.exportHeader ex)
-    let r ← if wasm then compileWasm decls io out
+    let r ← if wasm then
+        match selectWasmExterns s decls with
+        | .error e => pure (.error e)
+        | .ok externs => compileWasm decls io out externs
       else if llvm then
         compileLLVM tc (LLVM.program decls io bare) out
           (extraC s ++ "\n" ++ C.glue (C.externs decls) (extraC s) unbox ++ "\n" ++ C.exportWrappers ex true) (linkOf s) lib
@@ -402,7 +464,10 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
   | .error e => pure (.error e)
   | .ok (decls, ty) =>
     let wasmFile := dir / "wiz_main.wasm"
-    match ← compileWasm decls (isIO ty) wasmFile with
+    let externs := match selectWasmExterns s decls with
+      | .ok m => m
+      | .error e => return .error e
+    match ← compileWasm decls (isIO ty) wasmFile externs with
     | .error e => pure (.error e)
     | .ok () =>
       let host ← wasmHostPath
