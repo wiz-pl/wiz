@@ -1,0 +1,23 @@
+# The Scry package's trust review record (scry/src/Scry).
+#
+# Scry moved out of lib/ (separate-repos.md P0.1, `scry/src/Scry/`), and the lib/ trust
+# gate walks only the modules physically under lib/ (Tests/Native.lean, `ledgerSources`),
+# so these rows cannot be checked against a walk here. They are not deleted: they are
+# the reviewed `partial` declarations of Scry.Index, Scry.Interproc and Scry.Wil, moved
+# with the package. A full scry walk would surface every unreviewed source in the
+# package; that review and a gate belong to the package's own CI.
+#
+# Until then this file is a review record, not a gate. `Tests/Groups/Trust.lean` checks
+# that every row still names a `partial def` in the corresponding scry/src/Scry file.
+#
+# Columns are the ledger's: module, declaration, item, reason, owner, review.
+# The counts are checked by scripts/trust-counts.py --check.
+<!-- trust-counts-scry: rows=8 partial=8 axiom_rows=0 builtin_rows=0 native_rows=0 implemented_by=0 repr=0 extern_declarations=0 seal=0 other_builtin=0 pure_axioms=0 distinct_reasons=8 shared_reasons=0 legacy=0 expired=0 -->
+Scry.Index	Scry.pathEntriesGo	partial	`Scry.pathEntriesGo`: numbers a path list left to right (`(path, i)` in list order); a compiled-only list walk (`partial`: the kernel keeps no value to unfold). The module is in the scry package, so this is a review record outside the lib/ gate; a full scry walk belongs to the package's own CI. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.extendPathIdx	partial	`Scry.extendPathIdx`: the recursive path-index expansion (replaces a parameter/return seed in `path` by the interprocedural evidence behind it; `stack` turns an already-expanded root into a `recursion` node). Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.findParamSourceIdx	partial	`Scry.findParamSourceIdx`: finds a caller passing taint into parameter `pos` of `callee`, in program order then each caller's sites in call-graph order. Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.resultsWithPlansIn	partial	`Scry.resultsWithPlansIn`: evaluates every function under the summaries with its plan prepared once (the plan depends only on function, pack, points-to and entry sources). Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.sourceSiteIn	partial	`Scry.sourceSiteIn`: the first site of a function result that calls `callee` and passes a tainted value at `pos`. Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.summaryLoopWithEntriesModelsIn	partial	`Scry.summaryLoopWithEntriesModelsIn`: the summary fixpoint with a model pack; builds the call index and delegates to `summaryLoopWithPlansIn`. Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Interproc	Scry.summaryLoopWithPlansIn	partial	`Scry.summaryLoopWithPlansIn`: the summary fixpoint, iterating the prepared plans until `summariesEqIn` says the summaries are unchanged. Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
+Scry.Wil	Wil.funcEntriesGo	partial	`Wil.funcEntriesGo`: numbers a function list into `Wil.ProgramIndex` (`(name, entry)` in order). Compiled-only (`partial`), scry package, outside the lib/ gate. Pre-existing on train9.	Reuben Steenekamp	2027-05-20
