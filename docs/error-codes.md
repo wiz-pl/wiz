@@ -50,6 +50,28 @@ table lists exactly those. Messages not listed here have no code yet.
 | `kernel-rejected` | any other error of the kernel's | | |
 | `parse-error` | the parser's errors | `def := 1` | |
 
+## Lint codes
+
+Lint findings use the same `Msg.code` namespace but a different table: a `W` code is a
+judgement about a program the elaborator **accepted**, never an error code
+(`Wiz/Core/ErrorCode.lean` does not list them). The registry is `Wiz/Lint.lean`
+(`Wiz.Lint.registry`); `wiz lint --json` carries the code, and the language server sends
+it as a diagnostic's `code`. `default` is the rule's severity before repository policy;
+`scope` says whether the rule runs per command or once per module; `suppressible` says
+whether the per-site `-- lint: allow Wxxx (reason)` marker may silence it.
+
+| code | rule | category | default | scope | suppressible | detects |
+|---|---|---|---|---|---|---|
+| `W101` | unused-binding | correctness | warning | declaration | yes | a `pi`/`lam`/`letE` binder with no occurrence in its scope; `_`, `_…`, `x✝` and quantity-0 binders are exempt |
+| `W102` | shadowed-local | correctness | hint | declaration | yes | an inner local binder with the same name as an outer local, where the inner binder is used (never a global) |
+| `W103` | discarded-result | correctness | warning | declaration | yes | `let _ := e` where `e : Result`/`ResultQ`/`Option`; `do e` is `Monad.bind` and is not reported |
+| `W301` | missing-doc | api | warning | declaration | yes | a top-level public `def`/`abbrev`/`structure`/`class`/`inductive`/`coinductive`/`axiom`/`opaque`/`theorem` under a public root with no doc comment |
+| `W302` | unused-import | api | warning | module | yes | a direct import no target declaration uses, and that contributes no instance, syntax, notation, builtin, attribute, export or FFI/link effect |
+
+A rule retired later keeps its row as `default: off` (the code is never reused). The
+package code block (`W500`–`W999`) and the capability ABI are P1; P0 registers only the
+core rules above.
+
 One more quick fix is not keyed on a code: an error inside `@f a…` where `f` is given
 as many arguments as it has explicit parameters offers to let the implicit ones be
 inferred (drop the `@`: `@myId 1` ↦ `myId 1`).

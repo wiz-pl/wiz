@@ -158,6 +158,7 @@
       "lexer",
       "lift",
       "=lint",
+      "=wiz-lint",
       "match",
       "=meta",
       "observational",

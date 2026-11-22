@@ -1,0 +1,4 @@
+import Prelude
+import LintPlain
+
+def usesPlain : Nat := plain
