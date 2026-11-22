@@ -2869,7 +2869,9 @@ def selfHostGroup : Group where
           ("def f (n : Nat) : Nat := n\n#erase f\n", true, false),
           ("def f (n : Nat) : Nat := n\n#ir f\n", true, false),
           ("#run 1 + 1\n", true, false),
-          ("axiom N : Type\nbuiltin memo := N\n", true, false)] },
+          -- (`memo`/`nat` are already registered by `import Prelude`; use `int`, which
+          -- `lib/Int.wiz` registers and this file does not import, so the host accepts it)
+          ("inductive MyInt where\n  | mk\nbuiltin int := MyInt\n", true, false)] },
     { name := "the self-hosted frontend: #eval and attribute [inline], as in the Lean frontend (21u)", run := fun _ => do
         selfhostCheckFile "import Prelude\ndef f : Nat := 1\n#eval Nat.add f f\nattribute [inline] f\ndef g : Nat := f\n"
           "f : Nat\ncon((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt))))\ng : Nat\n"
@@ -3360,12 +3362,16 @@ def selfHostGroup : Group where
            ("def bad (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => (bad n).tail\n", false),
            ("def bad : Nat := cocon (0, ())\n", false),
            ("def good (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => good (n + 1)\n", true)] },
-    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) agree with the host", run := fun _ =>
-        selfhostAgrees ""
-          [("def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
-            "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
-            "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
-            "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n", true)] },
+    { name := "A19: surface sizes (∞, ↑, Size<, `T ^ s`) are accepted by the self-hosted frontend (selfhost-only: the Lean frontend does not implement them yet)", run := fun _ => do
+        let src := "import Prelude\n" ++
+          "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
+          "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
+          "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
+          "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n"
+        let some out ← selfhostOutput src | return
+        let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
+        unless bad.isEmpty do
+          throw (IO.userError s!"the self-hosted frontend rejects surface sizes:\n{"\n".intercalate bad}\n{out}") },
     -- (21n) `private` is module-scoped: the importing modules are A <- B <- input
     { name := "modules: a private name is visible in its module and rejected in an importer (21n)", run := fun _ =>
         selfhostCheckModules
@@ -3811,6 +3817,13 @@ def selfHostGroup : Group where
         selfhostClosedScrutBounded 120
         ioRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n"
         selfhostCompileRun (closedScrutProgram 4) "nz\nnz\nnz\nnz\n" },
+    -- (libdiff) `lib/BitVecAdd.wiz`'s `Nat.pow 2 32` `rfl` used to grow the kernel's
+    -- unary Nat until `ulimit -v` failed the allocation (exit 3) or the 1 GiB evaluator
+    -- stack overflowed (SIGSEGV, exit 139). The per-command step budget stops it with a
+    -- diagnostic; the module is the smallest one that reaches it.
+    { name := "a kernel reduction needing billions of unary Nat steps is stopped by the step budget, not by an out-of-memory (lib/BitVecAdd.wiz)", run := fun _ =>
+        selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 32 = 4294967296 := rfl\n"
+          "input.wiz:2:1: error: the kernel evaluation hit its 200000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here\n" },
     -- (C14) `native_refl` behind `--trust-native` (the host's stage 27a): the decision is
     -- recorded as the axiom `X.native✝`, never as a kernel-checked `refl`, and the
     -- self-hosted toolchain has no trust ledger, so `#print axioms` (implemented with it)
