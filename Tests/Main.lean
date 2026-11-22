@@ -207,7 +207,7 @@ long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer 
 memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
 auditing a group's isolation, not for CI).
 
-`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--ratchet FILE] [--jobs N] [--part i/n]`
 runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file
 and reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
 `Tests/Groups/SelfhostLibDiff.lean` documents the format). `--jobs N` checks N files at a
@@ -215,7 +215,10 @@ time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memor
 `--mem` MB per file. The driver's `--jobs` reaches the group's one case; `--jobs 1` is the
 serial control. `--part i/n` (1-based) runs only the files whose index in the sorted list
 is `k % n = i - 1`: the parts are a deterministic partition of the one case, so CI can run
-its 3664 s on n jobs without changing what any file is compared against. -/
+its 3664 s on n jobs without changing what any file is compared against. `--ratchet FILE`
+compares the run's verdicts with a checked-in `file<TAB>verdict` baseline and exits 1 on
+a regression (a file that was `ok` and no longer is, or a new file with a gap); the
+group's sweep cases use `Tests/libdiff-baseline.tsv`. -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
