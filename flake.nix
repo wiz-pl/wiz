@@ -22,6 +22,22 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
+      # (R2, wiz-notes/sota-numerics.md §5.2) The bignum the kernel's `Nat` computes
+      # with, pinned by version *and* source hash. Lean admits GMP into the kernel TCB
+      # and requires >= 6.3.0. The two build paths carry the same upstream release in
+      # different archives: nixpkgs builds GMP from the `.tar.bz2`, the release bundles
+      # the `.tar.xz` (scripts/bundle-cc.sources); both hashes are recorded in
+      # `docs/release/gmp-pin.json`, and the assert below names the actual and pinned
+      # nix hashes (and both archives) when nixpkgs picks a different GMP. Changing the
+      # bignum is a deliberate attestation update, never a flake-update side effect.
+      gmpPin = {
+        version = "6.3.0";
+        nixSrcHash = "sha256-rCghGnz7YJuuLiyNYFjWbI/pZDT3QM9v4uR7AA0cIMs=";
+        releaseSrcHash = "sha256-a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898";
+      };
+      gmpSrcHash = pkgs: let src = pkgs.gmp.src; in
+        src.outputHash or (src.drvAttrs.outputHash or "unknown");
+
       # The toolchain `wiz build` and grail use: where GMP and Boehm GC live, and `llc`.
       toolchain = pkgs: {
         cflags = "-I${pkgs.gmp.dev}/include";
@@ -44,6 +60,9 @@
           unwrapped =
             assert lib.assertMsg (lean.version == pinned)
               "flake.nix: nixpkgs has Lean ${lean.version} but lean-toolchain says ${pinned}: update the nixpkgs input (nix flake update) or lean-toolchain";
+            # (R2) the release's GMP identity: the actual and pinned hashes are named
+            assert lib.assertMsg (pkgs.gmp.version == gmpPin.version && gmpSrcHash pkgs == gmpPin.nixSrcHash)
+              "flake.nix: GMP is ${pkgs.gmp.version} with nix source ${gmpSrcHash pkgs}, but the pin is GMP ${gmpPin.version} with nix source ${gmpPin.nixSrcHash} (release archive ${gmpPin.releaseSrcHash}); see docs/release/gmp-pin.json. Update the pin and the attestation deliberately, or the release's bignum identity has changed";
             pkgs.stdenv.mkDerivation {
               pname = "wiz-unwrapped";
               version = "0.1.0";
