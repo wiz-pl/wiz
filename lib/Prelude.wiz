@@ -629,6 +629,9 @@ inductive Tac where
   -- (P0) the `[hint]` database: each entry's name, kind (`apply`/`intro`/`elim`) and
   -- reflected constant, in the order `auto` tries them (priority, then registration)
   | getHints (g : Nat) (k : List (String × (String × Expr)) → Tac)
+  -- (P0) the raw open goals, including the main goal a tactic has just solved: what
+  -- `replaceMainGoal` replaces (so it does not drop the next goal)
+  | getOpen (k : List Nat → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -656,6 +659,9 @@ def TacticM.fresh : TacticM Nat := fun k => Tac.fresh k
 /-- The open goals, the main goal first. Goals are numbers, handles held by the
 elaborator. -/
 def TacticM.getGoals : TacticM (List Nat) := fun k => Tac.getGoals k
+/-- The open goals **as the tactic started**, including the main goal a tactic just
+solved: what `TacticM.replaceMainGoal` replaces. (The filtered list is `getGoals`.) -/
+def TacticM.getOpen : TacticM (List Nat) := fun k => Tac.getOpen k
 /-- Replace the list of open goals. -/
 def TacticM.setGoals (gs : List Nat) : TacticM Unit := fun k => Tac.setGoals gs (k ())
 /-- The type of goal `g` (what is to be proved), reflected. -/
@@ -971,9 +977,11 @@ def TacticM.mainGoal : TacticM Nat := do
   | .nil => TacticM.fail "no goals"
   | .cons g _ => TacticM.pure g
 
-/-- Replace the main goal by the goals `new` (none, when it was closed). -/
+/-- Replace the main goal by the goals `new` (none, when it was closed). It reads the
+goals **as the tactic found them**, not the filtered list after the tactic solved the
+main goal, so closing one goal keeps the others. -/
 def TacticM.replaceMainGoal (new : List Nat) : TacticM Unit := do
-  gs ← TacticM.getGoals;
+  gs ← TacticM.getOpen;
   match gs with
   | .nil => TacticM.setGoals new
   | .cons _ rest => TacticM.setGoals (List.append new rest)
