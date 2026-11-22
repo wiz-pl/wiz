@@ -20,13 +20,16 @@ def usage : String := "usage:
                           the consumer enables the set with `--set`; exit 0 on warnings
                           unless --deny; --json carries the stable `W` code; `-` reads
                           standard input
-  wiz build FILE -o OUT [--target c|llvm|wasm|bpf]  compile the definition `main` to an
+  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js]  compile the definition `main` to an
                                    executable (C or LLVM) or a WebAssembly module (stage
                                    8f: no IO, Nat/Int, closures, arrays; run it with
                                    web/wasm-host.mjs). `--llvm` and `--wasm` still work.
                                    `--target bpf` takes a manifest (`bpf.toml`) and its
                                    `bpf-core/1` typed core, and writes freestanding C
                                    plus `bpf_rt.h` (run `clang -target bpf` yourself).
+                                   `--target js` writes a self-contained ES module
+                                   (`OUT.mjs`, the runtime pasted in) that Node runs and
+                                   a browser can import (`export function main`).
   wiz build FILE -o OUT [--attest [FILE]]  … and write a build attestation (default
                                    OUT.attest.json: an unsigned in-toto statement, see
                                    stage 11ae and docs/building.md); c and llvm only
@@ -40,7 +43,7 @@ def usage : String := "usage:
   wiz build FILE -o OUT --lib      … or the exported functions to an object file, with OUT.h
   wiz build FILE -o OUT --no-main  … or the exported functions, linked without a `main`
                                    (say, a Wasm module: --cc emcc --ldflags --no-entry)
-  wiz run FILE [--target c|llvm|wasm]  build and run `main`, printing its value
+  wiz run FILE [--target c|llvm|wasm|js]  build and run `main`, printing its value
                                    (`--llvm` and `--wasm` are aliases)
   wiz repl [--llvm] [--prelude M] [--script FILE] [--init CMD]
                                    read one command per line, keeping definitions (`:help`;
@@ -859,7 +862,7 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
 /-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf"]
+def targets : List String := ["c", "llvm", "wasm", "bpf", "js"]
 
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
@@ -882,9 +885,9 @@ backend and the rest. A flag and a conflicting `--target` are an error, as is tw
 different targets. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm, wasm or bpf"
+  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm or bpf)"
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf or js)"
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
@@ -913,6 +916,18 @@ def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool 
       pure 2
     else
       Wiz.Compiler.Bpf.buildCmd path out lib noMain split
+  else if target == "js" then
+    if attest.isSome then
+      IO.eprintln "wiz build --attest: the js target does not emit a build attestation"
+      pure 2
+    else if lib || noMain || split != 0 then
+      IO.eprintln "wiz build --target js: one ES module with a `main`; `--lib`, `--no-main` and `--split` do not apply"
+      pure 2
+    else do
+      let some s ← elabFile tc path | pure 1
+      match ← Build.buildJs s "main" (System.FilePath.mk out) with
+      | .error e => IO.eprintln e; pure 1
+      | .ok _ => pure 0
   else if target == "wasm" && attest.isSome then
     IO.eprintln "wiz build --attest: the wasm target does not emit a build attestation"
     pure 2
@@ -944,6 +959,10 @@ oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
         IO.print (if v.endsWith "\n" then v else v ++ "\n"); pure 0
       if target == "wasm" then
         match ← Build.runWasmGlobal s "main" dir with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v => print v
+      else if target == "js" then
+        match ← Build.runJsGlobal s "main" dir with
         | .error e => IO.eprintln e; pure 1
         | .ok v => print v
       else
@@ -1287,6 +1306,9 @@ def main (args : List String) : IO UInt32 := do
   | "repl" :: rest => do
     if target == "wasm" then
       IO.eprintln "wiz repl: targets are c, llvm and bpf (no wasm REPL)"
+      pure 2
+    else if target == "js" then
+      IO.eprintln "wiz repl: targets are c, llvm and bpf (no js REPL)"
       pure 2
     else if target == "bpf" then
       IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"

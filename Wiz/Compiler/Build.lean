@@ -3,6 +3,7 @@ import Wiz.Compiler.C
 import Wiz.Compiler.LLVM
 import Wiz.Compiler.Wasm
 import Wiz.Compiler.WasmValidate
+import Wiz.Compiler.Js
 import Wiz.Compiler.Lower
 import Wiz.Module
 import Wiz.Toolchain
@@ -394,6 +395,55 @@ def wasmHostPath : IO System.FilePath := do
   let installed := base / "web" / "wasm-host.mjs"
   if ← installed.pathExists then return installed
   pure ("web" / "wasm-host.mjs")
+
+/-- The JavaScript runtime the `--target js` modules paste in (`web/wiz-js-runtime.mjs`):
+beside the toolchain's library in an installation, `web/` in a checkout. -/
+def jsRuntimePath : IO System.FilePath := do
+  let base := (← Module.toolchainLib).parent.getD "."
+  let installed := base / "web" / "wiz-js-runtime.mjs"
+  if ← installed.pathExists then return installed
+  pure ("web" / "wiz-js-runtime.mjs")
+
+/-- Build `main` as a self-contained ES module. `OUT` ends in `.mjs` or `.js`, or the
+extension is chosen (`.mjs`). The IR is the C/LLVM/Wasm IR; the representation and the
+supported subset are in `Wiz/Compiler/Js.lean` and `wiz-notes/js-target.md`. -/
+def buildJs (s : CommandState R) (n : Name) (out : System.FilePath) : IO (Except String (Term R)) := do
+  match irProgram s n with
+  | .error e => pure (.error e)
+  | .ok (decls, ty) =>
+    let runtimePath ← jsRuntimePath
+    unless ← runtimePath.pathExists do
+      return .error s!"the JS runtime is missing: no {runtimePath} (a toolchain ships it in share/wiz/web; a checkout has web/wiz-js-runtime.mjs)"
+    let runtime ← IO.FS.readFile runtimePath
+    match Js.program runtime decls (isIO ty) with
+    | .error e => pure (.error e)
+    | .ok text =>
+      let outPath : System.FilePath :=
+        if out.toString.endsWith ".mjs" || out.toString.endsWith ".js" then out
+        else out.withExtension "mjs"
+      IO.FS.writeFile outPath text
+      pure (.ok ty)
+
+/-- Build `main` with the JS backend and run it under Node, reading the printed result
+back with `main`'s type (as `runGlobal` does for C); an `IO` program's standard output is
+the result, since it prints for itself. -/
+def runJsGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) :
+    IO (Except String String) := do
+  let file := dir / "wiz_main.mjs"
+  match ← buildJs s n file with
+  | .error e => pure (.error e)
+  | .ok ty =>
+    let out ← try
+      -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+      IO.Process.output
+        { cmd := "node", args := #[file.toString], env := #[("LD_LIBRARY_PATH", none)] }
+    catch e => return .error s!"node: {e}"
+    if out.exitCode != 0 then
+      return .error s!"the JS program failed ({out.exitCode}): {out.stderr.take 1500}"
+    if isIO ty then return .ok out.stdout
+    match parseValue out.stdout with
+    | none => pure (.error s!"could not read the result: {out.stdout}")
+    | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
 (`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
