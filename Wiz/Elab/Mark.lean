@@ -153,7 +153,7 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
   let g := ctx.globals
   let w : R := QuantitySyntax.explicitDefault
   match t with
-  | .var ix => (t, ctx.types[ix]?)
+  | .var ix => (t, ctx.typeAt? ix)
   | .const n us => (t, (g.find? n).bind fun d =>
       if d.levelParams.length == us.length then some (eval g [] (d.type.instLevels d.levelParams us)) else none)
   | .natLit _ => (t, (g.builtinOf? "nat").map fun N => ctx.eval (.const N []))

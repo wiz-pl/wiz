@@ -11,8 +11,9 @@ caller reads every module a file can reach up front, by scanning its import line
 visible in a file: importing a module that declares a name the file already has (from
 another module, or declared in the file itself) is an error at that `import`,
 `'b' is declared by both module M.A and module M.B`, whichever order the imports come
-in, and the module is not brought in. Wiz has no namespaces (`Nat.repr` is one global
-name), and the kernel identifies constants by name, so letting the later declaration win
+in, and the module is not brought in. Wiz has no selective import (a `namespace`, 13t,
+only prefixes a declaration's name: `Nat.repr` is still one global name), and the kernel
+identifies constants by name, so letting the later declaration win
 would keep everything checked against the earlier one: a theorem about M.A's `b` would
 then be about M.B's (it proved `Empty`; the regression is the case "two modules declaring
 one name: …" of the group `modules`).

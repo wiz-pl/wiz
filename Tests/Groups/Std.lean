@@ -143,6 +143,19 @@ def stdGroup : Group where
     { name := "native text", run := fun _ =>
         ioRun ("import Std\ndef main : IO Unit := do\n  let t := Str.append (Str.ofString \"hello, \") (Str.ofString \"world\");\n" ++
           "  IO.println (Str.toString (Str.slice t 7 12));\n  IO.println (Nat.toString (Str.size t))") "world\n12\n" },
+    { name := "native text: self-append and a shared value copy (no mutation)", run := fun _ =>
+        ioRun ("import Std\ndef both (s : Str) : Str × Str := (s, Str.append s (Str.ofString \"x\"))\n" ++
+          "def main : IO Unit := do\n  let s := Str.ofString \"abc\";\n  let t := Str.append s s;\n" ++
+          "  IO.println (Str.toString t);\n  IO.println (Str.toString s);\n" ++
+          "  let p := both (Str.ofString \"abc\");\n  IO.println (Str.toString p.1);\n  IO.println (Str.toString p.2);\n" ++
+          "  let b := Str.push (Str.push (Str.ofString \"\") 65) 66;\n  IO.println (Str.toString b);\n" ++
+          "  IO.println (Str.toString (Str.join (.cons (Str.ofString \"a\") (.cons (Str.ofString \"b\") (.cons (Str.ofString \"c\") .nil)))))")
+          "abcabc\nabc\nabc\nabcx\nAB\nabc\n" },
+    { name := "native text: aliasing fixtures (compiled; the original is never mutated)", run := fun _ => do
+        for f in ["self-append", "shared-receiver", "shared-push", "shared-join"] do
+          let src ← IO.FS.readFile ("Tests/fixtures/std-aliasing/" ++ f ++ ".wiz")
+          let want ← IO.FS.readFile ("Tests/fixtures/std-aliasing/" ++ f ++ ".expected")
+          ioRun src want },
     { name := "maps from text", run := fun _ =>
         ioRun ("import Std\ndef count : List String → StrMap Nat → StrMap Nat\n  | .nil, m => m\n" ++
           "  | .cons w ws, m => count ws (StrMap.insert m (Str.ofString w) (StrMap.findD m (Str.ofString w) 0 + 1))\n" ++

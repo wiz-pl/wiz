@@ -35,6 +35,8 @@ web=$1 playground=$2 ui=$3
   echo "modules-from-store: $playground has no wiz-playground.mjs" >&2; exit 1; }
 [ -f "$ui/wiz-playground-ui.mjs" ] || {
   echo "modules-from-store: $ui has no wiz-playground-ui.mjs" >&2; exit 1; }
+[ -f "$ui/wiz-playground-ui.wasm" ] || {
+  echo "modules-from-store: $ui has no wiz-playground-ui.wasm" >&2; exit 1; }
 echo "web=$web" >> "$GITHUB_OUTPUT"
 echo "playground=$playground" >> "$GITHUB_OUTPUT"
 echo "ui=$ui" >> "$GITHUB_OUTPUT"

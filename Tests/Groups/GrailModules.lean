@@ -347,8 +347,9 @@ def modulesGroup : Group where
         let src := "import Prelude\nimport Sneaky\n"
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := loaderOf ms }
         check (sneaky s) s!"runFrontend: Sneaky used Nat without importing Prelude: {s.messages.toList.map (·.text)}"
-        let s := runFrontend (R := ZeroOneMany) ("import Prelude\ndef two : Nat := 2\nimport Sneaky\n") { trustedModule := Tests.libModule, loader := loaderOf ms }
-        check (sneaky s) s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
+        -- the fixed header (13u): a later import is the error, not a module the frontend loads
+        let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef two : Nat := 2\nimport Sneaky\n" { trustedModule := Tests.libModule, loader := loaderOf ms }
+        check (s.messages.any fun m => m.code == "import-order") s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
         let (s, _) := Query.elaborate (R := ZeroOneMany) {} src { trustedModule := Tests.libModule, loader := loaderOf ms, termInfo := true }
         check (sneaky s) s!"the language server's engine: {s.messages.toList.map (·.text)}"
         -- through the server: the diagnostic is at the import
@@ -386,7 +387,7 @@ def modulesGroup : Group where
           m.severity == .error && m.text.startsWith "'b' is declared by both"
         for src in ["import M.A\nimport M.B\n" ++ boomA, "import M.B\nimport M.A\n" ++ boomB,
                     "import M.A\nimport M.D\n" ++ boomA, "import M.A\nimport M.D\n" ++ boomB,
-                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\ndef b : Bool := Bool.false\nimport M.A\n" ++ boomA,
+                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\nimport M.A\ndef b : Bool := Bool.false\n" ++ boomA,
                     "import M.A\ndef b : Bool := Bool.false\n" ++ boomA] do
           for (how, s) in ← paths src do
             check (clash s) s!"{how}: no clash reported for\n{src}\n{s.messages.toList.map (·.text)}"

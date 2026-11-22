@@ -1,0 +1,280 @@
+import Nat
+import Trace
+/-!
+# Temporal
+
+The generic temporal layer (`import Temporal`): traces are functions `Nat → A`, a
+formula `TL A` is a proposition about a trace at a time, and a protocol is a labelled
+transition system `LTS S A`. Design: `wiz-notes/distributed-proofs.md` §2–§4 and
+`wiz-notes/hdl-temporal.md`.
+
+This module is the generic part of the former `lib/Hdl/Temporal.wiz`, moved here so a
+protocol or concurrency library does not import the HDL. `Hdl.Temporal` imports it and
+keeps the HDL-specific lemmas.
+
+* `□` is a Π over `Nat` and `◇` an `∃`; the infinite-trace semantics is the primary
+  one. Finite prefixes are `Trace.take`, `TL.during` and `TL.within` (`bounded`).
+* `LTS` is a state type, an action type, an initial predicate and a step relation.
+  `LTS.Run` is a predicate over one trace; there is no separate network trace.
+* `LTS.invariant` is the safety rule: an inductive state invariant holds at every time
+  of every run. `LTS.safetyDuring` is its bounded form.
+-/
+
+/-- A temporal formula: a proposition about a trace at a time (`φ σ t` is "`φ` holds of `σ`
+at cycle `t`"). -/
+def TL (A : Type) : Type := Trace A → Nat → Prop
+
+/-- a state predicate, and a Boolean one (a checkable atom) -/
+def TL.now {A : Type} (p : A → Prop) : TL A := fun σ t => p (σ t)
+/-- A Boolean state predicate, as a formula (a checkable atom). -/
+def TL.nowB {A : Type} (p : A → Bool) : TL A := fun σ t => p (σ t) = .true
+
+/-- `φ ∧ ψ` at the same time. -/
+def TL.and {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t ∧ ψ σ t
+/-- `φ ∨ ψ` at the same time. -/
+def TL.or {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t ∨ ψ σ t
+/-- `φ → ψ` at the same time. -/
+def TL.imp {A : Type} (φ ψ : TL A) : TL A := fun σ t => φ σ t → ψ σ t
+/-- `¬ φ` at the same time. -/
+def TL.not {A : Type} (φ : TL A) : TL A := fun σ t => ¬ φ σ t
+
+/-- ○ (LTL X, SVA `##1`) and `##n` -/
+def TL.next {A : Type} (φ : TL A) : TL A := fun σ t => φ σ (Nat.succ t)
+/-- `##n φ`: `φ` in `n` cycles. -/
+def TL.nexts {A : Type} (n : Nat) (φ : TL A) : TL A := fun σ t => φ σ (Nat.add n t)
+
+/-- □ and ◇ -/
+def TL.always {A : Type} (φ : TL A) : TL A := fun σ t => (k : Nat) → φ σ (Nat.add k t)
+/-- `◇ φ`: `φ` at some cycle from now on. -/
+def TL.eventually {A : Type} (φ : TL A) : TL A := fun σ t => ∃ k, φ σ (Nat.add k t)
+
+/-- bounded: within the next `n` cycles (strong: it must happen), and throughout them -/
+def TL.within {A : Type} (n : Nat) (φ : TL A) : TL A :=
+  fun σ t => ∃ k, Nat.lt k n = .true ∧ φ σ (Nat.add k t)
+/-- `φ` throughout the next `n` cycles (bounded `□`). -/
+def TL.during {A : Type} (n : Nat) (φ : TL A) : TL A :=
+  fun σ t => (k : Nat) → Nat.lt k n = .true → φ σ (Nat.add k t)
+/-- SVA `##[m:n] φ`: φ at some cycle from `t + m` to `t + n` -/
+def TL.delayRange {A : Type} (m n : Nat) (φ : TL A) : TL A := TL.nexts m (TL.within (Nat.succ (n - m)) φ)
+
+/-- φ until ψ (strong: ψ comes) -/
+def TL.until {A : Type} (φ ψ : TL A) : TL A :=
+  fun σ t => ∃ k, ψ σ (Nat.add k t) ∧ ((j : Nat) → Nat.lt j k = .true → φ σ (Nat.add j t))
+
+/-- SVA implications for a Boolean antecedent: `a |-> φ` and `a |=> φ` -/
+def TL.implies {A : Type} (a φ : TL A) : TL A := TL.always (TL.imp a φ)
+/-- SVA `a |=> φ`: always, if `a` then `φ` in the next cycle. -/
+def TL.impliesNext {A : Type} (a φ : TL A) : TL A := TL.always (TL.imp a (TL.next φ))
+
+/-- TLA: leads-to, fairness -/
+def TL.leadsTo {A : Type} (φ ψ : TL A) : TL A := TL.always (TL.imp φ (TL.eventually ψ))
+/-- `□◇ φ`: `φ` infinitely often (TLA's `<>[]`). -/
+def TL.infOften {A : Type} (φ : TL A) : TL A := TL.always (TL.eventually φ)
+/-- TLA weak fairness: if `enabled` is eventually always true then `taken` happens infinitely
+often. -/
+def TL.WF {A : Type} (enabled taken : TL A) : TL A := TL.imp (TL.eventually (TL.always enabled)) (TL.infOften taken)
+/-- TLA strong fairness: if `enabled` is infinitely often true then `taken` is. -/
+def TL.SF {A : Type} (enabled taken : TL A) : TL A := TL.imp (TL.infOften enabled) (TL.infOften taken)
+
+/-- TLA actions: a relation between consecutive elements, and the same up to stuttering
+(`[R]_v` with `v` the whole element) -/
+def TL.act {A : Type} (R : A → A → Prop) : TL A := fun σ t => R (σ t) (σ (Nat.succ t))
+/-- An action up to stuttering (`[R]_v` with `v` the whole element). -/
+def TL.stut {A : Type} (R : A → A → Prop) : TL A := TL.act (fun a b => R a b ∨ a = b)
+
+/-- SVA `$past(x, n)`: `p` of the element `n` cycles ago (vacuous before time `n`) -/
+def TL.past {A : Type} (n : Nat) (p : A → Prop) : TL A :=
+  fun σ t => Nat.lt t n = .false → p (σ (t - n))
+
+/-- a trace satisfies φ (at time 0); φ is valid -/
+def TL.sat {A : Type} (σ : Trace A) (φ : TL A) : Prop := φ σ 0
+/-- `φ` holds of every trace at time 0. -/
+def TL.valid {A : Type} (φ : TL A) : Prop := (σ : Trace A) → φ σ 0
+
+-- Notation (docs/dsls.md, 13o): `□ φ`, `◇ φ`, `○ φ` (prefix, like `¬`), `p ~> q`, and
+-- SVA's `a |-> φ` and `a |=> φ` (right-associative, below `∧`/`∨`). Formulas print this way.
+notation:max "□ " φ:40 => TL.always φ
+notation:max "◇ " φ:40 => TL.eventually φ
+notation:max "○ " φ:40 => TL.next φ
+infixr:25 " ~> " => TL.leadsTo
+infixr:25 " |-> " => TL.implies
+infixr:25 " |=> " => TL.impliesNext
+
+--------------------------------------------------------------------------------
+-- Laws
+
+/-- □ φ ⇒ φ, □ φ ⇒ ○ □ φ -/
+def TL.always_now {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : φ σ t := h 0
+/-- `□ φ` at the next cycle. -/
+def TL.always_next {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : TL.always φ σ (Nat.succ t) :=
+  fun (k : Nat) => Eq.substProp (φ σ) (Eq.symm (Nat.add_succ k t)) (h (Nat.succ k))
+/-- φ everywhere gives □ φ at any time -/
+def TL.always_of {A : Type} (φ : TL A) (σ : Trace A) (h : (u : Nat) → φ σ u) (t : Nat) : TL.always φ σ t :=
+  fun (k : Nat) => h (Nat.add k t)
+/-- φ now and □ φ from the next cycle -/
+def TL.always_cons {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h0 : φ σ t) (h : TL.always φ σ (Nat.succ t)) :
+    (k : Nat) → φ σ (Nat.add k t)
+  | .zero => h0
+  | .succ j => Eq.substProp (φ σ) (Nat.add_succ j t) (h j)
+/-- induction on time (TLA INV1) -/
+def TL.always_ind {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h0 : φ σ t)
+    (hs : (k : Nat) → φ σ (Nat.add k t) → φ σ (Nat.succ (Nat.add k t))) : (k : Nat) → φ σ (Nat.add k t)
+  | .zero => h0
+  | .succ k => hs k (TL.always_ind φ σ t h0 hs k)
+/-- monotone, and conjunctive -/
+def TL.always_mono {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (f : (u : Nat) → φ σ u → ψ σ u)
+    (h : TL.always φ σ t) : TL.always ψ σ t := fun (k : Nat) => f (Nat.add k t) (h k)
+/-- `□ (φ ∧ ψ)` from `□ φ` and `□ ψ`. -/
+def TL.always_and {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (h1 : TL.always φ σ t) (h2 : TL.always ψ σ t) :
+    TL.always (TL.and φ ψ) σ t := fun (k : Nat) => And.intro (h1 k) (h2 k)
+/-- φ ⇒ ◇ φ, bounded ◇ ⇒ ◇, □ ⇒ bounded □ -/
+def TL.eventually_now {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : φ σ t) : TL.eventually φ σ t :=
+  Ex.intro (fun (k : Nat) => φ σ (Nat.add k t)) 0 h
+/-- A bounded `◇` gives `◇`. -/
+def TL.within_eventually {A : Type} (n : Nat) (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.within n φ σ t) :
+    TL.eventually φ σ t :=
+  Ex.imp (fun (k : Nat) (p : Nat.lt k n = .true ∧ φ σ (Nat.add k t)) => p.2) h
+/-- `□ φ` gives `φ` throughout the next `n` cycles. -/
+def TL.always_during {A : Type} (n : Nat) (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.always φ σ t) : TL.during n φ σ t :=
+  fun (k : Nat) (hk : Nat.lt k n = .true) => h k
+/-- ◇ ○ φ ⇒ ◇ φ (later is still eventually) -/
+def TL.eventually_next {A : Type} (φ : TL A) (σ : Trace A) (t : Nat) (h : TL.eventually φ σ (Nat.succ t)) :
+    TL.eventually φ σ t :=
+  Ex.elim h (fun (k : Nat) (p : φ σ (Nat.add k (Nat.succ t))) =>
+    Ex.intro (fun (j : Nat) => φ σ (Nat.add j t)) (Nat.succ k) (Eq.substProp (φ σ) (Nat.add_succ k t) p))
+/-- ◇ is monotone -/
+def TL.eventually_mono {A : Type} (φ ψ : TL A) (σ : Trace A) (t : Nat) (f : (u : Nat) → φ σ u → ψ σ u)
+    (h : TL.eventually φ σ t) : TL.eventually ψ σ t :=
+  Ex.imp (fun (k : Nat) (p : φ σ (Nat.add k t)) => f (Nat.add k t) p) h
+
+-- Arithmetic for splitting time: every `t` is below `F` or `j + F`.
+def TL.splitTime : (F t : Nat) → Nat.lt t F = .true ∨ (∃ j, t = Nat.add j F)
+  | .zero, t => Or.inr (Ex.intro (fun (j : Nat) => t = Nat.add j 0) t (Eq.symm (Nat.add_zero t)))
+  | .succ F, .zero => Or.inl rfl
+  | .succ F, .succ t => Or.imp (fun (h : Nat.lt t F = .true) => h)
+      (fun (h : ∃ j, t = Nat.add j F) => Ex.imp (fun (j : Nat) (e : t = Nat.add j F) =>
+        Eq.trans (Eq.congrArg Nat.succ e) (Eq.symm (Nat.add_succ j F))) h)
+      (TL.splitTime F t)
+
+/-- A transient phase and what comes after: φ for the first `F` cycles (typically by
+evaluation) and from `F` on (typically by an invariant) is φ always. -/
+def TL.splitAt {A : Type} (φ : TL A) (σ : Trace A) (F : Nat)
+    (early : (k : Nat) → Nat.lt k F = .true → φ σ k) (late : (j : Nat) → φ σ (Nat.add j F)) : (t : Nat) → φ σ t :=
+  fun (t : Nat) => Or.elim (TL.splitTime F t) (early t)
+    (fun (h : ∃ j, t = Nat.add j F) => Ex.elim h (fun (j : Nat) (e : t = Nat.add j F) =>
+      Eq.substProp (φ σ) (Eq.symm e) (late j)))
+
+/-- Liveness from fairness: while `p` holds and the fair event `h` (a Boolean, e.g. a
+consumer's `ready`) is absent, `p` persists; when `h` comes, `q` happens; `h` comes
+infinitely often. Then `p` leads to `q`. (TLA's WF1 for a deterministic step.) -/
+def TL.fairStepAux {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A) (v : Nat)
+    (hold : (u : Nat) → p σ u → h u = .false → p σ (Nat.succ u))
+    (fire : (u : Nat) → p σ u → h u = .true → q σ u) (pv : p σ v) :
+    (j : Nat) → p σ (Nat.add j v) ∨ TL.eventually q σ v
+  | .zero => Or.inl pv
+  | .succ j => Or.elim (TL.fairStepAux p q h σ v hold fire pv j)
+      (fun (pj : p σ (Nat.add j v)) => Or.elim (Bool.cases (h (Nat.add j v)))
+        (fun (e : h (Nat.add j v) = .true) => Or.inr (Ex.intro (fun (k : Nat) => q σ (Nat.add k v)) j (fire (Nat.add j v) pj e)))
+        (fun (e : h (Nat.add j v) = .false) => Or.inl (hold (Nat.add j v) pj e)))
+      (fun (d : TL.eventually q σ v) => Or.inr d)
+
+/-- Liveness from fairness: while `p` holds and the fair event `h` is absent, `p` persists;
+when `h` comes, `q` happens; `h` comes infinitely often. Then `p` leads to `q`. -/
+def TL.fairStep {A : Type} (p q : TL A) (h : Nat → Bool) (σ : Trace A)
+    (hold : (u : Nat) → p σ u → h u = .false → p σ (Nat.succ u))
+    (fire : (u : Nat) → p σ u → h u = .true → q σ u)
+    (fair : (u : Nat) → ∃ k, h (Nat.add k u) = .true) :
+    (v : Nat) → p σ v → TL.eventually q σ v :=
+  fun (v : Nat) (pv : p σ v) => Ex.elim (fair v) (fun (k : Nat) (hk : h (Nat.add k v) = .true) =>
+    Or.elim (TL.fairStepAux p q h σ v hold fire pv k)
+      (fun (pk : p σ (Nat.add k v)) => Ex.intro (fun (j : Nat) => q σ (Nat.add j v)) k (fire (Nat.add k v) pk hk))
+      (fun (d : TL.eventually q σ v) => d))
+
+/-- Liveness from a ranking function: while `p` holds and `q` has not happened, the rank
+goes down by one per cycle; at rank 0 `q` happens. Then `q` happens within `r + 1`
+cycles of a time where `p` holds with rank `r` (a bound as well as liveness). -/
+def TL.rank {A : Type} (p q : TL A) (rk : Nat → Nat) (σ : Trace A)
+    (down : (u r : Nat) → p σ u → rk u = Nat.succ r → q σ u ∨ (p σ (Nat.succ u) ∧ rk (Nat.succ u) = r))
+    (base : (u : Nat) → p σ u → rk u = 0 → q σ u) :
+    (r v : Nat) → p σ v → rk v = r → TL.within (Nat.succ r) q σ v
+  | .zero, v, pv, e => Ex.intro (fun (k : Nat) => Nat.lt k 1 = .true ∧ q σ (Nat.add k v)) 0 (And.intro rfl (base v pv e))
+  | .succ r, v, pv, e => Or.elim (down v r pv e)
+      (fun (qv : q σ v) => Ex.intro (fun (k : Nat) => Nat.lt k (Nat.succ (Nat.succ r)) = .true ∧ q σ (Nat.add k v)) 0 (And.intro rfl qv))
+      (fun (n : p σ (Nat.succ v) ∧ rk (Nat.succ v) = r) =>
+        Ex.elim (TL.rank p q rk σ down base r (Nat.succ v) n.1 n.2)
+          (fun (k : Nat) (w : Nat.lt k (Nat.succ r) = .true ∧ q σ (Nat.add k (Nat.succ v))) =>
+            Ex.intro (fun (j : Nat) => Nat.lt j (Nat.succ (Nat.succ r)) = .true ∧ q σ (Nat.add j v)) (Nat.succ k)
+              (And.intro w.1 (Eq.substProp (q σ) (Nat.add_succ k v) w.2))))
+
+--------------------------------------------------------------------------------
+-- Labelled transition systems (protocols)
+
+/-- A protocol is a labelled transition system: a state type `S`, an action type `A`, an
+initial predicate and a step relation. The network, message pool and history variables
+are fields of the state, so a behaviour is one trace (TLA's choice). -/
+structure LTS (S A : Type) where
+  init : S → Prop
+  step : A → S → S → Prop
+
+/-- A run of `M`: it starts in an initial state and every consecutive pair is a step or a
+stutter (`[Next]_v` with the whole state as the variable). -/
+def LTS.Run {S A : Type} (M : LTS S A) (σ : Trace S) : Prop :=
+  M.init (σ 0) ∧
+  ((t : Nat) → σ (Nat.succ t) = σ t ∨ ∃ a, M.step a (σ t) (σ (Nat.succ t)))
+
+/-- `a` can be taken from `s`. -/
+def LTS.enabled {S A : Type} (M : LTS S A) (a : A) (s : S) : Prop := ∃ s', M.step a s s'
+
+/-- The action `a` is taken at this time. -/
+def LTS.taken {S A : Type} (M : LTS S A) (a : A) : TL S := TL.act (M.step a)
+
+/-- TLA weak fairness of `a`: if `a` stays enabled then it is taken infinitely often. -/
+def LTS.WF {S A : Type} (M : LTS S A) (a : A) : TL S :=
+  TL.WF (TL.now (M.enabled a)) (M.taken a)
+
+/-- TLA strong fairness of `a`: if `a` is enabled infinitely often then it is taken
+infinitely often. -/
+def LTS.SF {S A : Type} (M : LTS S A) (a : A) : TL S :=
+  TL.SF (TL.now (M.enabled a)) (M.taken a)
+
+/-- Weak fairness for the actions marked in `wfair`. -/
+def LTS.WFair {S A : Type} (M : LTS S A) (wfair : A → Bool) (σ : Trace S) : Prop :=
+  (a : A) → wfair a = .true → M.WF a σ 0
+
+/-- Strong fairness for the actions marked in `sfair`. -/
+def LTS.SFair {S A : Type} (M : LTS S A) (sfair : A → Bool) (σ : Trace S) : Prop :=
+  (a : A) → sfair a = .true → M.SF a σ 0
+
+/-- A fair run: weak and strong fairness for the marked actions. Fairness is a
+hypothesis, never an axiom. -/
+def LTS.Fair {S A : Type} (M : LTS S A) (wfair sfair : A → Bool) (σ : Trace S) : Prop :=
+  M.WFair wfair σ ∧ M.SFair sfair σ
+
+/-- Safety: an inductive invariant of the initial states and the step relation holds at
+every time of every run. -/
+def LTS.invariant {S A : Type} (M : LTS S A) (I : S → Prop)
+    (h0 : (s : S) → M.init s → I s)
+    (hs : (a : A) → (s : S) → (s' : S) → I s → M.step a s s' → I s') :
+    (σ : Trace S) → M.Run σ → TL.always (TL.now I) σ 0 :=
+  fun (σ : Trace S) (h : M.Run σ) =>
+    TL.always_ind (TL.now I) σ 0
+      (h0 (σ 0) h.1)
+      (fun (k : Nat) (hk : I (σ (Nat.add k 0))) =>
+        Or.elim (h.2 (Nat.add k 0))
+          (fun (e : σ (Nat.succ (Nat.add k 0)) = σ (Nat.add k 0)) =>
+            Eq.substProp (fun (s : S) => I s) (Eq.symm e) hk)
+          (fun (w : ∃ a, M.step a (σ (Nat.add k 0)) (σ (Nat.succ (Nat.add k 0)))) =>
+            Ex.elim w (fun (a : A) (st : M.step a (σ (Nat.add k 0)) (σ (Nat.succ (Nat.add k 0)))) =>
+              hs a (σ (Nat.add k 0)) (σ (Nat.succ (Nat.add k 0))) hk st)))
+
+/-- The bounded form of safety: `I` holds throughout the first `n` cycles of a run.
+This is the finite-prefix reading of `□ I` (`TL.during`, not `TL.always`). -/
+def LTS.safetyDuring {S A : Type} (M : LTS S A) (I : S → Prop) (n : Nat)
+    (h0 : (s : S) → M.init s → I s)
+    (hs : (a : A) → (s : S) → (s' : S) → I s → M.step a s s' → I s')
+    (σ : Trace S) (h : M.Run σ) : TL.during n (TL.now I) σ 0 :=
+  TL.always_during n (TL.now I) σ 0 (LTS.invariant M I h0 hs σ h)
+
+/-- A run's first `n` states are the `n` states of its trace (`Trace.take`). -/
+def LTS.bounded {S A : Type} (M : LTS S A) (n : Nat) (σ : Trace S) : List S :=
+  Trace.take n σ
