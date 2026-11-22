@@ -36,9 +36,6 @@ real driver, and the `trust_ledger` and scry test jobs own their companions.
 
 Usage
   scripts/check-companion-lists.py             check this checkout
-  scripts/check-companion-lists.py --root DIR  check another checkout (the
-                                               child scripts still read their
-                                               own tree; for fixtures only)
   scripts/check-companion-lists.py --self-test run the parsers on fixtures
   scripts/check-companion-lists.py --quiet     print only drift and the summary
   scripts/check-companion-lists.py -v          also say which lists passed
@@ -287,7 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         if problems:
             failed += 1
             drift.extend(problems)
-            print(f"companion list drifted: {name}", file=sys.stderr)
+            if not args.quiet:
+                print(f"companion list drifted: {name}", file=sys.stderr)
         elif args.verbose:
             print(f"companion list current: {name}")
 
