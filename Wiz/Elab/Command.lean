@@ -147,6 +147,19 @@ structure CommandState (R : Type) where
   declDocs : Std.HashMap Name DeclDoc := {}
   /-- the module being elaborated (`""` for the main file) -/
   module : String := ""
+  /-- (13t) whether a module's declarations take its path as their default namespace
+  (`Module.nameOf`), so `lib/Scry/CstStore.wiz`'s `def f` is `Scry.CstStore.f`. This is
+  stage 3: off by default, because it renames every existing module declaration. A run
+  turns it on together with `legacy` (the stage-0 allowlist). -/
+  modulePrefix : Bool := false
+  /-- (13t) the stage-0 allowlist: `legacy module writtenName` is true when the
+  declaration keeps its current absolute name (a `legacy-names.tsv` row), so turning
+  `modulePrefix` on changes no existing name. -/
+  legacy : Name → String → Bool := fun _ _ => false
+  /-- (13t) the `namespace`s opened in this file, innermost first, with where each was
+  declared (for a missing `end` at the end of the file), and the `open`s and aliases the
+  block started with (`open` is block-scoped: `end` restores them) -/
+  nsStack : List (Name × SourceInfo × List Name × List (Name × Name)) := []
   /-- the modules whose `builtin` registrations are trusted: the toolchain's library
   (`lib/`). The main file never is, nor a module from a `-I` directory. -/
   trustedModule : String → Bool := fun _ => false
@@ -173,6 +186,11 @@ structure CommandState (R : Type) where
   /-- no command has been elaborated into this state yet (it is the initial state, up to
   messages and the info tree) -/
   pristine : Bool := true
+  /-- (import header) a command that is not an `import` has been elaborated in this file:
+  from then on an `import` is an error ("imports must precede declarations"). A module's
+  own state starts `false`; `endModule` restores the importer's value, so importing a
+  module does not close the importer's header. -/
+  headerDone : Bool := false
   /-- (13m) what `local` commands of the module being elaborated added, latest first: node
   kinds and syntax categories, and macro rules and `attribute [macro]` registrations
   (numbered from the oldest). They are dropped when the module's import ends
@@ -335,7 +353,7 @@ def renamePrivate (s : CommandState R) (added : Array Name) : CommandState R :=
   let instCache := added.foldl (fun c n => match decls[f n]? with
     | some d => { g with instCache := c.erase n }.cacheInst d
     | none => c.erase n) g.instCache
-  { s with globals := { g with decls, order, heights, instCache, builtins := rb g.builtins, assumed := rb g.assumed },
+  { s with globals := { g with decls, order, heights, instCache, assumed := rb g.assumed }.setBuiltins (rb g.builtins),
            builtins := rb s.builtins }
 
 /-- Metas are untyped, so `?A : Sort ?u` never learns `?u` from `?A := A`, and
@@ -943,6 +961,145 @@ def isCorecCall (name : Name) (rhs : Syntax) : Bool :=
   let h := if rhs.isOfKind "term.app" then rhs.getArg 0 else rhs
   h.isOfKind "term.ident" && (h.getArg 0).getId? == some name
 
+/-! ### Sized copatterns → `scofix`
+
+`def f {i : Size} (s : T^i) : T^i` with copatterns is compiled to a `scofix` whose body is
+at `↑j`: the declared size `i` is viewed as a successor (every size is `∞` or `↑j`), the
+explicit binders are the state at the declared size, and a recursive call is the `rec`
+argument at the predecessor `j`. The clause syntax is rewritten (observations of a sized
+explicit binder become payload projections of `out`, and recursive calls become `rec`
+applications) so the existing term elaborator checks the clauses at the body size. -/
+
+/-- Remove the last `n` binders and substitute `ps` (the terms for the binders, in order
+`x₁ … xₙ`) for them. `ps` live in the context without those binders. -/
+partial def substLastVars (n : Nat) (ps : List (Term R)) (t : Term R) (depth : Nat := 0) : Term R :=
+  match t with
+  | .var i =>
+    if i < depth || i < depth + n then
+      if i < depth then .var i
+      else match ps[n - 1 - (i - depth)]? with
+        | some p => p.lift depth
+        | none => .var i
+    else .var (i - n)
+  | t => Id.run <| t.mapChildrenM pure (fun d c => pure (substLastVars n ps c (depth + d)))
+
+/-- Replace the free variable `k` by `s` (a term in the same context). -/
+partial def replaceFree (k : Nat) (s : Term R) (t : Term R) (depth : Nat := 0) : Term R :=
+  match t with
+  | .var i => if i == k + depth then s.lift depth else .var i
+  | t => Id.run <| t.mapChildrenM pure (fun d c => pure (replaceFree k s c (depth + d)))
+
+private def sIdent (info : SourceInfo) (n : Name) : Syntax :=
+  .node info "term.ident" #[.ident info n]
+
+private def sApp (info : SourceInfo) (f : Syntax) (args : List Syntax) : Syntax :=
+  if args.isEmpty then f else .node info "term.app" #[f, .node info "null" args.toArray]
+
+private def sProj (info : SourceInfo) (t : Syntax) (n : Nat) : Syntax :=
+  .node info "term.proj" #[t, .atom info ".", numStx info n]
+
+private def sUnit (info : SourceInfo) : Syntax :=
+  .node info "term.unitVal" #[.atom info "(", .atom info ")"]
+
+/-- `let (x, y) := v; body` as syntax (the pair split, not a projection: the
+payload of a signal has a 0-quantity phantom index field, which R1 forbids
+projecting). -/
+private def sLetPair (info : SourceInfo) (x y : Name) (v body : Syntax) : Syntax :=
+  .node info "term.letPair"
+    #[.atom info "let", .node info "null" #[], .atom info "(",
+      .ident info x, .atom info ",", .ident info y, .atom info ")",
+      .atom info ":=", v, .node info "null" #[], body]
+
+/-- The observation `o` of the explicit binder `x` at the body size, as a pair split
+of `out x` (first field) or of its second component, and so on. -/
+private def sObs (info : SourceInfo) (x : Name) (pos : Nat) : Syntax :=
+  let outx := sApp info (sIdent info "out") [sIdent info x]
+  let rec go (src : Syntax) : Nat → Syntax
+    | 0 =>
+      let v := x ++ "✝v0"
+      let r := x ++ "✝r0"
+      sLetPair info v r src (sIdent info v)
+    | k + 1 =>
+      let v := x ++ "✝v" ++ toString (k + 1)
+      let r := x ++ "✝r" ++ toString (k + 1)
+      sLetPair info v r src (go (sIdent info r) k)
+  go outx pos
+
+/-- `(e₁, …, eₙ, ())`: the state tuple of the explicit binders (plus the trailing unit,
+which the `Σ` state type has). -/
+private def sStateTuple (info : SourceInfo) (args : List Syntax) : Syntax :=
+  match args ++ [sUnit info] with
+  | [t] => t
+  | t :: rest => .node info "term.tuple" #[.atom info "(", t, .atom info ",", .node info "null" rest.toArray, .atom info ")"]
+  | [] => sUnit info
+
+/-- Rewrite a sized clause's right-hand side: an observation `x.o` of a sized explicit
+binder `x` is `out x`'s field, and a recursive call `f e…` is the body's `rec` applied to
+the index and the state tuple. The head names `rec` and `idx` are the fresh binders the
+body context uses. -/
+partial def rewriteSizedRhs (info : SourceInfo) (name recName idxName : Name) (n : Nat)
+    (coid : List (Name × List Name)) (stx : Syntax) : Syntax :=
+  match stx with
+  | .node i "term.ident" #[.ident j nm] =>
+    match (coid.findSome? fun (x, os) =>
+        if nm.startsWith (x ++ ".") then
+          let o := (nm.drop (x.length + 1)).toString
+          os.idxOf? o |>.map fun pos => sObs info x pos
+        else none) with
+    | some t => t
+    | none => .node i "term.ident" #[.ident j nm]
+  | .node i "term.field" #[b, d, .ident j o] =>
+    let base := match b with
+      | .node _ "term.ident" #[.ident _ x] => some x
+      | _ => none
+    match base.bind fun x => (coid.find? (·.1 == x)).map (x, ·.2) with
+    | some (x, os) => match os.idxOf? o with
+      | some pos => sObs info x pos
+      | none => .node i "term.field" #[b, d, .ident j o]
+    | none => .node i "term.field" #[b, d, .ident j o]
+  | .node i "term.app" #[h, .node j "null" args] =>
+    let h' := rewriteSizedRhs info name recName idxName n coid h
+    let args' := args.map (rewriteSizedRhs info name recName idxName n coid)
+    if h'.isOfKind "term.ident" && (h'.getArg 0).getId? == some name then
+      if args'.size == n then
+        sApp info (sIdent info recName) [sIdent info idxName, sStateTuple info args'.toList]
+      else .node i "term.app" #[h', .node j "null" args']
+    else .node i "term.app" #[h', .node j "null" args']
+  | .node i k as => .node i k (as.map (rewriteSizedRhs info name recName idxName n coid))
+  | s => s
+
+/-- Is the result syntax a sized type `T^s` whose size is a variable (an identifier),
+rather than `↑s` or `∞`? (Parentheses are transparent.) -/
+partial def sizedVarSyntax? (stx : Syntax) : Bool :=
+  if stx.isOfKind "term.paren" then sizedVarSyntax? (stx.getArg 1)
+  else if stx.isOfKind "term.sized" then
+    stx.args.any (·.isOfKind "term.ident") &&
+      !stx.args.any fun a => a.isOfKind "term.szSuc" || a.isOfKind "term.szInf"
+  else false
+
+/-- The size variable of a `T^s` result, if the result type is written as a sized type
+with a size variable. (Parentheses are transparent.) -/
+partial def resultSizeVar? (stx : Syntax) : Option Name :=
+  if stx.isOfKind "term.paren" then resultSizeVar? (stx.getArg 1)
+  else if stx.isOfKind "term.sized" then
+    match stx.args.back? with
+    | some s => s.getId?
+    | none => none
+  else none
+
+/-- Does the syntax mention a sized type `_^i`? -/
+partial def mentionsSizedAt (i : Name) (stx : Syntax) : Bool :=
+  (stx.isOfKind "term.sized" &&
+    (match stx.args.back? with
+     | some s => s.getId? == some i
+     | none => false)) ||
+    stx.args.any (mentionsSizedAt i)
+
+/-- Does a binder of the definition have a type sized by `i`? -/
+def hasBinderSizedAt (cmd : Syntax) (i : Name) : Bool :=
+  (cmd.getArg 3).args.any fun b =>
+    (binderViews b).any fun v => v.bi == .default && v.type.any (mentionsSizedAt i)
+
 /-- The corecursive case of `elabCopatterns`: `coit`. -/
 def elabCopatternsCoit (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : ElabM R (Term R × Term R) := do
   let info := cmd.info
@@ -1096,6 +1253,137 @@ def elabCopatternsCocon (name : Name) (cmd : Syntax) (obs : List (Name × Bool))
   --| sorry
   --sol>
 
+/-- Does `stx` contain a recursive call `f e…` with a bare sized binder as an
+argument? That is a call at the body size (the state at `↑j`), which subtyping would
+otherwise accept as a value at the predecessor; it must be a size error. -/
+partial def sameSizeRec? (name : Name) (sized : List Name) (stx : Syntax) : Bool :=
+  let bare (a : Syntax) : Bool := match a with
+    | .node _ "term.ident" #[.ident _ x] => sized.contains x
+    | _ => false
+  match stx with
+  | .node _ "term.app" #[h, .node _ "null" args] =>
+    (h.isOfKind "term.ident" && (h.getArg 0).getId? == some name && args.any bare) ||
+      args.any (sameSizeRec? name sized) || sameSizeRec? name sized h
+  | .node _ _ as => as.any (sameSizeRec? name sized)
+  | _ => false
+
+/-- The sized case of `elabCopatterns`: `def f {i : Size} … : T^i | .o => rhs` with a
+binder at size `i` compiles to `scofix`. The state family is the tuple of the explicit
+binders at a size, the seed is their tuple at `i`, and the body is checked at a fresh
+predecessor `j` (the suc view `i = ↑j`): observations of a sized binder read `out`, and a
+recursive call becomes the `rec` argument at `j`. -/
+def elabCopatternsScofix (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) :
+    ElabM R (Term R × Term R) := do
+  let info := cmd.info
+  let g ← getGlobals
+  let (ctx, tele) ← elabTelescope { info } (((cmd.getArg 3).args.flatMap binderViews)).toList
+  let tyStx := (cmd.getArg 4).getArg 1
+  let (ty, _) ← Elab.checkType ctx tyStx
+  finishInstances
+  let ty ← zonk ctx.lvl ty
+  ensureNoMVars ty info
+  let .nu l I D idx sz hint ← force (← evalIn ctx ty)
+    | throwAt tyStx.info "copatterns need a coinductive result type"
+  let some si := (match sizeView sz with
+    | (some (.neutral (.local si) #[]), 0) => some si
+    | _ => none)
+    | throwAt tyStx.info s!"a sized copattern definition needs a size variable as its result size, not {← showVal ctx sz}"
+  let w : R := QuantitySyntax.explicitDefault
+  let wT : Term R := .qlit w
+  let q := quote g ctx.lvl
+  let explicit := (tele.toList.zipIdx.filter fun ((_, bi, _, _), _) => bi == .default)
+  let n := explicit.length
+  -- the state type at the declared size, and the seed (the explicit binders' tuple)
+  let stateTy0 : Term R := explicit.zipIdx.foldr (fun (((x, _, _, _), k), j) acc =>
+    .sigma x wT ((q ctx.types[ctx.lvl - k - 1]!).lift j) acc .hole) (.unit (.succ l))
+  let init : Term R := (explicit.map fun ((_, _, _, _), k) => (.var (ctx.lvl - k - 1) : Term R)).foldr .pair .tt
+  -- A := fun j => fun _ => stateTy0[si := j]
+  -- `si` is a level; the de Bruijn index of the size variable in `stateTy0` is
+  -- `ctx.lvl - 1 - si`, and `lift 2` adds the two binders of `A`.
+  let A : Term R := .lam "j" (.lam "_" (replaceFree (ctx.lvl + 1 - si) (.var 1) (stateTy0.lift 2)))
+  let vA ← evalIn ctx A
+  let vI := I
+  let vD := D
+  -- the body context: j, rec, idx, a
+  let ctxJ := ctx.bind "j" .size
+  let vJ := Val.var ctx.lvl
+  let vF := scofixFunTy g l vI vD vA w
+  let .pi _ _ _ _ codJ _ := whnf vF
+    | panic! "scofix f type is not a pi"
+  let vAfterJ := Closure.inst g codJ vJ
+  let .pi _ _ _ vRecDom codR _ := whnf vAfterJ
+    | panic! "scofix rec type is not a pi"
+  let recName : Name := name ++ "✝rec"
+  let idxName : Name := "idx✝"
+  let aName : Name := "a✝"
+  let ctxJR := ctxJ.bind recName vRecDom
+  let vRec := Val.var ctxJ.lvl
+  let ctxJRI := ctxJR.bind idxName vI
+  let vIdx := Val.var ctxJR.lvl
+  let vAfterRec := Closure.inst g codR vRec
+  let .pi _ _ _ _ codI _ := whnf vAfterRec
+    | panic! "scofix index type is not a pi"
+  let vAfterIdx := Closure.inst g codI vIdx
+  let vStateBody := match whnf vAfterIdx with
+    | .pi _ _ _ dom _ _ => dom
+    | _ => panic! "scofix body state"
+  -- the explicit binders at the body size, as real context binders (from the state)
+  let mut cctx := ctxJRI.bind aName vStateBody
+  let mut sty := vStateBody
+  for ((x, _, qq, _), _) in explicit do
+    match whnf sty with
+    | .sigma _ _ Aty B _ =>
+      cctx := cctx.bindQ x Aty ((Val.toPoly? (← evalIn cctx qq)).bind (·.isConst?))
+      sty := Closure.inst g B (Val.var (cctx.lvl - 1))
+    | _ => throwAt info "internal error: state tuple"
+  -- the explicit binders that are the same coinductive type as the result: their
+  -- observations are read with `out` at the body size
+  let some (T0, _, _) := hint
+    | throwAt tyStx.info "a sized copattern definition needs a nominal coinductive result type"
+  let coid : List (Name × List Name) := explicit.filterMap fun ((x, _, _, _), k) =>
+    match whnf ctx.types[ctx.lvl - k - 1]! with
+    | .nu _ _ _ _ _ (some (T, _, _)) => if T == T0 then some (x, obs.map (·.1)) else none
+    | _ => none
+  -- the clauses at the body size; a recursive call is `rec idx (args, ())`
+  let alts := (cmd.getArg 5).args.toList
+  let mut pty : VTy R := vInterp g l I D (nuFamilyAt l I D vJ) vIdx
+  let mut comps : List (Term R) := []
+  for (o, isRec) in obs do
+    let some alt := copatternAlt? alts o
+      | throwAt info s!"missing copattern .{o}" ErrorCode.missingCopattern
+    let rhs0 := alt.getArg 3
+    if sameSizeRec? name (coid.map (·.1)) rhs0 then
+      throwAt info s!"type mismatch: the recursive call must be at the predecessor size, not the body size (a combinational loop)"
+    let rhs := rewriteSizedRhs info name recName idxName n coid rhs0
+    let .sigma _ _ Aty B _ ← force pty
+      | throwAt info "internal error: observation type"
+    let Aty := if isRec then .nu l I D vIdx vJ hint else Aty
+    let (Aty, lifted) ← match isRec, ← force Aty with
+      | false, .ulift _ _ A' => pure (A', true)
+      | _, _ => pure (Aty, false)
+    let c ← Elab.check cctx rhs Aty
+    let c := if lifted then .up c else c
+    comps := comps ++ [c]   -- complexity: ok (one component per constructor argument)
+    pty ← instM B (← evalIn cctx c)
+  let e : Term R ← match ← force I with
+    | .unit _ => pure .tt
+    | _ => pure (.refl (quote g cctx.lvl I) (quote g cctx.lvl vIdx))
+  let payload : Term R := comps.foldr .pair (.pair e .tt)
+  -- substitute the body binders by the projections of the state `a`
+  let ps : List (Term R) := explicit.zipIdx.map fun ((_, _), pos) =>
+    .fst ((List.range pos).foldl (fun t _ => .snd t) (.var 0) : Term R)
+  let body := substLastVars n ps (.cocon payload)
+  let F : Term R := .lam "j" (.lam recName (.lam idxName (.lam aName body)))
+  let scofixT : Term R := .scofix l (q I) (q D) A F (q sz) (q idx) init
+  let val := tele.foldr (fun (x, _, _, _) b => Term.lam x b) scofixT
+  let fullTy := tele.foldr (fun (x, bi, qq, a) b => Term.pi x bi qq a b .hole) ty
+  finishInstances
+  let val ← zonk 0 val
+  ensureNoMVars val info
+  let fullTy ← zonk 0 fullTy
+  ensureNoMVars fullTy info
+  pure (fullTy, val)
+
 /-- Copatterns: `def f binders : T args | .obs => rhs …` for a coinductive `T`
 compiles to `coit`. The state is the tuple of the explicit binders; a recursive
 observation must be a corecursive call `f e…` (that is the guardedness condition),
@@ -1103,14 +1391,19 @@ whose arguments become the next state.
 
 When no observation is corecursive (`register a s | .head => a | .tail => s`), the
 definition is not recursive at all: it compiles to `cocon` of the observations, one
-cell in front of the given streams, and `f` may not occur on any right-hand side. -/
+cell in front of the given streams, and `f` may not occur on any right-hand side.
+
+A result `T^i` at a size variable with a binder also sized at `i` is the sized case:
+`elabCopatternsScofix` compiles it to `scofix`. -/
 def elabCopatterns (name : Name) (cmd : Syntax) (obs : List (Name × Bool)) : ElabM R (Term R × Term R) := do
   let alts := (cmd.getArg 5).args.toList
   for (o, _) in obs do
     if (copatternAlt? alts o).isNone then throwAt cmd.info s!"missing copattern .{o}" ErrorCode.missingCopattern
   let corecursive := obs.any fun (o, isRec) =>
     isRec && ((copatternAlt? alts o).map fun a => isCorecCall name (a.getArg 3)).getD false
-  let r ← if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
+  let sized := corecursive && sizedVarSyntax? ((cmd.getArg 4).getArg 1)
+  let r ← if sized then elabCopatternsScofix name cmd obs
+    else if corecursive then elabCopatternsCoit name cmd obs else elabCopatternsCocon name cmd obs
   checkGuessedDecl cmd.info name r.1 (some r.2)
   pure r
 
@@ -1291,7 +1584,7 @@ def builtinShapeError (g : Globals R) (key : Name) (d : Decl R) : Option String 
     | .sort _, some (.mu _ _ _ _ _ (some (T, _, _)) _) => if T == d.name then none else some "it must be an inductive type"
     | _, _ => some "it must be an inductive type"
   else if key == "memo" then none
-  else match g.builtins.lookup "nat" with
+  else match g.builtinOf? "nat" with
     | none => some "register `builtin nat := …` first"
     | some N =>
       let (as, r) := doms d.type
@@ -1330,7 +1623,16 @@ partial def mutualInductive (tables : ParserTables) (defs : Array Syntax) : Exce
     let sig := d.getArg 4
     unless sig.args.isEmpty || sig.args.any (·.isOfKind "term.prop") do
       throw "mutual inductive types may not have indices (yet)"
-  let fam := "_".intercalate names.toList
+  -- (13t) in a namespace the members are `N.A`, `N.B`: one family `N.A_B` (the
+  -- namespace before the underscore, so that `N.A_B.Tag` parses as a name)
+  let last (n : Name) : Name := (n.splitOn ".").getLast!
+  let nsParts : List String :=
+    match names[0]? with
+    | some n => (n.splitOn ".").dropLast
+    | none => []
+  let shorts := names.toList.map last
+  let fam := if nsParts.isEmpty then "_".intercalate shorts
+    else ".".intercalate nsParts ++ "." ++ "_".intercalate shorts
   -- (issue #252) a block of inductive propositions is one propositional family
   let isPropCmd (d : Syntax) : Bool := (d.getArg 4).args.any (·.isOfKind "term.prop")
   let anyProp := defs.any isPropCmd
@@ -1491,12 +1793,17 @@ def CommandState.endModule (inner outer : CommandState R) : CommandState R :=
   let insts := inner.localInsts.take (inner.localInsts.length - outer.localInsts.length)
   let simps := inner.localSimps.take (inner.localSimps.length - outer.localSimps.length)
   let pps := inner.localPP.take (inner.localPP.length - outer.localPP.length)
-  -- (11r) `set_option pp.…` is the module's own
+  -- (11r) `set_option pp.…` is the module's own; (13t) so are its namespaces and opens
+  let g2 : PPTable := { inner.globals.pp with useNotation := outer.globals.pp.useNotation }
+  let g1 : Globals R := { inner.globals with pp := g2, namespacePrefix := outer.globals.namespacePrefix, opens := outer.globals.opens, aliases := outer.globals.aliases }
   let reset := { inner with localKinds := outer.localKinds, localCats := outer.localCats,
                             localRules := outer.localRules, localProcs := outer.localProcs,
                             localInsts := outer.localInsts, localSimps := outer.localSimps,
                             localPP := outer.localPP,
-                            globals := { inner.globals with pp := { inner.globals.pp with useNotation := outer.globals.pp.useNotation } } }
+                            -- (import header) the importer's header is not the module's
+                            headerDone := outer.headerDone,
+                            nsStack := outer.nsStack,
+                            globals := g1 }
   -- (11w) a `local instance` is found only in its module (its definition stays: a name)
   let reset := if insts.isEmpty then reset else
     { reset with instances := (reset.instances.zipIdx.filter fun (_, i) => !insts.contains i).map (·.1) }
@@ -1557,8 +1864,133 @@ where
         (.node info k args', msgs)
       | stx => (stx, msgs)
 
+/-- (13t/13v) `__root__` (Lean's `_root_`): the leading segment that resets the
+namespace prefix to the empty one. `__root__` on its own is the root namespace
+(`namespace __root__`); `__root__.Shared` is the root-level namespace `Shared`. -/
+def rootEscape : Name := "__root__"
+
+/-- (13v) Where a written namespace name opens, relative to `p`: `__root__` and
+`__root__.X` are absolute, anything else is `p`-relative. -/
+def namespaceTarget (p : Name) (n : Name) : Name :=
+  if n == rootEscape then ""
+  else if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString
+  else if p.isEmpty then n else p ++ "." ++ n
+
+/-- (13v) A declaration name written with the `__root__.` escape: the true-global
+name it declares (`__root__.f` is `f`). Other names are unchanged. -/
+def stripRootEscape (n : Name) : Name :=
+  if n.startsWith (rootEscape ++ ".") then (n.drop (rootEscape.length + 1)).toString else n
+
+/-- (13v) The declaration name a command writes in its name position (the first one for
+`mutual`, whose members are checked when each is elaborated). -/
+partial def cmdDeclName? (cmd : Syntax) : Option Name :=
+  match cmd.kind with
+  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
+  | "command.foreignType" | "command.inductive" | "command.structure"
+  | "command.class" | "command.coinductive" => (cmd.getArg 1).getId?
+  | "command.extern" | "command.cStruct" => (cmd.getArg 3).getId?
+  | "command.instance" =>
+    let stx := cmd.getArg 2
+    match stx.getId? with
+    | some n => some n
+    | none => (stx.args[0]?).bind fun x => x.getId?
+  | "command.private" | "command.sealed" | "command.local" => cmdDeclName? (cmd.getArg 1)
+  | "command.partial" => cmdDeclName? (cmd.getArg 2)
+  | _ => none
+
+/-- (13t) Prefix the name a declaration command declares with the current namespace, so
+that `def bar` in `namespace Foo` is the global `Foo.bar`. The command's syntax is
+rewritten once, where the command is elaborated (`Frontend.step`, `elabExpansion`); the
+recursive `elabCommand` calls of `private`, `partial`, `mutual`, … then see the full name,
+and references to `bar` in the body resolve through `Globals.namespacePrefix`
+(`Globals.resolveName`). A written `__root__.` escape resets the prefix (13v). Commands
+that declare no name (`open`, `end`, `#check`, …) are unchanged; a command that declares
+several names has one in the position handled here (`mutual` recurses into its members). -/
+partial def prefixDeclName (p : Name) (module : Name) (legacy : Name → String → Bool) (cmd : Syntax) : Syntax :=
+  let prefixed (n : Name) : Name :=
+    if n == rootEscape then n
+    else if n.startsWith (rootEscape ++ ".") then
+      (n.drop (rootEscape.length + 1)).toString
+    else if (n.splitOn rootEscape).length > 1 then n
+    else if legacy module n then n
+    else if p.isEmpty then n else p ++ "." ++ n
+  let namedAt (i : Nat) : Syntax :=
+    match (cmd.getArg i).getId? with
+    | some n => Syntax.ident (cmd.getArg i).info (prefixed n)
+    | none => cmd.getArg i
+  -- an optional name: the `null` node `optional ident` makes, bare ident, or nothing
+  let optIdent (stx : Syntax) : Syntax :=
+    match stx.getId? with
+    | some n => Syntax.ident stx.info (prefixed n)
+    | none => match stx.args[0]? with
+      | some x => match x.getId? with
+        | some n => stx.setArg 0 (Syntax.ident x.info (prefixed n))
+        | none => stx
+      | none => stx
+  match cmd.kind with
+  | "command.def" | "command.defEqns" | "command.axiom" | "command.glue"
+  | "command.foreignType" => cmd.setArg 1 (namedAt 1)
+  | "command.inductive" | "command.structure" | "command.class" | "command.coinductive" =>
+    -- the type's own name, written unqualified in its fields (`| mk : T → T`), is the
+    -- prefixed one: the elaborator binds `N.T`, not `T`, while checking them
+    let short? := (cmd.getArg 1).getId? |>.map stripRootEscape
+    let cmd := cmd.setArg 1 (namedAt 1)
+    match short? with
+    | some sh => cmd.renameIdents fun n =>
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
+        else none
+    | none => cmd
+  | "command.extern" | "command.cStruct" => cmd.setArg 3 (namedAt 3)
+  | "command.instance" => cmd.setArg 2 (optIdent (cmd.getArg 2))
+  | "command.partial" => cmd.setArg 2 (prefixDeclName p module legacy (cmd.getArg 2))
+  | "command.private" | "command.sealed" | "command.local" =>
+    cmd.setArg 1 (prefixDeclName p module legacy (cmd.getArg 1))
+  | "command.mutual" =>
+    let body := cmd.getArg 1
+    let members := body.args.map (prefixDeclName p module legacy)
+    -- the block's type names, as written (`A`, `B`): a member refers to the others
+    -- unqualified (`| mk : B → A`), and the elaborator binds them as `N.A`, `N.B`
+    let typeShorts := body.args.filterMap fun d =>
+      let d := if d.isOfKind "command.private" then d.getArg 1 else d
+      if ["command.inductive", "command.structure", "command.class", "command.coinductive"].contains d.kind then
+        (d.getArg 1).getId?.map stripRootEscape else none
+    let rewrite (c : Syntax) : Syntax := c.renameIdents fun n =>
+      typeShorts.findSome? fun sh =>
+        if n == sh then some (prefixed sh)
+        else if n.startsWith (sh ++ ".") then some (prefixed n)
+        else none
+    cmd.setArg 1 (.node body.info body.kind (members.map rewrite))
+  | _ => cmd
+
+/-- (13t) Start elaborating a module: its `namespace`s and `open`s are its own (a file's
+`open` does not reach the modules it imports). -/
+def CommandState.atModuleStart (s : CommandState R) : CommandState R :=
+  -- (13t) stage 3: a module's default namespace is its path (`Module.nameOf`); the
+  -- stage-0 allowlist (`legacy`) keeps the old names until a batch deletes its rows
+  let p := if s.modulePrefix then s.module else ""
+  { s with globals := { s.globals with namespacePrefix := p, opens := [], aliases := [] },
+           nsStack := [] }
+
+/-- (13t) A file must close every `namespace` it opens: report each unclosed one at the
+line of its `namespace` (the error belongs there, not at the end of the file). -/
+def CommandState.checkUnclosedNamespaces (s : CommandState R) : CommandState R :=
+  if s.nsStack.isEmpty then s else
+  { s with nsStack := [], messages := s.messages ++ s.nsStack.reverse.toArray.map fun (n, info, _, _) =>
+      let shown := if n.isEmpty then rootEscape else n
+      let short := if n.isEmpty then rootEscape else (n.splitOn ".").getLast!
+      { info, severity := .error, code := ErrorCode.unclosedNamespace
+        text := s!"namespace {shown} is not closed: add `end` (or `end {short}`)" } }
+
 /-- Elaborate one command, updating the state and adding messages. -/
 partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
+  -- (13v) `__root__` is a leading segment only: a declaration named exactly `__root__`,
+  -- or one with `__root__` anywhere else in the name, is an error
+  if let some n := cmdDeclName? cmd then
+    if n == rootEscape || ((n.splitOn ".").drop 1).contains rootEscape then
+      let text := s!"`__root__` is only meaningful as the first segment of a name ('{n}')"
+      modify fun s => { s with messages := s.messages.push { info := cmd.info, severity := .error, code := ErrorCode.rootName, text } }
+      return
   -- (13b) privacy is per module: the globals know which one is being elaborated
   modify fun s => if s.globals.module == s.module then s else { s with globals := { s.globals with module := s.module } }
   let s ← get
@@ -1675,7 +2107,9 @@ partial def elabCommand (cmd : Syntax) : StateM (CommandState R) Unit := do
     | .error e => report .error info s!"{what}: {e}"
     | .ok (cmds, next) =>
       modify fun s => { s with nextScope := next }
-      for c in cmds do elabCommand c
+      let st ← get
+      for c in cmds do
+        elabCommand (prefixDeclName st.globals.namespacePrefix st.module st.legacy c)
   -- `deriving C` for the type `T`: run `C`'s deriver
   let derive (C T : Name) (info : SourceInfo) : StateM (CommandState R) Unit := do
     let s ← get
@@ -1728,10 +2162,79 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else
         reportKernel cmd.info name e (if ours then
           "\n(the definition itself checks: this is a bug in Wiz's compilation of recursive definitions, not in your code; please report it)" else "")
+  -- (import header) `import` is parsed only at the top level, before every other command
+  -- (`Wiz.Frontend.Parse.parseCommand`, `Builtin.importDescr`); it is not a rule of the
+  -- extensible `command` category, so `syntax`/`macro_rules` cannot write it. A node of
+  -- this kind that still reaches the elaborator was built by a command macro (`Macro`
+  -- output) or hand-built: reject it here, the second half of the extension-proofing.
+  if cmd.isOfKind "command.import" || cmd.isOfKind "command.openImport" then
+    reportC cmd.info "`import` is only allowed at the top level of a file, before every other command (a command macro cannot produce one)" ErrorCode.importOrder
+    return
+  -- the wrapper commands parse an `import` only to report which one contains it
+  let rejectImportIn (what : String) (inner : Syntax) : StateM (CommandState R) Bool := do
+    if inner.isOfKind "command.import" || inner.isOfKind "command.openImport" then
+      reportC inner.info s!"`import` is not allowed inside {what}: imports go at the top level of a file, before every other command" ErrorCode.importOrder
+      pure true
+    else pure false
   match cmd.kind with
+  | "command.namespace" =>
+    -- (13t) `namespace Foo`: declarations from here to the matching `end` are `Foo.x`
+    -- (nested: `A.B.x`). A namespace is only a prefix, not a privacy boundary.
+    -- (13v) `namespace __root__` opens the root (an empty prefix) and
+    -- `namespace __root__.X` opens the root-level `X`, for a file that must stay global.
+    let n := ((cmd.getArg 1).getId?).getD "_"
+    let p := s.globals.namespacePrefix
+    let full := namespaceTarget p n
+    -- (13t) the block's `open`s start from what the enclosing block has: `end` restores
+    -- them, so an `open` inside the body does not outlive it
+    modify fun s => { s with nsStack := (full, cmd.info, s.globals.opens, s.globals.aliases) :: s.nsStack,
+                             globals := { s.globals with namespacePrefix := full } }
+  | "command.end" =>
+    -- (13t) `end` closes the innermost `namespace`; `end Foo` must name it (its last
+    -- component, or its full name)
+    let given? := (cmd.getArg 1).args.filterMap Syntax.getId? |>.toList.head?
+    match s.nsStack with
+    | [] => reportC cmd.info "`end` without an open `namespace`" ""
+    | (full, _, savedOpens, savedAliases) :: rest =>
+      let short := if full.isEmpty then rootEscape else (full.splitOn ".").getLast!
+      let closes (g : Name) : Bool := g == short || g == full || (full.isEmpty && g == rootEscape)
+      if let some g := given? then
+        unless closes g do
+          report .error cmd.info s!"`end {g}` does not close the namespace `{full}` (write `end` or `end {short}`)"
+      let outerNs := match rest with
+        | (p, _, _, _) :: _ => p
+        | [] => ""
+      -- (13t) `open` is block-scoped: the enclosing block's opens and aliases come back
+      let g1 : Globals R := { s.globals with namespacePrefix := outerNs,
+                                             opens := savedOpens, aliases := savedAliases }
+      modify fun s => { s with nsStack := rest, globals := g1 }
+  | "command.open" =>
+    -- (13t) `open M`: M's names are visible unqualified from here to the end of the
+    -- enclosing block (at file top, to the end of the file: `nsStack` saves the opens).
+    -- `open M as A` only makes `A.x` a spelling of `M.x`: it opens nothing unqualified.
+    let n0 := ((cmd.getArg 1).getId?).getD "_"
+    -- (13v) `open __root__.X` opens the root-level `X`; `open __root__` is a no-op (the
+    -- root's names are always candidates)
+    let n := stripRootEscape n0
+    let asAlias? := (cmd.getArg 2).args.filterMap Syntax.getId? |>.toList.head?
+    -- (13t) the namespace must have a declaration visible here: a public one (named
+    -- `N.x`), or this module's own private one (`_private.m._0.N.x`, which only this
+    -- module can name). Another module's private names open nothing.
+    let privPrefix := if s.module.isEmpty then "" else "_private." ++ s.module ++ "._0."
+    let declares := s.globals.order.any fun d =>
+      d.startsWith (n ++ ".") || (privPrefix != "" && d.startsWith (privPrefix ++ n ++ "."))
+    if n.isEmpty then pure ()
+    else if !declares then
+      report .error (cmd.getArg 1).info s!"unknown namespace '{n}': there is no declaration `{n}.…`"
+    else match asAlias? with
+    | some a =>
+      modify fun s => { s with globals := { s.globals with aliases := (a, n) :: s.globals.aliases } }
+    | none =>
+      modify fun s => { s with globals := { s.globals with opens := s.globals.opens ++ [n] } }
   | "command.private" =>
     -- (13b) every name the command declares is private to this module
     let before := s.globals.order.size
+    if ← rejectImportIn "`private`" (cmd.getArg 1) then return
     -- In a module, a private type (`inductive`, `structure`, `class`, `coinductive`, or a
     -- `mutual` block of inductives) is declared under its private kernel name
     -- (`Globals.privateName`) from the start, so that its constructors, fields,
@@ -1746,10 +2249,22 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         (inner.getArg 1).args.filterMap (·.getArg 1 |>.getId?)
       else #[]
     let inner := if typeNames.isEmpty then inner else
-      inner.renameIdents fun n => typeNames.findSome? fun T =>
-        if n == T then some (Globals.privateName s.module T)
-        else if n.startsWith (T ++ ".") then some (Globals.privateName s.module T ++ (n.drop T.length).toString)
-        else none
+      let nsPrefix := s.globals.namespacePrefix
+      -- (13t) inside a namespace a declaration writes `T` for `Foo.T`: rename that
+      -- spelling too, so a private recursive type's fields still refer to the type
+      let shortOf (T : Name) : Option Name :=
+        if !nsPrefix.isEmpty && T.startsWith (nsPrefix ++ ".") then
+          some ((T.drop (nsPrefix.length + 1)).toString) else none
+      let renameOf (T : Name) : Name → Option Name := fun n =>
+        let kernel := Globals.privateName s.module T
+        if n == T then some kernel
+        else if n.startsWith (T ++ ".") then some (kernel ++ (n.drop T.length).toString)
+        else match shortOf T with
+          | some sh => if n == sh then some kernel
+            else if n.startsWith (sh ++ ".") then some (kernel ++ (n.drop sh.length).toString)
+            else none
+          | none => none
+      inner.renameIdents fun n => typeNames.findSome? fun T => renameOf T n
     elabCommand inner
     modify fun s =>
       let added := s.globals.order.extract before s.globals.order.size
@@ -1772,6 +2287,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- declaration can write the name, and a constant is compared by name, so no other
     -- declaration is convertible to `T`.
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`sealed`" inner then return
     if !inner.isOfKind "command.inductive" then
       report .error cmd.info "`sealed` applies to an `inductive` declaration"
     else
@@ -1782,8 +2298,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted s.globals { name := sealName T, levelParams := [], type := .sort 1, value := none } with
         | .error e => reportKernel cmd.info (sealName T) e
         | .ok g =>
-          let g := { g with privates := g.privates.insert (sealName T) s.module,
-                            builtins := (sealKey T, sealName T) :: g.builtins }
+          let g := g.addBuiltin (sealKey T) (sealName T)
+          let g := { g with privates := g.privates.insert (sealName T) s.module }
           modify fun s => { s with globals := g, builtins := (sealKey T, sealName T) :: s.builtins }
           -- (`T.desc` is private when a constructor is, 13b: a native type's always is, so
           -- `μ (T.desc …) i` written out elsewhere can't hand the seal to unification; a
@@ -1792,6 +2308,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.local" =>
     -- (13m) grammar that stays in this module: remember what the command adds
     let inner := cmd.getArg 1
+    if ← rejectImportIn "`local`" inner then return
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
             "command.macroRules", "command.attrMacro", "command.attrSimp", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
       report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance` and unexpanders can be `local`"
@@ -1922,6 +2439,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       else (d, none)
     let members := if cmd.isOfKind "command.partial" then #[unwrap cmd] else (cmd.getArg 1).args.map unwrap
     let defs := members.map (·.1)
+    -- an `import` is not a definition: say which wrapper contains it
+    let container := if cmd.isOfKind "command.mutual" then "a `mutual` block" else "`partial`"
+    for (d, _) in members do
+      if ← rejectImportIn container d then return
     if cmd.isOfKind "command.mutual" && defs.all (·.isOfKind "command.inductive") then
       match mutualInductive s.tables defs with
       | .ok cmds =>
@@ -2041,6 +2562,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | "term.ident" => (stx.getArg 0).getId?
         | "term.app" => resultHead (stx.getArg 0)
         | "term.paren" => resultHead (stx.getArg 1)
+        | "term.sized" => resultHead (stx.getArg 0)
         | "term.arrow" | "term.depArrow" => resultHead (stx.getArg 2)
         | _ => none
       let declared := (resultHead ((cmd.getArg 4).getArg 1)).map s.globals.resolve
@@ -2139,7 +2661,10 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       if stx.isOfKind "term.depArrow" then concl (stx.getArg 2) else stx
     -- ((13b) this module's private types and classes by their kernel names, so that two
     -- modules' instances for their private `Color`s have different names)
-    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n => ((s.globals.resolve (stripScope n)).replace "." "").capitalize)
+    let base := "inst" ++ String.join ((idents (concl typeStx)).map fun n =>
+      (((s.globals.resolveName (stripScope n)).toOption.getD (stripScope n)).replace "." "").capitalize)
+    -- (13t) an anonymous instance declared in a namespace is `Foo.inst…` too
+    let base := if s.globals.namespacePrefix.isEmpty then base else s.globals.namespacePrefix ++ "." ++ base
     let given? : Option Name := if nameOpt.isNone then none else
       (if nameOpt.isOfKind "null" then nameOpt.getArg 0 else nameOpt).getId?
     let name := match given? with
@@ -2157,7 +2682,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let valStx : Except (String × String × SourceInfo) Syntax :=
       if !isWhere then pure body else do
         let some C := headIdent typeStx | throw ("an instance's type must be an application of a class", ErrorCode.unknownClass, cmd.info)
-        let C := s.globals.resolve C
+        let C := (s.globals.resolveName C).toOption.getD C
         let some info := s.classes.find? (·.name == C)
           | throw (if s.globals.contains C then s!"{C} is not a class" else s!"unknown class '{C}'", ErrorCode.unknownClass, cmd.info)
         let given := body.args.toList.map fun f => (((f.getArg 0).getId?).getD "_", f, f.getArg 2)
@@ -2298,14 +2823,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         derivingClause (cmd.child "deriving") name
   | "command.builtin" =>
     let key := ((cmd.getArg 1).getId?).getD "_"
-    let n := ((cmd.getArg 3).getId?).getD "_"
+    let n0 := ((cmd.getArg 3).getId?).getD "_"
+    let n := (s.globals.resolveName n0).toOption.getD n0
     let known := ["nat", "nat.zero", "nat.succ", "nat.pred", "nat.add", "nat.sub", "nat.mul", "nat.beq", "nat.blt", "string", "memo", "int",
       "nat.div", "nat.mod", "nat.pow", "nat.land", "nat.lor", "nat.xor", "nat.shiftLeft", "nat.shiftRight", "nat.log2"]
     if !known.contains key then report .error cmd.info s!"unknown builtin {key}; known: {known}"
     -- one registration per key, and one key per constant: a second `builtin nat.add := K`
     -- would redirect how the first one's constant unfolds (the kernel finds the definition
     -- by key), an assumption that no declaration using it would show
-    else if let some m := s.globals.builtins.lookup key then
+    else if let some m := s.globals.builtinOf? key then
       report .error cmd.info s!"builtin {key} is already registered (as {m}); a builtin can be registered only once"
     else if let some (k, _) := s.globals.builtins.find? fun (k, m) => m == n && known.contains k then
       report .error cmd.info s!"{n} is already registered as builtin {k}"
@@ -2320,28 +2846,31 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         -- operation, so the registration is an axiom of whatever depends on `n`
         -- (`builtin int` only says how values print: nothing to trust)
         let trusted := s.trustedModule s.module || key == "int"
+        let g := s.globals.addBuiltin key n
         modify fun s => { s with builtins := (key, n) :: s.builtins,
-                                 globals := { s.globals with builtins := (key, n) :: s.globals.builtins,
-                                                             assumed := if trusted then s.globals.assumed
-                                                                        else (key, n) :: s.globals.assumed } }
+                                 globals := { g with assumed := if trusted then s.globals.assumed
+                                                                else (key, n) :: s.globals.assumed } }
         unless trusted do
           report .warning cmd.info s!"builtin {key} := {n} is not checked: it is an axiom of every declaration that depends on {n} (see `#print axioms`)"
   | "command.printAxioms" =>
-    let n := ((cmd.getArg 2).getId?).getD "_"
-    if !s.globals.contains n then reportC (cmd.getArg 2).info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-    else match s.globals.axiomsOf n with
-      | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
-      | as =>
-        -- (a native implementation is trusted to agree with its definition; proofs
-        -- never run it, compiled code does)
-        let note := if as.any (·.startsWith "native ") then
-          "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
-        -- (27a) a `native_refl` axiom
-        let note := note ++ if as.any (·.endsWith ".native✝") then
-          "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
-        let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
-          "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
-        report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
+    let nStx := cmd.getArg 2
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n =>
+      if !s.globals.contains n then reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+      else match s.globals.axiomsOf n with
+        | [] => report .info cmd.info s!"'{n}' does not depend on any axioms"
+        | as =>
+          -- (a native implementation is trusted to agree with its definition; proofs
+          -- never run it, compiled code does)
+          let note := if as.any (·.startsWith "native ") then
+            "\n(native: an implementation that compiled code runs, trusted to agree with its definition)" else ""
+          -- (27a) a `native_refl` axiom
+          let note := note ++ if as.any (·.endsWith ".native✝") then
+            "\n(.native✝: a closed proposition decided by running it (native_refl, --trust-native, sat_decide_native): trusted are erasure, the interpreter and the native implementations listed)" else ""
+          let note := note ++ if as.any (fun a => (a.splitOn ".smt✝").length > 1) then
+            "\n(.smt✝N⟨solver⟩: a goal closed by an SMT solver (the smt tactic, --trust-smt): trusted are the solver named in the axiom, Wiz's translation to SMT-LIB (Wiz/Smt/Translate.lean) and the answer cache)" else ""
+          report .info cmd.info s!"'{n}' depends on axioms: [{", ".intercalate as}]{note}"
   | "command.foreignType" =>
     -- an opaque C pointer type; values are released with the finalizer
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2349,7 +2878,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9i) `(c := "T")`: `T *` in an imported header is this type
     let cty := if (cmd.getArg 3).isNone then [] else [(s!"ctype:{(((cmd.getArg 3).getArg 3).getStr?).getD ""}", name)]
     match addDeclSorted s.globals { name, type := .sort 1, value := none } with
-    | .ok g => modify fun s => { s with globals := { g with builtins := cty ++ g.builtins }, builtins := cty ++ s.builtins,
+    | .ok g => modify fun s => { s with globals := g.setBuiltins (cty ++ g.builtins), builtins := cty ++ s.builtins,
                                         foreignTypes := (name, fin) :: s.foreignTypes }
     | .error e => reportKernel cmd.info (name) e
   | "command.importC" =>
@@ -2451,7 +2980,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match addDeclSorted st.globals { name := n, type := .sort 1, value := none } with
         | .ok g =>
           let key := s!"ctype:{sp}"
-          modify fun s => { s with globals := { g with builtins := (key, n) :: g.builtins }, builtins := (key, n) :: s.builtins,
+          modify fun s => { s with globals := g.addBuiltin key n, builtins := (key, n) :: s.builtins,
                                    foreignTypes := (n, "") :: s.foreignTypes }
           return some n
         | .error _ => return none
@@ -2523,7 +3052,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         let key : Name := s!"extern:{f.name}:{String.join (ks.toList.map (·.1.toKey))}:{rk.toKey}:{if isPure then "pure" else "io"}:{header}:{fin}"
         match addDeclSorted st.globals { name, type := ty, value := none } with
         | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                            globals := { g with builtins := (key, name) :: g.builtins } }
+                                            globals := g.addBuiltin key name }
         | .error e => reportKernel cmd.info (name) e
   | "command.glue" =>
     -- a foreign function defined by checked C code
@@ -2581,7 +3110,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             match addDeclSorted s.globals { name, type := ty, value := none } with
             | .ok g =>
               modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                       globals := { g with builtins := (key, name) :: g.builtins },
+                                       globals := g.addBuiltin key name,
                                        cCode := s.cCode.push code,
                                        cFuncs := (cname, pairs.map (gty ·.2), gty rk) :: s.cFuncs }
             | .error e => reportKernel cmd.info (name) e
@@ -2637,7 +3166,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let k : RVal.FKind := .struct ctype header kinds
           let code := if header == "" then C.structDefinition ctype kinds else s!"#include <{header}>"
           modify fun s => { s with builtins := (s!"cstruct:{k.toKey}", name) :: s.builtins,
-                                   globals := { s.globals with builtins := (s!"cstruct:{k.toKey}", name) :: s.globals.builtins },
+                                   globals := s.globals.addBuiltin (s!"cstruct:{k.toKey}") name,
                                    cCode := if s.cCode.contains code then s.cCode else s.cCode.push code }
   | "command.linkC" =>
     -- (9f) an unchecked C source file, compiled and linked with the program
@@ -2729,7 +3258,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
           let key : Name := s!"extern:{cname}:{String.join (ks.map (·.toKey))}:{rk.toKey}:{if io then "io" else "pure"}:{header}:{finOf res}"
           match addDeclSorted s.globals { name, type := ty, value := none } with
           | .ok g => modify fun s => { s with builtins := (key, name) :: s.builtins,
-                                              globals := { g with builtins := (key, name) :: g.builtins } }
+                                              globals := g.addBuiltin key name }
           | .error e => reportKernel cmd.info (name) e
         | _, _ =>
           let msg := "a foreign function's arguments and result must be Nat, UInt64, Float64, String, Bool, Unit, a c_struct, a Wiz data type or a function of those (a callback; the result may be in IO)"
@@ -2738,7 +3267,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     -- (9g) a C symbol for a Wiz function: the inverse of `extern`
     let cname := ((cmd.getArg 1).getStr?).getD "_"
     let fStx := cmd.getArg 2
-    let f := (fStx.getId?).getD "_"
+    let f0 := (fStx.getId?).getD "_"
+    let f := (s.globals.resolveName f0).toOption.getD f0
     match s.globals.find? f with
     | none => reportC fStx.info s!"unknown declaration '{f}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -2783,8 +3313,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       remakeMetaCode
   | "command.appUnexpander" =>
     -- (11r) `app_unexpander c | `(term| $_ $x …) => `(term| …)`: printing notation for `c`
-    let c := ((cmd.getArg 1).getId?).getD "_"
-    let c := if s.globals.contains c then c else s.globals.resolve c
+    let c0 := ((cmd.getArg 1).getId?).getD "_"
+    let c := (s.globals.resolveName c0).toOption.getD c0
     let mut entries := #[]
     for alt in (cmd.getArg 2).args do
       let lhs := (alt.getArg 1).args[0]?.getD .missing
@@ -2807,8 +3337,8 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     modify fun s => CommandState.refreshPP { s with ppUser := entries.toList ++ s.ppUser }
   | "command.attrUnexpander" =>
     -- (11r) `attribute [app_unexpander c] f` with `f : Unexpander` (a `Macro`)
-    let c := ((cmd.getArg 3).getId?).getD "_"
-    let c := if s.globals.contains c then c else s.globals.resolve c
+    let c0 := ((cmd.getArg 3).getId?).getD "_"
+    let c := (s.globals.resolveName c0).toOption.getD c0
     let f := ((cmd.getArg 5).getId?).getD "_"
     let ok := runElab s.globals do
       let (_, ty) ← Elab.infer {} (.node cmd.info "term.ident" #[cmd.getArg 5])
@@ -2855,7 +3385,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let nStx := cmd.getArg 5
-    let n := s.globals.resolve ((nStx.getId?).getD "_")
+    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
     match s.globals.find? n with
     | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
     | some d =>
@@ -2952,7 +3482,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             let (_, getArity) := target g 0 (eval g [] dg.type) 1000
             let key := ReprInfo.key T { mkImpl := impl, getImpl := get, tag, nfields, r, mkArity, p, getArity }
             modify fun s => { s with builtins := (key, f) :: s.builtins,
-                                     globals := { s.globals with builtins := (key, f) :: s.globals.builtins } }
+                                     globals := s.globals.addBuiltin key f }
       else if s.builtins.any (fun (k, x) => x == f && k != inlineKey && !k.startsWith RVal.exportPrefix) then
         report .error fStx.info s!"{f} is a builtin or foreign function: it already has an implementation"
       else if f == impl then report .error (cmd.getArg 3).info s!"{f} can't be implemented by itself"
@@ -2991,7 +3521,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         report .error fStx.info s!"{f} is a builtin, foreign or inline function already"
       else
         modify fun s => { s with builtins := s.builtins ++ [(inlineKey, f)],
-                                 globals := { s.globals with builtins := s.globals.builtins ++ [(inlineKey, f)] } }
+                                 globals := s.globals.addBuiltinBack inlineKey f }
   | "command.attrDefaultInstance" =>
     -- (7f) `attribute [default_instance p] i`: when instance problems are stuck, the
     -- instance `i` is tried on those of its class, highest `p` (default 1000) first
@@ -2999,14 +3529,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let prio := if (cmd.getArg 3).isNone then 1000 else
       (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
     let iStx := cmd.getArg 5
-    let i := s.globals.resolve ((iStx.getId?).getD "_")
+    let i := (s.globals.resolveName ((iStx.getId?).getD "_")).toOption.getD ((iStx.getId?).getD "_")
     match s.instances.find? fun j => j.name == i && !j.isDefault with
     | none => report .error iStx.info s!"{i} is not an instance"
     | some j => modify fun s => { s with instances := s.instances.push { j with priority := prio, isDefault := true } }
   | "command.attrBinop" =>
     -- (7f) `attribute [binop] C.f`: numeral operands of `C.f` take the type of the others
     let fStx := cmd.getArg 4
-    let f := s.globals.resolve ((fStx.getId?).getD "_")
+    let f := (s.globals.resolveName ((fStx.getId?).getD "_")).toOption.getD ((fStx.getId?).getD "_")
     match s.classes.find? fun c => c.fields.any fun x => c.name ++ "." ++ x == f with
     | none => report .error fStx.info s!"{f} is not a method of a class"
     | some c => modify fun s => { s with classes := s.classes.map fun c' => if c'.name == c.name then { c' with binop := true } else c' }
@@ -3025,16 +3555,20 @@ a proposition is not data (proofs are erased and all its proofs are definitional
   | "command.deriving" =>
     -- `deriving instance C₁, C₂ for T₁, T₂`
     let ids (stx : Syntax) := stx.args.toList.filter (·.getId?.isSome)
-    for T in ids (cmd.getArg 4) do
-      for C in ids (cmd.getArg 2) do
-        derive (C.getId?.getD "_") (s.globals.resolve (T.getId?.getD "_")) C.info
+    for TStx in ids (cmd.getArg 4) do
+      for CStx in ids (cmd.getArg 2) do
+        let T := (s.globals.resolveName (TStx.getId?.getD "_")).toOption.getD (TStx.getId?.getD "_")
+        let C := (s.globals.resolveName (CStx.getId?.getD "_")).toOption.getD (CStx.getId?.getD "_")
+        derive C T CStx.info
   | "command.erase" =>
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    match s.globals.find? n with
-    | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
-    | some d => match eraseDecl s.globals d with
-      | .ok e => report .info cmd.info s!"{n} := {e}"
-      | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
+    let nStx := cmd.getArg 1
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n => match s.globals.find? n with
+      | none => reportC cmd.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+      | some d => match eraseDecl s.globals d with
+        | .ok e => report .info cmd.info s!"{n} := {e}"
+        | .error err => report .error cmd.info s!"cannot erase {n}: {err}"
   | "command.eval" =>
     -- elaborate, erase, run, and read the result back using its type
     let r ← withTraces <| runElabH (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) s.globals do
@@ -3172,17 +3706,20 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       | .ok (ty, v) => report .info cmd.info ((readback s.globals s.builtins ty v).pretty [] (some s.globals))
       | .error err => report .error cmd.info s!"#run: {err}"
   | "command.ir" =>
-    let n := ((cmd.getArg 1).getId?).getD "_"
-    let result : Except String (Array IR.Decl) := do
-      let code ← (compileReachable s.globals s.builtins [n]).mapError toString
-      IR.lowerProgram code (.global n)
-    match result with
-    | .ok decls =>
-      -- (not the owned wrappers for closures, stage 8e)
-      let mine := (IR.optimizeProgram decls).filter fun d =>
-        d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
-      report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
-    | .error err => report .error cmd.info s!"#ir: {err}"
+    let nStx := cmd.getArg 1
+    match s.globals.resolveName ((nStx.getId?).getD "_") with
+    | .error e => reportC nStx.info e ErrorCode.ambiguousName
+    | .ok n =>
+      let result : Except String (Array IR.Decl) := do
+        let code ← (compileReachable s.globals s.builtins [n]).mapError toString
+        IR.lowerProgram code (.global n)
+      match result with
+      | .ok decls =>
+        -- (not the owned wrappers for closures, stage 8e)
+        let mine := (IR.optimizeProgram decls).filter fun d =>
+          d.name == n || (d.name.startsWith (n ++ ".") && !d.name.endsWith "._owned")
+        report .info cmd.info ("\n".intercalate (mine.toList.map (·.toString)))
+      | .error err => report .error cmd.info s!"#ir: {err}"
   | "command.syntax" | "command.declareSyntaxCat" =>
     match updateTables s.tables cmd with
     | .ok tables =>

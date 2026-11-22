@@ -275,6 +275,41 @@ def hdlGroup : Group where
            "((.true, .cons 4 (.cons 42 (.cons 42 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 116 (.cons 87 (.cons 87 (.cons 87 (.cons 87 (.cons 42 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 58 (.cons 58 (.cons 58 .nil))))))))))))))))))))))))))))))))))))))))), (.true, .cons 5 (.cons 0 (.cons 0 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 174 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 34 (.cons 121 (.cons 121 (.cons 121 (.cons 121 (.cons 0 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 203 (.cons 5 (.cons 5 (.cons 63 .nil))))))))))))))))))))))))))))))))))))))))), .true, .true)",
            ".true",
            "\"module reg_(input clk, input [0:0] rst, input [0:0] en, input [7:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd42;\\n  always @(posedge clk) if (rst) r <= 8'd42; else if (en) r <= x;\\n  assign y = r;\\nendmodule\\n\""] },
+    { name := "S4: deriving BitPack for inductives with fields and a plain structure (TxState, Instr), the tag/payload layout, samples by refl; non-packable fields and no constructors rejected", run := fun _ => do
+        -- examples/hdl-bitpack.wiz: a 4-constructor enumeration and a plain structure
+        -- (the UART's TxState: a derived enum field then 16 bits, no tag), a 5-constructor
+        -- Instr (3 tag bits + a 4-bit operand), a two-constructor payload (Move); the tags
+        -- and payloads pinned, the round trip on every small value and on samples, and
+        -- `Instr.lit` as a decoder constant in a circuit
+        okLibs (← IO.FS.readFile "examples/hdl-bitpack.wiz")
+          ["(2, 18, 0, 18)",
+           "(7, 3, 4)",
+           "(5, 1, 4)",
+           "9",
+           "51",
+           "64",
+           "19",
+           "131372",
+           "(.true, .true, .true)",
+           "[Bool.true, Bool.true, Bool.true, Bool.true]",
+           "[0, 0, 1, 0]"]
+        failsLibs "import Hdl.Core\ninductive Bad where\n  | c (n : Nat)\n  deriving BitPack" "no BitPack"
+        failsLibs "import Hdl.Core\ninductive Bad where\n  | c (b : Bad)\n  deriving BitPack" "recursive, implicit or a proof"
+        failsLibs "import Hdl.Core\ninductive Empty where\n  deriving BitPack" "no constructors"
+        -- the two width guards, called directly (a constructor payload wider than the
+        -- declared payload width; a tag width too small for the constructors)
+        failsLibs ("import Hdl.Core\n" ++
+          "def payM : CommandMacro := fun _ => do\n" ++
+          "  HdlDerive.checkPayloads \"Bad\" 2 (.cons 3 .nil);\n" ++
+          "  MacroM.pure .nil\n" ++
+          "syntax (name := pay) \"pay_bad\" : command\n" ++
+          "attribute [macro command.pay] payM\npay_bad") "wider than the declared width"
+        failsLibs ("import Hdl.Core\n" ++
+          "def tagM : CommandMacro := fun _ => do\n" ++
+          "  HdlDerive.checkTag \"Bad\" 3 1;\n" ++
+          "  MacroM.pure .nil\n" ++
+          "syntax (name := tag) \"tag_bad\" : command\n" ++
+          "attribute [macro command.tag] tagM\ntag_bad") "do not fit in 1 tag bits" },
     { name := "S4: match on a signal: an enumeration case tree equals the if chain (same netlist), Bool, nested, non-exhaustive rejected", run := fun _ => do
         okLibs (← IO.FS.readFile "examples/hdl-match.wiz")
           [
@@ -621,20 +656,22 @@ def hdlGroup : Group where
         unless (← has "cc") do skip "no cc"; return
         cRunLibs (← IO.FS.readFile "examples/hdl-pipe.wiz")
           "alu3: simFast = run = netlist: yes\nflow3: simFast = run = netlist: yes\n" },
-    { name := "L3: signals — `T^s` on the applied former, `registerS`, numerals at a size, and `+`/`if` at size ∞ on Signal.Sig (examples/hdl-l3.wiz)", run := fun _ => do
-        -- lane L3 of the Clash HDL plan: what types today. The applied former `(Signal d A)^i`
-        -- and its one size bump `registerS` check; a numeral at a size is `pureS` + the
-        -- `OfNat` instance; `+` and `if` at size ∞ are the `Hw` operators on `Signal.Sig`.
-        -- The Clash spelling through `Signal.fix` is blocked on lane L2 (group `hdl-signal`, 34b).
+    { name := "L3: signals — sized `mapS`, the counter through `Signal.fix`, the baud generator, and `+`/`if` at a size (examples/hdl-l3.wiz)", run := fun _ => do
+        -- lane L3 of the Clash HDL plan on lane L2: the applied former `(Signal d A)^i`
+        -- and its one size bump `registerS`; a numeral at a size; `+`/`if` at size ∞ on
+        -- `Signal.Sig`; and the sized surface (`mapS`, `Signal.fix`, the Clash counter
+        -- and baud generator) compiled to `scofix`.
         okLibs (← IO.FS.readFile "examples/hdl-l3.wiz")
-          [
-          ".cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))",
-          ".cons (0, 1) (.cons (0, 1) .nil)",
-          ".cons (2, 0) (.cons (2, 0) .nil)",
-          "[251, 251, 251, 251, 251]",
-          "[7, 7, 7]",
-          "[5, 5, 5]",
-          "[3, 3, 3]"] }
+          [".cons (3, 0) (.cons (3, 0) (.cons (3, 0) .nil))",
+           ".cons (0, 1) (.cons (0, 1) .nil)",
+           ".cons (2, 0) (.cons (2, 0) .nil)",
+           "[251, 251, 251, 251, 251]",
+           "[7, 7, 7]",
+           "[5, 5, 5]",
+           "[3, 3, 3]",
+           "[251, 251, 251]",
+           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
+           "[0, 0, 0, 1, 0, 0, 0, 1, 0, 0]"] }
   ]
 
 builtin_initialize registerGroup hdlGroup

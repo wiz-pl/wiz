@@ -7,6 +7,7 @@ import Scry.Lifetime
 import Scry.Bounds
 import Scry.Nullness
 import Scry.Registry
+import Scry.Index
 import Text
 import WordMap
 /-!
@@ -104,14 +105,37 @@ def Scry.callGraph (p : Wil.Program) (pt : Scry.PtResult) : Scry.CallGraph :=
     (Scry.concatLists (fun fn => Scry.sitesOfFunc fn pt) p.funcs)
     (Scry.concatLists Scry.indirectOfFunc p.funcs)
 
+/-- The call graph keyed both ways. A bucket keeps the graph's site order, so
+`siteAt`/`sitesFrom`/`sitesTo` return exactly what the old whole-list filter did. -/
+structure Scry.CallIndex where
+  /-- The graph's sites in graph order (the old iteration order). -/
+  sites : List Scry.CallSite
+  fromCaller : Scry.NameMap Scry.CallSite
+  toCallee : Scry.NameMap Scry.CallSite
+
+def Scry.callIndex (g : Scry.CallGraph) : Scry.CallIndex :=
+  Scry.CallIndex.mk g.sites
+    (Scry.NameMap.fromList (List.map (fun s => (s.caller, s)) g.sites))
+    (Scry.NameMap.fromList (List.map (fun s => (s.callee, s)) g.sites))
+
+def Scry.sitesToIn (ci : Scry.CallIndex) (callee : String) : List Scry.CallSite :=
+  Scry.NameMap.findAll ci.toCallee callee
+
+def Scry.sitesFromIn (ci : Scry.CallIndex) (caller : String) : List Scry.CallSite :=
+  Scry.NameMap.findAll ci.fromCaller caller
+
+def Scry.siteAtIn (ci : Scry.CallIndex) (caller : String) (node : Nat) :
+    Option Scry.CallSite :=
+  List.find (fun s => Nat.beq s.node node) (Scry.sitesFromIn ci caller)
+
 def Scry.siteAt (g : Scry.CallGraph) (caller : String) (node : Nat) : Option Scry.CallSite :=
-  List.find (fun s => Bool.and (String.eq s.caller caller) (Nat.beq s.node node)) g.sites
+  Scry.siteAtIn (Scry.callIndex g) caller node
 
 def Scry.sitesTo (g : Scry.CallGraph) (callee : String) : List Scry.CallSite :=
-  List.filter (fun s => String.eq s.callee callee) g.sites
+  Scry.sitesToIn (Scry.callIndex g) callee
 
 def Scry.sitesFrom (g : Scry.CallGraph) (caller : String) : List Scry.CallSite :=
-  List.filter (fun s => String.eq s.caller caller) g.sites
+  Scry.sitesFromIn (Scry.callIndex g) caller
 
 -- ## Exported entry parameters
 
@@ -146,12 +170,21 @@ def Scry.isExportedEntry (p : Wil.Program) (graph : Scry.CallGraph) (fn : Wil.Fu
       (Bool.and (List.isEmpty (Scry.sitesTo graph fn.name))
         (Bool.not (List.any (String.eq fn.name) (Scry.fnptrNames p)))))
 
+def Scry.isExportedEntryIn (ci : Scry.CallIndex) (fnptrNames : List String)
+    (fn : Wil.Func) : Bool :=
+  Bool.and (Bool.not (String.startsWith fn.name "static:"))
+    (Bool.and (Bool.not (String.eq fn.name "main"))
+      (Bool.and (List.isEmpty (Scry.sitesToIn ci fn.name))
+        (Bool.not (List.any (String.eq fn.name) fnptrNames))))
+
 /-- The `(function, parameter position)` pairs that are sources because the function is an
 exported entry. Positions follow the declaration order; they are only used when the
 function is defined in this unit. -/
 def Scry.entrySources (p : Wil.Program) (graph : Scry.CallGraph) : List (String × Nat) :=
+  let ci := Scry.callIndex graph;
+  let ptrs := Scry.fnptrNames p;
   Scry.rulePackConcat (fun fn =>
-    if Scry.isExportedEntry p graph fn then
+    if Scry.isExportedEntryIn ci ptrs fn then
       List.map (fun i => (fn.name, i)) (Scry.range (List.length fn.params))
     else .nil) p.funcs
 
@@ -171,6 +204,17 @@ structure Scry.Summary where
   summary carries locations, not just parameters. -/
   mems : List Scry.MemSeed
 
+/-- Summaries by function name; built once per round, not per site. -/
+def Scry.summaryIndex (sums : List Scry.Summary) :
+    Scry.NameMap Scry.Summary :=
+  Scry.NameMap.fromList (List.map (fun s => (s.name, s)) sums)
+
+def Scry.summaryOfIn (ix : Scry.NameMap Scry.Summary) (name : String) :
+    Scry.Summary :=
+  match Scry.NameMap.find ix name with
+  | .some s => s
+  | .none => Scry.Summary.mk name .nil .false .nil
+
 def Scry.summaryOf (sums : List Scry.Summary) (name : String) : Scry.Summary :=
   match List.find (fun s => String.eq s.name name) sums with
   | .some s => s
@@ -182,16 +226,20 @@ def Scry.seedSetEq (a b : List Scry.MemSeed) : Bool :=
     (List.all (fun m => List.any (fun x =>
       String.eq (Scry.memSeedKey x) (Scry.memSeedKey m)) a) b)
 
-def Scry.summariesEq (a b : List Scry.Summary) : Bool :=
+def Scry.summariesEqIn (ix : Scry.NameMap Scry.Summary)
+    (a : List Scry.Summary) : Bool :=
   List.foldr (fun s acc =>
     if acc then
-      let t := Scry.summaryOf b s.name;
+      let t := Scry.summaryOfIn ix s.name;
       if Scry.setEq s.params t.params then
         if Scry.seedSetEq s.mems t.mems then
           Nat.beq (if s.retTainted then 1 else 0) (if t.retTainted then 1 else 0)
         else .false
       else .false
     else .false) .true a
+
+def Scry.summariesEq (a b : List Scry.Summary) : Bool :=
+  Scry.summariesEqIn (Scry.summaryIndex b) a
 
 def Scry.totalParams (fs : List Wil.Func) : Nat :=
   List.foldr (fun fn acc => Nat.add acc (List.length fn.params)) 0 fs
@@ -200,18 +248,18 @@ def Scry.indexedNats : Nat → List Nat → List (Nat × Nat)
   | _, .nil => .nil
   | i, .cons v vs => List.cons (i, v) (Scry.indexedNats (Nat.succ i) vs)
 
-/-- For a callee, every argument position some caller passes a tainted value at. This
-is the slow form (it re-scans every result for every callee); `growSummaries` uses
-`paramContribMap`, which builds the taint indexes once. -/
+/-- For a callee, every argument position some caller passes a tainted value at. The
+result order and site order are the old whole-graph order; the lookup is indexed. -/
 def Scry.paramContributions (graph : Scry.CallGraph) (results : List Scry.FuncResult)
     (callee : String) : List Nat :=
+  let ci := Scry.callIndex graph;
   Scry.concatLists (fun r =>
     Scry.concatLists (fun site =>
-      if Bool.and (String.eq site.caller r.fn.name) (String.eq site.callee callee) then
+      if String.eq site.callee callee then
         Scry.concatLists (fun p =>
           if Scry.argTainted r site.node p.2 then [p.1] else .nil)
           (Scry.indexedNats 0 site.args)
-      else .nil) graph.sites) results
+      else .nil) (Scry.sitesFromIn ci r.fn.name)) results
 
 /-- Add parameter positions to `callee`'s entry in a contribution map (order-preserving
 and deterministic). -/
@@ -237,14 +285,19 @@ def Scry.taintEntries (results : List Scry.FuncResult) : List Scry.TaintIdxEntry
     Scry.TaintIdxEntry.mk r.fn.name r.plan.info idx
       (Scry.returnsTaintedIdx r.plan.info idx r.plan.rets)) results
 
+/-- Taint entries by function name. -/
+def Scry.taintIndex (idxs : List Scry.TaintIdxEntry) :
+    Scry.NameMap Scry.TaintIdxEntry :=
+  Scry.NameMap.fromList (List.map (fun e => (e.name, e)) idxs)
+
 /-- Every callee's tainted argument positions, computed in **one** pass: one taint index
 per result, then each call site looks its caller up. The old path called `argTainted`
 (which scanned every taint row and every data edge) for every argument of every site of
-every callee. -/
-def Scry.paramContribFrom (graph : Scry.CallGraph) (idxs : List Scry.TaintIdxEntry) :
-    List (String × List Nat) :=
+every callee, and re-scanned the taint-entry list for every site. -/
+def Scry.paramContribFromIn (ci : Scry.CallIndex)
+    (idxs : Scry.NameMap Scry.TaintIdxEntry) : List (String × List Nat) :=
   List.foldl (fun acc site =>
-    match List.find (fun e => String.eq e.name site.caller) idxs with
+    match Scry.NameMap.find idxs site.caller with
     | .none => acc
     | .some e =>
       let ps := Scry.concatLists (fun p =>
@@ -252,11 +305,24 @@ def Scry.paramContribFrom (graph : Scry.CallGraph) (idxs : List Scry.TaintIdxEnt
         else List.nil) (Scry.indexedNats 0 site.args);
       match List.isEmpty ps with
       | .true => acc
-      | .false => Scry.contribAdd acc site.callee ps) List.nil graph.sites
+      | .false => Scry.contribAdd acc site.callee ps) List.nil ci.sites
+
+def Scry.paramContribFrom (graph : Scry.CallGraph) (idxs : List Scry.TaintIdxEntry) :
+    List (String × List Nat) :=
+  Scry.paramContribFromIn (Scry.callIndex graph) (Scry.taintIndex idxs)
 
 def Scry.paramContribMap (graph : Scry.CallGraph) (results : List Scry.FuncResult) :
     List (String × List Nat) :=
   Scry.paramContribFrom graph (Scry.taintEntries results)
+
+def Scry.contribIndex (m : List (String × List Nat)) :
+    Scry.NameMap (List Nat) :=
+  Scry.NameMap.fromList m
+
+def Scry.contribOfIn (ix : Scry.NameMap (List Nat)) (callee : String) : List Nat :=
+  match Scry.NameMap.find ix callee with
+  | .none => List.nil
+  | .some ps => ps
 
 def Scry.contribOf (m : List (String × List Nat)) (callee : String) : List Nat :=
   match List.find (fun p => String.eq p.1 callee) m with
@@ -264,15 +330,19 @@ def Scry.contribOf (m : List (String × List Nat)) (callee : String) : List Nat 
   | .some p => p.2
 
 /-- The call results a function gets from callees that return tainted values. -/
-def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
-    (caller : String) : List (Nat × Nat) :=
+def Scry.retSeedsOfIn (ci : Scry.CallIndex)
+    (sums : Scry.NameMap Scry.Summary) (caller : String) :
+    List (Nat × Nat) :=
   Scry.concatLists (fun site =>
-    if Bool.and (String.eq site.caller caller)
-        (Scry.summaryOf sums site.callee).retTainted then
+    if (Scry.summaryOfIn sums site.callee).retTainted then
       match site.result with
       | .some r => [(site.node, r)]
       | .none => .nil
-    else .nil) graph.sites
+    else .nil) (Scry.sitesFromIn ci caller)
+
+def Scry.retSeedsOf (graph : Scry.CallGraph) (sums : List Scry.Summary)
+    (caller : String) : List (Nat × Nat) :=
+  Scry.retSeedsOfIn (Scry.callIndex graph) (Scry.summaryIndex sums) caller
 
 /-- Every location any summary knows to be tainted (deduplicated by location). -/
 def Scry.allMemSeeds (sums : List Scry.Summary) : List Scry.MemSeed :=
@@ -303,6 +373,16 @@ def Scry.argvParamsOf (pack : Scry.RulePack) (fn : Wil.Func) : List Nat :=
 /-- Evaluate one function under the current summaries (the unit of the summary
 fixpoint). Exposed so a driver can checkpoint between functions for `--timeout`. The
 entry sources are the C-ABI policy's parameter seeds for exported entries. -/
+def Scry.evalWithEntriesModelsIn (models : Scry.ModelPack) (ci : Scry.CallIndex)
+    (pack : Scry.RulePack) (pt : Scry.PtResult) (entries : List (String × Nat))
+    (sums : Scry.NameMap Scry.Summary) (allMems : List Scry.MemSeed)
+    (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWithModels models fn pack pt
+    (Scry.seedsForAll allMems fn.name)
+    (Scry.unionNat (Scry.summaryOfIn sums fn.name).params (Scry.argvParamsOf pack fn))
+    (Scry.retSeedsOfIn ci sums fn.name)
+    (Scry.entrySourcesFor entries fn.name)
+
 def Scry.evalWithEntriesModels (models : Scry.ModelPack) (graph : Scry.CallGraph)
     (pack : Scry.RulePack) (pt : Scry.PtResult) (entries : List (String × Nat))
     (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
@@ -319,6 +399,12 @@ def Scry.evalWithEntries (graph : Scry.CallGraph) (pack : Scry.RulePack)
 def Scry.evalWith (graph : Scry.CallGraph) (pack : Scry.RulePack) (pt : Scry.PtResult)
     (sums : List Scry.Summary) (fn : Wil.Func) : Scry.FuncResult :=
   Scry.evalWithEntries graph pack pt .nil sums fn
+
+def Scry.resultsWithEntriesModelsIn (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (pt : Scry.PtResult) (ci : Scry.CallIndex)
+    (sums : Scry.NameMap Scry.Summary) (allMems : List Scry.MemSeed)
+    (entries : List (String × Nat)) : List Scry.FuncResult :=
+  List.map (Scry.evalWithEntriesModelsIn models ci pack pt entries sums allMems) p.funcs
 
 def Scry.resultsWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
     (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult)
@@ -347,6 +433,16 @@ def Scry.evalWithPreparedM (graph : Scry.CallGraph) (pt : Scry.PtResult)
     (Scry.summaryOf sums fn.name).params
     (Scry.retSeedsOf graph sums fn.name)
 
+/-- `evalWithPreparedM` with the round's call/summary indexes supplied by the driver.
+`scry/src/Scry/TaintCmd` still calls the unindexed spelling per function; switching it
+to this one is what removes the last per-function summary scan from `scry taint`. -/
+def Scry.evalWithPreparedMIn (ci : Scry.CallIndex)
+    (sums : Scry.NameMap Scry.Summary) (plan : Scry.FuncPlan)
+    (allMems : List Scry.MemSeed) (fn : Wil.Func) : Scry.FuncResult :=
+  Scry.evaluateFuncWithPlan fn plan (Scry.seedsForAll allMems fn.name)
+    (Scry.summaryOfIn sums fn.name).params
+    (Scry.retSeedsOfIn ci sums fn.name)
+
 def Scry.resultsWith (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
     (pt : Scry.PtResult) (sums : List Scry.Summary) : List Scry.FuncResult :=
   Scry.resultsWithEntries p pack graph pt sums .nil
@@ -370,24 +466,39 @@ def Scry.prepareAll (p : Wil.Program) (pack : Scry.RulePack) (pt : Scry.PtResult
   List.map (fun fn => Scry.prepareFunc fn pack pt) p.funcs
 
 /-- Grow every summary from one round's results: the argument-taint contributions the
-results expose and the return flags, plus the tainted memory locations. -/
-def Scry.growSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
-    (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
+results expose and the return flags, plus the tainted memory locations. Every name
+lookup here is a bucket read; the lists still decide the answer. -/
+def Scry.growSummariesIn (p : Wil.Program) (pack : Scry.RulePack)
+    (ci : Scry.CallIndex) (prev : Scry.NameMap Scry.Summary)
+    (results : List Scry.FuncResult) : List Scry.Summary :=
   let mems := Scry.dedupSeeds (Scry.concatLists (fun r => Scry.resultMemSeeds r) results);
   let entries := Scry.taintEntries results;
-  let contribs := Scry.paramContribFrom graph entries;
+  let eix := Scry.taintIndex entries;
+  let contribs := Scry.contribIndex (Scry.paramContribFromIn ci eix);
   List.map (fun fn =>
-    let old := Scry.summaryOf prev fn.name;
-    let contrib := Scry.unionNat (Scry.contribOf contribs fn.name)
+    let old := Scry.summaryOfIn prev fn.name;
+    let contrib := Scry.unionNat (Scry.contribOfIn contribs fn.name)
       (Scry.argvParamsOf pack fn);
-    let ret := match List.find (fun e => String.eq e.name fn.name) entries with
+    let ret := match Scry.NameMap.find eix fn.name with
       | .some e => e.retTainted
       | .none => (.false : Bool);
     Scry.Summary.mk fn.name (Scry.unionNat old.params contrib)
       (Bool.or old.retTainted ret) (Scry.dedupSeeds (List.append old.mems mems))) p.funcs
 
+def Scry.growSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.CallGraph)
+    (prev : List Scry.Summary) (results : List Scry.FuncResult) : List Scry.Summary :=
+  Scry.growSummariesIn p pack (Scry.callIndex graph) (Scry.summaryIndex prev) results
+
 /-- One summary round: evaluate every function under `prev`, then grow every summary
 with the argument-taint contributions the results expose and the return flags. -/
+def Scry.stepSummariesWithEntriesModelsIn (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (ci : Scry.CallIndex) (pt : Scry.PtResult)
+    (prevList : List Scry.Summary) (prev : Scry.NameMap Scry.Summary)
+    (entries : List (String × Nat)) : List Scry.Summary :=
+  let allMems := Scry.allMemSeeds prevList;
+  Scry.growSummariesIn p pack ci prev
+    (Scry.resultsWithEntriesModelsIn models p pack pt ci prev allMems entries)
+
 def Scry.stepSummariesWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
     (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult)
     (prev : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
@@ -403,16 +514,46 @@ def Scry.stepSummaries (p : Wil.Program) (pack : Scry.RulePack) (graph : Scry.Ca
     (pt : Scry.PtResult) (prev : List Scry.Summary) : List Scry.Summary :=
   Scry.stepSummariesWithEntries p pack graph pt prev .nil
 
-partial def Scry.summaryLoopWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
-    (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
-    (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
+/-- Evaluate every function under `sums` with plans prepared once. The plan depends only
+on `(function, pack, points-to, entry sources)`, so recomputing it per round was pure
+overhead; the evaluation inputs are exactly those `evalWithPreparedM` uses. -/
+partial def Scry.resultsWithPlansIn (ci : Scry.CallIndex)
+    (sums : Scry.NameMap Scry.Summary) (allMems : List Scry.MemSeed) :
+    List Scry.FuncPlan → List Wil.Func → List Scry.FuncResult
+  | .nil, _ => .nil
+  | .cons plan plans, .cons fn fns =>
+    List.cons (Scry.evaluateFuncWithPlan fn plan (Scry.seedsForAll allMems fn.name)
+      (Scry.summaryOfIn sums fn.name).params
+      (Scry.retSeedsOfIn ci sums fn.name))
+      (Scry.resultsWithPlansIn ci sums allMems plans fns)
+  | .cons _ _, .nil => .nil
+  | .nil, .cons _ _ => .nil
+
+partial def Scry.summaryLoopWithPlansIn (p : Wil.Program) (pack : Scry.RulePack)
+    (ci : Scry.CallIndex) (plans : List Scry.FuncPlan) (fuel : Nat)
+    (sums : List Scry.Summary) : List Scry.Summary :=
   match fuel with
   | .zero => sums
   | .succ k =>
-    let next := Scry.stepSummariesWithEntriesModels models p pack graph pt sums entries;
-    match Scry.summariesEq next sums with
+    let prev := Scry.summaryIndex sums;
+    let allMems := Scry.allMemSeeds sums;
+    let results := Scry.resultsWithPlansIn ci prev allMems plans p.funcs;
+    let next := Scry.growSummariesIn p pack ci prev results;
+    match Scry.summariesEqIn (Scry.summaryIndex next) sums with
     | .true => next
-    | .false => Scry.summaryLoopWithEntriesModels models p pack graph pt k next entries
+    | .false => Scry.summaryLoopWithPlansIn p pack ci plans k next
+
+partial def Scry.summaryLoopWithEntriesModelsIn (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (ci : Scry.CallIndex) (pt : Scry.PtResult) (fuel : Nat)
+    (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
+  let plans := Scry.prepareAllWithEntriesModels models p pack pt entries;
+  Scry.summaryLoopWithPlansIn p pack ci plans fuel sums
+
+partial def Scry.summaryLoopWithEntriesModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pack : Scry.RulePack) (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
+    (sums : List Scry.Summary) (entries : List (String × Nat)) : List Scry.Summary :=
+  Scry.summaryLoopWithEntriesModelsIn models p pack (Scry.callIndex graph) pt fuel sums
+    entries
 
 partial def Scry.summaryLoopWithEntries (p : Wil.Program) (pack : Scry.RulePack)
     (graph : Scry.CallGraph) (pt : Scry.PtResult) (fuel : Nat)
@@ -435,6 +576,22 @@ structure Scry.ProgramResult where
   warnings : List Scry.MemWarning
   /-- Findings of `kind memory` pack rules (the CWE-416 lifetime rule). -/
   memoryFindings : List Scry.RuleFinding
+
+/-- The path walk's index: results by name and call sites both ways, built once per
+`programFindings`. A bucket keeps the result/program order, so every lookup returns the
+same first match as the old scans. -/
+structure Scry.PathIndex where
+  results : Scry.NameMap Scry.FuncResult
+  calls : Scry.CallIndex
+
+def Scry.findingPathIndex (pr : Scry.ProgramResult) : Scry.PathIndex :=
+  Scry.PathIndex.mk
+    (Scry.NameMap.fromList (List.map (fun r => (r.fn.name, r)) pr.results))
+    (Scry.callIndex pr.graph)
+
+def Scry.findResultIn (ix : Scry.NameMap Scry.FuncResult) (name : String) :
+    Option Scry.FuncResult :=
+  Scry.NameMap.find ix name
 
 def Scry.findResult (pr : Scry.ProgramResult) (name : String) : Option Scry.FuncResult :=
   List.find (fun r => String.eq r.fn.name name) pr.results
@@ -461,13 +618,13 @@ frequency table).
 `isModelledAt` is a parameter so a measurement can ask the same question of an older
 table (`Scry.Models.isModelledCore`): the `before` column of an external-coverage run is
 this function with the table the change added entries to. -/
-def Scry.unmodelledCallsWithArity (isModelledAt : String → Nat → Bool)
-    (p : Wil.Program) (r : Scry.FuncResult) : List (String × Nat) :=
+def Scry.unmodelledCallsWithArityIn (isModelledAt : String → Nat → Bool)
+    (pix : Wil.ProgramIndex) (r : Scry.FuncResult) : List (String × Nat) :=
   let g := r.plan.info.g;
   Scry.rulePackConcat (fun n =>
     match Scry.nodeStmt g n with
     | .some (.call res (.direct name) args _) =>
-      match Wil.findFunc p name with
+      match Wil.ProgramIndex.findFunc pix name with
       | .some _ => .nil
       | .none =>
         if isModelledAt name (List.length args) then .nil
@@ -480,6 +637,10 @@ def Scry.unmodelledCallsWithArity (isModelledAt : String → Nat → Bool)
           | .false => .nil
           | .true => [(name, n)]
     | _ => .nil) (Scry.range g.count)
+
+def Scry.unmodelledCallsWithArity (isModelledAt : String → Nat → Bool)
+    (p : Wil.Program) (r : Scry.FuncResult) : List (String × Nat) :=
+  Scry.unmodelledCallsWithArityIn isModelledAt (Wil.indexProgram p) r
 
 def Scry.unmodelledCallsWith (isModelled : String → Bool) (p : Wil.Program)
     (r : Scry.FuncResult) : List (String × Nat) :=
@@ -495,6 +656,13 @@ def Scry.unmodelledCallsOfModels (models : Scry.ModelPack) (p : Wil.Program)
   Scry.unmodelledCallsWithArity
     (fun name arity => Scry.ModelPack.isModelledAt models name arity) p r
 
+/-- The indexed spelling used by the analysis driver (one program index for every
+function's warnings). -/
+def Scry.unmodelledCallsOfModelsIn (models : Scry.ModelPack) (pix : Wil.ProgramIndex)
+    (r : Scry.FuncResult) : List (String × Nat) :=
+  Scry.unmodelledCallsWithArityIn
+    (fun name arity => Scry.ModelPack.isModelledAt models name arity) pix r
+
 /-- One unmodelled-external diagnostic for a call: the call point carries the callee and
 why the call is not modelled. See `Scry.unmodelledCallsOf` for the selection. -/
 def Scry.unmodelledWarningsOfModels (models : Scry.ModelPack) (p : Wil.Program)
@@ -503,6 +671,13 @@ def Scry.unmodelledWarningsOfModels (models : Scry.ModelPack) (p : Wil.Program)
     r.fn.name nc.2 ("call to unmodelled external " ++ nc.1
       ++ ": result and memory effects are unknown"))
     (Scry.unmodelledCallsOfModels models p r)
+
+def Scry.unmodelledWarningsOfModelsIn (models : Scry.ModelPack)
+    (pix : Wil.ProgramIndex) (r : Scry.FuncResult) : List Scry.MemWarning :=
+  List.map (fun nc => Scry.memWarning Scry.MemWarnKind.unmodelledExternal
+    r.fn.name nc.2 ("call to unmodelled external " ++ nc.1
+      ++ ": result and memory effects are unknown"))
+    (Scry.unmodelledCallsOfModelsIn models pix r)
 
 def Scry.unmodelledWarningsOf (p : Wil.Program) (r : Scry.FuncResult) :
     List Scry.MemWarning :=
@@ -523,6 +698,7 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
     (withNull : Bool) : Scry.ProgramResult :=
   let pack := Scry.RulePack.withModels pack0;
   let pt := Scry.pointsToBounded p maxRounds;
+  let pix := Wil.indexProgram p;
   let graph := Scry.callGraph p pt;
   let entries := match entryMode with
     | .true => Scry.entrySources p graph
@@ -531,7 +707,8 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
   let fuel := Nat.add 8 (Nat.add (Nat.add (List.length p.funcs) (Scry.totalParams p.funcs))
     (Scry.ptLocCount pt));
   let sums := Scry.summaryLoopWithEntriesModels models p pack graph pt fuel sums0 entries;
-  let results := Scry.resultsWithEntriesModels models p pack graph pt sums entries;
+  let results := Scry.resultsWithEntriesModelsIn models p pack pt (Scry.callIndex graph)
+    (Scry.summaryIndex sums) (Scry.allMemSeeds sums) entries;
   let hasLifetime : Bool := match pack.memoryRuleFor "use-after-free" with
     | .some _ => .true
     | .none => .false;
@@ -545,7 +722,8 @@ def Scry.analyzeCoreBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
     (List.filter (Scry.keepMemWarning hasLifetime)
       (List.append
         (Scry.concatLists (fun r => r.plan.memWarnings) results)
-        (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModels models p r) results)))
+        (Scry.concatLists (fun r => Scry.unmodelledWarningsOfModelsIn models pix r)
+          results)))
     (List.append (List.append analyses.warnings nulls) (Scry.registryWarnings pack)));
   let memoryFindings := analyses.findings;
   Scry.ProgramResult.mk results sums graph pt warnings memoryFindings
@@ -599,11 +777,12 @@ def Scry.analyzeBoundedModels (models : Scry.ModelPack) (p : Wil.Program)
 /-- Every external name a program calls directly, deduplicated in first-use order. This
 is the "used on the corpus" side of the dead-model report. -/
 def Scry.externalCallNames (p : Wil.Program) : List String :=
+  let pix := Wil.indexProgram p;
   let all := Scry.concatLists (fun fn =>
     let g := Scry.flatten fn;
     Scry.concatLists (fun n => match Scry.nodeStmt g n with
       | .some (.call _ (.direct name) _ _) =>
-        match Wil.findFunc p name with
+        match Wil.ProgramIndex.findFunc pix name with
         | .some _ => .nil
         | .none => List.cons name .nil
       | _ => .nil) (Scry.range g.count)) p.funcs;
@@ -694,19 +873,44 @@ partial def Scry.findParamSourceIn (callee : String) (pos : Nat) :
       | .none => Scry.findParamSourceIn callee pos rest
     else Scry.findParamSourceIn callee pos rest
 
+/-- The first site of `r` that calls `callee` and passes a tainted value at `pos`. -/
+partial def Scry.sourceSiteIn (ci : Scry.CallIndex) (r : Scry.FuncResult)
+    (callee : String) (pos : Nat) : List Scry.CallSite →
+    Option (Scry.FuncResult × Scry.CallSite)
+  | .nil => .none
+  | .cons site rest =>
+    if String.eq site.callee callee then
+      match Wil.listNth site.args pos with
+      | .some v =>
+        if Scry.argTainted r site.node v then .some (r, site)
+        else Scry.sourceSiteIn ci r callee pos rest
+      | .none => Scry.sourceSiteIn ci r callee pos rest
+    else Scry.sourceSiteIn ci r callee pos rest
+
+/-- Find a caller that passes taint into parameter `pos` of `callee`. Results are tried
+in program order and each caller's sites in call-graph order, exactly as the old
+flattened `(result, site)` list did. -/
+partial def Scry.findParamSourceIdx (pr : Scry.ProgramResult) (ix : Scry.PathIndex)
+    (callee : String) (pos : Nat) : List Scry.FuncResult →
+    Option (Scry.FuncResult × Scry.CallSite)
+  | .nil => .none
+  | .cons r rest =>
+    match Scry.sourceSiteIn ix.calls r callee pos
+        (Scry.sitesFromIn ix.calls r.fn.name) with
+    | .some pair => .some pair
+    | .none => Scry.findParamSourceIdx pr ix callee pos rest
+
 /-- Find a caller that passes taint into parameter `pos` of `callee`. -/
 def Scry.findParamSource (pr : Scry.ProgramResult) (callee : String) (pos : Nat) :
     Option (Scry.FuncResult × Scry.CallSite) :=
-  Scry.findParamSourceIn callee pos
-    (Scry.concatLists (fun (r : Scry.FuncResult) =>
-      List.map (fun (site : Scry.CallSite) => (r, site)) (Scry.sitesFrom pr.graph r.fn.name))
-      pr.results)
+  Scry.findParamSourceIdx pr (Scry.findingPathIndex pr) callee pos pr.results
 
 /-- Replace a parameter or return seed in `path` by the interprocedural evidence behind
 it, recursively. `stack` is the set of `(function, point)` roots already expanded, so
 recursion becomes a `recursion` node instead of a loop. -/
-partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × Nat))
-    (fuel : Nat) (fr : Scry.FuncResult) (path : List Scry.PathNode) : List Scry.PathNode :=
+partial def Scry.extendPathIdx (pr : Scry.ProgramResult) (ix : Scry.PathIndex)
+    (stack : List (String × Nat)) (fuel : Nat) (fr : Scry.FuncResult)
+    (path : List Scry.PathNode) : List Scry.PathNode :=
   match fuel with
   | .zero => path
   | .succ k =>
@@ -722,30 +926,30 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
           match Scry.paramPosOf fr.plan root.var with
           | .none => path
           | .some pos =>
-            match Scry.findParamSource pr fr.fn.name pos with
+            match Scry.findParamSourceIdx pr ix fr.fn.name pos pr.results with
             | .none => path
             | .some pair =>
               match Scry.argPath pair.1 pair.2 pos with
               | .none => path
               | .some callerPath =>
-                let callerPath := Scry.extendPath pr stack' k pair.1 callerPath;
+                let callerPath := Scry.extendPathIdx pr ix stack' k pair.1 callerPath;
                 List.append callerPath path
         | .returnSeed =>
-          match Scry.siteAt pr.graph fr.fn.name root.point with
+          match Scry.siteAtIn ix.calls fr.fn.name root.point with
           | .none => path
           | .some site =>
-            match Scry.findResult pr site.callee with
+            match Scry.findResultIn ix.results site.callee with
             | .none => path
             | .some callee =>
               match Scry.returnChain callee with
               | .nil => path
               | chain =>
-                let chain := Scry.extendPath pr stack' k callee chain;
+                let chain := Scry.extendPathIdx pr ix stack' k callee chain;
                 List.append chain path
         | .store =>
           /-- A memory seed produced by another function: expand it into that function's
           chain for the value stored at its store point. -/
-          match Scry.findResult pr root.func with
+          match Scry.findResultIn ix.results root.func with
           | .none => path
           | .some producer =>
             if String.eq producer.fn.name fr.fn.name then path
@@ -759,9 +963,14 @@ partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × N
                     | .none => Scry.State.empty
                     | .some s2 => s2;
                   let chain := Scry.chainToDef producer.fn.name producer.plan.seeds pst d m.var;
-                  let chain := Scry.extendPath pr stack' k producer chain;
+                  let chain := Scry.extendPathIdx pr ix stack' k producer chain;
                   List.append chain path
         | _ => path
+
+/-- Compatibility spelling: builds the path index once at the root. -/
+partial def Scry.extendPath (pr : Scry.ProgramResult) (stack : List (String × Nat))
+    (fuel : Nat) (fr : Scry.FuncResult) (path : List Scry.PathNode) : List Scry.PathNode :=
+  Scry.extendPathIdx pr (Scry.findingPathIndex pr) stack fuel fr path
 
 -- ## Findings
 
@@ -785,10 +994,12 @@ def Scry.sortRuleFindings (fs : List Scry.RuleFinding) : List Scry.RuleFinding :
 
 /-- All findings of an analysed program, with interprocedural paths. -/
 def Scry.programFindings (pr : Scry.ProgramResult) : List Scry.RuleFinding :=
+  let ix := Scry.findingPathIndex pr;
   Scry.sortRuleFindings (List.append pr.memoryFindings
     (Scry.concatLists (fun r =>
       List.map (fun f =>
-        { f with path := Scry.extendPath pr .nil 16 r f.path }) (Scry.resultFindings r))
+        { f with path := Scry.extendPathIdx pr ix .nil 16 r f.path })
+        (Scry.resultFindings r))
       pr.results))
 
 /-- The findings of one function (its intraprocedural part; the path is not stitched). -/
@@ -800,7 +1011,8 @@ def Scry.funcFindings (pr : Scry.ProgramResult) (name : String) : List Scry.Rule
 /-- The rule ids that fire on this program, in pack order. -/
 def Scry.ruleIds (p : Wil.Program) (pack : Scry.RulePack) : List String :=
   let pr := Scry.analyze p pack;
+  let fs := Scry.programFindings pr;
   List.foldr (fun rule acc =>
-    if List.any (fun f => String.eq f.rule rule) (Scry.programFindings pr) then
+    if List.any (fun f => String.eq f.rule rule) fs then
       List.cons rule acc
     else acc) .nil (List.map Scry.PackRule.id pack.rules)

@@ -27,8 +27,12 @@ def importsOf (src : String) : List Name := Id.run do
   let mut out : Array Name := #[]
   for line in src.splitOn "\n" do
     let l := line.trimAsciiStart.toString
-    if l.startsWith "import " || l.startsWith "import\t" then
-      let rest := (l.drop 7).trimAsciiStart.toString
+    let rest? : Option String :=
+      if l.startsWith "import " || l.startsWith "import\t" then some (l.drop 7).toString
+      else if l.startsWith "open import " || l.startsWith "open import\t" then some (l.drop 12).toString
+      else none
+    if let some r := rest? then
+      let rest := r.trimAsciiStart.toString
       let m := String.ofList (rest.toList.takeWhile fun c => c.isAlphanum || c == '_' || c == '.' || c == '\'')
       if !m.isEmpty && !out.contains m then out := out.push m
   pure out.toList

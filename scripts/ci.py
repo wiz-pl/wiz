@@ -721,9 +721,11 @@ def changes(args):
 
 
 GROUP = re.compile(r"^── (.*?) \((.*)\)$")
-PASS = re.compile(r"^  ✓ (.*?)(?: \([\d.]+ s\))?$")
-FAIL = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
-SKIP = re.compile(r"^  ⊘ (.*?)(?: \([\d.]+ s\))?$")
+# a case line starts with its position in the run (`[n/total] `; optional for older logs)
+POS = r"(?:\[\d+/\d+\] )?"
+PASS = re.compile(rf"^{POS}  ✓ (.*?)(?: \([\d.]+ s\))?$")
+FAIL = re.compile(rf"^{POS}  ✗ (.*?)(?: \([\d.]+ s\))?$")
+SKIP = re.compile(rf"^{POS}  ⊘ (.*?)(?: \([\d.]+ s\))?$")
 TIME = re.compile(r"^  \((.*): ([\d.]+) s(?:;.*)?\)$")
 TOTAL = re.compile(r"^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?$")
 
@@ -1182,11 +1184,12 @@ def self_test():
         out = []
         for g, cs in groups:
             out.append(f"── {g} (fixture)")
-            for c in cs:
+            for k, c in enumerate(cs, 1):
+                pos = f"[{k}/{len(cs)}] "
                 if isinstance(c, tuple):
-                    out += [f"  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
+                    out += [f"{pos}  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
                 else:
-                    out.append(f"  ✓ {c} (0.010 s)")
+                    out.append(f"{pos}  ✓ {c} (0.010 s)")
             out.append(f"  ({g}: 0.010 s; cases 0.010 s)")
         return "\n".join(out) + "\n"
 

@@ -3,10 +3,10 @@ import Tests.Grail
 namespace Tests.Grail
 open Wiz Tests
 
-/-- The checked-in example index (`examples/grail-index`): the `grail-index` repository
+/-- The checked-in example index (`examples/fate-index`): the `fate-index` repository
 layout (23m), with `index.wiz`, three packages and their deterministic archives. -/
 def exampleIndex : IO System.FilePath := do
-  let p ← IO.FS.realPath "examples/grail-index"
+  let p ← IO.FS.realPath "examples/fate-index"
   unless ← (p / "index").isDir do
     throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
   pure p
@@ -59,14 +59,14 @@ def signedGreetIndex (root : System.FilePath) (seq : Nat)
      ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
   IO.FS.writeFile (root / "index" / "greet.sexpr")
     s!"(index (package \"greet\" (version \"1.0.0\" (source \"file://{tar}\") (sha256 \"{sha}\") (toolchain \">=0.1.0\") (deps))))\n"
-  IO.FS.writeFile (root / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+  IO.FS.writeFile (root / "registry.sexpr") "(registry (name \"test/fate-index\") (format 1))\n"
   let key := root / "key"
   let _ ← runIn root "ssh-keygen"
     ["-q", "-t", "ed25519", "-N", "", "-C", "grail index test", "-f", key.toString]
   let pub : System.FilePath := System.FilePath.mk (key.toString ++ ".pub")
   let fp ← fingerprintOf pub
   let size := (← tar.metadata).byteSize
-  writeSnapshot root "test/grail-index" seq "2026-11-15T00:00:00Z" expires fp
+  writeSnapshot root "test/fate-index" seq "2026-11-15T00:00:00Z" expires fp
     [("greet", "1.0.0", sha, size)]
   signSnapshot root key
   let allowed := root / "allowed_signers"
@@ -77,7 +77,7 @@ def grailIndexGroup : Group where
   name := "grail-index"
   exercise := "Stage 23m"
   cases := [
-    { name := "the example grail-index validates offline", run := fun _ => do
+    { name := "the example fate-index validates offline", run := fun _ => do
         let ex ← exampleIndex
         let cache ← IO.FS.createTempDir
         match ← Grail.checkDir cache {} 7 "lib" ex.toString false with
@@ -96,7 +96,7 @@ def grailIndexGroup : Group where
           Grail.cliMain (["--cache", cache.toString, "index", "check"] ++ args)
         checkEq 0 (← run [ex.toString])
         -- a non-local spec is refused without --fetch, so a CI run cannot clone by accident
-        checkEq 1 (← run ["https://example.invalid/grail-index"])
+        checkEq 1 (← run ["https://example.invalid/fate-index"])
         -- a malformed entry exits 1
         let root ← IO.FS.createTempDir
         let idx := root / "index"
@@ -309,7 +309,7 @@ def grailIndexGroup : Group where
         signSnapshot idx key
         checkEq 1 (← run updated)
         -- an expired key
-        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2020-01-01T00:00:00Z" fp
+        writeSnapshot idx "test/fate-index" 1 "2026-11-15T00:00:00Z" "2020-01-01T00:00:00Z" fp
           [("greet", "1.0.0", sha, 0)]
         signSnapshot idx key
         checkEq 1 (← run updated)
@@ -332,7 +332,7 @@ def grailIndexGroup : Group where
         let updated := ["update", "--require-signature", "--allowed-signers", allowed.toString]
         checkEq 0 (← run updated)
         -- seq 2 is an ordinary update
-        writeSnapshot idx "test/grail-index" 2 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+        writeSnapshot idx "test/fate-index" 2 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
           [("greet", "1.0.0", sha, 0)]
         signSnapshot idx key
         checkEq 0 (← run updated)
@@ -340,14 +340,14 @@ def grailIndexGroup : Group where
           | throw (IO.userError "bad grail.lock")
         checkEq 2 (lock.indexSignature.map (·.seq) |>.getD 0)
         -- seq 1 is a rollback: refused, unless deliberately accepted
-        writeSnapshot idx "test/grail-index" 1 "2026-11-15T00:00:00Z" "2030-01-01T00:00:00Z" fp
+        writeSnapshot idx "test/fate-index" 1 "2026-11-15T00:00:00Z" "2030-01-01T00:00:00Z" fp
           [("greet", "1.0.0", sha, 0)]
         signSnapshot idx key
         checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
         checkEq 1 (← run updated)
         checkEq 0 (← run (updated ++ ["--allow-rewind"]))
         -- a rewrite at the same sequence is refused even with --allow-rewind
-        writeSnapshot idx "test/grail-index" 1 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
+        writeSnapshot idx "test/fate-index" 1 "2026-11-16T00:00:00Z" "2030-01-01T00:00:00Z" fp
           [("greet", "1.0.0", sha, 0)]
         signSnapshot idx key
         checkEq 1 (← run (updated ++ ["--allow-rewind"])) }

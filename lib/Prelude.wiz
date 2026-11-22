@@ -1,3 +1,4 @@
+namespace __root__
 /-!
 # Prelude
 
@@ -618,6 +619,9 @@ inductive Tac where
   -- (6h S2) the default `simp` set: each registered lemma's name and (constant) `Expr`,
   -- in the order the driver tries them (priority, then registration)
   | getSimpLemmas (g : Nat) (k : List (String × Expr) → Tac)
+  -- (D6) the source names of `T`'s constructors (`T.c`), in declaration order, for
+  -- `constructor`: `none` if `T` is not an inductive type or a structure
+  | ctorNames (n : String) (k : Option (List String) → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -720,6 +724,10 @@ def TacticM.getSimpLemmas (g : Nat) : TacticM (List (String × Expr)) := fun k =
 number of parameters and the constructor's number of fields: `List.cons` is
 `("List", 1, 2)`, and `List.cons A x L` has the fields `x` and `L` after one parameter. -/
 def TacticM.ctorInfo (n : String) : TacticM (Option (String × Nat × Nat)) := fun k => Tac.ctorInfo n k
+/-- (D6) The source names of the constructors of `n` (`T.c`), in declaration order: the
+candidates `constructor` tries. `none` if `n` is not an inductive type or a structure
+(and `some []` for an inductive with no constructors). -/
+def TacticM.ctorNames (n : String) : TacticM (Option (List String)) := fun k => Tac.ctorNames n k
 /-- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
 or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
 constant `n`. -/
@@ -1283,6 +1291,58 @@ def TacticM.whnfCtorApp (g : Nat) (e : Expr) : TacticM (Option (String × List E
   e' ← TacticM.whnf g e;
   TacticM.ctorApp e'
 
+-- `constructor`: the host wrapper for the self-hosted `tactic.constructor`
+-- (`STacOp.constructor`); it needs `Expr.headName`, so it is defined after the terms.
+/-- `constructor`'s search: try each constructor name in order, applying it as `apply`
+would (its arguments become goals), and return the first that fits the goal. A failed
+attempt is undone (`Tac.catch` restarts from the state before it), so a constructor
+that unifies after the first is found; if none fits, the tactic fails. -/
+def TacticM.tryCtors (g : Nat) (names : List String) : TacticM (List Nat) := fun k => match names with
+  | .nil => TacticM.fail "constructor: no constructor applies" k
+  | .cons n rest => Tac.catch
+      ((do f ← TacticM.elabInfer g (Syntax.mkVar n);
+           TacticM.applyLoop 64 g f.1 f.2 .nil) k)
+      (fun _ => TacticM.tryCtors g rest k)
+      Tac.done
+/-- `constructor`'s goal type: its head constant's constructors. A structure's type is a
+definition (its value is a Σ), so its name is read **before** computing the head, as the
+self-hosted frontend's `indCtorsOf` checks the glued head first; only when the head is
+not an inductive type (`def F := Nat`) is the type computed (`whnf`) and read again. -/
+def TacticM.ctorGoalNames (g : Nat) (fuel : Nat) (ty : Expr) : TacticM (Option (List String)) :=
+  match fuel with
+  | .zero => TacticM.pure .none
+  | .succ k => match Expr.headName ty with
+    | .some T => do
+      csOpt ← TacticM.ctorNames T;
+      match csOpt with
+      | .some cs => TacticM.pure (.some cs)
+      | .none => do
+        ty' ← TacticM.whnf g ty;
+        match Expr.beq ty ty' with
+        | .true => TacticM.pure .none
+        | .false => TacticM.ctorGoalNames g k ty'
+    | .none => TacticM.pure .none
+syntax (name := constructor) "constructor" : tactic
+/-- `constructor`: apply a constructor of the goal's type, as the self-hosted frontend's
+`tactic.constructor` (`STacOp.constructor`) does: the first one in declaration order
+whose result type unifies with the goal. Its arguments are the new goals, in order. It
+fails with `constructor: no constructor applies` when none fits, and with
+`constructor: the goal is not an inductive type (or it has no constructors)` when the
+goal's type is not an inductive type (or structure); it never picks a constructor whose
+result type does not fit. -/
+def Tactic.constructor : Tactic := fun _ => do
+  g ← TacticM.mainGoal;
+  ty ← TacticM.goalType g;
+  csOpt ← TacticM.ctorGoalNames g 16 ty;
+  match csOpt with
+  | .none => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+  | .some cs => match cs with
+    | .nil => TacticM.fail "constructor: the goal is not an inductive type (or it has no constructors)"
+    | .cons _ _ => do
+      new ← TacticM.tryCtors g cs;
+      TacticM.replaceMainGoal new
+attribute [tactic tactic.constructor] Tactic.constructor
+
 -- ## Unfolding and rewriting (stage 6f)
 --
 -- `unfold f, g` unfolds the definitions `f` and `g` in the goal, once each (and fails
@@ -1618,3 +1678,4 @@ def Syntax.infoAt (path : List Nat) (msg : String) : Syntax :=
 at `path` (so errors in it point there). -/
 def Syntax.sourceAt (path : List Nat) (src : String) : Syntax :=
   Syntax.mkNode "macro.source" (.cons (Syntax.pathNode path) (.cons (.atom src) .nil))
+end

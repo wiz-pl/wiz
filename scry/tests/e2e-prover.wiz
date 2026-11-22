@@ -1,0 +1,173 @@
+-- test: run
+-- NOTE: `e2e-prover.expected` was written from the checked-in corpus goldens and
+-- the contracts below, not copied from a completed run. The first live run was
+-- blocked before it reached the test (missing tree-sitter-c-sharp out-link), so
+-- treat the expected file as a contract until the scry goldens job has compared
+-- it. Do not mark this case as verified in a report before then.
+import Sys
+import Json
+import Text
+
+-- `scry prover`: the prover driver, end to end over the checked-in prover corpus.
+--
+--   cwe78-process-safe.cs   no Console.ReadLine reaches Process.Start   proved    0
+--   cwe78-process-unsafe.cs the same claim on the unsafe twin           refuted   1
+--   PathHelper.Resolve      no sink after lowering                     vacuous   3
+--   a missing function / spill / flag                                             2/3
+--
+-- The driver reads the checked-in `.cst` spill, so the test needs neither tree-sitter
+-- nor .NET; the report is `scry-prover-report/1` and the refutation's SARIF is one
+-- `error` result whose message is the provenance witness.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def run (args : List String) : EIO Res := do
+  out ← Process.output ".grail/bin/scry" args "";
+  let code := match out.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code out.stdout out.stderr)
+
+partial def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def nthJ : List Json → Nat → Json
+  | .nil, _ => Json.mkNull
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ k => nthJ xs k
+
+def parseJson (label text : String) : EIO Json :=
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check (label ++ ": JSON parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+def firstLine (s : String) : String :=
+  match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+def readText (p : String) : EIO (Except String String) := do
+  ok ← EIO.lift (FS.exists p);
+  match ok with
+  | .false => EIO.pure (.error ("no such file: " ++ p))
+  | .true => do
+    t ← FS.readFile p;
+    EIO.pure (.ok t)
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "e2e-prover: skip (.grail/bin/scry absent)")
+  | .true => do
+    dir ← FS.createTempDir;
+    let safeSarif := Path.join dir "proved.sarif";
+    let unsafeSarif := Path.join dir "refuted.sarif";
+
+    -- 1. the safe twin: proved, exit 0
+    r0 ← run ["prover", "corpus/csharp/taint/cwe78-process-safe.cs",
+      "Fixtures.Runner.Main", "--json", "--sarif", safeSarif];
+    j0 ← parseJson "safe" r0.out;
+    check "safe: exit 0" (Nat.beq r0.code 0);
+    check "safe: schema scry-prover-report/1"
+      (String.eq (jStr j0 ["schema"]) "scry-prover-report/1");
+    check "safe: kind prover" (String.eq (jStr j0 ["kind"]) "prover");
+    check "safe: property no-flow" (String.eq (jStr j0 ["property"]) "no-flow");
+    check "safe: verdict proved" (String.eq (jStr j0 ["verdict", "tag"]) "proved");
+    check "safe: exit field 0" (Nat.beq (jNat j0 ["exit"]) 0);
+    check "safe: a source row is present" (Nat.lt 0 (jNat j0 ["coverage", "src"]));
+    check "safe: a sink row is present" (Nat.lt 0 (jNat j0 ["coverage", "sink"]));
+    check "safe: the invariant has one row" (Nat.beq (jNat j0 ["invariant", "rows"]) 1);
+
+    -- 2. the unsafe twin: refuted, exit 1, with a provenance witness
+    r1 ← run ["prover", "corpus/csharp/taint/cwe78-process-unsafe.cs",
+      "Fixtures.Runner.Main", "--json", "--sarif", unsafeSarif];
+    j1 ← parseJson "unsafe" r1.out;
+    check "unsafe: exit 1" (Nat.beq r1.code 1);
+    check "unsafe: verdict refuted" (String.eq (jStr j1 ["verdict", "tag"]) "refuted");
+    check "unsafe: exit field 1" (Nat.beq (jNat j1 ["exit"]) 1);
+    check "unsafe: the witness names the sink"
+      (String.contains (jStr j1 ["verdict", "witness"]) "sink(");
+
+    -- 3. a vacuous claim is not a proof: exit 3
+    r2 ← run ["prover", "corpus/prover/synthetic/PathHelper.cs",
+      "Fixtures.Files.PathHelper.Resolve", "--pack", "corpus/prover/packs/path.scry",
+      "--entry", "--json"];
+    j2 ← parseJson "vacuous" r2.out;
+    check "vacuous: exit 3" (Nat.beq r2.code 3);
+    check "vacuous: verdict vacuous" (String.eq (jStr j2 ["verdict", "tag"]) "vacuous");
+    check "vacuous: the reason names the empty sink set"
+      (String.contains (jStr j2 ["verdict", "reason"]) "sink set is empty");
+
+    -- 4. nothing analysed: no such function, no spill
+    r3 ← run ["prover", "corpus/csharp/taint/cwe78-process-safe.cs",
+      "Fixtures.Runner.Missing", "--json"];
+    check "nothing: a missing function exits 3" (Nat.beq r3.code 3);
+    r4 ← run ["prover", "corpus/workflow/cwe78-getenv.c", "main", "--json"];
+    check "nothing: a missing spill exits 3" (Nat.beq r4.code 3);
+
+    -- 5. usage/IO: exit 2
+    r5 ← run ["prover"];
+    check "usage: no arguments exits 2" (Nat.beq r5.code 2);
+    check "usage: the error names the usage"
+      (String.startsWith (firstLine r5.err) "scry: usage: scry prover");
+    r6 ← run ["prover", "corpus/prover/does-not-exist.cs", "main"];
+    check "IO: a missing source exits 2" (Nat.beq r6.code 2);
+
+    -- 6. SARIF: a proved claim has no result; a refuted one is one error result
+    safeRead ← readText safeSarif;
+    match safeRead with
+    | .error e => check ("sarif-safe: read (" ++ e ++ ")") .false
+    | .ok text => match Json.parse text with
+      | .error e => check ("sarif-safe: parses (" ++ e ++ ")") .false
+      | .ok j => do
+        check "sarif-safe: version 2.1.0" (String.eq (jStr j ["version"]) "2.1.0");
+        check "sarif-safe: no result for a proof"
+          (Nat.beq (List.length (jList (nthJ (jList j ["runs"]) 0) ["results"])) 0);
+    unsafeRead ← readText unsafeSarif;
+    match unsafeRead with
+    | .error e => check ("sarif-unsafe: read (" ++ e ++ ")") .false
+    | .ok text => match Json.parse text with
+      | .error e => check ("sarif-unsafe: parses (" ++ e ++ ")") .false
+      | .ok j => do
+        let run0 := nthJ (jList j ["runs"]) 0;
+        check "sarif-unsafe: driver scry"
+          (String.eq (jStr run0 ["tool", "driver", "name"]) "scry");
+        check "sarif-unsafe: one result"
+          (Nat.beq (List.length (jList run0 ["results"])) 1);
+        let isNoFlowError := Bool.and
+          (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["level"]) "error")
+          (String.eq (jStr (nthJ (jList run0 ["results"]) 0) ["ruleId"])
+            "scry/prover/no-flow");
+        check "sarif-unsafe: the result is an error with the no-flow rule" isNoFlowError;
+
+    FS.removeAll dir)

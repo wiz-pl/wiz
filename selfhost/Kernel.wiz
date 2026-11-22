@@ -1,4 +1,5 @@
 import IO
+namespace __root__
 -- A type checker in Wiz (stage 14a): the core of `Wiz/Core`, for a small calculus:
 -- variables (de Bruijn indices), universes `U n`, Π types, λ, application, Σ types,
 -- pairs and projections (stage 14e), `Unit`, `Empty`, finite enumerations with case
@@ -1209,6 +1210,13 @@ def kernelLazyProofs : Bool := .true
 extern "wiz_proof_start" proofStart : Nat → Bool
 extern "wiz_proof_tick" proofTick : Nat → Bool
 extern "wiz_proof_end" proofEnd : Nat → Bool
+-- (the kernel evaluator's per-command budget, its own counter so ordinary evaluation does
+-- not consume the proof read-back's: one tick per structural elimination; the frontend
+-- arms it for a command with `kernelStart` and reports `kernelBudgetMsg` if `kernelEnd`
+-- says it ran out)
+extern "wiz_kernel_start" kernelStart : Nat → Bool
+extern "wiz_kernel_tick" kernelTick : Nat → Bool
+extern "wiz_kernel_end" kernelEnd : Nat → Bool
 -- the budget (Lean's `Budget.defaultSteps`)
 def proofSteps : Nat := 1000000
 -- what a proof reads back as when its budget ran out (Lean's `Budget.message`): a
@@ -1737,25 +1745,38 @@ def vDelimW : Lvl → Val → Val → Val → Val → Val → Val → Val
 def vInd (l : Lvl) (I D : Val) (v : Lvl) (P m i x : Val) : Val := vIndW l I D v P m i (whnfView x)
 def vIndW : Lvl → Val → Val → Lvl → Val → Val → Val → Val → Val
   | l, I, D, v, P, m, i, .vcon xs =>
-    -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
-    let f : Val := .vlam (.cons m (.cons P (.cons D (.cons I .nil))))
-      (.lam (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0)));
-    let hyps := vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (hypsTm l v)) I) D) (muFamily l I D)) P) f) i) xs;
-    vapp (vapp (vapp m i) xs) hyps
+    -- (a step bound: structural recursion on a huge numeral is one step per successor,
+    -- and the result is unary here, so `Nat.add`/`Nat.mul`/`Nat.pow` on a big numeral
+    -- grows without bound. The command that armed a budget gets a diagnostic instead of
+    -- an out-of-memory or a stack overflow; no budget runs in the kernel's own work.)
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true =>
+      -- fun j y => ind … j y;  inside: y0 j1 m2 P3 D4 I5
+      let f : Val := .vlam (.cons m (.cons P (.cons D (.cons I .nil))))
+        (.lam (.ind l (.var 5) (.var 4) v (.var 3) (.var 2) (.var 1) (.var 0)));
+      let hyps := vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (hypsTm l v)) I) D) (muFamily l I D)) P) f) i) xs;
+      vapp (vapp (vapp m i) xs) hyps
   | l, I, D, v, P, m, i, .vne h sp => .vne h (.sind sp l I D v P m i)
   | _, _, _, _, _, _, _, x => x
 -- sized recursion (`vSfix`): on a constructor, `f ∞ rec i x`, where `rec j i y` recurses
 def vSfix (l : Lvl) (I D : Val) (v : Lvl) (P f sz i x : Val) : Val := match whnfView x with
   | .vcon xs =>
-    -- inside: y0 i1 j2 f3 P4 D5 I6
-    let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
-      (.lam (.lam (.sfix l (.var 6) (.var 5) v (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))));
-    vapp (vapp (vapp (vapp f .vszInf) rec_) i) (.vcon xs)
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true =>
+      -- inside: y0 i1 j2 f3 P4 D5 I6
+      let rec_ : Val := .vlam (.cons f (.cons P (.cons D (.cons I .nil))))
+        (.lam (.lam (.sfix l (.var 6) (.var 5) v (.var 4) (.var 3) (.var 2) (.var 1) (.var 0))));
+      vapp (vapp (vapp (vapp f .vszInf) rec_) i) (.vcon xs)
   | .vne h sp => .vne h (.ssfix sp l I D v P f sz i)
   | x' => x'
 -- sized case analysis (`vScase`): `m ∞ i xs` (the quantity plays no part)
 def vScase (l : Lvl) (q : Q) (I D : Val) (v : Lvl) (P m sz i x : Val) : Val := match whnfView x with
-  | .vcon xs => vapp (vapp (vapp m .vszInf) i) xs
+  | .vcon xs =>
+    match kernelTick 0 with
+    | .false => outOfSteps
+    | .true => vapp (vapp (vapp m .vszInf) i) xs
   | .vne h sp => .vne h (.sscase sp l q I D v P m sz i)
   | x' => x'
 -- observation (`vOut`): run one step of an unfolding, re-wrapping the recursive fields
@@ -1766,11 +1787,15 @@ def vOut (x : Val) : Val := match whnf x with
     let f : Val := .vlam (.cons st (.cons S (.cons D (.cons I .nil))))
       (.lam (.coit l (.var 5) (.var 4) (.var 3) (.var 2) (.var 1) (.var 0)));
     vapp (vapp (vapp (vapp (vapp (vapp (vapp (eval .nil (mapTm l)) I) D) S) (nuFamily l I D)) f) i) (vapp (vapp st i) s)
-  | .vscofix l I D A f _ i a =>
-    -- fun i a => scofix … ∞ i a;  inside: a0 i1 f2 A3 D4 I5
-    let rec_ : Val := .vlam (.cons f (.cons A (.cons D (.cons I .nil))))
-      (.lam (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) .szInf (.var 1) (.var 0)));
-    vOut (vapp (vapp (vapp (vapp f .vszInf) rec_) i) a)
+  | .vscofix l I D A f s i a =>
+    -- the body is at the predecessor of `s` (`∞` is its own predecessor)
+    let j := match sizePred s with
+      | .some j => j
+      | .none => (.vszInf : Val);
+    -- fun i a => scofix … j i a;  inside: a0 i1 f2 A3 D4 I5 j6
+    let rec_ : Val := .vlam (.cons f (.cons A (.cons D (.cons I (.cons j .nil)))))
+      (.lam (.scofix l (.var 5) (.var 4) (.var 3) (.var 2) (.var 6) (.var 1) (.var 0)));
+    vOut (vapp (vapp (vapp (vapp f j) rec_) i) a)
   | .vne h sp => outNe h sp
   | x' => x'
 -- `⟦D⟧ X i`
@@ -2608,73 +2633,78 @@ inductive TCtx where
        -- its result used at ω when the result contains no linear content ("consumed but
        -- not contained", `fixCallSafe`)
        (fix : Option String)
+       -- (22i) `--unbox-structs`: erasure may unbox a structure's last field
+       (unbox : Bool)
 def TCtx.lvl : TCtx → Nat
-  | .mk _ _ l _ _ _ _ _ => l
+  | .mk _ _ l _ _ _ _ _ _ => l
 def TCtx.env : TCtx → Env
-  | .mk e _ _ _ _ _ _ _ => e
+  | .mk e _ _ _ _ _ _ _ _ => e
 def TCtx.types : TCtx → Env
-  | .mk _ t _ _ _ _ _ _ => t
+  | .mk _ t _ _ _ _ _ _ _ => t
 def TCtx.erased : TCtx → Bool
-  | .mk _ _ _ x _ _ _ _ => x
+  | .mk _ _ _ x _ _ _ _ _ => x
 def TCtx.pm : TCtx → Nat
-  | .mk _ _ _ _ m _ _ _ => m
+  | .mk _ _ _ _ m _ _ _ _ => m
 def TCtx.reg : TCtx → Bool
-  | .mk _ _ _ _ _ r _ _ => r
+  | .mk _ _ _ _ _ r _ _ _ => r
 -- checking a partial definition's witness (`checkPartial`): evidence that its type is
 -- inhabited, never run, so its usages are not enforced (it may ignore a linear argument).
 -- The definition's body, the code that runs, is checked strictly.
 def TCtx.witness : TCtx → Bool
-  | .mk _ _ _ _ _ _ w _ => w
+  | .mk _ _ _ _ _ _ w _ _ => w
 def TCtx.fix : TCtx → Option String
-  | .mk _ _ _ _ _ _ _ f => f
+  | .mk _ _ _ _ _ _ _ f _ => f
+-- (22i) `--unbox-structs`: erasure may unbox a structure's last field
+def TCtx.unbox : TCtx → Bool
+  | .mk _ _ _ _ _ _ _ _ u => u
 -- the body of the partial definition `f` is being checked
 def TCtx.withFix (c : TCtx) (f : String) : TCtx := match c with
-  | .mk e t l x m r w _ => .mk e t l x m r w (.some f)
+  | .mk e t l x m r w _ u => .mk e t l x m r w (.some f) u
 def TCtx.erase (c : TCtx) : TCtx := match c with
-  | .mk e t l _ m r w f => .mk e t l .true m r w f
+  | .mk e t l _ m r w f u => .mk e t l .true m r w f u
 -- (P2) inside a proof
 def TCtx.inProof (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 3 with
+  | .mk e t l x m r w f u => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
       -- (the sorts pass, below the kernel: inside a proof, still placing no markers)
-      | .true => .mk e t l x 5 r w f
-      | .false => .mk e t l x 1 r w f
+      | .true => .mk e t l x 5 r w f u
+      | .false => .mk e t l x 1 r w f u
 -- (P2) is `c` inside a proof (`1`; `5` is the same in the sorts pass, which places no
 -- markers: `4` relevant, `5` inside a proof)?
 def inProofMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ _ _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
+  | .mk _ _ _ _ m _ _ _ _ => Bool.or (Nat.beq m 1) (Nat.beq m 5)
 def sortsMode (c : TCtx) : Bool := match c with
-  | .mk _ _ _ _ m _ _ _ => Nat.lt 3 m
+  | .mk _ _ _ _ m _ _ _ _ => Nat.lt 3 m
 -- (tests only) no marker requirement anywhere below, and proofs evaluated: the
 -- well-typedness pre-check of the differential tests, so that a term which needs markers
 -- inside a proof reaches the marking passes (review F2; `lazyProofs := false` in Lean)
 def TCtx.noMarkers (c : TCtx) : TCtx := match c with
-  | .mk e t l x _ r w f => .mk e t l x 3 r w f
+  | .mk e t l x _ r w f u => .mk e t l x 3 r w f u
 -- (P2) at the term a marker wraps, and below it
 def TCtx.atMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match m with
-    | .zero => .mk e t l x 2 r w f
+  | .mk e t l x m r w f u => match m with
+    | .zero => .mk e t l x 2 r w f u
     | _ => c
 def TCtx.belowMarked (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 2 with
-    | .true => .mk e t l x 0 r w f
+  | .mk e t l x m r w f u => match Nat.beq m 2 with
+    | .true => .mk e t l x 0 r w f u
     | .false => c
 def erasedIf (q : Q) (c : TCtx) : TCtx := match q with
   | .qz => TCtx.erase c
   | _ => c
 -- a new variable of type `ty`
 def TCtx.bind (c : TCtx) (ty : Val) : TCtx := match c with
-  | .mk e t l x m r w f => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r w f
+  | .mk e t l x m r w f u => .mk (.cons (fresh l) e) (.cons ty t) (l + 1) x m r w f u
 -- a new variable defined as `v`
 def TCtx.define (c : TCtx) (v ty : Val) : TCtx := match c with
-  | .mk e t l x m r w f => .mk (.cons v e) (.cons ty t) (l + 1) x m r w f
+  | .mk e t l x m r w f u => .mk (.cons v e) (.cons ty t) (l + 1) x m r w f u
 -- (PF-C) the same context with regularity at every type on
 def TCtx.fullReg (c : TCtx) : TCtx := match c with
-  | .mk e t l x m _ w f => .mk e t l x m .true w f
+  | .mk e t l x m _ w f u => .mk e t l x m .true w f u
 -- the witness-checking context (`addPartialDecl` in `Check.lean`)
 def TCtx.wit (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r _ f => .mk e t l x m r .true f
+  | .mk e t l x m r _ f u => .mk e t l x m r .true f u
 -- (PF-C, `Conv.convTy`) **Cast-Refl at every type while deciding equality of two
 -- propositions.** The two sides are truth values in the model, which validates Cast-Refl at
 -- every type; so while they are compared, a stuck cast is its argument at *any* type, not
@@ -3008,18 +3038,23 @@ def scaseMethodTy (l v : Lvl) (q : Q) (I D P sz : Val) : Val :=
 
 -- `S : I → Type l`, the states of a coiteration (and `A`, the seeds of a corecursion)
 def coitStateTy (l : Lvl) (I : Val) : Val := .vpi .qw (lsucc l) (lsucc (lsucc l)) I .nil (.sortL (lsucc l))
+-- `A : (j : Size) → (i : I) → Sort (l+1)`, the size-dependent states of a sized corecursion
+def scofixStateTy (l : Lvl) (I : Val) : Val :=
+  let l1 := lsucc l;
+  eval (.cons I .nil) (TS.t (tpi .qz (.mk .size (ln 1))
+    (tpi .qw (.mk (.var 1) l1) (.mk (.sortL l1) (lsucc l1)))))
 -- `step : (i : I) → S i → ⟦D⟧ S i`
 def coitStepTy (l : Lvl) (I D S : Val) : Val :=
   let l1 := lsucc l;
   -- i0 S1 D2 I3 ; s0 i1 S2 D3 I4
   eval (.cons S (.cons D (.cons I .nil)))
     (TS.t (tpiw (.mk (.var 2) l1) (tpiw (.mk (.app (.var 1) (.var 0)) l1) (.mk (interpApp l (.var 4) (.var 3) (.var 2) (.var 1)) l1))))
--- `f : (s :0 Size) → ((i : I) → A i → ν^s D i) → (i : I) → A i → ν^{↑s} D i`
+-- `f : (j :0 Size) → ((i : I) → A j i → ν^j D i) → (i : I) → A (↑j) i → ν^{↑j} D i`
 def scofixFunTy (l : Lvl) (I D A : Val) : Val :=
   let l1 := lsucc l;
-  eval (.cons A (.cons D (.cons I .nil))) (TS.t (tpi .qz (.mk .size (ln 1))
-    (tpiw (tpiw (.mk (.var 3) l1) (tpiw (.mk (.app (.var 2) (.var 0)) l1) (.mk (.nu l (.var 5) (.var 4) (.var 1) (.var 2)) l1)))
-      (tpiw (.mk (.var 4) l1) (tpiw (.mk (.app (.var 3) (.var 0)) l1) (.mk (.nu l (.var 6) (.var 5) (.var 1) (.szSuc (.var 3))) l1))))))
+  eval (.cons A (.cons D (.cons I .nil))) (TS.t (tpi .qw (.mk .size (ln 1))
+    (tpiw (tpiw (.mk (.var 3) l1) (tpiw (.mk (.app (.app (.var 2) (.var 1)) (.var 0)) l1) (.mk (.nu l (.var 5) (.var 4) (.var 1) (.var 2)) l1)))
+      (tpiw (.mk (.var 4) l1) (tpiw (.mk (.app (.app (.var 3) (.szSuc (.var 2))) (.var 0)) l1) (.mk (.nu l (.var 6) (.var 5) (.var 1) (.szSuc (.var 3))) l1))))))
 
 def andSame (a : Option Nat) (k : Nat → Option Nat) : Option Nat := match a with
   | .some n => k n
@@ -3197,9 +3232,9 @@ def convW : TCtx → Val → Val → Val → Bool
         | .vcocon x => match whnf b with
           | .vcocon y => conv c (vInterp l I D (nuFamily l I D) i) x y
           | _ => convNe c a b
-        | .vscofix _ _ _ A f _ j x => match whnf b with
-          | .vscofix _ _ _ A' f' _ j' x' => Bool.and (conv c (coitStateTy l I) A A')
-              (Bool.and (conv c (scofixFunTy l I D A) f f') (Bool.and (conv c I j j') (conv c (vapp A j) x x')))
+        | .vscofix _ _ _ A f s j x => match whnf b with
+          | .vscofix _ _ _ A' f' s' j' x' => Bool.and (sizeEq s s') (Bool.and (conv c (scofixStateTy l I) A A')
+              (Bool.and (conv c (scofixFunTy l I D A) f f') (Bool.and (conv c I j j') (conv c (vapp (vapp A s) j) x x'))))
           | _ => convNe c a b
         | .vcoit _ _ _ S st j x => match whnf b with
           | .vcoit _ _ _ S' st' j' x' => Bool.and (conv c (coitStateTy l I) S S')
@@ -3518,11 +3553,11 @@ def isProofTy (c : TCtx) (ty : Val) : Bool := match kernelLazyProofs with
     | .some l => lvlIsZero l
     | .none => .false
 def TCtx.relevant (c : TCtx) : TCtx := match c with
-  | .mk e t l x m r w f => match Nat.beq m 3 with
+  | .mk e t l x m r w f u => match Nat.beq m 3 with
     | .true => c
     | .false => match Nat.lt 3 m with
-      | .true => .mk e t l x 4 r w f
-      | .false => .mk e t l x 0 r w f
+      | .true => .mk e t l x 4 r w f u
+      | .false => .mk e t l x 0 r w f u
 def modeAt (c : TCtx) (ty : Val) : TCtx := match inProofMode c with
   | .false => c
   | .true => match sortOf c ty with
@@ -4165,7 +4200,7 @@ def inferW : TCtx → Tm → TyRes
       match check c D (.vdesc l vI) with
       | .ok _ _ =>
         let vD := eval (TCtx.env c) D;
-        match check c A (coitStateTy l vI) with
+        match check c A (scofixStateTy l vI) with
         | .ok _ _ =>
           let vA := eval (TCtx.env c) A;
           match check c f (scofixFunTy l vI vD vA) with
@@ -4173,7 +4208,8 @@ def inferW : TCtx → Tm → TyRes
             | .ok _ _ => match check c i vI with
               | .ok _ _ =>
                 let vi := eval (TCtx.env c) i;
-                match check c a (vapp vA vi) with
+                let vs := eval (TCtx.env c) sz;
+                match check c a (vapp (vapp vA vs) vi) with
                 | .ok _ ua => .ok (.vnu l vI vD vi (eval (TCtx.env c) sz)) (uScale .qw (uAdd uf ua))
                 | r => r
               | r => r
@@ -4564,7 +4600,7 @@ def qtyOk (c : TCtx) (q : Tm) : Option String := match check (TCtx.erase c) q .v
     | _ => .some "a quantity must be a literal or a variable"
 end
 
-def empty : TCtx := .mk .nil .nil 0 .false 0 .false .false .none
+def empty : TCtx := .mk .nil .nil 0 .false 0 .false .false .none .false
 
 -- does the term have a level the predicate rejects, in any level position? (the
 -- declaration check uses it for "every level parameter is declared, and none is left
@@ -5116,12 +5152,13 @@ def markInferW : TCtx → Tm → MR
     let vI := eval (TCtx.env c) I';
     let D' := markCheck c D (.vdesc l vI);
     let vD := eval (TCtx.env c) D';
-    let A' := markCheck c A (coitStateTy l vI);
+    let A' := markCheck c A (scofixStateTy l vI);
     let vA := eval (TCtx.env c) A';
     let f' := markCheck c f (scofixFunTy l vI vD vA);
     let i' := markCheck c i vI;
     let vi := eval (TCtx.env c) i';
-    let a' := markCheck c a (vapp vA vi);
+    let vs := eval (TCtx.env c) sz;
+    let a' := markCheck c a (vapp (vapp vA vs) vi);
     .mk (.scofix l I' D' A' f' sz i' a') (.some (.vnu l vI vD vi (eval (TCtx.env c) sz)))
   | c, .coit l I D S st i x =>
     let I' := markTy c I;
@@ -5186,7 +5223,7 @@ def markClosed (v ty : Tm) : Tm := markCheck empty v (eval .nil ty)
 -- in a `Π`/`Σ`'s sorts from its components' levels, everywhere, inside proofs too. The
 -- frontend runs it on every type and value before the kernel; the kernel rejects a hole
 -- that is left (an ill-typed term) and checks every sort.
-def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false .false .none
+def sortsCtx : TCtx := .mk .nil .nil 0 .false 4 .false .false .none .false
 def sortsTy (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => markTy sortsCtx t
@@ -5204,7 +5241,7 @@ def normalize (t : Tm) : String := show .nil 0 (quoteNF 0 (eval .nil (sortsInfer
 def sortsTyIn (c : TCtx) (t : Tm) : Tm := match tmHasHole t with
   | .false => t
   | .true => match c with
-    | .mk e ts l x _ r w f => markTy (.mk e ts l x 4 r w f) t
+    | .mk e ts l x _ r w f u => markTy (.mk e ts l x 4 r w f u) t
 -- (`ty` already filled)
 def sortsClosed (v ty : Tm) : Tm := match tmHasHole v with
   | .false => v
@@ -5306,3 +5343,4 @@ def natRegistered (nb : NatB) (key : String) (c : Tm) : Tm := match natOpOfKey k
   | .none => match kStrEq key "nat.zero" with
     | .true => .nlit knZero nb
     | .false => c
+end

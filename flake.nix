@@ -86,6 +86,25 @@
           # below); `addFlags` is for `--add-flags`, which takes one escaped string.
           addArgs = flags: lib.concatMapStringsSep " " lib.escapeShellArg flags;
 
+          # The site's own files `wiz doc` copies into OUT: the plain page's scripts and
+          # the `--serve` client.
+          # They are installed at `share/wiz/web`, which is where `wiz doc` looks beside
+          # the toolchain's `lib/` (`Main.webDir`), and a fileset so only these files
+          # enter the store: `scripts/check-release-web-assets.py` checks this list
+          # covers everything `Wiz.Doc.run` copies, and a name without a file is a nix
+          # evaluation error.
+          # (The Wasm module and the infoview page come from `wiz-web`, which needs
+          # `wiz`: a release gets them from `web/build.sh`; see scripts/release-tarball.sh.)
+          docSiteAssets = [
+            "scroll.css" "scroll.js" "scroll-search.js"
+            "lsp-client.js" "doc-live.js" "doc-live.css"
+            "framework/mount.js" "framework/driver.js" "framework/runtime.js"
+          ];
+          docSiteSource = fs.toSource {
+            root = ./web;
+            fileset = fs.unions (map (f: ./web + "/${f}") docSiteAssets);
+          };
+
           # $out/share/wiz is laid out like a checkout (lib/ next to .lake/build/bin/),
           # which is where grail looks for the standard library.
           wiz = pkgs.stdenv.mkDerivation {
@@ -95,8 +114,11 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             installPhase = ''
               share=$out/share/wiz
-              mkdir -p $share/.lake/build/bin $out/bin
+              mkdir -p $share/.lake/build/bin $out/bin $share/web
               cp -r ${fs.toSource { root = ./lib; fileset = ./lib; }} $share/lib
+              # the site assets `wiz doc` reads (the release half of the asset lookup;
+              # a checkout's `web/` is the other, and `--web` wins over both)
+              cp -r ${docSiteSource}/. $share/web/
               # the marker editors look for (editors/nvim: a library file is served by its toolchain's wiz)
               echo 'A Wiz toolchain: lib/ is its standard library, .lake/build/bin/ its binaries, ../../bin/ its commands (editors use this file to find them).' > $share/TOOLCHAIN
               cp ${unwrapped}/bin/wiz ${unwrapped}/bin/grail $share/.lake/build/bin/

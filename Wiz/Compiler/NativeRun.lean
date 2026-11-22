@@ -121,7 +121,7 @@ partial def firePap (code : Code) : PapOp → Array RVal → M RVal
   | .indK, #[D, m, j, k, h] => do ind code D m (← apply code j h) (← apply code k h)
   | .mapK, #[f, j, k, h] => do applyN code f [← apply code j h, ← apply code k h]
   | .coitK, #[D, step, j, s] => pure (.coit D step j s)
-  | .scofixK, #[f, _, i, a] => pure (.scofix f i a)
+  | .scofixK, #[f, i, a] => pure (.scofix f i a)
   | _, _ => throw "bad partial application of a primitive"
 
 partial def unpack (code : Code) (D v : RVal) : M RVal :=

@@ -808,10 +808,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : TCM (VTy R × Usage R) :=
   | .mvar m => throw (.other s!"the kernel does not accept metavariables (?m{m})")
   | .natLit _ =>
     -- a numeral means `succ (… zero)`, so it needs both constructors, as definitions
-    let defined (k : Name) := match (ctx.globals.builtins.lookup k).bind ctx.globals.find? with
+    let defined (k : Name) := match (ctx.globals.builtinOf? k).bind ctx.globals.find? with
       | some { value := some _, .. } => true
       | _ => false
-    match ctx.globals.builtins.lookup "nat" with
+    match ctx.globals.builtinOf? "nat" with
     | some N =>
       if defined "nat.zero" && defined "nat.succ" then pure (ctx.eval (.const N []), Usage.zeros ctx.lvl)
       else throw (.other "numerals need `builtin nat.zero := …` and `builtin nat.succ := …`")
@@ -1128,12 +1128,12 @@ stores data), so its eliminator can only target Prop")
     let _ ← check ctx D (.desc l vI)
     let vD := ctx.eval D
     let w := QuantitySyntax.explicitDefault
-    let _ ← check ctx A (coitStateTy l vI w)
+    let _ ← check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let uf ← check ctx f (scofixFunTy ctx.globals l vI vD vA w)
     let _ ← check { ctx with erased := true } s .size
     let _ ← check ctx i vI
-    let ua ← check ctx a (vApp ctx.globals vA (ctx.eval i))
+    let ua ← check ctx a (vApp ctx.globals (vApp ctx.globals vA (ctx.eval s)) (ctx.eval i))
     pure (.nu l vI vD (ctx.eval i) (ctx.eval s) none, ← methodUsage ctx (uf + ua))
   | .scase l q I D v P m s i x => do
     -- (K1) the case at quantity `q`: the method runs once (unscaled) and receives the
@@ -1806,7 +1806,7 @@ partial def Globals.axiomsOf (g : Globals R) (n : Name) : List String := Id.run 
   let mut todo : List (Name × Bool) := [(n, false)]
   let mut out : Array String := #[]
   let mut reprs : List Name := []
-  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap (List.lookup · g.builtins)
+  let numeral := ["nat", "nat.zero", "nat.succ"].filterMap g.builtinOf?
   while true do
     match todo with
     | [] => break

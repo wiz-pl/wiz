@@ -9,12 +9,17 @@ table lists exactly those. Messages not listed here have no code yet.
 
 | code | the error | example | quick fixes |
 |---|---|---|---|
+| `root-name` | `__root__` not as the first segment of a name, or a declaration named exactly `__root__` (it is the root escape) | `def A.__root__.x`, `def __root__` | write `__root__.x` for a global, or drop the segment |
 | `unknown-identifier` | a name that is neither a local nor a global in scope | `doubel 2` | did you mean (locals and globals, edit distance ≤ 2); add the missing `import` of a module of the package or the library that declares it |
+| `ambiguous-name` | an unqualified name that two `open`s, or an `open` and a declaration, both provide | `open A` and `open B` with `A.x` and `B.x`, then `x` | qualify it with a namespace |
+| `unclosed-namespace` | a `namespace` with no `end` (the error is at the `namespace`) | `namespace A` … end of file | add `end` |
 | `no-such-field` | the type has no field (or name in its namespace) of that name | `p.cuont`, `{ p with cuont := 1 }` | did you mean (a structure's fields; for a data type `T`, the names `T.f` that `t.f` can mean) |
 | `unknown-constructor` | the type has no constructor of that name | `(.gren : Color)`, `\| .gren => …` | did you mean (the type's constructors) |
 | `unknown-module` | no root has the module of an `import` | `import Prelud` | did you mean (the modules the server knows) |
 | `import-cycle` | an `import` leads back to the module itself | | |
 | `module-errors` | an imported module has errors (they are listed) | | |
+| `no-such-file` | the file a command names cannot be read | `wiz check no.wiz` | |
+| `import-order` | an `import` after a declaration, or nested in a command: imports are a fixed header | `def x := 1` then `import Prelude`; `mutual import M end` | |
 | `missing-case` | a `match` or equations miss constructors | | add missing cases |
 | `missing-copattern` | a copattern definition misses an observation | | |
 | `missing-field` | an instance misses a field of its class | | |

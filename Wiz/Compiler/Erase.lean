@@ -417,7 +417,7 @@ and for every type of its shape (`natShaped`): the name on a `μ` is display met
 which conversion ignores, so a type convertible to `Nat` (a copy of its declaration, or
 the `μ` written out) must get `Nat`'s representation (R3). The name is only a shortcut. -/
 def isNatTy (g : Globals R) (ty : Val R) : Bool :=
-  match g.builtins.lookup "nat", whnf ty with
+  match g.builtinOf? "nat", whnf ty with
   | some N, .mu _ I D _ _ hint _ =>
     (match hint with | some (T, _, _) => T == N | none => false) || natShaped g I D
   | _, _ => false
@@ -665,7 +665,7 @@ partial def eraseCheck (ctx : Ctx R) (t : Term R) (ty : VTy R) (inDesc : Bool :=
     | some (k, fs), false => return .obj k fs
     | some (0, _), true => return .natLit 0
     | some (_, fs), true =>
-      match g.builtins.lookup "nat.succ", fs[0]? with
+      match g.builtinOf? "nat.succ", fs[0]? with
       | some succ, some f => return .app (.global succ) f
       | _, _ => return .prim .pack #[.obj 5 #[← eraseCheck ctx (quote g ctx.lvl D) (.desc l I)], x']
     | none, _ =>
@@ -835,11 +835,11 @@ partial def eraseInfer (ctx : Ctx R) (t : Term R) (known : Option (VTy R) := non
       let stTy := coitStepTy g l vI vD (ctx.eval S) QuantitySyntax.explicitDefault
       pure (.prim .coit #[← eraseCheck ctx D (.desc l vI), ← eraseCheck ctx st stTy, ← eraseCheck ctx i vI,
         ← eraseCheck ctx s (vApp g (ctx.eval S) (ctx.eval i))])
-    | .scofix l I D A f _ i a => do
+    | .scofix l I D A f s i a => do
       let (vI, vD, vA) := (ctx.eval I, ctx.eval D, ctx.eval A)
       let fTy := scofixFunTy g l vI vD vA QuantitySyntax.explicitDefault
       pure (.prim .scofix #[← eraseCheck ctx f fTy, ← eraseCheck ctx i vI,
-        ← eraseCheck ctx a (vApp g vA (ctx.eval i))])
+        ← eraseCheck ctx a (vApp g (vApp g vA (ctx.eval s)) (ctx.eval i))])
     | .sfix l I D v P f _ i x => do
       -- (fix self. λ i x. f ◾ (λ j i y. self i y) i x) i x
       let (vI, vD, vP) := (ctx.eval I, ctx.eval D, ctx.eval P)

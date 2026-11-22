@@ -6,14 +6,10 @@
 --   cnt     = register 0 (if tick then 0 else if ce then cnt + 1 else cnt)
 --   tick    = ce &&& (cnt === n - 1)
 --
--- with the loop variable at a size. That spelling needs lane L2's sized `scofix`:
--- `Signal.fix` itself, and the size-preserving `map` behind `+` and `if` at size `i`. On
--- this base `+`/`if` are rejected and `Signal.fix` does not exist (the `hdl-signal` group
--- pins the messages). Numerals at a size *do* type (`Signal.pureS` and its `OfNat`
--- instance: they never observe), and the rest of this file is what checks today: `T^s` on
--- the applied former (`(Signal d A)^i`, used by `Signal.registerS`), the operator syntax
--- at size ∞ on `Signal.Sig` (the `Hw` instance), and a numeral at a size. The unchecked
--- Clash target is drafts/hdl-l3/SignalL3.wiz.
+-- with the loop variable at a size. Lane L2 landed the sized `scofix`, the size-preserving
+-- `mapS`/`zipWithS`, and `Signal.fix`; this file now checks the Clash spelling as well as
+-- the size-∞ `Hw` surface. `registerS` is the only size bump, so a combinational loop
+-- (`Signal.fix (fun i c => c + 1)`) is a size error, not a runtime loop.
 import Hdl.Core
 import Hdl.Signal
 
@@ -70,3 +66,34 @@ def pureInf (a : Nat) : Signal Sys Nat := Signal.pureS (i := ∞) a
 -- A numeral at a size: `lib/Hdl/Signal.wiz`'s `OfNat ((Signal d (BitVec n))^i) k`.
 def numAtSize {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3
 #eval Signal.sample 3 (Signal.map BitVec.toNat (numAtSize (d := Sys) (i := ∞) : Signal Sys (BitVec 8)))
+
+------------------------------------------------------------------------------------
+-- Lane L2: the sized fixed point and the operator surface at a size
+
+-- `mapS` is the size-preserving `map` (a sized copattern, compiled to `scofix`); it is
+-- what makes `+`/`if` on `(Signal d A)^i` possible. `registerS` is the only size bump.
+def incS {d : ClockDomain} {i : Size} (s : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i :=
+  Signal.mapS (fun (x : BitVec 8) => BitVec.add x (BitVec.ofNat 8 1)) s
+#eval Signal.sample 3 (Signal.map BitVec.toNat (incS (d := Sys) (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))
+
+-- `counter = register 0 (counter + 1)`: the loop variable `c` is at size `i`, `c + 1`
+-- preserves the size, and only `registerS` raises it to `↑i` for the next knot.
+def counter {d : ClockDomain} : Signal d (BitVec 8) :=
+  Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) =>
+    Signal.registerS (BitVec.ofNat 8 0) (c + 1))
+#eval Signal.sample 10 (Signal.map BitVec.toNat (counter : Signal Sys (BitVec 8)))
+
+-- The baud generator: count `ce` cycles 0 … n-1, tick on the last, hold when `ce` is low.
+-- `ce` is at `∞`; the sized subtyping `∞ ≥ i` puts it at the loop's size.
+def baud {d : ClockDomain} (w n : Nat) (ce : Signal d (BitVec 1)) : Signal d (BitVec 1) :=
+  let cnt := Signal.fix (fun (i : Size) (c : (Signal d (BitVec w))^i) =>
+    let cei : (Signal d (BitVec 1))^i := ce
+    let last := Signal.zipWithS (fun (x y : BitVec w) => Bool.toBits (BitVec.beq x y)) c
+      (Signal.pureS (i := i) (BitVec.ofNat w (n - 1)))
+    let tick := Signal.zipWithS BitVec.and cei last
+    Signal.registerS (BitVec.ofNat w 0)
+      (if tick then 0 else if cei then c + 1 else c))
+  Signal.zipWith BitVec.and ce
+    (Signal.zipWith (fun (x y : BitVec w) => Bool.toBits (BitVec.beq x y)) cnt
+      (Signal.pure (BitVec.ofNat w (n - 1))))
+#eval Signal.sample 10 (Signal.map BitVec.toNat (baud 4 4 (Signal.pure (BitVec.ofNat 1 1)) : Signal Sys (BitVec 1)))

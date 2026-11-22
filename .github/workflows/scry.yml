@@ -1,5 +1,5 @@
 # The Scry tool's own golden suite: `cd scry && grail test`, which runs the
-# `scry/tests/*.expected` goldens (28 today). The Lean-side groups (`=scry-taint`,
+# `scry/tests/*.expected` goldens (33 today). The Lean-side groups (`=scry-taint`,
 # `=scry-egraph`, …) run inside CI's `library` shard, but those test the library through
 # the Wiz host; nothing ran this package's own suite, so a drifted golden (or a broken
 # `scry` CLI) could land without a red check. `golden-diff.yml` only *shows* what

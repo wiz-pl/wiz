@@ -14,7 +14,9 @@ lake test -- --timings t.jsonl rig    # also append each case's time to t.jsonl
 .lake/build/bin/tests --run selfhost 3  # one case (also selfhost#3): exit 0 passed, 1 failed, 3 skipped
 ```
 
-Every case prints its wall time (`✓ name (12.345 s)`), and every group its total.
+Every case prints its position among the cases the invocation selected and its wall time
+(`[3/42]   ✓ name (12.345 s)`; a shard's total spans its groups), and every group its
+total.
 `--timings FILE` (with `--shard NAME` as a label) appends one line of JSON per case:
 `shard`, `group`, `index`, `case`, `seconds`, `ok`, and `notes`, which say which shared
 programs the case used and built (`Tests.note`: `uses checker`, `built checker 331.2`;
@@ -425,7 +427,7 @@ grail build
 `grail cache path|list|verify` inspects the shared cache; `verify` re-hashes every
 archive and checks every unpacked tree's stamp, and exits 1 on a corrupt entry.
 
-The hermetic fixture is `Tests/fixtures/grail-index/` (`index/NAME.sexpr`,
+The hermetic fixture is `Tests/fixtures/fate-index/` (`index/NAME.sexpr`,
 `packages/NAME-V.tar.gz`, `sources/` and `make.sh`); `=grail-deps` covers exact/range
 versions, the transitive closure, a missing package, a hash mismatch, stale locks,
 `fetch --locked` with cold/warm caches, scoped `index/@org/name.sexpr` files, index
@@ -436,9 +438,9 @@ includes three signed-snapshot cases (a throwaway Ed25519 key via `ssh-keygen`; 
 skip when it is absent): the lock records the fingerprint/sequence, offline
 verification from the pinned key, and refusal of a tampered or re-signed snapshot, an
 expired key, a lower sequence and a same-sequence rewrite. Rebuild the archives with
-`cd Tests/fixtures/grail-index && ./make.sh`. There is no network in these tests.
+`cd Tests/fixtures/fate-index && ./make.sh`. There is no network in these tests.
 
-There is also a complete example **index repository** at `examples/grail-index/`
+There is also a complete example **index repository** at `examples/fate-index/`
 (`index.wiz`, `registry.sexpr`, `index/`, `entries/`, `sources/`, `packages/`, `make.sh`)
 and a checker: `scripts/grail-index-check.sh DIR` (also `grail index check DIR`) validates
 names, versions, semver requirements, local archive SHA-256s and layouts, `index.wiz`
@@ -1282,6 +1284,40 @@ python3 scripts/golden-diff.py --self-test   # the diff engine's synthetic fixtu
 
 The script uses `.lake/build/bin/grail` (or `$GRAIL`, or `--grail PATH`); `--keep` keeps
 the temporary copy, and `--out FILE` writes the report.
+
+### Running the scry e2e goldens locally
+
+The six end-to-end files (`scry/tests/{e2e-c,e2e-cs,e2e-prover,e2e-egraph,corpus-parse,
+workflow-e2e}.wiz`) need three things, and two of them are easy to miss:
+
+```sh
+lake build wiz grail tests          # the tree's own grail; the installed one matches nothing
+
+# 1. the C# grammar *as a real directory* (see below)
+cp -a /nix/store/<hash>-tree-sitter-c-sharp-0.23.5/. scry/native/tree-sitter-c-sharp/
+
+cd scry
+../.lake/build/bin/grail build scry  # 2. gives e2e-c/cs/egraph/prover .grail/bin/scry
+../.lake/build/bin/grail test --test-timeout 2400 \
+  tests/e2e-c.wiz tests/e2e-cs.wiz tests/e2e-prover.wiz \
+  tests/e2e-egraph.wiz tests/corpus-parse.wiz tests/workflow-e2e.wiz
+```
+
+* **Do not leave the grammar as the Nix out-link.** `nix build .#tree-sitter-c-sharp
+  -o scry/native/tree-sitter-c-sharp` writes a *symlink*; a test run over sshfs cannot
+  read it (`Operation not permitted`) and `src/Scry/Native.wiz` then fails with
+  `link_c: no file ../../native/tree-sitter-c-sharp/src/parser.c`. Copy the store
+  directory into the gitignored path instead (30 MB), and check from the node that
+  `scry/native/tree-sitter-c-sharp/src/parser.c` exists — an sshfs negative dentry can
+  report it missing for a minute after the copy.
+* **Without `grail build scry`** the four golden cases report
+  `skip (.grail/bin/scry absent)` and fail on line 1, which reads like a test failure
+  but is a missing step.
+* Use `grail test`'s own `--test-timeout`; the harness default is 300 s and
+  `tests/scale.wiz` needs more.
+
+`e2e-c` and `workflow-e2e` are the two that exercise the C and workflow pipelines; the
+other four cover C#, the prover, the e-graph and the corpus parse invariant.
 
 ### Documentation site
 

@@ -1,6 +1,7 @@
 -- test: check
 import Text
 import Scry.Optics
+import Scry.NativeLink
 import Scry.CstOptics
 import Scry.OpticsExamples
 import Scry.Query

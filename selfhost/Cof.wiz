@@ -1,4 +1,5 @@
 import Prelude
+namespace __root__
 -- The shared interval/cofibration layer for the cubical fragment Cub-F1 (M1), in Wiz.
 --
 -- Cub-F1 is Cartesian and two-level: dimensions are `0`, `1` and de Bruijn *indices*
@@ -494,3 +495,4 @@ def pathExt (a b : String) : Option Ext :=
 -- `underDim` decides `φ` in that restricted context (the Path endpoint rule).
 def underDim (ctx : CofCtx) (i : Nat) (r : Dim) (φ : Cof) : Bool :=
   entails (assume (eqD (.dv i) r) ctx) φ
+end

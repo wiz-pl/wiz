@@ -231,7 +231,7 @@ def readConfig (tc : Toolchain) (salt : UInt64) (std dir : System.FilePath) :
         if isOverrideKey k then some (overrideName k, v) else none
       pure (.ok ({ pkg with overrides }, ss.filter fun (k, _) => !isOverrideKey k))
 
-/-- (23m) The manifest of a `grail-index` repository (`index.wiz`): the index's name,
+/-- (23m) The manifest of a `fate-index` repository (`index.wiz`): the index's name,
 its format, and the packages it publishes. `Index.render` turns it into
 `(index (name "…") (format N) (package "…") …)`, which `grail index check` compares
 with the static `index/*.sexpr` files. Keeping it Wiz code means the index repository

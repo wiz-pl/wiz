@@ -241,7 +241,10 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   isType "coitStateTy" c2 st
   let c3' := c2.bind "S" q st
   isType "coitStepTy" c3' (coitStepTy g lv I D (Val.var 3) w)
-  isType "scofixFunTy" c3' (scofixFunTy g lv I D (Val.var 3) w)
+  let stA := scofixStateTy lv I w
+  isType "scofixStateTy" c2 stA
+  let cA := c2.bind "A" q stA
+  isType "scofixFunTy" cA (scofixFunTy g lv I D (Val.var 3) w)
 
 /-! ## Native arithmetic against the definitions -/
 
@@ -268,7 +271,9 @@ def definitionsOnly : IO String := do
   let keep := lines.filter fun l =>
     !(l.startsWith "builtin nat." && !l.startsWith "builtin nat.zero" && !l.startsWith "builtin nat.succ")
   check (lines.length - keep.length == 14) s!"expected to remove 14 registrations, removed {lines.length - keep.length}"
-  pure ("\n".intercalate keep ++ "\n")
+  -- the slice stops before Prelude's own `end __root__`, so close the wrapper here
+  let closed := if keep.any (· == "namespace __root__") then "end __root__\n" else ""
+  pure ("\n".intercalate keep ++ "\n" ++ closed)
 
 structure Op where
   name : String

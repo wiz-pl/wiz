@@ -290,7 +290,8 @@ def selectors_from_shard(name: str) -> list[str]:
 
 
 GROUP_RE = re.compile(r"^── (.*) \((.*)\)$")
-FAIL_RE = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
+# a case line starts with its position in the run (`[n/total] `; optional for older logs)
+FAIL_RE = re.compile(r"^(?:\[\d+/\d+\] )?  ✗ (.*?)(?: \([\d.]+ s\))?$")
 RUN_RESULT_RE = re.compile(r"^(.*) #(\d+): (FAILED|SKIPPED.*)$")
 
 

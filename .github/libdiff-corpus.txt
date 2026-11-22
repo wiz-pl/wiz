@@ -115,6 +115,7 @@ lib/Scry/Engine.wiz
 lib/Scry/EqPlan.wiz
 lib/Scry/Eval.wiz
 lib/Scry/Identity.wiz
+lib/Scry/Index.wiz
 lib/Scry/Interproc.wiz
 lib/Scry/Lifetime.wiz
 lib/Scry/Models.wiz
@@ -160,11 +161,13 @@ lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
 lib/Web/Search.wiz
+lib/Web/Selfhost.wiz
 lib/Web/Widget.wiz
 lib/Word.wiz
 lib/WordArray.wiz
 lib/WordMap.wiz
 scry/App.wiz
+scry/corpus/csharp/parity/pipeline-probe.wiz
 scry/fixtures/ReplPrelude.wiz
 scry/gen/C/Schema.wiz
 scry/grail.wiz
@@ -186,6 +189,7 @@ scry/src/Scry/Fuzz.wiz
 scry/src/Scry/FuzzCmd.wiz
 scry/src/Scry/Lower.wiz
 scry/src/Scry/Native.wiz
+scry/src/Scry/NativeLink.wiz
 scry/src/Scry/OpticsExamples.wiz
 scry/src/Scry/Parse.wiz
 scry/src/Scry/Preproc.wiz
@@ -193,6 +197,7 @@ scry/src/Scry/Project.wiz
 scry/src/Scry/ProjectCache.wiz
 scry/src/Scry/ProjectIO.wiz
 scry/src/Scry/ProjectTaint.wiz
+scry/src/Scry/ProverCmd.wiz
 scry/src/Scry/Query.wiz
 scry/src/Scry/Repl.wiz
 scry/src/Scry/ReportCmd.wiz
@@ -203,10 +208,15 @@ scry/src/Scry/WorkflowCmd.wiz
 scry/tests/bench.wiz
 scry/tests/cli.wiz
 scry/tests/codegen.wiz
+scry/tests/corpus-parse.wiz
 scry/tests/cst.wiz
 scry/tests/diff-cli.wiz
 scry/tests/diff.wiz
 scry/tests/dynamic.wiz
+scry/tests/e2e-c.wiz
+scry/tests/e2e-cs.wiz
+scry/tests/e2e-egraph.wiz
+scry/tests/e2e-prover.wiz
 scry/tests/egraph-rewrite.wiz
 scry/tests/egraph.wiz
 scry/tests/fuzz.wiz

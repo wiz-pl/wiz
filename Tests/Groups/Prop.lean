@@ -1115,13 +1115,15 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
       let vI := cx.k.eval I
       let vD := cx.k.eval D
       let unitS : Tm := .lam "i" (.unit (.succ l))
+      let unitA : Tm := .lam "j" (.lam "i" (.unit (.succ l)))
       let vS := cx.k.eval unitS
+      let vA := cx.k.eval unitA
       let viaCoit : Array (Gen Tm) := #[do
         let st ← genTm cx (quote g cx.k.lvl (coitStepTy g l vI vD vS .many)) f
         return .ann (.coit l I D unitS st i .tt) Tw]
       let viaScofix : Array (Gen Tm) := #[do
-        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vS .many)) f
-        return .scofix l I D unitS fn s i .tt]
+        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vA .many)) f
+        return .scofix l I D unitA fn s i .tt]
       (match sizePred? (cx.k.eval s) with
        | some s' =>
          let P := quote g cx.k.lvl (vInterp g l vI vD (nuFamilyAt l vI vD s') (cx.k.eval i))
