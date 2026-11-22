@@ -98,8 +98,9 @@ inconsistent — the hypothesis is the consistency assumption, not a syntactic f
 theorem badSig_sigWF_gives_empty (h : SigWF F0 badSig) :
     Derivable (F0 ([] : Sig)) (([] : Ctx) ⊢ Tm.tt ∶ Tm.empty .prop) := by
   unfold badSig at h
+  -- `axiom` is a keyword, so the constructor alternative needs guillemets in a pattern.
   cases h with
-  | axiom _ _ hval _ => simp [badDecl] at hval
+  | «axiom» _ _ hval _ => simp [badDecl] at hval
   | defn _ _ hval hty _ =>
       simp only [badDecl, Option.some.injEq] at hval
       subst hval
