@@ -965,8 +965,8 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
         (fun k c => modify fun xs => xs ++ [(k, c)]) []).2
       let rec goKids : List (Nat × Term R) →
           ElabM R (Option (Term R × Term R × Term R × Term R × Term R))
-        | [] => pure none
-        | (k, c) :: rest => match ← scan c (depth + k) with
+        | .nil => pure none
+        | .cons p rest => match ← scan p.2 (depth + p.1) with
           | some r => pure (some r)
           | none => goKids rest
       goKids kids
