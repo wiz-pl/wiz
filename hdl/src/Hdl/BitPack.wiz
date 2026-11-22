@@ -175,6 +175,47 @@ def Bits.pack_field (v w s pad rest : Nat)
       (Eq.trans (Eq.congrArg (Nat.add v) hzero) (Nat.add_zero v));
   Eq.trans (Eq.congrArg (Bits.low w) hval) (Bits.low_of_lt w v hv)
 
+/-- The high-fields-aware field extraction: a packed payload is
+`high · 2^(off+w) + (v · 2^s + rest) · 2^pad`; taking `low w` of its `high off`
+leaves the field `v`, since the higher fields contribute a multiple of `2^w` and the
+lower ones vanish below `off`. -/
+def Bits.pack_field_high (high v w s pad rest : Nat)
+    (hv : Nat.lt v (Nat.pow 2 w) = .true) (hr : Nat.lt rest (Nat.pow 2 s) = .true) :
+    Bits.low w (Bits.high (Nat.add pad s)
+      (Nat.add (Nat.mul high (Nat.pow 2 (Nat.add (Nat.add pad s) w)))
+        (Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) (Nat.pow 2 pad)))) = v :=
+  let off := Nat.add pad s;
+  let R := Nat.pow 2 pad;
+  let lowPart := Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) R;
+  let highPart := Nat.mul high (Nat.pow 2 (Nat.add off w));
+  let hsplit : lowPart = Nat.add (Nat.mul v (Nat.pow 2 off)) (Nat.mul rest R) :=
+    Bits.shift_add v s pad rest;
+  let hrest : Nat.lt (Nat.mul rest R) (Nat.pow 2 off) = .true :=
+    Eq.substProp (fun (t : Nat) => Nat.lt (Nat.mul rest R) t = .true)
+      (Eq.congrArg (Nat.pow 2) (Nat.add_comm s pad)) (Bits.mul_pow_lt' rest s pad hr);
+  let hzero : Bits.high off (Nat.mul rest R) = 0 :=
+    Bits.high_zero off (Nat.mul rest R) hrest;
+  let q := Nat.pow 2 w;
+  let p := Nat.pow 2 off;
+  let eHigh : Nat.mul high (Nat.pow 2 (Nat.add off w)) = Nat.mul (Nat.mul high q) p :=
+    Eq.trans (Eq.congrArg (Nat.mul high) (Bits.pow_add off w))
+      (Eq.trans (Eq.congrArg (Nat.mul high) (Nat.mul_comm p q))
+        (Eq.symm (Nat.mul_assoc high q p)));
+  let hHigh : Bits.high off (Nat.add highPart lowPart)
+      = Nat.add (Nat.mul high (Nat.pow 2 w)) (Bits.high off lowPart) :=
+    Eq.substProp (fun (t : Nat) => Bits.high off (Nat.add t lowPart)
+        = Nat.add (Nat.mul high (Nat.pow 2 w)) (Bits.high off lowPart))
+      (Eq.symm eHigh) (Bits.high_add_pow off (Nat.mul high (Nat.pow 2 w)) lowPart);
+  let hLow : Bits.high off lowPart = v :=
+    Eq.trans (Eq.substProp (fun (t : Nat) => Bits.high off t
+        = Nat.add v (Bits.high off (Nat.mul rest R))) (Eq.symm hsplit)
+      (Bits.high_add_pow off v (Nat.mul rest R)))
+      (Eq.trans (Eq.congrArg (Nat.add v) hzero) (Nat.add_zero v));
+  let hAll : Bits.high off (Nat.add highPart lowPart)
+      = Nat.add (Nat.mul high (Nat.pow 2 w)) v :=
+    Eq.trans hHigh (Eq.congrArg (Nat.add (Nat.mul high (Nat.pow 2 w))) hLow);
+  Eq.trans (Eq.congrArg (Bits.low w) hAll) (Bits.low_add_mul_pow w high v hv)
+
 /-- The field at the top of a packed payload, when the payload is known only as the low
 half of the packed number: rewrite that half to its shifted form first. -/
 def Bits.pack_field_low (payload0 v w s pad rest : Nat)

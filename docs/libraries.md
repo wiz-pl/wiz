@@ -807,12 +807,26 @@ are `hdl/examples/hdl-gaps.wiz` (group `hdl`, with Icarus Verilog test benches w
   `toNat` is below `2^T.width`, so the width and the value agree for every `x`) and
   `T.bitPack`. A field is `BitVec n`, `Bool`, or a type with its own derived
   `width`/`pack`/`unpack`. The round trip `T.unpack (T.pack x) = x` holds by `rfl` on
-  closed values (samples); its general proof is not emitted yet: `hdl/src/Hdl/BitPack.wiz`
-  proves the arithmetic (`Bits.pack_field`, `Bits.packed_tag`, `BitVec.ofNat_low`, …),
-  but the kernel's observational equality does not reduce a decoded constructor whose
-  payload is a symbolic `Nat.shiftLeft`, so the canonical equality tuple cannot be
-  ascribed. A recursive, implicit or proof field,
-  a field of a type with no `BitPack`, and a type with no constructors are errors; so is a
+  closed values (samples); its general proof is not emitted yet. The bit arithmetic is
+  in place (`Bits.pack_field`, the high-fields-aware `Bits.pack_field_high`,
+  `Bits.packed_tag`, `BitVec.ofNat_low`, …). The named follow-up is:
+
+  **HDL-2.4b — general `unpack_pack` for multi-field inductives.** Blocked on the
+  list split
+  `packFields fs · 2^pad = high · 2^(pad+s+w) + (v · 2^s + rest) · 2^pad`
+  for fields after the first, and on the kernel equality step with a symbolic
+  `Nat.shiftLeft` payload: the stuck goal is
+  `T.unpack (T.pack (T.c f…)) = T.c f…`, whose canonical form is
+  `T.decode tag (Nat.shiftLeft …) = T.c f…` (the kernel keeps the `decode`
+  application glued and reports the equality tuple
+  `(field = field) × True × True` instead). It needs a list-level
+  `Bits.unpack_field : (fs : List (Nat × Nat)) → …` proved by recursion, and a
+  `Nat`/power split lemma for `packFields`; the pinned bit strings and the
+  emitted/netlist concat checks already establish the *layout*, so this is a law
+  gap, not an encoding question.
+
+  A recursive, implicit or proof field, a field of a type with no `BitPack`, and a type
+  with no constructors are errors; so is a
   constructor payload wider than the declared payload width. A representation-
   parameterised `T Δ r` (fields `r Tᵢ`) also gets `T.toBits`/`T.ofBits` (packed on wires
   through `Hw.packBits`/`Hw.unpackBits`). `hdl/examples/hdl-bitpack.wiz` checks the UART's
