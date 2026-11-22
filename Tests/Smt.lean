@@ -39,7 +39,7 @@ range proof. It is the shape a future trusted constructor (the pre-22l
 `UIntN.ofBitsTrusted`) would have; the translator must refuse it, not assume its words
 are in range (R3). -/
 def fakeWord : String :=
-  "inductive UIntN (w : Nat) where\n  | mk (n : Nat)\n" ++
+  "import Prelude\ninductive UIntN (w : Nat) where\n  | mk (n : Nat)\n" ++
   "def UIntN.toNat {w : Nat} : UIntN w → Nat\n  | .mk n => n\n" ++
   "def UIntN.not {w : Nat} : UIntN w → UIntN w\n  | .mk n => .mk 0\n"
 
@@ -315,7 +315,8 @@ def smtGroup : Group where
         -- `not` is constant 0, so `not (not x) = x` is FALSE. Read as an 8-bit vector
         -- with the range assumed, z3 proves it unsat and `smt` would accept a false
         -- theorem. The translation must refuse the type instead (R3).
-        let loader : Name → Option String := fun m => if m == "Word" then some fakeWord else none
+        let lib ← Elab.libLoader
+        let loader : Name → Option String := fun m => if m == "Word" then some fakeWord else lib m
         let ms ← msgsWith loader ("import Word\n" ++
           "def bad (x : UIntN 8) : UIntN.not (UIntN.not x) = x := by smt\n") ["Word"] trusted
         expect ms "error: smt: UIntN is not sealed with a private constructor"
@@ -422,20 +423,27 @@ def smtGroup : Group where
         | .error e => throw (IO.userError s!"running z3 failed: {e}") },
     { name := "R5: only a non-empty proof file is cached; a verdict (no {out}) is never written", run := fun _ => do
         let dir ← IO.FS.createTempDir
-        let cfg : Smt.Config := { cacheDir := some dir.toString }
+        -- `runSolver` is declared pure (an opaque over a disk cache), so two calls with
+        -- *identical* arguments may be common-subexpression-eliminated, which would
+        -- hide the second read. The cache key does not include these settings, so
+        -- different `timeoutMs` values keep the same entry while making the calls
+        -- distinct; `runSolver` itself only reads `cacheDir`.
+        let cfgA : Smt.Config := { cacheDir := some dir.toString, timeoutMs := 1000 }
+        let cfgB : Smt.Config := { cacheDir := some dir.toString, timeoutMs := 1001 }
+        let cfgC : Smt.Config := { cacheDir := some dir.toString, timeoutMs := 1002 }
         let mk (body : String) : List String := ["-c", body, "sh", "{out}"]
         -- (a) `wantOut = false`: the answer is a verdict, so it must not be kept
-        let r := Smt.runSolver cfg "sh" (mk "printf 'unsat\\n'; exit 0") "q" "smt2" false (fun a => a.exitCode == 0)
+        let r := Smt.runSolver cfgA "sh" (mk "printf 'unsat\\n'; exit 0") "q" "smt2" false (fun a => a.exitCode == 0)
         (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
         check ((← cacheEntries dir.toString).isEmpty) "a verdict (wantOut = false) was cached"
         -- (b) `wantOut = true` but the solver wrote no proof: also not a certificate
-        let r := Smt.runSolver cfg "sh" (mk "printf 's UNSATISFIABLE\\n'; : > \"$1\"; exit 20") "q" "smt2" true (fun a => a.exitCode == 20)
+        let r := Smt.runSolver cfgB "sh" (mk "printf 's UNSATISFIABLE\\n'; : > \"$1\"; exit 20") "q" "smt2" true (fun a => a.exitCode == 20)
         (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
         check ((← cacheEntries dir.toString).isEmpty) "an answer with an empty proof file was cached"
         -- (c) a non-empty proof is cached, and a changed proof with a stale digest is a miss
         let marker := (dir / "run-marker").toString
         let body := s!"if [ -f {marker} ]; then exit 3; else printf 'PROOF1' > \"$1\"; exit 20; fi"
-        let r := Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20)
+        let r := Smt.runSolver cfgA "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20)
         let (_, a) ← match r with
           | .ok x => pure x
           | .error e => throw (IO.userError e)
@@ -450,12 +458,12 @@ def smtGroup : Group where
         IO.FS.writeFile (System.FilePath.mk marker) ""
         IO.FS.writeFile path
           (({ e with proof := "PROOF2" }.withDigest (Smt.Sha256.hexBytes "PROOF2".toUTF8)).render)
-        match Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
+        match Smt.runSolver cfgB "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
         | .ok (_, a) => checkEq "PROOF2" a.outFile
         | .error e => throw (IO.userError s!"a digest-matching cached proof was not served: {e}")
         -- (c2) digest stale: a miss, so the solver runs (and the marker makes it exit 3)
         IO.FS.writeFile path ({ e with proof := "PROOF3" }.render)
-        match Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
+        match Smt.runSolver cfgC "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
         | .ok (_, a) => check (a.exitCode == 3) "a proof with a stale digest was served"
         | .error _ => pure () },
     { name := "lib/ never uses smt", run := fun _ => do
