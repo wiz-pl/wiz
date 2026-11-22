@@ -34,9 +34,16 @@
       # The empty seed `withLakeCache` starts from: a real store path, so the function's
       # argument is never nullable and the producer is an ordinary derivation whose cold
       # compile the sandbox enforces (no cache, no dev shell, no network).
+      #
+      # `.lake/build/.keep` is load-bearing: nixpkgs' fixupPhase prunes empty
+      # directories, so an empty `.lake/build` disappears and the seed becomes an
+      # empty store path. `lake-cache.sh build` then refuses it (`$seed/.lake is
+      # missing`) and `withLakeCache` asserts the same. The file is what keeps the
+      # directory, and it costs nothing in the build.
       emptyLake = pkgs:
         pkgs.runCommand "empty-lake" { } ''
           mkdir -p $out/.lake/build
+          : > $out/.lake/build/.keep
           install -Dm644 ${./lean-toolchain} $out/toolchain
         '';
 
