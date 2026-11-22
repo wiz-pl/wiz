@@ -18,7 +18,8 @@
 #   share/wiz/.lake/build/bin/{wiz,grail}   the binaries (grail finds lib/ from there)
 #   share/wiz/editors/       the editor plugins, when the checkout has them
 #   share/wiz/cc/            the C compiler, glibc 2.27 sysroot, static GMP and GC (CCDIR)
-#   share/wiz/web/           the web infoview: page, script, Wasm (WEBDIR)
+#   share/wiz/web/           the web infoview: page, script, Wasm (WEBDIR), and the Wasm
+#                            backend's JS host (`wiz run --target wasm` finds it there)
 #   share/wiz/REVISION       the commit
 #   share/wiz/LICENSE, COPYING.RUNTIME, NOTICE   Wiz's licence, the runtime exception,
 #                            and what third-party code is in the toolchain
@@ -50,6 +51,9 @@ done
 # `lib/` is the standard library alone: Scry is a package (`scry/`, separate-repos.md
 # P0.1) and is not shipped in the toolchain tarball.
 cp -R lib "$top/share/wiz/lib"
+# (F12) the Wasm backend's JS host: `wiz run --target wasm` looks for it beside lib/
+mkdir -p "$top/share/wiz/web"
+cp web/wasm-host.mjs "$top/share/wiz/web/wasm-host.mjs"
 [ -d editors ] && cp -R editors "$top/share/wiz/editors"
 echo "$rev" > "$top/share/wiz/REVISION"
 # (the licence files come from this script's directory: the release job runs the

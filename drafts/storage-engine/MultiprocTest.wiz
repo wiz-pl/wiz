@@ -1,8 +1,8 @@
 import Sys
 import Word
 import Text
-import Storage
-import Durable
+import Scry.QuireStorage
+import Scry.QuireDurable
 import Multiproc
 /-!
 # The multi-process contract, exercised end to end
@@ -123,8 +123,8 @@ def countIn (a b : List Rec) (id : U64) : Nat :=
 def lockTest (dir : String) : EIO Unit := do
   let path := Path.join dir "lock.db";
   h ← openDb path indices;
-  s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  s0 ← DurableHandle.getDb h;
+  o ← DurableHandle.putDb h (seedNodes s0);
   expect "lock test: the seed commits" (succeeded o);
   -- Three open file descriptions in the same process: flock treats each as an
   -- independent locker, exactly as it would another process.
@@ -153,11 +153,11 @@ def lockTest (dir : String) : EIO Unit := do
   Fd.close p2;
   Fd.close p3;
   -- The commit section, and only the section, takes the exclusive lock.
-  s1 ← Handle.getDb h;
+  s1 ← DurableHandle.getDb h;
   p ← Fd.open path .readWrite OpenFlags.none;
   g ← Fd.tryLock p .exclusive;
   expect "lock test: another description can hold the file" (gotLock g);
-  tb ← Handle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
+  tb ← DurableHandle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
   expect "lock test: the commit section is deferred while it is held"
     (match tb with
       | .none => .true
@@ -165,14 +165,14 @@ def lockTest (dir : String) : EIO Unit := do
   -- A read waits for the exclusive holder (its handshake takes the share), so read after
   -- releasing: the transaction was not applied, and it was not retried.
   Fd.unlock p;
-  sStill ← Handle.getDb h;
+  sStill ← DurableHandle.getDb h;
   expect "lock test: the busy attempt changed nothing" (Nat.beq (snapCount sStill 1) 0);
-  tc ← Handle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
+  tc ← DurableHandle.tryPutDb h (bumpCount (U64.ofNat 1) s1);
   expect "lock test: the same transaction commits once the lock is free"
     (match tc with
       | .some out => succeeded out
       | .none => .false);
-  s2 ← Handle.getDb h;
+  s2 ← DurableHandle.getDb h;
   expect "lock test: and the count is 1" (Nat.beq (snapCount s2 1) 1);
   Fd.close p;
   closeDb h;
@@ -184,8 +184,8 @@ def lockTest (dir : String) : EIO Unit := do
 def snapshotTest (dir : String) : EIO Unit := do
   let path := Path.join dir "scan.db";
   h ← openDb path indices;
-  s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedMany s0 130 1);
+  s0 ← DurableHandle.getDb h;
+  o ← DurableHandle.putDb h (seedMany s0 130 1);
   expect "scan test: the 130-node seed commits" (succeeded o);
   r ← Reader.open path indices;
   p1 ← Scan.step (Reader.scan r);
@@ -194,8 +194,8 @@ def snapshotTest (dir : String) : EIO Unit := do
   | .some (recs1, scan1) => do
     expect "scan test: the first leaf holds 127 records" (Nat.beq (List.length recs1) 127);
     -- The commit lands in the middle of the scan.
-    sNow ← Handle.getDb h;
-    o1 ← Handle.putDb h (bumpCount (U64.ofNat 1) sNow);
+    sNow ← DurableHandle.getDb h;
+    o1 ← DurableHandle.putDb h (bumpCount (U64.ofNat 1) sNow);
     expect "scan test: the mid-scan commit commits" (succeeded o1);
     -- Finish the scan from the root frozen at `Reader.open`.
     p2 ← Scan.step scan1;
@@ -214,7 +214,7 @@ def snapshotTest (dir : String) : EIO Unit := do
       | .none => do
         expect "scan test: the old snapshot still says 0"
           (Nat.beq (snapCount (Reader.snapshot r) 1) 0);
-        sAfter ← Handle.getDb h;
+        sAfter ← DurableHandle.getDb h;
         expect "scan test: the writer's latest says 1" (Nat.beq (snapCount sAfter 1) 1);
         expect "scan test: the commit moved the generation" (Nat.beq sAfter.gen.toNat 2);
         Reader.close r;
@@ -232,35 +232,35 @@ def writersTest (dir : String) : EIO Unit := do
   let path := Path.join dir "writers.db";
   w1 ← openDb path indices;
   w2 ← openDb path indices;
-  s0 ← Handle.getDb w1;
-  oSeed ← Handle.putDb w1 (seedNodes s0);
+  s0 ← DurableHandle.getDb w1;
+  oSeed ← DurableHandle.putDb w1 (seedNodes s0);
   expect "writers test: the seed commits" (succeeded oSeed);
   -- Both read the same generation.
-  a ← Handle.getDb w1;
-  b ← Handle.getDb w2;
-  o1 ← Handle.putDb w1 (bumpCount (U64.ofNat 1) a);
+  a ← DurableHandle.getDb w1;
+  b ← DurableHandle.getDb w2;
+  o1 ← DurableHandle.putDb w1 (bumpCount (U64.ofNat 1) a);
   expect "writers test: the first +1 commits" (succeeded o1);
   -- The second transaction was computed from the same base; a pure delta rebases.
-  o2 ← Handle.putDb w2 (bumpCount (U64.ofNat 1) b);
+  o2 ← DurableHandle.putDb w2 (bumpCount (U64.ofNat 1) b);
   expect "writers test: the second +1 from the same base commits" (succeeded o2);
-  s2 ← Handle.getDb w1;
+  s2 ← DurableHandle.getDb w1;
   expect "writers test: the +1s summed to 2" (Nat.beq (snapCount s2 1) 2);
   -- A `set` computed from the stale base is not a delta: rejected, never retried.
-  o3 ← Handle.putDb w2 (setLabel (U64.ofNat 1) (U32.ofNat 99) b);
+  o3 ← DurableHandle.putDb w2 (setLabel (U64.ofNat 1) (U32.ofNat 99) b);
   expect "writers test: the stale set is rejected" (rejected o3);
   expect "writers test: and it is a conflict" (isConflict o3);
   -- A transaction of pure deltas still merges over the committed writes.
-  o4 ← Handle.putDb w1 (bumpCount (U64.ofNat 1) b);
+  o4 ← DurableHandle.putDb w1 (bumpCount (U64.ofNat 1) b);
   expect "writers test: a stale pure add still commits" (succeeded o4);
-  s4 ← Handle.getDb w1;
+  s4 ← DurableHandle.getDb w1;
   expect "writers test: the counter is 3" (Nat.beq (snapCount s4 1) 3);
   -- A delete moves the epoch; a transaction begun before it is stale.
-  oDel ← Handle.putDb w2 (delNode (U64.ofNat 2) b);
+  oDel ← DurableHandle.putDb w2 (delNode (U64.ofNat 2) b);
   expect "writers test: the delete commits" (succeeded oDel);
-  o5 ← Handle.putDb w2 (bumpCount (U64.ofNat 1) b);
+  o5 ← DurableHandle.putDb w2 (bumpCount (U64.ofNat 1) b);
   expect "writers test: a transaction begun before the delete is rejected" (rejected o5);
   expect "writers test: and it is stale" (isStale o5);
-  s5 ← Handle.getDb w2;
+  s5 ← DurableHandle.getDb w2;
   expect "writers test: the delete is visible" (Bool.not (snapHas s5 2));
   expect "writers test: the counter survives" (Nat.beq (snapCount s5 1) 3);
   closeDb w1;
@@ -271,26 +271,26 @@ def writersTest (dir : String) : EIO Unit := do
 -- ## 4. Retention: a base the policy dropped is `expired`
 
 /-- `n` read-bump-commit rounds from the current snapshot. -/
-def bumpN (h : Handle) : Nat → EIO Unit
+def bumpN (h : DurableHandle) : Nat → EIO Unit
   | .zero => EIO.pure ()
   | .succ k => do
-    s ← Handle.getDb h;
-    o ← Handle.putDb h (bumpCount (U64.ofNat 1) s);
+    s ← DurableHandle.getDb h;
+    o ← DurableHandle.putDb h (bumpCount (U64.ofNat 1) s);
     expect "retention test: a bump in the run commits" (succeeded o);
     bumpN h k
 
 def retentionTest (dir : String) : EIO Unit := do
   let path := Path.join dir "retention.db";
   h ← openDb path indices;
-  s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  s0 ← DurableHandle.getDb h;
+  o ← DurableHandle.putDb h (seedNodes s0);
   expect "retention test: the seed commits" (succeeded o);
-  s1 ← Handle.getDb h;                      -- generation 1
+  s1 ← DurableHandle.getDb h;                      -- generation 1
   bumpN h 9;                                -- generations 2..10; K = 8 keeps 3..10
-  oOld ← Handle.putDb h (bumpCount (U64.ofNat 1) s1);
+  oOld ← DurableHandle.putDb h (bumpCount (U64.ofNat 1) s1);
   expect "retention test: a base outside the K window is rejected" (rejected oOld);
   expect "retention test: and it is expired" (isExpired oOld);
-  sNow ← Handle.getDb h;
+  sNow ← DurableHandle.getDb h;
   expect "retention test: the counter is 9" (Nat.beq (snapCount sNow 1) 9);
   closeDb h;
   EIO.lift (IO.println "retention: a 9-commit-old base is expired, not rebased")
@@ -313,13 +313,13 @@ def newestMeta (bytes : Bytes) : Option Meta :=
 def reopenTest (dir : String) : EIO Unit := do
   let path := Path.join dir "reopen.db";
   h ← openDb path indices;
-  s0 ← Handle.getDb h;
-  oA ← Handle.putDb h (seedNodes s0);
-  s1 ← Handle.getDb h;
-  oB ← Handle.putDb h (bumpCount (U64.ofNat 1) s1);
-  s2 ← Handle.getDb h;
-  oC ← Handle.putDb h (bumpCount (U64.ofNat 1) s2);
-  s3 ← Handle.getDb h;
+  s0 ← DurableHandle.getDb h;
+  oA ← DurableHandle.putDb h (seedNodes s0);
+  s1 ← DurableHandle.getDb h;
+  oB ← DurableHandle.putDb h (bumpCount (U64.ofNat 1) s1);
+  s2 ← DurableHandle.getDb h;
+  oC ← DurableHandle.putDb h (bumpCount (U64.ofNat 1) s2);
+  s3 ← DurableHandle.getDb h;
   expect "reopen test: three commits"
     (Bool.and (succeeded oA) (Bool.and (succeeded oB) (succeeded oC)));
   expect "reopen test: at generation 3" (Nat.beq s3.gen.toNat 3);
@@ -336,7 +336,7 @@ def reopenTest (dir : String) : EIO Unit := do
   let tpath := Path.join dir "reopen-cut.db";
   FS.writeBytes tpath (Bytes.slice bytes 0 cut);
   ht ← openDb tpath indices;
-  st ← Handle.getDb ht;
+  st ← DurableHandle.getDb ht;
   expect "reopen test: the torn commit is ignored (generation 2)"
     (Nat.beq st.gen.toNat 2);
   expect "reopen test: the last good count is 1" (Nat.beq (snapCount st 1) 1);
@@ -346,9 +346,9 @@ def reopenTest (dir : String) : EIO Unit := do
   expect "reopen test: the reopened store is not left locked" (gotLock l);
   Fd.unlock p;
   Fd.close p;
-  oD ← Handle.putDb ht (bumpCount (U64.ofNat 1) st);
+  oD ← DurableHandle.putDb ht (bumpCount (U64.ofNat 1) st);
   expect "reopen test: a commit after torn recovery commits" (succeeded oD);
-  s4 ← Handle.getDb ht;
+  s4 ← DurableHandle.getDb ht;
   expect "reopen test: the recovery commit is generation 4"
     (Nat.beq s4.gen.toNat 4);
   expect "reopen test: and the count is 2" (Nat.beq (snapCount s4 1) 2);
@@ -373,8 +373,8 @@ def shQuote (s : String) : String := String.append "'" (String.append s "'")
 def killTest (dir : String) : EIO Unit := do
   let path := Path.join dir "kill.db";
   h ← openDb path indices;
-  s0 ← Handle.getDb h;
-  o ← Handle.putDb h (seedNodes s0);
+  s0 ← DurableHandle.getDb h;
+  o ← DurableHandle.putDb h (seedNodes s0);
   expect "kill test: the seed commits" (succeeded o);
   let marker := Path.join dir "kill.marker";
   -- A separate process takes the exclusive lock the same way the writer would, then

@@ -56,7 +56,26 @@ def grailJobsGroup : Group where
         let (s, ok, log) ← buildLog dir tc (jobs := 2) (timeoutMs := some 1)
         check (!ok) "the build succeeded"
         checkEq 0 s.ran
-        check ((log.splitOn "timed out after 0.001 s").length > 1) log }
+        check ((log.splitOn "timed out after 0.001 s").length > 1) log },
+    { name := "the supervisor keeps a child's status, and a huge limit does not wrap", run := fun _ => do
+        let self ← IO.appPath
+        -- an ordinary status survives the supervisor
+        let ok ← Grail.runSupervised self 60000 "sh" #["-c", "exit 42"]
+        checkEq 42 ok.code
+        -- a time limit still reports 124
+        let timed ← Grail.runSupervised self 1 "sh" #["-c", "sleep 5"]
+        checkEq 124 timed.code
+        -- the status is clamped to the 8 bits POSIX has, never wrapped to 0 (success)
+        checkEq 0 (Grail.exitStatus8 0)
+        checkEq 137 (Grail.exitStatus8 137)
+        checkEq 255 (Grail.exitStatus8 255)
+        checkEq 255 (Grail.exitStatus8 256)
+        checkEq 255 (Grail.exitStatus8 4294967295)
+        -- a limit above UInt32.max is slept in chunks rather than truncated to nothing
+        checkEq [] (Grail.sleepChunks 0)
+        checkEq [5] (Grail.sleepChunks 5)
+        checkEq [4294967295] (Grail.sleepChunks 4294967295)
+        checkEq [4294967295, 1] (Grail.sleepChunks 4294967296) }
   ]
 
 builtin_initialize registerGroup grailJobsGroup

@@ -116,6 +116,13 @@ _Static_assert(sizeof(Map) == 48 && offsetof(Map, count) == 16 && offsetof(Map, 
 
 static V unreach(void) { fprintf(stderr, "wiz: unreachable\n"); exit(3); }
 static void die(const char *m) { fprintf(stderr, "wiz: %s\n", m); exit(3); }
+/* A failed `IO` file operation: the message the host runtime prints
+   (runtime/rt_data.inc, `wiz_io_fail`), and exit 1. An `IO` call has no error
+   channel, so a failure must not look like success. */
+__attribute__((noreturn)) static void io_fail(const char *path, int e) {
+  fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
+  exit(1);
+}
 
 /* ---- the locking the runtime needs between threads (25a) ----
    The natives and the shared-thunk lock (below) use these; a `WIZ_NO_THREADS` build
@@ -830,14 +837,24 @@ NATIVE(IO_46_println, 2, puts(cstr(a[0])); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_print, 2, fputs(cstr(a[0]), stdout); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_ePrintln, 2, fflush(stdout); fprintf(stderr, "%s\n", cstr(a[0])); return prodv(BOX(0), a[1]);)
 NATIVE(IO_46_readFile, 2,
-  FILE *f = fopen(cstr(a[0]), "rb");
-  if (!f) return prodv(wstr("", 0), a[1]);
+  char *p = cstr(a[0]);
+  FILE *f = fopen(p, "rb");
+  int e = f ? 0 : errno;
+  if (!f) {
+    /* a path that does not exist is empty text (`IO.readFile` is how the library
+       asks "is there a file here?"); any other failure is reported and stops, as in
+       the host runtime */
+    if (e == ENOENT) return prodv(wstr("", 0), a[1]);
+    io_fail(p, e);
+  }
   size_t cap = 4096, len = 0; char *buf = (char *)GC_MALLOC_ATOMIC(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
     if (len == cap) { char *nb = (char *)GC_MALLOC_ATOMIC(cap * 2); memcpy(nb, buf, len); buf = nb; cap *= 2; }
   }
+  if (ferror(f)) e = errno ? errno : EIO; /* a read error is not the end of the file */
   fclose(f);
+  if (e) io_fail(p, e);
   return prodv(wstr(buf, len), a[1]);)
 #else
 NATIVE(IO_46_println, 2, char *s = cstr(a[0]); dec(a[0]); puts(s); free(s); return prodv(BOX(0), a[1]);)
@@ -846,16 +863,21 @@ NATIVE(IO_46_ePrintln, 2, char *s = cstr(a[0]); dec(a[0]); fflush(stdout); fprin
 NATIVE(IO_46_readFile, 2,
   char *p = cstr(a[0]); dec(a[0]);
   FILE *f = fopen(p, "rb");
-  free(p);
-  if (!f) return prodv(wstr("", 0), a[1]);
+  int e = f ? 0 : errno;
+  if (!f) {
+    if (e == ENOENT) { free(p); return prodv(wstr("", 0), a[1]); }
+    io_fail(p, e);
+  }
   size_t cap = 4096, len = 0; char *buf = (char *)malloc(cap);
   for (size_t r; (r = fread(buf + len, 1, cap - len, f)) > 0;) {
     len += r;
     if (len == cap) { buf = (char *)realloc(buf, cap * 2); if (!buf) die("out of memory"); cap *= 2; }
   }
+  if (ferror(f)) e = errno ? errno : EIO;
   fclose(f);
+  if (e) io_fail(p, e);
   V s = wstr(buf, len);
-  free(buf);
+  free(buf); free(p);
   return prodv(s, a[1]);)
 #endif
 

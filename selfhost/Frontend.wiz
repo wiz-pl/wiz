@@ -5304,6 +5304,9 @@ def inferRefl (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT) 
     | .vsort _ => .ok (.tyRefl a) (vEqType v v) es1
     | _ => .ok (.eqRefl (quote d A) a) (vEq A v v) es1
   | e => e
+def rflNotEq (cx : Cx) (d : Nat) (v : Val) : TE :=
+  .err (String.append "rfl: the expected type is not an equation (it may have computed further): "
+    (show (scopeNames (Cx.sc cx)) d (quote d v)))
 -- `rfl` against the expected type: an equation, at a term (`refl A a`) or between types
 -- (`reflTy X`), or a proposition that computed to `True` (`()`). The kernel checks it.
 def checkRfl (gs : Globals) (es : ES) (cx : Cx) (ty : Val) : TE :=
@@ -5312,8 +5315,18 @@ def checkRfl (gs : Globals) (es : ES) (cx : Cx) (ty : Val) : TE :=
   | .vne (.heq A a b) .snil => .ok (.eqRefl (quote d A) (quote d a)) ty es
   | .vne (.heqTy X Y) .snil => .ok (.tyRefl (quote d X)) ty es
   | .vunit _ => .ok .star ty es
-  | v => .err (String.append "rfl: the expected type is not an equation (it may have computed further): "
-      (show (scopeNames (Cx.sc cx)) d (quote d v)))
+  -- an equation of propositions `a = b` computes to `vIff a b`, a Σ of the two
+  -- implications, so the head is no longer an `Eq` (`vEq` at `Prop`). `vIff` keeps the
+  -- sides in the Σ's environment; when they are convertible, `refl Prop a` is the proof
+  -- (the host's `rflProof`/`eqSigmaSides?` does the same). Without this, `rfl` at
+  -- `¬ P = (P → False)` or `(∃ x, P x) = Ex …` reported "not an equation".
+  | .vsigma _ _ _ (.vpi _ _ _ _ _ _) (.cons a (.cons b .nil)) _ =>
+    -- (`unify`, not `convTy`: the sides may still hold implicit metavariables, as the
+    -- `∃` rewrite's `Ex (fun x => P x)` does; the command zonks the proof afterwards)
+    match unify es cx a b with
+    | .some es' => .ok (.eqRefl (quote d (.vsort (ln 0))) (quote d a)) ty es'
+    | .none => rflNotEq cx d ty
+  | v => rflNotEq cx d v
 -- `cast e t` along `e : A ≡ B`: `coe A B e t : B` (`t : A`)
 def inferCast (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp : Option SpT) : TE :=
   match inferT gs es cx (kid s 1) (spKid sp 1) with

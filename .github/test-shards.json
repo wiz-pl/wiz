@@ -119,6 +119,7 @@
       "=scry-datalog",
       "=scry-cert",
       "=scry-egraph",
+      "=scry-project",
       "=scry-e2e",
       "=smt",
       "std",

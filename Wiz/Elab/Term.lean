@@ -4431,58 +4431,42 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let (st, id) := addGoal st { ctx := gl.ctx, ty, tm := m }
     return ← runTac code info st (apply code (fld 3) (.nat id))
   if tag == TacTag.rewriteAt then
-    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side
+    -- (6h) match a rule's `∀` telescope and rewrite an occurrence of its left side;
+    -- (P0 congruence) the walk descends through λs and applications, so the rewrite
+    -- also fires under a binder when the replacement may mention the bound variable.
     let h ← zonk lvl (← reify st.handles (fld 1) lvl)
     let rtl := decodeBool (fld 2) == some true
-    let all := decodeBool (fld 3) == some true
+    let _all := decodeBool (fld 3) == some true
     let ans (r : RVal) := apply code (fld 4) r
-    -- (the rule's type as written when its head is a constant: its equation may compute)
-    let (body, happ, pairs) ← match ← ruleType? gl.ctx g h with
-      | some p => pure p
-      | none => do
-        let hty ← match (← get).kernelInfer (gl.kernelCtx g) h with
-          | .ok ty => pure ty
-          | .error e =>
-            match (← get).kernelInfer { gl.kernelCtx g with types := (← zonkedTypes gl.ctx) } h with
-            | .ok ty => pure ty
-            | .error _ => throwAt info s!"simp: {e}" ErrorCode.tacticFailed
-        let htyT ← zonk lvl (quote g lvl hty)
-        let (b, ms) ← stripRule gl.ctx 64 htyT
-        pure (b, ms.foldl (fun f m => .app f m) h, [])
-    let .eq A lhs rhs := body | return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
-    -- the universe levels of its constants (fresh after reflection), from the arguments' types
-    let happ ← if happ.hasLevelMVar then do
-        let _ ← (RCtx.ofLocal gl.ctx).typeOfUnifying? happ
-        zonk lvl happ
-      else pure happ
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    -- (`← h` matches the equation's right side and puts the left one back)
-    let pat := if rtl then rhs else lhs
-    match ← matchRule gl g A pat lhs rhs happ pairs with
-    | none => return ← runTac code info st (ans (mkCon 0 []))
-    | some (A', a', b', app, cand) => do
-      let repl := if rtl then a' else b'
-      -- abstract the subterm the goal really has (the rule's side may only match it up
-      -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
-      let (abstr, (found, _)) :=
-        (abstractOccAt cand goalT (if all then none else some 0)).run (false, 0)
-      if !found then return ← runTac code info st (ans (mkCon 0 []))
-      let newT := abstr.instantiateAt 0 repl
-      -- a rule that rewrites a term to itself is not a step: report no match, so a set
-      -- with a degenerate rule (a left side convertible with its right side) terminates
-      if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
-      -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
-      let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
-      -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
-      let P : Term R := .lam "x" (.lam "_"
-        (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
-      let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
-      let newTy ← evalIn gl.ctx newT
-      let m ← freshMeta gl.ctx "goal" newTy
-      unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
-      let (r, st) ← refl st gl newT
-      return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
+    match ← prepareIn g gl.ctx h with
+    | none => return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
+    | some _ =>
+      match ← rewriteDeep gl g h rtl with
+      | none => return ← runTac code info st (ans (mkCon 0 []))
+      | some (A', a', b', app, cand) => do
+        let repl := if rtl then a' else b'
+        -- abstract the subterm the goal really has (the rule's side may only match it up
+        -- to conversion: `List.append x []` is written `x ++ []` in the lemma)
+        let (abstr, (found, _)) :=
+          (abstractOccAt cand goalT (if _all then none else some 0)).run (false, 0)
+        if !found then return ← runTac code info st (ans (mkCon 0 []))
+        let newT := abstr.instantiateAt 0 repl
+        -- a rule that rewrites a term to itself is not a step: report no match, so a set
+        -- with a degenerate rule (a left side convertible with its right side) terminates
+        if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
+        -- for `← h` the abstraction puts back the *replacement*, as `rewrite` does
+        let Ga := abstr.instantiateAt 0 (if rtl then repl else cand)
+        -- `P x := G[x] = G[a]` (or `G[a] = G[x]`, right to left), as `rewrite`
+        let P : Term R := .lam "x" (.lam "_"
+          (if rtl then .eqTy (Ga.lift 2) (abstr.lift 1) else .eqTy (abstr.lift 1) (Ga.lift 2)))
+        let pf : Term R := .transp A' a' P (.reflTy Ga) b' app
+        let newTy ← evalIn gl.ctx newT
+        let m ← freshMeta gl.ctx "goal" newTy
+        unifyGoal gl (.cast newT goalT pf m)
+        let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
+        let (r, st) ← refl st gl newT
+        return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.getSimpLemmas then
     -- (6h S2) the default set, in the order the Wiz driver tries it: priority (higher
     -- first), then registration order (oldest first). Each lemma is the reflected
@@ -4492,10 +4476,63 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let mut st := st
     let mut ls : Array RVal := #[]
     for e in entries do
-      let (r, st') ← refl st gl (.const e.name [])
-      st := st'
-      ls := ls.push (encodePair (encodeString e.name) r)
+      if !e.hint then
+        let (r, st') ← refl st gl (.const e.name [])
+        st := st'
+        ls := ls.push (encodePair (encodeString e.name) r)
     return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
+  if tag == TacTag.getHints then
+    -- (P0) the `[hint]` database, in the order `auto` tries it: priority (higher first),
+    -- then registration order (oldest first). The Wiz side owns kind policy and search.
+    let entries := (← get).simpLemmas.reverse.mergeSort
+      (fun a b => decide (a.priority ≥ b.priority))
+    let mut st := st
+    let mut ls : Array RVal := #[]
+    for e in entries do
+      if e.hint then
+        let (r, st') ← refl st gl (.const e.name [])
+        st := st'
+        ls := ls.push (encodePair (encodeString e.name)
+          (encodePair (encodeString e.kind) r))
+    return ← runTac code info st (apply code (fld 1) (encodeList ls.toList))
+  if tag == TacTag.byCases then
+    -- (6j) `fun _ => G` at `Bool.casesOn`, with a branch hypothesis `e = false`/`e = true`
+    let eT ← zonk lvl (← reify st.handles (fld 1) lvl)
+    let tyT ← zonk lvl (← reify st.handles (fld 2) lvl)
+    let hint ← str (fld 3)
+    let boolT : Term R := .const "Bool" []
+    let w : Term R := .qlit QuantitySyntax.explicitDefault
+    let goalT ← zonk lvl (quote g lvl gl.ty)
+    let isBool ← try
+      unify lvl (← evalIn gl.ctx tyT) (← evalIn gl.ctx boolT)
+      pure true
+    catch _ => pure false
+    unless isBool do
+      throwAt info "by_cases: expected a Bool expression" ErrorCode.tacticFailed
+    let hf := introName gl.ctx.names hint "h" true false
+    let ht := introName gl.ctx.names hint "h" true false
+    let tyF ← evalIn gl.ctx (.eq boolT eT (.const "Bool.false" []))
+    let ctxF := gl.ctx.bind hf tyF
+    let mF ← freshMeta ctxF "by_cases" (← evalIn ctxF (goalT.lift 1))
+    let tyT ← evalIn gl.ctx (.eq boolT eT (.const "Bool.true" []))
+    let ctxT := gl.ctx.bind ht tyT
+    let mT ← freshMeta ctxT "by_cases" (← evalIn ctxT (goalT.lift 1))
+    -- `fun (b : Bool) => (e = b) → G`
+    let motive : Term R := .lam "b" (.pi "h" .default w
+      (.eq boolT (eT.lift 1) (.var 0)) (goalT.lift 2) .hole)
+    let some d := g.find? "Bool.casesOn"
+      | throwAt info "by_cases: Bool.casesOn is not in scope" ErrorCode.tacticFailed
+    let us ← d.levelParams.mapM fun _ => freshLevelMeta
+    -- `Bool.casesOn motive (fun h => mF) (fun h => mT) e (refl e) : G`
+    let proof : Term R :=
+      .app (.app (.app (.app (.app (.const "Bool.casesOn" us) motive) (.lam hf mF))
+        (.lam ht mT)) eT) (.refl boolT eT)
+    let tyT' ← evalIn ctxT (goalT.lift 1)
+    let tyF' ← evalIn ctxF (goalT.lift 1)
+    unifyGoal gl proof
+    let (st, idT) := addGoal st { ctx := ctxT, ty := tyT', tm := mT }
+    let (st, idF) := addGoal st { ctx := ctxF, ty := tyF', tm := mF }
+    return ← runTac code info st (apply code (fld 4) (encodeList [.nat idT, .nat idF]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty

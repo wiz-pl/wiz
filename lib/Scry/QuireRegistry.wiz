@@ -1,5 +1,5 @@
 import Word
-import Storage
+import Scry.QuireStorage
 /-!
 # Snapshot retention: the registry and its policy
 

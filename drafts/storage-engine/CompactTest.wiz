@@ -2,11 +2,11 @@ import Sys
 import Word
 import Text
 import MVar
-import Storage
-import Durable
-import Registry
-import Compact
-import Mmap
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
+import Scry.QuireMmap
 /-!
 # Compaction, retention and crash states, end to end
 
@@ -119,7 +119,7 @@ def mappedAgrees (s : Snapshot) (mapped : List (Option ReadNode)) (is : List Nat
 -- ## Commit a few times (each commit rewrites the chain: the store is never-reuse)
 
 /-- `n` single `+1` commits, each from the current snapshot. -/
-def bumpTimes (h : Handle) : Nat → Nat → EIO Nat
+def bumpTimes (h : DurableHandle) : Nat → Nat → EIO Nat
   | .zero, r => EIO.pure r
   | .succ k, r => do
     s ← getDb h;

@@ -110,7 +110,7 @@ EXEMPT: dict[str, str] = {
 #: reviewed decision. It is the roots the current file uses, and a root that no longer
 #: appears is an error (the usual staleness rule).
 META_ROOTS: set[str] = {
-    "Append", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
+    "Append", "Auto", "BinderKind", "CommandMacro", "CtorView", "Deriver", "Expr",
     "ExprView", "FieldView", "HAppend", "IndView", "List", "ListLit", "Macro",
     "MacroM", "Monad", "Monad1", "ParamView", "RewriteResult", "SatAnswer", "Simp",
     "String", "Syntax", "SyntaxF", "Tac", "Tactic", "TacticM", "PipeProj",
