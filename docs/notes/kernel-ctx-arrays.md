@@ -48,8 +48,10 @@ after the end is zero. Consequently:
   an interior zero is kept, because dropping it would shift the indices after it;
 * `Usage.scale q` trims after scaling (scaling by a constant 0 becomes `[]`);
 * `Usage.join?` is the pointwise `QPoly.join?`, used by the branches of a case;
-* `popUsage` on `[]` is the unused binder (`0 ≤ q` for every quantity), not an internal
-  underflow: a sparse vector may already have stopped before the binder.
+* `popUsage` on `[]` pops the missing entry, which is `0`, and checks it against the
+  binder's declared quantity (`0 ≤ q`); it is not an internal underflow. A stopped
+  vector therefore still rejects a linear binder used zero times (`0 ≤ 1` is false),
+  and accepts an erased (`q = 0`) or unrestricted binder.
 
 The meanings are unchanged: head = de Bruijn 0, the same `QPoly.le`/`join?` tests, the
 same shadowing (the arrays keep every level; lookups use the index, not the name).
@@ -101,10 +103,12 @@ them.
    also the selfhost check if the lane runs it (`=selfhost`), where the kernel is the
    checker.
 3. **Core groups.** `lake test -- '=check' '=eval' '=elab' '=quantity' '=inductive'
-   '=observational' '=context' '=prop-kernels' '=audit-kernels'` must be green. This
-   change is a representation change, so the verdicts and the error texts that mention
-   quantities must be identical; `=prop-kernels` is the generated-term differential
-   against the selfhost kernel.
+   '=observational' '=context' '=prop-kernels' '=audit-kernels'` must be green, and so
+   must the groups the sparse-usage regression hit: `=conc`, `=conc-model` and `=data`
+   (dropped/duplicated linear endpoints, tokens and erased fields, and case branches that
+   disagree on a linear variable). This change is a representation change, so the
+   verdicts and the error texts that mention quantities must be identical;
+   `=prop-kernels` is the generated-term differential against the selfhost kernel.
 4. **Conversion/sort-heavy files** (because `Ctx.tys` stopped copying an array on every
    `typeSort?`/`subTy`): time `wiz check lib/Prelude.wiz` (or a representative `lib/`
    file) and the existing `=audit` template cases; no semantic change is expected.
