@@ -73,9 +73,9 @@ of a committed candidate (with duplicate instances rejected, overlapping candida
 cannot arise; a candidate whose subgoals fail fails the command), **no default
 instances** (`attribute [default_instance]` is still an unsupported command), **no
 `binop`/`OfNat`** (a numeral at a non-`Nat` type is not a class problem; `import
-Prelude` still loads the self-hosted prelude, which has no classes), **no `outParam`**
-(the class's parameter types are not rewritten), and **no universe-polymorphic classes**
-(that is A15). A class with an instance parameter works, and its instance's own
+Prelude` still loads the self-hosted prelude, whose only class is `Append`, for `++`),
+**no `outParam`** (the class's parameter types are not rewritten), and **no
+universe-polymorphic classes** (that is A15). A class with an instance parameter works, and its instance's own
 parameters are solved by ordinary resolution (the `Commute` shape).
 
 ### Tests
@@ -137,9 +137,9 @@ looks `C` up and dispatches on the registered name. The five derivers `lib/Deriv
 registers in the Lean toolchain are implemented in `Frontend.wiz` under the same names
 (`deriveInhabited`, `deriveBEq`, `deriveRepr`, `deriveDecidableEq`, `deriveCompare`) and
 are pre-registered for the canonical class names, because the self-hosted prelude has no
-classes and no `import Deriving`. A deriver reads the type's shape from the
-already-elaborated `IndInfo` (the reflection counterpart) and **emits ordinary
-commands** — a `def` by structural recursion and an `instance` — which go through the
+class of its own beyond `Append` (for `++`) and no `import Deriving`. A deriver reads the
+type's shape from the already-elaborated `IndInfo` (the reflection counterpart) and
+**emits ordinary commands** — a `def` by structural recursion and an `instance` — which go through the
 same elaborator and kernel as a hand-written instance. The derived instance is a normal
 global: no axiom, no new kernel rule, no change to the trust ledger.
 

@@ -399,6 +399,12 @@ def languageGroup : Group where
           "#eval sum3 (1, 2, 3)\n#eval firstZero (0, 5)\n#eval firstZero (2, 5)") ["6", ".true", ".false"] },
     { name := "the pipe operator", run := fun _ =>
         okLib "import Prelude\n#eval 3 |> Nat.succ |> Nat.succ" ["5"] },
+    -- (`String ++`) the host side of the selfhost regression: `++` is `HAppend.hAppend`,
+    -- whose default instance is `Append.append`, so the operands pick `String.append` or
+    -- `List.append`; a string append is not a list append.
+    { name := "`++` is resolved by its operands: String.append for strings, List.append for lists", run := fun _ => do
+        okLib "import Prelude\ndef s : String := \"a\" ++ \"b\"\ndef xs : List Nat := [1] ++ [2]\n"
+        failsLib "import Prelude\ndef bad : List Nat := \"a\" ++ \"b\"\n" "type mismatch" },
     -- 13g
     { name := "as-patterns: x@p binds the matched value, and recursion on it is structural", run := fun _ =>
         okLib ("import Prelude\ndef last (A : Type) (d : A) : List A → A\n  | .nil => d\n  | .cons x .nil => x\n" ++
