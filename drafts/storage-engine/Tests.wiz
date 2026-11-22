@@ -1,4 +1,4 @@
-import Storage
+import Scry.Quire.Storage
 import StorageCursor
 /-!
 # The pure half: the `#eval` cases

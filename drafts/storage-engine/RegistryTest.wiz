@@ -2,10 +2,10 @@ import Sys
 import Word
 import Text
 import MVar
-import Storage
-import Durable
-import Registry
-import Compact
+import Scry.Quire.Storage
+import Scry.Quire.Durable
+import Scry.Quire.Registry
+import Scry.Quire.Compact
 /-!
 # The persisted retention registry (format v2), end to end
 
@@ -71,7 +71,7 @@ def snapCount (s : Snapshot) (id : U64) : Nat :=
   | .some n => n.count.toNat
 
 /-- `n` single `+1` commits, each from the current snapshot. -/
-def bumpTimes (h : Handle) : Nat → Nat → EIO Nat
+def bumpTimes (h : DurableHandle) : Nat → Nat → EIO Nat
   | .zero, r => EIO.pure r
   | .succ k, r => do
     s ← getDb h;

@@ -276,7 +276,7 @@ def main : IO Unit := EIO.toIO (do
   -- cache: cold, warm, changed declaration, corrupt entry
   tmp ← FS.createTempDir;
   let cacheDir := String.append tmp "/cache";
-  let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true cacheDir;
+  let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true cacheDir .json;
   c1 ← build "corpus/project/taint" cache;
   let s1 := c1.2;
   check "cache: cold miss for every TU" (Bool.and (Nat.beq s1.hit 0) (Bool.and (Nat.beq s1.miss 3) (Nat.beq s1.write 3)));
@@ -303,5 +303,44 @@ def main : IO Unit := EIO.toIO (do
   check "cache: symlink tmp refused" tmpRefused;
   victimText ← FS.readFile (String.append tmp "/victim.txt");
   check "cache: symlink target unchanged" (String.eq victimText "keep\n");
+
+  -- findings index: JSON and Quire round-trip the same rows, and a corrupt or
+  -- truncated Quire file is a clean miss
+  let frows := Scry.rowsOfReport rep;
+  let fid := Scry.ProjectIO.projectIndexId rep.project;
+  let fjson : Scry.CacheOpts := Scry.CacheOpts.mk .true tmp .json;
+  let fquire : Scry.CacheOpts := Scry.CacheOpts.mk .true tmp .quire;
+  j1 ← Scry.cacheFindings fjson fid frows;
+  check "index: json cold" (String.eq j1.reason "cold");
+  j2 ← Scry.cacheFindings fjson fid frows;
+  check "index: json hit" (String.eq j2.reason "hit");
+  q1 ← Scry.cacheFindings fquire fid frows;
+  check "index: quire cold" (String.eq q1.reason "cold");
+  q2 ← Scry.cacheFindings fquire fid frows;
+  check "index: quire hit" (String.eq q2.reason "hit");
+  jl ← Scry.findingsLoad fjson fid;
+  ql ← Scry.findingsLoad fquire fid;
+  let sameKeys := match jl, ql with
+    | .ok a, .ok b => Bool.and (Nat.beq (List.length a) (List.length b))
+        (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))
+    | _, _ => .false;
+  check "index: json and quire hold the same findings" sameKeys;
+  let sev0 := List.length (List.filter (fun r => Nat.beq r.severity 0) frows);
+  qc ← Scry.findingsQuery fquire fid 0;
+  check "index: quire severity query"
+    (match qc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+  jc ← Scry.findingsQuery fjson fid 0;
+  check "index: json severity query"
+    (match jc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+  let qpath := Scry.findingsCachePath fquire fid;
+  FS.writeFile qpath "not a quire image\n";
+  q3 ← Scry.cacheFindings fquire fid frows;
+  check "index: corrupt quire is a miss" (String.eq q3.reason "corrupt");
+  q4 ← Scry.cacheFindings fquire fid frows;
+  check "index: quire hit after repair" (String.eq q4.reason "hit");
+  qb ← FS.readBytes qpath;
+  FS.writeBytes qpath (Bytes.slice qb 0 100);
+  q5 ← Scry.cacheFindings fquire fid frows;
+  check "index: truncated quire is a miss" (String.eq q5.reason "corrupt");
   FS.removeAll tmp;
   check "cache: cleanup" .true)

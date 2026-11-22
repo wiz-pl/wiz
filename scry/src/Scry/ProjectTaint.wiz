@@ -3,6 +3,7 @@ import Text
 import Functor
 import Scry.Project
 import Scry.ProjectCache
+import Scry.QuireFindings
 import Scry.Models
 import Scry.TaintCmd
 import Scry.Sarif
@@ -157,6 +158,20 @@ def Scry.ProjectReport.fileOf (r : Scry.ProjectReport) (path : String) : Scry.Pr
 /-- Counts for every real project file, in project order. -/
 def Scry.ProjectReport.fileCounts (r : Scry.ProjectReport) : List Scry.ProjectFile :=
   List.map (fun path => r.fileOf path) r.project.realPaths
+
+/-- The findings index's rows for a report (see `Scry.QuireFindings`). The line is the
+sink's origin line; the message and the evidence path stay in the report's JSON. -/
+def Scry.rowsOfReport (r : Scry.ProjectReport) : List Scry.FindingRow :=
+  List.map (fun f =>
+    let o := Scry.originAt r.origins f.func f.sink;
+    let file := match o with
+      | .some x => x.uri
+      | .none => "";
+    let line := match o with
+      | .some x => x.line
+      | .none => 0;
+    Scry.FindingRow.make f.rule (Scry.Severity.id f.severity) file line f.func f.message)
+    r.findings
 
 -- ## JSON
 

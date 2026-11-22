@@ -4,10 +4,10 @@ import Text
 import Functor
 import WordMap
 import MVar
-import Storage
-import Core
-import Mmap
-import Durable
+import Scry.Quire.Storage
+import Scry.Quire.Core
+import Scry.Quire.Mmap
+import Scry.Quire.Durable
 /-!
 # Quire: the page-backed durable store
 
@@ -78,8 +78,9 @@ link_c "quire_seal.c"
 /-- Seal a page: FNV-1a-64 over its bytes with the 8-byte checksum field at `off` read
 as zero, then write the hash there. Takes and returns the page (no copy). A 4 KiB page
 hashed in Wiz would be 4096 interpreter/compiler steps, which dominates a small commit;
-this is the draft's C companion (built with `-Idrafts/storage-engine`). -/
-extern "wiz_store_seal" (header := "quire_seal.h") QFnv.seal : Bytes → Nat → Bytes
+this is the module's C companion (`quire_seal.c` in this directory). The C name has no
+`wiz_` prefix, so the compiler emits its prototype: no header is needed. -/
+extern "quire_seal" QFnv.seal : Bytes → Nat → Bytes
 
 -- ## Format constants
 

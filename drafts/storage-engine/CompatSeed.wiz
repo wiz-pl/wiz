@@ -1,6 +1,6 @@
 import Sys
-import Storage
-import Durable
+import Scry.Quire.Storage
+import Scry.Quire.Durable
 /-!
 # Write a store with the durable writer (the format-merge check)
 

@@ -17,8 +17,11 @@ wiz=${1:-${WIZ:-$root/.lake/build/bin/wiz}}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/wiz-multiproc.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 cd "$root"
-for f in Storage Registry Durable Multiproc MultiprocTest CompatSeed CompatRead; do
-  "$wiz" check -I drafts/storage-engine -I drafts/optics "drafts/storage-engine/$f.wiz"
+for f in lib/Scry/Quire/Storage.wiz lib/Scry/Quire/Registry.wiz lib/Scry/Quire/Durable.wiz; do
+  "$wiz" check "$f"
+done
+for f in Multiproc MultiprocTest CompatSeed CompatRead; do
+  "$wiz" check -I drafts/storage-engine "drafts/storage-engine/$f.wiz"
 done
 if [ -n "${WIZ_CFLAGS:-}" ]; then
   set -- --cflags "$WIZ_CFLAGS" --ldflags "${WIZ_LDFLAGS:-}"

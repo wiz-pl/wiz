@@ -1,4 +1,4 @@
-import Compact
+import Scry.Quire.Compact
 /-!
 # The pure half: live-page marking, the retention policy, the plan
 

@@ -5,6 +5,7 @@ import WordArray
 import Scry.CstStore
 import Json
 import Scry.Identity
+import Scry.QuireFindings
 /-!
 # Scry.ProjectCache: the per-translation-unit parse cache
 
@@ -26,12 +27,38 @@ same text the `scry cst` command writes; it does not add a second serialisation 
 CST.
 -/
 
-/-- Cache policy: off, or a directory. `--cache-stats` implies enabled. -/
+/-- The findings index's storage backend (see `Scry.QuireFindings`). `json` is the
+default: the document a reader can inspect, and the format the driver had before the
+index existed. `quire` is the page-backed store (`--cache-backend=quire`). -/
+inductive Scry.CacheBackend where
+  | json
+  | quire
+
+def Scry.CacheBackend.show : Scry.CacheBackend → String
+  | .json => "json"
+  | .quire => "quire"
+
+def Scry.CacheBackend.ofName (s : String) : Option Scry.CacheBackend :=
+  match String.eq s "json" with
+  | .true => .some .json
+  | .false => match String.eq s "quire" with
+    | .true => .some .quire
+    | .false => .none
+
+/-- The file extension of a findings index. -/
+def Scry.CacheBackend.ext : Scry.CacheBackend → String
+  | .json => "json"
+  | .quire => "quire"
+
+/-- Cache policy: off, or a directory and a findings-index backend. `--cache-stats`
+implies enabled. -/
 structure Scry.CacheOpts where
   enabled : Bool
   dir : String
+  backend : Scry.CacheBackend
 
-def Scry.CacheOpts.none : Scry.CacheOpts := Scry.CacheOpts.mk .false ".scry-project-cache"
+def Scry.CacheOpts.none : Scry.CacheOpts :=
+  Scry.CacheOpts.mk .false ".scry-project-cache" .json
 
 /-- Cache policy and statistics. `reason` is `cold`, `hit`, `miss`, `corrupt` or
 `disabled` (the first event of the last TU, for the human line). -/
@@ -189,3 +216,86 @@ def Scry.CacheStats.json (s : Scry.CacheStats) : Json :=
     , ("corrupt", Json.ofNat s.corrupt)
     , ("files", Json.ofNat s.files)
     , ("reason", Json.mkStr s.reason) ]
+
+-- ## The findings index (after a `--taint` run)
+
+/-- What the last findings-index check did. `reason` is `hit`, `cold`, `corrupt` or
+`disabled`; `bySeverity` is the in-memory count a query must reproduce. -/
+structure Scry.FindingsCacheStats where
+  backend : String
+  reason : String
+  rows : Nat
+  bySeverity : List (Nat × Nat)
+
+/-- The human findings-index line (`findings index: backend=quire reason=hit rows=2 …`). -/
+def Scry.FindingsCacheStats.line (s : Scry.FindingsCacheStats) : String :=
+  "findings index: backend=" ++ s.backend ++ " reason=" ++ s.reason
+    ++ " rows=" ++ Nat.repr s.rows
+    ++ " bySeverity=" ++ String.intercalate ","
+      (List.map (fun p => Nat.repr p.2) s.bySeverity)
+
+/-- `<dir>/findings-<id>.<ext>`: one index per project id and backend, so a backend
+switch never reads the other format. -/
+def Scry.findingsCachePath (cache : Scry.CacheOpts) (id : String) : String :=
+  String.append cache.dir (String.append "/findings-"
+    (String.append id (String.append "." (Scry.CacheBackend.ext cache.backend))))
+
+/-- Read the findings index. `error "cold"` when absent, `error "corrupt"` for a
+truncated, garbage or stale document; neither is a failure of the run. -/
+def Scry.findingsLoad (cache : Scry.CacheOpts) (id : String) :
+    EIO (Except String (List Scry.FindingKey)) :=
+  let p := Scry.findingsCachePath cache id;
+  match cache.backend with
+  | .json => do
+    loaded ← Scry.fiLoadJson p;
+    match loaded with
+    | .error e => EIO.pure (.error e)
+    | .ok rows => EIO.pure (.ok (List.map Scry.FindingRow.key rows))
+  | .quire => Scry.fiLoadQuire p
+
+/-- Write the findings index. -/
+def Scry.findingsSave (cache : Scry.CacheOpts) (id : String)
+    (rows : List Scry.FindingRow) : EIO Unit :=
+  let p := Scry.findingsCachePath cache id;
+  match cache.backend with
+  | .json => Scry.fiSaveJson p rows
+  | .quire => Scry.fiSaveQuire p rows
+
+/-- The index hit: how many findings have `severity`. `quire` answers through the
+severity index (no primary read); `json` parses and filters the document. -/
+def Scry.findingsQuery (cache : Scry.CacheOpts) (id : String) (severity : Nat) :
+    EIO (Except String Nat) :=
+  let p := Scry.findingsCachePath cache id;
+  match cache.backend with
+  | .json => Scry.fiCountSeverityJson p severity
+  | .quire => Scry.fiCountSeverityQuire p (U32.ofNat severity)
+
+/-- The severity counts of `rows`: the numbers a query must reproduce. -/
+def Scry.severityCounts (rows : List Scry.FindingRow) : List (Nat × Nat) :=
+  List.map (fun n => (n, List.length (List.filter (fun r => Nat.beq r.severity n) rows)))
+    [0, 1, 2]
+
+/-- Check the findings index for this run, and write it on a cold or stale entry. The
+report is never read from the index: the index is a derived projection, so an index miss
+cannot change what the analysis reports. A hit requires the same row count and
+fingerprint; a stale or corrupt entry is rewritten. -/
+def Scry.cacheFindings (cache : Scry.CacheOpts) (id : String)
+    (rows : List Scry.FindingRow) : EIO Scry.FindingsCacheStats :=
+  let want := List.map Scry.FindingRow.key rows;
+  let stats := Scry.FindingsCacheStats.mk (Scry.CacheBackend.show cache.backend) ""
+    (List.length rows) (Scry.severityCounts rows);
+  match cache.enabled with
+  | .false => EIO.pure { stats with reason := "disabled" }
+  | .true => do
+    loaded ← Scry.findingsLoad cache id;
+    let reason := match loaded with
+      | .ok ks => match Bool.and (Nat.beq (List.length ks) (List.length want))
+            (UIntN.beq (Scry.fiPrint ks) (Scry.fiPrint want)) with
+        | .true => "hit"
+        | .false => "corrupt"
+      | .error e => e;
+    match String.eq reason "hit" with
+    | .true => EIO.pure { stats with reason := reason }
+    | .false => do
+      Scry.findingsSave cache id rows;
+      EIO.pure { stats with reason := reason }

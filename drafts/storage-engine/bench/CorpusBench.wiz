@@ -1,0 +1,110 @@
+import Sys
+import Word
+import Text
+import Json
+import Scry.NativeLink
+import Scry.Project
+import Scry.ProjectIO
+import Scry.ProjectTaint
+import Scry.ProjectCache
+import Scry.QuireFindings
+import Scry.TaintCmd
+/-!
+# The project findings index on a real corpus
+
+`corpus-bench BACKEND OP CC` where `BACKEND` is `json` or `quire` and `OP` is `write`,
+`read` or `query`:
+
+* `write` — `Scry.cacheFindings` on a fresh cache directory (cold write);
+* `read` — `Scry.findingsLoad` of the index `write` produced (warm read);
+* `query` — `Scry.findingsQuery` for severity 0 (the index hit).
+
+The program builds and analyses `scry/corpus/project/taint` first (so the rows are the
+corpus's real findings, not a synthetic list), then times only the cache operation with
+`Clock.monotonic`. Each run is one process, so peak RSS is that operation's; the harness
+prints the file size. The project analysis is not in the timed region: it is the work a
+*warm* project run would be trying to avoid, not the cache operation itself.
+
+Run it from the repository root (one heavy job, sequentially):
+
+```
+wiz build -I scry/src -I scry/gen drafts/storage-engine/bench/CorpusBench.wiz -o /tmp/corpus-bench
+```
+-/
+
+def i2s (n : Nat) : String := Nat.toString n
+
+/-- A corpus project's report and findings rows. -/
+def corpusReport (cc : String) : EIO (Scry.ProjectReport × List Scry.FindingRow) := do
+  built ← Scry.ProjectIO.buildProject "scry/corpus/project/taint" .none cc .true .false
+    .false .nil Scry.CacheOpts.none;
+  pack ← Scry.loadTaintPack .none;
+  let rep := Scry.analyzeProject built.1 pack built.2;
+  EIO.pure (rep, Scry.rowsOfReport rep)
+
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (rows : Nat) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println (String.append "rows " (i2s rows));
+  IO.println extra
+
+def backendOf (s : String) : EIO Scry.CacheBackend :=
+  match Scry.CacheBackend.ofName s with
+  | .some b => EIO.pure b
+  | .none => EIO.fail "backend must be json or quire"
+
+def run (backend op cc dir : String) : EIO Unit := do
+  b ← backendOf backend;
+  let cache : Scry.CacheOpts := Scry.CacheOpts.mk .true dir b;
+  (rep, rows) ← corpusReport cc;
+  let id := Scry.ProjectIO.projectIndexId rep.project;
+  match op with
+  | "write" => do
+    t0 ← EIO.lift Clock.monotonic;
+    Scry.findingsSave cache id rows;
+    t1 ← EIO.lift Clock.monotonic;
+    EIO.lift (report "write" (List.length rows) t0 t1
+      (String.append "backend " backend))
+  | "read" => do
+    t0 ← EIO.lift Clock.monotonic;
+    loaded ← Scry.findingsLoad cache id;
+    t1 ← EIO.lift Clock.monotonic;
+    let n := match loaded with
+      | .ok ks => List.length ks
+      | .error _ => 0;
+    EIO.lift (report "read" n t0 t1 (String.append "backend " backend))
+  | "query" => do
+    t0 ← EIO.lift Clock.monotonic;
+    q ← Scry.findingsQuery cache id 0;
+    t1 ← EIO.lift Clock.monotonic;
+    let n := match q with
+      | .ok k => k
+      | .error _ => 0;
+    EIO.lift (report "query" n t0 t1 (String.append "backend " backend))
+  | _ => EIO.fail "op must be write, read or query"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  match args with
+  | backend :: op :: cc :: dir :: _ => run backend op cc dir
+  | _ => EIO.fail "usage: corpus-bench BACKEND OP CC DIR")

@@ -2,9 +2,9 @@ import Sys
 import Word
 import Text
 import Functor
-import Storage
-import Quire
-import QuireCursor
+import Scry.Quire.Storage
+import Scry.Quire
+import Scry.QuireCursor
 /-!
 # The Quire side of the findings-store benchmark
 

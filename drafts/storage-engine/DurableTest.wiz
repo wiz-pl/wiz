@@ -1,8 +1,8 @@
 import Sys
 import Word
 import Text
-import Storage
-import Durable
+import Scry.Quire.Storage
+import Scry.Quire.Durable
 /-!
 # The slice-2 file store, exercised end to end
 
