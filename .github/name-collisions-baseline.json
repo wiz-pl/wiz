@@ -99,18 +99,6 @@
     },
     {
       "module": "lib/Deriving.wiz",
-      "name": "deriveInhabited",
-      "modules": [
-        "lib/Deriving.wiz",
-        "selfhost/Frontend.wiz"
-      ],
-      "scope": "",
-      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveInhabited and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
-      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
-      "expires": "2027-05-01"
-    },
-    {
-      "module": "lib/Deriving.wiz",
       "name": "deriveRepr",
       "modules": [
         "lib/Deriving.wiz",

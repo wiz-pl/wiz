@@ -1,18 +1,19 @@
 func Demo.Match.Length(%0)
   b0:
-    %2 = havoc u1
-    %3 = 0
-    br ne %2, %3 ? b1 : b2
+    %2 = null
+    %3 = havoc u1
+    %4 = 0
+    br (ne %0, %2) and (ne %3, %4) ? b1 : b2
   b1:
     %1 = %0
-    %4 = call System.String.get_Length(%1)
-    ret %4
+    %5 = call System.String.get_Length(%1)
+    ret %5
   b2:
     goto b3
   b3:
-    %5 = 1
-    %6 = neg %5
-    ret %6
+    %6 = 1
+    %7 = neg %6
+    ret %7
 func Demo.Match.IsNull(%0)
   b0:
     %1 = null
@@ -29,20 +30,21 @@ func Demo.Match.TypeTest(%0)
     ret %1
 func Demo.Match.Guarded(%0)
   b0:
-    %2 = havoc u1
-    %3 = 0
-    br ne %2, %3 ? b1 : b2
+    %2 = null
+    %3 = havoc u1
+    %4 = 0
+    br (ne %0, %2) and (ne %3, %4) ? b1 : b2
   b1:
     %1 = %0
-    %4 = %1
+    %5 = %1
     goto b3
   b2:
-    %5 = 0
-    %4 = %5
+    %6 = 0
+    %5 = %6
     goto b3
   b3:
-    %6 = %4
-    ret %6
+    %7 = %5
+    ret %7
 func Demo.Match.OrNone(%0)
   b0:
     %2 = havoc u1
@@ -58,12 +60,13 @@ func Demo.Match.OrNone(%0)
     ret %1
 func Demo.Match.NotEither(%0)
   b0:
-    %2 = havoc u1
-    %3 = 0
-    br not (ne %2, %3) ? b1 : b2
+    %2 = null
+    %3 = havoc u1
+    %4 = 0
+    br not ((ne %0, %2) and (ne %3, %4)) ? b1 : b2
   b1:
-    %4 = global $str:"none"
-    ret %4
+    %5 = global $str:"none"
+    ret %5
   b2:
     %1 = %0
     goto b3

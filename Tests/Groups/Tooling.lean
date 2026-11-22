@@ -1,4 +1,5 @@
 import Tests.Elab
+import Grail.Elab
 
 open Wiz
 
@@ -312,7 +313,7 @@ def toolingGroup : Group where
           let env : Array (String × Option String) := #[("TMPDIR", some tmp.toString)]
           let (code, out, err) := ← runWiz (tc.toFlags ++ ["run", file.toString]) env
           if code != 0 then
-            if ["gmp", "No such file", "not preprocessed", "cannot find"].any (fun s => ((out ++ err).splitOn s).length > 1) then
+            if ["gmp", "No such file", "not preprocessed", "cannot find", "could not execute"].any (fun s => ((out ++ err).splitOn s).length > 1) then
               skip "no toolchain"
               return
             throw (IO.userError s!"wiz run failed ({code}):\n{out}\n{err}")
@@ -331,6 +332,149 @@ def toolingGroup : Group where
           check left.isEmpty s!"temporary directories were left behind: {left.toList}"
         finally
           IO.FS.removeDirAll tmp
+          IO.FS.removeDirAll dir },
+    { name := "import_c: a header name with a newline or `>` is rejected, not spliced (F09)", run := fun _ => do
+        let tc ← toolchain
+        -- `string.h` first, then a directive that *succeeds*: if it reached `cc`, the
+        -- preprocessed text would hold stdio's declarations and `C.printf` would bind
+        let injected := "string.h>\n#include <stdio.h>\n#define wiz_injected "
+        let rejected (what : String) (r : Except String Unit) : IO Unit :=
+          match r with
+          | .ok () => throw (IO.userError s!"{what} accepted the spliced header")
+          | .error e => do
+            check ((e.splitOn "not a valid C header name").length > 1)
+              s!"{what}: no clear rejection: {e}"
+            check ((e.splitOn "stdio").length == 1)
+              s!"{what}: the offending header was echoed into the error: {e}"
+        let viaBuild ← try
+            let _ ← Build.preprocessHeaders tc s!"import_c \"{injected}\"\n"
+            pure (.ok () : Except String Unit)
+          catch e => pure (.error (toString e))
+        rejected "Build.preprocessHeaders" viaBuild
+        -- Grail's reader runs the same scan; it must reject the name too
+        let viaGrail ← try
+            let _ ← Grail.preprocessHeaders tc [s!"import_c \"{injected}\"\n"]
+            pure (.ok () : Except String Unit)
+          catch e => pure (.error (toString e))
+        rejected "Grail.preprocessHeaders" viaGrail
+        -- and through the command: an error, and the injected include never bound anything
+        let dir ← IO.FS.createTempDir
+        try
+          let file := dir / "bad.wiz"
+          IO.FS.writeFile file ("import IO\nimport_c \"string.h>\n#include <stdio.h>\n#define wiz_injected \"\n" ++
+            "def main : IO Unit := do\n  IO.println (Nat.toString (C.printf \"x\"))\n")
+          let (code, out, err) ← runWiz (tc.toFlags ++ ["check", file.toString])
+          check (code != 0) s!"the injected header checked (exit {code}):\n{out}\n{err}"
+          check ((err.splitOn "not a valid C header name").length > 1)
+            s!"no clear error:\n{out}\n{err}"
+          check ((out.splitOn "C.printf").length == 1)
+            s!"the check reported the injected binding:\n{out}"
+        finally
+          IO.FS.removeDirAll dir },
+    { name := "import_c: a failing preprocessor is an error, not a silently dropped header (F09)", run := fun _ => do
+        let tc ← toolchain
+        let missing := "wiz_no_such_header_f09.h"
+        let viaBuild ← try
+            let _ ← Build.preprocessHeaders tc s!"import_c \"{missing}\"\n"
+            pure (none : Option String)
+          catch e => pure (some (toString e))
+        let some e := viaBuild | throw (IO.userError "a header the compiler could not read was dropped")
+        if ((e.splitOn "could not execute").length > 1) then
+          -- no `cc` on this machine: not this case's failure
+          skip "no toolchain"
+          return
+        check ((e.splitOn "-E failed").length > 1) s!"the compiler's failure is not reported: {e}"
+        check ((e.splitOn missing).length > 1) s!"the error does not name the header: {e}"
+        -- the same through `wiz check`: the compiler's failure, not "not preprocessed"
+        let dir ← IO.FS.createTempDir
+        try
+          let file := dir / "missing.wiz"
+          IO.FS.writeFile file s!"import IO\nimport_c \"{missing}\"\ndef main : IO Unit := IO.println \"x\"\n"
+          let (code, out, err) ← runWiz (tc.toFlags ++ ["check", file.toString])
+          check (code != 0) s!"a missing header checked (exit {code})"
+          check ((err.splitOn missing).length > 1) s!"the error does not name the header:\n{out}\n{err}"
+          check ((err.splitOn "was not preprocessed").length == 1)
+            s!"the old silent-skip message is still used:\n{out}\n{err}"
+        finally
+          IO.FS.removeDirAll dir },
+    { name := "split objects: the key is a SHA-256 of every input, and each one changes it (F36)", run := fun _ => do
+        let base : Build.SplitObject :=
+          { cc := "cc", flags := #["-O2", "-w", "-c"], env := #[("CPATH", none)],
+            text := "wiz_val wiz_f(void) { return 1; }", header := "wiz_val wiz_f(void);" }
+        let k := Build.splitObjectKey base
+        checkEq 64 k.length
+        check (k.toList.all fun c => (48 ≤ c.toNat && c.toNat ≤ 57) || (97 ≤ c.toNat && c.toNat ≤ 102))
+          s!"not a SHA-256 hex digest: {k}"
+        let changes : List (String × Build.SplitObject) :=
+          [("the compiler", { base with cc := "clang" }),
+           ("the flags", { base with flags := base.flags.push "-g" }),
+           ("the include environment", { base with env := #[("CPATH", some "/include")] }),
+           ("the environment list", { base with env := base.env.push ("C_INCLUDE_PATH", none) }),
+           ("the unit's text", { base with text := base.text ++ "\n" }),
+           ("the header", { base with header := base.header ++ "\n" })]
+        for (what, changed) in changes do
+          check (Build.splitObjectKey changed != k) s!"changing {what} did not change the key" },
+    { name := "a split build reuses its objects, and a changed program, compiler or flag misses (F36)", run := fun _ => do
+        let tc ← toolchain
+        let dir ← IO.FS.createTempDir
+        try
+          let log : System.FilePath := dir / "cc.log"
+          -- A recording stub `cc`: it logs the invocation and creates the `-o` output, so
+          -- the cache decisions (stamp + object present) are exercised without needing a
+          -- C toolchain or its GMP store paths on this node.
+          let stub (name : String) : IO String := do
+            let p := dir / name
+            IO.FS.writeFile p ("#!/bin/sh\n" ++
+              s!"printf '%s\\n' \"$*\" >> '{log}'\n" ++
+              "out=\"\"\nprev=\"\"\n" ++
+              "for a in \"$@\"; do\n  if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi\n  prev=\"$a\"\ndone\n" ++
+              "[ -n \"$out\" ] && : > \"$out\"\nexit 0\n")
+            let c ← IO.Process.output { cmd := "chmod", args := #["+x", p.toString] }
+            unless c.exitCode == 0 do throw (IO.userError s!"chmod failed: {c.stderr}")
+            pure p.toString
+          let compiles : IO Nat := do
+            if !(← log.pathExists) then return 0
+            let lines := (← IO.FS.readFile log).splitOn "\n"
+            pure (lines.filter fun l => (l.splitOn " ").contains "-c").length
+          let src : System.FilePath := dir / "prog.wiz"
+          let out : System.FilePath := dir / "prog"
+          let source (k : Nat) : String :=
+            "import IO\ndef twice (n : Nat) : Nat := n + n\n" ++
+            s!"def main : IO Unit := IO.println (Nat.toString (twice {k}))\n"
+          IO.FS.writeFile src (source 21)
+          let cc1 ← stub "cc1.sh"
+          let cc2 ← stub "cc2.sh"
+          let build (cc : String) (extra : List String) : IO (UInt32 × String × String) :=
+            runWiz (tc.toFlags ++ ["--cc", cc,
+              "--cflags", " ".intercalate (tc.cflags ++ extra),
+              "build", src.toString, "-o", out.toString, "--split", "2"])
+          let first ← build cc1 []
+          let n1 ← compiles
+          unless first.1 == 0 && n1 ≥ 3 do
+            -- the program did not elaborate into a split build: not this case's claim
+            skip "no split build"
+            return
+          -- the same inputs: every unit's stamp and object are reused
+          let again ← build cc1 []
+          checkEq 0 again.1
+          checkEq n1 (← compiles)
+          -- a changed program is a miss
+          IO.FS.writeFile src (source 22)
+          let edited ← build cc1 []
+          checkEq 0 edited.1
+          let n2 ← compiles
+          check (n2 > n1) s!"a changed program reused every object ({n1} -> {n2})"
+          -- a changed compiler is a miss (same flags, same text)
+          let other ← build cc2 []
+          checkEq 0 other.1
+          let n3 ← compiles
+          check (n3 > n2) s!"a changed compiler reused every object ({n2} -> {n3})"
+          -- a changed flag is a miss
+          let flagged ← build cc2 ["-g"]
+          checkEq 0 flagged.1
+          let n4 ← compiles
+          check (n4 > n3) s!"a changed --cflags reused every object ({n3} -> {n4})"
+        finally
           IO.FS.removeDirAll dir },
     { name := "wiz test-driver: the driver's --list, a group, and a clear error without the driver", run := fun _ => do
         let self ← IO.appPath

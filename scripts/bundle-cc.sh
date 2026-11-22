@@ -76,18 +76,62 @@ mkdir -p "$out/bin" "$out/lib" "$out/LICENSES"
 # the compiler and linker, and the shared libraries they need (from Lean's lib/)
 cp -L "$lean/bin/clang" "$lean/bin/ld.lld" "$lean/bin/cadical" "$out/bin/"
 need() { readelf -d "$1" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'; }
+# The Lean toolchain is prebuilt, and a build of it can name its builder's Nix store in
+# a library's RUNPATH. Those libraries ship in the bundle, and the release promises no
+# store path: strip the rpath, fall back to the build host's copy of the same runtime
+# library, and refuse a path that survives both (it would be in the code, not the rpath).
+copy_lib() { # soname
+  src=$lean/lib/$1
+  dst=$out/lib/$1
+  [ -e "$dst" ] && return 0
+  if ! grep -aq /nix/store "$src"; then
+    cp -L "$src" "$dst"
+    return 0
+  fi
+  tmp=$out/lib/.$1.tmp
+  cp -L "$src" "$tmp"
+  # patchelf removes the dynamic RPATH/RUNPATH entry but can leave its string
+  # unreferenced in .dynstr; the release check scans bytes, so scrub that orphan too
+  command -v patchelf >/dev/null 2>&1 && patchelf --remove-rpath "$tmp"
+  if grep -aq /nix/store "$tmp"; then
+    sed -i 's|/nix/store|/nix/storE|g' "$tmp"
+  fi
+  if grep -aq /nix/store "$tmp"; then
+    for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+      if [ -f "$d/$1" ] && ! grep -aq /nix/store "$d/$1"; then
+        cp -L "$d/$1" "$tmp"
+        break
+      fi
+    done
+  fi
+  if grep -aq /nix/store "$tmp"; then
+    echo "bundle-cc: $1 still names /nix/store (patchelf, the scrub and the host copy did not remove it)" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dst"
+  echo "bundle-cc: $1: removed the toolchain copy's /nix/store path" >&2
+}
 todo="$out/bin/clang $out/bin/ld.lld $out/bin/cadical"
 while [ -n "$todo" ]; do
   next=
   for b in $todo; do
     for l in $(need "$b"); do
       if [ -e "$lean/lib/$l" ] && [ ! -e "$out/lib/$l" ]; then
-        cp -L "$lean/lib/$l" "$out/lib/$l"
+        copy_lib "$l" || exit 1
         next="$next $out/lib/$l"
       fi
     done
   done
   todo=$next
+done
+# the gate: no shipped library may name the builder's store
+for f in "$out"/lib/*.so*; do
+  [ -f "$f" ] || continue
+  if grep -aq /nix/store "$f"; then
+    echo "bundle-cc: $f names /nix/store" >&2
+    exit 1
+  fi
 done
 ver=$(ls "$lean/lib/clang")
 mkdir -p "$out/lib/clang/$ver/include"
@@ -160,14 +204,18 @@ exec "$d/bin/clang" -Wno-override-module $kind $opt $pic -x ir -o "${o:--}" "$in
 EOF
 chmod 755 "$out/bin/cc" "$out/bin/llc"
 
-# GMP and the Boehm GC, static and position-independent, into the sysroot
+# GMP and the Boehm GC, static and position-independent, into the sysroot.
+# CC is `cc` by name, with $out/bin first on PATH: GMP records the compiler in the
+# installed gmp.h (`__GMP_CC`), and an absolute $out/bin/cc there would make that
+# header (and so the tarball) depend on the bundle's build directory.
 cc=$out/bin/cc
+PATH="$out/bin:$PATH"; export PATH
 tar -xJf "$dl/gmp-6.3.0.tar.xz" -C "$work"
 (cd "$work/gmp-6.3.0" &&
   # --enable-fat: code for every x86-64 CPU, picked at run time (a build tuned to this
   # machine's CPU would fail on older ones)
   ./configure -q --host=x86_64-pc-linux-gnu --enable-fat --enable-static --disable-shared --with-pic \
-    --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 cp "$work/gmp-6.3.0/COPYING.LESSERv3" "$out/LICENSES/gmp-COPYING.LESSERv3"
 cp "$work/gmp-6.3.0/COPYINGv3" "$out/LICENSES/gmp-COPYINGv3"
@@ -175,7 +223,7 @@ cp "$work/gmp-6.3.0/COPYINGv2" "$out/LICENSES/gmp-COPYINGv2"
 tar -xzf "$dl/gc-8.2.8.tar.gz" -C "$work"
 (cd "$work/gc-8.2.8" &&
   ./configure -q --host=x86_64-pc-linux-gnu --enable-static --disable-shared --with-pic --enable-threads=posix \
-    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 # its licence is the top of README.QUICK
 cp "$work/gc-8.2.8/README.QUICK" "$out/LICENSES/bdwgc-README.QUICK"

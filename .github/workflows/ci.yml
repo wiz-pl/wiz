@@ -580,6 +580,13 @@ jobs:
         id: nix
         run: |
           nix build .#wiz .#tests --no-link -L
+          # `=scry-project` (and the other scry groups in the library shard) link against
+          # the C# grammar: `scry/src/Scry/NativeLink.wiz` has `link_c ../../native/
+          # tree-sitter-c-sharp/src/parser.c`. That out-link is gitignored, so a fresh
+          # checkout has no grammar and the case fails on a missing file instead of
+          # testing anything. Create it here, exactly as the scry workflow does; it is
+          # substituted from Cachix, so this is a link, not a build.
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
           wiz=$(nix path-info .#wiz)
           tests=$(nix path-info .#tests)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"

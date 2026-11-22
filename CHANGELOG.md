@@ -12,7 +12,7 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=776 partial=197 axiom_rows=254 builtin_rows=249 native_rows=76 implemented_by=71 repr=5 extern_declarations=221 seal=8 other_builtin=20 pure_axioms=33 distinct_reasons=506 shared_reasons=270 legacy=0 expired=0 -->
+<!-- trust-counts: rows=824 partial=234 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=554 shared_reasons=270 legacy=0 expired=0 -->
 
 ## [Unreleased]
 
@@ -25,6 +25,17 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
   and a SIGSEGV reported as signal 11).
 
+* compiler: the **C and LLVM backends fail the compile** on a partial application of a
+  function with no known arity and on a jump with no join point in scope, instead of
+  emitting a closure with arity 0 and an assignment-free jump; the C backend's locals
+  are collected in linear time (the old collector appended each join's parameters to the
+  accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
+  as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
+  `=llvm`, `=scaling`.
+* modules: the `import_c` header scan skips `--` comment lines. The scan is textual
+  (F10), so `selfhost/Frontend.wiz` documenting the syntax yielded the header `…`,
+  which the header-name check (F09) rightly rejects; the playground build failed on a
+  comment. Block comments are still scanned (the remaining F10 gap). Tests: `=modules`.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes

@@ -173,9 +173,12 @@ if (routeStep) {
 // ## 5. The Loom trace: every patch list reproduces the next SSR
 
 ok(ui.schema === "scry.source.ui/1", "the trace names its schema");
+// The `route:` steps are entry points from the initial page (a shared link), not part
+// of the chained interaction sequence; each is applied to `ui.initial` below.
+const chained = (ui.steps || []).filter((s) => !s.name.startsWith("route:"));
 let current = ui.initial;
 let replayed = 0;
-for (const step of ui.steps || []) {
+for (const step of chained) {
   const next = run(current, step.patches);
   if (next !== step.html) {
     failed++;
@@ -187,6 +190,10 @@ for (const step of ui.steps || []) {
   replayed++;
 }
 ok(replayed >= 3, "the trace replays the scripted interactions", String(replayed));
+ok((ui.steps || []).some((s) => s.name.startsWith("route:")) &&
+  (ui.steps || []).filter((s) => s.name.startsWith("route:")).every((s) =>
+    run(ui.initial, s.patches) === s.html),
+  "every route step is an entry point from the initial page");
 ok((ui.steps || []).some((s) => s.name === "select:" + taint.id),
   "the trace selects the taint finding");
 

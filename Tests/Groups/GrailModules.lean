@@ -32,7 +32,11 @@ def modulesGroup : Group where
         checkEq "A/B/C.wiz" (Module.relPath "A.B.C").toString
         checkEq "A.B" (Module.nameOf "A/B.wiz")
         checkEq ["Prelude", "Data.Two"] (Module.importsOf "import Prelude\n-- c\n  import Data.Two\nimport_c \"m.h\"\ndef x := 1\n")
-        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n") },
+        checkEq ["m.h"] (Module.headersOf "import_c \"m.h\" (pure)\n")
+        -- the scan is textual, so a `--` comment that documents the syntax must not
+        -- become a header (it did: selfhost/Frontend.wiz, and F09 rejected the `…`)
+        checkEq [] (Module.headersOf "-- the `import_c \"…\"` names\n")
+        checkEq ["m.h"] (Module.headersOf "  -- import_c \"x.h\"\ndef x := 1\nimport_c \"m.h\"\n") },
     { name := "a file reaches modules in subdirectories", run := fun _ => do
         let dir ← mkTree libFiles
         let ms ← Module.loadClosure ["lib", dir] "import Use\n#eval four\n"

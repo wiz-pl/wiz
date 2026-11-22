@@ -169,6 +169,9 @@ inductive Scry.MemWarnKind where
   /-- A load or store through a pointer that may be null on some path (S5's nullness
   alarm, wired through `Scry.Nullness`). -/
   | nullDereference
+  /-- A variable whose C# type annotation is non-null was assigned a value that may be
+  null (the CS8600 shape); reported even when no dereference follows. -/
+  | nullableAssignment
   /-- The rule pack or the analysis registry asks for something this build cannot run
   (an unknown `check`, or a registered analysis no check can select). -/
   | registry
@@ -179,7 +182,21 @@ def Scry.MemWarnKind.show : Scry.MemWarnKind → String
   | .unknownIndirect => "unknown-indirect"
   | .unmodelledExternal => "unmodelled-external"
   | .nullDereference => "null-dereference"
+  | .nullableAssignment => "nullable-assignment"
   | .registry => "registry"
+
+/-- The diagnostic id of a memory warning. `scry/memory/` is the family for the
+language-neutral memory checks (C and C#); the C# annotation check is the one whose
+id the C# frontend design names (`scry/cs/nullable-assignment`), because it is a type
+contract, not a memory access. -/
+def Scry.MemWarnKind.ruleId : Scry.MemWarnKind → String
+  | .nullableAssignment => "scry/cs/nullable-assignment"
+  | k => String.append "scry/memory/" (Scry.MemWarnKind.show k)
+
+/-- Is this id a memory/analysis diagnostic (as opposed to a rule-pack finding)? Both
+families are emitted by the same pipeline. -/
+def Scry.memoryRuleId (id : String) : Bool :=
+  Bool.or (String.startsWith id "scry/memory/") (String.startsWith id "scry/cs/")
 
 /-- A memory diagnostic: a finding the taint rules cannot express, with the statement it
 belongs to. `detail` names the locations or the callee for a human. -/

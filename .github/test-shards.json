@@ -31,10 +31,13 @@
   },
   {
     "name": "hdl",
+    "split": 2,
+    "split-cases": true,
     "heavy": true,
     "select": [
       "=hdl-verified",
       "=hdl-uart-temporal",
+      "=hdl-examples",
       "=selfhost-parse-diff"
     ]
   },

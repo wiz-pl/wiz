@@ -2051,9 +2051,13 @@ def Tactic.omega : Tactic := fun _ => do
     | _ => match Expr.appOf "Nat.Lt" ty with
       | .some (.cons a (.cons b .nil)) => do
         let sa : Expr := .app (.const "Nat.succ") a;
-        ts ← TacticM.omegaCollect g (.cons sa (.cons b .nil));
-        hs ← TacticM.omegaHypTerms g hyps;
-        TacticM.omegaLe g hyps (List.append ts hs) sa b
+        same ← TacticM.isDefEq g a b;
+        match same with
+        | .true => TacticM.fail "omega: no proof (linear Nat fragment)"
+        | .false => do
+          ts ← TacticM.omegaCollect g (.cons sa (.cons b .nil));
+          hs ← TacticM.omegaHypTerms g hyps;
+          TacticM.omegaLe g hyps (List.append ts hs) sa b
       | _ => do
         ev ← TacticM.eqView g ty;
         match ev with

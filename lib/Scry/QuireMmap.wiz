@@ -214,6 +214,22 @@ def Store.pageBase (m : Map) (page : U64) : Except StoreError Nat :=
   | .true => .ok off
   | .false => .error (.outOfRange "page" off Store.pageSize)
 
+/-- The records a leaf page can hold: `(4096 - 32) / 32` = 127. -/
+def Store.leafRecCap : Nat := Nat.div (Nat.sub Store.pageSize Store.headerSize) Store.recordSize
+/-- The records an internal page (or an index leaf: the same 16-byte slot) can hold: 254. -/
+def Store.internalRecCap : Nat :=
+  Nat.div (Nat.sub Store.pageSize Store.headerSize) Store.internalRecordSize
+
+/-- A page header's `n`, clamped to the slots that actually fit in the page. `n` is disk
+input: `pageBase` bounds the page, but not an index derived from a corrupt count, so
+every slot loop caps the header before its unchecked `Map.getU64` calls. A file this
+writer produced is unaffected (`n` is the slot count); a corrupt or hostile one reads
+garbage slots, never a byte past the mapping. -/
+def Store.capSlots (n cap : Nat) : Nat :=
+  match Nat.le n cap with
+  | .true => n
+  | .false => cap
+
 /-- The header of a page, bounds-checked. -/
 def Store.header (m : Map) (page : U64) : Except StoreError PageHeader :=
   match Store.pageBase m page with
@@ -339,7 +355,7 @@ def Store.nodeInLeaf (m : Map) (page : U64) (i : Nat) : Except StoreError NodeRe
   | .ok hdr =>
     match hdr.kind with
     | .leaf =>
-      match Nat.lt i hdr.n with
+      match Nat.lt i (Store.capSlots hdr.n Store.leafRecCap) with
       | .true => match Store.pageBase m page with
         | .error e => .error e
         | .ok base => .ok (Store.recordAt m base i)
@@ -363,7 +379,8 @@ def Store.findInLeaf (m : Map) (page : U64) (key : U64) : Except StoreError (Opt
     match hdr.kind with
     | .leaf => match Store.pageBase m page with
       | .error e => .error e
-      | .ok base => .ok (Store.findInLeafFrom m base 0 hdr.n key)
+      | .ok base => .ok (Store.findInLeafFrom m base 0
+          (Store.capSlots hdr.n Store.leafRecCap) key)
     | _ => .error (.badKind page hdr.kindCode)
 
 /-- Scan a leaf, then its `right` siblings: `store-durable` writes the primary records as
@@ -400,8 +417,10 @@ def Store.childFrom : Map → Nat → Nat → Nat → U64 → Option U64 → Opt
       | .false => best;
     Store.childFrom m base (Nat.succ i) f key best'
 
-/-- The child of an internal page with `n` entries (primary or index: same shape). -/
+/-- The child of an internal page with `n` entries (primary or index: same shape). `n` is
+capped to the 254 slots that fit before any unchecked load. -/
 def Store.findChildOf (m : Map) (page : U64) (n : Nat) (key : U64) : Except StoreError U64 :=
+  let n := Store.capSlots n Store.internalRecCap;
   match n with
   | 0 => .error (.outOfRange "internal entry" 0 0)
   | _ => match Store.pageBase m page with
@@ -476,7 +495,9 @@ def Store.collectLeafChain : Map → U64 → U64 → Bool → Nat → Except Sto
         | .indexLeaf => match Store.pageBase m page with
           | .error e => .error e
           | .ok base =>
-            let here := List.reverse (Store.collectBucketFrom m base 0 hdr.n target []);
+            let here := List.reverse
+              (Store.collectBucketFrom m base 0
+                (Store.capSlots hdr.n Store.internalRecCap) target []);
             match UIntN.beq hdr.right (U64.ofNat 0) with
             | .true => .ok here
             | .false => match Store.collectLeafChain m hdr.right target verify f with

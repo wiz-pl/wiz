@@ -285,7 +285,7 @@
    "vendor --locked needs a lock; --offline needs the archive cache": {"seconds": 12.882}
   },
   "hdl": {
-   "Arty A7 (lib/Hdl/Arty.wiz): pin constraints (XDC) from the board's table, what does not fit, the two devices": {"seconds": 23.399},
+   "Arty A7 (hdl/src/Hdl/Arty.wiz): pin constraints (XDC) from the board's table, what does not fit, the two devices": {"seconds": 23.399},
    "C1: clock domains: a clk2 circuit emits input clk2 and posedge clk2; Hw.clockOf drives a primitive": {"seconds": 19.459},
    "C2/C3: clock domains: a synchronised crossing accepted, an unsynchronised one rejected; Multi parts and wires; Clocking.domains; XDC/PCF periods; BUFG output domain; runners refuse two clocks": {"seconds": 27.73},
    "H14 P1: primitive instances: Verilog of an OSERDESE2/IOBUF/ODDR/OBUF design under a PLL wrapper, refusal without models, buffer models, kind errors": {"seconds": 21.68},
@@ -316,6 +316,29 @@
    "optics: deriving Lens on structures and bundles (laws, independence by rfl); a step zoomed into a field, the frame rule": {"seconds": 17.1},
    "traces: a circuit's run along a trace (lib/Trace.wiz); the finite simulation is its prefix": {"seconds": 16.514},
    "traces: refinement and case-analysis tools (Mealy.follows, Mealy.seq, Nat.All, Bool.forall9, simulatesInv)": {"seconds": 2.081}
+  },
+  "hdl-examples": {
+   "hdl example markers: every .expected matches its `-- test:` kind": {"seconds": 13.964},
+   "hdl/examples/ from operators: the memory, simulation, protocol and verified goldens": {"seconds": 1120.519},
+   "hdl/examples/ up to mem: the arithmetic, bus, CDC, display and formal goldens": {"seconds": 770.095}
+  },
+  "hdl-signal": {
+   "34a: a register that keeps the size is rejected (a combinational loop as a size error)": {"seconds": 39.359},
+   "34a: a size-preserving map checks (sized copattern → scofix, lane L2)": {"seconds": 39.594},
+   "34a: a sized copattern that recurses at the same size is a size error, not a loop": {"seconds": 39.681},
+   "34a: signals of two clock domains do not mix": {"seconds": 44.843},
+   "34a: signals, registers, Hw code and bundles on signals, the baud generator through Signal.ofCircuit (hdl/examples/hdl-signal.wiz)": {"seconds": 44.548},
+   "34b: L3 partial: `pureS` (pure at any size) and a numeral at a sized signal check; at ∞ they are `pure`": {"seconds": 44.103},
+   "34b: L3: `+`/`if` at size i, `Signal.fix` counter, and the baud generator (lane L2)": {"seconds": 42.318},
+   "34b: a combinational loop through Signal.fix is a size error (no register in the body)": {"seconds": 43.428},
+   "34b: raw `scofix` is a term former (the primitive behind the sized definitions)": {"seconds": 44.402}
+  },
+  "hdl-uart-temporal": {
+   "H14 T2: the iCEstick UART's temporal properties for every trace and byte (hdl/examples/hdl-uart-temporal.wiz)": {"seconds": 209.944}
+  },
+  "hdl-verified": {
+   "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)": {"seconds": 192.027},
+   "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)": {"seconds": 288.004}
   },
   "infoview": {
    "11w: what else is at the cursor (wiz/interactiveInfo): sections, as text and HTML": {"seconds": 7.081},

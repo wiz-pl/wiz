@@ -20,13 +20,15 @@ func toplevel.Main()
     %0 = global $str:"REPORT_PREFIX"
     %1 = call System.Environment.GetEnvironmentVariable(%0)
     %2 = global $str:"daily"
-    %3 = %1
     %4 = null
     br eq %1, %4 ? b1 : b2
   b1:
     %3 = %2
-    goto b2
+    goto b3
   b2:
+    %3 = %1
+    goto b3
+  b3:
     %5 = %3
     %6 = call System.Console.ReadLine()
     %7 = %6
@@ -42,14 +44,12 @@ func toplevel.Main()
     %17 = global $str:"started"
     %18 = call ReportScope.Mark(%16, %17)
     %19 = null
-    %20 = eq %7, %19
-    %21 = 0
-    br ne %20, %21 ? b3 : b4
-  b3:
-    ret
+    br eq %7, %19 ? b4 : b5
   b4:
-    goto b5
+    ret
   b5:
-    %22 = call System.String.Concat(%11)
-    %23 = call System.Console.WriteLine(%22)
+    goto b6
+  b6:
+    %20 = call System.String.Concat(%11)
+    %21 = call System.Console.WriteLine(%20)
     ret
