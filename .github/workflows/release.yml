@@ -249,10 +249,18 @@ jobs:
       - name: Build tower (Wiz, stage 26h)
         run: |
           set -eu
+          # A partial/sparse checkout can leave tracked paths out of the worktree even
+          # though the commit has them; restore before deciding the commit is old.
+          if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
+            git checkout -- tower scripts/build-tower-wiz.sh 2>/dev/null || true
+          fi
           if [ ! -d tower ] || [ ! -f scripts/build-tower-wiz.sh ]; then
             # Every commit with the Wiz tower (26e and later) has both; an older commit
             # has no shipped tower, and a Lean build step is no longer used here.
             echo "::error::commit $GITHUB_SHA predates the Wiz tower (tower/, 26e)"
+            echo "  pwd=$(pwd)"
+            git ls-tree --name-only HEAD | head -20
+            git status --short | head -10
             exit 1
           fi
           # The bundled C toolchain links GMP statically and targets the tarball's glibc
