@@ -19,10 +19,14 @@ The fragment:
   truncated `-`, `/` and `%` with Wiz's `x / 0 = 0`, `x % 0 = x`, `Nat.max`.
 * `UIntN w` (`w` a numeral ≥ 1) as `(_ BitVec w)`: `add sub mul neg div mod land lor xor
   not`, shifts and `testBit` by numerals, `beq lt le`, `ofNat`, `toNat`, `zero`, `max`.
-  **Ranges**: every `UIntN w` value is below `2^w` (its constructor carries the proof,
-  stage 22l), and on such values the definitions are the bit-vector operations. (Before
-  22l the kernel's `UIntN 8` had values like `ofBitsTrusted 300`, where `not (not x) = x`
-  fails, and the translation required a range hypothesis for every word.)
+  **Ranges** (R3, `wiz-notes/sota-numerics.md` §5.3): every `UIntN w` value is below
+  `2^w` (its constructor carries the proof, stage 22l), and on such values the
+  definitions are the bit-vector operations. That invariant is *checked*, not assumed:
+  `sortOfChecked` refuses to translate a `UIntN` that is not the library's sealed type
+  with a private constructor, and a word literal outside `[0, 2^w)` is an error rather
+  than an atom. (Before 22l the kernel's `UIntN 8` had values like `ofBitsTrusted 300`,
+  where `not (not x) = x` fails; abstracting such a value to a bit vector makes an
+  impossible hypothesis satisfiable, so its negation is an unsound `unsat`.)
 * Anything else: a premise or hypothesis outside the fragment is dropped (sound: the
   problem only gets harder); a goal outside it is an error.
 -/
@@ -78,6 +82,9 @@ private def fresh (base : String) : TM R String := do
 private def declare (name : String) (srt : SSort) (shown : Option String) : TM R Unit := do
   modify fun s => { s with decls := s.decls.push s!"(declare-const {name} {srt.smt})" }
   if srt == .nat then modify fun s => { s with asserts := s.asserts.push s!"(>= {name} 0)" }
+  -- (a `(_ BitVec w)` value is in `[0, 2^w)` by its sort: the constraint is carried by
+  -- the sort, and `sortOfChecked` is what refuses a word type whose range invariant is
+  -- not established. There is no non-vacuous assertion to add here.)
   if let .bv w := srt then modify fun s => { s with words := s.words.push (name, w, shown.getD name) }
   if let some u := shown then modify fun s => { s with shown := s.shown.push (name, u) }
 
@@ -115,6 +122,18 @@ def fromLib (g : Globals R) (n : Name) : Bool :=
   | some m => m == "Prelude" || m == "Word" || m == "Logic" || m == "Int"
   | none => false
 
+/-- (R3, `wiz-notes/sota-numerics.md` §5.3) Is `T` a sealed induction whose constructor
+is private — the two declarations that make "this value is below `2^w`" a *type*
+invariant rather than an assumption? A `sealed inductive` registers `seal:T` (stage 22k,
+`lib/Word.wiz`), and `| private mk` puts `T.mk` in `Globals.privates`; a look-alike with
+a public constructor has neither, and translating it as `(_ BitVec w)` would be
+**unsound**: a value equal to `2^w` (or any other out-of-range number) is abstracted to
+an in-range bit vector, so a hypothesis that could never hold becomes satisfiable, and
+its negation — an impossible `unsat` — can close a false goal. The translator therefore
+refuses such a type (the range constraint is checked, not assumed). -/
+def sealedPrivate (g : Globals R) (T : Name) : Bool :=
+  g.builtins.any (fun (k, _) => k == sealKey T) && g.privates.contains (T ++ ".mk")
+
 /-- The sort of a type, if it is one of the fragment's. -/
 partial def sortOf (g : Globals R) (A : Val R) : Option SSort :=
   match A with
@@ -142,6 +161,21 @@ partial def sortOf (g : Globals R) (A : Val R) : Option SSort :=
     | _, _ => none
   | _ => none
 
+/-- `sortOf` with the word sort's range invariant **checked**: a `UIntN w` is translated
+as `(_ BitVec w)` only while it is the library's sealed type with a private constructor
+(`sealedPrivate`). Otherwise the translation stops with an error instead of assuming
+that every value of the type is below `2^w`; see `sealedPrivate` for the unsoundness
+that assumption would hide. -/
+def sortOfChecked (g : Globals R) (A : Val R) : TM R (Option SSort) := do
+  match sortOf g A with
+  | some s@(.bv _) =>
+    unless sealedPrivate g "UIntN" do
+      throw "smt: UIntN is not sealed with a private constructor; its range invariant \
+        `toNat < 2^w` would be assumed, not checked, so it is not translated as a bit \
+        vector"
+    return some s
+  | s => return s
+
 private def bin (op : String) (a b : String) : String := s!"({op} {a} {b})"
 
 mutual
@@ -151,6 +185,15 @@ partial def term (g : Globals R) (lvl : Nat) (v : Val R) (s : SSort) : TM R Stri
   match v with
   | .natLit n => match s with
     | .nat | .int => return toString n
+    -- (R3) a word literal is translated exactly when it is in range. Abstracting an
+    -- out-of-range number to a fresh bit vector would assert the existence of an
+    -- in-range value it cannot equal: a hypothesis mentioning it could then be
+    -- refuted (an `unsat` for a false goal). This is unreachable while `UIntN` is
+    -- sealed (`sortOfChecked`), and is the belt to that braces.
+    | .bv k =>
+      -- (`Nat.log2 n < k` is `n < 2^k` without building a possibly huge `2^k`)
+      if Nat.log2 n < k then return s!"(_ bv{n} {k})"
+      else throw s!"smt: the word literal {n} is not below 2^{k}, so it has no `(_ BitVec {k})` value; refusing to translate it"
     | _ => atom g lvl v s
   | .unfold n _ sp val =>
     match ← known g lvl n (spineArgs sp) s with
@@ -277,7 +320,7 @@ partial def prop (g : Globals R) (lvl : Nat) (P : Val R) : TM R (Option String) 
   | .unit _ => return some "true"
   | .empty _ => return some "false"
   | .neutral (.eq A a b) #[] =>
-    match sortOf g A with
+    match ← sortOfChecked g A with
     | some s =>
       -- (an equation between booleans is `=` on `Bool`)
       let a ← term g lvl a s
@@ -286,7 +329,7 @@ partial def prop (g : Globals R) (lvl : Nat) (P : Val R) : TM R (Option String) 
     | none => return none
   | .pi _ _ _ dom cod _ =>
     -- an implication between propositions (the body must not mention the proof)
-    if (sortOf g dom).isSome then return none
+    if (← sortOfChecked g dom).isSome then return none
     let some a ← sub dom | return none
     let before ← get
     modify fun s => { s with locals := s.locals.push none }
@@ -314,7 +357,7 @@ partial def translate (g : Globals R) (names : List Name) (types : List (Val R))
       if !b then
         modify fun s => { s with locals := s.locals.push none }
         continue
-      match sortOf g A with
+      match ← sortOfChecked g A with
       | some srt =>
         let n ← fresh x
         declare n srt (some x)
@@ -327,7 +370,7 @@ partial def translate (g : Globals R) (names : List Name) (types : List (Val R))
       match fuel, wh T with
       | 0, _ => throw "smt: the goal has too many binders"
       | fuel + 1, .pi x _ _ dom cod _ =>
-        match sortOf g dom with
+        match ← sortOfChecked g dom with
         | some srt =>
           let n ← fresh x
           declare n srt (some x)

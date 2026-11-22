@@ -10,16 +10,27 @@ through `unsafeBaseIO` behind an `opaque`, as the module cache does (`isoGet`,
 Frontend.lean). It stays a function of its arguments in the sense that matters:
 
 * the answer is kept in a cache file named by the SHA-256 of the solver's identity (its
-  path and `--version` output), its arguments and the whole input, and the entry stores
-  all three, compared on every read: a second run with the same query replays the same
-  answer (and needs no solver), and nothing else does;
+  path, `--version` output and binary SHA-256), its arguments and the whole input, and the
+  entry stores all three, compared on every read: a second run with the same query
+  replays the same answer (and needs no solver), and nothing else does;
 * only answers the caller calls final are kept (a crash or a timeout is not);
 * without a cache directory (`--no-cache`), the solver runs every time (in a temporary
   directory, removed afterwards).
 
+**R5 (wiz-notes/sota-numerics.md §5.5): the cache stores certificates, never verdicts.**
+An entry is written only when the caller asked for the solver's output file
+(`wantOut`) and that file is non-empty — for `sat_decide` this is CaDiCaL's LRAT proof —
+and the entry records its SHA-256. On a read the proof's digest is recomputed and must
+match, and the proof is then parsed and checked again (the LRAT parser here, then
+`Sat.lratCheck` in the kernel): a bad cached proof can only make the tactic fail. A
+caller that has no certificate (the trusted `smt` tactic: Z3's output file is empty)
+gets no cached answer at all, and a legacy/forged entry without a certificate is refused
+rather than replayed — a cached verdict would be an axiom in the trusted base, not a
+hint.
+
 `sat_decide` checks the solver's LRAT proof in the kernel, so a wrong, stale or
 nondeterministic answer can only make the tactic fail; the trusted `smt` (28a) believes
-`unsat`, so for it the cache is part of the trusted base (hence the digest and the check).
+`unsat`, so it must not cache (hence `wantOut` is the gate, not just `keep`).
 -/
 
 namespace Wiz.Smt
@@ -55,17 +66,77 @@ structure Answer where
 
 private def sep : String := "\n\x00wiz-smt\x00\n"
 
-/-- Per process: the identity of each solver (`path --version`), computed once. -/
+/-- The cache entry's format marker: entries written before R5 (a bare verdict, or a
+proof without a digest) do not have it and are refused. -/
+private def cacheMagic : String := "wiz-smt-cache-v2"
+
+/-- Per process: the identity of each solver (`path --version` and the binary's
+SHA-256), computed once. -/
 initialize solverIds : IO.Ref (Std.HashMap String String) ← IO.mkRef {}
 
+/-- The file `cmd` names: as given when it contains a `/`, else the first match on
+`PATH`. (`Wiz.Attest.findOnPath` does the same; importing it here would be a cycle.) -/
+private def resolveCmd (cmd : String) : IO (Option String) := do
+  if cmd.contains '/' then
+    let p := System.FilePath.mk cmd
+    return if ← p.pathExists then some p.toString else none
+  let path := (← IO.getEnv "PATH").getD ""
+  for d in path.splitOn ":" do
+    if d.isEmpty then continue
+    let p := System.FilePath.mk d / cmd
+    if ← p.pathExists then return some p.toString
+  pure none
+
+/-- A file's SHA-256, or none if it cannot be read. -/
+private def fileDigest? (p : String) : IO (Option String) := do
+  try
+    if ← (System.FilePath.mk p).pathExists then
+      return some (Sha256.hexBytes (← IO.FS.readBinFile (System.FilePath.mk p)))
+    else return none
+  catch _ => pure none
+
+/-- A solver's identity: its command, its `--version` output, and its binary's SHA-256.
+The version line alone is not an identity (a rebuilt or repackaged solver can keep it);
+the digest is part of every cache key, so an answer is never replayed across a changed
+binary. -/
 private def solverId (cmd : String) : IO String := do
   if let some v := (← solverIds.get).get? cmd then return v
   let v ← try
       let out ← IO.Process.output { cmd, args := #["--version"] }
-      pure s!"{cmd} {out.stdout.trimAscii.toString}"
+      let path? ← resolveCmd cmd
+      let dig ← match path? with
+        | some p => pure ((← fileDigest? p).getD "")
+        | none => pure ""
+      pure s!"{cmd} {out.stdout.trimAscii.toString} sha256:{dig}"
     catch _ => pure s!"{cmd} (not found)"
   solverIds.modify (·.insert cmd v)
   pure v
+
+/-- The cache key of a query: SHA-256 over the solver's identity, its arguments and the
+whole input. Pure for the tests (`runSolver` adds the identity itself). -/
+def queryKey (id : String) (args : List String) (input : String) : String :=
+  Sha256.hex s!"{id}{sep}{sep.intercalate args}{sep}{input}"
+
+/-- A solver's identity, for a test that plants or inspects a cache entry. -/
+def solverIdentity (cmd : String) : IO String := solverId cmd
+
+/-- The metadata lines of a cache entry (`meta ++ sep ++ outFile`), or none if it is not
+the current format, does not carry a proof, or the proof's bytes do not match the
+recorded digest. -/
+private def readCached (meta outFile query stdout query' : String) : Option Answer :=
+  if query' != query || outFile.isEmpty then none else
+  match meta.splitOn "\n" with
+  | [magic, kind, exitLine, shaLine] =>
+    if magic != cacheMagic || kind != "kind proof" then none else
+    let code? := (exitLine.splitOn " ").getLast?.bind fun s => s.toNat?
+    let recorded? := shaLine.splitOn " " |>.getLast?
+    match code?, recorded? with
+    | some code, some recorded =>
+      -- re-check the certificate on load: a truncated or edited proof is a miss, not a hit
+      if recorded != Sha256.hexBytes outFile.toUTF8 then none
+      else some { exitCode := code.toUInt32, stdout, outFile }
+    | _, _ => none
+  | _ => none
 
 private def runIO (cfg : Config) (cmd : String) (args : List String) (input : String) (inExt : String)
     (wantOut : Bool) (keep : Answer → Bool) : IO (Except String (String × Answer)) := do
@@ -80,15 +151,23 @@ private def runIO (cfg : Config) (cmd : String) (args : List String) (input : St
   IO.FS.createDirAll dir
   let base := dir / key
   let ansFile := base.addExtension "ans"
-  if !temp && (← ansFile.pathExists) then
-    let txt ← IO.FS.readFile ansFile
-    -- (the answer, then the query it answers: replayed only for exactly this query)
-    match txt.splitOn s!"{sep}query{sep}" with
-    | [ans, q] => if q == query then
-        match ans.splitOn sep with
-        | [code, out, file] => return .ok (id, { exitCode := code.toNat!.toUInt32, stdout := out, outFile := file })
+  -- (R5) only a certificate is replayed: `wantOut` says the caller reads a proof file.
+  -- A verdict-only caller (`smt`) always runs the solver, and an entry without a proof
+  -- is refused even if one was planted for the key.
+  if !temp && wantOut then
+    if ← ansFile.pathExists then
+      let txt ← IO.FS.readFile ansFile
+      -- (the metadata and proof, then the query it answers and the solver's stdout)
+      match txt.splitOn s!"{sep}query{sep}" with
+      | [metaAndProof, rest] =>
+        match rest.splitOn s!"{sep}stdout{sep}" with
+        | [q, out] =>
+          match metaAndProof.splitOn sep with
+          | [meta, file] =>
+            if let some a := readCached meta file query out q then return .ok (id, a)
+          | _ => pure ()
         | _ => pure ()
-    | _ => pure ()
+      | _ => pure ()
   let inFile := base.addExtension inExt
   let outPath := base.addExtension "out"
   IO.FS.writeFile inFile input
@@ -103,8 +182,14 @@ private def runIO (cfg : Config) (cmd : String) (args : List String) (input : St
   if temp then try IO.FS.removeDirAll dir catch _ => pure ()
   match r with
   | .ok a =>
-    if !temp && keep a then
-      IO.FS.writeFile ansFile s!"{a.exitCode}{sep}{a.stdout}{sep}{a.outFile}{sep}query{sep}{query}"
+    -- (R5) store only a proof: the answer must be `unsat` (exit 20 in the SAT
+    -- protocol) with a non-empty output file. A SAT model (exit 10) is never cached
+    -- even if the solver left bytes in the file: a cached counterexample would be a
+    -- verdict too, and it is cheap to ask again.
+    if !temp && wantOut && a.exitCode == 20 && keep a && !a.outFile.isEmpty then
+      let digest := Sha256.hexBytes a.outFile.toUTF8
+      IO.FS.writeFile ansFile
+        s!"{cacheMagic}\nkind proof\nexit {a.exitCode}\nout-sha256 {digest}{sep}{a.outFile}{sep}query{sep}{query}{sep}stdout{sep}{a.stdout}"
     pure (.ok (id, a))
   | .error e => pure (.error e)
 
@@ -116,7 +201,9 @@ private unsafe def runSolverImpl (cfg : Config) (cmd : String) (args : List Stri
 
 /-- Run solver `cmd` with `args` (`{in}`: a file holding `input`, with extension `inExt`;
 `{out}`: a file it writes, read back if `wantOut`). The solver's identity and the answer,
-or why there is none. Cached (see above) when `keep` says the answer is final. -/
+or why there is none. Cached (see above) when the answer is a certificate — `wantOut` and
+a non-empty output file — and `keep` says it is final; a verdict without one is never
+stored or replayed. -/
 @[implemented_by runSolverImpl]
 opaque runSolver (cfg : Config) (cmd : String) (args : List String) (input : String)
     (inExt : String) (wantOut : Bool) (keep : Answer → Bool) : Except String (String × Answer)

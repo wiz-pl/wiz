@@ -26,6 +26,23 @@ def msgs (input : String) (cfg : Smt.Config := {}) (trust : Bool := false) : IO 
   pure (render (runFrontend (R := ZeroOneMany) input
     { loader, trustedModule := Tests.libModule, smt := cfg, trustNative := trust }))
 
+/-- `msgs` with an explicit loader (and modules that are *not* trusted, so the case can
+supply its own `Word`): the range case below needs it. -/
+def msgsWith (loader : Name → Option String) (input : String) (untrusted : List String := [])
+    (cfg : Smt.Config := {}) : IO (List String) := do
+  let s := runFrontend (R := ZeroOneMany) input
+    { loader, trustedModule := fun m => m != "" && !untrusted.contains m, smt := cfg }
+  pure (render s)
+
+/-- A `Word` module that is *not* the library's: `UIntN` has a public constructor and no
+range proof. It is the shape a future trusted constructor (the pre-22l
+`UIntN.ofBitsTrusted`) would have; the translator must refuse it, not assume its words
+are in range (R3). -/
+def fakeWord : String :=
+  "inductive UIntN (w : Nat) where\n  | mk (n : Nat)\n" ++
+  "def UIntN.toNat {w : Nat} : UIntN w → Nat\n  | .mk n => n\n" ++
+  "def UIntN.not {w : Nat} : UIntN w → UIntN w\n  | .mk n => .mk 0\n"
+
 def has (ms : List String) (fragment : String) : Bool := ms.any fun m => (m.splitOn fragment).length > 1
 
 def expect (ms : List String) (fragment : String) : IO Unit :=
@@ -44,6 +61,49 @@ def onPath (cmd : String) : IO Bool := do
 
 def needs (cmd : String) (k : IO Unit) : IO Unit := do
   if ← onPath cmd then k else skip s!"no {cmd} on PATH (nix develop has it)"
+
+/-! ## Cache entries (R5)
+
+The on-disk format is documented in `Wiz/Smt/Process.lean`: `wiz-smt-cache-v2`, then
+`kind proof`, `exit`, `out-sha256`, then the proof, the query and the solver's stdout,
+joined by a separator containing NULs. The tests split it themselves so that a format
+change is visible here. -/
+
+def cacheSep : String :=
+  "\n" ++ String.singleton (Char.ofNat 0) ++ "wiz-smt" ++
+    String.singleton (Char.ofNat 0) ++ "\n"
+
+/-- The `.ans` entries of a cache directory. -/
+def cacheEntries (dir : String) : IO (List System.FilePath) := do
+  let d := System.FilePath.mk dir / "smt"
+  if !(← d.isDir) then return []
+  let mut out := []
+  for e in ← d.readDir do
+    if e.path.extension == some "ans" then out := out.push e.path
+  pure out
+
+structure Entry where
+  meta : String
+  proof : String
+  query : String
+  stdout : String
+
+def parseEntry (txt : String) : Option Entry :=
+  match txt.splitOn (cacheSep ++ "query" ++ cacheSep) with
+  | [metaAndProof, rest] =>
+    match rest.splitOn (cacheSep ++ "stdout" ++ cacheSep), metaAndProof.splitOn cacheSep with
+    | [q, out], [meta, proof] => some { meta, proof, query := q, stdout := out }
+    | _, _ => none
+  | _ => none
+
+def Entry.render (e : Entry) : String :=
+  e.meta ++ cacheSep ++ e.proof ++ cacheSep ++ "query" ++ cacheSep ++ e.query ++
+    cacheSep ++ "stdout" ++ cacheSep ++ e.stdout
+
+/-- Replace the `out-sha256` line of an entry's metadata. -/
+def Entry.withDigest (e : Entry) (digest : String) : Entry :=
+  { e with meta := "\n".intercalate ((e.meta.splitOn "\n").map fun l =>
+      if l.startsWith "out-sha256 " then "out-sha256 " ++ digest else l) }
 
 /-- The four clauses over two variables, refuted by CaDiCaL (its LRAT, by hand). -/
 def tinyCnf : String :=
@@ -250,6 +310,25 @@ def smtGroup : Group where
           "def UIntN.toNat {w : Nat} : UIntN w → Nat\n  | .mk n => n\ndef UIntN.not {w : Nat} : UIntN w → UIntN w\n  | .mk n => .mk 0\n" ++
           "def fake (x : UIntN 8) : UIntN.not (UIntN.not x) = x := by smt\n") trusted
         expect ms "smt: the goal is not in the fragment" },
+    { name := "R3: a word type that is not sealed with a private constructor is refused, not assumed in range", run := fun _ => needs "z3" do
+        -- The fake `Word`'s `UIntN` has a public constructor and no range proof; its
+        -- `not` is constant 0, so `not (not x) = x` is FALSE. Read as an 8-bit vector
+        -- with the range assumed, z3 proves it unsat and `smt` would accept a false
+        -- theorem. The translation must refuse the type instead (R3).
+        let loader : Name → Option String := fun m => if m == "Word" then some fakeWord else none
+        let ms ← msgsWith loader ("import Word\n" ++
+          "def bad (x : UIntN 8) : UIntN.not (UIntN.not x) = x := by smt\n") ["Word"] trusted
+        expect ms "error: smt: UIntN is not sealed with a private constructor"
+        -- the library's sealed `UIntN` still translates (the words case above checks
+        -- that the translated goal is actually proved by the solver)
+        let ms ← msgs ("import Word\ndef ok (x : UIntN 8) : UIntN.not (UIntN.not x) = x := by smt\n") trusted
+        noErrors ms },
+    { name := "R3: the seal/private-constructor predicate holds for lib/Word's UIntN (and not for an unsealed type)", run := fun _ => do
+        let loader ← Elab.libLoader
+        let s := runFrontend (R := ZeroOneMany) "import Word\n" { loader, trustedModule := Tests.libModule }
+        check (Smt.sealedPrivate s.globals "UIntN")
+          "lib/Word's UIntN does not look sealed: the SMT range check would refuse every word"
+        check (!Smt.sealedPrivate s.globals "Nat") "Nat (no seal, no private constructor) satisfies the seal check" },
     { name := "smt: a false goal fails with a counterexample in the user's names", run := fun _ => needs "z3" do
         let ms ← msgs ("import Prelude\ndef wrong (apples pears : Nat) (h : Nat.lt apples pears = .true) : Nat.lt pears apples = .true := by smt\n") trusted
         expect ms "smt: the solver found a counterexample"
@@ -285,6 +364,94 @@ def smtGroup : Group where
         checkEq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" (Smt.Sha256.hex "abc")
         checkEq "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
           (Smt.Sha256.hex "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") },
+    { name := "R5: sat_decide with a cache stores an LRAT certificate, and a SAT model is not cached", run := fun _ => needs "cadical" do
+        let dir ← IO.FS.createTempDir
+        let cfg : Smt.Config := { cacheDir := some dir.toString }
+        let ms ← msgs ("import SatTactic\ndef t (a b : Bool) : Bool.and a b = Bool.and b a := by sat_decide\n") cfg
+        noErrors ms
+        let es ← cacheEntries dir.toString
+        check (es.length == 1) s!"expected one certificate entry, got {es.length}"
+        let txt ← IO.FS.readFile es.head!
+        check ((txt.splitOn "wiz-smt-cache-v2").length > 1) s!"an entry without the v2 marker: {txt.take 200}"
+        check ((txt.splitOn "kind proof").length > 1) "the entry does not say it is a proof"
+        check ((txt.splitOn "out-sha256 ").length > 1) "the entry does not record the proof's digest"
+        check ((← parseEntry txt).isSome) s!"the test cannot read its own entry format: {txt.take 200}"
+        -- a SAT answer (exit 10, no proof file) must not become a cached counterexample
+        let ms ← msgs ("import SatTactic\ndef bad (a b : Bool) : Bool.and a b = Bool.or a b := by sat_decide\n") cfg
+        expect ms "sat_decide: the goal is false; a counterexample:"
+        check ((← cacheEntries dir.toString).length == 1) "a SAT model was cached as a verdict" },
+    { name := "R5: a cached proof is re-checked on load (a tampered proof with a matching digest is used and rejected)", run := fun _ => needs "cadical" do
+        let dir ← IO.FS.createTempDir
+        let cfg : Smt.Config := { cacheDir := some dir.toString }
+        let src := "import SatTactic\ndef t (a b : Bool) : Bool.and a b = Bool.and b a := by sat_decide\n"
+        noErrors (← msgs src cfg)
+        let es ← cacheEntries dir.toString
+        check (es.length == 1) s!"expected one certificate entry, got {es.length}"
+        let some e ← parseEntry (← IO.FS.readFile es.head!)
+          | throw (IO.userError "cannot parse the cache entry")
+        -- replace the proof and update the digest: the entry is still served (its bytes
+        -- match the record), and only the re-parse/kernel check can reject it
+        let bad : Entry := e.withDigest (Smt.Sha256.hexBytes "this is not LRAT".toUTF8)
+        IO.FS.writeFile es.head! (bad.render)
+        let ms ← msgs src cfg
+        expect ms "LRAT: bad line"
+        -- replace the proof without updating the digest: the entry is a miss, so the
+        -- solver runs again and the goal is proved
+        IO.FS.writeFile es.head! ({ e with proof := "also not LRAT" }.render)
+        noErrors (← msgs src cfg) },
+    { name := "R5: a cache entry without a certificate (a legacy verdict) is refused", run := fun _ => needs "z3" do
+        let dir ← IO.FS.createTempDir
+        let cfg : Smt.Config := { cacheDir := some dir.toString }
+        let args := ["-smt2", "-T:10", "{in}"]
+        let input := "(set-logic QF_LIA)\n(assert false)\n(check-sat)\n"
+        let id ← Smt.solverIdentity "z3"
+        let key := Smt.queryKey id args input
+        let ansFile := System.FilePath.mk s!"{dir}/smt/{key}.ans"
+        IO.FS.createDirAll ansFile.parent.getD "."
+        -- the pre-R5 format: exit, stdout, out-file, query. It claims `sat` for a
+        -- script that is `unsat`: replaying it would be wrong, so it must be ignored.
+        let query := id ++ cacheSep ++ String.intercalate cacheSep args ++ cacheSep ++ input
+        IO.FS.writeFile ansFile s!"0{cacheSep}sat{cacheSep}{cacheSep}query{cacheSep}{query}"
+        match Smt.runSolver cfg "z3" args input "smt2" true (fun _ => true) with
+        | .ok (_, a) =>
+          check (a.stdout.contains "unsat")
+            s!"the forged legacy verdict was replayed: stdout `{a.stdout.trimAscii.toString}`"
+        | .error e => throw (IO.userError s!"running z3 failed: {e}") },
+    { name := "R5: only a non-empty proof file is cached; a verdict (no {out}) is never written", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        let cfg : Smt.Config := { cacheDir := some dir.toString }
+        let mk (body : String) : List String := ["-c", body, "sh", "{out}"]
+        -- (a) `wantOut = false`: the answer is a verdict, so it must not be kept
+        let r ← Smt.runSolver cfg "sh" (mk "printf 'unsat\\n'; exit 0") "q" "smt2" false (fun a => a.exitCode == 0)
+        (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
+        check ((← cacheEntries dir.toString).isEmpty) "a verdict (wantOut = false) was cached"
+        -- (b) `wantOut = true` but the solver wrote no proof: also not a certificate
+        let r ← Smt.runSolver cfg "sh" (mk "printf 's UNSATISFIABLE\\n'; : > \"$1\"; exit 20") "q" "smt2" true (fun a => a.exitCode == 20)
+        (match r with | .ok _ => pure () | .error e => throw (IO.userError e))
+        check ((← cacheEntries dir.toString).isEmpty) "an answer with an empty proof file was cached"
+        -- (c) a non-empty proof is cached, and a changed proof with a stale digest is a miss
+        let marker := (dir / "run-marker").toString
+        let body := s!"if [ -f {marker} ]; then exit 3; else printf 'PROOF1' > \"$1\"; exit 20; fi"
+        let r ← Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20)
+        let (_, a) ← match r with
+          | .ok x => pure x
+          | .error e => throw (IO.userError e)
+        checkEq "PROOF1" a.outFile
+        let es ← cacheEntries dir.toString
+        check (es.length == 1) s!"expected one entry, got {es.length}"
+        let path := es.head!
+        let some e ← parseEntry (← IO.FS.readFile path) | throw (IO.userError "cannot parse the entry")
+        -- (c1) digest updated: served from the cache, without running the solver
+        IO.FS.writeFile (System.FilePath.mk marker) ""
+        IO.FS.writeFile path ((e.withDigest (Smt.Sha256.hexBytes "PROOF2".toUTF8)).render)
+        match Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
+        | .ok (_, a) => checkEq "PROOF2" a.outFile
+        | .error e => throw (IO.userError s!"a digest-matching cached proof was not served: {e}")
+        -- (c2) digest stale: a miss, so the solver runs (and the marker makes it exit 3)
+        IO.FS.writeFile path ({ e with proof := "PROOF3" }.render)
+        match Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
+        | .ok (_, a) => check (a.exitCode == 3) "a proof with a stale digest was served"
+        | .error _ => pure () },
     { name := "lib/ never uses smt", run := fun _ => do
         for e in ← System.FilePath.readDir "lib" do
           if e.path.extension == some "wiz" && e.path.fileName != some "Prelude.wiz" then
