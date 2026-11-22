@@ -191,6 +191,13 @@ def Nat.zero_le (n : Nat) : Nat.Le 0 n := rfl
 def Nat.le_refl : (n : Nat) → Nat.Le n n
   | .zero => rfl
   | .succ n => Nat.le_refl n
+/-- (P0 `omega`) `a ≤ b` from `a = b`, with all arguments explicit (a proof term `omega`
+can build without inserting implicits). -/
+def Nat.le_of_eq (a b : Nat) (e : a = b) : Nat.Le a b :=
+  Eq.subst (fun x => Nat.Le a x) e (Nat.le_refl a)
+/-- (P0 `omega`) `b ≤ a` from `a = b`, with all arguments explicit. -/
+def Nat.le_of_eq_sym (a b : Nat) (e : a = b) : Nat.Le b a :=
+  Nat.le_of_eq b a (Eq.symm e)
 /-- `n ≤ n + 1`. -/
 def Nat.le_succ : (n : Nat) → Nat.Le n (Nat.succ n)
   | .zero => rfl

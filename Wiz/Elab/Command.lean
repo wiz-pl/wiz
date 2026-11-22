@@ -2326,8 +2326,9 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     let inner := cmd.getArg 1
     if ← rejectImportIn "`local`" inner then return
     unless ["command.syntax", "command.declareSyntaxCat", "command.notation", "command.infix",
-            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
-      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance` and unexpanders can be `local`"
+            "command.macroRules", "command.attrMacro", "command.attrSimp", "command.attrHint",
+            "command.attrHintKind", "command.instance", "command.appUnexpander", "command.attrUnexpander"].contains inner.kind do
+      report .error cmd.info "only `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`, `macro_rules`, `attribute [macro …]`, `attribute [simp]`, `attribute [hint]`, `instance` and unexpanders can be `local`"
       return
     let before ← get
     elabCommand inner
@@ -3417,7 +3418,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .eq _ lhs rhs =>
           if conditional then
             reportC nStx.info s!"'{n}' is a conditional simp lemma (it has a premise before the equation); dischargers are S3, so it cannot be registered yet" ErrorCode.simpLemmaConditional
-          else if s.simpLemmas.any (·.name == n) then
+          else if s.simpLemmas.any fun e => !e.hint && e.name == n then
             report .warning nStx.info s!"duplicate `[simp]` registration for '{n}': it is already in the simp set (kept once, at its first priority)"
           else do
             if lhs == rhs then
@@ -3427,6 +3428,29 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false } :: s.simpLemmas }
         | _ =>
           reportC nStx.info s!"'{n}' is not an equation: a simp lemma must have the form `∀ x₁ … xₙ, lhs = rhs`" ErrorCode.simpLemmaNotEquation
+  | "command.attrHint" | "command.attrHintKind" =>
+    -- (P0) `attribute [hint] f`, `[hint 500] f`, `[hint intro] f`: a theorem that
+    -- `auto` may apply. It shares the registration array with `[simp]` but not the set.
+    let kindRule := cmd.isOfKind "command.attrHintKind"
+    let prio := if kindRule then 1000 else
+      if (cmd.getArg 3).isNone then 1000 else
+      (((if (cmd.getArg 3).isOfKind "null" then (cmd.getArg 3).getArg 0 else cmd.getArg 3).getNat?).getD 1000)
+    let kind := if kindRule then ((cmd.getArg 3).getId?).getD "apply" else "apply"
+    if !["apply", "intro", "elim"].contains kind then
+      reportC (cmd.getArg 3).info s!"'{kind}' is not a hint kind: use `apply`, `intro` or `elim`" ErrorCode.unknownDeclaration
+    let nStx := cmd.getArg 5
+    let n := (s.globals.resolveName ((nStx.getId?).getD "_")).toOption.getD ((nStx.getId?).getD "_")
+    match s.globals.find? n with
+    | none => reportC nStx.info s!"unknown declaration '{n}'" ErrorCode.unknownDeclaration
+    | some d =>
+      if (ctorInfo? s.globals n).isSome then
+        reportC nStx.info s!"'{n}' is a constructor, not a theorem: a hint must have a proof" ErrorCode.simpLemmaNotEquation
+      else if d.value.isNone && d.witness.isNone then
+        reportC nStx.info s!"'{n}' has no definition: a hint must be a theorem, not an axiom" ErrorCode.simpLemmaNotEquation
+      else if s.simpLemmas.any fun e => e.hint && e.name == n then
+        report .warning nStx.info s!"duplicate `[hint]` registration for '{n}': it is already in the hint set (kept once, at its first priority)"
+      else
+        modify fun s => { s with simpLemmas := { name := n, priority := prio, rtl := false, hint := true, kind := kind } :: s.simpLemmas }
   | "command.attrImplementedBy" =>
     -- `attribute [implemented_by g] f`: compiled code runs `g` wherever it would run `f`
     -- (erasure takes `g`'s code for `f`); the kernel and proofs keep `f`'s definition. So

@@ -417,6 +417,52 @@ def tacticGroup : Group where
           "def t (p : Nat) : Q (swap p) := by\n  shape\n  exact ()\n" ++
           "def t' (c : Prog) : Q c := by\n  shape\n  exact ()")
           ["Prog.get with fields # (λv. (Prog.ret #))", "not a constructor"] },
+    -- P0 simp congruence and simp?
+    { name := "simp congruence: rewrites under a lambda and an application", run := fun _ =>
+        okLib ("import SimpLemmas\n" ++
+          "def underBinder (a b : Nat) (h : a = b) :\n" ++
+          "    (fun (n : Nat) => n + a) = (fun (n : Nat) => n + b) := by\n" ++
+          "  simp [h]\n  rfl\n" ++
+          "def underApp (f : Nat → Nat) (a b : Nat) (h : a = b) : f a = f b := by\n" ++
+          "  simp [h]\n  rfl\n" ++
+          "#print axioms underBinder")
+          ["'underBinder' does not depend on any axioms"] },
+    { name := "simp? reports the used rules and the replay closes", run := fun _ =>
+        okLibs ("import SimpLemmas\n" ++
+          "def addZero (n : Nat) : n + 0 = n := by\n" ++
+          "  simp?\n  rfl\n" ++
+          "def addZero' (n : Nat) : n + 0 = n := by\n" ++
+          "  simp only [Nat.add_zero]\n  rfl")
+          ["Try this: simp only [Nat.add_zero]", "rulesUsed: [Nat.add_zero]"] },
+    -- P0 auto and [hint]
+    { name := "auto closes a hypothesis chain and a conjunction", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def chain (P Q R : Prop) (h₁ : P → Q) (h₂ : Q → R) (hp : P) : R := by auto\n" ++
+          "attribute [hint intro] And.intro\n" ++
+          "def both (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by auto\n" ++
+          "#print axioms chain\n#print axioms both")
+          ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
+    { name := "auto does not affirm the consequent", run := fun _ =>
+        failsLib ("import Logic\n" ++
+          "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
+          "auto: no proof" },
+    { name := "a hint of an axiom is refused", run := fun _ =>
+        failsLib "import Prelude\naxiom ax : True\nattribute [hint] ax"
+          "has no definition: a hint must be a theorem" },
+    -- P0 omega
+    { name := "omega closes linear Nat order and equality goals", run := fun _ =>
+        okLib ("import Nat\n" ++
+          "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
+          "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
+          "def bound (a b : Nat) (h : a + b = 3) : Nat.Le a 3 := by\n  omega\n" ++
+          "#print axioms leTrans")
+          ["'leTrans' does not depend on any axioms"] },
+    { name := "omega refuses false and non-linear goals", run := fun _ =>
+        failsLib "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
+          "omega:" },
+    { name := "omega refuses multiplication", run := fun _ =>
+        failsLib "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
+          "omega: non-linear" },
     -- case analysis (docs/stages/06-macros.md, 6j)
     { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
         okLib ("import Logic\n" ++

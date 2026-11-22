@@ -86,6 +86,8 @@ def getSimpLemmas := 40
 def ctorNames := 41
 -- (6j) a case split on a Boolean expression
 def byCases := 42
+-- (P0) the `[hint]` database, for `auto`
+def getHints := 43
 end TacTag
 
 structure Goal (R : Type) where
@@ -845,5 +847,141 @@ partial def matchRule (gl : Goal R) (g : Globals R) (A pat lhs rhs happ : Term R
         | some p => pure (some p)
         | none => do set s; go rest
   go (subtermsPre goalT)
+
+/-! ## Congruence: rewriting under binders
+
+`subtermsPre` returns bare subterms; the terms under a binder use variables of the
+extended context, so matching them in the goal's context is wrong. `rewriteDeep` walks
+the goal type with the real context for each λ binder, matches the rule at every node
+and rebuilds the term with a proof `new = old`:
+
+* under a λ, the proof is the pointwise (definitional) equality of functions, `.lam`;
+* at any other node, the child's proof is transported through the parent with
+  `transp` on the one-hole context (`Term.abstract`);
+* a `Π` (a type former) is not traversed: an equality of `Π`s is not pointwise in this
+  kernel, so `simp` leaves it to `intro`/P1 rather than build an unsound transport;
+* a match is attempted only where the rule's telescope instantiates in that context, so
+  the replacement may mention the bound variable.
+
+The Wiz driver still owns rule order, fuel and `all`: `rewriteDeep` rewrites the first
+matching node, and the driver restarts the pass. -/
+
+/-- Instantiate a rule's `∀` telescope in `ctx`, then match its left side against the
+whole term `t`: the same checks as `matchRule`, one candidate. -/
+partial def matchCand (g : Globals R) (ctx : LocalCtx R) (A pat lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) (cand : Term R) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+  let lvl := ctx.lvl
+  let rc := RCtx.ofLocal ctx
+  let pvRaw ← evalIn ctx pat
+  let pvF ← force pvRaw
+  if isConVal pvF && !pat.mvars.isEmpty then return none
+  let pv := if isConVal pvF then pvF else pvRaw
+  let cv ← evalIn ctx cand
+  if isConVal pv && !isConVal cv then return none
+  else do
+    let s ← get
+    let r ← try
+      unify lvl pv cv
+      for (dom, arg) in pairs do
+        let arg' ← zonk lvl arg
+        if arg'.mvars.isEmpty then
+          match ← rc.typeOf? arg' with
+          | some ty => unify lvl (← evalIn ctx dom) ty
+          | none => pure ()
+      let app ← zonk lvl happ
+      if !app.mvars.isEmpty then pure none
+      else do
+        let A' ← zonk lvl A
+        let a' ← zonk lvl lhs
+        let b' ← zonk lvl rhs
+        if !A'.mvars.isEmpty || !a'.mvars.isEmpty || !b'.mvars.isEmpty then pure none
+        else if a' == b' then pure none
+        else pure (some (A', a', b', app, cand))
+    catch _ => pure none
+    match r with
+    | some p => pure (some p)
+    | none => do set s; pure none
+
+/-- The kernel context of a local context (as `Goal.kernelCtx`, for a binder extension). -/
+def localKernelCtx (g : Globals R) (ctx : LocalCtx R) : Ctx R :=
+  { globals := g, env := ctx.env,
+    names := ctx.names.reverse.toArray,
+    qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+    types := ctx.types.reverse.toArray, lvl := ctx.lvl, erased := true }
+
+/-- Prepare `h` as a rule in `ctx`: its equation after the telescope (fresh metavariables
+in `ctx`), the applied lemma and the binder arguments. -/
+def prepareIn (g : Globals R) (ctx : LocalCtx R) (h : Term R) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × List (Term R × Term R))) := do
+  let (body, happ, pairs) ← match ← ruleType? ctx g h with
+    | some p => pure p
+    | none => do
+      let hty ← match (← get).kernelInfer (localKernelCtx g ctx) h with
+        | .ok ty => pure ty
+        | .error e => throwAt ctx.info s!"simp: {e}" ErrorCode.tacticFailed
+      let htyT ← zonk ctx.lvl (quote g ctx.lvl hty)
+      let (b, ms) ← stripRule ctx 64 htyT
+      pure (b, ms.foldl (fun f m => .app f m) h, [])
+  match body with
+  | .eq A lhs rhs => pure (some (A, lhs, rhs, happ, pairs))
+  | _ => pure none
+
+/-- `b = a` from `e : a = b`, by transport. -/
+def eqSym (A a b : Term R) (e : Term R) : Term R :=
+  .transp A a (.lam "x" (.eqTy (.var 0) (a.lift 1))) (.reflTy a) b e
+
+/-- Rewrite the first node of goal `gl`'s type that the rule `h` matches, descending
+through λs and non-dependent applications: `(new type, proof new = old)`. -/
+partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) :
+    ElabM R (Option (Term R × Term R)) := do
+  let goalT ← zonk gl.ctx.lvl (quote g gl.ctx.lvl gl.ty)
+  let rec go (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (Term R × Term R)) := do
+    let depth := ctx.lvl - gl.ctx.lvl
+    let matched ← match ← prepareIn g ctx (h.lift depth) with
+      | some (A, lhs, rhs, happ, pairs) =>
+        let pat := if rtl then rhs else lhs
+        match ← matchCand g ctx A pat lhs rhs happ pairs t with
+        | some (A', a', b', app, _) =>
+          -- `a'` is the rule's left side, `b'` its right side; the node is `a'` up to
+          -- conversion; return `new = old`
+          if rtl then pure (some (a', app))
+          else pure (some (b', eqSym A' a' b' app))
+        | none => pure none
+      | none => pure none
+    match matched with
+    | some r => pure (some r)
+    | none => match t with
+      | .pi .. => pure none
+      | .lam x body => do
+        let tyTerm ← freshTypeMeta ctx "simp binder"
+        let ty ← evalIn ctx tyTerm
+        let ctx' := ctx.bind x ty
+        match ← go ctx' body with
+        | some (bodyNew, pfBody) => pure (some (.lam x bodyNew, .lam x pfBody))
+        | none => pure none
+      | _ => do
+        -- immediate children at binder depth 0, in order
+        let kids := (t.forChildren (m := StateM (List (Term R))) (fun _ => pure ())
+          (fun k c => if k == 0 then modify fun xs => xs ++ [c] else pure ()) []).2
+        let rec tryKids : List (Term R) → ElabM R (Option (Term R × Term R))
+          | [] => pure none
+          | kid :: rest => do
+            let s ← get
+            match ← go ctx kid with
+            | some (kidNew, pf) => do
+              let C := t.abstract kid
+              let parentNew := C.instantiateAt 0 kidNew
+              if parentNew == t then tryKids rest
+              else do
+                -- `A` is the child's type: let the kernel solve the hole from the proof
+                let A ← freshTypeMeta ctx "simp congr"
+                let sym := .transp A kidNew (.lam "x" (.eqTy (.var 0) (kidNew.lift 1)))
+                  (.reflTy kidNew) kid pf
+                let P : Term R := .lam "x" (.eqTy (.app (C.lift 1) (.var 0)) (t.lift 1))
+                pure (some (parentNew, .transp A kid P (.reflTy t) kidNew sym))
+            | none => tryKids rest
+        tryKids kids
+  go gl.ctx goalT
 
 end Wiz.Elab

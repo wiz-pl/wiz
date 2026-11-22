@@ -423,6 +423,11 @@ def commandLeading : List LeadingParser := [
   -- 6h (S2): `attribute [simp] f` (and `[simp 500] f`) puts a theorem in the default set
   { kind := "command.attrSimp", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "simp", optional num, "]", ident] },
+  -- P0: `attribute [hint] f`, `[hint 500] f` (priority) and `[hint intro] f` (kind)
+  { kind := "command.attrHint", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hint", optional num, "]", ident] },
+  { kind := "command.attrHintKind", prec := maxPrec,
+    p := seqs ["attribute", "[", nonReserved "hint", ident, "]", ident] },
   -- HD8: `deriving`
   { kind := "command.attrDeriver", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "deriver", ident, "]", ident] },
