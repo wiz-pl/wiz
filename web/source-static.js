@@ -211,6 +211,11 @@ export async function mountSource(el, { module, bundle, env = globalThis } = {})
   };
   handle = await mount(el, {
     module, env, transport: { bundle: true }, onRequest,
+    // The reader uses `mouseover` for the hover card (View.lineRow) and `click` for the
+    // info view. The framework's default event list has no `mouseover`, so without this
+    // the hover is a dead handler in a real browser (the Node trace steps the model
+    // directly and cannot see it).
+    events: ["click", "mouseover", "input", "change", "keydown", "keyup", "submit"],
   });
   handle.call("wiz_loom_effect", "bundle", bundlePayload(bundle), "");
   const nav = () => {

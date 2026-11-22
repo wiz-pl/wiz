@@ -669,11 +669,13 @@ jobs:
           retention-days: 3
 
   # (11s) The Wiz→wasm page modules as Nix derivations (`packages.wiz-web`,
-  # `packages.wiz-playground` and `packages.wiz-playground-ui`; flake.nix), built once
-  # here and published to Cachix. They used to be built inside `web`'s test step (95 % of
+  # `packages.wiz-playground`, `packages.wiz-playground-ui` and `packages.wiz-source-ui`;
+  # flake.nix), built once here and published to Cachix. They used to be built inside
+  # `web`'s test step (95 % of
   # its 608 s, with `wasm-opt -O2`'s 8–10 GiB peak as the tail that once reached 55 min)
   # and again in every `docs` job on a push; both jobs now substitute these paths
-  # (`web/modules-from-store.sh`).
+  # (`web/modules-from-store.sh`). The reader's module is also what `scry web --ui` puts
+  # in the published `/source/` bundle.
   #
   # It is not in `build`: a 10-minute wasm build there would sit on the shards' critical
   # path. Here it runs beside the shards. It waits for `build` when that runs, so its
@@ -704,22 +706,25 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
+      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui, wiz-source-ui)
         id: nix
         run: |
           # They share `wiz`, the emscripten closure and mini-gmp; the playground engine is
           # the expensive one (`--opt 1` in flake.nix, because `wasm-opt`'s -O2 peak does
           # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
           # `wiz` and emscripten are substitutes.
-          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
+          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui .#wiz-source-ui --no-link -L --max-jobs 1
           web=$(nix path-info .#wiz-web)
           playground=$(nix path-info .#wiz-playground)
           ui=$(nix path-info .#wiz-playground-ui)
+          source_ui=$(nix path-info .#wiz-source-ui)
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "playground=$playground" >> "$GITHUB_OUTPUT"
           echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          echo "source_ui=$source_ui" >> "$GITHUB_OUTPUT"
           echo "wiz-web: $web"; echo "wiz-playground: $playground"; echo "wiz-playground-ui: $ui"
-          du -sh "$web" "$playground" "$ui"
+          echo "wiz-source-ui: $source_ui"
+          du -sh "$web" "$playground" "$ui" "$source_ui"
       - name: Publish the store paths to Cachix
         # `web` and `docs` substitute these; the same token rule as the compiler's push.
         # A fork pull request has no secret: its jobs build the modules themselves.
@@ -736,7 +741,7 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui)
+            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui .#wiz-source-ui)
 
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
   # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
@@ -819,11 +824,11 @@ jobs:
     needs: [build, web_modules]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    # 45 min: `wiz doc --lib` and the site, with wiz and both Wasm modules substituted
-    # (`web_modules`). Without an elaboration cache for this binary `wiz doc --lib` is
-    # the bulk of the job (10-19 min in recent runs); the restored cache below replays it
-    # in ~2-4 min.
-    timeout-minutes: 45
+    # 60 min: `wiz doc --lib` (10-19 min cold, ~2-4 min with the restored cache), the
+    # source reader's `grail build scry` (~12 min measured in scry.yml) and the site,
+    # with wiz and the Wasm modules substituted (`web_modules`). The reader build is why
+    # this is 60 and not 45: a timeout is a cancelled job, not a verdict on the commit.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -929,10 +934,47 @@ jobs:
         run: |
           ref=$(nix build .#reference --no-link --print-out-paths)
           cp "$ref/index.md" doc-site/docs/reference.md
+      - name: The source reader (grail build scry + scry web + .#wiz-source-ui)
+        # `/source/` is one static bundle: scry's report of the public C fixtures, the
+        # host files, and the reader's Loom runtime. `scry` is not a Nix package, so this
+        # is the job that has a scry binary: the same `grail build scry` path scry.yml
+        # uses (the tree-sitter shim and the dev shell's grail.local.wiz). `--ui` copies
+        # the .mjs and web/source-bundle.sh adds the .wasm beside it; a bundle missing
+        # either fails here, not in a browser.
+        id: source
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: |
+          nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
+          mkdir -p .lake/build/bin
+          ln -sf "$WIZ" .lake/build/bin/wiz
+          ln -sf "$(dirname "$WIZ")/grail" .lake/build/bin/grail
+          ( cd scry && cp ../grail.local.wiz . && ../.lake/build/bin/grail build scry )
+          ui=$(nix build .#wiz-source-ui --no-link --print-out-paths)
+          bundle=$(mktemp -d)
+          sh web/source-bundle.sh ./scry/.grail/bin/scry "$bundle/b" \
+            --ui "$ui" --target scry/tests/fixtures/report
+          echo "SOURCE_BUNDLE=$bundle/b" >> "$GITHUB_ENV"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
       - name: The landing page and the playground (web/build-site.sh)
+        env:
+          # The reader is part of the published product, so a site without it is red.
+          SITE_REQUIRE_SOURCE: "1"
         run: sh web/build-site.sh doc-site web/out
-      - name: The site has its three entry points and the landing's links resolve
+      - name: The site has its entry points, /source/, and the landing's links resolve
+        env:
+          SITE_REQUIRE_SOURCE: "1"
         run: sh web/check-site.sh doc-site
+      - name: The published source reader in headless Chromium
+        # The bundle is the tree under doc-site/source, not a second export: this checks
+        # the artifact deploy-docs will publish. The test serves it and loads it twice
+        # (JavaScript off: the SSR; on: mount, hover, #/f/<id>).
+        run: |
+          chrome=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)
+          if [ -z "$chrome" ]; then
+            chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
+          fi
+          node web/source_chrome_test.mjs "$chrome" doc-site/source
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-docs

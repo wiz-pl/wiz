@@ -9,9 +9,9 @@
   # of nixpkgs (which must be the version in `lean-toolchain`), and wrapped with this
   # toolchain as flags; `wiz-nvim`, the Neovim plugin, and `nvim-wiz`, Neovim with it
   # and wiz (`nix run .#nvim-wiz`); `reference`, the standard library's reference
-  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground` and
-  # `wiz-playground-ui`, the Wasm page modules (`web/build*.sh`) built by a
-  # derivation instead of in each CI job. CI pushes them to the Cachix cache
+  # manual, generated with that wiz (never committed); `wiz-web`, `wiz-playground`,
+  # `wiz-playground-ui` and `wiz-source-ui`, the Wasm page modules (`web/build*.sh`)
+  # built by a derivation instead of in each CI job. CI pushes them to the Cachix cache
   # `badlydrawnwizards`; see docs/building.md for `nix run`.
   description = "Wiz: a didactic dependently typed language";
 
@@ -411,6 +411,39 @@ EOF
               platforms = systems;
             };
           };
+          # The source reader's Loom UI (`web/source-ui.wiz`: Web.Source.View as a
+          # LiveApp). `scry web --ui` copies the module into a bundle and
+          # `web/source-static.js` mounts it; the site's `/source/` page is the same
+          # bytes. Built here for the same reason as `wiz-playground-ui`: one Cachix
+          # entry, and neither the scry nor the docs job runs Emscripten. `lib/` is the
+          # `-I` root, so a library change rebuilds it — correct, and small.
+          wiz-source-ui = pkgs.stdenv.mkDerivation {
+            pname = "wiz-source-ui";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [
+                ./web/build-source-ui.sh ./web/source-ui.wiz ./web/js.c
+                ./lib
+              ];
+            };
+            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
+              sh web/build-source-ui.sh out --gmp-src ${pkgs.gmp.src}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -r out $out
+              runHook postInstall
+            '';
+            meta = {
+              description = "The source reader's Loom UI module (wiz-source-ui.mjs, web/build-source-ui.sh)";
+              platforms = systems;
+            };
+          };
           # tower, the toolchain manager (stage 26): the Wiz implementation in `tower/`,
           # built by grail (stage 26e/26h). It needs no Lean at build time; the binary
           # links GMP (the flags below), so the closure grows by GMP and glibc only.
@@ -647,7 +680,7 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground wiz-playground-ui release-tarball;
+                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball;
           source-tarball = release-tarball;
           default = wiz;
           wizc = bootstrapChain.wizc;
