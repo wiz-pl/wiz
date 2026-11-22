@@ -3,7 +3,9 @@
 Writing the lexer and parser in Wiz showed what the language lacked:
 
 * **Recursion on any argument.** The structural argument is the first one the first
-  clause matches; parameters before the colon may be passed unchanged or left out.
+  clause matches; a parameter before the colon is fixed only if no recursive call
+  changes it — a changed one is elaborated as if it were after the colon (the induction
+  hypothesis takes its value), and the others may be passed unchanged or left out.
 * **`partial def` and `mutual … end`.** General recursion: the kernel treats the
   definition as opaque, justified by a witness of its type (22f, so no `False`), and its
   implementation (checked against the type) is what `#eval` and compiled code run. The
@@ -39,6 +41,16 @@ one get metavariables and instance problems. A named argument after the last pos
 one fills its parameter; an explicit parameter before it with no argument is an error
 (Lean would abstract it). Unknown and repeated names are errors (`inferAppNamed`,
 `Elab/Term.lean`; test group `elabfix`).
+
+A constructor's parameters and fields have names as well: with
+`inductive P where | mk (x : Nat) (y : Nat)`, `P.mk (y := 2) (x := 1)` fills `x` with 1
+and `y` with 2 — the telescope is walked in its own order, so a later field's type may
+mention an earlier named one — and an implicit field or a parameter can be named too.
+A missing field leaves a partial application (`P.mk (x := 1)` is a type mismatch at
+`P`), an unknown field is `no parameter named 'z'`, and a repeated one is an error
+(test groups `language`, `selfhost`). A dot-constructor (`.mk (x := 1)`, whose head needs
+the expected type) and an inductive type's own parameters (`L (A := Nat)`) keep no names
+yet.
 
 ## 13b: private declarations and private constructors
 
@@ -100,8 +112,8 @@ would still be accepted:
 | `refl X`, `cast e x`, `transp`, a tuple or look-alike against the type, `p.1` | closed (their types are unified in the elaborator's view) |
 | `exact`, `rfl` and other tactics that elaborate syntax; macros (they produce syntax) | closed (they go through the same rules) |
 | the tactic request `assign` with a term that still has holes | closed: such a term is kept in the tactic state and its type is inferred and compared with its goal at the end of the `by` block (it was a real bypass: `K x ?n : Look Nat` for a goal `Pos Nat`) |
-| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. A hole records its type when its maker knows it (`MetaEntry.type?`: implicit and instance arguments, `_` against an expected type, goals), and the guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a hole with no recorded type, a comparison that meets an unsolved hole) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`) |
-| the self-hosted frontend (`selfhost/Frontend.wiz`) | open, tracked as a parity item: it parses `private` and ignores it |
+| a hole solved by unification (the first-order approximation, or the flex-flex last resort) | closed: such a solution is picked by shape, not typed, so it is type-checked where it is guessed. Every hole records its type (`MetaEntry.type?`): the parameter's type for an implicit, instance or placeholder argument, the expected type for `_` and goals, `Sort ?u` for a hole that stands for a type, and the declared telescope for an output parameter, a simp or fold argument and a calc relation. The guess is compared with it in the elaborator's view (`checkGuess`, `Elab/Unify.lean`), so `def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p` and `sel _ (G.mk x)` for `G : Look Nat → Type` are rejected: `?F := G` would take `Look Nat → Type` for `Pos Nat → Type`, which agree only through the definition of `Pos` ("hidden outside its module", code `private`), with `:=` or equations. The error leads with the reason and names the hole by what it was made for ("the implicit argument F can't be G: the two types agree only through the definition of Pos (module Priv), hidden outside its module"), then shows the hole, its expected type, the guess and the guess's type, with the free variables by name; tests `elabfix`, `reject` ("a first-order solution cannot forge a private value", "… in equations"). A guess that can't be typed there (a pruned hole whose own Π lost a binder, a type that mentions a variable the hole is not applied to, a head whose type can't be read off, a comparison that still meets an unsolved hole at the end of the declaration) sets `ElabState.unifyGuessed`, and only that declaration is checked a second time against `Globals.elabView` (`checkGuessedDecl`). A comparison that meets a hole where the guess is made is kept and made again at the end of the declaration, with its holes solved (`recheckDeferredGuesses`); a forgery found then is reported as on the spot (`reject`, "a guess compared at the end of the declaration cannot forge either") |
+| the self-hosted frontend (`selfhost/Frontend.wiz`) | partly closed (stage 21n): private names are module-scoped there; the type-level rules above (a type with private parts is opaque) are not implemented |
 | `T.desc` of an inductive or coinductive type with private parts: `μ T.desc i` written out is the type with nothing hidden, and a raw `con` builds a value of it | closed: `T.desc` is private with the constructors and recursors (a structure has no description). Generic code over `Desc` in another module can't be pointed at such a type; it could not be applied to its values before either, since the type is opaque there. `deriving` reads the kernel's declarations, not the name, and is unaffected (a derived instance that matches on the type is refused as before) |
 | inside the declaring module | by design: there the look-alike is the same type |
 
@@ -120,6 +132,20 @@ elaborator quotes evaluated values into terms, and a raw pair or projection at a
 without a definition does not type-check (`drafts/rust/lowered/03_get_mut.wiz`,
 `get_mut.is_place` and `get_mut.spec_under`). With the flag a type with private parts is
 abstract for proofs as well.
+
+**`wiz --trace-guess-fallback`** (a diagnostic, off by default). Every hole a guess can
+meet records its type, apart from a pruned hole whose own function type lost a binder
+and a constant whose declared type is not a function there. Even so, a guess can still
+reach the whole-declaration recheck: its type can mention a variable the hole is not
+applied to, the guessed head's type can't be read off, or the comparison can still meet
+a hole at the end of the declaration (a comparison that meets one where the guess is made
+is made again there, once the holes are solved). The flag prints one line per declaration that reaches the recheck, with the
+reasons: `guess-fallback: <module> <declaration> recheck=ran|skipped reasons=…`
+(`skipped`: no other module's private type is in view, so the recheck has nothing to
+hide). `scripts/guess-fallback-stats.sh` counts them over `lib/`, `examples/` and `tests/`
+(`WIZ`), and over the programs inline in the test groups (`--tests TESTS`: the tests binary
+takes the same flag, and its cases' lines name their file `GROUP#INDEX`).
+The goal is zero, so the recheck can go.
 
 The motivating use is `lib/Region.wiz` ([22g](22-numbers.md)): the constructors of the borrow handles
 `Shr`, `Uniq`, `Mut` and `Lent` are private, so a handle at a region comes only from a
@@ -190,7 +216,7 @@ decide. `!b` is `Bool.not b`. Precedences are Lean's: `if` is a leading term lik
 `Bool.true && b` reduces to `b`, as `Bool.and Bool.true b` does, but a stuck `a && b` is a
 `match` on `a` and not convertible to `Bool.and a b` (state lemmas about `Bool.and` by
 cases on `a`). `if`, `then` and `else` are now reserved words in every program; `not` is
-not (constructors and class fields named `not` exist in `lib/Hdl`).
+not (constructors and class fields named `not` exist in `hdl/src/Hdl`).
 
 The self-hosted frontend doesn't read `lib/Prelude.wiz`: it embeds its own prelude
 (`preludeText`, selfhost/Frontend.wiz) and has had `if` since 19a (an application of `if`,
@@ -221,7 +247,7 @@ generic ones (7b), which is how a type that isn't a monad (an HDL signal) declar
 `Monad` itself is unchanged (it doesn't extend `Applicative`: classes have no `extends`
 yet), so `do`, `Monad1` and `do1` are as before. The module is separate from the Prelude
 because programs that import only the Prelude already define `List.map`, a class
-`Functor` and `Monad Option` instances of their own (`lib/Hdl/Core.wiz`, the tests).
+`Functor` and `Monad Option` instances of their own (`hdl/src/Hdl/Core.wiz`, the tests).
 Tests: group `language`.
 
 ## 13e: `∃ x, P`, `¬`, and ASCII spellings
@@ -257,12 +283,15 @@ def lin (1 p : Nat × Tok × Tok) : Unit × Unit :=
   (Tok.close s, Tok.close t)
 ```
 
-`let q (x₁, …, xₙ) := e; body` with three or more names (`term.letTuple`) is right-nested
-pairs, as tuple types and tuple patterns are: `let q (x₁, r₁) := e; let q (x₂, r₂) := r₁; …`,
-with intermediate names (`tuple✝k`) that no program can mention (`letTupleToPairs`,
-`Elab/Term.lean`). Each step is a `let (x, y)` split at quantity `q`, so with `let 1` every
-component of a linear tuple is bound once, which is how a tuple holding resources is taken
-apart now that linear pairs aren't projected. Tests: group `language`.
+`let q (p₁, …, pₙ) := e; body` with three or more components is the general `let` with a
+pattern of 13h: `(p₁, …, pₙ)` is the tuple pattern `(p₁, (p₂, …))` (`term.tuplePat`), so
+the components may be any patterns (a nested tuple, `_`, or a constructor — the `let` is
+then a `match`, so the constructors must be covered), and without a quantity the `let` is
+the `match` on the tuple that 13h describes. With a quantity `q` the components must be
+names: each step is a `let (x, y)` split at quantity `q` (right-nested, as tuple types
+are), so with `let 1` every component of a linear tuple is bound once, which is how a
+tuple holding resources is taken apart now that linear pairs aren't projected. (Two
+components are `term.letPair`, the same split.) Tests: group `language`.
 
 ## 13g: as-patterns `x@p`
 
@@ -432,7 +461,10 @@ The parser stays scannerless with one token table (`Wiz/Parser/Token.lean`): the
 a property of the category being parsed (`ParserTables.reservedIn`, read by the `ident`
 case of `runDescr`), so the memo key, which already names the category, is unchanged.
 The design options are in the notes (`scoped-keywords.md`). The self-hosted parser
-interprets the built-in tables, which use no scope, and has no `syntax` command yet.
+interprets the built-in tables, which use no scope; it dispatches `syntax` and
+`declare_syntax_cat` ([21ac](21-bootstrap.md); the `selfhost-macro` group checks them),
+but does not track a category's keyword scope, so a scope is accepted and not enforced
+there.
 Tests: `parser: commands and syntax`, `language`.
 
 ## 13k: list literals
@@ -449,9 +481,10 @@ def len : List Nat → Nat
 ```
 
 It is a Prelude `syntax` with a procedural macro (`ListLit.expand`), not built-in
-grammar, so the self-hosted toolchain's generated parser tables are unchanged (its own
-prelude, `preludeText` in `selfhost/Frontend.wiz`, has no list literals, and its sources
-don't use them). `[` already starts an instance binder in a dependent arrow
+grammar. The self-hosted toolchain cannot run a macro at elaboration time, so it adds
+the same surface rule itself (`term.listLit` in `selfhost/Parse.wiz`, precedence 1024)
+and rewrites the node to `List.cons`/`List.nil` in `selfhost/Frontend.wiz`; its embedded
+prelude (`preludeText`) declares nothing for it. `[` already starts an instance binder in a dependent arrow
 (`[Monad m] → m A`, `[inst : C A] → B`): that is one leading parser that also consumes
 the arrow, so it is longer than a list literal and wins (longest match, `Wiz/Parser/Interp.lean`);
 `Enum [a, b]`, `ecase t [..]` and `attribute [..]` are leading parsers that consume their
@@ -466,16 +499,32 @@ expanded if a macro applies, so `[x, y]` becomes `List.cons x (List.cons y List.
 and a user notation whose expansion is a constructor application works in patterns too.
 Tests: group `language`.
 
+**`x :: xs`.** The Prelude declares `infixr:67 " :: " => List.cons`, so a cons cell can
+be written `x :: xs` in terms and in patterns. It is right-associative at 67, the
+precedence of `++` (13l), and tighter than the arrows (25): `1 :: 2 :: xs` is
+`1 :: (2 :: xs)`, `x :: xs ++ ys` is `x :: (xs ++ ys)` (`++` is right-associative at
+67 too, so it sits in the `::` tail), and `x :: xs → P` is `(x :: xs) → P`. A list
+literal tail keeps the literal spelling: `1 :: [2]` prints as `[1, 2]`; a cons with a
+variable tail prints as `x :: xs` (the inverse of the notation
+rule that 11r installs for every `infix`; `set_option pp.notation false` prints
+`List.cons Nat x xs`). The self-hosted prelude, `preludeText` in `selfhost/Frontend.wiz`,
+declares the same `infixr`, so both frontends expand it to `List.cons` and the
+`selfhost` differential case computes with it. Tests: group `language`, `reject`
+(`1 :: 2`), and `selfhost`.
+
 ## 13l: `++` for lists and strings
 
-`a ++ b` is `Append.append a b`, a method of the homogeneous class
-`class Append (A : Type) where append : A → A → A`, with instances for `List A`
-(`List.append`) and `String` (`String.append`): the same design as the numeric classes
-(7e, HD9 stage 1). A heterogeneous `HAppend A B C` would need default instances, which
-the numeric classes also left for later. Other types get `++` by an instance.
-(`lib/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local spellings
-of `String.append`; the self-hosted prelude keeps `infixr " ++ " => List.append`.)
-Tests: group `language`.
+`a ++ b` elaborates to `HAppend.hAppend a b` (`lib/Prelude.wiz`'s
+`infixr:67 " ++ "`), the method of the heterogeneous class `HAppend (A B : Type)
+(C : outParam Type)`. The homogeneous class `Append (A : Type)` with
+`append : A → A → A` has instances for `List A` (`List.append`) and `String`
+(`String.append`), and `instHAppend {A : Type} [Append A] : HAppend A A A` is registered
+as a **default instance**: at a homogeneous type `++` therefore resolves to
+`Append.append`, and a heterogeneous instance (like `HMul Nat V V` in 7f) resolves
+without one. Other types get `++` by an `Append` instance or a heterogeneous `HAppend`
+one. (`hdl/src/Hdl/Core.wiz`'s `<+>` and `selfhost/Parse.wiz`'s `+++` are older local
+spellings of `String.append`; the self-hosted prelude keeps
+`infixr " ++ " => List.append`.) Tests: group `language` (`++` on lists and strings).
 
 ## 13m: local notation
 
@@ -490,8 +539,13 @@ local macro_rules
 ```
 
 `local` applies to `syntax`, `declare_syntax_cat`, `notation`, `infixl`/`infixr`/`infix`,
-`macro_rules` and `attribute [macro …]`; anything else is an error. In the main file it
-changes nothing. `local` is not a reserved word.
+`macro_rules`, `attribute [macro …]`, `attribute [simp]`, `instance`,
+`app_unexpander` and `attribute [app_unexpander …]` (the ten command kinds
+`Wiz/Elab/Command.lean` accepts; any other command is an error there). In the main file
+it changes nothing. `local` is not a reserved word. The `language` group pins
+`local instance` (11w) and the `simp` group pins `local attribute [simp]`; the
+self-hosted frontend unwraps `local` and leaves the notation visible to importers
+([21ac](21-bootstrap.md)).
 
 An `import` elaborates the module's text into the importer's state, so its
 syntax lands in the importer's parser tables. The state records what each `local`
@@ -504,11 +558,14 @@ reserved (so a local keyword `shout` is an identifier again in the importer). Ki
 names stay taken, so an importer that declares the same notation gets a new kind and
 none of the dropped rules. Definitions written with the notation are unaffected (they
 are terms by then). Lean also has `scoped` notation, active where a namespace is open;
-Wiz has no `open`, so the module is the only scope. The design notes are in the notes
+Wiz's `open` (13t) scopes names, not notation, so the module is still the only notation
+scope. The design notes are in the notes
 (`notation.md`). `command.local` is built-in grammar (`Wiz/Parser/Builtin.lean`), so the
-self-hosted parser's generated tables have it too; the self-hosted frontend has no
-`syntax` command yet and doesn't elaborate it. Tests: groups `language`,
-`parser: commands and syntax`.
+self-hosted parser's generated tables have it too; the self-hosted frontend also
+dispatches `syntax` and `declare_syntax_cat` ([21ac](21-bootstrap.md)), but it unwraps
+`local` and does not keep the command's rules in the module: a local notation or macro
+rule stays visible to importers there ([21ac](21-bootstrap.md)'s "Not done"). Tests:
+groups `language`, `parser: commands and syntax`.
 
 ## 13n: `rfl` at an equation that has computed
 
@@ -603,7 +660,7 @@ applies to it as to a kept field.
 Updates work for every structure, since all of them are Σ types read through
 `StructLayout`: with parameters, with dependent fields, and for bundles, structures
 over a representation `structure Tx (r : HwTy → Type) where line : r Bit; …`
-(`lib/Hdl/Core.wiz`): `{ s with line := v }` at `Tx r` keeps `r` abstract.
+(`hdl/src/Hdl/Core.wiz`): `{ s with line := v }` at `Tx r` keeps `r` abstract.
 
 **Hover and go to definition.** The field name of an update is recorded as a use of
 the projection `S.f`: a hover shows its type in the updated structure, and go to
@@ -789,3 +846,364 @@ unrelated `calc_e` syntax category in the `language` group is untouched.
 
 The `simp` tactic (stage 6h) is library code written in Wiz, with only one new host
 request (`Tac.rewriteAt`): [13-language/simp.md](13-language/simp.md).
+
+## 13u: imports are a fixed header
+
+A file's dependencies are a **syntactic fact**: `import` is not a command, but a
+header declaration.
+
+```wiz
+-- comments are not commands, so they may sit anywhere in the header
+/- … -/
+import Prelude
+import Logic
+
+def two : Nat := 1 + 1
+```
+
+Three rules, checked by both frontends:
+
+1. **Top level only.** An `import` inside a wrapper command (`private`, `sealed`,
+   `local`, `partial`, `mutual`) is an error that names the container, at the
+   `import`'s position. A term cannot contain an `import` at all (it is a reserved
+   keyword, and the parser says so where it was written).
+2. **Before every other command.** Once a non-import command has been elaborated, a
+   later `import` is the error `imports must precede declarations` (code
+   `import-order`), at the `import`'s position; it is not loaded.
+   **What the header admits:** only comments (`--`, `/- … -/`, including doc
+   comments) and `import`s. Every command ends it, including directives that are not
+   declarations: `set_option`, `syntax`/`notation`/`macro_rules`, `#check`/`#eval`.
+   The header is therefore *contiguous*, which is what makes the dependency scan a
+   scan of the top of the file; and a `set_option` is about printing, so nothing an
+   import means depends on one before it. (A doc comment before an import is trivia,
+   not documentation of it: imports declare no names.)
+3. **No extension can produce one.** `import` was removed from the extensible
+   `command` category: it is `Wiz.Parser.Builtin.importDescr`, a descriptor that
+   `parseCommand` tries before the category. A `syntax` rule cannot mention the token
+   in a `command` quotation — `` `(command| import M) `` is a parse error — and
+   `macro_rules` templates that try it do not parse. A command macro can still
+   *construct* a node of kind `command.import` by hand (`Syntax.mkNode`); that node
+   reaches `Wiz.Elab.Command.elabCommand`, which rejects it with the top-level-import
+   error. Two layers: the grammar cannot make one, and the elaborator refuses one
+   made anyway.
+
+The self-hosted frontend (`selfhost/Parse.wiz`, `selfhost/Frontend.wiz`) agrees: its
+`parseCommandAt` tries the same descriptor (`importDescr`) before the category, its
+`runCommands` carries a header flag (an import after a declaration is the same error),
+its `mutual`/`partial` handler rejects a nested import, and its module loader's
+`modImportsAt` stops at the first command that is not an import instead of scanning the
+whole file for import lines (the loader skips imports in the body, so this is where the
+two frontends would otherwise drift). `selfhost/Tables.wiz` is regenerated.
+
+**`open import M`.** The shorthand for `import M` plus a file-scope `open M`, for when a
+file uses M's names unqualified. It is header-only, like `import`: `open` is not reserved,
+but `import` is, so `command.open`'s `ident` cannot match it, and it is parsed with the
+header (a later one is the same `import-order` error). Its `open` has no enclosing block,
+so it is **file-scoped** and visible in every namespace body in the file. It exposes no
+private name of M (privacy is per module). Two `open import`s that provide the same name
+are ambiguous at the use (`ambiguous-name`), not at the import. `open import M in …` does
+not exist (an import cannot be command-scoped).
+
+**Payoff.** `wiz parse --imports FILE` prints the module names, one per line, in source
+order — parse only, no elaboration, no module lookup, and it stops at the first
+declaration. (Before the header rule, dependencies were found by scanning every line of
+the file, `Module.importsOf`; that line scan remains as the loader's superset, but the
+parser's answer is the authority, and `wiz parse --imports` reads only the header.) That
+fact is what the module graph needs: `loadClosure`/`moduleKeys` can compute the reachable
+set and the cache's input keys from the header, build ordering is the same graph, and the
+namespace/aliasing work of stage 13b/13m can treat "imported by another module" as a
+syntactic predicate rather than a result of elaboration.
+
+Migration: no `.wiz` file in the tree violates the order (0 files; checked with a
+comment-aware scan of every `.wiz`, and the accepted-header tests above). Tests:
+`language` (the header, the three rejections) and `selfhost` (the same header and
+rejections, through the self-hosted module loader).
+
+## 13t: namespaces and `open`
+
+A namespace groups declarations under a dotted prefix, and `open` makes a prefix's names
+available without writing it.
+
+```wiz
+namespace Foo
+namespace Bar
+def x : Unit := ()
+end Bar
+def y : Unit := Bar.x     -- Foo.Bar.x, through the enclosing namespace
+end Foo
+
+#check Foo.Bar.x          -- Foo.Bar.x : Unit
+```
+
+* **Grammar.** `namespace Foo` opens a namespace; `end` (or `end Foo`) closes the
+  innermost one. They are commands of their own (`command.namespace`, `command.end`:
+  `Wiz/Parser/Builtin.lean`), not a `many1` block like `mutual`: a missing `end` is then
+  reported at the line of the `namespace` it belongs to, and a stray `end` at its own
+  line. `open Foo` and `open Foo as Alias` are commands too (`command.open`). `namespace`
+  and `open` are *not reserved*, so both stay usable as names. `end` was already
+  reserved (by `mutual`); its command has precedence 0, below the `mutual` body's
+  precedence 1, so a `mutual … end` still terminates at its own `end`.
+* **Names.** A declaration in `namespace Foo` is `Foo.bar` (nested: `A.B.x`); the
+  namespace is a prefix, *not* a privacy boundary. A qualified name works with no `open`.
+  Inside `namespace Foo`, an unqualified `x` first names `Foo.x`; a qualified `B.x` names
+  `Foo.B.x` if `B.x` names nothing. A type's own name in its fields is rewritten with the
+  prefix (`inductive T where | mk : Unit → T` inside `namespace N` is `N.T`), and a
+  `mutual` block's members refer to each other unqualified.
+* **Scope: block-scoped, from the `open` on.** `open Foo` makes `Foo`'s names visible
+  unqualified in the **enclosing block**: inside a `namespace` body, until its `end`;
+  at file top, where there is no enclosing block, to the end of the file. The enclosing
+  block's opens come back at `end` (`CommandState.nsStack` saves them), so a sibling
+  namespace body needs its own `open`. An `import` does not see its importer's opens,
+  and a module's opens are dropped when it ends (`CommandState.endModule`). An `open`
+  names a namespace that already has declarations: elaboration is single-pass, so `open`
+  normally follows the namespace it opens (and a qualified name needs no `open` at all).
+  `open` makes *names* visible, not notation: `notation` is not scoped by a namespace
+  (13m has `local` for module-scoped grammar).
+* **`open` is not transitive.** `open Foo` brings in exactly the declarations named
+  `Foo.…`: a name `Foo` itself opened from `Bar` is `Bar.x`, so it needs its own
+  `open Bar`; and a module's opens are dropped when the module ends, so an importer never
+  inherits them. The command takes a *namespace*, not a module: a file's declarations are
+  global names as written in it, so `open Math` finds nothing unless `Math.wiz` wraps
+  them in `namespace Math`.
+* **Local names shadow; declarations do not.** A binder, `let`, or pattern variable
+  named `x` shadows an opened `A.x` (locals are looked up first and no ambiguity is
+  reported). A *declaration* does not shadow: the enclosing namespace's `x`, the module's
+  own `x` and an opened `A.x` are all candidates, and two distinct ones are the ambiguity
+  error below.
+* **Ambiguity is an error, not last-wins.** An unqualified name that two `open`s provide
+  (or an `open` and a declaration), with two *different* declared names, is rejected at
+  the use, naming both candidates (`ambiguous-name`):
+
+  ```text
+  'x' is ambiguous: it refers to 'A.x', 'B.x'; qualify it with a namespace
+  ```
+
+  The same declaration found twice (this namespace and an `open` of it) is one candidate.
+  Candidate order is: the enclosing namespace's `x`, the module's own `x`, then each
+  `open`'s `x`; only distinct resulting declarations conflict, so a bare name that
+  resolved before still resolves when no new open competes with it.
+* **`open M as Alias` is a prefix alias, not an open.** It makes `Alias.x` a spelling of
+  `M.x` and opens *nothing* unqualified: after `open A as Al`, `x` is not `A.x`. The
+  distinction is deliberate — an alias is for a long or clashing prefix, an `open` for
+  unqualified use. A qualified name uses the longest matching alias, and the alias is
+  applied before the name is looked up: after `open B as A`, `A.x` is `B.x` even if a
+  namespace `A` exists (the real `A.…` names stay reachable unqualified through
+  `open A`).
+* **`private` stays module-private.** A private declaration is reachable neither through
+  an `open` (an unqualified `x` skips another module's private `M.x`, so the use is
+  unknown) nor through an alias (`Al.x` resolves to `M.x`, and the private check reports
+  `'M.x' is private to module M`). In its own module it works as before — an `open` there
+  does bring the namespace's private names in, since they are usable in that module — and
+  a qualified name needs no `open`.
+* **Errors.** A namespace with no `end` is reported at the `namespace` line
+  (`namespace Foo is not closed: add end (or end Foo)`); `end` with no open namespace,
+  and `end Bar` that does not name the innermost namespace, are errors at the `end`.
+  `open Foo` when nothing is declared as `Foo.…` is an error at the `open`
+  (``unknown namespace 'Foo': there is no declaration `Foo.…` ``), because elaboration
+  is single-pass: the namespace must already have a declaration when the `open` is read.
+* **Self-hosting.** `selfhost/Frontend.wiz` keeps the same state in its `Globals`
+  (the prefix, the opens and aliases, and the open namespaces with the offset of each
+  `namespace`), prefixes declaration names where a command is elaborated, and resolves
+  terms and pattern constructors through `resolveNameV` with the host's order and
+  ambiguity error. The parser table was regenerated with the grammar; the self-hosted
+  frontend compiles the namespace cases in the `selfhost` group.
+
+### 13t.2 Stage 3: the module path is the default namespace
+
+The rule is one line — `CommandState.atModuleStart` sets `namespacePrefix` to
+`Module.nameOf` the module's path (`lib/Scry/CstStore.wiz` is `Scry.CstStore`), and a
+written `__root__.` resets it — but it renames every existing module declaration, so it is
+**guarded**: `CommandState.modulePrefix` is `false` by default, and a run turns it on
+together with `CommandState.legacy`, the stage-0 allowlist (`legacy-names.tsv`, one row
+per declaration that keeps its current absolute name until its migration batch deletes
+the row). With the two set, the default tree is unchanged; a declaration with no row gets
+its module's path. The allowlist lookup is per `(module, written name)` in
+`prefixDeclName`, so `__root__.x` still escapes.
+
+Tests: `namespace` runs `runFrontend` with `modulePrefix := true` (and with and without a
+`legacy` row): module `M`'s `def f` is `M.f`, and a row keeps it `f`.
+
+### 13t.1 `__root__`: the escape to the global scope
+
+`__root__` is Lean's `_root_`: a **leading name segment**, not a variable and not a
+namespace you can declare. It resets the prefix to the empty one, so a file that must keep
+global names (the Prelude, the self-hosted tree) needs one line at the top and one `end`
+at the bottom instead of a marker on every declaration:
+
+```wiz
+namespace __root__
+def f : Nat := 0                -- f, not Scry.CstStore.f
+def A.x : Nat := 0              -- A.x, root-level
+end __root__
+
+def __root__.y : Nat := 0       -- y, even inside a namespace
+namespace __root__.Shared       -- the root-level Shared
+def g : Nat := __root__.y       -- names the global y
+end Shared
+```
+
+`namespace __root__` (nothing after the dot) opens the root for a block; `end` or
+`end __root__` closes it. `__root__.` is only meaningful as the first segment: a
+declaration named exactly `__root__`, or one with `__root__` in the middle
+(`A.__root__.x`), is the error `root-name`, and `__root__` alone is not a term. `open
+__root__.X` opens the root-level `X` (`open __root__` is a no-op: the root is always
+searched). The self-hosted frontend mirrors the leading-segment rule for `namespace`,
+`end`, `open` and unqualified reads.
+
+Tests: `namespace` (a root block; a dotted root namespace; `def __root__.x`; the two
+root-name errors), and `selfhost`'s `(13v)` case.
+
+Tests: `namespace` (nested namespaces; qualified use with no `open`; `open` then
+unqualified use; the exact ambiguity error; `open … as` for qualification; `open … as`
+not opening unqualified; an alias shadowing a real prefix; a local binder shadowing an
+opened name; a private name through an open and through an alias; an `open` across two
+modules and its non-transitivity; **an `open` that ends at its namespace's `end`**, and a
+file-top `open` that reaches the end of the file; missing and stray `end`; `#check`
+showing the qualified name; `mutual` under a namespace), plus two `wiz check` cases (an
+`open` across two modules, and the ambiguity as a command-line error), and the `selfhost`
+group's `(13t)` cases (the same resolution in the self-hosted frontend, including a
+constructor of the matched type and the `end` diagnostics).
+## 13v: namespaces: the compatibility baseline
+
+The namespace model (design: `wiz-notes/namespace-plan.md`) makes a module's path its
+default prefix: `lib/Scry/CstStore.wiz` is module `Scry.CstStore`, so `def lineIndexGo`
+becomes `Scry.CstStore.lineIndexGo`. Stage 0 lands the compatibility baseline, with no
+parser or elaborator change: every declaration that exists today keeps its current
+absolute name until a migration batch deletes its row. This section describes only the
+baseline; the parser, resolver and self-hosted changes are stages 1–4 of the plan.
+
+* `legacy-names.tsv` is generated by `scripts/gen-legacy-names.py` from the six
+  library/tool roots (`lib/`, `scry/src/`, `scry/gen/`, `tower/`, `web/`, `selfhost/`).
+  It has one tab-separated row per declaration: module, today's absolute name, reason
+  class (`module-prefixed`, `first-prefixed`, `leaf-prefixed`, `other-dotted`,
+  `principal`, `bare`), source file, line. Rows are sorted by `(module, name)` and the
+  file is deterministic. Before batch 1 it is **14,353 rows in 216 files** on the
+  train9 tree (14,083 / 211 before the train9 merge; 11,131 / 198 without `selfhost` on
+  the train8 tree); after batch 1 it is **11,150 rows in 203 files** (10,880 / 198
+  before the train9 merge). The merge into train9 added 439 declarations that needed a
+  row and made 169 rows stale; the regenerated file is the same generation, not a
+  hand edit. `__root__.` declarations are not rows: they already have the true-global
+  name they keep.
+* `scripts/check-names.py` reports a declaration whose current name is not under its
+  module prefix — the set the migration will rename. Normal mode reports and exits 0; a
+  `__root__.` declaration is exempt, and a row suppresses the report. `--quiet` is the
+  CI gate: it fails on a declaration with no row (a new name must regenerate the
+  baseline) and on a stale row, and passes on today's tree. `--strict-names` makes
+  every prefix violation an error: **13,173 declarations** before batch 1 (12,487
+  dotted, 686 bare) and **9,970** after it (9,284 dotted, 686 bare) on the train9 tree;
+  the plan's 12,910 → 9,707 (9,436/3,474 → 9,068/639) are the same counts before the
+  train9 merge, whose new declarations add 263 outside-prefix names. That is the size of
+  the rename work, not a gate that is green before stage 6. A malformed row is exit 2.
+* A `namespace __root__` body is explicitly global, like a `__root__.` name: the tools
+  take its declarations out of the allowlist (no row), the collision checker reports
+  them under the name they are written as rather than as migration names, and
+  `end __root__` closes the block. It is the bulk form of the escape, for a file whose
+  declarations must stay root (batch 1 below).
+* The allowlist is an input of what a module elaborates to, so its SHA-256 is part of the
+  cache key. The digest covers the `(module, name, reason)` rows, not the review-only
+  file and line, so moving a declaration's line does not invalidate the cache.
+  `Wiz/LegacyNames.lean` holds the digest; `Cache.moduleKeysAll` mixes it into the fast
+  and strong module keys, and `Frontend.isoKey` into the in-process isolation key.
+  `check-names.py` fails when the constant and the file disagree, so a stale cache
+  cannot hide a name change. `gen-legacy-names.py --update-digest` refreshes it.
+* **Batch 1 (landed)** — `namespace __root__` around `lib/Prelude.wiz` and the twelve
+  `selfhost/*.wiz` files (3,203 declarations, 13 files on this tree; zero renames, zero
+  ledger re-keyings). It deleted their rows: on the train9 tree the allowlist is
+  14,353 → 11,150, the `--strict-names` count 13,173 → 9,970, and the collision
+  checker's migration count 10,221 with 13 baselined groups, 0 unbaselined and 0
+  co-loadable. (Before the train9 merge the same deletion read 14,083 → 10,880,
+  12,910 → 9,707, 10,000 migration and 87 baselined; train9's `egraph-one` collapse
+  removed the 74 `Scry.Egraph`/`Scry.EgraphNative` duplicate rows from the baseline,
+  so 13 is the current truthful baseline, not a regression.) Batch 2 (strip the
+  1,180 module-prefixed declarations) is the next mechanical batch.
+
+CI: add these two lines to the `docs_style` job's run step in
+`.github/workflows/ci.yml` (after the `check-name-collisions.py` lines):
+
+```sh
+python3 scripts/check-names.py --self-test
+python3 scripts/check-names.py --quiet
+```
+## 13w: application operators, sections, and `#eval` through `Repr`
+
+```wiz
+import Prelude
+import Text
+import Deriving
+import Compose
+
+#eval Nat.succ <| 4                       -- 5: `f <| x` is `f x` (infixr 10)
+#eval [1, 2, 3] |> List.length            -- 3: `x |> f` is `f x` (infixl 10)
+
+structure In where
+  x : Nat
+  y : Nat
+structure Out where
+  i : In
+  n : Nat
+def o : Out := Out.mk (In.mk 1 2) 3
+#eval o |>.n                              -- 3: the projection `o.n`
+#eval o |>.i.x                            -- 1: the same as `o.i.x`
+
+#eval List.length (List.map (· + 1) [1, 2, 3])   -- 3: `(· + 1)` is `fun x => x + 1`
+def mul : Nat → Nat → Nat := (· * ·)             -- two holes, two parameters
+#eval mul 3 4                                    -- 12
+
+#eval (Nat.succ ∘ Nat.succ) 0                    -- 2: lib/Compose.wiz
+```
+
+**`<|` and `|>`.** `|>` was already the Prelude's `pipe` (13); `<|` is its
+mirror, `apply` (`f <| x` is `f x`), at `infixr:10` against `infixl:10`, as in
+Lean. Both are at any universe, so proofs compose too (`h |> Eq.symm`), and both
+print back as written (the infix unexpander is the `infixl`/`infixr` declaration).
+
+**`x |>.f`.** A projection through the pipe: `term.pipeProj` is a *trailing* rule,
+`term:11 "|>." ident` (a Prelude `syntax`, not built-in grammar, so the self-hosted
+parser's generated tables are unchanged), and its macro expands to the `term.field`
+node. It is therefore the **same** elaboration as `x.f`: `elabFields`, the same field
+lookup, the same private checks and the same errors, and a dotted path works
+(`x |>.a.b` is `x.a.b`). The surface form is `x |>.f` with no space: the dot is part
+of the `|>.` token, as it is in `x.f`. `x |> .f` is not the projection: there the
+existing `|>` operator sees `.f`, the constructor-dot form, and the space would make
+the two readings differ. The left side is at precedence 11 (so `x + y |>.f` is
+`(x + y).f`) and the result binds at `max`, like a field access; as with `x.f`, an
+application on the left is an argument, so write `(f x) |>.f`. Printed back it is the
+projection (`o.2.1` for this structure), which is the same text `o.f` prints.
+
+**`(· + 1)`.** `·` is `term.sectionHole` (`syntax (name := sectionHole) "·" : term`).
+A parenthesised term whose holes are not inside a nested parenthesis is a section:
+the elaborator replaces each hole by a fresh variable (`section0✝…`, unspellable)
+and checks the body as a lambda, one Π at a time, against the expected type. That
+is what makes `List.map (· + 1) xs` work: the argument's expected `A → B` gives the
+hole its type. `(1 + ·)` is the same, and `(· * ·)` has one parameter per hole.
+Limits: the section must be parenthesised (the parentheses delimit it, as in Lean),
+its expected type must be a function type (`#check (· + 1)` says so), and a hole
+inside a nested `( … )` belongs to that inner section. It is check-mode syntax: a
+section with no function type in view is an error rather than a guessed lambda.
+
+**`Repr` and `#eval`.** `lib/Deriving.wiz` already had `class Repr (A) where
+reprPrec : A → Nat → String` and `Repr.repr a = Repr.reprPrec a 0`; `#eval` now
+uses it. When the elaborated value's type has a `Repr` instance (the wrapper
+`Repr.repr e` elaborates), `#eval` runs that and prints its string; otherwise it
+keeps the old term readback. So `#eval [1, 2, 3]` with `import Deriving` prints
+`[1, 2, 3]` (a hand-written `Repr (List A)` replaced the derived `List.cons …`
+one), while a type without an instance still prints its constructors. `#check`
+and `#print` are unchanged. `Bool` is the one exception: inductive types are anonymous
+`μ`s and `Enum` tags are metadata, so `Repr Bool` and the `Repr` of any other
+two-constructor enum are instances of the *same* class at definitionally equal types,
+and the later one wins (7b); `#eval` therefore keeps `Bool`'s constructor readback
+(`.true`, `.false`), which is the stable spelling a program sees. The `Repr String`
+instance now escapes as the lexer reads (`"a\nb"`, `\x0d` for a carriage return), which
+is what makes printing the `Repr` result directly equal to the old readback of a
+string.
+
+**`∘`.** `lib/Compose.wiz` declares `class Compose (α β γ : Type) where compose :
+(β → γ) → (α → β) → (α → γ)` and registers `infixr:90 " ∘ "`. The instance for
+functions is `Compose.mk (fun g f x => g (f x))`; a type can declare its own, and
+a later instance wins (stage 7b), so the operator is not hard-coded to functions.
+`Compose.assoc`, `Compose.id_left` and `Compose.id_right` (with `id`) hold at
+functions definitionally; `rfl` proves them and `#print axioms` lists none.
+
+Tests: group `language` (`<|`/`|>`, `|>.`, the section forms), `deriving`
+(`#eval` with and without an instance, list/string `Repr`), `std` (`Compose` and
+its laws, a custom instance). Stage 13's earlier letters are 13a–13s.

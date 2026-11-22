@@ -11,8 +11,9 @@ caller reads every module a file can reach up front, by scanning its import line
 visible in a file: importing a module that declares a name the file already has (from
 another module, or declared in the file itself) is an error at that `import`,
 `'b' is declared by both module M.A and module M.B`, whichever order the imports come
-in, and the module is not brought in. Wiz has no namespaces (`Nat.repr` is one global
-name), and the kernel identifies constants by name, so letting the later declaration win
+in, and the module is not brought in. Wiz has no selective import (a `namespace`, 13t,
+only prefixes a declaration's name: `Nat.repr` is still one global name), and the kernel
+identifies constants by name, so letting the later declaration win
 would keep everything checked against the earlier one: a theorem about M.A's `b` would
 then be about M.B's (it proved `Empty`; the regression is the case "two modules declaring
 one name: …" of the group `modules`).
@@ -118,11 +119,21 @@ its own `grail.wiz` is left out). The first line gives the kind: `-- test: check
 default: the messages, as `wiz check` prints them) or `-- test: run` (what `main` prints,
 compiled through C). `-- test: skip REASON` marks an example that the package-wide run
 cannot check (it needs `--trust-native`, or it takes minutes): it is reported as skipped,
-needs no `.expected`, and is not a pass. A pass is a job like any other, keyed by the file (and its
+needs no `.expected`, and is not a pass. A `check` or `run` line may end in
+`timeout SECS` (`-- test: run timeout 900`) for a test that needs more than
+`--test-timeout` gives every test: the larger limit applies to its job and to its
+program. A pass is a job like any other, keyed by the file (and its
 imports), the kind, the toolchain and the expected output, so `grail test` again runs
 nothing; `grail test FILTER` runs the tests whose path contains it, and
-`grail test --update` writes the actual output. Every example is a test
-(`examples/*.expected`). The Lean tests stay in `lake test`.
+`grail test --update` writes the actual output. `grail test --rerun` runs the tests again
+even when a pass is recorded (a flaky test, a program that reads something outside its
+key): the old record is dropped, a pass is recorded again and a failure leaves none, so the
+next plain `grail test` reports what this run saw. Only the tests' own jobs run again;
+their programs' checks, objects and links are reused when up to date. Every example is a
+test (`examples/*.expected`); the `examples` group (`Tests/Groups/GrailExamples.lean`) runs
+them in CI, in three cases over name ranges, so a change to a library that changes what
+an example prints fails the suite rather than only a command a person runs. The Lean
+tests stay in `lake test`.
 
 ## 23g: parallel jobs
 
@@ -136,8 +147,8 @@ dependencies are done (an object's key hashes the C its `c` node wrote); a node 
 output exists is up to date, the rest are jobs in a ready queue. `grail build -j N`
 (default: the cores, at most 4) runs up to `N` jobs at a time, each as a separate process
 (`grail --grail-job …` with the toolchain as flags, or the C compiler) with a time limit
-(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, so a test that
-hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
+(23k; `--timeout SECS`, default 1800; tests `--test-timeout SECS`, default 300, or the larger `timeout SECS` of a
+test's `-- test:` line (23f), so a test that hangs fails instead of hanging the run). A failed job is reported and the jobs that depend
 on it are skipped; the others still run. Each job's output is buffered and printed in the
 graph's order, so `-j 1` and `-j 8` print the same report, and a second build still runs
 no jobs.
@@ -149,6 +160,12 @@ the `.wizr` regions in the same cache layers as the `.wizc` entries: the write c
 searched first, then the `--cache-ro` caches (which are never written), and a missing,
 truncated or mistagged region falls back to the text entries. Since job keys are unchanged,
 a warm region build and a text build produce the same outputs.
+
+`--region-stats` is a toolchain flag too (`Toolchain.regionStats`, hence the same
+`region-stats` setting of `grail.wiz`), so every job receives it through `toFlags` and
+prints one line after its report: `region-stats: hits=… misses=… commands=…`. The counters
+are the job's own process; without `--region-cache` (or for a job that does not elaborate,
+such as a link) they are zero rather than absent.
 
 ## 23h: git dependencies and a lock file
 
@@ -374,6 +391,7 @@ already uses for `grail.lock`):
       (size 1042)
       (tree "…")
       (commands "…")
+      (commit "…")                     ; the release commit; a tag is not a pin
       (toolchain ">=0.1.0 <0.3.0")
       (deps (dep "std" "^0.1") (dep "text" "~1.0")))
     (yanked "1.2.1" "wrong tarball; use 1.2.2")))
@@ -381,9 +399,11 @@ already uses for `grail.lock`):
 
 * `source` is the immutable archive (an `https`, `file://` or plain path URL);
   `sha256` is the SHA-256 of its bytes. `size` is the archive's byte length (R19), `tree`
-  the SHA-256 of its unpacked file tree (R20) and `commands` a digest of the package's
-  declared `Package.command` set (R36); `grail publish` writes all three and a lock v3
-  records them. Older entries have none of them.
+  the SHA-256 of its unpacked file tree (R20), `commands` a digest of the package's
+  declared `Package.command` set (R36) and `commit` the release commit in `repo` (P0);
+  `grail publish` writes them (pass `--commit`) and a lock v3 records the first three.
+  Older entries have none of them. A build uses the locked tree, never `commit` alone:
+  `commit` binds the *source* claim, the tree binds the *content*.
 * `deps` is **authoritative for resolution**; it
   must agree with the published manifest, so a lock records the whole graph and a build
   never re-reads dependency manifests to resolve.
@@ -422,7 +442,7 @@ visible.) The URL is chosen by, in order:
 2. `Package.set "index" "URL"` in `grail.wiz` (or in the machine's
    `grail.local.wiz`, which wins, as for toolchain settings).
 
-The intended deployment is `https://github.com/wiz-pl/grail-index`, but any git URL is
+The intended deployment is `https://github.com/wiz-pl/fate-index`, but any git URL is
 an index, including an organisation's private one. A URL index is cloned once into
 `<cache>/grail/index`; `grail update` fetches and resets it, and `--offline` reads the
 cached clone (and refuses if there is none, or if it is a clone of another URL). The
@@ -459,7 +479,7 @@ the index/integrity fields, flat sorted entries and machine-local overrides:
 (lock
   (version 3)
   (toolchain 0.1.0-dev abcdef0)          -- Wiz.version and the release commit, when known
-  (index "https://github.com/wiz-pl/grail-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
+  (index "https://github.com/wiz-pl/fate-index" "885c4c903032ba188e1c819906ecad6c1912ab2f")
   (dep legacy "https://example.org/legacy.git" v2 "<commit>" "<content>")
   (pkg std 0.1.1 "https://…/std-0.1.1.tar.gz" "<sha256>"
     (size 1042) (tree "<sha256>") (commands "<sha256>")
@@ -555,15 +575,20 @@ v1's 64-bit content hash (accident detection, not cryptographic); registry entri
 the strong path.
 
 **Signed index state (Stage 1).** An index may publish `index/snapshot.sexpr` — every
-`name@version` with its SHA-256 and size, a monotone `(seq)`, an `(updated)` time, the
-signing key's fingerprint `(key)` and its `(expires)` date — signed as
+`name@version` with its SHA-256, size, `tree`, `commit`, **entry digest** and yank
+reason, a monotone `(seq)`, an `(updated)` time, the signing key's fingerprint `(key)`
+and its `(expires)` date — signed as
 `index/snapshot.sexpr.sig` with `ssh-keygen -Y sign -n grail-index`. `grail update
 --require-signature --allowed-signers FILE` verifies the signature offline and writes an
 `(index-signature …)` entry in `grail.lock` with the key, fingerprint, sequence and
 snapshot digest. Later updates re-verify from that pinned key even without the flag, and
 refuse a changed key, a lower `(seq)` (rollback; `--allow-rewind` accepts a deliberate
-rewind), a same-sequence rewrite, an expired key, or an entry whose hash differs from the
-snapshot. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
+rewind), a same-sequence rewrite, an expired key, or an entry whose archive hash, tree,
+commit, entry digest or yank state differs from the snapshot. The **entry digest** is
+SHA-256 over the canonical `(version …)` node, so one signature covers the archive hash,
+size, tree, command digest, commit, toolchain range, modules/prefixes and dependency
+edges; `grail index snapshot` writes it, and an older snapshot without one still verifies
+a minimal entry but refuses an entry that carries those extra claims. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
 `grail index check --require-signature` audits a repository. The `allowed_signers` file
 is a trust root from outside the index: the copy inside a checkout proves nothing. This
 gives authorship for an index state, not freshness: there is no transparency log or
@@ -588,14 +613,17 @@ The snapshot is additive: an index without one is read exactly as before.
 * **A signed index** is verified with `ssh-keygen -Y verify` against an
   `allowed_signers` file passed from outside the index (or the key a `grail.lock`
   already pinned); the snapshot must cover every entry of the index with the same
-  SHA-256, `(seq)` must not go backwards, the key must not change, the same sequence
-  must not be rewritten, and `(expires)` must be in the future.
+  SHA-256, tree, commit, entry digest and yank state, `(seq)` must not go backwards,
+  the key must not change, the same sequence must not be rewritten, and `(expires)`
+  must be in the future.
 * **Not verified:** git `dep` entries keep a 64-bit content hash (accident detection,
   not cryptographic); there are no signed git tags, no transparency log, no gossip, no
   download size cap, and no build sandbox — `grail build` runs the package author's
   Wiz/C code. Expiry and sequence are checked at `update`/`index verify`, not on every
   build. A first use needs an external `--allowed-signers` policy; an index without a
-  snapshot is accepted unless `--require-signature` or a lock pinned one.
+  snapshot is accepted unless `--require-signature` or a lock pinned one. CI and the
+  install docs pass `--require-signature`; `--allow-unsigned` is the explicit escape for
+  a registry without a signed snapshot.
 
 **Cache layout.** `<cache>/grail/downloads/<sha256>` holds the archives
 (content-addressed, re-verified on every use); `<cache>/grail/packages/<sha256>/` the
@@ -603,7 +631,7 @@ unpacked trees (23n), with `.grail/packages/NAME` linked to one; `<cache>/grail/
 the clone of a URL index. `.grail/` is not committed; `grail.lock` is; `grail cache
 path/list/verify` inspects the store.
 
-**Deferred:** a real `wiz-pl/grail-index` with CI naming rules and the first packages;
+**Deferred:** a real `wiz-pl/fate-index` with CI naming rules and the first packages;
 signed index tags (the signed-snapshot form is implemented) and key rotation without a
 re-lock; per-registry index caches and repeatable `--index` overlays; `grail update -p NAME`
 and `--minimal`; a SHA-256 tree hash for git deps (lock v3's `pkg` and override tree
@@ -611,7 +639,7 @@ hashes are implemented); private-index credential settings, binary artifacts, an
 publish (a bot that verifies the artifact before merging). The reader understands the
 `index/@org/name.sexpr` layout, but scopes are not enforced in names or manifests yet.
 
-**The index repository.** The layout of a `grail-index` (the static `index/NAME.sexpr`
+**The index repository.** The layout of a `fate-index` (the static `index/NAME.sexpr`
 files, deterministic `packages/NAME-VERSION.tar.gz` archives, `index.wiz` and the
 generator), the `grail index check` validation (names, versions, semver ranges, archive
 SHA-256s, module-prefix conflicts) and the hosting/signing plan (TUF stages, Sigsum; no

@@ -2,8 +2,9 @@
 #
 # `scripts/fixpoint.sh` builds the self-hosted compiler once with Lean and then compiles
 # the toolchain three times (one C stage per compile), comparing self1.c, self2.c and
-# self3.c byte for byte. It needs about 6 GiB: the self-compiles peak at 5.1-5.4 GiB
-# (stage 2 has reached 5.42 GiB), so a 5 GiB job cap kills it (exit 137). This workflow
+# self3.c byte for byte. It needs about 7 GiB: stage 2's self-compile peaked at 6.3 GiB
+# (docs/bootstrap-chain.md, "Measurements"; earlier runs 5.1-5.4 GiB), so a 5 or 6 GiB
+# job cap can kill it (exit 137). This workflow
 # is opt-in:
 #
 #   * nightly on `master` (the schedule below), and from "Run workflow";
@@ -35,6 +36,8 @@ permissions:
   contents: read
 
 concurrency:
+  # One run at a time and never cancelled: each run checks a different master commit, so
+  # a newer run does not supersede an older one (and the job is too long to lose).
   group: fixpoint
   cancel-in-progress: false
 
@@ -46,13 +49,14 @@ env:
   CACHIX_NAME: badlydrawnwizards
   LAKE_CACHE_DIR: ${{ github.workspace }}/.lake/cache
   # The job's declared memory requirement, checked against MemAvailable before the run
-  # (the self-compiles peak at 5.1-5.4 GiB; 6 GiB is the reservation).
-  WIZ_FIXPOINT_MEM_GIB: "6"
+  # (stage 2's self-compile has peaked at 6.3 GiB; 7 GiB is the reservation).
+  WIZ_FIXPOINT_MEM_GIB: "7"
 
 jobs:
   preflight:
     name: preflight
     runs-on: ubuntu-latest
+    # 5 min: read one repository variable
     timeout-minutes: 5
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -72,13 +76,14 @@ jobs:
           fi
 
   fixpoint:
-    name: fixpoint (self-hosted, 6 GiB)
+    name: fixpoint (self-hosted, 7 GiB)
     needs: preflight
     if: needs.preflight.outputs.run == 'true'
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 240 min: up to four self-compiles at ~5.4 GiB peak
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -91,11 +96,11 @@ jobs:
           avail_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
           echo "MemAvailable: $((avail_kib / 1024)) MiB; the fixpoint declares ${WIZ_FIXPOINT_MEM_GIB} GiB"
           if [ "$avail_kib" -lt "$need_kib" ]; then
-            echo "::error title=not enough memory::the fixpoint needs ${WIZ_FIXPOINT_MEM_GIB} GiB (the self-compiles peak near 5.4 GiB) and this runner has $((avail_kib / 1024)) MiB available"
+            echo "::error title=not enough memory::the fixpoint needs ${WIZ_FIXPOINT_MEM_GIB} GiB (stage 2 has peaked at 6.3 GiB) and this runner has $((avail_kib / 1024)) MiB available"
             exit 1
           fi
       - name: Cache the Lake build
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake
           key: fixpoint-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ hashFiles('lakefile.lean', '**/*.lean', 'selfhost/*.wiz', 'lib/*.wiz') }}
@@ -121,7 +126,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the C files of a failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fixpoint-artifacts
           path: |

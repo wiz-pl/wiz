@@ -89,10 +89,27 @@ lean_object *wiz_unix_listen(lean_object *w) {
   if (lstat(path_addr.sun_path, &st) == 0 && S_ISSOCK(st.st_mode)) unlink(path_addr.sun_path);
   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return io_errno(w);
-  if (bind(fd, (struct sockaddr *)&path_addr, sizeof path_addr) != 0 || listen(fd, 8) != 0) {
+  if (bind(fd, (struct sockaddr *)&path_addr, sizeof path_addr) != 0) {
     int e = errno; close(fd); errno = e; return io_errno(w);
   }
+  /* The infoview socket is a local capability: created under the caller's umask (often
+     022) it would be world-connectable (`bind` makes it 0777 & ~umask). Make it
+     owner-only before it listens, so no other user can ever connect; the execute bits a
+     Unix socket would carry are meaningless, so the final mode is 0600. Doing the chmod
+     before `listen` also closes the race (a bound but not-yet-listening socket refuses
+     connections). */
+  if (chmod(path_addr.sun_path, 0600) != 0 || listen(fd, 8) != 0) {
+    int e = errno; close(fd); unlink(path_addr.sun_path); errno = e; return io_errno(w);
+  }
   return wiz_sock_ok_fd((uint32_t)fd, w);
+}
+
+/* The permission bits of the socket file at the buffered path (for the test that checks
+   the mode): `st_mode & 0777`. */
+lean_object *wiz_unix_mode(lean_object *w) {
+  struct stat st;
+  if (stat(path_addr.sun_path, &st) != 0) return io_errno(w);
+  return wiz_sock_ok_fd((uint32_t)(st.st_mode & 0777), w);
 }
 
 /* Listen on TCP address `addr` (IPv4, host byte order: 0x7f000001 is 127.0.0.1) and

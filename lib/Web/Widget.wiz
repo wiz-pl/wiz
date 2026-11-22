@@ -1,15 +1,16 @@
 import Json
 import Text
-import Web.React
+import Plot
+import Web.Loom
 /-!
 # Web.Widget
 
-Interactive notebook widgets on top of `Web.React`.
+Interactive notebook widgets on top of `Web.Loom`.
 
 A widget is a **descriptor**, not a closure: an id, a kind (`slider`, `button`,
 `text`, `plot`), the DOM event it listens for, its current value, a label, and a
 **callback expression** naming a Wiz definition. `Widget.display` renders the
-descriptors as a `React.VNode` (the same typed VDOM `Web.React` renders and diffs),
+descriptors as a `Loom.VNode` (the same typed VDOM `Web.Loom` renders and diffs),
 wraps the HTML and the descriptors in one JSON document and prefixes it with
 `WIZ_WIDGET:`. The Jupyter kernel (`tools/jupyter/wiz_kernel/widgets.py`) recognises
 that prefix, turns it into a notebook MIME bundle
@@ -19,8 +20,8 @@ The front end never calls Wiz functions: it sends
 `{method: "event", widget_id, event, value}` on the comm. The kernel re-enters this
 session with `#eval Widget.handle (<callback>) <previous bundle> <id> <event> <value>`,
 which renders the old and the new widget list and **diffs** them with
-`React.Rendered.diff`. The patches come back on the same comm, so the browser applies
-them with `web/framework/runtime.js` — the same patch applier the React framework
+`Loom.Rendered.diff`. The patches come back on the same comm, so the browser applies
+them with `web/framework/runtime.js` — the same patch applier the Loom framework
 already uses.
 
 ## Writing a widget cell
@@ -51,18 +52,19 @@ back is quoted as a Wiz string literal, so it cannot become source.
 
 * No client-side state: every event round-trips to the kernel. With the `batch`
   driver that is a `wiz check` of the whole notebook per event.
-* A widget tree has no typed handlers (`React.on`); the VDOM is monomorphic in
+* A widget tree has no typed handlers (`Loom.on`); the VDOM is monomorphic in
   `Widget.NoMsg`. Events travel over the comm because a Jupyter front end cannot
   dispatch a Wiz inductive anyway.
 * **Values reach the callback.** `Widget.Event` carries the browser's `value` and
   `Widget.handle` passes it through, so a slider callback can read the new number.
-  This is deliberately not the `React.on` / `delegate` / `React.App.event` path,
+  This is deliberately not the `Loom.on` / `delegate` / `Loom.App.event` path,
   which passes only `(event, handler index)` and loses a control's value; that
-  index-only dispatch remains a `Web.React` limitation, not a widget one.
-* `plot` carries opaque JSON in `data-wiz-widget-data`; `lib/Plot.wiz` exists, but the
-  widget layer does not consume it yet, so the front end renders a placeholder. A
-  `Widget.plotOf` adapter is proposed, not implemented.
-* Text/range `value` is patched as an **attribute** (React's documented limit): after
+  index-only dispatch remains a `Web.Loom` limitation, not a widget one.
+* `plot` carries opaque JSON in `data-wiz-widget-data`; `Widget.plotOf` is the
+  `lib/Plot.wiz` adapter: it puts the chart's self-contained SVG in the fragment (raw
+  HTML, no front-end renderer) and keeps the summary as the value. A plain `Widget.plot`
+  with opaque data still renders a placeholder.
+* Text/range `value` is patched as an **attribute** (Loom's documented limit): after
   a patch a live input's property may not follow the DOM attribute. Re-mount the
   fragment when that matters.
 * Ids are keys: they must be unique among one display's widgets (the keyed diff
@@ -106,10 +108,20 @@ def Widget.buttonValue (id event value label callback : String) : Widget.Widget 
 def Widget.text (id event value callback : String) : Widget.Widget :=
   Widget.Widget.mk id "text" event value "" callback "" "" "" ""
 
-/-- A plot. `data` is opaque JSON (a `Plot` value once an adapter consumes it; none
-exists yet) carried in `data-wiz-widget-data`; the front end decides how to draw it. -/
+/-- A plot. `data` is opaque JSON carried in `data-wiz-widget-data`; the front end
+decides how to draw it. For a `Plot.Chart` use `Widget.plotOf`, which puts the
+self-contained SVG in the fragment (no front-end renderer needed). -/
 def Widget.plot (id event data callback : String) : Widget.Widget :=
   Widget.Widget.mk id "plot" event "" "plot" callback "" "" "" data
+
+/-- The `lib/Plot.wiz` adapter (the one `docs/libraries.md` calls `Widget.plotOf`): a
+display-only plot widget whose fragment is the chart's self-contained SVG
+(`Plot.html`), with the chart's title and summary for a client that only shows text.
+`id` is the widget key (unique among one display's widgets); there is no callback, so
+no event round trip. `Widget.display [Widget.plotOf "sales" chart]` is the whole
+notebook cell. -/
+def Widget.plotOf (id : String) (c : Plot.Chart) : Widget.Widget :=
+  Widget.Widget.mk id "plot" "" (Plot.summary c) c.title "" "" "" "" (Plot.html c)
 
 /-- The descriptor with a new value. -/
 def Widget.setValue (w : Widget.Widget) (value : String) : Widget.Widget :=
@@ -151,63 +163,72 @@ def Widget.ofJson (j : Json) : Widget.Widget :=
 
 -- ## The VDOM
 
-/-- The message type of a widget tree. Widgets carry no `React.on` handlers (events go
+/-- The message type of a widget tree. Widgets carry no `Loom.on` handlers (events go
 over the comm), so the tree is monomorphic in this empty type. -/
 inductive Widget.NoMsg where
   | noMsg
 
 /-- The attributes every widget root carries: the id, kind and event are what the front
 end reads to build a comm message. -/
-def Widget.attrs (w : Widget.Widget) : List React.Attr :=
-  List.cons (React.attr "class" (String.append "wiz-widget wiz-" w.kind))
-    (List.cons (React.attr "data-wiz-widget" w.id)
-      (List.cons (React.attr "data-wiz-widget-kind" w.kind)
-        (List.cons (React.attr "data-wiz-widget-event" w.event)
-          (List.cons (React.attr "data-wiz-widget-value" w.value) List.nil))))
+def Widget.attrs (w : Widget.Widget) : List Loom.Attr :=
+  List.cons (Loom.attr "class" (String.append "wiz-widget wiz-" w.kind))
+    (List.cons (Loom.attr "data-wiz-widget" w.id)
+      (List.cons (Loom.attr "data-wiz-widget-kind" w.kind)
+        (List.cons (Loom.attr "data-wiz-widget-event" w.event)
+          (List.cons (Loom.attr "data-wiz-widget-value" w.value) List.nil))))
 
 /-- The slider control: a range input and an output that shows its value (the output's
 text is the node a value change patches). -/
-def Widget.sliderNode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.el "span" (Widget.attrs w) [
-    React.el "input" [
-      React.attr "type" "range",
-      React.attr "min" w.min,
-      React.attr "max" w.max,
-      React.attr "step" w.step,
-      React.attr "value" w.value,
-      React.attr "data-wiz-widget-input" w.id
-    ] List.nil,
-    React.el "output" [React.attr "class" "wiz-widget-value"] [React.text w.value]
+def Widget.sliderNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "span" (Widget.attrs w) [
+    Loom.el "input" [
+      Loom.attr "type" "range",
+      Loom.attr "min" w.min,
+      Loom.attr "max" w.max,
+      Loom.attr "step" w.step,
+      Loom.attr "value" w.value,
+      Loom.attr "data-wiz-widget-input" w.id
+    ] [],
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
 /-- The text control: an input and an output with the committed value. -/
-def Widget.textNode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.el "span" (Widget.attrs w) [
-    React.el "input" [
-      React.attr "type" "text",
-      React.attr "value" w.value,
-      React.attr "data-wiz-widget-input" w.id
-    ] List.nil,
-    React.el "output" [React.attr "class" "wiz-widget-value"] [React.text w.value]
+def Widget.textNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "span" (Widget.attrs w) [
+    Loom.el "input" [
+      Loom.attr "type" "text",
+      Loom.attr "value" w.value,
+      Loom.attr "data-wiz-widget-input" w.id
+    ] [],
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
 /-- The button control. -/
-def Widget.buttonNode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.el "button" (List.append (Widget.attrs w) (List.cons (React.attr "type" "button") List.nil))
-    [React.text w.label]
+def Widget.buttonNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "button" (List.append (Widget.attrs w) [(Loom.attr "type" "button")])
+    [Loom.text w.label]
 
-/-- The plot placeholder. The payload is an attribute (opaque JSON for now); the front
-end draws it. -/
-def Widget.plotNode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.el "div" (List.append (Widget.attrs w)
-      (List.cons (React.attr "data-wiz-widget-data" w.data) List.nil)) [
-    React.el "div" [React.attr "class" "wiz-plot-canvas"] List.nil,
-    React.el "output" [React.attr "class" "wiz-widget-value"] [React.text w.value]
+/-- The plot's body: the self-contained SVG a `Plot` adapter put in `data` (raw, it is
+trusted HTML from `lib/Plot.wiz`), else the placeholder the front end may draw. -/
+def Widget.plotBody (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  match String.startsWith w.data "<svg" with
+  | .true => Loom.raw w.data
+  | .false => match String.startsWith w.data "<figure" with
+    | .true => Loom.raw w.data
+    | .false => Loom.el "div" [Loom.attr "class" "wiz-plot-canvas"] []
+
+/-- The plot. An opaque `data` payload is an attribute the front end may draw; an SVG
+or HTML fragment (`Widget.plotOf`) is the plot itself. -/
+def Widget.plotNode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "div" (List.append (Widget.attrs w)
+      [(Loom.attr "data-wiz-widget-data" w.data)]) [
+    Widget.plotBody w,
+    Loom.el "output" [Loom.attr "class" "wiz-widget-value"] [Loom.text w.value]
   ]
 
 /-- One widget as a keyed element (keys are the widget ids, so a reorder is a `move`). -/
-def Widget.vnode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.keyed w.id
+def Widget.vnode (w : Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.keyed w.id
     (match String.eq w.kind "button" with
     | .true => Widget.buttonNode w
     | .false => match String.eq w.kind "text" with
@@ -218,14 +239,14 @@ def Widget.vnode (w : Widget.Widget) : React.VNode Widget.NoMsg :=
 
 /-- The fragment: one `div.wiz-widgets` whose children are the widgets. This is the
 container the browser mounts and the patches are relative to. -/
-def Widget.vnodes (ws : List Widget.Widget) : React.VNode Widget.NoMsg :=
-  React.el "div" [
-    React.attr "class" "wiz-widgets",
-    React.attr "data-wiz-widget-root" ""
+def Widget.vnodes (ws : List Widget.Widget) : Loom.VNode Widget.NoMsg :=
+  Loom.el "div" [
+    Loom.attr "class" "wiz-widgets",
+    Loom.attr "data-wiz-widget-root" ""
   ] (List.map Widget.vnode ws)
 
 /-- The fragment's HTML (server-side render). -/
-def Widget.html (ws : List Widget.Widget) : String := React.toHtml (Widget.vnodes ws)
+def Widget.html (ws : List Widget.Widget) : String := Loom.toHtml (Widget.vnodes ws)
 
 -- ## The display bundle
 
@@ -273,15 +294,15 @@ def Widget.parseDisplay (text : String) : Option Json :=
 def Widget.widgetsOf (text : String) : List Widget.Widget :=
   match Widget.parseDisplay text with
   | .some j => List.map Widget.ofJson (Json.getList j "widgets")
-  | .none => List.nil
+  | .none => []
 
 /-- The patches turning `old` into `new`, as a JSON value (for the same applier the
-React framework uses). -/
+Loom framework uses). -/
 def Widget.patches (old new : List Widget.Widget) : Json :=
-  match Json.parse (React.patchesJson
-      (React.Rendered.diff (React.render (Widget.vnodes old)) (React.render (Widget.vnodes new)))) with
+  match Json.parse (Loom.patchesJson
+      (Loom.Rendered.diff (Loom.render (Widget.vnodes old)) (Loom.render (Widget.vnodes new)))) with
   | .ok j => j
-  | .error _ => Json.mkArr List.nil
+  | .error _ => Json.mkArr []
 
 /-- The bundle for an update: the new HTML and descriptors, the previous HTML (for a
 full re-mount), and the patches from old to new. -/

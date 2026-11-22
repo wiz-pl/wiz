@@ -1,22 +1,32 @@
 import IO
 import Infoview
--- The infoview in a browser (stage 11n): this program, compiled to C and then to
--- WebAssembly (`web/build.sh`), is the page's language client. It is a library
--- (stage 9g): `web/infoview.js` makes the state with `wiz_web_init` and hands every
--- event (text from the server, edits, cursor moves, clicks) to `wiz_web_step`, which
--- answers with `js_send` (bytes to the server) and `js_set_html` (a part of the page)
--- and returns the next state (a Wiz value the page holds). The protocol and the HTML
--- are `lib/Infoview.wiz`, shared with the terminal infoview.
+-- The browser module (stage 11n): this program, compiled to C and then to
+-- WebAssembly (`web/build.sh`), is the documentation's page renderer
+-- (`wiz_doc_init`/`wiz_doc_step`, web/scroll.js) and the Wiz-language infoview
+-- (stage 9g). It is a library: the page makes the state with `wiz_web_init` and hands
+-- every event (text from the server, edits, cursor moves, clicks) to `wiz_web_step`,
+-- which answers with `js_send` (bytes to the server) and `js_set_html` (a part of the
+-- page) and returns the next state (a Wiz value the page holds). The protocol and the
+-- HTML are `lib/Infoview.wiz`, shared with the terminal infoview.
+--
 -- (11s) The same module runs the documentation's pages (`wiz doc`): `wiz_doc_init` and
 -- `wiz_doc_step` (web/scroll.js), whose model is `DocPage` in `lib/Tagged.wiz`, the
 -- tagged text both kinds of page share.
+--
+-- The browser infoview page itself (`web/infoview.html`) no longer loads this module:
+-- it is the playground's JavaScript pane now (`web/playground-lsp.js`, `web/lsp-client.js`
+-- and the Wiz goals runtime), so both pages and both transports share one implementation. The
+-- `wiz_web_*` half below is kept because it is a self-contained Wiz language client
+-- (web/node_test.mjs runs it under Node against a real server) and because the
+-- documentation needs the module anyway; the page's rendering is `lib/Tagged.wiz` and
+-- `lib/Infoview.wiz`, which the terminal infoview also uses.
 
 -- (9f) the JavaScript side, as Emscripten C (EM_JS)
 link_c "js.c"
 extern "js_send" Js.send : String → IO Unit
 extern "js_set_html" Js.setHtml : String → String → IO Unit
 extern "js_go" Js.go : String → IO Unit
--- (react) DOM patches from lib/Web/React.wiz (`React.patchesJson`); the page applies
+-- (loom) DOM patches from lib/Web/Loom.wiz (`Loom.patchesJson`); the page applies
 -- them with web/framework/runtime.js. (No live page uses this yet.)
 extern "js_patch" Js.patch : String → IO Unit
 

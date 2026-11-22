@@ -1,4 +1,6 @@
+import Wiz.Compiler.IR
 import Wiz.Compiler.Inline
+import Wiz.Core.Pretty
 
 /-!
 # Running erased programs
@@ -34,7 +36,7 @@ inductive PapOp where
   | mapK
   /-- `fun j s => coit D step j s`: args `D step`, arity 2 -/
   | coitK
-  /-- `fun j i a => scofix f i a`: args `f`, arity 3 -/
+  /-- `fun i a => scofix f i a`: args `f`, arity 2 -/
   | scofixK
   deriving Repr, Inhabited
 
@@ -51,11 +53,19 @@ inductive RVal where
   /-- a byte buffer (the interpreters' model of `Bytes`, stage 21ag): the runtime
   natives are implemented on it here, since the interpreters cannot call C -/
   | bytes (data : ByteArray)
+  /-- an array (the interpreters' model of `Array`, stage 12a): the runtime natives
+  are implemented on it here, since the interpreters cannot call C -/
+  | arr (data : Array RVal)
   /-- a native operation waiting for arguments -/
   | native (op : Name) (args : Array RVal)
   /-- lazy coinductive values -/
   | coit (D step i s : RVal)
   | scofix (f i a : RVal)
+  /-- a term the interpreter could not evaluate: a declaration with no erased body, or
+  an application of something that is not a function. It carries the reason (instead of
+  panicking and continuing with a default value) so `#eval` reports it and readback
+  never prints a value built from `◾` in its place. -/
+  | stuck (reason : String)
   deriving Inhabited
 
 namespace RVal
@@ -65,7 +75,7 @@ def arity : PapOp → Nat
   | .indK => 5
   | .mapK => 4
   | .coitK => 4
-  | .scofixK => 4
+  | .scofixK => 3
 
 /-- A native number looks like its payload when inspected:
 `0 ↦ ⟨0 ⟨0⟩ ⟨0 ◾ ◾⟩⟩` and `n+1 ↦ ⟨0 ⟨1⟩ ⟨0 n ⟨0 ◾ ◾⟩⟩⟩`. -/
@@ -73,12 +83,27 @@ def natView : Nat → RVal
   | 0 => .obj 0 #[.obj 0 #[], .obj 0 #[.erased, .erased]]
   | n + 1 => .obj 0 #[.obj 1 #[], .obj 0 #[.nat n, .obj 0 #[.erased, .erased]]]
 
+/-- A value's shape, for an error message (the interpreter has no value printer). -/
+def describe : RVal → String
+  | .erased => "◾ (an erased proof or type)"
+  | .obj t _ => s!"the object ⟨{t} …⟩"
+  | .clo .. => "a function"
+  | .fixv .. => "a recursive function"
+  | .pap op _ => s!"a partial application of {repr op}"
+  | .nat n => s!"the number {n}"
+  | .bytes b => s!"a Bytes value of {b.size} bytes"
+  | .arr xs => s!"an Array value of {xs.size} elements"
+  | .native op _ => s!"the native operation `{op}`"
+  | .coit .. | .scofix .. => "a codata value"
+  | .stuck m => m
+
 def field (v : RVal) (i : Nat) : RVal :=
   match v with
   | .obj _ fs => fs[i]?.getD .erased
   | .nat n => match natView n with
     | .obj _ fs => fs[i]?.getD .erased
     | _ => .erased
+  | .stuck m => .stuck m
   | _ => .erased
 
 /-- The number a value denotes, if it is one (native, or a unary payload). -/
@@ -246,11 +271,23 @@ def exportPrefix : String := "export:"
 
 def nativeArity (key : Name) : Nat :=
   match ExternSig.ofKey? key with
+  -- erased parameters (`e`, implicit type arguments) are passed as `◾` and count:
+  -- the erased term keeps the application, and `C.lean`/`Wasm.lean` skip the value
+  -- when they marshal it (`argIndices` below gives the other parameters' positions)
   | some sig => sig.params.length + (if sig.io then 1 else 0)
-  | none => match key with
-    | "nat.zero" => 0
-    | "nat.succ" | "nat.pred" | "nat.log2" => 1
-    | _ => 2
+  | none => match IR.PrimOp.ofKey? key with
+    -- the typed registry (IR.PrimOp) is the source of the arities; this is its only
+    -- string-keyed reader, for the erased natives of the interpreters
+    | some p => p.arity
+    | none => 2
+
+/-- The positions of the parameters that carry a run-time value: `e` (an erased type
+argument, passed as `◾`) is skipped. The positions index the call's argument array,
+which has one value per parameter. -/
+def ExternSig.argIndices (sig : ExternSig) : List Nat :=
+  sig.params.zipIdx.filterMap fun (k, i) => match k with
+    | .k 'e' => none
+    | _ => some i
 
 end RVal
 
@@ -258,9 +295,9 @@ end RVal
 so the nine runtime natives (`runtime/rt_data.inc`, `runtime/rt_sys.inc`) are
 implemented here on a `ByteArray`, as `wiz_nat_show` already is; compiled code still
 calls the runtime. `ofCString`/`toCString` mirror the C boundary exactly: a `String` is
-encoded code point by code point (a surrogate or a value above `U+10FFFF` still takes
-three or four bytes, as `wiz_in_string` writes it), the C string stops at the first NUL,
-and the bytes come back as text by `wiz_out_string`'s lenient UTF-8 decode. -/
+encoded code point by code point (a surrogate or a value above `U+10FFFF` is U+FFFD, as
+`wiz_in_string` writes it), the C string stops at the first NUL, and the bytes come back
+as text by `wiz_out_string`'s UTF-8 decode (invalid sequences are U+FFFD). -/
 namespace BytesModel
 
 def push (b : ByteArray) (x : Nat) : ByteArray := b.push (UInt8.ofNat x)
@@ -283,8 +320,10 @@ def render (b : ByteArray) : String :=
     | x :: xs => toString x ++ ", " ++ go xs
   "[" ++ go (toList b) ++ "]"
 
-/-- One code point as UTF-8, as `wiz_in_string` writes it (no scalar-value check). -/
+/-- One code point as UTF-8, as the encoders write it (`Bytes.scalar`): a surrogate or
+a value above `U+10FFFF` is not a scalar value and becomes U+FFFD. -/
 def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
+  let c := if c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF) then 0xFFFD else c
   if c < 0x80 then b.push (UInt8.ofNat c)
   else if c < 0x800 then
     (b.push (UInt8.ofNat (0xC0 ||| (c >>> 6)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
@@ -296,20 +335,35 @@ def pushCp (b : ByteArray) (c : Nat) : ByteArray :=
       (UInt8.ofNat (0x80 ||| ((c >>> 12) &&& 0x3F)))).push
       (UInt8.ofNat (0x80 ||| ((c >>> 6) &&& 0x3F)))).push (UInt8.ofNat (0x80 ||| (c &&& 0x3F)))
 
-/-- The string's UTF-8 bytes up to the first NUL (a C string). -/
-def ofCString (s : String) : ByteArray :=
-  ByteArray.mk (((s.toList.foldl (fun (b : ByteArray) (c : Char) => pushCp b c.toNat) ByteArray.empty).toList.takeWhile
-    (· != 0)).toArray)
+/-- The string's UTF-8 bytes up to the first NUL (a C string). It walks the Wiz
+`String` value's list of `Char`s itself: a Lean `String` cannot hold a non-scalar
+code point (`Char.ofNat` maps a surrogate to NUL), and the runtime encodes such a
+character as U+FFFD, not as the end of the string. -/
+partial def ofCharsList (l : RVal) (b : ByteArray) (fuel : Nat) : Option ByteArray := do
+  if fuel == 0 then return b
+  if RVal.tagOf l == 0 then return b
+  let c ← ((l.field 0).field 0).toNat?
+  if c == 0 then return b
+  ofCharsList (l.field 1) (pushCp b c) (fuel - 1)
+
+/-- The bytes of a Wiz `String` value (a `String.mk (List Char)`) up to the first NUL. -/
+def ofCString (v : RVal) : Option ByteArray := ofCharsList (v.field 0) ByteArray.empty 1000000
 
 /-- The code point `cp` with the continuation bytes `j … len - 1` of a UTF-8
-sequence folded in, as `wiz_out_string` reads them (a helper of `decodeFrom`). -/
-partial def decodeCont (b : ByteArray) (i len j cp : Nat) : Nat :=
-  if j < len && i + j < b.size then
-    decodeCont b i len (j + 1) ((cp <<< 6) ||| ((b.get! (i + j)).toNat &&& 0x3F))
-  else cp
+sequence folded in (a helper of `decodeFrom`); `none` if one of them is not
+`10xxxxxx`. -/
+partial def decodeCont (b : ByteArray) (i len j cp : Nat) : Option Nat :=
+  if j >= len then some cp
+  else if h : i + j < b.size then
+    let x := (b[i + j]).toNat
+    if x < 0x80 || x > 0xBF then none
+    else decodeCont b i len (j + 1) ((cp <<< 6) ||| (x &&& 0x3F))
+  else none
 
-/-- The bytes from offset `i` decoded as `wiz_out_string` decodes UTF-8 (the sequence
-length comes from the leading byte; continuation bytes are not checked). -/
+/-- The bytes from offset `i` decoded as the C-string decoders read UTF-8: the length
+comes from the lead byte's top bits; an invalid sequence (a missing or malformed
+continuation, an overlong form, a surrogate, above `U+10FFFF`, or a byte that is not a
+lead) is U+FFFD and the scan resumes after the bytes the lead claimed. -/
 partial def decodeFrom (b : ByteArray) (i : Nat) (acc : String) : String :=
   if h : i < b.size then
     let c := (b[i]).toNat
@@ -317,8 +371,14 @@ partial def decodeFrom (b : ByteArray) (i : Nat) (acc : String) : String :=
       if c < 0x80 then (c, 1)
       else if c >>> 5 == 6 then (c &&& 0x1F, 2)
       else if c >>> 4 == 14 then (c &&& 0x0F, 3)
-      else (c &&& 0x07, 4)
-    decodeFrom b (i + len) (acc.push (Char.ofNat (decodeCont b i len 1 cp)))
+      else if c >>> 3 == 30 then (c &&& 0x07, 4)
+      else (0xFFFD, 1)
+    let cp := match decodeCont b i len 1 cp with
+      | some x => x
+      | none => 0xFFFD
+    let cp := if (len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)
+        || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF then 0xFFFD else cp
+    decodeFrom b (i + len) (acc.push (Char.ofNat cp))
   else acc
 
 /-- The bytes up to the first NUL, decoded as text. -/
@@ -326,6 +386,23 @@ def toCString (b : ByteArray) : String :=
   decodeFrom (ByteArray.mk ((b.toList.takeWhile (· != 0)).toArray)) 0 ""
 
 end BytesModel
+
+/-! The interpreters' model of `Array` (stage 12a). Compiled code's `Array` is a native
+buffer updated in place when it is unique (`runtime/rt_data.inc`, `wiz_array_*`); here it
+is an immutable Lean array of interpreter values, so `push` and `set` copy. The
+observable semantics is the same — Wiz has no pointer equality and every operation is
+functional — and the `natives` group compares the two. Out-of-range indices behave as
+in the runtime: `getD` gives the default and `set` changes nothing. -/
+namespace ArrayModel
+
+/-- The element at `i`, or `d` when `i` is out of range. -/
+def getD (a : Array RVal) (i : Nat) (d : RVal) : RVal := a[i]?.getD d
+
+/-- `a` with `i` replaced by `x` (unchanged when `i` is out of range). -/
+def set (a : Array RVal) (i : Nat) (x : RVal) : Array RVal :=
+  if i < a.size then a.set! i x else a
+
+end ArrayModel
 
 /-- The characters of a Wiz `String` value (`String.mk (List Char)`, the form
 `wiz_nat_show` builds), for a `Bytes` native that takes text. Defined here rather than
@@ -344,15 +421,14 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   let bs (i : Nat) : Option ByteArray := match args[i]? with
     | some (.bytes b) => some b
     | _ => none
-  let str (i : Nat) : Option String := match args[i]? with
-    | some v => stringValue? v
-    | none => none
   match (RVal.ExternSig.ofKey? op).map (·.cname) with
   | some "wiz_bytes_empty" => some (.bytes ByteArray.empty)
   | some "wiz_bytes_push" => (bs 0).map fun b => .bytes (BytesModel.push b (num 1))
   | some "wiz_bytes_size" => (bs 0).map fun b => .nat b.size
   | some "wiz_bytes_get" => (bs 0).map fun b => .nat (BytesModel.get b (num 1))
-  | some "wiz_bytes_of_string" => (str 0).map fun s => .bytes (BytesModel.ofCString s)
+  | some "wiz_bytes_of_string" => match args[0]? with
+    | some v => (BytesModel.ofCString v).map fun b => .bytes b
+    | none => none
   | some "wiz_bytes_to_string" => (bs 0).map fun b =>
       -- (the string a Wiz `String` is: `String.mk (List Char)`, as `wiz_nat_show` builds)
       let chars := (BytesModel.toCString b).toList.foldr
@@ -365,6 +441,29 @@ def bytesNative? (op : Name) (args : Array RVal) (num : Nat → Nat) : Option RV
   | some "wiz_bytes_eq" => (bs 0).map fun b => match bs 1 with
     | some c => .obj (if b == c then 1 else 0) #[]
     | none => .erased
+  | _ => none
+
+/-- The `Array` native operations (stage 12a), by the C name the runtime exports.
+`none` for every other native, and for an operation whose array argument is not what
+the compiler passes. The call's arguments include one `◾` per erased type parameter, so
+the handler indexes them through `ExternSig.argIndices`. -/
+def arrayNative? (op : Name) (args : Array RVal) : Option RVal :=
+  let ix := match RVal.ExternSig.ofKey? op with
+    | some sig => sig.argIndices
+    | none => []
+  let arg (j : Nat) : RVal := match ix[j]? with
+    | some i => (args[i]?).getD .erased
+    | none => .erased
+  let natArg (j : Nat) : Nat := (arg j).toNat?.getD 0
+  let as : Option (Array RVal) := match arg 0 with
+    | .arr a => some a
+    | _ => none
+  match (RVal.ExternSig.ofKey? op).map (·.cname) with
+  | some "wiz_array_empty" => some (.arr #[])
+  | some "wiz_array_push" => as.map fun a => .arr (a.push (arg 1))
+  | some "wiz_array_size" => as.map fun a => .nat a.size
+  | some "wiz_array_get" => as.map fun a => ArrayModel.getD a (natArg 1) (arg 2)
+  | some "wiz_array_set" => as.map fun a => .arr (ArrayModel.set a (natArg 1) (arg 2))
   | _ => none
 
 /-- Erased global definitions, by name. -/
@@ -386,7 +485,11 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
       | some v => v
       | none => if RVal.nativeArity op == 0 then .nat 0 else .native op #[]
     | some t => run code [] t
-    | none => panic! s!"no code for {n}"
+    | none =>
+      -- a declaration with no erased body (an axiom, or a global that is not in the
+      -- compiled code): there is no value to compute. This used to `panic!`, which
+      -- returns a default value here, so `#eval` went on with a value built from `◾`.
+      .stuck s!"no code for `{n}` (it is a declaration with no erased body, such as an axiom)"
   | .lam _ b => .clo env b
   | .app f a => apply code (run code env f) (run code env a)
   | .letE _ v b => run code (run code env v :: env) b
@@ -394,6 +497,7 @@ partial def run (code : Code) (env : List RVal) : ETerm → RVal
   | .proj i t => (run code env t).field i
   | .case s bs => match run code env s with
     | .obj t _ => run code env (bs[t]?.getD (.prim .unreachable #[]))
+    | .stuck m => .stuck m
     | _ => panic! "case on a non-object"
   | .fix _ b => .fixv env b
   | .prim op as => runPrim code op (as.map (run code env))
@@ -413,7 +517,11 @@ partial def apply (code : Code) (f a : RVal) : RVal :=
   | .native op args =>
     let args := args.push a
     if args.size < RVal.nativeArity op then .native op args else fireNative op args
-  | _ => .erased
+  -- (a failure in the function position is the failure to report, not a new one)
+  | .stuck m => .stuck m
+  -- applying something that is not a function is a runtime type error; it used to
+  -- answer `◾`, which the caller then used as if it were a value
+  | v => .stuck s!"the interpreter cannot apply {RVal.describe v} to an argument: it is not a function"
 
 /-- Native arithmetic. `nat.beq` returns a tag of the prelude's `Bool` (`false`, `true`). -/
 partial def fireNative (op : Name) (args : Array RVal) : RVal :=
@@ -432,7 +540,9 @@ partial def fireNative (op : Name) (args : Array RVal) : RVal :=
     .obj 0 #[chars]
   | _ => match bytesNative? op args n with
     | some v => v
-    | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
+    | none => match arrayNative? op args with
+      | some v => v
+      | none => panic! s!"{op}: foreign functions only run in compiled code (wiz run)"
 
 partial def applyN (code : Code) (f : RVal) (as : List RVal) : RVal := as.foldl (apply code) f
 
@@ -441,7 +551,7 @@ partial def firePap (code : Code) : PapOp → Array RVal → RVal
   | .indK, #[D, m, j, k, h] => ind code D m (apply code j h) (apply code k h)
   | .mapK, #[f, j, k, h] => applyN code f [apply code j h, apply code k h]
   | .coitK, #[D, step, j, s] => .coit D step j s
-  | .scofixK, #[f, _, i, a] => .scofix f i a
+  | .scofixK, #[f, i, a] => .scofix f i a
   | _, _ => panic! "bad partial application"
 
 /-- **Exercise 5.3a.** `ind D m i x = m i u (hyps D u)` with the payload `u = unpack D x`,
@@ -549,9 +659,12 @@ strings of the registered `nat` and `string` types print as literals. -/
 partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy R) (v : RVal) : Term R :=
   let readback := readback g builtins
   match whnf ty, v with
+  -- a value the interpreter could not produce prints its reason, not a value built
+  -- from `◾` (the type tells nothing about a stuck term)
+  | _, .stuck m => .const s!"<error: {m}>" []
   | .mu _ _ _ _ _ hint _ , v =>
     -- (the same test as erasure's: a type shaped like `Nat` is a number, R3)
-    if isNatTy { g with builtins := builtins } ty then
+    if isNatTy (g.setBuiltins builtins) ty then
       match v.toNat? with
       | some n => .const (toString n) []
       | none => readbackData ty v
@@ -568,6 +681,18 @@ partial def readback (g : Globals R) (builtins : List (Name × Name)) (ty : VTy 
     else readbackData ty v
   | .neutral (.global "Bytes" _) sp, .bytes b =>
     if sp.isEmpty then .const (BytesModel.render b) [] else readbackData ty v
+  | .neutral (.global "Array" _) sp, .arr xs =>
+    -- (`.`-prefixed constructors do not elaborate inside `some (…)`: there the expected
+    -- type is still a metavariable, so the constructor is written in full)
+    let elem : Option (Val R) := match sp[0]? with
+      | some (Elim.app A) => some A
+      | _ => none
+    let render (x : RVal) : String := match elem with
+      | some A => (readback A x).pretty [] (some g)
+      | none => match x.toNat? with
+        | some n => toString n
+        | none => "_"
+    .const ("[" ++ ", ".intercalate (xs.toList.map render) ++ "]") []
   | .sigma _ _ A B _, v =>
     -- the last field of a structure is unboxed (22i): `v` is the field itself
     if unboxedSigma g 1000000 ty then
@@ -592,12 +717,12 @@ where
     | .mu l I D i _ hint prop =>
       -- a native value (stage 22d), printed as a number: the model's object around it
       let _ := hint
-      let v := match v, reprOfTy? { g with builtins := builtins } ty with
+      let v := match v, reprOfTy? (g.setBuiltins builtins) ty with
         | .nat n, some ri => RVal.obj ri.tag ((List.range ri.nfields).toArray.map fun k =>
             if k == ri.r then .nat n else .erased)
         | v, _ => v
       let v := match v with
-        | .nat n => if isNatTy { g with builtins := builtins } ty then RVal.natView n else unflat D v
+        | .nat n => if isNatTy (g.setBuiltins builtins) ty then RVal.natView n else unflat D v
         | v => unflat D v
       .con (readback g builtins (vInterp g l I D (muFamily l I D prop) i prop) v)
     | _ => .tt
@@ -679,9 +804,9 @@ def compileReachableE (g : Globals R) (builtins : List (Name × Name)) (roots : 
   -- the conversions are foreign functions
   let isExtern (f : Name) := builtins.any fun (k, x) => x == f && k.startsWith "extern:"
   let g := if externImpls then g else
-    { g with builtins := g.builtins.filter fun (k, _) => match ReprInfo.parse? k with
+    g.setBuiltins (g.builtins.filter fun (k, _) => match ReprInfo.parse? k with
       | some (_, ri) => !isExtern ri.mkImpl && !isExtern ri.getImpl
-      | none => true }
+      | none => true)
   -- `attribute [inline]` (22i): the erased bodies of the inline definitions
   let mut inlines : Std.HashMap Name ETerm := {}
   for (k, f) in g.builtins do

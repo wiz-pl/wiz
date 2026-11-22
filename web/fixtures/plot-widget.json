@@ -1,0 +1,12 @@
+{
+  "schema": "wiz.widget/1",
+  "kind": "plot",
+  "mimeType": "image/svg+xml",
+  "title": "Sales",
+  "summary": "plot: Sales (1 series, 320×240)",
+  "width": 320,
+  "height": 240,
+  "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"240\" viewBox=\"0 0 320 240\" role=\"img\" aria-label=\"Sales\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"240\" fill=\"#ffffff\"/><polyline points=\"64,32 200,120 300,208\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"2\"/><text x=\"160\" y=\"20\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#111\">Sales</text></svg>",
+  "html": "<figure class=\"wiz-plot\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"240\" viewBox=\"0 0 320 240\" role=\"img\" aria-label=\"Sales\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"240\" fill=\"#ffffff\"/><polyline points=\"64,32 200,120 300,208\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"2\"/><text x=\"160\" y=\"20\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#111\">Sales</text></svg><figcaption>Sales</figcaption></figure>",
+  "count": 1
+}

@@ -1,0 +1,102 @@
+import Scry.NativeLink
+import Sys
+import Text
+import Scry.Wil
+import Scry.RuleTaint
+import Scry.Interproc
+import Scry.CsCmd
+/-!
+# cs-trace: one function's lowering and taint facts
+
+A measurement tool, not a driver. `scry cs PATH` reports the tree's counts; this prints
+**one function's** lowered Wil, the source/sink facts the rule pack placed in it, the
+tainted `(point, register)` rows the engine derived, and the alerts. It answers the
+question a zero-finding run asks: "did the source become a `src` fact, did the sink
+become a `sink` fact, and which definition reached it?"
+
+    cs-trace PATH NEEDLE [PACK.scry]
+
+`NEEDLE` is a substring of the lowered function name (`PartnerBasicAuthMiddleware`,
+`SchemeInboundReceiver.ReceiveAsync`, …). `PATH` is anything `scry cs` accepts. The
+points are printed with their source location through the same origin map the driver
+uses.
+-/
+
+def Scry.traceSay (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def Scry.traceContains (hay needle : String) : Bool := String.contains hay needle
+
+def Scry.traceLoc (m : Scry.OriginMap) (fn : String) (p : Nat) : String :=
+  Scry.locationText m fn p
+
+def Scry.tracePairs (m : Scry.OriginMap) (fn : String) (ps : List (Nat × Nat)) : List String :=
+  List.map (fun p => Scry.traceLoc m fn p.1 ++ "  var " ++ Nat.repr p.2) ps
+
+def Scry.traceSinks (m : Scry.OriginMap) (fn : String) (ss : List Scry.RuleSinkFact) :
+    List String :=
+  List.map (fun s => Scry.traceLoc m fn s.node ++ "  arg " ++ Nat.repr s.arg
+    ++ "  var " ++ Nat.repr s.var ++ "  " ++ s.name ++ "  " ++ s.rule) ss
+
+def Scry.traceFindings (fs : List Scry.RuleFinding) : List String :=
+  List.map (fun f => f.rule ++ "  " ++ f.name ++ "  arg " ++ Nat.repr f.arg
+    ++ "  sink " ++ Nat.repr f.sink) fs
+
+def Scry.traceOne (m : Scry.OriginMap) (r : Scry.FuncResult) : EIO Unit := do
+  Scry.traceSay ("== " ++ r.fn.name);
+  Scry.traceSay "lowered:";
+  Scry.traceSay (Scry.Cs.funcText r.fn);
+  let srcs := Scry.tracePairs m r.fn.name r.plan.sources;
+  Scry.traceSay ("sources " ++ Nat.repr (List.length srcs));
+  Scry.traceSay (String.intercalate "\n" srcs);
+  let prs : List (Nat × Nat) := List.map (fun row =>
+    (Scry.rtRowNat row 0, Scry.rtRowNat row 1)) (Scry.rtRows r.edb Scry.rtParam);
+  let pss := Scry.tracePairs m r.fn.name prs;
+  Scry.traceSay ("entry parameters " ++ Nat.repr (List.length pss));
+  Scry.traceSay (String.intercalate "\n" pss);
+  let snks := Scry.traceSinks m r.fn.name r.plan.sinks;
+  Scry.traceSay ("sinks " ++ Nat.repr (List.length snks));
+  Scry.traceSay (String.intercalate "\n" snks);
+  let ts := Scry.tracePairs m r.fn.name (Scry.resultTaint r);
+  Scry.traceSay ("tainted " ++ Nat.repr (List.length ts));
+  Scry.traceSay (String.intercalate "\n" ts);
+  let al := Scry.tracePairs m r.fn.name (Scry.resultAlerts r);
+  Scry.traceSay ("alerts " ++ Nat.repr (List.length al));
+  Scry.traceSay (String.intercalate "\n" al);
+  let fs := Scry.traceFindings (Scry.resultFindings r);
+  Scry.traceSay ("findings " ++ Nat.repr (List.length fs));
+  Scry.traceSay (String.intercalate "\n" fs)
+
+-- `traceOne` is an effectful fold; keep the recursion explicit so the tool builds on the
+-- same `EIO` as the driver.
+partial def Scry.traceOneP (rs : List Scry.FuncResult) (m : Scry.OriginMap) : EIO Unit :=
+  match rs with
+  | .nil => EIO.pure ()
+  | .cons r rest => do
+    Scry.traceOne m r;
+    Scry.traceOneP rest m
+
+def Scry.traceRun (args : List String) : EIO Unit :=
+  match args with
+  | .cons path (.cons needle rest) => do
+    target ← Scry.Cs.discover path;
+    results ← Scry.Cs.analyseAll target.walk.files;
+    let funcs := List.concat (List.map (fun r => r.funcs) results);
+    let origins := Scry.Cs.originMapOf results;
+    let packArg : Option String := match rest with
+      | .cons p _ => .some p
+      | .nil => .none;
+    found ← Scry.Cs.loadPack packArg;
+    match found with
+    | .none => Scry.traceSay "error: no rule pack found"
+    | .some (packPath, pack) => do
+      Scry.traceSay ("# pack " ++ packPath ++ " (" ++ Nat.repr (List.length pack.rules) ++ " rules)");
+      let prog := Scry.Cs.resolveCalls (Wil.program funcs);
+      let pr := Scry.analyzeC prog pack;
+      let hits := List.filter (fun r => Scry.traceContains r.fn.name needle) pr.results;
+      match hits with
+      | .nil => Scry.traceSay ("no function name contains: " ++ needle)
+      | _ => Scry.traceOneP hits origins
+  | _ => Scry.traceSay
+      "usage: cs-trace PATH NEEDLE [PACK.scry]   (PATH as for `scry cs`)"
+
+def main : IO Unit := EIO.toIO (IO.bind IO.args Scry.traceRun)

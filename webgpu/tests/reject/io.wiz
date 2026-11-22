@@ -1,0 +1,3 @@
+-- expect: IO
+def g (x : U32) : IO U32 := x
+def f (i : Nat) (a : Array U32) : U32 := g (Array.getD a i (U32.ofNat 0))

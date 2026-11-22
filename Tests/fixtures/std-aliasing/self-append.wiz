@@ -1,0 +1,11 @@
+import Std
+
+-- Negative case for the unique `Str.append` fast path: `a == b` must take the
+-- copying path. Even when the receiver is unique, growing it in place and then
+-- copying its own (possibly moved) bytes would read freed memory; the observable
+-- result is the concatenation, and the original still reads back as "abc".
+def main : IO Unit := do
+  let s := Str.ofString "abc";
+  let t := Str.append s s;
+  IO.println (Str.toString t);
+  IO.println (Str.toString s)

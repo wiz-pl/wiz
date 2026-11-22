@@ -27,6 +27,8 @@ Wiz/Core/Term.lean	tick	implemented_by	opaque over tickImpl: decrements this rea
 Wiz/Core/Term.lean	tickImpl	unsafe,unsafeBaseIO	mutates only the counter of the budget it is given (owned by one Budget.run); never_extract/noinline keep each tick
 Wiz/Core/Value.lean	memoThunk	implemented_by	opaque over memoThunkImpl: a Thunk whose value is f (); memoisation only saves recomputation
 Wiz/Core/Value.lean	memoThunkImpl	unsafe,unsafeBaseIO	the cell is owned by one thunk and f is pure over persistent Globals, so forcing it twice gives the same value
+Wiz/Elab/Command.lean	traceGuessesOn	implemented_by	opaque over traceGuessesOnImpl: gates only the --trace-guess-fallback dbgTrace; never what is accepted, rechecked or cached in a run without the flag
+Wiz/Elab/Command.lean	traceGuessesOnImpl	unsafe,unsafeBaseIO	reads a process-wide flag set once before elaboration (false without --trace-guess-fallback); the name argument only prevents closed-term extraction
 Wiz/Frontend/Frontend.lean	isoGet	implemented_by	opaque over isoGetImpl: a hit is what elaborating again gives (the key determines the module's elaboration), so runFrontend stays a function of its arguments
 Wiz/Frontend/Frontend.lean	isoGetImpl	unsafe,unsafeBaseIO	reads the per-process isolation memo (per rig), keyed by isoKey, which hashes everything a module's elaboration depends on
 Wiz/Frontend/Frontend.lean	isoPut	implemented_by	opaque over isoPutImpl: returns v unchanged; the write only fills the memo
@@ -39,6 +41,7 @@ Wiz/Socket.lean	closeRaw	extern	c/sockets.c: close and unlink the socket path se
 Wiz/Socket.lean	connectRaw	extern	c/sockets.c connect(2) to the buffered path: IO; handles come back through wiz_sock_ok_handles
 Wiz/Socket.lean	exitOnPanicRaw	extern	c/sockets.c: sets the process-wide exit-on-panic flag, so a panic fails the process instead of returning a default; makes failures louder, never hides one
 Wiz/Socket.lean	listenRaw	extern	c/sockets.c bind/listen on the buffered path: IO; the descriptor comes back through wiz_sock_ok_fd
+Wiz/Socket.lean	modeRaw	extern	c/sockets.c stat(2) of the buffered socket path: IO; returns only st_mode & 0777 through wiz_sock_ok_fd, read by the mode test
 Wiz/Socket.lean	pair	extern	c/sockets.c socketpair(2): IO; handles come back through wiz_sock_ok_pair
 Wiz/Socket.lean	pathClear	extern	c/sockets.c: clears the C path buffer; IO, used only inside setPath
 Wiz/Socket.lean	pathPush	extern	c/sockets.c: appends one byte to the C path buffer; IO, used only inside setPath

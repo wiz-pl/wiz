@@ -130,7 +130,12 @@ def checkDiverges (input mode : String) (secs : Nat := 3) : IO Unit := do
   unless out.exitCode == 124 do
     throw (IO.userError s!"expected a timeout, got exit code {out.exitCode}: {out.stderr.take 1000}")
 
-def matchPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n\ndef pred (n : Nat) : Nat := match n with\n  | .zero => .zero\n  | .succ m => m\n\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n\ndef head {A : Type} {n : Nat} : Vec A (.succ n) → A\n  | .cons x _ => x\n\ndef map {A B : Type} (f : A → B) {n : Nat} : Vec A n → Vec B n\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (map xs)\n\n"
+/-- The `match` prelude. `head` and `map` write `{0 n}`: rule (b) (the language decision
+of 2026-11-16) makes a bare `{n : Nat}` index ω, and a recursive call that passes the
+`{0 n}` cons field to it is a quantity error at the binder. This is the migration user
+code needs (#397); `Tests.Groups.Match` pins the bare form's error, so the workaround here
+is not silent. -/
+def matchPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ninductive Vec (A : Type) : Nat → Type where\n  | nil : Vec A .zero\n  | cons {0 n : Nat} (x : A) (xs : Vec A n) : Vec A (.succ n)\n\ndef pred (n : Nat) : Nat := match n with\n  | .zero => .zero\n  | .succ m => m\n\ndef add : Nat → Nat → Nat\n  | .zero, n => n\n  | .succ m, n => .succ (add m n)\n\ndef head {A : Type} {0 n : Nat} : Vec A (.succ n) → A\n  | .cons x _ => x\n\ndef map {A B : Type} (f : A → B) {0 n : Nat} : Vec A n → Vec B n\n  | .nil => .nil\n  | .cons x xs => .cons (f x) (map xs)\n\n"
 
 def streamPrelude : String := "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ncoinductive Stream (A : Type) where\n  head : A\n  tail : Stream A\n\ndef nats (n : Nat) : Stream Nat\n  | .head => n\n  | .tail => nats (.succ n)\n\n\ndef repeat {A : Type} (a : A) : Stream A\n  | .head => a\n  | .tail => repeat a\n\n"
 
@@ -361,6 +366,14 @@ def twice : IO Unit := IO.bind hello (fun _ => hello)
 def main : IO Unit := IO.bind twice (fun _ => twice)
 "
 
+/-- Report a `Build.runGlobal` failure: skip (as "no toolchain") only when the *build*
+could not find the C toolchain; a program that ran and failed is the case's failure, with
+its exit code and stderr. Never match the program's stderr: a program may print "No such
+file or directory" itself, and that is then a failing test, not a missing toolchain. `what`
+prefixes the failure (`"(llvm) "`). -/
+def failRun (e : Build.RunError) (what : String := "") : IO Unit :=
+  if e.isToolchain then skip "no toolchain" else throw (IO.userError (what ++ e.message))
+
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
 def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
@@ -370,9 +383,7 @@ def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat 
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (split := split) with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- (15f) Build `main` with the C compiler's optimiser off (`-O0`: it does no tail calls of
 its own) and run it on a 1 MB stack (`WIZ_STACK_MB`): deep recursion overflows it, a loop
@@ -392,8 +403,7 @@ def cRunSmallStack (src : String) (expected : String) (llvm : Bool := false) : I
     else Build.compileC tc (C.program decls false (Build.extraC s)) exe
   match built with
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if Build.missingToolchain tc e then skip "no toolchain" else throw (IO.userError e)
   | .ok () =>
     let out ← IO.Process.output { cmd := exe.toString, env := #[("WIZ_STACK_MB", some "1")] }
     unless out.exitCode == 0 do throw (IO.userError s!"the program failed ({out.exitCode}): {out.stderr.take 500}")
@@ -417,7 +427,7 @@ def zeroFieldDecls : String :=
 /-- Build `main : IO _` with the C backend (and the `IO` library), run it, and hand its
 output to `k`. -/
 def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit := do
+    (cflags : List String := []) (split : Nat := 0) (timeout : Nat := 120) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
   let ioLib ← IO.FS.readFile "lib/IO.wiz"
   let effLib ← IO.FS.readFile "lib/Eff.wiz"
@@ -438,16 +448,14 @@ def ioRunWith (src : String) (k : String → IO Unit) (args : Array String := #[
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
   let tc ← toolchain
-  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) (args := args) with
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some timeout) (args := args) (split := split) with
   | .ok v => k v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build `main : IO _` with the C backend (and the `IO` library) and compare its output. -/
 def ioRun (src : String) (expected : String) (args : Array String := #[]) (llvm : Bool := false)
-    (cflags : List String := []) : IO Unit :=
-  ioRunWith src (checkEq expected ·) args llvm cflags
+    (cflags : List String := []) (split : Nat := 0) : IO Unit :=
+  ioRunWith src (checkEq expected ·) args llvm cflags (split := split)
 
 def ioFails (src : String) (fragment : String) : IO Unit := do
   let prelude ← IO.FS.readFile "lib/Prelude.wiz"
@@ -478,16 +486,62 @@ def elabTree (files : List (String × String)) : IO (CommandState ZeroOneMany ×
       includes := some (Module.includeResolver includes) }
   pure (s, src, dir)
 
-/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output. -/
-def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- `elabTree`, then build and run `main` (through C, or LLVM) and compare its output.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def linkRun (files : List (String × String)) (expected : String) (llvm : Bool := false)
+    (cflags : List String := []) : IO Unit := do
   let (s, src, dir) ← elabTree files
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120) with
   | .ok v => checkEq expected v
+  | .error e => failRun e
+
+/-- `elabTree` with extra module roots (a package's `src`/`gen`, e.g. `scry/src`),
+after the toolchain's `lib` root and before the temp directory. This keeps `link_c` and
+`include_str` resolution relative to each module's own file, as `wiz` does. -/
+def elabTreeRoots (roots : List String) (files : List (String × String)) :
+    IO (CommandState ZeroOneMany × String × System.FilePath) := do
+  let dir ← IO.FS.createTempDir
+  for (p, text) in files do
+    let f := dir / p
+    if let some d := f.parent then IO.FS.createDirAll d
+    IO.FS.writeFile f text
+  let src ← IO.FS.readFile (dir / "main.wiz")
+  let mods ← Module.loadClosure ((("lib" :: roots).map System.FilePath.mk) ++ [dir]) src
+  let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
+  let s := runFrontend (R := ZeroOneMany) src
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
+  pure (s, src, dir)
+
+/-- `elabTreeRoots`, then build and run `main` (through C, or LLVM) and compare its
+output. `timeout` is the program's limit (a project run parses and analyses several
+translation units). -/
+def linkRunRoots (roots : List String) (files : List (String × String)) (expected : String)
+    (llvm : Bool := false) (cflags : List String := []) (timeout : Nat := 300) : IO Unit := do
+  let (s, src, dir) ← elabTreeRoots roots files
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm
+      (timeout := some timeout) with
+  | .ok v => checkEq expected v
+  | .error e => failRun e
+
+/-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
+def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
+  let (s, src, dir) ← elabTree files
+  let errs := (s.messages.filter (·.severity == .error)).map (·.render src)
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  | .ok v => throw (IO.userError s!"expected a failure, got {v}")
   | .error e =>
-    let missing := ["gmp.h", "llc:"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+    if e.isToolchain then skip "no toolchain"
+    else unless (e.message.splitOn fragment).length > 1 do
+      throw (IO.userError s!"error does not mention '{fragment}':\n{e.message}")
 
 /-- A program that links a C file (with a static helper and a header the FFI can't bind)
 and the maths library. -/
@@ -544,11 +598,10 @@ def ioRunC (src csrc expected : String) (fails : Option String := none) : IO Uni
     match ← Build.runGlobal tc s "main" dir llvm (timeout := some 120) with
     | .ok v => if fails.isSome then throw (IO.userError s!"expected a failure, got {v}") else checkEq expected v
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if e.isToolchain then skip "no toolchain"
       else match fails with
-        | some frag => unless (e.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e}")
-        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
+        | some frag => unless (e.message.splitOn frag).length > 1 do throw (IO.userError s!"error does not mention '{frag}':\n{e.message}")
+        | none => throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e.message}")
 
 /-- Build the exports of `src` as a library (`wiz build --lib`), link it with the C
 program `csrc` (which includes `lib.h`), run it. Both backends. -/
@@ -559,8 +612,7 @@ def libRunC (src csrc expected : String) : IO Unit := do
     let tc ← toolchain
     match ← Build.build tc s "main" (dir / "lib.o") llvm true with
     | .error e =>
-      if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then
-        skip "no toolchain"
+      if Build.missingToolchain tc e then skip "no toolchain"
       else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}")
     | .ok _ =>
       IO.FS.writeFile (dir / "main.c") csrc
@@ -1093,7 +1145,7 @@ def streamAt (s : MTm) : MTm := nu 0 (unit 0) streamD star s
 def streamTy : MTm := streamAt szInf
 def alt : MTm := coit 0 (unit 0) streamD (lam (enum 2))
   (lams 2 (pair (var 0) (pair (ecase (enum 2) (var 0) [tag 2 1, tag 2 0]) (pair star star)))) star (tag 2 0)
-def zeros : MTm := scofix 0 (unit 0) streamD (lam (unit 0))
+def zeros : MTm := scofix 0 (unit 0) streamD (lams 2 (unit 0))
   (lams 4 (cocon (pair (tag 2 0) (pair (app (app (var 2) (var 1)) (var 0)) (pair star star))))) szInf star star
 def shead (x : MTm) : MTm := fst (out x)
 def stail (x : MTm) : MTm := fst (snd (out x))
@@ -1263,7 +1315,7 @@ def elimRule : List (MTm × Bool) :=
      (ann (lam (scase 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 3 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (sfix 0 (unit 0) natD 1 (lams 2 (enum 2)) (lams 4 (tag 2 0)) szInf star (var 0))) (piq q natTy (enum 2)), ok),
      (ann (lam (coit 0 (unit 0) streamD (lam (enum 2)) step star (var 0))) (piq q (enum 2) streamTy), ok),
-     (ann (lam (scofix 0 (unit 0) streamD (lam (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
+     (ann (lam (scofix 0 (unit 0) streamD (lams 2 (unit 0)) zerosF szInf star (var 0))) (piq q (unit 0) streamTy), ok)]
 
 /-- Usage checking at the edges (kernel-lint's findings in Kernel.wiz, whose usage lists
 drop trailing zeros): a variable that is never used has usage 0, which a binder at 1 does
@@ -1350,7 +1402,7 @@ def elimsAt (l : Nat) (I i : MTm) : List MTm :=
    sfix l I uD 1 P (lams 4 (tag 2 0)) szInf i x,
    scase l I uD 1 P (lams 3 (tag 2 0)) szInf i x,
    coit l I sD (lam (unit l)) (lams 2 (pair star (pair star star))) i star,
-   scofix l I sD (lam (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
+   scofix l I sD (lams 2 (unit l)) (lams 4 (cocon (pair (app (app (var 2) (var 1)) (var 0)) (pair star star)))) szInf i star]
 
 /-- Audit F3 (fixed): an eliminator checks that its index type is in `Sort (l+1)`, as the
 type formers `μ`/`ν` do. The eliminators check the scrutinee against `μ.{l} I D i` (or
@@ -1859,10 +1911,40 @@ def leanDeclVerdict (d : List String × Option MTm × MTm) : String :=
   | .ok _ => "ok"
   | .error _ => "error"
 
+/-- The modules the self-hosted programs import may be elaborated against: the
+toolchain's `Prelude`, `IO`, `Std`, `Text` and `Sys` only. `selfhostChecker` and
+`selfhostCompiler` build their programs' loader from this, and so does the
+`selfhost-host` group's host guard (when a source imports anything else, both must
+reject it). `Std` imports `Text` (audit-runtime gave the class family an owner above
+it), so `Text` must be here or every selfhost case fails to build the checker. -/
+def selfhostLoader : IO (Name → Option String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  -- `Std` imports `Text` (its `List.foldl`/`foldr`, used by `Str.join`), so the
+  -- self-hosted compiler/checker's source closure needs it too.
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
+  let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let textLib ← IO.FS.readFile "lib/Text.wiz"
+  let sysLib ← IO.FS.readFile "lib/Sys.wiz"
+  pure fun m => if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Text" then some textLib
+    else if m == "Std" then some stdLib else if m == "Sys" then some sysLib else none
+
+/-- A binary to use instead of building the pipeline's `name` (`compiler` or `checker`),
+from `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER`; `none` in a normal run. The case
+"an echoing stub compiler fails every =selfhost case" (`Tests/Groups/SelfHost.lean`) sets
+them to a stub, so the pipeline group cannot quietly stop testing the pipeline. -/
+def selfhostBinaryOverride (name : String) : IO (Option System.FilePath) := do
+  let var := "WIZ_SELFHOST_" ++ name.toUpper
+  return (← IO.getEnv var).map System.FilePath.mk
+
 /-- The whole self-hosted pipeline as a compiled program that checks the file `input.wiz`
 in its working directory. It is built once and kept (under `/tmp`, keyed by its source
 and this test binary), since every test that uses it would otherwise compile it again. -/
 def selfhostChecker : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "checker" then
+    note "uses checker"
+    return .ok exe
   let src ← Selfhost.checkerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.checkerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
@@ -1872,11 +1954,7 @@ def selfhostChecker : IO (Except String System.FilePath) := do
   if ← exe.pathExists then return .ok exe
   let start ← IO.monoMsNow
   IO.FS.createDirAll dir
-  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
-  let ioLib ← IO.FS.readFile "lib/IO.wiz"
-  let stdLib ← IO.FS.readFile "lib/Std.wiz"
-  let loader : Name → Option String := fun m =>
-    if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Std" then some stdLib else none
+  let loader ← selfhostLoader
   let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
   unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
@@ -1895,6 +1973,9 @@ def selfhostChecker : IO (Except String System.FilePath) := do
 /-- The self-hosted compiler (stage 21): the frontend and `Backend.wiz`, printing the C
 program for `input.wiz` (the frontend's own output as comments). -/
 def selfhostCompiler : IO (Except String System.FilePath) := do
+  if let some exe ← selfhostBinaryOverride "compiler" then
+    note "uses compiler"
+    return .ok exe
   let src ← Selfhost.compilerFiles.mapM (fun (f : String) => IO.FS.readFile f)
   let prog := Selfhost.compilerSource src
   let stamp := toString (← (← IO.appPath).metadata).modified.sec
@@ -1904,14 +1985,8 @@ def selfhostCompiler : IO (Except String System.FilePath) := do
   if ← exe.pathExists then return .ok exe
   let start ← IO.monoMsNow
   IO.FS.createDirAll dir
-  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
-  let ioLib ← IO.FS.readFile "lib/IO.wiz"
-  let stdLib ← IO.FS.readFile "lib/Std.wiz"
   -- (the driver ends with `Process.exit` on a frontend error)
-  let sysLib ← IO.FS.readFile "lib/Sys.wiz"
-  let loader : Name → Option String := fun m =>
-    if m == "Prelude" then some prelude else if m == "IO" then some ioLib else if m == "Std" then some stdLib
-    else if m == "Sys" then some sysLib else none
+  let loader ← selfhostLoader
   let s := runFrontend (R := ZeroOneMany) prog { loader, trustedModule := Tests.libModule }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render prog
   unless errs.isEmpty do return .error s!"unexpected errors:\n{"\n".intercalate errs.toList}"
@@ -2016,11 +2091,52 @@ def selfhostModuleOutput (files : List (String × String)) (args : Array String 
     unless out.exitCode == 0 do throw (IO.userError s!"the checker failed ({out.exitCode}): {out.stderr}")
     pure (some out.stdout)
 
+/-- (A8, A14) The self-hosted compiler rejects a module set: `build input.wiz` exits 1,
+the errors are on standard error, and no C is written. `input.wiz` is the root; the other
+files are written beside it, so its `import`s find them. -/
+def selfhostModuleCompileFails (files : List (String × String)) (phrases : List String) : IO Unit := do
+  match ← selfhostCompiler with
+  | .error e =>
+    if (e.splitOn "gmp.h").length > 1 then skip "no toolchain" else throw (IO.userError e)
+  | .ok exe =>
+    let dir ← IO.FS.createTempDir
+    for (name, text) in files do
+      if let some parent := (dir / name).parent then IO.FS.createDirAll parent
+      IO.FS.writeFile (dir / name) text
+    let out ← IO.Process.output
+      { cmd := "timeout", args := #["300", exe.toString, "build", "input.wiz", "-o", "out.c", "--no-cache"],
+        cwd := dir }
+    checkEq (1 : UInt32) out.exitCode
+    checkEq "" out.stdout
+    if ← (dir / "out.c").pathExists then
+      throw (IO.userError "the compiler wrote C for a rejected program")
+    for phrase in phrases do
+      unless (out.stderr.splitOn phrase).length > 1 do
+        throw (IO.userError s!"the compiler's error does not say {repr phrase}:\n{out.stderr}")
+
 /-- (A14) Check a set of module files with the self-hosted checker and compare its output. -/
 def selfhostCheckModules (files : List (String × String)) (expected : String)
     (args : Array String := #[]) : IO Unit := do
   let some out ← selfhostModuleOutput files args | return
   checkEq expected out
+
+/-- (A8, A14) The Lean frontend's error messages for a set of module files: `input.wiz`
+is the root, the others are modules named by their file name without `.wiz` (`A.wiz` is
+module `A`). The messages are their texts, without positions: the module tests compare
+them with the self-hosted checker's `error: …` lines. -/
+def hostModuleErrors (files : List (String × String)) : IO (List String) := do
+  let prelude ← IO.FS.readFile "lib/Prelude.wiz"
+  let ioLib ← IO.FS.readFile "lib/IO.wiz"
+  let stdLib ← IO.FS.readFile "lib/Std.wiz"
+  let mods : List (Name × String) := files.filterMap fun (n, text) =>
+    if n == "input.wiz" then none
+    else some (((n.dropSuffix? ".wiz").map (·.toString)).getD n, text)
+  let loader : Name → Option String := fun m =>
+    if m == "Prelude" then some prelude else if m == "IO" then some ioLib
+    else if m == "Std" then some stdLib else mods.lookup m
+  let src := (files.lookup "input.wiz").getD ""
+  let s := runFrontend (R := ZeroOneMany) src { loader, trustedModule := Tests.libModule }
+  pure ((s.messages.filter (·.severity == .error)).map (·.text)).toList
 
 /-- (D1) The compiled program `main` of `src` doesn't finish within `secs` seconds
 (memory capped: a loop in the kernel allocates). -/
@@ -2051,17 +2167,33 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz` and `lib/D/*.wiz` (as `D.X`), by module name. -/
-def libLoader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  pure fun n => m.lookup n
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`), `scry/src/Scry/*.wiz` (as `Scry.X`)
+and `hdl/src/Hdl/*.wiz` (as `Hdl.X`), by module name (see `Tests.loadedModules`, which
+caches the load for the process). -/
+def libLoader : IO (Name → Option String) := Tests.libLoader
+
+/-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/
+def libModuleNames : IO (List String) := do
+  pure ((← Tests.loadedModules "lib").map (·.1))
+
+/-- Modules of `lib/` that are alternative implementations and cannot be imported into
+one program, paired with the modules each must leave out. It is empty now: the last two
+entries were `Scry.EgraphNative`/`Scry.EqPlan` against the reference e-graph family, and
+the e-graph is one engine (`Scry.EgraphNative` is a compatibility import of
+`Scry.Egraph`). A whole-library loader can import all of `lib/` at once. The list and
+`libSourceExcept` stay because the loaders and the trust ledger use the mechanism; an
+entry is still the right place for a future pair that cannot co-load. (`Json` and
+`Infoview` used to be here when `Json` declared `Nat.repr`; `Text` owns it now.) -/
+def libApart : List (String × List String) := []
+
+/-- `import` lines for every module of `lib/` except `skip`. -/
+def libSourceExcept (skip : List String) : IO String := do
+  pure (String.join (((← libModuleNames).filter (!skip.contains ·)).map (s!"import {·}\n")))
+
+/-- Every module of `lib/` imported at once, except the alternative backends that
+cannot co-load (see `libApart`). -/
+def allLibSource : IO String := do
+  libSourceExcept (libApart.map (·.1))
 
 /-- No errors, and these messages, with every library importable. -/
 def okLibs (input : String) (infos : List String := []) : IO Unit := do
@@ -2078,17 +2210,30 @@ def failsLibs (input : String) (fragment : String) : IO Unit := do
   unless (errs[0]!.splitOn fragment).length > 1 do
     throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
 
-/-- Build `main` with the C backend (or LLVM), with every library importable. -/
-def cRunLibs (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
+/-- Build `main` with the C backend (or LLVM), with every library importable, and return
+the run's outcome: its output, or why it failed. A frontend error is thrown (the source is
+wrong); a failure to *build* is `.build`/`.toolchain`, and a program that ran and failed is
+`.run` (its exit code and stderr). Never skips: `cRunLibs` decides that from the outcome.
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibsOut (src : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO (Except Build.RunError String) := do
   let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
   let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
   unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
   let dir ← IO.FS.createTempDir
-  match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 120) with
+  let tc ← toolchain
+  Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm (timeout := some 120)
+
+/-- Build `main` with the C backend (or LLVM), with every library importable, and compare
+its output. Skips as "no toolchain" only when the *build* cannot find the compiler or GMP;
+a program that ran and failed is this case's failure, with its exit code and stderr (a
+program that prints "No such file or directory" itself is not a missing toolchain).
+`cflags` are appended to the toolchain's (e.g. `-fsanitize=thread`, 25a). -/
+def cRunLibs (src : String) (expected : String) (llvm : Bool := false) (cflags : List String := []) :
+    IO Unit := do
+  match ← cRunLibsOut src llvm cflags with
   | .ok v => checkEq expected v
-  | .error e =>
-    if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
-    else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Build and run `main` with the whole library (`IO` …), through C or LLVM. -/
 def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit := do
@@ -2098,9 +2243,7 @@ def cRunIO (src : String) (expected : String) (llvm : Bool := false) : IO Unit :
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← toolchain) s "main" dir llvm with
   | .ok v => checkEq expected v
-  | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then skip "no toolchain" else throw (IO.userError e)
+  | .error e => failRun e
 
 /-- Reads of a wide structure's fields through shared projection prefixes (15j), where
 reference counting could go wrong: the root consumed (`keepW`) before the last read
@@ -2190,6 +2333,13 @@ def nativeCases (llvm : Bool) : List Case :=
         cRunSmallStack (llvm := llvm) ("import Prelude\npartial def count (n acc : Nat) : Nat := match n with\n  | .zero => acc\n" ++
           "  | .succ m => match Nat.beq (Nat.mod m 3) 0 with\n    | .true => count m (acc + 2)\n    | .false => count m acc\n" ++
           "def main : Nat := count 10000000 0") "6666668" },
+    { name := "tag inspections borrow their scrutinee: a match's number is used again in a branch, no leaks, interpreted and compiled (8e)", run := fun _ => do
+        let src := "import Prelude\ndef count : Nat → Nat\n  | .zero => 0\n" ++
+          "  | .succ n => count n + 1\ndef mk : Nat → List Nat\n  | .zero => .nil\n" ++
+          "  | .succ n => .cons n (mk n)\ndef sum : List Nat → Nat\n  | .nil => 0\n" ++
+          "  | .cons x xs => x + sum xs\ndef main : Nat := count 100000 + sum (mk 1000)\n"
+        unless llvm do okLib (src ++ "#run main\n") ["599500"]
+        cRun (llvm := llvm) src "599500" },
     { name := "constant folding and known constructors behave as before (15c)", run := fun _ =>
         cRun (llvm := llvm) foldSrc foldExpected },
     { name := "numerals at 2^31 … 2^64+1 and 10^30 are constants (15g)", run := fun _ =>

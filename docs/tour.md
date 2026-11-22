@@ -96,8 +96,10 @@ def describe (n : Nat) : String :=
 ```
 
 Values are printed as terms: a list is its constructors. Comparisons on `Nat` are
-functions that return a `Bool` (`Nat.lt`, `Nat.le`, `Nat.beq`); there are no `<` or
-`==` operators yet. (`examples/tour/01-basics.wiz`.)
+functions that return a `Bool` (`Nat.lt`, `Nat.le`, `Nat.beq`); `<` and `≤` are notation
+on the order classes (`import Order`, through `import Nat`), `≈` is notation on
+`Equiv`, and `==` is still `BEq.beq`. (`examples/tour/01-basics.wiz`; the `calc` chain
+below is `examples/tour/06b-calc.wiz`, checked in the `tour` group.)
 
 ## 2: inductive types and pattern matching
 
@@ -445,12 +447,24 @@ variable at run time:
 |---|---|---|
 | `0` | never: erased | types, proofs, indices like `Vec`'s length |
 | `1` | exactly once: linear | resources: a file handle, a channel end, the world |
-| `ω` | any number of times | everything else; the default |
+| `ω` | any number of times | explicit binders: the default; an implicit binder defaults to `0` (erased) |
+
+A binder with no quantity written is `ω`, except an implicit one whose type is a sort or
+a proposition (`{A : Type}`, `{P : Prop}`, `{h : a = b}`), which is `0`: such an
+argument is erased anyway. Any other implicit is data and `ω`, so `fun {n : Nat} => n`
+may use `n` at run time; an index needed only in types is cheaper written `{0 n : Nat}`
+(a bare `{n : Nat}` is passed at run time). A written quantity is always authoritative:
+`{0 n}`, `{1 x}`, `{ω A : Type}`. The type that decides is the one written on the
+binder: `{A}` with no type is data until you write `{A : Type}` or `{0 A}`.
 
 ```wiz
 def id {0 A : Type} (1 x : A) : A := x
 def dup {0 A : Type} (x : A) : A × A := (x, x)
 ```
+
+An omitted quantity is `ω` on an explicit binder and `0` on an implicit one
+(`Wiz/Parser/Builtin.lean`, `Wiz/Elab/Term.lean`): `{n : Nat}` is erased, so the library
+writes `{ω n : Nat}` when the value is needed at run time.
 
 `id` uses `x` once and `A` never (only in types), so both quantities are right.
 `dup` uses `x` twice, which is fine at the default `ω`. Written `(1 x : A)`, the checker
@@ -592,7 +606,7 @@ is a program, and its test (the first line, `-- test: run`) runs it.
 
 ## 10: hardware
 
-`lib/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
+`hdl/src/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
 simulated by evaluation and turned into Verilog.
 
 ```wiz
@@ -636,7 +650,7 @@ The library also has bundles of named signals (`deriving Bundle`), reset and ena
 test benches, waveforms (VCD) and pin constraints, and the combinators come with
 lemmas (`Circuit.run_seq`: running `seq a b` is running `b` on the outputs of `a`). A
 UART for a Lattice iCEstick FPGA board is written in it.
-(`examples/tour/10-hdl.wiz`; `examples/hdl.wiz`, `examples/hdl-compose.wiz`;
+(`examples/tour/10-hdl.wiz`; `hdl/examples/hdl.wiz`, `hdl/examples/hdl-compose.wiz`;
 [libraries.md](libraries.md), H14.)
 
 ## 11: packages
@@ -656,8 +670,9 @@ def package : Package := Package.new "hello"
 `grail run app` builds and runs a program, and `grail test` runs the tests: a test is a
 `.wiz` file whose messages (or, with `-- test: run` on its first line, whose output) must
 match the `.expected` file beside it. `grail test --update` writes the `.expected` files.
-The tour's own examples are tests of exactly this kind. A `wiz-toolchain` file next to
-`grail.wiz` pins the toolchain, and `Package.dep` adds a package from a git repository.
+The tour's own examples are tests of exactly this kind (group `tour`). A `wiz-toolchain`
+file next to `grail.wiz` pins the toolchain, and `Package.dep` adds a package from a git
+repository.
 [install.md](install.md#a-first-project-with-grail) walks through a first package;
 [stages/23-grail.md](stages/23-grail.md) has the rest.
 
@@ -675,8 +690,9 @@ is refused, so `new` never overwrites work, and the name must start with a lette
 ([stages/23-grail.md](stages/23-grail.md), 23o.)
 
 Modules are files: `import A.B` reads `A/B.wiz` from a module root (the standard
-library `lib/`, a package's `lib` directories, `-I DIR`). Wiz has no namespaces yet, so
-one name can be declared only once among everything a file imports. Mark helpers
+library `lib/`, a package's `lib` directories, `-I DIR`). There is no selective import,
+so one name can be declared only once among everything a file imports (`namespace`,
+13t, prefixes a declaration's name but does not let two modules reuse one). Mark helpers
 `private` to keep them out of other modules.
 
 ## 12: taint analysis with scry
@@ -705,7 +721,8 @@ which kills the flow. A finding also carries its source → sink path (`Scry.fin
 ## Where next
 
 * The **examples**: [`examples/`](../examples/) has one file per feature, each checked
-  by the test suite (`grail test` in the repository).
+  against its `.expected` by the test suite: `grail test` in the repository, and the
+  `examples` group in CI.
 * The **libraries**: `lib/`, described in [libraries.md](libraries.md): text, JSON,
   arrays, processes and files (`Sys`), effects (`Eff`), concurrency (`MVar`,
   `Session`), separation logic (`HProp`, `Hoare`), the HDL.

@@ -141,9 +141,10 @@ def instArgsWellTyped (ctx : LocalCtx R) (args : Array (Term R × VTy R)) : Elab
     let j := tys.size
     let t ← zonk j (quote g j (← forceMeta v))
     tys := tys.push (eval g (ctx.env.drop (ctx.lvl - j)) t)
-  let kctx : Ctx R := { globals := g, env := ctx.env, names := ctx.names,
-                        qtys := ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-                        types := tys.toList.reverse, lvl := ctx.lvl }
+  let kctx : Ctx R := { globals := g, env := ctx.env,
+                        names := ctx.names.reverse.toArray,
+                        qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+                        types := tys, lvl := ctx.lvl }
   let infer := (← get).kernelInfer
   for (t, A) in checks do
     match infer kctx t with
@@ -189,7 +190,10 @@ partial def synthInstance (ctx : LocalCtx R) (ty : VTy R) : ElabM R (Option (Ter
   -- output parameters become fresh holes
   let mut args' := #[]
   for a in args, out in info.outParams ++ List.replicate args.size false do
-    if out then args' := args'.push (← evalIn ctx (← freshMeta ctx "an output parameter"))
+    if out then
+      -- (13b) typed by the class's parameter (`MetaEntry.type?`)
+      let ty? ← constArgType? info.name us args'.toList
+      args' := args'.push (← evalIn ctx (← freshMeta ctx "an output parameter" ty?))
     else args' := args'.push a
   let g ← getGlobals
   let goalTy := args'.foldl (vApp g) (eval g [] (.const info.name us))

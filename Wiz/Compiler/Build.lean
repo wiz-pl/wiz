@@ -4,6 +4,7 @@ import Wiz.Compiler.LLVM
 import Wiz.Compiler.Wasm
 import Wiz.Compiler.WasmValidate
 import Wiz.Compiler.Lower
+import Wiz.Module
 import Wiz.Toolchain
 
 /-!
@@ -112,6 +113,44 @@ def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
     pure (if out.exitCode == 0 then .ok () else .error s!"{cmd} failed:\n{out.stderr}")
   catch e => pure (.error s!"{cmd}: {e}")
 
+/-- (F36) The inputs of one split unit's object file (`splitObjectKey` hashes them all). -/
+structure SplitObject where
+  /-- the C compiler -/
+  cc : String
+  /-- every flag `cc` gets for this unit: `-O2 -w -c`, `-DWIZ_API=` for the support unit,
+  `--cflags`, and the `-ffile-prefix-map`s that name the build directory (which `-g`
+  records in the object) -/
+  flags : Array String
+  /-- the include-path variables `cc` reads (`CPATH`, `C_INCLUDE_PATH`, …): they change
+  what an `#include` finds, so they change the object -/
+  env : Array (String × Option String) := #[]
+  /-- the unit's own C text -/
+  text : String
+  /-- the generated header (`wiz_split.h`); a part's text only includes it, so the
+  declarations it compiles against are an input of the part's object, not of its text -/
+  header : String
+  deriving Repr, Inhabited
+
+/-- (F36) The environment variables a C compiler takes include paths from. They are not
+read through a flag, and they change what `#include` finds, so the split object key names
+them too. -/
+def includeEnv : IO (Array (String × Option String)) := do
+  let cpath ← IO.getEnv "CPATH"
+  let cinclude ← IO.getEnv "C_INCLUDE_PATH"
+  let cplus ← IO.getEnv "CPLUS_INCLUDE_PATH"
+  let objc ← IO.getEnv "OBJC_INCLUDE_PATH"
+  pure #[("CPATH", cpath), ("C_INCLUDE_PATH", cinclude), ("CPLUS_INCLUDE_PATH", cplus),
+    ("OBJC_INCLUDE_PATH", objc)]
+
+/-- (F36) The key of one split unit's object: a SHA-256 of every input, so a collision
+cannot reuse an unrelated object (the old key was a 64-bit `mixHash` of the text and a
+re-spelling of the flags, which left the header, the `-ffile-prefix-map`s and the
+compiler's include environment out). -/
+def splitObjectKey (i : SplitObject) : String :=
+  Smt.Sha256.hexFramed "wiz-build/split-object-v2"
+    ([i.cc, "\n".intercalate i.flags.toList, i.text, i.header] ++
+      i.env.toList.map fun (k, v) => k ++ "=" ++ v.getD "")
+
 /-- Compile the C of a program. One translation unit by default; with `--split N` a
 support unit (`-DWIZ_API=`: the runtime and glue are exported) and `N` units of generated
 functions are compiled by `cc -c` in parallel (stage 15k), then linked. `--lib` stays one
@@ -130,22 +169,29 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   let headerText := C.splitHeader decls exports
   IO.FS.writeFile (dir / header) headerText
   let parts := C.splitParts decls n
-  -- (deterministic inputs; a part whose text and flags are unchanged reuses its object)
+  -- (deterministic inputs; a part whose inputs are unchanged reuses its object)
   let inputs : Array (String × String × Bool) :=
     #[("support", C.splitSupport decls io extra unbox exports noMain, true)] ++
     parts.zipIdx.map fun (p : String × Nat) => (s!"part{p.2}", C.splitPartText header p.1, false)
   let cc := tc.cc
   let cflags := tc.cflags.toArray
   let map ← pathMapFlags tc.cflags dir
-  let keyOf (text : String) (api : Bool) : String :=
-    toString (mixHash (hash text) (hash s!"{cc} {" ".intercalate tc.cflags} -O2 -w {api}"))
+  let env ← includeEnv
+  -- (F36) the key names the *actual* flags `cc -c` is given for the unit (plus its
+  -- include environment), not a re-spelling of some of them
+  let flagsOf (api : Bool) : Array String :=
+    #["-O2", "-w", "-c"] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map
+  let keyOf (text header : String) (api : Bool) : String :=
+    splitObjectKey { cc, flags := flagsOf api, env, text, header }
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
     runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
       (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
   for (name, text, api) in inputs do
-    let stamp := keyOf text api
+    -- (F36) the support unit does not include `wiz_split.h`; a part's object is compiled
+    -- against it, so the header is part of a part's key
+    let stamp := keyOf text (if api then "" else headerText) api
     let hit ← if (← (dir / (name ++ ".stamp")).pathExists) && (← (dir / (name ++ ".o")).pathExists) then
         pure ((← IO.FS.readFile (dir / (name ++ ".stamp"))).trimAscii.toString == stamp)
       else pure false
@@ -249,7 +295,9 @@ where
   ws (cs : List Char) : List Char := cs.dropWhile (·.isWhitespace)
   num (cs : List Char) : Option (Nat × List Char) :=
     let ds := cs.takeWhile Char.isDigit
-    if ds.isEmpty then none else some (String.mk ds |>.toNat!, cs.drop ds.length)
+    match ds with
+    | [] => none
+    | _ => (String.ofList ds).toNat?.map fun n => (n, cs.drop ds.length)
   go (cs : List Char) : Option (RVal × List Char) := do
     match ws cs with
     | '(' :: rest =>
@@ -265,27 +313,87 @@ where
     | '#' :: rest => let (n, rest) ← num rest; return (.nat n, rest)
     | cs => let (n, rest) ← num cs; return (.nat n, rest)
 
+/-- Why a compiled program did not give a result (`runGlobal`). The distinction is what
+lets a test tell "this machine has no C toolchain" (a skip) from "the program failed" (a
+failed case). Only `.toolchain` is a *build* failure that names the compiler, `llc` or a
+header; a program's own stderr is never a toolchain condition, whatever it contains. -/
+inductive RunError where
+  /-- The build failed: no program ran. -/
+  | build (msg : String)
+  /-- The build could not find the C toolchain: the compiler or `llc` could not be started,
+  or `gmp.h` is absent. The one failure a test may record as a skip. -/
+  | toolchain (msg : String)
+  /-- The program ran and exited with this code; `stderr` is what it wrote on standard
+  error (reported with the code, so a failing case says why). -/
+  | run (exitCode : UInt32) (stderr : String)
+  /-- The program did not finish within its time limit. -/
+  | timeout
+  /-- The program ran and printed something that is not a value of its type. -/
+  | readback (msg : String)
+
+namespace RunError
+
+/-- The failure as `wiz run` and the tests print it. -/
+def message : RunError → String
+  | .build m => m
+  | .toolchain m => m
+  | .run exitCode stderr => s!"the program failed ({exitCode}): {stderr}"
+  | .timeout => "the program timed out"
+  | .readback m => m
+
+/-- Is the machine missing the C toolchain? This is the only `runGlobal` failure a test may
+record as `skip "no toolchain"`; everything else (including `.run`) is the case's failure. -/
+def isToolchain : RunError → Bool
+  | .toolchain _ => true
+  | _ => false
+
+end RunError
+
+/-- Is this build failure a missing C toolchain? The message names the compiler (or `llc`)
+as a program that could not be started ("could not execute external process 'cc'", or
+`cc: no such file…`), or the compiler cannot find `gmp.h`. A compiler that ran and
+rejected the program does not count — and neither does a message that merely mentions a
+missing file (such as a `link_c` source in the test): that is a failing build, not a
+missing toolchain. -/
+def missingToolchain (tc : Toolchain) (msg : String) : Bool :=
+  let lower := msg.toLower
+  let names (p : String) : Bool :=
+    p != "" && ((msg.splitOn s!"could not execute external process '{p}'").length > 1 ||
+      (msg.startsWith (p ++ ":") && (lower.splitOn "no such file").length > 1))
+  (msg.splitOn "gmp.h").length > 1 || [tc.cc, tc.llc].any names
+
 /-- Build and run the global `n` (through C, or LLVM); returns its result, read back
 with its type. With `timeout`, the program is stopped after that many seconds (by
-coreutils' `timeout`). -/
+coreutils' `timeout`). A failure says whether it happened before the program ran
+(`RunError.build`/`.toolchain`) or was the program itself (`.run`, with its exit code and
+stderr; `.timeout`; `.readback`). -/
 def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.FilePath) (llvm : Bool := false)
     (timeout : Option Nat := none) (args : Array String := #[]) (split : Nat := 0) :
-    IO (Except String String) := do
+    IO (Except RunError String) := do
   let exe := dir / "wiz_main"
   match ← build tc s n exe llvm false (split := split) with
-    | .error e => pure (.error e)
+    | .error e => pure (.error (if missingToolchain tc e then .toolchain e else .build e))
     | .ok ty =>
       let io := isIO ty
       let out ← match timeout with
         | some t => IO.Process.output { cmd := "timeout", args := #[toString t, exe.toString] ++ args }
         | none => IO.Process.output { cmd := exe.toString, args }
-      if out.exitCode == 124 && timeout.isSome then return .error "the program timed out"
-      if out.exitCode != 0 then return .error s!"the program failed ({out.exitCode}): {out.stderr}"
+      if out.exitCode == 124 && timeout.isSome then return .error .timeout
+      if out.exitCode != 0 then return .error (.run out.exitCode out.stderr)
       -- an `IO` program prints for itself
       if io then return .ok out.stdout
       match parseValue out.stdout with
-      | none => pure (.error s!"could not read the result: {out.stdout}")
+      | none => pure (.error (.readback s!"could not read the result: {out.stdout}"))
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+
+/-- (8f, F12) The JS host of a Wasm module: beside the toolchain's library, so
+`share/wiz/web` in a Nix package or release tarball and `web` in a checkout (as `webDir`
+does for the infoview), else `./web/wasm-host.mjs` for a checkout run from its root. -/
+def wasmHostPath : IO System.FilePath := do
+  let base := (← Module.toolchainLib).parent.getD "."
+  let installed := base / "web" / "wasm-host.mjs"
+  if ← installed.pathExists then return installed
+  pure ("web" / "wasm-host.mjs")
 
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host
 (`web/wasm-host.mjs`), reading the printed result back with `main`'s type. -/
@@ -297,9 +405,9 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
     match ← compileWasm decls (isIO ty) wasmFile with
     | .error e => pure (.error e)
     | .ok () =>
-      let host : System.FilePath := "web" / "wasm-host.mjs"
+      let host ← wasmHostPath
       unless ← host.pathExists do
-        return .error "web/wasm-host.mjs is missing (run from the Wiz checkout)"
+        return .error s!"the Wasm host is missing: no {host} (a toolchain ships it in share/wiz/web; a checkout has web/wasm-host.mjs)"
       let out ← try
         -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
         IO.Process.output
@@ -311,17 +419,48 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
       | none => pure (.error s!"could not read the result: {out.stdout}")
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
+/-- (F09) A header name that may be written into `#include <…>`. A name with `"`, `<`,
+`>`, a backslash, whitespace or a newline would leave the directive (a newline starts
+another one) or close the bracket, so a string in the source could inject preprocessor
+directives — and their output is the C text spliced into the program. Paths (`stdio.h`,
+`sys/types.h`, `/tmp/x.h`) are names; only the characters are checked. -/
+def validHeaderName (h : String) : Bool :=
+  !h.isEmpty && h.toList.all fun c =>
+    c.isAlphanum || c == '_' || c == '.' || c == '/' || c == '-' || c == '+'
+
+/-- (F09) The error for a header name that is not a header name. The offending text is
+not quoted back: it may hold a newline and a preprocessor directive, which would then be
+a directive in a log as well. -/
+def badHeaderName : String :=
+  "import_c: not a valid C header name (letters, digits and `_ . / + -` only; a newline, " ++
+  "quote, angle bracket or backslash would inject a preprocessor directive)"
+
+/-- (F09) The error for a header the C compiler could not preprocess. -/
+def preprocessFailed (cc h : String) (exitCode : UInt32) (stderr : String) : String :=
+  s!"import_c {h}: {cc} -E failed ({exitCode}): {stderr.trimAscii}"
+
 /-- Preprocess the headers a file imports (`import_c "h"`), since the frontend is pure. -/
 def preprocessHeaders (tc : Toolchain) (input : String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
   for part in (input.splitOn "import_c \"").drop 1 do
     let h := (part.splitOn "\"").headD ""
     if h.isEmpty || m.contains h then continue
+    -- (F09) only a plausible header name reaches `cc`: a newline or `>` in it would
+    -- splice another preprocessor directive into the generated `#include`
+    unless validHeaderName h do throw (IO.userError badHeaderName)
     let cc := tc.cc
     let dir ← IO.FS.createTempDir
-    IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
-    let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-    if out.exitCode == 0 then m := m.insert h out.stdout
+    -- (F11) one scratch directory per header, removed whatever `cc` does
+    try
+      IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
+      let out ← IO.Process.output { cmd := cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
+      -- (F09) a header that cannot be preprocessed is an error: skipping it would let a
+      -- check pass with types that nothing read (and hide a broken `--cflags`)
+      if out.exitCode != 0 then
+        throw (IO.userError (preprocessFailed cc h out.exitCode out.stderr))
+      m := m.insert h out.stdout
+    finally
+      try IO.FS.removeDirAll dir catch _ => pure ()
   pure m
 
 

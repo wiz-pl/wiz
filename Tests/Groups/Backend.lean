@@ -11,6 +11,7 @@ namespace Tests.Elab
 def backendGroup : Group where
   name := "backend"
   exercise := "Exercise 8.1"
+  parallel := true
   cases := [
     { name := "numbers through the IR", run := fun _ =>
         okLib "import Prelude\n#run 100 * 100 + 1" ["10001"] },
@@ -39,6 +40,18 @@ def backendGroup : Group where
     { name := "the IR, with reference counting (Exercise 8.1)", run := fun _ =>
         okLib "import Prelude\ndef twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)\n#ir twice"
           ["def twice x0 x1 :=\n  dup x0\n  let x2 := ap x0 x1\n  let x3 := ap x0 x2\n  ret x3"] },
+    { name := "a tag inspection borrows its scrutinee (8e)", run := fun _ => do
+        let src := "import Prelude\ndef count : Nat → Nat\n  | .zero => 0\n" ++
+          "  | .succ n => count n + 1\n#ir count\n#run count 1000\n"
+        let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← preludeLoader }
+        match (s.messages.toList.filter (·.severity == .info)).map (·.text) with
+        | [ir, run] =>
+          -- `dup x` before `natTag x` would count a scrutinee that the inspection
+          -- only reads (the branch's `nat.pred` consumes it, the other drops it)
+          check ((ir.splitOn "dup").length == 1) s!"the tag inspection duplicated its scrutinee:\n{ir}"
+          check ((ir.splitOn "natTag").length > 1) s!"no natTag in:\n{ir}"
+          checkEq "1000" run
+        | ms => throw (IO.userError s!"unexpected messages {ms}") },
     { name := "reuse: a dead cell is reused for a new one (Exercise 8.3)", run := fun _ => do
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
         let src := "import Prelude\ndef inc : List Nat → List Nat\n  | .nil => .nil\n  | .cons x xs => .cons (x + 1) (inc xs)\n#ir inc\n#run inc (.cons 1 (.cons 2 .nil))"
@@ -119,7 +132,43 @@ def backendGroup : Group where
           check (cafs.contains n) s!"{n} is not cached"
         -- `tab` is `table` again, `four` and `Tab` are erased, `addTen` is a function
         for n in ["tab", "four", "Tab", "addTen", "wiz.entry", "range", "loop"] do
-          check (!cafs.contains n) s!"{n} is cached" }
+          check (!cafs.contains n) s!"{n} is cached" },
+    { name := "the typed primitive table covers every closed primitive (C and LLVM)", run := fun _ => do
+        -- (prim-table) A primitive that is not in the backend's table must be a
+        -- registration error, not a `wiz_unknown_prim` call: check the invariant the
+        -- backends rely on, before any code generation.
+        let closed := IR.PrimOp.runtimeSymbols.map (·.1) ++ [IR.PrimOp.natZero]
+        for (backend, label) in [(IR.Backend.c, "C"), (IR.Backend.llvm, "LLVM")] do
+          for p in closed do
+            if p != IR.PrimOp.natZero then
+              if ((IR.PrimOp.table backend).find? fun e => e.prim == p).isNone then
+                throw (IO.userError s!"{label}: no primitive-table entry for `{p.key}`")
+        for p in closed do
+          if p != IR.PrimOp.natZero then
+            match IR.PrimOp.ofKey? p.key with
+            | some q => if q != p then throw (IO.userError s!"`{p.key}` resolved to the wrong primitive")
+            | none => throw (IO.userError s!"`{p.key}` does not resolve to a primitive")
+        -- an unregistered key is not a primitive
+        check ((IR.PrimOp.ofKey? "wiz_unknown_prim").isNone) "an unknown key resolved" },
+    { name := "the IR still prints primitive keys the old way (wire compatibility)", run := fun _ => do
+        let s := runFrontend (R := ZeroOneMany)
+          "import Prelude\ndef f (x : Nat) : Nat := x + 1\ndef g (a b : Nat) : Bool := Nat.beq a b\n#ir f\n#ir g"
+          { trustedModule := Tests.libModule, loader := ← preludeLoader }
+        let errs := (s.messages.filter (·.severity == .error)).map (·.text)
+        unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        let texts := s.messages.toList.map (·.text)
+        check (texts.any fun t => (t.splitOn "prim nat.add").length > 1) s!"no `prim nat.add` in {texts}"
+        check (texts.any fun t => (t.splitOn "prim nat.beq").length > 1) s!"no `prim nat.beq` in {texts}" },
+    { name := "erasure: an out-of-scope variable is a diagnostic, not an array panic (F22)", run := fun _ => do
+        -- (`quickType` indexed `ctx.types[ix]!`, so a stale de Bruijn index panicked; the
+        -- public erasure path must report it instead)
+        let empty : Ctx ZeroOneMany := { globals := {} }
+        match quickType empty (.var 0) with
+        | .error e => check (((toString e).splitOn "out of scope").length > 1) s!"wrong error: {e}"
+        | .ok _ => throw (IO.userError "an out-of-scope variable was given a type")
+        match eraseE empty (.var 0) with
+        | .error e => check (((toString e).splitOn "out of scope").length > 1) s!"wrong error: {e}"
+        | .ok _ => throw (IO.userError "the malformed term was erased instead of reported") }
   ]
 
 builtin_initialize registerGroup backendGroup

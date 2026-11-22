@@ -133,6 +133,42 @@ def plotRoundSrc : String := r#"import Plot
 def plotRoundExpected : List String := [
   "1", "-1", "2", "-2", "\"0.2\"", "\"1000\"", "\"1.25\"", "\"-1\"", "\"0.333333333333\""]
 
+def plotWidgetSrc : String := r#"import Plot
+import Json
+
+def chart : Plot.Chart :=
+  Plot.labels "x" "y" (Plot.size 320 240 (Plot.chart "Widget" (Plot.frame [
+    Plot.line "revenue" [Plot.ptNat 0 3, Plot.ptNat 1 5, Plot.ptNat 2 4]])))
+
+def payload : Json := Plot.payload chart
+def field (k : String) : String := Json.getStr payload k
+
+#eval String.startsWith (Plot.widget chart) "WIZ_WIDGET:"
+#eval String.eq (field "schema") "wiz.widget/1"
+#eval String.eq (field "kind") "plot"
+#eval String.eq (field "mimeType") "image/svg+xml"
+#eval String.eq (field "svg") (Plot.svg chart)
+#eval String.eq (field "html") (Plot.html chart)
+#eval String.contains (field "html") "<svg"
+#eval String.contains (field "html") "<figcaption>Widget</figcaption>"
+#eval String.eq (Plot.html chart) (String.append "<figure class=\"wiz-plot\">"
+  (String.append (Plot.svg chart) (String.append "<figcaption>"
+    (String.append (Plot.esc chart.title) "</figcaption></figure>"))))
+"#
+
+def plotWidgetExpected : List String := [
+  ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true"]
+
+/-- `#plot` in a real source: the command must emit one message, the display value. -/
+def plotCommandSrc : String := r#"import Plot
+
+def chart : Plot.Chart :=
+  Plot.labels "x" "y" (Plot.size 320 240 (Plot.chart "Widget" (Plot.frame [
+    Plot.line "revenue" [Plot.ptNat 0 3, Plot.ptNat 1 5, Plot.ptNat 2 4]])))
+
+#plot chart
+"#
+
 def plotGoldenSrc : String := r#"import IO
 import Plot
 
@@ -169,12 +205,15 @@ def main : IO Unit := do
   IO.print "\n@@\n";
   IO.print (Plot.svg lineChart);
   IO.print "\n@@\n";
-  IO.print (Plot.svg lineChart)
+  IO.print (Plot.svg lineChart);
+  IO.print "\n@@\n";
+  IO.print (Plot.html lineChart)
 "#
 
 def plotGroup : Group where
   name := "plot"
   exercise := "lib/Plot.wiz"
+  parallel := true
   cases := [
     { name := "linear ticks: 1/2/5 step, inside the domain, increasing, integer multiples (awkward domains)", run := fun _ =>
         okLibs plotTicksSrc plotTicksExpected },
@@ -184,14 +223,37 @@ def plotGroup : Group where
         okLibs plotLogSrc plotLogExpected },
     { name := "rounding and decimal text are pinned (halves away from zero, exact tick labels)", run := fun _ =>
         okLibs plotRoundSrc plotRoundExpected },
-    { name := "golden SVGs: line, scatter, bar, histogram (byte for byte, twice the same)", run := fun _ => do
+    { name := "golden SVGs and the widget HTML: line, scatter, bar, histogram (byte for byte, twice the same)", run := fun _ => do
         let line ← IO.FS.readFile "Tests/data/plot/line.svg"
         let scatter ← IO.FS.readFile "Tests/data/plot/scatter.svg"
         let bar ← IO.FS.readFile "Tests/data/plot/bar.svg"
         let histogram ← IO.FS.readFile "Tests/data/plot/histogram.svg"
+        let html ← IO.FS.readFile "Tests/data/plot/line.html"
         let expected := String.intercalate "\n@@\n"
-          [line, scatter, bar, histogram, line, line]
-        cRunLibs plotGoldenSrc expected }
+          [line, scatter, bar, histogram, line, line, html]
+        cRunLibs plotGoldenSrc expected },
+    { name := "widget: Plot.widget is a WIZ_WIDGET: bundle with the SVG, title and mime type", run := fun _ =>
+        okLibs plotWidgetSrc plotWidgetExpected },
+    { name := "#plot emits the widget display value as one command message (the infoview payload)", run := fun _ => do
+        let s := runFrontend (R := ZeroOneMany) plotCommandSrc
+          { trustedModule := Tests.libModule, loader := ← libLoader }
+        let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render plotCommandSrc
+        unless errs.isEmpty do
+          throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+        let texts := s.messages.toList.map (·.text)
+        check (texts.length == 1) s!"#plot: expected one message, got {texts.length}"
+        let t := texts[0]!
+        check (t.startsWith "WIZ_WIDGET:") s!"#plot: no WIZ_WIDGET: prefix: {t.take 40}"
+        check ((t.splitOn "\"schema\":\"wiz.widget/1\"").length > 1) "#plot: no widget schema"
+        check ((t.splitOn "\"mimeType\":\"image/svg+xml\"").length > 1) "#plot: no SVG mime type"
+        check ((t.splitOn "\"kind\":\"plot\"").length > 1) "#plot: not a plot widget"
+        check ((t.splitOn "<svg").length > 1) "#plot: no SVG document"
+        check ((t.splitOn "<figcaption>Widget</figcaption>").length > 1) "#plot: no caption"
+        check (!((t.splitOn "<script").length > 1)) "#plot: the payload contains a script"
+        check (!((t.splitOn "href").length > 1)) "#plot: the payload has an external reference" },
+    { name := "examples/plot.wiz regenerates the figure docs/libraries.md shows (docs/assets/plot-example.svg)", run := fun _ => do
+        cRunLibs (← IO.FS.readFile "examples/plot.wiz")
+          (← IO.FS.readFile "docs/assets/plot-example.svg") }
   ]
 
 builtin_initialize registerGroup plotGroup

@@ -29,9 +29,44 @@ instance : Neg Z3 := Neg.mk (fun x => Z3.ofNat (3 - Z3.toNat x))
 instance : Sub Z3 := Sub.mk (fun x y => Z3.ofNat (Z3.toNat x + (3 - Z3.toNat y)))
 "
 
+/-- (30f) A superclass is an instance-implicit parameter of the class's telescope:
+`class Strong (p) [super : Profunctor p] where …` takes the superclass dictionary as a
+parameter of the *type* (not a stored field), so it shows in `#check Strong` and is
+inserted again at each method. -/
+def profunctorClasses : String := "import Prelude
+class Profunctor (p : Type → Type → Type) where
+  dimap : {A B C D : Type} → (A → B) → (C → D) → p B C → p A D
+class Strong (p : Type → Type → Type) [super : Profunctor p] where
+  first' : {A B C : Type} → p A B → p (A × C) (B × C)
+def Hom (A B : Type) : Type := A → B
+"
+
+def profunctorInsts : String := "instance : Profunctor Hom where
+  dimap := fun f g h => fun a => g (h (f a))
+instance : Strong Hom where
+  first' := fun h ac => (h ac.1, ac.2)
+"
+
+def profunctorSrc : String := profunctorClasses ++ profunctorInsts
+
+/-- A `Type 1` lens over `{p} → [d : Profunctor p] → [i : Strong p]`: the parameter
+form's cost, paid — every signature that forms `Strong p` also carries `[Profunctor p]`
+(30f), and `dimap` is then found from that binder. -/
+def lensSrc : String := "def Lens (S T A B : Type) : Type 1 :=
+  {p : Type → Type → Type} → [d : Profunctor p] → [i : Strong p] → (p A B → p S T)
+def fstL {A B C : Type} : Lens (A × C) (B × C) A B :=
+  fun {p : Type → Type → Type} [d : Profunctor p] [i : Strong p] => @Strong.first' p d i A B C
+def second' {A B C : Type} {p : Type → Type → Type} [d : Profunctor p] [i : Strong p]
+    (x : p A B) : p (C × A) (C × B) :=
+  Profunctor.dimap (fun ca => (ca.2, ca.1)) (fun bc => (bc.2, bc.1)) (Strong.first' x)
+#eval second' (p := Hom) (A := Nat) (B := Nat) (C := Bool) (fun n => n + 1) (Bool.true, 2)
+#eval fstL (p := Hom) (fun n => n + 1) (1, Bool.true)
+"
+
 def classGroup : Group where
   name := "classes"
   exercise := "Exercise 7.1"
+  parallel := true
   cases := [
     { name := "methods take the instance as an instance-implicit argument", run := fun _ =>
         okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {A : Type} → [self : Inhabited A] → A"] },
@@ -116,7 +151,21 @@ def classGroup : Group where
         failsLib "import Prelude\ninstance instHAdd : Add Bool := Add.mk Bool.and" "'instHAdd' is declared by both" },
     { name := "7f: compiled: operators with defaulted numerals are native", run := fun _ =>
         okLib "import Prelude\ndef g := fun x => x * 2 + 1\n#ir g\ndef h (x : Nat) : Nat := x ^ 2 + 1\n#run h 5"
-          ["def g x0 :=\n  let x1 := 2\n  let x2 := prim nat.mul x0 x1\n  let x3 := 1\n  let x4 := prim nat.add x2 x3\n  ret x4", "26"] }
+          ["def g x0 :=\n  let x1 := 2\n  let x2 := prim nat.mul x0 x1\n  let x3 := 1\n  let x4 := prim nat.add x2 x3\n  ret x4", "26"] },
+    -- (30f) a superclass is an instance-implicit parameter, not a stored field
+    { name := "30f: a superclass parameter shows in the class type and in each method", run := fun _ =>
+        okLib (profunctorClasses ++ "#check Profunctor\n#check Strong\n#check Strong.mk\n#check Strong.first'")
+          ["Profunctor : (Type → Type → Type) → Type 1",
+           "Strong : (p : Type → Type → Type) → [super : Profunctor p] → Type 1",
+           -- The class parameters are erased (`{0 p}`, `{0 super}`); they name types,
+           -- so the constructor and each method carry them at quantity 0.
+           "Strong.mk : {0 p : Type → Type → Type} → {0 super : Profunctor p} → ({A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)) → Strong p super",
+           "Strong.first' : {0 p : Type → Type → Type} → {0 super : Profunctor p} → [self : Strong p super] → {A : Type} → {B : Type} → {C : Type} → p A B → p (A × C) (B × C)"] },
+    { name := "30f: a class with a superclass parameter compiles and runs", run := fun _ =>
+        okLib (profunctorSrc ++ lensSrc) ["(.true, 3)", "(2, .true)"] },
+    { name := "30f: forming `C a` needs `D a`, so a context carries both", run := fun _ =>
+        failsLib (profunctorClasses ++ "def needsDimap {p : Type → Type → Type} [i : Strong p] (x : p Nat Nat) : p Nat Nat :=\n  Profunctor.dimap (fun a => a) (fun a => a) x")
+          "failed to synthesize an instance of Profunctor p" }
   ]
 
 builtin_initialize registerGroup classGroup

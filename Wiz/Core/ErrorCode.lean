@@ -12,6 +12,13 @@ namespace Wiz.ErrorCode
 
 /-- a name that is neither a local nor a global in scope -/
 def unknownIdentifier := "unknown-identifier"
+/-- (13v) `__root__` not as the first segment of a name, or a declaration named exactly
+`__root__` (it is the root escape, not a name) -/
+def rootName := "root-name"
+/-- (13t) a name that two `open`s (or an `open` and a declaration) both provide -/
+def ambiguousName := "ambiguous-name"
+/-- (13t) a `namespace` with no `end` (reported at the `namespace`) -/
+def unclosedNamespace := "unclosed-namespace"
 /-- `t.f` where the type of `t` has no field (or namespace member) `f` -/
 def noSuchField := "no-such-field"
 /-- `.c` or a pattern `.c …` where the type has no constructor `c` -/
@@ -22,6 +29,10 @@ def unknownModule := "unknown-module"
 def importCycle := "import-cycle"
 /-- an `import` of a module that has errors of its own -/
 def moduleErrors := "module-errors"
+/-- the file the command names cannot be read (`wiz check no.wiz`) -/
+def noSuchFile := "no-such-file"
+/-- an `import` after a declaration, or nested in a command (the header is fixed) -/
+def importOrder := "import-order"
 /-- a `match` (or equations) that misses constructors -/
 def missingCase := "missing-case"
 /-- a copattern definition that misses an observation -/
@@ -59,6 +70,8 @@ apart -/
 def private_ := "private"
 /-- a name declared twice -/
 def duplicateDeclaration := "duplicate-declaration"
+/-- a `match` that names its equation hypothesis twice (`match h : e, h : f with`) -/
+def duplicateHypothesis := "duplicate-hypothesis"
 /-- a constructor declared twice in one `inductive` -/
 def duplicateConstructor := "duplicate-constructor"
 /-- a local variable that shadows the recursive definition it is in -/
@@ -87,11 +100,12 @@ def nonPattern := "non-pattern"
 
 /-- The codes, as `docs/error-codes.md` lists them (`nonPattern` is internal). -/
 def all : List String :=
-  [unknownIdentifier, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
+  [unknownIdentifier, rootName, ambiguousName, unclosedNamespace, noSuchField, unknownConstructor, unknownModule, importCycle, moduleErrors,
+   noSuchFile, importOrder,
    missingCase, missingCopattern, missingField, typeMismatch, notDefeq, wrongArgumentCount,
    unknownParameter, namedArgument, unsolvedHole, unsolvedLevel, cannotInfer, unsolvedGoals,
    tacticFailed, typeExpected, binderMismatch, private_, duplicateDeclaration,
-   duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
+   duplicateHypothesis, duplicateConstructor, shadowedRecursive, notStructural, unknownSyntax, unknownClass,
    unknownDeclaration, simpLemmaNotEquation, simpLemmaConditional, quantity, kernelRejected, parseError]
 
 /-- The code a message is reported with: internal codes become the public ones. -/

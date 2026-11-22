@@ -1,0 +1,74 @@
+-- L2 hardware examples (stage S0, `import Hdl.Core`): each circuit is built twice (with
+-- and without hash-consing) and simulated three ways (values; the netlist from each
+-- builder). Checked by the `hdl` test group.
+import Hdl.Core
+def u8 : HwTy := HwTy.bits 8
+def none0 : HwTy := HwTy.bits 0
+def nil0 : HwTy.El none0 := BitVec.ofNat 0 0
+
+-- E1: the counter
+def counterC : Circuit none0 u8 :=
+  Circuit.mk u8 (BitVec.ofNat 8 0) (fun s u => Hw.pair (Hw.add s (Hw.lit 8 1)) s)
+
+-- the doubling chain x_{k+1} = x_k + x_k, written with a meta `let` (auto-shared)
+def dbl {r : HwTy → Type} [Hw r] : Nat → r u8 → r u8
+  | .zero, x => x
+  | .succ k, x => let y := Hw.add x x; dbl k y
+-- the same with the sharing switched off (an explicit quantity opts out)
+def dblNoShare {r : HwTy → Type} [Hw r] : Nat → r u8 → r u8
+  | .zero, x => x
+  | .succ k, x => let ω y := Hw.add x x; dblNoShare k y
+
+-- a saturating counter: the comparison and the increment share `s`
+def clampC : Circuit none0 u8 :=
+  Circuit.mk u8 (BitVec.ofNat 8 250)
+    (fun s u => let n := Hw.mux (Hw.eq s (Hw.lit 8 0xFF)) s (Hw.add s (Hw.lit 8 1)); Hw.pair n s)
+
+-- popcount by meta recursion over the bit index
+def bitAt {r : HwTy → Type} [Hw r] (x : r u8) (i : Nat) : r u8 :=
+  Hw.cat (Hw.lit 7 0) (Hw.slice i 1 x)
+def popCount {r : HwTy → Type} [Hw r] (x : r u8) : Nat → r u8
+  | .zero => Hw.lit 8 0
+  | .succ i => Hw.add (bitAt x i) (popCount x i)
+
+-- a 4-tap moving sum with a shared sub-sum, state = the last three samples
+def firC : Circuit u8 u8 :=
+  Circuit.mk (HwTy.prod u8 (HwTy.prod u8 u8)) (BitVec.ofNat 8 0, (BitVec.ofNat 8 0, BitVec.ofNat 8 0))
+    (fun s x =>
+      let a := Hw.fst s;
+      let b := Hw.fst (Hw.snd s);
+      let c := Hw.snd (Hw.snd s);
+      let ab := Hw.add a b;
+      Hw.pair (Hw.pair x (Hw.pair a b)) (Hw.add (Hw.add x c) (Hw.add ab (Hw.add b a))))
+
+def trace : List Nat := .cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 200 (.cons 7 .nil)))))
+def report {ω i o : HwTy} (c : Circuit i o) : (Nat × Nat) × (List Nat × List Nat × List Nat) :=
+  ((Netlist.size (Circuit.netlist "c" c), Netlist.size (Circuit.netlistNaive "c" c)),
+   (Circuit.runPacked c trace, Circuit.simNet .true c trace, Circuit.simNet .false c trace))
+
+def r1 : (Nat × Nat) × (List Nat × List Nat × List Nat) := report counterC
+#eval r1
+def r2 : (Nat × Nat) × (List Nat × List Nat × List Nat) := report clampC
+#eval r2
+def popC : Circuit u8 u8 := Circuit.mk none0 nil0 (fun s x => Hw.pair s (popCount x 8))
+def r3 : (Nat × Nat) × (List Nat × List Nat × List Nat) := report popC
+#eval r3
+def r4 : (Nat × Nat) × (List Nat × List Nat × List Nat) := report firC
+#eval r4
+def chain : Circuit u8 u8 := Circuit.mk none0 nil0 (fun s x => Hw.pair s (dbl 20 x))
+def chainS : Netlist × NetS := Circuit.netlistS .true "chain" chain
+def q1 : Nat × Nat × Nat := (Netlist.size chainS.1, Netlist.count NetOp.isAdd chainS.1, chainS.2.work)
+#eval q1
+def chain3 : Circuit u8 u8 := Circuit.mk none0 nil0 (fun s x => Hw.pair s (dbl 3 x))
+def q2 : List Nat × List Nat := (Circuit.runPacked chain3 trace, Circuit.simNet .true chain3 trace)
+#eval q2
+def inp : Wire u8 := NetM.emit (NetOp.input 0) 8 []
+def n1 : NetS := (Wire.build .true (dblNoShare 10 inp)).2
+def n2 : NetS := (Wire.build .false (dblNoShare 10 inp)).2
+def q3 : Nat × Nat × Nat := (n1.next, n1.work, n2.next)
+#eval q3
+-- identical subterms from different paths merge: (x + y) built twice, once as (y + x)
+def twoPaths {r : HwTy → Type} [Hw r] (x y : r u8) : r u8 := Hw.mul (Hw.add x y) (Hw.add y x)
+def inp2 : Wire u8 := NetM.emit (NetOp.input 1) 8 []
+def m1 : NetS := (Wire.build .true (twoPaths inp inp2)).2
+#eval m1.next

@@ -1,0 +1,581 @@
+import Sys
+import Word
+import Text
+import Functor
+import Json
+import Scry.Quire
+import Scry.QuireCursor
+import Scry.Facts
+import Scry.CstStore
+import Scry.AnalysisFile
+/-!
+# Scry.QuireGraph: the graph in Quire, and the revision manifest
+
+`wiz-notes/scry-as-wiz.md` §4–§6. The graph is a Quire file (`drafts/storage-engine/`),
+not a JSON document. This module is the bridge:
+
+* **encoding.** Each graph node is a Quire record `(id = node id, kind = node-kind id,
+  count = span start, label = span stop)`. Each graph edge and each relation tuple is a
+  **row record** `(id = N + row index, kind = relation id, count = column 0,
+  label = column 1)`. Names are interned in the manifest (`kinds`, `edgeLabels`,
+  `relations`, `fileTable`); ids are stable for that manifest. The prototype encodes
+  arity-2 relations only (the graph's `call`, `file_of` and edges are arity 2); a higher
+  arity is refused, not silently truncated.
+* **snapshots.** A re-ingest is a *new commit*: the transaction deletes the previous
+  manifest's records and sets the new ones, `putQ` publishes a new generation and root,
+  and the old snapshot remains readable to a reader that still holds it (Quire's COW).
+  The manifest is written *after* the commit; a crash between them leaves `store.gen >
+  manifest.gen`, which the runner reports as "manifest behind store", never as fresh.
+* **revision.** `treeState` hashes the ingested files (`path`, `size`, FNV-1a-64 of the
+  contents); `gitRevision` records a commit and a dirty-tree hash. The analysis compares
+  its manifest with the tree on disk (`Scry.revisionVerdict`) and reports both values
+  when they differ.
+* **the writer lock is separate.** `withWriter` is an `flock(LOCK_EX)` on
+  `<graph>.writer`, only so two ingests cannot allocate pages concurrently. It is *not*
+  the revision mechanism and is never called the lock file.
+
+The Quire API used: `openQ`/`getQ`/`putQ`/`closeQ`, `QSnapshot.record` (a write-set),
+`QSnapshot.getNode`, `QSnapshot.indexCursorRange` (a `QCursor` over primary ids), and `QSnapshot.gen`.
+`IndexDef` fields 0/1/2 are the record's kind/count/label; the three indices are
+non-unique.
+-/
+
+-- ## Paths (the command resolves `#ingest` against the file's directory)
+
+/-- The directory part of a path. -/
+def Scry.dirName (p : String) : String :=
+  match List.reverse (String.splitOn p "/") with
+  | [] => ""
+  | List.cons _ rest => String.intercalate "/" (List.reverse rest)
+
+/-- Resolve `p` against `dir` unless it is absolute. -/
+def Scry.resolvePath (dir p : String) : String :=
+  match String.startsWith p "/" with
+  | .true => p
+  | .false => match String.eq dir "" with
+    | .true => p
+    | .false => Path.join dir p
+
+/-- Recursively create `p`. -/
+partial def Scry.G.ensureDir (p : String) : EIO Unit :=
+  match String.eq p "" with
+  | .true => EIO.pure ()
+  | .false => do
+    ok ← EIO.lift (FS.exists p);
+    match ok with
+    | .true => do
+      dir ← EIO.lift (FS.isDir p);
+      match dir with
+      | .true => EIO.pure ()
+      | .false => EIO.fail (String.append p ": not a directory")
+    | .false => do
+      let parts := String.splitOn p "/";
+      let parent := match List.reverse parts with
+        | [] => ""
+        | List.cons _ rest => String.intercalate "/" (List.reverse rest);
+      Scry.G.ensureDir parent;
+      FS.createDir p
+
+-- ## The schema and the id space
+
+/-- The kind index (field 0). -/
+def Scry.G.kindIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+/-- The count/column-0 index (field 1). -/
+def Scry.G.countIndex : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 1) .false
+/-- The label/column-1 index (field 2). -/
+def Scry.G.labelIndex : IndexDef := IndexDef.mk (U32.ofNat 2) (U32.ofNat 2) .false
+
+/-- The indices a graph file is opened with. -/
+def Scry.G.indices : List IndexDef :=
+  [Scry.G.kindIndex, Scry.G.countIndex, Scry.G.labelIndex]
+
+/-- Node-kind ids start at 1 (`0` means "unknown"). -/
+def Scry.G.kindBase : Nat := 1
+/-- Edge-label relation ids start here. -/
+def Scry.G.edgeBase : Nat := 1000
+/-- Relation ids start here (above the edge range). -/
+def Scry.G.relBase : Nat := 2000
+
+/-- `n < 2^32` (the record's `kind`/`label` and a span end are `U32` columns). -/
+def Scry.G.fits32 (n : Nat) : Bool := Nat.lt n 4294967296
+
+/-- The distinct strings of a list, in first-appearance order. -/
+partial def Scry.G.unique : List String → List String
+  | [] => []
+  | List.cons x xs =>
+    match List.any (fun y => String.eq x y) xs with
+    | .true => Scry.G.unique xs
+    | .false => List.cons x (Scry.G.unique xs)
+
+/-- A name→id table with ids `base, base+1, …`. -/
+def Scry.G.tableOf (base : Nat) (xs : List String) : List (String × Nat) :=
+  Scry.mapIdxFrom 0 (fun i s => (s, Nat.add base i)) xs
+
+/-- A table's id for `s` (`0` when absent). -/
+def Scry.G.lookupId : List (String × Nat) → String → Nat
+  | [], _ => 0
+  | (List.cons p rest), s =>
+    match String.eq p.1 s with
+    | .true => p.2
+    | .false => Scry.G.lookupId rest s
+
+/-- `0, 1, …, n-1`. -/
+partial def Scry.G.range : Nat → List Nat
+  | .zero => []
+  | .succ k => List.append (Scry.G.range k) [k]
+
+/-- The `i`th string, or `""`. -/
+def Scry.G.nthString : List String → Nat → String
+  | [], _ => ""
+  | List.cons x xs, .zero => x
+  | List.cons _ xs, .succ k => Scry.G.nthString xs k
+
+-- ## Encoding a merged fact store
+
+/-- The encoded graph plus what the commit needs. -/
+structure Scry.G.Encoded where
+  manifest : Scry.Manifest
+  records : List (Nat × Node)
+  oldIds : List Nat
+
+/-- The first tuple that is not arity 2, with its relation name. -/
+partial def Scry.G.badTuple : List Scry.Relation → Option (String × Nat)
+  | [] => .none
+  | List.cons r rest =>
+    match List.find (fun t => Bool.not (Nat.beq (List.length t) 2)) r.tuples with
+    | .some _ => .some (r.name, r.arity)
+    | .none => Scry.G.badTuple rest
+
+/-- A relation's rows: `(id, Node.mk relId col0 col1)`, ids from `next`. -/
+partial def Scry.G.relationRows (next : Nat) (rels : List (String × Nat))
+    (rs : List Scry.Relation) : List (Nat × Node) × Nat :=
+  match rs with
+  | [] => ([], next)
+  | List.cons r rest =>
+    let rid := Scry.G.lookupId rels r.name;
+    let rows := Scry.mapIdxFrom next (fun i t => match t with
+      | List.cons a (List.cons b _) =>
+        (i, Node.mk (U32.ofNat rid) (U64.ofNat a) (U32.ofNat b))
+      | _ => (i, Node.mk (U32.ofNat rid) (U64.ofNat 0) (U32.ofNat 0))) r.tuples;
+    let more := Scry.G.relationRows (Nat.add next (List.length r.tuples)) rels rest;
+    (List.append rows more.1, more.2)
+
+/-- Encode a merged fact store. The manifest is produced with `gen = 0`; the caller
+fills in the committed generation. `old` supplies the record ids to delete. -/
+def Scry.G.encode (revision : Scry.Revision) (source graphPath : String)
+    (files : List Scry.FileDigest) (facts : Scry.Facts) (old : Option Scry.Manifest)
+    : Except String Scry.G.Encoded :=
+  match Scry.G.badTuple facts.relations with
+  | .some b => .error (String.append "relation " (String.append b.1
+      (String.append ": arity " (String.append (Nat.repr b.2)
+        " is not 2 (the Quire graph encodes arity 2)"))))
+  | .none =>
+    let kinds := Scry.G.tableOf Scry.G.kindBase (Scry.G.unique (List.map (fun n => n.kind) facts.nodes));
+    let edgeLabels := Scry.G.tableOf Scry.G.edgeBase (Scry.G.unique (List.map (fun e => e.label) facts.edges));
+    let rels := Scry.G.tableOf Scry.G.relBase (Scry.G.unique (List.map (fun r => r.name) facts.relations));
+    let fileNodes := List.filter (fun n => String.startsWith n.kind "file:") facts.nodes;
+    let fileTable : List (String × Nat) := match fileNodes with
+      | [] => Scry.mapIdxFrom 0 (fun i f => (f.path, i)) facts.files
+      | List.cons _ _ => List.map (fun n =>
+          ((match String.stripPrefix n.kind "file:" with
+            | .some p => p
+            | .none => n.kind), n.id.n)) fileNodes;
+    let n := List.length facts.nodes;
+    let nodeRecs := Scry.mapIdxFrom 0 (fun i nd =>
+      (nd.id.n, Node.mk (U32.ofNat (Scry.G.lookupId kinds nd.kind))
+        (U64.ofNat nd.span.start) (U32.ofNat nd.span.stop))) facts.nodes;
+    let edgeRecs := Scry.mapIdxFrom 0 (fun i e =>
+      (Nat.add n i, Node.mk (U32.ofNat (Scry.G.lookupId edgeLabels e.label))
+        (U64.ofNat e.src.n) (U32.ofNat e.dst.n))) facts.edges;
+    let relRecs := Scry.G.relationRows (Nat.add n (List.length facts.edges)) rels facts.relations;
+    let oldIds : List Nat := match old with
+      | .none => []
+      | .some m => match Nat.beq m.gen 0 with
+        | .true => []
+        | .false => Scry.G.range (Nat.add m.nodeCount
+            (Nat.add m.edgeRowCount m.relationRowCount));
+    let manifest := Scry.Manifest.mk "scry-graph-manifest/1" source graphPath 0 revision
+      files kinds rels edgeLabels fileTable n (List.length facts.edges)
+      (List.foldl (fun k r => Nat.add k (List.length r.tuples)) 0 facts.relations)
+      (Scry.viewOfFacts facts);
+    .ok (Scry.G.Encoded.mk manifest (List.append nodeRecs (List.append edgeRecs relRecs.1)) oldIds)
+
+-- ## Reading a graph back
+
+/-- The ids in an index bucket (index-only: no primary read). -/
+def Scry.G.idsOfKind (s : QSnapshot) (kindId : Nat) : List Nat :=
+  QCursor.fold (QSnapshot.indexCursorRange Scry.G.kindIndex (KeyRange.eq (U64.ofNat kindId)) s)
+    (fun acc id => List.cons id.toNat acc) []
+
+/-- The record for `id`. -/
+def Scry.G.nodeOf (s : QSnapshot) (id : Nat) : Option Node :=
+  QSnapshot.getNode s (U64.ofNat id)
+
+/-- The file path of `id`, through the `file_of` relation (`[node, fileId]`). -/
+def Scry.G.fileOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : String :=
+  let rows := QCursor.fold
+    (QSnapshot.indexCursorRange Scry.G.countIndex (KeyRange.eq (U64.ofNat id)) s)
+    (fun acc r => List.cons r.toNat acc) [];
+  let hit := List.find (fun r => match Scry.G.nodeOf s r with
+    | .some n => Nat.beq n.kind.toNat fileRel
+    | .none => .false) rows;
+  match hit with
+  | .none => ""
+  | .some r => match Scry.G.nodeOf s r with
+    | .some n => match List.find (fun p => Nat.beq p.2 n.label.toNat) m.fileTable with
+      | .some p => p.1
+      | .none => ""
+    | .none => ""
+
+/-- A call/error site from a node id. -/
+def Scry.G.siteOf (s : QSnapshot) (m : Scry.Manifest) (fileRel id : Nat) : Option Scry.AfCallSite :=
+  match Scry.G.nodeOf s id with
+  | .none => .none
+  | .some n => .some (Scry.AfCallSite.mk id (Scry.G.fileOf s m fileRel id)
+      n.count.toNat n.label.toNat)
+
+/-- The live view: query the Quire snapshot, with the manifest's counts. -/
+def Scry.G.viewOf (s : QSnapshot) (m : Scry.Manifest) : Scry.GraphView :=
+  let callKind := Scry.G.lookupId m.kinds "call_expression";
+  let callRel := Scry.G.lookupId m.relations "call";
+  let fileRel := Scry.G.lookupId m.relations "file_of";
+  let errorKind := Scry.G.lookupId m.kinds "ERROR";
+  let callIds := List.filter (fun id => Nat.lt id m.nodeCount) (Scry.G.idsOfKind s callKind);
+  let errIds := List.filter (fun id => Nat.lt id m.nodeCount) (Scry.G.idsOfKind s errorKind);
+  let calls := Scry.filterMap (fun id => Scry.G.siteOf s m fileRel id) callIds;
+  let errors := Scry.filterMap (fun id => Scry.G.siteOf s m fileRel id) errIds;
+  let rows := Scry.G.idsOfKind s callRel;
+  let heads := Scry.filterMap (fun r => match Scry.G.nodeOf s r with
+    | .some n => .some n.count.toNat
+    | .none => .none) rows;
+  Scry.GraphView.mk calls heads errors m.nodeCount m.edgeRowCount m.relationRowCount
+
+/-- Open the graph, read its current snapshot and the live view. -/
+def Scry.G.readGraph (path : String) (m : Scry.Manifest) : EIO (Scry.GraphView × Nat) := do
+  ok ← EIO.lift (FS.exists path);
+  match ok with
+  | .false => EIO.fail (String.append "graph " (String.append path
+      " does not exist: run the ingest command first"))
+  | .true => do
+    h ← openQ path Scry.G.indices;
+    s ← getQ h;
+    let v := Scry.G.viewOf s m;
+    closeQ h;
+    EIO.pure (v, s.gen.toNat)
+
+-- ## Committing a new snapshot
+
+/-- A commit error as text. -/
+def Scry.G.commitError : CommitError → String
+  | .stale b c => String.append "stale transaction (base " (String.append (Nat.repr b.toNat)
+      (String.append ", current " (String.append (Nat.repr c.toNat) ")")))
+  | .conflict id e a => String.append "conflict on " (String.append (Nat.repr id.toNat)
+      (String.append " (expected " (String.append (Nat.repr e.toNat)
+        (String.append ", actual " (String.append (Nat.repr a.toNat) ")")))))
+  | .missing id => String.append "missing " (Nat.repr id.toNat)
+  | .duplicate ix v => String.append "duplicate index " (String.append (Nat.repr ix.toNat)
+      (String.append " value " (Nat.repr v.toNat)))
+  | .expired b f => String.append "expired transaction (base " (String.append (Nat.repr b.toNat)
+      (String.append ", floor " (String.append (Nat.repr f.toNat) ")")))
+
+/-- Commit the encoded graph as a new snapshot. Deletes the previous manifest's ids,
+then sets the new records; returns the new generation. -/
+def Scry.G.commit (path : String) (eg : Scry.G.Encoded) : EIO Nat := do
+  h ← openQ path Scry.G.indices;
+  s ← getQ h;
+  let s1 := List.foldl (fun tx id =>
+    QSnapshot.record tx (U64.ofNat id) (.some .del)) s eg.oldIds;
+  let s2 := List.foldl (fun tx r =>
+    QSnapshot.record tx (U64.ofNat r.1) (.some (.set r.2))) s1 eg.records;
+  o ← putQ h s2;
+  closeQ h;
+  match o with
+  | .committed g => EIO.pure g.toNat
+  | .rejected e => EIO.fail (Scry.G.commitError e)
+
+-- ## Revisions
+
+/-- One file's digest. -/
+def Scry.G.digestFile (root name : String) : EIO Scry.FileDigest := do
+  text ← FS.readFile (Path.join root name);
+  st ← FS.stat (Path.join root name);
+  EIO.pure (Scry.FileDigest.mk name st.size (Scry.revHex (Scry.revFnv text)))
+
+/-- A source tree's revision and its file digests. -/
+structure Scry.G.TreeState where
+  revision : Scry.Revision
+  files : List Scry.FileDigest
+
+/-- The store files in `root`, in name order (the prototype's tree: `*.facts.json` and
+`*.cst`). A real frontend lists the sources it read; the manifest records that list. -/
+def Scry.G.treeNames (root : String) : EIO (List String) := do
+  names ← FS.listDir root;
+  EIO.pure (List.filter (fun n => Bool.or (String.endsWith n ".facts.json")
+    (String.endsWith n ".cst")) names)
+
+/-- Digest every name. -/
+partial def Scry.G.digestAll (root : String) : List String → EIO (List Scry.FileDigest)
+  | [] => EIO.pure []
+  | List.cons n rest => do
+    d ← Scry.G.digestFile root n;
+    ds ← Scry.G.digestAll root rest;
+    EIO.pure (List.cons d ds)
+
+/-- Hash the tree: the concatenation of `path`, size and content hash, in name order. -/
+def Scry.G.treeState (root : String) : EIO Scry.G.TreeState := do
+  names ← Scry.G.treeNames root;
+  files ← Scry.G.digestAll root names;
+  let combined := String.intercalate "\n" (List.map (fun f =>
+    String.append f.path (String.append "|" (String.append (Nat.repr f.bytes)
+      (String.append "|" f.hash)))) files);
+  EIO.pure (Scry.G.TreeState.mk
+    (Scry.Revision.mk "tree" "fnv1a64" (String.append "t_" (Scry.revHex (Scry.revFnv combined)))
+      .false "") files)
+
+/-- Run a command, returning its stdout and whether it exited 0. -/
+def Scry.G.capture (cmd : String) (args : List String) : EIO (String × Bool) := do
+  o ← Process.output cmd args "";
+  EIO.pure (o.stdout, ExitStatus.success o.status)
+
+/-- A git checkout's revision: HEAD, plus a dirty-tree hash when `git status` or
+`git diff HEAD` is non-empty. -/
+def Scry.G.gitRevision (root : String) : EIO Scry.Revision := do
+  h ← Scry.G.capture "git" ["-C", root, "rev-parse", "HEAD"];
+  match h.2 with
+  | .false => EIO.fail (String.append root " is not a git checkout (or git is unavailable)")
+  | .true => do
+    st ← Scry.G.capture "git" ["-C", root, "status", "--porcelain"];
+    df ← Scry.G.capture "git" ["-C", root, "diff", "HEAD"];
+    let dirty := Bool.not (String.isEmpty (String.trim st.1));
+    let dirtyHash := match dirty with
+      | .true => Scry.revHex (Scry.revFnv (String.append st.1 df.1))
+      | .false => "";
+    EIO.pure (Scry.Revision.mk "git" "git-sha1" (String.trim h.1) dirty dirtyHash)
+
+/-- Whether `rev` is present in this checkout. The remote case: a manifest may name a
+revision that is not checked out here; ingest refuses with "fetch first" rather than
+inventing a tree. -/
+def Scry.G.remoteCheck (root rev : String) : EIO (Except String Unit) := do
+  r ← Scry.G.capture "git" ["-C", root, "cat-file", "-e", String.append rev "^{commit}"];
+  match r.2 with
+  | .true => EIO.pure (.ok ())
+  | .false => EIO.pure (.error (String.append "revision " (String.append rev
+      " is not present in this checkout; fetch it first")))
+
+/-- The current revision of a manifest's source: git when the manifest says git, the
+tree hash otherwise. -/
+def Scry.G.currentRevision (m : Scry.Manifest) : EIO Scry.Revision :=
+  match String.eq m.revision.kind "git" with
+  | .true => Scry.G.gitRevision m.source
+  | .false => do
+    ts ← Scry.G.treeState m.source;
+    EIO.pure ts.revision
+
+-- ## The separate writer lock
+
+/-- The writer lock path. This is not the revision manifest. -/
+def Scry.G.writerPath (graph : String) : String := String.append graph ".writer"
+
+/-- The raw IO action behind an `EIO` (so `finallyWriter` can observe an error and still
+release the descriptor; `IO.bind` takes a linear action). -/
+def Scry.G.runRaw {A : Type} (x : EIO A) : IO (Except String A) := x
+
+/-- Release and close on every path. -/
+def Scry.G.finallyWriter {A : Type} (fd : Fd) (body : EIO A) : EIO A :=
+  IO.bind (Scry.G.runRaw body) (fun r =>
+    IO.bind (Fd.unlock fd) (fun u =>
+      IO.bind (Fd.close fd) (fun c =>
+        match u with
+        | .error e => IO.pure (.error e)
+        | .ok _ => match c with
+          | .error e => IO.pure (.error e)
+          | .ok _ => IO.pure r)))
+
+/-- Run `body` holding the graph's writer lock. Two ingests cannot interleave their
+read/commit sequence; a live holder is refused, never pre-empted. The revision manifest
+is a different mechanism and is checked by the analysis. -/
+def Scry.G.withWriter {A : Type} (graph : String) (body : EIO A) : EIO A := do
+  fd ← Fd.open (Scry.G.writerPath graph) .readWrite
+    (OpenFlags.mk .true .false .false .false .false .false);
+  l ← Fd.tryLock fd .exclusive;
+  match l with
+  | .busy => do
+    Fd.close fd;
+    EIO.fail (String.append "another ingest is writing " graph)
+  | .acquired => Scry.G.finallyWriter fd body
+
+-- ## Ingest
+
+/-- What one ingest produced. -/
+structure Scry.G.IngestResult where
+  ok : Bool
+  graph : String
+  manifestPath : String
+  revision : Scry.Revision
+  gen : Nat
+  committed : Bool
+  stores : Nat
+  nodes : Nat
+  edges : Nat
+  diagnostics : List Scry.IngestDiagnostic
+
+/-- A failed result. -/
+def Scry.G.failResult (graph manifestPath : String) (msg : String) : Scry.G.IngestResult :=
+  Scry.G.IngestResult.mk .false graph manifestPath Scry.emptyRevision 0 .false 0 0 0
+    (List.cons (Scry.IngestDiagnostic.mk "error" msg "" 0 0 0) .nil)
+
+/-- Read the manifest sidecar, if it exists. A malformed manifest is an error: ingest
+must not overwrite a manifest it cannot understand. -/
+def Scry.G.readManifest (path : String) : EIO (Option Scry.Manifest) := do
+  ok ← EIO.lift (FS.exists path);
+  match ok with
+  | .false => EIO.pure .none
+  | .true => do
+    text ← FS.readFile path;
+    match Scry.manifestOfText text with
+    | .ok m => EIO.pure (.some m)
+    | .error e => EIO.fail (String.append path (String.append ": " e))
+
+/-- Write the manifest atomically (sibling + rename). -/
+def Scry.G.writeManifest (path : String) (m : Scry.Manifest) : EIO Unit := do
+  let tmp := String.append path ".tmp";
+  FS.writeFile tmp (String.append (Scry.manifestText m) "\n");
+  FS.rename tmp path
+
+/-- Load one store: JSON first, then the `scry-cst 1` spill. -/
+def Scry.G.loadStore (p : String) : EIO Scry.Facts := do
+  text ← FS.readFile p;
+  match Scry.Facts.ofText text with
+  | .ok f => EIO.pure f
+  | .error jsonErr => match Scry.CstStore.ofText text with
+    | .ok s => match Scry.CstStore.toFacts s with
+      | .ok f => EIO.pure f
+      | .error cstErr => EIO.fail (String.append p (String.append ": " cstErr))
+    | .error cstErr => EIO.fail (String.append p
+        (String.append ": " (String.append jsonErr (String.append " (cst: "
+          (String.append cstErr ")")))))
+
+/-- Load every store, stopping at the first error. -/
+partial def Scry.G.loadStores (root : String) : List String → EIO (List Scry.Facts)
+  | [] => EIO.pure []
+  | List.cons n rest => do
+    f ← Scry.G.loadStore (Path.join root n);
+    fs ← Scry.G.loadStores root rest;
+    EIO.pure (List.cons f fs)
+
+/-- Read the store's current generation without committing. -/
+def Scry.G.storeGen (path : String) : EIO Nat := do
+  h ← openQ path Scry.G.indices;
+  s ← getQ h;
+  closeQ h;
+  EIO.pure s.gen.toNat
+
+/-- The body of an ingest, with the writer lock already held. -/
+def Scry.G.ingestTreeBody (root graphPath manifestPath : String) (git : Bool) : EIO Scry.G.IngestResult := do
+  old ← Scry.G.readManifest manifestPath;
+  ts ← (match git with
+    | .true => do
+      r ← Scry.G.gitRevision root;
+      EIO.pure (Scry.G.TreeState.mk r [])
+    | .false => Scry.G.treeState root);
+  names ← Scry.G.treeNames root;
+  match names with
+  | [] => EIO.pure (Scry.G.failResult graphPath manifestPath
+      (String.append "no store files (*.facts.json, *.cst) in " root))
+  | List.cons _ _ => do
+    fs ← Scry.G.loadStores root names;
+    match Scry.mergeFacts fs with
+    | .error e => EIO.pure (Scry.G.failResult graphPath manifestPath e)
+    | .ok facts =>
+      match Scry.G.encode ts.revision root graphPath ts.files facts old with
+      | .error e => EIO.pure (Scry.G.failResult graphPath manifestPath e)
+      | .ok eg => do
+        -- The same revision and the same generation is a no-op: no new snapshot.
+        let sameRevision : Bool := match old with
+          | .some m => Bool.and (String.eq m.revision.value ts.revision.value)
+              (Bool.and (String.eq m.revision.kind ts.revision.kind)
+                (Bool.and (Scry.boolEq m.revision.dirty ts.revision.dirty)
+                  (String.eq m.revision.dirtyHash ts.revision.dirtyHash)))
+          | .none => .false;
+        sg ← (match old with
+          | .some _ => Scry.G.storeGen graphPath
+          | .none => EIO.pure 0);
+        let sameGen : Bool := match old with
+          | .some m => Nat.beq sg m.gen
+          | .none => .false;
+        let same := Bool.and sameRevision sameGen;
+        match same with
+        | .true =>
+          let m := match old with | .some x => x | .none => eg.manifest;
+          EIO.pure (Scry.G.IngestResult.mk .true graphPath manifestPath ts.revision m.gen
+            .false (List.length fs) (List.length facts.nodes) (List.length facts.edges)
+            (List.cons (Scry.IngestDiagnostic.mk "info"
+              (String.append "up to date at " (Scry.renderRevision ts.revision)) "" 0 0 0) .nil))
+        | .false => do
+          g ← Scry.G.commit graphPath eg;
+          let m := { eg.manifest with gen := g };
+          Scry.G.writeManifest manifestPath m;
+          let msg := String.append "ingested "
+            (String.append (Nat.repr (List.length fs))
+              (String.append " store(s) at "
+                (String.append (Scry.renderRevision ts.revision)
+                  (String.append " into "
+                    (String.append graphPath
+                      (String.append " (generation "
+                        (String.append (Nat.repr g) ")")))))));
+          EIO.pure (Scry.G.IngestResult.mk .true graphPath manifestPath ts.revision g .true
+            (List.length fs) (List.length facts.nodes) (List.length facts.edges)
+            (List.cons (Scry.IngestDiagnostic.mk "info" msg "" 0 0 0) .nil))
+
+/-- Ingest a source tree into a Quire graph and write the revision manifest. -/
+def Scry.G.ingestTreeGo (root graphPath manifestPath : String) (git : Bool) : EIO Scry.G.IngestResult := do
+  Scry.G.ensureDir (Scry.dirName graphPath);
+  Scry.G.withWriter graphPath (Scry.G.ingestTreeBody root graphPath manifestPath git)
+
+/-- The safe form: a load/commit error becomes a failed result with a diagnostic, so a
+command can report it without unwinding. -/
+def Scry.G.ingestTree (root graphPath manifestPath : String) (git : Bool) : EIO Scry.G.IngestResult :=
+  IO.bind (Scry.G.ingestTreeGo root graphPath manifestPath git) (fun r =>
+    match r with
+    | .ok x => EIO.pure x
+    | .error e => EIO.pure (Scry.G.failResult graphPath manifestPath e))
+
+/-- The ingest result as text. -/
+def Scry.G.renderIngest (r : Scry.G.IngestResult) : String :=
+  let head := String.append (match r.ok with | .true => "ingest: ok" | .false => "ingest: failed")
+    (String.append " " (String.append (Scry.renderRevision r.revision)
+      (String.append " gen=" (String.append (Nat.repr r.gen)
+        (String.append (match r.committed with | .true => " (committed)" | .false => " (no-op)")
+          (String.append " " (String.append (Nat.repr r.stores)
+            (String.append " store(s), " (String.append (Nat.repr r.nodes) " nodes")))))))));
+  match List.isEmpty r.diagnostics with
+  | .true => head
+  | .false => List.foldl (fun acc d =>
+      String.append acc (String.append "\n" (Scry.renderDiagnostic d))) head r.diagnostics
+
+-- ## The file form
+
+/-- Run every `#ingest` line of a file, paths resolved against the file's directory. -/
+partial def Scry.G.runLines (file dir : String) : List Scry.IngestLine → EIO Scry.G.IngestResult
+  | [] => EIO.pure (Scry.G.IngestResult.mk .true "" "" Scry.emptyRevision 0 .false 0 0 0 [])
+  | List.cons l rest => do
+    let root := Scry.resolvePath dir l.spec.root;
+    let dest := Scry.resolvePath dir l.spec.dest;
+    r ← Scry.G.ingestTree root dest (String.append dest ".manifest.json") .false;
+    let here := List.map (fun d => d.atLine file l.line 0 (Nat.sub l.stop l.start)) r.diagnostics;
+    more ← Scry.G.runLines file dir rest;
+    EIO.pure (Scry.G.IngestResult.mk (Bool.and r.ok more.ok)
+      (match String.eq more.graph "" with | .true => r.graph | .false => more.graph)
+      (match String.eq more.manifestPath "" with | .true => r.manifestPath | .false => more.manifestPath)
+      (match String.eq more.revision.value "" with | .true => r.revision | .false => more.revision)
+      (Nat.add r.gen more.gen) (Bool.or r.committed more.committed)
+      (Nat.add r.stores more.stores) (Nat.add r.nodes more.nodes) (Nat.add r.edges more.edges)
+      (List.append here more.diagnostics))
+
+/-- `ingestSourceFile`: the command form of an `analysis.wiz`'s declarations. -/
+def Scry.G.ingestSourceFile (file : String) : EIO Scry.G.IngestResult := do
+  text ← FS.readFile file;
+  let lines := Scry.ingestLines text;
+  match lines with
+  | [] => EIO.pure (Scry.G.failResult "" "" (String.append "no #ingest declaration in " file))
+  | List.cons _ _ => Scry.G.runLines file (Scry.dirName file) lines

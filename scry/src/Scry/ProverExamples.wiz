@@ -1,0 +1,277 @@
+import Scry.Prover
+import Scry.RuleTaint
+import Scry.Bounds
+/-!
+# Tiny prover examples
+
+Small EDBs for the taint rules, small enough to read. They isolate the prover from the
+C# frontend, so the `scry-prover` tests can check the proof objects with exact rows:
+
+```
+point 0: v0 = source()          src(0, 0)
+point 1: v1 = f(v0)             flow(0, 1, 0), gen(1, 1), [san(1, 1)]
+point 2: sink(v1)               flow(1, 2, 1), sink(2, 0, 1)
+```
+
+`Scry.proverSafe` has the `san(1, 1)` kill (the sanitiser); `Scry.proverUnsafe` does
+not. The safe claim's invariant is `{(0,0)}`: the only seed, and the transfer rule is
+blocked at point 1. The unsafe closure adds `{(1,1)}` and the alert obligation fires at
+`sink 2 argument 0`.
+
+The memory pair shows the same shape through a store/load:
+
+```
+point 0: v0 = source()
+point 1: store loc 7 <- v0       flow(0,1,0), mstore(7,1,0)
+point 2: v0 = load loc 7         mload(7,2,0), [san(2,0)]
+point 3: v0 = f(v0)              flow(2,3,0), gen(3,0)
+point 4: sink(v0)                flow(3,4,0), sink(4,0,0)
+```
+
+The unsafe twin is refuted with a path that names the store and the load; the safe twin
+adds `san(2,0)` and proves with `I = {(0,0)}`, `M = {7}`.
+
+The relation numbers are `Scry.rtFlow`/`rtSrc`/`rtSink`/`rtSan`/`rtGen`/`rtMStore`/
+`rtMLoad`.
+-/
+
+def Scry.proverSafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 1, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtSan [U64.ofNat 1, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 1, U64.ofNat 2, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 2, U64.ofNat 0, U64.ofNat 1];
+  st
+
+def Scry.proverUnsafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 1, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 1, U64.ofNat 2, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 2, U64.ofNat 0, U64.ofNat 1];
+  st
+
+/-- A source that is stored into a location and loaded at a later point. -/
+def Scry.proverMemoryUnsafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtMStore [U64.ofNat 7, U64.ofNat 1, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtMLoad [U64.ofNat 7, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 2, U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 3, U64.ofNat 4, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 4, U64.ofNat 0, U64.ofNat 0];
+  st
+
+/-- The same program with the load result sanitised: the store still taints location 7,
+but the load cannot carry it to the sink. -/
+def Scry.proverMemorySafe : Scry.State Nat :=
+  Scry.State.addTuple Scry.proverMemoryUnsafe Scry.rtSan [U64.ofNat 2, U64.ofNat 0]
+
+/-- A sink with no source at all: sound but vacuous. -/
+def Scry.proverVacuous : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtSink [U64.ofNat 4, U64.ofNat 0, U64.ofNat 0]
+
+/-- A parameter flow reaches the sink; the `src` in the same EDB does not. -/
+def Scry.proverSelect : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtSrc [U64.ofNat 0, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtParam [U64.ofNat 0, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 0, U64.ofNat 2, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtGen [U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtFlow [U64.ofNat 2, U64.ofNat 3, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtSink [U64.ofNat 3, U64.ofNat 0, U64.ofNat 0];
+  st
+
+/-- The `src` also reaches the same sink argument: `constantOrBound` must refute. -/
+def Scry.proverSelectUnsafe : Scry.State Nat :=
+  Scry.State.addTuple Scry.proverSelect Scry.rtFlow [U64.ofNat 0, U64.ofNat 2, U64.ofNat 0]
+
+/-- The cover script: seed the sources and take the closure, without the final check.
+It is used to read the invariant a refutation would have produced. -/
+def Scry.coverScript : List Scry.Tactic :=
+  [ Scry.Tactic.intro Scry.rtSrc
+  , Scry.Tactic.intro Scry.rtParam
+  , Scry.Tactic.intro Scry.rtRetSrc
+  , Scry.Tactic.close ]
+
+def Scry.proverSafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverSafe
+
+def Scry.proverSafeInvariant : String :=
+  match Scry.proverSafeVerdict with
+  | .proved c => Scry.showInv c.invariant
+  | _ => "?"
+
+def Scry.proverUnsafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverUnsafe
+
+def Scry.proverUnsafeCoverVerdict : Scry.Verdict :=
+  Scry.proveWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript
+
+def Scry.proverUnsafeInvariant : String :=
+  match Scry.searchWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript with
+  | .some inv => Scry.showInv inv.tainted
+  | .none => "?"
+
+def Scry.proverEmptyVerdict : Scry.Verdict :=
+  Scry.check Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.noFlow "empty" [] [])
+
+def Scry.proverCrossVerdict : Scry.Verdict :=
+  match Scry.searchWith Scry.ruleTaintProgram Scry.proverUnsafe Scry.coverScript with
+  | .some inv => Scry.check Scry.ruleTaintProgram Scry.proverSafe
+      (Scry.Claim.noFlow "cross" inv.tainted inv.locations)
+  | .none => Scry.Verdict.refused "no invariant"
+
+def Scry.proverMemoryUnsafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverMemoryUnsafe
+
+def Scry.proverMemorySafeVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverMemorySafe
+
+def Scry.proverMemorySafeInvariant : String :=
+  match Scry.proverMemorySafeVerdict with
+  | .proved c => Scry.showInv c.invariant
+  | _ => "?"
+
+def Scry.proverMemorySafeLocations : String :=
+  match Scry.proverMemorySafeVerdict with
+  | .proved c => Scry.showLocs c.locations
+  | _ => "?"
+
+def Scry.proverVacuousVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverVacuous
+
+/-- All sources: the parameter flow is part of the claim, so it is refuted. -/
+def Scry.proverSelectAllVerdict : Scry.Verdict :=
+  Scry.prove Scry.ruleTaintProgram Scry.proverSelect
+
+/-- Only `src`: the parameter flow is not part of the claim, so it is proved. -/
+def Scry.proverSelectSrcVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelect
+    (Scry.Claim.withSources (Scry.Claim.noFlow "src-only" [] []) [Scry.rtSrc])
+
+/-- "Every sink argument is a constant or a parameter bind": the untrusted source does
+not reach the sink, so the claim is proved. -/
+def Scry.proverConstantOrBoundVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelect
+    (Scry.Claim.constantOrBound "sql" [] [])
+
+/-- The same claim when the untrusted source does reach the sink: refuted. -/
+def Scry.proverConstantOrBoundUnsafeVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSelectUnsafe
+    (Scry.Claim.constantOrBound "sql" [] [])
+
+/-- A script with an out-of-range rule index: a tagged script failure, not "none". -/
+def Scry.proverScriptFailVerdict : Scry.Verdict :=
+  Scry.proveWith Scry.ruleTaintProgram Scry.proverSafe [Scry.Tactic.apply 99]
+
+-- ## The cut (guards/bounds)
+
+/-- A tiny checked copy:
+```
+point 0: if (n > 32) return      guard(0, 3, 32, 1)   -- on the edge to 1, n <= 32
+point 1: memcpy(dst, src, n)     use(1, 3, 7, 32, 2, 0) -- copy-write into loc 7 (32 cells)
+                                 before(0, 1), before(1, 1)
+```
+`Scry.proverCutSafe` proves the cut over `{0}`; the twins below remove the dominance, weaken
+the bound, or make the length a constant. -/
+def Scry.proverCutSafe : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 1, U64.ofNat 1]
+
+/-- The same guard and use, but the check does not dominate the copy (it is after it). -/
+def Scry.proverCutUnordered : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0]
+
+/-- The guard is before the copy but its bound (64) exceeds the buffer (32 cells). -/
+def Scry.proverCutWeak : Scry.State Nat :=
+  let st := Scry.State.empty;
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 64, U64.ofNat 1];
+  let st := Scry.State.addTuple st Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 0];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1]
+
+/-- A constant length 32 into a 32-cell buffer: in range without a guard. -/
+def Scry.proverCutConstOk : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 33]
+
+/-- A constant length 64 into a 32-cell buffer. -/
+def Scry.proverCutConstBad : Scry.State Nat :=
+  Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 32, U64.ofNat 2, U64.ofNat 65]
+
+/-- A write with no statically known capacity. -/
+def Scry.proverCutUnknownCap : Scry.State Nat :=
+  let st := Scry.State.addTuple Scry.State.empty Scry.rtUse
+    [U64.ofNat 1, U64.ofNat 3, U64.ofNat 7, U64.ofNat 0, U64.ofNat 2, U64.ofNat 0];
+  let st := Scry.State.addTuple st Scry.rtGuard
+    [U64.ofNat 0, U64.ofNat 3, U64.ofNat 32, U64.ofNat 1];
+  Scry.State.addTuple st Scry.rtBefore [U64.ofNat 0, U64.ofNat 1]
+
+def Scry.proverCutSafeVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutSafe (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutUnorderedVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutUnordered (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutWeakVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutWeak (Scry.Claim.cut "cut" [0])
+
+def Scry.proverCutConstOkVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutConstOk (Scry.Claim.cut "cut" [])
+
+def Scry.proverCutConstBadVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutConstBad (Scry.Claim.cut "cut" [])
+
+def Scry.proverCutUnknownCapVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutUnknownCap (Scry.Claim.cut "cut" [0])
+
+/-- The cut names a point with no guard row. -/
+def Scry.proverCutPhantomVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverCutSafe (Scry.Claim.cut "cut" [9])
+
+/-- No use at all: a cut claim about a program with no writes is vacuous. -/
+def Scry.proverCutVacuousVerdict : Scry.Verdict :=
+  Scry.proveFor Scry.ruleTaintProgram Scry.proverSafe (Scry.Claim.cut "cut" [])
+
+-- ## Guard extraction
+
+/-- A hand-built function for the guard-extraction unit test:
+
+```
+if (n > 16) return;      -- the false edge establishes n <= 16
+return;
+```
+No memory is involved; this isolates `Scry.boundsCondBounds`/`boundsGuardRows` from the
+C frontend (the corpus covers the frontend path). -/
+def Scry.guardFn : Wil.Func :=
+  let n := Wil.var 0 Wil.u64;
+  let cap := Wil.var 1 Wil.u64;
+  Wil.func "guard" [] []
+    [ Wil.block
+        [ Wil.assign cap (.cst (Wil.Val.ofNat 64 .false 16))
+        , Wil.assign n (.havoc Wil.u64) ]
+        (Wil.branch (Wil.Cond.cmp .gt n cap) (Wil.mkBlockId 1) (Wil.mkBlockId 2))
+    , Wil.block [] (Wil.ret (Option.none : Option Wil.Var))
+    , Wil.block [] (Wil.ret (Option.none : Option Wil.Var)) ]
+
+def Scry.guardFnInfo : Scry.FnInfo := Scry.fnInfo Scry.guardFn
+
+def Scry.guardFnRows : List (List Nat) :=
+  Scry.boundsGuardRows Scry.guardFnInfo Scry.guardFnInfo.g

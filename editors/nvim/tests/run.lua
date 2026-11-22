@@ -163,6 +163,94 @@ test('every non-ASCII symbol in lib/*.wiz has an abbreviation', function()
   eq({}, missing, 'symbols without an abbreviation')
 end)
 
+io.stdout:write 'lsp keymaps and completion\n'
+
+test('LSP keymaps: installed on request, and a user mapping is kept', function()
+  local lsp = require 'wiz.lsp'
+  local keys = {
+    { 'K', 'n', 'hover' }, { 'gd', 'n', 'go to definition' },
+    { 'gD', 'n', 'go to declaration' }, { 'grn', 'n', 'rename' },
+    { 'grr', 'n', 'references' }, { 'gra', 'n', 'code action' },
+    { 'gO', 'n', 'outline' }, { ']d', 'n', 'next diagnostic' },
+    { '[d', 'n', 'previous diagnostic' }, { '<C-s>', 'i', 'signature help' },
+  }
+  local function scratch()
+    return vim.api.nvim_create_buf(false, true)
+  end
+  local function desc(buf, lhs, mode)
+    return vim.api.nvim_buf_call(buf, function()
+      return vim.fn.maparg(lhs, mode, false, true).desc
+    end)
+  end
+  local buf = scratch()
+  -- Neovim 0.12 has global defaults for some of these (grn, gra, gO, ]d, …): the plugin
+  -- must keep them and fill the gaps. On 0.10 there are none, so all are the plugin's.
+  local before = {}
+  for _, key in ipairs(keys) do
+    before[key[1]] = desc(buf, key[1], key[2])
+  end
+  lsp.keymaps(buf, true)
+  local ours = 0
+  for _, key in ipairs(keys) do
+    local want = before[key[1]] or ('wiz.nvim: ' .. key[3])
+    eq(want, desc(buf, key[1], key[2]), key[1])
+    if not before[key[1]] then
+      ours = ours + 1
+    end
+  end
+  eq(true, ours >= 3, 'the plugin installed the keys Neovim does not map')
+  -- A mapping the user made wins: the plugin does not replace it.
+  local mine = scratch()
+  vim.keymap.set('n', 'gd', function() end, { buffer = mine, desc = 'mine' })
+  lsp.keymaps(mine, true)
+  eq('mine', desc(mine, 'gd', 'n'), 'the user map')
+  eq('wiz.nvim: hover', desc(mine, 'K', 'n'), 'the other keys are still added')
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.api.nvim_buf_delete(mine, { force = true })
+end)
+
+test("LSP keymaps: 'auto' leaves 0.11+ to Neovim, false never maps", function()
+  local lsp = require 'wiz.lsp'
+  local buf = vim.api.nvim_create_buf(false, true)
+  -- (`maparg` reads the current buffer; a wiz buffer has Neovim's own `K` from
+  -- `vim.lsp`, so ask about the scratch buffer the plugin was given)
+  local function mapped()
+    return vim.api.nvim_buf_call(buf, function()
+      return vim.fn.maparg('K', 'n')
+    end)
+  end
+  lsp.keymaps(buf, false)
+  eq('', mapped(), 'false')
+  if vim.fn.has 'nvim-0.11' == 1 then
+    lsp.keymaps(buf, 'auto')
+    eq('', mapped(), 'auto on 0.11+')
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
+test('completion on Neovim 0.10: omnifunc and <C-Space> are enabled', function()
+  local buf = vim.api.nvim_create_buf(false, true)
+  local cfg = require('wiz.config').get().lsp
+  local savedWant = cfg.completion
+  cfg.completion = true               -- the test is the 0.10 path, not 'auto' detection
+  local saved = vim.lsp.completion
+  -- 0.10 has no `vim.lsp.completion`; `vim.lsp` lazily loads the field, so nil is not
+  -- enough to hide it — a table without `enable` is what the code sees there.
+  vim.lsp.completion = {}
+  local ok, err = pcall(require('wiz.lsp').on_attach, { id = 999 }, buf)
+  vim.lsp.completion = saved
+  cfg.completion = savedWant
+  if not ok then
+    error(err)
+  end
+  eq('v:lua.vim.lsp.omnifunc', vim.bo[buf].omnifunc, 'omnifunc')
+  local map = vim.api.nvim_buf_call(buf, function()
+    return vim.fn.maparg('<C-Space>', 'i', false, true)
+  end)
+  eq('wiz.nvim: complete (the language server)', map.desc, '<C-Space>')
+  vim.api.nvim_buf_delete(buf, { force = true })
+end)
+
 io.stdout:write 'infoview (wiz lsp)\n'
 
 local wiz = vim.g.wiz_config.lsp.cmd[1]
@@ -170,11 +258,11 @@ if vim.fn.executable(wiz) ~= 1 then
   io.stdout:write('  (skipped: ' .. wiz .. ' is not executable)\n')
 else
   local iv = require 'wiz.infoview'
-  local function at(line, col)
+  local function at(line, col, timeout)
     vim.api.nvim_win_set_cursor(0, { line, col })
     vim.api.nvim_exec_autocmds('CursorMoved', { buffer = 0 })
     iv.update_now()
-    wait(20000, function()
+    wait(timeout or 20000, function()
       return iv.idle() and iv.state.src and iv.state.src.position.line == line - 1
         and iv.state.src.position.character == col
     end, 'the infoview')
@@ -188,6 +276,27 @@ else
     end
     error(('no line %q in the infoview:\n%s'):format(s, table.concat(lines, '\n')), 2)
   end
+
+  test('widget items: a title and the browser pointer; an unknown kind does not crash', function()
+    local b = iv.layout(nil, nil, nil, nil, { items = {
+      { kind = 'widget', title = 'plot: Sales' },
+      { kind = 'widget', title = vim.NIL }, -- a JSON null title is not a string
+      { kind = 'mystery', title = 'something else' },
+      {}, -- no kind, no title
+      vim.NIL, -- a null item is skipped, not fatal
+      { kind = 'message', text = 'a message' },
+    } })
+    has(b.lines, 'Widgets')
+    has(b.lines, 'plot: Sales (open the browser infoview to draw it)')
+    has(b.lines, 'widget (open the browser infoview to draw it)')
+    has(b.lines, 'Info')
+    has(b.lines, 'something else')
+    has(b.lines, 'Messages')
+    has(b.lines, '  a message')
+    for _, l in ipairs(b.lines) do
+      eq(nil, l:find('WIZ_WIDGET:', 1, true), 'the widget payload is not shown')
+    end
+  end)
 
   test('the server starts on a wiz file and the infoview opens', function()
     vim.cmd('edit ' .. vim.fn.fnameescape(fixture))
@@ -292,6 +401,26 @@ else
     end, 'the new goal')
   end)
 
+  test('a #plot widget: its title and the browser pointer, not the SVG payload', function()
+    local widget = here .. '/fixture/Widget.wiz'
+    vim.cmd('edit ' .. vim.fn.fnameescape(widget))
+    wait(30000, function()
+      return require('wiz.lsp').client(0) ~= nil
+    end, 'the wiz client of the widget fixture')
+    -- (#plot runs the widget renderer: the first elaboration of the fixture is slow)
+    local lines = at(5, 7, 120000) -- `chart` in `#plot chart`
+    has(lines, 'Widgets')
+    local title
+    for _, l in ipairs(lines) do
+      if l:find('^plot: Sales', 1) then
+        title = l
+      end
+      eq(nil, l:find('WIZ_WIDGET:', 1, true), 'the widget payload is not shown')
+    end
+    eq(true, title ~= nil and title:find('(open the browser infoview to draw it)', 1, true) ~= nil,
+      'the widget title and the pointer:\n' .. table.concat(lines, '\n'))
+  end)
+
   test('the browser infoview: <LocalLeader>b and :WizInfoviewBrowser ask the server to listen', function()
     local m = vim.fn.maparg('<LocalLeader>b', 'n', false, true)
     eq('wiz.nvim: open the infoview in a browser', m.desc, 'the mapping and its desc')
@@ -309,35 +438,44 @@ else
     vim.ui.open = real_open
     local b = iv.state.browser
     eq(true, type(b.port) == 'number' and b.port > 0, 'a port: ' .. vim.inspect(b))
+    -- (#430) the server's token for this launch, which the page passes on to its socket
+    eq(true, type(b.token) == 'string' and b.token:find('^%x+$') ~= nil and #b.token == 32, 'a token: ' .. vim.inspect(b))
     if b.url ~= vim.NIL and b.url ~= nil then
       eq({ b.url }, opened, 'the page opened')
-      eq(true, b.url:find('^http://127%.0%.0%.1:' .. b.port .. '/infoview%.html%?port=' .. b.port .. '&follow=1$') ~= nil, 'url ' .. b.url)
+      eq(true, b.url:find('^http://127%.0%.0%.1:' .. b.port .. '/infoview%.html%?port=' .. b.port .. '&follow=1&token=' .. b.token .. '$') ~= nil, 'url ' .. b.url)
     else
       eq({}, opened, 'nothing opened without a built page')
     end
-    -- the port answers a WebSocket handshake (a page would connect there)
-    local got = nil
-    local tcp = vim.uv.new_tcp()
-    tcp:connect('127.0.0.1', b.port, function(e)
-      if e then
-        got = 'connect: ' .. e
-        tcp:close()
-        return
-      end
-      tcp:read_start(function(_, data)
-        got = got or data
-        tcp:close()
+    -- the port answers a WebSocket handshake with the token (a page would connect there),
+    -- and refuses one without it
+    local function handshake(target)
+      local got = nil
+      local tcp = vim.uv.new_tcp()
+      tcp:connect('127.0.0.1', b.port, function(e)
+        if e then
+          got = 'connect: ' .. e
+          tcp:close()
+          return
+        end
+        tcp:read_start(function(_, data)
+          got = got or data or 'closed'
+          tcp:close()
+        end)
+        tcp:write('GET ' .. target .. ' HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+          .. 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
       end)
-      tcp:write('GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
-        .. 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
-    end)
-    wait(10000, function()
-      return got ~= nil
-    end, 'the handshake')
-    if not tcp:is_closing() then
-      tcp:close() -- (the read callback closes it on the success path)
+      wait(10000, function()
+        return got ~= nil
+      end, 'the handshake')
+      if not tcp:is_closing() then
+        tcp:close() -- (the read callback closes it on the success path)
+      end
+      return got
     end
+    local got = handshake('/?token=' .. b.token)
     eq(true, got:find('101 Switching Protocols', 1, true) ~= nil, 'answer: ' .. got)
+    got = handshake('/')
+    eq(true, got:find('401 Unauthorized', 1, true) ~= nil, 'answer without the token: ' .. got)
   end)
 
   test('toggle closes and reopens the window', function()
@@ -404,7 +542,7 @@ else
   local lsp = require 'wiz.lsp'
 
   test('a file of an installed toolchain is found to be one', function()
-    eq({ lib = share .. '/lib', wiz = tc .. '/bin/wiz' }, lsp.toolchain(share .. '/lib/Hdl/Core.wiz'), 'toolchain')
+    eq({ lib = share .. '/lib', wiz = tc .. '/bin/wiz' }, lsp.toolchain(share .. '/lib/Word.wiz'), 'toolchain')
     eq(nil, lsp.toolchain(here .. '/fixture/Goals.wiz'), 'not a toolchain')
     eq({ tc .. '/bin/wiz', 'lsp' }, lsp.cmd(share .. '/lib'), 'the command')
   end)
@@ -438,10 +576,10 @@ else
     end
     eq(true, uri ~= nil and uri:find('/lib/Prelude.wiz$') ~= nil, 'the definition of Nat at ' .. row .. ':' .. col .. ' (' .. vim.inspect(res) .. ')')
     -- another file of the same toolchain: the same client
-    vim.cmd('edit ' .. vim.fn.fnameescape(share .. '/lib/Hdl/Core.wiz'))
+    vim.cmd('edit ' .. vim.fn.fnameescape(share .. '/lib/Word.wiz'))
     wait(10000, function()
       return lsp.client(0) ~= nil
-    end, 'the client for Hdl/Core.wiz')
+    end, 'the client for Word.wiz')
     eq(c.id, lsp.client(0).id, 'one client per toolchain')
   end)
 end

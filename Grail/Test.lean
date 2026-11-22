@@ -16,11 +16,16 @@ test it is (default `check`):
   pass, or costs too much for the package-wide run); it is reported as skipped and needs
   no `.expected` file. The reason is shown with the skip.
 
+A `check` or `run` line may end in `timeout SECS` (`-- test: run timeout 900`): the test's
+time limit, when it needs more than `--test-timeout` (default 300 s) gives every test. The
+larger of the two applies, to the test's job and, for `run`, to its program.
+
 A test is a job like any other (`Grail/Graph.lean`), run in its own process with a time
 limit: its key covers the file's key (its text and its imports'), the kind, the toolchain
 for `run`, and the expected output, and a passing test is recorded under
 `.grail/build/<key>/`, so `grail test` again runs nothing. A failing test isn't recorded.
-`grail test --update` writes the actual output to `.expected`.
+`grail test --update` writes the actual output to `.expected`; `grail test --rerun` runs the
+tests with a recorded pass again, and records what it finds (a new pass, or none).
 -/
 
 namespace Grail
@@ -33,16 +38,35 @@ inductive TestKind where
   | skip (reason : String)
   deriving BEq, Repr
 
-def TestKind.ofSource (src : String) : Except String TestKind :=
+/-- The `-- test:` line's kind and its declared time limit in seconds (`timeout SECS` at
+the end of a `check` or `run` line). -/
+def TestKind.parseLine (src : String) : Except String (TestKind × Option Nat) :=
   let first := (src.splitOn "\n").headD ""
-  if !first.startsWith "-- test:" then .ok .check else
-  match ((first.drop 8).trimAscii.toString) with
-  | "check" => .ok .check
-  | "run" => .ok .run
-  | k =>
-    if k == "skip" then .ok (.skip "")
-    else if k.startsWith "skip " then .ok (.skip (k.drop 5).trimAscii.toString)
-    else .error s!"unknown test kind {k} (check, run, skip REASON)"
+  if !first.startsWith "-- test:" then .ok (.check, none) else
+  let k := (first.drop 8).trimAscii.toString
+  if k == "skip" then .ok (.skip "", none)
+  else if k.startsWith "skip " then .ok (.skip (k.drop 5).trimAscii.toString, none)
+  else
+    let kind (w : String) : Except String TestKind := match w with
+      | "check" => .ok .check
+      | "run" => .ok .run
+      | _ => .error s!"unknown test kind {k} (check, run, skip REASON; check and run may end in timeout SECS)"
+    match (k.splitOn " ").filter (· != "") with
+    | [w] => (kind w).map (·, none)
+    | [w, "timeout", n] => match n.toNat? with
+      | some secs => if secs == 0 then .error s!"a test's timeout must be positive: {k}" else (kind w).map (·, some secs)
+      | none => .error s!"timeout wants a number of seconds: {k}"
+    | _ => .error s!"unknown test kind {k} (check, run, skip REASON; check and run may end in timeout SECS)"
+
+def TestKind.ofSource (src : String) : Except String TestKind :=
+  (TestKind.parseLine src).map (·.1)
+
+/-- A test's time limit in milliseconds: `--test-timeout`'s (`base`), or the larger
+`timeout SECS` its `-- test:` line declares. -/
+def testLimitMs (base : Nat) (src : String) : Nat :=
+  match TestKind.parseLine src with
+  | .ok (_, some secs) => max base (1000 * secs)
+  | _ => base
 
 /-- What a failing test without a `-- test:` line is told (it was taken for a `check`,
 which compares the messages of elaborating the file: a program's output never shows up). -/
@@ -84,7 +108,7 @@ def Runner.testOutput (r : Runner) (file : String) (kind : TestKind) (exe : Syst
     pure (.ok (render file l s))
   | .run =>
     let s ← r.elab file
-    let secs := r.testTimeoutMs / 1000
+    let secs := testLimitMs r.testTimeoutMs (← IO.FS.readFile (r.ctx.dir / file)) / 1000
     let out ← IO.Process.output { cmd := "timeout", args := #[toString secs, exe.toString] }
     if out.exitCode == 124 then return .error s!"timed out ({secs} s)"
     if out.exitCode != 0 then return .error s!"exited with {out.exitCode}: {out.stderr}"
@@ -110,7 +134,7 @@ def expectedOf (dir : System.FilePath) (file : String) : IO (System.FilePath × 
 
 /-- Is `rel` (a file's path under `base`) inside a nested package, a directory below
 `base` with its own `grail.wiz`? Such a package has its own dependencies and tests
-(`examples/grail-index/sources/*` are packages a registry fixture publishes), so its
+(`examples/fate-index/sources/*` are packages a registry fixture publishes), so its
 files are not tests of the enclosing one. -/
 def inNestedPackage (base : System.FilePath) (rel : String) : IO Bool := do
   let dirs := (rel.splitOn "/").dropLast

@@ -1,0 +1,297 @@
+-- Temporal properties of circuits (`import Hdl.Temporal`), two worked examples, checked
+-- by the `hdl` test group:
+--
+-- 1. A UART (8N1, 4 clock cycles per bit): the transmitter's line is high whenever it is
+--    idle, at every cycle for ever; the loopback (transmitter into receiver) delivers the
+--    byte sent within 45 cycles, and every byte it reports is that one, for ever.
+-- 2. A valid/ready buffer (one register stage): the AXI stability rule, and liveness: a
+--    consumer that is ready infinitely often gets every accepted item. Proved for every
+--    input trace, through a refinement to a Bool-level specification.
+import Hdl.Temporal
+
+def Bit : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+def B7 : HwTy := HwTy.bits 7
+def B8 : HwTy := HwTy.bits 8
+def B9 : HwTy := HwTy.bits 9
+
+def band {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.and a b
+def bor {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.or a b
+def bnot {r : HwTy → Type} [Hw r] (a : r Bit) : r Bit := Hw.not a
+def eqLit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit := Hw.eq x (Hw.lit n k)
+def inc {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) := Hw.add x (Hw.lit n 1)
+def dec {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) := Hw.sub x (Hw.lit n 1)
+
+------------------------------------------------------------------------------------
+-- 1. The UART. The transmitter: the line (a register), the bit periods left (0: idle),
+-- the cycle counter within a bit (held at 0 while idle) and a 9-bit shift register
+-- (stop bit on top of the data, least significant bit first, ones shifted in).
+
+structure Tx (r : HwTy → Type) where
+  line : r Bit
+  left : r B4
+  cnt : r B7
+  sh : r B9
+  deriving Bundle
+structure Send (r : HwTy → Type) where
+  start : r Bit
+  data : r B8
+  deriving Bundle
+structure Line (r : HwTy → Type) where
+  line : r Bit
+  deriving Bundle
+
+def txStep {r : HwTy → Type} [Hw r] (s : Tx r) (x : Send r) : r (HwTy.prod Tx.code Line.code) :=
+  let idle := eqLit s.left 0;
+  let go := band idle x.start;
+  let tick := band (bnot idle) (eqLit s.cnt 3);
+  Hw.pair (Tx.pack (Tx.mk
+    (Hw.mux go (Hw.lit 1 0) (Hw.mux tick (Hw.slice 0 1 s.sh) s.line))
+    (Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec s.left) s.left))
+    (Hw.mux (bor go (bor idle tick)) (Hw.lit 7 0) (inc s.cnt))
+    (Hw.mux go (Hw.cat (Hw.lit 1 1) x.data) (Hw.mux tick (Hw.cat (Hw.lit 1 1) (Hw.slice 1 8 s.sh)) s.sh))))
+    (Line.pack (Line.mk s.line))
+
+def Tx.idleState : Tx HwTy.El := Tx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat 7 0) (BitVec.ofNat 9 511)
+def txC : Circuit Send.code Line.code := Circuit.bundled Tx.bundle Send.bundle Line.bundle Tx.idleState txStep
+
+-- The receiver: the phase (0 idle, 10 start bit, 9 … 2 data, 1 stop), the cycle counter
+-- and the shift register. A falling line starts a frame; the start bit is checked in its
+-- middle (cycle 1 of 4), then the line is sampled every 4 cycles. `valid` is high for one
+-- cycle, at a high stop bit.
+
+structure Rx (r : HwTy → Type) where
+  ph : r B4
+  cnt : r B7
+  sh : r B8
+  deriving Bundle
+structure Byte (r : HwTy → Type) where
+  valid : r Bit
+  data : r B8
+  deriving Bundle
+
+def rxStep {r : HwTy → Type} [Hw r] (s : Rx r) (x : Line r) : r (HwTy.prod Rx.code Byte.code) :=
+  let idle := eqLit s.ph 0;
+  let inStart := eqLit s.ph 10;
+  let inStop := eqLit s.ph 1;
+  let fall := band idle (bnot x.line);
+  let startTick := band inStart (eqLit s.cnt 1);
+  let tick := band (bnot idle) (band (bnot inStart) (eqLit s.cnt 3));
+  let ph := Hw.mux fall (Hw.lit 4 10)
+    (Hw.mux startTick (Hw.mux x.line (Hw.lit 4 0) (Hw.lit 4 9)) (Hw.mux tick (dec s.ph) s.ph));
+  let cnt := Hw.mux (bor idle (bor startTick tick)) (Hw.lit 7 0) (inc s.cnt);
+  let sh := Hw.mux (band tick (bnot inStop)) (Hw.cat x.line (Hw.slice 1 7 s.sh)) s.sh;
+  Hw.pair (Rx.pack (Rx.mk ph cnt sh)) (Byte.pack (Byte.mk (band tick (band inStop x.line)) s.sh))
+
+def Rx.idleState (b : Nat) : Rx HwTy.El := Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat 7 0) (BitVec.ofNat 8 b)
+def rxC : Circuit Line.code Byte.code := Circuit.bundled Rx.bundle Line.bundle Byte.bundle (Rx.idleState 0) rxStep
+
+def loopback : Circuit Send.code Byte.code := Circuit.seq txC rxC
+
+-- The environment: send `b` in cycle 0, nothing after.
+def quiet : HwTy.El Send.code := Bundle.toEl Send.bundle (Send.mk (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+def sendByte (b : Nat) : HwTy.El Send.code := Bundle.toEl Send.bundle (Send.mk (BitVec.ofNat 1 1) (BitVec.ofNat 8 b))
+def sendOnce (b : Nat) : Trace (HwTy.El Send.code) :=
+  Trace.once (sendByte b) quiet
+
+-- Observations (Bool atoms)
+def txIdleLineHigh (s : HwTy.El txC.st) (x : HwTy.El Send.code) : Bool :=
+  Bool.or (Bool.not (BitVec.beq (Bundle.ofEl Tx.bundle s).left (BitVec.ofNat 4 0))) (BitVec.isTrue (Bundle.ofEl Tx.bundle s).line)
+def loopOut (s : HwTy.El loopback.st) (x : HwTy.El Send.code) : Byte HwTy.El :=
+  Bundle.ofEl Byte.bundle (Circuit.stepEl loopback s x).2
+def gotByte (b : Nat) (s : HwTy.El loopback.st) (x : HwTy.El Send.code) : Bool :=
+  Bool.and (BitVec.isTrue (loopOut s x).valid) (Nat.beq (BitVec.toNat (loopOut s x).data) b)
+def onlyByte (b : Nat) (s : HwTy.El loopback.st) (x : HwTy.El Send.code) : Bool :=
+  Bool.or (Bool.not (BitVec.isTrue (loopOut s x).valid)) (Nat.beq (BitVec.toNat (loopOut s x).data) b)
+
+-- The two machines, with their types spelled out once (so that the elaborator doesn't
+-- reconstruct them from `Circuit.stepEl`'s type at every use)
+def txM : Mealy (HwTy.El txC.st) (HwTy.El Send.code) (HwTy.El Line.code) := Circuit.stepEl txC
+def loopM : Mealy (HwTy.El loopback.st) (HwTy.El Send.code) (HwTy.El Byte.code) := Circuit.stepEl loopback
+
+-- Where the runs settle: the idle transmitter, and the idle receiver holding byte `b`.
+def txIdle : HwTy.El txC.st := Bundle.toEl Tx.bundle Tx.idleState
+def loopIdle (b : Nat) : HwTy.El loopback.st := (txIdle, Bundle.toEl Rx.bundle (Rx.idleState b))
+
+-- Both are fixed points under quiet input, for every `b` (the receiver's byte is a
+-- variable here: it only passes through), and the atoms hold there.
+def txIdle_fixed : Mealy.Fixed txM txIdle quiet := refl txIdle
+def txIdle_ok : txIdleLineHigh txIdle quiet = .true := rfl
+def loopIdle_fixed (b : Nat) : Mealy.Fixed loopM (loopIdle b) quiet := refl (loopIdle b)
+def loopIdle_ok (b : Nat) : onlyByte b (loopIdle b) quiet = .true := rfl
+
+-- The frame takes 1 + 10·4 cycles; after 48 cycles both parts are idle.
+def F : Nat := Nat.succ 47
+
+-- after cycle 0 the input is quiet
+def sendOnce_from (b : Nat) : Trace.From (sendOnce b) F quiet := Trace.once_from (sendByte b) quiet 47
+
+-- The theorems, for two bytes. Each is a generic rule (hdl/src/Hdl/Temporal.wiz) applied to
+-- facts about the first F cycles, which the kernel evaluates (`refl` with the value).
+-- They are stated per byte: with the byte a variable, the elaborator evaluates the run
+-- symbolically to check the hypotheses' types (tens of seconds each), and the settled
+-- state is only reached by evaluation. "For every byte" is 256 instances, or one
+-- `native_refl` over a Bool check (with a sound state equality: wishful
+-- uintn-range-proof).
+
+-- "The line is idle-high outside frames", at every cycle, when the byte is sent.
+def Uart.idleHigh_a5 :
+    TL.always (TL.nowB (fun (o : HwTy.El txC.st × HwTy.El Send.code) => txIdleLineHigh o.1 o.2)) (Mealy.obs txM txC.init (sendOnce 165)) 0 :=
+  Mealy.always_settled_const txM txIdleLineHigh txC.init (sendOnce 165) quiet F txIdle
+    (sendOnce_from 165) (refl Bool.true) (refl txIdle) txIdle_fixed txIdle_ok
+def Uart.idleHigh_00 :
+    TL.always (TL.nowB (fun (o : HwTy.El txC.st × HwTy.El Send.code) => txIdleLineHigh o.1 o.2)) (Mealy.obs txM txC.init (sendOnce 0)) 0 :=
+  Mealy.always_settled_const txM txIdleLineHigh txC.init (sendOnce 0) quiet F txIdle
+    (sendOnce_from 0) (refl Bool.true) (refl txIdle) txIdle_fixed txIdle_ok
+
+-- "Every byte sent is received within 45 cycles", and "every byte reported is that byte",
+-- for ever.
+def Uart.delivers_a5 :
+    TL.within 45 (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
+  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 165 o.1 o.2) 45 loopback.init (sendOnce 165) (refl .true)
+def Uart.delivers_00 :
+    TL.within 45 (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 0 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 0)) 0 :=
+  Mealy.findFrom_within loopM (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => gotByte 0 o.1 o.2) 45 loopback.init (sendOnce 0) (refl .true)
+def Uart.onlyThat_a5 :
+    TL.always (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => onlyByte 165 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 165)) 0 :=
+  Mealy.always_settled_const loopM (onlyByte 165) loopback.init (sendOnce 165) quiet F (loopIdle 165)
+    (sendOnce_from 165) (refl Bool.true) (refl (loopIdle 165)) (loopIdle_fixed 165) (loopIdle_ok 165)
+def Uart.onlyThat_00 :
+    TL.always (TL.nowB (fun (o : HwTy.El loopback.st × HwTy.El Send.code) => onlyByte 0 o.1 o.2)) (Mealy.obs loopM loopback.init (sendOnce 0)) 0 :=
+  Mealy.always_settled_const loopM (onlyByte 0) loopback.init (sendOnce 0) quiet F (loopIdle 0)
+    (sendOnce_from 0) (refl Bool.true) (refl (loopIdle 0)) (loopIdle_fixed 0) (loopIdle_ok 0)
+
+-- The finite simulation is a prefix of the trace (what `Circuit.run` shows is what the
+-- theorems are about), and one byte arrives in the first F cycles.
+def Uart.arrival (b : Nat) : List Nat :=
+  Hdl.map (fun (o : HwTy.El Byte.code) => BitVec.toNat (Bundle.ofEl Byte.bundle o).valid)
+    (Circuit.runFrom loopback loopback.init (Trace.take F (sendOnce b)))
+def Uart.prefix (n b : Nat) : Circuit.runFrom loopback loopback.init (Trace.take n (sendOnce b)) =
+    Trace.take n (Mealy.outAt loopM loopback.init (sendOnce b)) :=
+  Mealy.runFrom_take loopback n loopback.init (sendOnce b)
+def Uart.arrives_once : Hdl.sum (Uart.arrival 165) = 1 := refl 1
+
+------
+-- 2. A valid/ready buffer: one register stage that can take an item in the cycle it
+-- hands one on (`in_ready = ¬full ∨ out_ready`). Input: (in_valid, in_data, out_ready);
+-- output: (in_ready, out_valid, out_data); state: (full, data).
+
+def HsIn : HwTy := HwTy.prod Bit (HwTy.prod B8 Bit)
+def HsOut : HwTy := HwTy.prod Bit (HwTy.prod Bit B8)
+def HsSt : HwTy := HwTy.prod Bit B8
+
+def bufStep {r : HwTy → Type} [Hw r] (s : r HsSt) (x : r HsIn) : r (HwTy.prod HsSt HsOut) :=
+  let full := Hw.fst s;
+  let ordy := Hw.snd (Hw.snd x);
+  let irdy := bor (bnot full) ordy;
+  let take := band (Hw.fst x) irdy;
+  Hw.pair (Hw.pair (bor take (band full (bnot ordy))) (Hw.mux take (Hw.fst (Hw.snd x)) (Hw.snd s)))
+    (Hw.pair irdy (Hw.pair full (Hw.snd s)))
+
+def buf : Circuit HsIn HsOut := Circuit.mk HsSt (BitVec.ofNat 1 0, BitVec.ofNat 8 0) bufStep
+
+-- The specification: the same machine on Bools (control) and an opaque byte (data).
+def D : Type := HwTy.El B8
+def Spec.sel {A : Type} (c : Bool) (x y : A) : A := match c with
+  | .true => x
+  | .false => y
+def Spec.step (s : Bool × D) (x : Bool × (D × Bool)) : (Bool × D) × (Bool × (Bool × D)) :=
+  let ω inReady := Bool.or (Bool.not s.1) x.2.2;
+  let ω take := Bool.and inReady x.1;
+  ((Bool.or take (Bool.and s.1 (Bool.not x.2.2)), Spec.sel take x.2.1 s.2), (inReady, (s.1, s.2)))
+
+def embS (s : Bool × D) : HwTy.El HsSt := (Bool.toBits s.1, s.2)
+def embI (x : Bool × (D × Bool)) : HwTy.El HsIn := (Bool.toBits x.1, (x.2.1, Bool.toBits x.2.2))
+def embO (o : Bool × (Bool × D)) : HwTy.El HsOut := (Bool.toBits o.1, (Bool.toBits o.2.1, o.2.2))
+
+-- The refinement premise, one step: eight cases of the control bits, each by evaluation
+-- (the data are variables throughout), dispatched one Bool at a time (one match with
+-- five columns costs the elaborator ~40 s).
+def buf_000 (d y : D) : Circuit.stepEl buf (embS (.false, d)) (embI (.false, (y, .false))) = (embS (Spec.step (.false, d) (.false, (y, .false))).1, embO (Spec.step (.false, d) (.false, (y, .false))).2) :=
+  refl (Circuit.stepEl buf (embS (.false, d)) (embI (.false, (y, .false))))
+def buf_001 (d y : D) : Circuit.stepEl buf (embS (.false, d)) (embI (.false, (y, .true))) = (embS (Spec.step (.false, d) (.false, (y, .true))).1, embO (Spec.step (.false, d) (.false, (y, .true))).2) :=
+  refl (Circuit.stepEl buf (embS (.false, d)) (embI (.false, (y, .true))))
+def buf_010 (d y : D) : Circuit.stepEl buf (embS (.false, d)) (embI (.true, (y, .false))) = (embS (Spec.step (.false, d) (.true, (y, .false))).1, embO (Spec.step (.false, d) (.true, (y, .false))).2) :=
+  refl (Circuit.stepEl buf (embS (.false, d)) (embI (.true, (y, .false))))
+def buf_011 (d y : D) : Circuit.stepEl buf (embS (.false, d)) (embI (.true, (y, .true))) = (embS (Spec.step (.false, d) (.true, (y, .true))).1, embO (Spec.step (.false, d) (.true, (y, .true))).2) :=
+  refl (Circuit.stepEl buf (embS (.false, d)) (embI (.true, (y, .true))))
+def buf_100 (d y : D) : Circuit.stepEl buf (embS (.true, d)) (embI (.false, (y, .false))) = (embS (Spec.step (.true, d) (.false, (y, .false))).1, embO (Spec.step (.true, d) (.false, (y, .false))).2) :=
+  refl (Circuit.stepEl buf (embS (.true, d)) (embI (.false, (y, .false))))
+def buf_101 (d y : D) : Circuit.stepEl buf (embS (.true, d)) (embI (.false, (y, .true))) = (embS (Spec.step (.true, d) (.false, (y, .true))).1, embO (Spec.step (.true, d) (.false, (y, .true))).2) :=
+  refl (Circuit.stepEl buf (embS (.true, d)) (embI (.false, (y, .true))))
+def buf_110 (d y : D) : Circuit.stepEl buf (embS (.true, d)) (embI (.true, (y, .false))) = (embS (Spec.step (.true, d) (.true, (y, .false))).1, embO (Spec.step (.true, d) (.true, (y, .false))).2) :=
+  refl (Circuit.stepEl buf (embS (.true, d)) (embI (.true, (y, .false))))
+def buf_111 (d y : D) : Circuit.stepEl buf (embS (.true, d)) (embI (.true, (y, .true))) = (embS (Spec.step (.true, d) (.true, (y, .true))).1, embO (Spec.step (.true, d) (.true, (y, .true))).2) :=
+  refl (Circuit.stepEl buf (embS (.true, d)) (embI (.true, (y, .true))))
+def buf_00 (d y : D) : (r : Bool) → Circuit.stepEl buf (embS (.false, d)) (embI (.false, (y, r))) = (embS (Spec.step (.false, d) (.false, (y, r))).1, embO (Spec.step (.false, d) (.false, (y, r))).2)
+  | .false => buf_000 d y
+  | .true => buf_001 d y
+def buf_01 (d y : D) : (r : Bool) → Circuit.stepEl buf (embS (.false, d)) (embI (.true, (y, r))) = (embS (Spec.step (.false, d) (.true, (y, r))).1, embO (Spec.step (.false, d) (.true, (y, r))).2)
+  | .false => buf_010 d y
+  | .true => buf_011 d y
+def buf_10 (d y : D) : (r : Bool) → Circuit.stepEl buf (embS (.true, d)) (embI (.false, (y, r))) = (embS (Spec.step (.true, d) (.false, (y, r))).1, embO (Spec.step (.true, d) (.false, (y, r))).2)
+  | .false => buf_100 d y
+  | .true => buf_101 d y
+def buf_11 (d y : D) : (r : Bool) → Circuit.stepEl buf (embS (.true, d)) (embI (.true, (y, r))) = (embS (Spec.step (.true, d) (.true, (y, r))).1, embO (Spec.step (.true, d) (.true, (y, r))).2)
+  | .false => buf_110 d y
+  | .true => buf_111 d y
+def buf_0 (d : D) : (v : Bool) → (y : D) → (r : Bool) → Circuit.stepEl buf (embS (.false, d)) (embI (v, (y, r))) = (embS (Spec.step (.false, d) (v, (y, r))).1, embO (Spec.step (.false, d) (v, (y, r))).2)
+  | .false, y, r => buf_00 d y r
+  | .true, y, r => buf_01 d y r
+def buf_1 (d : D) : (v : Bool) → (y : D) → (r : Bool) → Circuit.stepEl buf (embS (.true, d)) (embI (v, (y, r))) = (embS (Spec.step (.true, d) (v, (y, r))).1, embO (Spec.step (.true, d) (v, (y, r))).2)
+  | .false, y, r => buf_10 d y r
+  | .true, y, r => buf_11 d y r
+def buf_step8 : (f : Bool) → (d : D) → (v : Bool) → (y : D) → (r : Bool) → Circuit.stepEl buf (embS (f, d)) (embI (v, (y, r))) = (embS (Spec.step (f, d) (v, (y, r))).1, embO (Spec.step (f, d) (v, (y, r))).2)
+  | .false, d, v, y, r => buf_0 d v y r
+  | .true, d, v, y, r => buf_1 d v y r
+def buf_step (s : Bool × D) (x : Bool × (D × Bool)) :
+    Circuit.stepEl buf (embS s) (embI x) = (embS (Spec.step s x).1, embO (Spec.step s x).2) :=
+  buf_step8 s.1 s.2 x.1 x.2.1 x.2.2
+
+-- So, for every input trace, the circuit's outputs are the specification's.
+def buf_refines (xs : Trace (Bool × (D × Bool))) (t : Nat) :
+    Mealy.outAt (Circuit.stepEl buf) buf.init (Trace.map embI xs) t =
+      embO (Mealy.outAt Spec.step (.false, BitVec.ofNat 8 0) xs t) :=
+  Mealy.simulatesOut (Circuit.stepEl buf) Spec.step embS embI embO buf_step (.false, BitVec.ofNat 8 0) xs t
+
+-- Stability (AXI): an offered item that is not taken is offered again, unchanged, in the
+-- next cycle: `out_valid ∧ ¬out_ready |=> out_valid ∧ $stable(out_data)`.
+def Spec.hold3 (d : D) : (v : Bool) → (y : D) → (r : Bool) → r = .false → (Spec.step (.true, d) (v, (y, r))).1 = (.true, d)
+  | v, y, .false, h => refl (.true, d)
+  | v, y, .true, h => absurd h.1
+def Spec.hold (d : D) (x : Bool × (D × Bool)) (h : x.2.2 = .false) : (Spec.step (.true, d) x).1 = (.true, d) :=
+  Spec.hold3 d x.1 x.2.1 x.2.2 h
+def specRun (xs : Trace (Bool × (D × Bool))) : Trace (Bool × D) := Mealy.stateAt Spec.step (.false, BitVec.ofNat 8 0) xs
+def buf_stable (xs : Trace (Bool × (D × Bool))) (t : Nat) (d : D)
+    (offered : specRun xs t = (.true, d)) (notTaken : (xs t).2.2 = .false) : specRun xs (Nat.succ t) = (.true, d) :=
+  -- The carriers are products, so a level metavariable occurs only in an implicit
+  -- argument's type and is not solved (`wiz-notes/wishful/level-from-implicit-type.md`):
+  -- name the levels at the call site.
+  Eq.trans.{0} (A := Bool × D)
+    (Eq.congrArg.{0, 0} (fun (s : Bool × D) => (Spec.step s (xs t)).1) offered)
+    (Spec.hold d (xs t) notTaken)
+
+-- Liveness: if the consumer is ready infinitely often, an item accepted at cycle t
+-- (`in_valid ∧ in_ready`) is handed on (`out_valid ∧ out_ready`, with its data) at some
+-- cycle after t. The fair event is `out_ready`; `TL.fairStep` does the rest.
+def Spec.accept5 : (f : Bool) → (d : D) → (v : Bool) → (y : D) → (r : Bool) → v = .true →
+    (Spec.step (f, d) (v, (y, r))).2.1 = .true → (Spec.step (f, d) (v, (y, r))).1 = (.true, y)
+  | .false, d, .true, y, r, hv, hr => refl (.true, y)
+  | .true, d, .true, y, .true, hv, hr => refl (.true, y)
+  | .true, d, .true, y, .false, hv, hr => absurd hr.1
+  | f, d, .false, y, r, hv, hr => absurd hv.1
+def Spec.accept (s : Bool × D) (x : Bool × (D × Bool)) (hv : x.1 = .true) (hr : (Spec.step s x).2.1 = .true) :
+    (Spec.step s x).1 = (.true, x.2.1) :=
+  Spec.accept5 s.1 s.2 x.1 x.2.1 x.2.2 hv hr
+
+def handedOn (xs : Trace (Bool × (D × Bool))) (y : D) : TL (Bool × D) :=
+  fun σ u => (xs u).2.2 = .true ∧ σ u = (.true, y)
+
+def buf_live (xs : Trace (Bool × (D × Bool))) (fair : (u : Nat) → ∃ k, (xs (Nat.add k u)).2.2 = .true)
+    (t : Nat) (accepted : (xs t).1 = .true) (ready : (Mealy.outAt Spec.step (.false, BitVec.ofNat 8 0) xs t).1 = .true) :
+    TL.eventually (handedOn xs (xs t).2.1) (specRun xs) (Nat.succ t) :=
+  TL.fairStep (fun σ u => σ u = (.true, (xs t).2.1)) (handedOn xs (xs t).2.1) (fun (u : Nat) => (xs u).2.2) (specRun xs)
+    (fun (u : Nat) (p : specRun xs u = (.true, (xs t).2.1)) (e : (xs u).2.2 = .false) => buf_stable xs u (xs t).2.1 p e)
+    (fun (u : Nat) (p : specRun xs u = (.true, (xs t).2.1)) (e : (xs u).2.2 = .true) => And.intro e p)
+    fair (Nat.succ t) (Spec.accept (specRun xs t) (xs t) accepted ready)
+

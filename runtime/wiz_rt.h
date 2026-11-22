@@ -10,12 +10,19 @@
    between threads (its count is -rc, changed atomically), rc == 0 is immortal. See
    `wiz_mark_mt` for the transfer rule. */
 
+/* Emscripten without -pthread has no threads: build the one-thread runtime (see
+   WIZ_NO_THREADS in rt_core.inc) even when the define is not passed. */
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__) && !defined(WIZ_NO_THREADS)
+#define WIZ_NO_THREADS 1
+#endif
+
 /* POSIX.1-2008 and the usual extensions, for the system interfaces (9h) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <alloca.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,9 +248,11 @@ WIZ_API wiz_val wiz_array_push(wiz_val v, wiz_val x);
 WIZ_API uint64_t wiz_array_size(wiz_val v);
 WIZ_API wiz_val wiz_array_get(wiz_val v, uint64_t i, wiz_val dflt);
 WIZ_API wiz_val wiz_array_set(wiz_val v, uint64_t i, wiz_val x);
+WIZ_API wiz_val wiz_str_empty(void);
 WIZ_API wiz_val wiz_str_of_cstr(const char *s);
 WIZ_API const char *wiz_str_to_cstr(wiz_val v);
 WIZ_API wiz_val wiz_str_append(wiz_val a, wiz_val b);
+WIZ_API wiz_val wiz_str_push(wiz_val v, uint64_t byte);
 WIZ_API uint64_t wiz_str_size(wiz_val v);
 WIZ_API uint64_t wiz_str_byte(wiz_val v, uint64_t i);
 WIZ_API wiz_val wiz_str_slice(wiz_val v, uint64_t from, uint64_t to);
@@ -312,6 +321,11 @@ WIZ_API const char *wiz_nat_show(uint64_t a);
 WIZ_API int wiz_proof_start(uint64_t steps);
 WIZ_API int wiz_proof_tick(uint64_t x);
 WIZ_API int wiz_proof_end(uint64_t x);
+/* the kernel evaluator's per-command budget (see `kernelSteps` in selfhost/Frontend.wiz):
+   one tick per structural elimination, independent of the proof read-back's budget */
+WIZ_API int wiz_kernel_start(uint64_t steps);
+WIZ_API int wiz_kernel_tick(uint64_t x);
+WIZ_API int wiz_kernel_end(uint64_t x);
 WIZ_API uint64_t wiz_sys_errno(void);
 WIZ_API const char *wiz_sys_strerror(uint64_t e);
 WIZ_API const char *wiz_sys_getenv(const char *k);
@@ -383,12 +397,17 @@ WIZ_API wiz_val wiz_sys_fd_read_exact(void *p, uint64_t n, int timed, uint64_t n
 WIZ_API uint64_t wiz_sys_fd_write(void *p, wiz_val v);
 WIZ_API uint64_t wiz_sys_fd_wait(void *p, uint64_t events, int timed, uint64_t ns);
 WIZ_API uint64_t wiz_sys_fd_seek(void *p, uint64_t whence, uint64_t off, int back);
+WIZ_API uint64_t wiz_sys_fd_fsync(void *p);
+WIZ_API uint64_t wiz_sys_fd_fdatasync(void *p);
+WIZ_API uint64_t wiz_sys_fd_flock(void *p, uint64_t mode, int nonblock);
+WIZ_API uint64_t wiz_sys_fd_ftruncate(void *p, uint64_t n);
 WIZ_API wiz_val wiz_sys_fd_poll(wiz_val fds, wiz_val events, int timed, uint64_t ns);
 WIZ_API void wiz_set(wiz_val o, uint32_t i, wiz_val v);
 WIZ_API wiz_val wiz_chan_fork(wiz_val child);
 WIZ_API wiz_val wiz_chan_send(wiz_val c, wiz_val a);
 WIZ_API wiz_val wiz_chan_recv(wiz_val c);
 WIZ_API void wiz_chan_close(wiz_val c);
+WIZ_API uint64_t wiz_chan_forks(void);
 WIZ_API wiz_val wiz_mvar_new(void);
 WIZ_API void wiz_mvar_put(wiz_val mv, wiz_val a);
 WIZ_API wiz_val wiz_mvar_new_full(wiz_val a);
@@ -405,6 +424,12 @@ WIZ_API void wiz_ref_free(wiz_val mv, wiz_val tok);
 WIZ_API wiz_val wiz_lock_new(void);
 WIZ_API wiz_val wiz_lock_acquire(wiz_val lv);
 WIZ_API void wiz_lock_release(wiz_val lv, wiz_val g);
+WIZ_API wiz_val wiz_task_spawn(wiz_val fn);
+WIZ_API wiz_val wiz_task_get(wiz_val tv);
+WIZ_API wiz_val wiz_task_both(wiz_val f, wiz_val g);
+WIZ_API wiz_val wiz_task_race(wiz_val f, wiz_val g);
 WIZ_API int wiz_finish_io(wiz_val main);
 WIZ_API int wiz_finish(wiz_val r);
 WIZ_API int wiz_run_main(wiz_val(*entry)(void), int io);
+WIZ_API char *wiz_stop_run(wiz_val f);
+WIZ_API uint64_t wiz_stop_code_value(uint64_t unused);

@@ -1,0 +1,207 @@
+-- The memory interface of hdl/src/Hdl/Mem.wiz, checked by the `hdl` test group.
+--
+-- The proved laws are instantiated at the bottom (`law_same`, `law_other`, `law_off`,
+-- `law_byte`). The checks are the ones a proof does not cover: every 4-bit byte-strobe
+-- pattern against the mask and against an independent byte-memory model, the one-cycle
+-- and two-cycle RAMs replaying those writes and reads, and the value simulation against
+-- the netlist simulation on a longer deterministic stream.
+import Hdl.Mem
+
+def B1 : HwTy := HwTy.bits 1
+def B4 : HwTy := HwTy.bits 4
+def B6 : HwTy := HwTy.bits 6
+def B8 : HwTy := HwTy.bits 8
+def B32 : HwTy := HwTy.bits 32
+
+def allB : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allB bs)
+
+def repeat3 {A : Type} (x : A) : List A := .cons x (.cons x (.cons x .nil))
+
+------------------------------------------------------------------------------------
+-- The mask and the byte-enable value, against the strobe bits
+
+def byteOfMask (dw nb s i : Nat) : Nat :=
+  (@Hw.slice HwTy.El _ (Nat.mul 8 i) 8 dw
+    (Mem.byteMask (r := HwTy.El) (dw := dw) (nb := nb) (BitVec.ofNat nb s))).toNat
+
+def maskOkW (dw nb lanes : Nat) : Bool :=
+  allB (Hdl.concatLists (Hdl.map (fun (s : Nat) =>
+    Hdl.map (fun (i : Nat) =>
+      Nat.beq (byteOfMask dw nb s i) (if Nat.testBit s i then 255 else 0))
+      (Hdl.upto lanes 0)) (Hdl.upto (Nat.pow 2 nb) 0)))
+
+def maskOk : Bool :=
+  Bool.and (maskOkW 8 1 1) (Bool.and (maskOkW 16 2 2) (maskOkW 32 4 4))
+
+------------------------------------------------------------------------------------
+-- A byte memory as the independent model: write the enabled lanes of a 32-bit word,
+-- then read the four bytes back. (The RAM below uses the word memory and the mask.)
+
+def bm0 : Mem.ByteStore 6 := fun (a : BitVec 6) => BitVec.ofNat 8 0
+
+def laneAddr (wordAddr i : Nat) : BitVec 6 :=
+  BitVec.ofNat 6 (Nat.add (Nat.mul 4 wordAddr) i)
+
+def lane (w : Nat) (i : Nat) : BitVec 8 :=
+  @Hw.slice HwTy.El _ (Nat.mul 8 i) 8 32 (BitVec.ofNat 32 w)
+
+def foldlB {A B : Type} (f : B → A → B) : B → List A → B
+  | b, .nil => b
+  | b, .cons x xs => foldlB f (f b x) xs
+
+def writeLanes (bm : Mem.ByteStore 6) (wordAddr strb d : Nat) (lanes : List Nat) : Mem.ByteStore 6 :=
+  foldlB (fun (m : Mem.ByteStore 6) (n : Nat) =>
+    let a := laneAddr wordAddr n;
+    let we := Bool.toBits (Nat.testBit strb n);
+    Mem.byteWrite m we a (lane d n)) bm lanes
+
+def readWord (bm : Mem.ByteStore 6) (wordAddr : Nat) : BitVec 32 :=
+  BitVec.concat (Mem.byteRead bm (laneAddr wordAddr 3))
+    (BitVec.concat (Mem.byteRead bm (laneAddr wordAddr 2))
+      (BitVec.concat (Mem.byteRead bm (laneAddr wordAddr 1))
+        (Mem.byteRead bm (laneAddr wordAddr 0))))
+
+def oldWord : Nat := 0x11223344
+def newWord : Nat := 0xAABBCCDD
+
+-- the byte model's answer for strobe `s`: old in the disabled lanes, new in the enabled
+def expected (s : Nat) : BitVec 32 :=
+  readWord (writeLanes (writeLanes bm0 5 15 oldWord (Hdl.upto 4 0)) 5 s newWord (Hdl.upto 4 0)) 5
+
+-- the same result from the mask and the read-modify-write value (the RAM's arithmetic)
+def merged (s : Nat) : BitVec 32 :=
+  Mem.merge (r := HwTy.El) (dw := 32)
+    (BitVec.ofNat 32 oldWord) (BitVec.ofNat 32 newWord)
+    (Mem.byteMask (r := HwTy.El) (dw := 32) (nb := 4) (BitVec.ofNat 4 s))
+
+def mergeOk : Bool :=
+  allB (Hdl.map (fun (s : Nat) => Nat.beq (merged s).toNat (expected s).toNat) (Hdl.upto 16 0))
+
+------------------------------------------------------------------------------------
+-- The two-cycle byte-enabled RAM
+
+def req2 (valid we addr wdata strb : Nat) : HwTy.El (Mem.ReqW.code 6 32) :=
+  Mem.ReqW.pack 6 32 (@Mem.ReqW.mk 6 32 HwTy.El (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+    (BitVec.ofNat 6 addr) (BitVec.ofNat 32 wdata) (BitVec.ofNat 4 strb))
+
+def zeroResp : HwTy.El (Mem.Resp.code 32) :=
+  Mem.Resp.pack 32 (@Mem.Resp.mk 32 HwTy.El (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0))
+
+def respAt (outs : List (HwTy.El (Mem.Resp.code 32))) (i : Nat) : Mem.Resp 32 HwTy.El :=
+  Mem.Resp.unpack 32 (Hdl.nthD zeroResp outs i)
+
+def writeCycles (we addr wdata strb : Nat) : List (HwTy.El (Mem.ReqW.code 6 32)) :=
+  repeat3 (req2 1 we addr wdata strb)
+
+def readCycles (addr : Nat) : List (HwTy.El (Mem.ReqW.code 6 32)) :=
+  repeat3 (req2 1 0 addr 0 0)
+
+def ram2Ins : List (HwTy.El (Mem.ReqW.code 6 32)) :=
+  Hdl.concatLists (Hdl.map (fun (s : Nat) =>
+    List.append (writeCycles 1 20 oldWord 15)
+      (List.append (writeCycles 1 20 newWord s) (readCycles 20)))
+    (Hdl.upto 16 0))
+
+def ram2Outs : List (HwTy.El (Mem.Resp.code 32)) := Circuit.run (Mem.ramWC2 2 6 4 32) ram2Ins
+
+-- each block is 3 write-old + 3 write-new + 3 read; the read answers at its third cycle
+def ram2Cycle (s : Nat) : Nat := Nat.add (Nat.mul 9 s) 8
+
+def ram2Ok : Bool :=
+  allB (Hdl.map (fun (s : Nat) =>
+    let r := respAt ram2Outs (ram2Cycle s);
+    Bool.and (BitVec.isTrue r.rvalid) (Nat.beq r.rdata.toNat (expected s).toNat))
+    (Hdl.upto 16 0))
+
+------------------------------------------------------------------------------------
+-- The one-cycle byte-enabled RAM (a write lands at the clock edge, the read sees it next
+-- cycle)
+
+def ram1Ins : List (HwTy.El (Mem.ReqW.code 6 32)) :=
+  Hdl.concatLists (Hdl.map (fun (s : Nat) =>
+    List.append (writeCycles 1 20 oldWord 15)
+      (List.append (.cons (req2 1 1 20 newWord s) .nil) (readCycles 20)))
+    (Hdl.upto 16 0))
+
+def ram1Outs : List (HwTy.El (Mem.Resp.code 32)) := Circuit.run (Mem.ramWC1 2 6 4 32) ram1Ins
+
+-- each block is 3 write-old + 1 write-new + 3 read; the read answers at its third cycle
+def ram1Cycle (s : Nat) : Nat := Nat.add (Nat.mul 7 s) 6
+
+def ram1Ok : Bool :=
+  allB (Hdl.map (fun (s : Nat) =>
+    let r := respAt ram1Outs (ram1Cycle s);
+    Bool.and (BitVec.isTrue r.rvalid) (Nat.beq r.rdata.toNat (expected s).toNat))
+    (Hdl.upto 16 0))
+
+------------------------------------------------------------------------------------
+-- Value simulation = netlist simulation on a longer deterministic stream
+
+def randomIns (n : Nat) : List (HwTy.El (Mem.ReqW.code 6 32)) :=
+  Hdl.map (fun (k : Nat) =>
+    req2 (Nat.mod (Nat.add k 1) 4) (Nat.mod k 2) (Nat.mod (Nat.mul 13 k) 64)
+      (Nat.mod (Nat.mul 2654435761 k) 4294967296) (Nat.mod k 16))
+    (Hdl.upto n 0)
+
+def agreeW (c : Circuit (Mem.ReqW.code 6 32) (Mem.Resp.code 32)) (n : Nat) : Bool :=
+  let ins := randomIns n;
+  BEq.beq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
+    (Circuit.simNet .true c (Hdl.map (HwTy.pack (Mem.ReqW.code 6 32)) ins))
+
+def agree1 : Bool := agreeW (Mem.ramWC1 2 6 4 32) 96
+def agree2 : Bool := agreeW (Mem.ramWC2 2 6 4 32) 96
+
+-- the plain word RAMs (no strobes) on the same stream
+def req (valid we addr wdata : Nat) : HwTy.El (Mem.Req.code 6 32) :=
+  Mem.Req.pack 6 32 (@Mem.Req.mk 6 32 HwTy.El (BitVec.ofNat 1 valid) (BitVec.ofNat 1 we)
+    (BitVec.ofNat 6 addr) (BitVec.ofNat 32 wdata))
+
+def randomReq (n : Nat) : List (HwTy.El (Mem.Req.code 6 32)) :=
+  Hdl.map (fun (k : Nat) =>
+    req (Nat.mod (Nat.add k 1) 4) (Nat.mod k 2) (Nat.mod (Nat.mul 13 k) 64)
+      (Nat.mod (Nat.mul 2654435761 k) 4294967296))
+    (Hdl.upto n 0)
+
+def agreeP (c : Circuit (Mem.Req.code 6 32) (Mem.Resp.code 32)) (n : Nat) : Bool :=
+  let ins := randomReq n;
+  BEq.beq (Hdl.map (HwTy.pack (Mem.Resp.code 32)) (Circuit.run c ins))
+    (Circuit.simNet .true c (Hdl.map (HwTy.pack (Mem.Req.code 6 32)) ins))
+
+def agreeP1 : Bool := agreeP (Mem.ramC1 2 6 4 32) 96
+def agreeP2 : Bool := agreeP (Mem.ramC2 2 6 4 32) 96
+
+------------------------------------------------------------------------------------
+-- Instances of the proved laws
+
+def mem0 : Mem.Store 4 32 := fun (a : BitVec 4) => BitVec.ofNat 32 0
+
+def law_same : Mem.read (Mem.write mem0 Mem.one (BitVec.ofNat 4 3) (BitVec.ofNat 32 42))
+    (BitVec.ofNat 4 3) = BitVec.ofNat 32 42 :=
+  Mem.read_write_same mem0 (BitVec.ofNat 4 3) (BitVec.ofNat 32 42)
+
+def law_other : Mem.read (Mem.write mem0 Mem.one (BitVec.ofNat 4 3) (BitVec.ofNat 32 42))
+    (BitVec.ofNat 4 5) = Mem.read mem0 (BitVec.ofNat 4 5) :=
+  Mem.read_write_other mem0 (BitVec.ofNat 4 3) (BitVec.ofNat 4 5) (BitVec.ofNat 32 42) rfl
+
+def law_off : Mem.read (Mem.write mem0 Mem.zero (BitVec.ofNat 4 3) (BitVec.ofNat 32 42))
+    (BitVec.ofNat 4 3) = Mem.read mem0 (BitVec.ofNat 4 3) :=
+  Mem.read_write_off mem0 (BitVec.ofNat 4 3) (BitVec.ofNat 4 3) (BitVec.ofNat 32 42)
+
+def byte0 : Mem.ByteStore 4 := fun (a : BitVec 4) => BitVec.ofNat 8 0
+
+def law_byte : Mem.byteRead (Mem.byteWrite byte0 Mem.one (BitVec.ofNat 4 3) (BitVec.ofNat 8 7))
+    (BitVec.ofNat 4 3) = BitVec.ofNat 8 7 :=
+  Mem.byteEnabled byte0 (BitVec.ofNat 4 3) (BitVec.ofNat 8 7)
+
+def law_byte_off : Mem.byteRead (Mem.byteWrite byte0 Mem.zero (BitVec.ofNat 4 3) (BitVec.ofNat 8 7))
+    (BitVec.ofNat 4 3) = Mem.byteRead byte0 (BitVec.ofNat 4 3) :=
+  Mem.byteDisabled byte0 (BitVec.ofNat 4 3) (BitVec.ofNat 8 7)
+
+def results : List Bool :=
+  .cons maskOk (.cons mergeOk (.cons ram1Ok (.cons ram2Ok
+    (.cons agree1 (.cons agree2 (.cons agreeP1 (.cons agreeP2
+      (.cons (Nat.beq (BitVec.ofNat 32 oldWord).toNat oldWord) .nil))))))))
+
+#eval results

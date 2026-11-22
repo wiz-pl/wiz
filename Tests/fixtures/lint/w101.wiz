@@ -1,0 +1,5 @@
+import Prelude
+
+def unusedParam (x : Nat) : Nat := 1
+
+def usedParam (x : Nat) : Nat := x

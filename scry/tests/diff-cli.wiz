@@ -1,4 +1,5 @@
 -- test: run
+import Scry.NativeLink
 import Sys
 import Scry.TaintCmd
 -- `scry taint --changed-lines`: exit codes for an in-diff finding, a finding on an
@@ -57,6 +58,27 @@ def main : IO Unit := EIO.toIO (do
       "--diff-context", "1"] with
   | .error _ => check "flags: --diff all has no context" .true
   | .ok _ => check "flags: --diff all has no context" .false;
+
+  -- security-05: a --diff value is a git revision, never an option spliced into argv
+  check "diff base: --output=FILE refused"
+    (Bool.not (Scry.validDiffBase "--output=build/evil.sarif"));
+  check "diff base: --ext-diff refused" (Bool.not (Scry.validDiffBase "--ext-diff"));
+  check "diff base: a revision range refused" (Bool.not (Scry.validDiffBase "a..b"));
+  check "diff base: HEAD~1 accepted" (Scry.validDiffBase "HEAD~1");
+  check "diff base: origin/master accepted" (Scry.validDiffBase "origin/master");
+  match Scry.taintArgs ["tests/fixtures/taint-unsafe.c", "--diff",
+      "--output=build/evil.sarif"] with
+  | .error _ => check "diff base: parse refuses an option" .true
+  | .ok _ => check "diff base: parse refuses an option" .false;
+  evilRun ← EIO.lift (Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--diff",
+    "--output=build/evil.sarif"]);
+  let evilRefused :=
+    match evilRun with
+    | .error _ => Bool.true
+    | .ok _ => Bool.false;
+  check "diff base: the run refuses it" evilRefused;
+  evilWritten ← EIO.lift (FS.exists "build/evil.sarif");
+  check "diff base: git never wrote a file" (Bool.not evilWritten);
 
   -- a diff that names a different file: no entry, treated as unchanged with a note
   n10 ← Scry.taintCmd ["tests/fixtures/taint-unsafe.c", "--changed-lines",

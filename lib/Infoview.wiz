@@ -104,11 +104,11 @@ def Infoview.isSpaceC (c : Char) : Bool := Nat.beq (Char.code c) 32
 /-- The longest prefix without spaces (`sp = false`) or with only spaces (`sp = true`), and
 the rest. -/
 def Infoview.span (sp : Bool) : List Char → List Char × List Char
-  | .nil => (List.nil, List.nil)
+  | .nil => ([], [])
   | .cons c cs => match Bool.and (Bool.not sp) (Infoview.isSpaceC c) with
-    | .true => (List.nil, List.cons c cs)
+    | .true => ([], List.cons c cs)
     | .false => match Bool.and sp (Bool.not (Infoview.isSpaceC c)) with
-      | .true => (List.nil, List.cons c cs)
+      | .true => ([], List.cons c cs)
       | .false =>
         let r := Infoview.span sp cs;
         (List.cons c r.1, r.2)
@@ -141,9 +141,9 @@ def Infoview.indentLine (indent : Nat) : List Piece := match Nat.beq indent 0 wi
   | .false => .cons (.mk (Infoview.spaces indent) "" .nil) .nil
 /-- The longest prefix of `cs` at most `w` columns wide, and the rest. -/
 def Infoview.takeWidth : Nat → List Char → List Char × List Char
-  | _, .nil => (List.nil, List.nil)
+  | _, .nil => ([], [])
   | w, .cons c cs => match Nat.lt w (Infoview.charWidth (Char.code c)) with
-    | .true => (List.nil, List.cons c cs)
+    | .true => ([], List.cons c cs)
     | .false =>
       let r := Infoview.takeWidth (w - Infoview.charWidth (Char.code c)) cs;
       (List.cons c r.1, r.2)
@@ -233,8 +233,9 @@ def Infoview.items : List Json → List InfoItem
 /-- The items of a `wiz/interactiveInfo` result, `{"items": [item…], "session"}`, or
 `null` (no items). -/
 def Items.ofJson (j : Json) : List InfoItem := Infoview.items (Json.getList j "items")
-/-- The section an item is shown in: `Syntax`, `Import`, `Instances`, `Declarations` or
-`Messages`. -/
+/-- The section an item is shown in: `Syntax`, `Import`, `Instances`, `Declarations`,
+`Widgets` or `Messages`. A widget item's `text` is the `WIZ_WIDGET:` payload
+(`lib/Plot.wiz` `Plot.widget`); a terminal shows the title, a browser draws it. -/
 def InfoItem.section (i : InfoItem) : String := match i with
   | .mk k _ _ _ => match String.eq k "syntax" with
     | .true => "Syntax"
@@ -246,7 +247,9 @@ def InfoItem.section (i : InfoItem) : String := match i with
           | .true => "Instances"
           | .false => match String.eq k "declaration" with
             | .true => "Declarations"
-            | .false => "Messages"
+            | .false => match String.eq k "widget" with
+              | .true => "Widgets"
+              | .false => "Messages"
 /-- What goes before an item's type: a declaration's name, an instance's term. -/
 def InfoItem.head (i : InfoItem) : String := match i with
   | .mk k title text _ => match String.eq k "instance" with
@@ -286,7 +289,7 @@ def Infoview.hypLines (width : Nat) (h : Hyp) (st : Flat) : List (List Piece) ×
 
 /-- The lines of each hypothesis, tags numbered on. -/
 def Infoview.hypsLines (width : Nat) : List Hyp → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons h hs, st =>
     let a := Infoview.hypLines width h st;
     let b := Infoview.hypsLines width hs a.2;
@@ -304,7 +307,7 @@ def Infoview.goalLines (width : Nat) (g : Goal) (st : Flat) : List (List Piece) 
 
 /-- The lines of each goal, a blank line between goals. -/
 def Infoview.goalsLines (width : Nat) : List Goal → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons g gs, st =>
     let a := Infoview.goalLines width g st;
     let b := Infoview.goalsLines width gs a.2;
@@ -345,19 +348,24 @@ def Infoview.indented : List (List Char) → List (List Char)
 /-- One item's lines: `head : type` (wrapped, indent 4), or its title and its text
 (indented). -/
 def Infoview.itemLines (width : Nat) (i : InfoItem) (st : Flat) : List (List Piece) × Flat := match i with
-  | .mk _ title text ty => match ty with
-    | .some t =>
-      let pre : List Piece := .cons (Infoview.str (InfoItem.head i) "name") (.cons (Infoview.str " : " "") .nil);
-      match Infoview.piecesOf pre t st with
-      | .mk ps n is => (Infoview.wrap width 4 ps, .mk .nil n is)
-    | .none =>
-      let body : List (List Piece) := match Infoview.isEmptyStr text with
-        | .true => .nil
-        | .false => Infoview.wrapLines width (Infoview.indented (Infoview.textLines (String.chars text) .nil));
-      (List.append (Infoview.wrapLines width (.cons (String.chars title) .nil)) body, st)
+  | .mk k title text ty => match String.eq k "widget" with
+    -- a terminal cannot draw it: the title, and where to see the picture
+    | .true =>
+      let hint : List Piece := .cons (.mk (String.chars "  (widget: open the browser infoview to draw it)") "dim" .nil) .nil;
+      (List.append (Infoview.wrapLines width (.cons (String.chars title) .nil)) (Infoview.wrap width 0 hint), st)
+    | .false => match ty with
+      | .some t =>
+        let pre : List Piece := .cons (Infoview.str (InfoItem.head i) "name") (.cons (Infoview.str " : " "") .nil);
+        match Infoview.piecesOf pre t st with
+        | .mk ps n is => (Infoview.wrap width 4 ps, .mk .nil n is)
+      | .none =>
+        let body : List (List Piece) := match Infoview.isEmptyStr text with
+          | .true => .nil
+          | .false => Infoview.wrapLines width (Infoview.indented (Infoview.textLines (String.chars text) .nil));
+        (List.append (Infoview.wrapLines width (.cons (String.chars title) .nil)) body, st)
 /-- The items' lines, with a heading (after a blank line) where the section changes. -/
 partial def Infoview.itemsLines (width : Nat) (sec : String) : List InfoItem → Flat → List (List Piece) × Flat
-  | .nil, st => (List.nil, st)
+  | .nil, st => ([], st)
   | .cons i is, st =>
     let s := InfoItem.section i;
     let head : List (List Piece) := match String.eq s sec with
@@ -375,7 +383,7 @@ its messages, the expected type (if there is a term) and the other items, tags n
 across all of them. With nothing to show, one line saying so. -/
 def View.ofInfo (width : Nat) (st : Option TacView) (term : Option Goal) (items : List InfoItem) : View :=
   let tac0 : List (List Piece) × Flat := match st with
-    | .none => (List.nil, Flat.mk List.nil 0 List.nil)
+    | .none => ([], Flat.mk [] 0 [])
     | .some (.mk gs _) => match gs with
       | .nil => (.cons (Infoview.header "Tactic state") (.cons (.cons (Infoview.str "No goals" "done") .nil) .nil), .mk .nil 0 .nil)
       | .cons _ _ =>
@@ -715,16 +723,20 @@ partial def Key.decode (s : List Char) : List Key := match s with
 def Infoview.htmlMsgs : List String → Html → Html
   | .nil, h => h
   | .cons m ms, h => Infoview.htmlMsgs ms (Html.lit "</pre>" (Html.add (Tagged.htmlText m .nil) (Html.lit "<pre class=\"message\">" h)))
-/-- One item as HTML. -/
+/-- One item as HTML. A widget is a titled placeholder here; the browser infoview
+draws the payload itself (`web/goals.js`), so this never inserts the SVG as text. -/
 def Infoview.htmlItem (sel : Nat) (i : InfoItem) (h : Html) : Html := match i with
-  | .mk _ title text ty => match ty with
-    | .some t => Html.lit "</div>" (TT.html sel t (Html.lit "</span> : "
-        (Html.add (Tagged.htmlText (InfoItem.head i) .nil) (Html.lit "<div class=\"item\"><span class=\"names\">" h))))
-    | .none =>
-      let h1 := Html.lit "</div>" (Html.add (Tagged.htmlText title .nil) (Html.lit "<div class=\"item-title\">" h));
-      match Infoview.isEmptyStr text with
-      | .true => h1
-      | .false => Html.lit "</pre>" (Html.add (Tagged.htmlText text .nil) (Html.lit "<pre class=\"item-text\">" h1))
+  | .mk k title text ty => match String.eq k "widget" with
+    | .true => Html.lit "</span></div>" (Html.add (Tagged.htmlText title .nil)
+        (Html.lit "<div class=\"widget\"><span class=\"names\">" h))
+    | .false => match ty with
+      | .some t => Html.lit "</div>" (TT.html sel t (Html.lit "</span> : "
+          (Html.add (Tagged.htmlText (InfoItem.head i) .nil) (Html.lit "<div class=\"item\"><span class=\"names\">" h))))
+      | .none =>
+        let h1 := Html.lit "</div>" (Html.add (Tagged.htmlText title .nil) (Html.lit "<div class=\"item-title\">" h));
+        match Infoview.isEmptyStr text with
+        | .true => h1
+        | .false => Html.lit "</pre>" (Html.add (Tagged.htmlText text .nil) (Html.lit "<pre class=\"item-text\">" h1))
 /-- The items as HTML, with a heading where the section changes. -/
 partial def Infoview.htmlItems (sel : Nat) (sec : String) : List InfoItem → Html → Html
   | .nil, h => h

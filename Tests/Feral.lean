@@ -131,11 +131,12 @@ def posSrc : String := pre ++ "feral\n  fn double (n : U64) : U64 := n + n\n" ++
 
 def surfaceNames : List String :=
   ["01_swap", "02_push", "03_get_mut", "04_reverse", "05_bst", "06_count", "07_disjoint", "08_first_mut",
-   "09_bsearch", "10_regions", "11_list", "12_pick"]
+   "09_bsearch", "10_regions", "11_list", "12_pick", "13_contracts"]
 
 def rejectedNames : List String :=
   ["E0499_two_mut", "E0502_use_while_mut", "E0515_return_local", "E0515_return_mut", "E0597_not_long_enough",
-   "E0597_store_short", "lifetime_bound_missing", "lifetime_bound_missing_mut", "outlives_wrong_way"]
+   "E0597_store_short", "lifetime_bound_missing", "lifetime_bound_missing_mut", "outlives_wrong_way",
+   "inline_spec_borrow"]
 
 def group : Group where
   name := "feral"
@@ -255,12 +256,91 @@ def group : Group where
         checkEq "[]" (toString (errorsOf rs r))
         let e ← firstError (pre ++ "feral\n  spec nope ensures (True)\nend\n")
         check (has e "no function `nope`") e },
+    { name := "final result: a returned borrow's spec quantifies its final value and is consumed in the lender's scope", run := fun _ => do
+        let fn := "  fn ret_self {'a} (v : &'a mut U64)\n" ++
+          "    ensures (result = old(v))\n" ++
+          "    ensures (final(v) = final(result))\n" ++
+          "  : &'a mut U64 := v\n"
+        -- accepted; the spec is value-level (the lender's value, one borrow scope)
+        let src := pre ++ "feral\n" ++ fn ++ "end\n"
+        let s ← frontend src
+        checkEq "[]" (toString (errorsOf s src))
+        let l ← frontend (pre ++ "#lower feral\n" ++ fn ++ "end\n")
+        let out := infosOf l
+        check (out.any (has · "def ret_self.Spec (v : U64) : Prop :=\n  (fin : U64) →")) s!"{out}"
+        check (out.any (has · "Result.Holds (fun (r : (U64 × U64)) => (r.1 = v) × (r.2 = fin))")) s!"{out}"
+        check (out.any (has · "Uniq.borrow Region.static v (fun ρ1 h1 l1 v =>")) s!"{out}"
+        check (out.any (has · "let 1 u := Mut.close m fin;")) s!"{out}"
+        -- the spec is provable, and the borrow is consumed inside the scope
+        let ok := pre ++ "feral\n" ++ fn ++ "end\n" ++
+          "def ret_self_ok (a : U64) : ret_self.Spec a := fun fin => (rfl, rfl)\n"
+        checkEq "[]" (toString (errorsOf (← frontend ok) ok))
+        -- and it runs: `*result` is old(v), the lender comes back with the chosen final value
+        let run := ok ++
+          "#eval Result.map (fun (p : U64 × U64) => (p.1.val, p.2.val)) (Uniq.borrow Region.static (U64.lit 3) (fun ρ h l v =>\n" ++
+          "  match ret_self v with\n" ++
+          "  | .ok m => let 1 (cur, m) := Mut.peek m; let 1 u := Mut.close m (U64.lit 9); .ok cur u\n" ++
+          "  | .err e v => .err e v))\n"
+        let r ← frontend run
+        checkEq "[]" (toString (errorsOf r run))
+        checkEq "[.ok (3, 9)]" (toString (infosOf r))
+        -- the previously-rejected shape (03_get_mut) lowers, and the program still runs
+        let gm ← IO.FS.readFile "drafts/feral/surface/03_get_mut.wiz"
+        let lum := gm.replace "\nferal\n" "\n#lower feral\n"
+        let gl ← frontend lum
+        checkEq "[]" (toString (errorsOf gl lum))
+        check ((infosOf gl).any (has · "def get_mut.Spec (v : (Vec U64)) (i : U64) : Prop :=")) s!"{infosOf gl}"
+        -- a borrow from two lenders cannot be closed in one scope: still rejected, naming it
+        let e ← firstError (pre ++ "feral\n  fn pick2 {'a} (c : Bool) (x : &'a mut U64) (y : &'a mut U64)\n" ++
+          "    ensures (final(x) = final(result))\n  : &'a mut U64 := if c then x else y\nend\n")
+        check (has e "more than one lender") e
+        -- an outlives bound makes the result's region not the lender's: still rejected
+        let e ← firstError (pre ++ "feral\n  fn pick {'a 'b} {'a : 'b} (c : Bool) (x : &'a mut U64) (y : &'b mut U64)\n" ++
+          "    ensures (final(x) = final(result))\n  : &'b mut U64 := if c then x else y\nend\n")
+        check (has e "outlives bound") e
+        -- an optional borrow has a `none` branch with no final value: still rejected
+        let e ← firstError (pre ++ "feral\n  fn first_mut {'a} (v : &'a mut Vec U64)\n" ++
+          "    ensures (final(v) = final(result))\n  : Option (&'a mut U64) := v.get_mut 0\nend\n")
+        check (has e "optional returned borrow") e
+        -- a returned borrow beside a handed-back `&mut` needs two handles in one scope: still rejected
+        let e ← firstError (pre ++ "feral\n  fn both {'a 'b} (v : &'a mut Vec U64) (w : &'b mut U64)\n" ++
+          "    ensures (final(v) = final(result))\n  : &'a mut U64 := { *w := *w + 1; &mut v[0] }\nend\n")
+        check (has e "beside handed-back") e
+        -- nor can a borrow that escapes its lender's scope carry a `final result` spec
+        let e ← firstError (pre ++ "feral\n  fn bad {'a} (v : &'a mut U64)\n" ++
+          "    ensures (final(v) = final(result))\n  : &'a mut U64 := {\n    let mut l : U64 := 5;\n    &mut l\n  }\nend\n")
+        check (has e "E0515") e
+        -- nor may the same lender be borrowed twice while the returned borrow is live
+        let e ← firstError (pre ++ "feral\n" ++ fn ++
+          "  fn bad () : U64 := {\n    let mut a : U64 := 1;\n    let r := ret_self (&mut a);\n" ++
+          "    let s := ret_self (&mut a);\n    *r := 2;\n    a\n  }\nend\n")
+        check (has e "E0499") e },
+    { name := "inline contracts (L18): `fn … requires (P) ensures (Q) : R := …` emits `f.Spec`", run := fun _ => do
+        let src := pre ++ "feral\n  fn idf (a : U64)\n    requires (True)\n    ensures (result = a)\n  : U64 := a\nend\n"
+        let s ← frontend src
+        checkEq "[]" (toString (errorsOf s src))
+        let ok := src ++ "def idf_ok (a : U64) : idf.Spec a := fun _ => rfl\n"
+        checkEq "[]" (toString (errorsOf (← frontend ok) ok))
+        let l ← frontend (src.replace "\nferal\n" "\n#lower feral\n")
+        check ((infosOf l).any (has · "def idf.Spec (a : U64) : Prop :=\n  (True) → Result.Holds (fun (r : U64) => (r = a)) ( idf a)"))
+          s!"{infosOf l}"
+        -- Rust's `final(x)`/`old(x)` spellings are the same as `final x`/`old x`
+        let b := pre ++ "feral\n  fn bump {'a} (x : &'a mut U64) (step : U64)\n    ensures (final(x).val = Nat.add old(x).val step.val)\n  : U64 := { *x := *x + step; *x }\nend\n"
+        let bs ← frontend b
+        checkEq "[]" (toString (errorsOf bs b))
+        let bl ← frontend (b.replace "\nferal\n" "\n#lower feral\n")
+        check ((infosOf bl).any (has · "def bump.Spec (x : U64) (step : U64) : Prop :=\n  Result.Holds (fun (r : (U64 × U64)) => (r.2.val = Nat.add x.val step.val))"))
+          s!"{infosOf bl}"
+        -- a function has one specification: an inline clause list and a `spec` item
+        let both := pre ++ "feral\n  fn idf (a : U64)\n    ensures (result = a)\n  : U64 := a\n  spec idf ensures (result = a)\nend\n"
+        let e ← firstError both
+        check (has e "one specification") e },
     { name := "#lower shows the generated Wiz, item by item", run := fun _ => do
         let src := pre ++ "#lower feral\n  fn swap {'a 'b} (x : &'a mut U64) (y : &'b mut U64) : Unit := {\n" ++
           "    let t := *x;\n    *x := *y;\n    *y := t\n  }\nend\n"
         let s ← frontend src
         checkEq "[]" (toString (errorsOf s src))
-        checkEq ("[def swap {ρa ρb : Region} (1 x : (Uniq ρa U64)) (1 y : (Uniq ρb U64)) : Result1 Unit ((1 _ : (Uniq ρa U64)) × (Uniq ρb U64)) :=\n" ++
+        checkEq ("[def swap {0 ρa ρb : Region} (1 x : (Uniq ρa U64)) (1 y : (Uniq ρb U64)) : Result1 Unit ((1 _ : (Uniq ρa U64)) × (Uniq ρb U64)) :=\n" ++
           "  let 1 (d_2, x) := Uniq.peek x;\n  let t := d_2;\n  let 1 (d_5, y) := Uniq.peek y;\n  let 1 x := Uniq.write x d_5;\n" ++
           "  let 1 y := Uniq.write y t;\n  Result1.ok (()) (x, y)\n]") (toString (infosOf s)) },
     { name := "errors point into the block: the line and column of the offending expression", run := fun _ => do
@@ -371,7 +451,7 @@ def group : Group where
           "#eval List.length longWords\n#eval String.length (String.intercalate \"\" longWords)\n"
         let s ← frontend src
         checkEq "[]" (toString (errorsOf s src))
-        checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), .cons \"x\" (.cons \"y\" (.cons \"a\" (.cons \"b\" (.cons \"c\" .nil)))), 20000, \"tail\", 3, 20002]"
+        checkEq "[(\"x\", \"f.g\"), (\"\", \"\"), (\"\", \"f\"), [\"x\", \"y\", \"a\", \"b\", \"c\"], 20000, \"tail\", 3, 20002]"
           (toString (infosOf s)) }
   ]
 

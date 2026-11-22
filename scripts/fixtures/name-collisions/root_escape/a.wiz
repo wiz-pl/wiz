@@ -1,0 +1,2 @@
+/-- Fixture: `__root__.same` declares `same` in the global scope. -/
+def __root__.same : Nat := 1

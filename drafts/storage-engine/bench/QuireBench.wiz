@@ -1,0 +1,241 @@
+import Sys
+import Word
+import Text
+import Functor
+import Scry.QuireStorage
+import Scry.Quire
+import Scry.QuireCursor
+/-!
+# The Quire side of the findings-store benchmark
+
+`quire-bench OP N PATH` (compiled with `wiz build`), where `OP` is `build`, `append`,
+`batch`, `reopen`, `query` or `update`. Each run is one operation; the shell harness
+surrounds it with `/proc/self/status`'s `VmHWM` (peak RSS) and prints the operation's own
+`Clock.monotonic` time.
+
+`append` is `N` independent one-record transactions committed in groups of
+`groupSize` (1000) with `putMany`: one page run, one `fdatasync` and one meta `fsync`
+per group, instead of two syncs per record. `build` keeps the one-commit-per-record
+path (the old append) for comparison.
+
+A finding is a 32-byte `Node`: `kind` = rule id, `label` = state id, `count` packs the
+line, a path id and a function id. Strings are interned (the design's `lib/Intern.wiz`
+precedent), so the record is the numeric projection a findings query uses.
+-/
+
+def u64 (n : Nat) : U64 := U64.ofNat n
+def u32 (n : Nat) : U32 := U32.ofNat n
+
+/-- Whether a commit outcome succeeded. -/
+def succeeded (o : Outcome) : Bool :=
+  match o with
+  | .committed _ => .true
+  | .rejected _ => .false
+
+/-- Findings schema: rule (field 0) and state (field 2), both non-unique. -/
+def ruleIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def stateIndex : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .false
+def schema : List IndexDef := [ruleIndex, stateIndex]
+
+/-- `count = line + path*2^20 + function*2^34 + severity*2^48`. -/
+def pack (i : Nat) : Nat :=
+  let sev := Nat.mod (Nat.div i 7) 5;
+  let path := Nat.mod i 16384;
+  let line := Nat.mod i 1048576;
+  let fn := Nat.mod i 16384;
+  Nat.add line (Nat.add (Nat.mul path 1048576)
+    (Nat.add (Nat.mul fn 17179869184) (Nat.mul sev 281474976710656)))
+
+/-- Rule `i % 100`, state `i % 5`, packed line/path/function/severity. -/
+def mkNode (i : Nat) : Node :=
+  Node.mk (u32 (Nat.mod i 100)) (u64 (pack i)) (u32 (Nat.mod i 5))
+
+def setNode (s : QSnapshot) (i : Nat) : QSnapshot :=
+  QSnapshot.record s (u64 i) (.some (.set (mkNode i)))
+
+/-- The end of the chunk starting at `i` (at most 500 records). -/
+def chunkEnd (n i : Nat) : Nat :=
+  match Nat.le (Nat.add i 500) n with
+  | .true => Nat.add i 500
+  | .false => n
+
+/-- One group of the append path: at most `groupSize` transactions. -/
+def groupSize : Nat := 1000
+
+/-- The last id of the group starting at `i` (inclusive). -/
+def groupEnd (n i : Nat) : Nat :=
+  let last := Nat.add i (Nat.sub groupSize 1);
+  match Nat.le last n with
+  | .true => last
+  | .false => n
+
+/-- A group of one-record transactions from one snapshot, ids `i..last` inclusive. -/
+partial def txsOfGroup (s : QSnapshot) (last : Nat) (i : Nat) : List QSnapshot :=
+  match Nat.le i last with
+  | .true => List.cons (setNode s i) (txsOfGroup s last (Nat.succ i))
+  | .false => []
+
+/-- The append path: `n` independent one-record transactions, committed in groups with
+**one** durability point per group (`putMany`). Each record is still its own transaction
+(its own write-set, its own outcome); the group shares the `fdatasync` and the meta write.
+This is the operation the old append row measured one commit at a time. -/
+partial def appendLoop (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => do
+    s ← getQ h;
+    let last := groupEnd n i;
+    outs ← putMany h (txsOfGroup s last i);
+    match List.all (fun o => succeeded o) outs with
+    | .true => appendLoop h n (Nat.succ last)
+    | .false => EIO.fail "append: rejected"
+  | .false => EIO.pure ()
+
+/-- A chunk of at most 500 records into one write-set. -/
+partial def setChunk (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => setChunk (setNode s i) n (Nat.succ i)
+  | .false => s
+
+/-- `n` records in one write-set (the batched load), in chunks of 500 so the recursion
+does not depend on N. -/
+partial def setMany (s : QSnapshot) (n : Nat) (i : Nat) : QSnapshot :=
+  match Nat.le i n with
+  | .true => setMany (setChunk s (chunkEnd n i) i) n (Nat.succ (chunkEnd n i))
+  | .false => s
+
+/-- A chunk of at most 500 single-record commits. -/
+partial def buildChunk (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => do
+    s ← getQ h;
+    o ← putQ h (setNode s i);
+    match o with
+    | .committed _ => buildChunk h n (Nat.succ i)
+    | .rejected _ => EIO.fail "append: rejected"
+  | .false => EIO.pure ()
+
+/-- `n` single-record commits (the append path), in chunks of 500. -/
+partial def buildLoop (h : QHandle) (n : Nat) (i : Nat) : EIO Unit :=
+  match Nat.le i n with
+  | .true => EIO.bind (buildChunk h (chunkEnd n i) i)
+      (fun _ => buildLoop h n (Nat.succ (chunkEnd n i)))
+  | .false => EIO.pure ()
+
+/-- The peak RSS of this process, from `/proc/self/status`. -/
+def firstWord (s : String) : String :=
+  match String.splitOn (String.trim s) " " with
+  | List.cons x _ => x
+  | [] => s
+
+partial def rssLines : List String → Option Nat
+  | [] => .none
+  | List.cons l ls =>
+    match String.stripPrefix l "VmHWM:" with
+    | .some rest => String.parseNat (firstWord rest)
+    | .none => rssLines ls
+
+def peakRss : IO Nat := do
+  text ← IO.readFile "/proc/self/status";
+  IO.pure (match rssLines (String.splitOn text "\n") with
+    | .some n => n
+    | .none => 0)
+
+def report (op : String) (t0 t1 : Duration) (extra : String) : IO Unit := do
+  rss ← peakRss;
+  IO.println (String.append "BENCH op=" op);
+  IO.println (String.append "time_ns " (Nat.toString (Nat.sub t1.ns t0.ns)));
+  IO.println (String.append "rss_kb " (Nat.toString rss));
+  IO.println extra
+
+def parseN (n : String) : EIO Nat :=
+  match String.parseNat n with
+  | .some k => EIO.pure k
+  | .none => EIO.fail "bad N"
+
+def parseArg (args : List String) : EIO (String × Nat × String) :=
+  match args with
+  | op :: n :: path :: _ => do
+    k ← parseN n;
+    EIO.pure (op, k, path)
+  | _ => EIO.fail "usage: quire-bench OP N PATH"
+
+def runBuild (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  buildLoop h n 1;
+  closeQ h
+
+/-- The measured append: one-record transactions, group-committed. -/
+def runAppend (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  appendLoop h n 1;
+  closeQ h
+
+def runBatch (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  o ← putQ h (setMany s n 1);
+  match o with
+  | .committed _ => closeQ h
+  | .rejected _ => EIO.fail "batch: rejected"
+
+def runReopen (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  let got := QSnapshot.getNode s (u64 n);
+  closeQ h;
+  match got with
+  | .some _ => EIO.lift (IO.println (String.append "found " (Nat.toString n)))
+  | .none => EIO.fail "reopen: last node absent"
+
+def runReopenFast (n : Nat) (path : String) : EIO Unit := do
+  h ← openQV path schema .false;
+  s ← getQ h;
+  let got := QSnapshot.getNode s (u64 n);
+  closeQ h;
+  match got with
+  | .some _ => EIO.lift (IO.println (String.append "found " (Nat.toString n)))
+  | .none => EIO.fail "reopen-fast: last node absent"
+
+def runQuery (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  let res := QCursor.foldWith
+    (QCursor.filterKey (KeyPred.eq (u64 2)) (QSnapshot.indexOnlyRange stateIndex KeyRange.all s))
+    (fun acc _ => Nat.succ acc) 0;
+  closeQ h;
+  EIO.lift (IO.println (String.append "count " (Nat.toString res.1)));
+  EIO.lift (IO.println (String.append "cost " (Cost.show res.2)))
+
+def runCompact (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  compactQ h;
+  closeQ h
+
+def runUpdate (n : Nat) (path : String) : EIO Unit := do
+  h ← openQ path schema;
+  s ← getQ h;
+  o ← putQ h (qsetField (u64 (Nat.div n 2)) Node.labelL (u32 4) s);
+  closeQ h;
+  match o with
+  | .committed _ => EIO.pure ()
+  | .rejected _ => EIO.fail "update: rejected"
+
+def run (op : String) (n : Nat) (path : String) : EIO Unit :=
+  match op with
+  | "build" => runBuild n path
+  | "append" => runAppend n path
+  | "batch" => runBatch n path
+  | "reopen" => runReopen n path
+  | "reopen-fast" => runReopenFast n path
+  | "query" => runQuery n path
+  | "compact" => runCompact n path
+  | "update" => runUpdate n path
+  | _ => EIO.fail "unknown op"
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  p ← parseArg args;
+  t0 ← EIO.lift Clock.monotonic;
+  run p.1 p.2.1 p.2.2;
+  t1 ← EIO.lift Clock.monotonic;
+  EIO.lift (report p.1 t0 t1 (String.append "n " (Nat.toString p.2.1))))

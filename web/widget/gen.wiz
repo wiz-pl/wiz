@@ -1,7 +1,7 @@
 -- A fixture for web/widget/test.mjs: each widget kind rendered and displayed, then an
 -- event through `Widget.handle` and the patches it produces. The Node test applies the
 -- patches with web/framework/runtime.js and web/framework/minidom.mjs, the same halves
--- the React framework test uses.
+-- the Loom framework test uses.
 --
 --   .lake/build/bin/wiz run -I lib web/widget/gen.wiz
 import IO

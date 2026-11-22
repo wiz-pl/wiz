@@ -5,9 +5,9 @@ import Tests.Elab
 /-!
 # scry's Datalog engine (S3, deep embedding)
 
-The group `scry-datalog` checks `lib/Scry/Store.wiz`, `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
-checks the S12 e-graph (`lib/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
+The group `scry-datalog` checks `scry/src/Scry/Store.wiz`, `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz` through `examples/scry-datalog-*.wiz`; the group `scry-egraph`
+checks the S12 e-graph (`scry/src/Scry/Egraph.wiz`) through `examples/scry-egraph-*.wiz`.
 The Datalog group's cases are:
 
 * transitive closure and a provenance witness;
@@ -19,8 +19,8 @@ The Datalog group's cases are:
 
 The engine is ordinary Wiz, so the same examples run under the interpreter (`#eval`) and
 compiled (C and LLVM); the transitive-closure case runs both. The embedding and the
-evaluator are described in the module docs of `lib/Scry/Datalog.wiz` and
-`lib/Scry/Eval.wiz`.
+evaluator are described in the module docs of `scry/src/Scry/Datalog.wiz` and
+`scry/src/Scry/Eval.wiz`.
 -/
 
 open Wiz
@@ -31,6 +31,14 @@ namespace Tests.Scry
 def interp (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs (src ++ "\n#eval main") [expected]
+
+/-- An example run through another import: the file's `import Scry.Egraph` line is
+swapped for `mod`. `Scry.EgraphNative` is now the compatibility import of the one
+engine, so the six differential examples keep the same source and digest through it;
+the case pins that the compatibility name still brings the whole surface. -/
+def interpAs (mod name expected : String) : IO Unit := do
+  let src ← IO.FS.readFile s!"examples/{name}.wiz"
+  Elab.okLibs ((src.replace "import Scry.Egraph" s!"import {mod}") ++ "\n#eval main") [expected]
 
 /-- The same, compiled to C and to LLVM. -/
 def compiled (name expected : String) : IO Unit := do
@@ -59,7 +67,8 @@ def strataCase : IO Unit := do
 
 def scryEgraphGroup : Group where
   name := "scry-egraph"
-  exercise := "S12: lib/Scry/Egraph.wiz"
+  exercise := "S12: scry/src/Scry/Egraph.wiz"
+  parallel := true
   cases := [
     { name := "congruence: a = b also equates f a = f b and g (f a) = g (f b)", run := fun _ =>
         interp "scry-egraph-congruence" "14111" },
@@ -74,12 +83,46 @@ def scryEgraphGroup : Group where
     { name := "fuel: a growing rewrite adds one layer per round and stops at the bound", run := fun _ =>
         interp "scry-egraph-fuel" "2851" },
     { name := "Datalog: derived equality facts feed one mergeFacts, then congruence", run := fun _ =>
-        interp "scry-egraph-datalog" "4021" }
+        interp "scry-egraph-datalog" "4021" },
+    { name := "native tables: all six examples give the reference digests", run := fun _ => do
+        interpAs "Scry.EgraphNative" "scry-egraph-congruence" "14111"
+        interpAs "Scry.EgraphNative" "scry-egraph-rebuild" "14111"
+        interpAs "Scry.EgraphNative" "scry-egraph-extract" "11332"
+        interpAs "Scry.EgraphNative" "scry-egraph-saturate" "3171"
+        interpAs "Scry.EgraphNative" "scry-egraph-fuel" "2851"
+        interpAs "Scry.EgraphNative" "scry-egraph-datalog" "4021" },
+    { name := "Datalog: eqsort columns, an equality-assertion head, canonicalise between rounds", run := fun _ =>
+        interp "scry-egraph-eqplan" "11111121" },
+    { name := "canonicalise: merge eq facts, rewrite eqsort columns, idempotent", run := fun _ =>
+        interp "scry-egraph-canon" "111012" },
+    { name := "analysis: an interval per e-class, a guarded rewrite and a joined interval", run := fun _ =>
+        interp "scry-egraph-analysis" "1131341" },
+    { name := "the analysis example under C and LLVM", run := fun _ =>
+        compiled "scry-egraph-analysis" "1131341" },
+    { name := "join: eqsort terms, an interval per e-class and a guarded rewrite refine each other", run := fun _ =>
+        interp "scry-egraph-join" "1131341" },
+    { name := "explanation: a rewrite chain and a congruence chain from the union log", run := fun _ =>
+        interp "scry-egraph-explain" "1000111" },
+    { name := "limits: fixpoint, fuel, node cap and clock cap stop reasons", run := fun _ =>
+        interp "scry-egraph-limits" "123415" },
+    { name := "extraction: Option costs, a cycle with no finite term, a large weight", run := fun _ =>
+        interp "scry-egraph-extract-opt" "111111" },
+    { name := "Wil terms: constant folding and identities reach 5 and 10", run := fun _ =>
+        interp "scry-egraph-wil-const" "13252025" },
+    { name := "Wil terms: a copy-only function is a one-round no-op fixpoint", run := fun _ =>
+        interp "scry-egraph-wil-noop" "1110200" },
+    { name := "Wil terms: fuel 1 stops before the outer fold, fuel 5 reaches it", run := fun _ =>
+        interp "scry-egraph-wil-fuel" "110113" },
+    { name := "extract back to Wil: 2+3 -> 5, identities -> copies, b+c -> 10, with fuel", run := fun _ =>
+        interp "scry-egraph-extract-wil" "24001111130111" },
+    { name := "extract guard: a redefined operand blocks the second identity", run := fun _ =>
+        interp "scry-egraph-extract-guard" "21101111" }
   ]
 
 def scryGroup : Group where
   name := "scry-datalog"
-  exercise := "S3: lib/Scry/Store.wiz, lib/Scry/Datalog.wiz, lib/Scry/Eval.wiz"
+  exercise := "S3: scry/src/Scry/Store.wiz, scry/src/Scry/Datalog.wiz, scry/src/Scry/Eval.wiz"
+  parallel := true
   cases := [
     { name := "transitive closure: the delta loop, and a witness for (1, 4) (interp)", run := fun _ =>
         interp "scry-datalog-tc" "600107" },

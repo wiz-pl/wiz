@@ -21,7 +21,7 @@ def sizedGroup : Group where
         fails (sizedPrelude ++ "#check fun (i : Size) (j : Size< i) (x : Nat^i) => (x : Nat^j)") "mismatch" },
     { name := "sized case analysis keeps field sizes", run := fun _ =>
         ok (sizedPrelude ++ "#check @Nat.scasesOn")
-          ["Nat.scasesOn : {s : Size} → (0 motive : Nat → Sort ?u0) → ((0 j : Size< s) → motive .zero) → ((0 j : Size< s) → (n : Nat^j) → motive (.succ n)) → (x : Nat^s) → motive x"] },
+          ["Nat.scasesOn : {0 s : Size} → (0 motive : Nat → Sort ?u0) → ((0 j : Size< s) → motive .zero) → ((0 j : Size< s) → (n : Nat^j) → motive (.succ n)) → (x : Nat^s) → motive x"] },
     { name := "course-of-values recursion (fib)", run := fun _ =>
         ok (sizedPrelude ++ "#reduce fib (.succ (.succ (.succ (.succ .zero))))")
           [".succ (.succ (.succ (.succ (.succ .zero))))"] },

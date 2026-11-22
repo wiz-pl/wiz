@@ -1,0 +1,92 @@
+import Cursor
+/-!
+# The linear-fixpoint gap (expected to fail)
+
+The engine's supported query loop is `Cursor.fold`/`Cursor.foldUntil`: they take the
+linear handle apart once, match it into the ω plan state, and recurse on the *state*.
+The natural hand-written consumer below does not typecheck. This file is deliberately
+red; `wiz check` exits 1, and that is the record of the gap (do not "fix" it by
+loosening the test).
+
+```text
+wiz check -I drafts/storage-engine drafts/storage-engine/CursorRecursive.wiz
+CursorRecursive.wiz:89:13: error: variable c declared with quantity 1 but used 0
+  (a linear variable, of quantity 1, must be used exactly once, and c is not used)
+```
+
+## What is actually rejected
+
+The rejection is `partial def` **with a linear parameter**, not recursion by itself.
+The same error appears for a `partial def` that never recurses:
+
+```wiz
+partial def takeOne {a : Type} (1 c : Cursor a) : Step a := Cursor.next c
+-- error: variable c declared with quantity 1 but used 0
+```
+
+A `partial def` is accepted only with a witness of its type, and the witness finder
+produces a term that ignores the linear argument; the linear checker then rejects the
+*witness* ("c is not used"). The body is fine. Supplying a linear witness makes the
+same definition — and the recursive one — typecheck:
+
+```wiz
+partial (default := fun c _ => Cursor.closeThen c 0) def countAll
+    {a : Type} (1 c : Cursor a) (acc : Nat) : Nat :=
+  match Cursor.next c with
+  | .done => acc
+  | .more _ c' => countAll c' (acc + 1)
+```
+
+That workaround is real but not the engine's API: it is an undocumented witness detail,
+it only works because `Cursor` is a closed plan, and the compiler's own `partial`
+support is not what the storage engine should ask callers to know. Keep
+`fold`/`foldUntil` as the supported path (see `Cursor.wiz`).
+
+The equation form is a different story: `def` by equations (structural recursion on an
+ω argument) already checks the linear handle. A duplicated handle is "used ω", a
+dropped continuation is "next ... used 0", and a recursive consumer that consumes the
+handle exactly once per path is *accepted*:
+
+```wiz
+def countAll {a : Type} : (1 c : Cursor a) → List Nat → Nat
+  | c, .nil => Cursor.closeThen c 0
+  | c, .cons _ rest => match Cursor.next c with
+    | .done => 0
+    | .more _ c' => countAll c' rest
+-- accepted: the cursor is consumed once on every path
+```
+
+General recursion has no structural decrease to check, so the form above is not
+available for a page-by-page plan whose length is not known to the checker. That is the
+gap a **linear fixpoint rule** would close.
+
+## What the rule would need to allow
+
+1. **A linear witness for a linear type.** `findWitness` (and the `partial`
+   `default :=` search) must build a term that consumes each `1`-bound argument exactly
+   once, e.g. `fun c … => Cursor.closeThen c (default …)`, instead of one that ignores
+   it. This is the actual blocker here: with a linear witness the body checks today.
+2. **The recursive occurrence as a consumer.** A recursive call must charge each
+   `1`-marked argument once — the continuation passed to `countAll` is consumed by the
+   callee, not duplicated. The checker's existing equation-form rule already does this;
+   the `partial` path must too.
+3. **Per-path linearity under non-termination.** A diverging loop that holds the handle
+   forever is fine: the handle is not copied, it simply never comes back. The rule is
+   "each linear parameter is consumed exactly once on every returning path", not "the
+   recursion terminates".
+4. **No ω escape.** The recursive occurrence must not lift the handle into an ω
+   closure (that is what would let the plan be duplicated), and a method/eliminator's
+   ω usage (`methodUsage`) must not absorb the linear argument.
+
+Until that exists, `Cursor.fold`/`Cursor.foldUntil` are the loops; a caller who needs a
+different consumer should build the plan state through them (or ask the engine for a
+combinator) rather than hand-roll one.
+-/
+
+/-- The minimal failing consumer: a partial streaming fold that threads the linear
+handle into the recursive call. Expected: "c is not used" (the inferred witness drops
+it). Use `Cursor.fold`/`Cursor.foldUntil` instead. -/
+partial def countAll {a : Type} (1 c : Cursor a) (acc : Nat) : Nat :=
+  match Cursor.next c with
+  | .done => acc
+  | .more _ c' => countAll c' (acc + 1)

@@ -82,6 +82,14 @@ def nativeDecide := 38
 def rewriteAt := 39
 -- (stage 6h S2) the registered `[simp]` lemmas, for the default set
 def getSimpLemmas := 40
+-- (D6) the constructor names of a type, for `constructor`
+def ctorNames := 41
+-- (6j) a case split on a Boolean expression
+def byCases := 42
+-- (P0) the `[hint]` database, for `auto`
+def getHints := 43
+-- (P0) the raw open-goal list (before filtering solved goals), for `replaceMainGoal`
+def getOpen := 44
 end TacTag
 
 structure Goal (R : Type) where
@@ -396,8 +404,8 @@ partial def reflectT (rc : RCtx R) (t : Term R) (ty? : Option (VTy R)) : ReflM R
     reflectArgs rc (mkCon 1 [encodeString T]) (rc.headType? (← globalsR) (.const T us)) args
   | .natOp op args =>
     let g ← globalsR
-    match g.builtins.find? (·.1 == op) with
-    | some (_, n) => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
+    match g.builtinOf? op with
+    | some n => reflectArgs rc (mkCon 1 [encodeString n]) (rc.headType? g (.const n [])) args.toList
     | none => mkOpq
   | .con (.pair tag rest) =>
     match ← reflectCtor rc tag rest ty? with
@@ -485,9 +493,10 @@ def introName (taken : List Name) (hint binder : Name) (isProof inaccessible : B
 
 /-- The kernel context for a goal, for inferring the types of complete terms. -/
 def Goal.kernelCtx (gl : Goal R) (g : Globals R) : Ctx R :=
-  { globals := g, env := gl.ctx.env, names := gl.ctx.names,
-    qtys := gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-    types := gl.ctx.types, lvl := gl.ctx.lvl, erased := true }
+  { globals := g, env := gl.ctx.env,
+    names := gl.ctx.names.reverse.toArray,
+    qtys := (gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+    types := gl.ctx.types.reverse.toArray, lvl := gl.ctx.lvl, erased := true }
 
 /-- Is the goal's hole still unsolved? -/
 def Goal.isOpen (gl : Goal R) : ElabM R Bool := do
@@ -546,7 +555,20 @@ def foldAs? (ctx : LocalCtx R) (n : Name) (t : Term R) : ElabM R (Option (Term R
   try
     let us ← d.levelParams.mapM fun _ => freshLevelMeta
     let mut cand : Term R := .const n us
-    for _ in [0:arity] do cand := .app cand (← freshMeta ctx "fold")
+    -- (13b) each hole typed by the definition's parameter (`MetaEntry.type?`)
+    let g ← getGlobals
+    let mut ty? : Option (VTy R) := some (eval g [] (d.type.instLevels d.levelParams us))
+    for _ in [0:arity] do
+      let dom? ← match ty? with
+        | some ty => do match ← force ty with
+          | .pi _ _ _ dom cod _ => pure (some (dom, cod))
+          | _ => pure none
+        | none => pure none
+      let m ← freshMeta ctx "fold" (dom?.map (·.1))
+      ty? ← match dom? with
+        | some (_, cod) => pure (some (← instM cod (← evalIn ctx m)))
+        | none => pure none
+      cand := .app cand m
     let cv ← evalIn ctx cand
     let tv ← force (← evalIn ctx t)
     -- `n ?a₁ … ?aₖ` is itself stuck, on the hole it recurses on: `?aᵢ` followed by the
@@ -709,8 +731,8 @@ partial def stripRule (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) :
   if fuel == 0 then return (ty, [])
   let ty' ← whnfTerm ctx ty
   match ty' with
-  | .pi _ _ _ _ body _ => do
-    let m ← freshMeta ctx "simp"
+  | .pi _ _ _ dom body _ => do
+    let m ← freshMeta ctx "simp" (some (← evalIn ctx dom))
     let (b, ms) ← stripRule ctx (fuel - 1) (body.instantiateAt 0 m)
     pure (b, m :: ms)
   | .eq .. => pure (ty', [])
@@ -735,7 +757,7 @@ partial def stripArgs (ctx : LocalCtx R) (fuel : Nat) (ty : Term R) (args : List
       let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 a) rest
       pure (b, ms, (dom, a) :: ps)
     | [] => do
-      let m ← freshMeta ctx "simp"
+      let m ← freshMeta ctx "simp" (some (← evalIn ctx dom))
       let (b, ms, ps) ← stripArgs ctx (fuel - 1) (body.instantiateAt 0 m) []
       pure (b, m :: ms, (dom, m) :: ps)
   | .eq .. => pure (ty, [], [])
@@ -827,5 +849,128 @@ partial def matchRule (gl : Goal R) (g : Globals R) (A pat lhs rhs happ : Term R
         | some p => pure (some p)
         | none => do set s; go rest
   go (subtermsPre goalT)
+
+/-! ## Congruence: rewriting under binders
+
+`subtermsPre` returns bare subterms; the terms under a binder use variables of the
+extended context, so matching them in the goal's context is wrong. `rewriteDeep` walks
+the goal type with the real context for each λ binder, matches the rule at every node
+and rebuilds the term with a proof `new = old`:
+
+* under a λ, the proof is the pointwise (definitional) equality of functions, `.lam`;
+* at any other node, the child's proof is transported through the parent with
+  `transp` on the one-hole context (`Term.abstract`);
+* a `Π` (a type former) is not traversed: an equality of `Π`s is not pointwise in this
+  kernel, so `simp` leaves it to `intro`/P1 rather than build an unsound transport;
+* a match is attempted only where the rule's telescope instantiates in that context, so
+  the replacement may mention the bound variable.
+
+The Wiz driver still owns rule order, fuel and `all`: `rewriteDeep` rewrites the first
+matching node, and the driver restarts the pass. -/
+
+/-- Instantiate a rule's `∀` telescope in `ctx`, then match its left side against the
+whole term `t`: the same checks as `matchRule`, one candidate. -/
+partial def matchCand (_g : Globals R) (ctx : LocalCtx R) (A pat lhs rhs happ : Term R)
+    (pairs : List (Term R × Term R)) (cand : Term R) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+  let lvl := ctx.lvl
+  let rc := RCtx.ofLocal ctx
+  let pvRaw ← evalIn ctx pat
+  let pvF ← force pvRaw
+  if isConVal pvF && !pat.mvars.isEmpty then return none
+  let pv := if isConVal pvF then pvF else pvRaw
+  let cv ← evalIn ctx cand
+  if isConVal pv && !isConVal cv then return none
+  else do
+    let s ← get
+    let r ← try
+      unify lvl pv cv
+      for (dom, arg) in pairs do
+        let arg' ← zonk lvl arg
+        if arg'.mvars.isEmpty then
+          match ← rc.typeOf? arg' with
+          | some ty => unify lvl (← evalIn ctx dom) ty
+          | none => pure ()
+      let app ← zonk lvl happ
+      if !app.mvars.isEmpty then pure none
+      else do
+        let A' ← zonk lvl A
+        let a' ← zonk lvl lhs
+        let b' ← zonk lvl rhs
+        if !A'.mvars.isEmpty || !a'.mvars.isEmpty || !b'.mvars.isEmpty then pure none
+        else if a' == b' then pure none
+        else pure (some (A', a', b', app, cand))
+    catch _ => pure none
+    match r with
+    | some p => pure (some p)
+    | none => do set s; pure none
+
+/-- The kernel context of a local context (as `Goal.kernelCtx`, for a binder extension). -/
+def localKernelCtx (g : Globals R) (ctx : LocalCtx R) : Ctx R :=
+  { globals := g, env := ctx.env,
+    names := ctx.names.reverse.toArray,
+    qtys := (ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+    types := ctx.types.reverse.toArray, lvl := ctx.lvl, erased := true }
+
+/-- Prepare `h` as a rule in `ctx`: its equation after the telescope (fresh metavariables
+in `ctx`), the applied lemma and the binder arguments. -/
+def prepareIn (g : Globals R) (ctx : LocalCtx R) (h : Term R) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × List (Term R × Term R))) := do
+  let r? ← ruleType? ctx g h
+  let (body, happ, pairs) ← match r? with
+    | some p => pure p
+    | none => do
+      let hty ← match (← get).kernelInfer (localKernelCtx g ctx) h with
+        | .ok ty => pure ty
+        | .error e => throwAt ctx.info s!"simp: {e}" ErrorCode.tacticFailed
+      let htyT ← zonk ctx.lvl (quote g ctx.lvl hty)
+      let (b, ms) ← stripRule ctx 64 htyT
+      pure (b, ms.foldl (fun f m => .app f m) h, [])
+  match body with
+  | .eq A lhs rhs => pure (some (A, lhs, rhs, happ, pairs))
+  | _ => pure none
+
+/-- `b = a` from `e : a = b`, by transport. -/
+def eqSym (A a b : Term R) (e : Term R) : Term R :=
+  .transp A a (.lam "x" (.eqTy (.var 0) (a.lift 1))) (.reflTy a) b e
+
+/-- `t` strengthened by removing `n` innermost bound variables, if it does not mention
+them (a subterm under a binder that the replacement in the goal's context can name). -/
+partial def strengthenN : Nat → Term R → Option (Term R)
+  | 0, t => some t
+  | n + 1, t => match t.strengthen? 0 with
+    | some t' => strengthenN n t'
+    | none => none
+
+/-- Find the first subterm of the goal type that the rule matches **in the goal's
+context**: a subterm under a binder is a candidate only if it can be strengthened (it
+does not mention the bound variables). The Wiz driver still owns rule order and fuel;
+the host owns the depth-aware scan and the transport. -/
+partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) :
+    ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+  let goalT ← zonk gl.ctx.lvl (quote g gl.ctx.lvl gl.ty)
+  match ← prepareIn g gl.ctx h with
+  | none => pure none
+  | some (A, lhs, rhs, happ, pairs) =>
+    let pat := if rtl then rhs else lhs
+    let kidsOf (t : Term R) (depth : Nat) : List (Term R × Nat) :=
+      (t.forChildren (m := StateM (List (Term R × Nat))) (fun _ => pure ())
+        (fun k c => modify fun xs => xs ++ [(c, depth + k)]) []).2
+    let rec go (work : List (Term R × Nat)) :
+        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
+      match work with
+      | [] => pure none
+      | .cons p rest => do
+        let t := p.1
+        let depth := p.2
+        let cand? := strengthenN depth t
+        match cand? with
+        | some cand => do
+          let r? ← matchCand g gl.ctx A pat lhs rhs happ pairs cand
+          match r? with
+          | some r => pure (some r)
+          | none => go (List.append (kidsOf t depth) rest)
+        | none => go (List.append (kidsOf t depth) rest)
+    go [(goalT, 0)]
 
 end Wiz.Elab

@@ -40,6 +40,7 @@ partial def leanFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
 def toolchainGroup : Group where
   name := "toolchain"
   exercise := "Stage 23a"
+  parallel := true
   cases := [
     { name := "wiz, grail and the test driver read no environment variables", run := fun _ => do
         let files := (← leanFiles "Wiz") ++ (← leanFiles "Grail") ++ #[System.FilePath.mk "Main.lean", "Tests/Main.lean"]
@@ -187,6 +188,12 @@ def toolchainGroup : Group where
         -- (the build-file setting: `(set "region-cache" "true")`)
         checkEq (some "true") ((({} : Toolchain).set "region-cache" "true").map fun t => toString t.regionCache)
         checkEq (some "false") ((({} : Toolchain).set "region-cache" "false").map fun t => toString t.regionCache)
+        -- (`--region-stats` is the same kind of flag: a job gets it from `toFlags`)
+        let (ts, _) := parse ["--region-stats", "check", "x.wiz"]
+        check ts.regionStats "the flag did not set region-stats"
+        check (!({} : Toolchain).regionStats) "region-stats is on by default"
+        checkEq (some "true") ((({} : Toolchain).set "region-stats" "true").map fun t => toString t.regionStats)
+        checkEq (some "false") ((({} : Toolchain).set "region-stats" "false").map fun t => toString t.regionStats)
         -- (forwarded to every job, beside the layered cache flags)
         let full : Toolchain := { cacheDir := some "/w", readCaches := ["/a"], regionCache := true }
         check (full.toFlags.contains "--region-cache") "toFlags drops region-cache"
@@ -195,9 +202,15 @@ def toolchainGroup : Group where
         let (back, rest) := parse full.toFlags
         checkEq [] rest
         checkEq (repr full).pretty (repr back).pretty
+        let fullStats : Toolchain := { full with regionStats := true }
+        check (fullStats.toFlags.contains "--region-stats") "toFlags drops region-stats"
+        let (backStats, rest) := parse fullStats.toFlags
+        checkEq [] rest
+        checkEq (repr fullStats).pretty (repr backStats).pretty
         -- render, for `grail config`
         check ((full.render.splitOn "cache /w\nregion-cache true\n").length > 1) full.render
-        check ((({} : Toolchain).render.splitOn "region-cache false\n").length > 1) ({} : Toolchain).render },
+        check ((fullStats.render.splitOn "region-cache true\nregion-stats true\n").length > 1) fullStats.render
+        check ((({} : Toolchain).render.splitOn "region-cache false\nregion-stats false\n").length > 1) ({} : Toolchain).render },
     { name := "-I DIR adds a module root", run := fun _ => do
         let dir ← mkTree [("Pkg/Three.wiz", "import Prelude\ndef three : Nat := 3\n")]
         let (tc, _) := ({} : Toolchain).parseFlags ["check", "main.wiz", "-I", dir.toString]
@@ -206,13 +219,13 @@ def toolchainGroup : Group where
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := loaderOf ms }
         checkEq "[2:1: info: 3]" (toString (s.messages.toList.map (·.render src))) },
     { name := "#262: `wiz check -I src FILE` and `wiz check FILE -I src` both find the package's modules", run := fun _ => do
-        let dir ← mkTree [("src/Crux/B.wiz", "import Prelude\ndef b : Nat := 1\n"),
-                          ("src/Crux/A.wiz", "import Crux.B\n#eval b\n")]
+        let dir ← mkTree [("src/Neutral/B.wiz", "import Prelude\ndef b : Nat := 1\n"),
+                          ("src/Neutral/A.wiz", "import Neutral.B\n#eval b\n")]
         let wiz := (← IO.FS.realPath ".lake/build/bin/wiz").toString
-        for args in [["check", "-I", "src", "src/Crux/A.wiz"], ["check", "src/Crux/A.wiz", "-I", "src"],
-                     ["-I", "src", "check", "src/Crux/A.wiz"]] do
+        for args in [["check", "-I", "src", "src/Neutral/A.wiz"], ["check", "src/Neutral/A.wiz", "-I", "src"],
+                     ["-I", "src", "check", "src/Neutral/A.wiz"]] do
           let out ← IO.Process.output { cmd := wiz, args := (args ++ ["--no-cache"]).toArray, cwd := some dir }
-          checkEq s!"{args}: 0 src/Crux/A.wiz:2:1: info: 1\n" s!"{args}: {out.exitCode} {out.stdout}{out.stderr}"
+          checkEq s!"{args}: 0 src/Neutral/A.wiz:2:1: info: 1\n" s!"{args}: {out.exitCode} {out.stdout}{out.stderr}"
         -- the usage text names -I for check
         let out ← IO.Process.output { cmd := wiz, args := #["help"] }
         check ((out.stdout.splitOn "wiz check [-I DIR] FILE").length > 1) out.stdout },

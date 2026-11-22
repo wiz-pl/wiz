@@ -31,7 +31,7 @@ subterm (under binders at `l + 1`) and instantiating level metas in `sort` and
 `const` (`instLevel`). Unsolved metas stay. -/
 partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
   --<sol
-  let (h, args) := spine t #[]
+  let (h, args) := Term.spine t
   match h with
   | .mvar m =>
     match (← lookupMeta m).solution with
@@ -48,9 +48,9 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
     -- (7f) a numeral whose type turned out to be the `builtin nat` type (it was elaborated
     -- at a hole: `@OfNat.ofNat ?T n ?i`) is the literal again, as if it had been written
     -- at `Nat`: kernel terms, native arithmetic, `rfl` and erasure see what they always did
-    if let #[A, .natLit n, i] := args then
+    if let [A, .natLit n, i] := args then
       if i.mvars.isEmpty then
-        if let some N := (← getGlobals).builtins.lookup "nat" then
+        if let some N := (← getGlobals).builtinOf? "nat" then
           let g ← getGlobals
           let env : Env R := ((List.range l).map fun i => Val.var i).reverse
           let isNat := match A with
@@ -74,10 +74,6 @@ partial def zonk (l : Lvl) (t : Term R) : ElabM R (Term R) := do
       | .ulift k l a => .ulift (unknown k) l a
       | _ => h'
     return (← args.mapM (zonk l)).foldl .app h'
-where
-  spine : Term R → Array (Term R) → Term R × Array (Term R)
-    | .app f a, acc => spine f (#[a] ++ acc)
-    | t, acc => (t, acc)
   --|ex
   --| sorry
   --sol>
@@ -90,7 +86,7 @@ type's equation compute further than as written (to a Σ of field equations at a
 structure), and `rfl` would then be proved field by field instead of as `refl` of its
 sides. -/
 partial def zonkInsts (l : Lvl) (t : Term R) : ElabM R (Term R) := do
-  let (h, args) := spine t #[]
+  let (h, args) := Term.spine t
   match h with
   | .mvar m =>
     let e ← lookupMeta m
@@ -104,10 +100,6 @@ partial def zonkInsts (l : Lvl) (t : Term R) : ElabM R (Term R) := do
   | _ =>
     let h' ← h.mapChildrenM pure (fun k c => zonkInsts (l + k) c)
     return (← args.mapM (zonkInsts l)).foldl .app h'
-where
-  spine : Term R → Array (Term R) → Term R × Array (Term R)
-    | .app f a, acc => spine f (#[a] ++ acc)
-    | t, acc => (t, acc)
 
 /-- Does the term mention a level metavariable? -/
 partial def Term.hasLevelMVar (t : Term R) : Bool :=

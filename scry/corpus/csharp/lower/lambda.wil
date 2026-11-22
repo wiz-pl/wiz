@@ -1,0 +1,20 @@
+func Program.Main()
+  b0:
+    %0 = havoc unknown
+    %1 = %0
+    %2 = fnptr $lambda:81
+    %3 = call System.Int32[].Select(%1, %2)
+    %4 = %3
+    ret
+func Program.Run()
+  b0:
+    %0 = fnptr $lambda:114
+    %1 = %0
+    %2 = call System.Console.ReadLine()
+    %3 = %2
+    %4 = global $str:"/bin/sh"
+    %5 = call System.Diagnostics.Process.Start(%4, %3)
+    %6 = %5
+    ret
+warning: Program.Main:14: initializer_expression not modelled: havoc
+warning: Program.Main:15: lambda body not lowered: passed to System.Int32[].Select, whose call site is unknown

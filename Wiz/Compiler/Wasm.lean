@@ -210,7 +210,17 @@ def hostSigs : Array (String × FnSig) := #[
   ("big_to_dec", { params := #[.i64, .i32], results := #[.i32] })
 ]
 
-def hostIndex (name : String) : Nat := (hostSigs.findIdx? (·.1 == name)).getD 0
+/-- An index that is past every function: a miss becomes a call the Wasm validator
+rejects, never a call to index `0` (a different function). `checkTables` reports a
+missing host import earlier, naming it. -/
+def missingFnIdx : Nat := 0x7FFFFFFF
+
+/-- The index of a host import by name. `checkTables` rejects a table that does not
+contain the five imports the runtime calls, naming the one that is missing. -/
+def hostIndex (name : String) : Nat :=
+  match hostSigs.findIdx? (·.1 == name) with
+  | some i => i
+  | none => missingFnIdx
 def iBigOfDec : Nat := hostIndex "big_of_dec"
 def iBigOp : Nat := hostIndex "big_op"
 def iBigCmp : Nat := hostIndex "big_cmp"
@@ -249,8 +259,16 @@ def runtimeNames : Array String := #[
   "wiz_array_get", "wiz_array_set", "wiz_big_to_string", "wiz_big_digits"
 ]
 
+/-- The function index of a runtime function by name. `checkTables` requires the first
+`runtimeNames.size` functions to be `runtimeNames` in order, so a missing or reordered
+runtime definition is an error; a name that is not in the table at all becomes
+`missingFnIdx`, so the validator rejects the module instead of the call reaching
+`wiz_alloc_raw` (index 0). -/
 def rtIdx (name : String) : Nat :=
-  hostSigs.size + ((runtimeNames.findIdx? (· == name)).getD 0)
+  let i := match runtimeNames.findIdx? (· == name) with
+    | some i => i
+    | none => missingFnIdx
+  hostSigs.size + i
 
 def runtimeSigs : Array FnSig := #[
   { params := #[.i32], results := #[.i32] },                          -- alloc_raw
@@ -303,8 +321,11 @@ def runtimeSigs : Array FnSig := #[
   { params := #[.i64], results := #[.i64] }                           -- big_digits
 ]
 
-def runtimeSig (name : String) : FnSig :=
-  runtimeSigs.getD ((runtimeNames.findIdx? (· == name)).getD 0) { params := #[], results := #[] }
+/-- A runtime function's signature, if the table has one (the two arrays must be
+parallel; `checkTables` and `program` report a name with no signature instead of
+defaulting to a wrong type). -/
+def runtimeSig? (name : String) : Option FnSig :=
+  (runtimeNames.findIdx? (· == name)).bind fun i => runtimeSigs[i]?
 
 /-- The runtime's function bodies.
 
@@ -761,13 +782,11 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i32WrapI64 ++ lg 1 ++ i64Store 3 16 ++
       lg 0 ++ i32WrapI64 ++ lg 2 ++ i32c 1 ++ i32Sub ++ i32Store 2 0 ++
       lg 1 ++ ret }
-  -- `wiz_tag_of(v)`: the tag as a scalar (it consumes `v`).
+  -- `wiz_tag_of(v)`: the tag as a scalar (it borrows `v`, stage 8e).
   out := out.push {
-    name := "wiz_tag_of", params := #[.i64], results := #[.i64], locals := #[.i32]
+    name := "wiz_tag_of", params := #[.i64], results := #[.i64], locals := #[]
     code :=
-      lg 0 ++ call (rt "wiz_tag") ++ ls 1 ++
-      lg 0 ++ call (rt "wiz_dec") ++
-      lg 1 ++ boxI32 ++ ret }
+      lg 0 ++ call (rt "wiz_tag") ++ boxI32 ++ ret }
   out := out.push {
     name := "wiz_nat_tag", params := #[.i64], results := #[.i64], locals := #[.i32]
     code :=
@@ -776,7 +795,6 @@ def runtimeDefs (boxedType : Nat) : Array FnDef := Id.run do
       lg 0 ++ i64c 1 ++ i64And ++ i64c 1 ++ i64Eq ++ if_
         ++ lg 0 ++ i64c 1 ++ i64ShrU ++ i64Eqz ++ if_ ++ i32c 0 ++ ls 1 ++ end_
         ++ end_ ++
-      lg 0 ++ call (rt "wiz_dec") ++
       lg 1 ++ boxI32 ++ ret }
   out := out.push {
     name := "wiz_field_at", params := #[.i64, .i64], results := #[.i64], locals := #[.i64]
@@ -1219,7 +1237,7 @@ def unsupportedPrim (op : String) : String :=
   | none => s!"the primitive `{op}` is not supported by the Wasm backend"
 
 partial def checkBody : Body → Except String Unit
-  | .vdecl _ (.prim op _) b => if primFn op |>.isSome then checkBody b else .error (unsupportedPrim op)
+  | .vdecl _ (.prim op _) b => if primFn op.key |>.isSome then checkBody b else .error (unsupportedPrim op.key)
   | .vdecl _ (.pap f as) b | .vdecl _ (.ap f as) b =>
     if as.size > maxCallArgs then
       .error s!"the Wasm backend holds at most {maxCallArgs} call arguments (calling `{f}` with {as.size})"
@@ -1352,7 +1370,7 @@ partial def emitExpr (c : Ctx) (x : Var) : Expr → Code
       lg (c.var tok) ++ i32c t ++ i32c as.size ++ call (rtIdx "wiz_reuse") ++ ls (c.var x) ++
       as.toList.zipIdx.foldl (fun (code : Code) (a, i) =>
         code ++ storeField (c.var x) i ++ lg (c.var a) ++ i64Store 3 0) #[]
-  | .prim op as => emitPrim c x op as
+  | .prim op as => emitPrim c x op.key as
 
 partial def emitPrim (c : Ctx) (x : Var) (op : String) (as : Array Var) : Code :=
   match natPrimFn op with
@@ -1430,7 +1448,53 @@ structure Built where
   /-- the `i32` global that counts CAF builds (after the slots) -/
   cafBuildGlobal : Nat := 0
 
-def typeIndex (types : Array FnSig) (s : FnSig) : Nat := (types.findIdx? (· == s)).getD 0
+/-- The type index of a signature, if the type table has it. A missing entry used to be
+emitted as type `0`, which validates (or runs) as a different signature. -/
+def typeIndex? (types : Array FnSig) (s : FnSig) : Option Nat := types.findIdx? (· == s)
+
+/-- The first name that appears twice in `xs`, if any (a duplicate makes a name lookup
+resolve to the earlier entry). -/
+def firstDuplicate (xs : Array String) : Option String := Id.run do
+  let mut seen : Std.HashSet String := {}
+  for x in xs do
+    if seen.contains x then return some x
+    seen := seen.insert x
+  return none
+
+/-- The host, runtime and type tables must be complete. Every failed lookup in the
+emitter falls back to index `0` (`hostIndex`, `rtIdx`, `typeIndex`), which would silently
+call a different function or give a function a different type; `program` calls this
+before it emits anything and reports the entry that is missing.
+
+`funcs` starts with the runtime's definitions: `rtIdx` is `hostSigs.size` plus the
+position in `runtimeNames`, so those must be `runtimeNames` in order, one body each. -/
+def checkTables (funcs : Array FnDef) : Except String Unit := do
+  -- the five host imports the runtime codegen calls by index (`iBigOfDec` …)
+  let hostRefs : Array (String × Nat) :=
+    #[("big_of_dec", iBigOfDec), ("big_op", iBigOp), ("big_cmp", iBigCmp),
+      ("big_log2", iBigLog2), ("big_to_dec", iBigToDec)]
+  for (name, i) in hostRefs do
+    match hostSigs[i]? with
+    | some (got, _) =>
+      if got != name then
+        throw s!"the Wasm backend's host table has `{got}` at index {i}, not `{name}`"
+    | none => throw s!"the Wasm backend's host table has no import `{name}`"
+  if let some dup := firstDuplicate (hostSigs.map (·.1)) then
+    throw s!"the Wasm backend's host table repeats the import `{dup}`"
+  -- every runtime function has one signature and one body, in `runtimeNames` order
+  if runtimeNames.size != runtimeSigs.size then
+    throw s!"the Wasm backend has {runtimeNames.size} runtime functions but {runtimeSigs.size} signatures"
+  if let some dup := firstDuplicate runtimeNames then
+    throw s!"the Wasm backend's runtime table repeats `{dup}`"
+  if funcs.size < runtimeNames.size then
+    throw s!"the Wasm backend defines {funcs.size} runtime functions, not {runtimeNames.size}"
+  for i in List.range runtimeNames.size do
+    match runtimeNames[i]?, funcs[i]? with
+    | some want, some got =>
+      if want != got.name then
+        throw s!"the Wasm backend's runtime table has `{got.name}` where `{want}` is expected (a missing definition would shift every runtime call)"
+    | some want, none => throw s!"the Wasm backend has no body for the runtime function `{want}`"
+    | none, _ => pure ()
 
 def align8 (n : Nat) : Nat := (n + 7) / 8 * 8
 
@@ -1456,15 +1520,32 @@ def encodeFn (f : FnDef) : Code :=
   let body := uleb f.locals.size ++ groups ++ f.code ++ #[0x00, 0x0B]
   uleb body.size ++ body
 
-def moduleBytes (b : Built) : ByteArray := Id.run do
+def moduleBytes (b : Built) : Except String ByteArray := do
+  -- every function and import must have a type index: a missing signature used to be
+  -- emitted as type 0, which is a different signature
+  let typeOf (what : String) (s : FnSig) : Except String Nat :=
+    match typeIndex? b.types s with
+    | some i => pure i
+    | none =>
+      throw s!"the Wasm backend's type table has no signature for {what} ({s.params.size} parameters, {s.results.size} results)"
+  let imports ← hostSigs.mapM fun (name, sig) => do
+    let ti ← typeOf s!"the host import `{name}`" sig
+    pure (name, ti)
+  let fnTypes ← b.funcs.mapM fun f => do
+    let ti ← typeOf s!"`{f.name}`" { params := f.params, results := f.results }
+    pure ti
+  -- `entry` is a function index in the module's index space, which starts with the
+  -- imports; the functions in `b.funcs` come after them
+  unless b.entry >= hostSigs.size && b.entry - hostSigs.size < b.funcs.size do
+    throw s!"the Wasm backend has no entry function at index {b.entry} ({hostSigs.size} imports, {b.funcs.size} functions)"
   -- types
   let typeSec := wasmSection 1 (vec (b.types.map fun s =>
     #[0x60] ++ vec (s.params.map fun t => #[t.byte]) ++ vec (s.results.map fun t => #[t.byte])))
   -- imports
-  let importSec := wasmSection 2 (uleb hostSigs.size ++ hostSigs.foldl (fun (acc : Code) (name, sig) =>
-    acc ++ nameBytes "env" ++ nameBytes name ++ #[0x00] ++ uleb (typeIndex b.types sig)) #[])
+  let importSec := wasmSection 2 (uleb imports.size ++ imports.foldl (fun (acc : Code) (name, ti) =>
+    acc ++ nameBytes "env" ++ nameBytes name ++ #[0x00] ++ uleb ti) #[])
   -- functions
-  let fnSec := wasmSection 3 (vec (b.funcs.map fun f => uleb (typeIndex b.types { params := f.params, results := f.results })))
+  let fnSec := wasmSection 3 (vec (fnTypes.map uleb))
   -- table (one funcref per boxed wrapper)
   let tableSec := wasmSection 4 (uleb 1 ++ #[0x70, 0x00] ++ uleb b.tableSize)
   -- memory (one page; the allocator grows it)
@@ -1496,8 +1577,8 @@ def moduleBytes (b : Built) : ByteArray := Id.run do
   let dataSec := wasmSection 11 (uleb b.data.size ++ b.data.foldl (fun (acc : Code) (off, s) =>
     acc ++ #[0x00] ++ i32c (dataBase + off) ++ #[0x0B] ++ nameBytes s) #[])
   let magic : Code := #[0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]
-  return ByteArray.mk (magic ++ typeSec ++ importSec ++ fnSec ++ tableSec ++ memSec ++ globSec ++
-    exportSec ++ elemSec ++ codeSec ++ dataSec)
+  pure (ByteArray.mk (magic ++ typeSec ++ importSec ++ fnSec ++ tableSec ++ memSec ++ globSec ++
+    exportSec ++ elemSec ++ codeSec ++ dataSec))
 
 /-- Emit a WebAssembly module for the IR of an IO-less `main`. -/
 def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArray := do
@@ -1554,14 +1635,22 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
     return m
   -- the boxed-wrapper signature is used by `call_indirect`
   let boxedSig : FnSig := { params := #[.i32], results := #[.i64] }
+  -- a runtime function with no signature in `runtimeSigs` would get the default
+  -- `() → ()` in the type table, so name it here instead
+  let rtSigs ← runtimeNames.mapM fun n =>
+    match runtimeSig? n with
+    | some s => pure s
+    | none => throw s!"the Wasm backend's runtime table has no signature for `{n}`"
   let allSigs : Array FnSig :=
     (hostSigs.map (·.2)) ++
-    (runtimeNames.map runtimeSig) ++
+    rtSigs ++
     (decls.map fun d => { params := d.params.map fun _ => .i64, results := #[.i64] }) ++
     (decls.map fun _ => boxedSig) ++
     (joinList.map fun j => { params := j.params.map fun _ => .i64, results := #[.i64] })
   let types := allSigs.foldl (fun (acc : Array FnSig) s => if acc.contains s then acc else acc.push s) #[]
-  let boxedType := typeIndex types boxedSig
+  let boxedType ← match typeIndex? types boxedSig with
+    | some i => pure i
+    | none => throw "the Wasm backend's type table has no signature for a boxed wrapper (i32 → i64)"
   let declFns := decls.map fun d =>
     if cafs.contains d.name then
       let cell := cafGlobal.getD d.name 0
@@ -1624,9 +1713,20 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
     { name := d.name ++ ".build", params := d.params.map fun _ => .i64, results := #[.i64],
       locals := (extra.map fun _ => VT.i64).push VT.i32, code := emitBody c d.body }
   let funcs := runtimeDefs boxedType ++ declFns ++ boxedFns ++ joinFns ++ builderFns
-  let entry := declIdx.getD "wiz.entry" 0
+  checkTables funcs
+  let some entry := declIdx.get? "wiz.entry" | throw "the Wasm backend needs the `wiz.entry` function (no `main`?)"
+  -- (`entry` is a function index, so the function is `hostSigs.size` slots later in
+  -- `funcs`, which holds only the module's own functions)
+  match funcs[entry - hostSigs.size]? with
+  | none => throw s!"the Wasm backend has no function at its entry index {entry}"
+  | some f =>
+    unless f.name == "wiz.entry" do
+      throw s!"the Wasm backend's entry index {entry} is `{f.name}`, not `wiz.entry`"
   let data := (lits.map fun n => match litTab.get? n with
     | some (off, _) => (off, toString n) | none => (0, "")).toList.toArray
-  pure (moduleBytes { types, funcs, tableSize := decls.size, heapStart, data, entry, cafCount := cafDecls.size, cafBuildGlobal := cafBuildGlobal })
+  let built : Built :=
+    { types := types, funcs := funcs, tableSize := decls.size, heapStart := heapStart,
+      data := data, entry := entry, cafCount := cafDecls.size, cafBuildGlobal := cafBuildGlobal }
+  moduleBytes built
 
 end Wiz.Wasm

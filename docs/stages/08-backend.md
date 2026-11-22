@@ -86,6 +86,10 @@ compiled separately with `-DWIZ_API=` so that its functions are exported. In SSA
 join point parameters live in stack slots, and a variable bound in several branches
 gets one name per branch. The LLVM tests are the C tests, through LLVM.
 
+The self-hosted compiler's first slice of this path (a closed `main : Nat`, with no
+ownership or runtime yet) is stage 21aq: it ports the `ETm` → `IR.Decl` lowering and this
+emitter for the allocating-free subset, and refuses the rest precisely.
+
 Still to do in the backend: specialise the eliminators for known descriptions (flat
 constructor objects instead of nested pairs, direct recursion instead of walking the
 description).
@@ -119,6 +123,12 @@ description).
   at their arguments, so they borrow them (`Expr.primBorrows`; the runtime's
   `wiz_nat_beq`/`wiz_nat_blt` no longer decrement): a lookup in a tree counts neither
   the key nor the keys it compares it with.
+* **Borrowed tag inspections**: `tag` and `natTag` also only read the argument (a
+  header tag, or whether a number is zero); they borrow it too, and
+  `wiz_tag_of`/`wiz_nat_tag` no longer decrement. The scrutinee of every `match` is
+  kept by the caller and dropped at its last use instead of being duplicated before
+  the inspection, so a recursive `Nat` function saves an `inc` and a `dec` per step
+  (`#ir` of a `Nat` counter has no `dup` before `natTag`).
 
 ## 8f: WebAssembly
 
@@ -131,3 +141,32 @@ before it is written (so an encoder bug is a compile error). Its representation,
 the validator and the 34-case `wasm` test group are in
 [08-backend/wasm.md](08-backend/wasm.md).
 
+## 8g: WebGPU (WGSL) prototype
+
+`webgpu/` emits WGSL for a small, data-parallel subset of Wiz and runs it on a WebGPU
+device, comparing every value with the interpreter. This is a **prototype, not a
+`--target`**: `wiz build --target wgpu` does not exist and the C/LLVM/Wasm backends are
+untouched. It reads the syntax tree from `wiz parse` (so it is pre-elaboration and sees
+builtin syntax only), accepts `U32`/`Bool`/`Nat`-index/`Array U32` values with `let`,
+`match` on `Bool`, acyclic scalar helpers and the `UIntN` arithmetic/comparison
+primitives, and refuses everything else (floats, IO, strings, `Nat` arithmetic,
+allocation, closures, recursion, division) with a diagnostic naming the construct.
+
+`webgpu/check.sh` runs three kernels over 8 narrow and 130 wide inputs (three
+workgroups) and gets 414/414 values equal to the interpreter under Deno's wgpu/naga and
+Mesa's lavapipe; `webgpu/tests/reject.mjs` checks 18 rejected fixtures. The browser demo
+is `webgpu/index.html` over `webgpu/serve.mjs`. The subset, the host ABI, the counts and
+the three blockers (unbounded `Nat` and the heap, closures and recursion, the async host
+and the missing `Float32`) are in [08-backend/webgpu.md](08-backend/webgpu.md).
+
+## 8h: eBPF (P0)
+
+`wiz build FLOW.toml -o flow.c --target bpf` accepts a narrow, verifier-shaped subset and
+writes freestanding C plus `bpf_rt.h`; `clang -target bpf` is the next step. The input is
+a `bpf-core/1` typed core, **not** the IR: the IR is untyped and a `match` on a recursive
+type has already become the generic `wiz.ind` interpreter, so the target needs the
+elaborated types. The P0 cut (typed core, checker, C emitter skeleton, the exact
+rejection messages, and what the first build/verifier run must establish) is in
+[08-backend/bpf.md](08-backend/bpf.md). The P0 code builds and its pure group is green
+(22/22); the object/verifier half (`clang -target bpf`, a privileged load) is still
+pending, so do not treat the presence of `--target bpf` as the P0 exit criterion.

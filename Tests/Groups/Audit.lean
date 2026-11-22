@@ -241,7 +241,10 @@ def argumentTypes (l v : Nat) (concrete : Bool) : IO Unit := do
   isType "coitStateTy" c2 st
   let c3' := c2.bind "S" q st
   isType "coitStepTy" c3' (coitStepTy g lv I D (Val.var 3) w)
-  isType "scofixFunTy" c3' (scofixFunTy g lv I D (Val.var 3) w)
+  let stA := scofixStateTy lv I w
+  isType "scofixStateTy" c2 stA
+  let cA := c2.bind "A" q stA
+  isType "scofixFunTy" cA (scofixFunTy g lv I D (Val.var 3) w)
 
 /-! ## Native arithmetic against the definitions -/
 
@@ -268,7 +271,9 @@ def definitionsOnly : IO String := do
   let keep := lines.filter fun l =>
     !(l.startsWith "builtin nat." && !l.startsWith "builtin nat.zero" && !l.startsWith "builtin nat.succ")
   check (lines.length - keep.length == 14) s!"expected to remove 14 registrations, removed {lines.length - keep.length}"
-  pure ("\n".intercalate keep ++ "\n")
+  -- the slice stops before Prelude's own `end __root__`, so close the wrapper here
+  let closed := if keep.any (· == "namespace __root__") then "end __root__\n" else ""
+  pure ("\n".intercalate keep ++ "\n" ++ closed)
 
 structure Op where
   name : String
@@ -420,9 +425,8 @@ def compiled (src : String) (llvm : Bool) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir llvm (timeout := some 300) with
   | .ok v => pure (some v)
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then IO.println "    (skipped: no toolchain)"; pure none
-    else throw (IO.userError e)
+    if e.isToolchain then IO.println "    (skipped: no toolchain)"; pure none
+    else throw (IO.userError e.message)
 
 /-- What `#eval main` prints. -/
 def evaluated (src : String) : IO String := do
@@ -820,6 +824,7 @@ def dropQSrc : String :=
   "  | .pfalse => .pfalse\n" ++
   "  | .exfalso m t => .exfalso (dropQTm m) (dropQTm t)\n" ++
   "  | .letUnit u b => .letUnit (dropQTm u) (dropQTm b)\n" ++
+  "  | .split q s m b => .split q (dropQTm s) (dropQTm m) (dropQTm b)\n" ++
   "  | .enum k => .enum k\n" ++
   "  | .tag k i => .tag k i\n" ++
   "  | .ecase m s bs => .ecase (dropQTm m) (dropQTm s) (dropQTms bs)\n" ++
@@ -858,6 +863,8 @@ def dropQSrc : String :=
   "  | .up a => .up (dropQTm a)\n" ++
   "  | .down t => .down (dropQTm t)\n" ++
   "  | .prf l t => .prf l (dropQTm t)\n" ++
+  "  | .nlit n nb => .nlit n nb\n" ++
+  "  | .natFn op nb d => .natFn op nb d\n" ++
   "partial def dropQTms : Tms → Tms\n" ++
   "  | .tnil => .tnil\n" ++
   "  | .tcons t r => .tcons (dropQTm t) (dropQTms r)\n" ++

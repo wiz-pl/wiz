@@ -1,0 +1,71 @@
+import IO
+import Json
+import Web.EditorBridge
+import Web.Hover
+import Web.InfoviewPage
+import Web.Loom
+
+/-!
+# The standalone infoview's entry points
+
+`web/infoview.js` mounts this module on the body: the header, the editor (unless
+`?follow=1`) and the goals pane from `Web.InfoviewPage`. The page keeps the endpoint
+rule, the socket and the caret; the runtime keeps the markup and the selection.
+-/
+
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+def patched (s s' : InfoviewPage) : IO InfoviewPage := do
+  Js.patch (Loom.LiveApp.patches infoviewApp s s');
+  IO.pure s'
+
+def loomInit : InfoviewPage := InfoviewPage.initial
+def loomHtml (s : InfoviewPage) : String := Loom.LiveApp.html infoviewApp s
+def loomStep (s : InfoviewPage) (ev : String) : IO InfoviewPage :=
+  patched s (Loom.LiveApp.step infoviewApp s ev)
+def loomEffect (s : InfoviewPage) (kind a b : String) : IO InfoviewPage :=
+  patched s (InfoviewPage.effect s kind a b)
+def loomRequests (s : InfoviewPage) : String := InfoviewPage.requests s
+def loomConsume (s : InfoviewPage) (ev : String) : Nat :=
+  match InfoviewPage.consume (Loom.splitEvent ev) with
+  | .true => 1
+  | .false => 0
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_step" loomStep
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume
+
+-- The editor's pure rules are `lib/Web/EditorBridge.wiz`, the same reads the playground's
+-- and the source reader's runtimes use: the page asks through `mount.ask` and the answer
+-- is a string.
+
+/-- A `textDocument/definition` result as `{uri, range, label}`, or `null`. -/
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
+export "wiz_loom_editor_index" EditorBridge.indexJson
+export "wiz_loom_editor_segments" EditorBridge.segments
+export "wiz_loom_editor_segments_index" EditorBridge.segmentsIndex
+export "wiz_loom_editor_items" EditorBridge.items
+export "wiz_loom_editor_popup" EditorBridge.popup
+export "wiz_loom_editor_move" EditorBridge.move
+export "wiz_loom_editor_key" EditorBridge.key
+export "wiz_loom_editor_accept" EditorBridge.accept
+export "wiz_loom_editor_trigger" EditorBridge.trigger
+export "wiz_loom_editor_position" EditorBridge.position
+export "wiz_loom_editor_position_index" EditorBridge.positionIndex
+export "wiz_loom_editor_offset" EditorBridge.offset
+export "wiz_loom_editor_offset_index" EditorBridge.offsetIndex
+export "wiz_loom_editor_utf16" EditorBridge.utf16
+export "wiz_loom_editor_editor_offset" EditorBridge.editorOffset
+export "wiz_loom_editor_line_end" EditorBridge.lineEnd
+export "wiz_loom_editor_line_end_index" EditorBridge.lineEndIndex
+export "wiz_loom_editor_indent" EditorBridge.indent
+export "wiz_loom_editor_item_title" EditorBridge.itemTitle
+export "wiz_loom_editor_ask_key" EditorBridge.askKey
+export "wiz_loom_editor_span" EditorBridge.span
+export "wiz_loom_editor_range_text" EditorBridge.rangeText
+export "wiz_loom_hover_target" loomHoverTarget

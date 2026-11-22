@@ -829,12 +829,12 @@ def chk (cx : Cx) (t T : Tm) : Bool :=
 /-- the variables whose type is convertible with `T` -/
 def varsOfTy (cx : Cx) (T : Tm) : Array Tm :=
   let vT := cx.k.eval T
-  ((List.range cx.size).filter fun i => Wiz.convTy cx.g cx.k.tys cx.k.types[i]! vT).toArray.map Term.var
+  ((List.range cx.size).filter fun i => Wiz.convTy cx.g cx.k.tys (cx.k.typeAt? i).get! vT).toArray.map Term.var
 
 /-- the type of variable `i`, as written, in this context -/
 def rawTy (cx : Cx) (i : Nat) : Tm := liftT (i + 1) cx.tys[i]!
 
-def names (cx : Cx) : List Name := cx.k.names
+def names (cx : Cx) : List Name := cx.k.prettyNames
 
 end Cx
 
@@ -1047,7 +1047,7 @@ type) to as many generated arguments as it takes to reach the type `T`. -/
 partial def headAlts (cx : Cx) (T : Tm) (fuel : Nat) : Gen (Array (Gen Tm)) := do
   let vT := cx.k.eval T
   let fnVars : List Tm := (List.range cx.size).filterMap fun i =>
-    match whnf cx.k.types[i]! with
+    match whnf (cx.k.typeAt? i).get! with
     | .pi .. => some (.var i)
     | _ => none
   let mut alts : Array (Gen Tm) := #[]
@@ -1115,13 +1115,15 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
       let vI := cx.k.eval I
       let vD := cx.k.eval D
       let unitS : Tm := .lam "i" (.unit (.succ l))
+      let unitA : Tm := .lam "j" (.lam "i" (.unit (.succ l)))
       let vS := cx.k.eval unitS
+      let vA := cx.k.eval unitA
       let viaCoit : Array (Gen Tm) := #[do
         let st ← genTm cx (quote g cx.k.lvl (coitStepTy g l vI vD vS .many)) f
         return .ann (.coit l I D unitS st i .tt) Tw]
       let viaScofix : Array (Gen Tm) := #[do
-        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vS .many)) f
-        return .scofix l I D unitS fn s i .tt]
+        let fn ← genTm cx (quote g cx.k.lvl (scofixFunTy g l vI vD vA .many)) f
+        return .scofix l I D unitA fn s i .tt]
       (match sizePred? (cx.k.eval s) with
        | some s' =>
          let P := quote g cx.k.lvl (vInterp g l vI vD (nuFamilyAt l vI vD s') (cx.k.eval i))
@@ -1184,7 +1186,7 @@ partial def genTm (cx : Cx) (T : Tm) (fuel : Nat) : Gen Tm := do
           alts := alts.push (do return .cast A B (.var i) (← genTm cx A f))
     -- from an empty hypothesis
     for i in [0:cx.size] do
-      if let .empty _ := whnf cx.k.types[i]! then alts := alts.push (pure (.absurd T (.var i)))
+      if let .empty _ := whnf (cx.k.typeAt? i).get! then alts := alts.push (pure (.absurd T (.var i)))
     if let some l := lT then
       -- a cast from a variant of the type, along a generated proof
       alts := alts.push (do
@@ -2172,8 +2174,7 @@ def wizRun (src : String) : IO (Option String) := do
   match ← Build.runGlobal (← toolchain) s "main" dir false (timeout := some 900) with
   | .ok v => pure (some v)
   | .error e =>
-    let missing := ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1
-    if missing then pure none else throw (IO.userError e)
+    if e.isToolchain then pure none else throw (IO.userError e.message)
 
 /-- Pinned queries, asked first: what each probes, whether its normal form is asked, the
 term, and whether the two kernels' answers **differ** today (after reading `↑∞` as `∞`).
@@ -2221,9 +2222,12 @@ def pinned : List (String × Bool × MTm × Bool) :=
      .ann (.lam (.cast L L (.var 0) (.app (.app (.const "idP" [1]) L) (.up .star)))) (.pi (.eqTy L L) L), true)]
 
 /-- P5: `Kernel.wiz` gives the Lean kernel's verdict on every recorded query (the
-judgments, their substitution instances, their normal forms, and conversions written as
-judgments). With P1–P3 holding in the Lean kernel on the same queries, they hold in
-`Kernel.wiz` on them too. -/
+judgments, their substitution instances, and conversions written as judgments), and the
+Lean kernel's normal form on every normal-form query whose answer the Lean kernel can
+print as an `MTm`. A normal form the Lean kernel cannot print is counted and reported
+(not gated: the known PH-K2 shape); the pinned list compares its shapes exactly. With
+P1–P3 holding in the Lean kernel on the same queries, they hold in `Kernel.wiz` on them
+too. -/
 def wizCase (b : Budget) : IO Unit := do
   memoReset
   let acc ← runLean b
@@ -2267,13 +2271,15 @@ def wizCase (b : Budget) : IO Unit := do
   let got := (out.splitOn "\n").take qs.length
   let norm (x : String) : String := (x.replace "↑(∞)" "∞").replace ", ∞)" ")"
   let mut verdictDiffs := 0
+  let mut nfDiffs := 0
+  let mut unrep := 0
   let mut other := 0
   let mut phk1 := 0
   let mut flipped : List String := []
   let mut shown : List String := []
   -- (a passing case's output is not shown: the answers that matter are also kept in a file)
   let mut report := ""
-  for (m, role, _) in qs, e in expected, o in got do
+  for (m, role, nf) in qs, e in expected, o in got do
     if role.startsWith "pinned " then
       report := report ++ s!"{role}\n  Lean: {e}\n  Wiz:  {o}\n"
       IO.println s!"    {role}\n      Lean: {e}\n      Wiz:  {o}"
@@ -2289,22 +2295,29 @@ def wizCase (b : Budget) : IO Unit := do
         phk1 := phk1 + 1
         continue
       let verdict := (e == "error") != (o == "error")
-      if verdict then verdictDiffs := verdictDiffs + 1 else other := other + 1
+      -- (a normal-form query the Lean kernel cannot print as an `MTm` is the known
+      -- PH-K2 shape: counted and reported, not gated; the pinned list pins its shapes)
+      let nfGated := nf && e != "?"
+      if verdict then verdictDiffs := verdictDiffs + 1
+      else if nfGated then nfDiffs := nfDiffs + 1
+      else if nf then unrep := unrep + 1
+      else other := other + 1
       -- (one in full for each kind of query, the rest in brief)
-      let key := s!"{role}/{verdict}"
+      let key := s!"{role}/{verdict}/{nfGated}"
       if !shown.contains key then
         shown := key :: shown
-        IO.println s!"\n{if verdict then "✗ P5 one kernel accepts and the other rejects" else "(not gated) P5 the answers differ"}: {role}\n  Lean: {e}\n  Wiz:  {o}\n  term: {m.pretty 0}\n  as a term of Kernel.wiz: {m.toWiz}"
+        IO.println s!"\n{if verdict then "✗ P5 one kernel accepts and the other rejects" else if nfGated then "✗ P5 the kernels' normal forms differ" else "(not gated) P5 the answers differ"}: {role}\n  Lean: {e}\n  Wiz:  {o}\n  term: {m.pretty 0}\n  as a term of Kernel.wiz: {m.toWiz}"
       else
-        IO.println s!"{if verdict then "✗" else "(not gated)"} P5 {role}: Lean {e.take 80} / Wiz {o.take 80} / {(m.pretty 0).take 200}"
-  IO.println s!"    ({phk1} answers differ only by ↑∞ against ∞ (PH-K1); {other} accepted by both with different normal forms or printed types (not gated: PH-K2, PH-K3); {verdictDiffs} accept/reject differences)"
-  report := report ++ s!"{qs.length} queries; {phk1} PH-K1; {other} different normal forms; {verdictDiffs} accept/reject differences\n"
+        IO.println s!"{if verdict then "✗" else if nfGated then "✗ P5 normal forms" else "(not gated)"} P5 {role}: Lean {e.take 80} / Wiz {o.take 80} / {(m.pretty 0).take 200}"
+  IO.println s!"    ({phk1} answers differ only by ↑∞ against ∞ (PH-K1); {nfDiffs} normal-form differences (gated); {unrep} normal forms with no Lean MTm form (not gated: PH-K2); {other} printed-type differences (not gated); {verdictDiffs} accept/reject differences)"
+  report := report ++ s!"{qs.length} queries; {phk1} PH-K1; {nfDiffs} normal-form differences (gated); {unrep} not representable; {other} printed types; {verdictDiffs} accept/reject differences\n"
   -- (in the worktree's scratch directory, when there is one)
   if ← System.FilePath.isDir ".scratch" then
     IO.FS.writeFile ".scratch/prop-kernels-report.txt" (w1Line ++ "\n" ++ report)
   unless got.length == qs.length do throw (IO.userError s!"{got.length} answers for {qs.length} queries")
   unless flipped.isEmpty do throw (IO.userError s!"pinned differences changed (update `pinned`): {flipped}")
   unless verdictDiffs == 0 do throw (IO.userError s!"P5: one kernel accepts and the other rejects on {verdictDiffs} of {qs.length} queries")
+  unless nfDiffs == 0 do throw (IO.userError s!"P5: the kernels' normal forms differ on {nfDiffs} of {qs.length} queries (not the known PH-K2 shape)")
   Tests.check (accepted * 4 ≥ verdicts.length) "too few accepted queries"
 
 def group : Group where

@@ -1,0 +1,219 @@
+-- The synthesisable N-master arbiter (`Bus.arbNC n`), checked against the value model
+-- `Bus.arbNStep`/`Bus.pickN` and against itself through `Netlist.simulate` and
+-- `Circuit.simFast`, for n = 2, 3 and 4. The netlist-level ownership/progress law is
+-- tested on the circuit's packed response vector: at most one master is answered in a
+-- cycle, and when the grant is valid and the slave answers, the granted master gets the
+-- answer. (The response *function* law is proved in `Hdl.BusLaw`; see the docs.)
+-- Run by the `bus-law` test group.
+import Hdl.Core
+import Hdl.Sim
+import Hdl.Bus
+import Hdl.BusLaw
+import IO
+
+def Bit : HwTy := HwTy.bits 1
+def B8 : HwTy := HwTy.bits 8
+
+def yes (b : Bool) : String := match b with
+  | .true => "yes"
+  | .false => "NO"
+
+-- value simulation = netlist simulation (hash-consed and naive) = fast simulation
+def agree {ω i o : HwTy} (c : Circuit i o) (ins : List (HwTy.El i)) : Bool :=
+  let ω v := Circuit.runLeaves c ins;
+  Bool.and (BEq.beq v (Circuit.simFast c ins))
+    (Bool.and (BEq.beq v (Circuit.simLeaves .true c ins)) (BEq.beq v (Circuit.simLeaves .false c ins)))
+
+def allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (allTrue bs)
+
+def units (n : Nat) : List Nat := Hdl.upto n 0
+
+def eqNatList (xs ys : List Nat) : Bool := BEq.beq xs ys
+
+def bitAt (m k : Nat) : Bool :=
+  Nat.beq (Nat.mod (Nat.div m (Nat.pow 2 k)) 2) 1
+
+------------------------------------------------------------------------------------
+-- Inputs and the value model. A cycle's request vector is the binary mask
+-- `cycleMask n k`; the sink answers three cycles out of four.
+
+def reqsN (n m : Nat) : Vec (Bus.Req 8 8 HwTy.El) n :=
+  Vec.ofFn n (fun (i : Fin n) => Bus.Req.mk
+    (BitVec.ofNat 1 (match bitAt m i.val with | .true => 1 | .false => 0))
+    (BitVec.ofNat 1 0) (BitVec.ofNat 8 i.val) (BitVec.ofNat 8 0))
+
+def respE (dw : Nat) (ready rvalid err rdata : Nat) : HwTy.El (Bus.Resp.code dw) :=
+  Bundle.toEl (Bus.Resp.bundle dw)
+    (Bus.Resp.mk (BitVec.ofNat 1 ready) (BitVec.ofNat 1 rvalid)
+      (BitVec.ofNat dw rdata) (BitVec.ofNat 1 err))
+
+def noReqP : HwTy.El (Bus.Req.code 8 8) :=
+  Bus.Req.pack 8 8 (Bus.noReq : Bus.Req 8 8 HwTy.El)
+
+def noRespP : HwTy.El (Bus.Resp.code 8) :=
+  Bus.Resp.pack 8 (Bus.noResp : Bus.Resp 8 HwTy.El)
+
+def reqPacksN (n m : Nat) : List (HwTy.El (Bus.Req.code 8 8)) :=
+  Hdl.map (fun (q : Bus.Req 8 8 HwTy.El) => Bus.Req.pack 8 8 q) (Vec.toList (reqsN n m))
+
+def respPacksN (n : Nat) (rs : Vec (Bus.Resp 8 HwTy.El) n) : List (HwTy.El (Bus.Resp.code 8)) :=
+  Hdl.map (fun (r : Bus.Resp 8 HwTy.El) => Bus.Resp.pack 8 r) (Vec.toList rs)
+
+def arbNInE (n m ack : Nat) : HwTy.El (Bus.ArbNIn.code n 8 8) :=
+  Bundle.toEl (Bus.ArbNIn.bundle n 8 8)
+    (Bus.ArbNIn.mk (Bus.listToProdN noReqP n (reqPacksN n m))
+      (Bus.Resp.unpack 8 (respE 8 ack 0 0 0)))
+
+def cycleMask (n k : Nat) : Nat :=
+  Nat.mod (Nat.add (Nat.mul 5 k) (Nat.div k 2)) (Nat.pow 2 n)
+
+def cycleAck (k : Nat) : Nat :=
+  if Nat.beq (Nat.mod k 4) 3 then 0 else 1
+
+-- The signal selector `Bus.pickNHw` against the value selector `Bus.pickN`: all valid
+-- masks and every `last` for n = 1..4 (49 cases).
+def boolsN (n m : Nat) : List Bool :=
+  Hdl.map (fun (k : Nat) => bitAt m k) (units n)
+
+def pickNHwCheck (n last m : Nat) : Bool :=
+  let vs : List (HwTy.El Bus.Bit) := Hdl.map (fun (k : Nat) => BitVec.ofNat 1
+    (match bitAt m k with | .true => 1 | .false => 0)) (units n);
+  let l : HwTy.El (HwTy.bits n) := BitVec.ofNat n last;
+  let g : HwTy.El (HwTy.bits n) := Bus.pickNHw n l vs;
+  Nat.beq (BitVec.toNat g) (Bus.pickN n last (boolsN n m))
+
+def pickNHwAllN (n : Nat) : Bool :=
+  allTrue (Hdl.map (fun (m : Nat) => allTrue (Hdl.map (fun (last : Nat) =>
+    pickNHwCheck n last m) (units n))) (units (Nat.pow 2 n)))
+
+def pickNHwAll : Bool :=
+  Bool.and (pickNHwAllN 1) (Bool.and (pickNHwAllN 2) (Bool.and (pickNHwAllN 3) (pickNHwAllN 4)))
+
+def insN (n : Nat) : List (HwTy.El (Bus.ArbNIn.code n 8 8)) :=
+  Hdl.map (fun (k : Nat) => arbNInE n (cycleMask n k) (cycleAck k)) (units 64)
+
+-- One cycle of the value model, with the circuit's output fields: the grant index, its
+-- validity, the forwarded request and the response vector.
+def expOut (n : Nat) (s : Bus.ArbN) (m ack : Nat) :
+    Bus.ArbN × HwTy.El (Bus.ArbNOut.code n 8 8) :=
+  let qs := reqsN n m;
+  let resp := Bus.Resp.unpack 8 (respE 8 ack 0 0 0);
+  let st := Bus.arbNStep n 8 8 s qs resp;
+  let g := if s.busy then s.owner else Bus.pickN n s.last (Bus.validVec qs);
+  let selV := Bool.and (Nat.lt g n) (bitAt m g);
+  let q := if selV then Hdl.nthD (Bus.noReq : Bus.Req 8 8 HwTy.El) (Vec.toList qs) g
+    else Bus.noReq;
+  let o := Bus.ArbNOut.mk q (BitVec.ofNat n g) (Bool.toBits selV)
+    (Bus.listToProdN noRespP n (respPacksN n st.2));
+  (st.1, Bundle.toEl (Bus.ArbNOut.bundle n 8 8) o)
+
+def expAux (n : Nat) : Bus.ArbN → Nat → Nat → List (HwTy.El (Bus.ArbNOut.code n 8 8))
+  | _, _, .zero => .nil
+  | s, k, .succ fuel =>
+    let p := expOut n s (cycleMask n k) (cycleAck k);
+    .cons p.2 (expAux n p.1 (Nat.succ k) fuel)
+
+def expectedN (n : Nat) : List (HwTy.El (Bus.ArbNOut.code n 8 8)) :=
+  expAux n Bus.arbNInit 0 64
+
+def outPackN (n : Nat) (y : HwTy.El (Bus.ArbNOut.code n 8 8)) : Nat :=
+  HwTy.pack (Bus.ArbNOut.code n 8 8) y
+
+def matchesN (n : Nat) : Bool :=
+  eqNatList
+    (Hdl.map (outPackN n) (Circuit.run (Bus.arbNC n 8 8) (insN n)))
+    (Hdl.map (outPackN n) (expectedN n))
+
+------------------------------------------------------------------------------------
+-- The netlist-level law, on the packed output. Responses are unpacked from `rs`; the
+-- forwarded request is compared with the granted input request.
+
+def respsOf (n : Nat) (y : HwTy.El (Bus.ArbNOut.code n 8 8)) : List (Bus.Resp 8 HwTy.El) :=
+  Hdl.map (Bus.Resp.unpack 8) (Bus.prodNToList n (Bus.ArbNOut.unpack n 8 8 y).rs)
+
+def reqsOf (n : Nat) (x : HwTy.El (Bus.ArbNIn.code n 8 8)) : List (HwTy.El (Bus.Req.code 8 8)) :=
+  Bus.prodNToList n (Bus.ArbNIn.unpack n 8 8 x).qs
+
+def pairMutexAux : List (Bus.Resp 8 HwTy.El) → Bool
+  | .nil => .true
+  | .cons r rest =>
+    Bool.and (allTrue (Hdl.map (fun (s : Bus.Resp 8 HwTy.El) =>
+      Bool.not (Bool.and (Bus.Law.ackS r) (Bus.Law.ackS s))) rest))
+      (pairMutexAux rest)
+
+def lawOne (n : Nat) (ackK : Nat) (x : HwTy.El (Bus.ArbNIn.code n 8 8))
+    (y : HwTy.El (Bus.ArbNOut.code n 8 8)) : Bool :=
+  let o := Bus.ArbNOut.unpack n 8 8 y;
+  let rs := respsOf n y;
+  let qs := reqsOf n x;
+  let g := BitVec.toNat o.grant;
+  let gv := BitVec.isTrue o.gntValid;
+  let acked := BitVec.isTrue o.req.valid;
+  let got := Bus.Req.pack 8 8 o.req;
+  let want := Hdl.nthD noReqP qs g;
+  let reqOk := if gv then
+      Bool.and acked (Nat.beq (HwTy.pack (Bus.Req.code 8 8) got)
+        (HwTy.pack (Bus.Req.code 8 8) want))
+    else Bool.not acked;
+  let granted := if Bool.and (Nat.beq ackK 1) gv then
+      Bus.Law.ackS (Hdl.nthD (Bus.noResp : Bus.Resp 8 HwTy.El) rs g)
+    else Bool.true;
+  Bool.and (pairMutexAux rs) (Bool.and reqOk granted)
+
+def lawAux (n : Nat) : Nat →
+    List (HwTy.El (Bus.ArbNIn.code n 8 8)) → List (HwTy.El (Bus.ArbNOut.code n 8 8)) → Bool
+  | k, .cons x xs, .cons y ys =>
+    Bool.and (lawOne n (cycleAck k) x y) (lawAux n (Nat.succ k) xs ys)
+  | _, _, _ => .true
+
+def lawN (n : Nat) : Bool :=
+  lawAux n 0 (insN n) (Circuit.run (Bus.arbNC n 8 8) (insN n))
+
+------------------------------------------------------------------------------------
+-- Fairness of the circuit: n = 3, all three masters always asking, always-ready sink;
+-- from every start cycle each master is answered within 3 cycles.
+
+def ackAtOut (n : Nat) (y : HwTy.El (Bus.ArbNOut.code n 8 8)) (i : Nat) : Bool :=
+  Bus.Law.ackS (Hdl.nthD (Bus.noResp : Bus.Resp 8 HwTy.El) (respsOf n y) i)
+
+def ackWithinOut : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) → Nat → Nat → Bool
+  | .nil, _, _ => .false
+  | _, _, .zero => .false
+  | .cons y rest, i, .succ f =>
+    Bool.or (ackAtOut 3 y i) (ackWithinOut rest i f)
+
+def fairStart (ys : List (HwTy.El (Bus.ArbNOut.code 3 8 8))) : Bool :=
+  allTrue (Hdl.map (fun (i : Nat) => ackWithinOut ys i 3) (units 3))
+
+def fairStarts : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) → Nat → Bool
+  | .nil, _ => .true
+  | _, .zero => .true
+  | .cons y rest, .succ f => Bool.and (fairStart (.cons y rest)) (fairStarts rest f)
+
+def fairOuts : List (HwTy.El (Bus.ArbNOut.code 3 8 8)) :=
+  Circuit.run (Bus.arbNC 3 8 8) (Hdl.map (fun (_ : Nat) => arbNInE 3 7 1) (units 64))
+
+def fairAll : Bool := fairStarts fairOuts 32
+
+def wellFormedN (n : Nat) : Bool :=
+  Netlist.wellFormed (Circuit.netlist "arbn" (Bus.arbNC n 8 8))
+
+------------------------------------------------------------------------------------
+
+def main : IO Unit := do
+  IO.println ("n-master circuit selector n=1..4 " <+> yes pickNHwAll);
+  IO.println ("n=2 circuit: value = simulate = simFast " <+> yes (agree (Bus.arbNC 2 8 8) (insN 2))
+    <+> ", value = arbNStep " <+> yes (matchesN 2)
+    <+> ", netlist law " <+> yes (lawN 2)
+    <+> ", well formed " <+> yes (wellFormedN 2) <+> ", 64 cycles");
+  IO.println ("n=3 circuit: value = simulate = simFast " <+> yes (agree (Bus.arbNC 3 8 8) (insN 3))
+    <+> ", value = arbNStep " <+> yes (matchesN 3)
+    <+> ", netlist law " <+> yes (lawN 3)
+    <+> ", well formed " <+> yes (wellFormedN 3) <+> ", 64 cycles");
+  IO.println ("n=4 circuit: value = simulate = simFast " <+> yes (agree (Bus.arbNC 4 8 8) (insN 4))
+    <+> ", value = arbNStep " <+> yes (matchesN 4)
+    <+> ", netlist law " <+> yes (lawN 4)
+    <+> ", well formed " <+> yes (wellFormedN 4) <+> ", 64 cycles");
+  IO.println ("n=3 circuit fair, 32 starts " <+> yes fairAll)

@@ -98,18 +98,29 @@ partial def Scry.reportArgsGo (path : Option String) (o : Scry.ReportOpts) :
         | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.reportUsage)
         | .none => Scry.reportArgsGo (.some a) o rest
 
+/-- Validate `--diff` when the report options are parsed (the same shape `scry taint`
+accepts). -/
+def Scry.reportCheckDiff (o : Scry.ReportOpts) : Except String Scry.ReportOpts :=
+  match o.diff with
+  | .none => .ok o
+  | .some b => match Bool.or (String.eq b "all") (Scry.validDiffBase b) with
+    | .true => .ok o
+    | .false => .error (Scry.diffBaseError b)
+
 def Scry.reportArgs (args : List String) : Except String Scry.ReportOpts :=
   match Scry.reportArgsGo .none Scry.emptyReportOpts args with
   | .error e => .error e
-  | .ok o => match o.diff, o.changedLines with
-    | .some _, .some _ => .error "--diff and --changed-lines are mutually exclusive"
-    | .some "all", .none => match o.diffContext with
-      | .some _ => .error "--diff-context has no effect with --diff all"
-      | .none => .ok o
-    | .none, .none => match o.diffContext with
-      | .some _ => .error "--diff-context needs --diff or --changed-lines"
-      | .none => .ok o
-    | _, _ => .ok o
+  | .ok o => match Scry.reportCheckDiff o with
+    | .error e => .error e
+    | .ok o => match o.diff, o.changedLines with
+      | .some _, .some _ => .error "--diff and --changed-lines are mutually exclusive"
+      | .some "all", .none => match o.diffContext with
+        | .some _ => .error "--diff-context has no effect with --diff all"
+        | .none => .ok o
+      | .none, .none => match o.diffContext with
+        | .some _ => .error "--diff-context needs --diff or --changed-lines"
+        | .none => .ok o
+      | _, _ => .ok o
 
 /-- The taint options for one file: this command is the same pipeline, not a copy. -/
 def Scry.reportTaintOpts (o : Scry.ReportOpts) (file : String) : Scry.TaintOpts :=
@@ -122,7 +133,8 @@ def Scry.reportTaintOpts (o : Scry.ReportOpts) (file : String) : Scry.TaintOpts 
 def Scry.reportStepOf (m : Scry.OriginMap) (p : Scry.PathNode) : Scry.ReportStep :=
   match Scry.originAt m p.func p.point with
   | .some o => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func o.line o.column
-  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0
+      o.endLine o.endColumn
+  | .none => Scry.ReportStep.mk (Scry.PathKind.show p.kind) p.func 0 0 0 0
 
 def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFinding)
     (checked : Bool) (hit : Option Scry.DiffHit) : Scry.ReportFinding :=
@@ -158,6 +170,8 @@ def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFind
     shown
     matchedBy
     diffLine
+    sink.endLine
+    sink.endColumn
 
 def Scry.reportWarningOf (w : Scry.BoundaryFinding) (hit : Option Scry.DiffHit) :
     Scry.ReportWarning :=
@@ -242,18 +256,77 @@ def Scry.reportFileOf (o : Scry.ReportOpts) (file : String) : EIO Scry.ReportFil
 -- ## Discovery and the command
 
 /-- One file, or every `*.c` under a directory (recursive, hidden directories skipped),
-sorted so a directory report is byte-stable. -/
-def Scry.reportFilesOf (path : String) : EIO (List String) := do
+sorted so a directory report is byte-stable. The second list is the symbolic links the
+walk refused to follow. -/
+def Scry.reportFilesOf (path : String) : EIO (List String × List String) := do
   present ← EIO.lift (FS.exists path);
   match present with
   | .false => EIO.fail (path ++ ": no such file or directory")
   | .true => do
     isDir ← EIO.lift (FS.isDir path);
     match isDir with
-    | .false => EIO.pure (List.cons path .nil)
+    | .false => EIO.pure (List.cons path .nil, (.nil : List String))
     | .true => do
-      found ← Scry.ProjectIO.walkGo path;
-      EIO.pure (Scry.sortStrings found)
+      w ← Scry.ProjectIO.walkGo path;
+      EIO.pure (Scry.sortStrings w.files, w.links)
+
+/-- `p` made absolute against the current directory and normalised (`.`, `..`). -/
+def Scry.reportAbsPath (p : String) : EIO String :=
+  match String.startsWith p "/" with
+  | .true => EIO.pure (Scry.normalisePath p)
+  | .false => do
+    cwd ← FS.currentDir;
+    EIO.pure (Scry.normalisePath (Path.join cwd p))
+
+/-- Whether `target` (a real path) is one of the files this report reads. -/
+partial def Scry.reportIsInput (target : String) : List String → EIO Bool
+  | .nil => EIO.pure .false
+  | .cons f rest => do
+    real ← EIO.lift (FS.realPath f);
+    let hit := match real with
+      | .ok r => String.eq r target
+      | .error _ => String.eq (Scry.normalisePath f) target;
+    match hit with
+    | .true => EIO.pure .true
+    | .false => Scry.reportIsInput target rest
+
+/-- The path to write the page to, after refusing the two ways `--out` could destroy
+something: a symlink (a committed `report.html -> ~/.bashrc` is truncated by
+`FS.writeFile`'s `O_TRUNC`), and a path that is one of the files this run reads (or a
+`*.c` under the corpus directory, which the next run would analyse). The parent is
+resolved with `realpath`, so a symlinked directory cannot redirect the write either. -/
+def Scry.reportOutTarget (o : Scry.ReportOpts) (files : List String) : EIO String := do
+  absOut ← Scry.reportAbsPath o.out;
+  st ← EIO.lift (FS.linkStat absOut);
+  match st with
+  | .ok s => match s.kind with
+    | .symlink => EIO.fail ("--out " ++ o.out
+        ++ " is a symbolic link; refusing to write through it (choose a real path)")
+    | _ => EIO.pure ()
+  | .error _ => EIO.pure ();
+  rp ← EIO.lift (FS.realPath (Scry.ProjectIO.parentDir absOut));
+  let target := match rp with
+    | .ok d => Path.join d (Scry.baseName absOut)
+    | .error _ => absOut;
+  clash ← Scry.reportIsInput target files;
+  match clash with
+  | .true => EIO.fail ("--out " ++ o.out ++ " (" ++ target
+      ++ ") is one of the files this report reads; refusing to overwrite an input")
+  | .false => do
+    isDir ← EIO.lift (FS.isDir o.path);
+    match isDir with
+    | .false => EIO.pure target
+    | .true => do
+      root ← EIO.lift (FS.realPath o.path);
+      let realRoot := match root with
+        | .ok r => r
+        | .error _ => Scry.normalisePath o.path;
+      match Bool.and (Scry.ProjectIO.underRoot realRoot target)
+          (String.endsWith target ".c") with
+      | .true => EIO.fail ("--out " ++ o.out
+          ++ " is a C file under the corpus directory; the next report would analyse it"
+          ++ " (choose a name outside " ++ o.path ++ ", or one that is not *.c)")
+      | .false => EIO.pure target
 
 partial def Scry.reportFilesGo (o : Scry.ReportOpts) : List String → EIO (List Scry.ReportFile)
   | .nil => EIO.pure .nil
@@ -264,14 +337,25 @@ partial def Scry.reportFilesGo (o : Scry.ReportOpts) : List String → EIO (List
 
 /-- `scry report …`: write one self-contained page and say what it contains. -/
 def Scry.reportRun (o : Scry.ReportOpts) : EIO Nat := do
-  files ← Scry.reportFilesOf o.path;
+  found ← Scry.reportFilesOf o.path;
+  let files := found.1;
+  let links := found.2;
+  out ← Scry.reportOutTarget o files;
   reps ← Scry.reportFilesGo o files;
+  let linkNote := match links with
+    | .nil => ""
+    | _ => "Skipped " ++ Nat.repr (List.length links)
+        ++ " symbolic link(s) (not followed): "
+        ++ String.intercalate " " (List.map (fun l => l ++ ";") links);
   let note := match files with
-    | .nil => "No C files were found under this path; the page has no findings."
-    | _ => "";
+    | .nil => match links with
+      | .nil => "No C files were found under this path; the page has no findings."
+      | _ => String.append
+          "No C files were found under this path; the page has no findings. " linkNote
+    | _ => linkNote;
   let page := Scry.renderReport
     (Scry.ReportMeta.mk "scry 0.1.0-dev (S1)" note) reps;
-  FS.writeFile o.out page;
+  FS.writeFile out page;
   let findings := List.foldl (fun acc r => Nat.add acc (List.length r.findings)) 0 reps;
   EIO.lift (IO.println ("wrote HTML report: " ++ o.out ++ " ("
     ++ Nat.repr (List.length reps) ++ " file(s), " ++ Nat.repr findings

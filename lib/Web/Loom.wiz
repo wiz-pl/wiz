@@ -1,0 +1,827 @@
+import Json
+import Optic
+import Tagged
+import Text
+import Web.Style
+/-!
+# Web.Loom
+
+The Loom UI framework for Wiz: components, local state, typed event handlers,
+keyed lists, a pure virtual DOM, deterministic server-side rendering (HTML strings),
+and a keyed diff that produces small DOM patches. `web/framework/` has the browser
+half (a patch applier and event delegation) and a demo.
+
+The model is **VDOM, not fine-grained signals**, and it is chosen for the way the
+existing web pages already work (web/Web.wiz, web/infoview.js):
+
+* A page's state is a Wiz value held by JavaScript and handed back on every event
+  (`wiz_web_step : state → event → state`). So the UI is a pure function
+  `state → tree`, which is exactly what a virtual DOM wants. A signal graph would need
+  a mutable heap, stable node identity and a subscription order that the step-function
+  FFI does not have.
+* The same `state → tree` function is the server-side renderer: `Loom.toHtml` is
+  deterministic and needs no DOM, so `wiz doc` and the static pages can render a
+  component tree without a browser.
+* Keyed diffing is ~150 lines and has no runtime beyond the tree itself; a signal
+  runtime (cells, dependency tracking, effect queue) would be larger in Wiz and would
+  still need the diff for first paint.
+
+Updates are **VDOM patches addressed by a child-index path** (`"0.2.1"`), through the
+same `js_*` FFI the infoview uses: `Loom.patchesJson` gives JavaScript a list of
+operations, and `web/framework/runtime.js` applies them. Nothing in this file is
+`unsafe`, and no proof in it is evaluated natively (it trusts no native axiom).
+
+The split between this runtime, the JavaScript host, the static SSR shell and the
+designer/builder, the data path of each surface, the single validation table, the wire
+envelope and the adopt contract are canonical in `docs/notes/loom-wire-protocol.md`.
+This comment states only what the renderer guarantees; it does not restate that model.
+
+## Components and local state
+
+A component is a record of `init`, `update` and `view` (`Loom.Component`), with props
+`P`, state `S` and messages `M`. Local state is addressed by a **lens**
+(`lib/Optic.wiz`) into the application state: `useState` is a lens's `view`, `setState`
+is its `over` (`Loom.useStateP`/`Loom.setStateP` on a `LensP`; the unsuffixed names are
+the store-lens shims). Two components' lenses are disjoint paths, so their updates
+commute (`Lens.Indep`, or `LensP.Indep`), and the lens laws give read-after-write. This
+fits quantities: an ordinary component's state is unrestricted data at ω.
+
+A component that owns a **one-shot resource** (an in-flight request, a focus lease)
+uses `Loom.Owned S`: a linear state cell (quantity 1). Every step takes the token and
+must return it, so the kernel rejects using it twice and rejects dropping it on a
+branch -- `Loom.Owned` is the `Uniq` pattern of `lib/Region.wiz` without regions.
+
+```
+import Optic
+import Web.Loom
+
+inductive Msg where
+  | inc
+  | dec
+
+structure Model where
+  count : Nat
+
+def countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n)
+
+def view (s : Model) : Loom.VNode Msg :=
+  Loom.el "div" [Loom.class "counter"]
+    [Loom.on "click" Msg.inc (Loom.el "button" List.nil [Loom.text "+"]),
+     Loom.text "count: ", Loom.text (Nat.toString s.count)]   -- `import IO` for Nat.toString
+
+def app : Loom.App Model Msg := Loom.App.mk (Model.mk 0)
+  (fun m s => match m with
+    | .inc => Loom.setState countL Nat.succ s
+    | .dec => Loom.setState countL (fun n => Nat.sub n 1) s)
+  view
+
+#eval (Loom.App.render app (Model.mk 2)).html   -- the HTML string
+```
+-/
+
+-- ## Nodes
+
+/-- An HTML attribute: a name and a value. Both are escaped when rendered. -/
+def Loom.Attr : Type := String × String
+/-- An attribute, `Loom.attr "class" "pane"`. -/
+def Loom.attr (name value : String) : Loom.Attr := (name, value)
+/-- The `class` attribute. -/
+def Loom.class (value : String) : Loom.Attr := Loom.attr "class" value
+/-- The `id` attribute. -/
+def Loom.id (value : String) : Loom.Attr := Loom.attr "id" value
+
+/-- A virtual node, as a first-child/next-sibling forest (Wiz has no nested inductive
+types, so children are a `children` chain and a node's `next` is its following
+sibling). Build nodes with the smart constructors below, which take ordinary `List`s
+and always end a chain at `.nil`.
+
+`on event msg node` attaches a typed message to `node`'s DOM `event` (`click`, `input`,
+`keydown`, …); `render` numbers handlers in document order and dispatch passes the
+message to the app's `update`. `raw html` inserts `html` unescaped: it is the one trust
+boundary (see `Loom.raw`). -/
+inductive Loom.VNode (M : Type) where
+  | nil
+  | text (s : String) (next : Loom.VNode M)
+  | raw (html : String) (next : Loom.VNode M)
+  | el (tag : String) (key : String) (attrs : List Loom.Attr) (children : Loom.VNode M) (next : Loom.VNode M)
+  | on (event : String) (msg : M) (body : Loom.VNode M) (next : Loom.VNode M)
+  | prevent (event : String) (msg : M) (body : Loom.VNode M) (next : Loom.VNode M)
+
+/-- Put `rest` after the sibling chain `x`. -/
+def Loom.append {M : Type} : Loom.VNode M → Loom.VNode M → Loom.VNode M
+  | .nil, rest => rest
+  | .text s n, rest => .text s (Loom.append n rest)
+  | .raw h n, rest => .raw h (Loom.append n rest)
+  | .el t k a cs n, rest => .el t k a cs (Loom.append n rest)
+  | .on e m b n, rest => .on e m b (Loom.append n rest)
+  | .prevent e m b n, rest => .prevent e m b (Loom.append n rest)
+
+/-- `x` followed by the chain `rest`, merging two adjacent text nodes into one. HTML
+merges adjacent text nodes when it parses a page, so the tree must merge them too: a
+patch's child-index path addresses DOM nodes, and two text children would be one node
+there. (Raw HTML is one element; see `Loom.raw`.) -/
+def Loom.mergeText {M : Type} (x : Loom.VNode M) (rest : Loom.VNode M) : Loom.VNode M :=
+  match x, rest with
+  | .text a .nil, .text b r => .text (String.append a b) r
+  | _, _ => Loom.append x rest
+
+/-- A sibling chain from a list (adjacent text merged, as the DOM would). An empty text
+node is dropped: it has no DOM node, so keeping it would make a patch path address a
+node the DOM does not have (the playground's `#count` starts out empty). -/
+def Loom.ofList {M : Type} : List (Loom.VNode M) → Loom.VNode M
+  | .nil => .nil
+  | .cons x xs => match x with
+    | .text s .nil => match String.isEmpty s with
+      | .true => Loom.ofList xs
+      | .false => Loom.mergeText x (Loom.ofList xs)
+    | _ => Loom.mergeText x (Loom.ofList xs)
+
+/-- A text node (escaped when rendered; a patch carries its unescaped text). -/
+def Loom.text {M : Type} (s : String) : Loom.VNode M := .text s .nil
+/-- Raw HTML, **not escaped**: only for output that is already trusted HTML (for
+instance `TT.toHtml`, which escapes its own text). Every other text path escapes. -/
+def Loom.raw {M : Type} (html : String) : Loom.VNode M := .raw html .nil
+/-- An element: a tag, attributes and children. -/
+def Loom.el {M : Type} (tag : String) (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
+  .el tag "" attrs (Loom.ofList kids) .nil
+
+/-- A styled element: `classes` becomes exactly one sorted `class` attribute, which is
+the value an SSR page carries and a state change patches with one `setAttr "class"`.
+`attrs` must not contain another `class`; the view test rejects a second one (the
+generator cannot attach a diagnostic to a pure function). The declarations stay in the
+build-time `Style.Styled` values, so a view imports only keys. -/
+def Loom.styled {M : Type} (tag : String) (classes : List Style.Class)
+    (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
+  Loom.el tag (List.append [Style.Class.attr classes] attrs) kids
+
+/-- The class attribute alone: the bridge for a caller that builds its own element. -/
+def Loom.classes (classes : List Style.Class) : List Loom.Attr :=
+  [Style.Class.attr classes]
+
+/-- The one class attribute's value (`""` for no classes), for a test or a patch. -/
+def Loom.classNames (classes : List Style.Class) : String :=
+  (Style.Class.attr classes).2
+
+/-- A keyed element: its key is matched across renders when its siblings are reordered
+(`Loom.diffChildren`). Only elements take keys; a key on anything else is ignored, and
+keys must be unique among their siblings (a duplicate is matched to the first). -/
+def Loom.keyed {M : Type} (key : String) (node : Loom.VNode M) : Loom.VNode M := match node with
+  | .el t _ a cs n => .el t key a cs n
+  | other => other
+/-- Attach a message to a DOM event on `node`: one handler per event per element (the
+last `on` for the same event wins, as in the DOM). -/
+def Loom.on {M : Type} (event : String) (msg : M) (node : Loom.VNode M) : Loom.VNode M :=
+  .on event msg node .nil
+
+/-- Like `Loom.on`, but the handler decides whether the event's default action is
+prevented: the element carries `data-wiz-prevent-EVENT`, and the driver asks the
+runtime's `wiz_loom_consume` (an app's `Loom.LiveApp` policy) after the step. Use it for
+a `keydown` on a textarea: a handler that prevents every key swallows typing, so the
+runtime prevents only what it consumed (Ctrl/⌘+Enter, Save, …). A plain `Loom.on` keeps
+the older rule (a handled event is prevented). -/
+def Loom.onPrevent {M : Type} (event : String) (msg : M) (node : Loom.VNode M) : Loom.VNode M :=
+  .prevent event msg node .nil
+/-- A group of siblings, for a children list (do not use a group as one child). -/
+def Loom.seq {M : Type} (kids : List (Loom.VNode M)) : Loom.VNode M := Loom.ofList kids
+
+/-- Lift a component's view into a page's message type (Elm's `Html.map`): a child with
+its own `Msg` composes into a page whose message type is larger, wrapping every handler's
+message with `f`. Handler order and indices are the child's, so the patches do not move.
+(`Loom.map` is the framework's list helper; this is the tree one.) -/
+def Loom.mapMsg {A B : Type} (f : A → B) : Loom.VNode A → Loom.VNode B
+  | .nil => .nil
+  | .text s n => .text s (Loom.mapMsg f n)
+  | .raw h n => .raw h (Loom.mapMsg f n)
+  | .el t k a cs n => .el t k a (Loom.mapMsg f cs) (Loom.mapMsg f n)
+  | .on e m b n => .on e (f m) (Loom.mapMsg f b) (Loom.mapMsg f n)
+  | .prevent e m b n => .prevent e (f m) (Loom.mapMsg f b) (Loom.mapMsg f n)
+
+-- ## Rendering
+
+/-- The rendered tree: text is raw (escaped when written out), attributes are strings,
+and event handlers have become `data-wiz-on-EVENT="index"` attributes. -/
+inductive Loom.RNode where
+  | nil
+  | text (s : String) (next : Loom.RNode)
+  | raw (html : String) (next : Loom.RNode)
+  | el (tag : String) (key : String) (attrs : List Loom.Attr) (children : Loom.RNode) (next : Loom.RNode)
+
+/-- Put `rest` after the sibling chain `x`. -/
+def Loom.RNode.append : Loom.RNode → Loom.RNode → Loom.RNode
+  | .nil, rest => rest
+  | .text s n, rest => .text s (Loom.RNode.append n rest)
+  | .raw h n, rest => .raw h (Loom.RNode.append n rest)
+  | .el t k a cs n, rest => .el t k a cs (Loom.RNode.append n rest)
+
+/-- A sibling chain from a list. -/
+def Loom.RNode.ofList : List Loom.RNode → Loom.RNode
+  | .nil => .nil
+  | .cons x xs => Loom.RNode.append x (Loom.RNode.ofList xs)
+
+/-- The siblings of a rendered node, detached (each with no `next`). -/
+def Loom.RNode.siblings : Loom.RNode → List Loom.RNode
+  | .nil => .nil
+  | .text s n => .cons (.text s .nil) (Loom.RNode.siblings n)
+  | .raw h n => .cons (.raw h .nil) (Loom.RNode.siblings n)
+  | .el t k a cs n => .cons (.el t k a cs .nil) (Loom.RNode.siblings n)
+
+/-- The key of a rendered node (empty for text, raw text and unkeyed elements). -/
+def Loom.RNode.key : Loom.RNode → String
+  | .nil => ""
+  | .text _ _ => ""
+  | .raw _ _ => ""
+  | .el _ k _ _ _ => k
+
+/-- The state of a render: the output (reversed characters), the number of the next
+handler, and the handlers so far (reversed). -/
+structure Loom.Out (M : Type) where
+  acc : List Char
+  next : Nat
+  handlers : List (String × M)
+
+/-- Whether `s` is in `xs`. -/
+def Loom.member (s : String) : List String → Bool
+  | .nil => .false
+  | .cons x xs => match String.eq s x with
+    | .true => .true
+    | .false => Loom.member s xs
+
+/-- Void HTML elements: no closing tag. -/
+def Loom.void (tag : String) : Bool :=
+  Loom.member tag (List.cons "area" (List.cons "base" (List.cons "br" (List.cons "col"
+    (List.cons "embed" (List.cons "hr" (List.cons "img" (List.cons "input" (List.cons "link"
+      (List.cons "meta" (List.cons "param" (List.cons "source" (List.cons "track"
+        (List.cons "wbr" List.nil))))))))))))))
+
+/-- The attribute name of a handler: one attribute per event, so an element can carry a
+`click` and a `keydown` handler at once (`data-wiz-on-click="0"`). -/
+def Loom.eventAttr (event : String) : String := String.append "data-wiz-on-" event
+
+/-- The `data-wiz-on-EVENT` value of a handler: its index in the rendered handler table. -/
+def Loom.eventValue (index : Nat) : String :=
+  String.mk (Json.natChars index [])
+
+/-- The marker attribute of a handler that decides its own default action
+(`Loom.onPrevent`): `data-wiz-prevent-EVENT`. -/
+def Loom.preventAttr (event : String) : String := String.append "data-wiz-prevent-" event
+
+/-- Attach the handler attribute for `event` (number `index`) and `extra` to the head of
+`node`. Nested `on`s put more attributes on the same element; a text node is wrapped in
+a `span` so that it has somewhere to carry the attribute. -/
+def Loom.attachWith {M : Type} (event : String) (index : Nat) (extra : List Loom.Attr) :
+    Loom.VNode M → Loom.VNode M
+  | .el t k a cs n =>
+    .el t k (List.append a (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra)) cs n
+  | .on e m b n => .on e m (Loom.attachWith event index extra b) n
+  | .prevent e m b n => .prevent e m (Loom.attachWith event index extra b) n
+  | .text s n => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) (.text s .nil) n
+  | .raw h n => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) (.raw h .nil) n
+  | .nil => .el "span" "" (List.append [(Loom.attr (Loom.eventAttr event) (Loom.eventValue index))] extra) .nil .nil
+
+/-- Attach the handler attribute for `event` (number `index`) to the head of `node`. -/
+def Loom.attach {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M :=
+  Loom.attachWith event index List.nil
+
+/-- Attach the handler attribute and the "the runtime decides" marker. -/
+def Loom.attachPrevent {M : Type} (event : String) (index : Nat) : Loom.VNode M → Loom.VNode M :=
+  Loom.attachWith event index [(Loom.attr (Loom.preventAttr event) "1")]
+
+/-- Turn a virtual tree into a rendered tree, numbering handlers in document order
+(pre-order: the node's own handlers, then its children, then its next sibling). -/
+partial def Loom.toR {M : Type} : Loom.VNode M → Loom.Out M → Loom.RNode × Loom.Out M
+  | .nil, o => (.nil, o)
+  | .text s n, o =>
+    let r := Loom.toR n o;
+    (.text s r.1, r.2)
+  | .raw h n, o =>
+    let r := Loom.toR n o;
+    (.raw h r.1, r.2)
+  | .el t k a cs n, o =>
+    let rc := Loom.toR cs o;
+    let rn := Loom.toR n rc.2;
+    (.el t k a rc.1 rn.1, rn.2)
+  | .on e m b n, o =>
+    let index := o.next;
+    let o1 : Loom.Out M := { o with next := index + 1, handlers := .cons (e, m) o.handlers };
+    let r := Loom.toR (Loom.append (Loom.attach e index b) n) o1;
+    (r.1, r.2)
+  | .prevent e m b n, o =>
+    let index := o.next;
+    let o1 : Loom.Out M := { o with next := index + 1, handlers := .cons (e, m) o.handlers };
+    let r := Loom.toR (Loom.append (Loom.attachPrevent e index b) n) o1;
+    (r.1, r.2)
+
+/-- An attribute's HTML: ` name="value"`, escaped. -/
+def Loom.attrHtml (a : Loom.Attr) (h : Html) : Html :=
+  Html.lit "\"" (Html.lit (Tagged.esc a.2) (Html.lit "=\"" (Html.lit a.1 (Html.lit " " h))))
+
+/-- Attributes' HTML, left to right. -/
+def Loom.attrsHtml : List Loom.Attr → Html → Html
+  | .nil, h => h
+  | .cons a rest, h => Loom.attrsHtml rest (Loom.attrHtml a h)
+
+/-- An opening tag, `<tag attrs>`, before `h`. -/
+def Loom.openTag (tag : String) (attrs : List Loom.Attr) (h : Html) : Html :=
+  Html.lit ">" (Loom.attrsHtml attrs (Html.lit tag (Html.lit "<" h)))
+
+/-- A closing tag, `</tag>`, before `h`. -/
+def Loom.closeTag (tag : String) (h : Html) : Html :=
+  Html.lit ">" (Html.lit tag (Html.lit "</" h))
+
+/-- A rendered node and its following siblings, as HTML, before `h`. -/
+def Loom.renderRNode : Loom.RNode → Html → Html
+  | .nil, h => h
+  | .text s n, h => Loom.renderRNode n (Html.lit (Tagged.esc s) h)
+  | .raw r n, h => Loom.renderRNode n (Html.lit r h)
+  | .el t k a cs n, h =>
+    let opened := Loom.openTag t a h;
+    match Loom.void t with
+    | .true => Loom.renderRNode n opened
+    | .false => Loom.renderRNode n (Loom.closeTag t (Loom.renderRNode cs opened))
+
+/-- A rendered tree as an HTML string. -/
+def Loom.htmlOf (n : Loom.RNode) : String := match Loom.renderRNode n (Html.mk [] 0) with
+  | .mk acc _ => String.mk (List.revOnto acc [])
+
+/-- A rendered view: its tree (for diffing), its HTML, and its handler table
+(`event, message`, in document order). -/
+structure Loom.Rendered (M : Type) where
+  tree : Loom.RNode
+  html : String
+  handlers : List (String × M)
+
+/-- Render a virtual tree: HTML for SSR, handlers for dispatch, and the tree for a
+later `Loom.Rendered.diff`. Deterministic: no clock, no hashing, no allocation order. -/
+def Loom.render {M : Type} (v : Loom.VNode M) : Loom.Rendered M :=
+  let o : Loom.Out M := Loom.Out.mk [] 0 [];
+  let r := Loom.toR v o;
+  Loom.Rendered.mk r.1 (Loom.htmlOf r.1) (List.revOnto r.2.handlers [])
+
+/-- A virtual tree as an HTML string (SSR). -/
+def Loom.toHtml {M : Type} (v : Loom.VNode M) : String := (Loom.render v).html
+
+-- ## Patches
+
+/-- A DOM update. Paths are child indices from the container (text nodes count too):
+`"0"` is the first child, `"0.2"` its third child, `""` the container itself.
+`insert` takes HTML for a new child; `move` removes the child at `src` and reinserts it
+so that it ends up at index `dst`; `remove` removes at `index`. -/
+inductive Loom.Patch where
+  | replace (path : String) (html : String)
+  | text (path : String) (s : String)
+  | setAttr (path : String) (name : String) (value : String)
+  | removeAttr (path : String) (name : String)
+  | insert (path : String) (index : Nat) (html : String)
+  | remove (path : String) (index : Nat)
+  | move (path : String) (src : Nat) (dst : Nat)
+
+/-- The element at `n`, if any. -/
+partial def Loom.at {A : Type} (n : Nat) : List A → Option A
+  | .nil => .none
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => .some x
+    | .false => Loom.at (n - 1) xs
+
+/-- The element at `n`, or `d`. -/
+partial def Loom.atD {A : Type} (d : A) (n : Nat) : List A → A
+  | .nil => d
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => x
+    | .false => Loom.atD d (n - 1) xs
+
+/-- Insert `x` before position `n`. -/
+partial def Loom.insertAt {A : Type} (n : Nat) (x : A) : List A → List A
+  | .nil => .cons x .nil
+  | .cons y ys => match Nat.beq n 0 with
+    | .true => .cons x (.cons y ys)
+    | .false => .cons y (Loom.insertAt (n - 1) x ys)
+
+/-- Remove the element at `n`. -/
+partial def Loom.removeAt {A : Type} (n : Nat) : List A → List A
+  | .nil => .nil
+  | .cons x xs => match Nat.beq n 0 with
+    | .true => xs
+    | .false => .cons x (Loom.removeAt (n - 1) xs)
+
+/-- Move the element at `src` so that it ends up at index `dst`. -/
+def Loom.moveTo {A : Type} (src dst : Nat) (xs : List A) : List A :=
+  match Loom.at src xs with
+  | .some x => Loom.insertAt dst x (Loom.removeAt src xs)
+  | .none => xs
+
+/-- The key of the node; empty for text/raw. -/
+def Loom.keyOf (n : Loom.RNode) : String := Loom.RNode.key n
+
+/-- Whether the list has a key equal to `k`. -/
+def Loom.hasKey (k : String) : List Loom.RNode → Bool
+  | .nil => .false
+  | .cons x xs => match String.eq (Loom.keyOf x) k with
+    | .true => .true
+    | .false => Loom.hasKey k xs
+
+/-- The first index at or after `from` whose key is `k`. -/
+partial def Loom.findKeyFrom (k : String) (from : Nat) : List Loom.RNode → Option Nat
+  | .nil => .none
+  | .cons x xs => match Nat.beq from 0 with
+    | .true => match String.eq (Loom.keyOf x) k with
+      | .true => .some 0
+      | .false => (match Loom.findKeyFrom k 0 xs with
+        | .some n => .some (n + 1)
+        | .none => .none)
+    | .false => (match Loom.findKeyFrom k (from - 1) xs with
+      | .some n => .some (n + 1)
+      | .none => .none)
+
+/-- Whether every node in the list is an element with a non-empty key. -/
+def Loom.allKeyed : List Loom.RNode → Bool
+  | .nil => .true
+  | .cons x xs => match String.eq (Loom.keyOf x) "" with
+    | .true => .false
+    | .false => Loom.allKeyed xs
+
+/-- Whether the parent is the root (whose child paths have no leading dot). -/
+def Loom.childPath (parent : String) (i : Nat) : String :=
+  match String.eq parent "" with
+  | .true => String.mk (Json.natChars i [])
+  | .false => String.mk (List.append (String.chars parent)
+      (List.append (String.chars ".") (Json.natChars i [])))
+
+/-- An attribute's value by name. -/
+def Loom.attrValue (name : String) : List Loom.Attr → Option String
+  | .nil => .none
+  | .cons a rest => match String.eq a.1 name with
+    | .true => .some a.2
+    | .false => Loom.attrValue name rest
+
+/-- Remove the attributes of `old` that `new` does not have. -/
+def Loom.removedAttrs (path : String) : List Loom.Attr → List Loom.Attr → List Loom.Patch
+  | .nil, _ => []
+  | .cons a rest, new => match Loom.attrValue a.1 new with
+    | .some _ => Loom.removedAttrs path rest new
+    | .none => .cons (.removeAttr path a.1) (Loom.removedAttrs path rest new)
+
+/-- Set the attributes of `new` that are absent from `old` or have another value. -/
+def Loom.setAttrs (path : String) (old : List Loom.Attr) : List Loom.Attr → List Loom.Patch
+  | .nil => []
+  | .cons a rest => match Loom.attrValue a.1 old with
+    | .some v => match String.eq v a.2 with
+      | .true => Loom.setAttrs path old rest
+      | .false => .cons (.setAttr path a.1 a.2) (Loom.setAttrs path old rest)
+    | .none => .cons (.setAttr path a.1 a.2) (Loom.setAttrs path old rest)
+
+/-- Patches for the attributes: remove the ones that went away, set the new or changed
+ones. -/
+def Loom.diffAttrs (path : String) (old new : List Loom.Attr) : List Loom.Patch :=
+  List.append (Loom.removedAttrs path old new) (Loom.setAttrs path old new)
+
+-- (diffNode and diffChildren are mutual: an element's children are diffed by the same
+-- function that diffs nodes.)
+
+mutual
+/-- Patches turning the node `old` into `new` at `path` (both are single nodes). -/
+partial def Loom.diffNode (path : String) (old : Loom.RNode) (new : Loom.RNode) : List Loom.Patch :=
+  match old, new with
+  | .nil, .nil => []
+  | .text s _, .text s' _ => match String.eq s s' with
+    | .true => []
+    | .false => [(.text path s')]
+  | .raw h _, .raw h' _ => match String.eq h h' with
+    | .true => []
+    | .false => [(.replace path h')]
+  | .el t k a cs _, .el t' k' a' cs' _ =>
+    match String.eq t t' with
+    | .false => [(.replace path (Loom.htmlOf new))]
+    | .true => match String.eq k k' with
+      | .false => [(.replace path (Loom.htmlOf new))]
+      | .true => List.append (Loom.diffAttrs path a a')
+          (Loom.diffChildren path (Loom.RNode.siblings cs) (Loom.RNode.siblings cs'))
+  | _, _ => [(.replace path (Loom.htmlOf new))]
+
+/-- Patches for a children list at `base` (which ends with `.`, or is empty at the
+root): keyed when both lists are fully keyed, positional otherwise. -/
+partial def Loom.diffChildren (base : String) (old new : List Loom.RNode) : List Loom.Patch :=
+  match Loom.allKeyed old with
+  | .true => match Loom.allKeyed new with
+    | .true => Loom.diffKeyed base old new
+    | .false => Loom.diffPositional base 0 old new
+  | .false => Loom.diffPositional base 0 old new
+
+/-- Positional diff: pair by index, then insert or remove at the tail. -/
+partial def Loom.diffPositional (base : String) (i : Nat) : List Loom.RNode → List Loom.RNode → List Loom.Patch
+  | .nil, .nil => []
+  | .nil, .cons n ns =>
+    .cons (.insert base i (Loom.htmlOf n)) (Loom.diffPositional base (i + 1) [] ns)
+  | .cons o os, .nil =>
+    .cons (.remove base i) (Loom.diffPositional base i os [])
+  | .cons o os, .cons n ns =>
+    List.append (Loom.diffNode (Loom.childPath base i) o n)
+      (Loom.diffPositional base (i + 1) os ns)
+
+/-- Keyed diff: drop the old children that are gone, then walk the new list, moving a
+matching child into place (or inserting it), and finally remove the leftovers. -/
+partial def Loom.diffKeyed (base : String) (old new : List Loom.RNode) : List Loom.Patch :=
+  let kept := Loom.dropMissing base new 0 old;
+  let walked := Loom.keyedLoop base 0 kept.1 new [];
+  List.append kept.2 walked.2
+
+/-- The old children still present in `new`, with `remove` patches for the others.
+`j` is the child's current index (the number kept so far). -/
+def Loom.dropMissing (base : String) (new : List Loom.RNode) (j : Nat) :
+    List Loom.RNode → List Loom.RNode × List Loom.Patch
+  | .nil => ([], [])
+  | .cons o os =>
+    match Loom.hasKey (Loom.keyOf o) new with
+    | .true => let rest := Loom.dropMissing base new (j + 1) os; (.cons o rest.1, rest.2)
+    | .false => let rest := Loom.dropMissing base new j os;
+      (rest.1, .cons (.remove base j) rest.2)
+
+/-- Walk `new` at index `i` over the current list `cur`, producing patches. -/
+partial def Loom.keyedLoop (base : String) (i : Nat) (cur : List Loom.RNode) :
+    List Loom.RNode → List Loom.Patch → List Loom.RNode × List Loom.Patch
+  | .nil, acc => (cur, List.append acc (Loom.removeTail base i (List.length cur - i)))
+  | .cons n ns, acc =>
+    match Loom.at i cur with
+    | .some c => match String.eq (Loom.keyOf c) (Loom.keyOf n) with
+      | .true => Loom.keyedLoop base (i + 1) cur ns
+          (List.append acc (Loom.diffNode (Loom.childPath base i) c n))
+      | .false => match Loom.findKeyFrom (Loom.keyOf n) (i + 1) cur with
+        | .some j => Loom.keyedLoop base (i + 1) (Loom.moveTo j i cur) ns
+            (List.append acc (.cons (.move base j i)
+              (Loom.diffNode (Loom.childPath base i) (Loom.atD n j cur) n)))
+        | .none => Loom.keyedLoop base (i + 1) (Loom.insertAt i n cur) ns
+            (List.append acc [(.insert base i (Loom.htmlOf n))])
+    | .none => Loom.keyedLoop base (i + 1) (Loom.insertAt i n cur) ns
+        (List.append acc [(.insert base i (Loom.htmlOf n))])
+
+/-- Remove `k` children at index `i` (each removal shifts the next into place). -/
+def Loom.removeTail (base : String) (i : Nat) : Nat → List Loom.Patch
+  | .zero => []
+  | .succ k => .cons (.remove base i) (Loom.removeTail base i k)
+end
+
+/-- Patches from one rendered view to another. -/
+def Loom.Rendered.diff {M : Type} (old new : Loom.Rendered M) : List Loom.Patch :=
+  Loom.diffChildren "" (Loom.RNode.siblings old.tree) (Loom.RNode.siblings new.tree)
+
+-- ## JSON, for the browser half
+
+/-- `map`, locally (the framework does not import lib/Text.wiz). -/
+def Loom.map {A B : Type} (f : A → B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => .cons (f x) (Loom.map f xs)
+
+/-- One patch as JSON (`web/framework/runtime.js` applies it). -/
+def Loom.Patch.toJson (p : Loom.Patch) : Json := match p with
+  | .replace path html => Json.mkObj (.cons (Json.field "op" (Json.mkStr "replace"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "html" (Json.mkStr html)) List.nil)))
+  | .text path s => Json.mkObj (.cons (Json.field "op" (Json.mkStr "text"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "text" (Json.mkStr s)) List.nil)))
+  | .setAttr path name value => Json.mkObj (.cons (Json.field "op" (Json.mkStr "setAttr"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "name" (Json.mkStr name))
+        (.cons (Json.field "value" (Json.mkStr value)) List.nil))))
+  | .removeAttr path name => Json.mkObj (.cons (Json.field "op" (Json.mkStr "removeAttr"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "name" (Json.mkStr name)) List.nil)))
+  | .insert path index html => Json.mkObj (.cons (Json.field "op" (Json.mkStr "insert"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "index" (Json.ofNat index))
+        (.cons (Json.field "html" (Json.mkStr html)) List.nil))))
+  | .remove path index => Json.mkObj (.cons (Json.field "op" (Json.mkStr "remove"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "index" (Json.ofNat index)) List.nil)))
+  | .move path src dst => Json.mkObj (.cons (Json.field "op" (Json.mkStr "move"))
+      (.cons (Json.field "path" (Json.mkStr path)) (.cons (Json.field "src" (Json.ofNat src))
+        (.cons (Json.field "dst" (Json.ofNat dst)) List.nil))))
+
+/-- A patch list as JSON, for `js_patch`. -/
+def Loom.patchesJson (ps : List Loom.Patch) : String :=
+  Json.render (Json.mkArr (Loom.map Loom.Patch.toJson ps))
+
+-- ## Components, state, dispatch
+
+/-- Read a component's local state at a profunctor lens: `useState` is `view`. -/
+def Loom.useStateP {S : Type} {ω A : Type} (l : LensP S S A A) (s : S) : A := view l s
+/-- Update a component's local state at a profunctor lens: `setState` is `over`. The lens
+laws (`LensP.GetPut`, `LensP.PutGet`) give read-after-write; two components' lenses on
+independent paths commute (`LensP.Indep`, which a derived `Lens.Indep` supplies through
+`LensP.ofLens_indep`). -/
+def Loom.setStateP {S : Type} {ω A : Type} (l : LensP S S A A) (f : A → A) (s : S) : S := over l f s
+/-- A reducer on a component's local state (`useReducer`), at a profunctor lens. -/
+def Loom.useReducerP {S : Type} {ω A : Type} {M : Type} (l : LensP S S A A) (step : M → A → A) (m : M) (s : S) : S :=
+  over l (step m) s
+
+/-- Read a component's local state: `useState` is a lens's get (the store-lens shim of
+`Loom.useStateP`, so `deriving Lens` fields work unchanged). -/
+def Loom.useState {S : Type} {ω A : Type} (l : Lens S A) (s : S) : A :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.useStateP lp s
+/-- Update a component's local state: `setState` is a lens's over. The lens laws
+(`Lens.GetPut`, `Lens.PutGet`) give read-after-write; two components' lenses on
+independent paths commute (`Lens.Indep`). -/
+def Loom.setState {S : Type} {ω A : Type} (l : Lens S A) (f : A → A) (s : S) : S :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.setStateP lp f s
+/-- A reducer on a component's local state (`useReducer`). -/
+def Loom.useReducer {S : Type} {ω A : Type} {M : Type} (l : Lens S A) (step : M → A → A) (m : M) (s : S) : S :=
+  let lp : LensP S S A A := LensP.ofLens l;
+  Loom.useReducerP lp step m s
+
+/-- A component: its initial state from props, its update, and its view. -/
+structure Loom.Component (P S M : Type) where
+  init : P → S
+  update : M → S → S
+  view : P → S → Loom.VNode M
+
+/-- Render a component (`props`, `state`) to a `Rendered`. -/
+def Loom.Component.render {P S M : Type} (c : Loom.Component P S M) (p : P) (s : S) : Loom.Rendered M :=
+  Loom.render (c.view p s)
+
+/-- A whole app: initial state, update and view. -/
+structure Loom.App (S M : Type) where
+  init : S
+  update : M → S → S
+  view : S → Loom.VNode M
+
+/-- The app's view at `s`, rendered. -/
+def Loom.App.render {S M : Type} (a : Loom.App S M) (s : S) : Loom.Rendered M :=
+  Loom.render (a.view s)
+
+/-- SSR: the app at `s` as HTML. -/
+def Loom.App.html {S M : Type} (a : Loom.App S M) (s : S) : String := (Loom.App.render a s).html
+
+/-- The message of handler `i` (document order), if any. -/
+partial def Loom.handlerAt {M : Type} (i : Nat) : List (String × M) → Option M
+  | .nil => .none
+  | .cons h hs => match Nat.beq i 0 with
+    | .true => .some h.2
+    | .false => Loom.handlerAt (i - 1) hs
+
+/-- Dispatch handler `i` (the browser sends its `data-wiz-on-EVENT` index): the next state. -/
+def Loom.App.dispatch {S M : Type} (a : Loom.App S M) (s : S) (i : Nat) : S :=
+  match Loom.handlerAt i (Loom.App.render a s).handlers with
+  | .some m => a.update m s
+  | .none => s
+
+/-- Dispatch only if the handler's event name is `event` (the browser sends both, so a
+stale index from a previous render cannot fire the wrong message). -/
+def Loom.App.event {S M : Type} (a : Loom.App S M) (s : S) (event : String) (i : Nat) : S :=
+  match Loom.at i (Loom.App.render a s).handlers with
+  | .some h => match String.eq h.1 event with
+    | .true => a.update h.2 s
+    | .false => s
+  | .none => s
+
+/-- The patches from the app's state `s` to `s'` (render both, keyed-diff). -/
+def Loom.App.patch {S M : Type} (a : Loom.App S M) (s s' : S) : List Loom.Patch :=
+  Loom.Rendered.diff (Loom.App.render a s) (Loom.App.render a s')
+
+/-- `Loom.App.patch` as JSON, for `js_patch`. -/
+def Loom.App.patches {S M : Type} (a : Loom.App S M) (s s' : S) : String :=
+  Loom.patchesJson (Loom.App.patch a s s')
+
+-- ## Events with a payload (form controls, keys)
+
+/-- One browser event: the DOM type, the handler index that answered it, and the payload
+`web/framework/driver.js` attached (a form control's value for `input`/`change`, the key
+for `keydown`/`keyup`; empty for the rest). -/
+structure Loom.Event where
+  name : String
+  index : Nat
+  payload : String
+
+/-- A decimal string as a number (`0` when it is not one). -/
+def Loom.natOr0 (s : String) : Nat := match String.parseNat s with
+  | .some n => n
+  | .none => 0
+
+/-- Split the driver's event string. The driver sends `event "\n" index "\n" payload`, and
+the payload is the rest of the string, so a textarea's newlines arrive intact:
+`"input\n3\na\nb"` is `input`, handler 3, `"a\nb"`. -/
+def Loom.splitEvent (s : String) : Loom.Event :=
+  match String.splitOn s "\n" with
+  | .nil => Loom.Event.mk "" 0 ""
+  | .cons name rest => match rest with
+    | .nil => Loom.Event.mk name 0 ""
+    | .cons index tail => Loom.Event.mk name (Loom.natOr0 index) (String.intercalate "\n" tail)
+
+/-- An app whose messages carry the event's payload: `update msg payload state`. Use it
+when a view binds a form control (`input`/`change`) or a key (`keydown`/`keyup`); a
+`Loom.App` whose messages need no payload stays as it is. -/
+structure Loom.LiveApp (S M : Type) where
+  init : S
+  update : M → String → S → S
+  view : S → Loom.VNode M
+
+/-- The app's view at `s`, rendered. -/
+def Loom.LiveApp.render {S M : Type} (a : Loom.LiveApp S M) (s : S) : Loom.Rendered M :=
+  Loom.render (a.view s)
+
+/-- SSR: the app at `s` as HTML. -/
+def Loom.LiveApp.html {S M : Type} (a : Loom.LiveApp S M) (s : S) : String :=
+  (Loom.LiveApp.render a s).html
+
+/-- The patches from the app's state `s` to `s'`. -/
+def Loom.LiveApp.patch {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : List Loom.Patch :=
+  Loom.Rendered.diff (Loom.LiveApp.render a s) (Loom.LiveApp.render a s')
+
+/-- `Loom.LiveApp.patch` as JSON, for `js_patch`. -/
+def Loom.LiveApp.patches {S M : Type} (a : Loom.LiveApp S M) (s s' : S) : String :=
+  Loom.patchesJson (Loom.LiveApp.patch a s s')
+
+/-- A live app and the last tree it rendered. The page's state is this pair, so a step
+diffs against the tree the previous step produced instead of rendering the old state
+again (one render per effect, not two), and an effect that arrives while another is in
+flight is applied to the same tree before the next diff. -/
+structure Loom.Session (S M : Type) where
+  state : S
+  rendered : Loom.Rendered M
+
+/-- The session's initial state and first tree (the SSR the page mounts). -/
+def Loom.LiveApp.session {S M : Type} (a : Loom.LiveApp S M) : Loom.Session S M :=
+  Loom.Session.mk a.init (Loom.LiveApp.render a a.init)
+
+/-- The session's HTML (the tree it already rendered). -/
+def Loom.Session.html {S M : Type} (s : Loom.Session S M) : String := s.rendered.html
+
+/-- Move the session to `next`, rendering only the next state: the patches from the
+retained tree and the new session. -/
+def Loom.LiveApp.advance {S M : Type} (a : Loom.LiveApp S M) (s : Loom.Session S M)
+    (next : S) : Loom.Session S M × List Loom.Patch :=
+  let rendered := Loom.LiveApp.render a next;
+  (Loom.Session.mk next rendered, Loom.Rendered.diff s.rendered rendered)
+
+/-- Dispatch one browser event string against the retained tree (`Loom.splitEvent`),
+then render only the next state. -/
+def Loom.LiveApp.stepSession {S M : Type} (a : Loom.LiveApp S M) (s : Loom.Session S M)
+    (ev : String) : Loom.Session S M × List Loom.Patch :=
+  let e := Loom.splitEvent ev;
+  let next := match Loom.at e.index s.rendered.handlers with
+    | .some h => match String.eq h.1 e.name with
+      | .true => a.update h.2 e.payload s.state
+      | .false => s.state
+    | .none => s.state;
+  Loom.LiveApp.advance a s next
+
+/-- The patches of a step, as JSON for `js_patch`, and the next session. -/
+def Loom.LiveApp.stepSessionJson {S M : Type} (a : Loom.LiveApp S M)
+    (s : Loom.Session S M) (ev : String) : Loom.Session S M × String :=
+  let r := Loom.LiveApp.stepSession a s ev;
+  (r.1, Loom.patchesJson r.2)
+
+/-- An effect's result, as a session and its patch JSON. -/
+def Loom.LiveApp.effectSessionJson {S M : Type} (a : Loom.LiveApp S M)
+    (s : Loom.Session S M) (next : S) : Loom.Session S M × String :=
+  let r := Loom.LiveApp.advance a s next;
+  (r.1, Loom.patchesJson r.2)
+
+/-- Dispatch one browser event string (`Loom.splitEvent`), giving the message its
+payload. A stale index from a previous render cannot fire the wrong message: the event
+name has to match the handler's too. -/
+def Loom.LiveApp.step {S M : Type} (a : Loom.LiveApp S M) (s : S) (ev : String) : S :=
+  let e := Loom.splitEvent ev;
+  match Loom.at e.index (Loom.LiveApp.render a s).handlers with
+  | .some h => match String.eq h.1 e.name with
+    | .true => a.update h.2 e.payload s
+    | .false => s
+  | .none => s
+
+-- ## Owned (linear) state
+
+/-- A one-shot state cell: the token is used at quantity 1, so the kernel rejects
+using it twice and rejects dropping it. The state itself is ordinary (ω) data, as in
+`Uniq`. Only this module constructs it (`private mk`). -/
+inductive Loom.Owned (S : Type) where
+  | private mk (state : S)
+
+/-- A new one-shot cell. -/
+def Loom.Owned.new {S : Type} (s : S) : Loom.Owned S := Loom.Owned.mk s
+
+/-- Use the cell once: run `k` on the state and return its result. -/
+def Loom.Owned.read {S B : Type} (1 o : Loom.Owned S) (k : S → B) : B :=
+  match o with
+  | .mk s => k s
+
+/-- The state, and the cell back (`*o` in direct style). -/
+def Loom.Owned.peek {S : Type} (1 o : Loom.Owned S) : S × Loom.Owned S :=
+  match o with
+  | .mk s => (s, Loom.Owned.mk s)
+
+/-- Update the state, giving the cell back. -/
+def Loom.Owned.update {S : Type} (1 o : Loom.Owned S) (f : S → S) : Loom.Owned S :=
+  match o with
+  | .mk s => Loom.Owned.mk (f s)
+
+/-- Replace the state, giving the cell back. -/
+def Loom.Owned.set {S : Type} (1 o : Loom.Owned S) (s : S) : Loom.Owned S :=
+  match o with
+  | .mk _ => Loom.Owned.mk s
+
+/-- End the one-shot state: its final value (the only way to discard the cell, and it
+must be written on every path). -/
+def Loom.Owned.end {S : Type} (1 o : Loom.Owned S) : S :=
+  match o with
+  | .mk s => s
+
+attribute [inline] Loom.Owned.new
+attribute [inline] Loom.Owned.read
+attribute [inline] Loom.Owned.peek
+attribute [inline] Loom.Owned.update
+attribute [inline] Loom.Owned.set
+attribute [inline] Loom.Owned.end

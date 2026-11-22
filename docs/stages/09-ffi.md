@@ -113,7 +113,14 @@ def finish (1 t : Tok) : IO Nat := do1
 * `class Monad1 m` has `bind1 : (1 x : m A) → (1 f : A → m B) → m B`, and **`do1`** is
   `do` notation over it (`x ← e;`, `e;`, `let x := e;`). `do` stays on `Monad.bind`,
   whose continuation is unrestricted: the same block written with `do` is rejected
-  when a later step uses a linear variable. Bound results are unrestricted in both.
+  when a later step uses a linear variable. With `←` the bound result is unrestricted.
+* **`IO1 A` and `⇐`.** `IO1 A` (`lib/IO.wiz`) is the direct-style counterpart for an
+  action whose result is used once: `(1 w : World) → (1 _ : A) × World`. `do1` also
+  accepts `x ⇐ e;` and `(x, y) ⇐ e;`, which run an `IO1` action through `IO1.bindIO`
+  and bind its result at quantity 1, so a linear value (a handle's token, say) is
+  threaded through straight-line code; `IO1.bind` and `IO1.bindIO` are linear in the
+  action and in the continuation. The `conc` group's `IO1` case pins both forms, the
+  leak that drops the token, and the owned-handle uses in `lib/Handle.wiz`.
 * **An action's result is split, never projected.** `x w : A × World` holds the next
   world as its second component, so it is taken apart with `let 1 (a, w') := x w; …`
   (as `IO.bind` and `IO.then1` do). `(x w).1` would run the action and drop the world
@@ -215,9 +222,11 @@ extern "on_tick" onTick : Callback (Nat → IO Unit) → IO Unit
   included, but without a `main`: what that makes is the toolchain's business (with
   `--cc emcc --ldflags "--no-entry …"`, a Wasm module). A program with a `main` exports its
   functions too (C code linked with it, here through `--libs`, can call them).
-  Exported functions run on the caller's thread and stack (not `main`'s big stack);
-  a handle is used from the thread that got it (only 25a's shared objects cross
-  threads), and `wiz_live_objects()` counts the calling thread's objects.
+  Exported functions run on the caller's thread and stack (not `main`'s big stack).
+  A `File` or `Child` handle may be passed between threads (25a): the runtime
+  serialises the operations on one handle, so a close on one thread cannot free a
+  `FILE *` a read on another is using, and a second close is `EBADF`.
+  `wiz_live_objects()` counts the calling thread's objects.
 * The keys: an export is `export:cname:kinds:result:io` in the builtins (cached with
   them); a callback parameter is `k[<params>/<result>]` (`K` for `Callback`, `!` before
   a result in `IO`) in an `extern:` key (`RVal.ExternSig`). An export's code is an IR
@@ -278,23 +287,51 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   `exists`, `isDir`, `isFile`, `tempRoot` (`$TMPDIR` or `/tmp`), `createTempDir`
   (`mkdtemp`), and whole files: `readFile`, `writeFile`, `appendFile`, and `readBytes`,
   `writeBytes` for binary data (text stops at a NUL byte). `Path.join` puts a `/`
-  between two paths.
+  between two paths. A `readdir` failure part-way through a listing is that listing's
+  error (the errno `readdir` set, in the same `<path>: <message>` shape as the rest),
+  not the end of the directory: a short `listDir` result is never reported as success.
 * **File handles.** `foreign_type File` (closed by its finalizer, or `File.close`):
-  `File.open path mode` (`fopen` modes), `File.stdin`/`stdout`/`stderr`,
+  `File.open path mode` (`fopen` modes; the descriptor is close-on-exec, like `Fd.open`
+  and the pipes, so a child this program starts does not inherit it — only the std
+  streams pass to a child, when it is given them), `File.stdin`/`stdout`/`stderr`,
   `readLine` (`none` at the end), `readAll`, `write`, `flush`. `IO.ePrintln` prints
-  to stderr.
+  to stderr. The handle is an ω value; the operations on one handle are serialised by
+  a mutex, so it can be captured by a `Chan.fork` child: a close waits for an
+  in-flight read, and a read after close is `EBADF`, never a `FILE *` use after free
+  (25a).
 * **Processes.** `Process.spawn cmd args stdin stdout stderr` starts `cmd` (searched in
   `PATH`, `posix_spawnp`) with each stream `.inherit`, `.piped` or `.null`, giving a
   `Child` (a foreign type: its pipes close and a finished child is reaped when it
   goes). `Child.write`, `closeStdin`, `readStdout`/`readStderr` (to the end),
   `communicate input` (writes stdin while collecting stdout and stderr with `poll`, so
-  a child that fills one pipe doesn't deadlock), `wait` (an `ExitStatus`: `exited code`
-  or `signaled n`), `kill`, `pid`. `Process.output cmd args input` runs a command to the
-  end and returns its status and output; `Process.run` runs one with this program's
-  streams; `Process.exec` replaces the program; `Process.exit`, `Process.id`. The
-  runtime ignores `SIGPIPE` once a child has been started (a write to a closed pipe is
-  then an `EPIPE` error), and the pipes are close-on-exec, so other children don't keep
-  them open.
+  a child that fills one pipe doesn't deadlock; a non-empty `input` whose stdin is not a
+  pipe — `.inherit`/`.null`, taken, or already closed — is `EBADF`, not dropped), `wait`
+  (an `ExitStatus`: `exited code` or `signaled n`), `kill`, `pid`. `Process.output cmd args
+  input` runs a command to the end and returns its status and output; `Process.run` runs
+  one with this program's streams; `Process.exec` replaces the program; `Process.exit`,
+  `Process.id`. The runtime ignores `SIGPIPE` (a write to a closed pipe is then an
+  `EPIPE` error), asserts that ignore on every spawn, and restores it when `exec` fails
+  (the program being replaced starts with the default action, but a failed `exec` must
+  not leave this program able to be killed by a broken pipe); the pipes and the
+  `File`/`Fd` handles are close-on-exec, so other children don't keep them open. A
+  `Child` can be used from two threads (25a): each pipe and the wait status have their
+  own lock, so a second `closeStdin` is `EBADF` (no second `close(2)`), two `wait`s
+  return the same status, and `kill` works while a `wait` or a read blocks.
+* **Allocation failure.** The OS-surface natives take the runtime's out-of-memory exit
+  (`wiz: out of memory`, code 3) instead of dereferencing NULL, and the readers that
+  have an error channel (`FS.readFile`, `File.readAll`) report `ENOMEM`
+  as an `EIO` error (`read: Cannot allocate memory`).
+* **`IO.writeFile`.** `lib/Std.wiz`'s `IO.writeFile path text : IO Unit` writes the text
+  as UTF-8 up to its first NUL (`FS.writeBytes` is for binary data). It has no error
+  channel, so `fopen`, a short write or the final flush failing prints
+  `wiz: <path>: <message>` on standard error and exits 1: a bad path or a full disk is
+  not reported as success.
+* **`IO.readFile`.** `lib/IO.wiz`'s `IO.readFile path : IO String` reads the whole file
+  as text. A path that does not exist reads as empty text: the library asks "is there a
+  file here?" with a read (the module loader's candidate paths), so absence is an
+  answer. Any other failure (a directory, no permission, a read error, out of memory)
+  prints `wiz: <path>: <message>` on standard error and exits 1, as `IO.writeFile` does:
+  it is not the empty text. `FS.readFile` is the variant with an `EIO` error channel.
 * `#eval` and `#run` can't do any of this (they are pure and can't call C): there are
   no models for system calls, since a model of the file system or of processes would
   give answers the real program wouldn't. The pure helpers (`Path.join`,
@@ -302,7 +339,14 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
 
 Tests: the `sys` group (spawning `echo`, a pipe through `cat`, exit codes and spawn
 errors, the environment, a temporary directory's life: files, links, stat, listing,
-removal, handles), on both backends.
+removal, handles), on both backends. The runtime/FFI review's cases pin the boundary
+rules: after a failed `Process.exec` a write to a dead child's stdin is `EPIPE` and the
+program survives; a `File` handle is not inherited by a child (it does not see it in
+`/proc/self/fd`); `communicate` with `input` but no stdin pipe is `EBADF`; an
+allocation failure under a capped address space makes `File.readAll` an `EIO` error,
+not a `SIGSEGV`; `IO.writeFile` writes the text up to a NUL and exits 1 on a failure; a
+`readdir` error is the listing's error; `Process.spawnOwned` + `Child.releaseOwned`
+drains 200 KB of piped output without deadlocking.
 
 Binary data on handles, descriptors with time limits, spawn options and serial ports
 came later: 9k.
@@ -365,9 +409,12 @@ c_struct "struct pair" Pair where     -- no header: the C definition is generate
 | `const void *buf, size_t n`  | one `Bytes` argument (the pointer and the length come from the buffer; only when the length parameter right after is named `n`, `len`, `nbytes` or `length`, with or without `__`) |
 | `char *buf, size_t n`, `unsigned char *`, `signed char *`, `uint8_t *` | one `Bytes` argument, by the same rule (a `char *` **with** a length is a buffer; without one it is the NUL-terminated `String`) |
 
-`const char *` without a length parameter stays `String`; other pointers (`int *`,
-`void *`, output buffers) are still skipped. The C subset parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct
-bodies, array lengths, typedef names of structs and parameter names for this.
+`const char *` without a length parameter stays `String`; a NULL one (a C header
+carries no nullability, and `strchr`, `strstr` and `getenv` return NULL on a miss) is
+read as the empty `String`, as a struct's `char *` field and `Sys.Env.getRaw` already
+do; other pointers (`int *`, `void *`, output buffers) are still skipped. The C subset
+parser (`FFI/CParse.lean`, `parseHeaderFull`) reads struct bodies, array lengths,
+typedef names of structs and parameter names for this.
 
 Opt-outs:
 
@@ -420,7 +467,7 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
 * **Bytes** also got `slice b start len`, `take`, `drop`, `append` (in place when the
   first is unique), `eq`, `isEmpty`, `at : Bytes → Nat → Option Nat` (`get` past the end
   is 0), `ofList`/`toList` (`List Nat`, each mod 256), `singleton`, `range n` (0 … n-1)
-  and `show` (`[1, 2, 255]`). A byte is a `Nat`; `import WordBytes` adds
+  and `show` (`[1, 2, 255]`). A byte is a `Nat`; `import Data.WordBytes` adds
   `Bytes.ofU8s`/`toU8s` (`List U8`, lib/Word.wiz), kept out of IO and Sys because
   `Hdl.Core` users define their own `U8`.
 * **Bytes on a `File`** (stdio, buffered, so they mix with `readLine`):
@@ -434,7 +481,11 @@ before it changed), and a new module `lib/Serial.wiz` with its C shim `lib/seria
   `create`, `truncate`, `append`, `exclusive`, `noControllingTty`, `nonBlockingOpen`;
   `OpenFlags.none`, `.createNew`, `.device`), `Fd.stdin`/`stdout`/`stderr`, `Fd.pipe :
   EIO (Fd × Fd)`, `Child.takePipe c i` (a child's pipe as an `Fd`), `Fd.close`,
-  `Fd.seek`, and:
+  `Fd.adopt n` (take over a number a C shim made; a `Nat` above `INT_MAX` is not a
+  descriptor — the runtime would narrow `4294967297` to 1, stdout — so it is rejected
+  with `EINVAL` and the handle is already closed: every operation on it is "Bad file
+  descriptor". Adopting 0, 1 or 2 takes over a standard stream, and adopting one number
+  twice gives two owners that both close it), `Fd.seek`, and:
 
   | read | result |
   |---|---|

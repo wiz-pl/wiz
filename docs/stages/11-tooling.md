@@ -53,15 +53,17 @@ region is a miss, and the next run rewrites it. The command loop (keys, imports,
 still parses every command and only takes the effects from the region, so the result is
 the same as the text path's. The artifact holds only `Effect`s, which have no closures, so
 the loader applies them to the live state (`Effect.apply`): `loader`, `trustedModule`,
-`pp.run` and the `Budget` stay live. `--region-stats` (a `wiz` flag) prints what came from
-a region.
+`pp.run` and the `Budget` stay live. `--region-stats` prints what came from a region: in
+`wiz` once at the end, in `grail` as one line per job.
 
-`grail` takes the same flag, as `--region-cache` or as the `region-cache` setting of
-`grail.wiz`/`grail.local.wiz` (`Toolchain.regionCache`). It is part of the toolchain record,
-so `grail config` shows it and `Toolchain.toFlags` passes it to every job: a job's
+`grail` takes the same flags, as `--region-cache`/`--region-stats` or as the
+`region-cache`/`region-stats` settings of `grail.wiz`/`grail.local.wiz`
+(`Toolchain.regionCache`, `Toolchain.regionStats`). They are part of the toolchain record,
+so `grail config` shows them and `Toolchain.toFlags` passes them to every job: a job's
 in-process elaboration reads and writes regions in the same layers as its `.wizc` entries,
 and a warm `grail build --region-cache` takes the package modules' effects from `.wizr`
-instead of decoding the text.
+instead of decoding the text. A job with `--region-stats` prints its own counters (zero
+when `--region-cache` is off, or when the job does not elaborate).
 
 **Regions and layers together.** Regions live in the same directory layers as the text
 entries: a lookup tries the write cache first, then the read-only caches in order (so a
@@ -110,6 +112,7 @@ The layout is one manifest per module (the note's P2) plus a per-layer generatio
 ```
 <cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
 <cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/roots/<hash path>.rootp                             -- a root file's last manifest
 <cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
 ```
 
@@ -132,13 +135,22 @@ A module manifest lists its `.wizc` entries and its `.wizr` region with `key`, `
 `module`, `binary` (`binaryId`), `toolchain` (SHA-256 of the executable), `toolchain-tag`,
 `target-tag`, `rig`, `prev` (the generation base an extended manifest started from) and
 `valid-until`. Its `root` is an RFC 6962-style Merkle root over a metadata leaf and the
-entries, so editing `prev`/`valid-until` breaks the root too. `manifest.sexpr` records the
+entries, so editing `prev`/`valid-until` breaks the root too. A **root file's** manifest
+is keyed by its text as well as its headers (`wiz-cache/root-manifest-v1`), so two files
+that differ only in their text do not share one: sharing it made that manifest grow with
+every root file checked (12.7 MB in one cache here), rewrote it per root miss and lost a
+concurrent writer's entries, which made a fresh file miss on every run.
+`manifest.sexpr` records the
 generation number, the previous root, the optional expiry and one record per module (fast
 key, SHA-256 key, name, file, digest), with its own root. A write-cache index is a
-**snapshot** of `manifest.d` — its generation is the module count and its `prev` is empty —
-because the number of writing processes (and `-j`) is not an input; a manifest that is
-extended keeps the base it started from rather than chaining to an intermediate partial
-write. Only the write cache is ever written; a
+**snapshot** of the layer's manifests, written by `wiz cache manifest` (and, for a
+read-only layer, sealed by the package) — not by an ordinary run: rebuilding it means
+reading and re-validating every manifest in the layer, which is O(cache) (about a minute
+on a shared cache of thousands of manifests), and nothing a run does reads its module
+list (only its expiry, which a run never changes). Its generation is the module count and
+its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
+manifest that is extended keeps the base it started from rather than chaining to an
+intermediate partial write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
 still checked first: a corrupt region never reaches the type-erased reader even when no
 manifest exists.
@@ -278,9 +290,10 @@ The pane waits for the server, then follows the editor's cursor. Without an edit
 `infoview/test.sh` (in the `infoview` test group) runs the terminal infoview against
 `infoview/stub_server.py` (canned goals; as text and in a pseudo-terminal) and against
 the real `wiz lsp --infoview`, with `infoview/editor_stub.py` as the editor.
-`web/test.sh` (needs nix: Emscripten, Chromium; not in CI) runs the Wasm module under
+`web/test.sh` (needs nix: Emscripten, Chromium) runs the Wasm module under
 Node (against the stub), then the page in headless Chromium over the DevTools protocol,
-against the real `wiz lsp --ws`.
+against the real `wiz lsp --ws`. The browser-free half (`WIZ_WEB_NO_BROWSER=1 sh web/test.sh`) is CI's `web` job, with
+`web/framework/test.sh` beside it; the Chromium half stays local.
 
 ### 11o: the infoview over a WebSocket
 
@@ -289,7 +302,8 @@ A browser can't open a Unix socket, so `wiz lsp --ws PORT` also listens on a Web
 `--no-stdio` there is no editor on stdin). `Wiz/WebSocket.lean` is the protocol: the
 HTTP upgrade (the answer proves the server understood it: base64 of the SHA-1 of the
 client's key and a fixed GUID, both written here), an `Origin` check (any web page may
-open a WebSocket to `127.0.0.1`, so only local pages are let in), and frames (a length
+open a WebSocket to `127.0.0.1`, so only local pages are let in; an opaque `null` origin
+— what a sandboxed iframe or a `data:`/`file:` page sends — is refused), and frames (a length
 in 7, 16 or 64 bits; the client's payload XORed with a mask; fragments; ping and close).
 One JSON-RPC message travels per text frame. A WebSocket client is an infoview (it is
 told where the cursor is and pulls goals) and may also edit documents of its own, so the
@@ -298,6 +312,24 @@ listen/accept/connect, with connections again as plain Lean handles; the server 
 (`serveWith`) handles messages from every connection in order, as before. Protocol §8.2;
 tested in-process (the `lsp-server` group: frames of each length class, the handshake's
 RFC example, foreign origins refused, an editor on a socket pair and two pages).
+
+**The token (#430).** The `Origin` check stops other web sites, but a local program
+simply sends no `Origin`, and a WebSocket client may open documents and have them
+elaborated (imports, `import_c` headers, an SMT solver) with the user's privileges. So
+the upgrade must also present the server's token, as `?token=T` in the request target
+(all a browser can add) or as `Authorization: Bearer T`; anything else gets `401` before
+any `101`, and the comparison takes the same time wherever the first difference is
+(`WebSocket.constantTimeEq`). The token is 128 random bits, fresh for every launch and
+printed on stderr with the web infoview's URL; `--token-file FILE` reads it from FILE
+(creating FILE, mode 0600, with a fresh one when it does not exist), and `--ws-insecure`
+turns the check off, for the loopback address only and with a warning.
+`wiz/browserInfoview` returns the token and puts it in the page's URL; the pages
+(`web/infoview.js`, the playground and `wiz doc --serve`'s panel through
+`web/lsp-client.js`) pass their own `?token=` on to the socket and never display it. The
+infoview's files are served without a token (they are the toolchain's own). Tests: the
+`lsp-server` group (no token, a wrong, empty or longer token, a wrong bearer: `401`; the
+query and the bearer: `101`; a token in an asset's URL changes nothing), the `nvim` group
+(the browser infoview's URL and handshake), and `web/playground_lsp_test.mjs`.
 
 ## 11p: a Neovim plugin
 
@@ -403,6 +435,22 @@ def four : Nat := twice two
   sections under the goals, and `gd` on an item jumps to it. `#check`, `#eval`,
   `#reduce`, `#run`, `inductive` and `structure` now keep their info trees, so hovers
   work inside them too.
+* **One-shot requests** (#435), for clients without an interactive table (no session, no
+  ref): `wiz/typeAt {textDocument, position}` answers the innermost elaborated term there
+  (an application, a `match`, a literal, a hole, or an identifier) as `{term, type,
+  range, kind, name?}`: the source text, the type it was checked against (an
+  identifier's own type), the range, and `const`/`local`/`term`/`hole`; it is the place
+  `wiz/plainTermGoal` picks, without the hypotheses. The info tree records no core term
+  per range, so `term` is what the source says there. `wiz/coreTerm {textDocument, name}`
+  (or `position`: the global under the cursor, else the declaration of the command
+  there) answers `{name, type, value, kind, levelParams, location, native?, axioms,
+  raw?}`: the declaration as the kernel has it, printed as core terms (macros and
+  notation expanded; `notation: true` prints with notation, as hovers do), `kind`
+  `definition`, `opaque` (no value to unfold: an axiom, a constructor, an `extern`; the
+  value is `null` rather than unfolded) or `partial`, the native implementation if
+  there is one, `#print axioms`'s list (`axioms: false` skips it), and with `raw: true`
+  the core syntax trees. Both are in `infoviewMethods`, so infoviews on the Unix socket
+  may ask them. Tests: `lsp-server`, "#435: wiz/typeAt and wiz/coreTerm".
 
 Not covered: hovers inside tactic arguments (a tactic gets its syntax without ranges),
 a procedural macro's output (it has no ranges of the user's), the arguments of
@@ -411,8 +459,11 @@ Tested in the `lsp-server` group and by wiz.nvim's tests (`nvim`).
 
 ## 11r: printing notation (unexpanders)
 
-Terms print as the notation they were written with: `#check`, `#reduce`, `#eval`,
-messages (`type mismatch`, kernel errors), hovers and the infoview's goals.
+`#check`, messages (`type mismatch`, kernel errors), hovers and the infoview's goals
+print terms as the notation they were written with. Data values from `#eval`/`#reduce`
+are constructor payloads, not applications, so they print as before (below;
+`Wiz/Core/Pretty.lean` prints `.con` without consulting an unexpander, and the `tour`
+case `01-basics` pins the list output).
 
 ```wiz
 import Logic
@@ -479,7 +530,7 @@ Like Lean's doc-gen4: a static site from a set of modules. Design notes:
 `wiz-notes/scroll.md`.
 
     wiz doc [MODULE|FILE|DIR …] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
-            [--reference DIR [--check]]
+            [--serve [--port N] [--lsp PORT]] [--reference DIR [--check]] [--jobs N] [-v] [-q]
     grail doc [TARGET…] [-o OUT] [--source-url URL] [--title T]
 
 `--lib` documents the toolchain's library; a directory, every module under it (it is a
@@ -518,6 +569,25 @@ package's `lib` targets with its module roots (dependencies included), into
   (`/` focuses the box): names first, then doc comments, then signatures, and a hit
   says which matched. The pages are complete HTML: they read without JS, and the
   search works from `file://`.
+* **What is documented.** Every command that declares a name, in source order: `def`
+  (with equations), `partial def`, `axiom`, `extern`, `foreign_type`, `glue`, `c_struct`,
+  `structure`, `class`, `inductive`, `coinductive`, `sealed inductive` and `instance`
+  (named or anonymous: the entry is the instance's name, and its signature is the class
+  applied to its arguments). A *user* command — `syntax … : command` with
+  `attribute [macro command.k] f`, as `lib/Feral.wiz` does — is documented with its own
+  kind, so a project can add `theorem`, `lemma` or `abbrev` as command macros and they
+  appear as such (`lemma` is shown as `theorem`). An entry's signature is the
+  declaration's elaborated type — the statement, for a theorem-like command — never its
+  body. Left out: private declarations and private constructors or fields, the
+  elaborator's auxiliary names (`T.rec`, `T.desc`, `T.casesOn`, …), instances a
+  `deriving` clause makes (they are still listed under their class and type) and commands
+  that declare nothing (`#check`, `#eval`, `syntax`, `notation`, `attribute`, `export`,
+  `link_c`, …); Wiz has no `example` command. Wiz also has no `namespace` command, so a
+  name written `T.f` is a top-level entry whose name, anchor and API row are the fully
+  qualified name (`#T.f`); grouping such names under `T` would need a grouping concept
+  the pages and the manual do not have, and source order is easier to follow. The shown
+  kind is the command's own, with `defEqns` as `def`, `foreignType` as `foreign type`,
+  `cStruct` as `c struct` and `lemma` as `theorem`.
 * **The reference manual** (`Wiz/Doc/Reference.lean`, `--reference DIR`). The pages are
   for browsing; the manual is for looking a name up. `DIR/index.md` has a contents list,
   the **notation table**, then one section per module and one subsection per declaration
@@ -583,16 +653,39 @@ package's `lib` targets with its module roots (dependencies included), into
   future performance site shares this deployment under `/perf/` rather than deploying
   separately. `docs/building.md`, "Documentation site", has the URL layout, the
   one-time Pages setting and the single-site rule.
+* **Cost, `--jobs` and the progress log.** The site needs each module's declarations as
+  that module's own file sees them, so `run` elaborates `import M` once per module
+  (`Wiz/Doc/Build.lean`). A warm cache replays M's import closure from `~/.cache/wiz`
+  (median closure: 8 modules), so the work is one elaboration per module, not one for the
+  library; the pages, the API index and the reference then pretty-print every declaration
+  and run `Wiz.infer` on every subterm of every signature (`LSP.subtermType:532`,
+  `Site.lean:130`), once per declaration. `--jobs N` elaborates and renders N modules at
+  once; the default is 1, and `--jobs 0` (or `--jobs auto`) takes the CPUs this process
+  may run on (`Cpus_allowed_list`, so a cgroup or `taskset` is respected), capped at 8
+  because each job holds a whole elaboration state. The pages, `api.html`, `api.json` and
+  `search.js` are assembled in the modules' order, whichever job finishes first, so `OUT`
+  is byte-for-byte the same at every N; only the log's line order follows completion.
+  `-v` writes that log to stderr: the discovery pass (a line per module, then a phase
+  total), each module's elaboration and rendering time and its cache hits, every 25th
+  declaration, the phase boundaries, and a summary with the wall time and peak RSS. `-vv`
+  lists every declaration; `-q` is the quiet default. Stdout and the pages are unchanged
+  in every mode.
 * **Tests**: the group `doc` (`Tests/Doc.lean`): doc comments stored and replayed by the
   cache; Markdown; `wiz doc` on a small package with doc comments (kinds, docs, source
-  links, instances, the index); every cross-link resolves; every declaration is in the
+  links, instances, the index); a fixture with one declaration of every command kind
+  (`Kinds/All.wiz`, including a user-defined `theorem`/`lemma`/`abbrev` and a private
+  definition), checking the kind and the signature (the type or statement, not the body)
+  on the page, in `api.html`/`api.json`, in the search index and in the reference manual,
+  that no non-declaring command makes an entry, and that two runs make the same bytes;
+  every cross-link resolves; every declaration is in the
   search index, with its doc summary and signature; the API index and `api.json` list
   every module and declaration; the reference manual and its `--check`; the pages without
   JS; `grail doc`; and the page model of the Wasm module
   run natively on a page's JSON (hover, click, keys); and that the core library is
   documented (every public declaration of `Prelude`, `Std`, `Vec` and `Word` has a doc
   comment, and each has a module doc). The search box's ranking and result rendering
-  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh`.
+  have a browser-free test, `web/scroll-search_test.mjs`, run by `web/test.sh` and by
+  CI's `web` job.
 * **The library's documentation.** Every module in `lib/` has a `/-! … -/` module doc
   (what it is for, its main definitions, an example) and a `/-- … -/` doc comment on each
   public declaration; `--` comments are left for implementation notes. `wiz doc --lib -o
@@ -734,10 +827,23 @@ Neovim shows them as `@lsp.type.keyword` (linked to `@keyword`) without configur
   that spells the whole name, in all those documents; it refuses a declaration of the
   toolchain's library and a new name that isn't one. A use through generalised field
   notation (`p.norm` for `Point.norm`) is not edited.
+* **From a declaration's own name** (#434). The name in a `def`, `inductive`,
+  `structure` or `class` header, a constructor (`| red`) and a structure field (`px :
+  Nat`) are not identifiers of the info tree, so the cursor there used to find nothing.
+  Now `targetAt` falls back to the command's syntax (parsed again, `declIdents`): the
+  first identifier of each declaring node is the name it declares, and the cursor on it
+  is the same target as a use, so references, highlights and rename give the same answer
+  from either place. The declaration site in the results is that identifier (before, the
+  name's first occurrence in the command's text, which missed constructors and fields).
+  A constructor or field is written by its last component (`red` for `Col.red`): rename
+  edits it there with the new name's last component when the new name keeps the prefix
+  (`Col.crimson`), and leaves it when it doesn't (the declaration can't say `Other.x`).
+  Tests: `lsp-server`, "#434: references, highlights and rename from a declaration's own
+  name".
 
 ## 11aa: `wiz fmt`, a formatter
 
-    wiz fmt [FILE|-] [--check] [--width N] [--explain]
+    wiz fmt [FILE|-] [--check] [--width N] [--explain] [--self-test]
 
 Reprints a file from its syntax tree: each command is parsed with the tables that are in
 effect at it (imported `syntax` and `notation` included), printed from the tree with the
@@ -746,7 +852,9 @@ spacing like `" + "` and `noWs` are honoured), and laid out by a small pretty-pr
 document (`Wiz/Format.lean`: `group`/`line`/`nest`, strictly pretty). `FILE` alone prints
 to stdout, `-` (the default) reads stdin, `--check` changes nothing and exits 1 when the
 file differs, `--width` is the column budget (default 100), `--explain` prints what a
-refused command would have become.
+refused command would have become, and `--self-test` runs eight built-in fixtures
+(`let` without `;`, `calc`, a tactic with `[simp]`, attributes, patterns, structures and
+implicit binders, a string with comment markers, comments in odd places).
 
 * **Why reprint, not rewrite whitespace.** The parser is the single source of truth for
   the tokens and for precedence, so a reprint cannot disagree with it about `a + b` or
@@ -768,7 +876,9 @@ refused command would have become.
   a line — `withPosition` in `term.let` stays in force for the terms after it, so a
   `let` in the middle of a line would forbid its own body's continuation lines to its
   left. That is why `def f := let …` breaks after `:=` while `def f := match …` may stay
-  on one line.
+  on one line. A `calc`'s steps line up under its first relation (`Doc.atCol`), and a
+  trailing comment on a token stays on that token's line while the break it ends takes
+  the indentation of the construct that follows (no blank line is left).
 * **What is refused.** A kind with no grammar in the tables, something between tokens
   that is not a comment, or a reprint that does not parse back to the same tree. The
   check is what makes a prototype safe: across the library files tested (Prelude, Logic,
@@ -776,7 +886,10 @@ refused command would have become.
   Trace, Text, Sat, Hdl/Sim and two examples) the formatter changes no command it
   accepts, is idempotent on every file (formatting twice gives the same text), and
   refuses one command (`Fe.specLin` in `lib/Feral.wiz`: a `match` inside a `let` value,
-  see `wiz-notes/wiz-fmt.md`). 13 test cases in the `format` group.
+  see `wiz-notes/wiz-fmt.md`). The `format` group has the layout and comment cases
+  (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
+  fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
+  idempotent reprint with no refused command. Both groups are in CI's `core` shard.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
   continuation lines; the self-hosted frontend has no formatter; and the LSP does not
@@ -785,10 +898,25 @@ refused command would have become.
 ## 11ab: a static playground
 
 `web/playground.html`: a Wiz playground that runs entirely in the page. A text area
-with a small program, a **Run** button (or Ctrl/⌘+Enter), one output line per command,
-and a status line (`loading` / `running` / `done in N ms`, with error lines in red).
-No server, no editor, no install: `web/build-playground.sh` compiles the program the
-page runs.
+with a small program, an **Examples** menu, a **Run** button (or Ctrl/⌘+Enter), one
+output line per command, and a status line (`loading` / `running` / `done in N ms`,
+with error lines in red). No server, no editor, no install: `web/build-playground.sh`
+compiles the program the page runs.
+
+* **The page around the engine.** The Examples menu holds seven checked programs (basics,
+  arithmetic, inductive data, pattern matching, structures, lists, and a "Wiz in Y
+  minutes" tour). **Save .wiz**
+  downloads the program as `playground.wiz`, adding `import Prelude` when the editor has
+  none so the file checks on its own; **Share link** puts the program in the URL
+  fragment and copies the URL; **Reset** restores the default program; **Clear** empties
+  the output pane. The draft is also kept in `localStorage`, so a reload restores it.
+  The fragment is `#preset=basics` when the text is exactly an example and otherwise
+  `#code=<base64url of the UTF-8 text>` — one URL-safe parameter for any program,
+  including Unicode and `&`/`#`/`%`. The address bar follows edits after a short pause,
+  `Ctrl/⌘+S` saves, and the layout stacks the panes and wraps the controls on narrow
+  screens (the textarea is 16px on mobile, so iOS does not zoom on focus). Examples run
+  when selected; a restored custom program waits for **Run**, so reloading a
+  non-terminating draft cannot block the tab before it can be edited.
 
 * **The engine.** The self-hosted frontend and kernel (`selfhost/Lex.wiz`,
   `Parse.wiz`, `Kernel.wiz`, `Frontend.wiz`) are Wiz source, so the same pipeline as the
@@ -806,9 +934,10 @@ page runs.
   types, structures, `#check`, `#reduce`/`#eval`, and its error messages. `import` lines
   are accepted but only Prelude is available (there is no module loader in the page);
   without any import the page prepends `import Prelude`, so a bare `def two : Nat := 1 + 1`
-  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/playground-values.js`
-  recognises the shapes of Nat, Bool and list values and shows `42`, `true`, `[1, 2]`,
-  keeping the raw form in the line's tooltip. Anything else is shown as it comes.
+  works. `#eval` prints the kernel's normal form (`con((#1, …))`); `web/framework/values.mjs`
+  (the test oracle; the grammar itself is `lib/Web/Playground.wiz`) recognises the shapes of
+  Nat, Bool and list values and shows `42`, `true`, `[1, 2]`, keeping the raw form in the
+  line's tooltip. Anything else is shown as it comes.
 * **Build and serve** (from a checkout after `lake build wiz`):
 
       web/build-playground.sh web/out             # → web/out/wiz-playground.mjs (+ the page)
@@ -824,10 +953,15 @@ page runs.
   without nix. The script writes `web/out/playground.wiz` (the assembled engine source)
   beside the module. The page needs HTTP (an ES module and a `.wasm` fetch; `file://`
   will not do). `web/build.sh` and its infoview are unchanged and can share `web/out`.
-* **Tests.** `node web/playground_test.mjs web/out` loads the module under Node, runs a
-  definition, a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an
-  error. `web/test.sh` now builds both Wasm modules and runs this test beside the
-  infoview's Node and Chromium tests.
+* **Tests.** `lake test -- '=loom'` checks the state format's cases (every example id, the
+  canonical fragment for an example, `#code` round trips for ASCII, Unicode and control
+  characters, malformed fragments and drafts) against `lib/Web/Draft.wiz`.
+  `node web/playground_test.mjs web/out` loads the module under Node, runs a definition,
+  a `#check`, `#eval twice 21` (the value renders as `42`), a Bool and an error, then
+  runs **every example** through the engine and checks the list example renders
+  `[2, 4, 6]`. `web/test.sh` now builds both Wasm modules and runs both playground
+  tests beside the infoview's Node and Chromium tests; CI's `web` job runs the
+  browser-free part.
 * **Goals, optionally.** With `?lsp=ws://host:port` the page is also a language client:
   `web/lsp-client.js` speaks JSON-RPC 2.0 over a WebSocket (one message per text frame,
   no `Content-Length`), and `web/playground-lsp.js` shows the tactic state in a Goals
@@ -839,10 +973,21 @@ page runs.
   server must serve — methods, UTF-16 positions, fallbacks and the optional fields that
   make highlighting precise — is [playground-lsp.md](../playground-lsp.md). The mock
   server (`web/mock_lsp_server.mjs`) and `node web/playground_lsp_test.mjs` test it with
-  no Wiz build.
+  no Wiz build. The editor itself is a plain textarea plus overlays with no dependency:
+  diagnostics are underlined by `web/squiggles.js`, the caret is re-asked on selection
+  changes, and `web/completions.js` shows `textDocument/completion` at Ctrl-Space or while
+  typing. The page itself is one app in `lib/Web/Loom.wiz`
+  (`web/playground-ui.wiz`, built as its own small Wasm module): `web/playground.html`
+  points `web/playground.js` at the body, and `web/framework/mount.js` mounts the runtime
+  there. There is no static page.
 * **Limits.** The evaluator has no fuel: a non-terminating `#eval` blocks the tab (the
-  call into Wasm is synchronous). Only the embedded Prelude exists, not the library's
-  modules or `IO`/`#run`; the page is a checker, not a REPL with a filesystem.
+  call into Wasm is synchronous), and a very large normal form (a `Nat` in the thousands)
+  can exhaust the Wasm stack, so the examples stay small. Only the embedded Prelude
+  exists, not the library's modules or `IO`/`#run`; the page is a checker, not a REPL
+  with a filesystem. Shared programs live in the URL, so a very large program can exceed
+  a browser's URL length; the clipboard needs a secure context (the page falls back to
+  the address bar and a prompt), and `localStorage` can be unavailable in a private
+  window (the page then simply does not remember the draft).
 * **Why a second module.** The infoview's exports (`wiz_web_init`/`wiz_web_step`) are a
   language-server client: they can ask a server for goals and diagnostics but cannot
   evaluate a term. The playground's evaluator is the self-hosted checker, which is Wiz
@@ -913,3 +1058,52 @@ $ wiz test-driver =rig --jobs 4
 …
 8 passed, 0 failed
 ```
+## 11ae: build attestations
+
+`wiz build --attest [FILE]` (default `OUT.attest.json`; `Wiz/Attest.lean`) writes what
+the build did as an **in-toto Statement** (`https://in-toto.io/Statement/v1`) with a
+project predicate, `https://wiz-lang.org/attestation/wiz-build/v1`:
+
+* `subject`: the output binary's name and SHA-256;
+* `source`: the root file, its SHA-256, and `git.commit`/`git.dirty` when the invocation
+  directory is a Git repository (tracked modifications only; untracked build outputs do
+  not count);
+* `inputs`: every input with its SHA-256 — the root file (`source`), each imported module
+  (`module`, named by module name, not path, so the record is portable), and each
+  `link_c` file (`link-c`) — plus `inputsRoot`, a SHA-256 over the canonical manifest
+  lines; `headers` lists `import_c` names (their preprocessed text is the C compiler's,
+  so it is not hashed);
+* `toolchain`: the running `wiz` (version, optional release revision, SHA-256 of its
+  bytes) and `cc`/`llc` (resolved path, SHA-256, `--version` line);
+* `flags`: backend, output kind, `cc`, cflags, ldflags, libs, GMP, `llc`, the GC flags,
+  split count, and the `-I` roots;
+* `output` (kind, name, SHA-256) and `byproducts` (the generated `.c`, a `.h`, `.ll`, and
+  a split build's units, each hashed);
+* `environment`: the Lean platform target only — no environment variables, no
+  timestamps, no hostname, so an identical build serialises identically.
+
+The statement is the `payload` (base64) of a DSSE-style envelope with
+`payloadType: application/vnd.in-toto+json` and **`signatures: []`**: this is provenance,
+not authenticity. `wiz verify [--attest FILE] ARTIFACT` (default
+`ARTIFACT.attest.json`) checks the statement and predicate types, the subject and
+`predicate.output` digests against the artifact, re-hashes the recorded inputs (modules
+through the toolchain's roots, so pass the same `-I` flags), recomputes `inputsRoot`, and
+re-checks byproducts that are still present. `--artifact-only` skips the inputs (a
+released artifact without its source tree). Exit status is 0 on a match, 1 on a
+mismatch. A non-empty `signatures` array is refused: signature verification is not
+implemented, and an unsigned verifier must not silently accept a "signed" claim.
+
+Trust model: the statement is a claim by the builder, not proof that the builder told
+the truth. It proves integrity of the artifact relative to the statement and that the
+named inputs still hash as recorded; it does **not** prove the source was reviewed, that
+the toolchain was honest, or that the output is reproducible. Anyone can edit an unsigned
+statement and its hashes together. Signing, a reproducible rebuild by an independent
+builder, or a TEE-held key are the missing steps
+(`wiz-notes/build-attest.md`, `wiz-notes/attested-enclave-builds.md`). The attestation is
+independent of the elaboration cache: it does not claim a cache hit was a source build
+and records no cache manifest.
+
+`grail build --attest DIR` writes one statement per built executable to
+`DIR/NAME.attest.json`, with the package's module roots (verify with
+`wiz verify -I PKG -I PKG/src …`). Its statements have no `byproducts` (the generated C
+stays in `.grail/build/<key>/`, whose key the CLI does not expose).

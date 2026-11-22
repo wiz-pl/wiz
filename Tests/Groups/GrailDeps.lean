@@ -50,18 +50,46 @@ def buildDeps (dir : System.FilePath) (tc : Toolchain) : IO (Except String (Grai
 def readPkg (tc : Toolchain) (d : System.FilePath) : IO (Except String Grail.Package) := do
   pure ((← Grail.readConfig tc (← binId tc) "lib" d).map (·.1))
 
-/-- The checked-in local index fixture (`Tests/fixtures/grail-index`): one `index/`
+/-- The checked-in local index fixture (`Tests/fixtures/fate-index`): one `index/`
 directory of S-expressions, relative `source` paths and their archives. Hermetic: no git,
 no network, no generated tarballs. -/
 def indexFixture : IO System.FilePath := do
-  let p ← IO.FS.realPath "Tests/fixtures/grail-index"
+  let p ← IO.FS.realPath "Tests/fixtures/fate-index"
   unless ← (p / "index").isDir do
     throw (IO.userError s!"{p}: no index/ directory (run the tests from the repository root)")
   pure p
 
+/-- Build a package archive at runtime: a fresh `NAME-work/pkg/a.txt`, `prep` may add a
+link or a file, and `extra` are tar options placed after `-czf OUT` (e.g. `-P` and
+`--transform=…`). Returns the archive and its SHA-256. Hostile tarballs are built here,
+never stored in the repository. -/
+def buildArchive (root : System.FilePath) (name : String) (extra : List String := [])
+    (prep : System.FilePath → IO Unit := fun _ => pure ()) : IO (System.FilePath × String) := do
+  let work := root / s!"{name}-work"
+  IO.FS.createDirAll (work / "pkg")
+  IO.FS.writeFile (work / "pkg" / "a.txt") "ok\n"
+  prep work
+  let out := root / s!"{name}.tar.gz"
+  let _ ← runIn root "tar" (["-czf", out.toString] ++ extra ++ ["-C", work.toString, "pkg"])
+  let sha := ((← runIn root "sha256sum" [out.toString]).splitOn " ").head!
+  pure (out, sha)
+
+/-- `untar` refuses the archive built from `name`, the message names `needle`, and nothing
+was extracted. -/
+def checkEscapes (root : System.FilePath) (name needle : String) (extra : List String := [])
+    (prep : System.FilePath → IO Unit := fun _ => pure ()) : IO Unit := do
+  let (tar, _) ← buildArchive root name extra prep
+  let dest := root / s!"{name}-extract"
+  IO.FS.createDirAll dest
+  match ← Grail.Registry.untar tar dest with
+  | .error e => check ((e.splitOn needle).length > 1) s!"{name}: {e}"
+  | .ok () => throw (IO.userError s!"{name}: the archive was unpacked")
+  checkEq 0 (← dest.readDir).size
+
 def grailDepsGroup : Group where
   name := "grail-deps"
   exercise := "Stage 23h"
+  parallel := true
   cases := [
     { name := "a git dependency: grail update writes the lock, builds use it", run := fun _ => do
         let (bare, work) ← depRepo
@@ -282,7 +310,7 @@ def grailDepsGroup : Group where
           [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.0.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
            ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 1\n")]
         writeGreet "1.0.0" tar1.toString sha1
-        IO.FS.writeFile (idxWork / "registry.sexpr") "(registry (name \"test/grail-index\") (format 1))\n"
+        IO.FS.writeFile (idxWork / "registry.sexpr") "(registry (name \"test/fate-index\") (format 1))\n"
         let _ ← gitIn idxWork ["add", "."]
         let _ ← gitIn idxWork ["commit", "--quiet", "-m", "v1"]
         let _ ← runIn root "git" ["clone", "--quiet", "--bare", idxWork.toString, idxBare.toString]
@@ -533,7 +561,7 @@ def grailDepsGroup : Group where
         checkEq 0 (← run ["update", "--locked"])
         -- (R10) `update --locked` reads only the lock: a missing/unreachable index does not
         -- make it re-resolve (a new publication upstream must not fail CI)
-        checkEq 0 (← run ["update", "--locked", "--index", "/nonexistent/grail-index"])
+        checkEq 0 (← run ["update", "--locked", "--index", "/nonexistent/fate-index"])
         -- a cold archive cache: offline fetches nothing
         checkEq 1 (← run ["fetch", "--locked", "--offline"])
         check (!(← (dir / ".grail/packages/greet").pathExists)) "a cold offline fetch unpacked something"
@@ -658,7 +686,7 @@ def grailDepsGroup : Group where
         let cmds := String.ofList (List.replicate 64 'c')
         let lock : Grail.Lock :=
           { format := 3, toolchain := "0.1.0-dev", revision := "abcdef",
-            indexUrl := "https://example.org/grail-index", indexCommit := "123456",
+            indexUrl := "https://example.org/fate-index", indexCommit := "123456",
             git := [
               { name := "zeta", url := "https://example.org/z.git", rev := "v1", commit := "c1", content := "d1" },
               { name := "alpha", url := "https://example.org/a.git", rev := "main", commit := "c2", content := "d2" } ],
@@ -866,7 +894,78 @@ def grailDepsGroup : Group where
         | .ok _ => throw (IO.userError "a rewritten index history was accepted")
         match ← Grail.Registry.resolveLock cache url false (readPkg tc) dir pkg true with
         | .error e => throw (IO.userError s!"--allow-rewind still failed: {e}")
-        | .ok l => check (l.indexCommit != c2.indexCommit) "the rewrite did not change the index commit" }
+        | .ok l => check (l.indexCommit != c2.indexCommit) "the rewrite did not change the index commit" },
+    { name := "an archive member that escapes the extraction root is refused before extraction", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        checkEscapes (root := root) (name := "dotdot") (needle := "outside the extraction directory")
+          (extra := ["--transform=s|^pkg/a.txt$|pkg/../escaped.txt|"])
+        check (!(← (root / "escaped.txt").pathExists)) "a `..` member wrote outside the root"
+        -- an absolute member (tar stores it only with -P; the pre-scan must still refuse it)
+        let absTarget := root / "escaped-abs.txt"
+        checkEscapes (root := root) (name := "absolute") (needle := "outside the extraction directory")
+          (extra := ["-P", s!"--transform=s|^pkg/a.txt$|{absTarget}|"])
+        -- a symlink whose target leaves the tree, and a device node (type `c`)
+        checkEscapes (root := root) (name := "symlink") (needle := "not a regular file")
+          (prep := fun work => do
+            let _ ← runIn root "ln" ["-s", "../../../escaped.txt", (work / "pkg" / "link").toString]
+            pure ())
+        let rootDev ← IO.FS.createTempDir
+        let dev := rootDev / "device.tar.gz"
+        let _ ← runIn rootDev "tar" ["-czf", dev.toString, "-C", "/dev", "null"]
+        let dest := rootDev / "extract"
+        IO.FS.createDirAll dest
+        match ← Grail.Registry.untar dev dest with
+        | .error e => check ((e.splitOn "not a regular file").length > 1) e
+        | .ok () => throw (IO.userError "a device node was unpacked")
+        -- the control: a normal archive still unpacks, with its top directory stripped
+        let goodRoot ← IO.FS.createTempDir
+        let good := goodRoot / "good.tar.gz"
+        let work := goodRoot / "work"
+        IO.FS.createDirAll (work / "pkg")
+        IO.FS.writeFile (work / "pkg" / "a.txt") "ok\n"
+        let _ ← runIn goodRoot "tar" ["-czf", good.toString, "-C", work.toString, "pkg"]
+        let out := goodRoot / "extract"
+        IO.FS.createDirAll out
+        match ← Grail.Registry.untar good out with
+        | .error e => throw (IO.userError s!"a normal archive was refused: {e}")
+        | .ok () => checkEq "ok\n" (← IO.FS.readFile (out / "a.txt")) },
+    { name := "a hostile archive with the locked hash is still refused by fetch", run := fun _ => do
+        let root ← IO.FS.createTempDir
+        let (hostile, sha) ← buildArchive root "hostile"
+          ["--transform=s|^pkg/a.txt$|pkg/../escaped.txt|"]
+        let dir ← mkTree [("grail.wiz", "import Grail\ndef package : Package := Package.new \"app\"\n")]
+        let cache ← IO.FS.createTempDir
+        -- the hash is correct: the archive is exactly what the lock names, and the member
+        -- check is what refuses it. The hash stays the gate; the content is still untrusted.
+        let p : Grail.PkgLock := { name := "evil", version := "1.0.0", source := hostile.toString,
+                                   sha256 := sha, deps := [] }
+        match ← Grail.Registry.fetch cache dir { pkgs := [p] } with
+        | .error e => check ((e.splitOn "outside the extraction directory").length > 1) e
+        | .ok _ => throw (IO.userError "a hostile archive with the locked hash was unpacked")
+        check (!(← (dir / ".grail/packages/evil").pathExists)) "a hostile package reached .grail/packages"
+        check (!(← (Grail.Registry.storeDir cache sha).pathExists)) "a hostile package reached the shared store"
+        check (!(← (root / "escaped.txt").pathExists)) "a hostile archive wrote outside the extraction root" },
+    { name := "a download refuses an option-shaped URL and an empty transfer", run := fun _ => do
+        let url := "--nope://example.org/x"
+        let args := Grail.Registry.curlArgs url "/tmp/grail-download-test.tgz"
+        -- `--` ends curl's options, so a URL beginning with `-` is an address, not a flag
+        checkEq url args[args.size - 1]!
+        checkEq "--" args[args.size - 2]!
+        checkEq "/tmp/grail-download-test.tgz" args[args.size - 3]!
+        let dir ← IO.FS.createTempDir
+        let empty := dir / "empty.tgz"
+        IO.FS.writeFile empty ""
+        let dest := dir / "copy.tgz"
+        match ← Grail.Registry.download s!"file://{empty}" dest with
+        | .error e => check ((e.splitOn "empty").length > 1) e
+        | .ok () => throw (IO.userError "an empty download was accepted")
+        -- the curl path: the bad scheme is rejected as a URL, not parsed as a curl option
+        let dest2 := dir / "curl.tgz"
+        match ← Grail.Registry.download url dest2 with
+        | .error e =>
+          check ((e.splitOn "is unknown").length == 1) s!"the URL was parsed as a curl option: {e}"
+          check (!(← dest2.pathExists)) "a failed download left a partial file"
+        | .ok () => throw (IO.userError "an invalid URL was downloaded") }
   ]
 
 builtin_initialize registerGroup grailDepsGroup

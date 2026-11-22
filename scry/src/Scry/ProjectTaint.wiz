@@ -3,6 +3,8 @@ import Text
 import Functor
 import Scry.Project
 import Scry.ProjectCache
+import Scry.QuireFindings
+import Scry.Models
 import Scry.TaintCmd
 import Scry.Sarif
 import Scry.Certify
@@ -110,15 +112,19 @@ def Scry.Project.boundaries (p : Scry.Project) : List Scry.BoundaryFinding :=
 
 /-- Analyse the whole project: points-to, cross-TU summaries, rules, certificates,
 origins and per-unit boundary warnings. -/
-def Scry.analyzeProject (p : Scry.Project) (pack : Scry.RulePack) (cache : Scry.CacheStats) :
-    Scry.ProjectReport :=
-  let pr := Scry.analyze p.program pack;
+def Scry.analyzeProjectModels (models : Scry.ModelPack) (p : Scry.Project)
+    (pack : Scry.RulePack) (cache : Scry.CacheStats) : Scry.ProjectReport :=
+  let pr := Scry.analyzeModels models p.program pack;
   let findings := Scry.programFindings pr;
   let checks := List.map (fun f => Scry.findingChecked pr f) findings;
   let origins := p.origins;
   let boundaries := p.boundaries;
   let memory := Scry.memoryFindings origins pr.warnings;
   Scry.ProjectReport.mk p pack findings checks origins boundaries memory pr.pointsTo cache
+
+def Scry.analyzeProject (p : Scry.Project) (pack : Scry.RulePack) (cache : Scry.CacheStats) :
+    Scry.ProjectReport :=
+  Scry.analyzeProjectModels Scry.defaultModels p pack cache
 
 /-- The origin URI of a finding's sink (`""` when the point has no physical origin). -/
 def Scry.ProjectReport.findingFile (r : Scry.ProjectReport) (f : Scry.RuleFinding) : String :=
@@ -152,6 +158,20 @@ def Scry.ProjectReport.fileOf (r : Scry.ProjectReport) (path : String) : Scry.Pr
 /-- Counts for every real project file, in project order. -/
 def Scry.ProjectReport.fileCounts (r : Scry.ProjectReport) : List Scry.ProjectFile :=
   List.map (fun path => r.fileOf path) r.project.realPaths
+
+/-- The findings index's rows for a report (see `Scry.QuireFindings`). The line is the
+sink's origin line; the message and the evidence path stay in the report's JSON. -/
+def Scry.rowsOfReport (r : Scry.ProjectReport) : List Scry.FindingsIndexRow :=
+  List.map (fun f =>
+    let o := Scry.originAt r.origins f.func f.sink;
+    let file := match o with
+      | .some x => x.uri
+      | .none => "";
+    let line := match o with
+      | .some x => x.line
+      | .none => 0;
+    Scry.FindingsIndexRow.make f.rule (Scry.Severity.id f.severity) file line f.func f.message)
+    r.findings
 
 -- ## JSON
 
@@ -199,7 +219,9 @@ have to partition a flat list. -/
 def Scry.ProjectReport.json (r : Scry.ProjectReport) : Json :=
   let p := r.project;
   Json.mkObj
-    [ ("tool", Json.mkStr "scry")
+    [ ("schema", Json.mkStr "scry-project-report/1")
+    , ("kind", Json.mkStr "project")
+    , ("tool", Json.mkStr "scry")
     , ("project", Json.mkStr p.root)
     , ("units", Json.ofNat (List.length p.units))
     , ("functions", Json.ofNat (List.length p.funcs))

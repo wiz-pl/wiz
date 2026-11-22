@@ -133,7 +133,13 @@ def trustModuleOf (g : Globals ZeroOneMany) (n : Name) : String :=
 witness), a `partial` definition (its body is compiled, not unfolded), a native
 implementation (`implemented_by`, and a type's `repr:` representation), a `native_refl`
 or `smt` axiom, and one per `builtin` registration. `only` restricts it to a scope (an
-example's own declarations). -/
+example's own declarations).
+
+An `implemented_by` on a **partial** definition is two sources, not one: the `partial`
+row for the declaration and a `native` row for the constant compiled code runs. The
+kernel's `Decl.nativeImpl?` suppresses every partial implementation (usually it is the
+compiled body), so the walk checks `d.impl` itself; otherwise the `partial` row would
+hide a native step that `#print axioms` also does not list. -/
 def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
     (only : Name → Bool := fun _ => true) : List TrustSource := Id.run do
   let mut out : Array TrustSource := #[]
@@ -152,6 +158,17 @@ def trustSources (g : Globals ZeroOneMany) (labelOf : Name → String)
       out := out.push { module := m, name := n, item := "partial" }
     if let some i := d.nativeImpl? then
       out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+    else if d.witness.isSome then
+      -- An `implemented_by` on a partial definition. `Decl.nativeImpl?` deliberately
+      -- returns none for every partial declaration (normally its implementation is the
+      -- compiled body, not a native), but `setImpl` can replace that body with a
+      -- constant: compiled code then runs it, and the `partial` row alone would hide
+      -- the trust step. A partial body that is itself a bare constant is the same shape
+      -- and is recorded the same way (compiled code runs that constant).
+      match d.impl with
+      | some (.const i _) =>
+        if i != n then out := out.push { module := m, name := n, item := s!"native {n} := {i}" }
+      | _ => pure ()
   -- every registration, including `repr:` (a type's native representation) and `seal:`;
   -- `inline` (a compiler hint) and `int` (only how values print) are not trust
   for (k, nm) in g.builtins do
@@ -214,24 +231,59 @@ def lineOf (src : String) (off : Nat) : Nat :=
   (String.ofList (src.toList.take off)).splitOn "\n" |>.length
 
 /-- The examples that are meant to be axiom-free (kernel-checked, nothing trusted):
-their own declarations must add no trust. `examples/hdl-verified.wiz` is checked by the
+their own declarations must add no trust. `hdl/examples/hdl-verified.wiz` is checked by the
 `hdl-verified` group too; `-native`/`-full` are deliberately trusted and are not here. -/
-def trustLedgerExamples : List String := ["examples/hdl-verified.wiz"]
+def trustLedgerExamples : List String := ["hdl/examples/hdl-verified.wiz"]
 
-/-- The state of importing every module of `lib/`, as `wiz check` does (the toolchain's
-library trusted). Both trust extensions are on so that a use is *recorded* by the
-ledger rather than merely an error; `lib/` is not allowed to use either (the cases below
-and `lib/ never uses native_refl` still fail on a use). -/
-def libTrustState : IO (CommandState ZeroOneMany) := do
-  let files ← wizFiles "lib"
-  let mods := files.filterMap fun f => do
-    let cs := (f.toString.toList.drop 4)
-    pure ((String.ofList (cs.take (cs.length - 4))).replace "/" ".")
-  let mods := mods.toArray.qsort (· ≤ ·) |>.toList
-  let input := String.join (mods.map (s!"import {·}\n"))
-  pure (runFrontend (R := ZeroOneMany) input
-    { loader := ← Elab.libLoader, trustedModule := Tests.libModule
-      trustNative := true, smt := { trust := true } })
+/-- Where the ledger's walk reads and writes the elaboration cache (`--cache DIR` is
+written, each `--cache-ro DIR` is a read-only layer). The walk elaborates every module of
+`lib/`; without a cache that is cold every run, with one an unchanged module is replayed
+(`Cache.elaborateCached`). -/
+structure TrustCache where
+  write : Option System.FilePath := none
+  reads : List System.FilePath := []
+
+def TrustCache.isEmpty (c : TrustCache) : Bool := c.write.isNone && c.reads.isEmpty
+
+/-- The states of importing `lib/`, as `wiz check` does (the toolchain's library
+trusted). Both trust extensions are on so that a use is *recorded* by the ledger rather
+than merely an error; `lib/` is not allowed to use either (the cases below and `lib/
+never uses native_refl` still fail on a use).
+
+`Scry.EgraphNative` and `Scry.EqPlan` are alternative backends that cannot be imported
+into one program with `Scry.Egraph` and its clients, so there is no single whole-library
+import: the reference family is loaded with everything else, then each distinct
+exclusion set among the apart modules (with those modules) is loaded with everything
+else. The ledger is the union of the states' sources, and every module is still checked
+against every module it can share a program with.
+
+With a cache each state comes through `Cache.elaborateCached`, in the same namespaces
+`wiz check` uses: a module is elaborated once and its effect replayed, so the walk sees
+the same declarations, builtins and `#print axioms` as the cold elaboration (the cache is
+keyed by each module's exact text, its imports, the binary and the trust options, so a
+changed source is never served an old effect). Returns how many commands the cache
+served. -/
+def libTrustStates (cache : TrustCache := {}) :
+    IO (List (String × CommandState ZeroOneMany × Nat)) := do
+  let loader ← Elab.libLoader
+  let one (what input : String) : IO (String × CommandState ZeroOneMany × Nat) := do
+    let init : CommandState ZeroOneMany :=
+      { loader, trustedModule := Tests.libModule
+        trustNative := true, smt := { trust := true } }
+    if cache.isEmpty then
+      pure (what, runFrontend (R := ZeroOneMany) input init, 0)
+    else
+      let tc : Toolchain := { cacheDir := cache.write, readCaches := cache.reads }
+      let (s, hits) ← Cache.elaborateCached tc.cacheDir tc.readCaches input init 0
+        (strongToolchain := tc.tag) (targetTag := tc.targetTag)
+      pure (what, s, hits)
+  let mut out := [← one "the library" (← Elab.allLibSource)]
+  let mut seen : List (List String) := []
+  for (m, skip) in Elab.libApart do
+    unless seen.contains skip do
+      seen := skip :: seen
+      out := out ++ [← one s!"the library with {m}" (← Elab.libSourceExcept skip)]   -- complexity: ok (libApart is a handful of module groups; test-only)
+  pure out
 
 /-- The state of elaborating `path` (an example) with every library module importable. -/
 def exampleTrustState (path : String) : IO (CommandState ZeroOneMany) := do
@@ -253,15 +305,18 @@ def rejectSorry (files : List System.FilePath) : IO Unit := do
     | [] => pure ()
     | off :: _ => throw (IO.userError s!"{f}:{lineOf src off}: `sorry` is not checked by the kernel; it is never allowed in the trusted base")
 
-/-- The ledger's sources: `module<TAB>declaration<TAB>item`, sorted and deduplicated.
+/-- The ledger's sources: `module<TAB>declaration<TAB>item`, sorted and deduplicated,
+and how many commands the cache served (0 without one).
 With `includeExamples`, the axiom-free examples' own declarations are included too.
 `root` is for the fixture trees under `Tests/trust-ledger/` (a directory of `.wiz`
 modules); it is not part of the checked-in ledger. -/
-def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (List TrustSource) := do
+def ledgerSources (includeExamples : Bool) (root : Option String := none)
+    (cache : TrustCache := {}) : IO (List TrustSource × Nat) := do
   match root with
   | some dir =>
     -- A fixture tree: elaborate its modules with the library importable, but count only
-    -- its own declarations (as the examples are counted).
+    -- its own declarations (as the examples are counted). (No cache: a fixture is small
+    -- and the tests must not share state.)
     rejectSorry (← wizFiles dir)
     let mods ← Wiz.Module.listRoot dir
     let input := String.join (mods.toList.map fun (n, _) => s!"import {n}\n")
@@ -278,17 +333,24 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
     let label (n : Name) : String := trustModuleOf s.globals n
     let sources := trustSources s.globals label own
     checkCovered s.globals sources own
-    pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
+    pure ((sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList, 0))
   | none =>
     let libFiles ← wizFiles "lib"
     rejectSorry libFiles
-    let s ← libTrustState
-    noTrustErrors "the library" s
-    check (s.globals.order.size > 1000) s!"only {s.globals.order.size} library declarations"
-    let libLabel (n : Name) : String := trustModuleOf s.globals n
-    let libSources := trustSources s.globals libLabel
-    checkCovered s.globals libSources
-    let mut sources := libSources
+    let states ← libTrustStates cache
+    let mut libSources : List TrustSource := []
+    let mut decls := 0
+    let mut hits := 0
+    for (what, s, h) in states do
+      noTrustErrors what s
+      decls := decls + s.globals.order.size
+      hits := hits + h
+      let libLabel (n : Name) : String := trustModuleOf s.globals n
+      let sources := trustSources s.globals libLabel
+      checkCovered s.globals sources
+      libSources := libSources ++ sources
+    check (decls > 1000) s!"only {decls} library declarations in all loads"
+    let mut sources := libSources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList   -- complexity: ok (test-only: one dedup of the whole ledger, after the loop)
     if includeExamples then
       for path in trustLedgerExamples do
         rejectSorry [path]
@@ -299,13 +361,14 @@ def ledgerSources (includeExamples : Bool) (root : Option String := none) : IO (
         let ownSources := (trustSources es.globals labelOf own)
         -- an example's declarations may depend on the library's trusted base, so the
         -- walk checks against both; its own sources are what the baseline would gain
-        checkCovered es.globals (libSources ++ ownSources) own
+        checkCovered es.globals (sources ++ ownSources) own
         sources := sources ++ ownSources
-    pure (sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList)
+    pure ((sources.eraseDups.toArray.qsort (fun a b => TrustSource.line a ≤ TrustSource.line b) |>.toList, hits))
 
 /-- The ledger's lines, sorted and deduplicated (what `--print` prints). -/
-def ledgerLines (includeExamples : Bool) (root : Option String := none) : IO (List String) := do
-  pure ((← ledgerSources includeExamples root).map TrustSource.line)
+def ledgerLines (includeExamples : Bool) (root : Option String := none)
+    (cache : TrustCache := {}) : IO (List String) := do
+  pure ((← ledgerSources includeExamples root cache).1.map TrustSource.line)
 
 def trustBaseline : System.FilePath := ".github/trust-baseline.tsv"
 
@@ -313,10 +376,11 @@ def trustBaselineHeader : String :=
   "# The Wiz trust ledger: the trusted base of lib/ (and the axiom-free examples).\n" ++
   "# One row per source of trust, tab-separated:\n" ++
   "#   module, declaration, item, reason, owner, review\n" ++
-  "# `item` is the wording of `#print axioms`: `axiom X`, `native f := g` for\n" ++
-  "# implemented_by, `native T := mk/get` for a repr registration, `native_refl\n" ++
-  "# X.native✝` (compiled evaluation, the analogue of Lean's native_decide), `smt\n" ++
-  "# X.smt✝…`, `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
+  "# `item` names the source: `axiom X`, `native f := g` for implemented_by (also a\n" ++
+  "# second row next to `partial` when a partial definition's implementation is a native\n" ++
+  "# constant), `native T := mk/get` for a repr registration, `native_refl X.native✝`\n" ++
+  "# (compiled evaluation, the analogue of Lean's native_decide), `smt X.smt✝…`,\n" ++
+  "# `builtin k := n` (including `extern:`/FFI registrations), or `partial`.\n" ++
   "# `builtin inline` (a compiler hint) and `builtin int` (how values print) are not\n" ++
   "# trust and are not listed.\n" ++
   "# Every row needs a non-empty reason, owner and review date (YYYY-MM-DD); a row\n" ++
@@ -448,6 +512,8 @@ def missingMetadata (r : TrustRow) : List String :=
 structure TrustReport where
   count : Nat
   legacy : Nat
+  /-- commands the elaboration cache served (0 without one) -/
+  hits : Nat := 0
 
 /-- Compare the actual sources with the ledger rows. Fails on a new source (the security
 relevant direction), a stale row, an incomplete row (a reason, owner and review date are
@@ -500,13 +566,15 @@ def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustR
 and its legacy-row count. -/
 def checkTrustLedger (includeExamples : Bool := true) (root : Option String := none)
     (ledger : System.FilePath := trustBaseline) (today : String := "")
-    (strictLegacy : Bool := false) : IO TrustReport := do
+    (strictLegacy : Bool := false) (cache : TrustCache := {}) : IO TrustReport := do
   let today ← if today.isEmpty then currentDate else pure today
-  let actual ← ledgerSources includeExamples root
+  let (actual, hits) ← ledgerSources includeExamples root cache
   let rows ← readTrustRows ledger
   -- `--lib-only` (the `native` group) leaves the examples' rows out, as before.
-  let rows := if includeExamples then rows else rows.filter fun r => !r.module.startsWith "examples/"
-  compareTrust "the trust ledger" actual rows today strictLegacy
+  let rows := if includeExamples then rows else
+    rows.filter fun r => !r.module.startsWith "examples/" && !r.module.startsWith "hdl/examples/"
+  let report ← compareTrust "the trust ledger" actual rows today strictLegacy
+  pure { report with hits }
 
 /-- Check one axiom-free example's own declarations against its part of the ledger, from
 the state a case already elaborated (no second elaboration). -/
@@ -526,23 +594,22 @@ def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany)
 /-- `--update`: regenerate the ledger, preserving the metadata of rows that stay. A row
 that appears for the first time is refused unless `reason` is non-empty; the new row
 gets `owner` (or the git user) and `review` (or today + 180 days). An explicit `review`
-also renews rows that still carry the migration marker. -/
+also renews rows that still carry the migration marker, and with `renewExpired` the
+rows whose review date has passed. A renewal is not automatic: it needs `--owner` (the
+re-reviewer, recorded), `--reason` (what was re-checked, recorded) and `--review`, and
+the row's reason gains ` | renewed DATE by OWNER: BASIS`. An explicit `review` for a
+new or renewed row must be at least 90 days ahead: the same-day renewal that expired
+the next morning is the failure this floor exists for. -/
 def updateTrustLedger (includeExamples : Bool) (root : Option String) (ledger : System.FilePath)
-    (reason owner review today : String) (reviewGiven : Bool := false) : IO UInt32 := do
+    (reason owner review today : String) (reviewGiven : Bool := false)
+    (renewExpired : Bool := false) (cache : TrustCache := {}) : IO UInt32 := do
   let today ← if today.isEmpty then currentDate else pure today
-  let actual ← ledgerSources includeExamples root
-  let old ← readTrustRows ledger
-  let oldKeys := old.map TrustRow.key
-  let newSources := actual.filter fun s => !oldKeys.contains (TrustSource.line s)
   let reason := reason.trimAscii.toString
-  if !newSources.isEmpty && reason.isEmpty then
-    let fmt := "\n" ++ "\n".intercalate (newSources.map fun s => s!"  + {TrustSource.line s}")
-    IO.eprintln s!"trust-ledger: refusing to add {newSources.length} new row(s) without a reason:{fmt}\n\nA reviewed row needs a reason, an owner and a review date. Run again with:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\""
-    return 2
   if reason.toList.any fun c => c == '\t' || c == '\n' then
     IO.eprintln "trust-ledger: --reason must be one line, without tabs"
     return 2
-  let owner ← if owner.trimAscii.toString.isEmpty then defaultOwner else pure owner.trimAscii.toString
+  -- Validate the new date before elaborating or reading anything: a refusal must not
+  -- depend on whether the ledger file exists.
   let review := if review.trimAscii.toString.isEmpty then addDays today 180 else review.trimAscii.toString
   unless validDate review do
     IO.eprintln s!"trust-ledger: --review must be YYYY-MM-DD (got '{review}')"
@@ -550,18 +617,52 @@ def updateTrustLedger (includeExamples : Bool) (root : Option String) (ledger : 
   if review < today then
     IO.eprintln s!"trust-ledger: --review {review} is before today ({today}); a new row cannot be expired already"
     return 2
+  if renewExpired && !reviewGiven then
+    IO.eprintln "trust-ledger: --renew-expired needs --review YYYY-MM-DD (the renewed rows' new date)"
+    return 2
+  if renewExpired && owner.trimAscii.toString.isEmpty then
+    IO.eprintln "trust-ledger: --renew-expired needs --owner NAME (the person or lane that re-reviewed; it is recorded in each renewed row)"
+    return 2
+  if renewExpired && reason.isEmpty then
+    IO.eprintln "trust-ledger: --renew-expired needs --reason TEXT (what was re-checked; it is recorded in each renewed row)"
+    return 2
+  if reviewGiven && addDays today 90 > review then
+    IO.eprintln s!"trust-ledger: --review {review} is less than 90 days after today ({today}); a new or renewed row needs a real review horizon, not a same-day stamp"
+    return 2
+  let (actual, _) ← ledgerSources includeExamples root cache
+  let old ← readTrustRows ledger
+  let oldKeys := old.map TrustRow.key
+  let newSources := actual.filter fun s => !oldKeys.contains (TrustSource.line s)
+  if !newSources.isEmpty && reason.isEmpty then
+    let fmt := "\n" ++ "\n".intercalate (newSources.map fun s => s!"  + {TrustSource.line s}")
+    IO.eprintln s!"trust-ledger: refusing to add {newSources.length} new row(s) without a reason:{fmt}\n\nA reviewed row needs a reason, an owner and a review date. Run again with:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\""
+    return 2
+  let owner ← if owner.trimAscii.toString.isEmpty then defaultOwner else pure owner.trimAscii.toString
   let actualKeys := actual.map TrustSource.line
+  let expired (r : TrustRow) : Bool := r.review < today
+  -- A renewal records its provenance in the reason cell: the original reason stays, then
+  -- the date, the named re-reviewer and what was re-checked. A date-only bump is exactly
+  -- the failure the same-day batch had.
+  let renewalNote (r : TrustRow) : String :=
+    s!"{r.reason} | renewed {today} by {owner}: {reason}"
   let kept := old.filterMap fun r =>
     if !actualKeys.contains (TrustRow.key r) then none
     -- An explicit --review renews the rows that still carry the migration marker.
     else if reviewGiven && r.isLegacy then some { r with review }
+    -- --renew-expired renews a reasoned row whose date has passed, with a named
+    -- reviewer and a stated basis (no auto-renewal).
+    else if renewExpired && reviewGiven && expired r then
+      some { r with review, owner, reason := renewalNote r }
     else some r
   let renewed := if reviewGiven then (old.filter fun r => r.isLegacy && actualKeys.contains (TrustRow.key r)).length else 0
+  let renewedExpired := if renewExpired then
+    (old.filter fun r => !r.isLegacy && expired r && actualKeys.contains (TrustRow.key r)).length
+    else 0
   let newRows := newSources.map fun s =>
     { module := s.module, name := s.name, item := s.item, reason, owner, review : TrustRow }
   let rows := (kept ++ newRows).toArray.qsort (fun a b => TrustRow.key a ≤ TrustRow.key b) |>.toList
   IO.FS.writeFile ledger (trustBaselineHeader ++ "\n".intercalate (rows.map TrustRow.line) ++ "\n")
-  IO.println s!"wrote {ledger} ({rows.length} rows: {newRows.length} new, {old.length - kept.length} removed, {renewed} legacy renewed)"
+  IO.println s!"wrote {ledger} ({rows.length} rows: {newRows.length} new, {old.length - kept.length} removed, {renewed} legacy renewed, {renewedExpired} expired renewed)"
   return 0
 
 /-- The options of `tests --trust-ledger` (`scripts/trust-ledger.sh`). -/
@@ -576,14 +677,19 @@ structure TrustArgs where
   owner : String := ""
   review : String := ""
   reviewGiven : Bool := false
+  renewExpired : Bool := false
   today : String := ""
   root : Option String := none
   ledger : Option String := none
 
 def trustLedgerUsage : String :=
   "usage: tests --trust-ledger [--check|--update|--print] [--lib-only]\n" ++
-  "       [--reason STR] [--owner STR] [--review YYYY-MM-DD] [--today YYYY-MM-DD]\n" ++
-  "       [--tree DIR] [--ledger FILE] [--strict-legacy]"
+  "       [--reason STR] [--owner STR] [--review YYYY-MM-DD] [--renew-expired]\n" ++
+  "       (--renew-expired needs --review, --owner and --reason: who re-reviewed\n" ++
+  "        what, and until when)\n" ++
+  "       [--today YYYY-MM-DD]\n" ++
+  "       [--tree DIR] [--ledger FILE] [--strict-legacy]\n" ++
+  "       [--cache DIR] [--cache-ro DIR] [--no-cache]"
 
 def parseTrustArgs (args : List String) : Except String TrustArgs :=
   let rec go (a : TrustArgs) : List String → Except String TrustArgs
@@ -597,6 +703,7 @@ def parseTrustArgs (args : List String) : Except String TrustArgs :=
     | "--reason" :: v :: rest => go { a with reason := v } rest
     | "--owner" :: v :: rest => go { a with owner := v } rest
     | "--review" :: v :: rest => go { a with review := v, reviewGiven := true } rest
+    | "--renew-expired" :: rest => go { a with renewExpired := true } rest
     | "--today" :: v :: rest => go { a with today := v } rest
     | "--tree" :: v :: rest => go { a with root := some v } rest
     | "--ledger" :: v :: rest => go { a with ledger := some v } rest
@@ -608,7 +715,9 @@ def parseTrustArgs (args : List String) : Except String TrustArgs :=
 
 /-- `tests --trust-ledger [--check|--update|--print] [--lib-only]` (`scripts/trust-ledger.sh`).
 `--tree` and `--ledger` point at a fixture tree (Tests/trust-ledger/); `--today` fixes the
-date for the expiry tests. -/
+date for the expiry tests. The cache is the suite's toolchain (`--cache DIR`, `--cache-ro
+DIR`, `--no-cache`, taken off the arguments by `Tests.Main` before this runs, as for every
+case): it is the elaboration cache the walk writes and the read-only layers it searches. -/
 def trustLedgerMain (args : List String) : IO UInt32 := do
   let a ← match parseTrustArgs args with
     | .ok a => pure a
@@ -619,17 +728,23 @@ def trustLedgerMain (args : List String) : IO UInt32 := do
     return 2
   let includeExamples := a.root.isNone && !a.libOnly
   let ledger := System.FilePath.mk (a.ledger.getD trustBaseline.toString)
+  let tc ← toolchain
+  let cache : TrustCache := { write := tc.cacheDir, reads := tc.readCaches }
+  if a.renewExpired && !a.update then
+    IO.eprintln "trust-ledger: --renew-expired is only meaningful with --update"
+    return 2
   if a.update then
     if a.root.isNone && !includeExamples then
       IO.eprintln "trust-ledger: --update always includes the examples (they are part of the ledger)"
       return 2
-    return ← updateTrustLedger includeExamples a.root ledger a.reason a.owner a.review a.today a.reviewGiven
+    return ← updateTrustLedger includeExamples a.root ledger a.reason a.owner a.review a.today a.reviewGiven a.renewExpired cache
   if a.printLedger then
-    for l in ← ledgerLines includeExamples a.root do IO.println l
+    for l in ← ledgerLines includeExamples a.root cache do IO.println l
     return 0
   try
-    let r ← checkTrustLedger includeExamples a.root ledger a.today a.strictLegacy
-    IO.println s!"trust ledger: OK ({r.count} sources in the checked scope; {r.legacy} legacy rows (pre-gate reason/owner))"
+    let r ← checkTrustLedger includeExamples a.root ledger a.today a.strictLegacy cache
+    let cacheNote := if cache.isEmpty then "" else s!" [{r.hits} cache hits]"
+    IO.println s!"trust ledger: OK ({r.count} sources in the checked scope; {r.legacy} legacy rows (pre-gate reason/owner)){cacheNote}"
     return 0
   catch e =>
     IO.eprintln e
@@ -789,11 +904,21 @@ def group : Group where
           let src ← IO.FS.readFile f
           check ((src.splitOn "native_refl").length == 1 && (src.splitOn "nativeRefl").length == 1)
             s!"{f} mentions native_refl" },
-    { name := "no library declaration depends on a native axiom", run := fun _ => do
+    { name := "every library source of trust is a reviewed ledger row", run := fun _ => do
         -- The trust ledger: every declaration of lib/ is run through `#print axioms`;
-        -- each axiom listed must be a source in .github/trust-baseline.tsv, and a new
+        -- each source listed must be a row in .github/trust-baseline.tsv, and a new
         -- source (axiom, `sorry`, native_refl, implemented_by, SMT, builtin, partial)
         -- fails. The examples that must be axiom-free are checked in `hdl-verified`.
+        --
+        -- This case was `no library declaration depends on a native axiom`: that was a
+        -- goal from Stage 27a, when it checked only the `native✝` axioms `native_refl`
+        -- adds. It is not an invariant of lib/: InternTable, UIntN, IntN and Proc have
+        -- depended on reviewed `extern`/`implemented_by` natives (`wiz_itab_*`,
+        -- `wiz_*` builtins) since before the ledger, as `Task.*` and `Scope.spawn`
+        -- (`wiz_task_*`, `wiz_scope_*`) do now. What the gate guarantees is that such
+        -- a dependency is reviewed, dated and listed; a `native_refl` axiom is still
+        -- never allowed in lib/ (the `lib/ never uses native_refl` case, and no
+        -- `native_refl` row exists).
         let _ ← checkTrustLedger (includeExamples := false)
         pure () },
     { name := "the trust gate: fixture trees, exit codes and messages (Tests/trust-ledger/)", run := fun _ => do
@@ -803,19 +928,35 @@ def group : Group where
         -- cases above do that).
         let out ← IO.Process.output { cmd := "sh", args := #["Tests/trust-ledger/run.sh"] }
         unless out.exitCode == 0 do
-          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
+          throw (IO.userError s!"Tests/trust-ledger/run.sh failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") },
+    { name := "the FFI audit: every extern's signature matches its C prototype (scripts/trust-ffi-audit.sh --check)", run := fun _ => do
+        -- (docs/trust-ledger.md, "The numeric/container FFI audit"; stage 22b/9.) The
+        -- ledger's `builtin extern:SYM:kinds:result` rows are only prose until this
+        -- script compiles a function pointer of the marshalled C signature against the
+        -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
+        -- this case nothing ran it — no test group and no CI job named it — so a
+        -- marshalling width that drifted from its C definition would have been silent.
+        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
+        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
+        -- not evidence (a pass here must have compiled the signatures).
+        let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
+        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
+          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        unless out.exitCode == 0 do
+          throw (IO.userError
+            s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
   ]
 
 /-- H14 V1 (docs/libraries.md): the OLED demo's arithmetic units, against their Nat
 definitions. Slow (minutes: kernel evaluation over every input of each unit's domain,
 and native_refl), so a group of its own, in a heavy shard. The 2^20-input checks,
-examples/hdl-verified-full.wiz, are run on demand only. -/
+hdl/examples/hdl-verified-full.wiz, are run on demand only. -/
 def hdlVerifiedGroup : Group where
   name := "hdl-verified"
   exercise := "—"
   cases := [
-    { name := "V1: kernel-checked on the units' domains, nothing trusted (examples/hdl-verified.wiz)", run := fun _ => do
-        let path := "examples/hdl-verified.wiz"
+    { name := "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)", run := fun _ => do
+        let path := "hdl/examples/hdl-verified.wiz"
         let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
           { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
         let ms := s.messages.toList.map fun m =>
@@ -826,8 +967,8 @@ def hdlVerifiedGroup : Group where
         -- the trust ledger's part for this file: it must add no source of trust
         let _ ← checkExampleTrustLedger path s.globals
         pure () },
-    { name := "V1: full widths by native_refl, each an axiom #print axioms names (examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "examples/hdl-verified-native.wiz")
+    { name := "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)", run := fun _ => do
+        let ms ← msgsLibs (← IO.FS.readFile "hdl/examples/hdl-verified-native.wiz")
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"

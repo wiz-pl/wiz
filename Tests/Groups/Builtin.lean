@@ -19,6 +19,7 @@ attribute [macro term.twice] twiceMacro
 def builtinGroup : Group where
   name := "builtins"
   exercise := "Stage 6b"
+  parallel := true
   cases := [
     { name := "import the prelude", run := fun _ =>
         okLib "import Prelude\n#check List.append" ["List.append : {A : Type} → List A → List A → List A"] },
@@ -209,7 +210,26 @@ def builtinGroup : Group where
     { name := "S1: the same family at the same partial application is still one family", run := fun _ =>
         okLib ("import Prelude\ndef T (f : Nat → Nat) : Type := match f 0 with\n  | .zero => Unit\n  | .succ _ => Empty\n" ++
           "inductive Box (f : Nat → Nat) where\n  | mk (t : T f)\n" ++
-          "def e (x : Nat) : Box (Nat.add x) = Box (Nat.add x) := rfl\n") }
+          "def e (x : Nat) : Box (Nat.add x) = Box (Nat.add x) := rfl\n") },
+    -- (audit F15) the compiled runtime refuses an expansive shift/power at the same bound
+    -- as the interpreter (`Wiz.Compiler.NativeRun.maxBits`, 2^24 bits), with a clean error
+    -- instead of asking GMP for 125 MB (or more) or hanging.
+    { name := "an oversized Nat.shiftLeft or Nat.pow is refused, not allocated (compiled)", run := fun _ => do
+        let refused (src : String) : IO Unit := do
+          match ← cRunLibsOut src with
+          | .error (.run code err) => do
+              check (code == 3) s!"exit {code}, not 3 (a runtime refusal): {err}"
+              check ((err.splitOn "the result would have more than 16777216 bits").length > 1)
+                s!"expected the maxBits refusal, got: {err}"
+          | .error e => failRun e
+          | .ok v => throw (IO.userError s!"expected a refusal, got {v}")
+        refused "import Prelude\ndef main : Nat := Nat.shiftLeft 1 1000000000"
+        refused "import Prelude\ndef main : Nat := Nat.pow 2 1000000000"
+        refused "import Prelude\ndef main : Nat := Nat.pow 3 20000000"
+        -- the bases that give a small result whatever the exponent are not refused
+        cRun "import Prelude\ndef main : Nat := Nat.shiftLeft 0 1000000000" "0"
+        cRun "import Prelude\ndef main : Nat := Nat.pow 0 1000000000" "0"
+        cRun "import Prelude\ndef main : Nat := Nat.pow 1 1000000000" "1" }
   ]
 
 builtin_initialize registerGroup builtinGroup

@@ -1,0 +1,215 @@
+{
+  "schema": "wiz-release/v1",
+  "status": "draft",
+  "version": "0.1.0",
+  "tag": null,
+  "commit": "4ad297923dc74afbc7fd1e37ee2ae6f554c40783",
+  "sourceDateEpoch": 1795021741,
+  "generatedAt": null,
+  "releaseNotes": "docs/release/v0.1.md",
+  "knownLimitations": "docs/release/v0.1.md#known-limitations",
+  "filledBy": null,
+  "source": {
+    "tarball": {
+      "name": "wiz-0.1.0-src.tar.gz",
+      "producer": "scripts/source-tarball.py",
+      "sha256": null,
+      "size": null,
+      "manifestSha256": null,
+      "treeSha256": null,
+      "schema": "wiz-source-tarball/v1",
+      "sbom": {
+        "name": "wiz-0.1.0-src.tar.gz.cdx.json",
+        "sha256": null,
+        "schema": "CycloneDX-1.6"
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "name": "wiz-x86_64-linux.tar.gz",
+      "kind": "toolchain",
+      "system": "x86_64-linux",
+      "producer": "scripts/release-tarball.sh",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-x86_64-linux.tar.gz.sha256",
+      "kind": "checksum",
+      "system": "x86_64-linux",
+      "producer": "scripts/release-tarball.sh",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz",
+      "kind": "source",
+      "system": "any",
+      "producer": "scripts/source-tarball.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz.manifest.json",
+      "kind": "source-manifest",
+      "system": "any",
+      "producer": "scripts/source-tarball.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz.sha256",
+      "kind": "checksum",
+      "system": "any",
+      "producer": "scripts/source-tarball.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-0.1.0-src.tar.gz.cdx.json",
+      "kind": "sbom-source",
+      "system": "any",
+      "producer": "scripts/source-tarball.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "wiz-x86_64-linux.tar.gz.cdx.json",
+      "kind": "sbom-binary",
+      "system": "x86_64-linux",
+      "producer": "scripts/release-sbom.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "provenance.intoto.json",
+      "kind": "provenance",
+      "system": "any",
+      "producer": "scripts/release-sbom.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    },
+    {
+      "name": "provenance.intoto.json.dsse",
+      "kind": "provenance-signature",
+      "system": "any",
+      "producer": "scripts/release-sbom.py",
+      "sha256": null,
+      "size": null,
+      "url": null
+    }
+  ],
+  "toolchain": {
+    "lean": "leanprover/lean4:v4.35.0",
+    "nixpkgs": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+    "flakeLockSha256": null,
+    "bundledC": {
+      "clang": "Lean toolchain clang",
+      "glibc": "2.27",
+      "gmp": "6.3.0",
+      "boehmgc": "8.2.8",
+      "cadical": "Lean toolchain copy (LRAT)",
+      "z3": null
+    },
+    "platforms": {
+      "releaseTarball": [
+        "x86_64-linux"
+      ],
+      "nixPackages": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ],
+      "glibcFloor": {
+        "run": "2.27",
+        "build": "2.30"
+      }
+    }
+  },
+  "checks": {
+    "ci": {
+      "workflow": ".github/workflows/ci.yml",
+      "runId": null,
+      "conclusion": null
+    },
+    "release": {
+      "workflow": ".github/workflows/release.yml",
+      "runId": null,
+      "conclusion": null
+    },
+    "selfhost": {
+      "selector": "=selfhost",
+      "passed": null,
+      "failed": null,
+      "skipped": null
+    },
+    "fixpoint": {
+      "green": null,
+      "runId": null
+    },
+    "trustLedger": {
+      "passed": null
+    },
+    "docsStyle": {
+      "passed": null
+    },
+    "nixBuildCheck": {
+      "x86_64-linux": null,
+      "aarch64-linux": null
+    },
+    "cachix": {
+      "name": "badlydrawnwizards",
+      "x86_64-linux": null,
+      "aarch64-linux": null
+    },
+    "testsNotInCI": {
+      "web": null,
+      "infoview": null,
+      "nvim": null
+    },
+    "installSmokeTest": {
+      "passed": null,
+      "tarball": null
+    },
+    "supplyChain": {
+      "passed": null,
+      "sbom": null,
+      "provenance": null
+    }
+  },
+  "supplyChain": {
+    "sbom": {
+      "schema": "CycloneDX-1.6",
+      "source": null,
+      "binary": null,
+      "sha256": null
+    },
+    "provenance": {
+      "schema": "wiz-provenance/v1",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "builderId": null,
+      "file": null,
+      "sha256": null,
+      "signed": null,
+      "signature": null,
+      "slsaLevelClaimed": null
+    }
+  },
+  "attestation": {
+    "kind": "none",
+    "statement": null,
+    "statementSha256": null,
+    "subjectSha256": null,
+    "extraData": null,
+    "verifier": null
+  },
+  "notes": "The deterministic source tarball (scripts/source-tarball.py, scripts/test-source-tarball.sh, the release-tarball Nix target and the wiz-source-tarball/v1 manifest) is in the tree; the source object and rows name its producer and their digests are filled by the release run. The binary tarball is reproducible for a pinned toolchain and image (the same-image two-root comparison in release.yml); bit-identity across different images or compilers is not claimed. See docs/release/v0.1-checklist.md section 4."
+}

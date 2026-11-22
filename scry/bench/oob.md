@@ -1,15 +1,15 @@
 # Out-of-bounds writes and reads (CWE-787 / CWE-125)
 
-Status: new opt-in rule family. `lib/Scry/rules/oob.scry` is not in `default.scry`, so no
+Status: new opt-in rule family. `rules/oob.scry` is not in `default.scry`, so no
 default finding, benchmark baseline or safe-corpus count changes. The analysis is
-`lib/Scry/Bounds.wiz`; the C fixtures are `scry/tests/fixtures/oob-*.c` and the package
+`src/Scry/Bounds.wiz`; the C fixtures are `scry/tests/fixtures/oob-*.c` and the package
 test is `scry/tests/oob.wiz`.
 
 ```sh
 cd scry
 ../.lake/build/bin/grail build scry
 ../.lake/build/bin/grail test oob
-.grail/bin/scry taint tests/fixtures/oob-write-heap.c --rules ../lib/Scry/rules/oob.scry
+.grail/bin/scry taint tests/fixtures/oob-write-heap.c --rules rules/oob.scry
 ```
 
 ## What the rule claims
@@ -58,7 +58,7 @@ branch's build and the opt-in pack:
 ```sh
 scripts/cve-fetch.py assemble        # the cases, from pinned upstream source
 for c in cve-2021-23017 cve-2018-1000001 cve-2014-0160; do
-  scry taint build/cve-src/cases/$c/case.c --rules ../lib/Scry/rules/oob.scry
+  scry taint build/cve-src/cases/$c/case.c --rules rules/oob.scry
 done
 ```
 
@@ -82,10 +82,13 @@ not a claim about the CVE population.
 
 ## False-positive cost
 
-The rule is opt-in, so the checked-in benchmark corpus and its baseline are unchanged:
-`scry bench --no-timing` still reports **52 cases, TP 32, FP 1, TN 17, FN 0, unknown 2**
-and matches `bench/baseline.json`. That FP is the pre-existing `infeasible-safe` case,
-not this family.
+The rule is opt-in, so it changes no benchmark result by itself. The 52-case numbers
+below come from a baseline **re-derived on the merged tree**: the exec/entry fixtures
+were added after the previous baseline, which is what moved the file from 48 to 52 cases
+and from TP 30/TN 15 to TP 32/TN 17 — the OOB rule did not. `scry bench --no-timing`
+reports **52 cases, TP 32, FP 1, TN 17, FN 0, unknown 2** and matches
+`bench/baseline.json`. That FP is the pre-existing `infeasible-safe` case, not this
+family.
 
 On the OOB fixtures, the four fixed controls fire **0** times (0/4 FP) and the unknown
 size probe yields a boundary, not a finding. The two `read`/`memcpy` controls also stay

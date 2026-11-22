@@ -12,17 +12,29 @@ preprocessed with the toolchain's compiler (the frontend is pure).
 namespace Grail
 open Wiz
 
-/-- Preprocess the headers (`import_c "h"`) of some sources with the toolchain's C compiler. -/
+/-- `--region-stats`' counters, per process (a grail job is one process). -/
+initialize regionStats : IO.Ref Cache.RegionCounts ← IO.mkRef {}
+
+/-- Preprocess the headers (`import_c "h"`) of some sources with the toolchain's C
+compiler. A header that is not a plausible `#include` name, or that the compiler cannot
+preprocess, is an error: splicing unparsed text into `#include <…>` lets a newline or `>`
+inject another directive, and skipping the header silently would leave its types unread
+(F09). -/
 def preprocessHeaders (tc : Toolchain) (srcs : List String) : IO (Std.HashMap String String) := do
   let mut m : Std.HashMap String String := {}
   for src in srcs do
     for h in Module.headersOf src do
-      if m.contains h then continue
+      if h.isEmpty || m.contains h then continue
+      unless Build.validHeaderName h do throw (IO.userError Build.badHeaderName)
       let dir ← IO.FS.createTempDir
-      IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
-      let out ← IO.Process.output { cmd := tc.cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
-      IO.FS.removeDirAll dir
-      if out.exitCode == 0 then m := m.insert h out.stdout
+      try
+        IO.FS.writeFile (dir / "h.c") s!"#include <{h}>\n"
+        let out ← IO.Process.output { cmd := tc.cc, args := #["-E", "-P", (dir / "h.c").toString] ++ tc.cflags.toArray }
+        if out.exitCode != 0 then
+          throw (IO.userError (Build.preprocessFailed tc.cc h out.exitCode out.stderr))
+        m := m.insert h out.stdout
+      finally
+        try IO.FS.removeDirAll dir catch _ => pure ()
   pure m
 
 /-- A file ready to elaborate: what it can import, its headers, and its key. -/
@@ -83,18 +95,30 @@ def load (tc : Toolchain) (roots : List System.FilePath) (salt : UInt64) (src : 
 /-- Elaborate a loaded file (through the cache when there is one: a write directory and
 any read-only ones). With `--region-cache` (`tc.regionCache`), module effects are also
 read from and written to `.wizr` regions in the same layers as the `.wizc` entries; the
-text entries stay the authority, and a missing or corrupt region is a miss. -/
+text entries stay the authority, and a missing or corrupt region is a miss.
+With `--region-stats` (`tc.regionStats`) the regions' counters are collected for this
+process; `printRegionStats` reports them (zeros when the cache is off). -/
 def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState ZeroOneMany) := do
   match tc.cacheDir, tc.readCaches with
   | none, [] => Cache.elaborateUncached l.src l.init salt
   | write, reads =>
     let region := if tc.regionCache then
-        some ({ rig := RigTag.tag (R := ZeroOneMany) } : Cache.RegionOptions)
+        some ({ rig := RigTag.tag (R := ZeroOneMany),
+                stats := if tc.regionStats then some regionStats else none } :
+          Cache.RegionOptions)
       else none
     pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)
       (verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn)
       (rig := RigTag.tag (R := ZeroOneMany))
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := l.keyStrong)).1
+
+/-- `--region-stats`: one line for this process (a grail job). Without `--region-cache`
+there is no region store and the counters are zero, so a job says so instead of staying
+silent. -/
+def printRegionStats (tc : Toolchain) : IO Unit := do
+  if tc.regionStats then
+    let c ← regionStats.get
+    IO.println s!"region-stats: hits={c.hits} misses={c.misses} commands={c.commands}"
 
 /-- The messages of a state, rendered `path:line:col: severity: text`. -/
 def render (path : String) (l : Loaded) (s : CommandState ZeroOneMany) : String :=
@@ -105,8 +129,10 @@ def hasErrors (s : CommandState ZeroOneMany) : Bool := s.messages.any (·.severi
 /-- Evaluate the global `n : String` in the interpreter. -/
 def evalString (s : CommandState ZeroOneMany) (n : Name) : Except String String := do
   let code ← (compileReachable s.globals s.builtins [n]).mapError toString
-  match (run code [] (.global n)).toString? with
-  | some str => pure str
-  | none => throw s!"{n} did not evaluate to a string"
+  match run code [] (.global n) with
+  | .stuck m => throw s!"{n} did not evaluate: {m}"
+  | v => match v.toString? with
+    | some str => pure str
+    | none => throw s!"{n} did not evaluate to a string"
 
 end Grail

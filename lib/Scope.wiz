@@ -1,0 +1,145 @@
+import IO
+import MVar
+import Session
+import Region
+/-!
+# Scope
+
+Structured concurrency for `IO`: `import Scope` (stage 31, docs/stages/31-tasks.md; plan
+stage T3 in wiz-notes/concurrency-plan-2026-11-17.md).
+
+`Scope.with` opens a scope; inside it `Scope.spawn` starts `IO` actions on other threads,
+and `Scope.close` waits for every one of them. The types make two promises:
+
+* **Every task is joined.** The scope `s : Scope ρ` is used at quantity 1, which is exact
+  in Wiz: it can be neither dropped nor copied, and the body must hand back a `Done ρ`,
+  which only `Scope.close s` makes (a private constructor). So by the time `Scope.with`
+  returns, everything spawned in it has finished. An action can't capture the scope
+  (actions are unrestricted values, and a linear variable can't be captured by one), so
+  nothing is spawned into a scope from outside its body's own thread of control.
+* **No handle escapes its scope.** The region `ρ` is a fresh variable of the body (bound
+  at quantity 0, as `runST`): a task's handle `Join ρ A` mentions it, and the result type
+  `A` of `Scope.with` is chosen outside, so a handle can't be its result. (A function that
+  calls `Join.get` may still be passed out, through an `MVar` say; it then reads a value
+  that is already there, since the task was joined at the close.)
+
+The model, which the kernel and the interpreters (`#eval`, `#run`) use, is sequential:
+`Scope.spawn s act k` runs `act` at once. Compiled code runs `act` on a new thread (through
+`Chan.fork`, so a build without threads stops there with a clear message) by
+`implemented_by`, a trusted claim that `#print axioms` lists. The two differ only in when
+an action's effects happen: in the model, in spawn order; in compiled code, interleaved,
+so actions that print or share state are ordered by the program (an `MVar`, a `Lock`), not
+by the scope. What the scope guarantees is the join.
+
+No cancellation yet (plan stage T2): a scope waits for its tasks. For pure work, see
+`lib/Task.wiz`, which needs no scope (a pure task has no effect to wait for).
+
+```
+import Scope
+
+def twoFiles : IO (String × String) :=
+  Scope.with (fun ρ s =>
+    Scope.spawn s (IO.readFile "a.txt") (fun s ja =>
+    Scope.spawn s (IO.readFile "b.txt") (fun s jb =>
+    IO.bind (Scope.close s) (fun d =>
+    IO.bind (Join.get ja) (fun a =>
+    IO.bind (Join.get jb) (fun b => IO.pure ((a, b), d)))))))
+```
+-/
+
+-- ## Scopes, handles and the proof of a close
+
+/-- An open scope at region `ρ`: the waits for the tasks spawned in it so far. Linear and
+opaque (a private constructor): it comes only from `Scope.with`, moves through
+`Scope.spawn`, and ends at `Scope.close`. -/
+inductive Scope (ρ : Region) where
+  | private mk (waits : List (IO Unit))
+
+/-- A task spawned in the scope at `ρ`, whose result is an `A`. Opaque (private constructor
+and field): read it with `Join.get`. -/
+structure Join (ρ : Region) (A : Type) where
+  private mk ::
+  private wait : IO A
+
+/-- The scope at `ρ` was closed: every task spawned in it has finished. Only
+`Scope.close` makes one (a private constructor), and `Scope.with`'s body must return one. -/
+inductive Done (ρ : Region) where
+  | private mk
+
+/-- Run `body` in a new scope. Its region `ρ` is fresh, so nothing that mentions it (a
+`Join ρ A`) is in its result; the body ends by closing the scope (`Scope.close`), whose
+`Done ρ` it returns with the result. -/
+def Scope.with {A : Type} (1 body : (0 ρ : Region) → (1 s : Scope ρ) → IO (A × Done ρ)) : IO A :=
+  IO.bind (body Region.static (Scope.mk List.nil)) (fun r => IO.pure r.1)
+
+-- (the region is a type-level parameter and never reaches run time, so every binder for
+-- it is 0. At ω, compiled code would *evaluate* `Region.static` — an axiom with no
+-- value — and stop with "wiz: reached an impossible case" before the scope could spawn.)
+
+/-- Start `act` in the scope `s`; `k` continues with the scope and the task's handle. The
+model runs `act` here, at once; compiled code runs it on a new thread
+(`Scope.spawnThreads`). -/
+def Scope.spawn {0 ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
+    (1 k : (1 s : Scope ρ) → (j : Join ρ A) → IO B) : IO B :=
+  IO.bind act (fun a => k s (Join.mk (IO.pure a)))
+
+/-- The task's result: wait for it (if the scope is still open) and return it. -/
+def Join.get {0 ρ : Region} {A : Type} (j : Join ρ A) : IO A := j.wait
+
+-- (each wait in turn)
+private def Scope.waitAll : List (IO Unit) → IO Unit
+  | .nil => IO.pure ()
+  | .cons w ws => IO.bind w (fun u => Scope.waitAll ws)
+
+/-- Close the scope: wait for every task spawned in it. -/
+def Scope.close {0 ρ : Region} (1 s : Scope ρ) : IO (Done ρ) :=
+  match s with
+  | .mk ws => IO.bind (Scope.waitAll ws) (fun u => IO.pure Done.mk)
+
+-- ## Compiled code: a thread per task
+
+-- (run `act` on a new thread and put its result in `m`; the channel only starts the thread)
+private def Scope.fork {A : Type} (act : IO A) (m : MVar A) : IO Unit :=
+  Chan.fork Proto.done
+    (fun c => Chan.close c (IO.bind act (fun a => MVar.put m a)))
+    (fun c => Chan.close c (IO.pure ()))
+
+/-- `Scope.spawn` in compiled code: `act` runs on a new thread and its result goes into an
+`MVar`, written once; the scope records a wait for it, and the handle reads it. -/
+def Scope.spawnThreads {0 ρ : Region} {A B : Type} (1 s : Scope ρ) (act : IO A)
+    (1 k : (1 s : Scope ρ) → (j : Join ρ A) → IO B) : IO B :=
+  IO.bind (MVar.new (A := A)) (fun m =>
+    IO.bind (Scope.fork act m) (fun u =>
+      match s with
+      | .mk ws => k (Scope.mk (List.cons (IO.bind (MVar.read m) (fun a => IO.pure ())) ws))
+          (Join.mk (MVar.read m))))
+attribute [implemented_by Scope.spawnThreads] Scope.spawn
+
+-- ## Combinators
+
+/-- Run `a` and `b` at once (each in the scope's own thread), and both results. -/
+def Scope.both {A B : Type} (a : IO A) (b : IO B) : IO (A × B) :=
+  Scope.with (fun ρ s =>
+    Scope.spawn s a (fun s ja =>
+    Scope.spawn s b (fun s jb =>
+    IO.bind (Scope.close s) (fun d =>
+    IO.bind (Join.get ja) (fun x =>
+    IO.bind (Join.get jb) (fun y => IO.pure ((x, y), d)))))))
+
+-- (spawn every action, then hand the scope and the handles, in order, to `k`)
+private def Scope.spawnAll {0 ρ : Region} {A B : Type} : List (IO A) → (1 s : Scope ρ) →
+    (1 k : (1 s : Scope ρ) → List (Join ρ A) → IO B) → IO B
+  | .nil => fun s k => k s List.nil
+  | .cons a as => fun s k =>
+      Scope.spawn s a (fun s j => Scope.spawnAll as s (fun s js => k s (List.cons j js)))
+-- (every handle's result, in order)
+private def Scope.getAll {0 ρ : Region} {A : Type} : List (Join ρ A) → IO (List A)
+  | .nil => IO.pure List.nil
+  | .cons j js => IO.bind (Join.get j) (fun x => IO.bind (Scope.getAll js) (fun xs => IO.pure (List.cons x xs)))
+
+/-- Run every action at once; their results, in order. -/
+def Scope.all {A : Type} (as : List (IO A)) : IO (List A) :=
+  Scope.with (fun ρ s =>
+    Scope.spawnAll as s (fun s js =>
+    IO.bind (Scope.close s) (fun d =>
+    IO.bind (Scope.getAll js) (fun xs => IO.pure (xs, d)))))

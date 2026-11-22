@@ -67,6 +67,14 @@ def selectedCases (g : Group) (args : List String) : Option (List Nat) := Id.run
     | _ => return none
   return some ixs
 
+/-- How many of `g`'s cases the selectors pick: all of them when they name the group
+without a `#` list (`selectedCases` returns `none`). This is the denominator of the
+`[n/total]` numbering, over the whole invocation rather than one group. -/
+def selectedCaseCount (g : Group) (args : List String) : Nat :=
+  match selectedCases g args with
+  | none => g.cases.length
+  | some ixs => ((List.range g.cases.length).filter (ixs.contains ·)).length
+
 /-- The group named `name`, among the suite's and the driver's fixtures (`--run` finds
 these; no selector picks them). -/
 def findGroup (name : String) : IO (Option Group) := do
@@ -101,7 +109,7 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -194,27 +202,56 @@ FILE (its group, index, name, wall time in seconds, whether it passed, and its n
 `--jobs N` (default 1) runs the cases of a group that opted in (`Group.parallel`, see
 "Running cases in parallel" in docs/building.md) N at a time in child processes, printing
 each case's output and `--timings` line in the group's case order; groups that did not opt
-in still run one case at a time. `--jobs-all` also parallelizes groups that did not opt in
-(for auditing a group's isolation, not for CI).
+in still run one case at a time, but each of their cases is told N (`Tests.caseJobs`), so a
+long sweep may use N workers inside its one process (`=selfhost-libdiff`, fewer when the
+memory or CPUs are short). `--jobs-all` also parallelizes groups that did not opt in (for
+auditing a group's isolation, not for CI).
 
-`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE]` runs the self-hosted
-compiler and the Lean frontend over every `lib/` and `scry/` file and reports where they
-disagree (the group `=selfhost-libdiff` is the same sweep; `Tests/Groups/SelfhostLibDiff.lean`
-documents the format). -/
+`--libdiff [--limit N] [--only FILE]… [--json] [--baseline FILE] [--jobs N] [--part i/n]`
+runs the self-hosted compiler and the Lean frontend over every `lib/` and `scry/` file and
+reports where they disagree (the group `=selfhost-libdiff` is the same sweep;
+`Tests/Groups/SelfhostLibDiff.lean` documents the format). `--jobs N` checks N files at a
+time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memory at
+`--mem` MB per file. The driver's `--jobs` reaches the group's one case; `--jobs 1` is the
+serial control. `--part i/n` (1-based) runs only the files whose index in the sorted list
+is `k % n = i - 1`: the parts are a deterministic partition of the one case, so CI can run
+its 3664 s on n jobs without changing what any file is compared against. -/
 def main (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
+  -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
+  -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
+  let traceGuesses := args.contains "--trace-guess-fallback"
+  let args := args.filter (· != "--trace-guess-fallback")
+  if traceGuesses then Wiz.traceGuessesRef.set true
   if let "--grail-exec" :: rest := args then return ← Grail.execMain rest
   if let "--grail" :: rest := args then return ← Grail.cliMain rest
+  -- `--jobs N` (default 1): the cases of an opted-in group run N at a time, and a case
+  -- of a group that runs one at a time may use N workers itself (`caseJobs`). It is
+  -- taken off before the toolchain flags, which also reach `--run-case`'s child.
+  let (jobsArg, args) := takeFlag "--jobs" args
+  let jobs : Option Nat := match jobsArg with
+    | none => some 1
+    | some s => match s.toNat? with
+      | some 0 => none
+      | n => n
+  let some jobs := jobs
+    | IO.eprintln "--jobs needs a count of at least 1"; return 2
+  caseJobsRef.set jobs
+  caseJobsSetRef.set jobsArg.isSome
+  -- `--part i/n`: the part of a split sweep to run (`=selfhost-libdiff`), passed on to
+  -- each case's process; not given, a case runs the whole sweep (`1/1`)
+  let (partArg, args) := takeFlag "--part" args
+  casePartRef.set (partArg.getD "")
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
-  flagsRef.set tc.toFlags
+  flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
   | ["--run-case", group, ix] =>
@@ -267,7 +304,13 @@ def main (args : List String) : IO UInt32 := do
   -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
   -- of one file (a bounded child of the sweep), and the sweep itself
   | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
-  | "--libdiff" :: rest => Elab.libDiffMain rest
+  -- `--part` was taken off above (it is a driver flag, not a toolchain flag); give it
+  -- back to the sweep's own command line, which validates it
+  | "--libdiff" :: rest =>
+    let rest := match partArg with
+      | some p => "--part" :: p :: rest
+      | none => rest
+    Elab.libDiffMain rest
   -- the trust ledger (`Tests/Native.lean`, scripts/trust-ledger.sh)
   | "--trust-ledger" :: rest => Native.trustLedgerMain rest
   | ["--list"] => do
@@ -287,20 +330,16 @@ def main (args : List String) : IO UInt32 := do
   | args => do
     let (timings, args) := takeFlag "--timings" args
     let (shard, args) := takeFlag "--shard" args
-    let (jobsArg, args) := takeFlag "--jobs" args
     let (jobsAll, args) := takeSwitch "--jobs-all" args
-    let jobs : Option Nat := match jobsArg with
-      | none => some 1
-      | some s => match s.toNat? with
-        | some 0 => none
-        | n => n
-    let some jobs := jobs
-      | IO.eprintln "--jobs needs a count of at least 1"; return 2
     let shard := shard.getD ""
     if let some code ← checkSelectors args then return code
     let groups ← allGroups
     let selected := if args.isEmpty then groups
       else groups.filter fun g => args.any (selects g)
+    -- `[n/total]` counts the cases this invocation selected, across its groups (a shard
+    -- runs several), not the whole suite and not each group from 1 again
+    let total := (selected.map (fun g => selectedCaseCount g args)).foldl (· + ·) 0
+    let mut caseNo := 0
     let record (g : Group) (r : CaseResult) : IO Unit := do
       if let some file := timings then
         let h ← IO.FS.Handle.mk file .append
@@ -311,8 +350,9 @@ def main (args : List String) : IO UInt32 := do
     for g in selected do
       let start ← IO.monoMsNow
       let results ← if jobs > 1 && (g.parallel || jobsAll) then
-          g.runJobs jobs (selectedCases g args) (record g)
-        else g.run (selectedCases g args) (record g)
+          g.runJobs jobs (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+        else g.run (selectedCases g args) (record g) (start := caseNo + 1) (total := some total)
+      caseNo := caseNo + results.length
       let cases := results.foldl (· + ·.ms) 0
       IO.println s!"  ({g.name}: {showMs ((← IO.monoMsNow) - start)} s; cases {showMs cases} s)"
       let p := (results.filter (·.ok)).length

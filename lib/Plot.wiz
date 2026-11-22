@@ -15,6 +15,7 @@ def sales : Plot.Frame := Plot.frame [
   Plot.line "2025" [Plot.pt 0 14, Plot.pt 1 22, Plot.pt 2 19]]
 
 def chart : Plot.Chart := Plot.labels "quarter" "units" (Plot.chart "Sales" sales)
+#plot chart                 -- an infoview widget (a WIZ_WIDGET: Plot.html bundle)
 #eval Plot.svg chart       -- one deterministic SVG document
 #eval Json.render (Plot.render chart)   -- a Jupyter mime bundle
 ```
@@ -850,7 +851,7 @@ def Plot.axesSvg (c : Plot.Chart) (r : Plot.Rect) (xb yb : Plot.Bounds) : List S
             (String.append (Plot.attr "font-size" "10")
               (String.append (Plot.attr "fill" "#333")
                 (String.append ">" (String.append (Plot.esc (Plot.showDec t.mant t.exp)) "</text>"))))))));
-    List.cons tick (List.cons label (List.nil : List String))) (Plot.xTicks c);
+    List.cons tick (List.cons label ([] : List String))) (Plot.xTicks c);
   let yticks := List.map (fun t =>
     let y := Plot.yAt c yb t.value;
     let tick := String.append "<line" (String.append (Plot.attr "x1" (Nat.repr (Nat.sub left 4)))
@@ -865,7 +866,7 @@ def Plot.axesSvg (c : Plot.Chart) (r : Plot.Rect) (xb yb : Plot.Bounds) : List S
             (String.append (Plot.attr "font-size" "10")
               (String.append (Plot.attr "fill" "#333")
                 (String.append ">" (String.append (Plot.esc (Plot.showDec t.mant t.exp)) "</text>"))))))));
-    List.cons tick (List.cons label (List.nil : List String))) (Plot.yTicks c);
+    List.cons tick (List.cons label ([] : List String))) (Plot.yTicks c);
   List.append xgrid (List.append ygrid
     (List.append border (List.append (List.concat xticks) (List.concat yticks))))
 
@@ -937,6 +938,19 @@ def Plot.svg (c : Plot.Chart) : String :=
                         (String.append (Plot.attr "height" (Nat.repr c.height))
                           (String.append (Plot.attr "fill" "#ffffff") "/>"))))))
                   (String.append (String.intercalate "\n" body) "</svg>")))))))))
+
+/-- A self-contained HTML figure: the SVG document and, when the chart has one, its
+title as a `<figcaption>`. The SVG has no external references (no `href`, `src`, script
+or `url(…)`); a client can insert this fragment as is, or use `Plot.svg` alone as an
+`image/svg+xml` payload. Deterministic, like `Plot.svg`. -/
+def Plot.html (c : Plot.Chart) : String :=
+  let svg := Plot.svg c;
+  let cap := match String.isEmpty c.title with
+    | .true => ""
+    | .false => String.append "<figcaption>"
+        (String.append (Plot.esc c.title) "</figcaption>");
+  String.append "<figure" (String.append (Plot.attr "class" "wiz-plot")
+    (String.append ">" (String.append svg (String.append cap "</figure>"))))
 
 -- ## JSON (for a JavaScript renderer, and the notebook hook)
 
@@ -1015,3 +1029,29 @@ def Plot.render (c : Plot.Chart) : Json :=
       (.cons (Json.field "image/svg+xml" (.str svg))
         (.cons (Json.field "text/html"
           (.str (String.append "<div class=\"wiz-plot\">" (String.append svg "</div>")))) .nil)))
+
+-- ## The infoview widget
+
+/-- The widget bundle: a JSON object in the Loom widget schema (`wiz.widget/1`) with a
+plot-specific `kind` and `mimeType`. `html` is `Plot.html` (what an infoview inserts),
+`svg` is the same drawing as an `image/svg+xml` document, and `title`/`summary` are the
+short labels a client shows when it cannot draw HTML. Self-contained: no network, no
+timestamps, no ids. -/
+def Plot.payload (c : Plot.Chart) : Json :=
+  Json.mkObj
+    (.cons (Json.field "schema" (.str "wiz.widget/1"))
+      (.cons (Json.field "kind" (.str "plot"))
+        (.cons (Json.field "mimeType" (.str "image/svg+xml"))
+          (.cons (Json.field "title" (.str c.title))
+            (.cons (Json.field "summary" (.str (Plot.summary c)))
+              (.cons (Json.field "width" (Json.ofNat c.width))
+                (.cons (Json.field "height" (Json.ofNat c.height))
+                  (.cons (Json.field "svg" (.str (Plot.svg c)))
+                    (.cons (Json.field "html" (.str (Plot.html c)))
+                      (.cons (Json.field "count" (Json.ofNat 1)) .nil))))))))))
+
+/-- The infoview display value: `WIZ_WIDGET:` followed by `Plot.payload`. The prefix is
+the Loom widget protocol's; the infoview turns a message with it into a widget item
+(`docs/design/infoview-protocol.md`, "Widget items"). `#plot expr` prints this string. -/
+def Plot.widget (c : Plot.Chart) : String :=
+  String.append "WIZ_WIDGET:" (Json.render (Plot.payload c))

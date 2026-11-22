@@ -1,0 +1,413 @@
+import Tests.Elab
+
+open Wiz
+
+-- Closed terms are normally evaluated at program start-up; that would execute
+-- unimplemented `sorry`s before any test runs.
+set_option compiler.extract_closed false
+
+namespace Tests.Elab
+
+/-! ## Web.Loom: the Loom UI framework for Wiz (lib/Web/Loom.wiz)
+
+The framework's own half is pure, so these cases are elaboration and evaluation:
+deterministic SSR, lens-addressed local state and its patches, keyed reorder, event
+dispatch, escaping, and the quantity-1 `Owned` state cell. `web/framework/test.mjs`
+runs the browser half (patch application and event delegation) under Node against the
+same tree, `web/framework/gen.wiz`. -/
+
+/-- A counter app (props-free), a keyed list, and `Msg`, shared by the cases. -/
+def loomPrelude : String :=
+  "import IO\nimport Optic\nimport Web.Loom\n" ++
+  "inductive Msg where\n  | inc\n" ++
+  "structure Model where\n  count : Nat\n" ++
+  "def countL : Lens Model Nat := fun s => (s.count, fun n => Model.mk n)\n" ++
+  "def counterView (s : Model) : Loom.VNode Msg :=\n" ++
+  "  Loom.el \"div\" [Loom.class \"counter\"]\n" ++
+  "    [Loom.el \"p\" List.nil [Loom.text \"count \", Loom.text (Nat.toString s.count)],\n" ++
+  "     Loom.on \"click\" Msg.inc (Loom.el \"button\" List.nil [Loom.text \"+\"])]\n" ++
+  "def app : Loom.App Model Msg := Loom.App.mk (Model.mk 0)\n" ++
+  "  (fun m s => match m with | .inc => Loom.setState countL Nat.succ s) counterView\n" ++
+  "def item (n : Nat) : Loom.VNode Msg :=\n" ++
+  "  Loom.keyed (Nat.toString n) (Loom.el \"li\" List.nil [Loom.text (Nat.toString n)])\n" ++
+  "def list (ns : List Nat) : Loom.VNode Msg :=\n" ++
+  "  Loom.el \"ul\" List.nil (Loom.map item ns)\n"
+
+/-- Elaborate with every library importable; no errors, and these infos. -/
+def okLoom (input : String) (infos : List String := []) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← libLoader }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render input
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  checkEq (repr infos).pretty (repr (s.messages.toList.map (·.text))).pretty
+
+/-- Exactly one error, mentioning `fragment`, with every library importable. -/
+def failsLoom (input : String) (fragment : String) : IO Unit := do
+  let s := runFrontend (R := ZeroOneMany) input { trustedModule := Tests.libModule, loader := ← libLoader }
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render input
+  unless errs.size == 1 do throw (IO.userError s!"expected one error, got {errs.size}: {errs}")
+  unless (errs[0]!.splitOn fragment).length > 1 do
+    throw (IO.userError s!"error does not mention '{fragment}':\n{errs[0]!}")
+
+/-- The state format's little prelude (`Web.Draft`, `Web.Playground`). -/
+def draftPrelude : String :=
+  "import Web.Draft\nimport Web.Editor\nimport Web.Examples\nimport Web.Loom\nimport Web.Playground\n" ++
+  "def custom : Draft.State := Draft.State.mk \"def one : Nat := 1\\n\" \"\"\n" ++
+  "def listsState : Draft.State := Draft.State.mk (Examples.codeOf \"lists\") \"lists\"\n" ++
+  "def ready : Page := Page.effect Page.initial \"enable\" \"1\" \"\"\n"
+
+/-- A goals pane with one widget item, for the host/runtime boundary case. -/
+def goalsPrelude : String :=
+  "import Json\nimport Web.Goals\nimport Web.Loom\n" ++
+  "inductive M where\n  | tag (n : Nat)\n  | span (s : String)\n  | key\n  | reconnect\n" ++
+  "def item (body : String) : Json :=\n" ++
+  "  let bundle := Json.mkObj\n" ++
+  "    [Json.field \"schema\" (Json.mkStr \"wiz.widget/1\"),\n" ++
+  "     Json.field \"kind\" (Json.mkStr \"plot\"),\n" ++
+  "     Json.field \"html\" (Json.mkStr body)];\n" ++
+  "  Json.mkObj [Json.field \"kind\" (Json.mkStr \"widget\"),\n" ++
+  "    Json.field \"title\" (Json.mkStr \"p\"),\n" ++
+  "    Json.field \"text\" (Json.mkStr (String.append \"WIZ_WIDGET:\" (Json.render bundle)))]\n" ++
+  "def paneView (body : String) : String :=\n" ++
+  "  Json.render (Json.mkObj\n" ++
+  "    [Json.field \"state\" (Json.mkStr \"open\"),\n" ++
+  "     Json.field \"goalsKind\" (Json.mkStr \"interactive\"),\n" ++
+  "     Json.field \"termKind\" (Json.mkStr \"interactive\"),\n" ++
+  "     Json.field \"items\" (Json.mkArr [item body])])\n" ++
+  "def paneHtml (body : String) : String :=\n" ++
+  "  Loom.toHtml (Goals.panel M.tag M.span M.reconnect M.key\n" ++
+  "    (Goals.effect Goals.initial \"view\" (paneView body) \"\"))\n"
+
+def loomGroup : Group where
+  name := "loom"
+  exercise := "lib/Web/Loom.wiz (web UI framework)"
+  cases := [
+    { name := "SSR: a component tree renders deterministic HTML", run := fun _ =>
+        okLoom (loomPrelude ++
+          "#eval Loom.App.html app (Model.mk 2)\n" ++
+          "#eval String.eq (Loom.App.html app (Model.mk 2)) (Loom.App.html app (Model.mk 2))")
+          [r#""<div class=\"counter\"><p>count 2</p><button data-wiz-on-click=\"0\">+</button></div>""#,
+           ".true"] },
+    { name := "state: a dispatch is a lens update, and its patch is one text node", run := fun _ =>
+        okLoom (loomPrelude ++
+          "#eval Loom.App.html app (Loom.App.dispatch app (Model.mk 2) 0)\n" ++
+          "#eval Loom.App.patches app (Model.mk 2) (Model.mk 3)")
+          [r#""<div class=\"counter\"><p>count 3</p><button data-wiz-on-click=\"0\">+</button></div>""#,
+           r#""[{\"op\":\"text\",\"path\":\"0.0.0\",\"text\":\"count 3\"}]""#] },
+    { name := "keyed lists: a rotation is two moves, not a re-render", run := fun _ =>
+        okLoom (loomPrelude ++
+          "#eval Loom.patchesJson (Loom.Rendered.diff (Loom.render (list [1, 2, 3])) (Loom.render (list [2, 3, 1])))\n" ++
+          "#eval Loom.patchesJson (Loom.Rendered.diff (Loom.render (list [1, 2])) (Loom.render (list [1, 2])))")
+          [r#""[{\"op\":\"move\",\"path\":\"0\",\"src\":1,\"dst\":0},{\"op\":\"move\",\"path\":\"0\",\"src\":2,\"dst\":1}]""#,
+           r#""[]""#] },
+    { name := "events: the handler's event name is checked", run := fun _ =>
+        okLoom (loomPrelude ++
+          "#eval Loom.App.html app (Loom.App.event app (Model.mk 2) \"click\" 0)\n" ++
+          "#eval Loom.App.html app (Loom.App.event app (Model.mk 2) \"keydown\" 0)\n" ++
+          "#eval Loom.App.html app (Loom.App.dispatch app (Model.mk 2) 9)")
+          [r#""<div class=\"counter\"><p>count 3</p><button data-wiz-on-click=\"0\">+</button></div>""#,
+           r#""<div class=\"counter\"><p>count 2</p><button data-wiz-on-click=\"0\">+</button></div>""#,
+           r#""<div class=\"counter\"><p>count 2</p><button data-wiz-on-click=\"0\">+</button></div>""#] },
+    { name := "escaping: text and attributes are escaped; raw is the trust boundary", run := fun _ =>
+        okLoom ("import Web.Loom\ninductive Msg where\n  | x\n" ++
+          "#eval Loom.toHtml (Loom.text \"<b> & 'x'\" : Loom.VNode Msg)\n" ++
+          "#eval Loom.toHtml (Loom.raw \"<b>ok</b>\" : Loom.VNode Msg)\n" ++
+          "#eval Loom.toHtml (Loom.el \"p\" [Loom.attr \"title\" \"a\\\"b\"] [Loom.text \"x\"] : Loom.VNode Msg)")
+          [r#""&lt;b&gt; &amp; &#39;x&#39;""#,
+           r#""<b>ok</b>""#,
+           r#""<p title=\"a&quot;b\">x</p>""#] },
+    { name := "Goals: widget payloads are the host's, never raw markup", run := fun _ =>
+        okLoom (goalsPrelude ++
+          "#eval String.contains (paneHtml \"<svg onload='alert(1)'></svg>\") \"onload\"\n" ++
+          "#eval String.contains (paneHtml \"<iframe SRC='https://evil.invalid/'></iframe>\") \"iframe\"\n" ++
+          "#eval String.contains (paneHtml \"<svg><foreignObject><div>x</div></foreignObject></svg>\") \"foreignObject\"\n" ++
+          "#eval String.contains (paneHtml \"<a HREF='javascript:alert(1)'>x</a>\") \"javascript:\"\n" ++
+          "#eval String.contains (paneHtml \"<svg xmlns='http://example.invalid/'></svg>\") \"example.invalid\"")
+          [".false", ".false", ".false", ".false", ".false"] },
+    { name := "events: two events on one element are two attributes", run := fun _ =>
+        okLoom ("import Web.Loom\ninductive Msg where\n  | a\n  | b\n" ++
+          "#eval Loom.toHtml (Loom.on \"click\" Msg.a (Loom.on \"keydown\" Msg.b (Loom.el \"button\" List.nil [Loom.text \"x\"])) : Loom.VNode Msg)")
+          [r#""<button data-wiz-on-click=\"0\" data-wiz-on-keydown=\"1\">x</button>""#] },
+    { name := "events: onPrevent marks the handler and the runtime decides", run := fun _ =>
+        okLoom ("import Web.Loom\ninductive Msg where\n  | a\n  | b\n" ++
+          "#eval Loom.toHtml (Loom.onPrevent \"keydown\" Msg.a (Loom.el \"textarea\" List.nil List.nil) : Loom.VNode Msg)\n" ++
+          "#eval Loom.toHtml (Loom.onPrevent \"keydown\" Msg.b (Loom.on \"input\" Msg.a (Loom.el \"textarea\" List.nil List.nil)) : Loom.VNode Msg)")
+          [r#""<textarea data-wiz-on-keydown=\"0\" data-wiz-prevent-keydown=\"1\"></textarea>""#,
+           r#""<textarea data-wiz-on-keydown=\"0\" data-wiz-prevent-keydown=\"1\" data-wiz-on-input=\"1\"></textarea>""#] },
+    { name := "owned state: a quantity-1 cell is updated and ends once", run := fun _ =>
+        okLoom ("import Web.Loom\n" ++
+          "#eval Loom.Owned.end (Loom.Owned.update (Loom.Owned.new 1) Nat.succ)\n" ++
+          "#eval Loom.Owned.end (Loom.Owned.set (Loom.Owned.new 1) 7)")
+          ["2", "7"] },
+    { name := "owned state: using the cell twice is a type error", run := fun _ =>
+        failsLoom ("import Web.Loom\n" ++
+          "def bad (1 o : Loom.Owned Nat) : Nat :=\n" ++
+          "  let a := Loom.Owned.read o (fun _ => 1);\n" ++
+          "  let b := Loom.Owned.read o (fun _ => 2);\n" ++
+          "  a + b\n") "declared with quantity 1 but used ω" },
+    { name := "owned state: dropping the cell is a type error", run := fun _ =>
+        failsLoom ("import Web.Loom\n" ++
+          "def worse (1 o : Loom.Owned Nat) : Nat := 0\n") "declared with quantity 1 but used 0" },
+    { name := "composition: mapMsg lifts a child's messages and keeps the handler index", run := fun _ =>
+        -- A child component with its own `Msg` composes into a page: the wrapper maps
+        -- every handler (and only the handlers), so the page's dispatch sees `Page.child`.
+        okLoom ("import IO\nimport Web.Loom\n" ++
+          "inductive Child where\n  | tap\n" ++
+          "inductive Page where\n  | child (m : Child)\n" ++
+          "structure Model where\n  tag : Nat\n" ++
+          "def child : Loom.VNode Child :=\n" ++
+          "  Loom.on \"click\" Child.tap (Loom.el \"button\" List.nil [Loom.text \"x\"])\n" ++
+          "def app : Loom.App Model Page := Loom.App.mk (Model.mk 0)\n" ++
+          "  (fun m s => match m with | .child _ => Model.mk 1)\n" ++
+          "  (fun _ => Loom.el \"div\" List.nil [Loom.mapMsg Page.child child])\n" ++
+          "#eval Loom.toHtml (Loom.mapMsg Page.child child)\n" ++
+          "#eval (Loom.App.dispatch app (Model.mk 0) 0).tag\n" ++
+          "#eval (Loom.App.dispatch app (Model.mk 0) 1).tag")
+          [r#""<button data-wiz-on-click=\"0\">x</button>""#, "1", "0"] },
+    { name := "state: base64url round-trips text, and refuses non-canonical input", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Draft.base64UrlEncode \"hello world\\n\"\n" ++
+          "#eval String.eq (match Draft.base64UrlDecode (Draft.base64UrlEncode \"λ → ∀ 😀\") with | .some s => s | .none => \"\") \"λ → ∀ 😀\"\n" ++
+          "#eval Draft.base64UrlDecode \"ab\"\n" ++
+          "#eval Draft.base64UrlDecode \"a\"\n" ++
+          "#eval Draft.base64UrlDecode \"%\"")
+          [r#""aGVsbG8gd29ybGQK""#, ".true", ".none", ".none", ".none"] },
+    { name := "state: the fragment is a preset id or the base64url code", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Draft.encodeFragment listsState\n" ++
+          "#eval match Draft.decodeFragment \"#preset=lists\" with | .some s => s.preset | .none => \"none\"\n" ++
+          "#eval String.eq (match Draft.decodeFragment (Draft.encodeFragment custom) with | .some s => s.code | .none => \"\" ) custom.code\n" ++
+          "#eval Draft.decodeFragment \"#preset=nope\"\n" ++
+          "#eval Draft.decodeFragment \"#code=ab\"\n" ++
+          "#eval Draft.decodeFragment \"\"")
+          ["\"#preset=lists\"", r#""lists""#, ".true", ".none", ".none", ".none"] },
+    { name := "state: the draft is versioned JSON, and a stale preset is dropped", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval String.eq (match Draft.parseDraft (Draft.serializeDraft custom) with | .some s => s.code | .none => \"\" ) custom.code\n" ++
+          "#eval match Draft.parseDraft \"{\\\"version\\\":1,\\\"code\\\":\\\"custom\\\",\\\"preset\\\":\\\"lists\\\"}\" with | .some s => s.preset | .none => \"none\"\n" ++
+          "#eval Draft.parseDraft \"{\\\"version\\\":2,\\\"code\\\":\\\"x\\\"}\"\n" ++
+          "#eval Draft.parseDraft \"not json\"")
+          [".true", r#""""#, ".none", ".none"] },
+    { name := "state: the embedded Prelude is added only when there is no import", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval String.eq (Draft.withPrelude \"def one : Nat := 1\") \"import Prelude\\n\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"import Prelude\\ndef one : Nat := 1\") \"import Prelude\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"  import Std\\ndef one : Nat := 1\") \"  import Std\\ndef one : Nat := 1\"\n" ++
+          "#eval String.eq (Draft.withPrelude \"imported : Nat := 1\") \"import Prelude\\n\\nimported : Nat := 1\"")
+          [".true", ".true", ".true", ".true"] },
+    { name := "page: a step asks for effects and an ack clears them", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Page.requests Page.initial\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.share \"\" Page.initial)) \"\\\"kind\\\":\\\"share\\\"\"\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.share \"\" Page.initial)) \"#preset=basics\"\n" ++
+          "#eval Page.requests (Page.ack (Page.ack (Page.update PageMsg.share \"\" Page.initial) \"share\") \"sync\")\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.save \"\" Page.initial)) \"\\\"kind\\\":\\\"save\\\"\"")
+          [r#""[]""#, ".true", ".true", r#""[]""#, ".true"] },
+    { name := "page: an effect updates the page without a request", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval (Page.effect Page.initial \"finished\" \"ok\\n3 : Nat\" \"done in 4 ms\").output.count\n" ++
+          "#eval (Page.effect Page.initial \"finished\" \"ok\\n3 : Nat\" \"done in 4 ms\").output.statusKind\n" ++
+          "#eval (Page.effect Page.initial \"failed\" \"error: x\" \"exit code 3\").output.count\n" ++
+          "#eval (Page.effect Page.initial \"failed\" \"error: x\" \"exit code 3\").output.statusKind\n" ++
+          "#eval (Page.effect Page.initial \"enable\" \"1\" \"\").editor.disabled\n" ++
+          "#eval Page.requests (Page.effect Page.initial \"finished\" \"ok\" \"done\")\n" ++
+          "#eval (Page.update (PageMsg.editor WebEditor.Msg.input) \"custom\" ready).preset\n" ++
+          "#eval (Page.update (PageMsg.editor WebEditor.Msg.input) (Examples.codeOf \"lists\") ready).preset")
+          [r#""2 lines""#, r#""ready""#, r#""exit code 3""#, r#""error""#, ".false", r#""[]""#,
+           r#""""#, r#""lists""#] },
+    { name := "page: the load precedence is fragment, draft, default", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval (Page.effect Page.initial \"load\" (Draft.encodeFragment listsState) \"\").preset\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" (Draft.encodeFragment listsState) \"\").editor.text (Examples.codeOf \"lists\")\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" \"\" (Draft.serializeDraft custom)).editor.text custom.code\n" ++
+          "#eval String.eq (Page.effect Page.initial \"load\" \"#nope\" \"\").editor.text (Examples.codeOf Examples.defaultExampleId)\n" ++
+          "#eval (Page.effect Page.initial \"load\" \"#nope\" \"\").note")
+          [r#""lists""#, ".true", ".true", ".true", r#""ignored an invalid playground link""#] },
+    { name := "page: the keyboard policy consumes only its shortcuts", run := fun _ =>
+        okLoom (draftPrelude ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nEnter\\nc\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nEnter\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\ns\\ncm\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"click\\n5\\n\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nTab\") ready\n" ++
+          "#eval Page.consume (Loom.splitEvent \"keydown\\n5\\nTab\\n@3@7\") ready\n" ++
+          "#eval (Page.update PageMsg.key \"Enter\\nc\" ready).loads\n" ++
+          "#eval (Page.update PageMsg.key \"Enter\" ready).loads\n" ++
+          "#eval (Page.update PageMsg.key \"s\\nm\" ready).save\n" ++
+          "#eval (Page.update PageMsg.key \"Tab\\n@1@2\" ready).edits\n" ++
+          "#eval String.contains (Page.requests (Page.update PageMsg.key \"Tab\\n@1@2\" ready)) \"\\\"kind\\\":\\\"edit\\\"\"")
+          [".true", ".false", ".true", ".false", ".true", ".true", "1", "0", "1", "1", ".true"] },
+    { name := "editor rules: positions are UTF-16, as the LSP wire format is", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "#eval (EditorModel.positionFromOffset (EditorModel.index \"a😀b\\nc\") 3).line\n" ++
+          "#eval (EditorModel.positionFromOffset (EditorModel.index \"a😀b\\nc\") 3).character\n" ++
+          "#eval EditorModel.offsetFromPosition (EditorModel.index \"a😀b\\nc\") (EditorModel.Position.mk 1 1)\n" ++
+          "#eval EditorModel.offsetFromPosition (EditorModel.index \"ab\\ncd\") (EditorModel.Position.mk 0 5)\n" ++
+          "#eval (EditorModel.codePointPositionFromOffset (EditorModel.index \"a😀b\\nc\") 3).character\n" ++
+          "#eval EditorModel.utf16OffsetFromCodePoints (EditorModel.index \"a😀b\\nc\") 2\n" ++
+          "#eval EditorModel.codePointOffsetFromUtf16 (EditorModel.index \"a😀b\\nc\") 3")
+          ["0", "3", "6", "2", "2", "3", "2"] },
+    { name := "editor rules: a diagnostic becomes merged, line-clipped spans", run := fun _ =>
+        okLoom ("import Json\nimport Web.EditorModel\n" ++
+          "def one := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":13},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":17}},\\\"severity\\\":1,\\\"message\\\":\\\"unknown identifier\\\"}]\"\n" ++
+          "def multi := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":4},\\\"end\\\":{\\\"line\\\":2,\\\"character\\\":2}},\\\"severity\\\":2,\\\"message\\\":\\\"w\\\"}]\"\n" ++
+          "def overlap := \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":1},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":4}},\\\"severity\\\":2,\\\"message\\\":\\\"warning\\\"},{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":0,\\\"character\\\":2},\\\"end\\\":{\\\"line\\\":0,\\\"character\\\":5}},\\\"severity\\\":1,\\\"message\\\":\\\"error\\\"}]\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"def f : Nat := nope\\n\") one 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson (EditorModel.index \"def f : Nat := nope\\n\") one 0) \"\\\"start\\\":13\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"one two\\nthree four\\nfive\") multi 0)\n" ++
+          "#eval String.contains (EditorModel.segmentsJson (EditorModel.index \"one two\\nthree four\\nfive\") multi 0) \"\\\"start\\\":19\"\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0)\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0) with | .some s => s.severity | .none => 0\n" ++
+          "#eval match List.head (EditorModel.squiggleSegments (EditorModel.index \"abcdef\") overlap 0) with | .some s => s.stop | .none => 0\n" ++
+          "#eval List.length (EditorModel.squiggleSegments (EditorModel.index \"ab\") \"[{\\\"range\\\":{\\\"start\\\":{\\\"line\\\":4,\\\"character\\\":0}}}]\" 0)")
+          ["1", ".true", "3", ".true", "1", "1", "5", "0"] },
+    { name := "editor rules: completions filter, order, move and insert", run := fun _ =>
+        okLoom ("import Json\nimport Web.EditorModel\n" ++
+          "def items := \"[{\\\"label\\\":\\\"Nat.add\\\"},{\\\"label\\\":\\\"Nat.sub\\\"},{\\\"label\\\":\\\"natPred\\\"},{\\\"label\\\":\\\"Bool.and\\\"},{\\\"label\\\":\\\"Nat.succ\\\",\\\"sortText\\\":\\\"0\\\"},{\\\"label\\\":\\\"add\\\"}]\"\n" ++
+          "def names (xs : List Json) : List String := List.map EditorModel.itemLabel xs\n" ++
+          "#eval List.length (EditorModel.completionItems items)\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"Nat.ad\" 0))\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"NAT.S\" 0))\n" ++
+          "#eval String.intercalate \",\" (names (EditorModel.filterCompletions (EditorModel.completionItems items) \"add\" 0))\n" ++
+          "#eval (EditorModel.identifierPrefix (EditorModel.index \"def foo := Nat.ad\") 17).1\n" ++
+          "#eval (EditorModel.identifierPrefix (EditorModel.index \"def foo := Nat.ad\") 17).2\n" ++
+          "#eval EditorModel.completionScore (Json.mkObj [(\"label\", Json.mkStr \"Nat.add\")]) \"dd\"\n" ++
+          "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"0\") (EditorModel.intOf \"-1\") (EditorModel.intOf \"3\"))\n" ++
+          "#eval EditorModel.intString (EditorModel.moveSelection (EditorModel.intOf \"2\") (EditorModel.intOf \"1\") (EditorModel.intOf \"3\"))\n" ++
+          "#eval EditorModel.stripSnippet \"foo ${1:bar} $2 ${0}\"\n" ++
+          "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).text\n" ++
+          "#eval (EditorModel.acceptCompletion \"def x := tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 11).caret\n" ++
+          "#eval (EditorModel.acceptCompletion \"😀 tw\" \"{\\\"label\\\":\\\"twice\\\"}\" 5).caret\n" ++
+          "#eval EditorModel.completionTrigger (EditorModel.index \"-- no\") \"t\" 5\n" ++
+          "#eval EditorModel.completionTrigger (EditorModel.index \"-- x\\n\") \"t\" 5")
+          ["6", r#""Nat.add,add""#, r#""Nat.succ,Nat.sub""#, r#""add,Nat.add""#, "11",
+           r#""Nat.ad""#, "2", r#""2""#, r#""0""#, r#""foo bar  ""#, r#""def x := twice""#, "14", "8",
+           ".false", ".true"] },
+    { name := "editor rules: Tab indents a line or a selection as a host edit", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def atCaret := EditorModel.indentJson \"a\\nb\\nc\" \"1\" \"1\"\n" ++
+          "def selected := EditorModel.indentJson \"a\\nb\\nc\" \"0\" \"3\"\n" ++
+          "#eval String.contains atCaret \"\\\"insert\\\":\\\"  \\\"\"\n" ++
+          "#eval String.contains atCaret \"\\\"from\\\":1\"\n" ++
+          "#eval String.contains selected \"  a\"\n" ++
+          "#eval String.contains selected \"  b\"\n" ++
+          "#eval String.contains selected \"\\\"from\\\":0\"\n" ++
+          "#eval String.contains selected \"\\\"to\\\":3\"")
+          [".true", ".true", ".true", ".true", ".true", ".true"] },
+    { name := "editor rules: the position index is a versioned line table that round-trips", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def text := \"ab\\ncd\\nef\"\n" ++
+          "def i := EditorModel.indexVersion 7 text\n" ++
+          "def j := EditorModel.indexFromJson text (EditorModel.indexJson 7 text)\n" ++
+          "#eval i.length\n" ++
+          "#eval (EditorModel.positionFromOffset i 4).line\n" ++
+          "#eval (EditorModel.positionFromOffset i 4).character\n" ++
+          "#eval (EditorModel.positionFromOffset j 4).line\n" ++
+          "#eval EditorModel.offsetFromPosition j (EditorModel.Position.mk 1 2)\n" ++
+          "#eval (EditorModel.indexAt i 7 text).version\n" ++
+          "#eval (EditorModel.indexAt i 8 text).version")
+          ["8", "1", "1", "1", "5", "7", "8"] },
+    { name := "editor rules: the selfhost index answers term, goals and declarations", run := fun _ =>
+        okLoom ("import Web.EditorModel\n" ++
+          "def text := \"def f (n : Nat) : Nat := n\\n\"\n" ++
+          "def p := 16\n" ++
+          "def entries := \"[{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"term\\\",\\\"expected\\\":\\\"Nat\\\"}," ++
+          "{\\\"s\\\":41,\\\"e\\\":42,\\\"kind\\\":\\\"goal\\\",\\\"goals\\\":[\\\"n : Nat\\\\n⊢ Nat\\\"]}," ++
+          "{\\\"s\\\":20,\\\"e\\\":21,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"f\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
+          "def ix := EditorModel.lspIndexJson text \"import Prelude\\n\\n\" entries\n" ++
+          "#eval EditorModel.lspIndexSize ix\n" ++
+          "#eval String.contains (EditorModel.lspTermGoalJson text ix 25) \"\\\"goal\\\":\\\"Nat\\\"\"\n" ++
+          "#eval String.contains (EditorModel.lspGoalJson text ix 25) \"⊢ Nat\"\n" ++
+          "#eval String.contains (EditorModel.lspDeclarationsJson text ix) \"\\\"label\\\":\\\"f\\\"\"\n" ++
+          "#eval String.contains (EditorModel.lspDeclarationJson text ix \"f\") \"\\\"kind\\\":3\"\n" ++
+          "#eval EditorModel.lspTermGoalJson text ix 0")
+          ["3", ".true", ".true", ".true", ".true", r#""null""#] },
+    { name := "selfhost: commands split at column 0 and the engine's lines become diagnostics", run := fun _ =>
+        -- The in-page server's pure half (`Web.Selfhost`): the command splitter (doc
+        -- comments and attributes belong to the command; a block comment, an indented
+        -- line and a `mutual` body do not start one) and the engine's output lines as
+        -- diagnostics (a result is information, a parse error is placed at its token).
+        okLoom ("import Web.Selfhost\n" ++
+          "def src := \"import Prelude\\n-- a comment\\n/-- doc -/\\ndef twice (n : Nat) : Nat := n + n\\n\\n@[simp]\\ntheorem t : Nat := 0\\n/- a block\\ndef notACommand : Nat := 0\\n-/\\n#check twice\\n#eval twice 21\\n\"\n" ++
+          "def cmds := Selfhost.commandsJson src\n" ++
+          "#eval String.contains cmds \"\\\"keyword\\\":\\\"theorem\\\"\"\n" ++
+          "#eval String.contains cmds \"\\\"silent\\\":true\"\n" ++
+          "#eval String.contains cmds \"\\\"result\\\":true\"\n" ++
+          "def ds := Selfhost.diagnosticsOutputJson \"import Prelude\\ndef twice (n : Nat) : Nat := n + n\\n#eval twice 21\\n\" \"twice : Nat → Nat\\n42\\n\"\n" ++
+          "#eval String.contains ds \"\\\"message\\\":\\\"42\\\"\"\n" ++
+          "#eval String.contains ds \"\\\"severity\\\":3\"\n" ++
+          "def bad := Selfhost.diagnosticsOutputJson \"def a : Nat := 1\\n\" \"error: one\\nerror: two\\n\"\n" ++
+          "#eval String.contains bad \"position unknown\"\n" ++
+          "def parsed := Selfhost.diagnosticsOutputJson \"def a : Nat := 1\\n-- 😀\\ndef b : Nat := @@ 2\\n\" \"a : Nat\\nparse error 53: unexpected token '@@'\\n\"\n" ++
+          "#eval String.contains parsed \"parse-error\"\n" ++
+          "#eval String.contains parsed \"\\\"character\\\":15\"")
+          [".true", ".true", ".true", ".true", ".true", ".true", ".true", ".true"] },
+    { name := "selfhost: the Prelude rule and the declaration answers are the runtime's", run := fun _ =>
+        -- `withPrelude` adds `import Prelude\n\n` only when the source has no `import`;
+        -- completion/hover/definition are decoded from the check's declaration index,
+        -- not from the caret or the source text in the shim.
+        okLoom ("import Json\nimport Web.EditorModel\nimport Web.Selfhost\n" ++
+          "def text := \"def twice (n : Nat) : Nat := n + n\\ndef pred (n : Nat) : Nat := n\\n#eval twice\\n\"\n" ++
+          "def ix := EditorModel.lspIndexJson text \"import Prelude\\n\\n\" \"[{\\\"s\\\":20,\\\"e\\\":25,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"twice\\\",\\\"detail\\\":\\\"(n : Nat) → Nat\\\",\\\"ckind\\\":3},{\\\"s\\\":54,\\\"e\\\":58,\\\"kind\\\":\\\"decl\\\",\\\"name\\\":\\\"pred\\\",\\\"detail\\\":\\\"Nat → Nat\\\",\\\"ckind\\\":3}]\"\n" ++
+          "#eval String.contains (Selfhost.preludeJson \"def a : Nat := 1\") \"import Prelude\"\n" ++
+          "#eval String.contains (Selfhost.preludeJson \"import Prelude\\ndef a : Nat := 1\") \"\\\"prefix\\\":\\\"\\\"\"\n" ++
+          "#eval String.contains (Selfhost.completionPrefixJson \"x := tw\" 7) \"\\\"prefix\\\":\\\"tw\\\"\"\n" ++
+          "#eval String.contains (Selfhost.wordAtJson \"def twice (n : Nat)\" 6) \"\\\"word\\\":\\\"twice\\\"\"\n" ++
+          "def completion := Selfhost.completionJson text ix \"{\\\"line\\\":2,\\\"character\\\":8}\"\n" ++
+          "#eval String.contains completion \"\\\"newText\\\":\\\"twice\\\"\"\n" ++
+          "#eval String.contains completion \"\\\"character\\\":6\"\n" ++
+          "#eval String.contains (Selfhost.hoverJson text ix \"{\\\"line\\\":2,\\\"character\\\":10}\") \"twice : (n : Nat) → Nat\"\n" ++
+          "#eval String.contains (Selfhost.definitionJson text ix \"{\\\"line\\\":2,\\\"character\\\":10}\" \"file:///x.wiz\") \"file:///x.wiz\"\n" ++
+          "#eval String.contains (Selfhost.filterCompletionsJson \"[{\\\"label\\\":\\\"twice\\\",\\\"kind\\\":3},{\\\"label\\\":\\\"pred\\\",\\\"kind\\\":3}]\" \"tw\" \"200\") \"twice\"\n" ++
+          "#eval Selfhost.hoverJson text ix \"{\\\"line\\\":1,\\\"character\\\":2}\"")
+          [".true", ".true", ".true", ".true",
+           ".true", ".true", ".true", ".true", ".true", r#""null""#] },
+    { name := "session: a step diffs against the retained tree (one render per effect)", run := fun _ =>
+        okLoom (loomPrelude ++
+          "def live : Loom.LiveApp Model Msg := Loom.LiveApp.mk (Model.mk 0)\n" ++
+          "  (fun m _ s => match m with | .inc => Loom.setState countL Nat.succ s) counterView\n" ++
+          "def s0 : Loom.Session Model Msg := Loom.LiveApp.session live\n" ++
+          "def stepped := Loom.LiveApp.stepSession live s0 \"click\\n0\\n\"\n" ++
+          "#eval stepped.1.state.count\n" ++
+          "#eval Loom.patchesJson stepped.2\n" ++
+          "#eval String.eq (Loom.LiveApp.effectSessionJson live stepped.1 (Model.mk 5)).1.rendered.html (Loom.App.html app (Model.mk 5))")
+          ["1", r#""[{\"op\":\"text\",\"path\":\"0.0.0\",\"text\":\"count 1\"}]""#, ".true"] },
+    { name := "Widget: a slider and a plot render to the prefixed bundle, and an event patches it", run := fun _ =>
+        -- Web.Widget's display format is the kernel's contract (`WIZ_WIDGET:` plus the
+        -- bundle JSON); the plot's placeholder is `div.wiz-plot-canvas`. `handle` re-enters
+        -- the session with the callback and diffs old against new.
+        okLoom ("import Web.Widget\n" ++
+          "def ws : List Widget.Widget :=\n" ++
+          "  .cons (Widget.slider \"gain\" \"input\" \"0.50\" \"onGain\")\n" ++
+          "    (.cons (Widget.plot \"trace\" \"click\" \"{}\" \"onGain\") .nil)\n" ++
+          "def cb (e : Widget.Event) (wss : List Widget.Widget) : List Widget.Widget :=\n" ++
+          "  List.map (fun w => match String.eq w.id e.widget with\n" ++
+          "    | .true => Widget.setValue w e.value\n" ++
+          "    | .false => w) wss\n" ++
+          "#eval String.startsWith (Widget.display ws) Widget.prefix\n" ++
+          "#eval String.contains (Widget.display ws) \"wiz-plot-canvas\"\n" ++
+          "#eval String.contains (Widget.display ws) \"data-wiz-widget-kind\"\n" ++
+          "#eval List.length (Widget.widgetsOf (Widget.display ws))\n" ++
+          "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"patches\"\n" ++
+          "#eval String.contains (Widget.handle cb (Widget.display ws) \"gain\" \"input\" \"0.75\") \"\\\"op\\\"\"")
+          [".true", ".true", ".true", "2", ".true", ".true"] },
+    { name := "Widget: a Plot.Chart becomes a display-only widget whose fragment is the SVG", run := fun _ =>
+        -- `Widget.plotOf` is the `lib/Plot.wiz` adapter: the SVG replaces the plot
+        -- placeholder, so the notebook needs no front-end renderer for it.
+        okLoom ("import Plot\nimport Web.Widget\n" ++
+          "def chart : Plot.Chart :=\n" ++
+          "  Plot.labels \"x\" \"y\" (Plot.chart \"W\" (Plot.frame [\n" ++
+          "    Plot.line \"a\" [Plot.ptNat 0 1, Plot.ptNat 1 3, Plot.ptNat 2 2]]))\n" ++
+          "def w : Widget.Widget := Widget.plotOf \"sales\" chart\n" ++
+          "def ws : List Widget.Widget := List.cons w List.nil\n" ++
+          "#eval String.eq w.kind \"plot\"\n" ++
+          "#eval String.isEmpty w.callback\n" ++
+          "#eval String.contains (Widget.html ws) \"<svg\"\n" ++
+          "#eval String.contains (Widget.html ws) \"wiz-plot\"\n" ++
+          "#eval Bool.not (String.contains (Widget.html ws) \"wiz-plot-canvas\")\n" ++
+          "#eval String.startsWith (Widget.display ws) Widget.prefix")
+          [".true", ".true", ".true", ".true", ".true", ".true"] }
+  ]
+
+builtin_initialize registerGroup loomGroup
+
+end Tests.Elab

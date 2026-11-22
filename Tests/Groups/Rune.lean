@@ -9,7 +9,7 @@ set_option compiler.extract_closed false
 namespace Tests.Elab
 
 /-- The rune group: the HDL standard library of reusable, simulated primitives
-(`lib/Hdl/Uart.wiz`, `lib/Hdl/Spi.wiz`, `lib/Hdl/Ddr.wiz`). Each case runs the example
+(`hdl/src/Hdl/Uart.wiz`, `hdl/src/Hdl/Spi.wiz`, `hdl/src/Hdl/Ddr.wiz`). Each case runs the example
 through the front end, compiles it, and compares its report: the value simulation and
 the fast netlist simulation (`Hdl.Sim`) agree and the protocol behaves (a byte through
 the UART loopback at each counter width, the SPI edges and byte, the DDR handshake and
@@ -17,6 +17,7 @@ masked writes). -/
 def runeGroup : Group where
   name := "rune"
   exercise := "rune: the HDL standard library (UART, SPI, DDR)"
+  parallel := true
   cases := [
     { name := "UART: baud generator and TX/RX loopback at the 16-bit default, 7-bit (iCEstick) and 10-bit (Arty/OLED) widths, n=1 and max n, reset/CDC receiver; simFast = values, every byte back, well formed", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/rune-uart.wiz")

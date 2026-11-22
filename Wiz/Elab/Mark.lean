@@ -153,10 +153,10 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
   let g := ctx.globals
   let w : R := QuantitySyntax.explicitDefault
   match t with
-  | .var ix => (t, ctx.types[ix]?)
+  | .var ix => (t, ctx.typeAt? ix)
   | .const n us => (t, (g.find? n).bind fun d =>
       if d.levelParams.length == us.length then some (eval g [] (d.type.instLevels d.levelParams us)) else none)
-  | .natLit _ => (t, (g.builtins.lookup "nat").map fun N => ctx.eval (.const N []))
+  | .natLit _ => (t, (g.builtinOf? "nat").map fun N => ctx.eval (.const N []))
   | .sort l => (t, some (.sort (.succ l)))
   -- (the sorts pass: a hole gets the component's level)
   | .pi x bi q A B σ =>
@@ -356,12 +356,12 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     let vI := ctx.eval I
     let D := check ctx D (.desc l vI)
     let vD := ctx.eval D
-    let A := check ctx A (coitStateTy l vI w)
+    let A := check ctx A (scofixStateTy l vI w)
     let vA := ctx.eval A
     let f := check ctx f (scofixFunTy g l vI vD vA w)
     let i := check ctx i vI
     let vi := ctx.eval i
-    let a := check ctx a (vApp g vA vi)
+    let a := check ctx a (vApp g (vApp g vA (ctx.eval s)) vi)
     (.scofix l I D A f s i a, some (.nu l vI vD vi (ctx.eval s) none))
   | .coit l I D S st i s =>
     let (I, _) := type ctx I
@@ -384,8 +384,39 @@ partial def inferCore (ctx : Ctx R) (t : Term R) : Term R × Option (VTy R) :=
     | some (.ulift _ _ A) => (.down x, some A)
     | _ => (.down x, none)
   -- checked only (no type to compute), metavariables, and the evaluator's own `natOp`
-  | .lam .. | .pair .. | .tt | .up _ | .dret _ | .darg .. | .drec .. | .dhrec .. | .con _ | .cocon _
-  | .mvar _ | .natOp .. | .prf .. => (t, none)
+  | .lam .. | .tt | .mvar _ | .natOp .. | .prf .. => (t, none)
+  | .pair .. | .up _ | .dret _ | .darg .. | .drec .. | .dhrec .. | .con _ | .cocon _ =>
+    -- (the sorts pass: the shape's own type needs an expected type, but its components are
+    -- at this context (no binder) and must still be visited, `inferComponents`)
+    ((if ctx.sortsOnly then inferComponents ctx t else t), none)
+
+/-- (Mandatory sorts) The term with the components of a shape whose type only an expected
+type gives visited anyway. Their context is this one (none of these constructors binds a
+variable), so each can be inferred even when the whole cannot, which is what fills the
+sorts inside it.
+
+This is the case the pass used to miss. The elaborator wraps a lambda it infers in
+`ann … (Π … ⟨hole, hole⟩)` (`term.fun`): the `Π`'s sorts are the pass's to fill, and a pair
+in inference position kept them (the inline spelling of the store law,
+`(view L s, fun a => set L a s).2 …`, was rejected by the kernel with "without its
+sorts"). A pair checked against a known `Σ` was never affected: its components are checked
+against the `Σ`'s parts, so no `ann` is built.
+
+Marking needs no such descent: placing a marker needs the shape's type (which is what is
+missing), and the kernel asks for the marker when the check that did know the type did not
+supply it. -/
+partial def inferComponents (ctx : Ctx R) (t : Term R) : Term R :=
+  let go (u : Term R) : Term R := (infer ctx u).1
+  match t with
+  | .pair a b => .pair (go a) (go b)
+  | .up a => .up (go a)
+  | .dret i => .dret (go i)
+  | .drec q j D => .drec q (go j) (go D)
+  | .dhrec q H j D => .dhrec q (go H) (go j) (go D)
+  | .darg q S D => .darg q (go S) (go D)
+  | .con x => .con (go x)
+  | .cocon x => .cocon (go x)
+  | t => t
 
 end
 

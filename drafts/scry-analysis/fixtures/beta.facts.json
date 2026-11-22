@@ -1,0 +1,20 @@
+{
+  "format": "scry-facts",
+  "version": 1,
+  "language": "c",
+  "files": [
+    { "id": 0, "path": "beta.c", "bytes": 24 }
+  ],
+  "nodes": [
+    { "id": 0, "kind": "translation_unit", "field": "", "span": [0, 24], "named": true },
+    { "id": 1, "kind": "function_definition", "field": "", "parent": 0, "span": [0, 18], "named": true },
+    { "id": 2, "kind": "call_expression", "field": "", "parent": 1, "span": [4, 14], "named": true }
+  ],
+  "edges": [
+    { "id": 0, "src": 0, "dst": 1, "label": "child" },
+    { "id": 1, "src": 1, "dst": 2, "label": "child" }
+  ],
+  "relations": [
+    { "id": 0, "name": "call", "arity": 2, "tuples": [] }
+  ]
+}

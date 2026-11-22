@@ -1,0 +1,195 @@
+-- test: run
+-- NOTE: `e2e-cs.expected` was written from the checked-in corpus goldens and
+-- the contracts below, not copied from a completed run. The first live run was
+-- blocked before it reached the test (missing tree-sitter-c-sharp out-link), so
+-- treat the expected file as a contract until the scry goldens job has compared
+-- it. Do not mark this case as verified in a report before then.
+import Sys
+import Json
+import Text
+
+-- `scry cs`: the C# tree driver, end to end on the checked-in corpus.
+--
+--   corpus/csharp/repo           6 kept / 5 excluded, 1 finding, 1 parse failure
+--   .../repo/src/Clean.cs        one clean file
+--   corpus/csharp/only-excluded  only `bin/Ghost.cs`, so nothing analysed   exit 3
+--   missing path / bad flag                                                 exit 2
+--
+-- It asserts the report JSON (`scry-cs-report/1`), the coverage rows, the SARIF log,
+-- and all four exit statuses (0 clean, 1 gated, 2 usage/IO, 3 nothing analysed).
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+structure Res where
+  code : Nat
+  out : String
+  err : String
+
+def run (args : List String) : EIO Res := do
+  out ← Process.output ".grail/bin/scry" args "";
+  let code := match out.status with
+    | .exited n => n
+    | .signaled _ => 99;
+  EIO.pure (Res.mk code out.stdout out.stderr)
+
+partial def jAt (j : Json) (path : List String) : Json :=
+  match path with
+  | .nil => j
+  | .cons k rest => match Json.get j k with
+    | .some x => jAt x rest
+    | .none => Json.mkNull
+
+def jNat (j : Json) (path : List String) : Nat :=
+  match jAt j path with
+  | .int _ n => n
+  | _ => 0
+
+def jStr (j : Json) (path : List String) : String :=
+  match jAt j path with
+  | .str s => s
+  | _ => ""
+
+def jList (j : Json) (path : List String) : List Json :=
+  match jAt j path with
+  | .arr xs => Jsons.toList xs
+  | _ => .nil
+
+def nthJ : List Json → Nat → Json
+  | .nil, _ => Json.mkNull
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ k => nthJ xs k
+
+def parseJson (label text : String) : EIO Json :=
+  match Json.parse text with
+  | .ok j => EIO.pure j
+  | .error e => do
+    check (label ++ ": JSON parses (" ++ e ++ ")") .false;
+    EIO.pure Json.mkNull
+
+def firstLine (s : String) : String :=
+  match String.splitOn s "\n" with
+  | .cons l _ => l
+  | .nil => ""
+
+def coverage (j : Json) : List Json := jList j ["coverage"]
+
+def row (j : Json) (construct : String) : Option Json :=
+  List.find (fun r => String.eq (jStr r ["construct"]) construct) (coverage j)
+
+def readText (p : String) : EIO (Except String String) := do
+  ok ← EIO.lift (FS.exists p);
+  match ok with
+  | .false => EIO.pure (.error ("no such file: " ++ p))
+  | .true => do
+    t ← FS.readFile p;
+    EIO.pure (.ok t)
+
+def main : IO Unit := EIO.toIO (do
+  bin ← EIO.lift (FS.exists ".grail/bin/scry");
+  match bin with
+  | .false => EIO.lift (IO.println "e2e-cs: skip (.grail/bin/scry absent)")
+  | .true => do
+    dir ← FS.createTempDir;
+    let sarif := Path.join dir "cs.sarif";
+
+    -- 1. the repository tree: coverage, a finding, a per-file parse failure
+    r0 ← run ["cs", "corpus/csharp/repo", "--json", "--sarif", sarif];
+    j0 ← parseJson "repo" r0.out;
+    check "repo: exit 0 without --fail-on" (Nat.beq r0.code 0);
+    check "repo: schema scry-cs-report/1"
+      (String.eq (jStr j0 ["schema"]) "scry-cs-report/1");
+    check "repo: kind directory" (String.eq (jStr j0 ["kind"]) "directory");
+    check "repo: 11 .cs before exclusions" (Nat.beq (jNat j0 ["walk", "before"]) 11);
+    check "repo: 6 kept" (Nat.beq (jNat j0 ["walk", "kept"]) 6);
+    check "repo: 5 excluded" (Nat.beq (jNat j0 ["walk", "excluded"]) 5);
+    check "repo: 6 found, 5 parsed, 5 lowered, 1 failed"
+      (Bool.and (Nat.beq (jNat j0 ["files", "found"]) 6)
+        (Bool.and (Nat.beq (jNat j0 ["files", "parsed"]) 5)
+          (Bool.and (Nat.beq (jNat j0 ["files", "lowered"]) 5)
+            (Nat.beq (jNat j0 ["files", "failed"]) 1))));
+    check "repo: 6 functions" (Nat.beq (jNat j0 ["functions"]) 6);
+    check "repo: 5 rules" (Nat.beq (jNat j0 ["rules", "count"]) 5);
+    check "repo: one error finding" (Nat.beq (jNat j0 ["findings", "total"]) 1);
+    check "repo: the rule is command-injection"
+      (Nat.beq (List.length (List.filter (fun r =>
+        Bool.and (String.eq (jStr r ["rule"]) "command-injection")
+          (Nat.beq (jNat r ["count"]) 1)) (jList j0 ["findings", "byRule"]))) 1);
+    check "repo: the finding is in src/Helper.cs"
+      (String.startsWith (jStr (nthJ (jList j0 ["findings", "byRule"]) 0) ["example"])
+        "src/Helper.cs:");
+
+    -- coverage rows: every row is named; errors are never merged
+    check "coverage: 9 rows" (Nat.beq (List.length (coverage j0)) 9);
+    match row j0 "parse failure" with
+    | .some r => do
+      check "coverage: one parse failure row" (Nat.beq (jNat r ["count"]) 1);
+      -- The row's location is deterministic (`src/Scry/CsCmd.wiz`'s `analyseFile`:
+      -- `rel ++ ":" ++ line ++ ":" ++ col ++ " (" ++ kind ++ ")"`), so pin its shape:
+      -- the file, and the first failing node's kind in parentheses. A
+      -- `startsWith "src/Broken.cs:"` alone accepts a truncated location, and the old
+      -- `== "src/Broken.cs"` was simply wrong (the row has carried a position since
+      -- `e3f27195d`). The line:column digits need a live C# run to pin; the scry
+      -- golden job is where that can be observed.
+      let ex := jStr r ["example"];
+      check "coverage: the failed file is named"
+        (String.startsWith ex "src/Broken.cs:");
+      check "coverage: the failure names its node kind, not just the path"
+        (Bool.and (String.endsWith ex ")")
+          (Bool.or (String.contains ex " (ERROR)")
+                   (String.contains ex " (MISSING ")))
+    | .none => check "coverage: parse failure row exists" .false;
+    check "coverage: the exclusion rules are rows"
+      (List.all (fun c => match row j0 ("excluded: " ++ c) with
+        | .some r => Nat.beq (jNat r ["count"]) 1
+        | .none => .false)
+        ["bin/", "obj/", "node_modules/", "*.g.cs", "*.Designer.cs"]);
+
+    -- 2. the gate: an error finding and a warning coverage row both gate
+    r1 ← run ["cs", "corpus/csharp/repo", "--json", "--fail-on", "error"];
+    check "gate: --fail-on error exits 1" (Nat.beq r1.code 1);
+    j1 ← parseJson "gate-error" r1.out;
+    check "gate: the JSON exit field is 1" (Nat.beq (jNat j1 ["exit"]) 1);
+    r2 ← run ["cs", "corpus/csharp/repo", "--json", "--fail-on", "warning"];
+    check "gate: --fail-on warning exits 1 (coverage row)" (Nat.beq r2.code 1);
+
+    -- 3. SARIF
+    readOut ← readText sarif;
+    match readOut with
+    | .error e => check ("sarif: read (" ++ e ++ ")") .false
+    | .ok text => match Json.parse text with
+      | .error e => check ("sarif: parses (" ++ e ++ ")") .false
+      | .ok j => do
+        check "sarif: version 2.1.0" (String.eq (jStr j ["version"]) "2.1.0");
+        check "sarif: driver scry"
+          (String.eq (jStr (nthJ (jList j ["runs"]) 0) ["tool", "driver", "name"]) "scry");
+        check "sarif: one result"
+          (Nat.beq (List.length (jList (nthJ (jList j ["runs"]) 0) ["results"])) 1);
+        check "sarif: the result names command-injection"
+          (String.eq (jStr (nthJ (jList (nthJ (jList j ["runs"]) 0) ["results"]) 0) ["ruleId"])
+            "scry/c/command-injection");
+
+    -- 4. clean file: 0 findings, exit 0
+    r3 ← run ["cs", "corpus/csharp/repo/src/Clean.cs", "--json"];
+    j3 ← parseJson "clean" r3.out;
+    check "clean: exit 0" (Nat.beq r3.code 0);
+    check "clean: kind file" (String.eq (jStr j3 ["kind"]) "file");
+    check "clean: one file found" (Nat.beq (jNat j3 ["files", "found"]) 1);
+    check "clean: no findings" (Nat.beq (jNat j3 ["findings", "total"]) 0);
+
+    -- 5. all four statuses
+    r4 ← run ["cs", "corpus/csharp/only-excluded", "--json"];
+    j4 ← parseJson "nothing" r4.out;
+    check "nothing: only excluded files exits 3" (Nat.beq r4.code 3);
+    check "nothing: the JSON says 0 found" (Nat.beq (jNat j4 ["files", "found"]) 0);
+    check "nothing: the JSON exit field is 3" (Nat.beq (jNat j4 ["exit"]) 3);
+    r5 ← run ["cs", "corpus/csharp/does-not-exist"];
+    check "IO: a missing path exits 2" (Nat.beq r5.code 2);
+    check "IO: the error line names scry cs" (String.startsWith (firstLine r5.err) "scry cs: ");
+    r6 ← run ["cs", "--bogus"];
+    check "usage: a bad flag exits 2" (Nat.beq r6.code 2);
+
+    FS.removeAll dir)

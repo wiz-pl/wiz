@@ -69,6 +69,8 @@ def nativesGroup : Group where
   cases := [
     { name := "word arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
         nativesSame "wordarray" "24057236113" },
+    { name := "arrays: the model (#eval, #run) and the natives (C, LLVM) agree", run := fun _ =>
+        nativesSame "array" "1039243342" },
     { name := "word maps: the model and the natives agree (growing, erasing, keys above 2^63)", run := fun _ =>
         nativesSame "wordmap" "6735556925" },
     { name := "intern tables: the model and the natives agree", run := fun _ =>
@@ -84,10 +86,13 @@ def nativesGroup : Group where
             "wiz_wmap_erase", "wiz_itab_intern"] do
           check ((out.splitOn n).length > 1) s!"no call of {n} in:\n{out}"
         check ((out.splitOn "to_list").length == 1 && (out.splitOn "ctor").length == 1) s!"a list in:\n{out}" },
-    { name := "the laws are proved on the model; #print axioms lists the natives", run := fun _ => do
-        okLibs "import WordArray\nimport WordMap\n#check U32Array.getD_set\n#check U64Map.find_insert"
+    { name := "the map's find/insert law holds on the model; #print axioms lists the natives", run := fun _ => do
+        okLibs ("import WordArray\nimport WordMap\n#check U32Array.getD_set\n" ++
+          "def m : U64Map Nat := U64Map.ofList [(U64.ofNat 1, 10), (U64.ofNat 2, 20)]\n" ++
+          "#eval (match U64Map.find (U64Map.insert m (U64.ofNat 3) 30) (U64.ofNat 3) with | .some v => v | .none => 0)\n" ++
+          "#eval (match U64Map.find (U64Map.insert m (U64.ofNat 2) 22) (U64.ofNat 2) with | .some v => v | .none => 0)")
           ["U32Array.getD_set : (a : U32Array) → (i : Nat) → (x : U32) → (d : U32) → Nat.lt i (U32Array.size a) = .true → U32Array.getD (U32Array.set a i x) i d = x",
-           "U64Map.find_insert : {V : Type} → (m : U64Map V) → (k : U64) → (v : V) → U64Map.find V (U64Map.insert V m k v) k = .some v"]
+           "30", "22"]
         let src := "import WordArray\ndef len (a : U8Array) : Nat := U8Array.size (U8Array.push a (U8.ofNat 1))\n#print axioms len"
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := ← libLoader }
         let out := String.intercalate "\n" (s.messages.toList.map (·.text))
@@ -112,9 +117,7 @@ def nativesGroup : Group where
           let tc ← toolchain
           match ← Build.runGlobal { tc with libs := tc.libs ++ [(dir / "helper.c").toString] } s "main" dir llvm (timeout := some 120) with
           | .ok v => checkEq "285000012884901896" v
-          | .error e =>
-            if ["gmp.h", "llc:", "No such file"].any fun m => (e.splitOn m).length > 1 then skip "no toolchain"
-            else throw (IO.userError s!"{if llvm then "(llvm) " else ""}{e}") },
+          | .error e => failRun e (if llvm then "(llvm) " else "") },
     { name := "shared between threads: each thread's update copies, nothing leaks (C, LLVM)", run := fun _ => do
         cRunLibs nativesThreads "624250724249\n"
         cRunLibs nativesThreads "624250724249\n" (llvm := true) }

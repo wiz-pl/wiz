@@ -1,5 +1,10 @@
-// The browser half of lib/Web/React.wiz: apply the patch list `React.patchesJson`
+// The browser half of lib/Web/Loom.wiz: apply the patch list `Loom.patchesJson`
 // produces, and turn DOM events into (event, handler-index) calls back into Wiz.
+//
+// This file is the DOM seam only. The shared model (host / Loom runtime / SSR shell /
+// designer-builder), the data paths, the single validation table and the adopt contract
+// are canonical in `docs/notes/loom-wire-protocol.md`; in particular `mount` here is the
+// **replace** path, chosen by `adopt.js` when an island's SSR hash does not verify.
 //
 // The paths are child indices from the container: "" is the container, "0" its first
 // child, "0.2" the third child of that. Text nodes count as children, as in the DOM.
@@ -10,7 +15,7 @@
 // No framework, no build step: an ES module, like tagged.js.
 "use strict";
 
-// Apply `patches` (the parsed JSON of React.patchesJson) to `root`. `parse(html)`
+// Apply `patches` (the parsed JSON of Loom.patchesJson) to `root`. `parse(html)`
 // returns a DocumentFragment (in a browser, `parseHtml` below). Each operation expects
 // the DOM state left by the previous ones (the diff emits them in order).
 export function applyPatches(root, patches, parse = parseHtml) {
@@ -24,6 +29,15 @@ export function applyPatches(root, patches, parse = parseHtml) {
       case "text": {
         const n = nodeAt(root, p.path);
         n.textContent = p.text;
+        // A textarea's text child is its *default* value: once the user has edited the
+        // control (the HTML "dirty value flag"), replacing the child does not change the
+        // live value. A page that sets a textarea's text means the value too. Only
+        // assign when it differs, so a re-render during typing cannot move the caret.
+        const parent = n.parentNode;
+        if (parent && String(parent.tagName || "").toLowerCase() === "textarea" &&
+            parent.value !== p.text) {
+          try { parent.value = p.text; } catch { /* a test double without a value */ }
+        }
         break;
       }
       case "setAttr": {
@@ -101,22 +115,29 @@ function parseHtml(html) {
 // with `data-wiz-on-EVENT="index"` is found from the target up (one attribute per
 // event, so an element can handle a click and a keydown), and `send(event, index,
 // domEvent)` is called. `send` returns whether the event was handled; when it does,
-// the default action is prevented (a button in a form should not submit).
-export function delegate(root, send, types = ["click", "input", "change", "submit", "keydown", "keyup"]) {
+// the default action is prevented (a button in a form should not submit) — unless the
+// element also carries `data-wiz-prevent-EVENT` (`Loom.onPrevent`), in which case
+// `consume(event, index, domEvent)` decides: a keydown on a textarea must not swallow
+// typing, so the runtime prevents only the keys it consumed.
+export function delegate(root, send, types = ["click", "input", "change", "submit", "keydown", "keyup"], consume = null) {
   for (const type of types) {
     const attr = "data-wiz-on-" + type;
+    const marked = "data-wiz-prevent-" + type;
     root.addEventListener(type, (e) => {
       let t = e.target;
       while (t && t !== root && !(t.getAttribute && t.getAttribute(attr) != null)) t = t.parentNode;
       if (!t || t === root || !t.getAttribute) return;
       const at = t.getAttribute(attr);
       if (at == null) return;
-      if (send(type, Number(at), e)) e.preventDefault();
+      const handled = send(type, Number(at), e);
+      if (!handled) return;
+      const asks = t.getAttribute(marked) != null;
+      if (!asks || typeof consume !== "function" || consume(type, Number(at), e)) e.preventDefault();
     }, false);
   }
 }
 
-// Mount a server-rendered tree: `html` is React.toHtml's output for the initial state.
+// Mount a server-rendered tree: `html` is Loom.toHtml's output for the initial state.
 export function mount(root, html, parse = parseHtml) {
   const frag = parse(html);
   for (const c of Array.from(root.childNodes)) root.removeChild(c);

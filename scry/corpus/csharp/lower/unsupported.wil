@@ -1,0 +1,69 @@
+func Demo.Unsupported.OutOfScope.GetEnumerator(%0)
+  b0:
+    ret
+func Demo.Unsupported.Control.Apply(%0)
+  b0:
+    %1 = 1
+    %2 = call f(%1)
+    ret %2
+func Demo.Unsupported.Control.Flow(%0, %1)
+  b0:
+    %2 = fnptr $lambda:233
+    %3 = %2
+    %4 = fnptr $lambda:254
+    %5 = %4
+    %6 = 1
+    %7 = call Local(%6)
+    %8 = 2
+    %9 = %8
+    %10 = 2
+    %11 = mul %9, %10
+    %12 = %11
+    %13 = call System.String.Concat(%7, %12)
+    %14 = fnptr $lambda:289
+    %15 = call Demo.Unsupported.Control.Apply(%14)
+    %16 = call System.String.Concat(%13, %15)
+    %1 = %16
+    %17 = havoc u1
+    %18 = 0
+    br ne %17, %18 ? b1 : b2
+  b1:
+    %19 = call System.Console.WriteLine(%1)
+    goto b3
+  b2:
+    goto b3
+  b3:
+    %20 = call System.Exception..ctor()
+    goto b4
+  b4:
+    %21 = havoc u1
+    %22 = 0
+    br ne %21, %22 ? b6 : b8
+  b5:
+    ret
+  b6:
+    %23 = havoc dyn*
+    %24 = null
+    %25 = ne %23, %24
+    %26 = call System.Console.WriteLine(%23)
+    goto b5
+  b7:
+    ret
+  b8:
+    goto b7
+warning: Demo.Unsupported.OutOfScope.GetEnumerator:30: yield_statement not modelled
+warning: Demo.Unsupported.Control.Apply:36: call to f: not a method of Demo.Unsupported.Control (delegate or unknown)
+warning: Demo.Unsupported.Control.Flow:40: local function Local not modelled: its body is not lowered and calls to it are unknown
+warning: Demo.Unsupported.Control.Flow:44: call to Local: not a method of Demo.Unsupported.Control (delegate or unknown)
+warning: Demo.Unsupported.Control.Flow:44: lambda body not lowered: passed to Demo.Unsupported.Control.Apply, whose call site is unknown
+warning: Demo.Unsupported.Control.Flow:46: lock_statement not modelled
+warning: Demo.Unsupported.Control.Flow:51: goto_statement not modelled
+warning: Demo.Unsupported.Control.Flow:53: labeled_statement not modelled
+warning: Demo.Unsupported.Control.Flow:61: nested pattern binding inner not modelled
+warning: Demo.Unsupported.Control.Flow:42: lambda body not lowered: assigned to local unused but never invoked in this method, so its call site is unknown
+warning: <global>:77: preproc_if not modelled: no code is lowered for it
+warning: <global>:10: delegate_declaration not modelled: no code is lowered for it
+warning: Demo.Unsupported.IBox:14: indexer_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:20: indexer_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:22: operator_declaration member not modelled: no code is lowered for it
+warning: Demo.Unsupported.OutOfScope:24: destructor_declaration member not modelled: no code is lowered for it

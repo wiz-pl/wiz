@@ -11,20 +11,35 @@
                                      their parts) A shard with
                                      "split": N becomes N shards NAME-1 … NAME-N, its
                                      cases balanced by .github/test-timings.json (needs
-                                     the test driver BIN; default .lake/build/bin/tests)
+                                     the test driver BIN; default .lake/build/bin/tests).
+                                     The shards are ordered by estimated cost, longest
+                                     first (the same `estimate`: a shard the baseline
+                                     cannot estimate goes last, by name), because GitHub
+                                     starts a matrix in that order and its 20-job cap
+                                     leaves the late entries waiting: the expensive work
+                                     should start in the first wave.
   scripts/ci.py check-shards [BIN]   check that every test case is run by exactly one
-                                     shard (after splitting), and that every selector
-                                     of a shard selects something. A group that no
-                                     selector picks goes to the shard it names
-                                     (`Group.shard`) or to the shard with
-                                     "default": true (`resolved`)
+                                     shard (after splitting), that every selector of a
+                                     shard selects something, and that the plan is total:
+                                     every group a shard selects or an entry of
+                                     .github/test-shard-exclusions.json (with a reason
+                                     and an owner) explains. A group with neither is an
+                                     error naming it — the old fallback to a default
+                                     shard is gone — and so is an exclusion whose group
+                                     does not exist or which a shard selects after all.
+                                     Also fails on a .github/skip-allowlist.json entry
+                                     whose group or case no case matches.
   scripts/ci.py plan [BIN]           the split shards' parts with their estimated times
   scripts/ci.py changes BASE [HEAD]  what a change needs (path filters): reads the files
                                      that differ between BASE and HEAD (git diff
                                      BASE HEAD; CI: a PR's merge commit and its first
                                      parent) and prints GitHub outputs: code=true
-                                     unless only docs changed, docs=true when a doc
-                                     changed, and shards=[NAMES], the shards of
+                                     unless only docs or the STC metatheory changed,
+                                     docs=true when a doc changed, web=true when a
+                                     browser-facing file (`web/*`) changed, stc=true
+                                     when `STC.lean` or `STC/` changed (the `stc` job
+                                     typechecks that library, which nothing else
+                                     imports), and shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
                                      "inputs", see `needed_shards`). `changes --all`
                                      prints everything
@@ -43,34 +58,71 @@
                                      (default 1.5) times the median shard's, every case
                                      of a split shard is in .github/test-timings.json,
                                      and no shared program is built by two parts of one
-                                     split shard. Prints GitHub warning annotations and
+                                     split shard (a "split-cases" shard excepted: its
+                                     parts each build it by design). Prints GitHub warning
+                                     annotations and
                                      a Markdown report (stdout); on drift, writes the
                                      regenerated baseline to FILE. Exits 0 (1 with
                                      --strict when there is drift)
+  scripts/ci.py fetch-runs [--branch REGEX] N DIR
+                                     download the last N completed (not cancelled) CI
+                                     runs that have a `test-timings` artifact into
+                                     DIR/RUN_ID/ (timings.jsonl, and jobs.json from the
+                                     jobs API), the input of `rebalance`; --branch: only
+                                     runs whose branch matches REGEX (whole name, e.g.
+                                     'master|integration/.*'); needs `gh`
+  scripts/ci.py rebalance [--jobs N] [--assume TSV] [--write] [--bin BIN] RUN..
+                                     re-derive the split shards from measured times:
+                                     each RUN is one run's `--timings` file (the
+                                     `test-timings` artifact) or a `fetch-runs`
+                                     directory; a case's time is its median over the
+                                     runs. With jobs.json, a shard's prediction is
+                                     scaled by its measured wall time over its case
+                                     sum (`--jobs` overlaps cases), and a shard that is
+                                     not split is its median wall time. Prints the new baseline's
+                                     summary, the "split" count of each split shard and
+                                     the predicted time of every job (min/median/max);
+                                     with --write, writes .github/test-timings.json and
+                                     the "split" counts of .github/test-shards.json.
+                                     The case list is the test driver's (--bin, default
+                                     .lake/build/bin/tests, when it exists), else the
+                                     last JSONL's. --assume TSV: `GROUP<TAB>CASE<TAB>S`
+                                     rows for cases no run has measured yet (S seconds,
+                                     or `drop`: a case that is gone). --jobs N: at most
+                                     N test jobs in all (default: as many as now); the
+                                     split counts grow greedily, a part at a time to the
+                                     shard with the longest part, until the budget is
+                                     used or another part would not shorten it. Exits
+                                     with an error if the parts do not cover every case
+                                     of the split shards exactly once
   scripts/ci.py check-skips [--max-ratio F] [--allow FILE] LOG|JSONL..
                                      a green run must have tested something: fail when
                                      a group skipped wholesale, when a skip names a tool
                                      the CI dev shell must provide (cc, GMP, GC, yosys,
-                                     node, nix, …), or when a group's unexplained skipped
+                                     node, nix, …), when a group's unexplained skipped
                                      ratio is over F (default 0.25, of the group's
-                                     cases in all shards). A skip in a group of
-                                     .github/skip-allowlist.json whose reason matches
-                                     (and whose case, when the entry names one) is
-                                     explained (reported, not failed); anything else that
-                                     skips wholesale is a failure. Reads `lake test`
-                                     logs and `--timings` files. `--self-test` checks the
-                                     rule on synthetic logs and exits 1 if it is wrong
+                                     cases in all shards), or when the logs parse no
+                                     records at all. A skip excused by an entry of
+                                     .github/skip-allowlist.json (same group and case
+                                     exactly, a reason the skip's starts with, and an
+                                     expiry still in the future) is explained (reported,
+                                     not failed); anything else that skips wholesale is a
+                                     failure. Reads `lake test` logs and `--timings`
+                                     files. `--self-test` checks the rule on synthetic
+                                     logs and exits 1 if it is wrong
 
 Selectors are the arguments of `lake test --`: `=NAME` selects the group NAME,
 `=NAME#I,J` the cases I and J of it, anything else is a prefix of group names (see
 Tests/Main.lean).
 """
+import datetime as dt
 import fnmatch, json, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARDS = os.path.join(ROOT, ".github", "test-shards.json")
 TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
 SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
+EXCLUSIONS = os.path.join(ROOT, ".github", "test-shard-exclusions.json")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
@@ -99,29 +151,84 @@ def shards():
         return json.load(f)
 
 
-def resolved(binary):
-    """The shards of .github/test-shards.json, with each group that no shard's selectors
-    pick added (as `=NAME`) to the shard that the group names (`Group.shard`, `tests
-    --list-shards`), else to the shard marked `"default": true`. So a new group needs no
-    edit here; selectors still win over a group's own choice."""
+class ShardPlanError(Exception):
+    """The shard plan is not total: a group is in no shard and no exclusion says why, an
+    exclusion is stale, or a selector names nothing. `check-shards` reports it as an
+    error, and `matrix`/`plan` refuse to build a plan that would silently lose cases."""
+
+
+def exclusions(path=None):
+    """The groups that run in no CI shard, each with `group`, `reason` and `owner` (and
+    optional `why`). The plan is total only when every case-listed group is selected by a
+    shard's selectors or named here: a group that is in neither is an error, not a
+    fallback to a default shard. A malformed entry is an error; `check-shards` fails on an
+    entry whose group does not exist, or which a shard selects after all (a stale entry)."""
+    path = path or EXCLUSIONS
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        return []
+    out = []
+    for e in doc.get("groups", []):
+        for k in ("group", "reason", "owner"):
+            if not str(e.get(k, "")).strip():
+                raise ShardPlanError(f"{path}: the entry {json.dumps(e)} lacks {k!r}")
+        out.append(dict(e))
+    return out
+
+
+def check_group_plan(groups, hints=None):
+    """The plan's group-totality errors: a group (from `tests --list`) that no shard
+    selects and no exclusion explains; an exclusion whose group does not exist; an
+    exclusion a shard selects after all. `hints` maps a group to its `Group.shard` hint,
+    only to make the first error more useful. Empty when the plan is total."""
     ss = shards()
-    names = {s["name"]: s for s in ss}
-    defaults = [s for s in ss if s.get("default")]
-    if len(defaults) != 1:
-        sys.exit(f"{SHARDS}: exactly one shard must have \"default\": true (found {len(defaults)})")
+    excl = {e["group"]: e for e in exclusions()}
+    hints = hints or {}
+    errors = []
+    if not groups:
+        return ["no test groups listed: the listing is empty, so the plan proves nothing"]
+    for g in groups:
+        picked = [s["name"] for s in ss if any(selects(g, sel) for sel in s["select"])]
+        if g in excl:
+            if picked:
+                errors.append(
+                    f"{EXCLUSIONS}: {g!r} is excluded, but the shard(s) {', '.join(picked)} "
+                    f"select it; either delete the exclusion or the selector")
+        elif not picked:
+            where = f"; its Group.shard hint names {hints[g]!r}" if hints.get(g) else ""
+            errors.append(
+                f"{SHARDS}: no shard selects the group {g!r}{where}. Add '={g}' to a "
+                f"shard's select list, or an entry for it in {EXCLUSIONS} saying why it "
+                f"runs nowhere")
+    for g in excl:
+        if g not in groups:
+            errors.append(
+                f"{EXCLUSIONS}: the exclusion names {g!r}, which is not a test group "
+                f"(`tests --list-shards`)")
+    return errors
+
+
+def resolved(binary):
+    """The shards of .github/test-shards.json, checked to be total: every group that
+    `tests --list-shards` reports must be selected by a shard's selectors or named in
+    .github/test-shard-exclusions.json. There is no default-shard fallback: a new group
+    that nobody wired is an error naming the group (and its `Group.shard` hint, if any),
+    not a case that quietly joins another shard's queue."""
+    ss = shards()
     out = subprocess.run([binary, "--list-shards"], capture_output=True, text=True, check=True,
                          cwd=ROOT).stdout
+    groups, hints = [], {}
     for line in out.split("\n"):
         if not line:
             continue
         g, _, hint = line.partition("\t")
-        if any(selects(g, sel) for s in ss for sel in s["select"]):
-            continue
-        if hint and hint not in names:
-            sys.exit(f"group {g!r} asks for the shard {hint!r}, which .github/test-shards.json lacks")
-        (names[hint] if hint else defaults[0]).setdefault("added", []).append(f"={g}")
-    for s in ss:
-        s["select"] = s["select"] + s.pop("added", [])
+        groups.append(g)
+        hints[g] = hint
+    errors = check_group_plan(groups, hints)
+    if errors:
+        raise ShardPlanError("\n".join(errors))
     return ss
 
 
@@ -168,17 +275,21 @@ def part_cost(items, builds):
     return sum(it[3] for it in items) + sum(builds.get(r, 0.0) for r in uses)
 
 
-def partition(items, n, builds):
+def partition(items, n, builds, split_cases=False):
     """Split the cases into n parts with the smallest longest part (estimated). The
     cases that use the same shared programs (the self-hosted checker or compiler: the
     first case that needs one builds it) stay together, so each program is built by one
-    part only; the other cases fill the parts up. Greedy, longest first, then single
-    moves while they help; deterministic."""
+    part only; the other cases fill the parts up. With `split_cases`, each case is its own
+    unit instead: a shard of sibling cases over disjoint inputs (the `selfhost-libdiff`
+    file parts) wants them spread over the jobs, and `part_cost` charges every part the
+    build it then pays. Greedy, longest first, then single moves while they help;
+    deterministic."""
     clusters = {}
     for it in items:
         clusters.setdefault(it[4], []).append(it)
     # the units to place: a cluster per set of programs, and each remaining case
-    units = [c for uses, c in clusters.items() if uses] + [[it] for it in clusters.get((), [])]
+    units = ([[it] for it in items] if split_cases else
+             [c for uses, c in clusters.items() if uses] + [[it] for it in clusters.get((), [])])
     units.sort(key=lambda u: (-part_cost(u, builds), u[0][0], u[0][1]))
     parts = [[] for _ in range(n)]
     cost = lambda us: part_cost([it for u in us for it in u], builds)
@@ -218,24 +329,38 @@ def part_selectors(items):
 
 def expanded(binary, base=None):
     """The shards with each split shard replaced by its parts: [(name, selectors,
-    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (1 unless the shard
-    says "jobs": N: the number of cases of a parallel-opted-in group it runs at a time)."""
+    estimated seconds or None, jobs)]; `jobs` is the shard's "--jobs" (None unless the
+    shard says "jobs": N: the number of cases of a parallel-opted-in group it runs at a
+    time). A shard without "jobs" is run without `--jobs`, so a case that has an auto
+    mode (selfhost-libdiff) can tell "not given" from "--jobs 1". A shard with
+    "split-cases": true hands each case to `partition` on its own rather than keeping the
+    cases that use one shared program together (see `partition`)."""
     out = []
     for s in resolved(binary):
         n = s.get("split", 1)
-        jobs = s.get("jobs", 1)
+        jobs = s.get("jobs")
         if n <= 1:
             out.append((s["name"], s["select"], None, jobs))
             continue
         base = base or baseline()
         items = estimate(list_cases(binary, s["select"]), base)
-        for k, p in enumerate(partition(items, n, base["builds"]), 1):
+        split_cases = bool(s.get("split-cases"))
+        for k, p in enumerate(partition(items, n, base["builds"], split_cases), 1):
             if p:
                 out.append((f"{s['name']}-{k}", part_selectors(p), part_cost(p, base["builds"]), jobs))
     return out
 
 
-def matrix(binary, only=None):
+def picks(group, index, sel):
+    """Does the selector `sel` pick case `index` of `group` (as `list_cases` would)?"""
+    if not sel.startswith("="):
+        return group.startswith(sel)
+    name, has, ixs = sel[1:].partition("#")
+    return group == name and (not has or index in {int(i) for i in ixs.split(",") if i})
+
+
+def matrix_entries(binary, only=None):
+    """The shards' matrix entries, longest first (see the ordering note below)."""
     # "heavy": true shards (and the parts of a split one) may run on the self-hosted
     # runner (vars.WIZ_RUNNER_HEAVY, docs/ci-runner.md)
     heavy = {s["name"] for s in shards() if s.get("heavy")}
@@ -245,9 +370,28 @@ def matrix(binary, only=None):
         return n in heavy or (base in split and base in heavy)
     def wanted(n):
         return only is None or n in only or (n.rsplit("-", 1)[0] in split and n.rsplit("-", 1)[0] in only)
-    print(json.dumps({"shard": [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n),
-                                 "jobs": jobs}
-                                for n, sel, _, jobs in expanded(binary) if wanted(n)]}, ensure_ascii=False))
+    base = baseline()
+    cases = list_cases(binary, [])
+    def cost(name, sel, est):
+        """Estimated seconds: a split part's own estimate (which includes the programs it
+        builds), else the shard's cases from the baseline plus those builds. `None` when
+        the shard selects no case at all (`check-shards` reports that): it goes last."""
+        if est is not None:
+            return est
+        sel_cases = [(g, i, n) for g, i, n in cases if any(picks(g, i, s) for s in sel)]
+        return part_cost(estimate(sel_cases, base), base["builds"]) if sel_cases else None
+    rows = [(n, sel, jobs, cost(n, sel, est))
+            for n, sel, est, jobs in expanded(binary, base) if wanted(n)]
+    # GitHub starts a matrix in its listed order and the 20-concurrent-job cap leaves the
+    # late entries waiting (`test (prop)` started 16 minutes after the wave did), so the
+    # longest shards come first: the expensive work is in the first wave, not the tail.
+    rows.sort(key=lambda r: (r[3] is None, -(r[3] or 0.0), r[0]))
+    return [{"name": n, "select": "\n".join(sel), "heavy": is_heavy(n), "jobs": jobs}
+            for n, sel, jobs, _ in rows]
+
+
+def matrix(binary, only=None):
+    print(json.dumps({"shard": matrix_entries(binary, only)}, ensure_ascii=False))
 
 
 def plan(binary):
@@ -268,20 +412,47 @@ def check_shards(binary):
     out = subprocess.run([binary, "--list"], capture_output=True, text=True, check=True).stdout
     groups = [g for g in out.split("\n") if g]
     errors = []
+    if not groups:
+        print("the test driver listed no groups (`--list`): nothing to check", file=sys.stderr)
+        return 1
+    try:
+        excl = {e["group"]: e for e in exclusions()}
+    except ShardPlanError as e:
+        print(e, file=sys.stderr)
+        return 1
+    for g in excl:
+        if g not in groups:
+            errors.append(f"{EXCLUSIONS}: the exclusion names {g!r}, which is not a test group")
     names = set()
     for s in shards():
         if s["name"] in names:
             errors.append(f"shard name {s['name']!r} is used twice")
         names.add(s["name"])
+        if not s["select"]:
+            errors.append(f"shard {s['name']!r}: no selectors (an empty selector list runs "
+                          f"every case, so it is never what was meant)")
         for sel in s["select"]:
-            if not any(selects(g, sel) for g in groups):
+            picked = [g for g in groups if selects(g, sel)]
+            if not picked:
                 errors.append(f"shard {s['name']!r}: selector {sel!r} selects no group")
-    runs = {(g, i): [] for g, i, _ in list_cases(binary, [])}
-    parts = expanded(binary)
+            for g in picked:
+                if g in excl:
+                    errors.append(f"shard {s['name']!r}: selector {sel!r} selects {g!r}, "
+                                  f"which {EXCLUSIONS} excludes")
+    # every group must be in a shard or in the exclusion list; `resolved` is also the
+    # plan the matrix is built from, so check it here (and report rather than exit)
+    try:
+        parts = expanded(binary)
+    except ShardPlanError as e:
+        errors.append(str(e))
+        parts = []
+    runs = {(g, i): [] for g, i, _ in list_cases(binary, []) if g not in excl}
     for name, sel, _, _ in parts:
         for g, i, _ in set(list_cases(binary, sel)):  # a case selected twice within a shard still runs once
             runs[(g, i)].append(name)
     for g in groups:
+        if g in excl:
+            continue
         missing = [i for (h, i), by in runs.items() if h == g and not by]
         if missing:
             errors.append(f"group {g!r}: {'all' if len(missing) == sum(1 for h, _ in runs if h == g) else len(missing)} "
@@ -289,6 +460,34 @@ def check_shards(binary):
     for (g, i), by in runs.items():
         if len(by) > 1:
             errors.append(f"case {g} #{i} is run by several shards: {', '.join(by)}")
+    # end to end: the jobs of the full matrix (what CI runs when every shard is needed),
+    # with their selectors read back from the matrix's newline-joined form, run every
+    # case of the listing exactly once and nothing else
+    jobs = []
+    if not errors:
+        jobs = matrix_entries(binary)
+        seen = {}
+        for e in jobs:
+            for g, i, _ in set(list_cases(binary, e["select"].split("\n"))):
+                seen.setdefault((g, i), []).append(e["name"])
+        lost = sorted(k for k in runs if k not in seen)
+        extra = sorted(k for k in seen if k not in runs)
+        twice = sorted(k for k, by in seen.items() if len(by) > 1)
+        if lost:
+            errors.append(f"the matrix runs {len(lost)} cases of the listing in no job "
+                          f"(first: {lost[0][0]} #{lost[0][1]})")
+        if extra:
+            errors.append(f"the matrix runs {len(extra)} cases that the listing lacks")
+        if twice:
+            errors.append(f"the matrix runs {len(twice)} cases in several jobs "
+                          f"(first: {twice[0][0]} #{twice[0][1]}: {', '.join(seen[twice[0]])})")
+        if {g for g, _ in seen} != {g for g, _ in runs}:
+            errors.append("the matrix's groups differ from the listing's")
+    # an allow-list entry whose group or case no longer exists cannot fire: it documents a
+    # parity gap that is gone (or renamed), so it is a failure, not a note
+    dead = dead_allowlist_entries(allowlist(), binary)
+    for e, why in dead:
+        errors.append(f"{SKIPS}: the entry {e['group']!r} / {e['case']!r} matches no case: {why}")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -301,17 +500,166 @@ def check_shards(binary):
             if new:
                 warn(f"{len(new)} cases of the split shard {s['name']!r} are unbalanced: not in "
                      f".github/test-timings.json (estimated at their group's median)", "Shard balance")
-    print(f"ok: {len(groups)} groups, {len(runs)} cases, each in exactly one of {len(parts)} shards")
+    excluded = sorted(excl)
+    print(f"ok: {len(groups)} groups ({len(excluded)} excluded: {', '.join(excluded) or 'none'}), "
+          f"{len(runs)} cases, each in exactly one of {len(parts)} shards "
+          f"(the matrix's {len(jobs)} jobs run them all, once); "
+          f"{len(allowlist())} allow-list entries all match a case")
     return 0
+
+
+FAKE_DRIVER = r'''#!/usr/bin/env python3
+"""A stand-in for the test driver (`check-shards --self-test`): answers --list,
+--list-shards and --list-cases from LISTING (group, index, name, shard hint)."""
+import json, sys
+LISTING = json.loads(%r)
+def sel(group, s):
+    return group == s[1:].split("#")[0] if s.startswith("=") else group.startswith(s)
+def picks(g, i, s):
+    if not sel(g, s):
+        return False
+    return "#" not in s or i in [int(x) for x in s.split("#", 1)[1].split(",")]
+a = sys.argv[1:]
+groups = list(dict.fromkeys(g for g, _, _, _ in LISTING))
+if a == ["--list"]:
+    print("\n".join(groups))
+elif a == ["--list-shards"]:
+    hint = {g: h for g, _, _, h in LISTING}
+    print("\n".join(f"{g}\t{hint[g]}" for g in groups))
+elif a[:1] == ["--list-cases"]:
+    for g, i, n, _ in LISTING:
+        if not a[1:] or any(picks(g, i, s) for s in a[1:]):
+            print(f"{g}\t{i}\t{n}")
+else:
+    sys.exit(2)
+'''
+
+
+def fake_driver(directory, listing):
+    """Write a stand-in test driver answering from LISTING [(group, index, name, shard
+    hint)] (see FAKE_DRIVER) into DIRECTORY; its path."""
+    path = os.path.join(directory, "tests")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(FAKE_DRIVER % json.dumps(listing))
+    os.chmod(path, 0o755)
+    return path
+
+
+def check_shards_self_test():
+    """`check-shards` on stand-in drivers, shard files and exclusion/allow lists: a good
+    layout (with a split shard and an explicitly excluded group) passes; a dropped case,
+    a case in two shards, a selector that selects nothing, a group no shard selects (the
+    removed default fallback), a stale exclusion, an exclusion for a missing group, an
+    exclusion without a reason, and an allow-list entry no case matches fail. Exits 1 if
+    an expectation is wrong."""
+    import contextlib, io, tempfile
+    global SHARDS, TIMINGS, EXCLUSIONS, SKIPS
+    listing = ([("alpha", i, f"a{i}", "") for i in range(5)]
+               + [("beta", i, f"b{i}", "") for i in range(7)]
+               + [("gamma", i, f"c{i}", "") for i in range(3)]
+               + [("delta", 0, "d0", "solo")])
+    good = [{"name": "solo", "select": ["=delta"]},
+            {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+            {"name": "small", "select": ["alp"]}]
+    no_delta = [{"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+                {"name": "small", "select": ["alp"]}]
+    excl = lambda g, reason="fixture: not run in CI": {"groups": [
+        {"group": g, "reason": reason, "owner": "shard self-test"}]}
+    live = {"groups": [{"group": "beta", "case": "b0", "reason": "fixture reason",
+                        "owner": "shard self-test", "expires": "2099-01-01"}]}
+    dead = {"groups": [{"group": "beta", "case": "b99", "reason": "fixture reason",
+                        "owner": "shard self-test", "expires": "2099-01-01"}]}
+    empty = {"groups": []}
+    # (name, listing, shards, exclusions, allow-list, expected exit, needle)
+    trials = [
+        ("good (a split shard)", listing, good, empty, empty, 0, None),
+        ("a case the shards drop", listing,
+         [{"name": "solo", "select": ["=delta"]},
+          {"name": "big", "split": 3, "default": True, "select": ["=beta#0,1,2,3,4,5", "=gamma"]},
+          {"name": "small", "select": ["alp"]}], empty, empty, 1, "in no shard"),
+        ("a case in two shards", listing,
+         [{"name": "solo", "select": ["=delta"]},
+          {"name": "big", "split": 3, "default": True, "select": ["=beta", "=gamma"]},
+          {"name": "small", "select": ["alp", "=gamma#1"]}], empty, empty, 1, "several shards"),
+        ("a selector that selects nothing", listing,
+         [{"name": "solo", "select": ["=delta"]},
+          {"name": "big", "split": 2, "default": True, "select": ["=beta", "=gamma", "=epsilon"]},
+          {"name": "small", "select": ["alp"]}], empty, empty, 1, "selects no group"),
+        ("a shard with no selectors", listing,
+         [{"name": "solo", "select": ["=delta"]},
+          {"name": "big", "split": 2, "default": True, "select": ["=beta", "=gamma"]},
+          {"name": "small", "select": []}], empty, empty, 1, "no selectors"),
+        ("a group no shard selects (no default fallback)", listing, no_delta, empty, empty, 1,
+         "no shard selects"),
+        ("an exclusion says why delta is not run", listing, no_delta, excl("delta"), empty, 0, None),
+        ("an exclusion for a group that does not exist", listing, good, excl("epsilon"), empty, 1,
+         "not a test group"),
+        ("an exclusion a shard contradicts", listing, good, excl("delta"), empty, 1, "excludes"),
+        ("an exclusion without a reason", listing, no_delta,
+         {"groups": [{"group": "delta", "owner": "shard self-test"}]}, empty, 1, "lacks"),
+        ("an allow-list entry no case matches", listing, good, empty, dead, 1,
+         "matches no case"),
+        ("an allow-list entry that matches a case", listing, good, empty, live, 0, None),
+        ("an empty group listing proves nothing", [], good, empty, empty, 1, "no groups"),
+    ]
+    saved, wrong = (SHARDS, TIMINGS, EXCLUSIONS, SKIPS), []
+    try:
+        for k, (name, lst, config, ex, allow, want, needle) in enumerate(trials):
+            with tempfile.TemporaryDirectory() as d:
+                SHARDS = os.path.join(d, "shards.json")
+                TIMINGS = os.path.join(d, "timings.json")
+                EXCLUSIONS = os.path.join(d, "exclusions.json")
+                SKIPS = os.path.join(d, "allow.json")
+                with open(SHARDS, "w") as f:
+                    json.dump(config, f)
+                with open(EXCLUSIONS, "w") as f:
+                    json.dump(ex, f)
+                with open(SKIPS, "w") as f:
+                    json.dump(allow, f)
+                with open(TIMINGS, "w") as f:
+                    json.dump({"cases": {"beta": {f"b{i}": {"seconds": 10.0 + i} for i in range(7)}},
+                               "builds": {}}, f)
+                binary = fake_driver(d, lst)
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    got = check_shards(binary)
+                text = err.getvalue()
+                ok = got == want and (needle is None or needle in text)
+                print(f"{'ok ' if ok else 'BAD'} {name}: exit {got} (expected {want})"
+                      + ("" if ok else f"; stderr: {text.strip()}"))
+                if not ok:
+                    wrong.append(name)
+    finally:
+        SHARDS, TIMINGS, EXCLUSIONS, SKIPS = saved
+    return 1 if wrong else 0
 
 
 # Path filters (`changes`). Files only people read: a change of only these runs no build
 # and no tests.
 DOCS = ["docs/*", "*.md", "LICENSE", "COPYING*"]
+# Browser-facing sources: the playground, the infoview and site scripts, their Node
+# tests and the Wiz programs they are built from. The `web` job (`ci.yml`) builds the
+# Wasm modules and runs the browser-free half of web/test.sh when one of these changes;
+# the Chromium half of that script stays local.
+WEB = ["web/*"]
+# The attestation tooling is covered by the `attest` job's Python unit tests. It does not
+# feed the Lean build, so a change only under scripts/attest must not schedule a shard.
+SELF_TESTED = ["scripts/attest/*"]
 # Files every shard depends on: the Lean sources (compiler, tests, grail), the
-# build and its toolchain, the C runtime, CI itself. A change to any runs every shard.
+# build and its toolchain, the C runtime, CI itself, and the web/ tree — its Wiz
+# sources and JS hosts are read by test groups (`web/Web.wiz`, `web/framework/gen.wiz`,
+# `web/wasm-host.mjs`), and a change there is checked by the `web` job rather than by
+# one shard, so it sends every shard to be safe. A change to any runs every shard.
 EVERYTHING = ["*.lean", "lakefile.*", "lean-toolchain", "lake-manifest.json", "flake.*",
-              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz"]
+              ".envrc", "runtime/*", "c/*", "scripts/*", ".github/*", "grail.wiz",
+              "web/*"]
+# The STC metatheory (`STC.lean`, `STC/`) is a separate Lake library, deliberately not a
+# default target, and nothing else imports it; `flake.nix` does not copy it into the Nix
+# build either (that would rebuild the compiler on every STC edit). An edit there needs
+# the `stc` job and nothing else, so STC paths are kept out of EVERYTHING: otherwise the
+# `*.lean` entry sends every wiz/grail shard to test a tree none of them reads. The `stc`
+# job also runs when `code` is true, since a toolchain or lakefile change can break it.
+STC = ["STC.lean", "STC/*"]
 
 
 def matches(path, globs):
@@ -337,12 +685,19 @@ def lib_closure(paths):
     return out
 
 
+def is_code_change(files):
+    """Whether `files` needs the default Lean build (wiz/grail/tests); docs, self-tested
+    scripts and the STC metatheory (its own `stc` job) do not."""
+    return any(not matches(f, DOCS + SELF_TESTED + STC) for f in files)
+
+
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
-    when one of its inputs changed, and a shard without "inputs" when anything but docs
-    changed. Nothing for a docs-only change."""
-    code = [f for f in files if not matches(f, DOCS)]
+    when one of its inputs changed, and a shard without "inputs" when anything but docs,
+    scripts/attest or the STC metatheory (the `stc` job, not a shard) changed. Nothing
+    for a docs/attest/STC-only change."""
+    code = [f for f in files if not matches(f, DOCS + SELF_TESTED + STC)]
     ss = shards()
     if any(matches(f, EVERYTHING) for f in code):
         return [s["name"] for s in ss]
@@ -365,6 +720,8 @@ def changes(args):
         names = [s["name"] for s in shards()]
         print("code=true")
         print("docs=true")
+        print("web=true")
+        print("stc=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -372,20 +729,26 @@ def changes(args):
                          text=True, check=True, cwd=ROOT).stdout
     files = [f for f in out.split("\n") if f]
     names = needed_shards(files)
-    code = any(not matches(f, DOCS) for f in files)
+    code = is_code_change(files)
     docs = any(matches(f, DOCS) for f in files)
+    web = any(matches(f, WEB) for f in files)
+    stc = any(matches(f, STC) for f in files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
+    print(f"web={'true' if web else 'false'}")
+    print(f"stc={'true' if stc else 'false'}")
     print(f"shards={json.dumps(names)}")
-    print(f"{len(files)} files changed; code: {code}; docs: {docs}; "
-          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
+    print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
+          f"stc: {stc}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
 GROUP = re.compile(r"^── (.*?) \((.*)\)$")
-PASS = re.compile(r"^  ✓ (.*?)(?: \([\d.]+ s\))?$")
-FAIL = re.compile(r"^  ✗ (.*?)(?: \([\d.]+ s\))?$")
-SKIP = re.compile(r"^  ⊘ (.*?)(?: \([\d.]+ s\))?$")
+# a case line starts with its position in the run (`[n/total] `; optional for older logs)
+POS = r"(?:\[\d+/\d+\] )?"
+PASS = re.compile(rf"^{POS}  ✓ (.*?)(?: \([\d.]+ s\))?$")
+FAIL = re.compile(rf"^{POS}  ✗ (.*?)(?: \([\d.]+ s\))?$")
+SKIP = re.compile(rf"^{POS}  ⊘ (.*?)(?: \([\d.]+ s\))?$")
 TIME = re.compile(r"^  \((.*): ([\d.]+) s(?:;.*)?\)$")
 TOTAL = re.compile(r"^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?$")
 
@@ -576,6 +939,9 @@ def balance(args):
                         f"median shard ({median:.0f} s), over the limit of {factor}x")
     base = baseline()
     split = [s["name"] for s in shards() if s.get("split", 1) > 1]
+    # a "split-cases" shard spreads its sibling cases over the parts on purpose, so its
+    # parts each build the shared program: that is charged in the estimates, not drift
+    rebuilt = {s["name"] for s in shards() if s.get("split-cases")}
     new = sorted({(r["group"], r["case"]) for r in records if split_of(r["shard"], split)
                   and r["case"] not in base["cases"].get(r["group"], {})})
     if new:
@@ -587,7 +953,7 @@ def balance(args):
                 if note.startswith(NOTE_BUILT):
                     built.setdefault((n, note[len(NOTE_BUILT):].rsplit(" ", 1)[0]), set()).add(r["shard"])
     for (n, res), parts in sorted(built.items()):
-        if len(parts) > 1:
+        if len(parts) > 1 and n not in rebuilt:
             problems.append(f"the {res} is built by {len(parts)} parts of {n} ({', '.join(sorted(parts))}): "
                             f"its users are split, the baseline is stale")
     for p in problems:
@@ -618,20 +984,53 @@ SKIP_DETAIL = re.compile(r"^      skipped \((.*)\)$")
 NO_REASON = "(the case printed no reason)"
 
 
-def allowlist(path=SKIPS):
-    """The groups of .github/skip-allowlist.json that may skip in CI, each with the
-    reason it may skip for and an owner, and optionally the one case it excuses. A malformed entry is an error: an allow-list
-    without an owner is a place for skips to hide."""
+def allowlist(path=None, today=None):
+    """The entries of .github/skip-allowlist.json that may skip in CI, each with the
+    reason it may skip for, an owner and the one `case` it excuses, plus an `expires`
+    date (YYYY-MM-DD). A malformed entry is an error: an allow-list without an owner is a
+    place for skips to hide, one without a case excuses a whole group, and one without an
+    expiry is never revisited (an expired entry has to be renewed with a new reason, as
+    the flaky quarantine's do). The reason matches as a prefix of the skip's reason — a
+    skip usually carries detail after the entry's words — but the case matches exactly."""
+    path = path or SKIPS
     with open(path, encoding="utf-8") as f:
         doc = json.load(f)
+    today = today or dt.date.today()
     out = []
     for e in doc.get("groups", []):
-        for k in ("group", "reason", "owner"):
+        for k in ("group", "reason", "owner", "case"):
             if not str(e.get(k, "")).strip():
                 sys.exit(f"{path}: the entry {json.dumps(e)} lacks {k!r}")
-        if "case" in e and not str(e["case"]).strip():
-            sys.exit(f"{path}: the entry {json.dumps(e)} has an empty 'case'")
-        out.append(e)
+        raw = e.get("expires")
+        if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            sys.exit(f"{path}: the entry {json.dumps(e)} needs an 'expires' date as a "
+                     f"YYYY-MM-DD string")
+        try:
+            expires = dt.date.fromisoformat(raw)
+        except ValueError:
+            sys.exit(f"{path}: the entry {json.dumps(e)} has an invalid 'expires' date {raw!r}")
+        if expires <= today:
+            sys.exit(f"{path}: the entry {json.dumps(e)} expired on {raw}; fix the case or "
+                     f"renew the entry with a new reason")
+        out.append(dict(e, expires=raw))
+    return out
+
+
+def dead_allowlist_entries(allowed, binary):
+    """[(entry, why)] for allow-list entries that no case matches: the group has no cases,
+    or no case of it is named exactly `case`. A dead entry cannot fire — `allowed_entry`
+    only consults entries when a skip happens — and it documents a parity gap that no
+    longer exists; `check-shards` fails on one so the list cannot rot."""
+    names = {}
+    out = []
+    for e in allowed:
+        g = e["group"]
+        if g not in names:
+            names[g] = [n for _, _, n in list_cases(binary, [f"={g}"])]
+        if not names[g]:
+            out.append((e, f"the group {g!r} has no cases"))
+        elif e["case"] not in names[g]:
+            out.append((e, f"no case of {g!r} is named {e['case']!r}"))
     return out
 
 
@@ -680,12 +1079,13 @@ def skip_records(paths):
 
 
 def allowed_entry(allowed, group, case, why):
-    """The allow-list entry that explains this skip, or None: same group, a reason the
-    skip's starts with, and, when the entry names a case, that case exactly."""
+    """The allow-list entry that explains this skip, or None: the same group, the same
+    case exactly, and a reason the skip's starts with. The case is not optional: an entry
+    that named no case would excuse every case of the group."""
     low = (why or "").lower()
     for e in allowed:
-        if (e["group"] == group and low.startswith(e["reason"].lower())
-                and ("case" not in e or e["case"] == case)):
+        if (e["group"] == group and e["case"] == case
+                and low.startswith(e["reason"].lower())):
             return e
     return None
 
@@ -746,7 +1146,7 @@ def analyze(recs, allowed, max_ratio):
                     details.append(f"- ❌ {msg}")
                 elif whole:
                     msg = (f"**{md(group)}**: all {len(cs)} cases skipped in shard `{md(shard)}` — "
-                           f"{v[1]}; not in .github/skip-allowlist.json")
+                           f"{v[1]}; not explained by .github/skip-allowlist.json")
                     errors.append(msg)
                     details.append(f"- ❌ {msg}")
                     for c, _ in items:
@@ -807,11 +1207,12 @@ def self_test():
         out = []
         for g, cs in groups:
             out.append(f"── {g} (fixture)")
-            for c in cs:
+            for k, c in enumerate(cs, 1):
+                pos = f"[{k}/{len(cs)}] "
                 if isinstance(c, tuple):
-                    out += [f"  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
+                    out += [f"{pos}  ⊘ {c[0]} (0.010 s)", f"      skipped ({c[1]})"]
                 else:
-                    out.append(f"  ✓ {c} (0.010 s)")
+                    out.append(f"{pos}  ✓ {c} (0.010 s)")
             out.append(f"  ({g}: 0.010 s; cases 0.010 s)")
         return "\n".join(out) + "\n"
 
@@ -840,7 +1241,7 @@ def self_test():
          {"core.log": log([("gamma", [(f"c{i}", "some reason") for i in range(5)] + pass10[:5])])}, 1, "50%"),
         ("unlisted whole group",
          {"core.log": log([("delta", [(f"c{i}", "some reason") for i in range(3)])])}, 1,
-         "not in .github/skip-allowlist.json"),
+         "not explained by .github/skip-allowlist.json"),
         ("allow-listed whole group",
          {"library-3.log": log([("tower", [("from source", "no source toolchain: `lake` has no toolchain "
                                                          "outside a checkout (elan has no default)")]),
@@ -872,9 +1273,31 @@ def self_test():
         ("--timings file", {"library-2.jsonl": timing("library-2", "wasm",
                                                       [(f"m{i}", "no node") for i in range(25)])}, 1, "node"),
     ]
-    allowed = {"groups": [{"group": "hdl", "reason": "no iverilog", "owner": "HDL fixtures"},
-                          {"group": "tower", "reason": "no source toolchain", "owner": "tower fixtures"},
-                          {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta fixtures"}]}
+    allowed = {"groups": [{"group": "hdl", "case": "sim", "reason": "no iverilog",
+                           "owner": "HDL fixtures", "expires": "2099-01-01"},
+                          {"group": "tower", "case": "from source",
+                           "reason": "no source toolchain", "owner": "tower fixtures",
+                           "expires": "2099-01-01"},
+                          {"group": "zeta", "case": "z0", "reason": "parity:",
+                           "owner": "zeta fixtures", "expires": "2099-01-01"}]}
+    # an entry needs a case and a live expiry: a group-level entry excuses every case,
+    # and one without a date is never revisited
+    loader_trials = [
+        ("a live, case-scoped entry loads",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "2099-01-01"},
+         True, None),
+        ("an entry without a case is rejected",
+         {"group": "zeta", "reason": "parity:", "owner": "zeta", "expires": "2099-01-01"},
+         False, "case"),
+        ("an entry without expires is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta"}, False, "expires"),
+        ("an expiry that is not YYYY-MM-DD is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "soon"},
+         False, "YYYY-MM-DD"),
+        ("an expired entry is rejected",
+         {"group": "zeta", "case": "z0", "reason": "parity:", "owner": "zeta", "expires": "2020-01-01"},
+         False, "expired"),
+    ]
     bad = 0
     with tempfile.TemporaryDirectory() as d:
         apath = os.path.join(d, "allow.json")
@@ -895,7 +1318,26 @@ def self_test():
             print(f"{'ok  ' if ok else 'FAIL'} {name}: {len(errors)} error(s)"
                   + ("" if ok else f", expected {want_errors}" + (f" mentioning {needle!r}" if needle else "")
                      + f": {errors}"))
-        # the repository's own allow-list must load, with an owner on every entry
+        for k, (name, entry, want_ok, needle) in enumerate(loader_trials):
+            p = os.path.join(d, f"allow-loader-{k}.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"groups": [entry]}, f)
+            try:
+                allowlist(p)
+                ok, why = want_ok, "loaded"
+            except SystemExit as e:
+                ok, why = not want_ok and (needle is None or needle in str(e)), str(e)
+            bad += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} {name}: {why}")
+        # a log the lint cannot parse is not "all 0 cases ran": no records is a failure
+        empty = os.path.join(d, "empty.log")
+        open(empty, "w", encoding="utf-8").close()
+        rc = check_skips([empty], annotate=False)
+        ok = rc != 0
+        bad += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} an empty record set exits non-zero (check-skips: {rc})")
+        # the repository's own allow-list must load, with an owner, a case and an expiry
+        # on every entry
         try:
             real = allowlist()
             ok = True
@@ -905,11 +1347,12 @@ def self_test():
         bad += not ok
         if ok:
             print(f"ok   .github/skip-allowlist.json: {len(real)} entr{'y' if len(real) == 1 else 'ies'}")
-    print(f"skip lint self-test: {len(trials) + 1} checks, {len(trials) + 1 - bad} ok")
+    checks = len(trials) + len(loader_trials) + 2
+    print(f"skip lint self-test: {checks} checks, {checks - bad} ok")
     return 1 if bad else 0
 
 
-def check_skips(args):
+def check_skips(args, annotate=True):
     max_ratio, allow, paths, selftest = 0.25, SKIPS, [], False
     it = iter(args)
     for a in it:
@@ -930,8 +1373,13 @@ def check_skips(args):
         return 2
     recs = skip_records(paths)
     if not recs:
-        print("No test results: the skip lint checked nothing (was a log written?).")
-        return 0
+        # a log that parsed no records proves nothing: "all 0 cases ran" would be a green
+        # gate over an empty or unreadable log
+        msg = "no test results: the skip lint checked nothing (was a log written?)"
+        print(msg, file=sys.stderr)
+        if annotate:
+            error(msg, "Skips")
+        return 1
     errors, warnings, lines = analyze(recs, allowlist(allow), max_ratio)
     print("\n".join(lines))
     for w in warnings:
@@ -963,7 +1411,14 @@ def make_baseline(paths):
         old = cases.setdefault(r["group"], {}).get(r["case"])
         if old is None or old["seconds"] < own:
             cases[r["group"]][r["case"]] = {"seconds": own, **({"uses": uses} if uses else {})}
-    # one case per line, sorted, so that the file diffs and merges well
+    print(baseline_json({"cases": cases, "builds": builds}))
+    return 0
+
+
+def baseline_json(base):
+    """.github/test-timings.json's text: one case per line, sorted, so that the file
+    diffs and merges well."""
+    cases, builds = base["cases"], base["builds"]
     dump = lambda x: json.dumps(x, ensure_ascii=False)
     out = ['{', f' "builds": {dump(dict(sorted(builds.items())))},', ' "cases": {']
     for k, (g, cs) in enumerate(sorted(cases.items())):
@@ -972,11 +1427,279 @@ def make_baseline(paths):
         out += [l + "," for l in lines[:-1]] + lines[-1:]
         out.append('  }' + ("," if k < len(cases) - 1 else ""))
     out += [' }', '}']
-    print("\n".join(out))
+    return "\n".join(out)
+
+
+# --- Rebalance (`rebalance`) ---------------------------------------------------------
+def median(xs):
+    xs = sorted(xs)
+    return (xs[(len(xs) - 1) // 2] + xs[len(xs) // 2]) / 2
+
+
+def run_medians(paths):
+    """Per-case and per-build medians over runs (one `--timings` file per run):
+    ({(group, case): (seconds, own seconds, uses, shard)}, {program: seconds},
+    {shard: seconds per run}). A case's `own` time leaves out the builds it did; a
+    failed case counts only if no run passed it. `shard` is the job the case ran in
+    last (its split shard's name for a part)."""
+    split = [s["name"] for s in shards() if s.get("split", 1) > 1]
+    seen, builds, totals, ratios, walls = {}, {}, {}, {}, {}
+    for p in paths:
+        run_builds, run_sums = {}, {}
+        for r in read_timings([timings_of(p)]):
+            run_sums[r["shard"]] = run_sums.get(r["shard"], 0.0) + r["seconds"]
+            built = 0.0
+            for n in r.get("notes", []):
+                if n.startswith(NOTE_BUILT):
+                    res, t = n[len(NOTE_BUILT):].rsplit(" ", 1)
+                    run_builds[res] = max(run_builds.get(res, 0.0), float(t))
+                    built += float(t)
+            uses = tuple(sorted({n[len(NOTE_USES):] for n in r.get("notes", []) if n.startswith(NOTE_USES)}))
+            shard = split_of(r["shard"], split) or r["shard"]
+            seen.setdefault((r["group"], r["case"]), []).append(
+                (r.get("ok", True), r["seconds"], max(r["seconds"] - built, 0.0), uses, shard))
+            totals.setdefault(r["shard"], {}).setdefault(p, 0.0)
+            totals[r["shard"]][p] += r["seconds"]
+        for res, t in run_builds.items():
+            builds.setdefault(res, []).append(t)
+        run_walls = job_walls(p)
+        for job, w in run_walls.items():
+            walls.setdefault(split_of(job, split) or job, []).append(w)
+        fam = {}
+        for job, w in run_walls.items():
+            if job in run_sums:
+                f = fam.setdefault(split_of(job, split) or job, [0.0, 0.0])
+                f[0] += w
+                f[1] += run_sums[job]
+        for sh, (w, c) in fam.items():
+            if c > 0:
+                ratios.setdefault(sh, []).append(w / c)
+    cases = {}
+    for k, rs in seen.items():
+        ok = [r for r in rs if r[0]] or rs
+        cases[k] = (median([r[1] for r in ok]), median([r[2] for r in ok]),
+                    max((r[3] for r in ok), key=len), ok[-1][4])
+    return (cases, {r: median(ts) for r, ts in builds.items()},
+            {sh: median(list(v.values())) for sh, v in totals.items()},
+            {sh: median(v) for sh, v in ratios.items()},
+            {sh: median(v) for sh, v in walls.items() if sh not in split})
+
+
+def timings_of(p):
+    """A run's `--timings` file: P itself, or P/timings.jsonl (`fetch-runs`)."""
+    return os.path.join(p, "timings.jsonl") if os.path.isdir(p) else p
+
+
+def job_walls(p):
+    """{job: seconds of its `tests -- …` step} of the successful test jobs of a
+    `fetch-runs` directory's jobs.json ({} without one)."""
+    from datetime import datetime
+    path = os.path.join(p, "jobs.json") if os.path.isdir(p) else None
+    if not path or not os.path.exists(path):
+        return {}
+    t = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00"))
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        jobs = json.load(f).get("jobs", [])
+    for j in jobs:
+        if not j["name"].startswith("test (") or j.get("conclusion") != "success":
+            continue
+        for st in j.get("steps", []):
+            if st["name"].startswith("tests -- ") and st.get("started_at") and st.get("completed_at"):
+                out[j["name"][len("test ("):-1]] = (t(st["completed_at"]) - t(st["started_at"])).total_seconds()
+    return out
+
+
+def fetch_runs(args):
+    branch = None
+    if args[:1] == ["--branch"] and len(args) >= 2:
+        branch, args = re.compile(args[1]), args[2:]
+    if len(args) != 2:
+        sys.exit("usage: scripts/ci.py fetch-runs [--branch REGEX] N DIR")
+    n, out = int(args[0]), args[1]
+    gh = lambda *a: subprocess.run(["gh", *a], capture_output=True, text=True, check=True).stdout
+    repo = os.environ.get("WIZ_REPO", "wiz-pl/wiz")
+    got, page = 0, 1
+    while got < n and page <= 10:
+        runs = json.loads(gh("api", f"repos/{repo}/actions/workflows/ci.yml/runs?status=completed&per_page=100&page={page}"))
+        page += 1
+        if not runs["workflow_runs"]:
+            break
+        for r in runs["workflow_runs"]:
+            if got >= n:
+                break
+            if r["conclusion"] in ("cancelled", "skipped"):
+                continue
+            if branch and not branch.fullmatch(r["head_branch"] or ""):
+                continue
+            d = os.path.join(out, str(r["id"]))
+            try:
+                gh("run", "download", str(r["id"]), "-R", repo, "-n", "test-timings", "-D", d)
+            except subprocess.CalledProcessError:
+                continue  # no test-timings artifact (the run stopped before its result job)
+            with open(os.path.join(d, "jobs.json"), "w", encoding="utf-8") as f:
+                f.write(gh("api", f"repos/{repo}/actions/runs/{r['id']}/jobs?filter=latest&per_page=100"))
+            got += 1
+            print(d)
+    return 0 if got else 1
+
+
+def rebalance(args):
+    jobs, assume, write, binary, paths = None, None, False, DEFAULT_BIN, []
+    it = iter(args)
+    for a in it:
+        if a == "--jobs":
+            jobs = int(next(it))
+        elif a == "--assume":
+            assume = next(it)
+        elif a == "--write":
+            write = True
+        elif a == "--bin":
+            binary = next(it)
+        else:
+            paths.append(a)
+    if not paths:
+        sys.exit("rebalance: no --timings files")
+    cases, builds, shard_secs, ratios, walls = run_medians(paths)
+    config = shards()
+    split = {s["name"]: s for s in config if s.get("split", 1) > 1}
+    # the current case list: the driver's, or the last run's
+    if os.path.exists(binary):
+        listed = {}
+        for s in resolved(binary):
+            for g, i, n in list_cases(binary, s["select"]):
+                listed[(g, n)] = s["name"]
+        source = binary
+    else:
+        listed = {}
+        for r in read_timings([timings_of(paths[-1])]):
+            listed[(r["group"], r["case"])] = split_of(r["shard"], list(split)) or r["shard"]
+        source = paths[-1]
+    assumed = set()
+    if assume:
+        with open(assume, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                g, n, t = line.rstrip("\n").split("\t")
+                if t == "drop":
+                    listed.pop((g, n), None)
+                    continue
+                if (g, n) in cases:
+                    continue  # measured: the measurement wins
+                # an unmeasured case goes to its group's shard
+                sh = next((s for (gg, _), s in listed.items() if gg == g), None)
+                if sh is None:
+                    sys.exit(f"rebalance: --assume names the group {g!r}, which no shard runs")
+                listed[(g, n)] = sh
+                cases[(g, n)] = (float(t), float(t), (), sh)
+                assumed.add((g, n))
+    missing = sorted(k for k, sh in listed.items() if sh in split and k not in cases)
+    # the new baseline: the split shards' current cases
+    base = {"cases": {}, "builds": {r: round(t, 3) for r, t in sorted(builds.items())}}
+    for (g, n), sh in listed.items():
+        if sh in split and (g, n) in cases:
+            _, own, uses, _ = cases[(g, n)]
+            base["cases"].setdefault(g, {})[n] = {"seconds": round(own, 3), **({"uses": list(uses)} if uses else {})}
+    # each split shard's items, as `estimate` gives them (index: the listing's order)
+    items = {name: [] for name in split}
+    known = {}
+    for (g, n), sh in listed.items():
+        if sh in split:
+            known.setdefault(sh, []).append((g, n))
+    for sh, ks in known.items():
+        idx = {}
+        for g, n in ks:
+            idx[g] = idx.get(g, -1) + 1
+            items[sh].append((g, idx[g], n))
+        items[sh] = estimate(items[sh], base)
+    # the jobs that cannot be split: the other shards, and the longest single unit
+    fixed = {s["name"]: walls.get(s["name"], shard_secs.get(s["name"], 0.0)) for s in config if s["name"] not in split}
+    # a split part's predicted wall: its estimated case sum times the shard's measured
+    # wall/case-sum ratio (below 1 when "jobs" runs cases at once)
+    ratio = {sh: ratios.get(sh, 1.0) for sh in split}
+    cost = lambda sh, p: part_cost(p, base["builds"]) * ratio[sh]
+    unit = lambda sh: max((cost(sh, [it]) for it in items[sh]), default=0.0)
+    floor = max(list(fixed.values()) + [unit(sh) for sh in split])
+    budget = jobs if jobs is not None else len(fixed) + sum(s["split"] for s in split.values())
+    counts = {sh: 1 for sh in split}
+    parts = {sh: partition(items[sh], 1, base["builds"]) for sh in split}
+    longest = lambda sh: max(cost(sh, p) for p in parts[sh])
+    # fill the budget: a part at a time to the shard with the longest part, while that
+    # shortens it (a job that cannot be split, e.g. a single long case, is no reason to
+    # stop: the other shards still get shorter and their spread smaller)
+    while len(fixed) + sum(counts.values()) < budget:
+        sh = max(split, key=lambda k: (longest(k), k))
+        trial = partition(items[sh], counts[sh] + 1, base["builds"])
+        if max(cost(sh, p) for p in trial) >= longest(sh) - 1e-9:
+            break
+        counts[sh] += 1
+        parts[sh] = trial
+    # nothing dropped: every case of the listing is in exactly one job
+    for sh in split:
+        got = sorted((g, n) for p in parts[sh] for g, _, n, *_ in p)
+        want = sorted(known.get(sh, []))
+        if got != want:
+            sys.exit(f"rebalance: the parts of {sh} do not cover its cases exactly once")
+    ran = {g for g, _ in cases}
+    gone = sorted(g for g in ran if g not in {g for g, _ in listed})
+    if gone:
+        print(f"Note: {len(gone)} groups measured by the runs are not in the case list "
+              f"(renamed or removed?): {', '.join(gone)}")
+    # the report
+    print(f"Runs: {len(paths)} `--timings` files; cases from {source}; budget {budget} jobs.")
+    if ratios:
+        print("Measured wall/case-sum ratios: " + ", ".join(f"{sh} {r:.2f}" for sh, r in sorted(ratios.items())))
+    else:
+        print("No jobs.json: predictions are case sums (an overestimate for shards with \"jobs\").")
+    if assumed:
+        print(f"Assumed (not yet measured): {len(assumed)} cases, {sum(cases[k][1] for k in assumed):.0f} s in all.")
+    if missing:
+        print(f"Not measured and not assumed: {len(missing)} cases of split shards (estimated at their group's median).")
+    print()
+    print("| shard | was | now |")
+    print("|---|---:|---:|")
+    for sh in split:
+        print(f"| {sh} | {split[sh]['split']} | {counts[sh]} |")
+    def predicted(cs):
+        out = dict(fixed)
+        for sh in split:
+            ps = parts[sh] if cs[sh] == counts[sh] else partition(items[sh], cs[sh], base["builds"])
+            for k, p in enumerate(ps, 1):
+                out[f"{sh}-{k}"] = cost(sh, p)
+        return out
+    def spread(ts):
+        ts = sorted(ts.values())
+        return (f"{len(ts)} jobs: min {ts[0]:.0f}, median {median(ts):.0f}, max {ts[-1]:.0f} "
+                f"({ts[-1] / max(median(ts), 1e-9):.2f}x the median)")
+    was = predicted({sh: split[sh]["split"] for sh in split})
+    now = predicted(counts)
+    print()
+    print(f"Predicted seconds of tests per job, the current split counts: {spread(was)}")
+    print(f"Predicted seconds of tests per job, the new split counts: {spread(now)}")
+    print(f"Floor: {floor:.0f} s (the longest job or case that cannot be split)")
+    print()
+    print("| job | predicted s (current counts) | predicted s (new counts) |")
+    print("|---|---:|---:|")
+    for n in sorted(set(was) | set(now), key=lambda n: -max(was.get(n, 0), now.get(n, 0))):
+        f = lambda d: f"{d[n]:.0f}" if n in d else ""
+        print(f"| {md(n)} | {f(was)} | {f(now)} |")
+    if write:
+        with open(TIMINGS, "w", encoding="utf-8") as f:
+            f.write(baseline_json(base) + "\n")
+        text = open(SHARDS, encoding="utf-8").read()
+        for sh, n in counts.items():
+            text, k = re.subn(r'("name": "' + re.escape(sh) + r'",\s*"split": )\d+', lambda m: m.group(1) + str(n), text)
+            if k != 1:
+                sys.exit(f"rebalance: cannot find the \"split\" of {sh} in {SHARDS}")
+        with open(SHARDS, "w", encoding="utf-8") as f:
+            f.write(text)
+        print()
+        print(f"Wrote {os.path.relpath(TIMINGS, ROOT)} and the split counts of {os.path.relpath(SHARDS, ROOT)}.")
     return 0
 
 
-def main(args):
+def _main(args):
     if args[:2] == ["matrix", "--only"] and len(args) >= 3:
         matrix(args[3] if len(args) > 3 else DEFAULT_BIN, set(json.loads(args[2])))
         return 0
@@ -986,6 +1709,8 @@ def main(args):
     if args[:1] == ["matrix"]:
         matrix(binary)
         return 0
+    if args[:2] == ["check-shards", "--self-test"]:
+        return check_shards_self_test()
     if args[:1] == ["check-shards"]:
         return check_shards(binary)
     if args[:1] == ["check-skips"]:
@@ -996,10 +1721,24 @@ def main(args):
         return summary(args[1], args[2:])
     if args[:1] == ["balance"]:
         return balance(args[1:])
+    if args[:1] == ["fetch-runs"]:
+        return fetch_runs(args[1:])
+    if args[:1] == ["rebalance"]:
+        return rebalance(args[1:])
     if args[:1] == ["baseline"] and len(args) >= 2:
         return make_baseline(args[1:])
     print(__doc__, file=sys.stderr)
     return 2
+
+
+def main(args):
+    """Run the command; a shard plan that is not total (`ShardPlanError`) is an error with
+    its explanation, never a matrix with quietly missing cases."""
+    try:
+        return _main(args)
+    except ShardPlanError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

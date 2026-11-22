@@ -12,7 +12,7 @@ version, archive URL and SHA-256 of every registry package, so a build needs no 
 no network unless something is missing from the cache.
 
     (lock
-      (index "https://github.com/wiz-pl/grail-index" "<commit>")
+      (index "https://github.com/wiz-pl/fate-index" "<commit>")
       (dep "greet" "https://example.org/greet.git" "v1" "<commit>" "<content>")
       (pkg "std" "0.1.2" "https://…/std-0.1.2.tar.gz" "<sha256>"
            (deps (dep "unused" "^0"))))
@@ -188,18 +188,38 @@ def lookupVendor (dir : System.FilePath) (sha256 : String) : IO (Option System.F
       if e.fileName.startsWith (sha256 ++ ".") then return some e.path
   pure none
 
-/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). -/
+/-- The `curl` arguments for a download. `--` ends the options before the URL: a
+registry-supplied URL beginning with `-` must be an address, not a curl option. -/
+def curlArgs (url : String) (dest : System.FilePath) : Array String :=
+  #["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", dest.toString, "--", url]
+
+/-- A downloaded archive must exist and have bytes. `curl -f` fails on an HTTP error, but
+a connection that closes early can still leave a partial (or empty) file, and an empty
+file is never an archive. -/
+def nonEmptyFile (dest : System.FilePath) : IO (Except String Unit) := do
+  if !(← dest.pathExists) then return .error s!"{dest}: the download wrote no file"
+  if (← dest.metadata).byteSize == 0 then
+    return .error s!"{dest}: the download is empty (a truncated or failed transfer)"
+  pure (.ok ())
+
+/-- Download `url` to `dest` (`curl` for http/https, a copy for a path or `file://`). The
+URL is never allowed to look like an option, and the result must be a non-empty file: a
+failed or truncated transfer is an error, not a cache entry. -/
 def download (url : String) (dest : System.FilePath) : IO (Except String Unit) := do
   if url.startsWith "file://" then
     if let .error e ← copyFile (url.drop 7).toString dest then return .error e
-    return .ok ()
+    return ← nonEmptyFile dest
   if !url.contains "://" then
-    return (← copyFile url dest).map (fun _ => ())
+    match ← copyFile url dest with
+    | .error e => return .error e
+    | .ok () => return ← nonEmptyFile dest
   try
-    let o ← IO.Process.output { cmd := "curl", args :=
-      #["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", dest.toString, url] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"curl {url}: {o.stderr.trimAscii}")
+    let o ← IO.Process.output { cmd := "curl", args := curlArgs url dest }
+    if o.exitCode != 0 then
+      -- do not leave a partial file behind for a later run to pick up
+      if ← dest.pathExists then IO.FS.removeFile dest
+      return .error s!"curl {url}: {o.stderr.trimAscii}"
+    nonEmptyFile dest
   catch e => pure (.error s!"curl: {e}")
 
 where
@@ -210,14 +230,74 @@ where
       pure (.ok ())
     catch e => pure (.error s!"{src}: {e}")
 
-/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. -/
+/-! ## Checking an archive before it is unpacked
+
+The SHA-256 in the lock says *which* bytes are wanted, not that the publisher's archive is
+safe to extract: the publisher chooses the member names and types. A listing pass (`tar
+-t` and `tar -tv`) runs first and refuses a member that is absolute, has a `..` component,
+or is not a regular file or directory (a symlink, hardlink, device or fifo). This is a
+pre-scan, not a path check after extraction, so nothing is written outside `dest` even
+briefly. `--strip-components=1` is not a sanitiser: it can *expose* a `..` that was hidden
+below the stripped component. -/
+
+/-- One member of an archive: its name, and the type character of `tar -tv` (`'-'` a
+regular file, `'d'` a directory). -/
+structure TarMember where
+  name : String
+  kind : Char
+  deriving Repr, BEq, Inhabited
+
+/-- Could `name` be written outside the extraction root? Rejected: an absolute name, and
+any `..` component (the root itself is `.` and stays inside). -/
+def safeMemberName (name : String) : Bool :=
+  !name.startsWith "/" && name != ".." && !(name.splitOn "/").contains ".."
+
+/-- The first unsafe member, described, or `none` when every member is a regular file or
+directory under the extraction root. -/
+def unsafeMember? (members : List TarMember) : Option String :=
+  members.findSome? fun m =>
+    if !safeMemberName m.name then
+      some s!"{repr m.name} would be written outside the extraction directory (an absolute path or a `..` component)"
+    else if m.kind != '-' && m.kind != 'd' then
+      some s!"{repr m.name} is not a regular file or a directory (tar type {repr m.kind}); links, devices and fifos are refused"
+    else none
+
+/-- List `tar`'s members without extracting: the names from `tar -t` and the type
+characters from `tar -tv`, which must line up one for one. -/
+def tarMembers (tar : System.FilePath) : IO (Except String (List TarMember)) := do
+  let listing (verbose : Bool) : IO (Except String (List String)) := do
+    try
+      let args := if verbose then #["-tvzf", tar.toString] else #["-tzf", tar.toString]
+      let o ← IO.Process.output { cmd := "tar", args }
+      if o.exitCode != 0 then return .error s!"tar -t {tar}: {o.stderr.trimAscii}"
+      pure (.ok ((o.stdout.splitOn "\n").filter (· != "")))
+    catch e => pure (.error s!"tar -t: {e}")
+  let names ← listing false
+  let verbose ← listing true
+  match names, verbose with
+  | .ok names, .ok verbose =>
+    if names.length != verbose.length then
+      return .error s!"tar -t {tar}: the name and type listings disagree ({names.length} vs {verbose.length} entries)"
+    pure (.ok (names.zipWith (fun n v => { name := n, kind := (v.toList.head?).getD '?' }) verbose))
+  | .error e, _ => pure (.error e)
+  | _, .error e => pure (.error e)
+
+/-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. The archive
+is listed and checked first; a member that could escape `dest` (or is not a file or
+directory) refuses the whole archive, before `tar -x` runs. -/
 def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String Unit) := do
-  try
-    let o ← IO.Process.output { cmd := "tar", args :=
-      #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
-    pure (if o.exitCode == 0 then .ok ()
-      else .error s!"tar {tar}: {o.stderr.trimAscii}")
-  catch e => pure (.error s!"tar: {e}")
+  match ← tarMembers tar with
+  | .error e => pure (.error e)
+  | .ok members =>
+    match unsafeMember? members with
+    | some why => pure (.error s!"{tar}: refusing to unpack: {why}")
+    | none =>
+      try
+        let o ← IO.Process.output { cmd := "tar", args :=
+          #["-xzf", tar.toString, "-C", dest.toString, "--strip-components=1", "--no-same-owner"] }
+        pure (if o.exitCode == 0 then .ok ()
+          else .error s!"tar {tar}: {o.stderr.trimAscii}")
+      catch e => pure (.error s!"tar: {e}")
 
 /-- The tree hash of an archive's contents: unpack into a temporary directory (the same
 `--strip-components=1` layout `fetch` uses) and hash the tree. -/
@@ -820,8 +900,8 @@ are the package's module names (from `archiveModules`), recorded so the resolver
 refuse two packages that would collide at `import` (R32). `size`, `tree` and `commands`
 are the v3 integrity fields (R19/R20/R36). -/
 def publishEntry (pkg : Package) (source sha : String) (modules : List String := [])
-    (size : Option Nat := none) (tree : String := "") (commands : String := "") :
-    Except String IxVersion := do
+    (size : Option Nat := none) (tree : String := "") (commands : String := "")
+    (commit : String := "") : Except String IxVersion := do
   if !validName pkg.name then throw s!"package name {pkg.name}: expected [a-z][a-z0-9-]* (at most 64)"
   if pkg.version.isEmpty then throw "grail.wiz has no Package.version: a published package needs one"
   let v ← Version.parse pkg.version
@@ -832,6 +912,11 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
   if !tree.isEmpty && !isSha256 tree then throw s!"tree {tree}: expected 64 lowercase hex digits"
   if !commands.isEmpty && !isSha256 commands then
     throw s!"command digest {commands}: expected 64 lowercase hex digits"
+  if !commit.isEmpty then
+    let hex (s : String) : Bool := s.toList.all fun c =>
+      ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')
+    unless (commit.length == 40 || commit.length == 64) && hex commit do
+      throw s!"commit {commit}: expected a 40- or 64-digit lowercase hex git commit (a tag is not a pin)"
   if !pkg.toolchain.isEmpty then
     if let .error e := Requirement.parse pkg.toolchain then
       throw s!"Package.toolchain {pkg.toolchain}: {e}"
@@ -839,7 +924,7 @@ def publishEntry (pkg : Package) (source sha : String) (modules : List String :=
     if let .error e := Requirement.parse r.req then
       throw s!"Package.require {r.name} {r.req}: {e}"
   pure { version := v, source, sha256 := sha, toolchain := pkg.toolchain, modules,
-         size, tree, commands, deps := pkg.requires }
+         size, tree, commands, commit, deps := pkg.requires }
 
 /-- The members of a `.tar.gz` (`tar -tzf`), one path per line. -/
 def archiveMembers (archive : System.FilePath) : IO (Except String (List String)) := do
@@ -888,8 +973,8 @@ def checkArchiveLayout (archive : System.FilePath) (name version : String) : IO 
 /-- `grail publish ARCHIVE --source URL`: hash the release archive and print the index
 entry, after checking the manifest and the archive layout. Printing (not writing) is the
 MVP: publishing is a reviewed pull request to the index repository. -/
-def publish (archive : Option System.FilePath) (source : String) (pkg : Package) :
-    IO (Except String String) := do
+def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
+    (commit : String := "") : IO (Except String String) := do
   let some ar := archive | return .error "usage: grail publish ARCHIVE --source URL"
   unless ← ar.pathExists do return .error s!"{ar}: no such archive"
   if let .error e ← checkArchiveLayout ar pkg.name pkg.version then return .error e
@@ -905,7 +990,7 @@ def publish (archive : Option System.FilePath) (source : String) (pkg : Package)
       | .error e => return .error e
       | .ok h => pure h
     let commands := commandDigest pkg.targets
-    match publishEntry pkg source sha modules size tree commands with
+    match publishEntry pkg source sha modules size tree commands commit with
     | .error e => pure (.error e)
     | .ok v => pure (.ok (Index.renderVersion v))
 

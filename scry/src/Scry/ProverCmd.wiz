@@ -1,0 +1,495 @@
+import Sys
+import Json
+import Text
+import Scry.CsCst
+import Scry.CsLower
+import Scry.Lower
+import Scry.CstStore
+import Scry.Rules
+import Scry.Models
+import Scry.RuleTaint
+import Scry.Bounds
+import Scry.Interproc
+import Scry.Prover
+/-!
+# Scry.ProverCmd: `scry prover`, the prover driver
+
+`scry prover FILE FUNCTION [--cover|--cut|--dump|--rows p:v,...] [--guards p,...]
+[--entry] [--classify] [--pack FILE] [--json] [--sarif OUT]` lowers one `.cs`/`.c` file
+from its checked-in `scry-cst` spill (so it needs neither tree-sitter nor .NET), runs
+the rule pack, and proves or checks one universal claim about one function's EDB:
+
+* `no-flow` (default): no selected source reaches a sink;
+* `--classify`: no **untrusted** source (`src`, `retsrc`) reaches a sink; parameter
+  binds are allowed (`constant-or-parameter-bound`);
+* `--cut`: every write is preceded by a check (the guard/bounds property);
+* `--cover`: the closure script (no hand-written invariant);
+* `--rows p:v,...`: check a hand-written invariant;
+* `--dump`: print the EDB relations.
+
+Exit status: `0` proved, `1` refuted or refused (the claim is not established),
+`2` usage/IO, `3` nothing analysed (no function, no spill, or a vacuous claim — the
+claim selected no source or no sink). A vacuous claim is never `0`; that distinction is
+the point of the driver.
+
+The human output is the `key<TAB>value` contract `scry/corpus/prover/check.sh` asserts;
+`--json` is `scry-prover-report/1`, and `--sarif OUT` writes one result for a refuted
+claim (a `note` for a proved claim is not emitted: absence of a finding is not a
+finding).
+-/
+
+-- ## Relations and lowering
+
+/-- One relation's rows, rendered with the row's own width. -/
+def Scry.proRel (st : Scry.State Nat) (name : String) (rel : Nat) : String :=
+  let rows := Scry.rtRows st rel;
+  name ++ "[" ++ Nat.repr (List.length rows) ++ "] "
+    ++ String.intercalate " " (List.map (fun row =>
+        let cols := Scry.range (List.length row);
+        "(" ++ String.intercalate "," (List.map (fun k => Nat.repr (Scry.claimRowNat row k)) cols)
+          ++ ")") rows)
+
+/-- The checked-in spill next to a `.cs`/`.c` file: `FILE.cs`/`FILE.c` -> `FILE.cst`. -/
+def Scry.spillOf (path : String) : String :=
+  if String.endsWith path ".cs" then String.append (String.dropEnd 3 path) ".cst"
+  else if String.endsWith path ".c" then String.append (String.dropEnd 2 path) ".cst"
+  else String.append path ".cst"
+
+/-- A lowered unit from either frontend: the functions and the warning count. -/
+structure Scry.ProLowered where
+  funcs : List Wil.Func
+  warnings : Nat
+
+/-- Lower a `.cs` with the C# frontend or anything else with the C frontend, from the
+same `scry-cst` spill format. -/
+def Scry.proLowerFile (path text spill : String) : Option Scry.ProLowered :=
+  match Scry.CstStore.ofText spill with
+  | .error _ => .none
+  | .ok store =>
+    match String.endsWith path ".cs" with
+    | .true =>
+      let l := Scry.Cs.lowerCst path text (Scry.Cs.ofStore text store);
+      .some (Scry.ProLowered.mk l.funcs (List.length l.warnings))
+    | .false =>
+      let t := Scry.lowerTU path (Scry.Cst.ofStore text store);
+      .some (Scry.ProLowered.mk t.funcs (List.length t.warnings))
+
+/-- A relation's row count. -/
+def Scry.proRelN (st : Scry.State Nat) (rel : Nat) : Nat := Scry.Db.relSize st.db rel
+
+def Scry.proDump (st : Scry.State Nat) : EIO Unit := do
+  EIO.lift (IO.println ("src\t" ++ Scry.proRel st "src" Scry.rtSrc));
+  EIO.lift (IO.println ("param\t" ++ Scry.proRel st "param" Scry.rtParam));
+  EIO.lift (IO.println ("retsrc\t" ++ Scry.proRel st "retsrc" Scry.rtRetSrc));
+  EIO.lift (IO.println ("sink\t" ++ Scry.proRel st "sink" Scry.rtSink));
+  EIO.lift (IO.println ("flow\t" ++ Scry.proRel st "flow" Scry.rtFlow));
+  EIO.lift (IO.println ("gen\t" ++ Scry.proRel st "gen" Scry.rtGen));
+  EIO.lift (IO.println ("san\t" ++ Scry.proRel st "san" Scry.rtSan));
+  EIO.lift (IO.println ("mstore\t" ++ Scry.proRel st "mstore" Scry.rtMStore));
+  EIO.lift (IO.println ("mload\t" ++ Scry.proRel st "mload" Scry.rtMLoad));
+  EIO.lift (IO.println ("mtainted\t" ++ Scry.proRel st "mtainted" Scry.rtMTainted));
+  EIO.lift (IO.println ("guard\t" ++ Scry.proRel st "guard" Scry.rtGuard));
+  EIO.lift (IO.println ("use\t" ++ Scry.proRel st "use" Scry.rtUse));
+  EIO.lift (IO.println ("before\t" ++ Scry.proRel st "before" Scry.rtBefore))
+
+-- ## Options
+
+structure Scry.ProverOpts where
+  file : Option String
+  func : Option String
+  pack : Option String
+  mode : String
+  rows : List (Nat × Nat)
+  guards : Option (List Nat)
+  entry : Bool
+  classify : Bool
+  json : Bool
+  sarif : Option String
+
+def Scry.ProverOpts.empty : Scry.ProverOpts :=
+  Scry.ProverOpts.mk .none .none .none "" .nil .none .false .false .false .none
+
+def Scry.proverUsage : String :=
+  "usage: scry prover FILE FUNCTION [--cover|--cut|--dump|--rows p:v,...]\n"
+  ++ "                         [--guards p,...] [--entry] [--classify]\n"
+  ++ "                         [--pack FILE] [--json] [--sarif OUT]\n"
+  ++ "  exit: 0 proved, 1 refuted/refused, 2 usage/IO, 3 nothing analysed\n"
+  ++ "        (no function/spill, or a vacuous claim).\n"
+
+/-- `0:0,2:1` as invariant rows. Malformed pairs are dropped. -/
+def Scry.parseRowsGo : List String → List (Nat × Nat)
+  | .nil => .nil
+  | .cons part rest => match String.splitOn ":" (String.trim part) with
+    | .cons a (.cons b .nil) => match String.parseNat (String.trim a), String.parseNat (String.trim b) with
+      | .some p, .some q => List.cons (p, q) (Scry.parseRowsGo rest)
+      | _, _ => Scry.parseRowsGo rest
+    | _ => Scry.parseRowsGo rest
+
+def Scry.parseRows (s : String) : List (Nat × Nat) :=
+  Scry.parseRowsGo (String.splitOn "," s)
+
+/-- `1,2,3` as a guard-point list. Malformed entries are dropped. -/
+def Scry.parseNatsGo : List String → List Nat
+  | .nil => .nil
+  | .cons part rest => match String.parseNat (String.trim part) with
+    | .some n => List.cons n (Scry.parseNatsGo rest)
+    | .none => Scry.parseNatsGo rest
+
+def Scry.parseNats (s : String) : List Nat :=
+  Scry.parseNatsGo (String.splitOn "," s)
+
+partial def Scry.proverArgsGo (o : Scry.ProverOpts) : List String → Except String Scry.ProverOpts
+  | .nil => match o.file, o.func with
+    | .some _, .some _ => .ok o
+    | _, _ => .error Scry.proverUsage
+  | .cons a rest => match a with
+    | "--cover" => Scry.proverArgsGo { o with mode := "--cover" } rest
+    | "--cut" => Scry.proverArgsGo { o with mode := "--cut" } rest
+    | "--dump" => Scry.proverArgsGo { o with mode := "--dump" } rest
+    | "--entry" => Scry.proverArgsGo { o with entry := .true } rest
+    | "--classify" => Scry.proverArgsGo { o with classify := .true } rest
+    | "--json" => Scry.proverArgsGo { o with json := .true } rest
+    | "--pack" => match rest with
+      | .cons p more => Scry.proverArgsGo { o with pack := .some p } more
+      | .nil => .error "--pack needs a FILE"
+    | "--sarif" => match rest with
+      | .cons p more => Scry.proverArgsGo { o with sarif := .some p } more
+      | .nil => .error "--sarif needs an OUT path"
+    | "--guards" => match rest with
+      | .cons g more => Scry.proverArgsGo { o with guards := .some (Scry.parseNats g) } more
+      | .nil => .error "--guards needs a point list"
+    | "--rows" => match rest with
+      | .cons r more => Scry.proverArgsGo { o with mode := "--rows", rows := Scry.parseRows r } more
+      | .nil => .error "--rows needs p:v,..."
+    | _ => match String.startsWith a "--" with
+      | .true => .error ("unknown flag " ++ a ++ "\n" ++ Scry.proverUsage)
+      | .false => match o.file with
+        | .none => Scry.proverArgsGo { o with file := .some a } rest
+        | .some _ => match o.func with
+          | .none => Scry.proverArgsGo { o with func := .some a } rest
+          | .some _ => .error ("unexpected argument " ++ a ++ "\n" ++ Scry.proverUsage)
+
+/-- The default C# rule pack: the corpus pack first (a checkout), then the installed
+one, in the same order `scry cs` uses. -/
+def Scry.proverPackCandidates : List String :=
+  ["scry/corpus/csharp/csharp.scry", "corpus/csharp/csharp.scry",
+   "../scry/corpus/csharp/csharp.scry", "scry/rules/csharp.scry",
+   "rules/csharp.scry"]
+
+def Scry.proverReadFirst : List String → EIO (Option (String × String))
+  | .nil => EIO.pure .none
+  | .cons p rest => do
+    ok ← EIO.lift (FS.exists p);
+    match ok with
+    | .true => do
+      text ← FS.readFile p;
+      EIO.pure (.some (p, text))
+    | .false => Scry.proverReadFirst rest
+
+def Scry.proverLoadPack (path : Option String) : EIO (String × Scry.RulePack) :=
+  match path with
+  | .some p => do
+    text ← FS.readFile p;
+    EIO.pure (p, Scry.parseRulePack text)
+  | .none => do
+    found ← Scry.proverReadFirst Scry.proverPackCandidates;
+    match found with
+    | .some pair => EIO.pure (pair.1, Scry.parseRulePack pair.2)
+    | .none => EIO.fail ("default C# rule pack not found (tried "
+        ++ String.intercalate ", " Scry.proverPackCandidates ++ "); pass --pack FILE")
+
+-- ## The report
+
+/-- The claim this run establishes. -/
+def Scry.claimOf (o : Scry.ProverOpts) (fn : String) (guards : List Nat) : Scry.Claim :=
+  let base := if o.classify then Scry.Claim.constantOrBound fn [] []
+    else Scry.Claim.noFlow fn [] [];
+  match o.mode with
+  | "--cut" => Scry.Claim.cut fn (match o.guards with | .some gs => gs | .none => guards)
+  | "--rows" => { base with invariant := o.rows }
+  | _ => base
+
+/-- The script a run uses: `--cover` closes from the seeds; the default is the prover's
+default script. -/
+def Scry.scriptOf (mode : String) : List Scry.Tactic :=
+  match mode with
+  | "--cover" => [Scry.Tactic.intro Scry.rtSrc, Scry.Tactic.intro Scry.rtParam,
+                  Scry.Tactic.intro Scry.rtRetSrc, Scry.Tactic.close]
+  | _ => [Scry.Tactic.intro Scry.rtSrc, Scry.Tactic.intro Scry.rtParam,
+          Scry.Tactic.intro Scry.rtRetSrc, Scry.Tactic.close, Scry.Tactic.split]
+
+def Scry.verdictTag : Scry.Verdict → String
+  | .proved _ => "proved"
+  | .refuted _ => "refuted"
+  | .refused _ => "refused"
+  | .scriptFailed _ => "script-failed"
+  | .vacuous _ => "vacuous"
+
+/-- Exit status of a final verdict: 0 proved, 1 refuted/refused/script-failed, 3
+vacuous (nothing analysed). -/
+def Scry.verdictStatus : Scry.Verdict → Nat
+  | .proved _ => 0
+  | .refuted _ => 1
+  | .refused _ => 1
+  | .scriptFailed _ => 1
+  | .vacuous _ => 3
+
+/-- The invariant rows and locations the verdict carries (empty for a non-proof). -/
+def Scry.verdictInvariant (v : Scry.Verdict) : Scry.Inv :=
+  match v with
+  | .proved c => Scry.invOfClaim c
+  | _ => Scry.Inv.empty
+
+def Scry.coverageJson (st : Scry.State Nat) : Json :=
+  Json.mkObj
+    [ ("src", Json.ofNat (Scry.proRelN st Scry.rtSrc))
+    , ("param", Json.ofNat (Scry.proRelN st Scry.rtParam))
+    , ("retsrc", Json.ofNat (Scry.proRelN st Scry.rtRetSrc))
+    , ("sink", Json.ofNat (Scry.proRelN st Scry.rtSink))
+    , ("flow", Json.ofNat (Scry.proRelN st Scry.rtFlow))
+    , ("gen", Json.ofNat (Scry.proRelN st Scry.rtGen))
+    , ("san", Json.ofNat (Scry.proRelN st Scry.rtSan))
+    , ("mstore", Json.ofNat (Scry.proRelN st Scry.rtMStore))
+    , ("mload", Json.ofNat (Scry.proRelN st Scry.rtMLoad))
+    , ("mtainted", Json.ofNat (Scry.proRelN st Scry.rtMTainted))
+    , ("guards", Json.ofNat (Scry.proRelN st Scry.rtGuard))
+    , ("uses", Json.ofNat (Scry.proRelN st Scry.rtUse))
+    , ("writes", Json.ofNat (Scry.writeUseCount st))
+    , ("before", Json.ofNat (Scry.proRelN st Scry.rtBefore)) ]
+
+def Scry.invariantJson (v : Scry.Verdict) : Json :=
+  let inv := Scry.verdictInvariant v;
+  Json.mkObj
+    [ ("rows", Json.ofNat (List.length inv.tainted))
+    , ("rowsText", Json.mkStr (Scry.showInv inv.tainted))
+    , ("locations", Json.ofNat (List.length inv.locations))
+    , ("locationsText", Json.mkStr (Scry.showLocs inv.locations)) ]
+
+def Scry.verdictJson (v : Scry.Verdict) : Json :=
+  Json.mkObj
+    [ ("tag", Json.mkStr (Scry.verdictTag v))
+    , ("text", Json.mkStr (Scry.Verdict.show v))
+    , ("witness", Json.mkStr (match v with | .refuted w => w | _ => ""))
+    , ("reason", Json.mkStr (match v with
+        | .refused r => r | .vacuous r => r | .scriptFailed e => e | _ => "")) ]
+
+def Scry.proverJson (o : Scry.ProverOpts) (file fn packPath : String)
+    (funcs warnings findings : Nat) (st : Scry.State Nat) (claim : Scry.Claim)
+    (v : Scry.Verdict) (status : Nat) : Json :=
+  Json.mkObj
+    [ ("schema", Json.mkStr "scry-prover-report/1")
+    , ("kind", Json.mkStr "prover")
+    , ("tool", Json.mkStr "scry")
+    , ("file", Json.mkStr file)
+    , ("function", Json.mkStr fn)
+    , ("pack", Json.mkStr packPath)
+    , ("entry", Json.mkBool o.entry)
+    , ("classify", Json.mkBool o.classify)
+    , ("mode", Json.mkStr (match o.mode with
+        | "" => "prove" | m => String.drop 2 m))
+    , ("functions", Json.ofNat funcs)
+    , ("warnings", Json.ofNat warnings)
+    , ("findings", Json.ofNat findings)
+    , ("property", Json.mkStr (Scry.Property.show claim.property))
+    , ("coverage", Scry.coverageJson st)
+    , ("verdict", match o.mode with
+        | "--dump" => Json.mkObj
+            [ ("tag", Json.mkStr "dump"), ("text", Json.mkStr "the EDB was dumped")
+            , ("witness", Json.mkStr ""), ("reason", Json.mkStr "") ]
+        | _ => Scry.verdictJson v)
+    , ("invariant", Scry.invariantJson v)
+    , ("exit", Json.ofNat status) ]
+
+/-- A SARIF log for one claim. A refuted claim is one `error` result whose message is the
+provenance witness; a refused/vacuous claim is a `note` (the run established nothing);
+a proved claim has no results. -/
+def Scry.proverSarif (file fn : String) (claim : Scry.Claim) (v : Scry.Verdict) : Json :=
+  let ruleId := "scry/prover/" ++ (match claim.property with
+    | .noFlow => "no-flow"
+    | .constantOrBound => "constant-or-parameter-bound"
+    | .cut => "cut");
+  let rule := Json.mkObj
+    [ ("id", Json.mkStr ruleId)
+    , ("shortDescription", Json.mkObj
+        [("text", Json.mkStr ("prover claim: " ++ Scry.Property.show claim.property))]) ];
+  let result := match v with
+    | .refuted w => [Json.mkObj
+        [ ("ruleId", Json.mkStr ruleId), ("level", Json.mkStr "error")
+        , ("message", Json.mkObj [("text", Json.mkStr w)])
+        , ("locations", Json.mkArr [Json.mkObj
+            [("physicalLocation", Json.mkObj
+              [("artifactLocation", Json.mkObj [("uri", Json.mkStr file)])])]]) ]]
+    | .refused r => [Json.mkObj
+        [ ("ruleId", Json.mkStr ruleId), ("level", Json.mkStr "note")
+        , ("message", Json.mkObj [("text", Json.mkStr ("refused: " ++ r))]) ]]
+    | .vacuous r => [Json.mkObj
+        [ ("ruleId", Json.mkStr ruleId), ("level", Json.mkStr "note")
+        , ("message", Json.mkObj [("text", Json.mkStr ("vacuous: " ++ r))]) ]]
+    | .scriptFailed e => [Json.mkObj
+        [ ("ruleId", Json.mkStr ruleId), ("level", Json.mkStr "warning")
+        , ("message", Json.mkObj [("text", Json.mkStr ("script-failed: " ++ e))]) ]]
+    | .proved _ => ([] : List Json);
+  let driver := Json.mkObj
+    [ ("name", Json.mkStr "scry")
+    , ("version", Json.mkStr "0.1.0")
+    , ("informationUri", Json.mkStr "https://github.com/wiz-pl/wiz")
+    , ("rules", Json.mkArr [rule]) ];
+  let run := Json.mkObj
+    [ ("tool", Json.mkObj [("driver", driver)])
+    , ("columnKind", Json.mkStr "utf16CodeUnits")
+    , ("results", Json.mkArr result) ];
+  Json.mkObj
+    [ ("$schema", Json.mkStr "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json")
+    , ("version", Json.mkStr "2.1.0")
+    , ("runs", Json.mkArr [run]) ]
+
+-- ## Rendering
+
+def Scry.proverCoverageLines (st : Scry.State Nat) : List String :=
+  [ "SRC\t" ++ Nat.repr (Scry.proRelN st Scry.rtSrc)
+  , "SINK\t" ++ Nat.repr (Scry.proRelN st Scry.rtSink)
+  , "FLOW\t" ++ Nat.repr (Scry.proRelN st Scry.rtFlow)
+  , "GEN\t" ++ Nat.repr (Scry.proRelN st Scry.rtGen)
+  , "SAN\t" ++ Nat.repr (Scry.proRelN st Scry.rtSan)
+  , "MSTORE\t" ++ Nat.repr (Scry.proRelN st Scry.rtMStore)
+  , "MLOAD\t" ++ Nat.repr (Scry.proRelN st Scry.rtMLoad)
+  , "MTAINTED\t" ++ Nat.repr (Scry.proRelN st Scry.rtMTainted)
+  , "GUARDS\t" ++ Nat.repr (Scry.proRelN st Scry.rtGuard)
+  , "USES\t" ++ Nat.repr (Scry.proRelN st Scry.rtUse)
+  , "WRITES\t" ++ Nat.repr (Scry.writeUseCount st)
+  , "BEFORE\t" ++ Nat.repr (Scry.proRelN st Scry.rtBefore) ]
+
+/-- The human report: the `key<TAB>value` lines `check.sh` asserts, in the same order
+the standalone driver printed them. -/
+def Scry.proverHuman (o : Scry.ProverOpts) (fn : String) (claim : Scry.Claim)
+    (st : Scry.State Nat) (v : Scry.Verdict) : EIO Unit := do
+  EIO.lift (IO.println ("PROPERTY\t" ++ Scry.Property.show claim.property));
+  EIO.lift (IO.println ("FUNCTION\t" ++ fn));
+  EIO.lift (IO.println ("SRC\t" ++ Nat.repr (Scry.proRelN st Scry.rtSrc)));
+  EIO.lift (IO.println ("SINK\t" ++ Nat.repr (Scry.proRelN st Scry.rtSink)));
+  EIO.lift (IO.println ("FLOW\t" ++ Nat.repr (Scry.proRelN st Scry.rtFlow)));
+  EIO.lift (IO.println ("GEN\t" ++ Nat.repr (Scry.proRelN st Scry.rtGen)));
+  EIO.lift (IO.println ("SAN\t" ++ Nat.repr (Scry.proRelN st Scry.rtSan)));
+  EIO.lift (IO.println ("MSTORE\t" ++ Nat.repr (Scry.proRelN st Scry.rtMStore)));
+  EIO.lift (IO.println ("MLOAD\t" ++ Nat.repr (Scry.proRelN st Scry.rtMLoad)));
+  EIO.lift (IO.println ("MTAINTED\t" ++ Nat.repr (Scry.proRelN st Scry.rtMTainted)));
+  EIO.lift (IO.println ("GUARDS\t" ++ Nat.repr (Scry.proRelN st Scry.rtGuard)));
+  EIO.lift (IO.println ("USES\t" ++ Nat.repr (Scry.proRelN st Scry.rtUse)));
+  EIO.lift (IO.println ("WRITES\t" ++ Nat.repr (Scry.writeUseCount st)));
+  EIO.lift (IO.println ("BEFORE\t" ++ Nat.repr (Scry.proRelN st Scry.rtBefore)));
+  match o.mode with
+  | "--dump" => Scry.proDump st
+  | "--cut" => do
+    EIO.lift (IO.println ("CUT\t" ++ Scry.showCut claim.guards));
+    EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
+    match v with
+    | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
+    | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
+    | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+    | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
+    | .proved c => do
+      let inv := Scry.invOfClaim c;
+      EIO.lift (IO.println ("ROWS\t" ++ Nat.repr (List.length inv.tainted)));
+      EIO.lift (IO.println ("INV\t" ++ Scry.showInv inv.tainted));
+      EIO.lift (IO.println ("LOCS\t" ++ Scry.showLocs inv.locations))
+  | _ => do
+    EIO.lift (IO.println ("VERDICT\t" ++ Scry.Verdict.show v));
+    match v with
+    | .proved c => do
+      let inv := Scry.invOfClaim c;
+      EIO.lift (IO.println ("ROWS\t" ++ Nat.repr (List.length inv.tainted)));
+      EIO.lift (IO.println ("INV\t" ++ Scry.showInv inv.tainted));
+      EIO.lift (IO.println ("LOCS\t" ++ Scry.showLocs inv.locations))
+    | .refuted w => EIO.lift (IO.println ("WITNESS\t" ++ w))
+    | .refused r => EIO.lift (IO.println ("REFUSED\t" ++ r))
+    | .vacuous r => EIO.lift (IO.println ("VACUOUS\t" ++ r))
+    | .scriptFailed e => EIO.lift (IO.println ("SCRIPT_FAILED\t" ++ e))
+
+-- ## The command
+
+/-- Try an `EIO` action, keeping its failure as a value (usage/IO is exit 2). -/
+def Scry.proverAttempt {A : Type} (x : EIO A) : EIO (Except String A) :=
+  IO.bind x (fun r => IO.pure (.ok r))
+
+def Scry.proverRun (o : Scry.ProverOpts) (file fn : String) : EIO Nat := do
+  packPair ← Scry.proverAttempt (Scry.proverLoadPack o.pack);
+  match packPair with
+  | .error e => do
+    EIO.lift (IO.ePrintln ("scry: " ++ e));
+    EIO.pure 2
+  | .ok (packPath, pack) => do
+    fileOk ← EIO.lift (FS.exists file);
+    match fileOk with
+    | .false => do
+      EIO.lift (IO.ePrintln ("scry: source not found: " ++ file));
+      EIO.pure 2
+    | .true => do
+      let spillPath := Scry.spillOf file;
+      spillOk ← EIO.lift (FS.exists spillPath);
+      match spillOk with
+      | .false => do
+        EIO.lift (IO.ePrintln ("scry: no checked-in spill: " ++ spillPath
+          ++ " (regenerate with scry-cst " ++ file ++ ")"));
+        EIO.pure 3
+      | .true => do
+        text ← FS.readFile file;
+        spill ← FS.readFile spillPath;
+        match Scry.proLowerFile file text spill with
+        | .none => do
+          EIO.lift (IO.ePrintln ("scry: could not read the spill " ++ spillPath));
+          EIO.pure 3
+        | .some l => do
+          let pr := match o.entry with
+            | .true => Scry.analyzeC (Wil.program l.funcs) pack
+            | .false => Scry.analyze (Wil.program l.funcs) pack;
+          match Scry.findResult pr fn with
+          | .none => do
+            EIO.lift (IO.ePrintln ("scry: no function " ++ fn ++ " in " ++ file));
+            EIO.pure 3
+          | .some r => do
+            let wantCut := String.eq o.mode "--cut";
+            let wantDump := String.eq o.mode "--dump";
+            let st0 := if Bool.or wantCut wantDump then
+              Scry.addBoundsFacts r.edb (Scry.boundsFactsOfFunc pr.pointsTo r)
+              else r.edb;
+            let claim := Scry.claimOf o fn (Scry.guardPoints st0);
+            let v : Scry.Verdict := match o.mode with
+              | "--rows" => Scry.check Scry.ruleTaintProgram st0 claim
+              | "--cut" => Scry.proveFor Scry.ruleTaintProgram st0 claim
+              | "--cover" => Scry.proveWithSpec Scry.ruleTaintProgram st0 claim
+                  (Scry.scriptOf "--cover")
+              | "--dump" => (Scry.Verdict.proved claim)
+              | _ => Scry.proveFor Scry.ruleTaintProgram st0 claim;
+            let status : Nat := match o.mode with
+              | "--dump" => 0
+              | _ => Scry.verdictStatus v;
+            match o.json with
+            | .true => EIO.lift (IO.println (Json.render (Scry.proverJson o file fn packPath
+                (List.length l.funcs) l.warnings (List.length (Scry.programFindings pr))
+                st0 claim v status)))
+            | .false => Scry.proverHuman o fn claim st0 v;
+            match o.sarif with
+            | .some out => do
+              w ← Scry.proverAttempt (FS.writeFile out (String.append
+                (Json.render (Scry.proverSarif file fn claim v)) "\n"));
+              match w with
+              | .error e => do
+                EIO.lift (IO.ePrintln ("scry: " ++ e));
+                EIO.pure 2
+              | .ok _ => do
+                EIO.lift (IO.ePrintln ("wrote SARIF 2.1.0: " ++ out ++ " ("
+                  ++ Nat.repr (match v with | .proved _ => 0 | _ => 1)
+                  ++ " result(s))"));
+                EIO.pure status
+            | .none => EIO.pure status
+
+def Scry.proverMain (args : List String) : EIO Nat :=
+  match Scry.proverArgsGo Scry.ProverOpts.empty args with
+  | .error e => do
+    EIO.lift (IO.ePrintln ("scry: " ++ e));
+    EIO.pure 2
+  | .ok o => match o.file, o.func with
+    | .some f, .some fn => Scry.proverRun o f fn
+    | _, _ => do
+      EIO.lift (IO.ePrintln ("scry: " ++ Scry.proverUsage));
+      EIO.pure 2

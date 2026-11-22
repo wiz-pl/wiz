@@ -3,7 +3,7 @@ import Logic
 # Trace
 
 Traces and Mealy machines (`import Trace`): the common semantics of the HDL's circuits
-(lib/Hdl/Core.wiz, `Circuit.trace`), the temporal logic over them, and anything else
+(hdl/src/Hdl/Core.wiz, `Circuit.trace`), the temporal logic over them, and anything else
 that runs step by step. Design: wiz-notes/cohesion-hardware.md, 2.1.
 
 * A trace is a function `Nat → A`, not a ν-stream: equality at ν is stuck, while
@@ -99,7 +99,11 @@ def Mealy.invariant {S I O : Type} (m : Mealy S I O) (s0 : S) (xs : Trace I) (en
 
 /-- Refinement by a representation map: the implementation, started in the image of the
 specification's state and driven by the image of its inputs, stays in the image of
-its states and outputs the image of its outputs, for ever. The premise is one step. -/
+its states and outputs the image of its outputs, for ever. The premise is one step.
+
+(The equations below are at `S × O`, which computes to a Σ, so the carrier's level is
+not solved from the argument: the levels are named explicitly. See
+`wiz-notes/wishful/level-from-implicit-type.md`.) -/
 def Mealy.simulates {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
     (embS : T → S) (embI : J → I) (embO : P → O)
     (h : (s : T) → (x : J) → impl (embS s) (embI x) = (embS (spec s x).1, embO (spec s x).2))
@@ -108,7 +112,7 @@ def Mealy.simulates {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J 
   | .zero => rfl
   | .succ t => Eq.trans
       (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).1) (Mealy.simulates impl spec embS embI embO h s0 xs t))
-      (Eq.congrArg (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)))
+      (Eq.congrArg.{0, 0} (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)))
 /-- The refinement map also matches the outputs, at every time. -/
 def Mealy.simulatesOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
     (embS : T → S) (embI : J → I) (embO : P → O)
@@ -117,7 +121,7 @@ def Mealy.simulatesOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T
     Mealy.outAt impl (embS s0) (Trace.map embI xs) t = embO (Mealy.outAt spec s0 xs t) :=
   Eq.trans
     (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).2) (Mealy.simulates impl spec embS embI embO h s0 xs t))
-    (Eq.congrArg (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)))
+    (Eq.congrArg.{0, 0} (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)))
 
 ------------------------------------------------------------------------------------
 -- Finite case analysis (H14 T2): numbers below a bound, and Booleans by evaluation
@@ -189,7 +193,7 @@ def Mealy.simulatesInv {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T
   | .zero => rfl
   | .succ t => Eq.trans
       (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).1) (Mealy.simulatesInv impl spec embS embI embO inv pres h s0 h0 xs t))
-      (Eq.congrArg (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)
+      (Eq.congrArg.{0, 0} (fun (r : S × O) => r.1) (h (Mealy.stateAt spec s0 xs t) (xs t)
         (Mealy.invariant spec s0 xs (fun (x : J) => True) inv h0 (fun (s : T) (x : J) (u : True) (i : inv s) => pres s x i) (fun (t : Nat) => True.intro) t)))
 def Mealy.simulatesInvOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Mealy T J P)
     (embS : T → S) (embI : J → I) (embO : P → O) (inv : T → Prop)
@@ -199,7 +203,7 @@ def Mealy.simulatesInvOut {S T I J O P : Type} (impl : Mealy S I O) (spec : Meal
     Mealy.outAt impl (embS s0) (Trace.map embI xs) t = embO (Mealy.outAt spec s0 xs t) :=
   Eq.trans
     (Eq.congrArg (fun (s : S) => (impl s (embI (xs t))).2) (Mealy.simulatesInv impl spec embS embI embO inv pres h s0 h0 xs t))
-    (Eq.congrArg (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)
+    (Eq.congrArg.{0, 0} (fun (r : S × O) => r.2) (h (Mealy.stateAt spec s0 xs t) (xs t)
       (Mealy.invariant spec s0 xs (fun (x : J) => True) inv h0 (fun (s : T) (x : J) (u : True) (i : inv s) => pres s x i) (fun (t : Nat) => True.intro) t)))
 
 -- A run that follows a known path: from `F 0` at cycle `t`, if every step `k < K` of
@@ -220,7 +224,7 @@ def Mealy.seq {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) : Mea
 def Mealy.seq_stateAt {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) (a : S1) (b : S2) (xs : Trace I) :
     (t : Nat) → Mealy.stateAt (Mealy.seq m1 m2) (a, b) xs t = (Mealy.stateAt m1 a xs t, Mealy.stateAt m2 b (Mealy.outAt m1 a xs) t)
   | .zero => refl (a, b)
-  | .succ t => Eq.congrArg (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).1) (Mealy.seq_stateAt m1 m2 a b xs t)
+  | .succ t => Eq.congrArg.{0, 0} (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).1) (Mealy.seq_stateAt m1 m2 a b xs t)
 def Mealy.seq_outAt {S1 S2 I M O : Type} (m1 : Mealy S1 I M) (m2 : Mealy S2 M O) (a : S1) (b : S2) (xs : Trace I) (t : Nat) :
     Mealy.outAt (Mealy.seq m1 m2) (a, b) xs t = Mealy.outAt m2 b (Mealy.outAt m1 a xs) t :=
-  Eq.congrArg (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).2) (Mealy.seq_stateAt m1 m2 a b xs t)
+  Eq.congrArg.{0, 0} (fun (p : S1 × S2) => (Mealy.seq m1 m2 p (xs t)).2) (Mealy.seq_stateAt m1 m2 a b xs t)

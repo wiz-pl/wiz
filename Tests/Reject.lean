@@ -97,20 +97,14 @@ def wizBinary : IO (Option System.FilePath) := do
     if ← c.pathExists then return some c
   return none
 
-/-- Write the program (and its modules) to a fresh directory and run `wiz check` on it:
-`wantReject` says whether the compiler must exit nonzero. -/
-def cliCheck (src : String) (extra : List (Name × String)) (wantReject : Bool) : IO Unit := do
-  let some wiz ← wizBinary | skip "no wiz binary"
-  let dir ← IO.FS.createTempDir
-  IO.FS.writeFile (dir / "main.wiz") src
-  for (n, text) in extra do
-    let p := dir / Module.relPath n
-    if let some d := p.parent then IO.FS.createDirAll d
-    IO.FS.writeFile p text
-  IO.FS.createDirAll cacheDir
-  let out ← IO.Process.output
-    { cmd := wiz.toString,
-      args := #["check", (dir / "main.wiz").toString, "-I", dir.toString, "--cache", cacheDir.toString] }
+/-- Run `wiz check` (with `args` before the path) and require `wantReject`'s verdict;
+return stdout and stderr, so a case can pin the rendered message too. `none` (the case
+should return) when there is no `wiz` binary to run. -/
+def cliRun (args : List String) (path : System.FilePath) (wantReject : Bool) : IO (Option String) := do
+  let some wiz ← wizBinary | do
+    skip "no wiz binary"
+    return none
+  let out ← IO.Process.output { cmd := wiz.toString, args := (["check"] ++ args ++ [path.toString]).toArray }
   let output := out.stdout ++ out.stderr
   if output.toLower.contains "panic" then
     throw (IO.userError s!"wiz check panicked:\n{output}")
@@ -120,6 +114,29 @@ def cliCheck (src : String) (extra : List (Name × String)) (wantReject : Bool) 
   else
     unless out.exitCode == 0 do
       throw (IO.userError s!"wiz check rejected a program that must stay accepted (exit {out.exitCode}):\n{output}")
+  pure (some output)
+
+/-- `cliCheck`, with experimental kernel flags before the path, returning the output so a
+case can also pin the message. (`--strict-privacy`/`--predicative-prop` turn the cache off
+themselves, so `--cache` only affects the default run.) -/
+def cliCheckWith (args : List String) (src : String) (extra : List (Name × String))
+    (wantReject : Bool) : IO (Option String) := do
+  let some _ ← wizBinary | do
+    skip "no wiz binary"
+    return none
+  let dir ← IO.FS.createTempDir
+  IO.FS.writeFile (dir / "main.wiz") src
+  for (n, text) in extra do
+    let p := dir / Module.relPath n
+    if let some d := p.parent then IO.FS.createDirAll d
+    IO.FS.writeFile p text
+  IO.FS.createDirAll cacheDir
+  cliRun (args ++ ["-I", dir.toString, "--cache", cacheDir.toString]) (dir / "main.wiz") wantReject
+
+/-- Write the program (and its modules) to a fresh directory and run `wiz check` on it:
+`wantReject` says whether the compiler must exit nonzero. -/
+def cliCheck (src : String) (extra : List (Name × String)) (wantReject : Bool) : IO Unit := do
+  discard <| cliCheckWith [] src extra wantReject
 
 /-- Elaborate in process and check that an error with the given class (code; `none` is
 "no code") and span is reported. -/

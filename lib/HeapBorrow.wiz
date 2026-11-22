@@ -1,5 +1,5 @@
 import HoareTactics
-import Optic
+import Data.Result
 /-!
 # HeapBorrow
 
@@ -27,9 +27,8 @@ the cells a Feral function is not given are the ones it can't touch. `Result.Hol
 
 
 /-- after the value-level function ran: hand the final value back to the cell, or fault -/
-def Prog.handBack {V B : Type} (l : Nat) : Result (B × V) → Prog V B
-  | .ok r => .set l r.2 (.ret r.1)
-  | .err e => .fail
+def Prog.handBack {V B : Type} (l : Nat) (r : Result (B × V)) : Prog V B :=
+  Result.elim (fun (p : B × V) => .set l p.2 (.ret p.1)) (fun _ => .fail) r
 
 /-- `f (&mut *l)`: the cell's value is lent to `f` and its final value written back -/
 def Prog.borrowMut {V B : Type} (l : Nat) (f : V → Result (B × V)) : Prog V B :=
@@ -59,9 +58,8 @@ def Prog.borrowMut_spec {V B : Type} (l : Nat) (a : V) (f : V → Result (B × V
 -- ## Two `&mut` borrows at once (two distinct cells: `⋆` says they are distinct)
 
 /-- After a two-borrow function ran: hand the final values back to the cells, or fault. -/
-def Prog.handBack2 {V B : Type} (p q : Nat) : Result (B × (V × V)) → Prog V B
-  | .ok r => .set p r.2.1 (.set q r.2.2 (.ret r.1))
-  | .err e => .fail
+def Prog.handBack2 {V B : Type} (p q : Nat) (r : Result (B × (V × V))) : Prog V B :=
+  Result.elim (fun (x : B × (V × V)) => .set p x.2.1 (.set q x.2.2 (.ret x.1))) (fun _ => .fail) r
 
 /-- `f (&mut *p) (&mut *q)` -/
 def Prog.borrowMut2 {V B : Type} (p q : Nat) (f : V → V → Result (B × (V × V))) : Prog V B :=
@@ -93,9 +91,8 @@ def Prog.borrowMut2_spec {V B : Type} (p q : Nat) (a b : V) (f : V → V → Res
 
 /-- After a shared-borrow function ran: return its result (the cell is unchanged), or
 fault. -/
-def Prog.handBackShr {V B : Type} : Result B → Prog V B
-  | .ok r => .ret r
-  | .err e => .fail
+def Prog.handBackShr {V B : Type} (r : Result B) : Prog V B :=
+  Result.elim (fun b => .ret b) (fun _ => .fail) r
 
 /-- `f (&*l)` -/
 def Prog.borrowShr {V B : Type} (l : Nat) (f : V → Result B) : Prog V B :=

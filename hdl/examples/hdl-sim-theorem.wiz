@@ -1,0 +1,38 @@
+-- The simulation theorem (`import Hdl.Netlist`) on a synthesised design: a one-bit delay
+-- built by `Circuit.netlist`. `Circuit.Simulates`' obligations are discharged by `rfl`
+-- (the kernel evaluates the netlist's nodes), and the theorem says the netlist
+-- simulation of any finite trace is the value simulation. Run by the `hdl` test group.
+import Hdl.Core
+import Hdl.Netlist
+import Hdl.Temporal
+
+def Bit : HwTy := HwTy.bits 1
+
+-- a one-bit delay: the output is the previous input (one register)
+def delayC : Circuit Bit Bit :=
+  Circuit.mk Bit (BitVec.ofNat 1 0) (fun s x => Hw.pair x s)
+def delayN : Netlist := Circuit.netlist "delay" delayC
+
+-- the relation's obligations: one clock, no memories, the initial register, one step
+def delaySim : Circuit.Simulates delayC delayN :=
+  Circuit.Simulates.mk rfl rfl rfl (fun s x => And.intro rfl rfl)
+
+-- the theorem, used at every finite input trace
+def delayLaw (xs : List (HwTy.El Bit)) :
+    Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) xs) = Circuit.runLeaves delayC xs :=
+  Circuit.Simulates.simulate_eq_runLeaves delaySim xs
+
+-- the Temporal form: every finite prefix of the infinite trace is what the netlist runs
+def delayTraceLaw (xs : Trace (HwTy.El Bit)) (k : Nat) :
+    Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) (Trace.take k xs)) =
+      Hdl.map (HwTy.leaves Bit) (Trace.take k (Circuit.trace delayC xs)) :=
+  Circuit.Simulates.trace_take delaySim xs k
+
+def ins : List (HwTy.El Bit) :=
+  List.cons (BitVec.ofNat 1 1)
+    (List.cons (BitVec.ofNat 1 0)
+      (List.cons (BitVec.ofNat 1 1) (List.cons (BitVec.ofNat 1 1) List.nil)))
+
+#eval Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) ins)
+#eval Circuit.runLeaves delayC ins
+#eval BEq.beq (Netlist.simulate delayN (Hdl.map (HwTy.leaves Bit) ins)) (Circuit.runLeaves delayC ins)

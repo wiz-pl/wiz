@@ -4,7 +4,7 @@ import FeralCore
 -- fn bad () : U64 := { let a := 3; let r := { let b := 5; longest (&a) (&b) }; *r }
 -- The result of `longest` is a `Shr ρb U64`; it can't leave b's scope, whose result
 -- type is chosen outside it (where ρb doesn't exist).
-def longest {ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
+def longest {0 ρa ρb : Region} (0 h : Outlives ρa ρb) (x : Shr ρa U64) (y : Shr ρb U64) : Result (Shr ρb U64) :=
   match U64.lt x.val y.val with
   | .true => .ok y
   | .false => .ok (Shr.weaken h x)

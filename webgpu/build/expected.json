@@ -1,0 +1,69 @@
+{
+  "note": "values are the Wiz interpreter's, from `wiz check webgpu/build/ref.wiz` (#eval); do not edit by hand",
+  "kernelSource": "webgpu/kernels/add.wiz",
+  "length": 8,
+  "a": [
+    3000000000,
+    4294967295,
+    0,
+    1,
+    123456789,
+    2147483648,
+    42,
+    4000000000
+  ],
+  "b": [
+    2000000000,
+    1,
+    0,
+    4294967295,
+    987654321,
+    2147483648,
+    0,
+    1000000000
+  ],
+  "kernels": {
+    "add": {
+      "entry": "add",
+      "wgsl": "add.wgsl",
+      "values": [
+        705032704,
+        0,
+        0,
+        0,
+        1111111110,
+        0,
+        42,
+        705032704
+      ]
+    },
+    "maxMul": {
+      "entry": "maxMul",
+      "wgsl": "maxMul.wgsl",
+      "values": [
+        3000000000,
+        4294967295,
+        0,
+        4294967293,
+        2962962963,
+        2147483648,
+        42,
+        4000000000
+      ]
+    },
+    "mix": {
+      "entry": "mix",
+      "wgsl": "mix.wgsl",
+      "values": [
+        0,
+        4294967287,
+        0,
+        11,
+        3158884403,
+        0,
+        249,
+        1410606080
+      ]
+    }
+  }
+}

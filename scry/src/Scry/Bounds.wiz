@@ -1,0 +1,712 @@
+import Scry.PointsTo
+import Scry.Rules
+import Scry.Models
+import Scry.RuleTaint
+import Scry.Eval
+import Scry.Engine
+import Text
+/-!
+# Scry.Bounds: CWE-787/CWE-125 bounds checks on the points-to model
+
+This is the analysis behind the two opt-in `kind memory` rules
+
+```
+rule out-of-bounds-write
+  kind memory
+  severity error
+  message An attacker-controlled index writes outside an allocation
+  check out-of-bounds-write
+end
+
+rule out-of-bounds-read
+  kind memory
+  severity error
+  message An attacker-controlled index reads outside an allocation
+  check out-of-bounds-read
+end
+```
+
+The claim is deliberately narrow. It does **not** prove a symbolic bound: it reports a
+memory access when all of the following hold, from data the existing analyses already
+have:
+
+* the points-to layer resolves the access pointer to an allocation (`Loc.heap` or
+  `Loc.stack`) whose cell count the lowering recorded;
+* the index (a `gepVar` subscript) or the copy length (a `read`/`recv`/`memcpy` count)
+  is tainted by the rule pack's sources, using `Scry.RuleTaint`'s taint rows;
+* no dominating branch on the path proves `index < capacity` (or `count < capacity`).
+
+If the access is a backed by an allocation whose size the lowering could not determine,
+the result is **not** a finding: it is the existing `scry/memory/unknown-memory`
+boundary diagnostic. That distinction is the point of the module: the tool never claims
+an extent it does not know.
+
+## What is modelled
+
+* `p[i] = v` and `x = p[i]` where `p` is a heap/stack object and `i` is tainted. The
+  capacity is `cells / scale` from the `Wil.Rhs.alloc`/`Wil.Rhs.slot` site (rounded up),
+  where `scale` is the element stride of the subscript.
+* `read(fd, buf, n)` / `recv(fd, buf, n, ...)` with a tainted `n`: the destination object
+  is the write side (CWE-787).
+* `memcpy(dst, src, n)` / `memmove` / `strncpy` with a tainted `n`: the source object is
+  the read side (CWE-125).
+* A dominating `if (i >= CAP) return;` (or `i < CAP`, `i <= CAP`, ... on the surviving
+  edge) suppresses the finding when `CAP` is a constant no larger than the object's
+  capacity. A trusted sanitising cap (`clamp_len(n, CAP)`) removes the taint itself, so
+  it also suppresses the finding.
+
+## What is not modelled
+
+Loops and induction variables, pointer walks (`*dst++`), negative indices, symbolic
+capacities, struct-array extents beyond the recorded cell count, comparisons through a
+function (`min(i, n)`), and interprocedural object sizes are not reasoned about. A store
+through a pointer that was advanced by `dst++` has no `gepVar` index and is therefore not
+reported. An allocation whose size is a runtime expression is recorded as unknown and
+produces the `unknown-memory` boundary, never a finding.
+-/
+
+-- ## Allocation sizes
+
+/-- The cell count of every `alloc`/`slot` event, keyed by `(function, program point)`.
+`0` is the lowering's "size not statically known" marker. This is the event-sourced form
+of `boundsSizesOfFunc`: it reads the semantics' projection (`Sem.events`) rather than
+Wil's statement constructors. -/
+def Scry.boundsSizesOfEvents (es : List (Scry.ObservedEvent Scry.Event)) :
+    List ((String × Nat) × Nat) :=
+  Scry.concatLists (fun e =>
+    match e.event with
+    | .alloc _ cells => List.cons ((e.func, e.point), cells) .nil
+    | .slot _ cells => List.cons ((e.func, e.point), cells) .nil
+    | _ => .nil) es
+
+/-- The cell count of every `alloc`/`slot` site in a function, keyed by
+`(function, program point)`. `0` is the lowering's "size not statically known" marker. -/
+def Scry.boundsSizesOfFunc (fn : Wil.Func) : List ((String × Nat) × Nat) :=
+  let g := Scry.flatten fn;
+  Scry.concatLists (fun n =>
+    match Scry.nodeStmt g n with
+    | .none => .nil
+    | .some s => match s with
+      | .assign _ (.alloc cells) _ => [((fn.name, n), cells)]
+      | .assign _ (.slot cells) _ => [((fn.name, n), cells)]
+      | _ => .nil) (Scry.range g.count)
+
+/-- The same table from a Wil program, through the default semantics. -/
+def Scry.boundsSizes (p : Wil.Program) : List ((String × Nat) × Nat) :=
+  Scry.boundsSizesOfEvents (Scry.WilEvents (Scry.WilTarget.mk p "" .nil))
+
+def Scry.boundsSizeAt (sizes : List ((String × Nat) × Nat)) (func : String) (point : Nat) :
+    Option Nat :=
+  match List.find (fun q => Bool.and (String.eq q.1.1 func) (Nat.beq q.1.2 point)) sizes with
+  | .none => .none
+  | .some q => .some q.2
+
+/-- Strip field/array cells to the object a free or an allocation would name. -/
+partial def Scry.boundsRoot (l : Scry.Loc) : Scry.Loc :=
+  match l with
+  | .field b _ => Scry.boundsRoot b
+  | .anyOff b => Scry.boundsRoot b
+  | _ => l
+
+/-- The recorded capacity of a location, when it is a heap object or stack slot. A global
+has no recorded extent (one merged cell), so it is `none`, not a guessed size. -/
+def Scry.boundsLocSize (sizes : List ((String × Nat) × Nat)) (l : Scry.Loc) : Option Nat :=
+  match Scry.boundsRoot l with
+  | .heap f p => Scry.boundsSizeAt sizes f p
+  | .stack f p => Scry.boundsSizeAt sizes f p
+  | _ => .none
+
+/-- `ceil a b`, the number of indices of stride `b` that fit in `a` cells. -/
+def Scry.boundsCeilDiv (a b : Nat) : Nat :=
+  match Nat.beq b 0 with
+  | .true => 0
+  | .false => Nat.div (Nat.add a (Nat.sub b 1)) b
+
+-- ## Taint of the index / length
+
+def Scry.boundsUntrustedAt (r : Scry.FuncResult) (point var : Nat) : Bool :=
+  Scry.taintAtUse r.plan.info (Scry.resultTaint r) point var
+
+-- ## Constants reached at a point
+
+/-- The definitions of register `var` that reach its use at `point`. The production
+taint engine builds a flow-only `Scry.FnInfo` (`Scry.fnInfoFlowWithG`: `rd` and `dom`
+empty, because the point-level tables are quadratic on a huge function), so the def-use
+index answers the question; a full `Scry.fnInfo` (the tests) still uses `rd`. Every
+query here is at a point that uses `var` (an access's pointer, a copy's source, a branch
+condition), which is exactly where the index has the reaching definitions. -/
+def Scry.boundsReaching (info : Scry.FnInfo) (point var : Nat) : List Nat :=
+  match info.rd with
+  | .nil => Scry.mapListGet info.depIdx (UIntN.toNat (Scry.depKey point var))
+  | _ => Scry.rdForVar info.defs info.rd point var
+
+def Scry.boundsValNat (v : Wil.Val) : Option Nat :=
+  match v with
+  | .int _ _ bits => .some bits
+  | _ => .none
+
+/-- A constant definition of `var` that reaches `point`, following `use` copies for a
+few hops (the lowering materialises literals through temporaries). -/
+partial def Scry.boundsConstAt (info : Scry.FnInfo) (g : Scry.Fn) (point var fuel : Nat) :
+    Option Nat :=
+  match fuel with
+  | .zero => .none
+  | .succ k =>
+    let defs := Scry.boundsReaching info point var;
+    match Scry.ptFilterMap (fun d =>
+        match Scry.nodeStmt g d with
+        | .none => .none
+        | .some s => match s with
+          | .assign _ (.cst v) _ => Scry.boundsValNat v
+          | .assign _ (.use u) _ => Scry.boundsConstAt info g d u.index k
+          | _ => .none) defs with
+    | .cons v _ => .some v
+    | .nil => .none
+
+-- ## Dominating guards
+
+def Scry.boundsBlockOf (g : Scry.Fn) (n : Nat) : Option Nat :=
+  match Scry.locate g n with
+  | .none => .none
+  | .some q => .some q.1.index
+
+def Scry.boundsDominates (info : Scry.FnInfo) (b n : Nat) : Bool :=
+  Scry.memNat b (Scry.lookupSet info.dom n)
+
+/-- Swap the operands of a comparison. -/
+def Scry.boundsSwapOp : Wil.Op → Wil.Op
+  | .lt => .gt
+  | .le => .ge
+  | .gt => .lt
+  | .ge => .le
+  | op => op
+
+/-- `lhs op K` on the edge, with `lhs` the index and `K` a constant. -/
+def Scry.boundsLtProves (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat) (op : Wil.Op)
+    (kvar : Wil.Var) (isTrue : Bool) (bound : Nat) : Bool :=
+  match Scry.boundsConstAt info g at kvar.index 8 with
+  | .none => .false
+  | .some k => match op, isTrue with
+    -- idx < K (K <= bound) and idx >= K false (same)
+    | .lt, .true => Nat.le k bound
+    | .ge, .false => Nat.le k bound
+    -- idx <= K (K + 1 <= bound) and idx > K false (same)
+    | .le, .true => Nat.le (Nat.succ k) bound
+    | .gt, .false => Nat.le (Nat.succ k) bound
+    | _, _ => .false
+
+/-- Does `cond` on the surviving edge imply `idx < bound`? Only `<`/`<=` against a
+constant are understood; everything else is "not proved". -/
+def Scry.boundsCondProves (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat)
+    (cond : Wil.Cond) (isTrue : Bool) (idx bound : Nat) : Bool :=
+  match cond with
+  | .cmp op a b =>
+    match Nat.beq a.index idx with
+    | .true => Scry.boundsLtProves info g at op b isTrue bound
+    | .false => match Nat.beq b.index idx with
+      | .true => Scry.boundsLtProves info g at (Scry.boundsSwapOp op) a isTrue bound
+      | .false => .false
+  | .not c => Scry.boundsCondProves info g at c (Bool.not isTrue) idx bound
+  | _ => .false
+
+/-- A branch that dominates `access` and proves `idx < bound` on the edge that reaches
+it. A branch in a block that is not the access's immediate target is not used. -/
+def Scry.boundsGuarded (info : Scry.FnInfo) (g : Scry.Fn) (access idx bound : Nat) : Bool :=
+  List.any (fun b =>
+    match Scry.boundsDominates info b access with
+    | .false => .false
+    | .true => match Scry.nodeTerm g b with
+      | .none => .false
+      | .some t => match t with
+        | .br c yes no _ =>
+          -- the access may sit in a join block after the branch, so ask whether the
+          -- taken edge's target dominates it, not whether it is the immediate block
+          if Scry.boundsDominates info (Scry.nodeOf g yes 0) access then
+            Scry.boundsCondProves info g b c .true idx bound
+          else if Scry.boundsDominates info (Scry.nodeOf g no 0) access then
+            Scry.boundsCondProves info g b c .false idx bound
+          else .false
+        | _ => .false) (Scry.range g.count)
+
+-- ## Findings and boundaries
+
+def Scry.boundsAllocNode (l : Scry.Loc) (func : String) (point : Nat) : Scry.PathNode :=
+  match Scry.boundsRoot l with
+  | .heap f p => Scry.PathNode.mk f p 0 Scry.PathKind.alloc
+  | .stack f p => Scry.PathNode.mk f p 0 Scry.PathKind.alloc
+  | _ => Scry.PathNode.mk func point 0 Scry.PathKind.alloc
+
+def Scry.boundsFinding (rule : Scry.MemoryRule) (fn : Wil.Func) (point var : Nat)
+    (what : String) (alloc : Scry.Loc) : Scry.RuleFinding :=
+  let a := Scry.boundsAllocNode alloc fn.name point;
+  let s := Scry.PathNode.mk fn.name point var Scry.PathKind.sink;
+  Scry.RuleFinding.mk rule.id rule.severity rule.message Scry.FindingKind.memory
+    fn.name point what var [a, s]
+
+def Scry.boundsWarning (func : String) (point : Nat) (what : String) : Scry.MemWarning :=
+  Scry.MemWarning.mk Scry.MemWarnKind.unknownMemory func point
+    (what ++ ": the object has no statically known size")
+
+structure Scry.BoundsResult where
+  findings : List Scry.RuleFinding
+  warnings : List Scry.MemWarning
+
+def Scry.boundsEmpty : Scry.BoundsResult := Scry.BoundsResult.mk .nil .nil
+
+def Scry.boundsAppend (a b : Scry.BoundsResult) : Scry.BoundsResult :=
+  Scry.BoundsResult.mk (List.append a.findings b.findings)
+    (List.append a.warnings b.warnings)
+
+-- ## Subscript accesses
+
+/-- A reached `gepVar` definition: its point, base pointer, index and element stride. -/
+structure Scry.BoundsIndexSite where
+  point : Nat
+  base : Wil.Var
+  index : Wil.Var
+  scale : Nat
+
+def Scry.boundsIndexSites (info : Scry.FnInfo) (g : Scry.Fn) (point var : Nat) :
+    List Scry.BoundsIndexSite :=
+  Scry.ptFilterMap (fun d =>
+    match Scry.nodeStmt g d with
+    | .none => .none
+    | .some s => match s with
+      | .assign _ (.gepVar base idx scale) _ =>
+        .some (Scry.BoundsIndexSite.mk d base idx scale)
+      | _ => .none) (Scry.boundsReaching info point var)
+
+/-- `(base location, recorded capacity / stride)` for a pointer register. A capacity of
+`0` means "unknown". -/
+def Scry.boundsPtrCaps (pt : Scry.PtResult) (sizes : List ((String × Nat) × Nat))
+    (func : String) (v : Nat) : List (Scry.Loc × Nat) :=
+  Scry.ptFilterMap (fun l =>
+    match Scry.boundsLocSize sizes l with
+    | .some s => .some (Scry.boundsRoot l, s)
+    | .none => match Scry.boundsRoot l with
+      -- a global has no recorded extent: unknown, not a guessed capacity
+      | .glob _ => .some (Scry.boundsRoot l, 0)
+      | _ => .none) (Scry.ptLocs pt func v)
+
+def Scry.boundsAccessName (write : Bool) : String :=
+  match write with
+  | .true => "store"
+  | .false => "load"
+
+/-- One capacity candidate: a finding when `size` is known and no guard proves the
+access in range; an `unknown-memory` diagnostic when `size` is the 0 marker. -/
+def Scry.boundsCapCheck (rule : Option Scry.MemoryRule) (fn : Wil.Func) (g : Scry.Fn)
+    (info : Scry.FnInfo) (access idx size bound : Nat) (what : String) (alloc : Scry.Loc) :
+    Scry.BoundsResult :=
+  match Nat.beq size 0 with
+  | .true => Scry.BoundsResult.mk .nil
+      [(Scry.boundsWarning fn.name access what)]
+  | .false => match Scry.boundsGuarded info g access idx bound with
+    | .true => Scry.boundsEmpty
+    | .false => match rule with
+      | .none => Scry.boundsEmpty
+      | .some r => Scry.BoundsResult.mk
+          [(Scry.boundsFinding r fn access idx what alloc)] .nil
+
+/-- Check one reached `gepVar` definition at an access. -/
+def Scry.boundsIndexSite (writeRule readRule : Option Scry.MemoryRule)
+    (pt : Scry.PtResult) (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult)
+    (fn : Wil.Func) (g : Scry.Fn) (access : Nat) (site : Scry.BoundsIndexSite)
+    (write : Bool) : Scry.BoundsResult :=
+  match Scry.boundsUntrustedAt r site.point site.index.index with
+  | .false => Scry.boundsEmpty
+  | .true =>
+    let rule := match write with
+      | .true => writeRule
+      | .false => readRule;
+    let what := Scry.boundsAccessName write;
+    List.foldr (fun cap acc =>
+      Scry.boundsAppend acc
+        (Scry.boundsCapCheck rule fn g r.plan.info access site.index.index cap.2
+          (Scry.boundsCeilDiv cap.2 site.scale) what cap.1))
+      Scry.boundsEmpty (Scry.boundsPtrCaps pt sizes fn.name site.base.index)
+
+/-- Check one subscript site at an access: a write or a read through `var`. -/
+def Scry.boundsIndexAt (writeRule readRule : Option Scry.MemoryRule)
+    (pt : Scry.PtResult) (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult)
+    (fn : Wil.Func) (g : Scry.Fn) (access var : Nat) (write : Bool) : Scry.BoundsResult :=
+  List.foldr (fun site acc =>
+    Scry.boundsAppend acc
+      (Scry.boundsIndexSite writeRule readRule pt sizes r fn g access site write))
+    Scry.boundsEmpty (Scry.boundsIndexSites r.plan.info g access var)
+
+-- ## Copy lengths
+
+structure Scry.BoundsCopy where
+  dst : Nat
+  src : Option Nat
+  count : Nat
+
+/-- The `(destination, source, count)` positions of a modelled copy/read call. This is a
+view of the pack's `copyBounds` effects, not a second table: the C family names and their
+argument positions live only in `Scry.Models` now. -/
+def Scry.boundsCopyShapeWith (models : Scry.ModelPack) (name : String) (arity : Nat) :
+    Option Scry.BoundsCopy :=
+  match Scry.ModelPack.copyShapeOf models name arity with
+  | .none => .none
+  | .some s => .some (Scry.BoundsCopy.mk s.dst s.src s.count)
+
+/-- The default pack's copy shape (the compatibility spelling). -/
+def Scry.boundsCopyShape (name : String) (arity : Nat) : Option Scry.BoundsCopy :=
+  Scry.boundsCopyShapeWith Scry.defaultModels name arity
+
+def Scry.boundsArgAt (args : List Nat) (i : Nat) : Option Nat := Wil.listNth args i
+
+/-- Check the capacities of one pointer for a copy length. A count is safe when it is
+`<= size`, expressed as `count < size + 1`. -/
+def Scry.boundsCopyCaps (rule : Option Scry.MemoryRule) (fn : Wil.Func) (g : Scry.Fn)
+    (info : Scry.FnInfo) (point : Nat) (countVar : Nat) (name : String)
+    (caps : List (Scry.Loc × Nat)) : Scry.BoundsResult :=
+  List.foldr (fun cap acc =>
+    let bound := Nat.succ (Scry.boundsCeilDiv cap.2 1);
+    Scry.boundsAppend acc
+      (Scry.boundsCapCheck rule fn g info point countVar cap.2 bound
+        ("copy length passed to " ++ name) cap.1)) Scry.boundsEmpty caps
+
+/-- Check a copy/read call. `read`/`recv` are the write side (the buffer they fill);
+`memcpy` and friends are the read side (the source they read). -/
+def Scry.boundsCopyAtWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : Scry.BoundsResult :=
+  match Scry.boundsCopyShapeWith models name (List.length args) with
+  | .none => Scry.boundsEmpty
+  | .some shape => match Scry.boundsArgAt args shape.count with
+    | .none => Scry.boundsEmpty
+    | .some countVar =>
+      match Scry.boundsUntrustedAt r point countVar with
+      | .false => Scry.boundsEmpty
+      | .true => match shape.src with
+        | .none => match Scry.boundsArgAt args shape.dst with
+          | .none => Scry.boundsEmpty
+          | .some dst => Scry.boundsCopyCaps writeRule fn g r.plan.info point countVar name
+              (Scry.boundsPtrCaps pt sizes fn.name dst)
+        | .some src => match Scry.boundsArgAt args src with
+          | .none => Scry.boundsEmpty
+          | .some srcVar => Scry.boundsCopyCaps readRule fn g r.plan.info point countVar name
+              (Scry.boundsPtrCaps pt sizes fn.name srcVar)
+
+def Scry.boundsCopyAt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : Scry.BoundsResult :=
+  Scry.boundsCopyAtWith Scry.defaultModels writeRule readRule pt sizes r fn g point name args
+
+-- ## One function, over the semantics' events
+
+/-- Everything `Bounds` needs from one analysed unit: the semantics' events (in the
+order the semantics emits them, which for `Wil.concrete` is function/point order) and
+the Wil-derived taint/CFG evidence (`result`). The event list is the parameterised part;
+the rest is the current Wil-specific fact bundle (the honest limit of this slice,
+recorded in `wiz-notes/scry-generic-engine.md`). -/
+structure Scry.BoundsUnit where
+  name : String
+  events : List (Nat × Scry.Event)
+  result : Scry.FuncResult
+
+/-- Dispatch one event. This replaces the Wil-constructor match: a `store`, a `load` and
+a direct `call` are the only events with a bounds obligation; everything else is
+`boundsEmpty`. -/
+def Scry.boundsEventStmtWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func)
+    (g : Scry.Fn) (n : Nat) (e : Scry.Event) : Scry.BoundsResult :=
+  match e with
+  | .store p _ => Scry.boundsIndexAt writeRule readRule pt sizes r fn g n p .true
+  | .load _ p => Scry.boundsIndexAt writeRule readRule pt sizes r fn g n p .false
+  | .call _ name args =>
+    Scry.boundsCopyAtWith models writeRule readRule pt sizes r fn g n name args
+  | _ => Scry.boundsEmpty
+
+def Scry.boundsEventStmt (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (fn : Wil.Func)
+    (g : Scry.Fn) (n : Nat) (e : Scry.Event) : Scry.BoundsResult :=
+  Scry.boundsEventStmtWith Scry.defaultModels writeRule readRule pt sizes r fn g n e
+
+def Scry.boundsOfUnitWith (models : Scry.ModelPack)
+    (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (u : Scry.BoundsUnit) : Scry.BoundsResult :=
+  let r0 := u.result;
+  let g := r0.plan.info.g;
+  let run := fun (r : Scry.FuncResult) => List.foldr (fun (pe : Nat × Scry.Event) acc =>
+    Scry.boundsAppend acc
+      (Scry.boundsEventStmtWith models writeRule readRule pt sizes r r.fn g pe.1 pe.2))
+    Scry.boundsEmpty u.events;
+  let first := run r0;
+  -- A flow-only plan has no dominator sets, so no guard can be proved in `first`.
+  -- Guards only remove findings (the unknown-size diagnostics do not consult them), so
+  -- the dominators are computed, once, only for a function that has a candidate.
+  match first.findings, r0.plan.info.dom with
+  | .nil, _ => first
+  | _, .cons _ _ => first
+  | _, .nil =>
+    let info := { r0.plan.info with dom := Scry.dominators g };
+    run { r0 with plan := { r0.plan with info := info } }
+
+def Scry.boundsOfUnit (writeRule readRule : Option Scry.MemoryRule) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (u : Scry.BoundsUnit) : Scry.BoundsResult :=
+  Scry.boundsOfUnitWith Scry.defaultModels writeRule readRule pt sizes u
+
+/-- The units of a run: one per function result, in result order (which is the program's
+function order, `Scry.evalAllStaged`). Each unit's events are the semantics' events for
+that function, in the order the semantics emitted them. -/
+def Scry.boundsUnits (es : List (Scry.ObservedEvent Scry.Event))
+    (rs : List Scry.FuncResult) :
+    List Scry.BoundsUnit :=
+  Scry.concatLists (fun r =>
+    List.cons (Scry.BoundsUnit.mk r.fn.name
+      (List.map (fun e => (e.point, e.event))
+        (List.filter (fun e => String.eq e.func r.fn.name) es)) r) .nil) rs
+
+/-- Join a list of per-unit results. -/
+def Scry.boundsJoin (rs : List Scry.BoundsResult) : Scry.BoundsResult :=
+  List.foldr (fun r acc => Scry.boundsAppend r acc) Scry.boundsEmpty rs
+
+/-- Run the two out-of-bounds rules of `pack` over a semantics' events, reading copy
+shapes from `models`. `s` supplies the event projection (`s.events p`); the default is
+`Scry.Wil.concrete` and `Scry.defaultModels`. -/
+def Scry.boundsCheckWithModels (models : Scry.ModelPack) (s : Scry.Sem Scry.Event)
+    (p : s.Ir) (pt : Scry.PtResult) (pack : Scry.RulePack)
+    (rs : List Scry.FuncResult) : Scry.BoundsResult :=
+  let wr := pack.memoryRuleFor "out-of-bounds-write";
+  let rr := pack.memoryRuleFor "out-of-bounds-read";
+  match wr, rr with
+  | .none, .none => Scry.boundsEmpty
+  | _, _ =>
+    let es := s.events p;
+    let sizes := Scry.boundsSizesOfEvents es;
+    Scry.boundsJoin (List.map (fun u => Scry.boundsOfUnitWith models wr rr pt sizes u)
+      (Scry.boundsUnits es rs))
+
+def Scry.boundsCheckWith (s : Scry.Sem Scry.Event) (p : s.Ir) (pt : Scry.PtResult)
+    (pack : Scry.RulePack) (rs : List Scry.FuncResult) : Scry.BoundsResult :=
+  Scry.boundsCheckWithModels Scry.defaultModels s p pt pack rs
+
+/-- Run the two out-of-bounds rules of `pack`. Neither rule in the pack means no
+findings and no diagnostics; the pack is still the only way to enable the family.
+This is the **default instantiation**: Wil's concrete semantics and the default model
+pack, byte-for-byte the analysis that ran before the `Sem` parameter existed. -/
+def Scry.boundsCheckModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (pack : Scry.RulePack) (rs : List Scry.FuncResult) :
+    Scry.BoundsResult :=
+  Scry.boundsCheckWithModels models Scry.Wil.concrete (Scry.WilTarget.mk p "" .nil)
+    pt pack rs
+
+def Scry.boundsCheck (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack)
+    (rs : List Scry.FuncResult) : Scry.BoundsResult :=
+  Scry.boundsCheckModels Scry.defaultModels p pt pack rs
+
+/-- `boundsCheckModels`' findings. -/
+def Scry.boundsFindingsWithModels (models : Scry.ModelPack) (p : Wil.Program)
+    (pt : Scry.PtResult) (pack : Scry.RulePack) (rs : List Scry.FuncResult) :
+    List Scry.RuleFinding :=
+  (Scry.boundsCheckModels models p pt pack rs).findings
+
+/-- Flatten the one-element list `boundsCheck` builds (kept explicit so the order is the
+function order and each function's point order). -/
+def Scry.boundsFindings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack)
+    (rs : List Scry.FuncResult) : List Scry.RuleFinding :=
+  (Scry.boundsCheck p pt pack rs).findings
+
+def Scry.boundsWarnings (p : Wil.Program) (pt : Scry.PtResult) (pack : Scry.RulePack)
+    (rs : List Scry.FuncResult) : List Scry.MemWarning :=
+  (Scry.boundsCheck p pt pack rs).warnings
+
+-- ## Guard and use facts for the prover's cut
+
+/-- The bounds a condition establishes on one outgoing edge, as `(var, hi)` pairs with
+the meaning `var <= hi`. This is `boundsLtProves` with the bound returned instead of a
+yes/no answer for one access; the two must agree on every condition they both accept.
+`and`-true and `or`-false distribute; the other polarities establish no bound (either
+conjunct may be the false one). -/
+def Scry.boundsCondBounds (info : Scry.FnInfo) (g : Scry.Fn) (at : Nat)
+    (cond : Wil.Cond) (isTrue : Bool) : List (Nat × Nat) :=
+  match cond with
+  | .cmp op a b =>
+    match Scry.boundsConstAt info g at b.index 8 with
+    | .some k =>
+      let hi : Option Nat := match op, isTrue with
+        -- a < K, a >= K false: a <= K-1
+        | .lt, .true => .some (Nat.sub k 1)
+        | .ge, .false => .some (Nat.sub k 1)
+        -- a <= K, a > K false: a <= K
+        | .le, .true => .some k
+        | .gt, .false => .some k
+        | _, _ => (.none : Option Nat);
+      match hi with
+      | .some h => [(a.index, h)]
+      | .none => .nil
+    | .none => match Scry.boundsConstAt info g at a.index 8 with
+      | .some k =>
+        let hi : Option Nat := match op, isTrue with
+          -- K > b, K <= b false: b <= K-1
+          | .gt, .true => .some (Nat.sub k 1)
+          | .le, .false => .some (Nat.sub k 1)
+          -- K >= b, K < b false: b <= K
+          | .ge, .true => .some k
+          | .lt, .false => .some k
+          | _, _ => (.none : Option Nat);
+        match hi with
+        | .some h => [(b.index, h)]
+        | .none => .nil
+      | .none => .nil
+  | .not c => Scry.boundsCondBounds info g at c (Bool.not isTrue)
+  | .and x y =>
+    match isTrue with
+    | .true => List.append (Scry.boundsCondBounds info g at x .true)
+        (Scry.boundsCondBounds info g at y .true)
+    | .false => .nil
+  | .or x y =>
+    match isTrue with
+    | .false => List.append (Scry.boundsCondBounds info g at x .false)
+        (Scry.boundsCondBounds info g at y .false)
+    | .true => .nil
+  | .const _ => .nil
+
+/-- The `guard` rows of one branch: every bound each outgoing edge establishes.
+`target` is the successor point of the edge, so the row says "on the edge to `target`,
+`var <= hi`". -/
+def Scry.boundsGuardsAt (info : Scry.FnInfo) (g : Scry.Fn) (b : Nat) : List (List Nat) :=
+  match Scry.nodeTerm g b with
+  | .some (.br c t f _) =>
+    let tg := Scry.nodeOf g t 0;
+    let fg := Scry.nodeOf g f 0;
+    List.append
+      (List.map (fun p => [b, p.1, p.2, tg])
+        (Scry.boundsCondBounds info g b c .true))
+      (List.map (fun p => [b, p.1, p.2, fg])
+        (Scry.boundsCondBounds info g b c .false))
+  | _ => .nil
+
+/-- Every guard row of a function. -/
+def Scry.boundsGuardRows (info : Scry.FnInfo) (g : Scry.Fn) : List (List Nat) :=
+  Scry.concatLists (fun b => Scry.boundsGuardsAt info g b) (Scry.range g.count)
+
+/-- The points-to id of a location, or `0` when the location is not in the table. -/
+def Scry.boundsLocIdOf (pt : Scry.PtResult) (l : Scry.Loc) : Nat :=
+  match Scry.locId pt l with
+  | .some i => i
+  | .none => 0
+
+/-- The constant code of a register at a point: `0` for "not a known constant", `k+1`
+for the constant `k`. -/
+def Scry.boundsConstCode (info : Scry.FnInfo) (g : Scry.Fn) (point var : Nat) : Nat :=
+  match Scry.boundsConstAt info g point var 8 with
+  | .some k => Nat.succ k
+  | .none => 0
+
+/-- The `use` rows of one subscript access: every reached `gepVar` site and every known
+capacity of its base. `kind` is `useIndexWrite` or `useIndexRead`. A capacity of `0` is
+the lowering's "unknown" marker and is kept: a write into an unknown extent is a refusal,
+not a silent pass. -/
+def Scry.boundsIndexUsesAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (access var kind : Nat) : List (List Nat) :=
+  Scry.concatLists (fun site =>
+    List.map (fun cap =>
+      [access, site.index.index, Scry.boundsLocIdOf pt cap.1,
+       Scry.boundsCeilDiv cap.2 site.scale, kind,
+       Scry.boundsConstCode r.plan.info g access site.index.index])
+      (Scry.boundsPtrCaps pt sizes r.fn.name site.base.index))
+    (Scry.boundsIndexSites r.plan.info g access var)
+
+/-- The `use` rows of one copy/read call: the destination is a write of the count, the
+source (when the shape has one) a read. The count is the length; an unknown capacity is
+kept as `0` for the same reason as above. -/
+def Scry.boundsCopyUsesAtWith (models : Scry.ModelPack) (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : List (List Nat) :=
+  match Scry.boundsCopyShapeWith models name (List.length args) with
+  | .none => .nil
+  | .some shape => match Scry.boundsArgAt args shape.count with
+    | .none => .nil
+    | .some countVar =>
+      let konst := Scry.boundsConstCode r.plan.info g point countVar;
+      let dstUses : List (List Nat) := match Scry.boundsArgAt args shape.dst with
+        | .none => .nil
+        | .some dstVar => List.map (fun cap =>
+            [point, countVar, Scry.boundsLocIdOf pt cap.1, cap.2,
+             Scry.useCopyWrite, konst])
+            (Scry.boundsPtrCaps pt sizes r.fn.name dstVar);
+      let srcUses : List (List Nat) := match shape.src with
+        | .none => .nil
+        | .some srcPos => match Scry.boundsArgAt args srcPos with
+          | .none => .nil
+          | .some srcVar => List.map (fun cap =>
+              [point, countVar, Scry.boundsLocIdOf pt cap.1, cap.2,
+               Scry.useCopyRead, konst])
+              (Scry.boundsPtrCaps pt sizes r.fn.name srcVar);
+      List.append dstUses srcUses
+
+def Scry.boundsCopyUsesAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (point : Nat) (name : String) (args : List Nat) : List (List Nat) :=
+  Scry.boundsCopyUsesAtWith Scry.defaultModels pt sizes r g point name args
+
+/-- The `use` rows one statement contributes: index writes and reads, and copy/read
+calls (whose destination is the write side). -/
+def Scry.boundsUseRowsAt (pt : Scry.PtResult)
+    (sizes : List ((String × Nat) × Nat)) (r : Scry.FuncResult) (g : Scry.Fn)
+    (n : Nat) : List (List Nat) :=
+  match Scry.nodeStmt g n with
+  | .some (.store p _ _) =>
+    Scry.boundsIndexUsesAt pt sizes r g n p.index Scry.useIndexWrite
+  | .some (.assign _ (.load p) _) =>
+    Scry.boundsIndexUsesAt pt sizes r g n p.index Scry.useIndexRead
+  | .some (.call _ (.direct name) args _) =>
+    Scry.boundsCopyUsesAt pt sizes r g n name (List.map (fun v => v.index) args)
+  | _ => .nil
+
+/-- The distinct access points of a use row list (column 0). -/
+def Scry.boundsUsePoints (uses : List (List Nat)) : List Nat :=
+  List.foldr (fun row acc =>
+    let p := List.getD row 0 0;
+    if List.any (Nat.beq p) acc then acc else List.cons p acc) .nil uses
+
+/-- The guard/use/before rows of one function. `before` is the dominance relation
+restricted to a use point: it is `before(node, use)` for every dominator of `use`. -/
+structure Scry.BoundsFacts where
+  guards : List (List Nat)
+  uses : List (List Nat)
+  before : List (List Nat)
+
+def Scry.boundsFactsEmpty : Scry.BoundsFacts :=
+  Scry.BoundsFacts.mk .nil .nil .nil
+
+/-- Build the prover's guard/use/before rows for one analysed function. The dominators
+are computed here when the production plan is flow-only (`dom` empty), exactly as
+`boundsOfUnitWith` does for a candidate finding. The capacities are the ones `Bounds`
+uses (`boundsPtrCaps`), so the cut and the out-of-bounds findings cannot disagree about
+an extent. -/
+def Scry.boundsFactsOfFuncWith (models : Scry.ModelPack) (pt : Scry.PtResult)
+    (r : Scry.FuncResult) : Scry.BoundsFacts :=
+  let fn := r.fn;
+  let g := r.plan.info.g;
+  let sizes := Scry.boundsSizesOfFunc fn;
+  let info := match r.plan.info.dom with
+    | .nil => { r.plan.info with dom := Scry.dominators g }
+    | _ => r.plan.info;
+  let uses := Scry.concatLists (fun n =>
+    Scry.boundsUseRowsAt pt sizes r g n) (Scry.range g.count);
+  let guardRows := Scry.boundsGuardRows info g;
+  let beforeRows := Scry.concatLists (fun u =>
+    List.map (fun d => [d, u]) (Scry.lookupSet info.dom u))
+    (Scry.boundsUsePoints uses);
+  Scry.BoundsFacts.mk guardRows uses beforeRows
+
+def Scry.boundsFactsOfFunc (pt : Scry.PtResult) (r : Scry.FuncResult) :
+    Scry.BoundsFacts :=
+  Scry.boundsFactsOfFuncWith Scry.defaultModels pt r
+
+/-- Add the guard/use/before rows to a function's EDB. -/
+def Scry.addBoundsFacts (st : Scry.State Nat) (f : Scry.BoundsFacts) : Scry.State Nat :=
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtGuard (List.map U64.ofNat row)) st f.guards;
+  let st := List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtUse (List.map U64.ofNat row)) st f.uses;
+  List.foldr (fun row acc =>
+    Scry.State.addTuple acc Scry.rtBefore (List.map U64.ofNat row)) st f.before

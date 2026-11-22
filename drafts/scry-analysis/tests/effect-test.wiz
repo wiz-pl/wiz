@@ -1,0 +1,227 @@
+import Sys
+import Json
+import Text
+import IO
+import Scry.AnalysisFile
+import Scry.QuireGraph
+import Scry.Facts
+/-!
+# The Quire-backed slice's test: revision manifest, snapshots, query, diagnostics
+
+Run from the repository root (compiled: Quire's `mmap`/`flock`/`quire_seal.c` natives are
+`wiz run` code):
+
+```
+wiz --cflags "-Idrafts/storage-engine" \
+    -I drafts/storage-engine -I drafts/scry-analysis -I scry/src \
+    run drafts/scry-analysis/tests/effect-test.wiz
+```
+
+It checks:
+
+* ingest writes a Quire graph and a revision manifest, with the two-store merge;
+* the live snapshot's view equals the manifest's view, and the claim is refuted at
+  `beta.c` (the `call` row is missing);
+* a changed tree is **stale** with both revisions; restoring it makes a second ingest a
+  no-op (same generation); changing it commits a **new snapshot** (generation + 1), not a
+  mutation of the old one;
+* a malformed store fails without writing the graph and names the file and the parse
+  error;
+* the separate writer lock refuses a second ingest;
+* a revision named by a manifest but absent from the checkout is "fetch first";
+* the file form resolves `#ingest` against the analysis file and attaches the line;
+* the widget payload is the `wiz.widget/1` bundle with the `scry.analysis/1` extension.
+
+A non-zero exit means a check failed.
+-/
+
+/-- A value for a branch that `Process.exit` never returns from (the test driver's
+error path). -/
+axiom ScryTest.anyValue {A : Type} : A
+
+/-- Flush standard output, then exit (the C `println` is buffered). -/
+def ScryTest.leave (n : Nat) : IO Unit := do
+  f ← File.stdout;
+  r ← File.flush f;
+  match r with
+  | .ok _ => Process.exit n
+  | .error _ => Process.exit n
+
+def ScryTest.runEIO {A : Type} (x : EIO A) : IO A := do
+  r ← x;
+  match r with
+  | .ok a => IO.pure a
+  | .error e => do
+    IO.ePrintln (String.append "unexpected EIO error: " e);
+    ScryTest.leave 2;
+    IO.pure ScryTest.anyValue
+
+def ScryTest.checkOne (fails : Nat) (name : String) (ok : Bool) : IO Nat := do
+  IO.println (String.append (match ok with | .true => "PASS " | .false => "FAIL ") name);
+  match ok with
+  | .true => IO.pure fails
+  | .false => IO.pure (Nat.succ fails)
+
+def ScryTest.anyDiag (needle : String) (ds : List Scry.IngestDiagnostic) : Bool :=
+  List.any (fun d => String.contains d.message needle) ds
+
+def ScryTest.diagLine (needle : String) (ds : List Scry.IngestDiagnostic) : Nat :=
+  match List.find (fun d => String.contains d.message needle) ds with
+  | .some d => d.line
+  | .none => 0
+
+def ScryTest.firstFile (r : Scry.ClaimResult) : String :=
+  match r.findings with
+  | .cons x _ => x.file
+  | .nil => ""
+
+def ScryTest.firstNode (r : Scry.ClaimResult) : Nat :=
+  match r.findings with
+  | .cons x _ => x.node
+  | .nil => 0
+
+partial def ScryTest.copyInto (src dst : String) : List String → IO Unit
+  | [] => IO.pure ()
+  | List.cons n rest => do
+    text ← ScryTest.runEIO (FS.readFile (Path.join src n));
+    ScryTest.runEIO (FS.writeFile (Path.join dst n) text);
+    ScryTest.copyInto src dst rest
+
+def ScryTest.fixtureNames : List String := ["alpha.facts.json", "beta.facts.json"]
+
+def ScryTest.lockFlags : OpenFlags :=
+  OpenFlags.mk .true .false .false .false .false .false
+
+/-- Read a manifest or exit. -/
+def ScryTest.manifestOf (path : String) : IO Scry.Manifest := do
+  r ← ScryTest.runEIO (Scry.G.readManifest path);
+  match r with
+  | .some m => IO.pure m
+  | .none => do
+    IO.ePrintln (String.append "no manifest at " path);
+    ScryTest.leave 2;
+    IO.pure ScryTest.anyValue
+
+def ScryTest.main : IO Unit := do
+  tmp ← ScryTest.runEIO FS.createTempDir;
+  let fixtures := Path.join tmp "fixtures";
+  ScryTest.runEIO (FS.createDir fixtures);
+  ScryTest.copyInto "drafts/scry-analysis/fixtures" fixtures ScryTest.fixtureNames;
+  alphaText ← ScryTest.runEIO (FS.readFile (Path.join fixtures "alpha.facts.json"));
+  let graphPath := Path.join tmp "graph.quire";
+  let manifestPath := String.append graphPath ".manifest.json";
+
+  -- 1. ingest into Quire + manifest
+  r1 ← ScryTest.runEIO (Scry.G.ingestTree fixtures graphPath manifestPath .false);
+  f1 ← ScryTest.checkOne 0 "ingest succeeds" r1.ok;
+  f2 ← ScryTest.checkOne f1 "ingest committed a snapshot" r1.committed;
+  gExists ← FS.exists graphPath;
+  mExists ← FS.exists manifestPath;
+  f3 ← ScryTest.checkOne f2 "the graph exists" gExists;
+  f4 ← ScryTest.checkOne f3 "the manifest exists" mExists;
+  f5 ← ScryTest.checkOne f4 "the manifest is at generation 1" (Nat.beq r1.gen 1);
+
+  m ← ScryTest.manifestOf manifestPath;
+  f6 ← ScryTest.checkOne f5 "manifest node count is 9" (Nat.beq m.nodeCount 9);
+  f7 ← ScryTest.checkOne f6 "manifest edge rows are 5" (Nat.beq m.edgeRowCount 5);
+  f8 ← ScryTest.checkOne f7 "manifest relation rows are 8" (Nat.beq m.relationRowCount 8);
+
+  -- 2. the claim over the manifest's view (what the editor sees)
+  let claim := Scry.claimCalls m.view;
+  f9 ← ScryTest.checkOne f8 "the claim is refuted" (String.eq claim.status "refuted");
+  f10 ← ScryTest.checkOne f9 "the claim has one finding" (Nat.beq (List.length claim.findings) 1);
+  f11 ← ScryTest.checkOne f10 "the finding is in beta.c" (String.eq (ScryTest.firstFile claim) "beta.c");
+  f12 ← ScryTest.checkOne f11 "the finding names node 7" (Nat.beq (ScryTest.firstNode claim) 7);
+  f13 ← ScryTest.checkOne f12 "the manifest view has two call sites" (Nat.beq (List.length m.view.calls) 2);
+  f14 ← ScryTest.checkOne f13 "the widget payload has the scry extension"
+    (String.contains (Scry.analysisDisplay claim m.view) "scry.analysis/1");
+  f15 ← ScryTest.checkOne f14 "the widget payload has the widget schema"
+    (String.contains (Scry.analysisDisplay claim m.view) "wiz.widget/1");
+
+  -- 3. the live Quire view matches the manifest and its generation
+  lr ← ScryTest.runEIO (Scry.G.readGraph graphPath m);
+  f16 ← ScryTest.checkOne f15 "the live generation is the manifest's" (Nat.beq lr.2 m.gen);
+  f17 ← ScryTest.checkOne f16 "the live view equals the manifest view" (Scry.sameView m.view lr.1);
+  f18 ← ScryTest.checkOne f17 "the live view has two call sites" (Nat.beq (List.length lr.1.calls) 2);
+  f19 ← ScryTest.checkOne f18 "the live view has one call head" (Nat.beq (List.length lr.1.callHeads) 1);
+
+  -- 4. the revision is fresh now; a changed tree is stale with both values
+  cur0 ← ScryTest.runEIO (Scry.G.currentRevision m);
+  f20 ← ScryTest.checkOne f19 "the current revision is fresh"
+    (match Scry.revisionVerdict m cur0 with | .fresh => .true | _ => .false);
+  ScryTest.runEIO (FS.writeFile (Path.join fixtures "alpha.facts.json")
+    (String.append alphaText " "));
+  cur1 ← ScryTest.runEIO (Scry.G.currentRevision m);
+  let verdict := Scry.revisionVerdict m cur1;
+  f21 ← ScryTest.checkOne f20 "a changed tree is stale"
+    (match verdict with | .stale _ _ _ => .true | .fresh => .false);
+  f22 ← ScryTest.checkOne f21 "the stale message names both revisions"
+    (String.contains (Scry.renderRevisionVerdict verdict) (Scry.renderRevision m.revision));
+
+  -- 5. restoring the tree makes a re-ingest a no-op (same snapshot)
+  ScryTest.runEIO (FS.writeFile (Path.join fixtures "alpha.facts.json") alphaText);
+  r2 ← ScryTest.runEIO (Scry.G.ingestTree fixtures graphPath manifestPath .false);
+  f23 ← ScryTest.checkOne f22 "a re-ingest at the same revision is a no-op" (Bool.not r2.committed);
+  f24 ← ScryTest.checkOne f23 "the no-op keeps the generation" (Nat.beq r2.gen m.gen);
+
+  -- 6. a new revision is a new commit
+  ScryTest.runEIO (FS.writeFile (Path.join fixtures "alpha.facts.json")
+    (String.append alphaText "\n"));
+  r3 ← ScryTest.runEIO (Scry.G.ingestTree fixtures graphPath manifestPath .false);
+  f25 ← ScryTest.checkOne f24 "a new revision commits" r3.committed;
+  f26 ← ScryTest.checkOne f25 "the generation increased" (Nat.beq r3.gen (Nat.succ m.gen));
+  m2 ← ScryTest.manifestOf manifestPath;
+  f27 ← ScryTest.checkOne f26 "the manifest records the new revision"
+    (Bool.not (String.eq (Scry.renderRevision m2.revision) (Scry.renderRevision m.revision)));
+
+  -- 7. a malformed store fails closed
+  let badDir := Path.join tmp "bad";
+  ScryTest.runEIO (FS.createDir badDir);
+  ScryTest.runEIO (FS.writeFile (Path.join badDir "bad.facts.json") "{ this is not json");
+  let badGraph := Path.join tmp "bad.quire";
+  rb ← ScryTest.runEIO (Scry.G.ingestTree badDir badGraph (String.append badGraph ".manifest.json") .false);
+  badExists ← FS.exists badGraph;
+  f28 ← ScryTest.checkOne f27 "a malformed store fails" (Bool.not rb.ok);
+  f29 ← ScryTest.checkOne f28 "the diagnostic names the file" (ScryTest.anyDiag "bad.facts.json" rb.diagnostics);
+  f30 ← ScryTest.checkOne f29 "the diagnostic names the parse error" (ScryTest.anyDiag "invalid JSON" rb.diagnostics);
+  f31 ← ScryTest.checkOne f30 "the destination is not written" (Bool.not badExists);
+
+  -- 8. the writer lock is a separate mechanism
+  let wpath := Scry.G.writerPath graphPath;
+  fd ← ScryTest.runEIO (Fd.open wpath .readWrite ScryTest.lockFlags);
+  lk ← ScryTest.runEIO (Fd.tryLock fd .exclusive);
+  f32 ← ScryTest.checkOne f31 "the test holds the writer lock"
+    (match lk with | .acquired => .true | .busy => .false);
+  rw ← ScryTest.runEIO (Scry.G.ingestTree fixtures graphPath manifestPath .false);
+  f33 ← ScryTest.checkOne f32 "a held writer lock refuses the ingest" (Bool.not rw.ok);
+  f34 ← ScryTest.checkOne f33 "the refusal names the writer"
+    (ScryTest.anyDiag "another ingest is writing" rw.diagnostics);
+  ScryTest.runEIO (Fd.unlock fd);
+  ScryTest.runEIO (Fd.close fd);
+
+  -- 9. a revision that is not in this checkout is "fetch first"
+  remote ← ScryTest.runEIO (Scry.G.remoteCheck "." "0000000000000000000000000000000000000000");
+  f35 ← ScryTest.checkOne f34 "an absent revision is refused"
+    (match remote with | .error _ => .true | .ok _ => .false);
+  f36 ← ScryTest.checkOne f35 "the refusal says fetch first"
+    (match remote with | .error e => String.contains e "fetch it first" | .ok _ => .false);
+
+  -- 10. the #ingest file form resolves paths and carries the line
+  let srcFile := Path.join tmp "analysis.wiz";
+  ScryTest.runEIO (FS.writeFile srcFile
+    "import Scry.AnalysisFile\n\n#ingest \"fixtures\" into \"graph2.quire\"\n");
+  r4 ← ScryTest.runEIO (Scry.G.ingestSourceFile srcFile);
+  let graph2 := Path.join tmp "graph2.quire";
+  g2 ← FS.exists graph2;
+  f37 ← ScryTest.checkOne f36 "the file command succeeds" r4.ok;
+  f38 ← ScryTest.checkOne f37 "the file command writes relative to the file" g2;
+  f39 ← ScryTest.checkOne f38 "the diagnostic carries the #ingest line" (Nat.beq (ScryTest.diagLine "ingested" r4.diagnostics) 3);
+
+  ScryTest.runEIO (FS.removeAll tmp);
+  match f39 with
+  | 0 => IO.println "ok: scry-analysis Quire effect test"
+  | n => do
+    IO.println (String.append "FAILED: " (String.append (Nat.repr n) " check(s)"));
+    ScryTest.leave 1
+
+def main : IO Unit := ScryTest.main

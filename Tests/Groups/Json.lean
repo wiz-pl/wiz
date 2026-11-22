@@ -14,6 +14,7 @@ The output is fixed byte for byte: the tests here are the regression net for the
 def jsonGroup : Group where
   name := "json"
   exercise := "lib/Json.wiz (stage 11m)"
+  parallel := true
   cases := [
     { name := "a non-trivial document renders byte for byte (integers, decimals, escapes, λ and 😀)", run := fun _ =>
         let src := r#"import Json
@@ -49,7 +50,27 @@ def rt (s : String) : String := match Json.parse s with
 #eval rt " { \"deep\": [[[[{\"n\": 1}]]]] } "
 "#
         okLibs src [r#""{\"a\":[1,-2,3.5e10,-0.25E-3,true,null,{}],\"b\":\"λ😀/\\t\",\"c\":[]}""#,
-     r#""{\"deep\":[[[[{\"n\":1}]]]]}""#] }
+     r#""{\"deep\":[[[[{\"n\":1}]]]]}""#] },
+    { name := "nesting has a budget: 60000 '[' is a positioned error, 512 still parses", run := fun _ =>
+        let src := r#"import Json
+partial def rep (n : Nat) (s : String) : String :=
+  match n with
+  | .zero => ""
+  | .succ k => String.append s (rep k s)
+def nest (n : Nat) : String := String.append (rep n "[") (rep n "]")
+#eval match Json.parse (nest 60000) with
+  | .ok _ => "parsed"
+  | .error e => e
+#eval match Json.parse (nest 512) with
+  | .ok _ => "512 deep ok"
+  | .error e => e
+#eval match Json.parse (nest 3) with
+  | .ok j => Json.render j
+  | .error e => e
+"#
+        okLibs src [r#""nesting too deep (limit 512) at offset 512""#,
+     r#""512 deep ok""#,
+     r#""[[[]]]""#] }
   ]
 
 builtin_initialize registerGroup jsonGroup

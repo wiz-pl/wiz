@@ -1,0 +1,121 @@
+-- test: run
+import Scry.NativeLink
+import WordMap
+import Sys
+import Text
+import Scry.Registry
+import Scry.TaintCmd
+-- The analysis registry (`scry/src/Scry/Registry.wiz`): a pack's `check` names select rows,
+-- and the two-direction exhaustiveness check refuses a silent skip.
+--
+--   pack -> table   every `check` a memory rule names has a row (`unknownChecks`)
+--   table -> pack   every row can be selected by some check (`unreachableAnalyses`)
+--
+-- The last block adds a row to a *local* registry (not `Scry.analyses`) and runs it,
+-- which is the shape of "adding an analysis": one `AnalysisSpec` value plus its check
+-- name, with no edit to either pipeline.
+
+def check (label : String) (ok : Bool) : EIO Unit :=
+  EIO.lift (match ok with
+    | .true => IO.println (label ++ ": ok")
+    | .false => IO.bind (IO.println (label ++ ": FAILED"))
+        (fun _ => Process.exit 1))
+
+def pack (body : String) : Scry.RulePack := Scry.parseRulePack body
+
+def packUaf : Scry.RulePack := pack
+  "rule uaf\n  kind memory\n  check use-after-free\nend\n"
+
+def packOob : Scry.RulePack := pack
+  "rule oob-read\n  kind memory\n  check out-of-bounds-read\nend\n"
+
+def packBoth : Scry.RulePack := pack
+  (String.append
+    "rule uaf\n  kind memory\n  check use-after-free\nend\n"
+    "rule oob-write\n  kind memory\n  check out-of-bounds-write\nend\n")
+
+def packTypo : Scry.RulePack := pack
+  "rule typo\n  kind memory\n  check out-of-bounds-writ\nend\n"
+
+def hasCheck (xs : List String) (c : String) : Bool :=
+  List.any (fun x => String.eq x c) xs
+
+def one (sp : Scry.AnalysisSpec) : Scry.AnalysisTable := .cons sp .nil
+
+def demoAnalysis : Scry.AnalysisSpec :=
+  Scry.AnalysisSpec.mk ["demo-function-count"] "demo" Scry.Wil.concrete
+    (fun p => Scry.WilTarget.mk p "" .nil)
+    (fun _ _ => Scry.AnalysisOutput.mk
+      [Scry.RuleFinding.mk "demo/fn" .note "the demo analysis ran" .memory "demo" 0 "" 0 .nil]
+      .nil)
+
+def demoPack : Scry.RulePack := pack
+  "rule demo\n  kind memory\n  check demo-function-count\nend\n"
+
+def demoRun : Scry.AnalysisOutput :=
+  Scry.runAnalyses (Scry.AnalysisTable.append Scry.analyses (one demoAnalysis))
+    Scry.defaultModels demoPack
+    (Wil.Program.mk .nil)
+    (Scry.PtResult.mk Scry.ptEmpty .nil U64Map.empty U64Map.empty .nil 0 .true) .nil
+
+def opts (args : List String) : EIO Scry.TaintOpts :=
+  match Scry.taintArgs args with
+  | .ok o => EIO.pure o
+  | .error e => EIO.fail e
+
+def main : IO Unit := EIO.toIO (do
+  check "registered checks cover the three shipped names"
+    (Bool.and (hasCheck (Scry.registeredChecks Scry.analyses) "out-of-bounds-write")
+      (Bool.and (hasCheck (Scry.registeredChecks Scry.analyses) "out-of-bounds-read")
+        (hasCheck (Scry.registeredChecks Scry.analyses) "use-after-free")));
+  check "no row is unreachable"
+    (List.isEmpty (Scry.unreachableAnalyses Scry.analyses));
+  check "a shadowed row is reported unreachable"
+    (Nat.beq (List.length (Scry.unreachableAnalyses
+      (Scry.AnalysisTable.append Scry.analyses
+        (one (Scry.lifetimeAnalysis Scry.Wil.concrete
+          (fun p => Scry.WilTarget.mk p "" .nil)))))) 1);
+  check "the oob pack has no unknown check"
+    (List.isEmpty (Scry.unknownChecks Scry.analyses packOob));
+  check "the uaf pack has no unknown check"
+    (List.isEmpty (Scry.unknownChecks Scry.analyses packUaf));
+  check "a typo check is unknown"
+    (hasCheck (Scry.unknownChecks Scry.analyses packTypo) "out-of-bounds-writ");
+  oobText ← FS.readFile "rules/oob.scry";
+  uafText ← FS.readFile "rules/uaf.scry";
+  check "the shipped oob.scry has no unknown check"
+    (List.isEmpty (Scry.unknownChecks Scry.analyses (Scry.parseRulePack oobText)));
+  check "the shipped uaf.scry has no unknown check"
+    (List.isEmpty (Scry.unknownChecks Scry.analyses (Scry.parseRulePack uafText)));
+  check "selection: oob picks the bounds row only"
+    (match Scry.analysisLabels (Scry.enabledAnalyses Scry.analyses packOob) with
+      | .cons l .nil => String.eq l "bounds"
+      | _ => .false);
+  check "selection: uaf picks the lifetime row only"
+    (match Scry.analysisLabels (Scry.enabledAnalyses Scry.analyses packUaf) with
+      | .cons l .nil => String.eq l "lifetime"
+      | _ => .false);
+  check "selection: both rules pick both rows, lifetime first"
+    (match Scry.analysisLabels (Scry.enabledAnalyses Scry.analyses packBoth) with
+      | .cons a (.cons b .nil) =>
+        Bool.and (String.eq a "lifetime") (String.eq b "bounds")
+      | _ => .false);
+  check "the table implements a row's check and no row for a typo"
+    (Bool.and (Scry.implements Scry.analyses "out-of-bounds-write")
+      (Bool.not (Scry.implements Scry.analyses "out-of-bounds-writ")));
+  -- The local registry: only the demo row is enabled by `demoPack`, and it runs.
+  check "a new row in a local registry runs (one-place addition)"
+    (match demoRun.findings with
+      | .cons f .nil =>
+        Bool.and (String.eq f.rule "demo/fn")
+          (Bool.and (String.eq f.message "the demo analysis ran")
+            (List.isEmpty demoRun.warnings))
+      | _ => .false);
+  -- The CLI path: a pack with an unknown check is refused, not silently empty.
+  FS.writeFile "/tmp/scry-registry-unknown.scry" "rule typo\n  kind memory\n  check out-of-bounds-writ\nend\n";
+  o ← opts ["tests/fixtures/oob-write-heap.c", "--rules", "/tmp/scry-registry-unknown.scry"];
+  r ← EIO.lift (Scry.analyzeFile o);
+  check "the CLI refuses an unknown check"
+    (match r with
+      | .error e => String.contains e "no analysis is registered"
+      | .ok _ => .false))

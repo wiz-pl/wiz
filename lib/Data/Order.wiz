@@ -1,0 +1,25 @@
+import Logic
+import Class
+/-!
+# Order
+
+Notation for orders and equivalences (`import Data.Order`): `a ≤ b`, `a < b` and `a ≈ b`,
+each a class with one instance per type. The relations are propositions.
+
+The classes (`LE`, `LT`, `Equiv`) are declared in lib/Class.wiz, so a module above the
+Prelude can use equality and the order relations without importing `Logic`; this module
+adds the notation. Both modules are re-exported by `import Data.Order`, as before.
+
+Instances: `Nat` (lib/Nat.wiz), `Int` (lib/IntOrder.wiz), and the rationals `Q`
+(lib/Rat.wiz, where `≈` is the equality of fractions).
+
+```
+import Nat
+
+def ex (n : Nat) : n ≤ n + 1 := Nat.le_add_right n 1
+```
+-/
+
+infix:50 " ≤ " => LE.le
+infix:50 " < " => LT.lt
+infix:50 " ≈ " => Equiv.equiv

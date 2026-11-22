@@ -1,0 +1,142 @@
+import Json
+import Web.EditorModel
+
+/-!
+# Web.EditorBridge
+
+The editor's pure rules (`Web.EditorModel`) as the host-facing string functions: the
+`wiz_loom_editor_*` entry points of `web/playground-ui.wiz`, `web/infoview-ui.wiz` and
+`web/source-ui.wiz`.
+
+The three page runtimes used to carry a copy of these wrappers each (the same twenty
+definitions over the same `EditorModel` calls). This module is the one implementation;
+a `*-ui.wiz` re-exports the names it needs (`export "wiz_loom_editor_index"
+EditorBridge.indexJson`), so the offset arithmetic, the UTF-16/code-point conversions and
+the span parsing exist once. The pages keep their own export lists because the wasm
+build's `-sEXPORTED_FUNCTIONS` and the host's queries are per page; they must not keep
+their own copies of the rules.
+
+All conversions are UTF-16 at this boundary, which is what the browser's `selectionStart`
+and the Loom driver count. `EditorModel.codePointOffsetFromUtf16` and
+`EditorModel.utf16OffsetFromCodePoints` are the only two places a code-point offset is
+converted.
+-/
+
+-- ## The line table
+
+/-- The versioned line table the page caches (`EditorModel.indexJson`). -/
+def EditorBridge.indexJson (version text : String) : String :=
+  EditorModel.indexJson (EditorModel.natOf version) text
+
+-- ## Diagnostics and completion
+
+/-- The spans a diagnostics array underlines, as JSON. -/
+def EditorBridge.segments (text diags maxSegments : String) : String :=
+  EditorModel.segmentsJsonText text diags (EditorModel.natOf maxSegments)
+
+/-- The spans, taking the cached line table (`EditorBridge.indexJson`). -/
+def EditorBridge.segmentsIndex (index text diags maxSegments : String) : String :=
+  EditorModel.segmentsJson (EditorModel.indexFromJson text index) diags
+    (EditorModel.natOf maxSegments)
+
+/-- A `textDocument/completion` result's items, as JSON. -/
+def EditorBridge.items (result : String) : String :=
+  Json.render (Json.mkArr (EditorModel.completionItems result))
+
+/-- The popup's filtered items, selection and prefix, as JSON. -/
+def EditorBridge.popup (text items index offset : String) : String :=
+  EditorModel.popupJson text items index (EditorModel.natOf offset)
+
+/-- The selected index after moving `delta` in `count` items. -/
+def EditorBridge.move (index delta count : String) : String :=
+  EditorModel.intString
+    (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
+      (EditorModel.intOf count))
+
+/-- What an accepted item inserts and where, as JSON. -/
+def EditorBridge.accept (text item offset : String) : String :=
+  EditorModel.acceptJson text item (EditorModel.natOf offset)
+
+/-- The popup command a keydown names, as JSON (`Web.EditorModel`); the popup host only
+carries it out. -/
+def EditorBridge.key (key index count : String) : String :=
+  EditorModel.popupKeyJson key index count
+
+/-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
+def EditorBridge.trigger (text c offset : String) : String :=
+  match EditorModel.completionTrigger (EditorModel.index text) c
+    (EditorModel.natOf offset) with
+  | .true => "1"
+  | .false => "0"
+
+-- ## Positions
+
+/-- The LSP position of a UTF-16 offset, as JSON. -/
+def EditorBridge.position (text offset : String) : String :=
+  EditorModel.positionJsonText text (EditorModel.natOf offset)
+
+/-- The LSP position, taking the cached line table. -/
+def EditorBridge.positionIndex (index offset : String) : String :=
+  EditorModel.positionJson (EditorModel.indexFromJson "" index)
+    (EditorModel.natOf offset)
+
+/-- The UTF-16 offset of an LSP position. -/
+def EditorBridge.offset (text line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition (EditorModel.index text)
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The UTF-16 offset, taking the cached line table. -/
+def EditorBridge.offsetIndex (index line character : String) : String :=
+  EditorModel.natString
+    (EditorModel.offsetFromPosition (EditorModel.indexFromJson "" index)
+      (EditorModel.Position.mk (EditorModel.natOf line) (EditorModel.natOf character)))
+
+/-- The UTF-16 offset of a code-point offset (the self-hosted engine counts code points). -/
+def EditorBridge.utf16 (text codePoints : String) : String :=
+  EditorModel.natString
+    (EditorModel.utf16OffsetFromCodePoints (EditorModel.index text)
+      (EditorModel.natOf codePoints))
+
+/-- A code-point offset into `prefix ++ text` as a UTF-16 offset into `text`. -/
+def EditorBridge.editorOffset (text prefix codePoints : String) : String :=
+  let source := EditorModel.index (String.append prefix text);
+  let at := EditorModel.utf16OffsetFromCodePoints source (EditorModel.natOf codePoints);
+  let cut := EditorModel.length prefix;
+  EditorModel.natString (if Nat.lt at cut then 0 else at - cut)
+
+/-- The UTF-16 offset of the end of the line containing `offset`. -/
+def EditorBridge.lineEnd (text offset : String) : String :=
+  let i := EditorModel.index text;
+  EditorModel.natString
+    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
+
+/-- The line end, taking the cached line table. -/
+def EditorBridge.lineEndIndex (index offset : String) : String :=
+  let i := EditorModel.indexFromJson "" index;
+  EditorModel.natString
+    (EditorModel.lineEndAt i (EditorModel.lineOfOffset i (EditorModel.natOf offset)))
+
+-- ## Edits and spans
+
+/-- The edit an accepted Tab makes at `from`..`to`, as JSON (`host.edit` applies it). -/
+def EditorBridge.indent (text from to : String) : String :=
+  EditorModel.indentJson text from to
+
+/-- A completion item's tooltip (its documentation, else its detail). -/
+def EditorBridge.itemTitle (item : String) : String :=
+  EditorModel.itemTitleJson item
+
+/-- Whether a key event is Ctrl/⌘-Space (`1` or `0`). -/
+def EditorBridge.askKey (key code ctrl meta : String) : String :=
+  match EditorModel.askKey key code (String.eq ctrl "1") (String.eq meta "1") with
+  | .true => "1"
+  | .false => "0"
+
+/-- A `LINE:CHAR-LINE:CHAR` span as `[start, end]` offsets, or `null`. -/
+def EditorBridge.span (text span : String) : String :=
+  EditorModel.spanJson text span
+
+/-- An LSP range as `LINE:CHAR-LINE:CHAR`. -/
+def EditorBridge.rangeText (range : String) : String :=
+  EditorModel.rangeTextJson range

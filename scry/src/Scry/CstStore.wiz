@@ -3,6 +3,7 @@ import Text
 import Functor
 import WordArray
 import Intern
+import IO
 import Scry.Facts
 /-!
 # Scry.CstStore: the native CST columns
@@ -82,6 +83,74 @@ def Scry.flagsOf (n : Scry.Node) : Nat :=
 def Scry.parentEntry (p : Option Scry.NodeId) : Nat := match p with
   | .none => 0
   | .some x => Nat.succ x.n
+
+-- ## Line tables from bytes
+
+/-- The byte offsets where each line starts (`0`, then one past every `\n`), scanning a
+`Bytes` buffer forward. The same table `Scry.lineStartsOf` builds from a `String`, but
+without materialising the whole file as a `List Char`. -/
+def Scry.lineStartsOfBytesGo (b : Bytes) (n : Nat) : Nat → U32Array → U32Array
+  | .zero, acc => acc
+  | .succ k, acc =>
+    let i := Nat.sub n (Nat.succ k);
+    Scry.lineStartsOfBytesGo b n k
+      (match Nat.beq (Bytes.get b i) 10 with
+        | .true => U32Array.push acc (U32.ofNat (Nat.succ i))
+        | .false => acc)
+
+/-- The line-start offsets of a byte buffer. -/
+def Scry.lineStartsOfBytes (b : Bytes) : U32Array :=
+  Scry.lineStartsOfBytesGo b (Bytes.size b) (Bytes.size b)
+    (U32Array.ofList (List.cons (U32.ofNat 0) .nil))
+
+/-- Binary search for the largest line-start index whose offset is `<= off`. -/
+partial def Scry.lineIndexGo (starts : U32Array) (off : Nat) (lo hi : Nat) : Nat :=
+  match Nat.lt lo hi with
+  | .false => lo
+  | .true =>
+    let mid := Nat.div (Nat.add (Nat.add lo hi) 1) 2;
+    match Nat.le (UIntN.toNat (U32Array.get starts mid)) off with
+    | .true => Scry.lineIndexGo starts off mid hi
+    | .false => Scry.lineIndexGo starts off lo (Nat.sub mid 1)
+
+/-- A 1-based line and **byte-as-character** column for a byte offset, from a line-start
+table. This is the bytes-backed path's lookup (`Scry.Cst.ofStoreBytes`): it has no byte
+map, and its fixtures are ASCII (the shim's offsets are bytes; a UTF-8 identifier would
+need a byte slice). The text-backed paths use `Scry.TextIndex` and `Scry.lineColFrom`. -/
+def Scry.lineColFromBytes (starts : U32Array) (off : Nat) : Nat × Nat :=
+  let n := U32Array.size starts;
+  match Nat.beq n 0 with
+  | .true => (1, Nat.succ off)
+  | .false =>
+    let i := Scry.lineIndexGo starts off 0 (Nat.sub n 1);
+    (Nat.succ i, Nat.succ (Nat.sub off (UIntN.toNat (U32Array.get starts i))))
+
+/-- The bytes as text: UTF-8 when they are valid, otherwise Latin-1 (one character per
+byte, which is the lowering's byte-as-character convention for a non-ASCII file). -/
+def Scry.bytesText (b : Bytes) : String := match Bytes.toUtf8 b with
+  | .ok s => s
+  | .error _ => Bytes.toLatin1 b
+
+/-- Is the byte one of the characters `String.trimLeft` skips? (`Char.isSpace`: space,
+or 9 … 13: tab, LF, VT, FF, CR.) -/
+def Scry.isSpaceByte (x : Nat) : Bool :=
+  Bool.or (Nat.beq x 32) (Bool.and (Nat.le 9 x) (Nat.le x 13))
+
+/-- Skip space bytes from `i` (never past `n`). -/
+partial def Scry.skipSpaceBytes (b : Bytes) (i n : Nat) : Nat :=
+  if Nat.lt i n then
+    (if Scry.isSpaceByte (Bytes.get b i) then Scry.skipSpaceBytes b (Nat.succ i) n
+     else i)
+  else i
+
+/-- Skip the white space at the start of one line (space, tab, CR, VT, FF — not LF):
+a line marker's `#` follows its own line's indentation, never the next line's. -/
+partial def Scry.skipSpaceLine (b : Bytes) (i n : Nat) : Nat :=
+  if Nat.lt i n then
+    (if Bool.and (Scry.isSpaceByte (Bytes.get b i)) (Bool.not (Nat.beq (Bytes.get b i) 10))
+     then Scry.skipSpaceLine b (Nat.succ i) n
+     else i)
+  else i
 
 -- ## The store
 
@@ -290,9 +359,15 @@ def Scry.CstStore.edgesOf (s : Scry.CstStore) : List Scry.Edge :=
     (InternTable.lookup s.fields (U32Array.get s.edgeLabel i)))
     (Scry.schemaRange (Scry.CstStore.edgeCount s))
 
+/-- The `arity` relation-tuple values at offsets `lo … lo+arity-1`, read from
+`relTuples` by index. Reading the array directly keeps one row O(arity); the older
+`U32Array.toList` + `List.drop` per row was O(tuples) per row, O(tuples²) for the store. -/
+def Scry.CstStore.tupleRow (s : Scry.CstStore) (lo arity : Nat) : List Nat :=
+  List.map (fun k => UIntN.toNat (U32Array.get s.relTuples (Nat.add lo k)))
+    (Scry.schemaRange arity)
+
 /-- The relations of `s`, in id order. -/
 def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
-  let flat := List.map UIntN.toNat (U32Array.toList s.relTuples);
   List.map (fun i =>
     let lo := UIntN.toNat (U32Array.get s.relOff i);
     let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ i));
@@ -301,7 +376,7 @@ def Scry.CstStore.relationsOf (s : Scry.CstStore) : List Scry.Relation :=
       | .zero => 0
       | .succ _ => Nat.div (Nat.sub hi lo) arity;
     let row := fun (j : Nat) =>
-      List.take arity (List.drop (Nat.add lo (Nat.mul j arity)) flat);
+      Scry.CstStore.tupleRow s (Nat.add lo (Nat.mul j arity)) arity;
     Scry.Relation.mk (Scry.Id.mk i) (InternTable.lookup s.relNames (U32.ofNat i)) arity
       (List.map row (Scry.schemaRange count)))
     (Scry.schemaRange (Scry.CstStore.relationCount s))
@@ -431,12 +506,12 @@ def Scry.relRows (s : Scry.CstStore) (i : Nat) : List String :=
   let arity := UIntN.toNat (U32Array.get s.relArity i);
   let lo := UIntN.toNat (U32Array.get s.relOff i);
   let hi := UIntN.toNat (U32Array.get s.relOff (Nat.succ i));
-  let flat := List.map UIntN.toNat (U32Array.toList s.relTuples);
   let count := match arity with
     | .zero => 0
     | .succ _ => Nat.div (Nat.sub hi lo) arity;
-  let rows := List.map (fun j => List.take arity
-    (List.drop (Nat.add lo (Nat.mul j arity)) flat)) (Scry.schemaRange count);
+  let rows := List.map (fun j =>
+    Scry.CstStore.tupleRow s (Nat.add lo (Nat.mul j arity)) arity)
+    (Scry.schemaRange count);
   List.append
     [Scry.cstEnc (InternTable.lookup s.relNames (U32.ofNat i)) ++ "\t"
       ++ Nat.repr arity ++ "\t" ++ Nat.repr (List.length rows)]

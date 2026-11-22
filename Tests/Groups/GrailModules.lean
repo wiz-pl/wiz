@@ -74,6 +74,24 @@ def modulesGroup : Group where
           "the strong toolchain is not in the module key"
         check (k != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := "target-a"))
           "the target is not in the module key" },
+    { name := "SHA-256: the NIST FIPS 180-4 known-answer vectors", run := fun _ => do
+        -- Every padding case from FIPS 180-4 (and NIST's CAVP examples): the empty
+        -- message, one short block, the 448-bit message (which still fits in one block but
+        -- needs the length in a second word), the 896-bit two-block message, and the
+        -- 1,000,000-'a' multi-block message. These are the trusted SMT cache's key
+        -- function, so a wrong digest must fail here rather than only show up as a
+        -- domain-separation inequality.
+        checkEq "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          (Smt.Sha256.hex "")
+        checkEq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          (Smt.Sha256.hex "abc")
+        checkEq "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+          (Smt.Sha256.hex "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+        checkEq "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"
+          (Smt.Sha256.hex
+            "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")
+        checkEq "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+          (Smt.Sha256.hex (String.ofList (List.replicate 1000000 'a'))) },
     { name := "target and toolchain ids: separate SHA-256 namespaces, not the 64-bit build id", run := fun _ => do
         let tc : Toolchain := {}
         let other : Toolchain := { tc with cflags := ["-O2"] }
@@ -347,8 +365,9 @@ def modulesGroup : Group where
         let src := "import Prelude\nimport Sneaky\n"
         let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := loaderOf ms }
         check (sneaky s) s!"runFrontend: Sneaky used Nat without importing Prelude: {s.messages.toList.map (·.text)}"
-        let s := runFrontend (R := ZeroOneMany) ("import Prelude\ndef two : Nat := 2\nimport Sneaky\n") { trustedModule := Tests.libModule, loader := loaderOf ms }
-        check (sneaky s) s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
+        -- the fixed header (13u): a later import is the error, not a module the frontend loads
+        let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef two : Nat := 2\nimport Sneaky\n" { trustedModule := Tests.libModule, loader := loaderOf ms }
+        check (s.messages.any fun m => m.code == "import-order") s!"runFrontend, after a definition: {s.messages.toList.map (·.text)}"
         let (s, _) := Query.elaborate (R := ZeroOneMany) {} src { trustedModule := Tests.libModule, loader := loaderOf ms, termInfo := true }
         check (sneaky s) s!"the language server's engine: {s.messages.toList.map (·.text)}"
         -- through the server: the diagnostic is at the import
@@ -386,7 +405,7 @@ def modulesGroup : Group where
           m.severity == .error && m.text.startsWith "'b' is declared by both"
         for src in ["import M.A\nimport M.B\n" ++ boomA, "import M.B\nimport M.A\n" ++ boomB,
                     "import M.A\nimport M.D\n" ++ boomA, "import M.A\nimport M.D\n" ++ boomB,
-                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\ndef b : Bool := Bool.false\nimport M.A\n" ++ boomA,
+                    "import M.C\nimport M.B\n" ++ boomA, "import M.Base\nimport M.A\ndef b : Bool := Bool.false\n" ++ boomA,
                     "import M.A\ndef b : Bool := Bool.false\n" ++ boomA] do
           for (how, s) in ← paths src do
             check (clash s) s!"{how}: no clash reported for\n{src}\n{s.messages.toList.map (·.text)}"

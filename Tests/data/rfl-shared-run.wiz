@@ -1,5 +1,5 @@
--- Regression fixture for #256: the ledger state machine from the crux-spec project's
--- `Crux.Machine` (definitions unchanged, imports inlined), run behind one definition.
+-- Regression fixture for #256: a private state machine's definitions (imports inlined),
+-- run behind one definition.
 -- Before the fix, the last equation did not check in two minutes and exceeded 5 GB.
 import Prelude
 import Int
@@ -54,8 +54,8 @@ def Movement.mirror (m : Movement) : Movement := Movement.mk m.tx m.account m.un
 def mirror (l : List Movement) : List Movement := List.map Movement.mirror l
 def forTx (l : List Movement) (t : Nat) : List Movement := List.filter (fun m => Nat.beq m.tx t) l
 
--- The ledger kernel as a state machine, cut down from CruxSpec/Machine.lean to what
--- ACCOUNT-001's floor is about: each `Op` is one save, and `apply` returns `.none` when
+-- The kernel as a state machine, cut down from a private model to what
+-- ACCOUNT-001's floor is about: each `Op` is one save, and `applyOp` returns `.none` when
 -- the save is refused. Kept: the chart (Held or Mirrored accounts), movements, draw holds,
 -- transactions with a status and a movement set, and the operations create, the two
 -- status-only begins, authorize (with the funds gate), complete (with the re-check and
@@ -110,7 +110,7 @@ structure Tx where
   status : Status
   plan : List Posting
 
--- `Movement` is Crux.Ledger's (tx, account, unit, amount)
+-- `Movement` is the model's (tx, account, unit, amount)
 structure State where
   txs : Nat → Option Tx
   next : Nat
@@ -295,7 +295,7 @@ def reverseTx (c : Chart) (s : State) (t : Nat) (tx : Tx) : Option State :=
   guard (Bool.and (Status.canReverse (Tx.status tx)) (reverseOk c s t))
     (State.save s t tx .reversed (List.append (State.ledger s) (mirror (forTx (State.ledger s) t))) (State.holds s))
 
-def apply (c : Chart) (s : State) : Op → Option State
+def applyOp (c : Chart) (s : State) : Op → Option State
   | .create plan =>
     .some (State.mk (upd (State.txs s) (State.next s) (Tx.mk .created plan)) (Nat.succ (State.next s))
       (State.ledger s) (State.holds s))
@@ -313,7 +313,7 @@ def apply (c : Chart) (s : State) : Op → Option State
 -- in `Type`: FINDINGS G2.)
 inductive Reachable (c : Chart) : State → Type where
   | init : Reachable c State.init
-  | step (s s' : State) (op : Op) (r : Reachable c s) (h : apply c s op = .some s') : Reachable c s'
+  | step (s s' : State) (op : Op) (r : Reachable c s) (h : applyOp c s op = .some s') : Reachable c s'
 
 def chart2 : Chart := fun a => match Nat.beq a 1 with
   | .true => AccountInfo.mk 710 .held
@@ -321,7 +321,7 @@ def chart2 : Chart := fun a => match Nat.beq a 1 with
 
 def run2 : State → List Op → Option State
   | s, .nil => .some s
-  | s, .cons op ops => Option.bind (apply chart2 s op) (fun s' => run2 s' ops)
+  | s, .cons op ops => Option.bind (applyOp chart2 s op) (fun s' => run2 s' ops)
 
 def fund2 : List Posting := .cons (Posting.mk 2 (-500)) (.cons (Posting.mk 1 500) .nil)
 def life2 (t : Nat) : List Op := .cons (.create fund2) (.cons (.beginAuthorize t)

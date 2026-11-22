@@ -1,0 +1,197 @@
+{
+  "comment": "Global name-collision groups that exist today but cannot break a run (scripts/check-name-collisions.py --quiet). Every entry must name the exact module set, the reason the declarations cannot be loaded in one program, an owner and an expires date. An expired entry is an error; so is a stale entry whose group has disappeared. Prefer renaming the declaration or removing the entry over renewing it. A module here is a repository-relative .wiz path; module and modules identify the same set (module is the primary path).",
+  "entries": [
+    {
+      "module": "lib/Infoview.wiz",
+      "name": "Goal",
+      "modules": [
+        "lib/Infoview.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Infoview.wiz (the infoview protocol) and selfhost/Frontend.wiz (the self-hosted frontend) are independent programs. Neither imports the other, transitively, and no scanned module imports both, so Goal cannot be loaded twice in one run.",
+      "owner": "Infoview (lib/Infoview.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Rat.wiz",
+      "name": "Q",
+      "modules": [
+        "lib/Rat.wiz",
+        "selfhost/Kernel.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Rat.wiz (the rationals' structure Q) and selfhost/Kernel.wiz (the self-hosted kernel's inductive Q) are independent. There is no import path either way and no scanned module imports both.",
+      "owner": "Rat (lib/Rat.wiz) and the self-hosted kernel (selfhost/Kernel.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "scry/src/Scry/Codegen.wiz",
+      "name": "Scry.boolD",
+      "modules": [
+        "scry/src/Scry/Codegen.wiz",
+        "scry/src/Scry/Facts.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: scry/src/Scry/Codegen.wiz (the schema generator) and scry/src/Scry/Facts.wiz (the fact-store loader) are separate tools. Neither imports the other, transitively, and no scanned module imports both.",
+      "owner": "Scry schema tooling (scry/src/Scry/Codegen.wiz, scry/src/Scry/Facts.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "scry/src/Scry/Codegen.wiz",
+      "name": "Scry.dedup",
+      "modules": [
+        "scry/src/Scry/Codegen.wiz",
+        "scry/src/Scry/Lower.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: scry/src/Scry/Codegen.wiz (the schema generator) and scry/src/Scry/Lower.wiz (C to Wil) have no import path between them and no common scanned importer, so the two dedup functions cannot meet in one run.",
+      "owner": "Scry schema tooling (scry/src/Scry/Codegen.wiz) and the C frontend (scry/src/Scry/Lower.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Grail.wiz",
+      "name": "Step",
+      "modules": [
+        "lib/Grail.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Grail.wiz (the tactic framework) and selfhost/Frontend.wiz (the self-hosted frontend) are independent: neither imports the other and no scanned module imports both.",
+      "owner": "Grail (lib/Grail.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "selfhost/Cof.wiz",
+      "name": "branches",
+      "modules": [
+        "selfhost/Cof.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: selfhost/Cof.wiz is not in the self-hosted compiler's module graph with selfhost/Frontend.wiz. There is no import path between them and no common scanned importer, so neither branches function is loaded by the other's program.",
+      "owner": "Self-hosted Cof (selfhost/Cof.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveBEq",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveBEq and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveDecidableEq",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveDecidableEq and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveInhabited",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveInhabited and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Deriving.wiz",
+      "name": "deriveRepr",
+      "modules": [
+        "lib/Deriving.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Deriving.wiz and selfhost/Frontend.wiz are independent bootstrap implementations. The self-hosted frontend reimplements deriveRepr and does not import lib/Deriving; there is no import path either way and no common scanned importer.",
+      "owner": "Deriving (lib/Deriving.wiz) and the self-hosted frontend (selfhost/Frontend.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "selfhost/Check.wiz",
+      "name": "main",
+      "modules": [
+        "selfhost/Check.wiz",
+        "selfhost/Main.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: selfhost/Check.wiz and selfhost/Main.wiz are alternative entry points (the checker and the compiler). Nothing imports both, so the two main definitions are never linked into one program.",
+      "owner": "Self-hosted entry points (selfhost/Check.wiz, selfhost/Main.wiz)",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scope.wiz",
+      "name": "Scope",
+      "modules": [
+        "lib/Scope.wiz",
+        "selfhost/Frontend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scope.wiz and selfhost/Frontend.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Scope.wiz and selfhost/Frontend.wiz",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Web/Playground.wiz",
+      "name": "linesOf",
+      "modules": [
+        "lib/Web/Playground.wiz",
+        "selfhost/Cli.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Web/Playground.wiz and selfhost/Cli.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
+      "owner": "the two modules lib/Web/Playground.wiz and selfhost/Cli.wiz",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireCompact.wiz",
+      "name": "Plan",
+      "modules": [
+        "lib/Scry/QuireCompact.wiz",
+        "selfhost/Backend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireCompact.wiz (the storage engine's plan type) and selfhost/Backend.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so Plan cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireCompact.wiz",
+      "name": "Prepared",
+      "modules": [
+        "lib/Scry/QuireCompact.wiz",
+        "selfhost/Cli.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireCompact.wiz (the storage engine's prepared statement) and selfhost/Cli.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so Prepared cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireDurable.wiz",
+      "name": "commit",
+      "modules": [
+        "lib/Scry/QuireDurable.wiz",
+        "selfhost/Parse.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireDurable.wiz (the durable store's commit) and selfhost/Parse.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so commit cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
+    }
+  ]
+}

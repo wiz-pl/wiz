@@ -1,0 +1,220 @@
+# The self-hosted toolchain chain (docs/bootstrap-chain.md, "Continuous integration").
+# Kept out of ci.yml on purpose: none of it is a merge gate.
+#
+#   release  after every CI run of a push to master: `nix build .#wizc-release` (the Lean
+#            host's seed.c, the static musl wizc, the fixpoint `cmp`, the tarball), its
+#            sha256 in the job summary, the store paths pushed to Cachix. It waits for
+#            CI (workflow_run) so the Lean host is already in Cachix: unchanged
+#            `selfhost/`, Lean host and nixpkgs make it a substitution (seconds), a change
+#            costs about 15 min and 3 GB. A CI run cancelled by a newer push is skipped
+#            (the newer run's release covers it); a failed CI run still gets its release.
+#   chain    nightly on master: scripts/chain-step-check.sh in self mode (the release
+#            fetched by hash rebuilds itself), then in cross mode from the previous
+#            night's release (two different compilers must give one tarball: the chain's
+#            diverse check). Each night's tarball is kept as the workflow artifact
+#            `wizc-nightly` and its fixed-output store path is pushed to Cachix, so the
+#            next night fetches it by (commit, hash); it is never committed. About 1 h,
+#            3 GB.
+#
+# A DIFFER fails this workflow, which blocks declaring a chain root
+# (docs/bootstrap-chain.md, "The root", requirement 8) but not merges: it is not part
+# of `CI result` and not a required check.
+name: bootstrap chain
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  schedule:
+    - cron: "17 5 * * *" # nightly, after fixpoint.yml (03:41) and bench.yml (04:17)
+  workflow_dispatch:
+    inputs:
+      cross:
+        description: Also run the cross check from the newest earlier `wizc-nightly`
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read # the previous night's artifact
+
+concurrency:
+  group: bootstrap-chain-${{ github.event_name == 'workflow_run' && 'release' || 'chain' }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
+
+env:
+  CACHIX_NAME: badlydrawnwizards
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  release:
+    name: wizc release
+    # only CI runs of pushes to this repository's master: trusted code, so the push token
+    # may be used
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion != 'cancelled' &&
+      github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true # the explicit push below publishes exactly these paths
+      - name: nix build .#wizc-release
+        run: |
+          nix build .#wizc-release .#wizc .#wizc-seed -L --no-link
+          rel=$(nix path-info .#wizc-release)
+          sys=$(nix eval --raw --impure --expr builtins.currentSystem)
+          tgz=$rel/wizc-$sys.tar.gz
+          sha=$(sha256sum "$tgz" | cut -d' ' -f1)
+          mkdir -p out && cp "$tgz" out/ && echo "${{ github.event.workflow_run.head_sha }}" > out/commit
+          {
+            echo "### wizc release at \`${{ github.event.workflow_run.head_sha }}\`"
+            echo
+            echo '```'
+            echo "wizc-$sys.tar.gz  sha256 $sha  $(nix hash convert --hash-algo sha256 --to sri "$sha")"
+            tar -xzOf "$tgz" "wizc-$sys/MANIFEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish to Cachix
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the release is not published"
+            exit 0
+          fi
+          mapfile -t paths < <(nix path-info .#wizc-release .#wizc .#wizc-seed)
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" "${paths[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wizc-release-${{ github.event.workflow_run.head_sha }}
+          path: out/
+          retention-days: 14
+
+  chain:
+    name: chain step check (self, cross)
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the flake is read at commits (git+file?rev=), the predecessor's too
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Self mode (the release rebuilds itself from its tarball)
+        id: self
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "system=$(nix eval --raw --impure --expr builtins.currentSystem)" >> "$GITHUB_OUTPUT"
+          scripts/chain-step-check.sh --out .scratch/self 2>&1 | tee self.log
+      - name: Keep this night's release
+        # A's tarball is a valid release even when B differed, so it is kept either way
+        if: always() && steps.self.outputs.commit != ''
+        env:
+          SYS: ${{ steps.self.outputs.system }}
+          COMMIT: ${{ steps.self.outputs.commit }}
+        run: |
+          rel=.scratch/self/release-a
+          if [ ! -e "$rel" ]; then echo "no release was built"; exit 0; fi
+          mkdir -p nightly
+          cp "$rel/wizc-$SYS.tar.gz" nightly/
+          echo "$COMMIT" > nightly/commit
+      - uses: actions/upload-artifact@v7
+        if: always() && hashFiles('nightly/commit') != ''
+        with:
+          name: wizc-nightly
+          path: nightly/
+          retention-days: 90
+      - name: The previous night's release
+        id: prev
+        if: always() && steps.self.outputs.commit != '' && (github.event_name == 'schedule' || inputs.cross)
+        env:
+          COMMIT: ${{ steps.self.outputs.commit }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # the newest unexpired `wizc-nightly` of master from an earlier run of this workflow
+          id=$(gh api "repos/$REPO/actions/artifacts?name=wizc-nightly&per_page=100" \
+                 --jq "[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == \"master\")
+                       | select(.workflow_run.id != $RUN_ID)]
+                       | sort_by(.created_at) | last | .id // empty")
+          if [ -z "$id" ]; then
+            echo "::notice title=cross check skipped::no earlier wizc-nightly artifact (first night, or older than 90 days)"
+            exit 0
+          fi
+          mkdir -p prev
+          gh api "repos/$REPO/actions/artifacts/$id/zip" > prev.zip
+          unzip -q -o prev.zip -d prev
+          pc=$(cat prev/commit)
+          if [ "$pc" = "$COMMIT" ]; then
+            echo "::notice title=cross check skipped::the previous release is of this commit ($pc)"
+            exit 0
+          fi
+          echo "commit=$pc" >> "$GITHUB_OUTPUT"
+          echo "previous release: $pc (artifact $id)"
+      - name: Cross mode (the previous release builds this commit's release)
+        id: cross
+        if: always() && steps.prev.outputs.commit != ''
+        env:
+          SYS: ${{ steps.self.outputs.system }}
+          PRED: ${{ steps.prev.outputs.commit }}
+        run: |
+          scripts/chain-step-check.sh --out .scratch/cross \
+            --pred "$PRED" --pred-tarball "prev/wizc-$SYS.tar.gz" 2>&1 | tee cross.log
+      - name: Publish to Cachix
+        # this night's release and its fixed-output path (what the next night's
+        # fetchToolchain asks for), the Lean host's seed, and the step's intermediates
+        if: always() && hashFiles('nightly/commit') != ''
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          SYS: ${{ steps.self.outputs.system }}
+          COMMIT: ${{ steps.self.outputs.commit }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the nightly release is not published"
+            exit 0
+          fi
+          fod=$(nix store add --mode flat --hash-algo sha256 \
+                  --name "wizc-$SYS-$COMMIT.tar.gz" "nightly/wizc-$SYS.tar.gz")
+          paths=("$fod")
+          for l in .scratch/self/* .scratch/cross/*; do
+            [ -L "$l" ] && paths+=("$(readlink -f "$l")")
+          done
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" "${paths[@]}"
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Bootstrap chain at \`${{ steps.self.outputs.commit }}\`"
+            for m in self cross; do
+              [ -f "$m.log" ] || continue
+              echo; echo "#### $m mode"; echo; echo '```'
+              grep -E '^(commit|same|differ|DIFFER|        |chain-step-check: (PASS|FAIL))' "$m.log" || echo "(no result)"
+              echo '```'
+            done
+            [ -f cross.log ] || echo "(cross mode did not run: see the job log)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q '^DIFFER' self.log cross.log 2>/dev/null; then
+            echo "::error title=bootstrap chain DIFFER::a chain comparison differs; no root may be declared at this commit (docs/bootstrap-chain.md, The root)"
+          fi

@@ -1,138 +1,89 @@
-// The browser half of the web infoview: a WebSocket to the language server
-// (`wiz lsp --ws PORT`, which web/bridge.sh starts), the Wiz program compiled to WebAssembly (web/Web.wiz), and the page.
-// Everything the infoview decides is in Wiz; this file only moves events in and HTML
-// out. Every event is a step of the Wiz program (its export `wiz_web_step`, stage 9g),
-// which calls back js_send and js_set_html (web/js.c).
+// The standalone web infoview page (`web/infoview.html`, served by `wiz lsp --ws` via
+// web/bridge.sh). It mounts the page's runtime (`wiz-infoview-ui.mjs`, built from
+// `web/infoview-ui.wiz` and `lib/Web/InfoviewPage.wiz`) and keeps only the endpoint
+// rule, the language server's socket and the editor's caret. The pane and the hover
+// card are `lib/Web/{Goals,Hover}.wiz`; the same transport as the playground
+// (`web/playground-lsp.js`) drives both.
+//
+// `?port=PORT` is a local server (default 8765, what `wiz lsp --ws` prints); `?lsp=`
+// names one like the playground's. `?follow=1` (what `wiz/browserInfoview` opens) shows
+// the cursor of the editor that owns the server instead of its own document.
 "use strict";
-// (11s) The parts the documentation's pages use too are web/tagged.js.
-import { loadWasm, stepper, delegate } from "./tagged.js";
+import { mount } from "./framework/mount.js";
+import { startInfoview, createIndexer } from "./playground-lsp.js";
+import { endpointFromSearch } from "./lsp-client.js";
 
-const params = new URLSearchParams(location.search);
-const port = params.get("port") || "8765";
-// (one server serves every page, and documents are shared: a URI of our own)
-const uri = params.get("uri") || `file:///scratch-${Math.random().toString(36).slice(2, 10)}.wiz`;
-
-// Events for Wiz: each is a step `state = wiz_web_step(state, event)`. The state is a
-// Wiz value (a reference the page owns, passed back in); the event's text is copied by
-// Wiz. Events before the module is loaded wait in `early`.
-let step = null;
-const early = [];
-function post(kind, payload) {
-  const ev = kind + "\n" + payload;
-  if (step) step(ev); else early.push(ev);
+// The server the page's URL names: `?lsp=` wins, else `?port=`, else 8765.
+export function endpointOf(search) {
+  const params = new URLSearchParams(search || "");
+  return params.has("lsp") ? endpointFromSearch(search)
+    : endpointFromSearch(search, "port", "8765");
 }
 
-// Messages to and from the server. Wiz frames its stream with Content-Length, as on
-// stdio; the WebSocket carries one JSON-RPC message per text frame (protocol §8.2), so
-// outgoing frames are cut out of the stream here, and incoming ones get their header.
-let sock = null;
-const outbox = [];
-const encoder = new TextEncoder();
-const decoder = new TextDecoder("utf-8");
-let pending = new Uint8Array(0);   // bytes from Wiz not yet a whole message
-function sendMessage(text) {
-  if (sock && sock.readyState === WebSocket.OPEN) sock.send(text); else outbox.push(text);
-}
-globalThis.wizSend = (text) => {
-  const more = encoder.encode(text);
-  const buf = new Uint8Array(pending.length + more.length);
-  buf.set(pending); buf.set(more, pending.length);
-  let at = 0;
-  for (;;) {
-    let end = -1;   // the blank line after the headers
-    for (let i = at; i + 3 < buf.length; i++)
-      if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) { end = i; break; }
-    if (end < 0) break;
-    const m = /Content-Length:\s*(\d+)/i.exec(decoder.decode(buf.subarray(at, end)));
-    const len = m ? Number(m[1]) : 0;
-    if (end + 4 + len > buf.length) break;
-    sendMessage(decoder.decode(buf.subarray(end + 4, end + 4 + len)));
-    at = end + 4 + len;
-  }
-  pending = buf.slice(at);
-};
-// (11w) `?follow=1`: no editor of our own; show the editor's cursor (wiz.nvim's
-// :WizInfoviewBrowser opens the page so), as the server announces it
-const follow = params.get("follow") === "1";
-function received(text) {
-  if (follow) {
-    try {
-      const m = JSON.parse(text);
-      if (m.method === "wiz/infoview/cursor") {
-        const p = m.params || {};
-        post("follow", (p.textDocument || {}).uri || "");
-        post("cursor", `${(p.position || {}).line || 0} ${(p.position || {}).character || 0}`);
-        return;
-      }
-    } catch (e) { /* not JSON: Wiz reports it */ }
-  }
-  post("net", `Content-Length: ${encoder.encode(text).length}\r\n\r\n${text}`);
-}
-globalThis.wizSetHtml = (id, html) => {
-  const el = document.getElementById(id);
-  if (el) el.innerHTML = html;
-};
+const runtimeModule = () => import("./wiz-infoview-ui.mjs");
 
-function setStatus(text) { document.getElementById("status").textContent = text; }
+// Mount the page on `doc` at `loc`. Exported for the Node test; `start()` below is the
+// browser's call.
+export async function startPage({ doc = globalThis.document, loc = globalThis.location,
+  module = runtimeModule } = {}) {
+  if (!doc || !doc.body) return null;
+  const params = new URLSearchParams(loc ? loc.search : "");
+  const follow = params.get("follow") === "1";
+  const endpoint = endpointOf(loc ? loc.search : "");
+  let app = null;
+  let handle = null;
 
-function connect() {
-  sock = new WebSocket(`ws://127.0.0.1:${port}/`);
-  sock.onopen = () => {
-    setStatus("connected");
-    for (const b of outbox.splice(0)) sock.send(b);
+  const effect = (kind, a = "", b = "") => {
+    if (handle) handle.call("wiz_loom_effect", kind, a, b);
   };
-  sock.onmessage = (m) => received(m.data);
-  sock.onclose = () => setStatus("disconnected (is `wiz lsp --ws` running?)");
-  sock.onerror = () => setStatus("cannot connect to ws://127.0.0.1:" + port);
-}
+  // The editor's pure rules are the runtime's (`Web.EditorModel`), read through `ask`;
+  // the index cache is the same one the payload's overlays use.
+  const rules = createIndexer((name, ...args) => handle.ask(name, ...args));
+  const onRequest = (kind, payload) => {
+    effect("ack", kind);
+    if (app) app.request(kind, payload);
+  };
 
-// The editor: a textarea. Its cursor as an LSP position (0-based, in characters).
-const editor = document.getElementById("editor");
-function cursor() {
-  const before = Array.from(editor.value.slice(0, editor.selectionStart));
-  let line = 0, col = 0;
-  for (const c of before) { if (c === "\n") { line++; col = 0; } else col++; }
-  return [line, col];
-}
-let lastPos = "";
-let opened = false;   // (cursor moves before the document is open would ask about nothing)
-function onCursor() {
-  if (!opened) return;
-  const [l, c] = cursor();
-  const key = l + " " + c;
-  if (key === lastPos) return;
-  lastPos = key;
-  document.getElementById("pos").textContent = `${l + 1}:${c + 1}`;
-  post("cursor", key);
-}
-let changeTimer = null;
-editor.addEventListener("input", () => {
-  clearTimeout(changeTimer);
-  changeTimer = setTimeout(() => { if (!opened) return; post("change", editor.value); lastPos = ""; onCursor(); }, 300);
-});
-for (const ev of ["keyup", "click", "select"]) editor.addEventListener(ev, onCursor);
-
-// The infoview: clicks select a subterm (event delegation: one listener for every
-// tag Wiz renders), the innermost tag under the mouse is highlighted, arrows navigate.
-delegate(document.getElementById("goals"), {
-  click: (t) => post("click", t.dataset.idx),
-  key: (k) => post("key", k),
-});
-
-// Start: load the Wasm module (Emscripten's loader, web/build.sh), open the document.
-async function start() {
-  setStatus("loading");
-  const wasm = await loadWasm();
-  step = stepper(wasm, "_wiz_web_init", "_wiz_web_step");
-  for (const ev of early.splice(0)) step(ev);
-  connect();
-  if (follow) {
-    editor.style.display = "none";
-    setStatus("following the editor");
-    return;
+  handle = await mount(doc.body, {
+    module,
+    transport: { lsp: endpoint },
+    events: ["click", "input", "change", "keydown"],
+    onRequest,
+  });
+  // Follow mode hides the local editor; normal mode keeps the runtime's default text.
+  effect("page", "init", JSON.stringify({ follow }));
+  const editor = follow ? null : doc.getElementById("editor");
+  // The widget pane is rendered by the runtime (`Web.InfoviewPage`); its host is
+  // `web/widgets.js`, which `playground-lsp.js` mounts into this element.
+  const widgetPane = doc.getElementById("widget-list");
+  app = startInfoview({
+    editor,
+    widgetPane,
+    follow,
+    config: endpoint,
+    uri: follow ? null : undefined,
+    squiggles: false,
+    completions: false,
+    rules,
+    document: doc,
+    update: (kind, a, b) => effect("panel", kind, b === "" ? a : b),
+    onRender: (view) => {
+      if (view.position) {
+        effect("page", "position",
+          `${view.position.line + 1}:${view.position.character + 1}`);
+      }
+    },
+  });
+  if (app && follow) {
+    const client = app.client();
+    if (client) {
+      client.on("wiz/infoview/cursor", (p) => {
+        if (!p || !p.textDocument || !p.position) return;
+        app.goTo(p.textDocument.uri, p.position);
+      });
+    }
   }
-  post("open", uri + "\n" + editor.value);
-  opened = true;
-  onCursor();
+  return app;
 }
-start().catch((e) => setStatus("failed: " + e));
+
+if (typeof document !== "undefined") startPage();

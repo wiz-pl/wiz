@@ -2,9 +2,10 @@
 #
 # Runs on `master` (the integration branch, with the solutions in it) and on pull
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
-# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and published to Cachix;
-# the test shards substitute those store paths instead of rebuilding (no Lake build and
-# no `.lake` Actions cache on the critical path). The exercise tree
+# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and a push to master
+# publishes it to the trusted Cachix cache (a pull request publishes only to its own
+# untrusted PR cache); the test shards substitute those store paths instead of rebuilding
+# (no Lake build and no `.lake` Actions cache on the critical path). The exercise tree
 # (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
 # `exercise tree` job, which must pass before anything is published (it still builds
 # with Lake, as does the weekly fixpoint).
@@ -28,26 +29,42 @@ on:
         type: boolean
         default: false
 
-# A newer push supersedes an older run of the same ref (saves runners): on a pull
-# request, and on master too, where merges come in quick succession and every run
-# tests everything merged so far (the newest run covers the older commits' changes;
-# nightly.yml then moves to the newest green commit; release.yml has its own rule). A
-# merge queue entry has a ref of its own (gh-readonly-queue/master/pr-N-SHA) and is
-# never cancelled by this rule (the queue cancels it when the entry leaves the queue);
-# a manual run has a group of its own.
+# Concurrency: one group per ref, except that a push to master carries its commit sha
+# (and a manual run its id) so no run ever cancels or replaces another:
+#   * pull_request: a newer commit on the same PR supersedes the old head, and the old
+#     head can no longer merge, so cancelling it is genuinely safe (and shortens the
+#     single-runner queue). Merging master into the branch restarts the run: that is the
+#     one case where in-flight work is discarded.
+#   * push to master: NOT cancelled. Every master commit needs its own complete run:
+#     nightly.yml moves `nightly` only to a commit whose CI passed, and release.yml
+#     publishes a snapshot for every commit (review ci-04/ci-06). The sha in the group
+#     also stops GitHub from replacing a *pending* run with a newer push.
+#   * merge_queue: its own ref (gh-readonly-queue/master/pr-N-SHA); the queue cancels the
+#     entry when it leaves the queue, never this rule.
+#   * schedule: the weekly fixpoint has its own group (`-fixpoint`) and is never cancelled
+#     by a merge.
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' && 'fixpoint' || 'checks' }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
-  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}-${{ github.event_name == 'schedule' && 'fixpoint' || 'checks' }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege: this workflow only reads the repository. The Cachix push uses the
+# CACHIX_AUTH_TOKEN secret (not a token permission); `deploy-docs` asks for its own
+# pages/id-token below, the only job that needs either.
 permissions:
   contents: read
 
 env:
-  # The Cachix binary cache (empty: none, everything comes from cache.nixos.org). Pushing
-  # to it needs the repository secret CACHIX_AUTH_TOKEN; without the secret (pull
-  # requests from forks) it is pull-only, and those shards rebuild what the build job
-  # could not publish.
+  # The trusted Cachix binary cache (empty: none, everything comes from
+  # cache.nixos.org). Only a push to master publishes to it; the jobs that pass a token
+  # to the setup action use it for substitution only (`skipPush: true`). A pull request
+  # publishes only to its own untrusted cache, named by the repository variable
+  # CACHIX_PR_NAME and authenticated by the secret CACHIX_PR_AUTH_TOKEN; without that
+  # token it publishes nothing, and its shards build the paths themselves. See
+  # docs/ci-runner.md, "Which cache is trusted".
   CACHIX_NAME: badlydrawnwizards
+  # The PR cache's name comes from repository settings (CACHIX_PR_NAME), never a literal
+  # here: it is untrusted and must never be added to trusted-public-keys.
+  CACHIX_PR_NAME: ${{ vars.CACHIX_PR_NAME }}
   # Lake's artifact cache (enableArtifactCache in lakefile.lean) inside .lake rather than
   # under the elan toolchain. Only the jobs that still run Lake use it: the weekly
   # fixpoint (and release.yml, which has its own workflow).
@@ -59,21 +76,28 @@ defaults:
 
 jobs:
   # Path filters: which jobs a pull request needs (scripts/ci.py changes; the shards'
-  # "inputs" in .github/test-shards.json). A docs-only PR builds no shard and runs no
-  # test, but it does check the documentation's Wiz examples (docs_examples); a PR
-  # touching only lib/ files no core test reads skips the core shard; the selfhost
-  # shards run for selfhost/ and the lib/ files it imports. Everything but a
-  # pull_request (pushes, the merge queue, manual runs) runs every job.
+  # "inputs" in .github/test-shards.json, and `web/*` for the web job). A docs-only PR
+  # builds no shard and runs no test, but it does check the documentation's Wiz examples
+  # (docs_examples); a PR touching only lib/ files no core test reads skips the core
+  # shard; the selfhost shards run for selfhost/ and the lib/ files it imports. An
+  # STC-only PR (`STC.lean`, `STC/`) builds no shard either: it runs the `stc` job, which
+  # is the only thing that typechecks the metatheory.
+  # Everything but a pull_request (pushes, the merge queue, manual runs) runs every job.
   changes:
     name: changes
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # 5 min: a checkout and one `git diff`; no build
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.filter.outputs.code }}
       docs: ${{ steps.filter.outputs.docs }}
+      web: ${{ steps.filter.outputs.web }}
+      # `STC.lean` or `STC/`: the `stc` job (the metatheory library nothing else imports)
+      stc: ${{ steps.filter.outputs.stc }}
       shards: ${{ steps.filter.outputs.shards }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 2 # a pull request's merge commit and its first parent (the base)
       - name: What changed
@@ -89,37 +113,96 @@ jobs:
           cat "$GITHUB_OUTPUT"
 
   # (seconds, no build) Documentation style: no authoring-environment paths, no
-  # agent roles and no status checkmarks (scripts/check-docs-style.py). Runs on
-  # every pull request too, including docs-only ones, which build and test skip.
+  # agent roles and no status checkmarks (scripts/check-docs-style.py), and every
+  # relative link and anchor in the docs resolves (scripts/check-doc-links.py;
+  # external links are reported but not fetched). The same job runs the quadratic-shape
+  # lint on the pull request's changed `.lean`/`.wiz` lines only
+  # (scripts/check-complexity --diff HEAD^1), so a new append-in-loop or eraseDups fails
+  # a PR before the build starts. A bounded site is excused inline, on the line or the
+  # line above it (`-- complexity: ok (why it is bounded)`); there is no allowlist file.
+  # Runs on every pull request too, including docs-only ones, which build and test skip.
   docs_style:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # 5 min: four Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2 # the diff base for scripts/check-complexity
       - name: Check the docs, and the checker's fixtures
         shell: bash
         run: |
           python3 scripts/check-docs-style.py --self-test
           python3 scripts/check-docs-style.py
+          python3 scripts/check-doc-links.py --self-test
+          python3 scripts/check-doc-links.py --quiet
+          python3 scripts/check-complexity --self-test
+          python3 scripts/check-complexity --diff HEAD^1
+          python3 scripts/check-name-collisions.py --self-test
+          python3 scripts/check-name-collisions.py --quiet
+          python3 scripts/check-names.py --self-test
+          python3 scripts/check-names.py --quiet
+          scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
+
+  # (seconds, no build) The self-hosted frontend's prelude (`preludeText`,
+  # selfhost/Frontend.wiz) is a hand-written subset of lib/Prelude.wiz. The playground
+  # compiles that frontend, so a name added to lib/Prelude.wiz but not to the embedded
+  # copy is invisible on the page and a new `selfhost-libdiff` gap. This ratchets the
+  # surface (coverage, no invented names, reviewed exceptions); the script's docstring
+  # says what is and is not compared.
+  prelude_drift:
+    name: prelude drift
+    needs: changes
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # 5 min: two Python checks on the checkout; no build
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Check the embedded prelude's surface
+        shell: bash
+        run: |
+          python3 scripts/check-prelude-drift.py --self-test
+          python3 scripts/check-prelude-drift.py
+
+  # (seconds, no build) The strict half of the name-collision check: a global group is
+  # reported only when two of its declarations can share a transitive importer, i.e.
+  # can be loaded in one program. The broad project-wide run lives in docs_style; its
+  # baseline records the groups that are independent programs today
+  # (scripts/check-name-collisions.py, .github/name-collisions-baseline.json).
+  # One extra first-wave job: the check is <1 s, so it holds a concurrency slot for
+  # roughly a checkout's minute and delays a queued job by that, not by a shard's build.
+  name_collisions_reachable:
+    name: name collisions (reachable)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # 5 min: one Python check on the checkout; no build (the check takes <1 s)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Reachable global name collisions
+        shell: bash
+        run: python3 scripts/check-name-collisions.py --reachable --quiet
 
   # The Wiz snippets in docs/**/*.md (scripts/check-docs-examples.py). A docs-only
   # pull request has no `build` job, so this one substitutes `wiz` from Cachix (the
-  # same store path `build` publishes) and checks the snippets. A pull request that
-  # changes code runs the same check in `build`, after the build it already has.
+  # same store path `build` publishes) and checks the snippets. A pull request reads
+  # the trusted cache anonymously; it never gets its auth token.
   docs_examples:
     name: docs examples
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'false' && needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
+    # 30 min: substitute wiz from Cachix, then the snippet check (a cache miss rebuilds)
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
           lean: false
       - name: Cache key
         id: key
@@ -136,7 +219,7 @@ jobs:
           "$wiz/bin/wiz" --version
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -146,6 +229,42 @@ jobs:
         run: |
           python3 scripts/check-docs-examples.py --self-test
           python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
+
+  # (seconds, no build) The source tarball and the release supply-chain artifacts
+  # (scripts/source-tarball.py, scripts/release-sbom.py, docs/building.md): two builds
+  # in different directories and environments are byte-identical, the manifest matches
+  # the archive, SOURCE_DATE_EPOCH changes only the metadata, and the SBOM/provenance
+  # parse, match every digest and are byte-identical on a second run. The Nix target
+  # (.#release-tarball) is checked with `nix build --rebuild` in the `build` job.
+  source-tarball:
+    name: source tarball
+    needs: changes
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Two builds are identical, and the manifest matches
+        shell: bash
+        run: scripts/test-source-tarball.sh
+      - name: SBOMs and provenance parse, match every digest, and are deterministic
+        shell: bash
+        run: python3 scripts/test_release_sbom.py -v
+
+  # (seconds, no build) Manifest canonicalization, DSSE/Ed25519 signing and
+  # quote verification (scripts/attest).  The unit tests generate a throwaway
+  # ssh-keygen key, use a stub tpm2_checkquote, and need no TPM, no Wiz build,
+  # no committed private key and no network.
+  attest:
+    name: attestation verifier
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test the statement signing, manifest format and verifier
+        shell: bash
+        run: python3 -m unittest discover -s scripts/attest/tests -v
 
   build:
     name: build
@@ -164,12 +283,13 @@ jobs:
       wiz: ${{ steps.nix.outputs.wiz }}
       tests: ${{ steps.nix.outputs.tests }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          # empty in pull requests from forks: Cachix is then pull-only
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token: pulls, merge-queue runs and
+          # dispatch read the public cache anonymously.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
           # no Lake here: nixpkgs' Lean builds the packages (elan is only for the
           # fixpoint)
           lean: false
@@ -182,9 +302,10 @@ jobs:
       - name: nix build (wiz, grail and the test driver)
         id: nix
         run: |
-          # One build for every job: the shards substitute these store paths from Cachix
-          # (on this repository's branches, which have the push token). `packages.wiz` is
-          # the default package; `packages.tests` is the test driver, from the same build.
+          # One build for every job: the shards substitute these store paths (master's
+          # from the trusted cache; a pull request's from its PR cache when published).
+          # `packages.wiz` is the default package; `packages.tests` is the test driver,
+          # from the same build.
           nix build .#wiz .#tests --no-link -L
           # No .#reference here: only the docs job reads it (and only on a push), and no
           # shard waits on it. That job builds it from this cached wiz, off this path.
@@ -195,34 +316,50 @@ jobs:
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
-      - name: The trusted base matches the baseline (before any shard runs)
-        # Fast fail: a ledger regression stops the run here, before the 1.8 GB Cachix
-        # push and before any test shard starts, and it reuses the store path this job
-        # already built instead of a separate job that builds again (~6 min).
+      - name: The source tarball is reproducible under Nix
+        # a second build in a different build directory, compared byte for byte
+        # (Nix 2.34 calls it --rebuild; older releases spell it --check)
         run: |
-          mkdir -p .lake/build/bin
-          ln -sf "${{ steps.nix.outputs.tests }}/bin/tests" .lake/build/bin/tests
-          scripts/trust-ledger.sh --check --strict-legacy
-          Tests/trust-ledger/run.sh
-          scripts/trust-ledger-merge_test.sh
-          python3 scripts/host-unsafe-ledger.py --check
-          Tests/host-unsafe-ledger/run.sh
-      - name: Publish the store paths to Cachix
-        # The shards substitute from here. Explicit (not the action's post-step) so that
+          nix build .#release-tarball -L --print-out-paths
+          nix build .#release-tarball --rebuild -L
+      - name: Publish the store paths to Cachix (master)
+        # Only a push to master writes the trusted cache; a pull request writes its own
+        # untrusted cache in the next step. Explicit (not the action's post-step) so that
         # exactly this commit's build is published, with the token only in this step's
-        # environment; fork pull requests have no secret and skip it (their shards build).
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        # environment; nothing on a pull request can reach the trusted token.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           if [ -z "$CACHIX_AUTH_TOKEN" ]; then
-            echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN: the store paths are not published"
+            # A push to master is the only run that publishes the trusted cache, so a
+            # missing secret means the cache stopped advancing (review ci-13): fail
+            # loudly instead of leaving the run green.
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          # .#reference is built by the docs job, not here (#460), so it is not pushed.
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
+            $(nix path-info .#wiz .#tests)
+      - name: Publish the store paths to the PR cache
+        # A pull request writes only its own untrusted cache, with its own token. If the
+        # repository variable or secret is absent (or this is a fork), nothing is
+        # published: the shards build the paths, and nothing falls back to the trusted
+        # cache or its token.
+        if: github.event_name == 'pull_request'
+        env:
+          CACHIX_PR_AUTH_TOKEN: ${{ secrets.CACHIX_PR_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_PR_NAME" ] || [ -z "$CACHIX_PR_AUTH_TOKEN" ]; then
+            echo "::warning title=Cachix::no CACHIX_PR_AUTH_TOKEN: the store paths are not published (set the CACHIX_PR_NAME variable and the CACHIX_PR_AUTH_TOKEN secret)"
             exit 0
           fi
-          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
+          nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
             $(nix path-info .#wiz .#tests)
       - name: Every test case is in exactly one shard
-        run: python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
+        run: |
+          python3 scripts/ci.py check-shards --self-test
+          python3 scripts/ci.py check-shards "${{ steps.nix.outputs.tests }}/bin/tests"
       - name: Shards
         id: shards
         run: |
@@ -242,7 +379,7 @@ jobs:
         # store path this job built (the `build` job has no Lake and no PATH entry).
         env:
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: scripts/grail-index-check.sh examples/grail-index
+        run: scripts/grail-index-check.sh examples/fate-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
         # built from a directory with no checkout, and grail starts
@@ -257,13 +394,28 @@ jobs:
       - name: Reproducibility (two absolute paths)
         # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
         # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
+        # The JSON is asserted, not discarded: a run-level skip is exit 2, and a skipped
+        # compiler comparison (this job does not pass --compiler) is a notice. The
+        # nightly repro workflow runs --compiler and requires it.
         env:
           WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
           GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
-        run: scripts/check-repro.sh --json
+        run: |
+          # `nix develop --command` does not export the shellHook's WIZ_LLC here, and a
+          # skipped LLVM comparison is now a failure (check-repro-report). Take it from
+          # the dev shell's PATH, which includes pkgs.llvm.
+          export WIZ_LLC="$(command -v llc)"
+          scripts/check-repro.sh --self-test
+          python3 scripts/check-repro-report.py --self-test
+          status=0
+          out="${RUNNER_TEMP:-/tmp}/repro.json"
+          scripts/check-repro.sh --json > "$out" || status=$?
+          cat "$out"
+          python3 scripts/check-repro-report.py "$out" || status=$?
+          exit $status
       - name: Restore the docs examples cache
         id: docs-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
@@ -277,10 +429,120 @@ jobs:
           python3 scripts/check-docs-examples.py --wiz "${{ steps.nix.outputs.wiz }}/bin/wiz"
       - name: Save the docs examples cache (master)
         if: steps.docs-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .lake/docs-examples
           key: docs-examples-${{ runner.os }}-${{ steps.key.outputs.compiler }}
+
+  # The trust ledger (scripts/trust-ledger.sh, .github/trust-baseline.tsv): every
+  # declaration of `lib/` (and the axiom-free example) goes through `#print axioms`, and a
+  # source of trust the reviewed baseline does not list fails the run, as does an expired
+  # row (`--strict-legacy` refuses the migration's sentinel reason/owner too).
+  #
+  # Its own job, not a step of `build`: the walk takes ~8 min and nothing the shards need
+  # waits on it, so `build` publishes the store paths and the matrix, the shards start,
+  # and this job runs beside them. It substitutes the test driver from Cachix (the store
+  # path `build` publishes) rather than rebuilding it; a fork pull request, whose `build`
+  # could not publish, builds it here (its shards build too). `result` requires the job
+  # when code changed, so it is still a gate, just not one on the critical path.
+  trust_ledger:
+    name: trust ledger
+    needs: build
+    runs-on: ubuntu-latest
+    # 75 min: the whole-lib walk (cold, when the elaboration cache misses) plus the
+    # fixture trees and the host-side ledger. A fork pull request has no Cachix token,
+    # so it builds the test driver here (~the build job's cold build) and then walks;
+    # this repository's pull requests substitute it from the PR cache.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # Only a push to master gets the trusted token: a pull request reads the
+          # trusted cache anonymously and adds its own untrusted cache instead.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
+          lean: false
+      - name: nix build (the test driver, from Cachix), and point .lake at it
+        id: nix
+        run: |
+          tests=$(nix build .#tests --no-link --print-out-paths)
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          du -sh "$tests"
+          # the ledger driver and the fixture scripts name `.lake/build/bin/tests`
+          mkdir -p .lake/build/bin
+          ln -sf "$tests/bin/tests" .lake/build/bin/tests
+      - name: Cache key
+        # The elaboration cache is keyed by the driver's bytes (every entry is mixed with
+        # `Cache.binaryId`, so another driver's entries are never read) and by the tree of
+        # `lib/` the walk reads; `restore-keys` stops at the binary, so a library change
+        # still restores the layers of unchanged modules.
+        id: key
+        shell: bash
+        run: |
+          bin=$(sha256sum "${{ steps.nix.outputs.tests }}/bin/tests" | cut -d' ' -f1)
+          printf 'cache=trust-cache-%s-%s-%s\n' "${{ runner.os }}" "$bin" "$(git rev-parse HEAD:lib)" >> "$GITHUB_OUTPUT"
+          printf 'prefix=trust-cache-%s-%s-\n' "${{ runner.os }}" "$bin" >> "$GITHUB_OUTPUT"
+      - name: Restore the elaboration cache
+        id: trust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake/trust-cache
+          key: ${{ steps.key.outputs.cache }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+      - name: The trusted base matches the baseline
+        # The elaboration cache: master writes the restored layer (content-addressed
+        # entries, from the same sources it checks; the save step publishes it). Every
+        # other run passes `--cache-ro` and only reads it, so a pull request or a
+        # merge-queue entry cannot change what the next run restores; a miss is then
+        # elaborated as in a cold run, not an error.
+        env:
+          TRUST_CACHE_MODE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '--cache' || '--cache-ro' }}
+        run: |
+          scripts/trust-ledger.sh --check --strict-legacy "$TRUST_CACHE_MODE" .lake/trust-cache
+          Tests/trust-ledger/run.sh
+          scripts/trust-ledger-merge_test.sh
+          python3 scripts/host-unsafe-ledger.py --check
+          Tests/host-unsafe-ledger/run.sh
+      - name: Save the elaboration cache (master)
+        if: steps.trust-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake/trust-cache
+          key: ${{ steps.key.outputs.cache }}
+
+  # The STC metatheory (`STC.lean`, `STC/`: ~5k lines, 226 theorems) is a separate Lake
+  # library, deliberately not a default target, and nothing else imports it. This is the
+  # only place it is typechecked: `build` is the Nix build of wiz/tests, and `STC/` is
+  # not in flake.nix's `unwrapped` fileset on purpose (that would rebuild the compiler on
+  # every STC edit). Its own job, off the critical path; `result` gates on it.
+  #
+  # It runs for an STC edit (the `stc` output of `scripts/ci.py changes`) and for any
+  # `code` change: a `lean-toolchain` or `lakefile.lean` bump can break the target
+  # without touching `STC/`. `scripts/check-stc.sh` builds `STC` and
+  # `STC.Prototype.Totality` (which is outside `STC.lean`'s import closure), requires an
+  # `.olean` for every `.lean` under `STC/` (so an unimported file cannot rot), and
+  # rejects `sorry`/`admit`/`axiom`. That script also holds the two deliberate breaks
+  # that prove this job can fail (`self-check`) and the job's cost.
+  stc:
+    name: STC metatheory
+    needs: changes
+    if: github.event_name != 'schedule' && (needs.changes.outputs.stc == 'true' || needs.changes.outputs.code == 'true')
+    runs-on: ubuntu-latest
+    # 15 min: restore the elan toolchain, then ~5k lines and 226 theorems; a cold build
+    # is ~1–3 min, and a warm `.lake` (Actions cache misses, so a repeated run is cold
+    # too) is a little less. No wiz/grail/tests build, so nothing else waits on it.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          lean: true
+      - name: Typecheck STC, and check the proof is honest
+        run: scripts/check-stc.sh
 
   test:
     name: test (${{ matrix.shard.name }})
@@ -297,17 +559,23 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Only a push to master gets the trusted token: pulls, merge-queue runs and
+          # dispatch read the public cache anonymously.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          # A pull request adds its own untrusted cache as a second substituter for this
+          # job (its key is trusted here only); master never adds it.
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           # the tower group's "from source" case runs Lake, so that one shard needs the
           # elan toolchain (the others run only the store's binaries)
           lean: ${{ contains(toJSON(matrix.shard), 'tower') }}
-      # The build job's store paths, substituted from Cachix (same os/arch). A fork pull
-      # request has no push token, so its build job could not publish them and this
-      # builds them again here.
+      # The build job's store paths, substituted from Cachix (same os/arch): master's
+      # from the trusted cache, a pull request's from its PR cache when it was published.
+      # A fork, or a PR with no PR token, builds them again here.
       - name: nix build (the store paths, from Cachix)
         id: nix
         run: |
@@ -328,21 +596,27 @@ jobs:
       # What the suite builds from Wiz programs, kept between runs: the elaboration cache
       # (`--cache`, which the grail-selfhost test uses), grail's `.grail` (the test's
       # build of the self-hosted checker) and the self-hosted checker and compiler that
-      # Tests/Elab.lean compiles under /tmp. The elaboration cache's keys include the wiz
-      # binary's hash, but the test runner's grail key has a constant binary id and the
-      # /tmp programs a timestamp, so the key starts with the compiler's inputs and
-      # restore-keys never cross compilers; within one compiler, entries are
-      # content-addressed, so a partial hit (other Wiz files) is safe.
+      # Tests/Elab.lean compiles under /tmp. The /tmp programs are keyed by their source
+      # and the *driver's mtime only* (Tests/Elab.lean: `hash (prog ++ stamp)`), and a
+      # Nix store path's mtime is a constant, while the libraries they are compiled
+      # against (`lib/Prelude.wiz`, `lib/IO.wiz`, `lib/Std.wiz`, `lib/Sys.wiz`) are read
+      # from the working tree at build time. So the cache key carries those inputs too:
+      # `selfhost/*.wiz` (the tables are `selfhost/Tables.wiz`) and `lib/*.wiz`, on top
+      # of the compiler inputs (`compiler-key`). `restore-keys` stops at that hash, so a
+      # Prelude change never restores a checker built from the old one; entries restored
+      # under the same hash saw the same selfhost/lib sources, and both the elaboration
+      # cache and the selfhost programs' inputs are then identical or content-addressed,
+      # so a partial hit (other Wiz files) is safe.
       - name: Restore the Wiz build caches
         id: wiz-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/wiz
             .grail
             /tmp/wiz-selfhost-*
-          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('**/*.wiz') }}
-          restore-keys: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-
+          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-${{ hashFiles('**/*.wiz') }}
+          restore-keys: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-
       - name: tests -- ${{ matrix.shard.name }}
         env:
           SELECT: ${{ matrix.shard.select }}
@@ -351,28 +625,34 @@ jobs:
           mapfile -t sel <<< "$SELECT"
           mkdir -p logs ~/.cache/wiz
           du -sh ~/.cache/wiz .grail /tmp/wiz-selfhost-* 2>/dev/null || true
-          echo "tests -- --cache ~/.cache/wiz --jobs $JOBS ${sel[*]}"
+          # A shard without "jobs" gets no `--jobs`: the driver already runs one case at
+          # a time, and a case with an auto mode (`=selfhost-libdiff`) tells "not given"
+          # from "--jobs 1" (`Tests.caseJobsGiven`).
+          jobs=()
+          if [ -n "$JOBS" ]; then jobs=(--jobs "$JOBS"); fi
+          jobs_s="${jobs[*]-}"
+          echo "tests -- --cache ~/.cache/wiz ${jobs_s:+$jobs_s }${sel[*]}"
           # the Nix-built driver, exactly as `lake test -- …` would run it; every case's
           # time as JSON lines (scripts/ci.py summary and baseline read them)
-          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" --jobs "$JOBS" \
+          "${{ steps.nix.outputs.tests }}/bin/tests" --cache "$HOME/.cache/wiz" "${jobs[@]}" \
             --timings "logs/${{ matrix.shard.name }}.jsonl" \
             --shard "${{ matrix.shard.name }}" "${sel[@]}" 2>&1 | tee "logs/${{ matrix.shard.name }}.log"
       - name: Save the Wiz build caches
         if: always() && steps.wiz-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/wiz
             .grail
             /tmp/wiz-selfhost-*
-          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('**/*.wiz') }}
+          key: wiz-${{ runner.os }}${{ runner.arch != 'X64' && format('-{0}', runner.arch) || '' }}-${{ matrix.shard.name }}-${{ needs.build.outputs.compiler-key }}-${{ hashFiles('selfhost/*.wiz', 'selfhost/Tables.wiz', 'lib/*.wiz') }}-${{ hashFiles('**/*.wiz') }}
       - name: Summary
         if: always()
         run: |
           [ -f "logs/${{ matrix.shard.name }}.log" ] || exit 0
           shopt -s nullglob
           python3 scripts/ci.py summary "shard ${{ matrix.shard.name }}" logs/${{ matrix.shard.name }}.log logs/${{ matrix.shard.name }}.jsonl >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-log-${{ matrix.shard.name }}
@@ -381,24 +661,172 @@ jobs:
           # always uploaded (the `CI result` job sums them up), but kept briefly
           retention-days: 3
 
+  # (11s) The Wiz→wasm page modules as Nix derivations (`packages.wiz-web`,
+  # `packages.wiz-playground` and `packages.wiz-playground-ui`; flake.nix), built once
+  # here and published to Cachix. They used to be built inside `web`'s test step (95 % of
+  # its 608 s, with `wasm-opt -O2`'s 8–10 GiB peak as the tail that once reached 55 min)
+  # and again in every `docs` job on a push; both jobs now substitute these paths
+  # (`web/modules-from-store.sh`).
+  #
+  # It is not in `build`: a 10-minute wasm build there would sit on the shards' critical
+  # path. Here it runs beside the shards. It waits for `build` when that runs, so its
+  # `wiz` is a substitute (a web-only change skips `build` and leaves `wiz` unchanged, so
+  # that substitutes from Cachix too).
+  web_modules:
+    name: wasm modules
+    needs: [changes, build]
+    if: >-
+      !cancelled() && needs.changes.outputs.web == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    # one cold module (~10 min: the playground engine) or seconds on a Cachix hit.
+    # 75, not 45: run 44795685025 hit the 45-minute limit after 45m15s on a cold
+    # Cachix miss (the nix build of both derivations), and GitHub reports a timed-out
+    # job as "The operation was canceled." — the annotation is the timeout.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # Only a push to master gets the trusted token. A pull request reads the trusted
+          # cache anonymously and instead adds the untrusted PR cache, which is where the
+          # `build` job publishes `wiz`/`wiz-unwrapped`: without it every web derivation
+          # rebuilt `wiz-unwrapped` from source (the cold 45-minute miss).
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
+          lean: false
+      - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
+        id: nix
+        run: |
+          # They share `wiz`, the emscripten closure and mini-gmp; the playground engine is
+          # the expensive one (`--opt 1` in flake.nix, because `wasm-opt`'s -O2 peak does
+          # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
+          # `wiz` and emscripten are substitutes.
+          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
+          web=$(nix path-info .#wiz-web)
+          playground=$(nix path-info .#wiz-playground)
+          ui=$(nix path-info .#wiz-playground-ui)
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "playground=$playground" >> "$GITHUB_OUTPUT"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+          echo "wiz-web: $web"; echo "wiz-playground: $playground"; echo "wiz-playground-ui: $ui"
+          du -sh "$web" "$playground" "$ui"
+      - name: Publish the store paths to Cachix
+        # `web` and `docs` substitute these; the same token rule as the compiler's push.
+        # A fork pull request has no secret: its jobs build the modules themselves.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            if [ "${{ github.event_name }}" = pull_request ]; then
+              echo "::warning title=Cachix::no CACHIX_AUTH_TOKEN (a pull request): the modules are not published"
+              exit 0
+            fi
+            echo "::error title=Cachix::CACHIX_AUTH_TOKEN is empty on a run that must publish"
+            exit 1
+          fi
+          nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
+            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui)
+
+  # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
+  # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
+  # runs its browser-free half on the two modules `web_modules` built: the search box,
+  # the benchmark page and site check, the playground's language client and self-hosted
+  # server shim (against stubs), the infoview's and playground's modules under Node, and a
+  # `wiz doc` page's module. `WIZ_WEB_NO_BROWSER` stops it before the Chromium half
+  # (`web/chrome_test.mjs` and `web/doc_chrome_test.mjs`: a served page over the DevTools
+  # protocol), which still needs a browser and stays local. The framework's browser half
+  # is a Node DOM double (`web/framework/test.sh`), so it runs here too. This job is in
+  # `result`: a missing module or a failing web test fails `CI result`.
+  web:
+    name: web
+    # Ordered behind `build` when it runs, so `nix build .#wiz` substitutes this commit's
+    # store path from Cachix instead of rebuilding it here (and instead of competing with
+    # the build for the runner). A web-only change skips `build` (`code` is false), which
+    # must not skip this job — hence the explicit result check rather than a bare `needs`.
+    needs: [changes, build, web_modules]
+    if: >-
+      !cancelled() && needs.changes.outputs.web == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      needs.web_modules.result == 'success'
+    runs-on: ubuntu-latest
+    # 20 min: the Node tests (~1 min) and slack; the Wasm builds are `web_modules`' job
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          # Only a push to master gets the trusted token: a pull request reads the
+          # trusted cache anonymously and adds its own untrusted cache instead (its
+          # `build` publishes there when the PR changed code).
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
+          lean: false
+      - name: nix build (wiz, from Cachix)
+        id: nix
+
+        run: |
+          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          du -sh "$wiz"
+      - name: The Wasm modules (from Cachix; web_modules built them)
+        id: modules
+        env:
+          # only the fork-pull-request fallback in the script reads it
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: sh web/modules-from-store.sh
+      - name: The browser-free half of web/test.sh
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          WIZ_WEB_NO_BROWSER: "1"
+          # the module directories, copied into web/test.sh's OUT (no build)
+          WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
+          WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
+          WIZ_PLAYGROUND_UI_FROM: ${{ steps.modules.outputs.ui }}
+        run: sh web/test.sh
+      - name: The React framework's browser half (a Node DOM double)
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: sh web/framework/test.sh
+      - name: The playground's output pane as a Loom component
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+        run: sh web/playground-loom-test.sh
+
   # (11s) The published site, as the artifact `wiz-docs`: on master only (a push), kept
   # 3 days (artifact storage). The tree is the landing page at the root, the standard
   # library's documentation (`wiz doc`, scroll) under `docs/`, and the static playground
   # under `playground/`; the two Wasm modules make the docs' signatures interactive and
-  # run the playground. Not a required check (not in `result`); `deploy-docs` publishes
-  # it to GitHub Pages on the same push (docs/building.md, "Documentation site").
+  # run the playground. This job *is* in `result` for a push, so a site that does not
+  # build or check is red on master (review ci-02); on a pull request it is skipped and
+  # `result` accepts that. `deploy-docs` publishes it to GitHub Pages on the same push
+  # and stays outside `result`: a Pages outage is not a defect in the commit
+  # (docs/building.md, "Documentation site").
   docs:
     name: docs (wiz doc --lib + site)
-    needs: build
+    needs: [build, web_modules]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # 45 min: `wiz doc --lib` and the site, with wiz and both Wasm modules substituted
+    # (`web_modules`). Without an elaboration cache for this binary `wiz doc --lib` is
+    # the bulk of the job (10-19 min in recent runs); the restored cache below replays it
+    # in ~2-4 min.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
-          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Same cache rule as the wasm job: the PR cache carries `wiz`; the trusted
+          # token is for a master push only.
+          cachix-token: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
+          cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
       - name: nix build (wiz, from Cachix)
         id: nix
@@ -406,17 +834,87 @@ jobs:
           wiz=$(nix build .#wiz --no-link --print-out-paths)
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
-      - name: The Wasm modules (web/build.sh, web/build-playground.sh)
+      - name: Cache key (the elaboration cache's own namespace)
+        id: key
+        shell: bash
+        run: |
+          # The cache is namespaced by the running binary: entry names mix in `binaryId`
+          # (a 64-bit hash of the executable's bytes, Wiz/Cache.lean) and manifests its
+          # SHA-256 (`toolchainTag`). So an identical build of the same source has the
+          # same namespace and hits, and a changed binary misses by construction.
+          # `$wiz/bin/wiz` is a makeWrapper script (its text embeds the store path);
+          # the file it execs is the ELF below, and its sha256 is that namespace.
+          elf="${{ steps.nix.outputs.wiz }}/share/wiz/.lake/build/bin/wiz"
+          compiler=$(sha256sum "$elf" | cut -d' ' -f1)
+          # The documented sources decide which entries exist: a changed lib/ saves a new
+          # snapshot, and the restore prefix (below) still serves the unchanged modules.
+          sources=$(git rev-parse HEAD:lib)
+          echo "compiler=$compiler" >> "$GITHUB_OUTPUT"
+          echo "cache=wiz-doc-v1-${{ runner.os }}-$compiler-$sources" >> "$GITHUB_OUTPUT"
+          echo "cache: wiz-doc-v1-${{ runner.os }}-$compiler-$sources"
+      - name: Restore the elaboration cache (a read-only layer)
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # `wiz --cache-ro` (a layer wiz only reads): the job cannot corrupt it, and a
+          # miss repopulates the write cache, which this run publishes below.
+          path: .wiz-doc-cache/ro
+          key: ${{ steps.key.outputs.cache }}
+          restore-keys: wiz-doc-v1-${{ runner.os }}-${{ steps.key.outputs.compiler }}-
+      - name: The Wasm modules (copied from the derivations)
+        id: modules
         env:
-          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
+          # only the fork-pull-request fallback in the script reads it (this job is a push)
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: sh web/modules-from-store.sh
+      - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
+        env:
+          # the scripts copy what `web_modules` built instead of running Emscripten
+          WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
+          WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
         run: |
           sh web/build.sh web/out
           sh web/build-playground.sh web/out
       - name: wiz doc --lib
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
         run: |
-          "${{ steps.nix.outputs.wiz }}/bin/wiz" doc --lib -o doc-site/docs --web web/out \
-            --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/"
+          # --cache-ro: wiz reads the restored layer and never writes it; this run's misses
+          #   go to `.wiz-doc-cache/write`, published as the next run's layer.
+          # --cache-verify off: the layer is this workflow's own, and the entries are
+          #   content-keyed (the binary hash plus each module's text); the manifest check
+          #   would additionally bind them to the toolchain tag, which embeds the store
+          #   paths of cc/llc and so needlessly invalidates a rebuild with the same ELF.
+          #   The store's own `share/wiz/cache` layer (the wrapper's default) is read too.
+          # --jobs 4: modules elaborate and render four at a time. The output is
+          #   byte-identical to `--jobs 1` (245 files SHA-256-equal at jobs 1 and 4), and
+          #   the warm run drops from ~333 s to ~162 s.
+          mkdir -p .wiz-doc-cache/write .wiz-doc-cache/ro
+          "$WIZ" doc --lib --jobs 4 -o doc-site/docs --web web/out \
+            --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/" \
+            --cache .wiz-doc-cache/write --cache-ro .wiz-doc-cache/ro \
+            --cache-verify off
           ls doc-site/docs | head -50
+      - name: Publish this run's entries as the read-only layer (a miss)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          # A hit needs nothing: the layer then serves every entry (checked: a warm run
+          # leaves no .wizc in the write cache). A miss repopulates it.
+          mkdir -p .wiz-doc-cache/ro
+          cp -a .wiz-doc-cache/write/. .wiz-doc-cache/ro/
+          # (the memo names the runner's store path; one hash of the binary per run)
+          rm -rf .wiz-doc-cache/ro/bin
+          find .wiz-doc-cache/ro -name '*.tmp*' -delete
+          ls .wiz-doc-cache/ro | wc -l
+          du -sh .wiz-doc-cache/ro
+      - name: Save the elaboration cache
+        # a cache quota or upload failure must not fail the site
+        continue-on-error: true
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .wiz-doc-cache/ro
+          key: ${{ steps.key.outputs.cache }}
       - name: The reference manual's Markdown (nix build .#reference)
         # Built here, not in the `build` job: this is the only consumer, and only a push
         # runs this job, so it is off the shards' critical path. It is generated from the
@@ -428,7 +926,7 @@ jobs:
         run: sh web/build-site.sh doc-site web/out
       - name: The site has its three entry points and the landing's links resolve
         run: sh web/check-site.sh doc-site
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wiz-docs
           path: doc-site
@@ -456,6 +954,7 @@ jobs:
     needs: docs
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # 10 min: upload the artifact and deploy it; no build
     timeout-minutes: 10
     permissions:
       contents: read
@@ -472,33 +971,38 @@ jobs:
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wiz-docs
           path: doc-site
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: doc-site
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   # One check for branch protection, and the whole suite's summary.
   result:
     name: CI result
-    needs: [changes, docs_style, docs_examples, build, test]
+    # `docs` is wanted on a push only (it is push-only): making it a need here is what
+    # makes a broken site red on master (review ci-02). It is skipped on a pull request
+    # and on a merge-queue entry, where `check` below accepts `skipped`.
+    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, build, trust_ledger, stc, test, web_modules, web, docs]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # 10 min: download the logs, the summary, the skip lint and the balance check
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           sparse-checkout: |
             scripts
             .github
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           pattern: test-log-*
@@ -531,7 +1035,7 @@ jobs:
             exit 1
           fi
           python3 scripts/ci.py check-skips "${logs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
         with:
           name: test-timings
@@ -558,7 +1062,7 @@ jobs:
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
@@ -567,16 +1071,29 @@ jobs:
       - name: Verdict
         shell: bash
         run: |
-          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, shards: ${{ needs.changes.outputs.shards }})"
+          echo "changes: ${{ needs.changes.result }} (code: ${{ needs.changes.outputs.code }}, docs: ${{ needs.changes.outputs.docs }}, web: ${{ needs.changes.outputs.web }}, stc: ${{ needs.changes.outputs.stc }}, shards: ${{ needs.changes.outputs.shards }})"
           echo "docs style: ${{ needs.docs_style.result }}"
+          echo "prelude drift: ${{ needs.prelude_drift.result }}"
           echo "docs examples: ${{ needs.docs_examples.result }}"
-          echo "build: ${{ needs.build.result }}, test: ${{ needs.test.result }}"
+          echo "source tarball: ${{ needs['source-tarball'].result }}"
+          echo "attestation: ${{ needs.attest.result }}"
+          echo "build: ${{ needs.build.result }}, trust ledger: ${{ needs.trust_ledger.result }}, stc: ${{ needs.stc.result }}, test: ${{ needs.test.result }}, wasm modules: ${{ needs.web_modules.result }}, web: ${{ needs.web.result }}, docs: ${{ needs.docs.result }}"
           # the path filter must have run; a job it skipped is not a failure, but outside
           # pull requests (and whenever the filter wants them) every job must succeed
           [ "${{ needs.changes.result }}" = success ] || exit 1
           code="${{ needs.changes.outputs.code }}"
           docs="${{ needs.changes.outputs.docs }}"
+          web="${{ needs.changes.outputs.web }}"
+          stc="${{ needs.changes.outputs.stc }}"
           want_tests=$([ "${{ needs.changes.outputs.shards }}" != "[]" ] && echo true || echo false)
+          # the metatheory library is checked for an STC edit and for any change to the
+          # default build (a toolchain or lakefile bump can break it too)
+          want_stc=false
+          if [ "$code" = true ] || [ "$stc" = true ]; then want_stc=true; fi
+          # the site is built and checked on every push (and only then); its failure is a
+          # real failure on master, so it is required there. `deploy-docs` stays out: a
+          # Pages outage is not a defect in the commit.
+          want_site=$([ "${{ github.event_name }}" = push ] && echo true || echo false)
           # a docs-only change has no build job, so `docs_examples` builds wiz and checks
           # the snippets; a code change runs the same check in `build`
           want_docs_examples=$([ "$code" = false ] && [ "$docs" = true ] && echo true || echo false)
@@ -585,9 +1102,22 @@ jobs:
             else [ "$2" = success ] || [ "$2" = skipped ] || { echo "$1: $2"; exit 1; }; fi
           }
           check "docs style" "${{ needs.docs_style.result }}" true
+          check "name collisions (reachable)" "${{ needs.name_collisions_reachable.result }}" true
+          check "prelude drift" "${{ needs.prelude_drift.result }}" true
           check "docs examples" "${{ needs.docs_examples.result }}" "$want_docs_examples"
+          check "source tarball" "${{ needs['source-tarball'].result }}" "$code"
+          check "attestation" "${{ needs.attest.result }}" true
           check build "${{ needs.build.result }}" "$code"
+          check "trust ledger" "${{ needs.trust_ledger.result }}" "$code"
+          check "STC metatheory" "${{ needs.stc.result }}" "$want_stc"
           check test "${{ needs.test.result }}" "$want_tests"
+          # the two page modules are a prerequisite of `web` (and of `docs` on a push):
+          # a failure here is red even though `web` then skips
+          check "wasm modules" "${{ needs.web_modules.result }}" "$web"
+          # a change to web/** must build the playground and pass its Node tests; the
+          # job is skipped (and that is fine) only when the filter does not want it
+          check web "${{ needs.web.result }}" "$web"
+          check docs "${{ needs.docs.result }}" "$want_site"
 
   # The three-stage bootstrap fixpoint (scripts/fixpoint.sh): stage-1 C = stage-2 C =
   # stage-3 C. Scheduled runs use the default branch (master). This weekly job stays on
@@ -597,9 +1127,10 @@ jobs:
     name: bootstrap fixpoint
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fixpoint)
     runs-on: ubuntu-latest
+    # 180 min: three self-hosting stages with Lake on ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -607,7 +1138,7 @@ jobs:
           # the fixpoint still builds with Lake (scripts/fixpoint.sh)
           lean: true
       - name: Cache the Lake build and the elaboration cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .lake

@@ -1,0 +1,116 @@
+import Hdl.AxiStream
+/-!
+# Hdl.AxiStreamLaw
+
+The obligations of the AXI4-Stream parts in `Hdl.AxiStream`, as Boolean checks over the
+value traces the example generates, plus the small lemmas the HDL model proves by
+computation.
+
+* `AxiStream.Law.Stable`: while a beat is offered and not accepted (`tvalid` high,
+  `tready` low), the whole source half of the beat is unchanged next cycle and `tvalid`
+  stays high. This is the source's obligation, checked over a finite source trace.
+* `AxiStream.Law.Order`: the sink's accepted payloads are exactly the payloads the
+  source handed over, same count, each once, in order. The example supplies that
+  expected sequence from the generator's own input-ready handshake, for the register
+  slice and both width converters (the converters group a fixed `ratio` of beats; see
+  the limits in `Hdl.AxiStream`).
+
+`examples/hdl-stream.wiz` calls `Stable` and `Order` on generated source/sink, slice and
+converter traces with a stalling sink, at the same time as it compares the value
+simulation, `Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**;
+the lemmas at the end are kernel-checked.
+-/
+
+------------------------------------------------------------------------------------
+-- Views of the beat and the accepted-beat sequence
+
+/-- `tvalid`. -/
+def AxiStream.Law.valid {ω dw : Nat} (b : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
+  BitVec.isTrue (AxiStream.Beat.unpack dw b).tvalid
+/-- `tready`. -/
+def AxiStream.Law.ready {ω dw : Nat} (b : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
+  BitVec.isTrue (AxiStream.Beat.unpack dw b).tready
+/-- `tlast`. -/
+def AxiStream.Law.last {ω dw : Nat} (b : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
+  BitVec.isTrue (AxiStream.Beat.unpack dw b).tlast
+/-- The beat is accepted this cycle: `tvalid && tready`. -/
+def AxiStream.Law.fire {ω dw : Nat} (b : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
+  Bool.and (AxiStream.Law.valid b) (AxiStream.Law.ready b)
+
+/-- The packed source half of a beat: `tdata`, `tlast`, `tkeep` and `tuser`, without the
+handshake bits. Two beats have the same payload exactly when these encodings are equal. -/
+def AxiStream.Law.payload {ω dw : Nat} (b : HwTy.El (AxiStream.Beat.code dw)) : Nat :=
+  let x := AxiStream.Beat.unpack dw b;
+  HwTy.pack (AxiStream.Tx.code dw) (AxiStream.Tx.pack dw
+    (AxiStream.Tx.mk (dw := dw) (r := HwTy.El) x.tdata x.tvalid x.tlast x.tkeep x.tuser))
+
+/-- The accepted payloads of a trace: one number per beat in a cycle with `tvalid` and
+`tready` both high. This is the sequence a sink observes. -/
+def AxiStream.Law.accepted {ω dw : Nat} :
+    List (HwTy.El (AxiStream.Beat.code dw)) → List Nat
+  | .nil => .nil
+  | .cons b bs =>
+    if AxiStream.Law.fire b then
+      List.cons (AxiStream.Law.payload b) (AxiStream.Law.accepted bs)
+    else AxiStream.Law.accepted bs
+
+
+/-- The Boolean form of `Stable`: a stalled beat is the same beat next cycle. -/
+def AxiStream.Law.StableStep {ω dw : Nat} (b b' : HwTy.El (AxiStream.Beat.code dw)) : Bool :=
+  Bool.or (Bool.not (Bool.and (AxiStream.Law.valid b) (Bool.not (AxiStream.Law.ready b))))
+    (Bool.and (AxiStream.Law.valid b')
+      (Nat.beq (AxiStream.Law.payload b') (AxiStream.Law.payload b)))
+
+/-- A conjunction of Booleans. -/
+def AxiStream.Law.allTrue : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (AxiStream.Law.allTrue bs)
+
+/-- `AxiStream.Law.Stable` on a finite beat trace: every adjacent pair holds a stalled
+beat unchanged. -/
+def AxiStream.Law.Stable {ω dw : Nat}
+    (bs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
+  AxiStream.Law.allTrue (Hdl.map (fun (t : Nat) =>
+    AxiStream.Law.StableStep
+      (Hdl.nthD (HwTy.unpack (AxiStream.Beat.code dw) 0) bs t)
+      (Hdl.nthD (HwTy.unpack (AxiStream.Beat.code dw) 0) bs (Nat.succ t)))
+    (Hdl.upto (Nat.sub (List.length bs) 1) 0))
+
+/-- The Boolean form of the order law: the sink's accepted payload sequence is exactly
+`expected`, in order. A beat lost, duplicated or reordered at the output fails it. The
+example supplies the payload sequence the generator actually accepted (its input-side
+`inReady` handshake), so this is the no-loss/no-duplication/order statement for the
+circuit under test. -/
+def AxiStream.Law.Order {ω dw : Nat} (expected : List Nat)
+    (outs : List (HwTy.El (AxiStream.Beat.code dw))) : Bool :=
+  Hdl.natsEq (AxiStream.Law.accepted outs) expected
+
+------------------------------------------------------------------------------------
+-- Kernel-checked lemmas
+
+/-- Nothing is accepted from an empty trace. -/
+def AxiStream.Law.accepted_nil {ω dw : Nat} :
+    AxiStream.Law.accepted (dw := dw) [] = [] := rfl
+
+/-- The keep of a byte-wide beat is one bit. -/
+def AxiStream.Law.keepW_8 : AxiStream.keepW 8 = 1 := rfl
+
+/-- The register slice starts empty. -/
+def AxiStream.Law.sliceInit_valid {ω dw : Nat} :
+    (AxiStream.sliceInit dw).valid = BitVec.ofNat 1 0 := rfl
+
+/-- The source starts with `n` beats left. -/
+def AxiStream.Law.sourceInit_left {ω n : Nat} :
+    (AxiStream.sourceInit n).left = BitVec.ofNat 16 n := rfl
+
+/-- The sink starts with no accepted beats. -/
+def AxiStream.Law.sinkInit_count {ω dw : Nat} :
+    (AxiStream.sinkInit dw).count = BitVec.ofNat 16 0 := rfl
+
+/-- The upsize starts with no beats accumulated. -/
+def AxiStream.Law.upInit_n {ω dw ratio : Nat} :
+    (AxiStream.upInit dw ratio).n = BitVec.ofNat 16 0 := rfl
+
+/-- The downsize starts idle. -/
+def AxiStream.Law.downInit_active {ω dw ratio : Nat} :
+    (AxiStream.downInit dw ratio).active = BitVec.ofNat 1 0 := rfl

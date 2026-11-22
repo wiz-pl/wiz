@@ -15,8 +15,20 @@ the same names and statements as Feral's lowering of `struct` (lib/Feral.wiz,
 `Fe.lensDefs`), so lowered code can use the deriver. The lenses are ordinary values:
 for an HDL bundle (`structure Tx (r : HwTy → Type)`) `Tx.lineL : Lens (Tx r) (r Bit)` is
 one lens at every representation, on values (proofs) and on wires (synthesis); see
-lib/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
-put would have to change the type). Design: wiz-notes/cohesion-hardware.md 2.2.
+hdl/src/Hdl/Optic.wiz. Fields whose types depend on earlier fields are not supported (a
+put would have to change the type). The profunctor layer (`lib/Optic.wiz`, `LensP`)
+reads and updates a derived lens through `LensP.ofLens` (`LensP.ofLens_view`/
+`LensP.ofLens_over` agree by `rfl`); the store form stays the derived data because the
+independence proofs (`S.f_g_indep`) and a returned borrow (`lib/Region.wiz`'s `Mut`) need
+it.
+
+Independence is not a store-only notion: `LensP.Indep` restates it on `view`/`over`
+(write one place, read the other; the two writes commute), and `LensP.ofLens_indep`
+turns a derived `S.f_g_indep` into exactly that hypothesis, so a hardware or UI frame
+proof can be stated at `P` without a second derivation. The deriver keeps emitting the
+store lens (Feral's contract and the `rfl` independence proofs are its callers); a
+profunctor-only consumer uses `S.fLP := LensP.ofLens S.fL` at the use site, which is
+definitionally the same optic. Design: wiz-notes/cohesion-hardware.md 2.2.
 -/
 
 /-- `{0 x : T} → rest` for the parameters (erased: a field's get and put never need them) -/

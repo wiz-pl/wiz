@@ -1,4 +1,6 @@
 
+#include <errno.h>
+
 /* a constructor value: a flat object ⟨tag f₁ … fₙ⟩, or just the tag without fields */
 static wiz_val wiz_con(uint32_t tag, uint32_t n, wiz_val *fields) {
   if (n == 0) return WIZ_BOX(tag);
@@ -13,6 +15,41 @@ static wiz_val wiz_field_ref(wiz_val v, uint32_t i) { /* borrowed */
 WIZ_API int wiz_in_bool(wiz_val v) { int b = (int)wiz_tag(v); wiz_dec(v); return b; }
 WIZ_API wiz_val wiz_out_bool(int b) { return wiz_con(b ? 1 : 0, 0, NULL); }
 
+/* ---- UTF-8 (one rule: `Bytes`, `String` at the C boundary, the interpreters and the
+   self-hosted runtime; docs/libraries.md, "Byte buffers") ----
+
+   The length of a sequence is the lead byte's top bits: 0xxxxxxx 1, 110xxxxx 2,
+   1110xxxx 3, 11110xxx 4; a byte that is none of those (10xxxxxx, 11111xxx) is not a
+   lead. A sequence is *valid* when its continuation bytes (10xxxxxx) are all there and
+   the scalar is not overlong (below 80, 800, 10000 for 2, 3, 4 bytes), not a surrogate
+   (D800 … DFFF) and at most 10FFFF. `Bytes.toUtf8` reports the offset of the lead byte
+   of the first invalid sequence; the C-string decoders cannot fail, so they write
+   U+FFFD for it and resume after the bytes the lead claimed (one for a non-lead). A
+   non-scalar code point is encoded as U+FFFD too, by every encoder. */
+
+/* the length a lead byte claims, and its low bits */
+static int wiz_utf8_span(unsigned char c, uint32_t *cp) {
+  if (c < 0x80) { *cp = c; return 1; }
+  if ((c >> 5) == 6) { *cp = c & 0x1F; return 2; }
+  if ((c >> 4) == 14) { *cp = c & 0x0F; return 3; }
+  if ((c >> 3) == 30) { *cp = c & 0x07; return 4; }
+  *cp = 0xFFFD; return 1; /* not a lead: 10xxxxxx, 11111xxx */
+}
+/* the scalar of `len` bytes at `p`, or U+FFFD if the sequence is not valid */
+static uint32_t wiz_utf8_scalar(int len, uint32_t cp, const unsigned char *p) {
+  for (int j = 1; j < len; j++) {
+    if ((p[j] & 0xC0) != 0x80) return 0xFFFD;
+    cp = (cp << 6) | (p[j] & 0x3F);
+  }
+  if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)) return 0xFFFD;
+  if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) return 0xFFFD;
+  return cp;
+}
+/* a code point as the encoders write it: a non-scalar value is U+FFFD */
+static uint32_t wiz_utf8_code(uint64_t c) {
+  return (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) ? 0xFFFD : (uint32_t)c;
+}
+
 /* String := String.mk (List Char), Char := Char.mk Nat; C strings are UTF-8 */
 WIZ_API char *wiz_in_string(wiz_val s) {
   size_t cap = 16, len = 0;
@@ -21,7 +58,7 @@ WIZ_API char *wiz_in_string(wiz_val s) {
   while (wiz_tag(l) == 1) {
     wiz_val ch = wiz_field_ref(l, 0);
     wiz_val cp = wiz_field_ref(ch, 0);
-    uint32_t c = WIZ_IS_SCALAR(cp) ? (uint32_t)WIZ_UNBOX(cp) : 0xFFFD;
+    uint32_t c = wiz_utf8_code(WIZ_IS_SCALAR(cp) ? (uint64_t)WIZ_UNBOX(cp) : 0xFFFD);
     if (len + 5 > cap) { cap *= 2; buf = (char *)realloc(buf, cap); }
     if (c < 0x80) buf[len++] = (char)c;
     else if (c < 0x800) { buf[len++] = 0xC0 | (c >> 6); buf[len++] = 0x80 | (c & 0x3F); }
@@ -34,18 +71,20 @@ WIZ_API char *wiz_in_string(wiz_val s) {
   return buf;
 }
 WIZ_API wiz_val wiz_out_string(const char *s) {
+  /* a C function may return NULL: `strchr`/`strstr`/`memchr` on a miss, `getenv` for an
+     unset variable, `realpath` on failure. `import_c` types `char *` as `String` (a C
+     header says nothing about nullability), so read NULL as "", like the struct-field
+     marshalling does (`C.lean`, `c.f ? c.f : ""`), `wiz_sys_getenv` below, and the
+     self-hosted runtime's `rt_out_str`. */
+  if (!s) s = "";
   /* decode UTF-8 into code points, then build the list from the end */
   size_t n = strlen(s), k = 0;
   uint32_t *cps = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
   for (size_t i = 0; i < n;) {
-    unsigned char c = (unsigned char)s[i];
-    uint32_t cp; int len;
-    if (c < 0x80) { cp = c; len = 1; }
-    else if ((c >> 5) == 6) { cp = c & 0x1F; len = 2; }
-    else if ((c >> 4) == 14) { cp = c & 0x0F; len = 3; }
-    else { cp = c & 0x07; len = 4; }
-    for (int j = 1; j < len && i + j < n; j++) cp = (cp << 6) | ((unsigned char)s[i + j] & 0x3F);
-    cps[k++] = cp;
+    uint32_t cp;
+    int len = wiz_utf8_span((unsigned char)s[i], &cp);
+    cps[k++] = i + (size_t)len > n ? 0xFFFD
+             : wiz_utf8_scalar(len, cp, (const unsigned char *)s + i);
     i += len;
   }
   wiz_val list = wiz_con(0, 0, NULL);
@@ -179,15 +218,36 @@ WIZ_API wiz_val wiz_array_set(wiz_val v, uint64_t i, wiz_val x) {
   return v;
 }
 
-/* ---- text ---- */
+/* ---- text ----
 
+   A `wiz_str` is an immutable value: there is no `cap` field, so the unused header
+   word stores the buffer's capacity in bytes (`wiz_hdr.size`, 0 when the capacity is
+   not known or exceeds the header's 32-bit word). `wiz_str_append` may then extend a
+   *unique* buffer in place, exactly as `wiz_bytes_push` does; a shared or aliased
+   string is copied first. The aliasing argument is the reference count: the caller
+   owns one reference (the language calls `wiz_str_append(a, b)` with both operands
+   consumed), so `WIZ_RC(a) == 1` means no other value can observe the buffer. `a == b`
+   is excluded even then, because `Str.append s s` passes the same object twice and
+   copying its bytes while they are read is only safe when the buffer is not realloc'd.
+   Capacity grows geometrically (`max(8, 2 * cap)`), which is what makes a loop of
+   appends amortised linear; a copy-on-share allocates the exact new length. */
+
+static size_t wiz_str_cap(wiz_str *t) {
+  size_t cap = t->h.size;
+  return cap ? cap : t->len; /* a capacity too large for the header is treated as exact */
+}
+static void wiz_str_set_cap(wiz_str *t, size_t cap) {
+  t->h.size = cap <= 0xFFFFFFFFu ? (uint32_t)cap : 0;
+}
 static wiz_val wiz_str_new(const char *s, size_t n) {
   wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + n + 1, WIZ_TAG_STR, 0);
   t->len = n;
+  wiz_str_set_cap(t, n);
   memcpy(t->data, s, n);
   t->data[n] = 0;
   return (wiz_val)t;
 }
+WIZ_API wiz_val wiz_str_empty(void) { return wiz_str_new("", 0); }
 WIZ_API wiz_val wiz_str_of_cstr(const char *s) { return wiz_str_new(s, strlen(s)); }
 WIZ_API const char *wiz_str_to_cstr(wiz_val v) {
   wiz_str *t = (wiz_str *)v;
@@ -197,13 +257,56 @@ WIZ_API const char *wiz_str_to_cstr(wiz_val v) {
   wiz_dec(v);
   return wiz_scratch;
 }
+/* append `n` bytes, growing the buffer in place when `v` is unique */
+static wiz_val wiz_str_grow(wiz_val v, size_t n) {
+  wiz_str *t = (wiz_str *)v;
+  size_t need = t->len + n;
+  if (need > wiz_str_cap(t)) {
+    size_t cap = wiz_str_cap(t);
+    if (cap < 8) cap = 8;
+    while (cap < need) cap *= 2;
+    t = (wiz_str *)wiz_xrealloc(t, sizeof(wiz_str) + cap + 1);
+    wiz_str_set_cap(t, cap);
+  }
+  return (wiz_val)t;
+}
 WIZ_API wiz_val wiz_str_append(wiz_val a, wiz_val b) {
   wiz_str *x = (wiz_str *)a, *y = (wiz_str *)b;
-  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + x->len + y->len + 1, WIZ_TAG_STR, 0);
-  t->len = x->len + y->len;
+  size_t n = y->len;
+  if (a != b && WIZ_RC(&x->h) == 1) {
+    /* unique and not self-append: no other value can see the buffer */
+    x = (wiz_str *)wiz_str_grow(a, n);
+    memcpy(x->data + x->len, y->data, n + 1);
+    x->len += n;
+    wiz_dec(b);
+    return (wiz_val)x;
+  }
+  size_t need = x->len + y->len;
+  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + need + 1, WIZ_TAG_STR, 0);
+  t->len = need;
+  wiz_str_set_cap(t, need);
   memcpy(t->data, x->data, x->len);
   memcpy(t->data + x->len, y->data, y->len + 1);
   wiz_dec(a); wiz_dec(b);
+  return (wiz_val)t;
+}
+WIZ_API wiz_val wiz_str_push(wiz_val v, uint64_t byte) {
+  if (WIZ_RC(&((wiz_str *)v)->h) == 1) {
+    v = wiz_str_grow(v, 1);
+    wiz_str *t = (wiz_str *)v;
+    t->data[t->len++] = (char)(unsigned char)byte;
+    t->data[t->len] = 0;
+    return v;
+  }
+  char c = (char)(unsigned char)byte;
+  wiz_str *x = (wiz_str *)v;
+  wiz_str *t = (wiz_str *)wiz_alloc(sizeof(wiz_str) + x->len + 2, WIZ_TAG_STR, 0);
+  t->len = x->len + 1;
+  wiz_str_set_cap(t, t->len);
+  memcpy(t->data, x->data, x->len);
+  t->data[x->len] = c;
+  t->data[x->len + 1] = 0;
+  wiz_dec(v);
   return (wiz_val)t;
 }
 WIZ_API uint64_t wiz_str_size(wiz_val v) { uint64_t n = ((wiz_str *)v)->len; wiz_dec(v); return n; }
@@ -741,26 +844,68 @@ WIZ_API wiz_val wiz_itab_of_list(wiz_val l) {
   return (wiz_val)t;
 }
 
-WIZ_API void wiz_io_write_file(const char *path, const char *text) {
-  FILE *f = fopen(path, "wb");
-  if (f) { fputs(text, f); fclose(f); }
+/* An `IO` call has no error channel, so a file operation that fails is reported on
+   standard error and the program stops with 1: it must not look like success. The stop
+   is clean (`wiz_clean_exit`, rt_core.inc): an armed boundary catches it, the native
+   CLI exits. */
+__attribute__((noreturn)) static void wiz_io_fail(const char *path, int e) {
+  fprintf(stderr, "wiz: %s: %s\n", path, strerror(e));
+  wiz_clean_exit(1);
 }
 
-/* files, for the library */
+/* `IO.writeFile`: the text as UTF-8 up to its first NUL (the `String` representation
+   ends there; `FS.writeBytes` is for binary data). A bad path, a full disk (a short
+   write, or `fclose` flushing the last buffer) is reported and stops the program. */
+WIZ_API void wiz_io_write_file(const char *path, const char *text) {
+  FILE *f = fopen(path, "wb");
+  int e = 0;
+  if (!f) e = errno;
+  else {
+    size_t n = strlen(text);
+    if (fwrite(text, 1, n, f) != n) e = errno ? errno : EIO;
+    if (fclose(f) < 0 && !e) e = errno;
+  }
+  if (e) wiz_io_fail(path, e);
+}
+
+/* `IO.readFile`: the whole file into the `wiz_scratch` buffer, as text up to the first
+   NUL. A path that does not exist reads as empty text: the library's callers (the
+   module loader's candidate paths) ask "is there a file here?" with a read, so absence is
+   an answer, and a missing file and an empty one look alike. Any other failure (a
+   directory, no permission, a read error, out of memory) is reported and stops the
+   program, as `IO.writeFile` does: it is not the empty text. `FS.readFile` in lib/Sys.wiz
+   is the variant with an `EIO` error channel. */
 WIZ_API const char *wiz_io_read_file(const char *path) {
   FILE *f = fopen(path, "rb");
+  int e = f ? 0 : errno;
   free(wiz_scratch);
   wiz_scratch = NULL;
-  if (!f) { wiz_scratch = (char *)calloc(1, 1); return wiz_scratch; }
+  if (!f) {
+    if (e == ENOENT) return wiz_scratch = (char *)wiz_xcalloc(1, 1);
+    wiz_io_fail(path, e);
+  }
   size_t cap = 1024, len = 0;
   wiz_scratch = (char *)malloc(cap);
+  if (!wiz_scratch) { fclose(f); wiz_io_fail(path, ENOMEM); }
   size_t n;
   while ((n = fread(wiz_scratch + len, 1, cap - len - 1, f)) > 0) {
     len += n;
-    if (len + 1 == cap) { cap *= 2; wiz_scratch = (char *)realloc(wiz_scratch, cap); }
+    if (len + 1 == cap) {
+      cap *= 2;
+      char *nb = (char *)realloc(wiz_scratch, cap);
+      if (!nb) {
+        free(wiz_scratch); wiz_scratch = NULL; fclose(f); wiz_io_fail(path, ENOMEM);
+      }
+      wiz_scratch = nb;
+    }
+  }
+  if (ferror(f)) e = errno ? errno : EIO; /* a read error is not the end of the file */
+  fclose(f);
+  if (e) {
+    free(wiz_scratch); wiz_scratch = NULL;
+    wiz_io_fail(path, e);
   }
   wiz_scratch[len] = 0;
-  fclose(f);
   return wiz_scratch;
 }
 
@@ -807,3 +952,13 @@ static __thread uint64_t wiz_proof_left = 0;
 WIZ_API int wiz_proof_start(uint64_t steps) { if (wiz_proof_on) return 0; wiz_proof_on = 1; wiz_proof_left = steps + 1; return 1; }
 WIZ_API int wiz_proof_tick(uint64_t x) { (void)x; if (!wiz_proof_on) return 1; if (wiz_proof_left <= 1) { wiz_proof_left = 0; return 0; } wiz_proof_left--; return 1; }
 WIZ_API int wiz_proof_end(uint64_t x) { (void)x; wiz_proof_on = 0; return wiz_proof_left > 0; }
+
+/* The kernel evaluator's per-command budget: one tick per structural elimination
+   (`vIndW`/`vSfix`/`vScase`), not per beta step. It is its own counter so a command's
+   budget does not make the proof read-back's `wiz_proof_*` budget run for ordinary
+   evaluation. */
+static __thread int wiz_kernel_on = 0;
+static __thread uint64_t wiz_kernel_left = 0;
+WIZ_API int wiz_kernel_start(uint64_t steps) { if (wiz_kernel_on) return 0; wiz_kernel_on = 1; wiz_kernel_left = steps + 1; return 1; }
+WIZ_API int wiz_kernel_tick(uint64_t x) { (void)x; if (!wiz_kernel_on) return 1; if (wiz_kernel_left <= 1) { wiz_kernel_left = 0; return 0; } wiz_kernel_left--; return 1; }
+WIZ_API int wiz_kernel_end(uint64_t x) { (void)x; wiz_kernel_on = 0; return wiz_kernel_left > 0; }

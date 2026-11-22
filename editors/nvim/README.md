@@ -97,7 +97,11 @@ require('wiz').setup {
     capabilities = nil,                -- merged into the defaults
     inlay_hints = false,               -- show binder types inline (0.10+)
     completion = 'auto',               -- Neovim's own LSP completion (0.11+), after `.` and on
-                                       --   <C-Space>: true | false | 'auto' (off with nvim-cmp/blink.cmp)
+                                       --   <C-Space>: true | false | 'auto' (off with nvim-cmp/blink.cmp);
+                                       --   on 0.10 sets 'omnifunc' (<C-x><C-o>) instead
+    keymaps = 'auto',                  -- K gd gD grn grr gra gO ]d [d <C-s>: 'auto' installs them
+                                       --   only on 0.10 (0.11+ has its own), true on every version
+                                       --   (a key the user mapped is never replaced), false never
     folding = false,                   -- fold with the server's ranges (0.11+)
   },
   abbreviations = {
@@ -129,7 +133,8 @@ require('wiz').setup {
 In Wiz buffers (normal mode): `<LocalLeader>i` toggles the infoview, `<LocalLeader>r`
 refreshes it, `<LocalLeader>b` is `:WizInfoviewBrowser`, `<LocalLeader>\` is
 `:WizAbbrev` (each with a `desc`, which which-key shows). The usual LSP keymaps (`K` hover,
-`gd`, `grn`, `gra`, `]d`, …) are Neovim's own.
+`gd`, `grn`, `gra`, `]d`, …) are Neovim's own on 0.11+; on 0.10 this plugin installs
+them (`lsp.keymaps`), and it never replaces a key you mapped yourself.
 
 What the server offers, and Neovim's keys for it:
 
@@ -137,7 +142,7 @@ What the server offers, and Neovim's keys for it:
 |---|---|
 | inlay hints (`lsp.inlay_hints`, or `:lua vim.lsp.inlay_hint.enable()`) | `: T` after a `fun`/`let` binder written without a type |
 | semantic tokens (on by default) | the keywords of the file's own syntax and of keyword-scoped DSLs, as `@lsp.type.keyword` |
-| completion (`lsp.completion`: pops up after `.`, `<C-Space>` in insert mode; else `<C-x><C-o>` or your completion plugin) | after `x.`: the fields of `x`'s type and the functions of its namespace (`p.norm` for `Point.norm p`); after `Nat.`: the names in `Nat`; where a term goes: the locals (with their types), then the globals whose type ends in the expected one; tactic names inside `by`, command keywords in column 0, a keyword-scoped DSL's keywords inside it; module names after `import` |
+| completion (`lsp.completion`: pops up after `.`, `<C-Space>` in insert mode; else `<C-x><C-o>` or your completion plugin) | after `x.`: the fields of `x`'s type and the functions of its namespace (`p.norm` for `Point.norm p`); after `Nat.`: the names in `Nat`; where a term goes: the locals (with their types), then the globals whose type ends in the expected one; tactic names inside `by`, command keywords in column 0, a keyword-scoped DSL's keywords inside it; module names after `import`. On 0.10 `omnifunc` is set, so `<C-x><C-o>` and `<C-Space>` work |
 | code actions (`gra`) | did you mean (an unknown identifier), add missing cases, add a type ascription, fill a hole `_`/`?x` from its expected type (a constructor `(.c ?x ?y)`, an anonymous constructor `⟨?px, ?py⟩`, `fun x => ?body`) |
 | signature help (`<C-s>` in insert mode) | the binders of the function being applied, the next explicit one highlighted |
 | references (`grr`), rename (`grn`) | a global's uses in the open files and the package's modules; a local's in its declaration. Rename refuses the toolchain's library |
@@ -224,7 +229,9 @@ editors/nvim/tests/run.sh          # or: lake test -- '=nvim'
 
 Headless Neovim with this plugin: abbreviations typed through insert mode (also one key
 at a time, in an embedded Neovim), a check that every non-ASCII character in `lib/*.wiz`
-has an abbreviation, and the infoview against the real `wiz lsp` on
+has an abbreviation, the LSP keymaps (installed on request, a user's mapping kept, `auto`
+leaving 0.11+ alone), the 0.10 completion fallback (`omnifunc` and `<C-Space>` with
+`vim.lsp.completion` removed), and the infoview against the real `wiz lsp` on
 `tests/fixture/Goals.wiz` (the goal after `intro n`, an expected type, highlights by
 kind, `K` on a subterm, following an edit). `WIZ` picks the executable (default: this
 checkout's `.lake/build/bin/wiz`); without `nvim` on `PATH` it is skipped (the dev shell

@@ -27,31 +27,10 @@ open Wiz
 
 namespace Tests.ScryC2Wil
 
-/-- Every `lib/*.wiz`, `lib/D/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
-by module name. The lowering lives in the scry package, so the test loader serves both
-roots. -/
-def loader : IO (Name → Option String) := do
-  let mut m : List (Name × String) := []
-  for e in ← System.FilePath.readDir "lib" do
-    if e.path.extension == some "wiz" then
-      m := (e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-    else if ← e.path.isDir then
-      for f in ← System.FilePath.readDir e.path do
-        if f.path.extension == some "wiz" then
-          m := (e.fileName ++ "." ++ f.path.fileStem.getD "", ← IO.FS.readFile f.path) :: m
-  for e in ← System.FilePath.readDir "scry/src/Scry" do
-    if e.path.extension == some "wiz" then
-      m := ("Scry." ++ e.path.fileStem.getD "", ← IO.FS.readFile e.path) :: m
-  pure fun n => m.lookup n
-
-/-- A C string literal for `s` (the escapes the Wiz lexer reads). -/
-def wizStr (s : String) : String :=
-  "\"" ++ s.foldl (fun acc c => acc ++ match c with
-    | '"' => "\\\""
-    | '\\' => "\\\\"
-    | '\n' => "\\n"
-    | '\t' => "\\t"
-    | c => c.toString) "" ++ "\""
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
+by module name: one loader for the suite (`Tests.scryLoader`). The lowering lives in the
+scry package, so the test loader serves both roots. -/
+def loader : IO (Name → Option String) := Tests.scryLoader
 
 /-- A fixture's C source and checked-in CST spill. -/
 def fixture (name : String) : IO (String × String) := do
@@ -169,6 +148,7 @@ def differential (name : String) : IO Unit := do
 def group : Group where
   name := "scry-c2wil"
   exercise := "Scry S2 (C to Wil, origins, CFG, facts)"
+  parallel := true
   cases := [
     { name := "differential: straight-line C (2 + 3 * 4) lowers and runs as compiled",
       run := fun _ => differential "straight" },
@@ -372,7 +352,25 @@ def group : Group where
           "    | _, _ => 999\n" ++
           "  | .none => 888\n"
         let outs ← wizEval "call" src cst body
-        checkEq ["2", "0", "0"] outs }
+        checkEq ["2", "0", "0"] outs },
+    { name := "block ids and indices: assemble orders by id and fills holes; zipIdx counts from 0",
+      run := fun _ => do
+        let body :=
+          "def blk (n : Nat) : Wil.Block := Wil.Block.mk .nil (.goto (Wil.mkBlockId n) Wil.noSpan)\n" ++
+          "def done : List (Nat × Wil.Block) := .cons (2, blk 2) (.cons (0, blk 0) .nil)\n" ++
+          "def asm : List Wil.Block := Scry.assemble 4 done\n" ++
+          "def target : Wil.Block → Nat\n" ++
+          "  | .mk _ t => match t with\n" ++
+          "    | .goto b _ => b.index\n" ++
+          "    | _ => 999\n" ++
+          "#eval List.map target asm\n" ++
+          "#eval List.map (fun p => p.1) (Scry.zipIdx (.cons 10 (.cons 20 (.cons 30 .nil))) 0)\n" ++
+          "#eval match Scry.assemble 2 .nil with\n" ++
+          "  | .cons a (.cons b .nil) => Nat.add (target a) (target b)\n" ++
+          "  | _ => 999\n"
+        let outs ← wizEvalRaw ("import Scry.Lower\nimport Text\n" ++ body)
+        checkEq [".cons 0 (.cons 999 (.cons 2 (.cons 999 .nil)))",
+                 ".cons 0 (.cons 1 (.cons 2 .nil))", "1998"] outs }
   ]
 
 builtin_initialize registerGroup group

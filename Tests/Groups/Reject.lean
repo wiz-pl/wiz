@@ -16,7 +16,9 @@ neighbours that must stay accepted, so the corpus cannot be gamed by over-reject
 `xfail:` cases are programs that should be rejected but are not (a `Tests.note` records
 why, and the case fails once the elaborator rejects them).
 
-`lake test -- '=reject'` runs the group.
+`lake test -- '=reject'` runs the group. The last cases run the experimental kernel flags
+(`--predicative-prop`, `--strict-privacy`) through the command line: they assert the
+verdict *and* the message, because the flag (not a `Globals` field) is what is under test.
 -/
 
 namespace Tests.RejectGroup
@@ -48,6 +50,7 @@ def privMod : String := "import Prelude\nprivate def secret : Nat := 42\ndef rev
 def group : Group where
   name := "reject"
   exercise := "negative corpus: soundness starts at rejection"
+  parallel := true
   cases := [
     -- universe and level escapes
     rejected "universe: Type : Type" "def X : Type := Type\n"
@@ -172,6 +175,14 @@ def group : Group where
       ("import Prelude\nmutual\ndef f : Nat → Nat\n  | n => g n\n" ++
        "def g : Nat → Nat\n  | n => f n\nend\n#check f\n"),
 
+    -- the cons notation: `::` is `List.cons`, whose tail must be a list
+    rejected "cons: the tail of `1 :: 2` is not a list"
+      (prelude ++ "def bad : List Nat := 1 :: 2\n")
+      none "2" "failed to synthesize an instance of OfNat (List Nat) 2",
+    rejected "cons: `1 :: (2 : Nat)` has a Nat tail"
+      (prelude ++ "def bad : List Nat := 1 :: (2 : Nat)\n")
+      (some "type-mismatch") "(2 : Nat)" "type mismatch",
+
     -- missing coverage
     rejected "coverage: match misses a constructor"
       "import Prelude\ndef f (b : Bool) : Nat := match b with\n  | .true => 1\n"
@@ -290,8 +301,8 @@ def group : Group where
        "inductive V (A : Type) : Nat → Type where\n" ++
        "  | nil : V A 0\n" ++
        "  | cons {n : Nat} (x : A) (xs : V A n) : V A (Nat.succ n)\n" ++
-       "  deriving BEq\n")
-      none "BEq" "indexed families are not supported",
+       "  deriving Inhabited\n")
+      none "Inhabited" "indexed families are not supported",
     rejected "deriving: Inhabited of a recursive type"
       ("import Deriving\ninductive I where\n  | more (i : I)\n  deriving Inhabited\n")
       none "Inhabited" "every constructor of I is recursive",
@@ -328,6 +339,39 @@ def group : Group where
        "#eval (forge (Look.mk 11)).val\n")
       (some "private") "G.mk x" "hidden outside its module"
       [("Priv", privMod)],
+    -- (13b) the message shows the hole, the guess and both types, as a type mismatch does
+    rejected "opaque: a forging guess shows the hole, the guess and both types"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" "(implicit argument F)\n  expected: "
+      [("Priv", privMod)],
+    rejected "opaque: a forging guess names the guess"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" "\n  guess: G\n  its type: "
+      [("Priv", privMod)],
+    -- (#412) the reason comes first, with the hole named by what it was made for
+    rejected "opaque: a forging guess leads with the reason and names the hole"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x"
+      ("the implicit argument F can't be G: the two types agree only through the definition " ++
+       "of Pos (module Priv), hidden outside its module")
+      [("Priv", privMod)],
+    -- (#412) the free variables are shown by their names (the hole is applied to `x`), not as `#0`
+    rejected "opaque: a forging guess names the free variables"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+       "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+       "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n")
+      (some "private") "G.mk x" " x (implicit argument F)\n  expected: Pos Nat → Type\n"
+      [("Priv", privMod)],
     accepted "accept: a module's own private names, through its public API"
       ("import Priv\ndef x : Nat := Tok.value (Tok.hide 1)\n#eval x\n") [("Priv", privMod)] (cli := true),
     rejected "opaque: a first-order solution in equations cannot forge either"
@@ -343,6 +387,30 @@ def group : Group where
        "def sel {F : Look Nat → Type} (p : Look Nat) (w : F p) : Look Nat := p\n" ++
        "def forge (x : Look Nat) : Look Nat := sel _ (G.mk x)\n" ++
        "#eval (forge (Look.mk 11)).val\n") [("Priv", privMod)] (cli := true),
+    -- (#411) where `?F x y := G` is guessed, `?F`'s type is `?A x y → Pos Nat → Type`: the
+    -- comparison with `Look Nat → Look Nat → Type` solves `?A` and then fails, so it met a
+    -- hole and is not final. It is made again at the end of the declaration, after `q`
+    -- has solved `?A := Look Nat`, and the forgery is reported as on the spot (not by the
+    -- whole-declaration recheck, whose message starts "a hole solved by shape takes")
+    rejected "opaque: a guess compared at the end of the declaration cannot forge either"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Look Nat → Type where\n  | mk (a b : Look Nat) : G a b\n" ++
+       "def sel {A : Type} {F : A → Pos Nat → Type} (a : A) (p : Pos Nat) (w : F a p) (q : A) : Nat := 0\n" ++
+       "def forge (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x\n")
+      (some "private") "sel"
+      ("the implicit argument F can't be G: the two types agree only through the definition " ++
+       "of Pos (module Priv), hidden outside its module")
+      [("Priv", privMod)],
+    -- (#411) its honest neighbour: the comparison meets the holes `?A` and `?b` (`Wrap ?b` is
+    -- stuck) where the guess is made, and agrees once `q` and `e` have solved them
+    accepted "accept: a guess compared at the end of the declaration that agrees"
+      ("import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+       "inductive G : Look Nat → Look Nat → Type where\n  | mk (a b : Look Nat) : G a b\n" ++
+       "def Wrap : Bool → Type\n  | .true => Look Nat\n  | .false => Nat\n" ++
+       "def sel {A : Type} {b : Bool} {F : A → Wrap b → Type} (a : A) (p : Wrap b) (w : F a p) " ++
+       "(q : A) (c : Bool) (e : b = c) : Nat := 0\n" ++
+       "def ok (x y : Look Nat) : Nat := sel _ _ (G.mk x y) x .true rfl\n" ++
+       "#eval ok (Look.mk 1) (Look.mk 2)\n") [("Priv", privMod)],
     rejected "inductive props: large elimination of a non-singleton proposition"
       (prelude ++ "inductive Le : Nat → Nat → Prop where\n  | refl (n : Nat) : Le n n\n  | step {n m : Nat} (h : Le n m) : Le n (.succ m)\n" ++
        "def bad (h : Le 0 0) : Nat := match h with\n  | .refl _ => 0\n  | .step _ => 0\n")
@@ -373,7 +441,48 @@ def group : Group where
           let errs := s.messages.filter (·.severity == .error)
           throw (IO.userError s!"no module-name clash:\n{"\n".intercalate (errs.toList.map (describe src))}")
         let s2 := (← Cache.elaborateCached (some cache) [] src init 0).1
-        unless clash s2 do throw (IO.userError "the module-name clash disappeared on a warm cache") }
+        unless clash s2 do throw (IO.userError "the module-name clash disappeared on a warm cache") },
+    -- experimental kernel modes: the flags (not just the `Globals` fields the in-process
+    -- tests set), the verdict each changes, and the rendered message
+    { name := "kernel mode --predicative-prop: an impredicative Prop is rejected, the same program is accepted without the flag", run := fun _ => do
+        let src := "import Prelude\ndef Impr : Prop := (P : Prop) → P → P\n"
+        -- impredicative (the default): `(P : Prop) → P → P` is a small proposition
+        let some _ ← cliCheckWith [] src [] false | return
+        let some out ← cliCheckWith ["--predicative-prop"] src [] true | return
+        check (out.contains "Impr: impredicative Π (into Prop over Prop) under predicative Prop")
+          s!"the --predicative-prop message changed:\n{out}"
+        -- under the flag, a Π whose domain is a variable is still a proposition, and a
+        -- declaration's own Π-spine is exempt (`declTypeSpine`: the theorem is never used
+        -- as a proof at level 0)
+        let okSrc := "import Prelude\ndef f (P : Prop) : Prop := P → P\ndef thm (A : Type) (a : A) : A := a\n"
+        discard <| cliCheckWith ["--predicative-prop"] okSrc [] false },
+    { name := "kernel mode --strict-privacy: the documented over-rejection class (a proof that quotes an evaluated UIntN)", run := fun _ => do
+        -- `hdl/src/Hdl/Mem.wiz` checks normally. With the flag the second check rejects
+        -- `Mem.ram1_write_read`: its `rfl` quotes the evaluated `BitVec 1` as
+        -- `μ (UIntN.desc 1) …`, which has no name once `UIntN` (a sealed type of another
+        -- module) has no definition. This is the "legitimate proof that computes through
+        -- a library operation" the documentation says the flag is off for (13b; the file
+        -- it names, `drafts/feral/lowered/03_get_mut.wiz`, no longer triggers).
+        let mem : System.FilePath := System.FilePath.mk "hdl/src/Hdl/Mem.wiz"
+        let some _ ← cliRun ["--cache", cacheDir.toString, "-I", "hdl/src"] mem false | return
+        let some out ← cliRun ["--strict-privacy", "-I", "hdl/src"] mem true | return
+        check (out.contains "Mem.ram1_write_read depends on the definition of UIntN (module Word), which is hidden outside its module")
+          s!"the --strict-privacy message changed:\n{out}" },
+    { name := "kernel mode --strict-privacy: the first-order forgery it was added for is now rejected without the flag", run := fun _ => do
+        -- (13b, `docs/stages/13-language.md`: "this also rejects a forgery that some other
+        -- rule left to the kernel"). The only such forgery was the untyped-unification
+        -- one; since a guessed solution is type-checked where it is made, the default
+        -- elaborator rejects it, so the flag never gets a declaration to check. Pinned
+        -- both ways: the verdict and message are the same with and without it.
+        let src := "import Priv\nstructure Look (A : Type) where\n  val : A\n" ++
+          "inductive G : Look Nat → Type where\n  | mk (l : Look Nat) : G l\n" ++
+          "def sel {F : Pos Nat → Type} (p : Pos Nat) (w : F p) : Pos Nat := p\n" ++
+          "def forge (x : Look Nat) : Pos Nat := sel _ (G.mk x)\n"
+        let want := "hidden outside its module"
+        let some out ← cliCheckWith [] src [("Priv", privMod)] true | return
+        check (out.contains want) s!"the default verdict's message changed:\n{out}"
+        let some out ← cliCheckWith ["--strict-privacy"] src [("Priv", privMod)] true | return
+        check (out.contains want) s!"the --strict-privacy verdict's message changed:\n{out}" }
   ]
 
 builtin_initialize registerGroup group

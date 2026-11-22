@@ -97,7 +97,11 @@ cp "$lean/LICENSE" "$out/LICENSES/lean4-LICENSE"
 # (a file in current Lean toolchains: the third-party licences, CaDiCaL's among them)
 [ -e "$lean/LICENSES" ] && cp -R "$lean/LICENSES" "$out/LICENSES/lean4-LICENSES"
 
-# the sysroot: glibc 2.27 and the kernel headers, only what compiling and linking need
+# the sysroot: glibc 2.27 and the kernel headers, only what compiling and linking need.
+# 2.27 (Ubuntu 18.04, EOL 2023-05) is a link-time-only compatibility floor for the
+# programs built here, not an execution environment (they link the host's glibc
+# dynamically); 18.04 is the last distribution that requires it. See the dated note and
+# TODO(2026-11-17, wiz-pl maintainers) in scripts/bundle-cc.sources before changing it.
 sys=$out/sysroot
 mkdir -p "$work/deb" "$sys"
 for d in libc6_2.27-3ubuntu1.6_amd64.deb libc6-dev_2.27-3ubuntu1.6_amd64.deb linux-libc-dev_4.15.0-213.224_amd64.deb; do
@@ -156,14 +160,18 @@ exec "$d/bin/clang" -Wno-override-module $kind $opt $pic -x ir -o "${o:--}" "$in
 EOF
 chmod 755 "$out/bin/cc" "$out/bin/llc"
 
-# GMP and the Boehm GC, static and position-independent, into the sysroot
+# GMP and the Boehm GC, static and position-independent, into the sysroot.
+# CC is `cc` by name, with $out/bin first on PATH: GMP records the compiler in the
+# installed gmp.h (`__GMP_CC`), and an absolute $out/bin/cc there would make that
+# header (and so the tarball) depend on the bundle's build directory.
 cc=$out/bin/cc
+PATH="$out/bin:$PATH"; export PATH
 tar -xJf "$dl/gmp-6.3.0.tar.xz" -C "$work"
 (cd "$work/gmp-6.3.0" &&
   # --enable-fat: code for every x86-64 CPU, picked at run time (a build tuned to this
   # machine's CPU would fail on older ones)
   ./configure -q --host=x86_64-pc-linux-gnu --enable-fat --enable-static --disable-shared --with-pic \
-    --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 cp "$work/gmp-6.3.0/COPYING.LESSERv3" "$out/LICENSES/gmp-COPYING.LESSERv3"
 cp "$work/gmp-6.3.0/COPYINGv3" "$out/LICENSES/gmp-COPYINGv3"
@@ -171,7 +179,7 @@ cp "$work/gmp-6.3.0/COPYINGv2" "$out/LICENSES/gmp-COPYINGv2"
 tar -xzf "$dl/gc-8.2.8.tar.gz" -C "$work"
 (cd "$work/gc-8.2.8" &&
   ./configure -q --host=x86_64-pc-linux-gnu --enable-static --disable-shared --with-pic --enable-threads=posix \
-    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC="$cc" CFLAGS="-O2 -w" >/dev/null &&
+    --disable-docs --with-libatomic-ops=none --prefix="$sys/usr" CC=cc CFLAGS="-O2 -w" >/dev/null &&
   make -s -j"$jobs" >/dev/null && make -s install >/dev/null)
 # its licence is the top of README.QUICK
 cp "$work/gc-8.2.8/README.QUICK" "$out/LICENSES/bdwgc-README.QUICK"
@@ -181,7 +189,7 @@ find "$sys/usr/lib" -name '*.la' -delete
 cat > "$out/VERSIONS" <<EOF
 clang, ld.lld, compiler-rt: from $(basename "$lean") ($("$out/bin/clang" --version | head -1))
 cadical: from $(basename "$lean") ($("$out/bin/cadical" --version))
-glibc 2.27 (libc6, libc6-dev 2.27-3ubuntu1.6), Linux headers 4.15 (linux-libc-dev 4.15.0-213.224): Ubuntu 18.04
+glibc 2.27 (libc6, libc6-dev 2.27-3ubuntu1.6), Linux headers 4.15 (linux-libc-dev 4.15.0-213.224): Ubuntu 18.04, link-time only
 GMP 6.3.0 (static, --enable-fat), Boehm GC 8.2.8 (static, threads)
 EOF
 

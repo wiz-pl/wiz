@@ -55,6 +55,8 @@ permissions:
   contents: read
 
 concurrency:
+  # One run at a time and never cancelled: the A/B pairs need the machine to itself, and
+  # a later night measures a different commit, so an earlier run is not superseded-useless.
   group: bench
   cancel-in-progress: false
 
@@ -80,6 +82,7 @@ jobs:
   preflight:
     name: preflight
     runs-on: ubuntu-latest
+    # 5 min: read one repository variable
     timeout-minutes: 5
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -103,9 +106,10 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.run == 'true'
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 180 min: the A/B pairs (~15 per mode) and the Scry corpus on one runner
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -139,7 +143,7 @@ jobs:
 
       - name: Restore the A-side executable
         id: baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bench/.build/bench-baseline
           key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -147,7 +151,7 @@ jobs:
             ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore the history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bench/history.jsonl
           key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -254,6 +258,31 @@ jobs:
             exit "$code"
           fi
 
+      - name: Scry resource limits
+        # scrydos-01/02 regressions: RSS < 20x input on a few-MiB file, and linear
+        # preparation for 16..256 `a++;` statements. The Scry corpus step above built
+        # the CLI; a checkout without it skips (the script prints one line and exits 0).
+        shell: bash
+        run: |
+          if [ ! -x scry/.grail/bin/scry ]; then
+            echo "::notice title=scry dos-check skipped::scry/.grail/bin/scry was not built"
+            exit 0
+          fi
+          python3 scry/scripts/dos-check.py --scry scry/.grail/bin/scry
+
+      - name: Scry fuzz regressions
+        # The minimised parse/lower regressions (scry/bench/fuzz.md) at the RSS cap
+        # and time budget recorded in their manifest, plus the bounded --ci profile.
+        # The fixtures are committed; a checkout without the CLI skips both.
+        shell: bash
+        run: |
+          if [ ! -x scry/.grail/bin/scry ]; then
+            echo "::notice title=scry fuzz regressions skipped::scry/.grail/bin/scry was not built"
+            exit 0
+          fi
+          python3 scry/scripts/fuzz-lower.py --ci --iterations 10 --no-write-fixtures
+          python3 scry/scripts/fuzz-lower.py --regressions-only
+
       - name: Paired-ratio threshold
         id: threshold
         # The gate is the Gate step below: this step still writes the summary,
@@ -305,21 +334,21 @@ jobs:
 
       - name: Save the new A side
         if: always() && steps.threshold.outputs.code == '0' && steps.stdlib.outputs.skip != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bench/.build/bench-baseline
           key: ${{ env.BENCH_BASELINE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save the history
         if: always() && hashFiles('bench/history.jsonl') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bench/history.jsonl
           key: ${{ env.BENCH_HISTORY_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload the run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -387,9 +416,10 @@ jobs:
     needs: [preflight, bench]
     if: ${{ !cancelled() && needs.preflight.outputs.run == 'true' }}
     runs-on: ${{ vars.WIZ_RUNNER_HEAVY }}
+    # 120 min: build the self-hosted checker once, then the corpus
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
         with:
           cachix-name: ${{ env.CACHIX_NAME }}
@@ -440,7 +470,7 @@ jobs:
 
       - name: Upload the run
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mem-bench-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench-out/mem-bench.json

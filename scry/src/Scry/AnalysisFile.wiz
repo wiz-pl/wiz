@@ -1,0 +1,760 @@
+import Json
+import Text
+import Web.Widget
+import Scry.Facts
+import Scry.Identity
+/-!
+# Scry.AnalysisFile: an analysis run as an ordinary Wiz file
+
+This module is the **pure** half of "a scry run is a Wiz file" (`wiz-notes/scry-as-wiz.md`).
+An `analysis.wiz` imports it, declares its ingestion with `#ingest`, loads a graph (from
+Quire, through `drafts/scry-analysis/QuireGraph.wiz`), states a claim and renders the
+result as a widget bundle.
+
+Two corrections shape this module:
+
+* **the "lock file" is a revision manifest, not a mutex.** `Scry.Manifest` records the
+  *content identity* of the tree the graph was built from (a hash of the ingested files,
+  or a git commit), the Quire generation, and the tables needed to read the graph. The
+  analysis compares the manifest with the tree on disk and reports **stale** with both
+  revisions rather than analysing the wrong code. A writer lock, if one is needed at
+  all, is a separate mechanism (`drafts/scry-analysis/Ingest.wiz`, `WriterLock`).
+* **the graph is Quire.** The manifest names the Quire file, the snapshot generation and
+  the encoding tables. A re-ingest is a *new commit* (new generation and root) in the
+  same store; the old snapshot stays readable to a reader that holds it.
+
+The pure pieces here are:
+
+* the `#ingest` declaration (a command macro that only records the two paths);
+* `Scry.Revision`/`Scry.Manifest`, their JSON, and `Scry.revisionVerdict`;
+* `Scry.GraphView`, the small projection a claim needs (call sites, call heads, errors),
+  produced by `Scry.viewOfFacts` at ingest time and re-queried from Quire by the runner;
+* `Scry.claimCalls`, `Scry.claimNoErrors`, and the `wiz.widget/1` payload with the
+  `scry.analysis/1` extension.
+-/
+
+-- ## Ingestion declarations
+
+/-- One `#ingest` declaration: the directory (resolved against the file's directory) and
+the graph it is lowered into. -/
+structure Scry.IngestSpec where
+  root : String
+  dest : String
+
+/-- A declaration with the source position it was written at (1-based line, and the
+character range of the whole command, for a diagnostic). -/
+structure Scry.IngestLine where
+  line : Nat
+  start : Nat
+  stop : Nat
+  spec : Scry.IngestSpec
+
+/-- Whether `c` is an ASCII letter or digit. -/
+def Scry.isAsciiAlnum (c : Char) : Bool :=
+  let n := Char.code c;
+  Bool.or (Bool.and (Nat.le 97 n) (Nat.le n 122))
+    (Bool.or (Bool.and (Nat.le 65 n) (Nat.le n 90))
+      (Bool.and (Nat.le 48 n) (Nat.le n 57)))
+
+/-- A declaration's name suffix: a path with every other character replaced by `_`.
+Two declarations with the same `dest` are a redefinition error, deliberately. -/
+def Scry.ingestSlug (s : String) : String :=
+  String.ofChars (List.map (fun c =>
+    match Scry.isAsciiAlnum c with
+    | .true => c
+    | .false => Char.mk 95) (String.chars s))
+
+/-- One string literal: the characters up to the closing quote, and the rest. -/
+partial def Scry.afUntilQuote : List Char → List Char → String × List Char
+  | .nil, acc => (String.ofChars (List.reverse acc), .nil)
+  | .cons c cs, acc =>
+    match Nat.beq (Char.code c) 34 with
+    | .true => (String.ofChars (List.reverse acc), cs)
+    | .false => match Nat.beq (Char.code c) 92 with
+      | .true => match cs with
+        | .cons d more => Scry.afUntilQuote more (List.cons d acc)
+        | .nil => (String.ofChars (List.reverse acc), .nil)
+      | .false => Scry.afUntilQuote cs (List.cons c acc)
+
+/-- Read the string literals of a line. -/
+partial def Scry.quotedParts : List Char → List String
+  | .nil => .nil
+  | .cons c cs =>
+    match Nat.beq (Char.code c) 34 with
+    | .true => let r := Scry.afUntilQuote cs .nil;
+      List.cons r.1 (Scry.quotedParts r.2)
+    | .false => Scry.quotedParts cs
+
+/-- The `#ingest` lines of a text, in order. -/
+partial def Scry.ingestLinesFrom (off lineNo : Nat) : List String → List Scry.IngestLine
+  | .nil => .nil
+  | .cons raw rest =>
+    let here := off;
+    let next := Nat.add off (Nat.add (String.length raw) 1);
+    let trimmed := String.trim raw;
+    let found : List Scry.IngestLine := match String.stripPrefix trimmed "#ingest" with
+      | .none => List.nil
+      | .some after => match Scry.quotedParts (String.chars after) with
+        | .cons root (.cons dest _) =>
+          List.cons (Scry.IngestLine.mk lineNo here
+            (Nat.add here (String.length raw)) (Scry.IngestSpec.mk root dest)) .nil
+        | _ => List.nil;
+    List.append found (Scry.ingestLinesFrom next (Nat.succ lineNo) rest)
+
+/-- The `#ingest` declarations of a file's text. -/
+def Scry.ingestLines (text : String) : List Scry.IngestLine :=
+  Scry.ingestLinesFrom 0 1 (String.splitOn text "\n")
+
+syntax (name := ingest) "#ingest" term "into" term : command
+
+/-- The `#ingest` expansion. The declaration is a pure marker: the elaborator must not
+mutate a shared artifact, and the command/runner scans the text for the two paths (the
+macro exists so the file is ordinary Wiz and the parser accepts the line). -/
+def Scry.ingestMacro : CommandMacro := fun _ => MacroM.pure .nil
+
+attribute [macro command.ingest] Scry.ingestMacro
+
+-- ## The revision manifest: the "lock file" is a content identity
+
+/-- Map and drop the `none`s (Wiz's `List` has no `filterMap`). -/
+partial def Scry.filterMap {A B : Type} (f : A → Option B) : List A → List B
+  | [] => []
+  | List.cons x rest => match f x with
+    | .none => Scry.filterMap f rest
+    | .some y => List.cons y (Scry.filterMap f rest)
+
+/-- JSON a field, or `Json.null` when absent. -/
+def Scry.jsonAt (j : Json) (key : String) : Json :=
+  match Json.get j key with
+  | .some v => v
+  | .none => Json.mkNull
+
+/-- A natural-number field with a default. -/
+def Scry.jsonNatD (j : Json) (key : String) (d : Nat) : Nat :=
+  match Json.get j key with
+  | .some v => match Json.asNat v with
+    | .some n => n
+    | .none => d
+  | .none => d
+
+/-- A string field with a default. -/
+def Scry.jsonStrD (j : Json) (key : String) (d : String) : String :=
+  match Json.get j key with
+  | .some (.str s) => s
+  | _ => d
+
+/-- A boolean field with a default. -/
+def Scry.jsonBoolD (j : Json) (key : String) (d : Bool) : Bool :=
+  match Json.get j key with
+  | .some (.bool b) => b
+  | _ => d
+
+/-- Boolean equality (there is no `Bool.eq` in the prelude). -/
+def Scry.boolEq (a b : Bool) : Bool :=
+  match a, b with
+  | .true, .true => .true
+  | .false, .false => .true
+  | _, _ => .false
+
+-- `Scry.revFnv`/`Scry.revHex` are aliases of the one hash (`Scry.Identity`); the
+-- revision records still name the algorithm (`fnv1a64`) next to the value.
+
+/-- The 64-bit hash of a string (alias of `Scry.fnv`). -/
+def Scry.revFnv (s : String) : Nat := Scry.fnv s
+
+/-- A 64-bit hash value as 16 hex digits (alias of `Scry.hex16`). -/
+def Scry.revHex (n : Nat) : String := Scry.hex16 n
+
+/-- A call site (or error site) as the claim sees it: a graph node, the file it is in,
+and its span. -/
+structure Scry.AfCallSite where
+  node : Nat
+  file : String
+  start : Nat
+  stop : Nat
+
+/-- The projection a claim is about. It is computed from the merged facts at ingest time
+and re-computed from Quire by the runner; comparing the two is the "manifest/view is
+behind the store" check. -/
+structure Scry.GraphView where
+  calls : List Scry.AfCallSite
+  callHeads : List Nat
+  errors : List Scry.AfCallSite
+  nodeCount : Nat
+  edgeCount : Nat
+  relationRows : Nat
+
+/-- One file the ingest read: its path (relative to the source root), size and
+FNV-1a-64 of its contents. -/
+structure Scry.FileDigest where
+  path : String
+  bytes : Nat
+  hash : String
+
+/-- What a graph was built from. `kind` is `tree` (a hash over the files read) or `git`
+(a commit, plus a dirty-tree hash when the checkout is not clean). `value` is the
+revision the manifest names; `dirtyHash` is set only for a dirty git checkout, so a
+dirty tree is not mistaken for its commit. -/
+structure Scry.Revision where
+  kind : String
+  algorithm : String
+  value : String
+  dirty : Bool
+  dirtyHash : String
+
+/-- The manifest: the revision the graph corresponds to, the Quire file and generation,
+the encoding tables, and the small view the file's claim is about. It is JSON, written
+next to the graph; it is the artifact the earlier design called the "lock file". -/
+structure Scry.Manifest where
+  schema : String
+  source : String
+  graph : String
+  gen : Nat
+  revision : Scry.Revision
+  files : List Scry.FileDigest
+  kinds : List (String × Nat)
+  relations : List (String × Nat)
+  edgeLabels : List (String × Nat)
+  /-- `(path, file-node id)` for the synthetic `file:<path>` nodes; the `file_of`
+  relation's second column is one of these ids. -/
+  fileTable : List (String × Nat)
+  nodeCount : Nat
+  edgeRowCount : Nat
+  relationRowCount : Nat
+  view : Scry.GraphView
+
+/-- The value of `#ingest` when no graph exists yet. -/
+def Scry.emptyRevision : Scry.Revision :=
+  Scry.Revision.mk "unset" "none" "" .false ""
+
+/-- An empty manifest (a file that has not been ingested, or whose manifest is
+malformed): the claim is vacuous, never "proved". -/
+def Scry.emptyManifest : Scry.Manifest :=
+  Scry.Manifest.mk "scry-graph-manifest/1" "" "" 0 Scry.emptyRevision .nil .nil .nil .nil
+    .nil 0 0 0 (Scry.GraphView.mk .nil .nil .nil 0 0 0)
+
+/-- One revision as JSON. -/
+def Scry.revisionJson (r : Scry.Revision) : Json :=
+  Json.mkObj [
+    ("kind", Json.mkStr r.kind),
+    ("algorithm", Json.mkStr r.algorithm),
+    ("value", Json.mkStr r.value),
+    ("dirty", Json.mkBool r.dirty),
+    ("dirtyHash", Json.mkStr r.dirtyHash) ]
+
+/-- A revision from JSON (tolerant: missing fields read as the empty revision). -/
+def Scry.revisionOfJson (j : Json) : Scry.Revision :=
+  Scry.Revision.mk (Json.getStr j "kind") (Json.getStr j "algorithm")
+    (Json.getStr j "value") (Scry.jsonBoolD j "dirty" .false)
+    (Json.getStr j "dirtyHash")
+
+/-- A file digest as JSON. -/
+def Scry.fileDigestJson (f : Scry.FileDigest) : Json :=
+  Json.mkObj [("path", Json.mkStr f.path), ("bytes", Json.ofNat f.bytes),
+    ("hash", Json.mkStr f.hash)]
+
+/-- A file digest from JSON. -/
+def Scry.fileDigestOfJson (j : Json) : Scry.FileDigest :=
+  Scry.FileDigest.mk (Json.getStr j "path") (Scry.jsonNatD j "bytes" 0)
+    (Json.getStr j "hash")
+
+/-- A name↔id table as JSON: an array of `[name, id]` pairs. -/
+def Scry.tableJson (t : List (String × Nat)) : Json :=
+  Json.mkArr (List.map (fun p => Json.mkArr [Json.mkStr p.1, Json.ofNat p.2]) t)
+
+/-- A name↔id table from JSON. -/
+def Scry.tableOfJson (j : Json) : List (String × Nat) :=
+  Scry.filterMap (fun v => match Json.asList v with
+    | .cons name (.cons id _) => match Json.asString name, Json.asNat id with
+      | .some s, .some n => .some (s, n)
+      | _, _ => .none
+    | _ => .none) (Json.asList j)
+
+/-- A natural number, or a default. -/
+def Scry.natOfJson (j : Json) (d : Nat) : Nat :=
+  match Json.asNat j with
+  | .some n => n
+  | .none => d
+
+/-- The `i`th element of a JSON array, or a default. -/
+def Scry.nthJson (xs : List Json) (i : Nat) (d : Json) : Json :=
+  match xs with
+  | .nil => d
+  | .cons x rest => match Nat.beq i 0 with
+    | .true => x
+    | .false => Scry.nthJson rest (Nat.sub i 1) d
+
+/-- A call site as JSON. -/
+def Scry.callSiteJson (c : Scry.AfCallSite) : Json :=
+  Json.mkObj [("node", Json.ofNat c.node), ("file", Json.mkStr c.file),
+    ("span", Json.mkArr [Json.ofNat c.start, Json.ofNat c.stop])]
+
+/-- A call site from JSON. -/
+def Scry.callSiteOfJson (j : Json) : Scry.AfCallSite :=
+  let span := Json.asList (Scry.jsonAt j "span");
+  Scry.AfCallSite.mk (Scry.jsonNatD j "node" 0) (Json.getStr j "file")
+    (Scry.natOfJson (Scry.nthJson span 0 Json.mkNull) 0)
+    (Scry.natOfJson (Scry.nthJson span 1 Json.mkNull) 0)
+
+/-- A graph view as JSON. -/
+def Scry.graphViewJson (v : Scry.GraphView) : Json :=
+  Json.mkObj [
+    ("calls", Json.mkArr (List.map Scry.callSiteJson v.calls)),
+    ("callHeads", Json.mkArr (List.map Json.ofNat v.callHeads)),
+    ("errors", Json.mkArr (List.map Scry.callSiteJson v.errors)),
+    ("nodeCount", Json.ofNat v.nodeCount),
+    ("edgeCount", Json.ofNat v.edgeCount),
+    ("relationRows", Json.ofNat v.relationRows) ]
+
+/-- A graph view from JSON. -/
+def Scry.graphViewOfJson (j : Json) : Scry.GraphView :=
+  Scry.GraphView.mk
+    (List.map Scry.callSiteOfJson (Json.asList (Scry.jsonAt j "calls")))
+    (Scry.filterMap (fun v => Json.asNat v) (Json.asList (Scry.jsonAt j "callHeads")))
+    (List.map Scry.callSiteOfJson (Json.asList (Scry.jsonAt j "errors")))
+    (Scry.jsonNatD j "nodeCount" 0) (Scry.jsonNatD j "edgeCount" 0)
+    (Scry.jsonNatD j "relationRows" 0)
+
+/-- The manifest as JSON. -/
+def Scry.manifestJson (m : Scry.Manifest) : Json :=
+  Json.mkObj [
+    ("schema", Json.mkStr m.schema),
+    ("source", Json.mkStr m.source),
+    ("graph", Json.mkStr m.graph),
+    ("gen", Json.ofNat m.gen),
+    ("revision", Scry.revisionJson m.revision),
+    ("files", Json.mkArr (List.map Scry.fileDigestJson m.files)),
+    ("kinds", Scry.tableJson m.kinds),
+    ("relations", Scry.tableJson m.relations),
+    ("edgeLabels", Scry.tableJson m.edgeLabels),
+    ("fileTable", Scry.tableJson m.fileTable),
+    ("nodeCount", Json.ofNat m.nodeCount),
+    ("edgeRowCount", Json.ofNat m.edgeRowCount),
+    ("relationRowCount", Json.ofNat m.relationRowCount),
+    ("view", Scry.graphViewJson m.view) ]
+
+/-- The manifest as text (one JSON line). -/
+def Scry.manifestText (m : Scry.Manifest) : String := Json.render (Scry.manifestJson m)
+
+/-- The manifest from JSON text, with a message that names the failure. -/
+def Scry.manifestOfText (text : String) : Except String Scry.Manifest :=
+  match Json.parse text with
+  | .error e => .error (String.append "manifest: invalid JSON: " e)
+  | .ok j => match Json.getStr j "schema" with
+    | "scry-graph-manifest/1" => .ok (Scry.Manifest.mk
+        (Json.getStr j "schema") (Json.getStr j "source") (Json.getStr j "graph")
+        (Scry.jsonNatD j "gen" 0)
+        (Scry.revisionOfJson (Scry.jsonAt j "revision"))
+        (List.map Scry.fileDigestOfJson (Json.asList (Scry.jsonAt j "files")))
+        (Scry.tableOfJson (Scry.jsonAt j "kinds"))
+        (Scry.tableOfJson (Scry.jsonAt j "relations"))
+        (Scry.tableOfJson (Scry.jsonAt j "edgeLabels"))
+        (Scry.tableOfJson (Scry.jsonAt j "fileTable"))
+        (Scry.jsonNatD j "nodeCount" 0)
+        (Scry.jsonNatD j "edgeRowCount" 0)
+        (Scry.jsonNatD j "relationRowCount" 0)
+        (Scry.graphViewOfJson (Scry.jsonAt j "view")))
+    | s => .error (String.append "manifest: schema \"" (String.append s "\" is not scry-graph-manifest/1"))
+
+/-- What the analysis should say about the graph's revision. -/
+inductive Scry.RevisionVerdict where
+  | fresh
+  | stale (manifest : Scry.Revision) (current : Scry.Revision) (reason : String)
+
+/-- Compare the manifest's revision with the tree on disk. A different kind is stale
+(the manifest was built from a git checkout, the source is now a plain tree, or vice
+versa); a clean git checkout and its dirty twin are different revisions. -/
+def Scry.revisionVerdict (m : Scry.Manifest) (current : Scry.Revision) : Scry.RevisionVerdict :=
+  match String.eq m.revision.kind "unset" with
+  | .true => .stale m.revision current "the graph has no revision manifest: run ingest"
+  | .false => match String.eq m.revision.kind current.kind with
+    | .false => .stale m.revision current "the manifest's revision kind differs from the source"
+    | .true => match String.eq m.revision.value current.value with
+      | .false => .stale m.revision current "the source tree differs from the ingested tree"
+      | .true => match Bool.and (Scry.boolEq m.revision.dirty current.dirty)
+          (String.eq m.revision.dirtyHash current.dirtyHash) with
+        | .true => .fresh
+        | .false => .stale m.revision current "the git checkout's dirty state differs from the ingest"
+
+/-- `tree:fnv1a64:t_…` (or `git:git-sha1:<commit>[+dirty:<hash>]`). -/
+def Scry.renderRevision (r : Scry.Revision) : String :=
+  String.append r.kind (String.append ":" (String.append r.algorithm
+    (String.append ":" (String.append r.value
+      (match r.dirty with
+        | .true => String.append "+dirty:" r.dirtyHash
+        | .false => "")))))
+
+/-- The stale verdict as text, with both revisions. -/
+def Scry.renderRevisionVerdict : Scry.RevisionVerdict → String
+  | .fresh => "revision: fresh"
+  | .stale m c reason =>
+    let a := String.append "revision: STALE (manifest " (Scry.renderRevision m);
+    let b := String.append a (String.append ", source " (Scry.renderRevision c));
+    String.append b (String.append "): " reason)
+
+-- ## The view
+
+/-- The first source file's path, or `""`. -/
+def Scry.firstFilePath (f : Scry.Facts) : String :=
+  match f.files with
+  | .cons sf _ => sf.path
+  | .nil => ""
+
+/-- The file a merged node belongs to, from the synthetic `file_of` relation; when there
+is none, the store's first file (the node schema has no file column). -/
+def Scry.fileOfNode (f : Scry.Facts) (id : Scry.NodeId) : String :=
+  match Scry.findRelation f.relations "file_of" with
+  | .some r =>
+    match List.find (fun t => match t with
+      | .cons a _ => Nat.beq a id.n
+      | .nil => .false) r.tuples with
+    | .some t => match t with
+      | .cons _ (.cons fileNode _) => match Scry.findNode f.nodes (Scry.nodeId fileNode) with
+        | .some n => match String.stripPrefix n.kind "file:" with
+          | .some p => p
+          | .none => n.kind
+        | .none => ""
+      | _ => ""
+    | .none => Scry.firstFilePath f
+  | .none => Scry.firstFilePath f
+
+/-- The first column of a relation's tuples. -/
+def Scry.relationHeads (f : Scry.Facts) (name : String) : List Nat :=
+  match Scry.findRelation f.relations name with
+  | .none => .nil
+  | .some r => Scry.filterMap (fun t => match t with
+      | .cons a _ => .some a
+      | .nil => .none) r.tuples
+
+/-- A node as a call/error site. -/
+def Scry.siteOfNode (f : Scry.Facts) (n : Scry.Node) : Scry.AfCallSite :=
+  Scry.AfCallSite.mk n.id.n (Scry.fileOfNode f n.id) n.span.start n.span.stop
+
+/-- The claim-relevant projection of a fact store: call sites, the heads of `call`,
+error sites, and counts. -/
+def Scry.viewOfFacts (f : Scry.Facts) : Scry.GraphView :=
+  Scry.GraphView.mk
+    (List.map (Scry.siteOfNode f) (List.filter (fun n => String.eq n.kind "call_expression") f.nodes))
+    (Scry.relationHeads f "call")
+    (List.map (Scry.siteOfNode f) (List.filter (fun n => n.isError) f.nodes))
+    (List.length f.nodes) (List.length f.edges)
+    (List.foldl (fun n r => Nat.add n (List.length r.tuples)) 0 f.relations)
+
+-- ## Claims
+
+/-- One finding of a claim. -/
+structure Scry.AnalysisFinding where
+  id : String
+  claim : String
+  message : String
+  file : String
+  node : Nat
+  start : Nat
+  stop : Nat
+
+/-- A claim's verdict: "proved" is a universal statement about this view, "refuted"
+carries counterexamples, "vacuous" means the view has no subject node. -/
+structure Scry.ClaimResult where
+  name : String
+  status : String
+  summary : String
+  findings : List Scry.AnalysisFinding
+
+/-- The finding's message: node, what, span and file. -/
+def Scry.findingMessage (c : Scry.AfCallSite) (what : String) : String :=
+  let a := String.append "node " (String.append (Nat.repr c.node) " (");
+  let b := String.append a (String.append what (String.append ") at [" (Nat.repr c.start)));
+  let d := String.append b (String.append "," (String.append (Nat.repr c.stop) ") in "));
+  String.append d c.file
+
+/-- The one finding for a site violating `claim`. -/
+def Scry.findingOfSite (claim : String) (c : Scry.AfCallSite) (what : String)
+    : Scry.AnalysisFinding :=
+  Scry.AnalysisFinding.mk (String.append "a_" (Nat.repr c.node)) claim
+    (Scry.findingMessage c what) c.file c.node c.start c.stop
+
+/-- Whether `id` is in `ids`. -/
+def Scry.hasNat (id : Nat) (ids : List Nat) : Bool :=
+  List.any (fun x => Nat.beq x id) ids
+
+/-- The claim "every `call_expression` site is the head of a `call` row". -/
+def Scry.claimCalls (v : Scry.GraphView) : Scry.ClaimResult :=
+  let missing := List.filter (fun c => Bool.not (Scry.hasNat c.node v.callHeads)) v.calls;
+  let status := match List.isEmpty v.calls with
+    | .true => "vacuous"
+    | .false => match List.isEmpty missing with
+      | .true => "proved"
+      | .false => "refuted";
+  let summary := match List.isEmpty v.calls with
+    | .true => "no call_expression node: the claim has no subject"
+    | .false => String.append (Nat.repr (List.length missing))
+      (String.append " of " (String.append (Nat.repr (List.length v.calls))
+        " call_expression node(s) are not in the call relation"));
+  Scry.ClaimResult.mk "calls-recorded" status summary
+    (List.map (fun c => Scry.findingOfSite "calls-recorded" c "call_expression") missing)
+
+/-- The claim "the graph has no `ERROR` node". -/
+def Scry.claimNoErrors (v : Scry.GraphView) : Scry.ClaimResult :=
+  let status := match Nat.beq v.nodeCount 0 with
+    | .true => "vacuous"
+    | .false => match List.isEmpty v.errors with
+      | .true => "proved"
+      | .false => "refuted";
+  Scry.ClaimResult.mk "no-error-nodes" status
+    (match List.isEmpty v.errors with
+      | .true => String.append "no ERROR node in "
+          (String.append (Nat.repr v.nodeCount) " node(s)")
+      | .false => String.append (Nat.repr (List.length v.errors)) " ERROR node(s)")
+    (List.map (fun c => Scry.findingOfSite "no-error-nodes" c "ERROR") v.errors)
+
+/-- The claim as text. -/
+def Scry.renderClaim (r : Scry.ClaimResult) : String :=
+  String.append (String.append (String.append "claim " r.name)
+    (String.append ": " (String.append r.status " — ")))
+    (String.append r.summary (List.foldl (fun acc x =>
+      String.append acc (String.append (String.append "\n  " x.id)
+        (String.append " " x.message))) "" r.findings))
+
+-- ## Comparing the manifest's view with the live Quire query
+
+/-- Whether two site lists have the same node ids. -/
+def Scry.sameSites (xs ys : List Scry.AfCallSite) : Bool :=
+  Bool.and (Nat.beq (List.length xs) (List.length ys))
+    (Bool.and (List.all (fun x => List.any (fun y => Nat.beq x.node y.node) ys) xs)
+      (List.all (fun y => List.any (fun x => Nat.beq x.node y.node) xs) ys))
+
+/-- Whether two views have the same call-site ids, call heads, error ids and counts. -/
+def Scry.sameView (a b : Scry.GraphView) : Bool :=
+  Bool.and (Scry.sameSites a.calls b.calls)
+    (Bool.and (Nat.beq (List.length a.callHeads) (List.length b.callHeads))
+      (Bool.and (List.all (fun x => Scry.hasNat x b.callHeads) a.callHeads)
+        (Bool.and (List.all (fun x => Scry.hasNat x a.callHeads) b.callHeads)
+          (Bool.and (Scry.sameSites a.errors b.errors)
+            (Bool.and (Nat.beq a.nodeCount b.nodeCount)
+              (Bool.and (Nat.beq a.edgeCount b.edgeCount)
+                (Nat.beq a.relationRows b.relationRows)))))))
+
+-- ## The widget payload
+
+/-- A finding as JSON. -/
+def Scry.afFindingJson (x : Scry.AnalysisFinding) : Json :=
+  Json.mkObj [
+    ("id", Json.mkStr x.id), ("claim", Json.mkStr x.claim),
+    ("message", Json.mkStr x.message), ("file", Json.mkStr x.file),
+    ("node", Json.ofNat x.node),
+    ("span", Json.mkArr [Json.ofNat x.start, Json.ofNat x.stop]) ]
+
+/-- A claim and its findings as JSON. -/
+def Scry.claimJson (r : Scry.ClaimResult) : Json :=
+  Json.mkObj [
+    ("name", Json.mkStr r.name), ("status", Json.mkStr r.status),
+    ("summary", Json.mkStr r.summary),
+    ("findings", Json.mkArr (List.map Scry.afFindingJson r.findings)) ]
+
+/-- The graph's shape as JSON. -/
+def Scry.graphJson (v : Scry.GraphView) : Json :=
+  Json.mkObj [
+    ("nodes", Json.ofNat v.nodeCount), ("edges", Json.ofNat v.edgeCount),
+    ("relationRows", Json.ofNat v.relationRows) ]
+
+/-- The widget list: a claim button, one button per finding (its value is the node id),
+and a `plot` carrying the claim JSON. -/
+def Scry.analysisWidgets (r : Scry.ClaimResult) (v : Scry.GraphView) : List Widget.Widget :=
+  let claimWidget := Widget.buttonValue "claim" "click" r.status
+    (String.append (String.append "claim " r.name) (String.append ": " r.status))
+    "Scry.analysisNoop";
+  let findingWidgets := List.map (fun x =>
+    Widget.buttonValue (String.append "finding-" x.id) "click" (Nat.repr x.node)
+      x.message "Scry.analysisNoop") r.findings;
+  let plot := Widget.plot "paths" "click" (Json.render (Scry.claimJson r)) "Scry.analysisNoop";
+  List.cons claimWidget (List.append findingWidgets (List.cons plot .nil))
+
+/-- The payload's `scry` extension: the claim, the findings, the graph counts. -/
+def Scry.analysisExt (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
+  Json.mkObj [
+    ("schema", Json.mkStr "scry.analysis/1"),
+    ("claim", Scry.claimJson r),
+    ("findings", Json.mkArr (List.map Scry.afFindingJson r.findings)),
+    ("graph", Scry.graphJson v) ]
+
+/-- The card's title: the claim and its verdict. -/
+def Scry.analysisTitle (r : Scry.ClaimResult) : String :=
+  String.append (String.append "claim " r.name) (String.append ": " r.status)
+
+/-- The bundle: `Widget.bundle`'s `wiz.widget/1` object with the card's `kind`,
+`mimeType`, `title` and `summary`, plus the `scry.analysis/1` extension. A widget host
+draws the extension itself (the claim, findings and graph counts); the `widgets` list
+and `html` stay for clients that only understand the Loom bundle. -/
+def Scry.analysisBundle (r : Scry.ClaimResult) (v : Scry.GraphView) : Json :=
+  let ws := Scry.analysisWidgets r v;
+  let ext := Scry.analysisExt r v;
+  match Widget.bundle ws with
+  | .obj fs => Json.obj (JFields.fcons "kind" (Json.mkStr "scry.analysis")
+      (JFields.fcons "mimeType" (Json.mkStr "text/html")
+        (JFields.fcons "title" (Json.mkStr (Scry.analysisTitle r))
+          (JFields.fcons "summary" (Json.mkStr r.summary)
+            (JFields.fcons "scry" ext fs)))))
+  | other => other
+
+/-- The display string: `WIZ_WIDGET:` plus the bundle. -/
+def Scry.analysisDisplay (r : Scry.ClaimResult) (v : Scry.GraphView) : String :=
+  String.append Widget.prefix (Json.render (Scry.analysisBundle r v))
+
+/-- The no-op widget callback the payload names. -/
+def Scry.analysisNoop (_e : Widget.Event) (ws : List Widget.Widget) : List Widget.Widget := ws
+
+-- ## Merging stores (the frontend the prototype ingests)
+
+/-- `f` applied with a 0-based index. -/
+partial def Scry.mapIdxFrom {A B : Type} (start : Nat) (f : Nat → A → B) : List A → List B
+  | .nil => .nil
+  | .cons a rest => List.cons (f start a) (Scry.mapIdxFrom (Nat.succ start) f rest)
+
+/-- Add a relation, unioning with an existing relation of the same name and arity. -/
+def Scry.addRelation (rels : List Scry.Relation) (name : String) (arity : Nat)
+    (tuples : List (List Nat)) : List Scry.Relation :=
+  match rels with
+  | .nil => List.cons (Scry.Relation.mk (Scry.relId 0) name arity tuples) .nil
+  | .cons r rest =>
+    match Bool.and (String.eq r.name name) (Nat.beq r.arity arity) with
+    | .true => List.cons (Scry.Relation.mk r.id r.name r.arity
+        (List.append r.tuples tuples)) rest
+    | .false => List.cons r (Scry.addRelation rest name arity tuples)
+
+/-- Give the relations ids `0, 1, …` in list order. -/
+def Scry.renumberRelations (rels : List Scry.Relation) : List Scry.Relation :=
+  Scry.mapIdxFrom 0 (fun i r => Scry.Relation.mk (Scry.relId i) r.name r.arity r.tuples) rels
+
+/-- The accumulator of `Scry.mergeFacts`. -/
+structure Scry.MergeAcc where
+  files : List Scry.SourceFile
+  nodes : List Scry.Node
+  edges : List Scry.Edge
+  rels : List Scry.Relation
+  fileOf : List (List Nat)
+  nNodes : Nat
+  nEdges : Nat
+
+/-- Merge one store into the accumulator. The node schema has no file column, so each
+store's nodes get a `file_of` tuple to that store's synthetic `file:<path>` node. -/
+def Scry.mergeOne (acc : Scry.MergeAcc) (f : Scry.Facts) : Scry.MergeAcc :=
+  let nodeOff := acc.nNodes;
+  let edgeOff := acc.nEdges;
+  let fileOff := List.length acc.files;
+  let fileNodeOff := Nat.add nodeOff (List.length f.nodes);
+  let files := List.append acc.files (Scry.mapIdxFrom fileOff
+    (fun i sf => Scry.SourceFile.mk i sf.path sf.bytes) f.files);
+  let nodes := List.append acc.nodes (Scry.mapIdxFrom nodeOff
+    (fun i nd => Scry.Node.mk (Scry.nodeId i) nd.kind nd.field
+      (match nd.parent with
+        | .some p => .some (Scry.nodeId (Nat.add p.n nodeOff))
+        | .none => .none)
+      nd.span nd.named nd.isError nd.missing) f.nodes);
+  let fileNodes := Scry.mapIdxFrom fileNodeOff
+    (fun i sf => Scry.Node.mk (Scry.nodeId i) (String.append "file:" sf.path) ""
+      .none (Scry.Span.mk 0 sf.bytes) .true .false .false) f.files;
+  let edges := List.append acc.edges (Scry.mapIdxFrom edgeOff
+    (fun i e => Scry.Edge.mk (Scry.edgeId i)
+      (Scry.nodeId (Nat.add e.src.n nodeOff)) (Scry.nodeId (Nat.add e.dst.n nodeOff))
+      e.label) f.edges);
+  let rels := List.foldl (fun rs r =>
+      Scry.addRelation rs r.name r.arity
+        (List.map (fun t => List.map (fun v => Nat.add v nodeOff) t) r.tuples))
+    acc.rels f.relations;
+  let fileOf := match List.isEmpty f.files with
+    | .true => acc.fileOf
+    | .false => List.append acc.fileOf (Scry.mapIdxFrom nodeOff
+        (fun i _ => [i, fileNodeOff]) f.nodes);
+  Scry.MergeAcc.mk files (List.append nodes fileNodes) edges rels fileOf
+    (Nat.add fileNodeOff (List.length f.files)) (Nat.add edgeOff (List.length f.edges))
+
+/-- The language of a merge: the common language, or `"mixed"`. -/
+def Scry.mergeLanguage : List Scry.Facts → String
+  | .nil => "c"
+  | .cons f rest =>
+    let same := List.all (fun g => String.eq g.language f.language) rest;
+    match same with
+    | .true => f.language
+    | .false => "mixed"
+
+/-- Merge fact stores into one graph. -/
+def Scry.mergeFacts (fs : List Scry.Facts) : Except String Scry.Facts :=
+  let acc := List.foldl Scry.mergeOne
+    (Scry.MergeAcc.mk .nil .nil .nil .nil .nil 0 0) fs;
+  let rels := match List.isEmpty acc.fileOf with
+    | .true => acc.rels
+    | .false => Scry.addRelation acc.rels "file_of" 2 acc.fileOf;
+  Scry.finishFacts "scry-facts" 1 (Scry.mergeLanguage fs) acc.files acc.nodes
+    acc.edges (Scry.renumberRelations rels)
+
+/-- The empty store (a vacuous claim, not a crash). -/
+def Scry.emptyGraph : Scry.Facts :=
+  Scry.Facts.mk "scry-facts" 1 "c" .nil .nil .nil .nil
+    (Scry.adjOf 0 .nil .true) (Scry.adjOf 0 .nil .false)
+
+-- ## Diagnostics and the code action
+
+/-- One command diagnostic. -/
+structure Scry.IngestDiagnostic where
+  severity : String
+  message : String
+  file : String
+  line : Nat
+  column : Nat
+  endColumn : Nat
+
+/-- A diagnostic with the position of an `#ingest` declaration. -/
+def Scry.IngestDiagnostic.atLine (d : Scry.IngestDiagnostic) (file : String)
+    (line column endColumn : Nat) : Scry.IngestDiagnostic :=
+  Scry.IngestDiagnostic.mk d.severity d.message file line column endColumn
+
+/-- `error: file:line:column: message`. -/
+def Scry.renderDiagnostic (d : Scry.IngestDiagnostic) : String :=
+  let pos := match Nat.beq d.line 0 with
+    | .true => ""
+    | .false => String.append ":" (String.append d.file
+        (String.append ":" (String.append (Nat.repr d.line)
+          (String.append ":" (Nat.repr d.column)))));
+  String.append (String.append d.severity pos) (String.append ": " d.message)
+
+/-- The LSP severity number. -/
+def Scry.diagSeverity (s : String) : Nat :=
+  match String.eq s "error" with
+  | .true => 1
+  | .false => match String.eq s "warning" with
+    | .true => 2
+    | .false => 3
+
+/-- A diagnostic as an LSP `Diagnostic` JSON value. -/
+def Scry.diagJson (d : Scry.IngestDiagnostic) : Json :=
+  let line := match Nat.beq d.line 0 with | .true => 0 | .false => Nat.sub d.line 1;
+  Json.mkObj [
+    ("range", Json.mkObj [
+      ("start", Json.mkObj [("line", Json.ofNat line), ("character", Json.ofNat d.column)]),
+      ("end", Json.mkObj [("line", Json.ofNat line), ("character", Json.ofNat d.endColumn)]) ]),
+    ("severity", Json.ofNat (Scry.diagSeverity d.severity)),
+    ("source", Json.mkStr "scry"),
+    ("message", Json.mkStr d.message) ]
+
+/-- A text rendering of diagnostics. -/
+def Scry.renderDiagnostics (ds : List Scry.IngestDiagnostic) : String :=
+  String.intercalate "\n" (List.map Scry.renderDiagnostic ds)
+
+/-- The `workspace/executeCommand` payload an `#ingest` code action asks the client to
+send. The server must advertise and handle this command; the current server does not. -/
+def Scry.ingestCommandJson (root dest : String) : Json :=
+  Json.mkObj [
+    ("title", Json.mkStr (String.append "Ingest " (String.append root
+      (String.append " into " dest)))),
+    ("command", Json.mkStr "wiz.scry.ingest"),
+    ("arguments", Json.mkArr [Json.mkStr root, Json.mkStr dest]) ]
+
+/-- A `refactor.rewrite` code action offering to ingest. -/
+def Scry.ingestCodeActionJson (uri root dest : String) (start stop : Nat) : Json :=
+  Json.mkObj [
+    ("title", Json.mkStr (String.append "Ingest " (String.append root
+      (String.append " into " dest)))),
+    ("kind", Json.mkStr "refactor.rewrite"),
+    ("data", Json.mkObj [("uri", Json.mkStr uri), ("start", Json.ofNat start),
+      ("end", Json.ofNat stop)]),
+    ("command", Scry.ingestCommandJson root dest) ]

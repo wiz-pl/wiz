@@ -1,10 +1,18 @@
 // (11ab) The playground's Wasm module under Node: no page, no server. Calls the exported
 // `wiz_playground_eval` on a small program, reads the string back, and checks a
-// definition, one `#eval` (42, whose kernel normal form web/playground-values.js turns
+// definition, one `#eval` (42, whose kernel normal form web/framework/values.mjs turns
 // into `42`), a Bool and an error.
 //   usage: node web/playground_test.mjs OUT_DIR
-import { pathToFileURL } from "node:url";
-import { renderValue } from "./playground-values.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { renderValue } from "./framework/values.mjs";
+import { findPreset, presets } from "./framework/examples.mjs";
+import { PositionIndex } from "./framework/index-oracle.mjs";
+
+// The page adds the embedded Prelude before the engine sees a source
+// (`Web.Draft.withPrelude`); the engine itself needs the import, so the test does the
+// same thing the page does.
+const withPrelude = (text) => (/^\s*import\b/m.test(text) ? text : "import Prelude\n\n" + text);
 
 const outDir = process.argv[2] || new URL("./out/", import.meta.url).pathname;
 const createModule = (await import(pathToFileURL(outDir + "/wiz-playground.mjs").href)).default;
@@ -26,6 +34,25 @@ function check(name, got, want) {
   else { failed++; console.log(`FAIL: ${name}\n  want: ${JSON.stringify(want)}\n  got:  ${JSON.stringify(got)}`); }
 }
 
+// (tour depth) Firefox charges a Wasm call against its own (much smaller) native stack,
+// not the module's `-sSTACK_SIZE`; a long list freed by recursion therefore reported
+// "too much recursion" for the tour, which V8's default stack tolerated. A child Node
+// with `--stack-size` turns that into a local check. The tour's output is the long
+// list (a `String` is a character list), so this must stay below the old ~600 KB.
+if (process.env.WIZ_PLAYGROUND_TOUR_DEPTH === "1") {
+  const tour = findPreset("tour");
+  const lines = run(withPrelude(tour.code));
+  check("the tour under a reduced JS stack", lines.find((l) => l.startsWith("error:") || l.startsWith("parse error")), undefined);
+  check("the tour under a reduced JS stack has output", lines.length > 0, true);
+  if (failed) process.exit(1);
+  console.log("playground depth: all checks passed");
+  process.exit(0);
+}
+
+// (engine-trampoline) The clean-stop boundary is armed: the module exports its status and
+// a normal check leaves it at 0 (no stop). web/playground_engine_test.mjs covers the
+// survival itself with a stub; this checks the script-built module carries the export.
+check("the exit boundary export is there", typeof wasm._wiz_playground_exit, "function");
 const out = run(`import Prelude
 
 def twice (n : Nat) : Nat := n + n
@@ -44,9 +71,104 @@ check("an error", out[4], "error: unknown identifier nope");
 
 // A source without an import is what the page sends (`withPrelude` prepends it); the
 // engine itself needs the import, so this is the page's contract, checked here once.
-const bare = run("import Prelude\ndef one : Nat := 1\n#eval one\n");
+const bare = run(withPrelude("def one : Nat := 1\n#eval one\n"));
 check("a bare definition's own output", bare[0], "one : Nat");
 check("a bare evaluation", renderValue(bare[1]), "1");
+check("a normal run leaves no clean-stop code", Number(wasm._wiz_playground_exit(0n)), 0);
+
+// Every example is a program the page offers; each must check and evaluate without an
+// error line. This is the smoke test that keeps the Examples menu honest.
+for (const p of presets) {
+  const lines = run(withPrelude(p.code));
+  const bad = lines.find((l) => l.startsWith("error:") || l.startsWith("parse error"));
+  check(`example ${p.id} checks`, bad, undefined);
+  check(`example ${p.id} has output`, lines.length > 0, true);
+}
+
+const lists = run(withPrelude(findPreset("lists").code));
+check("the lists example renders", renderValue(lists[lists.length - 1]), "[2, 4, 6]");
+
+// (stage 2/3) the check's position and declaration index. The page adds the Prelude
+// line itself (`withPrelude`), so the checked text is that source.
+function call(name, source) {
+  const p = wasm.stringToNewUTF8(source);
+  const r = wasm[name](big(p));
+  wasm._free(big(p));
+  const text = r ? wasm.UTF8ToString(Number(r)) : "";
+  if (r) wasm._free(r);
+  return text;
+}
+function checkThat(name, condition, detail) {
+  if (condition) console.log(`ok: ${name}`);
+  else { failed++; console.log(`FAIL: ${name}${detail ? "\n  " + detail : ""}`); }
+}
+{
+  const body = "def twice (n : Nat) : Nat := n + n\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + body));
+  checkThat("check: an index", Array.isArray(answer.index) && answer.index.length > 0,
+    JSON.stringify(answer).slice(0, 400));
+  const index = new PositionIndex(body, answer.index);
+  const at = body.indexOf("n + n");
+  const last = body.lastIndexOf("n");
+  check("index: the body's expected type", (index.termGoal(at + 2) || {}).goal, "Nat");
+  check("index: at the body's end", (index.termGoal(at + 4) || {}).goal, "Nat");
+  // `n + n` is an infix macro: the rewritten node keeps its range but not its children
+  check("index: the rewrite's span is the whole body",
+    (index.termGoal(last) || { range: { start: {} } }).range.start.character, at);
+  check("index: nothing before it", index.termGoal(0), null);
+}
+{
+  // a plain application is not rewritten: its arguments keep their spans
+  const src = "def ap (f : Nat → Nat) (x : Nat) : Nat := f x\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + src));
+  const index = new PositionIndex(src, answer.index);
+  const body = src.indexOf("f x");
+  const arg = src.lastIndexOf("x");
+  check("app: the body's expected type", (index.termGoal(body) || {}).goal, "Nat");
+  check("app: the argument's expected type", (index.termGoal(arg) || {}).goal, "Nat");
+  check("app: the argument's own span", (index.termGoal(arg) || { range: { start: {} } }).range.start.character, arg);
+}
+{
+  // a tactic block: the state before `exact a` is the initial goal
+  const src = "import Prelude\n\ndef idA (A : Type) (a : A) : A := by\n  exact a\n";
+  const answer = JSON.parse(call("_wiz_playground_check", src));
+  const errors = answer.lines.filter((l) => l.sev === 1 || l.sev === 2);
+  check("by: the block checks", errors.length, 0);
+  const doc = "def idA (A : Type) (a : A) : A := by\n  exact a\n";
+  const index = new PositionIndex(doc, answer.index);
+  const step = doc.indexOf("exact");
+  const goal = index.goal(step);
+  checkThat("by: a goal before the step", goal !== null && goal.goals.length === 1,
+    JSON.stringify(answer.index));
+  checkThat("by: its target", goal !== null && goal.rendered.includes("⊢ A"), goal && goal.rendered);
+  const end = doc.indexOf("exact a") + "exact a".length;   // the block's stop
+  checkThat("by: the end of the block has a state", index.goal(end) !== null, JSON.stringify(goal));
+}
+{
+  // the declarations of the module being checked: name, printed type and source span,
+  // for completion, hover and definition (the page's server answers from these)
+  const body = "def twice (n : Nat) : Nat := n + n\ndef pred (n : Nat) : Nat := n\n";
+  const answer = JSON.parse(call("_wiz_playground_check", "import Prelude\n\n" + body));
+  const index = new PositionIndex(body, answer.index);
+  const decls = index.declarations();
+  checkThat("decls: twice and pred", decls.map((d) => d.label).sort().join(",") === "pred,twice",
+    JSON.stringify(decls));
+  const twice = index.declarationNamed("twice");
+  checkThat("decls: twice's type", twice !== null && twice.detail.includes("Nat"), twice && twice.detail);
+  check("decls: twice's span", twice && JSON.stringify(twice.range),
+    JSON.stringify({ start: { line: 0, character: 4 }, end: { line: 0, character: 9 } }));
+  check("decls: an unknown name", index.declarationNamed("nope"), null);
+  check("decls: the export is gone", typeof wasm._wiz_playground_names, "undefined");
+}
+
+{
+  const r = spawnSync(process.execPath, ["--stack-size=400", fileURLToPath(import.meta.url), outDir], {
+    env: { ...process.env, WIZ_PLAYGROUND_TOUR_DEPTH: "1" },
+    encoding: "utf8",
+  });
+  check("the tour runs with a reduced JS stack", r.status, 0);
+  if (r.status !== 0) console.log((r.stderr || "").split("\n").slice(0, 20).join("\n"));
+}
 
 if (failed) process.exit(1);
 console.log("playground: all checks passed");

@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Wiz → WGSL: an elementwise kernel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 64rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  code, pre { font-family: ui-monospace, monospace; }
+  pre { padding: .75rem; overflow-x: auto; background: #8882; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border-bottom: 1px solid #8884; padding: .3rem .5rem; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .pass { color: #197a19; font-weight: 600; }
+  .fail { color: #b00020; font-weight: 600; }
+  .muted { opacity: .75; }
+  .kernels { display: grid; gap: 1.5rem; }
+</style>
+<h1>Wiz → WGSL: an elementwise kernel</h1>
+<p>
+  The kernel is Wiz source (<code>webgpu/kernels/add.wiz</code>); the WGSL in
+  <code>webgpu/build/</code> is generated from it by <code>webgpu/tools/wgsl.mjs</code>,
+  which reads the syntax tree printed by <code>wiz parse</code>. The expected column is
+  Wiz's own interpreter (<code>#eval</code>), not JavaScript arithmetic. Three kernels are
+  shown here (<code>add</code>, <code>maxMul</code>, <code>mix</code>); the Deno harness
+  runs the same modules over 130-element inputs too (three workgroups).
+</p>
+<p id="status" class="muted">starting…</p>
+<div id="out" class="kernels"></div>
+<footer class="muted" style="margin-top:2rem">
+  WebGPU needs a secure context: <code>http://localhost</code> is one, <code>file://</code> is not.
+</footer>
+<script type="module" src="./page.js"></script>

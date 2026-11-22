@@ -1,0 +1,40 @@
+import Word
+import Std
+
+/-- The per-element operation. This is the definition the WGSL `fn addScalar` is emitted
+from; `ref.wiz` calls the entry kernel itself, so the interpreter checks the buffer reads
+as well. -/
+def addScalar (x y : U32) : U32 := UIntN.add x y
+
+/-- A second scalar kernel that exercises `match` on `Bool` and a multiply. -/
+def maxMulScalar (x y : U32) : U32 :=
+  match UIntN.lt x y with
+  | .true => UIntN.mul y (U32.ofNat 3)
+  | .false => x
+
+/-- A third scalar kernel: every supported primitive in one expression — `let`, all the
+arithmetic/bitwise operations, `beq`, `le` and a nested `match`. -/
+def mixScalar (x y : U32) : U32 :=
+  let z : U32 := UIntN.add (UIntN.land x y) (UIntN.lor x y);
+  let w : U32 := UIntN.xor z (UIntN.mul (UIntN.sub x y) (U32.ofNat 5));
+  let same : Bool := UIntN.beq x y;
+  match same with
+  | .true => UIntN.land w (U32.ofNat 65535)
+  | .false =>
+    match UIntN.le w (UIntN.add x (U32.ofNat 1)) with
+    | .true => w
+    | .false => UIntN.lor w (U32.ofNat 1)
+
+/-- The entry kernel: a map over the buffers. `i` is the index the host supplies (the
+dispatch's global invocation id); `a` and `b` are read-only buffers. -/
+def add (i : Nat) (a b : Array U32) : U32 :=
+  addScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
+
+/-- The same map with the second scalar operation. -/
+def maxMul (i : Nat) (a b : Array U32) : U32 :=
+  maxMulScalar (Array.getD a i (U32.ofNat 0)) (Array.getD b i (U32.ofNat 0))
+
+/-- The same map with the primitive-coverage kernel. The index is named `idx` on
+purpose: the emitter must use the entry's own parameter name, not assume `i`. -/
+def mix (idx : Nat) (a b : Array U32) : U32 :=
+  mixScalar (Array.getD a idx (U32.ofNat 0)) (Array.getD b idx (U32.ofNat 0))

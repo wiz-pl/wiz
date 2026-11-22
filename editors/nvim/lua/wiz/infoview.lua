@@ -149,6 +149,7 @@ local item_titles = {
   import = 'Import',
   instance = 'Instances',
   declaration = 'Declarations',
+  widget = 'Widgets',
   message = 'Messages',
 }
 
@@ -156,11 +157,24 @@ local function present(x)
   return x ~= nil and x ~= vim.NIL
 end
 
+--- The title of an item, with `default` for a missing one (JSON null decodes as
+--- `vim.NIL`, which `Builder:text` cannot split).
+local function item_title(it, default)
+  return present(it.title) and it.title or default
+end
+
 --- One item of wiz/interactiveInfo.
 function Builder:item(it)
+  if type(it) ~= 'table' then
+    return
+  end
   local srow = self:pos()
-  if it.kind == 'declaration' then
-    self:text(it.title or '', 'WizInfoviewHypName')
+  if it.kind == 'widget' then
+    -- A terminal cannot draw the SVG; name it and point at the browser infoview.
+    self:text(item_title(it, 'widget'), 'WizInfoviewHypName')
+    self:text(' (open the browser infoview to draw it)', 'WizInfoviewMuted')
+  elseif it.kind == 'declaration' then
+    self:text(item_title(it, ''), 'WizInfoviewHypName')
     if present(it.type) then
       self:text ' : '
       self:tagged(it.type)
@@ -171,7 +185,7 @@ function Builder:item(it)
       self:tagged(it.type)
     end
   else
-    self:text(it.title or '', it.kind == 'message' and 'WizInfoviewMuted' or nil)
+    self:text(item_title(it, ''), it.kind == 'message' and 'WizInfoviewMuted' or nil)
     if present(it.text) then
       for _, line in ipairs(vim.split(it.text, '\n', { plain = true })) do
         self:newline()
@@ -248,16 +262,18 @@ function M.layout(src, goals, term, err, info)
   if type(items) == 'table' then
     local section = nil
     for _, it in ipairs(items) do
-      local title = item_titles[it.kind] or 'Info'
-      if title ~= section then
-        if goals or (term and term.goal) or section then
+      if type(it) == 'table' then
+        local title = item_titles[it.kind] or 'Info'
+        if title ~= section then
+          if goals or (term and term.goal) or section then
+            b:newline()
+          end
+          b:text(title, 'WizInfoviewTitle')
           b:newline()
+          section = title
         end
-        b:text(title, 'WizInfoviewTitle')
-        b:newline()
-        section = title
+        b:item(it)
       end
-      b:item(it)
     end
   end
   if not goals and not (term and term.goal) and #items == 0 then
@@ -641,7 +657,7 @@ end
 -- follows this editor's cursor.
 
 --- Open the web infoview for `buf`'s server (default: the current buffer). The result
---- (`{ port, url, message? }`) is kept in `M.state.browser`, for tests.
+--- (`{ port, url, token, message? }`; #430: the url carries the token) is kept in `M.state.browser`, for tests.
 function M.open_browser(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   lsp.request(buf, 'wiz/browserInfoview', vim.empty_dict(), function(err, result)

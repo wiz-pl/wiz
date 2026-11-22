@@ -104,6 +104,21 @@ run 1 new --check --tree "$root/Tests/trust-ledger/new/tree" \
 has "new source of trust (1)" new
 has "axiom bad" new
 
+# An inductive proposition (#252) is kernel-checked: no source, so an empty ledger is clean.
+run 0 ind-prop --check --tree "$root/Tests/trust-ledger/ind-prop/tree" \
+  --ledger "$root/Tests/trust-ledger/ind-prop/ledger.tsv" --today "$today"
+has "trust ledger: OK (0 sources" ind-prop
+
+# An `implemented_by` on a partial definition: the `partial` row alone hides the native
+# step compiled code runs, so the new-entry gate reports it as a second source.
+run 1 impl-partial --check --tree "$root/Tests/trust-ledger/impl-partial/tree" \
+  --ledger "$root/Tests/trust-ledger/impl-partial/ledger.tsv" --today "$today"
+has "new source of trust (1)" impl-partial
+has "native pBase := pOther" impl-partial
+run 0 impl-partial-ok --check --tree "$root/Tests/trust-ledger/impl-partial/tree" \
+  --ledger "$root/Tests/trust-ledger/impl-partial/ledger-ok.tsv" --today "$today"
+has "trust ledger: OK (2 sources" impl-partial-ok
+
 # A row that exists but has no reason: not a reviewed row.
 run 1 unreasoned --check --tree "$root/Tests/trust-ledger/unreasoned/tree" \
   --ledger "$root/Tests/trust-ledger/unreasoned/ledger.tsv" --today "$today"
@@ -148,6 +163,60 @@ run 0 renew-check --check --tree "$root/Tests/trust-ledger/legacy/tree" \
   --ledger "$renew" --today 2027-10-01
 has "1 legacy rows" renew-check
 
+# A reasoned row whose review date has passed is renewed by --renew-expired: the reason
+# is kept with a dated reviewer/basis note, and the owner becomes the named re-reviewer.
+# --update --review alone leaves it stale: renewal used to apply only to migration rows,
+# of which there are none.
+renewed=$tmp/renewed.tsv
+cp "$root/Tests/trust-ledger/expired/ledger.tsv" "$renewed"
+run 0 renew-expired --update --renew-expired --review 2028-01-01 \
+  --owner "renew-fixture" --reason "re-checked the fixture source" \
+  --tree "$root/Tests/trust-ledger/expired/tree" --ledger "$renewed" --today "$today"
+has "1 expired renewed" renew-expired
+barrier # renew-expired wrote $renewed, which the greps and next case read
+grep -Fq "2028-01-01" "$renewed" || fail "renew-expired: the review date was not updated"
+grep -Fq "fixture: expired row" "$renewed" || fail "renew-expired: the original reason was lost"
+grep -Fq "renewed 2026-11-15 by renew-fixture: re-checked the fixture source" "$renewed" ||
+  fail "renew-expired: the reviewer or basis was not recorded"
+run 0 renew-expired-check --check --tree "$root/Tests/trust-ledger/expired/tree" \
+  --ledger "$renewed" --today 2027-10-01
+has "trust ledger: OK (1 sources" renew-expired-check
+
+stale=$tmp/stale.tsv
+cp "$root/Tests/trust-ledger/expired/ledger.tsv" "$stale"
+run 0 no-renew-expired --update --review 2028-01-01 \
+  --tree "$root/Tests/trust-ledger/expired/tree" --ledger "$stale" --today "$today"
+has "0 expired renewed" no-renew-expired
+barrier # the check below reads $stale
+run 1 stale-check --check --tree "$root/Tests/trust-ledger/expired/tree" \
+  --ledger "$stale" --today "$today"
+has "expired on 2020-01-01" stale-check
+
+# --renew-expired needs a date, a named reviewer, a basis, --review is only for --update,
+# and a same-day stamp is the failure the 90-day floor exists for.
+run 2 renew-expired-no-review --update --renew-expired --owner "gate-fixture" \
+  --reason "fixture" --tree "$root/Tests/trust-ledger/expired/tree" \
+  --ledger "$tmp/x.tsv" --today "$today"
+has "needs --review" renew-expired-no-review
+run 2 renew-expired-no-owner --update --renew-expired --review 2028-01-01 \
+  --reason "fixture" --tree "$root/Tests/trust-ledger/expired/tree" \
+  --ledger "$tmp/x2.tsv" --today "$today"
+has "needs --owner" renew-expired-no-owner
+run 2 renew-expired-no-basis --update --renew-expired --review 2028-01-01 \
+  --owner "gate-fixture" --tree "$root/Tests/trust-ledger/expired/tree" \
+  --ledger "$tmp/x3.tsv" --today "$today"
+has "needs --reason" renew-expired-no-basis
+run 2 renew-expired-short --update --renew-expired --review 2026-11-16 \
+  --owner "gate-fixture" --reason "fixture" \
+  --tree "$root/Tests/trust-ledger/expired/tree" --ledger "$tmp/y.tsv" --today "$today"
+has "less than 90 days" renew-expired-short
+run 2 review-short-new --update --reason "fixture: too short" --review 2026-11-16 \
+  --tree "$root/Tests/trust-ledger/new/tree" --ledger "$tmp/z.tsv" --today "$today"
+has "less than 90 days" review-short-new
+run 2 renew-without-update --check --renew-expired --review 2028-01-01 \
+  --tree "$root/Tests/trust-ledger/expired/tree" --ledger "$tmp/w.tsv" --today "$today"
+has "only meaningful with --update" renew-without-update
+
 # --- --update ----------------------------------------------------------------------
 # A tree with a new axiom and an empty ledger: --update refuses without a reason.
 # Separate files, so the refusal and the accepted update do not race.
@@ -170,5 +239,12 @@ grep -Fq "2027-06-30" "$ledger" || fail "update: the review date is not in the l
 run 0 update-check --check --tree "$root/Tests/trust-ledger/new/tree" \
   --ledger "$ledger" --today "$today"
 has "0 legacy rows" update-check
+
+# The counts quoted in docs/trust-ledger.md and CHANGELOG.md are generated from the
+# ledger by scripts/trust-counts.py; a drift is a failure. (No build needed.)
+if ! python3 "$root/scripts/trust-counts.py" --check >"$tmp/counts.out" 2>&1; then
+  cat "$tmp/counts.out" >&2
+  fail "trust counts: the docs disagree with the ledger" 0
+fi
 
 finish

@@ -44,8 +44,10 @@ MODES = [
     "strmap-insert", "strmap-find", "strmap-miss", "strmap-iterate",
     "array-push", "array-index", "array-map", "array-fold",
     "bytes-append", "bytes-slice", "bytes-compare",
+    "str-append", "str-push", "str-join",
     "text-split", "text-replace", "text-trim", "text-eq", "text-suffix",
     "sort", "hash",
+    "list-index", "egraph",
 ]
 
 
@@ -280,9 +282,11 @@ DEFAULT_SIZES = {
     "array-push": 2000000, "array-index": 500000, "array-map": 1000000,
     "array-fold": 1000000,
     "bytes-append": 2000000, "bytes-slice": 2000000, "bytes-compare": 2000000,
+    "str-append": 10000, "str-push": 200000, "str-join": 10000,
     "text-split": 40000, "text-replace": 40000, "text-trim": 40000, "text-eq": 40000,
     "text-suffix": 40000,
     "sort": 100000, "hash": 300000,
+    "list-index": 4000, "egraph": 3000,
 }
 
 if __name__ == "__main__":

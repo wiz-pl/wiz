@@ -215,12 +215,13 @@ def elimsAt (l k : Nat) : List (String × Term Q) :=
   let lams (xs : List Name) (b : Term Q) : Term Q := xs.foldr .lam b
   let P := lams ["i", "x"] (.unit 1)
   let S := lams ["i"] (.unit (Level.ofNat (l + 1)))
+  let SA := lams ["j", "i"] (.unit (Level.ofNat (l + 1)))
   [("ind", .ind l' I uD 1 P (lams ["i", "xs", "ih"] .tt) .tt x false),
    ("sfix", .sfix l' I uD 1 P (lams ["s", "rec", "i", "x"] .tt) .szInf .tt x),
    ("scase", .scase l' (.qlit .many) I uD 1 P (lams ["j", "i", "xs"] .tt) .szInf .tt x),
    ("coit", .coit l' I sD S (lams ["i", "s"] (.pair .tt (.pair .tt .tt))) .tt .tt),
-   ("scofix", .scofix l' I sD S
-      (lams ["s", "rec", "i", "a"] (.cocon (.pair (.app (.app (.var 2) (.var 1)) (.var 0)) (.pair .tt .tt)))) .szInf .tt .tt)]
+   ("scofix", .scofix l' I sD SA
+      (lams ["j", "rec", "i", "a"] (.cocon (.pair (.app (.app (.var 2) (.var 1)) (.var 0)) (.pair .tt .tt)))) .szInf .tt .tt)]
 
 /-- Every eliminator of `elimsAt l k` is rejected with the index-level error. -/
 def elimsRejected (l k : Nat) : IO Unit :=
