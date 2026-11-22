@@ -2428,6 +2428,14 @@ def Fe.scope1 (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment aft
     | .lent _ _ => Fe.scopeOne cx env p (Fe.Req.mk 5 h.name rq.as .nil) ment after early inside k
     | _ => Fe.scopeOne cx env p rq ment after early inside k)
   | _, _, _ => Fe.scopeOne cx env p rq ment after early inside k
+/-- `f (S := sty) (B := bty)`: a scope call whose type arguments are named, so the
+elaborator also solves the `RegionFree B` instance. `@f sty bty …` would have to pass
+the instance explicitly, and the point is that it is found by resolution (or not). -/
+def Fe.scopeNamed2 (sty bty : Fe.Ty) (f : String) : Fe.Out :=
+  Fe.Out.s (f +++ " (S := ") ⊕ Fe.Out.t sty ⊕ Fe.Out.s ") (B := " ⊕ Fe.Out.t bty ⊕ Fe.Out.s ")"
+def Fe.scopeNamed3 (sty bty : Fe.Ty) (hty : Fe.Out) (f : String) : Fe.Out :=
+  Fe.scopeNamed2 sty bty f ⊕ Fe.Out.s " (H := " ⊕ hty ⊕ Fe.Out.s ")"
+
 /-- One borrow scope around a statement: the lender is rebound to a `Lent` token (or, for a
 reborrow, a `Lent`/`Uniq` of the handle) and the body runs inside, with the E0499/E0502
 checks the request's kind needs. -/
@@ -2574,28 +2582,36 @@ def Fe.scopeOne (cx : Fe.Cx) (env : Fe.Env) (p : List Nat) (rq : Fe.Req) (ment a
     let pre1 := Fe.the Fe.Out (match thrN with
       | .nil => pre
       | _ => Fe.unpackH oName thrN 0 ⊕ pre);
+    -- The scope's type arguments are named (not `@`), so the elaborator also solves the
+    -- `RegionFree B` instance the scope asks for: `B` is the result type, and a `B` that
+    -- quantifies over the scope's region (`(0 r : Region) × Shr r A`) has no instance.
+    let hty := Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr);
     let head := Fe.the Fe.Out (match rq.kind, linS, thrN with
-      | .zero, .true, .nil => Fe.Out.s "@Uniq.borrow " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " ")
-      | .zero, .true, _ => Fe.Out.s "@Uniq.borrowIn " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s " "
-          ⊕ Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr) ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
-      | .succ .zero, _, .cons _ _ => Fe.Out.s "@Shr.borrowIn " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s " "
-          ⊕ Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr) ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
-      | .succ (.succ (.succ .zero)), _, .cons _ _ => Fe.Out.s "@Uniq.shareIn " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s " "
-          ⊕ Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr) ⊕ Fe.Out.s (" " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
-      | .succ .zero, _, _ => Fe.Out.s "@Shr.borrow " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " ")
-      | .succ (.succ (.succ .zero)), _, _ => Fe.Out.s "@Uniq.share " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s (" " +++ rq.lender +++ " ")
+      | .zero, .true, .nil => Fe.scopeNamed2 sty bty "Uniq.borrow"
+          ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " ")
+      | .zero, .true, _ => Fe.scopeNamed3 sty bty hty "Uniq.borrowIn"
+          ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
+      | .succ .zero, _, .cons _ _ => Fe.scopeNamed3 sty bty hty "Shr.borrowIn"
+          ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
+      | .succ (.succ (.succ .zero)), _, .cons _ _ => Fe.scopeNamed3 sty bty hty "Uniq.shareIn"
+          ⊕ Fe.Out.s (" " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " ")
+      | .succ .zero, _, _ => Fe.scopeNamed2 sty bty "Shr.borrow"
+          ⊕ Fe.Out.s (" " +++ cx.sigma +++ " " +++ rq.lender +++ " ")
+      | .succ (.succ (.succ .zero)), _, _ => Fe.scopeNamed2 sty bty "Uniq.share"
+          ⊕ Fe.Out.s (" " +++ rq.lender +++ " ")
       | .succ (.succ (.succ (.succ (.succ .zero)))), _, _ =>
         let lens := Fe.the String (match Fe.head sty with
           | .some (sn, _) => sn +++ "." +++ zf +++ "L"
           | .none => "_");
+        let z2 := Fe.Out.s "Uniq.zoom (S := " ⊕ Fe.Out.t sty ⊕ Fe.Out.s ") (X := " ⊕ Fe.Out.t zt
+          ⊕ Fe.Out.s ") (B := " ⊕ Fe.Out.t bty ⊕ Fe.Out.s ")";
         (match thrN with
-        | .nil => Fe.Out.s "@Uniq.zoom " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t zt ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty
-            ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " ")
-        | _ => Fe.Out.s "@Uniq.zoomIn " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t zt ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s " "
-            ⊕ Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr) ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "))
-      | _, _, .nil => Fe.Out.s "@Uniq.reborrow " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s (" " +++ rq.lender +++ " ")
-      | _, _, _ => Fe.Out.s "@Uniq.reborrowIn " ⊕ Fe.Out.t (Fe.regionOf lt) ⊕ Fe.Out.s " " ⊕ Fe.Out.t sty ⊕ Fe.Out.s " " ⊕ Fe.Out.t bty ⊕ Fe.Out.s " "
-          ⊕ Fe.packHT (List.map (fun (w : Fe.Var) => w.ty) thr) ⊕ Fe.Out.s (" " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "));
+        | .nil => z2 ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " ")
+        | _ => z2 ⊕ Fe.Out.s " (H := " ⊕ hty ⊕ Fe.Out.s (" " +++ lens +++ " " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "))
+      | _, _, .nil => Fe.scopeNamed2 sty bty "Uniq.reborrow"
+          ⊕ Fe.Out.s (" " +++ rq.lender +++ " ")
+      | _, _, _ => Fe.scopeNamed3 sty bty hty "Uniq.reborrowIn"
+          ⊕ Fe.Out.s (" " +++ rq.lender +++ " " +++ Fe.packH thrN +++ " "));
     let opn := Fe.the Fe.Out (match linS with
       | .false => Fe.o ""
       | .true => Fe.Out.s ("let (" +++ b +++ ", " +++ rq.lender +++ ") := " +++ r +++ ";") ⊕ Fe.Out.nl);
@@ -3213,12 +3229,14 @@ def Fe.pass1 (bp : List Nat) : List (Nat × Syntax) → Fe.Glob → Fe.Glob × L
       ("feral_item.structI", fun _ => (match Fe.run (Fe.fieldsOf (Fe.sub p 3) (Fe.kids (Fe.arg it 3))) with
         | .ok fs _ =>
           let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs g.enums (.cons (Fe.Struct.mk name fs) g.structs));
-          (r.1, .cons (Fe.Item.data p ("structure " +++ name +++ " where" +++ Fe.fieldLines fs +++ "\n  deriving Lens")) r.2)
+          (r.1, .cons (Fe.Item.data p ("structure " +++ name +++ " where" +++ Fe.fieldLines fs
+            +++ "\n  deriving Lens\ninstance : RegionFree " +++ name +++ " := RegionFree.mk ()")) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
       ("feral_item.enumI", fun _ => (match Fe.run (Fe.ctorsOf (Fe.sub p 3) (Fe.kids (Fe.arg it 3))) with
         | .ok cs _ =>
           let r := Fe.pass1 bp xs (Fe.Glob.mk g.sigs (.cons (Fe.Enum.mk name .nil cs) g.enums) g.structs);
-          (r.1, .cons (Fe.Item.data p ("inductive " +++ name +++ " where" +++ Fe.ctorLines cs)) r.2)
+          (r.1, .cons (Fe.Item.data p ("inductive " +++ name +++ " where" +++ Fe.ctorLines cs
+            +++ "\ninstance : RegionFree " +++ name +++ " := RegionFree.mk ()")) r.2)
         | .err q m => let r := Fe.pass1 bp xs g; (r.1, .cons (Fe.Item.bad q m) r.2))) ▸
       ("feral_item.fnI", fun _ => (match Fe.run (Fe.sigOf p it) with
         | .ok sig _ =>
