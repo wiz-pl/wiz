@@ -1,16 +1,3 @@
-# The files one whole =selfhost-libdiff run compares: every *.wiz under lib/ and
-# scry/, sorted the way Tests/Groups/SelfhostLibDiff.lean's libDiffFiles sorts them.
-# `scripts/check-libdiff-corpus.sh` checks that this list is exactly that walk: every
-# entry is a file, every file is an entry, there are no duplicates, and the order is
-# `LC_ALL=C`. Add or remove a line here in the same change that adds or removes the
-# file under lib/ or scry/. Regenerate with:
-#
-#   find lib scry -name '*.wiz' | LC_ALL=C sort
-#
-# There are no exclusions. The sweep compares acceptance, the first error's code, span
-# and message, and the declaration count; a file the self-hosted frontend cannot parse
-# is a divergence to report, not a reason to drop it from the corpus. A module that
-# genuinely cannot be compared needs its reason here, next to its absence, not silence.
 lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
@@ -69,6 +56,15 @@ lib/RingTactic.wiz
 lib/Sat.wiz
 lib/SatTactic.wiz
 lib/Scope.wiz
+lib/Scry/Quire.wiz
+lib/Scry/QuireCompact.wiz
+lib/Scry/QuireCore.wiz
+lib/Scry/QuireCursor.wiz
+lib/Scry/QuireDurable.wiz
+lib/Scry/QuireFindings.wiz
+lib/Scry/QuireMmap.wiz
+lib/Scry/QuireRegistry.wiz
+lib/Scry/QuireStorage.wiz
 lib/Serial.wiz
 lib/Session.wiz
 lib/Sha.wiz

@@ -231,13 +231,13 @@ def viewOf (st : StoreState) : EIO StoreView := do
   EIO.pure (StoreView.mk n links)
 
 /-- The plan for the retained roots of a state. -/
-def planOf (st : StoreState) : EIO Plan := do
+def quirePlan (st : StoreState) : EIO Plan := do
   v ← viewOf st;
   EIO.pure (compact v (Registry.roots st.registry))
 
 /-- Live pages, total pages and wasted bytes: the policy's input. -/
 def statsOf (st : StoreState) : EIO Stats := do
-  p ← planOf st;
+  p ← quirePlan st;
   EIO.pure (Plan.stats p st.registryPages)
 
 /-- The current store's statistics. -/
@@ -326,7 +326,7 @@ touched: this is crash states 1–3 of the module header. The new registry is wr
 before either meta record, and the whole image is fsynced before the rename switch. -/
 def prepareCompaction (h : DurableHandle) : EIO Prepared := do
   st ← EIO.lift (MVar.read h.state);
-  p ← planOf st;
+  p ← quirePlan st;
   let remapped := Registry.remap st.registry p.rootMap;
   let refs := Registry.roots remapped;
   let liveN := List.length p.live;

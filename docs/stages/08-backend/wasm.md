@@ -22,7 +22,9 @@ GMP) as JavaScript `BigInt`s and decodes the result in the same generic tree syn
 therefore read back by `wiz run` with `main`'s type exactly as the C and LLVM backends'
 results are. The host is checked in and is the only thing needed to *run* a module; a
 browser or another host can instantiate the module itself by providing the five `env`
-functions below.
+functions below. An installed toolchain ships it as `share/wiz/web/wasm-host.mjs`, beside
+`lib/`: `wiz run --target wasm` looks there first and at `web/wasm-host.mjs` after it,
+so it does not depend on the current directory.
 
 ## The supported subset
 
