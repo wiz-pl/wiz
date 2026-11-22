@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/repo-subsets.py",
-  "git": "e8b734fe8c7d9a124a1cf1bca5c09c928708eecf",
+  "git": "unstaged",
   "subsets": {
     "docs": {
       "files": 114,
@@ -27,7 +27,7 @@
         "lake-manifest.json",
         "lean-toolchain"
       ],
-      "sha256": "e3649e478d64d2556e277d5ec186ba4fbfb879295b6c9cddf21dcf8deb8f1b46"
+      "sha256": "3932ff98b4fd6886811666a8e78cc1cf303526406383575f92b6f630439b69d2"
     },
     "packages": {
       "files": 911,
