@@ -868,7 +868,7 @@ matching node, and the driver restarts the pass. -/
 
 /-- Instantiate a rule's `∀` telescope in `ctx`, then match its left side against the
 whole term `t`: the same checks as `matchRule`, one candidate. -/
-partial def matchCand (g : Globals R) (ctx : LocalCtx R) (A pat lhs rhs happ : Term R)
+partial def matchCand (_g : Globals R) (ctx : LocalCtx R) (A pat lhs rhs happ : Term R)
     (pairs : List (Term R × Term R)) (cand : Term R) :
     ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
   let lvl := ctx.lvl
@@ -914,7 +914,8 @@ def localKernelCtx (g : Globals R) (ctx : LocalCtx R) : Ctx R :=
 in `ctx`), the applied lemma and the binder arguments. -/
 def prepareIn (g : Globals R) (ctx : LocalCtx R) (h : Term R) :
     ElabM R (Option (Term R × Term R × Term R × Term R × List (Term R × Term R))) := do
-  let (body, happ, pairs) ← match ← ruleType? ctx g h with
+  let r? ← ruleType? ctx g h
+  let (body, happ, pairs) ← match r? with
     | some p => pure p
     | none => do
       let hty ← match (← get).kernelInfer (localKernelCtx g ctx) h with
@@ -938,7 +939,8 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
   let goalT ← zonk gl.ctx.lvl (quote g gl.ctx.lvl gl.ty)
   let rec go (ctx : LocalCtx R) (t : Term R) : ElabM R (Option (Term R × Term R)) := do
     let depth := ctx.lvl - gl.ctx.lvl
-    let matched ← match ← prepareIn g ctx (h.lift depth) with
+    let prepared ← prepareIn g ctx (h.lift depth)
+    let matched ← match prepared with
       | some (A, lhs, rhs, happ, pairs) =>
         let pat := if rtl then rhs else lhs
         match ← matchCand g ctx A pat lhs rhs happ pairs t with
@@ -972,7 +974,7 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
             | some (kidNew, pf) => do
               let C := t.abstract kid
               let parentNew := C.instantiateAt 0 kidNew
-              if parentNew == t then tryKids rest
+              if parentNew == t then do set s; tryKids rest
               else do
                 -- `A` is the child's type: let the kernel solve the hole from the proof
                 let A ← freshTypeMeta ctx "simp congr"
@@ -980,7 +982,7 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
                   (.reflTy kidNew) kid pf
                 let P : Term R := .lam "x" (.eqTy (.app (C.lift 1) (.var 0)) (t.lift 1))
                 pure (some (parentNew, .transp A kid P (.reflTy t) kidNew sym))
-            | none => tryKids rest
+            | none => do set s; tryKids rest
         tryKids kids
   go gl.ctx goalT
 

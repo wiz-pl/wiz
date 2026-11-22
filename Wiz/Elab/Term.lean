@@ -4486,7 +4486,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let ty? ← typeOf? gl eT
     let isBool ← match ty? with
       | some ty => match ← force ty with
-        | .neutral (.const "Bool" _) _ => pure true
+        | .neutral (.global "Bool" _) _ => pure true
         | _ => pure false
       | none => pure false
     unless isBool do
