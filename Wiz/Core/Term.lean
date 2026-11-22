@@ -884,7 +884,7 @@ def resolveName (g : Globals R) (x : Name) : Except String Name :=
       ++ [x] ++ g.opens.map (· ++ "." ++ x)).filterMap fun n =>
         let k := g.resolve n
         if g.decls.contains k && (g.privateTo? k).isNone then some k else none
-    match found.eraseDups with
+    match found.eraseDups with   -- complexity: ok (one name plus at most its opens)
     | [] => .ok (g.resolve x)
     | [n] => .ok n
     | ns =>

@@ -3123,7 +3123,11 @@ def selfHostGroup : Group where
     -- fix (and the whole self-check at 10.7 GB); it is ~17 MB now. The bound is loose
     -- enough for the compiler's own heap, and catches the exponential cache again.
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
-        let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter (!·.startsWith "import"))
+        -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
+        -- this snippet concatenates two of them and cuts the second, so drop the wrapper
+        -- (both lines) rather than inherit an unclosed block.
+        let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
+          !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
