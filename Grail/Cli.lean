@@ -77,6 +77,10 @@ def usage : String := "usage:
                           documentation of the package's lib targets (all by
                           default): `wiz doc` with the package's module roots, into
                           .grail/doc (see `wiz doc`)
+  grail lint FILE… [--baseline FILE|--baseline-write FILE]
+                          `wiz lint` with the package's module roots and the lint sets
+                          `grail.wiz` declares and `lint.conf` enables; the two baseline
+                          flags are `wiz lint`'s `--lint-baseline[-write]`
   grail targets           list the targets
   grail config            print the toolchain grail would use
   grail --version         print the version
@@ -413,6 +417,57 @@ def cliMain (args : List String) : IO UInt32 := do
     let args := ({ tc with searchPath := roots ++ rest }.toFlags ++ "doc" :: (chosen.map fun (_, r) => (dirAbs / r).toString) ++ wizOpts).toArray
     let child ← try IO.Process.spawn { cmd := wiz, args, cwd := dirAbs }
       catch e => IO.eprintln s!"grail doc: {wiz}: {e}"; return 127
+    child.wait
+  -- (lint P2) the package's lint policy: `wiz lint` with the sets `grail.wiz` declares
+  -- and `lint.conf` enables, and the package's module roots. A set that does not load,
+  -- an unknown capability or an undeclared set name is the driver's error, reported
+  -- before a single rule runs.
+  | "lint" :: lintOpts =>
+    let wiz ← wizExe opts.wiz
+    let dirAbs ← absolute dir
+    let (pkg, localSettings) ← match ← readConfig flagged binId std dir with
+      | .ok r => pure r
+      | .error e => do IO.eprintln e; return 1
+    let mut tc := defaults
+    for (k, v) in pkg.settings ++ localSettings do
+      if k == "index" || k == "index-commit" || k == "vendor" then continue
+      match tc.set k v with
+      | some t => tc := t
+      | none => IO.eprintln s!"grail lint: unknown setting {k}"; return 1
+    tc := (tc.parseFlags raw).1
+    let conf ← match ← readLintPolicy dir pkg with
+      | .ok c => pure c
+      | .error e => do IO.eprintln e; return 1
+    -- `--baseline FILE` and `--baseline-write FILE` are `wiz lint`'s flags under a
+    -- shorter spelling; anything else that starts with `-` is passed through
+    let rec splitLint : List String → List String × List String
+      | "--baseline" :: f :: rest =>
+        let (fs, bs) := splitLint rest; (fs, "--lint-baseline" :: f :: bs)
+      | "--baseline-write" :: f :: rest =>
+        let (fs, bs) := splitLint rest; (fs, "--lint-baseline-write" :: f :: bs)
+      | a :: rest =>
+        let (fs, bs) := splitLint rest
+        if a.startsWith "-" then (fs, a :: bs) else (a :: fs, bs)
+      | [] => ([], [])
+    let (files, flags) := splitLint lintOpts
+    if files.isEmpty then
+      IO.eprintln "grail lint: name at least one FILE (a package-wide sweep is not wired yet)"
+      return 2
+    let readPkg (d : System.FilePath) : IO (Except String Package) := do
+      pure ((← readConfig tc binId std d).map (·.1))
+    let deps ← match ← Registry.lockedRoots cache readPkg dir pkg IO.eprint opts.offline
+        (vendorOf dir opts.vendor pkg localSettings) with
+      | .ok rs => rs.mapM absolute
+      | .error e => do IO.eprintln s!"grail lint: {e}"; pure []
+    let roots := [dirAbs] ++ libRootsOf dirAbs pkg.targets ++ deps
+    let setArgs := conf.sets.flatMap fun (n, _) => ["--set", n]
+    let moduleArgs := conf.sets.flatMap fun (_, m) => ["--package-lint", (dirAbs / m).toString]
+    let rootArgs := conf.publicRoots.flatMap fun r => ["--public-roots", r]
+    let rest := tc.searchPath.filter (!roots.contains ·)
+    let args := ({ tc with searchPath := roots ++ rest }.toFlags ++ "lint" :: files.reverse ++
+      moduleArgs ++ setArgs ++ rootArgs ++ flags).toArray
+    let child ← try IO.Process.spawn { cmd := wiz, args, cwd := dirAbs }
+      catch e => IO.eprintln s!"grail lint: {wiz}: {e}"; return 127
     child.wait
   | "build" :: _ | "test" :: _ | ["targets"] | ["config"] | "update" :: _ | "fetch" :: _
   | "vendor" :: _ | "index" :: _ | "publish" :: _ | ["run", _] =>
