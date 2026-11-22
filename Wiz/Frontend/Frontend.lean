@@ -2,6 +2,7 @@ import Wiz.Elab.Command
 import Wiz.Module
 import Wiz.Rig.Instances
 import Wiz.Parser.DocComment
+import Wiz.Lint
 
 /-!
 # The frontend
@@ -242,7 +243,10 @@ the frontend — `Wiz.Format` and `Wiz.LSP` each held a 29–33 MB specialisatio
 cost is instance arguments in the frontend loop; the measurement is in
 `docs/building.md`, "The Lean build". -/
 @[nospecialize] partial def runFrontend (input : String) (s : CommandState R := {}) : CommandState R :=
-  go input s input.toList.toArray 0 s
+  let out := go input s input.toList.toArray 0 s
+  -- (lint) the module-scope rules and the per-site suppressions run once, after the
+  -- target is elaborated; the pass never changes a declaration
+  if out.lintEnabled then Lint.finish out input.toList.toArray else out
 where
   @[nospecialize] go (input : String) (base : CommandState R) (chars : Array Char) (pos : Nat) (s : CommandState R) : CommandState R :=
     (go' input base chars pos s {}).1
@@ -277,6 +281,7 @@ where
                   | none => let (e, checked, memo) := isolate (); (isoPut ref k e, checked, memo)
                 | _, _ => isolate ()
               (e.errs, checked.insert m (some e.errs), some e.state, memo.insert m e.state)
+          let outerLint := s
           let s := { s with checked }
           let (inner, memo) := match iso? with
             -- (a pristine state may still list imports, of modules without commands; the
@@ -299,7 +304,17 @@ where
           -- the info tree is positions in this file: keep only ours (and (11q) the import)
           -- (13m) the module's `local` notation stays in it
           let infos := if s.termInfo then s.infos.push (.importMod (cmd.getArg 1).info m) else s.infos
-          go' input base chars stop { (inner.endModule s) with messages := msgs, module := s.module, infos } memo
+          let out := { (inner.endModule s) with messages := msgs, module := s.module, infos }
+          -- (lint) the target's direct imports, and whether one contributes an effect
+          -- that a name never shows: `W302` uses both
+          let out := if out.lintEnabled && out.module == "" then
+            { out with
+              lintImports := if out.lintImports.any (·.1 == m) then out.lintImports
+                else out.lintImports.push (m, cmd.info)
+              lintEffectful := if Lint.effectfulImport outerLint inner then
+                out.lintEffectful.insert m else out.lintEffectful }
+          else out
+          go' input base chars stop out memo
       else go' input base chars stop (step chars cmd s) memo
     | .error e =>
       -- (13o) a keyword where a name was expected: which notation, from which module
@@ -323,7 +338,13 @@ where
     let s' := ((elabCommand cmd).run { s with pristine := false }).2
     let added := s'.globals.order.extract before s'.globals.order.size
     -- (a command macro's located output may have placed them already: keep that)
-    { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
-              declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    let out :=
+      { s' with declSites := added.foldl (fun m n => if m.contains n then m else m.insert n (cmd.info, s.module)) s'.declSites,
+                declDocs := if added.isEmpty then s'.declDocs else declDocsOf chars cmd added s'.declDocs }
+    -- (lint) post-elaboration findings are ordinary messages; this never changes a
+    -- declaration or whether the command was accepted
+    if out.lintEnabled && out.module == "" then
+      { out with messages := out.messages ++ (Lint.runCommand out cmd chars added).map Lint.Finding.toMsg }
+    else out
 
 end Wiz

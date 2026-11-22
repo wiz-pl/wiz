@@ -1,0 +1,6 @@
+import Prelude
+
+def shadow (x : Nat) : Nat :=
+  let y := x
+  let x := 2
+  x + y
