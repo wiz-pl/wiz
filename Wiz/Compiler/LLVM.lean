@@ -32,6 +32,20 @@ def fresh (base : String) : M String := modifyGet fun s => (s!"%{base}.{s.next}"
 
 def fn (n : Name) : String := "@" ++ C.mangle n
 
+/-- This backend's checked primitive table (the shared runtime symbols, stamped
+`.llvm`). It is not a copy of the C dispatch: both backends read `PrimOp.table`. -/
+def primTable : List PrimEntry := PrimOp.table .llvm
+
+/-- The runtime function for a primitive, from this backend's table. A missing entry is
+a compiler error (there is no `wiz_unknown_prim` fallback). -/
+def primFn (op : PrimOp) : String :=
+  match op with
+  | .extern key => C.externWrapper key
+  | _ =>
+    match primTable.find? (·.prim == op) with
+    | some e => e.symbol
+    | none => panic! s!"LLVM backend: no primitive-table entry for `{op.key}`"
+
 /-- The SSA name of a variable. -/
 def val (env : Std.HashMap Var String) (x : Var) : String := env.getD x s!"%x{x}"
 
@@ -80,14 +94,7 @@ def expr (arities : Std.HashMap Name Nat) (env : Std.HashMap Var String) (x : St
     let arr ← array env as
     emit s!"  {x} = call i64 @wiz_apply(i64 {val env f}, i32 {as.size}, ptr {arr})"
   | .prim op as =>
-    let f := match op with
-      | "nat.succ" => "wiz_nat_succ" | "nat.pred" => "wiz_nat_pred"
-      | "nat.add" => "wiz_nat_add" | "nat.sub" => "wiz_nat_sub" | "nat.mul" => "wiz_nat_mul"
-      | "nat.beq" => "wiz_nat_beq" | "nat.blt" => "wiz_nat_blt" | "lazyTag" => "wiz_lazy_tag" | "lazySet" => "wiz_lazy_set" | "memo" => "wiz_memo"
-      | "tag" => "wiz_tag_of" | "natTag" => "wiz_nat_tag" | "fieldAt" => "wiz_field_at" | "mkObj" => "wiz_mk_obj"
-      | "dropMoved" => "wiz_drop_moved"
-      | op => if op.startsWith "nat." then "wiz_nat_" ++ (op.drop 4).toString
-        else if (RVal.ExternSig.ofKey? op).isSome then C.externWrapper op else "wiz_unknown_prim"
+    let f := primFn op
     emit s!"  {x} = call i64 @{f}({args env as})"
   | .reset y => emit s!"  {x} = call i64 @wiz_reset(i64 {val env y})"
   | .reuse tok t as => do
