@@ -513,7 +513,12 @@ def trustGroup : Group where
         expectMsg ms "Outlives.refl : (0 ρ : Region) → Outlives ρ ρ"
         expectMsg ms "Outlives.static : (0 ρ : Region) → Outlives Region.static ρ"
         expectMsg ms "Outlives.trans : (0 ρ₁ : Region) → (0 ρ₂ : Region) → (0 ρ₃ : Region) → Outlives ρ₁ ρ₂ → Outlives ρ₂ ρ₃ → Outlives ρ₁ ρ₃"
-        let known := ["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"]
+        -- The six ledger rows are `Region`, `Region.static` and the four `Outlives` ones, and
+        -- `#print axioms` reports the axioms in a derivation's *type* as well as its value, so
+        -- `r1 : (0 ρ : Region) → Outlives ρ ρ` depends on `Region` too. The assertion below is
+        -- "no axiom outside the six", not "no type axiom": that is what the case pins.
+        let known := ["Region", "Region.static", "Outlives", "Outlives.refl",
+          "Outlives.static", "Outlives.trans"]
         for (nm, needs) in [("r1", "Outlives.refl"), ("r2", "Outlives.static"),
             ("r3", "Outlives.trans"), ("r4", "Outlives.trans")] do
           let ax := printAxiomsOf ms nm
