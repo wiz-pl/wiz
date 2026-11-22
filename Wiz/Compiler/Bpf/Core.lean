@@ -24,33 +24,135 @@ namespace Wiz.Compiler.Bpf
 
 /-! ## Program kind and context layout -/
 
-/-- The context a program is compiled against. Only XDP and TC in P0-P2 (tracing needs
-CO-RE, which this path deliberately avoids). -/
+/-- The context a program is compiled against.
+
+`xdp`/`tc` are the packet kinds. `tracepoint` and `uprobe` are the two **tracing** kinds:
+their context is a fixed, declared layout (the tracepoint's own format file, or the
+platform's `struct pt_regs`), so they need no `vmlinux.h`, no BTF and no CO-RE
+(`wiz-notes/ebpf-dynamic.md` §1). A tracing program is a sensor: it reads the syscall's
+arguments through the bounded accessors and writes one POD event.
+-/
 inductive ProgKind where
   | xdp
   | tc
+  | tracepoint
+  | uprobe
   deriving Repr, BEq, Inhabited
 
-/-- The ELF section name libbpf expects. -/
+/-- The canonical ELF section name. A `tracepoint`/`uprobe` section is program-specific
+(`tracepoint/<category>/<event>`, `uprobe/<binary>:<symbol>`); the emitter uses
+`Program.sectionName`, and this is the loader's fallback spelling. -/
 def ProgKind.elfSection : ProgKind → String
   | .xdp => "xdp"
   | .tc => "classifier"
+  | .tracepoint => "tracepoint"
+  | .uprobe => "uprobe"
 
-/-- Accept the section spellings of §5.2 (and libbpf's `sched_cls` alias). -/
-def ProgKind.ofSection? : String → Option ProgKind
+/-- The loader's attach metadata. For a tracepoint the spec is `category:event` (the
+`perf_event_open` name); for a uprobe it is `binary:symbol`. The packet kinds have no
+argument. -/
+structure Attach where
+  /-- `"xdp"`, `"tc"`, `"tracepoint"` or `"uprobe"` -/
+  kind : String
+  /-- tracepoint: the category (`syscalls`); uprobe: the binary; otherwise `""` -/
+  target : String
+  /-- tracepoint: the event (`sys_enter_execve`); uprobe: the symbol; otherwise `""` -/
+  event : String
+  /-- the exact spec: `syscalls:sys_enter_execve`, `binary:symbol`, `xdp`, `classifier` -/
+  spec : String
+  deriving Repr, BEq, Inhabited
+
+/-- Split a tracepoint section `tracepoint/<category>/<event>`. Exactly two non-empty
+parts are required; a typo is a `none`, never a guessed category. -/
+def tracepointParts? (section : String) : Option (String × String) :=
+  if section.startsWith "tracepoint/" then
+    match (section.drop "tracepoint/".length).toString.splitOn "/" with
+    | [category, event] =>
+      if category.isEmpty || event.isEmpty then none else some (category, event)
+    | _ => none
+  else none
+
+/-- Split a uprobe section `uprobe/<binary>:<symbol>`. The binary may be an absolute
+path (`uprobe//bin/sh:readline` leaves `/bin/sh`), and the symbol is the last non-empty
+part. A binary path containing `:` is not supported (the loader's section grammar is
+ambiguous there); use a symlink without a colon. -/
+def uprobeParts? (section : String) : Option (String × String) :=
+  if section.startsWith "uprobe/" then
+    match (section.drop "uprobe/".length).toString.splitOn ":" with
+    | [binary, symbol] =>
+      if binary.isEmpty || symbol.isEmpty then none else some (binary, symbol)
+    | _ => none
+  else none
+
+/-- The attach metadata for a kind and a section spelling, if the spelling has the shape
+that kind needs. -/
+def ProgKind.attach? (k : ProgKind) (section : String) : Option Attach :=
+  match k with
+  | .xdp =>
+    if section == "xdp" then some { kind := "xdp", target := "", event := "", spec := "xdp" }
+    else none
+  | .tc =>
+    if section == "tc" || section == "classifier" || section == "sched_cls" then
+      some { kind := "tc", target := "", event := "", spec := "classifier" }
+    else none
+  | .tracepoint =>
+    (tracepointParts? section).map fun (category, event) =>
+      { kind := "tracepoint", target := category, event, spec := s!"{category}:{event}" }
+  | .uprobe =>
+    (uprobeParts? section).map fun (binary, symbol) =>
+      { kind := "uprobe", target := binary, event := symbol, spec := s!"{binary}:{symbol}" }
+
+/-- Accept the section spellings of §5.2 (and libbpf's `sched_cls` alias), plus the two
+declared tracing shapes. -/
+def ProgKind.ofSection? (section : String) : Option ProgKind :=
+  match section with
   | "xdp" => some .xdp
   | "tc" | "classifier" | "sched_cls" => some .tc
-  | _ => none
+  | _ =>
+    if (tracepointParts? section).isSome then some .tracepoint
+    else if (uprobeParts? section).isSome then some .uprobe
+    else none
+
+/-- `true` for the two tracing kinds (the sensor half). -/
+def ProgKind.isTracing : ProgKind → Bool
+  | .tracepoint | .uprobe => true
+  | .xdp | .tc => false
 
 /-- The eBPF program type libbpf derives from the section. -/
 def ProgKind.typeName : ProgKind → String
   | .xdp => "xdp"
   | .tc => "sched_cls"
+  | .tracepoint => "tracepoint"
+  | .uprobe => "kprobe"
+
+/-- `bpf_attr.prog_type`'s numeric value (`include/uapi/linux/bpf.h`): XDP = 6,
+SCHED_CLS = 3, TRACEPOINT = 5, KPROBE = 2. The loader reads this, not a string. -/
+def ProgKind.progType : ProgKind → Nat
+  | .xdp => 6
+  | .tc => 3
+  | .tracepoint => 5
+  | .uprobe => 2
+
+/-- The `enum bpf_prog_type` spelling, for a descriptor and a diagnostic. -/
+def ProgKind.progTypeName : ProgKind → String
+  | .xdp => "BPF_PROG_TYPE_XDP"
+  | .tc => "BPF_PROG_TYPE_SCHED_CLS"
+  | .tracepoint => "BPF_PROG_TYPE_TRACEPOINT"
+  | .uprobe => "BPF_PROG_TYPE_KPROBE"
+
+/-- The declared context C struct in `bpf_rt.h`. -/
+def ProgKind.contextName : ProgKind → String
+  | .xdp => "xdp_md"
+  | .tc => "__sk_buff"
+  | .tracepoint => "bpf_trace_event"
+  | .uprobe => "bpf_pt_regs"
 
 /-- For diagnostics: the Wiz-level name of the context/program kind. -/
 def ProgKind.describe : ProgKind → String
   | .xdp => "XDP"
   | .tc => "TC"
+  | .tracepoint => "tracepoint"
+  | .uprobe => "uprobe"
 
 /-! ## Maps -/
 
@@ -59,6 +161,9 @@ inductive MapKind where
   | array
   | percpuArray
   | lruHash
+  /-- `BPF_MAP_TYPE_PERF_EVENT_ARRAY`: the tracing event transport (§2.1). It is an
+  output ring, not a key/value store: it has no lookup/update/delete in this subset. -/
+  | perfEventArray
   deriving Repr, BEq, Inhabited
 
 def MapKind.cName : MapKind → String
@@ -66,18 +171,103 @@ def MapKind.cName : MapKind → String
   | .array => "BPF_MAP_TYPE_ARRAY"
   | .percpuArray => "BPF_MAP_TYPE_PERCPU_ARRAY"
   | .lruHash => "BPF_MAP_TYPE_LRU_HASH"
+  | .perfEventArray => "BPF_MAP_TYPE_PERF_EVENT_ARRAY"
 
 def MapKind.describe : MapKind → String
   | .hash => "hash"
   | .array => "array"
   | .percpuArray => "percpu_array"
   | .lruHash => "lru_hash"
+  | .perfEventArray => "perf_event_array"
 
 /-- The limits of §2.7/§6.1: a key is at most 64 B, a value at most 512 B, and an
 `array`'s key is the entry index. -/
 def MapKind.arrayLike : MapKind → Bool
   | .array | .percpuArray => true
   | _ => false
+
+/-- `true` for the one map kind that is an output, not a key/value store. -/
+def MapKind.isPerfEventArray : MapKind → Bool
+  | .perfEventArray => true
+  | _ => false
+
+/-! ## Event transport and kinds -/
+
+/-- How a probe's events leave the kernel. `perfEventArray` is the first transport
+(§2.1); `tracePrintk` is the debug-only fallback (GPL; a line on the trace pipe, not
+JSON). A descriptor records which one the object uses. -/
+inductive Transport where
+  | perfEventArray
+  | tracePrintk
+  deriving Repr, BEq, Inhabited
+
+def Transport.describe : Transport → String
+  | .perfEventArray => "perf_event_array"
+  | .tracePrintk => "trace_printk"
+
+def Transport.parse? : String → Option Transport
+  | "perf" | "perf_event_array" => some .perfEventArray
+  | "trace_printk" | "printk" => some .tracePrintk
+  | _ => none
+
+/-- The event kinds of `scry-probe-event/1` (§2.1/§2.2). The number is the wire value in
+`struct scry_probe_event.kind`; the name is what the JSON and the descriptor use. -/
+inductive EventKind where
+  | execve
+  | openat
+  | write
+  | connect
+  | heartbeat
+  deriving Repr, BEq, Inhabited
+
+def EventKind.code : EventKind → Nat
+  | .execve => 1
+  | .openat => 2
+  | .write => 3
+  | .connect => 4
+  | .heartbeat => 5
+
+def EventKind.name : EventKind → String
+  | .execve => "execve"
+  | .openat => "openat"
+  | .write => "write"
+  | .connect => "connect"
+  | .heartbeat => "heartbeat"
+
+def EventKind.ofName? : String → Option EventKind
+  | "execve" => some .execve
+  | "openat" => some .openat
+  | "write" => some .write
+  | "connect" => some .connect
+  | "heartbeat" => some .heartbeat
+  | _ => none
+
+/-- The number of syscall arguments a tracepoint context exposes (`args[6]`), and the
+number of registers a uprobe's `pt_regs` exposes as arguments (rdi, rsi, rdx, rcx, r8,
+r9). A projection past this is a compile error, not a zero. -/
+def traceArgCount : Nat := 6
+
+/-- The constant bound on the argv-slot walk (`wiz-notes/ebpf-dynamic.md` §2.1: scan
+slots 0..3, never a runtime `argc`). A slot past this is a compile error. -/
+def argvSlotMax : Nat := 4
+
+/-- The event's payload cap. It is a literal in the descriptor and in the emitted C; a
+runtime length never selects the copy size (§2.1). -/
+def eventDataCap : Nat := 80
+
+/-- `struct scry_probe_event.comm`'s size (`TASK_COMM_LEN`). -/
+def eventCommCap : Nat := 16
+
+/-- `sizeof(struct scry_probe_event)` with natural alignment: 4+4+4+4 + 8 + 4+4 +
+80 + 16 = 128. `meta` packs the slot (low 16) and the flags (bit 16 = truncated), so the
+event is the note's 128 B. The descriptor pins the offsets and the shifts. -/
+def eventSize : Nat := 128
+
+/-- `meta`'s low 16 bits are the capture slot. -/
+def eventMetaSlotShift : Nat := 0
+
+/-- `meta`'s bit 16 is `truncated` (the payload hit the literal cap). -/
+def eventMetaFlagsShift : Nat := 16
 
 /-! ## Types -/
 
@@ -98,6 +288,13 @@ inductive Ty where
   | packet
   /-- opaque: the only exposed fields are projections the emitter knows -/
   | ctx (kind : ProgKind)
+  /-- A captured user string: a fixed literal cap and a length. It is plain bytes, not
+  `String`; `len` is the valid prefix and `trunc` says the kernel read hit the cap.
+  This is the one value a probe reads out of user memory (§2.1). -/
+  | userStr (cap : Nat)
+  /-- An opaque user-pointer token: a syscall argument, never dereferenced. The only
+  consumer is `TraceCtx.readUserStr`'s capped accessor. -/
+  | userPtr
   /-- a handle, not a value; it cannot be stored, passed or returned -/
   | map (k v : Ty) (kind : MapKind)
   deriving Repr, BEq, Inhabited
@@ -135,7 +332,7 @@ def Ty.signedOf? : Nat → Option Ty
 have no layout (the caller checks with `Ty.byteSize`). -/
 partial def Ty.align : Ty → Nat
   | .u64 | .i64 => 8
-  | .u32 | .i32 => 4
+  | .u32 | .i32 | .userStr _ => 4
   | .u16 | .i16 => 2
   | .option t => t.align
   | .struct fs => fs.foldl (fun a f => max a f.align) 1
@@ -157,7 +354,8 @@ partial def Ty.byteSize : Ty → Option Nat
   | .u16 | .i16 => some 2
   | .u32 | .i32 => some 4
   | .u64 | .i64 => some 8
-  | .packet | .ctx _ | .map _ _ _ => none
+  | .userStr cap => some (alignUp (8 + cap) 4)
+  | .packet | .ctx _ | .userPtr | .map _ _ _ => none
   | .option t => t.byteSize.map fun s => alignUp (t.align + s) t.align
   | .struct fs =>
     let step : Option (Nat × Nat) → Ty → Option (Nat × Nat)
@@ -173,6 +371,7 @@ Pointers, closures and heap objects are not POD, and neither are the opaque cont
 types (`ctx` is a pointer the verifier tracks; `packet` is not storable either). -/
 partial def Ty.isPod : Ty → Bool
   | .unit | .bool | .u8 | .u16 | .u32 | .u64 | .i8 | .i16 | .i32 | .i64 | .enum _ => true
+  | .userStr _ => true
   | .option t => t.isPod
   | .struct fs => fs.toList.all fun f => f.isPod
   | _ => false
@@ -204,6 +403,8 @@ partial def Ty.describe : Ty → String
   | .option t => s!"Option ({t.describe})"
   | .packet => "Packet"
   | .ctx k => s!"{k.describe}Context"
+  | .userStr cap => s!"UserStr {cap}"
+  | .userPtr => "UserPtr"
   | .map k v kind => s!"Map ({k.describe}) ({v.describe}) ({kind.describe})"
 
 /-! ## Spans -/
@@ -253,15 +454,27 @@ structure Helper where
   res : Ty
   eff : Effect
   since : Nat
+  /-- The program kinds that may call it. Empty means every kind. This is the
+  "unverifiable helper use" gate: a packet-only or tracing-only helper in the wrong
+  program kind is a positioned compile error, never a silent `wiz_unknown_prim`. -/
+  kinds : Array ProgKind := #[]
   deriving Repr, Inhabited
 
 namespace Helpers
 
 /-- P0's non-map helpers. Map helpers are not here: `Map.lookup` and friends are
-operations with map types, and the copy/null-test shape is the emitter's. -/
+operations with map types, and the copy/null-test shape is the emitter's.
+
+The tracing helper is the one a sensor needs to identify the process; the other tracing
+helpers (`bpf_probe_read_user_str` 115, `bpf_perf_event_output` 25, `bpf_get_current_comm`
+16, `bpf_trace_printk` 6) are emitted by the `readUserStr`/`probeEmit` nodes rather than
+called from the typed surface, because their argument is a fixed stack buffer or a
+variadic format. They are still recorded in the probe descriptor. -/
 def table : Array Helper := #[
   { name := "Bpf.now", id := 5, args := #[], res := .u64, eff := .time, since := 5 },
-  { name := "Bpf.random", id := 7, args := #[], res := .u32, eff := .random, since := 4 }
+  { name := "Bpf.random", id := 7, args := #[], res := .u32, eff := .random, since := 4 },
+  { name := "Bpf.pidTgid", id := 14, args := #[], res := .u64, eff := .trace, since := 4,
+    kinds := #[.tracepoint, .uprobe] }
 ]
 
 def find? (n : String) : Option Helper := table.find? fun h => h.name == n
@@ -300,6 +513,29 @@ inductive TmNode where
   | ctxPacket (c : Tm)
   | ctxIfindex (c : Tm)
   | ctxRxQueue (c : Tm)
+  /-- `TraceCtx.pid`: the thread id, `bpf_get_current_pid_tgid() & 0xffffffff` -/
+  | ctxPid (c : Tm)
+  /-- `TraceCtx.tgid`: the process id, `bpf_get_current_pid_tgid() >> 32` -/
+  | ctxTgid (c : Tm)
+  /-- `TraceCtx.now`: `bpf_ktime_get_ns()` (monotonic, unordered; sort host-side) -/
+  | ctxNow (c : Tm)
+  /-- `TraceCtx.arg c i`: the i-th syscall argument as an opaque user-pointer token. -/
+  | ctxArg (i : Nat) (c : Tm)
+  /-- `TraceCtx.argWord c i`: the same argument as a scalar (a fd, a flags word). -/
+  | ctxArgWord (i : Nat) (c : Tm)
+  /-- `TraceCtx.readUserStr c ptr`: one `bpf_probe_read_user_str` with the literal cap
+  from the result type; `none` is `-EFAULT`, never a partial success. -/
+  | readUserStr (ty : Ty) (c : Tm) (ptr : Tm)
+  /-- `TraceCtx.argvSlot c argv slot`: read the pointer at `argv + 8*slot` with
+  `bpf_probe_read_user`, reject a null slot, then read its string with the capped
+  accessor. `slot` is a literal below `argvSlotMax`; the walk never reads `argc`. -/
+  | argvSlot (ty : Ty) (c : Tm) (argv : Tm) (slot : Nat)
+  /-- `Probe.emit events kind slot c pid tgid ppid ts data`: fill one POD
+  `scry_probe_event` on the stack and send it to the perf event array (or the
+  `trace_printk` fallback). The result is `Bool`: `false` means the output helper failed;
+  the policy may count it in a `lost` map, and it must never retry unbounded. -/
+  | probeEmit (ty : Ty) (events : String) (kind : EventKind) (slot : Nat)
+      (c pid tgid ppid ts data : Tm)
   | mapLookup (ty : Ty) (m : String) (k : Tm)
   | mapUpdate (ty : Ty) (m : String) (k v : Tm)
   | mapDelete (ty : Ty) (m : String) (k : Tm)
@@ -345,6 +581,13 @@ partial def Tm.ty (t : Tm) : Ty :=
   | .ctxPacket _ => .packet
   | .ctxIfindex _ => .u32
   | .ctxRxQueue _ => .u32
+  | .ctxPid _ | .ctxTgid _ => .u32
+  | .ctxNow _ => .u64
+  | .ctxArg _ _ => .userPtr
+  | .ctxArgWord _ _ => .u64
+  | .readUserStr ty _ _ => ty
+  | .argvSlot ty _ _ _ => ty
+  | .probeEmit ty _ _ _ _ _ _ _ _ _ => ty
   | .mapLookup ty _ _ => ty
   | .mapUpdate ty _ _ _ => ty
   | .mapDelete ty _ _ => ty
@@ -370,6 +613,11 @@ def TmNode.children : TmNode → Array Tm
   | .repeat _ _ init _ => #[init]
   | .pktLoad _ _ _ p off => #[p, off]
   | .ctxPacket c | .ctxIfindex c | .ctxRxQueue c => #[c]
+  | .ctxPid c | .ctxTgid c | .ctxNow c => #[c]
+  | .ctxArg _ c | .ctxArgWord _ c => #[c]
+  | .readUserStr _ c ptr => #[c, ptr]
+  | .argvSlot _ c argv _ => #[c, argv]
+  | .probeEmit _ _ _ _ c pid tgid ppid ts data => #[c, pid, tgid, ppid, ts, data]
   | .mapLookup _ _ k => #[k]
   | .mapUpdate _ _ k v => #[k, v]
   | .mapDelete _ _ k => #[k]
@@ -431,8 +679,13 @@ structure Program where
   version : Nat
   maps : Array MapDecl
   decls : Array Decl
-  /-- the program's result type; must be an enum (the action) -/
+  /-- the program's result type: an action enum for XDP/TC, `Unit` or `UIntN 32` for a
+  tracing program -/
   ret : Ty
+  /-- how a tracing program's events leave the kernel; ignored by XDP/TC -/
+  transport : Transport := .perfEventArray
+  /-- the manifest/source position, for a positioned whole-program diagnostic -/
+  span : Span := {}
 
 def Program.decl? (p : Program) (n : String) : Option Decl :=
   p.decls.find? fun d => d.name == n
@@ -442,6 +695,10 @@ def Program.map? (p : Program) (n : String) : Option MapDecl :=
 
 /-- The entry declaration, if the name resolves. -/
 def Program.entryDecl? (p : Program) : Option Decl := p.decl? p.entry
+
+/-- The loader's attach metadata, or `none` when the section does not have the shape the
+program kind needs. -/
+def Program.attach? (p : Program) : Option Attach := p.kind.attach? p.sectionName
 
 /-! ## The action enums (§5.2) -/
 

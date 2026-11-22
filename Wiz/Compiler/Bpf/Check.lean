@@ -36,6 +36,13 @@ def reject {α : Type} (span : Span) (msg : String) : Except String α :=
 def rejectTop {α : Type} (msg : String) : Except String α :=
   .error s!"bpf: {msg}"
 
+/-- A whole-program rejection with a position when the manifest/core carries one. A
+generated program has no position, and the message stays `bpf: …`; a manifest's
+`[program.NAME]` line becomes `bpf: … (at bpf.toml:3:1)`, so a typo in `type` or
+`section` is a positioned compile error, not a fall-through. -/
+def rejectAt {α : Type} (span : Span) (msg : String) : Except String α :=
+  if span.line == 0 && span.file == "<generated>" then rejectTop msg else reject span msg
+
 def typeMismatch {α : Type} (span : Span) (what : String) (expected actual : Ty) :
     Except String α :=
   reject span s!"{what}: expected {expected.describe}, got {actual.describe}"
@@ -123,6 +130,56 @@ def actionMessage (ty : Ty) : String :=
   s!"the program's result must be an action enum (`XdpAction` or `TcAction`), not \
 `{ty.describe}`. A `Nat`, `Bool` or struct return has no defined kernel meaning."
 
+def traceResultMessage (ty : Ty) : String :=
+  s!"a tracing program's result must be `Unit` or `UIntN 32` (the tracepoint return \
+code), not `{ty.describe}`. There is no packet action to return."
+
+def traceCtxMessage (what : String) (ty : Ty) : String :=
+  s!"`{what}` needs a tracepoint or uprobe context, not `{ty.describe}`. A tracing \
+program has no packet; read the syscall arguments with `TraceCtx.arg` and the capped \
+`TraceCtx.readUserStr`."
+
+def packetCtxMessage (what : String) (ty : Ty) : String :=
+  s!"`{what}` needs an XDP or TC context, not `{ty.describe}`. A tracepoint/uprobe \
+context has no `data`/`data_end`, so there is no checked packet load on this path."
+
+def packetTraceMessage : String :=
+  "a `Packet` has no representation in a tracepoint/uprobe program: the tracing context \
+has no `data`/`data_end`. Use `TraceCtx.readUserStr` or `TraceCtx.argvSlot`."
+
+def traceArgMessage (i : Nat) : String :=
+  s!"the syscall argument index {i} is outside 0..{traceArgCount - 1}. A tracepoint \
+context has six arguments (`args[6]`); a uprobe's `pt_regs` ABI exposes six in the \
+declared layout. A probe never walks a runtime argument count."
+
+def userStrMessage (cap : Nat) : String :=
+  s!"the captured string cap {cap} is outside 1..256. The cap is a literal in the \
+descriptor and in the emitted C; a runtime length never selects the copy size."
+
+def argvSlotMessage (slot : Nat) : String :=
+  s!"the argv slot {slot} is outside 0..{argvSlotMax - 1}. A probe scans a constant set \
+of argv slots, never a runtime `argc`; `bpf_probe_read_user` reads one pointer at \
+`argv + 8*slot`, and a null/failed slot is `none`, not an unbounded walk."
+
+def perfMapMessage (m : String) : String :=
+  s!"`{m}` is a `perf_event_array`, an output ring, not a key/value map: it has no \
+lookup/update/delete in this subset. Write to it with `Probe.emit`."
+
+def mapIndexMessage (m : String) (kind : MapKind) (i : Nat) (n : Nat) : String :=
+  s!"the `{kind.describe}` map `{m}` has {n} entries; the literal index {i} is out of \
+bounds. The kernel would return NULL at run time; this is a compile-time error, not a \
+runtime check."
+
+def helperKindMessage (h : String) (k : ProgKind) : String :=
+  s!"the helper `{h}` is not available in a {k.describe} program. It is a tracing \
+helper; a packet program has no syscall context. The helper table's `kinds` is the \
+gate, not the kernel's `ENOTSUPP`."
+
+def traceLicenseMessage (lic : String) : String :=
+  s!"a tracing probe needs `license = \"GPL\"` (got `{lic}`): \
+`bpf_probe_read_user_str` and `bpf_trace_printk` are GPL-only. A non-GPL object would \
+load-fail with `EINVAL`/`ENOTSUPP` on the helper."
+
 def frameMessage (f : String) (n : Nat) : String :=
   s!"the frame budget is 256 bytes but `{f}` needs about {n} (locals plus estimated \
 spills). Shrink the struct or split the program."
@@ -164,11 +221,17 @@ struct or keep the large data in a map."
     match t.byteSize with
     | none => rejectTop s!"`{t.describe}` has no C layout"
     | some n => do
-      if n > 64 then
-        rejectTop s!"`{t.describe}` is {n} bytes; a value is at most 64"
+      -- A captured string is the one value allowed past the 64-byte struct limit: its cap
+      -- is a literal chosen by the probe policy, and the frame budget below still applies.
+      let limit := match inner with | .userStr _ => 256 | _ => 64
+      if n > limit then
+        rejectTop s!"`{t.describe}` is {n} bytes; a value is at most {limit}"
       unless inner.isPod do
         rejectTop s!"`{t.describe}` wraps a non-POD payload; an `Option` is a value, not a \
 pointer"
+  | .userStr cap =>
+    if cap == 0 || cap > 256 then rejectTop (userStrMessage cap)
+  | .userPtr => pure ()
   | .map k v _ =>
     checkTy k
     checkTy v
@@ -213,6 +276,38 @@ def wordWidth (span : Span) (ty : Ty) : Except String Nat :=
   match ty.width with
   | some w => pure w
   | none => reject span s!"this operation needs a word (`UIntN`/`IntN`), not `{ty.describe}`"
+
+/-- The context a tracing projection needs. A packet context is rejected here, not left to
+the emitter: the C would not compile, and the diagnostic must name the Wiz term. -/
+def checkTraceCtx (span : Span) (what : String) (c : Tm) : Except String Unit :=
+  match c.ty with
+  | .ctx k =>
+    if k.isTracing then pure ()
+    else reject span (traceCtxMessage what c.ty)
+  | _ => reject span (traceCtxMessage what c.ty)
+
+/-- The context a packet projection needs. -/
+def checkPacketCtx (span : Span) (what : String) (c : Tm) : Except String Unit :=
+  match c.ty with
+  | .ctx .xdp | .ctx .tc => pure ()
+  | other => reject span (packetCtxMessage what other)
+
+/-- A `perf_event_array` is an output ring; it has no key/value operations. -/
+def checkNotPerfMap (span : Span) (d : MapDecl) : Except String Unit :=
+  if d.kind.isPerfEventArray then reject span (perfMapMessage d.name) else pure ()
+
+/-- A literal index into an `array`/`percpu_array` must be inside `max_entries`. This is
+the check the kernel's `map_value_or_null` would otherwise turn into a run-time NULL (or,
+worse, a silently dead branch); it is deliberately a compile error. A non-literal key is
+runtime data and is not bounded here (the map lookup's null test is the policy's job). -/
+def checkMapIndex (span : Span) (d : MapDecl) (k : Tm) : Except String Unit :=
+  if d.kind.arrayLike then
+    match k.node with
+    | .lit .u32 i =>
+      if i >= d.maxEntries then reject span (mapIndexMessage d.name d.kind i d.maxEntries)
+      else pure ()
+    | _ => pure ()
+  else pure ()
 
 /-- Check one term against the type it must have. -/
 partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
@@ -308,6 +403,7 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
     if bound == 0 then reject t.span "`Bpf.repeat`'s bound must be positive"
     else reject t.span loopMessage
   | .pktLoad ty width be pkt off =>
+    if p.kind.isTracing then reject t.span packetTraceMessage
     match Ty.unsignedOf? width with
     | none => reject t.span s!"a packet load is 8, 16, 32 or 64 bits, not {width}"
     | some word =>
@@ -318,29 +414,95 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
       let _ := be
       pure ()
   | .ctxPacket c =>
-    match c.ty with
-    | .ctx _ => checkTm p ctx c.ty c
-    | other => reject t.span s!"`XdpContext.packet` needs a context, not `{other.describe}`"
+    if p.kind.isTracing then reject t.span packetTraceMessage
+    checkPacketCtx t.span "XdpContext.packet" c
+    checkTm p ctx c.ty c
   | .ctxIfindex c | .ctxRxQueue c =>
-    match c.ty with
-    | .ctx _ => checkTm p ctx c.ty c
-    | other => reject t.span s!"a context projection needs a context, not `{other.describe}`"
+    if p.kind.isTracing then reject t.span packetTraceMessage
+    checkPacketCtx t.span "a context projection" c
+    checkTm p ctx c.ty c
+  | .ctxPid c | .ctxTgid c =>
+    checkTraceCtx t.span "TraceCtx.pid/tgid" c
+    checkTm p ctx c.ty c
+  | .ctxNow c =>
+    checkTraceCtx t.span "TraceCtx.now" c
+    checkTm p ctx c.ty c
+  | .ctxArg i c | .ctxArgWord i c =>
+    if i >= traceArgCount then reject t.span (traceArgMessage i)
+    checkTraceCtx t.span "TraceCtx.arg" c
+    checkTm p ctx c.ty c
+  | .readUserStr ty c ptr =>
+    match ty.optionInner with
+    | some (.userStr cap) =>
+      unless (1 <= cap && cap <= 256) do reject t.span (userStrMessage cap)
+    | _ =>
+      reject t.span s!"`TraceCtx.readUserStr` produces `Option (UserStr N)`, not \
+`{ty.describe}`"
+    checkTraceCtx t.span "TraceCtx.readUserStr" c
+    checkTm p ctx c.ty c
+    if ptr.ty != .userPtr then
+      typeMismatch t.span s!"`TraceCtx.readUserStr`'s pointer" .userPtr ptr.ty
+    checkTm p ctx .userPtr ptr
+  | .argvSlot ty c argv slot =>
+    match ty.optionInner with
+    | some (.userStr cap) =>
+      unless (1 <= cap && cap <= 256) do reject t.span (userStrMessage cap)
+    | _ =>
+      reject t.span s!"`TraceCtx.argvSlot` produces `Option (UserStr N)`, not `{ty.describe}`"
+    if slot >= argvSlotMax then reject t.span (argvSlotMessage slot)
+    checkTraceCtx t.span "TraceCtx.argvSlot" c
+    checkTm p ctx c.ty c
+    if argv.ty != .userPtr then
+      typeMismatch t.span s!"`TraceCtx.argvSlot`'s argv" .userPtr argv.ty
+    checkTm p ctx .userPtr argv
+  | .probeEmit ty events kind slot c pid tgid ppid ts data =>
+    if ty != .bool then typeMismatch t.span "`Probe.emit`" .bool ty
+    if slot >= 8 then
+      reject t.span s!"the capture slot {slot} is outside 0..7; a probe emits a bounded \
+set of slots, not a runtime index"
+    checkTraceCtx t.span "Probe.emit" c
+    checkTm p ctx c.ty c
+    for (what, tm, want) in [("pid", pid, Ty.u32), ("tgid", tgid, Ty.u32),
+                             ("ppid", ppid, Ty.u32), ("ts", ts, Ty.u64)] do
+      if tm.ty != want then typeMismatch t.span s!"`Probe.emit`'s {what}" want tm.ty
+      checkTm p ctx want tm
+    match data.ty with
+    | .userStr cap =>
+      if cap == 0 || cap > 256 then reject t.span (userStrMessage cap)
+    | other => reject t.span s!"`Probe.emit`'s payload is a captured `UserStr`, not \
+`{other.describe}`. Read it with `TraceCtx.readUserStr`; never pass a pointer."
+    checkTm p ctx data.ty data
+    match p.transport with
+    | .perfEventArray =>
+      let d ← lookupMap p t.span events
+      unless d.kind.isPerfEventArray do
+        reject t.span s!"`Probe.emit` writes a `perf_event_array`, but `{events}` is a \
+`{d.kind.describe}` map. Declare `[map.{events}]` with `kind = \"perf_event_array\"`."
+    | .tracePrintk => pure ()
   | .mapLookup ty m k =>
     let d ← lookupMap p t.span m
+    checkNotPerfMap t.span d
+    checkMapIndex t.span d k
     if ty != .option d.value then
       typeMismatch t.span s!"`Map.lookup {m}`" (.option d.value) ty
     checkTm p ctx d.key k
   | .mapUpdate ty m k v =>
     let d ← lookupMap p t.span m
+    checkNotPerfMap t.span d
+    checkMapIndex t.span d k
     if ty != .bool then typeMismatch t.span s!"`Map.update {m}`" .bool ty
     checkTm p ctx d.key k
     checkTm p ctx d.value v
   | .mapDelete ty m k =>
     let d ← lookupMap p t.span m
+    checkNotPerfMap t.span d
+    checkMapIndex t.span d k
     if ty != .bool then typeMismatch t.span s!"`Map.delete {m}`" .bool ty
     checkTm p ctx d.key k
   | .mapAdd ty m k n =>
     let d ← lookupMap p t.span m
+    checkNotPerfMap t.span d
+    checkMapIndex t.span d k
     if ty != .u64 then typeMismatch t.span s!"`Map.add {m}`" .u64 ty
     if d.value != .u64 then
       reject t.span s!"`Map.add {m}` needs a `UIntN 64` value, but `{m}` stores \
@@ -362,9 +524,11 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
         checkTm p ctx d.params[i]! args[i]!
   | .helper ty h args =>
     match Helpers.find? h.name with
-    | none => reject t.span s!"`{h.name}` is not in the P0 helper table"
+    | none => reject t.span s!"`{h.name}` is not in the helper table"
     | some d =>
       if ty != d.res then typeMismatch t.span s!"`{h.name}`'s result" d.res ty
+      if !d.kinds.isEmpty && !d.kinds.contains p.kind then
+        reject t.span (helperKindMessage h.name p.kind)
       if args.size != d.args.size then
         reject t.span s!"`{h.name}` takes {d.args.size} arguments, not {args.size}"
       for i in [0:d.args.size] do
@@ -420,7 +584,15 @@ def checkDecl (p : Program) (d : Decl) : Except String Unit := do
 value: it cannot be passed, stored or returned; name it in the program's map table instead"
     | .unit =>
       reject d.body.span s!"`{d.name}` has a `Unit` parameter, which has no C representation"
+    | .packet =>
+      if p.kind.isTracing then reject d.body.span packetTraceMessage else checkTy ty
+    | .ctx k =>
+      if k != p.kind then
+        reject d.body.span s!"`{d.name}` takes a {k.describe} context, but the program is \
+{p.kind.describe}"
+      else checkTy ty
     | _ => checkTy ty
+  if p.kind.isTracing && d.ret == .packet then reject d.body.span packetTraceMessage
   checkTy d.ret
   checkTail p d.params d.ret d.body
 
@@ -447,6 +619,10 @@ number is `clang`'s; §2.2 says the post-`clang` `r10 - N` check is authoritativ
 partial def localBytes (t : Tm) : Nat :=
   let here : Nat := match t.node with
     | .letE ty _ _ _ => (ty.byteSize.getD 8).max 8
+    -- the argv-slot accessor holds one pointer while the string is read
+    | .argvSlot _ _ _ _ => 8
+    -- the event is a stack local in the emitted block; the number is the ABI's size
+    | .probeEmit _ _ _ _ _ _ _ _ _ _ => eventSize
     | _ => 0
   here + t.node.children.foldl (fun n c => n + localBytes c) 0
 
@@ -497,27 +673,39 @@ def checkMaps (p : Program) : Except String Unit := do
     if m.kind.arrayLike && m.key != .u32 then
       rejectTop s!"the `{m.kind.describe}` map `{m.name}` is indexed by `UIntN 32`, not \
 `{m.key.describe}`"
+    if m.kind.isPerfEventArray then
+      if m.key != .u32 || m.value != .u32 then
+        rejectTop s!"the `perf_event_array` map `{m.name}` has a `UIntN 32` key and value \
+(a CPU index and a perf fd), not `{m.key.describe}`/`{m.value.describe}`"
     if m.maxEntries == 0 then rejectTop s!"the map `{m.name}` has `max_entries = 0`"
 
 /-- The whole-program checks. -/
 def checkProgram (p : Program) : Except String Unit := do
   let some entry := p.entryDecl? |
-    rejectTop s!"the entry `{p.entry}` has no definition"
-  match ProgKind.ofSection? p.sectionName with
-  | none => rejectTop s!"unknown section `{p.sectionName}` (choose xdp, tc or classifier)"
-  | some k =>
-    if k != p.kind then
-      rejectTop s!"the section `{p.sectionName}` is a {k.describe} program, but the manifest \
-says {p.kind.describe}"
+    rejectAt p.span s!"the entry `{p.entry}` has no definition"
+  match p.attach? with
+  | none =>
+    rejectAt p.span s!"unknown section `{p.sectionName}` for a {p.kind.describe} program \
+(choose xdp; tc, classifier or sched_cls; tracepoint/<category>/<event>; or \
+uprobe/<binary>:<symbol>)"
+  | some _ => pure ()
   if p.license.isEmpty then
-    rejectTop "a program needs a licence (`\"GPL\"` for GPL-only helpers)"
-  match p.ret with
-  | .enum n =>
-    let need := if p.kind == .xdp then xdpActionArity else tcActionArity
-    if n < need then
-      rejectTop s!"`{p.ret.describe}` has {n} constructors; the {p.kind.describe} action \
-has at least {need}"
-  | other => rejectTop (actionMessage other)
+    rejectAt p.span "a program needs a licence (`\"GPL\"` for GPL-only helpers)"
+  if p.kind.isTracing then do
+    if p.license != "GPL" then rejectAt p.span (traceLicenseMessage p.license)
+    else pure ()
+    match p.ret with
+    | .unit | .u32 => pure ()
+    | other => rejectAt p.span (traceResultMessage other)
+  else
+    match p.ret with
+    | .enum n =>
+      let need := if p.kind == .xdp then xdpActionArity else tcActionArity
+      if n < need then
+        rejectAt p.span s!"`{p.ret.describe}` has {n} constructors; the {p.kind.describe} \
+action has at least {need}"
+      else pure ()
+    | other => rejectAt p.span (actionMessage other)
   if entry.ret != p.ret then
     typeMismatch entry.body.span s!"`{p.entry}`'s result" p.ret entry.ret
   match entry.params.toList with
@@ -525,11 +713,13 @@ has at least {need}"
     match ty with
     | .ctx k =>
       if k != p.kind then
-        rejectTop s!"`{p.entry}` takes a {k.describe} context, but the program is \
-{p.kind.describe}"
-    | other => rejectTop s!"`{p.entry}`'s parameter must be the context, not `{other.describe}`"
-  | _ => rejectTop s!"`{p.entry}` takes {entry.params.size} parameters; an entry takes one \
-context"
+        rejectAt entry.body.span s!"`{p.entry}` takes a {k.describe} context, but the \
+program is {p.kind.describe}"
+    | other =>
+      rejectAt entry.body.span s!"`{p.entry}`'s parameter must be the context, not \
+`{other.describe}`"
+  | _ => rejectAt entry.body.span s!"`{p.entry}` takes {entry.params.size} parameters; an \
+entry takes one context"
   let names := p.decls.foldl (fun (s : List String) d =>
     if s.contains d.name then s else d.name :: s) []
   if names.length != p.decls.size then rejectTop "two definitions have the same name"

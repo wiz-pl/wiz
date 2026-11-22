@@ -1175,13 +1175,21 @@ def listHas (s : String) : List String → Bool
     | .true => .true
     | .false => listHas s rest
 
--- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
--- and, for C5's first slice, LLVM (a closed `main : Nat`, `genLLVM`), so `wasm` is the
--- one it refuses by name
-def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
+-- `--target`: the host's names are c, llvm, wasm, bpf and its `ebpf` alias; the
+-- self-hosted backend emits C and, for C5's first slice, LLVM (a closed `main : Nat`,
+-- `genLLVM`), so `wasm` is refused as a C5 gap and the probe backend is refused with
+-- the `targets-ext.md` §4 sentence below
+def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" (.cons "bpf" (.cons "ebpf" .nil))))
 
 def targetOk (t : String) : Bool := Bool.or (strEq t "c") (strEq t "llvm")
 def targetKnown (t : String) : Bool := listHas t targetModes
+
+-- `backend ebpf` (the tree spelling is `bpf`) reads `bpf-core/1`; the selfhost serialises
+-- no program and emits `c-text/1` only. This is a refusal, not a C fallback
+-- (`wiz-notes/ebpf-dynamic.md` §5; `wiz-notes/targets-ext.md` §4).
+def targetIsProbe (t : String) : Bool := Bool.or (strEq t "bpf") (strEq t "ebpf")
+
+def probeRefusal : String := "unsupported-target: the backend 'ebpf' reads bpf-core/1. This toolchain emits c-text/1 and does not serialise its program (docs/selfhost-compiler.md:114). Build the probe with the host wiz."
 
 -- the selected backend's name (`c` when no `--target` was given)
 def targetName (o : Opts) : String := match o.target with
@@ -1273,12 +1281,14 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   -- (the host's `takeTarget` messages and exit 1)
                                   | .false => match strEq a "--target" with
                                     | .true => match rest with
-                                      | .nil => .fail "--target needs c, llvm or wasm"
+                                      | .nil => .fail "--target needs c, llvm, wasm, bpf or ebpf"
                                       | .cons t r2 => match targetOk t with
                                         | .true => parseOptsGo r2 { o with target := .some t } file extra
-                                        | .false => match targetKnown t with
-                                          | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
-                                          | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                                        | .false => match targetIsProbe t with
+                                          | .true => .fail probeRefusal
+                                          | .false => match targetKnown t with
+                                            | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
+                                            | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm, wasm, bpf or ebpf)"))
                                     | .false => match strEq a "--cache-verify" with
                                       | .true => match rest with
                                         | .nil => .err "unknown flag: --cache-verify"
