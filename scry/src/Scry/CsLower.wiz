@@ -3321,16 +3321,17 @@ partial def Scry.Cs.lowerLocalFn (c : Scry.Cst) (n : Nat) : Scry.Cs.M Unit := do
   let capThis : Bool := match s0.this with
     | .some _ => .true
     | .none => .false;
-  -- register before lowering the body, so a recursive call finds the function
-  Scry.Cs.modify (fun s => { s with localFns := .cons
-    (Scry.Cs.LFn.mk name qname (List.map (fun p => p.1) ps)
-      (List.map (fun l => l.name) caps) capThis ret) s.localFns });
+  let lf := Scry.Cs.LFn.mk name qname (List.map (fun p => p.1) ps)
+    (List.map (fun l => l.name) caps) capThis ret;
+  -- register before lowering the body, and give the body's own state the same table, so
+  -- a recursive call finds the function (its captures are then its own parameters)
+  Scry.Cs.modify (fun s => { s with localFns := .cons lf s.localFns });
   let ls1 := { s0.ls with nextVar := 0, nextBlock := 1, curBlock := 0, curStmts := .nil
     , live := .true, done := .nil, locals := .nil, params := .nil, env := .nil
     , fname := qname, retTy := Wil.Ty.ptr Wil.Ty.dyn, funcOrigin := Scry.originOf c n
     , breakTo := .none, contTo := .none };
   let inner0 : Scry.Cs.LS := Scry.Cs.LS.mk ls1 .nil s0.cls s0.unit .none .none .nil .nil .nil
-    .none .nil .nil .nil;
+    .none .nil .nil (.cons lf s0.localFns);
   let prog : Scry.Cs.M Unit := (do
     (match capThis with
       | .true => do
