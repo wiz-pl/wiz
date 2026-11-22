@@ -571,7 +571,8 @@ def checkTrustLedger (includeExamples : Bool := true) (root : Option String := n
   let (actual, hits) ← ledgerSources includeExamples root cache
   let rows ← readTrustRows ledger
   -- `--lib-only` (the `native` group) leaves the examples' rows out, as before.
-  let rows := if includeExamples then rows else rows.filter fun r => !r.module.startsWith "examples/"
+  let rows := if includeExamples then rows else
+    rows.filter fun r => !r.module.startsWith "examples/" && !r.module.startsWith "hdl/examples/"
   let report ← compareTrust "the trust ledger" actual rows today strictLegacy
   pure { report with hits }
 

@@ -569,13 +569,13 @@ cost). A new skip, or one of these that stops skipping, fails `descSweepModes`: 
 is a decision, not a way to hide a failure. -/
 def descSweepSkips : List String :=
   [ "examples/closed-table-bench.wiz"
+  , "examples/natives-bench.wiz"
+  , "examples/plot.wiz"
+  , "examples/scry-datalog-bench.wiz"
   , "hdl/examples/hdl-crc-link.wiz"
   , "hdl/examples/hdl-sim-bench.wiz"
   , "hdl/examples/hdl-verified-full.wiz"
-  , "hdl/examples/hdl-verified-native.wiz"
-  , "examples/natives-bench.wiz"
-  , "examples/plot.wiz"
-  , "examples/scry-datalog-bench.wiz" ]
+  , "hdl/examples/hdl-verified-native.wiz" ]
 
 /-- The example whose skip reason is an on-demand cost: the sweep records that it needs
 `--trust-native` (so its classification is complete) but skips it for the reason it
