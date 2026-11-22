@@ -86,6 +86,39 @@ different bytes from identical C. Every stage compiles a copy named `wizc.c`;
 `scripts/fixpoint.sh` now does the same and prints the stage executables' sha256 (with
 `--stages 3`, stage2 against stage3).
 
+## What each check claims, separately
+
+Four properties are often written as one word, "trustworthy". This tree claims the first
+three only where it names the mechanism, and does not claim the fourth end to end. Keep
+them separate when describing a release.
+
+| property | what it would mean | what provides it today | what it does **not** provide |
+|---|---|---|---|
+| **Reproducibility** | the same source, recipe and pinned toolchain give the same bytes on two builders | `scripts/repro-fixpoint.sh` (two copies, `--stages 2`: 6/6 byte-identical) and the source tarball's two-build check (`scripts/test-source-tarball.sh`) | a *pinned* chain: `wizc-seed.json` does not exist yet (R2), and the claim is for a pinned toolchain and image, not across compilers (`docs/release/v0.1-checklist.md` §4) |
+| **Differential equality** | the two implementations (Lean host, Wiz-written frontend) make the same judgement on the same input | `=selfhost-libdiff`: acceptance, first error code/span/message, declaration count (`Tests/Groups/SelfhostLibDiff.lean:389-412`); `=selfhost-cli-diff` on case-sized inputs | **not elaborated types** (a declaration count is the observable), **not a gate** ("never fails because of a gap", `:33-34`), and **not the backend**: nothing in libdiff compiles or runs, so erasure, IR, C emitter and runtime are outside it. Today 2 files are `ok`, 8 both-reject, 194 diverge and 35 are bounded of 239 (`wiz-notes/libdiff-classification.md:8-27`) |
+| **Fixpoint / build stability** | the emitter prints the same C for its own source when that C is recompiled | `scripts/fixpoint.sh`: three stages by default (`self1.c = self2.c = self3.c`) | **not correctness**: a self-reproducing emitter bug passes forever, because one implementation is compared with itself, not Lean against Wiz; `--stages 2` ("one coincident round") is allowed (`fixpoint.sh:8-10`); no expected hash is pinned; the stage executables are printed but not in the verdict (`:245-257`); the nightly job is a clean skip without `WIZ_RUNNER_HEAVY` |
+| **Semantic preservation** | if the source program has a value, the compiled program has the same value | **no end-to-end claim.** The kernel checks each compiled equation against its definition (T1, partial correctness: if the compiled code terminates, its result is the value's); `#eval`/`#run`/C differentials and `=selfhost-cli-diff` compare behaviour on cases | a theorem from source semantics to C. Erasure, the IR, `inlineCalls` (typing only), RC, the C/LLVM/Wasm backends, `runtime/` and the C compiler are trusted, not proved (`docs/Status.md` §7.0) |
+
+**The fixpoint is the third row, not the first or the fourth.** It is a build-stability and
+bootstrappability check; it does not compare the two implementations and it says nothing
+about whether the common design is right. The Nix chain's `cmp seed.c self.c` is stronger
+on reproducibility, but in cross mode `c1` is informational and both paths use compilers
+of the same ancestry, so it is a convergence check, not Wheeler's diverse double
+compilation (`wiz-notes/bootstrap-chain-root.md` §4; DDC-1 is still root requirement 6).
+**libdiff is the second row at the frontend only**: it is a measurement, not a gate, and
+its observable is a projection that hides the elaborated term, which is the product of a
+dependent type checker.
+
+**Where the assurance budget goes.** The next formal step belongs to the *kernel*: a
+declarative specification and a checked equivalence with the algorithmic checker (WizMeta
+is that third voter today, 0 disagreements, with validity and subject reduction stated but
+not proved), plus a proof-carrying export that serialises an elaborated term for
+independent re-checking. Not a verified elaborator. The reason is one line: the kernel is
+the only component whose wrong answer a proof cannot outrun, and it is 6,286 lines against
+an elaborator with metavariables, unification, type classes and an extensible macro system
+(`docs/Status.md` §7.0–§7.1). CompCert's roughly 100 kLoC and six person-years bought a
+far simpler language than dependent type theory.
+
 ## The artifact: a static executable
 
 Fixed-output derivations (FODs) cannot refer to the store, and a release is consumed

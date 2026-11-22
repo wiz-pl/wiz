@@ -16,6 +16,21 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* docs: the claims the state-of-the-art review found were not what the pages said are now
+  precise or named as limitations, each with its measurement or test:
+  `docs/Status.md` line and case counts re-measured on `d853fde79` (selfhost
+  `Kernel.wiz` 5,346 lines, Lean kernel 6,286/4,998, `STC/F0` 28 files/5,136 lines, the
+  `elab` group's 43 cases and 24 rejections, 1,986 cases and 457 rejection checks in
+  `Tests/Groups/*.lean`); the four separately-claimed bootstrap properties and which of
+  them the fixpoint and libdiff do and do not provide (`docs/bootstrap-chain.md`), with
+  the assurance budget assigned to the kernel; `wiz-web/1` and `wiz-gpu/1` host/dispatch
+  profiles with their unverified rows (`docs/stages/08-backend/{wasm,webgpu}.md`);
+  Lean-interface extensibility rather than feature parity (`docs/design/README.md`);
+  the selfhost `Nat` as wrapping at 63 bits, under verification
+  (`docs/selfhost-compiler.md`, `docs/semantics-matrix.md`); and `Hdl.Formal` as an
+  unverified second rendering whose CI case skips without yosys/z3
+  (`docs/libraries.md`, `docs/hardware.md`). No code or kernel claim changed.
+
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
   paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a

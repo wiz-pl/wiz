@@ -13,7 +13,7 @@ controller. The libraries are described in [libraries.md](libraries.md) (section
 | memories | `hdl/src/Hdl/Core.wiz` | `HwTy.mem aw dw`, `Hw.memRead`/`memWrite`; block RAM on iCE40 |
 | traces | `lib/Trace.wiz` | `Trace A := Nat → A`, `Mealy`, invariants, refinement |
 | temporal logic | `hdl/src/Hdl/Temporal.wiz` (PR #146) | `□`, `◇`, `○`, SVA-style implications, fairness, over traces |
-| formal harness | `hdl/src/Hdl/Formal.wiz` | `` `ifdef FORMAL `` `assert`/`assume`/`cover` monitors with `$past`/`$stable`/`anyconst`, plus a generated `.sby` |
+| property monitors | `hdl/src/Hdl/Formal.wiz` | an **unverified second rendering** of properties: `` `ifdef FORMAL `` `assert`/`assume`/`cover` monitors with `$past`/`$stable`/`anyconst`, plus a generated `.sby`; nothing relates it to the `TL` formulas. The CI case is skipped when `yosys`, `yosys-smtbmc` or `z3` is missing (`Tests/Groups/Hdl.lean:196-203`) |
 | bit reasoning | `hdl/src/Hdl/Bits.wiz` (PR, needs 22l) | laws of one-bit logic by case split; the bridge to `sat_decide` |
 | solvers | `sat_decide` (stage 28b), `native_refl` (stage 27a) | certified SAT for Boolean goals; compiled evaluation for long closed runs |
 
