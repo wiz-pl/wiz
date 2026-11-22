@@ -72,8 +72,9 @@ a `Scry.NullTables` per function: which parameter registers allow null at entry,
 statements define a maybe-null value regardless of their RHS, which statements
 dereference a register, which statements assert one non-null, and which registers are
 non-null by annotation. `Scry.nullDerefWarningsWith` uses them; `Scry.nullDerefWarnings`
-passes `NullTables.empty`, so the C analysis is unchanged. The tables become the
-statements `AStmt.check` (a dereference) and `AStmt.checkAssign` (an assignment to a
+passes `NullTables.empty`, so the C frontend supplies no facts and its alarms are the
+load/store ones (the reserved-register split below applies to both). The tables become
+the statements `AStmt.check` (a dereference) and `AStmt.checkAssign` (an assignment to a
 non-null-annotated register, the CS8600 shape).
 -/
 

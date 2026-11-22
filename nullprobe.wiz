@@ -1,0 +1,83 @@
+import IO
+import Sys
+import Scry.CsLower
+import Scry.CsNull
+import Scry.RuleTaint
+
+def Scry.say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def Scry.report (name : String) (l : Scry.Cs.Lowered) : EIO Unit := do
+  Scry.say ("== " ++ name ++ " ==");
+  Scry.say (String.intercalate "\n" (List.map (fun w =>
+    "  " ++ Scry.MemWarnKind.ruleId w.kind ++ " " ++ w.func
+      ++ " pt=" ++ Nat.repr w.point ++ " " ++ w.detail) (Scry.Cs.nullWarningsOf l)));
+  Scry.say "  edb:";
+  Scry.say (Scry.Cs.nullEdbText l);
+  Scry.say "  points:";
+  Scry.say (Scry.Cs.nullPointsText l)
+
+def Scry.probeOne (name : String) : EIO Unit := do
+  text ← FS.readFile ("scry/corpus/csharp/null/" ++ name ++ ".cs");
+  spill ← FS.readFile ("scry/corpus/csharp/null/" ++ name ++ ".cst");
+  match Scry.Cs.frontend (name ++ ".cs") text spill with
+  | .err e => Scry.say (name ++ ": " ++ e)
+  | .ok l => Scry.report name l
+
+
+def Scry.aTag : AStmt → String
+  | .assign x _ => "assign %" ++ Nat.repr x
+  | .assume _ => "assume"
+  | .store a _ _ => "store %" ++ Nat.repr a
+  | .check v => "CHECK %" ++ Nat.repr v
+  | .checkAssign x _ => "checkAssign %" ++ Nat.repr x
+  | .skip => "skip"
+
+def Scry.nodeTag (g : Scry.Fn) (p : Nat) : String :=
+  match Scry.nodeStmt g p with
+  | .some s => Nat.repr (Scry.stmtNode s)
+  | .none => "-"
+
+def Scry.dumpFn (name : String) (l : Scry.Cs.Lowered) : EIO Unit := do
+  match List.find (fun f => String.eq f.name name) l.funcs with
+  | .none => Scry.say ("no function " ++ name)
+  | .some fn => do
+    let g := Scry.flatten fn;
+    Scry.say ("-- " ++ name ++ " (" ++ Nat.repr g.count ++ " points)");
+    Scry.say (String.intercalate "\n" (List.map (fun p =>
+      Nat.repr p ++ " [node " ++ Scry.nodeTag g p ++ "]: " ++ (match Scry.nodeStmt g p with
+        | .some s => Scry.Cs.stmtText s
+        | .none => match Scry.nodeTerm g p with
+          | .some t => Scry.Cs.termText t
+          | .none => "-")) (Scry.range g.count)));
+    Scry.say ("consts: " ++ String.intercalate ","
+      (List.map (fun p => Nat.repr p.1 ++ "=" ++ (match p.2 with
+        | .none => "?"
+        | .some n => Nat.repr n)) (Scry.constVars g)));
+    let tbls := Scry.Cs.nullTablesOf l fn;
+    let tab := Scry.retConstTable (Wil.program l.funcs);
+    let ncfg := Scry.translateWith fn tab tbls;
+    Scry.say (String.intercalate "\n" (List.map (fun p =>
+      "block " ++ Nat.repr p.1 ++ " (point " ++ Nat.repr p.2.point ++ "): "
+        ++ Scry.aTag p.2.stmt) ncfg.blocks))
+
+def Scry.probeDump : EIO Unit := do
+  text ← FS.readFile "scry/corpus/csharp/null/coalesce.cs";
+  spill ← FS.readFile "scry/corpus/csharp/null/coalesce.cst";
+  match Scry.Cs.frontend "coalesce.cs" text spill with
+  | .err e => Scry.say e
+  | .ok l => Scry.dumpFn "NullFixtures.Coalesce.Length" l
+
+def Scry.probeDumpField : EIO Unit := do
+  text ← FS.readFile "scry/corpus/csharp/null/field.cs";
+  spill ← FS.readFile "scry/corpus/csharp/null/field.cst";
+  match Scry.Cs.frontend "field.cs" text spill with
+  | .err e => Scry.say e
+  | .ok l => Scry.dumpFn "NullFixtures.Holder.Length" l
+
+def Scry.probeAll : EIO Unit := do
+  Scry.probeOne "coalesce";
+  Scry.probeOne "field";
+  Scry.probeDump;
+  Scry.probeDumpField
+
+def main : IO Unit := EIO.toIO Scry.probeAll

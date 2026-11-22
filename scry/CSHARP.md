@@ -303,7 +303,7 @@ when a spill's root does not span its `.cs` text. Goldens are regenerated with
 `SCRY_CS_WRITE=1 tests =scry-csharp`, which writes the files **and fails**, so a new
 golden is always reviewed in the diff.
 
-The spills are tool output, but they stay checked in as small goldens (15 files, 164 KB):
+The spills are tool output, but they stay checked in as small goldens (42 files, 336 KB):
 the test groups run Wiz in the Lean interpreter, which can't call the native shim, and
 neither the `.#tests` closure nor CI builds `scry-cst` (it needs the out-link, a C
 compile of the grammar and a `wiz build` of `CstMain`). This is the same arrangement as
