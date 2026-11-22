@@ -20,6 +20,8 @@
 // oracle for the runtime's `lib/Web/Goals.wiz` now.
 "use strict";
 
+import { definitionTarget, locationLabel } from "./hover.mjs";
+
 const clampNat = (n, lo, hi) => (n < lo ? lo : n > hi ? hi : n);
 const num = (x) => (typeof x === "number" && isFinite(x) ? Math.trunc(x) : 0);
 
@@ -393,6 +395,12 @@ export const rules = {
   },
   trigger: (text, offset, c) => completionTrigger(text, offset, c),
   position: (text, offset) => positionFromOffset(text, offset),
+  // A `textDocument/definition` answer's target, range and label (`Web.Hover`); the
+  // production page gets this from `wiz_loom_hover_target`.
+  target(result) {
+    const t = definitionTarget(result);
+    return t ? { uri: t.uri, range: t.range, label: locationLabel(t) } : null;
+  },
   // The popup's tooltip and ask key, and the goals pane's source spans (the runtime's
   // `Web.EditorModel` rules; these are the test oracle's).
   itemTitle(item) {

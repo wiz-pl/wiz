@@ -1,6 +1,7 @@
 import IO
 import Json
 import Web.EditorModel
+import Web.Hover
 import Web.InfoviewPage
 import Web.Loom
 
@@ -102,6 +103,9 @@ def loomEditorAskKey (key code ctrl meta : String) : String :=
 def loomEditorSpan (text span : String) : String := EditorModel.spanJson text span
 def loomEditorRangeText (range : String) : String := EditorModel.rangeTextJson range
 
+/-- A `textDocument/definition` result as `{uri, range, label}`, or `null`. -/
+def loomHoverTarget (result : String) : String := Hover.targetJson result
+
 export "wiz_loom_editor_index" loomEditorIndex
 export "wiz_loom_editor_segments" loomEditorSegments
 export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
@@ -123,3 +127,4 @@ export "wiz_loom_editor_item_title" loomEditorItemTitle
 export "wiz_loom_editor_ask_key" loomEditorAskKey
 export "wiz_loom_editor_span" loomEditorSpan
 export "wiz_loom_editor_range_text" loomEditorRangeText
+export "wiz_loom_hover_target" loomHoverTarget

@@ -8,6 +8,8 @@
 import { document as minidoc, Element } from "./framework/minidom.mjs";
 import { wantsHover, mountHover } from "./hover.js";
 import { hoverContents, hoverLines, definitionTarget, locationLabel } from "./framework/hover.mjs";
+import { rules } from "./framework/editor-model.mjs";
+import { readFileSync } from "node:fs";
 
 let failed = 0;
 function check(name, got, want) {
@@ -113,6 +115,30 @@ check("label: an encoded name",
   "My File.wiz:1:1");
 check("label: nothing", locationLabel(null), "");
 
+// The shape the runtime returns (`Web.Hover.targetJson`, `wiz_loom_hover_target`): one
+// target with the range to select and the label of a place the page cannot open.
+check("target: a Location, as the runtime's `{uri, range, label}`", rules.target(prelude), {
+  uri: "file:///lib/Prelude.wiz",
+  range: prelude.range,
+  label: "Prelude.wiz:7:1",
+});
+check("target: an array takes the first usable location", rules.target([null, prelude]), {
+  uri: "file:///lib/Prelude.wiz",
+  range: prelude.range,
+  label: "Prelude.wiz:7:1",
+});
+check("target: a LocationLink keeps its selection range", rules.target({
+  targetUri: "file:///a/B.wiz",
+  targetSelectionRange: { start: { line: 2, character: 1 }, end: { line: 2, character: 4 } },
+  targetRange: { start: { line: 2, character: 0 }, end: { line: 4, character: 0 } },
+}), {
+  uri: "file:///a/B.wiz",
+  range: { start: { line: 2, character: 1 }, end: { line: 2, character: 4 } },
+  label: "B.wiz:3:2",
+});
+check("target: nothing", rules.target(null), null);
+check("target: junk", rules.target("nope"), null);
+
 // ## 5. The widget: timers, the caret and the card the runtime renders
 
 function makeDoc() {
@@ -169,7 +195,14 @@ function mounts(doc, editor, options) {
   card.setAttribute("id", "wiz-hover");
   card.setAttribute("hidden", "");
   doc.body.appendChild(card);
-  return mountHover({ editor, document: doc, show: (raw, label) => makeCard(doc, { raw, label }), ...options });
+  return mountHover({
+    editor,
+    document: doc,
+    position: rules.position,
+    target: rules.target,
+    show: (raw, label) => makeCard(doc, { raw, label }),
+    ...options,
+  });
 }
 const HOVER = {
   contents: {
@@ -289,6 +322,53 @@ const sameDoc = { uri: "file:///play.wiz", range: { start: { line: 1, character:
 check("widget: no editor", mountHover({ document: minidoc(), onHover: () => null }), null);
 check("widget: no document", mountHover({ editor: { value: "" }, onHover: () => null }), null);
 check("widget: no request", mountHover({ editor: { value: "" }, document: minidoc() }), null);
+
+// ## 8. The position and definition rules are the runtime's, injected
+
+{
+  // The caret's position is not computed here: without the runtime's rule there is
+  // nothing to ask the server about, so no widget is mounted.
+  const doc = makeDoc();
+  const editor = makeEditor(doc, "x\n", 1);
+  check("rules: no position rule, no widget",
+    mountHover({ editor, document: doc, onHover: () => null }), null);
+  check("rules: a definition needs a target rule",
+    mountHover({ editor, document: doc, position: rules.position, onDefinition: () => null }), null);
+
+  // The injected rules are the only decisions: a position rule's answer is what the
+  // request carries, and a target rule's answer (including its label) is what is shown.
+  const asked = [];
+  let sawResult = null;
+  const hover = mounts(doc, editor, {
+    position: (text, offset) => ({ line: 7, character: offset + 1 }),
+    onHover: (p) => { asked.push(p); return HOVER; },
+    onDefinition: () => ({ uri: "file:///other/Lib.wiz" }),
+    target: (result) => {
+      sawResult = result;
+      return {
+        uri: "file:///other/Lib.wiz",
+        range: { start: { line: 2, character: 1 }, end: { line: 2, character: 4 } },
+        label: "Lib.wiz:3:2",
+      };
+    },
+  });
+  await hover.inquire();
+  check("rules: the injected position is the request's", asked, [{ line: 7, character: 2 }]);
+  const target = await hover.goToDefinition();
+  check("rules: the injected target's uri", target && target.uri, "file:///other/Lib.wiz");
+  check("rules: the target rule saw the server's answer", sawResult, { uri: "file:///other/Lib.wiz" });
+  check("rules: the injected label is what the card shows", hover.content(), "Lib.wiz:3:2");
+}
+
+// The page may not bring back the rules the runtime owns: a local caret calculation or
+// a local `textDocument/definition` interpreter is the regression this pins.
+{
+  const source = readFileSync(new URL("./hover.js", import.meta.url), "utf-8");
+  checkThat("source: no local position arithmetic",
+    !/lastIndexOf\("\\n"\)|match\(\/\\n\/g\)/.test(source));
+  checkThat("source: no local definition interpreter",
+    !/targetUri|definitionTarget|locationLabel|targetSelectionRange/.test(source));
+}
 
 if (failed) {
   console.log(`hover: ${failed} check(s) failed`);
