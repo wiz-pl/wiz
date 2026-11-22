@@ -1865,16 +1865,17 @@ def TacticM.omegaEqEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr)
 
 /-- The edges out of `node` from the hypotheses: `Le`, `Lt` and equalities (both ways,
 through `Nat.le_of_eq`/`Nat.le_of_eq_sym`). -/
-def TacticM.omegaHypEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
+def TacticM.omegaHypEdges (g : Nat) (i : Nat) (src : Expr) (node : Expr) (proof : Expr) :
     List (String × Expr) → TacticM (List (Expr × Expr))
   | .nil => TacticM.pure (.nil : List (Expr × Expr))
   | .cons h hs => do
-    rest ← TacticM.omegaHypEdges g src node proof hs;
+    rest ← TacticM.omegaHypEdges g (Nat.succ i) src node proof hs;
+    let hp : Expr := Expr.var i;
     match Expr.appOf "Nat.Le" h.2 with
     | .some (.cons u (.cons v .nil)) => do
       ok ← TacticM.isDefEq g node u;
       let here : List (Expr × Expr) := match ok with
-        | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof h.2) .nil
+        | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof hp) .nil
         | .false => .nil;
       TacticM.pure (List.append here rest)
     | _ => match Expr.appOf "Nat.Lt" h.2 with
@@ -1882,7 +1883,7 @@ def TacticM.omegaHypEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
         let su : Expr := .app (.const "Nat.succ") u;
         ok ← TacticM.isDefEq g node su;
         let here : List (Expr × Expr) := match ok with
-          | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof h.2) .nil
+          | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof hp) .nil
           | .false => .nil;
         TacticM.pure (List.append here rest)
       | _ => do
@@ -1890,7 +1891,7 @@ def TacticM.omegaHypEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
         match ev with
         | .some q => match q with
           | (A, u, v) => do
-            here ← TacticM.omegaEqEdges g src node proof A u v h.2;
+            here ← TacticM.omegaEqEdges g src node proof A u v hp;
             TacticM.pure (List.append here rest)
         | .none => TacticM.pure rest
 
@@ -1905,7 +1906,7 @@ hypotheses. -/
 def TacticM.omegaSuccs (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
     (src : Expr) (node : Expr) (proof : Expr) : TacticM (List (Expr × Expr)) := do
   adds ← TacticM.omegaAddEdges g src node proof terms;
-  hs ← TacticM.omegaHypEdges g src node proof hyps;
+  hs ← TacticM.omegaHypEdges g 0 src node proof hyps;
   TacticM.pure (List.append (TacticM.omegaSuccEdges src node proof) (List.append adds hs))
 
 /-- Breadth-first (queue order deterministic) search for `Le src target`; the proof of
