@@ -230,7 +230,7 @@ struct or keep the large data in a map."
         rejectTop s!"`{t.describe}` wraps a non-POD payload; an `Option` is a value, not a \
 pointer"
   | .userStr cap =>
-    if cap == 0 || cap > 256 then rejectTop (userStrMessage cap)
+    if cap == 0 || decide (cap > 256) then rejectTop (userStrMessage cap)
   | .userPtr => pure ()
   | .map k v _ =>
     checkTy k
@@ -434,7 +434,7 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
   | .readUserStr ty c ptr =>
     match ty.optionInner with
     | some (.userStr cap) =>
-      unless (1 <= cap && cap <= 256) do reject t.span (userStrMessage cap)
+      unless decide (1 <= cap ∧ cap <= 256) do reject t.span (userStrMessage cap)
     | _ =>
       reject t.span s!"`TraceCtx.readUserStr` produces `Option (UserStr N)`, not \
 `{ty.describe}`"
@@ -446,7 +446,7 @@ partial def checkTm (p : Program) (ctx : Array Ty) (expected : Ty) (t : Tm) :
   | .argvSlot ty c argv slot =>
     match ty.optionInner with
     | some (.userStr cap) =>
-      unless (1 <= cap && cap <= 256) do reject t.span (userStrMessage cap)
+      unless decide (1 <= cap ∧ cap <= 256) do reject t.span (userStrMessage cap)
     | _ =>
       reject t.span s!"`TraceCtx.argvSlot` produces `Option (UserStr N)`, not `{ty.describe}`"
     if slot >= argvSlotMax then reject t.span (argvSlotMessage slot)
@@ -468,7 +468,8 @@ set of slots, not a runtime index"
       checkTm p ctx want tm
     match data.ty with
     | .userStr cap =>
-      if cap == 0 || cap > 256 then reject t.span (userStrMessage cap)
+      if cap == 0 || decide (cap > 256) then reject t.span (userStrMessage cap)
+      else pure ()
     | other => reject t.span s!"`Probe.emit`'s payload is a captured `UserStr`, not \
 `{other.describe}`. Read it with `TraceCtx.readUserStr`; never pass a pointer."
     checkTm p ctx data.ty data

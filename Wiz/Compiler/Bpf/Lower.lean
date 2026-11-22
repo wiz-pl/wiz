@@ -250,7 +250,7 @@ nullary enum instead"
   | .packet => pure .packet
   | .ctx k => pure (.ctx k)
   | .userStr cap =>
-    if cap == 0 || cap > 256 then reject span (userStrMessage cap) else pure (.userStr cap)
+    if cap == 0 || decide (cap > 256) then reject span (userStrMessage cap) else pure (.userStr cap)
   | .userPtr => pure .userPtr
   | .map k v kind => do
     let k ← lowerTy span k
