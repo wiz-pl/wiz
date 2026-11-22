@@ -2247,7 +2247,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       let idx := s.declIndex.getD (buildDeclIndex s.modules s.loader)
       let candidates := cs.filter fun (C, _) => s.derivers.lookup C |>.isNone &&
         !(idx.modulesDeriving s.imported s.module C).isEmpty
-      let mods := candidates.map (fun (C, _) => (idx.modulesDeriving s.imported s.module C).head!) |>.eraseDups
+      let mods := candidates.map (fun (C, _) => (idx.modulesDeriving s.imported s.module C).head!) |>.eraseDups   -- complexity: ok (the modules for one deriving clause)
       let mut rest := cs
       for m in mods do
         let classes := (candidates.filter fun (C, _) =>

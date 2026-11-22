@@ -83,7 +83,7 @@ entry the scan does not have (`Array.empty`, a member of a type) falls back to i
 type's module, as the language server's quick fix does. -/
 def DeclIndex.modulesDeclaring (idx : DeclIndex) (imported : List Name) (self : Name) (x : Name) : List Name :=
   let of (n : Name) : List Name :=
-    ((idx.byName[n]?.getD []).filter fun m => m != self && !imported.contains m).eraseDups
+    ((idx.byName[n]?.getD []).filter fun m => m != self && !imported.contains m).eraseDups   -- complexity: ok (the modules declaring one name)
   let exact := of x
   if !exact.isEmpty then exact else
   match x.splitOn "." with
@@ -92,7 +92,7 @@ def DeclIndex.modulesDeclaring (idx : DeclIndex) (imported : List Name) (self : 
 
 /-- The modules (not imported) that register a deriver for `C`. -/
 def DeclIndex.modulesDeriving (idx : DeclIndex) (imported : List Name) (self : Name) (C : Name) : List Name :=
-  ((idx.derivers[C]?.getD []).filter fun m => m != self && !imported.contains m).eraseDups
+  ((idx.derivers[C]?.getD []).filter fun m => m != self && !imported.contains m).eraseDups   -- complexity: ok (the modules deriving one class: a handful)
 
 /-- The closest module name to `m` (edit distance at most 2), for `import Prelud`. -/
 def suggestModule (modules : Array Name) (m : Name) : Option Name :=
