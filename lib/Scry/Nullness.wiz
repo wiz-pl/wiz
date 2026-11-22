@@ -116,10 +116,16 @@ def Scry.nMaxVar (fn : Wil.Func) : Nat :=
       (List.append fn.params fn.locals)) (Scry.range g.count);
   fromStmts
 
-def Scry.nVars (fn : Wil.Func) : List Nat :=
-  Scry.range (Nat.succ (Scry.nMaxVar fn))
-
+/-- The reserved registers are `nMaxVar` (the unknown value: `havoc`, an unknown call
+result, an unknown operator) and `nMaxVar + 1` (the scratch a load's base check writes).
+They are distinct: a load-base check must not define the unknown-value register as a
+non-null load result, or every later maybe-null value would read back as non-null. -/
 def Scry.nHavoc (fn : Wil.Func) : Nat := Scry.nMaxVar fn
+
+def Scry.nScratch (fn : Wil.Func) : Nat := Nat.succ (Scry.nMaxVar fn)
+
+def Scry.nVars (fn : Wil.Func) : List Nat :=
+  Scry.range (Nat.succ (Scry.nScratch fn))
 
 /-- The entry environment: parameters are valid objects (non-null); everything else is
 unknown. `maybe` lists parameter registers whose **declared annotation** allows null
@@ -446,7 +452,7 @@ def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
       -- declared type allows null. A pointer read out of memory is not tracked as a
       -- null field (no memory nullness); treating every one as maybe-null would warn on
       -- every `p = s->field; p->x` chain. The access through the base is still checked.
-      List.cons (AStmt.assign (Scry.nHavoc fn) (AExpr.load p.index (AExpr.lit 0) 1))
+      List.cons (AStmt.assign (Scry.nScratch fn) (AExpr.load p.index (AExpr.lit 0) 1))
         (List.cons (defOf x (AExpr.alloc (AExpr.lit 1))) .nil)
     | .assign x e _ =>
       let rhs : AExpr := match e, x.ty with
