@@ -11,6 +11,9 @@
 #                          Loom runtime (web/build-playground-ui.sh) and the engine
 #                          (web/build-playground.sh's wiz-playground.mjs/.wasm)
 #   /licenses/             the Wasm modules' notice (mini-gmp) and licence texts
+#   /source/               optional: a `scry web` bundle (SOURCE_BUNDLE=DIR). The site
+#                          build has no `scry` binary, so it cannot generate one; CI or
+#                          a publisher that built scry passes the directory.
 #
 # The documentation is generated separately, into SITE/docs:
 #
@@ -59,6 +62,22 @@ for f in wiz-playground.mjs wiz-playground.wasm wiz-playground-ui.mjs wiz-playgr
   fi
   cp "$WEB/$f" "$SITE/playground/$f"
 done
+
+# The static source reader, when the publisher has a bundle (`scry web DIR --out B`).
+# A bundle is source + findings for one analysed tree, so the site does not synthesise
+# one: an absent SOURCE_BUNDLE means no /source/ page, not an empty one. A named bundle
+# must be complete, so a broken export is red here rather than a blank page.
+if [ -n "${SOURCE_BUNDLE:-}" ]; then
+  for f in index.html data/manifest.json data/findings.json; do
+    if [ ! -f "$SOURCE_BUNDLE/$f" ]; then
+      echo "build-site: $SOURCE_BUNDLE/$f is missing (SOURCE_BUNDLE is not a scry web bundle)" >&2
+      exit 1
+    fi
+  done
+  mkdir -p "$SITE/source"
+  cp -R "$SOURCE_BUNDLE"/. "$SITE/source/"
+  echo "site: source reader at $SITE/source/index.html"
+fi
 
 # The licences page: the Wasm modules (playground/, docs/) include GMP's mini-gmp, so
 # the site carries its notice, the LGPL v3 and the GPL v3 (Wiz's LICENSE).
