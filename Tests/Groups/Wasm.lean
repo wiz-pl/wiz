@@ -448,8 +448,12 @@ def wasmGroup : Group where
           "stack" },
     { name := "the validator rejects damaged bytes", run := fun _ => wasmValidatorCatchesDamage },
     { name := "IO main is rejected", run := fun _ => do
+        -- a reachable `IO.println` is refused before codegen (it has no `wasm` row), and
+        -- a program that reaches no foreign function but is in IO is refused by the
+        -- emitter itself: both say why, neither emits a call
         let e ← wasmError "import IO\ndef main : IO Unit := IO.println \"hi\""
-        unless (e.splitOn "IO-less").length > 1 do throw (IO.userError e) },
+        unless (e.splitOn "no-target-implementation").length > 1 do throw (IO.userError e)
+        unless (e.splitOn "`IO.println`").length > 1 do throw (IO.userError e) },
     { name := "Bytes (a native foreign type) is rejected", run := fun _ => do
         let e ← wasmError "import IO\ndef main : Nat := Bytes.size Bytes.empty"
         unless (e.splitOn "no-target-implementation").length > 1 do throw (IO.userError e) },
