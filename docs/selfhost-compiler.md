@@ -115,12 +115,15 @@ The gaps are documented, tracked and ordinary:
   future work (`selfhost/Cli.wiz`). The self-hosted runtime's `Nat` is a 63-bit word and
   its arithmetic **wraps** (`selfhost/rt.c:51-54`, `:804-831`), so the `[S]` column of the
   [semantics matrix](semantics-matrix.md) is limited to cells whose values and
-  intermediates stay below `2^63`. Above that bound it is a different function, not a
-  slower one: `Nat.add (2^63 - 1) 1` is `0` there, and `Nat.pow 2 63` reduces to `0`
-  (`wiz-notes/sota-numerics.md` §3.1). That is a **semantic difference**, not only a
-  bootstrap limitation. It is **under verification** (probe owned by the coordinator); until
-  that lands, treat the self-hosted `Nat` as *wrapping at 63 bits*, not as a checked or
-  faithful `Nat`.
+  intermediates stay below `2^63`. Above that bound the runtime arithmetic wraps, and the
+  *checker* does not currently exhibit a wrapped verdict: with the 2026-11-22 build,
+  `Nat.pow 2 63 = 0` is rejected by the 200000-step budget in 0.9 s, while
+  `Nat.add (2^63 - 1) 1 = 0` and `Nat.add 2^62 2^62 = 0` **do not return within 30 s** and
+  print nothing (the budget is reached — `tickout after 200001` — and the recovery path
+  hangs; F43 in `wiz-notes/codebase-audit-2026-11-22.md`). So above the bound the honest
+  statement today is *unsupported and currently unbounded*, not "wraps to 0": do not claim
+  a value for a cell whose intermediates exceed `2^63`, and treat the self-hosted `Nat` as
+  neither checked nor faithful (`selfhost/rt.c:51-54`, `:804-831`; `sota-numerics.md` §3.1).
 * **Diagnostics are approximated.** The driver turns the frontend's `@N text` into a
   compiler-style line and uses the Lean error code where the message maps; it does not
   reproduce every message (`selfhost/Cli.wiz`).
