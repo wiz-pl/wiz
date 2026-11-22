@@ -46,6 +46,8 @@ Exit status: 0 clean, 1 drift, 2 usage or a check that could not run.
 from __future__ import annotations
 
 import argparse
+import glob
+import os
 import re
 import subprocess
 import sys
@@ -56,6 +58,7 @@ CORPUS = ".github/libdiff-corpus.txt"
 OLD_NAMES = "legacy-names.tsv"
 LEGACY_MODULE = "Wiz/LegacyNames.lean"
 COLLISIONS = ".github/name-collisions-baseline.json"
+CSPILLS = "scry/corpus/csharp/**/*.cs (a sibling .cst each)"
 TEST_DRIVER = ".lake/build/bin/tests"
 
 
@@ -185,6 +188,32 @@ def check_collisions() -> list[str]:
     return [] if proc.returncode == 0 else parse_collisions(proc.stdout + proc.stderr)
 
 
+def check_csharp_spills() -> list[str]:
+    """Every fixture `.cs` under scry/corpus/csharp has its `.cst` spill beside it.
+
+    The spill is generated (tree-sitter's CST dump) and the fixtures that carry a
+    `repo/` directory are deliberate exceptions: the corpus is a checked-in pairing, and
+    a `.cs` without its `.cst` fails a suite case with `no such file or directory`
+    instead of naming the fixture that lost its companion (2026-11-22,
+    `cwe476-models-unsafe.cst`)."""
+    missing = []
+    # `repo/` and `only-excluded/` are deliberate non-corpus fixtures: the first is a
+    # whole repository tree, the second exists to be *dropped* by the exclusion rule, so
+    # neither is a `.cs`/`.cst` pair the suite checks. Every other fixture is.
+    non_corpus = ("/repo/", "/only-excluded/")
+    for cs in sorted(glob.glob("scry/corpus/csharp/**/*.cs", recursive=True)):
+        if any(marker in cs for marker in non_corpus):
+            continue
+        if not os.path.exists(cs[:-3] + ".cst"):
+            missing.append(cs)
+    if not missing:
+        return []
+    lines = [f"companion drift: {len(missing)} fixture(s) have a .cs but no .cst spill:"]
+    lines += [f"  {cs[:-3]}.cst" for cs in missing[:10]]
+    lines.append("  regenerate with the command in scry/README.md ('spills')")
+    return lines
+
+
 def self_test() -> int:
     failures: list[str] = []
 
@@ -272,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         (CORPUS, check_corpus),
         (f"{OLD_NAMES} + {LEGACY_MODULE}", check_legacy),
         (COLLISIONS, check_collisions),
+        (CSPILLS, check_csharp_spills),
     )
     drift: list[str] = []
     failed = 0
