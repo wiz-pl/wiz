@@ -45,10 +45,10 @@ def xdpProgram (decls : Array SDecl) (maps : Array SMapDecl := #[]) : SProgram :
 
 /-- A minimal tracepoint program: `execve : TraceCtx → UIntN 32`. -/
 def traceProgram (decls : Array SDecl) (maps : Array SMapDecl := #[])
-    (section : String := "tracepoint/syscalls/sys_enter_execve")
+    (sec : String := "tracepoint/syscalls/sys_enter_execve")
     (ret : STy := .uint 32) (transport : Transport := .perfEventArray)
     (kind : ProgKind := .tracepoint) : SProgram :=
-  { entry := "execve", sectionName := section, kind, license := "GPL",
+  { entry := "execve", sectionName := sec, kind, license := "GPL",
     version := 1, maps, decls, ret, transport }
 
 /-- A tracepoint body that reads one string and emits it once. The fixture
@@ -316,7 +316,7 @@ version = 1
         let prog := traceProgram #[
           { name := "execve", params := #[.ctx .tracepoint], ret := .uint 32,
             body := execveBody }] traceMaps
-          (section := "tracepoint/syscalls/sys_enter_execve")
+          (sec := "tracepoint/syscalls/sys_enter_execve")
           (transport := .tracePrintk)
         match emitProgram prog with
         | .error e => throw (IO.userError e)
@@ -335,7 +335,7 @@ version = 1
         let prog := traceProgram #[
           { name := "execve", params := #[.ctx .uprobe], ret := .uint 32,
             body := .ret (.uintLit 32 0) }] #[]
-          (section := "uprobe//bin/sh:readline")
+          (sec := "uprobe//bin/sh:readline")
           (ret := .uint 32) (kind := .uprobe)
         match emitProgram prog with
         | .error e => throw (IO.userError e)

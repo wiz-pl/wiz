@@ -879,8 +879,8 @@ def emitEntry (env : Env) (prog : Program) : EmitM Unit := do
   -- A tracepoint/uprobe section is program-specific, so the manifest's exact spelling is
   -- the ELF section. The packet kinds keep their canonical `elfSection` (`xdp`,
   -- `classifier`), so an existing xdp/tc object is byte-identical.
-  let section := if prog.kind.isTracing then prog.sectionName else prog.kind.elfSection
-  line s!"SEC(\"{section}\") int {cName prog.entry}(bpf_ctx *x0) \{"
+  let sec := if prog.kind.isTracing then prog.sectionName else prog.kind.elfSection
+  line s!"SEC(\"{sec}\") int {cName prog.entry}(bpf_ctx *x0) \{"
   emitRet env prog "  " prog.ret true d.body
   line "}"
 
