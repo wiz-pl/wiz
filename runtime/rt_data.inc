@@ -1366,8 +1366,10 @@ static int wiz_ryu_to_chars(wiz_ryu_fd v, int sign, char *result) {
   return index;
 }
 
-/* NaN (sign ignored: not part of the value), ±Infinity, ±0 */
-static int wiz_ryu_special(char *result, int sign, int exponent, int mantissa) {
+/* NaN (sign ignored: not part of the value), ±Infinity, ±0. `mantissa` is the full
+   52-bit field: truncating it to `int` would turn the default NaN 0x7ff8_0000_0000_0000
+   (low 32 bits zero) into an infinity. */
+static int wiz_ryu_special(char *result, int sign, int exponent, uint64_t mantissa) {
   if (mantissa) { memcpy(result, "NaN", 3); return 3; }
   int i = 0;
   if (sign) result[i++] = '-';
@@ -1386,7 +1388,7 @@ static int wiz_ryu_d2s(double f, char *result) {
     (uint32_t)((bits >> WIZ_RYU_MANTISSA_BITS) & ((1u << WIZ_RYU_EXPONENT_BITS) - 1));
   if (ieeeExponent == ((1u << WIZ_RYU_EXPONENT_BITS) - 1u) ||
       (ieeeExponent == 0 && ieeeMantissa == 0)) {
-    return wiz_ryu_special(result, sign, (int)ieeeExponent, (int)ieeeMantissa);
+    return wiz_ryu_special(result, sign, (int)ieeeExponent, ieeeMantissa);
   }
   wiz_ryu_fd v;
   if (wiz_ryu_d2d_small_int(ieeeMantissa, ieeeExponent, &v)) {
