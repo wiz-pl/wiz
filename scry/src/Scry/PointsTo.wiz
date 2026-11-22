@@ -65,6 +65,20 @@ is what makes pointer-to-pointer (`*pp = &x; **pp = v`) and a stored function po
 work. Parameters are seeded from call sites and return values from `ret` registers, so
 the whole program is one fixpoint: context-insensitive and field-sensitive.
 
+## The solver
+
+The fixpoint is a native **worklist** (`Scry.ptDrain`), not a whole-program pass. Each
+register and each memory cell owns a **sparse bitset** of interned location ids
+(`Scry.Bits`: sorted `(word, bits)` pairs with no zero word), so a set costs memory for
+the words it uses and union is a word-table merge that also reports whether the left
+side grew. A reverse dependency graph maps each node to the statements that read it;
+evaluating a statement returns the nodes it read and the nodes whose set grew, and only
+the readers of a grown node are queued. Statements are processed in program order
+(`Scry.PtQueue` is an increasing id list), so a change wakes later statements in the
+same generation and earlier ones in the next: the rounds and the final sets are exactly
+the old full pass's, but unaffected statements are not evaluated. There is no Datalog
+evaluation in the inner loop and no whole-state equality check.
+
 ## What is precise, what is not
 
 * Constant field offsets (`p.x`, `a[0]`, `p + 1`) are exact cells.
@@ -512,7 +526,726 @@ def Scry.stmtContrib (p : Wil.Program) (st : Scry.PtState) (func : String) (poin
   | .call r callee args _ => Scry.callContrib p st func point r callee args
   | _ => Scry.noContrib
 
--- ## The fixpoint
+-- ## The worklist solver: sparse bitsets
+
+-- The sets below are **sparse bitsets**: a sorted list of `(word index, word)` pairs
+-- with no zero words, so an empty set costs nothing and a set of a few locations costs
+-- one pair per 64 locations that actually occur. Union is a linear merge of the two
+-- word lists, and a changed flag comes out of the same pass, so the worklist never
+-- compares whole states.
+structure Scry.Bits where
+  /-- `(word index, bits)` pairs, increasing by word index, with no zero word. -/
+  words : List (Nat × U64)
+
+def Scry.bitsEmpty : Scry.Bits := Scry.Bits.mk .nil
+
+def Scry.bitsIsEmpty (b : Scry.Bits) : Bool := List.isEmpty b.words
+
+/-- The set `{i}`. -/
+def Scry.bitsSingleton (i : Nat) : Scry.Bits :=
+  let w := Nat.div i 64;
+  let bit := Nat.mod i 64;
+  Scry.Bits.mk (List.cons (w, UIntN.shiftLeft (U64.ofNat 1) bit) List.nil)
+
+/-- `a ∪ b`, and whether `a` grew. Both inputs are sparse, so this is a merge of the
+non-zero words, not a pass over the location universe. -/
+def Scry.bitsWordMap (ws : List (Nat × U64)) : U64Map U64 :=
+  List.foldl (fun m p => U64Map.insert m (Scry.u64 p.1) p.2) U64Map.empty ws
+
+/-- `a ∪ b` and whether `a` grew: fold `b`'s non-zero words into `a`'s word table and
+report whether any word gained a bit. Keys come back sorted, so the result is sparse. -/
+def Scry.bitsUnion (a b : Scry.Bits) : Scry.Bits × Bool :=
+  let acc : U64Map U64 × Bool := List.foldl (fun acc p =>
+    let old := U64Map.findD acc.1 (Scry.u64 p.1) (U64.ofNat 0);
+    let nw := UIntN.lor old p.2;
+    let ch := Bool.or acc.2 (Bool.not (UIntN.beq nw old));
+    (U64Map.insert acc.1 (Scry.u64 p.1) nw, ch))
+    (Scry.bitsWordMap a.words, .false) b.words;
+  (Scry.Bits.mk (List.map (fun p => (UIntN.toNat p.1, p.2)) (U64Map.toList acc.1)),
+    acc.2)
+
+/-- A bitset from location ids (used for seeds and offset transforms). -/
+def Scry.bitsOfList (ids : List Nat) : Scry.Bits :=
+  let m := List.foldl (fun m i =>
+    let w := Nat.div i 64;
+    let bit := Nat.mod i 64;
+    let old := U64Map.findD m (Scry.u64 w) (U64.ofNat 0);
+    U64Map.insert m (Scry.u64 w) (UIntN.lor old (UIntN.shiftLeft (U64.ofNat 1) bit)))
+    (U64Map.empty : U64Map U64) ids;
+  Scry.Bits.mk (List.map (fun p => (UIntN.toNat p.1, p.2)) (U64Map.toList m))
+
+/-- Membership, for tests and diagnostics (the solver iterates the words instead). -/
+def Scry.bitsHas (b : Scry.Bits) (i : Nat) : Bool :=
+  let w := Nat.div i 64;
+  let bit := Nat.mod i 64;
+  match List.find (fun p => Nat.beq p.1 w) b.words with
+  | .none => .false
+  | .some p => UIntN.testBit p.2 bit
+
+def Scry.bitsOfWordGo (base : Nat) (w : U64) : Nat → List Nat
+  | .zero => .nil
+  | .succ k =>
+    let rest := Scry.bitsOfWordGo base w k;
+    match UIntN.testBit w k with
+    | .true => List.cons (Nat.add base k) rest
+    | .false => rest
+
+def Scry.bitsOfWord (base : Nat) (w : U64) : List Nat := Scry.bitsOfWordGo base w 64
+
+def Scry.bitsToListGo : List (Nat × U64) → List Nat
+  | .nil => .nil
+  | .cons p rest =>
+    List.append (Scry.bitsOfWord (Nat.mul p.1 64) p.2) (Scry.bitsToListGo rest)
+
+/-- The members, in increasing id order. -/
+def Scry.bitsToList (b : Scry.Bits) : List Nat := Scry.bitsToListGo b.words
+
+-- ## The location interning table
+
+/-- Location → dense id, and id → location. Ids are allocated in discovery order; the
+public location table is still sorted by `locShow`, so ids in `PtResult` do not depend
+on this order. -/
+structure Scry.PtTable where
+  byHash : U64Map (List (Scry.Loc × Nat))
+  byId : U64Map Scry.Loc
+  next : Nat
+
+def Scry.ptTableEmpty : Scry.PtTable :=
+  Scry.PtTable.mk U64Map.empty U64Map.empty 0
+
+def Scry.ptLocOf (t : Scry.PtTable) (id : Nat) : Option Scry.Loc :=
+  U64Map.find t.byId (Scry.u64 id)
+
+def Scry.ptIntern (t : Scry.PtTable) (l : Scry.Loc) : Nat × Scry.PtTable :=
+  let h := Scry.locHash l;
+  match U64Map.find t.byHash h with
+  | .none =>
+    let id := t.next;
+    (id, Scry.PtTable.mk
+      (U64Map.insert t.byHash h (List.cons (l, id) List.nil))
+      (U64Map.insert t.byId (Scry.u64 id) l) (Nat.succ id))
+  | .some bucket =>
+    match List.find (fun p => Scry.locEq p.1 l) bucket with
+    | .some p => (p.2, t)
+    | .none =>
+      let id := t.next;
+      (id, Scry.PtTable.mk
+        (U64Map.insert t.byHash h (List.cons (l, id) bucket))
+        (U64Map.insert t.byId (Scry.u64 id) l) (Nat.succ id))
+
+-- ## The solver state and its nodes
+
+/-- Variables are nodes `2 * varId`; a memory cell (one per interned location) is
+`2 * locId + 1`. Node keys are only used by the dependency graph, never by a set. -/
+def Scry.ptNodeVar (id : Nat) : Nat := Nat.mul 2 id
+def Scry.ptNodeMem (id : Nat) : Nat := Nat.add (Nat.mul 2 id) 1
+
+/-- The worklist's state. `pt` is keyed by variable id, `mem` by location id, and both
+values are sparse bitsets of location ids. -/
+structure Scry.PtWork where
+  pt : U64Map Scry.Bits
+  mem : U64Map Scry.Bits
+  freed : Scry.Bits
+  tbl : Scry.PtTable
+  vids : U64Map Nat
+  vkeys : U64Map Scry.VarKey
+  nVars : Nat
+
+def Scry.ptSetOf (m : U64Map Scry.Bits) (k : Nat) : Scry.Bits :=
+  U64Map.findD m (Scry.u64 k) Scry.bitsEmpty
+
+/-- `m[k] ∪= b`, reporting whether it grew. -/
+def Scry.ptSetAdd (m : U64Map Scry.Bits) (k : Nat) (b : Scry.Bits) :
+    U64Map Scry.Bits × Bool :=
+  let old := Scry.ptSetOf m k;
+  match Scry.bitsUnion old b with
+  | (nw, ch) => match ch with
+    | .true => (U64Map.insert m (Scry.u64 k) nw, .true)
+    | .false => (m, .false)
+
+def Scry.ptWorkAddVar (w : Scry.PtWork) (id : Nat) (b : Scry.Bits) :
+    Scry.PtWork × Bool :=
+  let (m, ch) := Scry.ptSetAdd w.pt id b;
+  ({ w with pt := m }, ch)
+
+def Scry.ptWorkAddMem (w : Scry.PtWork) (id : Nat) (b : Scry.Bits) :
+    Scry.PtWork × Bool :=
+  let (m, ch) := Scry.ptSetAdd w.mem id b;
+  ({ w with mem := m }, ch)
+
+def Scry.ptWorkAddFreed (w : Scry.PtWork) (b : Scry.Bits) : Scry.PtWork × Bool :=
+  match Scry.bitsUnion w.freed b with
+  | (nw, ch) => match ch with
+    | .true => ({ w with freed := nw }, .true)
+    | .false => (w, .false)
+
+def Scry.ptVidIdx (w : Scry.PtWork) (func : String) (i : Nat) : Nat :=
+  U64Map.findD w.vids (Scry.vkKey (Scry.vk func i)) 0
+
+def Scry.ptVidOf (w : Scry.PtWork) (func : String) (v : Wil.Var) : Nat :=
+  Scry.ptVidIdx w func v.index
+
+-- ## Building the constraint statements
+
+/-- One statement of the worklist, in the exact program order of the old full pass. -/
+structure Scry.PtStmt where
+  func : String
+  point : Nat
+  stmt : Wil.Stmt
+
+structure Scry.PtBuild where
+  vids : U64Map Nat
+  vkeys : U64Map Scry.VarKey
+  nVars : Nat
+  tbl : Scry.PtTable
+  stmts : U64Map Scry.PtStmt
+  nStmts : Nat
+  /-- Variable ids that an assignment or call result defines (the `ptSeeds` test). -/
+  defined : U64Map Unit
+
+def Scry.ptBuildEmpty : Scry.PtBuild :=
+  Scry.PtBuild.mk U64Map.empty U64Map.empty 0 Scry.ptTableEmpty U64Map.empty 0 U64Map.empty
+
+def Scry.ptBuildVid (b : Scry.PtBuild) (func : String) (v : Wil.Var) : Nat :=
+  U64Map.findD b.vids (Scry.vkKey (Scry.vk func v.index)) 0
+
+def Scry.ptEnsureVar (b : Scry.PtBuild) (func : String) (v : Wil.Var) : Scry.PtBuild :=
+  let key := Scry.vk func v.index;
+  let h := Scry.vkKey key;
+  match U64Map.find b.vids h with
+  | .some _ => b
+  | .none =>
+    { b with vids := U64Map.insert b.vids h b.nVars,
+             vkeys := U64Map.insert b.vkeys (Scry.u64 b.nVars) key,
+             nVars := Nat.succ b.nVars }
+
+def Scry.ptEnsureIdx (b : Scry.PtBuild) (func : String) (i : Nat) : Scry.PtBuild :=
+  Scry.ptEnsureVar b func (Wil.var i Wil.Ty.unknown)
+
+def Scry.ptEnsureRhs (b : Scry.PtBuild) (func : String) : Wil.Rhs → Scry.PtBuild
+  | .use v => Scry.ptEnsureVar b func v
+  | .bin _ a c => Scry.ptEnsureVar (Scry.ptEnsureVar b func a) func c
+  | .un _ a => Scry.ptEnsureVar b func a
+  | .load p => Scry.ptEnsureVar b func p
+  | .gep p _ => Scry.ptEnsureVar b func p
+  | .gepVar p i _ => Scry.ptEnsureVar (Scry.ptEnsureVar b func p) func i
+  | _ => b
+
+def Scry.ptEnsureStmt (b : Scry.PtBuild) (func : String) : Wil.Stmt → Scry.PtBuild
+  | .assign x e _ => Scry.ptEnsureRhs (Scry.ptEnsureVar b func x) func e
+  | .store p v _ => Scry.ptEnsureVar (Scry.ptEnsureVar b func p) func v
+  | .free p _ => Scry.ptEnsureVar b func p
+  | .call r callee args _ =>
+    let b1 := match r with
+      | .some v => Scry.ptEnsureVar b func v
+      | .none => b;
+    let b2 := match callee with
+      | .indirect v => Scry.ptEnsureVar b1 func v
+      | .direct _ => b1;
+    List.foldl (fun acc v => Scry.ptEnsureVar acc func v) b2 args
+  | _ => b
+
+def Scry.ptMarkDef (b : Scry.PtBuild) (func : String) (v : Wil.Var) : Scry.PtBuild :=
+  { b with defined := U64Map.insert b.defined (Scry.u64 (Scry.ptBuildVid b func v)) () }
+
+def Scry.ptAddStmt (b : Scry.PtBuild) (func : String) (point : Nat)
+    (s : Wil.Stmt) : Scry.PtBuild :=
+  let b1 := Scry.ptEnsureStmt b func s;
+  let b2 := match s with
+    | .assign x _ _ => Scry.ptMarkDef b1 func x
+    | .call (.some r) _ _ _ => Scry.ptMarkDef b1 func r
+    | _ => b1;
+  { b2 with stmts := U64Map.insert b2.stmts (Scry.u64 b2.nStmts)
+      (Scry.PtStmt.mk func point s),
+    nStmts := Nat.succ b2.nStmts }
+
+def Scry.ptBuildPoint (b : Scry.PtBuild) (g : Scry.Fn) (n : Nat) : Scry.PtBuild :=
+  match Scry.nodeStmt g n with
+  | .none => b
+  | .some s => Scry.ptAddStmt b g.fn.name n s
+
+def Scry.ptBuildFunc (b : Scry.PtBuild) (g : Scry.Fn) : Scry.PtBuild :=
+  let b1 := List.foldl (fun acc v => Scry.ptEnsureVar acc g.fn.name v) b g.fn.params;
+  let b2 := List.foldl (fun acc v => Scry.ptEnsureVar acc g.fn.name v) b1 g.fn.locals;
+  let b3 := List.foldl (fun acc i => Scry.ptEnsureIdx acc g.fn.name i) b2
+    (Scry.fnRetVars g.fn);
+  List.foldl (fun acc n => Scry.ptBuildPoint acc g n) b3 (Scry.range g.count)
+
+def Scry.ptBuildProgram (gs : List Scry.Fn) : Scry.PtBuild :=
+  List.foldl (fun b g => Scry.ptBuildFunc b g) Scry.ptBuildEmpty gs
+
+def Scry.ptWorkOfBuild (b : Scry.PtBuild) : Scry.PtWork :=
+  Scry.PtWork.mk U64Map.empty U64Map.empty Scry.bitsEmpty b.tbl b.vids b.vkeys b.nVars
+
+-- ## Evaluating one statement
+
+/-- The result of evaluating one statement: the worklist state, the nodes the
+statement read (for the dependency graph), the nodes whose set grew (which wake the
+readers), and whether any state at all changed (including the `freed` set, which has
+no readers but is part of the fixpoint). -/
+structure Scry.PtEval where
+  work : Scry.PtWork
+  reads : List Nat
+  changed : List Nat
+  stateChanged : Bool
+
+def Scry.ptEvalNone (w : Scry.PtWork) : Scry.PtEval :=
+  Scry.PtEval.mk w .nil .nil .false
+
+def Scry.ptEvalVar (e : Scry.PtEval) (func : String) (v : Wil.Var)
+    (b : Scry.Bits) : Scry.PtEval :=
+  let id := U64Map.findD e.work.vids (Scry.vkKey (Scry.vk func v.index)) 0;
+  match Scry.ptWorkAddVar e.work id b with
+  | (w, .true) =>
+    Scry.PtEval.mk w e.reads (List.cons (Scry.ptNodeVar id) e.changed) .true
+  | (w, .false) => Scry.PtEval.mk w e.reads e.changed e.stateChanged
+
+def Scry.ptEvalMem (e : Scry.PtEval) (id : Nat) (b : Scry.Bits) : Scry.PtEval :=
+  match Scry.ptWorkAddMem e.work id b with
+  | (w, .true) =>
+    Scry.PtEval.mk w e.reads (List.cons (Scry.ptNodeMem id) e.changed) .true
+  | (w, .false) => Scry.PtEval.mk w e.reads e.changed e.stateChanged
+
+def Scry.ptEvalFree (e : Scry.PtEval) (b : Scry.Bits) : Scry.PtEval :=
+  match Scry.ptWorkAddFreed e.work b with
+  | (w, .true) => Scry.PtEval.mk w e.reads e.changed .true
+  | (w, .false) => Scry.PtEval.mk w e.reads e.changed e.stateChanged
+
+def Scry.ptUnknownBits (w : Scry.PtWork) : Scry.Bits × Scry.PtWork :=
+  let p := Scry.ptIntern w.tbl Scry.Loc.unknown;
+  (Scry.bitsSingleton p.1, { w with tbl := p.2 })
+
+def Scry.ptShiftLoc (wild : Bool) (l : Scry.Loc) (k : Nat) : Scry.Loc :=
+  match wild with
+  | .true => Scry.Loc.anyOff l
+  | .false => Scry.addOff l k
+
+/-- One `addOff`/`anyOff` step, with the intern out of the recursion. -/
+def Scry.ptOffsetOne (w : Scry.PtWork) (wild : Bool) (k : Nat) (lid : Nat)
+    (acc : Scry.Bits) : Scry.Bits × Scry.PtWork :=
+  match Scry.ptLocOf w.tbl lid with
+  | .none => (acc, w)
+  | .some l =>
+    let l' := Scry.ptShiftLoc wild l k;
+    let p := Scry.ptIntern w.tbl l';
+    let u := Scry.bitsUnion (Scry.bitsSingleton p.1) acc;
+    (u.1, { w with tbl := p.2 })
+
+/-- `addOff k` / `anyOff` over every location of a set. -/
+def Scry.ptOffsetBits (w : Scry.PtWork) (wild : Bool) (k : Nat) :
+    List Nat → Scry.Bits × Scry.PtWork
+  | .nil => (Scry.bitsEmpty, w)
+  | .cons lid rest =>
+    let p := Scry.ptOffsetBits w wild k rest;
+    Scry.ptOffsetOne p.2 wild k lid p.1
+
+/-- `⋃ { mem(l) | l ∈ pt(p) }`. -/
+def Scry.ptLoadBits (w : Scry.PtWork) : List Nat → Scry.Bits × Scry.PtWork
+  | .nil => (Scry.bitsEmpty, w)
+  | .cons lid rest =>
+    let p := Scry.ptLoadBits w rest;
+    let u := Scry.bitsUnion (Scry.ptSetOf p.2.mem lid) p.1;
+    (u.1, p.2)
+
+/-- The locations an assignment gives `x` — the same cases as the old `rhsLocs`, except
+that the sets are bitsets. -/
+def Scry.ptEvalRhs (w : Scry.PtWork) (func : String) (point : Nat)
+    (x : Wil.Var) (e : Wil.Rhs) : Scry.Bits × List Nat × Scry.PtWork :=
+  match e with
+  | .use v =>
+    (Scry.ptSetOf w.pt (Scry.ptVidOf w func v),
+      List.cons (Scry.ptNodeVar (Scry.ptVidOf w func v)) .nil, w)
+  | .cst _ => (Scry.bitsEmpty, .nil, w)
+  | .bin _ _ _ => match Scry.ptrLike x.ty with
+    | .true =>
+      let p := Scry.ptIntern w.tbl Scry.Loc.unknown;
+      (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+    | .false => (Scry.bitsEmpty, .nil, w)
+  | .un _ _ => match Scry.ptrLike x.ty with
+    | .true =>
+      let p := Scry.ptIntern w.tbl Scry.Loc.unknown;
+      (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+    | .false => (Scry.bitsEmpty, .nil, w)
+  | .load p =>
+    let ids := Scry.bitsToList (Scry.ptSetOf w.pt (Scry.ptVidOf w func p));
+    let r := Scry.ptLoadBits w ids;
+    (r.1, List.cons (Scry.ptNodeVar (Scry.ptVidOf w func p))
+      (List.map Scry.ptNodeMem ids), r.2)
+  | .gep p k =>
+    let ids := Scry.bitsToList (Scry.ptSetOf w.pt (Scry.ptVidOf w func p));
+    let r := Scry.ptOffsetBits w .false k ids;
+    (r.1, List.cons (Scry.ptNodeVar (Scry.ptVidOf w func p)) .nil, r.2)
+  | .gepVar p _ _ =>
+    let ids := Scry.bitsToList (Scry.ptSetOf w.pt (Scry.ptVidOf w func p));
+    let r := Scry.ptOffsetBits w .true 0 ids;
+    (r.1, List.cons (Scry.ptNodeVar (Scry.ptVidOf w func p)) .nil, r.2)
+  | .alloc _ =>
+    let p := Scry.ptIntern w.tbl (Scry.Loc.heap func point);
+    (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+  | .slot _ =>
+    let p := Scry.ptIntern w.tbl (Scry.Loc.stack func point);
+    (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+  | .globalRef n =>
+    let p := Scry.ptIntern w.tbl (Scry.Loc.glob n);
+    (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+  | .fnptr n =>
+    let p := Scry.ptIntern w.tbl (Scry.Loc.fn n);
+    (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+  | .havoc _ => match Scry.ptrLike x.ty with
+    | .true =>
+      let p := Scry.ptIntern w.tbl Scry.Loc.unknown;
+      (Scry.bitsSingleton p.1, .nil, { w with tbl := p.2 })
+    | .false => (Scry.bitsEmpty, .nil, w)
+
+/-- A store writes the value set into every memory cell its pointer may name. -/
+def Scry.ptEvalStore (w : Scry.PtWork) (func : String) (p v : Wil.Var) : Scry.PtEval :=
+  match Scry.ptrLike v.ty with
+  | .false => Scry.ptEvalNone w
+  | .true =>
+    let pid := Scry.ptVidOf w func p;
+    let xid := Scry.ptVidOf w func v;
+    let targets := Scry.bitsToList (Scry.ptSetOf w.pt pid);
+    let vb := Scry.ptSetOf w.pt xid;
+    let e0 := Scry.PtEval.mk w
+      (List.cons (Scry.ptNodeVar pid) (List.cons (Scry.ptNodeVar xid) .nil)) .nil .false;
+    List.foldl (fun e lid => Scry.ptEvalMem e lid vb) e0 targets
+
+/-- The functions a points-to set names, and whether the target set is incomplete (a
+non-function location, or no function at all). -/
+def Scry.ptTargetsGo (t : Scry.PtTable) : List Nat → List String → Bool →
+    List String × Bool
+  | .nil, names, unk => (List.reverse names, unk)
+  | .cons id rest, names, unk =>
+    match Scry.ptLocOf t id with
+    | .some (.fn n) => Scry.ptTargetsGo t rest (List.cons n names) unk
+    | .some _ => Scry.ptTargetsGo t rest names .true
+    | .none => Scry.ptTargetsGo t rest names .true
+
+def Scry.ptTargetsOf (t : Scry.PtTable) (b : Scry.Bits) : List String × Bool :=
+  Scry.ptTargetsGo t (Scry.bitsToList b) .nil .false
+
+/-- Argument → parameter flow for one resolved target. -/
+partial def Scry.ptArgsGo (e : Scry.PtEval) (caller callee : String)
+    (params : List Wil.Var) : List Wil.Var → Nat → Scry.PtEval
+  | .nil, _ => e
+  | .cons a rest, i =>
+    match Wil.listNth params i with
+    | .none => e
+    | .some pv =>
+      let aid := U64Map.findD e.work.vids (Scry.vkKey (Scry.vk caller a.index)) 0;
+      let b := Scry.ptSetOf e.work.pt aid;
+      let e1 := Scry.ptEvalVar e caller pv b;
+      let e2 := Scry.PtEval.mk e1.work (List.cons (Scry.ptNodeVar aid) e1.reads)
+        e1.changed e1.stateChanged;
+      Scry.ptArgsGo e2 caller callee params rest (Nat.succ i)
+
+/-- Parameter and result flow for one resolved target (`f`, defined in the unit). -/
+def Scry.ptCallEdges (ix : Wil.ProgramIndex) (e : Scry.PtEval) (caller : String)
+    (r : Option Wil.Var) (args : List Wil.Var) (name : String) : Scry.PtEval :=
+  match Wil.findFuncIn ix name with
+  | .none => e
+  | .some fn =>
+    let e1 := Scry.ptArgsGo e caller name fn.params args 0;
+    match r with
+    | .none => e1
+    | .some rv =>
+      List.foldl (fun e2 rvv =>
+        let rid := U64Map.findD e2.work.vids
+          (Scry.vkKey (Scry.vk name rvv)) 0;
+        let src := Scry.ptSetOf e2.work.pt rid;
+        let e3 := Scry.ptEvalVar e2 caller rv src;
+        Scry.PtEval.mk e3.work (List.cons (Scry.ptNodeVar rid) e3.reads)
+          e3.changed e3.stateChanged) e1 (Scry.fnRetVars fn)
+
+/-- The small external model: `strchr`/`strcpy`-style results alias argument 0,
+`strdup`/`realloc` return a fresh heap site, and any other external pointer result is
+unknown. -/
+def Scry.ptExternalResult (e : Scry.PtEval) (func : String) (point : Nat)
+    (r : Option Wil.Var) (name : String) (args : List Wil.Var) : Scry.PtEval :=
+  match r with
+  | .none => e
+  | .some rv => match Scry.ptrLike rv.ty with
+    | .false => e
+    | .true =>
+      match Scry.isAliasArg0Call name, args with
+      | .true, .cons a _ =>
+        let aid := U64Map.findD e.work.vids (Scry.vkKey (Scry.vk func a.index)) 0;
+        let b := Scry.ptSetOf e.work.pt aid;
+        let e1 := Scry.ptEvalVar e func rv b;
+        Scry.PtEval.mk e1.work (List.cons (Scry.ptNodeVar aid) e1.reads)
+          e1.changed e1.stateChanged
+      | _, _ =>
+        let fresh := Bool.or (Scry.isFreshAllocCall name) (Scry.isReallocCall name);
+        match fresh with
+        | .true =>
+          let p := Scry.ptIntern e.work.tbl (Scry.Loc.heap func point);
+          Scry.ptEvalVar { e with work := { e.work with tbl := p.2 } } func rv
+            (Scry.bitsSingleton p.1)
+        | .false =>
+          let p := Scry.ptUnknownBits e.work;
+          Scry.ptEvalVar { e with work := p.2 } func rv p.1
+
+def Scry.ptEvalCall (ix : Wil.ProgramIndex) (w : Scry.PtWork) (func : String)
+    (point : Nat) (r : Option Wil.Var) (callee : Wil.Callee)
+    (args : List Wil.Var) : Scry.PtEval :=
+  let e0 := Scry.ptEvalNone w;
+  match callee with
+  | .direct name =>
+    let e1 := Scry.ptCallEdges ix e0 func r args name;
+    -- `realloc` frees argument 0 whether or not it is defined in this unit, exactly as
+    -- the old `externalFrees` did.
+    let e2 : Scry.PtEval := match Scry.isReallocCall name, args with
+      | .true, .cons a _ =>
+        let aid := U64Map.findD e1.work.vids
+          (Scry.vkKey (Scry.vk func a.index)) 0;
+        let b := Scry.ptSetOf e1.work.pt aid;
+        let e3 := Scry.ptEvalFree e1 b;
+        Scry.PtEval.mk e3.work (List.cons (Scry.ptNodeVar aid) e3.reads)
+          e3.changed e3.stateChanged
+      | _, _ => e1;
+    match Wil.findFuncIn ix name with
+    | .some _ => e2
+    | .none => Scry.ptExternalResult e2 func point r name args
+  | .indirect fv =>
+    let fid := U64Map.findD w.vids (Scry.vkKey (Scry.vk func fv.index)) 0;
+    let t := Scry.ptTargetsOf w.tbl (Scry.ptSetOf w.pt fid);
+    let e1 := Scry.PtEval.mk w (List.cons (Scry.ptNodeVar fid) .nil) .nil .false;
+    let e2 := List.foldl (fun e name => Scry.ptCallEdges ix e func r args name) e1 t.1;
+    match t.2, r with
+    | .true, .some rv => match Scry.ptrLike rv.ty with
+      | .true =>
+        let p := Scry.ptUnknownBits e2.work;
+        Scry.ptEvalVar { e2 with work := p.2 } func rv p.1
+      | .false => e2
+    | _, _ => e2
+
+def Scry.ptEvalStmt (ix : Wil.ProgramIndex) (w : Scry.PtWork) (func : String)
+    (point : Nat) (s : Wil.Stmt) : Scry.PtEval :=
+  match s with
+  | .assign x e _ =>
+    let r := Scry.ptEvalRhs w func point x e;
+    Scry.ptEvalVar (Scry.PtEval.mk r.2.2 r.2.1 .nil .false) func x r.1
+  | .store p v _ => Scry.ptEvalStore w func p v
+  | .free p _ =>
+    let pid := U64Map.findD w.vids (Scry.vkKey (Scry.vk func p.index)) 0;
+    let e0 := Scry.PtEval.mk w (List.cons (Scry.ptNodeVar pid) .nil) .nil .false;
+    Scry.ptEvalFree e0 (Scry.ptSetOf w.pt pid)
+  | .call r callee args _ => Scry.ptEvalCall ix w func point r callee args
+  | _ => Scry.ptEvalNone w
+
+-- ## The worklist
+
+/-- Insert into an increasing id list, keeping the list sorted and duplicate-free. The
+pending list of a generation is usually tiny (the first generation is `range n`, already
+sorted), so the insertion scan is cheaper than a heap's allocation. -/
+def Scry.ptInsertSorted (j : Nat) : List Nat → List Nat
+  | .nil => List.cons j List.nil
+  | .cons h rest =>
+    if Nat.lt j h then List.cons j (List.cons h rest)
+    else if Nat.beq j h then List.cons h rest
+    else List.cons h (Scry.ptInsertSorted j rest)
+
+/-- The reverse dependency graph: a node key → the statement ids that read it. -/
+structure Scry.PtDeps where
+  rev : U64Map (U64Map Unit)
+
+def Scry.ptDepAdd (d : Scry.PtDeps) (node stmt : Nat) : Scry.PtDeps :=
+  let b := U64Map.findD d.rev (Scry.u64 node) (U64Map.empty : U64Map Unit);
+  let b1 := U64Map.insert b (Scry.u64 stmt) ();
+  Scry.PtDeps.mk (U64Map.insert d.rev (Scry.u64 node) b1)
+
+/-- Pending statements of the current and next generation, as increasing id lists plus
+membership maps (a duplicate is harmless but wastes an evaluation). -/
+structure Scry.PtQueue where
+  curSet : U64Map Unit
+  nextSet : U64Map Unit
+  cur : List Nat
+  next : List Nat
+
+/-- A statement at `cur` changed a node: a reader later in program order runs later in
+the **same** generation (the old pass saw it immediately), an earlier one waits for the
+next generation. -/
+def Scry.ptEnqueue (q : Scry.PtQueue) (cur j : Nat) : Scry.PtQueue :=
+  match Nat.lt cur j with
+  | .true => match U64Map.contains q.curSet (Scry.u64 j) with
+    | .true => q
+    | .false => { q with curSet := U64Map.insert q.curSet (Scry.u64 j) (),
+                       cur := Scry.ptInsertSorted j q.cur }
+  | .false => match U64Map.contains q.nextSet (Scry.u64 j) with
+    | .true => q
+    | .false => { q with nextSet := U64Map.insert q.nextSet (Scry.u64 j) (),
+                       next := Scry.ptInsertSorted j q.next }
+
+def Scry.ptNotifyNode (deps : Scry.PtDeps) (node cur : Nat) (q : Scry.PtQueue) :
+    Scry.PtQueue :=
+  let readers := U64Map.findD deps.rev (Scry.u64 node) (U64Map.empty : U64Map Unit);
+  U64Map.foldl (fun qq k _ => Scry.ptEnqueue qq cur (UIntN.toNat k)) q readers
+
+/-- All statement ids in one generation, in program order. -/
+def Scry.ptAllQueue (n : Nat) : Scry.PtQueue :=
+  let ids := Scry.range n;
+  Scry.PtQueue.mk
+    (List.foldl (fun m i => U64Map.insert m (Scry.u64 i) ()) (U64Map.empty : U64Map Unit) ids)
+    U64Map.empty ids List.nil
+
+structure Scry.PtSolved where
+  work : Scry.PtWork
+  rounds : Nat
+  complete : Bool
+
+def Scry.ptDummyStmt : Scry.PtStmt :=
+  Scry.PtStmt.mk "" 0 (Wil.Stmt.nop Wil.noSpan)
+
+/-- Drain the worklist one generation at a time. `fuel` is the number of **further**
+generations the caller will allow, so a generation that changes state and leaves no
+work needs one more round (the old solver's equality check), and a capped run that
+cannot afford it is `complete = false` just as before. -/
+partial def Scry.ptDrain (ix : Wil.ProgramIndex) (stmts : U64Map Scry.PtStmt)
+    (deps : Scry.PtDeps) (w : Scry.PtWork) (q : Scry.PtQueue) (cur fuel rounds : Nat)
+    (dirty : Bool) : Scry.PtSolved :=
+  match q.cur with
+  | .cons sid rest =>
+    let s := U64Map.findD stmts (Scry.u64 sid) Scry.ptDummyStmt;
+    let ev := Scry.ptEvalStmt ix w s.func s.point s.stmt;
+    let deps1 := List.foldl (fun d node => Scry.ptDepAdd d node sid) deps ev.reads;
+    let q1 := List.foldl (fun qq node => Scry.ptNotifyNode deps1 node sid qq)
+      { q with cur := rest } ev.changed;
+    Scry.ptDrain ix stmts deps1 ev.work q1 sid fuel rounds
+      (Bool.or dirty ev.stateChanged)
+  | .nil =>
+    match q.next with
+    | .nil =>
+      match dirty with
+      | .true => match fuel with
+        | .zero => Scry.PtSolved.mk w rounds .false
+        | .succ _ => Scry.PtSolved.mk w (Nat.succ rounds) .true
+      | .false => Scry.PtSolved.mk w rounds .true
+    | .cons _ _ => match fuel with
+      | .zero => Scry.PtSolved.mk w rounds .false
+      | .succ k =>
+        Scry.ptDrain ix stmts deps w
+          (Scry.PtQueue.mk q.nextSet U64Map.empty q.next List.nil)
+          0 k (Nat.succ rounds) .false
+
+def Scry.ptwRun (ix : Wil.ProgramIndex) (b : Scry.PtBuild) (w : Scry.PtWork)
+    (fuel : Nat) : Scry.PtSolved :=
+  match fuel with
+  | .zero => Scry.PtSolved.mk w 0 .false
+  | .succ k =>
+    Scry.ptDrain ix b.stmts (Scry.PtDeps.mk U64Map.empty) w
+      (Scry.ptAllQueue b.nStmts) 0 k 1 .false
+
+-- ## Seeding unknown after the inclusion fixpoint
+
+def Scry.ptSeedVar (w : Scry.PtWork) (func : String) (v : Wil.Var) :
+    Scry.PtWork × Bool :=
+  match Scry.ptrLike v.ty with
+  | .false => (w, .false)
+  | .true =>
+    let id := U64Map.findD w.vids (Scry.vkKey (Scry.vk func v.index)) 0;
+    match Scry.bitsIsEmpty (Scry.ptSetOf w.pt id) with
+    | .false => (w, .false)
+    | .true =>
+      let p := Scry.ptUnknownBits w;
+      let q := Scry.ptWorkAddVar p.2 id p.1;
+      (q.1, q.2)
+
+partial def Scry.ptSeedVars (w : Scry.PtWork) (func : String) (vs : List Wil.Var) :
+    Scry.PtWork × Bool :=
+  match vs with
+  | .nil => (w, .false)
+  | .cons v rest =>
+    let r1 := Scry.ptSeedVar w func v;
+    let r2 := Scry.ptSeedVars r1.1 func rest;
+    (r2.1, Bool.or r1.2 r2.2)
+
+partial def Scry.ptSeedLocals (b : Scry.PtBuild) (w : Scry.PtWork) (func : String)
+    (vs : List Wil.Var) : Scry.PtWork × Bool :=
+  match vs with
+  | .nil => (w, .false)
+  | .cons v rest =>
+    let id := U64Map.findD w.vids (Scry.vkKey (Scry.vk func v.index)) 0;
+    match U64Map.contains b.defined (Scry.u64 id) with
+    | .true =>
+      let r := Scry.ptSeedLocals b w func rest;
+      (r.1, r.2)
+    | .false =>
+      let r1 := Scry.ptSeedVar w func v;
+      let r2 := Scry.ptSeedLocals b r1.1 func rest;
+      (r2.1, Bool.or r1.2 r2.2)
+
+def Scry.ptSeedFunc (b : Scry.PtBuild) (w : Scry.PtWork) (fn : Wil.Func) :
+    Scry.PtWork × Bool :=
+  let r1 := Scry.ptSeedVars w fn.name fn.params;
+  Scry.ptSeedLocals b r1.1 fn.name fn.locals
+
+def Scry.ptSeedWork (b : Scry.PtBuild) (gs : List Scry.Fn) (w : Scry.PtWork) :
+    Scry.PtWork × Bool :=
+  List.foldl (fun acc g =>
+    let r := Scry.ptSeedFunc b acc.1 g.fn;
+    (r.1, Bool.or acc.2 r.2)) (w, .false) gs
+
+-- ## Exporting to the public state
+
+def Scry.ptLocListOf (w : Scry.PtWork) (b : Scry.Bits) : List Scry.Loc :=
+  Scry.ptFilterMap (fun id => Scry.ptLocOf w.tbl id) (Scry.bitsToList b)
+
+def Scry.ptExport (w : Scry.PtWork) : Scry.PtState :=
+  let pt := U64Map.foldl (fun m k b =>
+    let vk := U64Map.findD w.vkeys k (Scry.VarKey.mk "" 0);
+    let ls := Scry.ptLocListOf w b;
+    match List.isEmpty ls with
+    | .true => m
+    | .false => U64Map.insert m (Scry.vkKey vk) (vk, ls)) U64Map.empty w.pt;
+  let mem := U64Map.foldl (fun m k b =>
+    let lid := UIntN.toNat k;
+    match Scry.ptLocOf w.tbl lid with
+    | .none => m
+    | .some l =>
+      let ls := Scry.ptLocListOf w b;
+      match List.isEmpty ls with
+      | .true => m
+      | .false => match U64Map.find m (Scry.locHash l) with
+        | .none => U64Map.insert m (Scry.locHash l) (l, ls)
+        -- Two distinct locations with the same 64-bit hash: the old state merged
+        -- their memory under that key, so keep the same over-approximation here.
+        | .some old => U64Map.insert m (Scry.locHash l) (l, Scry.locUnion ls old.2)) U64Map.empty w.mem;
+  Scry.PtState.mk pt mem (Scry.ptLocListOf w w.freed)
+
+def Scry.ptSolveGB (p : Wil.Program) (gs : List Scry.Fn) (maxRounds : Option Nat) :
+    Scry.PtState × Nat × Bool :=
+  let b := Scry.ptBuildProgram gs;
+  let w0 := Scry.ptWorkOfBuild b;
+  let total := List.foldr (fun g acc => Nat.add acc g.count) 0 gs;
+  let fuel := Nat.add 8 (Nat.mul 2 total);
+  let ix := Wil.indexProgram p;
+  match maxRounds with
+  | .none =>
+    let r1 := Scry.ptwRun ix b w0 fuel;
+    let seeded := Scry.ptSeedWork b gs r1.work;
+    match seeded.2 with
+    | .false => (Scry.ptExport r1.work, r1.rounds, r1.complete)
+    | .true =>
+      let r2 := Scry.ptwRun ix b seeded.1 fuel;
+      (Scry.ptExport r2.work, Nat.add r1.rounds r2.rounds,
+        Bool.and r1.complete r2.complete)
+  | .some cap =>
+    let r1 := Scry.ptwRun ix b w0 cap;
+    let seeded := Scry.ptSeedWork b gs r1.work;
+    match seeded.2 with
+    | .false => (Scry.ptExport r1.work, r1.rounds, r1.complete)
+    | .true =>
+      let left := Nat.sub cap r1.rounds;
+      let r2 := Scry.ptwRun ix b seeded.1 left;
+      (Scry.ptExport r2.work, Nat.add r1.rounds r2.rounds,
+        Bool.and r1.complete r2.complete)
+
+/-- `ptSolve` on a function list: the public `ptSolveGB` name kept for the taint path. -/
+def Scry.ptSolveBounded (p : Wil.Program) (maxRounds : Option Nat) :
+    Scry.PtState × Nat × Bool :=
+  Scry.ptSolveGB p (List.map Scry.flatten p.funcs) maxRounds
+
+-- ## The legacy full-pass solver (kept temporarily for the differential run)
 
 /-- Fold one **already flattened** function's statements into the state. Flattening
 builds the point tables, so the round loop flattens every function once, not once per
@@ -608,7 +1341,7 @@ def Scry.ptSeeds (p : Wil.Program) (st : Scry.PtState) : Scry.PtState :=
       | .true => a
       | .false => Scry.seedUnknown a fn.name v) acc1 fn.locals) st p.funcs
 
-def Scry.ptSolveGB (p : Wil.Program) (gs : List Scry.Fn) (maxRounds : Option Nat) :
+def Scry.ptSolveLegacyGB (p : Wil.Program) (gs : List Scry.Fn) (maxRounds : Option Nat) :
     Scry.PtState × Nat × Bool :=
   let total := List.foldr (fun g acc => Nat.add acc g.count) 0 gs;
   let fuel := Nat.add 8 (Nat.mul 2 total);
@@ -635,9 +1368,9 @@ def Scry.ptSolveGB (p : Wil.Program) (gs : List Scry.Fn) (maxRounds : Option Nat
 whether it converged. `none` keeps the historical `2 * program points + 8` bound (which
 is finite but far too large for a million-point file); `some n` is the `--max-rounds`
 contract. Exhausting the cap is reported, never hidden. -/
-def Scry.ptSolveBounded (p : Wil.Program) (maxRounds : Option Nat) :
+def Scry.ptSolveLegacyBounded (p : Wil.Program) (maxRounds : Option Nat) :
     Scry.PtState × Nat × Bool :=
-  Scry.ptSolveGB p (List.map Scry.flatten p.funcs) maxRounds
+  Scry.ptSolveLegacyGB p (List.map Scry.flatten p.funcs) maxRounds
 
 -- ## The location table and ids
 
@@ -804,6 +1537,26 @@ is flattened once and shared by the fixpoint and the indirect-call scan. -/
 def Scry.pointsToBounded (p : Wil.Program) (maxRounds : Option Nat) : Scry.PtResult :=
   let gs := List.map Scry.flatten p.funcs;
   let solved := Scry.ptSolveGB p gs maxRounds;
+  let st := solved.1;
+  let locs := Scry.locSort (Scry.locTable st);
+  let indirect := Scry.concatLists (fun g =>
+    Scry.concatLists (fun n =>
+      match Scry.nodeStmt g n with
+      | .none => .nil
+      | .some s => match s with
+        | .call _ callee _ _ => match callee with
+          | .direct _ => .nil
+          | .indirect v => .cons (Scry.CallKey.mk g.fn.name n,
+              Scry.targetsOf (Scry.ptGet st (Scry.vk g.fn.name v.index))) .nil
+        | _ => .nil) (Scry.range g.count)) gs;
+  Scry.PtResult.mk st locs (Scry.locIdxOf locs 0) (Scry.fieldsIdxOf locs 0) indirect
+    solved.2.1 solved.2.2
+
+/-- The old full-pass solver, kept only for the differential test while the native
+worklist is verified against it. It is not on any production path. -/
+def Scry.pointsToLegacyBounded (p : Wil.Program) (maxRounds : Option Nat) : Scry.PtResult :=
+  let gs := List.map Scry.flatten p.funcs;
+  let solved := Scry.ptSolveLegacyGB p gs maxRounds;
   let st := solved.1;
   let locs := Scry.locSort (Scry.locTable st);
   let indirect := Scry.concatLists (fun g =>

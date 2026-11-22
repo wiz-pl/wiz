@@ -1,0 +1,80 @@
+-- test: run
+import Sys
+import Text
+import Scry.PointsTo
+import Scry.Budget
+-- Measured points-to scale case: one generated function with `n` chain registers and
+-- `4 n` copy edges, solved at `n` and `2 n`. The solve is timed with the same
+-- `Scry.nowMs` clock the CLI uses; the times go to **stderr** (the golden file compares
+-- stdout, which carries only the deterministic checksum), and the test fails when the
+-- larger size costs more than `3 * t(n) + 80 ms`.
+--
+-- Measured on the train12 `--sshfs` test node (compiled `grail test`, warm):
+--   n = 3000:  solve  ... ms, checksum ...   (fill in when measured)
+--   n = 6000:  solve  ... ms, checksum ...
+-- The old full-pass solver was ~250 s on a 12.7 k-register unit. A quadratic regression
+-- at these sizes is ~4x for 2n, which the 3x + 80 ms bound rejects once t(n) > 80 ms.
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def unless (label : String) (ok : Bool) : EIO Unit :=
+  match ok with
+  | .true => EIO.lift (IO.println (label ++ ": ok"))
+  | .false => EIO.fail (label ++ ": FAILED")
+
+def ptr : Wil.Ty := Wil.Ty.ptr Wil.i32
+
+/-- `n` chain registers, each with the four base locations. The base registers are
+allocated first; every chain register then copies each base, so its set has four
+members and the total output is `4 n` locations. -/
+def genFunc (n : Nat) : Wil.Func :=
+  let bases : List Wil.Var :=
+    [Wil.var 0 ptr, Wil.var 1 ptr, Wil.var 2 ptr, Wil.var 3 ptr];
+  let chains : List Wil.Var :=
+    List.map (fun i => Wil.var (Nat.add 4 i) ptr) (Scry.range n);
+  let allocs : List Wil.Stmt := List.map (fun v => Wil.alloc v 1) bases;
+  let copies : List Wil.Stmt := Scry.concatLists (fun v =>
+    List.map (fun b => Wil.copy v b) bases) chains;
+  let locals := List.append bases chains;
+  Wil.func "scale" .nil locals
+    [Wil.block (List.append allocs copies) (Wil.ret .none)]
+
+/-- A stable hash of every register's location ids: `h = 131 h + id + 1`. -/
+def checksum (p : Wil.Program) (r : Scry.PtResult) : Nat :=
+  List.foldl (fun acc fn =>
+    List.foldl (fun acc v =>
+      let ids := Scry.ptIds r fn.name v.index;
+      let h := List.foldl (fun h i =>
+        Nat.mod (Nat.add (Nat.mul h 131) (Nat.succ i)) 1000000007) 17 ids;
+      Nat.mod (Nat.add (Nat.mul acc 1000003) h) 1000000007) acc fn.locals) 0 p.funcs
+
+/-- The four base registers have one location; every chain register has exactly four. -/
+def sizesOk (p : Wil.Program) (r : Scry.PtResult) : Bool :=
+  List.all (fun fn => List.all (fun v =>
+    let want := match Nat.lt v.index 4 with
+      | .true => 1
+      | .false => 4;
+    Nat.beq (List.length (Scry.ptIds r fn.name v.index)) want) fn.locals) p.funcs
+
+def timedSolve (p : Wil.Program) : EIO (Scry.PtResult × Nat) := do
+  start ← EIO.lift Scry.nowMs;
+  let r := Scry.pointsTo p;
+  stop ← EIO.lift Scry.nowMs;
+  EIO.pure (r, Nat.sub stop start)
+
+def one (n : Nat) : EIO (Scry.PtResult × Nat) := do
+  let p := Wil.program [genFunc n];
+  result ← timedSolve p;
+  let cs := checksum p result.1;
+  EIO.lift (IO.ePrintln ("points-to-scale: n=" ++ Nat.repr n
+    ++ " solve=" ++ Nat.repr result.2 ++ "ms checksum=" ++ Nat.repr cs));
+  unless ("points-to-scale: n=" ++ Nat.repr n ++ " checksum=" ++ Nat.repr cs) .true;
+  unless ("points-to-scale: n=" ++ Nat.repr n ++ " four locations") (sizesOk p result.1);
+  unless ("points-to-scale: n=" ++ Nat.repr n ++ " rounds=2") (Nat.beq result.1.rounds 2);
+  EIO.pure result
+
+def main : IO Unit := EIO.toIO (do
+  small ← one 3000;
+  large ← one 6000;
+  let bound := Nat.add 80 (Nat.mul 3 small.2);
+  unless "points-to-scale: 2n within 3t+80ms" (Nat.le large.2 bound))

@@ -1,0 +1,112 @@
+-- test: run
+import Sys
+import Text
+import Scry.Parse
+import Scry.Lower
+import Scry.PointsTo
+-- Temporary differential harness for the native points-to worklist. It reads the
+-- checked-in `scry-cst` spills under `corpus/` (so it needs neither tree-sitter nor the
+-- native out-link), lowers each unit, and requires the new solver (`pointsTo`) and the
+-- old full-pass solver (`pointsToLegacyBounded`) to agree on every register set, every
+-- memory cell, `freed`, the location table, the indirect-call resolutions, the round
+-- count and completeness. This file and the legacy solver are deleted after the
+-- verification run (the branch history keeps both); the production test is
+-- `tests/points-to-scale.wiz`.
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def boolEq (a b : Bool) : Bool :=
+  Bool.or (Bool.and a b) (Bool.and (Bool.not a) (Bool.not b))
+
+def sameStrings (a b : List String) : Bool :=
+  Bool.and (List.all (fun x => List.any (String.eq x) b) a)
+    (List.all (fun x => List.any (String.eq x) a) b)
+
+/-- Compare two states as maps to **sets**; missing and empty agree. -/
+def sameMapSets {A : Type} (a b : U64Map (A × List Scry.Loc)) : Bool :=
+  let keysA := List.map (fun p => p.1) (U64Map.toList a);
+  let keysB := List.map (fun p => p.1) (U64Map.toList b);
+  let keys := List.foldl (fun acc k => match List.any (UIntN.beq k) acc with
+    | .true => acc
+    | .false => List.cons k acc) keysA keysB;
+  List.all (fun k => match U64Map.find a k, U64Map.find b k with
+    | .some x, .some y => Scry.locSetEq x.2 y.2
+    | .some x, .none => List.isEmpty x.2
+    | .none, .some y => List.isEmpty y.2
+    | .none, .none => .true) keys
+
+def sameIndirect (a b : Scry.PtResult) : Bool :=
+  let keysA := List.map (fun p => p.1) a.indirect;
+  let keysB := List.map (fun p => p.1) b.indirect;
+  let keys := List.foldl (fun acc k =>
+    match List.any (fun q => Scry.ckEq k q) acc with
+    | .true => acc
+    | .false => List.cons k acc) keysA keysB;
+  List.all (fun k =>
+    let x := Scry.indirectAt a k.func k.point;
+    let y := Scry.indirectAt b k.func k.point;
+    Bool.and (sameStrings x.names y.names) (boolEq x.unknown y.unknown)) keys
+
+def comparePt (pa pb : Scry.PtResult) : Bool :=
+  Bool.and (sameMapSets pa.state.pt pb.state.pt)
+    (Bool.and (sameMapSets pa.state.mem pb.state.mem)
+      (Bool.and (Scry.locSetEq pa.state.freed pb.state.freed)
+        (Bool.and (Scry.locSetEq pa.locs pb.locs)
+          (Bool.and (Nat.beq pa.rounds pb.rounds)
+            (Bool.and (boolEq pa.complete pb.complete) (sameIndirect pa pb))))))
+
+/-- A checked-in spill and the text it was produced from (the lowering reads file and
+span offsets from the text). -/
+structure Case where
+  cst : String
+  src : String
+
+def cases : List Case :=
+  [ Case.mk "corpus/c2wil/arith.cst" "corpus/c2wil/arith.c",
+    Case.mk "corpus/c2wil/branch.cst" "corpus/c2wil/branch.c",
+    Case.mk "corpus/c2wil/call.cst" "corpus/c2wil/call.c",
+    Case.mk "corpus/c2wil/forloop.cst" "corpus/c2wil/forloop.c",
+    Case.mk "corpus/c2wil/havoc.cst" "corpus/c2wil/havoc.c",
+    Case.mk "corpus/c2wil/straight.cst" "corpus/c2wil/straight.c",
+    Case.mk "corpus/c2wil/switch.cst" "corpus/c2wil/switch.c",
+    Case.mk "corpus/c2wil/preproc/main.i.cst" "corpus/c2wil/preproc/main.i",
+    Case.mk "corpus/project/main.i.cst" "corpus/project/main.i",
+    Case.mk "corpus/project/math.i.cst" "corpus/project/math.i" ]
+
+def checkCase (c : Case) : EIO Bool := do
+  text ← FS.readFile c.src;
+  store ← Scry.loadCstFile c.cst;
+  let cst := Scry.Cst.ofStore text store;
+  let tu := Scry.lowerTU c.src cst;
+  let p := Wil.program tu.funcs;
+  let fresh := Scry.pointsToBounded p .none;
+  let old := Scry.pointsToLegacyBounded p .none;
+  let ok := comparePt fresh old;
+  match ok with
+  | .true => EIO.pure .true
+  | .false => do
+    say ("points-to-diff: MISMATCH " ++ c.cst
+      ++ " newRounds=" ++ Nat.repr fresh.rounds
+      ++ " oldRounds=" ++ Nat.repr old.rounds
+      ++ " newLocs=" ++ Nat.repr (Scry.ptLocCount fresh)
+      ++ " oldLocs=" ++ Nat.repr (Scry.ptLocCount old)
+      ++ " newVars=" ++ Nat.repr (Scry.ptVarCount fresh)
+      ++ " oldVars=" ++ Nat.repr (Scry.ptVarCount old));
+    EIO.pure .false
+
+partial def runCases : List Case → Nat → Nat → EIO (Nat × Nat)
+  | .nil, ok, bad => EIO.pure (ok, bad)
+  | .cons c rest, ok, bad => do
+    good ← checkCase c;
+    match good with
+    | .true => runCases rest (Nat.succ ok) bad
+    | .false => runCases rest ok (Nat.succ bad)
+
+def main : IO Unit := EIO.toIO (do
+  say ("points-to-diff: units=" ++ Nat.repr (List.length cases));
+  counts ← runCases cases 0 0;
+  say ("points-to-diff: identical=" ++ Nat.repr counts.1
+    ++ " mismatched=" ++ Nat.repr counts.2);
+  match Nat.beq counts.2 0 with
+  | .true => say "points-to-diff: ok"
+  | .false => EIO.fail "points-to-diff: the native solver differs from the old one")
