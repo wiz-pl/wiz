@@ -125,7 +125,11 @@ case ${1:-} in
     empty_seed
     ;;
   build)
-    [ $# -ge 3 ] || { usage >&2; exit 2; }
+    # `build <seed> <attr>…`: shift the subcommand first. Without this, `$1` is
+    # still `build`, so the seed check reads `build/.lake` and every seeded build
+    # falls back to "missing" (the first fast-ci run's failure).
+    shift
+    [ $# -ge 2 ] || { usage >&2; exit 2; }
     seed=$1
     shift
     [ -d "$seed/.lake" ] || {
