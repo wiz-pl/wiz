@@ -12,10 +12,12 @@ where a checkout may not preserve the executable bit. A script that needs a buil
 so in its header and skips cleanly when the build is absent.
 
 Git hooks: the repository also ships a checkout-wide hook directory, `.githooks/`
-(`pre-commit` refreshes `.github/repo-subsets.json`). Enable it once per clone with
-`git config core.hooksPath .githooks`; CI does not depend on it (the `docs_style` job
-runs the same `--check`), and the hook never fails a commit. `scripts/install-hooks.sh`
-is the older, per-clone alternative that copies `.git/hooks/*`; do not enable both.
+(`pre-commit` refreshes `.github/repo-subsets.json`; `pre-push` warns when a registered
+light check has no clean record for the commit being pushed, and never blocks). Enable
+it once per clone with `git config core.hooksPath .githooks`; CI does not depend on it
+(the `docs_style` job runs the same checks), and no hook fails a commit or a push.
+`scripts/install-hooks.sh` is the older, per-clone alternative that copies `.git/hooks/*`
+(it does not install the ledger warning); do not enable both.
 
 ## Gates and CI glue
 
@@ -47,6 +49,29 @@ is the older, per-clone alternative that copies `.git/hooks/*`; do not enable bo
 | `test-runtime.sh` | compiles `runtime/wiz_rt.h` plus `runtime/rt_*.inc` in both ABI modes (`WIZ_API=` and `WIZ_API=static`) | `ci.yml` |
 | `test-perf-dashboard.sh` | end-to-end check of `perf-dashboard.py` on `fixtures/perf/` (no network, no toolchain) | docs only (`docs/stages/15-performance.md`) |
 | `flaky.py` | reruns failing test cases, classifies them, and maintains the expiring quarantine | `flaky-ci.sh`, by hand |
+| `checks-ledger.py` | records the light checks that ran on each commit in the gitignored, untrusted `.checks/` ledger (`run`, `status`, `warn`, `--self-test`); keyed by commit + name, so an amend invalidates | `.githooks/pre-push`; by hand |
+
+## Local check ledger (advisory, not a gate)
+
+`checks-ledger.py` is the local half of the light checks: `run NAME` records the
+commit, timestamp, command, exit status and whether the worktree was clean in
+`.checks/records.jsonl`; `status` shows, for `HEAD`, which registered checks have
+a clean record; `warn` is what `.githooks/pre-push` calls. Records are keyed by
+**commit + check name**, so an amend or rebase (a new SHA) makes them stale and
+the hook asks for a fresh run.
+
+Registered today: `docs-style`, `companion-lists`, `repo-subsets`,
+`legacy-names-digest` and `repo-subsets-write`. The `CHECKS` table at the top of
+the script is the one list, one line per check. `dirty` is the worktree at the
+start of the run; the record also keeps `dirty_after`, so an update script that
+writes a file shows as a clean start followed by a change (commit or discard its
+output). `--self-test` builds a throwaway repository and proves the behaviours
+(no record warns, a clean run stops the warning, a dirty run does not count, a
+new SHA warns again).
+
+`.checks/` is gitignored and **untrusted by design**: any process can write it,
+nothing signs it, and CI does not read it. Treat the warning as a fast-fail
+reminder, never as a security or merge gate.
 
 ## Trust ledger
 
