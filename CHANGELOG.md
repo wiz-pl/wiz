@@ -21,7 +21,8 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the
   modules the branch changed. The seed is the `lake` output of the master-only
   `lake_seed` job's `withLakeCache empty-lake` build (a cold compile the sandbox
-  enforces), whose `bin` is byte-identical to the pure build's; nothing a pull request
+  enforces), whose `bin` is intended to be byte-identical to the pure build's (the
+  `cmp` is the seed measurement's assertion, not yet run in CI); nothing a pull request
   writes is ever read by a trusted job. Pushes, the merge queue and the release path
   keep the pure `nix build`, and a missing seed is the same cold build, not a failure.
   The subset hashes are one committed table, `.github/repo-subsets.json`

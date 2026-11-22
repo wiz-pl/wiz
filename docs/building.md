@@ -940,8 +940,11 @@ output under two Actions-cache keys (`scripts/lake-cache.sh key`: `flake.lock`, 
 trusted one and an untrusted one. A pull request restores the untrusted key first (its
 own previous run) and the trusted one second, and builds `withLakeCache <seed>`: the
 same function, so Lake recompiles only the modules whose inputs changed. The producer's
-`bin` is byte-identical to the pure build's (measured), which is what makes it a
-trustworthy substitute for the compile; **nothing a pull request writes is read by a
+`bin` **should** be byte-identical to the pure build's — it is the same sources compiled
+by the same Lake — and the equality is asserted by the seed measurement's `cmp` of all
+three binaries; that measurement has **not yet run in CI**, so the claim is a design
+expectation, not a measured fact. It is what would make the producer a trustworthy
+substitute for the compile; **nothing a pull request writes is read by a
 trusted job** — a pull request saves no seed at all, and the producer only ever passes
 `empty-lake` (its job has no restore step). A missing seed is `empty-lake`, the same cold
 build, never an error. Those store paths differ from the pure build's — the seed is an
