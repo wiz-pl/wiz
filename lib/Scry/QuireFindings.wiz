@@ -121,8 +121,12 @@ def Scry.FindingKey.ofRec (r : Rec) : Scry.FindingKey :=
 
 /-- `"QRE1"`: the sentinel's `kind`, so a file this module did not write is a miss. -/
 def Scry.fiMagic : U32 := U32.ofNat 0x51524531
-/-- The index schema version, in the sentinel's `label`. -/
+/-- The index schema version. -/
 def Scry.fiSchema : U32 := U32.ofNat 1
+/-- The sentinel records' `label`: `0xffffff00 | schema`, outside the severity range, so
+the severity index never counts a sentinel. (The rule/file buckets still contain them;
+`findingsLoad` filters the sentinel keys out, and `findingsQuery` is a severity query.) -/
+def Scry.fiSentinelLabel : U32 := U32.ofNat 0xFFFFFF01
 /-- The sentinel's primary key (finding ids are FNV values; a 0 is mapped to 2 by the
 constructor so the sentinel is unambiguous). -/
 def Scry.fiSentinelId : U64 := U64.ofNat 0
@@ -224,10 +228,10 @@ def Scry.fiSaveQuire (path : String) (rows : List Scry.FindingsIndexRow) : EIO U
   h ← openQ path Scry.fiIndices;
   s ← getQ h;
   let s := Scry.fiNodes s rows;
-  let sentinel := Node.mk Scry.fiMagic (U64.ofNat (List.length rows)) Scry.fiSchema;
+  let sentinel := Node.mk Scry.fiMagic (U64.ofNat (List.length rows)) Scry.fiSentinelLabel;
   let s := QSnapshot.record s Scry.fiSentinelId (.some (.set sentinel));
   let print := Node.mk Scry.fiPrintMagic
-    (Scry.fiPrint (List.map Scry.FindingsIndexRow.key rows)) Scry.fiSchema;
+    (Scry.fiPrint (List.map Scry.FindingsIndexRow.key rows)) Scry.fiSentinelLabel;
   let s := QSnapshot.record s Scry.fiFingerprintId (.some (.set print));
   o ← putQ h s;
   closeQ h;
@@ -264,9 +268,9 @@ def Scry.fiProbe (path : String) : EIO (Except String (Nat × U64)) := do
         closeQ h;
         let good := match countNode, printNode with
           | .some c, .some p => Bool.and (UIntN.beq c.kind Scry.fiMagic)
-              (Bool.and (UIntN.beq c.label Scry.fiSchema)
+              (Bool.and (UIntN.beq c.label Scry.fiSentinelLabel)
                 (Bool.and (UIntN.beq p.kind Scry.fiPrintMagic)
-                  (UIntN.beq p.label Scry.fiSchema)))
+                  (UIntN.beq p.label Scry.fiSentinelLabel)))
           | _, _ => .false;
         match good with
         | .false => EIO.pure (.error "corrupt")
@@ -301,7 +305,7 @@ def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)
         let good := match sentinel with
           | .none => .false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
-              (UIntN.beq n.label Scry.fiSchema);
+              (UIntN.beq n.label Scry.fiSentinelLabel);
         let rows := match good with
           | .false => []
           | .true => List.filter (fun r =>
@@ -341,7 +345,7 @@ def Scry.fiCountSeverityQuire (path : String) (severity : U32) : EIO (Except Str
         let good := match sentinel with
           | .none => .false
           | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
-              (UIntN.beq n.label Scry.fiSchema);
+              (UIntN.beq n.label Scry.fiSentinelLabel);
         let n := match good with
           | .false => 0
           | .true => QCursor.length

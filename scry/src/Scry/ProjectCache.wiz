@@ -313,5 +313,6 @@ def Scry.cacheFindings (cache : Scry.CacheOpts) (id : String)
     match String.eq reason "hit" with
     | .true => EIO.pure { stats with reason := reason }
     | .false => do
+      Scry.mkdirp cache.dir;
       Scry.findingsSave cache id rows;
       EIO.pure { stats with reason := reason }
