@@ -951,25 +951,22 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
   | none => pure none
   | some (A, lhs, rhs, happ, pairs) =>
     let pat := if rtl then rhs else lhs
-    let rec scan (t : Term R) (depth : Nat) :
-        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
-      let cand? := strengthenN depth t
-      match cand? with
-      | some cand => match ← matchCand g gl.ctx A pat lhs rhs happ pairs cand with
-        | some r => pure (some r)
-        | none => scanKids t depth
-      | none => scanKids t depth
-    and scanKids (t : Term R) (depth : Nat) :
-        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) := do
-      let kids := (t.forChildren (m := StateM (List (Nat × Term R))) (fun _ => pure ())
-        (fun k c => modify fun xs => xs ++ [(k, c)]) []).2
-      let rec goKids : List (Nat × Term R) →
-          ElabM R (Option (Term R × Term R × Term R × Term R × Term R))
-        | .nil => pure none
-        | .cons p rest => match ← scan p.2 (depth + p.1) with
+    let kidsOf (t : Term R) (depth : Nat) : List (Term R × Nat) :=
+      (t.forChildren (m := StateM (List (Term R × Nat))) (fun _ => pure ())
+        (fun k c => modify fun xs => xs ++ [(depth + k, c)]) []).2
+    let rec go (work : List (Term R × Nat)) :
+        ElabM R (Option (Term R × Term R × Term R × Term R × Term R)) :=
+      match work with
+      | [] => pure none
+      | .cons p rest =>
+        let t := p.1
+        let depth := p.2
+        let cand? := strengthenN depth t
+        match cand? with
+        | some cand => match ← matchCand g gl.ctx A pat lhs rhs happ pairs cand with
           | some r => pure (some r)
-          | none => goKids rest
-      goKids kids
-    scan goalT 0
+          | none => go (List.append (kidsOf t depth) rest)
+        | none => go (List.append (kidsOf t depth) rest)
+    go [(goalT, 0)]
 
 end Wiz.Elab
