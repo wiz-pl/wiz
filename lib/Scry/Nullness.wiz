@@ -429,8 +429,16 @@ def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
     match List.any (Nat.beq v.index) tbls.nonNull with
     | .true => AStmt.checkAssign v.index (over v.index d)
     | .false => AStmt.assign v.index (over v.index d);
+  -- A fact is keyed by the *node*, and a construct can emit several statements at one
+  -- node (the `?.` guard's null constant, the call, the result copy). The dereference is
+  -- only the statement that actually uses the value: a call with it as an argument (a
+  -- receiver, an element or an argument), or a copy from it (an unboxing cast).
+  let isDerefStmt := fun (v : Nat) => match s with
+    | .call _ _ args _ => List.any (fun a => Nat.beq a.index v) args
+    | .assign _ (.use y) _ => Nat.beq y.index v
+    | _ => .false;
   let checks : List AStmt := List.map (fun p => AStmt.check p.2)
-    (List.filter (fun p => Nat.beq p.1 node) tbls.derefs);
+    (List.filter (fun p => Bool.and (Nat.beq p.1 node) (isDerefStmt p.2)) tbls.derefs);
   let body : List AStmt := match s with
     | .assign x (.load p) _ =>
       -- Two statements: one checks the base (the alarm), the other gives the loaded

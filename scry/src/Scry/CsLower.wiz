@@ -1616,13 +1616,16 @@ partial def Scry.Cs.binop (c : Scry.Cst) (n : Nat) (op : String) (a b : Scry.Cs.
     z ← Scry.Cs.fresh a.v.ty;
     Scry.Cs.emit c n (Wil.cst z .nul);
     tb ← Scry.Cs.newBlock;
-    jb ← Scry.Cs.newBlock;
-    Scry.Cs.seal c n (.br (Wil.Cond.cmp .eq a.v z) (Wil.mkBlockId tb) (Wil.mkBlockId jb) Wil.noSpan);
+    fb ← Scry.Cs.newBlock;
+    jn ← Scry.Cs.newBlock;
+    Scry.Cs.seal c n (.br (Wil.Cond.cmp .eq a.v z) (Wil.mkBlockId tb) (Wil.mkBlockId fb) Wil.noSpan);
     Scry.Cs.startBlock tb;
     Scry.Cs.emit c n (Wil.copy r b.v);
-    Scry.Cs.goto c n jb;
-    Scry.Cs.startBlock jb;
+    Scry.Cs.goto c n jn;
+    Scry.Cs.startBlock fb;
     Scry.Cs.emit c n (Wil.copy r a.v);
+    Scry.Cs.goto c n jn;
+    Scry.Cs.startBlock jn;
     Scry.Cs.pure (Scry.Cs.ev r a.ty)
   else match Scry.Cs.arith op with
     | .some wop => match Bool.and (Scry.Cs.isIntTy a.v.ty) (Scry.Cs.isIntTy b.v.ty) with
