@@ -28,3 +28,19 @@ bench/.build/
 # scry: the fetched C# grammar, an out-link to `nix build .#tree-sitter-c-sharp` (scry/native/README.md)
 /scry/native/tree-sitter-c-sharp
 .scratch-*.log
+
+# Ad-hoc run and build output at the repository root (repo audit 2026-11-22, F38):
+# Slurm job logs, redirects and compiler output written by a local experiment.
+/slurm-*.out
+/err.txt
+/guard2.out
+/out.c
+/out_v_myop*.txt
+# A scratch tree for in-progress compiler work (same audit, F39) and a developer
+# environment snapshot: not build output, ignored so `git add -A` does not take them.
+/.b6tmp/
+/.devenv/
+
+# Nix build outputs
+/result
+/result-*

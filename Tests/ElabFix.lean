@@ -54,7 +54,7 @@ def and_right : (a b : Bool) → Bool.and a b = .true → b = .true
   | .false, b, h => absurd h.1
 "
 
-/-- The shape of `Hw` (lib/Hdl/Core.wiz) that `Hw.cat (Hw.lit 1 1) d` needs. -/
+/-- The shape of `Hw` (hdl/src/Hdl/Core.wiz) that `Hw.cat (Hw.lit 1 1) d` needs. -/
 def hwSrc : String := "import Prelude
 inductive HwTy where
   | bits (n : Nat)

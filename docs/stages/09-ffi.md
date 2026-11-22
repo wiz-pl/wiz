@@ -319,13 +319,19 @@ runtime's section "system interfaces" (`runtime/`, so both backends have it).
   return the same status, and `kill` works while a `wait` or a read blocks.
 * **Allocation failure.** The OS-surface natives take the runtime's out-of-memory exit
   (`wiz: out of memory`, code 3) instead of dereferencing NULL, and the readers that
-  have an error channel (`FS.readFile`, `File.readAll`, `IO.readFile`) report `ENOMEM`
+  have an error channel (`FS.readFile`, `File.readAll`) report `ENOMEM`
   as an `EIO` error (`read: Cannot allocate memory`).
 * **`IO.writeFile`.** `lib/Std.wiz`'s `IO.writeFile path text : IO Unit` writes the text
   as UTF-8 up to its first NUL (`FS.writeBytes` is for binary data). It has no error
   channel, so `fopen`, a short write or the final flush failing prints
   `wiz: <path>: <message>` on standard error and exits 1: a bad path or a full disk is
   not reported as success.
+* **`IO.readFile`.** `lib/IO.wiz`'s `IO.readFile path : IO String` reads the whole file
+  as text. A path that does not exist reads as empty text: the library asks "is there a
+  file here?" with a read (the module loader's candidate paths), so absence is an
+  answer. Any other failure (a directory, no permission, a read error, out of memory)
+  prints `wiz: <path>: <message>` on standard error and exits 1, as `IO.writeFile` does:
+  it is not the empty text. `FS.readFile` is the variant with an `EIO` error channel.
 * `#eval` and `#run` can't do any of this (they are pure and can't call C): there are
   no models for system calls, since a model of the file system or of processes would
   give answers the real program wouldn't. The pure helpers (`Path.join`,

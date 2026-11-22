@@ -1,0 +1,205 @@
+import Word
+import Text
+/-!
+# Storage core: the plan's vocabulary
+
+The small, engine-wide values shared by `Storage.wiz` (the write half) and `Cursor.wiz`
+(the read half):
+
+* `Cost` is the **read-path counter**: `nodes` is primary-node fetches, `keys` is
+  index/table entries the plan consumed. The tests assert these counts; they are shape
+  checks, not timings;
+* `Entry` is one index or table entry before projection (`key`, primary `id`);
+* `KeyRange`/`KeyPred` are the inspectable predicate language: only these can be pushed
+  down into an index walk. An opaque `a → Bool` cannot be inspected and stays a filter;
+* `Source` records what a plan scans (a literal list, the table, or one index field);
+* `Rerange` is the pushdown hook: a scan that can rebuild its state for a tighter key
+  range. Its `rebuild` closure captures the snapshot and index definition, so the plan
+  only needs the range, not the store's maps.
+-/
+
+-- ## The read-path counter
+
+/-- What a plan spent: `nodes` primary-node reads (the store's `Snapshot.fetch`),
+`keys` index/table entries consumed, and `pages` mapped 4 KiB pages touched. The first
+two are the pure slice's counts; `pages` is the page-backed slice's count (a `U64Map`
+scan touches no page, so the pure plan leaves it 0). All are counts, never wall-clock
+time. -/
+structure Cost where
+  nodes : Nat
+  keys : Nat
+  pages : Nat
+
+/-- An empty spend. -/
+def Cost.zero : Cost := Cost.mk 0 0 0
+
+/-- One primary-node read. -/
+def Cost.node : Cost := Cost.mk 1 0 0
+
+/-- One consumed index/table entry (no primary read). -/
+def Cost.key : Cost := Cost.mk 0 1 0
+
+/-- One mapped page touched. -/
+def Cost.page : Cost := Cost.mk 0 0 1
+
+/-- `n` mapped pages touched. -/
+def Cost.pageN (n : Nat) : Cost := Cost.mk 0 0 n
+
+/-- Add two spends. -/
+def Cost.add (a b : Cost) : Cost :=
+  Cost.mk (a.nodes + b.nodes) (a.keys + b.keys) (a.pages + b.pages)
+
+/-- The spend as one number (convenience for assertions). -/
+def Cost.total (c : Cost) : Nat := c.nodes + c.keys + c.pages
+
+/-- `nodes=… keys=… pages=…`, for `#eval` of a plan or a run. -/
+def Cost.show (c : Cost) : String :=
+  String.append "nodes=" (String.append (Nat.repr c.nodes)
+    (String.append " keys=" (String.append (Nat.repr c.keys)
+      (String.append " pages=" (Nat.repr c.pages)))))
+
+-- ## Index entries and key ranges
+
+/-- One index or table entry before projection: the index `key` and the primary `id`.
+The primary node itself is fetched only when the plan needs it. -/
+structure Entry where
+  key : U64
+  id : U64
+
+/-- `Option` as 0 or 1 element (a `filterMap` helper, shared by the write and read
+halves). -/
+def Option.toList {a : Type} : Option a → List a
+  | .none => []
+  | .some x => [x]
+
+/-- A range over an ordered index. `between` is inclusive at both ends; `all` is the
+whole index. `empty` makes tightening composable (`eq 1` tightened by `eq 2`). -/
+inductive KeyRange where
+  | all
+  | empty
+  | eq (v : U64)
+  | between (lo : U64) (hi : U64)
+
+/-- Membership in a range. -/
+def KeyRange.contains (r : KeyRange) (v : U64) : Bool :=
+  match r with
+  | .all => .true
+  | .empty => .false
+  | .eq x => UIntN.beq x v
+  | .between lo hi => Bool.and (UIntN.le lo v) (UIntN.le v hi)
+
+/-- The greater of two words. -/
+def U64.max (a b : U64) : U64 := match UIntN.le a b with
+  | .true => b
+  | .false => a
+
+/-- The lesser of two words. -/
+def U64.min (a b : U64) : U64 := match UIntN.le a b with
+  | .true => a
+  | .false => b
+
+/-- Range intersection: the semantic core of pushdown (a tightened range must contain
+exactly the keys both ranges contained). -/
+def KeyRange.intersect (a b : KeyRange) : KeyRange :=
+  match a, b with
+  | .empty, _ => .empty
+  | _, .empty => .empty
+  | .all, r => r
+  | r, .all => r
+  | .eq x, .eq y => match UIntN.beq x y with
+    | .true => .eq x
+    | .false => .empty
+  | .eq x, .between lo hi => match KeyRange.contains (.between lo hi) x with
+    | .true => .eq x
+    | .false => .empty
+  | .between lo hi, .eq x => match KeyRange.contains (.between lo hi) x with
+    | .true => .eq x
+    | .false => .empty
+  | .between lo1 hi1, .between lo2 hi2 =>
+    let lo := U64.max lo1 lo2;
+    let hi := U64.min hi1 hi2;
+    match UIntN.le lo hi with
+    | .true => .between lo hi
+    | .false => .empty
+
+/-- An inspectable predicate on an index key. This is what pushdown understands; an
+opaque function is a post-filter instead. -/
+inductive KeyPred where
+  | eq (v : U64)
+  | between (lo : U64) (hi : U64)
+
+/-- The predicate as a range. -/
+def KeyPred.toRange : KeyPred → KeyRange
+  | .eq v => .eq v
+  | .between lo hi => .between lo hi
+
+/-- Direct evaluation of the predicate (used by the fallback filter and by tests). -/
+def KeyPred.test (p : KeyPred) (v : U64) : Bool :=
+  match p with
+  | .eq x => UIntN.beq x v
+  | .between lo hi => Bool.and (UIntN.le lo v) (UIntN.le v hi)
+
+/-- Tighten a range by a predicate. -/
+def KeyRange.tighten (r : KeyRange) (p : KeyPred) : KeyRange :=
+  KeyRange.intersect r (KeyPred.toRange p)
+
+/-- Whether to keep going after a step (early exit is `stop`). The pure cursor
+(`drafts/storage-engine/Cursor.wiz`) and the page cursor (`Scry.QuireCursor`) share it,
+and it lives in the engine-wide module so the page cursor does not depend on the draft
+slice. -/
+inductive Control (b : Type) where
+  | stop (b : b)
+  | go (b : b)
+
+/-- `all`, `eq 3`, `between 1 2`, or `empty`. -/
+def KeyRange.show : KeyRange → String
+  | .all => "all"
+  | .empty => "empty"
+  | .eq v => String.append "eq(" (String.append (Nat.repr v.toNat) ")")
+  | .between lo hi => String.append "between("
+      (String.append (Nat.repr lo.toNat)
+        (String.append "," (String.append (Nat.repr hi.toNat) ")")))
+
+-- ## What a plan yields
+
+/-- The projection a plan records: the index key, the primary id, the fetched node, or
+an arbitrary function (after `map`/`filterMap`). -/
+inductive Projection where
+  | key
+  | id
+  | node
+  | other
+
+/-- `key`, `id`, `node`, or `other`. -/
+def Projection.show : Projection → String
+  | .key => "key"
+  | .id => "id"
+  | .node => "node"
+  | .other => "other"
+
+-- ## What a plan scans
+
+/-- The static source of a plan. `index` names the indexed field and whether the index
+is unique; the range lives in the plan's `Rerange`. -/
+inductive Source where
+  | literal
+  | table
+  | index (field : U32) (unique : Bool)
+
+/-- `literal`, `table`, or `index(field=0,nonunique)`. -/
+def Source.show : Source → String
+  | .literal => "literal"
+  | .table => "table"
+  | .index f u => String.append "index(field="
+      (String.append (Nat.repr f.toNat)
+        (match u with
+          | .true => ",unique)"
+          | .false => ",nonunique)"))
+
+/-- A scan that can be re-ranged: the hook predicate pushdown uses. `rebuild` returns
+the full entry list for a new range; it captures the snapshot and index definition, so
+the plan is rebuilt rather than filtered (no node fetches). -/
+structure Rerange where
+  field : U32
+  range : KeyRange
+  rebuild : KeyRange → List Entry

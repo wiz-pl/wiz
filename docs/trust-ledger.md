@@ -63,6 +63,12 @@ walk measured **~9m30s cold** (against ~7m26s for `lib/` alone) and the same +57
 (730 → 1308 rows). That is a scope decision, not a mechanical update, and it is
 deliberately not made here.
 
+Release signing and build attestation are **not** Wiz trust sources: a DSSE/Ed25519 key
+and a SLSA-style provenance statement (`docs/attestation.md`, `docs/building.md`) are
+release authorities over artifacts, not declarations the kernel checks. They add no row
+to `.github/trust-baseline.tsv`; the identity and custody of the key are the release
+policy, and `wiz verify` checks only that a statement describes these bytes.
+
 ## Format
 
 Rows are tab-separated:
@@ -88,7 +94,7 @@ check fails with "missing a reason", "missing an owner" or "missing a review dat
 
 `scripts/trust-ledger.sh --check` fails when:
 
-* a source of trust in `lib/` (or `examples/hdl-verified.wiz`) has no matching row —
+* a source of trust in `lib/` (or `hdl/examples/hdl-verified.wiz`) has no matching row —
   the **new-entry gate**;
 * a row names a declaration that is no longer there (a stale row; a renamed declaration
   is called out explicitly when the item kind matches);

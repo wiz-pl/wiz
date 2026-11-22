@@ -4,9 +4,9 @@ import Text
 import WordMap
 import Functor
 import MVar
-import Storage
-import Registry
-import Durable
+import Scry.QuireStorage
+import Scry.QuireRegistry
+import Scry.QuireDurable
 /-!
 # Slice 3b: one writer, many readers, across processes
 
@@ -14,7 +14,7 @@ import Durable
 This module adds the multi-process contract on top of the *same* file format; it does
 not change a byte of it:
 
-* a **writer** takes `flock(LOCK_EX)` for the commit section only (`Handle.putDb`), not
+* a **writer** takes `flock(LOCK_EX)` for the commit section only (`DurableHandle.putDb`), not
   for the transaction. Between `getDb` and `putDb` the transaction is pure and holds no
   lock at all; another process may commit, and the validation at `putDb` decides whether
   this transaction still applies.
@@ -31,7 +31,7 @@ not change a byte of it:
   keeps the old inode, so the same lease survives that too. When a later policy reuses
   pages in one file, the lease becomes a held share or a counted lease, and a commit
   then waits for old readers.
-* **validation is inside the exclusive section.** `Handle.putDb` re-reads the meta after
+* **validation is inside the exclusive section.** `DurableHandle.putDb` re-reads the meta after
   taking the lock and runs the pure `Db.commit` on that fresh state, plus the retention
   test (`Registry.retained`). The delete epoch, the per-key versions and the retention
   horizon therefore cannot race a commit between the test and the slot switch. A
@@ -58,7 +58,7 @@ Limits, stated rather than hidden:
   (and the lock itself on the inode the path names), which the slice-3 format does not
   provide; this slice therefore keeps compaction out of the concurrent contract.
 * the writer handle's `MVar` is still the *in-process* single-writer cell. `flock` locks
-  an open file description, and two threads sharing one `Handle` share its descriptor,
+  an open file description, and two threads sharing one `DurableHandle` share its descriptor,
   so `flock` alone would not separate them (a `LOCK_SH` on a descriptor that holds
   `LOCK_EX` converts it); the `MVar` does. Two handles in one process (two `Fd.open`s)
   have two descriptions, so `flock` does separate them, which is what the two-handle
@@ -203,7 +203,7 @@ def mergeKnown (fd : Fd) (pages : U64) : List RootRef → Registry → EIO Regis
 still remembers. The page chain is read outside any lock (a valid slot names durable,
 immutable pages); the caller holds the handle's cell, which is what makes the publish
 atomic. -/
-def refresh (h : Handle) (st : StoreState) : EIO StoreState := do
+def refresh (h : DurableHandle) (st : StoreState) : EIO StoreState := do
   p ← recoverWith st.fd h.indices st.registry.keep;
   reg ← mergeKnown st.fd p.2 (Registry.roots st.registry) p.1.registry;
   EIO.pure { p.1 with registry := Registry.trim reg }
@@ -211,7 +211,7 @@ def refresh (h : Handle) (st : StoreState) : EIO StoreState := do
 /-- The state behind the meta slots `ms`. If their `txid` is the one this handle already
 holds, the in-memory state is returned; otherwise the chain is read (another process
 committed). -/
-def stateOfSlots (h : Handle) (st : StoreState) (ms : List Meta) : EIO StoreState :=
+def stateOfSlots (h : DurableHandle) (st : StoreState) (ms : List Meta) : EIO StoreState :=
   match ms with
   -- No checksum-valid slot: the disk is the truth and it holds no commit.
   | .nil => refresh h st
@@ -225,18 +225,18 @@ lock, so a commit in another process is seen whole or not at all (its slot switc
 96-byte write, and either the old or the new slot wins the `txid` pick).
 
 The handle's cell is taken for the read as well as for the commit: `flock` belongs to the
-open file description, and two threads that share one `Handle` share its descriptor, so a
+open file description, and two threads that share one `DurableHandle` share its descriptor, so a
 share taken on a descriptor that already holds the exclusive lock would convert it. One
 lock acquisition per descriptor at a time. Concurrent readers in one process use `Reader`
 (a descriptor and a share of their own). -/
-def refreshAndRead (h : Handle) (st : StoreState) (ms : List Meta) :
+def refreshAndRead (h : DurableHandle) (st : StoreState) (ms : List Meta) :
     IO (StoreState × Except String Snapshot) :=
   IO.bind (stateOfSlots h st ms) (fun r =>
     match r with
     | .error e => IO.pure (st, .error e)
     | .ok st' => IO.pure (st', .ok (Db.snapshot st'.db)))
 
-def Handle.getDb (h : Handle) : EIO Snapshot :=
+def DurableHandle.getDb (h : DurableHandle) : EIO Snapshot :=
   MVar.borrow h.state (fun st hole =>
     IO.bind (readSlotsLocked st.fd) (fun r =>
       match r with
@@ -249,7 +249,7 @@ def Handle.getDb (h : Handle) : EIO Snapshot :=
 retention test first (exactly `Durable.putDb`, moved under the lock). This is the whole
 point of the slice: the state the version/epoch/horizon checks see cannot change before
 the slot switch, because no other cooperating writer can be in the section. -/
-def commitSection (h : Handle) (st : StoreState) (tx : Snapshot) :
+def commitSection (h : DurableHandle) (st : StoreState) (tx : Snapshot) :
     EIO (StoreState × Except String Outcome) := do
   fresh ← refresh h st;
   match Registry.retained fresh.registry tx.gen with
@@ -258,7 +258,7 @@ def commitSection (h : Handle) (st : StoreState) (tx : Snapshot) :
   | .true => EIO.lift (commit fresh.fd fresh tx)
 
 /-- The section without the locking, for callers that already hold the exclusive lock. -/
-def commitUnlocked (h : Handle) (st : StoreState) (tx : Snapshot) :
+def commitUnlocked (h : DurableHandle) (st : StoreState) (tx : Snapshot) :
     IO (StoreState × Except String Outcome) := do
   r ← commitSection h st tx;
   match r with
@@ -267,7 +267,7 @@ def commitUnlocked (h : Handle) (st : StoreState) (tx : Snapshot) :
 
 /-- Commit with the lock already held, then unlock; the result carries the state to
 publish whether the commit committed, rejected, or failed. -/
-def commitAndUnlock (h : Handle) (st : StoreState) (tx : Snapshot) :
+def commitAndUnlock (h : DurableHandle) (st : StoreState) (tx : Snapshot) :
     IO (StoreState × Except String Outcome) :=
   IO.bind (commitUnlocked h st tx) (fun r =>
     IO.bind (Fd.unlock st.fd) (fun u =>
@@ -278,7 +278,7 @@ def commitAndUnlock (h : Handle) (st : StoreState) (tx : Snapshot) :
 /-- Commit a transaction, waiting for the writer lock. The transaction's pure part is
 already done; the exclusive section is validation plus the page/fsync/meta/fsync
 sequence. A transaction that lost a race is `Outcome.rejected` — it is not retried. -/
-def Handle.putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
+def DurableHandle.putDb (h : DurableHandle) (tx : Snapshot) : EIO Outcome :=
   MVar.borrow h.state (fun st hole =>
     IO.bind (Fd.lock st.fd .exclusive) (fun l =>
       match l with
@@ -287,18 +287,18 @@ def Handle.putDb (h : Handle) (tx : Snapshot) : EIO Outcome :=
         IO.bind (commitAndUnlock h st tx) (fun r =>
           MVar.fill h.state hole r.1 (IO.pure r.2))))
 
-/-- The result of a commit section, as `Handle.tryPutDb` reports it (`none` is `busy`). -/
+/-- The result of a commit section, as `DurableHandle.tryPutDb` reports it (`none` is `busy`). -/
 def tryPutResult (r : Except String Outcome) : EIO (Option Outcome) :=
   match r with
   | .ok o => EIO.pure (.some o)
   | .error e => EIO.fail e
-/-- The non-committed result of `Handle.tryPutDb`: another description held the lock. -/
+/-- The non-committed result of `DurableHandle.tryPutDb`: another description held the lock. -/
 def tryPutBusy : EIO (Option Outcome) := EIO.pure .none
 
 /-- A non-blocking commit: `none` when another open file description holds the exclusive
 lock (the caller decides whether to wait or to report `busy`), `some out` when the
 section ran. The typed `busy` of `Fd.tryLock` is surfaced here as `none`. -/
-def Handle.tryPutDb (h : Handle) (tx : Snapshot) : EIO (Option Outcome) :=
+def DurableHandle.tryPutDb (h : DurableHandle) (tx : Snapshot) : EIO (Option Outcome) :=
   MVar.borrow h.state (fun st hole =>
     IO.bind (Fd.tryLock st.fd .exclusive) (fun l =>
       match l with

@@ -156,6 +156,42 @@
       "reason": "project-wide only: lib/Web/Playground.wiz and selfhost/Cli.wiz are independent: neither imports the other, transitively, and no scanned module imports both, so the name cannot be loaded twice in one run.",
       "owner": "the two modules lib/Web/Playground.wiz and selfhost/Cli.wiz",
       "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireCompact.wiz",
+      "name": "Plan",
+      "modules": [
+        "lib/Scry/QuireCompact.wiz",
+        "selfhost/Backend.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireCompact.wiz (the storage engine's plan type) and selfhost/Backend.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so Plan cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireCompact.wiz",
+      "name": "Prepared",
+      "modules": [
+        "lib/Scry/QuireCompact.wiz",
+        "selfhost/Cli.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireCompact.wiz (the storage engine's prepared statement) and selfhost/Cli.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so Prepared cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
+    },
+    {
+      "module": "lib/Scry/QuireDurable.wiz",
+      "name": "commit",
+      "modules": [
+        "lib/Scry/QuireDurable.wiz",
+        "selfhost/Parse.wiz"
+      ],
+      "scope": "",
+      "reason": "project-wide only: lib/Scry/QuireDurable.wiz (the durable store's commit) and selfhost/Parse.wiz are independent programs; neither imports the other transitively and no scanned module imports both, so commit cannot be loaded twice in one run.",
+      "owner": "Scry storage engine (lib/Scry/Quire*) and the self-hosted toolchain",
+      "expires": "2027-05-01"
     }
   ]
 }

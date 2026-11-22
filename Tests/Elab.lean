@@ -498,6 +498,39 @@ def linkRun (files : List (String × String)) (expected : String) (llvm : Bool :
   | .ok v => checkEq expected v
   | .error e => failRun e
 
+/-- `elabTree` with extra module roots (a package's `src`/`gen`, e.g. `scry/src`),
+after the toolchain's `lib` root and before the temp directory. This keeps `link_c` and
+`include_str` resolution relative to each module's own file, as `wiz` does. -/
+def elabTreeRoots (roots : List String) (files : List (String × String)) :
+    IO (CommandState ZeroOneMany × String × System.FilePath) := do
+  let dir ← IO.FS.createTempDir
+  for (p, text) in files do
+    let f := dir / p
+    if let some d := f.parent then IO.FS.createDirAll d
+    IO.FS.writeFile f text
+  let src ← IO.FS.readFile (dir / "main.wiz")
+  let mods ← Module.loadClosure ((("lib" :: roots).map System.FilePath.mk) ++ [dir]) src
+  let sources ← Module.cSourceTable dir src mods
+  let includes ← Module.includeTable dir src mods
+  let s := runFrontend (R := ZeroOneMany) src
+    { loader := fun m => (mods[m]?).map (·.2), cSources := some (Module.cSourceResolver sources),
+      includes := some (Module.includeResolver includes) }
+  pure (s, src, dir)
+
+/-- `elabTreeRoots`, then build and run `main` (through C, or LLVM) and compare its
+output. `timeout` is the program's limit (a project run parses and analyses several
+translation units). -/
+def linkRunRoots (roots : List String) (files : List (String × String)) (expected : String)
+    (llvm : Bool := false) (cflags : List String := []) (timeout : Nat := 300) : IO Unit := do
+  let (s, src, dir) ← elabTreeRoots roots files
+  let errs := (s.messages.filter (·.severity == .error)).map fun m => m.render src
+  unless errs.isEmpty do throw (IO.userError s!"unexpected errors:\n{"\n".intercalate errs.toList}")
+  let tc ← toolchain
+  match ← Build.runGlobal { tc with cflags := tc.cflags ++ cflags } s "main" dir llvm
+      (timeout := some timeout) with
+  | .ok v => checkEq expected v
+  | .error e => failRun e
+
 /-- `linkRun`, expecting the program to fail: the error must mention `fragment`. -/
 def linkRunFails (files : List (String × String)) (fragment : String) (llvm : Bool := false) : IO Unit := do
   let (s, src, dir) ← elabTree files
@@ -2134,8 +2167,9 @@ def sealHeader : String :=
   "sealed inductive W (w : Nat) where\n  | mk (toNat : Nat)\ninductive L (w : Nat) where\n  | mk (toNat : Nat)\n" ++
   "sealed inductive V (w : Nat) where\n  | mk (toNat : Nat)\n"
 
-/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`) and `scry/src/Scry/*.wiz` (as `Scry.X`),
-by module name (see `Tests.loadedModules`, which caches the load for the process). -/
+/-- Every `lib/*.wiz`, `lib/*/*.wiz` (as `D.X`), `scry/src/Scry/*.wiz` (as `Scry.X`)
+and `hdl/src/Hdl/*.wiz` (as `Hdl.X`), by module name (see `Tests.loadedModules`, which
+caches the load for the process). -/
 def libLoader : IO (Name → Option String) := Tests.libLoader
 
 /-- Every module of `lib/`, by import name (`D.X` for a subdirectory). -/

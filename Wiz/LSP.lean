@@ -1029,19 +1029,51 @@ def handleInfoview (srv : Server) (msg : Json) : IO (Server × Array Json) := do
     else pure (srv, #[Json.mkObj [("jsonrpc", "2.0"), ("id", id),
       ("error", Json.mkObj [("code", (-32601 : Int)), ("message", s!"{method} is not available on the infoview socket")])]])
 
-/-- Read one message: headers, a blank line, then `Content-Length` bytes of JSON. -/
-partial def readMessage (stdin : IO.FS.Stream) : IO (Option Json) := do
-  let mut len := 0
+/-- The largest `Content-Length` a message may declare (64 MiB). Language-server messages
+are far smaller; the cap stops a truncated or hostile header from making the server read
+(and buffer) an arbitrary amount. -/
+def maxContentLength : Nat := 1 <<< 26
+
+/-- Exactly `n` bytes, or `none` if the stream ends first. A single `read` may return
+fewer bytes than asked (a pipe, a socket, a slow writer), so the body is read in chunks
+until it is complete and joined once at the end (not with a quadratic `acc ++ bs`). -/
+partial def readExact (r : IO.FS.Stream) (n : Nat) (chunks : Array ByteArray := #[])
+    (got : Nat := 0) : IO (Option ByteArray) := do
+  if got ≥ n then return some (chunks.foldl (· ++ ·) .empty)
+  let bs ← r.read (n - got).toUSize
+  if bs.isEmpty then return none
+  readExact r n (chunks.push bs) (got + bs.size)
+
+/-- Read one message: headers, a blank line, then `Content-Length` bytes of UTF-8 JSON.
+`ok none` at a clean end of stream (before a message started), `ok (some j)` for a
+message, and `error why` when the framing cannot be trusted: a missing or non-numeric
+`Content-Length`, one over `maxContentLength`, a body that ends short, bytes that are not
+UTF-8, or JSON that does not parse. The caller ends that connection and reports `why`;
+nothing here panics or silently substitutes a value. -/
+partial def readMessage (stdin : IO.FS.Stream) : IO (Except String (Option Json)) := do
+  let mut len : Option Nat := none
+  let mut started := false
   repeat
     let line ← stdin.getLine
-    if line.isEmpty then return none
+    if line.isEmpty then
+      return if started then .error "the stream ended in the middle of a message head" else .ok none
+    started := true
     let line := line.trimAscii.toString
     if line.isEmpty then break
-    if line.startsWith "Content-Length:" then len := ((line.drop 15).trimAscii.toString).toNat!
-  let body ← stdin.read len.toUSize
-  match Json.parse (String.fromUTF8! body) with
-  | .ok j => pure (some j)
-  | .error _ => pure (some Json.null)
+    -- the header name is ASCII and case-insensitive (LSP's base protocol)
+    if line.toLower.startsWith "content-length:" then
+      let v := (line.drop 15).trimAscii.toString
+      match v.toNat? with
+      | some n => len := some n
+      | none => return .error s!"bad Content-Length: {v}"
+  let some n := len | return .error "a message has no Content-Length header"
+  if n > maxContentLength then
+    return .error s!"Content-Length {n} is larger than the {maxContentLength}-byte limit"
+  let some body ← readExact stdin n | return .error s!"the body ended short of its {n}-byte Content-Length"
+  let some text := String.fromUTF8? body | return .error s!"the {n}-byte body is not valid UTF-8"
+  match Json.parse text with
+  | .ok j => pure (.ok (some j))
+  | .error e => pure (.error s!"the body is not JSON: {e}")
 
 def writeMessage (stdout : IO.FS.Stream) (j : Json) : IO Unit := do
   let body := j.compress
@@ -1120,12 +1152,20 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
     | none => some <$> WebSocket.freshToken
   let rec readEditor (input : IO.FS.Stream) : IO Unit := do
     match ← readMessage input with
-    | none => ch.send .editorDone
-    | some m => ch.send (.editor m); if getStr m ["method"] == "exit" then pure () else readEditor input
-  let rec readLoop (k : Nat) (recv : IO (Option Json)) : IO Unit := do
-    match ← (try recv catch _ => pure none) with
-    | none => ch.send (.disconnected k)
-    | some m => ch.send (.infoview k m); readLoop k recv
+    | .ok none => ch.send .editorDone
+    | .ok (some m) => ch.send (.editor m); if getStr m ["method"] == "exit" then pure () else readEditor input
+    | .error why =>
+      -- the framing is broken, so the rest of this stream cannot be trusted: end it with a
+      -- diagnostic instead of panicking or reading a body's bytes as the next head
+      IO.eprintln s!"wiz lsp: {why}"
+      ch.send .editorDone
+  let rec readLoop (k : Nat) (recv : IO (Except String (Option Json))) : IO Unit := do
+    match ← (try recv catch e => pure (.error (toString e))) with
+    | .ok none => ch.send (.disconnected k)
+    | .ok (some m) => ch.send (.infoview k m); readLoop k recv
+    | .error why =>
+      IO.eprintln s!"wiz lsp: connection {k}: {why}"
+      ch.send (.disconnected k)
   -- the Unix socket: Content-Length framing, as on stdio
   let unixConn (fd : UInt32) (r w : IO.FS.Handle) : IO Unit := do
     let k ← fresh
@@ -1139,34 +1179,42 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
     let k ← fresh
     ch.send (.connected k { fd, handle := r, send := fun j => WebSocket.sendText ws j.compress, editing := true })
     readLoop k do
-      let some text ← WebSocket.recvText rs ws | return none
-      pure (some ((Json.parse text).toOption.getD Json.null))
+      let some text ← WebSocket.recvText rs ws | return .ok none
+      pure (.ok (some ((Json.parse text).toOption.getD Json.null)))
   -- A closed listener is how the server stops: `Socket.close`/`closeFd` shuts it down and
   -- closes it (EBADF, or EINVAL for an accept already under way). Any other error (EMFILE,
-  -- ECONNABORTED, …) is transient: retry instead of ending the acceptor for good.
+  -- ECONNABORTED, …) is transient: retry instead of ending the acceptor for good, and
+  -- report the first failure of an episode (the condition can persist, so not every retry).
   let listenerClosed (e : IO.Error) : Bool :=
     match e with
     | .invalidArgument _ code _ => code == 9 || code == 22 -- EBADF | EINVAL
     | _ => false
-  let rec acceptLoop (lfd : UInt32) (serveConn : UInt32 → IO.FS.Handle → IO.FS.Handle → IO Unit) : IO Unit := do
+  let rec acceptLoop (lfd : UInt32) (serveConn : UInt32 → IO.FS.Handle → IO.FS.Handle → IO Unit)
+      (warned : IO.Ref Bool) : IO Unit := do
     let accepted : Except IO.Error (UInt32 × IO.FS.Handle × IO.FS.Handle) ←
       try pure (.ok (← Socket.accept lfd)) catch e => pure (.error e)
     match accepted with
     | .ok (fd, r, w) =>
+      warned.set false
       let _ ← IO.asTask (prio := .dedicated) (serveConn fd r w)
-      acceptLoop lfd serveConn
+      acceptLoop lfd serveConn warned
     | .error e =>
       unless listenerClosed e do
+        unless ← warned.get do
+          warned.set true
+          IO.eprintln s!"wiz lsp: accept failed ({e}); retrying"
         IO.sleep 20
-        acceptLoop lfd serveConn
+        acceptLoop lfd serveConn warned
   let unixFd ← listen.infoview.mapM Socket.listen
   if let (some fd, some _) := (unixFd, listen.infoview) then
-    let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd unixConn)
+    let warned ← IO.mkRef false
+    let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd unixConn warned)
   let wsFd ← listen.ws.mapM fun (addr, port) => Socket.tcpListen addr port
   -- the WebSocket listener: from `--ws`, or (11w) started by `wiz/browserInfoview`
   let wsRef ← IO.mkRef wsFd
   if let some (fd, port) := wsFd then
-    let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
+    let warned ← IO.mkRef false
+    let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn warned)
     ready port token
   -- (11w) `wiz/browserInfoview` from the editor: listen on a WebSocket (on 127.0.0.1, a
   -- free port) unless already listening, and say where the page is
@@ -1176,7 +1224,8 @@ partial def serveWith (libs : Std.HashMap String (String × String)) (stdio : Op
       | none =>
         let (fd, p) ← Socket.tcpListen Socket.loopback 0
         wsRef.set (some (fd, p))
-        let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn)
+        let warned ← IO.mkRef false
+        let _ ← IO.asTask (prio := .dedicated) (acceptLoop fd wsConn warned)
         ready p token
         pure p
     -- (#430) the page passes the token on to its WebSocket (`web/infoview.js`)

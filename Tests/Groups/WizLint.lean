@@ -10,14 +10,23 @@ namespace Tests.WizLint
 
 /-- Run a source with the lint pass on, with the library importable plus the pure
 fixture module `LintPlain`. -/
-def lintWith (path src : String) (publicRoots : List String := []) :
+def lintWith (path src : String) (publicRoots : List String := [])
+    (sets : Array LintPackageSet := #[]) (enabled : List String := []) :
     IO (CommandState ZeroOneMany) := do
   let base ← Tests.libLoader
   let plain ← IO.FS.readFile "Tests/fixtures/lint/LintPlain.wiz"
   let loader m := if m == "LintPlain" then some plain else base m
   pure <| runFrontend src
     { trustedModule := Tests.libModule, loader, lintEnabled := true,
-      lintPath := path, lintPublicRoots := publicRoots }
+      lintPath := path, lintPublicRoots := publicRoots,
+      lintPackageSets := sets, lintSets := enabled }
+
+/-- Elaborate a package lint module and run the registry's checks on it. -/
+def loadSet (file : String) : IO (Except String LintPackageSet) := do
+  let base ← Tests.libLoader
+  let src ← IO.FS.readFile ("Tests/fixtures/lint-pkg/" ++ file)
+  let s := runFrontend (R := ZeroOneMany) src { trustedModule := Tests.libModule, loader := base }
+  pure (Lint.loadPackageSet s)
 
 /-- The lint codes of a run, in message order. -/
 def codes (s : CommandState ZeroOneMany) : List String :=
@@ -40,7 +49,7 @@ def read (f : String) : IO String := IO.FS.readFile ("Tests/fixtures/lint/" ++ f
 
 def lintGroup : Group where
   name := "wiz-lint"
-  exercise := "Wiz/Lint.lean (the in-compiler lint pass and the P0 rules)"
+  exercise := "Wiz/Lint.lean (the in-compiler pass, the P0 rules, and the package lint ABI)"
   parallel := true
   shard := "library"
   cases := [
@@ -97,6 +106,44 @@ def lintGroup : Group where
         let s ← lintWith "Tests/fixtures/lint/unknown.wiz" unknown
         check (s.messages.any fun m => m.severity == .error && (m.text.splitOn "unknown code").length > 1)
           "an unknown suppression code must be an error" },
+    { name := "a package lint set fires only when the consumer enables it", run := fun _ => do
+        let set ← match ← loadSet "Lints.wiz" with
+          | Except.ok s => pure s
+          | Except.error e => throw (IO.userError s!"the good fixture package lint set was refused: {e}")
+        check (set.name == "fixture") s!"unexpected set name: {set.name}"
+        check (set.rules.toList.map (·.code) == ["W501"]) s!"unexpected rules: {set.rules.toList.map (·.code)}"
+        let src := "import Prelude\ndef rawThing : Nat := 1\n"
+        let on ← lintWith "Tests/fixtures/lint-pkg/target.wiz" src
+          (sets := #[set]) (enabled := ["fixture"])
+        noErrors on
+        checkEq ["W501"] (codes on)
+        check ((on.messages.find? (·.code == "W501")).map (·.text) == some "a raw declaration")
+          "the package rule's text did not survive the view round-trip"
+        let off ← lintWith "Tests/fixtures/lint-pkg/target.wiz" src (sets := #[set]) (enabled := [])
+        checkEq [] (codes off) },
+    { name := "a package rule with an undeclared capability is refused", run := fun _ => do
+        match ← loadSet "BadCapability.wiz" with
+        | Except.ok _ => throw (IO.userError "a set whose rule needs an undeclared capability was accepted")
+        | Except.error e =>
+          check ((e.splitOn "spans").length > 1) s!"the refusal does not name the capability: {e}" },
+    { name := "a package rule whose closure reaches a trust source is refused", run := fun _ => do
+        match ← loadSet "BadTrust.wiz" with
+        | Except.ok _ => throw (IO.userError "a set whose rule reaches an axiom was accepted")
+        | Except.error e =>
+          check ((e.splitOn "trust").length > 1 || (e.splitOn "trustMe").length > 1)
+            s!"the refusal does not name the trust source: {e}" },
+    { name := "wiz lint --package-lint --set runs the package rule", run := fun _ => do
+        let (code, out, err) ← runWiz
+          ["lint", "Tests/fixtures/lint-pkg/target.wiz",
+           "--package-lint", "Tests/fixtures/lint-pkg/Lints.wiz", "--set", "fixture"]
+        checkEq 0 code
+        check (err.isEmpty) s!"unexpected stderr: {err}"
+        check ((out.splitOn "[W501]").length > 1) s!"the package rule did not fire: {out}"
+        let (code2, out2, _) ← runWiz
+          ["lint", "Tests/fixtures/lint-pkg/target.wiz",
+           "--package-lint", "Tests/fixtures/lint-pkg/Lints.wiz"]
+        checkEq 0 code2
+        check ((out2.splitOn "[W501]").length == 1) s!"the package rule ran without --set: {out2}" },
     { name := "wiz lint --json carries the W code and the warning severity", run := fun _ => do
         let (code, out, err) ← runWiz ["lint", "Tests/fixtures/lint/w101.wiz", "--json"]
         checkEq 0 code

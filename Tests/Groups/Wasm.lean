@@ -248,6 +248,31 @@ def wasmGroup : Group where
   exercise := "Stage 8f"
   parallel := true
   cases := [
+    { name := "a function with no type entry is a compile error naming it", run := fun _ => do
+        -- the emitter indexes the type table by signature and used to fall back to
+        -- type 0, giving the function a different signature
+        let b : Wasm.Built :=
+          { types := Wasm.hostSigs.map (·.2),
+            funcs := #[{ name := "f", params := #[.i64], results := #[.i64] }],
+            tableSize := 0, heapStart := 16, data := #[], entry := 0 }
+        match Wasm.moduleBytes b with
+        | .ok _ => throw (IO.userError "a module with no type for its function was emitted")
+        | .error e =>
+          unless (e.splitOn "`f`").length > 1 do throw (IO.userError e) },
+    { name := "an entry outside the function table is a compile error", run := fun _ => do
+        let types := (Wasm.hostSigs.map (·.2)).push { params := #[], results := #[.i64] }
+        let b : Wasm.Built :=
+          { types := types, funcs := #[{ name := "f" }], tableSize := 0, heapStart := 16,
+            data := #[], entry := 1 }
+        match Wasm.moduleBytes b with
+        | .ok _ => throw (IO.userError "a module whose entry index is past its functions was emitted")
+        | .error e =>
+          unless (e.splitOn "entry").length > 1 do throw (IO.userError e) },
+    { name := "the type and runtime lookups are total", run := fun _ => do
+        check (Wasm.runtimeSig? "wiz_nat_add").isSome "a runtime function has a signature"
+        check (Wasm.runtimeSig? "wiz_no_such_function").isNone "an unknown runtime function has no signature"
+        check (Wasm.typeIndex? #[{ params := #[.i64], results := #[.i64] }]
+          { params := #[.i32], results := #[.i32] }).isNone "an unknown signature has no type index" },
     { name := "arithmetic (the interpreter is the oracle)", run := fun _ =>
         wasmGolden "import Prelude\ndef fact : Nat → Nat\n  | .zero => 1\n  | .succ n => (.succ n) * fact n\ndef main : Nat := fact 12 + 7 * 9 - (Nat.pred 0)" },
     { name := "arithmetic at every size (small and BigInt)", run := fun _ =>
@@ -415,6 +440,28 @@ def wasmGroup : Group where
           match ← Build.runWasmGlobal s "main" dir with
           | .error e => throw (IO.userError e)
           | .ok v => checkEq "42" v },
+    { name := "wiz run --target wasm finds the host beside the toolchain's lib/, not in the CWD (F12)", run := fun _ => do
+        -- an installed toolchain has `share/wiz/web/wasm-host.mjs` beside `share/wiz/lib`
+        let host ← Build.wasmHostPath
+        check (host.toString.endsWith "web/wasm-host.mjs") s!"unexpected host path: {host}"
+        unless ← host.pathExists do skip "no web/wasm-host.mjs"; return
+        unless ← nodeAvailable do skip "no node"; return
+        let tc ← toolchain
+        let dir ← IO.FS.createTempDir
+        try
+          let src := dir / "wasm.wiz"
+          IO.FS.writeFile src "import Prelude\ndef main : Nat := 6 * 7\n"
+          let exe ← IO.FS.realPath ((← IO.appPath).parent.getD "." / "wiz")
+          -- an empty CWD has no `web/`: the old lookup was relative to the CWD and failed
+          let out ← IO.Process.output
+            { cmd := exe.toString,
+              args := (tc.toFlags ++ ["run", src.toString, "--target", "wasm"]).toArray,
+              cwd := dir }
+          if out.exitCode != 0 then
+            throw (IO.userError s!"wiz run --target wasm from another directory failed ({out.exitCode}):\n{out.stdout}\n{out.stderr}")
+          check ((out.stdout.splitOn "42").length > 1) s!"no result:\n{out.stdout}"
+        finally
+          IO.FS.removeDirAll dir },
     { name := "--lib and --no-main are refused for the Wasm target", run := fun _ => do
         let s := runFrontend (R := ZeroOneMany) "import Prelude\ndef main : Nat := 1"
           { loader := ← libLoader, trustedModule := Tests.libModule }

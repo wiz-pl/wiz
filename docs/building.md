@@ -57,7 +57,7 @@ printing the case's name and result, a failure's output, and a last line
 plain `lake build` does not, and a stale driver runs whichever case had that index.
 
 **The trust ledger.** `scripts/trust-ledger.sh` walks every declaration of `lib/` (and
-`examples/hdl-verified.wiz`, which must stay axiom-free), runs `#print axioms`, and
+`hdl/examples/hdl-verified.wiz`, which must stay axiom-free), runs `#print axioms`, and
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
@@ -642,7 +642,7 @@ python3 scripts/mem-bench.py --from-json bench/mem-bench.json --check  # re-chec
 | `check-std` | `wiz check --no-cache lib/Std.wiz` | 1 GiB |
 | `check-text` | `wiz check --no-cache lib/Text.wiz` | 1 GiB |
 | `check-json` | `wiz check --no-cache lib/Json.wiz` | 1 GiB |
-| `check-example-hdl` | `wiz check --no-cache examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
+| `check-example-hdl` | `wiz check --no-cache -I hdl/src hdl/examples/hdl-temporal.wiz` (a large temporal-properties example) | 2 GiB |
 | `build-stdlib-bench` | `wiz build --no-cache bench/stdlib-bench.wiz -o bench-out/stdlib-bench` (elaborate, lower, C, `cc`) | 2 GiB |
 | `selfhost-checker` | the self-hosted checker checking the whole frontend | 1 GiB |
 
@@ -721,6 +721,168 @@ can be checked against each night's number. The build is not gated. The job's Ni
 step only substitutes (`--max-jobs 0`): `wiz` comes from the timing job's build on
 the same runner or from Cachix, and a Lean compile never runs under this budget.
 `--phases` (about 6 GiB, the in-process checker build) is not part of the nightly.
+## Build attestations
+
+`wiz build --attest [FILE]` writes an unsigned in-toto statement (a DSSE-style envelope
+with an empty `signatures` array) about the build: the source file and Git commit/dirty
+flag, the SHA-256 of every input (the file, imported modules by name, `link_c` files), the
+`wiz`/`cc`/`llc` identities, the compiler flags, and the output binary's and generated
+C's hashes. The default path is `OUT.attest.json`.
+
+```sh
+wiz build hello.wiz -o hello --attest
+wiz verify hello                    # reads hello.attest.json; 0 = match
+wiz verify --attest hello.attest.json hello
+wiz verify --artifact-only hello    # artifact only: the sources need not be present
+```
+
+`wiz verify` re-hashes the artifact, the recorded inputs (pass the same `-I` roots; a
+module is looked up by name) and the manifest root, and exits 1 on any mismatch. It does
+not check a signature: a non-empty `signatures` array is an error, so an unsigned
+verifier never accepts a "signed" claim it cannot check. An unsigned statement proves
+integrity relative to the statement, not that its author was honest — signing and
+independent rebuilds are the next steps (`wiz-notes/build-attest.md`). Absolute paths
+appear for toolchain binaries and for inputs outside the invocation directory; no
+environment variables or timestamps are recorded. `grail build --attest DIR` writes one
+statement per executable.
+## Reproducible source tarball
+
+`nix build .#release-tarball` (the same derivation as `.#source-tarball`) writes a
+deterministic source tarball and its manifest; `scripts/source-tarball.py` does the same
+for any checkout:
+
+```sh
+nix build .#release-tarball          # result/ holds the four files below
+python3 scripts/source-tarball.py --out dist --mode git
+scripts/test-source-tarball.sh       # the check CI runs
+```
+
+The output is
+
+```
+wiz-<version>-src.tar.gz                 the source tree under one wiz-<version>/ directory
+wiz-<version>-src.tar.gz.manifest.json   canonical JSON: every path, size and SHA-256
+wiz-<version>-src.tar.gz.sha256          the tarball's sha256sum line
+wiz-<version>-src.tar.gz.cdx.json        CycloneDX 1.6 SBOM for the source tree
+```
+
+The manifest's `sbom` object records the SBOM's file name, SHA-256 and component count.
+The SBOM lists every source file as a component (path, size, mode, SHA-256), plus the
+external inputs and build tools: the five `scripts/bundle-cc.sources` downloads with
+their licence expressions, the locked Nix inputs in `flake.lock`, `lean-toolchain`, the
+release workflow's actions and runner, and Emscripten when the workflow builds the web
+infoview. It contains no timestamps or absolute paths, so it is byte-identical for the
+same tree.
+
+`<version>` is `Wiz/Version.lean`'s version (`0.1.0-dev` today). The tar entries are
+sorted, every mtime is the source date epoch, uid/gid are 0 with empty uname/gname,
+files are 0644 (0755 when executable) and directories 0755, and the gzip header carries
+the epoch and no file name. `SOURCE_DATE_EPOCH` is honoured; without it the commit time
+is used (0 outside a git checkout), and the Nix target passes the flake's commit time.
+In git mode (`--mode git`, the default in a checkout) the file list is `git ls-files`,
+so an untracked scratch file or build output cannot leak in; in tree mode (`--mode
+tree`, what Nix uses) every regular file under the root is taken, and the exclusions
+below apply. Symlinks are rejected.
+
+**Included**: all tracked files, except the exclusions below — the Lean sources
+(`Wiz/`, `WizMeta/`, `Grail/`, `*.lean`), the runtime (`runtime/`), the C support code
+(`c/`), the standard library (`lib/`), the self-hosted toolchain (`selfhost/`), grail
+and tower (`tower/`), the editors (`editors/`), the infoview and web sources
+(`infoview/`, `web/`), tests and examples (`Tests/`, `examples/`), `docs/`, `scripts/`,
+the build files (`lakefile.lean`, `lake-manifest.json`, `lean-toolchain`, `flake.nix`,
+`flake.lock`, `devenv.*`, `grail.wiz`), CI (`.github/`) and the licence and prose files
+(`LICENSE`, `COPYING.RUNTIME`, `README.md`, `CHANGELOG.md`, `ROADMAP.md`).
+
+**Excluded**: VCS and tool state (`.git/`, `.lake/`, `.grail/`, `.wiz-cache/`,
+`.devenv*`, `.direnv/`), caches and package directories (`__pycache__/`, `node_modules/`),
+build outputs (`dist/`, `web/out/`, `cc-bundle/`, `bundle-downloads/`, `*.olean`,
+`*.ilean`, `*.o`, `*.a`, `*.so`, …), the developer's local files (`grail.local.wiz`,
+`wiz-toolchain.local`, `Tests/Groups.lean`), and `drafts/` (wishful code the release
+does not build). The manifest lists the exact set, so a reviewer need not trust this
+paragraph.
+
+The manifest is canonical JSON: sorted keys, compact separators (`,` and `:`), no
+trailing newline, so its bytes depend only on its content (`schema:
+wiz-source-tarball/v1`). Shown formatted; the file is one line:
+
+```json
+{
+  "files": [{ "mode": "0644", "path": "LICENSE", "sha256": "…", "size": 35140 }, …],
+  "name": "wiz-0.1.0-dev",
+  "version": "0.1.0-dev",
+  "revision": "<40-hex commit, or unknown; a dirty checkout ends -dirty>",
+  "schema": "wiz-source-tarball/v1",
+  "sourceDateEpoch": 1700000000,
+  "sbom": { "components": 764, "file": "wiz-0.1.0-dev-src.tar.gz.cdx.json",
+            "schema": "CycloneDX-1.6", "sha256": "…" },
+  "tarball": { "file": "wiz-0.1.0-dev-src.tar.gz", "sha256": "…", "size": 1234567 },
+  "tree": { "bytes": 8700000, "files": 580, "sha256": "…" }
+}
+```
+
+`tree.sha256` is the SHA-256 of the sorted lines `<file sha256>  <path>\n` over
+`files`; it is a content root, independent of the epoch, modes and compression. The
+tarball digest in `tarball.sha256` is the artifact's subject digest; an attestation
+(the E1 verifier sketched in `wiz-notes/attested-enclave-builds.md`) binds a TPM quote
+to the manifest by using the manifest's SHA-256 as the quote's `extraData`, and checks
+the file list and tree root against the tarball it was given. Nothing in the manifest is
+signed yet.
+
+**What is reproducible.** The source tarball is byte-identical for a commit across
+directories, caches, umask, `TZ`, `LANG`, `HOME` and `SOURCE_DATE_EPOCH` (when the
+epoch is the same): `scripts/test-source-tarball.sh` builds it twice in different
+directories with different environments and compares with `cmp` and `sha256sum`, and CI
+runs that check. `nix build .#release-tarball --rebuild` rebuilds the derivation in a
+different build directory and compares the output. Changing `SOURCE_DATE_EPOCH`
+changes the mtime headers and the gzip stream, hence the tarball's SHA-256, but not the
+per-file hashes or `tree.sha256`. The gzip stream also depends on the zlib version that
+wrote it; the tar content and the tree root do not.
+
+Generated C is already reproducible (same C for the same program across paths, caches,
+environments and even architectures); binaries are reproducible with the same compiler
+but differ across C compilers and architectures, so a cross-build's *binary* digest is
+not comparable. The binary release tarball (`scripts/release-tarball.sh`, what tower
+installs) is not yet deterministic: it copies build outputs and adds files in checkout
+order, so its digest can differ between builds of one commit.
+
+## Release SBOM and provenance
+
+`scripts/release-sbom.py` takes the source tarball, its canonical manifest (and the
+source SBOM recorded in it) and the binary tarball, and writes:
+
+```
+wiz-<arch>-linux.tar.gz.cdx.json   CycloneDX 1.6 for the binary tarball
+provenance.intoto.json             in-toto Statement v1, SLSA provenance v1 predicate
+```
+
+The binary SBOM lists every file in the tarball with its size, mode and SHA-256; the
+bundled C toolchain's `cc/VERSIONS` is recorded, along with the `scripts/bundle-cc.sources`
+inputs, the `flake.lock` Nix inputs, `lean-toolchain`, and the release workflow's actions,
+runner and Emscripten version. Both SBOMs name their licences (Wiz's GPL-3.0-or-later
+with the runtime exception, and the third-party expressions from the NOTICE); the
+runtime exception is recorded as a property because it is not an SPDX-registered
+exception.
+
+The provenance's `subject` is the source tarball, source manifest, source SBOM, binary
+tarball and binary SBOM, each with its SHA-256. Its predicate records the builder id
+(the release workflow and ref), commit, source date epoch, channel, the source tree
+digest, the Lean toolchain hash, the locked Nix inputs and the bundled C inputs. It is a
+**SLSA-style** statement: an in-toto Statement v1 with the SLSA provenance v1 predicate,
+not a hosted SLSA build, and **no SLSA level is claimed** (`wiz:slsaLevelClaimed` is
+null). Signing is optional and uses the E1 offline Ed25519 path
+(`scripts/attest/wiz-attest keygen|sign`): with `--sign-key` the statement is written as
+a DSSE envelope (`provenance.intoto.json.dsse`) plus a detached SSHSIG; without a key it
+is an unsigned claim. The release workflow reads the key material from the
+`WIZ_ATTEST_KEY` secret on pushes and tags, skips signing on pull requests, and skips
+it when the secret is absent.
+
+`python3 scripts/test_release_sbom.py -v` builds a tiny source tree and a fake binary
+tarball and checks that both SBOMs parse, every component digest matches the archive,
+the manifest and provenance digests agree, two runs are byte-identical, a tampered SBOM
+is rejected, and the optional signature verifies. CI runs it in the `source-tarball`
+job, and `release.yml` runs it before generating the assets. A Nix closure can be added
+with `--nix-closure-json` (`nix path-info --json --recursive`); the GitHub release
+tarball is built outside Nix, so only the locked inputs are recorded there.
 
 ## Continuous integration
 
@@ -871,6 +1033,13 @@ setup action keeps the elan cache for those
   `CI result` requires the job when `changes` selects it. The Chromium half
   (`web/chrome_test.mjs` and `web/doc_chrome_test.mjs`: a served page over the DevTools
   protocol) needs a browser and stays local.
+* **Source tarball and supply chain** (the `source-tarball` job):
+  `scripts/test-source-tarball.sh` builds the release source tarball twice in
+  different directories and environments, compares the archives, manifests and
+  source SBOM, and checks the exclusions; `scripts/test_release_sbom.py` checks
+  that the source and binary SBOMs and the provenance parse, match every archive
+  digest and are byte-identical on a second run. The `build` job also runs
+  `nix build .#release-tarball --rebuild` ("Reproducible source tarball").
 * **Trust ledger** (a step in the `build` job, before any shard):
   `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the

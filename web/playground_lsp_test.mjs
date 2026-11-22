@@ -158,6 +158,35 @@ check("token: withoutToken keeps the rest", withoutToken("ws://h:1/?a=1&token=t"
   check("adapter: null is sent as null", asked[1][0] === "wiz_loom_hover_target" && asked[1][1] === "null", true);
 }
 
+// ## 1c. The runtime adapter: the completion popup's rules are the runtime's questions
+
+{
+  const asked = [];
+  const ask = (name, ...args) => {
+    asked.push([name, ...args]);
+    if (name === "wiz_loom_editor_key") return JSON.stringify({ action: "move", index: 1 });
+    if (name === "wiz_loom_editor_items") return JSON.stringify([{ label: "Nat.add" }]);
+    if (name === "wiz_loom_editor_popup") {
+      return JSON.stringify({
+        items: [{ label: "Nat.add" }], index: 0, prefixStart: 9, prefixWord: "Nat.a",
+      });
+    }
+    return "{}";
+  };
+  const index = createIndexer(ask);
+  check("adapter: a key command is the runtime's",
+    JSON.stringify(index.key("ArrowDown", 0, 3)),
+    JSON.stringify({ action: "move", index: 1 }));
+  check("adapter: the key query carries the key and the popup state",
+    asked[0][0] === "wiz_loom_editor_key" && asked[0].slice(1).join("|") === "ArrowDown|0|3", true);
+  check("adapter: the result's items are the runtime's",
+    JSON.stringify(index.items({ items: [{ label: "Nat.add" }] })),
+    JSON.stringify([{ label: "Nat.add" }]));
+  check("adapter: the popup state is the runtime's",
+    JSON.stringify(index.popup("Nat.a", 14, [{ label: "Nat.add" }], 0)),
+    JSON.stringify({ items: [{ label: "Nat.add" }], index: 0, prefixStart: 9, prefixWord: "Nat.a" }));
+}
+
 // ## 2. The RFC 6455 frames (the mock server and the test client share them)
 
 check("handshake: the RFC example key", acceptKey("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");

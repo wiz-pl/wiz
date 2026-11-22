@@ -23,6 +23,162 @@ namespace Wiz.IR
 abbrev Var := Nat
 abbrev JoinId := Nat
 
+/-- The typed key of an IR primitive. `extern` carries the whole foreign-function key
+(`extern:cname:kinds:result:io:header:finalizer`), because a program registers its own
+foreign functions. Every other operation is a constructor, so a backend's dispatch is an
+exhaustive match rather than a string comparison. -/
+inductive PrimOp where
+  | natZero | natSucc | natPred | natAdd | natSub | natMul | natBeq | natBlt
+  | natDiv | natMod | natPow | natLand | natLor | natXor | natShiftLeft | natShiftRight
+  | natLog2
+  | memo
+  | lazyTag | lazySet
+  | tag | natTag | fieldAt | mkObj
+  | dropMoved
+  /-- a registered foreign function: the key is the `extern:` key itself -/
+  | extern (key : Name)
+  deriving Repr, BEq, Inhabited
+
+/-- Which code generator a primitive table belongs to. -/
+inductive Backend where
+  | c
+  | llvm
+  | wasm
+  deriving Repr, BEq, Inhabited
+
+/-- One entry of a backend's primitive table: the typed key, the backend, the number of
+run-time arguments and whether the operation borrows them, and the runtime function that
+lowers it. The table is the single source of truth for the backend's dispatch; an
+operation absent from it is a compile-time error, not a `wiz_unknown_prim` call. -/
+structure PrimEntry where
+  /-- the external key (what the IR prints and the caches used to see) -/
+  key : Name
+  prim : PrimOp
+  backend : Backend
+  arity : Nat
+  borrows : Bool
+  symbol : String
+  deriving Repr, Inhabited
+
+namespace PrimOp
+
+/-- The external name of a primitive (the same text the IR used to carry). -/
+def key : PrimOp → Name
+  | .natZero => "nat.zero"
+  | .natSucc => "nat.succ"
+  | .natPred => "nat.pred"
+  | .natAdd => "nat.add"
+  | .natSub => "nat.sub"
+  | .natMul => "nat.mul"
+  | .natBeq => "nat.beq"
+  | .natBlt => "nat.blt"
+  | .natDiv => "nat.div"
+  | .natMod => "nat.mod"
+  | .natPow => "nat.pow"
+  | .natLand => "nat.land"
+  | .natLor => "nat.lor"
+  | .natXor => "nat.xor"
+  | .natShiftLeft => "nat.shiftLeft"
+  | .natShiftRight => "nat.shiftRight"
+  | .natLog2 => "nat.log2"
+  | .memo => "memo"
+  | .lazyTag => "lazyTag"
+  | .lazySet => "lazySet"
+  | .tag => "tag"
+  | .natTag => "natTag"
+  | .fieldAt => "fieldAt"
+  | .mkObj => "mkObj"
+  | .dropMoved => "dropMoved"
+  | .extern k => k
+
+/-- The closed primitives, by their external name. Foreign functions are not here: the
+caller parses the `extern:` key (it needs the signature) and builds `.extern`. -/
+def ofKey? : Name → Option PrimOp
+  | "nat.zero" => some .natZero
+  | "nat.succ" => some .natSucc
+  | "nat.pred" => some .natPred
+  | "nat.add" => some .natAdd
+  | "nat.sub" => some .natSub
+  | "nat.mul" => some .natMul
+  | "nat.beq" => some .natBeq
+  | "nat.blt" => some .natBlt
+  | "nat.div" => some .natDiv
+  | "nat.mod" => some .natMod
+  | "nat.pow" => some .natPow
+  | "nat.land" => some .natLand
+  | "nat.lor" => some .natLor
+  | "nat.xor" => some .natXor
+  | "nat.shiftLeft" => some .natShiftLeft
+  | "nat.shiftRight" => some .natShiftRight
+  | "nat.log2" => some .natLog2
+  | "memo" => some .memo
+  | "lazyTag" => some .lazyTag
+  | "lazySet" => some .lazySet
+  | "tag" => some .tag
+  | "natTag" => some .natTag
+  | "fieldAt" => some .fieldAt
+  | "mkObj" => some .mkObj
+  | "dropMoved" => some .dropMoved
+  | _ => none
+
+/-- Is this one of the native number operations (`nat.…`)? -/
+def isNat : PrimOp → Bool
+  | .natZero | .natSucc | .natPred | .natAdd | .natSub | .natMul | .natBeq | .natBlt
+  | .natDiv | .natMod | .natPow | .natLand | .natLor | .natXor | .natShiftLeft
+  | .natShiftRight | .natLog2 => true
+  | _ => false
+
+/-- The number of run-time arguments of a closed primitive. (An `extern`'s arity comes
+from its signature: `RVal.nativeArity`, which also counts the `IO` world.) -/
+def arity : PrimOp → Nat
+  | .natZero => 0
+  | .natSucc | .natPred | .natLog2 | .lazyTag | .tag | .natTag => 1
+  | .extern _ => 2
+  | _ => 2
+
+/-- Operations that only inspect their arguments: they borrow, so the caller keeps its
+references. This used to be a name list in `IR.lean`; it is now metadata of the table. -/
+def borrows : PrimOp → Bool
+  | .natBeq | .natBlt | .tag | .natTag => true
+  | _ => false
+
+/-- A C identifier for a Wiz name: letters and digits stay, anything else is `_xx`. -/
+def mangle (n : Name) : String :=
+  "w_" ++ String.join (n.toList.map fun c =>
+    if c.isAlphanum then c.toString
+    else "_" ++ (Nat.toDigits 16 c.toNat).asString ++ "_")
+
+/-- The C wrapper of a foreign function. -/
+def externWrapper (key : Name) : String := "wiz_ext" ++ (mangle key).drop 1
+
+/-- The runtime symbols of the closed primitives (all backends call the same runtime).
+`nat.zero` is absent: it lowers to the literal `0`, never to a call. -/
+def runtimeSymbols : List (PrimOp × String) :=
+  [ (.natSucc, "wiz_nat_succ"), (.natPred, "wiz_nat_pred"),
+    (.natAdd, "wiz_nat_add"), (.natSub, "wiz_nat_sub"), (.natMul, "wiz_nat_mul"),
+    (.natBeq, "wiz_nat_beq"), (.natBlt, "wiz_nat_blt"),
+    (.natDiv, "wiz_nat_div"), (.natMod, "wiz_nat_mod"), (.natPow, "wiz_nat_pow"),
+    (.natLand, "wiz_nat_land"), (.natLor, "wiz_nat_lor"), (.natXor, "wiz_nat_xor"),
+    (.natShiftLeft, "wiz_nat_shiftLeft"), (.natShiftRight, "wiz_nat_shiftRight"),
+    (.natLog2, "wiz_nat_log2"),
+    (.memo, "wiz_memo"), (.lazyTag, "wiz_lazy_tag"), (.lazySet, "wiz_lazy_set"),
+    (.tag, "wiz_tag_of"), (.natTag, "wiz_nat_tag"), (.fieldAt, "wiz_field_at"),
+    (.mkObj, "wiz_mk_obj"), (.dropMoved, "wiz_drop_moved") ]
+
+/-- A backend's table: one entry per closed primitive, stamped with the backend. -/
+def table (backend : Backend) : List PrimEntry :=
+  runtimeSymbols.map fun (p, symbol) =>
+    { key := p.key, prim := p, backend, arity := p.arity, borrows := p.borrows, symbol }
+
+/-- The lowering of `p` in `backend`, from that backend's checked table. `none` means
+the backend must report an error: it never emits a `wiz_unknown_prim` call. -/
+def symbol? (backend : Backend) (p : PrimOp) : Option String :=
+  match p with
+  | .extern key => some (externWrapper key)
+  | _ => (table backend).find? (fun e => e.prim == p) |>.map (·.symbol)
+
+end PrimOp
+
 inductive Expr where
   /-- `◾`, a scalar -/
   | erased
@@ -38,8 +194,8 @@ inductive Expr where
   | pap (f : Name) (args : Array Var)
   /-- apply a closure -/
   | ap (f : Var) (args : Array Var)
-  /-- a runtime operation: `nat.add` …, `lazyTag` -/
-  | prim (op : Name) (args : Array Var)
+  /-- a runtime operation, a checked key of the backend's primitive table -/
+  | prim (op : PrimOp) (args : Array Var)
   /-- (8c) drop `x`, but if it was unique keep its memory as a *reuse token* -/
   | reset (x : Var)
   /-- (8c) `ctor tag args`, in the token's memory if it has the right size -/
@@ -74,8 +230,8 @@ namespace Expr
 parameter, so the caller keeps its references (a key compared during a lookup, or the
 scrutinee of a `match`, is neither incremented nor decremented). Every other native
 operation consumes its arguments. -/
-def primBorrows (op : Name) : Bool :=
-  op == "nat.beq" || op == "nat.blt" || op == "tag" || op == "natTag"
+def primBorrows (op : PrimOp) : Bool :=
+  op.borrows
 
 def args : Expr → Array Var
   | ctor _ as | fap _ as | pap _ as | prim _ as => as
@@ -92,7 +248,7 @@ def toString : Expr → String
   | fap f as => s!"{f} {vs as}"
   | pap f as => s!"pap {f} {vs as}"
   | ap f as => s!"ap x{f} {vs as}"
-  | prim op as => s!"prim {op} {vs as}"
+  | prim op as => s!"prim {op.key} {vs as}"
   | reset x => s!"reset x{x}"
   | reuse tok t as => s!"reuse x{tok} in ctor {t} {vs as}"
 where

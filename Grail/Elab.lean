@@ -120,8 +120,10 @@ def hasErrors (s : CommandState ZeroOneMany) : Bool := s.messages.any (·.severi
 /-- Evaluate the global `n : String` in the interpreter. -/
 def evalString (s : CommandState ZeroOneMany) (n : Name) : Except String String := do
   let code ← (compileReachable s.globals s.builtins [n]).mapError toString
-  match (run code [] (.global n)).toString? with
-  | some str => pure str
-  | none => throw s!"{n} did not evaluate to a string"
+  match run code [] (.global n) with
+  | .stuck m => throw s!"{n} did not evaluate: {m}"
+  | v => match v.toString? with
+    | some str => pure str
+    | none => throw s!"{n} did not evaluate to a string"
 
 end Grail

@@ -2,6 +2,7 @@ import Json
 import Optic
 import Tagged
 import Text
+import Web.Style
 /-!
 # Web.Loom
 
@@ -143,6 +144,24 @@ def Loom.raw {M : Type} (html : String) : Loom.VNode M := .raw html .nil
 /-- An element: a tag, attributes and children. -/
 def Loom.el {M : Type} (tag : String) (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
   .el tag "" attrs (Loom.ofList kids) .nil
+
+/-- A styled element: `classes` becomes exactly one sorted `class` attribute, which is
+the value an SSR page carries and a state change patches with one `setAttr "class"`.
+`attrs` must not contain another `class`; the view test rejects a second one (the
+generator cannot attach a diagnostic to a pure function). The declarations stay in the
+build-time `Style.Styled` values, so a view imports only keys. -/
+def Loom.styled {M : Type} (tag : String) (classes : List Style.Class)
+    (attrs : List Loom.Attr) (kids : List (Loom.VNode M)) : Loom.VNode M :=
+  Loom.el tag (List.append [Style.Class.attr classes] attrs) kids
+
+/-- The class attribute alone: the bridge for a caller that builds its own element. -/
+def Loom.classes (classes : List Style.Class) : List Loom.Attr :=
+  [Style.Class.attr classes]
+
+/-- The one class attribute's value (`""` for no classes), for a test or a patch. -/
+def Loom.classNames (classes : List Style.Class) : String :=
+  (Style.Class.attr classes).2
+
 /-- A keyed element: its key is matched across renders when its siblings are reordered
 (`Loom.diffChildren`). Only elements take keys; a key on anything else is ignored, and
 keys must be unique among their siblings (a duplicate is matched to the first). -/

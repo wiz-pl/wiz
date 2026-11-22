@@ -606,7 +606,7 @@ is a program, and its test (the first line, `-- test: run`) runs it.
 
 ## 10: hardware
 
-`lib/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
+`hdl/src/Hdl/Core.wiz` is a hardware description library: circuits are Wiz values,
 simulated by evaluation and turned into Verilog.
 
 ```wiz
@@ -650,7 +650,7 @@ The library also has bundles of named signals (`deriving Bundle`), reset and ena
 test benches, waveforms (VCD) and pin constraints, and the combinators come with
 lemmas (`Circuit.run_seq`: running `seq a b` is running `b` on the outputs of `a`). A
 UART for a Lattice iCEstick FPGA board is written in it.
-(`examples/tour/10-hdl.wiz`; `examples/hdl.wiz`, `examples/hdl-compose.wiz`;
+(`examples/tour/10-hdl.wiz`; `hdl/examples/hdl.wiz`, `hdl/examples/hdl-compose.wiz`;
 [libraries.md](libraries.md), H14.)
 
 ## 11: packages

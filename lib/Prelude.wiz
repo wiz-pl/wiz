@@ -396,7 +396,7 @@ macro_rules
 shifts `a <<< k`, `a >>> k` by a number of places `k : Nat` (Lean's take it at the
 operand's type; a fixed amount is what hardware shifts by wiring). Precedences as in
 Lean: `|||` 55, `^^^` 58, `&&&` 60 (below `+`), shifts 75, `~~~` max. Instances: `Nat`
-here, words in lib/Word.wiz, HDL signals in lib/Hdl/Core.wiz. -/
+here, words in lib/Word.wiz, HDL signals in hdl/src/Hdl/Core.wiz. -/
 class AndOp (A : Type) where
   and : A → A → A
 /-- Types with bitwise or, written `a ||| b`. -/
@@ -475,7 +475,7 @@ app_unexpander Bool.casesOn
   | `(term| $f $m $b Bool.true $a) => `(term| $a || $b)
   | `(term| $f $m $e $t $c) => `(term| if $c then $t else $e)
 /-- A condition that is a signal (H14 S2): when the type `C` of `c` is not a data type and
-has an instance `Mux C C` (an HDL signal, lib/Hdl/Core.wiz), `if c then a else b` is
+has an instance `Mux C C` (an HDL signal, hdl/src/Hdl/Core.wiz), `if c then a else b` is
 `Mux.mux c a b`, a multiplexer, at an instance `Mux C A` for the branches' type `A`.
 Any other condition is the `match` above (and its messages). -/
 class Mux (C A : Type) where

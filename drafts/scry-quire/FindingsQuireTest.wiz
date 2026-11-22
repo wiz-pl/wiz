@@ -3,8 +3,8 @@ import Word
 import Text
 import Json
 import Scry.Workflow
-import Storage
-import Durable
+import Scry.QuireStorage
+import Scry.QuireDurable
 import FindingsQuire
 /-!
 # The `scry findings` store on Quire: a runnable prototype

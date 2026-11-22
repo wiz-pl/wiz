@@ -300,6 +300,9 @@ def importDescr : ParserDescr := node "command.import" (seqs ["import", ident])
 `command.open`'s `ident` cannot match it, and the node never reaches the elaborator. -/
 def openImportDescr : ParserDescr := node "command.openImport" (seqs [nonReserved "open", "import", ident])
 
+/-- `[decl, spans]`: the capability list of a package lint set or rule. -/
+def lintCaps : ParserDescr := node "lint.caps" (seqs ["[", sepBy ident ",", "]"])
+
 /-- Commands. Each command is parsed inside `withPosition`, so an application can't
 continue onto a line starting at the command's column.
 
@@ -403,6 +406,14 @@ def commandLeading : List LeadingParser := [
   -- stage 9g: a C symbol for a Wiz function
   { kind := "command.export", prec := maxPrec,
     p := seqs ["export", str, ident, optional (seqs [":", term])] },
+  -- (P1) a package lint set: its header, and one `lint` per rule. `lint` is
+  -- `nonReserved`, so a program can still use it as a name; these are commands only at
+  -- the start of a line. The runner is a pure `String → String` (the stable
+  -- `Lint.Command` view in, findings out); see `docs/lint-abi.md`.
+  { kind := "command.lintSet", prec := maxPrec,
+    p := seqs ["lint-set", str, str, lintCaps] },
+  { kind := "command.lint", prec := maxPrec,
+    p := seqs [nonReserved "lint", ident, str, ident, ident, ident, lintCaps, ident] },
   { kind := "command.attrMacro", prec := maxPrec,
     p := seqs ["attribute", "[", nonReserved "macro", ident, "]", ident] },
   { kind := "command.attrTactic", prec := maxPrec,

@@ -4,6 +4,7 @@ import Functor
 import Json
 import Scry.Project
 import Scry.ProjectCache
+import Scry.QuireFindings
 import Scry.ProjectTaint
 import Scry.Preproc
 import Scry.Native
@@ -448,7 +449,7 @@ def Scry.ProjectIO.usage (query : Bool) : String :=
   match query with
   | .true => "usage: scry project query DIR --rel NAME | --func NAME"
   | .false =>
-    "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
+    "usage: scry project DIR [--compdb FILE] [--cc CMD] [--allow-errors] [--facts OUT] [--taint] [--rules FILE] [--json] [--sarif OUT] [--cache[=DIR]] [--cache-backend=json|quire] [--cache-stats] [--fail-on-finding] [--keep-system-headers] [--skip-broken]"
 
 /-- Parse the arguments after `project` (or `project query`): one positional directory
 and the flags above. `-I dir`, `-Idir`, `-D X=1`, `-DX=1` are all accepted and kept for
@@ -495,8 +496,14 @@ partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectO
         { opts with cache := { opts.cache with enabled := .true } } rest
     | "--cache-dir" => match rest with
       | .cons v r => Scry.parseProjectArgs target
-          { opts with cache := Scry.CacheOpts.mk .true v } r
+          { opts with cache := { opts.cache with enabled := .true, dir := v } } r
       | .nil => .error "--cache-dir needs a directory"
+    | "--cache-backend" => match rest with
+      | .cons v r => match Scry.CacheBackend.ofName v with
+        | .some b => Scry.parseProjectArgs target
+            { opts with cache := { opts.cache with backend := b } } r
+        | .none => .error "--cache-backend needs json or quire"
+      | .nil => .error "--cache-backend needs json or quire"
     | "-I" => match rest with
       | .cons v r => Scry.parseProjectArgs target (Scry.ProjectIO.addFlag opts "-I" v) r
       | .nil => .error "-I needs a directory"
@@ -511,21 +518,26 @@ partial def Scry.parseProjectArgs (target : Option String) (opts : Scry.ProjectO
       | .nil => .error "-include needs a file"
     | _ => match Bool.and (String.startsWith a "--cache=") (Nat.lt 8 (String.length a)) with
       | .true => Scry.parseProjectArgs target
-          { opts with cache := Scry.CacheOpts.mk .true (String.drop 8 a) } rest
-      | .false => match Bool.and (String.startsWith a "-I") (Nat.lt 2 (String.length a)) with
-        | .true => Scry.parseProjectArgs target
-            { opts with flags := List.append opts.flags [a] } rest
-        | .false => match Bool.and (String.startsWith a "-D") (Nat.lt 2 (String.length a)) with
+          { opts with cache := { opts.cache with enabled := .true, dir := String.drop 8 a } } rest
+      | .false => match Bool.and (String.startsWith a "--cache-backend=") (Nat.lt 16 (String.length a)) with
+        | .true => match Scry.CacheBackend.ofName (String.drop 16 a) with
+          | .some b => Scry.parseProjectArgs target
+              { opts with cache := { opts.cache with backend := b } } rest
+          | .none => .error "--cache-backend needs json or quire"
+        | .false => match Bool.and (String.startsWith a "-I") (Nat.lt 2 (String.length a)) with
           | .true => Scry.parseProjectArgs target
               { opts with flags := List.append opts.flags [a] } rest
-          | .false => match Bool.and (String.startsWith a "-U") (Nat.lt 2 (String.length a)) with
+          | .false => match Bool.and (String.startsWith a "-D") (Nat.lt 2 (String.length a)) with
             | .true => Scry.parseProjectArgs target
                 { opts with flags := List.append opts.flags [a] } rest
-            | .false => match String.startsWith a "-" with
-              | .true => .error ("unknown project option \"" ++ a ++ "\" (see scry help)")
-              | .false => match target with
-                | .none => Scry.parseProjectArgs (.some a) opts rest
-                | .some _ => .error "scry project takes one DIRECTORY"
+            | .false => match Bool.and (String.startsWith a "-U") (Nat.lt 2 (String.length a)) with
+              | .true => Scry.parseProjectArgs target
+                  { opts with flags := List.append opts.flags [a] } rest
+              | .false => match String.startsWith a "-" with
+                | .true => .error ("unknown project option \"" ++ a ++ "\" (see scry help)")
+                | .false => match target with
+                  | .none => Scry.parseProjectArgs (.some a) opts rest
+                  | .some _ => .error "scry project takes one DIRECTORY"
 
 /-- `scry project`'s output line helper (kept local: `Scry.Cli` imports this module). -/
 def Scry.ProjectIO.say (s : String) : EIO Unit := EIO.lift (IO.println s)
@@ -538,6 +550,11 @@ build/IO failure into exit 2 (usage/IO) or 3 (nothing analysed) instead of letti
 top level map every error to 1. -/
 def Scry.ProjectIO.attempt {A : Type} (x : EIO A) : EIO (Except String A) :=
   IO.bind x (fun r => IO.pure (.ok r))
+
+/-- The findings index's project id: a hash of the analysed translation-unit paths. An
+edit with the same paths keeps the id; the row fingerprint then turns it into a miss. -/
+def Scry.ProjectIO.projectIndexId (p : Scry.Project) : String :=
+  Scry.fiIdOf (String.intercalate "\u{0}" (List.map (fun u => u.path) p.units))
 
 /-- The exit status of a completed project report. `3` means nothing was analysed (no
 translation unit produced a function), so "no findings" is never confused with "did not
@@ -621,6 +638,11 @@ def Scry.ProjectIO.runArgs (query : Bool) (args : List String) : EIO Nat := do
             EIO.pure 2
           | .ok pack => do
             let rep := Scry.analyzeProject p pack r.2;
+            idx ← Scry.cacheFindings opts.cache (Scry.ProjectIO.projectIndexId p)
+              (Scry.rowsOfReport rep);
+            match opts.cacheStats with
+            | .true => Scry.ProjectIO.say (Scry.FindingsCacheStats.line idx)
+            | .false => EIO.pure ();
             Scry.ProjectIO.report opts rep
         | .false => do
           Scry.ProjectIO.say (Scry.Project.summary p);

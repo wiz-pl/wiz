@@ -1,16 +1,3 @@
-# The files one whole =selfhost-libdiff run compares: every *.wiz under lib/ and
-# scry/, sorted the way Tests/Groups/SelfhostLibDiff.lean's libDiffFiles sorts them.
-# `scripts/check-libdiff-corpus.sh` checks that this list is exactly that walk: every
-# entry is a file, every file is an entry, there are no duplicates, and the order is
-# `LC_ALL=C`. Add or remove a line here in the same change that adds or removes the
-# file under lib/ or scry/. Regenerate with:
-#
-#   find lib scry -name '*.wiz' | LC_ALL=C sort
-#
-# There are no exclusions. The sweep compares acceptance, the first error's code, span
-# and message, and the declaration count; a file the self-hosted frontend cannot parse
-# is a divergence to report, not a reason to drop it from the corpus. A module that
-# genuinely cannot be compared needs its reason here, next to its absence, not silence.
 lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
@@ -43,38 +30,6 @@ lib/Functor.wiz
 lib/Grail.wiz
 lib/HProp.wiz
 lib/Handle.wiz
-lib/Hdl/Apb.wiz
-lib/Hdl/Arty.wiz
-lib/Hdl/Axi4.wiz
-lib/Hdl/Axi4Law.wiz
-lib/Hdl/AxiLite.wiz
-lib/Hdl/AxiStream.wiz
-lib/Hdl/AxiStreamLaw.wiz
-lib/Hdl/Bits.wiz
-lib/Hdl/Bus.wiz
-lib/Hdl/BusLaw.wiz
-lib/Hdl/Cdc.wiz
-lib/Hdl/Core.wiz
-lib/Hdl/Crc.wiz
-lib/Hdl/Ddr.wiz
-lib/Hdl/Display.wiz
-lib/Hdl/Formal.wiz
-lib/Hdl/Mem.wiz
-lib/Hdl/Netlist.wiz
-lib/Hdl/Optic.wiz
-lib/Hdl/Pipe.wiz
-lib/Hdl/Prim.wiz
-lib/Hdl/ProtocolLaw.wiz
-lib/Hdl/Signal.wiz
-lib/Hdl/Sim.wiz
-lib/Hdl/Spi.wiz
-lib/Hdl/SpiLaw.wiz
-lib/Hdl/Temporal.wiz
-lib/Hdl/Uart.wiz
-lib/Hdl/Verified.wiz
-lib/Hdl/Wishbone.wiz
-lib/Hdl/Xdc.wiz
-lib/Hdl/Xilinx7.wiz
 lib/HeapBorrow.wiz
 lib/Hoare.wiz
 lib/HoareExamples.wiz
@@ -101,6 +56,15 @@ lib/RingTactic.wiz
 lib/Sat.wiz
 lib/SatTactic.wiz
 lib/Scope.wiz
+lib/Scry/Quire.wiz
+lib/Scry/QuireCompact.wiz
+lib/Scry/QuireCore.wiz
+lib/Scry/QuireCursor.wiz
+lib/Scry/QuireDurable.wiz
+lib/Scry/QuireFindings.wiz
+lib/Scry/QuireMmap.wiz
+lib/Scry/QuireRegistry.wiz
+lib/Scry/QuireStorage.wiz
 lib/Serial.wiz
 lib/Session.wiz
 lib/Sha.wiz
@@ -125,6 +89,7 @@ lib/Web/Loom.wiz
 lib/Web/Playground.wiz
 lib/Web/Search.wiz
 lib/Web/Selfhost.wiz
+lib/Web/Style.wiz
 lib/Web/Widget.wiz
 lib/Web/Wire.wiz
 lib/Word.wiz

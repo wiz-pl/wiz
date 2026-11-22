@@ -56,6 +56,8 @@ def loomEditorMove (index delta count : String) : String :=
   EditorModel.intString
     (EditorModel.moveSelection (EditorModel.intOf index) (EditorModel.intOf delta)
       (EditorModel.intOf count))
+def loomEditorKey (key index count : String) : String :=
+  EditorModel.popupKeyJson key index count
 def loomEditorAccept (text item offset : String) : String :=
   EditorModel.acceptJson text item (EditorModel.natOf offset)
 def loomEditorTrigger (text c offset : String) : String :=
@@ -112,6 +114,7 @@ export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
 export "wiz_loom_editor_items" loomEditorItems
 export "wiz_loom_editor_popup" loomEditorPopup
 export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_key" loomEditorKey
 export "wiz_loom_editor_accept" loomEditorAccept
 export "wiz_loom_editor_trigger" loomEditorTrigger
 export "wiz_loom_editor_position" loomEditorPosition
