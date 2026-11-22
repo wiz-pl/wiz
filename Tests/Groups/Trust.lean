@@ -527,7 +527,7 @@ def trustGroup : Group where
             check (known.contains a) s!"{nm} depends on a new Region axiom '{a}': {ax}"
         -- the declarations: exactly the six rows, each an axiom (not a `def`)
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
-          { loader := ← preludeLoader, trustedModule := Tests.libModule }
+          { loader := ← libLoader, trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
         checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
