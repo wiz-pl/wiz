@@ -442,6 +442,12 @@ def tacticGroup : Group where
           "def both (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by auto\n" ++
           "#print axioms chain\n#print axioms both")
           ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
+    { name := "auto closes two open goals, the second after a hint's subgoal", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "structure Pair (P Q : Prop) where\n  fst : P\n  snd : Q\n" ++
+          "def twoGoals (P Q R : Prop) (h : P → Q) (p : P) (r : R) : Pair Q R := by\n" ++
+          "  constructor\n  auto\n")
+          [] },
     { name := "auto does not affirm the consequent", run := fun _ =>
         failsLibs ("import Logic\n" ++
           "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
@@ -456,6 +462,8 @@ def tacticGroup : Group where
           "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
           "#print axioms leTrans")
           ["'leTrans' does not depend on any axioms"] },
+    { name := "omega P1: sum = constant bounds", run := fun _ =>
+        skip "P1: h : a + b = 3 ⊢ a ≤ 3 needs equality-hypothesis transport built from the hypothesis' own term; raw omega proof terms hit instance-argument conversion" },
     { name := "omega refuses false and non-linear goals", run := fun _ =>
         failsLibs "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
           "omega:" },

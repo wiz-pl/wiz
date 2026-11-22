@@ -1324,6 +1324,11 @@ def List.dropN {A : Type} : Nat → List A → List A
   | .zero, xs => xs
   | .succ n, .nil => .nil
   | .succ n, .cons _ xs => List.dropN n xs
+/-- The first `n` elements of a list (at most what it has). -/
+def List.takeN {A : Type} : Nat → List A → List A
+  | .zero, _ => .nil
+  | .succ _, .nil => .nil
+  | .succ n, .cons x xs => .cons x (List.takeN n xs)
 /-- `e` as a constructor application: the constructor's name and its fields (the
 arguments after the type's parameters). `List.cons A x L` is `("List.cons", [x, L])`. -/
 def TacticM.ctorApp (e : Expr) : TacticM (Option (String × List Expr)) := match Expr.constApp e with
@@ -1726,7 +1731,7 @@ partial def TacticM.autoHints
           let restGoals : List Nat := match before with
             | .nil => .nil
             | .cons _ t => t;
-          let fresh := List.dropN (List.length restGoals) after;
+          let fresh := List.takeN (Nat.sub (List.length after) (List.length restGoals)) after;
           go fresh (Nat.sub depth 1) (Nat.sub fuel 1) all)
         (fun _ => TacticM.autoHints go g depth fuel hs all)
 
