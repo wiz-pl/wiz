@@ -17,3 +17,13 @@ import Tower.Cli
 #eval Info.render (Info.parse (Info.render (Info.mk "v1" "source" "v1" "abc" "" (("cc", "gcc") :> .nil))))
 #eval Tower.opts ("v1" :> "--source" :> "release" :> "--cc" :> "gcc" :> "--force" :> .nil)
 #eval Tower.flagWords (("root", "/r") :> ("region-cache", "true") :> ("cache-ro", "/a") :> ("cache-ro", "/b") :> .nil)
+#eval Tower.safeMemberName "wiz-x86_64-linux/bin/wiz"
+#eval Tower.safeMemberName "../escape"
+#eval Tower.safeMemberName "/etc/passwd"
+#eval Tower.safeMemberName "wiz-x86_64-linux/../../escape"
+#eval Tower.safeMemberName "wiz-x86_64-linux/..hidden"
+#eval Tower.unsafeMember (Tower.tarMembers ("wiz-x86_64-linux/bin/wiz" :> "wiz-x86_64-linux" :> .nil) ("-" :> "d" :> .nil))
+#eval Tower.unsafeMember (Tower.tarMembers ("wiz-x86_64-linux/bin/wiz" :> "../escape" :> .nil) ("-" :> "-" :> .nil))
+#eval Tower.unsafeMember (Tower.tarMembers ("wiz-x86_64-linux/evil" :> .nil) ("l" :> .nil))
+#eval Tower.unsafeMember (Tower.tarMembers ("a" :> .nil) ("drwxr-xr-x 0/0 0 1970-01-01 00:00 a/" :> .nil))
+#eval Tower.unsafeMember (Tower.tarMembers ("a" :> .nil) ("lrwxrwxrwx 0/0 0 1970-01-01 00:00 a -> x" :> .nil))
