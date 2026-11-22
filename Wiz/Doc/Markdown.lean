@@ -78,8 +78,9 @@ def numbered? (l : String) : Option String :=
   | '.' :: ' ' :: rest => some (String.ofList rest)
   | _ => none
 
-/-- A rendered Markdown fragment and the fenced `wiz` blocks it highlighted, in reading
-order (the page data's `wizHighlight` blocks). -/
+/-- A rendered Markdown fragment and its fenced blocks in reading order (the page
+data's `wizHighlight` blocks): a highlighted block has its spans, a plain one none, so
+the block index is the fence's position in the Markdown. -/
 structure Rendered where
   html : String
   blocks : Array Highlight.Block := #[]
@@ -88,8 +89,8 @@ structure Rendered where
 /-- Markdown → HTML and the highlighted blocks. `tokens` is the module's parser table
 (`CommandState.tables.tokens`), so a `wiz` fence agrees with the module's own syntax; with
 `highlight := false` the output is exactly the pre-highlighting renderer. -/
-partial def renderWith (link : String → Option String) (tokens : Array String)
-    (highlight : Bool) (src : String) : Rendered :=
+partial def renderWith (link : String → Option String) (reg : Highlight.Registry)
+    (tokens : Array String) (highlight : Bool) (src : String) : Rendered :=
   let (html, blocks) := blocks (src.splitOn "\n") ("", #[])
   { html, blocks }
 where
@@ -99,13 +100,15 @@ where
     if !highlight then
       let cls := if lang.isEmpty then "" else s!" class=\"language-{htmlEscape lang}\""
       (s!"<pre><code{cls}>{htmlEscape body}</code></pre>\n", none)
-    else match Highlight.blockOf tokens lang body with
+    else match Highlight.blockOf reg tokens lang body with
       | some b =>
-        (s!"<pre><code class=\"language-wiz\">{Highlight.html b.spans body}</code></pre>\n", some b)
+        (s!"<pre><code class=\"language-{htmlEscape b.language}\">{Highlight.html b.spans body}</code></pre>\n", some b)
       | none =>
-        -- (an untagged block stays plain; a known registry name would go here in P1)
+        -- (an untagged or unknown block is plain; it still records an empty block so a
+        -- `wizHighlight` index is the n-th fence, the runtime's numbering)
         let cls := if lang.isEmpty then "" else " class=\"language-unknown\""
-        (s!"<pre><code{cls}>{htmlEscape body}</code></pre>\n", none)
+        (s!"<pre><code{cls}>{htmlEscape body}</code></pre>\n",
+          some { language := Highlight.languageOf lang, source := body, spans := #[] })
   blocks : List String → String × Array Highlight.Block → String × Array Highlight.Block
     | [], acc => acc
     | l :: ls, (accHtml, accBlocks) =>
@@ -132,7 +135,7 @@ where
       else if t.startsWith ">" then
         let quoted := (l :: ls).takeWhile (·.trimAscii.startsWith ">")
         let inner := quoted.map fun q => ((q.trimAscii.drop 1).toString)
-        let inner := renderWith link tokens highlight ("\n".intercalate inner)
+        let inner := renderWith link reg tokens highlight ("\n".intercalate inner)
         blocks (ls.drop (quoted.length - 1))
           (accHtml ++ s!"<blockquote>{inner.html}</blockquote>\n", accBlocks ++ inner.blocks)
       else
@@ -157,11 +160,11 @@ where
 
 /-- Markdown → HTML, with `wiz` fences highlighted by the built-in token table. -/
 def render (link : String → Option String) (src : String) : String :=
-  (renderWith link Highlight.builtinTokens true src).html
+  (renderWith link Highlight.Registry.builtins Highlight.builtinTokens true src).html
 
 /-- Markdown → HTML exactly as before highlighting (`--no-highlight`, and the Markdown
 reference, where spans have no lossless form). -/
 def renderPlain (link : String → Option String) (src : String) : String :=
-  (renderWith link Highlight.builtinTokens false src).html
+  (renderWith link Highlight.Registry.builtins Highlight.builtinTokens false src).html
 
 end Wiz.Doc

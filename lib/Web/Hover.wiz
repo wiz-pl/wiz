@@ -2,6 +2,7 @@ import IO
 import Json
 import Tagged
 import Web.Highlight
+import Web.InfoTree
 import Web.Loom
 
 /-!
@@ -107,39 +108,79 @@ def Hover.isRule (s : String) : Bool :=
       (Bool.or (Char.eq c (Char.mk 45)) (Bool.or (Char.eq c (Char.mk 42)) (Char.eq c (Char.mk 95)))))
   | _ => .false
 
-/-- The card's lines, accumulating in `acc` (reversed); `openFence` is the marker of
-an open fence. -/
-partial def Hover.linesGo (openFence : Option Char) (xs : List String) (acc : List Hover.Line) :
-    List Hover.Line :=
+/-- The characters of `s` after any run of `c` (a fence's marker run). -/
+partial def Hover.dropMarker (c : Char) : List Char → List Char
+  | .nil => .nil
+  | .cons x xs => match Char.eq x c with
+    | .true => Hover.dropMarker c xs
+    | .false => .cons x xs
+
+/-- The language word of a fence line (````wiz` → `wiz`; `~~~` → `""`). -/
+def Hover.fenceLang (s : String) : String :=
+  let t := String.trimLeft s;
+  match String.chars t with
+  | .cons c rest => String.trim (String.mk (Hover.dropMarker c rest))
+  | .nil => ""
+
+/-- What the line walker is inside: an open fence's marker, the index of the block being
+read (the n-th fence of the hover), the number of fences opened, and the line's offset
+in the block's source (UTF-16, for slicing the answer's `wizHighlight` spans). -/
+structure Hover.LineState where
+  marker : Option Char
+  block : Nat
+  fences : Nat
+  offset : Nat
+
+/-- Outside any fence. -/
+def Hover.initialLines : Hover.LineState := Hover.LineState.mk .none 0 0 0
+
+/-- Walk the hover's lines with the answer's `wizHighlight` blocks: a code line gets the
+block's spans clipped to that line (`InfoTree.tokensForLine`), so the card renders the
+same tokens the docs page does. `blocks` empty: plain code, exactly the old output. -/
+partial def Hover.linesWithGo (blocks : List InfoTree.HighlightBlock) (st : Hover.LineState)
+    (xs : List String) (acc : List Hover.Line) : List Hover.Line :=
   match xs with
   | .nil => List.reverse acc
   | .cons line rest =>
     let trimmed := String.trimRight line;
     match Hover.fence trimmed with
     | .some c =>
-      match openFence with
-      | .none => Hover.linesGo (.some c) rest acc
+      match st.marker with
+      | .none =>
+        -- open a fence: its block index is the number opened before it
+        Hover.linesWithGo blocks (Hover.LineState.mk (.some c) st.fences (st.fences + 1) 0) rest acc
       | .some open => match Char.eq c open with
-        | .true => Hover.linesGo .none rest acc
-        | .false => Hover.linesGo openFence rest (List.append acc [Hover.codeLine trimmed])
+        | .true => Hover.linesWithGo blocks (Hover.LineState.mk .none st.block st.fences 0) rest acc
+        | .false =>
+          let len := String.length trimmed;
+          let ts := InfoTree.tokensForLine blocks st.block st.offset len;
+          Hover.linesWithGo blocks { st with offset := st.offset + len + 1 } rest
+            (List.append acc [Hover.codeLineTokens trimmed ts])
     | .none =>
-      match openFence with
-      | .some _ => Hover.linesGo openFence rest (List.append acc [Hover.codeLine trimmed])
+      match st.marker with
+      | .some _ =>
+        let len := String.length trimmed;
+        let ts := InfoTree.tokensForLine blocks st.block st.offset len;
+        Hover.linesWithGo blocks { st with offset := st.offset + len + 1 } rest
+          (List.append acc [Hover.codeLineTokens trimmed ts])
       | .none =>
         match Hover.isRule trimmed with
-        | .true => Hover.linesGo .none rest (List.append acc [Hover.rule])
+        | .true => Hover.linesWithGo blocks st rest (List.append acc [Hover.rule])
         | .false => match String.isEmpty trimmed with
-          | .true => Hover.linesGo .none rest acc
-          | .false => Hover.linesGo .none rest (List.append acc [Hover.textLine trimmed])
+          | .true => Hover.linesWithGo blocks st rest acc
+          | .false => Hover.linesWithGo blocks st rest (List.append acc [Hover.textLine trimmed])
 
-/-- The card's lines: fences dropped (and their contents kept as code), rules kept,
-blank lines outside code dropped, and an ellipsis when there are more than `limit`
-lines. -/
-def Hover.lines (text : String) (limit : Nat) : List Hover.Line :=
-  let all := Hover.linesGo .none (String.splitOn text "\n") [];
+/-- The card's lines with highlight spans from the answer's `wizHighlight` blocks. -/
+def Hover.linesWith (text : String) (limit : Nat)
+    (blocks : List InfoTree.HighlightBlock) : List Hover.Line :=
+  let all := Hover.linesWithGo blocks Hover.initialLines (String.splitOn text "\n") [];
   match Nat.le (List.length all) limit with
   | .true => all
   | .false => List.append (List.take (limit - 1) all) [Hover.Line.mk "…" .false .false .true []]
+
+/-- The card's lines, without highlight spans (`Hover.linesWith` with no blocks). -/
+def Hover.lines (text : String) (limit : Nat) : List Hover.Line :=
+  Hover.linesWith text limit []
 
 /-- A hexadecimal digit's value. -/
 def Hover.hexVal (c : Char) : Option Nat :=
@@ -328,9 +369,8 @@ def Hover.cardLines {M : Type} (lines : List Hover.Line) (label : String) : Loom
     Loom.el "div" [Loom.id "wiz-hover", Loom.class "wiz-hover", Loom.attr "role" "tooltip"]
       (List.append head body)
 
-/-- The card: the label (a definition's place, optionally) and the lines. `raw` is a
-hover result; an empty one draws nothing unless there is a label. -/
-def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
+/-- The card from the LSP's `contents` (the pre-`wiz.hover/1` path). -/
+def Hover.cardContents {M : Type} (raw label : String) : Loom.VNode M :=
   let contents := match Json.parse raw with
     | .ok j => Hover.textOf j
     | .error _ => (.none : Option String);
@@ -338,3 +378,14 @@ def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
     | .some text => Hover.lines text 24
     | .none => [];
   Hover.cardLines lines label
+
+/-- The card: a `wiz.hover/1` payload when the result carries one (the Markdown comes
+from the payload's own field ladder, and its `wizHighlight` blocks supply the code's
+spans), else the LSP `contents` as before. `raw` is a hover result; an empty one draws
+nothing unless there is a label. -/
+def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
+  match Json.parse raw with
+  | .ok j => match InfoTree.Answer.ofJson j with
+    | .some a => Hover.cardLines (Hover.linesWith (InfoTree.Answer.markdown a) 24 a.highlight) label
+    | .none => Hover.cardContents raw label
+  | .error _ => Hover.cardContents raw label

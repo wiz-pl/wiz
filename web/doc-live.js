@@ -55,12 +55,27 @@ function start() {
   const endpoint = endpointOf(data);
   if (!data || !endpoint) return;
 
-  const panel = document.createElement("aside");
-  panel.id = "doc-live";
-  panel.className = "doc-live";
-  panel.setAttribute("aria-live", "polite");
-  panel.setAttribute("aria-label", "live documentation");
-  document.body.appendChild(panel);
+  // The page's `wizHighlight` data (the static doc comments' spans, `wiz doc`'s
+  // `wiz.highlight/1`). The live panel sends it once; `DocLive.hoverView` uses it when
+  // a hover answer is the LSP's Markdown rather than a `wiz.hover/1` payload.
+  const pageData = (() => {
+    const el = document.getElementById("wiz-doc-data");
+    if (!el) return null;
+    try { return JSON.parse(el.textContent || "null"); } catch (_) { return null; }
+  })();
+  const highlight = pageData && pageData.wizHighlight ? pageData.wizHighlight : null;
+
+  // A server-rendered panel (a future `wiz doc --serve` shell) carries `data-wiz-*`;
+  // with none, this empty mount point is the panel (mount's replace path).
+  let panel = document.getElementById("doc-live");
+  if (!panel) {
+    panel = document.createElement("aside");
+    panel.id = "doc-live";
+    panel.className = "doc-live";
+    panel.setAttribute("aria-live", "polite");
+    panel.setAttribute("aria-label", "live documentation");
+    document.body.appendChild(panel);
+  }
 
   let handle = null;
   let client = null;
@@ -193,6 +208,7 @@ function start() {
     onRequest: (kind) => { effect("ack", kind); if (kind === "reconnect") connect(); },
   }).then((mounted) => {
     handle = mounted;
+    if (highlight) effect("highlight", JSON.stringify(highlight));
     connect();
   }).catch((e) => console.warn("wiz doc: live docs need the runtime (" + e + ")"));
 

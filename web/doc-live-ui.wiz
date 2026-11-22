@@ -2,6 +2,7 @@ import IO
 import Json
 import Web.DocLive
 import Web.Loom
+import Web.Wire
 
 /-!
 # The live documentation panel's runtime
@@ -29,6 +30,13 @@ def init : Loom.Session DocLive DocLiveMsg := Loom.LiveApp.session docLiveApp
 
 def html (s : Loom.Session DocLive DocLiveMsg) : String := Loom.Session.html s
 
+/-- The panel's first-render hash, the client half of adopt-and-listen: a page that
+server-renders `#doc-live` writes `data-wiz-ssr` with the same `Wire.ssrHash` of the
+same HTML, and `mount` then adopts the existing nodes instead of replacing them
+(`web/framework/adopt.js`). -/
+def ssrHash (s : Loom.Session DocLive DocLiveMsg) : String :=
+  Wire.ssrHash (Loom.Session.html s)
+
 def patched (s : Loom.Session DocLive DocLiveMsg) (next : DocLive) : IO (Loom.Session DocLive DocLiveMsg) := do
   let r := Loom.LiveApp.effectSessionJson docLiveApp s next;
   Js.patch r.2;
@@ -48,6 +56,7 @@ def requests (s : Loom.Session DocLive DocLiveMsg) : String := DocLive.requests 
 
 export "wiz_loom_init" init
 export "wiz_loom_html" html
+export "wiz_loom_ssr_hash" ssrHash
 export "wiz_loom_step" step
 export "wiz_loom_effect" effect
 export "wiz_loom_requests" requests

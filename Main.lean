@@ -51,7 +51,7 @@ def usage : String := "usage:
                                    run the test driver (`.lake/build/bin/tests`, or PATH)
   wiz doc [MODULE|FILE|DIR…] -o OUT [--lib] [--source-url URL] [--title T] [--web DIR]
                                   [--serve [--port N] [--lsp PORT]] [--jobs N] [-v|-q]
-                                  [--no-highlight]
+                                  [--no-highlight] [--languages FILE]
                                    documentation: a static site (one page per module,
                                    index, search, reference); --lib: the toolchain's library;
                                    source links are URL + path in its root + #L<line>;
@@ -60,7 +60,9 @@ def usage : String := "usage:
                                    for live types and docs in a panel; --jobs N: elaborate
                                    and render N modules at once (0: auto); -v: a progress
                                    log on stderr (-vv: every declaration), -q: quiet;
-                                   --no-highlight: plain fences, the pre-highlighting bytes
+                                   --no-highlight: plain fences, the pre-highlighting bytes;
+                                   --languages FILE: merge a `wiz.doc.languages/1` registry
+                                   after the built-ins (repeatable; `wiz` reserved)
   wiz doc … --reference DIR [--check]
                                    also the reference manual (full signatures, doc comments,
                                    class instances, notation table) into DIR/index.md;
@@ -471,6 +473,8 @@ structure DocArgs where
   check : Bool := false
   /-- `--no-highlight`: the pages are byte-identical to the pre-highlighting output -/
   highlight : Bool := true
+  /-- `--languages FILE` (repeatable): external `wiz.doc.languages/1` registries -/
+  languages : List String := []
   inputs : List String := []
 
 def docArgs (a : DocArgs) : List String → Except String DocArgs
@@ -502,6 +506,7 @@ def docArgs (a : DocArgs) : List String → Except String DocArgs
   | "--reference" :: d :: rest => docArgs { a with reference := some d } rest
   | "--check" :: rest => docArgs { a with check := true } rest
   | "--no-highlight" :: rest => docArgs { a with highlight := false } rest
+  | "--languages" :: f :: rest => docArgs { a with languages := a.languages ++ [f] } rest
   | x :: rest => if x.startsWith "-" then throw s!"wiz doc: unknown option {x}" else docArgs { a with inputs := x :: a.inputs } rest
 
 /-- The path of `p` relative to `root` (`p` itself if it isn't under it). -/
@@ -595,7 +600,7 @@ def docCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let assets : List System.FilePath :=
     (web.toList ++ [System.FilePath.mk "web", base / "web"]).eraseDups -- complexity: ok (at most three candidate directories)
   -- (the site keeps its title with --reference; the manual has its own)
-  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs, highlight := a.highlight }
+  let o : Doc.Options := { out := out, sourceUrl := a.sourceUrl, title := a.title.getD "Wiz documentation", web := web, assets := assets, serve := a.serve, lsp := a.lsp, reference := a.reference.map System.FilePath.mk, check := a.check, referenceTitle := a.title.getD "Wiz standard library reference", verbose := a.verbose, jobs := jobs, highlight := a.highlight, languages := a.languages.map System.FilePath.mk }
   let r ← Doc.run (fun m => elaborateHits tc "<doc>" s!"import {m}\n") mods o
   IO.println s!"wiz doc: {r.pages} modules, {out}/index.html"
   for f in r.written do IO.println s!"wiz doc: wrote {f}"

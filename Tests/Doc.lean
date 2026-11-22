@@ -857,6 +857,34 @@ def docGroup : Group where
           checkHas md s!"<a id=\"{n}\"></a>"
         checkHas md "```text\nNat → Nat\n```"
         check (!has md "Nat.succ") "a declaration's body is in the manual" },
+    { name := "wiz doc --languages: an external wiz.doc.languages/1 spec renders hdl fences; duplicates and `wiz` are refused", run := fun _ => do
+        let dir ← IO.FS.createTempDir
+        IO.FS.createDirAll (dir / "src")
+        let reg := "{\"schema\":\"wiz.doc.languages/1\",\"languages\":[{\"name\":\"hdl\",\"lineComment\":[\"//\"],\"keywords\":[\"module\",\"endmodule\",\"assign\",\"wire\"],\"classes\":[\"kw\",\"com\",\"num\"]}]}"
+        IO.FS.writeFile (dir / "languages.json") reg
+        IO.FS.writeFile (dir / "src" / "Ext.wiz")
+          "import Prelude\n/-- A block.\n```hdl\nmodule m; // a comment\nassign x = 1;\nendmodule\n```\n-/\ndef n : Nat := 0\n"
+        let out := dir / "site"
+        discard <| runOut (← wiz) ["doc", (dir / "src").toString, "-o", out.toString,
+          "--web", (dir / "no-web").toString, "--languages", (dir / "languages.json").toString]
+        let html ← IO.FS.readFile (out / "Ext.html")
+        -- (the spec's classes: a keyword and a line comment; no core patch)
+        checkHas html "<span class=\"hl-kw\">module</span>"
+        checkHas html "<span class=\"hl-com\">// a comment</span>"
+        -- (a duplicate name is refused with the file and the entry, not a partial page)
+        IO.FS.writeFile (dir / "dup.json") reg
+        let p ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site2").toString, "--web", (dir / "no-web").toString,
+          "--languages", (dir / "languages.json").toString, "--languages", (dir / "dup.json").toString] }
+        check (p.exitCode != 0) "--languages accepted a duplicate language"
+        checkHas p.stderr "already exists"
+        -- (`wiz` is reserved)
+        IO.FS.writeFile (dir / "wiz.json") "{\"schema\":\"wiz.doc.languages/1\",\"languages\":[{\"name\":\"wiz\",\"override\":true}]}"
+        let q ← IO.Process.output { cmd := ← wiz, args := #["doc", (dir / "src").toString,
+          "-o", (dir / "site3").toString, "--web", (dir / "no-web").toString,
+          "--languages", (dir / "wiz.json").toString] }
+        check (q.exitCode != 0) "--languages replaced the reserved wiz language"
+        checkHas q.stderr "reserved" },
     libDocCase
   ]
 
