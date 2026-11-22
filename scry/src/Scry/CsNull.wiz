@@ -1,0 +1,84 @@
+import Scry.CsLower
+import Scry.Wil
+import Scry.Nullness
+/-!
+# Scry.CsNull: the C# nullability fact layer
+
+`Scry.CsLower` publishes what a C# declaration says about null (`T?`, an unannotated
+reference under `#nullable enable`, the `!` assertion) as two tables:
+
+* `Lowered.nulls` — the *annotation EDB*: `nullable(var)` for a declared `T?`, and
+  `nonnull(var)` for an unannotated reference under `#nullable enable`. The relation is
+  per function (the function name is the first column), keyed by the Wil register the
+  declaration got, so a Datalog rule can join it with `gen`/`use` facts. It is enough to
+  express the CS8600 shape ("an annotated non-null variable is assigned a maybe-null
+  value") without the abstract interpreter; the interpreter-side check is
+  `Scry.MemWarnKind.nullableAssignment` (`checkAssign` alarms).
+* `Lowered.nullPoints` — facts keyed by the CST node every `Wil.Span` carries:
+  `deref` (a receiver, element access or unboxing), `mayNull` (the value defined there
+  is maybe-null: an `as`, a `T?` field read, a `FirstOrDefault`-shaped call, a `?.`
+  result) and `assert` (C#'s `!`).
+
+This module turns those tables into `Scry.NullTables` and runs the S5 nullness pass
+(`Scry.Nullness`). The dereference check is the existing alarm class; the annotation
+check is the separate `nullableAssign` alarm. The C frontend supplies empty tables, so
+its analysis is unchanged.
+
+## The diagnostic id
+
+The C# design (`scry/CSHARP.md` §3) names `scry/cs/null-dereference`. This
+implementation keeps `scry/memory/null-dereference`: the memory-diagnostic carrier is
+shared by C and C# (one `MemWarnKind`, one `--null-deref` switch, one
+`scry/memory/` family that `TaintCmd`/`ProjectTaint` classify as memory), and the
+`=scry-cs` group's parity case pins that C and C# report the same id for the same
+shape. The *annotation* check, which is C#-only, does use the design's family:
+`scry/cs/nullable-assignment` (`Scry.MemWarnKind.ruleId`).
+-/
+
+/-- The nullness tables of one function, split out of the file's annotation EDB and
+point facts. Parameter registers are the leading `fn.params`; only a parameter's
+annotation affects the entry state (a local is judged from its initialiser and the
+dataflow). -/
+def Scry.Cs.nullTablesOf (l : Scry.Cs.Lowered) (fn : Wil.Func) : Scry.NullTables :=
+  let facts := List.filter (fun f => String.eq f.func fn.name) l.nulls;
+  let pts := List.filter (fun p => String.eq p.func fn.name) l.nullPoints;
+  let inParams := fun (v : Nat) => Nat.lt v (List.length fn.params);
+  let maybeParams := List.map (fun f => f.var)
+    (List.filter (fun f => Bool.and (inParams f.var) (Scry.Cs.NullAnn.maybe f.ann)) facts);
+  let mayNull := List.map (fun p => (p.node, p.var))
+    (List.filter (fun p => match p.kind with
+      | .mayNull => .true
+      | _ => .false) pts);
+  let derefs := List.map (fun p => (p.node, p.var))
+    (List.filter (fun p => match p.kind with
+      | .deref => .true
+      | _ => .false) pts);
+  let asserts := List.map (fun p => (p.node, p.var))
+    (List.filter (fun p => match p.kind with
+      | .assert => .true
+      | _ => .false) pts);
+  let nonNull := List.map (fun f => f.var)
+    (List.filter (fun f => Scry.Cs.NullAnn.assertsNonNull f.ann) facts);
+  Scry.NullTables.mk maybeParams mayNull derefs asserts nonNull
+
+/-- Every nullness warning of one lowered C# file: a dereference of a maybe-null value
+(`scry/memory/null-dereference`) and a maybe-null assignment to a non-null-annotated
+variable (`scry/cs/nullable-assignment`). -/
+def Scry.Cs.nullWarningsOf (l : Scry.Cs.Lowered) : List Scry.MemWarning :=
+  Scry.nullDerefWarningsWith (Wil.program l.funcs) (fun fn => Scry.Cs.nullTablesOf l fn)
+
+/-- The annotation EDB as text: `nullable(function, %register)` and
+`nonnull(function, %register)` lines only (an oblivious register has no line: it is in
+neither relation). This is what a Datalog consumer reads; the tests pin it. -/
+def Scry.Cs.nullEdbText (l : Scry.Cs.Lowered) : String :=
+  String.intercalate "\n" (List.concat (List.map (fun f =>
+    match f.ann with
+    | .maybeNull => .cons ("nullable(" ++ f.func ++ ", %" ++ Nat.repr f.var ++ ")") .nil
+    | .nonNull => .cons ("nonnull(" ++ f.func ++ ", %" ++ Nat.repr f.var ++ ")") .nil
+    | .oblivious => .nil) l.nulls))
+
+/-- The point facts as text, one `kind(function, node, %register)` line each. -/
+def Scry.Cs.nullPointsText (l : Scry.Cs.Lowered) : String :=
+  String.intercalate "\n" (List.map (fun p =>
+    Scry.Cs.PointKind.show p.kind ++ "(" ++ p.func ++ ", " ++ Nat.repr p.node
+      ++ ", %" ++ Nat.repr p.var ++ ")") l.nullPoints)

@@ -8,6 +8,7 @@ import Scry.Native
 import Scry.CstStore
 import Scry.Lower
 import Scry.CsLower
+import Scry.CsNull
 import Scry.Rules
 import Scry.Models
 import Scry.RuleTaint
@@ -673,7 +674,7 @@ findings use. -/
 def Scry.memoryFindings (origins : Scry.OriginMap) (ws : List Scry.MemWarning) :
     List Scry.BoundaryFinding :=
   List.map (fun w => Scry.BoundaryFinding.mk
-    (String.append "scry/memory/" (Scry.MemWarnKind.show w.kind)) w.detail
+    (Scry.MemWarnKind.ruleId w.kind) w.detail
     w.func w.point (Scry.originAt origins w.func w.point)) ws
 
 -- ## Derivation status
@@ -833,7 +834,7 @@ def Scry.boundaryFields (b : Scry.BoundaryFinding) : List (String × Json) :=
   let loc := match b.origin with
     | .some o => Scry.originJson o
     | .none => Json.mkObj [("function", Json.mkStr b.func), ("programPoint", Json.ofNat b.point)];
-  let kindText := match String.startsWith b.rule "scry/memory/" with
+  let kindText := match Scry.memoryRuleId b.rule with
     | .true => "memory"
     | .false => "boundary";
   [ ("rule", Json.mkStr b.rule)
@@ -1178,7 +1179,14 @@ def Scry.analyzeCsFile (o : Scry.TaintOpts) (startMs : Nat) (text : String)
         Scry.reportStage o startMs "lower" (Nat.repr (List.length tu.funcs)
           ++ " functions, " ++ Nat.repr (List.length tu.warnings) ++ " boundary warnings");
         let prog := Wil.program tu.funcs;
-        let pr := Scry.analyzeModels Scry.csModels prog pack;
+        let pr0 := Scry.analyzeModels Scry.csModels prog pack;
+        -- `--null-deref` is the C# frontend's nullability check: the S5 pass over the
+        -- facts the lowering published (`Scry.CsNull`), appended to the memory
+        -- diagnostics. The default run stays pinned without it.
+        let nulls : List Scry.MemWarning := match o.nullDeref with
+          | .true => Scry.Cs.nullWarningsOf l
+          | .false => .nil;
+        let pr := { pr0 with warnings := List.append pr0.warnings nulls };
         let findings := Scry.programFindings pr;
         let checks := List.map (fun f => Scry.findingChecked pr f) findings;
         let certificates := List.map (fun f => Scry.certifyFinding pr f) findings;

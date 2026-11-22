@@ -28,6 +28,15 @@ has its checked-in `scry-cst` spill next to it (`FILE.cs` → `FILE.cst`, regene
   names every out-of-scope construct they contain. The case fails when one of them
   regresses from a warning to a silent skip (a construct that lowers to nothing without
   a diagnostic, so the analysis reports nothing about code it never read).
+* **Nullability**: `null/*.cs` pairs each fact with its counter-case — an unguarded
+  `T?` dereference (`unsafe`), the `x != null`/`x is not null` guards (`guarded`),
+  `?.`/`??` (`coalesce`), a non-null-annotated local assigned `null`
+  (`annotated-violation`, which reports `scry/cs/nullable-assignment` separately from
+  the dereference), `!` (`forgiving`), and a `T?` field read (`field`). The tests run
+  `Scry.Cs.nullWarningsOf` (the `Scry.Nullness` pass over the facts the lowering
+  publishes in `Scry.Cs.Lowered.nulls`/`nullPoints`) and pin the annotation EDB
+  (`nullable(func, %var)` / `nonnull(func, %var)`) with `nullEdbText`. `coalesce` and
+  `forgiving` also have lowering goldens.
 * **End-to-end taint**: `taint/cwe78-process-unsafe.cs` (console input reaches
   `Process.Start` through string concatenation) fires the `command-injection` rule of
   `scry/corpus/csharp/csharp.scry`; its sanitised twin (`int.Parse` first) does not. Two
@@ -93,10 +102,14 @@ def lowerImports : String := "import Scry.CsLower\n"
 def taintImports : String :=
   "import Scry.CsLower\nimport Scry.Rules\nimport Scry.Models\nimport Scry.RuleTaint\nimport Scry.Interproc\n"
 
+
 def csCmdImports : String :=
   "import Scry.CsCmd\nimport Scry.Wil\nimport Scry.Rules\nimport Scry.Interproc\nimport Json\n"
 
 def modelImports : String := "import Scry.Models\n"
+
+def nullImports : String :=
+  "import Scry.CsLower\nimport Scry.CsNull\nimport Scry.Nullness\nimport Scry.RuleTaint\n"
 
 /-- A fixture's C# text and its checked-in spill (`dir/name.cs`, `dir/name.cst`). -/
 def fixture (dir name : String) : IO (String × String) := do
@@ -122,7 +135,9 @@ def fixtures : List (String × String) :=
    ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
    ("taint", "cwe78-pattern-unsafe"), ("taint", "cwe78-switch-unsafe"), ("taint", "cwe78-await-unsafe"),
    ("taint", "cwe78-lambda-unsafe"), ("taint", "cwe78-bcl-unsafe"),
-   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe")]
+   ("taint", "cwe117-log-unsafe"), ("taint", "cwe117-log-safe"),
+   ("null", "unsafe"), ("null", "guarded"), ("null", "coalesce"),
+   ("null", "annotated-violation"), ("null", "forgiving"), ("null", "field")]
 
 /-- Compare `actual` with the golden file `path` (see the module doc for `SCRY_CS_WRITE`). -/
 def golden (path : String) (actual : String) : IO Unit := do
@@ -154,6 +169,40 @@ def lowerLocGolden (name : String) : IO Unit := do
   match ← runProbe lowerImports (fixtureDefs src spill ++
       s!"#eval Scry.Cs.lowerLocations {wizStr (name ++ ".cs")} src spill\n") with
   | [m] => golden s!"scry/corpus/csharp/lower/{name}.loc" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The lowering golden of a `null/*.cs` fixture (the `?.`/`??`/`!` lowering). -/
+def nullGolden (name : String) : IO Unit := do
+  let (src, spill) ← fixture "null" name
+  match ← runProbe lowerImports (fixtureDefs src spill ++
+      s!"#eval Scry.Cs.lowerRender {wizStr (name ++ ".cs")} src spill\n") with
+  | [m] => golden s!"scry/corpus/csharp/null/{name}.wil" (unquote m)
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The nullness diagnostics of a `null/*.cs` fixture, as their rules in program order
+(the pass's own `Scry.Cs.nullWarningsOf`; no C toolchain, the spill is checked in). -/
+def nullWarnings (name : String) : IO (List String) := do
+  let (src, spill) ← fixture "null" name
+  let body := fixtureDefs src spill ++
+    s!"#eval match Scry.Cs.frontend {wizStr (name ++ ".cs")} src spill with\n" ++
+    "  | .ok l => String.intercalate \"|\" (List.map (fun w => Scry.MemWarnKind.ruleId w.kind) (Scry.Cs.nullWarningsOf l))\n" ++
+    "  | .err m => m\n"
+  match ← runProbe nullImports body with
+  | [m] =>
+    let s := unquote m
+    if s.startsWith "error" then throw (IO.userError s!"{name}: {s}") else
+    pure (if s.isEmpty then [] else s.splitOn "|")
+  | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
+
+/-- The annotation EDB (`nullable(func, %var)` / `nonnull(func, %var)`) of a fixture. -/
+def nullEdb (name : String) : IO String := do
+  let (src, spill) ← fixture "null" name
+  let body := fixtureDefs src spill ++
+    s!"#eval match Scry.Cs.frontend {wizStr (name ++ ".cs")} src spill with\n" ++
+    "  | .ok l => Scry.Cs.nullEdbText l\n" ++
+    "  | .err m => m\n"
+  match ← runProbe nullImports body with
+  | [m] => pure (unquote m)
   | ms => throw (IO.userError s!"expected one #eval message, got {ms.length}: {ms}")
 
 /-- The rendering of a lowered fixture (functions and warnings), read from the lowering
@@ -437,6 +486,27 @@ def group : Group where
       run := fun _ => lowerGolden "primary-ctor" },
     { name := "lower: known expansions (method groups, Format, FromResult, ConfigureAwait, ThrowIfNull)",
       run := fun _ => lowerGolden "expansions" },
+    { name := "nullness: a T? parameter dereferenced without a guard is a finding",
+      run := fun _ => checkEq ["scry/memory/null-dereference"] (← nullWarnings "unsafe") },
+    { name := "nullness: x != null and x is not null guards silence the dereference",
+      run := fun _ => checkEq ([] : List String) (← nullWarnings "guarded") },
+    { name := "nullness: ?. and ?? guard the receiver and yield a non-null value",
+      run := fun _ => checkEq ([] : List String) (← nullWarnings "coalesce") },
+    { name := "nullness: a non-null-annotated local assigned null is nullable-assignment plus a dereference",
+      run := fun _ => checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference"]
+        (← nullWarnings "annotated-violation") },
+    { name := "nullness: ! records an assertion and suppresses the dereference alarm",
+      run := fun _ => checkEq ([] : List String) (← nullWarnings "forgiving") },
+    { name := "nullness: a T? field read is maybe-null, so the next member access is a finding",
+      run := fun _ => checkEq ["scry/memory/null-dereference"] (← nullWarnings "field") },
+    { name := "nullness: the annotation EDB publishes nullable(var) and nonnull(var)",
+      run := fun _ => do
+        checkEq "nullable(NullFixtures.Unsafe.Length, %0)" (← nullEdb "unsafe")
+        checkEq "nonnull(NullFixtures.Violation.Length, %1)" (← nullEdb "annotated-violation") },
+    { name := "lower: ?. and ?? lower as guarded branches (the null path yields default)",
+      run := fun _ => nullGolden "coalesce" },
+    { name := "lower: the ! null-forgiving operator copies its operand and records an assertion",
+      run := fun _ => nullGolden "forgiving" },
     { name := "macro guard: an unknown name is still a havoc with a warning, not a value",
       run := fun _ => do
         let text ← loweredText "expansions"
