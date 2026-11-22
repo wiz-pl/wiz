@@ -298,8 +298,12 @@ def grailIndexGroup : Group where
         check ((generated.splitOn "(seq 7)").length > 1) generated
         check ((generated.splitOn "(package greet 1.0.0").length > 1) generated
         -- without a snapshot, --require-signature refuses (a fresh app, so no lock pins one)
-        IO.FS.removeFile (idx / "index" / "snapshot.sexpr")
+        -- first: a snapshot with no signature is named precisely
         IO.FS.removeFile (idx / "index" / "snapshot.sexpr.sig")
+        match ← Grail.Sign.verifySnapshot idx (some allowed) none with
+        | .error e => check ((e.splitOn "no signature").length > 1) e
+        | .ok _ => throw (IO.userError "verified a snapshot with no signature")
+        IO.FS.removeFile (idx / "index" / "snapshot.sexpr")
         let dir2 ← mkTree [
           ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app2\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
         let run2 (args : List String) : IO UInt32 :=
