@@ -383,9 +383,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   surface (`Scry.EGraph`, `costs : U64Array` with `EGraph.inf`, `applyAt`/`applyMatches`
   without a rule index) on the native hash cons (`etable` is a `U64Map` from an e-node
   hash to a bucket), plus the analyses, explanations, limits and `Option` cost view
-  (`costsOpt`/`costOpt`) that used to live only in the native module. `Scry.EgraphNative`
-  is a compatibility import of `Scry.Egraph`; `Scry.EqPlan` and the examples that named
-  it are unchanged, and every `examples/scry-egraph-*.wiz` digest is identical. `add` and
+  (`costsOpt`/`costOpt`) that used to live only in the native module. The compatibility
+  alias `Scry.EgraphNative` is gone too: `Scry.EqPlan` and the four examples that named
+  it import `Scry.Egraph` directly, and the six `scry-egraph` cases that only re-ran
+  examples through the alias are removed (the same digests are still pinned by the
+  `interp`/`compiled` cases). Every `examples/scry-egraph-*.wiz` digest is identical.
+  `add` and
   `rebuild` no longer scan a flat association list or append one node at a time (adding
   1 600 nodes: 18 ms in the audit's reference measurement, 0 ms here; at 12 800 nodes
   the old module took 501 ms to add and 4.5 s to rebuild, the unified one 3 ms and 3 ms;

@@ -21,7 +21,8 @@ the reference one: `Scry.EGraph`, `Scry.ENode`, `Scry.ETerm`, `Scry.Pat`,
 `applyAt`/`applyMatches` without a rule index. The *representation* is the native one
 for the part that was superlinear: `etable` is a `U64Map` from an e-node hash to a bucket
 of `(e-node, class)`, so `add` and `rebuild` no longer scan a flat association list.
-`Scry.EgraphNative` is now a compatibility module that imports this one; see its docs.
+There is one module and one import: `Scry.EqPlan` and the examples import `Scry.Egraph`,
+and the old `Scry.EgraphNative` alias is gone.
 
 ## Representation
 

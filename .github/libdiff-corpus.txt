@@ -131,7 +131,6 @@ scry/src/Scry/Dynamic.wiz
 scry/src/Scry/DynamicCmd.wiz
 scry/src/Scry/Egraph.wiz
 scry/src/Scry/EgraphExtract.wiz
-scry/src/Scry/EgraphNative.wiz
 scry/src/Scry/EgraphTaint.wiz
 scry/src/Scry/EgraphWil.wiz
 scry/src/Scry/Engine.wiz

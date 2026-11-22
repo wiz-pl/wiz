@@ -2,8 +2,7 @@ import Scry.Egraph
 -- Extraction (`scry-egraph-extract`): a cheapest term per e-class. The first class has
 -- `x`, `x + 0` and `(x + 0) * 1`; unit cost extracts `x`. The second has a leaf `k` and
 -- `0 + 1`; with a heavy weight on `k`, extraction picks the smaller `0 + 1` instead.
--- `Scry.EgraphNative` is the compatibility import of the same engine, so this source
--- also runs through it. `main` is the digest.
+-- `main` is the digest.
 
 -- ops: 0 = x, 1 = add, 2 = zero, 3 = mul, 4 = one, 5 = k
 def ga : Scry.EGraph :=

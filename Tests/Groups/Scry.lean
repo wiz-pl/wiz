@@ -32,14 +32,6 @@ def interp (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
   Elab.okLibs (src ++ "\n#eval main") [expected]
 
-/-- An example run through another import: the file's `import Scry.Egraph` line is
-swapped for `mod`. `Scry.EgraphNative` is now the compatibility import of the one
-engine, so the six differential examples keep the same source and digest through it;
-the case pins that the compatibility name still brings the whole surface. -/
-def interpAs (mod name expected : String) : IO Unit := do
-  let src ← IO.FS.readFile s!"examples/{name}.wiz"
-  Elab.okLibs ((src.replace "import Scry.Egraph" s!"import {mod}") ++ "\n#eval main") [expected]
-
 /-- The same, compiled to C and to LLVM. -/
 def compiled (name expected : String) : IO Unit := do
   let src ← IO.FS.readFile s!"examples/{name}.wiz"
@@ -84,13 +76,6 @@ def scryEgraphGroup : Group where
         interp "scry-egraph-fuel" "2851" },
     { name := "Datalog: derived equality facts feed one mergeFacts, then congruence", run := fun _ =>
         interp "scry-egraph-datalog" "4021" },
-    { name := "native tables: all six examples give the reference digests", run := fun _ => do
-        interpAs "Scry.EgraphNative" "scry-egraph-congruence" "14111"
-        interpAs "Scry.EgraphNative" "scry-egraph-rebuild" "14111"
-        interpAs "Scry.EgraphNative" "scry-egraph-extract" "11332"
-        interpAs "Scry.EgraphNative" "scry-egraph-saturate" "3171"
-        interpAs "Scry.EgraphNative" "scry-egraph-fuel" "2851"
-        interpAs "Scry.EgraphNative" "scry-egraph-datalog" "4021" },
     { name := "Datalog: eqsort columns, an equality-assertion head, canonicalise between rounds", run := fun _ =>
         interp "scry-egraph-eqplan" "11111121" },
     { name := "canonicalise: merge eq facts, rewrite eqsort columns, idempotent", run := fun _ =>

@@ -250,12 +250,10 @@ trusted). Both trust extensions are on so that a use is *recorded* by the ledger
 than merely an error; `lib/` is not allowed to use either (the cases below and `lib/
 never uses native_refl` still fail on a use).
 
-`Scry.EgraphNative` and `Scry.EqPlan` are alternative backends that cannot be imported
-into one program with `Scry.Egraph` and its clients, so there is no single whole-library
-import: the reference family is loaded with everything else, then each distinct
-exclusion set among the apart modules (with those modules) is loaded with everything
-else. The ledger is the union of the states' sources, and every module is still checked
-against every module it can share a program with.
+The whole library (`lib/`, `scry/src/Scry/`, `hdl/src/Hdl/`) is imported at once:
+`Tests.Elab.libApart` is empty, so there is one state and one ledger walk.
+(`Scry.EgraphNative` and `Scry.EqPlan` used to be alternative backends that could not
+co-load with `Scry.Egraph`; the e-graph is now one module.)
 
 With a cache each state comes through `Cache.elaborateCached`, in the same namespaces
 `wiz check` uses: a module is elaborated once and its effect replayed, so the walk sees

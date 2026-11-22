@@ -1,4 +1,4 @@
-import Scry.EgraphNative
+import Scry.Egraph
 -- Extraction costs are `Option Nat` (`scry-egraph-extract-opt`): `none` means "no
 -- finite term" (a cycle with no leaf), and a large weight is an ordinary `some`, with no
 -- `inf` sentinel to collide with a real cost. The canonical `Scry.EGraph.cost` is the

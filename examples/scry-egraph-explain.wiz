@@ -1,4 +1,4 @@
-import Scry.EgraphNative
+import Scry.Egraph
 -- Explanations (`scry-egraph-explain`): every union records why it happened. A rewrite
 -- records its rule index; a rebuild that discovers a congruence records `.congruence`.
 -- `explain` walks the log and returns the chain of steps between two class ids. This

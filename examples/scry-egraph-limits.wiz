@@ -1,4 +1,4 @@
-import Scry.EgraphNative
+import Scry.Egraph
 -- Saturation limits and stop reasons (`scry-egraph-limits`): `saturateLimited` reports
 -- whether it hit a fixpoint, the round (fuel) cap, the node cap or the clock cap. Both
 -- were given the same small graph. `main` is the digest.

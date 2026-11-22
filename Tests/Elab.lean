@@ -2144,10 +2144,10 @@ def libModuleNames : IO (List String) := do
   pure ((← Tests.loadedModules "lib").map (·.1))
 
 /-- Modules of `lib/` that are alternative implementations and cannot be imported into
-one program, paired with the modules each must leave out. It is empty now: the last two
+one program, paired with the modules each must leave out. It is empty: the last two
 entries were `Scry.EgraphNative`/`Scry.EqPlan` against the reference e-graph family, and
-the e-graph is one engine (`Scry.EgraphNative` is a compatibility import of
-`Scry.Egraph`). A whole-library loader can import all of `lib/` at once. The list and
+the e-graph is now one module, `Scry.Egraph` (the compatibility alias was removed). A
+whole-library loader can import all of `lib/` at once. The list and
 `libSourceExcept` stay because the loaders and the trust ledger use the mechanism; an
 entry is still the right place for a future pair that cannot co-load. (`Json` and
 `Infoview` used to be here when `Json` declared `Nat.repr`; `Text` owns it now.) -/

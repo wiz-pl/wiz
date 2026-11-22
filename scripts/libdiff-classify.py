@@ -50,7 +50,7 @@ FIX_TITLES = {
         "Host-only meta API (`Macro`/`Syntax`/`Expr`/`ParamView`): the embedded prelude omits the elaborator-time API.",
         "Large (elaboration-time evaluation); `Data/ListLemmas`, `Deriving`, `Grail`, `OpticDerive`, `BvDecide`, `SatTactic`, `RingTactic`.",
     ),
-    "wordarray": ("`WordArray.wiz:50` (`List.length_snoc`).", "Unblocks `Egraph`/`EgraphNative`/`EgraphExtract`/`EqPlan`/`Lower` (`U64Array`/`U32Array`)."),
+    "wordarray": ("`WordArray.wiz:50` (`List.length_snoc`).", "Unblocks `Egraph`/`EgraphExtract`/`EqPlan`/`Lower` (`U64Array`/`U32Array`)."),
     "nested-inductives": ("The inductive-occurrence check (`the type being defined may only occur …`).", "`Conc`, `Hoare`, `Session`, and the Hoare/Prog users."),
     "deriver-bundle": ("The general `deriver` registry (`attribute [deriver Bundle]`).", "The five Hdl bundle structures."),
     "logic-true": ("`Logic.wiz:47` `True.intro : True := ()` (`expected True, got Unit0`).", "`Data/Order`, `Hdl/Arty`, `IntRing`, `Rat`."),

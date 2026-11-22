@@ -1,0 +1,108 @@
+-- test: skip a benchmark: `wiz build` it (from a worktree at the revision) and run `./bench add N` / `./bench rebuild N`; a check is not its oracle
+import Prelude
+import IO
+import Sys
+import Text
+import Scry.Egraph
+
+-- E-graph engine benchmark (`examples/scry-egraph-bench.wiz`). Two shapes:
+--
+--   add N      add N distinct leaf e-nodes (empty graph), then report the table size.
+--   rebuild N  build N leaves and N unary nodes `f(leaf i)`, union every leaf with
+--              leaf 0 (N-1 unions, no rebuild), then time one `rebuild`: congruence
+--              must union the N `f` nodes too. Reports the class count after.
+--   merge N    build 2N nodes as for `rebuild`, then time one `mergeFacts` over the
+--              N-1 equality rows (the Datalog stratum's operation: all unions, one
+--              rebuild).
+--
+--   wiz build -I lib examples/scry-egraph-bench.wiz -o bench
+--   ./bench add 12800
+--   ./bench rebuild 12800
+--
+-- `add` is the hash-cons path and `rebuild` the congruence/table-rewrite path; both
+-- were Θ(n²) in the reference engine (a flat e-table scan and a per-node append).
+-- The counts are deterministic and checked by `scry/bench/egraph/run.py`; the
+-- elapsed milliseconds are informational, not a `perf-run` claim. The measured
+-- comparison, the two pinned revisions and the raw JSON/TSV live in
+-- `scry/bench/egraph/`.
+
+def egRange : Nat → List Nat → List Nat
+  | .zero, acc => acc
+  | .succ n, acc => egRange n (.cons n acc)
+
+/-- `0 … n-1`, ascending. -/
+def egIndices (n : Nat) : List Nat := egRange n .nil
+
+def egMs (d : Duration) : Nat := Nat.div d.ns 1000000
+
+def egLeaf (i : Nat) : Scry.ENode :=
+  Scry.ENode.leaf (Nat.add 1000000 i)
+
+-- ## Add only
+
+partial def egAddLeaves (g : Scry.EGraph) : List Nat → Scry.EGraph
+  | .nil => g
+  | .cons i rest => egAddLeaves (Scry.EGraph.add g (egLeaf i)).1 rest
+
+def egRunAdd (n : Nat) : IO Unit := do
+  t0 ← Clock.monotonic;
+  let g := egAddLeaves Scry.EGraph.empty (egIndices n);
+  t1 ← Clock.monotonic;
+  IO.println (String.append "add n=" (Nat.repr n));
+  IO.println (String.append "nodes=" (Nat.repr (Scry.EGraph.numNodes g)));
+  IO.println (String.append "classes=" (Nat.repr (Scry.EGraph.numClasses g)));
+  IO.println (String.append "add_ms=" (Nat.repr (egMs (Duration.sub t1 t0))))
+
+-- ## Build the 2n node shape: leaf i at id 2i, f(leaf i) at id 2i + 1
+
+partial def egBuildPairs (g : Scry.EGraph) : List Nat → Scry.EGraph
+  | .nil => g
+  | .cons i rest =>
+    let x := Scry.EGraph.add g (egLeaf i);
+    let y := Scry.EGraph.add x.1 (Scry.ENode.mk 7 [x.2]);
+    egBuildPairs y.1 rest
+
+/-- Union the leaf of pair `i` with the leaf of a fixed id (`0`): congruence then
+makes every `f` node one class, so the rebuild has real work to close. -/
+partial def egUnionLeaves (g : Scry.EGraph) (root : Nat) : List Nat → Scry.EGraph
+  | .nil => g
+  | .cons i rest =>
+    let r := Scry.EGraph.union g root i;
+    egUnionLeaves r.1 root rest
+
+def egRunRebuild (n : Nat) : IO Unit := do
+  let g := egBuildPairs Scry.EGraph.empty (egIndices n);
+  -- leaf ids are 2i (id 0 is pair 0's leaf), so union leaves 2, 4, … 2(n-1) with 0
+  let leaves := List.map (fun i => Nat.mul 2 (Nat.succ i)) (egIndices (Nat.sub n 1));
+  let g2 := egUnionLeaves g 0 leaves;
+  t0 ← Clock.monotonic;
+  let g3 := Scry.EGraph.rebuild g2;
+  t1 ← Clock.monotonic;
+  IO.println (String.append "rebuild n=" (Nat.repr n));
+  IO.println (String.append "nodes=" (Nat.repr (Scry.EGraph.numNodes g3)));
+  IO.println (String.append "classes=" (Nat.repr (Scry.EGraph.numClasses g3)));
+  IO.println (String.append "rebuild_ms=" (Nat.repr (egMs (Duration.sub t1 t0))))
+
+def egRunMerge (n : Nat) : IO Unit := do
+  let g := egBuildPairs Scry.EGraph.empty (egIndices n);
+  let rows := List.map (fun i => [U64.ofNat 0, U64.ofNat (Nat.mul 2 (Nat.succ i))])
+    (egIndices (Nat.sub n 1));
+  t0 ← Clock.monotonic;
+  let r := Scry.EGraph.mergeFacts g rows;
+  t1 ← Clock.monotonic;
+  IO.println (String.append "merge n=" (Nat.repr n));
+  IO.println (String.append "nodes=" (Nat.repr (Scry.EGraph.numNodes r.1)));
+  IO.println (String.append "classes=" (Nat.repr (Scry.EGraph.numClasses r.1)));
+  IO.println (String.append "merge_ms=" (Nat.repr (egMs (Duration.sub t1 t0))))
+
+def egParse (s : String) : Nat :=
+  match String.parseNat s with
+  | .some n => n
+  | .none => 0
+
+def main : IO Unit := IO.bind IO.args (fun as =>
+  match as with
+  | .cons "add" rest => egRunAdd (egParse (match rest with | .cons n _ => n | .nil => "0"))
+  | .cons "rebuild" rest => egRunRebuild (egParse (match rest with | .cons n _ => n | .nil => "0"))
+  | .cons "merge" rest => egRunMerge (egParse (match rest with | .cons n _ => n | .nil => "0"))
+  | _ => IO.println "usage: bench add N | rebuild N | merge N")

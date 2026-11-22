@@ -91,7 +91,6 @@ lib/Scry/Datalog.wiz	Word.wiz:42 equations need a function type	real selfhost bu
 lib/Scry/Diff.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`List.foldl` is defined in lib/Text but absent from the embedded prelude, so it is unknown.
 lib/Scry/Egraph.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	U64Array is missing because WordArray.wiz fails at its length_snoc lemma.
 lib/Scry/EgraphExtract.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	Scry.EGraph is missing because WordArray.wiz fails at its length_snoc lemma.
-lib/Scry/EgraphNative.wiz	WordArray.wiz:50 List.length_snoc	real selfhost bug	WordArray equations	wordarray	U64Array is missing because WordArray.wiz fails at its length_snoc lemma.
 lib/Scry/EgraphTaint.wiz	Text.wiz:55 List.foldl missing	real selfhost bug	List.foldl missing	prelude-text	`Scry.WgeAlert` is in Taint, which fails because `List.foldl` is absent from the embedded prelude.
 lib/Scry/EgraphWil.wiz	63-bit numeral (C13)	expected divergence	expected: C13 64-bit Nat		10^30/2·10^30 sentinels; the selfhost Nat is 63/64-bit (C13), the host is unbounded.
 lib/Scry/Engine.wiz	ULift universe lift	real selfhost bug	ULift	ulift	`structure Scry.Sem (Ev : Type)` hits the same ULift/Sort-2 failure.

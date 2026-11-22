@@ -1,5 +1,5 @@
 -- test: run
-import Scry.EgraphNative
+import Scry.Egraph
 -- E-class analyses and guarded rewrites (`scry-egraph-analysis`): the interval lattice
 -- is joined per e-class after each rebuild. The rewrite `f x -> g x` fires only when
 -- the analysis says `x` is in `[0, 5]`, so it merges `f 3` with `g 3` but leaves `f 9`

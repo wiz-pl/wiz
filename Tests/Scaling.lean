@@ -446,7 +446,7 @@ over two inputs: `lib/` imported at once, and every example. It ran as one case 
 is split into cases that can run in different shards: one for `lib/`, and
 `descExampleChunks` for the examples, chunk `k` taking the sorted files at positions `k`
 mod `descExampleChunks`. (A third case loaded each `libApart` backend on its own; there
-are none now that `Scry.EgraphNative` is a compatibility import of `Scry.Egraph`.)
+are none now that the e-graph is the one module `Scry.Egraph`.)
 Together they check the same inputs with the same assertions; `descSweepPartition` checks
 that the chunks cover every example exactly once. They are the group `desc-sweep`, which
 sets `parallel := true` so a shard's `--jobs N` runs them N at a time; they share no path

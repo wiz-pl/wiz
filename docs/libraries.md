@@ -2218,7 +2218,7 @@ context sensitivity, non-ASCII columns); the lowering still warns (havoc) for th
 constructs it does not lower. `wiz-notes/scry-taint.md` has the design, the `.scry`
 format and the gaps.
 
-## Scry: e-graph and equality saturation (`scry/src/Scry/Egraph.wiz`, `scry/src/Scry/EgraphNative.wiz`)
+## Scry: e-graph and equality saturation (`scry/src/Scry/Egraph.wiz`)
 
 `import Scry.Egraph` is the S12 e-graph, one engine: a union-find, congruence closure by
 rebuilding a hash-consed e-node table, relational e-matching, extraction, and saturation
@@ -2233,13 +2233,11 @@ native backend added: per-e-class analyses (the `Interval` lattice of `Scry.AiDo
 with guarded rewrites), union explanations (a flat proof forest, `explain`), node/round/
 clock limits with a reported stop reason (`saturateLimited`), and the `Option Nat` cost
 view (`costsOpt`/`costOpt`). `explain` needs the rule index, so the rule-index forms are
-`applyAtN`/`applyMatchesN`; the reference names record rule `0`. `import Scry.EgraphNative`
-is now a **compatibility import** — it just imports `Scry.Egraph` — kept because
-`Scry.EqPlan` and four examples named it; there is no second implementation and no
-import split (the whole of `lib/` loads at once, `Tests.Elab.libApart` is empty). All
-eighteen `examples/scry-egraph-*.wiz` produce their previous digests, including the six
-(`congruence`, `rebuild`, `extract`, `saturate`, `fuel`, `datalog`) that the
-`scry-egraph` group also runs through the compatibility name. `import Scry.EqPlan`
+`applyAtN`/`applyMatchesN`; the reference names record rule `0`. There is one module,
+`Scry.Egraph`, and no second implementation or compatibility alias: `Scry.EqPlan` and
+the examples import it directly, and the whole of `lib/` loads at once
+(`Tests.Elab.libApart` is empty). All eighteen `examples/scry-egraph-*.wiz` produce their
+previous digests. `import Scry.EqPlan`
 is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
 relations (a column is not an assertion: a term table `un(term, op, child)` has two
 `eqsort` columns and unions nothing), rules whose head is an equality assertion
