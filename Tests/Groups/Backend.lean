@@ -160,8 +160,9 @@ def backendGroup : Group where
         check (texts.any fun t => (t.splitOn "prim nat.add").length > 1) s!"no `prim nat.add` in {texts}"
         check (texts.any fun t => (t.splitOn "prim nat.beq").length > 1) s!"no `prim nat.beq` in {texts}" },
     { name := "erasure: an out-of-scope variable is a diagnostic, not an array panic (F22)", run := fun _ => do
-        -- (`quickType` indexed `ctx.types[ix]!`, so a stale de Bruijn index panicked; the
-        -- public erasure path must report it instead)
+        -- (pins 55c3828d1, "kernel: context arrays by level": `quickType` used to index
+        -- `ctx.types[ix]!`, so a stale de Bruijn index panicked; it must stay a
+        -- diagnostic through the public erasure path)
         let empty : Ctx ZeroOneMany := { globals := {} }
         match quickType empty (.var 0) with
         | .error e => check (((toString e).splitOn "out of scope").length > 1) s!"wrong error: {e}"
