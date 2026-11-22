@@ -42,6 +42,13 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
+# A `heavy` job can inherit a PATH without cc (AGENTS.md); grail's default compiler is
+# `cc`, so put a gcc wrapper first when there is one but it is not on PATH.
+if ! command -v cc >/dev/null 2>&1; then
+  for c in /nix/store/*-gcc-wrapper-*/bin/cc; do
+    [ -x "$c" ] && { PATH=$(dirname "$c"):$PATH; export PATH; break; }
+  done
+fi
 
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -90,8 +97,11 @@ die() { echo "test-release-tarball: $*" >&2; exit 2; }
 abs() { case $1 in /*) echo "$1" ;; *) echo "$(cd "$1" && pwd)" ;; esac; }
 
 # --- the commit ----------------------------------------------------------------------
-src=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || \
-  die "not a git checkout: run this beside a commit, or use --bindir and a REV"
+# WIZ_RELEASE_SRC is the checkout that has the commit (a `heavy --rsync` copy has no
+# .git); it defaults to the repository this script is in.
+src=${WIZ_RELEASE_SRC:-}
+[ -n "$src" ] || src=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || \
+  die "not a git checkout: run this beside a commit, or set WIZ_RELEASE_SRC"
 rev=$(git -C "$src" rev-parse --verify "$revarg^{commit}" 2>/dev/null) || \
   die "$revarg is not a commit"
 epoch=$(git -C "$src" log -1 --format=%ct "$rev")
