@@ -98,7 +98,7 @@ def buildPathFiles : List String :=
 
 /-- Every `.wiz` file under `dir`. -/
 partial def wizFiles (dir : System.FilePath) : IO (List System.FilePath) := do
-  let mut out := []
+  let mut out : List System.FilePath := []
   for e in ← dir.readDir do
     if ← e.path.isDir then out := out ++ (← wizFiles e.path)
     else if e.path.extension == some "wiz" then out := e.path :: out
@@ -208,7 +208,7 @@ def numericsGroup : Group where
         cRunIO src expected },
     { name := "R6: every printed Float64 reads back to the same bits (random patterns and boundaries)", run := fun _ => do
         let path ← IO.getEnv "PATH"
-        let some cc ← findCC (path.getD "").splitOn ":"
+        let some cc ← findCC ((path.getD "").splitOn ":")
           | skip "no cc on PATH to build the round-trip probe"
         let src ← ryuRoundTripProgram
         let dir ← IO.FS.createTempDir
@@ -234,7 +234,7 @@ def numericsGroup : Group where
           let src ← IO.FS.readFile f
           for line in codeLines src do
             for tok in forbidden do
-              check (!line.contains tok) s!"{f}: `{tok}` in `{line.trimAscii.toString}`: fast-math breaks IEEE semantics and bit-identical output"
+              check (!(line.contains tok)) s!"{f}: `{tok}` in `{line.trimAscii.toString}`: fast-math breaks IEEE semantics and bit-identical output"
         let build ← IO.FS.readFile "Wiz/Compiler/Build.lean"
         check ((build.splitOn "-ffp-contract=off").length > 1)
           "Wiz/Compiler/Build.lean: the C compiler invocations do not pin -ffp-contract=off" },
@@ -252,7 +252,7 @@ def numericsGroup : Group where
             -- in lib/); a use is `by smt` or the term-level `native_refl`
             unless t.startsWith "syntax" do
               for tok in ["by smt", "native_refl", "native_decide", "by sat_decide_native"] do
-                check (!t.contains tok) s!"{f}: `{tok}` in `{t}`: a trusted form in lib/" }
+                check (!(t.contains tok)) s!"{f}: `{tok}` in `{t}`: a trusted form in lib/" }
   ]
 
 builtin_initialize registerGroup numericsGroup
