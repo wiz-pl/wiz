@@ -164,6 +164,8 @@ def Scry.reportCwe (rule : String) : String :=
   | "strcpy-overflow" => "CWE-120"
   | "use-after-free" => "CWE-416"
   | "scry/memory/use-after-free" => "CWE-416"
+  | "scry/memory/null-dereference" => "CWE-476"
+  | "scry/cs/nullable-assignment" => "CWE-476"
   | _ => ""
 
 /-- `CWE-78 (T1)` when both are known, `CWE-78` or `T1` otherwise. The values come

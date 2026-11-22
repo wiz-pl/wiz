@@ -133,10 +133,20 @@ inductive Alarm where
   | unsoundEdge (src dst : Nat)
   | outOfBounds (at : Nat) (index len : Nat)
   | nullDeref (at : Nat)
+  /-- A non-null-annotated variable was assigned a value that may be null (C# CS8600
+  shape). A separate class from `nullDeref`: the assignment is a contract violation even
+  where no dereference follows. -/
+  | nullableAssign (at : Nat)
   deriving BEq, Repr
 
 /-- The empty alarm list (an explicit type helps overloaded `.nil`). -/
 def Alarm.none : List Alarm := .nil
+
+/-- The null-dereference alarm of a register, if the state says it may be null. -/
+def AiEnv.nullAlarm (at : Nat) (env : AiEnv) (v : Nat) : List Alarm :=
+  match Null.mayBeNull (AiEnv.getD env v Value.top).nul with
+  | .true => List.cons (Alarm.nullDeref at) Alarm.none
+  | .false => Alarm.none
 
 /-- Does an interval already prove "no overflow"? A nonempty range whose upper bound is
 below the modulus does; `bot` is unreachable; `top` is an alarm. -/
@@ -222,6 +232,11 @@ def AStmt.alarms (m : AiMach) (at : Nat) (env : AiEnv) : AStmt → List Alarm
   | .assign _ e => AExpr.alarms m at env e
   | .assume c => ACond.alarms m at env c
   | .store arr idx len => AExpr.memAlarms m at env arr idx len
+  | .check v => AiEnv.nullAlarm at env v
+  | .checkAssign _ e =>
+      (match Null.mayBeNull (AExpr.eval m env e).nul with
+        | .true => List.cons (Alarm.nullableAssign at) Alarm.none
+        | .false => Alarm.none)
   | .skip => Alarm.none
 
 -- ## The checker
