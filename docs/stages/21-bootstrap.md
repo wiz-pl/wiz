@@ -1801,7 +1801,7 @@ Everything that allocates or needs the runtime is one precise error, never a stu
 `ind`/`pack`/`unpack` primitives, a `prim` that does not fold, a numeral at or above
 `2^62` (a big-number object), a backend flag, or a `link_c` file. `--target wasm` and
 `--split N` are still refused with their own messages. `build --llvm` writes the module
-at `-o`; `run --llvm` assembles it with `llc` (`--llc CMD`) and links it with `cc`.
+at `-o`; `run --llvm` assembles it with `llc` (`--llc PATH`) and links it with `cc`.
 
 The module's own `main` prints the scalar (`2n+1` decoded) with `printf`: the host calls
 the runtime's `wiz_run_main`, which the self-hosted compiler does not carry yet.

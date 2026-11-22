@@ -10,6 +10,15 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
+  command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
+  paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
+  quote or a newline is one word and cannot start a second command, and `--cc` is
+  documented as one executable. A program killed by a signal is now a failure decoded
+  from the wait status (`WIFSIGNALED`/`WTERMSIG` → `128 + signal`) instead of exit 0
+  (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
+  and a SIGSEGV reported as signal 11).
+
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
