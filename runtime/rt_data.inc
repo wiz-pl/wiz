@@ -937,7 +937,477 @@ WIZ_API double wiz_f64_sub(double a, double b) { return a - b; }
 WIZ_API double wiz_f64_mul(double a, double b) { return a * b; }
 WIZ_API double wiz_f64_div(double a, double b) { return a / b; }
 WIZ_API int wiz_f64_lt(double a, double b) { return a < b; }
-WIZ_API const char *wiz_f64_show(double a) { static __thread char buf[64]; snprintf(buf, sizeof buf, "%.17g", a); return buf; }
+/* ---- shortest round-trip `Float64` printing (R6) ---------------------------
+
+   Ryu (Ulf Adams, PLDI 2018), the 64-bit `d2s` algorithm with the small lookup
+   tables (`RYU_OPTIMIZE_SIZE`), ported to C99 and prefixed `wiz_ryu_`. It emits the
+   shortest decimal that parses back to the same double, so `Float64.toString` is
+   deterministic and round-trips: the result no longer depends on the libc's
+   `%.17g` (whose last digit is unspecified and which is not shortest). The form is
+   scientific (`1E0`, `-0E0`, `5E-324`, `1.7976931348623157E308`); the non-finite
+   values print as `NaN`, `Infinity` and `-Infinity` (a NaN's sign bit is not part
+   of its value). `-0.0` keeps its sign.
+
+   Ported from https://github.com/ulfjack/ryu: Copyright 2018 Ulf Adams,
+   licensed under the Apache License 2.0 or the Boost Software License 1.0 (the
+   upstream repository carries both notices). */
+
+#define WIZ_RYU_MANTISSA_BITS 52
+#define WIZ_RYU_EXPONENT_BITS 11
+#define WIZ_RYU_BIAS 1023
+#define WIZ_RYU_POW5_INV_BITCOUNT 125
+#define WIZ_RYU_POW5_BITCOUNT 125
+#define WIZ_RYU_POW5_TABLE_SIZE 26
+
+typedef struct { uint64_t mantissa; int32_t exponent; } wiz_ryu_fd;
+
+static uint32_t wiz_ryu_decimal_length17(uint64_t v) {
+  if (v >= 10000000000000000ull) return 17;
+  if (v >= 1000000000000000ull) return 16;
+  if (v >= 100000000000000ull) return 15;
+  if (v >= 10000000000000ull) return 14;
+  if (v >= 1000000000000ull) return 13;
+  if (v >= 100000000000ull) return 12;
+  if (v >= 10000000000ull) return 11;
+  if (v >= 1000000000ull) return 10;
+  if (v >= 100000000ull) return 9;
+  if (v >= 10000000ull) return 8;
+  if (v >= 1000000ull) return 7;
+  if (v >= 100000ull) return 6;
+  if (v >= 10000ull) return 5;
+  if (v >= 1000ull) return 4;
+  if (v >= 100ull) return 3;
+  if (v >= 10ull) return 2;
+  return 1;
+}
+
+/* ceil(log_2(5^e)), 0 <= e <= 3528 */
+static int32_t wiz_ryu_pow5bits(int32_t e) {
+  return (int32_t)((((uint32_t)e * 1217359u) >> 19) + 1);
+}
+/* floor(log_10(2^e)), 0 <= e <= 1650 */
+static uint32_t wiz_ryu_log10pow2(int32_t e) {
+  return ((uint32_t)e * 78913u) >> 18;
+}
+/* floor(log_10(5^e)), 0 <= e <= 2620 */
+static uint32_t wiz_ryu_log10pow5(int32_t e) {
+  return ((uint32_t)e * 732923u) >> 20;
+}
+static uint64_t wiz_ryu_div5(uint64_t x) { return x / 5; }
+static uint64_t wiz_ryu_div10(uint64_t x) { return x / 10; }
+static uint64_t wiz_ryu_div100(uint64_t x) { return x / 100; }
+
+static uint32_t wiz_ryu_pow5factor(uint64_t value) {
+  const uint64_t m_inv_5 = 14757395258967641293ull; /* 5 * m_inv_5 = 1 (mod 2^64) */
+  const uint64_t n_div_5 = 3689348814741910323ull;  /* 2^64 / 5 */
+  uint32_t count = 0;
+  for (;;) {
+    value *= m_inv_5;
+    if (value > n_div_5) break;
+    ++count;
+  }
+  return count;
+}
+static int wiz_ryu_multiple_of_power_of_5(uint64_t value, uint32_t p) {
+  return wiz_ryu_pow5factor(value) >= p;
+}
+static int wiz_ryu_multiple_of_power_of_2(uint64_t value, uint32_t p) {
+  return (value & ((1ull << p) - 1)) == 0;
+}
+
+/* (wasm32 uses the 64-bit-only path: no `__int128` codegen assumption for the
+   playground/Wasm build) */
+#if defined(__SIZEOF_INT128__) && !defined(WIZ_RYU_ONLY_64_BIT_OPS) && \
+    !defined(__EMSCRIPTEN__) && !defined(__wasm__)
+#define WIZ_RYU_HAS_U128 1
+typedef __uint128_t wiz_ryu_u128;
+static uint64_t wiz_ryu_mulshift64(uint64_t m, const uint64_t *mul, int32_t j) {
+  const wiz_ryu_u128 b0 = (wiz_ryu_u128)m * mul[0];
+  const wiz_ryu_u128 b2 = (wiz_ryu_u128)m * mul[1];
+  return (uint64_t)(((b0 >> 64) + b2) >> (j - 64));
+}
+static uint64_t wiz_ryu_mulshiftall64(uint64_t m, const uint64_t *mul, int32_t j,
+    uint64_t *vp, uint64_t *vm, uint32_t mmshift) {
+  *vp = wiz_ryu_mulshift64(4 * m + 2, mul, j);
+  *vm = wiz_ryu_mulshift64(4 * m - 1 - mmshift, mul, j);
+  return wiz_ryu_mulshift64(4 * m, mul, j);
+}
+#else
+/* the reference's 64-bit-only path: no `__int128`, no intrinsics */
+static uint64_t wiz_ryu_umul128(uint64_t a, uint64_t b, uint64_t *hi) {
+  const uint32_t alo = (uint32_t)a, ahi = (uint32_t)(a >> 32);
+  const uint32_t blo = (uint32_t)b, bhi = (uint32_t)(b >> 32);
+  const uint64_t b00 = (uint64_t)alo * blo;
+  const uint64_t b01 = (uint64_t)alo * bhi;
+  const uint64_t b10 = (uint64_t)ahi * blo;
+  const uint64_t b11 = (uint64_t)ahi * bhi;
+  const uint32_t b00lo = (uint32_t)b00, b00hi = (uint32_t)(b00 >> 32);
+  const uint64_t mid1 = b10 + b00hi;
+  const uint32_t mid1lo = (uint32_t)mid1, mid1hi = (uint32_t)(mid1 >> 32);
+  const uint64_t mid2 = b01 + mid1lo;
+  const uint32_t mid2lo = (uint32_t)mid2, mid2hi = (uint32_t)(mid2 >> 32);
+  *hi = b11 + mid1hi + mid2hi;
+  return ((uint64_t)mid2lo << 32) | b00lo;
+}
+static uint64_t wiz_ryu_shiftright128(uint64_t lo, uint64_t hi, uint32_t dist) {
+  return (hi << (64 - dist)) | (lo >> dist);
+}
+static uint64_t wiz_ryu_mulshift64(uint64_t m, const uint64_t *mul, int32_t j) {
+  uint64_t high1;
+  const uint64_t low1 = wiz_ryu_umul128(m, mul[1], &high1);
+  uint64_t high0;
+  (void)wiz_ryu_umul128(m, mul[0], &high0);
+  const uint64_t sum = high0 + low1;
+  if (sum < high0) ++high1;
+  return wiz_ryu_shiftright128(sum, high1, (uint32_t)(j - 64));
+}
+static uint64_t wiz_ryu_mulshiftall64(uint64_t m, const uint64_t *mul, int32_t j,
+    uint64_t *vp, uint64_t *vm, uint32_t mmshift) {
+  *vp = wiz_ryu_mulshift64(4 * m + 2, mul, j);
+  *vm = wiz_ryu_mulshift64(4 * m - 1 - mmshift, mul, j);
+  return wiz_ryu_mulshift64(4 * m, mul, j);
+}
+#endif
+
+/* 1/5^i, scaled to 125 bits (every 26th entry), and the corrections that make the
+   intermediate entries exact. Generated by Ryu's `PrintDoubleLookupTable`. */
+static const uint64_t wiz_ryu_pow5_inv_split2[15][2] = {
+  {                    1u, 2305843009213693952u },
+  {  5955668970331000884u, 1784059615882449851u },
+  {  8982663654677661702u, 1380349269358112757u },
+  {  7286864317269821294u, 2135987035920910082u },
+  {  7005857020398200553u, 1652639921975621497u },
+  { 17965325103354776697u, 1278668206209430417u },
+  {  8928596168509315048u, 1978643211784836272u },
+  { 10075671573058298858u, 1530901034580419511u },
+  {   597001226353042382u, 1184477304306571148u },
+  {  1527430471115325346u, 1832889850782397517u },
+  { 12533209867169019542u, 1418129833677084982u },
+  {  5577825024675947042u, 2194449627517475473u },
+  { 11006974540203867551u, 1697873161311732311u },
+  { 10313493231639821582u, 1313665730009899186u },
+  { 12701016819766672773u, 2032799256770390445u }
+};
+static const uint32_t wiz_ryu_pow5_inv_offsets[22] = {
+  0x54544554, 0x04055545, 0x10041000, 0x00400414, 0x40010000, 0x41155555,
+  0x00000454, 0x00010044, 0x40000000, 0x44000041, 0x50454450, 0x55550054,
+  0x51655554, 0x40004000, 0x01000001, 0x00010500, 0x51515411, 0x05555554,
+  0x50411500, 0x40040000, 0x05040110, 0x00000000
+};
+/* 5^i, scaled to 125 bits (every 26th entry), and the corrections. */
+static const uint64_t wiz_ryu_pow5_split2[13][2] = {
+  {                    0u, 1152921504606846976u },
+  {                    0u, 1490116119384765625u },
+  {  1032610780636961552u, 1925929944387235853u },
+  {  7910200175544436838u, 1244603055572228341u },
+  { 16941905809032713930u, 1608611746708759036u },
+  { 13024893955298202172u, 2079081953128979843u },
+  {  6607496772837067824u, 1343575221513417750u },
+  { 17332926989895652603u, 1736530273035216783u },
+  { 13037379183483547984u, 2244412773384604712u },
+  {  1605989338741628675u, 1450417759929778918u },
+  {  9630225068416591280u, 1874621017369538693u },
+  {   665883850346957067u, 1211445438634777304u },
+  { 14931890668723713708u, 1565756531257009982u }
+};
+static const uint32_t wiz_ryu_pow5_offsets[21] = {
+  0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x40000000, 0x59695995,
+  0x55545555, 0x56555515, 0x41150504, 0x40555410, 0x44555145, 0x44504540,
+  0x45555550, 0x40004000, 0x96440440, 0x55565565, 0x54454045, 0x40154151,
+  0x55559155, 0x51405555, 0x00000105
+};
+static const uint64_t wiz_ryu_pow5_table[WIZ_RYU_POW5_TABLE_SIZE] = {
+  1ull, 5ull, 25ull, 125ull, 625ull, 3125ull, 15625ull, 78125ull, 390625ull,
+  1953125ull, 9765625ull, 48828125ull, 244140625ull, 1220703125ull, 6103515625ull,
+  30517578125ull, 152587890625ull, 762939453125ull, 3814697265625ull,
+  19073486328125ull, 95367431640625ull, 476837158203125ull,
+  2384185791015625ull, 11920928955078125ull, 59604644775390625ull,
+  298023223876953125ull
+};
+
+#if defined(WIZ_RYU_HAS_U128)
+static void wiz_ryu_compute_pow5(uint32_t i, uint64_t *result) {
+  const uint32_t base = i / WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t base2 = base * WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t offset = i - base2;
+  const uint64_t *mul = wiz_ryu_pow5_split2[base];
+  if (offset == 0) { result[0] = mul[0]; result[1] = mul[1]; return; }
+  const uint64_t m = wiz_ryu_pow5_table[offset];
+  const wiz_ryu_u128 b0 = (wiz_ryu_u128)m * mul[0];
+  const wiz_ryu_u128 b2 = (wiz_ryu_u128)m * mul[1];
+  const uint32_t delta = (uint32_t)(wiz_ryu_pow5bits((int32_t)i) - wiz_ryu_pow5bits((int32_t)base2));
+  const wiz_ryu_u128 shifted = (b0 >> delta) + (b2 << (64 - delta)) +
+    ((wiz_ryu_pow5_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+  result[0] = (uint64_t)shifted;
+  result[1] = (uint64_t)(shifted >> 64);
+}
+static void wiz_ryu_compute_inv_pow5(uint32_t i, uint64_t *result) {
+  const uint32_t base = (i + WIZ_RYU_POW5_TABLE_SIZE - 1) / WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t base2 = base * WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t offset = base2 - i;
+  const uint64_t *mul = wiz_ryu_pow5_inv_split2[base];
+  if (offset == 0) { result[0] = mul[0]; result[1] = mul[1]; return; }
+  const uint64_t m = wiz_ryu_pow5_table[offset];
+  const wiz_ryu_u128 b0 = (wiz_ryu_u128)m * (mul[0] - 1);
+  const wiz_ryu_u128 b2 = (wiz_ryu_u128)m * mul[1];
+  const uint32_t delta = (uint32_t)(wiz_ryu_pow5bits((int32_t)base2) - wiz_ryu_pow5bits((int32_t)i));
+  const wiz_ryu_u128 shifted = ((b0 >> delta) + (b2 << (64 - delta))) + 1 +
+    ((wiz_ryu_pow5_inv_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+  result[0] = (uint64_t)shifted;
+  result[1] = (uint64_t)(shifted >> 64);
+}
+#else
+static void wiz_ryu_compute_pow5(uint32_t i, uint64_t *result) {
+  const uint32_t base = i / WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t base2 = base * WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t offset = i - base2;
+  const uint64_t *mul = wiz_ryu_pow5_split2[base];
+  if (offset == 0) { result[0] = mul[0]; result[1] = mul[1]; return; }
+  const uint64_t m = wiz_ryu_pow5_table[offset];
+  uint64_t high1;
+  const uint64_t low1 = wiz_ryu_umul128(m, mul[1], &high1);
+  uint64_t high0;
+  const uint64_t low0 = wiz_ryu_umul128(m, mul[0], &high0);
+  const uint64_t sum = high0 + low1;
+  if (sum < high0) ++high1;
+  const uint32_t delta = (uint32_t)(wiz_ryu_pow5bits((int32_t)i) - wiz_ryu_pow5bits((int32_t)base2));
+  result[0] = wiz_ryu_shiftright128(low0, sum, delta) +
+    ((wiz_ryu_pow5_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+  result[1] = wiz_ryu_shiftright128(sum, high1, delta);
+}
+static void wiz_ryu_compute_inv_pow5(uint32_t i, uint64_t *result) {
+  const uint32_t base = (i + WIZ_RYU_POW5_TABLE_SIZE - 1) / WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t base2 = base * WIZ_RYU_POW5_TABLE_SIZE;
+  const uint32_t offset = base2 - i;
+  const uint64_t *mul = wiz_ryu_pow5_inv_split2[base];
+  if (offset == 0) { result[0] = mul[0]; result[1] = mul[1]; return; }
+  const uint64_t m = wiz_ryu_pow5_table[offset];
+  uint64_t high1;
+  const uint64_t low1 = wiz_ryu_umul128(m, mul[1], &high1);
+  uint64_t high0;
+  const uint64_t low0 = wiz_ryu_umul128(m, mul[0] - 1, &high0);
+  const uint64_t sum = high0 + low1;
+  if (sum < high0) ++high1;
+  const uint32_t delta = (uint32_t)(wiz_ryu_pow5bits((int32_t)base2) - wiz_ryu_pow5bits((int32_t)i));
+  result[0] = wiz_ryu_shiftright128(low0, sum, delta) + 1 +
+    ((wiz_ryu_pow5_inv_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+  result[1] = wiz_ryu_shiftright128(sum, high1, delta);
+}
+#endif
+
+/* the shortest decimal `mantissa * 10^exponent` in the rounding interval of the
+   double `ieeeMantissa * 2^...`; the port of Ryu's `d2d`. */
+static wiz_ryu_fd wiz_ryu_d2d(uint64_t ieeeMantissa, uint32_t ieeeExponent) {
+  int32_t e2;
+  uint64_t m2;
+  if (ieeeExponent == 0) {
+    e2 = 1 - WIZ_RYU_BIAS - WIZ_RYU_MANTISSA_BITS - 2;
+    m2 = ieeeMantissa;
+  } else {
+    e2 = (int32_t)ieeeExponent - WIZ_RYU_BIAS - WIZ_RYU_MANTISSA_BITS - 2;
+    m2 = (1ull << WIZ_RYU_MANTISSA_BITS) | ieeeMantissa;
+  }
+  const int even = (m2 & 1) == 0;
+  const int acceptBounds = even;
+  const uint64_t mv = 4 * m2;
+  const uint32_t mmShift = (ieeeMantissa != 0 || ieeeExponent <= 1) ? 1 : 0;
+  uint64_t vr, vp, vm;
+  int32_t e10;
+  int vmIsTrailingZeros = 0, vrIsTrailingZeros = 0;
+  uint64_t pow5[2];
+  if (e2 >= 0) {
+    const uint32_t q = wiz_ryu_log10pow2(e2) - (e2 > 3);
+    e10 = (int32_t)q;
+    const int32_t k = WIZ_RYU_POW5_INV_BITCOUNT + wiz_ryu_pow5bits((int32_t)q) - 1;
+    const int32_t i = -e2 + (int32_t)q + k;
+    wiz_ryu_compute_inv_pow5(q, pow5);
+    vr = wiz_ryu_mulshiftall64(m2, pow5, i, &vp, &vm, mmShift);
+    if (q <= 21) {
+      const uint32_t mvMod5 = (uint32_t)mv - 5 * (uint32_t)wiz_ryu_div5(mv);
+      if (mvMod5 == 0) {
+        vrIsTrailingZeros = wiz_ryu_multiple_of_power_of_5(mv, q);
+      } else if (acceptBounds) {
+        vmIsTrailingZeros = wiz_ryu_multiple_of_power_of_5(mv - 1 - mmShift, q);
+      } else {
+        if (wiz_ryu_multiple_of_power_of_5(mv + 2, q)) --vp;
+      }
+    }
+  } else {
+    const uint32_t q = wiz_ryu_log10pow5(-e2) - (-e2 > 1);
+    e10 = (int32_t)q + e2;
+    const int32_t i = -e2 - (int32_t)q;
+    const int32_t k = wiz_ryu_pow5bits(i) - WIZ_RYU_POW5_BITCOUNT;
+    const int32_t j = (int32_t)q - k;
+    wiz_ryu_compute_pow5((uint32_t)i, pow5);
+    vr = wiz_ryu_mulshiftall64(m2, pow5, j, &vp, &vm, mmShift);
+    if (q <= 1) {
+      vrIsTrailingZeros = 1;
+      if (acceptBounds) vmIsTrailingZeros = mmShift == 1;
+      else --vp;
+    } else if (q < 63) {
+      vrIsTrailingZeros = wiz_ryu_multiple_of_power_of_2(mv, q);
+    }
+  }
+  int32_t removed = 0;
+  uint8_t lastRemovedDigit = 0;
+  uint64_t output;
+  if (vmIsTrailingZeros || vrIsTrailingZeros) {
+    for (;;) {
+      const uint64_t vpDiv10 = wiz_ryu_div10(vp);
+      const uint64_t vmDiv10 = wiz_ryu_div10(vm);
+      if (vpDiv10 <= vmDiv10) break;
+      const uint32_t vmMod10 = (uint32_t)vm - 10 * (uint32_t)vmDiv10;
+      const uint64_t vrDiv10 = wiz_ryu_div10(vr);
+      const uint32_t vrMod10 = (uint32_t)vr - 10 * (uint32_t)vrDiv10;
+      vmIsTrailingZeros &= vmMod10 == 0;
+      vrIsTrailingZeros &= lastRemovedDigit == 0;
+      lastRemovedDigit = (uint8_t)vrMod10;
+      vr = vrDiv10;
+      vp = vpDiv10;
+      vm = vmDiv10;
+      ++removed;
+    }
+    if (vmIsTrailingZeros) {
+      for (;;) {
+        const uint64_t vmDiv10 = wiz_ryu_div10(vm);
+        const uint32_t vmMod10 = (uint32_t)vm - 10 * (uint32_t)vmDiv10;
+        if (vmMod10 != 0) break;
+        const uint64_t vpDiv10 = wiz_ryu_div10(vp);
+        const uint64_t vrDiv10 = wiz_ryu_div10(vr);
+        const uint32_t vrMod10 = (uint32_t)vr - 10 * (uint32_t)vrDiv10;
+        vrIsTrailingZeros &= lastRemovedDigit == 0;
+        lastRemovedDigit = (uint8_t)vrMod10;
+        vr = vrDiv10;
+        vp = vpDiv10;
+        vm = vmDiv10;
+        ++removed;
+      }
+    }
+    if (vrIsTrailingZeros && lastRemovedDigit == 5 && vr % 2 == 0) {
+      lastRemovedDigit = 4;
+    }
+    output = vr + ((vr == vm && (!acceptBounds || !vmIsTrailingZeros)) || lastRemovedDigit >= 5);
+  } else {
+    int roundUp = 0;
+    const uint64_t vpDiv100 = wiz_ryu_div100(vp);
+    const uint64_t vmDiv100 = wiz_ryu_div100(vm);
+    if (vpDiv100 > vmDiv100) {
+      const uint64_t vrDiv100 = wiz_ryu_div100(vr);
+      const uint32_t vrMod100 = (uint32_t)vr - 100 * (uint32_t)vrDiv100;
+      roundUp = vrMod100 >= 50;
+      vr = vrDiv100;
+      vp = vpDiv100;
+      vm = vmDiv100;
+      removed += 2;
+    }
+    for (;;) {
+      const uint64_t vpDiv10 = wiz_ryu_div10(vp);
+      const uint64_t vmDiv10 = wiz_ryu_div10(vm);
+      if (vpDiv10 <= vmDiv10) break;
+      const uint64_t vrDiv10 = wiz_ryu_div10(vr);
+      const uint32_t vrMod10 = (uint32_t)vr - 10 * (uint32_t)vrDiv10;
+      roundUp = vrMod10 >= 5;
+      vr = vrDiv10;
+      vp = vpDiv10;
+      vm = vmDiv10;
+      ++removed;
+    }
+    output = vr + (vr == vm || roundUp);
+  }
+  wiz_ryu_fd fd;
+  fd.mantissa = output;
+  fd.exponent = e10 + removed;
+  return fd;
+}
+
+/* the small-integer fast path: an integral double below 2^53 has an exact decimal
+   value; trailing zeros move into the exponent for the scientific form. */
+static int wiz_ryu_d2d_small_int(uint64_t ieeeMantissa, uint32_t ieeeExponent, wiz_ryu_fd *v) {
+  const uint64_t m2 = (1ull << WIZ_RYU_MANTISSA_BITS) | ieeeMantissa;
+  const int32_t e2 = (int32_t)ieeeExponent - WIZ_RYU_BIAS - WIZ_RYU_MANTISSA_BITS;
+  if (e2 > 0 || e2 < -52) return 0;
+  const uint64_t mask = (1ull << -e2) - 1;
+  if ((m2 & mask) != 0) return 0;
+  v->mantissa = m2 >> -e2;
+  v->exponent = 0;
+  return 1;
+}
+
+/* `d.dddE±x` (or `dE±x`) from the decimal `mantissa * 10^exponent`. */
+static int wiz_ryu_to_chars(wiz_ryu_fd v, int sign, char *result) {
+  int index = 0;
+  if (sign) result[index++] = '-';
+  uint64_t output = v.mantissa;
+  const uint32_t olength = wiz_ryu_decimal_length17(output);
+  char digits[20];
+  uint32_t i = 0;
+  do {
+    digits[i++] = (char)('0' + (output % 10));
+    output /= 10;
+  } while (output != 0);
+  /* `digits` is least-significant first; the first printed digit is the leading one */
+  for (uint32_t d = 0; d < olength; ++d) {
+    result[index++] = digits[olength - 1 - d];
+    if (d == 0 && olength > 1) result[index++] = '.';
+  }
+  result[index++] = 'E';
+  int32_t exp = v.exponent + (int32_t)olength - 1;
+  if (exp < 0) { result[index++] = '-'; exp = -exp; }
+  if (exp >= 100) {
+    result[index++] = (char)('0' + exp / 100);
+    result[index++] = (char)('0' + (exp / 10) % 10);
+    result[index++] = (char)('0' + exp % 10);
+  } else if (exp >= 10) {
+    result[index++] = (char)('0' + exp / 10);
+    result[index++] = (char)('0' + exp % 10);
+  } else {
+    result[index++] = (char)('0' + exp);
+  }
+  return index;
+}
+
+/* NaN (sign ignored: not part of the value), ±Infinity, ±0 */
+static int wiz_ryu_special(char *result, int sign, int exponent, int mantissa) {
+  if (mantissa) { memcpy(result, "NaN", 3); return 3; }
+  int i = 0;
+  if (sign) result[i++] = '-';
+  if (exponent) { memcpy(result + i, "Infinity", 8); return i + 8; }
+  memcpy(result + i, "0E0", 3);
+  return i + 3;
+}
+
+/* The shortest round-tripping text for `f` (no terminator); returns its length. */
+static int wiz_ryu_d2s(double f, char *result) {
+  uint64_t bits;
+  memcpy(&bits, &f, sizeof bits);
+  const int sign = (int)((bits >> (WIZ_RYU_MANTISSA_BITS + WIZ_RYU_EXPONENT_BITS)) & 1);
+  const uint64_t ieeeMantissa = bits & ((1ull << WIZ_RYU_MANTISSA_BITS) - 1);
+  const uint32_t ieeeExponent =
+    (uint32_t)((bits >> WIZ_RYU_MANTISSA_BITS) & ((1u << WIZ_RYU_EXPONENT_BITS) - 1));
+  if (ieeeExponent == ((1u << WIZ_RYU_EXPONENT_BITS) - 1u) ||
+      (ieeeExponent == 0 && ieeeMantissa == 0)) {
+    return wiz_ryu_special(result, sign, (int)ieeeExponent, (int)ieeeMantissa);
+  }
+  wiz_ryu_fd v;
+  if (wiz_ryu_d2d_small_int(ieeeMantissa, ieeeExponent, &v)) {
+    for (;;) {
+      const uint64_t q = v.mantissa / 10;
+      if (v.mantissa != 10 * q) break;
+      v.mantissa = q;
+      ++v.exponent;
+    }
+  } else {
+    v = wiz_ryu_d2d(ieeeMantissa, ieeeExponent);
+  }
+  return wiz_ryu_to_chars(v, sign, result);
+}
+
+WIZ_API const char *wiz_f64_show(double a) {
+  static __thread char buf[40];
+  int n = wiz_ryu_d2s(a, buf);
+  buf[n] = 0;
+  return buf;
+}
 WIZ_API const char *wiz_nat_show(uint64_t a) { static __thread char buf[32]; snprintf(buf, sizeof buf, "%llu", (unsigned long long)a); return buf; }
 
 /* (P2) The step budget of a proof's read-back in the self-hosted toolchain (selfhost/Kernel.wiz,

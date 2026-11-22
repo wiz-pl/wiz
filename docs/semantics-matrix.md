@@ -585,30 +585,30 @@ its two's-complement pattern.
 
 | cell | expected | sources | derivation |
 |---|---|---|---|
-| `0` | `0` | L | ofNat 0 |
-| `-0` | `-0` | L | 0 * -1: the sign bit is set |
-| `1` | `1` | L | ofNat 1 |
-| `0.1` | `0.10000000000000001` | L | the nearest double to 1/10 |
-| `1/3` | `0.33333333333333331` | L | the nearest double to 1/3 |
-| `0.1+0.2` | `0.30000000000000004` | L | the nearest double to 0.1 + 0.2 |
-| `2^53` | `9007199254740992` | L | exactly representable |
-| `2^53+1` | `9007199254740992` | L | rounds to even |
-| `2^53+3` | `9007199254740996` | L | rounds to even |
-| `2^63-1` | `9.2233720368547758e+18` | L | rounds up: 2^63 is nearer than 2^63 - 1 |
-| `2^64-1` | `1.8446744073709552e+19` | L | rounds up to 2^64, printed by %.17g |
-| `inf` | `inf` | L | 1/0 |
-| `-inf` | `-inf` | L | -1/0 |
-| `nan` | `-nan` | L | 0/0 is a NaN; x86's default NaN has the sign bit set (glibc prints -nan) |
-| `inf-inf` | `-nan` | L | inf - inf is a NaN |
-| `inf+1` | `inf` | L | inf + 1 = inf |
-| `inf*0` | `-nan` | L | inf * 0 is a NaN |
-| `1/inf` | `0` | L | 1/inf = 0 |
-| `min-subnormal` | `4.9406564584124654e-324` | L | 2^-1074: the least positive subnormal (halving 1074 times) |
-| `below-min-subnormal` | `0` | L | 2^-1075 rounds to even: 0 |
-| `max-normal` | `8.9884656743115795e+307` | L | 2^1023 |
-| `overflow` | `inf` | L | 2^1024 overflows to inf |
-| `subnormal+subnormal` | `9.8813129168249309e-324` | L | 2 * 2^-1074 |
-| `subnormal/2` | `0` | L | the least subnormal / 2 rounds to even: 0 |
+| `0` | `0E0` | L | ofNat 0 |
+| `-0` | `-0E0` | L | 0 * -1: the sign bit is set |
+| `1` | `1E0` | L | ofNat 1 |
+| `0.1` | `1E-1` | L | the nearest double to 1/10 |
+| `1/3` | `3.333333333333333E-1` | L | the nearest double to 1/3 |
+| `0.1+0.2` | `3.0000000000000004E-1` | L | the nearest double to 0.1 + 0.2 |
+| `2^53` | `9.007199254740992E15` | L | exactly representable |
+| `2^53+1` | `9.007199254740992E15` | L | rounds to even |
+| `2^53+3` | `9.007199254740996E15` | L | rounds to even |
+| `2^63-1` | `9.223372036854776E18` | L | rounds up: 2^63 is nearer than 2^63 - 1 |
+| `2^64-1` | `1.8446744073709552E19` | L | rounds up to 2^64; Ryu prints the shortest round-trip text |
+| `inf` | `Infinity` | L | 1/0 |
+| `-inf` | `-Infinity` | L | -1/0 |
+| `nan` | `NaN` | L | 0/0 is a NaN; a NaN's sign bit is not part of its value, so it prints NaN |
+| `inf-inf` | `NaN` | L | inf - inf is a NaN |
+| `inf+1` | `Infinity` | L | inf + 1 = inf |
+| `inf*0` | `NaN` | L | inf * 0 is a NaN |
+| `1/inf` | `0E0` | L | 1/inf = 0 |
+| `min-subnormal` | `5E-324` | L | 2^-1074: the least positive subnormal (halving 1074 times) |
+| `below-min-subnormal` | `0E0` | L | 2^-1075 rounds to even: 0 |
+| `max-normal` | `8.98846567431158E307` | L | 2^1023 |
+| `overflow` | `Infinity` | L | 2^1024 overflows to inf |
+| `subnormal+subnormal` | `1E-323` | L | 2 * 2^-1074 |
+| `subnormal/2` | `0E0` | L | the least subnormal / 2 rounds to even: 0 |
 | `nan<1` | `0` | L | all comparisons with NaN are false |
 | `1<nan` | `0` | L | all comparisons with NaN are false |
 | `nan<nan` | `0` | L | NaN < NaN is false |
@@ -620,21 +620,21 @@ its two's-complement pattern.
 | `min-sub<0` | `0` | L | a positive subnormal is > 0 |
 | `0<min-sub` | `1` | L | 0 < the least positive subnormal |
 | `2^53=2^53+1` | `0` | L | both convert to the same double: not less |
-| `ofNat 10^19` | `1e+19` | L | above 2^63, still below 2^64 |
-| `ofNat 2^64` | `1.8446744073709552e+19` | L | the first Nat the native cannot take |
-| `ofNat 2^64+2^11-1` | `1.8446744073709552e+19` | L | just below the tie: rounds down to 2^64 |
-| `ofNat 2^64+2^11` | `1.8446744073709552e+19` | L | a tie; the 53-bit mantissa is even, so round to even: down |
-| `ofNat 2^64+2^11+1` | `1.8446744073709556e+19` | L | just above the tie: up |
-| `ofNat 2^64+3*2^11` | `1.844674407370956e+19` | L | a tie; the mantissa is odd, so round to even: up |
-| `ofNat 2^64+2^12` | `1.8446744073709556e+19` | L | exactly representable |
-| `ofNat 2^65-1` | `3.6893488147419103e+19` | L | rounds up to 2^65 |
-| `ofNat 2^100` | `1.2676506002282294e+30` | L | the nearest Float64 to 2^100 |
-| `ofNat 2^100+2^47` | `1.2676506002282294e+30` | L | a tie far out; the mantissa is even: down |
-| `ofNat 2^100+3*2^47` | `1.26765060022823e+30` | L | a tie far out; the mantissa is odd: up |
-| `ofNat 2^1023` | `8.9884656743115795e+307` | L | the largest power of two below overflow |
-| `ofNat 2^1024` | `inf` | L | overflows to inf |
-| `ofNat 2^1024-1` | `inf` | L | rounds up to 2^1024: inf |
-| `ofNat 2^100000` | `inf` | L | the early inf branch (no huge shift) |
+| `ofNat 10^19` | `1E19` | L | above 2^63, still below 2^64 |
+| `ofNat 2^64` | `1.8446744073709552E19` | L | the first Nat the native cannot take |
+| `ofNat 2^64+2^11-1` | `1.8446744073709552E19` | L | just below the tie: rounds down to 2^64 |
+| `ofNat 2^64+2^11` | `1.8446744073709552E19` | L | a tie; the 53-bit mantissa is even, so round to even: down |
+| `ofNat 2^64+2^11+1` | `1.8446744073709556E19` | L | just above the tie: up |
+| `ofNat 2^64+3*2^11` | `1.844674407370956E19` | L | a tie; the mantissa is odd, so round to even: up |
+| `ofNat 2^64+2^12` | `1.8446744073709556E19` | L | exactly representable |
+| `ofNat 2^65-1` | `3.6893488147419103E19` | L | rounds up to 2^65 |
+| `ofNat 2^100` | `1.2676506002282294E30` | L | the nearest Float64 to 2^100 |
+| `ofNat 2^100+2^47` | `1.2676506002282294E30` | L | a tie far out; the mantissa is even: down |
+| `ofNat 2^100+3*2^47` | `1.26765060022823E30` | L | a tie far out; the mantissa is odd: up |
+| `ofNat 2^1023` | `8.98846567431158E307` | L | the largest power of two below overflow |
+| `ofNat 2^1024` | `Infinity` | L | overflows to inf |
+| `ofNat 2^1024-1` | `Infinity` | L | rounds up to 2^1024: inf |
+| `ofNat 2^100000` | `Infinity` | L | the early inf branch (no huge shift) |
 
 ### `String` and `Bytes` (UTF-8)
 
@@ -734,7 +734,7 @@ its two's-complement pattern.
 
 | cell(s) | before | decision |
 |---|---|---|
-| `ofNat 2^64`, `ofNat 2^100` (and the 13 other `ofNat` cells above `2^64`) | Lean → C aborted with "a number is too big for a C integer" | the **implementation** was wrong (the documented value is the nearest `Float64`), so spec first: `Float64.ofNat` now rounds (see below). After: `1.8446744073709552e+19`, `1.2676506002282294e+30` |
+| `ofNat 2^64`, `ofNat 2^100` (and the 13 other `ofNat` cells above `2^64`) | Lean → C aborted with "a number is too big for a C integer" | the **implementation** was wrong (the documented value is the nearest `Float64`), so spec first: `Float64.ofNat` now rounds (see below). After (Ryu's form): `1.8446744073709552E19`, `1.2676506002282294E30` |
 | `intn.1.1>> huge` | the matrix expected `0`, C gave `1` | the **matrix** was wrong: at width 1 the numeral `1` is the signed value `-1`, so an arithmetic shift keeps `1` (all ones). The generator now reads the signed value; C was right |
 | `uintn.0.1%max`, `uintn.0.0 lt 1`, … | the matrix expected the values of 1 at width 0 | the **matrix** was wrong: width 0 has one value, `0`; the generator now masks every unsigned operand at its width |
 | `text..surrogate round trip` | the harness used `String.length (Bytes.toUtf8 …)` (`Except String String`) | the **harness** expression was wrong; the value (`1`, U+FFFD) was right |
@@ -771,11 +771,12 @@ kernel` on this machine).
   carry to the next binade (`2^65 - 1`) and overflow.
 * **`Float64` has no `beq`, no total order and no `toNat`.** `lt` is the only
   comparison, and there is no conversion from a float to an integer; a value is
-  observed only as text. `Float64.toString` is documented as C's `%.17g`;
-  `-nan` is glibc's spelling for the default NaN (on x86 `0.0/0.0` has the sign
-  bit set), while the spec says only "NaN", so the sign is under-specified.
-  The cells pin the observable values (including subnormals, overflow and the
-  round-to-even ties at `2^53`).
+  observed only as text. `Float64.toString` is Ryu's shortest round-trip text in
+  scientific form (`1E0`, `5E-324`), so the printed value determines the double
+  and does not depend on the libc; `NaN` carries no sign (a NaN's sign bit is not
+  part of its value), `-0.0` keeps its sign as `-0E0`, and infinity prints
+  `Infinity`/`-Infinity`. The cells pin the observable values (including
+  subnormals, overflow and the round-to-even ties at `2^53`).
 * **No rotate primitive.** Neither `UIntN`/`IntN` nor `BitVec` has
   `rotateLeft`/`rotateRight`. The `rotl` cells pin the composition
   `(a << k) | (a >> (w - k))`. It is total: for `k >= w` the left shift is `0`
@@ -795,8 +796,8 @@ kernel` on this machine).
 * **Still under-specified (not cheap to settle here).**
   * **No total order on `Float64`.** Only `lt` exists; there is no `beq`, `le`
     or total order, and no `toNat` (a float is observed only as text).
-  * **`Float64` NaN payload/sign.** `toString` is C's `%.17g`; `-nan` is
-    glibc's spelling for the x86 default NaN, while the spec says only "NaN".
+  * **`Float64` NaN payload.** `toString` prints `NaN` for every NaN; the sign
+    bit and the payload are not observable, so no cell can pin them.
   * **`Float64` `lt` with NaN / signed zero** is IEEE (all comparisons with
     NaN false, `-0 = 0`), but there is no total order to pin.
   * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; `Bytes.ofUtf8`

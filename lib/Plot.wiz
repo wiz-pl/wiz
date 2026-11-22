@@ -23,7 +23,8 @@ def chart : Plot.Chart := Plot.labels "quarter" "units" (Plot.chart "Sales" sale
 **Arithmetic.** Every number here is exact: `Q` (`lib/Rat.wiz`) over `Int`, and integer
 pixels for the geometry. There is no `Float64` in the core: `Float64` is an *axiom* in
 `lib/IO.wiz` (opaque to the kernel and to `#eval`), so a plot that used it could not be
-checked or tested purely, and its text (`printf "%.17g"`) is a host detail. Data enters
+checked or tested purely, and its text (Ryu's shortest round-trip form) is a host
+detail. Data enters
 as `Q` (`Plot.frac 3 2`, `(3 : Q)`, …). There is no NaN or infinity in `Q`; a value that
 has none of those (a finite decimal) converts at the boundary. Log scales **drop**
 non-positive values instead of inventing a NaN coordinate, and a log axis with no

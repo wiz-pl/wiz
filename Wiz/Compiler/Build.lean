@@ -98,8 +98,8 @@ def compileC (tc : Toolchain) (src : String) (exe : System.FilePath) (link : Lin
   -- (9f) the `link_c` files are compiled with the program, with the same flags
   -- (9g: a library is an object file, linked by the C program that uses it, which
   -- also brings the `link_c` files and libraries)
-  let args := if lib then #["-O2", "-w", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
-    #["-O2", "-w", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
+  let args := if lib then #["-O2", "-w", "-ffp-contract=off", "-c", "-o", exe.toString, cFile.toString] ++ tc.cflags.toArray ++ map else
+    #["-O2", "-w", "-ffp-contract=off", "-o", exe.toString, cFile.toString] ++ link.sources ++ tc.cflags.toArray ++ map ++
     tc.gmp.toArray ++ tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags
   try
     let out ← IO.Process.output { cmd := cc, args }
@@ -117,7 +117,7 @@ def runCC (cmd : String) (args : Array String) : IO (Except String Unit) := do
 structure SplitObject where
   /-- the C compiler -/
   cc : String
-  /-- every flag `cc` gets for this unit: `-O2 -w -c`, `-DWIZ_API=` for the support unit,
+  /-- every flag `cc` gets for this unit: `-O2 -w -ffp-contract=off -c`, `-DWIZ_API=` for the support unit,
   `--cflags`, and the `-ffile-prefix-map`s that name the build directory (which `-g`
   records in the object) -/
   flags : Array String
@@ -180,11 +180,11 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   -- (F36) the key names the *actual* flags `cc -c` is given for the unit (plus its
   -- include environment), not a re-spelling of some of them
   let flagsOf (api : Bool) : Array String :=
-    #["-O2", "-w", "-c"] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map
+    #["-O2", "-w", "-ffp-contract=off", "-c"] ++ (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map
   let keyOf (text header : String) (api : Bool) : String :=
     splitObjectKey { cc, flags := flagsOf api, env, text, header }
   let ccOne (file obj : String) (api : Bool) : IO (Except String Unit) :=
-    runCC cc (#["-O2", "-w", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
+    runCC cc (#["-O2", "-w", "-ffp-contract=off", "-c", "-o", (dir / obj).toString, (dir / file).toString] ++
       (if api then #["-DWIZ_API="] else #[]) ++ cflags ++ map)
   let err ← IO.mkRef (none : Option String)
   let mut todo : Array (String × Bool × String) := #[]
@@ -211,7 +211,7 @@ def compileDecls (tc : Toolchain) (decls : Array IR.Decl) (io : Bool) (extra : S
   for t in tasks do collect t
   if let some e ← err.get then return .error e
   let objs := inputs.map fun (name, _, _) => (dir / (name ++ ".o")).toString
-  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
+  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w", "-ffp-contract=off"] ++ link.sources ++ cflags
   runCC cc (#["-o", out.toString] ++ objs ++ srcArgs ++ tc.gmp.toArray ++ tc.ldflags.toArray ++
     tc.libs.toArray ++ link.libFlags)
 
@@ -233,14 +233,14 @@ def compileLLVM (tc : Toolchain) (ll : String) (exe : System.FilePath) (glue : S
     catch e => pure (.error s!"{cmd}: {e}")
   let rtObj := exe.withFileName "wiz_runtime.o"
   let mainObj := if lib then exe.withFileName ((exe.fileStem.getD "wiz") ++ "_module.o") else exe.withExtension "o"
-  if let .error e ← step cc (#["-O2", "-w", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
+  if let .error e ← step cc (#["-O2", "-w", "-ffp-contract=off", "-c", "-DWIZ_API=", "-o", rtObj.toString, rtFile.toString] ++ cflags ++ map) then
     return .error e
   if let .error e ← step llc #["-O2", "-filetype=obj", "-relocation-model=pic", "-o", mainObj.toString, llFile.toString] then
     return .error e
   -- (9g: a library is the two objects as one, `-r`)
   if lib then return ← step cc #["-r", "-o", exe.toString, mainObj.toString, rtObj.toString]
   -- (9f) the `link_c` files are compiled by the linking step, with the C flags
-  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w"] ++ link.sources ++ cflags
+  let srcArgs := if link.sources.isEmpty then #[] else #["-O2", "-w", "-ffp-contract=off"] ++ link.sources ++ cflags
   step cc (#["-o", exe.toString, mainObj.toString, rtObj.toString] ++ srcArgs ++ tc.gmp.toArray ++
     tc.ldflags.toArray ++ tc.libs.toArray ++ link.libFlags)
 

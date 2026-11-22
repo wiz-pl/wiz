@@ -3576,30 +3576,30 @@ int..-1 beq 0	int		cmp	-1 beq 0	b2n (Int.beq (Int.neg (Int.ofNat 1)) (Int.ofNat 
 int..0 beq -1	int		cmp	0 beq -1	b2n (Int.beq (Int.ofNat 0) (Int.neg (Int.ofNat 1)))	0	nat	True	False	signed comparison
 int..-1267650600228229401496703205376 beq 1267650600228229401496703205376	int		cmp	-1267650600228229401496703205376 beq 1267650600228229401496703205376	b2n (Int.beq (Int.neg (Int.ofNat 1267650600228229401496703205376)) (Int.ofNat 1267650600228229401496703205376))	0	nat	True	False	signed comparison
 int..3 beq 3	int		cmp	3 beq 3	b2n (Int.beq (Int.ofNat 3) (Int.ofNat 3))	1	nat	True	False	signed comparison
-float..0	float		show	0	(Float64.ofNat 0)	0	str	False	False	ofNat 0
-float..-0	float		show	-0	Float64.mul (Float64.ofNat 0) (Float64.sub (Float64.ofNat 0) (Float64.ofNat 1))	-0	str	False	False	0 * -1: the sign bit is set
-float..1	float		show	1	(Float64.ofNat 1)	1	str	False	False	ofNat 1
-float..0.1	float		show	0.1	Float64.div (Float64.ofNat 1) (Float64.ofNat 10)	0.10000000000000001	str	False	False	the nearest double to 1/10
-float..1/3	float		show	1/3	Float64.div (Float64.ofNat 1) (Float64.ofNat 3)	0.33333333333333331	str	False	False	the nearest double to 1/3
-float..0.1+0.2	float		show	0.1+0.2	Float64.add (Float64.div (Float64.ofNat 1) (Float64.ofNat 10)) (Float64.div (Float64.ofNat 1) (Float64.ofNat 5))	0.30000000000000004	str	False	False	the nearest double to 0.1 + 0.2
-float..2^53	float		show	2^53	Float64.ofNat 9007199254740992	9007199254740992	str	False	False	exactly representable
-float..2^53+1	float		show	2^53+1	Float64.ofNat 9007199254740993	9007199254740992	str	False	False	rounds to even
-float..2^53+3	float		show	2^53+3	Float64.ofNat 9007199254740995	9007199254740996	str	False	False	rounds to even
-float..2^63-1	float		show	2^63-1	Float64.ofNat 9223372036854775807	9.2233720368547758e+18	str	False	False	rounds up: 2^63 is nearer than 2^63 - 1
-float..2^64-1	float		show	2^64-1	Float64.ofNat 18446744073709551615	1.8446744073709552e+19	str	False	False	rounds up to 2^64, printed by %.17g
-float..inf	float		show	inf	Float64.div (Float64.ofNat 1) (Float64.ofNat 0)	inf	str	False	False	1/0
-float..-inf	float		show	-inf	Float64.div (Float64.sub (Float64.ofNat 0) (Float64.ofNat 1)) (Float64.ofNat 0)	-inf	str	False	False	-1/0
-float..nan	float		show	nan	Float64.div (Float64.ofNat 0) (Float64.ofNat 0)	-nan	str	False	False	0/0 is a NaN; x86's default NaN has the sign bit set (glibc prints -nan)
-float..inf-inf	float		show	inf-inf	Float64.sub (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.div (Float64.ofNat 1) (Float64.ofNat 0))	-nan	str	False	False	inf - inf is a NaN
-float..inf+1	float		show	inf+1	Float64.add (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.ofNat 1)	inf	str	False	False	inf + 1 = inf
-float..inf*0	float		show	inf*0	Float64.mul (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.ofNat 0)	-nan	str	False	False	inf * 0 is a NaN
-float..1/inf	float		show	1/inf	Float64.div (Float64.ofNat 1) (Float64.div (Float64.ofNat 1) (Float64.ofNat 0))	0	str	False	False	1/inf = 0
-float..min-subnormal	float		show	min-subnormal	halve 1074 (Float64.ofNat 1)	4.9406564584124654e-324	str	False	False	2^-1074: the least positive subnormal (halving 1074 times)
-float..below-min-subnormal	float		show	below-min-subnormal	halve 1075 (Float64.ofNat 1)	0	str	False	False	2^-1075 rounds to even: 0
-float..max-normal	float		show	max-normal	double 1023 (Float64.ofNat 1)	8.9884656743115795e+307	str	False	False	2^1023
-float..overflow	float		show	overflow	double 1024 (Float64.ofNat 1)	inf	str	False	False	2^1024 overflows to inf
-float..subnormal+subnormal	float		show	subnormal+subnormal	Float64.add (halve 1074 (Float64.ofNat 1)) (halve 1074 (Float64.ofNat 1))	9.8813129168249309e-324	str	False	False	2 * 2^-1074
-float..subnormal/2	float		show	subnormal/2	halve 1 (halve 1074 (Float64.ofNat 1))	0	str	False	False	the least subnormal / 2 rounds to even: 0
+float..0	float		show	0	(Float64.ofNat 0)	0E0	str	False	False	ofNat 0
+float..-0	float		show	-0	Float64.mul (Float64.ofNat 0) (Float64.sub (Float64.ofNat 0) (Float64.ofNat 1))	-0E0	str	False	False	0 * -1: the sign bit is set
+float..1	float		show	1	(Float64.ofNat 1)	1E0	str	False	False	ofNat 1
+float..0.1	float		show	0.1	Float64.div (Float64.ofNat 1) (Float64.ofNat 10)	1E-1	str	False	False	the nearest double to 1/10
+float..1/3	float		show	1/3	Float64.div (Float64.ofNat 1) (Float64.ofNat 3)	3.333333333333333E-1	str	False	False	the nearest double to 1/3
+float..0.1+0.2	float		show	0.1+0.2	Float64.add (Float64.div (Float64.ofNat 1) (Float64.ofNat 10)) (Float64.div (Float64.ofNat 1) (Float64.ofNat 5))	3.0000000000000004E-1	str	False	False	the nearest double to 0.1 + 0.2
+float..2^53	float		show	2^53	Float64.ofNat 9007199254740992	9.007199254740992E15	str	False	False	exactly representable
+float..2^53+1	float		show	2^53+1	Float64.ofNat 9007199254740993	9.007199254740992E15	str	False	False	rounds to even
+float..2^53+3	float		show	2^53+3	Float64.ofNat 9007199254740995	9.007199254740996E15	str	False	False	rounds to even
+float..2^63-1	float		show	2^63-1	Float64.ofNat 9223372036854775807	9.223372036854776E18	str	False	False	rounds up: 2^63 is nearer than 2^63 - 1
+float..2^64-1	float		show	2^64-1	Float64.ofNat 18446744073709551615	1.8446744073709552E19	str	False	False	rounds up to 2^64; Ryu prints the shortest round-trip text
+float..inf	float		show	inf	Float64.div (Float64.ofNat 1) (Float64.ofNat 0)	Infinity	str	False	False	1/0
+float..-inf	float		show	-inf	Float64.div (Float64.sub (Float64.ofNat 0) (Float64.ofNat 1)) (Float64.ofNat 0)	-Infinity	str	False	False	-1/0
+float..nan	float		show	nan	Float64.div (Float64.ofNat 0) (Float64.ofNat 0)	NaN	str	False	False	0/0 is a NaN; a NaN's sign bit is not part of its value, so it prints NaN
+float..inf-inf	float		show	inf-inf	Float64.sub (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.div (Float64.ofNat 1) (Float64.ofNat 0))	NaN	str	False	False	inf - inf is a NaN
+float..inf+1	float		show	inf+1	Float64.add (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.ofNat 1)	Infinity	str	False	False	inf + 1 = inf
+float..inf*0	float		show	inf*0	Float64.mul (Float64.div (Float64.ofNat 1) (Float64.ofNat 0)) (Float64.ofNat 0)	NaN	str	False	False	inf * 0 is a NaN
+float..1/inf	float		show	1/inf	Float64.div (Float64.ofNat 1) (Float64.div (Float64.ofNat 1) (Float64.ofNat 0))	0E0	str	False	False	1/inf = 0
+float..min-subnormal	float		show	min-subnormal	halve 1074 (Float64.ofNat 1)	5E-324	str	False	False	2^-1074: the least positive subnormal (halving 1074 times)
+float..below-min-subnormal	float		show	below-min-subnormal	halve 1075 (Float64.ofNat 1)	0E0	str	False	False	2^-1075 rounds to even: 0
+float..max-normal	float		show	max-normal	double 1023 (Float64.ofNat 1)	8.98846567431158E307	str	False	False	2^1023
+float..overflow	float		show	overflow	double 1024 (Float64.ofNat 1)	Infinity	str	False	False	2^1024 overflows to inf
+float..subnormal+subnormal	float		show	subnormal+subnormal	Float64.add (halve 1074 (Float64.ofNat 1)) (halve 1074 (Float64.ofNat 1))	1E-323	str	False	False	2 * 2^-1074
+float..subnormal/2	float		show	subnormal/2	halve 1 (halve 1074 (Float64.ofNat 1))	0E0	str	False	False	the least subnormal / 2 rounds to even: 0
 float..nan<1	float		cmp	nan<1	b2n (Float64.lt (Float64.div (Float64.ofNat 0) (Float64.ofNat 0)) (Float64.ofNat 1))	0	nat	False	False	all comparisons with NaN are false
 float..1<nan	float		cmp	1<nan	b2n (Float64.lt (Float64.ofNat 1) (Float64.div (Float64.ofNat 0) (Float64.ofNat 0)))	0	nat	False	False	all comparisons with NaN are false
 float..nan<nan	float		cmp	nan<nan	b2n (Float64.lt (Float64.div (Float64.ofNat 0) (Float64.ofNat 0)) (Float64.div (Float64.ofNat 0) (Float64.ofNat 0)))	0	nat	False	False	NaN < NaN is false
@@ -3611,21 +3611,21 @@ float..inf<inf	float		cmp	inf<inf	b2n (Float64.lt (Float64.div (Float64.ofNat 1)
 float..min-sub<0	float		cmp	min-sub<0	b2n (Float64.lt (halve 1074 (Float64.ofNat 1)) (Float64.ofNat 0))	0	nat	False	False	a positive subnormal is > 0
 float..0<min-sub	float		cmp	0<min-sub	b2n (Float64.lt (Float64.ofNat 0) (halve 1074 (Float64.ofNat 1)))	1	nat	False	False	0 < the least positive subnormal
 float..2^53=2^53+1	float		cmp	2^53=2^53+1	b2n (Float64.lt (Float64.ofNat 9007199254740992) (Float64.ofNat 9007199254740993))	0	nat	False	False	both convert to the same double: not less
-float..ofNat 10^19	float		show	ofNat 10^19	Float64.ofNat 10000000000000000000	1e+19	str	False	False	above 2^63, still below 2^64
-float..ofNat 2^64	float		show	ofNat 2^64	Float64.ofNat (Nat.pow 2 64)	1.8446744073709552e+19	str	False	False	the first Nat the native cannot take
-float..ofNat 2^64+2^11-1	float		show	ofNat 2^64+2^11-1	Float64.ofNat (Nat.sub (Nat.add (Nat.pow 2 64) 2048) 1)	1.8446744073709552e+19	str	False	False	just below the tie: rounds down to 2^64
-float..ofNat 2^64+2^11	float		show	ofNat 2^64+2^11	Float64.ofNat (Nat.add (Nat.pow 2 64) 2048)	1.8446744073709552e+19	str	False	False	a tie; the 53-bit mantissa is even, so round to even: down
-float..ofNat 2^64+2^11+1	float		show	ofNat 2^64+2^11+1	Float64.ofNat (Nat.add (Nat.add (Nat.pow 2 64) 2048) 1)	1.8446744073709556e+19	str	False	False	just above the tie: up
-float..ofNat 2^64+3*2^11	float		show	ofNat 2^64+3*2^11	Float64.ofNat (Nat.add (Nat.pow 2 64) 6144)	1.844674407370956e+19	str	False	False	a tie; the mantissa is odd, so round to even: up
-float..ofNat 2^64+2^12	float		show	ofNat 2^64+2^12	Float64.ofNat (Nat.add (Nat.pow 2 64) 4096)	1.8446744073709556e+19	str	False	False	exactly representable
-float..ofNat 2^65-1	float		show	ofNat 2^65-1	Float64.ofNat (Nat.sub (Nat.pow 2 65) 1)	3.6893488147419103e+19	str	False	False	rounds up to 2^65
-float..ofNat 2^100	float		show	ofNat 2^100	Float64.ofNat (Nat.pow 2 100)	1.2676506002282294e+30	str	False	False	the nearest Float64 to 2^100
-float..ofNat 2^100+2^47	float		show	ofNat 2^100+2^47	Float64.ofNat (Nat.add (Nat.pow 2 100) 140737488355328)	1.2676506002282294e+30	str	False	False	a tie far out; the mantissa is even: down
-float..ofNat 2^100+3*2^47	float		show	ofNat 2^100+3*2^47	Float64.ofNat (Nat.add (Nat.pow 2 100) 422212465065984)	1.26765060022823e+30	str	False	False	a tie far out; the mantissa is odd: up
-float..ofNat 2^1023	float		show	ofNat 2^1023	Float64.ofNat (Nat.pow 2 1023)	8.9884656743115795e+307	str	False	False	the largest power of two below overflow
-float..ofNat 2^1024	float		show	ofNat 2^1024	Float64.ofNat (Nat.pow 2 1024)	inf	str	False	False	overflows to inf
-float..ofNat 2^1024-1	float		show	ofNat 2^1024-1	Float64.ofNat (Nat.sub (Nat.pow 2 1024) 1)	inf	str	False	False	rounds up to 2^1024: inf
-float..ofNat 2^100000	float		show	ofNat 2^100000	Float64.ofNat (Nat.pow 2 100000)	inf	str	False	False	the early inf branch (no huge shift)
+float..ofNat 10^19	float		show	ofNat 10^19	Float64.ofNat 10000000000000000000	1E19	str	False	False	above 2^63, still below 2^64
+float..ofNat 2^64	float		show	ofNat 2^64	Float64.ofNat (Nat.pow 2 64)	1.8446744073709552E19	str	False	False	the first Nat the native cannot take
+float..ofNat 2^64+2^11-1	float		show	ofNat 2^64+2^11-1	Float64.ofNat (Nat.sub (Nat.add (Nat.pow 2 64) 2048) 1)	1.8446744073709552E19	str	False	False	just below the tie: rounds down to 2^64
+float..ofNat 2^64+2^11	float		show	ofNat 2^64+2^11	Float64.ofNat (Nat.add (Nat.pow 2 64) 2048)	1.8446744073709552E19	str	False	False	a tie; the 53-bit mantissa is even, so round to even: down
+float..ofNat 2^64+2^11+1	float		show	ofNat 2^64+2^11+1	Float64.ofNat (Nat.add (Nat.add (Nat.pow 2 64) 2048) 1)	1.8446744073709556E19	str	False	False	just above the tie: up
+float..ofNat 2^64+3*2^11	float		show	ofNat 2^64+3*2^11	Float64.ofNat (Nat.add (Nat.pow 2 64) 6144)	1.844674407370956E19	str	False	False	a tie; the mantissa is odd, so round to even: up
+float..ofNat 2^64+2^12	float		show	ofNat 2^64+2^12	Float64.ofNat (Nat.add (Nat.pow 2 64) 4096)	1.8446744073709556E19	str	False	False	exactly representable
+float..ofNat 2^65-1	float		show	ofNat 2^65-1	Float64.ofNat (Nat.sub (Nat.pow 2 65) 1)	3.6893488147419103E19	str	False	False	rounds up to 2^65
+float..ofNat 2^100	float		show	ofNat 2^100	Float64.ofNat (Nat.pow 2 100)	1.2676506002282294E30	str	False	False	the nearest Float64 to 2^100
+float..ofNat 2^100+2^47	float		show	ofNat 2^100+2^47	Float64.ofNat (Nat.add (Nat.pow 2 100) 140737488355328)	1.2676506002282294E30	str	False	False	a tie far out; the mantissa is even: down
+float..ofNat 2^100+3*2^47	float		show	ofNat 2^100+3*2^47	Float64.ofNat (Nat.add (Nat.pow 2 100) 422212465065984)	1.26765060022823E30	str	False	False	a tie far out; the mantissa is odd: up
+float..ofNat 2^1023	float		show	ofNat 2^1023	Float64.ofNat (Nat.pow 2 1023)	8.98846567431158E307	str	False	False	the largest power of two below overflow
+float..ofNat 2^1024	float		show	ofNat 2^1024	Float64.ofNat (Nat.pow 2 1024)	Infinity	str	False	False	overflows to inf
+float..ofNat 2^1024-1	float		show	ofNat 2^1024-1	Float64.ofNat (Nat.sub (Nat.pow 2 1024) 1)	Infinity	str	False	False	rounds up to 2^1024: inf
+float..ofNat 2^100000	float		show	ofNat 2^100000	Float64.ofNat (Nat.pow 2 100000)	Infinity	str	False	False	the early inf branch (no huge shift)
 text..len empty	text		length	len empty	String.length ""	0	nat	True	True	0 Unicode scalar values (not UTF-8 bytes, not NFC-normalised)
 text..utf8 len empty	text		utf8len	utf8 len empty	Bytes.size (Bytes.ofUtf8 "")	0	nat	False	False	0 UTF-8 bytes: 
 text..len a	text		length	len a	String.length "a"	1	nat	True	True	1 Unicode scalar values (not UTF-8 bytes, not NFC-normalised)

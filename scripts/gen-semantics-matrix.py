@@ -478,14 +478,34 @@ def f64(x):
     return float(x)
 
 
-def cshow(x):
-    """C's `%.17g` (the documented `Float64.toString`), with glibc's spellings."""
+def ryu_show(x):
+    """`Float64.toString` since R6: Ryu's shortest round-trip text, scientific.
+
+    Python's repr is also the shortest round-tripping decimal (an independent
+    implementation of the same property), so it supplies the digits; this function
+    only rewrites them into Ryu's `d.dddE±x` form. Specials: `NaN` (sign ignored),
+    `±Infinity`, and `±0E0` (the sign of zero is part of the value).
+    """
     if x != x:
-        # glibc prints the sign of the NaN bit pattern; 0.0/0.0 is negative on x86.
-        return "-nan" if math.copysign(1.0, x) < 0 else "nan"
+        return "NaN"
     if math.isinf(x):
-        return "-inf" if x < 0 else "inf"
-    return format(x, ".17g")
+        return "-Infinity" if x < 0 else "Infinity"
+    if x == 0.0:
+        return "-0E0" if math.copysign(1.0, x) < 0 else "0E0"
+    s = repr(x)
+    neg = s.startswith("-")
+    if neg:
+        s = s[1:]
+    mant, _, ex = s.partition("e")
+    ex = int(ex) if ex else 0
+    ip, _, fp = mant.partition(".")
+    all_digits = ip + fp
+    first = len(all_digits) - len(all_digits.lstrip("0"))
+    digits = all_digits[first:].rstrip("0")
+    trailing = len(all_digits) - first - len(digits)
+    sci = ex - len(fp) + trailing + len(digits) - 1
+    text = digits[0] + ("." + digits[1:] if len(digits) > 1 else "") + "E" + str(sci)
+    return ("-" if neg else "") + text
 
 
 def float_cells():
@@ -494,7 +514,7 @@ def float_cells():
     neg1 = "(Float64.sub %s %s)" % (zero, one)
 
     def show(label, e, x, note, literal=None):
-        exp = literal if literal is not None else cshow(x)
+        exp = literal if literal is not None else ryu_show(x)
         cell("float", "", "show", label, e, exp, note, channel="str",
              interp=False, prelude=False)
 
@@ -521,18 +541,18 @@ def float_cells():
     show("2^63-1", "Float64.ofNat 9223372036854775807", float(2 ** 63 - 1),
          "rounds up: 2^63 is nearer than 2^63 - 1")
     show("2^64-1", "Float64.ofNat 18446744073709551615", float(2 ** 64 - 1),
-         "rounds up to 2^64, printed by %.17g")
+         "rounds up to 2^64; Ryu prints the shortest round-trip text")
     show("inf", "Float64.div %s %s" % (one, zero), float("inf"), "1/0")
     show("-inf", "Float64.div %s %s" % (neg1, zero), float("-inf"), "-1/0")
     show("nan", "Float64.div %s %s" % (zero, zero), 0.0,
-         "0/0 is a NaN; x86's default NaN has the sign bit set (glibc prints -nan)",
-         literal="-nan")
+         "0/0 is a NaN; a NaN's sign bit is not part of its value, so it prints NaN",
+         literal="NaN")
     show("inf-inf", "Float64.sub (Float64.div %s %s) (Float64.div %s %s)" % (one, zero, one, zero),
-         0.0, "inf - inf is a NaN", literal="-nan")
+         0.0, "inf - inf is a NaN", literal="NaN")
     show("inf+1", "Float64.add (Float64.div %s %s) %s" % (one, zero, one), float("inf"),
          "inf + 1 = inf")
     show("inf*0", "Float64.mul (Float64.div %s %s) %s" % (one, zero, zero), 0.0,
-         "inf * 0 is a NaN", literal="-nan")
+         "inf * 0 is a NaN", literal="NaN")
     show("1/inf", "Float64.div %s (Float64.div %s %s)" % (one, one, zero), 0.0,
          "1/inf = 0")
     show("min-subnormal", "halve 1074 %s" % one, 5e-324,
@@ -898,7 +918,7 @@ def gen_docs():
     w("")
     w("| cell(s) | before | decision |")
     w("|---|---|---|")
-    w("| `ofNat 2^64`, `ofNat 2^100` (and the 13 other `ofNat` cells above `2^64`) | Lean → C aborted with \"a number is too big for a C integer\" | the **implementation** was wrong (the documented value is the nearest `Float64`), so spec first: `Float64.ofNat` now rounds (see below). After: `1.8446744073709552e+19`, `1.2676506002282294e+30` |")
+    w("| `ofNat 2^64`, `ofNat 2^100` (and the 13 other `ofNat` cells above `2^64`) | Lean → C aborted with \"a number is too big for a C integer\" | the **implementation** was wrong (the documented value is the nearest `Float64`), so spec first: `Float64.ofNat` now rounds (see below). After (Ryu's form): `1.8446744073709552E19`, `1.2676506002282294E30` |")
     w("| `intn.1.1>> huge` | the matrix expected `0`, C gave `1` | the **matrix** was wrong: at width 1 the numeral `1` is the signed value `-1`, so an arithmetic shift keeps `1` (all ones). The generator now reads the signed value; C was right |")
     w("| `uintn.0.1%max`, `uintn.0.0 lt 1`, … | the matrix expected the values of 1 at width 0 | the **matrix** was wrong: width 0 has one value, `0`; the generator now masks every unsigned operand at its width |")
     w("| `text..surrogate round trip` | the harness used `String.length (Bytes.toUtf8 …)` (`Except String String`) | the **harness** expression was wrong; the value (`1`, U+FFFD) was right |")
@@ -945,11 +965,12 @@ def gen_docs():
     w("  carry to the next binade (`2^65 - 1`) and overflow.")
     w("* **`Float64` has no `beq`, no total order and no `toNat`.** `lt` is the only")
     w("  comparison, and there is no conversion from a float to an integer; a value is")
-    w("  observed only as text. `Float64.toString` is documented as C's `%.17g`;")
-    w("  `-nan` is glibc's spelling for the default NaN (on x86 `0.0/0.0` has the sign")
-    w("  bit set), while the spec says only \"NaN\", so the sign is under-specified.")
-    w("  The cells pin the observable values (including subnormals, overflow and the")
-    w("  round-to-even ties at `2^53`).")
+    w("  observed only as text. `Float64.toString` is Ryu's shortest round-trip text in")
+    w("  scientific form (`1E0`, `5E-324`), so the printed value determines the double")
+    w("  and does not depend on the libc; `NaN` carries no sign (a NaN's sign bit is not")
+    w("  part of its value), `-0.0` keeps its sign as `-0E0`, and infinity prints")
+    w("  `Infinity`/`-Infinity`. The cells pin the observable values (including")
+    w("  subnormals, overflow and the round-to-even ties at `2^53`).")
     w("* **No rotate primitive.** Neither `UIntN`/`IntN` nor `BitVec` has")
     w("  `rotateLeft`/`rotateRight`. The `rotl` cells pin the composition")
     w("  `(a << k) | (a >> (w - k))`. It is total: for `k >= w` the left shift is `0`")
@@ -969,8 +990,8 @@ def gen_docs():
     w("* **Still under-specified (not cheap to settle here).**")
     w("  * **No total order on `Float64`.** Only `lt` exists; there is no `beq`, `le`")
     w("    or total order, and no `toNat` (a float is observed only as text).")
-    w("  * **`Float64` NaN payload/sign.** `toString` is C's `%.17g`; `-nan` is")
-    w("    glibc's spelling for the x86 default NaN, while the spec says only \"NaN\".")
+    w("  * **`Float64` NaN payload.** `toString` prints `NaN` for every NaN; the sign")
+    w("    bit and the payload are not observable, so no cell can pin them.")
     w("  * **`Float64` `lt` with NaN / signed zero** is IEEE (all comparisons with")
     w("    NaN false, `-0 = 0`), but there is no total order to pin.")
     w("  * **Non-scalar `Char`s.** A `Char` is an unchecked `Nat` code; `Bytes.ofUtf8`")
