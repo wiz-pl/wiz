@@ -68,9 +68,11 @@ whether the per-site `-- lint: allow Wxxx (reason)` marker may silence it.
 | `W301` | missing-doc | api | warning | declaration | yes | a top-level public `def`/`abbrev`/`structure`/`class`/`inductive`/`coinductive`/`axiom`/`opaque`/`theorem` under a public root with no doc comment |
 | `W302` | unused-import | api | warning | module | yes | a direct import no target declaration uses, and that contributes no instance, syntax, notation, builtin, attribute, export or FFI/link effect |
 
-A rule retired later keeps its row as `default: off` (the code is never reused). The
-package code block (`W500`–`W999`) and the capability ABI are P1; P0 registers only the
-core rules above.
+A rule retired later keeps its row as `default: off` (the code is never reused). Core
+owns `W001`–`W499`; a package lint set owns `W500`–`W999` and registers its rules with
+`lint-set`/`lint` (`docs/lint-abi.md`). The registry refuses a code outside the package
+block, a duplicate in the enabled closure, and a rule whose declared capability the set
+does not declare. Core registers only the five rules above.
 
 One more quick fix is not keyed on a code: an error inside `@f a…` where `f` is given
 as many arguments as it has explicit parameters offers to let the implicit ones be

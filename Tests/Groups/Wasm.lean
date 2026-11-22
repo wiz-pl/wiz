@@ -248,6 +248,31 @@ def wasmGroup : Group where
   exercise := "Stage 8f"
   parallel := true
   cases := [
+    { name := "a function with no type entry is a compile error naming it", run := fun _ => do
+        -- the emitter indexes the type table by signature and used to fall back to
+        -- type 0, giving the function a different signature
+        let b : Wasm.Built :=
+          { types := Wasm.hostSigs.map (·.2),
+            funcs := #[{ name := "f", params := #[.i64], results := #[.i64] }],
+            tableSize := 0, heapStart := 16, data := #[], entry := 0 }
+        match Wasm.moduleBytes b with
+        | .ok _ => throw (IO.userError "a module with no type for its function was emitted")
+        | .error e =>
+          unless (e.splitOn "`f`").length > 1 do throw (IO.userError e) },
+    { name := "an entry outside the function table is a compile error", run := fun _ => do
+        let types := (Wasm.hostSigs.map (·.2)).push { params := #[], results := #[.i64] }
+        let b : Wasm.Built :=
+          { types := types, funcs := #[{ name := "f" }], tableSize := 0, heapStart := 16,
+            data := #[], entry := 1 }
+        match Wasm.moduleBytes b with
+        | .ok _ => throw (IO.userError "a module whose entry index is past its functions was emitted")
+        | .error e =>
+          unless (e.splitOn "entry").length > 1 do throw (IO.userError e) },
+    { name := "the type and runtime lookups are total", run := fun _ => do
+        check (Wasm.runtimeSig? "wiz_nat_add").isSome "a runtime function has a signature"
+        check (Wasm.runtimeSig? "wiz_no_such_function").isNone "an unknown runtime function has no signature"
+        check (Wasm.typeIndex? #[{ params := #[.i64], results := #[.i64] }]
+          { params := #[.i32], results := #[.i32] }).isNone "an unknown signature has no type index" },
     { name := "arithmetic (the interpreter is the oracle)", run := fun _ =>
         wasmGolden "import Prelude\ndef fact : Nat → Nat\n  | .zero => 1\n  | .succ n => (.succ n) * fact n\ndef main : Nat := fact 12 + 7 * 9 - (Nat.pred 0)" },
     { name := "arithmetic at every size (small and BigInt)", run := fun _ =>

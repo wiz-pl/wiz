@@ -298,6 +298,7 @@ where
                     | none => let (e, checked, memo) := isolate (); (isoPut ref k e, checked, memo)
                   | _, _ => isolate ()
                 (e.errs, checked.insert m (some e.errs), some e.state, memo.insert m e.state)
+            let outerLint := s
             let s := { s with checked }
             let (inner, memo) := match iso? with
               -- (a pristine state may still list imports, of modules without commands; the
@@ -329,7 +330,17 @@ where
             -- (13u) `open import M` is `import M` plus a file-scope `open M`
             let s' := if openImport then
                 { s' with globals := { s'.globals with opens := s'.globals.opens ++ [m] } } else s'
-            go' input base chars stop { s' with messages := msgs, module := s.module, infos } memo
+            let out := { s' with messages := msgs, module := s.module, infos }
+            -- (lint) the target's direct imports, and whether one contributes an effect
+            -- that a name never shows: `W302` uses both
+            let out := if out.lintEnabled && out.module == "" then
+              { out with
+                lintImports := if out.lintImports.any (·.1 == m) then out.lintImports
+                  else out.lintImports.push (m, cmd.info)
+                lintEffectful := if Lint.effectfulImport outerLint inner then
+                  out.lintEffectful.insert m else out.lintEffectful }
+            else out
+            go' input base chars stop out memo
       else go' input base chars stop (step chars cmd s) memo
     | .error e =>
       -- (13o) a keyword where a name was expected: which notation, from which module

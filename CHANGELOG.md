@@ -10,6 +10,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* release: a deterministic source tarball (`nix build .#release-tarball`, or
+  `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
+  SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
+  it beside the binary tarball, and CI builds it twice and compares; the binary tarball
+  is not deterministic yet (docs/building.md, "Reproducible source tarball").
+* release: a CycloneDX 1.6 SBOM for the binary tarball and an in-toto/SLSA-style
+  provenance statement (`provenance.intoto.json`) recording the builder, source,
+  toolchain and input hashes and every output digest. It can be DSSE-signed with the
+  offline E1 key; no hosted SLSA level is claimed (docs/building.md, "Release SBOM and
+  provenance").
 * hdl: the **sized signal surface** (`lib/Hdl/Signal.wiz`): `Signal.fix`, `mapS`,
   `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
   sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
@@ -812,6 +822,16 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   be named (`match h : e, k : f with`, including after an unnamed one) and the equation
   works in a non-dependent match too. A named match on an indexed value is reported
   rather than ill typed (4e, #254).
+* release: a deterministic source tarball (`nix build .#release-tarball`, or
+  `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
+  SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
+  it beside the binary tarball, and CI builds it twice and compares; the binary tarball
+  is not deterministic yet (docs/building.md, "Reproducible source tarball").
+* release: a CycloneDX 1.6 SBOM for the binary tarball and an in-toto/SLSA-style
+  provenance statement (`provenance.intoto.json`) recording the builder, source,
+  toolchain and input hashes and every output digest. It can be DSSE-signed with the
+  offline E1 key; no hosted SLSA level is claimed (docs/building.md, "Release SBOM and
+  provenance").
 * tower: the Lean reference implementation (`Tower/`, `tests --tower`) is gone; `tower/`
   is the only implementation, and the `tower` test group tests it (26h).
 * tower: a `wiz-toolchain.local` next to `wiz-toolchain` (uncommitted; add it to

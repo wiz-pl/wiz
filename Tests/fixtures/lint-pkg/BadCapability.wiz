@@ -1,0 +1,22 @@
+import Prelude
+import Text
+
+/-! A set whose rule reads `spans` but whose header does not declare it. The registry
+must refuse registration, naming `spans`. -/
+
+lint-set "bad-capability" "wiz-lint/1" [decl]
+
+def isRawDecl (line : String) : Bool :=
+  match String.splitOn line "\t" with
+  | field :: rest =>
+      match rest with
+      | name :: _ => if String.startsWith field "decl" then String.startsWith name "raw" else .false
+      | _ => .false
+  | _ => .false
+
+def noRawName (view : String) : String :=
+  if List.any isRawDecl (String.splitOn view "\n") then
+    "0\t0\traw\ta raw declaration"
+  else ""
+
+lint W502 "no-raw-name" api warning declaration [decl, spans] noRawName

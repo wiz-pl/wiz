@@ -265,9 +265,9 @@ def expr : P IR.Expr := do
   | "X" => let f ← num; return .ap f (← nums)
   | "O" =>
     let f ← tok
-    let p := match IR.PrimOp.ofKey? (Lean.Name.mkSimple f) with
+    let p := match IR.PrimOp.ofKey? f with
       | some p => p
-      | none => .extern (Lean.Name.mkSimple f)
+      | none => .extern f
     return .prim p (← nums)
   | "S" => return .reset (← num)
   | "Z" => let t ← num; let g ← num; return .reuse t g (← nums)
