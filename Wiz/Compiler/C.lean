@@ -38,14 +38,61 @@ def primFn (op : PrimOp) : String :=
     | some e => e.symbol
     | none => panic! s!"C backend: no primitive-table entry for `{op.key}`"
 
+/-- A body's bound variables, in first-occurrence order. (Linear in the body: the set of
+seen variables makes the join parameters' `push` O(1), where appending to, and
+de-duplicating, a list per join were quadratic in the number of locals.) -/
+private partial def boundGo : Body → StateM (Array Var × Std.HashSet Var) Unit
+  | .vdecl x _ b => do
+    let (acc, seen) ← get
+    unless seen.contains x do set (acc.push x, seen.insert x)
+    boundGo b
+  | .case _ alts => alts.forM boundGo
+  | .jdecl _ ps body k => do
+    for p in ps do
+      let (acc, seen) ← get
+      unless seen.contains p do set (acc.push p, seen.insert p)
+    boundGo body
+    boundGo k
+  | .dup _ b | .drop _ b => boundGo b
+  | _ => pure ()
+
 /-- The variables a body binds (to declare them up front). -/
-partial def bound (b : Body) (acc : Array Var := #[]) : Array Var :=
-  match b with
-  | .vdecl x _ b => bound b (acc.push x)
-  | .case _ alts => alts.foldl (fun acc a => bound a acc) acc
-  | .jdecl _ ps body k => bound k (bound body (acc ++ ps))
-  | .dup _ b | .drop _ b => bound b acc
-  | _ => acc
+def bound (b : Body) (acc : Array Var := #[]) : Array Var :=
+  let seen : Std.HashSet Var := acc.foldl (fun s x => s.insert x) {}
+  let (_, (locals, _)) := (boundGo b).run (acc, seen)
+  locals
+
+/-- The one expression shape the code generation must not paper over with a default: a
+partial application of a function whose arity is not known would build a closure that can
+never be applied (`wiz_clo_new` with arity 0). -/
+def checkExpr (arities : Std.HashMap Name Nat) : Expr → Except String Unit
+  | .pap f _ =>
+    if arities.contains f then .ok ()
+    else .error s!"partial application of `{f}`, which has no known arity"
+  | _ => .ok ()
+
+/-- The body invariants the C emission relies on: every partial application names a
+declaration in the program (so its arity is known) and every jump has a join point in
+scope. A violation used to be papered over with a default (arity 0, no assignment),
+which emitted a program that did something else; it is a compile error now. -/
+partial def checkBody (arities : Std.HashMap Name Nat) (joins : Std.HashSet JoinId) :
+    Body → Except String Unit
+  | .vdecl _ e b => do
+    checkExpr arities e
+    checkBody arities joins b
+  | .case _ alts => alts.foldl (fun acc a => acc.bind fun _ => checkBody arities joins a) (.ok ())
+  | .jdecl j _ body k => do
+    checkBody arities (joins.insert j) k
+    checkBody arities (joins.insert j) body
+  | .jmp j _ =>
+    if joins.contains j then .ok () else .error s!"jump to `j{j}`, which has no join point in scope"
+  | .dup _ b | .drop _ b => checkBody arities joins b
+  | _ => .ok ()
+
+/-- Every declaration's body against the invariants of `checkBody`. -/
+def checkDecls (decls : Array IR.Decl) : Except String Unit :=
+  let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
+  decls.foldl (fun acc d => acc.bind fun _ => checkBody arities {} d.body) (.ok ())
 
 def args (xs : Array Var) : String := ", ".intercalate (xs.toList.map var)
 
@@ -62,7 +109,12 @@ def expr (arities : Std.HashMap Name Nat) (x : Var) : Expr → String
   | .fap f as => s!"{var x} = {mangle f}({args as});"
   | .pap f as =>
     let arr := if as.isEmpty then "NULL" else s!"(wiz_val[]){lb}{args as}{rb}"
-    s!"{var x} = wiz_clo_new({mangle f}_boxed, {(arities.get? f).getD 0}, {as.size}, {arr});"
+    -- (a partial application of a function with no known arity used to emit arity 0:
+    -- a closure that can never be applied. `checkDecls` rejects it first.)
+    let arity := match arities.get? f with
+      | some n => n
+      | none => panic! s!"C backend: partial application of `{f}` with no known arity"
+    s!"{var x} = wiz_clo_new({mangle f}_boxed, {arity}, {as.size}, {arr});"
   | .ap f as => s!"{var x} = wiz_apply({var f}, {as.size}, (wiz_val[]){lb}{args as}{rb});"
   | .reset y => s!"{var x} = wiz_reset({var y});"
   | .reuse tok t as =>
@@ -385,7 +437,9 @@ partial def body (arities : Std.HashMap Name Nat) (joins : Std.HashMap JoinId (A
     let joins := joins.insert j ps
     s!"{body arities joins k ind}{ind}j{j}: {lb}\n{body arities joins jb (ind ++ "  ")}{ind}{rb}\n"
   | .jmp j as =>
-    let ps := (joins.get? j).getD #[]
+    let ps := match joins.get? j with
+      | some ps => ps
+      | none => panic! s!"C backend: jump to `j{j}`, which has no join point in scope"
     let tmps := as.toList.zipIdx.map fun (a, i) => s!"wiz_val t{i} = {var a}; "
     let sets := ps.toList.zipIdx.map fun (p, i) => s!"{var p} = t{i}; "
     s!"{ind}{lb} {String.join tmps}{String.join sets}goto j{j}; {rb}\n"
@@ -406,8 +460,8 @@ def signatureOf (pub : Bool) (d : IR.Decl) : String :=
 def signature (d : IR.Decl) : String := signatureOf false d
 
 def decl (arities : Std.HashMap Name Nat) (cafs : Std.HashSet Name) (d : IR.Decl) (pub : Bool := false) : String :=
-  -- (a reuse token may be bound in several branches: declare it once)
-  let locals := ((bound d.body).filter (!d.params.contains ·)).toList.eraseDups.toArray
+  -- (a reuse token may be bound in several branches: `bound` already returns each once)
+  let locals := (bound d.body).filter (!d.params.contains ·)
   let decls := if locals.isEmpty then "" else s!"  wiz_val {", ".intercalate (locals.toList.map var)};\n"
   let boxedArgs := ", ".intercalate ((List.range d.params.size).map (s!"a[{·}]"))
   -- (a closed definition, `IR.cafs`: built on its first use, made immortal, and shared;
@@ -510,6 +564,9 @@ def splitHeader (decls : Array IR.Decl) (exports : List RVal.ExternSig) : String
 C text, in declaration order (which `lowerProgram` sorts by name): deterministic, and
 functions that call each other usually stay together. -/
 def splitParts (decls : Array IR.Decl) (n : Nat) : Array String := Id.run do
+  let _ : Unit := match checkDecls decls with
+    | .error e => panic! s!"C backend: {e}"
+    | .ok _ => ()
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   let cafs := IR.cafs decls
   let texts := decls.map fun d => decl arities cafs d true
@@ -550,6 +607,9 @@ prints the result of the Wiz `main` (or, for `main : IO A`, runs it) and checks 
 leaks. -/
 def program (decls : Array IR.Decl) (io : Bool := false) (extra : String := "") (unbox : Bool := false)
     (exports : List RVal.ExternSig := []) (lib : Bool := false) : String :=
+  let _ : Unit := match checkDecls decls with
+    | .error e => panic! s!"C backend: {e}"
+    | .ok _ => ()
   let arities := decls.foldl (fun m d => m.insert d.name d.params.size) {}
   let cafs := IR.cafs decls
   let protos := decls.toList.map fun d =>
