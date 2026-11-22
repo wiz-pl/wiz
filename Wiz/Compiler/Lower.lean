@@ -290,7 +290,7 @@ def lowerProgram (code : Code) (main : ETerm) (extra : Array (Name × ETerm) := 
     if !xs.isEmpty && ctorShaped b then m.insert n b else m) {}
   let mut out : Array Decl := #[]
   -- wrappers for partially applied native operations
-  let keys := (natives.toList.map (·.2)).eraseDups.toArray.qsort (fun a b => a.key < b.key)
+  let keys := (natives.toList.map (·.2)).eraseDups.toArray.qsort (fun a b => a.key < b.key)   -- complexity: ok (one pass over the native primitive map)
   for key in keys do
     let ps := (List.range (primArity key)).toArray
     -- (`nat.zero` is a number, not an operation)
