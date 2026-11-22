@@ -77,9 +77,9 @@ def cacheSep : String :=
 def cacheEntries (dir : String) : IO (List System.FilePath) := do
   let d := System.FilePath.mk dir / "smt"
   if !(← d.isDir) then return []
-  let mut out := []
+  let mut out : List System.FilePath := []
   for e in ← d.readDir do
-    if e.path.extension == some "ans" then out := out.push e.path
+    if e.path.extension == some "ans" then out := e.path :: out
   pure out
 
 structure Entry where
@@ -408,7 +408,7 @@ def smtGroup : Group where
         let id ← Smt.solverIdentity "z3"
         let key := Smt.queryKey id args input
         let ansFile := System.FilePath.mk s!"{dir}/smt/{key}.ans"
-        IO.FS.createDirAll ansFile.parent.getD "."
+        IO.FS.createDirAll (ansFile.parent.getD ".")
         -- the pre-R5 format: exit, stdout, out-file, query. It claims `sat` for a
         -- script that is `unsat`: replaying it would be wrong, so it must be ignored.
         let query := id ++ cacheSep ++ String.intercalate cacheSep args ++ cacheSep ++ input

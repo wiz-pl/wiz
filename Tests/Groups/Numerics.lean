@@ -42,9 +42,9 @@ def between? (s before after : String) : Option String :=
     | [] => none
   | [] => none
 
-/-- The first line of `src` that starts with `prefix`. -/
-def lineStartingWith? (src prefix : String) : Option String :=
-  (src.splitOn "\n").find? (·.startsWith prefix)
+/-- The first line of `src` that starts with `initial`. -/
+def lineStartingWith? (src initial : String) : Option String :=
+  (src.splitOn "\n").find? (·.startsWith initial)
 
 /-- `flake.nix`'s GMP pin: its version, nixpkgs' source hash and the release's
 (`sha256-…` SRI, as `scripts/bundle-cc.sources` pins it). -/
@@ -119,34 +119,35 @@ def ryuRoundTripProgram : IO String := do
   let src ← IO.FS.readFile "runtime/rt_data.inc"
   let start := "#define WIZ_RYU_MANTISSA_BITS"
   let marker := "WIZ_API const char *wiz_f64_show(double a) {"
-  let some prefix := between? src start marker
+  let some head := between? src start marker
     | throw (IO.userError "runtime/rt_data.inc: no Ryu block (R6): the Float64 printer is not Ryu")
   let tail := (src.splitOn marker).drop 1 |>.headD ""
   let body := (tail.splitOn "}").headD ""
   if body.isEmpty then
     throw (IO.userError "runtime/rt_data.inc: wiz_f64_show has no body")
-  pure <| "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
-    ++ "#define WIZ_API static\n" ++ start ++ prefix ++ marker ++ body ++ "}\n" ++
-  "static int check(uint64_t bits) {\n" ++
-  "  double d; memcpy(&d, &bits, sizeof d);\n" ++
-  "  char buf[64]; int n = wiz_ryu_d2s(d, buf); buf[n] = 0;\n" ++
-  "  double back = strtod(buf, NULL); uint64_t b2; memcpy(&b2, &back, sizeof b2);\n" ++
-  "  if (b2 != bits) { printf(\"%016llx -> %s -> %016llx\\n\",\n" ++
-  "    (unsigned long long)bits, buf, (unsigned long long)b2); return 0; }\n" ++
-  "  return 1;\n}\n" ++
-  "int main(void) {\n" ++
-  "  static const uint64_t fixed[] = { 0x0ull, 0x8000000000000000ull,\n" ++
-  "    0x1ull, 0xfffffffffffffull, 0x10000000000000ull, 0x7fefffffffffffffull,\n" ++
-  "    0x3fb999999999999aull, 0x3ff0000000000000ull, 0x4340000000000000ull,\n" ++
-  "    0x4005bf0a8b145769ull, 0x0010000000000001ull, 0x0000000000000002ull };\n" ++
-  "  for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; ++i)\n" ++
-  "    if (!check(fixed[i])) return 1;\n" ++
-  "  uint64_t seed = 0x9e3779b97f4a7c15ull;\n" ++
-  "  for (int i = 0; i < 200000; ++i) {\n" ++
-  "    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;\n" ++
-  "    if (((seed >> 52) & 0x7ff) == 0x7ff) continue; /* NaN/Inf: strtod text is not bit-preserving */\n" ++
-  "    if (!check(seed)) return 1;\n" ++
-  "  }\n  return 0;\n}\n"
+  pure <| String.intercalate "" [
+    "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
+    "#define WIZ_API static\n", start, head, marker, body, "}\n",
+    "static int check(uint64_t bits) {\n",
+    "  double d; memcpy(&d, &bits, sizeof d);\n",
+    "  char buf[64]; int n = wiz_ryu_d2s(d, buf); buf[n] = 0;\n",
+    "  double back = strtod(buf, NULL); uint64_t b2; memcpy(&b2, &back, sizeof b2);\n",
+    "  if (b2 != bits) { printf(\"%016llx -> %s -> %016llx\\n\",\n",
+    "    (unsigned long long)bits, buf, (unsigned long long)b2); return 0; }\n",
+    "  return 1;\n}\n",
+    "int main(void) {\n",
+    "  static const uint64_t fixed[] = { 0x0ull, 0x8000000000000000ull,\n",
+    "    0x1ull, 0xfffffffffffffull, 0x10000000000000ull, 0x7fefffffffffffffull,\n",
+    "    0x3fb999999999999aull, 0x3ff0000000000000ull, 0x4340000000000000ull,\n",
+    "    0x4005bf0a8b145769ull, 0x0010000000000001ull, 0x0000000000000002ull };\n",
+    "  for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; ++i)\n",
+    "    if (!check(fixed[i])) return 1;\n",
+    "  uint64_t seed = 0x9e3779b97f4a7c15ull;\n",
+    "  for (int i = 0; i < 200000; ++i) {\n",
+    "    seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;\n",
+    "    if (((seed >> 52) & 0x7ff) == 0x7ff) continue; /* NaN/Inf: strtod text is not bit-preserving */\n",
+    "    if (!check(seed)) return 1;\n",
+    "  }\n  return 0;\n}\n"]
 
 def numericsGroup : Group where
   name := "numerics"
@@ -206,7 +207,8 @@ def numericsGroup : Group where
           "Infinity", "-Infinity", "NaN"] ++ "\n"
         cRunIO src expected },
     { name := "R6: every printed Float64 reads back to the same bits (random patterns and boundaries)", run := fun _ => do
-        let some cc ← findCC ((← IO.getEnv "PATH").getD "").splitOn ":"
+        let path ← IO.getEnv "PATH"
+        let some cc ← findCC (path.getD "").splitOn ":"
           | skip "no cc on PATH to build the round-trip probe"
         let src ← ryuRoundTripProgram
         let dir ← IO.FS.createTempDir
@@ -214,8 +216,8 @@ def numericsGroup : Group where
         IO.FS.writeFile c src
         -- both multiplication paths: the `__int128` one and the portable 64-bit one the
         -- wasm build takes (`WIZ_RYU_ONLY_64_BIT_OPS`)
-        for (i, defs) in ([[], ["-DWIZ_RYU_ONLY_64_BIT_OPS"]] : List (List String)).enum do
-          let exe := dir / s!"ryu_roundtrip{i}"
+        for defs in ([[], ["-DWIZ_RYU_ONLY_64_BIT_OPS"]] : List (List String)) do
+          let exe := dir / s!"ryu_roundtrip{defs.length}"
           let built ← IO.Process.output
             { cmd := cc, args := #["-O2", "-w"] ++ defs.toArray ++ #["-o", exe.toString, c.toString] }
           unless built.exitCode == 0 do
