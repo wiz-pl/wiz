@@ -96,12 +96,19 @@ structure Graph where
 abbrev GraphM := StateT Graph IO
 
 /-- The node `label`, made by `mk` (its action, dependencies, tolerance) unless it exists.
-Nodes are numbered after their dependencies. -/
+Nodes are numbered after their dependencies: `mk` runs first, and a dependency must already
+be in the graph, so its index is smaller than the new node's. The scheduler's ready heap
+relies on that (`Grail/Graph.lean`, "The ready queue"), so an out-of-order dependency is
+refused rather than building a graph whose index order is not topological. -/
 def GraphM.add (label : String) (mk : GraphM (Action × Array Nat × Bool)) : GraphM (Option Nat) := do
   if let some i := (← get).ids[label]? then return some i
   if (← get).pending.contains label then return none
   modify fun g => { g with pending := g.pending.insert label }
   let (action, deps, tolerant) ← mk
+  let size := (← get).nodes.size
+  for d in deps do
+    if d ≥ size then
+      throw (IO.userError s!"{label}: dependency {d} is not in the graph ({size} nodes)")
   modify fun g => { g with nodes := g.nodes.push { label, action, deps, tolerant },
                            ids := g.ids.insert label g.nodes.size, pending := g.pending.erase label }
   return some ((← get).nodes.size - 1)
@@ -513,16 +520,24 @@ structure Sched where
 
 /-! ### The ready queue
 
-`GraphM.add` numbers a node after its dependencies, so the graph's index order is a
-topological order. The scheduler therefore builds two indexes once — for each node, how
-many dependencies are unfinished, and for each node, the nodes that depend on it — and a
-node enters `queue` exactly once, when its last dependency finishes. `queue` is a binary
-min-heap on the node's index, so the job started next is always the ready job with the
-smallest index: the schedule does not depend on the order nodes became ready (the old FIFO
-queue appended a node when it finished its last dependency, so a low-index node could start
-behind higher-index siblings), and the report stays in node-index order. Every edge is
-walked once and every node is pushed and popped once, `O(V + E log V)`, rather than
-rescanning all `V` nodes on every pass and copying the queue on every pop (`O(V²)`). -/
+`GraphM.add` numbers a node after its dependencies (and refuses a dependency that is not yet
+in the graph), so the graph's index order is a topological order. The scheduler therefore
+builds two indexes once — for each node, how many dependencies are unfinished, and for each
+node, the nodes that depend on it — and a node enters `queue` exactly once, when its last
+dependency finishes. `queue` is a binary min-heap on the node's index, so the job started
+next is always the ready job with the smallest index: the schedule does not depend on the
+order nodes became ready (the old FIFO queue appended a node when it finished its last
+dependency, so a low-index node could start behind higher-index siblings), and the report
+stays in node-index order. Every node is pushed and popped once (`V log V`) and every edge
+is walked once (`E`), so scheduling is `O(V log V + E)`, rather than rescanning all `V` nodes
+on every pass and copying the queue on every pop (`O(V²)`).
+
+`settle` terminates: `finishNode` is called once per node (a node is prepared only when its
+last dependency finishes), so each node enters and leaves the worklist at most once, and a
+preparation that finishes a node at once is pushed on the worklist rather than recursed
+into. A graph that cannot finish (a dependency that is not in the graph, if one is built by
+hand) leaves those nodes' results `none`, so `Runner.build` reports a failure instead of
+looping. -/
 
 /-- The index key of `h[i]` (0 for an index outside the heap). -/
 private def heapKey (h : Array (Nat × Job)) (i : Nat) : Nat :=
