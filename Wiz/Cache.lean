@@ -467,7 +467,7 @@ def Effect.toSx (e : Effect R) : Sx :=
   let decl (d : Decl R) : Sx := list [str d.name, list (d.levelParams.map str), term d.type,
     (match d.value with | some v => term v | none => .a "none"), .a (toString d.inline),
     (match d.impl with | some v => term v | none => .a "none"),
-    (match d.witness with | some v => term v | none => .a "none")]
+    (match d.witness with | some v => term v | none => .a "none"), .a (toString d.typeWritten)]
   let sev : Severity → Sx | .error => .a "error" | .warning => .a "warning" | .info => .a "info"
   let msg (m : Msg) : Sx := list [info m.info, sev m.severity, str m.text, str m.code]
   list [list (e.decls.toList.map decl), list (e.messages.toList.map msg),
@@ -487,12 +487,13 @@ def Effect.toSx (e : Effect R) : Sx :=
 def Effect.ofSx? (x : Sx) : Option (Effect R) := do
   let #[ds, ms, bs, as, cs, is, cos, fts, cc, hs, ss, ps, os, dcs] ← items? x | none
   let decl (x : Sx) : Option (Decl R) := do
-    let #[n, ps, ty, v, inl, im, w] ← items? x | none
+    let #[n, ps, ty, v, inl, im, w, tw] ← items? x | none
     pure { name := ← atom? n, levelParams := ← (← items? ps).toList.mapM atom?, type := ← dterm ty,
            value := ← (match v with | .a "none" => some none | v => (dterm v).map some),
            inline := (← atom? inl) == "true",
            impl := ← (match im with | .a "none" => some none | v => (dterm v).map some),
-           witness := ← (match w with | .a "none" => some none | v => (dterm v).map some) }
+           witness := ← (match w with | .a "none" => some none | v => (dterm v).map some),
+           typeWritten := (← atom? tw) == "true" }
   let msg (x : Sx) : Option Msg := do
     let #[i, sev, t, c] ← items? x | none
     let severity : Severity := match ← atom? sev with
@@ -534,7 +535,7 @@ def Effect.ofSx? (x : Sx) : Option (Effect R) := do
 /-- The cache's version: change it whenever the format or the elaborator's output changes.
 (The directory store also mixes in the binary's own hash, `binaryId`, so two builds of
 wiz never share entries; the salt is for invalidating by hand.) -/
-def salt : UInt64 := hash "wiz-cache-31-deterministic-macro-scopes"  -- 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
+def salt : UInt64 := hash "wiz-cache-32-type-written"  -- 32: `Decl.typeWritten` (the type was written, so `#check` keeps the Π names of its ascription), so cached declarations carry it; 31: macro scopes start at the command's source position (a cache hit no longer shifts them); 30: mandatory component sorts (Π/Σ carry ⟨dom, cod⟩, ULift its content's sort), a mutual block's constructors named per type, error codes, `Info.fix`, `scase` quantity (K1), `letUnit`; 20: proof markers (P2: declarations are stored marked); 15: doc comments and declaration kinds (11s); 14: a builtin key is registered once; 13: witnesses, assumed registrations, warnings; 12: private constructors, observations, fields (13b); 11: 22i, marked structure tails; 9: private names (13b); 8: Q4
 
 /-! ## Keys and atomic writes (stage 23c)
 

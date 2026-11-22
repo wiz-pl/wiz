@@ -250,6 +250,11 @@ structure Decl (R : Type) where
   (`addPartialDecl`). The definition stays opaque (`value = none`) but is not an axiom:
   its type is inhabited, so assuming `f : T` proves nothing that `w : T` doesn't. -/
   witness : Option (Term R) := none
+  /-- The type was **written** (`def f … : T := …`), not inferred from the value. `#check`
+  prints the Πs of such a type from the end of the declaration's parameters on with their
+  names even when the value's body does not use them (a goal that is a function type,
+  `docs/stages/06-macros.md` 6j); an inferred type keeps the arrow form. -/
+  typeWritten : Bool := false
   deriving Repr, Inhabited
 
 /-- The native implementation of a definition (`attribute [implemented_by g] f`): compiled
