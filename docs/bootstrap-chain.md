@@ -96,16 +96,19 @@ different bytes from identical C. Every stage compiles a copy named `wizc.c`;
 
 ## The seed pin
 
-`scripts/wizc-seed.json` records the sha256 of the chain's inputs and of `C*`:
+`scripts/wizc-seed.json` records the sha256 of the chain's inputs:
 
 | entry | source | why |
 |---|---|---|
 | `self.wiz` | the `.#wizc-seed` derivation | the exact program every stage compiles |
-| `seed.c` | the `.#wizc-seed` derivation | `C*`: the same fixpoint C, not merely *a* fixpoint |
 | `selfhost/Tables.wiz` | the checkout | the parser tables are the bootstrap ABI (a seed parses them) |
 | `selfhost/rt.c` | the checkout | the runtime the release's C is linked with |
+| `Wiz/Selfhost.lean`, `Wiz/Version.lean` | the checkout | the assembly and the version it bakes into `self.wiz` |
 
-The `release` job of `bootstrap-chain.yml` checks it with
+`seed.c` (`C*`) is an **output** of that derivation, not an input: it is not pinned. A
+codegen change is a new `C*`, and the behavioural gate below runs the packed `wizc`, so
+the pin does not have to be regenerated (and reviewed) for every emitter change. The
+`release` job of `bootstrap-chain.yml` checks the pin with
 `scripts/check-wizc-release.sh --tarball … --seed …`; a mismatch prints the file and
 both hashes and fails the job, so the release is not pushed to Cachix. Updating the pin
 is a reviewed change: run
@@ -116,10 +119,9 @@ seed=$(nix path-info .#wizc-seed)
 scripts/check-wizc-release.sh --write-pin --seed "$seed"
 ```
 
-and read the diff. A changed `seed.c` means the emitted C changed (a codegen change),
-not that the pin is stale; review it like any other output change. The pin is over the
-seed derivation's bytes, so a change to `Wiz/Selfhost.lean`'s assembly or to
-`Wiz.version` also moves `self.wiz`.
+and read the diff. A changed `self.wiz` means the assembled source changed; a change to
+`Wiz/Selfhost.lean`'s assembly or to `Wiz.version` moves it too. `--write-pin` writes
+the same five entries the checked-in file has.
 
 ## The artifact: a static executable
 
