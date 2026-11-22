@@ -145,6 +145,9 @@ The package's examples are its tests: `hdl/grail.wiz` declares
 `hdl/examples/*.wiz` with its `.expected`. CI's `hdl-examples` group (shard `hdl`) runs
 the same comparisons (`Tests/Groups/HdlExamples.lean`).
 
+The package as a package — its layout, the standalone build and `HDL_ROOT`, its licence
+and tag policy — is [hdl.md](hdl.md).
+
 ## H14 S0: hardware as tagless-final code, with sharing
 
 `hdl/src/Hdl/Core.wiz` (`import Hdl.Core`) is the L2 layer of the HDL plan: combinational

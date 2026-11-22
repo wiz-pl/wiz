@@ -34,7 +34,7 @@ def hdlSignalGroup : Group where
   exercise := "HDL 34a (Clash-style signals)"
   cases := [
     { name := "34a: signals, registers, Hw code and bundles on signals, the baud generator through Signal.ofCircuit (hdl/examples/hdl-signal.wiz)", run := fun _ => do
-        okLibs (← IO.FS.readFile "hdl/examples/hdl-signal.wiz") [
+        okLibs (← Tests.hdlRead "examples/hdl-signal.wiz") [
           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
           "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
           "[7, 0, 1, 2, 3, 4]",
