@@ -466,8 +466,9 @@ namespace Helpers
 operations with map types, and the copy/null-test shape is the emitter's.
 
 The tracing helper is the one a sensor needs to identify the process; the other tracing
-helpers (`bpf_probe_read_user_str` 115, `bpf_perf_event_output` 25, `bpf_get_current_comm`
-16, `bpf_trace_printk` 6) are emitted by the `readUserStr`/`probeEmit` nodes rather than
+helpers (`bpf_probe_read_user` 112, `bpf_probe_read_user_str` 115,
+`bpf_perf_event_output` 25, `bpf_get_current_comm` 16, `bpf_trace_printk` 6) are emitted
+by the `readUserStr`/`argvSlot`/`probeEmit` nodes rather than
 called from the typed surface, because their argument is a fixed stack buffer or a
 variadic format. They are still recorded in the probe descriptor. -/
 def table : Array Helper := #[
