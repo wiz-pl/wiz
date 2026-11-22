@@ -43,6 +43,12 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
   counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (5/0).
 
+* run, cache, wasm: `wiz run`, the REPL's `:run` and `import_c` preprocessing remove
+  their temporary directories on success and failure (each leaked one per run/header),
+  and a malformed escape in a cache entry (`\xZZ`, `\u{zz}`) is a miss rather than a
+  decoded character. The Wasm backend's JS host is found beside the toolchain's `lib/`
+  (`share/wiz/web`), so `wiz run --target wasm` works from an installed toolchain and
+  from any current directory; the Nix package and a release tarball ship it there.
 * elab: a named `match h : e` inside a definition whose result is an equation keeps the
   equation as written while its branches are checked. The declared type used to be
   evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
