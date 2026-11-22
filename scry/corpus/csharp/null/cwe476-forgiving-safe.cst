@@ -42,7 +42,7 @@ type
 expression
 child
 paths	1
-corpus/csharp/null/forgiving.cs
+corpus/csharp/null/cwe476-forgiving-safe.cs
 bytes	1
 191
 nodes	47
