@@ -4028,10 +4028,18 @@ def Scry.Cs.lowerCstWithModels (models : Scry.ModelPack) (path : String) (text :
       | .some b => Scry.kids c b
       | .none => .nil;
     let r1 := Scry.Cs.lowerMembers c u k acc.1 ms;
-    let synth : List Wil.Func := match Scry.Cs.needsPrimaryCtor c d.2 k with
-      | .true => .cons (Scry.Cs.lowerPrimaryCtor c u k acc.1 d.2 (Scry.Cs.baseArgsOf c d.2)).2 .nil
-      | .false => .nil;
-    (r1.1, List.append acc.2 (List.append synth r1.2)))
+    -- the synthetic constructor runs after the members, from *their* final state, so its
+    -- annotation/point facts are not dropped
+    let p1 : Option (Scry.LState × Wil.Func) := match Scry.Cs.needsPrimaryCtor c d.2 k with
+      | .true => .some (Scry.Cs.lowerPrimaryCtor c u k r1.1 d.2 (Scry.Cs.baseArgsOf c d.2))
+      | .false => .none;
+    let synth : List Wil.Func := match p1 with
+      | .some r => .cons r.2 .nil
+      | .none => .nil;
+    let st1 : Scry.LState := match p1 with
+      | .some r => r.1
+      | .none => r1.1;
+    (st1, List.append acc.2 (List.append synth r1.2)))
     ({ Scry.emptyState with models := models }, (.nil : List Wil.Func)) decls;
   -- top-level statements are `Program.<Main>$` in C#: lower them as `<stem>.Main`.
   let globals := Scry.childrenK c 0 "global_statement";
