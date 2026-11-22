@@ -387,7 +387,7 @@ def cRunWith (loader : Name → Option String) (src : String) (expected : String
 
 /-- Build `main` with the C backend and compare its printed value. Skipped (passes) if
 the C toolchain can't find GMP: give the suite a toolchain (`Tests/Main.lean`) to run these. -/
-def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit :=
+def cRun (src : String) (expected : String) (llvm : Bool := false) (split : Nat := 0) : IO Unit := do
   cRunWith (← preludeLoader) src expected llvm split
 
 /-- `cRun` for a program that imports a module `preludeLoader` does not carry
