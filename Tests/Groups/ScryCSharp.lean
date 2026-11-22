@@ -487,18 +487,24 @@ def group : Group where
     { name := "lower: known expansions (method groups, Format, FromResult, ConfigureAwait, ThrowIfNull)",
       run := fun _ => lowerGolden "expansions" },
     { name := "nullness: a T? parameter dereferenced without a guard is a finding",
-      run := fun _ => checkEq ["scry/memory/null-dereference"] (← nullWarnings "unsafe") },
+      run := fun _ => do
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "unsafe") },
     { name := "nullness: x != null and x is not null guards silence the dereference",
-      run := fun _ => checkEq ([] : List String) (← nullWarnings "guarded") },
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "guarded") },
     { name := "nullness: ?. and ?? guard the receiver and yield a non-null value",
-      run := fun _ => checkEq ([] : List String) (← nullWarnings "coalesce") },
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "coalesce") },
     { name := "nullness: a non-null-annotated local assigned null is nullable-assignment plus a dereference",
-      run := fun _ => checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference"]
-        (← nullWarnings "annotated-violation") },
+      run := fun _ => do
+        checkEq ["scry/cs/nullable-assignment", "scry/memory/null-dereference"]
+          (← nullWarnings "annotated-violation") },
     { name := "nullness: ! records an assertion and suppresses the dereference alarm",
-      run := fun _ => checkEq ([] : List String) (← nullWarnings "forgiving") },
+      run := fun _ => do
+        checkEq ([] : List String) (← nullWarnings "forgiving") },
     { name := "nullness: a T? field read is maybe-null, so the next member access is a finding",
-      run := fun _ => checkEq ["scry/memory/null-dereference"] (← nullWarnings "field") },
+      run := fun _ => do
+        checkEq ["scry/memory/null-dereference"] (← nullWarnings "field") },
     { name := "nullness: the annotation EDB publishes nullable(var) and nonnull(var)",
       run := fun _ => do
         checkEq "nullable(NullFixtures.Unsafe.Length, %0)" (← nullEdb "unsafe")
