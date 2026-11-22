@@ -44,6 +44,32 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
   unverified second rendering whose CI case skips without yosys/z3
   (`docs/libraries.md`, `docs/hardware.md`). No code or kernel claim changed.
 
+* HDL laws: the trace obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw`
+  and `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
+  every one is called by `examples/hdl-stream.wiz`, `examples/hdl-spi.wiz`,
+  `examples/hdl-bus-law.wiz` and `examples/hdl-axi4.wiz`, so a law that fails fails the
+  `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
+  false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
+  predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
+  `Axi4.Law.ResponsesInOrder`/`Axi4.ResponseOrder` are removed; `docs/libraries.md`
+  lists the checks that now run.
+
+* HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves the knot's algebra
+  (`fix_unfold`, `register_fixed_unique`, `fix_pure`, `fix_delay_eq_circuit`), the sized
+  register (`registerS_head`, `registerS_eq_register`), the counter's `0, 1, 2, …` in both
+  the `Signal.fix` and `Circuit.loop` spellings, and `Signal.Eqv` congruence for
+  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`. The
+  *sized-observation* laws (`mapS_at`, `zipWithS_at`, `mapS_id`, `mapS_comp`, the
+  `mapS_head`/`mapS_tail` forms and the `Eqv` congruences for the sized operators) are
+  documented as blocked, with the three body shapes that fail and the one-line
+  elaborator change that unblocks them (docs/stages/34-hdl-signals.md §34c): a split of a
+  neutral payload is stuck, two projections make a `Signal.fix` knot exponential (the L3
+  example stops finishing), and a single `let p := out a` is rejected by the kernel for a
+  sized `cocon` because surface `out` erases the payload's size and index. All proved laws
+  are pinned by `#check` and `#print axioms` in the `hdl-signal` group (the thirteen
+  algebraic ones list no axioms; the four that mention a `Circuit` or compute `BitVec`
+  literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
   paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a

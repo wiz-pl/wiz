@@ -200,6 +200,14 @@ def Signal.zipWith_at {d : ClockDomain} {A B C : Type} (f : A → B → C) :
   | a, b, .zero => rfl
   | a, b, .succ t => Signal.zipWith_at f a.tail b.tail t
 
+/-- `zipWith3` at every cycle. -/
+def Signal.zipWith3_at {d : ClockDomain} {A B C D : Type} (f : A → B → C → D) :
+    (a : Signal d A) → (b : Signal d B) → (c : Signal d C) → (t : Nat) →
+    Signal.at (Signal.zipWith3 f a b c) t
+      = f (Signal.at a t) (Signal.at b t) (Signal.at c t)
+  | a, b, c, .zero => rfl
+  | a, b, c, .succ t => Signal.zipWith3_at f a.tail b.tail c.tail t
+
 /-- `pure` at every cycle. -/
 def Signal.pure_at {d : ClockDomain} {A : Type} (a : A) : (t : Nat) → Signal.at (Signal.pure a : Signal d A) t = a
   | .zero => rfl
@@ -417,3 +425,177 @@ def Signal.delay_from {d : ClockDomain} (t : HwTy) (v : HwTy.El t) :
 def Signal.ofCircuit_delay {d : ClockDomain} (t : HwTy) (init : HwTy.El t) (xs : Signal d (HwTy.El t)) :
     Signal.Eqv (Signal.ofCircuit (Circuit.delay t init) xs) (Signal.register init xs) :=
   fun (n : Nat) => Signal.delay_from t init n init xs
+
+------------------------------------------------------------------------------------
+-- Laws (P2.1 in wiz-notes/roadmap/hdl-next.md)
+
+-- What is proved here, and what is not (and why).
+--
+-- * The knot is definitional: `Signal.fix`'s body applies `g` to the recursive value and
+--   never *observes* it, so `fix_unfold`, `register_fixed_unique`, `fix_pure` and
+--   `fix_delay_eq_circuit` are `rfl`-level, and so are the counter's sample values in the
+--   `fix` and `Circuit.loop` spellings.
+-- * `Signal.registerS` is definitional: `registerS_head`, `registerS_eq_register`.
+-- * `Signal.Eqv` congruence is proved for the combinators whose bodies are `coit`
+--   (`map`/`zipWith`/`zipWith3`), for the state cells (`register`/`registerS`), for
+--   `mealy` and for the circuit bridge (`ofCircuit`).
+-- * The *sized-observation* laws (`mapS_at`, `zipWithS_at`, `mapS_id`, `mapS_comp`, the
+--   `mapS_head`/`mapS_tail` prefix forms and the `Eqv` congruences for
+--   `mapS`/`zipWithS`/`zipWith3S`) are **not** proved. They need `out (mapS f s)` to
+--   unfold for a *variable* `s`, so the body's payload observation must reduce. The body
+--   has three shapes and none both typechecks and reduces:
+--     1. `let (h, r) := out a` (shipped): linear in a knot, but `split` on a neutral
+--        payload is stuck, so `out (mapS f s)` does not unfold and no law is `rfl`;
+--     2. two projections `(out a).1` / `(out a).2.1`: unfolds, laws are `rfl`, but it
+--        re-evaluates `out a` at every step, so a `Signal.fix` knot is exponential —
+--        `hdl/examples/hdl-l3.wiz`'s counter/baud generator no longer finishes;
+--     3. `let p := out a` (one observation, linear *and* unfolding): the kernel rejects
+--        the sized `cocon` under a `let` ("expected ... ν (Signal.desc d A) ...
+--        inferred ... ν^j ..."), because the surface `out` erases the size and the index
+--        of the payload's recursive field, so the let-bound payload carries the
+--        predecessor size where the `cocon` check wants the family size.
+--   Unblocking (1) is an elaborator/kernel change: type `out`'s payload at the
+--   predecessor (`ν^j D i`, not `ν^∞ D ()`) in the builtin `out` case of
+--   `Wiz/Elab/Term.lean` (and the `selfhost/Frontend.wiz` mirror). With that, shape 3
+--   typechecks and every law above is `rfl` while the knot stays linear. That is the
+--   first item of HDL-2.2.
+
+/-- `f` respects three equalities (a local copy: the library has `congrArg`/`congrArg2`). -/
+def Signal.congrArg3 {A B C D : Type} (f : A → B → C → D) {a a' : A} {b b' : B} {c c' : C}
+    (ea : a = a') (eb : b = b') (ec : c = c') : f a b c = f a' b' c' :=
+  Eq.trans (Eq.congrArg (fun (x : A) => f x b c) ea)
+    (Eq.trans (Eq.congrArg (fun (y : B) => f a' y c) eb)
+      (Eq.congrArg (fun (z : C) => f a' b' z) ec))
+
+/-- `registerS` at a size, first observation: the register's head is `init`. -/
+def Signal.registerS_head {d : ClockDomain} {A : Type} {i : Size} (init : A)
+    (s : (Signal d A)^i) :
+    (out (Signal.registerS (i := i) init s)).1 = init := rfl
+
+/-- `registerS` at `∞` is `register` (the sized register is the delay). -/
+def Signal.registerS_eq_register {d : ClockDomain} {A : Type} (init : A) (s : Signal d A) :
+    Signal.Eqv (Signal.registerS (i := ∞) init s) (Signal.register init s)
+  | .zero => rfl
+  | .succ t => rfl
+
+/-- `fix` unfolds: the fixed point is the body applied to itself. `∞ = ↑∞`, so the body's
+result is at the same size, and the body's argument is the loop value (through the
+`rec` argument, which is `fix g` again). -/
+def Signal.fix_unfold {d : ClockDomain} {A : Type}
+    (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) :
+    Signal.Eqv (Signal.fix g) (g ∞ (Signal.fix g) : Signal d A)
+  | .zero => rfl
+  | .succ t => rfl
+
+/-- A fixed point of the delay is the constant: if `h` is `register init` of itself, then
+`h` is `init` in every cycle. This is the uniqueness statement for the contractive body
+`registerS init` (the body that only raises the size). -/
+def Signal.register_fixed_unique {d : ClockDomain} {A : Type} (init : A) (h : Signal d A)
+    (hfix : Signal.Eqv h (Signal.register init h)) : Signal.Eqv h (Signal.pure init)
+  | .zero => Eq.trans (hfix 0) rfl
+  | .succ t => Eq.trans (Eq.trans (hfix (Nat.succ t)) rfl)
+    (Signal.register_fixed_unique init h hfix t)
+
+/-- `fix` of the pure delay is the constant `init` (the counter's body with the feedback
+cut): the fixed point is unique. -/
+def Signal.fix_pure {d : ClockDomain} {A : Type} (init : A) :
+    Signal.Eqv
+      (Signal.fix (fun (i : Size) (c : (Signal d A)^i) =>
+        Signal.registerS init (Signal.pureS (i := i) init)))
+      (Signal.pure init)
+  | .zero => rfl
+  | .succ t => Eq.trans (Signal.pureS_at init t) (Eq.symm (Signal.pure_at init (Nat.succ t)))
+
+/-- `fix` of the delay agrees with the circuit spelling: `register` is `Circuit.delay`
+(`ofCircuit_delay`), and both are `pure init`. -/
+def Signal.fix_delay_eq_circuit {d : ClockDomain} (t : HwTy) (init : HwTy.El t) :
+    Signal.Eqv
+      (Signal.fix (fun (i : Size) (c : (Signal d (HwTy.El t))^i) =>
+        Signal.registerS init (Signal.pureS (i := i) init)))
+      (Signal.ofCircuit (Circuit.delay t init) (Signal.pure init)) :=
+  Signal.Eqv.trans (Signal.fix_pure init)
+    (Signal.Eqv.trans (Signal.Eqv.symm (Signal.register_head_tail (Signal.pure init)))
+      (Signal.Eqv.symm (Signal.ofCircuit_delay t init (Signal.pure init))))
+
+/-- Clash's counter, `cnt = register 0 (cnt + 1)`, 8 bits. -/
+def Signal.counter {d : ClockDomain} : Signal d (BitVec 8) :=
+  Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) =>
+    Signal.registerS (BitVec.ofNat 8 0) (c + 1))
+
+/-- The counter samples `0, 1, 2, …` (the acceptance datum of P2.1, in the kernel: the
+example's `#eval` prints the same list). -/
+def Signal.counter_sample {d : ClockDomain} :
+    Signal.sample 10 (Signal.map BitVec.toNat (Signal.counter (d := d)))
+      = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] := rfl
+
+/-- The counter's step as combinational code: the output is the feedback, and the next
+feedback is the feedback plus one. -/
+def Signal.counterStep {r : HwTy → Type} [Hw r]
+    (p : r (HwTy.prod (HwTy.bits 0) (HwTy.bits 8))) :
+    r (HwTy.prod (HwTy.bits 8) (HwTy.bits 8)) :=
+  Hw.pair (Hw.snd p) (Hw.add (Hw.snd p) (Hw.lit 8 1))
+
+/-- The counter as a `Circuit.loop`: the feedback is the count, the output is the count,
+and the next count is the count plus one. -/
+def Signal.counterLoop : Circuit (HwTy.bits 0) (HwTy.bits 8) :=
+  Circuit.loop (i := HwTy.bits 0) (o := HwTy.bits 8) (f := HwTy.bits 8)
+    (Circuit.comb Signal.counterStep) (BitVec.ofNat 8 0)
+
+/-- The circuit spelling samples the same `0, 1, 2, …`: `fix` of the register body and
+`Circuit.loop` of the same step agree on the counter. -/
+def Signal.counterLoop_sample {d : ClockDomain} :
+    Signal.sample 10
+      (Signal.map BitVec.toNat
+        (Signal.ofCircuit (d := d) Signal.counterLoop (Signal.pure (BitVec.ofNat 0 0))))
+      = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] := rfl
+
+/-- Congruence: equivalent inputs give equivalent `map` results. -/
+def Signal.Eqv.map {d : ClockDomain} {A B : Type} (f : A → B) {s s' : Signal d A}
+    (h : Signal.Eqv s s') : Signal.Eqv (Signal.map f s) (Signal.map f s') :=
+  fun (t : Nat) => Eq.trans (Signal.map_at f s t)
+    (Eq.trans (Eq.congrArg f (h t)) (Eq.symm (Signal.map_at f s' t)))
+
+/-- Congruence for `zipWith`. -/
+def Signal.Eqv.zipWith {d : ClockDomain} {A B C : Type} (f : A → B → C)
+    {a a' : Signal d A} (ha : Signal.Eqv a a') {b b' : Signal d B} (hb : Signal.Eqv b b') :
+    Signal.Eqv (Signal.zipWith f a b) (Signal.zipWith f a' b') :=
+  fun (t : Nat) => Eq.trans (Signal.zipWith_at f a b t)
+    (Eq.trans (Eq.congrArg2 f (ha t) (hb t)) (Eq.symm (Signal.zipWith_at f a' b' t)))
+
+/-- Congruence for `zipWith3` (the unsized `if`/`Mux` instance is this operation). -/
+def Signal.Eqv.zipWith3 {d : ClockDomain} {A B C D : Type} (f : A → B → C → D)
+    {a a' : Signal d A} (ha : Signal.Eqv a a') {b b' : Signal d B} (hb : Signal.Eqv b b')
+    {c c' : Signal d C} (hc : Signal.Eqv c c') :
+    Signal.Eqv (Signal.zipWith3 f a b c) (Signal.zipWith3 f a' b' c') :=
+  fun (t : Nat) => Eq.trans (Signal.zipWith3_at f a b c t)
+    (Eq.trans (Signal.congrArg3 f (ha t) (hb t) (hc t))
+      (Eq.symm (Signal.zipWith3_at f a' b' c' t)))
+
+/-- Congruence for `register` (a state cell keeps equivalent inputs equivalent). -/
+def Signal.Eqv.register {d : ClockDomain} {A : Type} (init : A) {s s' : Signal d A}
+    (h : Signal.Eqv s s') : Signal.Eqv (Signal.register init s) (Signal.register init s')
+  | .zero => rfl
+  | .succ t => h t
+
+/-- Congruence for `registerS` at `∞`. -/
+def Signal.Eqv.registerS {d : ClockDomain} {A : Type} (init : A) {s s' : Signal d A}
+    (h : Signal.Eqv s s') :
+    Signal.Eqv (Signal.registerS (i := ∞) init s) (Signal.registerS (i := ∞) init s')
+  | .zero => rfl
+  | .succ t => h t
+
+/-- Congruence for `mealy` in the input (the step and the initial state are fixed). -/
+def Signal.Eqv.mealy {d : ClockDomain} {S I O : Type} (f : S → I → S × O) (st : S)
+    {xs xs' : Signal d I} (h : Signal.Eqv xs xs') :
+    Signal.Eqv (Signal.mealy f st xs) (Signal.mealy f st xs') :=
+  fun (t : Nat) => Eq.trans (Signal.mealy_at f t st xs)
+    (Eq.trans (Eq.congrArg (fun (σ : Trace I) => Mealy.outAt f st σ t) (Signal.Eqv.toTrace h))
+      (Eq.symm (Signal.mealy_at f t st xs')))
+
+/-- Congruence for the circuit bridge: equivalent inputs give an equivalent signal. This
+is the `ofCircuit` transfer (and with `toTrace_ofCircuit`/`sat_ofCircuit`, the transfer
+to the netlist's trace). -/
+def Signal.Eqv.ofCircuit {d : ClockDomain} {i o : HwTy} (c : Circuit i o)
+    {xs xs' : Signal d (HwTy.El i)} (h : Signal.Eqv xs xs') :
+    Signal.Eqv (Signal.ofCircuit c xs) (Signal.ofCircuit c xs') :=
+  Signal.Eqv.mealy (Circuit.stepEl c) c.init h
