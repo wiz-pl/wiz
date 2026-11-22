@@ -158,18 +158,25 @@ def readFile? (f : System.FilePath) : IO String := do
 
 /-- A release directory for `tag`: `RELEASES/tag/wiz-ARCH-linux.tar.gz` made from a
 toolchain tree (`bin/wiz` and `bin/grail` print their arguments) that ships
-`share/wiz/cache`, and its `.sha256` (mandatory for tags and snapshots since
-51db234c1). -/
+`share/wiz/cache` and a glibc sysroot with the release's safe relative symlinks
+(`ld-linux-x86-64.so.2 -> ld-2.27.so`, and a `libc.so -> libc.so.6 -> libc-2.27.so`
+chain), and its `.sha256` (mandatory for tags and snapshots since 51db234c1). -/
 def releaseWithCache (rel : System.FilePath) (tag a : String) : IO Unit := do
+  let sys := s!"share/wiz/cc/sysroot/lib/x86_64-linux-gnu"
   let root ← mkTree [
     (s!"wiz-{a}-linux/bin/wiz", "#!/bin/sh\necho release wiz \"$@\"\n"),
     (s!"wiz-{a}-linux/bin/grail", "#!/bin/sh\necho release grail \"$@\"\n"),
     (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/wiz", "#!/bin/sh\necho release wiz \"$@\"\n"),
     (s!"wiz-{a}-linux/share/wiz/.lake/build/bin/grail", "#!/bin/sh\necho release grail \"$@\"\n"),
     (s!"wiz-{a}-linux/share/wiz/lib/Prelude.wiz", ""),
-    (s!"wiz-{a}-linux/share/wiz/cache/README", "a warm cache\n")]
+    (s!"wiz-{a}-linux/share/wiz/cache/README", "a warm cache\n"),
+    (s!"wiz-{a}-linux/{sys}/ld-2.27.so", ""), (s!"wiz-{a}-linux/{sys}/libc-2.27.so", "")]
   for b in ["bin/wiz", "bin/grail", "share/wiz/.lake/build/bin/wiz", "share/wiz/.lake/build/bin/grail"] do
     makeExecutable (root / s!"wiz-{a}-linux" / b)
+  -- the sysroot's relative symlinks, as the release's glibc 2.27 bundle has them
+  for (link, target) in [("ld-linux-x86-64.so.2", "ld-2.27.so"), ("libc.so.6", "libc-2.27.so"),
+                         ("libc.so", "libc.so.6")] do
+    let _ ← runOut "ln" ["-s", target, (root / s!"wiz-{a}-linux" / sys / link).toString]
   IO.FS.createDirAll (rel / tag)
   let tb := rel / tag / tarballName a
   let _ ← runOut "tar" ["-czf", tb.toString, "-C", root.toString, s!"wiz-{a}-linux"]
@@ -436,27 +443,54 @@ def cases (impl : IO Impl) : List Case := [
         checkHas m target.toString
         checkHas m "would be written outside"
         check (!(← target.pathExists)) "an absolute member was written outside the extraction root"
-        -- (3) an escaping symlink (any link, device or fifo is refused, not only one that
-        -- resolves outside)
-        let tree3 ← mkTree layout
-        let _ ← runOut "ln" ["-s", "../../outside/escaped.txt", (tree3 / s!"wiz-{a}-linux/evil").toString]
+        -- (3) an escaping symlink in the release's own shape: the glibc sysroot's
+        -- `libpthread.so.0`, pointing eight levels up from a seven-deep directory (the
+        -- target, not the link type, is what is refused)
+        let sysroot := "share/wiz/cc/sysroot/lib/x86_64-linux-gnu"
+        let glibc := s!"wiz-{a}-linux/" ++ sysroot
+        let tree3 ← mkTree (layout ++ [(glibc ++ "/libpthread-2.27.so", "")])
+        let _ ← runOut "ln" ["-s", "../../../../../../../../outside/libpthread.so.0",
+                             (tree3 / glibc / "libpthread.so.0").toString]
         let rel3 ← IO.FS.createTempDir
         let tb3 ← releaseTar rel3 "v1" a ["-C", tree3.toString, s!"wiz-{a}-linux"]
-        check (contains (← runOut "tar" ["-tvzf", tb3.toString]) "../../outside/escaped.txt")
+        check (contains (← runOut "tar" ["-tvzf", tb3.toString]) "libpthread.so.0 ->")
           "the fixture archive has no escaping symlink"
         tower e ["set", "releases", rel3.toString]
         let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
         checkHas m "refusing to unpack"
-        checkHas m "not a regular file or a directory"
-        checkHas m "evil"
+        checkHas m "escaping symlink"
+        checkHas m "libpthread.so.0"
         check (!(← (e.tcDir "v1").pathExists)) "a refused tarball left a toolchain"
-        -- (4) a good archive still installs: the scan is not a blanket refusal
+        -- (3b) a chain whose first link is lexically inside but whose second is not: the
+        -- escaping link is itself a member, so the whole archive is refused (which is why
+        -- a per-link lexical check is enough: every accepted link is checked from its own
+        -- directory, so composing accepted links cannot leave the root)
+        let tree3b ← mkTree (layout ++ [(glibc ++ "/libc-2.27.so", "")])
+        let _ ← runOut "ln" ["-s", "libc.so.6", (tree3b / glibc / "libc.so").toString]
+        let _ ← runOut "ln" ["-s", "../../../../../../../../outside/libc.so.6",
+                             (tree3b / glibc / "libc.so.6").toString]
+        let rel3b ← IO.FS.createTempDir
+        let tb3b ← releaseTar rel3b "v1" a ["-C", tree3b.toString, s!"wiz-{a}-linux"]
+        check (contains (← runOut "tar" ["-tvzf", tb3b.toString]) "libc.so ->")
+          "the fixture archive has no symlink chain"
+        tower e ["set", "releases", rel3b.toString]
+        let m ← towerFails e ["toolchain", "install", "v1", "--source", "release"]
+        checkHas m "refusing to unpack"
+        checkHas m "libc.so.6"
+        checkHas m "escaping symlink"
+        check (!(← (e.tcDir "v1").pathExists)) "a chained escaping symlink left a toolchain"
+        -- (4) a good archive still installs, and its safe sysroot links resolve: the
+        -- release's `ld-linux-x86-64.so.2 -> ld-2.27.so` and the
+        -- `libc.so -> libc.so.6 -> libc-2.27.so` chain
         let rel4 ← IO.FS.createTempDir
         releaseWithCache rel4 "v1" a
         tower e ["set", "releases", rel4.toString]
         tower e ["toolchain", "install", "v1", "--source", "release"]
         checkHas (← readFile? (e.tcDir "v1" / "tower.info")) "source release"
-        checkHas (← runOut (e.tcDir "v1" / "bin/wiz").toString ["check"]) "release wiz" },
+        checkHas (← runOut (e.tcDir "v1" / "bin/wiz").toString ["check"]) "release wiz"
+        let installed := e.tcDir "v1" / sysroot
+        checkEq "ld-2.27.so" (← runOut "readlink" [(installed / "ld-linux-x86-64.so.2").toString])
+        checkHas (← runOut "readlink" ["-f", (installed / "libc.so").toString]) "libc-2.27.so" },
     { name := "error paths: an external command, run of a missing command, link of a missing path, a dangling link", run := fun _ => do
         let (bare, _) ← upstream
         let a ← arch

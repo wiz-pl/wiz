@@ -18,6 +18,16 @@ tests/pure.wiz:23:1: info: .false
 tests/pure.wiz:24:1: info: .true
 tests/pure.wiz:25:1: info: .none
 tests/pure.wiz:26:1: info: .some "'../escape' would be written outside the extraction directory (an absolute path or a `..` component)"
-tests/pure.wiz:27:1: info: .some "'wiz-x86_64-linux/evil' is not a regular file or a directory (tar type 'l'); links, devices and fifos are refused"
+tests/pure.wiz:27:1: info: .some "'wiz-x86_64-linux/evil' -> '../../outside' would be written outside the extraction directory (an absolute or escaping symlink)"
 tests/pure.wiz:28:1: info: .none
-tests/pure.wiz:29:1: info: .some "'a' is not a regular file or a directory (tar type 'l'); links, devices and fifos are refused"
+tests/pure.wiz:29:1: info: .none
+tests/pure.wiz:30:1: info: .some "'usr/lib/x' -> '../../../outside' would be written outside the extraction directory (an absolute or escaping symlink)"
+tests/pure.wiz:31:1: info: .none
+tests/pure.wiz:32:1: info: .some "'usr/lib/b' is a hardlink to '../outside', an absolute or escaping member name"
+tests/pure.wiz:33:1: info: .none
+tests/pure.wiz:34:1: info: .true
+tests/pure.wiz:35:1: info: .true
+tests/pure.wiz:36:1: info: .false
+tests/pure.wiz:37:1: info: .false
+tests/pure.wiz:38:1: info: .true
+tests/pure.wiz:39:1: info: .false

@@ -545,7 +545,10 @@ the index/integrity fields, flat sorted entries and machine-local overrides:
 * Fetching a registry package (`Grail/Registry.lean`) is: if
   `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
   find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
-  and verify the hash **before** unpacking, unpack once into the shared store
+  and verify the hash **before** unpacking, list the archive first and refuse a member
+  whose name or link target could escape the unpack directory (absolute or `..` names,
+  absolute or escaping link targets, devices and fifos; relative links inside are fine),
+  unpack once into the shared store
   `<cache>/grail/packages/SHA256` (a temporary directory with
   `tar -xzf --strip-components=1 --no-same-owner`, the lock's `(tree …)` checked before
   the stamp, then a rename), and link `.grail/packages/NAME` to it. A second fetch is a
