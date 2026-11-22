@@ -1,0 +1,185 @@
+import BitVecShift
+import Nat
+/-!
+# Hdl.BitPack: the bit arithmetic behind `deriving BitPack`
+
+`Hdl.Core`'s `BitPack` deriver encodes a constructor as
+
+```
+BitVec.ofNat (tagWidth + payloadWidth)
+  (tag * 2^payloadWidth + ((f₀ << …) << pad))
+```
+
+and decodes it with `Bits.high`/`Bits.low` (`Nat` division and remainder by a
+power of two).  This module proves the arithmetic those two directions need, once:
+
+* `Bits.mul_pow_lt` and `Bits.add_mul_pow_lt`: a field or a tag above a payload
+  stays below the width of the packed number;
+* `Bits.low_add_mul_pow` / `Bits.packed_tag`: the low bits are the payload and the
+  high bits are the tag (no carry from the fields);
+* `Bits.pack_field`: a field at offset `pad + suffix` is recovered by
+  `low w (high (pad + suffix) payload)`;
+* `BitVec.ofNat_low`, `BitVec.isTrue_ofNat_low` and `BitPack.derived_field`
+  (in `Hdl.Core`, where `BitPack` is): the value-level decoders agree with the
+  original field.
+
+The generated `T.unpack_pack` is then a chain of `Eq.substProp` steps over this
+arithmetic: no axiom, no `native_refl`.
+-/
+
+-- ## Bounds
+
+/-- A shifted number stays below the same shift of its bound: from `a < 2^w`,
+`a * 2^p < 2^w * 2^p`. -/
+def Bits.mul_pow_lt : (a w p : Nat) → Nat.lt a (Nat.pow 2 w) = .true →
+    Nat.lt (Nat.mul a (Nat.pow 2 p)) (Nat.mul (Nat.pow 2 w) (Nat.pow 2 p)) = .true
+  | a, w, .zero, h =>
+    Eq.substProp (fun (t : Nat) => Nat.lt t (Nat.mul (Nat.pow 2 w) 1) = .true) (Eq.symm (Nat.mul_one a))
+      (Eq.substProp (fun (t : Nat) => Nat.lt a t = .true) (Eq.symm (Nat.mul_one (Nat.pow 2 w))) h)
+  | a, w, .succ p, h =>
+    let P := Nat.pow 2 p;
+    let Q := Nat.pow 2 w;
+    let h2 := Word.lt_2x (Nat.mul a P) (Nat.mul Q P) (Bits.mul_pow_lt a w p h);
+    let eR : Nat.mul 2 (Nat.mul Q P) = Nat.mul Q (Nat.mul 2 P) := nat_ring! 2 * (Q * P) = Q * (2 * P);
+    let eL : Nat.mul a (Nat.mul 2 P) = Nat.mul 2 (Nat.mul a P) := nat_ring! a * (2 * P) = 2 * (a * P);
+    Eq.substProp (fun (t : Nat) => Nat.lt t (Nat.mul Q (Nat.mul 2 P)) = .true) (Eq.symm eL)
+      (Eq.substProp (fun (t : Nat) => Nat.lt (Nat.mul 2 (Nat.mul a P)) t = .true) eR h2)
+
+/-- `Bits.mul_pow_lt` with the product written as one power. -/
+def Bits.mul_pow_lt' (a w p : Nat) (h : Nat.lt a (Nat.pow 2 w) = .true) :
+    Nat.lt (Nat.mul a (Nat.pow 2 p)) (Nat.pow 2 (Nat.add w p)) = .true :=
+  Eq.substProp (fun (t : Nat) => Nat.lt (Nat.mul a (Nat.pow 2 p)) t = .true)
+    (Eq.symm (Bits.pow_add w p)) (Bits.mul_pow_lt a w p h)
+
+/-- The tag above a payload stays below the packed width: from `tag < 2^tw` and
+`payload < 2^P`, `tag * 2^P + payload < 2^tw * 2^P`. -/
+def Bits.add_mul_pow_lt (tag tw P payload : Nat)
+    (ht : Nat.lt tag (Nat.pow 2 tw) = .true) (hp : Nat.lt payload (Nat.pow 2 P) = .true) :
+    Nat.lt (Nat.add (Nat.mul tag (Nat.pow 2 P)) payload)
+      (Nat.mul (Nat.pow 2 tw) (Nat.pow 2 P)) = .true :=
+  let X := Nat.mul tag (Nat.pow 2 P);
+  let Q := Nat.pow 2 P;
+  let hStep0 : Nat.Le (Nat.add X (Nat.succ payload)) (Nat.add X Q) :=
+    Nat.add_le_add_left X (Nat.succ payload) Q hp;
+  let hStep1 : Nat.Lt (Nat.add X payload) (Nat.add X Q) :=
+    Eq.substProp (fun (t : Nat) => Nat.Le t (Nat.add X Q)) (Nat.add_succ X payload) hStep0;
+  let eX : Nat.add X Q = Nat.mul (Nat.succ tag) Q :=
+    Eq.trans (Nat.add_comm X Q) (Eq.symm (Nat.succ_mul tag Q));
+  let hBound : Nat.Le (Nat.mul (Nat.succ tag) Q) (Nat.mul (Nat.pow 2 tw) Q) :=
+    Nat.mul_le_mul (Nat.succ tag) (Nat.pow 2 tw) Q Q ht (Nat.le_refl Q);
+  Nat.lt_of_lt_of_le (Nat.add X payload) (Nat.add X Q) (Nat.mul (Nat.pow 2 tw) Q) hStep1
+    (Eq.substProp (fun (t : Nat) => Nat.Le t (Nat.mul (Nat.pow 2 tw) Q)) (Eq.symm eX) hBound)
+
+/-- `Bits.add_mul_pow_lt` with the product written as one power. -/
+def Bits.add_mul_pow_lt' (tag tw P payload : Nat)
+    (ht : Nat.lt tag (Nat.pow 2 tw) = .true) (hp : Nat.lt payload (Nat.pow 2 P) = .true) :
+    Nat.lt (Nat.add (Nat.mul tag (Nat.pow 2 P)) payload) (Nat.pow 2 (Nat.add tw P)) = .true :=
+  Eq.substProp (fun (t : Nat) => Nat.lt (Nat.add (Nat.mul tag (Nat.pow 2 P)) payload) t = .true)
+    (Eq.symm (Bits.pow_add tw P)) (Bits.add_mul_pow_lt tag tw P payload ht hp)
+
+/-- `payload * 2^pad` stays below `2^P` when the payload fits `pad + cw` bits
+(`P = cw + pad`). -/
+def Bits.shift_lt (payload cw pad P : Nat)
+    (hp : Nat.lt payload (Nat.pow 2 cw) = .true) (hadj : Nat.add cw pad = P) :
+    Nat.lt (Nat.mul payload (Nat.pow 2 pad)) (Nat.pow 2 P) = .true :=
+  Eq.substProp (fun (t : Nat) => Nat.lt (Nat.mul payload (Nat.pow 2 pad)) (Nat.pow 2 t) = .true)
+    hadj (Bits.mul_pow_lt' payload cw pad hp)
+
+-- ## Low and high halves
+
+/-- `low P (tag * 2^P + payload) = payload`, when the payload fits. -/
+def Bits.low_add_mul_pow (P tag payload : Nat) (hp : Nat.lt payload (Nat.pow 2 P) = .true) :
+    Bits.low P (Nat.add (Nat.mul tag (Nat.pow 2 P)) payload) = payload :=
+  let Q := Nat.pow 2 P;
+  let e := Bits.pos_succ Q (Word.pow_pos P);
+  let hp' : Nat.lt payload (Nat.succ (Bits.dec Q)) = .true :=
+    Eq.substProp (fun (t : Nat) => Nat.lt payload t = .true) e hp;
+  let r : Nat.mod (Nat.add (Nat.mul (Nat.succ (Bits.dec Q)) tag) payload) (Nat.succ (Bits.dec Q)) = payload :=
+    Bits.mod_mq (Bits.dec Q) tag payload hp';
+  let rQ : Nat.mod (Nat.add (Nat.mul Q tag) payload) Q = payload :=
+    Eq.substProp (fun (t : Nat) => Nat.mod (Nat.add (Nat.mul t tag) payload) t = payload)
+      (Eq.symm e) r;
+  let r' : Nat.mod (Nat.add (Nat.mul tag Q) payload) Q = payload :=
+    Eq.substProp (fun (t : Nat) => Nat.mod (Nat.add t payload) Q = payload)
+      (nat_ring! Q * tag = tag * Q) rQ;
+  let eLow : Bits.low P (Nat.add (Nat.mul tag Q) payload)
+      = Nat.mod (Nat.add (Nat.mul tag Q) payload) Q := Eq.symm (Bits.mod_pow P (Nat.add (Nat.mul tag Q) payload));
+  Eq.trans eLow r'
+
+/-- The high half of a value below `2^P` is zero. -/
+def Bits.high_zero (P payload : Nat) (hp : Nat.lt payload (Nat.pow 2 P) = .true) :
+    Bits.high P payload = 0 :=
+  Eq.trans (Eq.symm (Bits.div_pow P payload)) (Bits.div_small payload (Nat.pow 2 P) hp)
+
+/-- `high P (tag * 2^P + payload) = tag`, when the payload fits below it. -/
+def Bits.packed_tag (P tag payload : Nat) (hp : Nat.lt payload (Nat.pow 2 P) = .true) :
+    Bits.high P (Nat.add (Nat.mul tag (Nat.pow 2 P)) payload) = tag :=
+  Eq.trans (Bits.high_add_pow P tag payload)
+    (Eq.trans (Eq.congrArg (Nat.add tag) (Bits.high_zero P payload hp)) (Nat.add_zero tag))
+
+-- ## Values of a bit vector
+
+/-- The value of `BitVec.ofNat W n` when `n` fits `W` bits. -/
+def BitVec.toNat_ofNat_lt (W n : Nat) (h : Nat.lt n (Nat.pow 2 W) = .true) :
+    BitVec.toNat (BitVec.ofNat W n) = n :=
+  Eq.trans (BitVec.toNat_ofNat W n) (Eq.trans (Bits.mod_pow W n) (Bits.low_of_lt W n h))
+
+/-- `BitVec.ofNat W x.toNat = x`. -/
+def BitVec.ofNat_toNat {0 W : Nat} (x : BitVec W) : BitVec.ofNat W x.toNat = x :=
+  UIntN.ext (BitVec.ofNat W x.toNat) x
+    (Eq.trans (BitVec.toNat_ofNat W x.toNat)
+      (Eq.trans (Bits.mod_pow W x.toNat) (Bits.low_of_lt W x.toNat (UIntN.toNat_lt x))))
+
+/-- `BitVec.ofNat w n = v` when the low `w` bits of `n` are `v`'s bits. -/
+def BitVec.ofNat_low {0 w : Nat} (n : Nat) (v : BitVec w)
+    (h : Bits.low w n = BitVec.toNat v) : BitVec.ofNat w n = v :=
+  UIntN.ext (BitVec.ofNat w n) v
+    (Eq.trans (BitVec.toNat_ofNat w n) (Eq.trans (Bits.mod_pow w n) h))
+
+-- ## One field
+
+/-- `(v*2^s + rest) * 2^pad` as `v*2^(pad+s) + rest*2^pad`. -/
+def Bits.shift_add (v s pad rest : Nat) :
+    Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) (Nat.pow 2 pad)
+      = Nat.add (Nat.mul v (Nat.pow 2 (Nat.add pad s))) (Nat.mul rest (Nat.pow 2 pad)) :=
+  let P := Nat.pow 2 s;
+  let R := Nat.pow 2 pad;
+  let h1 : Nat.mul (Nat.add (Nat.mul v P) rest) R = Nat.add (Nat.mul v (Nat.mul P R)) (Nat.mul rest R) :=
+    nat_ring! (v * P + rest) * R = v * (P * R) + rest * R;
+  let h2 : Nat.mul v (Nat.mul P R) = Nat.mul v (Nat.pow 2 (Nat.add pad s)) :=
+    Eq.congrArg (Nat.mul v)
+      (Eq.trans (Eq.symm (Bits.pow_add s pad)) (Eq.congrArg (Nat.pow 2) (Nat.add_comm s pad)));
+  Eq.trans h1 (Eq.congrArg (fun t => Nat.add t (Nat.mul rest R)) h2)
+
+/-- The field at the top of a packed payload: with `rest < 2^s` and `v < 2^w`,
+`low w (high (pad+s) ((v*2^s + rest)*2^pad)) = v`. -/
+def Bits.pack_field (v w s pad rest : Nat)
+    (hv : Nat.lt v (Nat.pow 2 w) = .true) (hr : Nat.lt rest (Nat.pow 2 s) = .true) :
+    Bits.low w (Bits.high (Nat.add pad s)
+      (Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) (Nat.pow 2 pad))) = v :=
+  let R := Nat.pow 2 pad;
+  let hrest : Nat.lt (Nat.mul rest R) (Nat.pow 2 (Nat.add pad s)) = .true :=
+    Eq.substProp (fun (t : Nat) => Nat.lt (Nat.mul rest R) t = .true)
+      (Eq.congrArg (Nat.pow 2) (Nat.add_comm s pad)) (Bits.mul_pow_lt' rest s pad hr);
+  let hhigh : Bits.high (Nat.add pad s)
+      (Nat.add (Nat.mul v (Nat.pow 2 (Nat.add pad s))) (Nat.mul rest R))
+      = Nat.add v (Bits.high (Nat.add pad s) (Nat.mul rest R)) :=
+    Bits.high_add_pow (Nat.add pad s) v (Nat.mul rest R);
+  let hzero : Bits.high (Nat.add pad s) (Nat.mul rest R) = 0 :=
+    Bits.high_zero (Nat.add pad s) (Nat.mul rest R) hrest;
+  let hval : Bits.high (Nat.add pad s)
+      (Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) R) = v :=
+    Eq.trans (Eq.substProp (fun (t : Nat) => Bits.high (Nat.add pad s) t
+        = Nat.add v (Bits.high (Nat.add pad s) (Nat.mul rest R)))
+      (Eq.symm (Bits.shift_add v s pad rest)) hhigh)
+      (Eq.trans (Eq.congrArg (Nat.add v) hzero) (Nat.add_zero v));
+  Eq.trans (Eq.congrArg (Bits.low w) hval) (Bits.low_of_lt w v hv)
+
+/-- The field at the top of a packed payload, when the payload is known only as the low
+half of the packed number: rewrite that half to its shifted form first. -/
+def Bits.pack_field_low (payload0 v w s pad rest : Nat)
+    (hpay : payload0 = Nat.mul (Nat.add (Nat.mul v (Nat.pow 2 s)) rest) (Nat.pow 2 pad))
+    (hv : Nat.lt v (Nat.pow 2 w) = .true) (hr : Nat.lt rest (Nat.pow 2 s) = .true) :
+    Bits.low w (Bits.high (Nat.add pad s) payload0) = v :=
+  Eq.substProp (fun (p : Nat) => Bits.low w (Bits.high (Nat.add pad s) p) = v)
+    (Eq.symm hpay) (Bits.pack_field v w s pad rest hv hr)

@@ -9,7 +9,9 @@ import Hdl.Core
 -- and on samples of the wider one; the packed state is also simulated as one register.
 
 def B1 : HwTy := HwTy.bits 1
+def B3 : HwTy := HwTy.bits 3
 def B4 : HwTy := HwTy.bits 4
+def B8 : HwTy := HwTy.bits 8
 def B16 : HwTy := HwTy.bits 16
 
 -- Uart.TxPhase / Uart.TxState: 4 constructors, 2 tag bits; the structure has no tag
@@ -89,3 +91,62 @@ def txAll : List Bool := Hdl.map (fun (p : TxPhase) => Bool.and (txOk p 0) (txOk
 def haltC : Circuit (HwTy.bits Instr.width) B1 :=
   Circuit.comb (fun x => Hw.eq x (Instr.lit Instr.halt))
 #eval Circuit.runPacked haltC (.cons 0 (.cons 9 (.cons 64 (.cons 127 .nil))))
+
+------------------------------------------------------------------------------------
+-- Shapes the S4 examples do not cover: a nested structure, a Bool field, an
+-- `Option`-shaped two-constructor type, and the width/size agreement. The packing
+-- order is pinned by concrete bit strings.
+
+structure Point where
+  x : BitVec 4
+  y : BitVec 4
+  deriving BitPack
+
+structure Flags where
+  on : Bool
+  mode : TxPhase
+  n : BitVec 3
+  deriving BitPack
+
+inductive Maybe where
+  | none
+  | some (v : BitVec 3)
+  deriving BitPack
+
+#eval (Point.width, Flags.width, Maybe.width)
+-- field order: `x` in the high bits, then `y`; swapping the fields changes the bits
+#eval (BitVec.toNat (Point.pack (Point.mk (BitVec.ofNat 4 10) (BitVec.ofNat 4 5))),
+       BitVec.toNat (Point.pack (Point.mk (BitVec.ofNat 4 5) (BitVec.ofNat 4 10))))
+-- Bool, enumeration and bit-vector fields: `true, data (2), 5` is 1·32 + 2·8 + 5
+#eval BitVec.toNat (Flags.pack (Flags.mk Bool.true TxPhase.data (BitVec.ofNat 3 5)))
+#eval (BitVec.toNat (Maybe.pack Maybe.none), BitVec.toNat (Maybe.pack (Maybe.some (BitVec.ofNat 3 5))))
+#eval (Point.pack_lt (Point.mk (BitVec.ofNat 4 10) (BitVec.ofNat 4 5)),
+       Flags.pack_lt (Flags.mk Bool.true TxPhase.data (BitVec.ofNat 3 5)))
+
+-- the layout the netlist sees: the Verilog concat of the fields, for every Point and
+-- for one Flags value. `Circuit.runPacked` is the value simulation, `Circuit.simNet`
+-- the netlist simulation (the same nodes `Verilog.emit` prints).
+def pointC : Circuit (HwTy.prod B4 B4) B8 :=
+  Circuit.comb (fun p => Hw.cat (Hw.fst p) (Hw.snd p))
+def pointSim (x y : Nat) : Bool :=
+  let ω n := HwTy.pack (HwTy.prod B4 B4) (BitVec.ofNat 4 x, BitVec.ofNat 4 y);
+  let ω want := BitVec.toNat (Point.pack (Point.mk (BitVec.ofNat 4 x) (BitVec.ofNat 4 y)));
+  Bool.and (BEq.beq (Circuit.runPacked pointC (.cons n .nil)) (.cons want .nil))
+    (BEq.beq (Circuit.simNet .true pointC (.cons n .nil)) (.cons want .nil))
+def pointAll : Bool :=
+  Bool.and (pointSim 10 5) (Bool.and (pointSim 5 10) (pointSim 0 15))
+#eval pointAll
+
+def flagsC : Circuit (HwTy.prod HwTy.bit (HwTy.prod (HwTy.bits TxPhase.width) B3))
+    (HwTy.bits Flags.width) :=
+  Circuit.comb (fun p => Hw.cat (Hw.fst p) (Hw.cat (Hw.fst (Hw.snd p)) (Hw.snd (Hw.snd p))))
+def flagsIn (b : Bool) (m : TxPhase) (n : BitVec 3) : Nat :=
+  HwTy.pack (HwTy.prod HwTy.bit (HwTy.prod (HwTy.bits TxPhase.width) B3))
+    (Bool.toBits b, (TxPhase.pack m, n))
+def flagsSim : Bool :=
+  let ω n := flagsIn Bool.true TxPhase.data (BitVec.ofNat 3 5);
+  let ω want := BitVec.toNat (Flags.pack (Flags.mk Bool.true TxPhase.data (BitVec.ofNat 3 5)));
+  Bool.and (BEq.beq (Circuit.runPacked flagsC (.cons n .nil)) (.cons want .nil))
+    (BEq.beq (Circuit.simNet .true flagsC (.cons n .nil)) (.cons want .nil))
+#eval flagsSim
+#eval Verilog.emit (Circuit.netlist "point" pointC)

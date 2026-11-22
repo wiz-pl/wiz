@@ -1,11 +1,19 @@
-examples/hdl-bitpack.wiz:43:1: info: (2, 18, 0, 18)
-examples/hdl-bitpack.wiz:44:1: info: (7, 3, 4)
-examples/hdl-bitpack.wiz:45:1: info: (5, 1, 4)
-examples/hdl-bitpack.wiz:48:1: info: 9
-examples/hdl-bitpack.wiz:49:1: info: 51
-examples/hdl-bitpack.wiz:50:1: info: 64
-examples/hdl-bitpack.wiz:51:1: info: 19
-examples/hdl-bitpack.wiz:53:1: info: 131372
-examples/hdl-bitpack.wiz:77:1: info: (.true, .true, .true)
-examples/hdl-bitpack.wiz:86:1: info: [Bool.true, Bool.true, Bool.true, Bool.true]
-examples/hdl-bitpack.wiz:91:1: info: [0, 0, 1, 0]
+examples/hdl-bitpack.wiz:45:1: info: (2, 18, 0, 18)
+examples/hdl-bitpack.wiz:46:1: info: (7, 3, 4)
+examples/hdl-bitpack.wiz:47:1: info: (5, 1, 4)
+examples/hdl-bitpack.wiz:50:1: info: 9
+examples/hdl-bitpack.wiz:51:1: info: 51
+examples/hdl-bitpack.wiz:52:1: info: 64
+examples/hdl-bitpack.wiz:53:1: info: 19
+examples/hdl-bitpack.wiz:55:1: info: 131372
+examples/hdl-bitpack.wiz:79:1: info: (.true, .true, .true)
+examples/hdl-bitpack.wiz:88:1: info: [Bool.true, Bool.true, Bool.true, Bool.true]
+examples/hdl-bitpack.wiz:93:1: info: [0, 0, 1, 0]
+examples/hdl-bitpack.wiz:116:1: info: (8, 6, 4)
+examples/hdl-bitpack.wiz:118:1: info: (165, 90)
+examples/hdl-bitpack.wiz:121:1: info: 53
+examples/hdl-bitpack.wiz:122:1: info: (0, 13)
+examples/hdl-bitpack.wiz:123:1: info: ((), ())
+examples/hdl-bitpack.wiz:138:1: info: .true
+examples/hdl-bitpack.wiz:151:1: info: .true
+examples/hdl-bitpack.wiz:152:1: info: "module point(input clk, input [3:0] x_0, input [3:0] x_1, output [7:0] y);\n  wire [7:0] n3 = {x_0, x_1};\n  assign y = n3;\nendmodule\n"
