@@ -211,14 +211,19 @@ def numericsGroup : Group where
         let src ← ryuRoundTripProgram
         let dir ← IO.FS.createTempDir
         let c := dir / "ryu_roundtrip.c"
-        let exe := dir / "ryu_roundtrip"
         IO.FS.writeFile c src
-        let built ← IO.Process.output { cmd := cc, args := #["-O2", "-w", "-o", exe.toString, c.toString] }
-        unless built.exitCode == 0 do
-          throw (IO.userError s!"cc failed on the Ryu probe:\n{built.stderr}")
-        let ran ← IO.Process.output { cmd := exe.toString }
-        unless ran.exitCode == 0 do
-          throw (IO.userError s!"a printed Float64 did not read back to its bits:\n{ran.stdout}") },
+        -- both multiplication paths: the `__int128` one and the portable 64-bit one the
+        -- wasm build takes (`WIZ_RYU_ONLY_64_BIT_OPS`)
+        for (i, defs) in ([[], ["-DWIZ_RYU_ONLY_64_BIT_OPS"]] : List (List String)).enum do
+          let exe := dir / s!"ryu_roundtrip{i}"
+          let built ← IO.Process.output
+            { cmd := cc, args := #["-O2", "-w"] ++ defs.toArray ++ #["-o", exe.toString, c.toString] }
+          unless built.exitCode == 0 do
+            throw (IO.userError s!"cc failed on the Ryu probe ({defs}):\n{built.stderr}")
+          let ran ← IO.Process.output { cmd := exe.toString }
+          unless ran.exitCode == 0 do
+            throw (IO.userError
+              s!"a printed Float64 did not read back to its bits ({defs}):\n{ran.stdout}") },
     { name := "R6: no build path enables fast-math, and the C backend pins -ffp-contract=off", run := fun _ => do
         let forbidden := ["-ffast-math", "-Ofast", "-funsafe-math-optimizations",
           "-ffinite-math-only", "-freciprocal-math", "-fassociative-math", "-fno-signed-zeros",
