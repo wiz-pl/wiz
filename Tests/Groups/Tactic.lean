@@ -419,7 +419,7 @@ def tacticGroup : Group where
           ["Prog.get with fields # (λv. (Prog.ret #))", "not a constructor"] },
     -- P0 simp congruence and simp?
     { name := "simp congruence: rewrites under a lambda and an application", run := fun _ =>
-        okLib ("import SimpLemmas\n" ++
+        okLibs ("import SimpLemmas\n" ++
           "def underBinder (a b : Nat) (h : a = b) :\n" ++
           "    (fun (n : Nat) => n + a) = (fun (n : Nat) => n + b) := by\n" ++
           "  simp [h]\n  rfl\n" ++
@@ -443,7 +443,7 @@ def tacticGroup : Group where
           "#print axioms chain\n#print axioms both")
           ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
     { name := "auto does not affirm the consequent", run := fun _ =>
-        failsLib ("import Logic\n" ++
+        failsLibs ("import Logic\n" ++
           "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
           "auto: no proof" },
     { name := "a hint of an axiom is refused", run := fun _ =>
@@ -451,17 +451,17 @@ def tacticGroup : Group where
           "has no definition: a hint must be a theorem" },
     -- P0 omega
     { name := "omega closes linear Nat order and equality goals", run := fun _ =>
-        okLib ("import Nat\n" ++
+        okLibs ("import Nat\n" ++
           "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
           "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
           "def bound (a b : Nat) (h : a + b = 3) : Nat.Le a 3 := by\n  omega\n" ++
           "#print axioms leTrans")
           ["'leTrans' does not depend on any axioms"] },
     { name := "omega refuses false and non-linear goals", run := fun _ =>
-        failsLib "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
+        failsLibs "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
           "omega:" },
     { name := "omega refuses multiplication", run := fun _ =>
-        failsLib "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
+        failsLibs "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
           "omega: non-linear" },
     -- case analysis (docs/stages/06-macros.md, 6j)
     { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>

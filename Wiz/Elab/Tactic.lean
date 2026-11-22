@@ -976,8 +976,12 @@ partial def rewriteDeep (gl : Goal R) (g : Globals R) (h : Term R) (rtl : Bool) 
               let parentNew := C.instantiateAt 0 kidNew
               if parentNew == t then do set s; tryKids rest
               else do
-                -- `A` is the child's type: let the kernel solve the hole from the proof
-                let A ← freshTypeMeta ctx "simp congr"
+                -- `A` is the child's type; quoting it keeps `transp`'s type index
+                -- determined (a bare metavariable is not solved by `transp`)
+                let ty? ← (RCtx.ofLocal ctx).typeOf? kid
+                let A ← match ty? with
+                  | some ty => zonk ctx.lvl (quote g ctx.lvl ty)
+                  | none => freshTypeMeta ctx "simp congr"
                 let sym := .transp A kidNew (.lam "x" (.eqTy (.var 0) (kidNew.lift 1)))
                   (.reflTy kidNew) kid pf
                 let P : Term R := .lam "x" (.eqTy (.app (C.lift 1) (.var 0)) (t.lift 1))

@@ -622,9 +622,10 @@ inductive Tac where
   -- (D6) the source names of `T`'s constructors (`T.c`), in declaration order, for
   -- `constructor`: `none` if `T` is not an inductive type or a structure
   | ctorNames (n : String) (k : Option (List String) → Tac)
-  -- (6j) a case split on the Boolean expression `e`: two goals, with `e = .true` and
-  -- `e = .false` as hypotheses (named from `hint`, freshly); `k` gets their numbers
-  | byCases (g : Nat) (e : Expr) (hint : String) (k : List Nat → Tac)
+  -- (6j) a case split on the Boolean expression `e` (of type `ty`): two goals, with
+  -- `e = .true` and `e = .false` as hypotheses (named from `hint`, freshly); `k` gets
+  -- their numbers
+  | byCases (g : Nat) (e : Expr) (ty : Expr) (hint : String) (k : List Nat → Tac)
   -- (P0) the `[hint]` database: each entry's name, kind (`apply`/`intro`/`elim`) and
   -- reflected constant, in the order `auto` tries them (priority, then registration)
   | getHints (g : Nat) (k : List (String × (String × Expr)) → Tac)
@@ -736,8 +737,8 @@ candidates `constructor` tries. `none` if `n` is not an inductive type or a stru
 def TacticM.ctorNames (n : String) : TacticM (Option (List String)) := fun k => Tac.ctorNames n k
 /-- Split goal `g` on the Boolean expression `e`: two goals, with `e = .true` and
 `e = .false` as hypotheses, named freshly from `hint` when it is not `""`. -/
-def TacticM.byCases (g : Nat) (e : Expr) (hint : String) : TacticM (List Nat) := fun k =>
-  Tac.byCases g e hint k
+def TacticM.byCases (g : Nat) (e : Expr) (ty : Expr) (hint : String) : TacticM (List Nat) := fun k =>
+  Tac.byCases g e ty hint k
 /-- The `[hint]` database: each hint's name, kind (`apply`/`intro`/`elim`) and reflected
 constant, in the order `auto` tries them (priority, then registration). -/
 def TacticM.getHints (g : Nat) : TacticM (List (String × (String × Expr))) := fun k =>
@@ -1207,7 +1208,7 @@ attribute [tactic tactic.renameI] Tactic.renameI
 /-- Split the goal at `stx`'s expression, naming the hypotheses from `hint`. -/
 def TacticM.byCasesAt (g : Nat) (hint : String) (stx : Syntax) : TacticM Unit := do
   p ← TacticM.elabInfer g stx;
-  gs ← TacticM.byCases g p.1 hint;
+  gs ← TacticM.byCases g p.1 p.2 hint;
   TacticM.replaceMainGoal gs
 syntax (name := byCases) "by_cases" term : tactic
 /-- `by_cases e` (`e : Bool`): two goals, with `e = .true` and `e = .false` as

@@ -4436,18 +4436,21 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     let _all := decodeBool (fld 3) == some true
     let ans (r : RVal) := apply code (fld 4) r
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    match ← rewriteDeep gl g h rtl with
-    | none => return ← runTac code info st (ans (mkCon 0 []))
-    | some (newT, pf) => do
-      -- a rule that rewrites a term to itself is not a step: report no match, so a set
-      -- with a degenerate rule (a left side convertible with its right side) terminates
-      if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
-      let newTy ← evalIn gl.ctx newT
-      let m ← freshMeta gl.ctx "goal" newTy
-      unifyGoal gl (.cast newT goalT pf m)
-      let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
-      let (r, st) ← refl st gl newT
-      return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
+    match ← prepareIn g gl.ctx h with
+    | none => return ← runTac code info st (ans (mkCon 2 [encodeString "not an equation"]))
+    | some _ =>
+      match ← rewriteDeep gl g h rtl with
+      | none => return ← runTac code info st (ans (mkCon 0 []))
+      | some (newT, pf) => do
+        -- a rule that rewrites a term to itself is not a step: report no match, so a set
+        -- with a degenerate rule (a left side convertible with its right side) terminates
+        if newT == goalT then return ← runTac code info st (ans (mkCon 0 []))
+        let newTy ← evalIn gl.ctx newT
+        let m ← freshMeta gl.ctx "goal" newTy
+        unifyGoal gl (.cast newT goalT pf m)
+        let (st, id) := addGoal st { ctx := gl.ctx, ty := newTy, tm := m }
+        let (r, st) ← refl st gl newT
+        return ← runTac code info st (ans (mkCon 1 [.nat id, r]))
   if tag == TacTag.getSimpLemmas then
     -- (6h S2) the default set, in the order the Wiz driver tries it: priority (higher
     -- first), then registration order (oldest first). Each lemma is the reflected
@@ -4479,16 +4482,15 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
   if tag == TacTag.byCases then
     -- (6j) `fun _ => G` at `Bool.casesOn`, with a branch hypothesis `e = false`/`e = true`
     let eT ← zonk lvl (← reify st.handles (fld 1) lvl)
-    let hint ← str (fld 2)
+    let tyT ← zonk lvl (← reify st.handles (fld 2) lvl)
+    let hint ← str (fld 3)
     let boolT : Term R := .const "Bool" []
     let w : Term R := .qlit QuantitySyntax.explicitDefault
     let goalT ← zonk lvl (quote g lvl gl.ty)
-    let ty? ← typeOf? gl eT
-    let isBool ← match ty? with
-      | some ty => match ← force ty with
-        | .neutral (.global "Bool" _) _ => pure true
-        | _ => pure false
-      | none => pure false
+    let isBool ← try
+      unify lvl (← evalIn gl.ctx tyT) (← evalIn gl.ctx boolT)
+      pure true
+    catch _ => pure false
     unless isBool do
       throwAt info "by_cases: expected a Bool expression" ErrorCode.tacticFailed
     let hf := introName gl.ctx.names hint "h" true false
@@ -4514,7 +4516,7 @@ partial def runTac (code : Code) (info : SourceInfo) (st : TacState R) (v : RVal
     unifyGoal gl proof
     let (st, idT) := addGoal st { ctx := ctxT, ty := tyT', tm := mT }
     let (st, idF) := addGoal st { ctx := ctxF, ty := tyF', tm := mF }
-    return ← runTac code info st (apply code (fld 3) (encodeList [.nat idT, .nat idF]))
+    return ← runTac code info st (apply code (fld 4) (encodeList [.nat idT, .nat idF]))
   if tag == TacTag.exact then
     let stx ← stxOf (fld 1)
     let t ← check (gl.ctx.withInfo stx) stx gl.ty
