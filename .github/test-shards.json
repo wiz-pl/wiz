@@ -1,7 +1,7 @@
 [
   {
     "name": "selfhost",
-    "split": 3,
+    "split": 6,
     "heavy": true,
     "inputs": [
       "selfhost/*",
@@ -37,7 +37,7 @@
   },
   {
     "name": "hdl",
-    "split": 2,
+    "split": 1,
     "split-cases": true,
     "heavy": true,
     "select": [
@@ -67,7 +67,7 @@
   },
   {
     "name": "library",
-    "split": 10,
+    "split": 8,
     "jobs": 4,
     "select": [
       "=bus-crc",

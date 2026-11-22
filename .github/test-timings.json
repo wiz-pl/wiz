@@ -4,6 +4,15 @@
   "args": {
    "long, short, clustered, --, positionals, subcommands and every error message": {"seconds": 2.458}
   },
+  "attest": {
+   "--artifact-only verifies without the inputs; the default needs them": {"seconds": 250.601},
+   "a cflags change changes the predicate, not inputsRoot": {"seconds": 227.704},
+   "a tampered artifact fails verification": {"seconds": 208.71},
+   "an edit to a tracked input is dirty and changes the source hash": {"seconds": 338.496},
+   "an identical rebuild produces a byte-identical envelope": {"seconds": 271.192},
+   "build with --attest writes a complete, unsigned statement; verify passes": {"seconds": 313.417},
+   "the envelope is explicitly unsigned; a forged signature is refused": {"seconds": 174.863}
+  },
   "audit": {
    "arithmetic: #eval against Lean's Nat": {"seconds": 2.246},
    "arithmetic: compiled (C) against Lean's Nat": {"seconds": 2.651},
@@ -69,7 +78,9 @@
    "recursion, without leaks": {"seconds": 1.486},
    "reuse: a dead cell is reused for a new one (Exercise 8.3)": {"seconds": 1.545},
    "sized recursion": {"seconds": 0.107},
+   "the IR still prints primitive keys the old way (wire compatibility)": {"seconds": 23.192},
    "the IR, with reference counting (Exercise 8.1)": {"seconds": 1.579},
+   "the typed primitive table covers every closed primitive (C and LLVM)": {"seconds": 15.512},
    "type class dictionaries": {"seconds": 1.506},
    "unused parameters are borrowed (the caller drops them)": {"seconds": 1.57}
   },
@@ -84,6 +95,30 @@
    "proj of a field of a number stops the IR interpreter and the C runtime": {"seconds": 0.602},
    "the length of a list borrows it": {"seconds": 1.558}
   },
+  "bpf": {
+   "`BitVec 12` is rejected": {"seconds": 21.792},
+   "`BitVec 32` is a register width": {"seconds": 17.781},
+   "``Array` allocates` is rejected": {"seconds": 18.501},
+   "``IO` — a kernel program has no world` is rejected": {"seconds": 19.875},
+   "``List` is a recursive heap object` is rejected": {"seconds": 18.536},
+   "``Nat` is not representable` is rejected": {"seconds": 21.791},
+   "``Ref` is mutable heap state` is rejected": {"seconds": 17.269},
+   "``String` is a heap object` is rejected": {"seconds": 21.79},
+   "``UIntN 128`` is rejected": {"seconds": 21.794},
+   "`a closure has no eBPF representation` is rejected": {"seconds": 18.523},
+   "`no floating-point instructions` is rejected": {"seconds": 20.325},
+   "`partial` is rejected": {"seconds": 15.847},
+   "a 64-bit shift by 63 is accepted": {"seconds": 17.903},
+   "a 64-bit shift by 64 is rejected": {"seconds": 20.152},
+   "a 64-bit shift by 65 is rejected": {"seconds": 19.244},
+   "a Packet map value is rejected": {"seconds": 16.143},
+   "a `UIntN 32` result is not an action": {"seconds": 18.416},
+   "a call cycle is rejected": {"seconds": 17.878},
+   "signed arithmetic is accepted": {"seconds": 20.158},
+   "signed division (INT_MIN / -1)": {"seconds": 17.77},
+   "the IPv4 allow-list fixture emits verifier-shaped C": {"seconds": 16.898},
+   "the manifest parses": {"seconds": 16.05}
+  },
   "builtins": {
    "Nat.beq and Nat.lt compute natively on numerals": {"seconds": 2.601},
    "S1: a variable captured by a native operation counts in syntactic equality (it proved False)": {"seconds": 1.444},
@@ -97,6 +132,7 @@
    "a procedural macro can fail": {"seconds": 1.605},
    "a stuck number times a big numeral, in a type (nat-pow-blowup)": {"seconds": 2.502},
    "a stuck subtraction with a huge power on the numeral side (numeral-sub-blowup)": {"seconds": 1.94},
+   "an oversized Nat.shiftLeft or Nat.pow is refused, not allocated (compiled)": {"seconds": 38.459},
    "different huge powers are not equal": {"seconds": 2.256},
    "different literals are not equal": {"seconds": 1.771},
    "division, powers and bits compute natively (#eval)": {"seconds": 1.959},
@@ -326,6 +362,12 @@
    "the library checks, and the scheduler, the checker and the proofs use no axiom": {"seconds": 7.765},
    "the proofs: picks by rfl, round-robin progress and pick-readiness applied": {"seconds": 7.793}
   },
+  "context": {
+   "Ctx arrays keep de Bruijn order, level order, and shadowing": {"seconds": 25.162},
+   "a deep context checks (innermost used, outermost used, linear outermost)": {"seconds": 19.837},
+   "a deep context still rejects a dropped linear variable": {"seconds": 18.968},
+   "usage vectors are sparse: zeros is empty, add pads, scale 0 trims, join is pointwise": {"seconds": 26.432}
+  },
   "conv": {
    "Type ≡ Type": {"seconds": 0.08},
    "Type ≢ Type 1": {"seconds": 0.08},
@@ -451,6 +493,15 @@
   "display": {
    "Display: SSD1306/SSD1331 command bytes, init, windows, pixel/colour helpers; seqC/serC decoded byte streams; values = Netlist.simulate = simFast": {"seconds": 27.48}
   },
+  "dist-proofs": {
+   "P1: refinement, fairness, leader safety/liveness and the bridge are axiom-free": {"seconds": 51.442},
+   "P1: the fair advance chooses a leader": {"seconds": 42.538},
+   "bounded traces: `safetyDuring` is axiom-free, and a bounded search is unknown": {"seconds": 45.409},
+   "counterexample: a participant commits before the coordinator, with a concrete path": {"seconds": 76.073},
+   "positive: the N=2 instance is ok, and the finite safety theorem applies": {"seconds": 57.818},
+   "the checker's soundness theorems are axiom-free": {"seconds": 142.34},
+   "the library checks, and the safety and checker theorems are axiom-free": {"seconds": 63.649}
+  },
   "doc": {
    "Markdown: paragraphs, emphasis, code, lists, fences, links; HTML escaped": {"seconds": 0.062},
    "doc comments are stored for every command kind that declares a name": {"seconds": 1.645},
@@ -463,6 +514,7 @@
    "wiz doc --reference: implicits, a class with two instances, an infix row, doc markup, a module without docs": {"seconds": 11.808},
    "wiz doc --serve: --port and --lsp need --serve": {"seconds": 0.127},
    "wiz doc --serve: the client is only in served pages, and the server serves the tree and its sources": {"seconds": 15.463},
+   "wiz doc: a ```wiz fence is highlighted with the parser's lexer; an untagged fence is plain": {"seconds": 272.644},
    "wiz doc: a page per module, kinds, docs as HTML, source links, instances, index": {"seconds": 12.634},
    "wiz doc: every command kind that declares a name is an entry with its kind and signature": {"seconds": 10.909},
    "wiz doc: every cross-link resolves; every declaration is in the search index": {"seconds": 10.037},
@@ -656,6 +708,7 @@
   "examples": {
    "example markers: every .expected matches its `-- test:` kind": {"seconds": 0.119},
    "examples/ before hdl: the stage demos, classes, std-like and FFI examples": {"seconds": 47.237},
+   "examples/ before import_c: the stage demos, classes, std-like and FFI examples": {"seconds": 713.94},
    "examples/ from import_c: the library, Scry, Rune and Pervasive examples": {"seconds": 201.37},
    "examples/hdl*: the HDL examples, including the large netlist goldens": {"seconds": 543.346}
   },
@@ -714,6 +767,7 @@
    "... nor performs an effect in the scrutinee of a split at 0 (C and LLVM)": {"seconds": 6.392},
    "IO actions run in order": {"seconds": 2.349},
    "IO.arg past the end is empty (no i+1 overflow at 2^64-1)": {"seconds": 2.538},
+   "IO.readFile: a missing file is empty text, any other failure is reported and exits 1 (so is a failed IO.writeFile)": {"seconds": 32.317},
    "UInt64.ofNat reduces mod 2^64 at the boundary (C and LLVM)": {"seconds": 4.935},
    "a C library function, through its header": {"seconds": 2.553},
    "a long stream observed twice computes each element once": {"seconds": 2.834},
@@ -869,6 +923,7 @@
   "grail-index": {
    "a changed archive, a bad requirement and a missing entry are errors": {"seconds": 2.653},
    "a lower snapshot seq is a rollback; a same-seq rewrite is refused": {"seconds": 14.229},
+   "a signed entry digest covers tree, commit and deps (P0)": {"seconds": 139.646},
    "a signed index snapshot is verified offline and pinned in the lock": {"seconds": 13.299},
    "an edited entry, snapshot or expiry is refused": {"seconds": 14.345},
    "grail index check: offline by default, and an error exits 1": {"seconds": 11.91},
@@ -876,7 +931,9 @@
    "index.wiz lists exactly the packages on disk": {"seconds": 2.622},
    "module-prefix conflicts are an index error and a resolver error": {"seconds": 0.043},
    "publish records the archive's module names": {"seconds": 2.695},
-   "the example grail-index validates offline": {"seconds": 2.652}
+   "the example fate-index validates offline": {"seconds": 19.657},
+   "the example grail-index validates offline": {"seconds": 2.652},
+   "yank state is signed, and a yanked version names its reason": {"seconds": 110.2}
   },
   "grail-jobs": {
    "a diamond builds with -j 4 as with -j 1, and again runs nothing": {"seconds": 22.272},
@@ -1264,6 +1321,7 @@
    "doc comments in hovers, completion items and signature help (11s)": {"seconds": 1.63},
    "document symbols, workspace symbols and folding ranges (11v)": {"seconds": 1.365},
    "error codes: the common errors carry theirs": {"seconds": 1.919},
+   "framing: a short read, a bad or oversized Content-Length, invalid UTF-8": {"seconds": 36.489},
    "infoview methods are advertised": {"seconds": 0.096},
    "infoview socket: cursor notifications, requests answered on the socket": {"seconds": 1.558},
    "inlay hints: the types of fun and let binders written without one": {"seconds": 1.769},
@@ -1309,6 +1367,7 @@
   "meta": {
    "E5b: a payload equation at a neutral field type, in the three variants (the kernels' rule is not stable under substitution)": {"seconds": 0.082},
    "O7 sanity: dropping the quantity side condition q ≡ q' changes the computed description equation (a differential case)": {"seconds": 0.109},
+   "O7: `DescEq_subst` on a concrete substitution (`dret (var 0)` under `var 0 ↦ tt`)": {"seconds": 35.975},
    "PR #123 (CoreSpec 8.2): equations at propositions are True, the Σ rule at a proof component uses reflTy: the reference checker agrees with the Lean kernel": {"seconds": 0.091},
    "PR #40 (CoreSpec 8.4b): equality at Desc, μ ≡ μ by codes, casts at Desc and μ: the reference checker agrees with the Lean kernel": {"seconds": 0.111},
    "T0 against T1: InReg decides an inert cast in the spec; PF-C also lets the kernel use a cast at a type variable under a proposition": {"seconds": 0.108},
@@ -1910,6 +1969,9 @@
    "Scry.Optics: a statement's origin lens gets, sets and maps": {"seconds": 18.291},
    "Scry.Report: HTML escaping, no remote resource, deterministic (scry/tests/report-pure.wiz)": {"seconds": 9.564}
   },
+  "scry-project": {
+   "findings index: same rows from both backends, corrupt/truncated Quire is a miss": {"seconds": 919.849}
+  },
   "scry-prover": {
    "a claim selects its sources; constantOrBound allows parameter flows": {"seconds": 154.629},
    "memory is covered: the store/load witness names both edges; the safe load proves": {"seconds": 156.749},
@@ -2021,6 +2083,14 @@
   },
   "selfhost": {
    "(#422) a match on a closed scrutinee is not evaluated while compiling: an argument, a postponed argument, a let-bound use, an if (bounded at 120 s; the same at fib 4 runs in both toolchains)": {"seconds": 7.324, "uses": ["compiler"]},
+   "(13t) `open A as Al` does not open A unqualified": {"seconds": 24.03, "uses": ["checker"]},
+   "(13t) a module's `open` does not reach the file that imports it": {"seconds": 22.136, "uses": ["checker"]},
+   "(13t) a namespace with no `end` is reported at the `namespace`; a stray or mismatching `end` at the `end`": {"seconds": 27.702, "uses": ["checker"]},
+   "(13t) an `open` inside a namespace ends at its `end`": {"seconds": 28.363, "uses": ["checker"]},
+   "(13t) mutual inductive types under a namespace": {"seconds": 26.549, "uses": ["checker"]},
+   "(13t) namespaces, `open` and `open … as`, and a constructor of the matched type": {"seconds": 37.512, "uses": ["checker"]},
+   "(13t) two opens that provide the same name are an error naming both (never last-wins)": {"seconds": 17.912, "uses": ["checker"]},
+   "(13v) `namespace __root__` keeps the block's declarations global": {"seconds": 25.678, "uses": ["checker"]},
    "(A11) a rejected derivation is reported at the command's line and column (D6)": {"seconds": 0.476, "uses": ["compiler"]},
    "(A11) deriving BEq: 0/1/2/3 fields, a recursive polymorphic inductive, and an after-the-fact instance": {"seconds": 1.29, "uses": ["checker"]},
    "(A11) deriving rejects a field with no BEq instance and a class with no deriver": {"seconds": 0.593, "uses": ["checker"]},
@@ -2036,17 +2106,27 @@
    "(C14) native_refl: a false equation is refuted, and a function type and a bare native_refl are refused": {"seconds": 0.601, "uses": ["checker"]},
    "(C14) native_refl: decided with --trust-native and recorded as the axiom X.native✝; refused without the flag": {"seconds": 1.383, "uses": ["checker"]},
    "(C14) native_refl: the driver has no --trust-native, so it refuses a native_refl body without the flag (D9)": {"seconds": 0.744, "uses": ["compiler"]},
+   "(D6) constructor: the Lean and self-hosted frontends agree": {"seconds": 48.72, "uses": ["checker"]},
    "(E-K) Kernel.wiz literals: 77 * 130 + 3 = 10013 by literals is at least 10 times faster than by unary numerals": {"seconds": 223.088, "uses": ["compiler"]},
    "(E-K) Kernel.wiz literals: a literal and its unary numeral are convertible both ways (the equation, conversion, ind looking inside a literal)": {"seconds": 163.089, "uses": ["compiler"]},
    "(E-K) Kernel.wiz literals: different numbers, a literal at another type and ill-typed registrations are rejected": {"seconds": 134.512, "uses": ["compiler"]},
    "(E-K) Kernel.wiz literals: the registered operations compute natively on literals (exact past 64 bits), with the zero shortcuts and the stuck applications of the Lean kernel": {"seconds": 134.279, "uses": ["compiler"]},
    "A17: `&&`/`||` short-circuit, bind as on the host and agree with it": {"seconds": 4.552, "uses": ["compiler"]},
+   "A17: `¬` and `∃` elaborate in the self-hosted frontend (the builtin rules over `Not`/`Ex`)": {"seconds": 51.03, "uses": ["checker"]},
+   "A17: `⟨…⟩` terms and patterns (a structure, a one-constructor data type, a pair, nested, `let ⟨a, b⟩`) agree with the host": {"seconds": 63.351, "uses": ["checker"]},
    "A17: list literals (nested, empty, in a pattern) agree with the host": {"seconds": 3.833, "uses": ["compiler"]},
    "A18: `let () := u; b` agrees with the host": {"seconds": 4.296, "uses": ["compiler"]},
    "A18: `let (x, y)` (and three components, nested) agrees with the host": {"seconds": 3.606, "uses": ["compiler"]},
    "A18: as-patterns (in equations, nested, over a variable, in a tuple) agree with the host": {"seconds": 3.66, "uses": ["compiler"]},
    "A18: tuple patterns (a pair, a nested triple, a tuple in a list) agree with the host": {"seconds": 4.434, "uses": ["compiler"]},
+   "A19: coinductive types and copatterns agree with the host (the self-hosted frontend)": {"seconds": 53.824, "uses": ["checker"]},
+   "A19: copattern errors (missing observation, guardedness, cocon's type) agree with the host": {"seconds": 51.886, "uses": ["checker"]},
+   "A19: surface sizes (∞, ↑, Size<, `T ^ s`) are accepted by the self-hosted frontend (selfhost-only: the Lean frontend does not implement them yet)": {"seconds": 36.219, "uses": ["checker"]},
+   "A19: the coinduction primitives cocon and coit agree with the host": {"seconds": 57.967, "uses": ["checker"]},
+   "A19: the coinduction primitives ν and out agree with the host": {"seconds": 61.332, "uses": ["checker"]},
    "A19: the coinductive surface is not ported: the host accepts `coinductive`, the self-hosted frontend rejects it": {"seconds": 1.886, "uses": ["checker"]},
+   "A23: `#erase`, `#ir`, `#run` and `builtin` are host commands the self-hosted frontend does not run (pinned differences)": {"seconds": 54.985, "uses": ["checker"]},
+   "A23: `#print`, `#guard`, `example` and `universe` are rejected by both frontends (they are not host commands)": {"seconds": 54.567, "uses": ["checker"]},
    "Backend.wiz erases the value of a let at 0, and keeps it at 1 and ω": {"seconds": 149.262, "uses": ["compiler"]},
    "Bytes (21ag): #reduce in the self-hosted checker (the Prelude's Bytes model)": {"seconds": 1.204, "uses": ["checker"]},
    "Bytes (21ag): Array ↔ Bytes and the slice/append/eq boundaries, in both toolchains": {"seconds": 13.928, "uses": ["compiler"]},
@@ -2082,12 +2162,14 @@
    "a closed match scrutinee is evaluated at compile time (expected slow, #422)": {"seconds": 10.276, "uses": ["compiler"]},
    "a file of definitions, checked in Wiz": {"seconds": 0.086, "uses": ["checker"]},
    "a kept callback that C never releases is a leak, in both compilers (21q)": {"seconds": 9.63, "uses": ["compiler"]},
+   "a kernel reduction needing billions of unary Nat steps is stopped by the step budget, not by an out-of-memory (lib/BitVecAdd.wiz)": {"seconds": 128.26, "uses": ["compiler"]},
    "a linear variable used once in each branch of a match: both frontends accept it (21v)": {"seconds": 8.287, "uses": ["checker"]},
    "a link_c file that does not exist is an error, in both toolchains (21t)": {"seconds": 1.974, "uses": ["compiler"]},
    "a name is declared once: a second declaration is an error (it proved an empty type inhabited)": {"seconds": 0.106, "uses": ["checker"]},
    "a numeral from 2^63 is an error in the self-hosted frontend, not a wrapped number (15g)": {"seconds": 0.621, "uses": ["checker"]},
    "axioms, Unit, Array, IO and do, checked in Wiz": {"seconds": 0.612, "uses": ["checker"]},
    "big numerals with the self-hosted compiler: no deep recursion, 63-bit words (15g)": {"seconds": 10.138, "uses": ["compiler"]},
+   "c_struct with --unbox-structs: the last field is unboxed, and C reads it back (22i)": {"seconds": 43.757, "uses": ["compiler"]},
    "c_struct: C structs by value, the Lean and the self-hosted compilers agree (21r)": {"seconds": 12.236, "uses": ["compiler"]},
    "c_struct: a byte-array field passes and returns by value, in both compilers (C8)": {"seconds": 11.888, "uses": ["compiler"]},
    "c_struct: a field at quantity 0 is not erased yet: its type is still checked and the C struct still carries it (C8)": {"seconds": 1.058, "uses": ["compiler"]},
@@ -2181,6 +2263,7 @@
    "the self-hosted frontend: #print axioms lists a dependency's axiom (no checked-in selfhost trust ledger) (B18)": {"seconds": 0.725, "uses": ["checker"]},
    "the self-hosted frontend: #print axioms lists the same axioms as the Lean frontend (A23)": {"seconds": 2.113, "uses": ["checker"]},
    "the self-hosted frontend: #print axioms walks a partial definition's body only as code, as the Lean frontend (A23)": {"seconds": 1.639, "uses": ["checker"]},
+   "the self-hosted frontend: `++` is `Append` on String and List, as in the Lean frontend (String ++)": {"seconds": 54.082, "uses": ["checker"]},
    "the self-hosted frontend: `by` and the core tactics (A13)": {"seconds": 0.605, "uses": ["checker"]},
    "the self-hosted frontend: `let () := u; b` and `split` (`let (x, y)`), as in the Lean frontend (B7, A18)": {"seconds": 6.651, "uses": ["checker"]},
    "the self-hosted frontend: `where` instances, a multi-method class, and a class with instance parameters (A10)": {"seconds": 1.748, "uses": ["checker"]},
@@ -2240,10 +2323,13 @@
    "diagnostics: file:line:col, severity, a code": {"seconds": 1.737, "uses": ["compiler"]},
    "private names: a warm cache replays the same diagnostic (21n)": {"seconds": 1.023, "uses": ["compiler"]},
    "run: the program's output, and -o keeps the C": {"seconds": 10.473, "uses": ["compiler"]},
+   "the cache is per module: one entry each, keyed by the module and its imports": {"seconds": 33.714, "uses": ["compiler"]},
    "the cache key covers an imported module's edit": {"seconds": 1.008, "uses": ["compiler"]},
    "the cache: --cache-prune removes old keyed entries from the write cache only": {"seconds": 1.126, "uses": ["compiler"]},
    "the cache: --cache-ro layers are read in order and never written": {"seconds": 1.373, "uses": ["compiler"]},
    "the cache: --cache-verify strict uses and writes manifests": {"seconds": 1.986, "uses": ["compiler"]},
+   "the cache: a C build and an LLVM build of one file are different regions (.wizr keys differ)": {"seconds": 34.236, "uses": ["compiler"]},
+   "the cache: a warm check replays a module's info lines once (--types)": {"seconds": 32.215, "uses": ["compiler"]},
    "the cache: cold, warm, then invalidated by an edit": {"seconds": 1.478, "uses": ["compiler"]},
    "the one-shot mode (input.wiz to standard output) still works": {"seconds": 1.058, "uses": ["compiler"]},
    "usage: an unknown command, an unknown option, a missing FILE: exit 2": {"seconds": 0.087, "uses": ["compiler"]},
@@ -2265,6 +2351,7 @@
    "-I: an error inside a module (the host nests it under the import)": {"seconds": 9.742, "uses": ["compiler"]},
    "a failed import: both also report the commands after it": {"seconds": 9.093, "uses": ["compiler"]},
    "a missing file: both exit 1 (the host's message is an uncaught read)": {"seconds": 0.126, "uses": ["compiler"]},
+   "a missing file: one positioned diagnostic in both (exit 1)": {"seconds": 86.661, "uses": ["compiler"]},
    "build --header: the driver's header-only mode (the host has no such flag)": {"seconds": 0.752, "uses": ["compiler"]},
    "build --lib without an export: the host's error, the same text and exit": {"seconds": 11.022, "uses": ["compiler"]},
    "build --lib: the object, its header and the C match the host's shapes": {"seconds": 26.692, "uses": ["compiler"]},
@@ -2282,6 +2369,7 @@
    "cache: the default is ~/.cache/wiz in both": {"seconds": 9.157, "uses": ["compiler"]},
    "check: `#check` prints an info line without --types in both": {"seconds": 9.095, "uses": ["compiler"]},
    "check: a bad file has the same line, severity and kind (the column is the command's start)": {"seconds": 27.303, "uses": ["compiler"]},
+   "check: a bad file has the same position, severity and kind (the column is the failing term)": {"seconds": 372.218, "uses": ["compiler"]},
    "check: a good file is silent, exit 0, in both": {"seconds": 9.174, "uses": ["compiler"]},
    "check: a parse error is at its token in both": {"seconds": 18.198, "uses": ["compiler"]},
    "extensions: --include, --types and -v are the driver's own (the host rejects them)": {"seconds": 1.752, "uses": ["compiler"]},
@@ -2293,6 +2381,7 @@
    "run --llvm: `main : Nat` prints the same value (C5's first slice)": {"seconds": 11.239, "uses": ["compiler"]},
    "run: an IO program prints the same output and exits 0": {"seconds": 14.14, "uses": ["compiler"]},
    "run: program arguments are the driver's (the host's `run` takes flags only)": {"seconds": 3.828, "uses": ["compiler"]},
+   "smt: without --trust-smt the refusal is the host's, at the `smt` token (C15)": {"seconds": 175.113, "uses": ["compiler"]},
    "smt: without --trust-smt the refusal is the host's, at the command's start (C15)": {"seconds": 9.211, "uses": ["compiler"]},
    "subcommands: parse and fmt are the host's (the driver has no such command)": {"seconds": 1.349, "uses": ["compiler"]},
    "usage: a missing FILE, extra arguments and an unknown command agree (exit 2)": {"seconds": 0.366, "uses": ["compiler"]},
@@ -2301,6 +2390,9 @@
   "selfhost-host": {
    "(30f) the self-hosted backend: a class with a superclass parameter compiles and runs (A10)": {"seconds": 3.958, "uses": ["compiler"]},
    "(30f) the self-hosted frontend: a superclass is an instance-implicit parameter (A10)": {"seconds": 0.628, "uses": ["checker"]},
+   "13u: an import after a declaration is an error": {"seconds": 28.311, "uses": ["compiler"]},
+   "13u: an import inside `mutual` is an error naming the block": {"seconds": 24.323, "uses": ["compiler"]},
+   "13u: comments and imports form the header (accepted)": {"seconds": 28.074, "uses": ["checker"]},
    "F3 (audit): the eliminators check the index type's level (and both kernels agree on it below)": {"seconds": 0.119},
    "F6: literal quantities that differ make types unequal (and both kernels agree on it below)": {"seconds": 0.083},
    "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)": {"seconds": 170.111},

@@ -1219,6 +1219,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read # this run's job walls, for the shard-balance gate
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -1266,27 +1267,47 @@ jobs:
           if-no-files-found: ignore
           # master's feed `scripts/ci.py baseline` (docs/building.md); others are short-lived
           retention-days: ${{ github.event_name == 'push' && 7 || 2 }}
-      # The shards stay balanced (docs/building.md, "Shard balance"): warn, never fail, when
-      # the longest shard is over 1.5x the median, a split shard's cases are missing from
-      # the baseline, or two parts build the same program. On master, a run whose tests all
-      # passed and that drifted uploads the regenerated baseline (`test-timings-baseline`).
+      # The shards stay balanced (docs/building.md, "Shard balance"): the longest shard's
+      # job wall must be within 1.5x the median wall, every split shard's cases must be in
+      # the baseline, and two parts must not build the same program. Wall, not summed case
+      # seconds: a shard that runs cases in parallel ("jobs": N) has a wall well below its
+      # case sum, so the case-sum ratio alone would call a short job the tail. It is a
+      # warning everywhere but a push to master, where `--strict` makes drift a failure:
+      # as a warning it stayed stale for three current runs (wiz-notes/ci-profile.md). A
+      # run whose tests all passed still uploads the regenerated baseline
+      # (`test-timings-baseline`), including when it is the strict step that failed.
       - name: Shard balance
         id: balance
         if: needs.test.result != 'skipped' # no shard ran: nothing to sum up
-        continue-on-error: true
+        continue-on-error: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/master') }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
           rm -f test-timings.json
-          python3 scripts/ci.py balance --factor 1.5 --baseline-out test-timings.json logs/*.jsonl >> "$GITHUB_STEP_SUMMARY"
+          # This run's job list, for the `tests --` step's wall. Without it (the API call
+          # failed) balance falls back to summed case seconds and says so.
+          jobs=()
+          if gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?filter=latest&per_page=100" > jobs.json.tmp 2>/dev/null && mv jobs.json.tmp jobs.json; then
+            jobs=(--jobs-json jobs.json)
+          else
+            rm -f jobs.json.tmp jobs.json
+            echo "::warning title=Shard balance::no job list from the API; the gate falls back to summed case seconds"
+          fi
+          set +e
+          python3 scripts/ci.py balance --factor 1.5 --strict --baseline-out test-timings.json "${jobs[@]}" logs/*.jsonl >> "$GITHUB_STEP_SUMMARY"
+          rc=$?
+          set -e
           if [ -f test-timings.json ] && [ "${{ github.event_name }}" = push ] && [ "${{ needs.test.result }}" = success ]; then
             echo "refresh=true" >> "$GITHUB_OUTPUT"
             cmd="gh run download ${{ github.run_id }} -R ${{ github.repository }} -n test-timings-baseline -D .github"
             echo "::warning title=Shard balance::the test-timings baseline drifted; to apply this run's: $cmd"
             { echo; echo "To apply it (then commit .github/test-timings.json in a PR):"; echo; echo '```'; echo "$cmd"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
+          exit $rc
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: steps.balance.outputs.refresh == 'true'
+        if: always() && steps.balance.outputs.refresh == 'true'
         with:
           name: test-timings-baseline
           path: test-timings.json
