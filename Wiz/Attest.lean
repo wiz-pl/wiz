@@ -432,7 +432,7 @@ def verify (attestPath : FilePath) (artifact : FilePath) (checkInputs : Bool)
         let some h ← digestFile p | return .error s!"cannot read the input {p}"
         if h != i.sha256 then
           return .error s!"input mismatch: {p} is sha256:{h}, the statement says sha256:{i.sha256}"
-        recomputed := recomputed ++ [{ i with sha256 := h }]
+        recomputed := { i with sha256 := h } :: recomputed
         checked := checked + 1
       let sorted := recomputed.toArray.qsort (fun a b => a.lt b) |>.toList
       match strField? predicate "inputsRoot" with
