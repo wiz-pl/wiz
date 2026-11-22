@@ -122,6 +122,7 @@ lib/Web/Playground.wiz
 lib/Web/Search.wiz
 lib/Web/Selfhost.wiz
 lib/Web/Widget.wiz
+lib/Web/Wire.wiz
 lib/Word.wiz
 lib/WordArray.wiz
 lib/WordMap.wiz

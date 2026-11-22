@@ -20,7 +20,7 @@ namespace Wiz
 namespace LegacyNames
 
 /-- SHA-256 of `legacy-names.tsv` as checked in. -/
-def digest : String := "5956b01c79db7c96e460ae7da86a486064b60d004904b35102280929aefcd42b"
+def digest : String := "cf0a61f9aa8ce47f6f48d4c4a827cca474329680c9b6c8ae4368092b9512a46f"
 
 /-- The 64-bit half, for the fast module keys and the in-memory isolation cache. -/
 def digestFast : UInt64 := hash digest
