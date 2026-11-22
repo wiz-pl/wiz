@@ -95,7 +95,7 @@ def monoCase : IO Unit := do
   -- With enough rounds the fixpoint is reached, the value is 5, and the result is
   -- certified (complete + registered).
   Elab.okLibs (base ++
-    "#eval (match Scry.evalBudget prog (.some good) (.some 10) db with | .none => 0 | .some o => match o.termination with | .fixpoint => match Scry.Db.findLat o.state.db 0 [U64.ofNat 0] with | .some v => if Nat.beq v 5 then (if Scry.EvalOutcome.certified o then 1 else 2) else 3 | .none => 4 | .rounds _ _ => 5)") ["1"];
+    "#eval (match Scry.evalBudget prog (.some good) (.some 10) db with | .none => 0 | .some o => match o.termination with | .fixpoint => (match Scry.Db.findLat o.state.db 0 [U64.ofNat 0] with | .some v => if Nat.beq v 5 then (if Scry.EvalOutcome.certified o then 1 else 2) else 3 | .none => 4) | .rounds _ _ => 5)") ["1"];
   -- Without a declaration the run is allowed but its outcome says the obligation is
   -- not covered.
   Elab.okLibs (base ++
@@ -103,7 +103,7 @@ def monoCase : IO Unit := do
   -- The bounded loop is faithful: an unbounded `eval` and `evalBudget` with generous
   -- rounds reach the same value.
   Elab.okLibs (base ++
-    "#eval (match Scry.eval prog db with | .some a => match Scry.evalBudget prog (.some good) (.some 20) db with | .some o => if Nat.beq (valAt a) (valAt o.state) then 1 else 0 | .none => 0 | .none => 0)") ["1"];
+    "#eval (match Scry.eval prog db with | .some a => (match Scry.evalBudget prog (.some good) (.some 20) db with | .some o => if Nat.beq (valAt a) (valAt o.state) then 1 else 0 | .none => 0) | .none => 0)") ["1"];
   -- A map nested under a registered map is checked recursively: one undeclared inner
   -- transfer is still a gap.
   Elab.okLibs (base ++
