@@ -95,6 +95,11 @@ def loomEditorMove (index delta count : String) : String :=
 def loomEditorAccept (text item offset : String) : String :=
   EditorModel.acceptJson text item (EditorModel.natOf offset)
 
+/-- The popup command a keydown names, as JSON (`Web.EditorModel`); the popup host only
+carries it out. -/
+def loomEditorKey (key index count : String) : String :=
+  EditorModel.popupKeyJson key index count
+
 /-- Whether typing `c` at `offset` should ask for completions (`1` or `0`). -/
 def loomEditorTrigger (text c offset : String) : String :=
   match EditorModel.completionTrigger (EditorModel.index text) c
@@ -270,6 +275,7 @@ export "wiz_loom_editor_segments_index" loomEditorSegmentsIndex
 export "wiz_loom_editor_items" loomEditorItems
 export "wiz_loom_editor_popup" loomEditorPopup
 export "wiz_loom_editor_move" loomEditorMove
+export "wiz_loom_editor_key" loomEditorKey
 export "wiz_loom_editor_accept" loomEditorAccept
 export "wiz_loom_editor_trigger" loomEditorTrigger
 export "wiz_loom_editor_position" loomEditorPosition

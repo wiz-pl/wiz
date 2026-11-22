@@ -104,8 +104,20 @@ export function createIndexer(ask, versionOf = null) {
     definition: (text, index, position, uri) =>
       JSON.parse(ask("wiz_loom_lsp_definition", text, index || "",
         JSON.stringify(position || {}), uri || "")),
-    // The completion popup's paint facts (`web/completions.js`) and the goals pane's
-    // source spans (`highlight`), so neither decides a rule.
+    // The completion popup's rules (`Web.EditorModel`): the result's items, the popup's
+    // filtered items/selection/prefix, the key command and the accepted edit. The popup
+    // only paints them, so none of this is decided in `web/completions.js`.
+    items: (result) => JSON.parse(ask("wiz_loom_editor_items", JSON.stringify(result))),
+    popup: (text, offset, items, index) =>
+      JSON.parse(ask("wiz_loom_editor_popup", text, JSON.stringify(items || []),
+        String(index), String(offset))),
+    key: (key, index, count) =>
+      JSON.parse(ask("wiz_loom_editor_key", String(key || ""), String(index), String(count))),
+    accept: (item, text, offset) =>
+      JSON.parse(ask("wiz_loom_editor_accept", text, JSON.stringify(item), String(offset))),
+    trigger: (text, offset, c) => ask("wiz_loom_editor_trigger", text, c, String(offset)) === "1",
+    // The popup's tooltip and ask key, and the goals pane's source spans (`highlight`),
+    // so neither decides a rule.
     itemTitle: (item) => ask("wiz_loom_editor_item_title", JSON.stringify(item || {})),
     askKey: (key, code, ctrl, meta) =>
       ask("wiz_loom_editor_ask_key", String(key || ""), String(code || ""),
