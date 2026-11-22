@@ -11,6 +11,12 @@ interpreter is named in the shebang; `sh` scripts avoid bash-isms and are run by
 where a checkout may not preserve the executable bit. A script that needs a build says
 so in its header and skips cleanly when the build is absent.
 
+Git hooks: the repository also ships a checkout-wide hook directory, `.githooks/`
+(`pre-commit` refreshes `.github/repo-subsets.json`). Enable it once per clone with
+`git config core.hooksPath .githooks`; CI does not depend on it (the `docs_style` job
+runs the same `--check`), and the hook never fails a commit. `scripts/install-hooks.sh`
+is the older, per-clone alternative that copies `.git/hooks/*`; do not enable both.
+
 ## Gates and CI glue
 
 | script | does | called from |
@@ -19,7 +25,9 @@ so in its header and skips cleanly when the build is absent.
 | `install-hooks.sh` | installs `.git/hooks/pre-commit` (fast tier on staged files) and `pre-push` (full tier); a foreign hook is kept unless `--force` is given | by hand; `pre-commit.sh --self-test` exercises it |
 | `test-embed.sh` | checks that Lake re-embeds `runtime/rt_*.inc` after an edit (a temporary copy of the checkout) | local dev shell only (`docs/building.md`); needs an incremental Lake build, so CI does not run it |
 | `check-docs-style.py` | fails on authoring artefacts in user-facing docs: `/workspace` paths, agent roles, status checkmarks, "the user's decision" | `ci.yml` (`docs_style`), `pre-commit.sh --fast` |
-| `check-companion-lists.py` | early `docs_style` gate for generated companion lists: `.github/libdiff-corpus.txt`, `legacy-names.tsv` + `Wiz/LegacyNames.lean`'s digest, and stale/expired `.github/name-collisions-baseline.json` entries; prints one `companion drift:` line naming both sides | `ci.yml` (`docs_style`), `--self-test` |
+| `check-companion-lists.py` | early `docs_style` gate for generated companion lists: `.github/libdiff-corpus.txt`, `legacy-names.tsv` + `Wiz/LegacyNames.lean`'s digest, stale/expired `.github/name-collisions-baseline.json` entries, and the `.github/repo-subsets.json` hashes; prints one `companion drift:` line naming both sides | `ci.yml` (`docs_style`), `--self-test` |
+| `repo-subsets.py` | the one table of build subsets (`lean`, `runtime`, `wizlib`, `packages`, `tests`, `docs`) and their content hashes over `git ls-files`; `--write` updates `.github/repo-subsets.json`, `--check` is the gate, `--print NAME` is for shell use, `--self-test` proves locality; `.githooks/pre-commit` runs it | `check-companion-lists.py`, `.githooks/pre-commit`, `scripts/lake-cache.sh key` |
+| `lake-cache.sh` | the PR-only Lake seed's cache key (`flake.lock` + `flake.nix` + the `lean`/`runtime` subset hashes), `init` for a cold run, `build` of flake.nix's `withLakeCache` package set, and `save` of the next run's seed | `ci.yml` (`build` on a pull request; `web_modules`) |
 | `check-release-consistency.py` | the release packet (candidate, counts, artifacts, checklist) and the machinery the docs name: versions, channels, `scripts/...` commands and release artifacts must still be produced by the tree | `ci.yml` (`docs_style`); `--for-tag` at the tagging PR |
 | `check-docs-examples.py` | runs every fenced `wiz` block through `wiz check`/`wiz run`, compares expected output, and resolves relative doc links | `ci.yml` (`docs_examples`), `--self-test` |
 | `check-names.py` | checks every declaration's current name against `legacy-names.tsv`: normal reports, `--quiet` is the CI gate, `--strict-names` fails on every name outside its module prefix; a stale row is an error, a malformed row exit 2 | `ci.yml` (`docs_style`, added by the namespace train) |

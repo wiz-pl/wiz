@@ -919,14 +919,32 @@ of the same commit substitutes the store paths. Only a push to master writes the
 trusted cache; a pull request's `build` writes its own untrusted cache instead
 (`CACHIX_PR_NAME` and `CACHIX_PR_AUTH_TOKEN`), and without that secret it publishes
 nothing and its shards build the paths. A merge-queue run publishes nothing either, so
-its shards build too. The `docs` job builds `.#reference` (the standard library's
+its shards build too.
+
+A **pull request** gets one further step before `build` compiles anything: it restores
+a previous run's compiled modules (`.lake`, an Actions cache entry; `scripts/lake-cache.sh
+key` names it from `flake.lock`, `flake.nix` and the `lean`/`runtime` subset hashes) and
+builds the same packages from flake.nix's `withLakeCache`, a *second* derivation that
+starts from that `.lake` and lets Lake recompile only the modules whose inputs changed.
+The run saves its seed back, so a pull request's first build (or its first after a
+toolchain or compiler change) is cold and the later ones are incremental; a missing or
+rejected seed is the cold build, never an error. Those store paths differ from the pure
+build's — the seed is an input — so the shards, `trust-ledger`, `web` and `web_modules`
+ask for the `build` job's paths directly (`nix build /nix/store/…`, which substitutes
+them from Cachix) instead of recomputing the derivation. Pushes, the merge queue and the
+release workflows keep the pure `nix build`: the trusted cache and every release
+artifact name the pure derivation, and nothing in the release path reads
+`withLakeCache`.
+
+The `docs` job builds `.#reference` (the standard library's
 reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
-the jobs that substitute this commit's store paths (the test shards, `trust-ledger` and
-`web`) also add the PR cache as an extra substituter for that job only. No job on the
-critical path runs `lake build` directly or saves a
-`.lake` Actions cache. The shards run the Nix-built test driver (`packages.tests`), not
+the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
+`web` and `web_modules`) also add the PR cache as an extra substituter for that job
+only. No job on the critical path runs `lake build` directly, and the only `.lake`
+Actions cache is a pull request's seed (above). The shards run the Nix-built test driver
+(`packages.tests`), not
 `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
@@ -1439,6 +1457,20 @@ the tiers needs no reinstall. It never overwrites a different hook without `--fo
 running it twice leaves the hooks byte-for-byte unchanged. The same two hooks are
 available to the pre-commit framework as the `wiz-fast` and `wiz-full` entries in
 `.pre-commit-hooks.yaml`.
+
+The checkout also ships `.githooks/pre-commit`, which keeps
+`.github/repo-subsets.json` current: the subset hashes are cache keys (and a reviewed
+list of what each build reads), and the `docs_style` job fails when the committed file
+does not describe the tree (`scripts/check-companion-lists.py`). Enable it once per
+clone with
+
+```sh
+git config core.hooksPath .githooks
+```
+
+It takes about 0.1 s, regenerates and stages the JSON only when a subset changed, warns
+(never fails) when `python3` is missing, and is skipped on a merge with conflicts. CI
+runs the same `--check`; a hook is a convenience, not the gate.
 
 What it cannot check: the test suite beyond the formatter group, generated C or LLVM
 outside the reproducibility corpus, the docs site, the release workflow, sharding
