@@ -34,7 +34,7 @@ def expectReject {α : Type} (r : Except String α) (fragment : String)
     check (e.startsWith "bpf:") s!"not a `bpf:` diagnostic: {e}"
     check ((e.splitOn fragment).length > 1) s!"the message does not mention `{fragment}`: {e}"
     match at? with
-    | some at => check ((e.splitOn at).length > 1) s!"the message is not positioned at `{at}`: {e}"
+    | some pos => check ((e.splitOn pos).length > 1) s!"the message is not positioned at `{pos}`: {e}"
     | none => pure ()
   | .ok _ => throw (IO.userError s!"accepted; expected a diagnostic mentioning `{fragment}`")
 
@@ -305,11 +305,14 @@ version = 1
         let prog := traceProgram #[
           { name := "execve", params := #[.ctx .tracepoint], ret := .uint 32,
             body := .ret (.uintLit 32 0) }] #[] "tracepoint/sched/sched_process_fork"
-        match emitProgram prog with
+        match lowerProgram prog with
         | .error e => throw (IO.userError e)
-        | .ok c =>
-          check (has c "SEC(\"tracepoint/sched/sched_process_fork\")")
-            "the section was rewritten to the canonical spelling" },
+        | .ok p =>
+          match emitProgram p with
+          | .error e => throw (IO.userError e)
+          | .ok c =>
+            check (has c "SEC(\"tracepoint/sched/sched_process_fork\")")
+              "the section was rewritten to the canonical spelling" },
 
     -- §2.1 fallback: the debug transport is a line on the trace pipe, not JSON
     { name := "the trace_printk fallback is emitted on request", run := fun _ => do
@@ -318,17 +321,20 @@ version = 1
             body := execveBody }] traceMaps
           (sec := "tracepoint/syscalls/sys_enter_execve")
           (transport := .tracePrintk)
-        match emitProgram prog with
+        match lowerProgram prog with
         | .error e => throw (IO.userError e)
-        | .ok c => do
-          check (has c "bpf_trace_printk") "the fallback transport is missing"
-          check (!has c "bpf_perf_event_output") "the fallback still emits perf output"
-          check (has c "#define BPF_TRACEPOINT 1") "the tracing define is missing"
-          match probeDescriptor prog with
+        | .ok p =>
+          match emitProgram p with
           | .error e => throw (IO.userError e)
-          | .ok d => do
-            check (has d "\"transport\":\"trace_printk\"") "the descriptor hides the fallback"
-            check (has d "\"bpf_trace_printk\"") "the helper list omits trace_printk" },
+          | .ok c => do
+            check (has c "bpf_trace_printk") "the fallback transport is missing"
+            check (!has c "bpf_perf_event_output") "the fallback still emits perf output"
+            check (has c "#define BPF_TRACEPOINT 1") "the tracing define is missing"
+            match probeDescriptor p with
+            | .error e => throw (IO.userError e)
+            | .ok d => do
+              check (has d "\"transport\":\"trace_printk\"") "the descriptor hides the fallback"
+              check (has d "\"bpf_trace_printk\"") "the helper list omits trace_printk" },
 
     -- §5.2 `uprobe`: the declared x86_64 `pt_regs` layout, program type KPROBE=2
     { name := "a uprobe program carries the declared pt_regs layout", run := fun _ => do
@@ -337,20 +343,23 @@ version = 1
             body := .ret (.uintLit 32 0) }] #[]
           (sec := "uprobe//bin/sh:readline")
           (ret := .uint 32) (kind := .uprobe)
-        match emitProgram prog with
+        match lowerProgram prog with
         | .error e => throw (IO.userError e)
-        | .ok c =>
-          check (has c "#define BPF_UPROBE 1") "the uprobe define is missing"
-          check (has c "SEC(\"uprobe//bin/sh:readline\")") "the uprobe section is missing"
-          check (has c "_Static_assert(sizeof(struct bpf_pt_regs) == 168")
-            "the pt_regs layout is not asserted"
-          match probeDescriptor prog with
+        | .ok p =>
+          match emitProgram p with
           | .error e => throw (IO.userError e)
-          | .ok d => do
-            check (has d "\"prog_type\":2") "KPROBE is not program type 2"
-            check (has d "\"arch\":\"x86_64\"") "the uprobe ABI is not pinned to x86_64"
-            check (has d "\"size\":168") "the pt_regs size is not 168"
-            check (has d "\"spec\":\"/bin/sh:readline\"") "the uprobe attach spec is wrong" },
+          | .ok c =>
+            check (has c "#define BPF_UPROBE 1") "the uprobe define is missing"
+            check (has c "SEC(\"uprobe//bin/sh:readline\")") "the uprobe section is missing"
+            check (has c "_Static_assert(sizeof(struct bpf_pt_regs) == 168")
+              "the pt_regs layout is not asserted"
+            match probeDescriptor p with
+            | .error e => throw (IO.userError e)
+            | .ok d => do
+              check (has d "\"prog_type\":2") "KPROBE is not program type 2"
+              check (has d "\"arch\":\"x86_64\"") "the uprobe ABI is not pinned to x86_64"
+              check (has d "\"size\":168") "the pt_regs size is not 168"
+              check (has d "\"spec\":\"/bin/sh:readline\"") "the uprobe attach spec is wrong" },
 
     -- the control: adding a program kind must not change the packet path
     { name := "the existing xdp fixture is unchanged", run := fun _ => do
