@@ -277,6 +277,7 @@ can use `*` (`sink *.ExecuteReader arg 0`) when resolution is weak.
 | M3 | name resolution: usings, a BCL type table, CHA call graph with interface dispatch and overloads by arity; fields/properties of the unit's classes as memory | 3 d |
 | M4 | rule pack `csharp.scry` (78/89/22), models for `String.Concat`/`Format`/`StringBuilder`, `scry taint` accepting `.cs` (SARIF ids `scry/cs/…`) | 2 d |
 | M5 | exceptions/`using`/`foreach` desugarings complete; lambdas as functions; nullability facts + the null-dereference check on the nullness domain | 4 d |
+| M8 | reach: field/property initialisers in constructor order, local functions with captures, wrapper bodies (`lock`/`fixed`/`#if`), a callback table that inlines a direct framework lambda | 2 d |
 | M6 | bounds checks on arrays/`List<T>` via the interval domain | 2 d |
 | M7 | ~~vendored tree-sitter-c-sharp behind the same `Scry.Cst`~~ done early (user chose B, 2026-11-16); left: a `scry-cst --recover` mode so the interpreter tests can also pin syntax-error reporting | 1 d |
 
@@ -292,10 +293,10 @@ Total ≈ 4 weeks, in line with §4.8.
 | `scry/src/Scry/CsCst.wiz` | `Scry.Cs.ofStore` (store → the lowering's `Scry.Cst`, with the normalised fields), `Scry.Cs.renderSpill` (S-expression golden renderer) |
 | `scry/src/Scry/CsLower.wiz` | class pre-pass (fields, auto-properties, methods, ctors), C# → Wil lowering (§3 table), Wil text printer for goldens, `Scry.Cs.programOf path text spill` |
 | `scry/corpus/csharp/parse/` | `hello`, `members`, `statements`, `expressions`, `modern` (`.cs` + `.cst` spill + `.sexp` view golden) |
-| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `switch` (constant int/string/enum labels compared, typed labels, `when` guards, stacked labels, arms), `unsupported` (the warnings for everything out of scope) |
-| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), the `pattern` pair (a pattern binding carries the sink on the test's true edge), and the `switch` case (a `case T x` binding and an arm binding reach the sink) |
+| `scry/corpus/csharp/lower/` | `basic` (classes, ctor, fields, string concat/interpolation, for/if/continue, try/catch/rethrow; also executed under `Wil.runFunction`), `modern` (record, record struct, partial parts, switch expression, LINQ, `with`, collection expression, constructor initialiser, async/await), `toplevel` (top-level statements become `<stem>.Main`, e.g. `toplevel.Main`), `patterns` (`is` tests and bindings on both edges, `is null`/`is not null`), `switch` (constant int/string/enum labels compared, typed labels, `when` guards, stacked labels, arms), `init-order` (field/property initialisers in declaration order, the synthetic `..cctor`, an unorderable read), `local-function` (a local function's captures and its direct call), `wrappers` (`lock`/`fixed`/`checked`/`unsafe`/label/`#if` bodies), `lambda-direct` (a direct lambda inlined at a modelled callee), `unsupported` (the warnings for everything out of scope) |
+| `scry/corpus/csharp/taint/cwe78-*.{cs,cst}` | the end-to-end pair plus two more unsafe cases, the `modern` pair (source → sink through LINQ, a switch expression, a record field and a `with` copy), the `pattern` pair (a pattern binding carries the sink on the test's true edge), the `switch` case (a `case T x` binding and an arm binding reach the sink), and the reach cases: a field initialiser, a `lock` body, a local function, and a direct lambda with its safe twin |
 | `scry/corpus/csharp/csharp.scry` | the first C# rule pack (CWE-78 only) |
-| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 5 view goldens, 6 lowering goldens + execution, 8 taint cases, and the "silent skip" case (§2) |
+| `Tests/Groups/ScryCSharp.lean` | group `scry-csharp` (library shard): spill freshness, 6 view goldens, 14 lowering goldens + execution, 16 taint cases, and the "silent skip" case (§2) |
 
 A spill is regenerated with `scry-cst FILE.cs > FILE.cst`. Build the tool with
 `wiz build tools/CstMain.wiz -I src -I ../lib -o …` from `scry/`, passing the
@@ -319,8 +320,9 @@ Known approximations in slice 1 (all listed in `CsLower`'s module doc): `X.Y.M()
 path `System.Console.Error.WriteLine`; overloads share a name; `return` inside `try`
 skips `finally`; `using var` does not call `Dispose`; `switch` labels are not compared
 (tree-sitter gives `case 1: case 2:` as two sections; every section is reachable
-anyway); field initialisers are not run by constructors (each one gets a warning);
-lambdas are opaque.
+anyway). Field/property initialisers run in constructor order, a local function is its
+own function with captures as parameters, and a direct lambda at a table-listed callee is
+lowered at the call site; a lambda with no known call site is still an opaque value.
 
 ## 7. Real-code coverage (a private C# solution, 2026-11-18)
 
@@ -495,6 +497,32 @@ that, not the lowering.
   expression body is the result, a block body gets its own `return` target. A lambda
   with no known call site still warns, naming the callee it was passed to or the
   local/field whose call site is unknown; a recursive lambda call warns and is havoc.
+* **A lambda passed directly to a framework callee** whose invocation policy
+  `Scry.Cs.callbacks` knows (`List.ForEach`, the LINQ operators with a selector or
+  predicate, `Task.Run`, `Configure`, the minimal-API `Map*`) is lowered at the call
+  site: the body is in the caller (its first parameter bound to the receiver's value,
+  the element abstraction the lowering has), the call still passes an opaque `fnptr`,
+  and there is no `lambda body not lowered` row for that shape. The table does not
+  model the callee's result or memory effect (`Scry.Models` owns those) and does not
+  apply to a class of the unit, whose body is visible and analysed.
+* **Field and auto-property initialisers run in declaration order.** Every constructor
+  runs the instance ones after its `: base(…)`/`: this(…)` call (a `: this(…)`
+  constructor leaves them to its target) and before the body, so the values are in the
+  object when the body starts. A class with initialisers and no declared constructor
+  gets the implicit parameterless one, and static initialisers get a synthetic
+  `..cctor` (type-initialisation *timing* is not modelled: the function is emitted, not
+  called). An initialiser that reads a static member initialised later in the file keeps
+  a warning, because the lowering cannot order it.
+* **Local functions are hoisted.** `void Launch() { … }` inside a method becomes
+  `Caller.$local:Launch` with the caller's locals it reads as leading parameters (after
+  `this` when the caller is an instance method); a call is a direct call that passes
+  them, so the sink in the body is analysed in that function. A local declared after the
+  declaration is not a capture (the declaration point is the C# scope boundary).
+* **Wrapper statements keep their body.** `lock`, `fixed`, `checked`, `unsafe`, a
+  labelled statement and a statement-level `#if`/`#elif`/`#else` lower their body as
+  its own block; only the wrapper's semantics warns (`lock` also emits
+  `Monitor.Enter`/`Exit`, and `#if`'s branches are all lowered because the condition is
+  not evaluated).
 * **C# external calls** have their result and awaited types in
   `src/Scry/Models.wiz`'s `Scry.csExternals` value table, which `knownRet` and
   `awaitedType` consult. `Process.GetCurrentProcess().StartInfo` keeps its
@@ -507,18 +535,17 @@ that, not the lowering.
 
 | construct | warning |
 |---|---|
-| lambda with an unknown call site | `lambda body not lowered: passed to CALLEE, whose call site is unknown` (a direct argument) or `lambda body not lowered: assigned to local NAME / field C.NAME but never invoked in this method, so its call site is unknown` |
+| lambda passed to a callee the table does not know | `lambda body not lowered: passed to CALLEE, whose call site is unknown`; a lambda assigned but never invoked: `lambda body not lowered: assigned to local NAME / field C.NAME but never invoked in this method, so its call site is unknown` |
 | recursive lambda call | `lambda NAME calls itself: the call site is the lambda body, which is not modelled: havoc` |
-| local function | `local function NAME not modelled: its body is not lowered and calls to it are unknown` |
 | indexer | `indexer_declaration member not modelled: no code is lowered for it` |
 | operator / conversion operator | `operator_declaration member not modelled: …` |
 | destructor | `destructor_declaration member not modelled: …` |
 | event with accessors | `event_declaration member not modelled: …` |
 | nested delegate / `#if`-guarded member | `delegate_declaration member not modelled: …`, `preproc_if not modelled: …` |
-| `#if` / `#else` block (top level) | `preproc_if not modelled: no code is lowered for it` |
-| `lock`, `goto`, a label | `lock_statement not modelled`, `goto_statement not modelled`, `labeled_statement not modelled` |
+| `#if` / `#else` member of a type or the file (top level) | `preproc_if not modelled: no code is lowered for it` (a statement-level one lowers every branch) |
+| `goto` | `goto_statement not modelled` (a `lock`, a label and a statement-level `#if` lower their body: only the semantics warns) |
 | `yield return` | `yield_statement not modelled` |
-| `unsafe`, `fixed`, `checked` | `unsafe_statement not modelled`, … |
+| `unsafe`, `fixed`, `checked` | `unsafe_statement not modelled: the body is lowered, its semantics are not`, … |
 | `is` test's *conditions* | none: a type test, a property/positional/relational/list pattern's conditions and an unknown constant are nondeterministic bits (like a switch label's type test), so both edges stay reachable; `is null` / `is not null` and integer constants are exact |
 | a pattern binding no condition site installs | `a pattern binding outside a condition is not installed` (a bare expression, or a binding used in the right operand of `&&`/`||`) |
 | a name declared inside a subpattern | `nested pattern binding NAME not modelled` |
@@ -526,7 +553,7 @@ that, not the lowering.
 | a switch label the lowering cannot compare (a property, relational or list pattern; a constant of unknown value against an integer scrutinee) | `switch label (…) is not compared: the section is reached by an unknown test` (`arm` for an expression), §7.10 |
 | target-typed `new()` in an expression | `target-typed new() without a declared type not modelled: havoc` |
 | `join`/`group`/`orderby` in a query | `… in a query is not modelled: its value is havoc` |
-| field/property initialiser | `field initialiser of X not modelled: the field starts as its default` |
+| an initialiser that reads a later initialiser | `initialiser of X cannot be ordered: it reads Y, which is initialised later` |
 | deconstruction `var (a, b) = …` | `deconstruction not modelled: each name is a havoc` |
 | `out`/`ref` target | `out/ref argument not modelled: havoc` |
 | `with` member updates | `with expression: the copy's members are not updated (it keeps the original's values)` |
@@ -1280,6 +1307,25 @@ call reaches `Dispatcher.Sink`.
 Method groups in the table are recognised by the unit's method table, so the guard is
 structural: remove a method and the name falls back to the warning; there is no
 permissive suffix rule.
+
+### 11.1 The callback table (`Scry.Cs.callbacks`)
+
+The expansions table replaces a call; the **callback table** answers a different
+question: *does this callee invoke this argument?* It is keyed by the callee's simple
+name and total arity (the receiver counts as argument 0, the lowering's convention), so
+the qualified, bare and `?.` spellings all match. A row names the callback's position
+and the argument whose value its first parameter receives; for a collection operator
+(`ForEach`, `Select`, `Where`, `Any`, `All`, the `List<T>` predicates, `Sort`) that is
+the receiver, which is the only element abstraction the lowering has (generics are
+erased, so the element is not a distinct location yet). A direct lambda at that position
+is lowered inline at the call site (`lowerArgsCb`), and the emitted call still passes an
+opaque `fnptr`; the row says nothing about the callee's result or memory effect —
+`Scry.Models` owns those. Rows for `Task.Run`, `ContinueWith`, the DI `Add*`/
+`Configure` factories and the minimal-API `Map*` handlers cover the framework's other
+invocation shapes; a handler's request parameter is a havoc, because the request object
+is not a value the lowering has. The table is **not** applied to a class of the unit:
+its body is visible and analysed, and guessing its invocation policy would inline a
+lambda it may never call.
 
 
 ## 11. The first finding on real code (2026-11-19)

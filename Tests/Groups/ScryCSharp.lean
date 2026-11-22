@@ -131,7 +131,12 @@ def fixtures : List (String × String) :=
    ("lower", "patterns"), ("lower", "switch"),
    ("lower", "primary-ctor"), ("lower", "lambda"),
    ("lower", "unicode"), ("lower", "expansions"),
+   ("lower", "init-order"), ("lower", "local-function"),
+   ("lower", "wrappers"), ("lower", "lambda-direct"),
    ("taint", "cwe78-process-unsafe"), ("taint", "cwe78-process-safe"),
+   ("taint", "cwe78-fieldinit-unsafe"), ("taint", "cwe78-lock-unsafe"),
+   ("taint", "cwe78-local-function-unsafe"),
+   ("taint", "cwe78-linq-lambda-unsafe"), ("taint", "cwe78-linq-lambda-safe"),
    ("taint", "cwe78-startinfo-unsafe"), ("taint", "cwe78-helper-unsafe"),
    ("taint", "cwe78-modern-unsafe"), ("taint", "cwe78-modern-safe"),
    ("taint", "cwe78-stringop-unsafe"), ("taint", "cwe78-macro-unsafe"),
@@ -224,13 +229,11 @@ from a warning to a **silent skip** (the analysis then says nothing about code i
 looked at), which is the failure mode this table exists to prevent. -/
 def requiredWarnings : List (String × String) :=
   [("modern", "target-typed new() without a declared type"),
-   ("modern", "local function Label not modelled"),
    ("modern", "with expression: the copy's members are not updated"),
    ("unsupported", "indexer_declaration member not modelled"),
    ("unsupported", "operator_declaration member not modelled"),
    ("unsupported", "destructor_declaration member not modelled"),
    ("unsupported", "delegate_declaration not modelled"),
-   ("unsupported", "local function Local not modelled"),
    ("unsupported", "lambda body not lowered"),
    ("unsupported", "passed to Demo.Unsupported.Control.Apply"),
    ("unsupported", "lock_statement not modelled"),
@@ -551,10 +554,16 @@ def group : Group where
           "#eval Wil.Result.show (Wil.runFunction prog 10000 \"Demo.Calc.Fact\" [Wil.Val.ofNat 32 .true 5])\n"
         let ms ← runProbe lowerImports body
         checkEq ["\"ok 45\"", "\"ok 120\""] ms },
-    { name := "known gap: a lambda passed to an unknown callee keeps its body out of the program",
-      run := fun _ => do
-        lowerGolden "lambda"
-        skip "known gap: a lambda passed to an unknown callee (Select) is an opaque fnptr; a lambda assigned to a local and invoked in the same method is lowered inline" },
+    { name := "lower: a lambda assigned to a local and a direct lambda passed to a known callee",
+      run := fun _ => lowerGolden "lambda" },
+    { name := "lower: field and property initialisers run in declaration order (ctor and synthetic .cctor)",
+      run := fun _ => lowerGolden "init-order" },
+    { name := "lower: a local function is a function with its captures as parameters, called directly",
+      run := fun _ => lowerGolden "local-function" },
+    { name := "lower: lock/fixed/checked/unsafe/label/#if bodies are ordinary code",
+      run := fun _ => lowerGolden "wrappers" },
+    { name := "lower: a lambda passed directly to a modelled callee is lowered at the call site",
+      run := fun _ => lowerGolden "lambda-direct" },
     { name := "taint: CWE-78, console input concatenated into Process.Start fires command-injection",
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-unsafe"
@@ -563,6 +572,24 @@ def group : Group where
       run := fun _ => do
         let fs ← taintFindings "cwe78-process-safe"
         checkEq ([] : List String) fs },
+    { name := "taint: CWE-78 through a field initialiser run by the implicit constructor",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-fieldinit-unsafe"
+        checkEq ["command-injection Fixtures.FieldShell.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 inside a lock body",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-lock-unsafe"
+        checkEq ["command-injection Fixtures.LockShell.Run System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 across a local function (the sink is in the hoisted function)",
+      run := fun _ => do
+        let fs ← taintFindings "cwe78-local-function-unsafe"
+        checkEq ["command-injection Fixtures.LocalShell.Run.$local:Launch System.Diagnostics.Process.Start arg 1"] fs },
+    { name := "taint: CWE-78 through a direct lambda at a modelled callee (ForEach), safe twin quiet",
+      run := fun _ => do
+        let fs ← taintFindingsEntry "cwe78-linq-lambda-unsafe"
+        checkEq ["command-injection Fixtures.CallbackShell.Run System.Diagnostics.Process.Start arg 1"] fs
+        let safe ← taintFindingsEntry "cwe78-linq-lambda-safe"
+        checkEq ([] : List String) safe },
     { name := "taint: CWE-78 through interpolation and a ProcessStartInfo object (constructor and receiver)",
       run := fun _ => do
         let fs ← taintFindings "cwe78-startinfo-unsafe"

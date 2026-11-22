@@ -108,14 +108,6 @@
       "why": "documented self-host parity difference (A14/D6): the self-hosted loader canonicalises Prelude to the embedded prelude and has no warning channel yet. Allow-listed by the user (2026-11-17) for this one case only."
     },
     {
-      "group": "scry-csharp",
-      "case": "known gap: a lambda passed to an unknown callee keeps its body out of the program",
-      "reason": "known gap: a lambda passed to an unknown callee",
-      "owner": "scry C# frontend (scry/CSHARP.md, scry/corpus/csharp/lower/lambda.cs)",
-      "expires": "2027-05-01",
-      "why": "Joern's LambdaTests fixture. A lambda assigned to a local and invoked in the same method is lowered inline; a lambda passed to a callee whose call site is unknown (`Select`) is still an opaque `fnptr` plus a warning, so its body is absent from the program. The case checks the lowering golden and the skip is the honest report; the golden changes when that gap is fixed."
-    },
-    {
       "group": "selfhost-cli-diff",
       "case": "run: program arguments are the driver's (the host's `run` takes flags only)",
       "reason": "run: the driver passes the words after FILE to the program",
