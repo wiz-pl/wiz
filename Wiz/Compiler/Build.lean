@@ -464,25 +464,25 @@ def runWasmGlobal (s : CommandState R) (n : Name) (dir : System.FilePath) : IO (
   | .error e => pure (.error e)
   | .ok (decls, ty) =>
     let wasmFile := dir / "wiz_main.wasm"
-    let externs := match selectWasmExterns s decls with
-      | .ok m => m
-      | .error e => return .error e
-    match ← compileWasm decls (isIO ty) wasmFile externs with
+    match selectWasmExterns s decls with
     | .error e => pure (.error e)
-    | .ok () =>
-      let host ← wasmHostPath
-      unless ← host.pathExists do
-        return .error s!"the Wasm host is missing: no {host} (a toolchain ships it in share/wiz/web; a checkout has web/wasm-host.mjs)"
-      let out ← try
-        -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
-        IO.Process.output
-          { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
-      catch e => return .error s!"node: {e}"
-      if out.exitCode != 0 then
-        return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
-      match parseValue out.stdout with
-      | none => pure (.error s!"could not read the result: {out.stdout}")
-      | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
+    | .ok externs =>
+      match ← compileWasm decls (isIO ty) wasmFile externs with
+      | .error e => pure (.error e)
+      | .ok () =>
+        let host ← wasmHostPath
+        unless ← host.pathExists do
+          return .error s!"the Wasm host is missing: no {host} (a toolchain ships it in share/wiz/web; a checkout has web/wasm-host.mjs)"
+        let out ← try
+          -- (under `lake env`, Lean's LD_LIBRARY_PATH breaks Node's own library lookup)
+          IO.Process.output
+            { cmd := "node", args := #[host.toString, wasmFile.toString], env := #[("LD_LIBRARY_PATH", none)] }
+        catch e => return .error s!"node: {e}"
+        if out.exitCode != 0 then
+          return .error s!"the Wasm program failed ({out.exitCode}): {out.stderr.take 1000}"
+        match parseValue out.stdout with
+        | none => pure (.error s!"could not read the result: {out.stdout}")
+        | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
 /-- (F09) A header name that may be written into `#include <…>`. A name with `"`, `<`,
 `>`, a backslash, whitespace or a newline would leave the directive (a newline starts
