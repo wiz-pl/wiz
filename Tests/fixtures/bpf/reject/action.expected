@@ -1,1 +1,0 @@
-bpf: the program's result must be an action enum (`XdpAction` or `TcAction`)

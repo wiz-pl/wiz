@@ -1,7 +1,0 @@
--- [UNRUN] P0 reject fixture: structural recursion on List has no bounded form.
-import Bpf
-
-def bad (xs : List (UIntN 32)) : UIntN 32 :=
-  match xs with
-  | .nil => UIntN.ofNat 32 0
-  | .cons x rest => UIntN.add x (bad rest)

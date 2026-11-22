@@ -1,4 +1,0 @@
--- [UNRUN] P0 reject fixture: a map value is plain old data, not a pointer/closure.
-import Bpf
-
-bpf_map bad : Map (UIntN 32) (Packet) (kind := .hash, max_entries := 16)

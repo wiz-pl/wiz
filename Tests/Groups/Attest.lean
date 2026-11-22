@@ -1,5 +1,6 @@
 import Tests.Harness
 import Wiz.Attest
+import Wiz.Compiler.Build
 import Lean.Data.Json
 
 /-!
@@ -62,6 +63,22 @@ def build (dir : System.FilePath) (tc : Toolchain) (cache : System.FilePath)
   let o ← IO.Process.output { cmd := exe, args := args.toArray, cwd := some dir, env }
   pure (o.stdout, o.stderr, o.exitCode)
 
+/-- Build for a case that only cares that the build succeeded. `false` is a *documented*
+missing toolchain (`Build.missingToolchain`: `gmp.h`, or a `cc`/`llc` that could not be
+started) and skips; every other non-zero exit throws, so a broken `--attest` path is a
+red case instead of a skip. A skipped case is not a pass (AGENTS.md; `ci.py check-skips`
+would report it as a skip, not a failure). -/
+def buildOrSkip (dir : System.FilePath) (tc : Toolchain) (cache : System.FilePath)
+    (attest : String := "prog.attest.json") (extraCflags : String := "") : IO Bool := do
+  let (_, err, code) ← build dir tc cache attest extraCflags
+  if code == 0 then
+    pure true
+  else if Build.missingToolchain tc err then
+    skip "no toolchain"
+    pure false
+  else
+    throw (IO.userError s!"build failed ({code}): {err}")
+
 /-- `wiz verify`; with `attest = ""` the default path is used. -/
 def verify (dir : System.FilePath) (tc : Toolchain) (attest artifact : String)
     (extra : List String := []) : IO (String × String × UInt32) := do
@@ -105,7 +122,7 @@ def group : Group where
         let (dir, tc, cache) ← project
         let (_, err, code) ← build dir tc cache
         if code != 0 then
-          if (err.splitOn "could not execute").length > 1 || (err.splitOn "failed").length > 1 then
+          if Build.missingToolchain tc err then
             skip "no toolchain"
             return
           throw (IO.userError s!"build failed ({code}): {err}")
@@ -142,8 +159,7 @@ def group : Group where
         check (!text.contains "s3cr3t-value") "the statement copied an environment variable" },
     { name := "a tampered artifact fails verification", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache) do return
         let p := dir / "prog"
         IO.FS.writeBinFile p ((← IO.FS.readBinFile p) ++ "x".toUTF8)
         let (out, verr, vcode) ← verify dir tc "prog.attest.json" "prog"
@@ -151,8 +167,7 @@ def group : Group where
         check ((verr.splitOn "artifact mismatch").length > 1) verr },
     { name := "an identical rebuild produces a byte-identical envelope", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache) do return
         let first ← IO.FS.readFile (dir / "prog.attest.json")
         let (_, err, code) ← build dir tc cache
         check (code == 0) err
@@ -161,8 +176,7 @@ def group : Group where
         check (!first.contains "\"startedOn\"" && !first.contains "\"finishedOn\"") "a timestamp is in the envelope" },
     { name := "a cflags change changes the predicate, not inputsRoot", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache "a.json"
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache "a.json") do return
         let (_, err, code) ← build dir tc cache "b.json" "-DWIZ_ATTEST_EXTRA=1"
         check (code == 0) err
         let a ← statement dir "a.json"
@@ -172,8 +186,7 @@ def group : Group where
         checkEq (some (← shaOf (dir / "prog"))) (Wiz.Attest.strField? (output b) "sha256") },
     { name := "an edit to a tracked input is dirty and changes the source hash", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache "before.json"
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache "before.json") do return
         let before ← statement dir "before.json"
         checkEq (some false) (gitDirty before)
         let oldSha := (Wiz.Attest.strField? (source before) "sha256").getD ""
@@ -187,8 +200,7 @@ def group : Group where
         check (oldSha != (Wiz.Attest.strField? (source after) "sha256").getD "") "the source hash did not change" },
     { name := "--artifact-only verifies without the inputs; the default needs them", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache) do return
         let other ← IO.FS.createTempDir
         IO.FS.writeBinFile (other / "prog") (← IO.FS.readBinFile (dir / "prog"))
         IO.FS.writeFile (other / "prog.attest.json") (← IO.FS.readFile (dir / "prog.attest.json"))
@@ -200,8 +212,7 @@ def group : Group where
         check ((out.splitOn "artifact only").length > 1) out },
     { name := "the envelope is explicitly unsigned; a forged signature is refused", run := fun _ => do
         let (dir, tc, cache) ← project
-        let (_, _, code) ← build dir tc cache
-        if code != 0 then skip "no toolchain"; return
+        unless (← buildOrSkip dir tc cache) do return
         let file := dir / "prog.attest.json"
         let env ← match Json.parse (← IO.FS.readFile file) with
           | .ok j => pure j
