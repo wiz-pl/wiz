@@ -1,3 +1,4 @@
+namespace __root__
 -- Checked C glue, in Wiz (stage 30b): the subset of `Wiz/FFI/CGlue.lean` that the
 -- self-hosted frontend needs for `glue`. A glue body is a small C program checked before
 -- it is emitted: it can compute with numbers and strings and call C functions that
@@ -521,3 +522,4 @@ def gCheckGlue (body : String) (params : List NamedGTy) (funcs : List Callable)
   match gStmtLoop p with
   | .serr m => .some m
   | .sok _ => .none
+end

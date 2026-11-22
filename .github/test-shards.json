@@ -66,6 +66,7 @@
       "builtins",
       "calc",
       "classes",
+      "context",
       "deriving",
       "=display",
       "=doc",
@@ -86,7 +87,7 @@
       "language",
       "lsp",
       "macros",
-      "modules",
+      "modules", "=namespace",
       "=native",
       "=natives",
       "=nvim",
@@ -172,6 +173,7 @@
       "=storage-mmap",
       "=storage-multiproc",
       "=storage-quire",
+      "=dist-proofs",
       "bpf"
     ]
   },

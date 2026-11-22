@@ -1028,7 +1028,7 @@ setup action keeps the elan cache for those
   case it excuses: prefer putting the tool in the dev shell.
 * **The Scry tool's own goldens** (`.github/workflows/scry.yml`) run `cd scry && grail
   test` over the 26 `scry/tests/*.expected` files, on changes to `scry/**`,
-  `lib/Scry/**`, `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
+  `Wiz/**` or `selfhost/**`. The Lean-side `=scry-*` groups test the
   library through the host; this is the package's own suite, and no other job ran it
   (`golden-diff.yml` only *shows* what `--update` would write, after a shard failed for
   another reason). The workflow never passes `--update`: a non-zero `grail test` fails,

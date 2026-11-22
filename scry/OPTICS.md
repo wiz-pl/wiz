@@ -14,10 +14,10 @@ They follow `wiz-notes/analysis-optics-decisions.md`:
 
 | module | imports | contents |
 |---|---|---|
-| `lib/Scry/Optics.wiz` (`Scry.Optics`) | `Scry.Wil`, `Scry.Analysis`, `Scry.PointsTo` | the four optic records, Wil origins/statements/terms, def-use folds, points-to views, query/rewrite helpers |
+| `src/Scry/Optics.wiz` (`Scry.Optics`) | `Scry.Wil`, `Scry.Analysis`, `Scry.PointsTo` | the four optic records, Wil origins/statements/terms, def-use folds, points-to views, query/rewrite helpers |
 | `scry/src/Scry/CstOptics.wiz` (`Scry.CstOptics`) | `Scry.Optics`, `Scry.Schema`, `Scry.Facts`, `Scry.CstStore` | CST node/edge/relation field getters, `Facts`/`CstStore` folds, facts query paths |
 
-The core and the Wil side are in the library root so a `lib/Scry` pass or rule can import
+The core and the Wil side are in the library root so a `src/Scry` pass or rule can import
 `Scry.Optics` without depending on the CLI/source package. Only the CST-aware half pays
 for `Scry.CstStore`.
 
@@ -120,7 +120,7 @@ Scry.Fold.toList (Scry.Fold.mapGetter
 
 ### A pass or rule (available, not migrated)
 
-`lib/Scry` code can `import Scry.Optics`; no CLI package dependency. The useful shapes
+`src/Scry` code can `import Scry.Optics`; no CLI package dependency. The useful shapes
 are folds over uses/defs/deps:
 
 ```wiz

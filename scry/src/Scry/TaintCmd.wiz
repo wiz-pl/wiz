@@ -246,10 +246,10 @@ def Scry.taintArgs (args : List String) : Except String Scry.TaintOpts :=
 -- ## The rule pack
 
 /-- Where the default pack is, relative to the repository root and to `scry/` (the two
-working directories the CLI is run from). -/
+working directories the CLI is run from). The pack is part of this package, not `lib/`. -/
 def Scry.defaultPackCandidates : List String :=
-  .cons "lib/Scry/rules/default.scry"
-    (.cons "../lib/Scry/rules/default.scry" .nil)
+  .cons "scry/rules/default.scry"
+    (.cons "rules/default.scry" .nil)
 
 def Scry.readIfExists (path : String) : EIO (Option String) := do
   ok ← EIO.lift (FS.exists path);
@@ -283,10 +283,10 @@ def Scry.loadTaintPack (rules : Option String) : EIO Scry.RulePack :=
   | .none => do
     found ← Scry.readFirst Scry.defaultPackCandidates;
     match found with
-    | .some text => Scry.packFromText "lib/Scry/rules/default.scry" text
+    | .some text => Scry.packFromText "rules/default.scry" text
     | .none => EIO.fail
-        ("default rule pack not found (tried lib/Scry/rules/default.scry and "
-         ++ "../lib/Scry/rules/default.scry); pass --rules FILE")
+        ("default rule pack not found (tried scry/rules/default.scry and "
+         ++ "rules/default.scry); pass --rules FILE")
 
 -- ## Spans and locations
 

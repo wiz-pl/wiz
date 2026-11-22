@@ -70,11 +70,11 @@ to CST spans for the dynamic-evidence report), `repl` (the Wiz REPL with `Scry.R
 preloaded) and `egraph FILE.c [--fuel N] [--rewrite]` (C -> Wil ->
 e-classes, then a deterministic fold/identity saturation report). The `egraph` report is
 read-only: it does not change the CST, the Wil program or any Datalog fact. `--rewrite`
-additionally runs `lib/Scry/EgraphExtract.wiz`, which extracts the saturated classes back
+additionally runs `src/Scry/EgraphExtract.wiz`, which extracts the saturated classes back
 into a **checked** `Wil.Program` (straight-line functions, single-definition registers, no
 registers outside the original right-hand side, strictly cheaper terms) and prints the
 transformation report. That program is an optional input to a later analysis;
-`lib/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
+`src/Scry/EgraphTaint.wiz` is the differential used by the tests, and Datalog stays
 authoritative. `parse --stats` prints counts only; the perf agent owns throughput numbers.
 
 ## Command-line reference
@@ -122,11 +122,11 @@ contract (`0` success, `1` error, `taint`'s `124` timeout).
 Two flags are accepted by the parser but missing from the top-level `scry help` text:
 `bench --baseline-bootstrap` (it is in `scry bench --help`) and `project --cache-dir`
 (an alias for `--cache=DIR`). `bench --no-baseline` also appears only in
-`scry bench --help`. The default rule pack is `lib/Scry/rules/default.scry`.
+`scry bench --help`. The default rule pack is `rules/default.scry`.
 
 ## Optics and accessors
 
-`lib/Scry/Optics.wiz` and `src/Scry/CstOptics.wiz` add a read-only `Getter`/`Fold`/
+`src/Scry/Optics.wiz` and `src/Scry/CstOptics.wiz` add a read-only `Getter`/`Fold`/
 `Lens`/`Traversal` layer over the existing Wil, analysis, CST and fact types. It is
 additive and non-mutating: no pass or existing query is migrated, and no second
 representation is introduced. The CST/facts half is direct traversal (`Fold`), not a
@@ -214,7 +214,7 @@ not define one.
 
 ```sh
 grail run scry -- taint tests/fixtures/taint-unsafe.c
-grail run scry -- taint FILE.c --rules ../lib/Scry/rules/default.scry --sarif out.sarif
+grail run scry -- taint FILE.c --rules rules/default.scry --sarif out.sarif
 grail run scry -- taint FILE.c --json --allow-errors
 grail run scry -- taint FILE.c --fail-on-finding
 ```
@@ -223,7 +223,7 @@ The stages are: parse with the vendored tree-sitter shim (S1) and build the
 `Scry.CstStore`; lower the translation unit with `Scry.Lower` (S2), whose `Wil.Stmt`/
 `Wil.Term` carry a `Wil.Span` (file, byte range, CST node); run the rule-pack engine
 (`Scry.RuleTaint`) and the direct-call summaries/path stitching (`Scry.Interproc`) with
-the default pack `lib/Scry/rules/default.scry` (or `--rules FILE`); certify each alert's
+the default pack `rules/default.scry` (or `--rules FILE`); certify each alert's
 derivation with `Scry.Certify`; print findings with their source spans; and, with
 `--sarif OUT`, write SARIF 2.1.0 (`Scry.Sarif`). `--origin-map` prints the
 `(function, program point) -> span` table used for the locations.
@@ -327,11 +327,11 @@ turn a one-minute CVE analysis into a ten-minute one.
 
 ## Path traversal (opt-in pack)
 
-`lib/Scry/rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
+`rules/path-traversal.scry` is the default pack **plus** a `path-traversal`
 rule: taint from `getenv`/`read`/`recv`/`fgets`/`getline`/`fread` or C's `argv` reaches
 `open`, `openat`, `creat`, `fopen`, `freopen`, `stat`/`lstat`, `unlink`, `remove`,
 `rename`, `chdir`, `opendir`, `access`, `mkdir` or `rmdir`. Run it with
-`--rules ../lib/Scry/rules/path-traversal.scry`.
+`--rules rules/path-traversal.scry`.
 
 `source argv result` is a pack directive, not a call pattern: it seeds the second
 parameter of `main` as a source. It is in this pack only, so the default pack's results do
@@ -692,7 +692,7 @@ collapsing beyond the browser's native `<details>`.
 
 `tests/report.wiz` pins the tainted/safe/XSS fixtures, the sink and step spans, the
 suppressed-count line, finding-id anchors and two-run byte identity. The reusable
-renderer is `lib/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
+renderer is `src/Scry/Report.wiz`; the IO half is `scry/src/Scry/ReportCmd.wiz`.
 
 ## `scry dynamic`: observed execution evidence
 

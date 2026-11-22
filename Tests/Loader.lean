@@ -82,13 +82,17 @@ def moduleLoader (roots : List (String × String)) : IO (Name → Option String)
     ms := (← loadedModules root pfx) ++ ms
   pure fun n => ms.lookup n
 
-/-- Every module of `lib/` (`lib/Dir/Mod.wiz` is `Dir.Mod`), by import name. -/
-def libLoader : IO (Name → Option String) := moduleLoader [("lib", "")]
-
-/-- Every module of `lib/` and of the Scry package (`scry/src/Scry/Mod.wiz` is
-`Scry.Mod`): the Scry groups elaborate the lowering they test against both roots. -/
-def scryLoader : IO (Name → Option String) :=
+/-- Every module of `lib/` (`lib/Dir/Mod.wiz` is `Dir.Mod`) and of the Scry package
+(`scry/src/Scry/Mod.wiz` is `Scry.Mod`), by import name. The Scry modules moved out of
+`lib/` (`separate-repos.md` P0.1), so the loader offers both roots: the engine groups
+elaborate the lowering they test against the std and the package. -/
+def libLoader : IO (Name → Option String) :=
   moduleLoader [("lib", ""), ("scry/src/Scry", "Scry.")]
+
+/-- Every module of `lib/` and of the Scry package: today the same roots as `libLoader`.
+Kept as the named loader the Scry groups use (a parity group reads the package, not
+`lib/`). -/
+def scryLoader : IO (Name → Option String) := libLoader
 
 /-- A Wiz string literal for `s` (the escapes the Wiz lexer reads). -/
 def wizStr (s : String) : String :=

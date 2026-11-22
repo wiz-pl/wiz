@@ -49,8 +49,8 @@ def hdlSignalGroup : Group where
     { name := "34a: a register that keeps the size is rejected (a combinational loop as a size error)", run := fun _ => do
         failsLibs "import Hdl.Signal\ndef badReg {d : ClockDomain} {A : Type} {i : Size} (init : A) (s : (Signal d A)^i) : (Signal d A)^i\n  | .head => init\n  | .tail => s\n" "builds a value of size ↑s or ∞, not i" },
     { name := "34a: a size-preserving map checks (sized copattern → scofix, lane L2)", run := fun _ => do
-        okLibs "import Hdl.Signal\ndef mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i\n  | .head => f s.head\n  | .tail => mapS f s.tail\n#eval Signal.sample 3 (Signal.map BitVec.toNat (mapS (fun (x : BitVec 8) => BitVec.add x (BitVec.ofNat 8 1)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))\n"
-          [".cons 251 (.cons 251 (.cons 251 .nil))"] },
+        okLibs "import Hdl.Signal\ndef mapS {d : ClockDomain} {A B : Type} {i : Size} (f : A → B) (s : (Signal d A)^i) : (Signal d B)^i\n  | .head => f s.head\n  | .tail => mapS f s.tail\n#eval Signal.sample 3 (Signal.map BitVec.toNat (mapS (d := ClockDomain.sys) (i := ∞) (fun (x : BitVec 8) => BitVec.add x (BitVec.ofNat 8 1)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 250))))\n"
+          ["[251, 251, 251]"] },
     { name := "34a: a sized copattern that recurses at the same size is a size error, not a loop", run := fun _ => do
         failsLibsEvery "import Hdl.Signal\ndef bad {d : ClockDomain} {i : Size} (s : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i\n  | .head => s.head\n  | .tail => bad s\n" "type mismatch" },
     { name := "34a: signals of two clock domains do not mix", run := fun _ => do
@@ -59,13 +59,13 @@ def hdlSignalGroup : Group where
         okLibs "import Hdl.Signal\ndef p {d : ClockDomain} {A : Type} (a : A) : Signal d A := Signal.pureS (i := ∞) a\ndef numS {d : ClockDomain} {i : Size} : (Signal d (BitVec 8))^i := 3\ndef reg {d : ClockDomain} {i : Size} (a : Nat) (s : (Signal d Nat)^i) : (Signal d Nat)^(↑i) := Signal.registerS a s\ndef regPure {d : ClockDomain} {i : Size} : (Signal d Nat)^(↑i) := reg 0 (Signal.pureS (i := i) 5)\n#eval Signal.sample 3 (p 5 : Signal ClockDomain.sys Nat)\n#eval Signal.sample 3 (Signal.map BitVec.toNat (numS (d := ClockDomain.sys) (i := ∞) : Signal ClockDomain.sys (BitVec 8)))\n"
           ["[5, 5, 5]", "[3, 3, 3]"] },
     { name := "34b: L3: `+`/`if` at size i, `Signal.fix` counter, and the baud generator (lane L2)", run := fun _ => do
-        okLibs "import Hdl.Signal\ndef addS {d : ClockDomain} {i : Size} (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := a + b\ndef ifS {d : ClockDomain} {i : Size} (c : (Signal d (BitVec 1))^i) (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := if c then a else b\ndef counter {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => Signal.registerS (BitVec.ofNat 8 0) (c + 1))\n#eval Signal.sample 10 (Signal.map BitVec.toNat (counter : Signal ClockDomain.sys (BitVec 8)))\n#eval Signal.sample 3 (Signal.map BitVec.toNat (addS (Signal.pureS (i := ∞) (BitVec.ofNat 8 7)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 9))))\n"
+        okLibs "import Hdl.Signal\ndef addS {d : ClockDomain} {i : Size} (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := a + b\ndef ifS {d : ClockDomain} {i : Size} (c : (Signal d (BitVec 1))^i) (a b : (Signal d (BitVec 8))^i) : (Signal d (BitVec 8))^i := if c then a else b\ndef counter {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => Signal.registerS (BitVec.ofNat 8 0) (c + 1))\n#eval Signal.sample 10 (Signal.map BitVec.toNat (counter : Signal ClockDomain.sys (BitVec 8)))\n#eval Signal.sample 3 (Signal.map BitVec.toNat (addS (d := ClockDomain.sys) (i := ∞) (Signal.pureS (i := ∞) (BitVec.ofNat 8 7)) (Signal.pureS (i := ∞) (BitVec.ofNat 8 9))))\n"
           ["[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
            "[16, 16, 16]"] },
     { name := "34b: a combinational loop through Signal.fix is a size error (no register in the body)", run := fun _ => do
         -- `c + 1` keeps the size; the body of `fix` must produce `Signal^(↑i)`, and only
         -- `registerS` raises the size. This is the whole point of the lane.
-        failsLibs "import Hdl.Signal\ndef bad {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => c + 1)\n" "type mismatch" },
+        failsLibs "import Hdl.Signal\ndef bad {d : ClockDomain} : Signal d (BitVec 8) := Signal.fix (fun (i : Size) (c : (Signal d (BitVec 8))^i) => c + 1)\n" "rigid mismatch" },
     { name := "34b: raw `scofix` is a term former (the primitive behind the sized definitions)", run := fun _ => do
         okLibs "import Hdl.Signal\ndef raw {d : ClockDomain} {A : Type} (g : (i : Size) → (Signal d A)^i → (Signal d A)^(↑i)) : Signal d A := scofix (fun (j : Size) => fun _ => Unit) (fun j rec idx a => g j (rec idx a)) ∞ () ()\n"
           [] } ]

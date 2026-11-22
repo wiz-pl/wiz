@@ -487,9 +487,10 @@ def introName (taken : List Name) (hint binder : Name) (isProof inaccessible : B
 
 /-- The kernel context for a goal, for inferring the types of complete terms. -/
 def Goal.kernelCtx (gl : Goal R) (g : Globals R) : Ctx R :=
-  { globals := g, env := gl.ctx.env, names := gl.ctx.names,
-    qtys := gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault,
-    types := gl.ctx.types, lvl := gl.ctx.lvl, erased := true }
+  { globals := g, env := gl.ctx.env,
+    names := gl.ctx.names.reverse.toArray,
+    qtys := (gl.ctx.names.map fun _ => QPoly.const QuantitySyntax.explicitDefault).reverse.toArray,
+    types := gl.ctx.types.reverse.toArray, lvl := gl.ctx.lvl, erased := true }
 
 /-- Is the goal's hole still unsolved? -/
 def Goal.isOpen (gl : Goal R) : ElabM R Bool := do

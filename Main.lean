@@ -8,6 +8,7 @@ open Wiz
 def usage : String := "usage:
   wiz --version           print the version (and, for a release, its commit)
   wiz parse FILE          print the syntax tree of every command
+  wiz parse --imports FILE  print the header's imports, one per line (no elaboration)
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
   wiz build FILE -o OUT [--target c|llvm|wasm|bpf]  compile the definition `main` to an
@@ -108,6 +109,18 @@ def parseCmd (path : String) : IO UInt32 := do
   for m in r.messages do
     IO.eprintln s!"{path}:{m.render input}"
   pure (if r.messages.isEmpty then 0 else 1)
+
+/-- `wiz parse --imports FILE`: the file's dependency fact. The imports are the fixed
+header, so this parses only the header (no elaboration, no module lookup, and it does not
+parse the rest of the file): one module name per line, in source order. -/
+def importsCmd (path : String) : IO UInt32 := do
+  let input ← IO.FS.readFile path
+  let (imports, messages) := parseImports input
+  for m in imports do
+    IO.println m
+  for m in messages do
+    IO.eprintln s!"{path}:{m.render input}"
+  pure (if messages.isEmpty then 0 else 1)
 
 /-- The module roots: the toolchain's library (`Module.toolchainLib`, the binary's own,
 whatever the current directory; `./lib` only when there is none), then the `-I`
@@ -1041,6 +1054,7 @@ def main (args : List String) : IO UInt32 := do
     | .error e => do IO.eprintln e; return 1
   let target := target?.getD "c"
   match args with
+  | ["parse", "--imports", path] => importsCmd path
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest

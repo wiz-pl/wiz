@@ -4,7 +4,7 @@ import Tests.Harness
 /-!
 # Tests for `Scry.Wil` (the IR and its concrete semantics)
 
-The programs are hand-built in `lib/Scry/WilExamples.wiz`; each case evaluates a property
+The programs are hand-built in `scry/src/Scry/WilExamples.wiz`; each case evaluates a property
 of `Wil.runFunction` with `#eval` (so no C toolchain is needed) and compares the `Nat`
 it evaluates to with the expected list. The differential cases compare the IR's result
 with a direct Wiz computation of the same function: when the C frontend lands, the same

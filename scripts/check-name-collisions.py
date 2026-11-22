@@ -123,7 +123,7 @@ CI: add these two lines to the `docs_style` job's run step in
   python3 scripts/check-name-collisions.py --self-test
   python3 scripts/check-name-collisions.py --quiet
 
-The baseline makes the `--quiet` run green today (12 entries); a stale or expired
+The baseline makes the `--quiet` run green today (13 entries); a stale or expired
 entry is still a failure.  A second, stricter job (recommended; no baseline, import
 graph only) is the truthful co-loadable check and is 0 today:
   python3 scripts/check-name-collisions.py --reachable --quiet
@@ -185,10 +185,16 @@ class Decl:
     line: int
     private: bool
     local: bool
+    rooted: bool = False  # inside `namespace __root__`: an explicitly global name
 
     @property
     def escaped(self) -> bool:
         return self.source.startswith("__root__.")
+
+    @property
+    def explicit_root(self) -> bool:
+        """Written global: a `__root__.` name, or a `namespace __root__` body."""
+        return self.escaped or self.rooted
 
     @property
     def bare(self) -> str:
@@ -211,12 +217,14 @@ class Decl:
     @property
     def migration(self) -> bool:
         """A dotted name that the module prefix would re-prefix."""
-        return not self.escaped and "." in self.source
+        return not self.explicit_root and "." in self.source
 
     @property
     def future_name(self) -> str:
+        if self.explicit_root:
+            return (self.namespace + "." + self.source) if self.namespace else self.source
         prefix = self.module + (("." + self.namespace) if self.namespace else "")
-        return self.source if self.escaped else prefix + "." + self.source
+        return prefix + "." + self.source
 
 
 def blank_comments_and_strings(text: str) -> str:
@@ -394,19 +402,33 @@ def scan_file(path: Path, module: str, display: str, rel: str) -> tuple[list[Dec
         raise SystemExit(2)
     lines = blank_comments_and_strings(text).splitlines()
 
-    # Stack of ("namespace"|"section"|"mutual", name, private).  A namespace name may
-    # be dotted; `namespace A.B` pushes the two components as one name and joins them
-    # into the namespace path.  `private` on a `mutual` block applies to its members.
-    stack: list[tuple[str, str | None, bool]] = []
+    # Stack of ("namespace"|"section"|"mutual", name, private, rooted).  A namespace
+    # name may be dotted; `namespace A.B` pushes the two components as one name and joins
+    # them into the namespace path.  A `__root__` component is the absolute root: it
+    # contributes nothing to the path, and the block is explicitly global (13v).
+    # `private` on a `mutual` block applies to its members.
+    stack: list[tuple[str, str | None, bool, bool]] = []
     decls: list[Decl] = []
     imports: list[str] = []
 
+    def ns_component(name: str) -> str:
+        if name == "__root__":
+            return ""
+        if name.startswith("__root__."):
+            return name[len("__root__.") :]
+        return name
+
     def namespace_path() -> str:
         parts: list[str] = []
-        for kind, name, _ in stack:
+        for kind, name, _, _ in stack:
             if kind == "namespace" and name:
-                parts.append(name)
+                part = ns_component(name)
+                if part:
+                    parts.append(part)
         return ".".join(parts)
+
+    def enclosing_rooted() -> bool:
+        return any(rooted for _, _, _, rooted in stack)
 
     for lineno, line in enumerate(lines, start=1):
         m = IMPORT_RE.match(line)
@@ -422,8 +444,12 @@ def scan_file(path: Path, module: str, display: str, rel: str) -> tuple[list[Dec
             if not stack:
                 continue
             if name:
-                # `end Foo` closes the nearest matching namespace if there is one;
-                # otherwise the innermost block.
+                # `end __root__` closes a `namespace __root__` block; otherwise `end Foo`
+                # closes the nearest matching namespace if there is one, else the
+                # innermost block.
+                if name == "__root__" and stack[-1][0] == "namespace" and ns_component(stack[-1][1] or "") == "":
+                    stack.pop()
+                    continue
                 for index in range(len(stack) - 1, -1, -1):
                     if stack[index][0] == "namespace" and stack[index][1] == name:
                         del stack[index:]
@@ -438,7 +464,11 @@ def scan_file(path: Path, module: str, display: str, rel: str) -> tuple[list[Dec
             continue
 
         if kind in ("namespace", "section", "mutual"):
-            stack.append((kind, name if kind == "namespace" else None, private))
+            if kind == "namespace" and name:
+                rooted = enclosing_rooted() or name == "__root__" or name.startswith("__root__.")
+            else:
+                rooted = enclosing_rooted()
+            stack.append((kind, name if kind == "namespace" else None, private, rooted))
             continue
 
         if name is None or name == "_":
@@ -446,7 +476,7 @@ def scan_file(path: Path, module: str, display: str, rel: str) -> tuple[list[Dec
         # `private mutual ... end` makes every member private to the module.
         in_private_mutual = any(
             block_kind == "mutual" and block_private
-            for block_kind, _, block_private in stack
+            for block_kind, _, block_private, _ in stack
         )
         private = private or in_private_mutual
         decls.append(
@@ -460,6 +490,7 @@ def scan_file(path: Path, module: str, display: str, rel: str) -> tuple[list[Dec
                 line=lineno,
                 private=private,
                 local=local,
+                rooted=enclosing_rooted(),
             )
         )
 

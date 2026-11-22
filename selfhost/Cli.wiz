@@ -1,3 +1,4 @@
+namespace __root__
 -- The self-hosted toolchain's driver (stage 21, gaps D2-D7 of
 -- `wiz-notes/selfhost-parity.md`). It replaces the generated `def main` strings of
 -- `Wiz/Selfhost.lean` with a real command line:
@@ -2965,3 +2966,4 @@ def dispatch : List String → IO Unit
                               | .false => usageError (String.append "unknown command: " (argv (.cons b rest3)))
 
 -- (`main` is `selfhost/Main.wiz`: the entry point is a module of its own, last.)
+end

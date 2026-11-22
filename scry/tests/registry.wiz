@@ -81,8 +81,8 @@ def main : IO Unit := EIO.toIO (do
     (List.isEmpty (Scry.unknownChecks Scry.analyses packUaf));
   check "a typo check is unknown"
     (hasCheck (Scry.unknownChecks Scry.analyses packTypo) "out-of-bounds-writ");
-  oobText ← FS.readFile "../lib/Scry/rules/oob.scry";
-  uafText ← FS.readFile "../lib/Scry/rules/uaf.scry";
+  oobText ← FS.readFile "rules/oob.scry";
+  uafText ← FS.readFile "rules/uaf.scry";
   check "the shipped oob.scry has no unknown check"
     (List.isEmpty (Scry.unknownChecks Scry.analyses (Scry.parseRulePack oobText)));
   check "the shipped uaf.scry has no unknown check"

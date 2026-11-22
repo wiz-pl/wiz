@@ -209,7 +209,9 @@ def Scry.cstCmd (file : String) (out : String) : EIO Nat := do
 /-- `scry repl [FILE]`: literally `wiz repl --prelude Scry.Repl -I …`, with `FILE`
 loaded through `Scry.Repl.load` before the first input. -/
 def Scry.replCmd (args : List String) : EIO Nat := do
-  let roots := ["lib", "src", "../lib", "../scry/src"];
+  -- `src` (the package's Scry modules), `lib`/`../lib` (the standard library, from the
+  -- checkout or the toolchain), and `scry/src` for a run from the repository root.
+  let roots := ["lib", "src", "../lib", "scry/src"];
   let wizPath := "wiz";
   let rootArgs := List.concat (List.map (fun r => ["-I", r]) roots);
   let (file, rest) := match args with

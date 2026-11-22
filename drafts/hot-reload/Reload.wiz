@@ -1,0 +1,72 @@
+-- NOT CHECKED. `reloadable` is not in the parser yet; this file is the proposed
+-- surface from `/workspace/wiz-notes/hot-reload.md` §3 and §12 P0, kept next to
+-- the Lean model (`HotReload/`) so a later elaborator change has the target in
+-- one place. Do not add it to `lib/` or to a checked test group until the
+-- command exists and the P0 build is green.
+
+/-- A stable name for a reloadable value. The type parameter is fixed; a swap may
+change the value, never the type. Opaque: no constructor, no unfolding. -/
+structure Observable (A : Type) where
+  private mk ::
+  slot : Nat
+
+/-- An immutable snapshot of one generation. ω data: copyable, storable, sendable;
+reading it is pure. -/
+axiom Pinned : Type
+
+/-- The only effect needed for reading. -/
+axiom snapshot : IO Pinned
+
+/-- Pure: `p` is immutable, so the same `p` and `o` always give the same value.
+The kernel sees a primitive and does not unfold the slot body. -/
+axiom read : {A : Type} → Pinned → Observable A → A
+
+/-- The generation-local counter (see C7: a `revision : ... → String` for the
+content hash is the other identity; the P0 model implements both). -/
+axiom version : {A : Type} → Pinned → Observable A → Nat
+
+def withPinned {B : Type} (k : Pinned → IO B) : IO B :=
+  IO.bind snapshot k
+
+/-- The sketch's `read : Observable A → Eff A`, as a one-shot derived read. Two
+`readNow`s are two snapshots; use `withPinned` for a consistent scope. -/
+def readNow {A : Type} (o : Observable A) : IO A :=
+  IO.bind snapshot (fun p => IO.pure (read p o))
+
+-- The declaration form (parser/elaborator target, not implemented):
+--
+-- reloadable def x : Nat := 41
+-- #check x
+-- -- x : Observable Nat
+-- --   slot 3, latest checked generation 7, revision 9f3a…
+-- --   read it with `read p x` for `p : Pinned`; `snapshot : IO Pinned`
+--
+-- reloadable def y : Nat := read x + 1
+-- -- elaborated as yBody (self : Pinned) : Nat := read self x + 1
+--
+-- A body is pure; it may read other slots at the same generation. A witness
+-- (`partial (default := w) def`) must be read-free in the P0 prototype; see the
+-- README roadblock on circular witnesses.
+
+-- A counter page: the state type is fixed, the view/update bodies are swapped.
+--
+-- reloadable def view (m : Model) : Loom.VNode Msg := ...
+-- reloadable def update (msg : Msg) (m : Model) : Model := ...
+-- def app (p : Pinned) : Loom.App Model Msg :=
+--   Loom.App.mk (Model.mk 0)
+--     (fun msg m => read p update msg m)
+--     (fun m => read p view m)
+
+-- A parser: one pinned generation per batch keeps the corpus reproducible; a
+-- REPL takes a new snapshot per input.
+--
+-- reloadable def parse (src : String) : Result Ast Error := ...
+-- def compileBatch (p : Pinned) (srcs : List String) : List (Result Ast Error) :=
+--   List.map (read p parse) srcs
+
+-- A scry rule: a scan pins one generation for the whole file/database, so a
+-- mid-scan swap cannot mix two rules; each finding carries the revision.
+--
+-- reloadable def taintRule (f : Func) : List Finding := ...
+-- def analyze (p : Pinned) (db : Db) : List Finding :=
+--   List.concatMap (read p taintRule) (Db.funcs db)

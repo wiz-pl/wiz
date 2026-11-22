@@ -261,10 +261,20 @@ def parse_wiz(text: str, where: str) -> Surface:
         if not line or line[0].isspace():
             i += 1
             continue
-        if re.match(r"^(namespace|section)\b", line):
+        if re.match(r"^namespace\b", line):
+            # `namespace __root__` is the explicit-global wrapper (its body is the
+            # root namespace, so the declarations stay unprefixed); another namespace
+            # would prefix them and the scanner does not model that.
+            ns = line.split(maxsplit=1)[1].strip() if len(line.split()) > 1 else ""
+            if ns != "__root__":
+                raise CheckError(
+                    f"{where}:{i + 1}: `namespace {ns}` is not handled by this checker "
+                    "(only `namespace __root__`, whose body is global)")
+            i += 1
+            continue
+        if re.match(r"^section\b", line):
             raise CheckError(
-                f"{where}:{i + 1}: `{line.split()[0]}` blocks are not handled by this "
-                "checker; teach scripts/check-prelude-drift.py about them")
+                f"{where}:{i + 1}: `section` blocks are not handled by this checker")
         if line in ("mutual", "end"):
             # A `mutual` block's declarations are top-level and at column 0; `end`
             # closes it. Both are transparent for the surface.

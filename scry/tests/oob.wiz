@@ -7,7 +7,7 @@ import Scry.Rules
 -- CWE-787 (out-of-bounds write) and CWE-125 (out-of-bounds read) over the fixtures in
 -- `fixtures/oob-*.c`.
 --
---   scry taint FILE.c --rules ../lib/Scry/rules/oob.scry
+--   scry taint FILE.c --rules rules/oob.scry
 --
 -- Four vulnerable fixtures (a heap store and load with an attacker index, a read-sized
 -- copy into a fixed buffer, and a memcpy read whose source is smaller than the tainted
@@ -44,7 +44,7 @@ def checkPack (label : String) (rep : Scry.TaintReport) : EIO Unit :=
     (Nat.beq (List.length (Scry.RulePack.memoryRules rep.pack)) 2)
 
 def checkVuln (label file rule : String) : EIO Unit := do
-  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  o ← opts [file, "--rules", "rules/oob.scry"];
   rep ← Scry.analyzeFile o;
   check (label ++ ": one out-of-bounds finding")
     (Nat.beq (List.length (oobFindings rep)) 1);
@@ -59,7 +59,7 @@ def checkVuln (label file rule : String) : EIO Unit := do
   | .nil => check (label ++ ": finding exists") .false
 
 def checkSafe (label file : String) : EIO Unit := do
-  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  o ← opts [file, "--rules", "rules/oob.scry"];
   rep ← Scry.analyzeFile o;
   check (label ++ ": zero out-of-bounds findings")
     (Nat.beq (List.length (oobFindings rep)) 0);
@@ -67,7 +67,7 @@ def checkSafe (label file : String) : EIO Unit := do
   checkPack label rep
 
 def checkUnknown (label file : String) : EIO Unit := do
-  o ← opts [file, "--rules", "../lib/Scry/rules/oob.scry"];
+  o ← opts [file, "--rules", "rules/oob.scry"];
   rep ← Scry.analyzeFile o;
   check (label ++ ": zero out-of-bounds findings")
     (Nat.beq (List.length (oobFindings rep)) 0);

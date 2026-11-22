@@ -585,7 +585,9 @@ quadratic in the nesting depth of the deep `casesOn` trees that `match` produces
 partial def quickType (ctx : Ctx R) (t : Term R) : TCM (VTy R) := do
   let g := ctx.globals
   match t with
-  | .var ix => pure ctx.types[ix]!
+  | .var ix => match ctx.typeAt? ix with
+    | some ty => pure ty
+    | none => throw (.other s!"variable #{ix} is out of scope ({ctx.lvl} in scope)")
   | .const n us => match g.find? n with
     | some d => pure (Wiz.eval g [] (d.type.instLevels d.levelParams us))
     | none => throw (.unboundGlobal n)
