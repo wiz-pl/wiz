@@ -126,7 +126,7 @@ def ryuRoundTripProgram : IO String := do
   if body.isEmpty then
     throw (IO.userError "runtime/rt_data.inc: wiz_f64_show has no body")
   pure <| "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
-    ++ start ++ prefix ++ marker ++ body ++ "}\n" ++
+    ++ "#define WIZ_API static\n" ++ start ++ prefix ++ marker ++ body ++ "}\n" ++
   "static int check(uint64_t bits) {\n" ++
   "  double d; memcpy(&d, &bits, sizeof d);\n" ++
   "  char buf[64]; int n = wiz_ryu_d2s(d, buf); buf[n] = 0;\n" ++
