@@ -514,7 +514,7 @@ def trustGroup : Group where
         let s := runFrontend (R := ZeroOneMany) "import Region\n"
           { loader := ← preludeLoader, trustedModule := Tests.libModule }
         let names := s.globals.order.filter (fun n => n == "Outlives" || n.startsWith "Outlives.")
-        checkEq 4 names.length
+        checkEq 4 names.size
         for n in (["Outlives", "Outlives.refl", "Outlives.static", "Outlives.trans"] : List Name) do
           check (names.contains n) s!"{n} is missing: {names}"
           let some d := s.globals.find? n | throw (IO.userError s!"{n} is missing")
