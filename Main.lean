@@ -12,10 +12,13 @@ def usage : String := "usage:
   wiz parse --imports FILE  print the header's imports, one per line (no elaboration)
   wiz check [-I DIR] FILE elaborate and type check (quantities: 0, 1, ω); -I DIR: another
                           module root (a package's src/), before or after FILE
-  wiz lint [-I DIR] FILE|- [--json] [--deny] [--rule Wxxx]... [--public-roots DIR]...
+  wiz lint [-I DIR] FILE|- [--json] [--deny] [--rule Wxxx]...
+                          [--public-roots DIR]... [--package-lint FILE]... [--set NAME]...
                           post-elaboration lint warnings (`W101`, `W102`, `W103`, `W301`,
-                          `W302`); exit 0 on warnings unless --deny; --json carries the
-                          stable `W` code; `-` reads standard input
+                          `W302`); a package lint module adds its own `W5xx` rules when
+                          the consumer enables the set with `--set`; exit 0 on warnings
+                          unless --deny; --json carries the stable `W` code; `-` reads
+                          standard input
   wiz build FILE -o OUT [--target c|llvm|wasm|bpf]  compile the definition `main` to an
                                    executable (C or LLVM) or a WebAssembly module (stage
                                    8f: no IO, Nat/Int, closures, arrays; run it with
@@ -300,6 +303,10 @@ structure LintOptions where
   path : String := ""
   publicRoots : List String := ["lib"]
   rules : List String := []
+  /-- (P1) package lint modules to load (`--package-lint FILE`) -/
+  packageLints : List String := []
+  /-- (P1) package set names the consumer enabled (`--set NAME`); empty: none -/
+  sets : List String := []
 
 /-- The state every elaboration starts from: the kernel and printing options, the
 `builtin` registrations trusted (the toolchain's own modules), and the hooks the pure
@@ -321,7 +328,8 @@ def initStateOf (tc : Toolchain) (lib : Std.HashMap Name String) (headers : Std.
       trustedModule := own.contains, trustNative := tc.trustNative,
       nativeFuel := tc.nativeFuel.getD NativeRun.defaultFuel, smt := ← tc.smt.resolve,
       lintEnabled := lint.enabled, lintPath := lint.path,
-      lintPublicRoots := lint.publicRoots, lintRules := lint.rules }
+      lintPublicRoots := lint.publicRoots, lintRules := lint.rules,
+      lintSets := lint.sets }
   pure init
 
 /-- The initial state the frontend runs from: the module loader (every module the file can
@@ -350,10 +358,14 @@ def initState (tc : Toolchain) (path : String) (input : String) (lint : LintOpti
   pure (init, headers)
 
 /-- Elaborate a file, through the toolchain's cache (if any); the number is the cache hits
-(one per command replayed from the cache), for `wiz doc -v`. -/
-def elaborateHits (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
+(one per command replayed from the cache), for `wiz doc -v`. `sets` are the already
+loaded package lint sets; `fresh` keeps a lint set module out of the cache (the cache
+does not replay its `lint`/`lint-set` commands). -/
+def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
+    (lint : LintOptions := {}) (sets : Array LintPackageSet := #[]) (fresh : Bool := false) :
     IO (CommandState ZeroOneMany × Nat) := do
   let (init, headers) ← initState tc path input lint
+  let init := { init with lintPackageSets := sets, lintSets := lint.sets }
   let (regularity, predicativeProp) ← kernelOpts.get
   let lazyProofs ← lazyProofsOpt.get
   let inertReg ← inertOpt.get
@@ -362,7 +374,7 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) (lint : Lint
   -- the cache doesn't know the experimental options
   let cacheOn := regularity == .off && !predicativeProp && lazyProofs && inertReg == .conv && !unboxStructs &&
       proofSteps == Budget.defaultSteps && !traceProofSteps && !(← strictPrivacyOpt.get) && !(← ppAllOpt.get) &&
-      !(← traceGuessesRef.get) && !lint.enabled
+      !(← traceGuessesRef.get) && !lint.enabled && !fresh
   if cacheOn && (tc.cacheDir.isSome || !tc.readCaches.isEmpty) then
     -- the key starts from the headers the file sees; modules enter it by their own keys
     let key₀ := hash (toString (headers.toList.map (·.2)))
@@ -381,8 +393,31 @@ def elaborateHits (tc : Toolchain) (path : String) (input : String) (lint : Lint
   else
     pure ((← Cache.elaborateUncached input init), 0)
 
+/-- Load and check package lint modules: each is elaborated fresh (its `lint-set` and
+`lint` commands are state, not cache effects), then the registry checks the code block,
+the capability declarations and the runner's closure. A bad set is a hard error, never a
+rule that quietly does nothing. -/
+def loadLintSets (tc : Toolchain) (files : List String) : IO (Array LintPackageSet) := do
+  let mut states : Array (CommandState ZeroOneMany) := #[]
+  for f in files do
+    let input ← IO.FS.readFile f
+    let (s, _) ← elaborateHitsCore tc f input {} #[] (fresh := true)
+    let errs := s.messages.filter (·.severity == .error)
+    unless errs.isEmpty do
+      throw (IO.userError s!"package lint set {f}: {String.intercalate "; " (errs.toList.map (·.text))}")
+    states := states.push s
+  match Wiz.Lint.loadPackageSets states with
+  | Except.ok sets => pure sets
+  | Except.error e => throw (IO.userError e)
+
 /-- Elaborate a file, through the toolchain's cache (if any; a lint run is fresh, so a
 changed rule set is never replayed from a stale entry). -/
+def elaborateHits (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
+    IO (CommandState ZeroOneMany × Nat) := do
+  let sets ← loadLintSets tc lint.packageLints
+  elaborateHitsCore tc path input lint sets
+
+/-- Elaborate a file with the lint options (and any package lint sets they name). -/
 def elaborate (tc : Toolchain) (path : String) (input : String) (lint : LintOptions := {}) :
     IO (CommandState ZeroOneMany) :=
   return (← elaborateHits tc path input lint).1
@@ -710,6 +745,8 @@ structure LintArgs where
   deny : Bool := false
   rules : List String := []
   publicRoots : List String := ["lib"]
+  packageLints : List String := []
+  sets : List String := []
 
 def parseLintArgs : List String → Except String LintArgs
   | [] => pure {}
@@ -723,6 +760,12 @@ def parseLintArgs : List String → Except String LintArgs
   | "--public-roots" :: r :: rest => do
       let a ← parseLintArgs rest
       pure { a with publicRoots := r :: a.publicRoots }
+  | "--package-lint" :: f :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with packageLints := f :: a.packageLints }
+  | "--set" :: n :: rest => do
+      let a ← parseLintArgs rest
+      pure { a with sets := n :: a.sets }
   | a :: rest =>
     if a.startsWith "-" && a != "-" then throw s!"wiz lint: unknown option {a}" else do
       let args ← parseLintArgs rest
@@ -762,7 +805,8 @@ def lintCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
       pure (file, text)
   let s ← elaborate tc (if file == "-" then "<stdin>" else file) input
     { enabled := true, path := (if file == "-" then "<stdin>" else file),
-      publicRoots := a.publicRoots.reverse, rules := a.rules.reverse }
+      publicRoots := a.publicRoots.reverse, rules := a.rules.reverse,
+      packageLints := a.packageLints.reverse, sets := a.sets.reverse }
   let lintMsgs := s.messages.filter fun m => m.code.startsWith "W"
   let errors := s.messages.filter (·.severity == .error)
   if a.json then
