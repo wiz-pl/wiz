@@ -234,17 +234,19 @@ where
 
 The SHA-256 in the lock says *which* bytes are wanted, not that the publisher's archive is
 safe to extract: the publisher chooses the member names and types. A listing pass (`tar
--t` and `tar -tv`) runs first and refuses a member that is absolute, has a `..` component,
-or is not a regular file or directory (a symlink, hardlink, device or fifo). This is a
-pre-scan, not a path check after extraction, so nothing is written outside `dest` even
-briefly. `--strip-components=1` is not a sanitiser: it can *expose* a `..` that was hidden
-below the stripped component. -/
+-t` and `tar -tv`) runs first and refuses a member whose name is absolute or has a `..`
+component, a symlink or hardlink whose target is absolute or leaves `dest`, or a device or
+fifo. Relative links inside `dest` are accepted (source archives legitimately contain
+them). This is a pre-scan, not a path check after extraction, so nothing is written
+outside `dest` even briefly. `--strip-components=1` is not a sanitiser: it can *expose* a
+`..` that was hidden below the stripped component. -/
 
-/-- One member of an archive: its name, and the type character of `tar -tv` (`'-'` a
-regular file, `'d'` a directory). -/
+/-- One member of an archive: its name, the type character of `tar -tv` (`'-'` a
+regular file, `'d'` a directory, `'l'` a symlink, `'h'` a hardlink) and a link's target. -/
 structure TarMember where
   name : String
   kind : Char
+  target : String
   deriving Repr, BEq, Inhabited
 
 /-- Could `name` be written outside the extraction root? Rejected: an absolute name, and
@@ -252,18 +254,72 @@ any `..` component (the root itself is `.` and stays inside). -/
 def safeMemberName (name : String) : Bool :=
   !name.startsWith "/" && name != ".." && !(name.splitOn "/").contains ".."
 
-/-- The first unsafe member, described, or `none` when every member is a regular file or
-directory under the extraction root. -/
+/-- What follows the first `sep` in `s` (with `sep` kept when the field contains it):
+the link target of a `tar -tv` line. -/
+def afterSep (s sep : String) : Option String :=
+  match s.splitOn sep with
+  | [] => none
+  | [_] => none
+  | _ :: rest => some (String.intercalate sep rest)
+
+/-- The components of a path that name a directory here (empty components and `.` do not). -/
+def pathDepth : List String → Nat
+  | [] => 0
+  | c :: rest => if c.isEmpty || c == "." then pathDepth rest else pathDepth rest + 1
+
+/-- How many directories above the extraction root a member's own directory is (`0` at
+the root): `usr/lib/x` is 2 deep. -/
+def memberDepth (name : String) : Nat :=
+  match (name.splitOn "/").reverse with
+  | _ :: dirs => pathDepth dirs
+  | [] => 0
+
+/-- Does `target`, read from a directory `depth` levels below the root, stay inside it?
+Only `..` moves up, and it may not move above the root; `.` and empty components stay.
+This is lexical (a target that is itself a link is checked as a link of its own). -/
+def insideFrom : List String → Nat → Bool
+  | [], _ => true
+  | c :: rest, depth =>
+    if c == ".." then
+      match depth with
+      | 0 => false
+      | d + 1 => insideFrom rest d
+    else if c.isEmpty || c == "." then insideFrom rest depth
+    else insideFrom rest (depth + 1)
+
+/-- A symlink target is safe when it is relative and, read from the link's own directory
+(`depth`), never climbs above the extraction root. A link to a sibling
+(`ld-linux-x86-64.so.2 -> ld-2.27.so`) or a parent (`usr/lib/x -> ../../lib/y`) is
+fine; a link one level down may not use two `..`. -/
+def safeSymlink (depth : Nat) (target : String) : Bool :=
+  !target.isEmpty && !target.startsWith "/" && insideFrom (target.splitOn "/") depth
+
+/-- A hardlink target is another archive member's name, relative to the archive root (and
+`--strip-components`, when used, applies to it too), so it may not be absolute or contain
+`..` at all. Nothing legitimate needs either. -/
+def safeHardlink (target : String) : Bool :=
+  !target.isEmpty && !target.startsWith "/" && !(target.splitOn "/").contains ".."
+
+/-- The first unsafe member, described, or `none` when every member is a regular file, a
+directory, or a link whose target stays inside the extraction root. -/
 def unsafeMember? (members : List TarMember) : Option String :=
   members.findSome? fun m =>
     if !safeMemberName m.name then
       some s!"{repr m.name} would be written outside the extraction directory (an absolute path or a `..` component)"
-    else if m.kind != '-' && m.kind != 'd' then
-      some s!"{repr m.name} is not a regular file or a directory (tar type {repr m.kind}); links, devices and fifos are refused"
-    else none
+    else if m.kind == '-' || m.kind == 'd' then none
+    else if m.kind == 'l' then
+      -- `untar` strips the archive's top component, so the link's directory is one level
+      -- higher than the name in the archive says
+      if safeSymlink (memberDepth m.name - 1) m.target then none
+      else some s!"{repr m.name} -> {repr m.target} would be written outside the extraction directory (an absolute or escaping symlink)"
+    else if m.kind == 'h' then
+      if safeHardlink m.target then none
+      else some s!"{repr m.name} is a hardlink to {repr m.target}, an absolute or escaping member name"
+    else
+      some s!"{repr m.name} is not a regular file, a directory or a link (tar type {repr m.kind}); devices and fifos are refused"
 
-/-- List `tar`'s members without extracting: the names from `tar -t` and the type
-characters from `tar -tv`, which must line up one for one. -/
+/-- List `tar`'s members without extracting: the names from `tar -t`, and the type
+characters and link targets from `tar -tv`, which must line up one for one. -/
 def tarMembers (tar : System.FilePath) : IO (Except String (List TarMember)) := do
   let listing (verbose : Bool) : IO (Except String (List String)) := do
     try
@@ -278,13 +334,21 @@ def tarMembers (tar : System.FilePath) : IO (Except String (List TarMember)) := 
   | .ok names, .ok verbose =>
     if names.length != verbose.length then
       return .error s!"tar -t {tar}: the name and type listings disagree ({names.length} vs {verbose.length} entries)"
-    pure (.ok (names.zipWith (fun n v => { name := n, kind := (v.toList.head?).getD '?' }) verbose))
+    pure (.ok (names.zipWith (fun n v =>
+      let kind := (v.toList.head?).getD '?'
+      let target :=
+        if kind == 'l' then (afterSep v " -> ").getD ""
+        else if kind == 'h' then (afterSep v " link to ").getD ""
+        else ""
+      { name := n, kind, target }) verbose))
   | .error e, _ => pure (.error e)
   | _, .error e => pure (.error e)
 
 /-- Unpack a `.tar.gz` into `dest`, dropping its single top-level directory. The archive
-is listed and checked first; a member that could escape `dest` (or is not a file or
-directory) refuses the whole archive, before `tar -x` runs. -/
+is listed and checked first; a member whose name or link target could escape `dest` (or a
+device/fifo) refuses the whole archive, before `tar -x` runs. A relative symlink or
+hardlink that stays inside `dest` is accepted: source archives legitimately contain them
+and the release sysroot needs them. -/
 def untar (tar : System.FilePath) (dest : System.FilePath) : IO (Except String Unit) := do
   match ← tarMembers tar with
   | .error e => pure (.error e)
