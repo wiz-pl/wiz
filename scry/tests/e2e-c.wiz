@@ -82,6 +82,13 @@ def findingRules (j : Json) : List String :=
   List.concat (List.map (fun f =>
     List.map (fun x => jStr x ["rule"]) (jList f ["findings"])) (jList j ["files"]))
 
+-- Every per-file `boundary` (or `memory`) entry of a project report, flattened: the
+-- top-level count must be the sum of the files' entries, and each entry must name its
+-- rule, its message and a source location. A bare count is not enough: this corpus is
+-- the taint contract, so its warnings are expected sites, not "whatever the tool emits".
+def warningEntries (j : Json) (field : String) : List Json :=
+  List.concat (List.map (fun f => jList f [field]) (jList j ["files"]))
+
 def readText (p : String) : EIO (Except String String) := do
   ok ← EIO.lift (FS.exists p);
   match ok with
@@ -155,6 +162,23 @@ def main : IO Unit := EIO.toIO (do
     check "taint: five lowering-boundary warnings"
       (Nat.beq (jNat j1 ["counts", "boundary"]) 5);
     check "taint: one memory warning" (Nat.beq (jNat j1 ["counts", "memory"]) 1);
+    let bnd := warningEntries j1 "boundary";
+    let mem := warningEntries j1 "memory";
+    check "taint: the boundary count is the sum of the files' entries"
+      (Nat.beq (List.length bnd) (jNat j1 ["counts", "boundary"]));
+    check "taint: the memory count is the sum of the files' entries"
+      (Nat.beq (List.length mem) (jNat j1 ["counts", "memory"]));
+    check "taint: every boundary entry is a located scry/lowering/boundary warning"
+      (List.all (fun b => Bool.and
+        (String.eq (jStr b ["rule"]) "scry/lowering/boundary")
+        (Bool.and (String.eq (jStr b ["severity"]) "warning")
+          (Bool.and (Nat.lt 0 (String.length (jStr b ["message"])))
+            (Bool.and (Nat.lt 0 (String.length (jStr b ["uri"])))
+              (Nat.lt 0 (jNat b ["startLine"])))))) bnd);
+    check "taint: every memory entry names a scry/memory rule and a message"
+      (List.all (fun b => Bool.and
+        (String.startsWith (jStr b ["rule"]) "scry/memory/")
+        (Nat.lt 0 (String.length (jStr b ["message"])))) mem);
     check "taint: no duplicate symbols" (Nat.beq (List.length (jList j1 ["callgraph", "duplicates"])) 0);
     check "taint: the unresolved callee is recorded"
       (List.any (fun u => String.eq (jStr u ["callee"]) "maybe")

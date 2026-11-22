@@ -16,7 +16,15 @@ pure (`Bpf.Lower`, `Bpf.Check`, `Bpf.Sexp`, `Bpf.C`; no `clang`, no privileges),
 run in every PR. The first build/run found and fixed the fixture's atom-type spelling
 and the `call` argument-list shape; a failure now is a P0 correctness bug.
 
-The two halves mirror §8.6:
+There is no source-level `.wiz` corpus here. An earlier P0 lane wrote 20
+`Tests/fixtures/bpf/{reject,accept}/*.wiz` + `.expected` files, but nothing could run
+them: `bpf_program`/`BpfM` are not in `lib/`, and the elaborator → `STm` adapter that
+would lower a `.wiz` file is still the P0 roadblock (`docs/stages/08-backend/bpf.md`).
+They were `-- [UNRUN]` documentation with no consumer, so they were removed rather than
+left asserting nothing. The rejection/acceptance contract they described is held by the
+`STm` cases below, and by the manifest + `bpf-core/1` fixture through the real pipeline.
+
+The two halves mirror §8.6 (both on `STm`, not on `.wiz` source):
 
 * `reject`: each case asserts the stable `bpf:` prefix and the message fragment of §4.4
   (or the edge case of §2.6: `BitVec` width, signed division with `INT_MIN / -1`, a
