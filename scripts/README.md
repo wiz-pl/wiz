@@ -15,7 +15,8 @@ Git hooks: the repository also ships a checkout-wide hook directory, `.githooks/
 (`pre-commit` refreshes `.github/repo-subsets.json`; `pre-push` warns when a registered
 light check has no clean record for the commit being pushed, and never blocks). Enable
 it once per clone with `git config core.hooksPath .githooks`; CI does not depend on it
-(the `docs_style` job runs the same checks), and no hook fails a commit or a push.
+(the `docs_style` job runs the same checks), and neither `.githooks` hook fails a
+commit or a push.
 `scripts/install-hooks.sh` is the older, per-clone alternative that copies `.git/hooks/*`
 (it does not install the ledger warning); do not enable both.
 
