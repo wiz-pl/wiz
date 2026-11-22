@@ -495,6 +495,16 @@ def tacticGroup : Group where
           "  by_cases p n\n  intro m\n  exact Or.inl h\n  intro m\n  exact Or.inr h\n" ++
           "#check bFun")
           ["bFun : (p : Nat → Bool) → (n : Nat) → (m : Nat) → p n = .true ∨ p n = .false"] },
+    -- (the fix must keep the names of *every* Π written in the goal's type, not only the
+    -- last arrow of a single binder)
+    { name := "by_cases: two leading binders of the goal's function type keep their names", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bFun2 (p : Nat → Bool) (n : Nat) :\n" ++
+          "    (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  intro m\n  intro k\n  exact Or.inl h\n" ++
+          "  intro m\n  intro k\n  exact Or.inr h\n" ++
+          "#check bFun2")
+          ["bFun2 : (p : Nat → Bool) → (n : Nat) → (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false"] },
     { name := "by_cases rejects a non-Bool expression", run := fun _ =>
         failsLib "import Prelude\ndef bad (n : Nat) : Nat := by\n  by_cases n"
           "by_cases: expected a Bool expression" },

@@ -336,6 +336,10 @@ def splitAs (p : Nat → Bool) (n : Nat) (R : Prop)
   `Or.elim`/`Bool.cases`/`Eq.trans` before, 9 lines after.
 * The branch hypothesis is put in the goal's context; the binders of `G` are not
   introduced, so a goal that is itself a function type keeps them for the next tactic.
+  A Π written in the type ascription keeps its name in `#check` even when it is unused,
+  unlike a declaration parameter (which prints as an arrow when its body does not use
+  it): `#check` prints the type's Πs from the end of the parameter telescope on with
+  their names (`command.check`, `Pretty.go`'s `keepFrom`).
 * The connectives are library definitions (a Σ and Church encodings), not inductives,
   so this is not a general `cases`: case analysis on an arbitrary inductive value, and
   `induction`, are still not implemented. The self-hosted frontend has no `by_cases`
@@ -343,7 +347,8 @@ def splitAs (p : Nat → Bool) (n : Nat) (R : Prop)
   a gap.
 
 Tests: `=tactics`, "by_cases splits a Bool expression into its two equations", "by_cases:
-a named hypothesis, and a goal that is a function type", and "by_cases rejects a non-Bool
+a named hypothesis, and a goal that is a function type", "by_cases: two leading binders
+of the goal's function type keep their names", and "by_cases rejects a non-Bool
 expression".
 
 ## P0: `simp` congruence, `simp?`, `auto` and `omega`

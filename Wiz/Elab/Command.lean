@@ -574,6 +574,13 @@ universe parameters and the binders. -/
 def declInsertAt (cmd : Syntax) : Nat :=
   [1, 2, 3].foldl (fun acc i => max acc (cmd.getArg i).info.stop) 0
 
+/-- The number of leading λs of a declaration's value, through proof markers
+(`Decl.withTopMarks`): its parameters, as opposed to the Πs written in its type. -/
+private partial def declLeadingLambdas : Term R → Nat
+  | .lam _ b => declLeadingLambdas b + 1
+  | .prf _ v => declLeadingLambdas v
+  | _ => 0
+
 partial def syntaxMentions (n : Name) : Syntax → Bool
   | .ident _ m => m == n
   | .node _ _ as => as.any (syntaxMentions n)
@@ -2206,14 +2213,14 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       for c in (stx.getArg 1).args do
         if let some C := c.getId? then derive C T c.info
   let addDeclChecked (name : Name) (levelParams : List Name) (ty : Term R) (val : Option (Term R))
-      (impl : Option (Term R) := none) := do
-    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl } with
+      (impl : Option (Term R) := none) (typeWritten : Bool := false) := do
+    match addDeclSorted s.globals { name, levelParams, type := ty, value := val, impl, typeWritten } with
     | .ok g => modify fun s => { s with globals := g }
     | .error e =>
       -- the implementation (a recursive definition's equations compiled a second time,
       -- `elabDefEqns`) is the elaborator's own: if only it fails, the bug is ours
       let ours := impl.isSome &&
-        (addDeclSorted s.globals { name, levelParams, type := ty, value := val }) matches .ok _
+        (addDeclSorted s.globals { name, levelParams, type := ty, value := val, typeWritten }) matches .ok _
       -- ...except a quantity error. The definition is checked through the eliminator, whose
       -- recursive results need none of the arguments, while the implementation calls
       -- itself, passing them: a parameter at ω (a data implicit's default, rule (b)) given a
@@ -2463,7 +2470,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
     else match runElabS (macros := s.macros) (builtins := s.builtins) (procMacros := s.procMacros) (tactics := s.tactics) (simpLemmas := s.simpLemmas) (metaCode := s.metaCode) (classes := s.classes) (instances := s.instances) (termInfo := s.termInfo) (smt := { s.smt with trustNative := s.trustNative, nativeFuel := s.nativeFuel }) (smtDecl := name) s.globals (elabDeclTerms binders typeStx valStx cmd.info (declName? := some (name, (cmd.getArg 1).info, declInsertAt cmd))) levelParams with
       | (.ok ((ty, val), sides), hv) =>
         addInfos hv
-        if sides.isEmpty then addDeclChecked name levelParams ty val
+        if sides.isEmpty then addDeclChecked name levelParams ty val (typeWritten := typeStx.isSome)
         else
           -- (28) declarations a tactic added: definitions (28c, `TacticM.define`), checked
           -- by the kernel like any other, and axioms, checked as types (an axiom's
@@ -2492,7 +2499,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
             | .ok g' => g := g'
             | .error e => report .error cmd.info s!"kernel rejected {d.name}: {e}"; ok := false; break
           if ok then
-            match addDeclSorted g { name, levelParams, type := ty, value := val } with
+            match addDeclSorted g { name, levelParams, type := ty, value := val, typeWritten := typeStx.isSome } with
             | .ok g' =>
               modify fun s => { s with globals := g' }
               let axs := sides.filter (·.value.isNone)
@@ -2604,7 +2611,15 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         | .ann tm _ => tm
         | t => t
       let g ← getGlobals
-      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g)}"
+      -- A declaration's type as written keeps the names of the Π binders of its type
+      -- ascription, not only its parameters': the value's leading λs (its parameters)
+      -- print as arrows when unused, as before, but a Π beyond them was written in the
+      -- type (`def f (n : Nat) : (m : Nat) → … := by …`), so `#check` keeps their names.
+      let keepFrom : Option Nat := match t with
+        | .const n _ => (g.find? n).bind fun d =>
+          if d.typeWritten then d.value.map declLeadingLambdas else none
+        | _ => none
+      pure s!"{t.pretty [] (some g)} : {ty.pretty [] (some g) keepFrom}"
     match r with
     | .ok text => report .info cmd.info text
     | .error e => reportErr e
@@ -2661,7 +2676,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
       match r with
       | (.ok (ty, val, impl), hv) =>
         addInfos hv
-        addDeclChecked name levelParams ty (some val) impl
+        addDeclChecked name levelParams ty (some val) impl (typeWritten := true)
       | (.error e, hv) => addInfos hv; reportErr e
   | "command.coinductive" =>
     let name := ((cmd.getArg 1).getId?).getD "_"
@@ -2793,7 +2808,7 @@ a proposition is not data (proofs are erased and all its proofs are definitional
         match (Term.spine concl).1 with
         | .const C _ =>
           if s.classes.any (·.name == C) then
-            addDeclChecked name levelParams ty val
+            addDeclChecked name levelParams ty val (typeWritten := true)
             modify fun s => { s with instances := s.instances.push { name, cls := C, priority } }
           else reportC cmd.info s!"{C} is not a class" ErrorCode.unknownClass
         | _ => report .error cmd.info "an instance's type must be an application of a class"

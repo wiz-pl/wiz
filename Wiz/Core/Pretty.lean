@@ -401,14 +401,17 @@ partial def structUpdateView? (g : Globals R) (t : Term R) : Option (Term R × L
 mutual
 
 /-- Print `t` at precedence `prec`. With `env`, applications print as notation (except at
-the root when `noUnexp`: printing a node whose notation couldn't be formatted). -/
+the root when `noUnexp`: printing a node whose notation couldn't be formatted).
+`keepFrom` prints the Π binders from that index on with their names even when they are
+not used (`#check` of a declaration: the Πs after its value's leading λs were written in
+the type, so their names are the source's). -/
 partial def go (env : Option (Globals R)) (names : List Name) (tys : List (Option (Term R))) (prec : Nat)
-    (t : Term R) (noUnexp : Bool := false) : M R TT := do
-  let body ← printNode env names tys prec t noUnexp
+    (t : Term R) (noUnexp : Bool := false) (keepFrom : Option Nat := none) : M R TT := do
+  let body ← printNode env names tys prec t noUnexp keepFrom
   record names tys t body
 
 partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List (Option (Term R))) (prec : Nat)
-    (t : Term R) (noUnexp : Bool) : M R TT := do
+    (t : Term R) (noUnexp : Bool) (keepFrom : Option Nat := none) : M R TT := do
   let sub (p : Nat) (u : Term R) : M R TT := go env names tys p u
   let app (f : TT) (args : List (Term R)) : M R TT := do
     let as ← args.mapM (sub 1023)
@@ -452,8 +455,12 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .qlit r => pure (txt (QuantitySyntax.display r))
   | .sort l => pure (paren (prec > 1022 && !atomicSort l) (txt (showSort l)))
   | .pi x bi q dom cod σ =>
-    if bi == .default && isDefaultQ .default q && !cod.hasVar 0 then
-      pure (paren (prec > 25) (cat [← sub 26 dom, txt " → ", ← go env ("_" :: names) (some dom :: tys) 25 cod]))
+    -- (`keepFrom = some 0`: this Π was written in the type, so keep its name even if unused;
+    -- a `_` binder was not written, and keeps the arrow form)
+    let keep := keepFrom == some 0 && x != "_"
+    if !keep && bi == .default && isDefaultQ .default q && !cod.hasVar 0 then
+      pure (paren (prec > 25) (cat [← sub 26 dom, txt " → ", ← go env ("_" :: names) (some dom :: tys) 25 cod
+        false (keepFrom.map (· - 1))]))
     else
       let x' := freshenName names (if x == "_" then "x" else x)
       let (o, c) := match bi with
@@ -461,7 +468,7 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
         | .instImplicit => ("[", "]")
         | .default => ("(", ")")
       pure (paren (prec > 25) (cat [txt o, ← qtyPrefixD (binderDefault bi dom σ) q, txt s!"{x'} : ", ← sub 0 dom, txt s!"{c} → ",
-        ← go env (x' :: names) (some dom :: tys) 25 cod]))
+        ← go env (x' :: names) (some dom :: tys) 25 cod false (keepFrom.map (· - 1))]))
   | .lam .. =>
     let (xs, names', tys', body) := lams names tys t #[]
     pure (paren (prec > 0) (cat [txt s!"fun {" ".intercalate xs.toList} => ", ← go env names' tys' 0 body]))
@@ -538,9 +545,9 @@ partial def printNode (env : Option (Globals R)) (names : List Name) (tys : List
   | .natLit n => pure (txt (NatString.decimalString n))
   -- Q4: the elaborator lifts small fields; `up`/`down` are invisible
   | .ulift _ _ A => app (txt "ULift") [A]
-  | .up a | .down a => printNode env names tys prec a noUnexp
+  | .up a | .down a => printNode env names tys prec a noUnexp keepFrom
   -- (P2) the proof marker is invisible too
-  | .prf _ a => printNode env names tys prec a noUnexp
+  | .prf _ a => printNode env names tys prec a noUnexp keepFrom
   | .natOp op args => app (txt s!"<{op}>") args.toList
   | .transp _ _ P p _ e =>
     pure (paren (prec > 1022) (cat [txt "transp ", ← sub 1023 P, txt " ", ← sub 1023 p, txt " ", ← sub 1023 e]))
@@ -748,9 +755,12 @@ def Term.prettyTagged (names : List Name) (tys : List (Option (Term R))) (t : Te
 def Term.prettyPrec (names : List Name) (prec : Nat) (t : Term R) : String :=
   ((Tagged.go none names [] prec t).run' #[]).flatten
 
-/-- `t` as text; with the globals `g`, applications print as notation. -/
-def Term.pretty (names : List Name := []) (t : Term R) (g : Option (Globals R) := none) : String :=
-  ((Tagged.go g names [] 0 t).run' #[]).flatten
+/-- `t` as text; with the globals `g`, applications print as notation. `keepFrom` keeps
+the names of the Π binders from that index on even when they are unused (see
+`Tagged.go`). -/
+def Term.pretty (names : List Name := []) (t : Term R) (g : Option (Globals R) := none)
+    (keepFrom : Option Nat := none) : String :=
+  ((Tagged.go g names [] 0 t false keepFrom).run' #[]).flatten
 
 /-- `t` as text, with the notation of `g` (`Term.pretty`). -/
 def Term.ppIn (g : Globals R) (names : List Name) (t : Term R) : String := t.pretty names (some g)
