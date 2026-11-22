@@ -1,3 +1,4 @@
+import Wiz.Compiler.IR
 import Wiz.Compiler.Inline
 import Wiz.Core.Pretty
 
@@ -254,10 +255,11 @@ def nativeArity (key : Name) : Nat :=
   -- the erased term keeps the application, and `C.lean`/`Wasm.lean` skip the value
   -- when they marshal it (`argIndices` below gives the other parameters' positions)
   | some sig => sig.params.length + (if sig.io then 1 else 0)
-  | none => match key with
-    | "nat.zero" => 0
-    | "nat.succ" | "nat.pred" | "nat.log2" => 1
-    | _ => 2
+  | none => match IR.PrimOp.ofKey? key with
+    -- the typed registry (IR.PrimOp) is the source of the arities; this is its only
+    -- string-keyed reader, for the erased natives of the interpreters
+    | some p => p.arity
+    | none => 2
 
 /-- The positions of the parameters that carry a run-time value: `e` (an erased type
 argument, passed as `◾`) is skipped. The positions index the call's argument array,

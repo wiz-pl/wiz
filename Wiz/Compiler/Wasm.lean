@@ -1216,7 +1216,7 @@ def unsupportedPrim (op : String) : String :=
   | none => s!"the primitive `{op}` is not supported by the Wasm backend"
 
 partial def checkBody : Body → Except String Unit
-  | .vdecl _ (.prim op _) b => if primFn op |>.isSome then checkBody b else .error (unsupportedPrim op)
+  | .vdecl _ (.prim op _) b => if primFn op.key |>.isSome then checkBody b else .error (unsupportedPrim op.key)
   | .vdecl _ (.pap f as) b | .vdecl _ (.ap f as) b =>
     if as.size > maxCallArgs then
       .error s!"the Wasm backend holds at most {maxCallArgs} call arguments (calling `{f}` with {as.size})"
@@ -1349,7 +1349,7 @@ partial def emitExpr (c : Ctx) (x : Var) : Expr → Code
       lg (c.var tok) ++ i32c t ++ i32c as.size ++ call (rtIdx "wiz_reuse") ++ ls (c.var x) ++
       as.toList.zipIdx.foldl (fun (code : Code) (a, i) =>
         code ++ storeField (c.var x) i ++ lg (c.var a) ++ i64Store 3 0) #[]
-  | .prim op as => emitPrim c x op as
+  | .prim op as => emitPrim c x op.key as
 
 partial def emitPrim (c : Ctx) (x : Var) (op : String) (as : Array Var) : Code :=
   match natPrimFn op with
