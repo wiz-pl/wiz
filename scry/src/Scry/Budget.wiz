@@ -1,5 +1,6 @@
 import Sys
 import Text
+import Scry.Datalog
 /-!
 # Scry.Budget: time and node limits, and progress reporting
 
@@ -17,8 +18,10 @@ This module is that contract:
 * `Scry.Budget.expired` is the cooperative deadline test, polled between stages, rounds
   and functions. Expiry is a **clear refusal** (no findings, non-zero exit); a
   `--max-rounds` stop is the **partial** path, marked `truncated` with a
-  `scry/budget/*` note. `Scry.Native.installTimeout` adds a hard `SIGALRM` guard for a
-  single stage that cannot poll.
+  `scry/budget/*` note. `Scry.evalBudget` (`Scry.Eval`) returns a `Scry.Termination`,
+  and `terminationNote` turns `.rounds limit ran` into the note the SARIF writer puts
+  in `invocations[].toolExecutionNotifications`. `Scry.Native.installTimeout` adds a
+  hard `SIGALRM` guard for a single stage that cannot poll.
 
 The clock is monotonic (`Clock.monotonic`), so a deadline never moves backwards.
 -/
@@ -87,3 +90,29 @@ its boundary list so a caller cannot mistake a truncated run for a complete one.
 structure Scry.BudgetNote where
   rule : String
   message : String
+
+/-- `--max-rounds` with the command's zero-means-unbounded convention, ready to pass to
+`Scry.evalBudget`. -/
+def Scry.RunBudget.roundLimit (b : Scry.RunBudget) : Option Nat :=
+  match b.maxRounds with
+  | .none => .none
+  | .some .zero => .none
+  | .some n => .some n
+
+/-- The `scry/budget/*` note a stopped lattice fixpoint earns (`none` when the fixpoint
+was reached). The same note is what a SARIF writer promotes to an invocation
+notification, so a truncated run cannot look complete to a consumer. -/
+def Scry.Budget.terminationNote (t : Scry.Termination) : Option Scry.BudgetNote :=
+  match t with
+  | .fixpoint => .none
+  | .rounds limit ran =>
+    .some (Scry.BudgetNote.mk "scry/budget/max-rounds"
+      ("Datalog evaluation stopped after " ++ Nat.repr ran ++ " round(s) at --max-rounds "
+       ++ Nat.repr limit ++ ": the derived relations are a lower bound, so recall is"
+       ++ " reduced (a reported finding is still a real derivation)"))
+
+/-- The notes a fixpoint's termination earns (`[]` when complete). -/
+def Scry.Budget.terminationNotes (t : Scry.Termination) : List Scry.BudgetNote :=
+  match Scry.Budget.terminationNote t with
+  | .none => .nil
+  | .some n => List.cons n .nil

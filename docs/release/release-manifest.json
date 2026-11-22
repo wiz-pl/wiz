@@ -106,6 +106,15 @@
       "sha256": null,
       "size": null,
       "url": null
+    },
+    {
+      "name": "provenance.intoto.json.sig",
+      "kind": "provenance-signature",
+      "system": "any",
+      "producer": "scripts/release-sbom.py",
+      "sha256": null,
+      "size": null,
+      "url": null
     }
   ],
   "toolchain": {

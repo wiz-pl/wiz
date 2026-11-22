@@ -21,9 +21,13 @@ loop and provenance.
   delta is empty.
 * **Lattice relations** keep one value per key. A key that is absent has `bot`; a new
   value is `join`ed in, and the key joins the delta only when the joined value differs.
-  Values must therefore move up a finite lattice (the engine is a `partial def`: it
-  does not prove termination, and a non-monotone transfer function can loop, as the
-  design intends for an untrusted fast engine).
+  Values must therefore move up a finite lattice. The unbounded `eval` is a `partial
+  def`: it does not prove termination, and a non-monotone transfer function can loop.
+  `evalBudget` is the contract: it takes a `Program.MonoDecl` (checked by
+  `Program.checkMono`) and a round budget, and its `EvalOutcome` says whether the run
+  was complete (`Termination`), whether the monotonicity obligation was covered
+  (`monoChecked`), and how many rounds ran. A truncated run returns the facts derived
+  so far plus `.rounds limit ran`, never a silent short answer.
 * **Provenance** is a flat heap of `ProofStep`s: each step has an id, the fact it
   derived, the rule (`.none` for an EDB fact), and the ids of the premises it used.
   `State.whyTuple`/`State.whyLat` return a fact's step, and `State.expandWitness`
@@ -590,11 +594,106 @@ partial def Scry.evalFrom {L : Type} (p : Scry.Program L) (strat : List Nat) (s 
 
 /-- The least fixpoint, if the program passes `Program.check` (range restriction and
 stratification); otherwise `.none`. EDB facts come from `State.addTuple` and
-`State.addLatFact`. -/
+`State.addLatFact`. This is the unbounded evaluation: a rule pack whose fixpoint does
+not terminate keeps running, so a caller that needs a budget should use `evalBudget`. -/
 def Scry.eval {L : Type} (p : Scry.Program L) (st : Scry.State L) : Option (Scry.State L) :=
   match p.check with
   | .none => .none
   | .some strat => .some (Scry.evalFrom p strat 0 (Scry.maxNat strat) st)
+
+-- ## The budgeted evaluator and the obligation in the result
+
+/-- The result of one evaluation. `state` always holds every fact derived before the
+run stopped. `termination` says whether that is the whole fixpoint: `.rounds` is a
+partial answer and must be surfaced, not discarded. `monoChecked` is true only when the
+caller supplied a `MonoDecl` that covers every lattice rule, so an **absence claim**
+requires `monoChecked && termination.complete`; `rounds` is the total number of delta
+rounds run (across strata). -/
+structure Scry.EvalOutcome (L : Type) where
+  state : Scry.State L
+  termination : Scry.Termination
+  monoChecked : Bool
+  rounds : Nat
+
+def Scry.EvalOutcome.complete {L : Type} (o : Scry.EvalOutcome L) : Bool :=
+  Scry.Termination.complete o.termination
+
+/-- `true` only for a complete run with a full monotonicity registration: the
+precondition for treating "no finding" as an absence. -/
+def Scry.EvalOutcome.certified {L : Type} (o : Scry.EvalOutcome L) : Bool :=
+  if Scry.EvalOutcome.complete o then o.monoChecked else .false
+
+/-- The delta loop with a round budget. `limit = none` keeps the old unbounded loop;
+`some n` runs at most `n` rounds and returns `.rounds n ran` when the delta is still
+non-empty. `left` is `n` at the start of the stratum. -/
+partial def Scry.evalStratumLoopB {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (d : Scry.Delta L) (st : Scry.State L) (limit : Option Nat) (left ran : Nat) :
+    Scry.State L × Scry.Termination × Nat :=
+  if Scry.Delta.isEmpty d then (st, .fixpoint, ran)
+  else
+    match limit with
+    | .some n =>
+      if Nat.beq left 0 then (st, .rounds n ran, ran)
+      else
+        let r := Scry.evalRound p strat s d p.rules 0 (Scry.Round.empty st);
+        Scry.evalStratumLoopB p strat s
+          (Scry.Delta.mk r.newTuples (Scry.dedupLatKeys r.newLats)) r.st limit
+          (Nat.sub left 1) (Nat.succ ran)
+    | .none =>
+      let r := Scry.evalRound p strat s d p.rules 0 (Scry.Round.empty st);
+      Scry.evalStratumLoopB p strat s
+        (Scry.Delta.mk r.newTuples (Scry.dedupLatKeys r.newLats)) r.st .none 0
+        (Nat.succ ran)
+
+def Scry.evalStratumB {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (st : Scry.State L) (limit : Option Nat) (ran : Nat) :
+    Scry.State L × Scry.Termination × Nat :=
+  let st1 := Scry.evalNonRecursive p strat s p.rules 0 st;
+  let left := match limit with
+    | .some n => n
+    | .none => 0;
+  Scry.evalStratumLoopB p strat s (Scry.initialDelta st1 strat s) st1 limit left ran
+
+/-- One stratum per call, stopping the whole run at the first budget stop: a later
+stratum would otherwise read a relation the truncated one did not finish. -/
+partial def Scry.evalFromB {L : Type} (p : Scry.Program L) (strat : List Nat) (s : Nat)
+    (max : Nat) (st : Scry.State L) (limit : Option Nat) (ran : Nat) :
+    Scry.State L × Scry.Termination × Nat :=
+  if Nat.lt max s then (st, .fixpoint, ran)
+  else
+    match Scry.evalStratumB p strat s st limit ran with
+    | (st', term, ran') =>
+      match term with
+      | .fixpoint => Scry.evalFromB p strat (Nat.succ s) max st' limit ran'
+      | .rounds _ _ => (st', term, ran')
+
+/-- `eval` with a round budget and an optional monotonicity registration.
+
+* No declaration (`none`): the run happens and the outcome says `monoChecked = false`;
+  absence is not certified.
+* A declaration with a gap: the checked evaluator **refuses** (`.none`), because running
+  a rule pack whose registered lattice head is not structurally monotone is exactly the
+  unchecked loop R6 removes. `Program.obligationError` names the rule.
+* A complete declaration: `monoChecked = true`; with `termination = fixpoint` the result
+  is `certified` and may support an absence claim.
+
+`maxRounds = none` is the old unbounded loop. `some 0` stops before any round and marks
+the result truncated, which is useful for a hard "no work" budget. -/
+def Scry.evalBudget {L : Type} (p : Scry.Program L) (decl : Option Scry.MonoDecl)
+    (maxRounds : Option Nat) (st : Scry.State L) : Option (Scry.EvalOutcome L) :=
+  match Scry.Program.check p with
+  | .none => .none
+  | .some strat =>
+    match decl with
+    | .some d =>
+      match Scry.Program.monoGap p d with
+      | .some _ => .none
+      | .none =>
+        match Scry.evalFromB p strat 0 (Scry.maxNat strat) st maxRounds 0 with
+        | (st', term, ran) => .some (Scry.EvalOutcome.mk st' term .true ran)
+    | .none =>
+      match Scry.evalFromB p strat 0 (Scry.maxNat strat) st maxRounds 0 with
+      | (st', term, ran) => .some (Scry.EvalOutcome.mk st' term .false ran)
 
 -- ## Provenance queries
 

@@ -1,0 +1,65 @@
+{
+  "generated_by": "scripts/repo-subsets.py",
+  "git": "unstaged",
+  "subsets": {
+    "docs": {
+      "files": 114,
+      "paths": [
+        "docs/**",
+        "README.md",
+        "CHANGELOG.md",
+        "AGENTS.md",
+        ".github/**"
+      ],
+      "sha256": "0d106328beff02cad6819633e943e0c3438773b6b532eac1a5464b8d59ea9800"
+    },
+    "lean": {
+      "files": 162,
+      "paths": [
+        "Wiz/**",
+        "Grail/**",
+        "WizMeta/**",
+        "Main.lean",
+        "Wiz.lean",
+        "Grail.lean",
+        "WizMeta.lean",
+        "lakefile.lean",
+        "lake-manifest.json",
+        "lean-toolchain"
+      ],
+      "sha256": "23a409b1c3c4c745ae9bc0f116bc9e18455980a51a3643f20e37f0d2e55b29e4"
+    },
+    "packages": {
+      "files": 911,
+      "paths": [
+        "scry/**",
+        "hdl/**",
+        "tower/**"
+      ],
+      "sha256": "25e604c759f3b4c30014a09d1c56f9070b2c096f9c33d10223eb2865d4119974"
+    },
+    "runtime": {
+      "files": 11,
+      "paths": [
+        "runtime/**",
+        "c/**"
+      ],
+      "sha256": "3ad2db9958aea5c6d6003f78719211337b2456a928750b27ccb396f3c27bbc9c"
+    },
+    "tests": {
+      "files": 376,
+      "paths": [
+        "Tests/**",
+        "web/**"
+      ],
+      "sha256": "76033f435e86a7d007d8a7c0a17dfb9cd9af767fe98655c9c139244e7ccd474f"
+    },
+    "wizlib": {
+      "files": 108,
+      "paths": [
+        "lib/**"
+      ],
+      "sha256": "779c69a1454038442d5758cc152d0006fd68bbd9f6cbe4ef0b2791757de1fb4c"
+    }
+  }
+}

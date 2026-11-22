@@ -1,0 +1,107 @@
+import Prelude
+import IO
+import Text
+
+/-!
+# A Loom-shaped demo, in Wiz
+
+The JavaScript side of Loom is a router, a mount and a patch list. This module is that
+glue written in Wiz: `route` is a pure function, `mount` builds the shell, and
+`render` applies a `List Patch` to one content element. The event listener is a Wiz
+closure (`Callback (Elem → IO Unit)`), so delegation is Wiz code too.
+
+Every DOM operation is an `extern "js.…"`; the host installs the namespace
+(`examples/js-loom/fake-dom.mjs` for the test, a real DOM adapter in Loom). The
+signatures are checked by the existing `extern` path, and the JS backend marshals
+`Elem` (a `foreign_type`) as an opaque handle, `String` as code points, and the Wiz
+closure as a callable JavaScript function.
+
+Build it and run it against the fake DOM:
+
+```sh
+wiz build examples/js-loom/loom.wiz --target js -o /tmp/loom.mjs
+node examples/js-loom/run.mjs /tmp/loom.mjs
+```
+-/
+
+/-- An element handle. Opaque: Wiz passes it back to the host, it never inspects it. -/
+foreign_type Elem
+
+/-- The router's result. -/
+inductive View where
+  | home
+  | about
+  | notFound
+
+/-- One entry of a patch list. Applying a list is the whole render. -/
+inductive Patch where
+  | text (s : String)
+  | attr (k : String) (v : String)
+
+/-- The host's DOM operations, named as JavaScript functions on `globalThis`. -/
+extern "js.wiz.dom.root" domRoot : Unit → Elem
+extern "js.document.createElement" createElement : String → Elem
+extern "js.wiz.dom.setAttribute" setAttribute : Elem → String → String → IO Unit
+extern "js.wiz.dom.appendChild" appendChild : Elem → Elem → IO Unit
+extern "js.wiz.dom.addEventListener" addEventListener : Elem → String → Callback (Elem → IO Unit) → IO Unit
+extern "js.wiz.dom.getAttribute" getAttribute : Elem → String → IO String
+extern "js.wiz.dom.setText" setText : Elem → String → IO Unit
+
+/-- The route table. The test's broken variant changes the first branch, so a route
+that silently maps `/` to the wrong view makes the demo fail. -/
+def route (path : String) : View :=
+  match String.eq path "/" with
+  | .true => .home
+  | .false => match String.eq path "/about" with
+    | .true => .about
+    | .false => .notFound
+
+/-- The patch list of a view: a text update and one attribute. -/
+def patchesFor : View → List Patch
+  | .home => .cons (.text "Home") (.cons (.attr "data-view" "home") .nil)
+  | .about => .cons (.text "About") (.cons (.attr "data-view" "about") .nil)
+  | .notFound => .cons (.text "Not found") (.cons (.attr "data-view" "404") .nil)
+
+def applyPatch (el : Elem) : Patch → IO Unit
+  | .text s => setText el s
+  | .attr k v => setAttribute el k v
+
+partial def applyPatches (el : Elem) (ps : List Patch) : IO Unit :=
+  match ps with
+  | .nil => IO.pure ()
+  | .cons p rest => IO.then1 (applyPatch el p) (applyPatches el rest)
+
+/-- Render the route's patch list onto the content element. -/
+def render (el : Elem) (path : String) : IO Unit :=
+  applyPatches el (patchesFor (route path))
+
+/-- Event delegation: read the clicked element's `data-path`, then render that route. -/
+def handleClick (content : Elem) (target : Elem) : IO Unit := do
+  path ← getAttribute target "data-path";
+  render content path
+
+/-- The shell: a container, a nav with two links, a content element and one delegated
+click listener. It returns the content element (the host does not need it; a browser
+caller could keep it). -/
+def mount : IO Elem := do
+  let root := domRoot ();
+  let container := createElement "div";
+  setAttribute container "id" "app";
+  appendChild root container;
+  let nav := createElement "nav";
+  appendChild container nav;
+  let home := createElement "a";
+  setAttribute home "data-path" "/";
+  appendChild nav home;
+  let about := createElement "a";
+  setAttribute about "data-path" "/about";
+  appendChild nav about;
+  let content := createElement "main";
+  appendChild container content;
+  addEventListener nav "click" (fun (target : Elem) => handleClick content target);
+  render content "/";
+  IO.pure content
+
+def main : IO Unit := do
+  content ← mount;
+  IO.pure ()

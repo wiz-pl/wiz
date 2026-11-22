@@ -505,10 +505,6 @@ def Axi4.orderGo : (fuel : Nat) → (issued done : List Axi4.Burst) → Bool
 
 /-- `done` is a completion order of `issued`: a permutation of the issued bursts that
 preserves the issue order of every ID (AXI4's ordering rule; different IDs may overtake
-each other). -/
+each other). `Axi4.orderOf` is the Boolean check the example evaluates. -/
 def Axi4.orderOf (issued done : List Axi4.Burst) : Bool :=
   Axi4.orderGo (Nat.succ (List.length done)) issued done
-
-/-- The response-order law for a list of completions against the issued bursts. -/
-def Axi4.ResponseOrder (issued done : List Axi4.Burst) : Prop :=
-  Axi4.orderOf issued done = .true

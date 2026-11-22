@@ -819,9 +819,14 @@ kernel` on this machine).
 * **Width 0** is an inhabited type (`UIntN 0` has one value, `0`); all arithmetic
   gives `0`, `2^0 - 1 = 0`, and `min = max = 0`. The docs only say "a number of
   bits below `2^w`", so the width-0 row is the specification by construction.
-* **The self-hosted backend's `Nat` is 63 bits** (`selfhost/rt.c`), so `[S]` is
-  limited to cells whose values and intermediates fit; that is a documented
-  bootstrap limitation, not a semantic difference. Where `[S]` runs, it agrees.
+* **The self-hosted backend's `Nat` is 63 bits and wraps** (`selfhost/rt.c:51-54`,
+  `:804-831`), so `[S]` is limited to cells whose values and intermediates stay below
+  `2^63`. Above that bound the runtime wraps, but the checker does not currently *return* a
+  wrapped verdict: `Nat.pow 2 63 = 0` is rejected by the 200000-step budget in 0.9 s, while
+  `Nat.add (2^63 - 1) 1 = 0` and `Nat.add 2^62 2^62 = 0` do not return within 30 s and print
+  nothing (budget reached, recovery path hangs — F43). So a cell above the bound is
+  **unsupported and currently unbounded**, not a known wrapped value. Where `[S]` runs
+  below the bound, it agrees with `[L]`.
 
 ## Running it
 

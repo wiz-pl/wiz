@@ -179,6 +179,14 @@ and measure nothing. The corpus header records that reason (and the per-file cau
 the change once the frontend accepts the cluster. Until then `=hdl-examples` is the Hdl
 gate.
 
+The sweep compares the **elaborated types** (one canonical `name : type` line per
+declaration and info message), not only the declaration count, and it **ratchets**
+against `Tests/libdiff-baseline.tsv` (`gen-libdiff-baseline.py` regenerates it from the
+checked-in classification; all 239 rows are frozen, including the pending `hdl/src`
+ones): a file the baseline calls `ok` may not become `diverging`, `rejected` or
+`bounded`. The listed gaps may be fixed or reclassified; the run's report is written
+before the ratchet fails, so a red part still says which file moved.
+
 ### Flaky tests and the quarantine
 
 A failure in a CI shard does not say whether it is deterministic. `scripts/flaky.py`
@@ -919,14 +927,43 @@ of the same commit substitutes the store paths. Only a push to master writes the
 trusted cache; a pull request's `build` writes its own untrusted cache instead
 (`CACHIX_PR_NAME` and `CACHIX_PR_AUTH_TOKEN`), and without that secret it publishes
 nothing and its shards build the paths. A merge-queue run publishes nothing either, so
-its shards build too. The `docs` job builds `.#reference` (the standard library's
+its shards build too.
+
+A **pull request**'s `build` job does not compile from scratch. A push to master's
+`lake_seed` job builds flake.nix's `withLakeCache` with `empty-lake`: a cold compile
+*inside the derivation* (the sandbox enforces it — no cache, no dev shell), whose second
+output `lake` carries what Lake wrote — `.lake/build/lib`, `.lake/build/ir`,
+`.lake/config` and the `toolchain` stamp, without `build/bin` (a consumer relinks) and
+without `.lake/cache` (the build phase keeps that in `$TMPDIR`). The job saves that
+output under two Actions-cache keys (`scripts/lake-cache.sh key`: `flake.lock`, the
+`lean-toolchain` stamp, the architecture and the `lean`/`runtime` subset hashes), a
+trusted one and an untrusted one. A pull request restores the untrusted key first (its
+own previous run) and the trusted one second, and builds `withLakeCache <seed>`: the
+same function, so Lake recompiles only the modules whose inputs changed. The producer's
+`bin` **should** be byte-identical to the pure build's — it is the same sources compiled
+by the same Lake — and the equality is asserted by the seed measurement's `cmp` of all
+three binaries; that measurement has **not yet run in CI**, so the claim is a design
+expectation, not a measured fact. It is what would make the producer a trustworthy
+substitute for the compile; **nothing a pull request writes is read by a
+trusted job** — a pull request saves no seed at all, and the producer only ever passes
+`empty-lake` (its job has no restore step). A missing seed is `empty-lake`, the same cold
+build, never an error. Those store paths differ from the pure build's — the seed is an
+input — so the shards, `trust-ledger`, `web` and `web_modules` ask for the `build` job's
+paths directly (`nix build /nix/store/…`, which substitutes them from Cachix) instead of
+recomputing the derivation. Pushes, the merge queue and the release workflows keep the
+pure `nix build`: the trusted cache and every release artifact name the pure derivation,
+and nothing in the release path reads `withLakeCache`.
+
+The `docs` job builds `.#reference` (the standard library's
 reference manual, made with the cached `wiz`) on a push, off the shards' critical path.
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
-the jobs that substitute this commit's store paths (the test shards, `trust-ledger` and
-`web`) also add the PR cache as an extra substituter for that job only. No job on the
-critical path runs `lake build` directly or saves a
-`.lake` Actions cache. The shards run the Nix-built test driver (`packages.tests`), not
+the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
+`web` and `web_modules`) also add the PR cache as an extra substituter for that job
+only. No job on the critical path runs `lake build` directly, and the only `.lake`
+Actions caches are the `lake_seed` job's cold seed and a pull request's restore of it
+(above). The shards run the Nix-built test driver
+(`packages.tests`), not
 `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
 `scripts/trust-ledger.sh` name directly (the driver also carries the wrapped `wiz` and
@@ -998,6 +1035,17 @@ setup action keeps the elan cache for those
   script's fixtures (`--self-test`) and then the check, on every push and pull request
   (including docs-only ones), and `CI result` requires it. No code block is exempt; a
   reviewed exception goes in the script's `ALLOW` list with a reason.
+  The same job runs `scripts/check-companion-lists.py` early: it checks the lists that
+  must move with their source of truth — `.github/libdiff-corpus.txt` against the walk
+  over `lib/` and `scry/`, `legacy-names.tsv` and `Wiz/LegacyNames.lean`'s digest against
+  the declarations, and stale or expired entries in
+  `.github/name-collisions-baseline.json` — by calling the existing checks and reporting
+  one `companion drift:` line naming both sides. (The test-shard total needs the test
+  binary, so that check stays in the build job; the trust ledger and scry goldens have
+  their own jobs.) It also runs `scripts/check-release-consistency.py`, which checks the
+  release packet and, for the machinery, that a version, channel, `scripts/...` command
+  or release artifact named in `docs/release*`, `docs/building.md`, `README.md` or
+  `CHANGELOG.md` is still produced by the tree.
   The same job runs `scripts/check-doc-links.py`: every relative link and `#anchor` in
   those files and in `docs/**/*.html` must resolve, using GitHub's heading slugs. Links
   to `wiz-notes/...` are reported as external notes (the notes live outside the
@@ -1149,22 +1197,27 @@ setup action keeps the elan cache for those
   estimate low and sort late, and giving them entries in `.github/test-timings.json`
   would refine the order.
 * **Shard balance.** CI's wall time is its longest job, so the invariant is that **no
-  test shard's test time is over 1.5× the median shard's**. Every split shard's cases
-  have an entry in `.github/test-timings.json`, and no shared program is built by two
-  parts of one split shard (a `"split-cases": true` shard excepted: its parts each build
-  it by design, and the estimates charge for it). It is tracked in two places:
+  test shard's job wall is over 1.5× the median shard's job wall**. Every split shard's
+  cases have an entry in `.github/test-timings.json`, and no shared program is built by
+  two parts of one split shard (a `"split-cases": true` shard excepted: its parts each
+  build it by design, and the estimates charge for it). It is tracked in two places:
   * `scripts/ci.py check-shards` (the build job) warns when a split shard has cases
     that are not in the baseline.
-  * `scripts/ci.py balance` (the `CI result` job) checks the run's measured case times.
-    It adds a "Shard balance" table to the run summary and a warning annotation for each
-    violation.
+  * `scripts/ci.py balance` (the `CI result` job) takes the run's job list from the API
+    and compares each `tests --` step's wall, so a shard that runs cases in parallel
+    (`"jobs": N`) is judged on its wall, not on its summed case seconds (which it also
+    reports; the two differ by the shard's `--jobs` factor). It adds a "Shard balance"
+    table to the run summary and an annotation for each violation.
 
-  Both only warn, on pull requests and on master. A new case has no time until a CI run
-  has measured it, and runner times vary, so a failure here would block merges that are
-  correct.
+  Both warn on pull requests; a push to `master` is strict. A new case has no time until
+  a CI run has measured it, so a master run with a split-shard case missing from the
+  baseline is red until the baseline is refreshed (below). That is deliberate: as a
+  warning, the baseline went stale for three current runs while every shard stayed over
+  the limit.
 
   On a master push whose tests all passed and whose balance drifted, the `CI result`
-  job uploads the regenerated baseline as the `test-timings-baseline` artifact. It also
+  job uploads the regenerated baseline as the `test-timings-baseline` artifact (also when
+  it is the strict balance step that failed). It also
   prints the command that applies it, in the warning and in the summary:
   `gh run download RUN -R wiz-pl/wiz -n test-timings-baseline -D .github`.
   Commit the result in a small PR. CI does not open that PR itself. A PR opened with the
@@ -1428,6 +1481,20 @@ the tiers needs no reinstall. It never overwrites a different hook without `--fo
 running it twice leaves the hooks byte-for-byte unchanged. The same two hooks are
 available to the pre-commit framework as the `wiz-fast` and `wiz-full` entries in
 `.pre-commit-hooks.yaml`.
+
+The checkout also ships `.githooks/pre-commit`, which keeps
+`.github/repo-subsets.json` current: the subset hashes are cache keys (and a reviewed
+list of what each build reads), and the `docs_style` job fails when the committed file
+does not describe the tree (`scripts/check-companion-lists.py`). Enable it once per
+clone with
+
+```sh
+git config core.hooksPath .githooks
+```
+
+It takes about 0.1 s, regenerates and stages the JSON only when a subset changed, warns
+(never fails) when `python3` is missing, and is skipped on a merge with conflicts. CI
+runs the same `--check`; a hook is a convenience, not the gate.
 
 What it cannot check: the test suite beyond the formatter group, generated C or LLVM
 outside the reproducibility corpus, the docs site, the release workflow, sharding

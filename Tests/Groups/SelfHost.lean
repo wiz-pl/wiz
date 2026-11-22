@@ -1490,6 +1490,14 @@ def parseDiffCorpus : List (Name × String) := [
   ("term", "f x y"), ("term", "fun (x : Nat) => x"), ("term", "(x : A) → B x"),
   ("term", "(a, b).1"), ("term", "match n with\n  | .zero => a\n  | .succ m => b"),
   ("term", "let x := 1; x"), ("term", "f (g x"), ("term", "Type 1"),
+  -- (the numeral is decimal text until the kernel types it: a hexadecimal literal above
+  -- 2^63 is not clamped, and one above 2^64-1 is still its exact value here, as in the
+  -- Lean lexer; the parenthesised application is the shape that exposed the clamp)
+  ("term", "f b (Nat.succ (Nat.div (Bytes.size b) 512)) 0 (U64.ofNat 0xcbf29ce484222325)"),
+  ("term", "14695981039346656037"), ("term", "18446744073709551615"),
+  ("term", "18446744073709551616"), ("term", "0x10000000000000000"),
+  ("command", "#eval 0xcbf29ce484222325"),
+  ("command", "def f : Nat → Nat\n  | 0xFFFFFFFFFFFFFFFF => 1\n  | _ => 0"),
   ("command", "def f (x : Nat) : Nat := x"),
   ("command", "inductive T where\n  | a\n  | b (t : T)"),
   ("command", "#eval f 41"), ("command", "def f : Nat → Nat\n  | .zero => 0\n  | .succ n => n")]
@@ -2556,6 +2564,33 @@ def checkEkTiming (out : String) : IO Unit := do
   | _ => throw (IO.userError s!"unexpected output: {out}")
 
 
+/-- The (22i) structure marker makes a structure's value end in its constructor's
+**index-equation** proof. A structure with fields ends in the marker tail
+`(0 fields✝ : Enum [fields✝]) → Unit` (`Wiz/Core/Term.lean`'s `structTailDom`: the host
+adds it in `Wiz/Elab/Inductive.lean`, the self-hosted frontend in `selfhost/Frontend.wiz`
+(22i, `0e306827c`)), so this structure is indexed by a proposition and the kernel's
+constructor payload ends in `refl(I, i)`, not the `tt` an unindexed data type carries
+(`Wiz/Elab/Command.lean`, "the index equation: `()` at `Unit`; for a phantom tail,
+`refl`"; `selfhost/Frontend.wiz`'s `addCtors`). The proof has no runtime content
+(`Compiler/Erase.lean`'s `erasedFunTy`/`unboxedSigma`), so this is the checker's normal
+form, not a field. The value was recorded by `d328b3bee`; it changed because
+`0e306827c` gave the self-hosted frontend the (22i) marker. -/
+def structuresProjSrc : String :=
+  "inductive Nat where\n  | zero\n  | succ (n : Nat)\nstructure Pair (A B : Type) where\n  fst : A\n  snd : B\n#check Pair.mk\ndef p : Pair Nat (Pair Nat Nat) := .mk .zero (.mk (.succ .zero) .zero)\n#reduce Pair.fst (Pair.snd p)\ndef swap {A B : Type} (q : Pair A B) : Pair B A := .mk (Pair.snd q) (Pair.fst q)\n#reduce Pair.fst (swap p)\n#reduce p.snd.fst\ndef swap2 {A B : Type} (q : Pair A B) : Pair B A := .mk q.snd q.fst\n#reduce (swap2 p).fst\n"
+
+def structuresProjExpected : String :=
+  "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\n"
+
+def structuresProjTest : IO Unit := do
+  let some out ← selfhostOutput structuresProjSrc | return
+  checkEq structuresProjExpected out
+  -- The distinguishing claim, named: both swap values end in the marker's index proof,
+  -- and neither matches the pre-marker two-slot value (`... , (tt, tt)))))`).
+  check ((out.splitOn "refl((x0 :0 Enum1) → Unit0, λx0. tt)").length == 3)
+    "the swap values do not end in the structure marker's index-equation proof"
+  check ((out.splitOn "con((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (tt, tt)))))").length == 1)
+    "a swap value still has the pre-marker (two-slot) normal form"
+
 /-- The pipeline group: every case here runs the **self-hosted** compiler (`selfhostCompiler`)
 or checker (`selfhostChecker`), and compares what it says. A case that only runs the Lean
 host belongs in `selfhost-host`; the case that sets an echoing stub proves this group
@@ -2647,9 +2682,8 @@ def selfHostGroup : Group where
     { name := "mutual types sharing a constructor name (Ev.s, Od.s), checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\nmutual\ninductive Ev where\n  | z\n  | s (o : Od)\ninductive Od where\n  | s (e : Ev)\nend\n#check Ev.s\n#check Od.s\ndef two : Ev := .s (.s .z)\ndef isZ : Ev → Nat\n  | .z => .zero\n  | Ev.s _ => .succ .zero\ndef unOd : Od → Ev\n  | .s e => e\n#reduce isZ (unOd (.s two))\n#reduce isZ (unOd (Od.s Ev.z))\n"
           "Nat : U0\nEv : U0\nOd : U0\n(x0 : Od) → Ev\n(x0 : Ev) → Od\ntwo : Ev\nisZ : (x0 : Ev) → Nat\nunOd : (x0 : Od) → Ev\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\n" },
-    { name := "structures and projections, checked in Wiz", run := fun _ =>
-        selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\nstructure Pair (A B : Type) where\n  fst : A\n  snd : B\n#check Pair.mk\ndef p : Pair Nat (Pair Nat Nat) := .mk .zero (.mk (.succ .zero) .zero)\n#reduce Pair.fst (Pair.snd p)\ndef swap {A B : Type} (q : Pair A B) : Pair B A := .mk (Pair.snd q) (Pair.fst q)\n#reduce Pair.fst (swap p)\n#reduce p.snd.fst\ndef swap2 {A B : Type} (q : Pair A B) : Pair B A := .mk q.snd q.fst\n#reduce (swap2 p).fst\n"
-          "Nat : U0\nPair : (x0 : U0) → (x1 : U0) → U0\nPair.fst : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x0\nPair.snd : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → x1\n(x0 :0 U0) → (x1 :0 U0) → (x2 : x0) → (x3 : x1) → ((Pair x0) x1)\np : ((Pair Nat) ((Pair Nat) Nat))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\nswap2 : (x0 :0 U0) → (x1 :0 U0) → (x2 : ((Pair x0) x1)) → ((Pair x1) x0)\ncon((#0, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (con((#0, (tt, tt))), (refl((x0 :0 Enum1) → Unit0, λx0. tt), tt)))))\n" },
+    { name := "structures and projections (the value ends in the 22i marker's index proof), checked in Wiz", run := fun _ =>
+        structuresProjTest },
     { name := "numerals and match as a term, checked in Wiz", run := fun _ =>
         selfhostCheckFile "inductive Nat where\n  | zero\n  | succ (n : Nat)\ndef add : Nat → Nat → Nat\n  | 0, n => n\n  | .succ m, n => .succ (add m n)\n#reduce add 2 3\ndef isSmall : Nat → Nat\n  | 0 => 1\n  | 1 => 1\n  | _ => 0\n#reduce isSmall 1\n#reduce isSmall 5\ninductive Bool where\n  | false\n  | true\ndef lt : Nat → Nat → Bool\n  | _, 0 => .false\n  | 0, .succ _ => .true\n  | .succ m, .succ n => lt m n\n#reduce lt 1 3\ndef pick (b : Bool) (x y : Nat) : Nat := add (match b with\n  | .true => x\n  | .false => y) 1\n#reduce pick .false 2 5\ndef both (a b : Bool) : Bool := match a, b with\n  | .true, .true => .true\n  | _, _ => .false\n#reduce both .true .false\n"
           "Nat : U0\nadd : (x0 : Nat) → (x1 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nisSmall : (x0 : Nat) → Nat\ncon((#1, (con((#0, (tt, tt))), (tt, tt))))\ncon((#0, (tt, tt)))\nBool : U0\nlt : (x0 : Nat) → (x1 : Nat) → Bool\ncon((#1, (tt, tt)))\npick : (x0 : Bool) → (x1 : Nat) → (x2 : Nat) → Nat\ncon((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#1, (con((#0, (tt, tt))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt)))), (tt, tt))))\nboth : (x0 : Bool) → (x1 : Bool) → Bool\ncon((#0, (tt, tt)))\n" },
@@ -3939,6 +3973,12 @@ def selfHostGroup : Group where
         let input := "def f (x : Nat) : Nat := x + 1 -- a comment\n/- a /- nested -/ block -/ #eval f 41\n" ++
           "inductive T where | a | b (t : T)\ndef s : String := \"hi\\n\" -- strings\ndef α₁ : List.cons → Nat.add := λ x => x.1\n" ++
           "0x3F 0b1010 0XfF 0B1 0x 0b2 0xg 007 0x7FFFFFFFFFFFFFFF 0x8000000000000000 " ++
+          -- (the radix is converted in decimal-string arithmetic: a literal above 2^63 is
+          -- not clamped, and one above 2^64-1 is still its exact value; decimal literals
+          -- keep their digits, so the same values read the same way)
+          "0xFFFFFFFFFFFFFFFF 0x10000000000000000 0x0000000000000001 " ++
+          "0b1111111111111111111111111111111111111111111111111111111111111111 " ++
+          "14695981039346656037 18446744073709551615 18446744073709551616 " ++
           -- every escape, then a bad one (both lexers stop there with the same message)
           "def e := \"a\\r\\t\\\\\\\"\\'\\x41\\u{3bb}\\u{1F600}z\" \"bad \\q\""
         let toks := Builtin.tables.tokens

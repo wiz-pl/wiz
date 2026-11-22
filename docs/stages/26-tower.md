@@ -80,10 +80,12 @@ setting, then realises it from one of three sources:
   It is checked against its `.sha256` when there is one; a snapshot must have one, a tag
   release is installed without it. A commit without a snapshot is an error that lists the
   retained snapshots and the other sources. The archive is listed (`tar -t` and `tar -tv`)
-  and refused before extraction when a member is absolute or has a `..` component, or is
-  not a regular file or a directory (a symlink, hardlink, device or fifo): the checksum
-  says which bytes are wanted, not that the publisher chose safe members (F16, the same
-  check as `grail fetch`).
+  and refused before extraction when a member name is absolute or has a `..` component,
+  a symlink or hardlink target is absolute or leaves the extraction root, or a member is
+  a device or a fifo. Relative links that stay inside are accepted: the bundled C
+  toolchain's glibc sysroot is full of them (`ld-linux-x86-64.so.2 -> ld-2.27.so`). The
+  checksum says which bytes are wanted, not that the publisher chose safe members (F16,
+  the same policy as `grail fetch`).
 * **source**: `git clone`, then `lake build wiz grail` (this needs elan), then the build
   is copied into the layout below and the clone is removed.
 
@@ -232,8 +234,10 @@ holding a tiny Lake project whose `wiz` and `grail` print their arguments, with 
   unpacked tarball;
 * a tag release with no `.sha256` installed, and a toolchain that ships
   `share/wiz/cache` passing it to both wrappers as `--cache-ro`;
-* release archives with a `../` member, an absolute member and an escaping symlink,
-  each built at test time and refused before extraction, and a good archive installing;
+* release archives with a `../` member, an absolute member, an escaping symlink (the
+  real `libpthread.so.0` shape) and a chain to an escaping link, each built at test time
+  and refused before extraction, and a good archive (with the sysroot's safe links)
+  installing and resolving;
 * the error paths: a failing external command (`tar …: exit 2`), `run` of a command that
   does not exist, `link` of a missing path, and `uninstall` of a dangling symlink;
 * every `tower set` key reaching the wrappers (`--gmp`, the caches, `-I` for `root`,

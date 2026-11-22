@@ -22,6 +22,7 @@
 # scripts/libdiff-causes.tsv: hdl-core 18, deriver-bundle 5, numeral-term 2, and one
 # each of logic-true, word-equations, hdl-optic, coinductive, exists, hdl-xilinx7;
 # Formal.wiz fails through Hdl.Core). The Hdl gate meanwhile is `=hdl-examples`.
+
 lib/Args.wiz
 lib/BitBlast.wiz
 lib/BitVec.wiz
@@ -110,6 +111,8 @@ lib/Web/Examples.wiz
 lib/Web/Goals.wiz
 lib/Web/Highlight.wiz
 lib/Web/Hover.wiz
+lib/Web/InfoPanel.wiz
+lib/Web/InfoTree.wiz
 lib/Web/InfoviewPage.wiz
 lib/Web/Loom.wiz
 lib/Web/Playground.wiz
@@ -150,6 +153,7 @@ scry/src/Scry/ConcurrencyExamples.wiz
 scry/src/Scry/CsCmd.wiz
 scry/src/Scry/CsCst.wiz
 scry/src/Scry/CsLower.wiz
+scry/src/Scry/CsNull.wiz
 scry/src/Scry/CstOptics.wiz
 scry/src/Scry/CstStore.wiz
 scry/src/Scry/Datalog.wiz
@@ -238,6 +242,7 @@ scry/tests/repl-prelude.wiz
 scry/tests/repl.wiz
 scry/tests/report-pure.wiz
 scry/tests/report.wiz
+scry/tests/sarif-contract.wiz
 scry/tests/sarif-id.wiz
 scry/tests/scale.wiz
 scry/tests/schema-index.wiz

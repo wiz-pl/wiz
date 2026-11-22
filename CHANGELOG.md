@@ -12,9 +12,63 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 `scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
 `native` group runs the check), so this file cannot drift from the ledger.
 
-<!-- trust-counts: rows=824 partial=234 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=554 shared_reasons=270 legacy=0 expired=0 -->
+<!-- trust-counts: rows=835 partial=245 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=549 shared_reasons=286 legacy=0 expired=0 -->
 
 ## [Unreleased]
+
+* ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
+  (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
+  architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the
+  modules the branch changed. The seed is the `lake` output of the master-only
+  `lake_seed` job's `withLakeCache empty-lake` build (a cold compile the sandbox
+  enforces), whose `bin` is intended to be byte-identical to the pure build's (the
+  `cmp` is the seed measurement's assertion, not yet run in CI); nothing a pull request
+  writes is ever read by a trusted job. Pushes, the merge queue and the release path
+  keep the pure `nix build`, and a missing seed is the same cold build, not a failure.
+  The subset hashes are one committed table, `.github/repo-subsets.json`
+  (`scripts/repo-subsets.py`), which the `docs_style` job checks and
+  `.githooks/pre-commit` refreshes (`git config core.hooksPath .githooks`).
+
+* docs: the claims the state-of-the-art review found were not what the pages said are now
+  precise or named as limitations, each with its measurement or test:
+  `docs/Status.md` line and case counts re-measured on `d853fde79` (selfhost
+  `Kernel.wiz` 5,346 lines, Lean kernel 6,286/4,998, `STC/F0` 28 files/5,136 lines, the
+  `elab` group's 43 cases and 24 rejections, 1,986 cases and 457 rejection checks in
+  `Tests/Groups/*.lean`); the four separately-claimed bootstrap properties and which of
+  them the fixpoint and libdiff do and do not provide (`docs/bootstrap-chain.md`), with
+  the assurance budget assigned to the kernel; `wiz-web/1` and `wiz-gpu/1` host/dispatch
+  profiles with their unverified rows (`docs/stages/08-backend/{wasm,webgpu}.md`);
+  Lean-interface extensibility rather than feature parity (`docs/design/README.md`);
+  the selfhost `Nat` as wrapping at 63 bits, under verification
+  (`docs/selfhost-compiler.md`, `docs/semantics-matrix.md`); and `Hdl.Formal` as an
+  unverified second rendering whose CI case skips without yosys/z3
+  (`docs/libraries.md`, `docs/hardware.md`). No code or kernel claim changed.
+
+* HDL laws: the trace obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw`
+  and `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
+  every one is called by `examples/hdl-stream.wiz`, `examples/hdl-spi.wiz`,
+  `examples/hdl-bus-law.wiz` and `examples/hdl-axi4.wiz`, so a law that fails fails the
+  `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
+  false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
+  predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
+  `Axi4.Law.ResponsesInOrder`/`Axi4.ResponseOrder` are removed; `docs/libraries.md`
+  lists the checks that now run.
+
+* HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves the knot's algebra
+  (`fix_unfold`, `register_fixed_unique`, `fix_pure`, `fix_delay_eq_circuit`), the sized
+  register (`registerS_head`, `registerS_eq_register`), the counter's `0, 1, 2, …` in both
+  the `Signal.fix` and `Circuit.loop` spellings, and `Signal.Eqv` congruence for
+  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`. The
+  *sized-observation* laws (`mapS_at`, `zipWithS_at`, `mapS_id`, `mapS_comp`, the
+  `mapS_head`/`mapS_tail` forms and the `Eqv` congruences for the sized operators) are
+  documented as blocked, with the three body shapes that fail and the one-line
+  elaborator change that unblocks them (docs/stages/34-hdl-signals.md §34c): a split of a
+  neutral payload is stuck, two projections make a `Signal.fix` knot exponential (the L3
+  example stops finishing), and a single `let p := out a` is rejected by the kernel for a
+  sized `cocon` because surface `out` erases the payload's size and index. All proved laws
+  are pinned by `#check` and `#print axioms` in the `hdl-signal` group (the thirteen
+  algebraic ones list no axioms; the four that mention a `Circuit` or compute `BitVec`
+  literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
 
 * selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
   command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output

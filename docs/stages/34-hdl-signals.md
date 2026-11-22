@@ -72,7 +72,10 @@ def Signal.ofCircuit_at {d : ClockDomain} {i o : HwTy} (c : Circuit i o) (xs : S
 
 `ofCircuit_at` is proved from `mealy_at`; `toTrace_ofCircuit` states it as an equation of
 traces and `sat_ofCircuit` transfers a temporal property between a circuit's signal and
-its trace (and from there through `Circuit.Simulates` to the netlist).
+its trace (and from there through `Circuit.Simulates` to the netlist, on a design for
+which the relation is discharged — today the one-bit-delay template in
+`hdl/examples/hdl-sim-theorem.wiz`, not designs generally; see
+[libraries.md](../libraries.md#when-netlistsimulate-is-circuitrun-hdlsrchdlnetlistwiz)).
 `Signal.ofCircuit_delay` proves that `register` is `Circuit.delay`.
 
 **Example** (`hdl/examples/hdl-signal.wiz`, the `hdl-signal` test group): counters as Mealy
@@ -146,6 +149,56 @@ The `hdl` group checks `hdl/examples/hdl-l3.wiz` (the counter, the baud generato
 same-size-recursion rejection and the combinational-loop rejection. The workaround
 (`register`/`mealy`/`moore`/`ofCircuit`) stays for designs that do not need the sized
 surface; the Mealy baud generator is still in `hdl/examples/hdl-signal.wiz`.
+
+## 34c: the laws (P2.1)
+
+`hdl/src/Hdl/Signal.wiz` proves what the sized layer makes definitional, all in the
+kernel:
+
+* **The knot.** `Signal.fix_unfold` (`fix g` is `g ∞ (fix g)`),
+  `Signal.register_fixed_unique` (a fixed point of `register init` is `pure init`),
+  `Signal.fix_pure` (`fix` of the pure delay is `pure init`) and
+  `Signal.fix_delay_eq_circuit` (the same fixed point is
+  `Signal.ofCircuit (Circuit.delay t init) (pure init)`, through `ofCircuit_delay`).
+  `Signal.counter_sample` states the counter's `0, 1, 2, …`, and
+  `Signal.counterLoop_sample` states that `Signal.ofCircuit` of the same step as a
+  `Circuit.loop` samples the same list: the `Signal.fix` and `Circuit.loop` spellings
+  agree on the counter.
+* **The delay.** `Signal.registerS_head` (the register's head is `init`) and
+  `Signal.registerS_eq_register` (`registerS` at `∞` is `register`).
+* **Congruence.** `Signal.Eqv.map`, `Eqv.zipWith`, `Eqv.zipWith3`, `Eqv.register`,
+  `Eqv.registerS`, `Eqv.mealy` and `Eqv.ofCircuit`: equivalent signals give equivalent
+  results, so a proof about the model transfers under the combinators and across the
+  circuit bridge.
+
+**What is not proved, and why.** The *sized-observation* laws (`mapS_at`, `zipWithS_at`,
+`mapS_id`, `mapS_comp`, the `mapS_head`/`mapS_tail` prefix forms and the `Eqv`
+congruences for `mapS`/`zipWithS`/`zipWith3S`) need `out (mapS f s)` to unfold for a
+*variable* `s`, i.e. the body's payload observation must reduce. There are three body
+shapes and none both typechecks and reduces:
+
+1. `let (h, r) := out a` (the shipped shape, and the one train11 used): a `Signal.fix`
+   knot costs one observation per cycle (linear), but `split` on a *neutral* payload is
+   stuck, so `out (mapS f s)` does not unfold and no law is `rfl`.
+2. two projections `(out a).1`/`(out a).2.1`: it unfolds and every law above is `rfl`,
+   but it re-evaluates `out a` at every step, so a knot is exponential — with that body
+   `hdl/examples/hdl-l3.wiz`'s counter/baud generator no longer finishes (measured: the
+   `hdl` group's L3 case ran for over 45 minutes and was killed).
+3. `let p := out a` (one observation: linear *and* unfolding): the kernel rejects the
+   sized `cocon` under a `let` (`expected: … ν (Signal.desc d A) … inferred: … ν^j …`),
+   because the surface `out` erases the size *and* the index of the payload's recursive
+   field, so the let-bound payload carries the predecessor size where the `cocon` check
+   wants the family size.
+
+Unblocking (1) is an elaborator/kernel change: type `out`'s payload at the predecessor
+(`ν^j D i`, not `ν^∞ D ()`) in the builtin `out` case of `Wiz/Elab/Term.lean` (and the
+`selfhost/Frontend.wiz` mirror). With that, shape 3 typechecks and every sized law is
+`rfl` while the knot stays linear. That is the first item of HDL-2.2.
+
+The `hdl-signal` group pins the proved statements with `#check` (the rendered text, so a
+changed statement fails) and `#print axioms` (none for the thirteen algebraic ones; the
+four that mention a `Circuit` or compute `BitVec` literals inherit the library's trusted
+`Hw HwTy.El`/`UIntN` natives, exactly as `ofCircuit_at`/`ofCircuit_delay` do).
 
 A `partial def` knot is not a substitute: it has neither the delay discipline (a
 combinational loop diverges) nor a totality story, and it is opaque to the kernel, so a
