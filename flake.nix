@@ -96,7 +96,7 @@
           # (The Wasm module and the infoview page come from `wiz-web`, which needs
           # `wiz`: a release gets them from `web/build.sh`; see scripts/release-tarball.sh.)
           docSiteAssets = [
-            "scroll.css" "scroll.js" "scroll-search.js"
+            "scroll.css" "scroll.js" "scroll-search.js" "highlight.css"
             "lsp-client.js" "doc-live.js" "doc-live.css"
             "framework/mount.js" "framework/driver.js" "framework/runtime.js"
           ];

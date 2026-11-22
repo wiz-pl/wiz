@@ -1,0 +1,18 @@
+/* Highlighting for fenced code in `wiz doc` pages. Fallback syntax `:root` only; the
+   docs profile sheet (CSS DSL) replaces these tokens when it lands. */
+:root {
+  --hl-kw: #7a3e9d; --hl-com: #6b6b66; --hl-str: #2e7d32;
+  --hl-num: #8a5a00; --hl-op: #444; --hl-const: #1f4fbf;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --hl-kw: #d79bf0; --hl-com: #9a9a94; --hl-str: #8bd48f;
+          --hl-num: #f0c060; --hl-op: #cfcfc8; --hl-const: #8ab4ff; }
+}
+.hl-kw { color: var(--hl-kw); font-weight: 600; }
+.hl-com { color: var(--hl-com); font-style: italic; }
+.hl-str { color: var(--hl-str); }
+.hl-num { color: var(--hl-num); }
+.hl-op  { color: var(--hl-op); }
+@media (prefers-contrast: more) {
+  .hl-com { color: var(--fg); }
+}

@@ -2,9 +2,10 @@
 """Check that a packaged `wiz` installs the web assets `wiz doc` copies.
 
 `Wiz.Doc.run` (`Wiz/Doc/Build.lean`) copies the site's scripts from the web assets:
-always `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js`, and with `--serve`
-`lsp-client.js`, `goals.js`, `doc-live.js`, `doc-live.css`. A checkout finds them in
-`web/`; a release finds them beside its `lib/`, in `share/wiz/web` (`Main.webDir`).
+always `scroll.css`, `scroll.js`, `tagged.js`, `scroll-search.js`, `highlight.css`, and
+with `--serve` `lsp-client.js`, `goals.js`, `doc-live.js`, `doc-live.css`. A checkout
+finds them in `web/`; a release finds them beside its `lib/`, in `share/wiz/web`
+(`Main.webDir`).
 `flake.nix`'s `wiz` installs exactly its `docSiteAssets` fileset there.
 
 This compares the two source lists and checks that every named file exists. It needs

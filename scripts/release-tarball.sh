@@ -75,7 +75,7 @@ if [ -n "$webdir" ]; then
            wiz-infoview-ui.mjs wiz-docs-ui.mjs wiz-doc-live-ui.mjs; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
   done
-  for f in scroll.js scroll-search.js scroll.css lsp-client.js playground-lsp.js \
+  for f in scroll.js scroll-search.js scroll.css highlight.css lsp-client.js playground-lsp.js \
            widgets.js widgets.css hover.js squiggles.js completions.js overlays.css \
            doc-live.js doc-live.css; do
     if [ -f "$webdir/$f" ]; then cp "$webdir/$f" "$top/share/wiz/web/$f"; fi
