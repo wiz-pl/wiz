@@ -1,0 +1,292 @@
+import Text
+import Json
+import Web.EditorModel
+import Web.Hover
+import Web.Source.Span
+
+/-!
+# Web.Source.Model
+
+The source reader's state: files, the finding index, the precomputed fact rows, the
+open file, the selected finding, the two answer panels (hover and info) and the pending
+effect request.
+
+One state type serves both modes the design asks for. A static bundle fills it from
+JSON (`Web.Source.Static`); the live adapter (P1) fills the same fields from LSP answers.
+Nothing in this module knows which transport produced a value, and nothing here parses
+C or C# or reads the filesystem: the evidence comes from `scry report`'s pipeline
+(`Scry.Report`), the source text from the bundle, and the spans are already UTF-16
+(`Web.Source.Span`).
+
+The boundary with the host is the playground's (`web/framework/mount.js`): the page
+publishes a pending request (`Page.requests`) and the host answers with
+`wiz_loom_effect "answer" kind json`. A host that cannot answer sends a `"none"` answer,
+so the page says "no answer" and never an error banner.
+
+## `scry.source.answer/1`
+
+Both transports produce this one object (the decoders are in `Web.Source.Static`):
+
+```
+{ "schema": "scry.source.answer/1",
+  "request": "hover" | "info" | "definition" | "claim",
+  "status": "ok" | "none",
+  "fileId": "file_ab12…", "span": {"start": N, "stop": N}, "spanText": "5:3-5:15",
+  "title": "command-injection (warning)",
+  "rule": "command-injection", "severity": "warning", "findingId": "f_ab12…",
+  "lines": [{"text": …, "code": true, "rule": false, "ellipsis": false}],
+  "rows":  [{"kind": "sink", "node": "n0", "span": {…}, "columns": [["rule", "…"]]}],
+  "findings": [ …the finding objects… ] }
+```
+
+An answer is one shape, not one shape per request: a hover fills `lines`/`rule`, the info
+view fills `rows`/`findings`. The view renders whichever it gets.
+-/
+
+/-- One file in the reader: its stable id, path, language, text and line count. -/
+structure Source.File where
+  id : String
+  path : String
+  language : String
+  text : String
+  lines : Nat
+
+/-- One precomputed fact row. `columns` is the generic key/value shape every fact kind
+renders through, so a new kind is data, not a new view. -/
+structure Source.FactRow where
+  kind : String
+  node : String
+  fileId : String
+  span : Source.Span
+  columns : List (String × String)
+
+/-- One finding, already in UTF-16. `line`/`column` are the 1-based display position of
+the span's start. `claimId` is empty in P0 (no certificate yet; P1 fills it). -/
+structure Source.Finding where
+  id : String
+  fileId : String
+  path : String
+  rule : String
+  severity : String
+  message : String
+  span : Source.Span
+  line : Nat
+  column : Nat
+  checked : Bool
+  claimId : String
+
+/-- One decoded `scry.source.answer/1`. -/
+structure Source.Answer where
+  request : String
+  status : String
+  fileId : String
+  span : Option Source.Span
+  /-- The span as `L:C-L:C` (1-based) for display; the host fills it, so the view needs
+  no line table to show where an answer points. -/
+  spanText : String
+  title : String
+  rule : String
+  severity : String
+  findingId : String
+  lines : List Hover.Line
+  rows : List Source.FactRow
+  findings : List Source.Finding
+
+/-- The answer has content to show. -/
+def Source.Answer.shown (a : Source.Answer) : Bool :=
+  String.eq a.status "ok"
+
+/-- One effect request: its name and a `fileId@start-stop` (or another) payload. -/
+structure Source.Request where
+  kind : String
+  payload : String
+
+/-- The reader's state. `bundleLoaded` becomes true after the host's `"bundle"` effect;
+before that the page says so rather than drawing an empty reader. -/
+structure Source.Page where
+  mode : String
+  tool : String
+  files : List Source.File
+  findings : List Source.Finding
+  facts : List Source.FactRow
+  openFile : Option String
+  selected : Option String
+  hover : Option Source.Answer
+  info : Option Source.Answer
+  panel : String
+  note : String
+  request : Option Source.Request
+  bundleLoaded : Bool
+
+/-- The first paint: nothing loaded yet, the findings panel. -/
+def Source.Page.initial : Source.Page :=
+  Source.Page.mk "static" "" [] [] [] .none .none .none .none "findings"
+    "loading the bundle…" .none .false
+
+/-- The first file (in the bundle's order) that a finding names. -/
+partial def Source.firstFileWithFinding (findings : List Source.Finding) :
+    List Source.File → Option String
+  | .nil => .none
+  | .cons f rest =>
+    match List.any (fun x => String.eq x.fileId f.id) findings with
+    | .true => .some f.id
+    | .false => Source.firstFileWithFinding findings rest
+
+/-- The page with a loaded bundle. The open file is the first file that has a finding,
+else the first file (a stable choice: the bundle's file order is sorted). -/
+def Source.Page.loaded (s : Source.Page) (mode tool : String) (files : List Source.File)
+    (findings : List Source.Finding) (facts : List Source.FactRow) : Source.Page :=
+  let firstFindingFile : Option String := match Source.firstFileWithFinding findings files with
+    | .some id => .some id
+    | .none => match files with
+      | .cons f _ => .some f.id
+      | .nil => .none;
+  let note := match files with
+    | .nil => "the bundle has no files"
+    | _ => "";
+  { s with mode := mode, tool := tool, files := files, findings := findings,
+    facts := facts, openFile := firstFindingFile, bundleLoaded := .true, note := note }
+
+/-- The file with `id`, if it is in the bundle. -/
+def Source.Page.file (s : Source.Page) (id : String) : Option Source.File :=
+  List.find (fun f => String.eq f.id id) s.files
+
+/-- The finding with `id`, if it is in the index. -/
+def Source.Page.finding (s : Source.Page) (id : String) : Option Source.Finding :=
+  List.find (fun f => String.eq f.id id) s.findings
+
+/-- The open file. -/
+def Source.Page.current (s : Source.Page) : Option Source.File :=
+  match s.openFile with
+  | .some id => Source.Page.file s id
+  | .none => match s.files with
+    | .cons f _ => .some f
+    | .nil => (Option.none : Option Source.File)
+
+/-- The findings of one file, in the bundle's (semantic-id) order. -/
+def Source.Page.findingsOf (s : Source.Page) (fileId : String) : List Source.Finding :=
+  List.filter (fun f => String.eq f.fileId fileId) s.findings
+
+/-- The selected finding, when one is selected. -/
+def Source.Page.selection (s : Source.Page) : Option Source.Finding :=
+  match s.selected with
+  | .some id => Source.Page.finding s id
+  | .none => .none
+
+-- ## Messages and routes
+
+/-- The page's messages: open a file, select a finding, ask the host for the hover card
+or the info view at a span, dismiss a panel, or switch the side panel. `hoverSpan` and
+`infoSpan` carry `FILEID@START-STOP` (the same text a route uses). -/
+inductive Source.Msg where
+  | openFile (id : String)
+  | select (id : String)
+  | hoverSpan (span : String)
+  | infoSpan (span : String)
+  | clearHover
+  | closeInfo
+  | panel (name : String)
+
+/-- The request payload for a span in a file. -/
+def Source.spanPayload (fileId : String) (span : Source.Span) : String :=
+  String.append fileId (String.append "@"
+    (String.append (Nat.repr span.start) (String.append "-" (Nat.repr span.stop))))
+
+/-- A request payload back into a file id and a span. -/
+def Source.parsePayload (payload : String) : Option (String × Source.Span) :=
+  match String.splitOn payload "@" with
+  | .cons file (.cons range _) => match String.splitOn range "-" with
+    | .cons a (.cons b _) => match String.parseNat a, String.parseNat b with
+      | .some start, .some stop => .some (file, Source.Span.make start stop)
+      | _, _ => .none
+    | _ => .none
+  | _ => .none
+
+/-- Open a file (clearing the panels). -/
+def Source.Page.openFileIn (s : Source.Page) (id : String) : Source.Page :=
+  { s with openFile := .some id, selected := .none, hover := .none, info := .none,
+    note := "" }
+
+/-- Select a finding: open its file at its span and make it the selection. -/
+def Source.Page.selectFinding (s : Source.Page) (id : String) : Source.Page :=
+  match Source.Page.finding s id with
+  | .none => { s with note := String.append "no finding " id }
+  | .some f => { s with openFile := .some f.fileId, selected := .some f.id,
+      hover := .none, info := .none, note := "" }
+
+/-- A hover request for a span payload. -/
+def Source.Page.askHover (s : Source.Page) (payload : String) : Source.Page :=
+  match Source.parsePayload payload with
+  | .none => { s with note := "bad hover payload" }
+  | .some p => { s with openFile := .some p.1, hover := .none,
+      request := .some (Source.Request.mk "hover" payload), note := "" }
+
+/-- An info request for a span payload. -/
+def Source.Page.askInfo (s : Source.Page) (payload : String) : Source.Page :=
+  match Source.parsePayload payload with
+  | .none => { s with note := "bad info payload" }
+  | .some p => { s with openFile := .some p.1, info := .none, panel := "info",
+      request := .some (Source.Request.mk "info" payload), note := "" }
+
+/-- The page's update: a message from the view. -/
+def Source.Page.step (s : Source.Page) (m : Source.Msg) : Source.Page :=
+  match m with
+  | .openFile id => Source.Page.openFileIn s id
+  | .select id => Source.Page.selectFinding s id
+  | .hoverSpan payload => Source.Page.askHover s payload
+  | .infoSpan payload => Source.Page.askInfo s payload
+  | .clearHover => { s with hover := .none }
+  | .closeInfo => { s with info := .none, panel := "findings" }
+  | .panel name => { s with panel := name }
+
+/-- The pending request(s), as the host reads them (`Page.requests` in the playground's
+shape: `[{"kind": …, "payload": …}]`). -/
+def Source.Page.requests (s : Source.Page) : String :=
+  match s.request with
+  | .none => "[]"
+  | .some r => Json.render (Json.mkArr
+      [Json.mkObj [("kind", Json.mkStr r.kind), ("payload", Json.mkStr r.payload)]])
+
+/-- Clear the serviced request (`wiz_loom_effect "ack" kind`). -/
+def Source.Page.ack (s : Source.Page) (kind : String) : Source.Page :=
+  match s.request with
+  | .some r => match String.eq r.kind kind with
+    | .true => { s with request := .none }
+    | .false => s
+  | .none => s
+
+/-- Store a decoded answer in the panel its `request` names. -/
+def Source.Page.answer (s : Source.Page) (a : Source.Answer) : Source.Page :=
+  match String.eq a.request "info" with
+  | .true => { s with info := .some a, panel := "info", request := .none }
+  | .false => { s with hover := .some a, request := .none }
+
+/-- The route for a file and span: `#/src/<fileId>@L:C-L:C` (1-based, from the span). -/
+def Source.Page.spanRoute (s : Source.Page) (file : Source.File) (span : Source.Span) : String :=
+  let i := EditorModel.index file.text;
+  String.append "#/src/" (String.append file.id
+    (String.append "@" (Source.Span.show i span)))
+
+/-- Handle a hash route. `#/f/<id>` selects a finding; `#/src/<fileId>@L:C[-L:C]` opens
+the file and asks for the hover card there; `#/file/<fileId>` opens the file. Anything
+else is a one-line note, never a blank page. The page returns itself and the request it
+wants the host to service (if any). -/
+def Source.Page.route (s : Source.Page) (hash : String) : Source.Page :=
+  let body := match String.stripPrefix hash "#" with
+    | .some rest => rest
+    | .none => hash;
+  match String.splitOn body "/" with
+  | .cons "" (.cons "f" (.cons id _)) => Source.Page.selectFinding s id
+  | .cons "" (.cons "file" (.cons id _)) => Source.Page.openFileIn s id
+  | .cons "" (.cons "src" (.cons rest _)) =>
+    match String.splitOn rest "@" with
+    | .cons fileId (.cons frag _) => match Source.Page.file s fileId with
+      | .none => { s with note := String.append "no file " fileId }
+      | .some f => match Source.Span.parse (EditorModel.index f.text) frag with
+        | .none => { s with openFile := .some f.id,
+            note := String.append "bad span " frag }
+        | .some span => Source.Page.askHover s (Source.spanPayload f.id span)
+    | _ => s
+  | _ => match String.isEmpty body with
+    | .true => s
+    | .false => { s with note := String.append "unknown link #/" body }

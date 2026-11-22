@@ -1,6 +1,7 @@
 import IO
 import Json
 import Tagged
+import Web.Highlight
 import Web.Loom
 
 /-!
@@ -15,19 +16,26 @@ browser: when to ask, the timers, the request generation and the card's position
 card's markup is `Loom`'s, so a server's text is escaped by construction.
 -/
 
-/-- One card line: text (maybe code), a thematic rule, or the truncation ellipsis. -/
+/-- One card line: text (maybe code), a thematic rule, or the truncation ellipsis.
+`tokens` are the line's highlight spans (UTF-16, from a `wizHighlight` answer or a
+provider's own data); they are rendered by `Web.Highlight`, so the card and the docs
+share the class table and the span assembler. -/
 structure Hover.Line where
   text : String
   code : Bool
   rule : Bool
   ellipsis : Bool
+  tokens : List Highlight.Token
 
 /-- A plain line. -/
-def Hover.textLine (s : String) : Hover.Line := Hover.Line.mk s .false .false .false
+def Hover.textLine (s : String) : Hover.Line := Hover.Line.mk s .false .false .false []
 /-- A code line. -/
-def Hover.codeLine (s : String) : Hover.Line := Hover.Line.mk s .true .false .false
+def Hover.codeLine (s : String) : Hover.Line := Hover.Line.mk s .true .false .false []
+/-- A code line with highlight spans. -/
+def Hover.codeLineTokens (s : String) (ts : List Highlight.Token) : Hover.Line :=
+  Hover.Line.mk s .true .false .false ts
 /-- A horizontal rule. -/
-def Hover.rule : Hover.Line := Hover.Line.mk "" .false .true .false
+def Hover.rule : Hover.Line := Hover.Line.mk "" .false .true .false []
 
 /-- One LSP content part as `{kind, text, language}`; `kind` is `markdown` or
 `plaintext`, `language` is the fence's tag when the part says it is code. -/
@@ -131,7 +139,7 @@ def Hover.lines (text : String) (limit : Nat) : List Hover.Line :=
   let all := Hover.linesGo .none (String.splitOn text "\n") [];
   match Nat.le (List.length all) limit with
   | .true => all
-  | .false => List.append (List.take (limit - 1) all) [Hover.Line.mk "…" .false .false .true]
+  | .false => List.append (List.take (limit - 1) all) [Hover.Line.mk "…" .false .false .true []]
 
 /-- A hexadecimal digit's value. -/
 def Hover.hexVal (c : Char) : Option Nat :=
@@ -301,16 +309,11 @@ def Hover.targetJson (result : String) : String :=
     | .none => "null"
   | .error _ => "null"
 
-/-- The card: the label (a definition's place, optionally) and the lines. `raw` is a
-hover result; an empty one draws nothing unless there is a label. -/
-def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
-  let contents := match Json.parse raw with
-    | .ok j => Hover.textOf j
-    | .error _ => (.none : Option String);
-  let lines := match contents with
-    | .some text => Hover.lines text 24
-    | .none => [];
-  match Bool.and (String.isEmpty raw) (String.isEmpty label) with
+/-- The card from its lines: the label (a definition's place, optionally) and the lines.
+A code line's text goes through `Web.Highlight`, so a provider's spans use the docs'
+eight classes and a bad span degrades to plain text instead of shifting the card. -/
+def Hover.cardLines {M : Type} (lines : List Hover.Line) (label : String) : Loom.VNode M :=
+  match Bool.and (List.isEmpty lines) (String.isEmpty label) with
   | .true => Loom.text ""
   | .false =>
     let head := match String.isEmpty label with
@@ -321,6 +324,17 @@ def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
       | .false => Loom.el "div" [Loom.class (String.append "hover-line"
           (String.append (match l.code with | .true => " code" | .false => "")
             (match l.ellipsis with | .true => " more" | .false => "")))]
-        [Loom.text l.text]) lines;
+        [Highlight.node l.text l.tokens]) lines;
     Loom.el "div" [Loom.id "wiz-hover", Loom.class "wiz-hover", Loom.attr "role" "tooltip"]
       (List.append head body)
+
+/-- The card: the label (a definition's place, optionally) and the lines. `raw` is a
+hover result; an empty one draws nothing unless there is a label. -/
+def Hover.card {M : Type} (raw label : String) : Loom.VNode M :=
+  let contents := match Json.parse raw with
+    | .ok j => Hover.textOf j
+    | .error _ => (.none : Option String);
+  let lines := match contents with
+    | .some text => Hover.lines text 24
+    | .none => [];
+  Hover.cardLines lines label

@@ -1,6 +1,7 @@
 import IO
 import Json
 import Web.Hover
+import Web.Highlight
 import Web.Loom
 
 /-!
@@ -150,11 +151,13 @@ end
 
 mutual
 /-- A tagged text as a Loom tree, numbering tags from `next`; `mkMsg` turns a tag's
-index into the pane's message (a click selects it). -/
+index into the pane's message (a click selects it). A text leaf goes through
+`Web.Highlight.text`, the same escaped-text path the hover card and the source pane use;
+the tag classes stay the infoview protocol's (`tt k-KIND`), not the docs' `hl-*` set. -/
 partial def Goals.taggedView {M : Type} (sel next : Nat) (mkMsg : Nat → M) (j : Json) :
     Loom.VNode M × Nat :=
   match Json.get j "text" with
-  | .some (.str s) => (Loom.text s, next)
+  | .some (.str s) => (Highlight.text s, next)
   | .some _ => (Loom.text "", next)
   | .none => match Json.get j "append" with
     | .some v => Goals.appendAll sel next mkMsg (Goals.arrOf v) []
