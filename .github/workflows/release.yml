@@ -156,6 +156,28 @@ jobs:
           [ "$(git rev-parse HEAD)" = "$OLD_COMMIT" ] || { echo "commit: give the full 40-hex sha"; exit 1; }
           st=$(gh api "repos/${{ github.repository }}/compare/$OLD_COMMIT...master" --jq .status)
           case $st in ahead|identical) ;; *) echo "$OLD_COMMIT is not on master ($st)"; exit 1 ;; esac
+      - name: The dispatched commit has the release tooling
+        # The `.release-tools` checkout is pinned to this commit, so a commit that
+        # predates one of the scripts the job calls would fail at that step, after the
+        # build. Refuse it in seconds instead: a dispatch publishes a snapshot, and
+        # every publish path calls the commit's own release-snapshots.sh.
+        if: inputs.commit != ''
+        run: |
+          missing=
+          for f in scripts/release-tarball.sh scripts/release-snapshots.sh \
+                   scripts/build-tower-wiz.sh scripts/release-licenses/NOTICE; do
+            [ -f ".release-tools/$f" ] || missing="$missing .release-tools/$f"
+          done
+          [ -d tower ] || missing="$missing tower/"
+          if grep -q withBundled Wiz/Toolchain.lean 2>/dev/null; then
+            for f in scripts/bundle-cc.sh scripts/bundle-cc.sources; do
+              [ -f ".release-tools/$f" ] || missing="$missing .release-tools/$f"
+            done
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::commit $OLD_COMMIT predates the release tooling:$missing; dispatch a commit from the release era (26d or later)"
+            exit 1
+          fi
       - name: elan
         # Pinned to the elan v4.3.0 commit, not `master`, and checked by hash: this
         # script is fetched over the network and run with `sh` (deps-02/03). To bump it,
