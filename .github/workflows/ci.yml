@@ -129,6 +129,12 @@ jobs:
     name: docs style
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # `check-release-consistency` resolves the release packet's candidate and its PR
+    # counts through `gh`; without a token it cannot, and an *unverifiable* count is a
+    # failure (exit 2), not a pass. Read-only on both.
+    permissions:
+      contents: read
+      pull-requests: read
     # 5 min: six Python checks and the libdiff corpus check on the checkout; no build
     timeout-minutes: 5
     steps:
@@ -158,6 +164,10 @@ jobs:
           scripts/check-libdiff-corpus.sh --self-test && scripts/check-libdiff-corpus.sh --quiet
       - name: Check the release packet and the machinery it describes
         shell: bash
+        env:
+          # `gh pr view`/`gh api` for the packet's candidate counts. Unset, the check is
+          # UNVERIFIABLE and exits 2.
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/check-release-consistency.py --self-test
           python3 scripts/check-release-consistency.py --quiet
