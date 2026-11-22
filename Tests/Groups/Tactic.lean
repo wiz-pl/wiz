@@ -417,6 +417,29 @@ def tacticGroup : Group where
           "def t (p : Nat) : Q (swap p) := by\n  shape\n  exact ()\n" ++
           "def t' (c : Prog) : Q c := by\n  shape\n  exact ()")
           ["Prog.get with fields # (λv. (Prog.ret #))", "not a constructor"] },
+    -- case analysis (docs/stages/06-macros.md, 6j)
+    { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bC (p : Nat → Bool) (n : Nat) (R : Prop) (ht : p n = .true → R)\n" ++
+          "    (hf : p n = .false → R) : R := by\n" ++
+          "  by_cases p n\n  exact ht h\n  exact hf h\n" ++
+          "def bEq (p : Nat → Bool) (n : Nat) : p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  exact Or.inl h\n  exact Or.inr h\n" ++
+          "#check bC\n#print axioms bC")
+          ["bC : (p : Nat → Bool) → (n : Nat) → (R : Prop) → (p n = .true → R) → (p n = .false → R) → R",
+           "'bC' does not depend on any axioms"] },
+    { name := "by_cases: a named hypothesis, and a goal that is a function type", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bName (p : Nat → Bool) (n : Nat) (R : Prop) (ht : p n = .true → R)\n" ++
+          "    (hf : p n = .false → R) : R := by\n" ++
+          "  by_cases hp : p n\n  exact ht hp\n  exact hf hp\n" ++
+          "def bFun (p : Nat → Bool) (n : Nat) : (m : Nat) → p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  intro m\n  exact Or.inl h\n  intro m\n  exact Or.inr h\n" ++
+          "#check bFun")
+          ["bFun : (p : Nat → Bool) → (n : Nat) → (m : Nat) → p n = .true ∨ p n = .false"] },
+    { name := "by_cases rejects a non-Bool expression", run := fun _ =>
+        failsLib "import Prelude\ndef bad (n : Nat) : Nat := by\n  by_cases n"
+          "by_cases: expected a Bool expression" },
     { name := "traces reach the language server (a diagnostic) and the infoview (wiz/plainGoal)", run := fun _ => do
         let src := "import Prelude\ndef k : Nat → Nat := by\n  intro n\n  trace_state\n  exact n\n"
         let (srv, out) ← tacticLsp src

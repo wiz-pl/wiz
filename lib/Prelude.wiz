@@ -622,6 +622,9 @@ inductive Tac where
   -- (D6) the source names of `T`'s constructors (`T.c`), in declaration order, for
   -- `constructor`: `none` if `T` is not an inductive type or a structure
   | ctorNames (n : String) (k : Option (List String) → Tac)
+  -- (6j) a case split on the Boolean expression `e`: two goals, with `e = .true` and
+  -- `e = .false` as hypotheses (named from `hint`, freshly); `k` gets their numbers
+  | byCases (g : Nat) (e : Expr) (hint : String) (k : List Nat → Tac)
 
 /-- The metaprogramming monad: requests to the elaborator (`Tac`) in
 continuation-passing style, so `bind` is just composition. Macros (`MacroM`) and
@@ -728,6 +731,10 @@ def TacticM.ctorInfo (n : String) : TacticM (Option (String × Nat × Nat)) := f
 candidates `constructor` tries. `none` if `n` is not an inductive type or a structure
 (and `some []` for an inductive with no constructors). -/
 def TacticM.ctorNames (n : String) : TacticM (Option (List String)) := fun k => Tac.ctorNames n k
+/-- Split goal `g` on the Boolean expression `e`: two goals, with `e = .true` and
+`e = .false` as hypotheses, named freshly from `hint` when it is not `""`. -/
+def TacticM.byCases (g : Nat) (e : Expr) (hint : String) : TacticM (List Nat) := fun k =>
+  Tac.byCases g e hint k
 /-- Is the constant `n` a definition, which `TacticM.unfold` can unfold (not a constructor
 or an axiom: for those `unfold` returns the term unchanged)? `none` if there is no
 constant `n`. -/
@@ -1184,6 +1191,31 @@ def Tactic.renameI : Tactic := fun stx => do
   g' ← TacticM.renameAll g (TacticM.inaccessibleFrom 0 hyps) (List.revOnto (Syntax.sepIdents (Syntax.getArg stx 1)) .nil);
   TacticM.replaceMainGoal (.cons g' .nil)
 attribute [tactic tactic.renameI] Tactic.renameI
+
+-- ## Case analysis (stage 6j)
+--
+-- `by_cases e` splits on a Boolean expression: two goals, with `e = .true` and
+-- `e = .false` as hypotheses. It is the `Bool.casesOn` eliminator at the motive
+-- `fun b => e = b → G`, applied to `refl e`; the kernel checks the term.
+/-- Split the goal at `stx`'s expression, naming the hypotheses from `hint`. -/
+def TacticM.byCasesAt (g : Nat) (hint : String) (stx : Syntax) : TacticM Unit := do
+  p ← TacticM.elabInfer g stx;
+  gs ← TacticM.byCases g p.1 hint;
+  TacticM.replaceMainGoal gs
+syntax (name := byCases) "by_cases" term : tactic
+/-- `by_cases e` (`e : Bool`): two goals, with `e = .true` and `e = .false` as
+hypotheses named `h`/`h1` (fresh). -/
+def Tactic.byCases : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  TacticM.byCasesAt g "" (Syntax.getArg stx 1)
+attribute [tactic tactic.byCases] Tactic.byCases
+syntax (name := byCasesAs) "by_cases" ident ":" term : tactic
+/-- `by_cases h : e`: as `by_cases e`, with the branch hypotheses named `h`. -/
+def Tactic.byCasesAs : Tactic := fun stx => do
+  g ← TacticM.mainGoal;
+  h ← Syntax.identName (Syntax.getArg stx 1);
+  TacticM.byCasesAt g h (Syntax.getArg stx 3)
+attribute [tactic tactic.byCasesAs] Tactic.byCasesAs
 
 -- ## Reading and building terms (stage 6g)
 --

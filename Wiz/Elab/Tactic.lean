@@ -84,6 +84,8 @@ def rewriteAt := 39
 def getSimpLemmas := 40
 -- (D6) the constructor names of a type, for `constructor`
 def ctorNames := 41
+-- (6j) a case split on a Boolean expression
+def byCases := 42
 end TacTag
 
 structure Goal (R : Type) where
