@@ -74,6 +74,24 @@ def modulesGroup : Group where
           "the strong toolchain is not in the module key"
         check (k != Cache.moduleKeyStrong loader (fun _ => none) 0 "M" (targetTag := "target-a"))
           "the target is not in the module key" },
+    { name := "SHA-256: the NIST FIPS 180-4 known-answer vectors", run := fun _ => do
+        -- Every padding case from FIPS 180-4 (and NIST's CAVP examples): the empty
+        -- message, one short block, the 448-bit message (which still fits in one block but
+        -- needs the length in a second word), the 896-bit two-block message, and the
+        -- 1,000,000-'a' multi-block message. These are the trusted SMT cache's key
+        -- function, so a wrong digest must fail here rather than only show up as a
+        -- domain-separation inequality.
+        checkEq "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          (Smt.Sha256.hex "")
+        checkEq "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          (Smt.Sha256.hex "abc")
+        checkEq "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+          (Smt.Sha256.hex "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+        checkEq "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"
+          (Smt.Sha256.hex
+            "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")
+        checkEq "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+          (Smt.Sha256.hex (String.ofList (List.replicate 1000000 'a'))) },
     { name := "target and toolchain ids: separate SHA-256 namespaces, not the 64-bit build id", run := fun _ => do
         let tc : Toolchain := {}
         let other : Toolchain := { tc with cflags := ["-O2"] }

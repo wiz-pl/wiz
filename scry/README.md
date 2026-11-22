@@ -498,9 +498,15 @@ URIs relative to the project root and `uriBaseId: "%SRCROOT%"`; every result's
 header. The single-file `scry taint` SARIF writer is unchanged.
 
 `--cache[=DIR]` (default `.scry-project-cache`) caches each TU's `scry-cst 1` store. The
-key covers the source path/text and flags; the entry is validated against a digest of the
-**actual preprocessed text**, so a changed header or macro is a miss, not a stale hit.
-`--cache-stats` adds hit/miss/write/corrupt counts and implies `--cache`.
+key covers the source path/text, the unit's flags, `--allow-errors` and
+`--keep-system-headers`; the entry is validated against a digest of the **actual
+preprocessed text**, so a changed header or macro is a miss, not a stale hit. The entry
+also names its cache format and frontend stamp (tree-sitter runtime/grammar, shim,
+`scry-cst` spill and preprocessing policy), so a frontend change is a clean miss and an
+older entry is rewritten; a corrupt or truncated entry is recomputed. A rule pack is not
+keyed (findings are recomputed from the cached CST), so a warm cache with a changed pack
+reports the new findings. `--cache-stats` adds hit/miss/write/corrupt counts and implies
+`--cache`.
 `--fail-on-finding` returns exit 1 when a finding, boundary warning or memory warning is
 reported.
 `--skip-broken` records a TU whose `cc -E`/parse fails in the `skipped` list and analyses

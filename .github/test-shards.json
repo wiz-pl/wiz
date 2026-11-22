@@ -100,6 +100,7 @@
       "=plot",
       "regions",
       "=reject",
+      "=diagnostics",
       "=scry-analysis",
       "=scry-wil",
       "=scry-c2wil",

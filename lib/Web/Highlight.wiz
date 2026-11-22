@@ -1,0 +1,177 @@
+import Text
+import Web.EditorModel
+import Web.Loom
+import Web.Style
+
+/-!
+# Web.Highlight
+
+The one span → `Loom` assembler for highlighted text, and the fixed class vocabulary the
+documentation's fenced code and the source reader share.
+
+`wiz doc` bakes highlighting into the page in Lean (`Wiz/Doc/Highlight.lean`): one
+`<span class="hl-…">` per selected token, with the token text escaped like the rest of
+the Markdown. That is the docs side. This module is the runtime side, so a second lexer
+or a second span-to-markup path does not appear in the browser: a caller supplies the
+spans it already has (the docs highlighter's output, an LSP `wizHighlight` answer, a
+finding's source range) and gets `Loom.VNode`s back.
+
+**The classes are the fixed eight** of `docs-highlighting.md` §4.1 — the same list
+`Wiz.Doc.Highlight.Class` emits and `Style.hlClasses` accepts. There is no other class
+name on a highlighted run; a view that needs another class uses its own markup, not a
+highlight token.
+
+**All or plain.** A token list is *checked* when every token is a non-empty range inside
+the text, in ascending order and pairwise non-overlapping. A checked list is rendered
+with its spans; an unchecked one is rendered as plain escaped text, never partially
+wrapped: a bad span must not shift the rest of the block. This mirrors the docs build's
+rule ("a highlighted block is either fully checked or plain").
+
+**Offsets are UTF-16 code units**, the unit the browser's `selectionStart` and the Loom
+driver count. The docs highlighter converts its character offsets once, at the edge
+(`Wiz.Doc.Highlight.utf16Offset`); the core here sees UTF-16 only. `Web.EditorModel`
+supplies the slicing, so the offset arithmetic is not restated here.
+
+Tokens carry no language and no parser. P0 emits no tokeniser (`docs-highlighting.md`
+§2.4); the source reader marks ranges, and a language that wants syntax classes supplies
+them as data.
+-/
+
+/-- The fixed eight highlight classes (`docs-highlighting.md` §4.1). A type error, not a
+dead class name, when a caller invents one. -/
+inductive Highlight.Class where
+  | kw
+  | com
+  | str
+  | num
+  | op
+  | const
+  | var
+  | sort
+
+/-- The canonical HTML class of a `Class`; exactly the `hl-*` names `Style.hlClasses`
+and `Wiz/Doc/Highlight.lean` use. -/
+def Highlight.className : Highlight.Class → String
+  | .kw => "hl-kw"
+  | .com => "hl-com"
+  | .str => "hl-str"
+  | .num => "hl-num"
+  | .op => "hl-op"
+  | .const => "hl-const"
+  | .var => "hl-var"
+  | .sort => "hl-sort"
+
+/-- The class as a typed `Style.Class`: the stylesheet accepts only these eight names. -/
+def Highlight.styleClass (c : Highlight.Class) : Style.Class :=
+  Style.Class.fixed (Highlight.className c)
+
+/-- Every class with its HTML name, in the docs' order (a test pins the table). -/
+def Highlight.table : List (Highlight.Class × String) :=
+  [ (Highlight.Class.kw, "hl-kw")
+  , (Highlight.Class.com, "hl-com")
+  , (Highlight.Class.str, "hl-str")
+  , (Highlight.Class.num, "hl-num")
+  , (Highlight.Class.op, "hl-op")
+  , (Highlight.Class.const, "hl-const")
+  , (Highlight.Class.var, "hl-var")
+  , (Highlight.Class.sort, "hl-sort")
+  ]
+
+/-- A range of text, `[start, stop)`, in UTF-16 units. -/
+structure Highlight.Mark where
+  start : Nat
+  stop : Nat
+
+/-- A styled range: a mark and its class. -/
+structure Highlight.Token where
+  start : Nat
+  stop : Nat
+  cls : Highlight.Class
+
+/-- The mark of a token. -/
+def Highlight.Token.mark (t : Highlight.Token) : Highlight.Mark :=
+  Highlight.Mark.mk t.start t.stop
+
+/-- The marks of a token list, in order. -/
+def Highlight.marksOf (ts : List Highlight.Token) : List Highlight.Mark :=
+  match ts with
+  | .nil => []
+  | .cons t rest => List.cons (Highlight.Token.mark t) (Highlight.marksOf rest)
+
+/-- The token whose mark is `m`, if the list has one. -/
+def Highlight.tokenAt (m : Highlight.Mark) : List Highlight.Token → Option Highlight.Token
+  | .nil => .none
+  | .cons t rest =>
+    match Bool.and (Nat.beq t.start m.start) (Nat.beq t.stop m.stop) with
+    | .true => .some t
+    | .false => Highlight.tokenAt m rest
+
+/-- A mark is well-formed for `n`-unit text: non-empty and inside it. -/
+def Highlight.markOk (n : Nat) (m : Highlight.Mark) : Bool :=
+  Bool.and (Nat.lt m.start m.stop) (Nat.le m.stop n)
+
+/-- The marks are ascending and pairwise non-overlapping (given sorted input). -/
+def Highlight.orderedGo (prev : Nat) : List Highlight.Mark → Bool
+  | .nil => .true
+  | .cons m rest => match Nat.le prev m.start with
+    | .true => Highlight.orderedGo m.stop rest
+    | .false => .false
+
+/-- The whole validation: every mark well-formed, then ordered and disjoint. -/
+def Highlight.checked (n : Nat) (ms : List Highlight.Mark) : Bool :=
+  match List.all (Highlight.markOk n) ms with
+  | .false => .false
+  | .true => Highlight.orderedGo 0 ms
+
+/-- The tokens are checked when their marks are. -/
+def Highlight.checkedTokens (n : Nat) (ts : List Highlight.Token) : Bool :=
+  Highlight.checked n (Highlight.marksOf ts)
+
+/-- Walk the text index and the checked marks together, handing each mark's text to
+`wrap`. Everything outside a mark is `Loom.text`, so the renderer escapes it; the caller's
+`wrap` must escape the body it is given (the helpers below do). -/
+partial def Highlight.nodeWithNodeGo {M : Type} (i : EditorModel.PositionIndex) (pos : Nat)
+    (wrap : Highlight.Mark → String → Loom.VNode M) (ms : List Highlight.Mark)
+    (acc : List (Loom.VNode M)) : List (Loom.VNode M) :=
+  match ms with
+  | .nil => List.append acc [Loom.text (EditorModel.slice i pos (EditorModel.length i.text))]
+  | .cons m rest =>
+    let before := EditorModel.slice i pos m.start;
+    let body := EditorModel.slice i m.start m.stop;
+    let node := wrap m body;
+    let acc' := List.append acc (match String.isEmpty before with
+      | .true => []
+      | .false => [Loom.text before]);
+    Highlight.nodeWithNodeGo i m.stop wrap rest (List.append acc' [node])
+
+/-- The general assembler: a text and its marked ranges, with the caller deciding what a
+mark becomes (`wrap mark body`). A checked list renders the marks; an unchecked list
+renders the whole text plain, so a bad span cannot shift the rest. -/
+def Highlight.nodeWithNode {M : Type} (text : String)
+    (wrap : Highlight.Mark → String → Loom.VNode M) (ms : List Highlight.Mark) :
+    Loom.VNode M :=
+  let i := EditorModel.index text;
+  match Highlight.checked (EditorModel.length text) ms with
+  | .false => Loom.text text
+  | .true => Loom.seq (Highlight.nodeWithNodeGo i 0 wrap ms [])
+
+/-- The attrs assembler: a text and its marked ranges, one `span` per mark with the
+attributes `attrOf` returns (the docs' `hl-*` path). -/
+def Highlight.nodeWith {M : Type} (text : String) (attrOf : Highlight.Mark → List Loom.Attr)
+    (ms : List Highlight.Mark) : Loom.VNode M :=
+  Highlight.nodeWithNode text
+    (fun m body => Loom.el "span" (attrOf m) [Loom.text body]) ms
+
+/-- A token list rendered with the fixed classes (`hl-kw`, …). An unchecked list is
+plain text. -/
+def Highlight.node {M : Type} (text : String) (ts : List Highlight.Token) : Loom.VNode M :=
+  Highlight.nodeWith text
+    (fun m => match Highlight.tokenAt m ts with
+      | .some t => [Loom.class (Highlight.className t.cls)]
+      | .none => [])
+    (Highlight.marksOf ts)
+
+/-- Escaped text through the same path (no marks): the docs and the source pane agree
+about how a code run's text reaches the page. -/
+def Highlight.text {M : Type} (s : String) : Loom.VNode M :=
+  Highlight.node s []

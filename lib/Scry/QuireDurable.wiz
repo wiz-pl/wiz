@@ -219,9 +219,10 @@ def decodePage (b : Bytes) (txid : U64) : Option PageData :=
     let stored := U64.ofNat (LE.read b 16 8);
     let computed := fnv (LE.setU64 b 16 (U64.ofNat 0));
     let right := U64.ofNat (LE.read b 24 4);
-    match Bool.and (Nat.beq kind 1)
+    let okm1 := Bool.and (Nat.beq kind 1)
         (Bool.and (Nat.le n recordsPerPage)
-          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed))) with
+          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed)));
+    match okm1 with
     | .true => .some (PageData.mk (decodeRecs b n 0) right)
     | .false => .none
 
@@ -268,8 +269,9 @@ def Meta.decode (b : Bytes) : Option Meta :=
     let format := U64.ofNat (LE.read b 8 4);
     let stored := U64.ofNat (LE.read b 88 8);
     let computed := fnv (LE.setU64 b 88 (U64.ofNat 0));
-    match Bool.and (UIntN.beq magic metaMagic)
-        (Bool.and (UIntN.beq format formatVersion) (UIntN.beq stored computed)) with
+    let okm2 := Bool.and (UIntN.beq magic metaMagic)
+        (Bool.and (UIntN.beq format formatVersion) (UIntN.beq stored computed));
+    match okm2 with
     | .true =>
       .some (Meta.mk
         (U64.ofNat (LE.read b 16 8))     -- txid
@@ -299,7 +301,8 @@ def Meta.check (b : Bytes) : SlotCheck :=
     let magic := U64.ofNat (LE.read b 0 8);
     let stored := U64.ofNat (LE.read b 88 8);
     let computed := fnv (LE.setU64 b 88 (U64.ofNat 0));
-    match Bool.and (UIntN.beq magic metaMagic) (UIntN.beq stored computed) with
+    let ok1 := Bool.and (UIntN.beq magic metaMagic) (UIntN.beq stored computed);
+    match ok1 with
     | .false => .absent
     | .true =>
       let format := U64.ofNat (LE.read b 8 4);
@@ -382,9 +385,10 @@ def decodeRegistryPage (b : Bytes) (txid : U64) : Option RegistryPage :=
     let stored := U64.ofNat (LE.read b 16 8);
     let computed := fnv (LE.setU64 b 16 (U64.ofNat 0));
     let right := U64.ofNat (LE.read b 24 4);
-    match Bool.and (Nat.beq kind registryKind)
+    let okm3 := Bool.and (Nat.beq kind registryKind)
         (Bool.and (Nat.le n registryEntriesPerPage)
-          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed))) with
+          (Bool.and (UIntN.beq pageTxid txid) (UIntN.beq stored computed)));
+    match okm3 with
     | .true => .some (RegistryPage.mk (decodeRegistryEntries b n 0)
         (U64.ofNat (LE.read b 32 8)) right)
     | .false => .none

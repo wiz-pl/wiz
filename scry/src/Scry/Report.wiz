@@ -22,12 +22,17 @@ without C or a compiler.
 -- ## Page data
 
 /-- One source step of a finding's path. `line`/`column` are 1-based; `line = 0` means
-the path node had no recorded origin (shown as a step, not as a source mark). -/
+the path node had no recorded origin (shown as a step, not as a source mark).
+`endLine`/`endColumn` are the origin's exclusive end (also 1-based, character columns);
+they are what the web bundle turns into a UTF-16 span, so a step can be underlined
+exactly. They do not change this page (it marks the start line only). -/
 structure Scry.ReportStep where
   kind : String
   func : String
   line : Nat
   column : Nat
+  endLine : Nat
+  endColumn : Nat
 
 /-- One finding on the page. `anchor` is page-unique (the semantic id, with a `-N`
 suffix only on a genuine collision); `id` is always the semantic id. -/
@@ -50,6 +55,10 @@ structure Scry.ReportFinding where
   shown : Bool
   diffMatchedBy : String
   diffLine : Nat
+  /-- The exclusive end of the sink origin (1-based character line/column). 0 when the
+  origin had no end; the web bundle then uses a one-unit caret. -/
+  endLine : Nat
+  endColumn : Nat
 
 /-- A non-finding diagnostic (lowering boundary or points-to memory warning). It is
 listed separately and is not evidence that the program is safe. -/
