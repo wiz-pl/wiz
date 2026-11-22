@@ -2,13 +2,16 @@
 #
 # Runs on `master` (the integration branch, with the solutions in it) and on pull
 # requests into it: the full suite, split into shards (.github/test-shards.json). The
-# toolchain is built once, with Nix (`nix build .#wiz .#tests`), and a push to master
-# publishes it to the trusted Cachix cache (a pull request publishes only to its own
-# untrusted PR cache); the test shards substitute those store paths instead of rebuilding
-# (no Lake build and no `.lake` Actions cache on the critical path). The exercise tree
-# (scripts/mkexercises.py) is checked only when a release is tagged: release.yml's
-# `exercise tree` job, which must pass before anything is published (it still builds
-# with Lake, as does the weekly fixpoint).
+# toolchain is built once, with Nix, and a push to master publishes it to the trusted
+# Cachix cache (a pull request publishes only to its own untrusted PR cache); the test
+# shards substitute those store paths instead of rebuilding (no Lake build and no
+# `.lake` Actions cache on the critical path). A pull request builds the *same*
+# packages from a seeded `.lake` (flake.nix's `withLakeCache`, scripts/lake-cache.sh),
+# so Lake recompiles only what the branch changed; master and the merge queue keep the
+# pure `nix build`, which is what the release path and the trusted cache name. The
+# exercise tree (scripts/mkexercises.py) is checked only when a release is tagged:
+# release.yml's `exercise tree` job, which must pass before anything is published (it
+# still builds with Lake, as does the weekly fixpoint).
 name: CI
 
 on:
@@ -287,7 +290,9 @@ jobs:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # one cold Nix build (unwrapped + prewarm), then the Cachix push of ~1.8 GB
+    # one cold Nix build (unwrapped + prewarm), then the Cachix push of ~1.8 GB. A pull
+    # request's seeded build is the incremental one only after its first run (a miss is
+    # the same cold build); the timeout covers the cold case.
     timeout-minutes: 90
     outputs:
       tree: solution # only the summary's title reads it (there is one tree now)
@@ -298,6 +303,10 @@ jobs:
       # the store paths of this commit's build (the shards substitute them from Cachix)
       wiz: ${{ steps.nix.outputs.wiz }}
       tests: ${{ steps.nix.outputs.tests }}
+      # the Lake-seed key a dependent job restores the same seed with, and the cached
+      # unwrapped output (the next run's seed): a pull request only, empty otherwise
+      lake-key: ${{ steps.lake-key.outputs.key }}
+      lake-prefix: ${{ steps.lake-key.outputs.prefix }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -315,6 +324,26 @@ jobs:
         run: |
           # what identifies the compiler and test driver (and the C toolchain they use)
           echo "compiler=${{ hashFiles('flake.lock', 'flake.nix', 'lean-toolchain', 'lake-manifest.json', 'lakefile.lean', '**/*.lean', 'runtime/**', 'c/**') }}" >> "$GITHUB_OUTPUT"
+      - name: Lake cache key (a pull request)
+        # The seed (a previous run's compiled modules) is only safe for the toolchain
+        # and sources that produced it: `key` names flake.lock + flake.nix and the
+        # `lean`/`runtime` subset hashes, `prefix` names the toolchain alone, so
+        # restore-keys falls back to the previous run's cache and never to one from
+        # another toolchain. See scripts/lake-cache.sh.
+        id: lake-key
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          scripts/lake-cache.sh key >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+      - name: Restore the Lake build (a pull request)
+        id: lake
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed
+          key: ${{ steps.lake-key.outputs.key }}
+          restore-keys: ${{ steps.lake-key.outputs.prefix }}
       - name: nix build (wiz, grail and the test driver)
         id: nix
         run: |
@@ -322,16 +351,49 @@ jobs:
           # from the trusted cache; a pull request's from its PR cache when published).
           # `packages.wiz` is the default package; `packages.tests` is the test driver,
           # from the same build.
-          nix build .#wiz .#tests --no-link -L
           # No .#reference here: only the docs job reads it (and only on a push), and no
           # shard waits on it. That job builds it from this cached wiz, off this path.
-          wiz=$(nix path-info .#wiz)
-          tests=$(nix path-info .#tests)
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            # The PR-only fast path: the same packages from a seeded `.lake`
+            # (flake.nix's withLakeCache, a different derivation), so Lake recompiles
+            # only the modules the branch changed. A miss — the first run after a
+            # toolchain or compiler change — builds from an empty seed, which is the
+            # cold build, and saves the result for the next run; it never fails.
+            if [ ! -d .lake-seed/.lake ]; then scripts/lake-cache.sh init .lake-seed; fi
+            scripts/lake-cache.sh build .lake-seed unwrapped wiz tests | tee lake-paths
+            wiz=$(sed -n 's/^wiz=//p' lake-paths)
+            tests=$(sed -n 's/^tests=//p' lake-paths)
+            echo "unwrapped=$(sed -n 's/^unwrapped=//p' lake-paths)" >> "$GITHUB_OUTPUT"
+          else
+            # Not a pull request (a push, the merge queue, a manual run): the pure
+            # build, which is what the trusted cache and the release path use.
+            nix build .#wiz .#tests --no-link -L
+            wiz=$(nix path-info .#wiz)
+            tests=$(nix path-info .#tests)
+          fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "wiz: $wiz"; echo "tests: $tests"
           du -sh "$wiz" "$tests"
           nix path-info -S "$wiz" "$tests" | sed 's/^/closure: /'
+      - name: Seed the Lake build for the next run (a pull request)
+        # On an exact key hit the restored seed is what this run used; on a miss the
+        # build just produced one. Either way the entry is not touched. A fork cannot
+        # save a cache, so it only builds (docs/building.md, "Merging").
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.lake.outputs.cache-hit != 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: scripts/lake-cache.sh save "${{ steps.nix.outputs.unwrapped }}" .lake-seed
+      - name: Save the Lake build (a pull request)
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.lake.outputs.cache-hit != 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed
+          key: ${{ steps.lake-key.outputs.key }}
       - name: The source tarball is reproducible under Nix
         # a second build in a different build directory, compared byte for byte
         # (Nix 2.34 calls it --rebuild; older releases spell it --check)
@@ -356,7 +418,7 @@ jobs:
           fi
           # .#reference is built by the docs job, not here (#460), so it is not pushed.
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_AUTH_TOKEN" cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz .#tests)
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
       - name: Publish the store paths to the PR cache
         # A pull request writes only its own untrusted cache, with its own token. If the
         # repository variable or secret is absent (or this is a fork), nothing is
@@ -371,7 +433,7 @@ jobs:
             exit 0
           fi
           nix develop .#ci --command env CACHIX_AUTH_TOKEN="$CACHIX_PR_AUTH_TOKEN" cachix push "$CACHIX_PR_NAME" \
-            $(nix path-info .#wiz .#tests)
+            ${{ steps.nix.outputs.wiz }} ${{ steps.nix.outputs.tests }}
       - name: Every test case is in exactly one shard
         run: |
           python3 scripts/ci.py check-shards --self-test
@@ -398,15 +460,20 @@ jobs:
         run: scripts/grail-index-check.sh examples/fate-index
       - name: The package checks, builds and runs a program outside the checkout
         # what the old `package` job tested, after the one build: a program is checked and
-        # built from a directory with no checkout, and grail starts
+        # built from a directory with no checkout, and grail starts. The store paths from
+        # the build step (not `nix run …#wiz`, which would evaluate, and on a pull request
+        # rebuild, the pure packages).
+        env:
+          WIZ: ${{ steps.nix.outputs.wiz }}
+          GRAIL: ${{ steps.nix.outputs.wiz }}/bin/grail
         run: |
           dir=$(mktemp -d)
           cp examples/io.wiz "$dir/"
           cd "$dir"
-          nix run "$GITHUB_WORKSPACE#wiz" -- check io.wiz
-          nix run "$GITHUB_WORKSPACE#wiz" -- build io.wiz -o io
+          "$WIZ/bin/wiz" check io.wiz
+          "$WIZ/bin/wiz" build io.wiz -o io
           ./io | head -3
-          nix run "$GITHUB_WORKSPACE#grail" -- 2>&1 | head -2
+          "$GRAIL" 2>&1 | head -2
       - name: Reproducibility (two absolute paths)
         # generated C, binaries, .split/, -g debug info, LLVM output and the .grail tree
         # must be byte-identical under different PWD/HOME/TMPDIR/umask/locale/epoch/-j.
@@ -484,7 +551,12 @@ jobs:
       - name: nix build (the test driver, from Cachix), and point .lake at it
         id: nix
         run: |
-          tests=$(nix build .#tests --no-link --print-out-paths)
+          # The build job's driver (a PR's from the seeded build); a store path
+          # substitutes directly, and a missing one falls back to the derivation.
+          tests='${{ needs.build.outputs.tests }}'
+          if [ -z "$tests" ] || ! nix build --no-link "$tests"; then
+            tests=$(nix build .#tests --no-link --print-out-paths)
+          fi
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           du -sh "$tests"
           # the ledger driver and the fixture scripts name `.lake/build/bin/tests`
@@ -595,7 +667,20 @@ jobs:
       - name: nix build (the store paths, from Cachix)
         id: nix
         run: |
-          nix build .#wiz .#tests --no-link -L
+          # The store paths the build job published (master's pure ones; a pull
+          # request's from its seeded `.lake` build). Asking for a store path
+          # substitutes it from the caches directly — the derivation hash of a PR's
+          # cached build cannot be recomputed here — and a fork (no PR cache) or a
+          # missing path falls back to the derivation, as before.
+          wiz='${{ needs.build.outputs.wiz }}'
+          tests='${{ needs.build.outputs.tests }}'
+          if [ -z "$wiz" ] || [ -z "$tests" ] || ! nix build --no-link "$wiz" "$tests"; then
+            nix build .#wiz .#tests --no-link -L
+            wiz=$(nix path-info .#wiz)
+            tests=$(nix path-info .#tests)
+          fi
+          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
           # `=scry-project` (and the other scry groups in the library shard) link against
           # the C# grammar: `scry/src/Scry/NativeLink.wiz` has `link_c ../../native/
           # tree-sitter-c-sharp/src/parser.c`. That out-link is gitignored, so a fresh
@@ -603,10 +688,6 @@ jobs:
           # testing anything. Create it here, exactly as the scry workflow does; it is
           # substituted from Cachix, so this is a link, not a build.
           nix build .#tree-sitter-c-sharp -o scry/native/tree-sitter-c-sharp
-          wiz=$(nix path-info .#wiz)
-          tests=$(nix path-info .#tests)
-          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
-          echo "tests=$tests" >> "$GITHUB_OUTPUT"
           # the suite and its helpers name the checkout's binaries (`.lake/build/bin/wiz`,
           # `.lake/build/bin/grail`, `scripts/trust-ledger.sh`); point them at the store.
           # No Lake build and no .lake cache: this is a directory of symlinks.
@@ -720,6 +801,16 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
+      - name: Restore the Lake build (a pull request)
+        # Same seed and key as the build job: the page modules are built from that
+        # job's `wiz`, so they must use the same package set.
+        id: lake
+        if: github.event_name == 'pull_request' && needs.build.outputs.lake-key != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lake-seed
+          key: ${{ needs.build.outputs.lake-key }}
+          restore-keys: ${{ needs.build.outputs.lake-prefix }}
       - name: nix build (wiz-web, wiz-playground, wiz-playground-ui)
         id: nix
         run: |
@@ -727,10 +818,21 @@ jobs:
           # the expensive one (`--opt 1` in flake.nix, because `wasm-opt`'s -O2 peak does
           # not fit a 16 GB runner). `--max-jobs 1`: one at a time, for the same reason.
           # `wiz` and emscripten are substitutes.
-          nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
-          web=$(nix path-info .#wiz-web)
-          playground=$(nix path-info .#wiz-playground)
-          ui=$(nix path-info .#wiz-playground-ui)
+          if [ -d .lake-seed/.lake ]; then
+            # a pull request: the build job's seeded package set (flake.nix's
+            # withLakeCache), so `wiz` is this branch's cached build, not a cold rebuild
+            LAKE_CACHE_NIX_ARGS='--max-jobs 1' \
+              scripts/lake-cache.sh build .lake-seed wiz-web wiz-playground wiz-playground-ui \
+              | tee web-paths
+            web=$(sed -n 's/^wiz-web=//p' web-paths)
+            playground=$(sed -n 's/^wiz-playground=//p' web-paths)
+            ui=$(sed -n 's/^wiz-playground-ui=//p' web-paths)
+          else
+            nix build .#wiz-web .#wiz-playground .#wiz-playground-ui --no-link -L --max-jobs 1
+            web=$(nix path-info .#wiz-web)
+            playground=$(nix path-info .#wiz-playground)
+            ui=$(nix path-info .#wiz-playground-ui)
+          fi
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "playground=$playground" >> "$GITHUB_OUTPUT"
           echo "ui=$ui" >> "$GITHUB_OUTPUT"
@@ -752,7 +854,7 @@ jobs:
             exit 1
           fi
           nix shell nixpkgs#cachix -c cachix push "$CACHIX_NAME" \
-            $(nix path-info .#wiz-web .#wiz-playground .#wiz-playground-ui)
+            ${{ steps.nix.outputs.web }} ${{ steps.nix.outputs.playground }} ${{ steps.nix.outputs.ui }}
 
   # (11s, ci-01) The playground and the site's JavaScript, on every pull request that
   # touches `web/**` (and on a push, where `changes --all` sets web=true). `web/test.sh`
@@ -794,7 +896,12 @@ jobs:
         id: nix
 
         run: |
-          wiz=$(nix build .#wiz --no-link --print-out-paths)
+          # the build job's wiz: a pull request's from its seeded `.lake` build (a
+          # store path substitutes directly); a miss falls back to the derivation
+          wiz='${{ needs.build.outputs.wiz }}'
+          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
+            wiz=$(nix build .#wiz --no-link --print-out-paths)
+          fi
           echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
           du -sh "$wiz"
       - name: The Wasm modules (from Cachix; web_modules built them)

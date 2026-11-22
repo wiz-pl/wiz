@@ -31,7 +31,16 @@
         gc-ldflags = "-L${pkgs.boehmgc}/lib -Wl,-rpath,${pkgs.boehmgc}/lib -lgc -lpthread";
       };
 
-      packagesFor = pkgs:
+      packagesFor = pkgs: packagesWith pkgs null;
+
+      # The same packages, built from a prebuilt `.lake` (`lakeCache`): CI's PR-only
+      # fast path, called through scripts/lake-cache.sh with `nix build --impure
+      # --expr` (a flake output cannot be a function in `packages`, but `lib` may hold
+      # one). It is a *different* derivation from the pure `unwrapped` — the seed is an
+      # extra input, so the hash differs — and the release path above never names it.
+      withLakeCache = pkgs: lakeCache: packagesWith pkgs lakeCache;
+
+      packagesWith = pkgs: lakeCache:
         let
           lib = pkgs.lib;
           fs = lib.fileset;
@@ -39,24 +48,27 @@
           pinned = lib.removePrefix "leanprover/lean4:v" (lib.trim (builtins.readFile ./lean-toolchain));
           tc = toolchain pkgs;
 
-          # wiz and grail as Lake builds them (unwrapped), from only the files the build
-          # reads: a change elsewhere (README, tests, Wiz programs) doesn't rebuild them.
-          unwrapped =
+          # every file the build reads: a change elsewhere (README, tests, Wiz programs)
+          # doesn't rebuild the compiler.
+          buildSrc = fs.toSource {
+            root = ./.;
+            fileset = fs.unions [
+              ./lakefile.lean ./lake-manifest.json ./lean-toolchain
+              ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+              ./Tests # the test driver (`packages.tests`)
+              ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
+              ./c # linked into the executables (moreLinkObjs)
+            ];
+          };
+
+          # wiz and grail as Lake builds them (unwrapped) — the release path.
+          pureUnwrapped =
             assert lib.assertMsg (lean.version == pinned)
               "flake.nix: nixpkgs has Lean ${lean.version} but lean-toolchain says ${pinned}: update the nixpkgs input (nix flake update) or lean-toolchain";
             pkgs.stdenv.mkDerivation {
               pname = "wiz-unwrapped";
               version = "0.1.0";
-              src = fs.toSource {
-                root = ./.;
-                fileset = fs.unions [
-                  ./lakefile.lean ./lake-manifest.json ./lean-toolchain
-                  ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
-                  ./Tests # the test driver (`packages.tests`)
-                  ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
-                  ./c # linked into the executables (moreLinkObjs)
-                ];
-              };
+              src = buildSrc;
               nativeBuildInputs = [ lean ];
               buildPhase = ''
                 runHook preBuild
@@ -73,6 +85,57 @@
                 runHook postInstall
               '';
             };
+
+          # The same three binaries from `lakeCache`'s compiled modules. Lake keys an
+          # olean on its inputs' content hashes, so it recompiles exactly what the tree
+          # changed and links the rest; the `toolchain` stamp refuses a seed built for
+          # another lean-toolchain, and `scripts/lake-cache.sh key` binds the toolchain
+          # (flake.lock, flake.nix) and the compiler sources (`lean`, `runtime`) into the
+          # cache key, so a seed from different sources never sits under the exact key.
+          cachedUnwrapped =
+            assert lib.assertMsg (lakeCache != null)
+              "flake.nix withLakeCache: no lakeCache seed";
+            assert lib.assertMsg (builtins.pathExists (lakeCache + "/toolchain"))
+              "flake.nix withLakeCache: ${toString lakeCache} has no toolchain stamp (a seed is written by scripts/lake-cache.sh)";
+            assert lib.assertMsg
+              ((builtins.readFile (lakeCache + "/toolchain")) == (builtins.readFile ./lean-toolchain))
+              "flake.nix withLakeCache: ${toString lakeCache} was built for another lean-toolchain; refusing a stale .lake";
+            pkgs.stdenv.mkDerivation {
+              pname = "wiz-unwrapped-lake-cache";
+              version = "0.1.0";
+              src = buildSrc;
+              nativeBuildInputs = [ lean ];
+              buildPhase = ''
+                runHook preBuild
+                export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache
+                if [ ! -d ${lakeCache}/.lake ]; then
+                  echo "withLakeCache: ${lakeCache}/.lake is missing" >&2
+                  exit 1
+                fi
+                cp -a ${lakeCache}/.lake .lake
+                chmod -R u+w .lake
+                lake build wiz grail tests
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin $out/lake/.lake/build
+                install -m755 .lake/build/bin/wiz .lake/build/bin/grail .lake/build/bin/tests $out/bin/
+                if [ ! -d .lake/build/lib ]; then
+                  echo "withLakeCache: lake build wrote no .lake/build/lib" >&2
+                  exit 1
+                fi
+                # the next run's seed: the modules and their traces. `bin/` is relinked
+                # in seconds, so leaving it out keeps the cache entry small.
+                cp -a .lake/build/lib $out/lake/.lake/build/lib
+                if [ -d .lake/build/ir ]; then cp -a .lake/build/ir $out/lake/.lake/build/ir; fi
+                if [ -d .lake/config ]; then cp -a .lake/config $out/lake/.lake/config; fi
+                cp ${./lean-toolchain} $out/toolchain
+                runHook postInstall
+              '';
+            };
+
+          unwrapped = if lakeCache == null then pureUnwrapped else cachedUnwrapped;
 
           # The toolchain as flags (stage 23a: nothing reads the environment). Flags on
           # the command line come later and win.
@@ -659,6 +722,16 @@ EOF
       # (packages without the function set, which is not a derivation)
       packages = forAll (pkgs: builtins.removeAttrs (packagesFor pkgs) [ "bootstrapChain" ]);
       legacyPackages = forAll (pkgs: { inherit (packagesFor pkgs) bootstrapChain; });
+
+      # The function set (a flake output cannot be a function, so `packages` cannot hold
+      # `withLakeCache`). CI's PR-only path:
+      #   nix build --impure --expr \
+      #     'let f = builtins.getFlake "/path/to/checkout"; in
+      #      (f.lib.x86_64-linux.withLakeCache /path/to/seed).wiz'
+      # `scripts/lake-cache.sh build` is the wrapper the workflow calls.
+      lib = forAll (pkgs: {
+        withLakeCache = lakeCache: packagesWith pkgs lakeCache;
+      });
 
       apps = forAll (pkgs:
         let
