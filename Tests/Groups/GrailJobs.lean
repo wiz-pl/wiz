@@ -101,7 +101,22 @@ def grailJobsGroup : Group where
                          pure (.ok ()) })
         let res ← r.schedule { nodes } prep
         check (res.all (· matches some (.ok _))) "a node failed"
-        checkEq [0, 1, 2, 3, 4, 5] (← order.get).toList }
+        checkEq [0, 1, 2, 3, 4, 5] (← order.get).toList },
+    { name := "a node's dependency must already be in the graph (node indices stay topological)", run := fun _ => do
+        -- `GraphM.add` numbers a node after its dependencies, which the scheduler's
+        -- index-order ready queue relies on; a forward dependency is refused, not built.
+        let ok : Grail.GraphM (Option Nat) :=
+          Grail.GraphM.add "a" (pure (.check "a.wiz", #[], false))
+        let (i, _) ← ok.run {}
+        checkEq (some 0) i
+        let forward : Grail.GraphM (Option Nat) := do
+          let _ ← Grail.GraphM.add "a" (pure (.check "a.wiz", #[], false))
+          Grail.GraphM.add "f" (pure (.check "f.wiz", #[1], false))
+        let refused ← try
+            let _ ← forward.run {}
+            pure false
+          catch _ => pure true
+        check refused "a forward dependency was accepted" }
   ]
 
 builtin_initialize registerGroup grailJobsGroup
