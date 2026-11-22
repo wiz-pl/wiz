@@ -389,6 +389,9 @@ def socketCase : IO Unit := do
           | 0 => Socket.connect sock
           | n + 1 => do try Socket.connect sock catch _ => do IO.sleep 50; conn n
         let (ivIn, ivOut) ← conn 100
+        -- the socket is owner-only: the infoview is a local capability, and the default
+        -- umask (022) would otherwise make it 0755 and connectable by any local user
+        checkEq 0o600 (← Socket.mode sock)
         let (iv, ivW) := (IO.FS.Stream.ofHandle ivIn, IO.FS.Stream.ofHandle ivOut)
         let c ← next iv
         checkEq "wiz/infoview/cursor" (LSP.getStr c ["method"])
