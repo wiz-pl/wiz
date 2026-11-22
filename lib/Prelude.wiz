@@ -1714,7 +1714,7 @@ partial def TacticM.autoHints
           before ← TacticM.getGoals;
           TacticM.applyExpr g e;
           after ← TacticM.getGoals;
-          let restGoals := match before with
+          let restGoals : List Nat := match before with
             | .nil => .nil
             | .cons _ t => t;
           let fresh := List.dropN (List.length restGoals) after;
@@ -1789,7 +1789,7 @@ partial def Expr.hasOp (names : List String) (e : Expr) : Bool :=
 
 /-- The subterms of `e`, in pre-order (for the `omega` add-term index). -/
 partial def Expr.subterms (e : Expr) : List Expr :=
-  let rest := match e with
+  let rest : List Expr := match e with
     | .app f a => List.append (Expr.subterms f) (Expr.subterms a)
     | .lam _ b => Expr.subterms b
     | .pi _ _ q d b => List.append (Expr.subterms q) (List.append (Expr.subterms d) (Expr.subterms b))
@@ -1827,20 +1827,20 @@ def Expr.addPair (e : Expr) : Option (Expr × Expr) :=
   | .none => .none
 
 /-- The edges out of `node` from the `Nat.add` terms: `a → a + k` and `k → a + k`. -/
-def TacticM.omegaAddEdges (g : Nat) (terms : List Expr) (src : Expr) (node : Expr)
-    (proof : Expr) : TacticM (List (Expr × Expr))
-  | .nil => TacticM.pure .nil
+def TacticM.omegaAddEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
+    List Expr → TacticM (List (Expr × Expr))
+  | .nil => TacticM.pure (.nil : List (Expr × Expr))
   | .cons t ts => do
-    rest ← TacticM.omegaAddEdges g ts src node proof;
+    rest ← TacticM.omegaAddEdges g src node proof ts;
     match Expr.addPair t with
     | .some (u, k) => do
       eu ← TacticM.isDefEq g node u;
       ek ← TacticM.isDefEq g node k;
-      let right := match eu with
+      let right : List (Expr × Expr) := match eu with
         | .true => .cons (t, Expr.ap5 (.const "Nat.le_trans") src node t proof
               (Expr.ap2 (.const "Nat.le_add_right") u k)) .nil
         | .false => .nil;
-      let left := match ek with
+      let left : List (Expr × Expr) := match ek with
         | .true => .cons (t, Expr.ap5 (.const "Nat.le_trans") src node t proof
               (Expr.ap2 (.const "Nat.le_add_left") k u)) .nil
         | .false => .nil;
@@ -1853,11 +1853,11 @@ def TacticM.omegaEqEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr)
     (A u v : Expr) (h : Expr) : TacticM (List (Expr × Expr)) := do
   eu ← TacticM.isDefEq g node u;
   ev ← TacticM.isDefEq g node v;
-  let fwd := match eu with
+  let fwd : List (Expr × Expr) := match eu with
     | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof
           (Expr.ap3 (.const "Nat.le_of_eq") u v h)) .nil
     | .false => .nil;
-  let bwd := match ev with
+  let bwd : List (Expr × Expr) := match ev with
     | .true => .cons (u, Expr.ap5 (.const "Nat.le_trans") src node u proof
           (Expr.ap3 (.const "Nat.le_of_eq_sym") u v h)) .nil
     | .false => .nil;
@@ -1865,23 +1865,23 @@ def TacticM.omegaEqEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr)
 
 /-- The edges out of `node` from the hypotheses: `Le`, `Lt` and equalities (both ways,
 through `Nat.le_of_eq`/`Nat.le_of_eq_sym`). -/
-def TacticM.omegaHypEdges (g : Nat) (hyps : List (String × Expr)) (src : Expr) (node : Expr)
-    (proof : Expr) : TacticM (List (Expr × Expr))
-  | .nil => TacticM.pure .nil
+def TacticM.omegaHypEdges (g : Nat) (src : Expr) (node : Expr) (proof : Expr) :
+    List (String × Expr) → TacticM (List (Expr × Expr))
+  | .nil => TacticM.pure (.nil : List (Expr × Expr))
   | .cons h hs => do
-    rest ← TacticM.omegaHypEdges g hs src node proof;
+    rest ← TacticM.omegaHypEdges g src node proof hs;
     match Expr.appOf "Nat.Le" h.2 with
     | .some (.cons u (.cons v .nil)) => do
       ok ← TacticM.isDefEq g node u;
-      let here := match ok with
+      let here : List (Expr × Expr) := match ok with
         | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof h.2) .nil
         | .false => .nil;
       TacticM.pure (List.append here rest)
     | _ => match Expr.appOf "Nat.Lt" h.2 with
       | .some (.cons u (.cons v .nil)) => do
-        let su := .app (.const "Nat.succ") u;
+        let su : Expr := .app (.const "Nat.succ") u;
         ok ← TacticM.isDefEq g node su;
-        let here := match ok with
+        let here : List (Expr × Expr) := match ok with
           | .true => .cons (v, Expr.ap5 (.const "Nat.le_trans") src node v proof h.2) .nil
           | .false => .nil;
         TacticM.pure (List.append here rest)
@@ -1896,7 +1896,7 @@ def TacticM.omegaHypEdges (g : Nat) (hyps : List (String × Expr)) (src : Expr) 
 
 /-- The successor edge `n → n + 1`, from `Nat.le_succ`. -/
 def TacticM.omegaSuccEdges (src : Expr) (node : Expr) (proof : Expr) : List (Expr × Expr) :=
-  let s := .app (.const "Nat.succ") node;
+  let s : Expr := .app (.const "Nat.succ") node;
   .cons (s, Expr.ap5 (.const "Nat.le_trans") src node s proof
     (.app (.const "Nat.le_succ") node)) .nil
 
@@ -1904,8 +1904,8 @@ def TacticM.omegaSuccEdges (src : Expr) (node : Expr) (proof : Expr) : List (Exp
 hypotheses. -/
 def TacticM.omegaSuccs (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
     (src : Expr) (node : Expr) (proof : Expr) : TacticM (List (Expr × Expr)) := do
-  adds ← TacticM.omegaAddEdges g terms src node proof;
-  hs ← TacticM.omegaHypEdges g hyps src node proof;
+  adds ← TacticM.omegaAddEdges g src node proof terms;
+  hs ← TacticM.omegaHypEdges g src node proof hyps;
   TacticM.pure (List.append (TacticM.omegaSuccEdges src node proof) (List.append adds hs))
 
 /-- Breadth-first (queue order deterministic) search for `Le src target`; the proof of
@@ -1958,7 +1958,7 @@ def TacticM.omegaHypTerms (g : Nat) : List (String × Expr) → TacticM (List Ex
 /-- Prove `Nat.Le src target` by the BFS; assign it to `g`, or fail. -/
 def TacticM.omegaLe (g : Nat) (hyps : List (String × Expr)) (terms : List Expr)
     (src target : Expr) : TacticM Unit := do
-  let start := .app (.const "Nat.le_refl") src;
+  let start : Expr := .app (.const "Nat.le_refl") src;
   r ← TacticM.omegaBFS g hyps terms src target 10000 (.cons (src, start) .nil) .nil;
   match r with
   | .none => TacticM.fail "omega: no proof (linear Nat fragment)"
@@ -1993,7 +1993,7 @@ def Tactic.omega : Tactic := fun _ => do
   hyps ← TacticM.goalHyps g;
   -- the linear fragment: refuse multiplication, division, modulo and powers
   ty' ← TacticM.normalize g ty;
-  let bad := .cons "Nat.mul" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow"
+  let bad : List String := .cons "Nat.mul" (.cons "Nat.div" (.cons "Nat.mod" (.cons "Nat.pow"
     (.cons "HMul.hMul" (.cons "Mul.mul" (.cons "HDiv.hDiv" (.cons "HMod.hMod" .nil)))))));
   hb ← TacticM.omegaHypsBad g bad hyps;
   gb ← TacticM.omegaEqBad g bad ty;
@@ -2007,7 +2007,7 @@ def Tactic.omega : Tactic := fun _ => do
       TacticM.omegaLe g hyps (List.append ts hs) a b
     | _ => match Expr.appOf "Nat.Lt" ty with
       | .some (.cons a (.cons b .nil)) => do
-        let sa := .app (.const "Nat.succ") a;
+        let sa : Expr := .app (.const "Nat.succ") a;
         ts ← TacticM.omegaCollect g (.cons sa (.cons b .nil));
         hs ← TacticM.omegaHypTerms g hyps;
         TacticM.omegaLe g hyps (List.append ts hs) sa b
