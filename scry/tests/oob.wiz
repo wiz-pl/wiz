@@ -1,5 +1,5 @@
-import Scry.NativeLink
 -- test: run
+import Scry.NativeLink
 import Sys
 import Json
 import Scry.TaintCmd

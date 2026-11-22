@@ -1,5 +1,5 @@
-import Scry.NativeLink
 -- test: run
+import Scry.NativeLink
 import WordMap
 import Sys
 import Text
