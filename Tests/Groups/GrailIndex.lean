@@ -440,7 +440,8 @@ def grailIndexGroup : Group where
         let snapText ← IO.FS.readFile (idx / "index" / "snapshot.sexpr")
         let .ok snap := Grail.Snapshot.parse snapText
           | throw (IO.userError "the snapshot did not parse")
-        let .ok pkgs := Grail.Index.parse (entry.replace ")\n" " (yanked \"1.2.0\" \"bad tarball\"))\n")
+        let yankedEntry := entry.replace " (deps))))" " (deps))) (yanked \"1.2.0\" \"bad tarball\"))"
+        let .ok pkgs := Grail.Index.parse yankedEntry
           | throw (IO.userError "the yanked index did not parse")
         let byName := pkgs.foldl (fun m p => m.insert p.name p) {}
         -- the old snapshot says "live"; the index says yanked: covers refuses
@@ -454,7 +455,7 @@ def grailIndexGroup : Group where
           check ((e.splitOn "bad tarball").length > 1) e
         | .ok _ => throw (IO.userError "resolved a yanked version")
         -- through the CLI it is exit 1 as well (the snapshot no longer covers the entry)
-        IO.FS.writeFile entryPath (entry.replace ")\n" " (yanked \"1.2.0\" \"bad tarball\"))\n")
+        IO.FS.writeFile entryPath yankedEntry
         checkEq 1 (← run updated) }
   ]
 
