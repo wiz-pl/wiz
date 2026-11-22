@@ -1277,9 +1277,13 @@ the generated reference manual (`result/index.md`, and `result/site`).
   `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo or `roots/` pointer
   index (both are write-cache aids) and `a-w` permissions. Both wrappers (`wiz` and
   `grail`) add
-  `--cache-ro $out/share/wiz/cache` after their toolchain flags, so a packaged run
-  replays the standard library instead of elaborating it; a user's `--cache` (the
-  default `~/.cache/wiz`) is still written, so the store cache is only ever read. The
+  `--cache-ro $out/share/wiz/cache --cache-ro-unsigned` after their toolchain flags, so a
+  packaged run replays the standard library instead of elaborating it; a user's
+  `--cache` (the default `~/.cache/wiz`) is still written, so the store cache is only
+  ever read. The opt-in is deliberate: a read-only layer is refused by default because a
+  manifest is a self-signed digest, and this layer is the one case where the reader and
+  the writer are the same derivation (the store path is content-addressed and the entries
+  are keyed by the packaged binary's hash), not a foreign trust domain. The
   warm runs pass the *same* toolchain flags the wrappers add: `Toolchain.tag` hashes
   exactly those fields and is part of every manifest's strong key, so a cache warmed
   with default flags is rejected by every wrapper invocation (it would be a clean miss
@@ -1306,7 +1310,9 @@ the generated reference manual (`result/index.md`, and `result/site`).
     minutes of build time, which is not worth it for the uncommon imports.
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
   write cache off, and a user's `--cache-ro DIR` appends another read-only layer
-  (`--cache-ro` is repeatable and searched in the order given). The entries are keyed
+  (`--cache-ro` is repeatable and searched in the order given). A layer passed this way
+  is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) is also given: its
+  manifests are self-signed, so they are integrity, not authenticity. The entries are keyed
   by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
   the Nix build invalidates them automatically; there is no manual invalidation and a
   stale store path is never reused (a new build gets new keys). The cache is
@@ -1320,8 +1326,9 @@ the generated reference manual (`result/index.md`, and `result/site`).
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
   test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
-  searched in order after the written `--cache DIR`, never written). The Nix package
-  can ship one in `$out/share/wiz/cache` for `--cache-ro $out/share/wiz/cache`, so CI and
+  searched in order after the written `--cache DIR`, never written; refused by default
+  unless `--cache-ro-unsigned`). The Nix package
+  ships one in `$out/share/wiz/cache` and its wrappers pass both flags, so CI and
   users share a warm cache without a writable store path; a run with no write cache
   hashes the wiz executable each time instead of remembering it under `bin/`.
 * **Storage.** CI no longer stores the build in the Actions cache: the build lives in the

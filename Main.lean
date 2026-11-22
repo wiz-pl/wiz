@@ -74,7 +74,9 @@ def usage : String := "usage:
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
   wiz cache verify [--strict]        check every cache entry against its output manifest
-                                    (a full scan); exit 1 on a mismatch or missing file
+                                    (a full scan; integrity, not authenticity); exit 1 on a
+                                    mismatch or missing file, and --strict also fails on an
+                                    unmanifested keyed file
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
   wiz lsp                          a language server on stdin/stdout
@@ -90,7 +92,9 @@ def usage : String := "usage:
                                    (default: share/wiz/web, or web/out in a checkout)
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
-after the write cache and never written, as in a Nix package's share/wiz/cache),
+after the write cache and never written, as in a Nix package's share/wiz/cache; its
+manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
+--cache-ro-unsigned (serve a read-only layer although it is unauthenticated),
 --no-cache (both), -I DIR (another module root, after lib/),
 --cache-prune DAYS (before the run: from the write cache only, remove keyed
   .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
@@ -99,8 +103,10 @@ after the write cache and never written, as in a Nix package's share/wiz/cache),
   read from the same caches and written to the write cache), --region-stats (print what
   the regions served, with --region-cache)
 --cache-verify off|warn|strict (default warn: check an entry's bytes against its output
-  manifest before using it; strict: only manifested entries; --cache-verify=strict works
-  too), --cache-verify-stats (print what the manifests verified)
+  manifest before using it; strict: an unlisted entry is a mismatch too. Neither is an
+  authenticity check: a manifest is a self-signed digest; a read-only layer needs
+  --cache-ro-unsigned or --cache-verify off; --cache-verify=strict works too),
+--cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
 experimental kernel options (D1, they turn the cache off): --regularity off|full (full:
@@ -416,7 +422,7 @@ def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
-      (rootPath := path))
+      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 
@@ -695,9 +701,15 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
 
 /-- `wiz cache verify`: check every manifest in each cache layer against the bytes beside
 it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
-file, and in `strict`/`--strict` also on an unmanifested keyed file. -/
+file, and in `strict`/`--strict` also on an unmanifested keyed file. A `--cache-ro` layer
+is always scanned as if `--strict` (a manifest, never an unverified file, is its only
+integrity claim). This is an integrity scan: a manifest is a self-signed digest, so it does
+not show that a writer and a builder are the same party. -/
 def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
-  let strict := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
+  -- (A read-only layer is scanned as if `strict`: "has a manifest" is all it claims, and
+  -- that is integrity, not authenticity. The name `strict` is about manifest presence
+  -- only; it is not a signature check.)
+  let requireManifest := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
   for a in args do
     unless a == "--strict" do
       IO.eprintln s!"cache verify: unknown argument {a}"
@@ -709,9 +721,12 @@ def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
   let mut bad := 0
   for dir in dirs do
     let c ← Cache.verifyLayer dir
+    let note := if tc.readCaches.any (·.toString == dir.toString) then
+      " (read-only: a manifest is integrity, not authenticity)"
+    else ""
     IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
-      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested")
-    if c.mismatches + c.missing + c.expired > 0 || (strict && c.unmanifested > 0) then bad := bad + 1
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested" ++ note)
+    if c.mismatches + c.missing + c.expired > 0 || (requireManifest && c.unmanifested > 0) then bad := bad + 1
   pure (if bad == 0 then 0 else 1)
 
 /-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index

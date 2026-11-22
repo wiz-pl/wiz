@@ -10,6 +10,20 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 
 ## [Unreleased]
 
+* cache (security): three containment fixes at the elaboration cache's trust boundary.
+  A `.wizr` region is now served only when a module manifest lists it and the bytes match
+  — the unmanifested fallback is gone in every mode, because a region is a type-erased
+  image and its `.wizs` sidecar is written by the same writer (`--region-cache` with
+  `--cache-verify off` now reads and writes no regions). A `--cache-ro` layer is
+  **refused by default**: a manifest is a self-signed digest, so it does not authenticate
+  a foreign layer; `--cache-ro-unsigned` is the explicit opt-in for unauthenticated data
+  (the Nix wrappers pass it for their own store cache). `--cache-verify strict` is now
+  described as manifest-presence, not authenticity. The fast-only legacy key fallback is
+  deleted: an unmanifested `.wizc` is a miss in `warn` (only `--cache-verify off` keeps
+  the old unverified lookup). Compatibility: existing `--cache-ro` users must add
+  `--cache-ro-unsigned` (or `--cache-verify off`); write caches need one cold pass to
+  acquire manifests. A regression fixture plants a forged `.wizc` + `.wizmf` (a claim of
+  `False` and a forged `builtin`) and shows it is refused under the defaults.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes

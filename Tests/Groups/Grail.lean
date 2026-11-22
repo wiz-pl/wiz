@@ -161,7 +161,7 @@ def grailGroup : Group where
         let dir2 ← mkTree pkgFiles
         let write ← IO.FS.createTempDir
         let buildArgs := #["--grail", "-C", dir2.toString, "--cache-ro", warm.toString,
-                           "--cache", write.toString, "build", "app"]
+                           "--cache-ro-unsigned", "--cache", write.toString, "build", "app"]
         let out ← IO.Process.output { cmd := self.toString, args := buildArgs }
         checkEq 0 out.exitCode
         check ((out.stdout.splitOn "jobs run").length > 1) s!"{out.stdout}{out.stderr}" },
@@ -239,7 +239,8 @@ def grailGroup : Group where
         let before ← snapshot ro
         let write ← IO.FS.createTempDir
         let pkg ← mkTree pkgFiles
-        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache", write.toString, "--region-cache"]
+        let o3 ← grailBuild pkg ["--cache-ro", ro.toString, "--cache-ro-unsigned",
+                                 "--cache", write.toString, "--region-cache"]
         checkEq 0 o3.exitCode
         checkEq o0.stdout o3.stdout
         checkEq before (← snapshot ro)

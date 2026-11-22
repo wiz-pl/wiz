@@ -89,7 +89,9 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   a test's `-- test: run timeout SECS` line may ask for more),
   --cc X --cflags \"…\" --ldflags \"…\" --libs \"…\" --llc X --gc-cflags \"…\" --gc-ldflags \"…\" -I DIR,
   --cache DIR (the elaboration cache, default ~/.cache/wiz), --cache-ro DIR (repeatable:
-  a read-only cache, searched in order after the write cache), --no-cache (both),
+  a read-only cache, searched in order after the write cache; refused unless
+  --cache-ro-unsigned, because its manifests are self-signed), --cache-ro-unsigned,
+  --no-cache (both),
   --index URL (the package index: a directory, a file, or a git URL; default: the
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
   --require-signature (require a verified signed index snapshot; CI and the install

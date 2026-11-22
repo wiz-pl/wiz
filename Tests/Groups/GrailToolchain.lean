@@ -119,7 +119,7 @@ def toolchainGroup : Group where
         checkEq [] rest
         checkEq "strict" back.cacheVerify
         check ((tc.render.splitOn "cache-verify strict").length > 1) tc.render },
-    { name := "wiz cache verify/manifest, and a --cache-ro layer is strict by default", run := fun _ => do
+    { name := "wiz cache verify/manifest, and a --cache-ro layer is refused unless opted in", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
                           ("main.wiz", "import M\n#eval x\n")]
         let cache ← IO.FS.createTempDir
@@ -152,20 +152,30 @@ def toolchainGroup : Group where
         checkEq 0 warm.exitCode
         checkEq cold.stdout warm.stdout
         checkEq 0 (← run #["cache", "verify", "--cache", cache.toString]).exitCode
-        -- (a read-only layer: strict by default; nothing there is written or repaired)
+        -- (a read-only layer: refused by default, its manifests are self-signed)
         let ro := cache
         let before ← snapshot ro
         let rw ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-verify-stats"])
         checkEq 0 rw.exitCode
         checkEq cold.stdout rw.stdout
-        check ((rw.stderr.splitOn "cache verify: ").length > 1) s!"no verify stats: {rw.stderr}"
+        check ((rw.stderr.splitOn "refusing an unauthenticated layer").length > 1)
+          s!"the read-only layer was not refused: {rw.stderr}"
+        check ((rw.stderr.splitOn "--cache-ro-unsigned").length > 1) s!"no opt-in named: {rw.stderr}"
+        checkEq before (← snapshot ro)
+        -- (the explicit opt-in serves it, through its manifests; nothing is written or repaired)
+        let rw2 ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-ro-unsigned",
+          "--cache-verify-stats"])
+        checkEq 0 rw2.exitCode
+        checkEq cold.stdout rw2.stdout
+        check ((rw2.stderr.splitOn "cache verify: ").length > 1) s!"no verify stats: {rw2.stderr}"
+        check ((rw2.stderr.splitOn ", 0 entries").length == 1) s!"no entry was served: {rw2.stderr}"
         checkEq before (← snapshot ro)
         -- (a tampered read-only entry: a miss, the text path answers, the layer is unchanged)
         let some (roFile, _) ← firstManifestEntry ro
           | throw (IO.userError "no read-only manifest entry")
         let _ ← flipByte roFile
         let bad ← snapshot ro
-        let o ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        let o ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-ro-unsigned"])
         checkEq 0 o.exitCode
         checkEq cold.stdout o.stdout
         checkEq bad (← snapshot ro)
@@ -174,7 +184,7 @@ def toolchainGroup : Group where
           | throw (IO.userError "no manifest for M")
         IO.FS.removeFile mf
         let after ← snapshot ro
-        let o2 ← run (base ++ #["--no-cache", "--cache-ro", ro.toString])
+        let o2 ← run (base ++ #["--no-cache", "--cache-ro", ro.toString, "--cache-ro-unsigned"])
         checkEq 0 o2.exitCode
         checkEq cold.stdout o2.stdout
         check ((o2.stderr.splitOn "no manifest for a module").length > 1) s!"no warning: {o2.stderr}"
@@ -292,7 +302,7 @@ def toolchainGroup : Group where
         check ((o3.stderr.splitOn "cache prune: removed 0 files").length > 1) s!"stderr: {o3.stderr}"
         -- (a bad number of days is an error, not a silent no-op)
         checkEq 1 (← go #["--cache-prune", "0"]).exitCode },
-    { name := "--cache-ro with --region-cache serves the read-only layer and never writes it", run := fun _ => do
+    { name := "--cache-ro with --region-cache serves the read-only layer (opted in) and never writes it", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
                           ("main.wiz", "import M\n#eval x\n")]
         let ro ← IO.FS.createTempDir
@@ -309,7 +319,8 @@ def toolchainGroup : Group where
         let warm (stats : Bool) : IO IO.Process.Output := do
           let extra : Array String := if stats then #["--region-stats"] else #[]
           let args : Array String := #["check", "main.wiz", "-I", dir.toString, "--no-cache",
-                                       "--cache-ro", ro.toString, "--region-cache"] ++ extra
+                                       "--cache-ro", ro.toString, "--cache-ro-unsigned",
+                                       "--region-cache"] ++ extra
           IO.Process.output { cmd := wiz, args, cwd := some dir }
         let o ← warm true
         checkEq 0 o.exitCode
@@ -324,6 +335,96 @@ def toolchainGroup : Group where
         checkEq cold.stdout o.stdout
         check ((o.stderr.splitOn "0 without").length == 1) s!"the corrupt region was not a miss: {o.stderr}"
         checkEq beforeBad (← snapshot ro) },
+    { name := "a forged .wizc + .wizmf in a read-only layer is refused by default (the opt-in serves it)", run := fun _ => do
+        -- (the threat: a foreign layer ships a self-consistent manifest+entry whose effect is
+        -- a `theorem` of `False` and a `builtin` registration the elaborator would refuse.
+        -- Defaults must refuse the layer: a manifest is a self-signed digest.)
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let pkg ← IO.FS.createTempDir
+        -- (a genuine cold run writes M's manifest and entries)
+        let (cold, _) ← Cache.elaborateCached (some pkg) [] "import M\n" init 0 (verify := .warn) (rig := rig)
+        check (!cold.messages.any (·.severity == .error)) s!"cold: {cold.messages.toList.map (·.text)}"
+        let some mf ← manifestFor pkg "M"
+          | throw (IO.userError "no manifest for M")
+        let some man := Cache.parseManifest (← IO.FS.readFile mf)
+          | throw (IO.userError "M's manifest does not parse")
+        let some ent := man.entries[0]?
+          | throw (IO.userError "M's manifest lists no entry")
+        let key : Cache.Key := { fast := man.key, strong := man.keySha,
+                                 toolchain := man.toolchainTag, target := man.targetTag }
+        let cmdKey : Cache.Key := { fast := ent.key, strong := ent.keySha,
+                                    toolchain := man.toolchainTag, target := man.targetTag }
+        let forged : Cache.Effect ZeroOneMany :=
+          { decls := #[{ name := "forgedFalse", type := .const "False" [],
+                         value := some (.const "Nat.zero" []) }],
+            builtins := [("nat.forged", "forgedFalse")] }
+        -- (an attacker with write access rewrites the entry and recomputes the manifest)
+        IO.FS.writeFile (pkg / ent.file) forged.toSx.render
+        let attacker ← Cache.ManifestStore.create (some pkg) [] man.binary man.toolchain man.rig .warn
+        attacker.writeManifest key man.module
+          #[Cache.ManifestEntry.ofEffect man.binary cmdKey forged] man.region
+        let tampered ← snapshot pkg
+        let served : IO (CommandState ZeroOneMany) := do
+          pure (← Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn) (rig := rig)).1
+        -- (the documented default: the layer is refused, so the module is elaborated)
+        let s0 ← served
+        check (!s0.globals.contains "forgedFalse") "the forged declaration was served by default"
+        check (s0.globals.contains "x") "the genuine module did not answer in its place"
+        checkEq (none : Option Name) (s0.globals.builtinOf? "nat.forged")
+        checkEq tampered (← snapshot pkg)
+        -- (the explicit opt-in really does serve it: this is what the default refuses, not a
+        -- fixture that happens to miss)
+        let s1 ← (Cache.elaborateCached none [pkg] "import M\n" init 0 (verify := .warn)
+          (rig := rig) (roUnsigned := true)).1
+        check (s1.globals.contains "forgedFalse") "the opt-in did not serve the forged entry"
+        check (match s1.globals.find? "forgedFalse" with
+          | some d => (match d.type with | .const "False" _ => true | _ => false)
+          | none => false) "the forged declaration is not of type False"
+        checkEq (some "forgedFalse") (s1.globals.builtinOf? "nat.forged")
+        checkEq tampered (← snapshot pkg) },
+    { name := "a region with no manifest entry is never served (not in warn, not in off)", run := fun _ => do
+        -- (a region is type-erased at the boundary and its `.wizs` sidecar is written by the
+        -- same writer; only a manifest entry binds the image to a module key)
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let cache ← IO.FS.createTempDir
+        let binary ← Cache.binaryId (some cache)
+        let k := moduleCacheKey ms 0 "M"
+        let forged : Cache.Effect ZeroOneMany :=
+          { decls := #[{ name := "forgedFalse", type := .const "False" [],
+                         value := some (.const "Nat.zero" []) }] }
+        let _ ← Cache.writeModuleRegion (R := ZeroOneMany) cache binary rig k "M" #[forged] #[k.fast]
+        let opts : Cache.RegionOptions := { rig }
+        for mode in [Cache.VerifyMode.warn, .strict] do
+          let store ← Cache.Store.layeredRegion (R := ZeroOneMany) (some cache) [] binary opts mode rig
+          check (← store.getRegion k).isNone s!"{repr mode}: an unmanifested region was served"
+        -- (`off` has no manifest store: it serves no region either, and writes none)
+        let offCache ← IO.FS.createTempDir
+        let init : CommandState ZeroOneMany := { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let _ ← Cache.elaborateCached (some offCache) [] "import M\n" init 0
+          (region := some opts) (verify := .off) (rig := rig)
+        checkEq 0 (← regionFiles offCache).size
+        let storeOff ← Cache.Store.layeredRegion (R := ZeroOneMany) (some offCache) [] binary opts .off rig
+        check (← storeOff.getRegion k).isNone "an unmanifested region was served with --cache-verify off" },
+    { name := "a fast-only legacy key is a miss in warn (the unmanifested fallback is gone)", run := fun _ => do
+        -- (path D of the audit: the public `Key`/`Coe UInt64 Key` API must not turn into an
+        -- unverified lookup just because the key has no SHA-256 half)
+        let write ← IO.FS.createTempDir
+        let binary : UInt64 := 4242
+        let k : UInt64 := 7
+        let forged : Cache.Effect ZeroOneMany :=
+          { decls := #[{ name := "forgedFalse", type := .const "False" [],
+                         value := some (.const "Nat.zero" []) }] }
+        IO.FS.writeFile (write / s!"{mixHash binary k}.wizc") forged.toSx.render
+        let store ← Cache.Store.layered (R := ZeroOneMany) (some write) [] binary (.warn)
+        check (← store.getEntry k).isNone "an unmanifested fast-only entry was served in warn"
+        -- (`off` is the explicit unverified mode and the old lookup is still there)
+        let storeOff ← Cache.Store.layered (R := ZeroOneMany) (some write) [] binary (.off)
+        check (← storeOff.getEntry k).isSome "the explicit off mode lost the old lookup" },
     { name := "wiz check --region-cache: a warm run comes from regions, and corrupt ones are misses", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"), ("main.wiz", "import M\n#eval x\n")]
         let cache ← IO.FS.createTempDir

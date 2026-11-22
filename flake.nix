@@ -203,11 +203,12 @@ EOF
               makeWrapper $share/.lake/build/bin/wiz $out/bin/wiz \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils ]} \
                 --add-flags ${addFlags (tcFlags ++ [ "-I" "${placeholder "out"}/share/wiz/lib"
-                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+                  "--cache-ro" "${placeholder "out"}/share/wiz/cache" "--cache-ro-unsigned" ])}
               # grail: git fetches dependencies (stage 23h)
               makeWrapper $share/.lake/build/bin/grail $out/bin/grail \
                 --prefix PATH : ${lib.makeBinPath [ pkgs.coreutils pkgs.git ]} \
-                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache" ])}
+                --add-flags ${addFlags (tcFlags ++ [ "--cache-ro" "${placeholder "out"}/share/wiz/cache"
+                  "--cache-ro-unsigned" ])}
             '';
             meta = {
               description = "Wiz, a didactic dependently typed language, and grail, its build tool";
