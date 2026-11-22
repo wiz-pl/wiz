@@ -309,7 +309,7 @@ partial def discardedTerms (t : Term R) : Array (String × Name) :=
     | .letE _ q ty val body => discardedTerms q ++ discardedTerms ty ++ discardedTerms val ++ discardedTerms body
     | .sigma _ q a b _ => discardedTerms q ++ discardedTerms a ++ discardedTerms b
     | .split q s _ m _ _ b => discardedTerms q ++ discardedTerms s ++ discardedTerms m ++ discardedTerms b
-    | .ecase _ m s bs => discardedTerms m ++ discardedTerms s ++ (bs.foldl (· ++ discardedTerms ·) #[])
+    | .ecase _ m s bs => discardedTerms m ++ discardedTerms s ++ (bs.foldl (· ++ discardedTerms ·) #[])   -- complexity: ok (one array per case alternative)
     | t => (t.forChildren (m := StateM (Array (String × Name))) (fun _ => pure ())
         (fun _ c => modify (· ++ discardedTerms c)) |>.run #[]).2
   here ++ rest
