@@ -44,6 +44,24 @@ def usageTest : IO Unit := do
   match Usage.join? a a with
   | some j => check (j == a) "join of a usage with itself changed it"
   | none => throw (IO.userError "join of a usage with itself does not exist")
+  -- a stopped vector's missing entries are zeros, and a zero still has to pass the
+  -- binder's quantity: a linear binder used zero times is an error, not acceptance
+  match popUsage "lin" (QPoly.const 1) ([] : Usage ZeroOneMany) with
+  | .ok _ => throw (IO.userError "an unused linear binder was accepted (popUsage [] with q = 1)")
+  | .error (.quantityMismatch _ _ used) =>
+    check (used == "0") s!"the dropped linear binder reported usage {used}, expected 0"
+  | .error e => throw (IO.userError s!"the dropped linear binder reported the wrong error: {e}")
+  match popUsage "erased" (QPoly.const 0) ([] : Usage ZeroOneMany) with
+  | .ok u => check u.isEmpty "popping an unused erased binder did not return []"
+  | .error e => throw (IO.userError s!"an unused erased binder was rejected: {e}")
+  match popUsage "unrestricted" (QPoly.const ZeroOneMany.many) ([] : Usage ZeroOneMany) with
+  | .ok u => check u.isEmpty "popping an unused unrestricted binder did not return []"
+  | .error e => throw (IO.userError s!"an unused unrestricted binder was rejected: {e}")
+  -- 1 ⊔ 0 = ω in {0, 1, ω}: a case branch that uses a linear variable and one that does
+  -- not must join to ω, so the branch agreement check sees it
+  match Usage.join? (Usage.single 2 0) (Usage.zeros 2) with
+  | some j => check (Usage.getD j 0 == QPoly.const ZeroOneMany.many) s!"join of 1 and a missing entry is {Usage.getD j 0}, expected ω"
+  | none => throw (IO.userError "join of 1 and a missing entry does not exist")
 
 /-! ## The context arrays -/
 
