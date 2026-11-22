@@ -392,7 +392,9 @@ def smtGroup : Group where
           | throw (IO.userError "cannot parse the cache entry")
         -- replace the proof and update the digest: the entry is still served (its bytes
         -- match the record), and only the re-parse/kernel check can reject it
-        let bad : Entry := e.withDigest (Smt.Sha256.hexBytes "this is not LRAT".toUTF8)
+        let bad : Entry :=
+          { e with proof := "this is not LRAT" }.withDigest
+            (Smt.Sha256.hexBytes "this is not LRAT".toUTF8)
         IO.FS.writeFile es.head! (bad.render)
         let ms ← msgs src cfg
         expect ms "LRAT: bad line"
@@ -443,9 +445,11 @@ def smtGroup : Group where
         let path := es.head!
         let entryText ← IO.FS.readFile path
         let some e := parseEntry entryText | throw (IO.userError "cannot parse the entry")
-        -- (c1) digest updated: served from the cache, without running the solver
+        -- (c1) proof and digest updated together: served from the cache, without
+        -- running the solver
         IO.FS.writeFile (System.FilePath.mk marker) ""
-        IO.FS.writeFile path ((e.withDigest (Smt.Sha256.hexBytes "PROOF2".toUTF8)).render)
+        IO.FS.writeFile path
+          (({ e with proof := "PROOF2" }.withDigest (Smt.Sha256.hexBytes "PROOF2".toUTF8)).render)
         match Smt.runSolver cfg "sh" (mk body) "q2" "smt2" true (fun a => a.exitCode == 20) with
         | .ok (_, a) => checkEq "PROOF2" a.outFile
         | .error e => throw (IO.userError s!"a digest-matching cached proof was not served: {e}")
