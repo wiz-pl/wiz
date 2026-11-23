@@ -1052,6 +1052,18 @@ EOF
               mkdir -p $out
               cp package/wiz-${releaseArch}-linux.tar.gz \
                  package/wiz-${releaseArch}-linux.tar.gz.sha256 $out/
+              # GPLv3 Corresponding Source for the bundled GCC runtime: the
+              # upstream tarball and the patches nixpkgs applies, beside the
+              # tarball in the same Nix output so they travel together.
+              mkdir -p gcc-source
+              cp ${pkgs.gcc.cc.src} gcc-source/
+              for p in ${lib.concatStringsSep " " pkgs.gcc.cc.patches}; do
+                cp "$p" gcc-source/
+              done
+              echo ${nixpkgs.rev} > gcc-source/NIXPKGS_REVISION
+              tar --sort=name --mtime=@${epoch} --owner=0 --group=0 \
+                --numeric-owner -czf $out/gcc-16.2.0-nixpkgs-source.tar.gz \
+                -C gcc-source .
               runHook postInstall
             '';
             doCheck = true;
