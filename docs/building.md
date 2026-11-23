@@ -66,8 +66,8 @@ plain `lake build` does not, and a stale driver runs whichever case had that ind
 compares the trusted base it finds with the checked-in `.github/trust-baseline.tsv`: a
 new `axiom`, `sorry`, `native_refl` or SMT axiom, `implemented_by`/`repr:`
 implementation, `builtin` registration or `partial` definition fails until the baseline
-is updated after review. The `build` job runs the whole check right after the Nix
-build and before any shard starts (with `Tests/trust-ledger/run.sh`), so a ledger
+is updated after review. The `trust_ledger` job runs the whole check after the `lean`
+build, beside the shards (with `Tests/trust-ledger/run.sh`), so a ledger
 regression fails the run early; the `native` group also covers the `lib/` part and
 `hdl-verified` the example's inside the shards;
 `scripts/trust-ledger.sh --update` regenerates the
@@ -918,7 +918,7 @@ which grail and the test driver read (`Tests/Main.lean`; flags to `lake test -- 
 `wiz` takes flags. Nothing reads environment variables.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes and pull requests to
-`master`. The toolchain is built **once**, with Nix: the `build` job runs
+`master`. The toolchain is built **once**, with Nix: the `lean` job runs
 `nix build .#wiz .#tests` (nixpkgs' Lean, no Lake artifact cache) and publishes those
 two store paths to Cachix with
 
@@ -931,12 +931,12 @@ registry lookup is involved. `CACHIX_AUTH_TOKEN` (the repository secret) is in t
 master push step's environment only. A Nix build has no Lake artifact cache: a commit's
 first build compiles every module in the sandbox (Lean comes from nixpkgs), and a rerun
 of the same commit substitutes the store paths. Only a push to master writes the
-trusted cache; a pull request's `build` writes its own untrusted cache instead
+trusted cache; a pull request's `lean` job writes its own untrusted cache instead
 (`CACHIX_PR_NAME` and `CACHIX_PR_AUTH_TOKEN`), and without that secret it publishes
 nothing and its shards build the paths. A merge-queue run publishes nothing either, so
 its shards build too.
 
-A **pull request**'s `build` job does not compile from scratch. A push to master's
+A **pull request**'s `lean` job does not compile from scratch. A push to master's
 `lake_seed` job builds flake.nix's `withLakeCache` with `empty-lake`: a cold compile
 *inside the derivation* (the sandbox enforces it — no cache, no dev shell), whose second
 output `lake` carries what Lake wrote — `.lake/build/lib`, `.lake/build/ir`,
@@ -944,18 +944,21 @@ output `lake` carries what Lake wrote — `.lake/build/lib`, `.lake/build/ir`,
 without `.lake/cache` (the build phase keeps that in `$TMPDIR`). The job saves that
 output under two Actions-cache keys (`scripts/lake-cache.sh key`: `flake.lock`, the
 `lean-toolchain` stamp, the architecture and the `lean`/`runtime` subset hashes), a
-trusted one and an untrusted one. A pull request restores the untrusted key first (its
-own previous run) and the trusted one second, and builds `withLakeCache <seed>`: the
+trusted one and an untrusted one. A pull request first restores its own PR-scoped
+`lean` subset cache (`.subset-cache/lean`, keyed by the `lean` subset's sha and the
+toolchain, not by the whole tree), then the untrusted seed key (its own previous run),
+then the trusted one, and builds `withLakeCache <seed>`: the
 same function, so Lake recompiles only the modules whose inputs changed. The producer's
 `bin` **should** be byte-identical to the pure build's — it is the same sources compiled
 by the same Lake — and the equality is asserted by the seed measurement's `cmp` of all
 three binaries; that measurement has **not yet run in CI**, so the claim is a design
 expectation, not a measured fact. It is what would make the producer a trustworthy
 substitute for the compile; **nothing a pull request writes is read by a
-trusted job** — a pull request saves no seed at all, and the producer only ever passes
+trusted job** — its only write is that PR-scoped subset cache, never the
+trusted/untrusted seed keys, and the producer only ever passes
 `empty-lake` (its job has no restore step). A missing seed is `empty-lake`, the same cold
 build, never an error. Those store paths differ from the pure build's — the seed is an
-input — so the shards, `trust-ledger`, `web` and `web_modules` ask for the `build` job's
+input — so the shards, `trust-ledger`, `web` and `wasm` ask for the `lean` job's
 paths directly (`nix build /nix/store/…`, which substitutes them from Cachix) instead of
 recomputing the derivation. Pushes, the merge queue and the release workflows keep the
 pure `nix build`: the trusted cache and every release artifact name the pure derivation,
@@ -966,10 +969,13 @@ reference manual, made with the cached `wiz`) on a push, off the shards' critica
 Every job pulls from Cachix through `cachix-action`, which is set up for substitution
 only (`skipPush: true`); on a pull request it reads the trusted cache anonymously, and
 the jobs that substitute this commit's store paths (the test shards, `trust-ledger`,
-`web` and `web_modules`) also add the PR cache as an extra substituter for that job
-only. No job on the critical path runs `lake build` directly, and the only `.lake`
-Actions caches are the `lake_seed` job's cold seed and a pull request's restore of it
-(above). The shards run the Nix-built test driver
+`web`, `wasm`, `lean` and `packages`) also add the PR cache as an extra substituter for
+that job only. No job on the critical path runs `lake build` directly, and the `.lake`
+Actions caches are the `lake_seed` job's cold seed, a pull request's restore of it, and
+the per-subset caches in [ci-runner.md](ci-runner.md) (a PR's `lean`
+`.subset-cache/lean`, a shard's Wiz caches,
+and the docs/package caches); a failed job writes none of them. The shards run the
+Nix-built test driver
 (`packages.tests`), not
 `lake test`, and symlink the store `wiz`
 and `grail` into the checkout's `.lake/build/bin`, which some cases and
@@ -994,7 +1000,7 @@ setup action keeps the elan cache for those
   named in `.github/test-shard-exclusions.json` with the reason it runs in no CI shard
   and an owner. A group with neither is an error naming it (and its `Group.shard` hint,
   if any), so a new group cannot silently join another shard's queue; there is no
-  default-shard fallback. The build job runs `scripts/ci.py check-shards` (the same
+  default-shard fallback. The `lean` job runs `scripts/ci.py check-shards` (the same
   check as `scripts/check-shards.py`), which also fails on an exclusion whose group does
   not exist or which a shard selects after all, and on a `.github/skip-allowlist.json`
   entry whose group or case no case matches; `check-shards --self-test` checks each of
@@ -1048,7 +1054,7 @@ setup action keeps the elan cache for those
   the declarations, and stale or expired entries in
   `.github/name-collisions-baseline.json` — by calling the existing checks and reporting
   one `companion drift:` line naming both sides. (The test-shard total needs the test
-  binary, so that check stays in the build job; the trust ledger and scry goldens have
+  binary, so that check stays in the `lean` job; the trust ledger and scry goldens have
   their own jobs.) It also runs `scripts/check-release-consistency.py`, which checks the
   release packet and, for the machinery, that a version, channel, `scripts/...` command
   or release artifact named in `docs/release*`, `docs/building.md`, `README.md` or
@@ -1069,31 +1075,34 @@ setup action keeps the elan cache for those
   `IO`/`Std`/`Bytes` names). No build, well under a second, and `CI result` requires it;
   the copies, the current gaps and what the real fix costs are in
   [stages/21-bootstrap.md](stages/21-bootstrap.md#the-two-preludes-and-the-drift-check).
-* **Documentation examples** (the `docs_examples` job, and a step in `build`):
+* **Documentation examples** (the `docs_examples` job, and a step in `lean`):
   `scripts/check-docs-examples.py` checks every fenced block marked `wiz` in `README.md`
   and `docs/**/*.md` with `wiz check` and runs the blocks marked `wiz run`, comparing
   their output with the block beside them; a `wiz no-check` block is an explicit
   exception.
   Relative links and `examples/...` references must resolve. On a docs-only pull request
   `docs_examples` substitutes the Nix-built `wiz` from Cachix (the same store path
-  `build` publishes); a pull request that changes code runs the same check in `build`.
-  Its cache (`.lake/docs-examples`) is keyed by the Lean sources that build `wiz`, so a
-  docs-only run is seconds and a toolchain change invalidates it.
+  `lean` publishes); a pull request that changes code runs the same check in `lean`.
+  Its cache (`.lake/docs-examples`) is keyed by the subset that runs it (`docs` in
+  `docs_examples`, `lean` in the `lean` job), and the checker keys its entries
+  internally by the compiler and the snippet text, so a docs-only run is seconds and a
+  toolchain change invalidates the changed blocks.
 * **The documentation site** (the `docs` and `deploy-docs` jobs): on a push to `master`
   only (not a pull request, the weekly run or a manual run), `docs` copies the two Wasm
-  modules that `web_modules` built (`wiz-web`, `wiz-playground`), the standard library's
+  modules that `wasm` built (`wiz-web`, `wiz-playground`), the standard library's
   pages with
   `wiz doc --lib` (source links to the commit; a restored elaboration cache makes this
   a replay, "Documentation site" below) into `doc-site/docs`, and the landing page
   and the static playground around them (`web/build-site.sh`); `web/check-site.sh`
   checks that `/`, `/docs/` and `/playground/` exist and that the landing page's local
   links resolve. It uploads the tree as the artifact `wiz-docs` (3 days, for debugging),
-  and `deploy-docs` publishes it to GitHub Pages. Neither job is a required check, so a
-  Pages outage does not fail the suite. See "Documentation site" below.
+  and `deploy-docs` publishes it to GitHub Pages. `deploy-docs` is not a required
+  check, so a Pages outage does not fail the suite; `docs` itself is required on a push.
+  See "Documentation site" below.
 * **The playground and the site's JavaScript** (the `web` job): on a pull request that
   changes `web/**` (and on a push), `web/test.sh` runs with `WIZ_WEB_NO_BROWSER=1`. The
   three Wasm modules (`web/build.sh`, `web/build-playground.sh` and the playground's Loom
-  UI, `web/build-playground-ui.sh`) are not built here: the `web_modules` job builds them
+  UI, `web/build-playground-ui.sh`) are not built here: the `wasm` job builds them
   once as the Nix derivations `packages.wiz-web`, `packages.wiz-playground` and
   `packages.wiz-playground-ui` (flake.nix) and publishes them to Cachix, and `web/test.sh`
   copies those directories (`WIZ_WEB_FROM`, `WIZ_PLAYGROUND_FROM`,
@@ -1118,9 +1127,9 @@ setup action keeps the elan cache for those
   different directories and environments, compares the archives, manifests and
   source SBOM, and checks the exclusions; `scripts/test_release_sbom.py` checks
   that the source and binary SBOMs and the provenance parse, match every archive
-  digest and are byte-identical on a second run. The `build` job also runs
+  digest and are byte-identical on a second run. The `lean` job also runs
   `nix build .#release-tarball --rebuild` ("Reproducible source tarball").
-* **Trust ledger** (a step in the `build` job, before any shard):
+* **Trust ledger** (the `trust_ledger` job, after `lean`):
   `scripts/trust-ledger.sh --check --strict-legacy` runs the
   `--trust-ledger` mode of the test driver (`Tests/Native.lean`) over `lib/` and the
   axiom-free examples, and compares the sources of trust it finds with
@@ -1208,7 +1217,7 @@ setup action keeps the elan cache for those
   cases have an entry in `.github/test-timings.json`, and no shared program is built by
   two parts of one split shard (a `"split-cases": true` shard excepted: its parts each
   build it by design, and the estimates charge for it). It is tracked in two places:
-  * `scripts/ci.py check-shards` (the build job) warns when a split shard has cases
+  * `scripts/ci.py check-shards` (the `lean` job) warns when a split shard has cases
     that are not in the baseline.
   * `scripts/ci.py balance` (the `CI result` job) takes the run's job list from the API
     and compares each `tests --` step's wall, so a shard that runs cases in parallel
@@ -1361,17 +1370,18 @@ setup action keeps the elan cache for those
   the build with itself, and "Run workflow" with `bootstrap: true` does that again
   after a deliberate change to the benchmark program. The JSONs, `bench/history.jsonl`
   (one line per run) and the baseline executable are artifacts, not committed files.
-* **The Nix package** (the `build` job; the old separate `nix package` job is folded
+* **The Nix package** (the `lean` job; the old separate `nix package` job is folded
   into it): `nix build .#wiz .#tests` builds `wiz` and `grail` with Lake in the Nix
   sandbox and nixpkgs' Lean (the flake checks that it is the version in `lean-toolchain`)
   and the test driver from the same build, and wraps the binaries with the toolchain as
   flags (`--cc`, `--cflags`, `--ldflags`, `--llc`, `--gc-cflags`, `--gc-ldflags`; flags
   you pass come later and win) and, for `wiz`, the packaged standard library as a module
-  root after `./lib`. The job then checks the package from a directory with no checkout
-  (`nix run "$GITHUB_WORKSPACE#wiz" -- check/build …`, and `#grail` starts), so the
-  publication path is exercised before the push. It publishes to the public Cachix cache
-  `badlydrawnwizards` from `master` and from this repository's pull requests (which have
-  the token); `packages.tests` is `nix run .#tests -- --list`, and `packages.reference` is
+  root after `./lib`. The `packages` job checks the package from a directory with no
+  checkout (`wiz check/build`, and `grail` starts), so the publication path is exercised
+  before the push. The `lean` job publishes to the public Cachix cache
+  `badlydrawnwizards` from `master` only; a pull request publishes to its own untrusted
+  cache (`CACHIX_PR_NAME`), or nothing without that secret. `packages.tests` is
+  `nix run .#tests -- --list`, and `packages.reference` is
 the generated reference manual (`result/index.md`, and `result/site`).
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
@@ -1445,19 +1455,23 @@ the generated reference manual (`result/index.md`, and `result/site`).
   `gh cache list -R wiz-pl/wiz -S size_in_bytes`.
 
 * **Path filters.** On a pull request the `changes` job (`scripts/ci.py changes`) reads
-  the files the PR changes and decides what runs: nothing but `changes`, `docs_style`,
-  `docs_examples` and `CI result` for a docs-only PR (`docs/`, `*.md`, LICENSE);
+  the files the PR changes and decides what runs: the static gates (`changes`,
+  `docs_style`, `name collisions (reachable)`, `prelude drift`, `attestation verifier`)
+  and, for a docs-only PR (`docs/`, `*.md`, LICENSE), `docs_examples` and `CI result`;
   `trust-ledger` runs whenever any code did; every shard when a Lean
   file, the build, the runtime, `scripts/`, `.github/` or `web/` changed; otherwise each
   shard with `"inputs"` in `.github/test-shards.json` only when one of its inputs
   changed (a `lib/X.wiz` input brings the lib files it imports), and the shards without
-  `"inputs"` (backends, library) for any non-docs change. The `web` job (the playground
-  and the site's JavaScript) runs when a `web/` file changed. So a PR touching only,
-  say, `lib/Json.wiz` skips `core` and the selfhost shards. `CI result` counts a job the
-  filter skipped as fine and a job it wanted only if it succeeded. Pushes to `master`,
-  the merge queue and manual runs always run everything, so a missing input shows up
-  there at the latest. A test that starts reading a new file belongs in a shard without
-  `"inputs"`, or add the file to its shard's `"inputs"`.
+  `"inputs"` (backends, library) for any non-docs change. The `lean` job runs whenever
+  `code` changed (it emits the shard matrix every non-empty `shards` list needs); the
+  `packages` and `runtime` jobs run only when their subset (`scry/`/`hdl/`/`tower/`, or
+  `runtime/`/`c/`) changed, and `web`/`wasm` when a `web/` file did. So a PR touching
+  only, say, `lib/Json.wiz` runs the `lean` job (warm: its sources and seed are
+  unchanged) and the shards, but skips the packages/runtime jobs. `CI result` counts
+  a job the filter skipped as fine and a job it wanted only if it succeeded. Pushes to
+  `master`, the merge queue and manual runs always run everything, so a missing input
+  shows up there at the latest. A test that starts reading a new file belongs in a shard
+  without `"inputs"`, or add the file to its shard's `"inputs"`.
 * **A self-hosted runner** for the heavy shards (`"heavy": true` in
   `.github/test-shards.json`): set the repository variable `WIZ_RUNNER_HEAVY` to its
   label; unset, everything runs on `ubuntu-latest`. Pull requests from forks never run
@@ -1624,13 +1638,13 @@ relative, so the project-site prefix (or a custom domain root) works either way:
 | `/bench/` | standard-library timings and the Scry taint corpus | `bench/*.json`, `scry/bench/baseline.json`, `web/build-bench.py` |
 | `/playground/` | the static playground (stage 11ab) | `web/playground.*`, `web/build-playground.sh` |
 
-The `docs` job copies the two Wasm modules that `web_modules` built from Cachix
+The `docs` job copies the two Wasm modules that `wasm` built from Cachix
 (`web/build.sh` for the documentation's interactive signatures,
 `web/build-playground.sh` for the playground; the scripts only copy in that mode),
 runs `wiz doc
 --lib -o doc-site/docs --web web/out` (source links to the commit), copies the
 reference manual's Markdown from the flake's `reference` package (`nix build
-.#reference`, a Cachix hit when the build job already built it) to
+.#reference`, a Cachix hit when the `lean` job already built it) to
 `doc-site/docs/reference.md`, assembles the
 landing page, the benchmark page, the playground and the guide with `web/build-site.sh
 doc-site web/out`, checks the result with `web/check-site.sh doc-site` (the five entry
@@ -1829,7 +1843,7 @@ nix run --option extra-substituters https://badlydrawnwizards.cachix.org \
 or `cachix use badlydrawnwizards` once and then `nix run
 github:wiz-pl/wiz#wiz -- …` (`#grail` for grail; `wiz build FILE -o OUT`
 works out of the box). Without a branch the flake reference means the default branch,
-`master`, whose binaries are on Cachix once its `build` job has pushed them. The
+`master`, whose binaries are on Cachix once its `lean` job has pushed them. The
 `--option`s count only for a trusted Nix user (or with the cache in `nix.conf`);
 otherwise Nix builds wiz from source, which takes a few minutes.
 

@@ -26,6 +26,44 @@ self-hosted runner executes that pull request's code on the machine. So:
   internet). A job sees the Cachix auth token while it runs, as on GitHub's runners;
   that is why only this repository's code may run there.
 
+## The CI job graph
+
+`.github/workflows/ci.yml` is split by the repository subsets in
+`.github/repo-subsets.json` (`scripts/repo-subsets.py`). The `changes` job publishes a
+`subset_<name>` boolean per subset; `CI result` requires a job exactly when that job's
+`if:` fires, so a skipped job and an unneeded job are the same thing.
+
+| job | subset | runs when |
+|---|---|---|
+| `changes` | all (path filters) | every run but the weekly schedule |
+| `docs style` | docs (static checks) | every run |
+| `name collisions (reachable)` | docs/lean (static) | every run |
+| `prelude drift` | docs/wizlib (static) | every run |
+| `docs examples` | docs | a docs-only pull request |
+| `source tarball` | release artifacts | `code` |
+| `attestation verifier` | scripts/attest | every run |
+| `lean` | lean (the Nix build of `wiz`/`tests`) | `code`; it emits the shard matrix and the store paths every shard substitutes |
+| `lake seed` | lean (the trusted cold seed) | a push to master with `code` |
+| `trust ledger` | wizlib (it walks `lib/`) | `code` |
+| `STC metatheory` | `STC.lean`, `STC/` | `stc` or `code` |
+| `tests` | tests (the shard matrix) | `shards` is not empty |
+| `wasm modules` | web (the Wasm page modules) | `web` |
+| `web` | web (browser-free tests) | `web` |
+| `docs` | docs (the published site) | a push |
+| `deploy docs to Pages` | docs | a push |
+| `packages` | packages (`scry/`, `hdl/`, `tower/`) | `subset_packages` |
+| `runtime` | runtime (`runtime/`, `c/`) | `subset_runtime` |
+| `CI result` | all | every run but the weekly schedule |
+| `bootstrap fixpoint` | none (schedule/dispatch) | the schedule or the `fixpoint` input |
+
+A path that matches several subsets sets all of them. A path no subset claims
+(`scripts/`, `flake.*`, `selfhost/`, ...) or any `.github/` edit sets every subset, so
+an input the table does not classify still runs every job. The `lean` job runs for any
+`code` change rather than the `lean` subset alone: the shard matrix is a job output, and
+a non-empty `shards` list cannot be expanded without it. The build is warm on a
+`wizlib`/`packages` change (the sources and the seed are unchanged, so Cachix
+substitutes or Lake recompiles nothing).
+
 ## What the runner needs
 
 * Linux, x86_64 or aarch64 (see "aarch64" below). 4 or more cores, 16 GB of memory
@@ -191,26 +229,67 @@ big one, with smaller `--cpus`/`--memory`) to take several heavy shards at once.
 ## Caches
 
 Each job starts with an empty container. The Nix store comes from the image and from
-Cachix: the `build` job's `nix build .#wiz .#tests` store paths are published and the
+Cachix: the `lean` job's `nix build .#wiz .#tests` store paths are published and the
 shards substitute them. The Wiz build caches (`~/.cache/wiz`, `.grail`,
-`/tmp/wiz-selfhost-*`) still come from the GitHub Actions cache, as on GitHub's runners.
-There is no `.lake` build or `.lake` cache to restore.
+`/tmp/wiz-selfhost-*`) and the per-subset workspace caches below still come from the
+GitHub Actions cache, as on GitHub's runners. A pull request saves its own PR-scoped
+`lean` subset cache (`.subset-cache/lean`, a `withLakeCache` `.lake` output); it is
+untrusted and PR-scoped, and the shards still have no `.lake` build or `.lake` cache.
+
+### Subset caches
+
+The Actions caches are keyed per repository subset, not by the whole tree, so a run
+that fails in one subset leaves the successful subsets' caches for the next run of the
+same pull request. `scripts/ci.py subset-key NAME [--with NAME] [--scope S]
+[--suffix S]` prints one `key=` and one `prefix=`:
+
+```text
+key:    subset-v1-<name>[-<name>...]-<os>-<arch>-<toolchain12>[-<scope>]-<sha12>[-<sha12>...][-<suffix>]
+prefix: subset-v1-<name>[-<name>...]-<os>-<arch>-<toolchain12>[-<scope>]-
+```
+
+`<sha12>` is the first 12 hex of the subset's `sha256` in `.github/repo-subsets.json`;
+`<toolchain12>` hashes `flake.lock` and `lean-toolchain`; `<os>`/`<arch>` are the
+runner's OS and architecture. The prefix stops before the subset hashes, so a later run
+restores its own subset's previous entry and recompiles what changed.
+
+| job | cache path | key |
+|---|---|---|
+| `lean` | `.subset-cache/lean` | `subset-v1-lean-<os>-<arch>-<toolchain12>-<lean12>` |
+| `lean` | `.lake/docs-examples` | `subset-v1-lean-<os>-<arch>-<toolchain12>-docs-examples-<lean12>` |
+| `docs examples` | `.lake/docs-examples` | `subset-v1-docs-<os>-<arch>-<toolchain12>-examples-<docs12>` |
+| `docs` | `.wiz-doc-cache/ro` | `subset-v1-docs-<os>-<arch>-<toolchain12>-site-<docs12>` |
+| `packages` | `scry/.grail` | `subset-v1-packages-<os>-<arch>-<toolchain12>-<compiler-key>-<packages12>` |
+| `tests` | `~/.cache/wiz`, `.grail`, `/tmp/wiz-selfhost-*` | `subset-v1-tests-wizlib-<os>-<arch>-<toolchain12>-<shard>-<compiler-key>-<selfhost/lib hash>-<tests12>-<wizlib12>-<wiz tree hash>` |
+| `trust ledger` | `.lake/trust-cache` | `subset-v1-wizlib-<os>-<arch>-<toolchain12>-<driver sha>-<wizlib12>` |
+
+`web`, `wasm` and `runtime` own no Actions cache: the modules are Nix store paths in
+the PR Cachix cache (content-addressed and reused path by path), the web job's product
+is a check result, and the runtime script builds into a temporary directory.
+
+A job restores with `actions/cache/restore` (`key` plus `restore-keys` = the prefix) and
+saves with `actions/cache/save` under the same key. The save step has no `always()`:
+only a successful build (or check, or test) reaches it, so a failed subset writes
+nothing. A failed `docs` or `web` job does not touch the `lean` key (the lean seed is
+saved right after its Nix build), and the `tests` shards save their own keys (each shard
+is a separate key). The trusted Lake seed (`lake_seed` -> `.lake-seed`, keys from
+`scripts/lake-cache.sh key`) stays master-only; a PR writes only the subset keys above.
 
 ### Which cache is trusted
 
 The invariant: **only master publishes trusted paths; PR caches are per-run and
 untrusted.**
 
-* A push to `master` publishes the `build` job's store paths to `CACHIX_NAME`
-  (`badlydrawnwizards`) with the `CACHIX_AUTH_TOKEN` secret. The tag/release path only
-  reads that cache (it has no Cachix push). That cache's key is the only Cachix key in
-  the image's `nix.conf` and in the docs/tower instructions
+* A push to `master` publishes the `lean` job's store paths (and the `wasm` job's page
+  modules) to `CACHIX_NAME` (`badlydrawnwizards`) with the `CACHIX_AUTH_TOKEN` secret.
+  The tag/release path only reads that cache (it has no Cachix push). That cache's key
+  is the only Cachix key in the image's `nix.conf` and in the docs/tower instructions
   (`cachix use badlydrawnwizards`).
 * A pull request publishes only to the PR cache `wiz-pl` (repository variable
   `CACHIX_PR_NAME`), with the token in the secret `CACHIX_PR_AUTH_TOKEN`. A PR's test
-  shards, trust-ledger and web jobs add that cache as an extra substituter for that job
-  only, so its key is trusted in that job and nowhere else; master, the docs job and
-  tower never add it as a substituter.
+  shards, trust-ledger, web, wasm, lean and packages jobs add that cache as an extra
+  substituter for that job only, so its key is trusted in that job and nowhere else;
+  master and the docs job never add it as a substituter.
 * If `CACHIX_PR_AUTH_TOKEN` is unset, or the PR is from a fork, the PR pushes nothing:
   the step prints "the store paths are not published" and continues, and the shards
   build the paths. Nothing falls back to `CACHIX_AUTH_TOKEN`.
@@ -234,11 +313,11 @@ Cachix token with Write on `wiz-pl` and Read on `badlydrawnwizards`.
 
 ## aarch64
 
-* Cachix holds x86_64 builds only (the `build` job runs on GitHub's x86_64 runner). A
+* Cachix holds x86_64 builds only (the `lean` job runs on GitHub's x86_64 runner). A
   heavy shard on an aarch64 runner has a different store path for the same sources, so
   `nix build .#wiz .#tests` builds it there the first time and nothing publishes it:
   aarch64 jobs are slower until the cache holds an aarch64 build (publishing one needs a
-  build job on that architecture, or a manual `cachix push` from an aarch64 machine).
+  `lean` job on that architecture, or a manual `cachix push` from an aarch64 machine).
   The dev shell's packages still come from cache.nixos.org, which builds aarch64-linux,
   and the image's pre-fetch step matters more.
 * The Wiz build-cache key carries the architecture through its compiler hash and
