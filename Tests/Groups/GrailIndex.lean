@@ -461,7 +461,54 @@ def grailIndexGroup : Group where
         | .ok _ => throw (IO.userError "resolved a yanked version")
         -- through the CLI it is exit 1 as well (the snapshot no longer covers the entry)
         IO.FS.writeFile entryPath yankedEntry
-        checkEq 1 (← run updated) }
+        checkEq 1 (← run updated) },
+    { name := "a lock's registry entries are checked against the signed snapshot", run := fun _ => do
+        unless ← haveSshKeygen do
+          skip "no ssh-keygen"
+          return
+        let root ← IO.FS.createTempDir
+        let (idx, _key, allowed, sha, tree) ← signedEntryIndex root 1
+        let std ← IO.FS.realPath "lib"
+        let cache := root / "cache"
+        let dir ← mkTree [
+          ("grail.wiz", s!"import Grail\ndef package : Package := Package.new \"app\"\n  |> Package.set \"index\" \"{idx}\"\n  |> Package.require \"greet\" \"^1\"\n")]
+        let run (args : List String) : IO UInt32 :=
+          Grail.cliMain (["-C", dir.toString, "--std", std.toString, "--cache", cache.toString] ++ args)
+        checkEq 0 (← run ["update", "--require-signature", "--allowed-signers", allowed.toString])
+        let lockPath := dir / "grail.lock"
+        let lockText ← IO.FS.readFile lockPath
+        -- the lock the update wrote is the signed state: the audit passes
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"])
+        -- A second archive for the same name@version, built from other sources, is not
+        -- the release the index signed. A lock edited to name it (with its real tree)
+        -- and a vendor directory holding it pass every local check: `--locked` reads no
+        -- index, and the archive hash in the lock is what fetch and build check.
+        let evilRoot := root / "evil"
+        IO.FS.createDirAll evilRoot
+        let (evilTar, evilSha) ← tarballOf evilRoot "greet" "1.2.0"
+          [("grail.wiz", "import Grail\ndef package : Package := Package.new \"greet\"\n  |> Package.version \"1.2.0\"\n  |> Package.toolchain \">=0.1.0\"\n  |> Package.lib \"greet\" \"src\"\n"),
+           ("src/Greet/Hello.wiz", "import Prelude\ndef hello : Nat := 666\n")]
+        let .ok evilTree ← Grail.Registry.unpackTreeHash evilTar
+          | throw (IO.userError "could not hash the second archive")
+        let vend := dir / "vendor"
+        IO.FS.createDirAll vend
+        let _ ← runIn root "cp" [evilTar.toString, (vend / (evilSha ++ ".tar.gz")).toString]
+        IO.FS.writeFile (vend / "index.sexpr")
+          s!"(vendor\n  (format 1)\n  (archive \"greet\" \"1.2.0\" \"{evilSha}\" \"{evilSha}.tar.gz\"))\n"
+        IO.FS.writeFile lockPath ((lockText.replace sha evilSha).replace tree evilTree)
+        checkEq 0 (← run ["update", "--locked", "--require-signature"])
+        checkEq 0 (← run ["fetch", "--locked", "--offline", "--vendor", vend.toString])
+        let unpacked ← IO.FS.readFile (dir / ".grail/packages/greet/src/Greet/Hello.wiz")
+        check ((unpacked.splitOn "666").length > 1) unpacked
+        -- The signed audit is what notices (the archive hash is compared first).
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        -- A swapped tree hash alone is refused too (the signed entry carries the tree).
+        let otherTree := String.ofList (List.replicate 64 '6')
+        IO.FS.writeFile lockPath (lockText.replace tree otherTree)
+        checkEq 1 (← run ["index", "verify", idx.toString, "--locked"])
+        -- and the honest lock still passes
+        IO.FS.writeFile lockPath lockText
+        checkEq 0 (← run ["index", "verify", idx.toString, "--locked"]) }
   ]
 
 builtin_initialize registerGroup grailIndexGroup
