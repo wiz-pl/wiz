@@ -62,10 +62,15 @@ def usage : String := "usage:
   grail index snapshot [INDEX] [--seq N] [--updated T] [--key FP] [--expires T]
                           write index/snapshot.sexpr from the entries (then sign it
                           with ssh-keygen -Y sign -n grail-index)
-  grail publish ARCHIVE --source URL [--commit SHA]
-                          hash a release archive and print its index entry (after
-                          checking the manifest and the archive layout); --commit
-                          records the release commit the signed entry binds
+  grail publish ARCHIVE --source URL [--commit SHA] [--entry FILE]
+                          [--index DIR [--key FILE] [--identity ID] [--expires T]
+                           [--allow-unsigned]]
+                          check a release archive and print its index entry (the
+                          archive's own grail.wiz is authoritative; --entry FILE also
+                          checks a declared entry against it); --index DIR also writes
+                          the entry into that index checkout and, with --key, regenerates
+                          and signs index/snapshot.sexpr and updates DIR/allowed_signers;
+                          writing an entry without --key needs --allow-unsigned
   grail run TARGET [-- ARGS…]
                           build an exe or command target's needs and run it with
                           ARGS, its input and output grail's own; exits with its code
@@ -94,12 +99,15 @@ options: -C DIR (the package directory), --dir DIR (with `new`: where to write t
   `index` setting of grail.wiz), --index-commit COMMIT (pin a git index),
   --require-signature (require a verified signed index snapshot; CI and the install
   docs pass it), --allow-unsigned (the explicit escape: accept an index with no signed
-  snapshot), --allowed-signers FILE
+  snapshot; also the opt-in for `publish --index` without --key), --allowed-signers FILE
   (the trust root for the snapshot; default: the key a grail.lock pinned),
   --allow-rewind (accept a rewritten index history or a lower snapshot seq),
   --offline (never touch the network),
   --vendor DIR (a directory of vendored archives; default: the `vendor` setting),
   --source URL (grail publish: the archive's public URL),
+  --entry FILE (grail publish: an entry to check the archive against),
+  --key FILE --identity ID --expires T (grail publish --index: sign the new snapshot and
+  name its key in allowed_signers; the expiry defaults to one year),
   --region-cache (experimental: serve module effects from mmap'ed .wizr regions in the
   same cache layers; the text entries remain the authority and the fallback),
   --region-stats (print what those regions served, per job),
@@ -144,6 +152,12 @@ structure Opts where
   source : Option String := none
   /-- (P0) `grail publish`: the release commit the signed entry binds -/
   commit : Option String := none
+  /-- `grail publish --entry FILE`: an entry to check the archive against -/
+  publishEntry : Option String := none
+  /-- `grail publish --identity ID`: the name written to `allowed_signers` -/
+  publishIdentity : String := ""
+  /-- `--allow-unsigned`: the explicit opt-in for an unsigned `publish --index` -/
+  allowUnsigned : Bool := false
   /-- `grail build --attest DIR`: write one statement per built executable -/
   attest : Option String := none
 
@@ -161,10 +175,13 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
   | "--vendor" :: v :: rest => grailOpts { o with vendor := some v } rest
   | "--allow-rewind" :: rest => grailOpts { o with allowRewind := true } rest
   | "--require-signature" :: rest => grailOpts { o with requireSignature := true } rest
-  | "--allow-unsigned" :: rest => grailOpts { o with requireSignature := false } rest
+  | "--allow-unsigned" :: rest =>
+    grailOpts { o with requireSignature := false, allowUnsigned := true } rest
   | "--allowed-signers" :: f :: rest => grailOpts { o with allowedSigners := some f } rest
   | "--source" :: s :: rest => grailOpts { o with source := some s } rest
   | "--commit" :: c :: rest => grailOpts { o with commit := some c } rest
+  | "--entry" :: f :: rest => grailOpts { o with publishEntry := some f } rest
+  | "--identity" :: i :: rest => grailOpts { o with publishIdentity := i } rest
   | "--fetch" :: rest => grailOpts { o with fetch := true } rest
   | "--offline" :: rest => grailOpts { o with offline := true } rest
   | "--locked" :: rest => grailOpts { o with locked := true } rest
@@ -173,6 +190,16 @@ partial def grailOpts (o : Opts) : List String → Opts × List String
     if a.startsWith "-j" && (a.drop 2).toString.toNat?.isSome then grailOpts { o with jobs := (a.drop 2).toString.toNat? } rest
     else let (o, r) := grailOpts o rest; (o, a :: r)
   | [] => (o, [])
+
+/-- `grail publish`: `--key`/`--expires` are publish-local because `grail index snapshot`
+parses the same flag names, and taking them in `grailOpts` would strip them from that
+command's arguments. Everything else the publish branch reads is already in `Opts`. -/
+def publishFlags (key expires : Option String) : List String →
+    Option String × Option String × List String
+  | "--key" :: k :: t => publishFlags (some k) expires t
+  | "--expires" :: e :: t => publishFlags key (some e) t
+  | a :: t => let (k, e, r) := publishFlags key expires t; (k, e, a :: r)
+  | [] => (key, expires, [])
 
 /-- The standard library: `--std`, else `lib/` of the checkout this binary was built in
 (`.lake/build/bin/grail`), else `./lib`. -/
@@ -527,11 +554,34 @@ def cliMain (args : List String) : IO UInt32 := do
           for line in lines do IO.println line
           pure 0
     | "publish" :: rest =>
-      let archive := rest.find? (fun a => !a.startsWith "-")
-      match ← Registry.publish (archive.map System.FilePath.mk) (opts.source.getD "") pkg
-          (opts.commit.getD "") with
+      let (key, expires, positional) := publishFlags none none rest
+      let archive := positional.find? (fun a => !a.startsWith "-")
+      let declared : Except String (Option IxVersion) ←
+        match opts.publishEntry with
+        | none => pure (.ok none)
+        | some f =>
+          let p := inPackage dir f
+          if !(← p.pathExists) then pure (.error s!"--entry {p}: no such file")
+          else match Registry.parseDeclared (← IO.FS.readFile p) pkg.name pkg.version with
+            | .error e => pure (.error s!"--entry {p}: {e}")
+            | .ok v => pure (.ok (some v))
+      match declared with
       | .error e => IO.eprintln e; pure 1
-      | .ok entry => IO.println entry; pure 0
+      | .ok declared =>
+        match ← Registry.publishVersion (archive.map System.FilePath.mk) (opts.source.getD "")
+            pkg (opts.commit.getD "") declared tc binId std with
+        | .error e => IO.eprintln e; pure 1
+        | .ok v =>
+          IO.println (Index.renderVersion v)
+          match opts.index with
+          | none => pure 0
+          | some dest =>
+            match ← Registry.publishInto (inPackage dir dest) pkg.name v key
+                opts.publishIdentity (expires.getD "") opts.allowUnsigned with
+            | .error e => IO.eprintln e; pure 1
+            | .ok lines =>
+              for l in lines do IO.println l
+              pure 0
     | "index" :: "resolve" :: _ =>
       if pkg.requires.isEmpty then pure 0 else
         let pinned ← Registry.lockSignature dir

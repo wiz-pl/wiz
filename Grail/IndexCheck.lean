@@ -83,20 +83,51 @@ def localArchive? (source : String) : Option String :=
   else if source.contains "://" then none
   else some source
 
-/-- Recompute an archive's SHA-256 and check its layout. -/
-def verifyArchive (r : CheckResult) (who source : String) (f : System.FilePath)
-    (name version sha : String) : IO CheckResult := do
+/-- What an archive audit needs to read the `grail.wiz` inside an archive: the same
+toolchain, cache salt and standard library the index checker already uses for
+`index.wiz`. -/
+structure AuditCtx where
+  tc : Toolchain := {}
+  salt : UInt64 := 7
+  std : System.FilePath := "lib"
+
+/-- Recompute an archive's SHA-256, its size and its layout, and (when the entry declares
+them) its tree hash and command digest. The last two are read from the archive itself —
+`treeHash` of the unpacked bytes and `commandDigest` of the `grail.wiz` inside it — so a
+declared `size`, `tree` or `commands` is checked against the file, never trusted. Every
+mismatch names the field and both values. -/
+def auditArchive (r : CheckResult) (who source : String) (f : System.FilePath)
+    (name version sha : String) (v : IxVersion) (ctx : AuditCtx) : IO CheckResult := do
+  let size := (← f.metadata).byteSize.toNat
+  let mut r := r
   match ← Registry.sha256File f with
   | .error e => pure (addError r who e)
   | .ok h =>
-    let r := if h != sha then addError r who s!"sha256 of {source} is {h}, the entry says {sha}" else r
+    if h != sha then r := addError r who s!"sha256 of {source} is {h}, the entry says {sha}"
     match ← Registry.checkArchiveLayout f name version with
     | .error e => pure (addError r who e)
-    | .ok () => pure r
+    | .ok () =>
+      -- a declared size is always checked: it is also the fetch path's download cap
+      match v.size with
+      | some n =>
+        if n != size then
+          r := addError r who s!"size: the archive is {size} bytes, the entry says {n}"
+      | none => pure ()
+      if v.tree.isEmpty && v.commands.isEmpty then pure r
+      else
+        match ← Registry.archiveFacts ctx.tc ctx.salt ctx.std f with
+        | .error e => pure (addError r who e)
+        | .ok facts =>
+          for m in Registry.integrityMismatches v (some size) facts.tree facts.commands do
+            r := addError r who m
+          if v.tree.isEmpty then
+            r := addWarning r who
+              "the entry declares commands but no (tree …): publish writes both, so a hand-edited archive is not bound by a tree identity"
+          pure r
 
 /-- One version: hash shape, requirements, module names, and its archive. -/
 def checkVersion (r : CheckResult) (name : String) (v : IxVersion) (fetch : Bool)
-    (tmp : System.FilePath) : IO CheckResult := do
+    (tmp : System.FilePath) (ctx : AuditCtx := {}) : IO CheckResult := do
   let who := s!"{name} {Version.render v.version}"
   let mut r := r
   if !Registry.isSha256 v.sha256 then
@@ -127,7 +158,7 @@ def checkVersion (r : CheckResult) (name : String) (v : IxVersion) (fetch : Bool
       | .error e => r := addError r who e
       | .ok () =>
         r := { r with archives := r.archives + 1 }
-        r := ← verifyArchive r who v.source f name (Version.render v.version) v.sha256
+        r := ← auditArchive r who v.source f name (Version.render v.version) v.sha256 v ctx
       if ← f.pathExists then IO.FS.removeFile f
     else
       -- counted, not downloaded: `archives` only names what this run actually hashed
@@ -138,12 +169,12 @@ def checkVersion (r : CheckResult) (name : String) (v : IxVersion) (fetch : Bool
       r := addError r who s!"source {v.source} does not exist"
     else
       r := { r with archives := r.archives + 1 }
-      r := ← verifyArchive r who v.source f name (Version.render v.version) v.sha256
+      r := ← auditArchive r who v.source f name (Version.render v.version) v.sha256 v ctx
   pure r
 
 /-- One package: its name, version list, and every version. -/
 def checkPackage (r : CheckResult) (name : String) (p : IxPackage) (fetch : Bool)
-    (tmp : System.FilePath) : IO CheckResult := do
+    (tmp : System.FilePath) (ctx : AuditCtx := {}) : IO CheckResult := do
   let mut r := r
   if !validIndexName name then
     r := addError r name "package name: expected [a-z][a-z0-9-]* (or @org/name)"
@@ -155,7 +186,7 @@ def checkPackage (r : CheckResult) (name : String) (p : IxPackage) (fetch : Bool
     if seen.contains ver then r := addError r name s!"version {ver} appears twice"
     seen := ver :: seen
     r := { r with versions := r.versions + 1 }
-    r := ← checkVersion r name v fetch tmp
+    r := ← checkVersion r name v fetch tmp ctx
   pure r
 
 /-- The first module clash between the (non-yanked) versions of two packages. Checking
@@ -271,7 +302,7 @@ def checkDir (cache : System.FilePath) (tc : Toolchain) (salt : UInt64)
           r := addError r "snapshot" s!"names {snap.name}, but registry.sexpr says {regName}"
         snapOk := some snap
     for (name, pkg) in entries do
-      r := ← checkPackage r name pkg fetch tmp
+      r := ← checkPackage r name pkg fetch tmp { tc, salt, std }
     r := checkConflicts r entries
     if let some snap := snapOk then
       if let .error e := snap.covers src.pkgs then r := addError r "snapshot" e
