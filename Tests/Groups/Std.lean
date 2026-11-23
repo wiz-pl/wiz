@@ -143,8 +143,8 @@ def stdGroup : Group where
     -- #255: the Boolean algebra and Int.eq_of_beq
     { name := "Boolean algebra and Int.eq_of_beq (import Logic, Int)", run := fun _ =>
         okLibs ("import Logic\nimport Int\n" ++
-          "def a (b : Bool) : Bool.and b .true = b := Bool.and_true b\n" ++
-          "def b2 (b : Bool) : Bool.or b .false = b := Bool.or_false b\n" ++
+          "def a (b : Bool) : (b && Bool.true) = b := Bool.and_true b\n" ++
+          "def b2 (b : Bool) : (b || Bool.false) = b := Bool.or_false b\n" ++
           "def c (a b : Bool) (h : Bool.or a b = .false) : a = .false := Bool.or_left a b h\n" ++
           "def d (a b : Bool) (h : Bool.or (Bool.not a) b = .true) (ha : a = .true) : b = .true := Bool.implies a b h ha\n" ++
           "def e (a b : Int) (h : Int.beq a b = .true) : a = b := Int.eq_of_beq a b h\n" ++

@@ -128,7 +128,7 @@ def matchGroup : Group where
           "  | .false => useEq n .false h\n") },
     { name := "nested matches both keep their equations", run := fun _ =>
         ok (eqnPrelude ++
-          "def nestedEq (n : Nat) : f2 n = isZero (Nat.succ n) :=\n" ++
+          "def nestedEq (n : Nat) : f2 n = .true :=\n" ++
           "  match h : isZero n with\n" ++
           "  | .true =>\n" ++
           "    match k : isZero (Nat.succ n) with\n" ++
@@ -138,6 +138,14 @@ def matchGroup : Group where
           "    match k : isZero (Nat.succ n) with\n" ++
           "    | .true => k\n" ++
           "    | .false => k\n") },
+    -- the named equation (#254) and a reverted dependent hypothesis (#259) are separate
+    -- match columns, in that order; both must be in scope and refined in the branch
+    { name := "a named equation and a reverted hypothesis are separate columns", run := fun _ =>
+        okLib ("import Logic\ndef f (b : Bool) (h : b = .true) : Nat :=\n" ++
+          "  match hb : b with\n" ++
+          "  | .true => 0\n" ++
+          "  | .false => absurd h.1\n" ++
+          "#eval f .true rfl") ["0"] },
     { name := "a plain match on a variable named h still parses", run := fun _ =>
         ok (matchPrelude ++
           "def pick (h : Nat) : Nat := match h with\n" ++

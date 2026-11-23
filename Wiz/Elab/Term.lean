@@ -2891,10 +2891,14 @@ partial def compileMatch (ctx : LocalCtx R) (vars : List Lvl) (clauses : List (M
       let eqTm : Term R := .eq ((q I).lift (nΞ + 1)) lhs ((q ξi).lift (nΞ + 1))
       let body : Term R := .pi "e" .default (.qlit 0) eqTm (G.lift (nΞ + 2)) ⟨0, vG.getD .hole⟩
       pure ((List.range nΞ).foldr (fun k acc => .lam s!"i{k}" acc) (.lam "x" body))
-  -- a type still to be found (an inferred `match`) is taken to be in `Type`
-  let unknown := match whnf Gv with
-    | .neutral (.mvar _) _ => true
+  -- a type still to be found (an inferred `match`) is taken to be in `Type`; the
+  -- motive's `Π` binders (reverted variables, a named equation) are not part of the
+  -- unknown result type, so look through them to the codomain
+  let rec piCodomainUnknown : Term R → Bool
+    | .pi _ _ _ _ b _ => piCodomainUnknown b
+    | .mvar _ => true
     | _ => false
+  let unknown := piCodomainUnknown G
   let some v := vG.orElse fun _ => if unknown then some (.succ .zero) else none
     | throwAt ctx.info "could not determine the universe of the match's type"
   let elimName := T ++ (if linear then ".casesOn1" else if additive then ".casesOnA" else if sized then ".scasesOn" else if useRec then ".rec" else ".casesOn") ++
@@ -3432,10 +3436,10 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
     -- scrutinee at 1 and then take it apart at ω)
     let fty ← force ty
     let hasCases1 := match fty with
-      | .mu _ _ _ _ .szInf (some (T, _, _)) => (g.find? (T ++ ".casesOn1")).isSome
+      | .mu _ _ _ _ .szInf (some (T, _, _)) _ => (g.find? (T ++ ".casesOn1")).isSome
       | _ => false
     indexed := indexed.push (match fty with
-      | .mu _ _ _ _ _ (some (T, _, args)) =>
+      | .mu _ _ _ _ _ (some (T, _, args)) _ =>
         match g.find? (T ++ ".desc") with
         | some descD => (piInfos descD.type).length < args.length
         | none => false
@@ -3478,7 +3482,12 @@ partial def elabMatch (ctx : LocalCtx R) (stx : Syntax) (expected : VTy R) : Ela
   let clauses := if extraNames.isEmpty then clauses else
     let extraPats := extraNames.map fun x =>
       if x == "_" then holeStx else (.node {} "term.ident" #[.ident {} x] : Syntax)
-    clauses.map fun c => { c with pats := c.pats ++ extraPats }
+    -- the columns are the scrutinees, then these reverted hypotheses, then the named
+    -- equations (`binders`/`lvls` below are built in that order); the equation holes
+    -- were appended above, so put this block before them
+    clauses.map fun c =>
+      let split := c.pats.length - eqCount
+      { c with pats := c.pats.take split ++ extraPats ++ c.pats.drop split }
   -- abstract the scrutinees, last first
   -- (each abstraction adds a binder: the later scrutinee terms are lifted over it)
   let mut absGoal := goalTm

@@ -116,7 +116,7 @@ def group : Group where
           "#eval DecidableEq.decide (Option.some 2) (Option.some 2)\n" ++
           "#eval DecidableEq.decide (List.cons 1 List.nil) (List.cons 2 List.nil)\n" ++
           "def cmp (a b : Status) : Bool := DecidableEq.decide a b")
-          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] }
+          [".true", ".false", ".true", ".false", ".false", ".true", ".true", ".false"] },
     -- `match h : e with`: the equation in an inferred match, and in a tactic's goal
     { name := "the equation of a match is a tactic hypothesis", run := fun _ =>
         okLib "import Prelude
@@ -142,10 +142,10 @@ def usesInferred (n : Nat) : Nat := inferred n
 " },
     { name := "a match cannot name its equation twice (the second name is reported)", run := fun _ =>
         fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n m : Nat) : Nat :=\n  match h : n, h : m with\n  | _, _ => .zero\n"
-          "6:16: the equation hypothesis 'h' is named twice" },
+          "6:16: error: the equation hypothesis 'h' is named twice" },
     { name := "the equation's name belongs before the scrutinee, not in a pattern", run := fun _ =>
         fails "inductive Nat where\n  | zero\n  | succ (n : Nat)\n\ndef d (n : Nat) : Nat :=\n  match h : n with\n  | h : .zero => .zero\n  | _ => .zero\n"
-          "7:5: a pattern is expected here" }
+          "7:5: error: a pattern is expected here" }
   ]
 
 builtin_initialize registerGroup group
