@@ -1,4 +1,4 @@
-// The browser half of lib/Web/React.wiz: apply the patch list `React.patchesJson`
+// The browser half of lib/Web/Loom.wiz: apply the patch list `Loom.patchesJson`
 // produces, and turn DOM events into (event, handler-index) calls back into Wiz.
 //
 // The paths are child indices from the container: "" is the container, "0" its first
@@ -10,7 +10,7 @@
 // No framework, no build step: an ES module, like tagged.js.
 "use strict";
 
-// Apply `patches` (the parsed JSON of React.patchesJson) to `root`. `parse(html)`
+// Apply `patches` (the parsed JSON of Loom.patchesJson) to `root`. `parse(html)`
 // returns a DocumentFragment (in a browser, `parseHtml` below). Each operation expects
 // the DOM state left by the previous ones (the diff emits them in order).
 export function applyPatches(root, patches, parse = parseHtml) {
@@ -116,7 +116,7 @@ export function delegate(root, send, types = ["click", "input", "change", "submi
   }
 }
 
-// Mount a server-rendered tree: `html` is React.toHtml's output for the initial state.
+// Mount a server-rendered tree: `html` is Loom.toHtml's output for the initial state.
 export function mount(root, html, parse = parseHtml) {
   const frag = parse(html);
   for (const c of Array.from(root.childNodes)) root.removeChild(c);

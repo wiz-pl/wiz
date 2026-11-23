@@ -88,6 +88,7 @@ def evalStrings (body : String) (expected : List String) : IO Unit := do
 def group : Group :=
   { name := "scry-uaf"
     exercise := "Scry CWE-416 (lifetime rule: alloc -> free -> use paths and false-positive kills)"
+    parallel := true
     cases := [
       { name := "pack: one memory rule, check use-after-free"
         run := fun _ => evalStrings

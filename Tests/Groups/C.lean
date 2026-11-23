@@ -24,6 +24,7 @@ def splitCase : Case :=
 def cGroup : Group where
   name := "c"
   exercise := "Exercise 8.2"
+  parallel := true
   cases := nativeCases false ++ [splitCase]
 
 builtin_initialize registerGroup cGroup

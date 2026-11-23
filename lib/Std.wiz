@@ -68,7 +68,11 @@ extern "wiz_map_find" StrMap.findD : {V : Type} → StrMap V → Str → V → V
 /-- The number of keys. -/
 extern "wiz_map_size" StrMap.size : {V : Type} → StrMap V → Nat
 
-/-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. -/
+/-- `IO.writeFile path text`: write `text` to the file at `path`, replacing it. The text
+is written as UTF-8 up to its first NUL (use `FS.writeBytes` in lib/Sys.wiz for binary
+data). `IO Unit` has no error channel, so a failure (a bad path, a full disk) prints
+`wiz: <path>: <message>` on standard error and exits 1 rather than looking like
+success. -/
 extern "wiz_io_write_file" IO.writeFile : String → String → IO Unit
 
 -- ## Bytes and arrays

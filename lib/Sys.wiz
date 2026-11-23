@@ -276,7 +276,9 @@ extern "wiz_sys_file_flush" File.flushRaw : File → IO Nat
 /-- Raw `fclose`; use `File.close`. -/
 extern "wiz_sys_file_close" File.closeRaw : File → IO Nat
 
-/-- Open a file; `mode` as for `fopen`: "r", "w", "a", "r+", … -/
+/-- Open a file; `mode` as for `fopen`: "r", "w", "a", "r+", … The handle is close-on-exec:
+a child this program starts does not inherit it (only the std streams are inherited, for
+streams a child is given). -/
 def File.open (p mode : String) : EIO File := Sys.check p (File.openRaw p mode)
 /-- Standard input. -/
 def File.stdin : IO File := File.std 0
@@ -392,7 +394,9 @@ def Child.readStdout (c : Child) : EIO String := Sys.check "read child stdout" (
 def Child.readStderr (c : Child) : EIO String := Sys.check "read child stderr" (Child.readRaw c 2)
 /-- Give the child `input` on stdin while collecting its stdout and stderr
 (`Child.readStdout` and `Child.readStderr` then return them): no deadlock when the
-pipes fill up. -/
+pipes fill up. The stdin must still be a pipe (`Process.spawn` with `.piped`, not
+taken or closed): `input` that has nowhere to go is an error ("communicate: Bad file
+descriptor"), not dropped. -/
 def Child.communicate (c : Child) (input : String) : EIO Unit := Sys.lift "communicate" (Child.communicateRaw c input)
 /-- Wait for the child to end. -/
 def Child.wait (c : Child) : EIO ExitStatus := do
@@ -626,7 +630,12 @@ foreign_type Fd (finalizer := "wiz_sys_fd_free")
 extern "wiz_sys_fd_open" Fd.openRaw : String → Nat → Nat → Nat → IO Fd
 /-- The descriptor 0, 1 or 2; use `Fd.stdin`, `Fd.stdout`, `Fd.stderr`. -/
 extern "wiz_sys_fd_std" Fd.std : Nat → IO Fd
-/-- Take ownership of a descriptor number (it is closed with the handle). -/
+/-- Take ownership of a descriptor number (it is closed with the handle). A number above
+`INT_MAX` is not a descriptor (the runtime would narrow `4294967297` to 1, stdout): it is
+rejected with `EINVAL` (see `Sys.errno`) and the handle is already closed, so every
+operation on it is "Bad file descriptor". Adopting 0, 1 or 2 takes over a standard
+stream, so the handle's close closes it; adopting one number twice gives two owners that
+both close it (close each handle once). -/
 extern "wiz_sys_fd_adopt" Fd.adopt : Nat → IO Fd
 /-- The descriptor's number; see `Fd.withRaw` to keep it valid while it is used. -/
 extern "wiz_sys_fd_raw" Fd.raw : Fd → IO Nat

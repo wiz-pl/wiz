@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test the browser half of lib/Web/React.wiz: render a component tree and its patches
+# Test the browser half of lib/Web/Loom.wiz: render a component tree and its patches
 # with the Wiz compiler, then apply the patches to the SSR HTML in a Node test double
 # of the DOM (web/framework/minidom.mjs) and compare with the SSR of the next state.
 # No browser and no Emscripten are needed (unlike web/test.sh).

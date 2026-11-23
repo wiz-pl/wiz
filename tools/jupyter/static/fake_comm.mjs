@@ -11,7 +11,7 @@
 // `Widget.display` bundle, receives
 // `{method: "event", widget_id, event, value}` from the front end, and answers with
 // `comm_msg` `{method: "update", bundle, patches}`.  The fixture supplies the bundle
-// and patch list (`React.Rendered.diff`'s output), so the test pins the wire shape and
+// and patch list (`Loom.Rendered.diff`'s output), so the test pins the wire shape and
 // the DOM patch, not a re-implementation of the Wiz diff.
 "use strict";
 

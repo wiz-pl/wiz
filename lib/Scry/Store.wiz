@@ -38,7 +38,7 @@ decides membership.
 
 Below `indexThreshold` rows (24) a relation stays a plain list: the kernel's map is a
 sorted list, and scanning a handful of rows is cheaper than hashing and maintaining
-indexes. Crossing the threshold builds both indexes once from the existing rows.
+indexes. At 24 rows or more it builds both indexes once from the existing rows.
 
 The constructor of each relation is private, so the model is the only accessor and a
 user cannot break the distinctness invariant.

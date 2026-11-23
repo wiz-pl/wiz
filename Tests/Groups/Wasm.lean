@@ -246,6 +246,7 @@ def wasmDeterministic (src : String) : IO Unit := do
 def wasmGroup : Group where
   name := "wasm"
   exercise := "Stage 8f"
+  parallel := true
   cases := [
     { name := "arithmetic (the interpreter is the oracle)", run := fun _ =>
         wasmGolden "import Prelude\ndef fact : Nat → Nat\n  | .zero => 1\n  | .succ n => (.succ n) * fact n\ndef main : Nat := fact 12 + 7 * 9 - (Nat.pred 0)" },

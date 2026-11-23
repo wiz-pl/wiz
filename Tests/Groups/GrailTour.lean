@@ -52,6 +52,7 @@ def tourNewCase : Case :=
 def tourGroup : Group where
   name := "tour"
   exercise := "docs/tour.md"
+  parallel := true
   cases :=
     { name := "examples/tour/ has exactly the files the group knows", run := fun _ => do
         let mut names : Array String := #[]

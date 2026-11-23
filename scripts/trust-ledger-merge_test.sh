@@ -186,7 +186,7 @@ has two-legacy "$tmp/err" 'K | k | axiom k'
 } >"$tmp/o"
 {
   cat "$tmp/o"
-  row Web.React React.at partial 'reviewed: list tail' reviewer 2027-05-14
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
 } >"$tmp/a"
 {
   write_hdr
@@ -195,7 +195,7 @@ has two-legacy "$tmp/err" 'K | k | axiom k'
 {
   write_hdr
   row IO UInt64.toNat 'axiom UInt64.toNat' 'reviewed: kept' reviewer 2027-05-14
-  row Web.React React.at partial 'reviewed: list tail' reviewer 2027-05-14
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
 } >"$tmp/want"
 run 0 delete-theirs "$tmp/o" "$tmp/a" "$tmp/b"
 same delete-theirs "$tmp/want" "$tmp/a"
@@ -207,7 +207,7 @@ same delete-theirs "$tmp/want" "$tmp/a"
 } >"$tmp/a"
 {
   cat "$tmp/o"
-  row Web.React React.at partial 'reviewed: list tail' reviewer 2027-05-14
+  row Web.Loom Loom.at partial 'reviewed: list tail' reviewer 2027-05-14
 } >"$tmp/b"
 run 0 delete-ours "$tmp/o" "$tmp/a" "$tmp/b"
 same delete-ours "$tmp/want" "$tmp/a"

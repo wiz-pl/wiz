@@ -28,7 +28,7 @@ fi
 # as the C compiler, mini-gmp in place of -lgmp (--gmp), and web/js.c by Web.wiz's
 # `link_c "js.c"` (stage 9f). `--no-main` (9g): the module is Web.wiz's exports, linked
 # without a `main` (emcc's --no-entry). It writes OUT/wiz-infoview.c beside the module.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=33554432 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
 -sEXPORTED_FUNCTIONS=_wiz_web_init,_wiz_web_step,_wiz_doc_init,_wiz_doc_step,_wiz_release,_free \

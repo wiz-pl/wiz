@@ -8,7 +8,7 @@ EM_JS(void, js_set_html, (const char *id, const char *html), {
   globalThis.wizSetHtml(UTF8ToString(Number(id)), UTF8ToString(Number(html)));
 });
 EM_JS(void, js_go, (const char *url), { globalThis.wizGo(UTF8ToString(Number(url))); });
-/* (react) A patch list from lib/Web/React.wiz (`React.patchesJson`): the page applies it
+/* (loom) A patch list from lib/Web/Loom.wiz (`Loom.patchesJson`): the page applies it
    to the container with web/framework/runtime.js's applyPatches. */
 EM_JS(void, js_patch, (const char *json), {
   globalThis.wizPatch(UTF8ToString(Number(json)));

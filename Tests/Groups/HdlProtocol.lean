@@ -83,6 +83,7 @@ value simulation, `Netlist.simulate` and `Circuit.simFast`. -/
 def hdlProtocolGroup : Group where
   name := "bus-protocol"
   exercise := "HDL libraries: Hdl.Apb, Hdl.Wishbone, Hdl.AxiLite, Hdl.Axi4, Hdl.AxiStream and Hdl.Spi"
+  parallel := true
   cases := [
     { name := "Hdl protocol bridges: APB/Wishbone stability, response order, strobes and the three simulations", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-protocols.wiz")

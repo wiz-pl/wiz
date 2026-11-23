@@ -19,6 +19,7 @@ attribute [macro term.twice] twiceMacro
 def builtinGroup : Group where
   name := "builtins"
   exercise := "Stage 6b"
+  parallel := true
   cases := [
     { name := "import the prelude", run := fun _ =>
         okLib "import Prelude\n#check List.append" ["List.append : {A : Type} → List A → List A → List A"] },

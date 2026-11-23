@@ -62,6 +62,7 @@ def indexFixture : IO System.FilePath := do
 def grailDepsGroup : Group where
   name := "grail-deps"
   exercise := "Stage 23h"
+  parallel := true
   cases := [
     { name := "a git dependency: grail update writes the lock, builds use it", run := fun _ => do
         let (bare, work) ← depRepo

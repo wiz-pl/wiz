@@ -64,6 +64,7 @@ def projOfNumber : Array IR.Decl :=
 def borrowGroup : Group where
   name := "borrow"
   exercise := "Stage 8e"
+  parallel := true
   cases := [
     { name := "the length of a list borrows it", run := fun _ => borrowedUncounted "len" 0 },
     { name := "a left fold borrows the list (and its tail call is a loop)", run := fun _ => do

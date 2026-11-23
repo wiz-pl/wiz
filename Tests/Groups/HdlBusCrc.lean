@@ -15,6 +15,7 @@ value simulation, `Netlist.simulate` and `Circuit.simFast` against each other. -
 def hdlBusCrcGroup : Group where
   name := "bus-crc"
   exercise := "HDL libraries: Hdl.Bus (valid/ready bus, arbiter, route, RAM) and Hdl.Crc"
+  parallel := true
   cases := [
     { name := "Hdl.Bus: value = Netlist.simulate = simFast; round-robin arbiter, decode/route, RAM model", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-bus.wiz")

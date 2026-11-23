@@ -52,6 +52,7 @@ def prelude : String :=
 def group : Group where
   name := "scry-workflow"
   exercise := "Scry workflow (finding identity, triage machine, JSON store, CWE tiers)"
+  parallel := true
   cases := [
     { name := "identity: normalized path, rule and path shape, line hash",
       run := fun _ => evalNats (prelude ++

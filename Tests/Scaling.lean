@@ -441,6 +441,86 @@ def allLibSource : IO String := do
         if f.path.extension == some "wiz" then ms := ms.push (e.fileName ++ "." ++ f.path.fileStem.getD "")
   pure (String.join (((ms.qsort (· < ·)).toList.filter (!libApart.contains ·)).map (s!"import {·}\n")))
 
+/-! The Desc sweep (direct induction hypotheses against the template, P2) is one check
+over three inputs: `lib/` imported at once, the `libApart` modules, and every example.
+It ran as one case (up to 31 min in CI, most of it the examples, each elaborating its
+imports from source), so it is split into cases that can run in different shards: one
+for `lib/`, one for `libApart`, and `descExampleChunks` for the examples, chunk `k`
+taking the sorted files at positions `k` mod `descExampleChunks`. Together they check
+the same inputs with the same assertions; `descSweepPartition` checks that the chunks
+cover every example exactly once. -/
+
+/-- The `.wiz` files directly in `examples/`, sorted by path. -/
+def exampleFiles : IO (Array System.FilePath) := do
+  let mut fs := #[]
+  for e in ← System.FilePath.readDir "examples" do
+    if e.path.extension == some "wiz" then fs := fs.push e.path
+  pure (fs.qsort (·.toString < ·.toString))
+
+/-- How many cases the examples of the Desc sweep are split into. -/
+def descExampleChunks : Nat := 6
+
+/-- Chunk `k` of `fs`: the files at positions `k` mod `descExampleChunks`. -/
+def exampleChunk (fs : Array System.FilePath) (k : Nat) : Array System.FilePath := Id.run do
+  let mut out := #[]
+  for i in [0:fs.size] do
+    if i % descExampleChunks == k then out := out.push fs[i]!
+  pure out
+
+/-- The Desc sweep on `lib/` imported at once (all modules but `libApart`), with the
+stuck descriptions, and the check that a wrong variant is caught. The count is a floor
+on this part alone (`lib/` has 762 descriptions today; the old single case's `> 1000`
+bound counted `lib/`, `libApart` and the examples together). -/
+def descSweepLib : IO Unit := do
+  let loader ← Tests.Elab.libLoader
+  let lib := runFrontend (R := ZeroOneMany) (← allLibSource) { trustedModule := Tests.libModule, loader }
+  let errs := lib.messages.filter (·.severity == .error)
+  unless errs.isEmpty do throw (IO.userError s!"the library has errors: {(errs.toList.take 3).map (·.text)}")
+  -- (the comparison can fail: a variant with the pairs swapped is caught)
+  let swapped := fun g l v I D X P f i xs => match vHyps g l v I D X P f i xs with
+    | .pair a b => .pair b a
+    | h => h
+  check (!(hypsMismatches lib.globals (direct := swapped)).2.isEmpty) "a wrong variant was not caught"
+  -- stuck: the whole description a variable, and an `arg` whose rest is a variable
+  let w : Val ZeroOneMany := .qlit QuantitySyntax.explicitDefault
+  let stuck := [("a variable", Level.zero, (.unit 0 : Val ZeroOneMany), Val.var 0, 1),
+    ("arg then a variable", .zero, .unit 0, .darg w (.sort 0) (Val.var 0), 1),
+    ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
+  let (n, bad) := hypsMismatches lib.globals stuck
+  unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
+  check (n > 500) s!"only {n} cases"
+
+/-- The Desc sweep on each `libApart` module, imported on its own. -/
+def descSweepApart : IO Unit := do
+  let loader ← Tests.Elab.libLoader
+  for m in libApart do
+    let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
+    unless st.messages.all (·.severity != .error) do throw (IO.userError s!"lib/{m} has errors")
+    let (_, bad) := hypsMismatches st.globals
+    unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
+
+/-- The Desc sweep on chunk `k` of the examples (an example with errors is skipped, as
+an example of an error). -/
+def descSweepExamples (k : Nat) : IO Unit := do
+  let loader ← Tests.Elab.libLoader
+  let fs := exampleChunk (← exampleFiles) k
+  check (!fs.isEmpty) s!"chunk {k} of the examples is empty"
+  for p in fs do
+    let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile p) { trustedModule := Tests.libModule, loader }
+    if st.messages.any (·.severity == .error) then continue
+    let (_, bad) := hypsMismatches st.globals
+    unless bad.isEmpty do throw (IO.userError s!"{p}: {bad.take 3}")
+
+/-- The example chunks cover `examples/` exactly once: their concatenation, sorted, is
+the sorted file list (and no chunk is empty). -/
+def descSweepPartition : IO Unit := do
+  let fs ← exampleFiles
+  let chunks := (List.range descExampleChunks).map (exampleChunk fs)
+  let all := (chunks.foldl (· ++ ·) #[]).qsort (·.toString < ·.toString)
+  check (all.map (·.toString) == fs.map (·.toString))
+    s!"the chunks cover {all.size} files, examples/ has {fs.size}"
+  check (chunks.all (!·.isEmpty)) s!"{fs.size} examples leave a chunk of {descExampleChunks} empty"
+
 /-- `n` matches on a `len`-element list, checked by `refl`. -/
 def listMatchProgram (len n : Nat) : String :=
   "import Prelude\n" ++
@@ -700,39 +780,17 @@ def group : Group where
         pure () },
     -- (P2) the direct hypotheses are the template's, on every description of the library
     -- and the examples, and on stuck descriptions (where the direct one falls back)
-    { name := "direct induction hypotheses agree with the template on every Desc in lib/ and examples/", run := fun _ => do
-        let loader ← Tests.Elab.libLoader
-        let lib := runFrontend (R := ZeroOneMany) (← allLibSource) { trustedModule := Tests.libModule, loader }
-        let errs := lib.messages.filter (·.severity == .error)
-        unless errs.isEmpty do throw (IO.userError s!"the library has errors: {(errs.toList.take 3).map (·.text)}")
-        -- (the comparison can fail: a variant with the pairs swapped is caught)
-        let swapped := fun g l v I D X P f i xs => match vHyps g l v I D X P f i xs with
-          | .pair a b => .pair b a
-          | h => h
-        check (!(hypsMismatches lib.globals (direct := swapped)).2.isEmpty) "a wrong variant was not caught"
-        let mut total := 0
-        -- stuck: the whole description a variable, and an `arg` whose rest is a variable
-        let w : Val ZeroOneMany := .qlit QuantitySyntax.explicitDefault
-        let stuck := [("a variable", Level.zero, (.unit 0 : Val ZeroOneMany), Val.var 0, 1),
-          ("arg then a variable", .zero, .unit 0, .darg w (.sort 0) (Val.var 0), 1),
-          ("rec then a variable", .zero, .unit 0, .drec w .tt (.darg w (.sort 0) (Val.var 0)), 1)]
-        let (n, bad) := hypsMismatches lib.globals stuck
-        unless bad.isEmpty do throw (IO.userError s!"lib: {bad.take 3}")
-        total := total + n
-        for m in libApart do
-          let st := runFrontend (R := ZeroOneMany) s!"import {m}\n" { trustedModule := Tests.libModule, loader }
-          unless st.messages.all (·.severity != .error) do throw (IO.userError s!"lib/{m} has errors")
-          let (n, bad) := hypsMismatches st.globals
-          unless bad.isEmpty do throw (IO.userError s!"{m}: {bad.take 3}")
-          total := total + n
-        for e in ← System.FilePath.readDir "examples" do
-          unless e.path.extension == some "wiz" do continue
-          let st := runFrontend (R := ZeroOneMany) (← IO.FS.readFile e.path) { trustedModule := Tests.libModule, loader }
-          if st.messages.any (·.severity == .error) then continue  -- (an example of an error)
-          let (n, bad) := hypsMismatches st.globals
-          unless bad.isEmpty do throw (IO.userError s!"{e.path}: {bad.take 3}")
-          total := total + n
-        check (total > 1000) s!"only {total} cases" },
+    -- (split into the parts below, so that they can run in different shards: see
+    -- `descSweepLib`, `descSweepApart`, `descSweepExamples`)
+    { name := "direct induction hypotheses agree with the template on every Desc in lib/ (imported at once), and on stuck descriptions", run := fun _ =>
+        descSweepLib },
+    { name := "direct induction hypotheses agree with the template on every Desc in lib/'s modules checked apart (Json, Infoview)", run := fun _ =>
+        descSweepApart }] ++
+    (List.range descExampleChunks).map (fun k => ({
+        name := s!"direct induction hypotheses agree with the template on every Desc in examples/, part {k + 1} of {descExampleChunks}", run := fun _ =>
+          descSweepExamples k } : Case)) ++ [
+    { name := "the Desc sweep's parts of examples/ cover every example exactly once", run := fun _ =>
+        descSweepPartition },
     -- (P3) a universe-polymorphic definition unfolds at the cached levels (0, 1, 2) and at
     -- others alike, and a wrong statement at a cached level is still rejected
     { name := "a polymorphic definition unfolds the same at cached and uncached levels", run := fun _ => do

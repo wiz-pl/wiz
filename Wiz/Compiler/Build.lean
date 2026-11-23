@@ -265,26 +265,77 @@ where
     | '#' :: rest => let (n, rest) ← num rest; return (.nat n, rest)
     | cs => let (n, rest) ← num cs; return (.nat n, rest)
 
+/-- Why a compiled program did not give a result (`runGlobal`). The distinction is what
+lets a test tell "this machine has no C toolchain" (a skip) from "the program failed" (a
+failed case). Only `.toolchain` is a *build* failure that names the compiler, `llc` or a
+header; a program's own stderr is never a toolchain condition, whatever it contains. -/
+inductive RunError where
+  /-- The build failed: no program ran. -/
+  | build (msg : String)
+  /-- The build could not find the C toolchain: the compiler or `llc` could not be started,
+  or `gmp.h` is absent. The one failure a test may record as a skip. -/
+  | toolchain (msg : String)
+  /-- The program ran and exited with this code; `stderr` is what it wrote on standard
+  error (reported with the code, so a failing case says why). -/
+  | run (exitCode : UInt32) (stderr : String)
+  /-- The program did not finish within its time limit. -/
+  | timeout
+  /-- The program ran and printed something that is not a value of its type. -/
+  | readback (msg : String)
+
+namespace RunError
+
+/-- The failure as `wiz run` and the tests print it. -/
+def message : RunError → String
+  | .build m => m
+  | .toolchain m => m
+  | .run exitCode stderr => s!"the program failed ({exitCode}): {stderr}"
+  | .timeout => "the program timed out"
+  | .readback m => m
+
+/-- Is the machine missing the C toolchain? This is the only `runGlobal` failure a test may
+record as `skip "no toolchain"`; everything else (including `.run`) is the case's failure. -/
+def isToolchain : RunError → Bool
+  | .toolchain _ => true
+  | _ => false
+
+end RunError
+
+/-- Is this build failure a missing C toolchain? The message names the compiler (or `llc`)
+as a program that could not be started ("could not execute external process 'cc'", or
+`cc: no such file…`), or the compiler cannot find `gmp.h`. A compiler that ran and
+rejected the program does not count — and neither does a message that merely mentions a
+missing file (such as a `link_c` source in the test): that is a failing build, not a
+missing toolchain. -/
+def missingToolchain (tc : Toolchain) (msg : String) : Bool :=
+  let lower := msg.toLower
+  let names (p : String) : Bool :=
+    p != "" && ((msg.splitOn s!"could not execute external process '{p}'").length > 1 ||
+      (msg.startsWith (p ++ ":") && (lower.splitOn "no such file").length > 1))
+  (msg.splitOn "gmp.h").length > 1 || [tc.cc, tc.llc].any names
+
 /-- Build and run the global `n` (through C, or LLVM); returns its result, read back
 with its type. With `timeout`, the program is stopped after that many seconds (by
-coreutils' `timeout`). -/
+coreutils' `timeout`). A failure says whether it happened before the program ran
+(`RunError.build`/`.toolchain`) or was the program itself (`.run`, with its exit code and
+stderr; `.timeout`; `.readback`). -/
 def runGlobal (tc : Toolchain) (s : CommandState R) (n : Name) (dir : System.FilePath) (llvm : Bool := false)
     (timeout : Option Nat := none) (args : Array String := #[]) (split : Nat := 0) :
-    IO (Except String String) := do
+    IO (Except RunError String) := do
   let exe := dir / "wiz_main"
   match ← build tc s n exe llvm false (split := split) with
-    | .error e => pure (.error e)
+    | .error e => pure (.error (if missingToolchain tc e then .toolchain e else .build e))
     | .ok ty =>
       let io := isIO ty
       let out ← match timeout with
         | some t => IO.Process.output { cmd := "timeout", args := #[toString t, exe.toString] ++ args }
         | none => IO.Process.output { cmd := exe.toString, args }
-      if out.exitCode == 124 && timeout.isSome then return .error "the program timed out"
-      if out.exitCode != 0 then return .error s!"the program failed ({out.exitCode}): {out.stderr}"
+      if out.exitCode == 124 && timeout.isSome then return .error .timeout
+      if out.exitCode != 0 then return .error (.run out.exitCode out.stderr)
       -- an `IO` program prints for itself
       if io then return .ok out.stdout
       match parseValue out.stdout with
-      | none => pure (.error s!"could not read the result: {out.stdout}")
+      | none => pure (.error (.readback s!"could not read the result: {out.stdout}"))
       | some v => pure (.ok (readback s.globals s.builtins (eval s.globals [] ty) v).pretty)
 
 /-- (8f) Build `main` as a WebAssembly module and run it under Node with the JS host

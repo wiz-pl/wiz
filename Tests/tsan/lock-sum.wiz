@@ -1,0 +1,52 @@
+import IO
+import Session
+import MVar
+
+-- Eight threads bump a plain C `uint64_t` a thousand times each, under `Lock.with`.
+-- The counter is not atomic and the runtime does not synchronise it: only the lock
+-- stands between this program and lost updates.  Prints the exact total (8000) and
+-- the overlap detector (0); tests/tsan-conc.sh runs it again under ThreadSanitizer.
+link_c "lock.c"
+
+extern "lock_bump" lockBump : Nat → IO Nat
+extern "lock_enter" lockEnter : IO Nat
+extern "lock_leave" lockLeave : IO Nat
+extern "lock_yield" lockYield : IO Nat
+extern "lock_counter" lockCounter : IO Nat
+extern "lock_overlap" lockOverlap : IO Nat
+
+-- `sched_yield` a few times while holding the lock: with the lock working nobody else
+-- can be in the critical section, and with a no-op lock the other threads run inside it
+-- (so the failure does not depend on two cores, or on the scheduler's timing).
+def yields : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ n => IO.bind lockYield (fun _ => yields n)
+
+def critical (l : Lock) : IO Unit :=
+  IO.bind (Lock.with l (IO.bind lockEnter (fun _ =>
+    IO.bind (yields 4) (fun _ =>
+    IO.bind (lockBump 1) (fun _ => lockLeave))))) (fun _ => IO.pure ())
+
+def worker (l : Lock) : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ n => IO.bind (critical l) (fun _ => worker l n)
+
+def spawnN (l : Lock) (done : MVar Nat) : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ k => Chan.fork Proto.done
+      (fun c => Chan.close c (IO.bind (worker l 1000) (fun _ => MVar.put done 1)))
+      (fun c => Chan.close c (spawnN l done k))
+
+def waitN (done : MVar Nat) : Nat → IO Unit
+  | .zero => IO.pure ()
+  | .succ k => IO.bind (MVar.take done) (fun _ => waitN done k)
+
+def main : IO Unit := do1
+  l ← Lock.new;
+  done ← MVar.new (A := Nat);
+  spawnN l done 8;
+  waitN done 8;
+  c ← lockCounter;
+  o ← lockOverlap;
+  IO.println (String.append "counter " (Nat.toString c));
+  IO.println (String.append "overlap " (Nat.toString o))

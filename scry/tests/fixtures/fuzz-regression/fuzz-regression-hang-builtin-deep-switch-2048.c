@@ -1,0 +1,1 @@
+int f(int x){switch(x){case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:case 1:break;}}

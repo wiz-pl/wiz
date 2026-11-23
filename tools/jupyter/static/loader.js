@@ -2,7 +2,7 @@
 //
 // The kernel renders every widget display twice, on purpose:
 //
-//   * `text/html` — the React SSR fragment wrapped in
+//   * `text/html` — the Loom SSR fragment wrapped in
 //     `<div class="wiz-widget-fragment" data-wiz-widget-comm="ID">…</div>`. It is
 //     readable with JavaScript off and is what this loader adopts (no re-render flash).
 //   * `application/vnd.wiz.widget+json` — the same fragment plus the descriptors and

@@ -10,6 +10,12 @@
    between threads (its count is -rc, changed atomically), rc == 0 is immortal. See
    `wiz_mark_mt` for the transfer rule. */
 
+/* Emscripten without -pthread has no threads: build the one-thread runtime (see
+   WIZ_NO_THREADS in rt_core.inc) even when the define is not passed. */
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__) && !defined(WIZ_NO_THREADS)
+#define WIZ_NO_THREADS 1
+#endif
+
 /* POSIX.1-2008 and the usual extensions, for the system interfaces (9h) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -389,6 +395,7 @@ WIZ_API wiz_val wiz_chan_fork(wiz_val child);
 WIZ_API wiz_val wiz_chan_send(wiz_val c, wiz_val a);
 WIZ_API wiz_val wiz_chan_recv(wiz_val c);
 WIZ_API void wiz_chan_close(wiz_val c);
+WIZ_API uint64_t wiz_chan_forks(void);
 WIZ_API wiz_val wiz_mvar_new(void);
 WIZ_API void wiz_mvar_put(wiz_val mv, wiz_val a);
 WIZ_API wiz_val wiz_mvar_new_full(wiz_val a);

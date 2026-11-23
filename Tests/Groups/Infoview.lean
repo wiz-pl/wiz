@@ -46,6 +46,7 @@ def esc (s : String) : List Char := .cons (Char.mk 27) (String.chars s)
 def infoviewGroup : Group where
   name := "infoview"
   exercise := "lib/Json.wiz, lib/Infoview.wiz (stages 11m, 11n)"
+  parallel := true
   cases := [
     { name := "JSON: printing escapes quotes, newlines; integers keep their sign", run := fun _ =>
         okInfoview (jsonPrelude ++ r#"#eval Json.render (Json.mkArr (.cons (.int .true 42) (.cons (.str "a\"b\nλ") (.cons .null .nil))))"#)

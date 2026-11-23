@@ -55,6 +55,7 @@ partial def wrapCalls (f : Name) (wrap : Term ZeroOneMany → Term ZeroOneMany) 
 def trustGroup : Group where
   name := "trust"
   exercise := "—"
+  parallel := true
   cases := [
     { name := "O2: a partial definition at an empty index is rejected", run := fun _ =>
         failsWith (familyTF ++ "partial def bad : T .f := bad\ndef boom : False := match bad with\n  | .mk => absurd ()\n")

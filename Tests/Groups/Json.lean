@@ -14,6 +14,7 @@ The output is fixed byte for byte: the tests here are the regression net for the
 def jsonGroup : Group where
   name := "json"
   exercise := "lib/Json.wiz (stage 11m)"
+  parallel := true
   cases := [
     { name := "a non-trivial document renders byte for byte (integers, decimals, escapes, λ and 😀)", run := fun _ =>
         let src := r#"import Json

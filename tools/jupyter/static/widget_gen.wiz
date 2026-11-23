@@ -8,7 +8,7 @@
 -- The three display strings are the real kernel values: `Widget.display` for the first
 -- render, then `Widget.handle` for a button click and a slider input.  The front end
 -- test feeds them to `widget.js` through a fake comm, so the patches it applies are the
--- ones `React.Rendered.diff` produced, not a re-implementation.
+-- ones `Loom.Rendered.diff` produced, not a re-implementation.
 import IO
 import Json
 import Text

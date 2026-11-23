@@ -40,6 +40,16 @@ one fills its parameter; an explicit parameter before it with no argument is an 
 (Lean would abstract it). Unknown and repeated names are errors (`inferAppNamed`,
 `Elab/Term.lean`; test group `elabfix`).
 
+A constructor's parameters and fields have names as well: with
+`inductive P where | mk (x : Nat) (y : Nat)`, `P.mk (y := 2) (x := 1)` fills `x` with 1
+and `y` with 2 — the telescope is walked in its own order, so a later field's type may
+mention an earlier named one — and an implicit field or a parameter can be named too.
+A missing field leaves a partial application (`P.mk (x := 1)` is a type mismatch at
+`P`), an unknown field is `no parameter named 'z'`, and a repeated one is an error
+(test groups `language`, `selfhost`). A dot-constructor (`.mk (x := 1)`, whose head needs
+the expected type) and an inductive type's own parameters (`L (A := Nat)`) keep no names
+yet.
+
 ## 13b: private declarations and private constructors
 
 ```wiz no-check

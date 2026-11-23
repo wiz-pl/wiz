@@ -44,14 +44,14 @@ ENGINE="$OUT/playground.wiz"
 
 # 3. Wiz → C → wasm. wasm64 as in web/build.sh; the export is called from
 # web/playground.js, and returns a malloc'ed UTF-8 string the page frees.
-(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp" --gmp "$OUT/gmp/mini-gmp.c" \
+(cd "$ROOT" && "$WIZ" --cc emcc --cflags "-I$OUT/gmp -DWIZ_NO_THREADS" --gmp "$OUT/gmp/mini-gmp.c" \
   --ldflags "-sMEMORY64=1 -sSTACK_SIZE=67108864 --no-entry \
 -sALLOW_MEMORY_GROWTH -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=web,node \
--sEXPORTED_FUNCTIONS=_wiz_playground_eval,_free \
+-sEXPORTED_FUNCTIONS=_wiz_playground_eval,_wiz_playground_check,_free \
 -sEXPORTED_RUNTIME_METHODS=stringToNewUTF8,UTF8ToString \
 -sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\$stringToNewUTF8,\$UTF8ToString" \
   build "$ENGINE" -o "$OUT/wiz-playground.mjs" --no-main)
 cp "$ROOT/web/playground.html" "$ROOT/web/playground.js" "$ROOT/web/playground-values.js" \
   "$ROOT/web/playground.css" "$ROOT/web/lsp-client.js" "$ROOT/web/goals.js" \
-  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$OUT/"
+  "$ROOT/web/playground-lsp.js" "$ROOT/web/tagged.js" "$ROOT/web/selfhost-lsp-shim.js" "$OUT/"
 echo "built $OUT/wiz-playground.mjs"

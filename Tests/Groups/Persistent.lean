@@ -17,6 +17,7 @@ which must agree. -/
 def persistentGroup : Group where
   name := "persistent"
   exercise := "persistent data structures: lib/PMap.wiz (PMap, PSet), examples/persistent.wiz"
+  parallel := true
   cases := [
     { name := "the model (#eval) passes every check", run := fun _ => do
         let src ← IO.FS.readFile "examples/persistent.wiz"

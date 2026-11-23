@@ -16,6 +16,7 @@ simulation = `Netlist.simulate` = `Hdl.Sim`'s `simFast`, and a well-formed netli
 def displayGroup : Group where
   name := "display"
   exercise := "display: the OLED command, data and window layer (SSD1306/SSD1331)"
+  parallel := true
   cases := [
     { name := "Display: SSD1306/SSD1331 command bytes, init, windows, pixel/colour helpers; seqC/serC decoded byte streams; values = Netlist.simulate = simFast", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-display.wiz")

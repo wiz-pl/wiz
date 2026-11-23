@@ -9,7 +9,8 @@ import Scry.ProjectCache
 import Scry.TaintCmd
 -- Multi-file project driver tests:
 --
--- * compile-database parsing (`arguments` vs `command`, flag filtering);
+-- * compile-database parsing (`arguments` vs `command`, flag filtering, and the
+--   preprocessor allowlist that refuses `-B`/`-fplugin`/`@file` by name);
 -- * shared-header dedupe, the static-symbol qualification, duplicate and unresolved
 --   policy;
 -- * cross-TU taint (a source in app.c reaching a sink in io.c), per-file counts and
@@ -84,6 +85,38 @@ def main : IO Unit := EIO.toIO (do
           (Bool.not (contains c1.flags "-o")))));
     check "compdb: command form keeps -Iinc2 and -DBAR=2"
       (Bool.and (contains c2.flags "-Iinc2") (contains c2.flags "-DBAR=2"));
+
+  -- the flag allowlist: only preprocessing flags may reach `cc -E`; a database is
+  -- repository-supplied, so an execution vector is refused by name, never stripped
+  check "compdb: -Bbin is refused by name"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-Bbin\",\"a.c\"]}]" with
+      | .error e => String.contains e "-Bbin"
+      | .ok _ => .false);
+  check "compdb: -fplugin is refused by name"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"command\":\"cc -fplugin=bin/p.so a.c\"}]" with
+      | .error e => String.contains e "-fplugin=bin/p.so"
+      | .ok _ => .false);
+  check "compdb: @file is refused"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"@bin/args\",\"a.c\"]}]" with
+      | .error e => String.contains e "@bin/args"
+      | .ok _ => .false);
+  check "compdb: an option-shaped value is refused"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"-Bbin\",\"a.c\"]}]" with
+      | .error e => String.contains e "-Bbin"
+      | .ok _ => .false);
+  check "compdb: -std=c11 kept, -o/-c dropped"
+    (match Scry.parseCompdb
+      "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-std=c11\",\"-DX=1\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]" with
+      | .error _ => .false
+      | .ok cmds => match cmds with
+        | .cons c _ => Bool.and (contains c.flags "-std=c11")
+            (Bool.and (contains c.flags "-DX=1")
+              (Bool.not (contains c.flags "-o")))
+        | .nil => .false);
 
   -- duplicate non-static definitions: reported, first analysed, no crash
   rd ← build "corpus/project/duplicate" Scry.CacheOpts.none;

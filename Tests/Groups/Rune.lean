@@ -17,6 +17,7 @@ masked writes). -/
 def runeGroup : Group where
   name := "rune"
   exercise := "rune: the HDL standard library (UART, SPI, DDR)"
+  parallel := true
   cases := [
     { name := "UART: baud generator and TX/RX loopback at the 16-bit default, 7-bit (iCEstick) and 10-bit (Arty/OLED) widths, n=1 and max n, reset/CDC receiver; simFast = values, every byte back, well formed", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/rune-uart.wiz")

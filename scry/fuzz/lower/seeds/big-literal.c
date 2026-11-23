@@ -1,0 +1,2 @@
+/* A large integer literal: Scry.parseDigits accumulates a big Nat. */
+int f(void){return 11111111111111111111111111111111111111111111111111111111111111111111111111111111;}

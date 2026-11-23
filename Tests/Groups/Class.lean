@@ -32,6 +32,7 @@ instance : Sub Z3 := Sub.mk (fun x y => Z3.ofNat (Z3.toNat x + (3 - Z3.toNat y))
 def classGroup : Group where
   name := "classes"
   exercise := "Exercise 7.1"
+  parallel := true
   cases := [
     { name := "methods take the instance as an instance-implicit argument", run := fun _ =>
         okLib (classPrelude ++ "#check Inhabited.default") ["Inhabited.default : {A : Type} → [self : Inhabited A] → A"] },

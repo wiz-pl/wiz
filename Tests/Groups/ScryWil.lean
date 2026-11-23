@@ -41,6 +41,7 @@ def evalNats (body : String) (expected : List Nat) : IO Unit := do
 def group : Group where
   name := "scry-wil"
   exercise := "Scry S2 (Wil)"
+  parallel := true
   cases := [
     { name := "arithmetic: three-address add and multiply",
       run := fun _ => evalNats

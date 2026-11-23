@@ -1,11 +1,11 @@
-// The page half for an app built from lib/Web/React.wiz, mirroring web/tagged.js's
+// The page half for an app built from lib/Web/Loom.wiz, mirroring web/tagged.js's
 // `stepper`: the Wiz module exports
 //
-//   wiz_react_init  : State
-//   wiz_react_html  : State -> String          (SSR of the current state)
-//   wiz_react_step  : State -> String -> State (the event string is "event\nindex")
+//   wiz_loom_init  : State
+//   wiz_loom_html  : State -> String          (SSR of the current state)
+//   wiz_loom_step  : State -> String -> State (the event string is "event\nindex")
 //
-// and calls the FFI `js_patch` (web/js.c) with `React.patchesJson` on every step; this
+// and calls the FFI `js_patch` (web/js.c) with `Loom.patchesJson` on every step; this
 // file applies those patches and turns DOM events into step calls. It is the intended
 // integration, not yet exercised by a Wasm build (no Emscripten on the machine where
 // the prototype was written); web/framework/test.mjs checks the same code path under
@@ -22,16 +22,16 @@ function takeString(wasm, p) {
   return s;
 }
 
-// Load `wasm` (Emscripten's MODULARIZE module), mount `wiz_react_html`'s output into
+// Load `wasm` (Emscripten's MODULARIZE module), mount `wiz_loom_html`'s output into
 // `root`, and wire events. `events` limits the delegated event types.
 export function start(wasm, root, { events } = {}) {
-  let state = wasm._wiz_react_init();
-  const html = () => takeString(wasm, wasm._wiz_react_html(state));
+  let state = wasm._wiz_loom_init();
+  const html = () => takeString(wasm, wasm._wiz_loom_html(state));
   mount(root, html());
   globalThis.wizPatch = (json) => applyPatches(root, JSON.parse(json));
   delegate(root, (event, index) => {
     const p = wasm.stringToNewUTF8(event + "\n" + index);
-    state = wasm._wiz_react_step(state, big(p));
+    state = wasm._wiz_loom_step(state, big(p));
     wasm._free(p);
     return true;   // a handled event does not also submit a form or follow a link
   }, events);

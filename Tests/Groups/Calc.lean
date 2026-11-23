@@ -147,6 +147,7 @@ def bad (a b c : Nat) (h1 : b < c) : a ≤ c :=
 def calcGroup : Group where
   name := "calc"
   exercise := "Stage 13s"
+  parallel := true
   cases := [
     { name := "mixed chains at Nat: ≤/<, </≤, ≤/< then ≤, and =/≤, ≤/=, </=; a long ≤ chain", run := fun _ =>
         okLibs natCalc ["'t' does not depend on any axioms"] },

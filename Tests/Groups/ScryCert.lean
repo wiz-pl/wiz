@@ -42,6 +42,7 @@ def compiled (name expected : String) : IO Unit := do
 def scryCertGroup : Group where
   name := "scry-cert"
   exercise := "S8: lib/Scry/Cert.wiz"
+  parallel := true
   cases := [
     { name := "transitive closure: a valid derivation is accepted (and `main`)", run := fun _ =>
         interp "scry-derivation" "10001011" },

@@ -178,6 +178,7 @@ def hdlPipeTools : IO Unit := do
 def hdlGroup : Group where
   name := "hdl"
   exercise := "HDL stage S0 (hdl-plan H14)"
+  parallel := true
   cases := [
     { name := "S2: operators on signals: same Verilog as the Hw operations, numerals at the width, if as a mux, printed back", run := fun _ => do
         -- the three designs agree with their Hw-operation twins (Verilog text); the counter

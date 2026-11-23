@@ -269,6 +269,46 @@ def cliGroup : Group where
         checkEq 1 c
         cliCheck err "cache miss: " "invalidated by the imported edit"
         cliCheck err "A.wiz:2:1: error: unknown identifier nope" "the module's error" },
+    { name := "(C15) smt: the host's refusal without --trust-smt; the flag is taken and says what is missing", run := fun _ =>
+        withSelfhostCli fun exe => do
+        let src := "import Prelude\ndef t (a b : Nat) : Nat.add a b = Nat.add b a := by smt\n"
+        let refuse := "f.wiz:2:1: error: SMT solving is not enabled: `smt` closes a goal on an SMT solver's word, which the kernel does not check; run with --trust-smt to allow it\n"
+        let noSolver := "f.wiz:2:1: error: smt: the self-hosted toolchain has no SMT translation or solver (C15); --trust-smt cannot close a goal here\n"
+        -- (the message is the host's, and the goal is not listed after it: the host's
+        -- `smt` error is an elaboration error, not a tactic failure)
+        let (c, out, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz"]
+        checkEq 1 c
+        checkEq "" out
+        checkEq refuse err
+        -- the flag is the host's, before or after the command; the self-hosted frontend
+        -- cannot run the solver, so it says so rather than closing the goal
+        for args in [#["check", "f.wiz", "--trust-smt"], #["--trust-smt", "check", "f.wiz"]] do
+          let (c, out, err) ← cliRun exe #[("f.wiz", src)] args
+          checkEq 1 c
+          checkEq "" out
+          checkEq noSolver err
+        -- a file that does not use `smt`: the flag is accepted and changes nothing, as
+        -- in the host
+        let (c, out, err) ← cliRun exe #[("good.wiz", cliGood)] #["check", "good.wiz", "--trust-smt"]
+        checkEq 0 c
+        checkEq "" out
+        checkEq "" err
+        -- the flag is in the cache key: the entry a run without the flag wrote is not
+        -- replayed with it (and vice versa), so the message always matches the run
+        let cacheDir ← IO.FS.createTempDir
+        let cache := (cacheDir / "c").toString
+        let (c, _, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "cold"
+        cliCheck err refuse "cold message"
+        let (c, _, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz", "--cache", cache, "-v", "--trust-smt"]
+        checkEq 1 c
+        cliCheck err "cache miss: " "the flag's entry is a different key"
+        cliCheck err noSolver "the flag's message"
+        let (c, _, err) ← cliRun exe #[("f.wiz", src)] #["check", "f.wiz", "--cache", cache, "-v"]
+        checkEq 1 c
+        cliCheck err "cache hit: " "warm"
+        cliCheck err refuse "warm message" },
     { name := "the one-shot mode (input.wiz to standard output) still works", run := fun _ =>
         withSelfhostCli fun exe => do
         let (c, out, _) ← cliRun exe #[("input.wiz", cliHello)] #[]

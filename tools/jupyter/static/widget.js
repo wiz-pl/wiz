@@ -3,17 +3,17 @@
 // messages.
 //
 // The renderer is **not** a second implementation. It imports the patch applier and
-// mount from web/framework/runtime.js — the same file lib/Web/React.wiz's patches are
+// mount from web/framework/runtime.js — the same file lib/Web/Loom.wiz's patches are
 // written for — and the Node test drives it with web/framework/minidom.mjs. The only
 // widget-specific code is event extraction (walk to `data-wiz-widget`, read the input
 // or the `data-wiz-widget-value`) and the comm binding.
 //
-// The Wiz→JS encoding is the one React already emits: one `div.wiz-widgets` fragment
-// whose HTML is `React.toHtml (Widget.vnodes ws)`, and patches addressed by
+// The Wiz→JS encoding is the one Loom already emits: one `div.wiz-widgets` fragment
+// whose HTML is `Loom.toHtml (Widget.vnodes ws)`, and patches addressed by
 // child-index paths ("" is the fragment, "0" its first child). Widget roots carry
 // `data-wiz-widget`, `data-wiz-widget-kind`, `data-wiz-widget-event` and
 // `data-wiz-widget-value`; the control is a child with `data-wiz-widget-input`. That is
-// documentation, not a protocol: nothing outside React's output is parsed here.
+// documentation, not a protocol: nothing outside Loom's output is parsed here.
 "use strict";
 
 import { applyPatches, mount } from "../../../web/framework/runtime.js";

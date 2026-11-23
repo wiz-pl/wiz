@@ -40,6 +40,7 @@ yosys on its Verilog when the tool is available. -/
 def hdlBusLawGroup : Group where
   name := "bus-law"
   exercise := "HDL libraries: Hdl.BusLaw (valid/ready laws, arbiter, route, RAM, byte enables)"
+  parallel := true
   cases := [
     { name := "Hdl.Bus law: stability, arbiter exclusion/progress, route, RAM read-after-write and strobes", run := fun _ => do
         cRunLibs (← IO.FS.readFile "examples/hdl-bus-law.wiz")

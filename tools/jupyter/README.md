@@ -6,7 +6,7 @@ a persistent `wiz repl` when the toolchain has one, otherwise a `wiz check`
 batch fallback — plus cell magics for `%%scry` (taint findings),
 `%%sh` (shell), `%%time` (wall clock and peak RSS) and `%%scry --progress`
 (live progress for long analyses), and interactive widgets (`Web.Widget` +
-Jupyter comms, rendered by `static/widget.js` on the React framework's patch
+Jupyter comms, rendered by `static/widget.js` on the Loom framework's patch
 applier). `tools/jupyter/wiz-nb export FILE.ipynb` turns a notebook's stored
 outputs into a self-contained static HTML page or Markdown.
 

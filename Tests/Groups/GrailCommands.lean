@@ -19,6 +19,7 @@ def cmdFiles (extra : String := "") : List (String × String) :=
 def grailCommandsGroup : Group where
   name := "grail-commands"
   exercise := "Stage 23i–j, 23o"
+  parallel := true
   cases := [
     { name := "commands chain through their outputs; a second build runs nothing", run := fun _ => do
         let dir ← mkTree (cmdFiles)

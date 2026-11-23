@@ -11,6 +11,7 @@ namespace Tests.Elab
 def ffiGroup : Group where
   name := "ffi"
   exercise := "Stage 9a"
+  parallel := true
   cases := [
     { name := "IO actions run in order", run := fun _ =>
         ioRun "import IO\ndef main : IO Unit := do\n  IO.println \"one\";\n  IO.println \"two\"" "one\ntwo\n" },
