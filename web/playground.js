@@ -134,6 +134,8 @@ function editorRules(handle, versionOf = null) {
     itemTitle: index.itemTitle,
     askKey: index.askKey,
     position: index.position,
+    // The LSP position → UTF-16 offset rule (the format action's edit applier uses it).
+    offset: index.offset,
     target: index.target,
   };
 }

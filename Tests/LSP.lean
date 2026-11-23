@@ -315,6 +315,33 @@ def group : Group where
         checkEq ["\"bye\\n\""] (infosIn out) }
   ]
 
+/-- The text `wiz fmt` makes of `src` (the Prelude the server has). -/
+def fmtText (src : String) : IO String := do
+  let p ← prelude
+  let init : St := { loader := fun m => if m == "Prelude" then some p else none, trustedModule := Tests.libModule }
+  pure (Fmt.run init src {}).text
+
+/-- A `textDocument/formatting` request's `TextEdit` array (or, with a range,
+`textDocument/rangeFormatting`), at `file:///t.wiz`. An error reply gives no edits. -/
+def formatEdits (srv : LSP.Server) (src : String) (range? : Option (Nat × Nat) := none)
+    (insertSpaces : Bool := true) : IO (LSP.Server × Array Lean.Json) := do
+  let options := s!"\{\"tabSize\":2,\"insertSpaces\":{if insertSpaces then "true" else "false"}}"
+  let (method, rangeJson) := match range? with
+    | some (a, b) => ("textDocument/rangeFormatting",
+        s!"\"range":\{\"start\":{posJson src a},\"end\":{posJson src b}},")
+    | none => ("textDocument/formatting", "")
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},{rangeJson}\"options\":{options}}}")
+  match (out[0]!.getObjVal? "result").toOption with
+  | some (.arr es) => pure (srv, es)
+  | _ => pure (srv, #[])
+
+/-- Apply a `TextEdit` array to `src` (the edits' positions are into `src`). -/
+def applyTextEdits (src : String) (es : Array Lean.Json) : String :=
+  let at (e : Lean.Json) (k : String) : Nat :=
+    LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+  Actions.apply src (es.map fun e =>
+    { start := at e "start", stop := at e "end", text := LSP.getStr e ["newText"] })
+
 /-- Apply a `WorkspaceEdit` (for `file:///t.wiz`) to `src`. -/
 def applyEdit (src : String) (edit : Lean.Json) : String :=
   let edits := match LSP.get? edit ["changes", "file:///t.wiz"] with
@@ -588,6 +615,42 @@ def serverGroup : Group where
         let (_, out) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
         for m in ["wiz/plainGoal", "wiz/interactiveGoals", "wiz/subtermInfo", "codeActionProvider", "experimental"] do
           check (has out[0]! m) s!"no {m}" },
+    { name := "textDocument/formatting: wiz fmt's text, one edit, idempotent, range-only", run := fun _ => do
+        -- the capability
+        let (_, caps) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "documentFormattingProvider") "no documentFormattingProvider"
+        check (has caps[0]! "documentRangeFormattingProvider") "no documentRangeFormattingProvider"
+        -- badly spaced source
+        let src := "import Prelude\ndef  f :Nat:=1\ndef g (n:Nat):Nat :=  n+1\n"
+        let expected ← fmtText src
+        check (expected != src) "the fixture is already formatted"
+        let (srv, _) ← openDoc src
+        let (srv, es) ← formatEdits srv src
+        checkEq 1 es.size
+        checkEq expected (applyTextEdits src es)
+        -- the one edit is a well-formed LSP range of the original text
+        let e := es[0]!
+        let at (k : String) : Nat :=
+          LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+        check (at "start" ≤ at "end" && at "end" ≤ src.length) s!"range {at "start"}..{at "end"} of {src.length}"
+        -- idempotence: the reprint is a fixed point
+        let (srv, _) ← openDoc expected (srv? := some srv)
+        let (_, es2) ← formatEdits srv expected
+        checkEq 0 es2.size
+        -- a range request formats only the command inside it
+        let src2 := "import Prelude\ndef  f :Nat:=1\ndef  g :Nat:=2\n"
+        let rlo := (src2.splitOn "def  g").headD "" |>.length
+        let rhi := rlo + "def  g :Nat:=2".length
+        let (srv2, _) ← openDoc src2 (srv? := some srv)
+        let (_, es3) ← formatEdits srv2 src2 (some (rlo, rhi))
+        checkEq 1 es3.size
+        let out := applyTextEdits src2 es3
+        check (out.contains "def  f :Nat:=1") s!"the first command changed: {out}"
+        check (out.contains "def g : Nat := 2") s!"the second command was not formatted: {out}"
+        -- `insertSpaces: false` is refused, not silently ignored
+        let (_, out4) ← LSP.handle srv2 (req "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"options\":{\"tabSize\":2,\"insertSpaces\":false}}}")
+        check (has out4[0]! "insertSpaces") s!"no error: {out4[0]!.compress}"
+        checkEq "-32602" ((LSP.get? out4[0]! ["error", "code"]).getD Lean.Json.null).compress },
     { name := "wiz/plainGoal and wiz/plainTermGoal", run := fun _ => do
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\n"
         let (srv, _) ← openDoc src

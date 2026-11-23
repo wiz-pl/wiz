@@ -814,6 +814,10 @@ structure Options where
   width : Nat := 100
   /-- print the reprint of a refused command (what it would have been) -/
   explain : Bool := false
+  /-- (LSP range formatting) reprint only the commands that lie wholly inside this
+  character span; every other command keeps its original text, byte for byte. `none`
+  formats the whole file, as `wiz fmt` does. -/
+  range : Option (Nat × Nat) := none
   deriving Inhabited
 
 structure Result where
@@ -840,7 +844,10 @@ partial def run (init : CommandState ZeroOneMany) (input : String) (opts : Optio
   let rec go (s : CommandState ZeroOneMany) (pos prevStop : Nat) (out : String)
       (refused : Array String) : Result :=
     if skipWs chars pos ≥ chars.size then
-      { text := stripTrailing (out ++ sliceText chars prevStop chars.size), refused }
+      -- (LSP range formatting) outside the range every character is kept, trailing
+      -- spaces included; a whole-file format still strips them
+      let tail := sliceText chars prevStop chars.size
+      { text := if opts.range.isSome then out ++ tail else stripTrailing (out ++ tail), refused }
     else match parseCommand chars s.tables pos with
     | .error e => { refused, errors := #[e.render input] }
     | .ok (cmd, stop) =>
@@ -848,35 +855,47 @@ partial def run (init : CommandState ZeroOneMany) (input : String) (opts : Optio
       let gap := if !rawGap.isEmpty && rawGap.toList.getLast! != '\n' then rawGap ++ "\n" else rawGap
       let original := sliceText chars cmd.info.start stop
       let fmts := formatsOf s
-      -- the reprint, but only when it parses back to the same tree with these tables
-      let checked : Except String String :=
-        match formatCommand fmts chars cmd opts.width with
-        | .error e => .error e
-        | .ok text =>
-          let fchars := text.toList.toArray
-          match parseCommand fchars s.tables 0 with
-          | .error e =>
-            let (l, c) := lineCol text e.pos
-            .error s!"the reprint does not parse at {l + 1}:{c + 1}: {(e.render text).splitOn ": " |>.drop 1 |> ": ".intercalate}"
-          | .ok (cmd', stop') =>
-            if skipWs fchars stop' != fchars.size then
-              let off := skipWs fchars stop'
-              let (l, c) := lineCol text off
-              Except.error (s!"the reprint does not parse to one command (stops at {l + 1}:{c + 1}, " ++
-                s!"before '{String.ofList (fchars.extract off (min fchars.size (off + 40))).toList}')")
-            else
-              let k := cmd.toSExpr (atoms := true)
-              let k' := cmd'.toSExpr (atoms := true)
-              if k' != k then .error s!"the reprint parses to a different tree{kDiff k k'}" else .ok text
-      let lineNo := (lineCol input cmd.info.start).1 + 1
       let s' := runFrontend.go input init (chars.extract 0 stop) pos s
-      match checked with
-      | .error why =>
-        let note := match formatCommand fmts chars cmd opts.width with
-          | .ok text => if opts.explain then s!"\n-- would be:\n{text}" else ""
-          | .error e => if opts.explain then s!"\n-- no reprint: {e}" else ""
-        go s' stop stop (out ++ gap ++ original) (refused.push s!"line {lineNo}: left as written ({why}){note}")
-      | .ok text => go s' stop stop (out ++ gap ++ text) refused
+      -- (LSP range formatting) a command outside the range keeps its text exactly; the
+      -- range's whitespace gaps are not rewritten either
+      let wanted := match opts.range with
+        | none => true
+        | some (lo, hi) => lo ≤ cmd.info.start && stop ≤ hi
+      if !wanted then
+        go s' stop stop (out ++ rawGap ++ original) refused
+      else
+        -- the reprint, but only when it parses back to the same tree with these tables
+        let checked : Except String String :=
+          match formatCommand fmts chars cmd opts.width with
+          | .error e => .error e
+          | .ok text =>
+            let fchars := text.toList.toArray
+            match parseCommand fchars s.tables 0 with
+            | .error e =>
+              let (l, c) := lineCol text e.pos
+              .error s!"the reprint does not parse at {l + 1}:{c + 1}: {(e.render text).splitOn ": " |>.drop 1 |> ": ".intercalate}"
+            | .ok (cmd', stop') =>
+              if skipWs fchars stop' != fchars.size then
+                let off := skipWs fchars stop'
+                let (l, c) := lineCol text off
+                Except.error (s!"the reprint does not parse to one command (stops at {l + 1}:{c + 1}, " ++
+                  s!"before '{String.ofList (fchars.extract off (min fchars.size (off + 40))).toList}')")
+              else
+                let k := cmd.toSExpr (atoms := true)
+                let k' := cmd'.toSExpr (atoms := true)
+                if k' != k then .error s!"the reprint parses to a different tree{kDiff k k'}" else .ok text
+        let lineNo := (lineCol input cmd.info.start).1 + 1
+        match checked with
+        | .error why =>
+          let note := match formatCommand fmts chars cmd opts.width with
+            | .ok text => if opts.explain then s!"\n-- would be:\n{text}" else ""
+            | .error e => if opts.explain then s!"\n-- no reprint: {e}" else ""
+          go s' stop stop (out ++ gap ++ original) (refused.push s!"line {lineNo}: left as written ({why}){note}")
+        | .ok text =>
+          -- a range's reprint is trailing-space free on its own: the whole file's
+          -- `stripTrailing` would also touch the text outside the range
+          let text := if opts.range.isSome then stripTrailing text else text
+          go s' stop stop (out ++ gap ++ text) refused
   go init 0 0 "" #[]
 
 /-! ### `--self-test`: small fixtures that exercise the constructs the formatter lays out
