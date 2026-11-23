@@ -1166,13 +1166,38 @@ s.optValue? "pp.notation"  -- the module's value, or the declared default
   module's options are restored when its import ends. The isolation cache key includes
   the starting registries and option values (`Frontend.isoKey`), so a custom initial
   state cannot reuse a module elaborated under another one.
-* `AttributeDecl` and `OptDecl` are deliberately small typed entries: they are the seed
-  for the ext layer (`Wiz/Ext/Basic.lean`'s `Kind`/`Stage`/`Payload`/`Entry`, CORE-3.3),
-  not that layer. `[term_elab]` landed this way (B1): the generic `command.attr` rule
-  parses it and the registry's action dispatches it (`AttrAction.termElab`), with no new
-  parser rule and no new `elabCommand` kind; the handler is `TermElab := Syntax →
-  TacticM Unit` (`lib/Prelude.wiz`), run by the elaborator in `check`/`infer`, and it is
-  not `local` (it has an effect that outlives its module, like `[tactic]`). Per-deriver
-  options can land here the same way; user code today gets no-op attributes/options as
-  data. `[simp]` and `[hint]` are registered entries too, each with its dedicated parser
-  rule.
+* `AttributeDecl` and `OptDecl` are deliberately small typed entries. They were the seed
+  for the ext layer; `Wiz/Ext/Basic.lean` now has that layer's `Kind`/`Stage`/`Payload`/
+  `Entry` and `Wiz/Ext/Resolve.lean` its one table and resolver (11ai). `[term_elab]`
+  landed this way (B1): the generic `command.attr` rule parses it and the registry's
+  action dispatches it (`AttrAction.termElab`), with no new parser rule and no new
+  `elabCommand` kind; the handler is `TermElab := Syntax → TacticM Unit`
+  (`lib/Prelude.wiz`), run by the elaborator in `check`/`infer`, and it is not `local`
+  (it has an effect that outlives its module, like `[tactic]`). Per-deriver options can
+  land in the attribute registry the same way; user code today gets no-op
+  attributes/options as data. `[simp]` and `[hint]` are registered entries too, each with
+  its dedicated parser rule.
+
+## 11ai: the entry registry and `--target`
+
+`Wiz/Ext/Basic.lean` is the shared record (`Entry`, `Capability`, `ArtifactKind`,
+`Diagnostic`); `Wiz/Ext/Resolve.lean` is the one table and one resolver. Resolution is
+fail-closed: unknown, not-enabled, wrong-ABI, undeclared-capability and unsupported
+payload are `Diagnostic`s with stable codes, returned before a payload runs. A duplicate
+`(kind, name)` or alias is refused when the table is built, naming both providers.
+
+`--target` is the first user: `backendEntries` declares `c`, `llvm`, `wasm`, `bpf`, `js`
+and the alias `ebpf`; `Main.takeTarget` resolves through the table and `buildCmd`/
+`runCmd`/the REPL dispatch on the payload's `CoreDriver`, with no `else` that means C.
+`--lib`/`--no-main`/`--split`/`--attest`/`run`/`repl` are capabilities on the row, so
+`--target bpf --attest` is `target-capability` before `Bpf.buildCmd` is entered. The
+resolved canonical name (the target this run enabled) is part of `Toolchain.targetTag`
+and of `Toolchain.id`, which `Main` passes as the cache's fast toolchain namespace; an
+unverified `.wizc` lookup is therefore separated by target too.
+
+The self-hosted deriver table stores `DeriverRef` (`builtin kind | user name`), so a user
+declaration called `deriveBEq` is refused with `entry-unsupported` rather than running
+the frontend's built-in `BEq` body. Package backends are not wired: `grail.wiz`'s
+`Package.command` is a build-graph node, not a registry row (see
+`wiz-notes/ext-registry.md` §4).
+>>>>>>> agent/ext-registry

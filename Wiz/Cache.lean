@@ -1070,7 +1070,7 @@ structure ModuleManifest where
   toolchain : String := ""
   /-- the strong toolchain namespace (`Toolchain.tag`: target, compiler, flags) -/
   toolchainTag : String := ""
-  /-- the strong target namespace (`Toolchain.targetTag`: triple and word width) -/
+  /-- the strong target namespace (`Toolchain.targetTag`: triple, word width and the selected backend entry) -/
   targetTag : String := ""
   /-- the rig the region was saved for (`RigTag.tag`) -/
   rig : String := ""
