@@ -35,7 +35,7 @@ def extGroup : Group where
             checkEq s!"target/{n}" (Wiz.Ext.Entry.key e)
         let c ← match Wiz.Ext.resolveBackend "c" with
           | .ok e => pure e | .error r => throw (IO.userError r.message)
-        for cap in [Wiz.Ext.Cap.emit, .check, .link, .run, .attest, .library, .split, .repl] do
+        for cap in [Wiz.Ext.Cap.emit, .link, .run, .attest, .library, .split, .repl] do
           check (c.caps.contains cap) s!"c lacks {cap.key}"
         let bpf ← match Wiz.Ext.resolveBackend "bpf" with
           | .ok e => pure e | .error r => throw (IO.userError r.message)

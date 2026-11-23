@@ -183,15 +183,29 @@ The payload is a **reference**, never a function value. That is what lets the sa
 describe a core target, a Wiz rule and a manifest entry; it is also why resolution can be
 pure and why the selfhost can carry the same table with `.unsupported reason`.
 
+The prototype's `Cap` carries the target and lint groups it exercises. The Wiz kinds add
+`Syntax`/`inductive`/`type` for a deriver or macro, `goals`/`expr` for a tactic, and
+`term` for the future term elaborator; the enum is closed per kind, and `register`
+refuses a capability outside its kind's set (a Step 2/5 check, not in the prototype —
+§9).
+
+**Names versus the brief's sketch.** `Capability` is `Cap`; `Diagnostic` is `Refusal` (a
+stable code and a message, for argv/manifest paths) plus the existing `Msg` where a span
+exists; `ArtifactKind` is backend-specific (`targets-ext.md` §2: `.src`, `.object`,
+`.header`, `.module`) and deliberately not a field of the generic record; `Resolve` is
+`Table.resolve` (a separate `Wiz/Ext/Resolve.lean` is a fine split when it grows). The
+prototype keeps the model and resolver in one ~260-line module so the first user has one
+import.
+
 The same declaration in its three current/proposed surfaces:
 
-```lean
+```text
 -- core: one row of the pure list, resolved before any module is read
 { kind := .backend, name := "bpf", schema := "bpf-core/1", abi := "wiz-backend/1",
   caps := [.emit, .check], payload := .core "Wiz.Compiler.Bpf" }
 
 -- Wiz rule: the attribute is sugar for the same record (`payload := .wizRule f`)
-attribute [deriver BEq] deriveBEq          -- ~ deriver/BEq, provider this module
+attribute [deriver BEq] deriveBEq           -- ~ deriver/BEq, provider this module
 attribute [tactic tactic.exact] Tactic.exact -- ~ tactic/tactic.exact
 
 -- package (proposed; not in the tree): the manifest names the same fields
@@ -209,21 +223,27 @@ would be a parser convenience, not a second registry.
 ```
 resolve(table, kind, name, needs):
   1. canonicalize name for the kind (case-fold only doc languages; validate the shape)
-  2. find (kind, name) in the core table        -- core wins; no package shadow
-  3. else find it in the enabled package tables -- two providers => duplicate-<kind>
-  4. else                                      => unknown-<kind> (+ choices)
-  5. unless entry.set is enabled               => <kind>-not-enabled
-  6. unless entry.abi is readable              => unsupported-<kind>
-  7. unless needs ⊆ entry.caps                 => <kind>-capability
-  8. unless payload is available here          => entry-unsupported / <kind>-not-installed
-  9. return entry
+  2. core := coreTable.find(kind, name); pkg := enabledPackageTables.find(kind, name)
+  3. if core is some and pkg is some:
+       if pkg.override and kind == docLanguage => pkg       -- the declared exception
+       else                                    => duplicate-<kind> (both providers)
+     else if core is some => core
+     else if pkg is some  => pkg
+     else                 => unknown-<kind> (+ choices)
+  4. unless entry.set is enabled               => <kind>-not-enabled
+  5. unless entry.abi is readable              => unsupported-<kind>
+  6. unless needs ⊆ entry.caps                 => <kind>-capability
+  7. unless payload is available here          => entry-unsupported / <kind>-not-installed
+  8. return entry
 ```
 
 Notes on each step:
 
-* **Core wins.** A package may not shadow a core name, except a doc language with
-  `override := true` (the existing `wiz.doc.languages/1` rule; `wiz` itself is never
-  overridable). An `override` on any other kind is a registration refusal.
+* **Core names are not shadowable.** A package may not shadow a core name: a package
+  entry that also provides one is a `duplicate-<kind>` refusal, except a doc language
+  with `override := true` (the existing `wiz.doc.languages/1` rule; `wiz` itself is never
+  overridable). An `override` on any other kind is a registration refusal. The exception
+  is in the resolver, not a per-kind branch in the driver.
 * **Two tables, one record.** The driver table is resolved before any module is read
   (`--target`); the elaboration table is resolved while a module is open. A table has a
   lifetime, not a different entry type. This is the answer to `targets-ext.md` §0.1's
@@ -265,8 +285,20 @@ the code. An elaboration refusal (duplicate deriver/tactic) is an ordinary `Msg`
 new code in `Wiz/Core/ErrorCode.all`; the `lsp-server` test re-pins the table in
 `docs/error-codes.md`.
 
+**Trust is per payload, not per entry.** A Wiz rule is gated by the kernel or the
+capability view and must pass the trust/`partial` walk (`Wiz/Lint.lean:587-648`); a
+target's runtime helpers are trust-ledger rows, not the entry; a process adapter is
+outside the ledger's walk, so its capabilities are **advisory** until there is a sandbox
+(`targets-ext.md` §6; `registry-provenance.md` §6.6). The registry is not a sandbox, and
+"declared capability" must not be read as "enforced".
+
 ### 2.4 Conflicts, per kind
 
+* **Payload/provider rule** — a `.core` payload is legal only for `provider ==
+  "wiz-lang"`; a package entry is `.wizRule`, `.data` or `.process` (`.unsupported` is
+  allowed anywhere). A package cannot register host code in the compiler process. This
+  is the registry-level version of `Module.fromFirstRoot`/`trustedModule`
+  (`Wiz/Module.lean:189-195`, `Wiz/Elab/Command.lean:150-152`).
 * **Duplicate `(kind, name)`** — refused wherever it is detected: at registration for a
   Wiz entry (the attribute command), at table construction for core, at resolution for
   package tables. The message names both providers. No "latest wins" by accident.
@@ -316,6 +348,13 @@ format change, `regionFormat` bump) or keep the four existing lists as the stora
 build the `Entry` view at lookup time. The latter is smaller and does not change the
 cache format; it is the recommended first cut.
 
+The entry key is the **interface**, not the implementation: a stable `deriver/BEq` may
+name a different declaration after a refactor. A cache keyed on the entry alone would
+reuse the old body; the module source hash (and the declaration name in the payload) is
+what makes a rename/rebuild a miss. Do not put an entry digest into an elaboration cache
+where the payload body matters; the target digest is for target selection, where the
+payload is the same host code.
+
 ---
 
 ## 3. The minimal Wiz-side ABI: `wiz-meta/1`
@@ -362,9 +401,8 @@ def Derive.instBinder (cls : String) (p : ParamView) (rest : Syntax) : Syntax :=
 
 `lib/Deriving.wiz:120-142` uses this shape throughout. What the ABI guarantees:
 
-* `$(x)` (written `$x`) is an **antiquotation**: the local `x` is checked against
-  `Syntax` and spliced as the value it holds (`Wiz/Elab/Term.lean:3777-3795`, the
-  `antiquotName?` branch).
+* `$x` is an **antiquotation**: the local `x` is checked against `Syntax` and spliced as
+  the value it holds (`Wiz/Elab/Term.lean:3777-3795`, the `antiquotName?` branch).
 * A literal identifier in the quote is marked with `✝` (`elabQuote`, `:3784-3792`),
   unless it is dotted or under one of `unscopedParents`
   (`Wiz/Elab/Macro.lean:55-56`: `term.dotIdent`, `term.field`, `level.param`,
@@ -404,10 +442,10 @@ What this view deliberately loses:
 * A type that does not print back becomes a hole `_` (`Reflect.lean:73-76`); the view is
   a printing, not a kernel term.
 * There are no class/instance tables, no definition bodies, no arbitrary declaration
-  types (`getType` returns the type of one declaration as syntax, `:86-89,138-142`), no
+  types (`getType` returns the type of one declaration as syntax, `:134-136,138-142`), no
   local context for a declaration, and no way to ask "is this definition equal to that".
 * `FieldView.recursive` is true only when the field's type spine is exactly the `const
-  T` (`:105-110`); an alias or a reducible spelling is not recognised.
+  T` (`:120-124`); an alias or a reducible spelling is not recognised.
 
 An entry may splice these types into commands, but the host re-elaborates the result:
 nothing the entry says about a type is trusted, and a hole in a copied type will be a
@@ -416,26 +454,26 @@ hole in the generated command.
 **Term view (`Expr`).** For a tactic or a future term elaborator, `Expr`
 (`lib/Prelude.wiz:494-504`) is `var i | const n | sort u | pi x implicit q dom body |
 lam x body | app f a | lit n | opaque id`. The host reflects with `reflect`
-(`Wiz/Elab/Tactic.lean:129-175`) and reifies with `reify`:
+(`Wiz/Elab/Tactic.lean:145-173`) and reifies with `reify` (`:176-207`):
 
 * variables are de Bruijn indices relative to the goal's context;
 * a constant loses its universe levels; `reify` makes fresh level metavariables
-  (`:170-177`), so a universe-polymorphic constant is not round-tripped faithfully;
+  (`:185-189`), so a universe-polymorphic constant is not round-tripped faithfully;
 * a `sort` is reflected only if its level is a numeral; otherwise `opaque`;
 * `pi`/`lam` carry the binder name; `pi` also carries an implicit flag and the quantity
   as an `Expr` (not a `BinderInfo` or a quantity literal), while `lam` carries only its
   name and body; `mu`/`nu` are shown only in the `(T, us, args)` display-hint form
   (`:155-160`);
 * every other kernel form is `opaque id`: an index into a 256-entry handle table, tagged
-  with the number of variables in scope (`internHandle`, `:127-135`). Two reflections of
+  with the number of variables in scope (`internHandle`, `:132-141`). Two reflections of
   the same term at the same depth get the same handle; a handle may be passed back to
   `reify`, lifted by `depth - d` or strengthened, and using it outside its binders fails
   (`:183-203`). A handle is never inspectable.
 * Constructor applications are recovered only where the **type** is known:
-  `reflectT` follows the types down (`:210-224`), so a `con` at a known nominal type is
-  its constructor applied to parameters and fields; where the type is not known it stays
-  opaque. This is enough for tactics and not enough for a rule that must see inside a
-  definition body.
+  `reflectT` follows the types down (`:210-224,370`), so a `con` at a known nominal type
+  is its constructor applied to parameters and fields; where the type is not known it
+  stays opaque. This is enough for tactics and not enough for a rule that must see inside
+  a definition body.
 
 **Requests.** `TacTag` (`Wiz/Elab/Tactic.lean:38-90`) is the closed vocabulary: 45 tags,
 append-only. A macro or deriver may ask only `result` (1), `fail` (2), `trace` (3),
@@ -518,6 +556,7 @@ acceptance for any default-on entry includes a budget-exhaustion case (`entry-bu
 |---|---|
 | `Wiz.Core.Term`, `Globals`, `Environment`, `Name` resolution internals | the ABI is a view; leaking the kernel makes every kernel change an ABI change |
 | arbitrary declaration types/bodies; `getType` is the only type query, `IndView` the only declaration view | a rule that needs the body needs the structured view (item ③), not a raw term |
+| the class name and its methods in a deriver; `Deriver` receives only the type name | `lib/Deriving.wiz` hardcodes the five method names; a generic deriver is a later ABI change (`getClass` or a second `String` argument) |
 | goals outside the current tactic state; direct metavariable assignment | a tactic is a request chain; anything else breaks the kernel's checked-term discipline |
 | adding `Tac` requests | `TacTag` is a host frontier (B2); an untyped backdoor would undermine the capability model |
 | IO, filesystem, clock, random, network, process control | a Wiz rule is a pure function over a view; the host supplies the view |
@@ -526,6 +565,7 @@ acceptance for any default-on entry includes a budget-exhaustion case (`entry-bu
 | doc renderer/tokeniser code | doc languages are data; the builder is host-only by design (`docs-highlighting.md` §4.3) |
 | cache keys, toolchain flags, options, module roots | the driver's policy, not the entry's |
 | suppressing/re-grading core lint rules or diagnostics | core policy is the consumer's and the toolchain's |
+| no `quoteExpr`/`quoteDecl`; the entry builds `Syntax` with a quotation and `Expr` with its constructors | the `Expr` view is the stable term interface; a kernel-term quotation would pin the representation |
 | multiple spans, related locations, several errors per term/deriver invocation, quick fixes | v1 has one `Msg`; C5 is the follow-up |
 | source positions in generated syntax; scope objects; capture avoidance for free names | the quote is a syntax-building term; positions are the call site |
 
@@ -564,6 +604,23 @@ the declaration through `runDeriver` (`:2204-2210`). The registry entry is
 for `getInductive`; the prototype does not need it yet). Duplicate `deriver/C` is a
 refusal; a user declaration named `deriveBEq` is simply a different declaration, because
 the key is the **class** and the payload is the declaration, not a name heuristic.
+
+Two registration details matter for the stable key. First, `attrDeriver` stores `C` as
+the **syntactic** id (`:3709-3711`), the `deriving` clause uses `c.getId?` without
+`resolveName` (`:2217-2220`), and only the standalone `deriving instance` command
+resolves C and T (`:3722-3727`). A deriver registered inside a namespace can therefore
+be stored under a name the clause never looks up. Step 5 must resolve `C` in all three
+places before constructing `deriver/C`. Second, `f` must be stored as the resolved
+declaration, not `deriverBase f`; the host already does the former, the selfhost the
+latter (D1).
+
+One ABI gap is easy to miss: `Deriver` receives only the **type** name
+(`String → MacroM (List Syntax)`, `lib/Prelude.wiz:903`), not the class `C` or its method
+names. The class is in the registry key, but the function cannot see it; `lib/Deriving.wiz`
+hardcodes `"BEq.beq"`, `"Repr.reprPrec"`, etc. A generic deriver for a user class must
+either hardcode its class (fine for the author) or the ABI needs a `getClass` request or
+a `Deriver := String → String → …` change. That is deliberately out of v1; the registry
+can still declare the entry and the driver can pass `C` to a future interface.
 
 The selfhost fix (D1) is part of Step 4: `Globals.addDeriver` must carry whether the
 registered value is a built-in (compiled into the frontend) or a user declaration
@@ -755,7 +812,9 @@ with the same codes.
 
 Add the marker to the entry `abi`; add `Tests/fixtures/meta/` with one deriver, one
 tactic, one command macro (with an error path) and one lint rule; run them on the host
-and record the selfhost's `unsupported` result. Add the fuel budget before any package
+and record the selfhost's `unsupported` result. The existing A11/A12 cases are the first
+rows of the corpus; a shared fixture directory makes them one artifact instead of two
+test-group copies. Add the fuel budget before any package
 entry is default-on. Acceptance: the corpus passes byte-identically on the host; the
 selfhost records the same `entry-unsupported` code for each; a budget-exhaustion case
 reports `entry-budget`, not a hang.
@@ -859,15 +918,18 @@ were re-read at those lines, not copied from `extensibility.md` (whose tree was
   duplicates in `lib/Prelude.wiz` are inside doc comments; `attribute [tactic
   tactic.exact]` appears at `:1009` only as code, `:969` is a documentation example).
 
-**Executed.** The build and test results will be filled here from the heavy job. What I
-did **not** run: the full suite, `=backend`, `=js`, `=bpf`, `=wasm`, `=selfhost`,
-`=selfhost-cli-diff`, `=wiz-lint`, `grail test`, any measurement. No Lean build was run
-on the controller; everything goes through `heavy`.
+**Executed.** The build and test results will be filled here from the heavy job. The
+commands are `heavy --rsync --timeout 3600 -- lake build wiz tests` and
+`heavy --sshfs -- timeout 600 lake test -- '=ext'` (the test runs after the build, one
+heavy job at a time). What I did **not** run: the full suite, `=backend`, `=js`, `=bpf`,
+`=wasm`, `=selfhost`, `=selfhost-cli-diff`, `=wiz-lint`, `grail test`, any measurement.
+No Lean build was run on the controller; everything goes through `heavy`.
 
 **Not implemented (the prototype stops here).**
 
 * `buildCmd`/`runCmd`/REPL dispatch and capability checks (Step 2); the prototype only
-  resolves `--target`.
+  resolves `--target NAME`, `--llvm` and `--wasm` (the last two through the table, as
+  fixed CLI aliases). Dispatch after resolution is still the string code.
 * The entry digest in `Toolchain.targetTag`/`Cache.Key` (Step 2).
 * The selfhost target table and the deriver flag (Steps 3–4).
 * The elaboration registry conversion (Step 5), lint/doc conversion (Step 6), the ABI
@@ -875,6 +937,10 @@ on the controller; everything goes through `heavy`.
 * Per-kind name shapes and doc-language case-folding; the prototype's `nameOk` only
   rejects whitespace/slashes, and the existing doc registry still owns the case-insensitive
   merge (`Wiz/Doc/Registry.lean:127-146`).
+* Per-kind capability validation (a `target` claiming `decl` is accepted by the
+  prototype's `register`); the real resolver refuses a capability outside its kind's set.
+* The `.core`-only-for-`wiz-lang` payload rule; the prototype records the payload but does
+  not enforce the trust boundary (it has no package table yet).
 * No package adapter, no `ext-set`, no `grail` manifest key.
 
 **Unverified / open.**
@@ -934,7 +1000,7 @@ new module/group.
 | `selfhost/Cli.wiz:1181-1186,1274-1301` | three names | five names + `supported`/reason | `=selfhost-cli-diff` |
 | `selfhost/Frontend.wiz:815-824,10834-10847,11435-11447` | name dispatch | builtin/user flag | `=selfhost` A11 |
 | `ErrorCode.lean:102+`, `docs/error-codes.md` | no entry codes | `entry-*`, `duplicate-*` | `lsp-server` table |
-| `.github/test-shards.json` | no `=ext` | add to the compiler shard (done) | `check-shards.py` |
+| `.github/test-shards.json` | no `=ext` | add to the library shard (done) | `check-shards.py` |
 
 The rows that are *not* done are deliberately not claimed as passing; §9 lists the
 selectors that were not run.

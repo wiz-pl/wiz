@@ -955,11 +955,17 @@ def takeTarget : List String → Except String (Option String × List String)
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
     | none => pure (some t, rest)
   | "--llvm" :: rest => do
+    match Wiz.Ext.resolveBackend "llvm" with
+    | .error r => throw r.message
+    | .ok _ => pure ()
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != "llvm" then throw s!"two targets: llvm and {u}" else pure (some "llvm", rest)
     | none => pure (some "llvm", rest)
   | "--wasm" :: rest => do
+    match Wiz.Ext.resolveBackend "wasm" with
+    | .error r => throw r.message
+    | .ok _ => pure ()
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != "wasm" then throw s!"two targets: wasm and {u}" else pure (some "wasm", rest)

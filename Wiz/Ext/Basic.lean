@@ -223,7 +223,7 @@ not a `String` comparison in `Main.lean`, decides whether `--attest`, `--lib`, `
 `run` or the REPL is legal. -/
 def backendEntries : List Entry := [
   { kind := .backend, name := "c", schema := "", abi := "wiz-backend/1",
-    caps := [.emit, .check, .link, .run, .attest, .library, .split, .repl],
+    caps := [.emit, .link, .run, .attest, .library, .split, .repl],
     payload := .core "Wiz.Compiler.Build.c" },
   { kind := .backend, name := "llvm", schema := "", abi := "wiz-backend/1",
     caps := [.emit, .link, .run, .attest, .library, .repl],
