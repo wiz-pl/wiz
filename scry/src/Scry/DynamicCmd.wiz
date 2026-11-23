@@ -105,14 +105,14 @@ def Scry.dynAnalyze (o : Scry.DynCliOpts) : EIO (Scry.DynReport × Option Scry.T
 
 def Scry.dynSarifText (rep : Scry.DynReport) (srep : Option Scry.TaintReport) : String :=
   match srep with
-  | .none => Json.render (Scry.sarifWith "scry" .nil (Scry.RulePack.mk .nil) .nil
+  | .none => Json.render (Scry.sarifWith "c" "scry" .nil (Scry.RulePack.mk .nil) .nil
       (Scry.dynSarifResults rep))
   | .some r =>
     let extra := List.append
       (List.map (fun b => Scry.boundaryResultJson b.rule b.origin b.func b.point b.message)
         (List.append r.boundaries r.memory))
       (Scry.dynSarifResults rep);
-    Json.render (Scry.sarifWith "scry" r.origins r.pack
+    Json.render (Scry.sarifWith "c" "scry" r.origins r.pack
       (Scry.zipFindings r.findings r.checks) extra)
 
 def Scry.dynCmd (args : List String) : EIO Nat :=

@@ -364,7 +364,7 @@ def Scry.Project.relatedJsonAt (p : Scry.Project) (m : Scry.OriginMap)
 def Scry.Project.resultJsonAt (p : Scry.Project) (m : Scry.OriginMap) (pack : Scry.RulePack)
     (f : Scry.RuleFinding) (checked : Bool) : Json :=
   Json.mkObj
-    [ ("ruleId", Json.mkStr (Scry.sarifRuleId f.rule))
+    [ ("ruleId", Json.mkStr (Scry.sarifRuleId "c" f.rule))
     , ("ruleIndex", Json.ofNat (Scry.ruleIndexOf pack f.rule))
     , ("level", Json.mkStr (Scry.Severity.sarif f.severity))
     , ("message", Json.mkObj [("text", Json.mkStr f.message)])
@@ -405,7 +405,7 @@ def Scry.ProjectReport.sarifJson (r : Scry.ProjectReport) : Json :=
   let artifacts := Json.mkArr (List.map (fun path =>
     Json.mkObj [("location", Scry.Project.artifactLocationJson p path)])
     p.artifactPaths);
-  let rules := Json.mkArr (List.map Scry.ruleJson r.pack.rules);
+  let rules := Json.mkArr (List.map (Scry.ruleJson "c") r.pack.rules);
   let driver := Json.mkObj
     [ ("name", Json.mkStr "scry")
     , ("version", Json.mkStr "0.1.0")

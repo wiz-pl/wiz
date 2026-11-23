@@ -150,7 +150,7 @@ def Scry.reportFindingOf (file : String) (m : Scry.OriginMap) (f : Scry.RuleFind
   let diffLine := match hit with
     | .none => 0
     | .some h => h.line;
-  let id := Scry.wfId f file;
+  let id := Scry.wfId "c" f file;
   Scry.ReportFinding.mk
     id                              -- anchor; `renderReport` disambiguates a collision
     id

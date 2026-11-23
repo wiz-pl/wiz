@@ -166,11 +166,40 @@ def main : IO Unit := EIO.toIO (do
         check "sarif: version 2.1.0" (String.eq (jStr j ["version"]) "2.1.0");
         check "sarif: driver scry"
           (String.eq (jStr (nthJ (jList j ["runs"]) 0) ["tool", "driver", "name"]) "scry");
-        check "sarif: one result"
-          (Nat.beq (List.length (jList (nthJ (jList j ["runs"]) 0) ["results"])) 1);
+        let csResults := jList (nthJ (jList j ["runs"]) 0) ["results"];
+        check "sarif: one result" (Nat.beq (List.length csResults) 1);
+        let csResult := nthJ csResults 0;
         check "sarif: the result names command-injection"
-          (String.eq (jStr (nthJ (jList (nthJ (jList j ["runs"]) 0) ["results"]) 0) ["ruleId"])
-            "scry/c/command-injection");
+          (String.eq (jStr csResult ["ruleId"]) "scry/cs/command-injection");
+        let csV1 := jStr csResult ["partialFingerprints", "scry/v1"];
+        check "sarif: the C# fingerprint is f_-prefixed"
+          (Bool.and (String.startsWith csV1 "f_") (Nat.beq (String.length csV1) 18));
+
+        -- 3b. the run's language namespaces the ids: the C frontend on its own fixture
+        -- mints a *different* `scry/v1` for the same pack rule. This is task 19's
+        -- deliberate **C# baseline break** (the C ids are unchanged); the assertion is
+        -- here so the two frontends cannot drift back into one namespace unnoticed.
+        -- `corpus/project/taint/util.c` is a single-file `getenv -> system` finding.
+        cSarif ← Path.join dir "util.sarif";
+        rc ← run ["taint", "corpus/project/taint/util.c", "--sarif", cSarif];
+        check "c fixture: exit 0 without --fail-on" (Nat.beq rc.code 0);
+        cRead ← readText cSarif;
+        match cRead with
+        | .error e => check ("c fixture sarif: read (" ++ e ++ ")") .false
+        | .ok cText => match Json.parse cText with
+          | .error e => check ("c fixture sarif: parses (" ++ e ++ ")") .false
+          | .ok cj => do
+            let cResults := jList (nthJ (jList cj ["runs"]) 0) ["results"];
+            match List.find (fun r =>
+                String.eq (jStr r ["ruleId"]) "scry/c/command-injection") cResults with
+            | .none => check "c fixture sarif: a scry/c/command-injection result" .false
+            | .some cr => do
+              let cV1 := jStr cr ["partialFingerprints", "scry/v1"];
+              check "c fixture sarif: the C fingerprint is f_-prefixed"
+                (Bool.and (String.startsWith cV1 "f_")
+                  (Nat.beq (String.length cV1) 18));
+              check "c# scry/v1 differs from the C one"
+                (Bool.not (String.eq csV1 cV1))
 
     -- 4. clean file: 0 findings, exit 0
     r3 ← run ["cs", "corpus/csharp/repo/src/Clean.cs", "--json"];

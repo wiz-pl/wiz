@@ -31,10 +31,12 @@ No line, column, program point, timestamp or rule-array index is part of an id.
 ## What an id is, and is not
 
 The id is a *stable handle for triage*, not a claim that two runs found the same bug in
-the sense of a proof. It includes the rule id, the normalized file path, the sink
-function/callee/argument and the path shape. A rename of the sink or a change from
-`source -> sink` to `source -> store -> load -> sink` is a new id: a deliberate review
-event, not a silent match.
+the sense of a proof. It includes the run's language namespace, the rule id, the
+normalized file path, the sink function/callee/argument and the path shape. A rename of
+the sink or a change from `source -> sink` to `source -> store -> load -> sink` is a new
+id: a deliberate review event, not a silent match. A finding from a different frontend
+(`scry/c/<rule>` vs `scry/cs/<rule>`) is a different id too, by design: `lang` is
+threaded per run and never guessed from a file extension.
 -/
 
 -- ## The hash
@@ -97,12 +99,23 @@ def Scry.lastFunc : List Scry.PathNode → String
   | .cons p .nil => p.func
   | .cons _ ps => Scry.lastFunc ps
 
-/-- The semantic identity inputs: rule, normalized path, sink function/callee/argument,
-the path shape and its first/last function. No line, column, program point or timestamp,
-so a moved finding keeps its id and a renamed sink/path gets a new one. -/
-def Scry.semanticKey (f : Scry.RuleFinding) (file : String) : String :=
+/-- The rule's namespace: `scry/<lang>/<rule>`. The language is the run's frontend
+(`c`, `cs`), so the same pack rule is a different SARIF rule id — and a different
+baseline id — per language. An id that is **already** namespaced (`scry/memory/*`,
+`scry/budget/*`, `scry/cs/nullable-assignment`) is kept as it is: one namespace is never
+applied twice. -/
+def Scry.ruleNs (lang rule : String) : String :=
+  match String.startsWith rule "scry/" with
+  | .true => rule
+  | .false => "scry/" ++ lang ++ "/" ++ rule
+
+/-- The semantic identity inputs: the run's language namespace, rule, normalized path,
+sink function/callee/argument, the path shape and its first/last function. No line,
+column, program point or timestamp, so a moved finding keeps its id and a renamed
+sink/path gets a new one. -/
+def Scry.semanticKey (lang : String) (f : Scry.RuleFinding) (file : String) : String :=
   String.intercalate "|"
-    [ String.append "scry/c/" f.rule
+    [ Scry.ruleNs lang f.rule
     , Scry.normPath file
     , f.func
     , f.name
@@ -113,8 +126,8 @@ def Scry.semanticKey (f : Scry.RuleFinding) (file : String) : String :=
 
 /-- `f_<16 hex>`: the stable baseline id used in `partialFingerprints.scry/v1` and as
 the workflow record's identity. -/
-def Scry.semanticId (f : Scry.RuleFinding) (file : String) : String :=
-  String.append "f_" (Scry.hex16 (Scry.fnv (Scry.semanticKey f file)))
+def Scry.semanticId (lang : String) (f : Scry.RuleFinding) (file : String) : String :=
+  String.append "f_" (Scry.hex16 (Scry.fnv (Scry.semanticKey lang f file)))
 
 /-- `b_<16 hex>`: the stable id of a boundary/memory warning. -/
 def Scry.boundaryId (rule file func message : String) : String :=
@@ -138,12 +151,12 @@ def Scry.normLine (s : String) : String :=
     (String.chars s);
   String.trim (String.ofChars (List.reverse st.2))
 
-/-- The GitHub-compatible line identity: rule + normalized primary line + function. A
-whitespace-only change keeps it; a line move keeps it (there is no line number); a
-changed sink creates a new one. -/
-def Scry.lineKey (f : Scry.RuleFinding) (lineText : String) : String :=
+/-- The GitHub-compatible line identity: the run's language namespace + rule, the
+normalized primary line and the function. A whitespace-only change keeps it; a line move
+keeps it (there is no line number); a changed sink creates a new one. -/
+def Scry.lineKey (lang : String) (f : Scry.RuleFinding) (lineText : String) : String :=
   String.intercalate "|"
-    [ String.append "scry/c/" f.rule, f.func, Scry.normLine lineText ]
+    [ Scry.ruleNs lang f.rule, f.func, Scry.normLine lineText ]
 
-def Scry.lineHash (f : Scry.RuleFinding) (lineText : String) : String :=
-  Scry.hex16 (Scry.fnv (Scry.lineKey f lineText))
+def Scry.lineHash (lang : String) (f : Scry.RuleFinding) (lineText : String) : String :=
+  Scry.hex16 (Scry.fnv (Scry.lineKey lang f lineText))
