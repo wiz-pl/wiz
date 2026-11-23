@@ -151,23 +151,30 @@ list (only its expiry, which a run never changes). Its generation is the module 
 its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
 manifest that is extended keeps the base it started from rather than chaining to an
 intermediate partial write. Only the write cache is ever written; a
-`--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
-still checked first: a corrupt region never reaches the type-erased reader even when no
-manifest exists.
+`--cache-ro` layer is read and byte-identical after a run. A region is **never** served
+without a manifest entry in any mode: a `.wizr` is a type-erased image and its `.wizs`
+sidecar is a 64-bit hash written by whoever wrote the region, so it is a corruption check,
+not an authenticity one. `--region-cache` with `--cache-verify off` reads and writes no
+regions at all.
 
 The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works):
 
-* `off` — no manifests are read or written; the cache is exactly as before.
-* `warn` (default) — a manifested key is served only if its bytes match. A new key has a
-  SHA-256 half, so an unlisted write-cache entry is a miss (nothing binds its bytes to the
-  strong input key); an old fast-only key still falls through, and `--cache-verify off`
-  restores the old lookup. An old local cache is one cold pass, then it is rewritten with
-  manifests. A `--cache-ro` layer is **strict**: an entry there is used only through a
-  manifest, so deleting a manifest cannot downgrade a read-only layer to unverified. When
-  a read-only layer has bytes for a module but no manifest, `wiz` warns once per layer (an
-  empty layer is silent).
-* `strict` (alias `require`) — only manifested entries are used anywhere; an unlisted key
-  is a miss. A cold run writes the manifests, so it becomes strict-warm in one pass.
+* `off` — no manifests are read or written; text entries are the old lookup, and no region
+  is served (there is no manifest entry to gate it). This is the explicit unverified mode.
+* `warn` (default) — a manifested key is served only if its bytes match. A key with no
+  manifest entry is a miss, fast-only or not: the 64-bit key is an index, not a digest, so
+  nothing binds an unmanifested file to its inputs. An old local cache is one cold pass,
+  then it is rewritten with manifests.
+* `strict` (alias `require`) — as `warn`, and an unlisted key is counted as a mismatch
+  too. It is a statement about **manifest presence**, not authenticity: a writer who can
+  replace the entry can recompute the manifest and its root.
+* A **read-only layer** (`--cache-ro`) is in someone else's trust domain. Its manifests
+  are self-signed, so they authenticate nothing: by default the layer is **refused** (no
+  entry or region is served from it, and `wiz` warns once per layer that has content for
+  a module, naming the flag).
+  `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data, and
+  `--cache-verify off` is the older blanket form of it. When an opted-in layer has bytes
+  for a module but no manifest, `wiz` warns once per layer (an empty layer is silent).
 
 A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
 has passed, or whose entry digest does not match is a miss: it is not repaired in a
@@ -175,19 +182,23 @@ read-only layer. `wiz cache verify [--strict]` scans every layer's manifests aga
 bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
 `--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
 index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
-prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
+prints the per-run counts (manifests, verified entries/regions, mismatches).
 
-Compatibility default: with no manifest (or `--cache-verify off`) existing caches keep
-their old behaviour; the write cache's old unverified path is still available in `warn`.
-Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
-so an unmanifested cache is byte-identical and no key or salt changes.
+Compatibility: a write cache needs one cold pass to acquire manifests, and a
+`--cache-ro` layer is no longer used unless `--cache-ro-unsigned` is given (or
+`--cache-verify off`). Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep
+their names and bytes, so an unmanifested cache is byte-identical and no key or salt
+changes.
 
 **Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
 a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
 and can delete it (in `warn`, for the write cache). The missing half is an external
 signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
 revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
-not read these manifests as provenance: they are integrity, not authenticity.
+not read these manifests as provenance: they are integrity, not authenticity. And a
+signature would say who published the bytes, not that they are the elaboration of the
+key's source: for a foreign layer only a kernel re-check (`addDecl`) or treating its
+source tree as the authority is sound.
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
