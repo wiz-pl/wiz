@@ -9,12 +9,12 @@
   "expected": [
     { "match": "exact", "path": "result.goals", "value": ["xs : List (Nat → Nat)\n⊢ Nat"] }
   ],
-  "note": "D3 (task 26 review): a Pi nested under an application. `showGoal` covers only the top-level Pi spine, so a Pi in `List (…)`, `Eq(…)` or a Σ argument still goes through `show` and prints its binder; the host prints `Nat → Nat` there.",
+  "note": "D3 (task 26 review): a Pi nested under an application. `showGoal` covers only the top-level Pi spine, so a Pi in `List (…)`, `Eq(…)` or a Σ argument still goes through `show`. The host prints `List (Nat → Nat)`; the remaining difference after 27a is the goal-mode spelling of an application: the selfhost wraps the whole application, `(List (Nat → Nat))`.",
   "knownGap": [
     {
       "server": "selfhost",
-      "reason": "nested Pi outside the top-level spine (task 27): `show` prints the binder, so a Pi argument reads `(List (x1 : Nat) → Nat)` where the host has `List (Nat → Nat)`",
-      "issue": "task 27"
+      "reason": "goal-mode application parens (27a′): the selfhost prints `xs : (List (Nat → Nat))` where the host prints `xs : List (Nat → Nat)` — the outer application's own parentheses, not the nested Pi",
+      "issue": "27a′"
     }
   ]
 }

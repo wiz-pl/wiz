@@ -9,12 +9,5 @@
   "expected": [
     { "match": "exact", "path": "result.goals", "value": ["f : (Nat → Nat) → Nat\n⊢ Nat"] }
   ],
-  "note": "D1 (task 26 review): a hypothesis whose type is a higher-order Pi. The arrow domain must be parenthesised — `(Nat → Nat) → Nat`, not `Nat → Nat → Nat` (arrows associate to the right, so the bare form is a different type). Caret at the step start, so the state before `exact` is shown.",
-  "knownGap": [
-    {
-      "server": "selfhost",
-      "reason": "showGoal D1 (task 28): an arrow domain is not parenthesised, so a higher-order hypothesis reads as `Nat → Nat → Nat` (a different type); the prebuilt server still prints the old binder form, `(x1 : (x1 : Nat) → Nat) → Nat`",
-      "issue": "task 28"
-    }
-  ]
+  "note": "D1 (task 26 review): a hypothesis whose type is a higher-order Pi. The arrow domain must be parenthesised — `(Nat → Nat) → Nat`, not `Nat → Nat → Nat` (arrows associate to the right, so the bare form is a different type). No knownGap: task 27a's goal-mode printer parenthesises the domain, so the selfhost gives this text; a compiler built before 27a prints the old binder form and fails the case."
 }

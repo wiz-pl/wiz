@@ -47,12 +47,12 @@
       "sha256": "936432c49522ea723f3c57dbe0a6492fdb5d41f7cdc03acf07a90aec8e85fa60"
     },
     "tests": {
-      "files": 420,
+      "files": 425,
       "paths": [
         "Tests/**",
         "web/**"
       ],
-      "sha256": "6b1b685aa390ddfe07f5d307440adc3f16273b4b6cd55c2a75281c448b25850b"
+      "sha256": "43f7e607fa5c8614947b376ce193686c4b7a7663f59d9f6e5ac6cdb96847167c"
     },
     "wizlib": {
       "files": 110,

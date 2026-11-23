@@ -1,0 +1,24 @@
+{
+  "name": "hover-sig-implicit-proof",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/hover-sig-implicit-proof.wiz",
+  "text": "import Prelude\ndef p {n m : Nat} {h : n = m} : Nat := 0\n",
+  "requests": [
+    { "method": "textDocument/hover", "params": { "position": { "line": 1, "character": 4 } } }
+  ],
+  "expected": [
+    {
+      "match": "exact",
+      "path": "result.contents.value",
+      "value": "```wiz\np : {n : Nat} → {m : Nat} → {h : n = m} → Nat\n```"
+    }
+  ],
+  "note": "S1 (27a review): an implicit *proof* binder over a Prop domain. The host prints one Pi per binder and no quantity on `{h : n = m}` (`binderDefault` gives an implicit over a Prop domain the ordinary quantity). The selfhost tests only `tmSort dom`, so it puts a spurious `0` there.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "S1: an implicit proof binder over a Prop domain gets a spurious `0` — `{0 h : n = m}` where the host has `{h : n = m}` (27a review, S1)",
+      "issue": "S1"
+    }
+  ]
+}
