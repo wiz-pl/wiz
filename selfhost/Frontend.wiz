@@ -2782,7 +2782,7 @@ inductive STacOp where
   | intro (x : String)
   | introFresh
   | intros
-  | exact (stx : Syntax)
+  | exact (stx : Syntax) (sp : Option SpT)
   | apply (stx : Syntax)
   | assumption
   | closeRfl
@@ -2791,7 +2791,7 @@ inductive STacOp where
   | constructor
   | rw (stx : Syntax) (rtl : Bool)
   | calc (stx : Syntax)
-  | have (x : String) (tyStx : Syntax) (valStx : Option Syntax)
+  | have (x : String) (tyStx : Syntax) (valStx : Option Syntax) (valSp : Option SpT)
   | suffices (x : String) (tyStx : Syntax)
   | obtain (x : String) (y : String) (eStx : Syntax)
   | trace (msg : String)
@@ -3028,6 +3028,14 @@ def optionalTerm (s : Syntax) : Option Syntax := match strEq (kindOf s) "null" w
     | .cons t _ => .some t
   | .false => .some s
 
+-- the span of `optionalTerm s`, from `s`'s span: the same kid choice
+def optionalTermSp (s : Syntax) (sp : Option SpT) : Option SpT := match strEq (kindOf s) "null" with
+  | .true => match kids s with
+    | .nil => .none
+    | .cons _ (.cons _ _) => spKid sp 1
+    | .cons _ _ => spKid sp 0
+  | .false => sp
+
 -- (C15) `smt` (stage 28a) is a library tactic: `lib/Prelude.wiz` declares the syntax and
 -- `Tactic.smt` sends the request `Tac.smt`. This frontend has no SMT translation, solver
 -- or answer cache, so it refuses. Without `--trust-smt` the host refuses at the same
@@ -3041,12 +3049,12 @@ def smtRefusalFor (gs : Globals) : String := match Globals.smtTrust gs with
   | .false => smtRefusal
 -- one tactic of a script, as a request
 mutual
-def tacOfStx (gs : Globals) (stx : Syntax) : STac :=
+def tacOfStx (gs : Globals) (stx : Syntax) (sp : Option SpT) : STac :=
   let k := kindOf stx;
   match strEq k "tactic.smt" with
   | .true => STac.abort (smtRefusalFor gs)
-  | .false => tacOfStxCore k stx
-def tacOfStxCore (k : String) (stx : Syntax) : STac :=
+  | .false => tacOfStxCore k stx sp
+def tacOfStxCore (k : String) (stx : Syntax) (sp : Option SpT) : STac :=
   match strEq k "tactic.intro" with
   | .true => match identNameOf (kid stx 1) with
     | .some x => STacticM.op (STacOp.intro x)
@@ -3054,7 +3062,7 @@ def tacOfStxCore (k : String) (stx : Syntax) : STac :=
   | .false => match strEq k "tactic.intros" with
     | .true => STacticM.op STacOp.intros
     | .false => match strEq k "tactic.exact" with
-      | .true => STacticM.op (STacOp.exact (kid stx 1))
+      | .true => STacticM.op (STacOp.exact (kid stx 1) (spKid sp 1))
       | .false => match strEq k "tactic.apply" with
         | .true => STacticM.op (STacOp.apply (kid stx 1))
         | .false => match strEq k "tactic.assumption" with
@@ -3075,7 +3083,7 @@ def tacOfStxCore (k : String) (stx : Syntax) : STac :=
                     | .true => STacticM.op (STacOp.calc stx)
                     | .false => match strEq k "tactic.have" with
                       | .true => match identNameOf (kid stx 1) with
-                        | .some x => STacticM.op (STacOp.have x (kid stx 3) (optionalTerm (kid stx 4)))
+                        | .some x => STacticM.op (STacOp.have x (kid stx 3) (optionalTerm (kid stx 4)) (optionalTermSp (kid stx 4) (spKid sp 4)))
                         | .none => STac.fail "have needs an identifier"
                       | .false => match strEq k "tactic.suffices" with
                         | .true => match identNameOf (kid stx 1) with
@@ -4736,7 +4744,7 @@ def runOpSuffices (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : Strin
             let st3 := STacState.mk (STacState.goals st2.1) (openReplace g (.cons st1.2 (.cons st2.2 .nil)) (STacState.open st2.1)) (STacState.unchecked st2.1);
             .ok st3 es4
 def runOpHave (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (tyStx : Syntax)
-    (valStx : Option Syntax) : STacR :=
+    (valStx : Option Syntax) (valSp : Option SpT) : STacR :=
   match valStx with
   | .none => runOpSuffices gs es st g x tyStx
   | .some vstx => match STacState.getGoal st g with
@@ -4747,7 +4755,7 @@ def runOpHave (gs : Globals) (es : ES) (st : STacState) (g : Nat) (x : String) (
         let cx := TacGoal.cx gl;
         let d := Cx.lvl cx;
         let Av := eval (TCtx.env (Cx.c cx)) A;
-        match checkT gs es1 cx vstx Av .none with
+        match checkT gs es1 cx vstx Av valSp with
         | .err m => .err m
         | .ok v _ es2 =>
           let cx' := Cx.defineL cx x (fun _ => eval (TCtx.env (Cx.c cx)) v) Av;
@@ -4847,10 +4855,10 @@ def runOpAssumption (es : ES) (st : STacState) (g : Nat) : STacR :=
     match anyHyp es cx (TacGoal.ty gl) (envToList (TCtx.types (Cx.c cx))) 0 with
     | .none => .err "assumption: no hypothesis matches the goal"
     | .some p => assignInto p.1 st g (.var p.2)
-def runOpExact (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) : STacR :=
+def runOpExact (gs : Globals) (es : ES) (st : STacState) (g : Nat) (stx : Syntax) (sp : Option SpT) : STacR :=
   match STacState.getGoal st g with
   | .none => tacGoalError
-  | .some gl => match checkT gs es (TacGoal.cx gl) stx (TacGoal.ty gl) .none with
+  | .some gl => match checkT gs es (TacGoal.cx gl) stx (TacGoal.ty gl) sp with
     | .err m => .err m
     | .ok t _ es1 => match tacGoalUnify es1 gl t with
       | .none => .err "exact: the term does not have the goal's type"
@@ -4946,7 +4954,7 @@ def runOpAt (gs : Globals) (es : ES) (st : STacState) (g : Nat) (o : STacOp) : S
   | .intro x => goalIntro es st g x
   | .introFresh => goalIntroFresh es st g
   | .intros => goalIntros es st g 4096
-  | .exact stx => runOpExact gs es st g stx
+  | .exact stx sp => runOpExact gs es st g stx sp
   | .apply stx => match STacState.getGoal st g with
     | .none => tacGoalError
     | .some gl => match inferT gs es (TacGoal.cx gl) stx .none with
@@ -4965,7 +4973,7 @@ def runOpAt (gs : Globals) (es : ES) (st : STacState) (g : Nat) (o : STacOp) : S
   | .constructor => runOpConstructor gs es st g
   | .rw stx rtl => runOpRw gs es st g stx rtl
   | .calc stx => runOpCalc gs es st g stx
-  | .have x ty val => runOpHave gs es st g x ty val
+  | .have x ty val vsp => runOpHave gs es st g x ty val vsp
   | .suffices x ty => runOpSuffices gs es st g x ty
   | .obtain x y e => runOpObtain gs es st g x y e
   | .trace _ => .ok st es
@@ -4987,7 +4995,7 @@ def runTac (gs : Globals) (es : ES) (st : STacState) (t : STac) : STacR := match
   | .fail m => .err m
   | .abort m => .abort m
   | .op o => runOp gs es st o
-  | .eval stx => evalTacticStx gs es st stx
+  | .eval stx => evalTacticStx gs es st stx .none
   | .seq a b => match runTac gs es st a with
     | .ok st' es' => runTac gs es' st' b
     | .err m => .err m
@@ -5002,10 +5010,10 @@ def runTac (gs : Globals) (es : ES) (st : STacState) (t : STac) : STacR := match
     | .abort _ => runTac gs es st b
   | .repeatTac body => runRepeat gs es st body 64
 
-def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) : STacR :=
+def evalTacticStx (gs : Globals) (es : ES) (st : STacState) (stx : Syntax) (sp : Option SpT) : STacR :=
   match stx with
   | .atom _ => .ok st es
-  | _ => runTac gs es st (tacOfStx gs stx)
+  | _ => runTac gs es st (tacOfStx gs stx sp)
 
 -- (D8 goals) the first token a tactic step is written with, for finding its offset in
 -- the command's source text (the parser keeps no positions in `Syntax`)
@@ -5127,7 +5135,7 @@ def runTacticSteps (gs : Globals) (es : ES) (st : STacState) (endSp : Option SpT
       | .some h => h.start
       | .none => last;
     let esB := recordGoal gs es (spHead sps) st lspPhaseBefore;
-    match evalTacticStx gs esB st t with
+    match evalTacticStx gs esB st t (spHead sps) with
     | .ok st' es' =>
       let es'' := match head with
         | .some h => ES.addSnap es' (.goal h.start h.stop (tacGoalsList es' st') lspPhaseAfter)
@@ -5150,7 +5158,10 @@ def elabBy (gs : Globals) (es : ES) (cx : Cx) (stx : Syntax) (expected : Val) (s
     let endSp : Option SpT := match sp with
       | .some t => .some (.leaf (SpT.stop t) (SpT.stop t))
       | .none => .none;
-    match runTacticSteps gs es1 st0 endSp (Globals.lspStart gs) (tacticSteps stx) (tacticStepsSp sp stx) with
+    let from := match sp with
+      | .some t => SpT.start t
+      | .none => Globals.lspStart gs;
+    match runTacticSteps gs es1 st0 endSp from (tacticSteps stx) (tacticStepsSp sp stx) with
     | .err msg => .err msg
     | .abort msg => .err msg
     | .ok st es' => match goalListOpen es' st (STacState.open st) with

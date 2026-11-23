@@ -314,32 +314,21 @@ def selfhostLspGroup : Group where
         checkEq 1 (lspNat (← lspAt got 7) ["result", "range", "start", "line"]) },
     { name := "lsp: nested by blocks: plainGoal answers the innermost block, as the host", run := fun _ =>
         withSelfhostCli fun exe => do
-        -- G: a `by` inside a step of a `by`. S: two sibling inner blocks. Positions are
-        -- (line, character), 0-based; the comments name what the caret is on.
-        let g := "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n"
-        let gq : List (Nat × Nat) :=
-          [ (2, 9)   -- the inner `by`: the inner block's own state
-          , (2, 11)  -- inside the inner block, before its first step
-          , (2, 12)  -- at `intro`: the state before it
-          , (2, 20)  -- between `intro x;` and `exact x`: after `intro x`
-          , (2, 28)  -- the end of `exact x` (end included): no goals
-          , (2, 29)  -- one past the inner block (the outer step's end): no goals
-          , (1, 21) ] -- the outer `by`
-        let s := "import Prelude\ndef p : Nat → Nat := by\n  intro x\n  exact (Nat.add (by exact x) (by exact 1))\n"
-        let sq : List (Nat × Nat) :=
-          [ (3, 18)   -- the first inner `by`
-          , (3, 31)   -- the second inner `by`
-          , (3, 28) ] -- the end of the first inner `exact x`
         let prelude ← IO.FS.readFile "lib/Prelude.wiz"
-        -- Run one document through the self-hosted server and the in-process host,
-        -- compare every `wiz/plainGoal` answer field by field (a failure names the
-        -- caret), and return the self-hosted answers.
-        let compare (name doc : String) (qs : List (Nat × Nat)) : IO (List Lean.Json) := do
+        -- the notification `method` for `uri`, if the session has one
+        let findMsg (msgs : List Lean.Json) (method uri : String) : Option Lean.Json :=
+          msgs.find? fun m => lspStr m ["method"] == method && lspStr m ["params", "uri"] == uri
+        -- Run one document through the self-hosted server and the in-process host, compare
+        -- `wiz/plainGoal` at every caret field by field (a failure names the caret), and
+        -- return the self-hosted answers. `againstHost` is off for the function-typed
+        -- carets: the self-hosted printer spells a Pi with its binder (`(_ : Nat) → Nat`)
+        -- where the host hides it (`Nat → Nat`), so those are pinned structurally below.
+        let query (name doc : String) (qs : List (Nat × Nat)) (againstHost : Bool) :
+            IO (List Lean.Json) := do
           let uri := s!"file:///tmp/selfhost-nested-{name}.wiz"
-          let pos (l c : Nat) : Lean.Json :=
-            Lean.Json.mkObj [("line", Lean.Json.num l), ("character", Lean.Json.num c)]
           let params (l c : Nat) : Lean.Json := Lean.Json.mkObj [
-            ("textDocument", Lean.Json.mkObj [("uri", uri)]), ("position", pos l c)]
+            ("textDocument", Lean.Json.mkObj [("uri", uri)]),
+            ("position", Lean.Json.mkObj [("line", Lean.Json.num l), ("character", Lean.Json.num c)])]
           let msgs :=
             [ lspReq 1 "initialize",
               lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]) ] ++
@@ -363,26 +352,95 @@ def selfhostLspGroup : Group where
           for (l, c) in qs do
             let (srv', hostOut) ← LSP.handle srv (lspReq (200 + qi) "wiz/plainGoal" (params l c))
             srv := srv'
-            let host := match hostOut.find? (fun m => (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some (200 + qi)) with
-              | some m => (jpath m ["result"]).getD .null
-              | none => .null
             let self := (jpath (← lspAt got (2 + qi)) ["result"]).getD .null
-            checkEq (s!"{name} {l}:{c}", lspStrs host ["goals"]) (s!"{name} {l}:{c}", lspStrs self ["goals"])
-            checkEq (s!"{name} {l}:{c}", lspStr host ["rendered"]) (s!"{name} {l}:{c}", lspStr self ["rendered"])
+            if againstHost then
+              let host := match hostOut.find? (fun m => (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some (200 + qi)) with
+                | some m => (jpath m ["result"]).getD .null
+                | none => .null
+              checkEq (s!"{name} {l}:{c}", lspStrs host ["goals"]) (s!"{name} {l}:{c}", lspStrs self ["goals"])
+              checkEq (s!"{name} {l}:{c}", lspStr host ["rendered"]) (s!"{name} {l}:{c}", lspStr self ["rendered"])
             selfs := selfs ++ [self]
             qi := qi + 1
           pure selfs
-        let gs ← compare "g" g gq
-        let ss ← compare "s" s sq
-        -- the concrete answers (so a host change shows here too); the first four are
-        -- the innermost-`by` ones the self-hosted walk used to answer from the enclosing
-        -- step
-        checkEq ["⊢ Nat → Nat"] (lspStrs gs[0]! ["goals"])          -- g 2:9  (the inner `by`)
-        checkEq ["⊢ Nat → Nat"] (lspStrs gs[1]! ["goals"])          -- g 2:11
-        checkEq ["x : Nat\n⊢ Nat"] (lspStrs gs[3]! ["goals"])       -- g 2:20 (after `intro x`)
-        checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[1]! ["goals"])       -- s 3:31 (the second inner `by`)
-        checkEq "no goals" (lspStr gs[4]! ["rendered"])             -- g 2:28 (the inner step's end)
-        checkEq ["⊢ Nat → Nat"] (lspStrs gs[6]! ["goals"]) },       -- g 1:21 (the outer `by`)
+        -- N: a `by` inside a step of a `by` whose goal has hypotheses only (`n : Nat ⊢ Nat`),
+        -- so the two printers agree and the block choice is all that is asserted. This is
+        -- where the `Cli.wiz` swap is load-bearing: at 2:11 the narrowest block answers
+        -- `n : Nat ⊢ Nat`, the largest one the outer `exact` step's "no goals".
+        let n := "import Prelude\ndef k (n : Nat) : Nat := by\n  exact (by exact n)\n"
+        let nq : List (Nat × Nat) :=
+          [ (2, 9)    -- the inner `by`: the inner block's own state
+          , (2, 11)   -- inside the inner block, before its first step
+          , (2, 12)   -- at `exact`: the state before it
+          , (2, 18)   -- inside the inner step, at `n` (the step ends at 19): no goals
+          , (2, 20)   -- one past the inner step and block: the outer step's end: no goals
+          , (1, 25) ] -- the outer `by`
+        -- G: the corpus document (`def k : Nat → Nat := by …`). Its arrow-typed carets
+        -- (2:9, 2:11, 1:21) are checked structurally; the rest against the host.
+        let g := "import Prelude\ndef k : Nat → Nat := by\n  exact (by intro x; exact x)\n"
+        let gq : List (Nat × Nat) :=
+          [ (2, 20)   -- between `intro x;` and `exact x`: after `intro x`
+          , (2, 28)   -- the end of `exact x` (end included): no goals
+          , (2, 29) ] -- one past the inner block (the outer step's end): no goals
+        let garrow : List (Nat × Nat) :=
+          [ (2, 9)    -- the inner `by`
+          , (2, 11)   -- inside the inner block, before its first step
+          , (1, 21) ] -- the outer `by`
+        -- S: two sibling inner blocks in one step.
+        let s := "import Prelude\ndef p : Nat → Nat := by\n  intro x\n  exact (Nat.add (by exact x) (by exact 1))\n"
+        let sq : List (Nat × Nat) :=
+          [ (3, 18)   -- the first inner `by`
+          , (3, 31)   -- the second inner `by`
+          , (3, 28) ] -- the end of the first inner `exact x`
+        let ns ← query "n" n nq true
+        let gs ← query "g" g gq true
+        let ss ← query "s" s sq true
+        let garrowRes ← query "g-arrow" g garrow false
+        -- the concrete answers (so a host change shows here too)
+        checkEq ["n : Nat\n⊢ Nat"] (lspStrs ns[0]! ["goals"])   -- n 2:9: the inner block, not the outer step
+        checkEq ["n : Nat\n⊢ Nat"] (lspStrs ns[1]! ["goals"])   -- n 2:11: the narrowest block
+        checkEq ["n : Nat\n⊢ Nat"] (lspStrs ns[5]! ["goals"])   -- n 1:25: the outer block's own state
+        checkEq "no goals" (lspStr ns[3]! ["rendered"])         -- n 2:18: the inner step's after-state
+        checkEq "no goals" (lspStr ns[4]! ["rendered"])         -- n 2:20: the outer step's end
+        checkEq ["x : Nat\n⊢ Nat"] (lspStrs gs[0]! ["goals"])   -- g 2:20: after `intro x`
+        checkEq "no goals" (lspStr gs[1]! ["rendered"])         -- g 2:28: the inner step's end
+        checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[0]! ["goals"])   -- s 3:18: the first inner `by`
+        checkEq ["x : Nat\n⊢ Nat"] (lspStrs ss[1]! ["goals"])   -- s 3:31: the second inner `by`
+        -- the function-typed carets: one goal from the block, never the enclosing step's
+        -- "no goals" (before the inner blocks had spans, all three answered "no goals")
+        for r in garrowRes do
+          checkEq 1 (lspStrs r ["goals"]).length
+          check (lspStr r ["rendered"] != "no goals") "a function-typed caret answers the block's goal"
+        -- a diagnostic inside an `exact` term is marked at the term (`true`), not at the
+        -- step's start: the self-hosted server and the host both report 2:19
+        let bad := "import Prelude\ndef bad : Nat := by\n  exact (Nat.add 1 true)\n"
+        let badUri := "file:///tmp/selfhost-nested-diag.wiz"
+        let badMsgs :=
+          [ lspReq 1 "initialize",
+            lspNote "textDocument/didOpen" (Lean.Json.mkObj [("textDocument", lspTextDoc badUri bad 1)]),
+            lspNote "exit" (Lean.Json.mkObj []) ]
+        let dir ← IO.FS.createTempDir
+        let (bcode, bout, berr) ← selfhostLspSession exe dir #[] badMsgs
+        checkEq 0 bcode
+        checkEq "" berr
+        let bgot ← lspMessages bout
+        let selfDiag ← match findMsg bgot "textDocument/publishDiagnostics" badUri with
+          | some d => pure d
+          | none => throw (IO.userError s!"no diagnostics notification for {badUri}")
+        let bsrv : LSP.Server :=
+          { libs := ({} : Std.HashMap String (String × String)).insert "Prelude" ("lib/Prelude.wiz", prelude),
+            trusted := ["Prelude"] }
+        let (bsrv, _) ← LSP.handle bsrv (lspReq 100 "initialize")
+        let (_, hostBad) ← LSP.handle bsrv (lspNote "textDocument/didOpen"
+          (Lean.Json.mkObj [("textDocument", lspTextDoc badUri bad 1)]))
+        let hostDiag ← match findMsg hostBad "textDocument/publishDiagnostics" badUri with
+          | some d => pure d
+          | none => throw (IO.userError "the host published no diagnostics")
+        checkEq 2 (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "line"])
+        checkEq 19 (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"])
+        checkEq (lspNat hostDiag ["params", "diagnostics", "0", "range", "start", "line"])
+          (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "line"])
+        checkEq (lspNat hostDiag ["params", "diagnostics", "0", "range", "start", "character"])
+          (lspNat selfDiag ["params", "diagnostics", "0", "range", "start", "character"]) },
     { name := "lsp: hover, definition and completion answer in the host's shapes", run := fun _ =>
         withSelfhostCli fun exe => do
         let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef three : Nat := lab\n"
