@@ -1,0 +1,20 @@
+{
+  "name": "goal-d2-erased-binder",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-d2-erased-binder.wiz",
+  "text": "import Prelude\ndef h (g : (0 n : Nat) → Nat) : Nat := by\n  exact g 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["g : (0 n : Nat) → Nat\n⊢ Nat"] }
+  ],
+  "note": "D2 (task 26 review): an erased (`:0`) binder in a hypothesis's type. The quantity must stay visible: the host prints `(0 n : Nat) → Nat`, and the selfhost must not turn it into a plain `Nat → Nat` arrow. The exact spelling of the binder form is task 27's business.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "showGoal D2 (task 28): a non-ω quantity is dropped in the arrow form; the prebuilt server still shows the quantity in the old binder spelling, `(x1 :0 Nat) → Nat`, which is task 27's",
+      "issue": "task 28"
+    }
+  ]
+}

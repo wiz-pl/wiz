@@ -1,0 +1,20 @@
+{
+  "name": "goal-d3-nested-pi",
+  "servers": ["host", "selfhost"],
+  "uri": "file:///conf/goal-d3-nested-pi.wiz",
+  "text": "import Prelude\ndef k (xs : List (Nat → Nat)) : Nat := by\n  exact 0\n",
+  "requests": [
+    { "method": "wiz/plainGoal", "params": { "position": { "line": 2, "character": 2 } } }
+  ],
+  "expected": [
+    { "match": "exact", "path": "result.goals", "value": ["xs : List (Nat → Nat)\n⊢ Nat"] }
+  ],
+  "note": "D3 (task 26 review): a Pi nested under an application. `showGoal` covers only the top-level Pi spine, so a Pi in `List (…)`, `Eq(…)` or a Σ argument still goes through `show` and prints its binder; the host prints `Nat → Nat` there.",
+  "knownGap": [
+    {
+      "server": "selfhost",
+      "reason": "nested Pi outside the top-level spine (task 27): `show` prints the binder, so a Pi argument reads `(List (x1 : Nat) → Nat)` where the host has `List (Nat → Nat)`",
+      "issue": "task 27"
+    }
+  ]
+}
