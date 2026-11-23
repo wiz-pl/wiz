@@ -217,7 +217,7 @@ place where "0 disagreements" is silent rather than reassuring.
 
 | # | assumption the spec makes | where | what a wrong term could do | fix |
 |---|---|---|---|---|
-| **D1** | Π/Σ component sorts are consistent | `Translate.ofSorts` maps `BinderSorts ⟨dom,cod⟩` to one `imax`/`max` | `pi` at `⟨0,1⟩` and `⟨1,1⟩` both become `imax … = 1`; the kernel's `checkComponentSort` rejects the first, the spec sees one term | carry both sorts in `Tm`; make each a **premise** of the pi/Σ rule |
+| **D1** | Π/Σ component sorts are consistent | `Translate.ofSorts` maps `BinderSorts ⟨dom,cod⟩` to the single `imax`/`max` it forms | the spec's image records one product sort, not the pair: `pi` at `⟨0,1⟩` and `⟨1,1⟩` both give a sort that is `1`, the kernel's `checkComponentSort` rejects the first, and the spec accepts both | carry both sorts in `Tm`; make each a **premise** of the pi/Σ rule |
 | **D2** | every sort is written | `Opts.sortsOptional` (set by the harness's `kernelOpts`), the harness's `sortHolesOk` pre-check | a hole is a rejection in the kernel and an accepted `none` in the spec as the harness runs it | spec: a hole is not a type; harness: the pre-check is not the spec |
 | **D3** | markers are present where needed | `ofTerm` refuses `prf` (no case), `Mark.infer` in `kernelInfer` | the kernel checks the **marked** term, the spec votes on the **unmarked** one; the bridge "marking preserves the judgement" is unproved and untested | a marker judgement, or an explicit bridge test (S1) |
 | **D4** | quantities are labels | `Q` = `{0,1,ω}`, `ofQty` refuses a polynomial | 6 of the 484 corpus terms are rejected by the kernel for usage only; `QPoly` is not modelled at all | a usage judgement `Γ ⊢ t ∶ A ▷ U` (S2) |
@@ -246,12 +246,14 @@ no rule, because it reads as a decision.
    `witness`. Metadata that the kernel *documents* as ignored (binder names, `BinderInfo`,
    enum labels, μ hints, `pp`) stays out — that is not an assumption, it is the kernel's
    contract, and `CoreSpec` §16 says so.
-2. **The translation becomes total on the fragment and testable in both directions.**
-   `ofTerm : Term → Option Tm` stays (nothing outside the fragment gets a vote), but it
-   gains an inverse `toTerm : Tm → Term`, and a test asserts
-   `ofTerm (toTerm t) = some t` and `ofTerm` is injective on the corpus modulo the
-   documented metadata. Today `Translate` has no inverse and no injectivity test, so D1 is
-   invisible by construction.
+2. **The translation becomes faithful and testable in both directions.**
+   `ofTerm : Term → Option Tm` stays (nothing outside the fragment gets a vote), but
+   (a) `Tm` carries everything the kernel checks, so a term and its image have the same
+   judgement up to the documented metadata; (b) an inverse `toTerm : Tm → Term` exists and
+   `ofTerm (toTerm t) = some t` on the fragment; (c) a test asserts that the translation
+   does not hide a distinction the kernel makes — for a pair the kernel distinguishes, the
+   spec must not give their images the same verdict. Today there is no inverse and no such
+   test, so D1 is invisible by construction.
 3. **Every rule hypothesis is decidable or a premise.** Today `Rule`'s hypotheses are
    `Prop`s: some decidable (`s.equiv …`), some judgement-shaped ("`Γ ⊢ A inert`"), some
    presuppositions the rules *assume*. That mixture is why "the checker is right by
@@ -647,16 +649,20 @@ the spec cannot see:
   a **named** reason (a `Lossy` variant, not a bare `none`), and the reason must be in a
   checked-in list;
 * for a constructed pair per defect D1–D5, the test *demonstrates* the blindness: e.g.
-  `pi` at `⟨0,1⟩` and `⟨1,1⟩` translate to the same `Tm`, while the kernel rejects one
-  (`checkComponentSort`, `Check.lean:890`) and the spec accepts both;
-* for every corpus term, `ofTerm` is injective on the kernel-relevant metadata (two terms
-  with the same image differ only in names/hints/labels/binder info — the documented
-  ignored set).
+  `pi` at `⟨0,1⟩` and `⟨1,1⟩` are both accepted by the spec (their `imax` is `1`) while
+  the kernel rejects the first (`checkComponentSort`, `Check.lean:890`);
+* the translation does not hide a distinction: for every pair of corpus terms that the
+  kernel treats differently, the spec must not give their images the same verdict; and
+  for every image the spec accepts, the kernel must accept the term it came from. In S0
+  these are **reported, not asserted** — each reported pair is a named defect and becomes
+  a work item; once fixed it is promoted to an assertion.
 
 **Acceptance.** A printed table: N corpus terms, N with a named loss, the count per
-defect; D1–D5 each has at least one witness; if D1 has no witness the test fails (it must
-be constructible). No kernel change; the one build (`lake build tests WizMeta`) goes
-through `heavy` like every other build.
+defect, and the list of pairs where the spec's verdict differs from the kernel's on
+translated terms. D1–D5 each has at least one witness (this *is* asserted: the
+construction must succeed). The reported collapses are the S1/S2 backlog, not a test
+failure. No kernel change; the one build (`lake build tests WizMeta`) goes through `heavy`
+like every other build.
 
 **Why first.** It is one test, it quantifies the value of every later slice, and it can
 overturn the reading of "0 disagreements" in `Status.md` §7.1 — which is better learned
