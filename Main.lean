@@ -1200,7 +1200,7 @@ def kernelOpt : List String → Except String (Regularity × Bool × List String
     return (r, p, a :: rest)
   | [] => return (.off, false, [])
 
-def main (args : List String) : IO UInt32 := do
+def mainImpl (args : List String) : IO UInt32 := do
   -- (after the toolchain flags: the tarball's and tower's wrappers put `-I LIB` and
   -- their flags before the user's arguments)
   if ((({} : Toolchain).parseFlags args).2) == ["--version"] then
@@ -1332,3 +1332,11 @@ def main (args : List String) : IO UInt32 := do
     | none => IO.eprintln s!"unknown command: {" ".intercalate args}"
     IO.eprintln usage
     pure 2
+
+/-- The executable: read `WIZ_STATS` before the run and print the core counters at exit
+(`wiz` is one process per file, so this is the whole check). -/
+def main (args : List String) : IO UInt32 := do
+  Wiz.Stats.fromEnv
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc

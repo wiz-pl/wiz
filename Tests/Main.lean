@@ -216,7 +216,7 @@ time; with no `--jobs` it is auto (the CPUs minus one), capped by the free memor
 serial control. `--part i/n` (1-based) runs only the files whose index in the sorted list
 is `k % n = i - 1`: the parts are a deterministic partition of the one case, so CI can run
 its 3664 s on n jobs without changing what any file is compared against. -/
-def main (args : List String) : IO UInt32 := do
+def mainImpl (args : List String) : IO UInt32 := do
   -- a `panic!` fails the case that hits it (each case runs in its own process), as it
   -- fails `wiz check`; `--panic-probe continue` turns it off again
   Wiz.exitOnPanic
@@ -362,3 +362,11 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + (results.length - p)
     IO.println s!"\n{passed} passed, {failed} failed{if skipped == 0 then "" else s!", {skipped} skipped"}"
     pure (if failed == 0 then 0 else 1)
+
+/-- The driver: `WIZ_STATS=1` makes each case's process report the core counters (and the
+driver itself prints its own, which are empty unless it is also `--run-case`). -/
+def main (args : List String) : IO UInt32 := do
+  Wiz.Stats.fromEnv
+  let rc ← mainImpl args
+  Wiz.Stats.report
+  return rc
