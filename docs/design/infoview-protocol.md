@@ -18,9 +18,10 @@ results carry handles that are only valid for one elaboration of the document.
 
 - Messages use the ordinary LSP framing (`Content-Length` headers, JSON-RPC 2.0), except
   on the WebSocket, where each frame carries one message body.
-- Positions are LSP positions (`line`, `character`, 0-based), but the server counts
-  Unicode characters rather than UTF-16 code units. The two agree except outside the
-  Basic Multilingual Plane. Ranges are LSP ranges with an exclusive end.
+- Positions are LSP positions (`line`, `character`, 0-based), counted in UTF-16 code
+  units as LSP's default `positionEncoding` says: the server advertises
+  `positionEncoding: "utf-16"`, and a character outside the Basic Multilingual Plane
+  counts two. Ranges are LSP ranges with an exclusive end.
 - Documents must be open. Sync is full text (`textDocumentSync: 1`). Each `didOpen` or
   `didChange` is elaborated (incrementally, through the query engine in `Wiz/Query.lean`)
   before the next message is read, so a request after a change always sees the new text.
