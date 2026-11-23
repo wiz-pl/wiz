@@ -14,6 +14,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif;
        display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+/* The static-complete page's island is a container, so it carries the page layout the
+   body used to: header, the flexing main and the footer. */
+#app { display: flex; flex-direction: column; flex: 1; min-height: 100vh; min-height: 100dvh; }
 header { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px;
          align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 .brand { grid-column: 1; grid-row: 1; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; min-width: 0; }

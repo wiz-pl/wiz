@@ -81,6 +81,12 @@ if grep -qF 'playground engine: all checks passed' "$OUT/engine.txt"; then echo 
 "$ROOT/web/build.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground.sh" "$OUT" >/dev/null
 "$ROOT/web/build-playground-ui.sh" "$OUT" >/dev/null
+# (static-complete) the playground page with scripts removed: the island, its hash and
+# every pane/control, plus the unfilled-template check
+node "$ROOT/web/static_page_test.mjs" "$OUT/playground.html" \
+  "$OUT/playground-static.json" "$ROOT/web/playground.html" > "$OUT/static-page.txt"
+if grep -qF 'static page: all checks passed' "$OUT/static-page.txt"; then echo "ok (playground, static page)"; else
+  echo "FAIL (playground, static page)"; cat "$OUT/static-page.txt"; exit 1; fi
 "$ROOT/web/build-infoview-ui.sh" "$OUT" >/dev/null
 "$ROOT/web/build-docs-ui.sh" "$OUT" >/dev/null
 "$ROOT/web/build-doc-live-ui.sh" "$OUT" >/dev/null
@@ -106,11 +112,25 @@ node "$ROOT/web/doc_node_test.mjs" "$OUT" "$OUT/doc/site/Col.json" > "$OUT/doc.t
 for want in 'class="tt k-const" data-ref=' 'info: <span class="kind">const</span> <code>Nat : Type</code>' 'tt k-pi sel'; do
   if grep -qF "$want" "$OUT/doc.txt"; then echo "ok (doc, node): $want"; else echo "FAIL (doc, node): missing $want"; cat "$OUT/doc.txt"; exit 1; fi
 done
+# (static-complete docs) the page `wiz doc` wrote, with every script removed: the
+# signature, its tags and the doc comment are the page, not the Wasm module's output
+node "$ROOT/web/docs_static_test.mjs" "$OUT/doc/site/Col.html" > "$OUT/docs-static.txt"
+if grep -qF 'docs static: all checks passed' "$OUT/docs-static.txt"; then echo "ok (docs, static page)"; else
+  echo "FAIL (docs, static page)"; cat "$OUT/docs-static.txt"; exit 1; fi
 if [ -n "$WIZ_WEB_NO_BROWSER" ]; then
   echo "ok (browser skipped: WIZ_WEB_NO_BROWSER)"
   exit 0
 fi
 if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell --inputs-from "$ROOT" nixpkgs#chromium -c sh -c 'command -v chromium'); fi
+# (static-complete) the playground in Chromium: a script-disabled load has the whole
+# shell, a normal load adopts the static nodes, and a replace that touches the focused
+# editor morphs instead of re-creating it
+node "$ROOT/web/static_chrome_test.mjs" "$CHROME" "$OUT" > "$OUT/static-chrome.txt"
+if grep -qF 'static chrome: all checks passed' "$OUT/static-chrome.txt"; then
+  echo "ok (playground, chromium static)"
+else
+  echo "FAIL (playground, chromium static)"; cat "$OUT/static-chrome.txt"; exit 1
+fi
 # (11s) the documentation page in Chromium: signatures rendered by the Wasm module
 (cd "$OUT/doc/site" && exec python3 -m http.server $((PORT + 2)) --bind 127.0.0.1) > "$OUT/http.log" 2>&1 &
 HTTP=$!

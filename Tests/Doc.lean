@@ -766,6 +766,7 @@ def docGroup : Group where
               checkHas (← httpGet port "/lsp-client.js") "export class LspClient"
               checkHas (← httpGet port "/framework/mount.js") "export async function mount"
               checkHas (← httpGet port "/framework/runtime.js") "export function applyPatches"
+              checkHas (← httpGet port "/framework/adopt.js") "export function decideAdopt"
               -- (the module's source, for the client to open in the server)
               let src ← httpGet port "/sources/Shapes.Basic.wiz"
               check (has src "200 OK") s!"GET /sources: {src.take 200}"

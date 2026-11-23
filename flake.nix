@@ -206,6 +206,7 @@
             "scroll.css" "scroll.js" "scroll-search.js" "highlight.css"
             "lsp-client.js" "doc-live.js" "doc-live.css"
             "framework/mount.js" "framework/driver.js" "framework/runtime.js"
+            "framework/adopt.js"
           ];
           docSiteSource = fs.toSource {
             root = ./web;
@@ -405,7 +406,7 @@ EOF
                 ./web/overlays.css
                 ./web/doc-live.js ./web/doc-live.css
                 ./web/framework/mount.js ./web/framework/driver.js ./web/framework/runtime.js
-                ./web/framework/editor-text.js
+                ./web/framework/adopt.js ./web/framework/editor-text.js
                 ./web/infoview-ui.wiz ./web/docs-ui.wiz ./web/doc-live-ui.wiz
                 ./web/build-infoview-ui.sh ./web/build-docs-ui.sh ./web/build-doc-live-ui.sh
               ];
@@ -440,16 +441,19 @@ EOF
                 ./selfhost/Lex.wiz ./selfhost/Parse.wiz ./selfhost/Kernel.wiz
                 ./selfhost/CParse.wiz ./selfhost/CGlue.wiz ./selfhost/Frontend.wiz
                 ./selfhost/Tables.wiz
-                # the page files the script copies into OUT
+                # the page files the script copies into OUT, and the generator that
+                # fills the static-complete page (the same Loom renderer as the runtime)
                 ./web/playground.html ./web/playground.js
+                ./web/playground_static_gen.wiz ./web/playground_static.mjs
                 ./web/playground.css ./web/overlays.css ./web/widgets.css
                 ./web/lsp-client.js ./web/widgets.js
                 ./web/playground-lsp.js ./web/selfhost-lsp-shim.js
                 ./web/playground-engine.js
                 # the entry point's mount contract (mount imports driver, which imports
-                # runtime.js): build-playground.sh copies all three beside the page
+                # runtime.js and adopt.js): build-playground.sh copies all of them
                 ./web/framework/mount.js ./web/framework/driver.js
-                ./web/framework/runtime.js ./web/framework/editor-text.js
+                ./web/framework/runtime.js ./web/framework/adopt.js
+                ./web/framework/editor-text.js
                 # the page's runtime (web/build-playground-ui.sh, built below): its Wiz
                 # app, the FFI it links and the library modules it imports. The rest of
                 # lib/ resolves from the packaged toolchain's own library.
@@ -460,7 +464,8 @@ EOF
                 ./web/squiggles.js ./web/completions.js ./web/hover.js
               ];
             };
-            nativeBuildInputs = [ wiz pkgs.emscripten ];
+            # node: web/playground_static.mjs fills the static-complete page.
+            nativeBuildInputs = [ wiz pkgs.emscripten pkgs.nodejs ];
             buildPhase = ''
               runHook preBuild
               export HOME=$TMPDIR EM_CACHE=$TMPDIR/emscripten-cache WIZ=${wiz}/bin/wiz
@@ -498,7 +503,7 @@ EOF
               fileset = fs.unions [
                 ./web/build-playground-ui.sh ./web/playground-ui.wiz ./web/js.c
                 ./web/framework/driver.js ./web/framework/runtime.js
-                ./web/framework/mount.js
+                ./web/framework/adopt.js ./web/framework/mount.js
                 ./lib
               ];
             };
