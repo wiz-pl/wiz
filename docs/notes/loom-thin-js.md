@@ -65,9 +65,14 @@ The runtime interface is therefore small and stable:
 wiz_loom_init : S
 wiz_loom_html : S -> String                    -- SSR, first paint
 wiz_loom_ssr_hash : S -> String                -- optional: the adopt hash (see the protocol note)
-wiz_loom_step : S -> String -> IO S            -- one DOM event, patched via js_patch
+wiz_step : i32 -> i32 -> i32 -> i32            -- one DOM event: (state, payload ptr+len) -> state
+wiz_loom_step : S -> String -> IO S            -- the same step as an i64 entry (tests, older modules)
 wiz_loom_<effect> : S -> ... -> IO S           -- the page's effects, if it has any
 ```
+
+`wiz_step` is `web/step.c`: three 32-bit words, so the host passes no `BigInt` per event
+(`docs/stages/08-backend/wasm.md`, "wiz-web/1"); the `i64` entry stays and
+`web/framework/driver.js` falls back to it.
 
 `web/framework/mount.js` is that contract (the first slice); `web/playground.js` is its
 first client. The current driver stays underneath as the DOM seam (event delegation,

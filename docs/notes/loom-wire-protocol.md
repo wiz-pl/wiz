@@ -13,7 +13,7 @@ The P0 slice in this branch is deliberately narrow and is implemented in five pl
 | shared runtime model, data paths, validation table, adopt contract | this note | prose, one copy |
 | envelope, P0 channels, payload schemas, monitor, caps | `web/framework/wire.js` | browser-free ES module, no DOM |
 | adopt/replace decision, SSR hash, error element | `web/framework/adopt.js` | browser-free ES module, no DOM |
-| DOM seam and mount ABI | `web/framework/runtime.js`, `driver.js`, `mount.js` | unchanged semantics; `driver.start` asks `adopt.js` before touching a node |
+| DOM seam and mount ABI | `web/framework/runtime.js`, `driver.js`, `mount.js` | unchanged semantics; `driver.start` asks `adopt.js` before touching a node; the step crosses as `wiz_step`'s three 32-bit words when the module exports it, else the `i64` `wiz_loom_step` (`driver.start().abi` says which) |
 | browser-free contract tests | `web/framework/wire_test.mjs` | encode/decode, monitor transitions, adopt/replace, validation table |
 
 `docs/notes/loom-thin-js.md` keeps the JavaScript line budget and the staged page

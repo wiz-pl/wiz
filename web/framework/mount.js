@@ -11,12 +11,13 @@
 //   mount(el, { module, transport })
 //
 // and nothing else. `module` is the runtime (a Wasm module built from a `Web.Loom` app,
-// or any object with the same three exports: `wiz_loom_init`, `wiz_loom_html`,
-// `wiz_loom_step`); `transport` is whatever the runtime needs from outside (an engine,
-// a language server's socket), and is handed to the module factory and published as
-// `globalThis.wizTransport`. Everything the page can see of the runtime is this one
-// call: the SSR is mounted into `el`, patches from `js_patch` land in `el`, DOM events
-// on it become steps, and the page's effects go back through `call`.
+// or any object with the same exports: `wiz_loom_init`, `wiz_loom_html` and a step —
+// `wiz_step` (three 32-bit words, `wiz-web/1`) or `wiz_loom_step` (i64)); `transport` is
+// whatever the runtime needs from outside (an engine, a language server's socket), and is
+// handed to the module factory and published as `globalThis.wizTransport`. Everything the
+// page can see of the runtime is this one call: the SSR is mounted into `el`, patches
+// from `js_patch` land in `el`, DOM events on it become steps, and the page's effects go
+// back through `call`.
 //
 // **What a runtime may ask the host for, and nothing more** (`globalThis.wizHost`, the
 // browser APIs a Wiz program cannot reach itself):
@@ -91,9 +92,12 @@ async function instantiate(module, options) {
     : wasm && typeof wasm.create === "function" ? wasm.create
       : null;
   if (factory) wasm = await factory(opts);
+  // The step entry is either `wiz_step` (three 32-bit words, `wiz-web/1`) or the i64
+  // `wiz_loom_step` (the Node tests' stubs, a module built before it); see driver.js.
   if (!wasm || typeof wasm._wiz_loom_init !== "function" ||
-      typeof wasm._wiz_loom_html !== "function" || typeof wasm._wiz_loom_step !== "function") {
-    throw new TypeError("mount: the runtime does not export wiz_loom_init/html/step");
+      typeof wasm._wiz_loom_html !== "function" ||
+      (typeof wasm._wiz_step !== "function" && typeof wasm._wiz_loom_step !== "function")) {
+    throw new TypeError("mount: the runtime does not export wiz_loom_init/html/step (or wiz_step)");
   }
   return wasm;
 }
@@ -308,6 +312,8 @@ export async function mount(target, { module, transport, env = globalThis, print
 
   // The runtime's own entry points (`wiz_loom_effect`, …): strings are allocated here
   // and freed after, numbers are wasm64 pointers, and the returned state is the next one.
+  // These entries are always i64, so the state goes back as a `BigInt` however the step
+  // entry carried it (`wiz_step` hands it back as an unsigned i32 Number).
   const call = (name, ...args) => {
     const fn = wasm["_" + name];
     if (typeof fn !== "function") throw new TypeError("mount: the runtime has no " + name);
@@ -321,7 +327,7 @@ export async function mount(target, { module, transport, env = globalThis, print
       return typeof a === "number" ? big(a) : a;
     });
     try {
-      app.setState(fn(app.state(), ...rest));
+      app.setState(fn(big(app.state()), ...rest));
     } finally {
       for (const p of pointers) wasm._free(p);
     }

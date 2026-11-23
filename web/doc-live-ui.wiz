@@ -16,6 +16,7 @@ of `{kind,a,b}` and applies them all before that one render (a hover answers sev
 fields at once; `web/doc-live.js` sends them together).
 -/
 link_c "js.c"
+link_c "step.c"   -- the browser ABI's i32 word entry (`wiz_step`, web/step.c)
 extern "js_patch" Js.patch : String → IO Unit
 
 def applyEffects (s : DocLive) (payload : String) : DocLive :=
