@@ -44,8 +44,19 @@ structure Toolchain where
   cacheVerify : String := "warn"
   /-- `--cache-ro-unsigned`: serve a `--cache-ro` layer although its manifests are not
   authenticated. Off by default: a manifest is a self-signed digest, so a foreign layer
-  is refused rather than trusted. Not in `Toolchain.id` (a policy, not an input). -/
+  is refused rather than trusted. It never accepts a layer that carries a signature. Not
+  in `Toolchain.id` (a policy, not an input). -/
   cacheRoUnsigned : Bool := false
+  /-- `--cache-signers FILE`: an OpenSSH `allowed_signers` allowlist for signed `--cache-ro`
+  layers. A signed layer whose generation index does not verify under this policy is
+  refused, even with `--cache-ro-unsigned`. Not in `Toolchain.id`. -/
+  cacheSigners : Option System.FilePath := none
+  /-- `--cache-key-id ID`: require this principal (a key id or `SHA256:` fingerprint) in
+  the signed-index policy. -/
+  cacheKeyId : Option String := none
+  /-- `--cache-min-generation N`: reject a signed index below this generation (a rollback
+  pin; the index's `prev` chain is written but not otherwise enforced). -/
+  cacheMinGeneration : Option Nat := none
   /-- (27a) `--trust-native`: `native_refl` may decide equations by running them -/
   trustNative : Bool := false
   /-- (27a) `--native-fuel N`: the interpreter steps one `native_refl` may take (none: the
@@ -104,6 +115,9 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
   | "cache-ro" => some { t with readCaches := t.readCaches ++ [System.FilePath.mk value] }
   | "cache-verify" => some { t with cacheVerify := value }
   | "cache-ro-unsigned" => some { t with cacheRoUnsigned := value == "true" }
+  | "cache-signers" => some { t with cacheSigners := some (System.FilePath.mk value) }
+  | "cache-key-id" => some { t with cacheKeyId := some value }
+  | "cache-min-generation" => value.toNat?.map fun n => { t with cacheMinGeneration := some n }
   | "region-cache" => some { t with regionCache := value == "true" }
   | "region-stats" => some { t with regionStats := value == "true" }
   | "root" => some { t with searchPath := t.searchPath ++ [System.FilePath.mk value] }
@@ -114,7 +128,10 @@ def set (t : Toolchain) (key value : String) : Option Toolchain :=
 `--ldflags "…"`, `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"`,
 `--gc-ldflags "…"`, `--cache DIR` (the cache written to), `--cache-ro DIR` (repeatable:
 a read-only cache, searched in the order given), `--cache-ro-unsigned` (serve a read-only
-layer whose manifests are not authenticated; off by default), `--region-cache` (serve module effects
+layer that carries no signature, as unauthenticated data; off by default),
+`--cache-signers FILE` (the OpenSSH allowed_signers allowlist for a signed layer; the
+trust root must live outside the layer), `--cache-key-id ID`, `--cache-min-generation N`,
+`--region-cache` (serve module effects
 from `.wizr` regions in those layers; experimental), `--region-stats` (print what those
 regions served, per process), `--no-cache` (both: no write cache and
 no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27a)
@@ -123,6 +140,12 @@ no read caches; a later `--cache` or `--cache-ro` adds one again), `-I DIR`, (27
 partial def parseFlags (t : Toolchain) : List String → Toolchain × List String
   | "--cache-verify" :: mode :: rest => parseFlags { t with cacheVerify := mode } rest
   | "--cache-ro-unsigned" :: rest => parseFlags { t with cacheRoUnsigned := true } rest
+  | "--cache-signers" :: f :: rest =>
+    parseFlags { t with cacheSigners := some (System.FilePath.mk f) } rest
+  | "--cache-key-id" :: k :: rest => parseFlags { t with cacheKeyId := some k } rest
+  | "--cache-min-generation" :: n :: rest => match n.toNat? with
+    | some k => parseFlags { t with cacheMinGeneration := some k } rest
+    | none => let (t, r) := parseFlags t rest; (t, "--cache-min-generation" :: n :: r)
   | "--no-cache" :: rest => parseFlags { t with cacheDir := none, readCaches := [] } rest
   | "--region-cache" :: rest => parseFlags { t with regionCache := true } rest
   | "--region-stats" :: rest => parseFlags { t with regionStats := true } rest
@@ -160,6 +183,11 @@ def toFlags (t : Toolchain) : List String :=
   (if t.regionStats then ["--region-stats"] else []) ++
   (if t.cacheVerify == "warn" then [] else ["--cache-verify", t.cacheVerify]) ++
   (if t.cacheRoUnsigned then ["--cache-ro-unsigned"] else []) ++
+  (match t.cacheSigners with | some f => ["--cache-signers", f.toString] | none => []) ++
+  (match t.cacheKeyId with | some k => ["--cache-key-id", k] | none => []) ++
+  (match t.cacheMinGeneration with
+   | some n => ["--cache-min-generation", toString n]
+   | none => []) ++
   t.searchPath.flatMap (fun d => ["-I", d.toString]) ++
   (if t.trustNative then ["--trust-native"] else []) ++
   (match t.nativeFuel with | some n => ["--native-fuel", toString n] | none => []) ++
@@ -198,7 +226,10 @@ def render (t : Toolchain) : String :=
   String.join (t.readCaches.map fun d => s!"cache-ro {d}\n") ++
   s!"cache {(t.cacheDir.map toString).getD "(off)"}\nregion-cache {t.regionCache}\nregion-stats {t.regionStats}\n" ++
   s!"roots {" ".intercalate (t.searchPath.map toString)}\n" ++
-  s!"cache-verify {t.cacheVerify}\ncache-ro-unsigned {t.cacheRoUnsigned}\n"
+  s!"cache-verify {t.cacheVerify}\ncache-ro-unsigned {t.cacheRoUnsigned}\n" ++
+  s!"cache-signers {(t.cacheSigners.map toString).getD "(none)"}\n" ++
+  s!"cache-key-id {t.cacheKeyId.getD "(none)"}\n" ++
+  s!"cache-min-generation {(t.cacheMinGeneration.map toString).getD "(none)"}\n"
 
 end Toolchain
 end Wiz

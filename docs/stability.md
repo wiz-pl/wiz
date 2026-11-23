@@ -106,7 +106,8 @@ failure) in every 0.1.z:
 | `wiz lsp` | a language server on stdin/stdout |
 
 The same holds for the toolchain flags, which may go before or after the command:
-`-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--cache-ro-unsigned`, `--no-cache`, `--cc X`, `--cflags "…"`, `--ldflags "…"`,
+`-I DIR`, `--cache DIR`, `--cache-ro DIR`, `--cache-ro-unsigned`, `--cache-signers FILE`,
+`--cache-key-id ID`, `--cache-min-generation N`, `--no-cache`, `--cc X`, `--cflags "…"`, `--ldflags "…"`,
 `--libs "…"`, `--gmp "…"`, `--llc X`, `--gc-cflags "…"` and `--gc-ldflags "…"`.
 
 Not covered:

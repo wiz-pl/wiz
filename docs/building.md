@@ -1440,8 +1440,9 @@ setup action keeps the elan cache for those
 the generated reference manual (`result/index.md`, and `result/site`).
 * **The packaged read-only elaboration cache.** The `wiz` package prewarms the
   elaboration cache during its build and installs it at `$out/share/wiz/cache`: the
-  `.wizc` effects and the `.wizm` seen markers, with no `bin/` memo or `roots/` pointer
-  index (both are write-cache aids) and `a-w` permissions. Both wrappers (`wiz` and
+  `.wizc` effects and their `manifest.d` manifests, and the `.wizm` seen markers, with no
+  `bin/` memo, `roots/` pointer index or `manifest.sexpr` index (the pointer/memo/index
+  are write-cache or publish-time aids) and `a-w` permissions. Both wrappers (`wiz` and
   `grail`) add
   `--cache-ro $out/share/wiz/cache --cache-ro-unsigned` after their toolchain flags, so a
   packaged run replays the standard library instead of elaborating it; a user's
@@ -1477,8 +1478,12 @@ the generated reference manual (`result/index.md`, and `result/site`).
   Flags parse left to right: a later `--no-cache` turns both the packaged cache and the
   write cache off, and a user's `--cache-ro DIR` appends another read-only layer
   (`--cache-ro` is repeatable and searched in the order given). A layer passed this way
-  is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) is also given: its
-  manifests are self-signed, so they are integrity, not authenticity. The entries are keyed
+  is refused unless it has a signed generation index verified under `--cache-signers`, or
+  `--cache-ro-unsigned` (or `--cache-verify off`) is also given: an unsigned layer's
+  manifests are self-signed, so they are integrity, not authenticity. A publisher that
+  signs its cache adds `manifest.sexpr.sig` (`wiz cache sign`) and consumers pass the
+  allowlist with `--cache-signers FILE` (outside the layer); a signed layer is read-only.
+  The entries are keyed
   by the packaged binary's hash (its bytes) and by `lib`'s text and module names, so
   the Nix build invalidates them automatically; there is no manual invalidation and a
   stale store path is never reused (a new build gets new keys). The cache is

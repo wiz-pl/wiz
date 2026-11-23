@@ -16,6 +16,19 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 ## [Unreleased]
 
+* cache: a read-only layer can carry a signed generation index
+  (`manifest.sexpr.sig`, an SSHSIG over the exact index bytes, verified with
+  `--cache-signers FILE`; `wiz cache sign --cache-ro DIR --key FILE` writes it). A run admits a signed
+  `--cache-ro` layer only when its index verifies, is fresh, meets an optional
+  `--cache-min-generation`, and records every module manifest it loads with a matching
+  SHA-256; a tampered index or manifest is refused, not silently replaced. A layer that
+  carries a signature is never downgraded by `--cache-ro-unsigned` (which now only
+  accepts layers with *no* signature), the allowlist must live outside the layer, and a
+  signed layer is read-only even when passed as `--cache`. `sealLayer` now writes
+  `generation + 1` / `prev = old root`. `wiz-notes/cache-trust-domains.md` states the
+  threat model and the remaining gaps (notably: a signature authenticates the publisher,
+  not the elaboration).
+
 * nix: the Wasm fixtures, the merged web bundle, the docs site, the Pages artifact and
   the binary release tarball are flake outputs (`.#wasm-fixtures`, `.#web-bundle`,
   `.#docs-site`, `.#pages`, `.#release-bin`), each input-addressed by the sources it

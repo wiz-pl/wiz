@@ -22,6 +22,52 @@ def tamperManifestRoot (f : System.FilePath) : IO Unit := do
     IO.FS.writeFile f (before ++ "(root " ++ bad ++ after.drop 1)
   | _ => IO.FS.writeFile f (text ++ " ")
 
+/-- `ssh-keygen` signs and verifies a cache layer's generation index; a machine without
+it cannot run the signed-cache cases, so they fail by default (`skipMissing`) and are
+reported as skips only under `--allow-missing-deps` (as the registry's signed cases do). -/
+def cacheHaveSshKeygen : IO Bool := do
+  try
+    let _ ← IO.Process.output { cmd := "ssh-keygen", args := #["-h"] }
+    pure true
+  catch _ => pure false
+
+/-- A throwaway Ed25519 key and its `.pub` in `dir`. -/
+def cacheKeypair (dir : System.FilePath) (name : String) :
+    IO (System.FilePath × System.FilePath) := do
+  let key := dir / name
+  let _ ← runIn dir "rm" ["-f", key.toString, key.toString ++ ".pub"]
+  let _ ← runIn dir "ssh-keygen"
+    ["-q", "-t", "ed25519", "-N", "", "-C", "wiz cache test", "-f", key.toString]
+  pure (key, System.FilePath.mk (key.toString ++ ".pub"))
+
+/-- An `allowed_signers` line naming `id` for the public key in `pub`. -/
+def cacheAllowSigner (allowed pub : System.FilePath) (id : String) : IO Unit := do
+  IO.FS.writeFile allowed s!"{id} {(← IO.FS.readFile pub)}\n"
+
+/-- A signed read-only cache layer: a cold verified run into `dir`, then seal and sign
+with a throwaway key whose allowlist lives outside the layer. Returns the allowlist and
+the policy that admits it. -/
+def cacheSignedLayer (dir : System.FilePath) (src : String)
+    (init : CommandState ZeroOneMany) (rig : String) :
+    IO (System.FilePath × Cache.SignaturePolicy) := do
+  let _ ← Cache.elaborateCached (some dir) [] src init 0 (verify := .warn) (rig := rig)
+  let _ ← Cache.sealLayer dir true 0
+  let keyDir ← IO.FS.createTempDir
+  let (key, pub) ← cacheKeypair keyDir "key"
+  let allowDir ← IO.FS.createTempDir
+  let allowed := allowDir / "allowed_signers"
+  cacheAllowSigner allowed pub "wiz-cache-test"
+  match ← Cache.signLayer dir key (some "wiz-cache-test") with
+  | .ok _ => pure ()
+  | .error e => throw (IO.userError e)
+  pure (allowed, { signers := some allowed, keyId := some "wiz-cache-test" })
+
+/-- Copy a cache layer tree (the fixtures are small). -/
+def cacheCopyTree (src dst : System.FilePath) : IO Unit := do
+  IO.FS.createDirAll dst
+  let _ ← runIn dst "cp" ["-a", src.toString ++ "/.", dst.toString]
+  pure ()
+
 /-- Every file under `dir`, recursively. -/
 partial def everyFile (dir : System.FilePath) : IO (Array System.FilePath) := do
   let mut out := #[]
@@ -495,7 +541,211 @@ def toolchainGroup : Group where
         checkEq (cold.messages.toList.map (·.render src)) (t2.messages.toList.map (·.render src))
         let c3 ← stats.get
         check (c3.mismatches > 0) s!"a tampered manifest was trusted: {repr c3}"
-        check ((← manifestFiles cache).size > 0) "the manifest was not rewritten" }
+        check ((← manifestFiles cache).size > 0) "the manifest was not rewritten" },
+    { name := "a signed generation index admits only recorded manifests; tampering is refused", run := fun _ => do
+        unless ← cacheHaveSshKeygen do
+          skipMissing "no ssh-keygen"
+          return
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n"),
+                          ("N.wiz", "import Prelude\ndef y : Nat := 3\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany :=
+          { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let layer ← IO.FS.createTempDir
+        let (_allowed, policy) ← cacheSignedLayer layer "import M\nimport N\n" init rig
+        let sig ← Cache.checkLayerSignature layer policy
+        check sig.accepted s!"the signed index was refused: {sig.status} {sig.detail}"
+        checkEq "valid" sig.status
+        check ((sig.domain.render).startsWith "signed:wiz-cache-test") sig.domain.render
+        check (sig.index.size > 0) "the signed index records no manifests"
+        -- (a pinned minimum generation rejects an older index)
+        let rollback ← Cache.checkLayerSignature layer
+          { policy with minGeneration := some (sig.generation + 1) }
+        check (!rollback.accepted) "a rollback pin was ignored"
+        check (rollback.code == Cache.Refusal.indexRollback) s!"unexpected code: {rollback.code.code}"
+        let serve (layerDir : System.FilePath) (policy : Cache.SignaturePolicy) :
+            IO (CommandState ZeroOneMany × Cache.VerifyCounts) := do
+          let stats ← IO.mkRef ({} : Cache.VerifyCounts)
+          let (s, _) ← Cache.elaborateCached none [layerDir] "import M\nimport N\n" init 0
+            (verify := .warn) (rig := rig) (stats := some stats) (policy := policy)
+          pure (s, ← stats.get)
+        let (s0, c0) ← serve layer policy
+        check (s0.globals.contains "x" && s0.globals.contains "y")
+          "the signed layer did not answer"
+        check (c0.hits > 0) s!"the signed layer served nothing: {repr c0}"
+        -- (no allowlist: fail closed, even though the index carries a signature)
+        let (s1, c1) ← serve layer {}
+        check (s1.globals.contains "x") "the text path did not answer"
+        checkEq 0 c1.hits
+        -- (a signature is never downgraded by --cache-ro-unsigned)
+        let statsU ← IO.mkRef ({} : Cache.VerifyCounts)
+        let (sU, _) ← Cache.elaborateCached none [layer] "import M\nimport N\n" init 0
+          (verify := .warn) (rig := rig) (stats := some statsU) (roUnsigned := true)
+        check (sU.globals.contains "x") "the text path did not answer"
+        checkEq 0 (← statsU.get).hits
+        -- (a tampered index: the signature no longer covers the bytes)
+        let badIndex ← IO.FS.createTempDir
+        cacheCopyTree layer badIndex
+        let _ ← flipByte (badIndex / "manifest.sexpr")
+        let isig ← Cache.checkLayerSignature badIndex policy
+        check (!isig.accepted) "a tampered index was accepted"
+        check (isig.code == Cache.Refusal.indexTampered ||
+          isig.code == Cache.Refusal.indexInvalid ||
+          isig.code == Cache.Refusal.indexOrphan) s!"unexpected code: {isig.code.code}"
+        let (s2, c2) ← serve badIndex policy
+        check (s2.globals.contains "x") "the text path did not answer after a tampered index"
+        checkEq 0 c2.hits
+        -- (a tampered manifest under an intact signature: the index record no longer
+        -- matches, so the module is refused; N's intact manifest still serves)
+        let badManifest ← IO.FS.createTempDir
+        cacheCopyTree layer badManifest
+        let some mf ← manifestFor badManifest "M" | throw (IO.userError "no manifest for M")
+        let _ ← flipByte mf
+        let mfsig ← Cache.checkLayerSignature badManifest policy
+        check mfsig.accepted "the intact index should still verify"
+        let (s3, c3) ← serve badManifest policy
+        check (s3.globals.contains "x") "the text path did not answer after a tampered manifest"
+        check (c3.hits > 0) "N's intact manifest should still serve"
+        check (c3.mismatches > 0) s!"the tampered manifest was not counted: {repr c3}"
+        -- (a re-seal chains the generation and the previous root)
+        let g1 ← match ← Cache.readGeneration layer with
+          | some g => pure g
+          | none => throw (IO.userError "the signed layer has no generation index")
+        let chain ← IO.FS.createTempDir
+        cacheCopyTree layer chain
+        IO.FS.removeFile (chain / "manifest.sexpr.sig")
+        let _ ← Cache.sealLayer chain true 0
+        let g2 ← match ← Cache.readGeneration chain with
+          | some g => pure g
+          | none => throw (IO.userError "the re-sealed layer has no generation index")
+        check (g2.generation == g1.generation + 1)
+          s!"the generation did not advance: {g1.generation} → {g2.generation}"
+        check (g2.prev == g1.root) "prev does not name the old index's root"
+        -- (a signed layer is never pruned or written, even when passed as --cache)
+        let before ← snapshot layer
+        let pruned ← Cache.pruneCache layer 7
+        checkEq 0 pruned.total
+        let msWrite ← Cache.ManifestStore.create (some layer) [] (← Cache.binaryId none) "" rig .warn
+        msWrite.writeManifest { fast := 1, strong := String.ofList (List.replicate 64 '0') } "" #[] none
+        let store ← Cache.Store.layered (R := ZeroOneMany) (some layer) [] (← Cache.binaryId none)
+          (.warn) rig
+        store.put { fast := 1 } {}
+        store.markSeen { fast := 1 } "M"
+        checkEq before (← snapshot layer) },
+    { name := "a layer from another trust domain is refused and cannot ride an index", run := fun _ => do
+        unless ← cacheHaveSshKeygen do
+          skipMissing "no ssh-keygen"
+          return
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany :=
+          { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let dirB ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 5\n")]
+        let msB ← Module.loadAll ["lib", dirB]
+        let initB : CommandState ZeroOneMany :=
+          { trustedModule := Tests.libModule, loader := loaderOf msB }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let a ← IO.FS.createTempDir
+        let (allowedA, policyA) ← cacheSignedLayer a "import M\n" init rig
+        let b ← IO.FS.createTempDir
+        let (_allowedB, policyB) ← cacheSignedLayer b "import M\n" initB rig
+        -- (B verifies under its own key, not under A's: the signer names the domain)
+        let bOwn ← Cache.checkLayerSignature b policyB
+        check bOwn.accepted s!"B does not verify under its own key: {bOwn.status} {bOwn.detail}"
+        let bUnderA ← Cache.checkLayerSignature b policyA
+        check (!bUnderA.accepted) "a foreign signer was accepted"
+        checkEq "invalid" bUnderA.status
+        let statsB ← IO.mkRef ({} : Cache.VerifyCounts)
+        let (sB, _) ← Cache.elaborateCached none [b] "import M\n" initB 0
+          (verify := .warn) (rig := rig) (stats := some statsB) (policy := policyA)
+        check (sB.globals.contains "x") "the text path did not answer"
+        checkEq 0 (← statsB.get).hits
+        let statsB2 ← IO.mkRef ({} : Cache.VerifyCounts)
+        let (_, _) ← Cache.elaborateCached none [b] "import M\n" initB 0
+          (verify := .warn) (rig := rig) (stats := some statsB2) (policy := policyB)
+        check ((← statsB2.get).hits > 0) "B's own policy did not admit B"
+        -- (B's manifest transplanted into A after A was signed: A's index records another
+        -- digest, so the bytes are refused, not served)
+        let mixed ← IO.FS.createTempDir
+        cacheCopyTree a mixed
+        let some mfA ← manifestFor mixed "M" | throw (IO.userError "no manifest for M in A")
+        let some mfB ← manifestFor b "M" | throw (IO.userError "no manifest for M in B")
+        IO.FS.writeBinFile mfA (← IO.FS.readBinFile mfB)
+        let msig ← Cache.checkLayerSignature mixed policyA
+        check msig.accepted "the index itself should still verify"
+        let statsM ← IO.mkRef ({} : Cache.VerifyCounts)
+        let (sM, _) ← Cache.elaborateCached none [mixed] "import M\n" init 0
+          (verify := .warn) (rig := rig) (stats := some statsM) (policy := policyA)
+        check (sM.globals.contains "x") "the text path did not answer"
+        checkEq 0 (← statsM.get).hits
+        let cm ← statsM.get
+        check (cm.mismatches > 0) s!"the transplanted manifest was not refused: {repr cm}"
+        -- (a policy file inside the layer is not a trust root)
+        let inside ← IO.FS.createTempDir
+        cacheCopyTree a inside
+        IO.FS.writeFile (inside / "allowed_signers") (← IO.FS.readFile allowedA)
+        let insidePolicy := { policyA with signers := some (inside / "allowed_signers") }
+        let isig ← Cache.checkLayerSignature inside insidePolicy
+        check (!isig.accepted) "a policy inside the layer was accepted"
+        check (isig.code == Cache.Refusal.policyInLayer) s!"unexpected code: {isig.code.code}" },
+    { name := "--cache-ro-unsigned serves an unsigned layer but never makes it writable", run := fun _ => do
+        let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 2\n")]
+        let ms ← Module.loadAll ["lib", dir]
+        let init : CommandState ZeroOneMany :=
+          { trustedModule := Tests.libModule, loader := loaderOf ms }
+        let rig := RigTag.tag (R := ZeroOneMany)
+        let ro ← IO.FS.createTempDir
+        let opts : Cache.RegionOptions := { rig }
+        let _ ← Cache.elaborateCached (some ro) [] "import M\n" init 0
+          (region := some opts) (verify := .warn) (rig := rig)
+        check ((← regionFiles ro).size > 0) "no region was written"
+        let before ← snapshot ro
+        let stats ← IO.mkRef ({} : Cache.VerifyCounts)
+        let rstats ← IO.mkRef ({} : Cache.RegionCounts)
+        let ropts : Cache.RegionOptions := { rig, stats := some rstats }
+        let (s, _) ← Cache.elaborateCached none [ro] "import M\n" init 0
+          (region := some ropts) (verify := .warn) (rig := rig) (stats := some stats)
+          (roUnsigned := true)
+        check (s.globals.contains "x") "the opt-in layer did not answer"
+        let ctext ← stats.get
+        let cregion ← rstats.get
+        check (ctext.hits > 0) s!"no text entry was served: {repr ctext}"
+        check (cregion.hits > 0) s!"no region was served: {repr cregion}"
+        checkEq before (← snapshot ro)
+        -- (a miss still writes nothing: there is no write cache)
+        let (s2, _) ← Cache.elaborateCached none [ro] "import M\ndef z : Nat := x\n" init 0
+          (region := some ropts) (verify := .warn) (rig := rig) (roUnsigned := true)
+        check (s2.globals.contains "z") "the miss did not elaborate"
+        checkEq before (← snapshot ro)
+        -- (the opt-in domain is named by its path; without the opt-in it is refused)
+        let binary ← Cache.binaryId none
+        let ms1 ← Cache.ManifestStore.create none [ro] binary "" rig .warn (roUnsigned := true)
+        let t1 ← ms1.trustOf ro
+        check t1.accepted "the opt-in layer was not admitted"
+        checkEq s!"unsigned:{ro}" t1.domain.render
+        let ms2 ← Cache.ManifestStore.create none [ro] binary "" rig .warn
+        let t2 ← ms2.trustOf ro
+        check (!t2.accepted) "an unsigned layer was admitted without the opt-in"
+        check (t2.refusal == some Cache.Refusal.foreign) s!"unexpected refusal: {repr t2.refusal}" },
+    { name := "--cache-signers/--cache-key-id/--cache-min-generation round-trip and stay out of the id", run := fun _ => do
+        let parse (args : List String) := ({} : Toolchain).parseFlags args
+        let (tc, rest) := parse ["--cache-signers", "/k", "--cache-key-id", "rel-1",
+                                  "--cache-min-generation", "7", "check", "x.wiz"]
+        checkEq ["check", "x.wiz"] rest
+        checkEq (some "/k") (tc.cacheSigners.map toString)
+        checkEq (some "rel-1") tc.cacheKeyId
+        check (tc.cacheMinGeneration == some 7) "the minimum generation did not parse"
+        let (back, rest) := parse tc.toFlags
+        checkEq [] rest
+        checkEq (repr tc).pretty (repr back).pretty
+        check (tc.id == ({ tc with cacheSigners := none, cacheKeyId := none,
+                           cacheMinGeneration := none } : Toolchain).id)
+          "the cache signer policy is in the toolchain id"
+        check ((tc.render.splitOn "cache-signers /k").length > 1) tc.render
+        match ({} : Toolchain).set "cache-min-generation" "8" with
+        | some t => check (t.cacheMinGeneration == some 8) "the build-file setting did not parse"
+        | none => throw (IO.userError "cache-min-generation is not a build-file setting") }
   ]
 
 builtin_initialize registerGroup toolchainGroup

@@ -21,8 +21,9 @@ order): misses are looked up there after the write cache, and they are never wri
 Nix package ships one in `$out/share/wiz/cache`; a run with only read caches
 (`--no-cache --cache-ro DIR`, since the default write cache is on) still replays modules
 and computes the binary's id on every run. A read-only layer is in someone else's trust
-domain, and a manifest is only a self-signed digest, so by default the layer is
-**refused**; `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data.
+domain: it is admitted only when its generation index carries a signature that verifies
+under `--cache-signers` (and then only the manifests recorded in that index), or when
+`--cache-ro-unsigned` explicitly accepts a layer that carries no signature at all.
 
 Commands that change the grammar or the macros (`syntax`, `macro_rules`, `notation`,
 attributes, `import`, user-defined commands) aren't cached; they are cheap to rerun.
@@ -31,8 +32,8 @@ manifested write-cache entry is trusted as *integrity*: it is the bytes the writ
 there. That is not authenticity, and a cache is not part of the kernel's trusted base:
 whoever can write a `.wizc` and its manifest can choose what the elaborator replays. The
 manifested write cache is a per-user trust assumption (the same domain as the process);
-a foreign layer needs a signature (P3) or a re-check before it can be treated as
-authority.
+a foreign layer needs a verified signed generation index (below) or a kernel re-check
+before it can be treated as authority.
 
 The format is S-expressions; quantities are written with the rig's literal syntax.
 -/
@@ -571,27 +572,48 @@ def writeAtomic (file : System.FilePath) (content : String) : IO Unit := do
 def removeQuietly (file : System.FilePath) : IO Unit :=
   try IO.FS.removeFile file catch _ => pure ()
 
+/-- A layer's detached signature over the exact bytes of its `manifest.sexpr`
+(OpenSSH's SSHSIG, written by `ssh-keygen -Y sign`). Its presence is what makes a
+read-only layer a *signed* trust domain; a layer that carries one is never written to
+and is judged by it (an invalid signature is not a licence to fall back to unsigned). -/
+def signatureFile (dir : System.FilePath) : System.FilePath := dir / "manifest.sexpr.sig"
+
+/-- The SSHSIG namespace of cache generation indexes. Changing it deliberately
+invalidates every existing signature. -/
+def signatureNamespace : String := "wiz-cache-index"
+
+/-- Is `dir` a signed layer? A signed layer is a published snapshot: even when it is
+passed as the write cache, no memo, pointer, entry, manifest, region or prune may write
+it. -/
+def signedLayer (dir : System.FilePath) : IO Bool :=
+  (signatureFile dir).pathExists
+
 /-- What identifies the running binary, and so its elaborator and kernel: the hash of the
 executable. Hashing it takes a moment, so the result is remembered in `dir/bin/`, by the
 executable's path, size and modification time. Without it, a cache directory shared by
 several builds (worktrees on different branches, CI runs) would serve one kernel's
 verdicts to another whenever a change forgot to bump `salt`. `dir` is the **write** cache:
 with none (read-only caches only), the executable is hashed on every run and nothing is
-written. -/
+written. A signed layer is never written: its memo is neither read nor written. -/
 def binaryId (dir : Option System.FilePath) : IO UInt64 := do
   let exe ← IO.appPath
   let md ← exe.metadata
   let stamp := s!"{exe} {md.byteSize} {md.modified.sec} {md.modified.nsec}"
   let file := dir.map (· / "bin" / s!"{hash stamp}")
+  let sealed ← match dir with
+    | some d => signedLayer d
+    | none => pure false
   if let some f := file then
-    if ← f.pathExists then
-      match (← IO.FS.readFile f).splitOn "\n" with
-      | [st, k] => if st == stamp then if let some n := k.toNat? then return n.toUInt64
-      | _ => pure ()
+    if !sealed then
+      if ← f.pathExists then
+        match (← IO.FS.readFile f).splitOn "\n" with
+        | [st, k] => if st == stamp then if let some n := k.toNat? then return n.toUInt64
+        | _ => pure ()
   let h := hash (← IO.FS.readBinFile exe)
   if let some f := file then
-    IO.FS.createDirAll (f.parent.getD ".")
-    writeAtomic f s!"{stamp}\n{h.toNat}"
+    if !sealed then
+      IO.FS.createDirAll (f.parent.getD ".")
+      writeAtomic f s!"{stamp}\n{h.toNat}"
   pure h
 
 /-- A cache key has a fast 64-bit index (for in-memory tables, file lookups and Lean's
@@ -870,11 +892,16 @@ A cache key is an **input** hash; the bytes a cache entry returns are an **outpu
 this stage nothing checked the output against the key: a cache could return any parseable
 `Effect`, and a `.wizr` region is worse (its type is erased at the `mmap` boundary). The
 first integrity step is a digest of the bytes that are served, plus a **manifest** that
-binds a key to that digest. There is no signature yet: a manifest catches corruption, a
-truncated/rewritten file and a mirror that swaps one entry for another; it does not stop a
-writer who controls the manifest too (that needs P3's signatures and, eventually, the
-append-only log). A read-only layer's manifests are not a trust root either, so such a
-layer is refused unless `--cache-ro-unsigned` (or `--cache-verify off`) says otherwise.
+binds a key to that digest. A manifest catches corruption, a truncated/rewritten file and
+a mirror that swaps one entry for another; it does not stop a writer who controls the
+manifest too. The **signature over the layer's generation index**
+(`manifest.sexpr.sig`, below) is the authenticity step for a foreign layer: it binds the
+index, the index records every module manifest's digest, and each manifest binds the entry
+bytes. It authenticates the *publisher*, not the claim that an effect is the elaboration of
+the key's source (a signature cannot show that; only a kernel re-check can). The local
+write cache remains a per-user trust assumption; a read-only layer is refused unless its
+signed index verifies under `--cache-signers`, or `--cache-ro-unsigned` explicitly accepts
+it as unauthenticated.
 
 The layout is deliberately the note's **P2** (per-module manifests) with a **P1**
 per-layer generation index:
@@ -882,6 +909,7 @@ per-layer generation index:
 ```
 <cache>/manifest.d/<binary ⊕ module key>.wizmf   -- one module (or one root file)
 <cache>/manifest.sexpr                            -- the layer's generation index
+<cache>/manifest.sexpr.sig                        -- detached SSHSIG over those bytes
 ```
 
 A module manifest lists every cacheable command entry of that module and its region, with
@@ -905,7 +933,8 @@ collision is a miss, never another command's effect. A format-1 manifest (or a f
 region) is a miss and is regenerated; it is never read under a strong key.
 
 `root` is an RFC 6962-style Merkle root over the entries (`0x00` leaf, `0x01` node
-separation), so P3 can sign one value instead of every entry. `.wizc` bytes are canonical
+separation), so one signature over the index binds every entry instead of signing each
+one. `.wizc` bytes are canonical
 text, so their digest is the effect digest too; a `.wizr` is a pointer image and is **not**
 canonical, so only its byte digest is recorded (never content-address a region by bytes).
 
@@ -922,13 +951,17 @@ The policy is `--cache-verify MODE`:
   claim: a manifest is a self-signed digest, and a writer who can replace the entry can
   recompute it. Only signatures (P3) or a kernel re-check can tell a writer from a
   builder.
-* A **read-only layer** (`--cache-ro`) is not in the user's trust domain. Its manifests
-  are self-signed, so by default they authenticate nothing and the layer is **refused**:
-  no entry or region is served from it, and `wiz` warns once per layer that has content
-  for a module. Passing
-  `--cache-ro-unsigned` (or `--cache-verify off`, which has no manifests and no region
-  gate) is the explicit opt-in to unauthenticated data. This is a deliberate change from
-  the old behaviour, where "the layer has a manifest" was treated as sufficient.
+* A **read-only layer** (`--cache-ro`) is not in the user's trust domain. It is admitted
+  only through a **signed generation index**: the index must verify (SSHSIG, namespace
+  `wiz-cache-index`) under an OpenSSH `allowed_signers` file passed as `--cache-signers`,
+  and every module manifest the run loads must be recorded in that index with a matching
+  SHA-256. The allowlist must live outside the layer. Without that, the layer contributes
+  nothing and `wiz` warns once per layer that has content for a module. Passing
+  `--cache-ro-unsigned` is the explicit opt-in to serve a layer that carries **no**
+  signature as unauthenticated data; a layer that carries a signature is always judged by
+  it and is never downgraded to unsigned. `--cache-verify off` has no manifests at all and
+  is the separate, explicit unverified mode. This is a deliberate change from the old
+  behaviour, where "the layer has a manifest" was treated as sufficient.
 
 A bad manifest disables the entries it names (they miss); an absent manifest in `warn` is
 a miss for every entry (the write cache's own entries are the only compatibility default).
@@ -1247,6 +1280,17 @@ def Generation.rootOf (g : Generation) : String :=
     leafHash "wiz-module-v1" (moduleRecord x).render.toUTF8
   Smt.Sha256.hexBytes (merkleRoot (#[metaLeaf] ++ mods))
 
+/-- Is this index self-consistent? Its root must cover its metadata and records. A
+generation index that fails this is not a snapshot at all, and is refused before any
+signature is considered (`cache-index-tampered`). -/
+def Generation.valid (g : Generation) : Bool :=
+  g.root == g.rootOf
+
+/-- The index's `(manifest file, SHA-256)` records. A signed layer serves a module
+manifest only when its file name is recorded here with exactly this digest. -/
+def Generation.indexEntries (g : Generation) : Array (String × String) :=
+  g.modules.map fun x => (x.2.2.2.1, x.2.2.2.2)
+
 def Generation.toSx (g : Generation) : Sx :=
   node "cache-manifest" [node "format" [nat 2], node "generation" [nat g.generation],
     node "prev" [str g.prev], node "valid-until" [nat g.validUntil],
@@ -1305,12 +1349,364 @@ def readRootPointer (dir : System.FilePath) (path : String) : IO (Option Key) :=
   | _ => pure none
 
 def writeRootPointer (dir : System.FilePath) (path : String) (k : Key) : IO Unit := do
+  -- (a signed layer is a published snapshot: no aid may be written into it)
+  if ← signedLayer dir then return
   let f := rootPointerFile dir path
   IO.FS.createDirAll (f.parent.getD dir)
   try writeAtomic f s!"{k.fast}\n{k.strong}\n" catch _ => pure ()
 
 def unixNow : IO Nat := do
   pure (← Std.Time.Timestamp.now).val.toSeconds.toInt.toNat
+
+/-! ## Trust domains and the signed generation index
+
+A manifest binds a cache key to the bytes it serves; a **signature** binds a layer's
+generation index to an offline key. The signature is OpenSSH's detached `SSHSIG` format
+(`ssh-keygen -Y sign`), stored beside the index and covering its exact bytes:
+
+```
+<cache>/manifest.sexpr       the generation index (P1)
+<cache>/manifest.sexpr.sig   SSHSIG over those exact bytes, namespace wiz-cache-index
+```
+
+The signature is checked once per layer, against an OpenSSH `allowed_signers` file that
+is the trust root. That file must live **outside the layer it judges**: whoever can rewrite
+the layer can rewrite a policy shipped in it. A signed layer is admitted only when
+
+* the index is self-consistent (`root == rootOf`), fresh and at or above the pinned
+  minimum generation;
+* its signature verifies under an allowlisted principal; and
+* every module manifest the run loads is **recorded in that index** and hashes to the
+  recorded digest.
+
+The last point is the one an index signature alone does not give: the index commits to
+each `.wizmf`, and the manifest commits to each `.wizc`/`.wizr`, so one signature covers
+the layer transitively. An unlisted manifest is ignored (`cache-manifest-unlisted`); a
+listed manifest whose bytes differ is a tampering event, not a miss, and poisons its
+module key (`cache-manifest-digest`).
+
+A layer is admitted under a **trust domain** that is derived from the authentication
+decision, never from anything the layer says about itself:
+
+* `local` — the write cache, in the process's own user domain; no signature is involved.
+* `signed:<id>[<fingerprint>]` — a read-only layer whose index verified under the
+  allowlisted principal `id` (its `SHA256:` fingerprint is shown too).
+* `unsigned:<path>` — a read-only layer explicitly accepted with `--cache-ro-unsigned`;
+  it is unauthenticated, named by its path because it has no cryptographic identity.
+
+A layer that carries a signature is never downgraded to `unsigned`: an invalid signature
+is refused even with `--cache-ro-unsigned`. A read-only layer may serve only what its
+admitted domain records; the write cache remains the only writable layer. -/
+
+/-- Why a layer, or one of its artifacts, was refused. The rendered strings are the
+diagnostic codes `wiz` prints; tests pin them. -/
+inductive Refusal where
+  | foreign
+  | indexOrphan
+  | indexTampered
+  | indexExpired
+  | indexRollback
+  | indexUnverified
+  | indexInvalid
+  | policyInLayer
+  | manifestUnlisted
+  | manifestDigest
+  | signedWrite
+  deriving Repr, Inhabited, BEq, DecidableEq
+
+def Refusal.code : Refusal → String
+  | .foreign => "cache-foreign-refused"
+  | .indexOrphan => "cache-index-signature-orphan"
+  | .indexTampered => "cache-index-tampered"
+  | .indexExpired => "cache-index-expired"
+  | .indexRollback => "cache-index-rollback"
+  | .indexUnverified => "cache-index-signature-unverified"
+  | .indexInvalid => "cache-index-signature-invalid"
+  | .policyInLayer => "cache-signers-in-layer"
+  | .manifestUnlisted => "cache-manifest-unlisted"
+  | .manifestDigest => "cache-manifest-digest"
+  | .signedWrite => "cache-signed-layer-write"
+
+def Refusal.text : Refusal → String
+  | .foreign =>
+    "refusing an unauthenticated layer (a manifest is a self-signed digest, not a signature); pass --cache-ro-unsigned to serve it anyway"
+  | .indexOrphan => "a generation-index signature without a readable index"
+  | .indexTampered => "the generation index's root does not cover its metadata and records"
+  | .indexExpired => "the generation index is past its valid-until"
+  | .indexRollback => "the generation index is below the pinned minimum generation"
+  | .indexUnverified =>
+    "the generation index is signed, but no --cache-signers allowlist was given, so the signature cannot be checked"
+  | .indexInvalid => "the generation index's signature is not valid"
+  | .policyInLayer =>
+    "the --cache-signers allowlist is inside the layer; the trust root must live outside it"
+  | .manifestUnlisted => "a module manifest is not listed in the layer's signed generation index"
+  | .manifestDigest => "a module manifest does not match its record in the signed generation index"
+  | .signedWrite => "a signed cache layer is read-only; nothing was written"
+
+/-- The trust domain a layer was admitted under. `signed` carries the allowlisted
+principal and the signing key's `SHA256:` fingerprint; `unsigned` is named by its path
+because it has no cryptographic identity. -/
+inductive TrustDomain where
+  | local
+  | signed (keyId fingerprint : String)
+  | unsigned (path : String)
+  deriving Repr, Inhabited, BEq, DecidableEq
+
+def TrustDomain.render : TrustDomain → String
+  | .local => "local"
+  | .signed id fp =>
+    let who := if id.isEmpty then fp else id
+    if id.isEmpty || fp.isEmpty then s!"signed:{who}" else s!"signed:{who}[{fp}]"
+  | .unsigned p => s!"unsigned:{p}"
+
+/-- How a run judges a signed read-only layer. With no `signers` file no signature can
+be checked, so a signed layer is refused (`cache-index-signature-unverified`); the
+existing `--cache-ro-unsigned` opt-in is only for layers that carry no signature. -/
+structure SignaturePolicy where
+  /-- an OpenSSH `allowed_signers` file, outside the layer it judges -/
+  signers : Option System.FilePath := none
+  /-- require this principal (a key id or a `SHA256:` fingerprint); `none`: any listed one -/
+  keyId : Option String := none
+  /-- reject an index whose generation is lower than this (a rollback pin) -/
+  minGeneration : Option Nat := none
+  deriving Repr, Inhabited
+
+/-- One key line of an `allowed_signers` file (its principals, key type and key blob). -/
+structure SignerKey where
+  identities : Array String := #[]
+  keyType : String := ""
+  key : String := ""
+  deriving Repr, Inhabited
+
+def isSshKeyType (s : String) : Bool :=
+  s.startsWith "ssh-" || s.startsWith "ecdsa-" || s.startsWith "sk-ssh-" || s.startsWith "sk-ecdsa-"
+
+private partial def findKeyType (toks : List String) (i : Nat) : Option Nat :=
+  match toks with
+  | [] => none
+  | t :: ts => if isSshKeyType t then some i else findKeyType ts (i + 1)
+
+/-- Parse one `allowed_signers` line: `principals [options] keytype key [comment]`.
+Blank lines and `#` comments are ignored; an options field is skipped by locating the key
+type. A principal can be a key id (`wiz-release-1`) or a `SHA256:` fingerprint. -/
+def parseSignerLine (line : String) : Option SignerKey := do
+  let line := (line.takeWhile (· != '#')).toString
+  let line := line.trimAscii.toString
+  if line.isEmpty then none
+  let toks := (line.splitOn " ").filter (fun t => !t.isEmpty)
+  let idx ← findKeyType toks 0
+  if idx == 0 then none
+  let idTok := toks[0]!
+  let ids := (idTok.splitOn ",").filter (fun s => !s.isEmpty)
+  if ids.isEmpty then none
+  let keyType := toks[idx]!
+  let key := (toks[idx + 1]?).getD ""
+  if key.isEmpty then none
+  pure { identities := ids.toArray, keyType, key }
+
+def readSigners (file : System.FilePath) : IO (Array SignerKey) := do
+  let text ← IO.FS.readFile file
+  pure ((text.splitOn "\n").filterMap parseSignerLine).toArray
+
+/-- The SHA-256 fingerprint of a public key, as `ssh-keygen -lf` prints it. -/
+def sshPublicFingerprint (keyType key : String) : IO (Option String) := do
+  try
+    let tmp ← IO.FS.createTempDir
+    let f := tmp / "key.pub"
+    IO.FS.writeFile f s!"{keyType} {key}\n"
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-lf", f.toString, "-E", "sha256"] }
+    IO.FS.removeDirAll tmp
+    if o.exitCode != 0 then return none
+    pure ((o.stdout.splitOn " ").find? (fun t => t.startsWith "SHA256:"))
+  catch _ => pure none
+
+/-- The `SHA256:` fingerprint of a private (or public) key file. -/
+def keyFingerprint (key : System.FilePath) : IO (Option String) := do
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-y", "-f", key.toString] }
+    if o.exitCode == 0 then
+      match (o.stdout.splitOn " ").filter (fun t => !t.isEmpty) with
+      | kt :: k :: _ => sshPublicFingerprint kt k
+      | _ => pure none
+    else
+      let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-lf", key.toString, "-E", "sha256"] }
+      if o.exitCode == 0 then
+        pure ((o.stdout.splitOn " ").find? (fun t => t.startsWith "SHA256:"))
+      else pure none
+  catch _ => pure none
+
+/-- Verify `manifest.sexpr.sig` against `signers` with `ssh-keygen -Y verify`, over the
+index's exact bytes (`payload`, the same bytes the caller parsed). With no `keyId`, every
+listed principal is tried; a `SHA256:` principal must also be the actual fingerprint of
+its line's key. -/
+def verifySignatureWith (dir signers : System.FilePath) (keyId : Option String)
+    (payload : String) : IO (Except String (String × String)) := do
+  let sig := signatureFile dir
+  let keys ← readSigners signers
+  let mut detail := ""
+  for s in keys do
+    for id in s.identities do
+      if keyId.isNone || keyId == some id then
+        let fpOk ← if id.startsWith "SHA256:" then
+            match ← sshPublicFingerprint s.keyType s.key with
+            | some fp => pure (fp == id)
+            | none => pure false
+          else pure true
+        if fpOk then
+          let o ← IO.Process.output { cmd := "ssh-keygen",
+            args := #["-Y", "verify", "-f", signers.toString, "-I", id,
+                      "-n", signatureNamespace, "-s", sig.toString] } (some payload)
+          if o.exitCode == 0 then
+            let fp ← sshPublicFingerprint s.keyType s.key
+            return .ok (id, fp.getD "")
+          else
+            detail := (if o.stderr.trimAscii.toString.isEmpty then o.stdout else o.stderr).trimAscii.toString
+  pure (.error (if detail.isEmpty then s!"no allowlisted key verified {sig}" else detail))
+
+/-- The outcome of judging one layer's generation index. `index` is the manifest file →
+SHA-256 binding, populated only for an accepted signed layer. -/
+structure SignatureResult where
+  /-- `valid`, `missing`, `expired`, `unverified` or `invalid` -/
+  status : String := "missing"
+  keyId : String := ""
+  fingerprint : String := ""
+  generation : Nat := 0
+  root : String := ""
+  /-- the index's `valid-until` (Unix seconds, `0` for none) -/
+  validUntil : Nat := 0
+  /-- manifest file name → SHA-256, from the index -/
+  index : Array (String × String) := #[]
+  domain : TrustDomain := .unsigned ""
+  code : Refusal := .foreign
+  detail : String := ""
+  accepted : Bool := false
+  deriving Repr, Inhabited
+
+/-- Judge a layer's generation index. A missing signature is `missing`; a present
+signature is always judged (a no-policy or failed check is never a fallback to
+unsigned). The index is checked for self-consistency before the signature, so a
+tampered root is reported as such rather than as a bad signature. -/
+def checkLayerSignature (dir : System.FilePath) (policy : SignaturePolicy) :
+    IO SignatureResult := do
+  let hasSig ← (signatureFile dir).pathExists
+  -- (read the index once: the bytes that are parsed are the bytes the signature covers;
+  -- re-reading the path after the parse would let a layer be swapped under the check)
+  let bytes ← try pure (← IO.FS.readBinFile (generationFile dir)) catch _ => pure ByteArray.empty
+  let text := (String.fromUTF8? bytes).getD ""
+  match parseGeneration text with
+  | none =>
+    if hasSig then
+      pure { status := "invalid", code := .indexOrphan,
+             detail := "manifest.sexpr.sig without a readable manifest.sexpr" }
+    else
+      pure { status := "missing", code := .foreign, detail := "unsigned (no manifest.sexpr.sig)" }
+  | some g =>
+    let base : SignatureResult :=
+      { generation := g.generation, root := g.root, validUntil := g.validUntil,
+        index := g.indexEntries }
+    if !g.valid then
+      return { base with status := "invalid", code := .indexTampered }
+    match policy.minGeneration with
+    | some min =>
+      if g.generation < min then
+        return { base with status := "invalid", code := .indexRollback,
+                 detail := s!"generation {g.generation} is below the pinned minimum {min}" }
+    | none => pure ()
+    let now ← unixNow
+    if g.validUntil != 0 && now > g.validUntil then
+      return { base with status := "expired", code := .indexExpired,
+               detail := s!"valid-until {g.validUntil}" }
+    if !hasSig then
+      return { base with status := "missing", code := .foreign,
+               detail := "unsigned (no manifest.sexpr.sig)" }
+    match policy.signers with
+    | none =>
+      pure { base with status := "unverified", code := .indexUnverified }
+    | some signers =>
+      let inside ← try
+          let d ← IO.FS.realPath dir
+          let s ← IO.FS.realPath signers
+          pure (s.toString == d.toString || s.toString.startsWith (d.toString ++ "/"))
+        catch _ => pure false
+      if inside then
+        return { base with status := "invalid", code := .policyInLayer,
+                 detail := s!"{signers} is inside {dir}" }
+      let r ← try verifySignatureWith dir signers policy.keyId text
+        catch e => pure (.error s!"signature check: {e}")
+      match r with
+      | .ok (id, fp) =>
+        pure { base with status := "valid", keyId := id, fingerprint := fp,
+               accepted := true, domain := .signed id fp }
+      | .error e =>
+        pure { base with status := "invalid", code := .indexInvalid, detail := e }
+
+/-- What `wiz cache sign` wrote. -/
+structure SignResult where
+  generation : Nat := 0
+  root : String := ""
+  signature : System.FilePath := ""
+  keyId : String := ""
+  fingerprint : String := ""
+  deriving Repr, Inhabited
+
+/-- Sign a layer's `manifest.sexpr` (its exact bytes) with an offline key. The key is
+used by `ssh-keygen -Y sign` and is never copied into the layer. A tampered index is
+never signed. -/
+def signLayer (dir : System.FilePath) (key : System.FilePath) (keyId : Option String) :
+    IO (Except String SignResult) := do
+  let gen := generationFile dir
+  unless ← gen.pathExists do
+    return .error s!"no {gen} (run `wiz cache manifest` first)"
+  let text ← try
+      pure (← IO.FS.readFile gen)
+    catch e => return .error s!"read {gen}: {e}"
+  let g ← match parseGeneration text with
+    | some g => pure g
+    | none => return .error s!"{gen} does not parse as a generation index"
+  unless g.valid do
+    return .error s!"{gen}: root does not cover its records; refusing to sign a tampered index"
+  -- (sign exactly the bytes that were checked, not whatever the path holds a moment later)
+  let tmp ← IO.FS.createTempDir
+  let payload := tmp / "manifest.sexpr"
+  IO.FS.writeFile payload text
+  let sigTmp := System.FilePath.mk (payload.toString ++ ".sig")
+  let o ← try
+      IO.Process.output { cmd := "ssh-keygen",
+        args := #["-Y", "sign", "-q", "-f", key.toString, "-n", signatureNamespace,
+                  payload.toString] }
+    catch e => do
+      IO.FS.removeDirAll tmp
+      return .error s!"ssh-keygen: {e}"
+  if o.exitCode != 0 then
+    IO.FS.removeDirAll tmp
+    return .error s!"ssh-keygen -Y sign failed: {o.stderr.trimAscii.toString}"
+  unless ← sigTmp.pathExists do
+    IO.FS.removeDirAll tmp
+    return .error "ssh-keygen wrote no signature file"
+  let sigText ← try
+      pure (← IO.FS.readFile sigTmp)
+    catch e => do
+      IO.FS.removeDirAll tmp
+      return .error s!"read {sigTmp}: {e}"
+  IO.FS.removeDirAll tmp
+  let sig := signatureFile dir
+  writeAtomic sig sigText
+  let fp ← keyFingerprint key
+  let id := match keyId with | some i => i | none => fp.getD ""
+  pure (.ok { generation := g.generation, root := g.root, signature := sig, keyId := id,
+              fingerprint := fp.getD "" })
+
+/-- The admission decision for one layer, computed once per process. `index` is the
+signed index's manifest → SHA-256 binding (empty for `local` and `unsigned`). -/
+structure LayerTrust where
+  domain : TrustDomain := .unsigned ""
+  accepted : Bool := false
+  /-- the signed index's `valid-until` (Unix seconds, `0` for none) -/
+  validUntil : Nat := 0
+  index : Std.HashMap String String := {}
+  refusal : Option Refusal := none
+  /-- the refusal's detail (e.g. `ssh-keygen`'s reason) -/
+  detail : String := ""
 
 /-- What verification did, for `--cache-verify-stats` and `wiz cache verify`. -/
 structure VerifyCounts where
@@ -1338,8 +1734,13 @@ structure ManifestStore where
   mode : VerifyMode
   /-- serve a read-only layer even though its manifests are not authenticated
   (`--cache-ro-unsigned`). Off by default: a manifest is a self-signed digest, so a
-  foreign layer is refused rather than trusted. -/
+  foreign layer is refused rather than trusted. It never accepts a layer that carries a
+  signature: a present signature is always judged. -/
   roUnsigned : Bool := false
+  /-- the publisher allowlist and rollback pin for signed `--cache-ro` layers -/
+  policy : SignaturePolicy := {}
+  /-- per-layer trust decisions, computed once -/
+  trust : IO.Ref (Std.HashMap String LayerTrust)
   /-- `Key.id`s whose manifests have been loaded -/
   loaded : IO.Ref (Std.HashSet String)
   /-- `Key.id` → (entry, layer), in layer order -/
@@ -1362,8 +1763,10 @@ structure ManifestStore where
 
 def ManifestStore.create (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (toolchain rig : String) (mode : VerifyMode)
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO ManifestStore := do
-  pure { write, reads, binary, toolchain, rig, mode, roUnsigned,
+    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false)
+    (policy : SignaturePolicy := {}) : IO ManifestStore := do
+  pure { write, reads, binary, toolchain, rig, mode, roUnsigned, policy,
+         trust := ← IO.mkRef ({} : Std.HashMap String LayerTrust),
          loaded := ← IO.mkRef ({} : Std.HashSet String),
          entries := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
          regions := ← IO.mkRef ({} : Std.HashMap String (Array (ManifestEntry × System.FilePath))),
@@ -1380,25 +1783,60 @@ def ManifestStore.dirs (m : ManifestStore) : List System.FilePath := m.write.toL
 def ManifestStore.isRead (m : ManifestStore) (dir : System.FilePath) : Bool :=
   m.reads.any (·.toString == dir.toString)
 
-/-- A layer's generation expiry (Unix seconds, `0` for none), read once. -/
+/-- The layer's admission decision, computed once. The write cache is `local`; a
+read-only layer is `signed` only when its index verifies under the policy, and is
+`unsigned` only when it carries no signature at all and `--cache-ro-unsigned` was
+given. A present signature is never downgraded to unsigned. -/
+def ManifestStore.trustOf (m : ManifestStore) (dir : System.FilePath) : IO LayerTrust := do
+  let key := dir.toString
+  match (← m.trust.get)[key]? with
+  | some t => pure t
+  | none =>
+    let t : LayerTrust ← if !m.isRead dir then
+        pure { domain := .local, accepted := true }
+      else do
+        let r ← checkLayerSignature dir m.policy
+        let hasSig ← (signatureFile dir).pathExists
+        if r.accepted then
+          pure { domain := r.domain, accepted := true, validUntil := r.validUntil,
+                 index := r.index.foldl (fun acc x => acc.insert x.1 x.2) {} }
+        else if !hasSig && m.roUnsigned then
+          pure { domain := .unsigned key, accepted := true }
+        else
+          pure { accepted := false, refusal := some r.code, detail := r.detail }
+    m.trust.modify (·.insert key t)
+    pure t
+
+/-- A layer's generation expiry (Unix seconds, `0` for none), read once. A tampered
+index has no trusted expiry, so it contributes none (a signed layer is checked by
+`trustOf` before this is consulted). -/
 def ManifestStore.expiryOf (m : ManifestStore) (dir : System.FilePath) : IO Nat := do
   let key := dir.toString
   match (← m.expiry.get)[key]? with
   | some n => pure n
   | none =>
     let n ← match ← readGeneration dir with
-      | some g => pure g.validUntil
+      | some g => pure (if g.valid then g.validUntil else 0)
       | none => pure 0
     m.expiry.modify (·.insert key n)
     pure n
 
-/-- Warn once per read-only layer that is refused: its manifests are self-signed, so they
-do not authenticate the writer. `--cache-ro-unsigned` is the explicit opt-in. -/
-def ManifestStore.warnRefusedRo (m : ManifestStore) (dir : System.FilePath) : IO Unit := do
-  let key := s!"refused {dir}"
+/-- Warn once per read-only layer that is refused, naming the refusal code and why. -/
+def ManifestStore.warnRefusedRo (m : ManifestStore) (dir : System.FilePath)
+    (why : Refusal := .foreign) (detail : String := "") : IO Unit := do
+  let key := s!"refused {why.code} {dir}"
   if (← m.warnedRo.get).contains key then return
   m.warnedRo.modify (·.insert key)
-  IO.eprintln s!"cache verify: --cache-ro {dir}: refusing an unauthenticated layer (a manifest is a self-signed digest, not a signature); pass --cache-ro-unsigned to serve it anyway"
+  let detail := if detail.isEmpty then why.text else detail
+  IO.eprintln s!"cache verify: --cache-ro {dir}: refusing [{why.code}] {detail}"
+
+/-- Warn once when a write is refused because the layer carries a signature: a signed
+layer is a published snapshot, not a working cache. -/
+def ManifestStore.warnSignedWrite (m : ManifestStore) (dir : System.FilePath) : IO Unit := do
+  let key := s!"write {dir}"
+  if (← m.warnedRo.get).contains key then return
+  m.warnedRo.modify (·.insert key)
+  IO.eprintln s!"cache verify: {dir}: refusing [{Refusal.signedWrite.code}] {Refusal.signedWrite.text}"
 
 /-- Warn once per read-only layer that has no manifest for a module: its entries are not
 used (they would be unverified). -/
@@ -1433,54 +1871,91 @@ def ManifestStore.hasModule (m : ManifestStore) (dir : System.FilePath) (key : K
 
 /-- Load (once) every layer's manifest for module key `key` and index its entries. A layer
 whose manifest exists but does not validate poisons the keys it names; it is never
-silently treated as authoritative. A read-only layer is skipped unless
-`--cache-ro-unsigned` was given: its manifest is a self-signed digest, so it cannot
-authenticate the writer (a signer policy is the missing piece, P3). -/
+silently treated as authoritative. A read-only layer is admitted only by
+`ManifestStore.trustOf`: `signed` layers must be recorded in the verified index and
+`unsigned` ones are the explicit `--cache-ro-unsigned` opt-in. -/
 def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
   let id := Key.id key
   if (← m.loaded.get).contains id then return
   m.loaded.modify (·.insert id)
   let now ← unixNow
   for dir in m.dirs do
-    if m.isRead dir && !m.roUnsigned then
+    let trust ← m.trustOf dir
+    unless trust.accepted do
       -- (warn only when this module was elaborated in the layer: an empty layer, or one
       -- that simply lacks the module, is not something to refuse loudly)
-      if ← m.hasModule dir key then m.warnRefusedRo dir
-  for dir in m.dirs.filter fun dir => !m.isRead dir || m.roUnsigned do
+      if m.isRead dir then
+        if ← m.hasModule dir key then
+          m.warnRefusedRo dir (trust.refusal.getD .foreign) trust.detail
+      continue
     let f := manifestFile dir m.binary key
     if ← f.pathExists then
       m.present.modify (·.insert id)
-      let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile f)).getD "") catch _ => pure ""
-      match parseManifest text with
-      | some man =>
-        -- (a manifest, or its layer's generation index, may carry an expiry)
-        let layerUntil ← m.expiryOf dir
-        let expired := (man.validUntil != 0 && now > man.validUntil) ||
-          (layerUntil != 0 && now > layerUntil)
-        if !expired && man.valid key m.binary m.toolchain m.rig then
-          m.valid.modify (·.insert id)
-          m.bump fun c => { c with manifests := c.manifests + 1 }
-          for e in man.entries do
-            let eid := Key.id { fast := e.key, strong := e.keySha }
-            m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
-          if let some e := man.region then
-            m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
-        else
-          -- (expired or not self-consistent: the entries it names are all misses, both
-          -- under its strong keys and under the fast-only compatibility key)
-          if expired then
-            IO.eprintln s!"cache verify: {dir}: manifest for module {man.module} expired (valid-until {man.validUntil})"
-          for e in man.allEntries do
-            let eid := Key.id { fast := e.key, strong := e.keySha }
-            m.poisoned.modify (·.insert eid)
-            m.poisoned.modify (·.insert (Key.id (Key.ofFast e.key)))
-      | none =>
-        -- (unparsable: its keys are unknown; treat it as absent, as the old cache did)
-        pure ()
+      let bytes ← try pure (← IO.FS.readBinFile f) catch _ => pure ByteArray.empty
+      let signed := match trust.domain with
+        | .signed _ _ => true
+        | _ => false
+      let fileName := f.fileName.getD ""
+      let admitted ←
+        if signed then
+          match trust.index[fileName]? with
+          | none =>
+            m.warnRefusedRo dir .manifestUnlisted
+              s!"manifest {fileName} is not listed in the layer's signed generation index"
+            pure false
+          | some sha =>
+            if Smt.Sha256.hexBytes bytes == sha then
+              pure true
+            else
+              -- (the signed index records this file with another digest: the layer was
+              -- rewritten after signing. Poison the module key and stop: a later layer's
+              -- manifest must not silently mask the tampering; elaboration answers.)
+              m.warnRefusedRo dir .manifestDigest
+                s!"manifest {fileName} does not match its record in the signed generation index"
+              m.bump fun c => { c with mismatches := c.mismatches + 1 }
+              m.poisoned.modify (·.insert id)
+              m.poisoned.modify (·.insert (Key.id (Key.ofFast key.fast)))
+              return
+        else pure true
+      if admitted then
+        let text := (String.fromUTF8? bytes).getD ""
+        match parseManifest text with
+        | some man =>
+          -- (a manifest, or its layer's generation index, may carry an expiry; for a
+          -- signed layer the expiry is the one in the index that was verified, not a
+          -- second read of the path)
+          let layerUntil ← match trust.domain with
+            | .signed _ _ => pure trust.validUntil
+            | _ => m.expiryOf dir
+          let expired := (man.validUntil != 0 && now > man.validUntil) ||
+            (layerUntil != 0 && now > layerUntil)
+          if !expired && man.valid key m.binary m.toolchain m.rig then
+            m.valid.modify (·.insert id)
+            m.bump fun c => { c with manifests := c.manifests + 1 }
+            for e in man.entries do
+              let eid := Key.id { fast := e.key, strong := e.keySha }
+              m.entries.modify fun mp => mp.insert eid (((mp[eid]?).getD #[]).push (e, dir))
+            if let some e := man.region then
+              m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
+          else
+            -- (expired or not self-consistent: the entries it names are all misses, both
+            -- under its strong keys and under the fast-only compatibility key)
+            if expired then
+              IO.eprintln s!"cache verify: {dir}: manifest for module {man.module} expired (valid-until {man.validUntil})"
+            for e in man.allEntries do
+              let eid := Key.id { fast := e.key, strong := e.keySha }
+              m.poisoned.modify (·.insert eid)
+              m.poisoned.modify (·.insert (Key.id (Key.ofFast e.key)))
+        | none =>
+          -- (unparsable: its keys are unknown; treat it as absent, as the old cache did)
+          pure ()
     else if m.isRead dir then
       -- (warn only if this module was elaborated here; an empty layer or one that
-      -- simply lacks the module is not a downgrade)
-      if ← m.hasModule dir key then m.warnMissingRo dir
+      -- simply lacks the module is not a downgrade. A signed layer with a missing
+      -- manifest is an ordinary miss: the index simply has nothing for it.)
+      match trust.domain with
+      | .unsigned _ => if ← m.hasModule dir key then m.warnMissingRo dir
+      | _ => pure ()
 
 /-- The entries a manifest lists for command key `k` (none: unlisted). The strong half is
 part of the index, so a 64-bit collision finds no entry for the other input. -/
@@ -1507,6 +1982,11 @@ def ManifestStore.writeManifest (m : ManifestStore) (key : Key) (module : Name)
     (entries : Array ManifestEntry) (region : Option ManifestEntry) (merge : Bool := false)
     (validUntil : Nat := 0) : IO Unit := do
   let some dir := m.write | return
+  -- (a signed layer is a published snapshot: rewriting one of its manifests would break
+  -- the index's digest and is never what a run should do)
+  if ← (signatureFile dir).pathExists then
+    m.warnSignedWrite dir
+    return
   IO.FS.createDirAll (dir / manifestDirName)
   let f := manifestFile dir m.binary key
   let id := Key.id key
@@ -1575,6 +2055,17 @@ structure LayerVerify where
   unmanifested : Nat := 0
   /-- manifests past their (or their layer's) `valid-until` -/
   expired : Nat := 0
+  /-- manifests not recorded in the layer's signed generation index -/
+  unlisted : Nat := 0
+  /-- the index/signature status: `valid`, `missing`, `invalid`, `unverified`, `expired` -/
+  signature : String := "none"
+  /-- the principal (and fingerprint) that verified, for a signed layer -/
+  signatureKey : String := ""
+  signatureDetail : String := ""
+  /-- the layer's admitted trust domain (`local`, `signed:…`, `unsigned:…`) -/
+  domain : String := ""
+  /-- the index/signature check failed (a tampered index, bad signer, rollback, expiry) -/
+  signatureBad : Bool := false
   deriving Inhabited, Repr
 
 partial def allFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
@@ -1585,43 +2076,75 @@ partial def allFiles (dir : System.FilePath) : IO (Array System.FilePath) := do
   pure out
 
 /-- Check every manifest in `dir` against the bytes beside it, and count keyed files that
-no manifest lists. The layer is read only. -/
-def verifyLayer (dir : System.FilePath) : IO LayerVerify := do
+no manifest lists. The layer is read only. For a signed layer, every manifest must also
+be recorded in the verified index with a matching digest; a signature that does not
+verify makes every manifest in that layer a mismatch (its claim is not admitted). -/
+def verifyLayer (dir : System.FilePath) (policy : SignaturePolicy := {}) : IO LayerVerify := do
   let mut c : LayerVerify := {}
   let mut named : Std.HashSet String := {}
   let now ← unixNow
-  let layerUntil ← match ← readGeneration dir with
-    | some g => pure g.validUntil
-    | none => pure 0
+  let hasSig ← (signatureFile dir).pathExists
+  let sig ← checkLayerSignature dir policy
+  let sigKey :=
+    if sig.keyId.isEmpty then sig.fingerprint
+    else if sig.fingerprint.isEmpty then sig.keyId
+    else s!"{sig.keyId} {sig.fingerprint}"
+  c := { c with signature := sig.status, signatureKey := sigKey,
+        signatureDetail := sig.detail,
+        domain := (if sig.accepted then sig.domain.render
+                   else if !hasSig then "unauthenticated"
+                   else s!"refused:{sig.code.code}"),
+        signatureBad := sig.status == "invalid" || sig.status == "expired" }
+  let signed := hasSig
+  let verified := hasSig && sig.accepted
+  let mut indexMap : Std.HashMap String String := {}
+  for (f, sha) in sig.index do indexMap := indexMap.insert f sha
+  let layerUntil ← if hasSig then pure sig.validUntil else
+    match ← readGeneration dir with
+      | some g => pure (if g.valid then g.validUntil else 0)
+      | none => pure 0
   let layerExpired := layerUntil != 0 && now > layerUntil
   let mdir := dir / manifestDirName
   let files ← if ← mdir.pathExists then mdir.readDir else pure #[]
   for e in files do
     if !e.fileName.endsWith ".wizmf" then continue
     let text ← try pure ((String.fromUTF8? (← IO.FS.readBinFile e.path)).getD "") catch _ => pure ""
-    match parseManifest text with
-    | some man =>
-      let expired := layerExpired || (man.validUntil != 0 && now > man.validUntil)
-      if expired then
-        c := { c with expired := c.expired + 1 }
-        for ent in man.allEntries do named := named.insert ent.file
-      else if man.valid { fast := man.key, strong := man.keySha,
-                           toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
-        c := { c with modules := c.modules + 1 }
-        for ent in man.allEntries do
-          named := named.insert ent.file
-          if ent.kind == "wizr" then c := { c with regions := c.regions + 1 }
-          else c := { c with entries := c.entries + 1 }
-          let f := dir / ent.file
-          if ← f.pathExists then
-            let bytes ← try pure (← IO.FS.readBinFile f) catch _ => pure ByteArray.empty
-            unless bytes.size == ent.size && Smt.Sha256.hexBytes bytes == ent.sha256 do
-              c := { c with mismatches := c.mismatches + 1 }
-          else
-            c := { c with missing := c.missing + 1 }
-      else
-        c := { c with mismatches := c.mismatches + 1 }
-    | none => c := { c with mismatches := c.mismatches + 1 }
+    let indexCode : Option Refusal ←
+      if signed then
+        if !verified then pure (some .indexInvalid)
+        else match indexMap[e.fileName]? with
+          | none => pure (some .manifestUnlisted)
+          | some sha =>
+            if Smt.Sha256.hexBytes text.toUTF8 != sha then pure (some .manifestDigest)
+            else pure none
+      else pure none
+    match indexCode with
+    | some .manifestUnlisted => c := { c with unlisted := c.unlisted + 1 }
+    | some _ => c := { c with mismatches := c.mismatches + 1 }
+    | none =>
+      match parseManifest text with
+      | some man =>
+        let expired := layerExpired || (man.validUntil != 0 && now > man.validUntil)
+        if expired then
+          c := { c with expired := c.expired + 1 }
+          for ent in man.allEntries do named := named.insert ent.file
+        else if man.valid { fast := man.key, strong := man.keySha,
+                             toolchain := man.toolchainTag, target := man.targetTag } man.binary "" "" then
+          c := { c with modules := c.modules + 1 }
+          for ent in man.allEntries do
+            named := named.insert ent.file
+            if ent.kind == "wizr" then c := { c with regions := c.regions + 1 }
+            else c := { c with entries := c.entries + 1 }
+            let f := dir / ent.file
+            if ← f.pathExists then
+              let bytes ← try pure (← IO.FS.readBinFile f) catch _ => pure ByteArray.empty
+              unless bytes.size == ent.size && Smt.Sha256.hexBytes bytes == ent.sha256 do
+                c := { c with mismatches := c.mismatches + 1 }
+            else
+              c := { c with missing := c.missing + 1 }
+        else
+          c := { c with mismatches := c.mismatches + 1 }
+      | none => c := { c with mismatches := c.mismatches + 1 }
   for f in ← allFiles dir do
     let name := f.fileName.getD ""
     if (name.endsWith ".wizc" || name.endsWith ".wizr") && !named.contains name then
@@ -1630,8 +2153,11 @@ def verifyLayer (dir : System.FilePath) : IO LayerVerify := do
 
 /-- `wiz cache manifest [DIR]`: rebuild a layer's `manifest.sexpr` from its per-module
 manifests, and report the counts. With `write = false` it only reports (a read-only layer
-is never written). -/
-def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : IO (Nat × Nat) := do
+is never written); a signed layer is never rewritten (the third result is `false`). The
+new index chains the previous one (`generation + 1`, `prev = old root`) when that index is
+self-consistent. -/
+def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) :
+    IO (Nat × Nat × Bool) := do
   let mut mods : Array (UInt64 × String × String × String × String) := #[]
   let mut entries := 0
   let mdir := dir / manifestDirName
@@ -1648,14 +2174,21 @@ def sealLayer (dir : System.FilePath) (write : Bool) (validUntil : Nat := 0) : I
           Smt.Sha256.hexBytes text.toUTF8)
     | none => pure ()
   if write then
-    let old ← readGeneration dir
-    let mergedMods := (old.map (·.modules) |>.getD #[]).foldl (fun acc x =>
-      (acc.filter (fun y => y.1 != x.1 || y.2.1 != x.2.1)).push x) mods
-    let g0 := Generation.mk (max 1 mergedMods.size) ""
-      (if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil) mergedMods ""
-    let g := { g0 with root := g0.rootOf }
-    writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
-  pure (mods.size, entries)
+    if ← (signatureFile dir).pathExists then
+      IO.eprintln s!"cache manifest: {dir}: refusing [{Refusal.signedWrite.code}] {Refusal.signedWrite.text}"
+      pure (mods.size, entries, false)
+    else do
+      let old := (← readGeneration dir).filter Generation.valid
+      let mergedMods := (old.map (·.modules) |>.getD #[]).foldl (fun acc x =>
+        (acc.filter (fun y => y.1 != x.1 || y.2.1 != x.2.1)).push x) mods
+      let generation := old.map (fun g => g.generation + 1) |>.getD 1
+      let prev := old.map (·.root) |>.getD ""
+      let until := if validUntil == 0 then (old.map (·.validUntil) |>.getD 0) else validUntil
+      let g0 := Generation.mk generation prev until mergedMods ""
+      let g := { g0 with root := g0.rootOf }
+      writeAtomic (generationFile dir) (g.toSx.render ++ "\n")
+      pure (mods.size, entries, true)
+  else pure (mods.size, entries, false)
 
 /-- The toolchain tag: SHA-256 of the executable, memoised in the write cache's `bin/` by
 the same stamp `binaryId` uses. Without a write cache it is recomputed (as `binaryId` is);
@@ -1666,14 +2199,19 @@ def toolchainTag (dir : Option System.FilePath) : IO String := do
     let md ← exe.metadata
     let stamp := s!"{exe} {md.byteSize} {md.modified.sec} {md.modified.nsec}"
     let file := dir.map (· / "bin" / s!"{hash stamp}.tag")
+    let sealed ← match dir with
+      | some d => signedLayer d
+      | none => pure false
     if let some f := file then
-      if ← f.pathExists then
-        let s ← IO.FS.readFile f
-        if s.startsWith (stamp ++ "\n") then return (s.drop (stamp.length + 1)).toString
+      if !sealed then
+        if ← f.pathExists then
+          let s ← IO.FS.readFile f
+          if s.startsWith (stamp ++ "\n") then return (s.drop (stamp.length + 1)).toString
     let tag := "sha256:" ++ Smt.Sha256.hexBytes (← IO.FS.readBinFile exe)
     if let some f := file then
-      IO.FS.createDirAll (f.parent.getD ".")
-      writeAtomic f s!"{stamp}\n{tag}"
+      if !sealed then
+        IO.FS.createDirAll (f.parent.getD ".")
+        writeAtomic f s!"{stamp}\n{tag}"
     pure tag
   catch _ => do
     pure s!"binary:{← binaryId dir}"
@@ -1840,22 +2378,26 @@ def writeRegionFile (file : System.FilePath) (a : ModuleArtifact R) : IO (Option
     throw e
 
 /-- Module `key`'s artifact, if it exists and its tags match; a bad file is dropped (a pure
-cache: the next run rewrites it). -/
+cache: the next run rewrites it). A signed layer is never repaired. -/
 def readModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : Key) :
     IO (Option (ModuleArtifact R)) := do
   let file := dir / regionFileName binary key
+  let sealed ← signedLayer dir
   match ← readRegionFile (R := R) file with
   | some a => if a.fits binary key rig then pure (some a) else
-      removeRegionFiles file
+      unless sealed do removeRegionFiles file
       pure none
   | none =>
-      if ← file.pathExists then removeRegionFiles file
+      if !sealed then
+        if ← file.pathExists then removeRegionFiles file
       pure none
 
-/-- Write module `key`'s artifact (the tags are filled in here). -/
+/-- Write module `key`'s artifact (the tags are filled in here). A signed layer is
+read-only. -/
 def writeModuleRegion (dir : System.FilePath) (binary : UInt64) (rig : String) (key : Key)
     (module : Name) (effects : Array (Effect R)) (keys : Array UInt64) (complete := false)
-    (rerun : Array (Nat × Nat) := #[]) : IO (Option ManifestEntry) :=
+    (rerun : Array (Nat × Nat) := #[]) : IO (Option ManifestEntry) := do
+  if ← signedLayer dir then return none
   writeRegionFile (dir / regionFileName binary key)
     { magic := regionMagic, format := regionFormat, binary, textSalt := salt, rig, module,
       key := key.fast, keySha := key.strong, toolchainSha := key.toolchain, targetSha := key.target,
@@ -1903,6 +2445,18 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
     if k.strong.isEmpty then entryName k else s!"{entryName k}-{k.strong}"
   let dirs := write.toList ++ reads
   let seenInMemory ← IO.mkRef ({} : Std.HashSet String)
+  -- (a signed layer is a published snapshot: if one is passed as `--cache`, it is still
+  -- never written. The read path judges its signature only as a `--cache-ro` layer; the
+  -- guard here keeps `--cache-ro-unsigned` from turning a signed layer into a working
+  -- cache by accident, and makes `--cache DIR` safe on a published layer.)
+  let warnedSealed ← IO.mkRef false
+  let refuseWrite (dir : System.FilePath) : IO Bool := do
+    if ← (signatureFile dir).pathExists then
+      unless ← warnedSealed.get do
+        warnedSealed.set true
+        IO.eprintln s!"cache: {dir}: refusing [{Refusal.signedWrite.code}] {Refusal.signedWrite.text}"
+      pure true
+    else pure false
   let getEntry : Key → IO (Option (CacheHit R)) := fun k => do
     match manifests with
     | none =>
@@ -1936,7 +2490,9 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
     getEntry
     get := fun k => return (← getEntry k).map (·.1)
     put := fun k e => match write with
-      | some dir => writeAtomic (dir / s!"{entryName k}.wizc") e.toSx.render
+      | some dir => do
+        if ← refuseWrite dir then pure ()
+        else writeAtomic (dir / s!"{entryName k}.wizc") e.toSx.render
       | none => pure ()
     seen := fun k => do
       if (← seenInMemory.get).contains (Key.id k) then return true
@@ -1944,7 +2500,9 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
         if ← (dir / s!"{markerName k}.wizm").pathExists then return true
       pure false
     markSeen := fun k m => match write with
-      | some dir => writeAtomic (dir / s!"{markerName k}.wizm") m
+      | some dir => do
+        if ← refuseWrite dir then seenInMemory.modify (·.insert (Key.id k))
+        else writeAtomic (dir / s!"{markerName k}.wizm") m
       | none => seenInMemory.modify (·.insert (Key.id k))
     manifests
     binary }
@@ -1952,10 +2510,11 @@ def Store.layeredCore (write : Option System.FilePath) (reads : List System.File
 /-- A layered store with the verification policy `verify` (default off: the old store). -/
 def Store.layered (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false)
+    (policy : SignaturePolicy := {}) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
     pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
-      roUnsigned))
+      roUnsigned policy))
   Store.layeredCore write reads binary manifests
 
 /-- The store in directory `dir`, for the binary `binary` (`binaryId`): a layered store
@@ -2018,14 +2577,16 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
     else match ← ms.regionFor k with
       | some list =>
         for (ent, dir) in list do
+          let sealed ← signedLayer dir
           match ← readRegionFile (R := R) (dir / ent.file)
               (expected := some (ent.size, ent.sha256)) with
           | some a =>
             if a.fits binary k opts.rig then
               ms.bump fun c => { c with regions := c.regions + 1 }
               return some a
-            else if inWrite dir then removeRegionFiles (dir / ent.file)
-          | none => if inWrite dir then removeRegionFiles (dir / ent.file)
+            else if inWrite dir && !sealed then removeRegionFiles (dir / ent.file)
+          | none =>
+            if inWrite dir && !sealed then removeRegionFiles (dir / ent.file)
         ms.bump fun c => { c with mismatches := c.mismatches + 1 }
         pure none
       | none =>
@@ -2038,18 +2599,23 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
     get := fun k => read k
     put := fun a => match write, manifests with
       | some dir, some ms => do
-        -- (a pure cache: a region that cannot be written, say because `Effect` grew a
-        -- closure, must not fail the run; the `.wizc` entries remain the authority)
-        try
-          let key : Key := { fast := a.key, strong := a.keySha, toolchain := a.toolchainSha,
-                             target := a.targetSha, binary := a.binarySha }
-          let e ← writeRegionFile (dir / regionFileName binary key)
-            { a with binary := binary, textSalt := salt, rig := opts.rig }
-          for ent in e.toList do
-            let id := Key.id key
-            ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
-          pure e
-        catch _ => pure none
+        -- (a signed layer is read-only, even when it was passed as `--cache`)
+        if ← (signatureFile dir).pathExists then
+          ms.warnSignedWrite dir
+          pure none
+        else
+          -- (a pure cache: a region that cannot be written, say because `Effect` grew a
+          -- closure, must not fail the run; the `.wizc` entries remain the authority)
+          try
+            let key : Key := { fast := a.key, strong := a.keySha, toolchain := a.toolchainSha,
+                               target := a.targetSha, binary := a.binarySha }
+            let e ← writeRegionFile (dir / regionFileName binary key)
+              { a with binary := binary, textSalt := salt, rig := opts.rig }
+            for ent in e.toList do
+              let id := Key.id key
+              ms.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (ent, dir))
+            pure e
+          catch _ => pure none
       | _, _ => pure none
     stats := opts.stats
     manifests }
@@ -2058,10 +2624,11 @@ def RegionStore.layered (write : Option System.FilePath) (reads : List System.Fi
 regions are searched in the same layer order, with one shared manifest index. -/
 def Store.layeredRegion (write : Option System.FilePath) (reads : List System.FilePath)
     (binary : UInt64) (opts : RegionOptions) (verify : VerifyMode := .off) (rig : String := "")
-    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false) : IO (Store R) := do
+    (stats : Option (IO.Ref VerifyCounts) := none) (roUnsigned : Bool := false)
+    (policy : SignaturePolicy := {}) : IO (Store R) := do
   let manifests ← if verify == .off then pure none else
     pure (some (← ManifestStore.create write reads binary (← toolchainTag write) rig verify stats
-      roUnsigned))
+      roUnsigned policy))
   let store ← Store.layeredCore write reads binary manifests
   let region ← RegionStore.layered write reads binary opts manifests
   pure { store with region := some region }
@@ -2117,6 +2684,8 @@ part of the cache — is left alone, and symlinks are not followed. Call it on t
 read-only layer is never pruned. -/
 partial def pruneCache (dir : System.FilePath) (days : Nat) (dryRun : Bool := false)
     (now : Option Int := none) : IO PruneCounts := do
+  -- (a signed layer is a published snapshot; nothing in it may be removed)
+  if ← (signatureFile dir).pathExists then return {}
   let now ← match now with
     | some t => pure t
     | none => pure (← Std.Time.Timestamp.now).val.toSeconds.toInt
@@ -2155,7 +2724,9 @@ def PruneCounts.render (c : PruneCounts) (days : Nat) (dryRun : Bool)
 /-- Prune `dir` and render the summary (`--cache-prune DAYS`, `wiz cache prune`). -/
 def pruneSummary (dir : System.FilePath) (days : Nat) (dryRun : Bool := false)
     (now : Option Int := none) : IO String := do
-  pure ((← pruneCache dir days dryRun now).render days dryRun dir)
+  if ← (signatureFile dir).pathExists then
+    pure s!"cache prune: {dir} is a signed cache layer (read-only); nothing removed"
+  else pure ((← pruneCache dir days dryRun now).render days dryRun dir)
 
 /-- Module `key`'s artifact, if the region cache is on and the file matches. -/
 def Store.getRegion (s : Store R) (k : Key) : IO (Option (ModuleArtifact R)) :=
@@ -2493,22 +3064,24 @@ are written to the write cache and checked on load (`rig` is the rig's tag).
 `Toolchain.targetTag`); `rootTag` is a strong version of `key₀` (the root file's headers),
 so a root manifest is bound to its actual inputs too. `rootPath` is the root file's path,
 used only for the manifest pointer an edit follows to keep its unchanged prefix warm.
-`roUnsigned` (`--cache-ro-unsigned`) serves a read-only layer although its manifests are
-not authenticated; it is off by default. -/
+`roUnsigned` (`--cache-ro-unsigned`) serves a read-only layer that carries no signature,
+as unauthenticated data; it is off by default and never downgrades a signed layer.
+`policy` is the signed-index allowlist (`--cache-signers`) and rollback pin; a read-only
+layer with a signature is admitted only when its index verifies under it. -/
 def elaborateCached (write : Option System.FilePath) (reads : List System.FilePath)
     (input : String) (init : CommandState R) (key₀ : UInt64)
     (toolchain : UInt64 := 0) (binary : Option UInt64 := none)
     (region : Option RegionOptions := none) (verify : VerifyMode := .off) (rig : String := "")
     (stats : Option (IO.Ref VerifyCounts) := none)
     (strongToolchain : String := "") (targetTag : String := "") (rootTag : String := "")
-    (rootPath : String := "") (roUnsigned : Bool := false) :
+    (rootPath : String := "") (roUnsigned : Bool := false) (policy : SignaturePolicy := {}) :
     IO (CommandState R × Nat) := do
   let binary ← match binary with | some b => pure b | none => binaryId write
   let binaryTag ← if region.isSome || verify != .off then toolchainTag write else pure ""
   -- (13b) `--trace-guess-fallback` reports from the elaborator: nothing may come from a cache
   let store ← if ← traceGuessesRef.get then Store.memory else match region with
-    | some opts => Store.layeredRegion write reads binary opts verify rig stats roUnsigned
-    | none => Store.layered write reads binary verify rig stats roUnsigned
+    | some opts => Store.layeredRegion write reads binary opts verify rig stats roUnsigned policy
+    | none => Store.layered write reads binary verify rig stats roUnsigned policy
   -- (the layer's `manifest.sexpr` is not refreshed here: rebuilding it reads and
   -- re-validates every manifest in the layer, which is O(cache) per run — about a minute
   -- on a shared cache of thousands of manifests. Nothing a run does reads its module

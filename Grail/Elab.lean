@@ -107,11 +107,14 @@ def elaborate (tc : Toolchain) (salt : UInt64) (l : Loaded) : IO (CommandState Z
                 stats := if tc.regionStats then some regionStats else none } :
           Cache.RegionOptions)
       else none
+    let policy : Cache.SignaturePolicy :=
+      { signers := tc.cacheSigners, keyId := tc.cacheKeyId,
+        minGeneration := tc.cacheMinGeneration }
     pure (← Cache.elaborateCached write reads l.src l.init l.key salt (region := region)
       (verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn)
       (rig := RigTag.tag (R := ZeroOneMany))
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := l.keyStrong)
-      (roUnsigned := tc.cacheRoUnsigned)).1
+      (roUnsigned := tc.cacheRoUnsigned) (policy := policy)).1
 
 /-- `--region-stats`: one line for this process (a grail job). Without `--region-cache`
 there is no region store and the counters are zero, so a job says so instead of staying

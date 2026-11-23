@@ -99,12 +99,13 @@ counts and prints (`cache prune: would remove 12 files (… .wizc, … .wizm, �
 be at least 1, and a read-only layer cannot be pruned even if it is passed with `--cache-ro`
 (the command says so).
 
-**Output manifests (`--cache-verify`, integrity only).** A cache key is an *input* hash;
+**Output manifests (`--cache-verify`, integrity; an optional signed index).** A cache key is an *input* hash;
 until this stage the bytes an entry returns (its *output*) were trusted because they were
 in the cache. `wiz` now writes a manifest with a SHA-256 of each entry's bytes and checks
 it before applying the effect: a truncated, rewritten or swapped entry is a **miss** (the
-text entry, the next layer, or re-elaboration answers), never a wrong result. There is no
-signature yet — see P3 below.
+text entry, the next layer, or re-elaboration answers), never a wrong result. A
+generation index can also carry a detached signature (P3 below): a signed `--cache-ro`
+layer is admitted only through it.
 
 The layout is one manifest per module (the note's P2) plus a per-layer generation index
 (P1):
@@ -112,6 +113,7 @@ The layout is one manifest per module (the note's P2) plus a per-layer generatio
 ```
 <cache>/manifest.d/<binary ⊕ fast key>-<sha256 key>.wizmf   -- one module, or one root file
 <cache>/manifest.sexpr                                      -- generation index for the layer
+<cache>/manifest.sexpr.sig                                  -- detached SSHSIG over those bytes
 <cache>/roots/<hash path>.rootp                             -- a root file's last manifest
 <cache>/<binary ⊕ fast key>-<sha256 key>.wizr               -- one module's region
 ```
@@ -147,8 +149,10 @@ key, SHA-256 key, name, file, digest), with its own root. A write-cache index is
 read-only layer, sealed by the package) — not by an ordinary run: rebuilding it means
 reading and re-validating every manifest in the layer, which is O(cache) (about a minute
 on a shared cache of thousands of manifests), and nothing a run does reads its module
-list (only its expiry, which a run never changes). Its generation is the module count and
-its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
+list (only its expiry, which a run never changes). `wiz cache manifest` writes
+`generation := old.generation + 1` and `prev := old.root` when the old index is
+self-consistent; a consumer can pin a minimum generation (`--cache-min-generation`). The
+`prev` chain is written but not followed by a reader: the pin is the rollback control. A
 manifest that is extended keeps the base it started from rather than chaining to an
 intermediate partial write. Only the write cache is ever written; a
 `--cache-ro` layer is read and byte-identical after a run. A region is **never** served
@@ -168,37 +172,52 @@ The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works
 * `strict` (alias `require`) — as `warn`, and an unlisted key is counted as a mismatch
   too. It is a statement about **manifest presence**, not authenticity: a writer who can
   replace the entry can recompute the manifest and its root.
-* A **read-only layer** (`--cache-ro`) is in someone else's trust domain. Its manifests
-  are self-signed, so they authenticate nothing: by default the layer is **refused** (no
-  entry or region is served from it, and `wiz` warns once per layer that has content for
-  a module, naming the flag).
-  `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data, and
-  `--cache-verify off` is the older blanket form of it. When an opted-in layer has bytes
-  for a module but no manifest, `wiz` warns once per layer (an empty layer is silent).
+* A **read-only layer** (`--cache-ro`) is in someone else's trust domain. It is admitted
+  only through a **signed generation index**: `manifest.sexpr.sig` (SSHSIG over the exact
+  index bytes, namespace `wiz-cache-index`) must verify under the OpenSSH
+  `allowed_signers` file given by `--cache-signers` (optionally pinned to a principal with
+  `--cache-key-id` and a generation floor with `--cache-min-generation`). The allowlist
+  must live outside the layer. Every module manifest the run loads must also be recorded
+  in that verified index with a matching SHA-256; an unlisted manifest is ignored and a
+  listed one whose bytes differ is refused (and poisons its module key). A layer that
+  ships a signature is never downgraded: an invalid, orphaned, untrusted, expired or
+  rolled-back signature is refused even with `--cache-ro-unsigned`.
+  `--cache-ro-unsigned` is the explicit opt-in to serve a layer that carries **no**
+  signature, as unauthenticated data; `--cache-verify off` is the older blanket form of
+  it. When an opted-in layer has bytes for a module but no manifest, `wiz` warns once per
+  layer (an empty layer is silent).
 
 A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
 has passed, or whose entry digest does not match is a miss: it is not repaired in a
-read-only layer. `wiz cache verify [--strict]` scans every layer's manifests against the
+read-only layer. `wiz cache verify [--strict] [--signers FILE] [--key-id ID]
+[--min-generation N] [--require-signature]` scans every layer's manifests against the
 bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
-`--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
-index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
-prints the per-run counts (manifests, verified entries/regions, mismatches).
+`--strict`/`--cache-ro` — an unmanifested keyed file); it also verifies each layer's
+index signature and each manifest's index record, and a read-only layer that carries a
+signature it cannot check fails the scan (with or without `--signers`; `--signers` supplies
+the trust root). `wiz cache manifest [--valid-days N]` rebuilds the
+generation index and can set its expiry; `wiz cache sign --cache-ro DIR --key FILE
+[--key-id ID]` writes `manifest.sexpr.sig` with `ssh-keygen -Y sign` (the key is never
+copied into the layer; sign only a read-only layer, after `cache manifest`).
+`--cache-verify-stats` prints the per-run counts (manifests, verified entries/regions,
+mismatches).
 
 Compatibility: a write cache needs one cold pass to acquire manifests, and a
-`--cache-ro` layer is no longer used unless `--cache-ro-unsigned` is given (or
-`--cache-verify off`). Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep
-their names and bytes, so an unmanifested cache is byte-identical and no key or salt
-changes.
+`--cache-ro` layer is no longer used unless it has a verified signed index or
+`--cache-ro-unsigned` is given (or `--cache-verify off`). Manifests are additive files —
+`.wizc`, `.wizr` and `.wizs` keep their names and bytes, so an unmanifested cache is
+byte-identical and no key or salt changes.
 
-**Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
-a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
-and can delete it (in `warn`, for the write cache). The missing half is an external
-signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
-revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
-not read these manifests as provenance: they are integrity, not authenticity. And a
-signature would say who published the bytes, not that they are the elaboration of the
-key's source: for a foreign layer only a kernel re-check (`addDecl`) or treating its
-source tree as the authority is sound.
+**Signatures (P3), and what they do not give.** A signature over the generation index
+binds the publisher to the index; the index binds every manifest's digest, and each
+manifest binds its entry bytes. That closes a mirror or a third party rewriting a
+read-only layer: the run refuses it instead of serving a self-consistent forgery. It does
+**not** show that the effects are the elaboration of the key's source: a malicious
+publisher can sign `theorem bad : False` for any module it lists (including a stdlib
+module), and it can serve an older signed index unless a minimum generation/root is
+pinned. For a foreign layer only a kernel re-check (`addDecl`) or treating its source tree
+as the authority is sound; a signed cache is supply-chain control, not a soundness
+control. The local write cache is not signed and remains a per-user trust assumption.
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).

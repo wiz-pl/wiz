@@ -84,12 +84,23 @@ def usage : String := "usage:
                                     remove keyed cache files (.wizc/.wizm/.wizr) older than
                                     N days (default 30) from the write cache; a pruned file is
                                     just a miss, and --cache-ro layers are never touched
-  wiz cache verify [--strict]        check every cache entry against its output manifest
+  wiz cache verify [--strict] [--signers FILE] [--key-id ID]
+                   [--min-generation N] [--require-signature]
+                                    check every cache entry against its output manifest
                                     (a full scan; integrity, not authenticity); exit 1 on a
                                     mismatch or missing file, and --strict also fails on an
-                                    unmanifested keyed file
+                                    unmanifested keyed file; --signers is an OpenSSH
+                                    allowed_signers allowlist and also checks each layer's
+                                    manifest.sexpr.sig
   wiz cache manifest                 rebuild the write cache's manifest.sexpr generation
                                     index from its per-module manifests
+  wiz cache sign --cache-ro DIR --key FILE [--key-id ID]
+                                    sign each named read-only layer's manifest.sexpr with
+                                    an offline Ed25519 key (`ssh-keygen -Y sign`); the
+                                    detached signature is manifest.sexpr.sig. Run `wiz
+                                    cache manifest --cache DIR` first, then pass the
+                                    layer as `--cache-ro DIR`; a signed layer is
+                                    read-only: no run, prune or re-seal writes it.
   wiz lsp                          a language server on stdin/stdout
   wiz lsp --infoview SOCK          … and for infoviews on the Unix socket SOCK
   wiz lsp --ws [ADDR:]PORT         … and on a WebSocket (127.0.0.1 unless ADDR is given;
@@ -104,8 +115,13 @@ def usage : String := "usage:
 options: --cache DIR (the elaboration cache, default ~/.cache/wiz; shared, since it is
 content-addressed), --cache-ro DIR (repeatable: a read-only cache, searched in order
 after the write cache and never written, as in a Nix package's share/wiz/cache; its
-manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
---cache-ro-unsigned (serve a read-only layer although it is unauthenticated),
+manifests are self-signed, so the layer is refused unless it has a signed generation
+index and --cache-signers, or --cache-ro-unsigned says otherwise),
+--cache-ro-unsigned (serve a read-only layer that carries no signature, as
+unauthenticated data; a layer that does carry a signature is always judged by it),
+--cache-signers FILE (an OpenSSH allowed_signers allowlist for signed --cache-ro layers;
+the file must live outside the layer), --cache-key-id ID (require that principal),
+--cache-min-generation N (refuse a signed index below N: a rollback pin),
 --no-cache (both), -I DIR (another module root, after lib/),
 --cache-prune DAYS (before the run: from the write cache only, remove keyed
   .wizc/.wizm/.wizr files older than DAYS days; a pruned entry is just a miss, and
@@ -115,8 +131,9 @@ manifests are self-signed, so the layer is refused unless --cache-ro-unsigned),
   the regions served, with --region-cache)
 --cache-verify off|warn|strict (default warn: check an entry's bytes against its output
   manifest before using it; strict: an unlisted entry is a mismatch too. Neither is an
-  authenticity check: a manifest is a self-signed digest; a read-only layer needs
-  --cache-ro-unsigned or --cache-verify off; --cache-verify=strict works too),
+  authenticity check: a manifest is a self-signed digest; for a read-only layer the
+  authenticity check is a signed generation index (--cache-signers), or the explicit
+  --cache-ro-unsigned / --cache-verify off opt-in; --cache-verify=strict works too),
 --cache-verify-stats (print what the manifests verified)
 trust: --trust-native (27a: `def X : a = b := native_refl` is decided by running a and b;
 the kernel does not check it, `#print axioms` lists it), --native-fuel N (its step limit)
@@ -429,11 +446,14 @@ def elaborateHitsCore (tc : Toolchain) (path : String) (input : String)
           Cache.RegionOptions))
       else pure none
     let verify := (Cache.VerifyMode.ofString? tc.cacheVerify).getD .warn
+    let policy : Cache.SignaturePolicy :=
+      { signers := tc.cacheSigners, keyId := tc.cacheKeyId,
+        minGeneration := tc.cacheMinGeneration }
     pure (← Cache.elaborateCached tc.cacheDir tc.readCaches input init key₀ (region := region)
       (verify := verify) (rig := RigTag.tag (R := ZeroOneMany))
       (stats := if verify == .off then none else some verifyStats)
       (strongToolchain := tc.tag) (targetTag := tc.targetTag) (rootTag := key₀Tag)
-      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned))
+      (rootPath := path) (roUnsigned := tc.cacheRoUnsigned) (policy := policy))
   else
     pure ((← Cache.elaborateUncached input init), 0)
 
@@ -717,30 +737,97 @@ def cachePruneCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
 it (a full scan; normal runs verify only what they read). Exit 1 on a mismatch or a missing
 file, and in `strict`/`--strict` also on an unmanifested keyed file. A `--cache-ro` layer
 is always scanned as if `--strict` (a manifest, never an unverified file, is its only
-integrity claim). This is an integrity scan: a manifest is a self-signed digest, so it does
-not show that a writer and a builder are the same party. -/
+integrity claim). `--signers FILE` supplies the allowlist for each layer's
+`manifest.sexpr.sig` and, for a signed layer, checks that every manifest is recorded in
+its index; a read-only layer that carries a signature the scan cannot check fails. This
+is an integrity scan:
+a manifest is a self-signed digest, so it does not show that a writer and a builder are
+the same party. -/
 def cacheVerifyCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (strict requireSig : Bool) (policy : Cache.SignaturePolicy) :
+      List String → Except String (Bool × Bool × Cache.SignaturePolicy)
+    | [] => pure (strict, requireSig, policy)
+    | "--strict" :: rest => parse true requireSig policy rest
+    | "--require-signature" :: rest => parse strict true policy rest
+    | "--signers" :: f :: rest =>
+      parse strict requireSig { policy with signers := some (System.FilePath.mk f) } rest
+    | "--key-id" :: k :: rest => parse strict requireSig { policy with keyId := some k } rest
+    | "--min-generation" :: n :: rest => do
+      let some k := n.toNat? | throw s!"--min-generation needs a number, not {n}"
+      if k == 0 then throw "--min-generation must be at least 1"
+      parse strict requireSig { policy with minGeneration := some k } rest
+    | a :: _ => throw s!"cache verify: unknown argument {a}"
+  let (strictArg, requireSig, policy) ← match parse false false {} args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
   -- (A read-only layer is scanned as if `strict`: "has a manifest" is all it claims, and
   -- that is integrity, not authenticity. The name `strict` is about manifest presence
   -- only; it is not a signature check.)
-  let requireManifest := tc.cacheVerify == "strict" || args.contains "--strict" || !tc.readCaches.isEmpty
-  for a in args do
-    unless a == "--strict" do
-      IO.eprintln s!"cache verify: unknown argument {a}"
-      return 2
+  let requireManifest := tc.cacheVerify == "strict" || strictArg || !tc.readCaches.isEmpty
   let dirs := tc.cacheDir.toList ++ tc.readCaches
   if dirs.isEmpty then
     IO.eprintln "cache verify: no cache (--cache DIR, --cache-ro DIR)"
     return 2
   let mut bad := 0
   for dir in dirs do
-    let c ← Cache.verifyLayer dir
-    let note := if tc.readCaches.any (·.toString == dir.toString) then
+    let readOnly := tc.readCaches.any (·.toString == dir.toString)
+    let c ← Cache.verifyLayer dir policy
+    let note := if readOnly then
       " (read-only: a manifest is integrity, not authenticity)"
     else ""
+    let sigText :=
+      if c.signature == "none" then ""
+      else
+        s!", signature {c.signature}" ++
+        (if c.signatureKey.isEmpty then "" else s!" ({c.signatureKey})") ++
+        (if c.signatureDetail.isEmpty then "" else s!" — {c.signatureDetail}")
+    let domainText :=
+      if c.domain.isEmpty || c.domain == "unauthenticated" then ""
+      else s!", domain {c.domain}"
     IO.println (s!"cache verify: {dir}: {c.modules} modules, {c.entries} entries, {c.regions} regions, " ++
-      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, {c.unmanifested} unmanifested" ++ note)
-    if c.mismatches + c.missing + c.expired > 0 || (requireManifest && c.unmanifested > 0) then bad := bad + 1
+      s!"{c.mismatches} mismatched, {c.missing} missing, {c.expired} expired, " ++
+      s!"{c.unmanifested} unmanifested, {c.unlisted} unlisted" ++ sigText ++ domainText ++ note)
+    -- (a read-only layer under a signer policy must verify; a layer that carries a
+    -- signature but cannot be checked is not a valid claim, and a bad or expired index
+    -- always fails the scan, even when no policy was given)
+    let sigFailed := c.signatureBad ||
+      (c.signature != "missing" && c.signature != "valid") ||
+      (readOnly && c.signature == "missing" && (requireSig || policy.signers.isSome))
+    if c.mismatches + c.missing + c.expired > 0 || (requireManifest && c.unmanifested > 0) ||
+        sigFailed then bad := bad + 1
+  pure (if bad == 0 then 0 else 1)
+
+/-- `wiz cache sign --cache-ro DIR --key FILE [--key-id ID]`: sign each named read-only
+layer's `manifest.sexpr` with an offline Ed25519 key (`ssh-keygen -Y sign`). The key is
+used, never copied into the layer; the trust root is the `allowed_signers` file a consumer
+passes with `--cache-signers`. A signed layer is read-only. -/
+def cacheSignCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
+  let rec parse (key id : Option String) : List String → Except String (Option String × Option String)
+    | [] => pure (key, id)
+    | "--key" :: k :: rest => parse (some k) id rest
+    | "--key-id" :: k :: rest => parse key (some k) rest
+    | a :: _ => throw s!"cache sign: unknown argument {a}"
+  let (key?, id) ← match parse none none args with
+    | .ok r => pure r
+    | .error e => do IO.eprintln e; return 2
+  let key ← match key? with
+    | some k => pure k
+    | none => do IO.eprintln "cache sign: --key FILE is required"; return 2
+  -- (sign only `--cache-ro` layers: signing the implicit default write cache would
+  -- silently freeze it. A publisher passes the layer with `--cache-ro DIR`.)
+  let dirs := tc.readCaches
+  if dirs.isEmpty then
+    IO.eprintln "cache sign: no read-only layer (--cache-ro DIR); a signed layer is read-only"
+    return 2
+  let mut bad := 0
+  for dir in dirs do
+    match ← Cache.signLayer dir (System.FilePath.mk key) id with
+    | .ok r =>
+      IO.println (s!"cache sign: {dir}: generation {r.generation}, root {r.root}, " ++
+        s!"key {r.keyId} ({r.fingerprint}), signature {r.signature}")
+    | .error e => do
+      IO.eprintln s!"cache sign: {dir}: {e}"
+      bad := bad + 1
   pure (if bad == 0 then 0 else 1)
 
 /-- `wiz cache manifest`: rebuild (or, for a read-only layer, report) the generation index
@@ -765,8 +852,8 @@ def cacheManifestCmd (tc : Toolchain) (args : List String) : IO UInt32 := do
     return 2
   for dir in dirs do
     let write := some dir.toString == tc.cacheDir.map (·.toString)
-    let (mods, entries) ← Cache.sealLayer dir write validUntil
-    let what := if write then "generation written" else "read-only"
+    let (mods, entries, wrote) ← Cache.sealLayer dir write validUntil
+    let what := if !write then "read-only" else if wrote then "generation written" else "signed layer: not written"
     IO.println s!"cache manifest: {dir}: {mods} modules, {entries} entries ({what})"
   pure 0
 
@@ -1370,6 +1457,7 @@ def mainImpl (args : List String) : IO UInt32 := do
   | ["parse", path] => parseCmd path
   | "cache" :: "prune" :: rest => cachePruneCmd tc rest
   | "cache" :: "verify" :: rest => cacheVerifyCmd tc rest
+  | "cache" :: "sign" :: rest => cacheSignCmd tc rest
   | "cache" :: "manifest" :: rest => cacheManifestCmd tc rest
   | ["check", path] => checkCmd tc path
   | "lint" :: rest => lintCmd tc rest
