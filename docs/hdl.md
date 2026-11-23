@@ -11,7 +11,11 @@ what it depends on, and what a release tag means.
 
 ## Using it
 
-```wiz
+The import is shown for orientation; `Hdl.Core` is large enough that checking it here would
+cost minutes per docs run, so the fence is not executed (`hdl`'s own groups check the
+library).
+
+```wiz no-check
 import Hdl.Core
 -- import Hdl.Sim, Hdl.Temporal, Hdl.Bus, Hdl.Axi4, …
 ```
@@ -36,7 +40,7 @@ nothing in `lib/` may import `Hdl.*`.
 cd hdl
 grail build          # check the library in src/
 grail build hdl      # just the library
-grail test           # every example, its messages against examples/NAME.expected
+grail test           # every example, its messages against the expected file beside it
 ```
 
 The package is relocatable: copy `hdl/` anywhere and the same commands work with only a

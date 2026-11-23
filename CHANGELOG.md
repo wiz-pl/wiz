@@ -46,8 +46,8 @@ The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
 
 * HDL laws: the trace obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw`
   and `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
-  every one is called by `examples/hdl-stream.wiz`, `examples/hdl-spi.wiz`,
-  `examples/hdl-bus-law.wiz` and `examples/hdl-axi4.wiz`, so a law that fails fails the
+  every one is called by `hdl/examples/hdl-stream.wiz`, `hdl/examples/hdl-spi.wiz`,
+  `hdl/examples/hdl-bus-law.wiz` and `hdl/examples/hdl-axi4.wiz`, so a law that fails fails the
   `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
   false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
   predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
