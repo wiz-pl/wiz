@@ -3188,13 +3188,20 @@ def selfHostGroup : Group where
     { name := "the selfhost checker: the parser's mutual block stays under 512 MB", run := fun _ => do
         -- the selfhost sources are wrapped in the explicit-global `namespace __root__`;
         -- this snippet concatenates two of them and cuts the second, so drop the wrapper
-        -- (both lines) rather than inherit an unclosed block.
+        -- (both lines) rather than inherit an unclosed block. The closing line is a bare
+        -- `end` in the current files: drop it from a whole file (Lex) only — Parse's head
+        -- ends inside a `mutual`, whose `end` must stay.
+        let dropFinalEnd := fun (s : String) =>
+          let ls := (s.splitOn "\n").reverse.dropWhile (fun l => l == "")
+          match ls with
+          | "end" :: rest => "\n".intercalate rest.reverse
+          | _ => s
         let strip := fun (s : String) => "\n".intercalate ((s.splitOn "\n").filter fun l =>
           !l.startsWith "import" && l != "namespace __root__" && l != "end __root__")
         let lex ← IO.FS.readFile "selfhost/Lex.wiz"
         let parse ← IO.FS.readFile "selfhost/Parse.wiz"
         let parseHead := (parse.splitOn "\ndef sexpr").headD parse
-        let src := "import Prelude\n" ++ strip lex ++ "\n" ++ strip parseHead
+        let src := "import Prelude\n" ++ dropFinalEnd (strip lex) ++ "\n" ++ strip parseHead
         let some out ← selfhostOutputPeak src 512
           | pure ()
         for l in out.splitOn "\n" do
