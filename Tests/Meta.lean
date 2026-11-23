@@ -913,7 +913,7 @@ def group : Group where
         -- `DescEqSubst.descEq_subst_concrete` is the lemma applied at this instance; it is
         -- elaborated when this module is compiled, at the substituted judgment.
         IO.println "    `dret (var 0)` under `var 0 ↦ tt` derives `dret tt ≡ dret tt` at `Desc_0 Unit_1`" },
-    { name := "D3 (marking bridge): the kernel checks the marked term and the reference checker votes on the unmarked one; marking preserves the verdict (484 in-fragment terms of 537, 216 declarations)", run := fun _ => do
+    { name := "D3 (marking bridge): the kernel checks the marked term and the reference checker votes on the unmarked one; marking preserves the verdict (533 in-fragment terms of 635, 216 declarations)", run := fun _ => do
         let g := leanGlobals ()
         let terms := diffTerms 400
         let mut outside := 0
@@ -927,7 +927,7 @@ def group : Group where
         for tm in terms do
           -- `vote` (and so the differential) gives a term outside the spec's fragment no
           -- vote and does not run the kernel on it. Do the same: the no-marker kernel on
-          -- the 53 outside terms is not production behaviour, and one of them reaches
+          -- the 102 outside terms is not production behaviour, and one of them reaches
           -- `vEcase: ill-typed` (a kernel `panic!` site; recorded in the note as risk 5,
           -- not fixed here).
           match WizMeta.ofTerm [] tm.toTerm with
@@ -964,12 +964,14 @@ def group : Group where
                 verdictChanges := verdictChanges + 1
                 IO.println s!"    marking turns an error into an accept ({e}): {tm.pretty 0}"
         IO.println s!"    {terms.size} terms: {outside} outside the fragment, {inFragment} in it; {preRejected} rejected by the pre-check (not marked); {bothAccept} accepted in both modes, {verdictChanges} verdict changes, {typeChanges} type changes; the pass marks {markedTerms} terms, {markedInFragment} of their images still readable"
-        check (terms.size == 537) s!"the corpus changed size: {terms.size}"
-        check (outside == 53) s!"outside the fragment: {outside}"
-        check (inFragment == 484) s!"in the fragment: {inFragment}"
+        check (terms.size == 635) s!"the corpus changed size: {terms.size}"
+        check (outside == 102) s!"outside the fragment: {outside}"
+        check (inFragment == 533) s!"in the fragment: {inFragment}"
         check (verdictChanges == 0) s!"{verdictChanges} terms change their verdict under marking"
         check (typeChanges == 0) s!"{typeChanges} terms change their type under marking"
-        check (markedTerms > 0) "the marking pass changes no corpus term: the bridge is vacuous"
+        check (preRejected == 283) s!"pre-check rejections: {preRejected}"
+        check (bothAccept == 250) s!"accepted in both modes: {bothAccept}"
+        check (markedTerms == 29) s!"the pass marks {markedTerms} terms (expected 29): the bridge is not vacuous"
         check (markedInFragment == 0) s!"{markedInFragment} marked images are still in the spec's fragment"
         -- the negative control: a `fun` at a proposition. The kernel rejects it as written
         -- (unmarked proof), the no-marker mode accepts it, the pass marks it, the kernel
