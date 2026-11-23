@@ -78,12 +78,14 @@ job's setup before the `tests` step and the model's error). `JOB_TIMEOUT_S` in
   margins to the budget and to the 120-minute timeout, and exits 1 when a job is over.
 * `scripts/ci.py check-shards` applies the same budget check, so the `lean` job fails
   before the matrix starts rather than sending a shard that would time out.
-* The prediction is the job's case sum from `.github/test-timings.json` plus every
-  shared program the part builds, times the shard's `"wall-ratio"`. That ratio is 1 for a
-  serial shard and the measured wall/case-sum fraction for a shard with `"jobs": N`
-  (`library` 0.60, `scaling` 0.47 on the 2026-11-23 five-run refresh; `rebalance` prints
-  it and `--write` refreshes it). The estimate is deliberately conservative: the case
-  times are medians from older runs, and a cold cache or a code change can move a case.
+* The prediction is a per-part simulation from `.github/test-timings.json`
+  (`scripts/ci.py simulated_wall`): each group after the previous one, with a barrier
+  between groups; a group that opted in to `--jobs N` runs its cases through the
+  driver's in-order pool (case *i* starts when case *i-N* is collected, so slot *i % N*),
+  and the other groups are summed. Every shared program the part builds is added once,
+  unscaled. It is deliberately conservative: the case times are medians from older runs,
+  and a cold cache or a code change can move a case. `scripts/ci.py plan --json` prints
+  the model's calibration against the 8-part and 12-part library runs (within 3.5 %).
 
 When a shard is over the budget, split it (`"split": N`) or refresh the baseline from
 green runs; do not raise the job timeout. A timeout is a cancelled job whose partial log

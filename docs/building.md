@@ -1285,8 +1285,9 @@ setup action keeps the elan cache for those
   A case's time is its median over the runs, and each part's prediction is scaled by
   its shard's measured wall time over its case sum (`"jobs"` overlaps cases: on the
   2026-11-23 five-run refresh `library` ran at 0.60 of its case sum and `scaling` at
-  0.47). `--write` puts that ratio in the shard's `"wall-ratio"`, the static model
-  `plan` and `matrix` use. The split counts grow a part at a time, to the
+  0.47). That ratio is rebalance's own planner, which has the run's real job walls; it is
+  no longer written to the shard, because `plan` and `matrix` now simulate each part
+  (below). The split counts grow a part at a time, to the
   shard with the longest part, until the job budget (`--jobs`, default the current
   number of test jobs) is used or another part would not shorten the longest one; a
   long job that cannot be split does not stop it. It exits with an error if the parts
@@ -1305,14 +1306,22 @@ setup action keeps the elan cache for those
   CPU count, and the sweep's cost is per file, so the lever is fewer files per job — the
   split.) A shard of one long case (`grail-selfhost`, `hdl-verified`) and the shards that
   build a shared program (`selfhost`) keep 1. A case's `seconds` stays its own
-  process's time, so shard balance is unaffected. A shard with `"jobs"` also carries a
-  `"wall-ratio"`: the measured fraction of its case sum its job wall takes (`library`
-  0.60, `scaling` 0.47). `plan` and `matrix` multiply by it, and the shard budget is
-  checked on the result; without it a parallel shard's serial case sum would look over
-  the budget while its wall is well under it.
+  process's time, so shard balance is unaffected. A shard with `"jobs"` has no
+  `"wall-ratio"` any more: `plan` and `matrix` simulate its parts (below).
+* **The per-part wall simulation.** A shard's predicted wall is not its case sum times
+  one family ratio: that predicted the mean part, not the worst one. `scripts/ci.py`
+  simulates the part: each group runs after the previous one, with a barrier between
+  groups (`Tests/Main.lean:375-378`); a group that opted in to `--jobs N` runs its cases
+  through the driver's in-order pool (`Tests/Harness.lean`, `Group.runJobs`), where case
+  *i* starts when case *i-N* is collected, so slot *i % N*, and the group's wall is the
+  last slot; the other groups are summed. The programs the part builds (the selfhost
+  checker/compiler, `tower-wiz`) are added once, unscaled. `PARALLEL_CONTENTION` is 1.0:
+  against the 8-part library run 45191566067 and the 12-part run's `library-12`, with
+  each run's own per-case times, the model is within 3.5 % with no systematic direction
+  (the residuals are printed by `scripts/ci.py plan --json`). A shard whose baseline is
+  stale still mispredicts, as before: refresh `.github/test-timings.json`.
 * **Shard order.** `scripts/ci.py matrix` lists the shards longest first, by the same
-  predicted job wall the split uses: the estimated case times times the shard's
-  `"wall-ratio"` (a shard that selects no case goes last, by name).
+  simulated wall (a shard that selects no case goes last, by name).
   GitHub starts a matrix in the listed order and its 20-concurrent-job cap
   leaves the tail waiting: in run 44333554608 `test (prop)` started 16 minutes after the
   wave did, so the long shards must be at the front. Every shard's cases are in the
@@ -1554,7 +1563,12 @@ the generated reference manual (`result/index.md`, and `result/site`).
   starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
-  test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
+  test driver's grail runs use a fixed binary id). The selfhost programs' `/tmp` key is
+  content-based (`Tests/Elab.lean`): the selfhost sources, the embedded C runtime and the
+  C compiler flags (`Toolchain.id`), not the test binary's mtime, and an exclusive
+  `flock` on the key's directory makes concurrent cases build once. A
+  `WIZ_SELFHOST_COMPILER`/`_CHECKER` override is accepted only with a `.selfhost-id`
+  sidecar matching this tree's sources (`tests --selfhost-identity`).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
   searched in order after the written `--cache DIR`, never written; each is refused by
   default unless `--cache-ro-unsigned` follows it). The Nix package

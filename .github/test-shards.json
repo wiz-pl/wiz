@@ -69,7 +69,6 @@
     "name": "library",
     "split": 11,
     "jobs": 4,
-    "wall-ratio": 0.60,
     "allow-missing-deps": true,
     "select": [
       "=cache-invariants",
@@ -202,7 +201,6 @@
     "name": "scaling",
     "split": 1,
     "jobs": 3,
-    "wall-ratio": 0.47,
     "select": [
       "=scaling",
       "=prop",
