@@ -3,10 +3,12 @@
 // runtime goes through mount's `call`, and the runtime module's exports are the driver's
 // and the mount's business, not the page's.
 //
-// There is no second page: `?ui` is gone, `playground-static.js` does not exist, and the
-// one failure path is a text message in the mount point (web/playground_start_test.mjs
-// runs it). The behavioural half (the page's SSR, steps and patches) is
-// web/playground_page_test.mjs; the mount contract itself is
+// There is no second page: `?ui` is gone, no hand-written fallback exists, and the one
+// failure path is a text message in the mount point (web/playground_start_test.mjs runs
+// it). The page ships a **static-complete** form instead: `#app` is an island filled at
+// build time from the same Loom renderer, with `data-wiz-ssr` matching
+// `wiz_loom_ssr_hash`; JavaScript adopts it. The behavioural half (the page's SSR,
+// steps and patches) is web/playground_page_test.mjs; the mount contract itself is
 // web/framework/mount_test.mjs.
 //
 // This is a source-level check on purpose: it is the one property a page is not allowed
@@ -45,10 +47,19 @@ const exports = [...entry.matchAll(/^export (?:async )?function (\w+)/gm)].map((
 ok(exports.length === 1 && exports[0] === "startPage",
   "the entry exports exactly one function (startPage)", exports.join(","));
 ok(/startPage\(\)/.test(html), "the page's HTML mounts it with startPage()");
+ok(/getElementById\("app"\)/.test(entry), "startPage mounts the #app island");
 
-// ## One page, one runtime
-ok(!/playground-static/.test(entry) && !/playground-static/.test(html),
-  "there is no static-page fallback in the entry or the HTML");
+// ## One page, one runtime, with a static-complete first paint
+ok(!/playground-static/.test(entry) && !/playground-static\.js/.test(html),
+  "there is no hand-written fallback page");
+ok(/<div id="app" data-wiz-island=/.test(html),
+  "the mount point is an island with a data-wiz-island attribute");
+ok(/data-wiz-ssr="<!--wiz-ssr-->"|data-wiz-ssr="t1-/.test(html),
+  "the island carries the SSR hash placeholder (or the generated hash)");
+ok(/<!--wiz-static-->|<header[ >]/.test(html),
+  "the island carries the static render placeholder (or the generated tree)");
+ok(/<noscript>/.test(html) && !/<noscript>[\s\S]*id="app"/.test(html),
+  "the noscript line is outside the island (it cannot shift a child-index path)");
 ok(!/ui=loom|useLoom|params\.get\("ui"\)/.test(entry),
   "there is no ?ui switch (the runtime is the page)");
 ok(!/function wireEditor|presetSelect|localStorage/.test(entry),

@@ -57,6 +57,29 @@ need licenses/GPL-3.0.txt
 need guide/docs/index.html
 need guide/guide.css
 
+# The playground is static-complete: its island carries the Loom first paint and the
+# normalised tree hash, so a JS-off load is the page (and a JS-on load adopts it). A
+# template with an unfilled placeholder, or an error message baked into the artifact,
+# is a broken build rather than a styling problem.
+playground_page="$SITE/playground/index.html"
+if [ -f "$playground_page" ]; then
+  for want in 'id="app"' 'data-wiz-island' 'data-wiz-ssr="t1-' '<header' '<main' \
+              '<footer' 'id="editor"' 'id="preset"'; do
+    grep -qF "$want" "$playground_page" || {
+      echo "check-site: playground/index.html has no $want (not the static-complete page)" >&2
+      fail=1
+    }
+  done
+  grep -qF '<!--wiz-static-->' "$playground_page" && {
+    echo "check-site: playground/index.html still has an unfilled static placeholder" >&2
+    fail=1
+  }
+  grep -qF 'data-wiz-error' "$playground_page" && {
+    echo "check-site: playground/index.html carries a data-wiz-error (a failed mount)" >&2
+    fail=1
+  }
+fi
+
 # The source reader, when the site has one. A publishing build sets SITE_REQUIRE_SOURCE=1
 # (web/build-site.sh refused to build without a bundle then), so the page and both halves
 # of its runtime are part of the artifact; a docs-only tree may omit the directory.

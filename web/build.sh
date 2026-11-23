@@ -88,7 +88,8 @@ cp "$ROOT/web/infoview.html" "$ROOT/web/infoview.js" "$ROOT/web/playground-lsp.j
   "$ROOT/web/doc-live.js" "$ROOT/web/doc-live.css" "$OUT/"
 mkdir -p "$OUT/framework"
 cp "$ROOT/web/framework/mount.js" "$ROOT/web/framework/driver.js" \
-  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
+  "$ROOT/web/framework/runtime.js" "$ROOT/web/framework/adopt.js" \
+  "$ROOT/web/framework/editor-text.js" "$OUT/framework/"
 # 3. The standalone infoview's runtime (`web/infoview.js` mounts it, stage 5).
 sh "$ROOT/web/build-infoview-ui.sh" "$OUT"
 sh "$ROOT/web/build-docs-ui.sh" "$OUT"

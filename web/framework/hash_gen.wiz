@@ -1,0 +1,63 @@
+-- A fixture for web/framework/hash_test.mjs: the normalised SSR tree hash
+-- (`Loom.ssrHash`) over trees that differ only in HTML spelling, and over real changes.
+--
+--   wiz run -I <repo>/lib web/framework/hash_gen.wiz
+import IO
+import Json
+import Web.Loom
+
+inductive Msg where
+  | msg
+
+-- The same element, two attribute orders and two white-space spellings of the text.
+def attrA : Loom.VNode Msg :=
+  Loom.el "div" [Loom.attr "class" "x", Loom.attr "id" "y"] [Loom.text "a   b"]
+
+def attrB : Loom.VNode Msg :=
+  Loom.el "div" [Loom.attr "id" "y", Loom.attr "class" "x"] [Loom.text "a\tb"]
+
+-- A real change: the id and the text differ.
+def changed : Loom.VNode Msg :=
+  Loom.el "div" [Loom.attr "class" "x", Loom.attr "id" "z"] [Loom.text "a   c"]
+
+-- Same HTML, different element keys: the key is the identity a keyed `move` uses, so
+-- the two trees are not the same page even though `Loom.toHtml` cannot show the difference.
+def keyA : Loom.VNode Msg :=
+  Loom.keyed "a" (Loom.el "li" List.nil [Loom.text "x"])
+
+def keyB : Loom.VNode Msg :=
+  Loom.keyed "b" (Loom.el "li" List.nil [Loom.text "x"])
+
+-- The same keyed children in the two orders: child order (and a keyed reorder) matters.
+def orderAB : Loom.VNode Msg :=
+  Loom.seq [Loom.keyed "a" (Loom.el "li" List.nil [Loom.text "x"]),
+            Loom.keyed "b" (Loom.el "li" List.nil [Loom.text "y"])]
+
+def orderBA : Loom.VNode Msg :=
+  Loom.seq [Loom.keyed "b" (Loom.el "li" List.nil [Loom.text "y"]),
+            Loom.keyed "a" (Loom.el "li" List.nil [Loom.text "x"])]
+
+def hashOf (v : Loom.VNode Msg) : String := Loom.Rendered.ssrHash (Loom.render v)
+
+def nodesOf (v : Loom.VNode Msg) : Nat :=
+  Loom.nodeCount (Loom.RNode.ofList (Loom.RNode.siblings (Loom.render v).tree))
+
+def fields : List (String × Json) :=
+  [ Json.field "hashA" (Json.mkStr (hashOf attrA))
+  , Json.field "hashB" (Json.mkStr (hashOf attrB))
+  , Json.field "hashC" (Json.mkStr (hashOf changed))
+  , Json.field "hashKeyA" (Json.mkStr (hashOf keyA))
+  , Json.field "hashKeyB" (Json.mkStr (hashOf keyB))
+  , Json.field "hashOrderAB" (Json.mkStr (hashOf orderAB))
+  , Json.field "hashOrderBA" (Json.mkStr (hashOf orderBA))
+  , Json.field "htmlA" (Json.mkStr (Loom.toHtml attrA))
+  , Json.field "htmlB" (Json.mkStr (Loom.toHtml attrB))
+  , Json.field "htmlKeyA" (Json.mkStr (Loom.toHtml keyA))
+  , Json.field "htmlKeyB" (Json.mkStr (Loom.toHtml keyB))
+  , Json.field "nodesA" (Json.ofNat (nodesOf attrA))
+  , Json.field "canonicalA" (Json.mkStr
+      (Loom.canonical (Loom.RNode.siblings (Loom.render attrA).tree)))
+  ]
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj fields))

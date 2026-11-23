@@ -171,7 +171,7 @@ def run (elabMod : String → IO (St × Nat)) (mods : Array Module) (o : Options
     discard <| copyFirst o.assets f o.out
   -- the mount contract the two runtimes share (`framework/mount.js` and its imports)
   IO.FS.createDirAll (o.out / "framework")
-  for f in ["mount.js", "driver.js", "runtime.js"] do
+  for f in ["mount.js", "driver.js", "runtime.js", "adopt.js"] do
     discard <| copyFirst (o.assets.map (fun d => d / "framework")) f (o.out / "framework")
   -- (11s) the live client: only with --serve, so a plain site is unchanged
   if o.serve then

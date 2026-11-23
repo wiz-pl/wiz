@@ -169,34 +169,65 @@ P0 implements the contract in `web/framework/adopt.js` and calls it from
 `driver.start` **before** the first render and before any wire message.
 
 1. The container carries `data-wiz-island` (presence, not value), `data-wiz-props`
-   (JSON), and `data-wiz-ssr` (the server's hash of its HTML **including class
-   attributes**).
-2. The client computes its own SSR of the initial state (`wiz_loom_html`) and a hash of
-   it. A runtime may instead export `wiz_loom_ssr_hash`, a read-only entry point that
-   returns the same string; the host asks for the runtime's hash first and only hashes
-   `html` when the export is absent.
+   (JSON), and `data-wiz-ssr` (the server's hash of its **normalised render tree**; see
+   below).
+2. The client asks for the runtime's `wiz_loom_ssr_hash` (a read-only entry point,
+   optional in the ABI) and, only when that export is absent, hashes the exact
+   `wiz_loom_html` string with the legacy `hashHtml`.
 3. **Equal → adopt**: attach the delegated listeners and the state, touch no node. A
    `<textarea>` keeps its value/selection, `<details>` its open state, the page its
    scroll.
 4. **Unequal, missing or absent hash → replace** through `runtime.js` (today's `mount`),
-   with one warning naming the reason. Never a half-adopt.
+   with one warning naming the reason. A **collision** (the same digest with a different
+   length/node-count witness) is a replace too, not an adopt. Never a half-adopt.
 5. **Module/ABI failure → leave the static DOM** and write one plain-text reason into a
    `data-wiz-error` element; no retry, no second UI. The exception still propagates, so
    a page that wants its own message can catch it.
 
-The hash is **FNV-1a 32-bit over the UTF-8 bytes of the HTML string**, lower-case eight
-hex digits (`hashHtml` in `adopt.js`). The input is the renderer's HTML for the
-container's children (the same string `wiz_loom_html` returns), not the container
-wrapper; hashing the exact string includes class attributes, attribute values and text,
-so the server and the client agree only on the same render. It is an identity/build
-check, not a security hash: a collision costs one replace, never a partial adopt. The
-exact hash inputs remain the open item recorded in the design notes; until the owner
-picks, this is the working contract.
+The preferred hash is `Loom.ssrHash` in Wiz (`wiz_loom_ssr_hash`). It hashes the
+**tree**, not the HTML spelling: attributes are sorted by name, every run of ASCII white
+space in a text node collapses to one space (except inside `<pre>`, `<textarea>`,
+`<script>` and `<style>`, where white space is content), the element key is part of the
+identity (a keyed `move` matches it), and child order is significant. `raw` HTML is
+hashed verbatim because its author owns its spelling. The string is
+
+```
+t1-<fnv8>-<canonical length>-<node count>
+```
+
+where `fnv8` is FNV-1a 32-bit over the UTF-8 canonical form. The last two fields are the
+**collision witness**: a digest collision with a different tree will almost always differ
+in length or node count, and either difference is `hash-collision` → replace. A
+coincidence in all three fields is indistinguishable from the same tree by construction.
+The static page generator and the runtime call the same Wiz function, so a formatting
+change in the HTML does not force a replace. The exact `hashHtml` (FNV-1a 32-bit over the
+UTF-8 bytes of the HTML string) remains the fallback for a runtime that does not export
+the hash, and adopts only against a server that wrote that exact string (`Wire.ssrHash`).
 
 `data-wiz-props` is parsed and passed to the runtime through the transport
 (`globalThis.wizTransport.props` and the module factory's `transport`), not through a
 second init ABI. A malformed props attribute is a warning and no props; the static DOM
 still stands.
+
+### 4.1 The morph fallback for a touching batch
+
+The keyed patch list is the fast path and stays so: a batch whose HTML-carrying
+`replace` does not remove the focused element is applied op by op, unchanged. A batch
+with a `replace` whose target **is** `document.activeElement` or contains it uses the
+morph path (`applyPatches` in `runtime.js`):
+
+* children are matched by `id`/`data-key` first and by position otherwise; a keyed child
+  that moved is moved, not re-created;
+* attributes are synchronised (removed/set) and text is updated in place; a focused
+  textarea keeps its live value because its text child is only the default;
+* the focused node's identity, focus and selection survive; if a keyed match had to
+  replace the node, focus is restored by id (then path, then tag/name);
+* a `move` may name its child by `key` instead of `src`; both keep the node's identity.
+
+The morph is a patch application, not adoption: `mount` still replaces on a hash
+mismatch, and a batch never adopts a subtree after the first message. `resync` is the
+JS-on reload: the driver's `resync()` re-renders the current state and replaces the
+container, the same primitive as the first mount (`globalThis.wizResync`).
 
 There is **no general hydration diff**. The wire does not reconcile nodes, does not
 adopt a subtree after the first message, and `resync` is not adoption.
@@ -222,7 +253,7 @@ agree.
 | 10 | patch pre-validator/applier (host) | `web/framework/runtime.js#applyPatches` | every path resolves, op known, index/depth in range | class semantics | discard batch + one `resync` |
 | 11 | CSS generator (build) | `web/gen-styles.wiz` + `build-css.sh --check` | key prefix, collision gate, public names exactly the eight / `wz-` shape, no `url(`/`@import`/`style=`, contrast | page composition | build fails |
 | 12 | hover card renderer (runtime) | `Hover`/`Goals` | `safeUrl` for `definition.uri`, field caps, `Loom.text` only | prose | field dropped / no card |
-| 13 | adopt verifier (host) | `web/framework/adopt.js#decideAdopt` | SSR hash equality, island/ABI presence | content | replace, or static DOM + text reason |
+| 13 | adopt verifier (host) | `web/framework/adopt.js#decideAdopt` | normalised-tree hash equality (digest + witness), island/ABI presence | content, raw HTML spelling | replace (a collision too), or static DOM + text reason |
 
 The split that matters: **the monitor validates shape, the renderer validates markup.**
 A class token is never an envelope error; a bad span or payload class is a display
@@ -257,8 +288,9 @@ existing patch applier.
 | what is canonical for the model? | this note |
 | what is canonical for the envelope/monitor? | `web/framework/wire.js` (P0 reference; generated Wiz monitor in P1) |
 | what is canonical for adopt? | `web/framework/adopt.js` |
-| what is canonical for the patch paths? | `web/framework/runtime.js` (unchanged) |
-| what is canonical for the mount/step ABI? | `web/framework/mount.js` + `driver.js` (unchanged) |
+| what is canonical for the patch paths and the morph fallback? | `web/framework/runtime.js` |
+| what is canonical for the mount/step ABI and `resync`? | `web/framework/mount.js` + `driver.js` |
+| what is canonical for the static-complete page? | `web/playground_static_gen.wiz` + `web/build-playground.sh` (the same `Loom` renderer as the runtime) |
 | what is canonical for the renderer/SSR? | `lib/Web/Loom.wiz` |
 | what is canonical for the JS line budget? | `docs/notes/loom-thin-js.md` |
 
@@ -283,10 +315,24 @@ and the ABI; `lib/Web/Loom.wiz` keeps the renderer's guarantees.
 * The adopt/replace decision on a `minidom` container: equal hash adopts without moving
   a textarea or a `<details>`, an unequal/missing hash replaces with one warning, and a
   module failure leaves the static DOM plus a text `data-wiz-error`.
+* The normalised tree hash (`web/framework/hash_test.mjs`): attribute order and
+  white-space runs hash equally, a real attribute/text change differs, a different key
+  differs even when the HTML is the same, and a witness collision is a
+  `hash-collision` replace.
+* The morph fallback (`web/framework/morph_test.mjs`): a touching `replace` keeps a
+  keyed child's node, focus, selection and live value; a keyed `move` works; a batch that
+  does not touch the focus still takes the fast path.
+* The static-complete page (`web/static_page_test.mjs`, `web/docs_static_test.mjs`,
+  `web/static_chrome_test.mjs`): the generated playground has every pane and control
+  with scripts removed and adopts its static nodes in Chromium, and a `wiz doc` page's
+  signature and comment survive with its scripts removed.
 * The `VALIDATION` rows 3–7 and 10 agree with the table in this note.
 
-`web/framework/test.sh` runs it with the existing Node-only tests. The Wiz-side test for
-the adopt hash is `Tests/Groups/Wire.lean` (§9).
+`web/framework/test.sh` runs the Node-only tests (including `hash_test.mjs`,
+`morph_test.mjs` and the Wiz hash fixture). `web/test.sh` runs the static page tests, and
+its Chromium half runs `static_chrome_test.mjs`. The Wiz-side tests are the exact
+`Wire.ssrHash` vectors in `Tests/Groups/Wire.lean` and the normalised-tree case in
+`Tests/Groups/Loom.lean` (§9).
 
 ## 9. P1 and later
 

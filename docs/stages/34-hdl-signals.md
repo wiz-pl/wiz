@@ -169,7 +169,11 @@ kernel:
 * **Congruence.** `Signal.Eqv.map`, `Eqv.zipWith`, `Eqv.zipWith3`, `Eqv.register`,
   `Eqv.registerS`, `Eqv.mealy` and `Eqv.ofCircuit`: equivalent signals give equivalent
   results, so a proof about the model transfers under the combinators and across the
-  circuit bridge.
+  circuit bridge. The sized combinators have the same congruences —
+  `Eqv.mapS`, `Eqv.zipWithS` and `Eqv.zipWith3S` — but, unlike their `coit` counterparts,
+  these are not `rfl`: a step compares `f` applied to two observations that agree only
+  pointwise, so the proof rewrites with `mapS_at`/`zipWithS_at`/`zipWith3S_at` and
+  `Eq.congrArg` (`congrArg2`/`congrArg3` for two/three inputs).
 
 ### 34c.1: `out`'s payload at the predecessor (HDL-2.2a)
 
@@ -220,10 +224,8 @@ separate `(out a).1`/`(out a).2.1` observations re-evaluate `out a` at every ste
 made the same L3 example run for over 45 minutes before it was killed (2026-11-22).
 
 **What it does not do.** `out` on a value at a *size variable* is still an error (that
-is the kernel's rule, and a value at an unknown size cannot be observed); the `Eqv`
-congruences for `mapS`/`zipWithS`/`zipWith3S` are not yet written (they follow from the
-`_at` lemmas and `Eq.congrArg`, but each is a proof, not `rfl`); and nothing about the
-size is computed at run time — sizes stay erased bounds.
+is the kernel's rule, and a value at an unknown size cannot be observed); and nothing
+about the size is computed at run time — sizes stay erased bounds.
 
 The `hdl-signal` group pins the proved statements with `#check` (the rendered text, so a
 changed statement fails) and `#print axioms` (none for the algebraic ones; the

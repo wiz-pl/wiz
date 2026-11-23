@@ -15,14 +15,29 @@
 //
 //   data-wiz-island   the container is an island (presence is what matters)
 //   data-wiz-props    JSON for the runtime's initial props (through the transport)
-//   data-wiz-ssr      the server's `hashHtml` (eight lower-case hex digits)
+//   data-wiz-ssr      the server's normalised-tree hash (`t1-<fnv8>-<length>-<nodes>`),
+//                     or the legacy exact `hashHtml` (eight lower-case hex digits)
 //
 // ## The hash
 //
-// `hashHtml` is FNV-1a 32-bit over the UTF-8 bytes of the HTML string, including class
-// attributes (they are part of the string). It is the working choice from the note while
-// the owner's exact hash inputs are open; the same algorithm is `Wire.ssrHash` in Wiz so
-// a runtime can export `wiz_loom_ssr_hash` instead of letting the host hash `html`.
+// The preferred hash is the runtime's `wiz_loom_ssr_hash`: `Loom.ssrHash` in Wiz hashes
+// the **normalised render tree**, not its HTML spelling. Attributes are sorted by name,
+// runs of white space in a text node collapse to one space (inside `<pre>`, `<textarea>`,
+// `<script>` and `<style>` it is content and is kept), and the element key is part of the
+// identity; child order is significant. The string is
+//
+//   t1-<fnv8>-<canonical length>-<node count>
+//
+// so a digest collision with a different tree also has to collide on the length and
+// node count to be mistaken for a match (`hash-collision` below). The runtime and the
+// static page generator use the same Wiz function, so a formatting-only difference in
+// the HTML cannot force a replace.
+//
+// `hashHtml` is the legacy fallback: FNV-1a 32-bit over the exact UTF-8 bytes of the
+// HTML string, including class attributes. It is used only when the runtime exports no
+// `wiz_loom_ssr_hash`, and it adopts only against a server that wrote that exact hash
+// (`Wire.ssrHash`). Either way the whole container has one decision and there is no
+// partial adopt.
 "use strict";
 
 export const ISLAND = "data-wiz-island";
@@ -32,6 +47,17 @@ export const ERROR = "data-wiz-error";
 
 const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
+
+// The normalised tree hash's witness fields (`Loom.ssrHash` in Wiz). A digest match with
+// a different canonical length or node count is a collision, not an adopt.
+const TREE_HASH = /^t1-([0-9a-f]{8})-(\d+)-(\d+)$/;
+
+function collides(expected, actual) {
+  const a = TREE_HASH.exec(String(expected));
+  const b = TREE_HASH.exec(String(actual));
+  if (!a || !b) return false;
+  return a[1] === b[1] && (a[2] !== b[2] || a[3] !== b[3]);
+}
 
 // The UTF-8 bytes of one code point (a JS string is UTF-16, so a surrogate pair is one
 // code point). The same four cases as `Draft.utf8Char` / `Wire.utf8Char`.
@@ -92,11 +118,12 @@ export function islandProps(info, warn = () => {}) {
 // The adopt/replace decision, before the first message and before any node is touched.
 //
 //   { mode: "adopt",   reason: "hash-match", hash }
-//   { mode: "replace", reason: "no-island" | "no-ssr-hash" | "hash-mismatch", hash,
-//     expected }
+//   { mode: "replace", reason: "no-island" | "no-ssr-hash" | "hash-mismatch" |
+//     "hash-collision", hash, expected }
 //
 // `hash` is the client's hash (`runtimeHash` when the runtime exports one, else
-// `hashHtml(html)`), and `expected` is the server's `data-wiz-ssr`.
+// `hashHtml(html)`), and `expected` is the server's `data-wiz-ssr`. Every mismatch is
+// one replace of the whole container; nothing is adopted subtree by subtree.
 export function decideAdopt({ root, html, runtimeHash, warn = () => {} } = {}) {
   const info = islandInfo(root);
   if (!info.island) return { mode: "replace", reason: "no-island", hash: null };
@@ -106,6 +133,11 @@ export function decideAdopt({ root, html, runtimeHash, warn = () => {} } = {}) {
     return { mode: "replace", reason: "no-ssr-hash", hash };
   }
   if (info.ssr !== hash) {
+    if (collides(info.ssr, hash)) {
+      safeWarn(warn, "mount: the island's SSR tree hash collides (" + info.ssr + " server, " +
+        hash + " client); replacing it");
+      return { mode: "replace", reason: "hash-collision", hash, expected: info.ssr };
+    }
     safeWarn(warn, "mount: the island's SSR hash does not match (" + info.ssr + " server, " +
       hash + " client); replacing it");
     return { mode: "replace", reason: "hash-mismatch", hash, expected: info.ssr };
