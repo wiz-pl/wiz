@@ -6,10 +6,10 @@ This is the smallest checkable slice of the model in `wiz-notes/extern-ffi.md`:
   * every `extern "sym" name : T` declaration is paired with its ledger
     `builtin extern:` row, and the ABI kinds are derived from the *Wiz type text*
     (not copied from the ledger) and compared with that row;
-  * the scalar class (kinds only from `n u f b p v e`) is compiled: one generated
-    function-pointer assignment per unique C symbol, against `runtime/wiz_rt.h`
-    (plus `lib/serial.c` for the serial ports), with `_Static_assert`s pinning
-    the representation the marshalling assumes;
+  * every unique C symbol gets a function-pointer assignment with the marshalled
+    types (all classes: `n u f b p v s w`, plus `y/Y` and callbacks when present);
+    the scalar class additionally gets `_Static_assert`s pinning the
+    representation the marshalling assumes;
   * every pointer result's finalizer is declared `void f(void *)`;
   * `--manifest` records a SHA-256 of each declaration, C prototype, C definition
     and containing C file, so a C-source edit is a review trigger instead of an
@@ -702,7 +702,8 @@ def verify_manifest(decls, protos, path):
 def main(argv):
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--list", action="store_true", help="list every extern declaration")
-    ap.add_argument("--check", action="store_true", help="derive kinds and compile the scalar ABI")
+    ap.add_argument("--check", action="store_true",
+                    help="derive kinds, compile every prototype, and check the scalar ABI")
     ap.add_argument("--self-test", action="store_true", help="run --check and two deliberate failures")
     ap.add_argument("--manifest", metavar="FILE", help="write the ABI/provenance manifest")
     ap.add_argument("--verify", metavar="FILE", help="compare against a manifest")
