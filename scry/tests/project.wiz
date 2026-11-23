@@ -157,31 +157,31 @@ def main : IO Unit := EIO.toIO (do
     (match Scry.parseCompdb
       "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-Bbin\",\"a.c\"]}]" with
       | .error e => String.contains e "-Bbin"
-      | .ok _ => .false);
+      | .ok _ => Bool.false);
   check "compdb: -fplugin is refused by name"
     (match Scry.parseCompdb
       "[{\"directory\":\"d\",\"file\":\"a.c\",\"command\":\"cc -fplugin=bin/p.so a.c\"}]" with
       | .error e => String.contains e "-fplugin=bin/p.so"
-      | .ok _ => .false);
+      | .ok _ => Bool.false);
   check "compdb: @file is refused"
     (match Scry.parseCompdb
       "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"@bin/args\",\"a.c\"]}]" with
       | .error e => String.contains e "@bin/args"
-      | .ok _ => .false);
+      | .ok _ => Bool.false);
   check "compdb: an option-shaped value is refused"
     (match Scry.parseCompdb
       "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-I\",\"-Bbin\",\"a.c\"]}]" with
       | .error e => String.contains e "-Bbin"
-      | .ok _ => .false);
+      | .ok _ => Bool.false);
   check "compdb: -std=c11 kept, -o/-c dropped"
     (match Scry.parseCompdb
       "[{\"directory\":\"d\",\"file\":\"a.c\",\"arguments\":[\"cc\",\"-std=c11\",\"-DX=1\",\"-c\",\"a.c\",\"-o\",\"a.o\"]}]" with
-      | .error _ => .false
+      | .error _ => Bool.false
       | .ok cmds => match cmds with
         | .cons c _ => Bool.and (contains c.flags "-std=c11")
             (Bool.and (contains c.flags "-DX=1")
               (Bool.not (contains c.flags "-o")))
-        | .nil => .false);
+        | .nil => Bool.false);
 
   -- duplicate non-static definitions: reported, first analysed, no crash
   rd ← build "corpus/project/duplicate" Scry.CacheOpts.none;
@@ -193,14 +193,14 @@ def main : IO Unit := EIO.toIO (do
   check "duplicate: call resolves to first definition"
     (match pd.callGraph with
       | .cons e _ => Bool.and (Nat.beq e.1 1) (Nat.beq e.2 0)
-      | .nil => .false);
+      | .nil => Bool.false);
 
   -- unresolved call
   rm ← build "corpus/project/missing" Scry.CacheOpts.none;
   check "unresolved: one call" (Nat.beq (List.length rm.1.unresolved) 1);
   check "unresolved: callee name" (match rm.1.unresolved with
     | .cons u _ => String.eq u.2 "missing"
-    | .nil => .false);
+    | .nil => Bool.false);
 
   -- shared header, static qualification and cross-TU call graph
   rp ← build "corpus/project" Scry.CacheOpts.none;
@@ -235,8 +235,8 @@ def main : IO Unit := EIO.toIO (do
       | .cons f _ => Bool.and (String.eq f.func "run_cmd")
           (match f.path with
             | .cons first _ => String.eq first.func "main"
-            | .nil => .false)
-      | .nil => .false);
+            | .nil => Bool.false)
+      | .nil => Bool.false);
   check "taint: app.c and io.c helpers stay distinct"
     (Bool.and (Nat.beq (List.length (rep.project.funcIndices "static:0:helper")) 1)
       (Nat.beq (List.length (rep.project.funcIndices "static:1:helper")) 1));
@@ -254,8 +254,8 @@ def main : IO Unit := EIO.toIO (do
         (match arts with
           | .cons a _ => match Json.get a "location" with
             | .some loc => String.eq (jStr loc "uri") "app.c"
-            | .none => .false
-          | .nil => .false);
+            | .none => Bool.false
+          | .nil => Bool.false);
       let results := jList run "results";
       check "sarif: one result per finding and warning"
         (Nat.beq (List.length results)
@@ -271,12 +271,12 @@ def main : IO Unit := EIO.toIO (do
                       (String.eq (jStr al "uriBaseId") "%SRCROOT%")
                       (match Json.get al "index" with
                         | .some (.int .false n) => Nat.lt n 4
-                        | _ => .false)
-                  | .none => .false
-                | .none => .false
-              | .nil => .false
-            | .none => .false
-          | .nil => .false);
+                        | _ => Bool.false)
+                  | .none => Bool.false
+                | .none => Bool.false
+              | .nil => Bool.false
+            | .none => Bool.false
+          | .nil => Bool.false);
 
   -- cache: cold, warm, identical findings, every key input, corrupt/truncated entries
   tmp ← FS.createTempDir;
@@ -399,7 +399,7 @@ def main : IO Unit := EIO.toIO (do
   fWarm ← build fmtDir fmtCache;
   let sameStore : Bool := match fCold.1.units, fWarm.1.units with
     | .cons a _, .cons b _ => String.eq (Scry.cstFullDigest a.store) (Scry.cstFullDigest b.store)
-    | _, _ => .false;
+    | _, _ => Bool.false;
   check "cache: a warm CST has the cold parse's full-column digest" sameStore;
 
   -- corrupt every entry, then the run must recompute and rewrite
@@ -442,15 +442,15 @@ def main : IO Unit := EIO.toIO (do
   let sameKeys : Bool := match jl, ql with
     | .ok a, .ok b => Bool.and (Nat.beq (List.length a) (List.length b))
         (UIntN.beq (Scry.fiPrint a) (Scry.fiPrint b))
-    | _, _ => .false;
+    | _, _ => Bool.false;
   check "index: json and quire hold the same findings" sameKeys;
   let sev0 := List.length (List.filter (fun r => Nat.beq r.severity 0) frows);
   qc ← Scry.findingsQuery fquire fid 0;
   check "index: quire severity query"
-    (match qc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+    (match qc with | .ok n => Nat.beq n sev0 | .error _ => Bool.false);
   jc ← Scry.findingsQuery fjson fid 0;
   check "index: json severity query"
-    (match jc with | .ok n => Nat.beq n sev0 | .error _ => .false);
+    (match jc with | .ok n => Nat.beq n sev0 | .error _ => Bool.false);
   let qpath := Scry.findingsCachePath fquire fid;
   FS.writeFile qpath "not a quire image\n";
   q3 ← Scry.cacheFindings fquire fid frows;
