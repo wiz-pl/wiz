@@ -51,6 +51,10 @@ body { color: var(--fg); background: var(--bg);
 .src-mark { background: var(--hit); border-radius: 2px; cursor: pointer; }
 .src-mark.sev-error { background: var(--sink); }
 .src-mark[data-finding=""] { background: var(--hit); }
+/* A live definition target: an outline rather than a fill, so it is distinguishable
+   from a finding mark (and from the finding it may sit inside). */
+.src-mark.src-focus { background: var(--sel); outline: 1px solid var(--note); }
+.src-line:hover { background: color-mix(in srgb, var(--side) 70%, var(--bg)); }
 .reader-panel { margin: .5rem 0 1rem; }
 .selection, .info-pane { border: 1px solid var(--line); border-radius: 6px;
   padding: .6rem .8rem; margin: .6rem 0; }
@@ -60,6 +64,8 @@ body { color: var(--fg); background: var(--bg);
 .selection dt { color: var(--muted); } .selection dd { margin: 0; }
 .fact-row { display: flex; flex-wrap: wrap; gap: .4rem .8rem; align-items: baseline;
   border-top: 1px solid var(--line); padding: .35rem 0; }
+.fact-row[data-target] { cursor: pointer; }
+.fact-row[data-target]:hover { background: var(--sel); }
 .fact-kind { font-family: var(--mono); font-size: .8rem; background: var(--side);
   border: 1px solid var(--line); border-radius: 3px; padding: 0 .3rem; }
 .fact-span { font-family: var(--mono); font-size: .8rem; color: var(--muted); }

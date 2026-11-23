@@ -100,18 +100,68 @@ def Source.View.findingList (s : Source.Page) : Loom.VNode Source.Msg :=
 
 -- ## Source pane
 
-/-- The marks on one line: every finding span that overlaps it, clipped to the line.
-The attributes carry the semantic id and the span, so a click can ask for the facts at
-that node without a second lookup. -/
+/-- One finding span clipped to the line `[start, stop)`, when they overlap at all. -/
+def Source.View.clipSpan (start stop : Nat) (x : Source.Span) : Option Source.Span :=
+  let a := match Nat.le start x.start with
+    | .true => x.start
+    | .false => start;
+  let b := match Nat.le stop x.stop with
+    | .true => stop
+    | .false => x.stop;
+  match Nat.lt a b with
+  | .true => .some (Source.Span.mk a b)
+  | .false => .none
+
+/-- The spans of `xs` clipped to the line, dropping the ones that miss it. -/
+partial def Source.View.clipSpans (start stop : Nat) : List Source.Span → List Source.Span
+  | .nil => []
+  | .cons x rest => match Source.View.clipSpan start stop x with
+    | .some s => List.cons s (Source.View.clipSpans start stop rest)
+    | .none => Source.View.clipSpans start stop rest
+
+/-- Insert a span into a start-ascending list (stable for equal starts). -/
+def Source.View.insertSpan (x : Source.Span) : List Source.Span → List Source.Span
+  | .nil => [x]
+  | .cons y rest => match Nat.le x.start y.start with
+    | .true => List.cons x (List.cons y rest)
+    | .false => List.cons y (Source.View.insertSpan x rest)
+
+/-- Ascending by start. A line has few marks, so insertion sort is the whole story. -/
+def Source.View.sortSpans : List Source.Span → List Source.Span
+  | .nil => []
+  | .cons x rest => Source.View.insertSpan x (Source.View.sortSpans rest)
+
+/-- Merge overlapping spans (not merely adjacent ones), so the result is ascending and
+disjoint: `Highlight.nodeWithNode` renders a checked list and plain text otherwise.
+Two findings on one line, or a definition inside a finding, would fail that check
+unsorted. -/
+def Source.View.mergeSpansGo (prev : Option Source.Span) :
+    List Source.Span → List Source.Span
+  | .nil => match prev with
+    | .some p => [p]
+    | .none => []
+  | .cons x rest => match prev with
+    | .none => Source.View.mergeSpansGo (.some x) rest
+    | .some p => match Nat.lt x.start p.stop with
+      | .true => Source.View.mergeSpansGo (.some (Source.Span.merge p x)) rest
+      | .false => List.cons p (Source.View.mergeSpansGo (.some x) rest)
+
+/-- The marks on a line: the finding spans that overlap it and, when the reader focused
+a definition range in this file, that range too. The attributes carry the semantic id
+and the span, so a click can ask for the facts at that node without a second lookup. -/
 def Source.View.lineMarks (s : Source.Page) (f : Source.File) (start stop : Nat) :
     List Highlight.Mark :=
-  let fs := Source.Page.findingsOf s f.id;
-  List.foldl (fun acc x =>
-      let a := match Nat.le start x.span.start with | .true => x.span.start | .false => start;
-      let b := match Nat.le stop x.span.stop with | .true => stop | .false => x.span.stop;
-      match Source.Span.overlaps (Source.Span.mk a b) x.span with
-      | .true => List.append acc [Highlight.Mark.mk a b]
-      | .false => acc) [] fs
+  let own := Source.View.clipSpans start stop
+    (List.map (fun x => x.span) (Source.Page.findingsOf s f.id));
+  let focus := match s.focus with
+    | .some z => match s.openFile with
+      | .some id => match String.eq id f.id with
+        | .true => Source.View.clipSpans start stop [z]
+        | .false => []
+      | .none => []
+    | .none => [];
+  List.map (fun (m : Source.Span) => Highlight.Mark.mk m.start m.stop)
+    (Source.View.mergeSpans (List.append own focus))
 
 /-- The finding a mark belongs to (the first finding whose span contains it). -/
 def Source.View.markFinding (s : Source.Page) (f : Source.File) (m : Highlight.Mark) :
@@ -134,14 +184,23 @@ def Source.View.lineRow (s : Source.Page) (f : Source.File) (i : EditorModel.Pos
     let finding := match Source.View.markFinding s f abs with
       | .some x => x
       | .none => Source.Finding.mk "" f.id f.path "" "" "" abs 0 0 .false "";
+    let focused := match s.focus with
+      | .some z => Source.Span.overlaps z abs
+      | .none => .false;
     let payload := Source.spanPayload f.id abs;
-    let cls := String.append "src-mark " (Source.View.severityClass finding.severity);
+    let base := match String.isEmpty finding.id with
+      | .true => "src-mark"
+      | .false => String.append "src-mark " (Source.View.severityClass finding.severity);
+    let cls := String.append base (match focused with
+      | .true => " src-focus"
+      | .false => "");
     Loom.on "mouseover" (Source.Msg.hoverSpan payload)
       (Loom.on "click" (Source.Msg.infoSpan payload)
         (Loom.el "span" [Loom.class cls, Loom.attr "data-finding" finding.id,
             Loom.attr "data-span" (Source.Span.show i abs)]
           [Highlight.text body]));
-  Loom.keyed (Nat.repr line) (Loom.el "div" [Loom.class "src-line", Loom.attr "data-line" (Nat.repr line)]
+  Loom.keyed (Nat.repr line) (Loom.el "div" [Loom.class "src-line",
+      Loom.attr "data-line" (Nat.repr line), Loom.attr "data-start" (Nat.repr start)]
     [ Loom.el "span" [Loom.class "ln"] [Loom.text (Nat.repr (line + 1))]
     , Loom.el "code" [Loom.class "line"] [Highlight.nodeWithNode text wrap relative]
     ])
@@ -188,18 +247,23 @@ def Source.View.answerTitle (s : Source.Page) (a : Source.Answer) : String :=
   | .true => a.title
   | .false => String.append a.title (String.append " at " a.spanText)
 
-/-- The hover card from a decoded answer (`Hover.cardLines`, so the markup, the escaping
-and the highlight classes are the same as the editor's hover). -/
+/-- The hover card from a decoded answer. A live answer carries the LSP result verbatim,
+so `Hover.card` (the playground's Markdown reader) draws it; a static answer carries the
+precomputed lines (`Hover.cardLines`). Both end in the same `.wiz-hover` markup. -/
 def Source.View.hoverPane (s : Source.Page) : Loom.VNode Source.Msg :=
   match s.hover with
   | .none => Loom.text ""
   | .some a => match a.status with
     | "ok" => Loom.el "div" [Loom.class "hover-host",
         Loom.attr "data-rule" a.rule, Loom.attr "data-finding" a.findingId]
-        [Hover.cardLines a.lines (Source.View.answerTitle s a)]
+        [match String.isEmpty a.raw with
+          | .true => Hover.cardLines a.lines (Source.View.answerTitle s a)
+          | .false => Hover.card a.raw (Source.View.answerTitle s a)]
     | _ => Loom.el "div" [Loom.class "hover-host none"] [Loom.text "no answer"]
 
-/-- One fact row in the info view: its kind, its span and its generic columns. -/
+/-- One fact row in the info view: its kind, its span and its generic columns. A row
+that names a bundle file is a jump target (`focusSpan`): a definition answer's row opens
+its file at the target range and outlines it. -/
 def Source.View.factRow (s : Source.Page) (r : Source.FactRow) : Loom.VNode Source.Msg :=
   let f := Source.Page.file s r.fileId;
   let spanText := match f with
@@ -210,12 +274,24 @@ def Source.View.factRow (s : Source.Page) (r : Source.FactRow) : Loom.VNode Sour
         [ Loom.el "span" [Loom.class "fact-key"] [Loom.text p.1]
         , Loom.el "span" [Loom.class "fact-value"] [Loom.text p.2]
         ]) r.columns;
-  Loom.el "div" [Loom.class "fact-row", Loom.attr "data-kind" r.kind,
-      Loom.attr "data-node" r.node, Loom.attr "data-span" spanText]
+  let located := match f with
+    | .some _ => Bool.and (String.eq r.kind "definition")
+        (Bool.not (Source.Span.isEmpty r.span))
+    | .none => Bool.false;
+  let attrs := List.append
+    [ Loom.class "fact-row", Loom.attr "data-kind" r.kind
+    , Loom.attr "data-node" r.node, Loom.attr "data-span" spanText ]
+    (match located with
+      | .true => [Loom.attr "data-target" "1"]
+      | .false => []);
+  let row := Loom.el "div" attrs
     (List.append
       [ Loom.el "span" [Loom.class "fact-kind"] [Loom.text r.kind]
       , Loom.el "span" [Loom.class "fact-span"] [Loom.text spanText]
-      ] cells)
+      ] cells);
+  match located with
+  | .true => Loom.on "click" (Source.Msg.focusSpan (Source.spanPayload r.fileId r.span)) row
+  | .false => row
 
 /-- One finding row inside an answer (`info`). -/
 def Source.View.answerFindingRow (s : Source.Page) (f : Source.Finding) : Loom.VNode Source.Msg :=
@@ -283,8 +359,9 @@ def Source.View.panel (s : Source.Page) : Loom.VNode Source.Msg :=
 
 -- ## The page
 
-/-- The reader's footer: the honesty line (a static export is one run's evidence, not a
-proof, and no findings is not safety). -/
+/-- The reader's footer: the honesty line (an export is one run's evidence, not a proof,
+and no findings is not safety) and its provenance (`static` from the bundle, `live` when
+the page is attached to a language server). -/
 def Source.View.footer (s : Source.Page) : Loom.VNode Source.Msg :=
   let tool := match String.isEmpty s.tool with
     | .true => "scry"
@@ -294,7 +371,7 @@ def Source.View.footer (s : Source.Page) : Loom.VNode Source.Msg :=
     | .false => Loom.el "span" [Loom.class "note"] [Loom.text s.note];
   Loom.el "footer" [Loom.class "reader-foot"]
     [ Loom.el "span" [Loom.class "provenance"]
-        [Loom.text (String.append tool (String.append " · " (String.append s.mode " export")))]
+        [Loom.text (String.append tool (String.append " · " (String.append s.mode " reader")))]
     , Loom.el "span" [Loom.class "caveat"]
         [Loom.text "Evidence from one run, not a proof; no findings is not safety."]
     , note

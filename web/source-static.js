@@ -121,7 +121,9 @@ function findingsAt(bundle, fileId, offset) {
     f.span && f.span.start <= offset && offset < f.span.stop);
 }
 
-function noneAnswer(request, fileId, spanText) {
+// The "nothing to show" answer. Every transport can produce it; the page renders it as
+// "no answer", never as an error.
+export function noneAnswer(request, fileId, spanText) {
   return JSON.stringify({
     schema: SCHEMA_ANSWER, request, status: "none", fileId: fileId || "",
     span: null, spanText: spanText || "", title: "no answer", rule: "", severity: "",
@@ -180,13 +182,20 @@ export function answer(bundle, kind, payload) {
 
 // ## Routing
 
-// `#/f/<findingId>`, `#/src/<fileId>@L:C[-L:C]`, `#/file/<fileId>`. A fragment is never
-// sent to a server; anything else is `{kind: "none"}` and the runtime lands on the list
-// with a note.
+// `#/f/<findingId>`, `#/src/<fileId>@L:C[-L:C]`, `#/def/<fileId>@L:C[-L:C]`,
+// `#/file/<fileId>`. A fragment is never sent to a server; anything else is
+// `{kind: "none"}` and the runtime lands on the list with a note. `#/def/` is a
+// definition target (a highlighted range, no request); the live host produces it.
 export function route(hash) {
   const body = String(hash == null ? "" : hash).replace(/^#/, "");
   if (body.startsWith("/f/")) return { kind: "finding", findingId: body.slice(3) };
   if (body.startsWith("/file/")) return { kind: "file", fileId: body.slice(6) };
+  if (body.startsWith("/def/")) {
+    const rest = body.slice(5);
+    const at = rest.lastIndexOf("@");
+    if (at < 0) return { kind: "file", fileId: rest };
+    return { kind: "definition", fileId: rest.slice(0, at), fragment: rest.slice(at + 1) };
+  }
   if (body.startsWith("/src/")) {
     const rest = body.slice(5);
     const at = rest.lastIndexOf("@");
@@ -200,17 +209,23 @@ export function route(hash) {
 
 // Mount the runtime on `el`, feed it the bundle, answer its requests and forward
 // `hashchange` to it. `module` is the loader/factory mount accepts; `env` is the host
-// object mount uses (defaults to `globalThis`).
-export async function mountSource(el, { module, bundle, env = globalThis } = {}) {
+// object mount uses (defaults to `globalThis`). `onRequest(kind, payload, handle)` is
+// the transport: absent, every `hover`/`info` request is answered from the bundle
+// (`answer`); `source-live.js` passes the adapter that asks the language server.
+export async function mountSource(el, { module, bundle, env = globalThis, onRequest } = {}) {
   const { mount } = await import("./framework/mount.js");
   let handle = null;
-  const onRequest = (kind, payload) => {
+  const respond = (kind, payload) => {
+    if (typeof onRequest === "function") {
+      onRequest(kind, payload, handle);
+      return;
+    }
     if (handle && (kind === "hover" || kind === "info")) {
       handle.call("wiz_loom_effect", "answer", kind, answer(bundle, kind, payload));
     }
   };
   handle = await mount(el, {
-    module, env, transport: { bundle: true }, onRequest,
+    module, env, transport: { bundle: true }, onRequest: respond,
     // The reader uses `mouseover` for the hover card (View.lineRow) and `click` for the
     // info view. The framework's default event list has no `mouseover`, so without this
     // the hover is a dead handler in a real browser (the Node trace steps the model

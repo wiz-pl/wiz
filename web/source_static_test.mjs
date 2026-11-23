@@ -157,6 +157,8 @@ ok(target.kind === "finding" && target.findingId === taint.id,
   "#/f/<id> routes to the finding", JSON.stringify(target));
 ok(route("#/src/" + taint.fileId + "@" + taint.spanText).kind === "source",
   "#/src/<file>@L:C-L:C routes to a source span");
+ok(route("#/def/" + taint.fileId + "@" + taint.spanText).kind === "definition",
+  "#/def/<file>@L:C-L:C routes to a definition range");
 ok(route("#/f/nope").findingId === "nope", "a missing id still routes (the UI notes it)");
 
 // The trace's route step must actually select the finding in the rendered page.
