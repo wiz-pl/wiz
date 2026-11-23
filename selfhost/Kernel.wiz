@@ -3485,7 +3485,17 @@ def subTy (c : TCtx) (A B : Val) : Bool := match whnf A with
 end
 
 -- (P2: an error message does not evaluate a suspended proof either; it reads back as `()`)
-def showVal (c : TCtx) (v : Val) : String := show .nil (TCtx.lvl c) (quoteM .false .false (TCtx.lvl c) v)
+-- (F43) and once the command's budget ran out, a value can hold everything the evaluator
+-- built before it stopped: up to `kernelSteps` unary `Nat` constructors. Reading it back
+-- and printing it is quadratic in them (`show` appends a string per constructor), which is
+-- the post-`tickout` hang (and its deep recursion is the SIGSEGV on a smaller stack); the
+-- diagnostic says the value was not printed instead. This is the recovery path:
+-- `kernelTick` reports exhaustion, and the one step it takes when the budget is still
+-- running is nothing next to building the message; no budget runs at all in the kernel's
+-- own work.
+def showVal (c : TCtx) (v : Val) : String := match kernelTick 0 with
+  | .false => "‹a value the kernel evaluation stopped on: it hit its step budget›"
+  | .true => show .nil (TCtx.lvl c) (quoteM .false .false (TCtx.lvl c) v)
 
 -- **Exercise 14.3.** Bidirectional type checking with usage (`infer` and `check` in
 -- `Check.lean`): each answer comes with the usage of the variables (types and proofs

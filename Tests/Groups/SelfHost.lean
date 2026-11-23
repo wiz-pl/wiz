@@ -4515,15 +4515,23 @@ def selfHostGroup : Group where
         match infer (R := ZeroOneMany) { globals := g } (Mark.infer (R := ZeroOneMany) { globals := g } loop.toTerm).1 with
         | .ok _ => pure ()
         | .error e => throw (IO.userError s!"the Lean kernel with full regularity rejects it: {e}") },
-    -- (F43) the command budget must be *armed before the command*: the train12 merge put
-    -- `let step := match commandStep …` before `kernelStart`, and a `let` is eager, so the
-    -- whole command (and the kernel's evaluation) ran before the budget existed and
-    -- `Nat.pow 2 63` ran away. `2^63 = 0` computes its equation to `False` at the head (a
-    -- small value), so it reaches the budget and reports it without printing a stopped
-    -- value; the 15 s bound makes a re-ordering fail by timeout.
-    { name := "(F43) the budget is armed before the command: Nat.pow 2 63 = 0 reports the 200000-step budget, not a runaway", run := fun _ => do
+    -- (F43) the command budget's two halves. First that it is *armed before the command*:
+    -- the train12 merge put `let step := match commandStep …` before `kernelStart`, and a
+    -- `let` is eager, so the whole command (and the kernel's evaluation) ran before the
+    -- budget existed and `Nat.pow 2 63` ran away. `2^63 = 0` computes its equation to
+    -- `False` at the head (a small value), so it reaches the budget and reports it without
+    -- printing a stopped value; the 15 s bound makes a re-ordering fail by timeout.
+    -- Then the recovery path: add/mul and 2^62/2^63 leave the equation stuck on a value
+    -- the evaluator stopped on, whose unary constructors made the old error printer
+    -- quadratic (a hang past 30 s and a SIGSEGV, exit 139).
+    { name := "(F43) the budget is armed before the command and its recovery path returns the positioned error for add/mul and 2^62/2^63 (no hang, no SIGSEGV)", run := fun _ => do
         let budget := "input.wiz:2:1: error: the kernel evaluation hit its 200000-step budget: this kernel computes Nat one successor at a time, so a large numeral operation (for example Nat.pow 2 32) cannot be decided here\n"
-        selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 63 = 0 := rfl\n" budget 15 },
+        selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 63 = 0 := rfl\n" budget 15
+        selfhostCheckFails "import Prelude\ndef t : Nat.add 1000000 1000000 = 2000000 := rfl\n" budget 15
+        selfhostCheckFails "import Prelude\ndef t : Nat.mul 1000000 1000000 = 1000000000000 := rfl\n" budget 15
+        selfhostCheckFails "import Prelude\ndef t : Nat.pow 2 62 = 4611686018427387904 := rfl\n" budget 15
+        selfhostCheckFails "import Prelude\ndef t : Nat.add 4611686018427387904 4611686018427387904 = Nat.pow 2 63 := rfl\n" budget 15
+        selfhostCheckFails "import Prelude\ndef t : Nat.mul 4611686018427387904 2 = Nat.pow 2 63 := rfl\n" budget 15 },
 
   ]
 
