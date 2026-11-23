@@ -1506,19 +1506,21 @@ jobs:
   # and stays outside `result`: a Pages outage is not a defect in the commit
   # (docs/building.md, "Documentation site").
   docs:
-    name: docs (wiz doc --lib + site)
+    name: docs pages
     needs: [lean, wasm]
-    # Built on a pull request as well as a push: the source-reader step is the one place
-    # a regression in `/source/` (a missing store path, a broken bundle, the Chromium
-    # check) shows up before merge, and it cost a master red to discover that when this
-    # was push-only. Only the *deploy* to Pages stays merge-action-only (`deploy-docs`).
+    # Built on a pull request as well as a push: the source reader is where a
+    # `/source/` regression shows up before merge, and it cost a master red to discover
+    # that when this was push-only. Only the *deploy* to Pages stays merge-action-only
+    # (`deploy-docs`).
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # 60 min: `wiz doc --lib` (10-19 min cold, ~2-4 min with the restored cache), the
-    # source reader's `grail build scry` (~12 min measured in scry.yml) and the site,
-    # with wiz and the Wasm modules substituted (`wasm`). The reader build is why
-    # this is 60 and not 45: a timeout is a cancelled job, not a verdict on the commit.
+    # The derivations do the work now: `.#pages` is `.#docs-site` (the site's chrome over
+    # `.#docs-lib`'s API pages) plus the source reader built from `.#scry` and
+    # `.#wiz-source-ui`. Cachix substitutes what it holds; nothing is compiled here.
+    # 60 min is the cold case only (a `lib/` change with no cache).
     timeout-minutes: 60
+    outputs:
+      path: ${{ steps.pages.outputs.path }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
@@ -1530,146 +1532,43 @@ jobs:
           cachix-pr-name: ${{ github.event_name == 'pull_request' && env.CACHIX_PR_NAME || '' }}
           cachix-pr-token: ${{ github.event_name == 'pull_request' && secrets.CACHIX_PR_AUTH_TOKEN || '' }}
           lean: false
-      - name: nix build (wiz, from the lean job or Cachix)
-        id: nix
+      - name: The site and the source reader (nix build .#pages)
+        # One derivation, so the API pages (`.#docs-lib`), the site chrome
+        # (`.#docs-site`), the analysis CLI (`.#scry`) and the reader's runtime
+        # (`.#wiz-source-ui`) are inputs with hashes rather than steps in this job. The
+        # build runs the site contract (`web/check-site.sh`) itself; the second job
+        # checks the published tree again and drives the reader in Chromium.
+        id: pages
         run: |
-          # the lean job's pure build on the push that runs this job; a store path
-          # substitutes, and a miss falls back to the derivation
-          wiz='${{ needs.lean.outputs.wiz }}'
-          if [ -z "$wiz" ] || ! nix build --no-link "$wiz"; then
-            wiz=$(nix build .#wiz --no-link --print-out-paths)
-          fi
-          echo "wiz=$wiz" >> "$GITHUB_OUTPUT"
-          du -sh "$wiz"
-      - name: Subset cache key (the docs site)
-        id: subset-key
-        shell: bash
-        run: |
-          # The docs subset's own cache, not a hash of the Lean tree:
-          # `subset-v1-docs-<os>-<arch>-<toolchain sha12>-site-<docs sha12>`.
-          # The layer is namespaced internally by the running binary: entry names mix in
-          # `binaryId` and manifests its SHA-256 (`toolchainTag`), so an identical build
-          # of the same source hits and a changed binary misses by construction. The
-          # documented sources decide which entries exist; the prefix still serves the
-          # unchanged modules after a lib/ change.
-          python3 scripts/ci.py subset-key docs --scope site --suffix "$(git rev-parse HEAD:lib)" >> "$GITHUB_OUTPUT"
-      - name: Restore the elaboration cache (a read-only layer)
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          p=$(nix build .#pages --no-link --print-out-paths)
+          echo "path=$p" >> "$GITHUB_OUTPUT"
+          echo "pages: $p"
+          du -sh "$p"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          # `wiz --cache-ro` (a layer wiz only reads): the job cannot corrupt it, and a
-          # miss repopulates the write cache, which this run publishes below.
-          path: .wiz-doc-cache/ro
-          key: ${{ steps.subset-key.outputs.key }}
-          restore-keys: ${{ steps.subset-key.outputs.prefix }}
-      - name: The Wasm modules (copied from the derivations)
-        id: modules
-        env:
-          # only the fork-pull-request fallback in the script reads it (this job is a push)
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          # the producer's paths: on a pull request they are seeded derivations
-          WIZ_MODULES_WEB: ${{ needs.wasm.outputs.web }}
-          WIZ_MODULES_PLAYGROUND: ${{ needs.wasm.outputs.playground }}
-          WIZ_MODULES_UI: ${{ needs.wasm.outputs.ui }}
-          # The source reader's module. It is realised here as a store path, not just
-          # carried as a string: nothing demanded it from Nix, so on master the docs
-          # job had a path with no file behind it and source-bundle.sh failed with
-          # "wiz-source-ui.mjs is missing".
-          WIZ_MODULES_SOURCE_UI: ${{ needs.wasm.outputs.source_ui }}
-        run: sh web/modules-from-store.sh
-      - name: The Wasm modules in web/out (web/build.sh, web/build-playground.sh)
-        env:
-          # the scripts copy what `wasm` built instead of running Emscripten
-          WIZ_WEB_FROM: ${{ steps.modules.outputs.web }}
-          WIZ_PLAYGROUND_FROM: ${{ steps.modules.outputs.playground }}
-        run: |
-          sh web/build.sh web/out
-          sh web/build-playground.sh web/out
-      - name: wiz doc --lib
-        env:
-          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
-        run: |
-          # --cache-ro: wiz reads the restored layer and never writes it; this run's misses
-          #   go to `.wiz-doc-cache/write`, published as the next run's layer.
-          # --cache-verify off: the layer is this workflow's own, and the entries are
-          #   content-keyed (the binary hash plus each module's text); the manifest check
-          #   would additionally bind them to the toolchain tag, which embeds the store
-          #   paths of cc/llc and so needlessly invalidates a rebuild with the same ELF.
-          #   The store's own `share/wiz/cache` layer (the wrapper's default) is read too.
-          # --jobs 4: modules elaborate and render four at a time. The output is
-          #   byte-identical to `--jobs 1` (245 files SHA-256-equal at jobs 1 and 4), and
-          #   the warm run drops from ~333 s to ~162 s.
-          mkdir -p .wiz-doc-cache/write .wiz-doc-cache/ro
-          "$WIZ" doc --lib --jobs 4 -o doc-site/docs --web web/out \
-            --source-url "https://github.com/${{ github.repository }}/blob/${{ github.sha }}/lib/" \
-            --cache .wiz-doc-cache/write --cache-ro .wiz-doc-cache/ro \
-            --cache-verify off
-          ls doc-site/docs | head -50
-      - name: Publish this run's entries as the read-only layer (a miss)
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          # A hit needs nothing: the layer then serves every entry (checked: a warm run
-          # leaves no .wizc in the write cache). A miss repopulates it.
-          mkdir -p .wiz-doc-cache/ro
-          cp -a .wiz-doc-cache/write/. .wiz-doc-cache/ro/
-          # (the memo names the runner's store path; one hash of the binary per run)
-          rm -rf .wiz-doc-cache/ro/bin
-          find .wiz-doc-cache/ro -name '*.tmp*' -delete
-          ls .wiz-doc-cache/ro | wc -l
-          du -sh .wiz-doc-cache/ro
-      - name: The reference manual's Markdown (nix build .#reference)
-        # Built here, not in the `lean` job: this is the only consumer, and only a push
-        # runs this job, so it is off the shards' critical path. It is generated from the
-        # `wiz` the lean job published (a substitute), so it needs no rebuild of wiz.
-        run: |
-          ref=$(nix build .#reference --no-link --print-out-paths)
-          cp "$ref/index.md" doc-site/docs/reference.md
-      - name: The source reader (nix build .#scry + scry web)
-        # `/source/` is one static bundle: scry's report of the public C fixtures, the
-        # host files, and the reader's Loom runtime. `scry` is a derivation now
-        # (`.#scry`), so this step *substitutes* the CLI instead of running
-        # `grail build scry` here: that build was ~12 minutes and was the same build
-        # `packages (scry)` had already done in the same run (it keeps doing it in
-        # place, because building the package from a checkout is what that leg tests).
-        # The runtime is the seeded `wiz-source-ui` path `wasm` published;
-        # `web/source-bundle.sh` adds the `.wasm` beside it, because `--ui` alone copies
-        # only the .mjs.
-        id: source
-        env:
-          # the path the modules step realised (substituted from Cachix or, on a fork
-          # pull request, built); the producer's raw output string is not a store path
-          # that exists on this runner
-          SOURCE_UI: ${{ steps.modules.outputs.source_ui }}
-        run: |
-          [ -n "$SOURCE_UI" ] || {
-            echo "docs: wasm produced no source_ui (the wasm modules job must build .#wiz-source-ui)" >&2
-            exit 1
-          }
-          scry=$(nix build .#scry --no-link --print-out-paths)
-          echo "scry: $scry"
-          bundle=$(mktemp -d)
-          sh web/source-bundle.sh "$scry/bin/scry" "$bundle/b" \
-            --ui "$SOURCE_UI" --target scry/tests/fixtures/report
-          echo "SOURCE_BUNDLE=$bundle/b" >> "$GITHUB_ENV"
-          echo "ui=$SOURCE_UI" >> "$GITHUB_OUTPUT"
-      - name: The landing page's island module (nix build .#wiz-landing-ui)
-        id: landing
-        run: |
-          ui=$(nix build .#wiz-landing-ui --no-link --print-out-paths --max-jobs 1)
-          echo "ui=$ui" >> "$GITHUB_OUTPUT"
-          du -sh "$ui"
-      - name: The landing page (web/build-landing.sh)
-        env:
-          WIZ: ${{ steps.nix.outputs.wiz }}/bin/wiz
-          WIZ_LANDING_UI_FROM: ${{ steps.landing.outputs.ui }}
-        run: |
-          sh web/build-landing-ui.sh web/out --from "$WIZ_LANDING_UI_FROM"
-          sh web/build-landing.sh web/out
-      - name: The landing page and the playground (web/build-site.sh)
-        env:
-          # The reader is part of the published product, so a site without it is red.
-          SITE_REQUIRE_SOURCE: "1"
-        run: sh web/build-site.sh doc-site web/out
+          name: wiz-docs
+          path: ${{ steps.pages.outputs.path }}
+          retention-days: 3
+
+  docs_check:
+    name: docs check (site contract + source reader)
+    needs: [docs]
+    # A separate job so the overview shows *building* the site and *checking* it as two
+    # verdicts: a broken page and a broken reader still report apart, and the check
+    # consumes exactly what Pages will publish (the artifact), not a tree rebuilt here.
+    if: needs.docs.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup
+        with:
+          cachix-name: ${{ env.CACHIX_NAME }}
+          lean: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wiz-docs
+          path: doc-site
       - name: The site has its entry points, /source/, and the landing's links resolve
         env:
           SITE_REQUIRE_SOURCE: "1"
@@ -1683,23 +1582,6 @@ jobs:
           # snap stub that never opens a DevTools target.
           chrome=$(nix shell --inputs-from . nixpkgs#chromium -c sh -c 'command -v chromium')
           node web/source_chrome_test.mjs "$chrome" doc-site/source
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: wiz-docs
-          path: doc-site
-          retention-days: 3
-      - name: Save the elaboration cache
-        # The end of the job, on success and failure alike: the entries are
-        # content-keyed by module text, so a failed run cannot poison the layer - it can
-        # only add modules that later runs reuse. Saving only on success meant a run with
-        # one bad module threw away 245 modules' worth of work for the retry.
-        # A cache quota/upload failure must not fail the site.
-        continue-on-error: true
-        if: always() && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .wiz-doc-cache/ro
-          key: ${{ steps.subset-key.outputs.key }}
 
   # (11s) Publish the `wiz-docs` artifact to GitHub Pages. The artifact's tree, and so
   # the site's URL layout, is:
@@ -1720,9 +1602,10 @@ jobs:
   # outage does not fail the suite.
   deploy-docs:
     name: deploy docs to Pages
-    needs: docs
+    needs: [docs, docs_check]
     # Merge action only: a push to master. The site is *built* on every pull request now;
-    # publishing it is the one step that belongs to the merge.
+    # publishing it is the one step that belongs to the merge. The contract check and the
+    # reader ship with it: a green build whose site or reader failed does not publish.
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # 10 min: upload the artifact and deploy it; no build
@@ -1762,7 +1645,7 @@ jobs:
     # and on a merge-queue entry, where `check` below accepts `skipped`. `packages` and
     # `runtime` are required exactly when their subset changed; `lean` whenever `code`
     # did (it carries the matrix), and `tests` whenever `shards` is not empty.
-    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, lean, lake_seed, trust_ledger, stc, tests, wasm, web, docs, packages, runtime]
+    needs: [changes, docs_style, name_collisions_reachable, prelude_drift, docs_examples, source-tarball, attest, lean, lake_seed, trust_ledger, stc, tests, wasm, web, docs, docs_check, packages, runtime]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # 10 min: download the logs, the summary, the skip lint and the balance check
@@ -1940,6 +1823,7 @@ jobs:
           # job is skipped (and that is fine) only when the filter does not want it
           check web "${{ needs.web.result }}" "$web"
           check docs "${{ needs.docs.result }}" "$want_docs"
+          check "docs check" "${{ needs.docs_check.result }}" "$want_docs"
           check packages "${{ needs.packages.result }}" "$want_packages"
           check runtime "${{ needs.runtime.result }}" "$want_runtime"
 
