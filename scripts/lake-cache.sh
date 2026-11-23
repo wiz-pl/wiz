@@ -186,7 +186,12 @@ case ${1:-} in
     # directory is copied in (`builtins.path`, keyed by its contents)
     case $seed in
       /nix/store/*) seed_expr="builtins.storePath \"$seed\"" ;;
-      *) seed_expr="builtins.path { path = \"$seed\"; name = \"lake-cache\"; }" ;;
+      *)
+        # `builtins.path` requires an absolute path; `choose` prints the relative
+        # `.subset-cache/lean` a restore created.
+        seed=$(cd "$seed" && pwd)
+        seed_expr="builtins.path { path = \"$seed\"; name = \"lake-cache\"; }"
+        ;;
     esac
     for attr in "$@"; do
       # LAKE_CACHE_NIX_ARGS: extra `nix build` flags (e.g. `--max-jobs 1`, for the
