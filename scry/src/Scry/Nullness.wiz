@@ -64,6 +64,18 @@ and the definitely-null `req` is only dereferenced on the unreachable path.
   list-based worklist is a prototype and the pass must not turn a one-minute CVE analysis
   into a ten-minute one.
 * Branch conditions with `&&`/`||` refine only their first nullness test.
+
+## Frontend facts
+
+A frontend that knows more than Wil's types (C#: `T?`, `#nullable enable`, `!`) supplies
+a `Scry.NullTables` per function: which parameter registers allow null at entry, which
+statements define a maybe-null value regardless of their RHS, which statements
+dereference a register, which statements assert one non-null, and which registers are
+non-null by annotation. `Scry.nullDerefWarningsWith` uses them; `Scry.nullDerefWarnings`
+passes `NullTables.empty`, so the C frontend supplies no facts and its alarms are the
+load/store ones (the reserved-register split below applies to both). The tables become
+the statements `AStmt.check` (a dereference) and `AStmt.checkAssign` (an assignment to a
+non-null-annotated register, the CS8600 shape).
 -/
 
 /-- The largest function the nullness pass runs on. Larger functions are skipped (the
@@ -105,16 +117,66 @@ def Scry.nMaxVar (fn : Wil.Func) : Nat :=
       (List.append fn.params fn.locals)) (Scry.range g.count);
   fromStmts
 
-def Scry.nVars (fn : Wil.Func) : List Nat :=
-  Scry.range (Nat.succ (Scry.nMaxVar fn))
-
+/-- The reserved registers are `nMaxVar` (the unknown value: `havoc`, an unknown call
+result, an unknown operator) and `nMaxVar + 1` (the scratch a load's base check writes).
+They are distinct: a load-base check must not define the unknown-value register as a
+non-null load result, or every later maybe-null value would read back as non-null. -/
 def Scry.nHavoc (fn : Wil.Func) : Nat := Scry.nMaxVar fn
 
+def Scry.nScratch (fn : Wil.Func) : Nat := Nat.succ (Scry.nMaxVar fn)
+
+def Scry.nVars (fn : Wil.Func) : List Nat :=
+  Scry.range (Nat.succ (Scry.nScratch fn))
+
 /-- The entry environment: parameters are valid objects (non-null); everything else is
-unknown. -/
-def Scry.nEntryEnv (fn : Wil.Func) : AiEnv :=
-  List.foldl (fun env v => AiEnv.set v.index Value.intTop env)
+unknown. `maybe` lists parameter registers whose **declared annotation** allows null
+(a C# `T?`, or an unannotated reference outside a `#nullable enable` context): they
+enter as `Value.top`, which the nullness domain reads as "may be null". -/
+def Scry.nEntryEnvWith (maybe : List Nat) (fn : Wil.Func) : AiEnv :=
+  List.foldl (fun env v => AiEnv.set v.index
+      (match List.any (Nat.beq v.index) maybe with
+        | .true => Value.top
+        | .false => Value.intTop) env)
     (AiEnv.topOf (Scry.nVars fn)) fn.params
+
+def Scry.nEntryEnv (fn : Wil.Func) : AiEnv := Scry.nEntryEnvWith .nil fn
+
+-- ## Frontend-supplied nullness tables
+
+/-- Facts a frontend that knows more than Wil's types publishes for one function. The C#
+lowering supplies all of them; the C frontend supplies none, so its analysis is exactly
+the previous one. Every list is restricted to the function being analysed
+(`Scry.nullDerefWarningsWith` splits the program-wide table once per function). -/
+structure Scry.NullTables where
+  /-- Parameter registers whose declaration allows null. -/
+  paramsMaybe : List Nat
+  /-- `(node, var)`: the value assigned to `var` where the statement's origin node is
+  `node` is maybe-null whatever the RHS says (`as`, a `T?` field read, a
+  `FirstOrDefault`-shaped call). -/
+  mayNull : List (Nat × Nat)
+  /-- `(node, var)`: a dereference of `var` at a statement with this origin node. -/
+  derefs : List (Nat × Nat)
+  /-- `(node, var)`: the value assigned to `var` at this node is asserted non-null
+  (C#'s `!`). -/
+  asserts : List (Nat × Nat)
+  /-- Registers whose declared annotation is non-null: an assignment to one that may be
+  null is a `nullableAssign` alarm (CS8600 shape). -/
+  nonNull : List Nat
+
+def Scry.NullTables.empty : Scry.NullTables :=
+  Scry.NullTables.mk .nil .nil .nil .nil .nil
+
+/-- The origin node of a statement (`0` for a hand-built one). -/
+def Scry.stmtNode : Wil.Stmt → Nat
+  | .assign _ _ sp => sp.node
+  | .assume _ sp => sp.node
+  | .store _ _ sp => sp.node
+  | .free _ sp => sp.node
+  | .call _ _ _ sp => sp.node
+  | .nop sp => sp.node
+
+def Scry.nodeHas (l : List (Nat × Nat)) (node v : Nat) : Bool :=
+  List.any (fun p => Bool.and (Nat.beq p.1 node) (Nat.beq p.2 v)) l
 
 -- ## Constant-return summaries
 
@@ -355,64 +417,103 @@ def Scry.nRhs (fn : Wil.Func) (tab : List (String × Nat)) (e : Wil.Rhs) : AExpr
   | .havoc _ => AExpr.var (Scry.nHavoc fn)
 
 /-- The abstract statements of one Wil statement. A call contributes its result (a
-constant when the callee's return summary proves one, otherwise an unknown). -/
+constant when the callee's return summary proves one, otherwise an unknown). The
+frontend's tables refine the value a statement assigns (maybe-null or asserted non-null),
+add a receiver dereference check, and turn an assignment to a non-null-annotated
+register into the CS8600-shaped `checkAssign`. -/
 def Scry.nStmts (fn : Wil.Func) (tab : List (String × Nat))
-    (consts : List (Nat × Option Nat)) (s : Wil.Stmt) : List AStmt :=
-  match s with
-  | .assign x (.load p) _ =>
-    -- Two statements: one checks the base (the alarm), the other gives the loaded
-    -- value a **non-null** abstract value. A pointer read out of memory is not tracked
-    -- as a null field (no memory nullness); treating it as maybe-null would warn on
-    -- every `p = s->field; p->x` chain. The access through the base is still checked.
-    List.cons (AStmt.assign (Scry.nHavoc fn) (AExpr.load p.index (AExpr.lit 0) 1))
-      (List.cons (AStmt.assign x.index (AExpr.alloc (AExpr.lit 1))) .nil)
-  | .assign x e _ =>
-    let rhs : AExpr := match e, x.ty with
-      | .cst (.int _ _ 0), .ptr _ => AExpr.null
-      | _, _ => Scry.nRhs fn tab e;
-    List.cons (AStmt.assign x.index rhs) .nil
-  | .assume c _ => match Scry.nCond consts c with
-    | .some a => List.cons (AStmt.assume a) .nil
-    | .none => .nil
-  | .store p _ _ => List.cons (AStmt.store p.index (AExpr.lit 0) 1) .nil
-  | .free _ _ => .nil
-  | .call r callee _args _ =>
-    match r with
-    | .some v =>
-      let e := match callee with
-        | .direct name => match Scry.retConstOfName tab name with
-          | .some 0 => match v.ty with
-            | .ptr _ => AExpr.null
-            | _ => AExpr.lit 0
-          | .some n => AExpr.lit n
-          | .none => AExpr.var (Scry.nHavoc fn)
-        | .indirect _ => AExpr.var (Scry.nHavoc fn);
-      List.cons (AStmt.assign v.index e) .nil
-    | .none => .nil
-  | .nop _ => .nil
+    (tbls : Scry.NullTables) (consts : List (Nat × Option Nat)) (s : Wil.Stmt) :
+    List AStmt :=
+  let node := Scry.stmtNode s;
+  let havoc := AExpr.var (Scry.nHavoc fn);
+  let over := fun (v : Nat) (d : AExpr) =>
+    match Scry.nodeHas tbls.mayNull node v with
+    | .true => havoc
+    | .false => match Scry.nodeHas tbls.asserts node v with
+      | .true => AExpr.alloc (AExpr.lit 1)
+      | .false => d;
+  let defOf := fun (v : Wil.Var) (d : AExpr) =>
+    match List.any (Nat.beq v.index) tbls.nonNull with
+    | .true => AStmt.checkAssign v.index (over v.index d)
+    | .false => AStmt.assign v.index (over v.index d);
+  -- A fact is keyed by the *node*, and a construct can emit several statements at one
+  -- node (the `?.` guard's null constant, the call, the result copy). The dereference is
+  -- only the statement that actually uses the value: a call with it as an argument (a
+  -- receiver, an element or an argument), or a copy from it (an unboxing cast).
+  let isDerefStmt := fun (v : Nat) => match s with
+    | .call _ _ args _ => List.any (fun a => Nat.beq a.index v) args
+    | .assign _ (.use y) _ => Nat.beq y.index v
+    | _ => .false;
+  let checks : List AStmt := List.map (fun p => AStmt.check p.2)
+    (List.filter (fun p => Bool.and (Nat.beq p.1 node) (isDerefStmt p.2)) tbls.derefs);
+  let body : List AStmt := match s with
+    | .assign x (.load p) _ =>
+      -- Two statements: one checks the base (the alarm), the other gives the loaded
+      -- value a **non-null** abstract value, unless the frontend says the field's
+      -- declared type allows null. A pointer read out of memory is not tracked as a
+      -- null field (no memory nullness); treating every one as maybe-null would warn on
+      -- every `p = s->field; p->x` chain. The access through the base is still checked.
+      List.cons (AStmt.assign (Scry.nScratch fn) (AExpr.load p.index (AExpr.lit 0) 1))
+        (List.cons (defOf x (AExpr.alloc (AExpr.lit 1))) .nil)
+    | .assign x e _ =>
+      let rhs : AExpr := match e, x.ty with
+        | .cst (.int _ _ 0), .ptr _ => AExpr.null
+        | _, _ => Scry.nRhs fn tab e;
+      List.cons (defOf x rhs) .nil
+    | .assume c _ => match Scry.nCond consts c with
+      | .some a => List.cons (AStmt.assume a) .nil
+      | .none => .nil
+    | .store p _ _ => List.cons (AStmt.store p.index (AExpr.lit 0) 1) .nil
+    | .free _ _ => .nil
+    | .call r callee _args _ =>
+      match r with
+      | .some v =>
+        let e := match callee with
+          | .direct name => match Scry.retConstOfName tab name with
+            | .some 0 => match v.ty with
+              | .ptr _ => AExpr.null
+              | _ => AExpr.lit 0
+            | .some n => AExpr.lit n
+            | .none => havoc
+          | .indirect _ => havoc;
+        -- A call result is trusted against the callee's declared contract *unless* the
+        -- frontend marks the call as maybe-null by its shape (`FirstOrDefault`, an
+        -- absent environment variable). Only then is an assignment to a
+        -- non-null-annotated variable a `checkAssign` alarm.
+        let may := Scry.nodeHas tbls.mayNull node v.index;
+        let val := match may with
+          | .true => havoc
+          | .false => e;
+        let stmt := match Bool.and (List.any (Nat.beq v.index) tbls.nonNull) may with
+          | .true => AStmt.checkAssign v.index val
+          | .false => AStmt.assign v.index val;
+        List.cons stmt .nil
+      | .none => .nil
+    | .nop _ => .nil;
+  List.append body checks
 
 /-- The number of CFG blocks a point needs (at least one, so a terminator has a block to
 carry its guards). -/
-def Scry.nSize (fn : Wil.Func) (tab : List (String × Nat))
+def Scry.nSize (fn : Wil.Func) (tab : List (String × Nat)) (tbls : Scry.NullTables)
     (consts : List (Nat × Option Nat)) (g : Scry.Fn) (p : Nat) : Nat :=
   match Scry.nodeStmt g p with
   | .none => 1
-  | .some s => Nat.max 1 (List.length (Scry.nStmts fn tab consts s))
+  | .some s => Nat.max 1 (List.length (Scry.nStmts fn tab tbls consts s))
 
-def Scry.nStmtAt (fn : Wil.Func) (tab : List (String × Nat))
+def Scry.nStmtAt (fn : Wil.Func) (tab : List (String × Nat)) (tbls : Scry.NullTables)
     (consts : List (Nat × Option Nat)) (g : Scry.Fn) (p : Nat) (j : Nat) : AStmt :=
   match Scry.nodeStmt g p with
   | .none => AStmt.skip
-  | .some s => match Wil.listNth (Scry.nStmts fn tab consts s) j with
+  | .some s => match Wil.listNth (Scry.nStmts fn tab tbls consts s) j with
     | .some a => a
     | .none => AStmt.skip
 
 /-- Allocate block bases: point `p` owns `[base, base + size)`. -/
-def Scry.nBases (fn : Wil.Func) (tab : List (String × Nat))
+def Scry.nBases (fn : Wil.Func) (tab : List (String × Nat)) (tbls : Scry.NullTables)
     (consts : List (Nat × Option Nat)) (g : Scry.Fn) :
     List (Nat × Nat × Nat) × Nat :=
   List.foldl (fun acc p =>
-    let size := Scry.nSize fn tab consts g p;
+    let size := Scry.nSize fn tab tbls consts g p;
     (List.append acc.1 (List.cons (p, acc.2, size) .nil), Nat.add acc.2 size))
     (.nil, 0) (Scry.range g.count)
 
@@ -429,15 +530,16 @@ def Scry.nSizeOf (bases : List (Nat × Nat × Nat)) (p : Nat) : Nat :=
 def Scry.nLastOf (bases : List (Nat × Nat × Nat)) (p : Nat) : Nat :=
   Nat.sub (Nat.add (Scry.nBaseOf bases p) (Scry.nSizeOf bases p)) 1
 
-/-- Translate one function to an `ACfg`. -/
-def Scry.translate (fn : Wil.Func) (tab : List (String × Nat)) : Scry.NCfg :=
+/-- Translate one function to an `ACfg`, with the frontend's nullness tables. -/
+def Scry.translateWith (fn : Wil.Func) (tab : List (String × Nat))
+    (tbls : Scry.NullTables) : Scry.NCfg :=
   let g := Scry.flatten fn;
   let consts := Scry.constVars g;
-  let bases := (Scry.nBases fn tab consts g).1;
+  let bases := (Scry.nBases fn tab tbls consts g).1;
   let blocks := Scry.concatLists (fun p =>
     let base := Scry.nBaseOf bases p;
     let size := Scry.nSizeOf bases p;
-    List.map (fun j => (Nat.add base j, Scry.NBlock.mk p (Scry.nStmtAt fn tab consts g p j)))
+    List.map (fun j => (Nat.add base j, Scry.NBlock.mk p (Scry.nStmtAt fn tab tbls consts g p j)))
       (Scry.range size)) (Scry.range g.count);
   let stmts := List.map (fun b => (b.1, b.2.stmt)) blocks;
   let intra := Scry.concatLists (fun p =>
@@ -463,6 +565,10 @@ def Scry.translate (fn : Wil.Func) (tab : List (String × Nat)) : Scry.NCfg :=
       (List.append intra inter))
     blocks bases
 
+/-- The CFG translation with no frontend facts (the C analysis). -/
+def Scry.translate (fn : Wil.Func) (tab : List (String × Nat)) : Scry.NCfg :=
+  Scry.translateWith fn tab Scry.NullTables.empty
+
 -- ## Reachability and alarms
 
 /-- The reachable Wil points under the post-fixpoint state. A branch whose condition is
@@ -487,16 +593,23 @@ partial def Scry.nReachGo (g : Scry.Fn) (ncfg : Scry.NCfg) (st : AState)
         | _ => succs;
       Scry.nReachGo g ncfg st (List.append rest next) seen'
 
-/-- The warning detail for a block: a load or a store through a possibly-null register. -/
+/-- The warning detail for a block: the kind of access a human should see. -/
 def Scry.nullDetail (b : Scry.NBlock) : String :=
   match b.stmt with
   | .assign _ (.load arr _ _) =>
     "load through pointer register " ++ Nat.repr arr ++ ", which may be null"
   | .store arr _ _ =>
     "store through pointer register " ++ Nat.repr arr ++ ", which may be null"
+  | .check v =>
+    "dereference of register " ++ Nat.repr v ++ ", which may be null"
+  | .checkAssign x _ =>
+    "non-null-annotated register " ++ Nat.repr x ++ " assigned a value that may be null"
   | _ => "memory access through a pointer that may be null"
 
-/-- The null-dereference warnings of one translated function. -/
+/-- The nullness warnings of one translated function: a dereference of a maybe-null
+value, and an assignment of a maybe-null value to a non-null-annotated variable. Both
+are read off the same post-fixpoint; they are separate alarm classes so the second can
+be reported where no dereference follows (the CS8600 shape). -/
 def Scry.nullWarningsOfCfg (fnName : String) (ncfg : Scry.NCfg) (st : AState)
     (reach : List Nat) : List Scry.MemWarning :=
   Scry.concatLists (fun b =>
@@ -506,35 +619,57 @@ def Scry.nullWarningsOfCfg (fnName : String) (ncfg : Scry.NCfg) (st : AState)
     | .true =>
       let alarms := AStmt.alarms (AiMach.mk 64) b.1
         (AState.at ncfg.cfg st b.1) b.2.stmt;
-      let nulls := List.filter (fun a => match a with
+      let derefs := List.filter (fun a => match a with
         | .nullDeref _ => .true
         | _ => .false) alarms;
-      List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point
-        (Scry.nullDetail b.2)) nulls) ncfg.blocks
+      let assigns := List.filter (fun a => match a with
+        | .nullableAssign _ => .true
+        | _ => .false) alarms;
+      List.append
+        (List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullDereference fnName point
+          (Scry.nullDetail b.2)) derefs)
+        (List.map (fun _ => Scry.memWarning Scry.MemWarnKind.nullableAssignment fnName point
+          (Scry.nullDetail b.2)) assigns)) ncfg.blocks
 
-/-- The null-dereference warnings of one function. -/
-def Scry.nullWarningsOfFunc (fn : Wil.Func) (tab : List (String × Nat)) : List Scry.MemWarning :=
+/-- The nullness warnings of one function, with the frontend's tables. -/
+def Scry.nullWarningsOfFuncWith (fn : Wil.Func) (tab : List (String × Nat))
+    (tbls : Scry.NullTables) : List Scry.MemWarning :=
   let g := Scry.flatten fn;
   match Nat.le g.count Scry.maxNullPoints with
   | .false => .nil
   | .true =>
-    let ncfg := Scry.translate fn tab;
-    let st := fixpointFrom (AiMach.mk 64) ncfg.cfg (Scry.nEntryEnv fn);
+    let ncfg := Scry.translateWith fn tab tbls;
+    let st := fixpointFrom (AiMach.mk 64) ncfg.cfg (Scry.nEntryEnvWith tbls.paramsMaybe fn);
     let reach := Scry.nReachGo g ncfg st
       (List.cons (Scry.entryNode g) .nil) .nil;
     Scry.nullWarningsOfCfg fn.name ncfg st reach
 
-/-- Deduplicate null warnings by function and point (one per memory access). -/
+/-- The nullness warnings of one function with no frontend facts. -/
+def Scry.nullWarningsOfFunc (fn : Wil.Func) (tab : List (String × Nat)) : List Scry.MemWarning :=
+  Scry.nullWarningsOfFuncWith fn tab Scry.NullTables.empty
+
+/-- Deduplicate null warnings by function and point and kind (one per access; a
+dereference and an annotation alarm at the same statement stay separate). -/
 def Scry.dedupNullWarnings (ws : List Scry.MemWarning) : List Scry.MemWarning :=
   List.foldl (fun acc w =>
-    let key := w.func ++ "|" ++ Nat.repr w.point;
-    match List.any (fun x => String.eq (x.func ++ "|" ++ Nat.repr x.point) key) acc with
+    let key := w.func ++ "|" ++ Nat.repr w.point ++ "|" ++ Scry.MemWarnKind.show w.kind;
+    match List.any (fun x =>
+      String.eq (x.func ++ "|" ++ Nat.repr x.point ++ "|" ++ Scry.MemWarnKind.show x.kind) key) acc with
     | .true => acc
     | .false => List.append acc (List.cons w .nil)) .nil ws
 
-/-- Every null-dereference warning of a program. `Scry.analyzeWithNull` runs it; the
-default `Scry.analyze` does not (the CLI flag is `--null-deref`). -/
+/-- Every nullness warning of a program. `Scry.analyzeWithNull` runs it; the default
+`Scry.analyze` does not (the CLI flag is `--null-deref`). -/
 def Scry.nullDerefWarnings (p : Wil.Program) : List Scry.MemWarning :=
   let tab := Scry.retConstTable p;
   Scry.dedupNullWarnings
     (Scry.concatLists (fun fn => Scry.nullWarningsOfFunc fn tab) p.funcs)
+
+/-- The same over a program with a program-wide frontend table. The table is keyed by
+the `Wil.Func` itself: parameter facts need the function's parameter count, so a name
+alone is not enough. -/
+def Scry.nullDerefWarningsWith (p : Wil.Program)
+    (tablesOf : Wil.Func → Scry.NullTables) : List Scry.MemWarning :=
+  let tab := Scry.retConstTable p;
+  Scry.dedupNullWarnings
+    (Scry.concatLists (fun fn => Scry.nullWarningsOfFuncWith fn tab (tablesOf fn)) p.funcs)

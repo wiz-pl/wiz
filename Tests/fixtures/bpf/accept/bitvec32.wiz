@@ -1,4 +1,0 @@
--- [UNRUN] P0 accept neighbour: BitVec at a register width is a UIntN.
-import Bpf
-
-def ok (x : BitVec 32) : BitVec 32 := BitVec.land x (BitVec.ofNat 32 0xff)

@@ -53,13 +53,15 @@ func Fixtures.Modern.WorkService.Find(%0)
   b0:
     %1 = call System.Collections.Generic.IEnumerable.FirstOrDefault(%0)
     %2 = call T..ctor()
-    %3 = %1
     %4 = null
     br eq %1, %4 ? b1 : b2
   b1:
     %3 = %2
-    goto b2
+    goto b3
   b2:
+    %3 = %1
+    goto b3
+  b3:
     ret %3
 func Fixtures.Modern.WorkService.SubmitAsync(%0, %1)
   b0:
@@ -88,47 +90,47 @@ func Fixtures.Modern.WorkService.SubmitAsync(%0, %1)
     %25 = 0
     br ne %24, %25 ? b6 : b5
   b1:
-    %38 = %22
-    %39 = %1
-    %40 = %39
-    %41 = global Fixtures.Modern.WorkService.Limits
-    %42 = load %41
-    %43 = global $str:"NotReady"
-    %44 = call System.Array.$new(%42, %43)
-    %45 = %44
-    %46 = gep %0, 0
-    %47 = load %46
-    %48 = 47
-    %49 = call System.String.Join(%48, %19)
-    %50 = call System.String.Concat(%38, %49)
-    %51 = gep %40, 2
-    %52 = load %51
-    %53 = call System.String.Concat(%50, %52)
-    %54 = call ?[].get_Length(%45)
+    %36 = %22
+    %37 = %1
+    %38 = %37
+    %39 = global Fixtures.Modern.WorkService.Limits
+    %40 = load %39
+    %41 = global $str:"NotReady"
+    %42 = call System.Array.$new(%40, %41)
+    %43 = %42
+    %44 = gep %0, 0
+    %45 = load %44
+    %46 = 47
+    %47 = call System.String.Join(%46, %19)
+    %48 = call System.String.Concat(%36, %47)
+    %49 = gep %38, 2
+    %50 = load %49
+    %51 = call System.String.Concat(%48, %50)
+    %52 = call ?[].get_Length(%43)
+    %53 = call System.String.Concat(%51, %52)
+    %54 = call ?.ToString(%11)
     %55 = call System.String.Concat(%53, %54)
-    %56 = call ?.ToString(%11)
-    %57 = call System.String.Concat(%55, %56)
-    %58 = call System.Collections.Generic.List.Add(%47, %57)
-    %59 = 202
-    %60 = alloc 3
-    %61 = gep %60, 0
-    store %61, %59
-    %62 = gep %60, 1
-    store %62, %38
-    ret %60
+    %56 = call System.Collections.Generic.List.Add(%45, %55)
+    %57 = 202
+    %58 = alloc 3
+    %59 = gep %58, 0
+    store %59, %57
+    %60 = gep %58, 1
+    store %60, %36
+    ret %58
   b2:
-    %33 = global $str:"zero"
-    %22 = %33
+    %31 = global $str:"zero"
+    %22 = %31
     goto b1
   b3:
-    %34 = gep %1, 2
-    %35 = load %34
-    %36 = call System.String.Concat(%35)
-    %22 = %36
+    %32 = gep %1, 2
+    %33 = load %32
+    %34 = call System.String.Concat(%33)
+    %22 = %34
     goto b1
   b4:
-    %37 = global $str:"by-name"
-    %22 = %37
+    %35 = global $str:"by-name"
+    %22 = %35
     goto b1
   b5:
     %26 = 1
@@ -140,9 +142,7 @@ func Fixtures.Modern.WorkService.SubmitAsync(%0, %1)
     %28 = gep %1, 2
     %29 = load %28
     %30 = null
-    %31 = ne %29, %30
-    %32 = 0
-    br ne %31, %32 ? b3 : b4
+    br ne %29, %30 ? b3 : b4
 func Fixtures.Modern.WorkService.ToString(%0)
   b0:
     %1 = gep %0, 1

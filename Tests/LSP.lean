@@ -1,4 +1,5 @@
 import Wiz
+import Wiz.Lint
 import Tests.Harness
 
 open Wiz
@@ -315,6 +316,33 @@ def group : Group where
         checkEq ["\"bye\\n\""] (infosIn out) }
   ]
 
+/-- The text `wiz fmt` makes of `src` (the Prelude the server has). -/
+def fmtText (src : String) : IO String := do
+  let p ← prelude
+  let init : St := { loader := fun m => if m == "Prelude" then some p else none, trustedModule := Tests.libModule }
+  pure (Fmt.run init src {}).text
+
+/-- A `textDocument/formatting` request's `TextEdit` array (or, with a range,
+`textDocument/rangeFormatting`), at `file:///t.wiz`. An error reply gives no edits. -/
+def formatEdits (srv : LSP.Server) (src : String) (range? : Option (Nat × Nat) := none)
+    (insertSpaces : Bool := true) : IO (LSP.Server × Array Lean.Json) := do
+  let options := s!"\{\"tabSize\":2,\"insertSpaces\":{if insertSpaces then "true" else "false"}}"
+  let (method, rangeJson) := match range? with
+    | some (a, b) => ("textDocument/rangeFormatting",
+        s!"\"range\":\{\"start\":{posJson src a},\"end\":{posJson src b}},")
+    | none => ("textDocument/formatting", "")
+  let (srv, out) ← LSP.handle srv (req s!"\{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"{method}\",\"params\":\{\"textDocument\":\{\"uri\":\"file:///t.wiz\"},{rangeJson}\"options\":{options}}}")
+  match (out[0]!.getObjVal? "result").toOption with
+  | some (.arr es) => pure (srv, es)
+  | _ => pure (srv, #[])
+
+/-- Apply a `TextEdit` array to `src` (the edits' positions are into `src`). -/
+def applyTextEdits (src : String) (es : Array Lean.Json) : String :=
+  let atPos (e : Lean.Json) (k : String) : Nat :=
+    LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+  Actions.apply src (es.map fun e =>
+    { start := atPos e "start", stop := atPos e "end", text := LSP.getStr e ["newText"] })
+
 /-- Apply a `WorkspaceEdit` (for `file:///t.wiz`) to `src`. -/
 def applyEdit (src : String) (edit : Lean.Json) : String :=
   let edits := match LSP.get? edit ["changes", "file:///t.wiz"] with
@@ -389,6 +417,9 @@ def socketCase : IO Unit := do
           | 0 => Socket.connect sock
           | n + 1 => do try Socket.connect sock catch _ => do IO.sleep 50; conn n
         let (ivIn, ivOut) ← conn 100
+        -- the socket is owner-only: the infoview is a local capability, and the default
+        -- umask (022) would otherwise make it 0755 and connectable by any local user
+        checkEq 0o600 (← Socket.mode sock)
         let (iv, ivW) := (IO.FS.Stream.ofHandle ivIn, IO.FS.Stream.ofHandle ivOut)
         let c ← next iv
         checkEq "wiz/infoview/cursor" (LSP.getStr c ["method"])
@@ -588,6 +619,51 @@ def serverGroup : Group where
         let (_, out) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
         for m in ["wiz/plainGoal", "wiz/interactiveGoals", "wiz/subtermInfo", "codeActionProvider", "experimental"] do
           check (has out[0]! m) s!"no {m}" },
+    { name := "textDocument/formatting: wiz fmt's text, one edit, idempotent, range-only", run := fun _ => do
+        -- the capability
+        let (_, caps) ← LSP.handle (← server) (req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+        check (has caps[0]! "documentFormattingProvider") "no documentFormattingProvider"
+        check (has caps[0]! "documentRangeFormattingProvider") "no documentRangeFormattingProvider"
+        -- badly spaced source
+        let src := "import Prelude\ndef  f :Nat:=1\ndef g (n:Nat):Nat :=  n+1\n"
+        let expected ← fmtText src
+        check (expected != src) "the fixture is already formatted"
+        let (srv, _) ← openDoc src
+        let (srv, es) ← formatEdits srv src
+        checkEq 1 es.size
+        checkEq expected (applyTextEdits src es)
+        -- the one edit is a well-formed LSP range of the original text
+        let e := es[0]!
+        let atPos (k : String) : Nat :=
+          LSP.ofPos src (LSP.getNat e ["range", k, "line"]) (LSP.getNat e ["range", k, "character"])
+        check (atPos "start" ≤ atPos "end" && atPos "end" ≤ src.length) s!"range {atPos "start"}..{atPos "end"} of {src.length}"
+        -- idempotence: the reprint is a fixed point
+        let (srv, _) ← openDoc expected (srv? := some srv)
+        let (_, es2) ← formatEdits srv expected
+        checkEq 0 es2.size
+        -- a range request formats only the command inside it
+        let src2 := "import Prelude\ndef  f :Nat:=1\ndef  g :Nat:=2\n"
+        let rlo := (src2.splitOn "def  g").headD "" |>.length
+        let rhi := rlo + "def  g :Nat:=2".length
+        let (srv2, _) ← openDoc src2 (srv? := some srv)
+        let (_, es3) ← formatEdits srv2 src2 (some (rlo, rhi))
+        checkEq 1 es3.size
+        let out := applyTextEdits src2 es3
+        -- The range's second command must be exactly what a whole-file format makes of it;
+        -- the first command must be byte-identical. (The formatter's reprint is the
+        -- oracle: `def g :Nat:= 2`, not the source style `def g : Nat := 2`.)
+        let expected2 ← fmtText src2
+        let expectedLines := expected2.splitOn "\n"
+        let outLines := out.splitOn "\n"
+        let some expectedG := expectedLines[2]? | throw (IO.userError s!"no third line in\n{expected2}")
+        let some outG := outLines[2]? | throw (IO.userError s!"no third line in\n{out}")
+        checkEq expectedG outG
+        check (expectedG != "def  g :Nat:=2") s!"the fixture's second command is already formatted: {expectedG}"
+        check (outLines[1]? == some "def  f :Nat:=1") s!"the first command changed: {out}"
+        -- `insertSpaces: false` is refused, not silently ignored
+        let (_, out4) ← LSP.handle srv2 (req "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"textDocument/formatting\",\"params\":{\"textDocument\":{\"uri\":\"file:///t.wiz\"},\"options\":{\"tabSize\":2,\"insertSpaces\":false}}}")
+        check (has out4[0]! "insertSpaces") s!"no error: {out4[0]!.compress}"
+        checkEq "-32602" ((LSP.get? out4[0]! ["error", "code"]).getD Lean.Json.null).compress },
     { name := "wiz/plainGoal and wiz/plainTermGoal", run := fun _ => do
         let src := tacticSrc ++ "def f (n : Nat) : Nat := Nat.add n _\n"
         let (srv, _) ← openDoc src
@@ -793,8 +869,12 @@ def serverGroup : Group where
           if l.startsWith "| `" then some ((((l.drop 3).toString.splitOn "`").headD "")) else none
         for c in ErrorCode.all do
           check (rows.contains c) s!"docs/error-codes.md has no row for {c}"
+        -- Lint rules are user-visible codes too and live in their own registry, not in
+        -- `ErrorCode.all`; the docs table is the union (WizLint checks the other direction).
+        let lintIds := (Lint.registry Nat).map (fun r => r.id)
         for c in rows do
-          check (ErrorCode.all.contains c) s!"docs/error-codes.md lists {c}, which is not in ErrorCode.all" },
+          check (ErrorCode.all.contains c || lintIds.contains c)
+            s!"docs/error-codes.md lists {c}, which is in neither ErrorCode.all nor the lint registry" },
     { name := "code action: did you mean (fields, namespace, constructors)", run := fun _ => do
         let pre := "import Prelude\nstructure P where\n  count : Nat\n  total : Nat\ninductive Box where\n  | mk (n : Nat)\ndef Box.double : Box → Nat\n  | .mk n => n + n\ninductive Color where\n  | red\n  | green\n"
         for (body, needle, title, fixed) in [
@@ -1498,7 +1578,7 @@ def nvimGroup : Group where
     -- a test result). Both fail this case; the `harness:` lines say which happened.
     { name := "wiz.nvim: abbreviations, and the infoview against wiz lsp (editors/nvim/tests/run.sh)", run := fun _ => do
         let out ← IO.Process.output { cmd := "sh", args := #["editors/nvim/tests/run.sh"] }
-        if out.stdout.startsWith "skipped" then skip ((out.stdout.replace "skipped: " "").trimAscii.toString)
+        if out.stdout.startsWith "skipped" then skipMissing ((out.stdout.replace "skipped: " "").trimAscii.toString)
         else unless out.exitCode == 0 do
           throw (IO.userError s!"editors/nvim/tests/run.sh failed:\n{out.stdout}{out.stderr}") },
     -- The harness's own reporting: fixture output, so it needs neither nvim nor a build.

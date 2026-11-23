@@ -279,6 +279,26 @@ def nowUtc : IO (Except String String) := do
     pure (.error s!"cannot read the current UTC time (date: {o.stderr.trimAscii})")
   catch e => pure (.error s!"cannot read the current UTC time: {e}")
 
+/-- One year after a `YYYY-MM-DDTHH:MM:SSZ` stamp: the default expiry for a signed
+publish. A pure string edit of the year, so the format stays valid. -/
+def addOneYear (utc : String) : String :=
+  if !validUtc utc then utc
+  else
+    match (utc.take 4).toString.toNat? with
+    | some y => toString (y + 1) ++ (utc.drop 4).toString
+    | none => utc
+
+/-- The public key line (`ssh-ed25519 AAAA…`, comment dropped) for a private key file. -/
+def publicKeyOf (key : System.FilePath) : IO (Except String String) := do
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := #["-y", "-f", key.toString] }
+    if o.exitCode != 0 then
+      return .error s!"ssh-keygen -y -f {key}: {o.stderr.trimAscii}"
+    let body := Signature.keyBody o.stdout.trimAscii.toString
+    if body.isEmpty then return .error s!"ssh-keygen -y -f {key}: no public key in its output"
+    pure (.ok body)
+  catch e => pure (.error s!"ssh-keygen: {e}")
+
 /-- `index/snapshot.sexpr` (the documented layout) or `snapshot.sexpr` at the root. -/
 def snapshotFile (root : System.FilePath) : IO (Option System.FilePath) := do
   for f in [root / "index" / "snapshot.sexpr", root / "snapshot.sexpr"] do
@@ -287,6 +307,20 @@ def snapshotFile (root : System.FilePath) : IO (Option System.FilePath) := do
 
 def sigFile (snap : System.FilePath) : System.FilePath :=
   System.FilePath.mk (snap.toString ++ ".sig")
+
+/-- Sign `snap` with `key` (`ssh-keygen -Y sign -n grail-index`), replacing an old
+detached signature so a stale one cannot survive a new snapshot. -/
+def signSnapshot (key snap : System.FilePath) : IO (Except String Unit) := do
+  let sig := sigFile snap
+  if ← sig.pathExists then IO.FS.removeFile sig
+  let args := #["-Y", "sign", "-q", "-n", "grail-index", "-f", key.toString, snap.toString]
+  try
+    let o ← IO.Process.output { cmd := "ssh-keygen", args := args }
+    if o.exitCode != 0 then
+      return .error s!"ssh-keygen -Y sign -f {key} {snap}: {o.stderr.trimAscii}"
+    unless ← sig.pathExists do return .error s!"ssh-keygen -Y sign wrote no {sig}"
+    pure (.ok ())
+  catch e => pure (.error s!"ssh-keygen: {e}")
 
 /-- Quote one word for `sh` (single quotes; an embedded quote is `'\''`). -/
 def shellQuote (s : String) : String :=
@@ -338,6 +372,21 @@ def allowedLine (line : String) : Option (List String × String) := do
 def allowedKeys (file : System.FilePath) : IO (Except String (List (List String × String))) := do
   let text ← IO.FS.readFile file
   pure (.ok (text.splitOn "\n" |>.filterMap allowedLine))
+
+/-- Write or update the `identity` line of an `allowed_signers` file: replace the line for
+`identity` (or one with the same key) and keep every other identity. This is the trust
+root a fresh consumer passes to `--allowed-signers`, so publishing it alongside the
+snapshot means first use needs no out-of-band key exchange. -/
+def updateAllowedSigners (file : System.FilePath) (identity key : String) :
+    IO (Except String Unit) := do
+  let body := Signature.keyBody key
+  let old ← if ← file.pathExists then IO.FS.readFile file else pure ""
+  let keep := (old.splitOn "\n" |>.filter (!·.isEmpty)).filter fun l =>
+    match allowedLine l with
+    | some (ids, k) => !ids.contains identity && Signature.keyBody k != body
+    | none => true
+  Cache.writeAtomic file (String.intercalate "\n" (keep ++ [s!"{identity} {body}"]) ++ "\n")
+  pure (.ok ())
 
 /-- The fingerprint `ssh-keygen -lf` reports for a public key line. -/
 def fingerprintOf (key : String) : IO (Except String String) := do

@@ -1,0 +1,98 @@
+import IO
+import Json
+import Web.Highlight
+import Web.Hover
+import Web.InfoTree
+import Web.Loom
+
+/-!
+# Web.InfoPanel
+
+The panel shell shared by the infoview (`Web.Goals`), the documentation's live panel
+(`Web.DocLive`) and, when its files are in this lane, the source reader: a titled section
+list and the small rows both panels already drew.
+
+The model is deliberately thin. `Web.InfoTree` owns the answers (tagged text, goals, the
+`wiz.hover/1` payload); this module owns how a *panel* is laid out: a section is a title
+and a body, and a model is a list of sections. The three consumers keep their own
+headers, status lines and wrappers — those are not the same component — but a section, a
+diagnostic row and a hover block are rendered once here, so two panels cannot disagree
+about the `<h3>`, the `sev-*` class or the `hl-*` span path.
+
+`Web.Highlight` is the only span assembler; `Loom.raw` is not on this path.
+-/
+
+/-- One panel section: its visible title and its body. -/
+structure InfoPanel.Section (M : Type) where
+  title : String
+  body : Loom.VNode M
+
+/-- A panel as an ordered list of sections. -/
+structure InfoPanel.Model (M : Type) where
+  sections : List (InfoPanel.Section M)
+
+/-- A section from a title and a body. -/
+def InfoPanel.section {M : Type} (title : String) (body : Loom.VNode M) :
+    InfoPanel.Section M := InfoPanel.Section.mk title body
+
+/-- A section heading (the panels' one heading level). -/
+def InfoPanel.heading {M : Type} (title : String) : Loom.VNode M :=
+  Loom.el "h3" [] [Loom.text title]
+
+/-- One section: its heading, then its body. -/
+def InfoPanel.sectionView {M : Type} (s : InfoPanel.Section M) : Loom.VNode M :=
+  Loom.seq [InfoPanel.heading s.title, s.body]
+
+/-- The sections in order. -/
+def InfoPanel.render {M : Type} (ss : List (InfoPanel.Section M)) : Loom.VNode M :=
+  Loom.seq (List.map InfoPanel.sectionView ss)
+
+/-- A model's sections. -/
+def InfoPanel.model {M : Type} (ss : List (InfoPanel.Section M)) : InfoPanel.Model M :=
+  InfoPanel.Model.mk ss
+
+/-- A model's view. -/
+def InfoPanel.renderModel {M : Type} (m : InfoPanel.Model M) : Loom.VNode M :=
+  InfoPanel.render m.sections
+
+/-- The panels' "nothing here" line. -/
+def InfoPanel.nothing {M : Type} (why : String) : Loom.VNode M :=
+  Loom.el "div" [Loom.class "nothing"] [Loom.text why]
+
+/-- A severity's class name. -/
+def InfoPanel.severity (n : Nat) : String :=
+  match Nat.beq n 1 with
+  | .true => "error"
+  | .false => match Nat.beq n 2 with
+    | .true => "warning"
+    | .false => match Nat.beq n 3 with
+      | .true => "info"
+      | .false => "hint"
+
+/-- The diagnostics list, one `diag sev-*` row per answer. -/
+def InfoPanel.diagnostics {M : Type} (diagnostics : List Json) : Loom.VNode M :=
+  match diagnostics with
+  | .nil => InfoPanel.nothing "no diagnostics"
+  | .cons _ _ => Loom.el "div" [Loom.class "diags"] (List.map (fun d =>
+      let sev := InfoPanel.severity (Json.getNat d "severity");
+      let range := match Json.get d "range" with
+        | .some r => r
+        | .none => Json.mkNull;
+      let atText := match Json.get range "start" with
+        | .some s => String.append (Nat.toString (InfoTree.natAt s ["line"] + 1))
+            (String.append ":" (Nat.toString (InfoTree.natAt s ["character"] + 1)))
+        | .none => "";
+      Loom.el "div" (List.append [Loom.class (String.append "diag sev-" sev)]
+        (InfoTree.spanAttrs range))
+        [ Loom.el "span" [Loom.class "sev"] [Loom.text sev]
+        , Loom.el "span" [Loom.class "msg"] [Loom.text (Json.getStr d "message")]
+        , Loom.el "span" [Loom.class "where"] [Loom.text atText] ]) diagnostics)
+
+/-- Hover lines as the live panel shows them: a rule, a `<pre class="sig">` code line
+(with `Web.Highlight` tokens when the answer carried spans) or a paragraph. -/
+def InfoPanel.hoverLines {M : Type} (lines : List Hover.Line) : Loom.VNode M :=
+  Loom.seq (List.map (fun l => match l.rule with
+    | .true => Loom.el "hr" [] []
+    | .false => match l.code with
+      | .true => Loom.el "pre" [Loom.class "sig"] [Highlight.node l.text l.tokens]
+      | .false => Loom.el "p" [] [Loom.text l.text]) lines)

@@ -1,0 +1,8 @@
+import FeralCore
+-- REJECTED (R2: a scope's result may not quantify over its fresh region). check.sh
+-- expects `failed to synthesize an instance of RegionFree`.
+-- A shared borrow of a local is a scope; the result type `B := (0 r : Region) × Shr r A`
+-- is a *closed* type that carries the fresh region and its handle out of the scope.
+-- Before `RegionFree` this was accepted (the hole in docs/stages/22-numbers.md, 22g).
+def esc (v : List Nat) : Result ((0 r : Region) × Shr r (List Nat)) :=
+  Shr.borrow Region.static v (fun ρ h x => .ok (ρ, x))

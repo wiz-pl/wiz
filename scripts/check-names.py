@@ -456,6 +456,9 @@ def collect(roots: list[Path], repo: Path) -> Scan:
         for hit in sorted(root.rglob("*.wiz")):
             if any(part in SKIP_DIRS for part in hit.relative_to(root).parts):
                 continue
+            # the dev shell writes this beside a package manifest; it is not a module
+            if hit.name == "grail.local.wiz":
+                continue
             resolved = hit.resolve()
             if resolved in seen:
                 continue

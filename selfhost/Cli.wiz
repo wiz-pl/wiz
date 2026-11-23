@@ -8,7 +8,8 @@ namespace __root__
 --                                     `--lib` also OUT.c, the header OUT.h and the object OUT
 --   wiz-selfhost run FILE [ARG…]       compile `main` and run it (also `eval`)
 --   wiz-selfhost lsp                   a language server on stdin/stdout (D8: the
---                                      protocol subset `web/selfhost-lsp-shim.js` answers)
+--                                      protocol subset `web/selfhost-lsp-shim.js` answers,
+--                                      plus hover/definition/completion)
 --   wiz-selfhost version | help
 --   options: -I DIR (module root, repeatable), -o OUT, --cache DIR, --cache-ro DIR
 --            (a read-only cache layer, repeatable), --no-cache, --cache-prune DAYS,
@@ -18,8 +19,13 @@ namespace __root__
 --            declaration's type),
 --            --trust-native (27a: `def X : a = b := native_refl` is decided by running
 --            a and b; the frontend's `Globals.trustNative`), --trust-smt (C15: the `smt`
---            tactic is refused; there is no solver here), --cc, --llc, --rt, --cflags,
---            --ldflags (the C toolchain for `run`),
+--            tactic is refused; there is no solver here), --cc PATH, --llc PATH, --rt DIR,
+--            --cflags FLAGS, --ldflags FLAGS (the C toolchain for `run`: `--cc` and
+--            `--llc` are one executable each, not a command line — a wrapper script is
+--            the way to add arguments; FLAGS is a whitespace-separated word list, as the
+--            host reads it). Every interpolated component is POSIX-quoted before it goes
+--            into the `system(3)` string, and a program killed by a signal is a failure
+--            (`128 + signal`).
 --            --rc | --rc-owned | --gc | --unbox-structs | --lib | --no-main |
 --            --header (the backend),
 --            --version, -h | --help. The host's --llvm/--wasm/--split/--cache-ro are
@@ -131,7 +137,11 @@ extern "wiz_sys_write_file" cWriteFile : String → String → Nat → IO Nat
 extern "wiz_sys_getenv" cGetenv : String → IO String
 extern "mkdir" (header := "sys/stat.h") cMkdir : String → Nat → IO Nat
 extern "rename" (header := "stdio.h") cRename : String → String → IO Nat
-extern "system" (header := "stdlib.h") cSystem : String → IO Nat
+-- `system(3)` runs the string through `/bin/sh`, so every component is quoted before it
+-- is put in one (`shellQuote` below). Its `int` result is read as `UInt64`: `-1`
+-- (`system` could not start the shell) is 2^64-1 here, which `UInt64.toNat` would refuse
+-- (a `Nat` is 63 bits in the selfhost runtime), and `exitCodeOf` decodes it.
+extern "system" (header := "stdlib.h") cSystem : String → IO UInt64
 -- `--cache-prune` (D5): the host runtime's interfaces (`lib/Sys.wiz`, `Wiz/Cache.lean`);
 -- the selfhost runtime has the same three leaves (a list of `kind, size, mtime, ns,
 -- mode`; the directory's names; the wall clock).
@@ -243,10 +253,6 @@ def joinSpaces : List String → String
   | .cons s rest => match rest with
     | .nil => s
     | .cons _ _ => String.append s (String.append " " (joinSpaces rest))
-
-def spacesOf : List String → String
-  | .nil => ""
-  | .cons s rest => String.append " " (String.append s (spacesOf rest))
 
 def docText : Doc → String
   | .t s => s
@@ -1170,13 +1176,21 @@ def listHas (s : String) : List String → Bool
     | .true => .true
     | .false => listHas s rest
 
--- `--target`: the host's names are c, llvm and wasm; the self-hosted backend emits C
--- and, for C5's first slice, LLVM (a closed `main : Nat`, `genLLVM`), so `wasm` is the
--- one it refuses by name
-def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" .nil))
+-- `--target`: the host knows c, llvm, wasm, bpf, js and the tracing alias `ebpf`; the
+-- self-hosted backend emits C and, for C5's first slice, LLVM (a closed `main : Nat`,
+-- `genLLVM`), so wasm and js are C5 gaps and bpf/ebpf are refused as probes (a known
+-- name is not a capability)
+def targetModes : List String := .cons "c" (.cons "llvm" (.cons "wasm" (.cons "bpf" (.cons "js" (.cons "ebpf" .nil)))))
 
 def targetOk (t : String) : Bool := Bool.or (strEq t "c") (strEq t "llvm")
 def targetKnown (t : String) : Bool := listHas t targetModes
+
+-- `backend ebpf` (the tree spelling is `bpf`) reads `bpf-core/1`; the selfhost serialises
+-- no program and emits `c-text/1` only. This is a refusal, not a C fallback
+-- (`wiz-notes/ebpf-dynamic.md` §5; `wiz-notes/targets-ext.md` §4).
+def targetIsProbe (t : String) : Bool := Bool.or (strEq t "bpf") (strEq t "ebpf")
+
+def probeRefusal : String := "unsupported-target: the backend 'ebpf' reads bpf-core/1. This toolchain emits c-text/1 and does not serialise its program (docs/selfhost-compiler.md:114). Build the probe with the host wiz."
 
 -- the selected backend's name (`c` when no `--target` was given)
 def targetName (o : Opts) : String := match o.target with
@@ -1268,12 +1282,14 @@ partial def parseOptsGo : List String → Opts → Option String → List String
                                   -- (the host's `takeTarget` messages and exit 1)
                                   | .false => match strEq a "--target" with
                                     | .true => match rest with
-                                      | .nil => .fail "--target needs c, llvm or wasm"
+                                      | .nil => .fail "--target needs c, llvm, wasm, bpf, js or ebpf"
                                       | .cons t r2 => match targetOk t with
                                         | .true => parseOptsGo r2 { o with target := .some t } file extra
-                                        | .false => match targetKnown t with
-                                          | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
-                                          | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm or wasm)"))
+                                        | .false => match targetIsProbe t with
+                                          | .true => .fail probeRefusal
+                                          | .false => match targetKnown t with
+                                            | .true => .fail (String.append "unsupported target " (String.append t ": the self-hosted backend emits C and LLVM (C5)"))
+                                            | .false => .fail (String.append "unknown target " (String.append t " (choose c, llvm, wasm, bpf, js or ebpf)"))
                                     | .false => match strEq a "--cache-verify" with
                                       | .true => match rest with
                                         | .nil => .err "unknown flag: --cache-verify"
@@ -1341,13 +1357,15 @@ def usageText : String :=
   "  --cache-verify off|warn|strict (check an entry against its output manifest;\n" +++
   "  strict: only manifested entries), --target c|llvm (LLVM is a first slice, C5:\n" +++
   "  a closed `main : Nat` lowered to the host's IR; `--llvm` is its alias;\n" +++
-  "  --wasm/--split are the host's and are refused), --llc CMD,\n" +++
+  "  --wasm/--split are the host's and are refused),\n" +++
   "  -v (cache hits and misses), --types (each declaration's type),\n" +++
   "  --trust-native (27a: `def X : a = b := native_refl` is decided by running a and\n" +++
   "  b, not by the kernel; `#print axioms` lists the axiom it adds. There is no\n" +++
   "  --native-fuel: the self-hosted evaluator has no step counter),\n" +++
-  "  --cc CMD, --rt DIR (the selfhost runtime, default selfhost), --cflags FLAGS,\n" +++
-  "  --ldflags FLAGS, --trust-smt (the `smt` tactic is refused: no solver here, C15);\n" +++
+  "  --cc PATH, --llc PATH (one executable each, not a command line), --rt DIR (the\n" +++
+  "  selfhost runtime, default selfhost), --cflags FLAGS, --ldflags FLAGS (word\n" +++
+  "  lists, as the host reads them), --trust-smt (the `smt` tactic is refused: no\n" +++
+  "  solver here, C15);\n" +++
   "  backend: --rc, --rc-owned, --gc, --unbox-structs, --lib, --no-main, --header\n" +++
   "\n" +++
   "without a command: input.wiz in the working directory to standard output\n"
@@ -1691,11 +1709,86 @@ def libOf (o : Opts) (p : Prepared) : IO (Option LibText) := do
       | .cons _ _ => IO.bind (ePrintAll missing) (fun u => noneLib)
       | .nil => someLib (LibText.mk (cText o p lines) (headerTextOf p)))
 
+-- ------------------------------------------------------------------------------------
+-- Shell quoting and wait status
+--
+-- `system(3)` runs its string through `/bin/sh`, so every component the driver
+-- interpolates — `--cc`, `--llc`, `--rt`, `--cflags`, `--ldflags`, an input or output
+-- path, and the program's own arguments — is quoted with `shellQuote` first: a path or
+-- argument with a space, `;`, `$`, a quote or a newline stays exactly one shell word and
+-- cannot start a second command. The fixed flags (`-O2`, `-w`, `-c`, `-o`, `-I`) are the
+-- driver's own literals and are not quoted. There is no argv-form process call in the
+-- selfhost runtime (`selfhost/rt.c` has no `wiz_sys_spawn`, unlike
+-- `runtime/rt_sys.inc`), and the extern FFI here cannot pass a `char *argv[]`, so a
+-- quoted shell string is the form `system(3)` takes.
+--
+-- POSIX single-quote quoting: everything between the quotes is literal, and an embedded
+-- `'` is closed, escaped and reopened (`'\''`), which is the one character a single-quoted
+-- string cannot hold.
+def shellQuoteBody : List Char → String
+  | .nil => ""
+  | .cons c cs => match Nat.beq (Char.code c) 39 with
+    | .true => String.append "'\\''" (shellQuoteBody cs)
+    | .false => String.append (String.mk (.cons c .nil)) (shellQuoteBody cs)
+
+def shellQuote (s : String) : String :=
+  String.append "'" (String.append (shellQuoteBody (charsOf s)) "'")
+
+-- one quoted shell word per element, each preceded by a space (empty for `.nil`, so a
+-- command never ends in one)
+def quoteAll : List String → String
+  | .nil => ""
+  | .cons s rest => String.append " " (String.append (shellQuote s) (quoteAll rest))
+
+-- `--cflags FLAGS` is a word list, as the host reads it (`Wiz/Toolchain.lean`'s
+-- `words`): one shell word per whitespace-separated flag, then each quoted. So
+-- `--cflags "-I/a -I/b"` stays two flags, and a flag's own `$` or `;` is still literal.
+def isFlagSpace (c : Nat) : Bool := Bool.or (Nat.beq c 32) (Nat.beq c 9)
+
+def wordsGo : List Char → List Char → List String
+  | .nil, acc => match acc with
+    | .nil => .nil
+    | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) .nil
+  | .cons c cs, acc => match isFlagSpace (Char.code c) with
+    | .true => match acc with
+      | .nil => wordsGo cs .nil
+      | .cons _ _ => .cons (String.mk (List.reverseOf acc .nil)) (wordsGo cs .nil)
+    | .false => wordsGo cs (.cons c acc)
+
+def wordsOf (s : String) : List String := match s with
+  | .mk cs => wordsGo cs .nil
+
+-- the `--cflags`/`--ldflags` values as quoted shell words
+def quoteFlags : List String → String
+  | .nil => ""
+  | .cons s rest => String.append (quoteAll (wordsOf s)) (quoteFlags rest)
+
+-- `system(3)` returns `waitpid`'s status: a program that exited normally leaves its code
+-- in bits 8–15 (`WEXITSTATUS`), and a program killed by a signal has that signal in the
+-- low seven bits (`WIFSIGNALED`/`WTERMSIG`). The old `st / 256` read every such status
+-- (1–127) as exit 0 and reported a killed program as a success. `st` is the `int`
+-- widened to `UInt64`, so C's -1 (the shell could not start) is 2^64-1, which no wait
+-- status reaches; it is the one value above 2^31 here, and both functions read it as
+-- "no status" (`127`, the shell's "not found" code) rather than letting `UInt64.toNat`
+-- refuse 2^64-1.
+def waitSignal (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .true => Nat.land (UInt64.toNat st) 127
+  | .false => 0
+
+def exitCodeOf (st : UInt64) : Nat :=
+  match UInt64.lt st (UInt64.ofNat 2147483648) with
+  | .false => 127
+  | .true => match Nat.beq (waitSignal st) 0 with
+    | .true => Nat.land (Nat.shiftRight (UInt64.toNat st) 8) 255
+    | .false => Nat.add 128 (waitSignal st)
+
 -- the host's `compileC` library path: `cc -O2 -w -c -o OUT OUT.c` with the toolchain's
 -- flags (the self-hosted C includes `rt.c`, so the runtime directory is an include root)
 def objectCommand (o : Opts) (src out : String) : String :=
-  String.append o.cc (String.append " -O2 -w -c -o " (String.append out (String.append " "
-    (String.append src (String.append " -I" (String.append o.rt (spacesOf o.cflags)))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -c -o " (String.append (shellQuote out)
+    (String.append " " (String.append (shellQuote src) (String.append " -I"
+      (String.append (shellQuote o.rt) (quoteFlags o.cflags)))))))
 
 def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
   let cFile := withExtension out "c";
@@ -1709,7 +1802,7 @@ def writeLib (o : Opts) (out : String) (l : LibText) : IO Unit := do
     | .false => do IO.ePrintln (String.append "error: cannot write " hFile); Process.exit 1
     | .true => do
       st ← cSystem (objectCommand o cFile out);
-      match Nat.beq st 0 with
+      match Nat.beq (exitCodeOf st) 0 with
       | .true => IO.pure ()
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append cFile "):"));
@@ -1807,10 +1900,22 @@ def buildCmd (o : Opts) (file : String) : IO Unit :=
 -- run / eval
 
 def ccCommand (o : Opts) (src prog : String) : String :=
-  String.append o.cc (String.append " -O2 -w -I" (String.append o.rt (String.append (spacesOf o.cflags)
-    (String.append " " (String.append src (String.append " -o " (String.append prog (spacesOf o.ldflags))))))))
+  String.append (shellQuote o.cc) (String.append " -O2 -w -I" (String.append (shellQuote o.rt)
+    (String.append (quoteFlags o.cflags) (String.append " " (String.append (shellQuote src)
+      (String.append " -o " (String.append (shellQuote prog) (quoteFlags o.ldflags))))))))
 
-def exitCodeOf (st : Nat) : Nat := Nat.div st 256
+-- `prog ARG…`, every word quoted: the program's own arguments are data, not shell text
+def programCommand (prog : String) (extra : List String) : String :=
+  String.append (shellQuote prog) (quoteAll extra)
+
+-- how a program's wait status is reported: a signal death (`128 + signal`, as a shell
+-- reports it) says so, so a SIGSEGV is visible as one instead of "exited with code 0"
+def reportProgramStatus (st : UInt64) : IO Unit :=
+  match Nat.beq (waitSignal st) 0 with
+  | .true => IO.ePrintln (String.append "error: the program exited with code "
+      (Nat.toString (exitCodeOf st)))
+  | .false => IO.ePrintln (String.append "error: the program was killed by signal "
+      (Nat.toString (waitSignal st)))
 
 def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List String) : IO Unit := do
   let dir := String.append "/tmp/wiz-selfhost-" key;
@@ -1826,17 +1931,17 @@ def compileAndRun (o : Opts) (key : String) (ctext : String) (extra : List Strin
     let prog := String.append dir "/prog";
     let cmd := ccCommand o src prog;
     st ← cSystem cmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: the C compiler failed (the C is " (String.append src "):"));
       IO.ePrintln cmd;
       Process.exit 1
     | .true => do
-      st2 ← cSystem (String.append prog (spacesOf extra));
+      st2 ← cSystem (programCommand prog extra);
       match Nat.beq (exitCodeOf st2) 0 with
       | .true => IO.pure ()
       | .false => do
-        IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st2)));
+        reportProgramStatus st2;
         Process.exit 1
 
 -- (C5) Compile the slice's LLVM text with `llc` and `cc` and run it. The module calls
@@ -1855,29 +1960,30 @@ def compileAndRunLLVM (o : Opts) (key : String) (lltext : String) (extra : List 
     | .none => IO.pure ();
     let obj := String.append dir "/main.o";
     let prog := String.append dir "/prog";
-    let llcCmd := String.append o.llc (String.append " -O2 -filetype=obj -relocation-model=pic -o "
-      (String.append obj (String.append " " src)));
+    let llcCmd := String.append (shellQuote o.llc) (String.append " -O2 -filetype=obj -relocation-model=pic -o "
+      (String.append (shellQuote obj) (String.append " " (shellQuote src))));
     st ← cSystem llcCmd;
-    match Nat.beq st 0 with
+    match Nat.beq (exitCodeOf st) 0 with
     | .false => do
       IO.ePrintln (String.append "error: llc failed (the IR is " (String.append src "):"));
       IO.ePrintln llcCmd;
       Process.exit 1
     | .true => do
-      let ccCmd := String.append o.cc (String.append " -O2 -w -o "
-        (String.append prog (String.append " " (String.append obj (spacesOf o.ldflags)))));
+      let ccCmd := String.append (shellQuote o.cc) (String.append " -O2 -w -o "
+        (String.append (shellQuote prog) (String.append " " (String.append (shellQuote obj)
+          (quoteFlags o.ldflags)))));
       st2 ← cSystem ccCmd;
-      match Nat.beq st2 0 with
+      match Nat.beq (exitCodeOf st2) 0 with
       | .false => do
         IO.ePrintln (String.append "error: the C compiler failed to link " (String.append obj ":"));
         IO.ePrintln ccCmd;
         Process.exit 1
       | .true => do
-        st3 ← cSystem (String.append prog (spacesOf extra));
+        st3 ← cSystem (programCommand prog extra);
         match Nat.beq (exitCodeOf st3) 0 with
         | .true => IO.pure ()
         | .false => do
-          IO.ePrintln (String.append "error: the program exited with code " (Nat.toString (exitCodeOf st3)));
+          reportProgramStatus st3;
           Process.exit 1
 
 -- the kept text, compiled and run by the selected backend
@@ -1973,17 +2079,21 @@ def legacyCmd (args : List String) : IO Unit := do
 -- lsp: the language server (D8), JSON-RPC over stdin/stdout
 --
 -- The subset is the one the playground's self-hosted shim answers
--- (`web/selfhost-lsp-shim.js`, the `docs/playground-lsp.md` contract): `initialize`
--- (`textDocumentSync` 1: full text, `wizInfoview` v1), `textDocument/didOpen`,
--- `didChange`, `didClose`, `textDocument/publishDiagnostics`, the `wiz/elaborated`
--- notification when the client asks for it, and the infoview's plain queries
--- (`wiz/plainGoal`, `wiz/plainTermGoal`): a check with the collection on records each
--- definition body's expected type and, in a `by` block, the goals after each tactic
--- (`LspEntry` in `selfhost/Frontend.wiz`), and the queries answer from those entries in
--- the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
+-- (`web/selfhost-lsp-shim.js`, the `docs/playground-lsp.md` contract), plus the
+-- declaration navigation the shim has: `initialize` (`textDocumentSync` 1: full text,
+-- `positionEncoding` UTF-16, hover/definition/completion providers, `wizInfoview` v1),
+-- `textDocument/didOpen`, `didChange`, `didClose`, `textDocument/publishDiagnostics`, the
+-- `wiz/elaborated` notification when the client asks for it, and the infoview's plain
+-- queries (`wiz/plainGoal`, `wiz/plainTermGoal`). A check with the collection on records
+-- each definition body's expected type, the goals after each tactic, and each
+-- declaration (`LspEntry` in `selfhost/Frontend.wiz`); the queries answer from those
+-- entries in the host's shapes (`Wiz/LSP.lean`): `plainTermGoal` is `{goal, range}` of the
 -- innermost term at the cursor, `plainGoal` the nearest snapshot at or before it
 -- (`{rendered, goals, messages}`, `null` outside every `by` block). `textDocument/hover`
--- is `null` and the interactive infoview methods are `MethodNotFound`, as in the shim.
+-- is the declaration's signature as Markdown, `definition` its `Location`, and
+-- `completion` the declarations matching the identifier before the caret (the shim's
+-- three, with the host's item fields); a name the index does not know is `null`. The
+-- interactive infoview methods are `MethodNotFound`, as in the shim.
 -- Diagnostics are `check`'s, with `source: "wiz"`,
 -- the code `check` prints, and a range from the diagnostic's position to the end of its
 -- line. An imported module's diagnostics are not published: open that module. A
@@ -1991,13 +2101,13 @@ def legacyCmd (args : List String) : IO Unit := do
 -- the text is the buffer's, and the path only names it in diagnostics and is the first
 -- `import` root. (`import_c` headers are read from the server's working directory, as
 -- `check` reads them; the Lean server resolves them beside the document.) Positions are
--- the frontend's, which count characters; as in the Lean server (`Wiz/LSP.lean`), that
--- agrees with LSP's UTF-16 unit outside the BMP.
+-- LSP's: `character` counts UTF-16 code units, so an astral character is two and every
+-- column after it on the line moves by one (the frontend's columns count code points and
+-- are converted at the boundary).
 --
--- Not here (see `wiz-notes/selfhost-parity.md` D8): definition, references,
--- completion, signature help, inlay hints, semantic tokens, document and workspace
--- symbols, folding, code actions, formatting (`fmt`), the documentation generator
--- (`doc`), and `repl`.
+-- Not here (see `wiz-notes/selfhost-parity.md` D8): references, signature help, inlay
+-- hints, semantic tokens, document and workspace symbols, folding, code actions,
+-- formatting (`fmt`), the documentation generator (`doc`), and `repl`.
 
 -- one byte of the client's stream. `getchar` is C's `int`; the return is read as
 -- `UInt64`, so the end of the file (a negative `int`, hence above any byte) is seen
@@ -2469,28 +2579,60 @@ def lspLineLen : List Char → Nat
   | .nil => 0
   | .cons c cs => if Nat.beq (Char.code c) 10 then 0 else Nat.succ (lspLineLen cs)
 
--- the line's length in characters (the end of a diagnostic's range)
+-- the line's length in code points (the end of a diagnostic's range)
 def lspLineEnd (text : String) (ln : Nat) : Nat := match text with
   | .mk cs => lspLineLen (lspDropLines cs (Nat.sub ln 1))
 
+-- ## UTF-16 positions
+--
+-- LSP's `character` counts UTF-16 code units (the default `positionEncoding`, and the
+-- one this server advertises). The frontend's columns, like Wiz's `Char`, count code
+-- points, so the two agree only below the BMP: an astral character (U+10000 and above)
+-- is one code point but two UTF-16 units, and every column after it on the same line is
+-- one more than the frontend's.
+
+-- the UTF-16 code units of a code point (an astral character is two)
+def lspUnitsOf (c : Char) : Nat :=
+  if Nat.lt (Char.code c) 65536 then 1 else 2
+
+-- the UTF-16 width of the first `k` code points of a line (stopping at its newline)
+partial def lspWidthGo (acc : Nat) : List Char → Nat → Nat
+  | .nil, _ => acc
+  | .cons _ _, .zero => acc
+  | .cons c cs, .succ k =>
+    if strEqC c 10 then acc else lspWidthGo (Nat.add acc (lspUnitsOf c)) cs k
+
+-- line `ln` (1-based) and code-point column `col` (0-based) as a UTF-16 column
+def lspUtf16Col (text : String) (ln col : Nat) : Nat :=
+  lspWidthGo 0 (lspDropLines (charsOf text) (Nat.sub ln 1)) col
+
+-- a diagnostic's position (1-based line and code-point column) and the end of its line,
+-- in UTF-16 units
 def lspRange (text : String) (ln col : Nat) : J :=
   let l0 := Nat.sub ln 1;
-  let c0 := Nat.sub col 1;
-  let e := Nat.max (lspLineEnd text ln) c0;
+  let c0 := lspUtf16Col text ln (Nat.sub col 1);
+  let e := Nat.max (lspUtf16Col text ln (lspLineEnd text ln)) c0;
   .jobj (.ocons "start" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
       (.ocons "character" (.jnum (Nat.toString c0)) .onil)))
     (.ocons "end" (.jobj (.ocons "line" (.jnum (Nat.toString l0))
       (.ocons "character" (.jnum (Nat.toString e)) .onil))) .onil))
 
+-- the host's `Pos` (1-based line and code-point column) as a JSON position
+def lspPosJ (text : String) (p : Pos) : J := match p with
+  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
+    (.ocons "character" (.jnum (Nat.toString (lspUtf16Col text line (Nat.sub col 1)))) .onil))
+
+-- a range from character offsets (the host's `range`: exactly `start` to `stop`, so an
+-- empty range stays empty; the goal helpers below widen theirs instead)
+def lspRangeOffJ (text : String) (start stop : Nat) : J :=
+  .jobj (.ocons "start" (lspPosJ text (lineCol text start))
+    (.ocons "end" (lspPosJ text (lineCol text stop)) .onil))
+
 -- (D8 goals) a range from character offsets, as the host's `range` (`Wiz/LSP.lean`):
 -- start at `start`, end at `stop` (at least one character on, as an empty range is not
 -- clickable)
-def lspPosJ (p : Pos) : J := match p with
-  | .mk line col => .jobj (.ocons "line" (.jnum (Nat.toString (Nat.sub line 1)))
-    (.ocons "character" (.jnum (Nat.toString (Nat.sub col 1))) .onil))
 def lspRangeOff (text : String) (start stop : Nat) : J :=
-  .jobj (.ocons "start" (lspPosJ (lineCol text start))
-    (.ocons "end" (lspPosJ (lineCol text (Nat.max stop (Nat.add start 1)))) .onil))
+  lspRangeOffJ text start (Nat.max stop (Nat.add start 1))
 
 -- (D8 goals) the innermost term entry at `off` (a caret at an entry's end counts, as
 -- `Query.termGoalAt`'s `endIn`; ties go to the later entry, and the list is newest
@@ -2535,16 +2677,192 @@ def lspGoalAt (es : List LspEntry) (off : Nat) : Option LspGoal :=
     | .term _ _ _ => lspGoalAt rest off
     | .decl _ _ _ _ _ => lspGoalAt rest off
 
--- (D8 goals) an LSP position as a character offset (`ofPos` in `Wiz/LSP.lean`)
-partial def lspOffGo : List Char → Nat → Nat → Nat
+-- ## Declarations (the check's `.decl` entries: hover, definition, completion)
+--
+-- The check records one `decl` entry per declaration the document added (`LspEntry` in
+-- `selfhost/Frontend.wiz`): the declaration's source name, its type as the kernel prints
+-- it, and the span of the name's token. The host answers these three methods from its
+-- info tree; here they are answered from that index, in the host's JSON shapes. Only
+-- this document's declarations are in it (an imported module's are in its own document's
+-- index), so a name from an import is `null`; a Prelude name is `null` too.
+
+structure LspDecl where
+  start : Nat
+  stop : Nat
+  name : String
+  ty : String
+  kind : Nat
+
+def lspDeclsOf : List LspEntry → List LspDecl
+  | .nil => .nil
+  | .cons e es => match e with
+    | .decl s t n ty k => .cons (LspDecl.mk s t n ty k) (lspDeclsOf es)
+    | .term _ _ _ => lspDeclsOf es
+    | .goal _ _ _ => lspDeclsOf es
+
+-- an identifier character (a dotted name is one word, as the host's `wordStart`)
+def lspIdCode (n : Nat) : Bool := Bool.or (isIdRest n) (Nat.beq n 46)
+
+structure LspWord where
+  start : Nat
+  stop : Nat
+
+partial def lspWordStartGo (us : Array Nat) (i : Nat) : Nat :=
+  match Nat.beq i 0 with
+  | .true => 0
+  | .false => match lspIdCode (Array.getD us (Nat.sub i 1) 0) with
+    | .true => lspWordStartGo us (Nat.sub i 1)
+    | .false => i
+
+partial def lspWordEndGo (us : Array Nat) (len i : Nat) : Nat :=
+  match Nat.le len i with
+  | .true => i
+  | .false => match lspIdCode (Array.getD us i 0) with
+    | .true => lspWordEndGo us len (Nat.add i 1)
+    | .false => i
+
+-- The identifier under the caret or just before it (a caret at a name's end is on it)
+def lspWordRange (text : String) (off : Nat) : LspWord :=
+  let us := String.codes text;
+  let len := Array.size us;
+  let at := match Nat.lt len off with
+    | .true => len
+    | .false => off;
+  LspWord.mk (lspWordStartGo us at) (lspWordEndGo us len at)
+
+def lspWordText (text : String) (w : LspWord) : String :=
+  String.mk (slice (Nat.sub w.stop w.start) (String.codes text) w.start)
+
+def lspLowerCode (n : Nat) : Nat := match Bool.and (Nat.le 65 n) (Nat.le n 90) with
+  | .true => Nat.add n 32
+  | .false => n
+
+def lspLowerGo : List Char → List Char
+  | .nil => .nil
+  | .cons c cs => .cons (Char.mk (lspLowerCode (Char.code c))) (lspLowerGo cs)
+
+-- ASCII lowercase, for a case-insensitive completion prefix
+def lspLower (s : String) : String := match s with
+  | .mk cs => String.mk (lspLowerGo cs)
+
+def lspFindExact : List LspDecl → String → Option LspDecl
+  | .nil, _ => .none
+  | .cons d rest, name => match strEq d.name name with
+    | .true => .some d
+    | .false => lspFindExact rest name
+
+-- a suffix match's result: the declaration and how many names ended with `.name`
+structure LspSuffix where
+  hit : Option LspDecl
+  count : Nat
+
+def lspFindSuffixGo : List LspDecl → String → LspSuffix
+  | .nil, _ => LspSuffix.mk .none 0
+  | .cons d rest, name => match endsWithS d.name (String.append "." name) with
+    | .true => match lspFindSuffixGo rest name with
+      | .mk _ n => LspSuffix.mk (.some d) (Nat.add n 1)
+    | .false => lspFindSuffixGo rest name
+
+-- The declaration a source name denotes: an exact name, else a unique suffix (`mk` for
+-- `T.mk`, as the shim and `EditorModel.lspDeclarationJson` look it up)
+def lspFindDecl (ds : List LspDecl) (name : String) : Option LspDecl :=
+  match strEq name "" with
+  | .true => .none
+  | .false => match lspFindExact ds name with
+    | .some d => .some d
+    | .none => match lspFindSuffixGo ds name with
+      | .mk hit n => match Nat.beq n 1 with
+        | .true => hit
+        | .false => .none
+
+-- the host's hover text for a declaration (a `wiz` fence with `name : type`)
+def lspSignature (d : LspDecl) : String := match strEq d.ty "" with
+  | .true => d.name
+  | .false => String.append d.name (String.append " : " d.ty)
+
+def lspHoverResult (text : String) (es : List LspEntry) (off : Nat) : J :=
+  let w := lspWordRange text off;
+  match lspFindDecl (lspDeclsOf es) (lspWordText text w) with
+  | .none => .jnull
+  | .some d => .jobj (.ocons "contents" (.jobj (.ocons "kind" (.jstr "markdown")
+      (.ocons "value" (.jstr (String.append "```wiz\n"
+        (String.append (lspSignature d) "\n```"))) .onil))) .onil)
+
+def lspDefinitionResult (text uri : String) (es : List LspEntry) (off : Nat) : J :=
+  let w := lspWordRange text off;
+  match lspFindDecl (lspDeclsOf es) (lspWordText text w) with
+  | .none => .jnull
+  | .some d => .jobj (.ocons "uri" (.jstr uri)
+    (.ocons "range" (lspRangeOffJ text d.start d.stop) .onil))
+
+def lspFilterDecls : List LspDecl → String → List LspDecl
+  | .nil, _ => .nil
+  | .cons d rest, want => match Bool.or (strEq want "") (startsWithS want (lspLower d.name)) with
+    | .true => .cons d (lspFilterDecls rest want)
+    | .false => lspFilterDecls rest want
+
+def lspTakeDecls : Nat → List LspDecl → List LspDecl
+  | _, .nil => .nil
+  | .zero, _ => .nil
+  | .succ k, .cons d rest => .cons d (lspTakeDecls k rest)
+
+-- `detail` only when the type is not empty (the host's items omit an empty one)
+def lspDetailField (ty : String) : JObj := match strEq ty "" with
+  | .true => .onil
+  | .false => .ocons "detail" (.jstr ty) .onil
+
+-- a completion item in the host's shape: `label`, `kind` (`kindFunction`: the frontend
+-- records these as globals), `sortText`/`filterText` as the host's `globalItem` sets
+-- them, then its `textEdit` over the typed prefix
+def lspCompletionItem (text : String) (start off : Nat) (d : LspDecl) : J :=
+  .jobj (.ocons "label" (.jstr d.name)
+    (.ocons "kind" (.jnum "3")
+    (.ocons "sortText" (.jstr (String.append "3" d.name))
+    (.ocons "filterText" (.jstr d.name)
+    (.ocons "textEdit" (.jobj (.ocons "range" (lspRangeOffJ text start off)
+      (.ocons "newText" (.jstr d.name) .onil)))
+    (lspDetailField d.ty))))))
+
+def lspCompletionItems (text : String) (start off : Nat) : List LspDecl → JList
+  | .nil => .jnil
+  | .cons d rest => .jcons (lspCompletionItem text start off d) (lspCompletionItems text start off rest)
+
+-- `textDocument/completion`: `{isIncomplete, items}`; the declarations whose name starts
+-- with the identifier before the caret (case-insensitively), capped at 200
+def lspCompletionResult (text : String) (es : List LspEntry) (off : Nat) : J :=
+  let us := String.codes text;
+  let len := Array.size us;
+  let at := match Nat.lt len off with
+    | .true => len
+    | .false => off;
+  let start := lspWordStartGo us at;
+  let want := lspLower (String.mk (slice (Nat.sub at start) us start));
+  let ds := lspTakeDecls 200 (lspFilterDecls (lspDeclsOf es) want);
+  .jobj (.ocons "isIncomplete" (.jbool .false)
+    (.ocons "items" (.jarr (lspCompletionItems text start at ds)) .onil))
+
+-- (D8 goals) an LSP position (0-based line, UTF-16 character) as a code-point offset
+partial def lspSkipLines : List Char → Nat → Nat → Nat
+  | _, .zero, i => i
   | .nil, _, i => i
-  | .cons _ _, .zero, i => i
   | .cons c cs, .succ k, i => match strEqC c 10 with
-    | .true => lspOffGo cs k (i + 1)
-    | .false => lspOffGo cs (.succ k) (i + 1)
+    | .true => lspSkipLines cs k (Nat.add i 1)
+    | .false => lspSkipLines cs (.succ k) (Nat.add i 1)
+
+partial def lspUnitsGo : List Char → Nat → Nat → Nat
+  | .nil, _, i => i
+  | _, .zero, i => i
+  | .cons c cs, .succ k, i => match strEqC c 10 with
+    | .true => i
+    | .false => lspUnitsGo cs (Nat.sub (Nat.succ k) (lspUnitsOf c)) (Nat.add i 1)
+
+-- An LSP position as a code-point offset (`ofPos` in `Wiz/LSP.lean`): the line's start,
+-- then `character` UTF-16 units into it. A character inside a surrogate pair (not a
+-- position an editor sends) counts as after the pair.
 def lspOffOf (text : String) (line col : Nat) : Nat :=
-  match text with
-  | .mk cs => Nat.add (lspOffGo cs line 0) col
+  let cs := charsOf text;
+  let base := lspSkipLines cs line 0;
+  lspUnitsGo (lspDropLines cs line) col base
 
 def lspStrList : List String → JList
   | .nil => .jnil
@@ -2621,7 +2939,8 @@ def lspFrame (body : String) : String :=
 def lspSend (j : J) : IO Unit := IO.print (lspFrame (jRender j))
 
 -- the host's `capabilities`, restricted to what this server answers (an absent provider
--- is not supported; the shim says `hoverProvider: false` the same way)
+-- is not supported). `positionEncoding` is UTF-16 and positions are counted in UTF-16
+-- units; hover, definition and completion answer from the check's declaration index.
 def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
   (.ocons "methods" (.jarr (.jcons (.jstr "wiz/plainGoal")
     (.jcons (.jstr "wiz/plainTermGoal") .jnil)))
@@ -2629,8 +2948,11 @@ def lspInfoviewCaps : J := .jobj (.ocons "version" (.jnum "1")
 
 def lspCaps : J := .jobj (.ocons "positionEncoding" (.jstr "utf-16")
   (.ocons "textDocumentSync" (.jnum "1")
-  (.ocons "hoverProvider" (.jbool .false)
-  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))
+  (.ocons "hoverProvider" (.jbool .true)
+  (.ocons "definitionProvider" (.jbool .true)
+  (.ocons "completionProvider" (.jobj (.ocons "triggerCharacters"
+    (.jarr (.jcons (.jstr ".") .jnil)) .onil))
+  (.ocons "experimental" (.jobj (.ocons "wizInfoview" lspInfoviewCaps .onil)) .onil))))))
 
 def lspServerInfo : J := .jobj (.ocons "name" (.jstr "wiz-selfhost")
   (.ocons "version" (.jstr wizVersion) .onil))
@@ -2723,6 +3045,30 @@ def lspDidChange (st : LspState) (msg : J) : IO LspState := do
     let doc := LspDoc.mk uri (lspUriPath uri) (lspChangesText changes) version (.nil : List LspEntry);
     lspCheck (LspState.mk (lspPut st.docs doc) st.roots st.elaborated st.session st.closed) doc
 
+def lspIsDocMethod (method : String) : Bool :=
+  Bool.or (strEq method "textDocument/hover")
+    (Bool.or (strEq method "textDocument/definition") (strEq method "textDocument/completion"))
+
+-- `textDocument/hover`, `/definition` and `/completion`: the cursor's code-point offset
+-- (the position's UTF-16 `character`, converted), then the check's declaration index.
+def lspDocRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState := do
+  let uri := jStrOf (jAt msg (.cons "params" (.cons "textDocument" (.cons "uri" .nil))));
+  let line := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "line" .nil))));
+  let col := jNatOf (jAt msg (.cons "params" (.cons "position" (.cons "character" .nil))));
+  match lspFind st.docs uri with
+  -- (as the host: no document is `null`, not an error)
+  | .none => do
+    lspSend (lspReply id .jnull);
+    IO.pure st
+  | .some doc => do
+    let off := lspOffOf doc.text line col;
+    match strEq method "textDocument/hover" with
+    | .true => lspSend (lspReply id (lspHoverResult doc.text doc.entries off))
+    | .false => match strEq method "textDocument/definition" with
+      | .true => lspSend (lspReply id (lspDefinitionResult doc.text uri doc.entries off))
+      | .false => lspSend (lspReply id (lspCompletionResult doc.text doc.entries off));
+    IO.pure st
+
 def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspState :=
   match strEq method "initialize" with
   | .true => do
@@ -2759,10 +3105,8 @@ def lspRequest (st : LspState) (id : J) (method : String) (msg : J) : IO LspStat
             | .none => lspSend (lspReply id .jnull)
           | .none => lspSend (lspReply id .jnull);
           IO.pure st
-        | .false => match strEq method "textDocument/hover" with
-          | .true => do
-            lspSend (lspReply id .jnull);
-            IO.pure st
+        | .false => match lspIsDocMethod method with
+          | .true => lspDocRequest st id method msg
           | .false => do
             lspSend (lspError id "-32601" (String.append "the self-hosted server has no " method));
             IO.pure st

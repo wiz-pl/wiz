@@ -41,6 +41,7 @@ Wiz/Socket.lean	closeRaw	extern	c/sockets.c: close and unlink the socket path se
 Wiz/Socket.lean	connectRaw	extern	c/sockets.c connect(2) to the buffered path: IO; handles come back through wiz_sock_ok_handles
 Wiz/Socket.lean	exitOnPanicRaw	extern	c/sockets.c: sets the process-wide exit-on-panic flag, so a panic fails the process instead of returning a default; makes failures louder, never hides one
 Wiz/Socket.lean	listenRaw	extern	c/sockets.c bind/listen on the buffered path: IO; the descriptor comes back through wiz_sock_ok_fd
+Wiz/Socket.lean	modeRaw	extern	c/sockets.c stat(2) of the buffered socket path: IO; returns only st_mode & 0777 through wiz_sock_ok_fd, read by the mode test
 Wiz/Socket.lean	pair	extern	c/sockets.c socketpair(2): IO; handles come back through wiz_sock_ok_pair
 Wiz/Socket.lean	pathClear	extern	c/sockets.c: clears the C path buffer; IO, used only inside setPath
 Wiz/Socket.lean	pathPush	extern	c/sockets.c: appends one byte to the C path buffer; IO, used only inside setPath

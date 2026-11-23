@@ -6,6 +6,19 @@ the alternatives that were considered and rejected, what remains open, and where
 tests are. They complement the reference specification ([CoreSpec](../CoreSpec.md)) and
 the [soundness ledger](../Status.md), which use the same issue names.
 
+**Policy: match Lean's extensibility interfaces, not its feature count.** The target is
+not a feature-for-feature copy of Lean 4. It is the four *interfaces* that let a library
+extend the language without a kernel change: data-driven term elaborators, user-extensible
+`deriving` handlers, hygienic macros, and `simp only`-style explicit lemma sets. The reason
+is concrete: a hard-coded name switch (today `Unit`/`Empty`/`Qty`/`Size`, the
+`Desc`/`μ`/`ν` table and the string-literal encoding) makes every new data primitive a
+compiler change (`wiz-notes/audit-kernel.md` #6), so adding features faster than these
+seams entrenches the switch. The registry shape that `wiz-notes/targets-ext.md` describes
+for targets — one `Entry` record, a table resolved by the consumer,
+`Wiz/Lint/Basic.lean:49` as the only registry-shaped ABI in the tree — is the same shape
+the elaborator needs. No new mechanism is proposed here: this paragraph is the policy
+sentence, and `wiz-notes/targets-ext.md` is the design input.
+
 * [mandatory-sorts.md](mandatory-sorts.md): every `Π`/`Σ` carries its two components'
   sorts and every `ULift` its content's, checked by both kernels (U5, U5b, D2).
 * [prf-marker.md](prf-marker.md): the proof marker `prf.{l} t`, which lets both kernels

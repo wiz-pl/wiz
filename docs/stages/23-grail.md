@@ -545,7 +545,10 @@ the index/integrity fields, flat sorted entries and machine-local overrides:
 * Fetching a registry package (`Grail/Registry.lean`) is: if
   `.grail/packages/NAME/.grail-pkg` already equals the archive hash, done; otherwise
   find `<cache>/grail/downloads/SHA256`, verify it (re-download if corrupt), download
-  and verify the hash **before** unpacking, unpack once into the shared store
+  and verify the hash **before** unpacking, list the archive first and refuse a member
+  whose name or link target could escape the unpack directory (absolute or `..` names,
+  absolute or escaping link targets, devices and fifos; relative links inside are fine),
+  unpack once into the shared store
   `<cache>/grail/packages/SHA256` (a temporary directory with
   `tar -xzf --strip-components=1 --no-same-owner`, the lock's `(tree …)` checked before
   the stamp, then a rename), and link `.grail/packages/NAME` to it. A second fetch is a
@@ -588,8 +591,12 @@ commit, entry digest or yank state differs from the snapshot. The **entry digest
 SHA-256 over the canonical `(version …)` node, so one signature covers the archive hash,
 size, tree, command digest, commit, toolchain range, modules/prefixes and dependency
 edges; `grail index snapshot` writes it, and an older snapshot without one still verifies
-a minimal entry but refuses an entry that carries those extra claims. `grail index verify INDEX [--locked]` is the standalone offline verifier, and
-`grail index check --require-signature` audits a repository. The `allowed_signers` file
+a minimal entry but refuses an entry that carries those extra claims. `grail index verify INDEX [--locked]` is the standalone offline verifier: with
+`--locked` it also checks every `pkg` entry of `grail.lock` against the signed snapshot
+(name, version, archive SHA-256, and the tree hash/size when the snapshot has them), so
+a hand-edited lock — the lock itself is not signed — is refused even though
+`fetch --locked` (which reads no index) cannot see it. `grail index check
+--require-signature` audits a repository. The `allowed_signers` file
 is a trust root from outside the index: the copy inside a checkout proves nothing. This
 gives authorship for an index state, not freshness: there is no transparency log or
 gossip, key rotation needs a re-lock, and a mirror serving an old snapshot is only caught
@@ -602,14 +609,20 @@ The snapshot is additive: an index without one is read exactly as before.
   again whenever the cached file is used; a corrupt cache entry is re-downloaded.
   `grail vendor` files are looked up by that same hash.
 * **Every unpacked tree** is checked against the lock's `(tree SHA256)` when the lock
-  has one, in the shared store before the stamp/rename; a hand-edited file in
-  `.grail/packages/NAME` is refused.
+  has one, in the shared store before the stamp/rename. A tree that carries a matching
+  `.grail-pkg` stamp is trusted after that, so a hand edit to `.grail/packages/NAME` of
+  a package that has already been fetched is not detected by a later `fetch` or build;
+  removing the stamp (in the project and in the shared store) forces a re-unpack and the
+  tree check, and `grail cache verify` checks stamps, not tree contents. An override's
+  tree is re-hashed on every build.
 * **The lock's shape** is checked before a build: package versions satisfy the
   requirements, the transitive closure is complete, `sha256`/`tree`/`commands` are
   64 lowercase hex digits, and `--locked` refuses a stale lock, a recorded
   machine-local override, or an unsigned registry lock when `--require-signature` is
   given. `--locked` reads no index, so it checks a signature *entry's shape* only;
-  `grail index verify --locked` is the command that re-verifies the signature itself.
+  `grail index verify --locked` is the command that re-verifies the signature itself
+  **and** compares every `pkg` entry of the lock with the signed snapshot (the lock is
+  not signed, so a hand-edited archive or tree hash is refused there).
 * **A signed index** is verified with `ssh-keygen -Y verify` against an
   `allowed_signers` file passed from outside the index (or the key a `grail.lock`
   already pinned); the snapshot must cover every entry of the index with the same

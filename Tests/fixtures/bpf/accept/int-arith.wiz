@@ -1,5 +1,0 @@
--- [UNRUN] P0 accept neighbour: signed +, -, *, bitwise and shifts are free; only / and
--- % are rejected.
-import Bpf
-
-def ok (x y : IntN 32) : IntN 32 := IntN.add (IntN.mul x y) (IntN.shiftLeft x 3)

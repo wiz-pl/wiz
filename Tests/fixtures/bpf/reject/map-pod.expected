@@ -1,1 +1,0 @@
-bpf: the map value type `Packet` contains a pointer, a closure or a heap object

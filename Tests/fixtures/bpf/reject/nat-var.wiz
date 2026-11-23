@@ -1,5 +1,0 @@
--- [UNRUN] P0 reject fixture: a `Nat` variable is a runtime value. The accepted
--- neighbour is accept/nat-offset.wiz, where the offset folds to a literal.
-import Bpf
-
-def bad (p : Packet) (n : Nat) : Option (UIntN 16) := Packet.load16be p n

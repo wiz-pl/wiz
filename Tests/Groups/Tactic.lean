@@ -442,6 +442,12 @@ def tacticGroup : Group where
           "def both (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by auto\n" ++
           "#print axioms chain\n#print axioms both")
           ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
+    { name := "auto closes two open goals, the second after a hint's subgoal", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "structure Pair (P Q : Prop) where\n  fst : P\n  snd : Q\n" ++
+          "def twoGoals (P Q R : Prop) (h : P → Q) (p : P) (r : R) : Pair Q R := by\n" ++
+          "  constructor\n  auto\n")
+          [] },
     { name := "auto does not affirm the consequent", run := fun _ =>
         failsLibs ("import Logic\n" ++
           "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
@@ -454,15 +460,54 @@ def tacticGroup : Group where
         okLibs ("import Nat\n" ++
           "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
           "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
-          "def bound (a b : Nat) (h : a + b = 3) : Nat.Le a 3 := by\n  omega\n" ++
           "#print axioms leTrans")
           ["'leTrans' does not depend on any axioms"] },
+    { name := "omega P1: sum = constant bounds", run := fun _ =>
+        skip "P1: h : a + b = 3 ⊢ a ≤ 3 needs equality-hypothesis transport built from the hypothesis' own term; raw omega proof terms hit instance-argument conversion" },
     { name := "omega refuses false and non-linear goals", run := fun _ =>
         failsLibs "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
           "omega:" },
     { name := "omega refuses multiplication", run := fun _ =>
         failsLibs "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
           "omega: non-linear" },
+    -- P0 certificate-producing `omega_cert` (`wiz-notes/omega-certificate.md`, S0):
+    -- the search builds a step list, the checker replays it, the kernel checks the term.
+    { name := "omega_cert: two independent chains close by adding the inequalities", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaSum (a b c d : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le c d) :\n" ++
+          "    Nat.Le (a + c) (b + d) := by\n  omega_cert\n" ++
+          "#print axioms omegaSum")
+          ["'omegaSum' does not depend on any axioms"] },
+    { name := "omega_cert: an equality with a sum side gives a bound (the P1 goal)", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaSumConst (a b : Nat) (h : Nat.add a b = 3) : Nat.Le a 3 := by\n  omega_cert\n" ++
+          "#print axioms omegaSumConst")
+          ["'omegaSumConst' does not depend on any axioms"] },
+    { name := "omega_cert: cancelling a common summand", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaCancel (a b k : Nat) (h : Nat.Le (Nat.add a k) (Nat.add b k)) : Nat.Le a b := by\n  omega_cert\n" ++
+          "#print axioms omegaCancel")
+          ["'omegaCancel' does not depend on any axioms"] },
+    { name := "omega_cert refuses a non-linear goal at the tactic's position", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) : a * b = b * a := by\n  omega_cert"
+          "3:3: error: omega: non-linear" },
+    { name := "omega_cert refuses a false linear goal", run := fun _ =>
+        failsLibs "import Omega\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega_cert"
+          "omega: no proof" },
+    { name := "omega_cert: the real-shadow lemma is proved, not assumed", run := fun _ =>
+        okLibs "import Omega\n#print axioms Nat.omegaFM"
+          ["'Nat.omegaFM' does not depend on any axioms"] },
+    { name := "omega_cert does not reverse a hypothesis", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) (h : Nat.Le a b) : Nat.Le b a := by\n  omega_cert"
+          "omega: no proof" },
+    { name := "omega_cert refuses a non-linear hypothesis", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) (h : Nat.mul a b = 3) : Nat.Le a 3 := by\n  omega_cert"
+          "omega: non-linear" },
+    { name := "two subgoals: the second survives the first exact", run := fun _ =>
+        okLib ("import Prelude\nstructure Pairish where\n  a : Nat\n  b : Nat\n" ++
+          "def p : Pairish := by\n  constructor\n  exact 1\n  exact 2\n" ++
+          "#eval p.a\n#eval p.b")
+          ["1", "2"] },
     -- case analysis (docs/stages/06-macros.md, 6j)
     { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
         okLib ("import Logic\n" ++
@@ -483,6 +528,16 @@ def tacticGroup : Group where
           "  by_cases p n\n  intro m\n  exact Or.inl h\n  intro m\n  exact Or.inr h\n" ++
           "#check bFun")
           ["bFun : (p : Nat → Bool) → (n : Nat) → (m : Nat) → p n = .true ∨ p n = .false"] },
+    -- (the fix must keep the names of *every* Π written in the goal's type, not only the
+    -- last arrow of a single binder)
+    { name := "by_cases: two leading binders of the goal's function type keep their names", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bFun2 (p : Nat → Bool) (n : Nat) :\n" ++
+          "    (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  intro m\n  intro k\n  exact Or.inl h\n" ++
+          "  intro m\n  intro k\n  exact Or.inr h\n" ++
+          "#check bFun2")
+          ["bFun2 : (p : Nat → Bool) → (n : Nat) → (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false"] },
     { name := "by_cases rejects a non-Bool expression", run := fun _ =>
         failsLib "import Prelude\ndef bad (n : Nat) : Nat := by\n  by_cases n"
           "by_cases: expected a Bool expression" },

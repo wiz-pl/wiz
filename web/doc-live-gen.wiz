@@ -1,0 +1,51 @@
+-- A fixture for `web/doc-live-highlight-test.mjs`: the shared `Web.InfoTree` model in
+-- the two places P1 consumes it — a `wiz.hover/1` payload with `wizHighlight` spans
+-- (the runtime assembles them), and the docs page's already-emitted `wiz.highlight/1`
+-- data used when the answer is the LSP's Markdown instead.
+--
+--   wiz run -I lib web/doc-live-gen.wiz
+import IO
+import Json
+import Web.DocLive
+import Web.Hover
+import Web.InfoTree
+import Web.Loom
+
+-- `f : Nat`, with `f` and `Nat` marked; the span array is block-relative UTF-16.
+def payload : String :=
+  "{\"schema\":\"wiz.hover/1\",\"uri\":\"file:///A.wiz\",\"version\":7,\"offset\":4,\"kind\":\"ident\",\"isHole\":false,\"name\":\"f\",\"isLocal\":true,\"type\":\"Nat\",\"expected\":null,\"binders\":[],\"doc\":\"A definition.\",\"definition\":{\"uri\":\"file:///A.wiz\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}}},\"wizHighlight\":{\"schema\":\"wiz.highlight/1\",\"blocks\":[{\"index\":0,\"language\":\"wiz\",\"spans\":[[0,1,\"hl-const\"],[4,7,\"hl-const\"]]}]}}"
+
+-- the same payload with a class outside the fixed eight: the whole block is plain
+def badPayload : String :=
+  "{\"schema\":\"wiz.hover/1\",\"uri\":\"file:///A.wiz\",\"version\":7,\"offset\":4,\"kind\":\"ident\",\"name\":\"f\",\"type\":\"Nat\",\"doc\":\"\",\"wizHighlight\":{\"schema\":\"wiz.highlight/1\",\"blocks\":[{\"index\":0,\"language\":\"wiz\",\"spans\":[[0,1,\"hl-nope\"]]}]}}"
+
+-- a schema the runtime does not know: no answer, never a guessed card
+def wrongSchema : String :=
+  "{\"schema\":\"wiz.hover/2\",\"name\":\"f\",\"type\":\"Nat\"}"
+
+-- an LSP `textDocument/hover` answer (no `data`): the docs panel uses the page data
+def plainHover : String :=
+  "{\"contents\":{\"kind\":\"markdown\",\"value\":\"```wiz\\nf : Nat\\n```\\n\\n---\\n\\nA definition.\"}}"
+
+-- `wiz doc`'s `Site.highlightData` for the same fence
+def pageHighlight : String :=
+  "{\"schema\":\"wiz.highlight/1\",\"blocks\":[{\"index\":0,\"language\":\"wiz\",\"spans\":[[0,1,\"hl-const\"],[4,7,\"hl-const\"]]}]}"
+
+def docState : DocLive :=
+  let s := DocLive.effect DocLive.initial "state" "open" "ws://127.0.0.1:1"
+  let s := DocLive.effect s "hover" plainHover ""
+  let s := DocLive.effect s "highlight" pageHighlight ""
+  DocLive.effect s "goals" "{\"goals\":[]}" "interactive"
+
+def main : IO Unit := do
+  IO.println (Json.render (Json.mkObj
+    [ Json.field "payload" (Json.mkStr (Loom.toHtml (Hover.card (M := DocLiveMsg) payload "")))
+    , Json.field "bad" (Json.mkStr (Loom.toHtml (Hover.card (M := DocLiveMsg) badPayload "")))
+    , Json.field "wrongSchema" (Json.mkStr (Loom.toHtml (Hover.card (M := DocLiveMsg) wrongSchema "")))
+    , Json.field "panel" (Json.mkStr (Loom.toHtml (DocLive.view docState)))
+    , Json.field "answer" (Json.mkStr (match Json.parse payload with
+        | .ok j => match InfoTree.Answer.ofJson j with
+          | .some a => InfoTree.Answer.markdown a
+          | .none => "<no answer>"
+        | .error _ => "<bad json>"))
+    ]))

@@ -1,0 +1,102 @@
+-- A hand-written fixture for the source reader: one synthetic C file, one finding, one
+-- fact row, and two hand-written `scry.source.answer/1` answers. No scry, no bundle and
+-- no Wasm, so the reader's SSR, its Loom patches and its cards are testable before
+-- `scry web` exists (design note §8, step 1).
+--
+--   .lake/build/bin/wiz run -I lib web/source_fixture_gen.wiz > /tmp/fixture.json
+--   node web/source_fixture_test.mjs /tmp/fixture.json
+import IO
+import Json
+import Web.EditorModel
+import Web.Loom
+import Web.Source.Model
+import Web.Source.Span
+import Web.Source.Static
+import Web.Source.View
+
+def text : String :=
+  "int main(void) {\n  char *p = getenv(\"CMD\");\n  system(p);\n  return 0;\n}\n"
+
+def file : Source.File :=
+  Source.File.mk "file_00000000000000f1" "demo.c" "c" text
+    (EditorModel.lineCount (EditorModel.index text))
+
+/-- Line 3, columns 3..12 (1-based code points): `system(p)`. -/
+def sinkSpan : Source.Span :=
+  Source.Span.ofOrigin (EditorModel.index text) 3 3 3 12
+
+def finding : Source.Finding :=
+  Source.Finding.mk "f_00000000000000a1" file.id file.path "command-injection" "warning"
+    "hand-written fixture: attacker text reaches a command" sinkSpan 3 3 .true ""
+
+def facts : List Source.FactRow :=
+  [ Source.FactRow.mk "sink" "n0" file.id sinkSpan
+      [ ("rule", "command-injection")
+      , ("severity", "warning")
+      , ("message", "hand-written fixture: attacker text reaches a command")
+      , ("derivation", "checked against this EDB")
+      , ("finding", finding.id)
+      ]
+  ]
+
+def page0 : Source.Page :=
+  Source.Page.loaded Source.Page.initial "static" "scry fixture" [file] [finding] facts
+
+def hoverJson : String :=
+  "{\"schema\":\"scry.source.answer/1\",\"request\":\"hover\",\"status\":\"ok\","
+  ++ "\"fileId\":\"file_00000000000000f1\",\"span\":{\"start\":"
+  ++ Nat.repr sinkSpan.start ++ ",\"stop\":" ++ Nat.repr sinkSpan.stop ++ "},"
+  ++ "\"spanText\":\"3:3-3:12\",\"title\":\"command-injection (warning)\","
+  ++ "\"rule\":\"command-injection\",\"severity\":\"warning\","
+  ++ "\"findingId\":\"f_00000000000000a1\",\"lines\":["
+  ++ "{\"text\":\"command-injection\",\"code\":false,\"rule\":false,\"ellipsis\":false},"
+  ++ "{\"text\":\"severity: warning · checked against this EDB\",\"code\":false,\"rule\":false,\"ellipsis\":false},"
+  ++ "{\"text\":\"hand-written fixture: attacker text reaches a command\",\"code\":false,\"rule\":false,\"ellipsis\":false},"
+  ++ "{\"text\":\"system(p)\",\"code\":true,\"rule\":false,\"ellipsis\":false}],"
+  ++ "\"rows\":[],\"findings\":[]}"
+
+def infoJson : String :=
+  "{\"schema\":\"scry.source.answer/1\",\"request\":\"info\",\"status\":\"ok\","
+  ++ "\"fileId\":\"file_00000000000000f1\",\"span\":{\"start\":"
+  ++ Nat.repr sinkSpan.start ++ ",\"stop\":" ++ Nat.repr sinkSpan.stop ++ "},"
+  ++ "\"spanText\":\"3:3-3:12\",\"title\":\"Info at 3:3-3:12\",\"rule\":\"\","
+  ++ "\"severity\":\"\",\"findingId\":\"\",\"lines\":[],"
+  ++ "\"rows\":[{\"kind\":\"sink\",\"node\":\"n0\",\"fileId\":\"file_00000000000000f1\","
+  ++ "\"span\":{\"start\":" ++ Nat.repr sinkSpan.start ++ ",\"stop\":"
+  ++ Nat.repr sinkSpan.stop ++ "},\"spanText\":\"3:3-3:12\",\"line\":3,\"column\":3,"
+  ++ "\"columns\":[[\"rule\",\"command-injection\"],[\"severity\",\"warning\"]]}],"
+  ++ "\"findings\":[{\"id\":\"f_00000000000000a1\",\"fileId\":\"file_00000000000000f1\","
+  ++ "\"path\":\"demo.c\",\"rule\":\"command-injection\",\"severity\":\"warning\","
+  ++ "\"message\":\"hand-written fixture: attacker text reaches a command\","
+  ++ "\"span\":{\"start\":" ++ Nat.repr sinkSpan.start ++ ",\"stop\":"
+  ++ Nat.repr sinkSpan.stop ++ "},\"spanText\":\"3:3-3:12\",\"line\":3,\"column\":3,"
+  ++ "\"checked\":true,\"claimId\":\"\"}]}"
+
+def applyAnswer (s : Source.Page) (json : String) : Source.Page :=
+  match Source.Static.decodeAnswer json with
+  | .some a => Source.Page.answer s a
+  | .none => s
+
+def stepJson (name : String) (from to : Source.Page) : Json :=
+  Json.mkObj
+    [ ("name", Json.mkStr name)
+    , ("patches", Json.mkStr (Loom.LiveApp.patches Source.View.app from to))
+    , ("html", Json.mkStr (Loom.LiveApp.html Source.View.app to))
+    ]
+
+def main : IO Unit := do
+  let selected := Source.Page.step page0 (.select finding.id)
+  let hovered := applyAnswer selected hoverJson
+  let informed := applyAnswer hovered infoJson
+  let routed := Source.Page.route page0 (String.append "#/f/" finding.id)
+  let j := Json.mkObj
+    [ ("schema", Json.mkStr "scry.source.ui/1")
+    , ("initial", Json.mkStr (Loom.LiveApp.html Source.View.app page0))
+    , ("steps", Json.mkArr
+        [ stepJson (String.append "select:" finding.id) page0 selected
+        , stepJson (String.append "hover:" finding.id) selected hovered
+        , stepJson (String.append "info:" finding.id) hovered informed
+        , stepJson (String.append "route:#/f/" finding.id) page0 routed
+        ])
+    ]
+  IO.println (Json.render j)

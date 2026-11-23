@@ -54,9 +54,18 @@ eq("a package key differs only by its hash", "lz-button-root-6150e3c9", classNam
 eq("the slug drops the package and the state", "goal-row", slugOf("loom/goal/row/selected"));
 eq("the name is a pure function of the key", className("loom/goal/row"),
   Class.name(Class.of("loom/goal/row")));
+// The class is a function of the key, not of the declarations. Two `Styled` values with
+// the same key and *different* declarations must render the same class (and their CSS
+// must differ, so the declarations really changed); a rename must render a different one.
+const quietRow = Styled.of(Class.of("loom/goal/row"), Style.set("color", Value.var("lz-fg")));
+const loudRow = Styled.of(Class.of("loom/goal/row"), Style.set("color", Value.var("lz-accent")));
+const quietCss = Style.sheet([{ pkg: "loom", styles: [quietRow] }]);
+const loudCss = Style.sheet([{ pkg: "loom", styles: [loudRow] }]);
+ok(quietCss !== loudCss, "the two declarations really differ", quietCss);
 eq("a declaration change does not rename the class",
-  Class.name(Class.of("loom/goal/row")),
-  Class.name(Class.of("loom/goal/row")));
+  Class.name(quietRow.cls), Class.name(loudRow.cls));
+ok(Class.name(Class.of("loom/goal/row")) !== Class.name(Class.of("loom/goal/cell")),
+  "a rename does change the class");
 
 throws("a key needs a package, component and slot", () => Class.of("loom/button"), "key");
 throws("a key's segments are lower-case identifiers", () => Class.of("Loom/button/root"), "key");

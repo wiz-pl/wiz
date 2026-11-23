@@ -111,10 +111,20 @@ def isStructTail (I : Val) : Bool := match whnf I with
 def unboxedLast (c : TCtx) (ty : Val) : Bool := Bool.and (TCtx.unbox c) (match whnf ty with
   | .vsigma _ _ _ _ env snd =>
     match whnf (eval (.cons (.vne (.hvar (TCtx.lvl c)) .snil) env) snd) with
-    | .vsigma _ _ _ E _ _ => match whnf E with
-      | .vne (.heq I _ _) _ => isStructTail I
-      | _ => Bool.false
-    | _ => Bool.false
+    | .vsigma _ _ _ E envB sndB =>
+      Bool.or
+        (match whnf E with
+          | .vne (.heq I _ _) _ => isStructTail I
+          | _ => Bool.false)
+        -- the structure tail `Σ (I = i) Unit`: its second component is the erased `Unit`
+        -- (the host's `unboxedSigma` asks `erasedFunTy`, not for the marker alone)
+        (match whnf (eval (.cons .vtt envB) sndB) with
+          | .vunit _ => Bool.true
+          | _ => Bool.false)
+    -- the last field: the second component *is* the tail function `(0 _ : Enum 1) → Unit`
+    -- (not a `Σ` wrapping it), and keeping this pair left the constructor's value one
+    -- field longer than `wiz_sout`'s, so `fld(v,1)` handed the tail to `rt_in_nat`
+    | B => isStructTail B
   | _ => Bool.false)
 
 -- Is this `μ` shaped like the natural numbers? Its values are numbers at runtime.

@@ -109,13 +109,102 @@ occurrence; never a line number). An empty string is no findings. The finding is
 ordinary `Msg` with `code := the rule id`, so the language server, `--json`, and per-site
 `-- lint: allow Wxxx (reason)` suppression all work without a second wire format.
 
+## The typed wrapper (`lib/Lint.wiz`)
+
+The view is text because that is the smallest stable interface, but a rule need not
+split it by hand. `lib/Lint.wiz` mirrors the registry's vocabulary — `Capability`,
+`Category`, `Severity`, `Scope` and their `key`/`ofKey` spellings, with
+`Capability.stable` the same package/unstable split the registry enforces — and parses
+the view into structures:
+
+```wiz no-check
+import Lint
+
+def noRawName (view : String) : String :=
+  let c := Lint.Command.parse view;
+  if Lint.Command.has c .decl then
+    List.foldr (fun (d : Lint.Decl) (acc : String) =>
+        match String.startsWith d.name "raw" with
+        | .true => String.append (Lint.Finding.render
+            (Lint.Finding.mk 0 0 (String.append d.name "#raw") "a raw name")) acc
+        | .false => acc)
+      "" c.decls
+  else ""
+```
+
+`Lint.Finding.parse`/`parseAll`/`render` are the four-field finding format, and
+`Lint.packageCode`/`coreCode` are the `W500`–`W999` / `W001`–`W499` blocks. This is a
+wrapper, not a second ABI: the host still builds the text, and a rule still returns
+text. `Tests/fixtures/lint/TypedProbe.wiz` is compared with `Wiz/Lint/Basic.lean` in the
+`wiz-lint` group, so the mirror cannot drift.
+
+## The package manifest and `lint.conf`
+
+A package declares its sets in `grail.wiz` (this is the package boundary, where the
+dependency graph is):
+
+```wiz no-check
+def package : Package := Package.new "scry"
+  |> Package.lib "scry" "src"
+  |> Package.lintSet "scry" "lint/Lints.wiz"
+```
+
+Declaring a set does not run it. The repository enables sets it wants in `lint.conf`
+at the repository root, a line-oriented file (`#` starts a comment, words are separated
+by spaces or tabs):
+
+```
+# lint.conf
+set scry
+set scratch lint/Scratch.wiz
+public-roots lib src
+```
+
+* `set NAME` enables a set the manifest declares; a name the manifest does not declare
+  is an error that names the missing `Package.lintSet` line. A typo never silently
+  enables nothing.
+* `set NAME MODULE` declares and enables a set in the file itself, for a repository
+  with no manifest.
+* `public-roots DIR…` are the roots `W301` treats as public (`lib` by default).
+* A dependency's `lint.conf` is never read, and a package cannot enable its own set in
+  a consumer: policy stays with the repository that owns the code.
+
+`grail lint FILE…` resolves the manifest and `lint.conf`, adds the package's module
+roots, and runs `wiz lint` with the resulting `--package-lint`/`--set`/`--public-roots`
+flags. `wiz lint` itself keeps the explicit `--package-lint FILE --set NAME` form for
+CI and for a file outside a package. An unknown capability, a trust source or a
+package-defined `partial` in a declared set is still the registry's refusal, reported
+before any rule runs.
+
+## Baselines and diff mode
+
+`wiz lint --lint-baseline-write FILE` records the run's findings; `wiz lint
+--lint-baseline FILE` reports only findings whose **stable key** the baseline does not
+name, and exits 1 when there is one (0 when there is none). The key is the file path,
+the rule code and the rule's anchor:
+
+```
+# wiz-lint baseline v1: one finding per line, TAB-separated path, rule, anchor
+lib/Foo.wiz	W101	foo#2
+```
+
+The anchor is a declaration name plus an occurrence, never a line or a hash of one, so
+a reindent or a line move does not churn the baseline and a rename is a stale row (a
+signal to re-review, not a silent match). The file is sorted and deduplicated, so a
+rewrite is byte-for-byte stable; blank lines and `#` comments are ignored. A finding the
+per-site marker suppressed is already gone from the run, so a baseline never re-admits
+it. A failed run (an elaboration error) is never written as a baseline.
+
+`grail lint` spells the two flags `--baseline FILE` and `--baseline-write FILE` and
+passes them through.
+
 ## What stays P2
 
-The view is serialised as text in P1, so a runner parses the few fields it needs (the
-fixture uses `String.splitOn`). A typed `lib/Lint.wiz` (a `Command`/`Finding` structure
-and its parser) is the ergonomic wrapper, not a new ABI. The `--package-lint` / `--set`
-flags are the P1 discovery path; a typed `Package.lint`/`Package.lintSet` manifest field
-and the `lint.conf` reader are the next step. The remaining P2 work is quick fixes
-(`Fix`), the stable projected `info` view, a step/fuel budget for the interpreter (so a
-trusted-library `partial` helper cannot hang a run), the selfhost lint table, and the
-baseline / `--diff` gate.
+The `--package-lint`/`--set` flags and the manifest field are the discovery paths; a
+directory-wide default file set (the package's roots) and `--diff BASE` (changed lines
+only) are not wired yet — for now a caller names the files and the baseline's keys are
+not line-scoped, so a whole-file run is the safe form. The remaining work is quick
+fixes (`Fix`), the stable projected `info` view (`termView`), a step/fuel budget for the
+interpreter (so a trusted-library `partial` helper cannot hang a run), and the selfhost
+lint table. `lint.conf`'s `deny`/severity gating is also still open: the flags
+(`--deny`, `--rule`) are per invocation, not per repository.
