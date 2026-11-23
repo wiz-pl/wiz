@@ -35,8 +35,9 @@ so the summary and the facts keep the boundary visible.
 The outer key covers the source path/text, the unit's flags, `--allow-errors` and
 `--keep-system-headers`; the entry is validated against the actual preprocessed text, so
 an edited header or macro is a miss rather than a stale hit. The entry also names its
-format and frontend stamp, so a grammar, shim, spill-format or preprocessing change is a
-clean miss; a corrupt or truncated entry is recomputed and rewritten.
+format and frontend stamp, and records a digest of every CST column (recomputed on load),
+so a lossy spill round trip is a miss; a corrupt or truncated entry is recomputed and
+rewritten.
 `--skip-broken` records a TU whose preprocessor/parse fails and continues with the rest;
 without it the first failure aborts the project.
 
@@ -173,11 +174,11 @@ def Scry.ProjectIO.readSource (dir file : String) : EIO String :=
 
 /-- Save a cache entry when the run was a miss, returning the updated counters. -/
 def Scry.ProjectIO.saveIfMiss (cache : Scry.CacheOpts) (hit : Bool) (stats : Scry.CacheStats)
-    (dir key pre errors cst : String) : EIO Scry.CacheStats :=
+    (dir key pre errors digest cst : String) : EIO Scry.CacheStats :=
   match Bool.and cache.enabled (Bool.not hit) with
   | .false => EIO.pure stats
   | .true => do
-    Scry.cacheSave dir key pre errors cst;
+    Scry.cacheSave dir key pre errors digest cst;
     EIO.pure (Scry.CacheStats.writeOne stats)
 
 /-- Build one translation unit: preprocess with `cmd.flags`, reuse or create a cached
@@ -226,9 +227,10 @@ def Scry.ProjectIO.buildUnit (cc : String) (allowErrors : Bool) (keepSystem : Bo
       ++ " ERROR/MISSING node(s) in the preprocessed text (use --allow-errors)")
   | .false => do
     let cst := Scry.Cst.ofPreprocessed pre store;
+    let dg := Scry.cstFullDigest store;
     stats2 ← Scry.ProjectIO.saveIfMiss cache hit stats1 cache.dir key pd
-      (Nat.repr errors) (Scry.CstStore.render store);
-    EIO.pure (Scry.unitOfPre (Scry.normalisePath cmd.file) pre cst errors, stats2)
+      (Nat.repr errors) dg (Scry.CstStore.render store);
+    EIO.pure (Scry.unitOfPre (Scry.normalisePath cmd.file) pre cst errors store, stats2)
 
 /-- The units built so far, the cache counters and the TUs skipped by `--skip-broken`. -/
 structure Scry.BuildUnits where

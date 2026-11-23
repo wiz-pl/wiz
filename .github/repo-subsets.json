@@ -30,13 +30,13 @@
       "sha256": "ecd5a7fa319a09744c1031ec1901c1ccb947abc5a0b0e30f7b0892f0c953df32"
     },
     "packages": {
-      "files": 926,
+      "files": 927,
       "paths": [
         "scry/**",
         "hdl/**",
         "tower/**"
       ],
-      "sha256": "7b5c0e8addcb4235042461912a75e0f8ec2913ddccda316064c06e9636822fce"
+      "sha256": "8fc294e5b0d3d5df78355a47a0e40ef466a3f7eb6ce65441a752c0811a7106f1"
     },
     "runtime": {
       "files": 11,

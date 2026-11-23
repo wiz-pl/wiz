@@ -75,6 +75,10 @@ cache: an entry from another format is a clean miss: ok
 cache: the format-mismatched entry warms after rewrite: ok
 cache: a truncated entry is recomputed, not a hit: ok
 cache: the truncated entry warms after rewrite: ok
+cache: the digest fixture rewrote its digest: ok
+cache: a digest mismatch is recomputed: ok
+cache: the digest-mismatched entry warms after rewrite: ok
+cache: a warm CST has the cold parse's full-column digest: ok
 cache: corrupt entries are recomputed: ok
 cache: warm again after corruption: ok
 cache: symlink tmp refused: ok
