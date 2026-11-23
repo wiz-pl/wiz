@@ -111,6 +111,21 @@ def jsEmit (src : String) : IO String := do
   let (_, _, text) ← jsCompile src
   pure text
 
+/-- Run a module under `web/host_test.mjs`: the capability seam (a missing handler is a
+startup diagnostic; a registered `mem` handler serves the program). -/
+def jsHostRun (src : String) : IO String := do
+  unless ← jsNodeAvailable do skipMissing "no node"; return ""
+  let (_, _, text) ← jsCompile src
+  let dir ← IO.FS.createTempDir
+  let file := dir / "wiz_main.mjs"
+  IO.FS.writeFile file text
+  let out ← IO.Process.output
+    { cmd := "node", args := #["web/host_test.mjs", file.toString],
+      env := #[("LD_LIBRARY_PATH", none)] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"the host-seam program failed ({out.exitCode}): {out.stderr.take 1500}")
+  pure out.stdout
+
 /-- Build `main` through C (`wiz run`'s path) and through JS, and require the same
 answer: the generic tree read back with `main`'s type for a pure `main`, and standard
 output for an `IO` one. This is the acceptance comparison for the target. -/
@@ -245,6 +260,28 @@ def jsGroup : Group where
         let e ← jsError ("import Prelude\nimport IO\ndef main : IO Unit := do\n" ++
           "  s ← IO.readFile \"x\";\n  IO.println s")
         unless (e.splitOn "filesystem").length > 1 do throw (IO.userError e) },
+    { name := "a host capability is a startup diagnostic, then a mem handler serves it", run := fun _ => do
+        let out ← jsHostRun ("import Prelude\nimport IO\nimport Host\n" ++
+          "def main : IO Unit := do\n" ++
+          "  e ← Host.mount \"\";\n" ++
+          "  Host.reserve \"note.txt\" \"file\";\n" ++
+          "  fd ← Host.open \"note.txt\" \"w\";\n" ++
+          "  w ← Host.write fd \"hello, opfs\";\n" ++
+          "  p1 ← Host.seek fd 0 7 .false;\n" ++
+          "  a ← Host.read fd 4;\n" ++
+          "  p2 ← Host.seek fd 2 4 .true;\n" ++
+          "  b ← Host.read fd 4;\n" ++
+          "  c ← Host.close fd;\n" ++
+          "  IO.println (String.append a (String.append \"/\" b));\n" ++
+          "  IO.println (Nat.toString e);\n  IO.println (Nat.toString w);\n" ++
+          "  IO.println (Nat.toString p1);\n  IO.println (Nat.toString p2);\n" ++
+          "  IO.println (Nat.toString c)")
+        checkEq ("host: missing ok\nopfs/opfs\n0\n11\n7\n7\n0\nhost: all checks passed\n") out },
+    { name := "the emitted main checks the reachable capabilities before user code", run := fun _ => do
+        let text ← jsEmit ("import Prelude\nimport IO\nimport Host\n" ++
+          "def main : IO Unit := do\n  fd ← Host.open \"a\" \"r\";\n  Host.close fd")
+        unless (text.splitOn "wizHostReady([\"fs.close\", \"fs.open\"])").length > 1 do
+          throw (IO.userError "the emitted main has no capability check") },
     { name := "an unimplemented runtime native is refused by name", run := fun _ => do
         let e ← jsError ("import Prelude\nimport IO\nextern \"wiz_sys_getcwd\" cwd : IO String\n" ++
           "def main : IO String := cwd")
