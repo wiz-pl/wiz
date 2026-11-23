@@ -769,8 +769,13 @@ EOF
             "web/check-site.sh" "web/check-links.py" "web/bench/index.html"
             # the landing page is *generated* in the derivation now (build-site.sh
             # refuses a WEB without landing/index.html), so the generator, its template
-            # and the snippets have to be inputs
-            "web/build-landing.sh" "web/build-landing.py" "web/landing"
+            # and the snippets have to be inputs. `landing_highlight.py` is the
+            # generator's `from landing_highlight import highlight` (it highlights the
+            # snippet bytes at build time): without it build-landing.py dies with
+            # ModuleNotFoundError in the sandbox, which is not a site bug but a missing
+            # input here.
+            "web/build-landing.sh" "web/build-landing.py" "web/landing_highlight.py"
+            "web/landing"
             "web/playground.html" "web/playground.js" "web/playground.css"
             "web/overlays.css" "web/widgets.css" "web/lsp-client.js" "web/widgets.js"
             "web/playground-lsp.js" "web/hover.js" "web/selfhost-lsp-shim.js"
