@@ -23,16 +23,19 @@ def usage : String := "usage:
                           standard input; --lint-baseline reports (and fails on) only
                           findings whose path/rule/anchor key is not in FILE, and
                           --lint-baseline-write records this run as that file
-  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js]  compile the definition `main` to an
-                                   executable (C or LLVM) or a WebAssembly module (stage
-                                   8f: no IO, Nat/Int, closures, arrays; run it with
-                                   web/wasm-host.mjs). `--llvm` and `--wasm` still work.
-                                   `--target bpf` takes a manifest (`bpf.toml`) and its
-                                   `bpf-core/1` typed core, and writes freestanding C
-                                   plus `bpf_rt.h` (run `clang -target bpf` yourself).
-                                   `--target js` writes a self-contained ES module
-                                   (`OUT.mjs`, the runtime pasted in) that Node runs and
-                                   a browser can import (`export function main`).
+  wiz build FILE -o OUT [--target c|llvm|wasm|bpf|js|ebpf]  compile the definition
+                                   `main` to an executable (C or LLVM) or a WebAssembly
+                                   module (stage 8f: no IO, Nat/Int, closures, arrays;
+                                   run it with web/wasm-host.mjs). `--llvm` and
+                                   `--wasm` still work. `--target bpf` (alias `ebpf`)
+                                   takes a manifest (`bpf.toml`) and its `bpf-core/1`
+                                   typed core, and writes freestanding C plus
+                                   `bpf_rt.h`; a tracepoint/uprobe program also writes
+                                   `OUT.probe.json` (`wiz-probe/1`). Run
+                                   `clang -target bpf` yourself. `--target js` writes
+                                   a self-contained ES module (`OUT.mjs`, the runtime
+                                   pasted in) that Node runs and a browser can import
+                                   (`export function main`).
   wiz build FILE -o OUT [--attest [FILE]]  … and write a build attestation (default
                                    OUT.attest.json: an unsigned in-toto statement, see
                                    stage 11ae and docs/building.md); c and llvm only
@@ -935,8 +938,9 @@ def elabFile (tc : Toolchain) (path : String) : IO (Option (CommandState ZeroOne
     if m.severity == .error then IO.eprintln s!"{path}:{m.render input}"
   pure (if s.messages.any (·.severity == .error) then none else some s)
 
-/-- The backend names `wiz build --target` accepts. -/
-def targets : List String := ["c", "llvm", "wasm", "bpf", "js"]
+/-- The backend names `wiz build --target` accepts. `ebpf` is the tracing-flavoured
+alias of the tree spelling `bpf`; both resolve to `Wiz.Compiler.Bpf`. -/
+def targets : List String := ["c", "llvm", "wasm", "bpf", "js", "ebpf"]
 
 /-- `wiz verify [--attest FILE] [--artifact-only] ARTIFACT`. -/
 def verifyCmd (tc : Toolchain) (attest : Option String) (args : List String) : IO UInt32 := do
@@ -959,9 +963,9 @@ backend and the rest. A flag and a conflicting `--target` are an error, as is tw
 different targets. -/
 def takeTarget : List String → Except String (Option String × List String)
   | [] => pure (none, [])
-  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf or js"
+  | "--target" :: [] => throw "--target needs c, llvm, wasm, bpf, js or ebpf"
   | "--target" :: t :: rest => do
-    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf or js)"
+    unless targets.contains t do throw s!"unknown target {t} (choose c, llvm, wasm, bpf, js or ebpf)"
     let (other, rest) ← takeTarget rest
     match other with
     | some u => if u != t then throw s!"two targets: {t} and {u}" else pure (some t, rest)
@@ -982,9 +986,11 @@ def takeTarget : List String → Except String (Option String × List String)
 
 def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool := false)
     (noMain : Bool := false) (split : Nat := 0) (attest : Option String := none) : IO UInt32 := do
-  -- `bpf` is the one target whose input is not the untyped IR: it consumes the typed
-  -- core (`bpf.toml` + `bpf-core/1`) and emits C for `clang -target bpf` (§1.2, §3.2).
-  if target == "bpf" then
+  -- `bpf` (and its `ebpf` alias) is the one target whose input is not the untyped IR: it
+  -- consumes the typed core (`bpf.toml` + `bpf-core/1`) and emits C for
+  -- `clang -target bpf` (§1.2, §3.2). A tracepoint/uprobe program also writes the
+  -- `wiz-probe/1` descriptor.
+  if target == "bpf" || target == "ebpf" then
     if attest.isSome then
       IO.eprintln "wiz build --attest: the bpf target does not emit a build attestation"
       pure 2
@@ -1019,7 +1025,7 @@ def buildCmd (tc : Toolchain) (path out : String) (target : String) (lib : Bool 
         | .ok () => IO.eprintln s!"wiz: attestation written to {file}"; pure 0
 
 def runCmd (tc : Toolchain) (path : String) (target : String) (split : Nat := 0) : IO UInt32 := do
-  if target == "bpf" then do
+  if target == "bpf" || target == "ebpf" then do
     IO.eprintln "wiz run --target bpf: the bpf backend builds an object; the ubpf/hosted \
 oracle is not wired in P0 (it needs the ELF reader and the helper harness)"
     pure 2
@@ -1384,7 +1390,7 @@ def main (args : List String) : IO UInt32 := do
     else if target == "js" then
       IO.eprintln "wiz repl: targets are c, llvm and bpf (no js REPL)"
       pure 2
-    else if target == "bpf" then
+    else if target == "bpf" || target == "ebpf" then
       IO.eprintln "wiz repl: the bpf backend has no REPL (a kernel program has no world)"
       pure 2
     else match takePrelude rest with
