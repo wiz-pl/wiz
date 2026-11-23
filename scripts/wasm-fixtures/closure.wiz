@@ -1,0 +1,6 @@
+import Prelude
+
+def adder (n : Nat) : Nat → Nat := fun x => x + n
+def twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)
+
+def main : Nat := twice (adder 10) 1

@@ -1,0 +1,3 @@
+import Prelude
+
+def main : Nat := Nat.pow 3 50

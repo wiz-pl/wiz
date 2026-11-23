@@ -49,7 +49,7 @@ if ! command -v emcc >/dev/null; then
 fi
 WIZ=${WIZ:-$ROOT/.lake/build/bin/wiz}
 # (after the compiler's own -O2, so emcc's last -O wins)
-CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS"
+CFLAGS="-I$OUT/gmp -DWIZ_NO_THREADS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$OUT=."
 [ -z "$OPT" ] || CFLAGS="$CFLAGS -O$OPT"
 
 # 1. mini-gmp, as web/build.sh does (share web/out when both are built)

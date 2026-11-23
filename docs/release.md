@@ -65,6 +65,13 @@ Each item says what must be true and how to check it.
    signature and is optional. Fill `release-manifest.json`'s `supplyChain` object from
    the generated files.
 
+The Nix form of the binary tarball is `nix build .#release-bin` (`.sha256` beside it).
+It links every non-glibc library statically and needs only glibc; its `doCheck` runs
+`scripts/test-release-portability.sh` and rebuilds the archive in a second environment.
+It has no `share/wiz/cc`, so the bundled-compiler checks in
+`scripts/test-release-install.sh` apply to the release.yml artifact, not to this one
+([building.md](building.md), "Nix artifacts for CI and releases").
+
 ## The tagging commit
 
 On a branch off the commit to tag, open one PR that:

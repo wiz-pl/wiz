@@ -15,6 +15,24 @@
 #
 # Writes `web=…`, `playground=…` and `ui=…` (store paths) to $GITHUB_OUTPUT.
 set -eu
+# One bundle for all three module sets (`nix build .#web-bundle`): the `web` job can set
+# WIZ_WEB_BUNDLE=1 (or a store path) and export the same directory for each `--from`.
+if [ -n "${WIZ_WEB_BUNDLE:-}" ]; then
+  bundle=$WIZ_WEB_BUNDLE
+  if [ ! -d "$bundle" ]; then
+    bundle=$(nix build .#web-bundle --no-link --print-out-paths --max-jobs 1) || exit 1
+  fi
+  for f in wiz-infoview.mjs wiz-playground.mjs wiz-playground.wasm \
+           wiz-playground-ui.mjs wiz-playground-ui.wasm; do
+    [ -f "$bundle/$f" ] || { echo "modules-from-store: $bundle has no $f" >&2; exit 1; }
+  done
+  echo "web=$bundle" >> "$GITHUB_OUTPUT"
+  echo "playground=$bundle" >> "$GITHUB_OUTPUT"
+  echo "ui=$bundle" >> "$GITHUB_OUTPUT"
+  echo "web-bundle: $bundle"
+  du -sh "$bundle"
+  exit 0
+fi
 ids=".#wiz-web .#wiz-playground .#wiz-playground-ui"
 # The producer's paths, when the workflow passes them. On a pull request they are
 # `withLakeCache` derivations (the seed is an input), so their store paths differ

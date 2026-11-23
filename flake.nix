@@ -80,6 +80,11 @@
           lean = pkgs.lean4;
           pinned = lib.removePrefix "leanprover/lean4:v" (lib.trim (builtins.readFile ./lean-toolchain));
           tc = toolchain pkgs;
+          # The commit this evaluation is from: the release's REVISION file, the
+          # documentation's source links, and the epoch the archive metadata uses.
+          revision = self.rev or self.dirtyRev or "unknown";
+          epoch = toString self.lastModified;
+          sourceUrl = "https://github.com/wiz-pl/wiz/blob/${revision}";
 
           # every file the build reads: a change elsewhere (README, tests, Wiz programs)
           # doesn't rebuild the compiler.
@@ -619,6 +624,435 @@ EOF
             };
           };
 
+          # ---- the remaining CI-built artifacts as Nix outputs ---------------------
+          #
+          # Each output below is input-addressed by exactly the sources it reads (a
+          # fileset, or the inputs it composes), so a pull request that changes the
+          # docs does not rebuild the Wasm modules, and a change to one web module does
+          # not rebuild the others. `passthru.subset` names that boundary for the CI
+          # lane that splits the jobs. The release tarball is the one leaf that may
+          # depend on all of them.
+
+          # The Wasm test fixtures: `scripts/wasm-fixtures/*.wiz` compiled by the packaged wiz and
+          # run through the checked-in `web/wasm-host.mjs`. The output is the module
+          # pair, the host and the expected stdout; the check is the run.
+          wasm-fixtures = pkgs.stdenv.mkDerivation {
+            pname = "wiz-wasm-fixtures";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./scripts/wasm-fixtures ./web/wasm-host.mjs ];
+            };
+            nativeBuildInputs = [ wiz pkgs.nodejs ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p $out
+              while read -r name expected; do
+                ${wiz}/bin/wiz build "scripts/wasm-fixtures/$name.wiz" -o "$out/$name.wasm" --target wasm
+                printf '%s\n' "$expected" > "$out/$name.expected"
+              done < scripts/wasm-fixtures/expected.tsv
+              cp web/wasm-host.mjs $out/wasm-host.mjs
+              runHook postBuild
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              while read -r name expected; do
+                got=$(node "$out/wasm-host.mjs" "$out/$name.wasm")
+                if [ "$got" != "$expected" ]; then
+                  echo "wasm-fixtures: $name: got '$got', expected '$expected'" >&2
+                  exit 1
+                fi
+                echo "ok: $name: $got"
+              done < scripts/wasm-fixtures/expected.tsv
+              if grep -a -R '/nix/store' "$out" >/dev/null 2>&1; then
+                echo "wasm-fixtures: a fixture names a build path" >&2
+                exit 1
+              fi
+              runHook postCheck
+            '';
+            passthru.subset = "scripts/wasm-fixtures + web/wasm-host.mjs";
+            meta = {
+              description = "The Wasm backend's fixture modules, compiled from scripts/wasm-fixtures and run under web/wasm-host.mjs";
+              platforms = systems;
+            };
+          };
+
+          # One directory with every page module the site and the release use, exactly
+          # the OUT of `web/build.sh` + `web/build-playground.sh` +
+          # `web/build-playground-ui.sh`. It composes the three per-module derivations
+          # (`wiz-web`, `wiz-playground`, `wiz-playground-ui`): each keeps its own
+          # source fileset, so a change to one module does not rebuild the others, and
+          # this bundle is only their union.
+          web-bundle = pkgs.stdenv.mkDerivation {
+            pname = "wiz-web-bundle";
+            inherit (unwrapped) version;
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.gnugrep ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -R --no-preserve=mode ${wiz-web}/. $out/
+              cp -R --no-preserve=mode ${wiz-playground}/. $out/
+              cp -R --no-preserve=mode ${wiz-playground-ui}/. $out/
+              for f in wiz-infoview.mjs wiz-playground.mjs wiz-playground.wasm \
+                       wiz-playground-ui.mjs wiz-playground-ui.wasm; do
+                [ -f "$out/$f" ] || { echo "web-bundle: missing $f" >&2; exit 1; }
+              done
+              if grep -a -R '/nix/store' $out >/dev/null; then
+                echo "web-bundle: a module names a build store path" >&2; exit 1
+              fi
+              runHook postInstall
+            '';
+            passthru.subset = "wiz-web + wiz-playground + wiz-playground-ui (their own filesets)";
+            meta = {
+              description = "Every Wasm page module and its page files in one directory (the site's web/out)";
+              platforms = systems;
+            };
+          };
+
+          # The published site's files, minus the source reader: `wiz doc --lib` plus
+          # the landing page, guide, benchmark page and playground. `wiz-pages` adds
+          # `/source/` and is the exact directory the Pages job uploads. The fileset
+          # lists the site scripts and prose it reads, not all of `web/`; a change to
+          # an Emscripten script does not rebuild the docs.
+          siteAssetFiles = [
+            "web/build-site.sh" "web/build-bench.py" "web/build-docs.py"
+            "web/check-site.sh" "web/check-links.py" "web/bench/index.html"
+            "web/landing/index.html" "web/landing/landing.css"
+            "web/playground.html" "web/playground.js" "web/playground.css"
+            "web/overlays.css" "web/widgets.css" "web/lsp-client.js" "web/widgets.js"
+            "web/playground-lsp.js" "web/hover.js" "web/selfhost-lsp-shim.js"
+            "web/playground-engine.js" "web/squiggles.js" "web/completions.js"
+            "web/framework/mount.js" "web/framework/driver.js"
+            "web/framework/runtime.js" "web/framework/editor-text.js"
+            "web/framework/adopt.js"
+            "web/licenses/index.html" "web/licenses/LGPL-3.0.txt"
+          ];
+          docsSiteSource = fs.toSource {
+            root = ./.;
+            fileset = fs.unions ([
+              ./docs ./bench/stdlib-baseline.json ./bench/stdlib-bench.json
+              ./scry/bench/baseline.json
+              ./README.md ./ROADMAP.md ./CHANGELOG.md ./LICENSE
+            ] ++ map (f: ./. + "/${f}") siteAssetFiles);
+          };
+          docs-site = pkgs.stdenv.mkDerivation {
+            pname = "wiz-docs-site";
+            inherit (unwrapped) version;
+            src = docsSiteSource;
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p site
+              ${wiz}/bin/wiz doc --lib --jobs 4 -o site/docs --web ${web-bundle} \
+                --source-url ${lib.escapeShellArg "${sourceUrl}/lib/"}
+              cp ${reference}/index.md site/docs/reference.md
+              WIZ_SOURCE_URL=${lib.escapeShellArg sourceUrl} \
+                sh web/build-site.sh site ${web-bundle}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -R site $out
+              runHook postInstall
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              sh web/check-site.sh site
+              if grep -a -R '/nix/store' site >/dev/null; then
+                echo "docs-site: a page names a build store path" >&2; exit 1
+              fi
+              if grep -a -R "$PWD" site >/dev/null; then
+                echo "docs-site: a page names the build root" >&2; exit 1
+              fi
+              runHook postCheck
+            '';
+            passthru.subset = "docs/ + bench/stdlib-{baseline,bench}.json + scry/bench/baseline.json + README/ROADMAP/CHANGELOG/LICENSE + the site scripts in siteAssetFiles + wiz + reference + web-bundle";
+            meta = {
+              description = "The documentation site: wiz doc --lib and the landing, guide, benchmark and playground pages";
+              platforms = systems;
+            };
+          };
+
+          # The source reader's own inputs: scry's package (built with grail) and the
+          # browser bundle's host files. `pages` is docs-site plus this `/source/`; a
+          # scry change rebuilds only the reader, and a docs change rebuilds both (the
+          # reader is added to the docs tree it publishes).
+          pagesSource = fs.toSource {
+            root = ./.;
+            fileset = fs.unions [
+              ./scry
+              ./web/source-bundle.sh ./web/source-app.js ./web/source.css
+              ./web/source-static.js
+              ./web/framework/mount.js ./web/framework/driver.js
+              ./web/framework/runtime.js ./web/framework/adopt.js
+            ];
+          };
+          pages = pkgs.stdenv.mkDerivation {
+            pname = "wiz-pages";
+            inherit (unwrapped) version;
+            src = pagesSource;
+            nativeBuildInputs = [ wiz pkgs.python3 pkgs.gnugrep ];
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              mkdir -p site
+              cp -R --no-preserve=mode ${docs-site}/. site/
+              # scry's link_c points at native/tree-sitter-c-sharp, an uncommitted
+              # out-link in a checkout; in the sandbox it is the fetched grammar.
+              mkdir -p scrybuild
+              cp -R --no-preserve=mode scry scrybuild/
+              cp -R --no-preserve=mode web scrybuild/
+              chmod -R u+w scrybuild
+              rm -rf scrybuild/scry/native/tree-sitter-c-sharp
+              ln -s ${tree-sitter-c-sharp} scrybuild/scry/native/tree-sitter-c-sharp
+              ( cd scrybuild/scry && ${wiz}/bin/grail build scry )
+              mkdir -p bundle
+              sh web/source-bundle.sh scrybuild/scry/.grail/bin/scry bundle \
+                --ui ${wiz-source-ui} --target scry/tests/fixtures/report
+              mkdir -p site/source
+              cp -R --no-preserve=mode bundle/. site/source/
+              SITE_REQUIRE_SOURCE=1 sh ${docsSiteSource}/web/check-site.sh site
+              if grep -a -R '/nix/store' site >/dev/null; then
+                echo "pages: a page names a build store path" >&2; exit 1
+              fi
+              if grep -a -R "$PWD" site >/dev/null; then
+                echo "pages: a page names the build root" >&2; exit 1
+              fi
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -R site $out
+              runHook postInstall
+            '';
+            passthru.subset = "docs-site + scry/ + web/source-{bundle.sh,app.js,css,static.js} + web/framework/ + wiz-source-ui + tree-sitter-c-sharp";
+            meta = {
+              description = "The exact doc-site tree GitHub Pages deploys: the docs site plus the scry source reader";
+              platforms = systems;
+            };
+          };
+
+          # ---- the portable release toolchain -------------------------------------
+          #
+          # `wiz`, `grail` and `tower` in a release must run on a machine that has
+          # glibc and nothing else from this build. The normal packages link GMP,
+          # libuv, OpenSSL, libstdc++ and libgcc dynamically (and a Nix RUNPATH names
+          # their store paths). The release build links every one of those statically:
+          #
+          #   gmp      `withStatic` (the release archive's link line already uses -lgmp)
+          #   libuv    a static-only autotools build
+          #   openssl  `static = true`
+          #   libstdc++/libgcc  the compiler driver's -static-libstdc++ -static-libgcc
+          #
+          # The .a files are collected in one -L directory with no .so beside them, so
+          # the linker's -luv/-lssl/-lgmp resolve to the archives no matter what other
+          # -L paths the stdenv adds. glibc (libc, libm, libdl, libpthread) stays
+          # dynamic, as the portability rule requires. `releaseCC` is the explicit
+          # alternate-tool seam: `LEAN_CC` and grail's `--cc` take it, and a caller may
+          # still pass its own --cc/--ldflags to build a different release.
+          release-gmp = pkgs.gmp.override { withStatic = true; };
+          release-libuv = pkgs.libuv.overrideAttrs (old: {
+            # static only, with the normal (glibc) stdenv; do not spend the build on
+            # libuv's own test suite for an archive we only link
+            configureFlags = (old.configureFlags or []) ++ [ "--disable-shared" "--enable-static" ];
+            dontDisableStatic = true;
+            doCheck = false;
+          });
+          release-openssl = pkgs.openssl.override { static = true; };
+          release-static-libs = pkgs.runCommand "wiz-release-static-libs" { } ''
+            mkdir -p $out/lib
+            cp -L ${release-gmp}/lib/libgmp.a $out/lib/libgmp.a
+            cp -L ${release-libuv}/lib/libuv.a $out/lib/libuv.a
+            cp -L ${release-openssl.out}/lib/libssl.a $out/lib/libssl.a
+            cp -L ${release-openssl.out}/lib/libcrypto.a $out/lib/libcrypto.a
+          '';
+          releaseCC = pkgs.writeShellScript "wiz-release-cc" ''
+            # The release's C compiler. Compile-only calls just get the release's
+            # static archive directory first on the search path. At link time the
+            # dynamic C++/GCC runtimes Lean's link line names are dropped and added
+            # back as static archives after every object (order matters for archives),
+            # and the link is non-PIE (the archives are not built PIC). glibc stays
+            # dynamic: -lm/-ldl/-pthread are the only libraries after -Bdynamic.
+            compile=no
+            args=()
+            for a in "$@"; do
+              case "$a" in
+                -c|-E|-S|-M|-MM) compile=yes ;;
+                -lgmp|-luv|-lssl|-lcrypto|-lstdc++|-lgcc|-lgcc_s|-latomic) continue ;;
+              esac
+              args+=("$a")
+            done
+            if [ "$compile" = yes ]; then
+              exec ${pkgs.stdenv.cc}/bin/cc -L${release-static-libs}/lib "''${args[@]}"
+            fi
+            # All non-glibc libraries, after every object that uses them. appending
+            # them (rather than only trusting -L order) is what makes the result static
+            # even if a later -L path or the driver's own specs name a .so first.
+            exec ${pkgs.stdenv.cc}/bin/cc -no-pie -static-libstdc++ -static-libgcc \
+              -L${release-static-libs}/lib "''${args[@]}" \
+              -Wl,-Bstatic -lgmp -luv -lssl -lcrypto -lstdc++ -lgcc -lgcc_eh -latomic \
+              -Wl,-Bdynamic -lm -ldl -pthread
+          '';
+          releaseInterp =
+            if pkgs.stdenv.hostPlatform.isAarch64
+            then "/lib/ld-linux-aarch64.so.1"
+            else "/lib64/ld-linux-x86-64.so.2";
+          releaseArch = pkgs.stdenv.hostPlatform.parsed.cpu.name;
+          release-unwrapped = pkgs.stdenv.mkDerivation {
+            pname = "wiz-unwrapped-release";
+            inherit (unwrapped) version;
+            # Lake reads the package definition (including the Tests/STC targets) even
+            # when asked for only wiz and grail; the release is a leaf, so it uses the
+            # full compiler source subset rather than staking a cold build on Lake not
+            # touching a target it was not asked for.
+            src = buildSrc;
+            nativeBuildInputs = [ lean ];
+            # an intermediate store path keeps its RUNPATH and debug info; the tarball's
+            # leaf step is the only place that touches them
+            dontStrip = true;
+            dontPatchELF = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR LAKE_CACHE_DIR=$TMPDIR/lake-cache \
+                LEAN_CC=${releaseCC}
+              lake build wiz grail
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              install -m755 .lake/build/bin/wiz .lake/build/bin/grail $out/bin/
+              runHook postInstall
+            '';
+            passthru.subset = "buildSrc (the compiler/tests subset: lakefile.lean, lake-manifest.json, lean-toolchain, Main.lean, Wiz/, Grail/, WizMeta/, STC/, Tests/, runtime/, c/)";
+          };
+          release-tower = pkgs.stdenv.mkDerivation {
+            pname = "tower-unwrapped-release";
+            inherit (unwrapped) version;
+            src = fs.toSource {
+              root = ./.;
+              fileset = fs.unions [ ./tower ./scripts/build-tower-wiz.sh ];
+            };
+            nativeBuildInputs = [ release-unwrapped ];
+            dontStrip = true;
+            dontPatchELF = true;
+            buildPhase = ''
+              runHook preBuild
+              export HOME=$TMPDIR
+              sh scripts/build-tower-wiz.sh tower-bin ${release-unwrapped}/bin/grail \
+                --cc ${releaseCC} \
+                --cflags ${lib.escapeShellArg "-I${release-gmp.dev}/include"} \
+                --ldflags ${lib.escapeShellArg "-L${release-static-libs}/lib"}
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 tower-bin $out/bin/tower
+              runHook postInstall
+            '';
+            passthru.subset = "tower/ + scripts/build-tower-wiz.sh + release-unwrapped + release-static-libs";
+          };
+
+          # The binary release tarball (scripts/release-tarball.sh): the portable
+          # wiz/grail/tower, the standard library, editors, licences and the infoview
+          # module. This is the leaf: the only place that points the ELF interpreter at
+          # the conventional path, removes the build RUNPATH, strips, and scrubs store
+          # paths, so the archive runs on a machine with no /nix/store. Do not copy that
+          # step into an intermediate derivation. The leaf deliberately has no
+          # `share/wiz/cc`: `wiz build` falls back to the host `cc`/GMP, and
+          # `scripts/bundle-cc.sh` remains the release pipeline's portable compiler
+          # bundle.
+          releaseSrc = fs.toSource {
+            root = ./.;
+            fileset = fs.unions [
+              ./lib ./editors ./scripts/release-licenses
+              ./LICENSE ./COPYING.RUNTIME ./web/wasm-host.mjs
+              ./scripts/release-tarball.sh
+            ];
+          };
+          release-bin = pkgs.stdenv.mkDerivation {
+            pname = "wiz-release-bin";
+            inherit (unwrapped) version;
+            src = releaseSrc;
+            nativeBuildInputs = [
+              pkgs.binutils pkgs.patchelf pkgs.python3 pkgs.lean4
+              pkgs.coreutils pkgs.diffutils pkgs.gnutar pkgs.gzip
+              pkgs.gnugrep pkgs.findutils
+            ];
+            dontStrip = true;
+            dontPatchELF = true;
+            buildPhase = ''
+              runHook preBuild
+              mkdir -p bin
+              cp ${release-unwrapped}/bin/wiz ${release-unwrapped}/bin/grail bin/
+              cp ${release-tower}/bin/tower bin/
+              chmod u+w bin/wiz bin/grail bin/tower
+              # ------------------------------------------------------------------
+              # LEAF ONLY. This deliberately breaks Nix convention: a normal store
+              # path keeps its interpreter, RUNPATH and references, and Nix tracks
+              # them. The final tarball leaves the store and must run on a machine
+              # with only glibc, so here (and nowhere else) the ELF interpreter is
+              # the conventional one, the build RUNPATH is removed, debug data is
+              # dropped, and the build's absolute store paths are overwritten. The
+              # binaries were linked statically against every non-glibc library
+              # above; nothing outside this derivation is patched or stripped.
+              # ------------------------------------------------------------------
+              for b in bin/wiz bin/grail bin/tower; do
+                patchelf --set-interpreter ${releaseInterp} "$b"
+                patchelf --remove-rpath "$b"
+                strip --strip-unneeded "$b"
+                python3 ${./scripts}/scrub-store-paths.py "$b"
+              done
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              RELEASE_SOURCE_DATE_EPOCH=${epoch} SOURCE_DATE_EPOCH=${epoch} \
+                sh ${./scripts}/release-tarball.sh \
+                  "$out/wiz-${releaseArch}-linux.tar.gz" bin "${revision}" "" \
+                  ${wiz-web} ${releaseSrc}
+              runHook postInstall
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              name=wiz-${releaseArch}-linux
+              # The archive layer is reproducible: the same patched binaries, commit
+              # epoch and members from a second environment are byte-identical.
+              for side in a b; do
+                mkdir -p repro/$side/bin repro/$side/out repro/$side/home repro/$side/tmp
+                cp bin/* repro/$side/bin/
+              done
+              ( umask 022; HOME=$PWD/repro/a/home TMPDIR=$PWD/repro/a/tmp \
+                  LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1111111111 \
+                  RELEASE_SOURCE_DATE_EPOCH=${epoch} \
+                  sh ${./scripts}/release-tarball.sh repro/a/out/$name.tar.gz \
+                    repro/a/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+              ( umask 077; HOME=$PWD/repro/b/home TMPDIR=$PWD/repro/b/tmp \
+                  LC_ALL=C.UTF-8 TZ=Asia/Tokyo SOURCE_DATE_EPOCH=1700000000 \
+                  RELEASE_SOURCE_DATE_EPOCH=${epoch} \
+                  sh ${./scripts}/release-tarball.sh repro/b/out/$name.tar.gz \
+                    repro/b/bin "${revision}" "" ${wiz-web} ${releaseSrc} )
+              cmp repro/a/out/$name.tar.gz repro/b/out/$name.tar.gz
+              cmp repro/a/out/$name.tar.gz.sha256 repro/b/out/$name.tar.gz.sha256
+              cmp "$out/$name.tar.gz" repro/a/out/$name.tar.gz
+              sh ${./scripts}/test-release-portability.sh \
+                "$out/$name.tar.gz" --glibc ${pkgs.glibc}
+              runHook postCheck
+            '';
+            passthru.subset = "release leaf: lib/ + editors/ + scripts/release-licenses + LICENSE + COPYING.RUNTIME + web/wasm-host.mjs, composed with release-unwrapped + release-tower + wiz-web";
+            meta = {
+              description = "The portable binary release tarball (wiz, grail, tower, library, editors and the infoview module)";
+              platforms = systems;
+            };
+          };
+
           # A deterministic source tarball with a manifest and a CycloneDX SBOM
           # (scripts/source-tarball.py, docs/building.md "Reproducible source tarball"):
           # sorted entries, epoch mtimes, uid/gid 0, normalised modes, no
@@ -627,10 +1061,6 @@ EOF
           # byte-identical. `source-tarball` is the same derivation under the name the
           # docs use.
           release-tarball =
-            let
-              revision = self.rev or self.dirtyRev or "unknown";
-              epoch = toString self.lastModified;
-            in
             pkgs.runCommand "wiz-release-tarball" {
               nativeBuildInputs = [ pkgs.python3 ];
             } ''
@@ -793,7 +1223,9 @@ EOF
           };
         in {
           inherit wiz unwrapped tower tests reference wiz-nvim nvim-wiz tree-sitter-c-sharp scry-native
-                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball;
+                   wiz-web wiz-playground wiz-playground-ui wiz-source-ui release-tarball
+                   wasm-fixtures web-bundle docs-site pages release-bin
+                   release-unwrapped release-tower;
           source-tarball = release-tarball;
           default = wiz;
           wizc = bootstrapChain.wizc;
