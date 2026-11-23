@@ -286,7 +286,16 @@ def hdlGroup : Group where
         okLibs (← IO.FS.readFile "examples/hdl-mem-laws.wiz")
           [".cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true (.cons .true .nil))))))))"] },
     { name := "bits: one-bit laws by case split (Hdl.Bits); control logic written with gates proved with symbolic inputs; the Boolean bridge", run := fun _ => do
-        okLibs (← IO.FS.readFile "examples/hdl-bits.wiz") ["1"] },
+        -- The four `#check`s name the proofs this case is about: the case used to pin
+        -- only the final `#eval`'s `1`, so deleting `stall_out`, `stall_halt`,
+        -- `stall_is_mux` or `stall_bool` (or weakening its statement) left it green.
+        okLibs ((← IO.FS.readFile "examples/hdl-bits.wiz") ++
+          "\n#check stall_out\n#check stall_halt\n#check stall_is_mux\n#check stall_bool\n")
+          ["1",
+           "stall_out : (tx : BitVec 1) → (rx : BitVec 1) → stall HwTy.El instHwHwTyEl Bit.one tx Bit.zero rx Bit.zero = ~~~tx",
+           "stall_halt : (o : BitVec 1) → (t : BitVec 1) → (i : BitVec 1) → (f : BitVec 1) → stall HwTy.El instHwHwTyEl o t i f Bit.one = Bit.one",
+           "stall_is_mux : (o : BitVec 1) → (t : BitVec 1) → (i : BitVec 1) → (f : BitVec 1) → (h : BitVec 1) → stall HwTy.El instHwHwTyEl o t i f h = stallMux o t i f h",
+           "stall_bool : (o : BitVec 1) → (t : BitVec 1) → (i : BitVec 1) → (f : BitVec 1) → (h : BitVec 1) → Bit.toBool (stall HwTy.El instHwHwTyEl o t i f h) = Bool.or (Bool.or (Bool.and (Bit.toBool o) ! (Bit.toBool t)) (Bool.and (Bit.toBool i) ! (Bit.toBool f))) (Bit.toBool h)"] },
     { name := "Verilog: declarations before use (regs, wires, then the updates), sized initial values", run := fun _ =>
         okLibs (hdlVerilogSrc ++ "#eval v1\n")
           ["\"module counter(input clk, input [0:0] x, output [7:0] y);\\n  reg [7:0] r; initial r = 8'd250;\\n  wire [7:0] n3 = r + 8'd1;\\n  always @(posedge clk) r <= n3;\\n  assign y = r;\\nendmodule\\n\""] },
