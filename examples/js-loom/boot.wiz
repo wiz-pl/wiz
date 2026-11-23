@@ -1,0 +1,198 @@
+import Prelude
+import IO
+import Text
+
+/-!
+# The Loom ABI, exported from Wiz, on the JS target
+
+`examples/js-loom/loom.wiz` shows the Loom-shaped glue (router, mount, delegation, patch
+list) written in Wiz and driven from a harness. This module is the next step: the **ABI a
+page mounts** (`wiz_loom_init/html/step/effect/requests/consume`, `web/framework/driver.js`)
+exported from Wiz and served by `--target js`, so `web/framework/mount.js` can mount a Wiz
+runtime with no Wasm boundary at all.
+
+The state is a Wiz `structure`; the driver treats it as opaque (`profile.js`). `html` is
+the SSR the first paint mounts; `step`/`effect` are `IO` (they call `js.wizPatch`, which
+the driver installs on `globalThis`), and the C ABI's rule — an exported function consumes
+its state and returns the next one — is what the JS emitter's export wrapper reproduces
+(`wizCallExport`). `requests` is the pending-effect list, as JSON; `consume` answers the
+driver's "did a marked event consume its default?".
+
+`probe` is the DOM half: it builds a small widget through `js.wiz.dom.…`, so the *same*
+Wiz code runs against `examples/js-loom/fake-dom.mjs` (the Node test) and
+`web/framework/dom-host.mjs` (the browser test).
+
+```sh
+wiz build examples/js-loom/boot.wiz --target js -o /tmp/boot.mjs
+node examples/js-loom/mount_test.mjs /tmp/boot.mjs
+```
+-/
+
+/-- An element handle. Opaque: Wiz passes it back to the host, it never inspects it. -/
+foreign_type Elem
+
+/- The host's DOM operations, named as JavaScript functions on `globalThis`. The names are
+the ones both hosts provide (`fake-dom.mjs`, `web/framework/dom-host.mjs`). -/
+extern "js.wiz.dom.root" domRoot : Unit → Elem
+extern "js.document.createElement" createElement : String → Elem
+extern "js.wiz.dom.setAttribute" setAttribute : Elem → String → String → IO Unit
+extern "js.wiz.dom.appendChild" appendChild : Elem → Elem → IO Unit
+extern "js.wiz.dom.addEventListener" addEventListener :
+  Elem → String → Callback (Elem → IO Unit) → IO Unit
+extern "js.wiz.dom.getAttribute" getAttribute : Elem → String → IO String
+extern "js.wiz.dom.setText" setText : Elem → String → IO Unit
+
+/- The driver's patch sink: it installs `globalThis.wizPatch` before the first render
+(`web/framework/driver.js`), so a step's patch list lands in the mounted tree. -/
+extern "js.wizPatch" patch : String → IO Unit
+
+/-- The route table. -/
+inductive View where
+  | home
+  | about
+  | notFound
+
+/-- What the app is showing: the route, the effects the host has acknowledged, and the
+pending effect request (`""` when there is none). -/
+structure State where
+  route : String
+  effects : Nat
+  pending : String
+
+def init : State := State.mk "/" 0 ""
+
+def viewOf (route : String) : View :=
+  match String.eq route "/" with
+  | .true => .home
+  | .false => match String.eq route "/about" with
+    | .true => .about
+    | .false => .notFound
+
+def viewName (route : String) : String :=
+  match viewOf route with
+  | .home => "home"
+  | .about => "about"
+  | .notFound => "404"
+
+def titleOf (route : String) : String :=
+  match viewOf route with
+  | .home => "Home"
+  | .about => "About"
+  | .notFound => "Not found"
+
+/-- The SSR of the current state. The patch paths below (`0.1`) are child indices from
+the mount point: the `#app` div is child 0, its `main` is child 1. -/
+def html (s : State) : String :=
+  let head := "<div id=\"app\"><nav><a href=\"#/\" data-wiz-on-click=\"0\">Home</a> <a href=\"#/about\" data-wiz-on-click=\"1\" data-wiz-prevent-click=\"1\">About</a></nav><main";
+  let view := String.append " data-view=\"" (String.append (viewName s.route) "\"");
+  let fx := String.append " data-effects=\"" (String.append (Nat.toString s.effects) "\">");
+  let body := String.append (titleOf s.route) "</main></div>";
+  String.append head (String.append view (String.append fx body))
+
+/- ## The patch list, as `js_patch` JSON (`web/framework/runtime.js` applies it) -/
+
+def jsonText (path text : String) : String :=
+  String.append "{\"op\":\"text\",\"path\":\"" (String.append path
+    (String.append "\",\"text\":\"" (String.append text "\"}")))
+
+def jsonAttr (path name value : String) : String :=
+  String.append "{\"op\":\"setAttr\",\"path\":\"" (String.append path
+    (String.append "\",\"name\":\"" (String.append name
+      (String.append "\",\"value\":\"" (String.append value "\"}")))))
+
+/-- The three operations that take `s` to `next`: the new title, its view name and the
+effect count. -/
+def patchesFor (next : State) : String :=
+  let a := jsonText "0.1" (titleOf next.route);
+  let b := jsonAttr "0.1" "data-view" (viewName next.route);
+  let c := jsonAttr "0.1" "data-effects" (Nat.toString next.effects);
+  String.append "[" (String.append a (String.append "," (String.append b
+    (String.append "," (String.append c "]")))))
+
+/- ## The event string (`event "\n" index "\n" payload`) -/
+
+def splitEvent (ev : String) : List String :=
+  List.map String.ofChars (Chars.splitOn (String.chars "\n") (String.chars ev))
+
+def eventName (ev : String) : String :=
+  match splitEvent ev with
+  | .cons n _ => n
+  | .nil => ""
+
+/-- The handler index: which `data-wiz-on-EVENT` the driver found. -/
+def eventIndex (ev : String) : String :=
+  match splitEvent ev with
+  | .cons _ (.cons i _) => i
+  | _ => ""
+
+/-- The route a marked link leads to (the SSR's handler indices: 0 `/`, 1 `/about`), and
+the effect the host is asked for. -/
+def routed (s : State) (index : String) : State :=
+  match String.eq index "1" with
+  | .true => State.mk "/about" s.effects "#/about"
+  | .false => match String.eq index "0" with
+    | .true => State.mk "/" s.effects "#/"
+    | .false => s
+
+/-- One step: route the marked element, apply the patch list, keep the new state. An
+`IO` step is the ABI's shape (the graph is `State -> String -> IO State`; the C wrapper
+unwraps the pair, `wizCallExport` does the same here). -/
+def step (s : State) (ev : String) : IO State := do
+  let next := routed s (eventIndex ev);
+  patch (patchesFor next);
+  IO.pure next
+
+/-- One effect acknowledged: the URL change the step asked for, counted. -/
+def effect (s : State) (kind : String) (_a : String) (_b : String) : IO State := do
+  let next := match String.eq kind "url" with
+    | .true => State.mk s.route (Nat.succ s.effects) ""
+    | .false => s;
+  patch (patchesFor next);
+  IO.pure next
+
+/-- The pending effects, as the JSON list `mount` reads: a URL change while one is
+outstanding, nothing otherwise. -/
+def requests (s : State) : String :=
+  match String.isEmpty s.pending with
+  | .true => "[]"
+  | .false => String.append "[{\"kind\":\"url\",\"payload\":\"" (String.append s.pending "\"}]")
+
+/-- `Loom.onPrevent`: a click on a marked link is consumed (the host does not follow
+`href`); nothing else is. -/
+def consume (s : State) (ev : String) : Nat :=
+  match String.eq (eventName ev) "click" with
+  | .true => 1
+  | .false => 0
+
+/- ## The DOM half: the same code against the fake DOM and the real adapter -/
+
+/-- Build a widget through `js.wiz.dom.…`: a box and a button whose Wiz closure sets the
+box's text and a `data-clicked` attribute. The host test calls it directly (an `IO Unit`
+export, so the emitter's wrapper applies it to the world and the page sees nothing back —
+the C ABI's shape for `wiz_shout`-style exports). -/
+def probe : IO Unit := do
+  let root := domRoot ();
+  let box := createElement "div";
+  setAttribute box "id" "probe";
+  setText box "ready";
+  appendChild root box;
+  let button := createElement "button";
+  setAttribute button "data-probe" "click";
+  setText button "probe";
+  appendChild box button;
+  addEventListener button "click" (fun (_ : Elem) => do
+    setText box "clicked";
+    setAttribute box "data-clicked" "1");
+  IO.pure ()
+
+export "wiz_loom_init" init
+export "wiz_loom_html" html
+export "wiz_loom_step" step
+export "wiz_loom_effect" effect
+export "wiz_loom_requests" requests
+export "wiz_loom_consume" consume
+export "wiz_loom_probe" probe
+
+/-- A library: the module is imported (never run as a program); `main` exists because the
+build path compiles one. -/
+def main : IO Unit := IO.pure ()

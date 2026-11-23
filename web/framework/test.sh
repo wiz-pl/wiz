@@ -39,6 +39,12 @@ node "$ROOT/web/framework/profile_test.mjs"
 node "$ROOT/web/framework/driver_test.mjs"
 # The mount contract (one export; element, module, events, host capabilities): Node only.
 node "$ROOT/web/framework/mount_test.mjs"
+# The Loom ABI exported from a `--target js` module and mounted through `mount()` /
+# `driver.start()` with the fake DOM: init, html, step, effect/requests/consume and a
+# Wiz listener. This is the JS-target half of the same contract, with no Wasm and no
+# Emscripten.
+"$WIZ" build -I "$ROOT/lib" "$ROOT/examples/js-loom/boot.wiz" --target js -o "$OUT/boot.mjs"
+node "$ROOT/examples/js-loom/mount_test.mjs" "$OUT/boot.mjs"
 # The wire envelope/monitor and the adopt/replace contract: Node only.
 node "$ROOT/web/framework/wire_test.mjs"
 # The typed style/class encoder/validator (row 11): Node only.

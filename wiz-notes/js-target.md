@@ -2,8 +2,10 @@
 
 **Status:** prototype on `integration/train12`, branch `agent/js-dom-glue`, no PR.
 New pieces: `Wiz/Compiler/Js.lean`, `web/wiz-js-runtime.mjs`, the `=js` test group
-(`Tests/Groups/Js.lean`), and `examples/js-loom/` (a Loom-shaped demo). The other
-backends are untouched; `--target js` is additive, like `--target wasm` was.
+(`Tests/Groups/Js.lean`), and `examples/js-loom/` (a Loom-shaped demo, and the Loom ABI
+itself in `boot.wiz`). The host half is `web/framework/{profile,mount,driver}.js` and
+`web/framework/dom-host.mjs`. The other backends are untouched; `--target js` is
+additive, like `--target wasm` was.
 
 **One-line result.** The existing untyped IR maps to JavaScript almost one-for-one, so
 the Loom glue — router, mount, event delegation, patch list — can be Wiz source that is
@@ -215,8 +217,24 @@ FAIL loom demo: 1 assertion(s) failed
 
 and exits 1, which is the evidence that the assertions are about the Wiz code and not
 about the harness. The demo is not wired into Loom's `web/source-*.js`; replacing those
-files is the next step, and the host adapter (the `wiz.dom` namespace over the real
-`Element`) is a thin JS file, not Wiz.
+files is the next step.
+
+`examples/js-loom/boot.wiz` goes one step further: it exports the **Loom ABI** itself —
+`wiz_loom_init` (a `State` structure), `wiz_loom_html` (the SSR), `wiz_loom_step`/`_effect`
+(`IO`, calling `js.wizPatch`, the driver's patch sink), `wiz_loom_requests` (the pending
+effect list) and `wiz_loom_consume` — plus `wiz_loom_probe`, a Wiz function that builds a
+widget through `js.wiz.dom.*` and registers a Wiz closure on it. That is what a page
+mounts: no Wasm, no Emscripten, no hand-written glue.
+
+`examples/js-loom/mount_test.mjs` mounts it the way a page does —
+`web/framework/mount.js`, which goes through `driver.js` and `profile.js` — with
+`fake-dom.mjs` behind `js.wiz.dom.*` and `minidom.mjs` as the page. It asserts the first
+paint, a click whose patch list lands in the tree, the effect request and its
+acknowledgement, and the probe's listener. `web/js_loom_chrome_test.mjs` does the same in
+headless Chromium with `web/framework/dom-host.mjs` (live `Element`s, a real click, the
+browser's HTML parser). The seam itself — a Wasm instance and a JS namespace normalising
+to one interface, with the Wasm ownership rule unchanged — is
+`web/framework/profile_test.mjs`.
 
 ## 6. Tests and files
 
@@ -226,16 +244,24 @@ interpreter (`#eval main`), `IO` programs with their expected output, and the tw
 acceptance programs with the **C backend** through `Build.runGlobal` and
 `Build.runJsGlobal` (the same value for a pure `main`, the same stdout for `IO`). It
 also checks that the emitted module is deterministic, has `main` and the `wiz_*` entry
-points, that `IO.readFile` and an unimplemented native are refused by name, that
-`Build.buildJs` writes `OUT.mjs`, and runs both demo variants. The group is 22 cases;
-it ran 22/22 (0 failed) in 37 s on the controller.
+points, that `export "name" f` becomes an ES export with the C ABI's shape (a `State`
+handle out and back, a `String` result, an `IO` result unwrapped), that `IO.readFile` and
+an unimplemented native are refused by name, that `Build.buildJs` writes `OUT.mjs`, and
+runs both demo variants — `loom.wiz` against its harness, and `boot.wiz` through
+`mount()`/`driver.start()`. The group is 24 cases.
 
 Files added:
 
-* `Wiz/Compiler/Js.lean` — the emitter (IR to ES module).
-* `web/wiz-js-runtime.mjs` — the runtime the module pastes in.
+* `Wiz/Compiler/Js.lean` — the emitter (IR to ES module, `main` and the exports).
+* `web/wiz-js-runtime.mjs` — the runtime the module pastes in (including
+  `wizCallExport`, the export wrapper).
 * `Tests/Groups/Js.lean` — the `=js` group.
 * `examples/js-loom/{loom.wiz,fake-dom.mjs,run.mjs}` — the demo.
+* `examples/js-loom/{boot.wiz,mount_test.mjs}` — the Loom ABI, mounted as a page.
+* `web/framework/profile.js` — the runtime seam (Wasm vs `--target js`).
+* `web/framework/dom-host.mjs` — `globalThis.wiz.dom` over the live DOM.
+* `web/framework/profile_test.mjs`, `web/js_loom_chrome_test.mjs` — the seam's Node test
+  and the browser test.
 * `Main.lean` target selection, `Wiz/Compiler/Build.lean` `buildJs`/`runJsGlobal`; no
   change to `IR.lean`, `C.lean`, `LLVM.lean` or `Wasm.lean`.
 
@@ -256,9 +282,8 @@ backend. `selfhost/Backend.wiz` must not pretend otherwise until that emitter ex
 ## 8. Out of scope for this slice
 
 * promises/`await` in `IO` (the Loom storage path);
-* user `export "name" f` as a JS export;
 * a native small-integer `Nat`, unboxed records, or any performance claim;
-* source maps, bundling, tree-shaking, a browser test bed;
+* source maps, bundling, tree-shaking;
 * `Str`, `WordArray`, `StrMap`, `Store`, `MVar`/`Ref`/`Chan`, threads;
 * the C struct and byte-buffer FFI kinds (a callback is supported for a `js.` host);
 * the self-hosted backend.

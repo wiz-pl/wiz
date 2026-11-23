@@ -132,6 +132,17 @@ if [ -n "$WIZ_WEB_NO_BROWSER" ]; then
   exit 0
 fi
 if command -v chromium >/dev/null; then CHROME=$(command -v chromium); else CHROME=$(nix shell --inputs-from "$ROOT" nixpkgs#chromium -c sh -c 'command -v chromium'); fi
+# (JS target) the Loom ABI exported from Wiz and built with `--target js`, mounted by the
+# real host in Chromium: `mount`/`driver.start` over `profile.js`, patches into the page
+# through the browser's own parser, and the module's `wiz.dom` calls through
+# `web/framework/dom-host.mjs`. No Wasm and no Emscripten: the wiz binary and a browser.
+"$WIZ" build -I "$ROOT/lib" "$ROOT/examples/js-loom/boot.wiz" --target js -o "$OUT/boot.mjs"
+node "$ROOT/web/js_loom_chrome_test.mjs" "$CHROME" "$OUT/boot.mjs" > "$OUT/js-loom-chrome.txt"
+if grep -qF 'js loom chrome: all checks passed' "$OUT/js-loom-chrome.txt"; then
+  echo "ok (js target, chromium)"
+else
+  echo "FAIL (js target, chromium)"; cat "$OUT/js-loom-chrome.txt"; exit 1
+fi
 # (static-complete) the playground in Chromium: a script-disabled load has the whole
 # shell, a normal load adopts the static nodes, and a replace that touches the focused
 # editor morphs instead of re-creating it

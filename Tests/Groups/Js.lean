@@ -157,6 +157,20 @@ def jsLoomRun (src : String) : IO (UInt32 × String × String) := do
       env := #[("LD_LIBRARY_PATH", none)] }
   pure (out.exitCode, out.stdout, out.stderr)
 
+/-- Build `examples/js-loom/boot.wiz` (or a variant) and mount it through the real host
+path — `web/framework/mount.js`, `driver.js`, `profile.js` — with the fake DOM behind the
+module's `js.wiz.dom.*` calls and `minidom.mjs` as the page: the exit code, the harness's
+stdout and its stderr. No Wasm and no Emscripten: an ES module namespace is the runtime. -/
+def jsLoomMount (src : String) : IO (UInt32 × String × String) := do
+  let (_, _, text) ← jsCompile src
+  let dir ← IO.FS.createTempDir
+  let file := dir / "boot.mjs"
+  IO.FS.writeFile file text
+  let out ← IO.Process.output
+    { cmd := "node", args := #["examples/js-loom/mount_test.mjs", file.toString],
+      env := #[("LD_LIBRARY_PATH", none)] }
+  pure (out.exitCode, out.stdout, out.stderr)
+
 def jsGroup : Group where
   name := "js"
   exercise := "Stage 8 (a JavaScript target)"
@@ -319,6 +333,22 @@ def jsGroup : Group where
         if code != 0 then
           throw (IO.userError s!"the demo failed ({code}):\n{stdout}\n{stderr}")
         unless (stdout.splitOn "PASS loom demo").length > 1 do
+          throw (IO.userError s!"no PASS line:\n{stdout}") },
+    { name := "the Loom ABI mounts through mount()/driver.start() (the profile seam)", run := fun _ => do
+        unless ← jsNodeAvailable do skipMissing "no node"; return
+        let src ← IO.FS.readFile ("examples" / "js-loom" / "boot.wiz")
+        let (code, stdout, stderr) ← jsLoomMount src
+        if code != 0 then
+          throw (IO.userError s!"the mount test failed ({code}):\n{stdout}\n{stderr}")
+        for want in ["profile.js recognises the module as the js kind",
+                     "wiz_loom_html is the first paint",
+                     "the patch list set the new title",
+                     "the step asked the host for the URL change",
+                     "the effect cleared the request",
+                     "the Wiz closure ran on the click"] do
+          unless (stdout.splitOn want).length > 1 do
+            throw (IO.userError s!"no PASS line for `{want}`:\n{stdout}")
+        unless (stdout.splitOn "PASS loom mount").length > 1 do
           throw (IO.userError s!"no PASS line:\n{stdout}") },
     { name := "the Loom demo fails when its route is broken", run := fun _ => do
         unless ← jsNodeAvailable do skipMissing "no node"; return

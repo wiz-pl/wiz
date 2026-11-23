@@ -33,7 +33,7 @@ table, events/patches, widgets and the LSP bridge are P1/P2 (§9).
 | owner | is | owns | never owns |
 |---|---|---|---|
 | **host** | the page's JavaScript (`web/framework/{mount,driver,runtime,wire,adopt}.js`, `web/*.js`) | sockets, the LSP transport, DOM measurement/geometry, focus trap, clipboard, storage, fetch, applying patches, the widget sanitiser | app state, what a hover means, a tokeniser, class-name choice |
-| **Loom runtime** | the Wiz→Wasm module (`lib/Web/*.wiz`, `web/*-ui.wiz`) | app state, effects-as-requests, view trees, patches, the drawer's open/closed state, span assembly, hover-card assembly from a typed payload, the wire monitor | raw DOM APIs, the network, a second lexer, HTML received from the host |
+| **Loom runtime** | the Wiz module (`lib/Web/*.wiz`, `web/*-ui.wiz`), built to Wasm **or** to an ES module (`wiz build --target js`) | app state, effects-as-requests, view trees, patches, the drawer's open/closed state, span assembly, hover-card assembly from a typed payload, the wire monitor | raw DOM APIs beyond the `wiz.dom` seam (§1.1), the network, a second lexer, HTML received from the host |
 | **SSR shell** | `Wiz.Doc.Site`/`Build` output, plus any server-rendered island HTML | static HTML, static CSS links, static highlighted code, `data-wiz-*` attributes, the SSR hash | interactivity, patches, state |
 | **designer/builder** | `wiz doc` / `grail doc`, `wiz wire gen`, `wiz run web/gen-styles.wiz` | docs pages, the language registry, rendered spans, generated sheets, the wire adapter and monitor table, class-registry cross-checks | running package code, a browser, the runtime |
 
@@ -50,6 +50,31 @@ Three clarifications remove the apparent contradictions:
   (host events/patch, runtime state) but a different ABI and no `Loom.Patch`; it is not an
   island. The shared model applies to it; the wire's typed channels apply to Loom
   runtimes, not to this legacy stepper.
+
+### 1.1 The runtime seam: Wasm and `--target js`
+
+The host is written against one interface, not against Emscripten. `web/framework/profile.js`
+normalises either kind of runtime into the same members —
+`{ kind, module, present, init, html, step, requests, consume, ssrHash, call, ask, stringOf }`:
+
+| | **Wasm** (`wiz build --target wasm`) | **JS** (`wiz build --target js`) |
+|---|---|---|
+| exports | `_wiz_loom_init/_html/_step`, optional `_wiz_loom_requests/_consume/_ssr_hash` | the same names without the `_` |
+| state | an i64 `BigInt` (a pointer, or a scalar) | a Wiz value — a JavaScript object the host never inspects |
+| strings | UTF-8 in linear memory; the host copies and frees | JavaScript strings; the module's export wrapper marshals with the FFI table |
+| ownership | an exported function consumes its argument; a read-only call needs `_wiz_retain` | none: the GC owns the value, and the export wrapper unwraps the `IO` pair as `wiz_io_value` does in C |
+
+`driver.start` and `mount` take that interface, so `mount(el, { module })` does not say
+which kind it got, and the ABI check before the first paint is the same three names. The
+Wasm branch of `profile.js` is the code `driver.js` ran before the seam existed, moved and
+unchanged; a profile is a profile (`profile(p) === p`), so `mount` builds it once.
+
+What does **not** change: the ownership table above, the event string, the patch list and
+`js_patch`, the adopt contract, and the host capability boundary. A JS-target runtime is a
+*runtime*, not a new host — it may reach the DOM only through `globalThis.wiz.dom`
+(`web/framework/dom-host.mjs` in a browser; `examples/js-loom/fake-dom.mjs` in Node), and
+the page's own capabilities stay behind `wizHost`. The emitter and the JS ABI are
+canonical in `wiz-notes/js-target.md`.
 
 ## 2. The data path
 
@@ -290,6 +315,8 @@ existing patch applier.
 | what is canonical for adopt? | `web/framework/adopt.js` |
 | what is canonical for the patch paths and the morph fallback? | `web/framework/runtime.js` |
 | what is canonical for the mount/step ABI and `resync`? | `web/framework/mount.js` + `driver.js` |
+| what is canonical for the runtime seam (Wasm vs `--target js`)? | `web/framework/profile.js` (§1.1); the JS ABI in `wiz-notes/js-target.md` |
+| what is canonical for the real-DOM adapter behind `wiz.dom`? | `web/framework/dom-host.mjs` |
 | what is canonical for the static-complete page? | `web/playground_static_gen.wiz` + `web/build-playground.sh` (the same `Loom` renderer as the runtime) |
 | what is canonical for the renderer/SSR? | `lib/Web/Loom.wiz` |
 | what is canonical for the JS line budget? | `docs/notes/loom-thin-js.md` |
@@ -326,6 +353,20 @@ and the ABI; `lib/Web/Loom.wiz` keeps the renderer's guarantees.
   `web/static_chrome_test.mjs`): the generated playground has every pane and control
   with scripts removed and adopts its static nodes in Chromium, and a `wiz doc` page's
   signature and comment survive with its scripts removed.
+* The runtime seam (`web/framework/profile_test.mjs`): a Wasm stub and a `--target js`
+  stub normalise to the same members, the Wasm ownership rule is unchanged (one extra
+  reference per read, the string freed), the JS path allocates and frees nothing, a
+  runtime without the optional exports keeps the old absence rules (`requests` `""`,
+  `ssrHash` `null`, `consume` `true`), and `driver.start` mounts the same DOM and sends
+  the same event strings for both.
+* The JS-target ABI (`examples/js-loom/mount_test.mjs`, built by the `=js` group and by
+  `web/framework/test.sh`): a `--target js` module exporting `wiz_loom_init/html/step/
+  effect/requests/consume` mounts through `mount()` with the fake DOM — the first paint,
+  a click whose patch list lands in the tree, the effect request and its acknowledgement,
+  and a Wiz closure on a listener.
+* The real adapter (`web/js_loom_chrome_test.mjs`, the Chromium half of `web/test.sh`):
+  the same module in a browser, `wiz.dom.*` over live elements (class list, focus,
+  selection), a patch list parsed by the browser, and a real click.
 * The `VALIDATION` rows 3–7 and 10 agree with the table in this note.
 
 `web/framework/test.sh` runs the Node-only tests (including `hash_test.mjs`,
