@@ -1184,15 +1184,6 @@ partial def bigLitsOf : Body → Array Nat → Array Nat
   | .jdecl _ _ jb k, acc => bigLitsOf k (bigLitsOf jb acc)
   | _, acc => acc
 
-def arrayFn (cname : String) : Option String :=
-  match cname with
-  | "wiz_array_empty" => some "wiz_array_empty"
-  | "wiz_array_push" => some "wiz_array_push"
-  | "wiz_array_size" => some "wiz_array_size"
-  | "wiz_array_get" => some "wiz_array_get"
-  | "wiz_array_set" => some "wiz_array_set"
-  | _ => none
-
 def natPrimFn (op : String) : Option String :=
   match op with
   | "nat.succ" => some "wiz_nat_add"
@@ -1221,35 +1212,40 @@ def natPrimFn (op : String) : Option String :=
   | "dropMoved" => some "wiz_drop_moved"
   | _ => none
 
-/-- The runtime function of a prim, if the Wasm backend supports it. -/
-def primFn (op : String) : Option String :=
+/-- The runtime function of a prim: a closed primitive's from `natPrimFn`, a foreign
+function's from the selected implementations (`extern key → runtime symbol`, chosen by
+`Build.selectWasmExterns` from `IR.externImpls`). There is no per-backend table of
+foreign names here: an extern is accepted iff the target's row selected it. -/
+def primFn (externs : Std.HashMap Name String) (op : String) : Option String :=
   match natPrimFn op with
   | some f => some f
   | none =>
     match RVal.ExternSig.ofKey? op with
-    | some sig => if sig.io then none else (arrayFn sig.cname)
+    | some sig => if sig.io then none else externs.get? op
     | none => none
 
-/-- A human-readable reason a prim is unsupported. -/
+/-- A human-readable reason a prim is unsupported. A reachable extern with no `wasm` row
+is normally refused before codegen (`Build.selectWasmExterns`, a positioned
+`no-target-implementation`); this is the codegen error for a caller that skipped selection. -/
 def unsupportedPrim (op : String) : String :=
   match RVal.ExternSig.ofKey? op with
-  | some sig => s!"the foreign function `{sig.cname}` is not supported by the Wasm backend (its arrays are)"
+  | some sig => s!"the foreign function `{sig.cname}` has no implementation in the Wasm backend (no `wasm` row for its declaration)"
   | none => s!"the primitive `{op}` is not supported by the Wasm backend"
 
-partial def checkBody : Body → Except String Unit
-  | .vdecl _ (.prim op _) b => if primFn op.key |>.isSome then checkBody b else .error (unsupportedPrim op.key)
+partial def checkBody (externs : Std.HashMap Name String) : Body → Except String Unit
+  | .vdecl _ (.prim op _) b => if primFn externs op.key |>.isSome then checkBody externs b else .error (unsupportedPrim op.key)
   | .vdecl _ (.pap f as) b | .vdecl _ (.ap f as) b =>
     if as.size > maxCallArgs then
       .error s!"the Wasm backend holds at most {maxCallArgs} call arguments (calling `{f}` with {as.size})"
-    else checkBody b
+    else checkBody externs b
   | .vdecl _ (.ctor t _) b | .vdecl _ (.reuse _ t _) b =>
     -- Tags are written as `i32`; a tag that does not fit would be silently truncated.
     if t ≥ 2 ^ 32 then
       .error s!"the Wasm backend writes a constructor tag as an `i32` (tag {t} is too large)"
-    else checkBody b
-  | .vdecl _ _ b | .dup _ b | .drop _ b => checkBody b
-  | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkBody a) (.ok ())
-  | .jdecl _ _ jb k => checkBody jb >>= fun _ => checkBody k
+    else checkBody externs b
+  | .vdecl _ _ b | .dup _ b | .drop _ b => checkBody externs b
+  | .case _ alts => alts.foldl (fun r a => r.bind fun _ => checkBody externs a) (.ok ())
+  | .jdecl _ _ jb k => checkBody externs jb >>= fun _ => checkBody externs k
   | _ => .ok ()
 
 /-- Every direct call and closure names a declaration in this module, and its arity
@@ -1293,12 +1289,12 @@ partial def checkJumps (known : Std.HashSet JoinId) : Body → Except String Uni
 
 /-- An unsupported prim (or too many call arguments, an unresolved call, an out-of-scope
 variable or a missing join point) anywhere in the program, as an error. -/
-def check (decls : Array IR.Decl) : Except String Unit :=
+def check (externs : Std.HashMap Name String) (decls : Array IR.Decl) : Except String Unit :=
   let names : Std.HashSet Name := decls.foldl (fun s d => s.insert d.name) {}
   let arities : Std.HashMap Name Nat :=
     decls.foldl (fun m d => m.insert d.name d.params.size) {}
   decls.foldl (fun r d => r.bind fun _ =>
-    checkBody d.body >>= fun _ =>
+    checkBody externs d.body >>= fun _ =>
     checkCalls names arities d.body >>= fun _ =>
     checkScope d.params d.body >>= fun _ =>
     checkJumps {} d.body >>= fun _ =>
@@ -1320,6 +1316,8 @@ structure Ctx where
   lits : Std.HashMap Nat (Nat × Nat)
   locals : Std.HashMap Var Nat
   tmp : Nat
+  /-- the selected foreign implementations: `extern` key → runtime function -/
+  externs : Std.HashMap Name String
 
 def Ctx.var (c : Ctx) (x : Var) : Nat := c.locals.getD x 0
 
@@ -1383,7 +1381,7 @@ partial def emitPrim (c : Ctx) (x : Var) (op : String) (as : Array Var) : Code :
   | none =>
     match RVal.ExternSig.ofKey? op with
     | some sig =>
-      match arrayFn sig.cname with
+      match c.externs.get? op with
       | some f =>
         -- skip erased (type) arguments; the runtime takes Wiz values
         let keep := as.toList.zip (sig.params ++ List.replicate (as.size - sig.params.length) (RVal.FKind.k 'e'))
@@ -1581,9 +1579,18 @@ def moduleBytes (b : Built) : Except String ByteArray := do
     exportSec ++ elemSec ++ codeSec ++ dataSec))
 
 /-- Emit a WebAssembly module for the IR of an IO-less `main`. -/
-def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArray := do
+def program (decls : Array IR.Decl) (io : Bool := false)
+    (externs : Std.HashMap Name String := {}) : Except String ByteArray := do
   if io then throw "the Wasm backend runs only IO-less `main`"
-  check decls
+  -- every selected implementation must name a function this module defines: a row
+  -- whose symbol is not in `runtimeNames` would otherwise become `missingFnIdx` and
+  -- only the validator would notice (or, worse, index 0)
+  for (key, symbol) in externs.toList do
+    match runtimeSig? symbol with
+    | some _ => pure ()
+    | none =>
+      throw s!"the Wasm implementation of `{key}` names `{symbol}`, which is not one of the backend's runtime functions"
+  check externs decls
   match decls.find? (·.name == "wiz.entry") with
   | none => throw "the Wasm backend needs the `wiz.entry` function (no `main`?)"
   | some d =>
@@ -1677,7 +1684,7 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
         return m
       let c : Ctx := {
         owner := d.name, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
-        tmp := nParams + extra.size }
+        tmp := nParams + extra.size, externs }
       { name := d.name, params := d.params.map fun _ => .i64, results := #[.i64],
         locals := locals ++ #[.i32], code := emitBody c d.body }
   let boxedFns := decls.map fun d =>
@@ -1696,7 +1703,7 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
       return m
     let c : Ctx := {
       owner := j.owner, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
-      tmp := nParams + extra.size }
+      tmp := nParams + extra.size, externs }
     { name := s!"{j.owner}.j{j.id}", params := j.params.map fun _ => .i64, results := #[.i64],
       locals := (extra.map fun _ => VT.i64).push VT.i32, code := emitBody c j.body }
   let builderFns := cafDecls.map fun d =>
@@ -1709,7 +1716,7 @@ def program (decls : Array IR.Decl) (io : Bool := false) : Except String ByteArr
       return m
     let c : Ctx := {
       owner := d.name, declIdx, joinIdx, joinParams, tableIdx, arities, lits := litTab, locals := env,
-      tmp := nParams + extra.size }
+      tmp := nParams + extra.size, externs }
     { name := d.name ++ ".build", params := d.params.map fun _ => .i64, results := #[.i64],
       locals := (extra.map fun _ => VT.i64).push VT.i32, code := emitBody c d.body }
   let funcs := runtimeDefs boxedType ++ declFns ++ boxedFns ++ joinFns ++ builderFns

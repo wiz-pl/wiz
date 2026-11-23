@@ -1,0 +1,5 @@
+func NullFixtures.Forgiving.Length(%0)
+  b0:
+    %1 = %0
+    %2 = call System.String.get_Length(%1)
+    ret %2

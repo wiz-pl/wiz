@@ -22,10 +22,13 @@ The timing law is stated on `sclk` edges rather than on absolute cycles:
   slave's `data` is the byte sent; `Spi.transferLoop` is the same statement at the
   byte level, for every mode.
 
+The obligations are Boolean checks over the finite link traces the example generates
+(`SampleStable`, `MosiOnShift`, `SampleCount`, `Divider`, `ByteRoundTrip`); their step
+forms are `Spi.Law.SampleStableGo`, `Spi.Law.MosiOnShiftGo` and `Spi.Law.sampleCount`.
 `examples/hdl-spi.wiz` (test group `bus-protocol`) runs all four modes, a divider sweep
-and the loopback, checks these Boolean forms and compares the value simulation,
-`Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**; the lemmas at
-the end are kernel-checked.
+and the loopback and calls every check, at the same time as it compares the value
+simulation, `Netlist.simulate` and `Circuit.simFast`. They are **tested, not proved**;
+the lemmas at the end are kernel-checked.
 -/
 
 /-- A `LinkOutW` field view. -/
@@ -138,35 +141,30 @@ def Spi.Law.slaveDoneSeen : List (HwTy.El (Spi.LinkOutW.code 8)) → Bool
 
 /-- `mosi` is stable on every sample edge: the master sees the bit it samples. -/
 def Spi.Law.SampleStable {ω w : Nat} (cpol cpha : Nat)
-    (xs : Trace (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
-  (t : Nat) →
-    Spi.Law.sampleEdge cpol cpha (BitVec.toNat (Spi.Law.out (xs t)).sclk)
-      (BitVec.toNat (Spi.Law.out (xs (Nat.succ t))).sclk) = .true →
-    Spi.Law.mosi (xs (Nat.succ t)) = Spi.Law.mosi (xs t)
+    (xs : List (HwTy.El (Spi.LinkOutW.code w))) : Bool :=
+  Spi.Law.sampleStableTrace cpol cpha xs
 
 /-- Data changes only on a shift edge (after the start cycle). -/
 def Spi.Law.MosiOnShift {ω w : Nat} (cpol cpha : Nat)
-    (xs : Trace (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
-  (t : Nat) → ¬ (Spi.Law.mosi (xs (Nat.succ t)) = Spi.Law.mosi (xs t)) →
-    Spi.Law.shiftEdge cpol cpha (BitVec.toNat (Spi.Law.out (xs t)).sclk)
-      (BitVec.toNat (Spi.Law.out (xs (Nat.succ t))).sclk) = .true
+    (xs : List (HwTy.El (Spi.LinkOutW.code w))) : Bool :=
+  Spi.Law.mosiOnShiftTrace cpol cpha xs
 
 /-- A transfer has eight sample edges. -/
 def Spi.Law.SampleCount {ω w : Nat} (cpol cpha : Nat)
-    (xs : List (HwTy.El (Spi.LinkOutW.code w))) : Prop :=
-  Spi.Law.SampleCountN cpol cpha xs = 8
+    (xs : List (HwTy.El (Spi.LinkOutW.code w))) : Bool :=
+  Nat.beq (Spi.Law.SampleCountN cpol cpha xs) 8
 
 /-- `done` is at cycle `16 * div` of a trace whose first cycle is `start`. -/
-def Spi.Law.Divider (div : Nat) (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Prop :=
-  Spi.Law.firstDone 0 xs = Nat.mul 16 div
+def Spi.Law.Divider (div : Nat) (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Bool :=
+  Nat.beq (Spi.Law.firstDone 0 xs) (Nat.mul 16 div)
 
 /-- The byte round-trips: the trace's first `done` is at `k`, and at that cycle the
 master receives the reply and the slave receives the sent byte. -/
 def Spi.Law.ByteRoundTrip (reply sent k : Nat)
-    (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Prop :=
-  Spi.Law.firstDone 0 xs = k ∧
-  Spi.Law.byteOk reply sent
-    (Hdl.nthD (HwTy.unpack (Spi.LinkOutW.code 8) 0) xs k) = .true
+    (xs : List (HwTy.El (Spi.LinkOutW.code 8))) : Bool :=
+  Bool.and (Nat.beq (Spi.Law.firstDone 0 xs) k)
+    (Spi.Law.byteOk reply sent
+      (Hdl.nthD (HwTy.unpack (Spi.LinkOutW.code 8) 0) xs k))
 
 ------------------------------------------------------------------------------------
 -- Kernel-checked lemmas: the mode table and the pure transfer model

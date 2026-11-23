@@ -1,1 +1,0 @@
-bpf: signed division is not in the subset: `IntN.div`/`IntN.mod` need SDIV/SMOD (ISA v4) and have an `INT_MIN / -1` special case

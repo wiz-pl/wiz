@@ -248,6 +248,11 @@ structure SimpLemma where
   name : Name
   priority : Nat := 1000
   rtl : Bool := false
+  /-- (P0) a `[hint]` entry shares the registration array with `[simp]`: the set is one
+  record, but the two attributes are independent (`simp` uses `hint = false` only) -/
+  hint : Bool := false
+  /-- the hint's kind: `apply` (default), `intro` or `elim` (the Wiz driver's policy) -/
+  kind : String := "apply"
   deriving Repr, Inhabited
 
 structure ElabState (R : Type) where

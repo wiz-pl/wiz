@@ -42,7 +42,7 @@ def runProbe : IO Unit := do
   let dir ← IO.FS.createTempDir
   match ← Build.runGlobal (← Tests.toolchain) s "main" dir false (timeout := some 1500) with
   | .ok out => checkEq "" out
-  | .error e => if e.isToolchain then skip "no toolchain" else Elab.failRun e
+  | .error e => if e.isToolchain then skipMissing "no toolchain" else Elab.failRun e
 
 def group : Group where
   name := "scry-cs"

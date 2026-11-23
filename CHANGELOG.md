@@ -8,8 +8,109 @@ release (0.1.0 → 0.1.1) fixes bugs only. What a patch release keeps is in
 Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
 `docs/stages/NN-*.md`. `#n` is a pull request on GitHub.
 
+The trust-ledger counts below are generated from `.github/trust-baseline.tsv` by
+`scripts/trust-counts.py --write` and checked by `scripts/trust-counts.py --check` (the
+`native` group runs the check), so this file cannot drift from the ledger.
+
+<!-- trust-counts: rows=837 partial=247 axiom_rows=260 builtin_rows=254 native_rows=76 implemented_by=71 repr=5 extern_declarations=226 seal=8 other_builtin=20 pure_axioms=34 distinct_reasons=550 shared_reasons=287 legacy=0 expired=0 -->
+
 ## [Unreleased]
 
+* ci: a pull request's `build` job starts from a `.lake` a **cold** derivation saved
+  (`flake.nix`'s `withLakeCache`, keyed by `flake.lock`, `lean-toolchain`, the
+  architecture and the `lean`/`runtime` subset hashes), so Lake recompiles only the
+  modules the branch changed. The seed is the `lake` output of the master-only
+  `lake_seed` job's `withLakeCache empty-lake` build (a cold compile the sandbox
+  enforces), whose `bin` is intended to be byte-identical to the pure build's (the
+  `cmp` is the seed measurement's assertion, not yet run in CI); nothing a pull request
+  writes is ever read by a trusted job. Pushes, the merge queue and the release path
+  keep the pure `nix build`, and a missing seed is the same cold build, not a failure.
+  The subset hashes are one committed table, `.github/repo-subsets.json`
+  (`scripts/repo-subsets.py`), which the `docs_style` job checks and
+  `.githooks/pre-commit` refreshes (`git config core.hooksPath .githooks`).
+
+* docs: the claims the state-of-the-art review found were not what the pages said are now
+  precise or named as limitations, each with its measurement or test:
+  `docs/Status.md` line and case counts re-measured on `d853fde79` (selfhost
+  `Kernel.wiz` 5,346 lines, Lean kernel 6,286/4,998, `STC/F0` 28 files/5,136 lines, the
+  `elab` group's 43 cases and 24 rejections, 1,986 cases and 457 rejection checks in
+  `Tests/Groups/*.lean`); the four separately-claimed bootstrap properties and which of
+  them the fixpoint and libdiff do and do not provide (`docs/bootstrap-chain.md`), with
+  the assurance budget assigned to the kernel; `wiz-web/1` and `wiz-gpu/1` host/dispatch
+  profiles with their unverified rows (`docs/stages/08-backend/{wasm,webgpu}.md`);
+  Lean-interface extensibility rather than feature parity (`docs/design/README.md`);
+  the selfhost `Nat` as wrapping at 63 bits, under verification
+  (`docs/selfhost-compiler.md`, `docs/semantics-matrix.md`); and `Hdl.Formal` as an
+  unverified second rendering whose CI case skips without yosys/z3
+  (`docs/libraries.md`, `docs/hardware.md`). No code or kernel claim changed.
+
+* HDL laws: the trace obligation sets in `Hdl.AxiStreamLaw`, `Hdl.SpiLaw`, `Hdl.BusLaw`
+  and `Hdl.Axi4Law` are Boolean checks over the finite traces the examples generate, and
+  every one is called by `hdl/examples/hdl-stream.wiz`, `hdl/examples/hdl-spi.wiz`,
+  `hdl/examples/hdl-bus-law.wiz` and `hdl/examples/hdl-axi4.wiz`, so a law that fails fails the
+  `bus-protocol` or `bus-law` case. The unused (and, for a correct register slice,
+  false) `AxiStream.Law.NoLoss`/`NoDup`/`Backpressure`/`SliceNoLoss`/`ConvertNoLoss`
+  predicates, the `Axi4.Law.AddressProgression`/`BeatCount` props and the tautological
+  `Axi4.Law.ResponsesInOrder`/`Axi4.ResponseOrder` are removed; `docs/libraries.md`
+  lists the checks that now run.
+
+* HDL signal laws (P2.1): `hdl/src/Hdl/Signal.wiz` proves the knot's algebra
+  (`fix_unfold`, `register_fixed_unique`, `fix_pure`, `fix_delay_eq_circuit`), the sized
+  register (`registerS_head`, `registerS_eq_register`), the counter's `0, 1, 2, …` in both
+  the `Signal.fix` and `Circuit.loop` spellings, `Signal.Eqv` congruence for
+  `map`/`zipWith`/`zipWith3`/`register`/`registerS`/`mealy`/`ofCircuit`, and the
+  *sized-observation* laws: `mapS_head`, `mapS_tail`, `mapS_at`, `mapS_id`, `mapS_comp`,
+  `zipWithS_head`, `zipWithS_at` and `zipWith3S_at` are `rfl` (pointwise for the `Eqv`
+  ones). All proved laws are pinned by `#check` and `#print axioms` in the `hdl-signal`
+  group (the algebraic ones list no axioms; the four that mention a `Circuit` or compute
+  `BitVec` literals inherit the library's trusted `Hw HwTy.El`/`UIntN` natives).
+
+* elab: surface `out` types its payload at the **predecessor** size, as the kernel has
+  it — `out x : Desc.interp D (ν^{s'}) i` for `x : ν^{↑s} D i`, `s' = sizePred? s`
+  (`∞ ↦ ∞`), in `Wiz/Elab/Term.lean`'s builtin `out` case and in the
+  `selfhost/Frontend.wiz` mirror. Before, the elaborator used the `ν^∞` family, so a
+  `let`-bound observation of a sized value carried a size the kernel's sized `cocon`
+  check rejects (`expected … ν (Signal.desc d A) … inferred … ν^j …`); a value at `∞`
+  was unaffected. This is what makes the sized-signal body `let p := out a` (one
+  observation per cycle, projected) check, so the laws above hold while a `Signal.fix`
+  knot stays linear; a value at a size *variable* is still not observable (the kernel's
+  rule, now reported by the elaborator too). No kernel change.
+
+* selfhost: the driver's `run` POSIX-quotes every component it puts in its `system(3)`
+  command (`--cc`, `--llc`, `--rt`, each `--cflags`/`--ldflags` word, input/output
+  paths, and the program's arguments), so a path or argument with a space, `;`, `$`, a
+  quote or a newline is one word and cannot start a second command, and `--cc` is
+  documented as one executable. A program killed by a signal is now a failure decoded
+  from the wait status (`WIFSIGNALED`/`WTERMSIG` → `128 + signal`) instead of exit 0
+  (`st / 256`). Tests: `=selfhost-cli` (two new cases: quoted `--rt`/paths/arguments,
+  and a SIGSEGV reported as signal 11).
+
+* compiler: the **C and LLVM backends fail the compile** on a partial application of a
+  function with no known arity and on a jump with no join point in scope, instead of
+  emitting a closure with arity 0 and an assignment-free jump; the C backend's locals
+  are collected in linear time (the old collector appended each join's parameters to the
+  accumulator and de-duplicated a list). Erasure reports an out-of-scope de Bruijn index
+  as a diagnostic instead of panicking on the types array. Tests: `=c`, `=backend`,
+  `=llvm`, `=scaling`.
+* modules: the `import_c` header scan skips `--` comment lines. The scan is textual
+  (F10), so `selfhost/Frontend.wiz` documenting the syntax yielded the header `…`,
+  which the header-name check (F09) rightly rejects; the playground build failed on a
+  comment. Block comments are still scanned (the remaining F10 gap). Tests: `=modules`.
+
+* cache (security): three containment fixes at the elaboration cache's trust boundary.
+  A `.wizr` region is now served only when a module manifest lists it and the bytes match
+  — the unmanifested fallback is gone in every mode, because a region is a type-erased
+  image and its `.wizs` sidecar is written by the same writer (`--region-cache` with
+  `--cache-verify off` now reads and writes no regions). A `--cache-ro` layer is
+  **refused by default**: a manifest is a self-signed digest, so it does not authenticate
+  a foreign layer; `--cache-ro-unsigned` is the explicit opt-in for unauthenticated data
+  (the Nix wrappers pass it for their own store cache). `--cache-verify strict` is now
+  described as manifest-presence, not authenticity. The fast-only legacy key fallback is
+  deleted: an unmanifested `.wizc` is a miss in `warn` (only `--cache-verify off` keeps
+  the old unverified lookup). Compatibility: existing `--cache-ro` users must add
+  `--cache-ro-unsigned` (or `--cache-verify off`); write caches need one cold pass to
+  acquire manifests. A regression fixture plants a forged `.wizc` + `.wizmf` (a claim of
+  `False` and a forged `builtin`) and shows it is refused under the defaults.
 * release: a deterministic source tarball (`nix build .#release-tarball`, or
   `scripts/source-tarball.py`) with a canonical JSON manifest (every path, size and
   SHA-256, plus a tree digest), and a CycloneDX 1.6 SBOM beside it. A release publishes
@@ -24,8 +125,8 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `zipWithS`/`zipWith3S`, `+`/`if` at a size, and the counter/baud examples now check as
   sized `scofix` terms on the kernel's `scofix` state rule. The negative causality cases
   are reported (a size-keeping register, a same-size recursive copattern); `Hdl.Signal`
-  contributes no trust sources (the ledger is 864/864). Tests: `=hdl-signal` 9/9,
-  `=hdl` 32/0, `=copatterns` 18/18, `=sized` 7/7.
+  contributes no trust sources (the ledger size is the `trust-counts` marker above). Tests: `=hdl-signal` 9/9,
+  `=hdl` 32/0, `=copatterns` 18/18, `=sized types` 7/7.
 * web: the site now installs **`wiz-playground-ui.wasm`** with its `.mjs` (the page
   aborted fetching it: "both async and sync fetching of the wasm failed"), and
   `mount` resolves a page's loader namespace (`() => import("./…-ui.mjs")`) to its
@@ -41,8 +142,14 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   runs, enabled/taken/invariants/safety-during/bounded), `lib/Dist/Checker.wiz` (a BFS
   reachability checker with soundness for `ok` and `bad`), and `lib/Dist/TwoPhase.wiz`
   (`twoPC_safety` for all `N`; a finite `N=2` decision instance with a proved
-  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (5/0).
+  counterexample for the broken twin). Axiom-free. Tests: new `=dist-proofs` (7/0).
 
+* run, cache, wasm: `wiz run`, the REPL's `:run` and `import_c` preprocessing remove
+  their temporary directories on success and failure (each leaked one per run/header),
+  and a malformed escape in a cache entry (`\xZZ`, `\u{zz}`) is a miss rather than a
+  decoded character. The Wasm backend's JS host is found beside the toolchain's `lib/`
+  (`share/wiz/web`), so `wiz run --target wasm` works from an installed toolchain and
+  from any current directory; the Nix package and a release tarball ship it there.
 * elab: a named `match h : e` inside a definition whose result is an equation keeps the
   equation as written while its branches are checked. The declared type used to be
   evaluated first (`f2 n = isZero (Nat.succ n)` computes to `True`), so an inner named
@@ -84,7 +191,7 @@ Section numbers (`4c`, `22e`, …) refer to the stage docs: section `NNx` is in
   `$stable`/`$rose`/`$fell`, `(* anyconst *)` declarations and an initial-reset
   assumption. The non-formal text is byte-identical to `Verilog.emit`, and
   `Formal.sby` writes a SymbiYosys job (`bmc`/`prove`, depth, `smtbmc`).
-  `examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
+  `hdl/examples/hdl-formal.wiz` is a one-entry valid/ready buffer plus a wrong variant:
   yosys-smtbmc passes the first (BMC depth 8; induction on the combinational rule) and
   finds a counterexample for the second.
 * web: the playground is **one page, one runtime**. `web/playground.js` (543 → 153

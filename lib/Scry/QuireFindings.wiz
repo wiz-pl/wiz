@@ -1,0 +1,379 @@
+import Word
+import Text
+import WordMap
+import Json
+import Scry.Quire
+import Scry.QuireCore
+import Scry.QuireCursor
+/-!
+# Scry.QuireFindings: a findings index on Quire
+
+The project driver (`Scry.ProjectIO`) computes findings that its report renders from
+JSON. This module is the **index** over those findings, in the shape the benchmark
+measured (`drafts/storage-engine/bench/`): a finding is a 32-byte `Node`
+
+| field | value |
+|---|---|
+| `id` | FNV-1a-64 of the finding's identity (rule, file, line, function, message) |
+| `kind` | the rule name's 32-bit hash |
+| `label` | severity (0–3) |
+| `count` | `(file's 32-bit hash << 32) | (line & 0xffffffff)` |
+
+with secondary indices on rule, severity and file. The *strings* (the rule name, the
+path, the function, the message and the evidence path) stay in the report's JSON: a
+Quire record is 32 fixed bytes and has no variable-length value store
+(`wiz-notes/scry-quire.md`). The index is therefore a **derived, queryable projection**;
+the report remains the evidence and the source of truth.
+
+Two backends write the same rows:
+
+* `saveJson`/`loadJson` — one JSON document (`scry-findings-index/1`) with the strings,
+  the natural fallback and the format a reader can inspect;
+* `saveQuire`/`loadQuire` — one Quire file, one commit for the whole run, rows read
+  back through `QAllRecords`. A missing, truncated or corrupt file is a clean
+  `error "cold"`/`"corrupt"`, never a panic: the loader checks the meta generation and
+  two sentinel records (id 0 the row count, id 1 the fingerprint) before it walks any
+  page.
+
+A truncated file is a miss because a fresh or garbage image has no valid meta, so the
+loader stops before `QAllRecords` can read a page that is not a leaf. The warm read
+(`fiProbe`) is the meta pick plus the two sentinel records; only `fiLoadQuire` (and the
+tests that need the rows) walks the tree.
+-/
+
+-- ## Hashing (the record's numeric columns)
+
+/-- FNV-1a-64 over a string, wrapping at 64 bits. The workflow store's own hash
+(`Scry.Identity.fnv`) is the precedent; this copy keeps the module in `lib/` without a
+dependency on the scry package. -/
+def Scry.fiFnv (s : String) : U64 :=
+  List.foldl (fun h c =>
+      UIntN.mul (UIntN.xor h (U64.ofNat (Char.code c))) (U64.ofNat 1099511628211))
+    (U64.ofNat 14695981039346656037) (String.chars s)
+
+/-- The low 32 bits of `fiFnv`, the record's `kind`/file column. -/
+def Scry.fiHash32 (s : String) : U32 := U32.ofNat (UIntN.toNat (Scry.fiFnv s))
+
+/-- A stable string id from a hash (the project id in a cache file name). -/
+def Scry.fiIdOf (s : String) : String := Nat.repr (UIntN.toNat (Scry.fiFnv s))
+
+/-- Keep the sentinel's keys (0, 1) out of the finding id space. -/
+def Scry.fiReserve (id : U64) : U64 :=
+  match UIntN.beq id (U64.ofNat 0) with
+  | .true => U64.ofNat 2
+  | .false => match UIntN.beq id (U64.ofNat 1) with
+    | .true => U64.ofNat 3
+    | .false => id
+
+/-- The 64-bit key of a finding's identity. A collision is a false identity; the
+identity string carries every field the report distinguishes, so this is the same
+collision class as the workflow store's `f_<16 hex>` id. -/
+def Scry.fiId (rule file function message : String) (line : Nat) : U64 :=
+  Scry.fiReserve (Scry.fiFnv
+    (String.intercalate "\u{0}" [rule, file, function, message, Nat.repr line]))
+
+-- ## The rows
+
+/-- One finding as the index sees it. `id` is `fiId` of the fields; the strings are
+kept here so the JSON backend can write them and the tests can compare both backends. -/
+structure Scry.FindingsIndexRow where
+  id : U64
+  rule : String
+  severity : Nat
+  file : String
+  line : Nat
+  function : String
+  message : String
+
+/-- A row with its identity computed from its fields. -/
+def Scry.FindingsIndexRow.make (rule : String) (severity : Nat) (file : String) (line : Nat)
+    (function message : String) : Scry.FindingsIndexRow :=
+  Scry.FindingsIndexRow.mk (Scry.fiId rule file function message line) rule severity file line
+    function message
+
+/-- The rows as a set by `id`: the index is a set, so two findings with the same
+identity are one record (the report still lists both). -/
+def Scry.fiDedupe (rows : List Scry.FindingsIndexRow) : List Scry.FindingsIndexRow :=
+  List.map (fun p => p.2)
+    (U64Map.toList (U64Map.ofList (List.map (fun r => (r.id, r)) rows)))
+
+/-- The numeric projection Quire stores. -/
+structure Scry.FindingKey where
+  id : U64
+  rule : U32
+  severity : Nat
+  file : U32
+  line : Nat
+
+/-- The row's index record. -/
+def Scry.FindingsIndexRow.key (r : Scry.FindingsIndexRow) : Scry.FindingKey :=
+  Scry.FindingKey.mk r.id (Scry.fiHash32 r.rule) r.severity (Scry.fiHash32 r.file) r.line
+
+/-- The 32-byte `Node` for a row: rule in `kind`, severity in `label`, file and line
+packed in `count`. -/
+def Scry.FindingsIndexRow.node (r : Scry.FindingsIndexRow) : Node :=
+  Node.mk (Scry.fiHash32 r.rule)
+    (U64.ofNat (Nat.add (Nat.shiftLeft (UIntN.toNat (Scry.fiHash32 r.file)) 32)
+      (Nat.land r.line 4294967295)))
+    (U32.ofNat r.severity)
+
+/-- The key a stored record decodes to. -/
+def Scry.FindingKey.ofRec (r : Rec) : Scry.FindingKey :=
+  Scry.FindingKey.mk r.id r.node.kind
+    (UIntN.toNat r.node.label)
+    (U32.ofNat (Nat.shiftRight (UIntN.toNat r.node.count) 32))
+    (Nat.land (UIntN.toNat r.node.count) 4294967295)
+
+-- ## The schema and the sentinel
+
+/-- `"QRE1"`: the sentinel's `kind`, so a file this module did not write is a miss. -/
+def Scry.fiMagic : U32 := U32.ofNat 0x51524531
+/-- The index schema version. -/
+def Scry.fiSchema : U32 := U32.ofNat 1
+/-- The sentinel records' `label`: `0xffffff00 | schema`, outside the severity range, so
+the severity index never counts a sentinel. (The rule/file buckets still contain them;
+`findingsLoad` filters the sentinel keys out, and `findingsQuery` is a severity query.) -/
+def Scry.fiSentinelLabel : U32 := U32.ofNat 0xFFFFFF01
+/-- The sentinel's primary key (finding ids are FNV values; a 0 is mapped to 2 by the
+constructor so the sentinel is unambiguous). -/
+def Scry.fiSentinelId : U64 := U64.ofNat 0
+/-- `"FPR1"`: the fingerprint sentinel's `kind`. -/
+def Scry.fiPrintMagic : U32 := U32.ofNat 0x46505231
+/-- The fingerprint sentinel's primary key. -/
+def Scry.fiFingerprintId : U64 := U64.ofNat 1
+
+/-- Rule (`kind`), severity (`label`) and file (`count`) indices, all non-unique. -/
+def Scry.fiRuleIndex : IndexDef := IndexDef.mk (U32.ofNat 0) (U32.ofNat 0) .false
+def Scry.fiSeverityIndex : IndexDef := IndexDef.mk (U32.ofNat 1) (U32.ofNat 2) .false
+def Scry.fiFileIndex : IndexDef := IndexDef.mk (U32.ofNat 2) (U32.ofNat 1) .false
+def Scry.fiIndices : List IndexDef :=
+  [Scry.fiRuleIndex, Scry.fiSeverityIndex, Scry.fiFileIndex]
+
+-- ## JSON backend
+
+/-- One row as JSON, with the strings the evidence needs. -/
+def Scry.FindingsIndexRow.json (r : Scry.FindingsIndexRow) : Json :=
+  Json.mkObj
+    [ ("id", Json.ofNat (UIntN.toNat r.id))
+    , ("rule", Json.mkStr r.rule)
+    , ("severity", Json.ofNat r.severity)
+    , ("file", Json.mkStr r.file)
+    , ("line", Json.ofNat r.line)
+    , ("function", Json.mkStr r.function)
+    , ("message", Json.mkStr r.message) ]
+
+/-- The whole JSON document. -/
+def Scry.fiJsonText (rows : List Scry.FindingsIndexRow) : String :=
+  Json.render (Json.mkObj
+    [ ("schema", Json.mkStr "scry-findings-index/1")
+    , ("rows", Json.mkArr (List.map Scry.FindingsIndexRow.json rows)) ])
+
+/-- A required string field. -/
+def Scry.fiStr (j : Json) (key : String) : Option String :=
+  match Json.get j key with
+  | .some v => Json.asString v
+  | .none => .none
+
+/-- Parse one row; `none` for a malformed record (the caller calls the file corrupt). -/
+def Scry.findingRowOfJson (j : Json) : Option Scry.FindingsIndexRow :=
+  match Scry.fiStr j "rule", Scry.fiStr j "file", Scry.fiStr j "function",
+      Scry.fiStr j "message" with
+  | .some rule, .some file, .some function, .some message =>
+    .some (Scry.FindingsIndexRow.mk (U64.ofNat (Json.getNat j "id")) rule
+      (Json.getNat j "severity") file (Json.getNat j "line") function message)
+  | _, _, _, _ => .none
+
+/-- `List.filterMap` (lib's `List` has no `filterMap`). -/
+def Scry.fiFilterMap {A B : Type} (f : A → Option B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => match f x with
+    | .some y => List.cons y (Scry.fiFilterMap f xs)
+    | .none => Scry.fiFilterMap f xs
+
+/-- Write the JSON index. -/
+def Scry.fiSaveJson (path : String) (rows0 : List Scry.FindingsIndexRow) : EIO Unit :=
+  FS.writeFile path (Scry.fiJsonText (Scry.fiDedupe rows0))
+
+/-- Read the JSON index: `"cold"` when absent, `"corrupt"` for a bad document. -/
+def Scry.fiLoadJson (path : String) : EIO (Except String (List Scry.FindingsIndexRow)) := do
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    text ← FS.readFile path;
+    match Json.parse text with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok j =>
+      match String.eq (Json.getStr j "schema") "scry-findings-index/1" with
+      | .false => EIO.pure (.error "corrupt")
+      | .true =>
+        let xs := Json.getList j "rows";
+        let rows := Scry.fiFilterMap Scry.findingRowOfJson xs;
+        EIO.pure (match Nat.beq (List.length rows) (List.length xs) with
+          | .true => .ok rows
+          | .false => .error "corrupt")
+
+-- ## Quire backend
+
+/-- A commutative fingerprint of a key set (sum plus three times the xor). The cache
+compares it with the freshly computed rows: a stale or partially written index is a
+miss, and a fresh one is a hit. -/
+def Scry.fiPrint (ks : List Scry.FindingKey) : U64 :=
+  let s := List.foldl (fun a k => UIntN.add a k.id) (U64.ofNat 0) ks;
+  let x := List.foldl (fun a k => UIntN.xor a k.id) (U64.ofNat 0) ks;
+  UIntN.add s (UIntN.mul (U64.ofNat 3) x)
+
+/-- Add every row to a write-set (one commit). -/
+def Scry.fiNodes (s : QSnapshot) (rows : List Scry.FindingsIndexRow) : QSnapshot :=
+  List.foldl (fun s r =>
+      QSnapshot.record s r.id (.some (.set (Scry.FindingsIndexRow.node r)))) s rows
+
+/-- Write the Quire index: a fresh file, one commit for the rows, the count sentinel and
+the fingerprint sentinel (so a warm read is a meta pick, not a page walk). -/
+def Scry.fiSaveQuire (path : String) (rows0 : List Scry.FindingsIndexRow) : EIO Unit := do
+  let rows := Scry.fiDedupe rows0;
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .true => FS.removeAll path
+  | .false => EIO.pure ();
+  h ← openQ path Scry.fiIndices;
+  s ← getQ h;
+  let s := Scry.fiNodes s rows;
+  let sentinel := Node.mk Scry.fiMagic (U64.ofNat (List.length rows)) Scry.fiSentinelLabel;
+  let s := QSnapshot.record s Scry.fiSentinelId (.some (.set sentinel));
+  let print := Node.mk Scry.fiPrintMagic
+    (Scry.fiPrint (List.map Scry.FindingsIndexRow.key rows)) Scry.fiSentinelLabel;
+  let s := QSnapshot.record s Scry.fiFingerprintId (.some (.set print));
+  o ← putQ h s;
+  closeQ h;
+  match o with
+  | .committed _ => EIO.pure ()
+  | .rejected _ => EIO.fail "findings index: commit rejected"
+
+/-- `x` with an `EIO` failure turned into a value (the cache treats it as `corrupt`). -/
+def Scry.fiAttempt {A : Type} (x : EIO A) : EIO (Except String A) :=
+  IO.bind x (fun r => IO.pure (.ok r))
+
+/-- The warm read: open the meta, check the two sentinels, and return `(rows,
+fingerprint)` without walking the tree. A fresh, truncated or garbage image is
+`"corrupt"` (checked before any record read). -/
+def Scry.fiProbe (path : String) : EIO (Except String (Nat × U64)) := do
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    opened ← Scry.fiAttempt (openQV path Scry.fiIndices .true);
+    match opened with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok h => do
+      s ← getQ h;
+      let gen := UIntN.toNat s.gen;
+      let root := UIntN.toNat s.root;
+      let ok1 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok1 with
+      | .false => do
+        closeQ h;
+        EIO.pure (.error "corrupt")
+      | .true => do
+        let countNode := QSnapshot.getNode s Scry.fiSentinelId;
+        let printNode := QSnapshot.getNode s Scry.fiFingerprintId;
+        closeQ h;
+        let good := match countNode, printNode with
+          | .some c, .some p => Bool.and (UIntN.beq c.kind Scry.fiMagic)
+              (Bool.and (UIntN.beq c.label Scry.fiSentinelLabel)
+                (Bool.and (UIntN.beq p.kind Scry.fiPrintMagic)
+                  (UIntN.beq p.label Scry.fiSentinelLabel)))
+          | _, _ => Bool.false;
+        match good with
+        | .false => EIO.pure (.error "corrupt")
+        | .true => EIO.pure (match countNode, printNode with
+          | .some c, .some p => .ok (UIntN.toNat c.count, p.count)
+          | _, _ => .error "corrupt")
+
+/-- Read the Quire index. The meta generation and the sentinel are checked before any
+page walk, so a fresh, truncated or garbage image is `"corrupt"` and never read as a
+leaf. -/
+def Scry.fiLoadQuire (path : String) : EIO (Except String (List Scry.FindingKey)) := do
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    opened ← Scry.fiAttempt (openQV path Scry.fiIndices .true);
+    match opened with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok h => do
+      s ← getQ h;
+      let gen := UIntN.toNat s.gen;
+      let root := UIntN.toNat s.root;
+      -- A fresh, truncated or garbage image has no valid meta (gen 0) or no root.
+      -- Stop here: reading a record through that "root" would walk a page that is not
+      -- a leaf.
+      let ok2 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok2 with
+      | .false => do
+        closeQ h;
+        EIO.pure (.error "corrupt")
+      | .true => do
+        let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
+        let good := match sentinel with
+          | .none => Bool.false
+          | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
+              (UIntN.beq n.label Scry.fiSentinelLabel);
+        let rows := match good with
+          | .false => ([] : List Rec)
+          | .true => List.filter (fun r =>
+              Bool.and (Bool.not (UIntN.beq r.id Scry.fiSentinelId))
+                (Bool.not (UIntN.beq r.id Scry.fiFingerprintId)))
+              (QAllRecords s.map s.root);
+        let countOk := match sentinel with
+          | .none => Bool.false
+          | .some n => Nat.beq (UIntN.toNat n.count) (List.length rows);
+        closeQ h;
+        let ok3 := Bool.and good countOk;
+        match ok3 with
+        | .false => EIO.pure (.error "corrupt")
+        | .true => EIO.pure (.ok (List.map Scry.FindingKey.ofRec rows))
+
+-- ## Counting a bucket (the index hit)
+
+/-- The number of findings with `severity`, through the severity index (no primary
+read). The JSON backend reads and filters the document instead. -/
+def Scry.fiCountSeverityQuire (path : String) (severity : U32) : EIO (Except String Nat) := do
+  there ← EIO.lift (FS.exists path);
+  match there with
+  | .false => EIO.pure (.error "cold")
+  | .true => do
+    opened ← Scry.fiAttempt (openQV path Scry.fiIndices .true);
+    match opened with
+    | .error _ => EIO.pure (.error "corrupt")
+    | .ok h => do
+      s ← getQ h;
+      let gen := UIntN.toNat s.gen;
+      let root := UIntN.toNat s.root;
+      let ok4 := Bool.and (Nat.lt 0 gen) (Nat.lt 0 root);
+      match ok4 with
+      | .false => do
+        closeQ h;
+        EIO.pure (.error "corrupt")
+      | .true => do
+        let sentinel := QSnapshot.getNode s Scry.fiSentinelId;
+        let good := match sentinel with
+          | .none => Bool.false
+          | .some n => Bool.and (UIntN.beq n.kind Scry.fiMagic)
+              (UIntN.beq n.label Scry.fiSentinelLabel);
+        let n := match good with
+          | .false => 0
+          | .true => QCursor.length
+              (QSnapshot.indexOnlyRange Scry.fiSeverityIndex (.eq (UIntN.resize 64 severity)) s);
+        closeQ h;
+        EIO.pure (match good with
+          | .true => .ok n
+          | .false => .error "corrupt")
+
+/-- The JSON backend's hit: parse the document and filter by severity. -/
+def Scry.fiCountSeverityJson (path : String) (severity : Nat) : EIO (Except String Nat) := do
+  loaded ← Scry.fiLoadJson path;
+  match loaded with
+  | .error e => EIO.pure (.error e)
+  | .ok rows => EIO.pure (.ok (List.length
+      (List.filter (fun r => Nat.beq r.severity severity) rows)))

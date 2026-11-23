@@ -354,6 +354,14 @@ structure Scry.LState where
   contTo : Option Nat
   /-- Diagnostics, newest first, each with the statement that caused it. -/
   warnings : List Scry.Warning
+  /-- C# nullability facts (`Scry.Cs.NullFact`), accumulated across the file's
+  functions: the annotation EDB (`nullable(var)`/`nonnull(var)`) the C# frontend
+  publishes. The C lowering leaves this empty. -/
+  nullFacts : List (String × Nat × Nat)
+  /-- C# nullness point facts (`node, var, kind`): the receiver of a dereference, a
+  value that is maybe-null, or an asserted value. `kind` is `Scry.Cs.pointMayNull`,
+  `pointDeref` or `pointAssert`. -/
+  nullPoints : List (String × Nat × Nat × Nat)
   /-- The model pack the lowering consults for allocation/free calls. -/
   models : Scry.ModelPack
 
@@ -2379,7 +2387,7 @@ end
 /-- The state a translation unit's lowering starts from. -/
 def Scry.emptyState : Scry.LState :=
   Scry.LState.mk 0 0 0 .nil .true .nil .nil .nil .nil .nil .nil .nil .nil .nil
-    "" Wil.i32 Wil.noSpan .none .none .nil Scry.defaultModels
+    "" Wil.i32 Wil.noSpan .none .none .nil .nil .nil Scry.defaultModels
 
 /-- Give each parameter a register and bind its name (an unnamed parameter still gets a
 register, so the arity matches). -/

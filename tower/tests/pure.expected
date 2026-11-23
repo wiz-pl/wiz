@@ -11,3 +11,23 @@ tests/pure.wiz:14:1: info: "unknown setting colour (default, source, flake, git,
 tests/pure.wiz:17:1: info: "spec v1\nsource source\nref v1\ncommit abc\npath \nflag cc gcc\n"
 tests/pure.wiz:18:1: info: (.cons ("cc", "gcc") .nil, .some "release", .true, .cons "v1" .nil, ())
 tests/pure.wiz:19:1: info: " --cache-ro '/a' --cache-ro '/b' --region-cache -I '/r'"
+tests/pure.wiz:20:1: info: .true
+tests/pure.wiz:21:1: info: .false
+tests/pure.wiz:22:1: info: .false
+tests/pure.wiz:23:1: info: .false
+tests/pure.wiz:24:1: info: .true
+tests/pure.wiz:25:1: info: .none
+tests/pure.wiz:26:1: info: .some "'../escape' would be written outside the extraction directory (an absolute path or a `..` component)"
+tests/pure.wiz:27:1: info: .some "'wiz-x86_64-linux/evil' -> '../../outside' would be written outside the extraction directory (an absolute or escaping symlink)"
+tests/pure.wiz:28:1: info: .none
+tests/pure.wiz:29:1: info: .none
+tests/pure.wiz:30:1: info: .some "'usr/lib/x' -> '../../../outside' would be written outside the extraction directory (an absolute or escaping symlink)"
+tests/pure.wiz:31:1: info: .none
+tests/pure.wiz:32:1: info: .some "'usr/lib/b' is a hardlink to '../outside', an absolute or escaping member name"
+tests/pure.wiz:33:1: info: .none
+tests/pure.wiz:34:1: info: .true
+tests/pure.wiz:35:1: info: .true
+tests/pure.wiz:36:1: info: .false
+tests/pure.wiz:37:1: info: .false
+tests/pure.wiz:38:1: info: .true
+tests/pure.wiz:39:1: info: .false

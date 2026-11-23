@@ -87,6 +87,9 @@ line below.
 * [Stage 27: trusted evaluation (`native_refl`)](stages/27-trusted-evaluation.md)
 * [The trust ledger](trust-ledger.md): the reviewed trusted base of `lib/`, its gate and expiry policy
 * [Stage 28: solvers (`smt`, `sat_decide`, `sat_decide_native`, `bv_decide`)](stages/28-solvers.md)
+* [Numerics and solver trust](numerics-trust.md): the GMP pin and attestation, the SMT
+  range check, the trust-boundary audit, the proof-not-verdict cache, Ryu float printing,
+  and the `omega` certificate plan
 
 ### Self-hosting
 
@@ -122,6 +125,8 @@ line below.
 * [Stage 29: native data structures](stages/29-natives.md): word arrays, word maps, interned strings
 * [Stage 34: Clash-style signals](stages/34-hdl-signals.md): `Signal d A` as a ν-stream
   over the HDL's `Circuit`, with registers, Mealy machines, bundles and the bridge theorem
+* [The Hdl package](hdl.md): the hardware-description library as a package: building and
+  testing it standalone (`HDL_ROOT`), its one-way boundary, licence and tag policy
 * [Libraries](libraries.md)
 * [Reference manual](https://wiz-pl.github.io/wiz/docs/reference.html): every
   standard-library declaration with its full signature, doc comment and class instances,

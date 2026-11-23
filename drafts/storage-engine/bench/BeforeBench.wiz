@@ -2,9 +2,9 @@ import Sys
 import Word
 import Text
 import Functor
-import Storage
+import Scry.QuireStorage
 import StorageCursor
-import Durable
+import Scry.QuireDurable
 /-!
 # The "before" side: train7's durable store
 
@@ -40,7 +40,7 @@ def chunkEnd (n i : Nat) : Nat :=
   | .true => Nat.add i 500
   | .false => n
 
-partial def appendChunk (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
+partial def appendChunk (h : DurableHandle) (n : Nat) (i : Nat) : EIO Unit :=
   match Nat.le i n with
   | .true => do
     s ← getDb h;
@@ -50,7 +50,7 @@ partial def appendChunk (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
     | .rejected _ => EIO.fail "before append: rejected"
   | .false => EIO.pure ()
 
-partial def appendLoop (h : Handle) (n : Nat) (i : Nat) : EIO Unit :=
+partial def appendLoop (h : DurableHandle) (n : Nat) (i : Nat) : EIO Unit :=
   match Nat.le i n with
   | .true => EIO.bind (appendChunk h (chunkEnd n i) i)
       (fun _ => appendLoop h n (Nat.succ (chunkEnd n i)))

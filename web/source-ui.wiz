@@ -1,0 +1,80 @@
+import IO
+import Json
+import Web.EditorBridge
+import Web.Loom
+import Web.Source.Model
+import Web.Source.Static
+import Web.Source.View
+
+/-!
+# The source reader's entry points
+
+`web/source-static.js` mounts this module on `#app`: the reader is
+`Web.Source.View.app`, a `Loom.LiveApp Source.Page Source.Msg`. This file is only the C
+ABI (stage 9g's ownership rule: every exported function takes the state and returns the
+next one), exactly as `web/playground-ui.wiz` is for the playground.
+
+Two runtime interfaces, not one per panel:
+
+  * `wiz_loom_effect (state) kind a b` — the host's results coming in: `"bundle" a` (the
+    one-time `scry.source.bundle-ui/1` payload), `"answer" a b` (the request kind `a` and
+    one `scry.source.answer/1` JSON `b`), `"route" a` (a `location.hash`), and
+    `"ack" a` (a serviced request);
+  * `wiz_loom_requests (state)` — the pending effect request, in the playground's
+    `[{"kind", "payload"}]` shape, read by `web/framework/mount.js`.
+
+The editor's span query is `Web.EditorBridge`'s (the same functions the playground and
+the infoview export), so the `FILEID@START-STOP` payload the view publishes can be
+checked against a line table without a fourth copy of the offset arithmetic.
+-/
+
+link_c "js.c"
+extern "js_patch" Js.patch : String → IO Unit
+
+/-- Patch the page from `s` to `s'` and give `s'` back. -/
+def patched (s s' : Source.Page) : IO Source.Page := do
+  Js.patch (Loom.LiveApp.patches Source.View.app s s');
+  IO.pure s'
+
+def loomInit : Source.Page := Source.Page.initial
+def loomHtml (s : Source.Page) : String := Loom.LiveApp.html Source.View.app s
+def loomStep (s : Source.Page) (ev : String) : IO Source.Page :=
+  patched s (Loom.LiveApp.step Source.View.app s ev)
+
+/-- Apply one host effect to the page. -/
+def applyEffect (s : Source.Page) (kind a b : String) : Source.Page :=
+  match kind with
+  | "bundle" => match Source.Static.decodeBundle a with
+    | .some bundle =>
+      Source.Page.loaded s bundle.mode bundle.tool bundle.files bundle.findings bundle.facts
+    | .none => { s with note := "the bundle payload did not decode" }
+  | "answer" => match Source.Static.decodeAnswer b with
+    | .some answer => Source.Page.answer s answer
+    | .none => { s with note := String.append "the " (String.append a " answer did not decode") }
+  | "route" => Source.Page.route s a
+  | "ack" => Source.Page.ack s a
+  | _ => s
+
+def loomEffect (s : Source.Page) (kind a b : String) : IO Source.Page :=
+  patched s (applyEffect s kind a b)
+
+/-- The pending request, as JSON (a read-only call: the driver retains first). -/
+def loomRequests (s : Source.Page) : String := Source.Page.requests s
+
+/-- The reader has no default-preventing handler. -/
+def loomConsume (s : Source.Page) (ev : String) : Nat := 0
+
+-- The editor's span query (`Web.EditorBridge`): a host that needs to turn a
+-- `LINE:CHAR-LINE:CHAR` marker into UTF-16 offsets asks this instead of re-implementing
+-- the conversion.
+def loomEditorSpan (text span : String) : String := EditorBridge.span text span
+def loomEditorIndex (version text : String) : String := EditorBridge.indexJson version text
+
+export "wiz_loom_init" loomInit
+export "wiz_loom_html" loomHtml
+export "wiz_loom_step" loomStep
+export "wiz_loom_effect" loomEffect
+export "wiz_loom_requests" loomRequests
+export "wiz_loom_consume" loomConsume
+export "wiz_loom_editor_span" loomEditorSpan
+export "wiz_loom_editor_index" loomEditorIndex

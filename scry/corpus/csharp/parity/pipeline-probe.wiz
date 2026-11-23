@@ -63,13 +63,16 @@ def main : IO Unit := EIO.toIO (do
         (Bool.and (String.eq fc.rule "command-injection") (String.eq fs.rule fc.rule));
       ok "parity: the sink is on the same line:column"
         (String.eq (locText rc fc) (locText rs fs));
-      ok "parity: the certificate status agrees"
-        (match firstBool rc.checks, firstBool rs.checks with
-          | .some a, .some b => match a, b with
-            | .true, .true => .true
-            | .false, .false => .true
-            | _, _ => .false
-          | _, _ => .false);
+      -- The fixture is a real command-injection derivation in both languages, so the
+      -- tail must *certify* each finding. Requiring only "the statuses are equal" made
+      -- `(false, false)` (a shared tail that certifies nothing) pass; a parity case must
+      -- not accept a check that stopped checking.
+      ok "parity: the C finding is certified" (match firstBool rc.checks with
+        | .some b => b
+        | .none => .false);
+      ok "parity: the C# finding is certified" (match firstBool rs.checks with
+        | .some b => b
+        | .none => .false);
       ok "parity: the rule id is the same"
         (String.eq fc.rule fs.rule)
     | _, _ => ok "parity: both pipelines have a finding" .false;

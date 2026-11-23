@@ -151,23 +151,30 @@ list (only its expiry, which a run never changes). Its generation is the module 
 its `prev` is empty because the number of writing processes (and `-j`) is not an input; a
 manifest that is extended keeps the base it started from rather than chaining to an
 intermediate partial write. Only the write cache is ever written; a
-`--cache-ro` layer is read and byte-identical after a run. The `.wizr` sidecar (`.wizs`) is
-still checked first: a corrupt region never reaches the type-erased reader even when no
-manifest exists.
+`--cache-ro` layer is read and byte-identical after a run. A region is **never** served
+without a manifest entry in any mode: a `.wizr` is a type-erased image and its `.wizs`
+sidecar is a 64-bit hash written by whoever wrote the region, so it is a corruption check,
+not an authenticity one. `--region-cache` with `--cache-verify off` reads and writes no
+regions at all.
 
 The policy is `--cache-verify off|warn|strict` (`--cache-verify=MODE` also works):
 
-* `off` — no manifests are read or written; the cache is exactly as before.
-* `warn` (default) — a manifested key is served only if its bytes match. A new key has a
-  SHA-256 half, so an unlisted write-cache entry is a miss (nothing binds its bytes to the
-  strong input key); an old fast-only key still falls through, and `--cache-verify off`
-  restores the old lookup. An old local cache is one cold pass, then it is rewritten with
-  manifests. A `--cache-ro` layer is **strict**: an entry there is used only through a
-  manifest, so deleting a manifest cannot downgrade a read-only layer to unverified. When
-  a read-only layer has bytes for a module but no manifest, `wiz` warns once per layer (an
-  empty layer is silent).
-* `strict` (alias `require`) — only manifested entries are used anywhere; an unlisted key
-  is a miss. A cold run writes the manifests, so it becomes strict-warm in one pass.
+* `off` — no manifests are read or written; text entries are the old lookup, and no region
+  is served (there is no manifest entry to gate it). This is the explicit unverified mode.
+* `warn` (default) — a manifested key is served only if its bytes match. A key with no
+  manifest entry is a miss, fast-only or not: the 64-bit key is an index, not a digest, so
+  nothing binds an unmanifested file to its inputs. An old local cache is one cold pass,
+  then it is rewritten with manifests.
+* `strict` (alias `require`) — as `warn`, and an unlisted key is counted as a mismatch
+  too. It is a statement about **manifest presence**, not authenticity: a writer who can
+  replace the entry can recompute the manifest and its root.
+* A **read-only layer** (`--cache-ro`) is in someone else's trust domain. Its manifests
+  are self-signed, so they authenticate nothing: by default the layer is **refused** (no
+  entry or region is served from it, and `wiz` warns once per layer that has content for
+  a module, naming the flag).
+  `--cache-ro-unsigned` is the explicit opt-in to unauthenticated data, and
+  `--cache-verify off` is the older blanket form of it. When an opted-in layer has bytes
+  for a module but no manifest, `wiz` warns once per layer (an empty layer is silent).
 
 A manifest whose root does not validate, whose `valid-until` (or whose layer generation's)
 has passed, or whose entry digest does not match is a miss: it is not repaired in a
@@ -175,19 +182,23 @@ read-only layer. `wiz cache verify [--strict]` scans every layer's manifests aga
 bytes (exit 1 on a mismatch, a missing file, an expired manifest, or — with
 `--strict`/`--cache-ro` — an unmanifested keyed file); `wiz cache manifest [--valid-days N]` rebuilds the generation
 index (`prev` chains it to the old one) and can set its expiry. `--cache-verify-stats`
-prints the per-run counts (manifests, verified entries/regions, mismatches, unverified).
+prints the per-run counts (manifests, verified entries/regions, mismatches).
 
-Compatibility default: with no manifest (or `--cache-verify off`) existing caches keep
-their old behaviour; the write cache's old unverified path is still available in `warn`.
-Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep their names and bytes,
-so an unmanifested cache is byte-identical and no key or salt changes.
+Compatibility: a write cache needs one cold pass to acquire manifests, and a
+`--cache-ro` layer is no longer used unless `--cache-ro-unsigned` is given (or
+`--cache-verify off`). Manifests are additive files — `.wizc`, `.wizr` and `.wizs` keep
+their names and bytes, so an unmanifested cache is byte-identical and no key or salt
+changes.
 
 **Not signatures (P3).** An unsigned manifest detects corruption and a mirror that swaps
 a listed entry, but a writer who controls the manifest can rewrite both it and the bytes,
 and can delete it (in `warn`, for the write cache). The missing half is an external
 signature over the manifest (DSSE/minisign/`ssh-keygen -Y sign`), a key-id policy with
 revocation, and a witnessed log; the attestation prior-art note calls this E2/P3. So do
-not read these manifests as provenance: they are integrity, not authenticity.
+not read these manifests as provenance: they are integrity, not authenticity. And a
+signature would say who published the bytes, not that they are the elaboration of the
+key's source: for a foreign layer only a kernel re-check (`addDecl`) or treating its
+source tree as the authority is sound.
 
 Next: finer dependencies (re-elaborate only what an edit affects, not everything
 after it).
@@ -890,10 +901,27 @@ implicit binders, a string with comment markers, comments in odd places).
   (25 cases); `wiz fmt --self-test` runs the fixtures, and the `fmt` gate group formats a
   fixed six-file corpus twice (`lake test -- '=fmt'`, about 12 s) and requires an
   idempotent reprint with no refused command. Both groups are in CI's `core` shard.
+* **In the language server.** `wiz lsp` advertises `documentFormattingProvider` and
+  `documentRangeFormattingProvider` and answers `textDocument/formatting` (one
+  `TextEdit`: the smallest span that changes) and `textDocument/rangeFormatting` (only
+  the commands wholly inside the range; the rest of the file is kept byte for byte).
+  Both run the same `Fmt.run`, from the server's libraries and the document's
+  `include_str` table, so `import` and `syntax` resolve exactly as they do for the
+  document's diagnostics. A file
+  that does not parse gets no edit (its diagnostics say why), and a range request whose
+  change would straddle the range gets none either. `insertSpaces: false` is refused
+  rather than ignored: the formatter's indentation is two spaces, a tab counts as one
+  column to the parser, and `tabSize` therefore does not apply. The playground's editor
+  has a format action (`format()`/`formatSelection()` in `web/playground-lsp.js`,
+  Ctrl/⌘+Shift+F): the `TextEdit`s go through one `WorkspaceEdit` applier
+  (`LspClient.applyWorkspaceEdit`; UTF-16 positions, reverse-order application, a
+  document-version guard, and the caret mapped through the edits), and the page's normal
+  `input` path sends `didChange`.
 * **Not done.** Signatures never break (a long header stays long: wrapping binder lists
   needs `fill`/alignment); a multi-line block comment keeps the indentation of its
-  continuation lines; the self-hosted frontend has no formatter; and the LSP does not
-  offer `textDocument/formatting` yet (`Wiz/Format.lean` is that plumbing's core).
+  continuation lines; the self-hosted frontend has no formatter; range formatting
+  formats whole commands (a selection that cuts through a command formats nothing);
+  and `insertSpaces: false` is refused.
 
 ## 11ab: a static playground
 
@@ -1107,3 +1135,37 @@ and records no cache manifest.
 `DIR/NAME.attest.json`, with the package's module roots (verify with
 `wiz verify -I PKG -I PKG/src …`). Its statements have no `byproducts` (the generated C
 stays in `.grail/build/<key>/`, whose key the CLI does not expose).
+## 11ag: the attribute/option registry in the toolchain
+
+The command frontend now keeps two small registries (`Wiz/Elab/Registry.lean`), so a
+tool can ask what a name is instead of matching the fixed set:
+
+```lean
+s.attrDecl? "inline"       -- some { name := "inline", payload := .flag, action := .inline }
+s.optDecl? "pp.notation"   -- some { name := "pp.notation", kind := .boolean, default := .bool true, … }
+s.optValue? "pp.notation"  -- the module's value, or the declared default
+```
+
+* `CommandState.attrDecls` / `optDecls` are the registries (built-ins plus user
+  registrations, latest first); `attrUses` records no-op applications as
+  `(attribute, target, arguments)`, and `optValues` holds the options set in the module.
+  `register_attribute` / `register_option` are ordinary commands, so their effect is in
+  the per-command content-hash chain (`Wiz/Query.lean`) and the language server sees the
+  same state as the batch frontend.
+* **Diagnostics.** One path produces `unknown attribute 'foo' (registered: …)`,
+  `unknown option 'foo' (registered: …)`, `attribute '[inline]' takes no arguments`,
+  ``option 'pp.notation' expects `true` or `false` `` and `… is already registered`, instead
+  of a parse failure per attribute. A user attribute with an unknown target is
+  `unknown declaration 'x'`.
+* **Cache and modules.** `attribute`, `set_option`, `register_attribute` and
+  `register_option` stay out of `Cache.cacheable` (like `syntax`/`macro_rules`), so an
+  import replays them; no `Effect` field or cache-salt bump is needed. `local`
+  registrations and no-op applications are removed by `CommandState.endModule`, and a
+  module's options are restored when its import ends. The isolation cache key includes
+  the starting registries and option values (`Frontend.isoKey`), so a custom initial
+  state cannot reuse a module elaborated under another one.
+* `AttributeDecl` and `OptDecl` are deliberately small typed entries: they are the seed
+  for the ext layer (`Wiz/Ext/Basic.lean`'s `Kind`/`Stage`/`Payload`/`Entry`, CORE-3.3),
+  not that layer. `[term_elab]` and per-deriver options can land here without a new
+  parser rule or a new match arm; user code today gets no-op attributes/options as data.
+  `[simp]` and `[hint]` are registered entries too, each with its dedicated parser rule.

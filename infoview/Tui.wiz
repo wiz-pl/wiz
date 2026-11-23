@@ -19,6 +19,7 @@ extern "iv_read_keys" Term.readKeys : IO String
 extern "iv_connect" Sock.connect : String → IO Nat
 extern "iv_close" Sock.close : Nat → IO Unit
 extern "iv_wait" Sock.wait : Nat → Nat → IO Nat
+extern "iv_wait_fd" Sock.waitFd : Nat → Nat → IO Nat
 extern "iv_read_fd" Sock.read : Nat → IO String
 extern "iv_closed" Sock.closed : IO Nat
 extern "iv_send" Sock.send : Nat → String → IO Nat
@@ -436,7 +437,9 @@ def printLines : List String → IO Unit
   | .cons l ls => do IO.println l; printLines ls
 
 -- Non-interactive (`--dump`): read until the goals and the expected type have both
--- come, then print the view as text.
+-- come, then print the view as text. It waits on the socket only (`Sock.waitFd`): a
+-- dump never reads keys, and an inherited stdin at end of file is readable for ever,
+-- so `Sock.wait` would report it as a key on every round and the loop would spin.
 def St.printView (s : St) : IO Unit := match s.opts.ansi with
   | .true => printLines (Infoview.ansiLines 0 (View.lines (St.view s)))
   | .false => printLines (Infoview.plainLines (View.lines (St.view s)))
@@ -458,7 +461,7 @@ partial def St.dumpLoop (s : St) (deadline : Nat) : IO Unit := do
   | .false => match Nat.le 3 s.got with
     | .true => St.printView s
     | .false => do
-      bits ← Sock.wait s.fd 200;
+      bits ← Sock.waitFd s.fd 200;
       match Infoview.bit bits 2 with
       | .false => St.dumpLoop s deadline
       | .true => do

@@ -1,0 +1,64 @@
+records: scan and refine: ok
+f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
+  marker: observed
+records: repro ran: ok
+records: evidence schema is /2: ok
+records: recipe schema is /2: ok
+records: the evidence carries the env it ran with: ok
+records: the evidence and the recipe name the same marker: ok
+records: marker observed with the plan's env: ok
+records: same pair id: ok
+records: the pair reads back: ok
+f_edbaeb86bcfed108: finding-present-poc-observed
+  static: still reported
+  repro: ran
+  poc marker: observed
+verify: exit 0 (PoC observed): ok
+verify: verdict names the observed PoC: ok
+verify: re-ran with the same env: ok
+verify: re-ran with the same marker: ok
+verify: the re-run observed the marker: ok
+verify: names the pair it checked: ok
+records: evidence without a recipe is refused: ok
+f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
+  marker: observed
+records: a recipe updated alone is refused: ok
+records: restoring the recipe restores the pair: ok
+records: a marker with an empty env is refused: ok
+f_edbaeb86bcfed108: repro skipped (address+undefined) exit exited 0
+  skip: probe-no-heartbeat: the run claimed a probe but the probe emitted no event (heartbeat=false); a silent sensor is a skip, not evidence that the sink was not reached
+skip: the probe run exits 1: ok
+skip: status is skipped: ok
+skip: reason is probe-no-heartbeat: ok
+skip: heartbeat is false: ok
+skip: a silent probe cannot claim a marker: ok
+skip: the recipe and evidence still agree: ok
+skip: the pair passes the record check: ok
+f_edbaeb86bcfed108: still-reported
+  static: still reported
+  repro: skipped
+  poc marker: not observed
+  skip: probe-no-heartbeat: the run claimed a probe but the probe emitted no event (heartbeat=false); a silent sensor is a skip, not evidence that the sink was not reached
+skip: verify does not claim the PoC: ok
+skip: comparison.reproSkipped is true: ok
+skip: the re-run is skipped too: ok
+skip: the PoC marker stays unobserved: ok
+skip: a skipped verdict is not a green exit: ok
+f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
+  marker: observed
+probe: heartbeat true: ok
+probe: one event recorded: ok
+probe: the event argv carries the marker: ok
+probe: trace kind is ebpf: ok
+probe: status is ran: ok
+probe: the repro exit is 0: ok
+f_edbaeb86bcfed108: repro ran (address+undefined) exit exited 0
+  marker: not observed
+probe: a live probe with no marker is ran: ok
+probe: no marker is not observed: ok
+probe: the live-probe pair is consistent: ok
+rule: no probe is ran: ok
+rule: a silent probe is skipped: ok
+rule: a live probe is ran: ok
+rule: compile failure outranks the skip: ok
+rule: the skip reason is probe-no-heartbeat: ok

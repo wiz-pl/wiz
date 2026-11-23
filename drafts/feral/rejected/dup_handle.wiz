@@ -1,0 +1,6 @@
+import Region
+-- REJECTED (the lowering must emit each handle at most once). check.sh expects a
+-- quantity error: a `Uniq` is linear, so a bad lowering that duplicates one (here as
+-- `(x, x)`) does not type-check.
+def dup {0 ρ : Region} (1 x : Uniq ρ Nat) : Result1 Unit ((1 _ : Uniq ρ Nat) × Uniq ρ Nat) :=
+  .ok () (x, x)

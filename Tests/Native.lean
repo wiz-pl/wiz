@@ -528,15 +528,21 @@ def compareTrust (what : String) (actual : List TrustSource) (rows : List TrustR
   for r in rows do
     if r.reason.trimAscii.toString.isEmpty && r.owner.trimAscii.toString.isEmpty &&
         r.review.trimAscii.toString.isEmpty then
-      problems := problems ++ [s!"{TrustRow.key r}: missing a reason, an owner and a review date (new rows need all three)"]
+      problems := s!"{TrustRow.key r}: missing a reason, an owner and a review date (new rows need all three)" :: problems
     else
       let miss := missingMetadata r
       if !miss.isEmpty then
-        problems := problems ++ [s!"{TrustRow.key r}: missing {" and ".intercalate miss}"]
+        problems := s!"{TrustRow.key r}: missing {" and ".intercalate miss}" :: problems
       else if !validDate r.review then
-        problems := problems ++ [s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD"]
+        problems := s!"{TrustRow.key r}: review date '{r.review}' is not YYYY-MM-DD" :: problems
       else if r.review < today then
-        problems := problems ++ [s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})"]
+        problems := s!"{TrustRow.key r}: expired on {r.review} (today {today}; owner {r.owner})" :: problems
+      -- A bulk `--update` writes one placeholder reason for the rows it adds; the
+      -- review must replace every one of them. Treat the placeholder as a gate failure
+      -- so a half-finished reason pass cannot be committed (or merged).
+      if (r.reason.splitOn "PENDING-REVIEW").length > 1 then
+        problems := s!"{TrustRow.key r}: placeholder reason (PENDING-REVIEW); replace it with the reviewed reason" :: problems
+  problems := problems.reverse
   if strictLegacy && legacy > 0 then
     problems := problems ++ [s!"{legacy} legacy rows still have the pre-gate reason/owner (review them, or run without --strict-legacy)"]
   if added.isEmpty && removed.isEmpty && problems.isEmpty then
@@ -592,24 +598,22 @@ def checkExampleTrustLedger (path : String) (g : Globals ZeroOneMany)
 /-- `--update`: regenerate the ledger, preserving the metadata of rows that stay. A row
 that appears for the first time is refused unless `reason` is non-empty; the new row
 gets `owner` (or the git user) and `review` (or today + 180 days). An explicit `review`
-also renews rows that still carry the migration marker. -/
+also renews rows that still carry the migration marker, and with `renewExpired` the
+rows whose review date has passed. A renewal is not automatic: it needs `--owner` (the
+re-reviewer, recorded), `--reason` (what was re-checked, recorded) and `--review`, and
+the row's reason gains ` | renewed DATE by OWNER: BASIS`. An explicit `review` for a
+new or renewed row must be at least 90 days ahead: the same-day renewal that expired
+the next morning is the failure this floor exists for. -/
 def updateTrustLedger (includeExamples : Bool) (root : Option String) (ledger : System.FilePath)
     (reason owner review today : String) (reviewGiven : Bool := false)
-    (cache : TrustCache := {}) : IO UInt32 := do
+    (renewExpired : Bool := false) (cache : TrustCache := {}) : IO UInt32 := do
   let today ← if today.isEmpty then currentDate else pure today
-  let (actual, _) ← ledgerSources includeExamples root cache
-  let old ← readTrustRows ledger
-  let oldKeys := old.map TrustRow.key
-  let newSources := actual.filter fun s => !oldKeys.contains (TrustSource.line s)
   let reason := reason.trimAscii.toString
-  if !newSources.isEmpty && reason.isEmpty then
-    let fmt := "\n" ++ "\n".intercalate (newSources.map fun s => s!"  + {TrustSource.line s}")
-    IO.eprintln s!"trust-ledger: refusing to add {newSources.length} new row(s) without a reason:{fmt}\n\nA reviewed row needs a reason, an owner and a review date. Run again with:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\""
-    return 2
   if reason.toList.any fun c => c == '\t' || c == '\n' then
     IO.eprintln "trust-ledger: --reason must be one line, without tabs"
     return 2
-  let owner ← if owner.trimAscii.toString.isEmpty then defaultOwner else pure owner.trimAscii.toString
+  -- Validate the new date before elaborating or reading anything: a refusal must not
+  -- depend on whether the ledger file exists.
   let review := if review.trimAscii.toString.isEmpty then addDays today 180 else review.trimAscii.toString
   unless validDate review do
     IO.eprintln s!"trust-ledger: --review must be YYYY-MM-DD (got '{review}')"
@@ -617,18 +621,52 @@ def updateTrustLedger (includeExamples : Bool) (root : Option String) (ledger : 
   if review < today then
     IO.eprintln s!"trust-ledger: --review {review} is before today ({today}); a new row cannot be expired already"
     return 2
+  if renewExpired && !reviewGiven then
+    IO.eprintln "trust-ledger: --renew-expired needs --review YYYY-MM-DD (the renewed rows' new date)"
+    return 2
+  if renewExpired && owner.trimAscii.toString.isEmpty then
+    IO.eprintln "trust-ledger: --renew-expired needs --owner NAME (the person or lane that re-reviewed; it is recorded in each renewed row)"
+    return 2
+  if renewExpired && reason.isEmpty then
+    IO.eprintln "trust-ledger: --renew-expired needs --reason TEXT (what was re-checked; it is recorded in each renewed row)"
+    return 2
+  if reviewGiven && addDays today 90 > review then
+    IO.eprintln s!"trust-ledger: --review {review} is less than 90 days after today ({today}); a new or renewed row needs a real review horizon, not a same-day stamp"
+    return 2
+  let (actual, _) ← ledgerSources includeExamples root cache
+  let old ← readTrustRows ledger
+  let oldKeys := old.map TrustRow.key
+  let newSources := actual.filter fun s => !oldKeys.contains (TrustSource.line s)
+  if !newSources.isEmpty && reason.isEmpty then
+    let fmt := "\n" ++ "\n".intercalate (newSources.map fun s => s!"  + {TrustSource.line s}")
+    IO.eprintln s!"trust-ledger: refusing to add {newSources.length} new row(s) without a reason:{fmt}\n\nA reviewed row needs a reason, an owner and a review date. Run again with:\n  scripts/trust-ledger.sh --update --reason \"why it is trusted\" --owner \"who reviewed it\""
+    return 2
+  let owner ← if owner.trimAscii.toString.isEmpty then defaultOwner else pure owner.trimAscii.toString
   let actualKeys := actual.map TrustSource.line
+  let expired (r : TrustRow) : Bool := r.review < today
+  -- A renewal records its provenance in the reason cell: the original reason stays, then
+  -- the date, the named re-reviewer and what was re-checked. A date-only bump is exactly
+  -- the failure the same-day batch had.
+  let renewalNote (r : TrustRow) : String :=
+    s!"{r.reason} | renewed {today} by {owner}: {reason}"
   let kept := old.filterMap fun r =>
     if !actualKeys.contains (TrustRow.key r) then none
     -- An explicit --review renews the rows that still carry the migration marker.
     else if reviewGiven && r.isLegacy then some { r with review }
+    -- --renew-expired renews a reasoned row whose date has passed, with a named
+    -- reviewer and a stated basis (no auto-renewal).
+    else if renewExpired && reviewGiven && expired r then
+      some { r with review, owner, reason := renewalNote r }
     else some r
   let renewed := if reviewGiven then (old.filter fun r => r.isLegacy && actualKeys.contains (TrustRow.key r)).length else 0
+  let renewedExpired := if renewExpired then
+    (old.filter fun r => !r.isLegacy && expired r && actualKeys.contains (TrustRow.key r)).length
+    else 0
   let newRows := newSources.map fun s =>
     { module := s.module, name := s.name, item := s.item, reason, owner, review : TrustRow }
   let rows := (kept ++ newRows).toArray.qsort (fun a b => TrustRow.key a ≤ TrustRow.key b) |>.toList
   IO.FS.writeFile ledger (trustBaselineHeader ++ "\n".intercalate (rows.map TrustRow.line) ++ "\n")
-  IO.println s!"wrote {ledger} ({rows.length} rows: {newRows.length} new, {old.length - kept.length} removed, {renewed} legacy renewed)"
+  IO.println s!"wrote {ledger} ({rows.length} rows: {newRows.length} new, {old.length - kept.length} removed, {renewed} legacy renewed, {renewedExpired} expired renewed)"
   return 0
 
 /-- The options of `tests --trust-ledger` (`scripts/trust-ledger.sh`). -/
@@ -643,13 +681,17 @@ structure TrustArgs where
   owner : String := ""
   review : String := ""
   reviewGiven : Bool := false
+  renewExpired : Bool := false
   today : String := ""
   root : Option String := none
   ledger : Option String := none
 
 def trustLedgerUsage : String :=
   "usage: tests --trust-ledger [--check|--update|--print] [--lib-only]\n" ++
-  "       [--reason STR] [--owner STR] [--review YYYY-MM-DD] [--today YYYY-MM-DD]\n" ++
+  "       [--reason STR] [--owner STR] [--review YYYY-MM-DD] [--renew-expired]\n" ++
+  "       (--renew-expired needs --review, --owner and --reason: who re-reviewed\n" ++
+  "        what, and until when)\n" ++
+  "       [--today YYYY-MM-DD]\n" ++
   "       [--tree DIR] [--ledger FILE] [--strict-legacy]\n" ++
   "       [--cache DIR] [--cache-ro DIR] [--no-cache]"
 
@@ -665,6 +707,7 @@ def parseTrustArgs (args : List String) : Except String TrustArgs :=
     | "--reason" :: v :: rest => go { a with reason := v } rest
     | "--owner" :: v :: rest => go { a with owner := v } rest
     | "--review" :: v :: rest => go { a with review := v, reviewGiven := true } rest
+    | "--renew-expired" :: rest => go { a with renewExpired := true } rest
     | "--today" :: v :: rest => go { a with today := v } rest
     | "--tree" :: v :: rest => go { a with root := some v } rest
     | "--ledger" :: v :: rest => go { a with ledger := some v } rest
@@ -691,11 +734,14 @@ def trustLedgerMain (args : List String) : IO UInt32 := do
   let ledger := System.FilePath.mk (a.ledger.getD trustBaseline.toString)
   let tc ← toolchain
   let cache : TrustCache := { write := tc.cacheDir, reads := tc.readCaches }
+  if a.renewExpired && !a.update then
+    IO.eprintln "trust-ledger: --renew-expired is only meaningful with --update"
+    return 2
   if a.update then
     if a.root.isNone && !includeExamples then
       IO.eprintln "trust-ledger: --update always includes the examples (they are part of the ledger)"
       return 2
-    return ← updateTrustLedger includeExamples a.root ledger a.reason a.owner a.review a.today a.reviewGiven cache
+    return ← updateTrustLedger includeExamples a.root ledger a.reason a.owner a.review a.today a.reviewGiven a.renewExpired cache
   if a.printLedger then
     for l in ← ledgerLines includeExamples a.root cache do IO.println l
     return 0
@@ -894,12 +940,14 @@ def group : Group where
         -- real prototype; that is how the `UInt64.ofNat` truncation was found. Before
         -- this case nothing ran it — no test group and no CI job named it — so a
         -- marshalling width that drifted from its C definition would have been silent.
-        -- No `cc`, or a `cc` that cannot find gmp.h, is a skip: the script prints the
-        -- latter as `signature check skipped` and still exits 0, so exit 0 alone is
-        -- not evidence (a pass here must have compiled the signatures).
+        -- No `cc` is a missing dependency (exit 2): a failure by default, a reported
+        -- skip under `--allow-missing-deps`. A `cc` that cannot find gmp.h is a
+        -- *failure*: the audit exits non-zero rather than printing "signature check
+        -- skipped", because a signature check that cannot run must not look like a pass.
         let out ← IO.Process.output { cmd := "sh", args := #["scripts/trust-ffi-audit.sh", "--check"] }
-        if out.exitCode == 2 || (out.stdout.splitOn "signature check skipped").length > 1 then
-          Tests.skip s!"the FFI audit needs a C compiler with GMP: {out.stderr.trimAscii.toString}"
+        if out.exitCode == 2 then
+          Tests.skipMissing s!"the FFI audit needs a C compiler: {out.stderr.trimAscii.toString}"
+          return
         unless out.exitCode == 0 do
           throw (IO.userError
             s!"scripts/trust-ffi-audit.sh --check failed (exit {out.exitCode}):\n{out.stdout}\n{out.stderr}") }
@@ -914,8 +962,7 @@ def hdlVerifiedGroup : Group where
   exercise := "—"
   cases := [
     { name := "V1: kernel-checked on the units' domains, nothing trusted (hdl/examples/hdl-verified.wiz)", run := fun _ => do
-        let path := "hdl/examples/hdl-verified.wiz"
-        let s := runFrontend (R := ZeroOneMany) (← IO.FS.readFile path)
+        let s := runFrontend (R := ZeroOneMany) (← Tests.hdlRead "examples/hdl-verified.wiz")
           { loader := ← Elab.libLoader, trustedModule := Tests.libModule }
         let ms := s.messages.toList.map fun m =>
           s!"{match m.severity with | .error => "error" | .warning => "warning" | .info => "info"}: {m.text}"
@@ -923,10 +970,11 @@ def hdlVerifiedGroup : Group where
         expect ms "info: (20, 19)"
         if has ms "native" then throw (IO.userError s!"the kernel-checked file mentions native evaluation:\n{"\n".intercalate ms}")
         -- the trust ledger's part for this file: it must add no source of trust
-        let _ ← checkExampleTrustLedger path s.globals
+        -- (the label stays the repository-relative one, even under `HDL_ROOT`)
+        let _ ← checkExampleTrustLedger "hdl/examples/hdl-verified.wiz" s.globals
         pure () },
     { name := "V1: full widths by native_refl, each an axiom #print axioms names (hdl/examples/hdl-verified-native.wiz)", run := fun _ => do
-        let ms ← msgsLibs (← IO.FS.readFile "hdl/examples/hdl-verified-native.wiz")
+        let ms ← msgsLibs (← Tests.hdlRead "examples/hdl-verified-native.wiz")
         noErrors ms
         expect ms "root_full is accepted on the strength of native evaluation"
         expect ms "norm_256 is accepted on the strength of native evaluation"

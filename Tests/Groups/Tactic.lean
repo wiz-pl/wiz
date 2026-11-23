@@ -417,6 +417,130 @@ def tacticGroup : Group where
           "def t (p : Nat) : Q (swap p) := by\n  shape\n  exact ()\n" ++
           "def t' (c : Prog) : Q c := by\n  shape\n  exact ()")
           ["Prog.get with fields # (λv. (Prog.ret #))", "not a constructor"] },
+    -- P0 simp congruence and simp?
+    { name := "simp congruence: rewrites under a lambda and an application", run := fun _ =>
+        okLibs ("import SimpLemmas\n" ++
+          "def underBinder (a b : Nat) (h : a = b) :\n" ++
+          "    (fun (n : Nat) => n + a) = (fun (n : Nat) => n + b) := by\n" ++
+          "  simp [h]\n  rfl\n" ++
+          "def underApp (f : Nat → Nat) (a b : Nat) (h : a = b) : f a = f b := by\n" ++
+          "  simp [h]\n  rfl\n" ++
+          "#print axioms underBinder")
+          ["'underBinder' does not depend on any axioms"] },
+    { name := "simp? reports the used rules and the replay closes", run := fun _ =>
+        okLibs ("import SimpLemmas\n" ++
+          "def addZero (n : Nat) : n + 0 = n := by\n" ++
+          "  simp?\n  rfl\n" ++
+          "def addZero' (n : Nat) : n + 0 = n := by\n" ++
+          "  simp only [Nat.add_zero]\n  rfl")
+          ["Try this: simp only [Nat.add_zero]; rfl", "simp?: rulesUsed: [Nat.add_zero]"] },
+    -- P0 auto and [hint]
+    { name := "auto closes a hypothesis chain and a conjunction", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def chain (P Q R : Prop) (h₁ : P → Q) (h₂ : Q → R) (hp : P) : R := by auto\n" ++
+          "attribute [hint intro] And.intro\n" ++
+          "def both (P Q : Prop) (p : P) (q : Q) : P ∧ Q := by auto\n" ++
+          "#print axioms chain\n#print axioms both")
+          ["'chain' does not depend on any axioms", "'both' does not depend on any axioms"] },
+    { name := "auto closes two open goals, the second after a hint's subgoal", run := fun _ =>
+        okLib ("import Prelude\n" ++
+          "structure Pair (P Q : Prop) where\n  fst : P\n  snd : Q\n" ++
+          "def twoGoals (P Q R : Prop) (h : P → Q) (p : P) (r : R) : Pair Q R := by\n" ++
+          "  constructor\n  auto\n")
+          [] },
+    { name := "auto does not affirm the consequent", run := fun _ =>
+        failsLibs ("import Logic\n" ++
+          "def bad (P Q : Prop) (h : P → Q) (q : Q) : P := by\n  auto")
+          "auto: no proof" },
+    { name := "a hint of an axiom is refused", run := fun _ =>
+        failsLib "import Prelude\naxiom ax : True\nattribute [hint] ax"
+          "has no definition: a hint must be a theorem" },
+    -- P0 omega
+    { name := "omega closes linear Nat order and equality goals", run := fun _ =>
+        okLibs ("import Nat\n" ++
+          "def leTrans (a b c : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le b c) : Nat.Le a c := by\n  omega\n" ++
+          "def ltSucc (n : Nat) : Nat.Lt n (Nat.succ n) := by\n  omega\n" ++
+          "#print axioms leTrans")
+          ["'leTrans' does not depend on any axioms"] },
+    { name := "omega P1: sum = constant bounds", run := fun _ =>
+        skip "P1: h : a + b = 3 ⊢ a ≤ 3 needs equality-hypothesis transport built from the hypothesis' own term; raw omega proof terms hit instance-argument conversion" },
+    { name := "omega refuses false and non-linear goals", run := fun _ =>
+        failsLibs "import Nat\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega"
+          "omega:" },
+    { name := "omega refuses multiplication", run := fun _ =>
+        failsLibs "import Nat\ndef bad (a b : Nat) : a * b = b * a := by\n  omega"
+          "omega: non-linear" },
+    -- P0 certificate-producing `omega_cert` (`wiz-notes/omega-certificate.md`, S0):
+    -- the search builds a step list, the checker replays it, the kernel checks the term.
+    { name := "omega_cert: two independent chains close by adding the inequalities", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaSum (a b c d : Nat) (h₁ : Nat.Le a b) (h₂ : Nat.Le c d) :\n" ++
+          "    Nat.Le (a + c) (b + d) := by\n  omega_cert\n" ++
+          "#print axioms omegaSum")
+          ["'omegaSum' does not depend on any axioms"] },
+    { name := "omega_cert: an equality with a sum side gives a bound (the P1 goal)", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaSumConst (a b : Nat) (h : Nat.add a b = 3) : Nat.Le a 3 := by\n  omega_cert\n" ++
+          "#print axioms omegaSumConst")
+          ["'omegaSumConst' does not depend on any axioms"] },
+    { name := "omega_cert: cancelling a common summand", run := fun _ =>
+        okLibs ("import Omega\n" ++
+          "def omegaCancel (a b k : Nat) (h : Nat.Le (Nat.add a k) (Nat.add b k)) : Nat.Le a b := by\n  omega_cert\n" ++
+          "#print axioms omegaCancel")
+          ["'omegaCancel' does not depend on any axioms"] },
+    { name := "omega_cert refuses a non-linear goal at the tactic's position", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) : a * b = b * a := by\n  omega_cert"
+          "3:3: error: omega: non-linear" },
+    { name := "omega_cert refuses a false linear goal", run := fun _ =>
+        failsLibs "import Omega\ndef bad (n : Nat) : Nat.Lt n n := by\n  omega_cert"
+          "omega: no proof" },
+    { name := "omega_cert: the real-shadow lemma is proved, not assumed", run := fun _ =>
+        okLibs "import Omega\n#print axioms Nat.omegaFM"
+          ["'Nat.omegaFM' does not depend on any axioms"] },
+    { name := "omega_cert does not reverse a hypothesis", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) (h : Nat.Le a b) : Nat.Le b a := by\n  omega_cert"
+          "omega: no proof" },
+    { name := "omega_cert refuses a non-linear hypothesis", run := fun _ =>
+        failsLibs "import Omega\ndef bad (a b : Nat) (h : Nat.mul a b = 3) : Nat.Le a 3 := by\n  omega_cert"
+          "omega: non-linear" },
+    { name := "two subgoals: the second survives the first exact", run := fun _ =>
+        okLib ("import Prelude\nstructure Pairish where\n  a : Nat\n  b : Nat\n" ++
+          "def p : Pairish := by\n  constructor\n  exact 1\n  exact 2\n" ++
+          "#eval p.a\n#eval p.b")
+          ["1", "2"] },
+    -- case analysis (docs/stages/06-macros.md, 6j)
+    { name := "by_cases splits a Bool expression into its two equations", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bC (p : Nat → Bool) (n : Nat) (R : Prop) (ht : p n = .true → R)\n" ++
+          "    (hf : p n = .false → R) : R := by\n" ++
+          "  by_cases p n\n  exact ht h\n  exact hf h\n" ++
+          "def bEq (p : Nat → Bool) (n : Nat) : p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  exact Or.inl h\n  exact Or.inr h\n" ++
+          "#check bC\n#print axioms bC")
+          ["bC : (p : Nat → Bool) → (n : Nat) → (R : Prop) → (p n = .true → R) → (p n = .false → R) → R",
+           "'bC' does not depend on any axioms"] },
+    { name := "by_cases: a named hypothesis, and a goal that is a function type", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bName (p : Nat → Bool) (n : Nat) (R : Prop) (ht : p n = .true → R)\n" ++
+          "    (hf : p n = .false → R) : R := by\n" ++
+          "  by_cases hp : p n\n  exact ht hp\n  exact hf hp\n" ++
+          "def bFun (p : Nat → Bool) (n : Nat) : (m : Nat) → p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  intro m\n  exact Or.inl h\n  intro m\n  exact Or.inr h\n" ++
+          "#check bFun")
+          ["bFun : (p : Nat → Bool) → (n : Nat) → (m : Nat) → p n = .true ∨ p n = .false"] },
+    -- (the fix must keep the names of *every* Π written in the goal's type, not only the
+    -- last arrow of a single binder)
+    { name := "by_cases: two leading binders of the goal's function type keep their names", run := fun _ =>
+        okLib ("import Logic\n" ++
+          "def bFun2 (p : Nat → Bool) (n : Nat) :\n" ++
+          "    (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false := by\n" ++
+          "  by_cases p n\n  intro m\n  intro k\n  exact Or.inl h\n" ++
+          "  intro m\n  intro k\n  exact Or.inr h\n" ++
+          "#check bFun2")
+          ["bFun2 : (p : Nat → Bool) → (n : Nat) → (m : Nat) → (k : Nat) → p n = .true ∨ p n = .false"] },
+    { name := "by_cases rejects a non-Bool expression", run := fun _ =>
+        failsLib "import Prelude\ndef bad (n : Nat) : Nat := by\n  by_cases n"
+          "by_cases: expected a Bool expression" },
     { name := "traces reach the language server (a diagnostic) and the infoview (wiz/plainGoal)", run := fun _ => do
         let src := "import Prelude\ndef k : Nat → Nat := by\n  intro n\n  trace_state\n  exact n\n"
         let (srv, out) ← tacticLsp src

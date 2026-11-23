@@ -2,10 +2,10 @@ import Sys
 import Word
 import Text
 import MVar
-import Storage
-import Durable
-import Registry
-import Compact
+import Scry.QuireStorage
+import Scry.QuireDurable
+import Scry.QuireRegistry
+import Scry.QuireCompact
 /-!
 # The crash matrix's two roles
 
@@ -89,7 +89,7 @@ partial def checkRefs (fd : Fd) (pc : U64) : List RootRef → EIO Unit
         (recHas rs 2);
       checkRefs fd pc rest
 
-partial def bumpN (h : Handle) : Nat → EIO Unit
+partial def bumpN (h : DurableHandle) : Nat → EIO Unit
   | .zero => EIO.pure ()
   | .succ k => do
     s ← getDb h;

@@ -65,6 +65,13 @@ def Scry.Severity.show : Scry.Severity → String
   | .warning => "warning"
   | .note => "note"
 
+/-- The severity number the findings index stores in a record's `label` (the same order
+as `show`: error, warning, note). -/
+def Scry.Severity.id : Scry.Severity → Nat
+  | .error => 0
+  | .warning => 1
+  | .note => 2
+
 /-- The SARIF `level` spelling. -/
 def Scry.Severity.sarif : Scry.Severity → String := Scry.Severity.show
 

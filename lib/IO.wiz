@@ -127,7 +127,10 @@ extern "wiz_f64_mul" Float64.mul : Float64 → Float64 → Float64
 extern "wiz_f64_div" Float64.div : Float64 → Float64 → Float64
 /-- `a < b`. -/
 extern "wiz_f64_lt" Float64.lt : Float64 → Float64 → Bool
-/-- The number as text, as C's `printf` shows it. -/
+/-- The number as the shortest decimal that reads back as this `Float64` (Ryu's
+round-trip algorithm, not C's `%.17g`). The form is scientific (`1E0`, `-0E0`, `5E-324`,
+`1.7976931348623157E308`); the non-finite values print `NaN`, `Infinity` and
+`-Infinity`, and a NaN's sign bit is not part of its value, so it prints `NaN`. -/
 extern "wiz_f64_show" Float64.toString : Float64 → String
 
 /-- `x` doubled `k` times: `x * 2^k`, exactly (used by `Float64.ofNat`). -/

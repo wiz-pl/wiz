@@ -171,8 +171,42 @@ partial def readCaseStderr (h : IO.FS.Handle) : IO String := do
 /-- Mark the running case as skipped (it could not run here, e.g. without a C toolchain),
 with the reason; the case then returns normally. The driver shows it as skipped, not
 passed (`Group.run`), and records the note `skipped REASON` (`--timings`). A skipped case
-is not evidence that the case passes. -/
+is not evidence that the case passes.
+
+This is for a skip the case *declares* --- a documented gap or a `-- test: skip` marker;
+an environment skip goes through `skipMissing`. -/
 def skip (reason : String) : IO Unit := note s!"skipped {reason}"
+
+/-- Whether a missing dependency may be reported as a skip rather than a failure. Set by
+`Tests/Main.lean` from `--allow-missing-deps` or the environment variable
+`WIZ_ALLOW_MISSING_DEPS`; both are explicit, and neither is on by default. -/
+initialize allowMissingDepsRef : IO.Ref Bool ← IO.mkRef false
+
+def setAllowMissingDeps (on : Bool) : IO Unit := allowMissingDepsRef.set on
+
+/-- Whether missing dependencies are being reported as skips (an explicit opt-out). -/
+def allowMissingDeps : IO Bool := allowMissingDepsRef.get
+
+/-- The note a `skipMissing` case records when the missing dependency was allowed as a
+skip: `missing-dep REASON`. It is separate from the `skipped REASON` note so the driver
+and `scripts/ci.py check-skips` can count the environment skips, and so a CI job cannot
+hide an unexpected missing dependency behind `--allow-missing-deps`: the skip lint
+requires an `.github/skip-allowlist.json` entry for it. -/
+def missingDepMarker : String := "missing-dep "
+
+/-- A case that cannot run because a dependency is absent (no `cc`, GMP, Boehm GC,
+`node`, `yosys`, `iverilog`, `z3`, `llc`, a `wiz`/`grail` binary, a self-host toolchain,
+...). By default this **fails**, naming the dependency: a green suite must not be green
+because the machine could not run the test. `--allow-missing-deps` (or
+`WIZ_ALLOW_MISSING_DEPS=1`) turns it into a reported skip --- the shard driver sets that
+only for a shard whose environment lacks a documented optional tool, and the skip lint
+still requires an allow-list entry for it. A declared gap stays `skip`, not this. -/
+def skipMissing (reason : String) : IO Unit := do
+  if ← allowMissingDeps then
+    note s!"skipped {reason}"
+    note (missingDepMarker ++ reason)
+  else
+    throw (IO.userError s!"missing dependency: {reason}\n      this case cannot run without it; install it, or pass --allow-missing-deps (or set WIZ_ALLOW_MISSING_DEPS=1) to report it as a skip")
 
 /-- The reason a passing case's process gave for skipping: its `skipped` note, or a line
 in the old style (`(skipped: REASON)`, `(no X: skipped)`) that a case printed itself. -/
@@ -402,7 +436,10 @@ def driverFixtures : Group where
         IO.println "fixture output before the failure"
         throw (IO.userError "fixture failure") },
     { name := "fixture: skips", run := fun _ => skip "fixture reason" },
-    { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" }
+    { name := "fixture: skips (old style)", run := fun _ => IO.println "    (skipped: old fixture reason)" },
+    -- the environment-skip policy: a missing dependency fails by default and is a
+    -- reported skip only under `--allow-missing-deps` / `WIZ_ALLOW_MISSING_DEPS`
+    { name := "fixture: missing dependency", run := fun _ => skipMissing "no fixture-dep on PATH" }
   ]
 
 end Tests
