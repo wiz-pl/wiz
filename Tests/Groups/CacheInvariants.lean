@@ -643,7 +643,12 @@ def cacheInvariantsGroup : Group where
         let c ← Cache.verifyLayer cache
         checkEq 0 c.mismatches
         check (c.regions > 0) "the forged region was not scanned" },
-    /- I12 (§1.4 option a) — poison is global per key. -/
+    /- I12 (§1.4 option a) — poison is global per `Key.id`: a bad manifest in any searched
+    layer hides that key in every layer, for both lookups (text and region), and for both
+    directions (bad read layer over a good write entry, bad write layer over a good read
+    entry). It is scoped to the keys the manifest names, never to the layer, so another
+    module in the same layer is unaffected. A *valid* layer hides nothing. The cost is
+    availability only: the output does not change and no layer is modified. -/
     { name := "a poisoned read layer hides a valid write-cache region (global poison)", run := fun _ => do
         let dir ← mkTree [("M.wiz", "import Prelude\ndef x : Nat := 1 + 1\n"),
                           ("main.wiz", "import M\n#eval x\n")]
@@ -659,22 +664,114 @@ def cacheInvariantsGroup : Group where
         check (!coldW.messages.any (·.severity == .error)) s!"write cold: {coldW.messages.toList.map (·.text)}"
         check (!coldRo.messages.any (·.severity == .error)) s!"read cold: {coldRo.messages.toList.map (·.text)}"
         let expected := coldW.messages.toList.map (·.render src)
-        let some mf ← manifestFor ro "M"
-          | throw (IO.userError "no manifest for M in the read layer")
-        invTamperRoot mf
-        let before ← snapshot ro
         let binary ← Cache.binaryId (some w)
         let k := invModuleKey ms "M"
-        check (← Cache.readModuleRegion (R := ZeroOneMany) w binary rig k).isSome
-          "the write layer's own region is not valid"
-        let store ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
+        let kPrelude := invModuleKey ms "Prelude"
+        -- (settle: the write cache is fully warm before any counter is read)
+        let _ ← invCold w src init rig opts
+        let some mfW ← manifestFor w "M"
+          | throw (IO.userError "no manifest for M in the write layer")
+        let some manW := Cache.parseManifest (← IO.FS.readFile mfW)
+          | throw (IO.userError "M's write manifest does not parse")
+        let some cmdEnt := manW.entries[0]?
+          | throw (IO.userError "M's write manifest lists no command")
+        let cmdKey : Cache.Key := { fast := cmdEnt.key, strong := cmdEnt.keySha }
+        -- (control, write layer alone: both lookups answer)
+        let storeW ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [] binary opts
+          .warn rig (unsignedReads := [])
+        check (← storeW.getRegion k).isSome "the write layer's own region is not valid"
+        check (← storeW.get cmdKey).isSome "the write layer's own command entry is not valid"
+        -- (control, read layer alone: it is valid, so hiding it later is the poison)
+        let storeRo ← Cache.Store.layeredRegion (R := ZeroOneMany) none [ro] binary opts
           .warn rig (unsignedReads := [ro])
-        check (← store.getRegion k).isNone
+        check (← storeRo.getRegion k).isSome "the read layer's own region is not valid"
+        check (← storeRo.get cmdKey).isSome "the read layer's own command entry is not valid"
+        -- (a *valid* read layer must not shadow a valid write entry; I12's other half)
+        let storeOk ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
+          .warn rig (unsignedReads := [ro])
+        check (← storeOk.getRegion k).isSome "a valid read layer hid the write cache's region"
+        check (← storeOk.get cmdKey).isSome
+          "a valid read layer hid the write cache's command entry"
+        let base ← IO.mkRef ({} : Cache.RegionCounts)
+        let baseOpts : Cache.RegionOptions := { rig, stats := some base }
+        let (warm, _) ← Cache.elaborateCached (some w) [ro] src init 0
+          (region := some baseOpts) (verify := .warn) (rig := rig)
+          (unsignedReads := [ro])
+        checkEq expected (warm.messages.toList.map (·.render src))
+        let b0 ← base.get
+        check (b0.hits > 0) s!"the warm write cache served no region: {repr b0}"
+        -- (the read layer's manifest for M now fails its own root)
+        let some mfRo ← manifestFor ro "M"
+          | throw (IO.userError "no manifest for M in the read layer")
+        let roSaved ← IO.FS.readFile mfRo
+        invTamperRoot mfRo
+        let beforeTampered ← snapshot ro
+        let storeBad ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
+          .warn rig (unsignedReads := [ro])
+        check (← storeBad.getRegion k).isNone
           "a poisoned read layer did not hide the write cache's valid region"
-        let (s, _) ← Cache.elaborateCached (some w) [ro] src init 0 (region := some opts)
-          (verify := .warn) (rig := rig) (unsignedReads := [ro])
-        checkEq expected (s.messages.toList.map (·.render src))
-        checkEq before (← snapshot ro) },
+        check (← storeBad.get cmdKey).isNone
+          "a poisoned read layer did not hide the write cache's valid command entry"
+        -- (the scope is the ids the bad manifest names, not the layer and not the fast half)
+        let tc ← Cache.toolchainTag (some w)
+        let msBad ← Cache.ManifestStore.create (some w) [ro] binary tc rig .warn none [ro]
+        let kOtherStrong : Cache.Key := { k with strong := String.ofList (List.replicate 64 'a') }
+        msBad.load k
+        check (← msBad.poisonedFor k) "the module key is not poisoned"
+        check (← msBad.poisonedFor (Cache.Key.ofFast k.fast))
+          "the fast-only compatibility id is not poisoned"
+        check (!(← msBad.poisonedFor kPrelude))
+          "M's bad manifest poisoned another module of the same layer"
+        check (!(← msBad.poisonedFor kOtherStrong))
+          "a different strong key for the same fast half is poisoned"
+        let bad ← IO.mkRef ({} : Cache.RegionCounts)
+        let badOpts : Cache.RegionOptions := { rig, stats := some bad }
+        let (poisoned, _) ← Cache.elaborateCached (some w) [ro] src init 0
+          (region := some badOpts) (verify := .warn) (rig := rig)
+          (unsignedReads := [ro])
+        checkEq expected (poisoned.messages.toList.map (·.render src))
+        let p0 ← bad.get
+        -- (one module lookup — the poisoned one — turned from a hit into a miss; the
+        -- re-elaboration re-counts its imports, so compare the misses, not hits + misses)
+        check (p0.misses == b0.misses + 1)
+          s!"the poisoned module was not the one region miss: {repr b0} -> {repr p0}"
+        check (p0.hits >= b0.hits)
+          s!"the poison also cost another module its region hit: {repr b0} -> {repr p0}"
+        checkEq beforeTampered (← snapshot ro)
+        -- (it goes both ways: an invalid write-layer manifest hides the read layer's valid
+        -- entry, and the same run repairs the write layer — the poison is per process)
+        IO.FS.writeFile mfRo roSaved
+        let some mfW2 ← manifestFor w "M"
+          | throw (IO.userError "M's write manifest is gone after the repair")
+        invTamperRoot mfW2
+        let storeRev ← Cache.Store.layeredRegion (R := ZeroOneMany) (some w) [ro] binary opts
+          .warn rig (unsignedReads := [ro])
+        check (← storeRev.getRegion k).isNone
+          "an invalid write-layer manifest did not hide the read layer's valid region"
+        check (← storeRev.get cmdKey).isNone
+          "an invalid write-layer manifest did not hide the read layer's valid command entry"
+        let beforeRestored ← snapshot ro
+        let rev ← IO.mkRef ({} : Cache.RegionCounts)
+        let revOpts : Cache.RegionOptions := { rig, stats := some rev }
+        let (repaired, _) ← Cache.elaborateCached (some w) [ro] src init 0
+          (region := some revOpts) (verify := .warn) (rig := rig)
+          (unsignedReads := [ro])
+        checkEq expected (repaired.messages.toList.map (·.render src))
+        let r0 ← rev.get
+        check (r0.misses == b0.misses + 1)
+          s!"an invalid write-layer manifest was not a region miss: {repr b0} -> {repr r0}"
+        check (r0.hits >= b0.hits)
+          s!"the poison also cost another module its region hit: {repr b0} -> {repr r0}"
+        checkEq beforeRestored (← snapshot ro)
+        let after ← IO.mkRef ({} : Cache.RegionCounts)
+        let afterOpts : Cache.RegionOptions := { rig, stats := some after }
+        let (again, _) ← Cache.elaborateCached (some w) [ro] src init 0
+          (region := some afterOpts) (verify := .warn) (rig := rig)
+          (unsignedReads := [ro])
+        checkEq expected (again.messages.toList.map (·.render src))
+        let a0 ← after.get
+        check (a0.hits > 0) s!"the repaired write layer was not served: {repr a0}"
+        check (a0.misses < r0.misses) s!"the write-layer repair did not converge: {repr a0}" },
     /- K3 (task 11): the opt-in covers only the layer before it. -/
     { name := "per-layer --cache-ro-unsigned: a later layer is refused", run := fun _ => do
         let dir ← mkTree [("A.wiz", "axiom a : Prop\n"),

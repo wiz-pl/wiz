@@ -1350,7 +1350,15 @@ structure ManifestStore where
   entries : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
   /-- module `Key.id` → (region entry, layer), in layer order -/
   regions : IO.Ref (Std.HashMap String (Array (ManifestEntry × System.FilePath)))
-  /-- keys named by a manifest whose own root failed: always a miss -/
+  /-- `Key.id`s named by a manifest whose own root, expiry or tags failed: a miss in every
+  layer. Poison is **global per key**, not per layer (K2 option (a), the spec's §1.4/I12,
+  pinned by `=cache-invariants` T11): a bad manifest in any searched layer hides a valid
+  entry for the same key in *another* layer, including the write cache, and the poisoning
+  goes both ways. The scope is the ids the manifest names (its command keys, its region key
+  and the fast-only compatibility ids), so another module's key in the same layer is
+  untouched. That is an availability cost chosen over a per-layer set: it never yields a
+  wrong result, and a repair run rewrites the bad layer. Do not scope this per layer
+  without restating §1.4 and I12 and changing T11. -/
   poisoned : IO.Ref (Std.HashSet String)
   /-- module keys with a manifest file in some layer (valid or not) -/
   present : IO.Ref (Std.HashSet String)
@@ -1493,7 +1501,9 @@ def ManifestStore.load (m : ManifestStore) (key : Key) : IO Unit := do
             m.regions.modify fun mp => mp.insert id (((mp[id]?).getD #[]).push (e, dir))
         else
           -- (expired or not self-consistent: the entries it names are all misses, both
-          -- under its strong keys and under the fast-only compatibility key)
+          -- under its strong keys and under the fast-only compatibility key. The poison is
+          -- global per key by design — K2 option (a), pinned by T11 — so this layer's bad
+          -- manifest also hides a valid entry for the same key in another layer.)
           if expired then
             IO.eprintln s!"cache verify: {dir}: manifest for module {man.module} expired (valid-until {man.validUntil})"
           for e in man.allEntries do
