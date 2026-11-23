@@ -88,6 +88,7 @@
             fileset = fs.unions [
               ./lakefile.lean ./lake-manifest.json ./lean-toolchain
               ./Main.lean ./Wiz.lean ./Wiz ./WizMeta.lean ./WizMeta ./Grail.lean ./Grail
+              ./STC.lean ./STC # the metatheory library the STC bridge test imports
               ./Tests # the test driver (`packages.tests`)
               ./runtime # the C runtime (wiz_rt.h, rt_*.inc) and WizRuntime.lean, which embeds it (include_str)
               ./c # linked into the executables (moreLinkObjs)

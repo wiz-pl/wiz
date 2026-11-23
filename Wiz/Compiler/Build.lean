@@ -82,7 +82,11 @@ def selectWasmExterns (s : CommandState R) (decls : Array IR.Decl)
         let decl := match names with
           | (_, n) :: _ => n
           | [] => sig.cname
-        let others := (["c"] ++ (impls.filter (·.decl == decl)).map (·.backend.name)).eraseDups
+        -- order-preserving dedupe (the list is tiny, but `eraseDups` is O(n²) and an
+        -- append-in-loop is rejected by the complexity rule; `Array.push` is not)
+        let all := ["c"] ++ (impls.filter (·.decl == decl)).map (·.backend.name)
+        let others := (all.foldl (fun (acc : Std.HashSet String × Array String) b =>
+          if acc.1.contains b then acc else (acc.1.insert b, acc.2.push b)) ({}, #[])).2.toList
         throw s!"{declPosition s decl}: error: no-target-implementation: `{decl}` has no `wasm` implementation (implemented by: {", ".intercalate others})"
   pure out
 
