@@ -264,7 +264,7 @@ h1 em { color: var(--accent); font-style: normal; }
   font: inherit;
 }
 .q-panel { margin: .9rem 0 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-.q-panel h4 { margin: 0 0 .4rem; font-size: .95rem; }
+.q-panel h3 { margin: 0 0 .4rem; font-size: .95rem; }
 .q-panel p { margin: .4rem 0 0; color: var(--dim); font-size: .93rem; }
 .q-panel pre { margin: .5rem 0 0; }
 /* The control is CSS-hidden until the runtime mounts, so no-JS readers get the stack

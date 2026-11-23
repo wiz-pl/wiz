@@ -103,8 +103,9 @@ if [ -f "$landing_page" ]; then
   }
   # The island's module and mount contract: a page that names an island without them
   # cannot start, and a JS-on load would silently stay static.
-  for f in app.js framework/mount.js framework/driver.js framework/runtime.js \
-           framework/adopt.js wiz-landing-ui.mjs wiz-landing-ui.wasm; do
+  for f in app.js carousel.js framework/mount.js framework/driver.js \
+           framework/runtime.js framework/adopt.js wiz-landing-ui.mjs \
+           wiz-landing-ui.wasm; do
     need "landing/$f"
   done
 fi

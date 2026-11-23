@@ -47,7 +47,7 @@ def Landing.rootClass (q : Nat) : String :=
 stylesheet can show the selected one. -/
 def Landing.panel (for_ title code note : String) : Loom.VNode Landing.Msg :=
   Loom.el "section" [Loom.class "q-panel", Loom.attr "data-for" for_]
-    [ Loom.el "h4" List.nil [Loom.text title]
+    [ Loom.el "h3" List.nil [Loom.text title]
     , Loom.el "pre" [Loom.attr "tabindex" "0"]
         [Loom.el "code" [Loom.class "language-wiz"] [Loom.text code]]
     , Loom.el "p" List.nil [Loom.text note]

@@ -50,8 +50,8 @@ const islandHtml = (() => {
   const at = page.indexOf('data-wiz-ssr="' + ssrHash + '">');
   if (at < 0) return "";
   const start = at + ('data-wiz-ssr="' + ssrHash + '">').length;
-  const end = page.indexOf("\n</div>", start);
-  return page.slice(start, end);
+  const end = page.indexOf("\n", start);
+  return page.slice(start, end).replace(/<\/div>$/u, "");
 })();
 eq("the built island is the module's SSR byte for byte", ssrHtml, islandHtml);
 ok(ssrHtml.includes('id="q-select"'), "the first paint has the select");
@@ -76,7 +76,7 @@ ok(root.childNodes[0].getAttribute("class") === "q-app q0", "the adopted root's 
 // ## A step is one setAttr "class"; nothing else
 const realPatch = globalThis.wizPatch;
 const patches = [];
-globalThis.wizPatch = (json) => { patches.push(JSON.parse(json)); realPatch(json); };
+globalThis.wizPatch = (json) => { patches.push(...JSON.parse(json)); realPatch(json); };
 function choose(value) {
   patches.length = 0;
   const select = byId(root, "q-select");

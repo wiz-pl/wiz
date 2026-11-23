@@ -54,7 +54,7 @@ cat > "$WEB/landing/index.html" <<'PAGE'
 <div id="quantity-app" data-wiz-island="loom/1" data-wiz-ssr="t1-00000000-0-0"><div class="q-app q0" id="quantity-widget"><select id="q-select"></select><section class="q-panel"></section><section class="q-panel"></section><section class="q-panel"></section></div></div>
 </main></body></html>
 PAGE
-for f in app.js wiz-landing-ui.mjs wiz-landing-ui.wasm framework/mount.js \
+for f in app.js carousel.js wiz-landing-ui.mjs wiz-landing-ui.wasm framework/mount.js \
          framework/driver.js framework/runtime.js framework/adopt.js; do
   mkdir -p "$WEB/landing/$(dirname "$f")"
   : > "$WEB/landing/$f"

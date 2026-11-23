@@ -127,6 +127,21 @@ for (const href of ["docs/", "guide/docs/index.html", "bench/", "playground/",
   "guide/docs/install.html"]) {
   ok(html.includes('href="' + href + '"'), "the page keeps the link " + href);
 }
+ok(/<script src="landing\/carousel\.js" defer><\/script>/u.test(html),
+  "the carousel enhancement is loaded with defer");
+ok(/<script type="module" src="landing\/app\.js"><\/script>/u.test(html),
+  "the island mount is a module script");
+// The page's two scripts are the Loom boundary restated: one mount call, no direct
+// ABI calls, and no DOM construction in either script.
+const appJs = readFileSync(join(root, "web/landing/app.js"), "utf-8");
+ok(/import \{ mount \} from "\.\/framework\/mount\.js"/u.test(appJs),
+  "app.js imports the mount contract");
+ok(/await mount\(el, \{/u.test(appJs), "app.js mounts the island with mount(el, { module })");
+ok(!/_wiz_loom_|createElement|innerHTML|appendChild|insertAdjacentHTML/u.test(appJs),
+  "app.js calls no ABI directly and builds no DOM");
+const carouselJs = readFileSync(join(root, "web/landing/carousel.js"), "utf-8");
+ok(!/createElement|innerHTML|appendChild|insertAdjacentHTML/u.test(carouselJs),
+  "carousel.js builds no DOM (attributes and focus only)");
 ok(html.includes("tower default nightly"), "the install command is on the page");
 ok(html.includes("sha256sum -c -"), "the install command still checks its checksum");
 

@@ -47,19 +47,19 @@
       "sha256": "936432c49522ea723f3c57dbe0a6492fdb5d41f7cdc03acf07a90aec8e85fa60"
     },
     "tests": {
-      "files": 414,
+      "files": 416,
       "paths": [
         "Tests/**",
         "web/**"
       ],
-      "sha256": "2916842429fedb6b25ea8a49d4fc4c8b64451ca11df3dca4c1906b0960abae33"
+      "sha256": "d1a3dde402c41c5f6ac92f401deaf03592633275cb196bd6c2030baea65ef09c"
     },
     "wizlib": {
       "files": 111,
       "paths": [
         "lib/**"
       ],
-      "sha256": "86ebe054fc51744f22e360822a8eae48addebacec4e583760e6a00759c308094"
+      "sha256": "0a46433c2058c97718e87b42529d82c9efff9440435866cc22f9965ce0259fb9"
     }
   }
 }

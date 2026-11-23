@@ -555,7 +555,11 @@ EOF
             '';
             installPhase = ''
               runHook preInstall
-              cp -r out $out
+              # build-landing-ui.sh writes OUT/landing/ (the page's asset directory);
+              # the store path is that directory, so the page's --from/--ui copy finds
+              # wiz-landing-ui.mjs at its root.
+              mkdir -p $out
+              cp -r out/landing/. $out/
               runHook postInstall
             '';
             meta = {

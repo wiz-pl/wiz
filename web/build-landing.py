@@ -35,19 +35,19 @@ STATIC_ISLAND = """\
 <div class="q-app q0" id="quantity-widget">
   <p class="q-intro">The same shape of definition under each quantity.</p>
   <section class="q-panel" data-for="0">
-    <h4>0 — erased at run time</h4>
+    <h3>0 — erased at run time</h3>
     <pre tabindex="0"><code class="language-wiz">def ignore {0 A : Type} (0 x : A) : Nat := 0</code></pre>
     <p>The argument is absent from the compiled code: it may be a type, a proof, or an
       index, and the body cannot use it.</p>
   </section>
   <section class="q-panel" data-for="1">
-    <h4>1 — used exactly once</h4>
+    <h3>1 — used exactly once</h3>
     <pre tabindex="0"><code class="language-wiz">def identity {0 A : Type} (1 x : A) : A := x</code></pre>
     <p>A linear value must be consumed once: a file handle, a token, or a proof that
       must not be duplicated or dropped.</p>
   </section>
   <section class="q-panel" data-for="w">
-    <h4>ω — unrestricted</h4>
+    <h3>ω — unrestricted</h3>
     <pre tabindex="0"><code class="language-wiz">def dup {0 A : Type} (ω x : A) : A × A := (x, x)</code></pre>
     <p>Ordinary data is unrestricted: the body may use it any number of times, including
       twice in the same pair.</p>
@@ -129,9 +129,13 @@ def island(root, path):
     digest = data["hash"]
     if not tree or not digest.startswith("t1-"):
         raise SystemExit("build-landing: island JSON has no html/hash")
+    # No white space inside the island: Loom's patch paths are child indices from the
+    # container, so a newline before the app's root would make path "0" a text node.
+    # The SSR hash normalises white space and would adopt it, then every patch would
+    # misaddress; the playground's generator has the same rule.
     return (
-        '<div id="quantity-app" data-wiz-island="loom/1" data-wiz-ssr="{hash}">\n'
-        '{tree}\n</div>'.format(hash=esc(digest), tree=tree))
+        '<div id="quantity-app" data-wiz-island="loom/1" data-wiz-ssr="{hash}">'
+        '{tree}</div>'.format(hash=esc(digest), tree=tree))
 
 
 def main(argv):
