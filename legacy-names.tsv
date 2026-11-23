@@ -11904,11 +11904,11 @@ Web.Selfhost	Selfhost.tokenStopUnits	leaf-prefixed	lib/Web/Selfhost.wiz	361
 Web.Selfhost	Selfhost.wordAtJson	leaf-prefixed	lib/Web/Selfhost.wiz	559
 Web.Selfhost	Selfhost.wordEndGo	leaf-prefixed	lib/Web/Selfhost.wiz	552
 Web.Selfhost	Selfhost.wordStartGo	leaf-prefixed	lib/Web/Selfhost.wiz	545
-Web.Source.Facts	Source.factsAt	other-dotted	lib/Web/Source/Facts.wiz	25
-Web.Source.Facts	Source.factsInFile	other-dotted	lib/Web/Source/Facts.wiz	21
-Web.Source.Facts	Source.factsOverlapping	other-dotted	lib/Web/Source/Facts.wiz	42
-Web.Source.Facts	Source.findingById	other-dotted	lib/Web/Source/Facts.wiz	37
-Web.Source.Facts	Source.findingsAt	other-dotted	lib/Web/Source/Facts.wiz	31
+Web.Source.Facts	Source.factsAt	other-dotted	lib/Web/Source/Facts.wiz	30
+Web.Source.Facts	Source.factsInFile	other-dotted	lib/Web/Source/Facts.wiz	26
+Web.Source.Facts	Source.factsOverlapping	other-dotted	lib/Web/Source/Facts.wiz	47
+Web.Source.Facts	Source.findingById	other-dotted	lib/Web/Source/Facts.wiz	42
+Web.Source.Facts	Source.findingsAt	other-dotted	lib/Web/Source/Facts.wiz	36
 Web.Source.Model	Source.Answer	other-dotted	lib/Web/Source/Model.wiz	79
 Web.Source.Model	Source.Answer.shown	other-dotted	lib/Web/Source/Model.wiz	100
 Web.Source.Model	Source.FactRow	other-dotted	lib/Web/Source/Model.wiz	56
