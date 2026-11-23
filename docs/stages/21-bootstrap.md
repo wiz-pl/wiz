@@ -1171,7 +1171,9 @@ The anti-vacuity case builds a stub that writes `input.wiz` to standard output a
 the compiler and the checker, runs every `=selfhost` case in a child process with
 `WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` pointing at it, and fails if any of them
 passes. That is the audit's measurement turned into a test, so the pipeline group cannot
-regress into cases that do not reach the pipeline. (At `integration/train7` the guard is
+regress into cases that do not reach the pipeline. (The stub has no `.selfhost-id`
+sidecar, so the override is refused rather than trusted — every case that reaches the
+pipeline still fails, which is what the case asserts.) (At `integration/train7` the guard is
 **red**: one of 208 `=selfhost` cases, "Kernel.wiz quantity terms ...", passes with the
 stub, so that case does not reach the pipeline.) Twenty-two cases that used to
 compile a Wiz program with the Lean host (`the lexer in Wiz`, `the parser in Wiz`, the
@@ -1180,6 +1182,17 @@ erasure, the `D1` probe) now use `selfhostCompileRun`; the rest of `=selfhost-ho
 the cases that cannot — they call the Lean kernel API in process, need the additive
 eliminator, or compare two strings. The shard plan (`.github/test-shards.json`, the
 `selfhost` shard split 3) selects both groups.
+
+The pipeline's own build is cached under `/tmp/wiz-selfhost-KEY/`, keyed by the content
+of the selfhost sources, the embedded C runtime and the C compiler flags (`Toolchain.id`),
+not by the test binary's mtime; an exclusive `flock` on `KEY/.lock` means two concurrent
+cases build it once (the first waits, the second reuses), and the executable appears only
+by an atomic rename, so a failed build leaves nothing a later case trusts. A
+`WIZ_SELFHOST_COMPILER`/`WIZ_SELFHOST_CHECKER` override is accepted only when its
+`<binary>.selfhost-id` sidecar matches `tests --selfhost-identity compiler|checker`; a
+stale artifact from another tree is refused rather than silently used. The
+`=selfhost-host` case "two concurrent lookups of an unbuilt selfhost program build it
+once" exercises the lock with two `--selfhost-cache-probe` children.
 
 ## 21ae: the library against the self-hosted compiler (`=selfhost-libdiff`)
 

@@ -1521,7 +1521,12 @@ the generated reference manual (`result/index.md`, and `result/site`).
   (`/tmp/wiz-selfhost-*`). The cache key starts with a hash of everything the compiler
   is made of (the `.lean` files, Lean, `flake.lock`), and partial hits only come from the
   same compiler (the elaboration cache's own keys include the wiz binary's hash, but the
-  test driver's grail runs use a fixed binary id and the `/tmp` programs a timestamp).
+  test driver's grail runs use a fixed binary id). The selfhost programs' `/tmp` key is
+  content-based (`Tests/Elab.lean`): the selfhost sources, the embedded C runtime and the
+  C compiler flags (`Toolchain.id`), not the test binary's mtime, and an exclusive
+  `flock` on the key's directory makes concurrent cases build once. A
+  `WIZ_SELFHOST_COMPILER`/`_CHECKER` override is accepted only with a `.selfhost-id`
+  sidecar matching this tree's sources (`tests --selfhost-identity`).
   The elaboration cache may also have read-only layers (`--cache-ro DIR`, repeatable,
   searched in order after the written `--cache DIR`, never written; each is refused by
   default unless `--cache-ro-unsigned` follows it). The Nix package

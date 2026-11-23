@@ -57,7 +57,8 @@ structure Group where
   say `true` only if its cases touch no state that two cases share (a fixed path must
   belong to one case, and there is no port, driver environment variable or build
   directory in the work tree), and none of them assert on wall time or on the machine's
-  load: see "Running cases in parallel" in `docs/building.md`. -/
+  load: see "Running cases in parallel" in `docs/building.md`. `tests --list-parallel`
+  prints the groups that opted in (`scripts/ci.py` simulates their `--jobs` pool). -/
   parallel : Bool := false
   /-- A hint at the shard that is meant to run the group (`.github/test-shards.json`).
   It is not a fallback: `scripts/check-shards.py` fails when no shard's selectors pick

@@ -4595,6 +4595,29 @@ def selfHostHostGroup : Group where
   cases := [
     { name := "the host frontend elaborates the self-hosted checker and compiler (a fast guard)", run := fun _ =>
         selfhostHostGuard },
+    -- The selfhost build cache is content-keyed and locked (`buildSelfhostProgram` in
+    -- `Tests/Elab.lean`). Two child probes with one fresh tag start before either is
+    -- collected: if the lock works, one builds and the other waits and reuses, so exactly
+    -- one child prints `built probe` (without the lock both would build).
+    { name := "two concurrent lookups of an unbuilt selfhost program build it once (the cache lock)", run := fun _ => do
+        let tag := toString (← IO.monoNanosNow)
+        let self ← IO.appPath
+        let flags := (← flagsRef.get).toArray
+        let a ← IO.Process.spawn
+          { cmd := self.toString, args := #["--selfhost-cache-probe", tag] ++ flags
+            stdin := .null, stdout := .piped, stderr := .piped }
+        let b ← IO.Process.spawn
+          { cmd := self.toString, args := #["--selfhost-cache-probe", tag] ++ flags
+            stdin := .null, stdout := .piped, stderr := .piped }
+        let outA ← a.stdout.readToEnd
+        let errA ← a.stderr.readToEnd
+        let codeA ← a.wait
+        let outB ← b.stdout.readToEnd
+        let errB ← b.stderr.readToEnd
+        let codeB ← b.wait
+        let built := ((outA ++ "\n" ++ outB).splitOn "\n").filter (· == "built probe") |>.length
+        unless codeA == 0 && codeB == 0 && built == 1 do
+          throw (IO.userError s!"expected one build of an unbuilt program and one reuse, got {built} build(s) (exit {codeA}/{codeB}):\n--- probe 1 ---\n{outA}{errA}\n--- probe 2 ---\n{outB}{errB}") },
     { name := "the additive match (T.casesOnA) runs, compiled by the Lean compiler (21v)", run := fun _ =>
         ioRun linearMatchProgram "3\n5\n6\n" },
     { name := "Kernel.wiz quantity terms: the same variable is the same quantity, and a Σ at a stuck non-variable quantity is rejected, as in the Lean kernel (21x, review probes 7a, 15b)", run := fun _ => do

@@ -268,7 +268,7 @@ def mainImpl (args : List String) : IO UInt32 := do
   casePartRef.set (partArg.getD "")
   -- the processes the suite starts get the toolchain as flags
   let child := match args with
-    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ => true
+    | "--run-case" :: _ | "--prop-long" :: _ | "--prop-replay" :: _ | ["--prop-no-sizes"] | ["--prop-trace"] | "--check" :: _ | "--check-libs" :: _ | "--probe-reuse" :: _ | "--probe-reuse-ir" :: _ | "--panic-probe" :: _ | "--grail-job" :: _ | "--trust-ledger" :: _ | ["--list"] | ["--list-shards"] | ["--list-parallel"] | "--list-cases" :: _ | "--allocs" :: _ | "--libdiff-host" :: _ | "--part" :: _ | "--selfhost-identity" :: _ | "--selfhost-cache-probe" :: _ => true
     | _ => false
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
@@ -327,6 +327,10 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- the library against the self-hosted compiler (`=selfhost-libdiff`): the host side
   -- of one file (a bounded child of the sweep), and the sweep itself
   | "--libdiff-host" :: rest => Elab.libDiffHostMain rest
+  -- the selfhost build cache's identity (what a `WIZ_SELFHOST_*` override must match)
+  -- and its lock test hook (two concurrent probes with one tag build once)
+  | "--selfhost-identity" :: rest => Elab.selfhostIdentityMain (rest.headD "")
+  | "--selfhost-cache-probe" :: rest => Elab.selfhostCacheProbe (rest.headD "")
   -- `--part` was taken off above (it is a driver flag, not a toolchain flag); give it
   -- back to the sweep's own command line, which validates it
   | "--libdiff" :: rest =>
@@ -342,6 +346,12 @@ def mainImpl (args : List String) : IO UInt32 := do
   -- each group's shard hint (`Group.shard`; empty for the default), for `scripts/ci.py`
   | ["--list-shards"] => do
     for g in ← allGroups do IO.println s!"{g.name}\t{g.shard}"
+    pure 0
+  -- the groups that opt in to `--jobs N` (`Group.parallel`), for `scripts/ci.py`'s
+  -- per-part wall simulation: only these cases go through the in-order pool
+  | ["--list-parallel"] => do
+    for g in ← allGroups do
+      if g.parallel then IO.println g.name
     pure 0
   | "--list-cases" :: sels => do
     for g in ← allGroups do
