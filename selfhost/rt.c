@@ -1856,7 +1856,8 @@ static int wiz_proof_start(uint64_t steps) { if (wiz_proof_on) return 0; wiz_pro
 static int wiz_proof_tick(uint64_t x) { (void)x; if (!wiz_proof_on) return 1; if (wiz_proof_left <= 1) { wiz_proof_left = 0; return 0; } wiz_proof_left--; return 1; }
 static int wiz_proof_end(uint64_t x) { (void)x; wiz_proof_on = 0; return wiz_proof_left > 0; }
 /* the kernel evaluator's per-command budget (see `kernelSteps` in Frontend.wiz): one
-   tick per structural elimination, a counter of its own (as in runtime/rt_data.inc) */
+   tick per closure instantiation and per structural elimination, a counter of its own
+   (as in runtime/rt_data.inc) */
 static int wiz_kernel_on = 0;
 static uint64_t wiz_kernel_left = 0;
 static int wiz_kernel_start(uint64_t steps) { if (wiz_kernel_on) return 0; wiz_kernel_on = 1; wiz_kernel_left = steps + 1; return 1; }

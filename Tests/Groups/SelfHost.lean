@@ -3393,8 +3393,12 @@ def selfHostGroup : Group where
         let src := "import Prelude\n" ++
           "def szInf : Size := ∞\ndef szSuc (s : Size) : Size := ↑s\n" ++
           "def szLt (s : Size< ∞) : Size< ∞ := s\n" ++
-          "inductive N2 where\n  | z\ncoinductive S2 where\n  | h : N2\n" ++
-          "def nSized : Type := N2 ^ ∞\ndef sSized : Type := S2 ^ ∞\n"
+          -- (a coinductive's observations are fields, not constructors: no `|`, as
+          -- `structureField` in the grammar; and a sized type is `T^s` without spaces:
+          -- `T ^ s` is `HPow.hPow` of lib/Prelude.wiz (`infixr:75 " ^ "`), as
+          -- `term.sized`'s `noWs` in `Parser/Builtin.lean` says)
+          "inductive N2 where\n  | z\ncoinductive S2 where\n  h : N2\n" ++
+          "def nSized : Type := N2^∞\ndef sSized : Type := S2^∞\n"
         let some out ← selfhostOutput src | return
         let bad := (out.splitOn "\n").filter fun l => l.startsWith "error" || l.startsWith "parse error"
         unless bad.isEmpty do

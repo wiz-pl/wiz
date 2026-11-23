@@ -953,10 +953,10 @@ WIZ_API int wiz_proof_start(uint64_t steps) { if (wiz_proof_on) return 0; wiz_pr
 WIZ_API int wiz_proof_tick(uint64_t x) { (void)x; if (!wiz_proof_on) return 1; if (wiz_proof_left <= 1) { wiz_proof_left = 0; return 0; } wiz_proof_left--; return 1; }
 WIZ_API int wiz_proof_end(uint64_t x) { (void)x; wiz_proof_on = 0; return wiz_proof_left > 0; }
 
-/* The kernel evaluator's per-command budget: one tick per structural elimination
-   (`vIndW`/`vSfix`/`vScase`), not per beta step. It is its own counter so a command's
-   budget does not make the proof read-back's `wiz_proof_*` budget run for ordinary
-   evaluation. */
+/* The kernel evaluator's per-command budget: one tick per closure instantiation
+   (`instC`, a beta step) and per structural elimination (`vIndW`/`vSfix`/`vScase`). It is
+   its own counter so a command's budget does not make the proof read-back's
+   `wiz_proof_*` budget run for ordinary evaluation. */
 static __thread int wiz_kernel_on = 0;
 static __thread uint64_t wiz_kernel_left = 0;
 WIZ_API int wiz_kernel_start(uint64_t steps) { if (wiz_kernel_on) return 0; wiz_kernel_on = 1; wiz_kernel_left = steps + 1; return 1; }

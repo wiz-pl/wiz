@@ -5163,11 +5163,16 @@ def identHead (gs : Globals) (es : ES) (cx : Cx) (n : String) : HE :=
     | .none => match strEq n "Unit" with
       -- (built in, like `Type`, `True` and `False`: the kernel's `unit`, `ptrue`, `pfalse`)
       | .true => .ok (.unit (ln 1)) (.vsort (.lnum 1)) es .nil
-      | .false => match strEq n "True" with
-        | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
-        | .false => match strEq n "False" with
-          | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
-          | .false => .err (String.append "unknown identifier " n)
+      | .false => match strEq n "Size" with
+        -- (A19) `Size` is a builtin type in the Lean frontend too (`Elab/Term.lean`'s
+        -- `"Size", none => (.size, .sort 1)`): the kernel's `size`, the sort of the sizes
+        -- `∞`, `↑s` and the bound in `Size< s`
+        | .true => .ok .size (.vsort (.lnum 1)) es .nil
+        | .false => match strEq n "True" with
+          | .true => .ok .ptrue (.vsort (.lnum 0)) es .nil
+          | .false => match strEq n "False" with
+            | .true => .ok .pfalse (.vsort (.lnum 0)) es .nil
+            | .false => .err (String.append "unknown identifier " n)
   | .ok i => match Nat.lt i d with
     | .true => .ok (.var i) (lookup (TCtx.types (Cx.c cx)) i) es .nil
     | .false => match globalUse gs es cx (i - d) .nil with
@@ -5565,8 +5570,11 @@ def inferT1_0 (gs : Globals) (es : ES) (cx : Cx) (s : Syntax) (sp0 : Option SpT)
                             | .ok t0 _ es1 => match checkT gs es1 cx (kid s 2) .vsize (spKid sp 2) with
                               | .err m => .err m
                               | .ok sz0 _ es2 => match whnf (force es2 (eval (TCtx.env (Cx.c cx)) t0)) with
-                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vmu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
-                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vnu l I D i (eval (TCtx.env (Cx.c cx)) sz0)) es2
+                                -- (the size-indexed type is a *type*: its own type is the sort
+                                -- `Type l`, as `infer` gives `.mu`/`.nu` (`Type l`, not the
+                                -- family `μ^s`/`ν^s` itself, which is what a value *of* it has))
+                                | .vmu l I D i _ => .ok (.mus l (quote d I) (quote d D) (quote d i) sz0) (.vsort (lsucc l)) es2
+                                | .vnu l I D i _ => .ok (.nu l (quote d I) (quote d D) (quote d i) sz0) (.vsort (lsucc l)) es2
                                 | v => .err (String.append "only inductive and coinductive types have sizes, not "
                                     (show (scopeNames (Cx.sc cx)) d (quote d v)))
                           | .false => inferT2 gs es cx s sp
@@ -11537,12 +11545,16 @@ def commandStep (gs0 : Globals) (stx : Syntax) (sp : Option SpT) : Step :=
                     | .true => errStep gs0 "`import` is not allowed inside a command: imports go at the top level of a file, before every other command"
                     | .false => errStep gs0 (String.append "unsupported command " (kindOf stx))
 
--- (the kernel evaluator's per-command step budget) A structural recursion in the kernel
--- (`vIndW`) is one step per constructor, and this kernel has no native `Nat` operations:
--- `Nat.pow 2 32` and `Nat.add` on a 32-bit numeral are billions of unary steps, which used
--- to grow until the process ran out of memory or its 1 GiB evaluator stack overflowed
--- (`lib/BitVecAdd.wiz`). A command that reaches the budget is reported as an error, not
--- crashed: the same bounding principle as the proof read-back's (P2) budget.
+-- (the kernel evaluator's per-command step budget) One step is one closure instantiation
+-- (`instC`, a β-step) or one structural elimination (`vIndW`/`vSfix`/`vScase`, one per
+-- constructor). This kernel has no native `Nat` operations: `Nat.pow 2 32` and `Nat.add`
+-- on a 32-bit numeral are billions of unary steps, which used to grow until the process
+-- ran out of memory or its evaluator stack overflowed (`lib/BitVecAdd.wiz`). The
+-- elimination alone is not enough to count the work: one successor costs several β-steps,
+-- so counting them too bounds the *C stack depth* of the expansion as well as its total
+-- work (a budget of 200000 eliminations allowed 200000 nested evaluator frames, which no
+-- stack holds). A command that reaches the budget is reported as an error, not crashed:
+-- the same bounding principle as the proof read-back's (P2) budget.
 def kernelSteps : Nat := 200000
 -- (`#reduce`/`#eval` compute a value in the kernel; the Prelude's Bytes model needs more
 -- than 3.6M structural steps for three characters, so a value-level command gets a
@@ -11630,21 +11642,25 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
         | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
       -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
-      -- and checking, not its parse. The match on `kernelStart` forces the extern before
-      -- the command is evaluated: a lazy `let` would otherwise run the step first.)
+      -- and checking, not its parse.)
       let budget := commandSteps stx;
+      -- (the step is a thunk: Wiz evaluates a `let` eagerly, so `let step := …` evaluated
+      -- the whole command — elaboration and the kernel's check — *before* `kernelStart`
+      -- armed the budget, and every `kernelTick` then saw no budget (a 200000-step bound
+      -- that never bounded anything: `Nat.pow 2 32` still ran away). It is applied inside
+      -- the branches, after the arming call.)
       -- (13t) a namespace command changes the state (and validates it), not the globals;
       -- it takes the step's place when it is one, as on train9's side.
-      let step : Step := match commandStep gs0 stx sp with
+      let runStep : Unit → Step := fun (_ : Unit) => match commandStep gs0 stx sp with
         | .mk line gs' => match nsCommand gs0 stx start with
           | .some s => s
           | .none => .mk line gs'
       match kernelStart budget with
       | .false =>
-        match step with
+        match runStep () with
         | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx
       | .true =>
-        match step with
+        match runStep () with
         | .mk line gs' => match kernelEnd 0 with
           | .true => finishStep stop start gs gs' input sp line cats tokens notes stx
           -- (the evaluator gave up mid-command: report the limit, not the stuck value

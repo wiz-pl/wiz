@@ -1450,9 +1450,14 @@ def forceSp : Val → Spine → Val
 -- (P2) the eliminations of a proof from its last `absurd` on (`.none`: there is none).
 -- Past an `absurd` the value need not be a proof (`exfalso M p : M`, for any `M`).
 -- (P2) a closure's instantiation: `body` with `a` for its variable, on the step budget of
--- a proof's read-back when one runs (`proofTick`; always `eval` otherwise)
+-- a proof's read-back when one runs (`proofTick`) and on the command's kernel budget
+-- (`kernelTick`: a β-step is one evaluation step, as in the proof budget, so a reduction
+-- that expands deeply through closure applications is bounded by its *work*, not only by
+-- its structural eliminations). A command that runs out gets `outOfSteps` here too.
 def instC (env : Env) (a : Val) (body : Tm) : Val := match proofTick 0 with
-  | .true => eval (.cons a env) body
+  | .true => match kernelTick 0 with
+    | .true => eval (.cons a env) body
+    | .false => outOfSteps
   | .false => outOfSteps
 def fromAbsurd : Spine → Option Spine
   | .snil => .none
@@ -3485,7 +3490,15 @@ def subTy (c : TCtx) (A B : Val) : Bool := match whnf A with
 end
 
 -- (P2: an error message does not evaluate a suspended proof either; it reads back as `()`)
-def showVal (c : TCtx) (v : Val) : String := show .nil (TCtx.lvl c) (quoteM .false .false (TCtx.lvl c) v)
+-- (and once the command's budget ran out, the value is one the evaluator stopped on: it
+-- is not printed — reading it back and showing it is quadratic in the constructors the
+-- stopped reduction built (`show` appends a string per constructor), which is not a cost
+-- a diagnostic may pay. `kernelTick` reports exhaustion; the one step it takes when the
+-- budget is still running is nothing next to building the message, and no budget runs at
+-- all in the kernel's own work.)
+def showVal (c : TCtx) (v : Val) : String := match kernelTick 0 with
+  | .false => "‹the kernel evaluation hit its step budget›"
+  | .true => show .nil (TCtx.lvl c) (quoteM .false .false (TCtx.lvl c) v)
 
 -- **Exercise 14.3.** Bidirectional type checking with usage (`infer` and `check` in
 -- `Check.lean`): each answer comes with the usage of the variables (types and proofs

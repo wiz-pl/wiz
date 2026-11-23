@@ -322,7 +322,8 @@ WIZ_API int wiz_proof_start(uint64_t steps);
 WIZ_API int wiz_proof_tick(uint64_t x);
 WIZ_API int wiz_proof_end(uint64_t x);
 /* the kernel evaluator's per-command budget (see `kernelSteps` in selfhost/Frontend.wiz):
-   one tick per structural elimination, independent of the proof read-back's budget */
+   one tick per closure instantiation and per structural elimination, independent of the
+   proof read-back's budget */
 WIZ_API int wiz_kernel_start(uint64_t steps);
 WIZ_API int wiz_kernel_tick(uint64_t x);
 WIZ_API int wiz_kernel_end(uint64_t x);
