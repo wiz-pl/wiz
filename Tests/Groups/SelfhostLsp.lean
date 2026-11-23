@@ -427,6 +427,12 @@ def selfhostLspGroup : Group where
         let erased := (lspStrs d2s[0]! ["goals"]).headD ""
         check ((erased.splitOn ":0 ").length > 1) "an erased binder keeps its quantity"
         check ((erased.splitOn ") → Nat").length > 1) "an erased binder keeps the binder form"
+        -- D3 (task 27a): a Pi under an application inside a hypothesis prints the goal
+        -- form too (`Nat → Nat`, not `(x0 : Nat) → Nat`). `show`'s application parens
+        -- stay (27c), so the hypothesis reads `(List (Nat → Nat))`.
+        let d3 := "import Prelude\ndef g (xs : List (Nat → Nat)) : Nat := by\n  exact 0\n"
+        let d3s ← query "d3" d3 dq false
+        checkEq ["xs : (List (Nat → Nat))\n⊢ Nat"] (lspStrs d3s[0]! ["goals"])
         -- a diagnostic inside an `exact` term, for the span-threading pin
         let bad := "import Prelude\ndef bad : Nat := by\n  exact (Nat.add 1 true)\n"
         let badUri := "file:///tmp/selfhost-nested-diag.wiz"
@@ -464,7 +470,9 @@ def selfhostLspGroup : Group where
           "the diagnostic is marked inside the exact term" },
     { name := "lsp: hover, definition and completion answer in the host's shapes", run := fun _ =>
         withSelfhostCli fun exe => do
-        let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef three : Nat := lab\n"
+        -- `twice` is arrow-only in its type, `idx` has an implicit sort binder and `dep`
+        -- a used explicit one: the three shapes a declaration signature has (task 27a)
+        let doc := "import Prelude\ndef one : Nat := 1\ndef label : String := \"x\"\ndef two : Nat := one\ndef twice (f : Nat → Nat) (x : Nat) : Nat := f (f x)\ndef idx {A : Type} (x : A) : A := x\ndef dep (A : Type) (xs : List A) : Nat := 0\ndef three : Nat := lab\n"
         let uri := "file:///tmp/selfhost-nav.wiz"
         let nav (i : Nat) (method : String) (line char : Nat) : Lean.Json :=
           lspReq i method (Lean.Json.mkObj [
@@ -481,14 +489,17 @@ def selfhostLspGroup : Group where
             -- the `3` the declaration index can promise)
             nav 10 "textDocument/hover" 1 6,
             nav 11 "textDocument/definition" 3 17,
-            nav 12 "textDocument/completion" 4 22,
+            nav 12 "textDocument/completion" 7 22,
+            nav 13 "textDocument/hover" 4 6,
+            nav 14 "textDocument/hover" 5 6,
+            nav 15 "textDocument/hover" 6 6,
             lspNote "exit" (Lean.Json.mkObj []) ]
         let dir ← IO.FS.createTempDir
         let (code, out, err) ← selfhostLspSession exe dir #[] msgs
         check (code == 0) s!"the server exited {code}, stderr:\n{err}"
         checkEq "" err
         let got ← lspMessages out
-        checkEq 5 got.length
+        checkEq 8 got.length
         -- initialize advertises the three providers, with the host's fields
         let init ← lspAt got 0
         checkEq "utf-16" (lspStr init ["result", "capabilities", "positionEncoding"])
@@ -507,7 +518,8 @@ def selfhostLspGroup : Group where
           (Lean.Json.mkObj [("textDocument", lspTextDoc uri doc 1)]))
         let (srv, hoverOut) ← LSP.handle srv (nav 10 "textDocument/hover" 1 6)
         let (srv, defOut) ← LSP.handle srv (nav 11 "textDocument/definition" 3 17)
-        let (_, compOut) ← LSP.handle srv (nav 12 "textDocument/completion" 4 22)
+        let (srv, compOut) ← LSP.handle srv (nav 12 "textDocument/completion" 7 22)
+        let (_, sigOut) ← LSP.handle srv (nav 13 "textDocument/hover" 4 6)
         let hostOf (outs : Array Lean.Json) (i : Nat) : Lean.Json :=
           match outs.toList.find? (fun m =>
               (jpath m ["id"] |>.bind (·.getNat?.toOption)) == some i) with
@@ -520,6 +532,21 @@ def selfhostLspGroup : Group where
         checkEq (lspStr hostHover ["contents", "value"]) (lspStr selfHover ["contents", "value"])
         checkEq "```wiz\none : Nat\n```"
           (lspStr selfHover ["contents", "value"])
+        -- a declaration's signature uses the parameter kinds and *written* names (task
+        -- 27a): `twice`'s type is all arrows, so the host's text is the same
+        checkEq (lspStr (hostOf sigOut 13) ["contents", "value"])
+          (lspStr (← lspAt got 5) ["result", "contents", "value"])
+        checkEq "```wiz\ntwice : (Nat → Nat) → Nat → Nat\n```"
+          (lspStr (← lspAt got 5) ["result", "contents", "value"])
+        -- an implicit binder prints `{…}` with its default quantity suppressed (rule (b)
+        -- for a sort: `{A : Type}`, never `{0 A : Type}`); the sort itself is `show`'s
+        -- spelling (`U0` for `Type`, 27c)
+        checkEq "```wiz\nidx : {A : U0} → A → A\n```"
+          (lspStr (← lspAt got 6) ["result", "contents", "value"])
+        -- a used explicit binder keeps its written name (`A`, not `x0`); `List A` is an
+        -- application, so `show`'s spelling keeps its parens (27c)
+        checkEq "```wiz\ndep : (A : U0) → (List A) → Nat\n```"
+          (lspStr (← lspAt got 7) ["result", "contents", "value"])
         -- definition: the declaration's `Location`. The host's declaration range is the
         -- whole command (its own tests pin the line only); the selfhost and the shim
         -- point at the name token, so the lines and the uri are compared and the

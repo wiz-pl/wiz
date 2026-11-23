@@ -3584,6 +3584,88 @@ inductive TE where
 def markTE (sp : Option SpT) : TE → TE
   | .ok t ty es => .ok t ty es
   | .err m => .err (errMarkIf sp m)
+-- ## A declaration's signature, for hover (task 27a)
+
+-- is the term a sort (`U n`, `Prop`, `Sort l`)? The host's `binderDefault` tests the
+-- domain structurally too (`dom matches .sort _`, `Wiz/Core/Pretty.lean:114-117`), and
+-- neither printer unfolds a definition.
+def tmSort : Tm → Bool
+  | .univ _ => .true
+  | .prop => .true
+  | .sortL _ => .true
+  | _ => .false
+-- a binder kind's default quantity, as the printer sees it (rule (b)): an implicit binder
+-- over a sort or Prop is at 0, every other binder at ω
+def sigDfltQ (kind : BKind) (dom : Tm) : Q := match kind with
+  | .impl => match tmSort dom with
+    | .true => .qz
+    | .false => .qw
+  | _ => .qw
+-- the quantity prefix of a signature binder, before the name (`{0 α : Type}`, `(1 x : A)`),
+-- only when it differs from the kind's default (`qtyPrefixD`, `Wiz/Core/Pretty.lean:419-421`)
+def sigQty (kind : BKind) (dom : Tm) (q : Q) : String := match qEq q (sigDfltQ kind dom) with
+  | .true => ""
+  | .false => String.append (qName q) " "
+def strIn : List String → String → Bool
+  | .nil, _ => .false
+  | .cons y ys, x => match strEq x y with
+    | .true => .true
+    | .false => strIn ys x
+-- the host's `freshenName` (`Wiz/Core/Pretty.lean:46-52`): `_` prints as `x`, a clash with
+-- an outer name gets a prime
+def sigNameGo (names : List String) (x : String) : Nat → String
+  | .zero => x
+  | .succ k => match strIn names x with
+    | .true => sigNameGo names (String.append x "'") k
+    | .false => x
+def sigName (names : List String) (x : String) : String := match strEq x "_" with
+  | .true => "x"
+  | .false => sigNameGo names x 8
+-- A declaration's type as the host's declaration hover writes it (`Wiz/LSP.lean:456-460`,
+-- `declHover`: `d.type.pretty []`, i.e. `keepFrom = none`): the leading Pis use the
+-- global's own parameter kinds and *written* names (`{α : Type} → α → α`,
+-- `(n : Nat) → Nat → Nat`), a default quantity prints nothing, and an unused ordinary
+-- binder takes the arrow form. A type that is not a Pi, or a spine longer than the
+-- parameters, falls through to the goal printer (`showM .true`).
+partial def showSigGo (pnames : List String) (mask : List BKind) (names : List String)
+    (l : Nat) (t : Tm) : String :=
+  match t with
+  | .pi q _ _ a b => match mask with
+    | .nil => showM .true names l t
+    | .cons kind rest => match pnames with
+      | .nil => showM .true names l t
+      | .cons pn prest =>
+        let name := sigName names pn;
+        let dom := showM .true names l a;
+        -- an arrow's domain: a Pi under it needs the parens the host's `sub 26` gives it
+        let domArrow := match a with
+          | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
+          | _ => dom;
+        let cod := showSigGo prest rest (List.append names (.cons name .nil)) (l + 1) b;
+        let o := match kind with
+          | .impl => "{"
+          | .inst => "["
+          | .dflt => "(";
+        let c := match kind with
+          | .impl => "}"
+          | .inst => "]"
+          | .dflt => ")";
+        -- `o qty name : dom c   →   cod`
+        let head1 := String.append (String.append (String.append o (sigQty kind a q)) name)
+          (String.append " : " dom);
+        let binder := String.append (String.append head1 c) (String.append " → " cod);
+        match kind with
+        | .dflt => match qEq q .qw with
+          | .true => match usesVar 0 b with
+            | .false => String.append (String.append domArrow " → ") cod
+            | .true => binder
+          | .false => binder
+        | _ => binder
+  | t => showM .true names l t
+-- `showSig` for a global's type from its parameter names and mask
+def showSig (pnames : List String) (mask : List BKind) (l : Nat) (t : Tm) : String :=
+  showSigGo pnames mask .nil l t
+
 -- a global's implicit parameters (by its index from the latest)
 def globalMask (gs : Globals) (i : Nat) : List BKind := match gs with
   | .mk all _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => match Array.getD all (Array.size all - 1 - i) (.mk "?" .nil .star .star .star .nil .nil) with
@@ -6952,13 +7034,15 @@ partial def recordDeclsGo (gs : Globals) (input : Array Nat) (sp : Option SpT)
   match Nat.lt i (Array.size all) with
   | .false => gs
   | .true => match Array.getD all i (.mk "?" .nil .star .star .star .nil .nil) with
-    | .mk n _ ty _ _ _ _ =>
+    | .mk n _ ty _ _ m ns =>
       let base := privBase n;
       match declSpanFor input sp base with
         | .none => recordDeclsGo gs input sp all (i + 1)
         | .some t =>
+          -- the declaration hover's text: the parameter kinds and written names, as the
+          -- host's `declHover` prints them (task 27a)
           let gs1 := Globals.addLsp gs (.decl (SpT.start t) (SpT.stop t) base
-            (show .nil 0 ty) (declKind gs base ty));
+            (showSig ns m 0 ty) (declKind gs base ty));
           recordDeclsGo gs1 input sp all (i + 1)
 
 -- what a command added between `old` and `new`, for the check's index (nothing unless

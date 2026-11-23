@@ -2506,72 +2506,97 @@ def showSmall (name : String) (zero : String) (l : Lvl) : String := match lvlClo
 mutual
 -- terms, printed with the variables named by level (`x0` is the outermost, unless
 -- `names` names it)
-def show (names : List String) : Nat → Tm → String
+def showM (goal : Bool) (names : List String) : Nat → Tm → String
   | l, .var i => nameAt names (l - i - 1)
   | _, .univ n => String.append "U" (Nat.toString n)
   | _, .prop => "Prop"
-  | l, .pi q _ _ a b => String.append (String.append (String.append "(" (nameAt names l))
-      (String.append (showQ q) (show names l a))) (String.append ") → " (show names (l + 1) b))
-  | l, .lam b => String.append (String.append "λ" (nameAt names l)) (String.append ". " (show names (l + 1) b))
-  | l, .app f a => String.append (String.append "(" (show names l f)) (String.append " " (String.append (show names l a) ")"))
+  | l, .pi q _ _ a b => match goal with
+    -- a goal's type: the host's `GoalView.show` rule, which a Pi *anywhere* in the type
+    -- (under an application, a Σ, an `Eq`) must obey - task 27a's D3
+    | .true =>
+      let dom := showM goal names l a;
+      let cod := showM goal names (l + 1) b;
+      -- an arrow's domain: a Pi under it needs the parens the host's `sub 26` gives it
+      let domArrow := match a with
+        | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
+        | _ => dom;
+      -- the binder form, with the quantity (`showQ` is ` : ` at ω)
+      let binder := String.append (String.append (String.append "(" (nameAt names l))
+        (String.append (showQ q) dom)) (String.append ") → " cod);
+      match q with
+      | .qw => match usesVar 0 b with
+        | .false => String.append (String.append domArrow " → ") cod
+        | .true => binder
+      | _ => binder
+    | .false => String.append (String.append (String.append "(" (nameAt names l))
+        (String.append (showQ q) (showM goal names l a))) (String.append ") → " (showM goal names (l + 1) b))
+  | l, .lam b => String.append (String.append "λ" (nameAt names l)) (String.append ". " (showM goal names (l + 1) b))
+  | l, .app f a =>
+    -- a Pi argument in a goal keeps its parens (`List (Nat → Nat)`, task 27a)
+    let arg := match goal with
+      | .true => match a with
+        | .pi _ _ _ _ _ => String.append (String.append "(" (showM goal names l a)) ")"
+        | _ => showM goal names l a
+      | .false => showM goal names l a;
+    String.append (String.append "(" (showM goal names l f)) (String.append " " (String.append arg ")"))
   | l, .letE t v b => String.append (String.append "let " (nameAt names l))
-      (String.append (String.append " := " (show names l v)) (String.append "; " (show names (l + 1) b)))
-  | l, .letUnit u b => String.append (String.append "let () := " (show names l u)) (String.append "; " (show names l b))
+      (String.append (String.append " := " (showM goal names l v)) (String.append "; " (showM goal names (l + 1) b)))
+  | l, .letUnit u b => String.append (String.append "let () := " (showM goal names l u)) (String.append "; " (showM goal names l b))
   | l, .split q s m b =>
     let qp := match q with
       | .qw => ""
       | q' => String.append (qLit q') " ";
-    String.append (String.append (String.append "let " qp) (String.append "(x, y) := " (show names l s)))
-      (String.append "; " (show names (l + 2) b))
-  | l, .ann t ty => String.append (String.append "(" (show names l t)) (String.append " : " (String.append (show names l ty) ")"))
-  | l, .letq _ t v b => show names l (.letE t v b)
+    String.append (String.append (String.append "let " qp) (String.append "(x, y) := " (showM goal names l s)))
+      (String.append "; " (showM goal names (l + 2) b))
+  | l, .ann t ty => String.append (String.append "(" (showM goal names l t)) (String.append " : " (String.append (showM goal names l ty) ")"))
+  | l, .letq _ t v b => showM goal names l (.letE t v b)
   | l, .sigma q _ _ a b => String.append (String.append (String.append "(" (nameAt names l))
-      (String.append (showQ q) (show names l a))) (String.append ") × " (show names (l + 1) b))
-  | l, .pair a b => String.append (String.append "(" (show names l a)) (String.append ", " (String.append (show names l b) ")"))
-  | l, .fst p => String.append (show names l p) ".1"
-  | l, .snd p => String.append (show names l p) ".2"
+      (String.append (showQ q) (showM goal names l a))) (String.append ") × " (showM goal names (l + 1) b))
+  | l, .pair a b => String.append (String.append "(" (showM goal names l a)) (String.append ", " (String.append (showM goal names l b) ")"))
+  | l, .fst p => String.append (showM goal names l p) ".1"
+  | l, .snd p => String.append (showM goal names l p) ".2"
   | _, .unit l => showSmall "Unit" "True" l
   | _, .star => "tt"
   | _, .empty l => showSmall "Empty" "False" l
   | _, .ptrue => "True"
   | _, .pfalse => "False"
-  | l, .eq A a b => String.append (String.append (String.append "Eq(" (show names l A)) (String.append ", " (show names l a)))
-      (String.append ", " (String.append (show names l b) ")"))
-  | l, .eqTy A B => String.append (String.append "EqTy(" (show names l A)) (String.append ", " (String.append (show names l B) ")"))
-  | l, .eqRefl A a => String.append (String.append "refl(" (show names l A)) (String.append ", " (String.append (show names l a) ")"))
-  | l, .descr k I => String.append (String.append "Desc" (lvlShow k)) (String.append "(" (String.append (show names l I) ")"))
-  | l, .dret i => String.append (String.append "ret(" (show names l i)) ")"
-  | l, .darg q S E => String.append (String.append (String.append "arg(" (showFieldQ names l q)) (show names l S)) (String.append ", " (String.append (show names l E) ")"))
-  | l, .drec q j E => String.append (String.append (String.append "rec(" (showFieldQ names l q)) (show names l j)) (String.append ", " (String.append (show names l E) ")"))
-  | l, .dhrec q H j E => String.append (String.append (String.append (String.append "hrec(" (showFieldQ names l q)) (show names l H)) (String.append ", " (show names l j)))
-      (String.append ", " (String.append (show names l E) ")"))
-  | l, .delim v P a b c d D => String.append (String.append (String.append "elim(" (show names l P))
-      (String.append ", " (show names l a))) (String.append (String.append (String.append ", " (show names l b))
-        (String.append ", " (show names l c))) (String.append (String.append ", " (show names l d))
-          (String.append ", " (String.append (show names l D) ")"))))
-  | l, .mu k I D i => String.append (String.append (String.append "μ" (lvlShow k)) (String.append "(" (show names l I)))
-      (String.append (String.append ", " (show names l D)) (String.append ", " (String.append (show names l i) ")")))
-  | l, .con x => String.append (String.append "con(" (show names l x)) ")"
-  | l, .sfix _ _ _ _ P f sz i x => String.append (String.append (String.append "sfix(" (show names l P)) (String.append ", " (show names l f)))
-      (String.append (String.append ", " (show names l sz)) (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")"))))
-  | l, .scase _ _ _ _ _ P m sz i x => String.append (String.append (String.append "scase(" (show names l P)) (String.append ", " (show names l m)))
-      (String.append (String.append ", " (show names l sz)) (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")"))))
+  | l, .eq A a b => String.append (String.append (String.append "Eq(" (showM goal names l A)) (String.append ", " (showM goal names l a)))
+      (String.append ", " (String.append (showM goal names l b) ")"))
+  | l, .eqTy A B => String.append (String.append "EqTy(" (showM goal names l A)) (String.append ", " (String.append (showM goal names l B) ")"))
+  | l, .eqRefl A a => String.append (String.append "refl(" (showM goal names l A)) (String.append ", " (String.append (showM goal names l a) ")"))
+  | l, .descr k I => String.append (String.append "Desc" (lvlShow k)) (String.append "(" (String.append (showM goal names l I) ")"))
+  | l, .dret i => String.append (String.append "ret(" (showM goal names l i)) ")"
+  | l, .darg q S E => String.append (String.append (String.append "arg(" (showFieldQ goal names l q)) (showM goal names l S)) (String.append ", " (String.append (showM goal names l E) ")"))
+  | l, .drec q j E => String.append (String.append (String.append "rec(" (showFieldQ goal names l q)) (showM goal names l j)) (String.append ", " (String.append (showM goal names l E) ")"))
+  | l, .dhrec q H j E => String.append (String.append (String.append (String.append "hrec(" (showFieldQ goal names l q)) (showM goal names l H)) (String.append ", " (showM goal names l j)))
+      (String.append ", " (String.append (showM goal names l E) ")"))
+  | l, .delim v P a b c d D => String.append (String.append (String.append "elim(" (showM goal names l P))
+      (String.append ", " (showM goal names l a))) (String.append (String.append (String.append ", " (showM goal names l b))
+        (String.append ", " (showM goal names l c))) (String.append (String.append ", " (showM goal names l d))
+          (String.append ", " (String.append (showM goal names l D) ")"))))
+  | l, .mu k I D i => String.append (String.append (String.append "μ" (lvlShow k)) (String.append "(" (showM goal names l I)))
+      (String.append (String.append ", " (showM goal names l D)) (String.append ", " (String.append (showM goal names l i) ")")))
+  | l, .con x => String.append (String.append "con(" (showM goal names l x)) ")"
+  | l, .sfix _ _ _ _ P f sz i x => String.append (String.append (String.append "sfix(" (showM goal names l P)) (String.append ", " (showM goal names l f)))
+      (String.append (String.append ", " (showM goal names l sz)) (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")"))))
+  | l, .scase _ _ _ _ _ P m sz i x => String.append (String.append (String.append "scase(" (showM goal names l P)) (String.append ", " (showM goal names l m)))
+      (String.append (String.append ", " (showM goal names l sz)) (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")"))))
   | _, .size => "Size"
   | _, .szInf => "∞"
-  | l, .szSuc sz => String.append (String.append "↑(" (show names l sz)) ")"
-  | l, .sizeLt sz => String.append (String.append "Size<(" (show names l sz)) ")"
-  | l, .mus k I D i sz => String.append (String.append (String.append "μ" (lvlShow k)) (String.append "(" (show names l I)))
-      (String.append (String.append ", " (show names l D)) (String.append (String.append ", " (show names l i))
-        (String.append ", " (String.append (show names l sz) ")"))))
-  | l, .nu k I D i sz => String.append (String.append (String.append "ν" (lvlShow k)) (String.append "(" (show names l I)))
-      (String.append (String.append ", " (show names l D)) (String.append (String.append ", " (show names l i))
-        (String.append ", " (String.append (show names l sz) ")"))))
-  | l, .out x => String.append (String.append "out(" (show names l x)) ")"
-  | l, .cocon x => String.append (String.append "cocon(" (show names l x)) ")"
-  | l, .scofix _ _ _ A f sz i a => String.append (String.append (String.append "scofix(" (show names l A)) (String.append ", " (show names l f)))
-      (String.append (String.append ", " (show names l sz)) (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l a) ")"))))
-  | l, .coit _ _ _ S st i x => String.append (String.append (String.append "coit(" (show names l S)) (String.append ", " (show names l st)))
-      (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
+  | l, .szSuc sz => String.append (String.append "↑(" (showM goal names l sz)) ")"
+  | l, .sizeLt sz => String.append (String.append "Size<(" (showM goal names l sz)) ")"
+  | l, .mus k I D i sz => String.append (String.append (String.append "μ" (lvlShow k)) (String.append "(" (showM goal names l I)))
+      (String.append (String.append ", " (showM goal names l D)) (String.append (String.append ", " (showM goal names l i))
+        (String.append ", " (String.append (showM goal names l sz) ")"))))
+  | l, .nu k I D i sz => String.append (String.append (String.append "ν" (lvlShow k)) (String.append "(" (showM goal names l I)))
+      (String.append (String.append ", " (showM goal names l D)) (String.append (String.append ", " (showM goal names l i))
+        (String.append ", " (String.append (showM goal names l sz) ")"))))
+  | l, .out x => String.append (String.append "out(" (showM goal names l x)) ")"
+  | l, .cocon x => String.append (String.append "cocon(" (showM goal names l x)) ")"
+  | l, .scofix _ _ _ A f sz i a => String.append (String.append (String.append "scofix(" (showM goal names l A)) (String.append ", " (showM goal names l f)))
+      (String.append (String.append ", " (showM goal names l sz)) (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l a) ")"))))
+  | l, .coit _ _ _ S st i x => String.append (String.append (String.append "coit(" (showM goal names l S)) (String.append ", " (showM goal names l st)))
+      (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")")))
   | _, .const n _ ls _ _ => String.append (privBase n) (showLvls ls)
   | _, .sortL l => match lvlClosed l with
     | .some n => match n with
@@ -2579,72 +2604,57 @@ def show (names : List String) : Nat → Tm → String
       | .succ m => String.append "U" (Nat.toString m)
     | .none => String.append (String.append "Sort(" (lvlShow l)) ")"
   | _, .axiomC n _ => privBase n
-  | l, .ind _ _ _ _ P m i x => String.append (String.append (String.append "ind(" (show names l P)) (String.append ", " (show names l m)))
-      (String.append (String.append ", " (show names l i)) (String.append ", " (String.append (show names l x) ")")))
-  | l, .tyRefl X => String.append (String.append "reflTy(" (show names l X)) ")"
-  | l, .coe A B e t => String.append (String.append (String.append "cast(" (show names l A)) (String.append ", " (show names l B)))
-      (String.append (String.append ", " (show names l e)) (String.append ", " (String.append (show names l t) ")")))
-  | l, .subst A a P p b e => String.append (String.append (String.append "transp(" (show names l A)) (String.append ", " (show names l a)))
-      (String.append (String.append (String.append ", " (show names l P)) (String.append ", " (show names l p)))
-        (String.append (String.append ", " (show names l b)) (String.append ", " (String.append (show names l e) ")"))))
-  | l, .exfalso m t => String.append (String.append "absurd(" (show names l m)) (String.append ", " (String.append (show names l t) ")"))
+  | l, .ind _ _ _ _ P m i x => String.append (String.append (String.append "ind(" (showM goal names l P)) (String.append ", " (showM goal names l m)))
+      (String.append (String.append ", " (showM goal names l i)) (String.append ", " (String.append (showM goal names l x) ")")))
+  | l, .tyRefl X => String.append (String.append "reflTy(" (showM goal names l X)) ")"
+  | l, .coe A B e t => String.append (String.append (String.append "cast(" (showM goal names l A)) (String.append ", " (showM goal names l B)))
+      (String.append (String.append ", " (showM goal names l e)) (String.append ", " (String.append (showM goal names l t) ")")))
+  | l, .subst A a P p b e => String.append (String.append (String.append "transp(" (showM goal names l A)) (String.append ", " (showM goal names l a)))
+      (String.append (String.append (String.append ", " (showM goal names l P)) (String.append ", " (showM goal names l p)))
+        (String.append (String.append ", " (showM goal names l b)) (String.append ", " (String.append (showM goal names l e) ")"))))
+  | l, .exfalso m t => String.append (String.append "absurd(" (showM goal names l m)) (String.append ", " (String.append (showM goal names l t) ")"))
   | _, .enum k => String.append "Enum" (Nat.toString k)
-  | l, .ulift _ k A => String.append (String.append (String.append "ULift" (lvlShow k)) "(") (String.append (show names l A) ")")
-  | l, .up a => show names l a
-  | l, .down t => show names l t
-  | l, .prf _ t => show names l t
+  | l, .ulift _ k A => String.append (String.append (String.append "ULift" (lvlShow k)) "(") (String.append (showM goal names l A) ")")
+  | l, .up a => showM goal names l a
+  | l, .down t => showM goal names l t
+  | l, .prf _ t => showM goal names l t
   | _, .tag _ i => String.append "#" (Nat.toString i)
-  | l, .ecase m s bs => String.append (String.append (String.append "case(" (show names (l + 1) m))
-      (String.append ", " (show names l s))) (String.append (showBranches names l bs) ")")
+  | l, .ecase m s bs => String.append (String.append (String.append "case(" (showM goal names (l + 1) m))
+      (String.append ", " (showM goal names l s))) (String.append (showBranches goal names l bs) ")")
   | _, .qty => "Qty"
   | _, .qlit q => qLit q
   -- (E-K) a literal in decimal; an operation by its constant
   | _, .nlit n _ => knShow n
-  | l, .natFn _ _ d => show names l d
-  | l, .sigmaQ q _ _ a b => String.append (String.append (String.append "(%" (show names l q))
-      (String.append (String.append " " (nameAt names l)) (String.append " : " (show names l a)))) (String.append ") × " (show names (l + 1) b))
+  | l, .natFn _ _ d => showM goal names l d
+  | l, .sigmaQ q _ _ a b => String.append (String.append (String.append "(%" (showM goal names l q))
+      (String.append (String.append " " (nameAt names l)) (String.append " : " (showM goal names l a)))) (String.append ") × " (showM goal names (l + 1) b))
 
 -- the branches, each after `, `
-def showBranches (names : List String) : Nat → Tms → String
+def showBranches (goal : Bool) (names : List String) : Nat → Tms → String
   | _, .tnil => ""
-  | l, .tcons b rest => String.append (String.append ", " (show names l b)) (showBranches names l rest)
+  | l, .tcons b rest => String.append (String.append ", " (showM goal names l b)) (showBranches goal names l rest)
 -- (21x) a description field's quantity, before the field: nothing at ω, else `0 `, `1 `
-def showFieldQ (names : List String) (l : Nat) (q : Tm) : String := match q with
+def showFieldQ (goal : Bool) (names : List String) (l : Nat) (q : Tm) : String := match q with
   | .qlit k => match k with
     | .qw => ""
     | _ => String.append (qLit k) " "
-  | _ => String.append (String.append "%" (show names l q)) " "
+  | _ => String.append (String.append "%" (showM goal names l q)) " "
 end
 
+-- The de Bruijn printer (`#check`, `--types`, diagnostics, error messages): `showM .false`
+-- is the spelling the goldens pin, unchanged by task 27a.
+def show (names : List String) (l : Nat) (t : Tm) : String := showM .false names l t
 -- A goal's type as the host's `GoalView.show` writes it (`Wiz/Core/Pretty.lean:457-470`):
 --   * the arrow form (`Nat → Nat`, not `show`'s `(x0 : Nat) → Nat`) only for the ordinary
 --     ω binder whose variable is unused (:469), and there a Pi domain keeps its parens
 --     (`(Nat → Nat) → Nat`, :462);
 --   * otherwise the binder form keeps the quantity (`(x :0 Nat) → Nat`, :461), so a
 --     non-ω or dependent binder never loses it.
--- `Tm.pi` carries no binder name (`Kernel.wiz`, the `pi` constructor), so dependence is the
--- bound variable's occurrence in the codomain — the host's own criterion. Everything that
--- is not a Pi delegates to `show`, so this is the goal-text (language server) printer
--- only: `#check` and diagnostics keep `show`.
-def showGoal (names : List String) (l : Nat) (t : Tm) : String :=
-  match t with
-  | .pi q _ _ a b =>
-    let dom := showGoal names l a;
-    let cod := showGoal names (l + 1) b;
-    -- an arrow's domain: a Pi under it needs the parens the host's `sub 26` gives it
-    let domArrow := match a with
-      | .pi _ _ _ _ _ => String.append (String.append "(" dom) ")"
-      | _ => dom;
-    -- the binder form, with the quantity (`showQ` is ` : ` at ω, so the ordinary binder
-    -- reads `(x : Nat) → ` as `show` writes it)
-    let binder := String.append (String.append (String.append "(" (nameAt names l))
-      (String.append (showQ q) dom)) (String.append ") → " cod);
-    match q with
-    | .qw => match usesVar 0 b with
-      | .false => String.append (String.append domArrow " → ") cod
-      | .true => binder
-    | _ => binder
-  | t => show names l t
+-- `showM .true` applies that rule wherever a Pi appears (task 27a: under an application, a
+-- `Σ` or an `Eq`, not only at the top). `Tm.pi` carries no binder name (`Kernel.wiz`, the
+-- `pi` constructor), so dependence is the bound variable's occurrence in the codomain —
+-- the host's own criterion.
+def showGoal (names : List String) (l : Nat) (t : Tm) : String := showM .true names l t
 
 -- the typing context: values of the variables, their types, the depth
 -- (and whether we are in an erased position: a type, a proof, an argument to a `0`
