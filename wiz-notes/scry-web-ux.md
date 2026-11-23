@@ -151,13 +151,28 @@ so run it from the checkout root.
 
 ## Results
 
-<!-- filled in after the runs: see the honesty ledger below -->
+* `wiz check` (the Wiz compiler from this branch, `lib/Web/...`): Model.wiz rc=0 (52 s),
+  View.wiz rc=0 (17 s), `web/source-ui.wiz` rc=0, `scry/src/Scry/WebCmd.wiz` rc=0. The
+  first two runs found a missing `mergeSpans` wrapper and an untyped `.false` in the
+  focus match; both are fixed in the committed tree.
+* A direct `wiz lsp --ws` probe (Node client, `lib/Web/Source/Span.wiz`): hover at
+  `EditorModel.slice` returned
+  `EditorModel.slice : EditorModel.PositionIndex → Nat → Nat → String` plus the doc
+  comment after **51.4 s**; the definition 60 ms later was
+  `file://…/lib/Web/EditorModel.wiz` range 168:0–173:62 (the whole declaration).
+* Why the check/probe used a repointed binary: the heavy build ran on `win3`, so the
+  copied-back `.lake/build/bin/wiz` has `win3`'s glibc as its ELF interpreter
+  (`glibc-2.44-25`), which this controller does not have. For local probes only, a copy
+  under `/tmp/opencode/scry-ux/` was `patchelf`-ed to the controller's
+  `glibc-2.44-57`/`gcc-16.2.0-lib` and run with the worktree as cwd (so its fallback
+  library root is this checkout's `lib/`). The bundle job runs on `win3` and uses the
+  unpatched binaries.
 
 ## Honesty ledger
 
 | what | how it ran | verdict |
 |---|---|---|
-| Wiz model/view compile (`Source.Page.focus`, `lspHover`, definition answer, marks) |  |  |
+| Wiz model/view compile (`Source.Page.focus`, `lspHover`, definition answer, marks) | `wiz check` with the branch compiler (repointed local copy of the win3 binary) | Model 52 s rc=0, View 17 s rc=0, source-ui rc=0, WebCmd rc=0 |
 | `scry web --source` + bundle generation |  |  |
 | `scry.source.answer/1` static answers + patch replay (`source_static_test.mjs`) |  |  |
 | real `wiz lsp --ws` hover/definition on the bundled `Span.wiz` → `EditorModel.wiz` |  |  |
