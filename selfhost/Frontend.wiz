@@ -5402,7 +5402,12 @@ def inferBuiltin (gs : Globals) (es : ES) (cx : Cx) (n : String) (args : List Sy
     | .cons x .nil => match inferT gs es cx x .none with
       | .err m => .err m
       | .ok x0 xty es1 => match whnf (force es1 xty) with
-        | .vnu l I D i sz => .ok (.out x0) (vInterp l I D (nuFamily l I D) i) es1
+        | .vnu l I D i sz => match sizePred sz with
+          -- (HDL 34c) `out`'s payload is at the **predecessor** size (`ν^s'`), as in
+          -- `Kernel.wiz`'s and the Lean kernel's `out` rule. `∞` is its own
+          -- predecessor; a size variable cannot be observed.
+          | .none => .err "only a value of size ↑s or ∞ can be observed"
+          | .some s' => .ok (.out x0) (vInterp l I D (nuFamilyAt l I D s') i) es1
         | v => .err (String.append "out expects a coinductive value, got " (show (scopeNames (Cx.sc cx)) d (quote d v)))
     | _ => .err "out takes one value"
   else if strEq n "coit" then .err "coit builds a coinductive value"
