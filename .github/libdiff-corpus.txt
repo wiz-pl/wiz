@@ -58,6 +58,7 @@ lib/HeapBorrow.wiz
 lib/Hoare.wiz
 lib/HoareExamples.wiz
 lib/HoareTactics.wiz
+lib/Host.wiz
 lib/IO.wiz
 lib/Infoview.wiz
 lib/Int.wiz

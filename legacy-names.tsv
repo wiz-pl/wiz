@@ -3825,6 +3825,17 @@ HoareTactics	xw.bind	other-dotted	lib/HoareTactics.wiz	216
 HoareTactics	xw.free	other-dotted	lib/HoareTactics.wiz	212
 HoareTactics	xw.get	other-dotted	lib/HoareTactics.wiz	198
 HoareTactics	xw.set	other-dotted	lib/HoareTactics.wiz	203
+Host	Host.Capability	module-prefixed	lib/Host.wiz	42
+Host	Host.Capability.key	module-prefixed	lib/Host.wiz	67
+Host	Host.capabilities	module-prefixed	lib/Host.wiz	64
+Host	Host.close	module-prefixed	lib/Host.wiz	91
+Host	Host.fs	module-prefixed	lib/Host.wiz	52
+Host	Host.mount	module-prefixed	lib/Host.wiz	75
+Host	Host.open	module-prefixed	lib/Host.wiz	81
+Host	Host.read	module-prefixed	lib/Host.wiz	84
+Host	Host.reserve	module-prefixed	lib/Host.wiz	78
+Host	Host.seek	module-prefixed	lib/Host.wiz	89
+Host	Host.write	module-prefixed	lib/Host.wiz	86
 IO	Bytes	bare	lib/IO.wiz	252
 IO	Bytes.append	other-dotted	lib/IO.wiz	276
 IO	Bytes.at	other-dotted	lib/IO.wiz	283

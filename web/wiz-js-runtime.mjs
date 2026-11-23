@@ -463,6 +463,37 @@ export function wizIoResult(v, world) {
   return wizCtor(0, [v, world]);
 }
 
+/* ---- the capability registry: `extern "host.name"` ----
+ *
+ * A `host.` extern names a *capability*, not an arbitrary global: it resolves only
+ * against the table a page registered (or the table `mount.js` publishes as
+ * `globalThis.wizHost`). A capability that was not registered is not reachable and
+ * is reported once, by `wizHostReady`, before `main` runs — a startup diagnostic with
+ * a stable code, not a trap from inside a call graph. The same table is what the
+ * Emscripten shim and a future Wasm `host_call` adapter read, so one registration
+ * serves every target.
+ */
+const WIZ_HOST = Object.create(null);
+export function registerHost(table) {
+  for (const name of Object.keys(table)) WIZ_HOST[name] = table[name];
+  /* one table for both conventions: a page that already mounts gets its capabilities
+   * from `mount.js`, and a builder can add to that object */
+  if (globalThis.wizHost) Object.assign(globalThis.wizHost, table);
+}
+function wizHostLookup(name) {
+  const fn = WIZ_HOST[name] ?? (globalThis.wizHost && globalThis.wizHost[name]);
+  if (typeof fn !== "function") throw new Error("WIZ_HOST_MISSING: " + name);
+  return fn;
+}
+export function wizHostReady(names) {
+  const missing = names.filter((name) => {
+    const fn = WIZ_HOST[name] ?? (globalThis.wizHost && globalThis.wizHost[name]);
+    return typeof fn !== "function";
+  });
+  if (missing.length > 0) throw new Error("WIZ_HOST_MISSING: " + missing.join(", "));
+}
+export function wizHostCall(name, args) { return wizHostLookup(name)(...args); }
+
 /* ---- the FFI: `extern "js.path"` and the runtime natives ---- */
 
 const WIZ_NATIVES = Object.create(null);
@@ -659,6 +690,8 @@ export function wizExtern(key, args) {
     r = native(...callArgs);
   } else if (cname.startsWith("js.")) {
     r = wizCallJs(cname.slice(3), callArgs);
+  } else if (cname.startsWith("host.")) {
+    r = wizHostCall(cname.slice(5), callArgs);
   } else {
     throw new Error("wiz: no JavaScript runtime for `" + cname + "`");
   }
