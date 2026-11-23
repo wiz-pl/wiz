@@ -73,7 +73,7 @@ def scale : EIO Unit := do
       ++ " summaryRounds=" ++ Nat.repr rep.summaryRounds);
     unless "scale: node count" (Nat.le 1000000 rep.nodes);
     unless "scale: complete" (Bool.not rep.truncated);
-    unless "scale: under the (raised) limit" (Nat.lt rep.elapsedMs 900000);
+    unless "scale: under the limit" (Nat.lt rep.elapsedMs 900000);
 
     o2 ← opts (List.cons path (List.cons "--allow-errors"
       (List.cons "--max-nodes" (List.cons "1000" .nil))));
