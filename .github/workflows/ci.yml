@@ -684,9 +684,10 @@ jobs:
       needs.changes.outputs.subset_packages == 'true' &&
       needs.lean.result == 'success'
     runs-on: ubuntu-latest
-    # 60 min: scry's `grail build scry` (~12 min measured in scry.yml), the Hdl
-    # standalone build plus its 32 goldens, tower's Nix build and the package smokes.
-    timeout-minutes: 60
+    # 120 min: scry's `grail build scry` (~12 min measured in scry.yml), the Hdl
+    # standalone build plus its 32 goldens (it hit the old 60 min cap), tower's Nix
+    # build and the package smokes.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/setup
