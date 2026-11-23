@@ -374,11 +374,19 @@ partial def Scry.parseArtifactArgs (target : Option String) (opts : Scry.Artifac
     | "--out" => match rest with
       | .cons v r => Scry.parseArtifactArgs target { opts with out := v } r
       | .nil => .error "--out needs a DIRECTORY"
-    | _ => match target with
-      | .none => match String.startsWith a "--" with
-        | .true => .error ("unknown option \"" ++ a ++ "\"")
-        | .false => Scry.parseArtifactArgs (.some a) opts rest
-      | .some _ => .error "scry-artifacts takes one DIRECTORY"
+    | _ => match String.stripPrefix a "--cache-dir=" with
+      | .some v => Scry.parseArtifactArgs target
+          { opts with cache := { opts.cache with enabled := .true, dir := v } } rest
+      | .none => match String.stripPrefix a "--cache=" with
+        | .some v => Scry.parseArtifactArgs target
+            { opts with cache := { opts.cache with enabled := .true, dir := v } } rest
+        | .none => match target with
+          | .none => match String.startsWith a "--" with
+            | .true => .error ("unknown option \"" ++ a ++ "\"")
+            | .false => Scry.parseArtifactArgs (.some a) opts rest
+          | .some _ => match String.startsWith a "--" with
+            | .true => .error ("unknown option \"" ++ a ++ "\"")
+            | .false => .error "scry-artifacts takes one DIRECTORY"
 
 /-- The cache statistics line, marked as metadata (a cold and a warm build must differ
 here; the invariant excludes it). -/

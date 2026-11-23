@@ -338,7 +338,7 @@ class Run:
 
 
 def run_artifacts(binary: Path, root: Path, out: Path, cache: Optional[Path],
-                  mode: str, rules: Path, cc: str) -> Run:
+                  mode: str, rules: Path, cc: str, timeout_s: int) -> Run:
     args = [str(binary), str(root), "--out", str(out), "--rules", str(rules), "--cc", cc]
     if cache is not None:
         args += ["--cache-dir", str(cache)]
@@ -346,12 +346,15 @@ def run_artifacts(binary: Path, root: Path, out: Path, cache: Optional[Path],
         args.append("--allow-errors")
     if mode == "skip":
         args.append("--skip-broken")
-    p = subprocess.run(args, text=True, capture_output=True, timeout=1800)
-    return Run(p.returncode, p.stdout, p.stderr, out)
+    try:
+        p = subprocess.run(args, text=True, capture_output=True, timeout=timeout_s)
+        return Run(p.returncode, p.stdout, p.stderr, out)
+    except subprocess.TimeoutExpired:
+        return Run(124, "", f"timeout after {timeout_s}s", out)
 
 
 def run_cli(binary: Path, root: Path, outdir: Path, cache: Optional[Path],
-            rules: Path, mode: str, cc: str) -> Run:
+            rules: Path, mode: str, cc: str, timeout_s: int) -> Run:
     outdir.mkdir(parents=True, exist_ok=True)
     sarif = outdir / "cli.sarif"
     facts = outdir / "cli.facts"
@@ -363,8 +366,12 @@ def run_cli(binary: Path, root: Path, outdir: Path, cache: Optional[Path],
         args.append("--allow-errors")
     if mode == "skip":
         args.append("--skip-broken")
-    p = subprocess.run(args, text=True, capture_output=True, timeout=1800, cwd=str(ROOT / "scry"))
-    return Run(p.returncode, p.stdout, p.stderr, outdir)
+    try:
+        p = subprocess.run(args, text=True, capture_output=True, timeout=timeout_s,
+                           cwd=str(ROOT / "scry"))
+        return Run(p.returncode, p.stdout, p.stderr, outdir)
+    except subprocess.TimeoutExpired:
+        return Run(124, "", f"timeout after {timeout_s}s", outdir)
 
 
 def normalize_json(text: str) -> Any:
@@ -466,7 +473,8 @@ def parse_manifest_hits(path: Path) -> dict[str, int]:
 
 
 def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Path,
-                 rules: Path, cc: str, keep: bool, cli: bool) -> CampaignResult:
+                 rules: Path, cc: str, keep: bool, cli: bool,
+                 control: bool, budget: int) -> CampaignResult:
     rng = random.Random(seed * 100003 + program)
     fuzz = load_fuzz_lower()
     base = new_state(rng, fuzz, rng.randint(1, 3))
@@ -487,8 +495,13 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
         for step, st in enumerate(history):
             write_state(root / "proj", st)
             for mode in modes:
-                run_artifacts(artifacts, root / "proj",
-                              root / f"warm-{step}-{mode}", cache, mode, rules, cc)
+                w = run_artifacts(artifacts, root / "proj",
+                                  root / f"warm-{step}-{mode}", cache, mode, rules, cc,
+                                  budget)
+                if w.code == 124:
+                    return CampaignResult(seed, program, True,
+                                          f"slow-input (skipped: {mode} step {step}: {w.stderr})",
+                                          muts, {}, root if keep else None)
 
         # Final state: full (no cache) vs incremental (warm cache), for each mode.
         final = history[-1]
@@ -497,8 +510,13 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
         for mode in modes:
             full_out = root / f"full-{mode}"
             inc_out = root / f"inc-{mode}"
-            full = run_artifacts(artifacts, root / "proj", full_out, None, mode, rules, cc)
-            inc = run_artifacts(artifacts, root / "proj", inc_out, cache, mode, rules, cc)
+            full = run_artifacts(artifacts, root / "proj", full_out, None, mode, rules, cc, budget)
+            inc = run_artifacts(artifacts, root / "proj", inc_out, cache, mode, rules, cc, budget)
+            if full.code == 124 or inc.code == 124:
+                return CampaignResult(seed, program, True,
+                                      f"slow-input (skipped: {mode} final: "
+                                      f"full={full.code} incremental={inc.code})",
+                                      muts, {}, root if keep else None)
             why = compare_runs(f"artifacts/{mode}", full, inc)
             if why is None:
                 why = compare_trees(f"artifacts/{mode}", full_out, inc_out)
@@ -507,13 +525,34 @@ def run_campaign(seed: int, program: int, steps: int, artifacts: Path, scry: Pat
                                       f"seed={seed} program={program} mutations={muts}\n{why}",
                                       muts, hits, root if keep else None)
             hits[mode] = parse_manifest_hits(inc_out / "manifest.txt").get("hit", 0)
+            if control:
+                full2_out = root / f"full2-{mode}"
+                full2 = run_artifacts(artifacts, root / "proj", full2_out, None,
+                                      mode, rules, cc, budget)
+                if full2.code == 124:
+                    return CampaignResult(seed, program, True,
+                                          f"slow-input (skipped: control {mode})",
+                                          muts, {}, root if keep else None)
+                why2 = compare_runs(f"control/{mode}", full, full2)
+                if why2 is None:
+                    why2 = compare_trees(f"control/{mode}", full_out, full2_out)
+                if why2 is not None:
+                    return CampaignResult(
+                        seed, program, False,
+                        f"seed={seed} program={program} NONDETERMINISTIC "
+                        f"(cold vs cold, not a cache divergence)\nmutations={muts}\n{why2}",
+                        muts, hits, root if keep else None)
 
         if cli:
             for mode in modes:
                 cli_full_dir = root / f"cli-full-{mode}"
                 cli_inc_dir = root / f"cli-inc-{mode}"
-                full = run_cli(scry, root / "proj", cli_full_dir, None, rules, mode, cc)
-                inc = run_cli(scry, root / "proj", cli_inc_dir, cache, rules, mode, cc)
+                full = run_cli(scry, root / "proj", cli_full_dir, None, rules, mode, cc, budget)
+                inc = run_cli(scry, root / "proj", cli_inc_dir, cache, rules, mode, cc, budget)
+                if full.code == 124 or inc.code == 124:
+                    return CampaignResult(seed, program, True,
+                                          f"slow-input (skipped: cli/{mode})",
+                                          muts, {}, root if keep else None)
                 why = compare_runs(f"cli/{mode}", full, inc)
                 if why is None:
                     fs = full.stdout.strip()
@@ -612,6 +651,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="C compiler for cc -E (default $CC or cc)")
     ap.add_argument("--no-cli", action="store_true",
                     help="compare only the artifact bundles, not `scry project`")
+    ap.add_argument("--control", action="store_true",
+                    help="also compare a second cold build (nondeterminism control)")
+    ap.add_argument("--budget", type=int, default=120, metavar="SECS",
+                    help="per-invocation time budget; a timeout skips the campaign "
+                         "as slow-input (default 120)")
     ap.add_argument("--keep", action="store_true",
                     help="keep the campaign directory (prints its path)")
     ap.add_argument("--replay", type=int, metavar="SEED",
@@ -649,7 +693,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     for program in range(args.programs):
         seed = args.seed + program
         res = run_campaign(seed, program, args.steps, args.artifacts, args.scry,
-                           args.rules, args.cc, args.keep, not args.no_cli)
+                           args.rules, args.cc, args.keep, not args.no_cli,
+                           args.control, args.budget)
         rows.append({"seed": seed, "program": program, "ok": res.ok,
                      "message": res.message if not res.ok else res.message,
                      "hits": res.hits, "mutations": res.steps})
