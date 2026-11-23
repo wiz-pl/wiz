@@ -53,17 +53,17 @@ percent, far below the 6× headroom.
 
 ## What the counters cost when they are off
 
-The caller pays one opaque call per site even with `WIZ_STATS` unset; the case
+The caller pays one opaque call per site even without `--stats`; the case
 `off-path cost of a counter call` times that directly (n = 3M): a no-op opaque of the
 same shape is **8 ns/call**, `Stats.countedVal` **20 ns**, and reading the cell at the
 call site (what a real site writes) **21 ns**. `lib/Nat.wiz` makes **6.2 M** counter
-calls (`WIZ_STATS=1 wiz check lib/Nat.wiz | grep stat`), so the direct cost is ~0.12 s.
+calls (`wiz --stats check lib/Nat.wiz | grep stat`), so the direct cost is ~0.12 s.
 The whole-file A/B against the base commit 6d065b579 (user CPU, 15 paired rounds,
 `lib/Nat.wiz`) is **+3.6 % median** (min +4.1 %); the same-binary A/A control is 1.000,
 so that is real, not a protocol artefact. The difference beyond the 8 ns call floor is
 the loss of tail calls in `whnf`/`conv` (their result now flows through the wrapper).
 If a release budget needs the last 3 %, compile the call sites out (CORE-2.5); the
-`WIZ_STATS` mode is a development measurement, per the note's M2.1 risk.
+`--stats` mode is a development measurement, per the note's M2.1 risk.
 -/
 
 set_option compiler.extract_closed false

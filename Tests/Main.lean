@@ -109,7 +109,7 @@ flags). Prints the case's name and result (and a failure's output) and exits 0 i
 passed, 1 if it failed, 2 on a usage error and 3 if it was skipped: a skipped case is not
 a pass. -/
 def runOne (args : List String) : IO UInt32 := do
-  let usage := "usage: tests --run GROUP INDEX [--jobs N] [--allow-missing-deps] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
+  let usage := "usage: tests --run GROUP INDEX [--jobs N] [--allow-missing-deps] [--stats] [toolchain flags] (INDEX from 0: `tests --list-cases '=GROUP'`)"
   let args := match args with
     | [one] => one.splitOn "#"
     | args => args
@@ -199,7 +199,9 @@ documented gap, a `-- test: skip` marker) shows as `⊘` and is counted apart. A
 cannot run because a dependency is missing (`Tests.skipMissing`) is a **failure** that
 names the dependency, unless `--allow-missing-deps` (or `WIZ_ALLOW_MISSING_DEPS=1`, the
 shard driver's equivalent) is given, in which case it is a reported skip and the summary
-counts it. `--timings FILE` appends one line of JSON per case to
+counts it. `--stats` prints the core evaluator's counters (`Wiz.Core.Stats`) on stderr at
+exit, for the driver and for each case's process; it is diagnostics only, and no term,
+cache key or output depends on it. `--timings FILE` appends one line of JSON per case to
 FILE (its group, index, name, wall time in seconds, whether it passed, and its notes:
 `Tests.note`), labelled with `--shard NAME`.
 
@@ -235,6 +237,10 @@ def mainImpl (args : List String) : IO UInt32 := do
   let allowEnv ← IO.getEnv "WIZ_ALLOW_MISSING_DEPS"
   let allowMissing := allowArg || allowEnv.isSome
   setAllowMissingDeps allowMissing
+  -- `--stats` enables the core counters in this process and in each case's process (the
+  -- counter output is diagnostics on stderr; a case's result never depends on it)
+  let (statsArg, args) := takeSwitch "--stats" args
+  if statsArg then Wiz.Stats.enable
   -- (23k) a grail job's supervisor, and grail itself (the job-hygiene tests run it)
   -- (13b) `--trace-guess-fallback`: each case's process reports the declarations that reach
   -- the fallback recheck (`checkGuessedDecl`), and the driver forwards them (`forwardGuessLines`)
@@ -267,6 +273,7 @@ def mainImpl (args : List String) : IO UInt32 := do
   let (tc, args') ← suiteToolchain args (readLocal := !child)
   toolchainRef.set tc
   flagsRef.set (tc.toFlags ++ (if traceGuesses then ["--trace-guess-fallback"] else [])
+    ++ (if statsArg then ["--stats"] else [])
     ++ (if allowMissing then ["--allow-missing-deps"] else []))
   match args' with
   -- one case in this process: what `Group.run` starts for each case
@@ -387,10 +394,9 @@ def mainImpl (args : List String) : IO UInt32 := do
       IO.println s!"{missingDeps} case(s) skipped for a missing dependency (--allow-missing-deps / WIZ_ALLOW_MISSING_DEPS=1)"
     pure (if failed == 0 then 0 else 1)
 
-/-- The driver: `WIZ_STATS=1` makes each case's process report the core counters (and the
+/-- The driver: `--stats` makes each case's process report the core counters (and the
 driver itself prints its own, which are empty unless it is also `--run-case`). -/
 def main (args : List String) : IO UInt32 := do
-  Wiz.Stats.fromEnv
   let rc ← mainImpl args
   Wiz.Stats.report
   return rc
