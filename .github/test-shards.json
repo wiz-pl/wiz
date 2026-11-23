@@ -1,7 +1,7 @@
 [
   {
     "name": "selfhost",
-    "split": 6,
+    "split": 4,
     "heavy": true,
     "inputs": [
       "selfhost/*",
@@ -67,8 +67,9 @@
   },
   {
     "name": "library",
-    "split": 8,
+    "split": 11,
     "jobs": 4,
+    "wall-ratio": 0.60,
     "allow-missing-deps": true,
     "select": [
       "=bus-crc",
@@ -197,8 +198,9 @@
   },
   {
     "name": "scaling",
-    "split": 2,
+    "split": 1,
     "jobs": 3,
+    "wall-ratio": 0.47,
     "select": [
       "=scaling",
       "=prop",

@@ -1,8 +1,8 @@
 # A self-hosted CI runner
 
 CI runs on GitHub's `ubuntu-latest` runners. The heavy test shards (those with
-`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-6` and
-`grail-selfhost`) can run on a machine of our own instead. Nothing changes until the
+`"heavy": true` in `.github/test-shards.json`: `selfhost-1` … `selfhost-4`, `hdl` and
+`semantics`) can run on a machine of our own instead. Nothing changes until the
 repository variable `WIZ_RUNNER_HEAVY` is set; unsetting it switches back.
 
 This repository is **public**: anyone can open a pull request, and a workflow run on a
@@ -63,6 +63,30 @@ an input the table does not classify still runs every job. The `lean` job runs f
 a non-empty `shards` list cannot be expanded without it. The build is warm on a
 `wizlib`/`packages` change (the sources and the seed are unchanged, so Cachix
 substitutes or Lake recompiles nothing).
+
+## The shard budget
+
+A test job is killed at **90 minutes** (`timeout-minutes` in the `tests` job). A killed
+job has a partial log, and `scripts/ci.py balance` cannot see it (it reads only
+successful jobs' walls), so a shard that grows into the timeout hides the regression that
+made it slow. The plan therefore has a hard headroom guard: **no job's predicted wall may
+exceed 75 minutes** (`SHARD_BUDGET_S` in `scripts/ci.py`; the 15 minutes left are the
+job's setup before the `tests` step and the model's error).
+
+* `scripts/ci.py plan` (the `lean` job) prints the longest predicted job with its
+  margins to the budget and to the 90-minute timeout, and exits 1 when a job is over.
+* `scripts/ci.py check-shards` applies the same budget check, so the `lean` job fails
+  before the matrix starts rather than sending a shard that would time out.
+* The prediction is the job's case sum from `.github/test-timings.json` plus every
+  shared program the part builds, times the shard's `"wall-ratio"`. That ratio is 1 for a
+  serial shard and the measured wall/case-sum fraction for a shard with `"jobs": N`
+  (`library` 0.60, `scaling` 0.47 on the 2026-11-23 five-run refresh; `rebalance` prints
+  it and `--write` refreshes it). The estimate is deliberately conservative: the case
+  times are medians from older runs, and a cold cache or a code change can move a case.
+
+When a shard is over the budget, split it (`"split": N`) or refresh the baseline from
+green runs; do not raise the job timeout. A timeout is a cancelled job whose partial log
+cannot tell which case hung, and `balance` then leaves it out of the reported tail.
 
 ## What the runner needs
 
