@@ -43,10 +43,29 @@
                                      browser-facing file (`web/*`) changed, stc=true
                                      when `STC.lean` or `STC/` changed (the `stc` job
                                      typechecks that library, which nothing else
-                                     imports), and shards=[NAMES], the shards of
+                                     imports), subset_NAME=true for each build subset
+                                     of `.github/repo-subsets.json` that a changed file
+                                     belongs to (`scripts/repo-subsets.py`: lean,
+                                     runtime, wizlib, packages, tests, docs), and
+                                     shards=[NAMES], the shards of
                                      .github/test-shards.json to run (each shard's
-                                     "inputs", see `needed_shards`). `changes --all`
-                                     prints everything
+                                     "inputs", see `needed_shards`). A changed file no
+                                     subset claims (`scripts/`, `flake.*`,
+                                     `selfhost/`, ...), and any `.github/` edit, sets
+                                     every subset: it is a build input the table has
+                                     not classified, so every subset job runs.
+                                     `changes --all` prints everything
+  scripts/ci.py subset-key NAME [--with NAME] [--scope S] [--suffix S]
+                                     the Actions cache key and restore prefix for a
+                                     subset job (`$GITHUB_OUTPUT` lines `key=` and
+                                     `prefix=`): `subset-v1-<name>[-<name>...]-<os>-
+                                     <arch>-<toolchain12>`, then `-<scope>` (in key and
+                                     prefix), the subset sha(s) `-<sha12>` (one per
+                                     name), and `-<suffix>` (key only). <sha12> is the
+                                     subset's `sha256` from .github/repo-subsets.json;
+                                     the prefix stops before the subset hashes, so a
+                                     later run restores its own subset's previous
+                                     entry and recompiles what changed.
   scripts/ci.py summary TITLE FILE.. a Markdown summary for $GITHUB_STEP_SUMMARY of
                                      `lake test` logs (*.log: pass/fail, failing cases)
                                      and `--timings` files (*.jsonl: a table of every
@@ -123,13 +142,14 @@ Selectors are the arguments of `lake test --`: `=NAME` selects the group NAME,
 Tests/Main.lean).
 """
 import datetime as dt
-import fnmatch, json, os, re, subprocess, sys
+import fnmatch, hashlib, json, os, platform, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARDS = os.path.join(ROOT, ".github", "test-shards.json")
 TIMINGS = os.path.join(ROOT, ".github", "test-timings.json")
 SKIPS = os.path.join(ROOT, ".github", "skip-allowlist.json")
 EXCLUSIONS = os.path.join(ROOT, ".github", "test-shard-exclusions.json")
+REPO_SUBSETS = os.path.join(ROOT, ".github", "repo-subsets.json")
 DEFAULT_BIN = os.path.join(ROOT, ".lake/build/bin/tests")
 NOTE_USES = "uses "
 NOTE_BUILT = "built "
@@ -706,6 +726,106 @@ def is_code_change(files):
     return any(not matches(f, DOCS + SELF_TESTED + STC) for f in files)
 
 
+def repo_subsets():
+    """The committed subset table (`.github/repo-subsets.json`): name -> path patterns.
+    `scripts/repo-subsets.py` is the source of truth and `docs_style` proves the JSON
+    describes the tree; reading the generated copy keeps the `changes` job free of a
+    second pattern table. A missing or malformed table is an error, never a silent
+    "nothing changed"."""
+    try:
+        with open(REPO_SUBSETS, encoding="utf-8") as f:
+            doc = json.load(f)
+        return {name: entry["paths"] for name, entry in doc["subsets"].items()}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ShardPlanError(f"{REPO_SUBSETS}: cannot read the subset table: {e}")
+
+
+def subset_flags(files):
+    """The `subset_NAME` path filters: for each subset, whether a changed file belongs
+    to it. A path that matches several subsets sets all of them (the union over the
+    files), so a change touching, say, `Tests/` and `lib/` runs both the Lean build and
+    every test shard.
+
+    A changed file no subset claims (`scripts/`, `flake.*`, `selfhost/`, `examples/`,
+    `infoview/`, ...) is a build input the table has not classified: it sets every
+    subset, exactly as `changes --all` does, so a change can never skip the job that
+    would have caught it. A `.github/` edit is in the `docs` subset for the cache-key
+    table (`.github/**`), but it changes CI itself, so it also sets every subset; a
+    workflow change must exercise every job, not just the docs ones."""
+    table = repo_subsets()
+    claimed = {f for f in files if any(matches(f, paths) for paths in table.values())}
+    unclassified = [f for f in files if f not in claimed or matches(f, [".github/*"])]
+    if unclassified:
+        return {name: True for name in table}
+    return {name: any(matches(f, paths) for f in files) for name, paths in table.items()}
+
+
+def subset_key(args):
+    """The Actions-cache key for one subset job (see the docstring at the top).
+
+    `NAME` is a subset of `.github/repo-subsets.json`; `--with NAME` adds another
+    subset the job's cache also reads (the test shards read `tests` and `wizlib`).
+    `--scope S` is a correctness input that must match before a restore is offered
+    (the driver's compiler key, the self-hosted program inputs); it is in both the
+    key and the prefix. `--suffix S` is a content hash that belongs in the exact key
+    but not in the restore prefix (the `**/*.wiz` tree the last run saw), so a changed
+    file still restores the previous entry and the job overwrites it on success.
+
+    Key:        subset-v1-<name>[-<name>…]-<os>-<arch>-<toolchain12>[-<scope>]-<sha12>[-<sha12>…][-<suffix>]
+    Prefix:     subset-v1-<name>[-<name>…]-<os>-<arch>-<toolchain12>[-<scope>]-
+    <sha12>     first 12 hex of the subset's `sha256` in .github/repo-subsets.json
+    <toolchain12> first 12 hex of sha256(flake.lock + lean-toolchain)
+    <os>/<arch> `RUNNER_OS`/`RUNNER_ARCH` (lowercased) under Actions, else uname.
+    """
+    names, scope, suffix = [], None, None
+    it = iter(args)
+    for a in it:
+        if a == "--with":
+            names.append(next(it))
+        elif a == "--scope":
+            scope = next(it)
+        elif a == "--suffix":
+            suffix = next(it)
+        elif a.startswith("--"):
+            raise SystemExit(f"subset-key: unknown option {a!r}")
+        else:
+            names.append(a)
+    if not names:
+        raise SystemExit("subset-key: a subset name is required")
+    try:
+        table = json.load(open(REPO_SUBSETS, encoding="utf-8"))["subsets"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(f"{REPO_SUBSETS}: cannot read the subset table: {e}")
+    for n in names:
+        if n not in table:
+            raise SystemExit(f"subset-key: {n!r} is not a subset of {REPO_SUBSETS}")
+    try:
+        toolchain = hashlib.sha256(
+            open(os.path.join(ROOT, "flake.lock"), "rb").read()
+            + b"\0"
+            + open(os.path.join(ROOT, "lean-toolchain"), "rb").read()
+        ).hexdigest()[:12]
+    except OSError as e:
+        raise SystemExit(f"subset-key: cannot hash the toolchain: {e}")
+    osname = (os.environ.get("RUNNER_OS") or platform.system()).lower()
+    arch = (os.environ.get("RUNNER_ARCH") or platform.machine()).lower()
+    def sha(name):
+        return table[name]["sha256"][:12]
+    names_part = "-".join(names)
+    shas = "-".join(sha(n) for n in names)
+    head = f"subset-v1-{names_part}-{osname}-{arch}-{toolchain}"
+    key = head
+    prefix = head + "-"
+    if scope:
+        key += f"-{scope}"
+        prefix += f"{scope}-"
+    key += f"-{shas}"
+    if suffix:
+        key += f"-{suffix}"
+    print(f"key={key}")
+    print(f"prefix={prefix}")
+
+
 def needed_shards(files):
     """The shards a change needs: all of them when a file of EVERYTHING changed; else a
     shard with "inputs" (globs; lib/ files among them bring the lib/ files they import)
@@ -737,6 +857,8 @@ def changes(args):
         print("docs=true")
         print("web=true")
         print("stc=true")
+        for name in repo_subsets():
+            print(f"subset_{name}=true")
         print(f"shards={json.dumps(names)}")
         return 0
     base, head = args[0], (args[1] if len(args) > 1 else "HEAD")
@@ -748,13 +870,18 @@ def changes(args):
     docs = any(matches(f, DOCS) for f in files)
     web = any(matches(f, WEB) for f in files)
     stc = any(matches(f, STC) for f in files)
+    subsets = subset_flags(files)
     print(f"code={'true' if code else 'false'}")
     print(f"docs={'true' if docs else 'false'}")
     print(f"web={'true' if web else 'false'}")
     print(f"stc={'true' if stc else 'false'}")
+    for name in subsets:
+        print(f"subset_{name}={'true' if subsets[name] else 'false'}")
     print(f"shards={json.dumps(names)}")
     print(f"{len(files)} files changed; code: {code}; docs: {docs}; web: {web}; "
-          f"stc: {stc}; shards: {', '.join(names) or 'none'}", file=sys.stderr)
+          f"stc: {stc}; subsets: "
+          f"{', '.join(n for n in subsets if subsets[n]) or 'none'}; "
+          f"shards: {', '.join(names) or 'none'}", file=sys.stderr)
     return 0
 
 
@@ -1823,6 +1950,9 @@ def _main(args):
         return 0
     if args[:1] == ["changes"] and len(args) >= 2:
         return changes(args[1:])
+    if args[:1] == ["subset-key"]:
+        subset_key(args[1:])
+        return 0
     binary = args[1] if len(args) > 1 else DEFAULT_BIN
     if args[:1] == ["matrix"]:
         matrix(binary)
