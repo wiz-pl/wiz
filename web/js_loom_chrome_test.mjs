@@ -204,7 +204,9 @@ try {
   // ## The DOM adapter: the module's own `wiz.dom` calls, on real elements
   await evaluate(`globalThis.app.module.wiz_loom_probe()`);
   eq("the probe appended its box", true, await evaluate(`!!document.getElementById("probe")`));
-  eq("with its text", "ready", await evaluate(`document.getElementById("probe").textContent`));
+  // The box holds the probe's text node and then the button it appended (`setText` is
+  // `textContent`, so the order matters and the text is the box's first child).
+  eq("with its text", "ready", await evaluate(`document.getElementById("probe").firstChild.data`));
   eq("and a button", "probe",
     await evaluate(`document.querySelector("#probe button").textContent`));
   await evaluate(`document.querySelector("#probe button").click()`);

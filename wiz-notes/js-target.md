@@ -248,7 +248,7 @@ points, that `export "name" f` becomes an ES export with the C ABI's shape (a `S
 handle out and back, a `String` result, an `IO` result unwrapped), that `IO.readFile` and
 an unimplemented native are refused by name, that `Build.buildJs` writes `OUT.mjs`, and
 runs both demo variants — `loom.wiz` against its harness, and `boot.wiz` through
-`mount()`/`driver.start()`. The group is 24 cases.
+`mount()`/`driver.start()`. The group is 25 cases.
 
 Files added:
 
