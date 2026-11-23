@@ -11882,21 +11882,25 @@ def stepCommand (inlineImports : Bool) (header : Bool) (cats : List Cat) (tokens
         | LinkR.mk line gs' => StepR.next (atLine start line) stop (Globals.setPrivate gs' .false) cats tokens notes)
       | .none =>
       -- (the kernel step budget, see `kernelSteps`; it covers the command's elaboration
-      -- and checking, not its parse. The match on `kernelStart` forces the extern before
-      -- the command is evaluated: a lazy `let` would otherwise run the step first.)
+      -- and checking, not its parse.)
       let budget := commandSteps stx;
       -- (13t) a namespace command changes the state (and validates it), not the globals;
       -- it takes the step's place when it is one, as on train9's side.
-      let step : Step := match commandStep gs0 stx sp with
+      -- (F43) the step is a thunk: Wiz evaluates a `let` eagerly, so a `let step := …`
+      -- ran the command — and the kernel's evaluation — *before* `kernelStart` armed the
+      -- budget, and every `kernelTick` then saw no budget (a 200000-step bound that
+      -- bounded nothing: `Nat.pow 2 32` still ran away). It is applied inside the
+      -- branches, after the arming call.
+      let runStep : Unit → Step := fun (_ : Unit) => match commandStep gs0 stx sp with
         | .mk line gs' => match nsCommand gs0 stx start with
           | .some s => s
           | .none => .mk line gs'
       match kernelStart budget with
       | .false =>
-        match step with
+        match runStep () with
         | .mk line gs' => finishStep stop start gs gs' input sp line cats tokens notes stx
       | .true =>
-        match step with
+        match runStep () with
         | .mk line gs' => match kernelEnd 0 with
           | .true => finishStep stop start gs gs' input sp line cats tokens notes stx
           -- (the evaluator gave up mid-command: report the limit, not the stuck value
