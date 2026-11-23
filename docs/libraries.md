@@ -2236,8 +2236,9 @@ view (`costsOpt`/`costOpt`). `explain` needs the rule index, so the rule-index f
 `applyAtN`/`applyMatchesN`; the reference names record rule `0`. There is one module,
 `Scry.Egraph`, and no second implementation or compatibility alias: `Scry.EqPlan` and
 the examples import it directly, and the whole of `lib/` loads at once
-(`Tests.Elab.libApart` is empty). All eighteen `examples/scry-egraph-*.wiz` produce their
-previous digests. `import Scry.EqPlan`
+(`Tests.Elab.libApart` is empty). All eighteen digest examples
+`examples/scry-egraph-*.wiz` (the benchmark example aside) produce their previous
+digests. `import Scry.EqPlan`
 is the Datalog seam: `eqsort` columns (`Scry.ColKind`), an explicit set of equality
 relations (a column is not an assertion: a term table `un(term, op, child)` has two
 `eqsort` columns and unions nothing), rules whose head is an equality assertion
